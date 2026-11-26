@@ -29,11 +29,7 @@ fn midpoint_drift(a: u8, b: u8) -> u8 eff [Fail[ArithOverflow]] {
 
 // Holds everywhere.
 fn min_is_at_most_a(a: u8, b: u8) -> bool {
-    let m = if a < b {
-        a
-    } else {
-        b
-    };
+    let m = if a < b { a } else { b };
     m <= a
 }
 

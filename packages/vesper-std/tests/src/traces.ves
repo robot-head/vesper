@@ -274,11 +274,7 @@ test {
             let roll = below(inout rng, 100);
             let len = cur.len();
             if roll < 45 {
-                let burst: u64 = if below(inout rng, 10) == 0 {
-                    40
-                } else {
-                    1
-                };
+                let burst: u64 = if below(inout rng, 10) == 0 { 40 } else { 1 };
                 for _ in 0..burst {
                     let v = below(inout rng, 4294967296);
                     cur.push(v);

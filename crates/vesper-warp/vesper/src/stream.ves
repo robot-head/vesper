@@ -72,11 +72,7 @@ fn bits_mark(inout w: Slice[u64], cap: u64, off: u64, end: u64, set: bool) {
         let m = mask_of(i % 64, take);
         let at = i / 64;
         let x = word(in w, at);
-        let v = if set {
-            x | m
-        } else {
-            x & (m ^ u64_max())
-        };
+        let v = if set { x | m } else { x & (m ^ u64_max()) };
         w.try_set(at, v);
         o = wrapping_add(o, take);
     }
@@ -117,11 +113,7 @@ fn bits_find(in w: Slice[u64], cap: u64, off: u64, end: u64, want: bool) -> u64 
         let bit = i % 64;
         let take = step_take(cap, o, end);
         let x = word(in w, i / 64);
-        let bits = if want {
-            x
-        } else {
-            x ^ u64_max()
-        };
+        let bits = if want { x } else { x ^ u64_max() };
         let hit = bits & mask_of(bit, take);
         if hit != 0 {
             return wrapping_add(wrapping_sub(o, bit), widen_u64(trailing_zeros_u64(hit)));

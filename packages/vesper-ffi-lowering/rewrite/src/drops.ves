@@ -462,11 +462,7 @@ pub fn append_drops(inout dst: Ast, in s: S) {
                 if it.kind != 2 {
                     continue;
                 }
-                let name = if ii == 0 {
-                    s1
-                } else {
-                    s2
-                };
+                let name = if ii == 0 { s1 } else { s2 };
                 let fn_id = copy_fn(inout dst, in parsed.ast, it.node, base, name);
                 let new_item = dst.items.alloc(ItemNode { kind: 2, node: fn_id }).raw;
                 dst.m_items.push(new_item);

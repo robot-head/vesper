@@ -88,11 +88,7 @@ fn build(
         return NO_SIZE;
     }
     let n = t.node(ty);
-    let name = if n.kind == TyKind::Named {
-        n.name
-    } else {
-        0
-    };
+    let name = if n.kind == TyKind::Named { n.name } else { 0 };
     let scalar = n.kind == TyKind::Lit
         || n.kind == TyKind::Fn
         || (n.kind == TyKind::Named && k.is_scalar(name))
@@ -155,11 +151,7 @@ fn build(
     let mut size: u64 = 8;
     for vi in 0..w(a.vn) {
         let v = wd.variant(add(w(a.va), vi));
-        let mut offset: i64 = if a.is_enum {
-            8
-        } else {
-            0
-        };
+        let mut offset: i64 = if a.is_enum { 8 } else { 0 };
         for fi in 0..w(v.fc) {
             let f = wd.field(add(w(v.fa), fi));
             let ft = substitute(inout t, f.ty, in vars);

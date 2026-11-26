@@ -424,11 +424,7 @@ fn join_method_sym(inout names: Names, tname: u32, mname: u32) -> u32 {
 
 fn check_fn_call(inout tc: Tc, in a: Ast, f: FnR, receiver_ty: u32, e: Ex, ce: Ex) -> u32 {
     if f.gn == 0 {
-        let p_off: u64 = if receiver_ty != NONE32 {
-            1
-        } else {
-            0
-        };
+        let p_off: u64 = if receiver_ty != NONE32 { 1 } else { 0 };
         for ai in 0..e.n {
             let av = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(ai, 2), 1)));
             let pi = wrapping_add(ai, p_off);
@@ -721,11 +717,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         if e.c == NONE64 {
             tc.unit_ty
         } else {
-            let exp_e = if tt == tc.never_ty {
-                expected
-            } else {
-                tt
-            };
+            let exp_e = if tt == tc.never_ty { expected } else { tt };
             let et = check_expr(inout tc, in a, e.c, exp_e);
             if tt == tc.never_ty || tc.types.kind(tt) == TyKind::Infer {
                 et
@@ -741,11 +733,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             let body = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(i, 2), 1)));
             push_scope(inout tc);
             bind_pat(inout tc, in a, pt, vt);
-            let exp_b = if res == tc.never_ty {
-                expected
-            } else {
-                res
-            };
+            let exp_b = if res == tc.never_ty { expected } else { res };
             let bt = check_expr(inout tc, in a, body, exp_b);
             if (tc.types.kind(res) == TyKind::Infer || res == tc.never_ty) && bt != tc.never_ty {
                 res = bt;

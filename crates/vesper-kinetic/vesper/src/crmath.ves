@@ -189,11 +189,7 @@ fn max_i64(a: i64, b: i64) -> i64 {
 
 // Correctly round `sign * m * 2^e2` (`m >= 0`) to the format; the bits.
 pub fn round_to(negative: bool, in m: Big, e2: i64, is64: bool) -> u64 {
-    let sign = if negative {
-        sign_bit(is64)
-    } else {
-        0
-    };
+    let sign = if negative { sign_bit(is64) } else { 0 };
     if big_is_zero(in m) {
         return sign;
     }
@@ -385,11 +381,7 @@ fn constant(inout c: Slice[u32], f: u64, want_pi: bool) -> Big {
             big_store(in pi, inout c, 3);
             big_store(in ln2, inout c, wrapping_add(3, st));
         } else {
-            let v = if want_pi {
-                pi
-            } else {
-                ln2
-            };
+            let v = if want_pi { pi } else { ln2 };
             return big_shr(in v, wrapping_sub(bits, f));
         }
     }
@@ -623,11 +615,7 @@ fn sin_cos_eval(inout c: Slice[u32], ex: Exact, lead: i64, want_cos: bool, p: u6
         0
     };
     let f = wrapping_add(wrapping_add(p, SIN_COS_EXTRA_BITS), tiny);
-    let int_bits = if lead > 0 {
-        wrapping_u64(lead)
-    } else {
-        0
-    };
+    let int_bits = if lead > 0 { wrapping_u64(lead) } else { 0 };
     let wide = wrapping_add(wrapping_add(f, int_bits), REDUCTION_WIDE_BITS);
     let pi_wide = pi_fix(inout c, wide);
     let half_pi_wide = big_shr(in pi_wide, 1);
@@ -648,24 +636,13 @@ fn sin_cos_eval(inout c: Slice[u32], ex: Exact, lead: i64, want_cos: bool, p: u6
     let ts = series_terms(in r, in r2, f, false, inout s);
     let tc = series_terms(in r, in r2, f, true, inout c);
     let terms = wrapping_add(wrapping_add(ts, tc), 2);
-    let use_sin = (quadrant & 1)
-        == (
-            if want_cos {
-                1
-            } else {
-                0
-            }
-        );
+    let use_sin = (quadrant & 1) == (if want_cos { 1 } else { 0 });
     let mut neg = if want_cos {
         quadrant == 1 || quadrant == 2
     } else {
         quadrant >= 2
     };
-    let mut val = if use_sin {
-        s
-    } else {
-        c
-    };
+    let mut val = if use_sin { s } else { c };
     if big_is_neg(in val) {
         val = big_neg(in val);
         neg = !neg;
@@ -774,11 +751,7 @@ fn pi_multiple_bits(inout c: Slice[u32], quarters: u64, is64: bool) -> u64 {
 
 // `|y| <= |x|` exactly.
 fn ratio_le_one(ey: Exact, ex: Exact) -> bool {
-    let common = if ey.exp < ex.exp {
-        ey.exp
-    } else {
-        ex.exp
-    };
+    let common = if ey.exp < ex.exp { ey.exp } else { ex.exp };
     let ny = big_u64(ey.mant);
     let nx = big_u64(ex.mant);
     let a = shift(in ny, wrapping_sub(ey.exp, common));
@@ -796,18 +769,8 @@ fn atan2_eval(
     p: u64
 ) -> Approx {
     let d = wrapping_sub(ly, lx);
-    let ad = wrapping_u64(
-        if d < 0 {
-            wrapping_sub(0, d)
-        } else {
-            d
-        }
-    );
-    let tiny = if ad > 0 {
-        wrapping_sub(ad, 1)
-    } else {
-        0
-    };
+    let ad = wrapping_u64(if d < 0 { wrapping_sub(0, d) } else { d });
+    let tiny = if ad > 0 { wrapping_sub(ad, 1) } else { 0 };
     let f = wrapping_add(
         wrapping_add(p, ATAN2_EXTRA_BITS),
         if tiny < ATAN2_TINY_CAP {
@@ -816,11 +779,7 @@ fn atan2_eval(
             ATAN2_TINY_CAP
         }
     );
-    let (num_e, den_e) = if y_le_x {
-        (ey, ex)
-    } else {
-        (ex, ey)
-    };
+    let (num_e, den_e) = if y_le_x { (ey, ex) } else { (ex, ey) };
     let num = big_u64(num_e.mant);
     let den = big_u64(den_e.mant);
     let s = wrapping_add(wrapping_i64(f), wrapping_sub(num_e.exp, den_e.exp));
@@ -853,11 +812,7 @@ pub fn atan2_bits(inout c: Slice[u32], ybits: u64, xbits: u64, is64: bool) -> u6
         return nan_bits(is64);
     }
     let y_neg = (ybits >> 63) == 1;
-    let sign = if y_neg {
-        sign_bit(is64)
-    } else {
-        0
-    };
+    let sign = if y_neg { sign_bit(is64) } else { 0 };
     let y_inf = (ybits & F64_ABS_MASK) == F64_INF_BITS;
     if y == 0.0 {
         return if x > 0.0 || (x == 0.0 && (xbits >> 63) == 0) {

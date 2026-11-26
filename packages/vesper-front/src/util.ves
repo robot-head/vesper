@@ -108,16 +108,8 @@ pub fn saturating_mul_u64(a: u64, b: u64) -> u64 {
     if (a >> 32) != 0 && (b >> 32) != 0 {
         return max;
     }
-    let big = if a > b {
-        a
-    } else {
-        b
-    };
-    let small = if a > b {
-        b
-    } else {
-        a
-    };
+    let big = if a > b { a } else { b };
+    let small = if a > b { b } else { a };
     let hi = wrapping_mul(big >> 32, small);
     if (hi >> 32) != 0 {
         return max;

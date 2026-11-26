@@ -222,15 +222,7 @@ pub fn null_val() -> Val {
 }
 
 pub fn bool_val(b: bool) -> Val {
-    Val {
-        t: 4,
-        a: if b {
-            1
-        } else {
-            0
-        },
-        b: 0
-    }
+    Val { t: 4, a: if b { 1 } else { 0 }, b: 0 }
 }
 
 pub fn vat(in d: D, in q: Q, i: u64) -> Val {
@@ -339,11 +331,7 @@ pub fn same(in p: ChunkSeq[u8], ao: u64, al: u64, bo: u64, bl: u64) -> bool {
 
 // Byte-wise order of two pool ranges: 0 less, 1 equal, 2 greater.
 pub fn order(in p: ChunkSeq[u8], ao: u64, al: u64, bo: u64, bl: u64) -> u64 {
-    let n = if al < bl {
-        al
-    } else {
-        bl
-    };
+    let n = if al < bl { al } else { bl };
     for i in 0..n {
         let x = cb(in p, wrapping_add(ao, i));
         let y = cb(in p, wrapping_add(bo, i));

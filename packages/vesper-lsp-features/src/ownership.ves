@@ -303,11 +303,7 @@ fn tid(inout o: Ow, inout c: Ctx, in a: Ast, t: u32) -> u32 {
     let n = ty_at(in a, t);
     let mut id: u32 = c.types.infer;
     if n.kind == AT_NAMED || n.kind == AT_TUPLE {
-        let list = if n.kind == AT_NAMED {
-            n.b
-        } else {
-            n.a
-        };
+        let list = if n.kind == AT_NAMED { n.b } else { n.a };
         let len = list_len(in a, list);
         let mut args = ChunkSeq::with_capacity[u32](len);
         for j in 0..len {
@@ -451,20 +447,8 @@ fn bind(
     o.b_os.push(os);
     o.b_oe.push(oe);
     o.b_ty.push(ty);
-    o.b_lin.push(
-        if linear {
-            1
-        } else {
-            0
-        }
-    );
-    o.b_own.push(
-        if owned {
-            1
-        } else {
-            0
-        }
-    );
+    o.b_lin.push(if linear { 1 } else { 0 });
+    o.b_own.push(if owned { 1 } else { 0 });
     o.b_ss.push(ss);
     o.b_se.push(se);
     o.b_head.push(0);
@@ -832,11 +816,7 @@ fn args(inout o: Ow, inout c: Ctx, in a: Ast, in k: Callees, list: u32, pa: u64,
 // `args_by_pass` with the passes of a function type.
 fn args_of_type(inout o: Ow, inout c: Ctx, in a: Ast, in k: Callees, list: u32, fty: u32) -> bool {
     let fnode = c.types.node(fty);
-    let pn = if fnode.kind == CT_FN {
-        w(fnode.n)
-    } else {
-        0
-    };
+    let pn = if fnode.kind == CT_FN { w(fnode.n) } else { 0 };
     for i in 0..list_len(in a, list) {
         let x = arg_at(in a, list_at(in a, list, i));
         let pass = if x.explicit {
@@ -1365,11 +1345,7 @@ fn function_at(in o: Ow, at: u64) -> u64 {
     let i = wrapping_sub(lo, 1);
     let mut f = NONE64;
     let mut len: u64 = 0;
-    let from = if i > 0 {
-        wrapping_sub(i, 1)
-    } else {
-        i
-    };
+    let from = if i > 0 { wrapping_sub(i, 1) } else { i };
     let mut j = from;
     loop {
         if j > i {
@@ -1984,11 +1960,7 @@ fn grants(
 
 // Byte order of names[a..+al] and names[b..+bl]: -1, 0 or 1.
 fn cmp_blob(in bytes: Slice[u8], a: u64, al: u64, b: u64, bl: u64) -> i64 {
-    let n = if al < bl {
-        al
-    } else {
-        bl
-    };
+    let n = if al < bl { al } else { bl };
     for i in 0..n {
         let x = byte(in bytes, wrapping_add(a, i));
         let y = byte(in bytes, wrapping_add(b, i));

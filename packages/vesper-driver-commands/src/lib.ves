@@ -1283,11 +1283,7 @@ fn name_before(in e: Entries, x: u64, y: u64) -> bool {
     let yb = entry_end(in e, y);
     let xl = wrapping_sub(xb, xa);
     let yl = wrapping_sub(yb, ya);
-    let n = if xl < yl {
-        xl
-    } else {
-        yl
-    };
+    let n = if xl < yl { xl } else { yl };
     for i in 0..n {
         let p = byte_at(in e.bytes.as_slice(), wrapping_add(xa, i));
         let q = byte_at(in e.bytes.as_slice(), wrapping_add(ya, i));

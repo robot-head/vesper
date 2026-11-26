@@ -1295,20 +1295,8 @@ pub fn m_guest_files(in f: Fabric, hart: u64) -> Located {
         return Located { k: none(), g: 0, off: 0 };
     }
     let n = slot(in f, bk >> 32, bk & 4294967295).nguest;
-    let g = if n == 0 {
-        0
-    } else {
-        wrapping_sub(n, 1)
-    };
-    Located {
-        k: bk,
-        g: if g > 63 {
-            63
-        } else {
-            g
-        },
-        off: 0
-    }
+    let g = if n == 0 { 0 } else { wrapping_sub(n, 1) };
+    Located { k: bk, g: if g > 63 { 63 } else { g }, off: 0 }
 }
 
 pub fn m_geilen(in f: Fabric, hart: u64) -> u64 {

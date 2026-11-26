@@ -232,11 +232,7 @@ pub fn ack_encode(in a: WireAck, inout out: Slice[u8]) {
     let _ = out.try_write_u32_be(0, a.follower_id);
     let _ = out.try_write_u64_be(4, a.term);
     let _ = out.try_write_u64_be(12, a.match_index);
-    let flag: u8 = if a.accepted {
-        1
-    } else {
-        0
-    };
+    let flag: u8 = if a.accepted { 1 } else { 0 };
     let _ = out.try_set(20, flag);
 }
 
@@ -246,11 +242,7 @@ pub fn ack_encode_seq(in a: WireAck, inout out: ChunkSeq[u8]) {
     let _ = out.try_write_u32_be(base, a.follower_id);
     let _ = out.try_write_u64_be(wrapping_add(base, 4), a.term);
     let _ = out.try_write_u64_be(wrapping_add(base, 12), a.match_index);
-    let flag: u8 = if a.accepted {
-        1
-    } else {
-        0
-    };
+    let flag: u8 = if a.accepted { 1 } else { 0 };
     let _ = out.try_set(wrapping_add(base, 20), flag);
 }
 
@@ -387,11 +379,7 @@ pub fn config_index_slice(in log: Slice[RaftEntry]) -> u64 {
 pub fn log_matching_slice(in x: Slice[RaftEntry], in y: Slice[RaftEntry]) -> u64 {
     let nx = x.len();
     let ny = y.len();
-    let n = if nx < ny {
-        nx
-    } else {
-        ny
-    };
+    let n = if nx < ny { nx } else { ny };
     let mut prefix_equal = true;
     for i in 0..n {
         let a = ge(in x, i);
@@ -411,11 +399,7 @@ pub fn log_matching_arena(
     off_b: u64,
     len_b: u64
 ) -> u64 {
-    let n = if len_a < len_b {
-        len_a
-    } else {
-        len_b
-    };
+    let n = if len_a < len_b { len_a } else { len_b };
     let mut prefix_equal = true;
     for i in 0..n {
         let a = ge(in arena, wrapping_add(off_a, i));
@@ -590,11 +574,7 @@ pub fn checker_core_committed_arena(
     commit: u64
 ) {
     chk.checks = wrapping_add(chk.checks, 1);
-    let n = if commit < len {
-        commit
-    } else {
-        len
-    };
+    let n = if commit < len { commit } else { len };
     for i in 0..n {
         let e = ge(in arena, wrapping_add(off, i));
         if i < chk.committed.len() {

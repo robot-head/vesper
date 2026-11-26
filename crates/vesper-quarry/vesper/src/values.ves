@@ -58,11 +58,7 @@ pub fn size_vec(in q: Q) -> u64 {
 
 // A total order key for a finite f64 (-0.0 equals 0.0).
 pub fn f64_key(bits: u64) -> u64 {
-    let b = if bits == SIGN_BIT {
-        0
-    } else {
-        bits
-    };
+    let b = if bits == SIGN_BIT { 0 } else { bits };
     if (b >> SIGN_SHIFT) == 1 {
         ~b
     } else {

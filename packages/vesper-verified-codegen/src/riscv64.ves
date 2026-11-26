@@ -178,11 +178,7 @@ fn branch_to(inout a: Asm, funct3: u32, rs1: u32, rs2: u32, l: u64) {
 }
 
 fn ldst(inout a: Asm, load: bool, rr: u32, loc: u8, n: u64) {
-    let mut base = if loc == L_IN {
-        S0
-    } else {
-        SP
-    };
+    let mut base = if loc == L_IN { S0 } else { SP };
     let mut offset = if loc == L_IN {
         wrapping_add(16, wrapping_mul(n, 8))
     } else {
@@ -289,29 +285,9 @@ pub fn emit(inout a: Asm, in m: M) {
         b(inout a, BNE, A1, T0, 8);
         jal(inout a, ZERO, ovf);
     } else if o == M_DIV {
-        muldiv(
-            inout a,
-            if m.a == S_S {
-                DIV
-            } else {
-                DIVU
-            },
-            A0,
-            A0,
-            A1
-        );
+        muldiv(inout a, if m.a == S_S { DIV } else { DIVU }, A0, A0, A1);
     } else if o == M_REM {
-        muldiv(
-            inout a,
-            if m.a == S_S {
-                REM
-            } else {
-                REMU
-            },
-            A0,
-            A0,
-            A1
-        );
+        muldiv(inout a, if m.a == S_S { REM } else { REMU }, A0, A0, A1);
     } else if o == M_NEG_CHK {
         if m.a == S_S {
             int_min(inout a, T0);
@@ -373,16 +349,8 @@ pub fn emit(inout a: Asm, in m: M) {
             0
         };
         let swap = c == C_GT || c == C_GE;
-        let x: u32 = if swap {
-            1
-        } else {
-            0
-        };
-        let y: u32 = if swap {
-            0
-        } else {
-            1
-        };
+        let x: u32 = if swap { 1 } else { 0 };
+        let y: u32 = if swap { 0 } else { 1 };
         fp(inout a, 81, funct3, A0, x, y);
         if c == C_NE {
             xori(inout a, A0, A0, 1);
@@ -438,11 +406,7 @@ fn syscall(inout a: Asm, number: u64) {
 
 // `_start` (Linux only).
 pub fn start(inout a: Asm, protocol: u8, result_words: u32, entry: u64) {
-    let words: u32 = if result_words == 0 {
-        1
-    } else {
-        result_words
-    };
+    let words: u32 = if result_words == 0 { 1 } else { result_words };
     let area = wrapping_mul(wrapping_add(words, 1) & 4294967294, 8);
     sub_sp(inout a, area);
     far_call(inout a, RA, entry);

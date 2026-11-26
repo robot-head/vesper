@@ -220,11 +220,7 @@ pub fn write_arena(inout arena: ShardArena, offset: u64, in bytes: Slice[u8]) ->
         let (idx, off) = div_rem_u64(at, arena.shard_len);
         let avail = wrapping_sub(arena.shard_len, off);
         let rem = wrapping_sub(n, done);
-        let chunk = if avail < rem {
-            avail
-        } else {
-            rem
-        };
+        let chunk = if avail < rem { avail } else { rem };
         mark_shard_dirty(inout arena, idx);
         let mut k: u64 = 0;
         loop {
@@ -429,14 +425,7 @@ pub fn encode_delta(in d: ArenaDelta) -> ChunkSeq[u8] {
     push_u64_le(inout out, d.epoch);
     push_u64_le(inout out, d.len);
     push_u32_le(inout out, d.shard_len);
-    push_u32_le(
-        inout out,
-        if d.keyframe {
-            1
-        } else {
-            0
-        }
-    );
+    push_u32_le(inout out, if d.keyframe { 1 } else { 0 });
     let count = d.shard_ids.as_slice().len();
     push_u32_le(inout out, wrapping_u32(count));
     let slen = widen_u64(d.shard_len);

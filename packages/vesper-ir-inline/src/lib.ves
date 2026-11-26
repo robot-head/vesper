@@ -1889,13 +1889,7 @@ fn bindings_new() -> Bindings {
 
 impl Bindings {
     fn push(inout self, place: bool, value: u32, at: u64) {
-        self.place.push(
-            if place {
-                1
-            } else {
-                0
-            }
-        );
+        self.place.push(if place { 1 } else { 0 });
         self.value.push(value);
         self.at.push(at);
     }
@@ -2179,15 +2173,7 @@ fn binary(code: u64, a: Kn, b: Kn) -> Kn {
     } else {
         return unknown();
     };
-    Kn {
-        k: 2,
-        lo: if r {
-            1
-        } else {
-            0
-        },
-        hi: 0
-    }
+    Kn { k: 2, lo: if r { 1 } else { 0 }, hi: 0 }
 }
 
 // `site::arm`: the arm a known value takes, NONE32 when undecided.
@@ -3038,13 +3024,7 @@ fn copy_pattern(inout p: Prog, in rn: Rename, at: u64) -> u64 {
     if kind == PK_BIND {
         let name = p.pat(add(at, 3));
         let r = rn.names.get(name);
-        body.push(
-            if r != NONE32 {
-                w(r)
-            } else {
-                name
-            }
-        );
+        body.push(if r != NONE32 { w(r) } else { name });
     } else if kind == PK_TUPLE {
         let n = p.pat(add(at, 3));
         body.push(n);

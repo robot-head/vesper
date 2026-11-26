@@ -286,11 +286,7 @@ fn seg_data_start(s: SentSeg) -> u64 {
 }
 
 fn seg_data_end(s: SentSeg) -> u64 {
-    let e = if s.fin {
-        wrapping_sub(s.end, 1)
-    } else {
-        s.end
-    };
+    let e = if s.fin { wrapping_sub(s.end, 1) } else { s.end };
     max64(e, seg_data_start(s))
 }
 

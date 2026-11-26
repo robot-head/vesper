@@ -136,13 +136,7 @@ pub fn add_expr(inout t: Tree, n: ExprNode, cap1: u64, cap2: u64) -> u32 {
 pub fn add_int(inout t: Tree, v: i128, start: u32, end: u32) -> u32 {
     let neg = v < 0;
     // `i128::MIN` negates to itself; its magnitude 2^127 is that bit pattern.
-    let m = wrapping_u128(
-        if neg {
-            wrapping_neg_i128(v)
-        } else {
-            v
-        }
-    );
+    let m = wrapping_u128(if neg { wrapping_neg_i128(v) } else { v });
     let l = t.ast
         .lits
         .alloc(Lit { kind: 1, neg: neg, bits: wrapping_u64(m), hi: wrapping_u64(m >> 64) });

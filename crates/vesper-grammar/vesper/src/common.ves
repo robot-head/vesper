@@ -175,11 +175,7 @@ pub fn leb_len(value: u64) -> u64 {
 pub fn put_leb(inout out: Slice[u8], at: u64, value: u64, len: u64) {
     let mut v = value;
     for i in 0..len {
-        let more: u64 = if v >= LEB128_MORE {
-            LEB128_MORE
-        } else {
-            0
-        };
+        let more: u64 = if v >= LEB128_MORE { LEB128_MORE } else { 0 };
         out.try_set(wrapping_add(at, i), wrapping_u8((v & LEB128_PAYLOAD) | more));
         v = v >> LEB128_SHIFT;
     }

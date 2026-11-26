@@ -214,11 +214,7 @@ impl Gen {
             self.syms,
             in conc
         );
-        let tag: u8 = if res {
-            2
-        } else {
-            1
-        };
+        let tag: u8 = if res { 2 } else { 1 };
         set8(inout self.spec_cache, si, tag);
         res
     }
@@ -735,11 +731,7 @@ impl Gen {
                 continue;
             }
             let t = u64_at(in touched, s);
-            let others = if t > loans {
-                wrapping_sub(t, loans)
-            } else {
-                0
-            };
+            let others = if t > loans { wrapping_sub(t, loans) } else { 0 };
             if keeps_in_home(others, loans) {
                 mark(inout memory, n32(s));
             }

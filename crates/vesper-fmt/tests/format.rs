@@ -865,3 +865,47 @@ fn member_chains_keep_a_short_receiver_and_overflow_their_one_call() {
 "
     );
 }
+#[test]
+fn short_if_else_expressions_stay_on_one_line_like_rustfmt() {
+    // An `if` used as a value, with one expression in each branch, stays on
+    // one line when it is at most 50 columns.
+    assert_eq!(
+        verify("fn f(a:u64)->u64{let x=if a>1{a}else{2};x}"),
+        "fn f(a: u64) -> u64 {
+    let x = if a > 1 { a } else { 2 };
+    x
+}
+"
+    );
+    // So does one in an argument or a match arm.
+    assert_eq!(
+        verify("fn f(a:bool,k:u8)->u64{g(if a{1}else{2},3);match k{0=>if a{1}else{2},_=>3}}"),
+        "fn f(a: bool, k: u8) -> u64 {
+    g(if a { 1 } else { 2 }, 3);
+    match k {
+        0 => if a { 1 } else { 2 },
+        _ => 3
+    }
+}
+"
+    );
+    // A longer one, or an `if` that starts a statement, stays vertical.
+    assert_eq!(
+        verify(
+            "fn f(a:u64)->u64{let x=if a>first_limit_value{a}else{second_limit_value};if a>1{a}else{2}}"
+        ),
+        "fn f(a: u64) -> u64 {
+    let x = if a > first_limit_value {
+        a
+    } else {
+        second_limit_value
+    };
+    if a > 1 {
+        a
+    } else {
+        2
+    }
+}
+"
+    );
+}

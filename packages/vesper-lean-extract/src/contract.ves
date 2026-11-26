@@ -299,21 +299,9 @@ pub fn contracts(
         }
         // the predicates
         for k in 0..2 {
-            let pi = if k == 0 {
-                ri
-            } else {
-                ei
-            };
-            let pa = if k == 0 {
-                c.ra
-            } else {
-                c.ea
-            };
-            let pz = if k == 0 {
-                c.rz
-            } else {
-                c.ez
-            };
+            let pi = if k == 0 { ri } else { ei };
+            let pa = if k == 0 { c.ra } else { c.ea };
+            let pz = if k == 0 { c.rz } else { c.ez };
             if pi != NONE {
                 let p = y.a.function(pi);
                 let mut row = false;
@@ -368,21 +356,9 @@ pub fn contracts(
             types.push(y.a.param_ty(f, i));
         }
         for k in 0..2 {
-            let pi = if k == 0 {
-                ri
-            } else {
-                ei
-            };
-            let pa = if k == 0 {
-                c.ra
-            } else {
-                c.ea
-            };
-            let pz = if k == 0 {
-                c.rz
-            } else {
-                c.ez
-            };
+            let pi = if k == 0 { ri } else { ei };
+            let pa = if k == 0 { c.ra } else { c.ea };
+            let pz = if k == 0 { c.rz } else { c.ez };
             if pi != NONE {
                 let p = y.a.function(pi);
                 let mut expected: ChunkSeq[u32] = ChunkSeq::new[u32]();

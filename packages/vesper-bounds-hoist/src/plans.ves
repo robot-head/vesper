@@ -717,11 +717,7 @@ fn i128_of(neg: bool, lo: u64, hi: u64) -> I128 {
     }
     // -(hi, lo)
     let nlo = wrapping_add(lo ^ 18446744073709551615, 1);
-    let carry: u64 = if nlo == 0 {
-        1
-    } else {
-        0
-    };
+    let carry: u64 = if nlo == 0 { 1 } else { 0 };
     I128 { lo: nlo, hi: wrapping_add(hi ^ 18446744073709551615, carry) }
 }
 
@@ -847,19 +843,11 @@ fn trip_count(in f: Fun, head: Head) -> (bool, u64) {
             return (false, 0);
         }
         let nlo = wrapping_add(b.lo, 1);
-        let carry: u64 = if nlo == 0 {
-            1
-        } else {
-            0
-        };
+        let carry: u64 = if nlo == 0 { 1 } else { 0 };
         b = I128 { lo: nlo, hi: wrapping_add(b.hi, carry) };
     }
     // d = b - a, saturating
-    let borrow: u64 = if b.lo < a.lo {
-        1
-    } else {
-        0
-    };
+    let borrow: u64 = if b.lo < a.lo { 1 } else { 0 };
     let mut d = I128 {
         lo: wrapping_sub(b.lo, a.lo),
         hi: wrapping_sub(wrapping_sub(b.hi, a.hi), borrow)
@@ -1881,11 +1869,7 @@ pub fn dominated_list(in f: Fun) -> ChunkSeq[u64] {
             let mut is_stable = s == 2;
             if s == 0 {
                 is_stable = stable_place(in f, in all, recv.place);
-                let mark: u8 = if is_stable {
-                    2
-                } else {
-                    1
-                };
+                let mark: u8 = if is_stable { 2 } else { 1 };
                 let set = stable.try_set(w(recv.place), mark);
             }
             if !is_stable {
@@ -1925,13 +1909,7 @@ pub fn dominated_list(in f: Fun) -> ChunkSeq[u64] {
             ab.push(b);
             ak.push(kk);
             ap.push(recv.place);
-            aconst.push(
-                if is_const {
-                    1
-                } else {
-                    0
-                }
-            );
+            aconst.push(if is_const { 1 } else { 0 });
             alo.push(lo);
             ahi.push(hi);
             achecked.push(

@@ -3391,11 +3391,7 @@ fn grow(
     }
     let mut target: u64 = 0;
     if cap == 0 {
-        target = if max < 4 {
-            max
-        } else {
-            4
-        };
+        target = if max < 4 { max } else { 4 };
     } else {
         target = t_mul(inout r, cap, 2, N_GRAPH_METADATA);
         if target > max {

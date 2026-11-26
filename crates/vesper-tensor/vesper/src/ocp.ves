@@ -145,11 +145,7 @@ pub fn fp8_encode(e5m2: bool, value: f32) -> u8 eff [Fail[ArithOverflow]] {
         max
     } else {
         let lg = floor_log2(abs(value));
-        let e = if lg > emin {
-            lg
-        } else {
-            emin
-        };
+        let e = if lg > emin { lg } else { emin };
         let quantum = pow2(e - m_bits);
         let scaled = a / quantum;
         let mut r = floor(scaled);

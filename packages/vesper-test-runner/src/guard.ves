@@ -180,14 +180,7 @@ fn builtin(in a: Ast, inout w: Walk, name: u32) -> bool {
     w.tmp.clear();
     let ok = a.names.resolve_into(symbol_from_id(name), inout w.tmp);
     let yes = builtin_text(in w.tmp);
-    let set = w.builtin.try_set(
-        k,
-        if yes {
-            2
-        } else {
-            1
-        }
-    );
+    let set = w.builtin.try_set(k, if yes { 2 } else { 1 });
     yes
 }
 
@@ -607,11 +600,7 @@ fn text_less(in a: Ast, x: u32, y: u32, inout t1: String, inout t2: String) -> b
     let b2 = t2.as_bytes();
     let n1 = b1.len();
     let n2 = b2.len();
-    let n = if n1 < n2 {
-        n1
-    } else {
-        n2
-    };
+    let n = if n1 < n2 { n1 } else { n2 };
     for i in 0..n {
         let c1 = b1.try_get(i).unwrap_or(0);
         let c2 = b2.try_get(i).unwrap_or(0);

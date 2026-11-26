@@ -57,11 +57,7 @@ fn sort_seq[T: mod copy](inout s: ChunkSeq[T]) where T: Ord {
                         Option::None => false,
                     }
                 };
-                let from = if take_left {
-                    i
-                } else {
-                    j
-                };
+                let from = if take_left { i } else { j };
                 match src.try_get(from) {
                     Option::Some(v) => {
                         dst.try_set(k, v);

@@ -1182,28 +1182,14 @@ fn find_line(in lines: ChunkSeq[u64], field: u64, x: u64) -> u64 {
 fn chars_before(in t: Slice[u8], n: u64, in lines: ChunkSeq[u64], l: u64, x: u64) -> u64 {
     let from = byte_off(in lines, l);
     let to = x;
-    let real = if to <= n {
-        to
-    } else {
-        n
-    };
+    let real = if to <= n { to } else { n };
     let mut count = if from < real {
         chars_in(in t, from, real)
     } else {
         0
     };
     if to > n {
-        count = wrapping_add(
-            count,
-            wrapping_sub(
-                to,
-                if from > n {
-                    from
-                } else {
-                    n
-                }
-            )
-        );
+        count = wrapping_add(count, wrapping_sub(to, if from > n { from } else { n }));
     }
     wrapping_add(char_off(in lines, l), count)
 }
@@ -1264,11 +1250,7 @@ fn l_multi(in r: Rep, l: u64) -> bool {
 fn l_last(in r: Rep, l: u64) -> u64 {
     let e = l_end(in r, l);
     let s = l_start(in r, l);
-    let x = if e > 0 {
-        wrapping_sub(e, 1)
-    } else {
-        0
-    };
+    let x = if e > 0 { wrapping_sub(e, 1) } else { 0 };
     if x > s {
         x
     } else {
@@ -1337,14 +1319,7 @@ fn write_margin(
     } else {
         open(inout out, r.color, Color::Skipped);
         spaces(inout out, wrapping_add(r.width, 1));
-        put_char(
-            inout out,
-            if is_ellipsis {
-                vbar_gap()
-            } else {
-                vbar()
-            }
-        );
+        put_char(inout out, if is_ellipsis { vbar_gap() } else { vbar() });
         close(inout out, r.color, Color::Skipped);
     }
     out.push(Ascii::Space);
@@ -1352,11 +1327,7 @@ fn write_margin(
     let has_margin = labels && r.has_margin;
     let span_start = char_off(in lines, idx);
     let span_end = wrapping_add(span_start, char_len(in lines, idx));
-    let cols = if draw && m > 0 {
-        wrapping_add(m, 1)
-    } else {
-        0
-    };
+    let cols = if draw && m > 0 { wrapping_add(m, 1) } else { 0 };
     for col in 0..cols {
         let mut corner = NONE;
         let mut corner_start = false;
@@ -1364,11 +1335,7 @@ fn write_margin(
         let mut vbar_l = NONE;
         let mut ptr = NONE;
         let mut ptr_start = false;
-        let multi_label = if col < m {
-            multi_at(in r, col)
-        } else {
-            NONE
-        };
+        let multi_label = if col < m { multi_at(in r, col) } else { NONE };
         let lim = if wrapping_add(col, 1) < m {
             wrapping_add(col, 1)
         } else {
@@ -1409,11 +1376,7 @@ fn write_margin(
                     let mut skip = false;
                     if report_row == label_row {
                         if margin {
-                            vbar_l = if col == i {
-                                label
-                            } else {
-                                NONE
-                            };
+                            vbar_l = if col == i { label } else { NONE };
                             if is_start {
                                 skip = true;
                             }
@@ -1455,21 +1418,13 @@ fn write_margin(
         let mut a: u64 = Ascii::Space;
         let mut b: u64 = Ascii::Space;
         if corner != NONE {
-            a = if corner_start {
-                ltop()
-            } else {
-                lbot()
-            };
+            a = if corner_start { ltop() } else { lbot() };
             b = hbar();
         } else if hbar_l != NONE {
             a = hbar();
             b = hbar();
         } else if vbar_l != NONE {
-            a = if is_ellipsis {
-                vbar_gap()
-            } else {
-                vbar()
-            };
+            a = if is_ellipsis { vbar_gap() } else { vbar() };
             b = Ascii::Space;
         } else if ptr != NONE && is_line {
             let is_col = multi_label == ptr;
@@ -1485,11 +1440,7 @@ fn write_margin(
             } else {
                 hbar()
             };
-            b = if !is_limit {
-                hbar()
-            } else {
-                Ascii::Space
-            };
+            b = if !is_limit { hbar() } else { Ascii::Space };
         }
         put_char(inout out, a);
         put_char(inout out, b);
@@ -1607,13 +1558,7 @@ fn report_labels(
         }
         r.lab.push(sc);
         r.lab.push(ec);
-        r.lab.push(
-            if first != last {
-                1
-            } else {
-                0
-            }
-        );
+        r.lab.push(if first != last { 1 } else { 0 });
         if l == 0 {
             r.lab.push(d.message);
             r.lab.push(d.message_len);
@@ -1719,11 +1664,7 @@ fn line_labels(inout r: Rep, in lines: ChunkSeq[u64], idx: u64, count: u64) -> b
             let e = l_end(in r, l);
             if s >= off && e <= end {
                 let mid = wrapping_add(s, e) / 2;
-                let col = if mid > s {
-                    mid
-                } else {
-                    s
-                };
+                let col = if mid > s { mid } else { s };
                 r.ll.push(l);
                 r.ll.push(wrapping_sub(col, off));
                 r.ll.push(0);
@@ -1768,16 +1709,8 @@ fn line_chars(inout r: Rep, in t: Slice[u8], n: u64, in lines: ChunkSeq[u64], id
         if i >= to {
             break;
         }
-        let c = if i < n {
-            decode(in t, i)
-        } else {
-            Ascii::Space
-        };
-        let len = if i < n {
-            utf8_len(byte(in t, i))
-        } else {
-            1
-        };
+        let c = if i < n { decode(in t, i) } else { Ascii::Space };
+        let len = if i < n { utf8_len(byte(in t, i)) } else { 1 };
         r.cps.push(c);
         if !is_space(c) {
             keep = r.cps.len();
@@ -1817,11 +1750,7 @@ fn write_line(
             arrow = len;
         } else {
             let e = l_end(in r, ll_label(in r, j));
-            let x = if e > off {
-                wrapping_sub(e, off)
-            } else {
-                0
-            };
+            let x = if e > off { wrapping_sub(e, off) } else { 0 };
             if x > arrow {
                 arrow = x;
             }
@@ -1893,14 +1822,7 @@ fn write_line(
                 tail = hbar();
             }
             for i in 0..w {
-                put_char(
-                    inout out,
-                    if i == 0 {
-                        c
-                    } else {
-                        tail
-                    }
-                );
+                put_char(inout out, if i == 0 { c } else { tail });
             }
         }
         out.push(Ascii::Lf);
@@ -2001,16 +1923,8 @@ fn write_report(
     } else {
         0
     };
-    let x = if ge > 0 {
-        wrapping_sub(ge, 1)
-    } else {
-        0
-    };
-    let y = if x > gs {
-        x
-    } else {
-        gs
-    };
+    let x = if ge > 0 { wrapping_sub(ge, 1) } else { 0 };
+    let y = if x > gs { x } else { gs };
     let end = if y <= src_len {
         wrapping_add(find_line(in lines, Line::CharOff, y), 1)
     } else {

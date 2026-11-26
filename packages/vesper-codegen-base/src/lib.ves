@@ -93,11 +93,7 @@ pub fn alloc(
     size: u32,
     zeroed: bool
 ) -> Value eff [Ffi[Cranelift]] {
-    let bytes = if size < 8 {
-        8
-    } else {
-        size
-    };
+    let bytes = if size < 8 { 8 } else { size };
     let slot = create_stack_slot(inout b, bytes, WORD_ALIGN_SHIFT);
     let ptr = ins_stack_addr(inout b, pointer_type(in m), slot, 0);
     if zeroed {

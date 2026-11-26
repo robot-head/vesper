@@ -151,11 +151,7 @@ test {
         stable_sort(inout items.as_slice_mut());
         let zeros = count >> 1;
         for i in 0..count {
-            let expected_key: u64 = if i < zeros {
-                0
-            } else {
-                1
-            };
+            let expected_key: u64 = if i < zeros { 0 } else { 1 };
             let original_index = if i < zeros {
                 wrapping_add(i << 1, 1)
             } else {

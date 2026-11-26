@@ -625,11 +625,7 @@ pub fn req_end_txn(
 // Whether `data[a..a + la]` sorts before `data[b..b + lb]` (bytewise, as
 // `str`'s `Ord`).
 fn bytes_lt(in data: Slice[u8], a: u64, la: u64, b: u64, lb: u64) -> bool {
-    let n = if la < lb {
-        la
-    } else {
-        lb
-    };
+    let n = if la < lb { la } else { lb };
     for i in 0..n {
         let x = sb(in data, wrapping_add(a, i));
         let y = sb(in data, wrapping_add(b, i));
@@ -830,16 +826,8 @@ fn utf8_ok(in b: Slice[u8], start: u64, end: u64) -> bool {
             }
             i = wrapping_add(i, 2);
         } else if x < 240 {
-            let lo: u8 = if x == 224 {
-                160
-            } else {
-                128
-            };
-            let hi: u8 = if x == 237 {
-                159
-            } else {
-                191
-            };
+            let lo: u8 = if x == 224 { 160 } else { 128 };
+            let hi: u8 = if x == 237 { 159 } else { 191 };
             if wrapping_add(i, 3) > end
                 || !ok_byte(in b, wrapping_add(i, 1), lo, hi)
                 || !ok_byte(in b, wrapping_add(i, 2), 128, 191) {
@@ -847,16 +835,8 @@ fn utf8_ok(in b: Slice[u8], start: u64, end: u64) -> bool {
             }
             i = wrapping_add(i, 3);
         } else if x < 245 {
-            let lo: u8 = if x == 240 {
-                144
-            } else {
-                128
-            };
-            let hi: u8 = if x == 244 {
-                143
-            } else {
-                191
-            };
+            let lo: u8 = if x == 240 { 144 } else { 128 };
+            let hi: u8 = if x == 244 { 143 } else { 191 };
             if wrapping_add(i, 4) > end
                 || !ok_byte(in b, wrapping_add(i, 1), lo, hi)
                 || !ok_byte(in b, wrapping_add(i, 2), 128, 191)
@@ -1139,18 +1119,7 @@ pub fn resp_sasl_authenticate(in b: Slice[u8]) -> ChunkSeq[i64] eff [Fail[KwErr]
     let code = r16(in b, inout at);
     let m = rnstr(in b, inout at, false);
     if code != 0 {
-        code_msg(
-            code,
-            wrapping_sub(
-                at,
-                if m < 0 {
-                    0
-                } else {
-                    wrapping_u64(m)
-                }
-            ),
-            m
-        );
+        code_msg(code, wrapping_sub(at, if m < 0 { 0 } else { wrapping_u64(m) }), m);
     }
     let mut out = ChunkSeq::with_capacity[i64](2);
     push_bytes(in b, inout at, false, inout out);
@@ -1283,18 +1252,7 @@ pub fn resp_create_topic(in b: Slice[u8]) eff [Fail[KwErr]] {
         let code = r16(in b, inout at);
         let m = rnstr(in b, inout at, false);
         if code != 0 {
-            code_msg(
-                code,
-                wrapping_sub(
-                    at,
-                    if m < 0 {
-                        0
-                    } else {
-                        wrapping_u64(m)
-                    }
-                ),
-                m
-            );
+            code_msg(code, wrapping_sub(at, if m < 0 { 0 } else { wrapping_u64(m) }), m);
         }
     }
 }

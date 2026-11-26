@@ -429,11 +429,7 @@ pub fn fresh(in f: F, inout err: ChunkSeq[u8]) -> bool {
                 let target = wd(in f, o);
                 let nargs = wd(in f, wrapping_add(o, 1));
                 o = wrapping_add(wrapping_add(o, 2), wrapping_mul(nargs, 2));
-                let c: u64 = if crossed {
-                    1
-                } else {
-                    0
-                };
+                let c: u64 = if crossed { 1 } else { 0 };
                 let key = wrapping_add(wrapping_mul(target, 2), c);
                 if u64_at(in visited, key) == 0 {
                     put(inout visited, key, 1);

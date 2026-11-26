@@ -1088,11 +1088,7 @@ pub fn onertt_open(
             k.has_previous = true;
             k.previous_generation = k.recv_generation;
             let deadline = wrapping_add(now_ns, k.retire_window_ns);
-            k.previous_deadline = if deadline < now_ns {
-                U64_MAX
-            } else {
-                deadline
-            };
+            k.previous_deadline = if deadline < now_ns { U64_MAX } else { deadline };
             k.recv_generation = generation;
             k.recv_has_first = true;
             k.recv_first_pn = pn;

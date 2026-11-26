@@ -298,13 +298,7 @@ pub fn close_bounded(
     let mut bounded = ChunkSeq::with_capacity[u8](nf);
     for fi in 0..nf {
         let is_b = u32_at(in m.fn_bn, fi) > 0 || u8_at(in m.fn_is_stub, fi) != 0;
-        bounded.push(
-            if is_b {
-                1
-            } else {
-                0
-            }
-        );
+        bounded.push(if is_b { 1 } else { 0 });
     }
     loop {
         let mut changed = false;
@@ -472,11 +466,7 @@ fn check_type_obligations(
         if adt_idx != NONE64 {
             let ga = w(u32_at(in m.adt_ga, adt_idx));
             let gn = w(u32_at(in m.adt_gn, adt_idx));
-            let limit = if gn < an {
-                gn
-            } else {
-                an
-            };
+            let limit = if gn < an { gn } else { an };
             for gi in 0..limit {
                 vars.set(
                     u32_at(in m.adt_gen_names, add(ga, gi)),
@@ -927,13 +917,7 @@ fn mono_check_body(
     check_obligations(inout sess, in m, in cp, inout errors);
     out.push(bounded.len());
     for i in 0..bounded.len() {
-        out.push(
-            if u8_at(in bounded, i) != 0 {
-                1
-            } else {
-                0
-            }
-        );
+        out.push(if u8_at(in bounded, i) != 0 { 1 } else { 0 });
     }
     out.push(errors.codes.len());
     for i in 0..errors.codes.len() {

@@ -733,11 +733,7 @@ fn ambient(in source: ChunkSeq[u8], call_s: u64, call_e: u64, inout amb: Amb) ->
     for i in 0..list_len(in a, fx.instances) {
         instances.push(list_at(in a, fx.instances, i));
     }
-    let mut tail = if f.effects == none() {
-        none()
-    } else {
-        fx.tail
-    };
+    let mut tail = if f.effects == none() { none() } else { fx.tail };
     // Frames as rows (body length, expression), longest first, stable.
     let mut frames = ChunkSeq::new[u64]();
     let order = post_order(in a, f.body);
@@ -801,11 +797,7 @@ fn ambient(in source: ChunkSeq[u8], call_s: u64, call_e: u64, inout amb: Amb) ->
             for i in 0..list_len(in a, cx.instances) {
                 instances.push(list_at(in a, cx.instances, i));
             }
-            tail = if n.d == none() {
-                none()
-            } else {
-                cx.tail
-            };
+            tail = if n.d == none() { none() } else { cx.tail };
         } else {
             instances.push(n.a);
         }
@@ -893,13 +885,7 @@ fn push_change(
     eds.push(e);
     eds.push(pool.len());
     eds.push(text.len());
-    eds.push(
-        if forwarded {
-            1
-        } else {
-            0
-        }
-    );
+    eds.push(if forwarded { 1 } else { 0 });
     pool.extend(in text.as_slice());
 }
 
@@ -1067,16 +1053,8 @@ fn parts_of(in map: ChunkSeq[u64], s: u64, e: u64) -> ChunkSeq[u64] {
         if ss >= e {
             break;
         }
-        let a = if ss > s {
-            ss
-        } else {
-            s
-        };
-        let b = if se < e {
-            se
-        } else {
-            e
-        };
+        let a = if ss > s { ss } else { s };
+        let b = if se < e { se } else { e };
         if a < b {
             out.push(a);
             out.push(b);

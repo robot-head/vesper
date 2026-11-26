@@ -1675,21 +1675,13 @@ impl L {
 
     fn vty(inout self, v: u64) -> u32 {
         let t = self.cx.ir.value_type(self.e.info, v);
-        let t2 = if t == NONE32 {
-            self.infer()
-        } else {
-            t
-        };
+        let t2 = if t == NONE32 { self.infer() } else { t };
         self.subst(t2)
     }
 
     fn local_type(inout self, name: u32) -> u32 {
         let t = self.cx.ir.local_type(self.e.info, name);
-        let t2 = if t == NONE32 {
-            self.infer()
-        } else {
-            t
-        };
+        let t2 = if t == NONE32 { self.infer() } else { t };
         self.subst(t2)
     }
 
@@ -2000,11 +1992,7 @@ impl L {
             let t = self.cx.ir.word(ta);
             let n = self.cx.ir.word(inc(ta));
             let (p0, pn) = self.cx.ir.block_params(fi, t);
-            let m = if n < pn {
-                n
-            } else {
-                pn
-            };
+            let m = if n < pn { n } else { pn };
             for k in 0..m {
                 let x = self.value(self.cx.ir.word(add(add(ta, 2), k)));
                 let y = self.dest(self.cx.ir.word(add(p0, k)));
@@ -2348,20 +2336,7 @@ impl L {
                     Fail::raise(werr(K_INVALID, 0, 171));
                 }
                 let x = self.local();
-                self.load(
-                    v,
-                    wrapping_mul(
-                        8,
-                        add(
-                            fi,
-                            if is_enum {
-                                1
-                            } else {
-                                0
-                            }
-                        )
-                    )
-                );
+                self.load(v, wrapping_mul(8, add(fi, if is_enum { 1 } else { 0 })));
                 self.e.code.set(x);
                 let (fn2, t) = self.cx.variant_field(sh, index, fi);
                 self.condition(inc(p), x, t);
@@ -2418,20 +2393,7 @@ impl L {
                     Fail::raise(werr(K_INVALID, 0, 173));
                 }
                 let x = self.local();
-                self.load(
-                    v,
-                    wrapping_mul(
-                        8,
-                        add(
-                            fi,
-                            if is_enum {
-                                1
-                            } else {
-                                0
-                            }
-                        )
-                    )
-                );
+                self.load(v, wrapping_mul(8, add(fi, if is_enum { 1 } else { 0 })));
                 self.e.code.set(x);
                 let (fn2, t) = self.cx.variant_field(sh, index, fi);
                 self.bind(inc(p), x, t);
@@ -2746,14 +2708,7 @@ impl L {
             let name = n32(self.cx.ir.word(a));
             let (index, is_enum, sh) = self.cx.variant_of(ty, name);
             let nf = self.cx.field_count(sh, index);
-            let slots = add(
-                nf,
-                if is_enum {
-                    1
-                } else {
-                    0
-                }
-            );
+            let slots = add(nf, if is_enum { 1 } else { 0 });
             let block = if slots == 0 {
                 let x = self.local();
                 self.e.code.i64_const(0);
@@ -2777,21 +2732,7 @@ impl L {
                     Fail::raise(werr(K_INVALID, 0, 195));
                 }
                 let v = self.value(vid);
-                self.store(
-                    block,
-                    wrapping_mul(
-                        8,
-                        add(
-                            fi,
-                            if is_enum {
-                                1
-                            } else {
-                                0
-                            }
-                        )
-                    ),
-                    v
-                );
+                self.store(block, wrapping_mul(8, add(fi, if is_enum { 1 } else { 0 })), v);
             }
             self.set_value(dv, block);
         } else if op == Op::Project {
@@ -3120,11 +3061,7 @@ impl L {
             if c == 46 {
                 let s = self.cx.intern(in cur);
                 if first {
-                    root = if cur.len() == 0 {
-                        NONE32
-                    } else {
-                        s
-                    };
+                    root = if cur.len() == 0 { NONE32 } else { s };
                     first = false;
                 } else {
                     segs.push(s);
@@ -3319,11 +3256,7 @@ impl L {
                     self.e.code.set(t);
                     self.e.code.op(OP_END);
                 } else if a != NONE32 || b != NONE32 {
-                    let g = if a != NONE32 {
-                        a
-                    } else {
-                        b
-                    };
+                    let g = if a != NONE32 { a } else { b };
                     self.e.code.global_get(g);
                     self.e.code.set(t);
                 }
@@ -3553,11 +3486,7 @@ impl L {
         for i in 0..self.cx.names.size(opname) {
             name.push(self.cx.names.byte(opname, i));
         }
-        let lib: u8 = if ename == self.cx.s.ffi_env {
-            3
-        } else {
-            4
-        };
+        let lib: u8 = if ename == self.cx.s.ffi_env { 3 } else { 4 };
         let k = op_index(in name.as_slice(), lib, in passes);
         let mut cells = ChunkSeq::new[Cell]();
         let vals = self.host_args(inc(a), in passes, in tys, inout cells);
@@ -3978,11 +3907,7 @@ impl L {
                     locals.push(vt(VT_I64));
                     c.get(value);
                     c.op(OP_I32_WRAP_I64);
-                    let slot = if is_enum {
-                        inc(fi)
-                    } else {
-                        fi
-                    };
+                    let slot = if is_enum { inc(fi) } else { fi };
                     c.load(wrapping_mul(8, slot));
                     c.set(tmp);
                     let (fn2, t) = self.cx.variant_field(sh, index, fi);
@@ -4433,11 +4358,7 @@ impl L {
                 self.e.code.set(frame);
                 self.e.code.op(OP_END);
             } else if exact != NONE32 || by_name != NONE32 {
-                let g = if exact != NONE32 {
-                    exact
-                } else {
-                    by_name
-                };
+                let g = if exact != NONE32 { exact } else { by_name };
                 self.e.code.global_get(g);
                 self.e.code.set(frame);
             } else {
@@ -4577,56 +4498,20 @@ impl L {
         if !is_int(s1) || !is_int(s2) {
             Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 252));
         }
-        let kind = if ik_unsigned(s1) {
-            s1
-        } else {
-            s2
-        };
+        let kind = if ik_unsigned(s1) { s1 } else { s2 };
         let signed = ik_signed(kind);
         if self.is_op(opn, "==") {
             self.cmp(x, y, OP_I64_EQ);
         } else if self.is_op(opn, "!=") {
             self.cmp(x, y, OP_I64_NE);
         } else if self.is_op(opn, "<") {
-            self.cmp(
-                x,
-                y,
-                if signed {
-                    OP_I64_LT_S
-                } else {
-                    OP_I64_LT_U
-                }
-            );
+            self.cmp(x, y, if signed { OP_I64_LT_S } else { OP_I64_LT_U });
         } else if self.is_op(opn, "<=") {
-            self.cmp(
-                x,
-                y,
-                if signed {
-                    OP_I64_LE_S
-                } else {
-                    OP_I64_LE_U
-                }
-            );
+            self.cmp(x, y, if signed { OP_I64_LE_S } else { OP_I64_LE_U });
         } else if self.is_op(opn, ">") {
-            self.cmp(
-                x,
-                y,
-                if signed {
-                    OP_I64_GT_S
-                } else {
-                    OP_I64_GT_U
-                }
-            );
+            self.cmp(x, y, if signed { OP_I64_GT_S } else { OP_I64_GT_U });
         } else if self.is_op(opn, ">=") {
-            self.cmp(
-                x,
-                y,
-                if signed {
-                    OP_I64_GE_S
-                } else {
-                    OP_I64_GE_U
-                }
-            );
+            self.cmp(x, y, if signed { OP_I64_GE_S } else { OP_I64_GE_U });
         } else if self.is_op(opn, "wrapping_add")
             || self.is_op(opn, "wrapping_sub")
             || self.is_op(opn, "wrapping_mul") {
@@ -4752,24 +4637,12 @@ impl L {
                 self.e.code.set(xm);
                 self.e.code.get(xm);
                 self.e.code.get(n);
-                self.e.code.op(
-                    if left {
-                        OP_I64_SHL
-                    } else {
-                        OP_I64_SHR_U
-                    }
-                );
+                self.e.code.op(if left { OP_I64_SHL } else { OP_I64_SHR_U });
                 self.e.code.get(xm);
                 self.e.code.u64_const(bits);
                 self.e.code.get(n);
                 self.e.code.op(OP_I64_SUB);
-                self.e.code.op(
-                    if left {
-                        OP_I64_SHR_U
-                    } else {
-                        OP_I64_SHL
-                    }
-                );
+                self.e.code.op(if left { OP_I64_SHR_U } else { OP_I64_SHL });
                 self.e.code.op(OP_I64_OR);
                 if ik_unsigned(s1) {
                     self.e.code.u64_const(mask);
@@ -4784,13 +4657,7 @@ impl L {
             } else {
                 self.e.code.get(x);
                 self.e.code.get(y);
-                self.e.code.op(
-                    if left {
-                        OP_I64_ROTL
-                    } else {
-                        OP_I64_ROTR
-                    }
-                );
+                self.e.code.op(if left { OP_I64_ROTL } else { OP_I64_ROTR });
             }
         } else {
             Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 253));
@@ -4813,13 +4680,7 @@ impl L {
         if (add_ || mul_) && (kind == SC_U8 || kind == SC_U16 || kind == SC_U32) {
             self.e.code.get(x);
             self.e.code.get(y);
-            self.e.code.op(
-                if add_ {
-                    OP_I64_ADD
-                } else {
-                    OP_I64_MUL
-                }
-            );
+            self.e.code.op(if add_ { OP_I64_ADD } else { OP_I64_MUL });
             self.e.code.u64_const(ik_mask(kind));
             self.e.code.op(OP_I64_GT_U);
         } else if (add_ || sub_ || mul_) && (kind == SC_I8 || kind == SC_I16 || kind == SC_I32) {
@@ -4870,13 +4731,7 @@ impl L {
             let r = self.local();
             self.e.code.get(x);
             self.e.code.get(y);
-            self.e.code.op(
-                if add_ {
-                    OP_I64_ADD
-                } else {
-                    OP_I64_SUB
-                }
-            );
+            self.e.code.op(if add_ { OP_I64_ADD } else { OP_I64_SUB });
             self.e.code.set(r);
             self.e.code.get(x);
             self.e.code.get(r);
@@ -5250,19 +5105,9 @@ impl L {
     // is NONE32.
     fn option_into(inout self, d: u32, ty: u32, v: u32) eff [Fail[WErr]] {
         let s = self.cx.s;
-        let name = if v == NONE32 {
-            s.none
-        } else {
-            s.some
-        };
+        let name = if v == NONE32 { s.none } else { s.some };
         let (index, is_enum, sh) = self.cx.variant_of(ty, name);
-        let block = self.alloc_block(
-            if v == NONE32 {
-                8
-            } else {
-                16
-            }
-        );
+        let block = self.alloc_block(if v == NONE32 { 8 } else { 16 });
         let t = self.local();
         self.e.code.u64_const(index);
         self.e.code.set(t);
@@ -5525,11 +5370,7 @@ impl L {
             let d = self.dest(dv);
             let view = c == SQ_TRY_GET
                 && self.cx.ir.word(self.seq_arg(a, 0)) == widen_u64(TyPass::Inout);
-            let addr = if view {
-                self.local()
-            } else {
-                0
-            };
+            let addr = if view { self.local() } else { 0 };
             self.e.code.get(i);
             self.e.code.get(n);
             self.e.code.op(OP_I64_LT_U);
@@ -5721,11 +5562,7 @@ impl L {
         let hi = self.seq_val(a, 2);
         self.check_interval(lo, hi, n);
         for k in 0..2 {
-            let e = if k == 0 {
-                lo
-            } else {
-                hi
-            };
+            let e = if k == 0 { lo } else { hi };
             // A boundary unless a continuation byte `0b10xx_xxxx` is there.
             self.e.code.get(e);
             self.e.code.get(n);

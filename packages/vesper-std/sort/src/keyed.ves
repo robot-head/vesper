@@ -237,11 +237,7 @@ fn merge_pairs[K: mod copy + Ord, V: mod copy](
         match ka.try_get(i) {
             Option::Some(a) => match ka.try_get(j) {
                 Option::Some(b) => {
-                    let from = if lt(b, a) {
-                        j
-                    } else {
-                        i
-                    };
+                    let from = if lt(b, a) { j } else { i };
                     when let Option::Some(v) = va.try_get(from) {
                         vb.try_set(k, v);
                     }
@@ -286,17 +282,9 @@ fn pass_pairs[K: mod copy + Ord, V: mod copy](
             break;
         }
         let mid0 = wrapping_add(lo, width);
-        let mid = if mid0 < n {
-            mid0
-        } else {
-            n
-        };
+        let mid = if mid0 < n { mid0 } else { n };
         let hi0 = wrapping_add(mid, width);
-        let hi = if hi0 < n && hi0 > mid {
-            hi0
-        } else {
-            n
-        };
+        let hi = if hi0 < n && hi0 > mid { hi0 } else { n };
         merge_pairs(in ka, in va, inout kb, inout vb, lo, mid, hi);
         lo = hi;
     }

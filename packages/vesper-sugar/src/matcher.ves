@@ -631,16 +631,7 @@ fn compile(in pb: ChunkSeq[u8], in p: Toks, inout m: Mx) -> bool {
         if sequence && i == n && (sc == S_SCOPE || sc == S_STMTS) {
             push_op(inout m, OP_TAIL, cap, 0);
         } else {
-            push_op(
-                inout m,
-                OP_HOLE,
-                cap,
-                if sequence {
-                    1
-                } else {
-                    0
-                }
-            );
+            push_op(inout m, OP_HOLE, cap, if sequence { 1 } else { 0 });
         }
     }
     if g_op.len() != 0 {
@@ -678,11 +669,7 @@ fn valid_fragment(
                     || k == k_linear()
                     || k == k_eff()
             );
-        return if ok {
-            1
-        } else {
-            0
-        };
+        return if ok { 1 } else { 0 };
     }
     if sort == S_PLACE {
         let k = kind(in t, rs);

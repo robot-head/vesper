@@ -171,18 +171,8 @@ fn adopt_stream(
     fin: bool,
 ) {
     st.stats.streams_accepted = inc(st.stats.streams_accepted);
-    let flags = (
-        if fin {
-            WT_FLAG_RECV_DONE
-        } else {
-            0
-        }
-    ) | (
-        if !bidi {
-            WT_FLAG_SEND_DONE
-        } else {
-            0
-        }
+    let flags = (if fin { WT_FLAG_RECV_DONE } else { 0 }) | (
+        if !bidi { WT_FLAG_SEND_DONE } else { 0 }
     );
     let f = bsearch_u64(in st.w_id.as_slice(), id);
     if f.found {
@@ -195,20 +185,7 @@ fn adopt_stream(
         insert_word(inout st.w_held_q, f.idx, rest_q);
         insert_word(inout st.w_flags, f.idx, flags);
     }
-    push_sev(
-        inout sev,
-        SEV_STREAM,
-        session,
-        id,
-        if bidi {
-            1
-        } else {
-            0
-        },
-        0,
-        0,
-        0
-    );
+    push_sev(inout sev, SEV_STREAM, session, id, if bidi { 1 } else { 0 }, 0, 0, 0);
 }
 
 fn refuse(inout cmd: CmdBuf, id: u64, bidi: bool, code: u64) {
@@ -288,19 +265,7 @@ fn hold_stream(
         let _c = q_clear(inout pool, rest_q);
         refuse(inout cmd, id, bidi, CODE_WT_BUFFERED_STREAM_REJECTED);
     } else {
-        let flags = (
-            if bidi {
-                HELD_FLAG_BIDI
-            } else {
-                0
-            }
-        ) | (
-            if fin {
-                HELD_FLAG_FIN
-            } else {
-                0
-            }
-        );
+        let flags = (if bidi { HELD_FLAG_BIDI } else { 0 }) | (if fin { HELD_FLAG_FIN } else { 0 });
         st.h_id.push(id);
         st.h_session.push(session);
         st.h_rest_q.push(rest_q);
@@ -471,11 +436,7 @@ pub fn end_session(
             widen_u64(code),
             off,
             len,
-            if has_reset {
-                1
-            } else {
-                0
-            },
+            if has_reset { 1 } else { 0 },
             reset_code,
         );
     }
@@ -811,11 +772,7 @@ pub fn wt_register_opened(
     let _ok2 = vput(inout hdr, session);
     out_queue(inout out, inout pool, id, in hdr.as_slice());
 
-    let flags = if !bidi {
-        WT_FLAG_RECV_DONE
-    } else {
-        0
-    };
+    let flags = if !bidi { WT_FLAG_RECV_DONE } else { 0 };
     let f = bsearch_u64(in st.w_id.as_slice(), id);
     if f.found {
         let _a = st.w_session.try_set(f.idx, session);

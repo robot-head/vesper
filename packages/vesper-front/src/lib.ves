@@ -354,11 +354,7 @@ fn report_rejected(in d: Diags) -> ChunkSeq[u64] {
 
 fn report_oversized(retained: u64, in d: Diags) -> ChunkSeq[u64] {
     let mut out = ChunkSeq::new[u64]();
-    let leaves: u64 = if retained == 0 {
-        0
-    } else {
-        1
-    };
+    let leaves: u64 = if retained == 0 { 0 } else { 1 };
     out.push(leaves);
     out.push(1);
     out.push(1);
@@ -475,11 +471,7 @@ test {
         retained: u64
     ) -> bool {
         let rows = parse_tables_at_limit(in source, limit);
-        let leaves: u64 = if retained == 0 {
-            0
-        } else {
-            1
-        };
+        let leaves: u64 = if retained == 0 { 0 } else { 1 };
         if rows.try_get(0) != Option::Some(leaves)
             || rows.try_get(1) != Option::Some(1)
             || rows.try_get(2) != Option::Some(1) {

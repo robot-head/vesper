@@ -416,11 +416,7 @@ fn put_environment(in n: Slice[u64], v: u64, inout w: Slice[u64]) -> Unit eff [F
     int_map(in n, v, F_ENV);
     map_only(in n, v, 7, F_ENV);
     let cls = map_find(in n, v, K_ENV_CLASS);
-    let has_class = if cls == NONE {
-        0
-    } else {
-        1
-    };
+    let has_class = if cls == NONE { 0 } else { 1 };
     put(inout w, has_class);
     if has_class == 1 {
         int_map(in n, cls, F_CLASS);
@@ -800,11 +796,7 @@ fn parse_comid_node(
                 }
                 let env = wrapping_add(aat, 2);
                 let keys = skip(in n, env);
-                let has_cond = if arity == 3 {
-                    1
-                } else {
-                    0
-                };
+                let has_cond = if arity == 3 { 1 } else { 0 };
                 put_environment(in n, env, inout w);
                 let kc = check_array(in n, keys, F_ATTEST_KEYS);
                 put(inout w, kc);

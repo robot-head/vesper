@@ -372,11 +372,7 @@ impl Enc {
                 // two's complement words to a sign and a magnitude
                 if (hi >> 63) != 0 {
                     let nlo = wrapping_add(lo ^ 18446744073709551615, 1);
-                    let carry: u64 = if nlo == 0 {
-                        1
-                    } else {
-                        0
-                    };
+                    let carry: u64 = if nlo == 0 { 1 } else { 0 };
                     self.put(Word::Int);
                     self.put(1);
                     self.put(nlo);

@@ -8,17 +8,9 @@ fn ty_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     let k = kind(p);
     if k == 12 {
         let q = bump(p);
-        let q = if at(q, 44) {
-            mode(bump(q))
-        } else {
-            q
-        };
+        let q = if at(q, 44) { mode(bump(q)) } else { q };
         let q = expect(ty_params(expect(q, 32)), 33);
-        let q = if at(q, 46) {
-            ty(bump(q))
-        } else {
-            q
-        };
+        let q = if at(q, 46) { ty(bump(q)) } else { q };
         effects(q)
     } else if k == 32 {
         expect(ty_list(bump(p)), 33)
@@ -175,11 +167,7 @@ fn effect_list(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
         } else if at(p, 4) && nth(p, 1).kind != 40 {
             lower(p)
         } else {
-            let q = if at(p, 4) {
-                expect(lower(p), 40)
-            } else {
-                p
-            };
+            let q = if at(p, 4) { expect(lower(p), 40) } else { p };
             let r = type_args(upper(q));
             let s = eat(r, 38);
             if ate(r, s) || at(r, 68) {
@@ -257,11 +245,7 @@ fn field_list(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     } else {
         let q = ty(expect(lower(p), 40));
         let m = eat(q, 45);
-        let r = if ate(q, m) {
-            required_mode(m)
-        } else {
-            q
-        };
+        let r = if ate(q, m) { required_mode(m) } else { q };
         let s = eat(r, 38);
         if ate(r, s) {
             field_list(s)
@@ -364,22 +348,14 @@ fn impl_item(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
 fn function(p: P, op: bool) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     let g = generics(lower(expect(p, 12)), true);
     let q = expect(params(expect(with_flags(g, g.nostruct, g.rows, false), 32), 33), 33);
-    let q = if at(q, 46) {
-        ty(bump(q))
-    } else {
-        q
-    };
+    let q = if at(q, 46) { ty(bump(q)) } else { q };
     let q = effects(q);
     let q = if at_word(q, 0, 0x7768657265) {
         where_clauses(bump(q))
     } else {
         q
     };
-    let r = if op {
-        expect(q, 39)
-    } else {
-        block(q)
-    };
+    let r = if op { expect(q, 39) } else { block(q) };
     with_flags(r, r.nostruct, p.rows, r.bounds)
 }
 
@@ -399,17 +375,9 @@ fn params(p: P, end: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     } else {
         let q = lower(pass(p));
         let d = eat(q, 42);
-        let q = if ate(q, d) {
-            place_tree(d)
-        } else {
-            q
-        };
+        let q = if ate(q, d) { place_tree(d) } else { q };
         let c = eat(q, 40);
-        let q = if ate(q, c) {
-            ty(c)
-        } else {
-            q
-        };
+        let q = if ate(q, c) { ty(c) } else { q };
         let r = eat(q, 38);
         if ate(q, r) {
             params(r, end)

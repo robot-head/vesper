@@ -280,11 +280,7 @@ fn reduce_cands(
     let oy = e01z * (p2x - p0x) - e01x * (p2z - p0z);
     let oz = e01x * (p2y - p0y) - e01y * (p2x - p0x);
     let orient = ox * nx + oy * ny + oz * nz;
-    let sgn = if orient >= 0.0 {
-        1.0
-    } else {
-        -1.0
-    };
+    let sgn = if orient >= 0.0 { 1.0 } else { -1.0 };
     let e12x = p2x - p1x;
     let e12y = p2y - p1y;
     let e12z = p2z - p1z;

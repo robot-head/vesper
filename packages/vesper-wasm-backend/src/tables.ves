@@ -211,11 +211,7 @@ impl L {
                 let cname = n32(self.cx.ir.word(a));
                 let (index, is_enum, sh) = self.cx.variant_of(ins.ty, cname);
                 let nf = self.cx.field_count(sh, index);
-                let base: u64 = if is_enum {
-                    1
-                } else {
-                    0
-                };
+                let base: u64 = if is_enum { 1 } else { 0 };
                 let slots = add(nf, base);
                 out.clear();
                 for _i in 0..slots {

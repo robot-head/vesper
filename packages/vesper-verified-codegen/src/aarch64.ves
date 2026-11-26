@@ -63,21 +63,13 @@ fn reg(r: u8) -> u32 {
 }
 
 fn ldst(inout a: Asm, load: bool, r: u8, loc: u8, n: u64) {
-    let base = if loc == L_IN {
-        FP
-    } else {
-        SP
-    };
+    let base = if loc == L_IN { FP } else { SP };
     let offset = if loc == L_IN {
         wrapping_add(16, wrapping_mul(n, 8))
     } else {
         wrapping_mul(n, 8)
     };
-    let op: u32 = if load {
-        4181721088
-    } else {
-        4177526784
-    };
+    let op: u32 = if load { 4181721088 } else { 4177526784 };
     put_u32(inout a, op | sh(wrapping_u32(offset / 8), 10) | sh(base, 5) | reg(r));
 }
 
@@ -85,11 +77,7 @@ fn ldst(inout a: Asm, load: bool, r: u8, loc: u8, n: u64) {
 fn imm(inout a: Asm, rd: u32, w: u64) {
     for hw in 0..4 {
         let part = wrapping_u32(wrapping_shr_u64(w, wrapping_u32(wrapping_mul(hw, 16))) & 65535);
-        let op: u32 = if hw == 0 {
-            3531603968
-        } else {
-            4068474880
-        };
+        let op: u32 = if hw == 0 { 3531603968 } else { 4068474880 };
         put_u32(inout a, op | sh(wrapping_u32(hw), 21) | sh(part, 5) | rd);
     }
 }
@@ -110,11 +98,7 @@ fn branch(inout a: Asm, op: u32, l: u64) {
 // `cbz`/`cbnz xt, label`.
 fn cb(inout a: Asm, nonzero: bool, rt: u32, l: u64) {
     let at = here(in a);
-    let op: u32 = if nonzero {
-        3036676096
-    } else {
-        3019898880
-    };
+    let op: u32 = if nonzero { 3036676096 } else { 3019898880 };
     put_u32(inout a, op | rt);
     fixup(inout a, at, l, FIX_IMM19);
 }
@@ -283,11 +267,7 @@ pub fn emit(inout a: Asm, in m: M) {
         // ldr x0, [x16, #8*off] (str x0, ...).
         put_u32(inout a, 3533701120 | sh(wrapping_u32(HEAP_BASE >> 16), 5) | 16);
         put_u32(inout a, ADD | sh(1, 16) | sh(3, 10) | sh(16, 5) | 16);
-        let op: u32 = if o == M_LDH {
-            4181721088
-        } else {
-            4177526784
-        };
+        let op: u32 = if o == M_LDH { 4181721088 } else { 4177526784 };
         put_u32(inout a, op | sh(wrapping_u32(m.n), 10) | sh(16, 5));
     } else if o == M_LABEL {
         bind(inout a, m.n);
@@ -332,11 +312,7 @@ fn syscall(inout a: Asm, os: u64, linux: u32, macos: u32) {
 
 // The entry: `_start` (Linux) or the C `_main` (macOS).
 pub fn start(inout a: Asm, os: u64, protocol: u8, result_words: u32, entry: u64) {
-    let words: u32 = if result_words == 0 {
-        1
-    } else {
-        result_words
-    };
+    let words: u32 = if result_words == 0 { 1 } else { result_words };
     let area = wrapping_mul(wrapping_add(words, 1) & 4294967294, 8);
     if os == OS_MACOS {
         put_u32(inout a, 2847898621);

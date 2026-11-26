@@ -220,16 +220,7 @@ fn number(inout d: Doc, in t: Slice[u8], inout p: P, positive: bool, start: u64)
     }
     // A negative or fractional number is not a u64.
     let u = positive && !float;
-    node(
-        inout d,
-        NUMBER,
-        if u {
-            1
-        } else {
-            0
-        },
-        sig
-    )
+    node(inout d, NUMBER, if u { 1 } else { 0 }, sig)
 }
 
 fn hex_digit(c: u8) -> u64 {

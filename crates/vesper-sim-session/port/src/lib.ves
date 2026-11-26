@@ -1237,11 +1237,7 @@ pub fn wal_state_fail_flush(inout w: WalState) -> WalResult {
 // records reach the medium whole and, if a further record exists, `torn`
 // bytes of its frame (clamped below the full frame) follow.
 pub fn wal_state_crash(inout w: WalState, persisted: u64, torn: u64) -> WalCrash {
-    let in_flight = if w.flushing {
-        w.in_flight
-    } else {
-        0
-    };
+    let in_flight = if w.flushing { w.in_flight } else { 0 };
     let persisted = min(persisted, in_flight);
     let whole = pending_bytes(in w, persisted);
     persist(inout w, 0, whole);

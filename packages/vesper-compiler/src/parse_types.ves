@@ -315,14 +315,7 @@ fn parse_expect_word(
     if parse_at_word(p, 0, packed) {
         parse_bump(p)
     } else {
-        syntax_issue(
-            p,
-            if packed == 0x6173 {
-                15
-            } else {
-                16
-            }
-        )
+        syntax_issue(p, if packed == 0x6173 { 15 } else { 16 })
     }
 }
 

@@ -66,11 +66,7 @@ fn frame_at(in seq: ChunkSeq[Frame], idx: u64) -> Frame {
 }
 
 fn align_up_8(length: u64) -> (bool, u64) {
-    let min_len = if length == 0 {
-        1
-    } else {
-        length
-    };
+    let min_len = if length == 0 { 1 } else { length };
     let max_u64: u64 = wrapping_sub(0, 1);
     if min_len > wrapping_sub(max_u64, 7) {
         return (false, 0);
@@ -2060,26 +2056,14 @@ fn io_finish(r: IoRequest, ok: bool, n: u64, errno: u32) -> IoCompletion {
         good = false;
         e = io_error_invalid_length();
     }
-    let len = if good && is_read(r.op) {
-        n
-    } else {
-        r.len
-    };
+    let len = if good && is_read(r.op) { n } else { r.len };
     IoCompletion {
         id: r.id,
         token: r.token,
         op: r.op,
         ok: good,
-        bytes: if good {
-            n
-        } else {
-            0
-        },
-        errno: if good {
-            0
-        } else {
-            e
-        },
+        bytes: if good { n } else { 0 },
+        errno: if good { 0 } else { e },
         start: r.start,
         len: len,
     }
@@ -2291,11 +2275,7 @@ pub fn epoll_driver_cancel_all(inout d: EpollDriver) -> u32 eff [Ffi[PulseSys]] 
 // Append the tokens of fired registrations to `fired`, at most 64; when
 // `block`, wait until one fires. `EINTR` is retried. 0 or the errno.
 fn io_wait(in d: EpollDriver, block: bool, inout fired: ChunkSeq[u64]) -> u32 eff [Ffi[PulseSys]] {
-    let mut timeout: i32 = if block {
-        -1
-    } else {
-        0
-    };
+    let mut timeout: i32 = if block { -1 } else { 0 };
     loop {
         if fired.len() >= 64 {
             return 0;
@@ -2847,13 +2827,7 @@ pub fn uring_driver_submit(
     if d.next >= uring_cancel_bit() {
         return Result::Err(io_error_ids_exhausted());
     }
-    let buf = PulseSys::malloc(
-        if len == 0 {
-            1
-        } else {
-            len
-        }
-    );
+    let buf = PulseSys::malloc(if len == 0 { 1 } else { len });
     if buf == 0 {
         return Result::Err(PulseSys::ENOMEM_ERR);
     }
@@ -3010,11 +2984,7 @@ fn uring_complete(
     } else {
         (true, wrapping_u64(widen_i64(res)), 0)
     };
-    let keep = if ok && is_read(r.op) {
-        bytes
-    } else {
-        r.len
-    };
+    let keep = if ok && is_read(r.op) { bytes } else { r.len };
     let at = out.data.len();
     out.data.resize(wrapping_add(at, keep), 0);
     if keep > 0 {

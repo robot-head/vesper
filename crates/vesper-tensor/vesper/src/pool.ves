@@ -325,11 +325,7 @@ pub fn kv_append(
             p = wrapping_add(p, 1);
         }
         if !found {
-            return if any_free {
-                6
-            } else {
-                5
-            };
+            return if any_free { 6 } else { 5 };
         }
         page_generation = pages[4 * page + 3] + 1;
     } else {

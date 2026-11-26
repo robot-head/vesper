@@ -217,11 +217,7 @@ fn prog_of(in g: G, in names: Names, in x: Extra) -> Prog {
     let (a, b) = pool_bytes(inout p, in g.name.as_slice());
     p.name_a = a;
     p.name_b = b;
-    let section = if p.xdp {
-        "xdp"
-    } else {
-        "classifier"
-    };
+    let section = if p.xdp { "xdp" } else { "classifier" };
     let (a, b) = pool_bytes(inout p, in section.as_bytes());
     p.sec_a = a;
     p.sec_b = b;
@@ -444,11 +440,7 @@ fn btf_header(inout b: Btf, name: u32, kind: u32, vlen: u32, size_or_type: u32) 
 fn btf_int(inout b: Btf, in name: Str, size: u32, signed: bool) -> u32 {
     let n = btf_str(inout b, in name.as_bytes());
     let t = btf_header(inout b, n, KIND_INT, 0, size);
-    let enc: u32 = if signed {
-        16777216
-    } else {
-        0
-    };
+    let enc: u32 = if signed { 16777216 } else { 0 };
     btf_word(inout b, enc | wrapping_mul(size, 8));
     t
 }
@@ -1127,13 +1119,7 @@ fn write_object(in p: Prog, inout out: ChunkSeq[u8]) -> u64 {
         sym_sec.push(0);
         sym_value.push(wrapping_mul(e, 8));
         sym_size.push(wrapping_mul(wrapping_sub(end, e), 8));
-        sym_local.push(
-            if i == 0 {
-                0
-            } else {
-                1
-            }
-        );
+        sym_local.push(if i == 0 { 0 } else { 1 });
         sym_func.push(1);
     }
     let nsyms = sym_a.len();
@@ -1250,22 +1236,14 @@ fn write_object(in p: Prog, inout out: ChunkSeq[u8]) -> u64 {
             let local = u8_at(in sym_local, k) == 1;
             if (pass == 0) == local {
                 let id = seq64(in sym_str, k);
-                let name = if id == NONE {
-                    0
-                } else {
-                    str_offset(in st, id)
-                };
+                let name = if id == NONE { 0 } else { str_offset(in st, id) };
                 put32(inout out, name);
                 let ty = if u8_at(in sym_func, k) == 1 {
                     STT_FUNC
                 } else {
                     STT_OBJECT
                 };
-                let bind = if local {
-                    0
-                } else {
-                    STB_GLOBAL
-                };
+                let bind = if local { 0 } else { STB_GLOBAL };
                 out.push(bind | ty);
                 out.push(0);
                 put16(inout out, seq64(in index, seq64(in sym_sec, k)));

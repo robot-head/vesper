@@ -162,11 +162,7 @@ pub fn cmp_names(in names: Names, a: u32, b: u32) -> i32 {
     }
     let na = names.size(a);
     let nb = names.size(b);
-    let n = if na < nb {
-        na
-    } else {
-        nb
-    };
+    let n = if na < nb { na } else { nb };
     for i in 0..n {
         let x = names.byte(a, i);
         let y = names.byte(b, i);
@@ -835,11 +831,7 @@ pub fn program_facts(in names: Names, in d: Calls, in p: Program) -> ProgramFact
                         break;
                     }
                 }
-                let start_at = if prev == 0 {
-                    1
-                } else {
-                    inc(prev)
-                };
+                let start_at = if prev == 0 { 1 } else { inc(prev) };
                 e = parse_usize(in text, inc(last), n);
                 s = parse_usize(in text, start_at, last);
                 is_nested = e != 18446744073709551615 && s != 18446744073709551615;
@@ -1099,11 +1091,7 @@ fn visit_node(
     if function_value_instance(inout t, in names, in wd, in d, k, tf) {
         let mut bound = ivars_new();
         let mut arg = first_arg;
-        let n = if w(tf.pn) < nargs {
-            w(tf.pn)
-        } else {
-            nargs
-        };
+        let n = if w(tf.pn) < nargs { w(tf.pn) } else { nargs };
         for j in 0..n {
             let p = d.param(add(w(tf.pa), j));
             let a = d.expr(arg);

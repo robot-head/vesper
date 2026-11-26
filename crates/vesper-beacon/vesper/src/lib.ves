@@ -409,11 +409,7 @@ pub fn exp_record(inout counts: Slice[u64], inout st: ExpState, value: u64) eff 
         raise_histogram(HistogramError::TotalOverflow);
     }
     let sum_lo = wrapping_add(st.sum_lo, value);
-    let carry: u64 = if sum_lo < value {
-        1
-    } else {
-        0
-    };
+    let carry: u64 = if sum_lo < value { 1 } else { 0 };
     if carry == 1 && st.sum_hi == MAX_U64 {
         raise_histogram(HistogramError::TotalOverflow);
     }

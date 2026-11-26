@@ -376,15 +376,7 @@ impl Facts {
             }
         }
         let ok = slice_once || borrowed || stable_place(in f, in self.all, place);
-        set_u8(
-            inout self.stable,
-            w(place),
-            if ok {
-                2
-            } else {
-                1
-            }
-        );
+        set_u8(inout self.stable, w(place), if ok { 2 } else { 1 });
         ok
     }
 
@@ -541,11 +533,7 @@ impl Facts {
 
     fn any_changes(in self, in f: Fun, b: u32, from: u64, to: u64, mode: u8, arg: u32) -> bool {
         let k = f.block(w(b));
-        let end = if to < w(k.ic) {
-            to
-        } else {
-            w(k.ic)
-        };
+        let end = if to < w(k.ic) { to } else { w(k.ic) };
         let mut j = from;
         loop {
             if j >= end {
@@ -584,11 +572,7 @@ impl Facts {
             qk = pk0;
         }
         if pb == qb && pk <= qk {
-            let from = if inc(pk) < qk {
-                inc(pk)
-            } else {
-                qk
-            };
+            let from = if inc(pk) < qk { inc(pk) } else { qk };
             return !self.block_changes(in f, pb, mode, arg)
                 && !self.any_changes(in f, pb, from, qk, mode, arg);
         }

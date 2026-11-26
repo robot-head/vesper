@@ -19,11 +19,7 @@ fn note_rtt(inout b: Bbrv3, sample: RttSample) {
 
 fn init_pacing_rate(inout b: Bbrv3) {
     let srtt = match b.srtt_ns {
-        Option::Some(s) => if s > 0 {
-            s
-        } else {
-            Nanos::DefaultSrtt
-        },
+        Option::Some(s) => if s > 0 { s } else { Nanos::DefaultSrtt },
         Option::None => Nanos::DefaultSrtt,
     };
     // initial_cwnd is at most u32::MAX, so the product is exact in u64.
@@ -191,11 +187,7 @@ fn update_ack_aggregation(inout b: Bbrv3, now_ns: u64) {
     }
     b.extra_acked_delivered = sat_add(b.extra_acked_delivered, b.rs.newly_acked);
     let extra = min(wrapping_sub(b.extra_acked_delivered, expected), b.cwnd);
-    let filter_len: u64 = if b.full_bw_reached {
-        10
-    } else {
-        1
-    };
+    let filter_len: u64 = if b.full_bw_reached { 10 } else { 1 };
     let round = b.round_count;
     b.extra_acked = windowed_max_update(inout b.extra_acked_filter, filter_len, round, extra);
 }

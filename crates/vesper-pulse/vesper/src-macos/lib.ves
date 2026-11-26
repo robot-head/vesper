@@ -66,11 +66,7 @@ fn frame_at(in seq: ChunkSeq[Frame], idx: u64) -> Frame {
 }
 
 fn align_up_8(length: u64) -> (bool, u64) {
-    let min_len = if length == 0 {
-        1
-    } else {
-        length
-    };
+    let min_len = if length == 0 { 1 } else { length };
     let max_u64: u64 = wrapping_sub(0, 1);
     if min_len > wrapping_sub(max_u64, 7) {
         return (false, 0);
@@ -2061,26 +2057,14 @@ fn io_finish(r: IoRequest, ok: bool, n: u64, errno: u32) -> IoCompletion {
         good = false;
         e = io_error_invalid_length();
     }
-    let len = if good && is_read(r.op) {
-        n
-    } else {
-        r.len
-    };
+    let len = if good && is_read(r.op) { n } else { r.len };
     IoCompletion {
         id: r.id,
         token: r.token,
         op: r.op,
         ok: good,
-        bytes: if good {
-            n
-        } else {
-            0
-        },
-        errno: if good {
-            0
-        } else {
-            e
-        },
+        bytes: if good { n } else { 0 },
+        errno: if good { 0 } else { e },
         start: r.start,
         len: len,
     }

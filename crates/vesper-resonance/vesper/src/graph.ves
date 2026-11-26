@@ -425,11 +425,7 @@ fn line_write(inout data: Slice[u32], in slots: Slice[u64], m: u64, in input: Sl
     let n = input.len();
     if n <= cap {
         let room = wrapping_sub(cap, head);
-        let first = if n < room {
-            n
-        } else {
-            room
-        };
+        let first = if n < room { n } else { room };
         data.copy_from(wrapping_add(start, head), in input[0..first]);
         if first < n {
             data.copy_from(start, in input[first..n]);
@@ -459,11 +455,7 @@ fn line_read(in data: Slice[u32], in slots: Slice[u64], m: u64, inout out: Slice
     let n = out.len();
     if n <= cap {
         let room = wrapping_sub(cap, start);
-        let first = if n < room {
-            n
-        } else {
-            room
-        };
+        let first = if n < room { n } else { room };
         let from = wrapping_add(ring, start);
         out.copy_from(0, in data[from..wrapping_add(from, first)]);
         if first < n {

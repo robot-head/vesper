@@ -752,11 +752,7 @@ pub fn discover(in s: Slice[u8]) -> Found {
             }
             let root = wrapping_sub(ne, ns) >= 7
                 && same_str(in s[ns..wrapping_add(ns, 7)], in "_root_.");
-            let is_ = if root {
-                wrapping_add(ns, 7)
-            } else {
-                ns
-            };
+            let is_ = if root { wrapping_add(ns, 7) } else { ns };
             if !name_valid(in s[is_..ne]) {
                 return msg2(
                     in "unsupported ",

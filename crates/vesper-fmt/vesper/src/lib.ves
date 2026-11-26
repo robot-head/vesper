@@ -366,11 +366,7 @@ fn push_text(
     } else {
         chars(in src, s, e)
     };
-    let kind = if comment {
-        D_COMMENT
-    } else {
-        D_TEXT
-    };
+    let kind = if comment { D_COMMENT } else { D_TEXT };
     add_node(inout d, kind, s, e, width, 1)
 }
 
@@ -438,11 +434,7 @@ fn push_concat_range(
         }
         let w = width_at(in d, id);
         if width != NONE {
-            width = if w == NONE {
-                NONE
-            } else {
-                cadd(width, w)
-            };
+            width = if w == NONE { NONE } else { cadd(width, w) };
         }
         d.kids.push(wrapping_u32(id));
     }
@@ -470,11 +462,7 @@ fn text_len(in d: Doc, id: u64) -> u64 {
 
 // A pending render entry: node, flat flag and indentation in one word.
 fn entry(indent: u64, flat: bool, id: u64) -> u64 {
-    let f: u64 = if flat {
-        4294967296
-    } else {
-        0
-    };
+    let f: u64 = if flat { 4294967296 } else { 0 };
     id | f | wrapping_shl_u64(indent, 33)
 }
 
@@ -1134,11 +1122,7 @@ fn gap(p: u8, c: u8, block: bool, after_block: bool) -> u8 {
         return G_HARD;
     }
     if p == K_COMMA {
-        return if block {
-            G_HARD
-        } else {
-            G_SOFT
-        };
+        return if block { G_HARD } else { G_SOFT };
     }
     if after_block
         && !(
@@ -1427,6 +1411,113 @@ fn word_used_as_name(has_prev: bool, prev: u8, c: u8, next: u8) -> bool {
 }
 
 // `sequence`: the atoms from `pos` up to the closing delimiter `end`.
+// The widest short `if` expression that stays on one line, as rustfmt's
+// `single_line_if_else_max_width`.
+const SHORT_IF_ELSE_WIDTH: u64 = 50;
+
+// Where a short `if c { a } else { b }` starting at `start` ends: the index
+// of its last `}` (NONE: it is not one), when each branch holds one
+// expression and no comment, its one-line width is at most
+// SHORT_IF_ELSE_WIDTH, and it ends the expression it is in. rustfmt keeps
+// such an `if` on one line.
+fn short_if_else(in at: Atoms, start: u64, end: u8, in src: Slice[u8]) -> u64 {
+    let n = at.kind.len();
+    // 0: condition, 1: first branch, 2: `else`, 3: its `{`, 4: second branch.
+    let mut state: u8 = 0;
+    let mut depth: u64 = 0;
+    let mut tokens: u64 = 0;
+    let mut width: u64 = 0;
+    let mut has_prev = false;
+    let mut prev: u8 = 0;
+    let mut unary = false;
+    let mut i = start;
+    let mut close = NONE;
+    loop {
+        if i >= n {
+            return NONE;
+        }
+        let kind = akind(in at, i);
+        if kind == K_COMMENT || kind == K_BLOCK_COMMENT || kind == K_SEMI {
+            return NONE;
+        }
+        if has_prev {
+            let space = if prev == K_L_PAREN
+                || prev == K_L_BRACKET
+                || kind == K_R_PAREN
+                || kind == K_R_BRACKET
+                || unary {
+                false
+            } else if prev == K_L_BRACE || kind == K_R_BRACE {
+                true
+            } else {
+                let g = gap(prev, kind, false, prev == K_R_BRACE);
+                g != G_NONE && g != G_EMPTY
+            };
+            if space {
+                width = wrapping_add(width, 1);
+            }
+        }
+        width = wrapping_add(width, chars(in src, w32(in at.start, i), w32(in at.end, i)));
+        if width > SHORT_IF_ELSE_WIDTH {
+            return NONE;
+        }
+        unary = (kind == K_MINUS || kind == K_BANG || kind == K_TILDE)
+            && !(has_prev && ends_operand(prev));
+        has_prev = true;
+        prev = kind;
+        if kind == K_L_BRACE {
+            if depth == 0 && (state == 0 && tokens > 1 || state == 3) {
+                state = wrapping_add(state, 1);
+                tokens = 0;
+                depth = 1;
+            } else {
+                return NONE;
+            }
+        } else if kind == K_R_BRACE && depth == 1 && (state == 1 || state == 4) {
+            if tokens == 0 {
+                return NONE;
+            }
+            if state == 4 {
+                close = i;
+                break;
+            }
+            state = 2;
+            depth = 0;
+        } else if kind == K_ELSE && depth == 0 && state == 2 {
+            state = 3;
+        } else if depth == 0 && state != 0 {
+            return NONE;
+        } else if kind == K_L_PAREN || kind == K_L_BRACKET {
+            depth = wrapping_add(depth, 1);
+            tokens = wrapping_add(tokens, 1);
+        } else if kind == K_R_PAREN || kind == K_R_BRACKET || kind == K_R_BRACE {
+            if depth == 0 {
+                return NONE;
+            }
+            depth = wrapping_sub(depth, 1);
+            tokens = wrapping_add(tokens, 1);
+        } else {
+            tokens = wrapping_add(tokens, 1);
+        }
+        i = wrapping_add(i, 1);
+    }
+    let next = wrapping_add(close, 1);
+    if next >= n {
+        return close;
+    }
+    let k = akind(in at, next);
+    if end != NO_END && k == end
+        || k == K_SEMI
+        || k == K_COMMA
+        || k == K_R_PAREN
+        || k == K_R_BRACKET
+        || k == K_R_BRACE {
+        close
+    } else {
+        NONE
+    }
+}
+
 fn sequence(
     in at: Atoms,
     inout pos: u64,
@@ -1465,6 +1556,12 @@ fn sequence(
     let mut previous_params = false;
     // The member chain being built on `line` (`out.rows.push(..)`).
     let mut chain = new_chain();
+    // A short `if c { a } else { b }` laid out on `line` as one group: the
+    // index of its last `}` (NONE: none is open), and where its docs and
+    // breaks start on `line`.
+    let mut short_close = NONE;
+    let mut short_docs: u64 = 0;
+    let mut short_breaks: u64 = 0;
     loop {
         if pos >= n {
             break;
@@ -1473,6 +1570,26 @@ fn sequence(
         if end != NO_END && c == end {
             break;
         }
+        // An `if` used as a value (`let x = if ..`, an argument, a match
+        // arm), not one at the start of a statement, as rustfmt decides.
+        let starts_short_if = short_close == NONE
+            && c == K_IF
+            && !(has_prev && prev == K_ELSE)
+            && !(
+                block
+                    && (
+                        !has_prev
+                            || previous_block
+                            || prev == K_SEMI
+                            || prev == K_COMMENT
+                            || prev == K_BLOCK_COMMENT
+                    )
+            );
+        let short_if_close = if starts_short_if {
+            short_if_else(in at, pos, end, in src)
+        } else {
+            NONE
+        };
         let f = aflags(in at, pos);
         let blank = f & 1 != 0;
         let glued = f & 2 != 0;
@@ -1484,6 +1601,8 @@ fn sequence(
         // too, spaced inside its braces.
         let is_record = opens_block && in_expr && !head && has_prev && prev == K_UPPER;
         let is_block = opens_block && !is_record;
+        // A branch of a short `if` breaks only with the whole `if`.
+        let soft_block = is_block && short_close != NONE;
         let cs0 = w32(in at.start, pos);
         let ce0 = w32(in at.end, pos);
         if c == K_IF
@@ -1550,7 +1669,7 @@ fn sequence(
             output.push(wrapping_u32(push_leaf(inout d, D_SOFT_SPACE)));
         } else if spacing == G_SOFT && !is_block && near_comment {
             line.push(wrapping_u32(push_leaf(inout d, D_SOFT_SPACE)));
-        } else if (spacing == G_SOFT || spacing == G_SPACE) && !is_block {
+        } else if (spacing == G_SOFT || spacing == G_SPACE) && (!is_block || soft_block) {
             line.push(wrapping_u32(push_leaf(inout d, D_SPACE)));
         } else if spacing == G_RETURN {
             concat_group(inout line, inout breaks, inout d, inout output);
@@ -1582,11 +1701,16 @@ fn sequence(
                 chain_dot(inout chain, wrapping_sub(breaks.len(), 1));
             }
         }
-        if is_block {
+        if is_block && !soft_block {
             concat_group(inout line, inout breaks, inout d, inout output);
             if spacing == G_SOFT || spacing == G_SPACE {
                 output.push(wrapping_u32(push_leaf(inout d, D_SPACE)));
             }
+        }
+        if short_if_close != NONE {
+            short_close = short_if_close;
+            short_docs = line.len();
+            short_breaks = breaks.len();
         }
         let cs = w32(in at.start, pos);
         let ce = w32(in at.end, pos);
@@ -1635,7 +1759,9 @@ fn sequence(
             } else {
                 let lead = push_leaf(
                     inout d,
-                    if is_block || trailing_comma {
+                    if soft_block {
+                        D_SOFT_SPACE
+                    } else if is_block || trailing_comma {
                         D_HARD
                     } else if is_record {
                         D_SOFT_SPACE
@@ -1647,7 +1773,9 @@ fn sequence(
                 let nest = push_nest(inout d, 4, content);
                 let trail = push_leaf(
                     inout d,
-                    if is_block || last_is_line_comment || trailing_comma {
+                    if soft_block {
+                        D_SOFT_SPACE
+                    } else if is_block || last_is_line_comment || trailing_comma {
                         D_HARD
                     } else if is_record {
                         D_SOFT_SPACE
@@ -1658,8 +1786,8 @@ fn sequence(
                 let all = concat4(inout d, start, nest, trail, finish);
                 // A parameter list before `->` shares its line's group, so it
                 // breaks whenever the signature with its return type cannot
-                // fit on one line.
-                if params {
+                // fit on one line; a short `if`'s branch shares the `if`'s.
+                if params || soft_block {
                     all
                 } else {
                     push_group(inout d, all)
@@ -1668,11 +1796,25 @@ fn sequence(
         } else {
             push_text(inout d, in src, cs, ce, c == K_COMMENT || c == K_BLOCK_COMMENT)
         };
-        if is_block {
+        if is_block && !soft_block {
             output.push(wrapping_u32(node));
         } else {
             line.push(wrapping_u32(node));
             chain_push(inout chain, width_at(in d, node), c == K_L_PAREN, c);
+        }
+        // The short `if` ends: it becomes one group that breaks like any
+        // other `if`, with the breaks in its condition kept on one line.
+        if short_close != NONE && pos > short_close {
+            for i in short_breaks..breaks.len() {
+                let b = break_at(in breaks, i);
+                let glue = push_leaf(inout d, if b.level == 12 { D_NIL } else { D_SPACE });
+                let _ = line.try_set(b.offset, wrapping_u32(glue));
+            }
+            breaks.truncate(short_breaks);
+            let inner = push_concat_range(inout d, in line.as_slice(), short_docs, line.len());
+            line.truncate(short_docs);
+            line.push(wrapping_u32(push_group(inout d, inner)));
+            short_close = NONE;
         }
         previous_block = is_block;
         previous_params = params;
@@ -2214,16 +2356,8 @@ fn sugar_group(inout at: Atoms, in p: P, in src: Slice[u8], start: u64, end: u64
             if repeat {
                 let a1 = wrapping_add(i, 1);
                 let a2 = wrapping_add(i, 2);
-                let k1 = if a1 < end {
-                    akind(in at, a1)
-                } else {
-                    K_EOF
-                };
-                let k2 = if a2 < end {
-                    akind(in at, a2)
-                } else {
-                    K_EOF
-                };
+                let k1 = if a1 < end { akind(in at, a1) } else { K_EOF };
+                let k2 = if a2 < end { akind(in at, a2) } else { K_EOF };
                 if a1 < end && (k1 == K_STAR || k1 == K_PLUS) {
                     join(inout at, a1, G_NONE);
                 } else if a2 < end

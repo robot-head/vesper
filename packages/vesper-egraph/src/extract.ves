@@ -41,11 +41,7 @@ fn node_cost(in g: EGraph, in cost: ChunkSeq[u64], k: u64) -> u64 {
         }
         // saturating_add
         let s = wrapping_add(sum, c);
-        sum = if s < sum {
-            NO_COST
-        } else {
-            s
-        };
+        sum = if s < sum { NO_COST } else { s };
     }
     sum
 }

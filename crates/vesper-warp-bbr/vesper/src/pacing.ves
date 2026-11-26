@@ -37,11 +37,7 @@ pub fn clamp_target_cwnd(cwnd: u64, mss: u32, inflight_hi: u64) -> u64 {
     } else {
         floor
     };
-    let raised = if cwnd > floor {
-        cwnd
-    } else {
-        floor
-    };
+    let raised = if cwnd > floor { cwnd } else { floor };
     if raised < ceiling {
         raised
     } else {

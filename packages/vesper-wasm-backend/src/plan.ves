@@ -184,11 +184,7 @@ pub fn cmp_syms(in names: Names, a: u32, b: u32) -> i64 {
     let (b0, b1) = (names.start(b), names.end(b));
     let la = wrapping_sub(a1, a0);
     let lb = wrapping_sub(b1, b0);
-    let n = if la < lb {
-        la
-    } else {
-        lb
-    };
+    let n = if la < lb { la } else { lb };
     for i in 0..n {
         let x = names.byte(a, i);
         let y = names.byte(b, i);
@@ -1795,11 +1791,7 @@ fn handler(
             Fail::raise(werr(K_INVALID, 0, 52));
         }
         let n = sig.pn;
-        let k_index = if stateful {
-            inc(n)
-        } else {
-            n
-        };
+        let k_index = if stateful { inc(n) } else { n };
         let mut resume = NONE32;
         if k_index < npats {
             let at = u64_at(in pat_at, k_index);
@@ -1915,11 +1907,7 @@ pub fn inst_operands(in cx: Cx, op: u8, a: u64) -> ChunkSeq[u64] {
         out.push(cx.ir.word(a));
         out.push(cx.ir.word(inc(a)));
     } else if op == Op::Tuple || op == Op::Vector {
-        let at = if op == Op::Vector {
-            inc(a)
-        } else {
-            a
-        };
+        let at = if op == Op::Vector { inc(a) } else { a };
         let n = cx.ir.word(at);
         for k in 0..n {
             out.push(cx.ir.word(add(inc(at), k)));

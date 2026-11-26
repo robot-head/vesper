@@ -35,11 +35,7 @@ pub fn run_forge(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fai
             check = true;
         }
     }
-    let arg_count = if n > 1 {
-        wrapping_sub(n, 1)
-    } else {
-        0
-    };
+    let arg_count = if n > 1 { wrapping_sub(n, 1) } else { 0 };
     if arg_count > 16 {
         return reject_config(check, in "source macro argument budget exceeded".as_bytes());
     }

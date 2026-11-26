@@ -214,11 +214,7 @@ fn sift(inout s: ChunkSeq[u64], root: u64, n: u64) {
 fn cmp_names(in names: Names, a: u32, b: u32) -> i64 {
     let na = names.size(a);
     let nb = names.size(b);
-    let n = if na < nb {
-        na
-    } else {
-        nb
-    };
+    let n = if na < nb { na } else { nb };
     for i in 0..n {
         let x = names.byte(a, i);
         let y = names.byte(b, i);
@@ -539,11 +535,7 @@ pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
         let c = widen_u64(s.caller);
         let caller = g.name(c);
         // `to_silicon` gives an unknown instruction 0.
-        let inst = if s.inst == NONE64 {
-            0
-        } else {
-            s.inst
-        };
+        let inst = if s.inst == NONE64 { 0 } else { s.inst };
         let row = g.target_row(caller);
         if row == NONE64 {
             set64(inout unbounded_here, c, 1);

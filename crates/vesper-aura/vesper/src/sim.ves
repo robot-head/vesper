@@ -170,11 +170,7 @@ pub fn do_sim_trigger(in rec: Recorder, same_session: bool, widget: u64, event: 
         return q;
     }
     dispatch_if_subscribed(in rec, inout q, widget, event);
-    q.code = if q.has_handler {
-        0
-    } else {
-        2
-    };
+    q.code = if q.has_handler { 0 } else { 2 };
     q
 }
 

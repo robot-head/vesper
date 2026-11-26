@@ -1,36 +1,12 @@
 // Exercise the actual self-hosted lexer's six byte classifiers for every
 // byte plus the -1 EOF sentinel and 256, on both machine-code backends.
 fn byte_class_bits(i: i64) -> i64 {
-    let a = if is_digit(i) {
-        1
-    } else {
-        0
-    };
-    let b = if is_upper(i) {
-        2
-    } else {
-        0
-    };
-    let c = if is_lower_start(i) {
-        4
-    } else {
-        0
-    };
-    let d = if is_ident(i) {
-        8
-    } else {
-        0
-    };
-    let e = if is_hex(i) {
-        16
-    } else {
-        0
-    };
-    let f = if is_space(i) {
-        32
-    } else {
-        0
-    };
+    let a = if is_digit(i) { 1 } else { 0 };
+    let b = if is_upper(i) { 2 } else { 0 };
+    let c = if is_lower_start(i) { 4 } else { 0 };
+    let d = if is_ident(i) { 8 } else { 0 };
+    let e = if is_hex(i) { 16 } else { 0 };
+    let f = if is_space(i) { 32 } else { 0 };
     wrapping_add(wrapping_add(wrapping_add(a, b), wrapping_add(c, d)), wrapping_add(e, f))
 }
 

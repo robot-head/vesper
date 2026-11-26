@@ -391,14 +391,7 @@ impl Fip {
         if at >= self.box_memo.len() {
             self.box_memo.resize(inc(at), 0);
         }
-        let ok = self.box_memo.try_set(
-            at,
-            if found {
-                2
-            } else {
-                1
-            }
-        );
+        let ok = self.box_memo.try_set(at, if found { 2 } else { 1 });
         found
     }
 

@@ -477,11 +477,7 @@ fn erase(inout d: D, t: u32) -> u32 {
     }
     let n = ty(in d, t);
     if n.kind == 1 || n.kind == 2 {
-        let list = if n.kind == 1 {
-            n.b
-        } else {
-            n.a
-        };
+        let list = if n.kind == 1 { n.b } else { n.a };
         let len = ll(in d, list);
         let mut words = ChunkSeq::with_capacity[u32](len);
         let mut changed = false;
@@ -1237,11 +1233,7 @@ fn lower(inout d: D, e: u32, expected: u32) {
         let len = ll(in d, n.a);
         let tuple = expected != NONE && en.kind == 2 && ll(in d, en.a) == len;
         for i in 0..len {
-            let want = if tuple {
-                la(in d, en.a, i)
-            } else {
-                d.t_infer
-            };
+            let want = if tuple { la(in d, en.a, i) } else { d.t_infer };
             lower(inout d, la(in d, n.a, i), want);
         }
     } else if k == 4 {
@@ -1256,11 +1248,7 @@ fn lower(inout d: D, e: u32, expected: u32) {
         for i in 0..ll(in d, n.a) {
             let s = stmt_at(in d, la(in d, n.a, i));
             if s.kind == 1 {
-                let want = if is_infer(in d, s.ty) {
-                    NONE
-                } else {
-                    s.ty
-                };
+                let want = if is_infer(in d, s.ty) { NONE } else { s.ty };
                 lower(inout d, s.value, want);
                 let bound = if want != NONE {
                     want
@@ -1423,13 +1411,7 @@ fn call(inout d: D, e: u32) {
             && ex(in d, a.expr).kind == 15
             && want != NONE
             && fn_sig(in d, want) != NONE;
-        lends.push(
-            if lend {
-                1
-            } else {
-                0
-            }
-        );
+        lends.push(if lend { 1 } else { 0 });
         if lend {
             last_lend = i;
             has_lend = true;

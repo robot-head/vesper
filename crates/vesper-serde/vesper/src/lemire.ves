@@ -371,11 +371,7 @@ fn eisel_lemire(q: i64, w: u64, in pow5: Slice[u64]) -> Fp {
         mantissa = bit_shr(mantissa, wrapping_u64(s));
         mantissa = wrapping_add(mantissa, mantissa & 1);
         mantissa = mantissa >> 1;
-        let p2: i64 = if mantissa >= HIDDEN_BIT {
-            1
-        } else {
-            0
-        };
+        let p2: i64 = if mantissa >= HIDDEN_BIT { 1 } else { 0 };
         return fp(p2, mantissa & MANTISSA_MASK);
     }
     // A product exactly halfway between two doubles: round to even.
@@ -400,11 +396,7 @@ fn eisel_lemire(q: i64, w: u64, in pow5: Slice[u64]) -> Fp {
 }
 
 fn assemble(negative: bool, f: Fp) -> u64 {
-    let sign: u64 = if negative {
-        SIGN_BIT
-    } else {
-        0
-    };
+    let sign: u64 = if negative { SIGN_BIT } else { 0 };
     (wrapping_u64(f.power2) << MANTISSA_BITS) | f.mantissa | sign
 }
 
@@ -429,11 +421,7 @@ pub fn decode_bits(in text: Slice[u8], in pow5: Slice[u64]) -> Decoded {
     if !d.ok {
         return Decoded { path: 0, bits: 0 };
     }
-    let sign: u64 = if d.negative {
-        SIGN_BIT
-    } else {
-        0
-    };
+    let sign: u64 = if d.negative { SIGN_BIT } else { 0 };
     if d.w == 0 {
         return Decoded { path: 1, bits: sign };
     }

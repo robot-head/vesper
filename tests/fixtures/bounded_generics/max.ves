@@ -17,10 +17,6 @@ fn main() -> i64 {
     let small = max(3, 7);
     let flag = max(true, false);
     let p = max(Point { x: 1, y: 9 }, Point { x: 2, y: 0 });
-    let f = if flag {
-        1
-    } else {
-        0
-    };
+    let f = if flag { 1 } else { 0 };
     wrapping_add(wrapping_add(wrapping_mul(small, 100), wrapping_mul(p.x, 10)), f)
 }

@@ -282,14 +282,7 @@ pub fn do_regression_bp_bounds(s: Sample) -> BpBounds {
     if s.baseline == 0 {
         let scaled = w_mul_small(w_sub(w_u64(s.candidate), w_u64(s.baseline)), BP_SCALE);
         let (q, r) = w_floor_divrem(scaled, w_u64(s.baseline));
-        return BpBounds {
-            floor: q,
-            ceil: if w_is_zero(r) {
-                q
-            } else {
-                w_add(q, w_u64(1))
-            }
-        };
+        return BpBounds { floor: q, ceil: if w_is_zero(r) { q } else { w_add(q, w_u64(1)) } };
     }
     // |candidate - baseline| * BP_SCALE / baseline in native u128, then the
     // sign: floor(-x) = -ceil(x).
@@ -304,11 +297,7 @@ pub fn do_regression_bp_bounds(s: Sample) -> BpBounds {
         s.baseline
     );
     let down = w_from_u128(q);
-    let away = if exact {
-        down
-    } else {
-        w_add(down, w_u64(1))
-    };
+    let away = if exact { down } else { w_add(down, w_u64(1)) };
     if up {
         BpBounds { floor: down, ceil: away }
     } else {

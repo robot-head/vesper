@@ -585,11 +585,7 @@ pub fn sym_cmp(in a: Ast, x: u32, y: u32) -> i64 {
     let (ys, ye) = a.names.span(symbol_from_id(y));
     let xn = wrapping_sub(xe, xs);
     let yn = wrapping_sub(ye, ys);
-    let n = if xn < yn {
-        xn
-    } else {
-        yn
-    };
+    let n = if xn < yn { xn } else { yn };
     for i in 0..n {
         let p = match a.names.text_byte(wrapping_add(xs, i)) {
             Option::Some(c) => c,
@@ -690,11 +686,7 @@ pub fn tid(inout d: D, t: u32) -> u32 {
     let mut id: u32 = d.types.infer;
     if n.kind == 1 || n.kind == 2 {
         let len = ll(in d, n.b);
-        let list = if n.kind == 1 {
-            n.b
-        } else {
-            n.a
-        };
+        let list = if n.kind == 1 { n.b } else { n.a };
         let len2 = ll(in d, list);
         let mut args = ChunkSeq::with_capacity[u32](len2);
         for j in 0..len2 {
@@ -960,11 +952,7 @@ pub fn boxed_traits(in d: D, t: u32, inout out: ChunkSeq[u32]) {
     }
     let n = ty(in d, t);
     if n.kind == 1 || n.kind == 2 {
-        let list = if n.kind == 1 {
-            n.b
-        } else {
-            n.a
-        };
+        let list = if n.kind == 1 { n.b } else { n.a };
         for i in 0..ll(in d, list) {
             boxed_traits(in d, la(in d, list, i), inout out);
         }
@@ -997,11 +985,7 @@ pub fn mentions_fn_object(in d: D, t: u32) -> bool {
     }
     let n = ty(in d, t);
     if n.kind == 1 || n.kind == 2 {
-        let list = if n.kind == 1 {
-            n.b
-        } else {
-            n.a
-        };
+        let list = if n.kind == 1 { n.b } else { n.a };
         for i in 0..ll(in d, list) {
             if mentions_fn_object(in d, la(in d, list, i)) {
                 return true;
@@ -1028,11 +1012,7 @@ pub fn contains_infer(in d: D, t: u32) -> bool {
         return true;
     }
     if n.kind == 1 || n.kind == 2 {
-        let list = if n.kind == 1 {
-            n.b
-        } else {
-            n.a
-        };
+        let list = if n.kind == 1 { n.b } else { n.a };
         for i in 0..ll(in d, list) {
             if contains_infer(in d, la(in d, list, i)) {
                 return true;

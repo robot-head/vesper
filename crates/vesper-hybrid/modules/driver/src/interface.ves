@@ -454,11 +454,7 @@ fn cmp_path(in b: Slice[u8], p: u64, q: u64) -> i64 {
     let mut c = q;
     let na = num(in b, inout a);
     let nc = num(in b, inout c);
-    let n = if na < nc {
-        na
-    } else {
-        nc
-    };
+    let n = if na < nc { na } else { nc };
     for _ in 0..n {
         let (sa, la) = text(in b, inout a);
         let (sc, lc) = text(in b, inout c);

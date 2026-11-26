@@ -809,11 +809,7 @@ impl Dec {
                 } else if inst.op == Op::Closure || inst.op == Op::Handle {
                     let is_handle = inst.op == Op::Handle;
                     // handle: has, state value; then the pool entry
-                    let mut k = if is_handle {
-                        add(a, 3)
-                    } else {
-                        inc(a)
-                    };
+                    let mut k = if is_handle { add(a, 3) } else { inc(a) };
                     let na = p.op(k);
                     k = inc(k);
                     for j in 0..na {

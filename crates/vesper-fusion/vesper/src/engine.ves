@@ -1060,11 +1060,7 @@ impl Eng {
     // than `n` with `n`'s key: (slot index, found id or NONE).
     fn probe(in self, n: u32, canon: bool) -> (u64, u32) {
         let h = self.key_hash(n, canon);
-        let mask = if canon {
-            self.k_mask
-        } else {
-            self.o_mask
-        };
+        let mask = if canon { self.k_mask } else { self.o_mask };
         let mut i = h & mask;
         loop {
             let s = if canon {
@@ -1325,11 +1321,7 @@ impl Eng {
             return out;
         }
         if kind == P_INT || kind == P_STR {
-            let op = if kind == P_INT {
-                OP_INT
-            } else {
-                OP_STR
-            };
+            let op = if kind == P_INT { OP_INT } else { OP_STR };
             if at32(in self.n_op, w(c)) == op && ati(in self.n_data, w(c)) == val {
                 for i in 0..inp.len() {
                     out.push(at32(in inp, i));
@@ -1438,11 +1430,7 @@ impl Eng {
         let mut found: ChunkSeq[u32] = ChunkSeq::new[u32]();
         for r in 0..self.r_lhs.len() {
             let nv = w(at32(in self.r_nv, r));
-            let width = if nv == 0 {
-                1
-            } else {
-                nv
-            };
+            let width = if nv == 0 { 1 } else { nv };
             let lhs = at32(in self.r_lhs, r);
             for ci in 0..self.roots.len() {
                 let c = at32(in self.roots, ci);
@@ -1876,13 +1864,7 @@ impl Eng {
             slots.push(s);
         }
         self.st_words.push(w(r));
-        self.st_words.push(
-            if forward {
-                0
-            } else {
-                1
-            }
-        );
+        self.st_words.push(if forward { 0 } else { 1 });
         self.st_words.push(self.path.len());
         for i in 0..self.path.len() {
             self.st_words.push(w(at32(in self.path, i)));
@@ -1902,16 +1884,8 @@ impl Eng {
     fn cross(inout self, x: u32, up: bool) {
         let px = at32(in self.pf_parent, w(x));
         let j = at32(in self.pf_just, w(x));
-        let src = if up {
-            x
-        } else {
-            px
-        };
-        let dst = if up {
-            px
-        } else {
-            x
-        };
+        let src = if up { x } else { px };
+        let dst = if up { px } else { x };
         if j == J_CONGR {
             for i in 0..self.klen(src) {
                 if self.err != 0 {
@@ -1990,13 +1964,7 @@ impl Eng {
                     ok = false;
                 }
             }
-            self.settled.push(
-                if ok {
-                    1
-                } else {
-                    0
-                }
-            );
+            self.settled.push(if ok { 1 } else { 0 });
         }
     }
 

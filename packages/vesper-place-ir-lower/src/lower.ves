@@ -709,11 +709,7 @@ fn pattern(inout l: L, pid: u64, ty: u32, rename: bool) {
     } else if p.kind == Pat::Tuple {
         put(inout l, p.n, Tag::Raw);
         let tuple = rename && l.c.types.kind(ty) == TyKind::Tuple;
-        let m = if tuple {
-            l.c.types.arity(ty)
-        } else {
-            0
-        };
+        let m = if tuple { l.c.types.arity(ty) } else { 0 };
         for i in 0..p.n {
             let kid = l.a.px(add(p.b, i));
             if i < m {
@@ -1245,11 +1241,7 @@ fn lower_tiled_call(inout l: L, e: Ex, receiver: u64, tr: TiledRes) -> u32 {
     if receiver != NONE64 && tr.is_recv_first {
         args.push(argument_proj(inout l, receiver, tr.recv_pass, tr.recv_proj));
     }
-    let start: u64 = if tr.skip_first {
-        1
-    } else {
-        0
-    };
+    let start: u64 = if tr.skip_first { 1 } else { 0 };
     for i in start..e.n {
         let aid = l.a.x(add(e.b, inc(wrapping_mul(i, 2))));
         if receiver == NONE64 && tr.is_recv_first && i == 0 {
@@ -1490,11 +1482,7 @@ fn control(inout l: L, e: Ex) -> u32 {
     let unit_ty = l.c.types.unit;
     if e.kind == X_LOOP {
         let ty = type_at(inout l, e.s0, e.s1);
-        let param_ty = if is_never(in l, ty) {
-            unit_ty
-        } else {
-            ty
-        };
+        let param_ty = if is_never(in l, ty) { unit_ty } else { ty };
         let header = new_block(inout l);
         let exit = new_block(inout l);
         let result = fresh(inout l);
@@ -1600,11 +1588,7 @@ fn lower_for(inout l: L, e: Ex) -> u32 {
     let lp = emit_at(inout l, Op::Loop, a, e.s0, e.s1, unit_ty);
     let i = read_slot(inout l, index, at, element);
     let n = read_slot(inout l, bound, at, element);
-    let op = if inclusive {
-        l.s_le
-    } else {
-        l.s_lt
-    };
+    let op = if inclusive { l.s_le } else { l.s_lt };
     let condition = binary_at(inout l, op, i, n, test_at, bool_ty);
     branch(inout l, l.cur, condition, body_block, exit);
     l.cur = body_block;
@@ -1972,11 +1956,7 @@ fn add_nested(inout l: L, kind: u8, body: u64, in ps: ChunkSeq[Pm], result: u32,
             cn = inc(cn);
         }
     }
-    let owner = if kind == NK_BODY {
-        l.owner
-    } else {
-        name
-    };
+    let owner = if kind == NK_BODY { l.owner } else { name };
     l.a.add_function(
         FnR {
             key: name,
@@ -2336,15 +2316,7 @@ fn handler(inout l: L, e: Ex) -> u32 {
         }
     }
     let a = l.sops.len();
-    put(
-        inout l,
-        if h.has_state {
-            1
-        } else {
-            0
-        },
-        Tag::Raw
-    );
+    put(inout l, if h.has_state { 1 } else { 0 }, Tag::Raw);
     put(inout l, w(sv), Tag::Value);
     put(inout l, h.pool, Tag::Pool);
     put_aliases(inout l);
@@ -2828,11 +2800,7 @@ fn cmp_names(in names: Names, a: u32, b: u32) -> u8 {
     }
     let na = names.size(a);
     let nb = names.size(b);
-    let n = if na < nb {
-        na
-    } else {
-        nb
-    };
+    let n = if na < nb { na } else { nb };
     for i in 0..n {
         let x = names.byte(a, i);
         let y = names.byte(b, i);
@@ -3124,11 +3092,7 @@ fn flush(inout l: L, f: FnR) {
             for j in y.a..add(y.a, y.n) {
                 put_p(inout l, sop(in l, j), u8_at(in l.stags, j));
             }
-            let has = if y.action || y.read {
-                1
-            } else {
-                0
-            };
+            let has = if y.action || y.read { 1 } else { 0 };
             l.p.insts.push(
                 InstRow {
                     dest: y.dest,
@@ -3138,11 +3102,7 @@ fn flush(inout l: L, f: FnR) {
                     has_token: has,
                     tin: u64_at(in tin, i),
                     tout: u64_at(in tout, i),
-                    fallible: if y.fallible {
-                        1
-                    } else {
-                        0
-                    },
+                    fallible: if y.fallible { 1 } else { 0 },
                     op: y.op,
                     a: a,
                     n: y.n

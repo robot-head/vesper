@@ -434,11 +434,7 @@ fn resolve_slice_io(inout c: Ctx, in a: Ast, e: Ex, n: u32) -> SeqRes {
         label: label,
         has_recv: false,
         recv_pass: TyPass::In,
-        arg_mode: if store {
-            3
-        } else {
-            4
-        }
+        arg_mode: if store { 3 } else { 4 }
     }
 }
 
@@ -719,11 +715,7 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
         matched: true,
         label: label,
         has_recv: true,
-        recv_pass: if write {
-            TyPass::Inout
-        } else {
-            TyPass::In
-        },
+        recv_pass: if write { TyPass::Inout } else { TyPass::In },
         arg_mode: 0
     }
 }
@@ -1136,11 +1128,7 @@ fn field_arg_name(in c: Ctx, ty: u32) -> u32 {
 }
 
 fn col_name_from_type_args(in c: Ctx, in a: Ast, e: Ex, is_static: bool) -> u32 {
-    let idx = if is_static && e.m == 2 {
-        1
-    } else {
-        0
-    };
+    let idx = if is_static && e.m == 2 { 1 } else { 0 };
     if idx >= e.m {
         return NONE32;
     }
@@ -1148,11 +1136,7 @@ fn col_name_from_type_args(in c: Ctx, in a: Ast, e: Ex, is_static: bool) -> u32 
 }
 
 fn load_vec_col_name(in c: Ctx, in a: Ast, e: Ex, is_static: bool) -> u32 {
-    let start = if is_static && e.m >= 2 {
-        1
-    } else {
-        0
-    };
+    let start = if is_static && e.m >= 2 { 1 } else { 0 };
     let rem = wrapping_sub(e.m, start);
     if rem == 1 {
         field_arg_name(in c, n32(a.x(add(e.c, start))))

@@ -129,11 +129,7 @@ fn guard_range_fits(
         checked_sum(inout b, None, in minus, inout overflow)
     };
     let mut at_lo = lo;
-    let terms_len = if negated {
-        minus.len()
-    } else {
-        plus.len()
-    };
+    let terms_len = if negated { minus.len() } else { plus.len() };
     let mut i: u64 = 0;
     loop {
         if i >= terms_len {
@@ -256,11 +252,7 @@ pub fn emit_bounds_guard(call: u64, inout b: Builder) eff [Ffi[Cranelift]] {
     let empty_args = ChunkSeq::new[u32]();
     ins_brif(inout b, skip, done, in no_args.as_slice(), compute, in empty_args.as_slice());
     switch_to_block(inout b, compute);
-    let empty_cc = if inclusive {
-        cc_ugt()
-    } else {
-        cc_uge()
-    };
+    let empty_cc = if inclusive { cc_ugt() } else { cc_uge() };
     let empty = ins_icmp(inout b, empty_cc, lo, hi);
     let last = if inclusive {
         hi

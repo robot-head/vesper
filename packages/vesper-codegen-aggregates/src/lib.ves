@@ -241,11 +241,7 @@ fn read_env(inout r: Reader, in b: Slice[u8], inout names: Names, functions: u64
         let n = r.word(in b);
         e.cl_n.push(n);
         for k in 0..n {
-            let lent: u8 = if r.word(in b) != 0 {
-                1
-            } else {
-                0
-            };
+            let lent: u8 = if r.word(in b) != 0 { 1 } else { 0 };
             e.cl_lent.push(lent);
             e.cua.push(e.cu.len());
             let m = r.word(in b);
@@ -257,20 +253,12 @@ fn read_env(inout r: Reader, in b: Slice[u8], inout names: Names, functions: u64
         }
     }
     for f in 0..functions {
-        let ret: u8 = if r.word(in b) != 0 {
-            1
-        } else {
-            0
-        };
+        let ret: u8 = if r.word(in b) != 0 { 1 } else { 0 };
         e.ret.push(ret);
         e.ca.push(e.cflag.len());
         let n = r.word(in b);
         for k in 0..n {
-            let x: u8 = if r.word(in b) != 0 {
-                1
-            } else {
-                0
-            };
+            let x: u8 = if r.word(in b) != 0 { 1 } else { 0 };
             e.cflag.push(x);
         }
     }
@@ -2046,11 +2034,7 @@ fn window_ok(
             let b = w(db);
             let i = w(u32_at(in g.def_i, v));
             let len = p.block(add(g.b0, b)).ic;
-            let end = if b == ab {
-                ai
-            } else {
-                len
-            };
+            let end = if b == ab { ai } else { len };
             if u8_at(in rset, b) == 0 {
                 set8(inout rset, b, 1);
                 set64(inout rf, b, i);
@@ -2063,11 +2047,7 @@ fn window_ok(
             if pb != NONE32 {
                 let b = w(pb);
                 let len = p.block(add(g.b0, b)).ic;
-                let end = if b == ab {
-                    ai
-                } else {
-                    len
-                };
+                let end = if b == ab { ai } else { len };
                 set8(inout rset, b, 1);
                 set64(inout rf, b, 0);
                 set64(inout rt, b, end);
@@ -2348,11 +2328,7 @@ fn count_mentions(inout c: Ctx, in p: Program, inout g: G, in s: Syms) {
                 }
             }
         } else if op == Op::Closure || op == Op::Handle {
-            let mut at = if op == Op::Handle {
-                add(a, 3)
-            } else {
-                inc(a)
-            };
+            let mut at = if op == Op::Handle { add(a, 3) } else { inc(a) };
             let na = p.op(at);
             for j in 0..na {
                 names.push(n32(p.op(add(inc(at), wrapping_mul(j, 2)))));
@@ -2700,11 +2676,7 @@ fn split_locals(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in s: Sym
             }
         } else if op == Op::Closure || op == Op::Handle {
             has_closure = true;
-            let mut at = if op == Op::Handle {
-                add(a, 3)
-            } else {
-                inc(a)
-            };
+            let mut at = if op == Op::Handle { add(a, 3) } else { inc(a) };
             let na = p.op(at);
             for j in 0..na {
                 mark_memory(in s, inout memory, n32(p.op(add(inc(at), wrapping_mul(j, 2)))));
@@ -3411,11 +3383,7 @@ fn replace_drops(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms)
         return out;
     }
     let nb = g.nb;
-    let width = if nc == 0 {
-        1
-    } else {
-        nc
-    };
+    let width = if nc == 0 { 1 } else { nc };
     // exit states, nb x width, and whether each was computed
     let mut exit = filled8(wrapping_mul(nb, width), 0);
     let mut known = filled8(nb, 0);
@@ -4303,11 +4271,7 @@ fn memory_locals(inout c: Ctx, in e: Env, in p: Program, in g: G, in s: Syms) ->
             || op == Op::Tiled {
             ban_args(in p, in s, inout banned, inc(a));
         } else if op == Op::Closure || op == Op::Handle {
-            let mut at = if op == Op::Handle {
-                add(a, 3)
-            } else {
-                inc(a)
-            };
+            let mut at = if op == Op::Handle { add(a, 3) } else { inc(a) };
             let na = p.op(at);
             for j in 0..na {
                 ban(in s, inout banned, n32(p.op(add(inc(at), wrapping_mul(j, 2)))));
@@ -5192,16 +5156,8 @@ fn derived_row(inst: InstRow, dest: u64, ty: u32, op: u8, a: u64, n: u64, span: 
     InstRow {
         dest: n32(dest),
         ty: ty,
-        s0: if span {
-            inst.s0
-        } else {
-            0
-        },
-        s1: if span {
-            inst.s1
-        } else {
-            0
-        },
+        s0: if span { inst.s0 } else { 0 },
+        s1: if span { inst.s1 } else { 0 },
         has_token: inst.has_token,
         tin: inst.tin,
         tout: inst.tout,

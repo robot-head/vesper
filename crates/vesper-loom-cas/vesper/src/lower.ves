@@ -2669,11 +2669,7 @@ fn lower_run(c: u64) -> u64 {
             break;
         }
         let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
-        let first = if mid < 194 {
-            LOWER_LO[mid]
-        } else {
-            0
-        };
+        let first = if mid < 194 { LOWER_LO[mid] } else { 0 };
         if first <= c {
             lo = wrapping_add(mid, 1);
         } else {
@@ -2711,11 +2707,7 @@ pub fn case_class(c: u64) -> u64 {
             break;
         }
         let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
-        let first = if mid < 621 {
-            CASE_LO[mid]
-        } else {
-            0
-        };
+        let first = if mid < 621 { CASE_LO[mid] } else { 0 };
         if first <= c {
             lo = wrapping_add(mid, 1);
         } else {

@@ -15,11 +15,7 @@ fn parse_statements(
         if parse_ate(p, l) {
             let q = parse_pattern(l);
             let c = parse_eat(q, 40);
-            let q = if parse_ate(q, c) {
-                parse_ty(c)
-            } else {
-                q
-            };
+            let q = if parse_ate(q, c) { parse_ty(c) } else { q };
             let values = q.value_head;
             let q = syntax_heads(q, q.row_head, p.value_head);
             let q = parse_expect(parse_expr(parse_expect(q, 48)), 39);
@@ -131,17 +127,9 @@ fn parse_closure(
         parse_expect(parse_params(parse_expect(p, 68), 68), 68)
     };
     let a = parse_eat(q, 44);
-    let q = if parse_ate(q, a) {
-        parse_mode(a)
-    } else {
-        q
-    };
+    let q = if parse_ate(q, a) { parse_mode(a) } else { q };
     let r = parse_eat(q, 46);
-    let q = if parse_ate(q, r) {
-        parse_ty(r)
-    } else {
-        q
-    };
+    let q = if parse_ate(q, r) { parse_ty(r) } else { q };
     let q = parse_expr(parse_effects(q));
     syntax_heads(q, q.row_head, p.value_head)
 }
@@ -317,11 +305,7 @@ fn parse_primary_inner(
     } else if k == 3 {
         let q = parse_bump(p);
         let c = parse_eat(q, 41);
-        let q = if parse_ate(q, c) {
-            parse_ident(c)
-        } else {
-            q
-        };
+        let q = if parse_ate(q, c) { parse_ident(c) } else { q };
         if parse_at(q, 34) && !q.nostruct {
             parse_expect(parse_field_values(parse_bump(q)), 35)
         } else {
@@ -349,11 +333,7 @@ fn parse_field_values(
     } else {
         let q = parse_lower(p);
         let c = parse_eat(q, 40);
-        let q = if parse_ate(q, c) {
-            parse_expr(c)
-        } else {
-            q
-        };
+        let q = if parse_ate(q, c) { parse_expr(c) } else { q };
         let r = parse_eat(q, 38);
         if parse_ate(q, r) {
             parse_field_values(r)
@@ -413,11 +393,7 @@ fn parse_pattern_inner(
     } else if k == 3 {
         let q = parse_upper(n);
         let c = parse_eat(q, 41);
-        let q = if parse_ate(q, c) {
-            parse_upper(c)
-        } else {
-            q
-        };
+        let q = if parse_ate(q, c) { parse_upper(c) } else { q };
         let l = parse_eat(q, 32);
         if parse_ate(q, l) {
             parse_expect(parse_pattern_list(l, 33), 33)

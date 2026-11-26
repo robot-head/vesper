@@ -230,16 +230,8 @@ pub fn remove(inout iv: Slice[u64], count: u64, s: u64, e: u64) -> u64 {
     if keep_right {
         set_w(inout iv, last_idx << 1, e);
     }
-    let out_start: u64 = if keep_left {
-        wrapping_add(lo, 1)
-    } else {
-        lo
-    };
-    let tail_src: u64 = if keep_right {
-        last_idx
-    } else {
-        hi
-    };
+    let out_start: u64 = if keep_left { wrapping_add(lo, 1) } else { lo };
+    let tail_src: u64 = if keep_right { last_idx } else { hi };
     if out_start != tail_src {
         let mut dst: u64 = out_start;
         let mut src: u64 = tail_src;

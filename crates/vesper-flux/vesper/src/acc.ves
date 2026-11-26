@@ -185,11 +185,7 @@ pub fn acc_insert(
         };
         let lo = word(in a.los, d);
         let nlo = wrapping_add(lo, wlo);
-        let carry: i64 = if nlo < lo {
-            1
-        } else {
-            0
-        };
+        let carry: i64 = if nlo < lo { 1 } else { 0 };
         let nhi = wrapping_add(wrapping_add(hi, whi), carry);
         // i128 overflow: both addends of one sign, the sum of the other.
         if (hi < 0) == (whi < 0) && (nhi < 0) != (hi < 0) {

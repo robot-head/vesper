@@ -631,14 +631,7 @@ fn put_intrinsic(inout o: ChunkSeq[u8], i: u32) {
         put(inout o, conv_name(op));
         put(inout o, ")");
     } else if f == I_SHIFT {
-        put(
-            inout o,
-            if op == 0 {
-                "Shift(Shl)"
-            } else {
-                "Shift(Shr)"
-            }
-        );
+        put(inout o, if op == 0 { "Shift(Shl)" } else { "Shift(Shr)" });
     } else if f == I_COMPARE {
         put(inout o, "Compare(");
         put(inout o, cmp_name(op));
@@ -792,14 +785,7 @@ fn put_u64(inout o: ChunkSeq[u8], v: u64) {
     o.push(wrapping_add(48, wrapping_u8(v % 10)));
 }
 fn put_bool(inout o: ChunkSeq[u8], b: bool) {
-    put(
-        inout o,
-        if b {
-            "1"
-        } else {
-            "0"
-        }
-    );
+    put(inout o, if b { "1" } else { "0" });
 }
 fn sp(inout o: ChunkSeq[u8]) {
     o.push(32);

@@ -1200,11 +1200,7 @@ fn parse_const_int(in b: Slice[u8], a: u64, e: u64) -> (bool, u64) {
         Option::None => 0,
     };
     let neg = a < e && first == Ascii::Hyphen;
-    let mut i = if neg {
-        inc(a)
-    } else {
-        a
-    };
+    let mut i = if neg { inc(a) } else { a };
     let mut mag: u64 = 0;
     loop {
         if i >= e {
@@ -2970,11 +2966,7 @@ pub fn dump_abi(inout s: S) {
         put_convention(inout s, l.triple);
         s.put(in " params=");
         // A callback's call leaves the pointer out of its C signature.
-        let first: u64 = if f.indirect {
-            1
-        } else {
-            0
-        };
+        let first: u64 = if f.indirect { 1 } else { 0 };
         let darwin = triple_os(in s, l.triple) == TargetOs::Darwin;
         let mut integers: u64 = 0;
         let mut emitted = false;

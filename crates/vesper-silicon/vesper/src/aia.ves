@@ -228,11 +228,7 @@ pub fn m_imsic_push(inout f: Imsic, ids: u64, external: bool) eff [Fail[AiaFault
     f.hdr.push(
         ImsicHdr {
             ids: ids,
-            delivery: if external {
-                Eidelivery::External
-            } else {
-                0
-            },
+            delivery: if external { Eidelivery::External } else { 0 },
             external: external,
             threshold: 0,
             off: off,
@@ -312,14 +308,7 @@ fn set_eip(inout f: Imsic, h: ImsicHdr, id: u64, on: bool) {
     match f.eip.try_get(at) {
         Option::Some(x) => {
             let m = wrapping_shl_u64(1, wrapping_u32(id & 63));
-            let _ = f.eip.try_set(
-                at,
-                if on {
-                    x | m
-                } else {
-                    x & ~m
-                }
-            );
+            let _ = f.eip.try_set(at, if on { x | m } else { x & ~m });
         },
         Option::None => (),
     }
@@ -389,14 +378,7 @@ pub fn m_imsic_csr_write(inout f: Imsic, i: u64, isel: u64, v: u64) eff [Fail[Ai
         }
         let w = k >> 1;
         if w < h.words {
-            let _ = f.eip.try_set(
-                wrapping_add(h.off, w),
-                if w == 0 {
-                    v & ~1
-                } else {
-                    v
-                }
-            );
+            let _ = f.eip.try_set(wrapping_add(h.off, w), if w == 0 { v & ~1 } else { v });
         }
         return;
     }
@@ -407,14 +389,7 @@ pub fn m_imsic_csr_write(inout f: Imsic, i: u64, isel: u64, v: u64) eff [Fail[Ai
         }
         let w = k >> 1;
         if w < h.words {
-            let _ = f.eie.try_set(
-                wrapping_add(h.off, w),
-                if w == 0 {
-                    v & ~1
-                } else {
-                    v
-                }
-            );
+            let _ = f.eie.try_set(wrapping_add(h.off, w), if w == 0 { v & ~1 } else { v });
         }
         return;
     }
@@ -469,21 +444,9 @@ fn low_mask(w: u64) -> u64 {
 pub fn m_msi_address(c: MsiCfg, supervisor: bool, hart: u64, guest: u64) -> u64 {
     let g = wrapping_shr_u64(hart, wrapping_u32(c.lhxw)) & low_mask(c.hhxw);
     let h = hart & low_mask(c.lhxw);
-    let ppn = if supervisor {
-        c.s_ppn
-    } else {
-        c.m_ppn
-    };
-    let lhxs = if supervisor {
-        c.lhxs_s
-    } else {
-        c.lhxs_m
-    };
-    let gu = if supervisor {
-        guest
-    } else {
-        0
-    };
+    let ppn = if supervisor { c.s_ppn } else { c.m_ppn };
+    let lhxs = if supervisor { c.lhxs_s } else { c.lhxs_m };
+    let gu = if supervisor { guest } else { 0 };
     let v = ppn | wrapping_shl_u64(
         g,
         wrapping_u32(wrapping_add(c.hhxs, PAGE_SHIFT))
@@ -1324,11 +1287,7 @@ pub fn m_aplic_write32(inout a: Aplic, d: u64, addr: u64, v: u64) eff [Fail[AiaF
             (v & TargetField::Hart) | guest | (v & TargetField::Eiid)
         } else {
             let p = v & TargetField::Iprio;
-            let prio = if p == 0 {
-                1
-            } else {
-                p
-            };
+            let prio = if p == 0 { 1 } else { p };
             (v & TargetField::Hart) | prio
         };
         set_src_word(inout a.target, h, s, t);

@@ -575,11 +575,7 @@ fn validate_type(in p: Prog, ty: u32) eff [Fail[LintFail]] {
         let x = type_at(in p, t);
         let d = inc(depth);
         if x.kind == TY_NAMED || x.kind == TY_TUPLE {
-            let args = if x.kind == TY_NAMED {
-                x.b
-            } else {
-                x.a
-            };
+            let args = if x.kind == TY_NAMED { x.b } else { x.a };
             let len = list_len(in p, args);
             if len > MAX_TYPE_ARGS {
                 fail(L_TYPE_ARITY);
@@ -708,11 +704,7 @@ fn check_limits(in p: Prog, functions: u64, actions: u64, work: u64, depth: u64)
 fn opaque_type(in p: Prog, t: u32) -> bool {
     let x = type_at(in p, t);
     if x.kind == TY_NAMED || x.kind == TY_TUPLE {
-        let args = if x.kind == TY_NAMED {
-            x.b
-        } else {
-            x.a
-        };
+        let args = if x.kind == TY_NAMED { x.b } else { x.a };
         for i in 0..list_len(in p, args) {
             if opaque_type(in p, list_at(in p, args, i)) {
                 return true;
@@ -1143,20 +1135,12 @@ fn sym_cmp(in p: Prog, in blob: Str, a: u32, b: u32) -> i64 {
     let la = word(in p.sym_len.as_slice(), widen_u64(a));
     let sb = word(in p.sym_start.as_slice(), widen_u64(b));
     let lb = word(in p.sym_len.as_slice(), widen_u64(b));
-    let n = if la < lb {
-        la
-    } else {
-        lb
-    };
+    let n = if la < lb { la } else { lb };
     for i in 0..n {
         let u = at(in x, wrapping_add(sa, i));
         let v = at(in x, wrapping_add(sb, i));
         if u != v {
-            return if u < v {
-                -1
-            } else {
-                1
-            };
+            return if u < v { -1 } else { 1 };
         }
     }
     if la < lb {
@@ -1172,11 +1156,7 @@ fn sym_cmp(in p: Prog, in blob: Str, a: u32, b: u32) -> i64 {
 fn path_lt(in p: Prog, in blob: Str, a: u32, b: u32) -> bool {
     let n = list_len(in p, a);
     let m = list_len(in p, b);
-    let k = if n < m {
-        n
-    } else {
-        m
-    };
+    let k = if n < m { n } else { m };
     for i in 0..k {
         let c = sym_cmp(in p, in blob, list_at(in p, a, i), list_at(in p, b, i));
         if c != 0 {

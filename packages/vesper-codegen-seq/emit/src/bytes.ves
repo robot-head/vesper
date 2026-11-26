@@ -1091,11 +1091,7 @@ fn find_not_in_runs(
 }
 
 fn rep_byte(byte: u64, is_i64: bool) -> i64 {
-    let n = if is_i64 {
-        8
-    } else {
-        4
-    };
+    let n = if is_i64 { 8 } else { 4 };
     let mut acc: u64 = 0;
     for _ in 0..n {
         acc = (acc << 8) | (byte & 255);
@@ -1134,22 +1130,10 @@ fn lowercase_words(
     let eargs = empty_args();
     ins_brif(inout b, wide, four, in eargs.as_slice(), scalar, in zargs.as_slice());
     for pass in 0..2 {
-        let blk = if pass == 0 {
-            eight
-        } else {
-            four
-        };
+        let blk = if pass == 0 { eight } else { four };
         let is_i64 = pass == 0;
-        let ty = if is_i64 {
-            ty_i64()
-        } else {
-            ty_i32()
-        };
-        let neg_width: i64 = if is_i64 {
-            -8
-        } else {
-            -4
-        };
+        let ty = if is_i64 { ty_i64() } else { ty_i32() };
+        let neg_width: i64 = if is_i64 { -8 } else { -4 };
         switch_to_block(inout b, blk);
         let back = ins_iadd_imm(inout b, n, neg_width);
         let src2 = ins_iadd(inout b, src, back);

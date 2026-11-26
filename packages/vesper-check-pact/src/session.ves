@@ -791,11 +791,7 @@ fn lower_conformance(
     let mut mode_bounds: ChunkSeq[u32] = ChunkSeq::new[u32]();
     for i in 0..gn {
         let g = d.gen(add(w(cf.ga), i));
-        let pk = if g.row {
-            kd_row()
-        } else {
-            kd_type()
-        };
+        let pk = if g.row { kd_row() } else { kd_type() };
         out.push(pk);
         scope_push(inout sc, g.name, wrapping_u8(pk), vbound(i), g.bound);
         if !g.row && g.bound < 2 {
@@ -1354,11 +1350,7 @@ fn lower_q_goal(
             Option::None => QArg { is_row: false, ty: 0 },
         };
         let pk = widen_u64(u8_at(in sess.tb.tr_pkinds, add(tr_pa, i)));
-        let actual_pk = if qa.is_row {
-            kd_row()
-        } else {
-            kd_type()
-        };
+        let actual_pk = if qa.is_row { kd_row() } else { kd_type() };
         if pk != actual_pk {
             // Check bare parameter name rule (`lower.rs:874`).
             let n = sess.c.types.node(qa.ty);
@@ -1671,22 +1663,12 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
             Option::Some(v) => v,
             Option::None => Gen { name: 0, bound: 2, row: false },
         };
-        let pk = if g.row {
-            kd_row()
-        } else {
-            kd_type()
-        };
+        let pk = if g.row { kd_row() } else { kd_type() };
         scope_push(inout sc, g.name, wrapping_u8(pk), vph(i), g.bound);
         ph_names.push(g.name);
         ph_bounds.push(g.bound);
         env_words.push(pk);
-        env_words.push(
-            if g.row {
-                none()
-            } else {
-                widen_u64(g.bound)
-            }
-        );
+        env_words.push(if g.row { none() } else { widen_u64(g.bound) });
     }
 
     let na = spec.assumptions.len();

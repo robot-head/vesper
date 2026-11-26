@@ -42,11 +42,7 @@ fn same[T: mod copy](a: T, b: T) -> u64 where T: Eq, T: Hash {
 
 fn main() -> i64 {
     let i = Interval { lo: 3, hi: 5 };
-    let inside = if smallest(i.lo, i.hi, 4) == 3 {
-        1
-    } else {
-        0
-    };
+    let inside = if smallest(i.lo, i.hi, 4) == 3 { 1 } else { 0 };
     let canonical = smallest(4, 2, 8);
     let reversed = {
         use model Reverse;

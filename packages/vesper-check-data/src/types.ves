@@ -589,19 +589,7 @@ impl Types {
     // integer, so the sample keeps a sign (in `mode`) and a u64 magnitude.
     pub fn literal(inout self, neg: bool, magnitude: u64) -> u32 {
         let no: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        self.mk(
-            TyKind::Lit,
-            if neg {
-                1
-            } else {
-                0
-            },
-            0,
-            in no,
-            0,
-            0,
-            wrapping_i64(magnitude)
-        )
+        self.mk(TyKind::Lit, if neg { 1 } else { 0 }, 0, in no, 0, 0, wrapping_i64(magnitude))
     }
 
     pub fn row_type(inout self, row: u32) -> u32 {

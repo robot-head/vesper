@@ -734,11 +734,7 @@ pub fn simnet_core_deliver_due(inout net: SimNetCore, now: u64) -> SimDeliverOut
 
 fn next_delivery(in net: SimNetCore, delivered: bool) -> SimDeliverOut {
     let has_next = net.h_at.len() > 0;
-    let next_at = if has_next {
-        sw(in net.h_at, 0)
-    } else {
-        0
-    };
+    let next_at = if has_next { sw(in net.h_at, 0) } else { 0 };
     SimDeliverOut { delivered: delivered, has_next: has_next, next_at: next_at }
 }
 

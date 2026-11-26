@@ -308,11 +308,7 @@ pub fn connection_core_record_failure(
     if response {
         c.retained = wrapping_add(c.retained, len);
     }
-    let phase: u64 = if response {
-        2
-    } else {
-        3
-    };
+    let phase: u64 = if response { 2 } else { 3 };
     c.slots.push(Slot { id: false, head: false, request_close: true, phase: phase, len: len });
     c.has_close_after = true;
     c.close_after = sequence;
@@ -351,11 +347,7 @@ pub fn connection_core_check(in c: ConnectionCore, connection: u64, sequence: u6
 // completions could block the earliest submission forever.
 pub fn connection_core_fits(in c: ConnectionCore, sequence: u64, len: u64) -> bool {
     let index = wrapping_sub(sequence, c.base_sequence);
-    let reserve = if index == 0 {
-        0
-    } else {
-        c.max_total
-    };
+    let reserve = if index == 0 { 0 } else { c.max_total };
     saturating_add(saturating_add(c.retained, len), reserve) <= c.max_outbound
 }
 

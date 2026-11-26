@@ -984,11 +984,7 @@ impl Planner {
             self.v2 = true;
             let mut kids = ChunkSeq::new[u32]();
             kids.push(abi);
-            let kind = if c == C_SEQ {
-                K_SEQ
-            } else {
-                K_SLICE
-            };
+            let kind = if c == C_SEQ { K_SEQ } else { K_SLICE };
             return self.push_anode(kind, 0, false, in kids);
         }
         if c == C_STRING || c == C_STR {
@@ -1151,11 +1147,7 @@ impl Planner {
                     Option::None => LVar { name: 0, fa: 0, fc: 0 },
                 };
                 // A struct has one variant named after the type.
-                let vname = if nd.lkind == 1 {
-                    n
-                } else {
-                    lv.name
-                };
+                let vname = if nd.lkind == 1 { n } else { lv.name };
                 let fa = self.dfields.len();
                 let fc = u64_at(in counts, v);
                 for k in 0..fc {
@@ -1310,13 +1302,7 @@ impl Planner {
             let pointer = nd.aggregate || p.pass == TyPass::Inout || self.wide_by_pointer(t);
             pnames.push(p.name);
             ptys.push(t);
-            pptr.push(
-                if pointer {
-                    1
-                } else {
-                    0
-                }
-            );
+            pptr.push(if pointer { 1 } else { 0 });
             ppass.push(
                 if p.pass == TyPass::In {
                     0
@@ -1441,11 +1427,7 @@ impl Planner {
     fn cmp(in self, a: u32, b: u32) -> i64 {
         let na = self.names.size(a);
         let nb = self.names.size(b);
-        let n = if na < nb {
-            na
-        } else {
-            nb
-        };
+        let n = if na < nb { na } else { nb };
         for i in 0..n {
             let x = self.names.byte(a, i);
             let y = self.names.byte(b, i);
@@ -1773,13 +1755,7 @@ fn put_opt(inout out: ChunkSeq[u64], in names: Names, s1: u32) {
 }
 
 fn put_flag(inout out: ChunkSeq[u64], b: bool) {
-    out.push(
-        if b {
-            1
-        } else {
-            0
-        }
-    );
+    out.push(if b { 1 } else { 0 });
 }
 
 fn put_type(inout out: ChunkSeq[u64], in p: Planner, a: u32) {

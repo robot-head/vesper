@@ -883,11 +883,7 @@ pub fn rec_on_timeout(
         out.packets = 1;
         out.anti_deadlock = true;
     } else {
-        out.space = if sc.pto.has {
-            sc.pto.space
-        } else {
-            0
-        };
+        out.space = if sc.pto.has { sc.pto.space } else { 0 };
         out.packets = 2;
     }
     if st.pto_count != U32_MAX {

@@ -577,11 +577,7 @@ fn field_value(kind: u64, bits: u64, width: u64, size: u64, signed: bool, inout 
         byte_sz = size;
         bit_sz = wrapping_mul(size, 8);
     } else {
-        let mut sz: u64 = if size < 1 {
-            1
-        } else {
-            size
-        };
+        let mut sz: u64 = if size < 1 { 1 } else { size };
         let mut off = wrapping_mul(udiv(bits >> 3, sz), sz);
         loop {
             if wrapping_sub(wrapping_add(bits, width), wrapping_mul(off, 8))
@@ -605,11 +601,7 @@ fn field_value(kind: u64, bits: u64, width: u64, size: u64, signed: bool, inout 
     } else if kind == CoreReloc::FieldExists {
         out = 1;
     } else if kind == CoreReloc::FieldSigned {
-        out = if signed {
-            1
-        } else {
-            0
-        };
+        out = if signed { 1 } else { 0 };
     } else {
         if byte_sz > 8 {
             return 4;

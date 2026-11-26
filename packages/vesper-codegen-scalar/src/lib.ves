@@ -566,14 +566,7 @@ impl Gen {
         let ops = self.ops;
         if (op == ops.slash || op == ops.percent) && a == LANE_I128 {
             put(inout self.o, in "wide-divide ");
-            put(
-                inout self.o,
-                if unsigned {
-                    "u"
-                } else {
-                    "s"
-                }
-            );
+            put(inout self.o, if unsigned { "u" } else { "s" });
             return;
         }
         if ops.is_comparison(op) {
@@ -910,14 +903,7 @@ impl Gen {
                 let d = default_type(inout self.c.types, t);
                 self.c.types.kind(d) != TyKind::Lit && kind_wide(self.kind_of(d))
             };
-            put(
-                inout self.o,
-                if wide {
-                    "const wide"
-                } else {
-                    "const int"
-                }
-            );
+            put(inout self.o, if wide { "const wide" } else { "const int" });
         } else if lit == Lit::Float {
             let t = self.c.world.expr_type(i.s0, i.s1);
             let f32 = if t == NONE32 {
@@ -926,14 +912,7 @@ impl Gen {
                 let d = default_type(inout self.c.types, t);
                 self.c.types.name(d) == self.ops.f32_
             };
-            put(
-                inout self.o,
-                if f32 {
-                    "const f32"
-                } else {
-                    "const f64"
-                }
-            );
+            put(inout self.o, if f32 { "const f32" } else { "const f64" });
         } else if lit == Lit::Bool {
             put(inout self.o, in "const bool");
         } else {

@@ -212,15 +212,7 @@ pub fn param_child_of(in r: RouterCore, i: u64) -> u64 {
 
 // Node `i`'s first terminal for a path with or without the trailing slash.
 pub fn terms_at(in r: RouterCore, i: u64, trailing: bool) -> u64 {
-    node_word(
-        in r,
-        i,
-        if trailing {
-            TERMS_SLASH
-        } else {
-            TERMS
-        }
-    )
+    node_word(in r, i, if trailing { TERMS_SLASH } else { TERMS })
 }
 
 fn node_count(in r: RouterCore) -> u64 {

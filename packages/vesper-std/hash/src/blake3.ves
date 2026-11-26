@@ -280,11 +280,7 @@ impl Blake3 {
             }
             let room = wrapping_sub(64, self.block_len);
             let left = wrapping_sub(n, pos);
-            let take = if left < room {
-                left
-            } else {
-                room
-            };
+            let take = if left < room { left } else { room };
             let end = wrapping_add(pos, take);
             self.block.try_copy_from(self.block_len, in input[pos..end]);
             self.block_len = wrapping_add(self.block_len, take);

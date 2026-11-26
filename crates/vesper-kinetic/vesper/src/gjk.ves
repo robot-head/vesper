@@ -187,11 +187,7 @@ pub fn shape_valid(kind: u32, in d: Slice[f64]) -> bool {
         }
         return true;
     }
-    let want: u64 = if kind == 0 {
-        4
-    } else {
-        7
-    };
+    let want: u64 = if kind == 0 { 4 } else { 7 };
     if kind > 1 || n != want {
         return false;
     }
@@ -221,11 +217,7 @@ fn core_support(kind: u32, in d: Slice[f64], dir: V3) -> V3 {
     if kind == 1 {
         let a = vat(in d, 0);
         let b = vat(in d, 3);
-        return if dot(b, dir) > dot(a, dir) {
-            b
-        } else {
-            a
-        };
+        return if dot(b, dir) > dot(a, dir) { b } else { a };
     }
     let count = d.len() / 3;
     let mut best = vat(in d, 0);

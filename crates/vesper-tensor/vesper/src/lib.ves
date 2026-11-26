@@ -680,11 +680,7 @@ pub fn attend(
     let kv_heads = cfg[0];
     let head_dim = cfg[1];
     let plane = TOKENS_PER_PAGE * cfg[5];
-    let width: u64 = if words {
-        4
-    } else {
-        2
-    };
+    let width: u64 = if words { 4 } else { 2 };
     let kv_stride = kv_heads * head_dim;
     let group = query_heads / kv_heads;
     let npages = (tokens + TOKENS_PER_PAGE - 1) / TOKENS_PER_PAGE;

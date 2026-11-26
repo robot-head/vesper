@@ -649,11 +649,7 @@ pub fn fr_encode(
     match f {
         FrameW::Padding { len } => {
             // The Rust writer fills the room it has before failing.
-            let n = if len > out.len() {
-                out.len()
-            } else {
-                len
-            };
+            let n = if len > out.len() { out.len() } else { len };
             for i in 0..n {
                 out.try_set(i, 0);
             }
@@ -884,11 +880,7 @@ fn vl(v: u64) -> u64 {
 }
 
 pub fn fr_stream_header_len(stream_id: u64, offset: u64, len: u64) -> u64 {
-    let off = if offset != 0 {
-        vl(offset)
-    } else {
-        0
-    };
+    let off = if offset != 0 { vl(offset) } else { 0 };
     wrapping_add(wrapping_add(wrapping_add(1, vl(stream_id)), off), vl(len))
 }
 

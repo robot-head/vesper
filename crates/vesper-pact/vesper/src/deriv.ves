@@ -481,11 +481,7 @@ fn node(inout s: S, env: u64, d: u64) -> bool {
             if j > na {
                 break;
             }
-            let a = if j == na {
-                g
-            } else {
-                word_at(in s.anc, j)
-            };
+            let a = if j == na { g } else { word_at(in s.anc, j) };
             let ok = tag_of(in s, a) == g_impl()
                 && word_at(in s.tr_coind, field_a(in s, field_a(in s, a))) != 0;
             if !ok {

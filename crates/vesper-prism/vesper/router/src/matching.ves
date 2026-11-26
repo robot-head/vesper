@@ -114,11 +114,7 @@ fn method_less(in r: RouterCore, a: u64, b: u64) -> bool {
     };
     let al = wrapping_sub(ahi, alo);
     let bl = wrapping_sub(bhi, blo);
-    let n = if al < bl {
-        al
-    } else {
-        bl
-    };
+    let n = if al < bl { al } else { bl };
     for i in 0..n {
         let x = if a == none() {
             byte_of(in head, i)
