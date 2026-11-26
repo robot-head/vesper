@@ -140,7 +140,7 @@ fn special(w: u64) -> bool {
 
 // `b[at..at+len]` as a JSON string with serde_json's escapes (json.ves
 // `put_string`), copying the runs between escaped bytes whole.
-fn put_json(inout o: ChunkSeq[u8], in b: Slice[u8], at: u64, len: u64) {
+pub fn put_json(inout o: ChunkSeq[u8], in b: Slice[u8], at: u64, len: u64) {
     o.push(34);
     let end = wrapping_add(at, len);
     let mut run = at;
@@ -706,7 +706,7 @@ fn lines_err(e: SpanError) -> Result[ChunkSeq[u64], SpanError] {
     Result::Err(e)
 }
 
-fn lines_of(in text: Str, in l: Limits) -> Result[ChunkSeq[u64], SpanError] {
+pub fn lines_of(in text: Str, in l: Limits) -> Result[ChunkSeq[u64], SpanError] {
     handle Fail[SpanError] in {
         lines_ok(line_table(in text, in l, narrow_usize(16)))
     } with {
@@ -771,7 +771,7 @@ fn put_lens_head(
     put(inout out, in "}],\"command\":\"vesper.proofAudit\",\"title\":");
 }
 
-fn put_pos(inout o: ChunkSeq[u8], p: Position) {
+pub fn put_pos(inout o: ChunkSeq[u8], p: Position) {
     put(inout o, in "{\"character\":");
     put_u64(inout o, widen_u64(p.character));
     put(inout o, in ",\"line\":");

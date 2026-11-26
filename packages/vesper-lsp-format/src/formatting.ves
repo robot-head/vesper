@@ -1,0 +1,451 @@
+// `textDocument/formatting` (src/lsp/actions.rs `ActionDocument::new`,
+// `format_document`, `format_complete_declarations` and the JSON of
+// `Formatting`) in Vesper over the formatter port (`@vesper/fmt`).
+//
+// The canonical formatter replaces the whole document. When it refuses a
+// syntax error or an opaque macro, the recovery formatter's edits to the
+// complete declarations are proposed instead. JSON objects are written
+// with sorted keys, as serde_json writes `json!` maps.
+use @vesper/fmt::{
+    FmtFail, fail_code, fail_offset, format, format_recovery, recovery_edits, recovery_error,
+    recovery_formatted, recovery_ok, recovery_output
+};
+use @vesper/span::{ByteSpan, Limits, Position, Range, range};
+use @vesper/span::Error as SpanError;
+use @vesper-std/hash::blake3::{blake3, digest_bytes};
+use @vesper/lsp-features::json::{put_i64, put_u64};
+use @vesper/lsp-features::proof_lenses::{lines_of, put_json, put_pos};
+use @vesper/lsp-features::nav::{put_span_error};
+
+// `actions::MAX_SOURCE_BYTES` and `MAX_URI_BYTES`.
+const ACTION_SOURCE_BYTES: u64 = 131072;
+const ACTION_URI_BYTES: u64 = 4096;
+// `format_document`'s formatter limits: 128 KiB in and out, 64 Mi work
+// units, and `vesper_fmt::Limits::default()` for the rest.
+const FMT_WORK: u64 = 67108864;
+const FMT_TOKENS: u64 = 131072;
+const FMT_NODES: u64 = 1000000;
+const FMT_DEPTH: u64 = 24;
+// The most edits a recovery proposal may carry.
+const MAX_RECOVERY_EDITS: u64 = 256;
+// `vesper_fmt::Error` codes (`FmtFail::code`) that send formatting to the
+// recovery formatter.
+const FMT_SYNTAX: u64 = 9;
+const FMT_MACRO: u64 = 10;
+// Words per recovery edit: start, end, replacement length.
+const EDIT_WORDS: u64 = 3;
+const DIGEST_BYTES: u64 = 32;
+
+// The line table of the document being formatted.
+struct Doc {
+    lines: ChunkSeq[u64],
+    max_work: usize
+}
+
+// A formatter result: the text, or the error's code and offset.
+struct Formatted {
+    ok: bool,
+    code: u64,
+    offset: u64,
+    out: ChunkSeq[u8]
+}
+
+fn formatted_ok(sink out: ChunkSeq[u8]) -> Formatted {
+    Formatted { ok: true, code: 0, offset: 0, out: out }
+}
+
+fn formatted_err(e: FmtFail) -> Formatted {
+    Formatted { ok: false, code: fail_code(e), offset: fail_offset(e), out: ChunkSeq::new[u8]() }
+}
+
+fn run_format(in src: Str) -> Formatted {
+    handle Fail[FmtFail] in {
+        formatted_ok(format(
+            in src,
+            ACTION_SOURCE_BYTES,
+            ACTION_SOURCE_BYTES,
+            FMT_TOKENS,
+            FMT_NODES,
+            FMT_DEPTH,
+            FMT_WORK
+        ))
+    } with {
+        return v => v,
+        raise(e, resume) => formatted_err(e),
+    }
+}
+
+// `vesper_fmt::Error`'s `Display` (its `Debug`).
+fn put_fmt_error(inout o: ChunkSeq[u8], code: u64, offset: u64) {
+    let name = match code {
+        0 => "InputLimit",
+        1 => "OutputLimit",
+        2 => "TokenLimit",
+        3 => "NodeLimit",
+        4 => "DepthLimit",
+        5 => "WorkLimit",
+        6 => "Overflow",
+        7 => "Allocation",
+        8 => "InvalidDoc",
+        9 => "Syntax { offset: ",
+        10 => "OpaqueMacro",
+        11 => "Conservation",
+        _ => "NotIdempotent",
+    };
+    put(inout o, in name);
+    if code == FMT_SYNTAX {
+        put_u64(inout o, offset);
+        put(inout o, in " }");
+    }
+}
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn range_ok(r: Range) -> Result[Range, SpanError] {
+    Result::Ok(r)
+}
+
+fn range_err(e: SpanError) -> Result[Range, SpanError] {
+    Result::Err(e)
+}
+
+// `LineIndex::range` of `start .. end`.
+fn doc_range(in text: String, in d: Doc, start: u64, end: u64) -> Result[Range, SpanError] {
+    handle Fail[SpanError] in {
+        range_ok(range(
+            in text,
+            in d.lines.as_slice(),
+            d.max_work,
+            ByteSpan { start: narrow_usize(start), end: narrow_usize(end) }
+        ))
+    } with {
+        return v => v,
+        raise(err, resume) => range_err(err),
+    }
+}
+
+fn put_range(inout o: ChunkSeq[u8], r: Range) {
+    put(inout o, in "{\"end\":");
+    put_pos(inout o, r.end);
+    put(inout o, in ",\"start\":");
+    put_pos(inout o, r.start);
+    o.push(125);
+}
+
+// The proposed edits: ranges and the texts they take, in `texts`.
+struct Edits {
+    ranges: ChunkSeq[Range],
+    text_at: ChunkSeq[u64],
+    text_len: ChunkSeq[u64],
+    texts: ChunkSeq[u8]
+}
+
+fn g64(in v: ChunkSeq[u64], i: u64) -> u64 {
+    v.try_get(i).unwrap_or(0)
+}
+
+// `[TextEdit::to_json, ..]`.
+fn put_edits(inout o: ChunkSeq[u8], in e: Edits) {
+    o.push(91);
+    for k in 0..e.ranges.len() {
+        if k != 0 {
+            o.push(44);
+        }
+        put(inout o, in "{\"newText\":");
+        put_json(inout o, in e.texts.as_slice(), g64(in e.text_at, k), g64(in e.text_len, k));
+        put(inout o, in ",\"range\":");
+        let r = match e.ranges.try_get(k) {
+            Option::Some(r) => r,
+            Option::None => Range {
+                start: Position { line: 0, character: 0 },
+                end: Position { line: 0, character: 0 }
+            },
+        };
+        put_range(inout o, r);
+        o.push(125);
+    }
+    o.push(93);
+}
+
+fn put_hex(inout o: ChunkSeq[u8], in digest: ChunkSeq[u8]) {
+    o.push(34);
+    for i in 0..digest.len() {
+        let x = digest.try_get(i).unwrap_or(0);
+        o.push(hex(x >> 4));
+        o.push(hex(x & 15));
+    }
+    o.push(34);
+}
+
+fn hex(d: u8) -> u8 {
+    if d < 10 {
+        wrapping_add(d, 48)
+    } else {
+        wrapping_add(d, 87)
+    }
+}
+
+// `identity_json`.
+fn put_identity(inout o: ChunkSeq[u8], in uri: Str, version: i64, in digest: ChunkSeq[u8]) {
+    put(inout o, in "{\"source_blake3\":");
+    put_hex(inout o, in digest);
+    put(inout o, in ",\"uri\":");
+    put_json(inout o, in uri.as_bytes(), 0, uri.len());
+    put(inout o, in ",\"version\":");
+    put_i64(inout o, version);
+    o.push(125);
+}
+
+// The three lines of a `Formatting`: `to_json`, `workspace_edit_json`
+// and the provenance (`formatted` is 0 for the canonical formatter, else
+// the recovery formatter's declaration count).
+fn put_formatting(
+    inout o: ChunkSeq[u8],
+    in e: Edits,
+    in uri: Str,
+    version: i64,
+    in digest: ChunkSeq[u8],
+    recovered: bool,
+    formatted: u64
+) {
+    put_edits(inout o, in e);
+    put(inout o, in "\n{\"documentChanges\":[{\"edits\":");
+    put_edits(inout o, in e);
+    put(inout o, in ",\"textDocument\":{\"uri\":");
+    put_json(inout o, in uri.as_bytes(), 0, uri.len());
+    put(inout o, in ",\"version\":");
+    put_i64(inout o, version);
+    put(inout o, in "}}]}\n{\"document\":");
+    put_identity(inout o, in uri, version, in digest);
+    if recovered {
+        put(inout o, in ",\"formatted_declarations\":");
+        put_u64(inout o, formatted);
+    }
+    put(inout o, in ",\"formatter\":\"vesper-fmt\",\"indent_spaces\":4,\"line_width\":100");
+    if recovered {
+        put(
+            inout o,
+            in ",\"scope\":\"complete_declarations\",\"semantic_checked\":false,\"syntax_only\":true"
+        );
+    }
+    put(inout o, in ",\"token_and_comment_conserved\":true}");
+}
+
+fn clear(inout e: Edits) {
+    e.ranges.truncate(0);
+    e.text_at.truncate(0);
+    e.text_len.truncate(0);
+    e.texts.truncate(0);
+}
+
+fn same_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut k: u64 = 0;
+    loop {
+        if wrapping_add(k, 8) > a.len() {
+            break;
+        }
+        if a.try_read_u64_le(k) != b.try_read_u64_le(k) {
+            return false;
+        }
+        k = wrapping_add(k, 8);
+    }
+    loop {
+        if k >= a.len() {
+            return true;
+        }
+        if a.try_get(k) != b.try_get(k) {
+            return false;
+        }
+        k = wrapping_add(k, 1);
+    }
+}
+
+// Whether byte `i` starts a UTF-8 scalar (or is the end): `str::get`'s
+// boundary test.
+fn boundary(in b: Slice[u8], i: u64) -> bool {
+    if i >= b.len() {
+        return i == b.len();
+    }
+    let c = b.try_get(i).unwrap_or(0);
+    c < 128 || c >= 192
+}
+
+// `format_complete_declarations`: the recovery formatter's edits, or the
+// error row.
+fn recovery(
+    inout o: ChunkSeq[u8],
+    inout e: Edits,
+    in text: String,
+    in d: Doc,
+    in uri: Str,
+    version: i64,
+    in digest: ChunkSeq[u8],
+    original: u64,
+    original_offset: u64
+) {
+    let r = format_recovery(
+        in text,
+        ACTION_SOURCE_BYTES,
+        ACTION_SOURCE_BYTES,
+        FMT_TOKENS,
+        FMT_NODES,
+        FMT_DEPTH,
+        FMT_WORK
+    );
+    if !recovery_ok(in r) {
+        let f = recovery_error(in r);
+        put(inout o, in "E formatting unavailable: ");
+        put_fmt_error(inout o, fail_code(f), fail_offset(f));
+        return;
+    }
+    let formatted = recovery_formatted(in r);
+    if formatted == 0 {
+        put(inout o, in "E formatting unavailable: ");
+        put_fmt_error(inout o, original, original_offset);
+        return;
+    }
+    let words = recovery_edits(in r);
+    let n = words.len() / EDIT_WORDS;
+    if n > MAX_RECOVERY_EDITS {
+        put(inout o, in "E formatting unavailable: format edit limit");
+        return;
+    }
+    let mut bytes: u64 = 0;
+    for k in 0..n {
+        bytes = wrapping_add(bytes, g64(in words, wrapping_add(wrapping_mul(k, EDIT_WORDS), 2)));
+    }
+    if bytes > ACTION_SOURCE_BYTES {
+        put(inout o, in "E formatting unavailable: format edit byte limit");
+        return;
+    }
+    let output = recovery_output(in r);
+    let src = text.as_bytes();
+    clear(inout e);
+    // How far the output has moved past the source so far.
+    let mut shift: i64 = 0;
+    let mut previous_end: u64 = 0;
+    for k in 0..n {
+        let w0 = wrapping_mul(k, EDIT_WORDS);
+        let start = g64(in words, w0);
+        let end = g64(in words, wrapping_add(w0, 1));
+        let len = g64(in words, wrapping_add(w0, 2));
+        if start < previous_end
+            || start > end
+            || end > src.len()
+            || !boundary(in src, start)
+            || !boundary(in src, end)
+        {
+            put(inout o, in "E action invariant failed: formatter edit ranges differ");
+            return;
+        }
+        match doc_range(in text, in d, start, end) {
+            Result::Ok(range) => e.ranges.push(range),
+            Result::Err(err) => {
+                put(inout o, in "E invalid selection: ");
+                put_span_error(inout o, err);
+                return;
+            }
+        }
+        let at = wrapping_u64(wrapping_add(wrapping_i64(start), shift));
+        e.text_at.push(e.texts.len());
+        e.text_len.push(len);
+        e.texts.extend(in output[at..wrapping_add(at, len)]);
+        shift = wrapping_add(
+            shift,
+            wrapping_sub(wrapping_i64(len), wrapping_i64(wrapping_sub(end, start)))
+        );
+        previous_end = end;
+    }
+    put_formatting(inout o, in e, in uri, version, in digest, true, formatted);
+}
+
+// One `textDocument/formatting` answer for `uri` at `version` with text
+// `src`, against the expected stamp (`has_expected`, else the document's
+// own).
+pub fn formatting_answer(
+    inout o: ChunkSeq[u8],
+    inout e: Edits,
+    in uri: Str,
+    version: i64,
+    in src: String,
+    in l: Limits,
+    has_expected: bool,
+    expected_version: i64,
+    in expected_digest: ChunkSeq[u8]
+) {
+    o.truncate(0);
+    // The session's line index exists before the action document.
+    let lines = match lines_of(in src, in l) {
+        Result::Ok(lines) => lines,
+        Result::Err(err) => {
+            put(inout o, in "E index ");
+            put_span_error(inout o, err);
+            return;
+        }
+    };
+    if uri.len() == 0 || uri.len() > ACTION_URI_BYTES {
+        put(inout o, in "E invalid action document: URI byte limit");
+        return;
+    }
+    if src.len() > ACTION_SOURCE_BYTES {
+        put(inout o, in "E invalid action document: source exceeds 128 KiB");
+        return;
+    }
+    let d = Doc { lines: lines, max_work: l.max_work };
+    let mut digest: ChunkSeq[u8] = ChunkSeq::new();
+    digest_bytes(blake3(in src.as_bytes()), inout digest);
+    if has_expected
+        && (expected_version != version
+            || !same_bytes(in expected_digest.as_slice(), in digest.as_slice()))
+    {
+        put(inout o, in "E document version/source identity changed");
+        return;
+    }
+    let f = run_format(in src);
+    if !f.ok {
+        if f.code == FMT_SYNTAX || f.code == FMT_MACRO {
+            recovery(inout o, inout e, in src, in d, in uri, version, in digest, f.code, f.offset);
+        } else {
+            put(inout o, in "E formatting unavailable: ");
+            put_fmt_error(inout o, f.code, f.offset);
+        }
+        return;
+    }
+    clear(inout e);
+    if !same_bytes(in f.out.as_slice(), in src.as_bytes()) {
+        if f.out.len() > ACTION_SOURCE_BYTES {
+            put(inout o, in "E invalid action document: candidate exceeds 128 KiB");
+            return;
+        }
+        match doc_range(in src, in d, 0, src.len()) {
+            Result::Ok(range) => e.ranges.push(range),
+            Result::Err(err) => {
+                put(inout o, in "E invalid selection: ");
+                put_span_error(inout o, err);
+                return;
+            }
+        }
+        e.text_at.push(0);
+        e.text_len.push(f.out.len());
+        e.texts.extend(in f.out.as_slice());
+    }
+    put_formatting(inout o, in e, in uri, version, in digest, false, 0);
+}
+
+pub fn edits_new() -> Edits {
+    Edits {
+        ranges: ChunkSeq::new(),
+        text_at: ChunkSeq::new(),
+        text_len: ChunkSeq::new(),
+        texts: ChunkSeq::new()
+    }
+}
+
+pub fn digest_len() -> u64 {
+    DIGEST_BYTES
+}
