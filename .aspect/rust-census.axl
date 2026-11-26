@@ -123,7 +123,7 @@ MODULES = {
     "lsp": ("SH5-16, SH5-17, #1828", "vesper-lsp, vesper-lsp-features", "navigation.rs fully ported (definition 0.85x, documentSymbol 0.64x, hover 1.18x, doc links; 0 diffs); proof_model.rs ported (0.96x with hash-sys BLAKE3, 0 diffs); lens.rs ownership facts and live obligations (0.76x), repair (0.92x) and semantic/repaired views with completion ranking (1.12x) ported; session Lens requests (poison notices, completion items, obligation hovers, inlay hints, 0.85x) ported, 0 diffs; not wired"),
     "tensor_types": ("SH2-14", "vesper-check-tensor-types", "0.28-0.49x"),
     "pact_frontend": ("SH2-13", "", "#1225 part 1"),
-    "forge_frontend": ("SH1-14", "vesper-front, vesper-sugar", "#1157: sugar surface profile (0 diffs, 0.35x) and sugar rule matcher (0 diffs, 1.5-1.7x alone), template skeleton, template-scopes CST + AST, template flow analysis, scope captures and pattern hygiene ported (0 diffs); left: expansion driver, hygiene, macros, swap"),
+    "forge_frontend": ("SH1-14", "vesper-front, vesper-sugar", "#1157: sugar surface profile (0 diffs, 0.35x) and sugar rule matcher (0 diffs, 1.5-1.7x alone), template skeleton, template-scopes CST + AST, template flow analysis, scope captures, pattern hygiene and the expansion driver with caller hygiene ported (0 diffs, driver 1.38x); left: driver imports and scopes, macros, swap"),
     "native_export": ("SH4-12", "vesper-codegen-export", ""),
     "ffi_lowering": ("SH4-13, #1830", "vesper-ffi-lowering", "plans, rewrite, drops, cpu.rs tables, buffers.rs check and every emission step in Vesper (0 diffs); left: eval_host.rs (evaluator host)"),
     "optimize": ("G1-4", "vesper-optimize", "flip gate PASS: checker 1.12x, producer 0.70x, both 0.79x"),
