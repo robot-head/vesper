@@ -135,7 +135,7 @@ flip-gate row is in its own file, `crates/vesper-hybrid/src/swap/<file>.rs`,
 | `none` | no swap: the Rust compiler behind the Vesper driver | checking the driver alone |
 
 A swap joins `gated` in the PR that passes its gate: that PR adds the gate
-configuration (`scripts/ci/flip-gate/<name>.toml`), the scoreboard row
+configuration (`scripts/ci/flip-gate/<name>.json`), the scoreboard row
 below, and changes the swap's row in its `src/swap/` file to `pass(...)`.
 `crates/vesper-hybrid/tests/swaps.rs` checks that every `gated` swap has
 both and that the others really stay on Rust, and
