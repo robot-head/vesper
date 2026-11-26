@@ -187,7 +187,88 @@ impl State<'_> {
 }
 
 /// Remove the formatter framing from `bytes`.
+#[cfg(vesper_port)]
 pub fn deformat(
+    bytes: &[u8],
+    mode: FormatterMode,
+    limits: &FormatterLimits,
+) -> Result<Deformatted, FormatterError> {
+    // Each input byte emits at most one trace byte. Runs are usually long,
+    // so the first try gives one run word per frame; a capture that changes
+    // source more often is decoded again with the bound (one per
+    // flag-carrying byte).
+    let mut data = vec![0u8; bytes.len()];
+    let mode_code = match mode {
+        FormatterMode::Frames => 0,
+        FormatterMode::FrameSync => 1,
+    };
+    let mut w = [0u64; 9];
+    let mut runs = vec![0u64; bytes.len() / FRAME_LEN + 1];
+    let mut code = 6;
+    for words in [runs.len(), bytes.len() / 2 + 1] {
+        runs.resize(words, 0);
+        code = crate::port::vesper::deformat(
+            bytes,
+            mode_code,
+            limits.max_output as u64,
+            &mut data,
+            &mut runs,
+            &mut w,
+        );
+        if code != 6 {
+            break;
+        }
+    }
+    let (offset, val) = (w[6] as usize, w[7] as usize);
+    match code {
+        0 => {}
+        1 => return Err(FormatterError::PartialFrame { offset, len: val }),
+        2 => return Err(FormatterError::NoSync),
+        3 => {
+            return Err(FormatterError::ReservedId {
+                offset,
+                id: val as u8,
+            });
+        }
+        4 => return Err(FormatterError::BadAuxBit { offset }),
+        _ => return Err(FormatterError::OutputBudget { limit: val }),
+    }
+    let mut streams: BTreeMap<u8, Vec<u8>> = BTreeMap::new();
+    let runs = &runs[..w[8] as usize];
+    for (i, &run) in runs.iter().enumerate() {
+        let start = (run >> 8) as usize;
+        let end = runs
+            .get(i + 1)
+            .map_or(w[5] as usize, |next| (next >> 8) as usize);
+        streams
+            .entry(run as u8)
+            .or_default()
+            .extend_from_slice(&data[start..end]);
+    }
+    Ok(Deformatted {
+        streams,
+        frames: w[0] as usize,
+        syncs: w[1] as usize,
+        unattributed: w[2] as usize,
+        padding: w[3] as usize,
+        control: w[4] as usize,
+    })
+}
+
+/// Remove the formatter framing from `bytes` (the Rust build: the seed
+/// copy, and the differential tests' reference).
+#[cfg(not(vesper_port))]
+pub fn deformat(
+    bytes: &[u8],
+    mode: FormatterMode,
+    limits: &FormatterLimits,
+) -> Result<Deformatted, FormatterError> {
+    deformat_reference(bytes, mode, limits)
+}
+
+/// The Rust deformatter.
+#[cfg_attr(vesper_port, allow(dead_code))]
+pub(crate) fn deformat_reference(
     bytes: &[u8],
     mode: FormatterMode,
     limits: &FormatterLimits,

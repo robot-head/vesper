@@ -1,0 +1,40 @@
+[package]
+name = "vesper-chrono-seed"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Frozen Rust seed copy of vesper-chrono for the compiler's own build"
+autotests = false
+autoexamples = false
+autobenches = false
+build = false
+
+# The seed-copy rule ("Crates the compiler links" in
+# docs/maintenance/porting-a-crate.md): the compiler (`vesper top`,
+# `vesper replay`, the anvil simulator) and the crates of its build link
+# this package, the sources in ../src with cfg(vesper_port) off, so the Rust
+# code runs instead of the Vesper port, under the library name
+# `vesper_chrono`. They depend on it with
+# `vesper-chrono = { path = ".../seed", package = "vesper-chrono-seed" }`;
+# every other crate uses the port-backed package `vesper-chrono`, whose
+# build needs a `vesper` compiler. The Rust code takes bug fixes only until
+# self-hosting Stage 2 (Rust-exit SH6 lane 14, #1409).
+[lib]
+name = "vesper_chrono"
+path = "../src/lib.rs"
+
+[dependencies]
+blake3 = "1.8"
+serde_json = { workspace = true }
+iced-x86 = { version = "=1.21.0", default-features = false, features = ["std", "decoder", "instr_info"] }
+vesper-ffi = { path = "../../vesper-ffi" }
+vesper-fiber-abi = { path = "../../vesper-fiber-abi" }
+vesper-simpulse = { path = "../../vesper-simpulse/seed", package = "vesper-simpulse-seed" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[lints.rust]
+# cfg(vesper_port) is set only by the port-backed package's build script.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

@@ -1,8 +1,65 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_port_object")
+
+# The port-backed package (Rust-exit SH6 lane 14 part 7a, #1409): build.rs
+# links the object built here from the Loom package in vesper/ and checks
+# port/binding.rs against the generated binding. The compiler links the
+# Rust seed copy, //crates/vesper-chrono/seed, since this object needs
+# //:bin/vesper.
+vesper_port_object(
+    name = "chrono_vesper",
+    library = "chrono",
+    package = "//crates/vesper-chrono/vesper:port_package",
+    target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "chrono_vesper_binding",
+    srcs = [":chrono_vesper"],
+    output_group = "rust_binding",
+)
+
+# The divergent builds, one per ported module: the same edits as the Cargo
+# feature `vesper-port-divergent` (DIVERGENT in build.rs). They must build;
+# .aspect/port-checks.axl asserts that the tests catch each edit.
+[
+    vesper_port_object(
+        name = "chrono_vesper_divergent_" + module,
+        edit_src = "//crates/vesper-chrono/vesper:src/%s.ves" % module,
+        edits = edits,
+        library = "chrono",
+        package = "//crates/vesper-chrono/vesper:port_package",
+        target = VESPER_TARGET,
+    )
+    for module, edits in {
+        "formatter": {"                if cur > 0 && cur < 112 {": "                if cur > 0 && cur < 112 || cur == 125 {"},
+    }.items()
+]
 
 vesper_crate(
+    build_script_data = [
+        ":chrono_vesper",
+        ":chrono_vesper_binding",
+    ],
+    build_script_env = {
+        # rules_rust already makes these execpaths absolute.
+        "VESPER_PORT_OBJECT": "$(execpath :chrono_vesper)",
+        "VESPER_PORT_GENERATED_BINDING": "$(execpath :chrono_vesper_binding)",
+    },
     # tests/lean_model.rs reads lean/ChronoReplay.lean and its fixture; Lean
     # rejects symlinked runfiles outside --root, so it runs in a regular copy.
     copy_test_cwd = ["test/lean_model"],
     extra_test_data = ["//:lean"],
 )
+
+# The seed package (seed/) builds these same Rust sources without the port.
+filegroup(
+    name = "rust_srcs",
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//crates/vesper-chrono/seed:__pkg__"],
+)
+
+exports_files([
+    "README.md",
+    "src/lib.rs",
+])

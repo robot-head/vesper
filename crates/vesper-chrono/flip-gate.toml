@@ -1,0 +1,25 @@
+# The flip gate for vesper-chrono (scripts/ci/flip_gate.py, SH6 lane 1,
+# #1396; this crate's lane: SH6 lane 14, #1409). The port-backed package
+# links @vesper/chrono (vesper/) and its flipped modules forward to it; the
+# compiler links the Rust seed copy (seed/), which keeps the Rust until
+# self-hosting Stage 2. Part 7a flips the CoreSight formatter
+# (formatter::deformat, vesper/src/formatter.ves).
+name = "vesper-chrono"
+lane = "SH6-14"
+env = { CARGO_PROFILE_DEV_DEBUG = "0", CARGO_PROFILE_TEST_DEBUG = "0" }
+
+[[tests]]
+run = "cargo test --locked --release -p vesper-chrono"
+
+# 20,000 generated formatter captures in both modes (ETR frames and TPIU
+# with full-frame syncs), with ID changes, null/flush/trigger and reserved
+# IDs, random auxiliary bits, truncated and extended tails, single bit
+# flips and small output budgets, against the Rust deformatter.
+[differential]
+run = "cargo test --locked --release -p vesper-chrono --lib port_differential"
+
+# Deformat a 64 KiB ETR buffer of two interleaved sources with padding, a
+# source switch every four frames or so.
+[[abba]]
+workload = "formatter"
+run = "cargo test --locked --release -p vesper-chrono --lib port_differential::abba_formatter -- --ignored --nocapture"

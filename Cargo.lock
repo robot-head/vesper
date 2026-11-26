@@ -5598,7 +5598,7 @@ dependencies = [
  "vesper-alloc-seed",
  "vesper-beacon-seed",
  "vesper-bench-seed",
- "vesper-chrono",
+ "vesper-chrono-seed",
  "vesper-core",
  "vesper-crucible-seed",
  "vesper-crypto-sys",
@@ -5791,6 +5791,22 @@ dependencies = [
 
 [[package]]
 name = "vesper-chrono"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "iced-x86",
+ "libc",
+ "serde_json",
+ "vesper-bench",
+ "vesper-ffi",
+ "vesper-fiber-abi",
+ "vesper-port-abi",
+ "vesper-port-harness",
+ "vesper-simpulse-seed",
+]
+
+[[package]]
+name = "vesper-chrono-seed"
 version = "0.1.0"
 dependencies = [
  "blake3",
@@ -6880,7 +6896,7 @@ dependencies = [
  "vesper-beacon-seed",
  "vesper-bench-pmu",
  "vesper-bench-seed",
- "vesper-chrono",
+ "vesper-chrono-seed",
  "vesper-crucible-seed",
  "vesper-ffi",
  "vesper-fmt-seed",

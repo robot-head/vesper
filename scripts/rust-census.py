@@ -102,7 +102,7 @@ CRATES = {
     "vesper-pulse": ("c-api", "", "", "io_uring/epoll/kqueue/IOCP syscalls (buffers C keeps: Pinned[T], #1505); scheduler ports", "13"),
     "vesper-fiber-abi": ("c-api", "", "", "stack switching asm (assembly files or Vesper asm), unwinding; Cranelift JIT via the shim", "13"),
     "vesper-ffi": ("c-api", "", "", "Bridge runtime and layouts; BLAKE3 C", "13"),
-    "vesper-chrono": ("c-api", "", "", "perf/ptrace syscalls; iced-x86 disassembler (port or Capstone C)", "14"),
+    "vesper-chrono": ("partial", "in crate (+ seed)", "formatter 1.03x", "@vesper/chrono linked into the crate (part 7a); compiler links the Rust seed (seed/) until Stage 2; formatter flipped; ipt/ete decoders, ring, timeline, lineage, redact, bundle, replay, arena, checkpoint ported but not yet called; perf/ptrace syscalls and iced-x86 (G9) remain", "14"),
     "vesper-bench-pmu": ("c-api", "", "", "perf_event_open", "14"),
     "vesper-warp-umem": ("c-api", "", "", "AF_XDP rings, mmap (UMEM as Pinned[u8], rings as mappings viewed in place: #1505)", "14"),
     "vesper-aether": ("c-api", "in crate", "virtqueue 1.27x, packed 1.47x, hot sets 1.35x, seccomp evaluate 1.24x, vsock device 0.94x, net device 0.90x, blk device 0.93x, mmio transport 0.99x (flipped); seccomp compile 1.67x, guest_mem locate 3.8x, slot plans 3.6x, pvh 8.5x, vsock header/vmgenid codecs ~27x", "KVM ioctls, userfaultfd; non-flipped ports are bound by per-call Rust/Vesper crossings (small codecs) or G10 (slot plans, PVH)", "14"),
