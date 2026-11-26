@@ -344,10 +344,7 @@ fn term_key(term: TermRow) -> u64 {
 }
 
 fn const_at(in consts: ChunkSeq[i128], i: u64) -> i128 {
-    match consts.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    consts.try_get(i).unwrap_or(0)
 }
 
 // `intern`: a linear search, one unit of work per compared term. The
@@ -614,10 +611,7 @@ pub fn bind_source(
     if bound.values.len() != 1 {
         return E_UNSUPPORTED_AST;
     }
-    bound.root = match bound.values.try_get(0) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    };
+    bound.root = bound.values.try_get(0).unwrap_or(0);
     0
 }
 
@@ -660,10 +654,7 @@ fn bytes_of(n: u64, size: u64) -> u64 {
     if n < 281474976710656 {
         wrapping_mul(n, size)
     } else {
-        match checked_mul_u64(n, size) {
-            Option::Some(v) => v,
-            Option::None => OVERFLOW,
-        }
+        checked_mul_u64(n, size).unwrap_or(OVERFLOW)
     }
 }
 
@@ -1123,10 +1114,7 @@ pub fn build_candidate(
         if e != 0 {
             return e;
         }
-        let marked = match reach.try_get(id) {
-            Option::Some(v) => v,
-            Option::None => false,
-        };
+        let marked = reach.try_get(id).unwrap_or(false);
         if !marked {
             continue;
         }

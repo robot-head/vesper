@@ -18,8 +18,8 @@ fn any_json_flag(in args: Args, n: u64) -> bool {
         if i >= n {
             return false;
         }
-        let a_buf = arg(in args, i);
-        if eq(in a_buf.as_slice(), in "--json") {
+        let arg_buf = arg(in args, i);
+        if eq(in arg_buf.as_slice(), in "--json") {
             return true;
         }
         i = wrapping_add(i, 1);
@@ -57,8 +57,8 @@ fn pack_args(in args: Args, n: u64) -> ChunkSeq[u8] {
         if i >= n {
             break;
         }
-        let a_buf = arg(in args, i);
-        packed.extend(in a_buf.as_slice());
+        let arg_buf = arg(in args, i);
+        packed.extend(in arg_buf.as_slice());
         packed.push(0);
         i = wrapping_add(i, 1);
     }
@@ -99,14 +99,14 @@ fn run_store_olean(
         if i >= n {
             break;
         }
-        let a_buf = arg(in args, i);
-        let a = a_buf.as_slice();
-        if eq(in a, in "--help") || eq(in a, in "-h") {
+        let arg_buf = arg(in args, i);
+        let arg_text = arg_buf.as_slice();
+        if eq(in arg_text, in "--help") || eq(in arg_text, in "-h") {
             print_doc_help();
             return 0;
-        } else if eq(in a, in "--json") {
+        } else if eq(in arg_text, in "--json") {
             // Tracked via `has_json`.
-        } else if eq(in a, in "--proof-audit") && !has_audit {
+        } else if eq(in arg_text, in "--proof-audit") && !has_audit {
             i = wrapping_add(i, 1);
             if i >= n {
                 return fail_doc(
@@ -114,27 +114,27 @@ fn run_store_olean(
                     in "--proof-audit requires a proof-audit JSON report".as_bytes()
                 );
             }
-            let v_buf = arg(in args, i);
-            let v = v_buf.as_slice();
-            if v.len() != 0 && byte_at(in v, 0) == 45 {
+            let value_buf = arg(in args, i);
+            let value = value_buf.as_slice();
+            if value.len() != 0 && byte_at(in value, 0) == 45 {
                 return fail_doc(
                     has_json,
                     in "--proof-audit requires a proof-audit JSON report".as_bytes()
                 );
             }
             has_audit = true;
-        } else if eq(in a, in "--root") && !has_root {
+        } else if eq(in arg_text, in "--root") && !has_root {
             i = wrapping_add(i, 1);
             if i >= n {
                 return fail_doc(has_json, in "--root requires the Lean build directory".as_bytes());
             }
-            let v_buf = arg(in args, i);
-            let v = v_buf.as_slice();
-            if v.len() != 0 && byte_at(in v, 0) == 45 {
+            let value_buf = arg(in args, i);
+            let value = value_buf.as_slice();
+            if value.len() != 0 && byte_at(in value, 0) == 45 {
                 return fail_doc(has_json, in "--root requires the Lean build directory".as_bytes());
             }
             has_root = true;
-        } else if eq(in a, in "--store") && !has_store {
+        } else if eq(in arg_text, in "--store") && !has_store {
             i = wrapping_add(i, 1);
             if i >= n {
                 return fail_doc(
@@ -142,9 +142,9 @@ fn run_store_olean(
                     in "--store requires a store directory or 'default'".as_bytes()
                 );
             }
-            let v_buf = arg(in args, i);
-            let v = v_buf.as_slice();
-            if v.len() != 0 && byte_at(in v, 0) == 45 {
+            let value_buf = arg(in args, i);
+            let value = value_buf.as_slice();
+            if value.len() != 0 && byte_at(in value, 0) == 45 {
                 return fail_doc(
                     has_json,
                     in "--store requires a store directory or 'default'".as_bytes()
@@ -154,7 +154,7 @@ fn run_store_olean(
         } else {
             let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
             err.extend(in "unexpected store-olean argument '".as_bytes());
-            err.extend(in a);
+            err.extend(in arg_text);
             err.push(39);
             return fail_doc(has_json, in err.as_slice());
         }
@@ -173,9 +173,9 @@ fn check_value(in args: Args, i: u64, n: u64) -> bool {
     if i >= n {
         return false;
     }
-    let v_buf = arg(in args, i);
-    let v = v_buf.as_slice();
-    if v.len() != 0 && byte_at(in v, 0) == 45 {
+    let value_buf = arg(in args, i);
+    let value = value_buf.as_slice();
+    if value.len() != 0 && byte_at(in value, 0) == 45 {
         return false;
     }
     true
@@ -214,18 +214,18 @@ pub fn run_doc(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[
         if i >= n {
             break;
         }
-        let a_buf = arg(in args, i);
-        let a = a_buf.as_slice();
-        if eq(in a, in "--help") || eq(in a, in "-h") {
+        let arg_buf = arg(in args, i);
+        let arg_text = arg_buf.as_slice();
+        if eq(in arg_text, in "--help") || eq(in arg_text, in "-h") {
             print_doc_help();
             return 0;
-        } else if eq(in a, in "--json") {
+        } else if eq(in arg_text, in "--json") {
             json = true;
-        } else if eq(in a, in "--wcsd-stack") {
+        } else if eq(in arg_text, in "--wcsd-stack") {
             wcsd_stack = true;
-        } else if eq(in a, in "--target") {
+        } else if eq(in arg_text, in "--target") {
             if has_target {
-                let err = dup_err(in a);
+                let err = dup_err(in arg_text);
                 return fail_doc(has_json, in err.as_slice());
             }
             i = wrapping_add(i, 1);
@@ -233,9 +233,9 @@ pub fn run_doc(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[
                 return fail_doc(has_json, in "--target requires a target triple".as_bytes());
             }
             has_target = true;
-        } else if eq(in a, in "-o") {
+        } else if eq(in arg_text, in "-o") {
             if has_output {
-                let err = dup_err(in a);
+                let err = dup_err(in arg_text);
                 return fail_doc(has_json, in err.as_slice());
             }
             i = wrapping_add(i, 1);
@@ -243,9 +243,9 @@ pub fn run_doc(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[
                 return fail_doc(has_json, in "-o requires a new output path".as_bytes());
             }
             has_output = true;
-        } else if eq(in a, in "--bundle") {
+        } else if eq(in arg_text, in "--bundle") {
             if has_bundle {
-                let err = dup_err(in a);
+                let err = dup_err(in arg_text);
                 return fail_doc(has_json, in err.as_slice());
             }
             i = wrapping_add(i, 1);
@@ -253,9 +253,9 @@ pub fn run_doc(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[
                 return fail_doc(has_json, in "--bundle requires a new output directory".as_bytes());
             }
             has_bundle = true;
-        } else if eq(in a, in "--query") {
+        } else if eq(in arg_text, in "--query") {
             if has_query {
-                let err = dup_err(in a);
+                let err = dup_err(in arg_text);
                 return fail_doc(has_json, in err.as_slice());
             }
             i = wrapping_add(i, 1);
@@ -263,27 +263,27 @@ pub fn run_doc(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[
                 return fail_doc(has_json, in "--query requires a query JSON file".as_bytes());
             }
             has_query = true;
-        } else if eq(in a, in "--search") {
+        } else if eq(in arg_text, in "--search") {
             if has_text_query {
-                let err = dup_err(in a);
+                let err = dup_err(in arg_text);
                 return fail_doc(has_json, in err.as_slice());
             }
             i = wrapping_add(i, 1);
             if i >= n {
                 return fail_doc(has_json, in "--search requires a text query".as_bytes());
             }
-            let v_buf = arg(in args, i);
-            let v = v_buf.as_slice();
-            if v.len() != 0 && byte_at(in v, 0) == 45 {
-                let arrow = v.len() >= 2 && byte_at(in v, 1) == 62;
+            let query_buf = arg(in args, i);
+            let query_text = query_buf.as_slice();
+            if query_text.len() != 0 && byte_at(in query_text, 0) == 45 {
+                let arrow = query_text.len() >= 2 && byte_at(in query_text, 1) == 62;
                 if !arrow {
                     return fail_doc(has_json, in "--search requires a text query".as_bytes());
                 }
             }
             has_text_query = true;
-        } else if eq(in a, in "--wire") {
+        } else if eq(in arg_text, in "--wire") {
             if has_wire {
-                let err = dup_err(in a);
+                let err = dup_err(in arg_text);
                 return fail_doc(has_json, in err.as_slice());
             }
             i = wrapping_add(i, 1);
@@ -291,9 +291,9 @@ pub fn run_doc(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[
                 return fail_doc(has_json, in "--wire requires a wire layout JSON file".as_bytes());
             }
             has_wire = true;
-        } else if eq(in a, in "--olean-store") {
+        } else if eq(in arg_text, in "--olean-store") {
             if has_store {
-                let err = dup_err(in a);
+                let err = dup_err(in arg_text);
                 return fail_doc(has_json, in err.as_slice());
             }
             i = wrapping_add(i, 1);
@@ -304,9 +304,9 @@ pub fn run_doc(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[
                 );
             }
             has_store = true;
-        } else if eq(in a, in "--olean-root") {
+        } else if eq(in arg_text, in "--olean-root") {
             if has_olean_root {
-                let err = dup_err(in a);
+                let err = dup_err(in arg_text);
                 return fail_doc(has_json, in err.as_slice());
             }
             i = wrapping_add(i, 1);
@@ -317,7 +317,7 @@ pub fn run_doc(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[
                 );
             }
             has_olean_root = true;
-        } else if eq(in a, in "--proof-audit") {
+        } else if eq(in arg_text, in "--proof-audit") {
             if audits_count == 16 {
                 return fail_doc(has_json, in "at most 16 --proof-audit reports".as_bytes());
             }
@@ -329,10 +329,10 @@ pub fn run_doc(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[
                 );
             }
             audits_count = wrapping_add(audits_count, 1);
-        } else if a.len() != 0 && byte_at(in a, 0) == 45 {
+        } else if arg_text.len() != 0 && byte_at(in arg_text, 0) == 45 {
             let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
             err.extend(in "unknown doc option '".as_bytes());
-            err.extend(in a);
+            err.extend(in arg_text);
             err.push(39);
             return fail_doc(has_json, in err.as_slice());
         } else {

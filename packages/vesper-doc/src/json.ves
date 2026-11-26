@@ -30,10 +30,7 @@ pub const PRETTY_TEXT_OVER: u64 = 1;
 pub const PRETTY_NEWLINE_OVER: u64 = 2;
 
 fn byte(in b: Slice[u8], i: u64) -> u8 {
-    match b.try_get(i) {
-        Option::Some(c) => c,
-        Option::None => 0,
-    }
+    b.try_get(i).unwrap_or(0)
 }
 
 fn line(inout out: ChunkSeq[u8], depth: u64) {

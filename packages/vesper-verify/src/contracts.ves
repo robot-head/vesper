@@ -84,16 +84,10 @@ pub fn bindings(
     let wo = order(in witness_keys);
     for k in 0..wrapping_add(po.len(), wo.len()) {
         let f = if k < po.len() {
-            let i = match po.try_get(k) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
+            let i = po.try_get(k).unwrap_or(0);
             @vesper/proof-audit::strs::get(in proof_keys, i)
         } else {
-            let i = match wo.try_get(wrapping_sub(k, po.len())) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
+            let i = wo.try_get(wrapping_sub(k, po.len())).unwrap_or(0);
             @vesper/proof-audit::strs::get(in witness_keys, i)
         };
         if !contains(in contracts, in f.as_slice()) {
@@ -113,10 +107,7 @@ pub fn bindings(
         }
     }
     for index in 0..po.len() {
-        let i = match po.try_get(index) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let i = po.try_get(index).unwrap_or(0);
         let function = proof_keys.bytes[start(in proof_keys, i)..end(in proof_keys, i)];
         let theorem = proof_values.bytes[start(in proof_values, i)..end(in proof_values, i)];
         let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();

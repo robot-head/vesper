@@ -174,10 +174,7 @@ pub fn last_exits(in a: Asm) -> u64 {
 }
 
 fn label_at(in a: Asm, l: u64) -> u64 {
-    match a.labels.try_get(l) {
-        Option::Some(p) => p,
-        Option::None => 0,
-    }
+    a.labels.try_get(l).unwrap_or(0)
 }
 
 // Keep the first failure.
@@ -209,10 +206,7 @@ pub fn fixup(inout a: Asm, at: u64, l: u64, kind: u8) {
 }
 
 fn read32(in a: Asm, at: u64) -> u32 {
-    match a.code.try_read_u32_le(at) {
-        Option::Some(w) => w,
-        Option::None => 0,
-    }
+    a.code.try_read_u32_le(at).unwrap_or(0)
 }
 
 fn or32(inout a: Asm, at: u64, field: u32) {

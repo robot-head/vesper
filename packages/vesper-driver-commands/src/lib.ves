@@ -89,7 +89,7 @@ pub fn run(
         route(in args)
     } with {
         return v => v,
-        raise(f, _) => print_panic(f),
+        raise(failure, _) => print_panic(failure),
     }
 }
 
@@ -102,49 +102,49 @@ fn route(
         return 0;
     }
     let command = arg(in args, 0);
-    let c = command.as_slice();
+    let command_name = command.as_slice();
     // A command with a byte outside ASCII is never a tool's, and the Rust
     // CLI decides what it is (it panics on one that is not UTF-8).
-    if !ascii(in c) {
+    if !ascii(in command_name) {
         return delegate();
     }
     // `tool_commands::dispatch` leaves options and the compiler's own
     // commands to the CLI.
-    if byte_at(in c, 0) == Ascii::Dash {
-        if eq(in c, in "--help") || eq(in c, in "-h") {
+    if byte_at(in command_name, 0) == Ascii::Dash {
+        if eq(in command_name, in "--help") || eq(in command_name, in "-h") {
             print(stdout_stream(), in cli_help().as_bytes());
             return 0;
         }
-        if eq(in c, in "--version") || eq(in c, in "-V") {
+        if eq(in command_name, in "--version") || eq(in command_name, in "-V") {
             return version();
         }
-        return unknown_command(in c);
+        return unknown_command(in command_name);
     }
-    if eq(in c, in "fmt") {
+    if eq(in command_name, in "fmt") {
         return fmt(in args);
     }
-    if eq(in c, in "graph") {
+    if eq(in command_name, in "graph") {
         return run_graph(in args);
     }
-    if eq(in c, in "forge") {
+    if eq(in command_name, in "forge") {
         return run_forge(in args);
     }
-    if eq(in c, in "ebpf") {
+    if eq(in command_name, in "ebpf") {
         return run_ebpf(in args);
     }
-    if eq(in c, in "test") {
+    if eq(in command_name, in "test") {
         return run_test(in args);
     }
-    if eq(in c, in "doc") {
+    if eq(in command_name, in "doc") {
         return run_doc(in args);
     }
-    if eq(in c, in "lint") {
+    if eq(in command_name, in "lint") {
         return run_lint(in args);
     }
-    if eq(in c, in "proof-audit") {
+    if eq(in command_name, in "proof-audit") {
         return run_proof_audit(in args);
     }
-    if eq(in c, in "verify") {
+    if eq(in command_name, in "verify") {
         if has_arg(in args, in "--refute") {
             let found = locate(in "refute".as_bytes());
             if found.len() == 0 {
@@ -154,34 +154,34 @@ fn route(
         }
         return run_verify(in args);
     }
-    if eq(in c, in "lsp") {
+    if eq(in command_name, in "lsp") {
         return run_lsp(in args);
     }
-    if compiler_command(in c) {
+    if compiler_command(in command_name) {
         return delegate();
     }
-    if !tool(in c) {
+    if !tool(in command_name) {
         // Unknown commands keep the compiler's error unless a tool exists.
-        if !tool_name(in c) {
-            return unknown_command(in c);
+        if !tool_name(in command_name) {
+            return unknown_command(in command_name);
         }
-        let found = locate(in c);
+        let found = locate(in command_name);
         if found.len() == 0 {
-            return unknown_command(in c);
+            return unknown_command(in command_name);
         }
         return run_tool(in found.as_slice(), in args);
     }
-    let found = locate(in c);
+    let found = locate(in command_name);
     if found.len() == 0 {
-        return missing(in c);
+        return missing(in command_name);
     }
     run_tool(in found.as_slice(), in args)
 }
 
-// Whether every byte of `c` is ASCII.
-fn ascii(in c: Slice[u8]) -> bool {
-    for i in 0..c.len() {
-        if byte_at(in c, i) >= Ascii::NonAsciiStart {
+// Whether every byte of `text` is ASCII.
+fn ascii(in text: Slice[u8]) -> bool {
+    for i in 0..text.len() {
+        if byte_at(in text, i) >= Ascii::NonAsciiStart {
             return false;
         }
     }
@@ -190,59 +190,59 @@ fn ascii(in c: Slice[u8]) -> bool {
 
 // `COMPILER_COMMANDS` of src/main.rs: the commands the compiler binary runs
 // itself (the compile commands never reach `run`).
-fn compiler_command(in c: Slice[u8]) -> bool {
-    eq(in c, in "build")
-        || eq(in c, in "check")
-        || eq(in c, in "doc")
-        || eq(in c, in "ebpf")
-        || eq(in c, in "emit")
-        || eq(in c, in "fmt")
-        || eq(in c, in "forge")
-        || eq(in c, in "graph")
-        || eq(in c, in "jit")
-        || eq(in c, in "lint")
-        || eq(in c, in "lsp")
-        || eq(in c, in "proof-audit")
-        || eq(in c, in "run")
-        || eq(in c, in "test")
-        || eq(in c, in "verify")
+fn compiler_command(in command: Slice[u8]) -> bool {
+    eq(in command, in "build")
+        || eq(in command, in "check")
+        || eq(in command, in "doc")
+        || eq(in command, in "ebpf")
+        || eq(in command, in "emit")
+        || eq(in command, in "fmt")
+        || eq(in command, in "forge")
+        || eq(in command, in "graph")
+        || eq(in command, in "jit")
+        || eq(in command, in "lint")
+        || eq(in command, in "lsp")
+        || eq(in command, in "proof-audit")
+        || eq(in command, in "run")
+        || eq(in command, in "test")
+        || eq(in command, in "verify")
 }
 
 // `tool_commands::TOOLS`: subcommands served by `vesper-<name>` binaries.
-fn tool(in c: Slice[u8]) -> bool {
-    eq(in c, in "attest")
-        || eq(in c, in "audit")
-        || eq(in c, in "bench")
-        || eq(in c, in "cas")
-        || eq(in c, in "fuzz")
-        || eq(in c, in "grammar")
-        || eq(in c, in "highlight")
-        || eq(in c, in "json")
-        || eq(in c, in "migrate")
-        || eq(in c, in "publish")
-        || eq(in c, in "replay")
-        || eq(in c, in "resolve")
-        || eq(in c, in "sbom")
-        || eq(in c, in "semver")
-        || eq(in c, in "shot")
-        || eq(in c, in "simd")
-        || eq(in c, in "top")
-        || eq(in c, in "traceparent")
+fn tool(in command: Slice[u8]) -> bool {
+    eq(in command, in "attest")
+        || eq(in command, in "audit")
+        || eq(in command, in "bench")
+        || eq(in command, in "cas")
+        || eq(in command, in "fuzz")
+        || eq(in command, in "grammar")
+        || eq(in command, in "highlight")
+        || eq(in command, in "json")
+        || eq(in command, in "migrate")
+        || eq(in command, in "publish")
+        || eq(in command, in "replay")
+        || eq(in command, in "resolve")
+        || eq(in command, in "sbom")
+        || eq(in command, in "semver")
+        || eq(in command, in "shot")
+        || eq(in command, in "simd")
+        || eq(in command, in "top")
+        || eq(in command, in "traceparent")
 }
 
 // A name an external `vesper-<name>` may have: nonempty ASCII letters,
 // digits, `-` and `_`.
-fn tool_name(in c: Slice[u8]) -> bool {
-    if c.len() == 0 {
+fn tool_name(in name: Slice[u8]) -> bool {
+    if name.len() == 0 {
         return false;
     }
-    for i in 0..c.len() {
-        let b = byte_at(in c, i);
-        let ok = (b >= Ascii::Digit0 && b <= Ascii::Digit9)
-            || ascii_letter(b)
-            || b == Ascii::Dash
-            || b == Ascii::Underscore;
-        if !ok {
+    for i in 0..name.len() {
+        let byte = byte_at(in name, i);
+        let allowed = (byte >= Ascii::Digit0 && byte <= Ascii::Digit9)
+            || ascii_letter(byte)
+            || byte == Ascii::Dash
+            || byte == Ascii::Underscore;
+        if !allowed {
             return false;
         }
     }
@@ -252,17 +252,17 @@ fn tool_name(in c: Slice[u8]) -> bool {
 // ---------------------------------------------------------------------------
 // Shared helpers.
 
-pub fn arg(in a: Args, i: u64) -> ChunkSeq[u8] {
-    let mut v: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let s = arg_start(in a, i);
-    let e = arg_end(in a, i);
-    v.extend(in a.bytes[s..e]);
-    v
+pub fn arg(in args: Args, i: u64) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let start = arg_start(in args, i);
+    let end = arg_end(in args, i);
+    out.extend(in args.bytes[start..end]);
+    out
 }
 
-pub fn byte_at(in s: Slice[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(b) => b,
+pub fn byte_at(in bytes: Slice[u8], i: u64) -> u8 {
+    match bytes.try_get(i) {
+        Option::Some(byte) => byte,
         Option::None => 0,
     }
 }
@@ -300,74 +300,74 @@ fn write_stream(stream: u32, in text: Slice[u8]) eff [Ffi[StdFs], Fail[PrintFail
     }
 }
 
-// `String::from_utf8_lossy`: each maximal ill-formed subpart of `s`
+// `String::from_utf8_lossy`: each maximal ill-formed subpart of `bytes`
 // becomes U+FFFD (as `Utf8Chunks` splits it).
-fn lossy(in s: Slice[u8]) -> ChunkSeq[u8] {
+fn lossy(in bytes: Slice[u8]) -> ChunkSeq[u8] {
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut i: u64 = 0;
     loop {
-        if i >= s.len() {
+        if i >= bytes.len() {
             break;
         }
-        let b = byte_at(in s, i);
-        if b < Ascii::NonAsciiStart {
-            out.push(b);
+        let lead = byte_at(in bytes, i);
+        if lead < Ascii::NonAsciiStart {
+            out.push(lead);
             i = wrapping_add(i, 1);
             continue;
         }
-        let mut need: u64 = 0;
+        let mut cont_count: u64 = 0;
         let mut lo: u8 = 128;
         let mut hi: u8 = 191;
-        if b >= 194 && b <= 223 {
-            need = 1;
-        } else if b == 224 {
-            need = 2;
+        if lead >= 194 && lead <= 223 {
+            cont_count = 1;
+        } else if lead == 224 {
+            cont_count = 2;
             lo = 160;
-        } else if (b >= 225 && b <= 236) || b == 238 || b == 239 {
-            need = 2;
-        } else if b == 237 {
-            need = 2;
+        } else if (lead >= 225 && lead <= 236) || lead == 238 || lead == 239 {
+            cont_count = 2;
+        } else if lead == 237 {
+            cont_count = 2;
             hi = 159;
-        } else if b == 240 {
-            need = 3;
+        } else if lead == 240 {
+            cont_count = 3;
             lo = 144;
-        } else if b >= 241 && b <= 243 {
-            need = 3;
-        } else if b == 244 {
-            need = 3;
+        } else if lead >= 241 && lead <= 243 {
+            cont_count = 3;
+        } else if lead == 244 {
+            cont_count = 3;
             hi = 143;
         }
         // The bytes of the longest valid prefix of a sequence.
-        let mut got: u64 = 1;
-        if need != 0 {
+        let mut prefix_len: u64 = 1;
+        if cont_count != 0 {
             loop {
-                if got > need {
+                if prefix_len > cont_count {
                     break;
                 }
-                let at = wrapping_add(i, got);
-                if at >= s.len() {
+                let cont_at = wrapping_add(i, prefix_len);
+                if cont_at >= bytes.len() {
                     break;
                 }
-                let c = byte_at(in s, at);
-                let ok = if got == 1 {
-                    c >= lo && c <= hi
+                let cont_byte = byte_at(in bytes, cont_at);
+                let in_range = if prefix_len == 1 {
+                    cont_byte >= lo && cont_byte <= hi
                 } else {
-                    c >= 128 && c <= 191
+                    cont_byte >= 128 && cont_byte <= 191
                 };
-                if !ok {
+                if !in_range {
                     break;
                 }
-                got = wrapping_add(got, 1);
+                prefix_len = wrapping_add(prefix_len, 1);
             }
         }
-        if need != 0 && got == wrapping_add(need, 1) {
-            out.extend(in s[i..wrapping_add(i, got)]);
+        if cont_count != 0 && prefix_len == wrapping_add(cont_count, 1) {
+            out.extend(in bytes[i..wrapping_add(i, prefix_len)]);
         } else {
             out.push(239);
             out.push(191);
             out.push(189);
         }
-        i = wrapping_add(i, got);
+        i = wrapping_add(i, prefix_len);
     }
     out
 }
@@ -375,25 +375,25 @@ fn lossy(in s: Slice[u8]) -> ChunkSeq[u8] {
 // Rust's panic for a failed `print!`, as the CLI's panic hook writes it,
 // and the status a panicking `main` exits with. A failed write of the
 // message itself is ignored, as the hook ignores it.
-fn print_panic(f: PrintFailed) -> i64 eff [Ffi[StdFs]] {
-    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    m.extend(
+fn print_panic(failure: PrintFailed) -> i64 eff [Ffi[StdFs]] {
+    let mut message: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    message.extend(
         in "thread 'vesper' panicked at library/std/src/io/stdio.rs:\nfailed printing to "
             .as_bytes()
     );
-    if f.stream == stderr_stream() {
-        m.extend(in "stderr: ".as_bytes());
+    if failure.stream == stderr_stream() {
+        message.extend(in "stderr: ".as_bytes());
     } else {
-        m.extend(in "stdout: ".as_bytes());
+        message.extend(in "stdout: ".as_bytes());
     }
-    let t = error_text(f.error);
-    m.extend(in t.as_slice());
-    m.extend(
+    let detail = error_text(failure.error);
+    message.extend(in detail.as_slice());
+    message.extend(
         in "\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
             .as_bytes()
     );
     handle Fail[IoError] in {
-        write_stderr(in m.as_slice());
+        write_stderr(in message.as_slice());
     } with {
         return v => v,
         raise(_, _) => (),
@@ -411,25 +411,25 @@ pub fn fail(in message: Slice[u8]) -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
     1
 }
 
-// `unknown command '<c>'; see --help` (the end of `cli()`).
-fn unknown_command(in c: Slice[u8]) -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
-    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    m.extend(in "unknown command '".as_bytes());
-    m.extend(in c);
-    m.extend(in "'; see --help".as_bytes());
-    fail(in m.as_slice())
+// `unknown command '<command>'; see --help` (the end of `cli()`).
+fn unknown_command(in command: Slice[u8]) -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
+    let mut message: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    message.extend(in "unknown command '".as_bytes());
+    message.extend(in command);
+    message.extend(in "'; see --help".as_bytes());
+    fail(in message.as_slice())
 }
 
 // The host's copy-out protocol: whether `buf` had to grow (call again);
 // otherwise `buf` is cut to the length. `none` is set for a negative
 // length (no text).
-fn grown(n: i64, inout buf: ChunkSeq[u8], inout none: bool) -> bool {
-    if n < 0 {
+fn grown(host_len: i64, inout buf: ChunkSeq[u8], inout none: bool) -> bool {
+    if host_len < 0 {
         buf.truncate(0);
         none = true;
         return false;
     }
-    let len = wrapping_u64(n);
+    let len = wrapping_u64(host_len);
     if len > buf.len() {
         buf.resize(len, 0);
         return true;
@@ -451,29 +451,29 @@ pub fn io_error_text(word: u64) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
 // `--version` (`format_version_banner` in src/main.rs).
 
 fn version() -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
-    let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    b.extend(in "  \\\\    //   vesper ".as_bytes());
-    b.extend(in cli_version().as_bytes());
-    b.extend(in " (stage3-ddc)\n   \\\\  //    target: ".as_bytes());
-    b.extend(in arch_name().as_bytes());
-    b.push(Ascii::Dash);
-    b.extend(in os_name().as_bytes());
-    b.extend(
+    let mut banner: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    banner.extend(in "  \\\\    //   vesper ".as_bytes());
+    banner.extend(in cli_version().as_bytes());
+    banner.extend(in " (stage3-ddc)\n   \\\\  //    target: ".as_bytes());
+    banner.extend(in arch_name().as_bytes());
+    banner.push(Ascii::Dash);
+    banner.extend(in os_name().as_bytes());
+    banner.extend(
         in " (cranelift + lean4)\n    \\\\||/    modes: copy <= affine <= linear | 0 sorryAx\n     \\/\n"
             .as_bytes()
     );
-    print(stdout_stream(), in b.as_slice());
+    print(stdout_stream(), in banner.as_slice());
     0
 }
 
 // `std::env::consts::ARCH` and `OS` of the host.
 fn arch_name() -> Str {
-    let a = arch();
-    if a == arch_x86_64() {
+    let host_arch = arch();
+    if host_arch == arch_x86_64() {
         "x86_64"
-    } else if a == arch_aarch64() {
+    } else if host_arch == arch_aarch64() {
         "aarch64"
-    } else if a == arch_wasm32() {
+    } else if host_arch == arch_wasm32() {
         "wasm32"
     } else {
         ""
@@ -481,12 +481,12 @@ fn arch_name() -> Str {
 }
 
 fn os_name() -> Str {
-    let o = os();
-    if o == os_linux() {
+    let host_os = os();
+    if host_os == os_linux() {
         "linux"
-    } else if o == os_macos() {
+    } else if host_os == os_macos() {
         "macos"
-    } else if o == os_windows() {
+    } else if host_os == os_windows() {
         "windows"
     } else {
         "wasi"
@@ -503,41 +503,41 @@ fn cli_help() -> Str {
 // Tool dispatch (src/tool_commands.rs).
 
 // `binary_name`: `vesper-<tool>` plus the host's executable suffix.
-fn binary_name(in t: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdEnv]] {
+fn binary_name(in subcommand: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdEnv]] {
     let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
     name.extend(in "vesper-".as_bytes());
-    name.extend(in t);
+    name.extend(in subcommand);
     if os() == os_windows() {
         name.extend(in ".exe".as_bytes());
     }
     name
 }
 
-fn is_separator(b: u8, windows: bool) -> bool {
-    b == Ascii::Slash || (windows && b == Ascii::Backslash)
+fn is_separator(byte: u8, windows: bool) -> bool {
+    byte == Ascii::Slash || (windows && byte == Ascii::Backslash)
 }
 
 // `Path::join` of a relative `name`: an empty directory gives the name,
 // and a separator is added unless the directory ends with one.
 pub fn join(in dir: Slice[u8], in name: Slice[u8], windows: bool) -> ChunkSeq[u8] {
-    let mut p: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    p.extend(in dir);
+    let mut path: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    path.extend(in dir);
     // `PathBuf::push` adds no separator after an ordinary bare drive (`C:`):
     // `C:vesper-x.exe` is relative to drive C's current directory, not its
     // root. A verbatim drive (`\\?\C:`) is not `is_drive()` and does get `\`.
     if windows && bare_drive(in dir) {
-        p.extend(in name);
-        return p;
+        path.extend(in name);
+        return path;
     }
     if dir.len() != 0 && !is_separator(byte_at(in dir, wrapping_sub(dir.len(), 1)), windows) {
         if windows {
-            p.push(Ascii::Backslash);
+            path.push(Ascii::Backslash);
         } else {
-            p.push(Ascii::Slash);
+            path.push(Ascii::Slash);
         }
     }
-    p.extend(in name);
-    p
+    path.extend(in name);
+    path
 }
 
 // Whether `dir` is an ordinary Windows drive prefix and nothing else: `X:`
@@ -546,8 +546,9 @@ fn bare_drive(in dir: Slice[u8]) -> bool {
     dir.len() == 2 && ascii_letter(byte_at(in dir, 0)) && byte_at(in dir, 1) == Ascii::Colon
 }
 
-fn ascii_letter(b: u8) -> bool {
-    (b >= Ascii::UpperA && b <= Ascii::UpperZ) || (b >= Ascii::LowerA && b <= Ascii::LowerZ)
+fn ascii_letter(byte: u8) -> bool {
+    (byte >= Ascii::UpperA && byte <= Ascii::UpperZ)
+        || (byte >= Ascii::LowerA && byte <= Ascii::LowerZ)
 }
 
 fn same(in a: Slice[u8], in b: Slice[u8]) -> bool {
@@ -571,95 +572,97 @@ fn executable(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
 // `Path::parent` of the executable's path: everything before its last
 // component, without the separators (and `.` components) before that;
 // none for a root or an empty path.
-fn parent(in p: Slice[u8], windows: bool, inout none: bool) -> ChunkSeq[u8] {
-    let root = root_len(in p, windows);
-    let verbatim = windows && starts_verbatim(in p);
-    let mut end = trim_back(in p, p.len(), root, windows, verbatim);
+fn parent(in path: Slice[u8], windows: bool, inout none: bool) -> ChunkSeq[u8] {
+    let root = root_len(in path, windows);
+    let verbatim = windows && starts_verbatim(in path);
+    let mut end = trim_back(in path, path.len(), root, windows, verbatim);
     if end <= root {
         none = true;
         return ChunkSeq::new[u8]();
     }
     loop {
-        if end <= root || is_sep(byte_at(in p, wrapping_sub(end, 1)), windows, verbatim) {
+        if end <= root || is_sep(byte_at(in path, wrapping_sub(end, 1)), windows, verbatim) {
             break;
         }
         end = wrapping_sub(end, 1);
     }
-    end = trim_back(in p, end, root, windows, verbatim);
+    end = trim_back(in path, end, root, windows, verbatim);
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    out.extend(in p[0..end]);
+    out.extend(in path[0..end]);
     out
 }
 
-fn is_sep(b: u8, windows: bool, verbatim: bool) -> bool {
+fn is_sep(byte: u8, windows: bool, verbatim: bool) -> bool {
     if verbatim {
-        b == Ascii::Backslash
+        byte == Ascii::Backslash
     } else {
-        is_separator(b, windows)
+        is_separator(byte, windows)
     }
 }
 
-// `p[..end]` without trailing separators and `.` components, keeping the
+// `path[..end]` without trailing separators and `.` components, keeping the
 // first `root` bytes.
-fn trim_back(in p: Slice[u8], end: u64, root: u64, windows: bool, verbatim: bool) -> u64 {
-    let mut e = end;
+fn trim_back(in path: Slice[u8], end: u64, root: u64, windows: bool, verbatim: bool) -> u64 {
+    let mut trimmed_end = end;
     loop {
-        if e <= root {
+        if trimmed_end <= root {
             break;
         }
-        let last = byte_at(in p, wrapping_sub(e, 1));
+        let last = byte_at(in path, wrapping_sub(trimmed_end, 1));
         if is_sep(last, windows, verbatim) {
-            e = wrapping_sub(e, 1);
+            trimmed_end = wrapping_sub(trimmed_end, 1);
         } else if !verbatim
             && last == Ascii::Dot
             && (
-                wrapping_sub(e, 1) == root
-                    || is_sep(byte_at(in p, wrapping_sub(e, 2)), windows, verbatim)
+                wrapping_sub(trimmed_end, 1) == root
+                    || is_sep(byte_at(in path, wrapping_sub(trimmed_end, 2)), windows, verbatim)
             ) {
             // A `.` component, unless it is the path's first (`./x` keeps it).
-            if wrapping_sub(e, 1) == 0 {
+            if wrapping_sub(trimmed_end, 1) == 0 {
                 break;
             }
-            e = wrapping_sub(e, 1);
+            trimmed_end = wrapping_sub(trimmed_end, 1);
         } else {
             break;
         }
     }
-    e
+    trimmed_end
 }
 
-fn starts_verbatim(in p: Slice[u8]) -> bool {
-    p.len() >= 4
-        && byte_at(in p, 0) == Ascii::Backslash
-        && byte_at(in p, 1) == Ascii::Backslash
-        && byte_at(in p, 2) == Ascii::Question
-        && byte_at(in p, 3) == Ascii::Backslash
+fn starts_verbatim(in path: Slice[u8]) -> bool {
+    path.len() >= 4
+        && byte_at(in path, 0) == Ascii::Backslash
+        && byte_at(in path, 1) == Ascii::Backslash
+        && byte_at(in path, 2) == Ascii::Question
+        && byte_at(in path, 3) == Ascii::Backslash
 }
 
-// The bytes of the prefix and root of `p`: `/` on Unix; `X:`, `X:\`,
+// The bytes of the prefix and root of `path`: `/` on Unix; `X:`, `X:\`,
 // `\\?\X:\` or `\` on Windows.
-fn root_len(in p: Slice[u8], windows: bool) -> u64 {
+fn root_len(in path: Slice[u8], windows: bool) -> u64 {
     if !windows {
-        if p.len() != 0 && byte_at(in p, 0) == Ascii::Slash {
+        if path.len() != 0 && byte_at(in path, 0) == Ascii::Slash {
             return 1;
         }
         return 0;
     }
     let mut n: u64 = 0;
-    if starts_verbatim(in p) {
+    if starts_verbatim(in path) {
         n = 4;
-        if p.len() >= 6 && ascii_letter(byte_at(in p, 4)) && byte_at(in p, 5) == Ascii::Colon {
+        if path.len() >= 6
+            && ascii_letter(byte_at(in path, 4))
+            && byte_at(in path, 5) == Ascii::Colon {
             n = 6;
         }
-        if n < p.len() && byte_at(in p, n) == Ascii::Backslash {
+        if n < path.len() && byte_at(in path, n) == Ascii::Backslash {
             n = wrapping_add(n, 1);
         }
         return n;
     }
-    if p.len() >= 2 && ascii_letter(byte_at(in p, 0)) && byte_at(in p, 1) == Ascii::Colon {
+    if path.len() >= 2 && ascii_letter(byte_at(in path, 0)) && byte_at(in path, 1) == Ascii::Colon {
         n = 2;
     }
-    if n < p.len() && is_separator(byte_at(in p, n), true) {
+    if n < path.len() && is_separator(byte_at(in path, n), true) {
         n = wrapping_add(n, 1);
     }
     n
@@ -670,18 +673,18 @@ fn root_len(in p: Slice[u8], windows: bool) -> u64 {
 fn exe_parent_dir(canonical: bool, inout none: bool) -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[StdEnv]] {
     let windows = os() == os_windows();
     let exe = handle Fail[IoError] in {
-        let e = current_exe_bytes();
+        let exe_path = current_exe_bytes();
         if canonical {
-            Option::Some(canonicalize_path(in e.as_slice()))
+            Option::Some(canonicalize_path(in exe_path.as_slice()))
         } else {
-            Option::Some(e)
+            Option::Some(exe_path)
         }
     } with {
         return v => v,
         raise(_, _) => Option::None,
     };
     match exe {
-        Option::Some(e) => parent(in e.as_slice(), windows, inout none),
+        Option::Some(exe_path) => parent(in exe_path.as_slice(), windows, inout none),
         Option::None => {
             none = true;
             ChunkSeq::new[u8]()
@@ -716,10 +719,11 @@ fn path_entries(in path: Slice[u8], windows: bool) -> ChunkSeq[u64] {
     let mut start: u64 = 0;
     let mut quoted = false;
     for i in 0..path.len() {
-        let b = byte_at(in path, i);
-        if windows && b == Ascii::DoubleQuote {
+        let byte = byte_at(in path, i);
+        if windows && byte == Ascii::DoubleQuote {
             quoted = !quoted;
-        } else if (!windows && b == Ascii::Colon) || (windows && !quoted && b == Ascii::Semicolon) {
+        } else if (!windows && byte == Ascii::Colon)
+            || (windows && !quoted && byte == Ascii::Semicolon) {
             spans.push(start);
             spans.push(i);
             start = wrapping_add(i, 1);
@@ -732,15 +736,15 @@ fn path_entries(in path: Slice[u8], windows: bool) -> ChunkSeq[u64] {
 
 fn span_at(in spans: Slice[u64], i: u64) -> u64 {
     match spans.try_get(i) {
-        Option::Some(x) => x,
+        Option::Some(offset) => offset,
         Option::None => 0,
     }
 }
 
 // `locate`: the tool's executable, or empty when there is none.
-fn locate(in t: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[StdEnv]] {
+fn locate(in subcommand: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[StdEnv]] {
     let windows = os() == os_windows();
-    let name = binary_name(in t);
+    let name = binary_name(in subcommand);
     let mut no_exe = false;
     let exe_dir = exe_parent_dir(false, inout no_exe);
     if !no_exe {
@@ -760,19 +764,19 @@ fn locate(in t: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[StdEnv]] {
         }
     }
     let path = match var_bytes(in "PATH") {
-        Option::Some(p) => p,
+        Option::Some(path_value) => path_value,
         Option::None => return ChunkSeq::new[u8](),
     };
     let spans = path_entries(in path.as_slice(), windows);
     let count = spans.len() / 2;
     for k in 0..count {
-        let a = span_at(in spans.as_slice(), wrapping_mul(k, 2));
-        let b = span_at(in spans.as_slice(), wrapping_add(wrapping_mul(k, 2), 1));
+        let span_start = span_at(in spans.as_slice(), wrapping_mul(k, 2));
+        let span_end = span_at(in spans.as_slice(), wrapping_add(wrapping_mul(k, 2), 1));
         let mut dir: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        for i in a..b {
-            let c = byte_at(in path.as_slice(), i);
-            if !(windows && c == Ascii::DoubleQuote) {
-                dir.push(c);
+        for i in span_start..span_end {
+            let byte = byte_at(in path.as_slice(), i);
+            if !(windows && byte == Ascii::DoubleQuote) {
+                dir.push(byte);
             }
         }
         let candidate = join(in dir.as_slice(), in name.as_slice(), windows);
@@ -786,8 +790,8 @@ fn locate(in t: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[StdEnv]] {
 fn has_arg(in args: Args, in needle: Str) -> bool {
     let n = args_count(in args);
     for i in 1..n {
-        let a = arg(in args, i);
-        if eq(in a.as_slice(), in needle) {
+        let arg_buf = arg(in args, i);
+        if eq(in arg_buf.as_slice(), in needle) {
             return true;
         }
     }
@@ -795,17 +799,17 @@ fn has_arg(in args: Args, in needle: Str) -> bool {
 }
 
 // `missing`: a known tool whose binary is not there.
-fn missing(in t: Slice[u8]) -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
-    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    m.extend(in "`vesper ".as_bytes());
-    m.extend(in t);
-    m.extend(in "` is provided by the `vesper-".as_bytes());
-    m.extend(in t);
-    m.extend(
+fn missing(in subcommand: Slice[u8]) -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
+    let mut message: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    message.extend(in "`vesper ".as_bytes());
+    message.extend(in subcommand);
+    message.extend(in "` is provided by the `vesper-".as_bytes());
+    message.extend(in subcommand);
+    message.extend(
         in "` tool, which was not found next to the vesper executable or on PATH; build it with `cargo build -p vesper-tools` (or `bazel build //crates/vesper-tools:all`) and install it beside vesper"
             .as_bytes()
     );
-    fail(in m.as_slice())
+    fail(in message.as_slice())
 }
 
 // `run` and `exit_code`: the tool with the arguments after the command,
@@ -815,24 +819,24 @@ fn run_tool(
     in binary: Slice[u8],
     in args: Args
 ) -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Fail[PrintFailed]] {
-    let mut c = command_path(in binary);
+    let mut command = command_path(in binary);
     let n = args_count(in args);
     for i in 1..n {
-        let a = arg(in args, i);
-        proc_arg(inout c, in a.as_slice());
+        let arg_buf = arg(in args, i);
+        proc_arg(inout command, in arg_buf.as_slice());
     }
-    let mut ch = match spawn(c) {
-        Result::Ok(ch) => ch,
+    let mut child = match spawn(command) {
+        Result::Ok(child) => child,
         Result::Err(e) => return spawn_failed(in binary, e),
     };
-    let waited = wait(inout ch);
-    release(ch);
+    let waited = wait(inout child);
+    release(child);
     match waited {
-        Result::Ok(st) => {
-            if st.exited {
-                st.code
-            } else if st.signal != 0 {
-                wrapping_add(SIGNAL_EXIT_BASE, widen_i64(st.signal))
+        Result::Ok(status) => {
+            if status.exited {
+                status.code
+            } else if status.signal != 0 {
+                wrapping_add(SIGNAL_EXIT_BASE, widen_i64(status.signal))
             } else {
                 1
             }
@@ -849,7 +853,7 @@ pub fn measure_tee(in path: Slice[u8]) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[
         tee_measure(in path)
     } with {
         return v => v,
-        raise(f, _) => print_panic(f),
+        raise(failure, _) => print_panic(failure),
     }
 }
 
@@ -860,21 +864,21 @@ fn tee_measure(
     if binary.len() == 0 {
         return missing(in "tee".as_bytes());
     }
-    let mut c = command_path(in binary.as_slice());
-    proc_arg(inout c, in "measure".as_bytes());
-    proc_arg(inout c, in path);
-    let mut ch = match spawn(c) {
-        Result::Ok(ch) => ch,
+    let mut command = command_path(in binary.as_slice());
+    proc_arg(inout command, in "measure".as_bytes());
+    proc_arg(inout command, in path);
+    let mut child = match spawn(command) {
+        Result::Ok(child) => child,
         Result::Err(e) => return spawn_failed(in binary.as_slice(), e),
     };
-    let waited = wait(inout ch);
-    release(ch);
+    let waited = wait(inout child);
+    release(child);
     let code = match waited {
-        Result::Ok(st) => {
-            if st.exited {
-                st.code
-            } else if st.signal != 0 {
-                wrapping_add(SIGNAL_EXIT_BASE, widen_i64(st.signal))
+        Result::Ok(status) => {
+            if status.exited {
+                status.code
+            } else if status.signal != 0 {
+                wrapping_add(SIGNAL_EXIT_BASE, widen_i64(status.signal))
             } else {
                 1
             }
@@ -884,33 +888,33 @@ fn tee_measure(
     if code == 0 {
         return 0;
     }
-    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    m.extend(in "vesper-tee could not measure ".as_bytes());
-    m.extend(in path);
-    m.extend(in " (exit ".as_bytes());
+    let mut message: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    message.extend(in "vesper-tee could not measure ".as_bytes());
+    message.extend(in path);
+    message.extend(in " (exit ".as_bytes());
     if code < 0 {
-        m.push(Ascii::Dash);
-        push_decimal(inout m, wrapping_sub(0, wrapping_u64(code)));
+        message.push(Ascii::Dash);
+        push_decimal(inout message, wrapping_sub(0, wrapping_u64(code)));
     } else {
-        push_decimal(inout m, wrapping_u64(code));
+        push_decimal(inout message, wrapping_u64(code));
     }
-    m.push(Ascii::RightParen);
-    fail(in m.as_slice())
+    message.push(Ascii::RightParen);
+    fail(in message.as_slice())
 }
 
 // `{binary}: {e}`.
 fn spawn_failed(in binary: Slice[u8], e: IoError) -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
-    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    m.extend(in binary);
-    m.extend(in ": ".as_bytes());
+    let mut message: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    message.extend(in binary);
+    message.extend(in ": ".as_bytes());
     if e.kind == not_found() && e.os == 0 {
-        m.extend(in "program not found".as_bytes());
+        message.extend(in "program not found".as_bytes());
     } else {
         let word = widen_u64(e.kind) | (widen_u64(e.os) << 32);
-        let t = io_error_text(word);
-        m.extend(in t.as_slice());
+        let detail = io_error_text(word);
+        message.extend(in detail.as_slice());
     }
-    fail(in m.as_slice())
+    fail(in message.as_slice())
 }
 
 // ---------------------------------------------------------------------------
@@ -980,137 +984,137 @@ fn paths_new() -> Paths {
     }
 }
 
-fn paths_push(inout p: Paths, in path: Slice[u8]) {
-    p.bytes.extend(in path);
-    p.ends.push(p.bytes.len());
+fn paths_push(inout paths: Paths, in path: Slice[u8]) {
+    paths.bytes.extend(in path);
+    paths.ends.push(paths.bytes.len());
 }
 
-fn paths_start(in p: Paths, i: u64) -> u64 {
+fn paths_start(in paths: Paths, i: u64) -> u64 {
     if i == 0 {
         0
     } else {
-        span_at(in p.ends.as_slice(), wrapping_sub(i, 1))
+        span_at(in paths.ends.as_slice(), wrapping_sub(i, 1))
     }
 }
 
-fn paths_get(in p: Paths, i: u64) -> ChunkSeq[u8] {
-    let mut v: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let a = paths_start(in p, i);
-    let b = span_at(in p.ends.as_slice(), i);
-    v.extend(in p.bytes[a..b]);
-    v
+fn paths_get(in paths: Paths, i: u64) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let start = paths_start(in paths, i);
+    let end = span_at(in paths.ends.as_slice(), i);
+    out.extend(in paths.bytes[start..end]);
+    out
 }
 
 // Remove and return the last path.
-fn paths_pop(inout p: Paths) -> ChunkSeq[u8] {
-    let n = p.ends.len();
-    let last = paths_get(in p, wrapping_sub(n, 1));
-    let a = paths_start(in p, wrapping_sub(n, 1));
-    p.bytes.truncate(a);
-    p.ends.truncate(wrapping_sub(n, 1));
+fn paths_pop(inout paths: Paths) -> ChunkSeq[u8] {
+    let n = paths.ends.len();
+    let last = paths_get(in paths, wrapping_sub(n, 1));
+    let start = paths_start(in paths, wrapping_sub(n, 1));
+    paths.bytes.truncate(start);
+    paths.ends.truncate(wrapping_sub(n, 1));
     last
 }
 
-// Rust's `str::from_utf8`: whether `s` is well-formed UTF-8 (no overlong
+// Rust's `str::from_utf8`: whether `bytes` is well-formed UTF-8 (no overlong
 // forms, surrogates or code points past U+10FFFF).
-fn utf8(in s: Slice[u8]) -> bool {
+fn utf8(in bytes: Slice[u8]) -> bool {
     let mut i: u64 = 0;
     loop {
-        if i >= s.len() {
+        if i >= bytes.len() {
             break;
         }
-        let b = byte_at(in s, i);
-        if b < Ascii::NonAsciiStart {
+        let lead = byte_at(in bytes, i);
+        if lead < Ascii::NonAsciiStart {
             i = wrapping_add(i, 1);
         } else {
-            let mut need: u64 = 0;
+            let mut cont_count: u64 = 0;
             let mut lo: u8 = 128;
             let mut hi: u8 = 191;
-            if b >= 194 && b <= 223 {
-                need = 1;
-            } else if b == 224 {
-                need = 2;
+            if lead >= 194 && lead <= 223 {
+                cont_count = 1;
+            } else if lead == 224 {
+                cont_count = 2;
                 lo = 160;
-            } else if b >= 225 && b <= 236 {
-                need = 2;
-            } else if b == 237 {
-                need = 2;
+            } else if lead >= 225 && lead <= 236 {
+                cont_count = 2;
+            } else if lead == 237 {
+                cont_count = 2;
                 hi = 159;
-            } else if b == 238 || b == 239 {
-                need = 2;
-            } else if b == 240 {
-                need = 3;
+            } else if lead == 238 || lead == 239 {
+                cont_count = 2;
+            } else if lead == 240 {
+                cont_count = 3;
                 lo = 144;
-            } else if b >= 241 && b <= 243 {
-                need = 3;
-            } else if b == 244 {
-                need = 3;
+            } else if lead >= 241 && lead <= 243 {
+                cont_count = 3;
+            } else if lead == 244 {
+                cont_count = 3;
                 hi = 143;
             } else {
                 return false;
             }
-            if wrapping_add(i, need) >= s.len() {
+            if wrapping_add(i, cont_count) >= bytes.len() {
                 return false;
             }
-            let c1 = byte_at(in s, wrapping_add(i, 1));
-            if c1 < lo || c1 > hi {
+            let first_cont = byte_at(in bytes, wrapping_add(i, 1));
+            if first_cont < lo || first_cont > hi {
                 return false;
             }
-            for k in 2..wrapping_add(need, 1) {
-                let c = byte_at(in s, wrapping_add(i, k));
-                if c < 128 || c > 191 {
+            for k in 2..wrapping_add(cont_count, 1) {
+                let cont_byte = byte_at(in bytes, wrapping_add(i, k));
+                if cont_byte < 128 || cont_byte > 191 {
                     return false;
                 }
             }
-            i = wrapping_add(i, wrapping_add(need, 1));
+            i = wrapping_add(i, wrapping_add(cont_count, 1));
         }
     }
     true
 }
 
-fn push_decimal(inout out: ChunkSeq[u8], v: u64) {
-    if v >= 10 {
-        push_decimal(inout out, v / 10);
+fn push_decimal(inout out: ChunkSeq[u8], value: u64) {
+    if value >= 10 {
+        push_decimal(inout out, value / 10);
     }
-    out.push(wrapping_u8(wrapping_add(v % 10, 48)));
+    out.push(wrapping_u8(wrapping_add(value % 10, 48)));
 }
 
-fn hex_digit(v: u8) -> u8 {
-    if v < 10 {
-        wrapping_add(v, 48)
+fn hex_digit(nibble: u8) -> u8 {
+    if nibble < 10 {
+        wrapping_add(nibble, 48)
     } else {
-        wrapping_add(v, 87)
+        wrapping_add(nibble, 87)
     }
 }
 
 // A JSON string as serde_json writes it: `"` and `\` escaped, the control
 // bytes as `\b \f \n \r \t` or `\u00xx`, everything else as is.
-fn json_string(inout out: ChunkSeq[u8], in s: Slice[u8]) {
+fn json_string(inout out: ChunkSeq[u8], in text: Slice[u8]) {
     out.push(Ascii::DoubleQuote);
-    for i in 0..s.len() {
-        let b = byte_at(in s, i);
-        if b == Ascii::DoubleQuote || b == Ascii::Backslash {
+    for i in 0..text.len() {
+        let byte = byte_at(in text, i);
+        if byte == Ascii::DoubleQuote || byte == Ascii::Backslash {
             out.push(Ascii::Backslash);
-            out.push(b);
-        } else if b < 32 {
+            out.push(byte);
+        } else if byte < 32 {
             out.push(Ascii::Backslash);
-            if b == 8 {
+            if byte == 8 {
                 out.push(98);
-            } else if b == 12 {
+            } else if byte == 12 {
                 out.push(102);
-            } else if b == 10 {
+            } else if byte == 10 {
                 out.push(110);
-            } else if b == 13 {
+            } else if byte == 13 {
                 out.push(114);
-            } else if b == 9 {
+            } else if byte == 9 {
                 out.push(116);
             } else {
                 out.extend(in "u00".as_bytes());
-                out.push(hex_digit(b >> 4));
-                out.push(hex_digit(b & 15));
+                out.push(hex_digit(byte >> 4));
+                out.push(hex_digit(byte & 15));
             }
         } else {
-            out.push(b);
+            out.push(byte);
         }
     }
     out.push(Ascii::DoubleQuote);
@@ -1125,8 +1129,8 @@ fn json_key(inout out: ChunkSeq[u8], in key: Str, first: bool) {
     out.push(Ascii::Colon);
 }
 
-fn json_bool(inout out: ChunkSeq[u8], v: bool) {
-    if v {
+fn json_bool(inout out: ChunkSeq[u8], value: bool) {
+    if value {
         out.extend(in "true".as_bytes());
     } else {
         out.extend(in "false".as_bytes());
@@ -1195,8 +1199,8 @@ fn fmt_error_text() -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
     buf.resize(ERROR_TEXT_INITIAL_BYTES, 0);
     let mut none = false;
     loop {
-        let n = HybridCommands::hc_fmt_error(inout buf.as_slice_mut());
-        if !grown(n, inout buf, inout none) {
+        let host_len = HybridCommands::hc_fmt_error(inout buf.as_slice_mut());
+        if !grown(host_len, inout buf, inout none) {
             break;
         }
     }
@@ -1206,7 +1210,7 @@ fn fmt_error_text() -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
 // `fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())`; `path` is UTF-8.
 fn is_dir(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
     let text = match String::from_utf8(in path) {
-        Option::Some(t) => t,
+        Option::Some(decoded) => decoded,
         Option::None => return false,
     };
     handle Fail[IoError] in {
@@ -1224,7 +1228,7 @@ fn io_word(e: IoError) -> u64 {
 // A directory listing, or the error word of the read that failed.
 struct Listed {
     entries: Entries,
-    err: u64,
+    error_word: u64,
 }
 
 // Directory `dir`'s names and kinds (not following symbolic links) into
@@ -1239,10 +1243,10 @@ fn list_bounded(
 ) -> u64 eff [Ffi[StdFs]] {
     // The error comes back in the handled value: a clause's assignment to
     // an outer local changes only the clause's copy (#2038).
-    let got = handle Fail[IoError] in {
+    let result = handle Fail[IoError] in {
         Listed {
             entries: list_dir_path(in dir),
-            err: 0,
+            error_word: 0,
         }
     } with {
         return v => v,
@@ -1252,13 +1256,13 @@ fn list_bounded(
                 ends: ChunkSeq::new[u64](),
                 kinds: ChunkSeq::new[u32](),
             },
-            err: io_word(e),
+            error_word: io_word(e),
         },
     };
-    if got.err != 0 {
-        return got.err;
+    if result.error_word != 0 {
+        return result.error_word;
     }
-    let listed = got.entries;
+    let listed = result.entries;
     if listed.ends.len() > budget {
         over = true;
         return 0;
@@ -1269,34 +1273,38 @@ fn list_bounded(
     0
 }
 
-// Whether name `x` sorts before name `y` (bytewise, as `OsString` does).
-fn name_before(in e: Entries, x: u64, y: u64) -> bool {
-    let xa = entry_start(in e, x);
-    let xb = entry_end(in e, x);
-    let ya = entry_start(in e, y);
-    let yb = entry_end(in e, y);
-    let xl = wrapping_sub(xb, xa);
-    let yl = wrapping_sub(yb, ya);
-    let n = if xl < yl { xl } else { yl };
-    for i in 0..n {
-        let p = byte_at(in e.bytes.as_slice(), wrapping_add(xa, i));
-        let q = byte_at(in e.bytes.as_slice(), wrapping_add(ya, i));
-        if p != q {
-            return p < q;
+// Whether name `left` sorts before name `right` (bytewise, as `OsString` does).
+fn name_before(in entries: Entries, left: u64, right: u64) -> bool {
+    let left_start = entry_start(in entries, left);
+    let left_end = entry_end(in entries, left);
+    let right_start = entry_start(in entries, right);
+    let right_end = entry_end(in entries, right);
+    let left_len = wrapping_sub(left_end, left_start);
+    let right_len = wrapping_sub(right_end, right_start);
+    let common_len = if left_len < right_len {
+        left_len
+    } else {
+        right_len
+    };
+    for i in 0..common_len {
+        let left_byte = byte_at(in entries.bytes.as_slice(), wrapping_add(left_start, i));
+        let right_byte = byte_at(in entries.bytes.as_slice(), wrapping_add(right_start, i));
+        if left_byte != right_byte {
+            return left_byte < right_byte;
         }
     }
-    xl < yl
+    left_len < right_len
 }
 
-// The entry order of `e` sorted by name: a stable bottom-up merge sort of
+// The entry order of `entries` sorted by name: a stable bottom-up merge sort of
 // indices.
-fn sorted_order(in e: Entries) -> ChunkSeq[u64] {
-    let n = e.ends.len();
-    let mut a: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    let mut b: ChunkSeq[u64] = ChunkSeq::new[u64]();
+fn sorted_order(in entries: Entries) -> ChunkSeq[u64] {
+    let n = entries.ends.len();
+    let mut order: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut merged: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for i in 0..n {
-        a.push(i);
-        b.push(i);
+        order.push(i);
+        merged.push(i);
     }
     let mut width: u64 = 1;
     loop {
@@ -1313,35 +1321,35 @@ fn sorted_order(in e: Entries) -> ChunkSeq[u64] {
             let mut i = lo;
             let mut j = mid;
             for k in lo..hi {
-                let ai = span_at(in a.as_slice(), i);
-                let aj = span_at(in a.as_slice(), j);
+                let left_entry = span_at(in order.as_slice(), i);
+                let right_entry = span_at(in order.as_slice(), j);
                 let take_left = if i >= mid {
                     false
                 } else if j >= hi {
                     true
                 } else {
-                    !name_before(in e, aj, ai)
+                    !name_before(in entries, right_entry, left_entry)
                 };
                 if take_left {
-                    set64(inout b.as_slice_mut(), k, ai);
+                    set64(inout merged.as_slice_mut(), k, left_entry);
                     i = wrapping_add(i, 1);
                 } else {
-                    set64(inout b.as_slice_mut(), k, aj);
+                    set64(inout merged.as_slice_mut(), k, right_entry);
                     j = wrapping_add(j, 1);
                 }
             }
             lo = hi;
         }
         for k in 0..n {
-            set64(inout a.as_slice_mut(), k, span_at(in b.as_slice(), k));
+            set64(inout order.as_slice_mut(), k, span_at(in merged.as_slice(), k));
         }
         width = wrapping_add(width, width);
     }
-    a
+    order
 }
 
-fn set64(inout s: Slice[u64], i: u64, v: u64) {
-    s.try_set(i, v);
+fn set64(inout slots: Slice[u64], i: u64, value: u64) {
+    slots.try_set(i, value);
 }
 
 fn min_u64(x: u64, y: u64) -> u64 {
@@ -1370,20 +1378,20 @@ fn ves_name(in name: Slice[u8]) -> bool {
     if n < 5 {
         return false;
     }
-    let d = wrapping_sub(n, 4);
-    byte_at(in name, d) == 46
-        && byte_at(in name, wrapping_add(d, 1)) == 118
-        && byte_at(in name, wrapping_add(d, 2)) == 101
-        && byte_at(in name, wrapping_add(d, 3)) == 115
+    let dot_at = wrapping_sub(n, 4);
+    byte_at(in name, dot_at) == 46
+        && byte_at(in name, wrapping_add(dot_at, 1)) == 118
+        && byte_at(in name, wrapping_add(dot_at, 2)) == 101
+        && byte_at(in name, wrapping_add(dot_at, 3)) == 115
 }
 
-fn starts_with(in s: Slice[u8], in prefix: Str) -> bool {
-    let p = prefix.as_bytes();
-    if s.len() < p.len() {
+fn starts_with(in bytes: Slice[u8], in prefix: Str) -> bool {
+    let prefix_bytes = prefix.as_bytes();
+    if bytes.len() < prefix_bytes.len() {
         return false;
     }
-    for i in 0..p.len() {
-        if byte_at(in s, i) != byte_at(in p, i) {
+    for i in 0..prefix_bytes.len() {
+        if byte_at(in bytes, i) != byte_at(in prefix_bytes, i) {
             return false;
         }
     }
@@ -1425,8 +1433,8 @@ fn walk(
         if word != 0 {
             err.extend(in dir.as_slice());
             err.extend(in ": ".as_bytes());
-            let t = io_error_text(word);
-            err.extend(in t.as_slice());
+            let detail = io_error_text(word);
+            err.extend(in detail.as_slice());
             return walk_failed();
         }
         if over {
@@ -1440,29 +1448,29 @@ fn walk(
         let order = sorted_order(in entries);
         let mut subdirs = paths_new();
         for k in 0..count {
-            let i = span_at(in order.as_slice(), k);
-            let a = entry_start(in entries, i);
-            let b = entry_end(in entries, i);
+            let entry_index = span_at(in order.as_slice(), k);
+            let name_start = entry_start(in entries, entry_index);
+            let name_end = entry_end(in entries, entry_index);
             let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
-            name.extend(in entries.bytes[a..b]);
+            name.extend(in entries.bytes[name_start..name_end]);
             if windows && replacement_char(in name.as_slice()) {
                 return walk_delegate();
             }
-            let kind = entry_kind(in entries, i);
+            let kind = entry_kind(in entries, entry_index);
             if kind == kind_dir() {
                 if !skipped_dir(in name.as_slice()) {
-                    let p = join(in dir.as_slice(), in name.as_slice(), windows);
-                    paths_push(inout subdirs, in p.as_slice());
+                    let child_path = join(in dir.as_slice(), in name.as_slice(), windows);
+                    paths_push(inout subdirs, in child_path.as_slice());
                 }
             } else if kind == kind_file() && ves_name(in name.as_slice()) {
-                let p = join(in dir.as_slice(), in name.as_slice(), windows);
-                paths_push(inout files, in p.as_slice());
+                let child_path = join(in dir.as_slice(), in name.as_slice(), windows);
+                paths_push(inout files, in child_path.as_slice());
             }
         }
-        let k = subdirs.ends.len();
-        for j in 0..k {
-            let p = paths_get(in subdirs, wrapping_sub(wrapping_sub(k, 1), j));
-            paths_push(inout pending, in p.as_slice());
+        let subdir_count = subdirs.ends.len();
+        for j in 0..subdir_count {
+            let child_path = paths_get(in subdirs, wrapping_sub(wrapping_sub(subdir_count, 1), j));
+            paths_push(inout pending, in child_path.as_slice());
         }
     }
     walk_ok()
@@ -1481,10 +1489,10 @@ fn walk_delegate() -> u32 {
 }
 
 // Why one file could not be formatted: `code` picks the message
-// (`fmt_message`); code `FMT_IO` carries the OS error `io`.
+// (`fmt_message`); code `FMT_IO` carries the OS error `io_error`.
 copy struct FmtStop {
     code: u32,
-    io: IoError,
+    io_error: IoError,
 }
 
 const FMT_IO: u32 = 0;
@@ -1508,11 +1516,11 @@ copy struct FmtDone {
 }
 
 fn fmt_stop(code: u32) -> FmtStop {
-    FmtStop { code: code, io: IoError { kind: 0, os: 0 } }
+    FmtStop { code: code, io_error: IoError { kind: 0, os: 0 } }
 }
 
 fn fmt_io(e: IoError) -> FmtStop {
-    FmtStop { code: FMT_IO, io: e }
+    FmtStop { code: FMT_IO, io_error: e }
 }
 
 // `fmt_commands::open_input`: the regular UTF-8 file at `path`, read
@@ -1527,23 +1535,23 @@ fn fmt_open(in path: Slice[u8]) -> Opened eff [Ffi[StdFs], Fail[FmtStop]] {
     if kind != kind_file() {
         return Fail::raise(fmt_stop(FMT_NOT_FILE_NOFOLLOW));
     }
-    let o = handle Fail[IoError] in {
+    let opened = handle Fail[IoError] in {
         read_nofollow_limit(in path, wrapping_add(FMT_MAX_BYTES, 1))
     } with {
         return v => v,
         raise(e, _) => Fail::raise(fmt_io(e)),
     };
-    if !o.id.regular {
+    if !opened.id.regular {
         return Fail::raise(fmt_stop(FMT_NOT_FILE));
     }
-    if o.id.size > FMT_MAX_BYTES || o.bytes.len() > FMT_MAX_BYTES {
+    if opened.id.size > FMT_MAX_BYTES || opened.bytes.len() > FMT_MAX_BYTES {
         return Fail::raise(fmt_stop(FMT_TOO_BIG));
     }
-    match String::from_utf8(in o.bytes.as_slice()) {
+    match String::from_utf8(in opened.bytes.as_slice()) {
         Option::Some(_) => {},
         Option::None => return Fail::raise(fmt_stop(FMT_NOT_UTF8)),
     }
-    o
+    opened
 }
 
 // The output of the last successful `hc_fmt_source`.
@@ -1552,8 +1560,8 @@ fn fmt_output() -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
     buf.resize(ERROR_TEXT_INITIAL_BYTES, 0);
     let mut none = false;
     loop {
-        let n = HybridCommands::hc_fmt_output(inout buf.as_slice_mut());
-        if !grown(n, inout buf, inout none) {
+        let host_len = HybridCommands::hc_fmt_output(inout buf.as_slice_mut());
+        if !grown(host_len, inout buf, inout none) {
             break;
         }
     }
@@ -1683,23 +1691,23 @@ fn fmt_steps(
 
 // The error text of a stopped file, as `format_file`'s `Err` reads.
 fn fmt_message(inout out: ChunkSeq[u8], stop: FmtStop) eff [Ffi[StdFs], Ffi[HybridCommands]] {
-    let c = stop.code;
-    if c == FMT_IO {
-        let t = error_text(stop.io);
-        out.extend(in t.as_slice());
-    } else if c == FMT_NOT_FILE_NOFOLLOW {
+    let code = stop.code;
+    if code == FMT_IO {
+        let detail = error_text(stop.io_error);
+        out.extend(in detail.as_slice());
+    } else if code == FMT_NOT_FILE_NOFOLLOW {
         out.extend(in "fmt requires a regular file without final symlinks".as_bytes());
-    } else if c == FMT_NOT_FILE {
+    } else if code == FMT_NOT_FILE {
         out.extend(in "fmt requires a regular file".as_bytes());
-    } else if c == FMT_TOO_BIG {
+    } else if code == FMT_TOO_BIG {
         out.extend(in "fmt input exceeds 256 KiB".as_bytes());
-    } else if c == FMT_NOT_UTF8 {
+    } else if code == FMT_NOT_UTF8 {
         out.extend(in "fmt input must be UTF-8".as_bytes());
-    } else if c == FMT_CHANGED {
+    } else if code == FMT_CHANGED {
         out.extend(in "fmt input changed during formatting; retry".as_bytes());
     } else {
-        let t = fmt_error_text();
-        out.extend(in t.as_slice());
+        let detail = fmt_error_text();
+        out.extend(in detail.as_slice());
     }
 }
 
@@ -1776,22 +1784,22 @@ fn fmt(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[HybridCommands], 
     let n = args_count(in args);
     // The Rust CLI panics on an argument that is not UTF-8.
     for i in 1..n {
-        let a = arg(in args, i);
-        if !utf8(in a.as_slice()) {
+        let arg_buf = arg(in args, i);
+        if !utf8(in arg_buf.as_slice()) {
             return delegate();
         }
     }
     let mut json = false;
     let mut help = false;
     for i in 1..n {
-        let a = arg(in args, i);
-        if eq(in a.as_slice(), in "--") {
+        let arg_buf = arg(in args, i);
+        if eq(in arg_buf.as_slice(), in "--") {
             break;
         }
-        if eq(in a.as_slice(), in "--help") || eq(in a.as_slice(), in "-h") {
+        if eq(in arg_buf.as_slice(), in "--help") || eq(in arg_buf.as_slice(), in "-h") {
             help = true;
         }
-        if eq(in a.as_slice(), in "--json") {
+        if eq(in arg_buf.as_slice(), in "--json") {
             json = true;
         }
     }
@@ -1805,31 +1813,31 @@ fn fmt(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[HybridCommands], 
     let mut recovery = false;
     let mut positional = false;
     for i in 1..n {
-        let a = arg(in args, i);
-        let s = a.as_slice();
+        let arg_buf = arg(in args, i);
+        let arg_text = arg_buf.as_slice();
         let mut taken = false;
         if !positional {
-            if eq(in s, in "--check") {
+            if eq(in arg_text, in "--check") {
                 check = true;
                 taken = true;
-            } else if eq(in s, in "--json") {
+            } else if eq(in arg_text, in "--json") {
                 taken = true;
-            } else if eq(in s, in "--recovery") {
+            } else if eq(in arg_text, in "--recovery") {
                 recovery = true;
                 taken = true;
-            } else if eq(in s, in "--") {
+            } else if eq(in arg_text, in "--") {
                 positional = true;
                 taken = true;
-            } else if byte_at(in s, 0) == Ascii::Dash && s.len() != 0 {
-                let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
-                m.extend(in "unknown fmt option '".as_bytes());
-                m.extend(in s);
-                m.push(39);
-                return fmt_failed(in m.as_slice(), json);
+            } else if byte_at(in arg_text, 0) == Ascii::Dash && arg_text.len() != 0 {
+                let mut message: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                message.extend(in "unknown fmt option '".as_bytes());
+                message.extend(in arg_text);
+                message.push(39);
+                return fmt_failed(in message.as_slice(), json);
             }
         }
         if !taken {
-            paths_push(inout paths, in s);
+            paths_push(inout paths, in arg_text);
         }
     }
     let mut stats: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -1873,10 +1881,10 @@ fn fmt(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[HybridCommands], 
     let mut files = paths_new();
     let mut visited: u64 = 0;
     for i in 0..paths.ends.len() {
-        let p = paths_get(in paths, i);
-        if is_dir(in p.as_slice()) {
+        let path = paths_get(in paths, i);
+        if is_dir(in path.as_slice()) {
             let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
-            let walked = walk(in p.as_slice(), inout files, inout visited, inout err);
+            let walked = walk(in path.as_slice(), inout files, inout visited, inout err);
             if walked == walk_delegate() {
                 return delegate();
             }
@@ -1884,7 +1892,7 @@ fn fmt(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[HybridCommands], 
                 return fmt_failed(in err.as_slice(), json);
             }
         } else {
-            paths_push(inout files, in p.as_slice());
+            paths_push(inout files, in path.as_slice());
         }
     }
     let mut changed: u64 = 0;
@@ -1988,10 +1996,10 @@ fn fmt(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[HybridCommands], 
     }
     print(stdout_stream(), in out.as_slice());
     if failed > 0 {
-        let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        push_decimal(inout m, failed);
-        m.extend(in " file(s) could not be formatted".as_bytes());
-        return fail(in m.as_slice());
+        let mut message: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        push_decimal(inout message, failed);
+        message.extend(in " file(s) could not be formatted".as_bytes());
+        return fail(in message.as_slice());
     }
     if needs > 0 {
         return fail(in "source is not canonically formatted".as_bytes());

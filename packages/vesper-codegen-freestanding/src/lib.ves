@@ -39,17 +39,17 @@ fn bad_request() -> ChunkSeq[u8] {
 // Request: target, ram_base, ram_bytes, image_base, stack_bytes, board name.
 // Result: 0, the script.
 pub fn freestanding_script(in req: Slice[u8]) -> ChunkSeq[u8] {
-    let mut r = reader();
-    let target = r.word(in req);
-    let ram_base = r.word(in req);
-    let ram_bytes = r.word(in req);
-    let image_base = r.word(in req);
-    let stack_bytes = r.word(in req);
-    let name = r.span(in req);
-    if r.bad {
+    let mut cursor = reader();
+    let target = cursor.word(in req);
+    let ram_base = cursor.word(in req);
+    let ram_bytes = cursor.word(in req);
+    let image_base = cursor.word(in req);
+    let stack_bytes = cursor.word(in req);
+    let name = cursor.span(in req);
+    if cursor.bad {
         return bad_request();
     }
-    let s = linker_script(
+    let script = linker_script(
         target,
         in req[name.start..span_end(name)],
         ram_base,
@@ -59,28 +59,28 @@ pub fn freestanding_script(in req: Slice[u8]) -> ChunkSeq[u8] {
     );
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     push64(inout out, 0);
-    put_str(inout out, in s.as_slice());
+    put_str(inout out, in script.as_slice());
     out
 }
 
 // Request: target, exit device, exit device base, e_flags. Result: 0, the
 // stub object.
 pub fn freestanding_stub(in req: Slice[u8]) -> ChunkSeq[u8] {
-    let mut r = reader();
-    let target = r.word(in req);
-    let exit = r.word(in req);
-    let exit_base = r.word(in req);
-    let e_flags = r.word(in req);
-    if r.bad {
+    let mut cursor = reader();
+    let target = cursor.word(in req);
+    let exit = cursor.word(in req);
+    let exit_base = cursor.word(in req);
+    let e_flags = cursor.word(in req);
+    if cursor.bad {
         return bad_request();
     }
-    let o = stub_object(target, exit, exit_base, wrapping_u32(e_flags));
-    if o.len() == 0 {
+    let stub = stub_object(target, exit, exit_base, wrapping_u32(e_flags));
+    if stub.len() == 0 {
         return error_target(in "semihosting exit on riscv64 (use the SiFive test device)");
     }
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     push64(inout out, 0);
-    put_str(inout out, in o.as_slice());
+    put_str(inout out, in stub.as_slice());
     out
 }
 
@@ -92,41 +92,41 @@ pub fn freestanding_stub(in req: Slice[u8]) -> ChunkSeq[u8] {
 // offset, file bytes, memory bytes, flags), the symbol count and per symbol
 // (object, name, address, size, global), the trap PCs, the image.
 pub fn freestanding_link(in req: Slice[u8]) -> ChunkSeq[u8] {
-    let mut r = reader();
+    let mut cursor = reader();
     let opts = LinkOptions {
-        target: r.word(in req),
-        image_base: r.word(in req),
-        ram_base: r.word(in req),
-        ram_bytes: r.word(in req),
-        stack_bytes: r.word(in req)
+        target: cursor.word(in req),
+        image_base: cursor.word(in req),
+        ram_base: cursor.word(in req),
+        ram_bytes: cursor.word(in req),
+        stack_bytes: cursor.word(in req)
     };
-    let n = r.word(in req);
-    let mut lk = linker_new(opts);
+    let object_count = cursor.word(in req);
+    let mut linker = linker_new(opts);
     let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut names: ChunkSeq[Span] = ChunkSeq::new[Span]();
     let mut bodies: ChunkSeq[Span] = ChunkSeq::new[Span]();
-    for i in 0..n {
-        if r.bad {
+    for i in 0..object_count {
+        if cursor.bad {
             return bad_request();
         }
-        names.push(r.span(in req));
-        bodies.push(r.span(in req));
+        names.push(cursor.span(in req));
+        bodies.push(cursor.span(in req));
     }
-    let traps = r.word(in req);
+    let trap_count = cursor.word(in req);
     let mut entries: ChunkSeq[TrapEntry] = ChunkSeq::new[TrapEntry]();
-    for i in 0..traps {
-        if r.bad {
+    for i in 0..trap_count {
+        if cursor.bad {
             return bad_request();
         }
-        let object = r.span(in req);
-        let function = r.span(in req);
-        let offset = r.word(in req);
+        let object = cursor.span(in req);
+        let function = cursor.span(in req);
+        let offset = cursor.word(in req);
         entries.push(TrapEntry { object: object, function: function, offset: offset });
     }
-    if r.bad {
+    if cursor.bad {
         return bad_request();
     }
-    for i in 0..n {
+    for i in 0..object_count {
         let name = match names.try_get(i) {
             Option::Some(v) => v,
             Option::None => Span { start: 0, len: 0 },
@@ -135,20 +135,20 @@ pub fn freestanding_link(in req: Slice[u8]) -> ChunkSeq[u8] {
             Option::Some(v) => v,
             Option::None => Span { start: 0, len: 0 },
         };
-        if !lk.add_object(in req, name, body.start, body.len, inout err) {
+        if !linker.add_object(in req, name, body.start, body.len, inout err) {
             return err;
         }
     }
-    if !lk.link(in req, inout err) {
+    if !linker.link(in req, inout err) {
         return err;
     }
     let mut pcs: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    if !lk.patch_traps(in req, in entries, inout pcs, inout err) {
+    if !linker.patch_traps(in req, in entries, inout pcs, inout err) {
         return err;
     }
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     push64(inout out, 0);
-    lk.put_result(in req, in pcs, inout out);
+    linker.put_result(in req, in pcs, inout out);
     out
 }
 
@@ -159,11 +159,11 @@ pub fn freestanding_read_executable(in elf: Slice[u8]) -> ChunkSeq[u8] {
 
 // Request: the object, the symbol, the code. Result: 0, or the error.
 pub fn freestanding_compare_code(in req: Slice[u8]) -> ChunkSeq[u8] {
-    let mut r = reader();
-    let object = r.span(in req);
-    let symbol = r.span(in req);
-    let code = r.span(in req);
-    if r.bad {
+    let mut cursor = reader();
+    let object = cursor.span(in req);
+    let symbol = cursor.span(in req);
+    let code = cursor.span(in req);
+    if cursor.bad {
         return bad_request();
     }
     let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();

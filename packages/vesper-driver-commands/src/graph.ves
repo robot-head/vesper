@@ -18,16 +18,16 @@ pub fn run_graph(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fai
         if i >= n {
             break;
         }
-        let a_buf = arg(in args, i);
-        let a = a_buf.as_slice();
-        if eq(in a, in "--help") || eq(in a, in "-h") {
+        let arg_buf = arg(in args, i);
+        let arg_text = arg_buf.as_slice();
+        if eq(in arg_text, in "--help") || eq(in arg_text, in "-h") {
             print(
                 stdout_stream(),
                 in "Usage: vesper graph [Loom.lock] [--package @org/name] [--invert] [--json|--dot]\n\nInspect declared snapshot metadata without resolving, executing or modifying files.\n--package selects a reachable package and its dependency closure.\n--invert follows dependents instead, and reverses drawn arrows.\n--json emits the versioned inspection report; --dot emits Graphviz DOT.\n"
                     .as_bytes()
             );
             return 0;
-        } else if eq(in a, in "--package") {
+        } else if eq(in arg_text, in "--package") {
             if has_focus {
                 return fail(in "--package may only be specified once".as_bytes());
             }
@@ -35,19 +35,19 @@ pub fn run_graph(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fai
             if i >= n {
                 return fail(in "--package requires a package name".as_bytes());
             }
-            let v_buf = arg(in args, i);
+            let value_buf = arg(in args, i);
             has_focus = true;
-            focus.extend(in v_buf.as_slice());
-        } else if eq(in a, in "--invert") {
+            focus.extend(in value_buf.as_slice());
+        } else if eq(in arg_text, in "--invert") {
             invert = true;
-        } else if eq(in a, in "--json") {
+        } else if eq(in arg_text, in "--json") {
             json = true;
-        } else if eq(in a, in "--dot") {
+        } else if eq(in arg_text, in "--dot") {
             dot = true;
-        } else if a.len() != 0 && byte_at(in a, 0) == 45 {
+        } else if arg_text.len() != 0 && byte_at(in arg_text, 0) == 45 {
             let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
             err.extend(in "unknown graph option '".as_bytes());
-            err.extend(in a);
+            err.extend(in arg_text);
             err.push(39);
             return fail(in err.as_slice());
         } else {
@@ -55,7 +55,7 @@ pub fn run_graph(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fai
                 return fail(in "graph accepts one solution snapshot".as_bytes());
             }
             has_input = true;
-            input.extend(in a);
+            input.extend(in arg_text);
         }
         i = wrapping_add(i, 1);
     }
