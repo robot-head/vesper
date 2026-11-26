@@ -38,12 +38,7 @@ pub fn swap_at[T: mod copy](inout s: Slice[T], i: u64, j: u64) {
 
 // Whether no element of `s` is smaller than the one before it.
 pub fn is_sorted[T: mod copy + Ord](in s: Slice[T]) -> bool {
-    all{
-        {
-            !lt_at(in s, i, wrapping_sub(i, 1))
-        }
-        |i in 1..s.len()
-    }
+    all{ { !lt_at(in s, i, wrapping_sub(i, 1)) } | i in 1..s.len() }
 }
 
 // Insertion sort of `s[lo..hi]`.
