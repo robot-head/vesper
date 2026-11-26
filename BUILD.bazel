@@ -932,6 +932,12 @@ vesper_crate(
             "resources:memory:12288",
             "resources:cpu:2",
         ],
+        # Peaks near 6.8 GiB locally. Unreserved, it ran alongside the other
+        # codegen differentials until the kernel killed the Bazel server
+        # (exit 37) on "Self-host codegen differentials".
+        "test/self_host_native_walk": [
+            "resources:memory:8192",
+        ],
         # The CLI audit subprocess permits Lean -M8192 and runs serially.
         "test/proof_audit_cli": [
             "resources:memory:9216",
