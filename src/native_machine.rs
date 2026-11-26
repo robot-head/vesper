@@ -364,28 +364,30 @@ impl IntegerBlocks<'_> {
         values[value]
     }
 
-    // Both arms must be disjoint paths to returns. The true arm falls through
-    // to its return, and the false arm begins immediately after that return.
+    // Each arm follows its jump chain to a return. If the paths rejoin, the
+    // shared suffix is emitted once per arm with that arm's argument bindings.
+    // Each traversal includes the prefix in its visited set to reject cycles.
     fn returned_from_branch(
         &mut self,
         condition: Value,
         arms: [BlockCall; 2],
         values: Values,
-        visited: &mut SecondaryMap<Block, bool>,
+        mut visited: SecondaryMap<Block, bool>,
     ) -> Option<u64> {
         integer_width(self.value_type(condition))?;
         let condition = values[self.function.dfg.resolve_aliases(condition)]?;
         self.append(IntegerOp::BranchZero, [condition, 0, 0]);
         let [yes_edge, no_edge] = arms;
         let mut yes_values = values.clone();
+        let mut yes_visited = visited.clone();
         let yes_block = self.edge(yes_edge, &mut yes_values)?;
-        let yes_return = self.follow_jumps(yes_block, &mut yes_values, visited)?;
+        let yes_return = self.follow_jumps(yes_block, &mut yes_values, &mut yes_visited)?;
         let yes = self.returned(yes_return, &yes_values)?;
         self.append(IntegerOp::EarlyReturn, [yes, 0, 0]);
 
         let mut no_values = values;
         let no_block = self.edge(no_edge, &mut no_values)?;
-        let no_return = self.follow_jumps(no_block, &mut no_values, visited)?;
+        let no_return = self.follow_jumps(no_block, &mut no_values, &mut visited)?;
         self.returned(no_return, &no_values)
     }
 }
@@ -445,7 +447,7 @@ pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
             opcode: Opcode::Brif,
             arg,
             blocks: arms,
-        } => blocks.returned_from_branch(arg, arms, values, &mut visited)?,
+        } => blocks.returned_from_branch(arg, arms, values, visited)?,
         _ => blocks.returned(terminator, &values)?,
     };
     blocks.words[ARGUMENT_COUNT] = arity as u64;

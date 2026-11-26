@@ -34,6 +34,7 @@ enum Case {
     RetainedLoad,
     MemoryStores,
     GuardedMemory,
+    JoinedMemory,
     CompareImmediate,
     Select,
     SelectKeepingArms,
@@ -118,6 +119,7 @@ fn integer_backend_matches_cranelift_results() {
         Case::RetainedLoad,
         Case::MemoryStores,
         Case::GuardedMemory,
+        Case::JoinedMemory,
     ];
     let cases: Vec<_> = cases
         .into_iter()
@@ -356,6 +358,35 @@ fn integer_backend_matches_cranelift_results() {
                 let original = builder.ins().bxor(d, f);
                 builder.ins().isub(shared, original)
             }
+            Case::JoinedMemory => {
+                let flags = MemFlags::new().with_notrap();
+                let yes = builder.create_block();
+                let no = builder.create_block();
+                let join = builder.create_block();
+                let left = builder.append_block_param(join, types::I64);
+                let right = builder.append_block_param(join, types::I64);
+                let byte = builder.append_block_param(join, types::I8);
+                let predicate = builder.ins().ireduce(types::I8, b);
+                builder.ins().brif(predicate, yes, &[], no, &[]);
+                builder.switch_to_block(yes);
+                let loaded = builder.ins().load(types::I64, flags, a, -13);
+                builder
+                    .ins()
+                    .jump(join, &[loaded.into(), c.into(), predicate.into()]);
+                builder.switch_to_block(no);
+                let small = builder.ins().ireduce(types::I8, d);
+                builder
+                    .ins()
+                    .jump(join, &[f.into(), d.into(), small.into()]);
+                builder.switch_to_block(join);
+                let old = builder.ins().load(types::I64, flags, e, 0);
+                let extension = builder.ins().sextend(types::I64, byte);
+                let delta = builder.ins().isub(left, right);
+                let delta = builder.ins().iadd(delta, extension);
+                let written = builder.ins().iadd(old, delta);
+                builder.ins().store(flags, written, e, 0);
+                written
+            }
             Case::CompareImmediate => {
                 let byte = builder.ins().ireduce(types::I8, a);
                 let zero = builder.ins().icmp_imm(IntCC::Equal, byte, 0);
@@ -412,27 +443,33 @@ fn integer_backend_matches_cranelift_results() {
         let candidate: Fn6 =
             unsafe { std::mem::transmute(module.get_finalized_function(candidate)) };
         let memory: [u8; 512] = std::array::from_fn(|i| i.wrapping_mul(97) as u8);
-        if matches!(case, Case::GuardedMemory) {
+        if matches!(case, Case::GuardedMemory | Case::JoinedMemory) {
             for condition in [0, 0x100, 0x101, u64::MAX] {
                 let mut reference_memory = memory;
                 let mut generated_memory = memory;
                 let executes_memory = condition as u8 != 0;
                 let run = |function: Fn6, memory: &mut [u8; 512]| {
-                    let address = if executes_memory {
-                        memory[256..].as_mut_ptr() as u64
-                    } else {
-                        0
-                    };
-                    // The dereference is in the taken arm only. Its offset
-                    // covers bytes within the live buffer on that path.
-                    unsafe { function(address, condition, 3, 5, 7, 11) }
+                    let base = memory.as_mut_ptr();
+                    // The first address is read only when the branch is
+                    // taken. The join uses a separate region of this buffer.
+                    unsafe {
+                        let address = if executes_memory {
+                            base.add(256) as u64
+                        } else {
+                            0
+                        };
+                        function(address, condition, 3, 5, base.add(320) as u64, 11)
+                    }
                 };
                 assert_eq!(
                     run(candidate, &mut generated_memory),
                     run(baseline, &mut reference_memory),
                 );
                 assert_eq!(generated_memory, reference_memory);
-                assert_eq!(generated_memory != memory, executes_memory);
+                assert_eq!(
+                    generated_memory != memory,
+                    executes_memory || matches!(case, Case::JoinedMemory),
+                );
             }
             continue;
         }
