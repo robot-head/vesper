@@ -129,9 +129,13 @@ vesper_crate(
             "//crates/vesper-prism-h3:files",
             "//crates/vesper-semver:files",
         ],
+        # sort imports `guard` and `when` from @vesper-std/sugar, so testing
+        # sort/src/unstable.ves resolves sort's manifest and its dependency.
         "test/test_runner_cli": glob([
             "packages/vesper-std/*/src/*.ves",
         ]) + [
+            "packages/vesper-std/sort/Loom.toml",
+            "packages/vesper-std/sugar/Loom.toml",
             "//crates/vesper-crucible:files",
             "//crates/vesper-lean-syntax:files",
             "//crates/vesper-simpulse:files",
