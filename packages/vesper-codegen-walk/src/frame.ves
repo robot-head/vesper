@@ -421,7 +421,7 @@ pub fn frame_plan(
     inout o: ChunkSeq[u8],
     inout err: Errs
 ) -> bool {
-    let info = d.fn_info(f.f);
+    let info = d.fn_info(f.func_index);
     let fail_record = fail_only(inout t, in names, in wd, k, in f);
     let caller_slot = uses_caller_slot(in d, info);
     let result = layout_facts(inout ls, inout t, inout names, in wd, f.result, inout err);
@@ -546,7 +546,7 @@ pub fn frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
     let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
     for ti in 0..d.tasks.len() {
         let task = d.task(ti);
-        if task.more {
+        if task.more_roots {
             // A root of the library task before it.
             continue;
         }
@@ -563,7 +563,7 @@ pub fn frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
         if task.library {
             let mut tj = add(ti, 1);
             loop {
-                if tj >= d.tasks.len() || !d.task(tj).more {
+                if tj >= d.tasks.len() || !d.task(tj).more_roots {
                     break;
                 }
                 roots.push(d.task(tj).entry);
@@ -571,7 +571,7 @@ pub fn frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
             }
         }
         let trace_ok = !task.library
-            && task.trace
+            && task.trace_host
             && trace_entry_ok(in c.types, in c.names, in d, k, task.entry);
         let found = discover_roots(
             inout c.types,
