@@ -53,35 +53,35 @@ pub const EXPORT_FUNC: u8 = 0;
 pub const EXPORT_MEMORY: u8 = 2;
 
 // A type definition: a function type (`vals[p0..p0+pn]` params, then
-// `rn` results) or a continuation type over function type `func`.
+// `result_count` results) or a continuation type over function type `func`.
 pub copy struct TypeDef {
     kind: u8,
     p0: u64,
     pn: u64,
-    rn: u64,
+    result_count: u64,
     func: u32,
 }
 
 pub copy struct ImportRow {
     // module and name: text[m0..m0+mn], text[n0..n0+nn]
-    m0: u64,
-    mn: u64,
-    n0: u64,
-    nn: u64,
+    module_start: u64,
+    module_len: u64,
+    name_start: u64,
+    name_len: u64,
     ty: u32,
 }
 
 pub copy struct FuncRow {
     ty: u32,
     // body bytes: bodies[b0..b0+bn]; `defined` once given
-    b0: u64,
-    bn: u64,
+    body_start: u64,
+    body_len: u64,
     defined: bool,
 }
 
 pub copy struct ExportRow {
-    n0: u64,
-    nn: u64,
+    name_start: u64,
+    name_len: u64,
     kind: u8,
     index: u32,
 }
@@ -156,14 +156,14 @@ impl Builder {
     fn type_def(in self, i: u64) -> TypeDef {
         match self.types.try_get(i) {
             Option::Some(def) => def,
-            Option::None => TypeDef { kind: TD_FUNC, p0: 0, pn: 0, rn: 0, func: 0 },
+            Option::None => TypeDef { kind: TD_FUNC, p0: 0, pn: 0, result_count: 0, func: 0 },
         }
     }
 
     fn func_row(in self, i: u64) -> FuncRow {
         match self.funcs.try_get(i) {
             Option::Some(row) => row,
-            Option::None => FuncRow { ty: 0, b0: 0, bn: 0, defined: false },
+            Option::None => FuncRow { ty: 0, body_start: 0, body_len: 0, defined: false },
         }
     }
 
@@ -171,7 +171,7 @@ impl Builder {
     pub fn func_type(inout self, in params: ChunkSeq[ValTy], in results: ChunkSeq[ValTy]) -> u32 {
         for i in 0..self.types.len() {
             let def = self.type_def(i);
-            if def.kind == TD_FUNC && def.pn == params.len() && def.rn == results.len() {
+            if def.kind == TD_FUNC && def.pn == params.len() && def.result_count == results.len() {
                 let mut same = true;
                 for j in 0..def.pn {
                     if !same_val(
@@ -181,7 +181,7 @@ impl Builder {
                         same = false;
                     }
                 }
-                for j in 0..def.rn {
+                for j in 0..def.result_count {
                     let val_index = wrapping_add(wrapping_add(def.p0, def.pn), j);
                     if !same_val(val_at(in self.vals, val_index), val_at(in results, j)) {
                         same = false;
@@ -201,7 +201,13 @@ impl Builder {
         }
         let i = self.types.len();
         self.types.push(
-            TypeDef { kind: TD_FUNC, p0: first_val, pn: params.len(), rn: results.len(), func: 0 }
+            TypeDef {
+                kind: TD_FUNC,
+                p0: first_val,
+                pn: params.len(),
+                result_count: results.len(),
+                func: 0
+            }
         );
         wrapping_u32(i)
     }
@@ -233,12 +239,12 @@ impl Builder {
             }
         }
         let i = self.types.len();
-        self.types.push(TypeDef { kind: TD_CONT, p0: 0, pn: 0, rn: 0, func: func });
+        self.types.push(TypeDef { kind: TD_CONT, p0: 0, pn: 0, result_count: 0, func: func });
         wrapping_u32(i)
     }
 
     pub fn declare_typed(inout self, ty: u32) -> u32 {
-        self.funcs.push(FuncRow { ty: ty, b0: 0, bn: 0, defined: false });
+        self.funcs.push(FuncRow { ty: ty, body_start: 0, body_len: 0, defined: false });
         wrapping_u32(wrapping_sub(wrapping_add(self.imports.len(), self.funcs.len()), 1))
     }
 
@@ -279,7 +285,13 @@ impl Builder {
         let module_at = self.put_text(in module);
         let name_at = self.put_text(in name);
         self.imports.push(
-            ImportRow { m0: module_at, mn: module.len(), n0: name_at, nn: name.len(), ty: ty }
+            ImportRow {
+                module_start: module_at,
+                module_len: module.len(),
+                name_start: name_at,
+                name_len: name.len(),
+                ty: ty
+            }
         );
         wrapping_u32(wrapping_sub(self.imports.len(), 1))
     }
@@ -293,7 +305,12 @@ impl Builder {
         let old_row = self.func_row(i);
         let body_at = self.bodies.len();
         append(inout self.bodies, in body);
-        let row = FuncRow { ty: old_row.ty, b0: body_at, bn: body.len(), defined: true };
+        let row = FuncRow {
+            ty: old_row.ty,
+            body_start: body_at,
+            body_len: body.len(),
+            defined: true
+        };
         let ok = self.funcs.try_set(i, row);
     }
 
@@ -356,8 +373,9 @@ impl Builder {
 
     pub fn export_func(inout self, in name: Slice[u8], func: u32) {
         let name_at = self.put_text(in name);
-        self.exports
-            .push(ExportRow { n0: name_at, nn: name.len(), kind: EXPORT_FUNC, index: func });
+        self.exports.push(
+            ExportRow { name_start: name_at, name_len: name.len(), kind: EXPORT_FUNC, index: func }
+        );
     }
 
     // The module's bytes (`Builder::finish`).
@@ -382,8 +400,8 @@ impl Builder {
                 for j in 0..def.pn {
                     put_valtype(inout body, val_at(in self.vals, wrapping_add(def.p0, j)));
                 }
-                uleb(inout body, def.rn);
-                for j in 0..def.rn {
+                uleb(inout body, def.result_count);
+                for j in 0..def.result_count {
                     put_valtype(
                         inout body,
                         val_at(in self.vals, wrapping_add(wrapping_add(def.p0, def.pn), j))
@@ -402,10 +420,20 @@ impl Builder {
             for i in 0..self.imports.len() {
                 match self.imports.try_get(i) {
                     Option::Some(import_row) => {
-                        uleb(inout body, import_row.mn);
-                        copy_range(inout body, in self.text, import_row.m0, import_row.mn);
-                        uleb(inout body, import_row.nn);
-                        copy_range(inout body, in self.text, import_row.n0, import_row.nn);
+                        uleb(inout body, import_row.module_len);
+                        copy_range(
+                            inout body,
+                            in self.text,
+                            import_row.module_start,
+                            import_row.module_len
+                        );
+                        uleb(inout body, import_row.name_len);
+                        copy_range(
+                            inout body,
+                            in self.text,
+                            import_row.name_start,
+                            import_row.name_len
+                        );
                         body.push(IMPORT_FUNC);
                         uleb(inout body, widen_u64(import_row.ty));
                     },
@@ -480,8 +508,13 @@ impl Builder {
         for i in 0..self.exports.len() {
             match self.exports.try_get(i) {
                 Option::Some(export_row) => {
-                    uleb(inout body, export_row.nn);
-                    copy_range(inout body, in self.text, export_row.n0, export_row.nn);
+                    uleb(inout body, export_row.name_len);
+                    copy_range(
+                        inout body,
+                        in self.text,
+                        export_row.name_start,
+                        export_row.name_len
+                    );
                     body.push(export_row.kind);
                     uleb(inout body, widen_u64(export_row.index));
                 },
@@ -533,8 +566,8 @@ impl Builder {
             if !row.defined {
                 Fail::raise(werr(K_INVALID, 0, 3));
             }
-            uleb(inout body, row.bn);
-            copy_range(inout body, in self.bodies, row.b0, row.bn);
+            uleb(inout body, row.body_len);
+            copy_range(inout body, in self.bodies, row.body_start, row.body_len);
         }
         section(inout out, S_CODE, in body);
         if self.data.len() != 0 {

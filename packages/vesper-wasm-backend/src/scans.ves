@@ -60,65 +60,65 @@ impl L {
         };
         let dest = self.dest(dest_val);
         let i = self.const_local(0);
-        self.e.code.open(OP_BLOCK);
-        self.e.code.open(OP_LOOP);
-        self.e.code.get(i);
-        self.e.code.get(n);
-        self.e.code.op(OP_I64_GE_U);
-        self.e.code.open(OP_IF);
+        self.cur_fn.code.open(OP_BLOCK);
+        self.cur_fn.code.open(OP_LOOP);
+        self.cur_fn.code.get(i);
+        self.cur_fn.code.get(n);
+        self.cur_fn.code.op(OP_I64_GE_U);
+        self.cur_fn.code.open(OP_IF);
         self.option_into(dest, ty, NONE32);
-        self.e.code.br(2);
-        self.e.code.op(OP_END);
+        self.cur_fn.code.br(2);
+        self.cur_fn.code.op(OP_END);
         let byte_val = self.elem_load(base, i, 1);
         if code == sq_find_byte() {
-            self.e.code.get(byte_val);
-            self.e.code.get(arg1);
-            self.e.code.op(OP_I64_EQ);
+            self.cur_fn.code.get(byte_val);
+            self.cur_fn.code.get(arg1);
+            self.cur_fn.code.op(OP_I64_EQ);
         } else if code == sq_find_not_in() {
             // in the class: bit b of lo (b < 64), bit b - 64 of hi
             // (b < 128), else `high`; the scan stops outside it
             self.class_bit(arg1, byte_val);
             self.class_bit(arg2, byte_val);
-            self.e.code.get(arg3);
-            self.e.code.get(byte_val);
-            self.e.code.i64_const(128);
-            self.e.code.op(OP_I64_LT_U);
-            self.e.code.op(OP_SELECT);
-            self.e.code.get(byte_val);
-            self.e.code.i64_const(64);
-            self.e.code.op(OP_I64_LT_U);
-            self.e.code.op(OP_SELECT);
-            self.e.code.op(OP_I64_EQZ);
+            self.cur_fn.code.get(arg3);
+            self.cur_fn.code.get(byte_val);
+            self.cur_fn.code.i64_const(128);
+            self.cur_fn.code.op(OP_I64_LT_U);
+            self.cur_fn.code.op(OP_SELECT);
+            self.cur_fn.code.get(byte_val);
+            self.cur_fn.code.i64_const(64);
+            self.cur_fn.code.op(OP_I64_LT_U);
+            self.cur_fn.code.op(OP_SELECT);
+            self.cur_fn.code.op(OP_I64_EQZ);
         } else {
-            self.e.code.get(byte_val);
-            self.e.code.get(arg1);
-            self.e.code.op(OP_I64_EQ);
-            self.e.code.get(byte_val);
-            self.e.code.get(arg2);
-            self.e.code.op(OP_I64_EQ);
-            self.e.code.op(OP_I32_OR);
+            self.cur_fn.code.get(byte_val);
+            self.cur_fn.code.get(arg1);
+            self.cur_fn.code.op(OP_I64_EQ);
+            self.cur_fn.code.get(byte_val);
+            self.cur_fn.code.get(arg2);
+            self.cur_fn.code.op(OP_I64_EQ);
+            self.cur_fn.code.op(OP_I32_OR);
         }
-        self.e.code.open(OP_IF);
+        self.cur_fn.code.open(OP_IF);
         self.option_into(dest, ty, i);
-        self.e.code.br(2);
-        self.e.code.op(OP_END);
-        self.e.code.get(i);
-        self.e.code.i64_const(1);
-        self.e.code.op(OP_I64_ADD);
-        self.e.code.set(i);
-        self.e.code.br(0);
-        self.e.code.op(OP_END);
-        self.e.code.op(OP_END);
+        self.cur_fn.code.br(2);
+        self.cur_fn.code.op(OP_END);
+        self.cur_fn.code.get(i);
+        self.cur_fn.code.i64_const(1);
+        self.cur_fn.code.op(OP_I64_ADD);
+        self.cur_fn.code.set(i);
+        self.cur_fn.code.br(0);
+        self.cur_fn.code.op(OP_END);
+        self.cur_fn.code.op(OP_END);
     }
 
     // `(mask >> (b & 63)) & 1` on the stack.
     fn class_bit(inout self, mask: u32, byte_val: u32) {
-        self.e.code.get(mask);
-        self.e.code.get(byte_val);
-        self.e.code.i64_const(63);
-        self.e.code.op(OP_I64_AND);
-        self.e.code.op(OP_I64_SHR_U);
-        self.e.code.i64_const(1);
-        self.e.code.op(OP_I64_AND);
+        self.cur_fn.code.get(mask);
+        self.cur_fn.code.get(byte_val);
+        self.cur_fn.code.i64_const(63);
+        self.cur_fn.code.op(OP_I64_AND);
+        self.cur_fn.code.op(OP_I64_SHR_U);
+        self.cur_fn.code.i64_const(1);
+        self.cur_fn.code.op(OP_I64_AND);
     }
 }

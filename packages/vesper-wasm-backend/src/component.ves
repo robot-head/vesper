@@ -93,11 +93,11 @@ fn is_upper(byte_val: u8) -> bool {
 
 // Close the current word of `ident` into `out`, merging a word that
 // starts with a digit into the one before it.
-fn ident_word(inout out: ChunkSeq[u8], inout cur: ChunkSeq[u8], inout merged: u64) {
-    if cur.len() == 0 {
+fn ident_word(inout out: ChunkSeq[u8], inout word: ChunkSeq[u8], inout merged: u64) {
+    if word.len() == 0 {
         return;
     }
-    let first = match cur.try_get(0) {
+    let first = match word.try_get(0) {
         Option::Some(byte_val) => byte_val,
         Option::None => 0,
     };
@@ -112,18 +112,18 @@ fn ident_word(inout out: ChunkSeq[u8], inout cur: ChunkSeq[u8], inout merged: u6
         }
         merged = add(merged, 1);
     }
-    for i in 0..cur.len() {
-        match cur.try_get(i) {
+    for i in 0..word.len() {
+        match word.try_get(i) {
             Option::Some(byte_val) => out.push(byte_val),
             Option::None => {},
         }
     }
-    cur = ChunkSeq::new[u8]();
+    word = ChunkSeq::new[u8]();
 }
 
 // `component::ident`: a WIT identifier (kebab-case) for a Vesper name.
 pub fn ident(in name: Slice[u8], inout out: ChunkSeq[u8]) {
-    let mut cur = ChunkSeq::new[u8]();
+    let mut word = ChunkSeq::new[u8]();
     let mut merged: u64 = 0;
     let mut prev_lower = false;
     for i in 0..name.len() {
@@ -133,40 +133,40 @@ pub fn ident(in name: Slice[u8], inout out: ChunkSeq[u8]) {
         };
         let alnum = is_digit(byte_val) || is_lower(byte_val) || is_upper(byte_val);
         if !alnum {
-            ident_word(inout out, inout cur, inout merged);
+            ident_word(inout out, inout word, inout merged);
             prev_lower = false;
             continue;
         }
-        if is_upper(byte_val) && prev_lower && cur.len() > 0 {
-            ident_word(inout out, inout cur, inout merged);
+        if is_upper(byte_val) && prev_lower && word.len() > 0 {
+            ident_word(inout out, inout word, inout merged);
         }
         prev_lower = is_lower(byte_val) || is_digit(byte_val);
         if is_upper(byte_val) {
-            cur.push(wrapping_add(byte_val, 32));
+            word.push(wrapping_add(byte_val, 32));
         } else {
-            cur.push(byte_val);
+            word.push(byte_val);
         }
     }
-    ident_word(inout out, inout cur, inout merged);
+    ident_word(inout out, inout word, inout merged);
     if merged == 0 {
         text(inout out, in "unnamed".as_bytes());
     }
 }
 
-fn ident_sym(in l: L, sym_id: u32, inout out: ChunkSeq[u8]) {
+fn ident_sym(in lowerer: L, sym_id: u32, inout out: ChunkSeq[u8]) {
     let mut name_bytes = ChunkSeq::new[u8]();
-    l.cx.write_name(sym_id, inout name_bytes);
+    lowerer.ctx.write_name(sym_id, inout name_bytes);
     ident(in name_bytes.as_slice(), inout out);
 }
 
 // `component::mangle`.
-fn mangle(in l: L, ty: u32, inout out: ChunkSeq[u8]) {
-    let node = l.cx.types.node(ty);
+fn mangle(in lowerer: L, ty: u32, inout out: ChunkSeq[u8]) {
+    let node = lowerer.ctx.types.node(ty);
     if node.kind == TyKind::Named {
-        ident_sym(in l, node.name, inout out);
+        ident_sym(in lowerer, node.name, inout out);
         for i in 0..w(node.n) {
             out.push(45);
-            mangle(in l, l.cx.types.arg(ty, i), inout out);
+            mangle(in lowerer, lowerer.ctx.types.arg(ty, i), inout out);
         }
         return;
     }
@@ -174,7 +174,7 @@ fn mangle(in l: L, ty: u32, inout out: ChunkSeq[u8]) {
         text(inout out, in "tuple".as_bytes());
         for i in 0..w(node.n) {
             out.push(45);
-            mangle(in l, l.cx.types.arg(ty, i), inout out);
+            mangle(in lowerer, lowerer.ctx.types.arg(ty, i), inout out);
         }
         return;
     }
@@ -205,10 +205,10 @@ fn set32(inout table: ChunkSeq[u32], key: u32, value: u32) {
     let ok = table.try_set(i, value);
 }
 
-fn display_key(inout l: L, ty: u32) -> u32 {
+fn display_key(inout lowerer: L, ty: u32) -> u32 {
     let mut display = ChunkSeq::new[u8]();
-    l.cx.show(ty, inout display);
-    l.cx.intern(in display)
+    lowerer.ctx.show(ty, inout display);
+    lowerer.ctx.intern(in display)
 }
 
 impl Wit {
@@ -253,13 +253,13 @@ impl Wit {
     }
 
     // `Wit::ty`: the WIT type expression of `resolved`, written to `out`.
-    pub fn ty(inout self, inout l: L, raw_ty: u32, inout out: ChunkSeq[u8]) eff [Fail[WErr]] {
-        let resolved = l.cx.default_ty(raw_ty);
-        let key = display_key(inout l, resolved);
+    pub fn ty(inout self, inout lowerer: L, raw_ty: u32, inout out: ChunkSeq[u8]) eff [Fail[WErr]] {
+        let resolved = lowerer.ctx.default_ty(raw_ty);
+        let key = display_key(inout lowerer, resolved);
         let named = get32(in self.names, key);
         if named != 0 {
             out.push(37);
-            l.cx.write_name(wrapping_sub(named, 1), inout out);
+            lowerer.ctx.write_name(wrapping_sub(named, 1), inout out);
             return;
         }
         if self.is_active(key) {
@@ -269,7 +269,7 @@ impl Wit {
         if self.active.len() > 32 {
             Fail::raise(export_err(1));
         }
-        let shape = l.cx.shape(resolved);
+        let shape = lowerer.ctx.shape(resolved);
         if shape.kind == SH_SCALAR {
             let scalar = shape.scalar;
             if scalar == SC_I64 {
@@ -291,23 +291,23 @@ impl Wit {
             text(inout out, in "string".as_bytes());
         } else if shape.kind == SH_TUPLE {
             text(inout out, in "tuple<".as_bytes());
-            let n = l.cx.arity(shape.ty);
+            let n = lowerer.ctx.arity(shape.ty);
             for i in 0..n {
                 if i > 0 {
                     text(inout out, in ", ".as_bytes());
                 }
-                let elem_ty = l.cx.tuple_elem(shape.ty, i);
-                self.ty(inout l, elem_ty, inout out);
+                let elem_ty = lowerer.ctx.tuple_elem(shape.ty, i);
+                self.ty(inout lowerer, elem_ty, inout out);
             }
             out.push(62);
         } else if shape.kind == SH_STRUCT {
-            if l.cx.field_count(shape, 0) == 0 {
+            if lowerer.ctx.field_count(shape, 0) == 0 {
                 Fail::raise(export_err(3));
             }
             let mut name = ChunkSeq::new[u8]();
-            mangle(in l, resolved, inout name);
+            mangle(in lowerer, resolved, inout name);
             let mut body = ChunkSeq::new[u8]();
-            self.fields(inout l, shape, 0, inout body);
+            self.fields(inout lowerer, shape, 0, inout body);
             let mut def_text = ChunkSeq::new[u8]();
             text(inout def_text, in "record %".as_bytes());
             text(inout def_text, in name.as_slice());
@@ -315,22 +315,22 @@ impl Wit {
             text(inout def_text, in body.as_slice());
             text(inout def_text, in " }".as_bytes());
             self.def(in def_text);
-            let name_sym = l.cx.intern(in name);
+            let name_sym = lowerer.ctx.intern(in name);
             set32(inout self.names, key, inc32(name_sym));
             out.push(37);
             text(inout out, in name.as_slice());
         } else if shape.kind == SH_ENUM {
             let mut name = ChunkSeq::new[u8]();
-            mangle(in l, resolved, inout name);
+            mangle(in lowerer, resolved, inout name);
             let mut cases = ChunkSeq::new[u8]();
-            let n_variants = l.cx.variant_count(shape);
+            let n_variants = lowerer.ctx.variant_count(shape);
             for case_index in 0..n_variants {
                 if case_index > 0 {
                     text(inout cases, in ", ".as_bytes());
                 }
-                let variant = l.cx.variant(shape, case_index);
+                let variant = lowerer.ctx.variant(shape, case_index);
                 let mut case = ChunkSeq::new[u8]();
-                ident_sym(in l, variant.name, inout case);
+                ident_sym(in lowerer, variant.name, inout case);
                 let n_fields = w(variant.fc);
                 cases.push(37);
                 text(inout cases, in case.as_slice());
@@ -343,7 +343,7 @@ impl Wit {
                     rec.push(45);
                     text(inout rec, in case.as_slice());
                     let mut body = ChunkSeq::new[u8]();
-                    self.fields(inout l, shape, case_index, inout body);
+                    self.fields(inout lowerer, shape, case_index, inout body);
                     let mut def_text = ChunkSeq::new[u8]();
                     text(inout def_text, in "record %".as_bytes());
                     text(inout def_text, in rec.as_slice());
@@ -355,9 +355,9 @@ impl Wit {
                     text(inout cases, in rec.as_slice());
                     cases.push(41);
                 } else if n_fields == 1 {
-                    let (_, field_ty) = l.cx.variant_field(shape, case_index, 0);
+                    let (_, field_ty) = lowerer.ctx.variant_field(shape, case_index, 0);
                     cases.push(40);
-                    self.ty(inout l, field_ty, inout cases);
+                    self.ty(inout lowerer, field_ty, inout cases);
                     cases.push(41);
                 } else {
                     text(inout cases, in "(tuple<".as_bytes());
@@ -365,8 +365,8 @@ impl Wit {
                         if i > 0 {
                             text(inout cases, in ", ".as_bytes());
                         }
-                        let (_, field_ty) = l.cx.variant_field(shape, case_index, i);
-                        self.ty(inout l, field_ty, inout cases);
+                        let (_, field_ty) = lowerer.ctx.variant_field(shape, case_index, i);
+                        self.ty(inout lowerer, field_ty, inout cases);
                     }
                     text(inout cases, in ">)".as_bytes());
                 }
@@ -378,7 +378,7 @@ impl Wit {
             text(inout def_text, in cases.as_slice());
             text(inout def_text, in " }".as_bytes());
             self.def(in def_text);
-            let name_sym = l.cx.intern(in name);
+            let name_sym = lowerer.ctx.intern(in name);
             set32(inout self.names, key, inc32(name_sym));
             out.push(37);
             text(inout out, in name.as_slice());
@@ -389,16 +389,20 @@ impl Wit {
     }
 
     // `Wit::fields`: `%name: type, ...` of variant `variant` of `shape`.
-    fn fields(inout self, inout l: L, shape: Shape, variant: u64, inout out: ChunkSeq[u8]) eff [
-        Fail[WErr]
-    ] {
+    fn fields(
+        inout self,
+        inout lowerer: L,
+        shape: Shape,
+        variant: u64,
+        inout out: ChunkSeq[u8]
+    ) eff [Fail[WErr]] {
         let mut seen = ChunkSeq::new[u32]();
-        let n = l.cx.field_count(shape, variant);
+        let n = lowerer.ctx.field_count(shape, variant);
         for i in 0..n {
-            let (fname, field_ty) = l.cx.variant_field(shape, variant, i);
+            let (fname, field_ty) = lowerer.ctx.variant_field(shape, variant, i);
             let mut field_ident = ChunkSeq::new[u8]();
-            ident_sym(in l, fname, inout field_ident);
-            let field_sym = l.cx.intern(in field_ident);
+            ident_sym(in lowerer, fname, inout field_ident);
+            let field_sym = lowerer.ctx.intern(in field_ident);
             for j in 0..seen.len() {
                 match seen.try_get(j) {
                     Option::Some(seen_sym) => {
@@ -416,7 +420,7 @@ impl Wit {
             out.push(37);
             text(inout out, in field_ident.as_slice());
             text(inout out, in ": ".as_bytes());
-            self.ty(inout l, field_ty, inout out);
+            self.ty(inout lowerer, field_ty, inout out);
         }
     }
 }
@@ -436,17 +440,17 @@ fn max64(lhs: u64, rhs: u64) -> u64 {
 }
 
 // The member types of a tuple, of a struct or of variant `variant` of an enum.
-fn members(inout l: L, shape: Shape, variant: u64) -> ChunkSeq[u32] {
+fn members(inout lowerer: L, shape: Shape, variant: u64) -> ChunkSeq[u32] {
     let mut tys = ChunkSeq::new[u32]();
     if shape.kind == SH_TUPLE {
-        for i in 0..l.cx.arity(shape.ty) {
-            tys.push(l.cx.tuple_elem(shape.ty, i));
+        for i in 0..lowerer.ctx.arity(shape.ty) {
+            tys.push(lowerer.ctx.tuple_elem(shape.ty, i));
         }
         return tys;
     }
-    let n = l.cx.field_count(shape, variant);
+    let n = lowerer.ctx.field_count(shape, variant);
     for i in 0..n {
-        let (_, ty) = l.cx.variant_field(shape, variant, i);
+        let (_, ty) = lowerer.ctx.variant_field(shape, variant, i);
         tys.push(ty);
     }
     tys
@@ -478,8 +482,8 @@ fn disc_of(cases: u64) -> (u64, u64) {
 }
 
 // `size_align`: canonical (size, alignment) of the WIT image of `ty`.
-fn size_align(inout l: L, ty: u32) -> (u64, u64) eff [Fail[WErr]] {
-    let shape = l.cx.shape(ty);
+fn size_align(inout lowerer: L, ty: u32) -> (u64, u64) eff [Fail[WErr]] {
+    let shape = lowerer.ctx.shape(ty);
     if shape.kind == SH_SCALAR {
         let scalar = shape.scalar;
         if scalar == SC_BOOL || scalar == SC_U8 {
@@ -497,18 +501,18 @@ fn size_align(inout l: L, ty: u32) -> (u64, u64) eff [Fail[WErr]] {
         return (8, 4);
     }
     if shape.kind == SH_TUPLE || shape.kind == SH_STRUCT {
-        let tys = members(inout l, shape, 0);
-        let (layout, _) = record(inout l, in tys);
+        let tys = members(inout lowerer, shape, 0);
+        let (layout, _) = record(inout lowerer, in tys);
         return layout;
     }
     if shape.kind == SH_ENUM {
-        let n_variants = l.cx.variant_count(shape);
+        let n_variants = lowerer.ctx.variant_count(shape);
         let (disc, _) = disc_of(n_variants);
         let mut size: u64 = 0;
         let mut align = disc;
         for case_index in 0..n_variants {
-            let tys = members(inout l, shape, case_index);
-            let ((case_size, case_align), _) = record(inout l, in tys);
+            let tys = members(inout lowerer, shape, case_index);
+            let ((case_size, case_align), _) = record(inout lowerer, in tys);
             size = max64(size, case_size);
             align = max64(align, case_align);
         }
@@ -520,12 +524,12 @@ fn size_align(inout l: L, ty: u32) -> (u64, u64) eff [Fail[WErr]] {
 }
 
 // `record`: ((size, align), field offsets) of a record of `tys`.
-fn record(inout l: L, in tys: ChunkSeq[u32]) -> ((u64, u64), ChunkSeq[u64]) eff [Fail[WErr]] {
+fn record(inout lowerer: L, in tys: ChunkSeq[u32]) -> ((u64, u64), ChunkSeq[u64]) eff [Fail[WErr]] {
     let mut offset: u64 = 0;
     let mut align: u64 = 1;
     let mut offsets = ChunkSeq::new[u64]();
     for i in 0..tys.len() {
-        let (member_size, member_align) = size_align(inout l, t_at(in tys, i));
+        let (member_size, member_align) = size_align(inout lowerer, t_at(in tys, i));
         offset = align_to(offset, member_align);
         offsets.push(offset);
         offset = wrapping_add(offset, member_size);
@@ -534,8 +538,8 @@ fn record(inout l: L, in tys: ChunkSeq[u32]) -> ((u64, u64), ChunkSeq[u64]) eff 
     ((align_to(offset, align), align), offsets)
 }
 
-fn flat_count(inout l: L, ty: u32) -> u64 eff [Fail[WErr]] {
-    let shape = l.cx.shape(ty);
+fn flat_count(inout lowerer: L, ty: u32) -> u64 eff [Fail[WErr]] {
+    let shape = lowerer.ctx.shape(ty);
     if shape.kind == SH_SCALAR {
         return 1;
     }
@@ -543,20 +547,20 @@ fn flat_count(inout l: L, ty: u32) -> u64 eff [Fail[WErr]] {
         return 2;
     }
     if shape.kind == SH_TUPLE || shape.kind == SH_STRUCT {
-        let tys = members(inout l, shape, 0);
+        let tys = members(inout lowerer, shape, 0);
         let mut n: u64 = 0;
         for i in 0..tys.len() {
-            n = wrapping_add(n, flat_count(inout l, t_at(in tys, i)));
+            n = wrapping_add(n, flat_count(inout lowerer, t_at(in tys, i)));
         }
         return n;
     }
     if shape.kind == SH_ENUM {
         let mut max_flat: u64 = 0;
-        for case_index in 0..l.cx.variant_count(shape) {
-            let tys = members(inout l, shape, case_index);
+        for case_index in 0..lowerer.ctx.variant_count(shape) {
+            let tys = members(inout lowerer, shape, case_index);
             let mut n: u64 = 0;
             for i in 0..tys.len() {
-                n = wrapping_add(n, flat_count(inout l, t_at(in tys, i)));
+                n = wrapping_add(n, flat_count(inout lowerer, t_at(in tys, i)));
             }
             max_flat = max64(max_flat, n);
         }
@@ -571,18 +575,18 @@ fn temp(inout locals: ChunkSeq[ValTy], nparams: u64) -> u32 {
     wrapping_u32(wrapping_sub(wrapping_add(nparams, locals.len()), 1))
 }
 
-fn load_field(inout c: Code, from: u32, slot: u64, to: u32) {
-    c.get(from);
-    c.op(OP_I32_WRAP_I64);
-    c.mem(OP_I64_LOAD, 3, slot);
-    c.set(to);
+fn load_field(inout code: Code, from: u32, slot: u64, to: u32) {
+    code.get(from);
+    code.op(OP_I32_WRAP_I64);
+    code.mem(OP_I64_LOAD, 3, slot);
+    code.set(to);
 }
 
 // `store`: stores of the uniform value in local `value` of type `ty` into the
 // canonical layout at `base + offset`.
 fn store(
-    inout l: L,
-    inout c: Code,
+    inout lowerer: L,
+    inout code: Code,
     inout locals: ChunkSeq[ValTy],
     nparams: u64,
     base: u32,
@@ -590,45 +594,45 @@ fn store(
     value: u32,
     ty: u32
 ) eff [Fail[WErr]] {
-    let shape = l.cx.shape(ty);
+    let shape = lowerer.ctx.shape(ty);
     if shape.kind == SH_SCALAR {
-        c.get(base);
-        c.op(OP_I32_WRAP_I64);
-        c.get(value);
+        code.get(base);
+        code.op(OP_I32_WRAP_I64);
+        code.get(value);
         let scalar = shape.scalar;
         if scalar == SC_BOOL || scalar == SC_U8 {
-            c.mem(OP_I64_STORE8, 0, offset);
+            code.mem(OP_I64_STORE8, 0, offset);
         } else if scalar == SC_U32 {
-            c.mem(OP_I64_STORE32, 2, offset);
+            code.mem(OP_I64_STORE32, 2, offset);
         } else {
-            c.mem(OP_I64_STORE, 3, offset);
+            code.mem(OP_I64_STORE, 3, offset);
         }
         return;
     }
     if shape.kind == SH_STR {
-        c.get(base);
-        c.op(OP_I32_WRAP_I64);
-        c.get(value);
-        c.i64_const(8);
-        c.op(OP_I64_ADD);
-        c.mem(OP_I64_STORE32, 2, offset);
-        c.get(base);
-        c.op(OP_I32_WRAP_I64);
-        c.get(value);
-        c.op(OP_I32_WRAP_I64);
-        c.mem(OP_I64_LOAD, 3, 0);
-        c.mem(OP_I64_STORE32, 2, wrapping_add(offset, 4));
+        code.get(base);
+        code.op(OP_I32_WRAP_I64);
+        code.get(value);
+        code.i64_const(8);
+        code.op(OP_I64_ADD);
+        code.mem(OP_I64_STORE32, 2, offset);
+        code.get(base);
+        code.op(OP_I32_WRAP_I64);
+        code.get(value);
+        code.op(OP_I32_WRAP_I64);
+        code.mem(OP_I64_LOAD, 3, 0);
+        code.mem(OP_I64_STORE32, 2, wrapping_add(offset, 4));
         return;
     }
     if shape.kind == SH_TUPLE || shape.kind == SH_STRUCT {
-        let tys = members(inout l, shape, 0);
-        let (_, offsets) = record(inout l, in tys);
+        let tys = members(inout lowerer, shape, 0);
+        let (_, offsets) = record(inout lowerer, in tys);
         for i in 0..tys.len() {
             let field_local = temp(inout locals, nparams);
-            load_field(inout c, value, wrapping_mul(8, i), field_local);
+            load_field(inout code, value, wrapping_mul(8, i), field_local);
             store(
-                inout l,
-                inout c,
+                inout lowerer,
+                inout code,
                 inout locals,
                 nparams,
                 base,
@@ -640,39 +644,39 @@ fn store(
         return;
     }
     if shape.kind == SH_ENUM {
-        let (_, align) = size_align(inout l, ty);
-        let nv = l.cx.variant_count(shape);
-        let (disc, disc_align) = disc_of(nv);
+        let (_, align) = size_align(inout lowerer, ty);
+        let n_variants = lowerer.ctx.variant_count(shape);
+        let (disc, disc_align) = disc_of(n_variants);
         let payload = align_to(disc, align);
         let tag = temp(inout locals, nparams);
-        load_field(inout c, value, 0, tag);
-        c.get(base);
-        c.op(OP_I32_WRAP_I64);
-        c.get(tag);
+        load_field(inout code, value, 0, tag);
+        code.get(base);
+        code.op(OP_I32_WRAP_I64);
+        code.get(tag);
         if disc == 1 {
-            c.mem(OP_I64_STORE8, disc_align, offset);
+            code.mem(OP_I64_STORE8, disc_align, offset);
         } else if disc == 2 {
-            c.mem(OP_I64_STORE16, disc_align, offset);
+            code.mem(OP_I64_STORE16, disc_align, offset);
         } else {
-            c.mem(OP_I64_STORE32, disc_align, offset);
+            code.mem(OP_I64_STORE32, disc_align, offset);
         }
-        for case_index in 0..nv {
-            let tys = members(inout l, shape, case_index);
+        for case_index in 0..n_variants {
+            let tys = members(inout lowerer, shape, case_index);
             if tys.len() == 0 {
                 continue;
             }
-            let (_, offsets) = record(inout l, in tys);
-            c.get(tag);
-            c.i64_const(wrapping_i64(case_index));
-            c.op(OP_I64_EQ);
-            c.open(OP_IF);
+            let (_, offsets) = record(inout lowerer, in tys);
+            code.get(tag);
+            code.i64_const(wrapping_i64(case_index));
+            code.op(OP_I64_EQ);
+            code.open(OP_IF);
             for i in 0..tys.len() {
                 let field_local = temp(inout locals, nparams);
-                load_field(inout c, value, wrapping_mul(8, wrapping_add(i, 1)), field_local);
+                load_field(inout code, value, wrapping_mul(8, wrapping_add(i, 1)), field_local);
                 let field_offset = wrapping_add(wrapping_add(offset, payload), o_at(in offsets, i));
                 store(
-                    inout l,
-                    inout c,
+                    inout lowerer,
+                    inout code,
                     inout locals,
                     nparams,
                     base,
@@ -681,7 +685,7 @@ fn store(
                     t_at(in tys, i)
                 );
             }
-            c.op(OP_END);
+            code.op(OP_END);
         }
         return;
     }
@@ -690,8 +694,8 @@ fn store(
 
 // `single_leaf`: the load (opcode, alignment) of the only flat value of a
 // single-flat type, and its core type.
-fn single_leaf(inout l: L, ty: u32) -> (u8, u64, u8) eff [Fail[WErr]] {
-    let shape = l.cx.shape(ty);
+fn single_leaf(inout lowerer: L, ty: u32) -> (u8, u64, u8) eff [Fail[WErr]] {
+    let shape = lowerer.ctx.shape(ty);
     if shape.kind == SH_SCALAR {
         let scalar = shape.scalar;
         if scalar == SC_BOOL || scalar == SC_U8 {
@@ -705,15 +709,15 @@ fn single_leaf(inout l: L, ty: u32) -> (u8, u64, u8) eff [Fail[WErr]] {
         }
         return (OP_I64_LOAD, 3, VT_I64);
     }
-    if shape.kind == SH_TUPLE && l.cx.arity(shape.ty) == 1 {
-        return single_leaf(inout l, l.cx.tuple_elem(shape.ty, 0));
+    if shape.kind == SH_TUPLE && lowerer.ctx.arity(shape.ty) == 1 {
+        return single_leaf(inout lowerer, lowerer.ctx.tuple_elem(shape.ty, 0));
     }
-    if shape.kind == SH_STRUCT && l.cx.field_count(shape, 0) == 1 {
-        let (_, field_ty) = l.cx.variant_field(shape, 0, 0);
-        return single_leaf(inout l, field_ty);
+    if shape.kind == SH_STRUCT && lowerer.ctx.field_count(shape, 0) == 1 {
+        let (_, field_ty) = lowerer.ctx.variant_field(shape, 0, 0);
+        return single_leaf(inout lowerer, field_ty);
     }
     if shape.kind == SH_ENUM {
-        let (disc_size, _) = disc_of(l.cx.variant_count(shape));
+        let (disc_size, _) = disc_of(lowerer.ctx.variant_count(shape));
         if disc_size == 1 {
             return (OP_I32_LOAD8_U, 0, VT_I32);
         }
@@ -748,8 +752,8 @@ fn k_at(in kinds: ChunkSeq[u8], i: u64) -> u8 {
 }
 
 // `flatten`: the flat core types of `ty` as a parameter.
-fn flatten(inout l: L, ty: u32, inout out: ChunkSeq[u8]) eff [Fail[WErr]] {
-    let shape = l.cx.shape(ty);
+fn flatten(inout lowerer: L, ty: u32, inout out: ChunkSeq[u8]) eff [Fail[WErr]] {
+    let shape = lowerer.ctx.shape(ty);
     if shape.kind == SH_SCALAR {
         let kind = core_scalar(shape.scalar);
         if kind == 0 {
@@ -764,20 +768,20 @@ fn flatten(inout l: L, ty: u32, inout out: ChunkSeq[u8]) eff [Fail[WErr]] {
         return;
     }
     if shape.kind == SH_TUPLE || shape.kind == SH_STRUCT {
-        let tys = members(inout l, shape, 0);
+        let tys = members(inout lowerer, shape, 0);
         for i in 0..tys.len() {
-            flatten(inout l, t_at(in tys, i), inout out);
+            flatten(inout lowerer, t_at(in tys, i), inout out);
         }
         return;
     }
     if shape.kind == SH_ENUM {
         out.push(VT_I32);
         let mut joined = ChunkSeq::new[u8]();
-        for case_index in 0..l.cx.variant_count(shape) {
-            let tys = members(inout l, shape, case_index);
+        for case_index in 0..lowerer.ctx.variant_count(shape) {
+            let tys = members(inout lowerer, shape, case_index);
             let mut case = ChunkSeq::new[u8]();
             for i in 0..tys.len() {
-                flatten(inout l, t_at(in tys, i), inout case);
+                flatten(inout lowerer, t_at(in tys, i), inout case);
             }
             for i in 0..case.len() {
                 let kind = k_at(in case, i);
@@ -796,9 +800,9 @@ fn flatten(inout l: L, ty: u32, inout out: ChunkSeq[u8]) eff [Fail[WErr]] {
     Fail::raise(export_err(12));
 }
 
-fn has_string(inout l: L, ty: u32) -> bool {
+fn has_string(inout lowerer: L, ty: u32) -> bool {
     let shape = handle Fail[WErr] in {
-        l.cx.shape(ty)
+        lowerer.ctx.shape(ty)
     } with {
         return value => value,
         raise(e, resume) => Shape { kind: 255, scalar: 0, adt: NONE32, ty: 0 },
@@ -807,19 +811,19 @@ fn has_string(inout l: L, ty: u32) -> bool {
         return true;
     }
     if shape.kind == SH_TUPLE || shape.kind == SH_STRUCT {
-        let tys = members(inout l, shape, 0);
+        let tys = members(inout lowerer, shape, 0);
         for i in 0..tys.len() {
-            if has_string(inout l, t_at(in tys, i)) {
+            if has_string(inout lowerer, t_at(in tys, i)) {
                 return true;
             }
         }
         return false;
     }
     if shape.kind == SH_ENUM {
-        for case_index in 0..l.cx.variant_count(shape) {
-            let tys = members(inout l, shape, case_index);
+        for case_index in 0..lowerer.ctx.variant_count(shape) {
+            let tys = members(inout lowerer, shape, case_index);
             for i in 0..tys.len() {
-                if has_string(inout l, t_at(in tys, i)) {
+                if has_string(inout lowerer, t_at(in tys, i)) {
                     return true;
                 }
             }
@@ -829,24 +833,24 @@ fn has_string(inout l: L, ty: u32) -> bool {
 }
 
 fn new_block(
-    inout l: L,
-    inout c: Code,
+    inout lowerer: L,
+    inout code: Code,
     inout locals: ChunkSeq[ValTy],
     nparams: u64,
     slots: u64
 ) -> u32 {
     let block = temp(inout locals, nparams);
-    c.i64_const(wrapping_i64(wrapping_mul(8, slots)));
-    c.call(l.alloc);
-    c.set(block);
+    code.i64_const(wrapping_i64(wrapping_mul(8, slots)));
+    code.call(lowerer.alloc);
+    code.set(block);
     block
 }
 
-fn put(inout c: Code, block: u32, slot: u64, value: u32) {
-    c.get(block);
-    c.op(OP_I32_WRAP_I64);
-    c.get(value);
-    c.mem(OP_I64_STORE, 3, wrapping_mul(8, slot));
+fn put(inout code: Code, block: u32, slot: u64, value: u32) {
+    code.get(block);
+    code.op(OP_I32_WRAP_I64);
+    code.get(value);
+    code.mem(OP_I64_STORE, 3, wrapping_mul(8, slot));
 }
 
 fn next_flat(in flat: ChunkSeq[u32], inout cursor: u64) -> u32 eff [Fail[WErr]] {
@@ -864,24 +868,24 @@ fn next_flat(in flat: ChunkSeq[u32], inout cursor: u64) -> u32 eff [Fail[WErr]] 
 // `lift`: the uniform value of parameter type `ty` from the 64-bit flat
 // values `flat[cursor..]`; returns its local.
 fn lift(
-    inout l: L,
-    inout c: Code,
+    inout lowerer: L,
+    inout code: Code,
     inout locals: ChunkSeq[ValTy],
     nparams: u64,
     ty: u32,
     in flat: ChunkSeq[u32],
     inout cursor: u64
 ) -> u32 eff [Fail[WErr]] {
-    let shape = l.cx.shape(ty);
+    let shape = lowerer.ctx.shape(ty);
     if shape.kind == SH_SCALAR {
         let value = next_flat(in flat, inout cursor);
         let scalar = shape.scalar;
         if scalar == SC_U32 || scalar == SC_U8 || scalar == SC_BOOL {
             // A joined variant slot carries the i32 in its low bits.
-            c.get(value);
-            c.i64_const(LOW32);
-            c.op(OP_I64_AND);
-            c.set(value);
+            code.get(value);
+            code.i64_const(LOW32);
+            code.op(OP_I64_AND);
+            code.set(value);
         }
         return value;
     }
@@ -889,122 +893,122 @@ fn lift(
         let ptr = next_flat(in flat, inout cursor);
         let len = next_flat(in flat, inout cursor);
         let block = temp(inout locals, nparams);
-        c.get(len);
-        c.i64_const(LOW32);
-        c.op(OP_I64_AND);
-        c.tee(len);
-        c.i64_const(8);
-        c.op(OP_I64_ADD);
-        c.call(l.alloc);
-        c.tee(block);
-        c.op(OP_I32_WRAP_I64);
-        c.get(len);
-        c.mem(OP_I64_STORE, 3, 0);
-        c.get(block);
-        c.op(OP_I32_WRAP_I64);
-        c.i32_const(8);
-        c.op(OP_I32_ADD);
-        c.get(ptr);
-        c.op(OP_I32_WRAP_I64);
-        c.get(len);
-        c.op(OP_I32_WRAP_I64);
-        c.memory_copy();
+        code.get(len);
+        code.i64_const(LOW32);
+        code.op(OP_I64_AND);
+        code.tee(len);
+        code.i64_const(8);
+        code.op(OP_I64_ADD);
+        code.call(lowerer.alloc);
+        code.tee(block);
+        code.op(OP_I32_WRAP_I64);
+        code.get(len);
+        code.mem(OP_I64_STORE, 3, 0);
+        code.get(block);
+        code.op(OP_I32_WRAP_I64);
+        code.i32_const(8);
+        code.op(OP_I32_ADD);
+        code.get(ptr);
+        code.op(OP_I32_WRAP_I64);
+        code.get(len);
+        code.op(OP_I32_WRAP_I64);
+        code.memory_copy();
         return block;
     }
     if shape.kind == SH_TUPLE {
-        let tys = members(inout l, shape, 0);
-        let block = new_block(inout l, inout c, inout locals, nparams, tys.len());
+        let tys = members(inout lowerer, shape, 0);
+        let block = new_block(inout lowerer, inout code, inout locals, nparams, tys.len());
         for i in 0..tys.len() {
             let elem = lift(
-                inout l,
-                inout c,
+                inout lowerer,
+                inout code,
                 inout locals,
                 nparams,
                 t_at(in tys, i),
                 in flat,
                 inout cursor
             );
-            put(inout c, block, i, elem);
+            put(inout code, block, i, elem);
         }
         return block;
     }
     if shape.kind == SH_STRUCT {
-        let tys = members(inout l, shape, 0);
+        let tys = members(inout lowerer, shape, 0);
         let mut block: u32 = 0;
         if tys.len() == 0 {
             block = temp(inout locals, nparams);
-            c.i64_const(0);
-            c.set(block);
+            code.i64_const(0);
+            code.set(block);
         } else {
-            block = new_block(inout l, inout c, inout locals, nparams, tys.len());
+            block = new_block(inout lowerer, inout code, inout locals, nparams, tys.len());
         }
         for i in 0..tys.len() {
             let elem = lift(
-                inout l,
-                inout c,
+                inout lowerer,
+                inout code,
                 inout locals,
                 nparams,
                 t_at(in tys, i),
                 in flat,
                 inout cursor
             );
-            put(inout c, block, i, elem);
+            put(inout code, block, i, elem);
         }
         return block;
     }
     if shape.kind == SH_ENUM {
         let disc = next_flat(in flat, inout cursor);
-        let n_variants = l.cx.variant_count(shape);
+        let n_variants = lowerer.ctx.variant_count(shape);
         let mut width: u64 = 0;
         for variant_index in 0..n_variants {
-            let tys = members(inout l, shape, variant_index);
+            let tys = members(inout lowerer, shape, variant_index);
             let mut case = ChunkSeq::new[u8]();
             for i in 0..tys.len() {
-                flatten(inout l, t_at(in tys, i), inout case);
+                flatten(inout lowerer, t_at(in tys, i), inout case);
             }
             width = max64(width, case.len());
         }
         let out = temp(inout locals, nparams);
         let start = cursor;
-        c.get(disc);
-        c.i64_const(wrapping_i64(n_variants));
-        c.op(OP_I64_GE_U);
-        c.open(OP_IF);
-        c.op(OP_UNREACHABLE);
-        c.op(OP_END);
+        code.get(disc);
+        code.i64_const(wrapping_i64(n_variants));
+        code.op(OP_I64_GE_U);
+        code.open(OP_IF);
+        code.op(OP_UNREACHABLE);
+        code.op(OP_END);
         for case_index in 0..n_variants {
-            c.get(disc);
-            c.i64_const(wrapping_i64(case_index));
-            c.op(OP_I64_EQ);
-            c.open(OP_IF);
-            let tys = members(inout l, shape, case_index);
+            code.get(disc);
+            code.i64_const(wrapping_i64(case_index));
+            code.op(OP_I64_EQ);
+            code.open(OP_IF);
+            let tys = members(inout lowerer, shape, case_index);
             let block = new_block(
-                inout l,
-                inout c,
+                inout lowerer,
+                inout code,
                 inout locals,
                 nparams,
                 wrapping_add(1, tys.len())
             );
             let tag = temp(inout locals, nparams);
-            c.i64_const(wrapping_i64(case_index));
-            c.set(tag);
-            put(inout c, block, 0, tag);
+            code.i64_const(wrapping_i64(case_index));
+            code.set(tag);
+            put(inout code, block, 0, tag);
             let mut cur = start;
             for field_index in 0..tys.len() {
                 let value = lift(
-                    inout l,
-                    inout c,
+                    inout lowerer,
+                    inout code,
                     inout locals,
                     nparams,
                     t_at(in tys, field_index),
                     in flat,
                     inout cur
                 );
-                put(inout c, block, wrapping_add(1, field_index), value);
+                put(inout code, block, wrapping_add(1, field_index), value);
             }
-            c.get(block);
-            c.set(out);
-            c.op(OP_END);
+            code.get(block);
+            code.set(out);
+            code.op(OP_END);
         }
         cursor = wrapping_add(start, width);
         return out;
@@ -1022,18 +1026,18 @@ fn vts(in kinds: ChunkSeq[u8]) -> ChunkSeq[ValTy] {
 }
 
 // `export_realloc`: `cabi_realloc(old, old_size, align, new_size)`.
-fn export_realloc(inout l: L) {
+fn export_realloc(inout lowerer: L) {
     let mut param_tys = ChunkSeq::new[ValTy]();
     for _i in 0..4 {
         param_tys.push(vt(VT_I32));
     }
     let mut result_tys = ChunkSeq::new[ValTy]();
     result_tys.push(vt(VT_I32));
-    let idx = l.b.declare(in param_tys, in result_tys);
+    let func = lowerer.builder.declare(in param_tys, in result_tys);
     let mut code = code_new();
     code.get(3);
     code.op(OP_I64_EXTEND_I32_U);
-    code.call(l.alloc);
+    code.call(lowerer.alloc);
     code.set(4);
     code.get(0);
     code.open(OP_IF);
@@ -1051,17 +1055,17 @@ fn export_realloc(inout l: L) {
     code.get(4);
     code.op(OP_I32_WRAP_I64);
     code.op(OP_END);
-    l.b.define(idx, in body_n(1, in code));
-    l.b.export_func(in "cabi_realloc".as_bytes(), idx);
+    lowerer.builder.define(func, in body_n(1, in code));
+    lowerer.builder.export_func(in "cabi_realloc".as_bytes(), func);
 }
 
 // `component::exports`: add the export wrappers for the entry and return
 // the WIT source.
-pub fn exports(inout l: L) -> ChunkSeq[u8] eff [Fail[WErr]] {
-    let entry = l.cx.f.entry;
-    let plugin = l.cx.f.plugin;
-    let sig = l.cx.sig(entry);
-    if sig.gn != 0 {
+pub fn exports(inout lowerer: L) -> ChunkSeq[u8] eff [Fail[WErr]] {
+    let entry = lowerer.ctx.facts.entry;
+    let plugin = lowerer.ctx.facts.plugin;
+    let sig = lowerer.ctx.sig(entry);
+    if sig.gen_count != 0 {
         Fail::raise(werr(K_ENTRY, 0, 20));
     }
     let mut wit = wit_new();
@@ -1069,7 +1073,7 @@ pub fn exports(inout l: L) -> ChunkSeq[u8] eff [Fail[WErr]] {
     let mut core_params = ChunkSeq::new[u8]();
     let mut scalars = ChunkSeq::new[u8]();
     for i in 0..sig.pn {
-        let param = l.cx.f.param(add(sig.p0, i));
+        let param = lowerer.ctx.facts.param(add(sig.p0, i));
         if param.pass == TyPass::Inout {
             Fail::raise(werr(K_ENTRY, 0, 21));
         }
@@ -1077,11 +1081,11 @@ pub fn exports(inout l: L) -> ChunkSeq[u8] eff [Fail[WErr]] {
             text(inout params, in ", ".as_bytes());
         }
         params.push(37);
-        ident_sym(in l, param.name, inout params);
+        ident_sym(in lowerer, param.name, inout params);
         text(inout params, in ": ".as_bytes());
-        wit.ty(inout l, param.ty, inout params);
+        wit.ty(inout lowerer, param.ty, inout params);
         handle Fail[WErr] in {
-            flatten(inout l, param.ty, inout core_params)
+            flatten(inout lowerer, param.ty, inout core_params)
         } with {
             return value => value,
             raise(e, resume) => {
@@ -1091,7 +1095,7 @@ pub fn exports(inout l: L) -> ChunkSeq[u8] eff [Fail[WErr]] {
                 Fail::raise(e);
             },
         };
-        let param_shape = l.cx.shape(param.ty);
+        let param_shape = lowerer.ctx.shape(param.ty);
         if param_shape.kind == SH_SCALAR {
             scalars.push(param_shape.scalar);
         }
@@ -1099,25 +1103,25 @@ pub fn exports(inout l: L) -> ChunkSeq[u8] eff [Fail[WErr]] {
     if core_params.len() > 16 {
         Fail::raise(werr(K_ENTRY, 0, 23));
     }
-    if plugin && l.plan.host.len() > 0 {
+    if plugin && lowerer.plan.host.len() > 0 {
         Fail::raise(werr(K_ENTRY, 0, 24));
     }
-    let result = l.cx.default_ty(sig.result);
-    let shape = l.cx.shape(result);
+    let result = lowerer.ctx.default_ty(sig.result);
+    let shape = lowerer.ctx.shape(result);
     let unit = shape.kind == SH_SCALAR && (shape.scalar == SC_UNIT || shape.scalar == SC_NEVER);
     let mut wit_result = ChunkSeq::new[u8]();
     if !unit {
-        wit.ty(inout l, result, inout wit_result);
+        wit.ty(inout lowerer, result, inout wit_result);
     }
     let mut flat: u64 = 0;
     if !unit {
-        flat = flat_count(inout l, result);
+        flat = flat_count(inout lowerer, result);
     }
     let mut core_result = ChunkSeq::new[u8]();
     if flat == 0 {} else if shape.kind == SH_SCALAR {
         core_result.push(core_scalar(shape.scalar));
     } else if flat == 1 {
-        let (_, _, core_ty) = single_leaf(inout l, result);
+        let (_, _, core_ty) = single_leaf(inout lowerer, result);
         core_result.push(core_ty);
     } else {
         core_result.push(VT_I32);
@@ -1153,9 +1157,17 @@ pub fn exports(inout l: L) -> ChunkSeq[u8] eff [Fail[WErr]] {
     let mut cursor: u64 = 0;
     let mut args = ChunkSeq::new[u32]();
     for i in 0..sig.pn {
-        let param = l.cx.f.param(add(sig.p0, i));
+        let param = lowerer.ctx.facts.param(add(sig.p0, i));
         args.push(
-            lift(inout l, inout code, inout locals, nparams, param.ty, in flat_params, inout cursor)
+            lift(
+                inout lowerer,
+                inout code,
+                inout locals,
+                nparams,
+                param.ty,
+                in flat_params,
+                inout cursor
+            )
         );
     }
     for i in 0..args.len() {
@@ -1165,9 +1177,9 @@ pub fn exports(inout l: L) -> ChunkSeq[u8] eff [Fail[WErr]] {
         }
     }
     let ret_val = temp(inout locals, nparams);
-    code.call(wrapping_sub(get32(in l.funcs, entry), 1));
+    code.call(wrapping_sub(get32(in lowerer.funcs, entry), 1));
     code.set(ret_val);
-    code.global_get(l.abort);
+    code.global_get(lowerer.abort);
     code.i64_const(0);
     code.op(OP_I64_NE);
     code.open(OP_IF);
@@ -1182,26 +1194,26 @@ pub fn exports(inout l: L) -> ChunkSeq[u8] eff [Fail[WErr]] {
             code.op(OP_F64_REINTERPRET_I64);
         }
     } else {
-        let (size, _) = size_align(inout l, result);
+        let (size, _) = size_align(inout lowerer, result);
         let area = temp(inout locals, nparams);
         code.i64_const(wrapping_i64(size));
-        code.call(l.alloc);
+        code.call(lowerer.alloc);
         code.set(area);
-        store(inout l, inout code, inout locals, nparams, area, 0, ret_val, result);
+        store(inout lowerer, inout code, inout locals, nparams, area, 0, ret_val, result);
         code.get(area);
         code.op(OP_I32_WRAP_I64);
         if flat == 1 {
-            let (op, align, _) = single_leaf(inout l, result);
+            let (op, align, _) = single_leaf(inout lowerer, result);
             code.mem(op, align, 0);
         }
     }
     code.op(OP_END);
-    let wrapper = l.b.declare(in vts(in core_params), in vts(in core_result));
-    l.b.define(wrapper, in body_each(in locals, in code));
+    let wrapper = lowerer.builder.declare(in vts(in core_params), in vts(in core_result));
+    lowerer.builder.define(wrapper, in body_each(in locals, in code));
     if plugin {
-        l.b.export_func(in "run".as_bytes(), wrapper);
+        lowerer.builder.export_func(in "run".as_bytes(), wrapper);
     } else {
-        l.b.export_func(in "vesper:program/entry@0.1.0#main".as_bytes(), wrapper);
+        lowerer.builder.export_func(in "vesper:program/entry@0.1.0#main".as_bytes(), wrapper);
     }
     let mut src = ChunkSeq::new[u8]();
     text(inout src, in "package vesper:program@0.1.0;\n\n".as_bytes());
@@ -1220,14 +1232,14 @@ pub fn exports(inout l: L) -> ChunkSeq[u8] eff [Fail[WErr]] {
     }
     let mut has_str = false;
     for i in 0..sig.pn {
-        let param = l.cx.f.param(add(sig.p0, i));
-        if has_string(inout l, param.ty) {
+        let param = lowerer.ctx.facts.param(add(sig.p0, i));
+        if has_string(inout lowerer, param.ty) {
             has_str = true;
         }
     }
     // The WASI imports return lists through `cabi_realloc` too.
-    if has_str || active(in l.host) {
-        export_realloc(inout l);
+    if has_str || active(in lowerer.host) {
+        export_realloc(inout lowerer);
     }
     let mut run = ChunkSeq::new[u8]();
     if sig.pn == 0 {
@@ -1235,7 +1247,7 @@ pub fn exports(inout l: L) -> ChunkSeq[u8] eff [Fail[WErr]] {
         let mut run_results = ChunkSeq::new[ValTy]();
         run_results.push(vt(VT_I32));
         let none = ChunkSeq::new[ValTy]();
-        let run_fn = l.b.declare(in none, in run_results);
+        let run_fn = lowerer.builder.declare(in none, in run_results);
         let mut run_code = code_new();
         run_code.call(wrapper);
         if core_result.len() == 0 {
@@ -1247,8 +1259,8 @@ pub fn exports(inout l: L) -> ChunkSeq[u8] eff [Fail[WErr]] {
         run_code.op(OP_END);
         let counts = ChunkSeq::new[u32]();
         let types = ChunkSeq::new[ValTy]();
-        l.b.define(run_fn, in function_bytes(in counts, in types, in run_code));
-        l.b.export_func(in "wasi:cli/run@0.2.0#run".as_bytes(), run_fn);
+        lowerer.builder.define(run_fn, in function_bytes(in counts, in types, in run_code));
+        lowerer.builder.export_func(in "wasi:cli/run@0.2.0#run".as_bytes(), run_fn);
         text(inout run, in "  export wasi:cli/run@0.2.0;\n".as_bytes());
     }
     text(inout src, in "interface entry {\n".as_bytes());
@@ -1261,7 +1273,7 @@ pub fn exports(inout l: L) -> ChunkSeq[u8] eff [Fail[WErr]] {
         text(inout src, in wit_result.as_slice());
     }
     text(inout src, in ";\n}\n\nworld program {\n".as_bytes());
-    text(inout src, in wit_imports(in l.host).as_bytes());
+    text(inout src, in wit_imports(in lowerer.host).as_bytes());
     text(inout src, in run.as_slice());
     text(inout src, in "  export entry;\n}\n".as_bytes());
     src

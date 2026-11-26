@@ -44,33 +44,33 @@ fn compile_diag(
     compile_with_facts_diag(sink ctx, sink program, sink facts, want_syms)
 }
 
-fn append_sym_line(idx: u32, in label: Slice[u8], inout out: ChunkSeq[u8]) {
-    if idx == 4294967295 {
+fn append_sym_line(func: u32, in label: Slice[u8], inout out: ChunkSeq[u8]) {
+    if func == 4294967295 {
         return;
     }
-    push_decimal(inout out, w(idx));
+    push_decimal(inout out, w(func));
     out.push(32);
     out.extend(in label);
     out.push(10);
 }
 
-fn append_fn_syms(in l: L, inout out: ChunkSeq[u8]) {
-    for i in 0..l.b.import_count() {
+fn append_fn_syms(in lowerer: L, inout out: ChunkSeq[u8]) {
+    for i in 0..lowerer.builder.import_count() {
         push_decimal(inout out, i);
         out.extend(in " wasi_import\n".as_bytes());
     }
-    append_sym_line(l.alloc, in "__alloc".as_bytes(), inout out);
-    append_sym_line(l.h_str_eq, in "__str_eq".as_bytes(), inout out);
-    append_sym_line(l.h_fmod, in "__fmod".as_bytes(), inout out);
-    append_sym_line(l.h_seq_reserve, in "__seq_reserve".as_bytes(), inout out);
-    append_sym_line(l.h_bytes_eq, in "__bytes_eq".as_bytes(), inout out);
-    append_sym_line(l.h_utf8, in "__utf8".as_bytes(), inout out);
-    for i in 0..l.plan.insts.len() {
-        let inst = l.plan.inst(i);
-        let idx = l.func_of(inst.key);
-        push_decimal(inout out, w(idx));
+    append_sym_line(lowerer.alloc, in "__alloc".as_bytes(), inout out);
+    append_sym_line(lowerer.h_str_eq, in "__str_eq".as_bytes(), inout out);
+    append_sym_line(lowerer.h_fmod, in "__fmod".as_bytes(), inout out);
+    append_sym_line(lowerer.h_seq_reserve, in "__seq_reserve".as_bytes(), inout out);
+    append_sym_line(lowerer.h_bytes_eq, in "__bytes_eq".as_bytes(), inout out);
+    append_sym_line(lowerer.h_utf8, in "__utf8".as_bytes(), inout out);
+    for i in 0..lowerer.plan.insts.len() {
+        let inst = lowerer.plan.inst(i);
+        let func = lowerer.func_of(inst.key);
+        push_decimal(inout out, w(func));
         out.push(32);
-        l.cx.names.write(inst.key, inout out);
+        lowerer.ctx.names.write(inst.key, inout out);
         out.push(10);
     }
 }
@@ -88,40 +88,40 @@ fn compile_with_facts_core(
     let max_pages = wrapping_u32(facts.max_pages);
     let max_instructions = facts.max_instructions;
     let ir = ir_new(program);
-    let mut cx = cx_new(ctx, facts, ir);
-    if cx.fn_sig(cx.f.entry) == 0 {
-        Fail::raise(werr_syms(K_ENTRY, 0, 2, cx.f.entry, cx.f.entry));
+    let mut context = cx_new(ctx, facts, ir);
+    if context.fn_sig(context.facts.entry) == 0 {
+        Fail::raise(werr_syms(K_ENTRY, 0, 2, context.facts.entry, context.facts.entry));
     }
-    let lowering_plan = plan(inout cx);
-    let mut lowerer = lowerer_new(cx, lowering_plan, max_instructions);
+    let lowering_plan = plan(inout context);
+    let mut lowerer = lowerer_new(context, lowering_plan, max_instructions);
     lowerer.declare_all();
     let wit = exports(inout lowerer);
     lowerer.define_init();
-    let mut lim = lowerer.pre_reserve_define_all();
+    let mut reserve_limits = lowerer.pre_reserve_define_all();
     let mut d_perm_buf = ChunkSeq::new[u8]();
     d_perm_buf.reserve(134217728);
     let d_perm_end = stage2_heap_mark();
     let mut d_perm = wrapping_sub(d_perm_end, 134217728);
     let mut d_mark = d_perm_end;
     for i in 0..lowerer.plan.insts.len() {
-        let n_mask = lowerer.cx.names.mask_val();
-        let n_tmask = lowerer.cx.types.t_mask();
-        let n_rmask = lowerer.cx.types.r_mask();
+        let n_mask = lowerer.ctx.names.mask_val();
+        let n_tmask = lowerer.ctx.types.t_mask();
+        let n_rmask = lowerer.ctx.types.r_mask();
         let n_eqp = lowerer.eq_pending.len();
-        let n_btypes = lowerer.b.types.len();
-        let n_bvals = lowerer.b.vals.len();
-        let n_bfuncs = lowerer.b.funcs.len();
+        let n_btypes = lowerer.builder.types.len();
+        let n_bvals = lowerer.builder.vals.len();
+        let n_bfuncs = lowerer.builder.funcs.len();
         let inst = lowerer.plan.inst(i);
         let body = lowerer.function(inst);
-        let idx = lowerer.func_of(inst.key);
-        let s_def = stage2_heap_swap(d_perm);
-        lowerer.b.define(idx, in body);
-        d_perm = stage2_heap_swap(s_def);
+        let func = lowerer.func_of(inst.key);
+        let heap_before_define = stage2_heap_swap(d_perm);
+        lowerer.builder.define(func, in body);
+        d_perm = stage2_heap_swap(heap_before_define);
         if d_perm_end != 0 && d_perm >= d_perm_end {
             Fail::raise(werr_syms(K_LIMIT, 0, 93, inst.key, 0));
         }
         if lowerer.can_rewind_define(
-            in lim,
+            in reserve_limits,
             n_mask,
             n_tmask,
             n_rmask,
@@ -130,27 +130,27 @@ fn compile_with_facts_core(
             n_bvals,
             n_bfuncs
         ) {
-            let mut old_lowerer = dummy_l(lowerer.cx.k, lowerer.cx.s);
+            let mut old_lowerer = dummy_l(lowerer.ctx.known, lowerer.ctx.syms);
             swap(inout lowerer, inout old_lowerer);
             let (rebuilt, next_perm) = rebuild_l(old_lowerer, d_mark, d_perm);
             let mut new_lowerer = rebuilt;
             d_perm = next_perm;
             swap(inout lowerer, inout new_lowerer);
         } else {
-            let s_pre = stage2_heap_swap(d_perm);
-            lim = lowerer.pre_reserve_define_all();
-            d_perm = stage2_heap_swap(s_pre);
+            let heap_before_reserve = stage2_heap_swap(d_perm);
+            reserve_limits = lowerer.pre_reserve_define_all();
+            d_perm = stage2_heap_swap(heap_before_reserve);
             d_mark = stage2_heap_mark();
         }
     }
     let _ = stage2_heap_swap(d_mark);
     lowerer.define_finish();
-    let functions = lowerer.b.function_count();
+    let functions = lowerer.builder.function_count();
     let handlers = handler_report(in lowerer);
     if want_syms {
         append_fn_syms(in lowerer, inout syms_out);
     }
-    let core = lowerer.b.finish(max_pages);
+    let core = lowerer.builder.finish(max_pages);
     (core, wit, functions, handlers)
 }
 
@@ -183,20 +183,20 @@ pub fn compile_with_facts_diag(
 // The artifact's `handlers` (`HandlerLowering`, in plan order): their count,
 // then per handler the packed site instance and effect names, the clause
 // count and each clause's operation index and mode (0 Abort, 1 Tail).
-fn handler_report(in l: L) -> ChunkSeq[u64] {
+fn handler_report(in lowerer: L) -> ChunkSeq[u64] {
     let mut out = ChunkSeq::new[u64]();
-    out.push(l.plan.handlers.len());
-    for i in 0..l.plan.handlers.len() {
-        let handler_row = l.plan.handler(i);
+    out.push(lowerer.plan.handlers.len());
+    for i in 0..lowerer.plan.handlers.len() {
+        let handler_row = lowerer.plan.handler(i);
         let mut site = ChunkSeq::new[u8]();
-        l.cx.write_name(handler_row.site, inout site);
+        lowerer.ctx.write_name(handler_row.site, inout site);
         push_all(inout out, in pack_text(in site));
         let mut effect = ChunkSeq::new[u8]();
-        l.cx.write_name(handler_row.ename, inout effect);
+        lowerer.ctx.write_name(handler_row.effect_name, inout effect);
         push_all(inout out, in pack_text(in effect));
-        out.push(handler_row.cn);
-        for clause_offset in 0..handler_row.cn {
-            let clause = l.plan.clause(wrapping_add(handler_row.c0, clause_offset));
+        out.push(handler_row.clause_count);
+        for clause_offset in 0..handler_row.clause_count {
+            let clause = lowerer.plan.clause(wrapping_add(handler_row.clause_start, clause_offset));
             out.push(clause.op);
             out.push(widen_u64(clause.mode));
         }

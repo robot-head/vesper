@@ -34,8 +34,8 @@ impl L {
         if self.h_seq_reserve != NONE32 {
             return self.h_seq_reserve;
         }
-        let idx = self.b.declare(in i64s(3), in i64s(1));
-        self.h_seq_reserve = idx;
+        let func = self.builder.declare(in i64s(3), in i64s(1));
+        self.h_seq_reserve = func;
         let p: u32 = 0;
         let need: u32 = 1;
         let stride: u32 = 2;
@@ -109,8 +109,8 @@ impl L {
         code.store(0);
         code.get(new_buf);
         code.op(OP_END);
-        self.b.define(idx, in body_n(4, in code));
-        idx
+        self.builder.define(func, in body_n(4, in code));
+        func
     }
 
     // `$bytes_eq(a, n, b, m)`: the byte ranges are equal.
@@ -118,8 +118,8 @@ impl L {
         if self.h_bytes_eq != NONE32 {
             return self.h_bytes_eq;
         }
-        let idx = self.b.declare(in i64s(4), in i64s(1));
-        self.h_bytes_eq = idx;
+        let func = self.builder.declare(in i64s(4), in i64s(1));
+        self.h_bytes_eq = func;
         let i: u32 = 4;
         let mut code = code_new();
         code.get(1);
@@ -160,8 +160,8 @@ impl L {
         code.op(OP_END);
         code.op(OP_UNREACHABLE);
         code.op(OP_END);
-        self.b.define(idx, in body_n(1, in code));
-        idx
+        self.builder.define(func, in body_n(1, in code));
+        func
     }
 
     // `$utf8(c, at) -> width`: the UTF-8 encoding of scalar value `c` at
@@ -170,8 +170,8 @@ impl L {
         if self.h_utf8 != NONE32 {
             return self.h_utf8;
         }
-        let idx = self.b.declare(in i64s(2), in i64s(1));
-        self.h_utf8 = idx;
+        let func = self.builder.declare(in i64s(2), in i64s(1));
+        self.h_utf8 = func;
         let scalar: u32 = 0;
         let at: u32 = 1;
         let mut code = code_new();
@@ -234,7 +234,7 @@ impl L {
         }
         code.op(OP_UNREACHABLE);
         code.op(OP_END);
-        self.b.define(idx, in body_n(0, in code));
-        idx
+        self.builder.define(func, in body_n(0, in code));
+        func
     }
 }
