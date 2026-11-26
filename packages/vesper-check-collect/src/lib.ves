@@ -5,13 +5,13 @@
 // generics first and an untyped `self` given the block's type) and reports
 // the E0100 duplicate and reserved-name diagnostics.
 //
-// The preludes a module brings in follow it as the checker adds them:
-// the byte-order, bit and checked builtins (widths.ves), then strings and
-// `Option` methods (prelude.ves), each lowered on its own with its spans
-// shifted to where the checker parses it. A module that could need a
-// prelude not ported yet (regions, `Box`, secret operations,
-// transcendentals, atomics and workers) is declined (`needs_prelude`), and
-// the Rust collector stays its source of truth until that part lands.
+// The preludes come as the checker adds them: regions and `Box` among
+// the builtins (regions.ves, boxes.ves), then after the module the secret
+// operations (secret.ves), the width builtins (widths.ves),
+// transcendentals (floats.ves), strings, atomics and workers, and `Option`
+// methods (prelude.ves), each lowered on its own with its spans shifted to
+// where the checker parses it. With the built-in `Region` effect, the
+// region labels of function signatures print normalized (`Norm`).
 //
 // tests/self_host_check_collect.rs compares the canonical dump (`dump`)
 // with the same dump of Rust's `World::collect` over the repository's
@@ -27,8 +27,13 @@ use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{Interner, interner_new, symbol_from_id};
 use self::prelude::{
     defined_methods, module_end, needs_option, needs_strings, option_source, replaced,
-    sorted_symbols, strings_source, used, uses_of, Uses
+    sorted_symbols, strings_source, used, uses_of, Uses, atomics_source, workers_source,
+    needs_workers
 };
+use self::boxes::{box_dump, needs_atomics, needs_box};
+use self::floats::{float_source};
+use self::regions::{builtin_region, needs_region, region_source};
+use self::secret::{secret_source};
 use self::widths::{reserved_width_name, width_source};
 
 // The builtin declarations every world starts from (`World::collect`'s
@@ -166,85 +171,6 @@ fn name_is(in a: Ast, sym: u32, in lit: Str) -> bool {
 
 // ---------------------------------------------------------------- preludes
 
-// Whether the module names `lit` anywhere (its interner holds it).
-fn has_name(in a: Ast, in lit: Str) -> bool {
-    match a.names.lookup(in lit) {
-        Option::Some(s) => true,
-        Option::None => false,
-    }
-}
-
-// Whether the module could need a prelude this part does not build: each
-// test is a superset of the checker's (`regions::needs_prelude`,
-// `fip::needs_prelude`, `capability_effects::secret_prelude`,
-// `float_math::prelude`, `atomics::needs_prelude` and `needs_workers`),
-// so a declined module may need none, but an accepted one needs no other.
-pub fn needs_prelude(in a: Ast, in u: Uses) -> bool {
-    // Regions: a handle type, a tiled sequence, or a `Region` effect
-    // instance (the lowering interns `Region` for every module, so the
-    // effect nodes decide).
-    if has_name(in a, "RegionBox") || has_name(in a, "Watermark") || has_name(in a, "TiledSeq") {
-        return true;
-    }
-    match a.names.lookup(in "Region") {
-        Option::Some(r) => {
-            for i in 0..a.effect_nodes.len() {
-                if effect_node(in a, wrapping_u32(i)).name == r.id() {
-                    return true;
-                }
-            }
-        },
-        Option::None => {},
-    }
-    // `Box`: the type or its constructors, or an `@fip` function.
-    if has_name(in a, "Box")
-        || has_name(in a, "Box::new")
-        || has_name(in a, "Box::new_in_caller")
-        || has_name(in a, "Box::Box") {
-        return true;
-    }
-    for i in 0..a.fns.len() {
-        if fn_node(in a, wrapping_u32(i)).fip {
-            return true;
-        }
-    }
-    // Atomics and workers.
-    if has_name(in a, "Atomic") || has_name(in a, "MemoryOrder") || has_name(in a, "parallel_for") {
-        return true;
-    }
-    // Transcendentals.
-    if used(in u, "exp_f32")
-        || used(in u, "exp_f64")
-        || used(in u, "ln_f32")
-        || used(in u, "ln_f64")
-        || used(in u, "sin_f32")
-        || used(in u, "sin_f64")
-        || used(in u, "cos_f32")
-        || used(in u, "cos_f64") {
-        return true;
-    }
-    // Secret operations over a declared secret scalar.
-    let scalar = has_name(in a, "SecU8")
-        || has_name(in a, "SecU32")
-        || has_name(in a, "SecU64")
-        || has_name(in a, "SecMask64");
-    scalar
-        && (
-            used(in u, "bit_and")
-                || used(in u, "bit_or")
-                || used(in u, "bit_xor")
-                || used(in u, "wrapping_add")
-                || used(in u, "wrapping_sub")
-                || used(in u, "wrapping_mul")
-                || used(in u, "ct_eq")
-                || used(in u, "ct_is_zero")
-                || used(in u, "ct_not")
-                || used(in u, "ct_select")
-                || used(in u, "declassify_bool")
-                || used(in u, "load_sec_u64le")
-        )
-}
-
 // ---------------------------------------------------------------- the world
 
 // An entry of a world table: the item in the base (`src` 0) or the module
@@ -298,7 +224,9 @@ struct Collect {
     effects: Table,
     functions: Table,
     // The diagnostics' dump lines, in order.
-    diags: ChunkSeq[u8]
+    diags: ChunkSeq[u8],
+    // The module brought in the region prelude.
+    region_prelude: bool
 }
 
 fn name_text(in a: Ast, sym: u32) -> String {
@@ -405,6 +333,17 @@ fn collect_item(
         }
     } else if it.kind == 3 {
         let n = effect_decl_node(in a, it.node);
+        if src == 1 && c.region_prelude && name_is(in a, n.name, "Region") {
+            diag(
+                inout c,
+                "E0797",
+                in quoted(in a, n.name, " is the built-in Strata region effect"),
+                wrapping_add(n.start, shift),
+                wrapping_add(n.end, shift),
+                "open a lexical region with `region r { ... }`"
+            );
+            return;
+        }
         if is_capability_effect(in a, n.name) {
             let m = quoted(in a, n.name, " is a reserved built-in capability effect");
             diag(
@@ -614,6 +553,159 @@ fn put_type(inout o: ChunkSeq[u8], in a: Ast, t: u32) {
     }
 }
 
+// The region labels of a function's signature (`World::collect` with the
+// built-in `Region` active): `RegionBox[r, T]`, `Watermark[r]` and
+// `TiledSeq[T, r]` with `r` one of the function's `r: Region` effect labels
+// print as the capability row `row{$fncap:<key>:<i>:Region|-}`
+// (`regions::normalize`, `function_capability`).
+struct Norm {
+    active: bool,
+    key: String,
+    // The function's effect instances: the label of each `Region` one,
+    // else `none()`.
+    labels: ChunkSeq[u32]
+}
+
+fn norm_off() -> Norm {
+    Norm { active: false, key: String::new(), labels: ChunkSeq::new[u32]() }
+}
+
+fn norm_of(in a: Ast, f: u32, in key: String, active: bool) -> Norm {
+    let mut labels = ChunkSeq::new[u32]();
+    let e = fn_node(in a, f).effects;
+    if active && e != none() {
+        let n = effects_node(in a, e);
+        for i in 0..list_len(in a, n.instances) {
+            let x = effect_node(in a, list_at(in a, n.instances, i));
+            if name_is(in a, x.name, "Region") {
+                labels.push(x.label);
+            } else {
+                labels.push(none());
+            }
+        }
+    }
+    let mut k = String::new();
+    k.push_str(in key.as_str());
+    Norm { active: active, key: k, labels: labels }
+}
+
+// `regions::source_name`: a bare name, or a row of only a tail.
+fn source_name(in a: Ast, t: u32) -> u32 {
+    if t == none() {
+        return none();
+    }
+    let n = type_at(in a, t);
+    if n.kind == 1 && list_len(in a, n.b) == 0 {
+        n.a
+    } else if n.kind == 4 {
+        let e = effects_node(in a, n.a);
+        if list_len(in a, e.instances) == 0 {
+            e.tail
+        } else {
+            none()
+        }
+    } else {
+        none()
+    }
+}
+
+// The index of the last `Region` instance labelled `label`, or `none()`.
+fn label_index(in a: Ast, in nm: Norm, label: u32) -> u32 {
+    let mut found = none();
+    if label == none() {
+        return found;
+    }
+    for i in 0..nm.labels.len() {
+        let l = word32(in nm.labels, i);
+        if l != none() && same_name(in a, l, label) {
+            found = wrapping_u32(i);
+        }
+    }
+    found
+}
+
+fn same_name(in a: Ast, x: u32, y: u32) -> bool {
+    if x == y {
+        return true;
+    }
+    let mut t = String::new();
+    let ok = a.names.resolve_into(symbol_from_id(y), inout t);
+    a.names.symbol_eq(symbol_from_id(x), in t.as_str())
+}
+
+// `t` normalized by `nm` (`put_type` when it is off).
+fn put_norm(inout o: ChunkSeq[u8], in a: Ast, t: u32, in nm: Norm) {
+    if !nm.active || t == none() {
+        put_type(inout o, in a, t);
+        return;
+    }
+    let n = type_at(in a, t);
+    if n.kind == 1 {
+        put_name(inout o, in a, n.a);
+        let count = list_len(in a, n.b);
+        let at = if name_is(in a, n.a, "RegionBox") || name_is(in a, n.a, "Watermark") {
+            0
+        } else if name_is(in a, n.a, "TiledSeq") && count == 2 {
+            1
+        } else {
+            count
+        };
+        if count == 0 {
+            return;
+        }
+        o.push(91);
+        for i in 0..count {
+            if i > 0 {
+                o.extend(in ", ".as_bytes());
+            }
+            let arg = list_at(in a, n.b, i);
+            let idx = if i == at {
+                label_index(in a, in nm, source_name(in a, arg))
+            } else {
+                none()
+            };
+            if idx != none() {
+                o.extend(in "row{$fncap:".as_bytes());
+                o.extend(in nm.key.as_bytes());
+                o.push(58);
+                put_u64(inout o, widen_u64(idx));
+                o.extend(in ":Region|-}".as_bytes());
+            } else {
+                put_norm(inout o, in a, arg, in nm);
+            }
+        }
+        o.push(93);
+    } else if n.kind == 2 {
+        o.push(40);
+        for i in 0..list_len(in a, n.a) {
+            if i > 0 {
+                o.extend(in ", ".as_bytes());
+            }
+            put_norm(inout o, in a, list_at(in a, n.a, i), in nm);
+        }
+        o.push(41);
+    } else if n.kind == 3 {
+        o.extend(in "fn(".as_bytes());
+        let pairs = list_len(in a, n.a) / 2;
+        for i in 0..pairs {
+            if i > 0 {
+                o.extend(in ", ".as_bytes());
+            }
+            put_u64(inout o, widen_u64(list_at(in a, n.a, wrapping_mul(i, 2))));
+            o.push(32);
+            put_norm(inout o, in a, list_at(in a, n.a, wrapping_add(wrapping_mul(i, 2), 1)), in nm);
+        }
+        o.extend(in ") -> ".as_bytes());
+        put_norm(inout o, in a, n.b, in nm);
+        o.push(32);
+        put_effects(inout o, in a, n.c);
+        o.extend(in " mode=".as_bytes());
+        put_u64(inout o, widen_u64(n.d));
+    } else {
+        put_type(inout o, in a, t);
+    }
+}
+
 fn put_generics(inout o: ChunkSeq[u8], in a: Ast, list: u32, depth: u64) {
     for i in 0..list_len(in a, list) {
         let g = generic_node(in a, list_at(in a, list, i));
@@ -631,7 +723,15 @@ fn put_generics(inout o: ChunkSeq[u8], in a: Ast, list: u32, depth: u64) {
 // A function's signature: `head` names it (the table key, or an effect
 // operation's name); an `impl` method (`imp`) takes its block's generics
 // first and gives an untyped `self` the block's type.
-fn put_function(inout o: ChunkSeq[u8], in a: Ast, f: u32, imp: u32, depth: u64, shift: u32) {
+fn put_function(
+    inout o: ChunkSeq[u8],
+    in a: Ast,
+    f: u32,
+    imp: u32,
+    depth: u64,
+    shift: u32,
+    in nm: Norm
+) {
     let n = fn_node(in a, f);
     o.extend(in " fip=".as_bytes());
     put_bool(inout o, n.fip);
@@ -669,15 +769,15 @@ fn put_function(inout o: ChunkSeq[u8], in a: Ast, f: u32, imp: u32, depth: u64, 
         o.extend(in "] : ".as_bytes());
         let infer = p.ty == none() || type_at(in a, p.ty).kind == 5;
         if self_ty != none() && infer && name_is(in a, p.name, "self") {
-            put_type(inout o, in a, self_ty);
+            put_norm(inout o, in a, self_ty, in nm);
         } else {
-            put_type(inout o, in a, p.ty);
+            put_norm(inout o, in a, p.ty, in nm);
         }
         o.push(10);
     }
     indent(inout o, depth);
     o.extend(in "result ".as_bytes());
-    put_type(inout o, in a, n.result);
+    put_norm(inout o, in a, n.result, in nm);
     o.push(10);
     indent(inout o, depth);
     o.extend(in "effects ".as_bytes());
@@ -741,7 +841,7 @@ fn put_effect(inout o: ChunkSeq[u8], in a: Ast, x: u32, shift: u32) {
         let f = list_at(in a, n.ops, i);
         o.extend(in " op ".as_bytes());
         put_name(inout o, in a, fn_node(in a, f).name);
-        put_function(inout o, in a, f, none(), 2, shift);
+        put_function(inout o, in a, f, none(), 2, shift, in norm_off());
     }
 }
 
@@ -772,7 +872,14 @@ struct Srcs {
     strings: Ast,
     option: Ast,
     width: Ast,
+    atomics: Ast,
+    floats: Ast,
+    secret: Ast,
+    region: Ast,
     w_shift: u32,
+    x_shift: u32,
+    f_shift: u32,
+    a_shift: u32,
     s_shift: u32,
     o_shift: u32
 }
@@ -784,12 +891,22 @@ fn shift_of(in s: Srcs, src: u8) -> u32 {
         s.o_shift
     } else if src == 4 {
         s.w_shift
+    } else if src == 6 {
+        s.a_shift
+    } else if src == 7 {
+        s.f_shift
+    } else if src == 8 {
+        s.x_shift
     } else {
         0
     }
 }
 
 fn dump_adt(inout o: ChunkSeq[u8], in s: Srcs, e: Entry) {
+    if e.src == 5 {
+        o.extend(in box_dump().as_bytes());
+        return;
+    }
     let sh = shift_of(in s, e.src);
     if e.src == 0 {
         put_adt(inout o, in s.base, e.node, sh);
@@ -799,6 +916,12 @@ fn dump_adt(inout o: ChunkSeq[u8], in s: Srcs, e: Entry) {
         put_adt(inout o, in s.strings, e.node, sh);
     } else if e.src == 4 {
         put_adt(inout o, in s.width, e.node, sh);
+    } else if e.src == 6 {
+        put_adt(inout o, in s.atomics, e.node, sh);
+    } else if e.src == 7 {
+        put_adt(inout o, in s.floats, e.node, sh);
+    } else if e.src == 8 {
+        put_adt(inout o, in s.secret, e.node, sh);
     } else {
         put_adt(inout o, in s.option, e.node, sh);
     }
@@ -814,23 +937,118 @@ fn dump_effect(inout o: ChunkSeq[u8], in s: Srcs, e: Entry) {
         put_effect(inout o, in s.strings, e.node, sh);
     } else if e.src == 4 {
         put_effect(inout o, in s.width, e.node, sh);
+    } else if e.src == 6 {
+        put_effect(inout o, in s.atomics, e.node, sh);
+    } else if e.src == 7 {
+        put_effect(inout o, in s.floats, e.node, sh);
+    } else if e.src == 8 {
+        put_effect(inout o, in s.secret, e.node, sh);
+    } else if e.src == 9 {
+        put_effect(inout o, in s.region, e.node, sh);
     } else {
         put_effect(inout o, in s.option, e.node, sh);
     }
 }
 
-fn dump_function(inout o: ChunkSeq[u8], in s: Srcs, e: Entry) {
+fn dump_function(inout o: ChunkSeq[u8], in s: Srcs, e: Entry, in key: String, active: bool) {
     let sh = shift_of(in s, e.src);
     if e.src == 0 {
-        put_function(inout o, in s.base, e.node, e.imp, 1, sh);
+        put_function(
+            inout o,
+            in s.base,
+            e.node,
+            e.imp,
+            1,
+            sh,
+            in norm_of(in s.base, e.node, in key, active)
+        );
     } else if e.src == 1 {
-        put_function(inout o, in s.module, e.node, e.imp, 1, sh);
+        put_function(
+            inout o,
+            in s.module,
+            e.node,
+            e.imp,
+            1,
+            sh,
+            in norm_of(in s.module, e.node, in key, active)
+        );
     } else if e.src == 2 {
-        put_function(inout o, in s.strings, e.node, e.imp, 1, sh);
+        put_function(
+            inout o,
+            in s.strings,
+            e.node,
+            e.imp,
+            1,
+            sh,
+            in norm_of(in s.strings, e.node, in key, active)
+        );
     } else if e.src == 4 {
-        put_function(inout o, in s.width, e.node, e.imp, 1, sh);
+        put_function(
+            inout o,
+            in s.width,
+            e.node,
+            e.imp,
+            1,
+            sh,
+            in norm_of(in s.width, e.node, in key, active)
+        );
+    } else if e.src == 6 {
+        put_function(
+            inout o,
+            in s.atomics,
+            e.node,
+            e.imp,
+            1,
+            sh,
+            in norm_of(in s.atomics, e.node, in key, active)
+        );
+    } else if e.src == 7 {
+        put_function(
+            inout o,
+            in s.floats,
+            e.node,
+            e.imp,
+            1,
+            sh,
+            in norm_of(in s.floats, e.node, in key, active)
+        );
+    } else if e.src == 8 {
+        put_function(
+            inout o,
+            in s.secret,
+            e.node,
+            e.imp,
+            1,
+            sh,
+            in norm_of(in s.secret, e.node, in key, active)
+        );
     } else {
-        put_function(inout o, in s.option, e.node, e.imp, 1, sh);
+        put_function(
+            inout o,
+            in s.option,
+            e.node,
+            e.imp,
+            1,
+            sh,
+            in norm_of(in s.option, e.node, in key, active)
+        );
+    }
+}
+
+// `regions::active`: the world's `Region` effect is the built-in one.
+fn region_active(in c: Collect, in s: Srcs) -> bool {
+    let e = match c.effects.keys.lookup(in "Region") {
+        Option::Some(sym) => entry_at(in c.effects, sym.id()),
+        Option::None => return false,
+    };
+    if e.src == 9 {
+        builtin_region(in s.region, e.node)
+    } else if e.src == 1 {
+        builtin_region(in s.module, e.node)
+    } else if e.src == 0 {
+        builtin_region(in s.base, e.node)
+    } else {
+        false
     }
 }
 
@@ -845,12 +1063,15 @@ fn dump(in c: Collect, in s: Srcs, inout o: ChunkSeq[u8]) {
     for i in 0..effects.len() {
         dump_effect(inout o, in s, entry_at(in c.effects, word32(in effects, i)));
     }
+    let active = region_active(in c, in s);
     let functions = sorted_keys(in c.functions);
     for i in 0..functions.len() {
         let id = word32(in functions, i);
         o.extend(in "fn ".as_bytes());
         put_key(inout o, in c.functions, id);
-        dump_function(inout o, in s, entry_at(in c.functions, id));
+        let mut key = String::new();
+        let ok = c.functions.keys.resolve_into(symbol_from_id(id), inout key);
+        dump_function(inout o, in s, entry_at(in c.functions, id), in key, active);
     }
     o.extend(in c.diags.as_slice());
 }
@@ -894,19 +1115,43 @@ fn max32(a: u32, b: u32) -> u32 {
 fn world_of(in source: Str, inout o: ChunkSeq[u8]) {
     let module = lower_source(in source).ast;
     let uses = uses_of(in module);
+    let with_region = needs_region(in module);
+    let region = if with_region {
+        lower_source(in region_source()).ast
+    } else {
+        lower_source(in "").ast
+    };
     let defined = defined_methods(in module);
     let module_last = module_end(in module, false, in defined);
-    let w_shift = wrapping_add(module_last, 1);
+    let x_shift = wrapping_add(module_last, 1);
+    let xsrc = secret_source(in uses, in module);
+    let secret = lower_source(in xsrc.as_str()).ast;
+    let x_end = prelude_end(in secret, x_shift, in defined);
+    let w_shift = wrapping_add(max32(x_end, module_last), 1);
     let wsrc = width_source(in uses, in module);
     let width = lower_source(in wsrc.as_str()).ast;
-    let w_end = prelude_end(in width, w_shift, in defined);
+    let w_end0 = max32(x_end, prelude_end(in width, w_shift, in defined));
+    let f_shift = wrapping_add(max32(w_end0, module_last), 1);
+    let fsrc = float_source(in uses, in module);
+    let floats = lower_source(in fsrc.as_str()).ast;
+    let w_end = max32(w_end0, prelude_end(in floats, f_shift, in defined));
     let s_shift = wrapping_add(max32(w_end, module_last), 1);
     let strings = if needs_strings(in uses) {
         lower_source(in strings_source()).ast
     } else {
         lower_source(in "").ast
     };
-    let after = max32(w_end, prelude_end(in strings, s_shift, in defined));
+    let s_end = max32(w_end, prelude_end(in strings, s_shift, in defined));
+    let a_shift = wrapping_add(max32(s_end, module_last), 1);
+    let mut asrc = String::new();
+    if needs_atomics(in module) {
+        asrc.push_str(in atomics_source());
+    }
+    if needs_workers(in uses, in module) {
+        asrc.push_str(in workers_source());
+    }
+    let atomics = lower_source(in asrc.as_str()).ast;
+    let after = max32(s_end, prelude_end(in atomics, a_shift, in defined));
     let o_shift = wrapping_add(max32(after, module_last), 1);
     let option = if needs_option(in uses, in defined) {
         lower_source(in option_source()).ast
@@ -919,7 +1164,14 @@ fn world_of(in source: Str, inout o: ChunkSeq[u8]) {
         strings: strings,
         option: option,
         width: width,
+        atomics: atomics,
+        floats: floats,
+        secret: secret,
+        region: region,
         w_shift: w_shift,
+        x_shift: x_shift,
+        f_shift: f_shift,
+        a_shift: a_shift,
         s_shift: s_shift,
         o_shift: o_shift
     };
@@ -927,27 +1179,30 @@ fn world_of(in source: Str, inout o: ChunkSeq[u8]) {
         adts: table_new(),
         effects: table_new(),
         functions: table_new(),
-        diags: ChunkSeq::new[u8]()
+        diags: ChunkSeq::new[u8](),
+        region_prelude: with_region
     };
     let none_defined = interner_new();
     collect_all(inout c, in s.base, 0, 0, false, in none_defined);
+    collect_all(inout c, in s.region, 9, 0, false, in none_defined);
+    if needs_box(in s.module) {
+        let mut key = String::new();
+        key.push_str(in "Box");
+        let was = insert(inout c.adts, in key, Entry { src: 5, node: none(), imp: none() });
+    }
     collect_all(inout c, in s.module, 1, 0, false, in none_defined);
+    collect_all(inout c, in s.secret, 8, x_shift, false, in none_defined);
     collect_all(inout c, in s.width, 4, w_shift, false, in none_defined);
+    collect_all(inout c, in s.floats, 7, f_shift, false, in none_defined);
     collect_all(inout c, in s.strings, 2, s_shift, true, in defined);
+    collect_all(inout c, in s.atomics, 6, a_shift, false, in none_defined);
     collect_all(inout c, in s.option, 3, o_shift, true, in defined);
     dump(in c, in s, inout o);
 }
 
-// The harness entry: the dump of `World::collect` over `source`'s parse,
-// or `declined` when the module could need a prelude this part does not
-// build (`needs_prelude`).
+// The harness entry: the dump of `World::collect` over `source`'s parse.
 pub fn collect_text(in source: Str) -> ChunkSeq[u64] {
     let mut o = ChunkSeq::new[u8]();
-    let module = lower_source(in source).ast;
-    if needs_prelude(in module, in uses_of(in module)) {
-        o.extend(in "declined\n".as_bytes());
-        return pack_text(in o);
-    }
     world_of(in source, inout o);
     pack_text(in o)
 }

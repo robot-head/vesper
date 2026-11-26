@@ -144,10 +144,7 @@ fn push_ffi_sym(inout out: String, in s: S, sym: u32) {
     let a = s.start(sym);
     let e = s.end(sym);
     for i in a..e {
-        let b = match s.text.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let b = s.text.try_get(i).unwrap_or(0);
         let _ = out.push_char(widen_u32(b));
     }
 }
@@ -159,10 +156,7 @@ fn copy_sym(inout dst: Ast, in src: Ast, sym: u32) -> u32 {
     let (a, e) = src.names.span(symbol_from_id(sym));
     let mut text = String::new();
     for i in a..e {
-        let b = match src.names.text_byte(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let b = src.names.text_byte(i).unwrap_or(0);
         let _ = text.push_char(widen_u32(b));
     }
     dst.names.intern(in text.as_str()).id
@@ -174,10 +168,7 @@ fn alloc_list(inout dst: Ast, in items: ChunkSeq[u32]) -> u32 {
     }
     let first = wrapping_u32(dst.pool.len());
     for i in 0..items.len() {
-        let v = match items.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let v = items.try_get(i).unwrap_or(0);
         dst.pool.push(v);
     }
     dst.lists.alloc(ListRef { first: first, len: wrapping_u32(items.len()) }).raw

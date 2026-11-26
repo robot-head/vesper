@@ -1,0 +1,485 @@
+// The built-in region prelude (`regions::needs_prelude`, `regions::prelude`):
+// the linear `Region` effect a module that uses region syntax or region
+// types gets among its builtins.
+
+use @vesper/ast::{
+    Ast, AdtNode, ArgNode, ClauseNode, EffectDeclNode, EffectNode, EffectsNode, FieldNode, FnNode,
+    ImplNode, ItemNode, ParamNode, StmtNode, VariantNode, expr_at, list_at, list_len, none, pat_at,
+    type_at
+};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
+
+// `regions::PRELUDE`, byte for byte.
+pub fn region_source() -> Str {
+    "linear effect Region { fn box(sink value: Unit) -> Unit; fn get(in boxed: Unit) -> Unit; fn set(in boxed: Unit, sink value: Unit) -> Unit; fn take(sink boxed: Unit) -> Unit; fn checkpoint() -> Unit; fn rewind(sink mark: Unit) -> Unit; fn commit(sink mark: Unit) -> Unit; fn used() -> u64; }"
+}
+
+fn r_item(in a: Ast, i: u32) -> ItemNode {
+    a.items.get_or(idx_from_raw[ItemNode](i), ItemNode { kind: 0, node: none() })
+}
+
+fn r_fn(in a: Ast, i: u32) -> FnNode {
+    a.fns.get_or(
+        idx_from_raw[FnNode](i),
+        FnNode {
+            name: none(),
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: none(),
+            effects: none(),
+            body: none(),
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+fn r_effect_decl(in a: Ast, i: u32) -> EffectDeclNode {
+    a.effect_decls.get_or(
+        idx_from_raw[EffectDeclNode](i),
+        EffectDeclNode { name: none(), linear: false, generics: 0, ops: 0, start: 0, end: 0 }
+    )
+}
+
+fn r_effect(in a: Ast, i: u32) -> EffectNode {
+    a.effect_nodes
+        .get_or(idx_from_raw[EffectNode](i), EffectNode { label: none(), name: none(), args: 0 })
+}
+
+fn is(in a: Ast, sym: u32, in lit: Str) -> bool {
+    sym != none() && a.names.symbol_eq(symbol_from_id(sym), in lit)
+}
+
+// `regions::effects_use`.
+fn effects_use(in a: Ast, e: u32) -> bool {
+    if e == none() {
+        return false;
+    }
+    let n = a.effects
+        .get_or(idx_from_raw[EffectsNode](e), EffectsNode { instances: 0, tail: none() });
+    for i in 0..list_len(in a, n.instances) {
+        let x = r_effect(in a, list_at(in a, n.instances, i));
+        if is(in a, x.name, "Region") || types_use(in a, x.args) {
+            return true;
+        }
+    }
+    false
+}
+
+fn types_use(in a: Ast, list: u32) -> bool {
+    for i in 0..list_len(in a, list) {
+        if type_uses(in a, list_at(in a, list, i)) {
+            return true;
+        }
+    }
+    false
+}
+
+// `regions::type_uses`.
+fn type_uses(in a: Ast, t: u32) -> bool {
+    if t == none() {
+        return false;
+    }
+    let n = type_at(in a, t);
+    if n.kind == 1 {
+        is(in a, n.a, "RegionBox")
+            || is(in a, n.a, "Watermark")
+            || (is(in a, n.a, "TiledSeq") && list_len(in a, n.b) == 2)
+            || types_use(in a, n.b)
+    } else if n.kind == 2 {
+        types_use(in a, n.a)
+    } else if n.kind == 3 {
+        let pairs = list_len(in a, n.a) / 2;
+        for i in 0..pairs {
+            if type_uses(in a, list_at(in a, n.a, wrapping_add(wrapping_mul(i, 2), 1))) {
+                return true;
+            }
+        }
+        type_uses(in a, n.b) || effects_use(in a, n.c)
+    } else if n.kind == 4 {
+        effects_use(in a, n.a)
+    } else {
+        false
+    }
+}
+
+// `signature_types_use`'s `handle_types`.
+fn handle_types(in a: Ast, t: u32) -> bool {
+    if t == none() {
+        return false;
+    }
+    let n = type_at(in a, t);
+    if n.kind == 1 {
+        if is(in a, n.a, "RegionBox") || is(in a, n.a, "Watermark") {
+            return true;
+        }
+        for i in 0..list_len(in a, n.b) {
+            if handle_types(in a, list_at(in a, n.b, i)) {
+                return true;
+            }
+        }
+        false
+    } else if n.kind == 2 {
+        for i in 0..list_len(in a, n.a) {
+            if handle_types(in a, list_at(in a, n.a, i)) {
+                return true;
+            }
+        }
+        false
+    } else if n.kind == 3 {
+        let pairs = list_len(in a, n.a) / 2;
+        for i in 0..pairs {
+            if handle_types(in a, list_at(in a, n.a, wrapping_add(wrapping_mul(i, 2), 1))) {
+                return true;
+            }
+        }
+        handle_types(in a, n.b)
+    } else {
+        false
+    }
+}
+
+fn param_type(in a: Ast, p: u32) -> u32 {
+    a.params
+        .get_or(
+            idx_from_raw[ParamNode](p),
+            ParamNode { name: none(), pass: 0, projections: 0, ty: none(), start: 0, end: 0 }
+        )
+        .ty
+}
+
+// Whether the name of a single `Bind` return pattern is a region block's
+// (`regions::block_capacity`: `$region`, or `$region:` and a count).
+fn region_marker(in a: Ast, sym: u32) -> bool {
+    if sym == none() {
+        return false;
+    }
+    let (s, e) = a.names.span(symbol_from_id(sym));
+    let t = "$region".as_bytes();
+    if wrapping_sub(e, s) < t.len() {
+        return false;
+    }
+    for i in 0..t.len() {
+        if a.names.text_byte(wrapping_add(s, i)) != t.try_get(i) {
+            return false;
+        }
+    }
+    let mut i = wrapping_add(s, t.len());
+    if i == e {
+        return true;
+    }
+    if a.names.text_byte(i) != Option::Some(58) {
+        return false;
+    }
+    i = wrapping_add(i, 1);
+    if i < e && a.names.text_byte(i) == Option::Some(43) {
+        i = wrapping_add(i, 1);
+    }
+    if i == e {
+        return false;
+    }
+    // A `usize`: decimal digits, at most 2^64 - 1.
+    let mut v: u64 = 0;
+    loop {
+        if i >= e {
+            break;
+        }
+        let c = match a.names.text_byte(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if c < 48 || c > 57 {
+            return false;
+        }
+        let d = widen_u64(wrapping_sub(c, 48));
+        if v > 1844674407370955161 || (v == 1844674407370955161 && d > 5) {
+            return false;
+        }
+        v = wrapping_add(wrapping_mul(v, 10), d);
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+// A region block: a `Region` handler whose return clause binds one
+// region marker.
+fn region_block(in a: Ast, e: u32) -> bool {
+    let x = expr_at(in a, e);
+    if !is(in a, r_effect(in a, x.a).name, "Region") || list_len(in a, x.e) == 0 {
+        return false;
+    }
+    let ret = a.clauses.get_or(
+        idx_from_raw[ClauseNode](list_at(in a, x.e, 0)),
+        ClauseNode { name: none(), pats: 0, body: none() }
+    );
+    if list_len(in a, ret.pats) != 1 {
+        return false;
+    }
+    let p = pat_at(in a, list_at(in a, ret.pats, 0));
+    p.kind == 2 && region_marker(in a, p.a)
+}
+
+// Whether any expression of `e` (`regions::visit_expr`) passes the test
+// of `mode`: 1 `expr_uses`, 2 `syntax_uses`.
+fn any_expr(mode: u8, in a: Ast, e: u32) -> bool {
+    if e == none() {
+        return false;
+    }
+    let x = expr_at(in a, e);
+    let k = x.kind;
+    if k == 16 {
+        if mode == 1 && is(in a, r_effect(in a, x.a).name, "Region") {
+            return true;
+        }
+        if mode == 2 && region_block(in a, e) {
+            return true;
+        }
+    } else if k == 15 && mode == 1 {
+        if effects_use(in a, x.d) || type_uses(in a, x.c) {
+            return true;
+        }
+        for i in 0..list_len(in a, x.a) {
+            if type_uses(in a, param_type(in a, list_at(in a, x.a, i))) {
+                return true;
+            }
+        }
+    } else if k == 5 && mode == 1 {
+        for i in 0..list_len(in a, x.a) {
+            let s = a.stmts.get_or(
+                idx_from_raw[StmtNode](list_at(in a, x.a, i)),
+                StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
+            );
+            if s.kind == 1 && type_uses(in a, s.ty) {
+                return true;
+            }
+        }
+    } else if k == 6 && mode == 1 && types_use(in a, x.b) {
+        return true;
+    }
+    // The children, as `visit_expr` walks them.
+    if k == 3 {
+        for i in 0..list_len(in a, x.a) {
+            if any_expr(mode, in a, list_at(in a, x.a, i)) {
+                return true;
+            }
+        }
+        false
+    } else if k == 4 || k == 14 {
+        if k == 14 && any_expr(mode, in a, x.a) {
+            return true;
+        }
+        let pairs = list_len(in a, x.b) / 2;
+        for i in 0..pairs {
+            if any_expr(mode, in a, list_at(in a, x.b, wrapping_add(wrapping_mul(i, 2), 1))) {
+                return true;
+            }
+        }
+        false
+    } else if k == 5 {
+        for i in 0..list_len(in a, x.a) {
+            let s = a.stmts.get_or(
+                idx_from_raw[StmtNode](list_at(in a, x.a, i)),
+                StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
+            );
+            if any_expr(mode, in a, s.value) {
+                return true;
+            }
+        }
+        any_expr(mode, in a, x.b)
+    } else if k == 6 {
+        if any_expr(mode, in a, x.a) {
+            return true;
+        }
+        for i in 0..list_len(in a, x.c) {
+            let arg = a.args.get_or(
+                idx_from_raw[ArgNode](list_at(in a, x.c, i)),
+                ArgNode { pass: 0, explicit: false, expr: none() }
+            );
+            if any_expr(mode, in a, arg.expr) {
+                return true;
+            }
+        }
+        false
+    } else if k == 7 || k == 9 || k == 17 || k == 20 || k == 21 {
+        any_expr(mode, in a, x.a)
+    } else if k == 10 {
+        any_expr(mode, in a, x.b)
+    } else if k == 8 || k == 19 {
+        any_expr(mode, in a, x.a) || any_expr(mode, in a, x.b)
+    } else if k == 11 || k == 12 || k == 18 {
+        any_expr(mode, in a, x.b) || any_expr(mode, in a, x.c)
+    } else if k == 13 {
+        any_expr(mode, in a, x.a) || any_expr(mode, in a, x.b) || any_expr(mode, in a, x.c)
+    } else if k == 15 {
+        any_expr(mode, in a, x.e)
+    } else if k == 16 {
+        if x.b != none() && any_expr(mode, in a, x.c) {
+            return true;
+        }
+        if any_expr(mode, in a, x.d) {
+            return true;
+        }
+        for i in 0..list_len(in a, x.e) {
+            let c = a.clauses.get_or(
+                idx_from_raw[ClauseNode](list_at(in a, x.e, i)),
+                ClauseNode { name: none(), pats: 0, body: none() }
+            );
+            if any_expr(mode, in a, c.body) {
+                return true;
+            }
+        }
+        false
+    } else {
+        false
+    }
+}
+
+// `regions::function_uses`.
+fn function_uses(in a: Ast, f: u32) -> bool {
+    let n = r_fn(in a, f);
+    if effects_use(in a, n.effects) || type_uses(in a, n.result) {
+        return true;
+    }
+    for i in 0..list_len(in a, n.params) {
+        if type_uses(in a, param_type(in a, list_at(in a, n.params, i))) {
+            return true;
+        }
+    }
+    any_expr(1, in a, n.body)
+}
+
+// A function of a module that declares its own `Region`: a region block in
+// its body, or a handle type in its signature.
+fn function_needs(in a: Ast, f: u32) -> bool {
+    let n = r_fn(in a, f);
+    if any_expr(2, in a, n.body) || handle_types(in a, n.result) {
+        return true;
+    }
+    for i in 0..list_len(in a, n.params) {
+        if handle_types(in a, param_type(in a, list_at(in a, n.params, i))) {
+            return true;
+        }
+    }
+    false
+}
+
+fn impl_methods(in a: Ast, i: u32) -> u32 {
+    a.impls
+        .get_or(idx_from_raw[ImplNode](i), ImplNode { ty: none(), generics: 0, methods: 0 })
+        .methods
+}
+
+fn item_at(in a: Ast, i: u64) -> ItemNode {
+    match a.m_items.try_get(i) {
+        Option::Some(v) => r_item(in a, v),
+        Option::None => ItemNode { kind: 0, node: none() },
+    }
+}
+
+// `regions::needs_prelude`.
+pub fn needs_region(in a: Ast) -> bool {
+    let mut declares = false;
+    for i in 0..a.m_items.len() {
+        let it = item_at(in a, i);
+        if it.kind == 3 && is(in a, r_effect_decl(in a, it.node).name, "Region") {
+            declares = true;
+        }
+    }
+    for i in 0..a.m_items.len() {
+        let it = item_at(in a, i);
+        if declares {
+            if it.kind == 2 && function_needs(in a, it.node) {
+                return true;
+            }
+            if it.kind == 4 {
+                let ms = impl_methods(in a, it.node);
+                for j in 0..list_len(in a, ms) {
+                    if function_needs(in a, list_at(in a, ms, j)) {
+                        return true;
+                    }
+                }
+            }
+            continue;
+        }
+        if it.kind == 2 && function_uses(in a, it.node) {
+            return true;
+        } else if it.kind == 4 || it.kind == 3 {
+            let ms = if it.kind == 4 {
+                impl_methods(in a, it.node)
+            } else {
+                r_effect_decl(in a, it.node).ops
+            };
+            for j in 0..list_len(in a, ms) {
+                if function_uses(in a, list_at(in a, ms, j)) {
+                    return true;
+                }
+            }
+        } else if it.kind == 1 {
+            let n = a.adts.get_or(
+                idx_from_raw[AdtNode](it.node),
+                AdtNode {
+                    name: none(),
+                    mode: 0,
+                    generics: 0,
+                    variants: 0,
+                    is_enum: false,
+                    tiled: false,
+                    tile_width: 0,
+                    start: 0,
+                    end: 0
+                }
+            );
+            for j in 0..list_len(in a, n.variants) {
+                let v = a.variants.get_or(
+                    idx_from_raw[VariantNode](list_at(in a, n.variants, j)),
+                    VariantNode { name: none(), fields: 0, named: false }
+                );
+                for k in 0..list_len(in a, v.fields) {
+                    let f = a.fields.get_or(
+                        idx_from_raw[FieldNode](list_at(in a, v.fields, k)),
+                        FieldNode { name: none(), ty: none(), modality: 3, temperature: 0 }
+                    );
+                    if type_uses(in a, f.ty) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+// `regions::active`: the world's `Region` effect is the built-in one
+// (linear, no generics, the eight operations in order).
+pub fn builtin_region(in a: Ast, decl: u32) -> bool {
+    let n = r_effect_decl(in a, decl);
+    if !n.linear || list_len(in a, n.generics) != 0 || list_len(in a, n.ops) != 8 {
+        return false;
+    }
+    for i in 0..8 {
+        let op = r_fn(in a, list_at(in a, n.ops, i)).name;
+        let want = if i == 0 {
+            "box"
+        } else if i == 1 {
+            "get"
+        } else if i == 2 {
+            "set"
+        } else if i == 3 {
+            "take"
+        } else if i == 4 {
+            "checkpoint"
+        } else if i == 5 {
+            "rewind"
+        } else if i == 6 {
+            "commit"
+        } else {
+            "used"
+        };
+        if !is(in a, op, want) {
+            return false;
+        }
+    }
+    true
+}
