@@ -2,7 +2,7 @@
 //
 // Element reads use `try_get`, whose `None` arm no index here reaches, so
 // the functions are total and raise nothing.
-use @vesper-std/sugar::{guard};
+use @vesper-std/sugar::{guard, when};
 
 // Whether `a` sorts before `b`.
 pub fn lt[T: mod copy + Ord](a: T, b: T) -> bool {
@@ -57,24 +57,21 @@ pub fn insertion[T: mod copy + Ord](inout s: Slice[T], lo: u64, hi: u64) {
         if i >= hi {
             break;
         }
-        match s.try_get(i) {
-            Option::Some(x) => {
-                let mut j = i;
-                loop {
-                    if j <= lo {
-                        break;
-                    }
-                    let k = wrapping_sub(j, 1);
-                    let y = s.try_get(k).unwrap_or(x);
-                    if !lt(x, y) {
-                        break;
-                    }
-                    s.try_set(j, y);
-                    j = k;
+        when let Option::Some(x) = s.try_get(i) {
+            let mut j = i;
+            loop {
+                if j <= lo {
+                    break;
                 }
-                s.try_set(j, x);
-            },
-            Option::None => {},
+                let k = wrapping_sub(j, 1);
+                let y = s.try_get(k).unwrap_or(x);
+                if !lt(x, y) {
+                    break;
+                }
+                s.try_set(j, y);
+                j = k;
+            }
+            s.try_set(j, x);
         }
         i = wrapping_add(i, 1);
     }
@@ -269,7 +266,15 @@ test {
         b.extend(in original.as_bytes());
         insertion(inout a.as_slice_mut(), start, end);
         heapsort(inout b.as_slice_mut(), start, end);
-        same_bytes(in a.as_slice(), in expected) && same_bytes(in b.as_slice(), in expected)
+        let ranges_match = same_bytes(in a.as_slice(), in expected)
+            && same_bytes(in b.as_slice(), in expected);
+        // Extending the whole range past the slice must skip missing reads.
+        if start == 0 && end == original.as_bytes().len() {
+            insertion(inout a.as_slice_mut(), start, wrapping_add(end, 2));
+            ranges_match && same_bytes(in a.as_slice(), in expected)
+        } else {
+            ranges_match
+        }
     }
 
     // @case distinct(0, 2, in "cba")

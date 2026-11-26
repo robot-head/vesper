@@ -410,3 +410,26 @@ itself (part 4b-4).
 | `self_host_sugar` `scope_matches_on_the_fuzzed_corpus` | 500 edited callers (2,123 cases, 1,117 matching) | 0 differences |
 | `self_host_sugar` `pattern_hygiene_*` | 15 pattern rules plus every render corpus above (examples, suites, 4,000 fuzzed) | 0 differences |
 | `self_host_ast` `template_scopes_*` | now also the surface-profile AST of every case | 0 differences |
+
+## Part 4c: the expansion driver
+
+- **Driver** (`packages/vesper-sugar/src/driver.ves`): a port of the
+  `sugar_expand.rs` expansion loop for sources without imports
+  (`expand_sugar_for_execution`). It covers the round parse in the surface
+  profile, definition reading and binding, the call queue with
+  postponement of scope captures (nested reparses join one growing CST
+  forest), operator associativity, the recursion rank check, the edits
+  and source mappings, and the depth, step and work limits. It also ports
+  `hygiene::protect`, the caller-side renaming, which runs after the last
+  round. The entry is `@vesper/sugar` `sugar_expand_words`.
+- Gap (part 6): as in 4b-5, the surface profile does not yet run
+  `macro_source::validate_surface`. Rust refuses 2 suite expansions
+  (`E0002` unsupported source macro category or context) that Vesper
+  expands. The test counts these and fails on any other difference.
+
+| Test | Cases | Result |
+|---|---|---|
+| `self_host_sugar` `driver_matches_on_the_scope_examples` | 7 scope rules over 37 callers, with and without tests (518 expansions) | 0 differences |
+| `self_host_sugar` `driver_matches_on_the_sugar_test_suites` | the 133 sugar programs of the test suites, with and without tests (266 expansions) | 0 differences, 2 macro-validation gaps |
+| `self_host_sugar` `driver_matches_on_the_fuzzed_corpus` | 500 edited programs, with and without tests | 0 differences |
+| `self_host_sugar` `driver_speed` (release, ignored) | the 133 suite programs ×5 | Vesper 1.38x Rust (single run) |

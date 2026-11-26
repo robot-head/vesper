@@ -1,0 +1,17 @@
+[package]
+name = "@vesper/proof-audit"
+version = "0.1.0"
+edition = "2026"
+# `vesper proof-audit` (src/proof_commands.rs, SH5 lane 18, #1341): replay
+# local Lean artifacts through the kernel and audit theorem axioms. It
+# reads the artifact tree, writes a private staging directory, runs the
+# pinned Lean toolchain and hashes what Lean imported (BLAKE3 in C).
+capability_ceiling = ["Fail", "Alloc", "Ffi[StdFs]", "Ffi[StdEnv]", "Ffi[StdProcess]", "Ffi[Blake3]"]
+
+[dependencies]
+"@vesper-std/fs" = { version = "^0.1", path = "../vesper-std/fs" }
+"@vesper-std/env" = { version = "^0.1", path = "../vesper-std/env" }
+"@vesper-std/process" = { version = "^0.1", path = "../vesper-std/process" }
+"@vesper-std/hash" = { version = "^0.1", path = "../vesper-std/hash" }
+"@vesper-std/hash-sys" = { version = "^0.1", path = "../vesper-std/hash/sys" }
+"@vesper/serde" = { version = "^0.1", path = "../../crates/vesper-serde/vesper" }

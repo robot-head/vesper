@@ -1,0 +1,3100 @@
+// `sugar_expand`'s driver: the bounded expansion loop of
+// crates/vesper-syntax/src/sugar_expand.rs (`expand_sugar_with_scopes_for_execution`
+// without imports, `read_definition`, the registry, `ExpandedSugar::apply`
+// and `original_span`) and `hygiene::protect`.
+//
+// Each round parses the expanded source in the surface profile (@vesper/front
+// `parse_surface_tokens` under sugar expansion's limits), reads new sugar
+// declarations, and expands every outermost sugar use with the rule matcher
+// (matcher.ves), the template (template.ves, flow.ves), pattern hygiene and
+// scope captures (hygiene.ves, scope.ves). Edits keep a map from expanded
+// to original bytes and the effect regions of each expansion. When no use
+// is left, `protect` renames caller bindings that a template's free names
+// would otherwise capture.
+//
+// Tables are rows over pools: texts are (first, length) references into
+// byte pools, regions and edits are fixed-width rows with their holes,
+// places and copies in their own row pools.
+
+use @vesper/ast::{Ast, ConfNode, ImplNode, ItemNode, expr_at, list_at, list_len, none, pat_at};
+use @vesper/ast::lower::{lower_source, lower_surface_source_limits};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper/front::{P};
+use @vesper/front::lex::{
+    lex_sugar_raw_with_limits,
+    lex_sugar_with_limits,
+    max_diagnostics,
+    max_source_bytes,
+    max_tokens,
+    token_end,
+    trivia_kind
+};
+use @vesper/front::diag::{diags_new};
+use @vesper/front::parse::{hard_depth, parse_surface_tokens};
+use @vesper/front::kinds::{
+    k_amp,
+    k_amp_eq,
+    k_and,
+    k_arrow,
+    k_caret,
+    k_colon,
+    k_dot,
+    k_eff,
+    k_eq_eq,
+    k_ge,
+    k_gt,
+    k_l_brace,
+    k_le,
+    k_linear,
+    k_lower,
+    k_lt,
+    k_minus,
+    k_minus_eq,
+    k_ne,
+    k_or,
+    k_percent,
+    k_percent_eq,
+    k_pipe,
+    k_pipe_eq,
+    k_plus,
+    k_plus_eq,
+    k_question,
+    k_r_brace,
+    k_shl,
+    k_shr,
+    k_slash,
+    k_slash_eq,
+    k_star,
+    k_star_eq,
+    k_state,
+    k_with
+};
+use self::flow::{Rd, arg_of, clause_of, fn_of, name_byte, name_len, param_of, render, stmt_of};
+use self::hygiene::{pattern_hygiene};
+use self::matcher::{captures_tail, match_rule_encoded};
+use self::scope::{lower};
+use self::template::{
+    Caps,
+    add,
+    b8,
+    cap_at,
+    cap_count,
+    caps_read,
+    inc,
+    push_decimal,
+    skeleton_run,
+    sort_in,
+    sub,
+    value_at,
+    w32,
+    w64
+};
+
+const NONE: u64 = 18446744073709551615;
+const MAX_DEPTH: u64 = 64;
+const MAX_STEPS: u64 = 8192;
+// `lexer::HARD_SOURCE_BYTES` and `HARD_TOKENS`.
+const MAX_BYTES: u64 = 8388608;
+const HARD_TOKENS: u64 = 262144;
+const WORK: u64 = 67108864;
+
+// Node kinds of the surface CST.
+const N_SUGAR_ITEM: u8 = 208;
+const N_SUGAR_STMT: u8 = 209;
+const N_SUGAR_EXPR: u8 = 210;
+const N_SUGAR_DECL: u8 = 212;
+const N_SUGAR_RULE: u8 = 213;
+const N_SUGAR_PATTERN: u8 = 214;
+const N_SUGAR_TEMPLATE: u8 = 215;
+const N_SUGAR_PAT: u8 = 218;
+const N_SUGAR_OPERATOR: u8 = 220;
+const N_PIPE_EXPR: u8 = 221;
+const N_DOTTED_EXPR: u8 = 222;
+const N_TAGGED_LITERAL: u8 = 223;
+
+// ---------------------------------------------------------------- bytes
+
+fn cat(inout out: ChunkSeq[u8], in s: Str) {
+    out.extend(in s.as_bytes());
+}
+
+fn cat_seq(inout out: ChunkSeq[u8], in s: ChunkSeq[u8]) {
+    out.extend(in s.as_slice());
+}
+
+fn cat_range(inout out: ChunkSeq[u8], in b: ChunkSeq[u8], s: u64, e: u64) {
+    for j in s..e {
+        out.push(b8(in b, j));
+    }
+}
+
+fn range_of(in b: ChunkSeq[u8], s: u64, e: u64) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    cat_range(inout out, in b, s, e);
+    out
+}
+
+fn range_is(in b: ChunkSeq[u8], s: u64, e: u64, in w: Slice[u8]) -> bool {
+    if e < s || sub(e, s) != w.len() {
+        return false;
+    }
+    for j in 0..w.len() {
+        let c = match w.try_get(j) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if b8(in b, add(s, j)) != c {
+            return false;
+        }
+    }
+    true
+}
+
+fn ranges_eq(in a: ChunkSeq[u8], s: u64, e: u64, in b: ChunkSeq[u8], s2: u64, e2: u64) -> bool {
+    if e < s || e2 < s2 || sub(e, s) != sub(e2, s2) {
+        return false;
+    }
+    for j in 0..sub(e, s) {
+        if b8(in a, add(s, j)) != b8(in b, add(s2, j)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn seq_eq(in a: ChunkSeq[u8], in b: ChunkSeq[u8]) -> bool {
+    ranges_eq(in a, 0, a.len(), in b, 0, b.len())
+}
+
+fn is_space(c: u8) -> bool {
+    c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12
+}
+
+// `text.trim_end().ends_with(';')`.
+fn ends_with_semi(in b: ChunkSeq[u8], s: u64, e: u64) -> bool {
+    let mut i = e;
+    loop {
+        if i <= s {
+            return false;
+        }
+        let c = b8(in b, sub(i, 1));
+        if !is_space(c) {
+            return c == 59;
+        }
+        i = sub(i, 1);
+    }
+}
+
+// ---------------------------------------------------------------- diagnostics
+
+// A `Diagnostic`: code, message, span and related labels.
+pub struct Dg {
+    failed: bool,
+    code: ChunkSeq[u8],
+    msg: ChunkSeq[u8],
+    s: u64,
+    e: u64,
+    // Related labels as rows (start, end, message first, message length).
+    rel: ChunkSeq[u64],
+    rel_text: ChunkSeq[u8]
+}
+
+fn dg_ok() -> Dg {
+    Dg {
+        failed: false,
+        code: ChunkSeq::new[u8](),
+        msg: ChunkSeq::new[u8](),
+        s: 0,
+        e: 0,
+        rel: ChunkSeq::new[u64](),
+        rel_text: ChunkSeq::new[u8]()
+    }
+}
+
+fn dg_new(in code: Str, in msg: ChunkSeq[u8], s: u64, e: u64) -> Dg {
+    let mut d = dg_ok();
+    d.failed = true;
+    cat(inout d.code, in code);
+    cat_seq(inout d.msg, in msg);
+    d.s = s;
+    d.e = e;
+    d
+}
+
+fn dg_str(in code: Str, in msg: Str, s: u64, e: u64) -> Dg {
+    let mut m = ChunkSeq::new[u8]();
+    cat(inout m, in msg);
+    dg_new(in code, in m, s, e)
+}
+
+// `diag(message, span)`: E0141.
+fn diag(in msg: Str, s: u64, e: u64) -> Dg {
+    dg_str(in "E0141", in msg, s, e)
+}
+
+fn diag_seq(in msg: ChunkSeq[u8], s: u64, e: u64) -> Dg {
+    dg_new(in "E0141", in msg, s, e)
+}
+
+fn limit(s: u64, e: u64) -> Dg {
+    dg_str(in "E0143", in "sugar expansion exceeded its depth, size, or work limit", s, e)
+}
+
+fn related(inout d: Dg, s: u64, e: u64, in msg: Str) {
+    d.rel.push(s);
+    d.rel.push(e);
+    d.rel.push(d.rel_text.len());
+    d.rel.push(msg.as_bytes().len());
+    cat(inout d.rel_text, in msg);
+}
+
+fn charge(inout work: u64, units: u64, s: u64, e: u64) -> Dg {
+    if units > work {
+        return limit(s, e);
+    }
+    work = sub(work, units);
+    dg_ok()
+}
+
+// ---------------------------------------------------------------- CST
+
+// A node of the surface CST: kind, parent, text range, leaf range and the
+// index after its last descendant.
+copy struct Node {
+    kind: u8,
+    parent: u32,
+    start: u32,
+    end: u32,
+    lo: u32,
+    hi: u32,
+    after: u32
+}
+
+// The CST of one parse: nodes in preorder, leaves (token indices) in text
+// order, and the token kinds and ranges.
+struct Cst {
+    nodes: ChunkSeq[Node],
+    leaf: ChunkSeq[u32],
+    tk: ChunkSeq[u8],
+    ts: ChunkSeq[u64],
+    te: ChunkSeq[u64]
+}
+
+fn node_at(in c: Cst, n: u64) -> Node {
+    match c.nodes.try_get(n) {
+        Option::Some(v) => v,
+        Option::None => Node {
+            kind: 0,
+            parent: 0,
+            start: 0,
+            end: 0,
+            lo: 0,
+            hi: 0,
+            after: 0
+        },
+    }
+}
+
+fn build_cst(in p: P) -> Cst {
+    let mut c = Cst {
+        nodes: ChunkSeq::new[Node](),
+        leaf: ChunkSeq::new[u32](),
+        tk: ChunkSeq::new[u8](),
+        ts: ChunkSeq::new[u64](),
+        te: ChunkSeq::new[u64]()
+    };
+    for i in 0..p.t.kind.len() {
+        c.tk.push(b8(in p.t.kind, i));
+        c.ts.push(w32(in p.t.start, i));
+        c.te.push(token_end(in p.t, i));
+    }
+    let mut open = ChunkSeq::new[u64]();
+    let mut offset: u64 = 0;
+    for i in 0..p.ev.len() {
+        let e = w32(in p.ev, i);
+        if e == 4294967295 {
+            let last = sub(open.len(), 1);
+            let n = w64(in open, last);
+            open.truncate(last);
+            let mut node = node_at(in c, n);
+            node.end = wrapping_u32(offset);
+            node.hi = wrapping_u32(c.leaf.len());
+            node.after = wrapping_u32(c.nodes.len());
+            c.nodes.try_set(n, node);
+        } else if e >= 2147483648 {
+            let parent = if open.len() == 0 {
+                4294967295
+            } else {
+                wrapping_u32(w64(in open, sub(open.len(), 1)))
+            };
+            open.push(c.nodes.len());
+            c
+                .nodes
+                .push(
+                    Node {
+                        kind: wrapping_u8(sub(e, 2147483648)),
+                        parent: parent,
+                        start: wrapping_u32(offset),
+                        end: wrapping_u32(offset),
+                        lo: wrapping_u32(c.leaf.len()),
+                        hi: wrapping_u32(c.leaf.len()),
+                        after: 0
+                    }
+                );
+        } else {
+            offset = w64(in c.te, e);
+            c.leaf.push(wrapping_u32(e));
+        }
+    }
+    c
+}
+
+fn leaf_tok(in c: Cst, l: u64) -> u64 {
+    w32(in c.leaf, l)
+}
+
+fn tok_kind(in c: Cst, t: u64) -> u8 {
+    b8(in c.tk, t)
+}
+
+fn trivia(in c: Cst, l: u64) -> bool {
+    trivia_kind(tok_kind(in c, leaf_tok(in c, l)))
+}
+
+// The leaves of `token_words(node)`: the non-trivia leaves under it.
+fn words(in c: Cst, n: u64) -> ChunkSeq[u64] {
+    let node = node_at(in c, n);
+    let mut out = ChunkSeq::new[u64]();
+    for l in widen_u64(node.lo)..widen_u64(node.hi) {
+        if !trivia(in c, l) {
+            out.push(l);
+        }
+    }
+    out
+}
+
+fn leaf_s(in c: Cst, l: u64) -> u64 {
+    w64(in c.ts, leaf_tok(in c, l))
+}
+
+fn leaf_e(in c: Cst, l: u64) -> u64 {
+    w64(in c.te, leaf_tok(in c, l))
+}
+
+fn leaf_k(in c: Cst, l: u64) -> u8 {
+    tok_kind(in c, leaf_tok(in c, l))
+}
+
+fn leaf_is(in c: Cst, in src: ChunkSeq[u8], l: u64, in w: Str) -> bool {
+    range_is(in src, leaf_s(in c, l), leaf_e(in c, l), in w.as_bytes())
+}
+
+fn n_start(in c: Cst, n: u64) -> u64 {
+    widen_u64(node_at(in c, n).start)
+}
+
+fn n_end(in c: Cst, n: u64) -> u64 {
+    widen_u64(node_at(in c, n).end)
+}
+
+// `significant_range(node).start`.
+fn sig_start(in c: Cst, n: u64) -> u64 {
+    let node = node_at(in c, n);
+    for l in widen_u64(node.lo)..widen_u64(node.hi) {
+        if !trivia(in c, l) {
+            return leaf_s(in c, l);
+        }
+    }
+    widen_u64(node.start)
+}
+
+// The first child of `n` of kind `k`, or NONE.
+fn child_of(in c: Cst, n: u64, k: u8) -> u64 {
+    let node = node_at(in c, n);
+    for m in inc(n)..widen_u64(node.after) {
+        let x = node_at(in c, m);
+        if widen_u64(x.parent) == n && x.kind == k {
+            return m;
+        }
+    }
+    NONE
+}
+
+fn children_of(in c: Cst, n: u64, k: u8) -> ChunkSeq[u64] {
+    let node = node_at(in c, n);
+    let mut out = ChunkSeq::new[u64]();
+    for m in inc(n)..widen_u64(node.after) {
+        let x = node_at(in c, m);
+        if widen_u64(x.parent) == n && x.kind == k {
+            out.push(m);
+        }
+    }
+    out
+}
+
+fn call_node(k: u8) -> bool {
+    k == N_SUGAR_ITEM
+        || k == N_SUGAR_PAT
+        || k == N_SUGAR_STMT
+        || k == N_SUGAR_EXPR
+        || k == N_DOTTED_EXPR
+        || k == N_PIPE_EXPR
+        || k == N_TAGGED_LITERAL
+}
+
+// `head_range(node)`.
+fn head_range(in c: Cst, n: u64) -> (u64, u64) {
+    let op = child_of(in c, n, N_SUGAR_OPERATOR);
+    if op != NONE {
+        return (n_start(in c, op), n_end(in c, op));
+    }
+    let s = sig_start(in c, n);
+    (s, inc(s))
+}
+
+// `call_key(node)` as a byte range of the source.
+fn call_key(in c: Cst, in src: ChunkSeq[u8], n: u64) -> (u64, u64) {
+    let op = child_of(in c, n, N_SUGAR_OPERATOR);
+    if op != NONE {
+        return (n_start(in c, op), n_end(in c, op));
+    }
+    let ws = words(in c, n);
+    let first = w64(in ws, 0);
+    if leaf_is(in c, in src, first, in "ghost") && ws.len() > 1 {
+        let next = w64(in ws, 1);
+        if leaf_k(in c, next) == k_lower() {
+            return (leaf_s(in c, next), leaf_e(in c, next));
+        }
+    }
+    (leaf_s(in c, first), leaf_e(in c, first))
+}
+
+// The end of the leaves of the tree of `n` in the forest (its root's).
+fn tree_end(in c: Cst, n: u64) -> u64 {
+    let mut at = n;
+    loop {
+        let p = node_at(in c, at).parent;
+        if p == 4294967295 {
+            break;
+        }
+        at = widen_u64(p);
+    }
+    widen_u64(node_at(in c, at).hi)
+}
+
+// `block_end(node, work)`: the start of the enclosing block's `}`.
+fn block_end(in c: Cst, n: u64, inout work: u64, inout end: u64) -> Dg {
+    let node = node_at(in c, n);
+    let mut depth: u64 = 0;
+    let first = if node.hi > node.lo {
+        widen_u64(node.hi)
+    } else {
+        tree_end(in c, n)
+    };
+    for l in first..tree_end(in c, n) {
+        let ch = charge(inout work, 1, n_start(in c, n), n_end(in c, n));
+        if ch.failed {
+            return ch;
+        }
+        let k = leaf_k(in c, l);
+        if k == k_l_brace() {
+            depth = inc(depth);
+        }
+        if k == k_r_brace() {
+            if depth == 0 {
+                end = leaf_s(in c, l);
+                return dg_ok();
+            }
+            depth = sub(depth, 1);
+        }
+    }
+    diag(in "statement sugar needs an enclosing block", n_start(in c, n), n_end(in c, n))
+}
+
+// `parse(source, include_tests)`: the CST and diagnostics, or the lexer's
+// refusal (`LexLimit::diagnostic(0)`).
+struct Parsed {
+    cst: Cst,
+    // Diagnostics as rows (code, start, end, message first, message length).
+    d: ChunkSeq[u64],
+    dtext: ChunkSeq[u8],
+    refused: Dg
+}
+
+fn parse(in src: ChunkSeq[u8], include_tests: bool) -> Parsed {
+    let mut d = diags_new();
+    let t = lex_sugar_with_limits(
+        in src.as_slice(),
+        inout d,
+        MAX_BYTES,
+        HARD_TOKENS,
+        max_diagnostics()
+    );
+    if t.rejected {
+        let end = if d.at.len() > 1 {
+            w32(in d.at, 1)
+        } else {
+            d.text.len()
+        };
+        let m = range_of(in d.text, w32(in d.at, 0), end);
+        return Parsed {
+            cst: Cst {
+                nodes: ChunkSeq::new[Node](),
+                leaf: ChunkSeq::new[u32](),
+                tk: ChunkSeq::new[u8](),
+                ts: ChunkSeq::new[u64](),
+                te: ChunkSeq::new[u64]()
+            },
+            d: ChunkSeq::new[u64](),
+            dtext: ChunkSeq::new[u8](),
+            refused: dg_new(in "E0003", in m, 0, 0)
+        };
+    }
+    let p = parse_surface_tokens(
+        in src.as_slice(),
+        t,
+        d,
+        max_diagnostics(),
+        hard_depth(),
+        include_tests
+    );
+    let mut rows = ChunkSeq::new[u64]();
+    let mut text = ChunkSeq::new[u8]();
+    let n = p.d.code.len();
+    for i in 0..n {
+        let s = w32(in p.d.at, i);
+        let e = if inc(i) < n {
+            w32(in p.d.at, inc(i))
+        } else {
+            p.d.text.len()
+        };
+        rows.push(widen_u64(b8(in p.d.code, i)));
+        rows.push(w32(in p.d.start, i));
+        rows.push(w32(in p.d.end, i));
+        rows.push(text.len());
+        rows.push(sub(e, s));
+        cat_range(inout text, in p.d.text, s, e);
+    }
+    Parsed {
+        cst: build_cst(in p),
+        d: rows,
+        dtext: text,
+        refused: dg_ok()
+    }
+}
+
+// ---------------------------------------------------------------- definitions
+
+// Definitions and rules as rows over one text pool.
+//   def rows (DW): name first, len, sort first, len, symbol first or NONE,
+//     len, nonassoc, emits first or NONE, len, rule first, count, key
+//     first, count, import
+//   rule rows (RW): pattern first, len, head start, end, template first,
+//     len, span start, end, tail
+//   key rows: first, len
+const DW: u64 = 14;
+const RW: u64 = 9;
+
+struct Reg {
+    pool: ChunkSeq[u8],
+    defs: ChunkSeq[u64],
+    rules: ChunkSeq[u64],
+    keys: ChunkSeq[u64],
+    // Bindings: key first, len, def, alias.
+    heads: ChunkSeq[u64]
+}
+
+fn df(in r: Reg, d: u64, k: u64) -> u64 {
+    w64(in r.defs, add(wrapping_mul(d, DW), k))
+}
+
+fn rf(in r: Reg, rule: u64, k: u64) -> u64 {
+    w64(in r.rules, add(wrapping_mul(rule, RW), k))
+}
+
+fn ndefs(in r: Reg) -> u64 {
+    r.defs.len() / DW
+}
+
+fn pool_text(in r: Reg, first: u64, len: u64) -> ChunkSeq[u8] {
+    range_of(in r.pool, first, add(first, len))
+}
+
+fn pool_push(inout r: Reg, in src: ChunkSeq[u8], s: u64, e: u64) -> u64 {
+    let first = r.pool.len();
+    cat_range(inout r.pool, in src, s, e);
+    first
+}
+
+fn pool_is(in r: Reg, first: u64, len: u64, in w: Str) -> bool {
+    range_is(in r.pool, first, add(first, len), in w.as_bytes())
+}
+
+fn def_rule(in r: Reg, d: u64, i: u64) -> u64 {
+    add(df(in r, d, 9), i)
+}
+
+// `read_definition(source, decl, None)`.
+fn read_definition(inout r: Reg, in src: ChunkSeq[u8], in c: Cst, decl: u64) -> Dg {
+    let ds = n_start(in c, decl);
+    let de = n_end(in c, decl);
+    let ws = words(in c, decl);
+    let mut at: u64 = 0;
+    loop {
+        if at >= ws.len() || leaf_is(in c, in src, w64(in ws, at), in "sugar") {
+            break;
+        }
+        at = inc(at);
+    }
+    at = inc(at);
+    if at >= ws.len() {
+        return diag(in "missing sugar name", ds, de);
+    }
+    let name_l = w64(in ws, at);
+    at = inc(at);
+    if inc(at) >= ws.len() {
+        return diag(in "missing sugar sort", ds, de);
+    }
+    let sort_l = w64(in ws, inc(at));
+    at = add(at, 2);
+    let mut header = ChunkSeq::new[u64]();
+    loop {
+        if at >= ws.len() || leaf_k(in c, w64(in ws, at)) == k_l_brace() {
+            break;
+        }
+        header.push(w64(in ws, at));
+        at = inc(at);
+    }
+    let op = child_of(in c, decl, N_SUGAR_OPERATOR);
+    let mut nonassoc = false;
+    let mut emits_at = NONE;
+    for i in 0..header.len() {
+        let l = w64(in header, i);
+        if leaf_is(in c, in src, l, in "none") {
+            nonassoc = true;
+        }
+        if emits_at == NONE && leaf_is(in c, in src, l, in "emits") {
+            emits_at = i;
+        }
+    }
+    let mut emits_first = NONE;
+    let mut emits_len: u64 = 0;
+    if emits_at != NONE {
+        let start = leaf_s(in c, w64(in header, inc(emits_at)));
+        let end = leaf_e(in c, w64(in header, sub(header.len(), 1)));
+        let mut wrapped = ChunkSeq::new[u8]();
+        cat(inout wrapped, in "fn __sugar_row() ");
+        cat_range(inout wrapped, in src, start, end);
+        cat(inout wrapped, in " {}");
+        let text = match String::from_utf8(in wrapped.as_slice()) {
+            Option::Some(t) => t,
+            Option::None => String::new(),
+        };
+        let l = lower_source(in text.as_str());
+        if l.p.d.code.len() != 0 {
+            return diag(in "invalid sugar effect row", ds, de);
+        }
+        let a = l.ast;
+        if a.m_items.len() != 0 {
+            let it = item_of(in a, 0);
+            if it.kind == 2 {
+                let f = fn_of(in a, it.node);
+                if f.effects != none() {
+                    let fx = a
+                        .effects
+                        .get_or(
+                            idx_from_raw[@vesper/ast::EffectsNode](f.effects),
+                            @vesper/ast::EffectsNode {
+                                instances: 0,
+                                tail: none()
+                            }
+                        );
+                    if fx.tail != none() {
+                        return diag(in "sugar emits must declare a closed effect row", ds, de);
+                    }
+                }
+                emits_first = pool_push(inout r, in src, start, end);
+                emits_len = sub(end, start);
+            }
+        }
+    }
+    // Rules.
+    let rule_first = r.rules.len() / RW;
+    let key_first = r.keys.len() >> 1;
+    let rules = children_of(in c, decl, N_SUGAR_RULE);
+    let mut sort = ChunkSeq::new[u8]();
+    cat_range(inout sort, in src, leaf_s(in c, sort_l), leaf_e(in c, sort_l));
+    for ri in 0..rules.len() {
+        let rule = w64(in rules, ri);
+        let pat = child_of(in c, rule, N_SUGAR_PATTERN);
+        let body = child_of(in c, rule, N_SUGAR_TEMPLATE);
+        let ps = n_start(in c, pat);
+        let pe = n_end(in c, pat);
+        let pws = words(in c, pat);
+        let mut k: u64 = 1;
+        let mut head = w64(in pws, k);
+        if leaf_is(in c, in src, head, in "ghost") {
+            k = inc(k);
+            if k >= pws.len() {
+                return diag(in "missing ghost sugar head", n_start(in c, rule), n_end(in c, rule));
+            }
+            head = w64(in pws, k);
+        }
+        let (key_s, key_e, key_src) = if op != NONE {
+            (n_start(in c, op), n_end(in c, op), true)
+        } else {
+            let hk = leaf_k(in c, head);
+            if !(
+                hk == k_lower()
+                    || hk == k_state()
+                    || hk == k_linear()
+                    || hk == k_with()
+                    || hk == k_eff()
+            ) {
+                return diag(in "sugar rule needs a literal head word", ps, pe);
+            }
+            (leaf_s(in c, head), leaf_e(in c, head), true)
+        };
+        let mut known = false;
+        for q in key_first..(r.keys.len() >> 1) {
+            let kf = w64(in r.keys, q << 1);
+            let kl = w64(in r.keys, inc(q << 1));
+            if key_src && ranges_eq(in r.pool, kf, add(kf, kl), in src, key_s, key_e) {
+                known = true;
+            }
+        }
+        if !known {
+            let kf = pool_push(inout r, in src, key_s, key_e);
+            r.keys.push(kf);
+            r.keys.push(sub(key_e, key_s));
+        }
+        let text = range_of(in src, inc(ps), sub(pe, 1));
+        let tail = captures_tail(in text);
+        if tail && !seq_eq(in sort, in stmt_text()) {
+            return diag(
+                in "a block-tail hole requires statement sugar",
+                n_start(in c, rule),
+                n_end(in c, rule)
+            );
+        }
+        let pf = pool_push(inout r, in src, inc(ps), sub(pe, 1));
+        let bs = n_start(in c, body);
+        let be = n_end(in c, body);
+        let tf = pool_push(inout r, in src, inc(bs), sub(be, 1));
+        r.rules.push(pf);
+        r.rules.push(sub(sub(pe, 1), inc(ps)));
+        r.rules.push(sub(sub(leaf_s(in c, head), ps), 1));
+        r.rules.push(sub(sub(leaf_e(in c, head), ps), 1));
+        r.rules.push(tf);
+        r.rules.push(sub(sub(be, 1), inc(bs)));
+        r.rules.push(n_start(in c, rule));
+        r.rules.push(n_end(in c, rule));
+        r
+            .rules
+            .push(
+                if tail {
+                    1
+                } else {
+                    0
+                }
+            );
+    }
+    let nf = pool_push(inout r, in src, leaf_s(in c, name_l), leaf_e(in c, name_l));
+    r.defs.push(nf);
+    r.defs.push(sub(leaf_e(in c, name_l), leaf_s(in c, name_l)));
+    let sf = pool_push(inout r, in src, leaf_s(in c, sort_l), leaf_e(in c, sort_l));
+    r.defs.push(sf);
+    r.defs.push(sort.len());
+    if op != NONE {
+        let of = pool_push(inout r, in src, n_start(in c, op), n_end(in c, op));
+        r.defs.push(of);
+        r.defs.push(sub(n_end(in c, op), n_start(in c, op)));
+    } else {
+        r.defs.push(NONE);
+        r.defs.push(0);
+    }
+    r
+        .defs
+        .push(
+            if nonassoc {
+                1
+            } else {
+                0
+            }
+        );
+    r.defs.push(emits_first);
+    r.defs.push(emits_len);
+    r.defs.push(rule_first);
+    r.defs.push(sub(r.rules.len() / RW, rule_first));
+    r.defs.push(key_first);
+    r.defs.push(sub(r.keys.len() >> 1, key_first));
+    r.defs.push(NONE);
+    dg_ok()
+}
+
+fn stmt_text() -> ChunkSeq[u8] {
+    let mut s = ChunkSeq::new[u8]();
+    cat(inout s, in "stmt");
+    s
+}
+
+fn item_of(in a: Ast, k: u64) -> ItemNode {
+    let raw = match a.m_items.try_get(k) {
+        Option::Some(v) => v,
+        Option::None => none(),
+    };
+    a
+        .items
+        .get_or(
+            idx_from_raw[ItemNode](raw),
+            ItemNode {
+                kind: 0,
+                node: 0
+            }
+        )
+}
+
+// `bind(defs, heads, id, visible)` with `visible` the definition's name.
+fn bind(inout r: Reg, id: u64) -> Dg {
+    let first = df(in r, id, 11);
+    let count = df(in r, id, 12);
+    for q in first..add(first, count) {
+        let kf = w64(in r.keys, q << 1);
+        let kl = w64(in r.keys, inc(q << 1));
+        for h in 0..(r.heads.len() >> 2) {
+            let hf = w64(in r.heads, h << 2);
+            let hl = w64(in r.heads, inc(h << 2));
+            if ranges_eq(in r.pool, hf, add(hf, hl), in r.pool, kf, add(kf, kl)) {
+                let mut m = ChunkSeq::new[u8]();
+                cat(inout m, in "duplicate sugar binding for `");
+                cat_range(inout m, in r.pool, kf, add(kf, kl));
+                m.push(96);
+                let rule = def_rule(in r, id, 0);
+                return diag_seq(in m, rf(in r, rule, 6), rf(in r, rule, 7));
+            }
+        }
+        r.heads.push(kf);
+        r.heads.push(kl);
+        r.heads.push(id);
+        r.heads.push(0);
+    }
+    dg_ok()
+}
+
+// `Registry::get(key, call, None)`: the definition, or NONE with `d` set.
+fn lookup(in r: Reg, in src: ChunkSeq[u8], ks: u64, ke: u64, cs: u64, ce: u64, inout d: Dg) -> u64 {
+    for h in 0..(r.heads.len() >> 2) {
+        let hf = w64(in r.heads, h << 2);
+        let hl = w64(in r.heads, inc(h << 2));
+        if ranges_eq(in r.pool, hf, add(hf, hl), in src, ks, ke) {
+            return w64(in r.heads, add(h << 2, 2));
+        }
+    }
+    let mut m = ChunkSeq::new[u8]();
+    cat(inout m, in "unresolved sugar `");
+    cat_range(inout m, in src, ks, ke);
+    m.push(96);
+    d = dg_new(in "E0142", in m, cs, ce);
+    NONE
+}
+
+fn sort_is(in r: Reg, d: u64, in w: Str) -> bool {
+    pool_is(in r, df(in r, d, 2), df(in r, d, 3), in w)
+}
+
+// `fits_sort(kind, sort)`.
+fn fits_sort(in r: Reg, k: u8, d: u64) -> bool {
+    if k == N_SUGAR_ITEM {
+        sort_is(in r, d, in "item")
+    } else if k == N_SUGAR_PAT {
+        sort_is(in r, d, in "pat")
+    } else if k == N_SUGAR_STMT {
+        sort_is(in r, d, in "stmt") || sort_is(in r, d, in "expr")
+    } else if k == N_SUGAR_EXPR {
+        sort_is(in r, d, in "expr")
+    } else if k == N_PIPE_EXPR || k == N_DOTTED_EXPR {
+        sort_is(in r, d, in "infix")
+    } else if k == N_TAGGED_LITERAL {
+        sort_is(in r, d, in "tag")
+    } else {
+        false
+    }
+}
+
+// `operator_level(def)`: the Pratt level of its symbol, 0 for none.
+fn operator_level(in r: Reg, d: u64) -> u64 {
+    if df(in r, d, 4) == NONE {
+        return 0;
+    }
+    let text = pool_text(in r, df(in r, d, 4), df(in r, d, 5));
+    let mut dd = diags_new();
+    let t = lex_sugar_raw_with_limits(
+        in text.as_slice(),
+        inout dd,
+        max_source_bytes(),
+        max_tokens(),
+        max_diagnostics()
+    );
+    if t.rejected || t.kind.len() < 2 {
+        return 0;
+    }
+    if token_end(in t, 0) != w32(in t.start, 1) {
+        return 0;
+    }
+    let head = b8(in t.kind, 0);
+    let next = b8(in t.kind, 1);
+    if head == k_pipe() {
+        if next == k_gt() {
+            return 3;
+        }
+        if next == k_question()
+            && t.kind.len() > 2
+            && b8(in t.kind, 2) == k_gt()
+            && token_end(in t, 1) == w32(in t.start, 2) {
+            return 3;
+        }
+        return 0;
+    }
+    if head != k_dot() {
+        return 0;
+    }
+    if next == k_eq_eq() || next == k_ne() {
+        8
+    } else if next == k_lt()
+        || next == k_le()
+        || next == k_shl()
+        || next == k_gt()
+        || next == k_ge()
+        || next == k_shr() {
+        10
+    } else if next == k_pipe() || next == k_pipe_eq() || next == k_or() {
+        12
+    } else if next == k_caret() {
+        14
+    } else if next == k_amp() || next == k_amp_eq() || next == k_and() {
+        16
+    } else if next == k_plus()
+        || next == k_minus()
+        || next == k_plus_eq()
+        || next == k_minus_eq()
+        || next == k_arrow() {
+        20
+    } else if next == k_star()
+        || next == k_slash()
+        || next == k_percent()
+        || next == k_star_eq()
+        || next == k_slash_eq()
+        || next == k_percent_eq() {
+        22
+    } else {
+        0
+    }
+}
+
+// ---------------------------------------------------------------- state
+
+// `ExpandedSugar`. Mappings are rows (expanded start, end, original start,
+// end, copied); regions rows of RG words: expanded start, end, hole first,
+// count, place first, count, definition, call start, end, rule start, end,
+// import (NONE for none).
+const RG: u64 = 12;
+
+pub struct St {
+    src: ChunkSeq[u8],
+    mark: ChunkSeq[u8],
+    maps: ChunkSeq[u64],
+    regs: ChunkSeq[u64],
+    holes: ChunkSeq[u64],
+    places: ChunkSeq[u64]
+}
+
+fn nmaps(in st: St) -> u64 {
+    st.maps.len() / 5
+}
+
+fn mp(in st: St, i: u64, k: u64) -> u64 {
+    w64(in st.maps, add(wrapping_mul(i, 5), k))
+}
+
+fn nregs(in st: St) -> u64 {
+    st.regs.len() / RG
+}
+
+fn rg(in st: St, i: u64, k: u64) -> u64 {
+    w64(in st.regs, add(wrapping_mul(i, RG), k))
+}
+
+fn clamp(x: u64, lo: u64, hi: u64) -> u64 {
+    if x < lo {
+        lo
+    } else if x > hi {
+        hi
+    } else {
+        x
+    }
+}
+
+// `SugarSourceSpan::project(range)` of mapping row `m` of `maps`.
+fn project(in maps: ChunkSeq[u64], m: u64, s: u64, e: u64) -> (u64, u64) {
+    let row = wrapping_mul(m, 5);
+    let es = w64(in maps, row);
+    let ee = w64(in maps, inc(row));
+    let os = w64(in maps, add(row, 2));
+    let oe = w64(in maps, add(row, 3));
+    if w64(in maps, add(row, 4)) == 0 {
+        return (os, oe);
+    }
+    (sub(add(os, clamp(s, es, ee)), es), sub(add(os, clamp(e, es, ee)), es))
+}
+
+// `ExpandedSugar::original_span(span)`.
+fn original_span(in st: St, s: u64, e: u64) -> (u64, u64) {
+    let n = nmaps(in st);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n || mp(in st, i, 1) > s {
+            break;
+        }
+        i = inc(i);
+    }
+    if i < n {
+        let (fs, fe) = project(in st.maps, i, s, s);
+        if s == e {
+            return (fs, fe);
+        }
+        let mut j: u64 = 0;
+        loop {
+            if j >= n || mp(in st, j, 0) >= e {
+                break;
+            }
+            j = inc(j);
+        }
+        let last = if j == 0 {
+            0
+        } else {
+            sub(j, 1)
+        };
+        let (ls, le) = project(in st.maps, last, e, e);
+        let a = if fs < ls {
+            fs
+        } else {
+            ls
+        };
+        let b = if fe > le {
+            fe
+        } else {
+            le
+        };
+        return (a, b);
+    }
+    if n == 0 {
+        return (0, 0);
+    }
+    let oe = mp(in st, sub(n, 1), 3);
+    (oe, oe)
+}
+
+// An edit (`Edit`): rows of EW words: old start, end, text first, length,
+// region (0 none, 1 some), region expanded start, end, hole first, count,
+// place first, count, definition, call start, end, rule start, end, copy
+// first, count, origin start, end. Texts, holes, places and copies (new
+// start, end, prior start, end) live in the pools of `Eds`.
+const EW: u64 = 20;
+
+struct Eds {
+    rows: ChunkSeq[u64],
+    text: ChunkSeq[u8],
+    holes: ChunkSeq[u64],
+    places: ChunkSeq[u64],
+    copies: ChunkSeq[u64]
+}
+
+fn eds_new() -> Eds {
+    Eds {
+        rows: ChunkSeq::new[u64](),
+        text: ChunkSeq::new[u8](),
+        holes: ChunkSeq::new[u64](),
+        places: ChunkSeq::new[u64](),
+        copies: ChunkSeq::new[u64]()
+    }
+}
+
+fn ed(in x: Eds, i: u64, k: u64) -> u64 {
+    w64(in x.rows, add(wrapping_mul(i, EW), k))
+}
+
+fn neds(in x: Eds) -> u64 {
+    x.rows.len() / EW
+}
+
+// A plain edit: no region, no copies.
+fn push_plain(inout x: Eds, os: u64, oe: u64, in text: ChunkSeq[u8], gs: u64, ge: u64) {
+    x.rows.push(os);
+    x.rows.push(oe);
+    x.rows.push(x.text.len());
+    x.rows.push(text.len());
+    cat_seq(inout x.text, in text);
+    for k in 0..12 {
+        x.rows.push(0);
+    }
+    x.rows.push(x.copies.len() >> 2);
+    x.rows.push(0);
+    x.rows.push(gs);
+    x.rows.push(ge);
+}
+
+// The spans `project(r)` yields for region spans under edit `i`.
+fn project_span(in x: Eds, i: u64, s: u64, e: u64, inout out: ChunkSeq[u64]) {
+    let os = ed(in x, i, 0);
+    let oe = ed(in x, i, 1);
+    let end = add(os, ed(in x, i, 3));
+    if e <= os {
+        out.push(s);
+        out.push(e);
+        return;
+    }
+    if s >= oe {
+        out.push(add(end, sub(s, oe)));
+        out.push(add(end, sub(e, oe)));
+        return;
+    }
+    if s <= os && e >= oe {
+        out.push(s);
+        out.push(add(end, sub(e, oe)));
+        return;
+    }
+    if s < os {
+        out.push(s);
+        out.push(os);
+    }
+    let cf = ed(in x, i, 16);
+    for k in 0..ed(in x, i, 17) {
+        let row = add(cf, k) << 2;
+        let ns = w64(in x.copies, row);
+        let ne = w64(in x.copies, inc(row));
+        let ps = w64(in x.copies, add(row, 2));
+        let pe = w64(in x.copies, add(row, 3));
+        let a = if s > ps {
+            s
+        } else {
+            ps
+        };
+        let b = if e < pe {
+            e
+        } else {
+            pe
+        };
+        if a < b && sub(ne, ns) == sub(pe, ps) {
+            let base = add(os, ns);
+            out.push(add(base, sub(a, ps)));
+            out.push(add(base, sub(b, ps)));
+        }
+    }
+    if e > oe {
+        out.push(end);
+        out.push(add(end, sub(e, oe)));
+    }
+}
+
+// `emit(from, to)` of `apply`: the old mappings over `from` moved to `to`.
+fn emit_maps(in st: St, fs: u64, fe: u64, to: u64, inout out: ChunkSeq[u64]) {
+    let n = nmaps(in st);
+    for m in 0..n {
+        let es = mp(in st, m, 0);
+        let ee = mp(in st, m, 1);
+        if ee <= fs {
+            continue;
+        }
+        if es >= fe {
+            break;
+        }
+        let a = if es > fs {
+            es
+        } else {
+            fs
+        };
+        let b = if ee < fe {
+            ee
+        } else {
+            fe
+        };
+        if a < b {
+            let (os, oe) = project(in st.maps, m, a, b);
+            out.push(sub(add(to, a), fs));
+            out.push(sub(add(to, b), fs));
+            out.push(os);
+            out.push(oe);
+            out.push(mp(in st, m, 4));
+        }
+    }
+}
+
+// `ExpandedSugar::apply(edit, work)` of edit `i`.
+fn apply(inout st: St, in x: Eds, i: u64, inout work: u64) -> Dg {
+    let os = ed(in x, i, 0);
+    let oe = ed(in x, i, 1);
+    let tf = ed(in x, i, 2);
+    let tl = ed(in x, i, 3);
+    let gs = ed(in x, i, 18);
+    let ge = ed(in x, i, 19);
+    let ncopies = ed(in x, i, 17);
+    let end = add(os, tl);
+    let size = add(sub(st.src.len(), sub(oe, os)), tl);
+    if size > MAX_BYTES {
+        return limit(gs, ge);
+    }
+    let ch = charge(inout work, add(add(size, nmaps(in st)), nregs(in st)), gs, ge);
+    if ch.failed {
+        return ch;
+    }
+    let mut regs = ChunkSeq::new[u64]();
+    let mut holes = ChunkSeq::new[u64]();
+    let mut places = ChunkSeq::new[u64]();
+    for r in 0..nregs(in st) {
+        let hf = rg(in st, r, 2);
+        let hn = rg(in st, r, 3);
+        let pf = rg(in st, r, 4);
+        let pn = rg(in st, r, 5);
+        let units = wrapping_mul(add(add(1, hn), pn), inc(ncopies));
+        let ch2 = charge(inout work, units, gs, ge);
+        if ch2.failed {
+            return ch2;
+        }
+        let mut spans = ChunkSeq::new[u64]();
+        project_span(in x, i, rg(in st, r, 0), rg(in st, r, 1), inout spans);
+        let nhf = holes.len() >> 1;
+        for h in hf..add(hf, hn) {
+            let mut ps = ChunkSeq::new[u64]();
+            project_span(
+                in x,
+                i,
+                w64(in st.holes, h << 1),
+                w64(in st.holes, inc(h << 1)),
+                inout ps
+            );
+            holes.extend(in ps.as_slice());
+        }
+        let nhn = sub(holes.len() >> 1, nhf);
+        let npf = places.len() / 3;
+        for p in pf..add(pf, pn) {
+            let row = wrapping_mul(p, 3);
+            let mut ps = ChunkSeq::new[u64]();
+            project_span(in x, i, w64(in st.places, row), w64(in st.places, inc(row)), inout ps);
+            for q in 0..(ps.len() >> 1) {
+                places.push(w64(in ps, q << 1));
+                places.push(w64(in ps, inc(q << 1)));
+                places.push(w64(in st.places, add(row, 2)));
+            }
+        }
+        let npn = sub(places.len() / 3, npf);
+        for q in 0..(spans.len() >> 1) {
+            regs.push(w64(in spans, q << 1));
+            regs.push(w64(in spans, inc(q << 1)));
+            regs.push(nhf);
+            regs.push(nhn);
+            regs.push(npf);
+            regs.push(npn);
+            for k in 6..RG {
+                regs.push(rg(in st, r, k));
+            }
+        }
+    }
+    let mut maps = ChunkSeq::new[u64]();
+    emit_maps(in st, 0, os, 0, inout maps);
+    let cf = ed(in x, i, 16);
+    for k in 0..ncopies {
+        let row = add(cf, k) << 2;
+        let ns = w64(in x.copies, row);
+        let ne = w64(in x.copies, inc(row));
+        let ps = w64(in x.copies, add(row, 2));
+        let pe = w64(in x.copies, add(row, 3));
+        if sub(ne, ns) == sub(pe, ps) {
+            emit_maps(in st, ps, pe, add(os, ns), inout maps);
+        }
+    }
+    emit_maps(in st, oe, st.src.len(), end, inout maps);
+    let mut complete = ChunkSeq::new[u64]();
+    let mut fill: u64 = 0;
+    for m in 0..(maps.len() / 5) {
+        let row = wrapping_mul(m, 5);
+        let es = w64(in maps, row);
+        if fill < es {
+            complete.push(fill);
+            complete.push(es);
+            complete.push(gs);
+            complete.push(ge);
+            complete.push(0);
+        }
+        fill = w64(in maps, inc(row));
+        for k in 0..5 {
+            complete.push(w64(in maps, add(row, k)));
+        }
+    }
+    if fill < size {
+        complete.push(fill);
+        complete.push(size);
+        complete.push(gs);
+        complete.push(ge);
+        complete.push(0);
+    }
+    st.maps = complete;
+    let mut text = ChunkSeq::new[u8]();
+    cat_range(inout text, in st.src, 0, os);
+    cat_range(inout text, in x.text, tf, add(tf, tl));
+    cat_range(inout text, in st.src, oe, st.src.len());
+    st.src = text;
+    if ed(in x, i, 4) == 1 {
+        let hf = ed(in x, i, 7);
+        let hn = ed(in x, i, 8);
+        let pf = ed(in x, i, 9);
+        let pn = ed(in x, i, 10);
+        regs.push(ed(in x, i, 5));
+        regs.push(ed(in x, i, 6));
+        regs.push(holes.len() >> 1);
+        regs.push(hn);
+        regs.push(places.len() / 3);
+        regs.push(pn);
+        for h in hf..add(hf, hn) {
+            holes.push(w64(in x.holes, h << 1));
+            holes.push(w64(in x.holes, inc(h << 1)));
+        }
+        for p in pf..add(pf, pn) {
+            for k in 0..3 {
+                places.push(w64(in x.places, add(wrapping_mul(p, 3), k)));
+            }
+        }
+        regs.push(ed(in x, i, 11));
+        regs.push(ed(in x, i, 12));
+        regs.push(ed(in x, i, 13));
+        regs.push(ed(in x, i, 14));
+        regs.push(ed(in x, i, 15));
+        regs.push(NONE);
+    }
+    st.regs = regs;
+    st.holes = holes;
+    st.places = places;
+    dg_ok()
+}
+
+// `fresh_prefix([source])`.
+fn fresh_prefix(in src: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let base = "__vesper_sugar_".as_bytes();
+    let mut used = ChunkSeq::new[u64]();
+    let n = src.len();
+    let bl = base.len();
+    let mut at: u64 = 0;
+    loop {
+        if add(at, bl) > n {
+            break;
+        }
+        let mut hit = true;
+        for j in 0..bl {
+            let c = match base.try_get(j) {
+                Option::Some(c) => c,
+                Option::None => 0,
+            };
+            if b8(in src, add(at, j)) != c {
+                hit = false;
+                break;
+            }
+        }
+        if !hit {
+            at = inc(at);
+            continue;
+        }
+        let tail = add(at, bl);
+        let mut k = tail;
+        loop {
+            if k >= n {
+                break;
+            }
+            let c = b8(in src, k);
+            if c < 48 || c > 57 {
+                break;
+            }
+            k = inc(k);
+        }
+        if k > tail && k < n && b8(in src, k) == 95 {
+            // `tail[..n].parse::<usize>()`: digits past usize overflow
+            // and are ignored.
+            let mut v: u64 = 0;
+            let mut ok = true;
+            for q in tail..k {
+                let d = sub(widen_u64(b8(in src, q)), 48);
+                if v > 1844674407370955161 || v == 1844674407370955161 && d > 5 {
+                    ok = false;
+                    break;
+                }
+                v = add(wrapping_mul(v, 10), d);
+            }
+            if ok {
+                let mut seen = false;
+                for q in 0..used.len() {
+                    if w64(in used, q) == v {
+                        seen = true;
+                    }
+                }
+                if !seen {
+                    used.push(v);
+                }
+            }
+        }
+        // `match_indices` does not overlap.
+        at = tail;
+    }
+    let mut id: u64 = 0;
+    loop {
+        let mut seen = false;
+        for q in 0..used.len() {
+            if w64(in used, q) == id {
+                seen = true;
+            }
+        }
+        if !seen {
+            break;
+        }
+        id = inc(id);
+    }
+    let mut out = ChunkSeq::new[u8]();
+    cat(inout out, in "__vesper_sugar_");
+    push_decimal(inout out, id);
+    out.push(95);
+    out
+}
+
+// ---------------------------------------------------------------- expansion
+
+fn mapped_diag(in st: St, in pd: Parsed, i: u64) -> Dg {
+    let row = wrapping_mul(i, 5);
+    let code = w64(in pd.d, row);
+    let s = w64(in pd.d, inc(row));
+    let e = w64(in pd.d, add(row, 2));
+    let first = w64(in pd.d, add(row, 3));
+    let len = w64(in pd.d, add(row, 4));
+    let m = range_of(in pd.dtext, first, add(first, len));
+    let (os, oe) = original_span(in st, s, e);
+    let mut d = if code == 1 {
+        dg_new(in "E0001", in m, os, oe)
+    } else if code == 2 {
+        dg_new(in "E0002", in m, os, oe)
+    } else {
+        dg_new(in "E0003", in m, os, oe)
+    };
+    let mut r = nregs(in st);
+    loop {
+        if r == 0 {
+            break;
+        }
+        r = sub(r, 1);
+        if rg(in st, r, 0) <= s && s <= rg(in st, r, 1) {
+            related(inout d, rg(in st, r, 9), rg(in st, r, 10), in "expanded from this sugar rule");
+            break;
+        }
+    }
+    d
+}
+
+// The outcome of `expand`: a diagnostic, nothing to expand, or the state.
+pub struct Ex {
+    d: Dg,
+    some: bool,
+    st: St,
+    reg: Reg
+}
+
+fn ex_err(sink d: Dg, sink st: St, sink reg: Reg) -> Ex {
+    Ex {
+        d: d,
+        some: false,
+        st: st,
+        reg: reg
+    }
+}
+
+// `expand_sugar_for_execution(source, include_tests)`.
+pub fn expand(in source: ChunkSeq[u8], include_tests: bool) -> Ex {
+    let mut reg = Reg {
+        pool: ChunkSeq::new[u8](),
+        defs: ChunkSeq::new[u64](),
+        rules: ChunkSeq::new[u64](),
+        keys: ChunkSeq::new[u64](),
+        heads: ChunkSeq::new[u64]()
+    };
+    let mark = fresh_prefix(in source);
+    let mut st = St {
+        src: ChunkSeq::new[u8](),
+        mark: mark,
+        maps: ChunkSeq::new[u64](),
+        regs: ChunkSeq::new[u64](),
+        holes: ChunkSeq::new[u64](),
+        places: ChunkSeq::new[u64]()
+    };
+    if source.len() > MAX_BYTES {
+        return ex_err(limit(0, 0), st, reg);
+    }
+    cat_seq(inout st.src, in source);
+    st.maps.push(0);
+    st.maps.push(source.len());
+    st.maps.push(0);
+    st.maps.push(source.len());
+    st.maps.push(1);
+    let mut work = WORK;
+    let mut changed = false;
+    let mut steps: u64 = 0;
+    for depth in 0..inc(MAX_DEPTH) {
+        let ch = charge(inout work, st.src.len(), 0, 0);
+        if ch.failed {
+            return ex_err(ch, st, reg);
+        }
+        let pd = parse(in st.src, include_tests);
+        if pd.refused.failed {
+            return ex_err(pd.refused, st, reg);
+        }
+        let mut decls = ChunkSeq::new[u64]();
+
+        let mut calls = ChunkSeq::new[u64]();
+        let mut starts = ChunkSeq::new[u64]();
+        for n in 0..pd.cst.nodes.len() {
+            let k = node_at(in pd.cst, n).kind;
+            if k == N_SUGAR_DECL {
+                decls.push(n);
+            }
+            if call_node(k) {
+                calls.push(n);
+                starts.push(sig_start(in pd.cst, n));
+            }
+        }
+        let has_calls = calls.len() != 0;
+        if pd.d.len() != 0 {
+            if !changed && decls.len() == 0 && !has_calls {
+                let mut out = ex_err(dg_ok(), st, reg);
+                out.some = false;
+                return out;
+            }
+            let d = mapped_diag(in st, in pd, 0);
+            return ex_err(d, st, reg);
+        }
+        let c = pd.cst;
+        if !has_calls && decls.len() == 0 {
+            if changed {
+                let pr = protect(inout st, include_tests, inout work);
+                if pr.failed {
+                    return ex_err(pr, st, reg);
+                }
+            }
+            let mut out = ex_err(dg_ok(), st, reg);
+            out.some = changed;
+            return out;
+        }
+        if depth == MAX_DEPTH {
+            let n = nregs(in st);
+            let d = if n == 0 {
+                limit(0, 0)
+            } else {
+                limit(rg(in st, sub(n, 1), 7), rg(in st, sub(n, 1), 8))
+            };
+            return ex_err(d, st, reg);
+        }
+        let mut edits = eds_new();
+        for di in 0..decls.len() {
+            let decl = w64(in decls, di);
+            if changed {
+                let (os, oe) = original_span(in st, n_start(in c, decl), n_end(in c, decl));
+                return ex_err(
+                    diag(in "a sugar template cannot introduce new sugar declarations", os, oe),
+                    st,
+                    reg
+                );
+            }
+            let rd = read_definition(inout reg, in st.src, in c, decl);
+            if rd.failed {
+                return ex_err(rd, st, reg);
+            }
+            let id = sub(ndefs(in reg), 1);
+            let bd = bind(inout reg, id);
+            if bd.failed {
+                return ex_err(bd, st, reg);
+            }
+            let mut sp = ChunkSeq::new[u8]();
+            sp.push(32);
+            push_plain(
+                inout edits,
+                n_start(in c, decl),
+                n_end(in c, decl),
+                in sp,
+                n_start(in c, decl),
+                n_end(in c, decl)
+            );
+        }
+        let mut skip_to: u64 = 0;
+        // Pending calls as forest nodes; nested reparses join the forest.
+        let mut pending = ChunkSeq::new[u64]();
+        for q in 0..calls.len() {
+            pending.push(w64(in calls, q));
+        }
+        let mut forest = c;
+        let mut head: u64 = 0;
+        loop {
+            if head >= pending.len() {
+                break;
+            }
+            let node = w64(in pending, head);
+            head = inc(head);
+            let step = expand_call(
+                inout st,
+                inout reg,
+                inout forest,
+                node,
+                in starts,
+                inout edits,
+                inout skip_to,
+                inout steps,
+                inout work,
+                include_tests
+            );
+            if step.d.failed {
+                return ex_err(step.d, st, reg);
+            }
+            if step.calls.len() != 0 {
+                // Splice the nested calls in front of the queue, in order.
+                let mut front = ChunkSeq::new[u64]();
+                for q in 0..step.calls.len() {
+                    front.push(w64(in step.calls, q));
+                }
+                for q in head..pending.len() {
+                    front.push(w64(in pending, q));
+                }
+                pending = front;
+                head = 0;
+            }
+        }
+        // `edits.sort_by_key(|e| e.old.start)` then apply from the last.
+        let n = neds(in edits);
+        let mut order = ChunkSeq::new[u64]();
+        for i in 0..n {
+            let s = ed(in edits, i, 0);
+            let mut at = order.len();
+            loop {
+                if at == 0 || ed(in edits, w64(in order, sub(at, 1)), 0) <= s {
+                    break;
+                }
+                at = sub(at, 1);
+            }
+            order.push(0);
+            let mut k = sub(order.len(), 1);
+            loop {
+                if k <= at {
+                    break;
+                }
+                order.try_set(k, w64(in order, sub(k, 1)));
+                k = sub(k, 1);
+            }
+            order.try_set(at, i);
+        }
+        let mut k = n;
+        loop {
+            if k == 0 {
+                break;
+            }
+            k = sub(k, 1);
+            let ap = apply(inout st, in edits, w64(in order, k), inout work);
+            if ap.failed {
+                return ex_err(ap, st, reg);
+            }
+        }
+        changed = true;
+    }
+    ex_err(limit(0, 0), st, reg)
+}
+
+struct Step {
+    d: Dg,
+    // Nested uses to run first, as forest nodes.
+    calls: ChunkSeq[u64]
+}
+
+fn step_ok() -> Step {
+    Step {
+        d: dg_ok(),
+        calls: ChunkSeq::new[u64]()
+    }
+}
+
+fn step_err(sink d: Dg) -> Step {
+    let mut s = step_ok();
+    s.d = d;
+    s
+}
+
+fn step_msg(in msg: ChunkSeq[u8], os: u64, oe: u64, rs: u64, re: u64, in label: Str) -> Step {
+    let mut d = diag_seq(in msg, os, oe);
+    related(inout d, rs, re, in label);
+    step_err(d)
+}
+
+// The body of the `while let Some(node) = pending.pop_front()` loop.
+fn expand_call(
+    inout st: St,
+    inout reg: Reg,
+    inout c: Cst,
+    node: u64,
+    in starts: ChunkSeq[u64],
+    inout edits: Eds,
+    inout skip_to: u64,
+    inout steps: u64,
+    inout work: u64,
+    include_tests: bool
+) -> Step {
+    let kind = node_at(in c, node).kind;
+    if n_start(in c, node) < skip_to {
+        return step_ok();
+    }
+    let cs = sig_start(in c, node);
+    let ce = n_end(in c, node);
+    let (os, oe) = original_span(in st, cs, ce);
+    steps = inc(steps);
+    if steps > MAX_STEPS {
+        return step_err(limit(os, oe));
+    }
+    let (ks, ke) = call_key(in c, in st.src, node);
+    let mut d = dg_ok();
+    let def = lookup(in reg, in st.src, ks, ke, os, oe, inout d);
+    if def == NONE {
+        return step_err(d);
+    }
+    if !fits_sort(in reg, kind, def) {
+        let mut m = ChunkSeq::new[u8]();
+        cat(inout m, in "sugar `");
+        cat_seq(inout m, in pool_text(in reg, df(in reg, def, 0), df(in reg, def, 1)));
+        cat(inout m, in "` has sort ");
+        cat_seq(inout m, in pool_text(in reg, df(in reg, def, 2), df(in reg, def, 3)));
+        cat(inout m, in ", incompatible with this use");
+        let r0 = def_rule(in reg, def, 0);
+        return step_msg(
+            in m,
+            os,
+            oe,
+            rf(in reg, r0, 6),
+            rf(in reg, r0, 7),
+            in "declared by this rule"
+        );
+    }
+    if df(in reg, def, 4) != NONE {
+        let node_n = node_at(in c, node);
+        for m in inc(node)..widen_u64(node_n.after) {
+            let x = node_at(in c, m);
+            if widen_u64(x.parent) != node || !(x.kind == N_PIPE_EXPR || x.kind == N_DOTTED_EXPR) {
+                continue;
+            }
+            let op = child_of(in c, m, N_SUGAR_OPERATOR);
+            let (xs, xe) = original_span(in st, n_start(in c, m), n_end(in c, m));
+            let mut d2 = dg_ok();
+            let inner = lookup(
+                in reg,
+                in st.src,
+                n_start(in c, op),
+                n_end(in c, op),
+                xs,
+                xe,
+                inout d2
+            );
+            if inner == NONE {
+                return step_err(d2);
+            }
+            let same_symbol = df(in reg, inner, 4) != NONE
+                && ranges_eq(
+                    in reg.pool,
+                    df(in reg, def, 4),
+                    add(df(in reg, def, 4), df(in reg, def, 5)),
+                    in reg.pool,
+                    df(in reg, inner, 4),
+                    add(df(in reg, inner, 4), df(in reg, inner, 5))
+                );
+            if (df(in reg, def, 6) == 1 || df(in reg, inner, 6) == 1)
+                && !same_symbol
+                && operator_level(in reg, def) == operator_level(in reg, inner) {
+                return step_err(
+                    dg_str(
+                        in "E0140",
+                        in "parenthesize mixed non-associative sugar operators",
+                        os,
+                        oe
+                    )
+                );
+            }
+        }
+    }
+    let inv = range_of(in st.src, cs, ce);
+    let mut chosen = NONE;
+    let mut words = ChunkSeq::new[u64]();
+    let mut tail_end = NONE;
+    let mut tail = ChunkSeq::new[u8]();
+    for ri in 0..df(in reg, def, 10) {
+        let rule = def_rule(in reg, def, ri);
+        let rule_tail = rf(in reg, rule, 8) == 1;
+        let mut tail_len: u64 = 0;
+        if rule_tail {
+            if tail_end == NONE {
+                let mut end: u64 = 0;
+                let be = block_end(in c, node, inout work, inout end);
+                if be.failed {
+                    return step_err(be);
+                }
+                tail_end = end;
+            }
+            tail = range_of(in st.src, ce, tail_end);
+            tail_len = tail.len();
+        }
+        let pattern = pool_text(in reg, rf(in reg, rule, 0), rf(in reg, rule, 1));
+        let w = match_rule_encoded(in pattern, in inv, rule_tail, tail_len, work);
+        let status = w64(in w, 0);
+        work = w64(in w, 1);
+        if status == 2 {
+            let n = w64(in w, 2);
+            let mut m = ChunkSeq::new[u8]();
+            for j in 0..n {
+                m.push(wrapping_u8(w64(in w, add(3, j))));
+            }
+            return step_msg(
+                in m,
+                os,
+                oe,
+                rf(in reg, rule, 6),
+                rf(in reg, rule, 7),
+                in "while matching this sugar rule"
+            );
+        }
+        if status == 1 {
+            chosen = rule;
+            words = w;
+            break;
+        }
+    }
+    if chosen == NONE {
+        let mut m = ChunkSeq::new[u8]();
+        cat(inout m, in "no rule of `");
+        cat_seq(inout m, in pool_text(in reg, df(in reg, def, 0), df(in reg, def, 1)));
+        cat(inout m, in "` matches this sugar use");
+        let r0 = def_rule(in reg, def, 0);
+        return step_msg(
+            in m,
+            os,
+            oe,
+            rf(in reg, r0, 6),
+            rf(in reg, r0, 7),
+            in "candidate sugar rule"
+        );
+    }
+    let rule = chosen;
+    let rule_tail = rf(in reg, rule, 8) == 1;
+    if !rule_tail {
+        tail.clear();
+    }
+    let caps = caps_read(words);
+    // Scope captures: expand nested uses first.
+    let mut postpone = false;
+    let mut nested = step_ok();
+    for cap in 0..cap_count(in caps) {
+        if !sort_in(in caps, cap, in "scope".as_bytes()) {
+            continue;
+        }
+        for v in 0..cap_at(in caps, cap, 4) {
+            let vo = value_at(in caps, cap, v);
+            let vs = w64(in caps.w, vo);
+            let ve = w64(in caps.w, inc(vo));
+            let from_tail = w64(in caps.w, add(vo, 2)) != 0;
+            let base = if from_tail {
+                ce
+            } else {
+                cs
+            };
+            let start = add(base, vs);
+            let end = add(base, ve);
+            let mut probe = NONE;
+            for q in 0..starts.len() {
+                let n = w64(in starts, q);
+                if !(n < start || n <= cs) {
+                    probe = n;
+                    break;
+                }
+            }
+            if probe != NONE && probe < end {
+                postpone = true;
+            } else if !from_tail {
+                if start < 6 {
+                    return step_err(diag(in "scope has no enclosing function", os, oe));
+                }
+                let ch = charge(inout work, end, os, oe);
+                if ch.failed {
+                    return step_err(ch);
+                }
+                let mut wrapped = ChunkSeq::new[u8]();
+                cat(inout wrapped, in "fn f()");
+                for j in 6..start {
+                    wrapped.push(32);
+                }
+                cat_range(inout wrapped, in st.src, start, end);
+                let inside = parse(in wrapped, include_tests);
+                if inside.refused.failed {
+                    return step_err(inside.refused);
+                }
+                let mut found = ChunkSeq::new[u64]();
+                for n in 0..inside.cst.nodes.len() {
+                    if call_node(node_at(in inside.cst, n).kind) {
+                        found.push(n);
+                    }
+                }
+                if found.len() != 0 {
+                    postpone = true;
+                    // Later captures push in front of earlier ones.
+                    let base = append_cst(inout c, in inside.cst);
+                    let mut front = ChunkSeq::new[u64]();
+                    for q in 0..found.len() {
+                        front.push(add(base, w64(in found, q)));
+                    }
+                    for q in 0..nested.calls.len() {
+                        front.push(w64(in nested.calls, q));
+                    }
+                    nested.calls = front;
+                }
+            }
+        }
+    }
+    if postpone {
+        // The use waits for the next round; its nested uses run first,
+        // from the trees appended to the forest.
+        return nested;
+    }
+    let (hs, he) = head_range(in c, node);
+    for r in 0..nregs(in st) {
+        if rg(in st, r, 11) != NONE {
+            continue;
+        }
+        if rg(in st, r, 9) == rf(in reg, rule, 6)
+            && rg(in st, r, 10) == rf(in reg, rule, 7)
+            && rg(in st, r, 0) <= hs
+            && he <= rg(in st, r, 1) {
+            let mut in_hole = false;
+            let hf = rg(in st, r, 2);
+            for h in hf..add(hf, rg(in st, r, 3)) {
+                if w64(in st.holes, h << 1) <= hs && he <= w64(in st.holes, inc(h << 1)) {
+                    in_hole = true;
+                }
+            }
+            if !in_hole {
+                let mut d = dg_str(
+                    in "E0143",
+                    in "recursive sugar template does not decrease expansion rank",
+                    os,
+                    oe
+                );
+                related(
+                    inout d,
+                    rf(in reg, rule, 6),
+                    rf(in reg, rule, 7),
+                    in "this rule occurs earlier in the same expansion"
+                );
+                return step_err(d);
+            }
+        }
+    }
+    let mut mark = ChunkSeq::new[u8]();
+    cat_seq(inout mark, in st.mark);
+    push_decimal(inout mark, steps);
+    mark.push(95);
+    let template = pool_text(in reg, rf(in reg, rule, 4), rf(in reg, rule, 5));
+    let sk = skeleton_run(in template, in caps, in inv, in tail, in mark, MAX_BYTES);
+    if sk.failed {
+        return step_msg(
+            in sk.msg,
+            os,
+            oe,
+            rf(in reg, rule, 6),
+            rf(in reg, rule, 7),
+            in "in this sugar template"
+        );
+    }
+    let mut r = render(in sk, in caps, in inv, in tail, in mark);
+    if r.failed {
+        return step_msg(
+            in r.msg,
+            os,
+            oe,
+            rf(in reg, rule, 6),
+            rf(in reg, rule, 7),
+            in "in this sugar template"
+        );
+    }
+    if kind == N_SUGAR_PAT {
+        let ph = pattern_hygiene(inout r, in mark);
+        if ph.failed {
+            return step_msg(
+                in ph.msg,
+                os,
+                oe,
+                rf(in reg, rule, 6),
+                rf(in reg, rule, 7),
+                in "in this pattern template"
+            );
+        }
+    }
+    let mut has_scope = false;
+    for cap in 0..cap_count(in caps) {
+        if sort_in(in caps, cap, in "scope".as_bytes()) && cap_at(in caps, cap, 4) != 0 {
+            has_scope = true;
+        }
+    }
+    if has_scope {
+        let ch = charge(inout work, st.src.len(), os, oe);
+        if ch.failed {
+            return step_err(ch);
+        }
+    }
+    let sc = lower(inout r, in caps, in st.src, cs, ce, in mark, MAX_BYTES);
+    if sc.failed {
+        return step_msg(
+            in sc.msg,
+            os,
+            oe,
+            rf(in reg, rule, 6),
+            rf(in reg, rule, 7),
+            in "in this scope template"
+        );
+    }
+    if sc.items.len() != 0 {
+        let at = st.src.len();
+        let mut t = ChunkSeq::new[u8]();
+        t.push(10);
+        cat_seq(inout t, in sc.items);
+        t.push(10);
+        push_plain(inout edits, at, at, in t, os, oe);
+    }
+    let end = if rule_tail {
+        tail_end
+    } else {
+        ce
+    };
+    let expr = sort_is(in reg, def, in "expr")
+        || sort_is(in reg, def, in "infix")
+        || sort_is(in reg, def, in "tag");
+    let prefix: u64 = if expr {
+        1
+    } else {
+        0
+    };
+    let mut text = ChunkSeq::new[u8]();
+    if expr {
+        text.push(40);
+        cat_seq(inout text, in r.text);
+        cat(inout text, in "\n)");
+    } else {
+        cat_seq(inout text, in r.text);
+    }
+    if kind == N_SUGAR_STMT && !rule_tail && !ends_with_semi(in text, 0, text.len()) {
+        let nn = node_at(in c, node);
+        let mut next_k: u64 = NONE;
+        if nn.hi > nn.lo {
+            for l in widen_u64(nn.hi)..tree_end(in c, node) {
+                if !trivia(in c, l) {
+                    next_k = widen_u64(leaf_k(in c, l));
+                    break;
+                }
+            }
+        }
+        if ends_with_semi(in inv, 0, inv.len())
+            || next_k != NONE && next_k != widen_u64(k_r_brace()) {
+            text.push(59);
+        }
+    }
+    // The region and its edit.
+    let copy_first = edits.copies.len() >> 2;
+    let no = r.origins.len() / 5;
+    let mut crow = ChunkSeq::new[u64]();
+    for o in 0..no {
+        let row = wrapping_mul(o, 5);
+        let base = if w64(in r.origins, add(row, 4)) != 0 {
+            ce
+        } else {
+            cs
+        };
+        crow.push(add(w64(in r.origins, row), prefix));
+        crow.push(add(w64(in r.origins, inc(row)), prefix));
+        crow.push(add(base, w64(in r.origins, add(row, 2))));
+        crow.push(add(base, w64(in r.origins, add(row, 3))));
+    }
+    // `copies.sort_by_key(|(r, _)| r.start)`, stable.
+    let mut order = ChunkSeq::new[u64]();
+    for o in 0..no {
+        let s = w64(in crow, o << 2);
+        let mut at = order.len();
+        loop {
+            if at == 0 || w64(in crow, w64(in order, sub(at, 1)) << 2) <= s {
+                break;
+            }
+            at = sub(at, 1);
+        }
+        order.push(0);
+        let mut k = sub(order.len(), 1);
+        loop {
+            if k <= at {
+                break;
+            }
+            order.try_set(k, w64(in order, sub(k, 1)));
+            k = sub(k, 1);
+        }
+        order.try_set(at, o);
+    }
+    for k in 0..no {
+        let o = w64(in order, k);
+        for j in 0..4 {
+            edits.copies.push(w64(in crow, add(o << 2, j)));
+        }
+    }
+    let hole_first = edits.holes.len() >> 1;
+    for h in 0..(r.holes.len() >> 1) {
+        edits.holes.push(add(add(cs, prefix), w64(in r.holes, h << 1)));
+        edits.holes.push(add(add(cs, prefix), w64(in r.holes, inc(h << 1))));
+    }
+    let place_first = edits.places.len() / 3;
+    for p in 0..(r.places.len() / 3) {
+        let row = wrapping_mul(p, 3);
+        edits.places.push(add(add(cs, prefix), w64(in r.places, row)));
+        edits.places.push(add(add(cs, prefix), w64(in r.places, inc(row))));
+        edits.places.push(w64(in r.places, add(row, 2)));
+    }
+    edits.rows.push(cs);
+    edits.rows.push(end);
+    edits.rows.push(edits.text.len());
+    edits.rows.push(text.len());
+    cat_seq(inout edits.text, in text);
+    edits.rows.push(1);
+    edits.rows.push(cs);
+    edits.rows.push(add(cs, text.len()));
+    edits.rows.push(hole_first);
+    edits.rows.push(r.holes.len() >> 1);
+    edits.rows.push(place_first);
+    edits.rows.push(r.places.len() / 3);
+    edits.rows.push(def);
+    edits.rows.push(os);
+    edits.rows.push(oe);
+    edits.rows.push(rf(in reg, rule, 6));
+    edits.rows.push(rf(in reg, rule, 7));
+    edits.rows.push(copy_first);
+    edits.rows.push(no);
+    edits.rows.push(os);
+    edits.rows.push(oe);
+    skip_to = end;
+    step_ok()
+}
+
+// Append `c` to `forest`, shifting its node, leaf and token indices, and
+// return the index of its first node.
+fn append_cst(inout forest: Cst, in c: Cst) -> u64 {
+    let nb = forest.nodes.len();
+    let lb = forest.leaf.len();
+    let tb = forest.tk.len();
+    for i in 0..c.nodes.len() {
+        let mut v = node_at(in c, i);
+        if v.parent != 4294967295 {
+            v.parent = wrapping_add(v.parent, wrapping_u32(nb));
+        }
+        v.lo = wrapping_add(v.lo, wrapping_u32(lb));
+        v.hi = wrapping_add(v.hi, wrapping_u32(lb));
+        v.after = wrapping_add(v.after, wrapping_u32(nb));
+        forest.nodes.push(v);
+    }
+    for i in 0..c.leaf.len() {
+        match c.leaf.try_get(i) {
+            Option::Some(t) => forest.leaf.push(wrapping_add(t, wrapping_u32(tb))),
+            Option::None => forest.leaf.push(0),
+        }
+    }
+    forest.tk.extend(in c.tk.as_slice());
+    forest.ts.extend(in c.ts.as_slice());
+    forest.te.extend(in c.te.as_slice());
+    nb
+}
+
+// ---------------------------------------------------------------- protect
+
+// `hygiene::protect(state, mark, work, ast)`.
+fn protect(inout st: St, include_tests: bool, inout work: u64) -> Dg {
+    if nregs(in st) == 0 {
+        return dg_ok();
+    }
+    let ch = charge(inout work, st.src.len(), 0, 0);
+    if ch.failed {
+        return ch;
+    }
+    let mut d = diags_new();
+    let t = lex_sugar_raw_with_limits(
+        in st.src.as_slice(),
+        inout d,
+        MAX_BYTES,
+        HARD_TOKENS,
+        max_diagnostics()
+    );
+    if t.rejected {
+        let end = if d.at.len() > 1 {
+            w32(in d.at, 1)
+        } else {
+            d.text.len()
+        };
+        let m = range_of(in d.text, w32(in d.at, 0), end);
+        return dg_new(in "E0003", in m, 0, 0);
+    }
+    // The non-trivia tokens as (kind, start, end).
+    let mut tokens = ChunkSeq::new[u64]();
+    for i in 0..t.kind.len() {
+        let k = b8(in t.kind, i);
+        if !trivia_kind(k) {
+            tokens.push(widen_u64(k));
+            tokens.push(w32(in t.start, i));
+            tokens.push(token_end(in t, i));
+        }
+    }
+    let text = match String::from_utf8(in st.src.as_slice()) {
+        Option::Some(s) => s,
+        Option::None => String::new(),
+    };
+    let l = lower_surface_source_limits(in text.as_str(), MAX_BYTES, HARD_TOKENS, include_tests);
+    let a = l.ast;
+    let mut nm = Names {
+        bindings: ChunkSeq::new[u64](),
+        refs: ChunkSeq::new[u64](),
+        shorthand: ChunkSeq::new[u64]()
+    };
+    for k in 0..a.m_items.len() {
+        let it = item_of(in a, k);
+        if it.kind == 2 {
+            scan(inout nm, in st, in tokens, in a, it.node);
+        } else if it.kind == 4 {
+            let n = a
+                .impls
+                .get_or(
+                    idx_from_raw[ImplNode](it.node),
+                    ImplNode {
+                        ty: none(),
+                        generics: 0,
+                        methods: 0
+                    }
+                );
+            for m in 0..list_len(in a, n.methods) {
+                scan(inout nm, in st, in tokens, in a, list_at(in a, n.methods, m));
+            }
+        } else if it.kind == 6 {
+            let n = a
+                .confs
+                .get_or(
+                    idx_from_raw[ConfNode](it.node),
+                    ConfNode {
+                        model: none(),
+                        public: false,
+                        generics: 0,
+                        trait_ref: none(),
+                        self_ty: none(),
+                        wheres: 0,
+                        assoc: 0,
+                        methods: 0,
+                        start: 0,
+                        end: 0
+                    }
+                );
+            for m in 0..list_len(in a, n.methods) {
+                scan(inout nm, in st, in tokens, in a, list_at(in a, n.methods, m));
+            }
+        }
+    }
+    let mut edits = eds_new();
+    names_edits(inout nm, in st, in a, inout edits);
+    // `edits` is in start order: apply from the last.
+    let mut k = neds(in edits);
+    loop {
+        if k == 0 {
+            break;
+        }
+        k = sub(k, 1);
+        let (gs, ge) = original_span(in st, ed(in edits, k, 0), ed(in edits, k, 1));
+        edits.rows.try_set(add(wrapping_mul(k, EW), 18), gs);
+        edits.rows.try_set(add(wrapping_mul(k, EW), 19), ge);
+        let ap = apply(inout st, in edits, k, inout work);
+        if ap.failed {
+            return ap;
+        }
+    }
+    dg_ok()
+}
+
+// `Names`: bindings as rows (name symbol, binder start, end, scope start,
+// end); refs as rows (name symbol, start, end, copied); shorthand starts.
+struct Names {
+    bindings: ChunkSeq[u64],
+    refs: ChunkSeq[u64],
+    shorthand: ChunkSeq[u64]
+}
+
+fn copied(in st: St, at: u64) -> bool {
+    let n = nmaps(in st);
+    for i in 0..n {
+        if mp(in st, i, 1) > at {
+            return mp(in st, i, 4) == 1;
+        }
+    }
+    false
+}
+
+// `self.state.source.get(span) == Some(name)`.
+fn span_is_name(in st: St, in a: Ast, s: u64, e: u64, sym: u32) -> bool {
+    if e < s || e > st.src.len() || sub(e, s) != name_len(in a, sym) {
+        return false;
+    }
+    for j in 0..sub(e, s) {
+        if b8(in st.src, add(s, j)) != name_byte(in a, sym, j) {
+            return false;
+        }
+    }
+    true
+}
+
+// `field(key, span)`.
+fn field(
+    inout nm: Names,
+    in st: St,
+    in tokens: ChunkSeq[u64],
+    in a: Ast,
+    key: u32,
+    s: u64,
+    e: u64
+) {
+    if !span_is_name(in st, in a, s, e, key) {
+        return;
+    }
+    let mut i: u64 = 0;
+    let n = tokens.len() / 3;
+    loop {
+        if i >= n || w64(in tokens, add(wrapping_mul(i, 3), 2)) > s {
+            break;
+        }
+        i = inc(i);
+    }
+    if i > 0 && w64(in tokens, wrapping_mul(sub(i, 1), 3)) != widen_u64(k_colon()) {
+        let mut seen = false;
+        for q in 0..nm.shorthand.len() {
+            if w64(in nm.shorthand, q) == s {
+                seen = true;
+            }
+        }
+        if !seen {
+            nm.shorthand.push(s);
+        }
+    }
+}
+
+fn pat(inout nm: Names, in st: St, in tokens: ChunkSeq[u64], in a: Ast, p: u32, ss: u64, se: u64) {
+    if p == none() {
+        return;
+    }
+    let n = pat_at(in a, p);
+    if n.kind == 2 {
+        if span_is_name(in st, in a, widen_u64(n.start), widen_u64(n.end), n.a) {
+            nm.bindings.push(widen_u64(n.a));
+            nm.bindings.push(widen_u64(n.start));
+            nm.bindings.push(widen_u64(n.end));
+            nm.bindings.push(ss);
+            nm.bindings.push(se);
+        }
+    } else if n.kind == 4 {
+        for i in 0..list_len(in a, n.a) {
+            pat(inout nm, in st, in tokens, in a, list_at(in a, n.a, i), ss, se);
+        }
+    } else if n.kind == 5 {
+        for i in 0..(list_len(in a, n.b) >> 1) {
+            let key = list_at(in a, n.b, i << 1);
+            let q = list_at(in a, n.b, inc(i << 1));
+            if n.c != 0 {
+                let qn = pat_at(in a, q);
+                field(
+                    inout nm,
+                    in st,
+                    in tokens,
+                    in a,
+                    key,
+                    widen_u64(qn.start),
+                    widen_u64(qn.end)
+                );
+            }
+            pat(inout nm, in st, in tokens, in a, q, ss, se);
+        }
+    }
+}
+
+fn params(
+    inout nm: Names,
+    in st: St,
+    in tokens: ChunkSeq[u64],
+    in a: Ast,
+    list: u32,
+    ss: u64,
+    se: u64
+) {
+    let n = tokens.len() / 3;
+    for k in 0..list_len(in a, list) {
+        let p = param_of(in a, list_at(in a, list, k));
+        let ps = widen_u64(p.start);
+        let pe = widen_u64(p.end);
+        let mut i: u64 = 0;
+        loop {
+            if i >= n || w64(in tokens, add(wrapping_mul(i, 3), 2)) > ps {
+                break;
+            }
+            i = inc(i);
+        }
+        loop {
+            if i >= n {
+                break;
+            }
+            let ts = w64(in tokens, inc(wrapping_mul(i, 3)));
+            let te = w64(in tokens, add(wrapping_mul(i, 3), 2));
+            if ts >= pe {
+                break;
+            }
+            if span_is_name(in st, in a, ts, te, p.name) {
+                nm.bindings.push(widen_u64(p.name));
+                nm.bindings.push(ts);
+                nm.bindings.push(te);
+                nm.bindings.push(ss);
+                nm.bindings.push(se);
+                break;
+            }
+            i = inc(i);
+        }
+    }
+}
+
+fn es(in a: Ast, e: u32) -> u64 {
+    widen_u64(expr_at(in a, e).start)
+}
+
+fn ee(in a: Ast, e: u32) -> u64 {
+    widen_u64(expr_at(in a, e).end)
+}
+
+// `Names::scan(f)`.
+fn scan(inout nm: Names, in st: St, in tokens: ChunkSeq[u64], in a: Ast, fi: u32) {
+    let f = fn_of(in a, fi);
+    if f.body == none() {
+        return;
+    }
+    params(inout nm, in st, in tokens, in a, f.params, es(in a, f.body), ee(in a, f.body));
+    walk(inout nm, in st, in tokens, in a, f.body);
+}
+
+// `parser::walk_exprs(body, ..)`: children first, then the callback.
+fn walk(inout nm: Names, in st: St, in tokens: ChunkSeq[u64], in a: Ast, e: u32) {
+    if e == none() {
+        return;
+    }
+    let n = expr_at(in a, e);
+    let k = n.kind;
+    if k == 3 {
+        for i in 0..list_len(in a, n.a) {
+            walk(inout nm, in st, in tokens, in a, list_at(in a, n.a, i));
+        }
+    } else if k == 4 {
+        for i in 0..(list_len(in a, n.b) >> 1) {
+            walk(inout nm, in st, in tokens, in a, list_at(in a, n.b, inc(i << 1)));
+        }
+    } else if k == 5 {
+        for i in 0..list_len(in a, n.a) {
+            let s = stmt_of(in a, list_at(in a, n.a, i));
+            walk(inout nm, in st, in tokens, in a, s.value);
+        }
+        walk(inout nm, in st, in tokens, in a, n.b);
+    } else if k == 6 {
+        walk(inout nm, in st, in tokens, in a, n.a);
+        for i in 0..list_len(in a, n.c) {
+            let arg = arg_of(in a, list_at(in a, n.c, i));
+            walk(inout nm, in st, in tokens, in a, arg.expr);
+        }
+    } else if k == 7 || k == 9 || k == 17 {
+        walk(inout nm, in st, in tokens, in a, n.a);
+    } else if k == 10 {
+        walk(inout nm, in st, in tokens, in a, n.b);
+    } else if k == 8 || k == 19 {
+        walk(inout nm, in st, in tokens, in a, n.a);
+        walk(inout nm, in st, in tokens, in a, n.b);
+    } else if k == 11 || k == 12 {
+        walk(inout nm, in st, in tokens, in a, n.b);
+        walk(inout nm, in st, in tokens, in a, n.c);
+    } else if k == 13 {
+        walk(inout nm, in st, in tokens, in a, n.a);
+        walk(inout nm, in st, in tokens, in a, n.b);
+        walk(inout nm, in st, in tokens, in a, n.c);
+    } else if k == 14 {
+        walk(inout nm, in st, in tokens, in a, n.a);
+        for i in 0..(list_len(in a, n.b) >> 1) {
+            walk(inout nm, in st, in tokens, in a, list_at(in a, n.b, inc(i << 1)));
+        }
+    } else if k == 15 {
+        walk(inout nm, in st, in tokens, in a, n.e);
+    } else if k == 16 {
+        if n.b != none() {
+            walk(inout nm, in st, in tokens, in a, n.c);
+        }
+        walk(inout nm, in st, in tokens, in a, n.d);
+        for i in 0..list_len(in a, n.e) {
+            walk(inout nm, in st, in tokens, in a, clause_of(in a, list_at(in a, n.e, i)).body);
+        }
+    } else if k == 18 {
+        walk(inout nm, in st, in tokens, in a, n.b);
+        walk(inout nm, in st, in tokens, in a, n.c);
+    } else if k == 20 || k == 21 {
+        walk(inout nm, in st, in tokens, in a, n.a);
+    }
+    // The callback.
+    let s = widen_u64(n.start);
+    let t = widen_u64(n.end);
+    if k == 2 {
+        if span_is_name(in st, in a, s, t, n.a) {
+            nm.refs.push(widen_u64(n.a));
+            nm.refs.push(s);
+            nm.refs.push(t);
+            nm
+                .refs
+                .push(
+                    if copied(in st, s) {
+                        1
+                    } else {
+                        0
+                    }
+                );
+        }
+    } else if k == 4 {
+        for i in 0..(list_len(in a, n.b) >> 1) {
+            let key = list_at(in a, n.b, i << 1);
+            let v = list_at(in a, n.b, inc(i << 1));
+            field(inout nm, in st, in tokens, in a, key, es(in a, v), ee(in a, v));
+        }
+    } else if k == 5 {
+        for i in 0..list_len(in a, n.a) {
+            let stmt = stmt_of(in a, list_at(in a, n.a, i));
+            if stmt.kind == 1 {
+                pat(inout nm, in st, in tokens, in a, stmt.pat, ee(in a, stmt.value), t);
+            }
+        }
+    } else if k == 14 {
+        for i in 0..(list_len(in a, n.b) >> 1) {
+            let p = list_at(in a, n.b, i << 1);
+            let arm = list_at(in a, n.b, inc(i << 1));
+            pat(inout nm, in st, in tokens, in a, p, es(in a, arm), ee(in a, arm));
+        }
+    } else if k == 18 {
+        pat(inout nm, in st, in tokens, in a, n.a, es(in a, n.c), ee(in a, n.c));
+    } else if k == 15 {
+        params(inout nm, in st, in tokens, in a, n.a, es(in a, n.e), ee(in a, n.e));
+    } else if k == 16 {
+        if n.b != none() {
+            pat(inout nm, in st, in tokens, in a, n.b, es(in a, n.d), t);
+        }
+        for i in 0..list_len(in a, n.e) {
+            let cl = clause_of(in a, list_at(in a, n.e, i));
+            for j in 0..list_len(in a, cl.pats) {
+                pat(
+                    inout nm,
+                    in st,
+                    in tokens,
+                    in a,
+                    list_at(in a, cl.pats, j),
+                    es(in a, cl.body),
+                    ee(in a, cl.body)
+                );
+            }
+        }
+    }
+}
+
+// Name order: `String`'s byte order of the two symbols' spellings.
+fn name_lt(in a: Ast, x: u64, y: u64) -> bool {
+    let xs = wrapping_u32(x);
+    let ys = wrapping_u32(y);
+    let nx = name_len(in a, xs);
+    let ny = name_len(in a, ys);
+    let n = if nx < ny {
+        nx
+    } else {
+        ny
+    };
+    for j in 0..n {
+        let cx = name_byte(in a, xs, j);
+        let cy = name_byte(in a, ys, j);
+        if cx != cy {
+            return cx < cy;
+        }
+    }
+    nx < ny
+}
+
+// Symbols are interned, so equal spellings are equal ids.
+fn same_name(in a: Ast, x: u64, y: u64) -> bool {
+    x == y
+}
+
+fn max_u64(x: u64, y: u64) -> u64 {
+    if x > y {
+        x
+    } else {
+        y
+    }
+}
+
+fn zeros(n: u64) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    for i in 0..n {
+        out.push(0);
+    }
+    out
+}
+
+// The first index of sorted `v` whose value is at least `x`.
+fn lower_bound(in v: ChunkSeq[u64], x: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = v.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = add(lo, (sub(hi, lo)) >> 1);
+        if w64(in v, mid) < x {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+// Bottom-up merge sort of `v` by the spelling of each symbol.
+fn sort_by_name(in a: Ast, inout v: ChunkSeq[u64]) {
+    let n = v.len();
+    let mut width: u64 = 1;
+    loop {
+        if width >= n {
+            break;
+        }
+        let mut out = ChunkSeq::new[u64]();
+        let mut lo: u64 = 0;
+        loop {
+            if lo >= n {
+                break;
+            }
+            let mid = if add(lo, width) < n {
+                add(lo, width)
+            } else {
+                n
+            };
+            let hi = if add(mid, width) < n {
+                add(mid, width)
+            } else {
+                n
+            };
+            let mut i = lo;
+            let mut j = mid;
+            loop {
+                if i >= mid && j >= hi {
+                    break;
+                }
+                let take_right = if i >= mid {
+                    true
+                } else if j >= hi {
+                    false
+                } else {
+                    name_lt(in a, w64(in v, j), w64(in v, i))
+                };
+                if take_right {
+                    out.push(w64(in v, j));
+                    j = inc(j);
+                } else {
+                    out.push(w64(in v, i));
+                    i = inc(i);
+                }
+            }
+            lo = hi;
+        }
+        v = out;
+        width = width << 1;
+    }
+}
+
+// Bottom-up merge sort of `v` by value.
+fn sort_u64(inout v: ChunkSeq[u64]) {
+    let n = v.len();
+    let mut width: u64 = 1;
+    loop {
+        if width >= n {
+            break;
+        }
+        let mut out = ChunkSeq::new[u64]();
+        let mut lo: u64 = 0;
+        loop {
+            if lo >= n {
+                break;
+            }
+            let mid = if add(lo, width) < n {
+                add(lo, width)
+            } else {
+                n
+            };
+            let hi = if add(mid, width) < n {
+                add(mid, width)
+            } else {
+                n
+            };
+            let mut i = lo;
+            let mut j = mid;
+            loop {
+                if i >= mid && j >= hi {
+                    break;
+                }
+                let take_right = if i >= mid {
+                    true
+                } else if j >= hi {
+                    false
+                } else {
+                    w64(in v, j) < w64(in v, i)
+                };
+                if take_right {
+                    out.push(w64(in v, j));
+                    j = inc(j);
+                } else {
+                    out.push(w64(in v, i));
+                    i = inc(i);
+                }
+            }
+            lo = hi;
+        }
+        v = out;
+        width = width << 1;
+    }
+}
+
+fn starts_with_mark(in st: St, in a: Ast, sym: u64) -> bool {
+    let s = wrapping_u32(sym);
+    if name_len(in a, s) < st.mark.len() {
+        return false;
+    }
+    for j in 0..st.mark.len() {
+        if name_byte(in a, s, j) != b8(in st.mark, j) {
+            return false;
+        }
+    }
+    true
+}
+
+// `Names::edits(mark)` as plain edits in start order (one per start, the
+// last insert winning).
+fn names_edits(inout nm: Names, in st: St, in a: Ast, inout out: Eds) {
+    let nb = nm.bindings.len() / 5;
+    let nr = nm.refs.len() >> 2;
+    // Symbols are interned: one id per spelling. Flags by id replace the
+    // name maps of Rust (`BTreeMap`/`BTreeSet`), so the grouping stays
+    // O(n log n) in the references.
+    let mut top: u64 = 0;
+    for i in 0..nr {
+        top = max_u64(top, inc(w64(in nm.refs, i << 2)));
+    }
+    for bi in 0..nb {
+        top = max_u64(top, inc(w64(in nm.bindings, wrapping_mul(bi, 5))));
+    }
+    let mut seen = zeros(top);
+    let mut uncopied = zeros(top);
+    // Distinct ref names in name order.
+    let mut names = ChunkSeq::new[u64]();
+    for i in 0..nr {
+        let sym = w64(in nm.refs, i << 2);
+        if b8(in seen, sym) == 0 {
+            seen.try_set(sym, 1);
+            names.push(sym);
+        }
+        if w64(in nm.refs, add(i << 2, 3)) == 0 {
+            uncopied.try_set(sym, 1);
+        }
+    }
+    sort_by_name(in a, inout names);
+    // `generated`: a name with an uncopied ref that is not the mark's.
+    let mut generated = zeros(top);
+    let mut any_generated = false;
+    for q in 0..names.len() {
+        let sym = w64(in names, q);
+        if b8(in uncopied, sym) == 1 && !starts_with_mark(in st, in a, sym) {
+            generated.try_set(sym, 1);
+            any_generated = true;
+        }
+    }
+    // Uncopied ref starts as (symbol, start) keys in order, and each
+    // symbol's first key.
+    let mut keys = ChunkSeq::new[u64]();
+    if any_generated {
+        for i in 0..nr {
+            let sym = w64(in nm.refs, i << 2);
+            if w64(in nm.refs, add(i << 2, 3)) == 0 && b8(in generated, sym) == 1 {
+                keys.push(add(sym << 32, w64(in nm.refs, inc(i << 2))));
+            }
+        }
+        sort_u64(inout keys);
+    }
+    // `conflicts`: binding names, in name order, with a generated use in
+    // the scope of a copied binder.
+    let mut conflicts = ChunkSeq::new[u64]();
+    let mut listed = zeros(top);
+    for bi in 0..nb {
+        let row = wrapping_mul(bi, 5);
+        let sym = w64(in nm.bindings, row);
+        if b8(in generated, sym) == 0 || b8(in listed, sym) == 1 {
+            continue;
+        }
+        if !copied(in st, w64(in nm.bindings, inc(row))) {
+            continue;
+        }
+        let ss = w64(in nm.bindings, add(row, 3));
+        let se = w64(in nm.bindings, add(row, 4));
+        // The first generated use at or after the scope start.
+        let at = lower_bound(in keys, add(sym << 32, ss));
+        if at < keys.len() {
+            let k = w64(in keys, at);
+            if k >> 32 == sym && (k & 4294967295) < se {
+                listed.try_set(sym, 1);
+                conflicts.push(sym);
+            }
+        }
+    }
+    sort_by_name(in a, inout conflicts);
+    // Edits keyed by start: rows (start, end, text first, len) over `tx`.
+    let mut rows = ChunkSeq::new[u64]();
+    let mut tx = ChunkSeq::new[u8]();
+    for id in 0..conflicts.len() {
+        let sym = w64(in conflicts, id);
+        let mut fresh = ChunkSeq::new[u8]();
+        cat_seq(inout fresh, in st.mark);
+        cat(inout fresh, in "caller_");
+        push_decimal(inout fresh, id);
+        // Copied binders of this name, sorted by scope start (stable).
+        let mut binders = ChunkSeq::new[u64]();
+        for b in 0..nb {
+            let row = wrapping_mul(b, 5);
+            if same_name(in a, w64(in nm.bindings, row), sym)
+                && copied(in st, w64(in nm.bindings, inc(row))) {
+                let s = w64(in nm.bindings, add(row, 3));
+                let mut at = binders.len();
+                loop {
+                    if at == 0
+                        || w64(in nm.bindings, add(wrapping_mul(w64(in binders, sub(at, 1)), 5), 3))
+                            <= s {
+                        break;
+                    }
+                    at = sub(at, 1);
+                }
+                binders.push(0);
+                let mut k = sub(binders.len(), 1);
+                loop {
+                    if k <= at {
+                        break;
+                    }
+                    binders.try_set(k, w64(in binders, sub(k, 1)));
+                    k = sub(k, 1);
+                }
+                binders.try_set(at, b);
+            }
+        }
+        let mut scopes = ChunkSeq::new[u64]();
+        for q in 0..binders.len() {
+            let row = wrapping_mul(w64(in binders, q), 5);
+            let bs = w64(in nm.bindings, inc(row));
+            let be = w64(in nm.bindings, add(row, 2));
+            rename(inout rows, inout tx, in nm, in a, sym, in fresh, bs, be);
+            let ss = w64(in nm.bindings, add(row, 3));
+            let se = w64(in nm.bindings, add(row, 4));
+            let ns = scopes.len() >> 1;
+            if ns != 0 && ss <= w64(in scopes, inc(sub(ns, 1) << 1)) {
+                let pe = w64(in scopes, inc(sub(ns, 1) << 1));
+                scopes
+                    .try_set(
+                        inc(sub(ns, 1) << 1),
+                        if se > pe {
+                            se
+                        } else {
+                            pe
+                        }
+                    );
+            } else {
+                scopes.push(ss);
+                scopes.push(se);
+            }
+        }
+        for i in 0..nr {
+            if !same_name(in a, w64(in nm.refs, i << 2), sym) {
+                continue;
+            }
+            let rs = w64(in nm.refs, inc(i << 2));
+            let re = w64(in nm.refs, add(i << 2, 2));
+            let is_copied = w64(in nm.refs, add(i << 2, 3)) == 1;
+            let mut q: u64 = 0;
+            loop {
+                if q >= (scopes.len() >> 1) || w64(in scopes, inc(q << 1)) > rs {
+                    break;
+                }
+                q = inc(q);
+            }
+            if is_copied && q < (scopes.len() >> 1) && w64(in scopes, q << 1) <= rs {
+                rename(inout rows, inout tx, in nm, in a, sym, in fresh, rs, re);
+            }
+        }
+    }
+    for k in 0..(rows.len() >> 2) {
+        let first = w64(in rows, add(k << 2, 2));
+        let len = w64(in rows, add(k << 2, 3));
+        let t = range_of(in tx, first, add(first, len));
+        push_plain(inout out, w64(in rows, k << 2), w64(in rows, inc(k << 2)), in t, 0, 0);
+    }
+}
+
+fn rename(
+    inout rows: ChunkSeq[u64],
+    inout tx: ChunkSeq[u8],
+    in nm: Names,
+    in a: Ast,
+    sym: u64,
+    in fresh: ChunkSeq[u8],
+    s: u64,
+    e: u64
+) {
+    let first = tx.len();
+    let mut short = false;
+    for q in 0..nm.shorthand.len() {
+        if w64(in nm.shorthand, q) == s {
+            short = true;
+        }
+    }
+    if short {
+        let n = wrapping_u32(sym);
+        for j in 0..name_len(in a, n) {
+            tx.push(name_byte(in a, n, j));
+        }
+        cat(inout tx, in ": ");
+    }
+    cat_seq(inout tx, in fresh);
+    let len = sub(tx.len(), first);
+    let mut at = rows.len() >> 2;
+    for k in 0..(rows.len() >> 2) {
+        let ks = w64(in rows, k << 2);
+        if ks == s {
+            rows.try_set(inc(k << 2), e);
+            rows.try_set(add(k << 2, 2), first);
+            rows.try_set(add(k << 2, 3), len);
+            return;
+        }
+        if ks > s {
+            at = k;
+            break;
+        }
+    }
+    for j in 0..4 {
+        rows.push(0);
+    }
+    let mut q = sub(rows.len() >> 2, 1);
+    loop {
+        if q <= at {
+            break;
+        }
+        for j in 0..4 {
+            rows.try_set(add(q << 2, j), w64(in rows, add(sub(q, 1) << 2, j)));
+        }
+        q = sub(q, 1);
+    }
+    rows.try_set(at << 2, s);
+    rows.try_set(inc(at << 2), e);
+    rows.try_set(add(at << 2, 2), first);
+    rows.try_set(add(at << 2, 3), len);
+}
+
+// ---------------------------------------------------------------- words
+
+fn push_text(inout out: ChunkSeq[u64], in b: ChunkSeq[u8]) {
+    out.push(b.len());
+    for i in 0..b.len() {
+        out.push(widen_u64(b8(in b, i)));
+    }
+}
+
+// The words of `expand`: [2, code, message, start, end, labels, (start,
+// end, message)*] for a diagnostic (texts as a length and bytes), [0] for
+// nothing to expand, else [1, source, fresh prefix, regions, (expanded
+// start, end, holes, (start, end)*, places, (start, end, pass)*, emits
+// row text, call start, end, rule start, end)*, mappings, (expanded start,
+// end, original start, end, copied)*].
+pub fn expand_words(in source: ChunkSeq[u8], include_tests: bool) -> ChunkSeq[u64] {
+    let x = expand(in source, include_tests);
+    let mut out = ChunkSeq::new[u64]();
+    if x.d.failed {
+        out.push(2);
+        push_text(inout out, in x.d.code);
+        push_text(inout out, in x.d.msg);
+        out.push(x.d.s);
+        out.push(x.d.e);
+        let nl = x.d.rel.len() >> 2;
+        out.push(nl);
+        for k in 0..nl {
+            out.push(w64(in x.d.rel, k << 2));
+            out.push(w64(in x.d.rel, inc(k << 2)));
+            let first = w64(in x.d.rel, add(k << 2, 2));
+            let len = w64(in x.d.rel, add(k << 2, 3));
+            push_text(inout out, in range_of(in x.d.rel_text, first, add(first, len)));
+        }
+        return out;
+    }
+    if !x.some {
+        out.push(0);
+        return out;
+    }
+    out.push(1);
+    push_text(inout out, in x.st.src);
+    push_text(inout out, in x.st.mark);
+    let n = nregs(in x.st);
+    out.push(n);
+    for r in 0..n {
+        out.push(rg(in x.st, r, 0));
+        out.push(rg(in x.st, r, 1));
+        let hf = rg(in x.st, r, 2);
+        let hn = rg(in x.st, r, 3);
+        out.push(hn);
+        for h in hf..add(hf, hn) {
+            out.push(w64(in x.st.holes, h << 1));
+            out.push(w64(in x.st.holes, inc(h << 1)));
+        }
+        let pf = rg(in x.st, r, 4);
+        let pn = rg(in x.st, r, 5);
+        out.push(pn);
+        for p in pf..add(pf, pn) {
+            for k in 0..3 {
+                out.push(w64(in x.st.places, add(wrapping_mul(p, 3), k)));
+            }
+        }
+        let def = rg(in x.st, r, 6);
+        let ef = df(in x.reg, def, 7);
+        if ef == NONE {
+            out.push(0);
+        } else {
+            push_text(inout out, in pool_text(in x.reg, ef, df(in x.reg, def, 8)));
+        }
+        for k in 7..11 {
+            out.push(rg(in x.st, r, k));
+        }
+    }
+    let m = nmaps(in x.st);
+    out.push(m);
+    for i in 0..m {
+        for k in 0..5 {
+            out.push(mp(in x.st, i, k));
+        }
+    }
+    out
+}

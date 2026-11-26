@@ -437,7 +437,7 @@ pub fn clause_of(in a: Ast, i: u32) -> ClauseNode {
         .get_or(idx_from_raw[ClauseNode](i), ClauseNode { name: none(), pats: 0, body: none() })
 }
 
-fn param_of(in a: Ast, i: u32) -> ParamNode {
+pub fn param_of(in a: Ast, i: u32) -> ParamNode {
     a
         .params
         .get_or(

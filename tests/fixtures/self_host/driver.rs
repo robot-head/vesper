@@ -445,6 +445,9 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     // Claim #1886: the verified codegen port uses `use` (#880)
                     // and `pub const`.
                     || path.ends_with("packages/vesper-verified-codegen")
+                    // SH5 lane 18 (#1341): the proof-audit port uses `use`
+                    // (#880) and `pub const`.
+                    || path.ends_with("packages/vesper-proof-audit")
                 {
                     continue;
                 }

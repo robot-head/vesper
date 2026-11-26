@@ -4310,29 +4310,40 @@ pub fn lower_source(in source: Str) -> L {
 // tagged literal the tuple of its payload block, a pattern phrase a
 // wildcard, and a sugar operator a binary expression.
 pub fn lower_template_source(in source: Str) -> L {
-    lower_profile_source(in source, true)
+    lower_profile_source(in source, true, max_source_bytes(), max_tokens(), true)
 }
 
 // The same for the surface profile itself (`parser::parse_expansion_scopes`
 // without its expression macro validation): phrases lower as above except
 // that an expression or statement phrase is the empty tuple.
 pub fn lower_surface_source(in source: Str) -> L {
-    lower_profile_source(in source, false)
+    lower_profile_source(in source, false, max_source_bytes(), max_tokens(), true)
 }
 
-fn lower_profile_source(in source: Str, template: bool) -> L {
+// `lower_surface_source` under explicit lexer limits (sugar expansion's
+// `parse`: `MAX_BYTES` and `HARD_TOKENS`) and test visibility.
+pub fn lower_surface_source_limits(
+    in source: Str,
+    max_bytes: u64,
+    max_tok: u64,
+    include_tests: bool
+) -> L {
+    lower_profile_source(in source, false, max_bytes, max_tok, include_tests)
+}
+
+fn lower_profile_source(
+    in source: Str,
+    template: bool,
+    max_bytes: u64,
+    max_tok: u64,
+    include_tests: bool
+) -> L {
     let b = source.as_bytes();
     let mut a = ast_new();
     let s = syms_new(inout a);
     let mut text = String::new();
     let mut d = diags_new();
-    let t = lex_sugar_with_limits(
-        in b,
-        inout d,
-        max_source_bytes(),
-        max_tokens(),
-        max_diagnostics()
-    );
+    let t = lex_sugar_with_limits(in b, inout d, max_bytes, max_tok, max_diagnostics());
     let oversized = t.rejected;
     if !oversized {
         text.push_str(in source);
@@ -4340,7 +4351,7 @@ fn lower_profile_source(in source: Str, template: bool) -> L {
     let p = if template {
         parse_template_tokens(in b, t, d)
     } else {
-        parse_surface_tokens(in b, t, d, max_diagnostics(), hard_depth(), true)
+        parse_surface_tokens(in b, t, d, max_diagnostics(), hard_depth(), include_tests)
     };
     let mut l = L {
         p: p,
@@ -4365,7 +4376,7 @@ fn lower_profile_source(in source: Str, template: bool) -> L {
         decl_public: false,
         buf: String::new(),
         s: s,
-        tests: true
+        tests: include_tests
     };
     if oversized || l.p.halted || l.p.t.limited {
         return l;
