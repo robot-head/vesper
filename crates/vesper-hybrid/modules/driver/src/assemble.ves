@@ -26,13 +26,8 @@ use @vesper/check-names-packages::{
     assembly_metadata,
     assembly_parse_errors
 };
-use @vesper/ast::words::{
-    put_ast_words
-};
-use @vesper-std/intern::{
-    Interner,
-    symbol_from_id
-};
+use @vesper/ast::words::{put_ast_words};
+use @vesper-std/intern::{Interner, symbol_from_id};
 
 // The layout version of `assembled_words`; the Rust reader checks it.
 fn assembled_format() -> u64 {
