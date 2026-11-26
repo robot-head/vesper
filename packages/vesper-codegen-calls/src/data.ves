@@ -18,14 +18,26 @@
 //   ns, ns stub names
 //   nv, nv x (object type, self type, m, m x (method, k, k x (name, type)))
 //   nk, nk caller-slot function names
-//   nt, nt x (entry name, optimize)
+//   nt, nt x (entry name, flags: 1 optimize | 2 trace host | 4 library | 8 more roots)
 //
 // Expressions are pre-order rows: a node's children follow it, `size` is
 // the row count of its subtree, so a pre-order walk is a range walk.
 
-use @vesper/check-data::util::{add, inc, inc32, n32, u32_at, w};
-use @vesper/check-data::input::{Ctx, Reader};
-use @vesper/check-data::world::{set_by_symbol};
+use @vesper/check-data::util::{
+    add,
+    inc,
+    inc32,
+    n32,
+    u32_at,
+    w
+};
+use @vesper/check-data::input::{
+    Ctx,
+    Reader
+};
+use @vesper/check-data::world::{
+    set_by_symbol
+};
 
 const NONE32: u32 = 4294967295;
 
@@ -93,9 +105,16 @@ pub copy struct VTableRow {
     mn: u32,
 }
 
+// The task's flags word: bit 0 optimizes, bit 1 asks for a Beacon trace
+// host (`EntryEffects::TraceHost`), bit 2 starts a library whose entry is
+// its first export root (`native_export::compile_exports`) and bit 3 adds
+// the entry as another root of the library before it.
 pub copy struct Task {
     entry: u32,
     optimize: bool,
+    trace: bool,
+    library: bool,
+    more: bool,
 }
 
 pub struct Calls {
@@ -265,7 +284,10 @@ impl Calls {
             Option::Some(t) => t,
             Option::None => Task {
                 entry: 0,
-                optimize: false
+                optimize: false,
+                trace: false,
+                library: false,
+                more: false
             },
         }
     }
@@ -488,13 +510,16 @@ pub fn read_calls(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Calls {
     let nt = r.word(in b);
     for i in 0..nt {
         let entry = sym(in c, r.word(in b));
-        let optimize = r.word(in b) != 0;
+        let flags = r.word(in b);
         d
             .tasks
             .push(
                 Task {
                     entry: entry,
-                    optimize: optimize
+                    optimize: flags & 1 != 0,
+                    trace: flags & 2 != 0,
+                    library: flags & 4 != 0,
+                    more: flags & 8 != 0
                 }
             );
     }
