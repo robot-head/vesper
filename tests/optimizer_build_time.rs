@@ -31,10 +31,11 @@ fn worlds() -> impl Iterator<Item = &'static check_harness::Case> {
 
 #[test]
 fn policy_matches_optimize_on_lowered_worlds() {
-    // Each world is independent, so the comparisons run on every core: run
-    // serially they were the slowest tail of "Test all targets" (7 min).
+    // Each world is independent, so the comparisons run on 4 threads: run
+    // serially they were the slowest tail of "Test all targets" (7 min). Each
+    // thread adds about 0.5 GiB, so BUILD.bazel reserves 4 CPUs and 5 GiB.
     let cases: Vec<_> = self::worlds().collect();
-    let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
+    let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(4));
     let counts: Vec<(usize, usize, usize)> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..workers)
             .map(|w| {
