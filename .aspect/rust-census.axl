@@ -82,7 +82,7 @@ CRATES = {
     "vesper-chrono": ("c-api", "", "", "perf/ptrace syscalls; iced-x86 disassembler (port or Capstone C)", "14"),
     "vesper-bench-pmu": ("c-api", "", "", "perf_event_open", "14"),
     "vesper-warp-umem": ("c-api", "", "", "AF_XDP rings, mmap (UMEM as Pinned[u8], rings as mappings viewed in place: #1505)", "14"),
-    "vesper-aether": ("c-api", "in crate", "virtqueue 1.27x, packed 1.47x, hot sets 1.35x, seccomp evaluate 1.24x, vsock device 0.94x, net device 0.90x, blk device 0.93x, mmio transport 0.99x (flipped); seccomp compile 1.67x, guest_mem locate 3.8x, slot plans 3.6x, pvh 8.5x, vsock header/vmgenid codecs ~27x", "KVM ioctls, userfaultfd; non-flipped ports are bound by per-call Rust/Vesper crossings (small codecs) or G10 (slot plans, PVH)", "14"),
+    "vesper-aether": ("c-api", "in crate", "virtqueue 1.27x, packed 1.47x, hot sets 1.35x, seccomp evaluate 1.24x, vsock device 0.94x, net device 0.90x, blk device 0.93x, mmio transport 0.99x, seccomp compile 1.35x (flipped); guest_mem locate 3.8x, slot plans 3.6x, pvh 8.5x, vsock header/vmgenid codecs ~27x", "KVM ioctls, userfaultfd; non-flipped ports are bound by per-call Rust/Vesper crossings (small codecs) or G10 (slot plans, PVH)", "14"),
     "vesper-warp-shard": ("unported", "", "", "SIMD CID lookup: source vectors", "4"),
     "vesper-aura-gtk": ("c-api", "", "", "gtk4-rs: call the GTK 4 C API", "15"),
     "vesper-ignis-vulkan": ("c-api", "", "", "ash: call the Vulkan C API; naga via shim", "15"),
@@ -109,7 +109,7 @@ CRATES = {
 
 # Root compiler module -> (owner lane(s), Vesper package, status note)
 MODULES = {
-    "verified_codegen": ("#1886", "vesper-verified-codegen", "owner 2026-11-25: port to Vesper; parts 1-4b: slot IR, select, encoders, ELF/Mach-O/COFF containers, range certificate, plan + lowering without handlers, monomorphization (0 diffs: 12,488 rows, 1,034 builds over 5 targets, 13,749 certificate checks, 222 lowerings, 222 mono programs, 212 mono + lowering; select 0.91x, certificate 0.93x, lowering 1.07x, mono + lowering 0.76x); left: handlers/evidence/regions, coverage, cli, swap"),
+    "verified_codegen": ("#1886", "vesper-verified-codegen", "owner 2026-11-25: port to Vesper; parts 1-4d-1: slot IR, select, encoders, ELF/Mach-O/COFF containers, range certificate, plan + lowering, monomorphization, handle Fail handlers, regions, evidence passing (0 diffs: 12,488 rows, 1,034 builds over 5 targets, 13,749 certificate checks, 304 lowerings, 364 mono programs, 364 mono + evidence + lowering, 3,640 end-to-end compiles; select 0.91x, certificate 0.93x, lowering 1.00x, front half 0.69x, compile 1.03x); left: coverage, cli, swap"),
     "lean": ("SH5-18", "vesper-lean-extract", "whole module ported (head, CFG, structured, effects, ordering, fuel, contracts, proof module): 0 diffs over 363 worlds, 1.11x with lifting; `lean_extract` hybrid swap open (word encoding not yet counted); Rust kept for extract_report callers (verify, forge provenance)"),
     "lean_ir": ("SH5-18", "vesper-lean-extract", "ported (CFG extractor, part 2)"),
     "lean_nodes": ("SH5-18", "vesper-lean-extract", "ported (term builders)"),

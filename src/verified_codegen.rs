@@ -411,15 +411,12 @@ pub fn mono_for_test(
 /// differential (#1886, part 4b).
 #[doc(hidden)]
 pub struct FrontOutcome {
-    /// Evidence passing left the monomorphized program as it was.
-    pub evidence_unchanged: bool,
-    /// Evidence passing found handler sites.
-    pub has_sites: bool,
     pub lowered: Result<Lowered, VerifiedError>,
 }
 
 /// The program after ir_opt, the instance limit and the front half's
-/// outcome (or monomorphization's or evidence passing's error).
+/// outcome (or monomorphization's error; an evidence passing error is an
+/// outcome).
 #[doc(hidden)]
 #[allow(clippy::type_complexity)]
 pub fn front_for_test(
@@ -438,16 +435,13 @@ pub fn front_for_test(
     let max = max_instances(options);
     let outcome = (|| {
         let mut mono = mono::monomorphize(world, &program, entry, max)?;
-        let before = format!("{mono:?}");
-        let sites = evidence::rewrite(world, &mut mono, &[entry.to_owned()], None)?;
-        let evidence_unchanged = format!("{mono:?}") == before;
-        let has_sites = !sites.escape.is_empty() || !sites.restore.is_empty();
+        let sites = match evidence::rewrite(world, &mut mono, &[entry.to_owned()], None) {
+            Ok(sites) => sites,
+            // Evidence passing refused the program.
+            Err(e) => return Ok(FrontOutcome { lowered: Err(e) }),
+        };
         let lowered = lower_program(world, &mono, entry, options, &sites).map(|(_, lir)| lir);
-        Ok(FrontOutcome {
-            evidence_unchanged,
-            has_sites,
-            lowered,
-        })
+        Ok(FrontOutcome { lowered })
     })();
     Ok((program, max, outcome))
 }
@@ -553,7 +547,31 @@ pub fn lower_for_test(
 /// Compile `entry` (no parameters) and everything it reaches.
 pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact, VerifiedError> {
     let (program, sites) = prepare(world, entry, options)?;
-    let (plan, lir) = lower_program(world, &program, entry, options, &sites)?;
+    compile_prepared(world, &program, &sites, entry, options)
+}
+
+/// [`compile`] of an optimized program (the timing half of the Vesper
+/// port's end-to-end flip gate).
+#[doc(hidden)]
+pub fn compile_timing_for_test(
+    world: &World,
+    program: &crate::ir::Program,
+    entry: &str,
+    options: &Options,
+) -> Result<Artifact, VerifiedError> {
+    let mut mono = mono::monomorphize(world, program, entry, max_instances(options))?;
+    let sites = evidence::rewrite(world, &mut mono, &[entry.to_owned()], None)?;
+    compile_prepared(world, &mono, &sites, entry, options)
+}
+
+fn compile_prepared(
+    world: &World,
+    program: &crate::ir::Program,
+    sites: &evidence::Sites,
+    entry: &str,
+    options: &Options,
+) -> Result<Artifact, VerifiedError> {
+    let (plan, lir) = lower_program(world, program, entry, options, sites)?;
     let certificate = certificate::check(&lir);
     if let (true, Err(r)) = (options.require_certificate, &certificate) {
         return Err(VerifiedError::Invalid(r.to_string()));
