@@ -5,11 +5,13 @@
 // generics first and an untyped `self` given the block's type) and reports
 // the E0100 duplicate and reserved-name diagnostics.
 //
-// Part 1 covers modules that need none of the checker's preludes (regions,
-// `Box`, secret operations, byte order and the bit and checked builtins,
-// transcendentals, strings, atomics and workers, `Option` methods): a module
-// whose names could bring one in is declined (`needs_prelude`), and the
-// Rust collector stays its source of truth until the prelude's part lands.
+// The preludes a module brings in follow it as the checker adds them:
+// the byte-order, bit and checked builtins (widths.ves), then strings and
+// `Option` methods (prelude.ves), each lowered on its own with its spans
+// shifted to where the checker parses it. A module that could need a
+// prelude not ported yet (regions, `Box`, secret operations,
+// transcendentals, atomics and workers) is declined (`needs_prelude`), and
+// the Rust collector stays its source of truth until that part lands.
 //
 // tests/self_host_check_collect.rs compares the canonical dump (`dump`)
 // with the same dump of Rust's `World::collect` over the repository's
@@ -46,9 +48,11 @@ use self::prelude::{
     needs_strings,
     option_source,
     replaced,
+    sorted_symbols,
     strings_source,
     uses_of
 };
+use self::widths::{reserved_width_name, width_source};
 
 // The builtin declarations every world starts from (`World::collect`'s
 // `builtins`, with `numeric::OVERFLOW_DECLARATION`).
@@ -219,7 +223,7 @@ fn name_starts(in a: Ast, sym: u32, in lit: Str) -> bool {
 // them): the prelude types and methods, the byte-order, bit, checked and
 // transcendental families, and `Str` (a `Str` parameter brings in strings).
 fn prelude_name(in a: Ast, sym: u32) -> bool {
-    name_is(in a, sym, "mul_wide")
+    false
         || name_is(in a, sym, "Atomic")
         || name_is(in a, sym, "MemoryOrder")
         || name_is(in a, sym, "parallel_for")
@@ -230,19 +234,6 @@ fn prelude_name(in a: Ast, sym: u32) -> bool {
         || name_is(in a, sym, "SecMask64")
         || name_is(in a, sym, "Watermark")
         || name_is(in a, sym, "Box")
-        || name_starts(in a, sym, "checked_add_")
-        || name_starts(in a, sym, "checked_sub_")
-        || name_starts(in a, sym, "checked_mul_")
-        || name_starts(in a, sym, "leading_zeros_")
-        || name_starts(in a, sym, "trailing_zeros_")
-        || name_starts(in a, sym, "count_ones_")
-        || name_starts(in a, sym, "wrapping_shl_")
-        || name_starts(in a, sym, "wrapping_shr_")
-        || name_starts(in a, sym, "wrapping_neg_")
-        || name_starts(in a, sym, "to_le_bytes_")
-        || name_starts(in a, sym, "to_be_bytes_")
-        || name_starts(in a, sym, "from_le_bytes_")
-        || name_starts(in a, sym, "from_be_bytes_")
         || name_starts(in a, sym, "exp_")
         || name_starts(in a, sym, "ln_")
         || name_starts(in a, sym, "sin_")
@@ -336,64 +327,7 @@ fn insert(inout t: Table, in key: String, e: Entry) -> bool {
 
 // The key symbols of `t` in byte order of their names.
 fn sorted_keys(in t: Table) -> ChunkSeq[u32] {
-    let mut out = ChunkSeq::new[u32]();
-    for i in 0..t.entries.len() {
-        let id = wrapping_u32(i);
-        let mut j = out.len();
-        out.push(id);
-        loop {
-            if j == 0 {
-                break;
-            }
-            let prev = match out.try_get(wrapping_sub(j, 1)) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
-            if cmp_keys(in t.keys, prev, id) <= 0 {
-                break;
-            }
-            let ok = out.try_set(j, prev);
-            j = wrapping_sub(j, 1);
-        }
-        let ok = out.try_set(j, id);
-    }
-    out
-}
-
-fn cmp_keys(in k: Interner, x: u32, y: u32) -> i64 {
-    let (xs, xe) = k.span(symbol_from_id(x));
-    let (ys, ye) = k.span(symbol_from_id(y));
-    let xl = wrapping_sub(xe, xs);
-    let yl = wrapping_sub(ye, ys);
-    let n = if xl < yl {
-        xl
-    } else {
-        yl
-    };
-    for i in 0..n {
-        let a = match k.text_byte(wrapping_add(xs, i)) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
-        let b = match k.text_byte(wrapping_add(ys, i)) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
-        if a != b {
-            return if a < b {
-                -1
-            } else {
-                1
-            };
-        }
-    }
-    if xl < yl {
-        -1
-    } else if xl > yl {
-        1
-    } else {
-        0
-    }
+    sorted_symbols(in t.keys)
 }
 
 // The world's tables while collecting.
@@ -536,7 +470,9 @@ fn collect_item(
         }
     } else if it.kind == 2 {
         let n = fn_node(in a, it.node);
-        if is_wrapping_intrinsic(in a, n.name) {
+        let key = name_text(in a, n.name);
+        if is_wrapping_intrinsic(in a, n.name)
+            || (src == 1 && reserved_width_name(in key.as_str())) {
             let m = quoted(in a, n.name, " is a reserved arithmetic intrinsic");
             diag(
                 inout c,
@@ -547,7 +483,7 @@ fn collect_item(
                 "-"
             );
         }
-        let key = name_text(in a, n.name);
+
         let entry = Entry { src: src, node: it.node, imp: none() };
         if insert(inout c.functions, in key, entry) {
             let m = prefixed("duplicate function ", in a, n.name);
@@ -873,6 +809,8 @@ struct Srcs {
     module: Ast,
     strings: Ast,
     option: Ast,
+    width: Ast,
+    w_shift: u32,
     s_shift: u32,
     o_shift: u32
 }
@@ -882,6 +820,8 @@ fn shift_of(in s: Srcs, src: u8) -> u32 {
         s.s_shift
     } else if src == 3 {
         s.o_shift
+    } else if src == 4 {
+        s.w_shift
     } else {
         0
     }
@@ -895,6 +835,8 @@ fn dump_adt(inout o: ChunkSeq[u8], in s: Srcs, e: Entry) {
         put_adt(inout o, in s.module, e.node, sh);
     } else if e.src == 2 {
         put_adt(inout o, in s.strings, e.node, sh);
+    } else if e.src == 4 {
+        put_adt(inout o, in s.width, e.node, sh);
     } else {
         put_adt(inout o, in s.option, e.node, sh);
     }
@@ -908,6 +850,8 @@ fn dump_effect(inout o: ChunkSeq[u8], in s: Srcs, e: Entry) {
         put_effect(inout o, in s.module, e.node, sh);
     } else if e.src == 2 {
         put_effect(inout o, in s.strings, e.node, sh);
+    } else if e.src == 4 {
+        put_effect(inout o, in s.width, e.node, sh);
     } else {
         put_effect(inout o, in s.option, e.node, sh);
     }
@@ -921,6 +865,8 @@ fn dump_function(inout o: ChunkSeq[u8], in s: Srcs, e: Entry) {
         put_function(inout o, in s.module, e.node, e.imp, 1, sh);
     } else if e.src == 2 {
         put_function(inout o, in s.strings, e.node, e.imp, 1, sh);
+    } else if e.src == 4 {
+        put_function(inout o, in s.width, e.node, e.imp, 1, sh);
     } else {
         put_function(inout o, in s.option, e.node, e.imp, 1, sh);
     }
@@ -996,13 +942,17 @@ fn world_of(in source: Str, inout o: ChunkSeq[u8]) {
     let uses = uses_of(in module);
     let defined = defined_methods(in module);
     let module_last = module_end(in module, false, in defined);
-    let s_shift = wrapping_add(module_last, 1);
+    let w_shift = wrapping_add(module_last, 1);
+    let wsrc = width_source(in uses, in module);
+    let width = lower_source(in wsrc.as_str()).ast;
+    let w_end = prelude_end(in width, w_shift, in defined);
+    let s_shift = wrapping_add(max32(w_end, module_last), 1);
     let strings = if needs_strings(in uses) {
         lower_source(in strings_source()).ast
     } else {
         lower_source(in "").ast
     };
-    let after = prelude_end(in strings, s_shift, in defined);
+    let after = max32(w_end, prelude_end(in strings, s_shift, in defined));
     let o_shift = wrapping_add(max32(after, module_last), 1);
     let option = if needs_option(in uses, in defined) {
         lower_source(in option_source()).ast
@@ -1014,6 +964,8 @@ fn world_of(in source: Str, inout o: ChunkSeq[u8]) {
         module: module,
         strings: strings,
         option: option,
+        width: width,
+        w_shift: w_shift,
         s_shift: s_shift,
         o_shift: o_shift
     };
@@ -1026,6 +978,7 @@ fn world_of(in source: Str, inout o: ChunkSeq[u8]) {
     let none_defined = interner_new();
     collect_all(inout c, in s.base, 0, 0, false, in none_defined);
     collect_all(inout c, in s.module, 1, 0, false, in none_defined);
+    collect_all(inout c, in s.width, 4, w_shift, false, in none_defined);
     collect_all(inout c, in s.strings, 2, s_shift, true, in defined);
     collect_all(inout c, in s.option, 3, o_shift, true, in defined);
     dump(in c, in s, inout o);

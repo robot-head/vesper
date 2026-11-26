@@ -290,7 +290,16 @@ const CASES: &[&str] = &[
     "impl[T: mod copy] Option[T] { fn unwrap_or(self, f: T) -> T { f } } fn f(o: Option[u64]) -> u64 { o.or(Option::None).unwrap_or(0) }",
     "impl[T: mod copy] Option[T] { fn is_some(self) -> bool { true } } fn f(o: Option[u64]) -> bool { o.is_some() }",
     "fn f(s: Str, o: Option[u64]) -> u64 { s.char_count() + o.unwrap_or(1) }",
+    // The width prelude: one name of every family (`WIDTH_NAMES`), a
+    // module that defines one itself, and the reserved names.
+    "fn f(x: u64) -> u64 { let (lo, hi) = mul_wide(x, x); lo }",
+    "fn checked_mul_u64(a: u64, b: u64) -> Option[u64] { Option::None } fn f() -> u64 { checked_mul_u64(1, 2); 0 }",
+    "fn leading_zeros_u32(x: u32) -> u32 { x } fn f() -> u32 { 0 }",
+    "fn to_le_bytes_u8(x: u8) -> u8 { x } fn f() -> u8 { to_le_bytes_u8(1) }",
 ];
+
+/// Every byte-order, bit and checked builtin, named once.
+const WIDTH_NAMES: &str = "to_le_bytes_u8; to_le_bytes_u16; to_le_bytes_u32; to_le_bytes_u64; to_le_bytes_usize; to_le_bytes_i8; to_le_bytes_i16; to_le_bytes_i32; to_le_bytes_i64; to_le_bytes_isize; to_le_bytes_i128; to_le_bytes_u128; to_be_bytes_u8; to_be_bytes_u16; to_be_bytes_u32; to_be_bytes_u64; to_be_bytes_usize; to_be_bytes_i8; to_be_bytes_i16; to_be_bytes_i32; to_be_bytes_i64; to_be_bytes_isize; to_be_bytes_i128; to_be_bytes_u128; from_le_bytes_u8; from_le_bytes_u16; from_le_bytes_u32; from_le_bytes_u64; from_le_bytes_usize; from_le_bytes_i8; from_le_bytes_i16; from_le_bytes_i32; from_le_bytes_i64; from_le_bytes_isize; from_le_bytes_i128; from_le_bytes_u128; from_be_bytes_u8; from_be_bytes_u16; from_be_bytes_u32; from_be_bytes_u64; from_be_bytes_usize; from_be_bytes_i8; from_be_bytes_i16; from_be_bytes_i32; from_be_bytes_i64; from_be_bytes_isize; from_be_bytes_i128; from_be_bytes_u128; leading_zeros_u8; leading_zeros_u16; leading_zeros_u32; leading_zeros_u64; leading_zeros_usize; leading_zeros_i8; leading_zeros_i16; leading_zeros_i32; leading_zeros_i64; leading_zeros_isize; leading_zeros_i128; leading_zeros_u128; trailing_zeros_u8; trailing_zeros_u16; trailing_zeros_u32; trailing_zeros_u64; trailing_zeros_usize; trailing_zeros_i8; trailing_zeros_i16; trailing_zeros_i32; trailing_zeros_i64; trailing_zeros_isize; trailing_zeros_i128; trailing_zeros_u128; count_ones_u8; count_ones_u16; count_ones_u32; count_ones_u64; count_ones_usize; count_ones_i8; count_ones_i16; count_ones_i32; count_ones_i64; count_ones_isize; count_ones_i128; count_ones_u128; wrapping_shl_u8; wrapping_shl_u16; wrapping_shl_u32; wrapping_shl_u64; wrapping_shl_usize; wrapping_shl_i8; wrapping_shl_i16; wrapping_shl_i32; wrapping_shl_i64; wrapping_shl_isize; wrapping_shl_i128; wrapping_shl_u128; wrapping_shr_u8; wrapping_shr_u16; wrapping_shr_u32; wrapping_shr_u64; wrapping_shr_usize; wrapping_shr_i8; wrapping_shr_i16; wrapping_shr_i32; wrapping_shr_i64; wrapping_shr_isize; wrapping_shr_i128; wrapping_shr_u128; wrapping_neg_u8; wrapping_neg_u16; wrapping_neg_u32; wrapping_neg_u64; wrapping_neg_usize; wrapping_neg_i8; wrapping_neg_i16; wrapping_neg_i32; wrapping_neg_i64; wrapping_neg_isize; wrapping_neg_i128; wrapping_neg_u128; checked_add_u8; checked_add_u16; checked_add_u32; checked_add_u64; checked_add_usize; checked_add_i8; checked_add_i16; checked_add_i32; checked_add_i64; checked_add_isize; checked_add_i128; checked_add_u128; checked_sub_u8; checked_sub_u16; checked_sub_u32; checked_sub_u64; checked_sub_usize; checked_sub_i8; checked_sub_i16; checked_sub_i32; checked_sub_i64; checked_sub_isize; checked_sub_i128; checked_sub_u128; checked_mul_u8; checked_mul_u16; checked_mul_u32; checked_mul_u64; checked_mul_usize; checked_mul_i8; checked_mul_i16; checked_mul_i32; checked_mul_i64; checked_mul_isize; checked_mul_i128; checked_mul_u128";
 
 #[test]
 fn collect_matches_rust() {
@@ -300,6 +309,10 @@ fn collect_matches_rust() {
         .enumerate()
         .map(|(i, s)| (format!("case {i}"), (*s).to_owned()))
         .collect();
+    sources.push((
+        "width names".into(),
+        format!("fn f() -> u64 {{ {WIDTH_NAMES}; 0 }}"),
+    ));
     let mut files = vec![];
     for d in ["examples", "tests", "packages", "crates", "src"] {
         ves_files(&repo().join(d), &mut files);
