@@ -93,6 +93,11 @@ copy struct FrameSlot {
     size: u64,
 }
 
+copy struct BranchArm {
+    start: u64,
+    end: u64,
+}
+
 struct FrameLayout {
     slots: ChunkSeq[FrameSlot],
     size: u64,
@@ -338,8 +343,8 @@ fn find_last_reads(
     if paired {
         let _ = reads.try_set(second, values);
     }
-    let mut early_return_at = NEVER_READ;
-    let mut has_branch = false;
+    let mut arms = ChunkSeq::new[BranchArm]();
+    let mut depth: u64 = 0;
     let mut pending_arguments: u64 = 0;
     for reverse_index in 0..count {
         let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
@@ -394,18 +399,30 @@ fn find_last_reads(
         {
             return Option::None;
         }
+        let arm = arms.try_get(wrapping_sub(depth, 1))
+            .unwrap_or(BranchArm { start: NO_VALUE, end: values });
         if record.op == EARLY_RETURN {
-            if early_return_at != NEVER_READ || (record.left == NO_VALUE) != (result == NO_VALUE) {
+            if (record.left == NO_VALUE) != (result == NO_VALUE)
+                || record.extra < arguments
+                || record.extra >= value
+                || (depth != 0 && record.extra <= arm.start)
+            {
                 return Option::None;
             }
-            early_return_at = value;
+            let nested = BranchArm { start: record.extra, end: value };
+            if depth == arms.len() {
+                arms.push(nested);
+            } else {
+                let _ = arms.try_set(depth, nested);
+            }
+            depth = wrapping_add(depth, 1);
         } else if record.op == BRANCH_ZERO {
-            if early_return_at == NEVER_READ || has_branch {
+            if depth == 0 || arm.start != value {
                 return Option::None;
             }
-            has_branch = true;
-        } else if early_return_at != NEVER_READ && !has_branch && last > early_return_at {
-            // The false arm cannot use a value created in the true arm.
+            depth = wrapping_sub(depth, 1);
+        } else if depth != 0 && (value <= arm.start || last > arm.end) {
+            // A definition in this arm cannot reach past its return.
             return Option::None;
         }
         if is_call(record.op) {
@@ -457,7 +474,7 @@ fn find_last_reads(
             }
         }
     }
-    if early_return_at != NEVER_READ && !has_branch {
+    if depth != 0 {
         return Option::None;
     }
     Option::Some(reads)
@@ -896,7 +913,8 @@ pub fn encode_block(
 
     let mut output = ChunkSeq::new[u8]();
     emit(inout output, in Instruction::FrameEnter(frame_size));
-    let mut branch_end: u64 = 0;
+    let mut branch_ends = ChunkSeq::new[u64]();
+    let mut branch_depth: u64 = 0;
     let mut call_index: u64 = 0;
 
     for index in 0..count {
@@ -937,7 +955,9 @@ pub fn encode_block(
             // Values in scope on the false path retain their homes. This
             // return and its stack adjustment run only on the true path.
             emit_return(inout output, in low, in high, frame_size);
-            if !patch_forward_branch(inout output, branch_end) {
+            branch_depth = wrapping_sub(branch_depth, 1);
+            let offset = branch_ends.try_get(branch_depth).unwrap_or(0);
+            if !patch_forward_branch(inout output, offset) {
                 return ChunkSeq::new[u8]();
             }
             continue;
@@ -970,7 +990,12 @@ pub fn encode_block(
         };
         if record.op == BRANCH_ZERO {
             emit(inout output, in Instruction::BranchZero(left));
-            branch_end = output.len();
+            if branch_depth == branch_ends.len() {
+                branch_ends.push(output.len());
+            } else {
+                let _ = branch_ends.try_set(branch_depth, output.len());
+            }
+            branch_depth = wrapping_add(branch_depth, 1);
         } else if is_store(record.op) {
             emit(
                 inout output,

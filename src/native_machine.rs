@@ -82,6 +82,8 @@ const GP_REGISTER_ARGUMENTS: usize = 6;
 const STACK_PROBE_INTERVAL: usize = 4096;
 const MAX_GP_ARGUMENTS: usize = GP_REGISTER_ARGUMENTS + STACK_PROBE_INTERVAL / size_of::<u64>() - 1;
 const GP_RESULTS: usize = 2;
+// Limit code duplication when several paths share a suffix.
+const MAX_LINEARIZED_BRANCHES: usize = 32;
 const FUNCTION_NAMESPACE: u32 = 0;
 const CALL_DISPLACEMENT_BYTES: i64 = size_of::<i32>() as i64;
 
@@ -171,6 +173,7 @@ struct IntegerBlocks<'a> {
     arity: usize,
     words: Vec<u64>,
     calls: bool,
+    branches: usize,
 }
 
 impl IntegerBlocks<'_> {
@@ -535,31 +538,42 @@ impl IntegerBlocks<'_> {
         }
     }
 
-    // Each arm follows its jump chain to a return. If the paths rejoin, the
-    // shared suffix is emitted once per arm with that arm's argument bindings.
+    // Each arm follows its path to a return. If the paths rejoin, the shared
+    // suffix is emitted for each arm with that arm's argument bindings.
     // Each traversal includes the prefix in its visited set to reject cycles.
-    fn returned_from_branch(
+    fn returned_from_path(
         &mut self,
-        condition: Value,
-        arms: [BlockCall; 2],
-        values: Values,
+        entry: Block,
+        mut values: Values,
         mut visited: SecondaryMap<Block, bool>,
     ) -> Option<(u64, Option<u64>)> {
+        let terminator = self.follow_jumps(entry, &mut values, &mut visited)?;
+        let InstructionData::Brif {
+            opcode: Opcode::Brif,
+            arg: condition,
+            blocks: [yes_edge, no_edge],
+        } = self.function.dfg.insts[terminator]
+        else {
+            return self.returned(terminator, &values);
+        };
+        if self.branches == MAX_LINEARIZED_BRANCHES {
+            return None;
+        }
+        self.branches += 1;
         integer_width(self.value_type(condition))?;
         let condition = values[self.function.dfg.resolve_aliases(condition)]?;
-        self.append(IntegerOp::BranchZero, [condition, 0, 0]);
-        let [yes_edge, no_edge] = arms;
+        let branch = self.append(IntegerOp::BranchZero, [condition, 0, 0]);
         let mut yes_values = values.clone();
-        let mut yes_visited = visited.clone();
         let yes_block = self.edge(yes_edge, &mut yes_values)?;
-        let yes_return = self.follow_jumps(yes_block, &mut yes_values, &mut yes_visited)?;
-        let (yes_low, yes_high) = self.returned(yes_return, &yes_values)?;
-        self.append(IntegerOp::EarlyReturn, [yes_low, yes_high.unwrap_or(0), 0]);
+        let (yes_low, yes_high) =
+            self.returned_from_path(yes_block, yes_values, visited.clone())?;
+        self.append(
+            IntegerOp::EarlyReturn,
+            [yes_low, yes_high.unwrap_or(0), branch],
+        );
 
-        let mut no_values = values;
-        let no_block = self.edge(no_edge, &mut no_values)?;
-        let no_return = self.follow_jumps(no_block, &mut no_values, &mut visited)?;
-        self.returned(no_return, &no_values)
+        let no_block = self.edge(no_edge, &mut values)?;
+        self.returned_from_path(no_block, values, visited)
     }
 }
 
@@ -573,10 +587,10 @@ impl IntegerBlocks<'_> {
 /// followed by one slot per instruction. A store uses its extra word for
 /// displacement and leaves an unreferenced slot. Operand IDs refer to prior
 /// value-producing instructions or arguments.
-/// A single BranchZero may skip to the instruction after EarlyReturn. These
-/// records also leave unreferenced slots, and the false arm uses the header's
-/// return value. An early return from a procedure uses NO_VALUE too.
-/// Neither arm may read values defined in the other.
+/// BranchZero skips to the instruction after its matching EarlyReturn. Each
+/// EarlyReturn's extra word is the slot ID of its BranchZero. These records
+/// leave unreferenced slots. An early return from a procedure uses NO_VALUE.
+/// No arm may read values defined in a sibling arm.
 /// A trailing ReturnPair gives the second result ID and makes EarlyReturn's
 /// right operand a second result ID as well.
 /// Leading StackSlot records declare frame slots by size and alignment.
@@ -624,6 +638,7 @@ fn integer_program(function: &Function) -> Option<(Vec<u64>, bool)> {
         arity,
         words: vec![0; HEADER_WORDS],
         calls: false,
+        branches: 0,
     };
     for slot in function.sized_stack_slots.values() {
         if slot.kind != StackSlotKind::ExplicitSlot {
@@ -632,16 +647,7 @@ fn integer_program(function: &Function) -> Option<(Vec<u64>, bool)> {
         let alignment = 1u64.checked_shl(u32::from(slot.align_shift))?;
         blocks.append(IntegerOp::StackSlot, [u64::from(slot.size), alignment, 0]);
     }
-    let mut visited = SecondaryMap::new();
-    let terminator = blocks.follow_jumps(block, &mut values, &mut visited)?;
-    let (low, high) = match function.dfg.insts[terminator] {
-        InstructionData::Brif {
-            opcode: Opcode::Brif,
-            arg,
-            blocks: arms,
-        } => blocks.returned_from_branch(arg, arms, values, visited)?,
-        _ => blocks.returned(terminator, &values)?,
-    };
+    let (low, high) = blocks.returned_from_path(block, values, SecondaryMap::new())?;
     blocks.words[ARGUMENT_COUNT] = arity as u64;
     blocks.words[RETURN_VALUE] = low;
     if let Some(high) = high {

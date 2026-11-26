@@ -38,6 +38,7 @@ enum Case {
     ChainedCasts,
     JumpChain,
     ReturningBranch,
+    NestedBranches,
     ShiftCountInRcx,
     ShiftDestinationRcx,
     ShiftSameRegister,
@@ -81,8 +82,13 @@ fn integer_backend_matches_cranelift_results() {
     assert!(binding::x86_64_integer_block(&[1, 0, 29, 0, 0, 0]).is_empty());
     // The false arm cannot return a value defined in the true arm.
     assert!(
-        binding::x86_64_integer_block(&[1, 2, 28, 0, 0, 0, 0, 9, 0, 0, 29, 2, 0, 0]).is_empty()
+        binding::x86_64_integer_block(&[1, 2, 28, 0, 0, 0, 0, 9, 0, 0, 29, 2, 0, 1]).is_empty()
     );
+    // Two nested branches must close in reverse order.
+    let nested = [1, 0, 28, 0, 0, 0, 28, 0, 0, 0, 29, 0, 0, 2, 29, 0, 0, 1];
+    assert!(!binding::x86_64_integer_block(&nested).is_empty());
+    let crossing = [1, 0, 28, 0, 0, 0, 28, 0, 0, 0, 29, 0, 0, 1, 29, 0, 0, 2];
+    assert!(binding::x86_64_integer_block(&crossing).is_empty());
     // Excessive alignment, a frame that needs probing, and an invalid slot offset.
     assert!(binding::x86_64_integer_block(&[1, 0, 30, 32, 32, 0]).is_empty());
     assert!(binding::x86_64_integer_block(&[1, 0, 30, 4096, 16, 0]).is_empty());
@@ -134,6 +140,7 @@ fn integer_backend_matches_cranelift_results() {
         Case::ChainedCasts,
         Case::JumpChain,
         Case::ReturningBranch,
+        Case::NestedBranches,
         Case::ShiftCountInRcx,
         Case::ShiftDestinationRcx,
         Case::ShiftSameRegister,
@@ -307,6 +314,27 @@ fn integer_backend_matches_cranelift_results() {
                 builder.ins().return_(&[result]);
                 builder.switch_to_block(no);
                 builder.ins().isub(no_operand, d)
+            }
+            Case::NestedBranches => {
+                let yes = builder.create_block();
+                let no = builder.create_block();
+                let join = builder.create_block();
+                let chosen = builder.append_block_param(join, types::I64);
+                builder.ins().brif(a, yes, &[], no, &[]);
+                for (arm, condition, left, right) in [(yes, c, a, b), (no, d, b, a)] {
+                    builder.switch_to_block(arm);
+                    let sum = builder.ins().iadd(left, right);
+                    let difference = builder.ins().isub(left, right);
+                    let inner_yes = builder.create_block();
+                    let inner_no = builder.create_block();
+                    builder.ins().brif(condition, inner_yes, &[], inner_no, &[]);
+                    builder.switch_to_block(inner_yes);
+                    builder.ins().jump(join, &[BlockArg::Value(sum)]);
+                    builder.switch_to_block(inner_no);
+                    builder.ins().jump(join, &[BlockArg::Value(difference)]);
+                }
+                builder.switch_to_block(join);
+                builder.ins().iadd(chosen, f)
             }
             Case::ShiftCountInRcx => {
                 let shifted = builder.ins().ushr(a, d);
@@ -612,6 +640,7 @@ fn integer_backend_matches_cranelift_results() {
         let scalar_inputs = [
             [2, 3, 5, 7, 13, 17],
             [0, 0, 0, 0, 0, 0],
+            [0, 3, 5, 7, 13, 17],
             [u64::MAX, 1, 0, 0, u64::MAX, 2],
             [1, 2, 3, 4, 1 << 63, u64::MAX],
             [0x80, 0x7f, 0, 0, 0x80, 0xff],
@@ -654,7 +683,7 @@ fn integer_backend_matches_paired_system_v_returns() {
     assert!(binding::x86_64_integer_block(&[1, 0, 37, 0, 0, 0, 0, 8, 0, 0]).is_empty());
     assert!(binding::x86_64_integer_block(&[1, 0, 37, 1, 0, 0]).is_empty());
     assert!(
-        binding::x86_64_integer_block(&[1, 0, 28, 0, 0, 0, 0, 8, 0, 0, 29, 0, 2, 0, 37, 2, 0, 0])
+        binding::x86_64_integer_block(&[1, 0, 28, 0, 0, 0, 0, 8, 0, 0, 29, 0, 2, 1, 37, 2, 0, 0])
             .is_empty()
     );
 
