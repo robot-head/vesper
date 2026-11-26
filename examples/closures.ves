@@ -6,7 +6,9 @@ fn offset(sink amount: i64) -> fn @copy (i64) -> i64 eff [Fail[ArithOverflow]] {
 fn compose(
     sink first: fn @copy (i64) -> i64 eff [Fail[ArithOverflow]],
     sink second: fn @copy (i64) -> i64 eff [Fail[ArithOverflow]],
-) -> fn @copy (i64) -> i64 eff [Fail[ArithOverflow]] {
+) -> fn @copy (
+    i64
+) -> i64 eff [Fail[ArithOverflow]] {
     | value | first(second(value))
 }
 

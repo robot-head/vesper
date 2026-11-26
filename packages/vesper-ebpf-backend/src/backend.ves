@@ -1017,8 +1017,14 @@ fn check_action(inout g: G, inout c: Ctx, in x: Extra, enum_name: u32) -> bool {
 }
 
 // `Surface::effect`: recognise and register effect `name` (idempotent).
-fn effect_rule(inout g: G, inout c: Ctx, in p: Program, in x: Extra, function: u32, name: u32)
-    -> bool {
+fn effect_rule(
+    inout g: G,
+    inout c: Ctx,
+    in p: Program,
+    in x: Extra,
+    function: u32,
+    name: u32
+) -> bool {
     if u32_at(in g.registered, w(name)) != 0 {
         return true;
     }
@@ -1240,8 +1246,14 @@ fn map_err(inout g: G, function: u32, decl: XEff) {
     fail(inout g, R_MAP, function, true, decl.s0, decl.s1);
 }
 
-fn map_effect(inout g: G, inout c: Ctx, in p: Program, in x: Extra, function: u32, decl: XEff)
-    -> bool {
+fn map_effect(
+    inout g: G,
+    inout c: Ctx,
+    in p: Program,
+    in x: Extra,
+    function: u32,
+    decl: XEff
+) -> bool {
     let name = decl.name;
     let mut key: u8 = S_NONE;
     let mut value: u8 = S_NONE;
@@ -2531,8 +2543,15 @@ fn ld(inout g: G, in c: Ctx, r: u8, v: u32, part: u32, s0: u64, s1: u64) -> bool
 
 // `dest_slot`: the slot of `v` (in `slot`), false without one; an
 // undefined value is an error (`ok` false).
-fn dest_slot(inout g: G, in c: Ctx, v: u32, s0: u64, s1: u64, inout slot: u32, inout ok: bool)
-    -> bool {
+fn dest_slot(
+    inout g: G,
+    in c: Ctx,
+    v: u32,
+    s0: u64,
+    s1: u64,
+    inout slot: u32,
+    inout ok: bool
+) -> bool {
     let k = loc_kind(in g, v);
     if k == L_UNDEF {
         undefined(inout g, in c, v, s0, s1);
@@ -2708,8 +2727,14 @@ fn op_name(inout m: ChunkSeq[u8], op: u8) {
 }
 
 // `instruction`; `tail` is set when a tail self-call ended the block.
-fn instruction(inout g: G, inout c: Ctx, in p: Program, in x: Extra, i: InstRow, inout tail: bool)
-    -> bool {
+fn instruction(
+    inout g: G,
+    inout c: Ctx,
+    in p: Program,
+    in x: Extra,
+    i: InstRow,
+    inout tail: bool
+) -> bool {
     let s0 = i.s0;
     let s1 = i.s1;
     if i.fallible != 0 {
@@ -3130,8 +3155,14 @@ fn bind(inout g: G, in c: Ctx, in p: Program, at: u64, value: u32, s0: u64, s1: 
     false
 }
 
-fn call(inout g: G, inout c: Ctx, in p: Program, in x: Extra, i: InstRow, inout tail: bool)
-    -> bool {
+fn call(
+    inout g: G,
+    inout c: Ctx,
+    in p: Program,
+    in x: Extra,
+    i: InstRow,
+    inout tail: bool
+) -> bool {
     let s0 = i.s0;
     let s1 = i.s1;
     let callee = pos32(in p, i.a);

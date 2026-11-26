@@ -326,8 +326,10 @@ pub fn frame_stack_read_address(
     addr
 }
 
-pub fn frame_stack_pop(inout stack: FrameStack, id: FrameId)
-    -> ChunkSeq[u8] eff [Fail[FrameError]] {
+pub fn frame_stack_pop(
+    inout stack: FrameStack,
+    id: FrameId
+) -> ChunkSeq[u8] eff [Fail[FrameError]] {
     let n = stack.frames.len();
     if n == 0 {
         return Fail::raise(FrameError::StaleFrame);
@@ -481,8 +483,10 @@ pub fn epoll_release(in poller: EpollPoller, fd: i32) -> (bool, u32) eff [Ffi[Pu
     }
 }
 
-pub fn epoll_wait_one(in poller: EpollPoller, timeout_ms: i32)
-    -> EpollWaitResult eff [Ffi[PulseSys]] {
+pub fn epoll_wait_one(
+    in poller: EpollPoller,
+    timeout_ms: i32
+) -> EpollWaitResult eff [Ffi[PulseSys]] {
     let mut ev = EpollEvent {
         w0: 0,
         w1: 0,
@@ -735,8 +739,10 @@ fn slot_at(in seq: ChunkSeq[RequestSlot], idx: u64) -> RequestSlot {
     }
 }
 
-pub fn readiness_queue_new(kind: DriverKind, capacity: u64)
-    -> ReadinessQueue eff [Fail[DriverError]] {
+pub fn readiness_queue_new(
+    kind: DriverKind,
+    capacity: u64
+) -> ReadinessQueue eff [Fail[DriverError]] {
     if capacity == 0 {
         return Fail::raise(DriverError::InvalidCapacity);
     }
@@ -2256,8 +2262,10 @@ fn io_remove_waiting(inout d: EpollDriver, i: u64) {
 // Cancel a waiting request: true when it was waiting (its cancelled
 // completion comes with the next poll), false when it is not; `Err` with
 // the errno when epoll refuses to forget it (it stays waiting).
-pub fn epoll_driver_cancel(inout d: EpollDriver, id: RequestId)
-    -> Result[bool, u32] eff [Ffi[PulseSys]] {
+pub fn epoll_driver_cancel(
+    inout d: EpollDriver,
+    id: RequestId
+) -> Result[bool, u32] eff [Ffi[PulseSys]] {
     let i = io_waiting_index(in d, id.bits);
     if i >= d.waiting.len() {
         return Result::Ok(false);
@@ -2916,8 +2924,10 @@ fn uring_request_index(in d: UringDriver, id: u64) -> u64 {
 // Queue the cancellation of request `id`: true when it is owned and not
 // already being cancelled (its completion, `ECANCELED`, comes with a later
 // poll), else false; `Err` when the cancellation cannot be queued.
-pub fn uring_driver_cancel(inout d: UringDriver, id: RequestId)
-    -> Result[bool, u32] eff [Ffi[PulseSys]] {
+pub fn uring_driver_cancel(
+    inout d: UringDriver,
+    id: RequestId
+) -> Result[bool, u32] eff [Ffi[PulseSys]] {
     if uring_request_index(in d, id.bits) >= d.requests.len()
         || uring_u64_index(in d.cancellations, id.bits) < d.cancellations.len() {
         return Result::Ok(false);
@@ -2988,8 +2998,12 @@ pub fn uring_driver_eventfd(inout d: UringDriver) -> Result[i32, u32] eff [Ffi[P
 // Account for one completion (`user_data`, `res`): appends the request's
 // completion and buffer to `out`, or nothing for a cancellation's own
 // completion; 0 or the error.
-fn uring_complete(inout d: UringDriver, user_data: u64, res: i32, inout out: UringPoll)
-    -> u32 eff [Ffi[PulseSys]] {
+fn uring_complete(
+    inout d: UringDriver,
+    user_data: u64,
+    res: i32,
+    inout out: UringPoll
+) -> u32 eff [Ffi[PulseSys]] {
     if (user_data & uring_cancel_bit()) != 0 {
         let id = user_data ^ uring_cancel_bit();
         if !uring_u64_remove(inout d.cancellations, id) {

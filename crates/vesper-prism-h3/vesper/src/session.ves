@@ -676,8 +676,11 @@ pub fn on_quic_datagram(
     Result::Ok(())
 }
 
-pub fn live_session(in st: SessionTable, err: Option[ConnectionError], session: u64)
-    -> Result[u64, SessionError] {
+pub fn live_session(
+    in st: SessionTable,
+    err: Option[ConnectionError],
+    session: u64
+) -> Result[u64, SessionError] {
     match err {
         Option::Some(_) => return Result::Err(SessionError::Connection),
         Option::None => {}
@@ -855,8 +858,12 @@ fn retire_wt_by_id(inout st: SessionTable, in pool: BytePool, id: u64) {
     }
 }
 
-pub fn wt_can_write(in st: SessionTable, in out: OutMap, in pool: BytePool, id: u64)
-    -> Result[bool, SessionError] {
+pub fn wt_can_write(
+    in st: SessionTable,
+    in out: OutMap,
+    in pool: BytePool,
+    id: u64
+) -> Result[bool, SessionError] {
     let f = bsearch_u64(in st.w_id.as_slice(), id);
     if !f.found {
         return Result::Err(SessionError::UnknownStream);
@@ -868,8 +875,12 @@ pub fn wt_can_write(in st: SessionTable, in out: OutMap, in pool: BytePool, id: 
     Result::Ok(out_queued(in out, in pool, id) > 0)
 }
 
-pub fn wt_on_write_reset(inout st: SessionTable, in pool: BytePool, id: u64, code: u64)
-    -> Result[u64, SessionError] {
+pub fn wt_on_write_reset(
+    inout st: SessionTable,
+    in pool: BytePool,
+    id: u64,
+    code: u64
+) -> Result[u64, SessionError] {
     let f = bsearch_u64(in st.w_id.as_slice(), id);
     if !f.found {
         return Result::Err(SessionError::UnknownStream);

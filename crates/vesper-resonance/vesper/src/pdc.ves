@@ -515,8 +515,11 @@ pub fn p_line_read(in buf: Slice[u32], head: u64, delay: u64, inout out: Slice[u
 }
 
 // `DelayLine::advance`: the head after one block.
-pub fn p_line_advance(head: u64, block: u64, len: u64)
-    -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+pub fn p_line_advance(
+    head: u64,
+    block: u64,
+    len: u64
+) -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
     (head + block) % len
 }
 

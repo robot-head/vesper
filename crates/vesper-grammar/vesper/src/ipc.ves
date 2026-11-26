@@ -391,8 +391,14 @@ fn field(in input: Slice[u8], f: Fb, inout b: Bud, t: Table, index: u64) -> u64 
     }
 }
 
-fn scalar8(in input: Slice[u8], f: Fb, inout b: Bud, t: Table, index: u64, default: u64)
-    -> u64 eff [Fail[GErr]] {
+fn scalar8(
+    in input: Slice[u8],
+    f: Fb,
+    inout b: Bud,
+    t: Table,
+    index: u64,
+    default: u64
+) -> u64 eff [Fail[GErr]] {
     let at = field(in input, f, inout b, t, index);
     if at == none() {
         default
@@ -401,8 +407,14 @@ fn scalar8(in input: Slice[u8], f: Fb, inout b: Bud, t: Table, index: u64, defau
     }
 }
 
-fn scalar16(in input: Slice[u8], f: Fb, inout b: Bud, t: Table, index: u64, default: u64)
-    -> u64 eff [Fail[GErr]] {
+fn scalar16(
+    in input: Slice[u8],
+    f: Fb,
+    inout b: Bud,
+    t: Table,
+    index: u64,
+    default: u64
+) -> u64 eff [Fail[GErr]] {
     let at = field(in input, f, inout b, t, index);
     if at == none() {
         default
@@ -411,8 +423,14 @@ fn scalar16(in input: Slice[u8], f: Fb, inout b: Bud, t: Table, index: u64, defa
     }
 }
 
-fn scalar64(in input: Slice[u8], f: Fb, inout b: Bud, t: Table, index: u64, default: u64)
-    -> u64 eff [Fail[GErr]] {
+fn scalar64(
+    in input: Slice[u8],
+    f: Fb,
+    inout b: Bud,
+    t: Table,
+    index: u64,
+    default: u64
+) -> u64 eff [Fail[GErr]] {
     let at = field(in input, f, inout b, t, index);
     if at == none() {
         default
@@ -635,8 +653,12 @@ fn schema(
 
 // A range check whose arrow failure becomes Column(kind) at `body_at`
 // plus its offset: (start, end).
-fn column_range(total: u64, offset_bytes: u64, byte_length: u64, body_at: u64)
-    -> P2 eff [Fail[GErr]] {
+fn column_range(
+    total: u64,
+    offset_bytes: u64,
+    byte_length: u64,
+    body_at: u64
+) -> P2 eff [Fail[GErr]] {
     let r = handle Fail[GErr] in {
         let p = checked_buffer_range(total, offset_bytes, byte_length, BUFFER_ALIGN);
         P4 { a: 0, b: p.a, c: p.b, d: 0 }

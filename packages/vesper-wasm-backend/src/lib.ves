@@ -30,8 +30,10 @@ fn compile(in b: Slice[u8]) -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64]) 
     compile_with_facts(sink c, sink p, sink f)
 }
 
-fn compile_diag(in b: Slice[u8], want_syms: bool)
-    -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64], ChunkSeq[u8]) eff [Fail[WErr]] {
+fn compile_diag(
+    in b: Slice[u8],
+    want_syms: bool
+) -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64], ChunkSeq[u8]) eff [Fail[WErr]] {
     let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
@@ -151,14 +153,21 @@ fn compile_with_facts_core(
     (core, wit, functions, handlers)
 }
 
-pub fn compile_with_facts(sink c: Ctx, sink p: Program, sink f: Facts)
-    -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64]) eff [Fail[WErr]] {
+pub fn compile_with_facts(
+    sink c: Ctx,
+    sink p: Program,
+    sink f: Facts
+) -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64]) eff [Fail[WErr]] {
     let mut dummy_syms = ChunkSeq::new[u8]();
     compile_with_facts_core(sink c, sink p, sink f, false, inout dummy_syms)
 }
 
-pub fn compile_with_facts_diag(sink c: Ctx, sink p: Program, sink f: Facts, want_syms: bool)
-    -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64], ChunkSeq[u8]) eff [Fail[WErr]] {
+pub fn compile_with_facts_diag(
+    sink c: Ctx,
+    sink p: Program,
+    sink f: Facts,
+    want_syms: bool
+) -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64], ChunkSeq[u8]) eff [Fail[WErr]] {
     let mut syms_out = ChunkSeq::new[u8]();
     let (core, wit, functions, handlers) = compile_with_facts_core(
         sink c,
@@ -250,8 +259,11 @@ pub fn wasm_backend_compile_bytes(in input: Slice[u8]) -> ChunkSeq[u64] {
 // driver's `vesper build --target wasm32-wasip2`, #1895): true with the
 // core module and the WIT in `core` and `wit`, false on an error or a
 // construct not ported yet.
-pub fn wasm_backend_module(in input: Slice[u8], inout core: ChunkSeq[u8], inout wit: ChunkSeq[u8])
-    -> bool {
+pub fn wasm_backend_module(
+    in input: Slice[u8],
+    inout core: ChunkSeq[u8],
+    inout wit: ChunkSeq[u8]
+) -> bool {
     handle Fail[WErr] in {
         let (c, t, functions, handlers) = compile(in input);
         core = c;

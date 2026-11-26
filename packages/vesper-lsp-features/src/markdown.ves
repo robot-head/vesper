@@ -126,8 +126,14 @@ fn at_of(v: u64) -> u64 {
 
 // `close_ticks`: the end of the run of `count` backticks closing the one
 // at line `line`, byte `at`; NOT_FOUND when unclosed.
-fn close_ticks(inout k: Link, in b: Slice[u8], line: u64, at: u64, count: u64, inout out: u64)
-    -> bool {
+fn close_ticks(
+    inout k: Link,
+    in b: Slice[u8],
+    line: u64,
+    at: u64,
+    count: u64,
+    inout out: u64
+) -> bool {
     out = NOT_FOUND;
     let n = k.l_start.len();
     for i in line..n {

@@ -302,8 +302,10 @@ fn push_unique_name(inout out: ChunkSeq[ChunkSeq[u8]], in slice: Slice[u8]) {
     out.push(sink name);
 }
 
-fn scan_mods(in src: Slice[u8], include_super: bool)
-    -> (ChunkSeq[ChunkSeq[u8]], ChunkSeq[ChunkSeq[u8]]) {
+fn scan_mods(
+    in src: Slice[u8],
+    include_super: bool
+) -> (ChunkSeq[ChunkSeq[u8]], ChunkSeq[ChunkSeq[u8]]) {
     let mut self_out = ChunkSeq::new[ChunkSeq[u8]]();
     let mut super_out = ChunkSeq::new[ChunkSeq[u8]]();
     let mut pos: u64 = 0;
@@ -498,8 +500,10 @@ fn find_pkg_by_dir(in pkgs: ChunkSeq[PkgNode], in dir: Slice[u8]) -> Option[u64]
     Option::None
 }
 
-fn load_pkg_graph(in root_dir: Slice[u8], inout pkgs: ChunkSeq[PkgNode])
-    -> Option[u64] eff [Ffi[StdFs]] {
+fn load_pkg_graph(
+    in root_dir: Slice[u8],
+    inout pkgs: ChunkSeq[PkgNode]
+) -> Option[u64] eff [Ffi[StdFs]] {
     let norm = normalize_dir(in ".".as_bytes(), in root_dir);
     match find_pkg_by_dir(in pkgs, in norm.as_slice()) {
         Option::Some(idx) => {

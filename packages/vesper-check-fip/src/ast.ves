@@ -201,8 +201,12 @@ fn opt(x: u64) -> u32 {
 // Decodes the fip task section: the pool, the expressions, the patterns
 // and the functions. Names in pool words are tagged by the node kind that
 // owns them and mapped here, so the checker sees symbols and type ids.
-pub fn read_ast(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tmap: ChunkSeq[u32])
-    -> Ast {
+pub fn read_ast(
+    inout r: Reader,
+    in b: Slice[u8],
+    in nmap: ChunkSeq[u32],
+    in tmap: ChunkSeq[u32]
+) -> Ast {
     let pn = r.word(in b);
     let mut pool: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](pn);
     for i in 0..pn {

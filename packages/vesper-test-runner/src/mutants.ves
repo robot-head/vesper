@@ -126,8 +126,13 @@ fn binary_codes(in o: Ops, op: u32) -> (u64, u64, u64) {
 
 // `find_operator_span`: the first non-trivia token within
 // `[range_start, range_end]` whose text is `op`, as (found, start, end).
-fn find_operator(in src: Slice[u8], in t: Toks, range_start: u64, range_end: u64, in op: Str)
-    -> (bool, u64, u64) {
+fn find_operator(
+    in src: Slice[u8],
+    in t: Toks,
+    range_start: u64,
+    range_end: u64,
+    in op: Str
+) -> (bool, u64, u64) {
     // partition_point(|t| t.span.start < range_start)
     let mut lo: u64 = 0;
     let mut hi = t.kind.len();

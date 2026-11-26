@@ -313,8 +313,13 @@ pub fn read_pat(
     id
 }
 
-fn read_types_into(inout r: Reader, in b: Slice[u8], inout x: Exprs, in tmap: ChunkSeq[u32], n: u64)
-    -> u32 {
+fn read_types_into(
+    inout r: Reader,
+    in b: Slice[u8],
+    inout x: Exprs,
+    in tmap: ChunkSeq[u32],
+    n: u64
+) -> u32 {
     let a = wrapping_u32(x.tys.len());
     for i in 0..n {
         x.tys.push(at32(in tmap, r.word(in b)));

@@ -33,8 +33,12 @@ fn synth_param_sym(inout names: Names, idx: u64) -> u32 {
 
 // Derives `(base, joins)` for `adt_idx` in `wd`, checking every
 // well-formed combination of argument modes against `World::mode_of`.
-pub fn derive_adt_scheme(inout t: Types, inout names: Names, in wd: World, adt_idx: u32)
-    -> DerivedScheme {
+pub fn derive_adt_scheme(
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    adt_idx: u32
+) -> DerivedScheme {
     let a = wd.adt(adt_idx);
     let gn = w(a.gn);
     let mut is_row: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](gn);

@@ -42,8 +42,12 @@ use self::wire::{
 
 // insn.rs
 
-pub fn insn_decode(pc: usize, len: usize, lo: RawInsn, hi: RawInsn)
-    -> Insn eff [Fail[DecodeError]] {
+pub fn insn_decode(
+    pc: usize,
+    len: usize,
+    lo: RawInsn,
+    hi: RawInsn
+) -> Insn eff [Fail[DecodeError]] {
     decode(pc, len, lo, hi)
 }
 
@@ -209,8 +213,13 @@ pub fn verifier_scalar_alu(op: AluOp, wide: bool, a: Scalar, b: Scalar) -> Scala
     scalar_alu(op, wide, a, b)
 }
 
-pub fn verifier_refine_jmp(op: JmpOp, wide: bool, a: Scalar, b: Scalar, holds: bool)
-    -> Option[(Scalar, Scalar)] {
+pub fn verifier_refine_jmp(
+    op: JmpOp,
+    wide: bool,
+    a: Scalar,
+    b: Scalar,
+    holds: bool
+) -> Option[(Scalar, Scalar)] {
     refine_jmp(op, wide, a, b, holds)
 }
 
@@ -350,15 +359,23 @@ pub fn wire_alert_decode(in s: Slice[u8]) -> SynDropAlertWire eff [Fail[WireErro
 
 // btf.rs
 
-pub fn btf_parse(in btf: Slice[u8], split: bool, base_types: u64, in base_strings: Slice[u8])
-    -> ChunkSeq[u64] {
+pub fn btf_parse(
+    in btf: Slice[u8],
+    split: bool,
+    base_types: u64,
+    in base_strings: Slice[u8]
+) -> ChunkSeq[u64] {
     parse_btf(in btf, split, base_types, in base_strings)
 }
 
 // core.rs
 
-pub fn core_local_value(kind: u64, in lt: Slice[u64], in access: Slice[u64], local_id: u64)
-    -> ChunkSeq[u64] {
+pub fn core_local_value(
+    kind: u64,
+    in lt: Slice[u64],
+    in access: Slice[u64],
+    local_id: u64
+) -> ChunkSeq[u64] {
     let mut out: u64 = 0;
     let mut bad: u64 = 0;
     let code = local_value(kind, in lt, in access, local_id, inout out, inout bad);
@@ -459,8 +476,11 @@ pub fn btf_ext_local_type(in tab: Slice[u64], in idx: Slice[u64], id: u64) -> Ch
     local_type_words(in tab, in idx, id)
 }
 
-pub fn btf_ext_maps_from_btf(in tab: Slice[u64], in idx: Slice[u64], in strs: Slice[u8])
-    -> ChunkSeq[u64] {
+pub fn btf_ext_maps_from_btf(
+    in tab: Slice[u64],
+    in idx: Slice[u64],
+    in strs: Slice[u8]
+) -> ChunkSeq[u64] {
     maps_from_btf(in tab, in idx, in strs)
 }
 

@@ -1341,8 +1341,13 @@ fn no_loop() -> LoopPlan {
 }
 
 // `loop_candidate`: what to guard in loop `blocks` headed by `h`.
-fn loop_candidate(in f: Fun, inout fa: Facts, in g: Graph, h: u32, in blocks: ChunkSeq[u32])
-    -> LoopPlan {
+fn loop_candidate(
+    in f: Fun,
+    inout fa: Facts,
+    in g: Graph,
+    h: u32,
+    in blocks: ChunkSeq[u32]
+) -> LoopPlan {
     let pre = loop_entry(in f, in g, h, in blocks);
     if pre == NONE32 {
         return no_loop();

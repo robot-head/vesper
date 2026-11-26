@@ -738,8 +738,11 @@ fn exists16(in path: Slice[u16]) -> bool eff [Ffi[StdProcess]] {
 
 // The first `dir\name` that exists, over the `;`-separated entries of
 // `paths` (quotes stripped, empty entries skipped), or empty.
-fn search16(in paths: Slice[u16], in name: Slice[u16], has_extension: bool)
-    -> ChunkSeq[u16] eff [Ffi[StdProcess]] {
+fn search16(
+    in paths: Slice[u16],
+    in name: Slice[u16],
+    has_extension: bool
+) -> ChunkSeq[u16] eff [Ffi[StdProcess]] {
     let mut dir: ChunkSeq[u16] = ChunkSeq::new[u16]();
     let mut quoted = false;
     let n = paths.len();
@@ -1094,8 +1097,12 @@ fn drain_pipe(h: u64, inout dst: ChunkSeq[u8], limit: u64, inout cut: bool) eff 
 
 // Read what is waiting in pipe `h` now, without blocking: the new handle
 // (0 once the pipe has ended and is closed) and whether bytes came.
-fn pump_pipe(h: u64, inout dst: ChunkSeq[u8], limit: u64, inout cut: bool)
-    -> (u64, bool) eff [Ffi[StdProcess]] {
+fn pump_pipe(
+    h: u64,
+    inout dst: ChunkSeq[u8],
+    limit: u64,
+    inout cut: bool
+) -> (u64, bool) eff [Ffi[StdProcess]] {
     if h == 0 {
         return (0, false);
     }
@@ -1167,8 +1174,10 @@ pub fn wait(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProc
 // waited for), or `None` when the time runs out first (the child, and
 // what it wrote so far, stay; wait again, or `kill_tree`). 0 milliseconds
 // only checks. Waiting for a waited child is an `invalid_input()` error.
-pub fn wait_timeout(inout ch: ProcChild, millis: u64)
-    -> Result[Option[ExitStatus], IoError] eff [Ffi[StdProcess]] {
+pub fn wait_timeout(
+    inout ch: ProcChild,
+    millis: u64
+) -> Result[Option[ExitStatus], IoError] eff [Ffi[StdProcess]] {
     if ch.waited {
         return Result::Err(IoError { kind: invalid_input(), os: 0 });
     }

@@ -1,5 +1,11 @@
-fn plan_texture(inout pl: Planner, in g: Graph, p: u32, queue: u32, resource: u32, pass: PassInfo)
-    -> PlanFault {
+fn plan_texture(
+    inout pl: Planner,
+    in g: Graph,
+    p: u32,
+    queue: u32,
+    resource: u32,
+    pass: PassInfo
+) -> PlanFault {
     let res = get_resource(in g, widen_u64(resource));
     let mut entries: ChunkSeq[ReqEntry] = ChunkSeq::new[ReqEntry]();
     let mut seq: u64 = 0;
@@ -101,8 +107,14 @@ fn plan_texture(inout pl: Planner, in g: Graph, p: u32, queue: u32, resource: u3
     PlanFault::None
 }
 
-fn plan_buffer(inout pl: Planner, in g: Graph, p: u32, queue: u32, resource: u32, pass: PassInfo)
-    -> PlanFault {
+fn plan_buffer(
+    inout pl: Planner,
+    in g: Graph,
+    p: u32,
+    queue: u32,
+    resource: u32,
+    pass: PassInfo
+) -> PlanFault {
     for x in 0..pass.use_count {
         let u = get_use(in g.uses, wrapping_add(pass.first_use, x));
         if u.resource == resource {

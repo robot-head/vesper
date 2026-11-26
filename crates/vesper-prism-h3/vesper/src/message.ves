@@ -169,8 +169,11 @@ fn split(in b: Slice[u8], in meta: Slice[u64]) -> Result[u64, MessageError] {
     Result::Ok(pseudo)
 }
 
-fn content_length(in b: Slice[u8], in meta: Slice[u64], first: u64)
-    -> Result[Option[u64], MessageError] {
+fn content_length(
+    in b: Slice[u8],
+    in meta: Slice[u64],
+    first: u64
+) -> Result[Option[u64], MessageError] {
     let mut found: Option[u64] = Option::None;
     for i in first..count(in meta) {
         let l = line(in meta, i);
@@ -213,8 +216,10 @@ fn empty_or_none(s: Option[Span]) -> bool {
     }
 }
 
-pub fn message_parse_request(in b: Slice[u8], in meta: Slice[u64])
-    -> Result[RequestParts, MessageError] {
+pub fn message_parse_request(
+    in b: Slice[u8],
+    in meta: Slice[u64]
+) -> Result[RequestParts, MessageError] {
     let pseudo = match split(in b, in meta) {
         Result::Ok(p) => p,
         Result::Err(e) => return Result::Err(e),
@@ -368,8 +373,10 @@ pub fn message_parse_request(in b: Slice[u8], in meta: Slice[u64])
     )
 }
 
-pub fn message_parse_response(in b: Slice[u8], in meta: Slice[u64])
-    -> Result[ResponseParts, MessageError] {
+pub fn message_parse_response(
+    in b: Slice[u8],
+    in meta: Slice[u64]
+) -> Result[ResponseParts, MessageError] {
     let pseudo = match split(in b, in meta) {
         Result::Ok(p) => p,
         Result::Err(e) => return Result::Err(e),

@@ -43,8 +43,10 @@ fn any_help(in args: Args, n: u64) -> bool {
     false
 }
 
-fn fail_test(has_json: bool, in message: Slice[u8])
-    -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
+fn fail_test(
+    has_json: bool,
+    in message: Slice[u8]
+) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     if has_json {
         HybridCommands::hc_test_json_err(in message);
     }
@@ -74,8 +76,10 @@ fn pack_args(in args: Args, n: u64) -> ChunkSeq[u8] {
     packed
 }
 
-fn run_packed(in args: Args, n: u64)
-    -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
+fn run_packed(
+    in args: Args,
+    n: u64
+) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     let packed = pack_args(in args, n);
     let err_len = HybridCommands::hc_test_run(in packed.as_slice());
     if err_len == 0 {
@@ -147,8 +151,11 @@ fn parse_u64(in text: Slice[u8], inout out: u64) -> bool {
     true
 }
 
-fn run_doctest_cli(in args: Args, n: u64, has_json: bool)
-    -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
+fn run_doctest_cli(
+    in args: Args,
+    n: u64,
+    has_json: bool
+) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     let mut doc = false;
     let mut json = false;
     let mut has_file = false;

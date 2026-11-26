@@ -610,8 +610,15 @@ fn put_literal(inout l: L, kind: u64, lo: u64, hi: u64) {
     put(inout l, hi, Tag::Raw);
 }
 
-fn read_paths(inout l: L, root: u32, path: u64, pass: u8, in ps: ChunkSeq[u64], s0: u64, s1: u64)
-    -> u32 {
+fn read_paths(
+    inout l: L,
+    root: u32,
+    path: u64,
+    pass: u8,
+    in ps: ChunkSeq[u64],
+    s0: u64,
+    s1: u64
+) -> u32 {
     let a = l.sops.len();
     put(inout l, w(root), Tag::Name);
     put(inout l, path, Tag::Path);

@@ -163,8 +163,14 @@ fn grow(inout a: ZAcc) {
 // as `Accumulator::add` does after its work charge and width check.
 // Returns INSERTED, or the failure: ROWS_FULL or SUM_OVERFLOW (nothing
 // changes then).
-pub fn acc_insert(inout a: ZAcc, input: u64, in row: Slice[i64], at: u64, whi: i64, wlo: u64)
-    -> u64 {
+pub fn acc_insert(
+    inout a: ZAcc,
+    input: u64,
+    in row: Slice[i64],
+    at: u64,
+    whi: i64,
+    wlo: u64
+) -> u64 {
     if whi == 0 && wlo == 0 {
         return INSERTED;
     }

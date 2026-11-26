@@ -98,8 +98,13 @@ pub fn put(inout w: Slice[u64], v: u64) {
 
 // A fixed-size byte array: consumed, and its offset in the input appended
 // to the output words (the adapter slices the input it passed).
-pub fn arr(in b: Slice[u8], inout r: Rd, n: u64, field: u64, inout w: Slice[u64])
-    -> Unit eff [Fail[AErr]] {
+pub fn arr(
+    in b: Slice[u8],
+    inout r: Rd,
+    n: u64,
+    field: u64,
+    inout w: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
     put(inout w, take(inout r, n, field));
 }
 

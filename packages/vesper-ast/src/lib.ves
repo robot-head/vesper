@@ -1204,8 +1204,13 @@ test {
     // @case struct_decl(in "copy struct Pair { first: i64, second: u64 }", 0, 1, 0, 1)
     // @case enum_decl(in "copy enum Flag { Off, On }", 0, 1, 0, 1)
     // @case aliased_import(in "use self::ops::add as plus;", 0, 0, 1, 0)
-    fn test_ast_module_tables(in source: Str, functions: u64, adts: u64, imports: u64, items: u64)
-        -> bool {
+    fn test_ast_module_tables(
+        in source: Str,
+        functions: u64,
+        adts: u64,
+        imports: u64,
+        items: u64
+    ) -> bool {
         let rows = ast_rows(in source);
         let declarations = rows.try_get(13) == Option::Some(adts)
             && rows.try_get(14) == Option::Some(functions);

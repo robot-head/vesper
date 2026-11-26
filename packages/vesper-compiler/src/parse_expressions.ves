@@ -3,8 +3,9 @@ fn parse_block(p: ParseCursor) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fai
     syntax_heads(q, p.row_head, p.value_head)
 }
 
-fn parse_statements(p: ParseCursor)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_statements(
+    p: ParseCursor
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if parse_at_end(p, 35) {
         p
     } else if parse_at_word(p, 0, 0x757365) && parse_at_word(p, 1, 0x6d6f64656c) {
@@ -41,8 +42,9 @@ fn parse_expr(p: ParseCursor) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail
     parse_leave(parse_close(parse_expr_inner(parse_open(parse_enter(p), 202))), p)
 }
 
-fn parse_expr_inner(p: ParseCursor)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_expr_inner(
+    p: ParseCursor
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let k = parse_kind(p);
     if k == 23 {
         parse_handle_expr(p)
@@ -66,19 +68,22 @@ fn parse_at_region(p: ParseCursor) -> bool eff [SyntaxMemory, Fail[Diag], Fail[A
     parse_at_word(p, 0, 0x726567696f6e) && parse_nth(p, 1).kind == 4 && (next == 34 || next == 32)
 }
 
-fn parse_restricted(p: ParseCursor)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_restricted(
+    p: ParseCursor
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let q = parse_expr(parse_with_flags(p, true, p.rows, p.bounds));
     parse_with_flags(q, p.nostruct, q.rows, q.bounds)
 }
 
-fn parse_if_expr(p: ParseCursor)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_if_expr(
+    p: ParseCursor
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     parse_leave(parse_if_inner(parse_enter(p)), p)
 }
 
-fn parse_if_inner(p: ParseCursor)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_if_inner(
+    p: ParseCursor
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let q = parse_block(parse_restricted(parse_expect(p, 28)));
     let e = parse_eat(q, 29);
     if parse_ate(q, e) {
@@ -92,8 +97,9 @@ fn parse_if_inner(p: ParseCursor)
     }
 }
 
-fn parse_match_expr(p: ParseCursor)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_match_expr(
+    p: ParseCursor
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let q = parse_expect(parse_restricted(parse_expect(p, 27)), 34);
     parse_expect(parse_arms(q), 35)
 }
@@ -115,8 +121,9 @@ fn parse_arms(p: ParseCursor) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail
     }
 }
 
-fn parse_closure(p: ParseCursor)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_closure(
+    p: ParseCursor
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let o = parse_eat(p, 66);
     let q = if parse_ate(p, o) {
         o
@@ -139,8 +146,9 @@ fn parse_closure(p: ParseCursor)
     syntax_heads(q, q.row_head, p.value_head)
 }
 
-fn parse_handle_expr(p: ParseCursor)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_handle_expr(
+    p: ParseCursor
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let q = parse_expect(p, 23);
     let q = if parse_at(q, 4) {
         parse_expect(parse_lower(q), 40)
@@ -162,8 +170,9 @@ fn parse_handle_expr(p: ParseCursor)
     parse_expect(parse_clauses(parse_eat(q, 38)), 35)
 }
 
-fn parse_clauses(p: ParseCursor)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_clauses(
+    p: ParseCursor
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if parse_at_end(p, 35) {
         p
     } else {
@@ -174,8 +183,9 @@ fn parse_clauses(p: ParseCursor)
     }
 }
 
-fn parse_region_expr(p: ParseCursor)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_region_expr(
+    p: ParseCursor
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let q = parse_lower(parse_bump(p));
     let l = parse_eat(q, 32);
     if parse_ate(q, l) {
@@ -197,8 +207,10 @@ fn parse_region_expr(p: ParseCursor)
     }
 }
 
-fn parse_binary(p: ParseCursor, min: i64)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_binary(
+    p: ParseCursor,
+    min: i64
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let q = parse_enter(p);
     let k = parse_kind(q);
     let lhs = if k == 55 || k == 67 {
@@ -209,8 +221,10 @@ fn parse_binary(p: ParseCursor, min: i64)
     parse_leave(parse_binary_rest(lhs, min), p)
 }
 
-fn parse_binary_rest(p: ParseCursor, min: i64)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_binary_rest(
+    p: ParseCursor,
+    min: i64
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let prec = precedence(parse_kind(p));
     if prec == 0 || prec < min {
         p
@@ -227,8 +241,10 @@ fn parse_binary_rest(p: ParseCursor, min: i64)
 
 // The operator loop of a postfix expression; each operator deepens it.
 
-fn parse_postfix(p: ParseCursor, head: Tok)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_postfix(
+    p: ParseCursor,
+    head: Tok
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let k = parse_kind(p);
     if k == 32 || k == 36 || k == 42 || k == 43 {
         parse_postfix_op(parse_enter(p), k, head)
@@ -240,8 +256,11 @@ fn parse_postfix(p: ParseCursor, head: Tok)
 // Whether `[` followed by this token opens type arguments, not an index.
 // `Tensor::reshape[[M, N]](x)`: no index expression starts with `[`.
 
-fn parse_postfix_op(p: ParseCursor, k: i64, head: Tok)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_postfix_op(
+    p: ParseCursor,
+    k: i64,
+    head: Tok
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if k == 32 {
         parse_postfix(parse_expect(parse_args(parse_bump(p)), 33), tok(70, 0, 0))
     } else if k == 36 {
@@ -281,13 +300,15 @@ fn parse_args(p: ParseCursor) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail
     }
 }
 
-fn parse_primary(p: ParseCursor)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_primary(
+    p: ParseCursor
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     parse_leave(parse_primary_inner(parse_enter(p)), p)
 }
 
-fn parse_primary_inner(p: ParseCursor)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_primary_inner(
+    p: ParseCursor
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let k = parse_kind(p);
     if parse_at_literal(p) {
         parse_literal(p)
@@ -320,8 +341,9 @@ fn parse_primary_inner(p: ParseCursor)
     }
 }
 
-fn parse_field_values(p: ParseCursor)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_field_values(
+    p: ParseCursor
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if parse_at_end(p, 35) {
         p
     } else {
@@ -341,8 +363,9 @@ fn parse_field_values(p: ParseCursor)
     }
 }
 
-fn parse_tuple_values(p: ParseCursor)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_tuple_values(
+    p: ParseCursor
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if parse_at_end(p, 33) {
         p
     } else {
@@ -358,13 +381,15 @@ fn parse_tuple_values(p: ParseCursor)
 
 // Patterns.
 
-fn parse_pattern(p: ParseCursor)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_pattern(
+    p: ParseCursor
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     parse_leave(parse_close(parse_pattern_inner(parse_open(parse_enter(p), 203))), p)
 }
 
-fn parse_pattern_inner(p: ParseCursor)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_pattern_inner(
+    p: ParseCursor
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let n = parse_eat(p, 55);
     let negative = parse_ate(p, n);
     let n = if negative && !parse_at_literal(n) {
@@ -416,8 +441,10 @@ fn parse_pattern_inner(p: ParseCursor)
     }
 }
 
-fn parse_pattern_list(p: ParseCursor, end: i64)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_pattern_list(
+    p: ParseCursor,
+    end: i64
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if parse_at_end(p, end) {
         p
     } else {
@@ -431,8 +458,9 @@ fn parse_pattern_list(p: ParseCursor, end: i64)
     }
 }
 
-fn parse_field_patterns(p: ParseCursor)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_field_patterns(
+    p: ParseCursor
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if parse_at_end(p, 35) {
         p
     } else {
@@ -465,8 +493,10 @@ fn syntax_callee(p: ParseCursor) -> Tok eff [SyntaxMemory, Fail[Diag], Fail[Arit
     }
 }
 
-fn syntax_grouped_name(index: i64, depth: i64)
-    -> Tok eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn syntax_grouped_name(
+    index: i64,
+    depth: i64
+) -> Tok eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let t = syntax_tok(index);
     if depth >= parse_max_depth() {
         fail_tok(Diag::Limit(t.start))
@@ -479,8 +509,11 @@ fn syntax_grouped_name(index: i64, depth: i64)
     }
 }
 
-fn syntax_grouped_close(index: i64, depth: i64, name: Tok)
-    -> Tok eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn syntax_grouped_close(
+    index: i64,
+    depth: i64,
+    name: Tok
+) -> Tok eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if depth == 0 {
         name
     } else if syntax_tok(index).kind == 33 {

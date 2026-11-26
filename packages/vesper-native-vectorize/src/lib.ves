@@ -361,8 +361,13 @@ fn kind_step(kind: u64, known: bool, st: i64, inout out: i64) -> bool {
 // `step`: how much an operation of `j` grows per iteration, when it is
 // affine; whether it is (into `out`). `arg_kinds` holds its arguments'
 // kinds and steps.
-fn step(in f: Func, i: u32, in args: ChunkSeq[u32], in arg_kinds: ArgKinds, inout out: i64)
-    -> bool {
+fn step(
+    in f: Func,
+    i: u32,
+    in args: ChunkSeq[u32],
+    in arg_kinds: ArgKinds,
+    inout out: i64
+) -> bool {
     let row = f.inst(w(i));
     let op = row.op;
     let binary = op == OP_IADD
@@ -1131,8 +1136,14 @@ fn lower(inout f: Func, direction: i64, lanes: u32, e: u32) -> u32 {
 }
 
 // A lane operand: its vector, or the splat of its scalar (made once).
-fn operand(inout f: Func, lanes: u32, in vectors: Map, inout splats: Map, in lane0: Map, v0: u32)
-    -> u32 {
+fn operand(
+    inout f: Func,
+    lanes: u32,
+    in vectors: Map,
+    inout splats: Map,
+    in lane0: Map,
+    v0: u32
+) -> u32 {
     let v = f.resolve(v0);
     let x = vectors.get(v);
     if x != NONE {

@@ -292,8 +292,10 @@ pub fn read_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoErr
 
 // At most the first `limit` bytes of the file at `path` (`Read::take`):
 // no more is read, however long the file is.
-pub fn read_path_limit(in path: Slice[u8], limit: u64)
-    -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+pub fn read_path_limit(
+    in path: Slice[u8],
+    limit: u64
+) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
     let h = open_handle(in path, StdFs::GENERIC_READ, StdFs::OPEN_EXISTING);
     let mut fsize: i64 = 0;
     let (sok, _) = StdFs::GetFileSizeEx(h, inout fsize);
@@ -530,8 +532,10 @@ pub struct Opened {
 // directory is not a regular file. `std` compares no device or inode on
 // Windows, so both are 0; `perm` is the file attributes, which
 // `create_staged` copies as `File::set_permissions` does.
-pub fn read_nofollow_limit(in path: Slice[u8], limit: u64)
-    -> Opened eff [Ffi[StdFs], Fail[IoError]] {
+pub fn read_nofollow_limit(
+    in path: Slice[u8],
+    limit: u64
+) -> Opened eff [Ffi[StdFs], Fail[IoError]] {
     let wpath = utf8_to_utf16(in path);
     let h = match StdFs::CreateFileW(
         in wpath.as_slice(),

@@ -516,8 +516,14 @@ impl Linker {
         Absent::Row
     }
 
-    fn relocate(inout self, in b: Slice[u8], oi: u64, pi: u64, rel: Rel, inout err: ChunkSeq[u8])
-        -> bool {
+    fn relocate(
+        inout self,
+        in b: Slice[u8],
+        oi: u64,
+        pi: u64,
+        rel: Rel,
+        inout err: ChunkSeq[u8]
+    ) -> bool {
         let o = obj_at(in self.objs, oi);
         let on = o.name;
         let oname = b[on.start..add(on.start, on.len)];

@@ -49,8 +49,10 @@ fn seen(conn: Conn, full_pn: u64, hdr: QuicShortHdr) -> Conn {
     }
 }
 
-fn poll_and_step_acked(conns: Conns, now_ns: u64)
-    -> Result[AckStepped, QuicError] eff [XdpNic, Wire, AckPath, Fail[QuicError]] {
+fn poll_and_step_acked(
+    conns: Conns,
+    now_ns: u64
+) -> Result[AckStepped, QuicError] eff [XdpNic, Wire, AckPath, Fail[QuicError]] {
     let headroom = pn_space_left(conns)?;
     match XdpNic::harvest_rx_single() {
         None => Ok(AckStepped { conns: conns, kind: AIdle, retired: 0, largest: 0, cid: 0 }),
@@ -231,8 +233,11 @@ copy struct AckDrained {
     failed: bool
 }
 
-fn drain_acked(budget: u64, conns: Conns, stats: AckStats)
-    -> AckDrained eff [XdpNic, Wire, AckPath, Clock] {
+fn drain_acked(
+    budget: u64,
+    conns: Conns,
+    stats: AckStats
+) -> AckDrained eff [XdpNic, Wire, AckPath, Clock] {
     if budget == 0 {
         AckDrained { conns: conns, stats: stats, failed: false }
     } else {
@@ -272,8 +277,12 @@ fn drain_acked(budget: u64, conns: Conns, stats: AckStats)
     }
 }
 
-fn serve_acked(rounds: u64, idle_timeout_ns: u64, conns: Conns, stats: AckStats)
-    -> AckStats eff [XdpNic, Wire, AckPath, RxWait, Clock] {
+fn serve_acked(
+    rounds: u64,
+    idle_timeout_ns: u64,
+    conns: Conns,
+    stats: AckStats
+) -> AckStats eff [XdpNic, Wire, AckPath, RxWait, Clock] {
     let d = drain_acked(64, conns, stats);
     if d.failed {
         failed_acked(d.stats)

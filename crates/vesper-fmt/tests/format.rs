@@ -449,12 +449,13 @@ fn generics_and_effect_rows_break_inside_their_brackets() {
         output.lines().all(|line| line.chars().count() <= 100),
         "{output}"
     );
-    assert!(output.starts_with("fn id[T: mod linear](x: T)"), "{output}");
+    // The parameter list breaks first, as rustfmt does, and the return type
+    // follows its closing parenthesis.
     assert!(
-        output.contains("\n    -> T eff [\n        Capability0,\n"),
+        output.starts_with("fn id[T: mod linear](\n    x: T\n) -> T eff [\n    Capability0,\n"),
         "{output}"
     );
-    assert!(output.contains("\n    ] {\n    x\n}\n"), "{output}");
+    assert!(output.contains("\n] {\n    x\n}\n"), "{output}");
 }
 
 #[test]
@@ -762,6 +763,30 @@ fn brace_patterns_keep_the_assignment_or_match_arrow() {
     let output = verify("fn f() { let Ticket {} = ticket; match ticket { Ticket {} => 1, } }");
     assert!(output.contains("let Ticket {} = ticket;"), "{output}");
     assert!(output.contains("Ticket {} => 1,"), "{output}");
+}
+
+#[test]
+fn long_signatures_break_their_parameters_like_rustfmt() {
+    assert_eq!(
+        verify(
+            "fn string(in b: Slice[u8], h: Head, base: u64, field: u64, inout w: Slice[u64]) -> u64 eff [Fail[AErr]] { 1 }"
+        ),
+        "fn string(
+    in b: Slice[u8],
+    h: Head,
+    base: u64,
+    field: u64,
+    inout w: Slice[u64]
+) -> u64 eff [Fail[AErr]] {
+    1
+}
+"
+    );
+    // A signature that fits stays on one line, and so does a function type.
+    assert_eq!(
+        verify("fn g(f: fn(u64) -> u64, x: u64) -> u64 { f(x) }"),
+        "fn g(f: fn(u64) -> u64, x: u64) -> u64 {\n    f(x)\n}\n"
+    );
 }
 
 #[test]

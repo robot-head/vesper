@@ -138,8 +138,10 @@ pub fn fp8_encode(e5m2: bool, value: u32) -> u8 eff [Fail[ArithOverflow]] {
 }
 
 // Q4_K (src/formats.rs).
-pub fn q4_k_scale_min(j: u64, in scales: Slice[u8])
-    -> (u8, u8) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn q4_k_scale_min(
+    j: u64,
+    in scales: Slice[u8]
+) -> (u8, u8) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     scale_min(j, in scales)
 }
 
@@ -179,8 +181,9 @@ pub fn make_qkx2_quants(
 }
 
 // One super-block of `QK_K` values: the `Q4_K_BYTES` block bytes.
-pub fn quantize_q4_k_block(in x: Slice[u32])
-    -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn quantize_q4_k_block(
+    in x: Slice[u32]
+) -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     let mut out = ChunkSeq::with_capacity[u8](Q4_K_BYTES);
     let mut s = ChunkSeq::new[u8]();
     for i in u64_zero()..Q4_K_SCRATCH_BYTES {
@@ -195,8 +198,10 @@ pub fn quantize_q4_k_block(in x: Slice[u32])
 }
 
 // Rows of super-blocks; `Fault::Limit` when a scale exceeds binary16.
-pub fn quantize_q4_k(in data: Slice[u32], cols: u64)
-    -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+pub fn quantize_q4_k(
+    in data: Slice[u32],
+    cols: u64
+) -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
     check_rows(in data, cols, QK_K);
     let blocks = data.len() / QK_K;
     let mut out = ChunkSeq::with_capacity[u8](blocks * Q4_K_BYTES);
@@ -249,18 +254,24 @@ pub fn dequantize_q4_0_block(in block: Slice[u8], inout out: Slice[u32]) eff [
     dequantize_q4_0(in block, inout out, 0);
 }
 
-pub fn quantize_mxfp4(in data: Slice[u32], cols: u64)
-    -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+pub fn quantize_mxfp4(
+    in data: Slice[u32],
+    cols: u64
+) -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
     b_quantize_mxfp4(in data, cols)
 }
 
-pub fn quantize_q8_0(in data: Slice[u32], cols: u64)
-    -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+pub fn quantize_q8_0(
+    in data: Slice[u32],
+    cols: u64
+) -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
     b_quantize_q8_0(in data, cols)
 }
 
-pub fn quantize_q4_0(in data: Slice[u32], cols: u64)
-    -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+pub fn quantize_q4_0(
+    in data: Slice[u32],
+    cols: u64
+) -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
     b_quantize_q4_0(in data, cols)
 }
 
@@ -269,8 +280,11 @@ pub fn fp8_scale(in data: Slice[u32], e5m2: bool) -> u32 eff [Fail[RuntimeError]
     to_bits_f32(b_fp8_scale(in data, e5m2))
 }
 
-pub fn fp8_codes(in data: Slice[u32], e5m2: bool, scale: u32)
-    -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn fp8_codes(
+    in data: Slice[u32],
+    e5m2: bool,
+    scale: u32
+) -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     b_fp8_codes(in data, e5m2, from_bits_f32(scale))
 }
 
@@ -283,8 +297,10 @@ pub fn decode_piece(format: u8, scale: u32, in raw: Slice[u8], inout out: Slice[
 }
 
 // `Matrix::from_bytes`: every element or block scale is finite.
-pub fn finite_payload(format: u8, in raw: Slice[u8])
-    -> bool eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn finite_payload(
+    format: u8,
+    in raw: Slice[u8]
+) -> bool eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     b_finite_payload(format, in raw)
 }
 
@@ -354,23 +370,34 @@ pub fn encode_prompt(
 }
 
 // The paged K/V pool (src/kv.rs); see pool.ves for the tables and codes.
-pub fn kv_layout(in config: Slice[u64], inout out: Slice[u64])
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn kv_layout(
+    in config: Slice[u64],
+    inout out: Slice[u64]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     p_kv_layout(in config, inout out)
 }
 
-pub fn kv_len(in slots: Slice[u64], slot: u64, generation: u64, inout out: Slice[u64])
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn kv_len(
+    in slots: Slice[u64],
+    slot: u64,
+    generation: u64,
+    inout out: Slice[u64]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     p_kv_len(in slots, slot, generation, inout out)
 }
 
-pub fn kv_stats(in pages: Slice[u64], in slots: Slice[u64], inout out: Slice[u64])
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn kv_stats(
+    in pages: Slice[u64],
+    in slots: Slice[u64],
+    inout out: Slice[u64]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     p_kv_stats(in pages, in slots, inout out)
 }
 
-pub fn kv_begin(inout slots: Slice[u64], inout out: Slice[u64])
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn kv_begin(
+    inout slots: Slice[u64],
+    inout out: Slice[u64]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     p_kv_begin(inout slots, inout out)
 }
 
@@ -430,8 +457,12 @@ pub fn kv_read_page(
     p_kv_read_page(in pages, in slots, in leases, in cfg, slot, generation, index, inout out)
 }
 
-pub fn kv_checkpoint(in slots: Slice[u64], slot: u64, generation: u64, inout out: Slice[u64])
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn kv_checkpoint(
+    in slots: Slice[u64],
+    slot: u64,
+    generation: u64,
+    inout out: Slice[u64]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     p_kv_checkpoint(in slots, slot, generation, inout out)
 }
 
@@ -483,13 +514,19 @@ pub fn rng_next_f32(seed: u64) -> (u64, u32) eff [Fail[ArithOverflow]] {
     (s, to_bits_f32(v))
 }
 
-pub fn sample_mult(in probs: Slice[u32], coin: u32)
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn sample_mult(
+    in probs: Slice[u32],
+    coin: u32
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     s_sample_mult(in probs, from_bits_f32(coin))
 }
 
-pub fn sample_top_p(in probs: Slice[u32], top_p: u32, coin: u32, inout scratch: Slice[u64])
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn sample_top_p(
+    in probs: Slice[u32],
+    top_p: u32,
+    coin: u32,
+    inout scratch: Slice[u64]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     s_sample_top_p(in probs, from_bits_f32(top_p), from_bits_f32(coin), inout scratch)
 }
 
@@ -780,8 +817,12 @@ fn visible(stored: u64, left: u64) -> u64 {
 }
 
 // Element `i` of a K/V head at byte `at`: little-endian FP32 or BF16.
-fn kv_elem(in storage: Slice[u8], at: u64, i: u64, words: bool)
-    -> f32 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+fn kv_elem(
+    in storage: Slice[u8],
+    at: u64,
+    i: u64,
+    words: bool
+) -> f32 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     if words {
         from_bits_f32(storage.read_u32_le(at + 4 * i))
     } else {
@@ -792,8 +833,14 @@ fn kv_elem(in storage: Slice[u8], at: u64, i: u64, words: bool)
 }
 
 // The scalar kernel's dot product, in element order.
-fn dot_at(in q: Slice[u32], q0: u64, in storage: Slice[u8], at: u64, n: u64, words: bool)
-    -> f32 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+fn dot_at(
+    in q: Slice[u32],
+    q0: u64,
+    in storage: Slice[u8],
+    at: u64,
+    n: u64,
+    words: bool
+) -> f32 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     let mut acc: f32 = 0.0;
     if words {
         for i in u64_zero()..n {
@@ -831,23 +878,36 @@ fn axpy_at(
 }
 
 // The pure checks of src/llama.rs (see llama.ves).
-pub fn llama_validate(in dims: Slice[u64], rope_base: u32, rms_epsilon: u32)
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn llama_validate(
+    in dims: Slice[u64],
+    rope_base: u32,
+    rms_epsilon: u32
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     l_validate(in dims, rope_base, rms_epsilon)
 }
 
-pub fn llama_checkpoint(in b: Slice[u8], rope_base: u32, rms_epsilon: u32, inout out: Slice[u64])
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn llama_checkpoint(
+    in b: Slice[u8],
+    rope_base: u32,
+    rms_epsilon: u32,
+    inout out: Slice[u64]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     l_check_checkpoint(in b, rope_base, rms_epsilon, inout out)
 }
 
-pub fn llama_tokenizer(in b: Slice[u8], vocab: u64, inout out: Slice[u64])
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn llama_tokenizer(
+    in b: Slice[u8],
+    vocab: u64,
+    inout out: Slice[u64]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     l_check_tokenizer(in b, vocab, inout out)
 }
 
-pub fn llama_decode(in piece: Slice[u8], after_bos: bool, inout out: Slice[u64])
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn llama_decode(
+    in piece: Slice[u8],
+    after_bos: bool,
+    inout out: Slice[u64]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     l_decode_piece(in piece, after_bos, inout out)
 }
 

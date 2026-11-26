@@ -61,8 +61,10 @@ pub fn add_secret_region(inout p.{regions}: RedactionPolicy, region: ImageRegion
     0
 }
 
-pub fn add_secret_value(inout p.{secret_buf, secret_spans}: RedactionPolicy, in bytes: Slice[u8])
-    -> u32 {
+pub fn add_secret_value(
+    inout p.{secret_buf, secret_spans}: RedactionPolicy,
+    in bytes: Slice[u8]
+) -> u32 {
     if bytes.len() < min_secret_bytes() {
         return 2;
     }

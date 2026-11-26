@@ -360,8 +360,13 @@ fn field_bytes(n: i64) -> u64 {
 }
 
 // `varint(n)` and then, for n > 0, `data[src..src + n]`.
-fn put_field(inout out: Slice[u8], at: u64, in data: Slice[u8], src: u64, n: i64)
-    -> u64 eff [Fail[RuntimeError]] {
+fn put_field(
+    inout out: Slice[u8],
+    at: u64,
+    in data: Slice[u8],
+    src: u64,
+    n: i64
+) -> u64 eff [Fail[RuntimeError]] {
     let pos = put_uvarint(inout out, at, zigzag(n));
     if n <= 0 {
         return pos;

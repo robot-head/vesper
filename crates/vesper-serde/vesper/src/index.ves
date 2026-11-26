@@ -680,8 +680,12 @@ fn number(inout p: P, in t: Slice[u8]) -> Unit eff [Fail[Error]] {
     }
 }
 
-fn string(inout p: P, inout toks: ChunkSeq[Token], in t: Slice[u8], index: u64)
-    -> Unit eff [Fail[Error]] {
+fn string(
+    inout p: P,
+    inout toks: ChunkSeq[Token],
+    in t: Slice[u8],
+    index: u64
+) -> Unit eff [Fail[Error]] {
     expect(inout p, in t, Ascii::Quote);
     let mut decoded: u64 = 0;
     let mut escaped = false;
@@ -793,8 +797,12 @@ fn container(
     }
 }
 
-fn value(inout p: P, inout toks: ChunkSeq[Token], in t: Slice[u8], depth: u64)
-    -> Unit eff [Fail[Error]] {
+fn value(
+    inout p: P,
+    inout toks: ChunkSeq[Token],
+    in t: Slice[u8],
+    depth: u64
+) -> Unit eff [Fail[Error]] {
     let b = at(in t, p.pos);
     let kind = if b == Ascii::LowerN {
         Kind::Null
@@ -900,8 +908,13 @@ pub fn parse_document(inout doc: Doc, in input: Slice[u8], lim: Limits) -> Unit 
 // `Node::field`: schema-directed lookup with its own work allowance.
 // -------------------------------------------------------------------
 
-pub fn field_lookup(in doc: Doc, in input: Slice[u8], index: u64, in key: Slice[u8], max_work: u64)
-    -> Option[u64] eff [Fail[Error]] {
+pub fn field_lookup(
+    in doc: Doc,
+    in input: Slice[u8],
+    index: u64,
+    in key: Slice[u8],
+    max_work: u64
+) -> Option[u64] eff [Fail[Error]] {
     let obj = tok(in doc.tokens, index);
     if obj.kind != Kind::Object {
         raise(ErrorKind::Type, obj.start);

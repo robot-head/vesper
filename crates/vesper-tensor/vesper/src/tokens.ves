@@ -236,8 +236,11 @@ fn heap_push(
 
 // Removes the top entry (copied to `heap - 4 ..`, the scratch entry) and
 // returns the new count.
-fn heap_pop(inout w: Slice[u64], heap: u64, count: u64)
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+fn heap_pop(
+    inout w: Slice[u64],
+    heap: u64,
+    count: u64
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     move_entry(inout w, heap - 4, heap);
     let n = count - 1;
     if n == 0 {

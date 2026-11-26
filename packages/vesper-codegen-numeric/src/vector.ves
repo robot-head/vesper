@@ -273,8 +273,13 @@ fn vx_zero_chunk(inout b: Builder, ty: u32) -> Value eff [Ffi[Cranelift]] {
     ins_vconst(inout b, vty(ty), in zeros.as_slice())
 }
 
-fn vx_load_chunks(inout b: Builder, ptr: Value, e: u32, lanes: u32, mask: bool)
-    -> ChunkSeq[u32] eff [Ffi[Cranelift]] {
+fn vx_load_chunks(
+    inout b: Builder,
+    ptr: Value,
+    e: u32,
+    lanes: u32,
+    mask: bool
+) -> ChunkSeq[u32] eff [Ffi[Cranelift]] {
     let ty = if mask {
         mask_chunk_ty(e)
     } else {
@@ -289,8 +294,13 @@ fn vx_load_chunks(inout b: Builder, ptr: Value, e: u32, lanes: u32, mask: bool)
     out
 }
 
-fn vx_store_chunks(inout b: Builder, in m: Module, e: u32, lanes: u32, in chunks: Slice[u32])
-    -> Value eff [Ffi[Cranelift]] {
+fn vx_store_chunks(
+    inout b: Builder,
+    in m: Module,
+    e: u32,
+    lanes: u32,
+    in chunks: Slice[u32]
+) -> Value eff [Ffi[Cranelift]] {
     // The chunks write every byte of the vector.
     let ptr = vx_alloc(inout b, in m, shape_bytes(e, lanes), false);
     for c in 0..chunks.len() {
@@ -342,8 +352,13 @@ fn vx_less(e: u32) -> u32 {
     }
 }
 
-fn vx_binary_chunk(inout b: Builder, op: u32, e: u32, x: Value, y: Value)
-    -> Value eff [Ffi[Cranelift]] {
+fn vx_binary_chunk(
+    inout b: Builder,
+    op: u32,
+    e: u32,
+    x: Value,
+    y: Value
+) -> Value eff [Ffi[Cranelift]] {
     if elem_is_float(e) {
         return if op == B_ADD {
             ins_binary(inout b, Bin::Fadd, x, y)
@@ -431,8 +446,13 @@ fn vx_float_cc(op: u32) -> u32 {
     }
 }
 
-fn vx_reduce_step(inout b: Builder, op: u32, e: u32, a: Value, x: Value)
-    -> Value eff [Ffi[Cranelift]] {
+fn vx_reduce_step(
+    inout b: Builder,
+    op: u32,
+    e: u32,
+    a: Value,
+    x: Value
+) -> Value eff [Ffi[Cranelift]] {
     if elem_is_float(e) {
         return if op == RD_MIN {
             ins_binary(inout b, Bin::Fmin, a, x)
@@ -491,8 +511,14 @@ fn vx_available(inout b: Builder, offset: Value, len: Value) -> Value eff [Ffi[C
 }
 
 // The mask of lanes `i` with `offset + i < len`.
-fn vx_active(inout b: Builder, in m: Module, offset: Value, len: Value, e: u32, lanes: u32)
-    -> Value eff [Ffi[Cranelift]] {
+fn vx_active(
+    inout b: Builder,
+    in m: Module,
+    offset: Value,
+    len: Value,
+    e: u32,
+    lanes: u32
+) -> Value eff [Ffi[Cranelift]] {
     let available = vx_available(inout b, offset, len);
     // Clamp to the lane count so the bound fits every lane type.
     let n = ins_iconst(inout b, vx_i64(), widen_i64(lanes));
@@ -526,8 +552,14 @@ fn vx_active(inout b: Builder, in m: Module, offset: Value, len: Value, e: u32, 
 }
 
 // `Vec::load_masked[u8, N](s, offset)`.
-fn vx_load_masked(inout b: Builder, in m: Module, string: Value, offset: Value, e: u32, lanes: u32)
-    -> Value eff [Ffi[Cranelift]] {
+fn vx_load_masked(
+    inout b: Builder,
+    in m: Module,
+    string: Value,
+    offset: Value,
+    e: u32,
+    lanes: u32
+) -> Value eff [Ffi[Cranelift]] {
     let result = vx_alloc(inout b, in m, shape_bytes(e, lanes), true);
     let len = ins_load(inout b, vx_i64(), MF_PLAIN, string, 0);
     let available = vx_available(inout b, offset, len);
@@ -637,8 +669,14 @@ fn vx_well_formed(call: u64, i: u32, e: u32, lanes: u32) -> bool eff [Ffi[Cranel
 }
 
 // Emit the operation and answer its value.
-fn vx_emit(call: u64, inout b: Builder, in m: Module, i: u32, e: u32, lanes: u32)
-    -> Value eff [Ffi[Cranelift]] {
+fn vx_emit(
+    call: u64,
+    inout b: Builder,
+    in m: Module,
+    i: u32,
+    e: u32,
+    lanes: u32
+) -> Value eff [Ffi[Cranelift]] {
     let family = family_of(i);
     let sub = op_of(i);
     let per = widen_u64(lanes_per_chunk(e));

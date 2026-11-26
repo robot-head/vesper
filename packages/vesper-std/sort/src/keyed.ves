@@ -457,8 +457,12 @@ test {
     // @case extra_keys(in "bac!", in "012", in "abc!", in "102")
     // @case extra_values(in "bac", in "012!", in "abc", in "102!")
     // @case empty_common_prefix(in "", in "012", in "", in "012")
-    fn test_sort_pairs(in keys: Str, in values: Str, in expected_keys: Str, in expected_values: Str)
-        -> bool {
+    fn test_sort_pairs(
+        in keys: Str,
+        in values: Str,
+        in expected_keys: Str,
+        in expected_values: Str
+    ) -> bool {
         let mut ks = ChunkSeq::new[u8]();
         let mut vs = ChunkSeq::new[u8]();
         ks.extend(in keys.as_bytes());

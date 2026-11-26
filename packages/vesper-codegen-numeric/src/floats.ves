@@ -90,8 +90,12 @@ fn is_f32(inout b: Builder, v: Value) -> bool eff [Ffi[Cranelift]] {
 
 // `float_const(ty, x)` for the constants above: `f32const` of the `f32`
 // bits when `v` is an `f32`, else `f64const`.
-fn float_const_like(inout b: Builder, v: Value, bits32: u32, bits64: u64)
-    -> Value eff [Ffi[Cranelift]] {
+fn float_const_like(
+    inout b: Builder,
+    v: Value,
+    bits32: u32,
+    bits64: u64
+) -> Value eff [Ffi[Cranelift]] {
     if is_f32(inout b, v) {
         ins_f32const(inout b, bits32)
     } else {

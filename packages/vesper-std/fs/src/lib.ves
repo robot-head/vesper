@@ -162,8 +162,10 @@ pub fn read_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoErr
 
 // At most the first `limit` bytes of the file at `path` (`Read::take`):
 // no more is read, however long the file is.
-pub fn read_path_limit(in path: Slice[u8], limit: u64)
-    -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+pub fn read_path_limit(
+    in path: Slice[u8],
+    limit: u64
+) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
     let mut err: u64 = 0;
     let fd = os_open(in path, mode_read(), inout err);
     if fd < 0 {
@@ -399,8 +401,10 @@ pub struct Opened {
 // `O_NOFOLLOW | O_NONBLOCK` (`FILE_FLAG_OPEN_REPARSE_POINT` on Windows)
 // and `Read::take`. Nothing is read when the open file is not a regular
 // file or is at least `limit` bytes long: the caller decides from `id`.
-pub fn read_nofollow_limit(in path: Slice[u8], limit: u64)
-    -> Opened eff [Ffi[StdFs], Fail[IoError]] {
+pub fn read_nofollow_limit(
+    in path: Slice[u8],
+    limit: u64
+) -> Opened eff [Ffi[StdFs], Fail[IoError]] {
     let mut err: u64 = 0;
     let fd = os_open_nofollow(in path, inout err);
     if fd < 0 {

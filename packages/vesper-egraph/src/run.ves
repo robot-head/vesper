@@ -314,8 +314,14 @@ fn root_has_leaf(in g: EGraph, root: u32, c: Config) -> bool {
 }
 
 // One iteration of egg's `Runner::run_one`; 0 to go on, else a STOP_*.
-fn run_one(inout g: EGraph, in rules: Rules, c: Config, root: u32, done: u64, inout rec: Records)
-    -> u8 {
+fn run_one(
+    inout g: EGraph,
+    in rules: Rules,
+    c: Config,
+    root: u32,
+    done: u64,
+    inout rec: Records
+) -> u8 {
     if g.memo_len() > c.node_limit {
         return STOP_NODES;
     }
@@ -374,8 +380,13 @@ fn run_one(inout g: EGraph, in rules: Rules, c: Config, root: u32, done: u64, in
 
 // egg's `Runner::run` from a graph holding the root's expression. Returns
 // why it stopped and how many iterations ran (egg's `iterations.len()`).
-pub fn run_egg(inout g: EGraph, in rules: Rules, c: Config, root: u32, inout rec: Records)
-    -> (u8, u64) {
+pub fn run_egg(
+    inout g: EGraph,
+    in rules: Rules,
+    c: Config,
+    root: u32,
+    inout rec: Records
+) -> (u8, u64) {
     g.rebuild();
     let mut iters: u64 = 0;
     loop {

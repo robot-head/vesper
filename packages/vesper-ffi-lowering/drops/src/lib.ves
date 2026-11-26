@@ -191,8 +191,13 @@ fn fn_value_type(in p: Program, nv_op: u64, v: u32) -> u32 {
     NONE32
 }
 
-fn fn_local_or_param_type(in p: Program, np: u64, params_op: u64, locals_op: u64, name: u32)
-    -> u32 {
+fn fn_local_or_param_type(
+    in p: Program,
+    np: u64,
+    params_op: u64,
+    locals_op: u64,
+    name: u32
+) -> u32 {
     // locals first (matches drops.rs:324-327)
     let nl = p.op(locals_op);
     for i in 0..nl {
@@ -663,8 +668,13 @@ fn release_wildcards(
 
 // ----- refuse_unplaced --------------------------------------------------------
 
-fn wild_handle(inout c: Ctx, in p: Program, start_pos: u64, ty: u32, in handles: ChunkSeq[u32])
-    -> (bool, u64) {
+fn wild_handle(
+    inout c: Ctx,
+    in p: Program,
+    start_pos: u64,
+    ty: u32,
+    in handles: ChunkSeq[u32]
+) -> (bool, u64) {
     let mut pos = start_pos;
     let kind = n32(p.op(pos));
     pos = add(pos, 3);
@@ -1502,8 +1512,14 @@ fn drop_callees_of(
 
 // ----- harness entry ----------------------------------------------------------
 
-fn read_drop_item(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program, blk: u64, at: u64)
-    -> DropItem {
+fn read_drop_item(
+    inout r: Reader,
+    in b: Slice[u8],
+    in c: Ctx,
+    inout p: Program,
+    blk: u64,
+    at: u64
+) -> DropItem {
     let kind = wrapping_u8(r.word(in b));
     if kind == 0 {
         let v = n32(r.word(in b));

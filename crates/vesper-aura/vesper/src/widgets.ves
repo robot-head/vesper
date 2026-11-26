@@ -13,8 +13,13 @@ use self::util::{dec, inc, op};
 const EV_CREATED: u64 = 1;
 const EV_DESTROYED: u64 = 2;
 
-pub fn patch_set_root(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in text: Slice[u8])
-    -> Option[BackendFault] {
+pub fn patch_set_root(
+    inout s: RState,
+    lim: Lim,
+    in w: Slice[u64],
+    base: u64,
+    in text: Slice[u8]
+) -> Option[BackendFault] {
     let has = word(in w, base, 1) == 1;
     let root = word(in w, base, 3);
     if has {
@@ -48,8 +53,13 @@ pub fn patch_set_root(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in
     )
 }
 
-pub fn patch_create(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in text: Slice[u8])
-    -> Option[BackendFault] {
+pub fn patch_create(
+    inout s: RState,
+    lim: Lim,
+    in w: Slice[u64],
+    base: u64,
+    in text: Slice[u8]
+) -> Option[BackendFault] {
     let serial = word(in w, base, 2);
     match allocate(inout s, word(in w, base, 1), serial) {
         Option::Some(f) => {
@@ -76,8 +86,13 @@ pub fn patch_create(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in t
     record(inout s, lim, op(EV_CREATED, serial, 0, 0, 0))
 }
 
-pub fn patch_destroy(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in text: Slice[u8])
-    -> Option[BackendFault] {
+pub fn patch_destroy(
+    inout s: RState,
+    lim: Lim,
+    in w: Slice[u64],
+    base: u64,
+    in text: Slice[u8]
+) -> Option[BackendFault] {
     if !session_ok(in s, word(in w, base, 1)) {
         return foreign();
     }

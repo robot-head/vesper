@@ -658,8 +658,13 @@ fn is_bound(in bound: ChunkSeq[u32], s: u32) -> bool {
 }
 
 // One instruction of the instance `name` (arguments `vars`): its new row.
-fn instruction(inout m: Mo, i: InstRow, name: u32, in vars: Vars, in bound: ChunkSeq[u32])
-    -> InstRow eff [Fail[VErr]] {
+fn instruction(
+    inout m: Mo,
+    i: InstRow,
+    name: u32,
+    in vars: Vars,
+    in bound: ChunkSeq[u32]
+) -> InstRow eff [Fail[VErr]] {
     let generic = vars.keys.len() != 0;
     let mut row = i;
     if generic {

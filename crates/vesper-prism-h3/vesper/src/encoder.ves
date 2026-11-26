@@ -115,8 +115,12 @@ fn limit(in e: EncoderCore, may_block: bool) -> u64 {
 }
 
 // The newest entry below the limit with this name and value.
-fn dynamic_exact(in e: EncoderCore, in name: Slice[u8], in value: Slice[u8], may_block: bool)
-    -> Option[u64] {
+fn dynamic_exact(
+    in e: EncoderCore,
+    in name: Slice[u8],
+    in value: Slice[u8],
+    may_block: bool
+) -> Option[u64] {
     let first = table_first(in e.table);
     let mut abs = limit(in e, may_block);
     loop {
@@ -147,8 +151,12 @@ fn dynamic_name(in e: EncoderCore, in name: Slice[u8], may_block: bool) -> Optio
 
 // Inserts an entry if it is small enough and every entry it evicts is
 // acknowledged and unreferenced, writing the insert instruction.
-fn try_insert(inout e: EncoderCore, in h: Huff, in name: Slice[u8], in value: Slice[u8])
-    -> Option[u64] {
+fn try_insert(
+    inout e: EncoderCore,
+    in h: Huff,
+    in name: Slice[u8],
+    in value: Slice[u8]
+) -> Option[u64] {
     let size = wrapping_add(wrapping_add(name.len(), value.len()), ENTRY_OVERHEAD);
     if wrapping_mul(size, ENTRY_SHARE_SCALE)
         > wrapping_mul(e.table.capacity, e.cfg.max_entry_share) {
@@ -447,8 +455,10 @@ fn fail(inout e: EncoderCore, r: Reason) -> Result[Unit, QpackError] {
 
 // `Encoder::on_decoder_stream`: Section Acknowledgment, Stream
 // Cancellation and Insert Count Increment (RFC 9204 §4.4).
-pub fn enc_on_decoder_stream(inout e: EncoderCore, in bytes: Slice[u8])
-    -> Result[Unit, QpackError] {
+pub fn enc_on_decoder_stream(
+    inout e: EncoderCore,
+    in bytes: Slice[u8]
+) -> Result[Unit, QpackError] {
     match e.failed {
         Option::Some(err) => {
             return Result::Err(err);

@@ -47,8 +47,13 @@ fn charge(inout work: u64) -> bool {
 // `GuestAuthorization::permits` over `(start, end, access)` triples sorted
 // by start, access 0 = read, 1 = write, 2 = read-write. Returns 0 when
 // permitted, 1 for `Limit` and 2 for `UnauthorizedRange`.
-fn packed_permits(in regions: Slice[u64], start: u64, end: u64, write: bool, inout work: u64)
-    -> u64 {
+fn packed_permits(
+    in regions: Slice[u64],
+    start: u64,
+    end: u64,
+    write: bool,
+    inout work: u64
+) -> u64 {
     let mut lo: u64 = 0;
     let mut hi = regions.len() / 3;
     loop {

@@ -140,8 +140,14 @@ fn push_path(inout out: ChunkSeq[u64], in pp: ChunkSeq[u64], in pi: ChunkSeq[u64
     }
 }
 
-pub fn requirements(in g: Slice[u64], op_kind: u64, op_a: u64, op_b: u64, op_c: u64, op_d: u64)
-    -> ChunkSeq[u64] {
+pub fn requirements(
+    in g: Slice[u64],
+    op_kind: u64,
+    op_a: u64,
+    op_b: u64,
+    op_c: u64,
+    op_d: u64
+) -> ChunkSeq[u64] {
     let mut out = ChunkSeq::new[u64]();
     if op_kind == 2 {
         out.push(1);

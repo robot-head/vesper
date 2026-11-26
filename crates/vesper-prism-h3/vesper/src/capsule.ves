@@ -146,8 +146,11 @@ pub fn valid_utf8(in s: Slice[u8]) -> bool {
     }
 }
 
-pub fn parse_value(ty: u64, in v: Slice[u8], inout out: ChunkSeq[u8])
-    -> Result[CapsuleOut, CapsuleError] {
+pub fn parse_value(
+    ty: u64,
+    in v: Slice[u8],
+    inout out: ChunkSeq[u8]
+) -> Result[CapsuleOut, CapsuleError] {
     if ty == datagram_type() {
         out.extend(in v);
         return Result::Ok(CapsuleOut::Datagram);

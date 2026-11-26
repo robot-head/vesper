@@ -747,8 +747,13 @@ fn transfer(inout f: ChunkSeq[u64], in r: Lir) {
 }
 
 // `checkJump`: an unknown label is the modelled unreachable abort.
-fn check_jump(in t: FlatTable[u64, u64], in c: Cert, f: u64, in facts: ChunkSeq[u64], l: u64)
-    -> bool {
+fn check_jump(
+    in t: FlatTable[u64, u64],
+    in c: Cert,
+    f: u64,
+    in facts: ChunkSeq[u64],
+    l: u64
+) -> bool {
     let target = label_row(in t, f, l);
     if target == MISSING {
         return true;
