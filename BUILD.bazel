@@ -435,6 +435,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Stage 2 retirement (#2053): @vesper/run against `Runtime::run`
+        # over the same corpus.
+        "test/self_host_run": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # SH3 lane 13 (#1252): @vesper/place-ir-lower against
         # `ir::lower_world` over the same corpus.
         "test/self_host_ir_lower": glob([
@@ -1253,6 +1260,8 @@ vesper_crate(
         "test/self_host_codegen_export": "long",
         "test/self_host_place_ir_jit": "long",
         "test/self_host_ir_lower": "long",
+        # Every runnable corpus world under six fuel and optimizer settings.
+        "test/self_host_run": "long",
         # The eBPF backend differential (#1290) loads every corpus world.
         "test/self_host_ebpf_backend": "long",
         "test/self_host_codegen_calls": "long",
@@ -1660,6 +1669,19 @@ vesper_package(
     manifest = "packages/vesper-place-ir/Loom.toml",
     visibility = ["//visibility:public"],
     deps = [":check_data_package"],
+)
+
+# The `vesper run` evaluator for the hybrid compiler's run module (Stage 2
+# retirement, #2053).
+vesper_package(
+    name = "run_package",
+    srcs = glob(["packages/vesper-run/src/**/*.ves"]),
+    manifest = "packages/vesper-run/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":place_ir_package",
+    ],
 )
 
 # The scalar lowering's plan and emission for the hybrid compiler's

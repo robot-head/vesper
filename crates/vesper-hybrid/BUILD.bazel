@@ -286,6 +286,12 @@ vesper_hybrid(
             "//:check_data_package",
             "//:place_ir_package",
         ],
+        # The `vesper run` evaluator (#2053) builds on @vesper/run.
+        "hybrid_run": [
+            "//:check_data_package",
+            "//:place_ir_package",
+            "//:run_package",
+        ],
         # The stack-bound swap (#1182) builds on @vesper/check-loops-atomics.
         "hybrid_stack_bound": [
             "//:check_data_package",
@@ -388,6 +394,8 @@ vesper_hybrid(
         "test/codegen_export": "long",
         "test/differential": "long",
         "test/driver_front": "long",
+        # Every examples/ and tests/fixtures/ program, four runs each.
+        "test/run": "long",
         "test/driver_packages": "long",
     },
     test_path_binaries = {
@@ -442,6 +450,8 @@ vesper_hybrid(
             ":bin/vesper-hybrid",
             "//:bin/vesper",
         ],
+        # The `run` swap (#2053) with and without the Vesper evaluator.
+        "test/run": [":bin/vesper-hybrid"],
         # SH4 lane 2 (#1276): the hybrid's own cost report.
         "test/swap_inputs": [":bin/vesper-hybrid"],
         # SH5 lane 10 (#1333): the shared-world cost report.
