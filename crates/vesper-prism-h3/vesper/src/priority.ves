@@ -501,13 +501,11 @@ pub fn priority_update_parse(ty: u64, in payload: Slice[u8]) -> Result[PriorityU
             return Result::Err(FrameError::Malformed);
         }
     }
-    Result::Ok(
-        PriorityUpdate {
-            push: ty == priority_update_push(),
-            element_id: n.value,
-            priority: priority_parse_value(in payload[n_used..payload.len()])
-        }
-    )
+    Result::Ok(PriorityUpdate {
+        push: ty == priority_update_push(),
+        element_id: n.value,
+        priority: priority_parse_value(in payload[n_used..payload.len()])
+    })
 }
 
 pub fn priority_update_write(u: PriorityUpdate, inout out: ChunkSeq[u8]) -> bool {

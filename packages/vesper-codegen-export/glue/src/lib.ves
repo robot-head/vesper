@@ -294,10 +294,7 @@ fn glue(inout m: Module, in i: Iface, flags: u64) eff [Ffi[Cranelift]] {
             let mut fb = b;
             let mut total = zero(inout fb);
             for k in 0..counters.len() {
-                let id = match counters.try_get(k) {
-                    Option::Some(x) => x,
-                    Option::None => 0,
-                };
+                let id = counters.try_get(k).unwrap_or(0);
                 let data = import_data(inout fb, in m, DataId { id: id });
                 let address = ins_symbol_value(inout fb, ty_i64(), data);
                 let value = ins_atomic_load(inout fb, ty_i64(), mem_trusted(), address);
@@ -353,10 +350,7 @@ fn glue(inout m: Module, in i: Iface, flags: u64) eff [Ffi[Cranelift]] {
 }
 
 fn drop_fn(in drops: ChunkSeq[u32], d: u64) -> u32 {
-    match drops.try_get(d) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    drops.try_get(d).unwrap_or(0)
 }
 
 // Whether variant `v` has a field that owns something.
@@ -567,10 +561,7 @@ fn interface_bytes(in args: ChunkSeq[u64]) -> ChunkSeq[u8] {
     let n = args.len();
     let mut o = ChunkSeq::with_capacity[u8](wrapping_mul(n, WORD));
     for k in 1..n {
-        let x = match args.try_get(k) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let x = args.try_get(k).unwrap_or(0);
         let mut y = x;
         for _ in 0..8 {
             o.push(wrapping_u8(y & 255));
@@ -585,10 +576,7 @@ fn interface_bytes(in args: ChunkSeq[u64]) -> ChunkSeq[u8] {
 // Rust glue then reports that), before emitting anything.
 pub fn export_glue(call: u64) -> u64 eff [Ffi[Cranelift]] {
     let args = call_args(call);
-    let flags = match args.try_get(0) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    };
+    let flags = args.try_get(0).unwrap_or(0);
     let bytes = interface_bytes(in args);
     let i = read_iface(in bytes.as_slice());
     match call_module(call) {

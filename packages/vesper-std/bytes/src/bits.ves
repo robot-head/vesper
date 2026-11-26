@@ -1,0 +1,88 @@
+// Pack named unsigned fields, most significant first, into the low bits
+// of one u64. Names document the layout; the widths are in bits.
+//
+// bits{ version: 4 = 4, length: 12 = n } produces Some(0x4000 | n)
+// when n fits. Returns None for a zero width, total width above 64, or
+// a value that does not fit. Never truncates a field or allocates.
+// Width and value expressions run once, left to right, up to and
+// including the first invalid field. An empty layout produces Some(0).
+pub sugar bits: tag {
+    rule (bits{ $($field:ident: $width:expr = $value:expr),* }) => {
+        {
+            let mut packed: Option[PackedBits] = Option::Some(
+                PackedBits {
+                    word: 0,
+                    used: 0
+                }
+            );
+            $(
+                packed = match packed {
+                    Option::Some(previous) => append_field(previous, $width, $value),
+                    Option::None => Option::None,
+                };
+            )* match packed {
+                Option::Some(result) => Option::Some(result.word),
+                Option::None => Option::None,
+            }
+        }
+    }
+}
+
+copy struct PackedBits {
+    word: u64,
+    used: u64,
+}
+
+fn append_field(previous: PackedBits, width: u64, value: u64) -> Option[PackedBits] {
+    if width == 0 || width > wrapping_sub(64, previous.used) {
+        return Option::None;
+    }
+    if width == 64 {
+        return Option::Some(PackedBits { word: value, used: 64 });
+    }
+    let shift = wrapping_u32(width);
+    if wrapping_shr_u64(value, shift) != 0 {
+        return Option::None;
+    }
+    Option::Some(PackedBits {
+        word: wrapping_shl_u64(previous.word, shift) | value,
+        used: wrapping_add(previous.used, width)
+    })
+}
+
+test {
+    // @case typical(0xabc, Option::Some(0x4abc))
+    // @case max_length(4095, Option::Some(0x4fff))
+    // @case overflow(4096, Option::None)
+    fn header_fields(length: u64, expected: Option[u64]) -> bool {
+        bits{ version: 4 = 4, length: 12 = length } == expected
+    }
+
+    // @case edge_widths()
+    fn accepts_full_words_and_rejects_invalid_widths() -> bool {
+        let all: u64 = 0xffffffffffffffff;
+        bits{} == Option::Some(0)
+            && bits{ full: 64 = all } == Option::Some(all)
+            && bits{ hi: 1 = 1, rest: 63 = 0x7fffffffffffffff } == Option::Some(all)
+            && bits{ zero: 0 = 0 } == Option::None
+            && bits{ hi: 1 = 0, rest: 64 = 0 } == Option::None
+            && bits{ huge: 0xffffffffffffffff = 0 } == Option::None
+    }
+
+    fn record(inout log: u64, digit: u64) -> u64 {
+        log = wrapping_add(wrapping_mul(log, 10), digit);
+        digit
+    }
+
+    // @case success(3, Option::Some(255), 33234)
+    // @case first_failure(1, Option::None, 13)
+    fn evaluation_order(width: u64, expected: Option[u64], trace: u64) -> bool {
+        let mut log: u64 = 0;
+        let packed = bits{
+            first: record(inout log, width) = record(inout log, 3),
+            second: record(inout log, 2) = record(inout log, 3),
+            third: record(inout log, 4) = 15
+        };
+        packed == expected && log == trace
+    }
+}

@@ -80,7 +80,7 @@ const PASS_IN: u8 = 0;
 // The walk's state.
 pub struct W {
     // types: kind, name symbol, items ti[ta..ta+tn]
-    tk: ChunkSeq[u8],
+    ty_kinds: ChunkSeq[u8],
     tname: ChunkSeq[u32],
     ta: ChunkSeq[u64],
     tn: ChunkSeq[u64],
@@ -99,8 +99,8 @@ pub struct W {
     // the source functions and methods that may perform `Ffi`
     foreign: ChunkSeq[u32],
     // scopes: bindings (name, type), and each scope's first binding
-    sn: ChunkSeq[u32],
-    st: ChunkSeq[u32],
+    bind_names: ChunkSeq[u32],
+    bind_tys: ChunkSeq[u32],
     marks: ChunkSeq[u64],
     // the first error: its span and message
     has_err: bool,
@@ -121,72 +121,72 @@ pub struct W {
     keeps: ChunkSeq[u32],
 }
 
-fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
-    s.try_get(i).unwrap_or(NONE)
+fn u32_at(in seq: ChunkSeq[u32], i: u64) -> u32 {
+    seq.try_get(i).unwrap_or(NONE)
 }
 
-fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
-    s.try_get(i).unwrap_or(0)
+fn u64_at(in seq: ChunkSeq[u64], i: u64) -> u64 {
+    seq.try_get(i).unwrap_or(0)
 }
 
-fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
-    s.try_get(i).unwrap_or(0)
+fn u8_at(in seq: ChunkSeq[u8], i: u64) -> u8 {
+    seq.try_get(i).unwrap_or(0)
 }
 
 fn w64(x: u32) -> u64 {
     widen_u64(x)
 }
 
-fn has32(in s: ChunkSeq[u32], x: u32) -> bool {
-    for i in 0..s.len() {
-        if u32_at(in s, i) == x {
+fn has32(in seq: ChunkSeq[u32], x: u32) -> bool {
+    for i in 0..seq.len() {
+        if u32_at(in seq, i) == x {
             return true;
         }
     }
     false
 }
 
-// Interns `t` into the tree's names.
-fn sym(inout a: Ast, in t: Str) -> u32 {
-    a.names.intern(in t).id()
+// Interns `text` into the tree's names.
+fn sym(inout ast: Ast, in text: Str) -> u32 {
+    ast.names.intern(in text).id()
 }
 
-// A new walk over `a`, whose names gain the symbols it compares with.
-pub fn w_new(inout a: Ast) -> W {
+// A new walk over `ast`, whose names gain the symbols it compares with.
+pub fn w_new(inout ast: Ast) -> W {
     let mut keeps: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    keeps.push(sym(inout a, in "len"));
-    keeps.push(sym(inout a, in "address"));
-    keeps.push(sym(inout a, in "get"));
-    keeps.push(sym(inout a, in "set"));
-    keeps.push(sym(inout a, in "try_get"));
-    keeps.push(sym(inout a, in "try_set"));
-    keeps.push(sym(inout a, in "try_get_mut"));
-    keeps.push(sym(inout a, in "try_atomic_load"));
-    keeps.push(sym(inout a, in "try_atomic_load_u32"));
-    keeps.push(sym(inout a, in "try_atomic_load_u64"));
-    keeps.push(sym(inout a, in "try_atomic_store"));
-    keeps.push(sym(inout a, in "try_atomic_store_u32"));
-    keeps.push(sym(inout a, in "try_atomic_store_u64"));
-    keeps.push(sym(inout a, in "as_slice"));
-    keeps.push(sym(inout a, in "as_slice_mut"));
-    keeps.push(sym(inout a, in "copy_from"));
-    keeps.push(sym(inout a, in "try_copy_from"));
-    keeps.push(sym(inout a, in "copy_within"));
-    keeps.push(sym(inout a, in "try_copy_within"));
-    keeps.push(sym(inout a, in "fill"));
-    keeps.push(sym(inout a, in "try_fill"));
-    keeps.push(sym(inout a, in "swap"));
-    keeps.push(sym(inout a, in "sum_be16"));
-    keeps.push(sym(inout a, in "eq"));
-    keeps.push(sym(inout a, in "cmp"));
-    keeps.push(sym(inout a, in "find_byte"));
-    keeps.push(sym(inout a, in "find_either"));
-    keeps.push(sym(inout a, in "find_not_in"));
-    keeps.push(sym(inout a, in "eq_ignore_ascii_case"));
-    keeps.push(sym(inout a, in "make_ascii_lowercase"));
-    keeps.push(sym(inout a, in "try_make_ascii_lowercase"));
-    let mut w = W {
-        tk: ChunkSeq::new[u8](),
+    keeps.push(sym(inout ast, in "len"));
+    keeps.push(sym(inout ast, in "address"));
+    keeps.push(sym(inout ast, in "get"));
+    keeps.push(sym(inout ast, in "set"));
+    keeps.push(sym(inout ast, in "try_get"));
+    keeps.push(sym(inout ast, in "try_set"));
+    keeps.push(sym(inout ast, in "try_get_mut"));
+    keeps.push(sym(inout ast, in "try_atomic_load"));
+    keeps.push(sym(inout ast, in "try_atomic_load_u32"));
+    keeps.push(sym(inout ast, in "try_atomic_load_u64"));
+    keeps.push(sym(inout ast, in "try_atomic_store"));
+    keeps.push(sym(inout ast, in "try_atomic_store_u32"));
+    keeps.push(sym(inout ast, in "try_atomic_store_u64"));
+    keeps.push(sym(inout ast, in "as_slice"));
+    keeps.push(sym(inout ast, in "as_slice_mut"));
+    keeps.push(sym(inout ast, in "copy_from"));
+    keeps.push(sym(inout ast, in "try_copy_from"));
+    keeps.push(sym(inout ast, in "copy_within"));
+    keeps.push(sym(inout ast, in "try_copy_within"));
+    keeps.push(sym(inout ast, in "fill"));
+    keeps.push(sym(inout ast, in "try_fill"));
+    keeps.push(sym(inout ast, in "swap"));
+    keeps.push(sym(inout ast, in "sum_be16"));
+    keeps.push(sym(inout ast, in "eq"));
+    keeps.push(sym(inout ast, in "cmp"));
+    keeps.push(sym(inout ast, in "find_byte"));
+    keeps.push(sym(inout ast, in "find_either"));
+    keeps.push(sym(inout ast, in "find_not_in"));
+    keeps.push(sym(inout ast, in "eq_ignore_ascii_case"));
+    keeps.push(sym(inout ast, in "make_ascii_lowercase"));
+    keeps.push(sym(inout ast, in "try_make_ascii_lowercase"));
+    let mut walk = W {
+        ty_kinds: ChunkSeq::new[u8](),
         tname: ChunkSeq::new[u32](),
         ta: ChunkSeq::new[u64](),
         tn: ChunkSeq::new[u64](),
@@ -199,36 +199,36 @@ pub fn w_new(inout a: Ast) -> W {
         eff_name: ChunkSeq::new[u32](),
         eff_node: ChunkSeq::new[u32](),
         foreign: ChunkSeq::new[u32](),
-        sn: ChunkSeq::new[u32](),
-        st: ChunkSeq::new[u32](),
+        bind_names: ChunkSeq::new[u32](),
+        bind_tys: ChunkSeq::new[u32](),
         marks: ChunkSeq::new[u64](),
         has_err: false,
         err_start: 0,
         err_end: 0,
         msg: ChunkSeq::new[u8](),
-        s_data: sym(inout a, in "data"),
-        s_range: sym(inout a, in ".."),
-        s_as_slice: sym(inout a, in "as_slice"),
-        s_as_slice_mut: sym(inout a, in "as_slice_mut"),
-        s_option: sym(inout a, in "Option"),
-        s_some: sym(inout a, in "Some"),
-        s_result: sym(inout a, in "Result"),
-        s_ok: sym(inout a, in "Ok"),
-        s_err: sym(inout a, in "Err"),
-        s_ffi: sym(inout a, in "Ffi"),
+        s_data: sym(inout ast, in "data"),
+        s_range: sym(inout ast, in ".."),
+        s_as_slice: sym(inout ast, in "as_slice"),
+        s_as_slice_mut: sym(inout ast, in "as_slice_mut"),
+        s_option: sym(inout ast, in "Option"),
+        s_some: sym(inout ast, in "Some"),
+        s_result: sym(inout ast, in "Result"),
+        s_ok: sym(inout ast, in "Ok"),
+        s_err: sym(inout ast, in "Err"),
+        s_ffi: sym(inout ast, in "Ffi"),
         keeps: keeps,
     };
     // Type 0 is Other.
     let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    let other = w.ty(TK_OTHER, NONE, in none);
-    w
+    let other = walk.ty(TK_OTHER, NONE, in none);
+    walk
 }
 
 impl W {
     // A new type row.
     pub fn ty(inout self, kind: u8, name: u32, in items: ChunkSeq[u32]) -> u32 {
-        let id = wrapping_u32(self.tk.len());
-        self.tk.push(kind);
+        let id = wrapping_u32(self.ty_kinds.len());
+        self.ty_kinds.push(kind);
         self.tname.push(name);
         self.ta.push(self.ti.len());
         self.tn.push(items.len());
@@ -238,32 +238,32 @@ impl W {
         id
     }
 
-    fn kind(in self, t: u32) -> u8 {
-        if t == NO_TY {
+    fn kind(in self, ty: u32) -> u8 {
+        if ty == NO_TY {
             return 255;
         }
-        u8_at(in self.tk, w64(t))
+        u8_at(in self.ty_kinds, w64(ty))
     }
 
-    fn name(in self, t: u32) -> u32 {
-        u32_at(in self.tname, w64(t))
+    fn name(in self, ty: u32) -> u32 {
+        u32_at(in self.tname, w64(ty))
     }
 
-    fn count(in self, t: u32) -> u64 {
-        u64_at(in self.tn, w64(t))
+    fn count(in self, ty: u32) -> u64 {
+        u64_at(in self.tn, w64(ty))
     }
 
-    fn item(in self, t: u32, i: u64) -> u32 {
-        if i >= self.count(t) {
+    fn item(in self, ty: u32, i: u64) -> u32 {
+        if i >= self.count(ty) {
             return NO_TY;
         }
-        u32_at(in self.ti, wrapping_add(u64_at(in self.ta, w64(t)), i))
+        u32_at(in self.ti, wrapping_add(u64_at(in self.ta, w64(ty)), i))
     }
 
     // A recorded type of the checker, for span `start..end`.
-    pub fn record(inout self, start: u64, end: u64, t: u32) {
+    pub fn record(inout self, start: u64, end: u64, ty: u32) {
         self.rec_key.push((start << 32) | end);
-        self.rec_ty.push(t);
+        self.rec_ty.push(ty);
     }
 
     pub fn add_buffer(inout self, name: u32) {
@@ -271,7 +271,7 @@ impl W {
     }
 
     fn recorded(in self, start: u32, end: u32) -> u32 {
-        let k = (w64(start) << 32) | w64(end);
+        let key = (w64(start) << 32) | w64(end);
         let mut lo: u64 = 0;
         let mut hi = self.rec_key.len();
         loop {
@@ -279,11 +279,11 @@ impl W {
                 return NO_TY;
             }
             let mid = wrapping_add(lo, hi) >> 1;
-            let x = u64_at(in self.rec_key, mid);
-            if x == k {
+            let entry = u64_at(in self.rec_key, mid);
+            if entry == key {
                 return u32_at(in self.rec_ty, mid);
             }
-            if x < k {
+            if entry < key {
                 lo = wrapping_add(mid, 1);
             } else {
                 hi = mid;
@@ -291,64 +291,64 @@ impl W {
         }
     }
 
-    fn lookup(in self, n: u32) -> u32 {
-        let mut i = self.sn.len();
+    fn lookup(in self, name: u32) -> u32 {
+        let mut i = self.bind_names.len();
         loop {
             if i == 0 {
                 return NO_TY;
             }
             i = wrapping_sub(i, 1);
-            if u32_at(in self.sn, i) == n {
-                return u32_at(in self.st, i);
+            if u32_at(in self.bind_names, i) == name {
+                return u32_at(in self.bind_tys, i);
             }
         }
     }
 
-    fn push_binding(inout self, n: u32, t: u32) {
-        self.sn.push(n);
-        self.st.push(if t == NO_TY { OTHER } else { t });
+    fn push_binding(inout self, name: u32, ty: u32) {
+        self.bind_names.push(name);
+        self.bind_tys.push(if ty == NO_TY { OTHER } else { ty });
     }
 
     fn open(inout self) {
-        self.marks.push(self.sn.len());
+        self.marks.push(self.bind_names.len());
     }
 
     fn close(inout self) {
-        let k = self.marks.len();
-        if k == 0 {
+        let depth = self.marks.len();
+        if depth == 0 {
             return;
         }
-        let m = u64_at(in self.marks, wrapping_sub(k, 1));
-        self.marks.truncate(wrapping_sub(k, 1));
-        self.sn.truncate(m);
-        self.st.truncate(m);
+        let mark = u64_at(in self.marks, wrapping_sub(depth, 1));
+        self.marks.truncate(wrapping_sub(depth, 1));
+        self.bind_names.truncate(mark);
+        self.bind_tys.truncate(mark);
     }
 
-    fn is_buffer(in self, n: u32) -> bool {
-        has32(in self.buffers, n)
+    fn is_buffer(in self, name: u32) -> bool {
+        has32(in self.buffers, name)
     }
 
-    fn find_adt(in self, n: u32) -> u32 {
+    fn find_adt(in self, name: u32) -> u32 {
         let mut i = self.adt_name.len();
         loop {
             if i == 0 {
                 return NONE;
             }
             i = wrapping_sub(i, 1);
-            if u32_at(in self.adt_name, i) == n {
+            if u32_at(in self.adt_name, i) == name {
                 return u32_at(in self.adt_node, i);
             }
         }
     }
 
-    fn find_effect(in self, n: u32) -> u32 {
+    fn find_effect(in self, name: u32) -> u32 {
         let mut i = self.eff_name.len();
         loop {
             if i == 0 {
                 return NONE;
             }
             i = wrapping_sub(i, 1);
-            if u32_at(in self.eff_name, i) == n {
+            if u32_at(in self.eff_name, i) == name {
                 return u32_at(in self.eff_node, i);
             }
         }
@@ -357,8 +357,8 @@ impl W {
 
 // ---------------------------------------------------------------- nodes
 
-fn fn_at(in a: Ast, i: u32) -> FnNode {
-    a.fns.get_or(
+fn fn_at(in ast: Ast, i: u32) -> FnNode {
+    ast.fns.get_or(
         idx_from_raw[FnNode](i),
         FnNode {
             name: NONE,
@@ -374,30 +374,30 @@ fn fn_at(in a: Ast, i: u32) -> FnNode {
     )
 }
 
-fn param_at(in a: Ast, i: u32) -> ParamNode {
-    a.params.get_or(
+fn param_at(in ast: Ast, i: u32) -> ParamNode {
+    ast.params.get_or(
         idx_from_raw[ParamNode](i),
         ParamNode { name: NONE, pass: 0, projections: 0, ty: NONE, start: 0, end: 0 }
     )
 }
 
-fn stmt_at(in a: Ast, i: u32) -> StmtNode {
-    a.stmts.get_or(
+fn stmt_at(in ast: Ast, i: u32) -> StmtNode {
+    ast.stmts.get_or(
         idx_from_raw[StmtNode](i),
         StmtNode { kind: 0, pat: NONE, ty: NONE, value: NONE, mutable: false }
     )
 }
 
-fn arg_at(in a: Ast, i: u32) -> ArgNode {
-    a.args.get_or(idx_from_raw[ArgNode](i), ArgNode { pass: 0, explicit: false, expr: NONE })
+fn arg_at(in ast: Ast, i: u32) -> ArgNode {
+    ast.args.get_or(idx_from_raw[ArgNode](i), ArgNode { pass: 0, explicit: false, expr: NONE })
 }
 
-fn clause_at(in a: Ast, i: u32) -> ClauseNode {
-    a.clauses.get_or(idx_from_raw[ClauseNode](i), ClauseNode { name: NONE, pats: 0, body: NONE })
+fn clause_at(in ast: Ast, i: u32) -> ClauseNode {
+    ast.clauses.get_or(idx_from_raw[ClauseNode](i), ClauseNode { name: NONE, pats: 0, body: NONE })
 }
 
-fn adt_at(in a: Ast, i: u32) -> AdtNode {
-    a.adts.get_or(
+fn adt_at(in ast: Ast, i: u32) -> AdtNode {
+    ast.adts.get_or(
         idx_from_raw[AdtNode](i),
         AdtNode {
             name: NONE,
@@ -413,326 +413,332 @@ fn adt_at(in a: Ast, i: u32) -> AdtNode {
     )
 }
 
-fn variant_at(in a: Ast, i: u32) -> VariantNode {
-    a.variants
+fn variant_at(in ast: Ast, i: u32) -> VariantNode {
+    ast.variants
         .get_or(idx_from_raw[VariantNode](i), VariantNode { name: NONE, fields: 0, named: false })
 }
 
-fn field_at(in a: Ast, i: u32) -> FieldNode {
-    a.fields.get_or(
+fn field_at(in ast: Ast, i: u32) -> FieldNode {
+    ast.fields.get_or(
         idx_from_raw[FieldNode](i),
         FieldNode { name: NONE, ty: NONE, modality: 3, temperature: 0 }
     )
 }
 
-fn generic_name(in a: Ast, i: u32) -> u32 {
-    match a.generics.get(idx_from_raw[GenericNode](i)) {
+fn generic_name(in ast: Ast, i: u32) -> u32 {
+    match ast.generics.get(idx_from_raw[GenericNode](i)) {
         Option::Some(g) => g.name,
         Option::None => NONE,
     }
 }
 
-fn effect_node(in a: Ast, i: u32) -> EffectNode {
-    a.effect_nodes
+fn effect_node(in ast: Ast, i: u32) -> EffectNode {
+    ast.effect_nodes
         .get_or(idx_from_raw[EffectNode](i), EffectNode { label: NONE, name: NONE, args: 0 })
 }
 
-fn effect_decl(in a: Ast, i: u32) -> EffectDeclNode {
-    a.effect_decls.get_or(
+fn effect_decl(in ast: Ast, i: u32) -> EffectDeclNode {
+    ast.effect_decls.get_or(
         idx_from_raw[EffectDeclNode](i),
         EffectDeclNode { name: NONE, linear: false, generics: 0, ops: 0, start: 0, end: 0 }
     )
 }
 
-// Whether symbol `x` starts with `p`.
-fn sym_starts(in a: Ast, x: u32, in p: Str) -> bool {
-    if x == NONE {
+// Whether symbol `sym` starts with `prefix`.
+fn sym_starts(in ast: Ast, sym: u32, in prefix: Str) -> bool {
+    if sym == NONE {
         return false;
     }
-    let (s, e) = a.names.span(symbol_from_id(x));
-    let b = p.as_bytes();
-    if wrapping_sub(e, s) < b.len() {
+    let (lo, hi) = ast.names.span(symbol_from_id(sym));
+    let prefix_bytes = prefix.as_bytes();
+    if wrapping_sub(hi, lo) < prefix_bytes.len() {
         return false;
     }
-    for i in 0..b.len() {
-        let c = a.names.text_byte(wrapping_add(s, i)).unwrap_or(0);
-        let d = b.try_get(i).unwrap_or(0);
-        if c != d {
+    for i in 0..prefix_bytes.len() {
+        let actual = ast.names.text_byte(wrapping_add(lo, i)).unwrap_or(0);
+        let expected = prefix_bytes.try_get(i).unwrap_or(0);
+        if actual != expected {
             return false;
         }
     }
     true
 }
 
-fn put_sym(in a: Ast, inout o: ChunkSeq[u8], x: u32) {
-    if x == NONE {
+fn put_sym(in ast: Ast, inout out: ChunkSeq[u8], sym: u32) {
+    if sym == NONE {
         return;
     }
-    let (s, e) = a.names.span(symbol_from_id(x));
-    for i in s..e {
-        match a.names.text_byte(i) {
-            Option::Some(c) => o.push(c),
+    let (lo, hi) = ast.names.span(symbol_from_id(sym));
+    for i in lo..hi {
+        match ast.names.text_byte(i) {
+            Option::Some(byte) => out.push(byte),
             Option::None => {}
         }
     }
 }
 
-fn put(inout o: ChunkSeq[u8], in t: Str) {
-    o.extend(in t.as_bytes());
+fn put(inout out: ChunkSeq[u8], in text: Str) {
+    out.extend(in text.as_bytes());
 }
 
 // ---------------------------------------------------------------- types
 
-// The walk's type of AST type `t`.
-fn from_ast(in a: Ast, inout w: W, t: u32) -> u32 {
-    if t == NONE {
+// The walk's type of AST type `ast_ty`.
+fn from_ast(in ast: Ast, inout walk: W, ast_ty: u32) -> u32 {
+    if ast_ty == NONE {
         return OTHER;
     }
-    let n = type_at(in a, t);
+    let node = type_at(in ast, ast_ty);
     let mut items: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    if n.kind == T_NAMED {
-        for i in 0..list_len(in a, n.b) {
-            items.push(from_ast(in a, inout w, list_at(in a, n.b, i)));
+    if node.kind == T_NAMED {
+        for i in 0..list_len(in ast, node.b) {
+            items.push(from_ast(in ast, inout walk, list_at(in ast, node.b, i)));
         }
-        return w.ty(TK_NAMED, n.a, in items);
+        return walk.ty(TK_NAMED, node.a, in items);
     }
-    if n.kind == T_TUPLE {
-        for i in 0..list_len(in a, n.a) {
-            items.push(from_ast(in a, inout w, list_at(in a, n.a, i)));
+    if node.kind == T_TUPLE {
+        for i in 0..list_len(in ast, node.a) {
+            items.push(from_ast(in ast, inout walk, list_at(in ast, node.a, i)));
         }
-        return w.ty(TK_TUPLE, NONE, in items);
+        return walk.ty(TK_TUPLE, NONE, in items);
     }
     OTHER
 }
 
-// `ast::substitute` of `t` with `names[i] := vals[i]`.
-fn subst(inout w: W, t: u32, in names: ChunkSeq[u32], in vals: ChunkSeq[u32]) -> u32 {
-    let k = w.kind(t);
-    if k == TK_NAMED {
-        let n = w.name(t);
-        let c = w.count(t);
-        if c == 0 {
+// `ast::substitute` of `ty` with `names[i] := vals[i]`.
+fn subst(inout walk: W, ty: u32, in names: ChunkSeq[u32], in vals: ChunkSeq[u32]) -> u32 {
+    let kind = walk.kind(ty);
+    if kind == TK_NAMED {
+        let name = walk.name(ty);
+        let count = walk.count(ty);
+        if count == 0 {
             for i in 0..names.len() {
-                if u32_at(in names, i) == n {
+                if u32_at(in names, i) == name {
                     return u32_at(in vals, i);
                 }
             }
-            return t;
+            return ty;
         }
         let mut items: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        for i in 0..c {
-            let x = w.item(t, i);
-            items.push(subst(inout w, x, in names, in vals));
+        for i in 0..count {
+            let item = walk.item(ty, i);
+            items.push(subst(inout walk, item, in names, in vals));
         }
-        return w.ty(TK_NAMED, n, in items);
+        return walk.ty(TK_NAMED, name, in items);
     }
-    if k == TK_TUPLE {
+    if kind == TK_TUPLE {
         let mut items: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        for i in 0..w.count(t) {
-            let x = w.item(t, i);
-            items.push(subst(inout w, x, in names, in vals));
+        for i in 0..walk.count(ty) {
+            let item = walk.item(ty, i);
+            items.push(subst(inout walk, item, in names, in vals));
         }
-        return w.ty(TK_TUPLE, NONE, in items);
+        return walk.ty(TK_TUPLE, NONE, in items);
     }
-    t
+    ty
 }
 
-// The generic names of a generics list, zipped with type `t`'s arguments
+// The generic names of a generics list, zipped with type `ty`'s arguments
 // (`zip` stops at the shorter).
 fn zip_vars(
-    in a: Ast,
-    in w: W,
+    in ast: Ast,
+    in walk: W,
     generics: u32,
-    t: u32,
+    ty: u32,
     inout names: ChunkSeq[u32],
     inout vals: ChunkSeq[u32]
 ) {
-    let n = list_len(in a, generics);
-    let m = w.count(t);
-    let k = if n < m { n } else { m };
-    for i in 0..k {
-        names.push(generic_name(in a, list_at(in a, generics, i)));
-        vals.push(w.item(t, i));
+    let generic_count = list_len(in ast, generics);
+    let arg_count = walk.count(ty);
+    let pair_count = if generic_count < arg_count {
+        generic_count
+    } else {
+        arg_count
+    };
+    for i in 0..pair_count {
+        names.push(generic_name(in ast, list_at(in ast, generics, i)));
+        vals.push(walk.item(ty, i));
     }
 }
 
-// `Walk::field_type`: the type of field `field` of a value of type `t`.
-fn field_type(in a: Ast, inout w: W, t: u32, field: u32) -> u32 {
-    if w.kind(t) != TK_NAMED {
+// `Walk::field_type`: the type of field `field` of a value of type `ty`.
+fn field_type(in ast: Ast, inout walk: W, ty: u32, field: u32) -> u32 {
+    if walk.kind(ty) != TK_NAMED {
         return NO_TY;
     }
-    let ai = w.find_adt(w.name(t));
-    if ai == NONE {
+    let adt_index = walk.find_adt(walk.name(ty));
+    if adt_index == NONE {
         return NO_TY;
     }
-    let adt = adt_at(in a, ai);
-    if adt.is_enum || list_len(in a, adt.variants) == 0 {
+    let adt = adt_at(in ast, adt_index);
+    if adt.is_enum || list_len(in ast, adt.variants) == 0 {
         return NO_TY;
     }
-    let v = variant_at(in a, list_at(in a, adt.variants, 0));
-    for i in 0..list_len(in a, v.fields) {
-        let f = field_at(in a, list_at(in a, v.fields, i));
-        if f.name == field {
+    let variant = variant_at(in ast, list_at(in ast, adt.variants, 0));
+    for i in 0..list_len(in ast, variant.fields) {
+        let field_def = field_at(in ast, list_at(in ast, variant.fields, i));
+        if field_def.name == field {
             let mut names: ChunkSeq[u32] = ChunkSeq::new[u32]();
             let mut vals: ChunkSeq[u32] = ChunkSeq::new[u32]();
-            zip_vars(in a, in w, adt.generics, t, inout names, inout vals);
-            let ft = from_ast(in a, inout w, f.ty);
-            return subst(inout w, ft, in names, in vals);
+            zip_vars(in ast, in walk, adt.generics, ty, inout names, inout vals);
+            let field_ty = from_ast(in ast, inout walk, field_def.ty);
+            return subst(inout walk, field_ty, in names, in vals);
         }
     }
     NO_TY
 }
 
 // `Walk::payload`: the type of field `field` (position `i`) of constructor
-// `cname` of a value of type `t`.
-fn payload(in a: Ast, inout w: W, t: u32, cname: u32, field: u32, i: u64) -> u32 {
-    if w.kind(t) != TK_NAMED {
+// `cname` of a value of type `ty`.
+fn payload(in ast: Ast, inout walk: W, ty: u32, cname: u32, field: u32, i: u64) -> u32 {
+    if walk.kind(ty) != TK_NAMED {
         return NO_TY;
     }
-    let n = w.name(t);
-    if (n == w.s_option && cname == w.s_some) || (n == w.s_result && cname == w.s_ok) {
-        return w.item(t, 0);
+    let name = walk.name(ty);
+    if (name == walk.s_option && cname == walk.s_some)
+        || (name == walk.s_result && cname == walk.s_ok) {
+        return walk.item(ty, 0);
     }
-    if n == w.s_result && cname == w.s_err {
-        return w.item(t, 1);
+    if name == walk.s_result && cname == walk.s_err {
+        return walk.item(ty, 1);
     }
-    let ai = w.find_adt(n);
-    if ai == NONE {
+    let adt_index = walk.find_adt(name);
+    if adt_index == NONE {
         return NO_TY;
     }
-    let adt = adt_at(in a, ai);
+    let adt = adt_at(in ast, adt_index);
     let mut found = NONE;
-    for k in 0..list_len(in a, adt.variants) {
-        let v = variant_at(in a, list_at(in a, adt.variants, k));
-        if v.name == cname {
-            found = list_at(in a, adt.variants, k);
+    for k in 0..list_len(in ast, adt.variants) {
+        let variant = variant_at(in ast, list_at(in ast, adt.variants, k));
+        if variant.name == cname {
+            found = list_at(in ast, adt.variants, k);
             break;
         }
     }
     if found == NONE {
         return NO_TY;
     }
-    let v = variant_at(in a, found);
-    let mut fty = NONE;
+    let variant = variant_at(in ast, found);
+    let mut field_ast_ty = NONE;
     let mut have = false;
-    for k in 0..list_len(in a, v.fields) {
-        let f = field_at(in a, list_at(in a, v.fields, k));
-        if f.name == field {
-            fty = f.ty;
+    for k in 0..list_len(in ast, variant.fields) {
+        let field_def = field_at(in ast, list_at(in ast, variant.fields, k));
+        if field_def.name == field {
+            field_ast_ty = field_def.ty;
             have = true;
             break;
         }
     }
     if !have {
-        if i >= list_len(in a, v.fields) {
+        if i >= list_len(in ast, variant.fields) {
             return NO_TY;
         }
-        fty = field_at(in a, list_at(in a, v.fields, i)).ty;
+        field_ast_ty = field_at(in ast, list_at(in ast, variant.fields, i)).ty;
     }
     let mut names: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut vals: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    zip_vars(in a, in w, adt.generics, t, inout names, inout vals);
-    let ft = from_ast(in a, inout w, fty);
-    subst(inout w, ft, in names, in vals)
+    zip_vars(in ast, in walk, adt.generics, ty, inout names, inout vals);
+    let field_ty = from_ast(in ast, inout walk, field_ast_ty);
+    subst(inout walk, field_ty, in names, in vals)
 }
 
-// `Walk::type_of`: the type of the place or value `x`.
-fn type_of(in a: Ast, inout w: W, x: u32) -> u32 {
-    if x == NONE {
+// `Walk::type_of`: the type of the place or value `expr_id`.
+fn type_of(in ast: Ast, inout walk: W, expr_id: u32) -> u32 {
+    if expr_id == NONE {
         return NO_TY;
     }
-    let e = expr_at(in a, x);
-    if e.kind == E_NAME {
-        let t = w.lookup(e.a);
-        if t != NO_TY {
-            return t;
+    let node = expr_at(in ast, expr_id);
+    if node.kind == E_NAME {
+        let ty = walk.lookup(node.a);
+        if ty != NO_TY {
+            return ty;
         }
-        return w.recorded(e.start, e.end);
+        return walk.recorded(node.start, node.end);
     }
-    if e.kind == E_FIELD {
-        let bt = type_of(in a, inout w, e.a);
-        if bt != NO_TY {
-            let f = field_type(in a, inout w, bt, e.b);
-            if f != NO_TY {
-                return f;
+    if node.kind == E_FIELD {
+        let base_ty = type_of(in ast, inout walk, node.a);
+        if base_ty != NO_TY {
+            let field_ty = field_type(in ast, inout walk, base_ty, node.b);
+            if field_ty != NO_TY {
+                return field_ty;
             }
         }
-        return w.recorded(e.start, e.end);
+        return walk.recorded(node.start, node.end);
     }
-    w.recorded(e.start, e.end)
+    walk.recorded(node.start, node.end)
 }
 
-// `Walk::bind`: binds the names of pattern `p`, which matches a value of
-// type `t`.
-fn bind(in a: Ast, inout w: W, p: u32, t: u32) {
-    if p == NONE {
+// `Walk::bind`: binds the names of pattern `pat_id`, which matches a value of
+// type `ty`.
+fn bind(in ast: Ast, inout walk: W, pat_id: u32, ty: u32) {
+    if pat_id == NONE {
         return;
     }
-    let n = pat_at(in a, p);
-    if n.kind == P_BIND {
-        w.push_binding(n.a, t);
-    } else if n.kind == P_TUPLE {
-        let k = list_len(in a, n.a);
-        let split = w.kind(t) == TK_TUPLE && w.count(t) == k;
-        for i in 0..k {
-            let ti = if split { w.item(t, i) } else { NO_TY };
-            bind(in a, inout w, list_at(in a, n.a, i), ti);
+    let node = pat_at(in ast, pat_id);
+    if node.kind == P_BIND {
+        walk.push_binding(node.a, ty);
+    } else if node.kind == P_TUPLE {
+        let count = list_len(in ast, node.a);
+        let split = walk.kind(ty) == TK_TUPLE && walk.count(ty) == count;
+        for i in 0..count {
+            let item_ty = if split { walk.item(ty, i) } else { NO_TY };
+            bind(in ast, inout walk, list_at(in ast, node.a, i), item_ty);
         }
-    } else if n.kind == P_CONSTRUCTOR {
-        let k = list_len(in a, n.b) >> 1;
-        for i in 0..k {
-            let field = list_at(in a, n.b, i << 1);
-            let sub = list_at(in a, n.b, wrapping_add(i << 1, 1));
-            let ft = if t == NO_TY {
+    } else if node.kind == P_CONSTRUCTOR {
+        let count = list_len(in ast, node.b) >> 1;
+        for i in 0..count {
+            let field = list_at(in ast, node.b, i << 1);
+            let sub = list_at(in ast, node.b, wrapping_add(i << 1, 1));
+            let field_ty = if ty == NO_TY {
                 NO_TY
             } else {
-                payload(in a, inout w, t, n.a, field, i)
+                payload(in ast, inout walk, ty, node.a, field, i)
             };
-            bind(in a, inout w, sub, ft);
+            bind(in ast, inout walk, sub, field_ty);
         }
     }
 }
 
 // ---------------------------------------------------------------- buffers
 
-// `Walk::buffer_of`: the buffer type name when `x` is `b.data` of a pinned
+// `Walk::buffer_of`: the buffer type name when `expr_id` is `b.data` of a pinned
 // buffer or a mapping `b`, else NONE.
-fn buffer_of(in a: Ast, inout w: W, x: u32) -> u32 {
-    if x == NONE {
+fn buffer_of(in ast: Ast, inout walk: W, expr_id: u32) -> u32 {
+    if expr_id == NONE {
         return NONE;
     }
-    let e = expr_at(in a, x);
-    if e.kind != E_FIELD || e.b != w.s_data {
+    let node = expr_at(in ast, expr_id);
+    if node.kind != E_FIELD || node.b != walk.s_data {
         return NONE;
     }
-    let t = type_of(in a, inout w, e.a);
-    if w.kind(t) == TK_NAMED && w.is_buffer(w.name(t)) {
-        return w.name(t);
+    let ty = type_of(in ast, inout walk, node.a);
+    if walk.kind(ty) == TK_NAMED && walk.is_buffer(walk.name(ty)) {
+        return walk.name(ty);
     }
     NONE
 }
 
-// `Walk::view_of`: the buffer type name when `x` is a view of foreign
+// `Walk::view_of`: the buffer type name when `expr_id` is a view of foreign
 // memory: `b.data`, `b.data[a..c]` or `b.data.as_slice()`.
-fn view_of(in a: Ast, inout w: W, x: u32) -> u32 {
-    if x == NONE {
+fn view_of(in ast: Ast, inout walk: W, expr_id: u32) -> u32 {
+    if expr_id == NONE {
         return NONE;
     }
-    let e = expr_at(in a, x);
-    if e.kind == E_FIELD {
-        return buffer_of(in a, inout w, x);
+    let node = expr_at(in ast, expr_id);
+    if node.kind == E_FIELD {
+        return buffer_of(in ast, inout walk, expr_id);
     }
-    if e.kind == E_INDEX {
-        let i = expr_at(in a, e.b);
-        if e.b != NONE && i.kind == E_BINARY && i.a == w.s_range {
-            return buffer_of(in a, inout w, e.a);
+    if node.kind == E_INDEX {
+        let index_node = expr_at(in ast, node.b);
+        if node.b != NONE && index_node.kind == E_BINARY && index_node.a == walk.s_range {
+            return buffer_of(in ast, inout walk, node.a);
         }
         return NONE;
     }
-    if e.kind == E_CALL {
-        let c = expr_at(in a, e.a);
-        if c.kind == E_FIELD && (c.b == w.s_as_slice || c.b == w.s_as_slice_mut) {
-            return buffer_of(in a, inout w, c.a);
+    if node.kind == E_CALL {
+        let callee = expr_at(in ast, node.a);
+        if callee.kind == E_FIELD
+            && (callee.b == walk.s_as_slice || callee.b == walk.s_as_slice_mut) {
+            return buffer_of(in ast, inout walk, callee.a);
         }
     }
     NONE
@@ -740,235 +746,247 @@ fn view_of(in a: Ast, inout w: W, x: u32) -> u32 {
 
 // `keeps_buffer`: the `ChunkSeq` methods that neither reallocate, nor
 // change the length, nor give the sequence away.
-fn keeps_buffer(in a: Ast, in w: W, m: u32) -> bool {
-    has32(in w.keeps, m)
-        || sym_starts(in a, m, in "read_")
-        || sym_starts(in a, m, in "write_")
-        || sym_starts(in a, m, in "try_read_")
-        || sym_starts(in a, m, in "try_write_")
+fn keeps_buffer(in ast: Ast, in walk: W, method: u32) -> bool {
+    has32(in walk.keeps, method)
+        || sym_starts(in ast, method, in "read_")
+        || sym_starts(in ast, method, in "write_")
+        || sym_starts(in ast, method, in "try_read_")
+        || sym_starts(in ast, method, in "try_write_")
 }
 
 // `Walk::calls_foreign`: whether calling `callee` may perform `Ffi`.
-fn calls_foreign(in a: Ast, in w: W, callee: u32) -> bool {
+fn calls_foreign(in ast: Ast, in walk: W, callee: u32) -> bool {
     if callee == NONE {
         return false;
     }
-    let c = expr_at(in a, callee);
-    if c.kind == E_NAME {
-        return sym_starts(in a, c.a, in "Ffi$") || has32(in w.foreign, c.a);
+    let callee_node = expr_at(in ast, callee);
+    if callee_node.kind == E_NAME {
+        return sym_starts(in ast, callee_node.a, in "Ffi$")
+            || has32(in walk.foreign, callee_node.a);
     }
-    if c.kind == E_FIELD {
-        return has32(in w.foreign, c.b);
+    if callee_node.kind == E_FIELD {
+        return has32(in walk.foreign, callee_node.b);
     }
     false
 }
 
-// The direct subexpressions of `x` (`children`).
-fn children(in a: Ast, x: u32, inout out: ChunkSeq[u32]) {
-    if x == NONE {
+// The direct subexpressions of `expr_id` (`children`).
+fn children(in ast: Ast, expr_id: u32, inout out: ChunkSeq[u32]) {
+    if expr_id == NONE {
         return;
     }
-    let e = expr_at(in a, x);
-    let k = e.kind;
-    if k == E_TUPLE {
-        for i in 0..list_len(in a, e.a) {
-            out.push(list_at(in a, e.a, i));
+    let node = expr_at(in ast, expr_id);
+    let kind = node.kind;
+    if kind == E_TUPLE {
+        for i in 0..list_len(in ast, node.a) {
+            out.push(list_at(in ast, node.a, i));
         }
-    } else if k == E_STRUCT {
-        for i in 0..(list_len(in a, e.b) >> 1) {
-            out.push(list_at(in a, e.b, wrapping_add(i << 1, 1)));
+    } else if kind == E_STRUCT {
+        for i in 0..(list_len(in ast, node.b) >> 1) {
+            out.push(list_at(in ast, node.b, wrapping_add(i << 1, 1)));
         }
-    } else if k == E_BLOCK {
-        for i in 0..list_len(in a, e.a) {
-            out.push(stmt_at(in a, list_at(in a, e.a, i)).value);
+    } else if kind == E_BLOCK {
+        for i in 0..list_len(in ast, node.a) {
+            out.push(stmt_at(in ast, list_at(in ast, node.a, i)).value);
         }
-        if e.b != NONE {
-            out.push(e.b);
+        if node.b != NONE {
+            out.push(node.b);
         }
-    } else if k == E_CALL {
-        out.push(e.a);
-        for i in 0..list_len(in a, e.c) {
-            out.push(arg_at(in a, list_at(in a, e.c, i)).expr);
+    } else if kind == E_CALL {
+        out.push(node.a);
+        for i in 0..list_len(in ast, node.c) {
+            out.push(arg_at(in ast, list_at(in ast, node.c, i)).expr);
         }
-    } else if k == E_FIELD || k == E_TRY {
-        out.push(e.a);
-    } else if k == E_UNARY {
-        out.push(e.b);
-    } else if k == E_INDEX {
-        out.push(e.a);
-        out.push(e.b);
-    } else if k == E_BINARY || k == E_ASSIGN {
-        out.push(e.b);
-        out.push(e.c);
-    } else if k == E_IF {
-        out.push(e.a);
-        out.push(e.b);
-        if e.c != NONE {
-            out.push(e.c);
+    } else if kind == E_FIELD || kind == E_TRY {
+        out.push(node.a);
+    } else if kind == E_UNARY {
+        out.push(node.b);
+    } else if kind == E_INDEX {
+        out.push(node.a);
+        out.push(node.b);
+    } else if kind == E_BINARY || kind == E_ASSIGN {
+        out.push(node.b);
+        out.push(node.c);
+    } else if kind == E_IF {
+        out.push(node.a);
+        out.push(node.b);
+        if node.c != NONE {
+            out.push(node.c);
         }
-    } else if k == E_MATCH {
-        out.push(e.a);
-        for i in 0..(list_len(in a, e.b) >> 1) {
-            out.push(list_at(in a, e.b, wrapping_add(i << 1, 1)));
+    } else if kind == E_MATCH {
+        out.push(node.a);
+        for i in 0..(list_len(in ast, node.b) >> 1) {
+            out.push(list_at(in ast, node.b, wrapping_add(i << 1, 1)));
         }
-    } else if k == E_CLOSURE {
-        out.push(e.e);
-    } else if k == E_HANDLE {
-        if e.b != NONE {
-            out.push(e.c);
+    } else if kind == E_CLOSURE {
+        out.push(node.e);
+    } else if kind == E_HANDLE {
+        if node.b != NONE {
+            out.push(node.c);
         }
-        out.push(e.d);
-        for i in 0..list_len(in a, e.e) {
-            out.push(clause_at(in a, list_at(in a, e.e, i)).body);
+        out.push(node.d);
+        for i in 0..list_len(in ast, node.e) {
+            out.push(clause_at(in ast, list_at(in ast, node.e, i)).body);
         }
-    } else if k == E_LOOP {
-        out.push(e.a);
-    } else if k == E_FOR {
-        out.push(e.b);
-        out.push(e.c);
-    } else if k == E_RANGE {
-        out.push(e.a);
-        out.push(e.b);
-    } else if k == E_BREAK || k == E_RETURN {
-        if e.a != NONE {
-            out.push(e.a);
+    } else if kind == E_LOOP {
+        out.push(node.a);
+    } else if kind == E_FOR {
+        out.push(node.b);
+        out.push(node.c);
+    } else if kind == E_RANGE {
+        out.push(node.a);
+        out.push(node.b);
+    } else if kind == E_BREAK || kind == E_RETURN {
+        if node.a != NONE {
+            out.push(node.a);
         }
     }
 }
 
-// `Walk::may_call_foreign`: whether evaluating `x` may call into C.
-fn may_call_foreign(in a: Ast, in w: W, x: u32) -> bool {
-    if x == NONE {
+// `Walk::may_call_foreign`: whether evaluating `expr_id` may call into C.
+fn may_call_foreign(in ast: Ast, in walk: W, expr_id: u32) -> bool {
+    if expr_id == NONE {
         return false;
     }
-    let e = expr_at(in a, x);
-    if e.kind == E_CALL && calls_foreign(in a, in w, e.a) {
+    let node = expr_at(in ast, expr_id);
+    if node.kind == E_CALL && calls_foreign(in ast, in walk, node.a) {
         return true;
     }
     let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    children(in a, x, inout kids);
+    children(in ast, expr_id, inout kids);
     for i in 0..kids.len() {
-        if may_call_foreign(in a, in w, u32_at(in kids, i)) {
+        if may_call_foreign(in ast, in walk, u32_at(in kids, i)) {
             return true;
         }
     }
     false
 }
 
-fn refuse_view(in a: Ast, inout w: W, ty: u32, x: u32, in why: Str) {
-    if w.has_err {
+fn refuse_view(in ast: Ast, inout walk: W, ty: u32, expr_id: u32, in why: Str) {
+    if walk.has_err {
         return;
     }
-    let e = expr_at(in a, x);
-    w.has_err = true;
-    w.err_start = e.start;
-    w.err_end = e.end;
-    put(inout w.msg, in "C may write the memory of ");
-    put_sym(in a, inout w.msg, ty);
-    put(inout w.msg, in " during any foreign call, so a view of it ");
-    put(inout w.msg, in why);
-    put(inout w.msg, in ": read it through `.data[i]` after the call, or end the view before it");
+    let node = expr_at(in ast, expr_id);
+    walk.has_err = true;
+    walk.err_start = node.start;
+    walk.err_end = node.end;
+    put(inout walk.msg, in "C may write the memory of ");
+    put_sym(in ast, inout walk.msg, ty);
+    put(inout walk.msg, in " during any foreign call, so a view of it ");
+    put(inout walk.msg, in why);
+    put(
+        inout walk.msg,
+        in ": read it through `.data[i]` after the call, or end the view before it"
+    );
 }
 
-fn refuse(in a: Ast, inout w: W, ty: u32, x: u32) {
-    if w.has_err {
+fn refuse(in ast: Ast, inout walk: W, ty: u32, expr_id: u32) {
+    if walk.has_err {
         return;
     }
-    let e = expr_at(in a, x);
-    w.has_err = true;
-    w.err_start = e.start;
-    w.err_end = e.end;
-    put(inout w.msg, in "the memory of ");
-    put_sym(in a, inout w.msg, ty);
+    let node = expr_at(in ast, expr_id);
+    walk.has_err = true;
+    walk.err_start = node.start;
+    walk.err_end = node.end;
+    put(inout walk.msg, in "the memory of ");
+    put_sym(in ast, inout walk.msg, ty);
     put(
-        inout w.msg,
+        inout walk.msg,
         in " stays where it is while C may hold its address: `.data` is used only as `.data[i]`, `.data[a..b]`, an `in` argument, or the receiver of a method that keeps its length (not growing, shrinking, moving or replacing it)"
     );
 }
 
 // ---------------------------------------------------------------- walk
 
-// `Walk::expr`: `x` in a position that may hold `b.data` when `ok`.
-fn expr(in a: Ast, inout w: W, x: u32, ok: bool) {
-    if x == NONE {
+// `Walk::expr`: `expr_id` in a position that may hold `b.data` when `ok`.
+fn expr(in ast: Ast, inout walk: W, expr_id: u32, ok: bool) {
+    if expr_id == NONE {
         return;
     }
-    let buffer = buffer_of(in a, inout w, x);
-    let e = expr_at(in a, x);
+    let buffer = buffer_of(in ast, inout walk, expr_id);
+    let node = expr_at(in ast, expr_id);
     if buffer != NONE {
         if !ok {
-            refuse(in a, inout w, buffer, x);
+            refuse(in ast, inout walk, buffer, expr_id);
         }
-        if e.kind == E_FIELD {
-            expr(in a, inout w, e.a, false);
+        if node.kind == E_FIELD {
+            expr(in ast, inout walk, node.a, false);
         }
         return;
     }
-    let k = e.kind;
-    if k == E_TUPLE {
-        for i in 0..list_len(in a, e.a) {
-            expr(in a, inout w, list_at(in a, e.a, i), false);
+    let kind = node.kind;
+    if kind == E_TUPLE {
+        for i in 0..list_len(in ast, node.a) {
+            expr(in ast, inout walk, list_at(in ast, node.a, i), false);
         }
-    } else if k == E_STRUCT {
-        for i in 0..(list_len(in a, e.b) >> 1) {
-            expr(in a, inout w, list_at(in a, e.b, wrapping_add(i << 1, 1)), false);
+    } else if kind == E_STRUCT {
+        for i in 0..(list_len(in ast, node.b) >> 1) {
+            expr(in ast, inout walk, list_at(in ast, node.b, wrapping_add(i << 1, 1)), false);
         }
-    } else if k == E_BLOCK {
-        w.open();
-        let n = list_len(in a, e.a);
-        for i in 0..n {
-            let s = stmt_at(in a, list_at(in a, e.a, i));
-            if s.kind == ST_LET {
-                let view = view_of(in a, inout w, s.value);
+    } else if kind == E_BLOCK {
+        walk.open();
+        let stmt_count = list_len(in ast, node.a);
+        for i in 0..stmt_count {
+            let stmt = stmt_at(in ast, list_at(in ast, node.a, i));
+            if stmt.kind == ST_LET {
+                let view = view_of(in ast, inout walk, stmt.value);
                 if view != NONE {
                     let mut found = NONE;
-                    for j in wrapping_add(i, 1)..n {
-                        let later = stmt_at(in a, list_at(in a, e.a, j)).value;
-                        if may_call_foreign(in a, in w, later) {
+                    for j in wrapping_add(i, 1)..stmt_count {
+                        let later = stmt_at(in ast, list_at(in ast, node.a, j)).value;
+                        if may_call_foreign(in ast, in walk, later) {
                             found = later;
                             break;
                         }
                     }
-                    if found == NONE && e.b != NONE && may_call_foreign(in a, in w, e.b) {
-                        found = e.b;
+                    if found == NONE
+                        && node.b != NONE
+                        && may_call_foreign(in ast, in walk, node.b) {
+                        found = node.b;
                     }
                     if found != NONE {
-                        refuse_view(in a, inout w, view, found, in "may not stay bound across one");
+                        refuse_view(
+                            in ast,
+                            inout walk,
+                            view,
+                            found,
+                            in "may not stay bound across one"
+                        );
                     }
                 }
-                expr(in a, inout w, s.value, false);
-                let infer = s.ty == NONE || type_at(in a, s.ty).kind == T_INFER;
-                let t = if infer {
-                    type_of(in a, inout w, s.value)
+                expr(in ast, inout walk, stmt.value, false);
+                let infer = stmt.ty == NONE || type_at(in ast, stmt.ty).kind == T_INFER;
+                let ty = if infer {
+                    type_of(in ast, inout walk, stmt.value)
                 } else {
-                    from_ast(in a, inout w, s.ty)
+                    from_ast(in ast, inout walk, stmt.ty)
                 };
-                bind(in a, inout w, s.pat, t);
+                bind(in ast, inout walk, stmt.pat, ty);
             } else {
-                expr(in a, inout w, s.value, false);
+                expr(in ast, inout walk, stmt.value, false);
             }
         }
-        if e.b != NONE {
-            expr(in a, inout w, e.b, false);
+        if node.b != NONE {
+            expr(in ast, inout walk, node.b, false);
         }
-        w.close();
-    } else if k == E_CALL {
-        let callee = expr_at(in a, e.a);
+        walk.close();
+    } else if kind == E_CALL {
+        let callee = expr_at(in ast, node.a);
         if callee.kind == E_FIELD {
-            let keep = keeps_buffer(in a, in w, callee.b);
-            expr(in a, inout w, callee.a, keep);
+            let keep = keeps_buffer(in ast, in walk, callee.b);
+            expr(in ast, inout walk, callee.a, keep);
         } else {
-            expr(in a, inout w, e.a, false);
+            expr(in ast, inout walk, node.a, false);
         }
-        let import = callee.kind == E_NAME && sym_starts(in a, callee.a, in "Ffi$");
-        if !import && calls_foreign(in a, in w, e.a) {
-            for i in 0..list_len(in a, e.c) {
-                let arg = arg_at(in a, list_at(in a, e.c, i));
-                let view = view_of(in a, inout w, arg.expr);
+        let import = callee.kind == E_NAME && sym_starts(in ast, callee.a, in "Ffi$");
+        if !import && calls_foreign(in ast, in walk, node.a) {
+            for i in 0..list_len(in ast, node.c) {
+                let arg = arg_at(in ast, list_at(in ast, node.c, i));
+                let view = view_of(in ast, inout walk, arg.expr);
                 if view != NONE {
                     refuse_view(
-                        in a,
-                        inout w,
+                        in ast,
+                        inout walk,
                         view,
                         arg.expr,
                         in "may not be lent to a function that may call into C"
@@ -976,59 +994,59 @@ fn expr(in a: Ast, inout w: W, x: u32, ok: bool) {
                 }
             }
         }
-        for i in 0..list_len(in a, e.c) {
-            let arg = arg_at(in a, list_at(in a, e.c, i));
-            expr(in a, inout w, arg.expr, arg.explicit && arg.pass == PASS_IN);
+        for i in 0..list_len(in ast, node.c) {
+            let arg = arg_at(in ast, list_at(in ast, node.c, i));
+            expr(in ast, inout walk, arg.expr, arg.explicit && arg.pass == PASS_IN);
         }
-    } else if k == E_FIELD || k == E_TRY {
-        expr(in a, inout w, e.a, false);
-    } else if k == E_UNARY {
-        expr(in a, inout w, e.b, false);
-    } else if k == E_INDEX {
-        expr(in a, inout w, e.a, true);
-        expr(in a, inout w, e.b, false);
-    } else if k == E_BINARY || k == E_ASSIGN {
-        expr(in a, inout w, e.b, false);
-        expr(in a, inout w, e.c, false);
-    } else if k == E_IF {
-        expr(in a, inout w, e.a, false);
-        expr(in a, inout w, e.b, false);
-        if e.c != NONE {
-            expr(in a, inout w, e.c, false);
+    } else if kind == E_FIELD || kind == E_TRY {
+        expr(in ast, inout walk, node.a, false);
+    } else if kind == E_UNARY {
+        expr(in ast, inout walk, node.b, false);
+    } else if kind == E_INDEX {
+        expr(in ast, inout walk, node.a, true);
+        expr(in ast, inout walk, node.b, false);
+    } else if kind == E_BINARY || kind == E_ASSIGN {
+        expr(in ast, inout walk, node.b, false);
+        expr(in ast, inout walk, node.c, false);
+    } else if kind == E_IF {
+        expr(in ast, inout walk, node.a, false);
+        expr(in ast, inout walk, node.b, false);
+        if node.c != NONE {
+            expr(in ast, inout walk, node.c, false);
         }
-    } else if k == E_MATCH {
-        expr(in a, inout w, e.a, false);
-        let t = type_of(in a, inout w, e.a);
-        for i in 0..(list_len(in a, e.b) >> 1) {
-            w.open();
-            bind(in a, inout w, list_at(in a, e.b, i << 1), t);
-            expr(in a, inout w, list_at(in a, e.b, wrapping_add(i << 1, 1)), false);
-            w.close();
+    } else if kind == E_MATCH {
+        expr(in ast, inout walk, node.a, false);
+        let ty = type_of(in ast, inout walk, node.a);
+        for i in 0..(list_len(in ast, node.b) >> 1) {
+            walk.open();
+            bind(in ast, inout walk, list_at(in ast, node.b, i << 1), ty);
+            expr(in ast, inout walk, list_at(in ast, node.b, wrapping_add(i << 1, 1)), false);
+            walk.close();
         }
-    } else if k == E_CLOSURE {
-        w.open();
-        for i in 0..list_len(in a, e.a) {
-            let p = param_at(in a, list_at(in a, e.a, i));
-            let t = from_ast(in a, inout w, p.ty);
-            w.push_binding(p.name, t);
+    } else if kind == E_CLOSURE {
+        walk.open();
+        for i in 0..list_len(in ast, node.a) {
+            let param = param_at(in ast, list_at(in ast, node.a, i));
+            let ty = from_ast(in ast, inout walk, param.ty);
+            walk.push_binding(param.name, ty);
         }
-        expr(in a, inout w, e.e, false);
-        w.close();
-    } else if k == E_HANDLE {
-        handle(in a, inout w, x);
-    } else if k == E_FOR {
-        expr(in a, inout w, e.b, false);
-        w.open();
-        bind(in a, inout w, e.a, NO_TY);
-        expr(in a, inout w, e.c, false);
-        w.close();
-    } else if k == E_LOOP {
-        expr(in a, inout w, e.a, false);
-    } else if k == E_RANGE {
-        expr(in a, inout w, e.a, false);
-        expr(in a, inout w, e.b, false);
-    } else if k == E_BREAK || k == E_RETURN {
-        expr(in a, inout w, e.a, false);
+        expr(in ast, inout walk, node.e, false);
+        walk.close();
+    } else if kind == E_HANDLE {
+        handle(in ast, inout walk, expr_id);
+    } else if kind == E_FOR {
+        expr(in ast, inout walk, node.b, false);
+        walk.open();
+        bind(in ast, inout walk, node.a, NO_TY);
+        expr(in ast, inout walk, node.c, false);
+        walk.close();
+    } else if kind == E_LOOP {
+        expr(in ast, inout walk, node.a, false);
+    } else if kind == E_RANGE {
+        expr(in ast, inout walk, node.a, false);
+        expr(in ast, inout walk, node.b, false);
+    } else if kind == E_BREAK || kind == E_RETURN {
+        expr(in ast, inout walk, node.a, false);
     }
 }
 
@@ -1036,67 +1054,71 @@ fn expr(in a: Ast, inout w: W, x: u32, ok: bool) {
 // them: the return clause binds the body's value (with the state after
 // it), and an operation clause binds the operation's arguments, then the
 // state, then the continuation.
-fn handle(in a: Ast, inout w: W, x: u32) {
-    let e = expr_at(in a, x);
-    let has_state = e.b != NONE;
+fn handle(in ast: Ast, inout walk: W, expr_id: u32) {
+    let node = expr_at(in ast, expr_id);
+    let has_state = node.b != NONE;
     let mut state_ty = NO_TY;
     if has_state {
-        expr(in a, inout w, e.c, false);
-        state_ty = type_of(in a, inout w, e.c);
+        expr(in ast, inout walk, node.c, false);
+        state_ty = type_of(in ast, inout walk, node.c);
     }
-    expr(in a, inout w, e.d, false);
-    let body_ty = type_of(in a, inout w, e.d);
+    expr(in ast, inout walk, node.d, false);
+    let body_ty = type_of(in ast, inout walk, node.d);
     let ret_ty = if has_state {
         if body_ty != NO_TY && state_ty != NO_TY {
             let mut items: ChunkSeq[u32] = ChunkSeq::new[u32]();
             items.push(body_ty);
             items.push(state_ty);
-            w.ty(TK_TUPLE, NONE, in items)
+            walk.ty(TK_TUPLE, NONE, in items)
         } else {
             NO_TY
         }
     } else {
         body_ty
     };
-    let nc = list_len(in a, e.e);
-    if nc > 0 {
-        let ret = clause_at(in a, list_at(in a, e.e, 0));
-        w.open();
-        for i in 0..list_len(in a, ret.pats) {
-            let t = if i == 0 { ret_ty } else { NO_TY };
-            bind(in a, inout w, list_at(in a, ret.pats, i), t);
+    let clause_count = list_len(in ast, node.e);
+    if clause_count > 0 {
+        let return_clause = clause_at(in ast, list_at(in ast, node.e, 0));
+        walk.open();
+        for i in 0..list_len(in ast, return_clause.pats) {
+            let ty = if i == 0 { ret_ty } else { NO_TY };
+            bind(in ast, inout walk, list_at(in ast, return_clause.pats, i), ty);
         }
-        expr(in a, inout w, ret.body, false);
-        w.close();
+        expr(in ast, inout walk, return_clause.body, false);
+        walk.close();
     }
-    let eff = effect_node(in a, e.a);
-    let decl_i = w.find_effect(eff.name);
+    let eff = effect_node(in ast, node.a);
+    let decl_index = walk.find_effect(eff.name);
     let mut names: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut vals: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    if decl_i != NONE {
-        let decl = effect_decl(in a, decl_i);
-        let n = list_len(in a, decl.generics);
-        let m = list_len(in a, eff.args);
-        let k = if n < m { n } else { m };
-        for i in 0..k {
-            names.push(generic_name(in a, list_at(in a, decl.generics, i)));
-            let t = from_ast(in a, inout w, list_at(in a, eff.args, i));
-            vals.push(t);
+    if decl_index != NONE {
+        let decl = effect_decl(in ast, decl_index);
+        let generic_count = list_len(in ast, decl.generics);
+        let arg_count = list_len(in ast, eff.args);
+        let pair_count = if generic_count < arg_count {
+            generic_count
+        } else {
+            arg_count
+        };
+        for i in 0..pair_count {
+            names.push(generic_name(in ast, list_at(in ast, decl.generics, i)));
+            let ty = from_ast(in ast, inout walk, list_at(in ast, eff.args, i));
+            vals.push(ty);
         }
     }
-    for ci in 1..nc {
-        let c = clause_at(in a, list_at(in a, e.e, ci));
+    for ci in 1..clause_count {
+        let clause = clause_at(in ast, list_at(in ast, node.e, ci));
         // The operation's parameter types, then the state's.
         let mut tys: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        if decl_i != NONE {
-            let decl = effect_decl(in a, decl_i);
-            for j in 0..list_len(in a, decl.ops) {
-                let op = fn_at(in a, list_at(in a, decl.ops, j));
-                if op.name == c.name {
-                    for q in 0..list_len(in a, op.params) {
-                        let p = param_at(in a, list_at(in a, op.params, q));
-                        let pt = from_ast(in a, inout w, p.ty);
-                        tys.push(subst(inout w, pt, in names, in vals));
+        if decl_index != NONE {
+            let decl = effect_decl(in ast, decl_index);
+            for j in 0..list_len(in ast, decl.ops) {
+                let op = fn_at(in ast, list_at(in ast, decl.ops, j));
+                if op.name == clause.name {
+                    for param_index in 0..list_len(in ast, op.params) {
+                        let param = param_at(in ast, list_at(in ast, op.params, param_index));
+                        let param_ty = from_ast(in ast, inout walk, param.ty);
+                        tys.push(subst(inout walk, param_ty, in names, in vals));
                     }
                     break;
                 }
@@ -1105,69 +1127,69 @@ fn handle(in a: Ast, inout w: W, x: u32) {
         if has_state {
             tys.push(state_ty);
         }
-        w.open();
-        for i in 0..list_len(in a, c.pats) {
-            let t = u32_at(in tys, i);
-            bind(in a, inout w, list_at(in a, c.pats, i), t);
+        walk.open();
+        for i in 0..list_len(in ast, clause.pats) {
+            let ty = u32_at(in tys, i);
+            bind(in ast, inout walk, list_at(in ast, clause.pats, i), ty);
         }
-        expr(in a, inout w, c.body, false);
-        w.close();
+        expr(in ast, inout walk, clause.body, false);
+        walk.close();
     }
 }
 
-// `may_perform_foreign`: whether a function with row `es` may call into C:
+// `may_perform_foreign`: whether a function with row `row_id` may call into C:
 // the row names `Ffi` (before or after the rewrite) or is open.
-fn may_perform_foreign(in a: Ast, in w: W, es: u32) -> bool {
-    if es == NONE {
+fn may_perform_foreign(in ast: Ast, in walk: W, row_id: u32) -> bool {
+    if row_id == NONE {
         return false;
     }
-    let row = match a.effects.get(idx_from_raw[EffectsNode](es)) {
+    let row = match ast.effects.get(idx_from_raw[EffectsNode](row_id)) {
         Option::Some(x) => x,
         Option::None => return false,
     };
     if row.tail != NONE {
         return true;
     }
-    for i in 0..list_len(in a, row.instances) {
-        let e = effect_node(in a, list_at(in a, row.instances, i));
-        if e.name == w.s_ffi || sym_starts(in a, e.name, in "Ffi$") {
+    for i in 0..list_len(in ast, row.instances) {
+        let effect = effect_node(in ast, list_at(in ast, row.instances, i));
+        if effect.name == walk.s_ffi || sym_starts(in ast, effect.name, in "Ffi$") {
             return true;
         }
     }
     false
 }
 
-fn walk_function(in a: Ast, inout w: W, fi: u32) {
-    let f = fn_at(in a, fi);
-    if f.body == NONE {
+fn walk_function(in ast: Ast, inout walk: W, fi: u32) {
+    let func = fn_at(in ast, fi);
+    if func.body == NONE {
         return;
     }
-    w.open();
-    for i in 0..list_len(in a, f.params) {
-        let p = param_at(in a, list_at(in a, f.params, i));
-        let t = from_ast(in a, inout w, p.ty);
-        w.push_binding(p.name, t);
+    walk.open();
+    for i in 0..list_len(in ast, func.params) {
+        let param = param_at(in ast, list_at(in ast, func.params, i));
+        let ty = from_ast(in ast, inout walk, param.ty);
+        walk.push_binding(param.name, ty);
     }
-    expr(in a, inout w, f.body, false);
-    w.close();
+    expr(in ast, inout walk, func.body, false);
+    walk.close();
 }
 
-fn item_at(in a: Ast, i: u64) -> ItemNode {
-    let it = a.m_items.try_get(i).unwrap_or(NONE);
-    a.items.get_or(idx_from_raw[ItemNode](it), ItemNode { kind: 0, node: NONE })
+fn item_at(in ast: Ast, i: u64) -> ItemNode {
+    let item_id = ast.m_items.try_get(i).unwrap_or(NONE);
+    ast.items.get_or(idx_from_raw[ItemNode](item_id), ItemNode { kind: 0, node: NONE })
 }
 
 // The methods list of impl or conformance item `item`, or 0 (the empty
 // list).
-fn methods_of(in a: Ast, item: ItemNode) -> u32 {
+fn methods_of(in ast: Ast, item: ItemNode) -> u32 {
     if item.kind == I_IMPL {
-        return match a.impls.get(idx_from_raw[ImplNode](item.node)) {
+        return match ast.impls.get(idx_from_raw[ImplNode](item.node)) {
             Option::Some(m) => m.methods,
             Option::None => 0,
         };
     }
     if item.kind == I_CONF {
-        return match a.confs.get(idx_from_raw[ConfNode](item.node)) {
+        return match ast.confs.get(idx_from_raw[ConfNode](item.node)) {
             Option::Some(c) => c.methods,
             Option::None => 0,
         };
@@ -1177,44 +1199,44 @@ fn methods_of(in a: Ast, item: ItemNode) -> u32 {
 
 // `buffers::check`: refuses every use of a pinned buffer's or a mapping's
 // `.data` that could move its memory. Returns whether it refused one (the
-// message and span are in `w`).
-pub fn check_buffers(in a: Ast, inout w: W) -> bool {
-    if w.buffers.len() == 0 {
+// message and span are in `walk`).
+pub fn check_buffers(in ast: Ast, inout walk: W) -> bool {
+    if walk.buffers.len() == 0 {
         return false;
     }
-    for i in 0..a.m_items.len() {
-        let item = item_at(in a, i);
+    for i in 0..ast.m_items.len() {
+        let item = item_at(in ast, i);
         if item.kind == I_ADT {
-            w.adt_name.push(adt_at(in a, item.node).name);
-            w.adt_node.push(item.node);
+            walk.adt_name.push(adt_at(in ast, item.node).name);
+            walk.adt_node.push(item.node);
         } else if item.kind == I_EFFECT {
-            w.eff_name.push(effect_decl(in a, item.node).name);
-            w.eff_node.push(item.node);
+            walk.eff_name.push(effect_decl(in ast, item.node).name);
+            walk.eff_node.push(item.node);
         } else if item.kind == I_FN {
-            let f = fn_at(in a, item.node);
-            if may_perform_foreign(in a, in w, f.effects) {
-                w.foreign.push(f.name);
+            let func = fn_at(in ast, item.node);
+            if may_perform_foreign(in ast, in walk, func.effects) {
+                walk.foreign.push(func.name);
             }
         } else if item.kind == I_IMPL || item.kind == I_CONF {
-            let ms = methods_of(in a, item);
-            for j in 0..list_len(in a, ms) {
-                let f = fn_at(in a, list_at(in a, ms, j));
-                if may_perform_foreign(in a, in w, f.effects) {
-                    w.foreign.push(f.name);
+            let methods = methods_of(in ast, item);
+            for j in 0..list_len(in ast, methods) {
+                let func = fn_at(in ast, list_at(in ast, methods, j));
+                if may_perform_foreign(in ast, in walk, func.effects) {
+                    walk.foreign.push(func.name);
                 }
             }
         }
     }
-    for i in 0..a.m_items.len() {
-        let item = item_at(in a, i);
+    for i in 0..ast.m_items.len() {
+        let item = item_at(in ast, i);
         if item.kind == I_FN {
-            walk_function(in a, inout w, item.node);
+            walk_function(in ast, inout walk, item.node);
         } else if item.kind == I_IMPL || item.kind == I_CONF {
-            let ms = methods_of(in a, item);
-            for j in 0..list_len(in a, ms) {
-                walk_function(in a, inout w, list_at(in a, ms, j));
+            let methods = methods_of(in ast, item);
+            for j in 0..list_len(in ast, methods) {
+                walk_function(in ast, inout walk, list_at(in ast, methods, j));
             }
         }
     }
-    w.has_err
+    walk.has_err
 }

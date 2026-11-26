@@ -26,6 +26,14 @@ const HELP: &str = "Vesper — modal ownership and lexical effects\n\nUsage: ves
 /// call chain already exceeds, so run every command on a thread with an
 /// explicit, platform-independent stack.
 const CLI_STACK_BYTES: usize = 64 * 1024 * 1024;
+/// The evaluation step limit when `--fuel` is not given.
+const DEFAULT_FUEL: u64 = 10_000_000;
+/// When diagnostics can't be rendered with source, the most printed raw.
+const MAX_RAW_DIAGNOSTICS: usize = 128;
+/// The longest diagnostic code printed raw, in chars.
+const MAX_RAW_CODE_CHARS: usize = 128;
+/// The longest diagnostic message printed raw, in chars.
+const MAX_RAW_MESSAGE_CHARS: usize = 4096;
 
 /// Commands the compiler binary runs itself; `tool_commands::TOOLS` and any
 /// other `vesper-<name>` executable are dispatched before the CLI starts.
@@ -134,7 +142,7 @@ fn cli() -> Result<(), String> {
     let mut format = "ir".to_string();
     let mut entry = "main".to_string();
     let mut include_tests = false;
-    let mut fuel = 10_000_000;
+    let mut fuel = DEFAULT_FUEL;
     let mut json = false;
     // `opt` is the IR optimizer (evaluator, JIT and backends); `ast_opt` the
     // AST optimizer that runs before them. `--no-opt` turns off both.
@@ -777,18 +785,22 @@ fn diagnostics(file: &str, source: &str, ds: &[Diagnostic], json: bool) {
             // Compiler errors remain errors when source presentation is outside
             // its profile. These are raw byte offsets, never clamped squiggles.
             eprintln!("diagnostic source rendering unavailable: {reason}");
-            for diagnostic in ds.iter().take(128) {
-                let code: String = diagnostic.code.chars().take(128).collect();
-                let message: String = diagnostic.message.chars().take(4096).collect();
+            for diagnostic in ds.iter().take(MAX_RAW_DIAGNOSTICS) {
+                let code: String = diagnostic.code.chars().take(MAX_RAW_CODE_CHARS).collect();
+                let message: String = diagnostic
+                    .message
+                    .chars()
+                    .take(MAX_RAW_MESSAGE_CHARS)
+                    .collect();
                 eprintln!(
                     "{code}: {message} (UTF-8 bytes {}..{})",
                     diagnostic.span.start, diagnostic.span.end
                 );
             }
-            if ds.len() > 128 {
+            if ds.len() > MAX_RAW_DIAGNOSTICS {
                 eprintln!(
                     "{} additional compiler errors exceed the display profile",
-                    ds.len() - 128
+                    ds.len() - MAX_RAW_DIAGNOSTICS
                 );
             }
         }

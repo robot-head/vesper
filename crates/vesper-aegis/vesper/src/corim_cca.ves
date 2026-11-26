@@ -117,17 +117,15 @@ fn col_err(
     off: u64,
     len: u64
 ) -> Never eff [Fail[AtErr]] {
-    Fail::raise(
-        AtErr {
-            kind: AT_COLLATERAL,
-            what: prefix,
-            reason: reason,
-            index: index,
-            extra: extra,
-            off: off,
-            len: len
-        }
-    )
+    Fail::raise(AtErr {
+        kind: AT_COLLATERAL,
+        what: prefix,
+        reason: reason,
+        index: index,
+        extra: extra,
+        off: off,
+        len: len
+    })
 }
 
 copy struct Cur {

@@ -1279,17 +1279,23 @@ fn lower_seq_call(inout l: L, ex: Ex, recv_id: u64, seq_res: SeqRes) -> u32 {
 fn lower_tiled_call(inout l: L, ex: Ex, receiver: u64, tiled_res: TiledRes) -> u32 {
     let mut args: ChunkSeq[Arg] = ChunkSeq::new[Arg]();
     if receiver != NONE64 && tiled_res.is_receiver_first {
-        args.push(
-            argument_proj(inout l, receiver, tiled_res.receiver_pass, tiled_res.receiver_proj)
-        );
+        args.push(argument_proj(
+            inout l,
+            receiver,
+            tiled_res.receiver_pass,
+            tiled_res.receiver_proj
+        ));
     }
     let start: u64 = if tiled_res.skip_first { 1 } else { 0 };
     for i in start..ex.n {
         let arg_id = l.ast.x(add(ex.b, inc(wrapping_mul(i, 2))));
         if receiver == NONE64 && tiled_res.is_receiver_first && i == 0 {
-            args.push(
-                argument_proj(inout l, arg_id, tiled_res.receiver_pass, tiled_res.receiver_proj)
-            );
+            args.push(argument_proj(
+                inout l,
+                arg_id,
+                tiled_res.receiver_pass,
+                tiled_res.receiver_proj
+            ));
         } else {
             args.push(argument(inout l, arg_id, TyPass::Sink, 0, 0));
         }
@@ -1553,9 +1559,12 @@ fn control(inout l: L, ex: Ex) -> u32 {
         l.cur_block = header;
         let ops_start = l.operands.len();
         let loop_inst = emit_at(inout l, Op::Loop, ops_start, ex.s0, ex.s1, unit_ty);
-        l.loops.push(
-            Lp { exit: exit, has_value: true, next: header, cont_start: l.continue_blocks.len() }
-        );
+        l.loops.push(Lp {
+            exit: exit,
+            has_value: true,
+            next: header,
+            cont_start: l.continue_blocks.len()
+        });
         let mark = l.alias_trail.len();
         let body = expr(inout l, ex.a);
         restore(inout l, mark);
@@ -1662,9 +1671,12 @@ fn lower_for(inout l: L, ex: Ex) -> u32 {
     put(inout l, w(pat_value), Tag::Value);
     pattern(inout l, ex.a, elem_ty, true);
     let bind = emit_at(inout l, Op::Bind, bind_start, pat.s0, pat.s1, unit_ty);
-    l.loops.push(
-        Lp { exit: exit, has_value: false, next: NONE64, cont_start: l.continue_blocks.len() }
-    );
+    l.loops.push(Lp {
+        exit: exit,
+        has_value: false,
+        next: NONE64,
+        cont_start: l.continue_blocks.len()
+    });
     let body = expr(inout l, ex.c);
     let popped = pop_loop(inout l);
     let mut continues: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -1947,17 +1959,15 @@ fn pm_at(in params: ChunkSeq[Pm], i: u64) -> Pm {
 fn pattern_params(inout l: L, pattern_id: u64, ty: u32, pass: u8, inout out: ChunkSeq[Pm]) {
     let pat = l.ast.pt(pattern_id);
     if pat.kind == Pat::Bind {
-        out.push(
-            Pm {
-                name: n32(pat.a),
-                pass: pass,
-                proj_start: 0,
-                proj_count: 0,
-                ty: ty,
-                s0: pat.s0,
-                s1: pat.s1
-            }
-        );
+        out.push(Pm {
+            name: n32(pat.a),
+            pass: pass,
+            proj_start: 0,
+            proj_count: 0,
+            ty: ty,
+            s0: pat.s0,
+            s1: pat.s1
+        });
     } else if pat.kind == Pat::Tuple {
         if l.ctx.types.kind(ty) == TyKind::Tuple {
             let typed_count = min_u64(pat.n, l.ctx.types.arity(ty));
@@ -2044,25 +2054,23 @@ fn add_nested(inout l: L, kind: u8, body: u64, in params: ChunkSeq[Pm], result: 
         }
     }
     let owner = if kind == NK_BODY { l.owner } else { name };
-    l.ast.add_function(
-        FnR {
-            key: name,
-            name: name,
-            has_body: true,
-            body: body,
-            param_start: param_start,
-            param_count: params.len(),
-            result: result,
-            effects: effects,
-            generic_start: l.fn_generic_start,
-            generic_count: l.fn_generic_count,
-            cap_start: cap_start,
-            cap_count: cap_count,
-            owner: owner,
-            ext_start: ext_start,
-            ext_count: ext_count
-        }
-    );
+    l.ast.add_function(FnR {
+        key: name,
+        name: name,
+        has_body: true,
+        body: body,
+        param_start: param_start,
+        param_count: params.len(),
+        result: result,
+        effects: effects,
+        generic_start: l.fn_generic_start,
+        generic_count: l.fn_generic_count,
+        cap_start: cap_start,
+        cap_count: cap_count,
+        owner: owner,
+        ext_start: ext_start,
+        ext_count: ext_count
+    });
 }
 
 // The free names of `body` (minus the bound ones), or false when a
@@ -3221,53 +3229,47 @@ fn flush(inout l: L, func: FnR) {
                 put_p(inout l, sop(in l, j), u8_at(in l.operand_tags, j));
             }
             let has_token = if inst.action || inst.read { 1 } else { 0 };
-            l.program.insts.push(
-                InstRow {
-                    dest: inst.dest,
-                    ty: inst.ty,
-                    s0: inst.s0,
-                    s1: inst.s1,
-                    has_token: has_token,
-                    tin: u64_at(in token_in, i),
-                    tout: u64_at(in token_out, i),
-                    fallible: if inst.fallible { 1 } else { 0 },
-                    op: inst.op,
-                    a: ops_start,
-                    n: inst.n
-                }
-            );
+            l.program.insts.push(InstRow {
+                dest: inst.dest,
+                ty: inst.ty,
+                s0: inst.s0,
+                s1: inst.s1,
+                has_token: has_token,
+                tin: u64_at(in token_in, i),
+                tout: u64_at(in token_out, i),
+                fallible: if inst.fallible { 1 } else { 0 },
+                op: inst.op,
+                a: ops_start,
+                n: inst.n
+            });
         }
         let inst_count = wrapping_sub(l.program.insts.len(), first_inst);
         let term_start = l.program.ops.len();
         for j in block_row.term_start..add(block_row.term_start, block_row.term_count) {
             put_p(inout l, sop(in l, j), u8_at(in l.operand_tags, j));
         }
-        l.program.blocks.push(
-            BlockRow {
-                ha: block_header_start,
-                hn: block_header_len,
-                i0: first_inst,
-                ic: inst_count,
-                term: block_row.term,
-                ta: term_start,
-                tn: wrapping_sub(l.program.ops.len(), term_start)
-            }
-        );
+        l.program.blocks.push(BlockRow {
+            ha: block_header_start,
+            hn: block_header_len,
+            i0: first_inst,
+            ic: inst_count,
+            term: block_row.term,
+            ta: term_start,
+            tn: wrapping_sub(l.program.ops.len(), term_start)
+        });
     }
     // The trailer: no fip side tables at lowering.
     let trailer_start = l.program.ops.len();
     for j in 0..5 {
         put_p(inout l, 0, Tag::Raw);
     }
-    l.program.fns.push(
-        FnRow {
-            name: func.name,
-            ha: header_start,
-            hn: header_len,
-            b0: first_block,
-            bc: block_count,
-            ta: trailer_start,
-            tn: wrapping_sub(l.program.ops.len(), trailer_start)
-        }
-    );
+    l.program.fns.push(FnRow {
+        name: func.name,
+        ha: header_start,
+        hn: header_len,
+        b0: first_block,
+        bc: block_count,
+        ta: trailer_start,
+        tn: wrapping_sub(l.program.ops.len(), trailer_start)
+    });
 }

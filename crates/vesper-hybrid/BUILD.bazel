@@ -48,6 +48,10 @@ vesper_hybrid(
             "edit_src": "modules/lean_extract/src/lib.ves",
             "edits": {"(sink text: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    text\n": "(sink text: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = text;\n    let _ = t.try_set(0, 0);\n    t\n"},
         },
+        "hybrid_sugar": {
+            "edit_src": "modules/sugar/src/lib.ves",
+            "edits": {"(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    words\n": "(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = words;\n    let _ = t.try_set(0, 0);\n    t\n"},
+        },
         "hybrid_verified_codegen": {
             "edit_src": "modules/verified_codegen/src/lib.ves",
             "edits": {"(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    words\n": "(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = words;\n    let _ = t.try_set(0, 0);\n    t\n"},
@@ -85,6 +89,7 @@ vesper_hybrid(
     build_script_env = {
         # Path dependencies are not beside the crate in Bazel.
         "VESPER_HYBRID_OBJECT_PACKAGES_HYBRID_DRIVER": "$(execpath //:std_hash_sys_manifest)",
+        "VESPER_HYBRID_OBJECT_PACKAGES_HYBRID_VERIFY": "$(execpath //:std_hash_sys_manifest)",
     },
     extra_compile_data = ["//:files"],
     # The differential harness runs the default compiler beside the hybrid
@@ -263,6 +268,20 @@ vesper_hybrid(
             "//:place_ir_package",
             "//crates/vesper-lean-syntax:port_package",
         ],
+        # `vesper verify SOURCE --format` (#1341) is @vesper/verify.
+        "hybrid_verify": [
+            "//:front_package",
+            "//:proof_audit_package",
+            "//:std_env_package",
+            "//:std_fs_package",
+            "//:std_hash_package",
+            "//:std_hash_sys_package",
+            "//:std_process_package",
+            "//:verify_package",
+            "//crates/vesper-fmt:port_package",
+            "//crates/vesper-lean-syntax:port_package",
+            "//crates/vesper-serde:port_package",
+        ],
         # The verified code generator (#1886) builds on
         # @vesper/verified-codegen.
         "hybrid_verified_codegen": [
@@ -308,6 +327,15 @@ vesper_hybrid(
         "hybrid_stack_bound": [
             "//:check_data_package",
             "//:check_loops_atomics_package",
+        ],
+        # Sugar expansion (#1157) is @vesper/sugar's driver.
+        "hybrid_sugar": [
+            "//:ast_package",
+            "//:check_data_package",
+            "//:front_package",
+            "//:std_arena_package",
+            "//:std_intern_package",
+            "//:sugar_package",
         ],
         # The tensor type checker (#1186) builds on @vesper/check-tensor-types.
         "hybrid_tensor_types": [

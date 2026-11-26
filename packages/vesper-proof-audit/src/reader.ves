@@ -10,14 +10,17 @@
 // The error texts name the field but not serde_json's line and column.
 use @vesper/serde::{Doc, Error, Kind, Limits, Token, doc_new, doc_parse};
 use @vesper/serde::index::{next_decoded, tok};
-use self::strs::{Strs, count, end, push, put_str, same, same_str, start, strs_new};
+use self::strs::{
+    DIGIT_NINE, DIGIT_ZERO, LOWER_T, Strs, count, end, push, put_str, same, same_str, start,
+    strs_new
+};
 
 // serde_json's recursion limit of 128: the tape refuses a container that
 // opens at depth 127, as serde_json refuses the 128th.
 const NESTING: u64 = 127;
 const NO_LIMIT: u64 = 4611686018427387904;
 const NO_CHAR: u64 = 0x110000;
-const NONE: u64 = 18446744073709551615;
+pub const NONE: u64 = 18446744073709551615;
 const U32_MAX: u64 = 4294967295;
 
 // A parsed document and the first error found reading it.
@@ -150,11 +153,11 @@ pub fn integer(inout r: Rd, i: u64, max: u64, in field: Str) -> u64 {
     let mut n: u64 = 0;
     for p in t.start..t.end {
         let b = r.input.try_get(p).unwrap_or(0);
-        if b < 48 || b > 57 {
+        if b < DIGIT_ZERO || b > DIGIT_NINE {
             fail_field(inout r, in "expected an integer for", in field);
             return 0;
         }
-        let d = widen_u64(wrapping_sub(b, 48));
+        let d = widen_u64(wrapping_sub(b, DIGIT_ZERO));
         if n > wrapping_sub(max, d) / 10 {
             fail_field(inout r, in "integer out of range for", in field);
             return 0;
@@ -179,7 +182,7 @@ pub fn boolean(inout r: Rd, i: u64, in field: Str) -> bool {
         return false;
     }
     match r.input.try_get(t.start) {
-        Option::Some(b) => b == 116,
+        Option::Some(b) => b == LOWER_T,
         Option::None => false,
     }
 }

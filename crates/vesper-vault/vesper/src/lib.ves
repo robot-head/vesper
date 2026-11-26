@@ -141,9 +141,12 @@ pub fn frame_header_parse(in frame: Slice[u8]) -> Option[FrameHdr] {
         Option::Some(v) => v,
         Option::None => return Option::None,
     };
-    Option::Some(
-        FrameHdr { key_epoch: key_epoch, nonce_seq: nonce_seq, tag_lo: tag_lo, tag_hi: tag_hi }
-    )
+    Option::Some(FrameHdr {
+        key_epoch: key_epoch,
+        nonce_seq: nonce_seq,
+        tag_lo: tag_lo,
+        tag_hi: tag_hi
+    })
 }
 
 pub fn sealer_new(id: u64, alg: AeadKind, epoch: u32, next_seq: u64, limit: u64) -> SealerSt {
@@ -486,9 +489,10 @@ pub fn kem_server_validate(isa: KemIsaKind, in client_share: Slice[u8]) eff [
 ] {
     kem_require_isa(isa);
     if client_share.len() != CLIENT_SHARE_LEN {
-        Fail::raise(
-            VaultErr::BadShareLength { expected: CLIENT_SHARE_LEN, found: client_share.len() }
-        );
+        Fail::raise(VaultErr::BadShareLength {
+            expected: CLIENT_SHARE_LEN,
+            found: client_share.len()
+        });
     }
     if !mlkem768_validate(isa_code(isa), in client_share[0..1184]) {
         Fail::raise(VaultErr::InvalidEncapsulationKey);

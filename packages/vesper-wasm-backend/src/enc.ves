@@ -301,9 +301,9 @@ impl Code {
     pub fn f64_const(inout self, bits: u64) {
         self.bytes.push(OP_F64_CONST);
         for byte_index in 0..8 {
-            self.bytes.push(
-                wrapping_u8(wrapping_shr_u64(bits, wrapping_u32(wrapping_mul(byte_index, 8))) & 255)
-            );
+            self.bytes.push(wrapping_u8(
+                wrapping_shr_u64(bits, wrapping_u32(wrapping_mul(byte_index, 8))) & 255
+            ));
         }
         self.count = wrapping_add(self.count, 1);
     }

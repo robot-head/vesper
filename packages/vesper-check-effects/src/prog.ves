@@ -76,8 +76,8 @@ pub copy struct Fun {
     row: u32,
     carried: u32,
     body: u32,
-    pa: u32,
-    pn: u32,
+    param_start: u32,
+    param_count: u32,
 }
 
 pub copy struct ParamRow {
@@ -86,26 +86,26 @@ pub copy struct ParamRow {
     ty: u32,
 }
 
-// An effect declaration: generics are `gens[ga..ga+gn]` (names), operations
-// `ops[oa..oa+on]`.
+// An effect declaration: generics are `gens[gen_start..gen_start+gen_count]`
+// (names), operations `ops[op_start..op_start+op_count]`.
 pub copy struct EffDecl {
     name: u32,
     linear: bool,
     start: u64,
     end: u64,
-    ga: u32,
-    gn: u32,
-    oa: u32,
-    on: u32,
+    gen_start: u32,
+    gen_count: u32,
+    op_start: u32,
+    op_count: u32,
 }
 
 // `world.calls`: the generic instantiation of a call span, as pairs
-// (name, type) in `call_vars[va..va+2*vn]`.
+// (name, type) in `call_vars[var_start..var_start+2*var_count]`.
 pub copy struct CallRow {
     start: u64,
     end: u64,
-    va: u32,
-    vn: u32,
+    var_start: u32,
+    var_count: u32,
 }
 
 pub struct Prog {
@@ -139,22 +139,22 @@ pub fn no_fun() -> Fun {
         row: 0,
         carried: 0,
         body: NONE32,
-        pa: 0,
-        pn: 0
+        param_start: 0,
+        param_count: 0
     }
 }
 
 impl Prog {
-    pub fn expr(in self, e: u32) -> ExprNode {
-        match self.exprs.try_get(w(e)) {
-            Option::Some(x) => x,
+    pub fn expr(in self, expr_id: u32) -> ExprNode {
+        match self.exprs.try_get(w(expr_id)) {
+            Option::Some(node) => node,
             Option::None => no_expr(),
         }
     }
 
-    pub fn pat(in self, p: u32) -> PatNode {
-        match self.pats.try_get(w(p)) {
-            Option::Some(x) => x,
+    pub fn pat(in self, pat_id: u32) -> PatNode {
+        match self.pats.try_get(w(pat_id)) {
+            Option::Some(node) => node,
             Option::None => PatNode { kind: 0, start: 0, end: 0, a: NONE32, b: NONE32, c: NONE32 },
         }
     }
@@ -189,8 +189,12 @@ impl Prog {
         if key == NONE32 {
             return NONE32;
         }
-        let x = u32_at(in self.fun_by_key, w(key));
-        if x == 0 { NONE32 } else { wrapping_sub(x, 1) }
+        let entry = u32_at(in self.fun_by_key, w(key));
+        if entry == 0 {
+            NONE32
+        } else {
+            wrapping_sub(entry, 1)
+        }
     }
 
     pub fn decl(in self, i: u32) -> EffDecl {
@@ -201,10 +205,10 @@ impl Prog {
                 linear: false,
                 start: 0,
                 end: 0,
-                ga: 0,
-                gn: 0,
-                oa: 0,
-                on: 0
+                gen_start: 0,
+                gen_count: 0,
+                op_start: 0,
+                op_count: 0
             },
         }
     }
@@ -214,21 +218,25 @@ impl Prog {
         if name == NONE32 {
             return NONE32;
         }
-        let x = u32_at(in self.eff_by_name, w(name));
-        if x == 0 { NONE32 } else { wrapping_sub(x, 1) }
+        let entry = u32_at(in self.eff_by_name, w(name));
+        if entry == 0 {
+            NONE32
+        } else {
+            wrapping_sub(entry, 1)
+        }
     }
 
-    // The operation `op` of declaration `d` (`d.ops.iter().find(..)`), as
+    // The operation `op` of declaration `decl_id` (`d.ops.iter().find(..)`), as
     // an index into `ops`, or NONE32.
-    pub fn find_op(in self, d: u32, op: u32) -> u32 {
-        if d == NONE32 {
+    pub fn find_op(in self, decl_id: u32, op: u32) -> u32 {
+        if decl_id == NONE32 {
             return NONE32;
         }
-        let x = self.decl(d);
-        for i in 0..w(x.on) {
-            let f = self.op(add(w(x.oa), i));
-            if f.name == op {
-                return n32(add(w(x.oa), i));
+        let decl = self.decl(decl_id);
+        for i in 0..w(decl.op_count) {
+            let candidate = self.op(add(w(decl.op_start), i));
+            if candidate.name == op {
+                return n32(add(w(decl.op_start), i));
             }
         }
         NONE32
@@ -243,15 +251,15 @@ impl Prog {
                 break;
             }
             let mid = wrapping_add(lo, wrapping_sub(hi, lo) / 2);
-            let r = self.call_row(mid);
-            if r.start < start || (r.start == start && r.end < end) {
+            let row = self.call_row(mid);
+            if row.start < start || (row.start == start && row.end < end) {
                 lo = inc(mid);
             } else {
                 hi = mid;
             }
         }
-        let r = self.call_row(lo);
-        if lo < self.calls.len() && r.start == start && r.end == end {
+        let row = self.call_row(lo);
+        if lo < self.calls.len() && row.start == start && row.end == end {
             n32(lo)
         } else {
             NONE32
@@ -260,28 +268,33 @@ impl Prog {
 
     pub fn call_row(in self, i: u64) -> CallRow {
         match self.calls.try_get(i) {
-            Option::Some(r) => r,
-            Option::None => CallRow { start: 0, end: 0, va: 0, vn: 0 },
+            Option::Some(row) => row,
+            Option::None => CallRow { start: 0, end: 0, var_start: 0, var_count: 0 },
         }
     }
 }
 
-fn read_fun(inout r: Reader, in b: Slice[u8], in c: Ctx, inout params: ChunkSeq[ParamRow]) -> Fun {
-    let key = u32_at(in c.nmap, r.word(in b));
-    let name = u32_at(in c.nmap, r.word(in b));
-    let start = r.word(in b);
-    let end = r.word(in b);
-    let result = u32_at(in c.tmap, r.word(in b));
-    let row = u32_at(in c.tmap, r.word(in b));
-    let carried = u32_at(in c.tmap, r.word(in b));
-    let body = n32(r.word(in b));
-    let pn = r.word(in b);
-    let pa = n32(params.len());
-    for i in 0..pn {
-        let pname = u32_at(in c.nmap, r.word(in b));
-        let pass = wrapping_u8(r.word(in b));
-        let ty = u32_at(in c.tmap, r.word(in b));
-        params.push(ParamRow { name: pname, pass: pass, ty: ty });
+fn read_fun(
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    in ctx: Ctx,
+    inout params: ChunkSeq[ParamRow]
+) -> Fun {
+    let key = u32_at(in ctx.nmap, reader.word(in bytes));
+    let name = u32_at(in ctx.nmap, reader.word(in bytes));
+    let start = reader.word(in bytes);
+    let end = reader.word(in bytes);
+    let result = u32_at(in ctx.tmap, reader.word(in bytes));
+    let row = u32_at(in ctx.tmap, reader.word(in bytes));
+    let carried = u32_at(in ctx.tmap, reader.word(in bytes));
+    let body = n32(reader.word(in bytes));
+    let param_count = reader.word(in bytes);
+    let param_start = n32(params.len());
+    for i in 0..param_count {
+        let param_name = u32_at(in ctx.nmap, reader.word(in bytes));
+        let pass = wrapping_u8(reader.word(in bytes));
+        let ty = u32_at(in ctx.tmap, reader.word(in bytes));
+        params.push(ParamRow { name: param_name, pass: pass, ty: ty });
     }
     Fun {
         key: key,
@@ -292,193 +305,199 @@ fn read_fun(inout r: Reader, in b: Slice[u8], in c: Ctx, inout params: ChunkSeq[
         row: row,
         carried: carried,
         body: body,
-        pa: pa,
-        pn: n32(pn)
+        param_start: param_start,
+        param_count: n32(param_count)
     }
 }
 
 // Maps an encoded name index to its symbol, keeping NONE32.
-fn sym_or_none(in c: Ctx, x: u64) -> u32 {
-    if x == 4294967295 {
+fn sym_or_none(in ctx: Ctx, index: u64) -> u32 {
+    if index == 4294967295 {
         NONE32
     } else {
-        u32_at(in c.nmap, x)
+        u32_at(in ctx.nmap, index)
     }
 }
 
-fn ty_or_none(in c: Ctx, x: u64) -> u32 {
-    if x == 4294967295 {
+fn ty_or_none(in ctx: Ctx, index: u64) -> u32 {
+    if index == 4294967295 {
         NONE32
     } else {
-        u32_at(in c.tmap, x)
+        u32_at(in ctx.tmap, index)
     }
 }
 
-fn map_sym(inout pool: ChunkSeq[u32], in c: Ctx, at: u64) {
-    let x = u32_at(in pool, at);
-    let ok = pool.try_set(at, sym_or_none(in c, w(x)));
+fn map_sym(inout pool: ChunkSeq[u32], in ctx: Ctx, at: u64) {
+    let raw = u32_at(in pool, at);
+    let ok = pool.try_set(at, sym_or_none(in ctx, w(raw)));
 }
 
-fn map_ty(inout pool: ChunkSeq[u32], in c: Ctx, at: u64) {
-    let x = u32_at(in pool, at);
-    let ok = pool.try_set(at, ty_or_none(in c, w(x)));
+fn map_ty(inout pool: ChunkSeq[u32], in ctx: Ctx, at: u64) {
+    let raw = u32_at(in pool, at);
+    let ok = pool.try_set(at, ty_or_none(in ctx, w(raw)));
 }
 
-// Decodes the task words; `r` is at the first of them.
-pub fn read_prog(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Prog {
-    let ne = r.word(in b);
-    let mut exprs: ChunkSeq[ExprNode] = ChunkSeq::with_capacity[ExprNode](ne);
-    for i in 0..ne {
-        let kind = wrapping_u8(r.word(in b));
-        let start = r.word(in b);
-        let end = r.word(in b);
-        let mut a = r.word(in b);
-        let mut bb = r.word(in b);
-        let mut cc = r.word(in b);
-        let mut d = r.word(in b);
-        let e = r.word(in b);
+// Decodes the task words; `reader` is at the first of them.
+pub fn read_prog(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Prog {
+    let expr_count = reader.word(in bytes);
+    let mut exprs: ChunkSeq[ExprNode] = ChunkSeq::with_capacity[ExprNode](expr_count);
+    for i in 0..expr_count {
+        let kind = wrapping_u8(reader.word(in bytes));
+        let start = reader.word(in bytes);
+        let end = reader.word(in bytes);
+        let mut a = reader.word(in bytes);
+        let mut bb = reader.word(in bytes);
+        let mut cc = reader.word(in bytes);
+        let mut d = reader.word(in bytes);
+        let e = reader.word(in bytes);
         // Names and types in the fields become symbols and type ids.
         if kind == 2 || kind == 4 || kind == 10 || kind == 11 || kind == 12 || kind == 16 {
-            a = widen_u64(sym_or_none(in c, a));
+            a = widen_u64(sym_or_none(in ctx, a));
         }
         if kind == 7 {
-            bb = widen_u64(sym_or_none(in c, bb));
+            bb = widen_u64(sym_or_none(in ctx, bb));
         }
         if kind == 15 {
-            cc = widen_u64(ty_or_none(in c, cc));
-            d = widen_u64(ty_or_none(in c, d));
+            cc = widen_u64(ty_or_none(in ctx, cc));
+            d = widen_u64(ty_or_none(in ctx, d));
         }
-        exprs.push(
-            ExprNode {
-                kind: kind,
-                start: start,
-                end: end,
-                a: n32(a),
-                b: n32(bb),
-                c: n32(cc),
-                d: n32(d),
-                e: n32(e)
-            }
-        );
+        exprs.push(ExprNode {
+            kind: kind,
+            start: start,
+            end: end,
+            a: n32(a),
+            b: n32(bb),
+            c: n32(cc),
+            d: n32(d),
+            e: n32(e)
+        });
     }
-    let np = r.word(in b);
-    let mut pats: ChunkSeq[PatNode] = ChunkSeq::with_capacity[PatNode](np);
-    for i in 0..np {
-        let kind = wrapping_u8(r.word(in b));
-        let start = r.word(in b);
-        let end = r.word(in b);
-        let mut a = r.word(in b);
-        let pb = r.word(in b);
-        let pc = r.word(in b);
+    let pat_count = reader.word(in bytes);
+    let mut pats: ChunkSeq[PatNode] = ChunkSeq::with_capacity[PatNode](pat_count);
+    for i in 0..pat_count {
+        let kind = wrapping_u8(reader.word(in bytes));
+        let start = reader.word(in bytes);
+        let end = reader.word(in bytes);
+        let mut a = reader.word(in bytes);
+        let pb = reader.word(in bytes);
+        let pc = reader.word(in bytes);
         if kind == 2 || kind == 5 {
-            a = widen_u64(sym_or_none(in c, a));
+            a = widen_u64(sym_or_none(in ctx, a));
         }
-        pats.push(
-            PatNode { kind: kind, start: start, end: end, a: n32(a), b: n32(pb), c: n32(pc) }
-        );
+        pats.push(PatNode {
+            kind: kind,
+            start: start,
+            end: end,
+            a: n32(a),
+            b: n32(pb),
+            c: n32(pc)
+        });
     }
     // The pool holds expression and pattern indices and passes, and the
     // names and types of the lists that have them, which are mapped to
     // symbols and type ids below (each list belongs to one node).
-    let nl = r.word(in b);
-    let mut pool: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](nl);
-    for i in 0..nl {
-        pool.push(n32(r.word(in b)));
+    let pool_len = reader.word(in bytes);
+    let mut pool: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](pool_len);
+    for i in 0..pool_len {
+        pool.push(n32(reader.word(in bytes)));
     }
     for i in 0..exprs.len() {
-        let x = match exprs.try_get(i) {
-            Option::Some(x) => x,
+        let node = match exprs.try_get(i) {
+            Option::Some(node) => node,
             Option::None => no_expr(),
         };
-        if x.kind == 4 {
-            for j in 0..w(x.c) {
-                map_sym(inout pool, in c, add(w(x.b), wrapping_mul(j, 2)));
+        if node.kind == 4 {
+            for j in 0..w(node.c) {
+                map_sym(inout pool, in ctx, add(w(node.b), wrapping_mul(j, 2)));
             }
-        } else if x.kind == 5 {
-            for j in 0..w(x.b) {
-                map_ty(inout pool, in c, add(w(x.a), add(wrapping_mul(j, 4), 2)));
+        } else if node.kind == 5 {
+            for j in 0..w(node.b) {
+                map_ty(inout pool, in ctx, add(w(node.a), add(wrapping_mul(j, 4), 2)));
             }
-        } else if x.kind == 15 {
-            for j in 0..w(x.b) {
-                let at = add(w(x.a), wrapping_mul(j, 3));
-                map_sym(inout pool, in c, at);
-                map_ty(inout pool, in c, add(at, 2));
+        } else if node.kind == 15 {
+            for j in 0..w(node.b) {
+                let at = add(w(node.a), wrapping_mul(j, 3));
+                map_sym(inout pool, in ctx, at);
+                map_ty(inout pool, in ctx, add(at, 2));
             }
-        } else if x.kind == 16 {
-            let n = w(u32_at(in pool, w(x.e)));
-            for j in 0..n {
-                map_sym(inout pool, in c, add(inc(w(x.e)), wrapping_mul(j, 4)));
+        } else if node.kind == 16 {
+            let clause_count = w(u32_at(in pool, w(node.e)));
+            for j in 0..clause_count {
+                map_sym(inout pool, in ctx, add(inc(w(node.e)), wrapping_mul(j, 4)));
             }
         }
     }
     for i in 0..pats.len() {
-        let p = match pats.try_get(i) {
-            Option::Some(p) => p,
+        let pat = match pats.try_get(i) {
+            Option::Some(pat) => pat,
             Option::None => PatNode { kind: 0, start: 0, end: 0, a: 0, b: 0, c: 0 },
         };
-        if p.kind == 5 {
-            for j in 0..w(p.c) {
-                map_sym(inout pool, in c, add(w(p.b), wrapping_mul(j, 2)));
+        if pat.kind == 5 {
+            for j in 0..w(pat.c) {
+                map_sym(inout pool, in ctx, add(w(pat.b), wrapping_mul(j, 2)));
             }
         }
     }
     let mut params: ChunkSeq[ParamRow] = ChunkSeq::new[ParamRow]();
-    let nf = r.word(in b);
-    let mut funs: ChunkSeq[Fun] = ChunkSeq::with_capacity[Fun](nf);
+    let fun_count = reader.word(in bytes);
+    let mut funs: ChunkSeq[Fun] = ChunkSeq::with_capacity[Fun](fun_count);
     let mut fun_by_key: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    for i in 0..nf {
-        let f = read_fun(inout r, in b, in c, inout params);
-        set_by_symbol(inout fun_by_key, f.key, inc32(n32(funs.len())));
-        funs.push(f);
+    for i in 0..fun_count {
+        let func = read_fun(inout reader, in bytes, in ctx, inout params);
+        set_by_symbol(inout fun_by_key, func.key, inc32(n32(funs.len())));
+        funs.push(func);
     }
-    let nd = r.word(in b);
+    let decl_count = reader.word(in bytes);
     let mut effs: ChunkSeq[EffDecl] = ChunkSeq::new[EffDecl]();
     let mut gens: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut ops: ChunkSeq[Fun] = ChunkSeq::new[Fun]();
     let mut eff_by_name: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    for i in 0..nd {
-        let name = u32_at(in c.nmap, r.word(in b));
-        let linear = r.word(in b) != 0;
-        let start = r.word(in b);
-        let end = r.word(in b);
-        let gn = r.word(in b);
-        let ga = n32(gens.len());
-        for j in 0..gn {
-            gens.push(u32_at(in c.nmap, r.word(in b)));
+    for i in 0..decl_count {
+        let name = u32_at(in ctx.nmap, reader.word(in bytes));
+        let linear = reader.word(in bytes) != 0;
+        let start = reader.word(in bytes);
+        let end = reader.word(in bytes);
+        let gen_count = reader.word(in bytes);
+        let gen_start = n32(gens.len());
+        for j in 0..gen_count {
+            gens.push(u32_at(in ctx.nmap, reader.word(in bytes)));
         }
-        let on = r.word(in b);
-        let oa = n32(ops.len());
-        for j in 0..on {
-            let f = read_fun(inout r, in b, in c, inout params);
-            ops.push(f);
+        let op_count = reader.word(in bytes);
+        let op_start = n32(ops.len());
+        for j in 0..op_count {
+            let op = read_fun(inout reader, in bytes, in ctx, inout params);
+            ops.push(op);
         }
         set_by_symbol(inout eff_by_name, name, inc32(n32(effs.len())));
-        effs.push(
-            EffDecl {
-                name: name,
-                linear: linear,
-                start: start,
-                end: end,
-                ga: ga,
-                gn: n32(gn),
-                oa: oa,
-                on: n32(on)
-            }
-        );
+        effs.push(EffDecl {
+            name: name,
+            linear: linear,
+            start: start,
+            end: end,
+            gen_start: gen_start,
+            gen_count: n32(gen_count),
+            op_start: op_start,
+            op_count: n32(op_count)
+        });
     }
-    let nc = r.word(in b);
-    let mut calls: ChunkSeq[CallRow] = ChunkSeq::with_capacity[CallRow](nc);
+    let call_count = reader.word(in bytes);
+    let mut calls: ChunkSeq[CallRow] = ChunkSeq::with_capacity[CallRow](call_count);
     let mut call_vars: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    for i in 0..nc {
-        let start = r.word(in b);
-        let end = r.word(in b);
-        let vn = r.word(in b);
-        let va = n32(call_vars.len());
-        for j in 0..vn {
-            call_vars.push(u32_at(in c.nmap, r.word(in b)));
-            call_vars.push(u32_at(in c.tmap, r.word(in b)));
+    for i in 0..call_count {
+        let start = reader.word(in bytes);
+        let end = reader.word(in bytes);
+        let var_count = reader.word(in bytes);
+        let var_start = n32(call_vars.len());
+        for j in 0..var_count {
+            call_vars.push(u32_at(in ctx.nmap, reader.word(in bytes)));
+            call_vars.push(u32_at(in ctx.tmap, reader.word(in bytes)));
         }
-        calls.push(CallRow { start: start, end: end, va: va, vn: n32(vn) });
+        calls.push(CallRow {
+            start: start,
+            end: end,
+            var_start: var_start,
+            var_count: n32(var_count)
+        });
     }
     Prog {
         exprs: exprs,

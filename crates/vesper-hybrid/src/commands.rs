@@ -34,10 +34,52 @@ pub(crate) fn install_proof_audit(run: ProofAuditRun) -> Result<(), ProofAuditRu
     PROOF_AUDIT.set(run)
 }
 
-/// Print what `proof_audit_run` (modules/driver) printed and return its error: a
+/// `vesper verify SOURCE --format` from `modules/verify` (#1341): it takes
+/// the packed arguments and returns the module's result bytes.
+pub(crate) type VerifyRun = fn(&[u8]) -> Vec<u8>;
+
+/// The installed [`VerifyRun`], when its swap is on (src/swap/verify.rs).
+static VERIFY: std::sync::OnceLock<VerifyRun> = std::sync::OnceLock::new();
+
+/// Serve `hc_verify_run`'s `--format` runs from `run` (`modules/verify`).
+pub(crate) fn install_verify(run: VerifyRun) -> Result<(), VerifyRun> {
+    VERIFY.set(run)
+}
+
+/// Whether packed `verify` arguments ask for `--format` (before `--`), as
+/// the command layer parsed them: an option's value (`--proofs --format`)
+/// is not a flag. The command layer has rejected `--format` with
+/// `--extract`.
+fn verify_format(packed: &[u8]) -> bool {
+    const VALUED: [&[u8]; 8] = [
+        b"--proofs",
+        b"--theorem",
+        b"--contract-proof",
+        b"--contract-witness",
+        b"--allow-axiom",
+        b"--olean-store",
+        b"--lean",
+        b"--timeout",
+    ];
+    let mut args = packed.split(|&b| b == 0);
+    while let Some(arg) = args.next() {
+        match arg {
+            b"--" => return false,
+            b"--format" => return true,
+            _ if VALUED.contains(&arg) => {
+                args.next();
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Print what a Vesper command module (`proof_audit_run` of
+/// `modules/driver`, `modules/verify`) printed and return its error: a
 /// status byte, the stdout length (8 bytes, little-endian), stdout, then
 /// the error text.
-fn proof_audit_result(result: &[u8]) -> Result<(), String> {
+fn module_result(result: &[u8]) -> Result<(), String> {
     use std::io::Write;
     let (Some(&status), Some(len)) = (result.first(), result.get(1..9)) else {
         std::process::abort();
@@ -1729,7 +1771,7 @@ pub mod host {
         // SAFETY: lent for the call.
         let raw = unsafe { bytes(packed, packed_len) };
         let result = match super::PROOF_AUDIT.get() {
-            Some(run) => super::proof_audit_result(&run(raw)),
+            Some(run) => super::module_result(&run(raw)),
             None => crate::proof_commands::run(unpack_test_args(raw)),
         };
         match result {
@@ -1772,8 +1814,11 @@ pub mod host {
         let _flush = FlushOnReturn;
         // SAFETY: lent for the call.
         let raw = unsafe { bytes(packed, packed_len) };
-        let args = unpack_test_args(raw);
-        match crate::verify_commands::run(args) {
+        let result = match super::VERIFY.get() {
+            Some(run) if super::verify_format(raw) => super::module_result(&run(raw)),
+            _ => crate::verify_commands::run(unpack_test_args(raw)),
+        };
+        match result {
             Ok(()) => 0,
             Err(err) => {
                 let bytes = err.into_bytes();

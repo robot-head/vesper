@@ -590,22 +590,21 @@ fn adt_infos(inout state: St, inout ctx: Cx, in ast: Ast) {
         let kinds_row = at32(in ctx.adt_kind_rows, name);
         let mut names = ChunkSeq::new[u32]();
         for generic_idx in 0..list_len(in ast, adt.generics) {
-            names.push(
-                nm(in state, genericn(in ast, list_at(in ast, adt.generics, generic_idx)).name)
-            );
+            names.push(nm(
+                in state,
+                genericn(in ast, list_at(in ast, adt.generics, generic_idx)).name
+            ));
         }
         let mut kinds = ChunkSeq::new[u8]();
         if kinds_row != NONE {
             for kind_idx in 0..widen_u64(u32_at(in ctx.adt_kind_counts, widen_u64(kinds_row))) {
-                kinds.push(
-                    u8_at(
-                        in ctx.adt_kind_values,
-                        wrapping_add(
-                            widen_u64(u32_at(in ctx.adt_kind_starts, widen_u64(kinds_row))),
-                            kind_idx
-                        )
+                kinds.push(u8_at(
+                    in ctx.adt_kind_values,
+                    wrapping_add(
+                        widen_u64(u32_at(in ctx.adt_kind_starts, widen_u64(kinds_row))),
+                        kind_idx
                     )
-                );
+                ));
             }
         }
         set_scope_from(inout ctx, in names, in kinds);
@@ -965,15 +964,10 @@ fn variant_fields(
     }
     let subst = adt_subst(in state, in ctx, info_row, ty);
     for i in 0..widen_u64(u32_at(in ctx.variant_field_counts, widen_u64(variant_row))) {
-        field_names.push(
-            u32_at(
-                in ctx.variant_field_names,
-                wrapping_add(
-                    widen_u64(u32_at(in ctx.variant_field_starts, widen_u64(variant_row))),
-                    i
-                )
-            )
-        );
+        field_names.push(u32_at(
+            in ctx.variant_field_names,
+            wrapping_add(widen_u64(u32_at(in ctx.variant_field_starts, widen_u64(variant_row))), i)
+        ));
         let field_ty = sub_ty_or(
             inout state,
             in subst,
@@ -1215,18 +1209,14 @@ fn struct_literal(
     let mut generic_names = ChunkSeq::new[u32]();
     let mut generic_kinds = ChunkSeq::new[u8]();
     for i in 0..generic_count {
-        generic_names.push(
-            u32_at(
-                in ctx.info_generic_names,
-                wrapping_add(widen_u64(u32_at(in ctx.info_generic_starts, widen_u64(info_row))), i)
-            )
-        );
-        generic_kinds.push(
-            u8_at(
-                in ctx.info_kind_values,
-                wrapping_add(widen_u64(u32_at(in ctx.info_kind_starts, widen_u64(info_row))), i)
-            )
-        );
+        generic_names.push(u32_at(
+            in ctx.info_generic_names,
+            wrapping_add(widen_u64(u32_at(in ctx.info_generic_starts, widen_u64(info_row))), i)
+        ));
+        generic_kinds.push(u8_at(
+            in ctx.info_kind_values,
+            wrapping_add(widen_u64(u32_at(in ctx.info_kind_starts, widen_u64(info_row))), i)
+        ));
     }
     let mut renaming = subst_new();
     let mut fresh = ChunkSeq::new[u32]();
@@ -1300,9 +1290,10 @@ fn struct_literal(
                         u32_at(
                             in ctx.variant_field_tys,
                             wrapping_add(
-                                widen_u64(
-                                    u32_at(in ctx.variant_field_starts, widen_u64(variant_row))
-                                ),
+                                widen_u64(u32_at(
+                                    in ctx.variant_field_starts,
+                                    widen_u64(variant_row)
+                                )),
                                 j
                             )
                         ),
@@ -1734,33 +1725,28 @@ fn apply_sig(
     let mut generic_names = ChunkSeq::new[u32]();
     let mut generic_kinds = ChunkSeq::new[u8]();
     for i in 0..widen_u64(u32_at(in ctx.sig_generic_counts, widen_u64(row))) {
-        generic_names.push(
-            u32_at(
-                in ctx.sig_generic_names,
-                wrapping_add(widen_u64(u32_at(in ctx.sig_generic_starts, widen_u64(row))), i)
-            )
-        );
-        generic_kinds.push(
-            u8_at(
-                in ctx.sig_generic_kinds,
-                wrapping_add(widen_u64(u32_at(in ctx.sig_generic_starts, widen_u64(row))), i)
-            )
-        );
+        generic_names.push(u32_at(
+            in ctx.sig_generic_names,
+            wrapping_add(widen_u64(u32_at(in ctx.sig_generic_starts, widen_u64(row))), i)
+        ));
+        generic_kinds.push(u8_at(
+            in ctx.sig_generic_kinds,
+            wrapping_add(widen_u64(u32_at(in ctx.sig_generic_starts, widen_u64(row))), i)
+        ));
     }
     let mut param_tys = ChunkSeq::new[u32]();
     for i in 0..widen_u64(u32_at(in ctx.sig_param_counts, widen_u64(row))) {
-        param_tys.push(
-            u32_at(
-                in ctx.sig_param_tys,
-                wrapping_add(widen_u64(u32_at(in ctx.sig_param_starts, widen_u64(row))), i)
-            )
-        );
+        param_tys.push(u32_at(
+            in ctx.sig_param_tys,
+            wrapping_add(widen_u64(u32_at(in ctx.sig_param_starts, widen_u64(row))), i)
+        ));
     }
     let mut obs = ChunkSeq::new[Ob]();
     for i in 0..widen_u64(u32_at(in ctx.sig_ob_counts, widen_u64(row))) {
-        obs.push(
-            ob_get(in ctx, wrapping_add(widen_u64(u32_at(in ctx.sig_ob_starts, widen_u64(row))), i))
-        );
+        obs.push(ob_get(
+            in ctx,
+            wrapping_add(widen_u64(u32_at(in ctx.sig_ob_starts, widen_u64(row))), i)
+        ));
     }
     apply(
         inout state,
@@ -1850,15 +1836,13 @@ fn call(inout state: St, inout ctx: Cx, in ast: Ast, expr_id: u32, expected: u32
         let variant_row = info_variant(in state, in ctx, info_row, variant);
         let mut param_tys = ChunkSeq::new[u32]();
         for i in 0..widen_u64(u32_at(in ctx.variant_field_counts, widen_u64(variant_row))) {
-            param_tys.push(
-                u32_at(
-                    in ctx.variant_field_tys,
-                    wrapping_add(
-                        widen_u64(u32_at(in ctx.variant_field_starts, widen_u64(variant_row))),
-                        i
-                    )
+            param_tys.push(u32_at(
+                in ctx.variant_field_tys,
+                wrapping_add(
+                    widen_u64(u32_at(in ctx.variant_field_starts, widen_u64(variant_row))),
+                    i
                 )
-            );
+            ));
         }
         let generic_count = info_gen_count(in ctx, info_row);
         let mut generic_names = ChunkSeq::new[u32]();
@@ -3135,18 +3119,14 @@ fn check_body(inout state: St, inout ctx: Cx, in ast: Ast, fn_id: u32, row: u32)
     ctx.scope_names.clear();
     ctx.scope_kinds.clear();
     for i in 0..widen_u64(u32_at(in ctx.sig_generic_counts, widen_u64(row))) {
-        ctx.scope_names.push(
-            u32_at(
-                in ctx.sig_generic_names,
-                wrapping_add(widen_u64(u32_at(in ctx.sig_generic_starts, widen_u64(row))), i)
-            )
-        );
-        ctx.scope_kinds.push(
-            u8_at(
-                in ctx.sig_generic_kinds,
-                wrapping_add(widen_u64(u32_at(in ctx.sig_generic_starts, widen_u64(row))), i)
-            )
-        );
+        ctx.scope_names.push(u32_at(
+            in ctx.sig_generic_names,
+            wrapping_add(widen_u64(u32_at(in ctx.sig_generic_starts, widen_u64(row))), i)
+        ));
+        ctx.scope_kinds.push(u8_at(
+            in ctx.sig_generic_kinds,
+            wrapping_add(widen_u64(u32_at(in ctx.sig_generic_starts, widen_u64(row))), i)
+        ));
     }
     let mut param_count = list_len(in ast, func.params);
     if widen_u64(u32_at(in ctx.sig_param_counts, widen_u64(row))) < param_count {

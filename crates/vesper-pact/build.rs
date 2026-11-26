@@ -73,16 +73,8 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
     // query.ves: caught by query_dto_from_fixture_solves.
     (
         "query",
-        "    if r == 0 {
-        n
-    } else {
-        r
-    }",
-        "    if r == 0 {
-        n
-    } else {
-        n
-    }",
+        "    if r == 0 { n } else { r }",
+        "    if r == 0 { n } else { n }",
     ),
     // coherence.ves: caught by coherence_violations_are_reported_deterministically.
     (

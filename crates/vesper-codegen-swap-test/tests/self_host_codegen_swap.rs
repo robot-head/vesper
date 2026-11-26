@@ -199,7 +199,13 @@ fn divergent_hook() {
         ..CodegenHooks::default()
     };
     let mut total = Diff::default();
-    for case in worlds() {
+    // Every world, not the `CODEGEN_SWAP_STEP` sample: the loop stops at
+    // the first divergence, and a sample can miss every `TRUE` request
+    // when a new corpus file shifts it.
+    let all = check_harness::corpus()
+        .iter()
+        .filter(|c| c.world.functions.contains_key("main"));
+    for case in all {
         total.add(compare(&case.name, &case.world, "main", hooks, true, false));
         if !total.clif.is_empty() {
             break;

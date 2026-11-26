@@ -15,303 +15,312 @@ use self::walker::{
 const NONE32: u32 = 4294967295;
 const CT: u8 = 1;
 
-fn put(inout s: Walk, in t: Str) {
-    s.text.extend(in t.as_bytes());
+fn put(inout walk: Walk, in text: Str) {
+    walk.text.extend(in text.as_bytes());
 }
 
-fn put_name(in c: Ctx, inout s: Walk, name: u32) {
-    c.names.write(name, inout s.text);
+fn put_name(in ctx: Ctx, inout walk: Walk, name: u32) {
+    ctx.names.write(name, inout walk.text);
 }
 
-fn begin(inout s: Walk, in code: Str) -> u64 {
-    let a = s.text.len();
-    put(inout s, code);
-    a
+fn begin(inout walk: Walk, in code: Str) -> u64 {
+    let code_start = walk.text.len();
+    put(inout walk, code);
+    code_start
 }
 
-fn finish(inout s: Walk, a: u64, in help: Str, start: u64, end: u64) {
-    let h = s.text.len();
-    put(inout s, help);
-    s.rows.push(DRow { start: start, end: end, a: a, m: add(a, 5), h: h, z: s.text.len() });
+fn finish(inout walk: Walk, code_start: u64, in help: Str, start: u64, end: u64) {
+    let help_start = walk.text.len();
+    put(inout walk, help);
+    walk.rows.push(DRow {
+        start: start,
+        end: end,
+        code_start: code_start,
+        message_start: add(code_start, 5),
+        help_start: help_start,
+        help_end: walk.text.len()
+    });
 }
 
-// `summarise`: the facts to a fixpoint; left in `s.cur`.
-pub fn summarise(inout c: Ctx, in p: Prog, inout s: Walk) {
+// `summarise`: the facts to a fixpoint; left in `walk.summaries`.
+pub fn summarise(inout ctx: Ctx, in prog: Prog, inout walk: Walk) {
     let mut bound: u64 = 4;
-    for i in 0..p.funs.len() {
-        bound = add(bound, wrapping_mul(w(p.fun(n32(i)).pn), 2));
+    for i in 0..prog.funs.len() {
+        bound = add(bound, wrapping_mul(w(prog.fun(n32(i)).param_count), 2));
     }
-    bound = add(bound, p.ops.len());
-    s.emit = false;
-    s.cur.clear();
+    bound = add(bound, prog.ops.len());
+    walk.emit = false;
+    walk.summaries.clear();
     let mut next = sums_new();
-    let ne = s.edges.len();
-    let nn = s.nodes.len();
+    let edge_count = walk.edges.len();
+    let node_count = walk.nodes.len();
     for round in 0..bound {
-        next.assign(in s.cur);
-        for i in 0..p.funs.len() {
-            let f = p.fun(n32(i));
-            let caps = caps_of(in c, s.k, f.row);
-            start(inout c, in p, inout s, n32(i), caps, true);
-            let t = function_body(inout c, in p, inout s);
-            next.merge(in s.found);
-            s.edges.truncate(ne);
-            s.nodes.truncate(nn);
+        next.assign(in walk.summaries);
+        for i in 0..prog.funs.len() {
+            let func = prog.fun(n32(i));
+            let caps = caps_of(in ctx, walk.syms, func.row);
+            start(inout ctx, in prog, inout walk, n32(i), caps, true);
+            let tainted = function_body(inout ctx, in prog, inout walk);
+            next.merge(in walk.found);
+            walk.edges.truncate(edge_count);
+            walk.nodes.truncate(node_count);
         }
-        if next.same(in s.cur) {
+        if next.same(in walk.summaries) {
             break;
         }
-        s.cur.assign(in next);
+        walk.summaries.assign(in next);
     }
 }
 
-fn tail_span_start(in p: Prog, e: u32) -> u64 {
-    let x = p.expr(e);
-    if x.kind == 5 && x.c != NONE32 {
-        return tail_span_start(in p, x.c);
+fn tail_span_start(in prog: Prog, expr_id: u32) -> u64 {
+    let node = prog.expr(expr_id);
+    if node.kind == 5 && node.c != NONE32 {
+        return tail_span_start(in prog, node.c);
     }
-    x.start
+    node.start
 }
 
-fn tail_span_end(in p: Prog, e: u32) -> u64 {
-    let x = p.expr(e);
-    if x.kind == 5 && x.c != NONE32 {
-        return tail_span_end(in p, x.c);
+fn tail_span_end(in prog: Prog, expr_id: u32) -> u64 {
+    let node = prog.expr(expr_id);
+    if node.kind == 5 && node.c != NONE32 {
+        return tail_span_end(in prog, node.c);
     }
-    x.end
+    node.end
 }
 
-fn carries_no_information(in c: Ctx, in s: Walk, ty: u32) -> bool {
-    let n = c.types.node(ty);
-    if n.kind == 2 && n.n == 0 {
+fn carries_no_information(in ctx: Ctx, in walk: Walk, ty: u32) -> bool {
+    let ty_node = ctx.types.node(ty);
+    if ty_node.kind == 2 && ty_node.n == 0 {
         return true;
     }
-    let name = c.types.name(ty);
-    name == s.k.unit || name == s.k.never
+    let name = ctx.types.name(ty);
+    name == walk.syms.unit || name == walk.syms.never
 }
 
 // `check_world`: every diagnostic, sorted by (span, code, message) with
-// duplicates removed, as rows of `s`; returns the kept row indices.
-pub fn check_world(inout c: Ctx, in p: Prog, inout s: Walk) -> ChunkSeq[u64] {
-    summarise(inout c, in p, inout s);
-    s.emit = true;
-    s.text.clear();
-    s.rows.clear();
-    s.edges.clear();
-    s.nodes.clear();
-    for i in 0..p.effs.len() {
-        let d = p.decl(n32(i));
-        if d.name == s.k.rtbus && !d.linear {
-            let a = begin(inout s, "E0724");
+// duplicates removed, as rows of `walk`; returns the kept row indices.
+pub fn check_world(inout ctx: Ctx, in prog: Prog, inout walk: Walk) -> ChunkSeq[u64] {
+    summarise(inout ctx, in prog, inout walk);
+    walk.emit = true;
+    walk.text.clear();
+    walk.rows.clear();
+    walk.edges.clear();
+    walk.nodes.clear();
+    for i in 0..prog.effs.len() {
+        let decl = prog.decl(n32(i));
+        if decl.name == walk.syms.rtbus && !decl.linear {
+            let code_start = begin(inout walk, "E0724");
             put(
-                inout s,
+                inout walk,
                 "'RtBus' must be declared as a linear effect: the realtime bus is resumed exactly once by the host"
             );
             finish(
-                inout s,
-                a,
+                inout walk,
+                code_start,
                 "declare it as `linear effect RtBus { .. }` (§32.2)",
-                d.start,
-                d.end
+                decl.start,
+                decl.end
             );
         }
     }
     let mut indirect = keys_new();
     for pass in 0..2 {
         let infer = pass == 1;
-        for i in 0..p.funs.len() {
-            let f = p.fun(n32(i));
-            let caps = caps_of(in c, s.k, f.row);
-            let ne = s.edges.len();
-            let nn = s.nodes.len();
-            start(inout c, in p, inout s, n32(i), caps, infer);
-            let tainted = function_body(inout c, in p, inout s);
-            if f.body != NONE32
+        for i in 0..prog.funs.len() {
+            let func = prog.fun(n32(i));
+            let caps = caps_of(in ctx, walk.syms, func.row);
+            let edge_count = walk.edges.len();
+            let node_count = walk.nodes.len();
+            start(inout ctx, in prog, inout walk, n32(i), caps, infer);
+            let tainted = function_body(inout ctx, in prog, inout walk);
+            if func.body != NONE32
                 && !infer
                 && caps & CT != 0
                 && tainted
-                && !secret_type(in c, inout s, f.result)
-                && !carries_no_information(in c, in s, f.result)
-                && !walker_gate(in c, f.name) {
-                let a = begin(inout s, "E0706");
-                put(inout s, "eff [ConstTime] function '");
-                put_name(in c, inout s, f.name);
-                put(inout s, "' returns a secret-derived value as non-secret '");
-                display(in c.types, in c.names, f.result, inout s.text);
-                put(inout s, "'");
+                && !secret_type(in ctx, inout walk, func.result)
+                && !carries_no_information(in ctx, in walk, func.result)
+                && !walker_gate(in ctx, func.name) {
+                let code_start = begin(inout walk, "E0706");
+                put(inout walk, "eff [ConstTime] function '");
+                put_name(in ctx, inout walk, func.name);
+                put(inout walk, "' returns a secret-derived value as non-secret '");
+                display(in ctx.types, in ctx.names, func.result, inout walk.text);
+                put(inout walk, "'");
                 finish(
-                    inout s,
-                    a,
+                    inout walk,
+                    code_start,
                     "wrap the result in a secret type or pass it through an explicit declassify gate",
-                    tail_span_start(in p, f.body),
-                    tail_span_end(in p, f.body)
+                    tail_span_start(in prog, func.body),
+                    tail_span_end(in prog, func.body)
                 );
             }
             if infer {
-                indirect.merge(in s.indirect);
+                indirect.merge(in walk.indirect);
             } else {
-                s.edges.truncate(ne);
-                s.nodes.truncate(nn);
+                walk.edges.truncate(edge_count);
+                walk.nodes.truncate(node_count);
             }
         }
     }
-    realtime_recursion(inout c, inout s, in indirect);
-    sorted_rows(in s)
+    realtime_recursion(inout ctx, inout walk, in indirect);
+    sorted_rows(in walk)
 }
 
-fn walker_gate(in c: Ctx, name: u32) -> bool {
-    is_declassify_gate(in c, name)
+fn walker_gate(in ctx: Ctx, name: u32) -> bool {
+    is_declassify_gate(in ctx, name)
 }
 
 // ------------------------------------------------------------ recursion
 
-fn edge_at(in s: Walk, i: u64) -> Edge {
-    match s.edges.try_get(i) {
-        Option::Some(e) => e,
+fn edge_at(in walk: Walk, i: u64) -> Edge {
+    match walk.edges.try_get(i) {
+        Option::Some(edge) => edge,
         Option::None => Edge { node: 0, callee: 0, start: 0, end: 0 },
     }
 }
 
 // Byte order of two names (-1, 0, 1).
-pub fn cmp_names(in c: Ctx, a: u32, b: u32) -> i32 {
-    let na = c.names.size(a);
-    let nb = c.names.size(b);
-    let n = if na < nb { na } else { nb };
+pub fn cmp_names(in ctx: Ctx, a: u32, b: u32) -> i32 {
+    let a_len = ctx.names.size(a);
+    let b_len = ctx.names.size(b);
+    let n = if a_len < b_len { a_len } else { b_len };
     for i in 0..n {
-        let x = c.names.byte(a, i);
-        let y = c.names.byte(b, i);
-        if x < y {
+        let a_byte = ctx.names.byte(a, i);
+        let b_byte = ctx.names.byte(b, i);
+        if a_byte < b_byte {
             return -1;
         }
-        if x > y {
+        if a_byte > b_byte {
             return 1;
         }
     }
-    if na < nb {
+    if a_len < b_len {
         -1
-    } else if na > nb {
+    } else if a_len > b_len {
         1
     } else {
         0
     }
 }
 
-// Sorts `v` (symbols) by name bytes (insertion sort: the graph is small).
-fn sort_names(in c: Ctx, inout v: ChunkSeq[u32]) {
-    for i in 1..v.len() {
-        let x = u32_at(in v, i);
+// Sorts `names` (symbols) by name bytes (insertion sort: the graph is small).
+fn sort_names(in ctx: Ctx, inout names: ChunkSeq[u32]) {
+    for i in 1..names.len() {
+        let name = u32_at(in names, i);
         let mut j = i;
         loop {
             if j == 0 {
                 break;
             }
-            let y = u32_at(in v, wrapping_sub(j, 1));
-            if cmp_names(in c, y, x) <= 0 {
+            let prev = u32_at(in names, wrapping_sub(j, 1));
+            if cmp_names(in ctx, prev, name) <= 0 {
                 break;
             }
-            let ok = v.try_set(j, y);
+            let ok = names.try_set(j, prev);
             j = wrapping_sub(j, 1);
         }
-        let ok = v.try_set(j, x);
+        let ok = names.try_set(j, name);
     }
 }
 
 // `realtime_recursion`: call cycles among realtime functions (E0722).
-fn realtime_recursion(inout c: Ctx, inout s: Walk, in indirect: Keys) {
-    let ind = s.k.indirect;
+fn realtime_recursion(inout ctx: Ctx, inout walk: Walk, in indirect: Keys) {
+    let indirect_sym = walk.syms.indirect;
     // The graph's nodes in name order, with the synthetic INDIRECT node.
     let mut nodes: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    for i in 0..s.nodes.len() {
-        nodes.push(u32_at(in s.nodes, i));
+    for i in 0..walk.nodes.len() {
+        nodes.push(u32_at(in walk.nodes, i));
     }
-    let mut has_ind = false;
+    let mut has_indirect = false;
     for i in 0..nodes.len() {
-        if u32_at(in nodes, i) == ind {
-            has_ind = true;
+        if u32_at(in nodes, i) == indirect_sym {
+            has_indirect = true;
         }
     }
-    if !has_ind {
-        nodes.push(ind);
+    if !has_indirect {
+        nodes.push(indirect_sym);
     }
-    sort_names(in c, inout nodes);
-    let count = nodes.len();
+    sort_names(in ctx, inout nodes);
+    let node_count = nodes.len();
     // symbol -> node index + 1
     let mut index: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    for i in 0..count {
+    for i in 0..node_count {
         set_by_symbol(inout index, u32_at(in nodes, i), inc32(n32(i)));
     }
     // Edges grouped by node, in insertion order: (callee node index + 1 or
     // 0 outside the graph, start, end); INDIRECT's edges go to every
     // address-taken realtime function and realtime closure.
-    let mut first: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    first.resize(inc(count), 0);
-    let mut extra: ChunkSeq[Edge] = ChunkSeq::new[Edge]();
+    let mut edge_starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    edge_starts.resize(inc(node_count), 0);
+    let mut extra_edges: ChunkSeq[Edge] = ChunkSeq::new[Edge]();
     for i in 0..indirect.len() {
-        extra.push(Edge { node: ind, callee: n32(indirect.get(i)), start: 0, end: 0 });
+        extra_edges
+            .push(Edge { node: indirect_sym, callee: n32(indirect.get(i)), start: 0, end: 0 });
     }
-    let total = add(s.edges.len(), extra.len());
-    for i in 0..total {
-        let e = if i < s.edges.len() {
-            edge_at(in s, i)
+    let edge_count = add(walk.edges.len(), extra_edges.len());
+    for i in 0..edge_count {
+        let edge = if i < walk.edges.len() {
+            edge_at(in walk, i)
         } else {
-            match extra.try_get(wrapping_sub(i, s.edges.len())) {
-                Option::Some(e) => e,
-                Option::None => edge_at(in s, 0),
+            match extra_edges.try_get(wrapping_sub(i, walk.edges.len())) {
+                Option::Some(edge) => edge,
+                Option::None => edge_at(in walk, 0),
             }
         };
-        let ni = w(u32_at(in index, w(e.node)));
-        if ni != 0 {
-            let ok = first.try_set(ni, inc(u64_at(in first, ni)));
+        let node_slot = w(u32_at(in index, w(edge.node)));
+        if node_slot != 0 {
+            let ok = edge_starts.try_set(node_slot, inc(u64_at(in edge_starts, node_slot)));
         }
     }
-    for i in 0..count {
-        let ok = first.try_set(inc(i), add(u64_at(in first, inc(i)), u64_at(in first, i)));
+    for i in 0..node_count {
+        let ok = edge_starts
+            .try_set(inc(i), add(u64_at(in edge_starts, inc(i)), u64_at(in edge_starts, i)));
     }
-    let mut fill: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    for i in 0..count {
-        fill.push(u64_at(in first, i));
+    let mut edge_fill: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..node_count {
+        edge_fill.push(u64_at(in edge_starts, i));
     }
-    let mut to: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    to.resize(total, 0);
+    let mut targets: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    targets.resize(edge_count, 0);
     let mut spans: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    spans.resize(wrapping_mul(total, 2), 0);
+    spans.resize(wrapping_mul(edge_count, 2), 0);
     let mut callees: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    callees.resize(total, 0);
-    for i in 0..total {
-        let e = if i < s.edges.len() {
-            edge_at(in s, i)
+    callees.resize(edge_count, 0);
+    for i in 0..edge_count {
+        let edge = if i < walk.edges.len() {
+            edge_at(in walk, i)
         } else {
-            match extra.try_get(wrapping_sub(i, s.edges.len())) {
-                Option::Some(e) => e,
-                Option::None => edge_at(in s, 0),
+            match extra_edges.try_get(wrapping_sub(i, walk.edges.len())) {
+                Option::Some(edge) => edge,
+                Option::None => edge_at(in walk, 0),
             }
         };
-        let ni = w(u32_at(in index, w(e.node)));
-        if ni != 0 {
-            let at = u64_at(in fill, wrapping_sub(ni, 1));
-            let ok = fill.try_set(wrapping_sub(ni, 1), inc(at));
-            let ok2 = to.try_set(at, u32_at(in index, w(e.callee)));
-            let ok3 = spans.try_set(wrapping_mul(at, 2), e.start);
-            let ok4 = spans.try_set(inc(wrapping_mul(at, 2)), e.end);
-            let ok5 = callees.try_set(at, e.callee);
+        let node_slot = w(u32_at(in index, w(edge.node)));
+        if node_slot != 0 {
+            let slot = u64_at(in edge_fill, wrapping_sub(node_slot, 1));
+            let ok = edge_fill.try_set(wrapping_sub(node_slot, 1), inc(slot));
+            let ok2 = targets.try_set(slot, u32_at(in index, w(edge.callee)));
+            let ok3 = spans.try_set(wrapping_mul(slot, 2), edge.start);
+            let ok4 = spans.try_set(inc(wrapping_mul(slot, 2)), edge.end);
+            let ok5 = callees.try_set(slot, edge.callee);
         }
     }
     let mut reported = keys_new();
     let mut seen: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    seen.resize(count, 0);
+    seen.resize(node_count, 0);
     let mut generation: u64 = 0;
     let mut stack: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    for r in 0..count {
-        let root = u32_at(in nodes, r);
-        if root == ind {
+    for root_index in 0..node_count {
+        let root = u32_at(in nodes, root_index);
+        if root == indirect_sym {
             continue;
         }
-        let a = u64_at(in first, r);
-        let b = u64_at(in first, inc(r));
-        for k in a..b {
-            let target = u32_at(in to, k);
-            let start = u64_at(in spans, wrapping_mul(k, 2));
-            let end = u64_at(in spans, inc(wrapping_mul(k, 2)));
+        let lo = u64_at(in edge_starts, root_index);
+        let hi = u64_at(in edge_starts, inc(root_index));
+        for edge_index in lo..hi {
+            let target = u32_at(in targets, edge_index);
+            let start = u64_at(in spans, wrapping_mul(edge_index, 2));
+            let end = u64_at(in spans, inc(wrapping_mul(edge_index, 2)));
             let key = pair(n32(start), n32(end));
             if target == 0 || reported.has(key) {
                 continue;
@@ -325,43 +334,43 @@ fn realtime_recursion(inout c: Ctx, inout s: Walk, in indirect: Keys) {
                 if n == 0 {
                     break;
                 }
-                let x = u32_at(in stack, wrapping_sub(n, 1));
+                let node = u32_at(in stack, wrapping_sub(n, 1));
                 stack.truncate(wrapping_sub(n, 1));
-                if w(x) == r {
+                if w(node) == root_index {
                     cycle = true;
                     break;
                 }
-                if u64_at(in seen, w(x)) == generation {
+                if u64_at(in seen, w(node)) == generation {
                     continue;
                 }
-                let ok = seen.try_set(w(x), generation);
-                let xa = u64_at(in first, w(x));
-                let xb = u64_at(in first, inc(w(x)));
-                for j in xa..xb {
-                    let y = u32_at(in to, j);
-                    if y != 0 {
-                        stack.push(wrapping_sub(y, 1));
+                let ok = seen.try_set(w(node), generation);
+                let succ_start = u64_at(in edge_starts, w(node));
+                let succ_end = u64_at(in edge_starts, inc(w(node)));
+                for j in succ_start..succ_end {
+                    let succ = u32_at(in targets, j);
+                    if succ != 0 {
+                        stack.push(wrapping_sub(succ, 1));
                     }
                 }
             }
             if cycle {
                 reported.insert(key);
-                let callee = u32_at(in callees, k);
-                let d = begin(inout s, "E0722");
-                if callee == ind {
-                    put(inout s, "eff [Realtime] call through a function value in '");
-                    put_shown(in c, inout s, root);
-                    put(inout s, "' may reach it again; recursion has no static bound");
+                let callee = u32_at(in callees, edge_index);
+                let code_start = begin(inout walk, "E0722");
+                if callee == indirect_sym {
+                    put(inout walk, "eff [Realtime] call through a function value in '");
+                    put_shown(in ctx, inout walk, root);
+                    put(inout walk, "' may reach it again; recursion has no static bound");
                 } else {
-                    put(inout s, "eff [Realtime] call from '");
-                    put_shown(in c, inout s, root);
-                    put(inout s, "' to '");
-                    put_name(in c, inout s, callee);
-                    put(inout s, "' is recursive; recursion has no static bound");
+                    put(inout walk, "eff [Realtime] call from '");
+                    put_shown(in ctx, inout walk, root);
+                    put(inout walk, "' to '");
+                    put_name(in ctx, inout walk, callee);
+                    put(inout walk, "' is recursive; recursion has no static bound");
                 }
                 finish(
-                    inout s,
-                    d,
+                    inout walk,
+                    code_start,
                     "realtime code must have a statically bounded call depth; unroll or bound the iteration",
                     start,
                     end
@@ -371,40 +380,47 @@ fn realtime_recursion(inout c: Ctx, inout s: Walk, in indirect: Keys) {
     }
 }
 
-fn put_shown(in c: Ctx, inout s: Walk, root: u32) {
-    if c.names.has_prefix(root, in "$rtbus@".as_bytes()) {
-        put(inout s, "an RtBus handler");
-    } else if c.names.has_prefix(root, in "$closure@".as_bytes()) {
-        put(inout s, "a realtime closure");
+fn put_shown(in ctx: Ctx, inout walk: Walk, root: u32) {
+    if ctx.names.has_prefix(root, in "$rtbus@".as_bytes()) {
+        put(inout walk, "an RtBus handler");
+    } else if ctx.names.has_prefix(root, in "$closure@".as_bytes()) {
+        put(inout walk, "a realtime closure");
     } else {
-        put_name(in c, inout s, root);
+        put_name(in ctx, inout walk, root);
     }
 }
 
 // ------------------------------------------------------------ order
 
-fn row(in s: Walk, i: u64) -> DRow {
-    match s.rows.try_get(i) {
-        Option::Some(r) => r,
-        Option::None => DRow { start: 0, end: 0, a: 0, m: 0, h: 0, z: 0 },
+fn row(in walk: Walk, i: u64) -> DRow {
+    match walk.rows.try_get(i) {
+        Option::Some(diag) => diag,
+        Option::None => DRow {
+            start: 0,
+            end: 0,
+            code_start: 0,
+            message_start: 0,
+            help_start: 0,
+            help_end: 0
+        },
     }
 }
 
-fn cmp_text(in s: Walk, a: u64, an: u64, b: u64, bn: u64) -> i32 {
-    let n = if an < bn { an } else { bn };
+fn cmp_text(in walk: Walk, a_start: u64, a_len: u64, b_start: u64, b_len: u64) -> i32 {
+    let n = if a_len < b_len { a_len } else { b_len };
     for i in 0..n {
-        let x = u8_at(in s.text, add(a, i));
-        let y = u8_at(in s.text, add(b, i));
-        if x < y {
+        let a_byte = u8_at(in walk.text, add(a_start, i));
+        let b_byte = u8_at(in walk.text, add(b_start, i));
+        if a_byte < b_byte {
             return -1;
         }
-        if x > y {
+        if a_byte > b_byte {
             return 1;
         }
     }
-    if an < bn {
+    if a_len < b_len {
         -1
-    } else if an > bn {
+    } else if a_len > b_len {
         1
     } else {
         0
@@ -412,31 +428,43 @@ fn cmp_text(in s: Walk, a: u64, an: u64, b: u64, bn: u64) -> i32 {
 }
 
 // (start, end, code, message) order of rows i and j.
-fn cmp_rows(in s: Walk, i: u64, j: u64) -> i32 {
-    let a = row(in s, i);
-    let b = row(in s, j);
-    if a.start != b.start {
-        return if a.start < b.start { -1 } else { 1 };
+fn cmp_rows(in walk: Walk, i: u64, j: u64) -> i32 {
+    let left = row(in walk, i);
+    let right = row(in walk, j);
+    if left.start != right.start {
+        return if left.start < right.start { -1 } else { 1 };
     }
-    if a.end != b.end {
-        return if a.end < b.end { -1 } else { 1 };
+    if left.end != right.end {
+        return if left.end < right.end { -1 } else { 1 };
     }
-    let c = cmp_text(in s, a.a, wrapping_sub(a.m, a.a), b.a, wrapping_sub(b.m, b.a));
-    if c != 0 {
-        return c;
+    let order = cmp_text(
+        in walk,
+        left.code_start,
+        wrapping_sub(left.message_start, left.code_start),
+        right.code_start,
+        wrapping_sub(right.message_start, right.code_start)
+    );
+    if order != 0 {
+        return order;
     }
-    cmp_text(in s, a.m, wrapping_sub(a.h, a.m), b.m, wrapping_sub(b.h, b.m))
+    cmp_text(
+        in walk,
+        left.message_start,
+        wrapping_sub(left.help_start, left.message_start),
+        right.message_start,
+        wrapping_sub(right.help_start, right.message_start)
+    )
 }
 
 // A stable merge sort of the row indices, then `dedup_by` on (code, span,
 // message).
-fn sorted_rows(in s: Walk) -> ChunkSeq[u64] {
-    let n = s.rows.len();
-    let mut v: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
-    let mut tmp: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+fn sorted_rows(in walk: Walk) -> ChunkSeq[u64] {
+    let n = walk.rows.len();
+    let mut order: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    let mut merged: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
     for i in 0..n {
-        v.push(i);
-        tmp.push(i);
+        order.push(i);
+        merged.push(i);
     }
     let mut width: u64 = 1;
     loop {
@@ -458,12 +486,14 @@ fn sorted_rows(in s: Walk) -> ChunkSeq[u64] {
                     break;
                 }
                 let take_left = j >= hi
-                    || (i < mid && cmp_rows(in s, u64_at(in v, i), u64_at(in v, j)) <= 0);
+                    || (
+                        i < mid && cmp_rows(in walk, u64_at(in order, i), u64_at(in order, j)) <= 0
+                    );
                 if take_left {
-                    let ok = tmp.try_set(k, u64_at(in v, i));
+                    let ok = merged.try_set(k, u64_at(in order, i));
                     i = inc(i);
                 } else {
-                    let ok = tmp.try_set(k, u64_at(in v, j));
+                    let ok = merged.try_set(k, u64_at(in order, j));
                     j = inc(j);
                 }
                 k = inc(k);
@@ -471,18 +501,18 @@ fn sorted_rows(in s: Walk) -> ChunkSeq[u64] {
             lo = hi;
         }
         for i in 0..n {
-            let ok = v.try_set(i, u64_at(in tmp, i));
+            let ok = order.try_set(i, u64_at(in merged, i));
         }
         width = wrapping_mul(width, 2);
     }
     let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
     for i in 0..n {
-        let x = u64_at(in v, i);
-        let m = out.len();
-        if m > 0 && cmp_rows(in s, u64_at(in out, wrapping_sub(m, 1)), x) == 0 {
+        let index = u64_at(in order, i);
+        let kept = out.len();
+        if kept > 0 && cmp_rows(in walk, u64_at(in out, wrapping_sub(kept, 1)), index) == 0 {
             continue;
         }
-        out.push(x);
+        out.push(index);
     }
     out
 }
@@ -493,49 +523,49 @@ fn min_u64(a: u64, b: u64) -> u64 {
 
 // One line per kept diagnostic, as the Rust side writes it:
 // "<code> <start>..<end> <message> | <help> | 0".
-pub fn write_text(in s: Walk, in rows: ChunkSeq[u64], inout o: ChunkSeq[u8]) {
+pub fn write_text(in walk: Walk, in rows: ChunkSeq[u64], inout out: ChunkSeq[u8]) {
     for i in 0..rows.len() {
-        let r = row(in s, u64_at(in rows, i));
-        for j in r.a..r.m {
-            o.push(u8_at(in s.text, j));
+        let diag = row(in walk, u64_at(in rows, i));
+        for j in diag.code_start..diag.message_start {
+            out.push(u8_at(in walk.text, j));
         }
-        o.push(32);
-        push_decimal(inout o, r.start);
-        o.extend(in "..".as_bytes());
-        push_decimal(inout o, r.end);
-        o.push(32);
-        for j in r.m..r.h {
-            o.push(u8_at(in s.text, j));
+        out.push(32);
+        push_decimal(inout out, diag.start);
+        out.extend(in "..".as_bytes());
+        push_decimal(inout out, diag.end);
+        out.push(32);
+        for j in diag.message_start..diag.help_start {
+            out.push(u8_at(in walk.text, j));
         }
-        o.extend(in " | ".as_bytes());
-        for j in r.h..r.z {
-            o.push(u8_at(in s.text, j));
+        out.extend(in " | ".as_bytes());
+        for j in diag.help_start..diag.help_end {
+            out.push(u8_at(in walk.text, j));
         }
-        o.extend(in " | 0\n".as_bytes());
+        out.extend(in " | 0\n".as_bytes());
     }
 }
 
-pub fn push_u32_le(inout o: ChunkSeq[u8], x: u64) {
-    o.push(wrapping_u8(x & 255));
-    o.push(wrapping_u8((x >> 8) & 255));
-    o.push(wrapping_u8((x >> 16) & 255));
-    o.push(wrapping_u8((x >> 24) & 255));
+pub fn push_u32_le(inout out: ChunkSeq[u8], value: u64) {
+    out.push(wrapping_u8(value & 255));
+    out.push(wrapping_u8((value >> 8) & 255));
+    out.push(wrapping_u8((value >> 16) & 255));
+    out.push(wrapping_u8((value >> 24) & 255));
 }
 
 // Binary diagnostic encoding for vesper-hybrid: u32 count, then per row:
 // u32 start, u32 end, u32 code_len, u32 msg_len, u32 help_len, followed by
 // the raw UTF-8 bytes of code, message, and help.
-pub fn write_bin(in s: Walk, in rows: ChunkSeq[u64], inout o: ChunkSeq[u8]) {
-    push_u32_le(inout o, rows.len());
+pub fn write_bin(in walk: Walk, in rows: ChunkSeq[u64], inout out: ChunkSeq[u8]) {
+    push_u32_le(inout out, rows.len());
     for i in 0..rows.len() {
-        let r = row(in s, u64_at(in rows, i));
-        push_u32_le(inout o, r.start);
-        push_u32_le(inout o, r.end);
-        push_u32_le(inout o, wrapping_sub(r.m, r.a));
-        push_u32_le(inout o, wrapping_sub(r.h, r.m));
-        push_u32_le(inout o, wrapping_sub(r.z, r.h));
-        for j in r.a..r.z {
-            o.push(u8_at(in s.text, j));
+        let diag = row(in walk, u64_at(in rows, i));
+        push_u32_le(inout out, diag.start);
+        push_u32_le(inout out, diag.end);
+        push_u32_le(inout out, wrapping_sub(diag.message_start, diag.code_start));
+        push_u32_le(inout out, wrapping_sub(diag.help_start, diag.message_start));
+        push_u32_le(inout out, wrapping_sub(diag.help_end, diag.help_start));
+        for j in diag.code_start..diag.help_end {
+            out.push(u8_at(in walk.text, j));
         }
     }
 }

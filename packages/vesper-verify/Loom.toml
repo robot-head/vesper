@@ -5,10 +5,15 @@ edition = "2026"
 # `vesper verify` (src/verify_commands.rs) in Vesper (SH5 lane 18, #1341):
 # so far the pure pieces of `--extract`, theorem discovery in a Lean proofs
 # file and the contract-binding source; and `--format`'s formatter model
-# and its Lean witness.
+# and its Lean witness; and `--format` end to end (run.ves): the Lean run
+# over the pinned model and the witness, and the report.
 capability_ceiling = ["Fail", "Alloc", "Ffi"]
 
 [dependencies]
+"@vesper-std/fs" = { version = "^0.1", path = "../vesper-std/fs" }
+"@vesper-std/env" = { version = "^0.1", path = "../vesper-std/env" }
+"@vesper-std/process" = { version = "^0.1", path = "../vesper-std/process" }
+"@vesper-std/hash-sys" = { version = "^0.1", path = "../vesper-std/hash/sys" }
 "@vesper/proof-audit" = { version = "^0.1", path = "../vesper-proof-audit" }
 "@vesper/fmt" = { version = "^0.1", path = "../../crates/vesper-fmt/vesper" }
 "@vesper/lean-syntax" = { version = "^0.1", path = "../../crates/vesper-lean-syntax/vesper" }

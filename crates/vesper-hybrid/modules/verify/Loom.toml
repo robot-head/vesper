@@ -1,0 +1,13 @@
+[package]
+name = "@vesper/hybrid-verify"
+version = "0.1.0"
+edition = "2026"
+# `vesper verify SOURCE --format` (src/verify_commands.rs) served from
+# @vesper/verify (SH5 lane 18, #1341); `--extract` stays in Rust until the
+# checked world is in Vesper. Its own module, like proof_audit, because it
+# links hash-sys's BLAKE3 C.
+capability_ceiling = ["Fail", "Alloc", "Ffi[StdFs]", "Ffi[StdEnv]", "Ffi[StdProcess]", "Ffi[Blake3]"]
+
+[dependencies]
+"@vesper/verify" = { version = "^0.1", path = "../../../../packages/vesper-verify" }
+"@vesper/proof-audit" = { version = "^0.1", path = "../../../../packages/vesper-proof-audit" }

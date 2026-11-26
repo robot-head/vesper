@@ -177,19 +177,17 @@ fn read_world(
             wd.variants.push(Variant { name: vname, fa: fa, fc: n32(fc), named: named });
         }
         let id = n32(wd.adts.len());
-        wd.adts.push(
-            Adt {
-                name: name,
-                mode: mode,
-                ga: ga,
-                gn: n32(gn),
-                va: va,
-                vn: n32(vn),
-                is_enum: is_enum,
-                tile: tile,
-                span_zero: span_zero
-            }
-        );
+        wd.adts.push(Adt {
+            name: name,
+            mode: mode,
+            ga: ga,
+            gn: n32(gn),
+            va: va,
+            vn: n32(vn),
+            is_enum: is_enum,
+            tile: tile,
+            span_zero: span_zero
+        });
         wd.index(name, id);
     }
     let en = r.word(in b);

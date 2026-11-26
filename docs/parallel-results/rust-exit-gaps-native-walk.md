@@ -505,3 +505,53 @@ Both swaps join the hybrid's `gated` set. **Rust lines deleted:** 0. This is
 a compiler module, so `instances_for_roots`, `NativeAbi::plan` and
 `frame_plan` go when the Rust compiler retires, and nothing goes at this
 flip.
+
+## Part 6a: the block plan (#2094)
+
+Part 6 ports the walk's emission (`Codegen`), one decision at a time, the
+way parts 3 to 5 ported its setup. The first decision `ir_graph_at` makes
+for a graph is its block plan, now `native::block_plan` behind the new
+`block_plan` swap hook (`codegen_swap::BlockPlanHook`). The plan has three
+parts:
+
+- the order the blocks are lowered in: petgraph's topological order of the
+  reachable blocks, or the reverse postorder from the entry when there is a
+  loop, then the unreachable blocks in index order;
+- the blocks on a cycle;
+- the blocks sealed as soon as they are lowered. A block is sealed early
+  when it is not the entry, not on a cycle, and every predecessor came
+  before it.
+
+The input is each block's successor list (`native::block_targets`).
+
+`@vesper/native-walk` answers it in packages/vesper-codegen-walk/src/blocks.ves
+(`native_walk_block_plan_bytes`). The order has to be petgraph 0.8's exactly,
+so the port follows `GraphMap` closely:
+
+- nodes are kept in insertion order, and each adjacency list in edge
+  insertion order;
+- a repeated edge is ignored;
+- a self loop gets only an outgoing entry, but it still counts as its own
+  predecessor;
+- `remove_node` does swap removals on the node list and on each
+  neighbour's list, and these reorder both before `toposort` runs.
+
+The hybrid driver installs the package at the hook: `block_plan` in
+crates/vesper-hybrid/src/swap/codegen_walk.rs, an open row.
+
+tests/self_host_native_walk_blocks.rs:
+
+| Check | Result |
+|---|---|
+| Plans, Rust against Vesper | 0 of 5,024 graphs differ: the 1,024 graphs the walk lowers in the sampled corpus compiles, plus 4,000 seeded random graphs (2,728 with loops, 3,583 with unreachable blocks) |
+| Swap, CLIF and objects | 0 of 82 compiles differ (1,024 graphs planned by Vesper, 0 declined). A perturbed plan changed 51 of them, so the hook is live |
+| ABBA, plans alone (encoding included) | 1.16x [1.12x, 1.19x] |
+| ABBA, whole optimized compiles | 1.01x [0.99x, 1.03x] |
+
+**Rust lines deleted:** 0. `block_plan` goes when the Rust compiler
+retires, and the petgraph dependency goes with it.
+
+Next (6b and later): the other per-graph plans `ir_graph_at` makes before
+it dispatches instructions (split sources, homes, early binds, placed
+writes). After those, the emission skeleton with Vesper driving each graph,
+then the JIT and object driver steps (G3).

@@ -1,0 +1,111 @@
+// Counted loops over scaled indexes and fixed-width reads and writes
+// (#2022): the bounds-hoisting differentials see each form the guards
+// cover, and `main` runs both the guarded and the checked copies.
+fn gw(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 1000,
+    }
+}
+
+fn rd(in s: Slice[u8], at: u64) -> u64 {
+    match s.try_read_u64_le(at) {
+        Option::Some(v) => v,
+        Option::None => 77,
+    }
+}
+
+fn words(n: u64) -> ChunkSeq[u64] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..n {
+        s.push(wrapping_add(wrapping_mul(i, 2654435761), 1));
+    }
+    s
+}
+
+fn bytes(n: u64) -> ChunkSeq[u8] {
+    let mut s: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..n {
+        s.push(wrapping_u8(wrapping_add(wrapping_mul(i, 37), 11)));
+    }
+    s
+}
+
+// `b[5i]`, `b[5i + 1]` and `b[5i + 4]`: one guard of five elements.
+fn strided(in b: Slice[u64], lo: u64, n: u64) -> u64 {
+    let mut acc: u64 = 0;
+    for i in lo..n {
+        let bi = wrapping_mul(i, 5);
+        let w0 = gw(in b, bi);
+        let w1 = gw(in b, wrapping_add(bi, 1));
+        let w4 = gw(in b, wrapping_add(bi, 4));
+        acc = wrapping_add(wrapping_mul(acc, 31), w0 ^ w1 ^ w4);
+    }
+    acc
+}
+
+// `(m - i) * 4 + 1`, `(k + i) << 2` and `3 * (i - k) + 6`.
+fn forms(in s: Slice[u64], lo: u64, hi: u64, k: u64, m: u64) -> u64 {
+    let mut acc: u64 = 0;
+    for i in lo..hi {
+        let a = gw(in s, wrapping_add(wrapping_mul(wrapping_sub(m, i), 4), 1));
+        let b = gw(in s, wrapping_add(k, i) << 2);
+        let c = gw(in s, wrapping_add(wrapping_mul(3, wrapping_sub(i, k)), 6));
+        acc = wrapping_add(wrapping_mul(acc, 131), wrapping_add(a, wrapping_add(b, c)));
+    }
+    acc
+}
+
+// Four `try_read_u64_le` at `(k + t) << 5` and the next three words.
+fn scan(in data: Slice[u8], k: u64, block: u64) -> u64 {
+    let mut acc: u64 = 0;
+    for t in 0..block {
+        let at = wrapping_add(k, t) << 5;
+        let w0 = rd(in data, at);
+        let w1 = rd(in data, wrapping_add(at, 8));
+        let w2 = rd(in data, wrapping_add(at, 16));
+        let w3 = rd(in data, wrapping_add(at, 24));
+        acc = wrapping_add(wrapping_mul(acc, 7), (w0 ^ w1) ^ (w2 ^ w3));
+    }
+    acc
+}
+
+// Total and checked fixed-width writes at `6i + 1` and `6i + 4`.
+fn pack(inout b: ChunkSeq[u8], n: u64) -> u64 eff [Fail[RuntimeError]] {
+    let mut stored: u64 = 0;
+    for i in 0..n {
+        if b.try_write_u32_be(wrapping_add(wrapping_mul(i, 6), 1), wrapping_u32(i)) {
+            stored = wrapping_add(stored, 1);
+        }
+        b.write_u16_le(wrapping_add(wrapping_mul(i, 6), 4), wrapping_u16(wrapping_mul(i, 3)));
+    }
+    stored
+}
+
+fn run() -> u64 eff [Fail[RuntimeError]] {
+    let w = words(100);
+    let v = w.as_slice();
+    let mut acc = wrapping_add(strided(in v, 0, 12), strided(in v, 3, 21));
+    for k in 0..4 {
+        acc = wrapping_add(acc, forms(in v, k, wrapping_add(k, 20), 2, 24));
+    }
+    let b = bytes(1000);
+    let d = b.as_slice();
+    for k in 0..4 {
+        acc = wrapping_add(acc, scan(in d, k, 27));
+        acc = wrapping_add(acc, scan(in d, k, 29));
+    }
+    let mut p = bytes(64);
+    acc = wrapping_add(acc, pack(inout p, 10));
+    acc
+}
+
+fn main() -> u64 {
+    let r = handle Fail[RuntimeError] in {
+        run()
+    } with {
+        return x => x,
+        raise(e, k) => 7777,
+    };
+    r % 251
+}

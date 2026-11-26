@@ -199,23 +199,21 @@ fn read_job(in b: Slice[u8]) -> Job {
             params.push(wrapping_sub(pool.len(), at));
             kinds.push(word(in b, inout r));
         }
-        models.push(
-            Model {
-                function: function,
-                function_n: wrapping_sub(module, function),
-                module: module,
-                module_n: wrapping_sub(theorem, module),
-                theorem: theorem,
-                theorem_n: wrapping_sub(exact, theorem),
-                exact: exact,
-                exact_n: wrapping_sub(bitvec, exact),
-                bitvec: bitvec,
-                bitvec_n: wrapping_sub(key, bitvec),
-                key: key,
-                p0: p0,
-                pn: np
-            }
-        );
+        models.push(Model {
+            function: function,
+            function_n: wrapping_sub(module, function),
+            module: module,
+            module_n: wrapping_sub(theorem, module),
+            theorem: theorem,
+            theorem_n: wrapping_sub(exact, theorem),
+            exact: exact,
+            exact_n: wrapping_sub(bitvec, exact),
+            bitvec: bitvec,
+            bitvec_n: wrapping_sub(key, bitvec),
+            key: key,
+            p0: p0,
+            pn: np
+        });
     }
     Job {
         launcher: launcher,

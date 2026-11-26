@@ -57,11 +57,14 @@ pub fn tcb_poll_transmit(
                 },
             }
             t.stats.segments_sent = wrapping_add(t.stats.segments_sent, 1);
-            return Result::Ok(
-                Option::Some(
-                    Tx { len: n, edt_ns: now, ips: rst.ips, entry: false, pn: 0, bytes: 0 }
-                )
-            );
+            return Result::Ok(Option::Some(Tx {
+                len: n,
+                edt_ns: now,
+                ips: rst.ips,
+                entry: false,
+                pn: 0,
+                bytes: 0
+            }));
         },
         Option::None => (),
     }

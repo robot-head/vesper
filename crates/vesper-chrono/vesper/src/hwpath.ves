@@ -173,12 +173,10 @@ pub fn new_branch_timeline(
         }
         k = wrapping_add(k, 1);
     }
-    Result::Ok(
-        BranchTimeline {
-            anchors: replace(inout anchors, ChunkSeq::new()),
-            steps: replace(inout steps, ChunkSeq::new())
-        }
-    )
+    Result::Ok(BranchTimeline {
+        anchors: replace(inout anchors, ChunkSeq::new()),
+        steps: replace(inout steps, ChunkSeq::new())
+    })
 }
 
 pub fn anchors_from_events(in events: Slice[FlightEvent]) -> ChunkSeq[EffectAnchor] {
@@ -189,12 +187,10 @@ pub fn anchors_from_events(in events: Slice[FlightEvent]) -> ChunkSeq[EffectAnch
             break;
         }
         let _ = handle Fail[RuntimeError] in {
-            out.push(
-                EffectAnchor {
-                    lamport_seq: events[i].lamport_seq,
-                    tsc: events[i].time_ns,
-                }
-            );
+            out.push(EffectAnchor {
+                lamport_seq: events[i].lamport_seq,
+                tsc: events[i].time_ns,
+            });
             0
         } with {
             return _ => 0,
@@ -235,15 +231,13 @@ fn clone_isa(in isa: InstructionSet) -> InstructionSet {
 }
 
 fn push_pt_branch(inout out: ChunkSeq[TraceStep], in b: Branch) {
-    out.push(
-        TraceStep {
-            from: b.from,
-            to: clone_opt_u64(in b.to),
-            kind: StepKind::StepBranch(clone_branch_kind(in b.kind)),
-            tsc_lo: clone_opt_u64(in b.tsc_lo),
-            tsc_hi: clone_opt_u64(in b.tsc_hi),
-        }
-    );
+    out.push(TraceStep {
+        from: b.from,
+        to: clone_opt_u64(in b.to),
+        kind: StepKind::StepBranch(clone_branch_kind(in b.kind)),
+        tsc_lo: clone_opt_u64(in b.tsc_lo),
+        tsc_hi: clone_opt_u64(in b.tsc_hi),
+    });
 }
 
 pub fn steps_from_pt(in trace: FlowTrace) -> ChunkSeq[TraceStep] {
@@ -277,15 +271,13 @@ fn flush_steps(inout open: ChunkSeq[TraceStep], inout out: ChunkSeq[TraceStep], 
     loop {
         match rev.pop() {
             Option::Some(s) => {
-                out.push(
-                    TraceStep {
-                        from: s.from,
-                        to: s.to,
-                        kind: s.kind,
-                        tsc_lo: s.tsc_lo,
-                        tsc_hi: clone_opt_u64(in ts),
-                    }
-                );
+                out.push(TraceStep {
+                    from: s.from,
+                    to: s.to,
+                    kind: s.kind,
+                    tsc_lo: s.tsc_lo,
+                    tsc_hi: clone_opt_u64(in ts),
+                });
             }
             Option::None => break,
         }
@@ -307,48 +299,40 @@ fn push_ete_step(
         EteElement::Address { address, isa } => {
             let from = at;
             at = address;
-            open.push(
-                TraceStep {
-                    from: from,
-                    to: Option::Some(address),
-                    kind: StepKind::StepAddress(clone_isa(in isa)),
-                    tsc_lo: clone_opt_u64(in ts),
-                    tsc_hi: Option::None,
-                }
-            );
+            open.push(TraceStep {
+                from: from,
+                to: Option::Some(address),
+                kind: StepKind::StepAddress(clone_isa(in isa)),
+                tsc_lo: clone_opt_u64(in ts),
+                tsc_hi: Option::None,
+            });
         }
         EteElement::Atom { executed } => {
-            open.push(
-                TraceStep {
-                    from: at,
-                    to: Option::None,
-                    kind: StepKind::StepAtom { executed: executed },
-                    tsc_lo: clone_opt_u64(in ts),
-                    tsc_hi: Option::None,
-                }
-            );
+            open.push(TraceStep {
+                from: at,
+                to: Option::None,
+                kind: StepKind::StepAtom { executed: executed },
+                tsc_lo: clone_opt_u64(in ts),
+                tsc_hi: Option::None,
+            });
         }
         EteElement::Exception { exception_type, preferred_return, isa: _ } => {
-            open.push(
-                TraceStep {
-                    from: preferred_return,
-                    to: Option::None,
-                    kind: StepKind::StepException { exception_type: exception_type },
-                    tsc_lo: clone_opt_u64(in ts),
-                    tsc_hi: Option::None,
-                }
-            );
+            open.push(TraceStep {
+                from: preferred_return,
+                to: Option::None,
+                kind: StepKind::StepException { exception_type: exception_type },
+                tsc_lo: clone_opt_u64(in ts),
+                tsc_hi: Option::None,
+            });
         }
         EteElement::ExceptionReturn => {
-            open.push(
-                TraceStep {
-                    from: at,
-                    to: Option::None,
-                    kind: StepKind::StepExceptionReturn,
-                    tsc_lo: clone_opt_u64(in ts),
-                    tsc_hi: Option::None,
-                }
-            );
+            open.push(TraceStep {
+                from: at,
+                to: Option::None,
+                kind: StepKind::StepExceptionReturn,
+                tsc_lo: clone_opt_u64(in ts),
+                tsc_hi: Option::None,
+            });
         }
         _ => {}
     }
@@ -488,12 +472,10 @@ pub fn path_between(
     to_seq: u64,
 ) -> Result[PathSliceRange, PathError] {
     if from_seq >= to_seq {
-        return Result::Err(
-            PathError::Reversed {
-                from: from_seq,
-                to: to_seq,
-            }
-        );
+        return Result::Err(PathError::Reversed {
+            from: from_seq,
+            to: to_seq,
+        });
     }
     let ia = match anchor_index(in tl, from_seq) {
         Result::Ok(v) => v,
@@ -516,18 +498,16 @@ pub fn path_between(
     };
     let u_end_raw = partition_lo_lt(in tl.steps.as_slice(), b.tsc);
     let u_end = if u_end_raw > end { u_end_raw } else { end };
-    Result::Ok(
-        PathSliceRange {
-            from: a,
-            to: b,
-            def_start: start,
-            def_end: end,
-            u_start_begin: u_start,
-            u_start_end: start,
-            u_end_begin: end,
-            u_end_end: u_end,
-        }
-    )
+    Result::Ok(PathSliceRange {
+        from: a,
+        to: b,
+        def_start: start,
+        def_end: end,
+        u_start_begin: u_start,
+        u_start_end: start,
+        u_end_begin: end,
+        u_end_end: u_end,
+    })
 }
 
 pub fn path_before(in tl: BranchTimeline, to_seq: u64) -> Result[PathSliceRange, PathError] {
@@ -536,11 +516,9 @@ pub fn path_before(in tl: BranchTimeline, to_seq: u64) -> Result[PathSliceRange,
         Result::Err(e) => return Result::Err(e),
     };
     if i == 0 {
-        return Result::Err(
-            PathError::NoPreviousRecord {
-                lamport_seq: to_seq,
-            }
-        );
+        return Result::Err(PathError::NoPreviousRecord {
+            lamport_seq: to_seq,
+        });
     }
     let prev = anchor_at(in tl.anchors.as_slice(), wrapping_sub(i, 1));
     path_between(in tl, prev.lamport_seq, to_seq)
@@ -559,10 +537,8 @@ pub fn reverse_watch_path(
         Result::Ok(p) => p,
         Result::Err(e) => return Result::Err(e),
     };
-    Result::Ok(
-        WatchPathRange {
-            cursor: cursor,
-            path: path,
-        }
-    )
+    Result::Ok(WatchPathRange {
+        cursor: cursor,
+        path: path,
+    })
 }

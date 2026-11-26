@@ -1353,9 +1353,10 @@ fn struct_value(inout d: D, in src: Slice[u8], id: u32, k: u64) -> bool {
         e = x.next;
     }
     // Required fields, in declaration order.
-    let mut json: ChunkSeq[u8] = ChunkSeq::with_capacity(
-        wrapping_add(wrapping_sub(d.out.len(), mark), 128)
-    );
+    let mut json: ChunkSeq[u8] = ChunkSeq::with_capacity(wrapping_add(
+        wrapping_sub(d.out.len(), mark),
+        128
+    ));
     json.push(123);
     let mut first = true;
     for i in 0..count {

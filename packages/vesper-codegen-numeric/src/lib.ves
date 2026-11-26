@@ -65,30 +65,30 @@ pub fn runtime_object(
     in flags: Slice[u8],
     families: u32
 ) -> u64 eff [Ffi[Cranelift]] {
-    let mut m = match module_new(in triple, in flags, in "vesper".as_bytes()) {
-        Some(m) => m,
+    let mut module = match module_new(in triple, in flags, in "vesper".as_bytes()) {
+        Some(module) => module,
         None => return 0,
     };
     let mut ok = true;
     if (families & RT_REGIONS) != 0 || (families & RT_TILED) != 0 {
-        ok = define_region_runtime(inout m);
+        ok = define_region_runtime(inout module);
     }
     if ok && (families & RT_TILED) != 0 {
-        ok = define_tiled_runtime(inout m);
+        ok = define_tiled_runtime(inout module);
     }
     if ok {
         ok = define_box_runtime(
-            inout m,
+            inout module,
             (families & RT_BOX_ALLOC) != 0,
             (families & RT_BOX_FREE) != 0
         );
     }
     if !ok {
-        module_free(m);
+        module_free(module);
         return 0;
     }
-    match module_finish(m) {
-        Some(o) => object_publish(o),
+    match module_finish(module) {
+        Some(object) => object_publish(object),
         None => 0,
     }
 }

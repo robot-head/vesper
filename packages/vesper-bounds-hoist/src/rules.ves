@@ -51,17 +51,6 @@ pub fn block_drop_overlaps(in f: Fun, b: u32, place: u32) -> bool {
     false
 }
 
-// Whether a box drop of a block in `blocks` reclaims a place rooted at
-// `root`.
-fn drop_rooted(in f: Fun, in blocks: ChunkSeq[u32], root: u32) -> bool {
-    for i in 0..f.drop_b.len() {
-        if has(in blocks, u32_at(in f.drop_b, i)) && f.root_of(u32_at(in f.drop_p, i)) == root {
-            return true;
-        }
-    }
-    false
-}
-
 // Whether argument `a` lends a place overlapping `place` other than `in`.
 fn lent_overlapping(in f: Fun, a: Arg, place: u32) -> bool {
     a.pass != TyPass::In && a.place != 0 && f.overlaps(a.place, place)
@@ -125,58 +114,6 @@ pub fn stable_place(in f: Fun, in blocks: ChunkSeq[u32], place: u32) -> bool {
         }
     }
     true
-}
-
-// `stable`: whether nothing in `blocks` can change the length of a
-// sequence rooted at `root`.
-pub fn stable_root(in f: Fun, in blocks: ChunkSeq[u32], root: u32) -> bool {
-    if drop_rooted(in f, in blocks, root) {
-        return false;
-    }
-    for bi in 0..blocks.len() {
-        let k = f.block(w(u32_at(in blocks, bi)));
-        for j in 0..w(k.ic) {
-            let i = f.inst(add(w(k.i0), j));
-            let ok = if i.op == OP_WRITE {
-                f.write_root(i) != root
-            } else if i.op == OP_BIND {
-                !f.binds(i, root)
-            } else if i.op == OP_READ {
-                f.root_of(i.place) != root || w(n32(i.sub)) != 2
-            } else if i.op == OP_SEQ {
-                let recv = has_receiver(i.sub);
-                let receiver = i.gn > 0 && rooted(in f, f.arg(w(i.g0)), root) && recv;
-                let first: u64 = if recv && i.gn > 0 { 1 } else { 0 };
-                let mut others = true;
-                for jj in first..w(i.gn) {
-                    let a = f.arg(add(w(i.g0), jj));
-                    if rooted(in f, a, root) && a.pass != TyPass::In {
-                        others = false;
-                    }
-                }
-                (!receiver || keeps_length(i.sub)) && others
-            } else if i.op == OP_CALL || i.op == OP_TILED || i.op == OP_FIP {
-                let mut others = true;
-                for jj in 0..w(i.gn) {
-                    let a = f.arg(add(w(i.g0), jj));
-                    if rooted(in f, a, root) && a.pass != TyPass::In {
-                        others = false;
-                    }
-                }
-                others
-            } else {
-                true
-            };
-            if !ok {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-fn rooted(in f: Fun, a: Arg, root: u32) -> bool {
-    a.place != 0 && f.root_of(a.place) == root
 }
 
 // `invariant_local`: whether `blocks` never write, rebind or lend `inout`

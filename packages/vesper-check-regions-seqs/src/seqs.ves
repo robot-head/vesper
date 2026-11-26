@@ -793,17 +793,11 @@ impl Sigs {
     }
 
     pub fn adt_span_start(in self, i: u64) -> u64 {
-        match self.adt_start.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        }
+        self.adt_start.try_get(i).unwrap_or(0)
     }
 
     pub fn adt_span_stop(in self, i: u64) -> u64 {
-        match self.adt_stop.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        }
+        self.adt_stop.try_get(i).unwrap_or(0)
     }
 
     pub fn temp(in self, field: u64) -> u8 {

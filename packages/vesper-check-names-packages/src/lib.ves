@@ -511,12 +511,10 @@ fn assemble_module_bytes(inout s: St, in input: Slice[u8], m: u32) -> AssembledM
     s.cur_pkg = at32(in s.mod_pkg, w(m));
     s.is_root = m == s.root_mod;
     let file = at32(in s.mod_file, w(m));
-    s.shift = n32(
-        match s.file_base.try_get(w(file)) {
-            Option::Some(b) => b,
-            Option::None => 0,
-        }
-    );
+    s.shift = n32(match s.file_base.try_get(w(file)) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    });
     s.values.clear();
     s.types.clear();
     let mut l = match s.cached_ls.pop() {
