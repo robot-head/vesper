@@ -1,4 +1,3 @@
-load("@bazel_skylib//rules:native_binary.bzl", "native_binary")
 load("//tools/bazel:vesper_hybrid.bzl", "vesper_hybrid")
 
 # The hybrid Stage 2 compiler (self-hosting SH0 lane 1, #1123): the default
@@ -497,18 +496,4 @@ vesper_hybrid(
         # SH5 lane 10 (#1333): the shared-world cost report.
         "test/swap_crossing": [":bin/vesper-hybrid"],
     },
-)
-
-# The hybrid under the name the default compiler ships as (#1397, the
-# default switch, piece S2): started as `vesper`, it runs the gated swap
-# set with no variable (src/swaps.rs), so this is the compiler the default
-# `vesper` switches to. A copy, not a second build of the crate.
-native_binary(
-    name = "vesper",
-    src = ":bin/vesper-hybrid",
-    out = select({
-        "@platforms//os:windows": "shipped/vesper.exe",
-        "//conditions:default": "shipped/vesper",
-    }),
-    visibility = ["//visibility:public"],
 )

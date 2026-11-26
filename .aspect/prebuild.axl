@@ -1,4 +1,4 @@
-load("./lib/bazel_exec.axl", "prebuild_executables")
+load("./lib/bazel_exec.axl", "VESPER", "prebuild_executables")
 load("./lib/process.axl", "command", "root_path")
 
 _QUERY = "filter(':example/', //crates/...)"
@@ -12,7 +12,7 @@ def _prebuild(ctx: TaskContext) -> int:
     bazel = ctx.std.env.var("BAZEL") or "bazel"
     flags = (ctx.std.env.var("BAZEL_FLAGS") or "").split()
     examples = command(ctx, bazel, ["query"] + flags + [_QUERY], root).stdout("piped").stderr("null").spawn().wait_with_output()
-    targets = ["//:bin/vesper", "//crates/vesper-oracles:bin/logos42"] + examples.stdout.split()
+    targets = [VESPER, "//crates/vesper-oracles:bin/logos42"] + examples.stdout.split()
     count = prebuild_executables(ctx, root, path, targets)
     if count == None:
         ctx.std.io.stderr.write("warning: prebuilding acceptance executables failed; each task will build its own\n")

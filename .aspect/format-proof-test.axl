@@ -176,7 +176,7 @@ def _test(ctx: TaskContext) -> int:
         "installed lean/bin/lean": "",
         "bin/compiler": "",
         "bin/compiler.exe": "",
-        "compiler manifest": "//:bin/vesper bin/compiler\n",
+        "compiler manifest": "//:vesper_shipped bin/compiler\n",
     }.items():
         absolute = workspace + "/" + path
         ctx.std.fs.create_dir_all(absolute.rpartition("/")[0])
