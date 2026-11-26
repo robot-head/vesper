@@ -916,7 +916,7 @@ and never reaches a foreign call.
 
 ## Differential
 
-428 cases. Every seventh `.ves` file under `packages/` up to 128 KiB,
+434 cases. Every seventh `.ves` file under `packages/` up to 128 KiB,
 as it is and in five variants: re-indented, CRLF line ends, an unclosed
 function appended, `) ) )` inserted in the middle, and cut in half. Their
 versions run from -40 upward. Hand-written cases cover empty documents,
@@ -924,8 +924,8 @@ multi-byte text, comments, broken declarations between good ones, URIs
 at 0, 4,096 and 4,097 bytes and with escapes, stale versions and digests,
 and sources at and over the 128 KiB bound.
 
-152 whole-document replacements, 49 recovery proposals, 71 unchanged
-documents and 156 refusals matched with 0 diffs.
+151 whole-document replacements, 45 recovery proposals, 73 unchanged
+documents and 165 refusals matched with 0 diffs.
 
 ## Numbers
 
@@ -934,7 +934,7 @@ rounds per case, timed ABBA.
 
 | Cases | Rust | Vesper | Ratio |
 |---|--:|--:|--:|
-| All 428 | 3.72 ms | 2.17 ms | **0.58x** |
+| All 428 (before merging main) | 3.72 ms | 2.17 ms | **0.58x** |
 
 Rust lines deleted: 0. The action is not wired: Rust stays the default
 until the hybrid wiring part.
