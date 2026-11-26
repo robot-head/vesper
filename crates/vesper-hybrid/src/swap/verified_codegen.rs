@@ -143,10 +143,16 @@ fn decode(
 }
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
-pub(super) const SWAPS: &[Swap] = &[open(
-    "verified_codegen",
-    "0 diffs over 3,640 corpus compiles, 1.03x end to end; no flip-gate configuration",
-)];
+pub(super) const SWAPS: &[Swap] = &[
+    open(
+        "verified_codegen",
+        "0 diffs over 3,640 corpus compiles, 1.03x end to end; no flip-gate configuration",
+    ),
+    open(
+        "verified_coverage_listing",
+        "opt-in through VESPER_HYBRID_VERIFIED_COVERAGE=1",
+    ),
+];
 
 pub(super) fn register(_r: &mut Registry) {
     if on("verified_codegen") && !env_off("VESPER_HYBRID_VERIFIED") {
@@ -156,6 +162,16 @@ pub(super) fn register(_r: &mut Registry) {
         }
         must(verified::install_verified_build(VESPER_VERIFIED_BUILD));
         INSTALLED.store(true, Relaxed);
+    }
+    if on("verified_coverage_listing")
+        && std::env::var_os("VESPER_HYBRID_VERIFIED_COVERAGE").is_some_and(|v| v == "1")
+    {
+        must(verified::install_coverage_listing(|report| {
+            String::from_utf8(verified_codegen_binding::coverage_listing_bytes(
+                &report.listing_input(),
+            ))
+            .ok()
+        }));
     }
 }
 
