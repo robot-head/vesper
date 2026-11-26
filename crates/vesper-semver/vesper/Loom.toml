@@ -3,3 +3,6 @@ name = "@vesper/semver"
 version = "0.1.0"
 edition = "2026"
 capability_ceiling = ["Fail"]
+
+[dependencies]
+"@vesper-std/core" = { version = "^0.1", path = "../../../packages/vesper-std/core" }
