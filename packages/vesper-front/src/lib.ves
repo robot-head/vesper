@@ -36,6 +36,7 @@ use self::diag::{
 use self::parse::{
     parse_tokens,
     parse_surface_tokens,
+    parse_template_tokens,
     hard_depth
 };
 use self::recover::{
@@ -166,6 +167,11 @@ pub struct P {
     // delimiter, the index of the token closing it, else u32::MAX
     // (`group_ends`); empty outside the surface profile.
     surface: bool,
+    // The template-scopes refinement of the surface profile
+    // (`Parser::template_scopes`, `parse_template_scopes`): phrase bodies
+    // and tagged literal payloads are blocks, and raw phrase headers and
+    // nested pattern sugar are errors.
+    template_scopes: bool,
     before_handler_in: bool,
     group_end: ChunkSeq[u32]
 }
@@ -283,6 +289,29 @@ pub fn parse_surface_tables(in source: Str, limits: u64, counts: u64) -> ChunkSe
         return report_rejected(in d);
     }
     let p = parse_surface_tokens(in b, t, d, max_diag, hard_depth(), ((limits >> 32) & 1) == 1);
+    let mut tree = tree_new();
+    build_tree(inout tree, in p);
+    report(in tree, in p)
+}
+
+// The template-scopes profile, as the tables of `parse_tables`:
+// `parser::parse_template_scopes(source)` (crates/vesper-syntax
+// `parser::parse_template_cst`), the surface profile under the default
+// limits with tests parsed, phrase bodies and tagged payloads as blocks.
+pub fn parse_template_tables(in source: Str) -> ChunkSeq[u64] {
+    let b = source.as_bytes();
+    let mut d = diags_new();
+    let t = lex_sugar_with_limits(
+        in b,
+        inout d,
+        max_source_bytes(),
+        max_tokens(),
+        max_diagnostics()
+    );
+    if t.rejected {
+        return report_rejected(in d);
+    }
+    let p = parse_template_tokens(in b, t, d);
     let mut tree = tree_new();
     build_tree(inout tree, in p);
     report(in tree, in p)
