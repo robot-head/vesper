@@ -359,11 +359,7 @@ fn header(in input: Slice[u8], start: u64, end: u64, inout m: Meter) -> Hdr eff 
     if constructed != (kind == K_SEQUENCE || kind == K_SET_OF) {
         fail(17, start);
     }
-    Hdr {
-        kind: kind,
-        content: pos,
-        finish: finish
-    }
+    Hdr { kind: kind, content: pos, finish: finish }
 }
 
 fn printable(b: u64) -> bool {
@@ -750,12 +746,7 @@ pub fn encoding_plan(
     bound(metadata, sw(in lim, 6), 7);
     charge(inout m, intermediate);
     charge(inout m, size);
-    Plan {
-        encoded: size,
-        nodes: m.nodes,
-        metadata: metadata,
-        intermediate: intermediate
-    }
+    Plan { encoded: size, nodes: m.nodes, metadata: metadata, intermediate: intermediate }
 }
 
 fn kind_tag(kind: u64) -> u64 {

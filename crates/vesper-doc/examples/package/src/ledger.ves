@@ -35,10 +35,7 @@ linear struct Tx {
 /// }
 /// ```
 fn open(id: u64) -> Tx {
-    Tx {
-        id: id,
-        total: 0
-    }
+    Tx { id: id, total: 0 }
 }
 
 /// Adds an amount to the open transaction.
@@ -50,10 +47,7 @@ fn deposit(inout tx.{total}: Tx, amount: u64) {
 ///
 /// @proof(Codex.Ledger.commit_total)
 fn commit(sink tx: Tx) -> u64 {
-    let Tx {
-        id,
-        total
-    } = tx;
+    let Tx { id, total } = tx;
     total
 }
 

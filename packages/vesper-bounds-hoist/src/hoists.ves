@@ -125,11 +125,7 @@ fn users_of(in f: Fun) -> Users {
         let ok = rows.try_set(at, u64_at(in pr, q));
         let ok2 = fill.try_set(v, wrapping_add(u32_at(in fill, v), 1));
     }
-    Users {
-        u0: u0,
-        un: count,
-        rows: rows
-    }
+    Users { u0: u0, un: count, rows: rows }
 }
 
 // `only_access_receivers`: whether every use of `read` is the receiver,
@@ -199,21 +195,13 @@ pub struct Hoists {
 }
 
 fn hoists_new() -> Hoists {
-    Hoists {
-        rows: ChunkSeq::new[Hoist](),
-        reads: ChunkSeq::new[u64]()
-    }
+    Hoists { rows: ChunkSeq::new[Hoist](), reads: ChunkSeq::new[u64]() }
 }
 
 fn row(in h: Hoists, k: u64) -> Hoist {
     match h.rows.try_get(k) {
         Option::Some(x) => x,
-        Option::None => Hoist {
-            pre: 0,
-            place: 0,
-            ty: 0,
-            entry: false
-        },
+        Option::None => Hoist { pre: 0, place: 0, ty: 0, entry: false },
     }
 }
 
@@ -296,16 +284,7 @@ fn stable_views(in f: Fun, in us: Users, inout out: Hoists) {
             }
         }
         if any {
-            out
-                .rows
-                .push(
-                    Hoist {
-                        pre: 0,
-                        place: place,
-                        ty: q.tyname,
-                        entry: true
-                    }
-                );
+            out.rows.push(Hoist { pre: 0, place: place, ty: q.tyname, entry: true });
         }
     }
     // Sequence fields of `in` parameters, by [root, path..] key.
@@ -424,9 +403,7 @@ fn copy_places(in f: Fun) -> Roots {
             let ok = roots.try_set(w(u32_at(in f.plast, p)), n32(p));
         }
     }
-    Roots {
-        roots: roots
-    }
+    Roots { roots: roots }
 }
 
 // `header_hoists`.

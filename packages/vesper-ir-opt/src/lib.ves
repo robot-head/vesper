@@ -43,9 +43,7 @@ pub fn ir_opt_entry(in input: Str) -> ChunkSeq[u64] {
 // The same over bytes, for the hybrid build's `opt` hook
 // (crates/vesper-hybrid/modules/ir_opt).
 pub fn ir_opt_words(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let mut p = read_program(inout r, in b, in c);
     let mode = r.word(in b);

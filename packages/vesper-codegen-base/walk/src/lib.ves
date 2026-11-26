@@ -133,9 +133,7 @@ pub fn has(bits: u64, bit: u64) -> bool {
 }
 
 pub fn var_of_word(w: u64) -> Var {
-    Var {
-        id: wrapping_u32(w)
-    }
+    Var { id: wrapping_u32(w) }
 }
 pub fn var_word(v: Var) -> u64 {
     widen_u64(v.id)

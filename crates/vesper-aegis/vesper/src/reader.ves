@@ -27,23 +27,11 @@ pub fn k_over_budget() -> u64 {
 }
 
 pub fn rd(start: u64, end: u64, format: u64) -> Rd {
-    Rd {
-        pos: start,
-        end: end,
-        format: format
-    }
+    Rd { pos: start, end: end, format: format }
 }
 
 pub fn raise(kind: u64, format: u64, field: u64, a: u64, b: u64) -> Never eff [Fail[AErr]] {
-    Fail::raise(
-        AErr {
-            kind: kind,
-            format: format,
-            field: field,
-            a: a,
-            b: b
-        }
-    )
+    Fail::raise(AErr { kind: kind, format: format, field: field, a: a, b: b })
 }
 
 // ParseError::UnsupportedValue in the reader's format.

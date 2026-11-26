@@ -30,12 +30,7 @@ pub fn vdec(in buf: Slice[u8], at: u64) -> Option[Num] {
     for k in 0..wrapping_sub(len, 1) {
         v = shl(v, 8) | widen_u64(byte(in buf, wrapping_add(base, k)));
     }
-    Option::Some(
-        Num {
-            value: v,
-            used: len
-        }
-    )
+    Option::Some(Num { value: v, used: len })
 }
 
 // Appends `v` in its shortest form; false (nothing written) above 2^62 - 1.

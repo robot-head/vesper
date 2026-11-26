@@ -188,13 +188,7 @@ pub fn link_state_clone(in l: LinkState) -> LinkState {
     for i in l.head..n {
         departures.push(at(in l.departures, i));
     }
-    LinkState {
-        params: l.params,
-        rng: l.rng,
-        bad: l.bad,
-        departures: departures,
-        head: 0
-    }
+    LinkState { params: l.params, rng: l.rng, bad: l.bad, departures: departures, head: 0 }
 }
 
 // The same state: configuration, generator, chain state and queue.
@@ -1123,10 +1117,7 @@ pub fn wal_state_volatile_lsns(in w: WalState) -> ChunkSeq[u64] {
 pub fn wal_state_recover(inout w: WalState) -> WalRecovery {
     let scan = scan_bytes(in w.durable.as_slice());
     if w.recovered {
-        return WalRecovery {
-            ok: false,
-            scan: scan
-        };
+        return WalRecovery { ok: false, scan: scan };
     }
     w.durable.truncate(scan.valid_bytes);
     w.view.clear();
@@ -1141,10 +1132,7 @@ pub fn wal_state_recover(inout w: WalState) -> WalRecovery {
     }
     w.next_lsn = wrapping_add(wal_state_durable_lsn(in w), 1);
     w.recovered = true;
-    WalRecovery {
-        ok: true,
-        scan: scan
-    }
+    WalRecovery { ok: true, scan: scan }
 }
 
 pub fn wal_recovery_ok(in r: WalRecovery) -> bool {

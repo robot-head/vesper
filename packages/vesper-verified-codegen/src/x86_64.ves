@@ -387,14 +387,7 @@ fn call_external(inout a: Asm, name: u8) {
     byte(inout a, 232);
     let at = here(in a);
     put_u32(inout a, 0);
-    a
-        .externals
-        .push(
-            External {
-                at: at,
-                name: name
-            }
-        );
+    a.externals.push(External { at: at, name: name });
 }
 
 // The Windows C `main`: reserve the result area, call the entry,

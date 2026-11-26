@@ -866,9 +866,7 @@ pub fn corim_parse(
     put(inout w, 0);
     let slot_comids = cur_len(in w);
 
-    let mut sc = Scratch {
-        pos: 0
-    };
+    let mut sc = Scratch { pos: 0 };
     let mut comids = 0;
     let mut other_tags = 0;
     let mut t = 0;

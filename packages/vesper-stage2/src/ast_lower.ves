@@ -173,20 +173,7 @@ fn lower_pat(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, pat_id: u32) -> 
         Option::Some(v) => v,
         Option::None => {
             let idx = lc.ir.pts.len();
-            lc
-                .ir
-                .pts
-                .push(
-                    Pt {
-                        kind: Pat::Wild,
-                        s0: 0,
-                        s1: 0,
-                        a: 0,
-                        b: 0,
-                        c: 0,
-                        n: 0
-                    }
-                );
+            lc.ir.pts.push(Pt { kind: Pat::Wild, s0: 0, s1: 0, a: 0, b: 0, c: 0, n: 0 });
             return idx;
         },
     };
@@ -195,50 +182,19 @@ fn lower_pat(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, pat_id: u32) -> 
     let s1 = off | widen_u64(p.end);
     if p.kind == 1 {
         let idx = lc.ir.pts.len();
-        lc
-            .ir
-            .pts
-            .push(
-                Pt {
-                    kind: Pat::Wild,
-                    s0: s0,
-                    s1: s1,
-                    a: 0,
-                    b: 0,
-                    c: 0,
-                    n: 0
-                }
-            );
+        lc.ir.pts.push(Pt { kind: Pat::Wild, s0: s0, s1: s1, a: 0, b: 0, c: 0, n: 0 });
         return idx;
     }
     if p.kind == 2 {
         let nm = sym(inout lc, in ast, mod_idx, p.a);
         let idx = lc.ir.pts.len();
-        lc
-            .ir
-            .pts
-            .push(
-                Pt {
-                    kind: Pat::Bind,
-                    s0: s0,
-                    s1: s1,
-                    a: widen_u64(nm),
-                    b: 0,
-                    c: 0,
-                    n: 0
-                }
-            );
+        lc.ir.pts.push(Pt { kind: Pat::Bind, s0: s0, s1: s1, a: widen_u64(nm), b: 0, c: 0, n: 0 });
         return idx;
     }
     if p.kind == 3 {
         let lit = match ast.lits.get(idx_from_raw[SurfLit](p.a)) {
             Option::Some(l) => l,
-            Option::None => SurfLit {
-                kind: 3,
-                neg: false,
-                bits: 0,
-                hi: 0
-            },
+            Option::None => SurfLit { kind: 3, neg: false, bits: 0, hi: 0 },
         };
         let lk: u64 = if lit.kind == 1 {
             Lit::Int
@@ -268,20 +224,7 @@ fn lower_pat(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, pat_id: u32) -> 
             lit.hi
         };
         let idx = lc.ir.pts.len();
-        lc
-            .ir
-            .pts
-            .push(
-                Pt {
-                    kind: Pat::Literal,
-                    s0: s0,
-                    s1: s1,
-                    a: lk,
-                    b: lo,
-                    c: hi,
-                    n: 0
-                }
-            );
+        lc.ir.pts.push(Pt { kind: Pat::Literal, s0: s0, s1: s1, a: lk, b: lo, c: hi, n: 0 });
         return idx;
     }
     if p.kind == 4 {
@@ -298,20 +241,7 @@ fn lower_pat(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, pat_id: u32) -> 
             }
         }
         let idx = lc.ir.pts.len();
-        lc
-            .ir
-            .pts
-            .push(
-                Pt {
-                    kind: Pat::Tuple,
-                    s0: s0,
-                    s1: s1,
-                    a: 0,
-                    b: b0,
-                    c: 0,
-                    n: n
-                }
-            );
+        lc.ir.pts.push(Pt { kind: Pat::Tuple, s0: s0, s1: s1, a: 0, b: b0, c: 0, n: n });
         return idx;
     }
     // Pat::Constructor (kind 5)
@@ -437,12 +367,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
     if e.kind == 1 {
         let lit = match ast.lits.get(idx_from_raw[SurfLit](e.a)) {
             Option::Some(l) => l,
-            Option::None => SurfLit {
-                kind: 3,
-                neg: false,
-                bits: 0,
-                hi: 0
-            },
+            Option::None => SurfLit { kind: 3, neg: false, bits: 0, hi: 0 },
         };
         let lk: u64 = if lit.kind == 1 {
             Lit::Int
@@ -475,19 +400,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
         lc
             .ir
             .exs
-            .push(
-                Ex {
-                    kind: X_LITERAL,
-                    s0: s0,
-                    s1: s1,
-                    a: lk,
-                    b: lo,
-                    c: hi,
-                    n: 0,
-                    m: 0,
-                    x: 0
-                }
-            );
+            .push(Ex { kind: X_LITERAL, s0: s0, s1: s1, a: lk, b: lo, c: hi, n: 0, m: 0, x: 0 });
         return idx;
     }
     if e.kind == 2 {
@@ -514,17 +427,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
             .ir
             .exs
             .push(
-                Ex {
-                    kind: X_NAME,
-                    s0: s0,
-                    s1: s1,
-                    a: widen_u64(nm),
-                    b: 0,
-                    c: 0,
-                    n: 0,
-                    m: 0,
-                    x: 0
-                }
+                Ex { kind: X_NAME, s0: s0, s1: s1, a: widen_u64(nm), b: 0, c: 0, n: 0, m: 0, x: 0 }
             );
         return idx;
     }
@@ -536,22 +439,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
         }
         let a0 = push_xs(inout lc, in elems);
         let idx = lc.ir.exs.len();
-        lc
-            .ir
-            .exs
-            .push(
-                Ex {
-                    kind: X_TUPLE,
-                    s0: s0,
-                    s1: s1,
-                    a: a0,
-                    b: 0,
-                    c: 0,
-                    n: n,
-                    m: 0,
-                    x: 0
-                }
-            );
+        lc.ir.exs.push(Ex { kind: X_TUPLE, s0: s0, s1: s1, a: a0, b: 0, c: 0, n: n, m: 0, x: 0 });
         return idx;
     }
     if e.kind == 4 {
@@ -644,19 +532,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
         lc
             .ir
             .exs
-            .push(
-                Ex {
-                    kind: X_BLOCK,
-                    s0: s0,
-                    s1: s1,
-                    a: a0,
-                    b: tail,
-                    c: 0,
-                    n: n,
-                    m: 0,
-                    x: 0
-                }
-            );
+            .push(Ex { kind: X_BLOCK, s0: s0, s1: s1, a: a0, b: tail, c: 0, n: n, m: 0, x: 0 });
         return idx;
     }
     if e.kind == 6 {
@@ -768,17 +644,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
             .ir
             .exs
             .push(
-                Ex {
-                    kind: X_CALL,
-                    s0: s0,
-                    s1: s1,
-                    a: callee,
-                    b: b0,
-                    c: c0,
-                    n: n,
-                    m: m,
-                    x: iclass
-                }
+                Ex { kind: X_CALL, s0: s0, s1: s1, a: callee, b: b0, c: c0, n: n, m: m, x: iclass }
             );
         return idx;
     }
@@ -837,40 +703,13 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
         lc
             .ir
             .exs
-            .push(
-                Ex {
-                    kind: X_INDEX,
-                    s0: s0,
-                    s1: s1,
-                    a: base,
-                    b: iv,
-                    c: 0,
-                    n: 0,
-                    m: 0,
-                    x: 0
-                }
-            );
+            .push(Ex { kind: X_INDEX, s0: s0, s1: s1, a: base, b: iv, c: 0, n: 0, m: 0, x: 0 });
         return idx;
     }
     if e.kind == 9 {
         let inner = lower_expr(inout lc, in ast, mod_idx, e.a);
         let idx = lc.ir.exs.len();
-        lc
-            .ir
-            .exs
-            .push(
-                Ex {
-                    kind: X_TRY,
-                    s0: s0,
-                    s1: s1,
-                    a: inner,
-                    b: 0,
-                    c: 0,
-                    n: 0,
-                    m: 0,
-                    x: 0
-                }
-            );
+        lc.ir.exs.push(Ex { kind: X_TRY, s0: s0, s1: s1, a: inner, b: 0, c: 0, n: 0, m: 0, x: 0 });
         return idx;
     }
     if e.kind == 10 {
@@ -881,17 +720,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
             .ir
             .exs
             .push(
-                Ex {
-                    kind: X_UNARY,
-                    s0: s0,
-                    s1: s1,
-                    a: widen_u64(op),
-                    b: v,
-                    c: 0,
-                    n: 0,
-                    m: 0,
-                    x: 0
-                }
+                Ex { kind: X_UNARY, s0: s0, s1: s1, a: widen_u64(op), b: v, c: 0, n: 0, m: 0, x: 0 }
             );
         return idx;
     }
@@ -920,17 +749,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
                     .ir
                     .exs
                     .push(
-                        Ex {
-                            kind: X_TUPLE,
-                            s0: s0,
-                            s1: s1,
-                            a: a0,
-                            b: 0,
-                            c: 0,
-                            n: 2,
-                            m: 0,
-                            x: 0
-                        }
+                        Ex { kind: X_TUPLE, s0: s0, s1: s1, a: a0, b: 0, c: 0, n: 2, m: 0, x: 0 }
                     );
                 l = lx.a;
                 r = tup;
@@ -945,19 +764,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
         lc
             .ir
             .exs
-            .push(
-                Ex {
-                    kind: k,
-                    s0: s0,
-                    s1: s1,
-                    a: widen_u64(op),
-                    b: l,
-                    c: r,
-                    n: 0,
-                    m: 0,
-                    x: 0
-                }
-            );
+            .push(Ex { kind: k, s0: s0, s1: s1, a: widen_u64(op), b: l, c: r, n: 0, m: 0, x: 0 });
         return idx;
     }
     if e.kind == 13 {
@@ -965,22 +772,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
         let th = lower_expr(inout lc, in ast, mod_idx, e.b);
         let el = lower_expr(inout lc, in ast, mod_idx, e.c);
         let idx = lc.ir.exs.len();
-        lc
-            .ir
-            .exs
-            .push(
-                Ex {
-                    kind: X_IF,
-                    s0: s0,
-                    s1: s1,
-                    a: cond,
-                    b: th,
-                    c: el,
-                    n: 0,
-                    m: 0,
-                    x: 0
-                }
-            );
+        lc.ir.exs.push(Ex { kind: X_IF, s0: s0, s1: s1, a: cond, b: th, c: el, n: 0, m: 0, x: 0 });
         return idx;
     }
     if e.kind == 14 {
@@ -1000,32 +792,13 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
         }
         let b0 = push_xs(inout lc, in arms);
         let idx = lc.ir.exs.len();
-        lc
-            .ir
-            .exs
-            .push(
-                Ex {
-                    kind: X_MATCH,
-                    s0: s0,
-                    s1: s1,
-                    a: val,
-                    b: b0,
-                    c: 0,
-                    n: n,
-                    m: 0,
-                    x: 0
-                }
-            );
+        lc.ir.exs.push(Ex { kind: X_MATCH, s0: s0, s1: s1, a: val, b: b0, c: 0, n: n, m: 0, x: 0 });
         return idx;
     }
     if e.kind == 16 {
         let eff_node = match ast.effect_nodes.get(idx_from_raw[EffectNode](e.a)) {
             Option::Some(v) => v,
-            Option::None => EffectNode {
-                label: ast_none(),
-                name: ast_none(),
-                args: 0
-            },
+            Option::None => EffectNode { label: ast_none(), name: ast_none(), args: 0 },
         };
         let lbl = if eff_node.label == ast_none() {
             0
@@ -1086,15 +859,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
             }
             let pa = push_xs(inout lc, in pats);
             let cbody = lower_expr(inout lc, in ast, mod_idx, cnode.body);
-            cls
-                .push(
-                    Cl {
-                        name: cname,
-                        pa: pa,
-                        pn: pn,
-                        body: cbody
-                    }
-                );
+            cls.push(Cl { name: cname, pa: pa, pn: pn, body: cbody });
         }
         let ret = lc.ir.cls.len();
         for ci in 0..cls.len() {
@@ -1139,40 +904,13 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
         lc
             .ir
             .exs
-            .push(
-                Ex {
-                    kind: X_HANDLE,
-                    s0: s0,
-                    s1: s1,
-                    a: hidx,
-                    b: 0,
-                    c: 0,
-                    n: 0,
-                    m: 0,
-                    x: 0
-                }
-            );
+            .push(Ex { kind: X_HANDLE, s0: s0, s1: s1, a: hidx, b: 0, c: 0, n: 0, m: 0, x: 0 });
         return idx;
     }
     if e.kind == 17 {
         let body = lower_expr(inout lc, in ast, mod_idx, e.a);
         let idx = lc.ir.exs.len();
-        lc
-            .ir
-            .exs
-            .push(
-                Ex {
-                    kind: X_LOOP,
-                    s0: s0,
-                    s1: s1,
-                    a: body,
-                    b: 0,
-                    c: 0,
-                    n: 0,
-                    m: 0,
-                    x: 0
-                }
-            );
+        lc.ir.exs.push(Ex { kind: X_LOOP, s0: s0, s1: s1, a: body, b: 0, c: 0, n: 0, m: 0, x: 0 });
         return idx;
     }
     if e.kind == 18 {
@@ -1180,22 +918,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
         let it = lower_expr(inout lc, in ast, mod_idx, e.b);
         let body = lower_expr(inout lc, in ast, mod_idx, e.c);
         let idx = lc.ir.exs.len();
-        lc
-            .ir
-            .exs
-            .push(
-                Ex {
-                    kind: X_FOR,
-                    s0: s0,
-                    s1: s1,
-                    a: pt,
-                    b: it,
-                    c: body,
-                    n: 0,
-                    m: 0,
-                    x: 0
-                }
-            );
+        lc.ir.exs.push(Ex { kind: X_FOR, s0: s0, s1: s1, a: pt, b: it, c: body, n: 0, m: 0, x: 0 });
         return idx;
     }
     if e.kind == 19 {
@@ -1228,42 +951,12 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
             X_RETURN
         };
         let idx = lc.ir.exs.len();
-        lc
-            .ir
-            .exs
-            .push(
-                Ex {
-                    kind: k,
-                    s0: s0,
-                    s1: s1,
-                    a: v,
-                    b: 0,
-                    c: 0,
-                    n: 0,
-                    m: 0,
-                    x: 0
-                }
-            );
+        lc.ir.exs.push(Ex { kind: k, s0: s0, s1: s1, a: v, b: 0, c: 0, n: 0, m: 0, x: 0 });
         return idx;
     }
     if e.kind == 22 {
         let idx = lc.ir.exs.len();
-        lc
-            .ir
-            .exs
-            .push(
-                Ex {
-                    kind: X_CONTINUE,
-                    s0: s0,
-                    s1: s1,
-                    a: 0,
-                    b: 0,
-                    c: 0,
-                    n: 0,
-                    m: 0,
-                    x: 0
-                }
-            );
+        lc.ir.exs.push(Ex { kind: X_CONTINUE, s0: s0, s1: s1, a: 0, b: 0, c: 0, n: 0, m: 0, x: 0 });
         return idx;
     }
     if e.kind == 15 {
@@ -1328,17 +1021,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
             .ir
             .exs
             .push(
-                Ex {
-                    kind: X_CLOSURE,
-                    s0: s0,
-                    s1: s1,
-                    a: pool,
-                    b: pa,
-                    c: body,
-                    n: pn,
-                    m: 0,
-                    x: 0
-                }
+                Ex { kind: X_CLOSURE, s0: s0, s1: s1, a: pool, b: pa, c: body, n: pn, m: 0, x: 0 }
             );
         return idx;
     }
@@ -1469,16 +1152,7 @@ pub fn build_ir_ast_for_entry(
         for gi in 0..w(f.gn) {
             match prog.fn_generics.try_get(wrapping_add(w(f.ga), gi)) {
                 Option::Some(gn) => {
-                    lc
-                        .ir
-                        .gens
-                        .push(
-                            Gn {
-                                name: gn.name,
-                                bound: gn.bound,
-                                row: gn.row
-                            }
-                        );
+                    lc.ir.gens.push(Gn { name: gn.name, bound: gn.bound, row: gn.row });
                 },
                 Option::None => {},
             }
@@ -1561,17 +1235,7 @@ pub fn build_ir_ast_for_entry(
                     Option::None => {},
                 }
             }
-            lc
-                .ir
-                .eops
-                .push(
-                    Eop {
-                        name: op.name,
-                        pa: pa,
-                        pn: widen_u64(op.pn),
-                        result: op.result
-                    }
-                );
+            lc.ir.eops.push(Eop { name: op.name, pa: pa, pn: widen_u64(op.pn), result: op.result });
         }
         let eidx = lc.ir.effs.len();
         lc

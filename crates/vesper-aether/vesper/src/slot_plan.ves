@@ -99,75 +99,38 @@ fn region_at(in regions: Slice[PlannedRegion], i: u64) -> PlannedRegion {
 fn region_error(r: PlannedRegion, limits: KvmHostLimits) -> Option[SlotError] {
     let slot = r.slot;
     if r.memory_size == 0 {
-        return Option::Some(
-            SlotError::ZeroSized {
-                slot: slot
-            }
-        );
+        return Option::Some(SlotError::ZeroSized { slot: slot });
     }
     if !aligned_4k(r.guest_phys_addr)
         || !aligned_4k(r.userspace_addr)
         || !aligned_4k(r.memory_size) {
-        return Option::Some(
-            SlotError::Unaligned {
-                slot: slot
-            }
-        );
+        return Option::Some(SlotError::Unaligned { slot: slot });
     }
     if add_overflows(r.guest_phys_addr, r.memory_size)
         || add_overflows(r.userspace_addr, r.memory_size) {
-        return Option::Some(
-            SlotError::Overflow {
-                slot: slot
-            }
-        );
+        return Option::Some(SlotError::Overflow { slot: slot });
     }
     if r.userspace_addr == 0 {
-        return Option::Some(
-            SlotError::NullHost {
-                slot: slot
-            }
-        );
+        return Option::Some(SlotError::NullHost { slot: slot });
     }
     if r.flags & (KNOWN_FLAGS ^ 4294967295) != 0 {
-        return Option::Some(
-            SlotError::UnknownFlags {
-                slot: slot,
-                flags: r.flags
-            }
-        );
+        return Option::Some(SlotError::UnknownFlags { slot: slot, flags: r.flags });
     }
     if read_only(r) && !limits.readonly_mem {
-        return Option::Some(
-            SlotError::ReadOnlyUnsupported {
-                slot: slot
-            }
-        );
+        return Option::Some(SlotError::ReadOnlyUnsupported { slot: slot });
     }
     if read_only(r) && r.flags & KVM_MEM_LOG_DIRTY_PAGES != 0 {
-        return Option::Some(
-            SlotError::DirtyLogReadOnly {
-                slot: slot
-            }
-        );
+        return Option::Some(SlotError::DirtyLogReadOnly { slot: slot });
     }
     if slot >= limits.max_slots {
-        return Option::Some(
-            SlotError::SlotIdOutOfRange {
-                slot: slot,
-                max: limits.max_slots
-            }
-        );
+        return Option::Some(SlotError::SlotIdOutOfRange { slot: slot, max: limits.max_slots });
     }
     let bits = widen_u64(limits.guest_phys_bits);
     if bits < 64 {
         let end = wrapping_add(r.guest_phys_addr, r.memory_size);
         if end > wrapping_shl_u64(1, wrapping_u32(bits)) {
             return Option::Some(
-                SlotError::GuestAddressTooWide {
-                    slot: slot,
-                    bits: limits.guest_phys_bits
-                }
+                SlotError::GuestAddressTooWide { slot: slot, bits: limits.guest_phys_bits }
             );
         }
     }
@@ -232,10 +195,7 @@ pub fn slot_plan_verify(in regions: Slice[PlannedRegion], limits: KvmHostLimits)
     let n = regions.len();
     if n > widen_u64(limits.max_slots) {
         return Option::Some(
-            SlotError::TooManyRegions {
-                count: n,
-                max: widen_u64(limits.max_slots)
-            }
+            SlotError::TooManyRegions { count: n, max: widen_u64(limits.max_slots) }
         );
     }
     for i in 0..n {
@@ -260,31 +220,17 @@ pub fn slot_plan_verify(in regions: Slice[PlannedRegion], limits: KvmHostLimits)
     let mut sorted_ids = ChunkSeq::with_capacity[u64](n);
     sorted_ids.extend(ids.as_slice());
     match first_duplicate(inout sorted_ids) {
-        Option::Some(s) => return Option::Some(
-            SlotError::DuplicateSlot {
-                slot: wrapping_u32(s)
-            }
-        ),
+        Option::Some(s) => return Option::Some(SlotError::DuplicateSlot { slot: wrapping_u32(s) }),
         Option::None => (),
     }
     let mut ids2 = ChunkSeq::with_capacity[u64](n);
     ids2.extend(ids.as_slice());
     match first_overlap(inout gs, inout ge, inout ids) {
-        Option::Some((a, b)) => return Option::Some(
-            SlotError::GuestOverlap {
-                a: a,
-                b: b
-            }
-        ),
+        Option::Some((a, b)) => return Option::Some(SlotError::GuestOverlap { a: a, b: b }),
         Option::None => (),
     }
     match first_overlap(inout hs, inout he, inout ids2) {
-        Option::Some((a, b)) => return Option::Some(
-            SlotError::HostOverlap {
-                a: a,
-                b: b
-            }
-        ),
+        Option::Some((a, b)) => return Option::Some(SlotError::HostOverlap { a: a, b: b }),
         Option::None => (),
     }
     Option::None
@@ -307,11 +253,7 @@ pub fn slot_plan_verify_cross_vm(
         }
     }
     match first_duplicate(inout vms) {
-        Option::Some(v) => return Option::Some(
-            SlotError::DuplicateVm {
-                vm_id: v
-            }
-        ),
+        Option::Some(v) => return Option::Some(SlotError::DuplicateVm { vm_id: v }),
         Option::None => (),
     }
     let n = regions.len();

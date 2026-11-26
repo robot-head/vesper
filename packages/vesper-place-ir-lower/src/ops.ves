@@ -59,13 +59,7 @@ pub copy struct VecRes {
 }
 
 fn no_seq() -> SeqRes {
-    SeqRes {
-        matched: false,
-        label: 0,
-        has_recv: false,
-        recv_pass: TyPass::In,
-        arg_mode: 0
-    }
+    SeqRes { matched: false, label: 0, has_recv: false, recv_pass: TyPass::In, arg_mode: 0 }
 }
 
 fn no_tiled() -> TiledRes {
@@ -81,12 +75,7 @@ fn no_tiled() -> TiledRes {
 }
 
 fn no_vec() -> VecRes {
-    VecRes {
-        matched: false,
-        label: 0,
-        const_lo: 0,
-        const_hi: 0
-    }
+    VecRes { matched: false, label: 0, const_lo: 0, const_hi: 0 }
 }
 
 fn span_type(in c: Ctx, s0: u64, s1: u64) -> u32 {

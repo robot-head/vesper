@@ -1080,10 +1080,7 @@ fn ct_eq(in a: Slice[u8], in b: Slice[u8]) -> bool {
 }
 
 fn tk_opened(code: u64, len: u64) -> TokenOpened {
-    TokenOpened {
-        code: code,
-        len: len
-    }
+    TokenOpened { code: code, len: len }
 }
 
 // Token layout (src/lifecycle.rs): kind, a 12-byte nonce, then the sealed

@@ -189,15 +189,7 @@ fn identifier(inout m: ChunkSeq[u8], in s: Slice[u8], a: u64, b: u64, pos: u64) 
 
 // `Version::from_str`.
 pub fn parse_version(inout m: ChunkSeq[u8], in s: Slice[u8], a: u64, b: u64) -> (bool, SVer) {
-    let mut v = SVer {
-        major: 0,
-        minor: 0,
-        patch: 0,
-        pre_a: 0,
-        pre_b: 0,
-        build_a: 0,
-        build_b: 0
-    };
+    let mut v = SVer { major: 0, minor: 0, patch: 0, pre_a: 0, pre_b: 0, build_a: 0, build_b: 0 };
     if a >= b {
         put(inout m, "empty string, expected a semver version");
         return (false, v);

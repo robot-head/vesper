@@ -187,13 +187,7 @@ fn n32(x: u64) -> u32 {
 }
 
 fn no_err() -> Err {
-    Err {
-        kind: 0,
-        msg: NONE,
-        has_span: false,
-        start: 0,
-        end: 0
-    }
+    Err { kind: 0, msg: NONE, has_span: false, start: 0, end: 0 }
 }
 
 fn r_new(sink s: S, sink ast: Ast, pass2: bool, in ar: ChunkSeq[u64], in lens: ChunkSeq[u64]) -> R {
@@ -377,13 +371,7 @@ fn raise(inout r: R, kind: u8, msg: u32, start: u32, end: u32) {
         return;
     }
     r.has_err = true;
-    r.err = Err {
-        kind: kind,
-        msg: msg,
-        has_span: true,
-        start: s,
-        end: e
-    };
+    r.err = Err { kind: kind, msg: msg, has_span: true, start: s, end: e };
 }
 
 // The S symbol of the output text from `mark`, which it then drops.
@@ -412,10 +400,7 @@ fn module(inout r: R) {
         };
         let item = match r.ast.items.get(idx_from_raw[ItemNode](it)) {
             Option::Some(x) => x,
-            Option::None => ItemNode {
-                kind: 0,
-                node: NONE
-            },
+            Option::None => ItemNode { kind: 0, node: NONE },
         };
         if item.kind == I_ADT {
             let a = match r.ast.adts.get(idx_from_raw[AdtNode](item.node)) {
@@ -569,14 +554,7 @@ fn effects(inout r: R, es: u32, start: u32, end: u32) {
         let ok2 = r
             .ast
             .effect_nodes
-            .set(
-                idx_from_raw[EffectNode](ei),
-                EffectNode {
-                    label: e.label,
-                    name: name,
-                    args: 0
-                }
-            );
+            .set(idx_from_raw[EffectNode](ei), EffectNode { label: e.label, name: name, args: 0 });
     }
 }
 
@@ -584,14 +562,7 @@ fn effect_at(in r: R, i: u32) -> EffectNode {
     r
         .ast
         .effect_nodes
-        .get_or(
-            idx_from_raw[EffectNode](i),
-            EffectNode {
-                label: NONE,
-                name: NONE,
-                args: 0
-            }
-        )
+        .get_or(idx_from_raw[EffectNode](i), EffectNode { label: NONE, name: NONE, args: 0 })
 }
 
 // `Rewriter::ty`.
@@ -827,17 +798,7 @@ fn pattern(inout r: R, p: u32) {
                 let ci = const_row(inout r, lib, at, n.a);
                 if ci != NONE64 {
                     let c = r.s.const_row(ci);
-                    let lit = r
-                        .ast
-                        .lits
-                        .alloc(
-                            Lit {
-                                kind: 1,
-                                neg: c.neg,
-                                bits: c.value,
-                                hi: 0
-                            }
-                        );
+                    let lit = r.ast.lits.alloc(Lit { kind: 1, neg: c.neg, bits: c.value, hi: 0 });
                     buf_name(inout r, wrapping_u32(widen_u64(c.scalar)));
                     let scalar = intern_buf(inout r);
                     let ok = r
@@ -1015,11 +976,7 @@ fn call(inout r: R, lib: u64, x: u32, at: u64, args: u32, start: u32, end: u32) 
                 count = wrapping_add(count, 1);
                 let arg = match r.ast.args.get(idx_from_raw[ArgNode](list_at(in r.ast, args, j))) {
                     Option::Some(v) => v,
-                    Option::None => ArgNode {
-                        pass: 0,
-                        explicit: false,
-                        expr: NONE
-                    },
+                    Option::None => ArgNode { pass: 0, explicit: false, expr: NONE },
                 };
                 let ae = expr_at(in r.ast, arg.expr);
                 r.sites.push(w(ae.start));
@@ -1324,10 +1281,7 @@ fn report(inout r: R) {
 // text.
 fn run(in b: Slice[u8], in source: Str) -> S {
     let mut s = s_new();
-    let mut rd = Reader {
-        pos: 0,
-        stop: b.len()
-    };
+    let mut rd = Reader { pos: 0, stop: b.len() };
     let nl = rd.word(in b);
     for i in 0..nl {
         let handler = rd.word(in b);
@@ -1386,10 +1340,7 @@ pub fn ffi_rewrite_text(in input: Str, in source: Str) -> ChunkSeq[u64] {
 pub fn ffi_drops_generated_text(in input: Str, in source: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
     let mut s = s_new();
-    let mut rd = Reader {
-        pos: 0,
-        stop: b.len()
-    };
+    let mut rd = Reader { pos: 0, stop: b.len() };
     let nl = rd.word(in b);
     for i in 0..nl {
         let handler = rd.word(in b);
@@ -1489,10 +1440,7 @@ fn read_ty(inout rd: Reader, in b: Slice[u8], inout ast: Ast, inout w: W) -> u32
 pub fn ffi_buffer_text(in input: Str, in source: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
     let mut s = s_new();
-    let mut rd = Reader {
-        pos: 0,
-        stop: b.len()
-    };
+    let mut rd = Reader { pos: 0, stop: b.len() };
     let nl = rd.word(in b);
     for i in 0..nl {
         let handler = rd.word(in b);

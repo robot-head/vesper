@@ -483,14 +483,7 @@ struct Prog {
 }
 
 fn no_row() -> Lir {
-    Lir {
-        tag: 255,
-        op: 0,
-        kind: 0,
-        f1: 0,
-        f2: 0,
-        f3: 0
-    }
+    Lir { tag: 255, op: 0, kind: 0, f1: 0, f2: 0, f3: 0 }
 }
 
 fn nfun(in p: Prog) -> u64 {
@@ -1355,11 +1348,7 @@ fn summ_new(n: u64) -> Summ {
         o.push(ChunkSeq::new[u64]());
         h.push(false);
     }
-    Summ {
-        f: f,
-        o: o,
-        h: h
-    }
+    Summ { f: f, o: o, h: h }
 }
 
 fn summ_facts(in s: Summ, i: u64) -> ChunkSeq[u64] {
@@ -2315,14 +2304,7 @@ fn widen(r: Lir) -> Lir {
         } else {
             K_U64
         };
-        return Lir {
-            tag: r.tag,
-            op: r.op,
-            kind: k,
-            f1: r.f1,
-            f2: r.f2,
-            f3: r.f3
-        };
+        return Lir { tag: r.tag, op: r.op, kind: k, f1: r.f1, f2: r.f2, f3: r.f3 };
     }
     r
 }

@@ -8,10 +8,7 @@ fn bump(inout x: u64) {
 }
 
 fn main() -> u64 {
-    let mut c = Counter {
-        hits: 0,
-        total: 10
-    };
+    let mut c = Counter { hits: 0, total: 10 };
     bump(c.hits);
     c.total
 }

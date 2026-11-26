@@ -230,24 +230,14 @@ pub fn check_table(inout q: Q, b: Bind) -> u64 {
     for i in 0..q.aliases.len() {
         let a = match q.aliases.try_get(i) {
             Option::Some(a) => a,
-            Option::None => Rng {
-                off: 0,
-                len: 0
-            },
+            Option::None => Rng { off: 0, len: 0 },
         };
         if same(in q.pool, a.off, a.len, b.aoff, b.alen) {
             fail_name(inout q, 3, "table alias ", b.aoff, b.alen);
             return 0;
         }
     }
-    q
-        .aliases
-        .push(
-            Rng {
-                off: b.aoff,
-                len: b.alen
-            }
-        );
+    q.aliases.push(Rng { off: b.aoff, len: b.alen });
     let t = find_table(in q, b.noff, b.nlen);
     if t == none() {
         fail_name(inout q, 2, "table ", b.noff, b.nlen);

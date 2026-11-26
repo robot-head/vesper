@@ -38,9 +38,7 @@ use self::out::{put};
 // E0213 and E0200 diagnostics of the control rules, in walk order.
 pub fn check_loops_control(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let mut x = exprs_new();
     read_fns(inout r, in b, inout x, in c.nmap, in c.tmap);
@@ -56,9 +54,7 @@ pub fn check_loops_control(in input: Str) -> ChunkSeq[u64] {
 // and `check_program`.
 pub fn check_atomics(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let atomic = r.word(in b) != 0;
     let workers = r.word(in b) != 0;
@@ -91,9 +87,7 @@ pub fn check_atomics(in input: Str) -> ChunkSeq[u64] {
 // and findings, then `render`, then whether it is accepted.
 pub fn check_stack_bound(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = stack_ctx(inout r, in b);
     let g = read_graph(inout r, in b, in c.nmap);
     let mut o = ChunkSeq::new[u8]();
@@ -110,20 +104,14 @@ fn stack_ctx(inout r: Reader, in b: Slice[u8]) -> NamesCtx {
         return c;
     }
     let full = read_ctx(inout r, in b);
-    NamesCtx {
-        names: full.names,
-        nmap: full.nmap,
-        ok: true
-    }
+    NamesCtx { names: full.names, nmap: full.nmap, ok: true }
 }
 
 // The hybrid task (crates/vesper-hybrid/modules/stack_bound): the names,
 // types and world of the harness input (an empty world) and one call
 // graph with its policy; the report as words (`report_words`).
 pub fn stack_bound_words(in input: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = stack_ctx(inout r, in input);
     let g = read_graph(inout r, in input, in c.nmap);
     let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();

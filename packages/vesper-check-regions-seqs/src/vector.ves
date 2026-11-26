@@ -32,10 +32,7 @@ pub fn vec_names_new(inout n: Names) -> VecNames {
     p.push(n.intern(in "Avx512".as_bytes()));
     p.push(n.intern(in "Sve2".as_bytes()));
     p.push(n.intern(in "Rvv1".as_bytes()));
-    VecNames {
-        isa: n.intern(in "Isa".as_bytes()),
-        profiles: p
-    }
+    VecNames { isa: n.intern(in "Isa".as_bytes()), profiles: p }
 }
 
 // `Elem::from_name`, or 0.
@@ -96,22 +93,14 @@ pub copy struct Shape {
 }
 
 pub fn no_shape() -> Shape {
-    Shape {
-        kind: 0,
-        elem: 0,
-        lanes: 0
-    }
+    Shape { kind: 0, elem: 0, lanes: 0 }
 }
 
 // `Shape::new`: a shape of 128, 256 or 512 bits, else none.
 pub fn shape_new(e: u8, lanes: u64) -> Shape {
     let bits = wrapping_mul(elem_bits(e), lanes);
     if e != 0 && (bits == 128 || bits == 256 || bits == 512) {
-        Shape {
-            kind: 0,
-            elem: e,
-            lanes: lanes
-        }
+        Shape { kind: 0, elem: e, lanes: lanes }
     } else {
         no_shape()
     }
@@ -212,11 +201,7 @@ pub fn shape_of(in t: Types, in names: Names, k: Known, ty: u32) -> Shape {
         return no_shape();
     }
     let s = shape_new(elem_of(in t, k, t.arg(ty, 0)), lanes);
-    Shape {
-        kind: kind,
-        elem: s.elem,
-        lanes: s.lanes
-    }
+    Shape { kind: kind, elem: s.elem, lanes: s.lanes }
 }
 
 // `type_error`: appends the message and returns true, or returns false.

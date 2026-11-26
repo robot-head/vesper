@@ -121,14 +121,7 @@ pub fn freestanding_link(in req: Slice[u8]) -> ChunkSeq[u8] {
         let object = r.span(in req);
         let function = r.span(in req);
         let offset = r.word(in req);
-        entries
-            .push(
-                TrapEntry {
-                    object: object,
-                    function: function,
-                    offset: offset
-                }
-            );
+        entries.push(TrapEntry { object: object, function: function, offset: offset });
     }
     if r.bad {
         return bad_request();
@@ -136,17 +129,11 @@ pub fn freestanding_link(in req: Slice[u8]) -> ChunkSeq[u8] {
     for i in 0..n {
         let name = match names.try_get(i) {
             Option::Some(v) => v,
-            Option::None => Span {
-                start: 0,
-                len: 0
-            },
+            Option::None => Span { start: 0, len: 0 },
         };
         let body = match bodies.try_get(i) {
             Option::Some(v) => v,
-            Option::None => Span {
-                start: 0,
-                len: 0
-            },
+            Option::None => Span { start: 0, len: 0 },
         };
         if !lk.add_object(in req, name, body.start, body.len, inout err) {
             return err;

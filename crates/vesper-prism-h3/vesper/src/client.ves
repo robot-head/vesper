@@ -442,11 +442,7 @@ pub fn client_cancel(inout c: ClientCore, inout dec: DecoderCore, id: u64) {
 pub fn client_accept_bidi_need_sniff(in c: ClientCore, id: u64) -> Result[bool, ConnectionError] {
     match c.conn.sent_settings.webtransport_max_sessions {
         Option::Some(_) => Result::Ok(c.sn_id.len() >= MAX_SNIFFED),
-        Option::None => Result::Err(
-            ConnectionError::StreamCreation {
-                stream_id: id
-            }
-        ),
+        Option::None => Result::Err(ConnectionError::StreamCreation { stream_id: id }),
     }
 }
 
@@ -500,11 +496,7 @@ pub fn client_sniff_data(inout c: ClientCore, id: u64, in bytes: Slice[u8], fin:
         true,
     ) {
         Result::Ok(st) => st,
-        Result::Err(_) => return Result::Err(
-            ConnectionError::StreamCreation {
-                stream_id: id
-            }
-        ),
+        Result::Err(_) => return Result::Err(ConnectionError::StreamCreation { stream_id: id }),
     };
 
     if step.kind == FRAME_WT_STREAM {
@@ -539,11 +531,7 @@ pub fn client_sniff_data(inout c: ClientCore, id: u64, in bytes: Slice[u8], fin:
         let _l = c.sn_fr_len.try_set(f.idx, step.flen);
         return Result::Ok(());
     }
-    Result::Err(
-        ConnectionError::StreamCreation {
-            stream_id: id
-        }
-    )
+    Result::Err(ConnectionError::StreamCreation { stream_id: id })
 }
 
 pub fn client_handle_goaway(inout c: ClientCore) {
@@ -899,9 +887,7 @@ fn section(
             dec.sec.fields.clear();
             dec.sec.bytes.clear();
             match crate_err {
-                QpackError::FieldSectionTooLarge {
-                    stream_id: _sid
-                } => {
+                QpackError::FieldSectionTooLarge { stream_id: _sid } => {
                     malformed(inout c, inout dec, id, CODE_EXCESSIVE_LOAD);
                     Result::Ok(())
                 }
@@ -1057,12 +1043,7 @@ fn frames(inout c: ClientCore, inout dec: DecoderCore, in h: Huff, id: u64)
             false,
         ) {
             Result::Ok(st) => st,
-            Result::Err(
-                FrameError::TooLarge {
-                    frame_type: _ft,
-                    len: _len
-                }
-            ) => {
+            Result::Err(FrameError::TooLarge { frame_type: _ft, len: _len }) => {
                 malformed(inout c, inout dec, id, CODE_EXCESSIVE_LOAD);
                 return Result::Ok(());
             }

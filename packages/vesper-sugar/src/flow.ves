@@ -423,40 +423,18 @@ pub fn stmt_of(in a: Ast, i: u32) -> StmtNode {
         .stmts
         .get_or(
             idx_from_raw[StmtNode](i),
-            StmtNode {
-                kind: 0,
-                pat: none(),
-                ty: none(),
-                value: none(),
-                mutable: false
-            }
+            StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
         )
 }
 
 pub fn arg_of(in a: Ast, i: u32) -> ArgNode {
-    a
-        .args
-        .get_or(
-            idx_from_raw[ArgNode](i),
-            ArgNode {
-                pass: 0,
-                explicit: false,
-                expr: none()
-            }
-        )
+    a.args.get_or(idx_from_raw[ArgNode](i), ArgNode { pass: 0, explicit: false, expr: none() })
 }
 
 pub fn clause_of(in a: Ast, i: u32) -> ClauseNode {
     a
         .clauses
-        .get_or(
-            idx_from_raw[ClauseNode](i),
-            ClauseNode {
-                name: none(),
-                pats: 0,
-                body: none()
-            }
-        )
+        .get_or(idx_from_raw[ClauseNode](i), ClauseNode { name: none(), pats: 0, body: none() })
 }
 
 fn param_of(in a: Ast, i: u32) -> ParamNode {
@@ -464,14 +442,7 @@ fn param_of(in a: Ast, i: u32) -> ParamNode {
         .params
         .get_or(
             idx_from_raw[ParamNode](i),
-            ParamNode {
-                name: none(),
-                pass: 0,
-                projections: 0,
-                ty: none(),
-                start: 0,
-                end: 0
-            }
+            ParamNode { name: none(), pass: 0, projections: 0, ty: none(), start: 0, end: 0 }
         )
 }
 
@@ -1894,10 +1865,7 @@ pub fn render(
                             Option::None => 0,
                         }
                     ),
-                    ItemNode {
-                        kind: 0,
-                        node: 0
-                    }
+                    ItemNode { kind: 0, node: 0 }
                 );
             if it.kind == 2 {
                 function(inout f, in sk, in c, in a, it.node, wrapped);
@@ -1906,11 +1874,7 @@ pub fn render(
                     .impls
                     .get_or(
                         idx_from_raw[ImplNode](it.node),
-                        ImplNode {
-                            ty: none(),
-                            generics: 0,
-                            methods: 0
-                        }
+                        ImplNode { ty: none(), generics: 0, methods: 0 }
                     );
                 for m in 0..list_len(in a, n.methods) {
                     function(inout f, in sk, in c, in a, list_at(in a, n.methods, m), wrapped);

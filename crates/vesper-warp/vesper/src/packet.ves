@@ -21,10 +21,7 @@ fn tag_len() -> u64 {
 }
 
 fn no_span() -> Sp {
-    Sp {
-        start: 0,
-        len: 0
-    }
+    Sp { start: 0, len: 0 }
 }
 
 // The ACK frame of `rx` at `at`, or 0 bytes when none is owed (or the
@@ -107,11 +104,7 @@ pub fn pk_short_plain(
     }
     let end = wrapping_add(at, app.len());
     if end < at || end > scratch.len() {
-        Fail::raise(
-            PlainErr::TooLarge {
-                len: end
-            }
-        );
+        Fail::raise(PlainErr::TooLarge { len: end });
     }
     let _c = scratch.try_copy_from(at, in app);
     let payload_len = wrapping_sub(end, max_short_header());
@@ -138,15 +131,7 @@ pub fn pk_short_plain(
     let _m = scratch.try_copy_within(max_short_header(), end, header_len);
     let plain_len = wrapping_add(header_len, payload_len);
     if wrapping_add(plain_len, tag_len()) > max_datagram {
-        Fail::raise(
-            PlainErr::TooLarge {
-                len: wrapping_add(plain_len, tag_len())
-            }
-        );
+        Fail::raise(PlainErr::TooLarge { len: wrapping_add(plain_len, tag_len()) });
     }
-    PlainOut {
-        plain_len: plain_len,
-        header_len: header_len,
-        has_ack: has_ack
-    }
+    PlainOut { plain_len: plain_len, header_len: header_len, has_ack: has_ack }
 }

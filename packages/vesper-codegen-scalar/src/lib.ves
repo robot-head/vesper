@@ -1312,9 +1312,7 @@ impl Gen {
 // The decisions of the input's program, packed by `pack_text`.
 pub fn codegen_scalar_decisions(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
     let mut tab = Tables {
@@ -1355,9 +1353,7 @@ pub fn codegen_scalar_plan(in input: Str) -> ChunkSeq[u64] {
 // `codegen_scalar_plan` of the input's bytes (the hybrid's `scalar` hook,
 // crates/vesper-hybrid/modules/codegen_scalar).
 pub fn codegen_scalar_plan_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
     let mut tab = Tables {

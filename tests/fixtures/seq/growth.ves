@@ -32,15 +32,9 @@ fn run() -> u64 eff [Fail[RuntimeError]] {
     bytes.push(7);
     bytes.push(9);
     let mut pairs: ChunkSeq[Pair] = ChunkSeq::new[Pair]();
-    let first = Pair {
-        a: 5,
-        b: 6
-    };
+    let first = Pair { a: 5, b: 6 };
     pairs.push(first);
-    let second = Pair {
-        a: 11,
-        b: 12
-    };
+    let second = Pair { a: 11, b: 12 };
     pairs.push(second);
     let last = match pairs.pop() {
         Option::Some(p) => wrapping_add(p.a, widen_u64(p.b)),

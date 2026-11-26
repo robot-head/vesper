@@ -38,12 +38,7 @@ pub fn decode_int(in buf: Slice[u8], at: u64, bits: u64) -> Result[Num, PrefixEr
     let mask = wrapping_sub(bit(bits), 1);
     let mut value = first & mask;
     if value < mask {
-        return Result::Ok(
-            Num {
-                value: value,
-                used: 1
-            }
-        );
+        return Result::Ok(Num { value: value, used: 1 });
     }
     let mut shift: u64 = 0;
     let n = buf.len();
@@ -62,12 +57,7 @@ pub fn decode_int(in buf: Slice[u8], at: u64, bits: u64) -> Result[Num, PrefixEr
         }
         value = v;
         if b & CONTINUATION == 0 {
-            return Result::Ok(
-                Num {
-                    value: value,
-                    used: wrapping_sub(inc(i), at)
-                }
-            );
+            return Result::Ok(Num { value: value, used: wrapping_sub(inc(i), at) });
         }
         shift = wrapping_add(shift, PAYLOAD_BITS);
         i = inc(i);

@@ -53,11 +53,7 @@ pub fn vi_len_or_zero(value: u64) -> u64 {
 pub fn vi_encoded_len(value: u64) -> u64 eff [Fail[VarIntErr]] {
     let n = vi_len_or_zero(value);
     if n == 0 {
-        Fail::raise(
-            VarIntErr::TooLarge {
-                value: value
-            }
-        );
+        Fail::raise(VarIntErr::TooLarge { value: value });
     }
     n
 }
@@ -66,23 +62,13 @@ pub fn vi_decode(in buf: Slice[u8]) -> (u64, u64) eff [Fail[VarIntErr]] {
     let first = match buf.try_get(0) {
         Option::Some(b) => b,
         Option::None => {
-            Fail::raise(
-                VarIntErr::Truncated {
-                    needed: 1,
-                    available: 0
-                }
-            );
+            Fail::raise(VarIntErr::Truncated { needed: 1, available: 0 });
             0
         }
     };
     let len = vi_prefix_len(first);
     if buf.len() < len {
-        Fail::raise(
-            VarIntErr::Truncated {
-                needed: len,
-                available: buf.len()
-            }
-        );
+        Fail::raise(VarIntErr::Truncated { needed: len, available: buf.len() });
     }
     (vi_value_at(in buf, 0, len), len)
 }
@@ -111,27 +97,14 @@ pub fn vi_value_at(in buf: Slice[u8], at: u64, len: u64) -> u64 {
 
 pub fn vi_encode_with_len(value: u64, len: u64, inout out: Slice[u8]) -> u64 eff [Fail[VarIntErr]] {
     if len != 1 && len != 2 && len != 4 && len != 8 {
-        Fail::raise(
-            VarIntErr::BadLength {
-                len: len
-            }
-        );
+        Fail::raise(VarIntErr::BadLength { len: len });
     }
     let need = vi_encoded_len(value);
     if need > len {
-        Fail::raise(
-            VarIntErr::BadLength {
-                len: len
-            }
-        );
+        Fail::raise(VarIntErr::BadLength { len: len });
     }
     if out.len() < len {
-        Fail::raise(
-            VarIntErr::BufferTooSmall {
-                needed: len,
-                available: out.len()
-            }
-        );
+        Fail::raise(VarIntErr::BufferTooSmall { needed: len, available: out.len() });
     }
     vi_put(value, len, inout out, 0);
     len
