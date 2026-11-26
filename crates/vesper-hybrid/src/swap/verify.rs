@@ -1,11 +1,7 @@
-// `vesper verify SOURCE --format` (SH5 lane 18, #1341), from `modules/verify`.
+// `vesper verify SOURCE --format` (SH5 lane 18, #1341), from `verify_run`
+// of the driver module (`modules/driver`; once its own module).
 
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-
-#[rustfmt::skip]
-#[allow(clippy::all)]
-#[path = "../../port/verify.rs"]
-mod verify_binding;
 
 use super::{Registry, Swap, must, on, open};
 
@@ -14,7 +10,7 @@ static VERIFY_CALLS: AtomicU64 = AtomicU64::new(0);
 
 fn run(packed: &[u8]) -> Vec<u8> {
     VERIFY_CALLS.fetch_add(1, Relaxed);
-    verify_binding::verify_run(packed)
+    crate::driver::verify_run(packed)
 }
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).

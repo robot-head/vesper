@@ -140,10 +140,10 @@ fn compress(h: [u32; 8], in bytes: Slice[u8], base: u64) -> [u32; 8] {
 // Lowercase 64-byte ASCII hex SHA-256 of `bytes`.
 pub fn sha256_hex(in bytes: Slice[u8]) -> ChunkSeq[u8] {
     let n = bytes.len();
-    let mut h: [u32; 8] = H0;
+    let mut hash_words: [u32; 8] = H0;
     let full = n / BLOCK_BYTES;
     for block in 0..full {
-        h = compress(h, in bytes, wrapping_mul(block, BLOCK_BYTES));
+        hash_words = compress(hash_words, in bytes, wrapping_mul(block, BLOCK_BYTES));
     }
     let done = wrapping_mul(full, BLOCK_BYTES);
     let rest = wrapping_sub(n, done);
@@ -162,20 +162,20 @@ pub fn sha256_hex(in bytes: Slice[u8]) -> ChunkSeq[u8] {
     );
     let blocks = tail_len / BLOCK_BYTES;
     for block in 0..blocks {
-        h = compress(h, in tail.as_slice(), wrapping_mul(block, BLOCK_BYTES));
+        hash_words = compress(hash_words, in tail.as_slice(), wrapping_mul(block, BLOCK_BYTES));
     }
     let mut raw: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](32);
     raw.resize(32, 0);
     for i in 0..DIGEST_WORDS {
         if i < 8 {
-            let _ = raw.try_write_u32_be(wrapping_mul(i, 4), h[i]);
+            let _ = raw.try_write_u32_be(wrapping_mul(i, 4), hash_words[i]);
         }
     }
     let mut hex: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](64);
     for i in 0..32 {
-        let bv = raw.try_get(i).unwrap_or(0);
-        let hi = bv >> 4;
-        let lo = bv & 15;
+        let byte = raw.try_get(i).unwrap_or(0);
+        let hi = byte >> 4;
+        let lo = byte & 15;
         hex.push(hex_nibble(hi));
         hex.push(hex_nibble(lo));
     }

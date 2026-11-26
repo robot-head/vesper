@@ -33,3 +33,6 @@ capability_ceiling = ["Fail", "Alloc", "Ffi[StdFs]", "Ffi[StdProcess]", "Ffi[Std
 "@vesper-std/intern" = { version = "^0.1", path = "../../../../packages/vesper-std/intern" }
 # `vesper proof-audit` (SH5 lane 18, #1341; its own module until #2091).
 "@vesper/proof-audit" = { version = "^0.1", path = "../../../../packages/vesper-proof-audit" }
+# `vesper verify SOURCE --format` (SH5 lane 18, #1341; its own module until
+# it moved here).
+"@vesper/verify" = { version = "^0.1", path = "../../../../packages/vesper-verify" }

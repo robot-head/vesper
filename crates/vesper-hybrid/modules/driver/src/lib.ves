@@ -65,6 +65,8 @@ use self::load::{read_graph};
 // module by #2091).
 use @vesper/proof-audit::{run as proof_audit_command};
 use @vesper/proof-audit::strs::{byte as audit_byte, push as audit_push, strs_new as audit_strs_new};
+// `vesper verify SOURCE --format` (SH5 lane 18, #1341).
+use @vesper/verify::{run_format as verify_format_command};
 // hd_step group 2 (#1893): the front-end passes in Vesper.
 use self::front::{parse_clean, cst_text};
 use self::interface::{interface_json};
@@ -237,10 +239,12 @@ fn print(stream: u32, in text: Slice[u8]) eff [Ffi[HybridDriver]] {
 
 // `vesper: <message>` on stderr; exit code 1.
 fn error(in message: Slice[u8]) -> i64 eff [Ffi[HybridDriver]] {
-    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    line.extend(in "vesper: ".as_bytes());
-    line.extend(in message);
-    line.push(10);
+    let line = fmt{
+        new;
+        write_str(in "vesper: "),
+        write_bytes(in message),
+        write_str(in "\n")
+    };
     print(stderr_stream(), in line.as_slice());
     1
 }
@@ -290,10 +294,12 @@ fn is_failure(r: i64) -> bool {
 
 // `<n> <what>` as an error.
 fn count_error(n: i64, in what: Str) -> i64 eff [Ffi[HybridDriver]] {
-    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    write_u64(inout m, wrapping_u64(n));
-    m.push(32);
-    m.extend(in what.as_bytes());
+    let m = fmt{
+        new;
+        write_u64(wrapping_u64(n)),
+        write_str(in " "),
+        write_str(in what)
+    };
     error(in m.as_slice())
 }
 
@@ -518,11 +524,13 @@ fn drive(
         if o.json {
             print(stdout_stream(), in "[]\n".as_bytes());
         } else {
-            let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-            line.extend(in "checked ".as_bytes());
             let input = value(in o, slot_input());
-            line.extend(in input.as_slice());
-            line.push(10);
+            let line = fmt{
+                new;
+                write_str(in "checked "),
+                write_bytes(in input.as_slice()),
+                write_str(in "\n")
+            };
             print(stdout_stream(), in line.as_slice());
         }
         return 0;
@@ -684,10 +692,12 @@ fn build(
     if r != 0 {
         return r;
     }
-    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    line.extend(in "built ".as_bytes());
-    line.extend(in built.as_slice());
-    line.push(10);
+    let line = fmt{
+        new;
+        write_str(in "built "),
+        write_bytes(in built.as_slice()),
+        write_str(in "\n")
+    };
     print(stdout_stream(), in line.as_slice());
     if o.tee {
         return measure_tee(in built.as_slice());
@@ -816,18 +826,23 @@ fn starts_with(in text: Slice[u8], in prefix: Slice[u8]) -> bool {
     true
 }
 
+// Length of the `error: ` prefix in front of a code generator error summary.
+const ERROR_PREFIX_LEN: u64 = 7;
+// The newline byte that ends a summary line.
+const NEWLINE: u8 = 10;
+
 // Whether the code generator's summary is an `error: <display>` line whose
 // display Rust's `VerifiedError::from_display` reads back to the same text.
 fn verified_error_text(in summary: Slice[u8]) -> bool {
     let n = summary.len();
-    if n < 8 {
+    if n <= ERROR_PREFIX_LEN {
         return false;
     }
     let last = match summary.try_get(wrapping_sub(n, 1)) {
         Option::Some(c) => c,
         Option::None => 0,
     };
-    if last != 10 {
+    if last != NEWLINE {
         return false;
     }
     for i in 0..wrapping_sub(n, 1) {
@@ -835,7 +850,7 @@ fn verified_error_text(in summary: Slice[u8]) -> bool {
             Option::Some(c) => c,
             Option::None => 0,
         };
-        if c == 10 {
+        if c == NEWLINE {
             return false;
         }
     }
@@ -874,7 +889,8 @@ fn verified_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[H
     // one `VerifiedError::from_display` reads back exactly).
     if verified_error_text(in summary.as_slice()) {
         let line = summary.as_slice();
-        return error(in line[7..wrapping_sub(line.len(), 1)]);
+        let start = ERROR_PREFIX_LEN;
+        return error(in line[start..wrapping_sub(line.len(), 1)]);
     }
     let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let rest = unpack(in words, at, inout bytes);
@@ -901,9 +917,9 @@ fn verified_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[H
     for i in prefix.len()..summary.len() {
         let c = match summary.try_get(i) {
             Option::Some(c) => c,
-            Option::None => 10,
+            Option::None => NEWLINE,
         };
-        if c == 10 {
+        if c == NEWLINE {
             break;
         }
         code.push(c);
@@ -1331,6 +1347,37 @@ pub fn proof_audit_run(
         }
     }
     let o = proof_audit_command(in args);
+    let mut result: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if o.failed {
+        result.push(1);
+    } else {
+        result.push(0);
+    }
+    let mut n = o.out.len();
+    for _k in 0..AUDIT_LEN_BYTES {
+        result.push(wrapping_u8(n % BYTE_RADIX));
+        n = n / BYTE_RADIX;
+    }
+    result.extend(in o.out.as_slice());
+    result.extend(in o.err.as_slice());
+    result
+}
+
+// `verify_commands::run` for `--format` (the `verify` swap,
+// src/swap/verify.rs): `hc_verify_run` hands over `--format` runs in
+// `proof_audit_run`'s packing and reads back the same result.
+pub fn verify_run(
+    in packed: Slice[u8]
+) -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3]] {
+    let mut args = audit_strs_new();
+    let mut from: u64 = 0;
+    for i in 0..packed.len() {
+        if audit_byte(in packed, i) == 0 {
+            audit_push(inout args, in packed[from..i]);
+            from = wrapping_add(i, 1);
+        }
+    }
+    let o = verify_format_command(in args);
     let mut result: ChunkSeq[u8] = ChunkSeq::new[u8]();
     if o.failed {
         result.push(1);

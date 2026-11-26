@@ -54,8 +54,8 @@ const ITEM_EFFECT: u8 = 3;
 const ITEM_IMPL: u8 = 4;
 const ITEM_TRAIT: u8 = 5;
 
-fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
-    s.try_get(i).unwrap_or(0)
+fn u64_at(in column: ChunkSeq[u64], i: u64) -> u64 {
+    column.try_get(i).unwrap_or(0)
 }
 
 // ------------------------------------------------------------ facts
@@ -66,55 +66,55 @@ fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
 // live in `pool` as (offset, length).
 pub struct DocFacts {
     pool: ChunkSeq[u8],
-    fn_s: ChunkSeq[u64],
-    fn_l: ChunkSeq[u64],
+    fn_name_at: ChunkSeq[u64],
+    fn_name_len: ChunkSeq[u64],
     fn_start: ChunkSeq[u64],
     fn_end: ChunkSeq[u64],
-    gen_s: ChunkSeq[u64],
-    gen_l: ChunkSeq[u64],
-    adt_s: ChunkSeq[u64],
-    adt_l: ChunkSeq[u64],
+    gen_name_at: ChunkSeq[u64],
+    gen_name_len: ChunkSeq[u64],
+    adt_name_at: ChunkSeq[u64],
+    adt_name_len: ChunkSeq[u64],
     adt_start: ChunkSeq[u64],
     adt_end: ChunkSeq[u64],
-    eff_s: ChunkSeq[u64],
-    eff_l: ChunkSeq[u64],
+    eff_name_at: ChunkSeq[u64],
+    eff_name_len: ChunkSeq[u64],
     eff_start: ChunkSeq[u64],
     eff_end: ChunkSeq[u64],
-    eff_oa: ChunkSeq[u64],
-    eff_on: ChunkSeq[u64],
-    op_s: ChunkSeq[u64],
-    op_l: ChunkSeq[u64],
+    eff_op_start: ChunkSeq[u64],
+    eff_op_count: ChunkSeq[u64],
+    op_name_at: ChunkSeq[u64],
+    op_name_len: ChunkSeq[u64],
     op_start: ChunkSeq[u64],
     op_end: ChunkSeq[u64],
-    tr_s: ChunkSeq[u64],
-    tr_l: ChunkSeq[u64]
+    trait_name_at: ChunkSeq[u64],
+    trait_name_len: ChunkSeq[u64]
 }
 
 pub fn doc_facts_new() -> DocFacts {
     DocFacts {
         pool: ChunkSeq::new[u8](),
-        fn_s: ChunkSeq::new[u64](),
-        fn_l: ChunkSeq::new[u64](),
+        fn_name_at: ChunkSeq::new[u64](),
+        fn_name_len: ChunkSeq::new[u64](),
         fn_start: ChunkSeq::new[u64](),
         fn_end: ChunkSeq::new[u64](),
-        gen_s: ChunkSeq::new[u64](),
-        gen_l: ChunkSeq::new[u64](),
-        adt_s: ChunkSeq::new[u64](),
-        adt_l: ChunkSeq::new[u64](),
+        gen_name_at: ChunkSeq::new[u64](),
+        gen_name_len: ChunkSeq::new[u64](),
+        adt_name_at: ChunkSeq::new[u64](),
+        adt_name_len: ChunkSeq::new[u64](),
         adt_start: ChunkSeq::new[u64](),
         adt_end: ChunkSeq::new[u64](),
-        eff_s: ChunkSeq::new[u64](),
-        eff_l: ChunkSeq::new[u64](),
+        eff_name_at: ChunkSeq::new[u64](),
+        eff_name_len: ChunkSeq::new[u64](),
         eff_start: ChunkSeq::new[u64](),
         eff_end: ChunkSeq::new[u64](),
-        eff_oa: ChunkSeq::new[u64](),
-        eff_on: ChunkSeq::new[u64](),
-        op_s: ChunkSeq::new[u64](),
-        op_l: ChunkSeq::new[u64](),
+        eff_op_start: ChunkSeq::new[u64](),
+        eff_op_count: ChunkSeq::new[u64](),
+        op_name_at: ChunkSeq::new[u64](),
+        op_name_len: ChunkSeq::new[u64](),
         op_start: ChunkSeq::new[u64](),
         op_end: ChunkSeq::new[u64](),
-        tr_s: ChunkSeq::new[u64](),
-        tr_l: ChunkSeq::new[u64]()
+        trait_name_at: ChunkSeq::new[u64](),
+        trait_name_len: ChunkSeq::new[u64]()
     }
 }
 
@@ -123,92 +123,97 @@ pub struct WordReader {
     pos: u64
 }
 
-pub fn read_word(in b: Slice[u8], inout r: WordReader) -> u64 {
-    let x = b.try_read_u64_le(r.pos).unwrap_or(0);
-    r.pos = wrapping_add(r.pos, 8);
-    x
+pub fn read_word(in bytes: Slice[u8], inout reader: WordReader) -> u64 {
+    let value = bytes.try_read_u64_le(reader.pos).unwrap_or(0);
+    reader.pos = wrapping_add(reader.pos, 8);
+    value
 }
 
-fn read_text(in b: Slice[u8], inout r: WordReader, inout f: DocFacts) -> (u64, u64) {
-    let n = read_word(in b, inout r);
-    let s = f.pool.len();
-    f.pool.extend(in b[r.pos..wrapping_add(r.pos, n)]);
-    r.pos = wrapping_add(r.pos, wrapping_mul(wrapping_add(n, 7) / 8, 8));
-    (s, n)
+fn read_text(in bytes: Slice[u8], inout reader: WordReader, inout facts: DocFacts) -> (u64, u64) {
+    let text_len = read_word(in bytes, inout reader);
+    let text_at = facts.pool.len();
+    facts.pool.extend(in bytes[reader.pos..wrapping_add(reader.pos, text_len)]);
+    reader.pos = wrapping_add(reader.pos, wrapping_mul(wrapping_add(text_len, 7) / 8, 8));
+    (text_at, text_len)
 }
 
 // Reads the facts section (see tests/self_host_lsp_features.rs
 // `doc_facts`): functions, generated, ADTs, effects with operations,
 // traits, each a count then its rows.
-pub fn read_doc_facts(in b: Slice[u8], inout r: WordReader) -> DocFacts {
-    let mut f = doc_facts_new();
-    let n = read_word(in b, inout r);
+pub fn read_doc_facts(in bytes: Slice[u8], inout reader: WordReader) -> DocFacts {
+    let mut facts = doc_facts_new();
+    let n = read_word(in bytes, inout reader);
     for i in 0..n {
-        let (s, l) = read_text(in b, inout r, inout f);
-        f.fn_s.push(s);
-        f.fn_l.push(l);
-        f.fn_start.push(read_word(in b, inout r));
-        f.fn_end.push(read_word(in b, inout r));
+        let (name_at, name_len) = read_text(in bytes, inout reader, inout facts);
+        facts.fn_name_at.push(name_at);
+        facts.fn_name_len.push(name_len);
+        facts.fn_start.push(read_word(in bytes, inout reader));
+        facts.fn_end.push(read_word(in bytes, inout reader));
     }
-    let n = read_word(in b, inout r);
+    let n = read_word(in bytes, inout reader);
     for i in 0..n {
-        let (s, l) = read_text(in b, inout r, inout f);
-        f.gen_s.push(s);
-        f.gen_l.push(l);
+        let (name_at, name_len) = read_text(in bytes, inout reader, inout facts);
+        facts.gen_name_at.push(name_at);
+        facts.gen_name_len.push(name_len);
     }
-    let n = read_word(in b, inout r);
+    let n = read_word(in bytes, inout reader);
     for i in 0..n {
-        let (s, l) = read_text(in b, inout r, inout f);
-        f.adt_s.push(s);
-        f.adt_l.push(l);
-        f.adt_start.push(read_word(in b, inout r));
-        f.adt_end.push(read_word(in b, inout r));
+        let (name_at, name_len) = read_text(in bytes, inout reader, inout facts);
+        facts.adt_name_at.push(name_at);
+        facts.adt_name_len.push(name_len);
+        facts.adt_start.push(read_word(in bytes, inout reader));
+        facts.adt_end.push(read_word(in bytes, inout reader));
     }
-    let n = read_word(in b, inout r);
+    let n = read_word(in bytes, inout reader);
     for i in 0..n {
-        let (s, l) = read_text(in b, inout r, inout f);
-        f.eff_s.push(s);
-        f.eff_l.push(l);
-        f.eff_start.push(read_word(in b, inout r));
-        f.eff_end.push(read_word(in b, inout r));
-        f.eff_oa.push(f.op_s.len());
-        let m = read_word(in b, inout r);
-        f.eff_on.push(m);
-        for j in 0..m {
-            let (os, ol) = read_text(in b, inout r, inout f);
-            f.op_s.push(os);
-            f.op_l.push(ol);
-            f.op_start.push(read_word(in b, inout r));
-            f.op_end.push(read_word(in b, inout r));
+        let (name_at, name_len) = read_text(in bytes, inout reader, inout facts);
+        facts.eff_name_at.push(name_at);
+        facts.eff_name_len.push(name_len);
+        facts.eff_start.push(read_word(in bytes, inout reader));
+        facts.eff_end.push(read_word(in bytes, inout reader));
+        facts.eff_op_start.push(facts.op_name_at.len());
+        let op_count = read_word(in bytes, inout reader);
+        facts.eff_op_count.push(op_count);
+        for j in 0..op_count {
+            let (op_name_at, op_name_len) = read_text(in bytes, inout reader, inout facts);
+            facts.op_name_at.push(op_name_at);
+            facts.op_name_len.push(op_name_len);
+            facts.op_start.push(read_word(in bytes, inout reader));
+            facts.op_end.push(read_word(in bytes, inout reader));
         }
     }
-    let n = read_word(in b, inout r);
+    let n = read_word(in bytes, inout reader);
     for i in 0..n {
-        let (s, l) = read_text(in b, inout r, inout f);
-        f.tr_s.push(s);
-        f.tr_l.push(l);
+        let (name_at, name_len) = read_text(in bytes, inout reader, inout facts);
+        facts.trait_name_at.push(name_at);
+        facts.trait_name_len.push(name_len);
     }
-    f
+    facts
 }
 
-// Whether pool text `s, l` equals `q`.
-fn pool_eq(in f: DocFacts, s: u64, l: u64, in q: ChunkSeq[u8]) -> bool {
-    if l != q.len() {
+// Whether pool text `text_at, text_len` equals `name`.
+fn pool_eq(in facts: DocFacts, text_at: u64, text_len: u64, in name: ChunkSeq[u8]) -> bool {
+    if text_len != name.len() {
         return false;
     }
-    for i in 0..l {
-        if u8_at(in f.pool, wrapping_add(s, i)) != u8_at(in q, i) {
+    for i in 0..text_len {
+        if u8_at(in facts.pool, wrapping_add(text_at, i)) != u8_at(in name, i) {
             return false;
         }
     }
     true
 }
 
-// The row of `table` (offsets `ss`, lengths `ls`) spelling `q`, or
+// The row of `table` (offsets `offsets`, lengths `lengths`) spelling `name`, or
 // NOT_FOUND (`BTreeMap::get` by name).
-fn find(in f: DocFacts, in ss: ChunkSeq[u64], in ls: ChunkSeq[u64], in q: ChunkSeq[u8]) -> u64 {
-    for i in 0..ss.len() {
-        if pool_eq(in f, u64_at(in ss, i), u64_at(in ls, i), in q) {
+fn find(
+    in facts: DocFacts,
+    in offsets: ChunkSeq[u64],
+    in lengths: ChunkSeq[u64],
+    in name: ChunkSeq[u8]
+) -> u64 {
+    for i in 0..offsets.len() {
+        if pool_eq(in facts, u64_at(in offsets, i), u64_at(in lengths, i), in name) {
             return i;
         }
     }
@@ -224,49 +229,49 @@ struct Inv {
     err: u64,
     // Targets: path bytes in `paths` as (offset, length), kind, selection.
     paths: ChunkSeq[u8],
-    t_s: ChunkSeq[u64],
-    t_l: ChunkSeq[u64],
-    t_kind: ChunkSeq[u8],
-    t_sel_start: ChunkSeq[u64],
-    t_sel_end: ChunkSeq[u64],
+    path_at: ChunkSeq[u64],
+    path_len: ChunkSeq[u64],
+    target_kind: ChunkSeq[u8],
+    target_sel_start: ChunkSeq[u64],
+    target_sel_end: ChunkSeq[u64],
     // The capacities of `names` and `spans` (`Budget::reserve`).
     names_cap: u64,
     spans_cap: u64
 }
 
-fn inv_fail(inout v: Inv, code: u64) -> bool {
-    if v.err == ERR_NONE {
-        v.err = code;
+fn inv_fail(inout inventory: Inv, code: u64) -> bool {
+    if inventory.err == ERR_NONE {
+        inventory.err = code;
     }
     false
 }
 
-fn inv_work(inout v: Inv, n: u64) -> bool {
-    if n > v.work {
-        return inv_fail(inout v, ERR_DOC_INVENTORY);
+fn inv_work(inout inventory: Inv, n: u64) -> bool {
+    if n > inventory.work {
+        return inv_fail(inout inventory, ERR_DOC_INVENTORY);
     }
-    v.work = wrapping_sub(v.work, n);
+    inventory.work = wrapping_sub(inventory.work, n);
     true
 }
 
-fn inv_metadata(inout v: Inv, n: u64) -> bool {
-    if n > v.metadata {
-        return inv_fail(inout v, ERR_DOC_INVENTORY);
+fn inv_metadata(inout inventory: Inv, n: u64) -> bool {
+    if n > inventory.metadata {
+        return inv_fail(inout inventory, ERR_DOC_INVENTORY);
     }
-    v.metadata = wrapping_sub(v.metadata, n);
-    inv_work(inout v, n)
+    inventory.metadata = wrapping_sub(inventory.metadata, n);
+    inv_work(inout inventory, n)
 }
 
 // `Budget::lookup`: `(entries + 1) * (key_bytes + 1)` work.
-fn inv_lookup(inout v: Inv, entries: u64, key: u64) -> bool {
-    inv_work(inout v, wrapping_mul(wrapping_add(entries, 1), wrapping_add(key, 1)))
+fn inv_lookup(inout inventory: Inv, entries: u64, key: u64) -> bool {
+    inv_work(inout inventory, wrapping_mul(wrapping_add(entries, 1), wrapping_add(key, 1)))
 }
 
 // `Budget::reserve` of a vector of `len` values of `size` bytes whose
 // capacity is `cap`; returns the new capacity, or NOT_FOUND on failure.
-fn inv_reserve(inout v: Inv, len: u64, cap: u64, size: u64, limit: u64) -> u64 {
+fn inv_reserve(inout inventory: Inv, len: u64, cap: u64, size: u64, limit: u64) -> u64 {
     if len >= limit {
-        inv_fail(inout v, ERR_DOC_INVENTORY);
+        inv_fail(inout inventory, ERR_DOC_INVENTORY);
         return NOT_FOUND;
     }
     if len != cap {
@@ -277,72 +282,72 @@ fn inv_reserve(inout v: Inv, len: u64, cap: u64, size: u64, limit: u64) -> u64 {
     if next > limit {
         next = limit;
     }
-    if !inv_metadata(inout v, wrapping_mul(next, size)) {
+    if !inv_metadata(inout inventory, wrapping_mul(next, size)) {
         return NOT_FOUND;
     }
-    if !inv_work(inout v, wrapping_mul(len, size)) {
+    if !inv_work(inout inventory, wrapping_mul(len, size)) {
         return NOT_FOUND;
     }
     next
 }
 
-fn identifier(in q: ChunkSeq[u8]) -> bool {
-    if q.len() == 0 || !ident_start(u8_at(in q, 0)) {
+fn identifier(in name: ChunkSeq[u8]) -> bool {
+    if name.len() == 0 || !ident_start(u8_at(in name, 0)) {
         return false;
     }
-    for i in 1..q.len() {
-        if !ident_byte(u8_at(in q, i)) {
+    for i in 1..name.len() {
+        if !ident_byte(u8_at(in name, i)) {
             return false;
         }
     }
     true
 }
 
-fn is_self(in q: ChunkSeq[u8]) -> bool {
-    q.len() == 4
-        && u8_at(in q, 0) == 83
-        && u8_at(in q, 1) == 101
-        && u8_at(in q, 2) == 108
-        && u8_at(in q, 3) == 102
+fn is_self(in name: ChunkSeq[u8]) -> bool {
+    name.len() == 4
+        && u8_at(in name, 0) == 83
+        && u8_at(in name, 1) == 101
+        && u8_at(in name, 2) == 108
+        && u8_at(in name, 3) == 102
 }
 
 // `Inventory::local_name`.
-fn local_name(inout v: Inv, in name: ChunkSeq[u8], inout ok: bool) -> bool {
-    if !inv_work(inout v, wrapping_add(name.len(), 1)) {
+fn local_name(inout inventory: Inv, in name: ChunkSeq[u8], inout ok: bool) -> bool {
+    if !inv_work(inout inventory, wrapping_add(name.len(), 1)) {
         return false;
     }
     ok = !is_self(in name) && identifier(in name);
     true
 }
 
-fn name_text(in x: Ix, sym: u32) -> ChunkSeq[u8] {
-    let mut b = ChunkSeq::new[u8]();
-    put_name(inout b, in x.ast, sym);
-    b
+fn name_text(in index: Ix, sym: u32) -> ChunkSeq[u8] {
+    let mut name = ChunkSeq::new[u8]();
+    put_name(inout name, in index.ast, sym);
+    name
 }
 
 // `Inventory::path`: `owner::name` (or `name`) into `out`.
 fn inv_path(
-    inout v: Inv,
+    inout inventory: Inv,
     in owner: ChunkSeq[u8],
     has_owner: bool,
     in name: ChunkSeq[u8],
     inout out: ChunkSeq[u8]
 ) -> bool {
-    if !inv_work(inout v, wrapping_add(name.len(), 1)) {
+    if !inv_work(inout inventory, wrapping_add(name.len(), 1)) {
         return false;
     }
     let mut bytes = name.len();
     if has_owner {
-        if !inv_work(inout v, wrapping_add(owner.len(), 1)) {
+        if !inv_work(inout inventory, wrapping_add(owner.len(), 1)) {
             return false;
         }
         bytes = wrapping_add(wrapping_add(owner.len(), 2), name.len());
     }
     if bytes > L_MAX_PATH_BYTES {
-        return inv_fail(inout v, ERR_DOC_INVENTORY);
+        return inv_fail(inout inventory, ERR_DOC_INVENTORY);
     }
-    if !inv_metadata(inout v, bytes) {
+    if !inv_metadata(inout inventory, bytes) {
         return false;
     }
     out.clear();
@@ -358,71 +363,74 @@ fn inv_path(
 // `Inventory::selection`: the first identifier token inside `s..e`
 // spelling `name`.
 fn selection(
-    inout v: Inv,
-    in x: Ix,
+    inout inventory: Inv,
+    in index: Ix,
     s: u64,
     e: u64,
     in name: ChunkSeq[u8],
     inout out_s: u64,
     inout out_e: u64
 ) -> bool {
-    if s > e || e > x.src.len() {
-        return inv_fail(inout v, ERR_INVALID_SPAN);
+    if s > e || e > index.src.len() {
+        return inv_fail(inout inventory, ERR_INVALID_SPAN);
     }
-    if !x.src.is_char_boundary(s) || !x.src.is_char_boundary(e) {
-        return inv_fail(inout v, ERR_INVALID_SPAN);
+    if !index.src.is_char_boundary(s) || !index.src.is_char_boundary(e) {
+        return inv_fail(inout inventory, ERR_INVALID_SPAN);
     }
-    let n = x.t.kind.len();
-    if !inv_work(inout v, wrapping_mul(n, 2)) {
+    let token_count = index.tokens.kind.len();
+    if !inv_work(inout inventory, wrapping_mul(token_count, 2)) {
         return false;
     }
-    let begin = first_from(in x, s);
-    let end = ending_by(in x, e);
-    let b = x.src.as_bytes();
+    let begin = first_from(in index, s);
+    let end = ending_by(in index, e);
+    let bytes = index.src.as_bytes();
     let mut i = begin;
     loop {
         if i >= end {
             break;
         }
-        if !inv_work(inout v, 1) {
+        if !inv_work(inout inventory, 1) {
             return false;
         }
-        let k = u8_at(in x.t.kind, i);
-        if k == TK_LOWER || k == TK_UPPER || k == TK_SELF {
-            let ts = token_start(in x, i);
-            let te = token_end(in x.t, i);
-            if !inv_work(inout v, wrapping_add(wrapping_sub(te, ts), name.len())) {
+        let kind = u8_at(in index.tokens.kind, i);
+        if kind == TK_LOWER || kind == TK_UPPER || kind == TK_SELF {
+            let tok_start = token_start(in index, i);
+            let tok_end = token_end(in index.tokens, i);
+            if !inv_work(
+                inout inventory,
+                wrapping_add(wrapping_sub(tok_end, tok_start), name.len())
+            ) {
                 return false;
             }
-            if wrapping_sub(te, ts) == name.len() {
+            if wrapping_sub(tok_end, tok_start) == name.len() {
                 let mut same = true;
                 for j in 0..name.len() {
-                    if byte(in b, wrapping_add(ts, j)) != u8_at(in name, j) {
+                    if byte(in bytes, wrapping_add(tok_start, j)) != u8_at(in name, j) {
                         same = false;
                         break;
                     }
                 }
                 if same {
-                    out_s = ts;
-                    out_e = te;
+                    out_s = tok_start;
+                    out_e = tok_end;
                     return true;
                 }
             }
         }
         i = wrapping_add(i, 1);
     }
-    inv_fail(inout v, ERR_INVALID_SPAN)
+    inv_fail(inout inventory, ERR_INVALID_SPAN)
 }
 
-fn first_from(in x: Ix, at: u64) -> u64 {
+fn first_from(in index: Ix, at: u64) -> u64 {
     let mut lo: u64 = 0;
-    let mut hi = x.t.kind.len();
+    let mut hi = index.tokens.kind.len();
     loop {
         if lo >= hi {
             break;
         }
         let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
-        if token_start(in x, mid) < at {
+        if token_start(in index, mid) < at {
             lo = wrapping_add(mid, 1);
         } else {
             hi = mid;
@@ -431,15 +439,15 @@ fn first_from(in x: Ix, at: u64) -> u64 {
     lo
 }
 
-fn ending_by(in x: Ix, at: u64) -> u64 {
+fn ending_by(in index: Ix, at: u64) -> u64 {
     let mut lo: u64 = 0;
-    let mut hi = x.t.kind.len();
+    let mut hi = index.tokens.kind.len();
     loop {
         if lo >= hi {
             break;
         }
         let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
-        if token_end(in x.t, mid) <= at {
+        if token_end(in index.tokens, mid) <= at {
             lo = wrapping_add(mid, 1);
         } else {
             hi = mid;
@@ -450,59 +458,65 @@ fn ending_by(in x: Ix, at: u64) -> u64 {
 
 // `Inventory::push`.
 fn inv_push(
-    inout v: Inv,
-    in x: Ix,
+    inout inventory: Inv,
+    in index: Ix,
     in path: ChunkSeq[u8],
     kind: u8,
     s: u64,
     e: u64,
     in leaf: ChunkSeq[u8]
 ) -> bool {
-    let mut ss: u64 = 0;
-    let mut se: u64 = 0;
-    if !selection(inout v, in x, s, e, in leaf, inout ss, inout se) {
+    let mut sel_start: u64 = 0;
+    let mut sel_end: u64 = 0;
+    if !selection(inout inventory, in index, s, e, in leaf, inout sel_start, inout sel_end) {
         return false;
     }
-    let len = v.t_s.len();
-    let nc = inv_reserve(inout v, len, v.names_cap, SIZE_LINK_TARGET, MAX_SYMBOLS);
-    if nc == NOT_FOUND {
+    let len = inventory.path_at.len();
+    let names_cap = inv_reserve(
+        inout inventory,
+        len,
+        inventory.names_cap,
+        SIZE_LINK_TARGET,
+        MAX_SYMBOLS
+    );
+    if names_cap == NOT_FOUND {
         return false;
     }
-    v.names_cap = nc;
-    let sc = inv_reserve(inout v, len, v.spans_cap, SIZE_SPAN, MAX_SYMBOLS);
-    if sc == NOT_FOUND {
+    inventory.names_cap = names_cap;
+    let spans_cap = inv_reserve(inout inventory, len, inventory.spans_cap, SIZE_SPAN, MAX_SYMBOLS);
+    if spans_cap == NOT_FOUND {
         return false;
     }
-    v.spans_cap = sc;
-    v.t_s.push(v.paths.len());
-    v.t_l.push(path.len());
-    v.paths.extend(in path.as_slice());
-    v.t_kind.push(kind);
-    v.t_sel_start.push(ss);
-    v.t_sel_end.push(se);
+    inventory.spans_cap = spans_cap;
+    inventory.path_at.push(inventory.paths.len());
+    inventory.path_len.push(path.len());
+    inventory.paths.extend(in path.as_slice());
+    inventory.target_kind.push(kind);
+    inventory.target_sel_start.push(sel_start);
+    inventory.target_sel_end.push(sel_end);
     true
 }
 
 // `Inventory::function`.
 fn inv_function(
-    inout v: Inv,
-    in x: Ix,
-    in f: DocFacts,
+    inout inventory: Inv,
+    in index: Ix,
+    in facts: DocFacts,
     fnode: u32,
     in owner: ChunkSeq[u8],
     has_owner: bool
 ) -> bool {
-    let node = fn_at(in x.ast, fnode);
-    let name = name_text(in x, node.name);
+    let node = fn_at(in index.ast, fnode);
+    let name = name_text(in index, node.name);
     let mut ok = false;
-    if !local_name(inout v, in name, inout ok) {
+    if !local_name(inout inventory, in name, inout ok) {
         return false;
     }
     if !ok {
         return true;
     }
     if has_owner {
-        if !local_name(inout v, in owner, inout ok) {
+        if !local_name(inout inventory, in owner, inout ok) {
             return false;
         }
         if !ok {
@@ -510,28 +524,28 @@ fn inv_function(
         }
     }
     let mut path = ChunkSeq::new[u8]();
-    if !inv_path(inout v, in owner, has_owner, in name, inout path) {
+    if !inv_path(inout inventory, in owner, has_owner, in name, inout path) {
         return false;
     }
-    if !inv_lookup(inout v, f.fn_s.len(), path.len()) {
+    if !inv_lookup(inout inventory, facts.fn_name_at.len(), path.len()) {
         return false;
     }
-    let i = find(in f, in f.fn_s, in f.fn_l, in path);
+    let i = find(in facts, in facts.fn_name_at, in facts.fn_name_len, in path);
     if i == NOT_FOUND {
-        return inv_fail(inout v, ERR_INVALID_SPAN);
+        return inv_fail(inout inventory, ERR_INVALID_SPAN);
     }
-    if u64_at(in f.fn_start, i) != w(node.start) || u64_at(in f.fn_end, i) != w(node.end) {
-        return inv_fail(inout v, ERR_INVALID_SPAN);
+    if u64_at(in facts.fn_start, i) != w(node.start) || u64_at(in facts.fn_end, i) != w(node.end) {
+        return inv_fail(inout inventory, ERR_INVALID_SPAN);
     }
-    if !inv_lookup(inout v, f.gen_s.len(), path.len()) {
+    if !inv_lookup(inout inventory, facts.gen_name_at.len(), path.len()) {
         return false;
     }
-    if find(in f, in f.gen_s, in f.gen_l, in path) != NOT_FOUND {
+    if find(in facts, in facts.gen_name_at, in facts.gen_name_len, in path) != NOT_FOUND {
         return true;
     }
     inv_push(
-        inout v,
-        in x,
+        inout inventory,
+        in index,
         in path,
         if has_owner { T_METHOD } else { T_FUNCTION },
         w(node.start),
@@ -540,117 +554,143 @@ fn inv_function(
     )
 }
 
-fn type_node(in x: Ix, t: u32) -> TypeNode {
-    x.ast.types.get_or(
-        idx_from_raw[TypeNode](t),
+fn type_node(in index: Ix, type_id: u32) -> TypeNode {
+    index.ast.types.get_or(
+        idx_from_raw[TypeNode](type_id),
         TypeNode { kind: 5, a: NONE, b: NONE, c: NONE, d: NONE }
     )
 }
 
 // `Inventory::collect`.
-fn collect(inout v: Inv, in x: Ix, in f: DocFacts) -> bool {
+fn collect(inout inventory: Inv, in index: Ix, in facts: DocFacts) -> bool {
     let none = ChunkSeq::new[u8]();
-    for k in 0..x.ast.m_items.len() {
-        if !inv_work(inout v, 1) {
+    for item_index in 0..index.ast.m_items.len() {
+        if !inv_work(inout inventory, 1) {
             return false;
         }
-        let it = item_at(in x.ast, u32_at(in x.ast.m_items, k));
-        if it.kind == ITEM_FUNCTION {
-            if !inv_function(inout v, in x, in f, it.node, in none, false) {
+        let item = item_at(in index.ast, u32_at(in index.ast.m_items, item_index));
+        if item.kind == ITEM_FUNCTION {
+            if !inv_function(inout inventory, in index, in facts, item.node, in none, false) {
                 return false;
             }
-        } else if it.kind == ITEM_ADT {
-            let a = adt_at(in x.ast, it.node);
-            let name = name_text(in x, a.name);
+        } else if item.kind == ITEM_ADT {
+            let adt = adt_at(in index.ast, item.node);
+            let name = name_text(in index, adt.name);
             let mut ok = false;
-            if !local_name(inout v, in name, inout ok) {
+            if !local_name(inout inventory, in name, inout ok) {
                 return false;
             }
             if !ok {
                 continue;
             }
-            if !inv_lookup(inout v, f.adt_s.len(), name.len()) {
+            if !inv_lookup(inout inventory, facts.adt_name_at.len(), name.len()) {
                 return false;
             }
-            let i = find(in f, in f.adt_s, in f.adt_l, in name);
+            let i = find(in facts, in facts.adt_name_at, in facts.adt_name_len, in name);
             if i == NOT_FOUND
-                || u64_at(in f.adt_start, i) != w(a.start)
-                || u64_at(in f.adt_end, i) != w(a.end)
+                || u64_at(in facts.adt_start, i) != w(adt.start)
+                || u64_at(in facts.adt_end, i) != w(adt.end)
             {
-                return inv_fail(inout v, ERR_INVALID_SPAN);
+                return inv_fail(inout inventory, ERR_INVALID_SPAN);
             }
             let mut path = ChunkSeq::new[u8]();
-            if !inv_path(inout v, in none, false, in name, inout path) {
+            if !inv_path(inout inventory, in none, false, in name, inout path) {
                 return false;
             }
-            if !inv_push(inout v, in x, in path, T_TYPE, w(a.start), w(a.end), in name) {
+            if !inv_push(
+                inout inventory,
+                in index,
+                in path,
+                T_TYPE,
+                w(adt.start),
+                w(adt.end),
+                in name
+            ) {
                 return false;
             }
-        } else if it.kind == ITEM_EFFECT {
-            let e = effect_decl_at(in x.ast, it.node);
-            let name = name_text(in x, e.name);
+        } else if item.kind == ITEM_EFFECT {
+            let eff_decl = effect_decl_at(in index.ast, item.node);
+            let name = name_text(in index, eff_decl.name);
             let mut ok = false;
-            if !local_name(inout v, in name, inout ok) {
+            if !local_name(inout inventory, in name, inout ok) {
                 return false;
             }
             if !ok {
                 continue;
             }
-            if !inv_lookup(inout v, f.eff_s.len(), name.len()) {
+            if !inv_lookup(inout inventory, facts.eff_name_at.len(), name.len()) {
                 return false;
             }
-            let i = find(in f, in f.eff_s, in f.eff_l, in name);
+            let i = find(in facts, in facts.eff_name_at, in facts.eff_name_len, in name);
             if i == NOT_FOUND {
-                return inv_fail(inout v, ERR_INVALID_SPAN);
+                return inv_fail(inout inventory, ERR_INVALID_SPAN);
             }
-            if u64_at(in f.eff_start, i) != w(e.start) || u64_at(in f.eff_end, i) != w(e.end) {
-                return inv_fail(inout v, ERR_INVALID_SPAN);
+            if u64_at(in facts.eff_start, i) != w(eff_decl.start)
+                || u64_at(in facts.eff_end, i) != w(eff_decl.end)
+            {
+                return inv_fail(inout inventory, ERR_INVALID_SPAN);
             }
             let mut path = ChunkSeq::new[u8]();
-            if !inv_path(inout v, in none, false, in name, inout path) {
+            if !inv_path(inout inventory, in none, false, in name, inout path) {
                 return false;
             }
-            if !inv_push(inout v, in x, in path, T_EFFECT, w(e.start), w(e.end), in name) {
+            if !inv_push(
+                inout inventory,
+                in index,
+                in path,
+                T_EFFECT,
+                w(eff_decl.start),
+                w(eff_decl.end),
+                in name
+            ) {
                 return false;
             }
-            let oa = u64_at(in f.eff_oa, i);
-            let on = u64_at(in f.eff_on, i);
-            for j in 0..list_len(in x.ast, e.ops) {
-                if !inv_work(inout v, 1) {
+            let op_start = u64_at(in facts.eff_op_start, i);
+            let op_count = u64_at(in facts.eff_op_count, i);
+            for j in 0..list_len(in index.ast, eff_decl.ops) {
+                if !inv_work(inout inventory, 1) {
                     return false;
                 }
-                let op = fn_at(in x.ast, list_at(in x.ast, e.ops, j));
-                let op_name = name_text(in x, op.name);
-                if !local_name(inout v, in op_name, inout ok) {
+                let op = fn_at(in index.ast, list_at(in index.ast, eff_decl.ops, j));
+                let op_name = name_text(in index, op.name);
+                if !local_name(inout inventory, in op_name, inout ok) {
                     return false;
                 }
                 if !ok {
                     continue;
                 }
                 let mut matched = false;
-                for c in 0..on {
-                    let q = wrapping_add(oa, c);
-                    let cl = u64_at(in f.op_l, q);
-                    if !inv_work(inout v, wrapping_add(wrapping_add(cl, op_name.len()), 1)) {
+                for op_index in 0..op_count {
+                    let op_row = wrapping_add(op_start, op_index);
+                    let op_name_len = u64_at(in facts.op_name_len, op_row);
+                    if !inv_work(
+                        inout inventory,
+                        wrapping_add(wrapping_add(op_name_len, op_name.len()), 1)
+                    ) {
                         return false;
                     }
-                    if pool_eq(in f, u64_at(in f.op_s, q), cl, in op_name)
-                        && u64_at(in f.op_start, q) == w(op.start)
-                        && u64_at(in f.op_end, q) == w(op.end)
+                    if pool_eq(
+                        in facts,
+                        u64_at(in facts.op_name_at, op_row),
+                        op_name_len,
+                        in op_name
+                    )
+                        && u64_at(in facts.op_start, op_row) == w(op.start)
+                        && u64_at(in facts.op_end, op_row) == w(op.end)
                     {
                         matched = true;
                     }
                 }
                 if !matched {
-                    return inv_fail(inout v, ERR_INVALID_SPAN);
+                    return inv_fail(inout inventory, ERR_INVALID_SPAN);
                 }
                 let mut op_path = ChunkSeq::new[u8]();
-                if !inv_path(inout v, in name, true, in op_name, inout op_path) {
+                if !inv_path(inout inventory, in name, true, in op_name, inout op_path) {
                     return false;
                 }
                 if !inv_push(
-                    inout v,
-                    in x,
+                    inout inventory,
+                    in index,
                     in op_path,
                     T_OPERATION,
                     w(op.start),
@@ -660,22 +700,22 @@ fn collect(inout v: Inv, in x: Ix, in f: DocFacts) -> bool {
                     return false;
                 }
             }
-        } else if it.kind == ITEM_IMPL {
-            let im = impl_at(in x.ast, it.node);
+        } else if item.kind == ITEM_IMPL {
+            let impl_node = impl_at(in index.ast, item.node);
             // `Type::name`: a named type's name, else "".
-            let ty = type_node(in x, im.ty);
+            let ty = type_node(in index, impl_node.ty);
             if ty.kind == 1 {
-                let owner = name_text(in x, ty.a);
+                let owner = name_text(in index, ty.a);
                 if owner.len() != 0 {
-                    for j in 0..list_len(in x.ast, im.methods) {
-                        if !inv_work(inout v, 1) {
+                    for j in 0..list_len(in index.ast, impl_node.methods) {
+                        if !inv_work(inout inventory, 1) {
                             return false;
                         }
                         if !inv_function(
-                            inout v,
-                            in x,
-                            in f,
-                            list_at(in x.ast, im.methods, j),
+                            inout inventory,
+                            in index,
+                            in facts,
+                            list_at(in index.ast, impl_node.methods, j),
                             in owner,
                             true
                         ) {
@@ -684,34 +724,45 @@ fn collect(inout v: Inv, in x: Ix, in f: DocFacts) -> bool {
                     }
                 }
             }
-        } else if it.kind == ITEM_TRAIT {
-            let tr = trait_at(in x.ast, it.node);
-            let name = name_text(in x, tr.name);
+        } else if item.kind == ITEM_TRAIT {
+            let trait_node = trait_at(in index.ast, item.node);
+            let name = name_text(in index, trait_node.name);
             let mut ok = false;
-            if !local_name(inout v, in name, inout ok) {
+            if !local_name(inout inventory, in name, inout ok) {
                 return false;
             }
             if !ok {
                 continue;
             }
             let mut known = false;
-            for j in 0..f.tr_s.len() {
-                let tl = u64_at(in f.tr_l, j);
-                if !inv_work(inout v, wrapping_add(wrapping_add(tl, name.len()), 1)) {
+            for j in 0..facts.trait_name_at.len() {
+                let trait_name_len = u64_at(in facts.trait_name_len, j);
+                if !inv_work(
+                    inout inventory,
+                    wrapping_add(wrapping_add(trait_name_len, name.len()), 1)
+                ) {
                     return false;
                 }
-                if pool_eq(in f, u64_at(in f.tr_s, j), tl, in name) {
+                if pool_eq(in facts, u64_at(in facts.trait_name_at, j), trait_name_len, in name) {
                     known = true;
                 }
             }
             if !known {
-                return inv_fail(inout v, ERR_INVALID_SPAN);
+                return inv_fail(inout inventory, ERR_INVALID_SPAN);
             }
             let mut path = ChunkSeq::new[u8]();
-            if !inv_path(inout v, in none, false, in name, inout path) {
+            if !inv_path(inout inventory, in none, false, in name, inout path) {
                 return false;
             }
-            if !inv_push(inout v, in x, in path, T_TRAIT, w(tr.start), w(tr.end), in name) {
+            if !inv_push(
+                inout inventory,
+                in index,
+                in path,
+                T_TRAIT,
+                w(trait_node.start),
+                w(trait_node.end),
+                in name
+            ) {
                 return false;
             }
         }
@@ -721,94 +772,101 @@ fn collect(inout v: Inv, in x: Ix, in f: DocFacts) -> bool {
 
 // ------------------------------------------------------------ target
 
-// `doc_links::target` for a cursor at byte `at` of `x` that has no lexical
+// `doc_links::target` for a cursor at byte `at` of `index` that has no lexical
 // target: the selection span of the declaration the reference under the
 // cursor names, as `start << 32 | end` + 1, 0 for none, or NOT_FOUND with
 // the error code in `err`.
-pub fn doc_target(in x: Ix, in f: DocFacts, at: u64, inout err: u64) -> u64 {
-    let mut v = Inv {
+pub fn doc_target(in index: Ix, in facts: DocFacts, at: u64, inout err: u64) -> u64 {
+    let mut inventory = Inv {
         work: INV_WORK,
         metadata: INV_METADATA,
         err: ERR_NONE,
         paths: ChunkSeq::new[u8](),
-        t_s: ChunkSeq::new[u64](),
-        t_l: ChunkSeq::new[u64](),
-        t_kind: ChunkSeq::new[u8](),
-        t_sel_start: ChunkSeq::new[u64](),
-        t_sel_end: ChunkSeq::new[u64](),
+        path_at: ChunkSeq::new[u64](),
+        path_len: ChunkSeq::new[u64](),
+        target_kind: ChunkSeq::new[u8](),
+        target_sel_start: ChunkSeq::new[u64](),
+        target_sel_end: ChunkSeq::new[u64](),
         names_cap: 0,
         spans_cap: 0
     };
-    if !inv_work(inout v, x.t.kind.len()) {
-        err = v.err;
+    if !inv_work(inout inventory, index.tokens.kind.len()) {
+        err = inventory.err;
         return NOT_FOUND;
     }
-    let i = ending_by(in x, at);
-    if i >= x.t.kind.len() {
+    let i = ending_by(in index, at);
+    if i >= index.tokens.kind.len() {
         return 0;
     }
-    let s = token_start(in x, i);
-    let e = token_end(in x.t, i);
-    if u8_at(in x.t.kind, i) != TK_COMMENT || !(s <= at && at < e) {
+    let tok_start = token_start(in index, i);
+    let tok_end = token_end(in index.tokens, i);
+    if u8_at(in index.tokens.kind, i) != TK_COMMENT || !(tok_start <= at && at < tok_end) {
         return 0;
     }
-    let b = x.src.as_bytes();
-    let l = wrapping_sub(e, s);
-    let doc = l >= 3
-        && byte(in b, s) == 47
-        && byte(in b, wrapping_add(s, 1)) == 47
-        && (byte(in b, wrapping_add(s, 2)) == 33
-            || (byte(in b, wrapping_add(s, 2)) == 47
-                && !(l >= 4 && byte(in b, wrapping_add(s, 3)) == 47)));
-    if !doc {
+    let bytes = index.src.as_bytes();
+    let comment_len = wrapping_sub(tok_end, tok_start);
+    let is_doc = comment_len >= 3
+        && byte(in bytes, tok_start) == 47
+        && byte(in bytes, wrapping_add(tok_start, 1)) == 47
+        && (byte(in bytes, wrapping_add(tok_start, 2)) == 33
+            || (byte(in bytes, wrapping_add(tok_start, 2)) == 47
+                && !(comment_len >= 4 && byte(in bytes, wrapping_add(tok_start, 3)) == 47)));
+    if !is_doc {
         return 0;
     }
-    if !collect(inout v, in x, in f) {
-        err = v.err;
+    if !collect(inout inventory, in index, in facts) {
+        err = inventory.err;
         return NOT_FOUND;
     }
-    let mut k = link_new();
-    if !analyze(inout k, in x, in v.paths, in v.t_s, in v.t_l, in v.t_kind) {
-        err = if k.err == 1 {
+    let mut link = link_new();
+    if !analyze(
+        inout link,
+        in index,
+        in inventory.paths,
+        in inventory.path_at,
+        in inventory.path_len,
+        in inventory.target_kind
+    ) {
+        err = if link.err == 1 {
             ERR_DOC_LINK_BUDGET
-        } else if k.err == 2 {
+        } else if link.err == 2 {
             ERR_INVALID_LIMITS
         } else {
             ERR_INVALID_SPAN
         };
         return NOT_FOUND;
     }
-    if !inv_work(inout v, k.r_start.len()) {
-        err = v.err;
+    if !inv_work(inout inventory, link.ref_start.len()) {
+        err = inventory.err;
         return NOT_FOUND;
     }
-    let mut r = NOT_FOUND;
-    for j in 0..k.r_start.len() {
-        if u64_at(in k.r_start, j) <= at && at < u64_at(in k.r_end, j) {
-            r = j;
+    let mut ref_index = NOT_FOUND;
+    for j in 0..link.ref_start.len() {
+        if u64_at(in link.ref_start, j) <= at && at < u64_at(in link.ref_end, j) {
+            ref_index = j;
             break;
         }
     }
-    if r == NOT_FOUND {
+    if ref_index == NOT_FOUND {
         return 0;
     }
-    let target = u64_at(in k.r_target, r);
-    let ts = u64_at(in k.t_s, target);
-    let tl = u64_at(in k.t_l, target);
-    let tk = u8_at(in k.t_kind, target);
+    let target = u64_at(in link.ref_target, ref_index);
+    let target_at = u64_at(in link.path_at, target);
+    let target_len = u64_at(in link.path_len, target);
+    let target_kind = u8_at(in link.target_kind, target);
     let mut selected: u64 = 0;
-    for j in 0..v.t_s.len() {
-        let vl = u64_at(in v.t_l, j);
-        if !inv_work(inout v, wrapping_add(wrapping_add(vl, tl), 1)) {
-            err = v.err;
+    for j in 0..inventory.path_at.len() {
+        let entry_len = u64_at(in inventory.path_len, j);
+        if !inv_work(inout inventory, wrapping_add(wrapping_add(entry_len, target_len), 1)) {
+            err = inventory.err;
             return NOT_FOUND;
         }
-        if vl == tl && u8_at(in v.t_kind, j) == tk {
-            let vs = u64_at(in v.t_s, j);
+        if entry_len == target_len && u8_at(in inventory.target_kind, j) == target_kind {
+            let entry_at = u64_at(in inventory.path_at, j);
             let mut same = true;
-            for q in 0..tl {
-                if u8_at(in v.paths, wrapping_add(vs, q))
-                    != u8_at(in k.paths, wrapping_add(ts, q))
+            for offset in 0..target_len {
+                if u8_at(in inventory.paths, wrapping_add(entry_at, offset))
+                    != u8_at(in link.paths, wrapping_add(target_at, offset))
                 {
                     same = false;
                     break;
@@ -820,7 +878,8 @@ pub fn doc_target(in x: Ix, in f: DocFacts, at: u64, inout err: u64) -> u64 {
                     return NOT_FOUND;
                 }
                 selected = wrapping_add(
-                    wrapping_shl_u64(u64_at(in v.t_sel_start, j), 32) | u64_at(in v.t_sel_end, j),
+                    wrapping_shl_u64(u64_at(in inventory.target_sel_start, j), 32)
+                        | u64_at(in inventory.target_sel_end, j),
                     1
                 );
             }

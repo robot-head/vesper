@@ -25,8 +25,8 @@ const D_WIT: u64 = 16;
 // comp.ves `encode`'s reasons (`X_*`) as 32 + reason.
 const D_ENCODE: u64 = 32;
 
-fn byte(in b: Slice[u8], i: u64) -> u8 {
-    match b.try_get(i) {
+fn byte(in bytes: Slice[u8], i: u64) -> u8 {
+    match bytes.try_get(i) {
         Option::Some(x) => x,
         Option::None => 0,
     }
@@ -47,16 +47,16 @@ pub fn wit_component_command(
     in core: Slice[u8],
     inout out: ChunkSeq[u8]
 ) -> u64 {
-    let w = parse(in wit);
-    if w.err != 0 {
-        return wrapping_add(D_WIT, w.err);
+    let parsed = parse(in wit);
+    if parsed.err != 0 {
+        return wrapping_add(D_WIT, parsed.err);
     }
-    if w.plugin {
+    if parsed.plugin {
         return D_WORLD;
     }
-    let x = encode(in core, in w, inout out);
-    if x != 0 {
-        return wrapping_add(D_ENCODE, x);
+    let reason = encode(in core, in parsed, inout out);
+    if reason != 0 {
+        return wrapping_add(D_ENCODE, reason);
     }
     0
 }
@@ -79,29 +79,29 @@ pub fn wit_component_wrap_bytes(in input: Slice[u8]) -> ChunkSeq[u64] {
     if kind != W_COMMAND && kind != W_PLUGIN {
         return declined(D_INPUT);
     }
-    let mut len: u64 = 0;
+    let mut wit_len: u64 = 0;
     for k in 0..4 {
-        len = len
+        wit_len = wit_len
             | wrapping_shl_u64(
                 widen_u64(byte(in input, wrapping_add(1, k))),
                 wrapping_mul(wrapping_u32(k), 8)
             );
     }
-    let wit_end = wrapping_add(5, len);
+    let wit_end = wrapping_add(5, wit_len);
     if wit_end > n {
         return declined(D_INPUT);
     }
-    let w = parse(in input[5..wit_end]);
-    if w.err != 0 {
-        return declined(wrapping_add(D_WIT, w.err));
+    let wit = parse(in input[5..wit_end]);
+    if wit.err != 0 {
+        return declined(wrapping_add(D_WIT, wit.err));
     }
-    if w.plugin != (kind == W_PLUGIN) {
+    if wit.plugin != (kind == W_PLUGIN) {
         return declined(D_WORLD);
     }
     let mut component = ChunkSeq::new[u8]();
-    let x = encode(in input[wit_end..n], in w, inout component);
-    if x != 0 {
-        return declined(wrapping_add(D_ENCODE, x));
+    let reason = encode(in input[wit_end..n], in wit, inout component);
+    if reason != 0 {
+        return declined(wrapping_add(D_ENCODE, reason));
     }
     let packed = pack_text(in component);
     let mut out = ChunkSeq::with_capacity[u64](wrapping_add(packed.len(), 1));

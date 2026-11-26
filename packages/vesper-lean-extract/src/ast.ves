@@ -80,9 +80,9 @@ pub const TO_LOAD_TILE_VEC: u64 = 11;
 pub copy struct SrcFn {
     name: u32,
     body: u64,
-    // params: pnames/ppass/ptys[pa..pa+pn]
-    pa: u64,
-    pn: u64,
+    // params: param_names/param_passes/param_tys[param_start..param_start+param_count]
+    param_start: u64,
+    param_count: u64,
     result: u32,
     polymorphic: bool,
     // `() -> Unit / effects` holding the function's effects row
@@ -95,27 +95,28 @@ pub copy struct SrcFn {
 pub copy struct EffDecl {
     name: u32,
     linear: bool,
-    // generic names: egens[ga..ga+gn]
+    // generic names: eff_generics[ga..ga+gn]
     ga: u64,
     gn: u64,
-    // operations: eops[oa..oa+on]
-    oa: u64,
-    on: u64,
+    // operations: eff_ops[op_start..op_start+op_count]
+    op_start: u64,
+    op_count: u64,
 }
 
 pub copy struct EffOp {
     name: u32,
-    // parameters: eparams[pa..pa+pn]
-    pa: u64,
-    pn: u64,
+    // parameters: eff_params[param_start..param_start+param_count]
+    param_start: u64,
+    param_count: u64,
     result: u32,
 }
 
 pub copy struct EffParam {
     pass: u64,
-    // projections: eprojs[qa..qa+qn], each a range of eproj_syms
-    qa: u64,
-    qn: u64,
+    // projections: eff_projs[proj_start..proj_start+proj_count], each a range of
+    // eff_proj_syms
+    proj_start: u64,
+    proj_count: u64,
     ty: u32,
 }
 
@@ -127,136 +128,136 @@ pub copy struct Range {
 pub struct Ast {
     fip: bool,
     fns: ChunkSeq[SrcFn],
-    pnames: ChunkSeq[u32],
-    ppass: ChunkSeq[u64],
-    ptys: ChunkSeq[u32],
+    param_names: ChunkSeq[u32],
+    param_passes: ChunkSeq[u64],
+    param_tys: ChunkSeq[u32],
     // rows: words[at[i]..]
-    pw: ChunkSeq[u64],
+    pat_words: ChunkSeq[u64],
     pat_at: ChunkSeq[u64],
-    ew: ChunkSeq[u64],
+    expr_words: ChunkSeq[u64],
     expr_at: ChunkSeq[u64],
     nmap: ChunkSeq[u32],
     tmap: ChunkSeq[u32],
     // symbol -> function index + 1
     fn_by_name: ChunkSeq[u32],
-    effs: ChunkSeq[EffDecl],
-    egens: ChunkSeq[u32],
-    eops: ChunkSeq[EffOp],
-    eparams: ChunkSeq[EffParam],
-    eprojs: ChunkSeq[Range],
-    eproj_syms: ChunkSeq[u32],
+    eff_decls: ChunkSeq[EffDecl],
+    eff_generics: ChunkSeq[u32],
+    eff_ops: ChunkSeq[EffOp],
+    eff_params: ChunkSeq[EffParam],
+    eff_projs: ChunkSeq[Range],
+    eff_proj_syms: ChunkSeq[u32],
     // symbol -> effect index + 1
     eff_by_name: ChunkSeq[u32],
 }
 
-fn copy_words(inout r: Reader, in b: Slice[u8], n: u64, inout out: ChunkSeq[u64]) {
+fn copy_words(inout reader: Reader, in bytes: Slice[u8], n: u64, inout out: ChunkSeq[u64]) {
     for i in 0..n {
-        out.push(r.word(in b));
+        out.push(reader.word(in bytes));
     }
 }
 
 // A pattern row's payload length.
-fn pattern_len(inout r: Reader, in b: Slice[u8], inout out: ChunkSeq[u64]) {
-    let kind = r.word(in b);
+fn pattern_len(inout reader: Reader, in bytes: Slice[u8], inout out: ChunkSeq[u64]) {
+    let kind = reader.word(in bytes);
     out.push(kind);
-    copy_words(inout r, in b, 3, inout out);
+    copy_words(inout reader, in bytes, 3, inout out);
     if kind == PK_BIND {
-        copy_words(inout r, in b, 1, inout out);
+        copy_words(inout reader, in bytes, 1, inout out);
     } else if kind == PK_LITERAL {
-        copy_words(inout r, in b, 3, inout out);
+        copy_words(inout reader, in bytes, 3, inout out);
     } else if kind == PK_TUPLE {
-        let n = r.word(in b);
+        let n = reader.word(in bytes);
         out.push(n);
-        copy_words(inout r, in b, n, inout out);
+        copy_words(inout reader, in bytes, n, inout out);
     } else if kind == PK_CTOR {
-        copy_words(inout r, in b, 2, inout out);
-        let n = r.word(in b);
+        copy_words(inout reader, in bytes, 2, inout out);
+        let n = reader.word(in bytes);
         out.push(n);
-        copy_words(inout r, in b, add(n, n), inout out);
+        copy_words(inout reader, in bytes, add(n, n), inout out);
     }
 }
 
-fn count_then(inout r: Reader, in b: Slice[u8], per: u64, inout out: ChunkSeq[u64]) {
-    let n = r.word(in b);
+fn count_then(inout reader: Reader, in bytes: Slice[u8], per: u64, inout out: ChunkSeq[u64]) {
+    let n = reader.word(in bytes);
     out.push(n);
-    copy_words(inout r, in b, wrapping_mul(n, per), inout out);
+    copy_words(inout reader, in bytes, wrapping_mul(n, per), inout out);
 }
 
-fn expr_row(inout r: Reader, in b: Slice[u8], inout out: ChunkSeq[u64]) {
-    let kind = r.word(in b);
+fn expr_row(inout reader: Reader, in bytes: Slice[u8], inout out: ChunkSeq[u64]) {
+    let kind = reader.word(in bytes);
     out.push(kind);
-    copy_words(inout r, in b, 3, inout out);
+    copy_words(inout reader, in bytes, 3, inout out);
     if kind == X_LITERAL {
-        copy_words(inout r, in b, 3, inout out);
+        copy_words(inout reader, in bytes, 3, inout out);
     } else if kind == X_NAME || kind == X_TRY {
-        copy_words(inout r, in b, 1, inout out);
+        copy_words(inout reader, in bytes, 1, inout out);
     } else if kind == X_TUPLE {
-        count_then(inout r, in b, 1, inout out);
+        count_then(inout reader, in bytes, 1, inout out);
     } else if kind == X_STRUCT {
-        copy_words(inout r, in b, 1, inout out);
-        count_then(inout r, in b, 2, inout out);
+        copy_words(inout reader, in bytes, 1, inout out);
+        count_then(inout reader, in bytes, 2, inout out);
     } else if kind == X_FIELD {
-        copy_words(inout r, in b, 2, inout out);
+        copy_words(inout reader, in bytes, 2, inout out);
     } else if kind == X_INDEX {
-        copy_words(inout r, in b, 2, inout out);
-        let route = r.word(in b);
+        copy_words(inout reader, in bytes, 2, inout out);
+        let route = reader.word(in bytes);
         out.push(route);
         if route == 4 {
-            copy_words(inout r, in b, 1, inout out);
+            copy_words(inout reader, in bytes, 1, inout out);
         }
     } else if kind == X_UNARY {
-        copy_words(inout r, in b, 2, inout out);
+        copy_words(inout reader, in bytes, 2, inout out);
     } else if kind == X_BINARY || kind == X_ASSIGN || kind == X_IF {
-        copy_words(inout r, in b, 3, inout out);
+        copy_words(inout reader, in bytes, 3, inout out);
     } else if kind == X_BLOCK {
-        let n = r.word(in b);
+        let n = reader.word(in bytes);
         out.push(n);
         for i in 0..n {
-            let k = r.word(in b);
-            out.push(k);
-            if k == 0 {
-                copy_words(inout r, in b, 1, inout out);
+            let stmt_kind = reader.word(in bytes);
+            out.push(stmt_kind);
+            if stmt_kind == 0 {
+                copy_words(inout reader, in bytes, 1, inout out);
             } else {
-                copy_words(inout r, in b, 4, inout out);
+                copy_words(inout reader, in bytes, 4, inout out);
             }
         }
-        copy_words(inout r, in b, 1, inout out);
+        copy_words(inout reader, in bytes, 1, inout out);
     } else if kind == X_CALL {
-        copy_words(inout r, in b, 1, inout out);
-        count_then(inout r, in b, 2, inout out);
-        count_then(inout r, in b, 1, inout out);
-        copy_words(inout r, in b, 11, inout out);
+        copy_words(inout reader, in bytes, 1, inout out);
+        count_then(inout reader, in bytes, 2, inout out);
+        count_then(inout reader, in bytes, 1, inout out);
+        copy_words(inout reader, in bytes, 11, inout out);
     } else if kind == X_MATCH {
-        copy_words(inout r, in b, 1, inout out);
-        count_then(inout r, in b, 2, inout out);
+        copy_words(inout reader, in bytes, 1, inout out);
+        count_then(inout reader, in bytes, 2, inout out);
     } else if kind == X_CLOSURE {
-        copy_words(inout r, in b, 1, inout out);
-        count_then(inout r, in b, 1, inout out);
-        copy_words(inout r, in b, 1, inout out);
-        count_then(inout r, in b, 1, inout out);
-        copy_words(inout r, in b, 1, inout out);
+        copy_words(inout reader, in bytes, 1, inout out);
+        count_then(inout reader, in bytes, 1, inout out);
+        copy_words(inout reader, in bytes, 1, inout out);
+        count_then(inout reader, in bytes, 1, inout out);
+        copy_words(inout reader, in bytes, 1, inout out);
     } else if kind == X_HANDLE {
-        copy_words(inout r, in b, 2, inout out);
-        count_then(inout r, in b, 1, inout out);
-        copy_words(inout r, in b, 4, inout out);
-        clause_row(inout r, in b, false, inout out);
-        let n = r.word(in b);
+        copy_words(inout reader, in bytes, 2, inout out);
+        count_then(inout reader, in bytes, 1, inout out);
+        copy_words(inout reader, in bytes, 4, inout out);
+        clause_row(inout reader, in bytes, false, inout out);
+        let n = reader.word(in bytes);
         out.push(n);
         for i in 0..n {
-            clause_row(inout r, in b, true, inout out);
+            clause_row(inout reader, in bytes, true, inout out);
         }
-        count_then(inout r, in b, 1, inout out);
-        copy_words(inout r, in b, 1, inout out);
-        let m = r.word(in b);
+        count_then(inout reader, in bytes, 1, inout out);
+        copy_words(inout reader, in bytes, 1, inout out);
+        let m = reader.word(in bytes);
         out.push(m);
         for i in 0..m {
-            let k = r.word(in b);
+            let k = reader.word(in bytes);
             out.push(k);
-            copy_words(inout r, in b, 1, inout out);
+            copy_words(inout reader, in bytes, 1, inout out);
             if k == 1 {
-                copy_words(inout r, in b, 1, inout out);
+                copy_words(inout reader, in bytes, 1, inout out);
             } else if k == 2 {
-                count_then(inout r, in b, 1, inout out);
+                count_then(inout reader, in bytes, 1, inout out);
             }
         }
     }
@@ -264,128 +265,145 @@ fn expr_row(inout r: Reader, in b: Slice[u8], inout out: ChunkSeq[u64]) {
 
 // A handler clause: name, patterns, body, free names (then, for operation
 // clauses, the body's names with their spans).
-fn clause_row(inout r: Reader, in b: Slice[u8], names: bool, inout out: ChunkSeq[u64]) {
-    copy_words(inout r, in b, 1, inout out);
-    count_then(inout r, in b, 1, inout out);
-    copy_words(inout r, in b, 1, inout out);
-    count_then(inout r, in b, 1, inout out);
+fn clause_row(inout reader: Reader, in bytes: Slice[u8], names: bool, inout out: ChunkSeq[u64]) {
+    copy_words(inout reader, in bytes, 1, inout out);
+    count_then(inout reader, in bytes, 1, inout out);
+    copy_words(inout reader, in bytes, 1, inout out);
+    count_then(inout reader, in bytes, 1, inout out);
     if names {
-        count_then(inout r, in b, 3, inout out);
+        count_then(inout reader, in bytes, 3, inout out);
     }
 }
 
 pub fn read_ast(
-    inout r: Reader,
-    in b: Slice[u8],
+    inout reader: Reader,
+    in bytes: Slice[u8],
     in nmap: ChunkSeq[u32],
     in tmap: ChunkSeq[u32]
 ) -> Ast {
-    let mut a = Ast {
+    let mut ast = Ast {
         fip: false,
         fns: ChunkSeq::new[SrcFn](),
-        pnames: ChunkSeq::new[u32](),
-        ppass: ChunkSeq::new[u64](),
-        ptys: ChunkSeq::new[u32](),
-        pw: ChunkSeq::new[u64](),
+        param_names: ChunkSeq::new[u32](),
+        param_passes: ChunkSeq::new[u64](),
+        param_tys: ChunkSeq::new[u32](),
+        pat_words: ChunkSeq::new[u64](),
         pat_at: ChunkSeq::new[u64](),
-        ew: ChunkSeq::new[u64](),
+        expr_words: ChunkSeq::new[u64](),
         expr_at: ChunkSeq::new[u64](),
         nmap: ChunkSeq::new[u32](),
         tmap: ChunkSeq::new[u32](),
         fn_by_name: ChunkSeq::new[u32](),
-        effs: ChunkSeq::new[EffDecl](),
-        egens: ChunkSeq::new[u32](),
-        eops: ChunkSeq::new[EffOp](),
-        eparams: ChunkSeq::new[EffParam](),
-        eprojs: ChunkSeq::new[Range](),
-        eproj_syms: ChunkSeq::new[u32](),
+        eff_decls: ChunkSeq::new[EffDecl](),
+        eff_generics: ChunkSeq::new[u32](),
+        eff_ops: ChunkSeq::new[EffOp](),
+        eff_params: ChunkSeq::new[EffParam](),
+        eff_projs: ChunkSeq::new[Range](),
+        eff_proj_syms: ChunkSeq::new[u32](),
         eff_by_name: ChunkSeq::new[u32](),
     };
     for i in 0..nmap.len() {
-        a.nmap.push(u32_at(in nmap, i));
+        ast.nmap.push(u32_at(in nmap, i));
     }
     for i in 0..tmap.len() {
-        a.tmap.push(u32_at(in tmap, i));
+        ast.tmap.push(u32_at(in tmap, i));
     }
-    a.fip = r.word(in b) != 0;
-    let nf = r.word(in b);
-    for i in 0..nf {
-        let name = u32_at(in a.nmap, r.word(in b));
-        let body = r.word(in b);
-        let pa = a.pnames.len();
-        let pn = r.word(in b);
-        for j in 0..pn {
-            let n = u32_at(in a.nmap, r.word(in b));
-            a.pnames.push(n);
-            a.ppass.push(r.word(in b));
-            let t = u32_at(in a.tmap, r.word(in b));
-            a.ptys.push(t);
+    ast.fip = reader.word(in bytes) != 0;
+    let fn_count = reader.word(in bytes);
+    for i in 0..fn_count {
+        let name = u32_at(in ast.nmap, reader.word(in bytes));
+        let body = reader.word(in bytes);
+        let param_start = ast.param_names.len();
+        let param_count = reader.word(in bytes);
+        for j in 0..param_count {
+            let param_name = u32_at(in ast.nmap, reader.word(in bytes));
+            ast.param_names.push(param_name);
+            ast.param_passes.push(reader.word(in bytes));
+            let param_ty = u32_at(in ast.tmap, reader.word(in bytes));
+            ast.param_tys.push(param_ty);
         }
-        let result = u32_at(in a.tmap, r.word(in b));
-        let polymorphic = r.word(in b) != 0;
-        let row = u32_at(in a.tmap, r.word(in b));
-        let req_result = u32_at(in a.tmap, r.word(in b));
-        a.fns.push(SrcFn {
+        let result = u32_at(in ast.tmap, reader.word(in bytes));
+        let polymorphic = reader.word(in bytes) != 0;
+        let row = u32_at(in ast.tmap, reader.word(in bytes));
+        let req_result = u32_at(in ast.tmap, reader.word(in bytes));
+        ast.fns.push(SrcFn {
             name: name,
             body: body,
-            pa: pa,
-            pn: pn,
+            param_start: param_start,
+            param_count: param_count,
             result: result,
             polymorphic: polymorphic,
             row: row,
             req_result: req_result
         });
-        set_by_symbol(inout a.fn_by_name, name, n32(inc(i)));
+        set_by_symbol(inout ast.fn_by_name, name, n32(inc(i)));
     }
-    let np = r.word(in b);
-    for i in 0..np {
-        a.pat_at.push(a.pw.len());
-        pattern_len(inout r, in b, inout a.pw);
+    let pat_count = reader.word(in bytes);
+    for i in 0..pat_count {
+        ast.pat_at.push(ast.pat_words.len());
+        pattern_len(inout reader, in bytes, inout ast.pat_words);
     }
-    let ne = r.word(in b);
-    for i in 0..ne {
-        a.expr_at.push(a.ew.len());
-        expr_row(inout r, in b, inout a.ew);
+    let expr_count = reader.word(in bytes);
+    for i in 0..expr_count {
+        ast.expr_at.push(ast.expr_words.len());
+        expr_row(inout reader, in bytes, inout ast.expr_words);
     }
-    let neff = r.word(in b);
-    for i in 0..neff {
-        let name = u32_at(in a.nmap, r.word(in b));
-        let linear = r.word(in b) != 0;
-        let ga = a.egens.len();
-        let gn = r.word(in b);
-        for j in 0..gn {
-            let g = u32_at(in a.nmap, r.word(in b));
-            a.egens.push(g);
+    let decl_count = reader.word(in bytes);
+    for i in 0..decl_count {
+        let name = u32_at(in ast.nmap, reader.word(in bytes));
+        let linear = reader.word(in bytes) != 0;
+        let generic_start = ast.eff_generics.len();
+        let generic_count = reader.word(in bytes);
+        for j in 0..generic_count {
+            let generic = u32_at(in ast.nmap, reader.word(in bytes));
+            ast.eff_generics.push(generic);
         }
-        let oa = a.eops.len();
-        let on = r.word(in b);
-        for j in 0..on {
-            let op = u32_at(in a.nmap, r.word(in b));
-            let pa = a.eparams.len();
-            let pn = r.word(in b);
-            for k in 0..pn {
-                let pass = r.word(in b);
-                let qa = a.eprojs.len();
-                let qn = r.word(in b);
-                for q in 0..qn {
-                    let sa = a.eproj_syms.len();
-                    let sn = r.word(in b);
-                    for z in 0..sn {
-                        let s = u32_at(in a.nmap, r.word(in b));
-                        a.eproj_syms.push(s);
+        let op_start = ast.eff_ops.len();
+        let op_count = reader.word(in bytes);
+        for j in 0..op_count {
+            let op_name = u32_at(in ast.nmap, reader.word(in bytes));
+            let op_param_start = ast.eff_params.len();
+            let op_param_count = reader.word(in bytes);
+            for k in 0..op_param_count {
+                let pass = reader.word(in bytes);
+                let proj_start = ast.eff_projs.len();
+                let proj_count = reader.word(in bytes);
+                for q in 0..proj_count {
+                    let segment_start = ast.eff_proj_syms.len();
+                    let segment_count = reader.word(in bytes);
+                    for z in 0..segment_count {
+                        let segment = u32_at(in ast.nmap, reader.word(in bytes));
+                        ast.eff_proj_syms.push(segment);
                     }
-                    a.eprojs.push(Range { a: sa, n: sn });
+                    ast.eff_projs.push(Range { a: segment_start, n: segment_count });
                 }
-                let ty = u32_at(in a.tmap, r.word(in b));
-                a.eparams.push(EffParam { pass: pass, qa: qa, qn: qn, ty: ty });
+                let ty = u32_at(in ast.tmap, reader.word(in bytes));
+                ast.eff_params.push(EffParam {
+                    pass: pass,
+                    proj_start: proj_start,
+                    proj_count: proj_count,
+                    ty: ty
+                });
             }
-            let result = u32_at(in a.tmap, r.word(in b));
-            a.eops.push(EffOp { name: op, pa: pa, pn: pn, result: result });
+            let result = u32_at(in ast.tmap, reader.word(in bytes));
+            ast.eff_ops.push(EffOp {
+                name: op_name,
+                param_start: op_param_start,
+                param_count: op_param_count,
+                result: result
+            });
         }
-        a.effs.push(EffDecl { name: name, linear: linear, ga: ga, gn: gn, oa: oa, on: on });
-        set_by_symbol(inout a.eff_by_name, name, n32(inc(i)));
+        ast.eff_decls.push(EffDecl {
+            name: name,
+            linear: linear,
+            ga: generic_start,
+            gn: generic_count,
+            op_start: op_start,
+            op_count: op_count
+        });
+        set_by_symbol(inout ast.eff_by_name, name, n32(inc(i)));
     }
-    a
+    ast
 }
 
 impl Ast {
@@ -395,8 +413,8 @@ impl Ast {
             Option::None => SrcFn {
                 name: 0,
                 body: NONE,
-                pa: 0,
-                pn: 0,
+                param_start: 0,
+                param_count: 0,
                 result: 0,
                 polymorphic: false,
                 row: 0,
@@ -405,168 +423,175 @@ impl Ast {
         }
     }
 
-    // The function named `n`, or NONE.
-    pub fn fn_index(in self, n: u32) -> u64 {
-        let k = u32_at(in self.fn_by_name, widen_u64(n));
-        if k == 0 {
+    // The function named `name`, or NONE.
+    pub fn fn_index(in self, name: u32) -> u64 {
+        let entry = u32_at(in self.fn_by_name, widen_u64(name));
+        if entry == 0 {
             NONE
         } else {
-            wrapping_sub(widen_u64(k), 1)
+            wrapping_sub(widen_u64(entry), 1)
         }
     }
 
-    // The effect declaration named `n`, or NONE.
-    pub fn eff_index(in self, n: u32) -> u64 {
-        let k = u32_at(in self.eff_by_name, widen_u64(n));
-        if k == 0 {
+    // The effect declaration named `name`, or NONE.
+    pub fn eff_index(in self, name: u32) -> u64 {
+        let entry = u32_at(in self.eff_by_name, widen_u64(name));
+        if entry == 0 {
             NONE
         } else {
-            wrapping_sub(widen_u64(k), 1)
+            wrapping_sub(widen_u64(entry), 1)
         }
     }
 
     pub fn eff(in self, i: u64) -> EffDecl {
-        match self.effs.try_get(i) {
+        match self.eff_decls.try_get(i) {
             Option::Some(e) => e,
-            Option::None => EffDecl { name: 0, linear: false, ga: 0, gn: 0, oa: 0, on: 0 },
+            Option::None => EffDecl {
+                name: 0,
+                linear: false,
+                ga: 0,
+                gn: 0,
+                op_start: 0,
+                op_count: 0
+            },
         }
     }
 
-    pub fn eff_generic(in self, e: EffDecl, i: u64) -> u32 {
-        u32_at(in self.egens, add(e.ga, i))
+    pub fn eff_generic(in self, decl: EffDecl, i: u64) -> u32 {
+        u32_at(in self.eff_generics, add(decl.ga, i))
     }
 
-    pub fn eff_op(in self, e: EffDecl, i: u64) -> EffOp {
-        match self.eops.try_get(add(e.oa, i)) {
+    pub fn eff_op(in self, decl: EffDecl, i: u64) -> EffOp {
+        match self.eff_ops.try_get(add(decl.op_start, i)) {
             Option::Some(o) => o,
-            Option::None => EffOp { name: 0, pa: 0, pn: 0, result: 0 },
+            Option::None => EffOp { name: 0, param_start: 0, param_count: 0, result: 0 },
         }
     }
 
-    // The operation of `e` named `op`, or an operation with name 0.
-    pub fn find_op(in self, e: EffDecl, op: u32) -> EffOp {
-        for i in 0..e.on {
-            let o = self.eff_op(e, i);
-            if o.name == op {
-                return o;
+    // The operation of `decl` named `op`, or an operation with name 0.
+    pub fn find_op(in self, decl: EffDecl, op: u32) -> EffOp {
+        for i in 0..decl.op_count {
+            let candidate = self.eff_op(decl, i);
+            if candidate.name == op {
+                return candidate;
             }
         }
-        EffOp { name: 0, pa: 0, pn: 0, result: 0 }
+        EffOp { name: 0, param_start: 0, param_count: 0, result: 0 }
     }
 
-    pub fn op_param(in self, o: EffOp, i: u64) -> EffParam {
-        match self.eparams.try_get(add(o.pa, i)) {
+    pub fn op_param(in self, op: EffOp, i: u64) -> EffParam {
+        match self.eff_params.try_get(add(op.param_start, i)) {
             Option::Some(p) => p,
-            Option::None => EffParam { pass: 0, qa: 0, qn: 0, ty: 0 },
+            Option::None => EffParam { pass: 0, proj_start: 0, proj_count: 0, ty: 0 },
         }
     }
 
-    pub fn proj(in self, p: EffParam, q: u64) -> Range {
-        match self.eprojs.try_get(add(p.qa, q)) {
+    pub fn proj(in self, param: EffParam, q: u64) -> Range {
+        match self.eff_projs.try_get(add(param.proj_start, q)) {
             Option::Some(x) => x,
             Option::None => Range { a: 0, n: 0 },
         }
     }
 
-    pub fn proj_sym(in self, r: Range, j: u64) -> u32 {
-        u32_at(in self.eproj_syms, add(r.a, j))
+    pub fn proj_sym(in self, range: Range, j: u64) -> u32 {
+        u32_at(in self.eff_proj_syms, add(range.a, j))
     }
 
-    pub fn param_name(in self, f: SrcFn, i: u64) -> u32 {
-        u32_at(in self.pnames, add(f.pa, i))
+    pub fn param_name(in self, func: SrcFn, i: u64) -> u32 {
+        u32_at(in self.param_names, add(func.param_start, i))
     }
 
-    pub fn param_pass(in self, f: SrcFn, i: u64) -> u64 {
-        u64_at(in self.ppass, add(f.pa, i))
+    pub fn param_pass(in self, func: SrcFn, i: u64) -> u64 {
+        u64_at(in self.param_passes, add(func.param_start, i))
     }
 
-    pub fn param_ty(in self, f: SrcFn, i: u64) -> u32 {
-        u32_at(in self.ptys, add(f.pa, i))
+    pub fn param_ty(in self, func: SrcFn, i: u64) -> u32 {
+        u32_at(in self.param_tys, add(func.param_start, i))
     }
 
-    // Word `k` of expression `e`'s row: 0 kind, 1 start, 2 end, 3 type,
+    // Word `k` of expression `expr_id`'s row: 0 kind, 1 start, 2 end, 3 type,
     // then the payload.
-    pub fn ew(in self, e: u64, k: u64) -> u64 {
-        u64_at(in self.ew, add(u64_at(in self.expr_at, e), k))
+    pub fn ew(in self, expr_id: u64, k: u64) -> u64 {
+        u64_at(in self.expr_words, add(u64_at(in self.expr_at, expr_id), k))
     }
 
-    pub fn kind(in self, e: u64) -> u64 {
-        self.ew(e, 0)
+    pub fn kind(in self, expr_id: u64) -> u64 {
+        self.ew(expr_id, 0)
     }
 
-    pub fn start(in self, e: u64) -> u64 {
-        self.ew(e, 1)
+    pub fn start(in self, expr_id: u64) -> u64 {
+        self.ew(expr_id, 1)
     }
 
-    pub fn end(in self, e: u64) -> u64 {
-        self.ew(e, 2)
+    pub fn end(in self, expr_id: u64) -> u64 {
+        self.ew(expr_id, 2)
     }
 
     // The checked type (after `default_type`), or NONE32.
-    pub fn ty(in self, e: u64) -> u32 {
-        let x = self.ew(e, 3);
-        if x == NONE {
+    pub fn ty(in self, expr_id: u64) -> u32 {
+        let word = self.ew(expr_id, 3);
+        if word == NONE {
             NONE32
         } else {
-            u32_at(in self.tmap, x)
+            u32_at(in self.tmap, word)
         }
     }
 
     // Payload word `k`.
-    pub fn x(in self, e: u64, k: u64) -> u64 {
-        self.ew(e, add(4, k))
+    pub fn x(in self, expr_id: u64, k: u64) -> u64 {
+        self.ew(expr_id, add(4, k))
     }
 
     // Payload word `k` as a symbol (NONE32 for NONE).
-    pub fn xs(in self, e: u64, k: u64) -> u32 {
-        let x = self.x(e, k);
-        if x == NONE {
+    pub fn xs(in self, expr_id: u64, k: u64) -> u32 {
+        let word = self.x(expr_id, k);
+        if word == NONE {
             NONE32
         } else {
-            u32_at(in self.nmap, x)
+            u32_at(in self.nmap, word)
         }
     }
 
     // Payload word `k` as a type (NONE32 for NONE).
-    pub fn xt(in self, e: u64, k: u64) -> u32 {
-        let x = self.x(e, k);
-        if x == NONE {
+    pub fn xt(in self, expr_id: u64, k: u64) -> u32 {
+        let word = self.x(expr_id, k);
+        if word == NONE {
             NONE32
         } else {
-            u32_at(in self.tmap, x)
+            u32_at(in self.tmap, word)
         }
     }
 
-    pub fn pw(in self, p: u64, k: u64) -> u64 {
-        u64_at(in self.pw, add(u64_at(in self.pat_at, p), k))
+    pub fn pw(in self, pat_id: u64, k: u64) -> u64 {
+        u64_at(in self.pat_words, add(u64_at(in self.pat_at, pat_id), k))
     }
 
-    pub fn pkind(in self, p: u64) -> u64 {
-        self.pw(p, 0)
+    pub fn pkind(in self, pat_id: u64) -> u64 {
+        self.pw(pat_id, 0)
     }
 
-    pub fn is_box(in self, p: u64) -> bool {
-        self.pw(p, 3) != 0
+    pub fn is_box(in self, pat_id: u64) -> bool {
+        self.pw(pat_id, 3) != 0
     }
 
     // Pattern payload word `k`.
-    pub fn px(in self, p: u64, k: u64) -> u64 {
-        self.pw(p, add(4, k))
+    pub fn px(in self, pat_id: u64, k: u64) -> u64 {
+        self.pw(pat_id, add(4, k))
     }
 
-    pub fn pxs(in self, p: u64, k: u64) -> u32 {
-        u32_at(in self.nmap, self.px(p, k))
+    pub fn pxs(in self, pat_id: u64, k: u64) -> u32 {
+        u32_at(in self.nmap, self.px(pat_id, k))
     }
 
-    pub fn sym(in self, x: u64) -> u32 {
-        u32_at(in self.nmap, x)
+    pub fn sym(in self, index: u64) -> u32 {
+        u32_at(in self.nmap, index)
     }
 
-    pub fn tyw(in self, x: u64) -> u32 {
-        if x == NONE {
+    pub fn tyw(in self, word: u64) -> u32 {
+        if word == NONE {
             NONE32
         } else {
-            u32_at(in self.tmap, x)
+            u32_at(in self.tmap, word)
         }
     }
 }

@@ -22,9 +22,9 @@ pub copy struct Sig {
     // generics: gens[ga..ga+gn]
     ga: u64,
     gn: u64,
-    // parameters: params[pa..pa+pn]
-    pa: u64,
-    pn: u64,
+    // parameters: params[param_start..param_start+param_count]
+    param_start: u64,
+    param_count: u64,
     effectful: bool,
 }
 
@@ -35,9 +35,9 @@ pub copy struct Generic {
 
 pub copy struct SigParam {
     pass: u8,
-    // projections: paths[qa..qa+qn]
-    qa: u64,
-    qn: u64,
+    // projections: paths[proj_start..proj_start+proj_count]
+    proj_start: u64,
+    proj_count: u64,
     ty: u32,
 }
 
@@ -82,19 +82,19 @@ pub struct Fns {
     by_name: ChunkSeq[u32],
 }
 
-fn sym(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32]) -> u32 {
-    let x = r.word(in b);
-    u32_at(in nmap, x)
+fn sym(inout reader: Reader, in bytes: Slice[u8], in nmap: ChunkSeq[u32]) -> u32 {
+    let index = reader.word(in bytes);
+    u32_at(in nmap, index)
 }
 
-fn ty(inout r: Reader, in b: Slice[u8], in tmap: ChunkSeq[u32]) -> u32 {
-    let x = r.word(in b);
-    u32_at(in tmap, x)
+fn ty(inout reader: Reader, in bytes: Slice[u8], in tmap: ChunkSeq[u32]) -> u32 {
+    let index = reader.word(in bytes);
+    u32_at(in tmap, index)
 }
 
 pub fn read_fns(
-    inout r: Reader,
-    in b: Slice[u8],
+    inout reader: Reader,
+    in bytes: Slice[u8],
     in nmap: ChunkSeq[u32],
     in tmap: ChunkSeq[u32]
 ) -> Fns {
@@ -109,72 +109,83 @@ pub fn read_fns(
         closures: ChunkSeq::new[Closure](),
         by_name: ChunkSeq::new[u32](),
     };
-    let nf = r.word(in b);
-    for i in 0..nf {
-        let name = sym(inout r, in b, in nmap);
-        let source = r.word(in b) != 0;
-        let ga = out.gens.len();
-        let gn = r.word(in b);
-        for j in 0..gn {
-            let g = sym(inout r, in b, in nmap);
-            let row = r.word(in b) != 0;
-            out.gens.push(Generic { name: g, row: row });
+    let sig_count = reader.word(in bytes);
+    for i in 0..sig_count {
+        let name = sym(inout reader, in bytes, in nmap);
+        let source = reader.word(in bytes) != 0;
+        let generic_start = out.gens.len();
+        let generic_count = reader.word(in bytes);
+        for j in 0..generic_count {
+            let generic = sym(inout reader, in bytes, in nmap);
+            let row = reader.word(in bytes) != 0;
+            out.gens.push(Generic { name: generic, row: row });
         }
-        let pa = out.params.len();
-        let pn = r.word(in b);
-        for j in 0..pn {
-            let pass = wrapping_u8(r.word(in b));
-            let qa = out.paths.len();
-            let qn = r.word(in b);
-            for k in 0..qn {
-                let a = out.syms.len();
-                let n = r.word(in b);
-                for m in 0..n {
-                    let s = sym(inout r, in b, in nmap);
-                    out.syms.push(s);
+        let param_start = out.params.len();
+        let param_count = reader.word(in bytes);
+        for j in 0..param_count {
+            let pass = wrapping_u8(reader.word(in bytes));
+            let proj_start = out.paths.len();
+            let proj_count = reader.word(in bytes);
+            for k in 0..proj_count {
+                let segment_start = out.syms.len();
+                let segment_count = reader.word(in bytes);
+                for m in 0..segment_count {
+                    let segment = sym(inout reader, in bytes, in nmap);
+                    out.syms.push(segment);
                 }
-                out.paths.push(Path { a: a, n: n });
+                out.paths.push(Path { a: segment_start, n: segment_count });
             }
-            let t = ty(inout r, in b, in tmap);
-            out.params.push(SigParam { pass: pass, qa: qa, qn: qn, ty: t });
+            let param_ty = ty(inout reader, in bytes, in tmap);
+            out.params.push(SigParam {
+                pass: pass,
+                proj_start: proj_start,
+                proj_count: proj_count,
+                ty: param_ty
+            });
         }
-        let effectful = r.word(in b) != 0;
+        let effectful = reader.word(in bytes) != 0;
         set_by_symbol(inout out.by_name, name, n32(add(out.sigs.len(), 1)));
         out.sigs.push(Sig {
             name: name,
             source: source,
-            ga: ga,
-            gn: gn,
-            pa: pa,
-            pn: pn,
+            ga: generic_start,
+            gn: generic_count,
+            param_start: param_start,
+            param_count: param_count,
             effectful: effectful
         });
     }
-    let nc = r.word(in b);
-    for i in 0..nc {
-        let s0 = r.word(in b);
-        let s1 = r.word(in b);
-        let a = out.vars.len();
-        let n = r.word(in b);
-        for j in 0..n {
-            let name = sym(inout r, in b, in nmap);
-            let t = ty(inout r, in b, in tmap);
-            out.vars.push(Var { name: name, ty: t });
+    let call_count = reader.word(in bytes);
+    for i in 0..call_count {
+        let s0 = reader.word(in bytes);
+        let s1 = reader.word(in bytes);
+        let var_start = out.vars.len();
+        let var_count = reader.word(in bytes);
+        for j in 0..var_count {
+            let name = sym(inout reader, in bytes, in nmap);
+            let var_ty = ty(inout reader, in bytes, in tmap);
+            out.vars.push(Var { name: name, ty: var_ty });
         }
-        out.calls.push(Call { s0: s0, s1: s1, a: a, n: n });
+        out.calls.push(Call { s0: s0, s1: s1, a: var_start, n: var_count });
     }
-    let nl = r.word(in b);
-    for i in 0..nl {
-        let owner = sym(inout r, in b, in nmap);
-        let dest = r.word(in b);
-        let lifted = sym(inout r, in b, in nmap);
-        let a = out.syms.len();
-        let n = r.word(in b);
-        for j in 0..n {
-            let s = sym(inout r, in b, in nmap);
-            out.syms.push(s);
+    let closure_count = reader.word(in bytes);
+    for i in 0..closure_count {
+        let owner = sym(inout reader, in bytes, in nmap);
+        let dest = reader.word(in bytes);
+        let lifted = sym(inout reader, in bytes, in nmap);
+        let capture_start = out.syms.len();
+        let capture_count = reader.word(in bytes);
+        for j in 0..capture_count {
+            let captured = sym(inout reader, in bytes, in nmap);
+            out.syms.push(captured);
         }
-        out.closures.push(Closure { owner: owner, dest: dest, lifted: lifted, a: a, n: n });
+        out.closures.push(Closure {
+            owner: owner,
+            dest: dest,
+            lifted: lifted,
+            a: capture_start,
+            n: capture_count
+        });
     }
     out
 }
@@ -182,8 +193,12 @@ pub fn read_fns(
 impl Fns {
     // `world.functions.get(name)`: the signature index, or NONE32.
     pub fn find(in self, name: u32) -> u32 {
-        let x = u32_at(in self.by_name, w(name));
-        if x == 0 { NONE32 } else { wrapping_sub(x, 1) }
+        let entry = u32_at(in self.by_name, w(name));
+        if entry == 0 {
+            NONE32
+        } else {
+            wrapping_sub(entry, 1)
+        }
     }
 
     pub fn sig(in self, i: u64) -> Sig {
@@ -194,24 +209,24 @@ impl Fns {
                 source: false,
                 ga: 0,
                 gn: 0,
-                pa: 0,
-                pn: 0,
+                param_start: 0,
+                param_count: 0,
                 effectful: false
             },
         }
     }
 
-    pub fn generic(in self, s: Sig, i: u64) -> Generic {
-        match self.gens.try_get(add(s.ga, i)) {
+    pub fn generic(in self, sig: Sig, i: u64) -> Generic {
+        match self.gens.try_get(add(sig.ga, i)) {
             Option::Some(g) => g,
             Option::None => Generic { name: 0, row: false },
         }
     }
 
-    pub fn param(in self, s: Sig, i: u64) -> SigParam {
-        match self.params.try_get(add(s.pa, i)) {
+    pub fn param(in self, sig: Sig, i: u64) -> SigParam {
+        match self.params.try_get(add(sig.param_start, i)) {
             Option::Some(p) => p,
-            Option::None => SigParam { pass: 0, qa: 0, qn: 0, ty: 0 },
+            Option::None => SigParam { pass: 0, proj_start: 0, proj_count: 0, ty: 0 },
         }
     }
 
@@ -222,8 +237,8 @@ impl Fns {
         }
     }
 
-    pub fn path_sym(in self, p: Path, k: u64) -> u32 {
-        u32_at(in self.syms, add(p.a, k))
+    pub fn path_sym(in self, path: Path, k: u64) -> u32 {
+        u32_at(in self.syms, add(path.a, k))
     }
 
     // `world.calls.get(&(s0, s1))`: the call index, or NONE32. The calls
@@ -236,15 +251,15 @@ impl Fns {
                 break;
             }
             let mid = add(lo, wrapping_sub(hi, lo) / 2);
-            let c = self.call_at(mid);
-            if c.s0 < s0 || (c.s0 == s0 && c.s1 < s1) {
+            let probe = self.call_at(mid);
+            if probe.s0 < s0 || (probe.s0 == s0 && probe.s1 < s1) {
                 lo = add(mid, 1);
             } else {
                 hi = mid;
             }
         }
-        let c = self.call_at(lo);
-        if lo < self.calls.len() && c.s0 == s0 && c.s1 == s1 {
+        let probe = self.call_at(lo);
+        if lo < self.calls.len() && probe.s0 == s0 && probe.s1 == s1 {
             n32(lo)
         } else {
             NONE32
@@ -258,12 +273,12 @@ impl Fns {
         }
     }
 
-    // The type call `c` gives generic `name`, or NONE32.
-    pub fn call_var(in self, c: u32, name: u32) -> u32 {
-        if c == NONE32 {
+    // The type call `call_index` gives generic `name`, or NONE32.
+    pub fn call_var(in self, call_index: u32, name: u32) -> u32 {
+        if call_index == NONE32 {
             return NONE32;
         }
-        let row = self.call_at(w(c));
+        let row = self.call_at(w(call_index));
         for i in 0..row.n {
             match self.vars.try_get(add(row.a, i)) {
                 Option::Some(v) => {
@@ -281,8 +296,8 @@ impl Fns {
     // NONE32.
     pub fn closure(in self, owner: u32, dest: u64) -> u32 {
         for i in 0..self.closures.len() {
-            let c = self.closure_at(i);
-            if c.owner == owner && c.dest == dest {
+            let candidate = self.closure_at(i);
+            if candidate.owner == owner && candidate.dest == dest {
                 return n32(i);
             }
         }
@@ -296,7 +311,7 @@ impl Fns {
         }
     }
 
-    pub fn capture(in self, c: Closure, k: u64) -> u32 {
-        u32_at(in self.syms, add(c.a, k))
+    pub fn capture(in self, closure: Closure, k: u64) -> u32 {
+        u32_at(in self.syms, add(closure.a, k))
     }
 }

@@ -34,464 +34,475 @@ pub const LOOP_REFUSAL: Str = "Lean extraction does not model loop, for, break o
 
 // What the emitter reads besides the builder and the type table.
 pub struct X {
-    p: Program,
-    wd: World,
-    fx: Fns,
+    program: Program,
+    world: World,
+    fns: Fns,
     fip: bool,
     // `recursive_structs`, by ADT index
-    rec: ChunkSeq[bool],
+    recursive_structs: ChunkSeq[bool],
     // program function index + 1, by name symbol
     fn_by_name: ChunkSeq[u32],
 }
 
 // One function's emitter state.
 pub struct S {
-    f: Fun,
+    func: Fun,
     live: ChunkSeq[u64],
     arms: ChunkSeq[u64],
     sig: Sig,
 }
 
-fn put(inout o: ChunkSeq[u8], in s: Str) {
-    o.extend(in s.as_bytes());
+fn put(inout out: ChunkSeq[u8], in text: Str) {
+    out.extend(in text.as_bytes());
 }
 
 // ----- small terms ----------------------------------------------------------------
 
 // `$value{v}`.
-fn value_sym(inout b: B, v: u64) -> u32 {
-    b.numbered(in "$value", v)
+fn value_sym(inout builder: B, v: u64) -> u32 {
+    builder.numbered(in "$value", v)
 }
 
-fn value(inout b: B, v: u64) {
-    let s = value_sym(inout b, v);
-    b.sref(s);
+fn value(inout builder: B, value_id: u64) {
+    let sym = value_sym(inout builder, value_id);
+    builder.sref(sym);
 }
 
 // `Pure.pure(...)`: write the argument after it.
-fn pure_app(inout b: B) {
-    let m = b.app(1);
-    b.global2(in "Pure", in "pure");
-    b.args(m);
-    b.arg();
+fn pure_app(inout builder: B) {
+    let mark = builder.app(1);
+    builder.global2(in "Pure", in "pure");
+    builder.args(mark);
+    builder.arg();
 }
 
 // A one-argument application of a fixed global; write the argument after.
-fn global_app(inout b: B, in a: Str, in c: Str) {
-    let m = b.app(1);
-    b.global2(in a, in c);
-    b.args(m);
-    b.arg();
+fn global_app(inout builder: B, in namespace: Str, in member: Str) {
+    let mark = builder.app(1);
+    builder.global2(in namespace, in member);
+    builder.args(mark);
+    builder.arg();
 }
 
-fn global_app2(inout b: B, in a: Str, in c: Str) -> u64 {
-    let m = b.app(2);
-    b.global2(in a, in c);
-    b.args(m);
-    m
+fn global_app2(inout builder: B, in namespace: Str, in member: Str) -> u64 {
+    let mark = builder.app(2);
+    builder.global2(in namespace, in member);
+    builder.args(mark);
+    mark
 }
 
 // `project(value, "toNat")`.
-fn to_nat_of_value(inout b: B, v: u64) {
-    b.w(T_PROJECT);
-    value(inout b, v);
-    b.w(0);
-    b.text(in "toNat");
+fn to_nat_of_value(inout builder: B, value_id: u64) {
+    builder.w(T_PROJECT);
+    value(inout builder, value_id);
+    builder.w(0);
+    builder.text(in "toNat");
 }
 
-fn unit_tuple(inout b: B) {
-    b.w(T_TUPLE);
-    b.w(0);
+fn unit_tuple(inout builder: B) {
+    builder.w(T_TUPLE);
+    builder.w(0);
 }
 
-// The local behind bit `k`: its raw name's symbol.
-fn local_sym(inout b: B, in f: Fun, k: u64) -> u32 {
-    if k < f.nlocals() {
-        u32_at(in f.lnames, k)
+// The local behind bit `bit`: its raw name's symbol.
+fn local_sym(inout builder: B, in func: Fun, bit: u64) -> u32 {
+    if bit < func.nlocals() {
+        u32_at(in func.local_names, bit)
     } else {
-        let v = u64_at(in f.vids, wrapping_sub(k, f.nlocals()));
-        value_sym(inout b, v)
+        let value_id = u64_at(in func.value_ids, wrapping_sub(bit, func.nlocals()));
+        value_sym(inout builder, value_id)
     }
 }
 
-fn typ(inout b: B, in t: Types, in x: X, ty: u32) {
-    ty_check(inout b, in t, ty, x.fip);
-    emit_ty(inout b, in t, ty, x.fip);
+fn typ(inout builder: B, in types: Types, in env: X, ty: u32) {
+    ty_check(inout builder, in types, ty, env.fip);
+    emit_ty(inout builder, in types, ty, env.fip);
 }
 
 // `Name::qualified([ident(a), ident(b)])` written quietly; `name2_check`
 // makes its checks.
-fn name2_quiet(inout b: B, rooted: bool, a: u32, c: u32) {
-    b.w(if rooted { 1 } else { 0 });
-    b.w(2);
-    b.sym(a);
-    b.sym(c);
+fn name2_quiet(inout builder: B, rooted: bool, a: u32, c: u32) {
+    builder.w(if rooted { 1 } else { 0 });
+    builder.w(2);
+    builder.sym(a);
+    builder.sym(c);
 }
 
-fn name2_check(inout b: B, a: u32, c: u32) {
-    b.check(a, in "identifier");
-    b.check(c, in "identifier");
+fn name2_check(inout builder: B, a: u32, c: u32) {
+    builder.check(a, in "identifier");
+    builder.check(c, in "identifier");
 }
 
 // `$block_{f}_{b}`.
-fn block_sym(inout b: B, in f: Fun, k: u64) -> u32 {
-    let mut s: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    put(inout s, in "$block_");
-    b.names.write(f.row.name, inout s);
-    put(inout s, in "_");
-    put_decimal(inout s, k);
-    b.names.intern(in s.as_slice())
+fn block_sym(inout builder: B, in func: Fun, block_index: u64) -> u32 {
+    let mut spelling: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put(inout spelling, in "$block_");
+    builder.names.write(func.row.name, inout spelling);
+    put(inout spelling, in "_");
+    put_decimal(inout spelling, block_index);
+    builder.names.intern(in spelling.as_slice())
 }
 
 // The non-row generics of a signature.
-fn generic_count(in x: X, sig: Sig) -> u64 {
-    let mut n: u64 = 0;
+fn generic_count(in env: X, sig: Sig) -> u64 {
+    let mut count: u64 = 0;
     for i in 0..sig.gn {
-        if !x.fx.generic(sig, i).row {
-            n = inc(n);
+        if !env.fns.generic(sig, i).row {
+            count = inc(count);
         }
     }
-    n
+    count
 }
 
 // `type_params`: `{T : Type}` per non-row generic.
-fn type_params(inout b: B, in x: X, sig: Sig) {
+fn type_params(inout builder: B, in env: X, sig: Sig) {
     for i in 0..sig.gn {
-        let g = x.fx.generic(sig, i);
-        if !g.row {
-            b.w(B_IMPLICIT);
-            b.w(1);
-            b.ident(g.name);
-            b.type0();
+        let generic = env.fns.generic(sig, i);
+        if !generic.row {
+            builder.w(B_IMPLICIT);
+            builder.w(1);
+            builder.ident(generic.name);
+            builder.type0();
         }
     }
 }
 
 // `generic_args`: `(T := T)` per non-row generic, as arguments.
-fn generic_args(inout b: B, in x: X, sig: Sig) {
+fn generic_args(inout builder: B, in env: X, sig: Sig) {
     for i in 0..sig.gn {
-        let g = x.fx.generic(sig, i);
-        if !g.row {
-            b.w(1);
-            b.ident(g.name);
-            b.sref(g.name);
+        let generic = env.fns.generic(sig, i);
+        if !generic.row {
+            builder.w(1);
+            builder.ident(generic.name);
+            builder.sref(generic.name);
         }
     }
 }
 
 // The inout parameters of the function.
-fn inout_count(in f: Fun) -> u64 {
-    let mut n: u64 = 0;
-    for k in 0..f.params.len() {
-        if f.param(k).pass == TyPass::Inout {
-            n = inc(n);
+fn inout_count(in func: Fun) -> u64 {
+    let mut count: u64 = 0;
+    for k in 0..func.params.len() {
+        if func.param(k).pass == TyPass::Inout {
+            count = inc(count);
         }
     }
-    n
+    count
 }
 
 // `result_type` without its checks.
-fn result_type(inout b: B, in t: Types, in x: X, in f: Fun) {
-    let n = inout_count(in f);
-    if n > 0 {
-        b.w(T_PRODUCT);
-        b.w(inc(n));
+fn result_type(inout builder: B, in types: Types, in env: X, in func: Fun) {
+    let inout_params = inout_count(in func);
+    if inout_params > 0 {
+        builder.w(T_PRODUCT);
+        builder.w(inc(inout_params));
     }
-    emit_ty(inout b, in t, f.result, x.fip);
-    for k in 0..f.params.len() {
-        let q = f.param(k);
-        if q.pass == TyPass::Inout {
-            emit_ty(inout b, in t, q.ty, x.fip);
+    emit_ty(inout builder, in types, func.result, env.fip);
+    for k in 0..func.params.len() {
+        let param_row = func.param(k);
+        if param_row.pass == TyPass::Inout {
+            emit_ty(inout builder, in types, param_row.ty, env.fip);
         }
     }
 }
 
-fn result_check(inout b: B, in t: Types, in x: X, in f: Fun) {
-    ty_check(inout b, in t, f.result, x.fip);
-    for k in 0..f.params.len() {
-        let q = f.param(k);
-        if q.pass == TyPass::Inout {
-            ty_check(inout b, in t, q.ty, x.fip);
+fn result_check(inout builder: B, in types: Types, in env: X, in func: Fun) {
+    ty_check(inout builder, in types, func.result, env.fip);
+    for k in 0..func.params.len() {
+        let param_row = func.param(k);
+        if param_row.pass == TyPass::Inout {
+            ty_check(inout builder, in types, param_row.ty, env.fip);
         }
     }
 }
 
-// The number of live locals of block `k`.
-fn live_count(in s: S, k: u64) -> u64 {
-    let mut n: u64 = 0;
-    let mut i = set_next_in(in s, k, 0);
+// The number of live locals of block `block_index`.
+fn live_count(in emitter: S, block_index: u64) -> u64 {
+    let mut count: u64 = 0;
+    let mut bit = set_next_in(in emitter, block_index, 0);
     loop {
-        if i == NONE64 {
+        if bit == NONE64 {
             break;
         }
-        n = inc(n);
-        i = set_next_in(in s, k, inc(i));
+        count = inc(count);
+        bit = set_next_in(in emitter, block_index, inc(bit));
     }
-    n
+    count
 }
 
-// The next live local of block `k` at or after bit `i`, or NONE64.
-fn set_next_in(in s: S, k: u64, i: u64) -> u64 {
-    let mut j = i;
+// The next live local of block `block_index` at or after bit `from`, or NONE64.
+fn set_next_in(in emitter: S, block_index: u64, from: u64) -> u64 {
+    let mut bit = from;
     loop {
-        if j >= s.f.nbits {
+        if bit >= emitter.func.set_bits {
             return NONE64;
         }
-        if block_has(in s.live, k, s.f.nw, j) {
-            return j;
+        if block_has(in emitter.live, block_index, emitter.func.set_words, bit) {
+            return bit;
         }
-        j = inc(j);
+        bit = inc(bit);
     }
 }
 
 // `call_block(k, replacements)`: the replacements are the jump's
 // arguments at `args` (NONE64 for none) for the target's parameters.
-fn call_block(inout b: B, in x: X, in s: S, k: u64, args: u64) {
-    let n = add(generic_count(in x, s.sig), live_count(in s, k));
-    let m = b.app(n);
-    let name = block_sym(inout b, in s.f, k);
-    b.quiet = inc(b.quiet);
-    b.sref(name);
-    b.quiet = wrapping_sub(b.quiet, 1);
-    b.args(m);
-    generic_args(inout b, in x, s.sig);
-    let tb = s.f.block(in x.p, k);
-    let tps = block_params(in x.p, tb);
-    let mut i = set_next_in(in s, k, 0);
+fn call_block(inout builder: B, in env: X, in emitter: S, block_index: u64, args: u64) {
+    let arity = add(generic_count(in env, emitter.sig), live_count(in emitter, block_index));
+    let mark = builder.app(arity);
+    let name = block_sym(inout builder, in emitter.func, block_index);
+    builder.quiet = inc(builder.quiet);
+    builder.sref(name);
+    builder.quiet = wrapping_sub(builder.quiet, 1);
+    builder.args(mark);
+    generic_args(inout builder, in env, emitter.sig);
+    let target_block = emitter.func.block(in env.program, block_index);
+    let params_at = block_params(in env.program, target_block);
+    let mut bit = set_next_in(in emitter, block_index, 0);
     loop {
-        if i == NONE64 {
+        if bit == NONE64 {
             break;
         }
-        b.arg();
+        builder.arg();
         let mut done = false;
-        if i >= s.f.nlocals() && args != NONE64 {
-            let v = u64_at(in s.f.vids, wrapping_sub(i, s.f.nlocals()));
-            let na = x.p.op(args);
-            let np = x.p.op(tps);
-            for j in 0..na {
-                if !done && j < np && x.p.op(add(inc(tps), j)) == v {
-                    value(inout b, x.p.op(add(inc(args), j)));
+        if bit >= emitter.func.nlocals() && args != NONE64 {
+            let value_id = u64_at(
+                in emitter.func.value_ids,
+                wrapping_sub(bit, emitter.func.nlocals())
+            );
+            let jump_arg_count = env.program.op(args);
+            let param_count = env.program.op(params_at);
+            for j in 0..jump_arg_count {
+                if !done && j < param_count && env.program.op(add(inc(params_at), j)) == value_id {
+                    value(inout builder, env.program.op(add(inc(args), j)));
                     done = true;
                 }
             }
         }
         if !done {
-            let sy = local_sym(inout b, in s.f, i);
-            b.sref(sy);
+            let local_name = local_sym(inout builder, in emitter.func, bit);
+            builder.sref(local_name);
         }
-        i = set_next_in(in s, k, inc(i));
+        bit = set_next_in(in emitter, block_index, inc(bit));
     }
-    b.check(name, in "name");
+    builder.check(name, in "name");
 }
 
 // ----- types and constructors -----------------------------------------------------
 
 // `IntegerKind::from_type(ty).is_some_and(signed)`.
-fn signed_kind(in b: B, in t: Types, ty: u32) -> bool {
+fn signed_kind(in builder: B, in types: Types, ty: u32) -> bool {
     if ty == NONE32 {
         return false;
     }
-    let n = t.node(ty);
-    if n.kind == TyKind::Lit {
-        return !(n.mode == 0 && wrapping_u64(n.lit) > 9223372036854775807);
+    let node = types.node(ty);
+    if node.kind == TyKind::Lit {
+        return !(node.mode == 0 && wrapping_u64(node.lit) > 9223372036854775807);
     }
-    if n.kind != TyKind::Named {
+    if node.kind != TyKind::Named {
         return false;
     }
-    spells(in b, n.name, in "i8")
-        || spells(in b, n.name, in "i16")
-        || spells(in b, n.name, in "i32")
-        || spells(in b, n.name, in "i64")
-        || spells(in b, n.name, in "isize")
-        || spells(in b, n.name, in "i128")
+    spells(in builder, node.name, in "i8")
+        || spells(in builder, node.name, in "i16")
+        || spells(in builder, node.name, in "i32")
+        || spells(in builder, node.name, in "i64")
+        || spells(in builder, node.name, in "isize")
+        || spells(in builder, node.name, in "i128")
 }
 
 // `World::constructor(name)`: (adt index << 32) + variant index, or NONE64.
-pub fn lookup_constructor(inout b: B, in wd: World, name: u32) -> u64 {
-    let n = b.names.size(name);
-    let mut seps: u64 = 0;
-    let mut last: u64 = 0;
+pub fn lookup_constructor(inout builder: B, in world: World, name: u32) -> u64 {
+    let len = builder.names.size(name);
+    let mut sep_count: u64 = 0;
+    let mut last_sep: u64 = 0;
     let mut i: u64 = 0;
     loop {
-        if inc(i) >= n {
+        if inc(i) >= len {
             break;
         }
-        if b.names.byte(name, i) == 58 && b.names.byte(name, inc(i)) == 58 {
-            seps = inc(seps);
-            last = i;
+        if builder.names.byte(name, i) == 58 && builder.names.byte(name, inc(i)) == 58 {
+            sep_count = inc(sep_count);
+            last_sep = i;
             i = add(i, 2);
         } else {
             i = inc(i);
         }
     }
-    if seps > 1 {
+    if sep_count > 1 {
         return NONE64;
     }
-    if seps == 0 {
-        return constructor(in wd, NONE32, name);
+    if sep_count == 0 {
+        return constructor(in world, NONE32, name);
     }
-    let mut q: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let mut r: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    for j in 0..n {
-        let c = b.names.byte(name, j);
-        if j < last {
-            q.push(c);
-        } else if j >= add(last, 2) {
-            r.push(c);
+    let mut qualifier: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut rest: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for j in 0..len {
+        let byte = builder.names.byte(name, j);
+        if j < last_sep {
+            qualifier.push(byte);
+        } else if j >= add(last_sep, 2) {
+            rest.push(byte);
         }
     }
-    let qs = b.names.lookup(in q.as_slice());
-    let rs = b.names.lookup(in r.as_slice());
-    if qs == NONE32 || rs == NONE32 {
+    let qualifier_sym = builder.names.lookup(in qualifier.as_slice());
+    let rest_sym = builder.names.lookup(in rest.as_slice());
+    if qualifier_sym == NONE32 || rest_sym == NONE32 {
         return NONE64;
     }
-    constructor(in wd, qs, rs)
+    constructor(in world, qualifier_sym, rest_sym)
 }
 
-pub fn adt_of(in wd: World, c: u64) -> Adt {
-    wd.adt(n32(wrapping_shr_u64(c, 32)))
+pub fn adt_of(in world: World, ctor: u64) -> Adt {
+    world.adt(n32(wrapping_shr_u64(ctor, 32)))
 }
 
-pub fn variant_of(in wd: World, c: u64) -> Variant {
-    wd.variant(c & 4294967295)
+pub fn variant_of(in world: World, ctor: u64) -> Variant {
+    world.variant(ctor & 4294967295)
 }
 
 // `Emitter::constructor` written quietly; `constructor_check` checks it.
-fn constructor_name(inout b: B, in wd: World, c: u64) {
-    let a = adt_of(in wd, c);
-    let v = variant_of(in wd, c);
-    if spells(in b, a.name, in "Option") && spells(in b, v.name, in "Some") {
-        b.w(1);
-        b.w(2);
-        b.text(in "Option");
-        b.text(in "some");
-    } else if spells(in b, a.name, in "Option") && spells(in b, v.name, in "None") {
-        b.w(1);
-        b.w(2);
-        b.text(in "Option");
-        b.text(in "none");
-    } else if spells(in b, a.name, in "Result") && spells(in b, v.name, in "Ok") {
-        b.w(1);
-        b.w(2);
-        b.text(in "Except");
-        b.text(in "ok");
-    } else if spells(in b, a.name, in "Result") && spells(in b, v.name, in "Err") {
-        b.w(1);
-        b.w(2);
-        b.text(in "Except");
-        b.text(in "error");
-    } else if a.is_enum {
-        name2_quiet(inout b, false, a.name, v.name);
+fn constructor_name(inout builder: B, in world: World, ctor: u64) {
+    let adt = adt_of(in world, ctor);
+    let variant = variant_of(in world, ctor);
+    if spells(in builder, adt.name, in "Option") && spells(in builder, variant.name, in "Some") {
+        builder.w(1);
+        builder.w(2);
+        builder.text(in "Option");
+        builder.text(in "some");
+    } else if spells(in builder, adt.name, in "Option")
+        && spells(in builder, variant.name, in "None")
+    {
+        builder.w(1);
+        builder.w(2);
+        builder.text(in "Option");
+        builder.text(in "none");
+    } else if spells(in builder, adt.name, in "Result")
+        && spells(in builder, variant.name, in "Ok")
+    {
+        builder.w(1);
+        builder.w(2);
+        builder.text(in "Except");
+        builder.text(in "ok");
+    } else if spells(in builder, adt.name, in "Result")
+        && spells(in builder, variant.name, in "Err")
+    {
+        builder.w(1);
+        builder.w(2);
+        builder.text(in "Except");
+        builder.text(in "error");
+    } else if adt.is_enum {
+        name2_quiet(inout builder, false, adt.name, variant.name);
     } else {
-        let mk = b.intern(in "mk");
-        name2_quiet(inout b, false, a.name, mk);
+        let mk_sym = builder.intern(in "mk");
+        name2_quiet(inout builder, false, adt.name, mk_sym);
     }
 }
 
-fn constructor_check(inout b: B, in wd: World, c: u64) {
-    let a = adt_of(in wd, c);
-    let v = variant_of(in wd, c);
-    let special = (spells(in b, a.name, in "Option")
-        && (spells(in b, v.name, in "Some") || spells(in b, v.name, in "None")))
-        || (spells(in b, a.name, in "Result")
-            && (spells(in b, v.name, in "Ok") || spells(in b, v.name, in "Err")));
+fn constructor_check(inout builder: B, in world: World, ctor: u64) {
+    let adt = adt_of(in world, ctor);
+    let variant = variant_of(in world, ctor);
+    let special = (spells(in builder, adt.name, in "Option")
+        && (spells(in builder, variant.name, in "Some")
+            || spells(in builder, variant.name, in "None")))
+        || (spells(in builder, adt.name, in "Result")
+            && (spells(in builder, variant.name, in "Ok")
+                || spells(in builder, variant.name, in "Err")));
     if special {
         return;
     }
-    b.check(a.name, in "identifier");
-    if a.is_enum {
-        b.check(v.name, in "identifier");
+    builder.check(adt.name, in "identifier");
+    if adt.is_enum {
+        builder.check(variant.name, in "identifier");
     }
 }
 
 // `World::field(ty, [field])`, or NONE32.
-fn field_type(inout t: Types, in b: B, in wd: World, ty: u32, field: u32) -> u32 {
+fn field_type(inout types: Types, in builder: B, in world: World, ty: u32, field: u32) -> u32 {
     if ty == NONE32 {
         return NONE32;
     }
-    let n = t.node(ty);
-    if n.kind == TyKind::Tuple {
-        let k = parse_index(in b, field);
-        if k == NONE64 || k >= w(n.n) {
+    let node = types.node(ty);
+    if node.kind == TyKind::Tuple {
+        let index = parse_index(in builder, field);
+        if index == NONE64 || index >= w(node.n) {
             return NONE32;
         }
-        return t.arg(ty, k);
+        return types.arg(ty, index);
     }
-    if n.kind != TyKind::Named {
+    if node.kind != TyKind::Named {
         return NONE32;
     }
     let mut adt_ty = ty;
-    if spells(in b, n.name, in "TiledSeq") {
-        if n.n == 0 {
+    if spells(in builder, node.name, in "TiledSeq") {
+        if node.n == 0 {
             return NONE32;
         }
-        adt_ty = t.arg(ty, 0);
-        let e = t.node(adt_ty);
-        if e.kind != TyKind::Named {
+        adt_ty = types.arg(ty, 0);
+        let elem_node = types.node(adt_ty);
+        if elem_node.kind != TyKind::Named {
             return NONE32;
         }
-        let ai = wd.lookup(e.name);
-        if ai == NONE32 {
+        let adt_index = world.lookup(elem_node.name);
+        if adt_index == NONE32 {
             return NONE32;
         }
-        let a = wd.adt(ai);
-        if a.is_enum || a.tile == 0 {
+        let adt = world.adt(adt_index);
+        if adt.is_enum || adt.tile == 0 {
             return NONE32;
         }
-    } else if spells(in b, n.name, in "ChunkSeq")
-        || spells(in b, n.name, in "Slice")
-        || spells(in b, n.name, in "String")
-        || spells(in b, n.name, in "Str")
+    } else if spells(in builder, node.name, in "ChunkSeq")
+        || spells(in builder, node.name, in "Slice")
+        || spells(in builder, node.name, in "String")
+        || spells(in builder, node.name, in "Str")
     {
         // Interval and view loans of sequences and strings are not places
         // the CFG extractor updates.
         return NONE32;
     }
-    let an = t.node(adt_ty);
-    let ai = wd.lookup(an.name);
-    if ai == NONE32 {
+    let adt_node = types.node(adt_ty);
+    let adt_index = world.lookup(adt_node.name);
+    if adt_index == NONE32 {
         return NONE32;
     }
-    let a = wd.adt(ai);
-    if a.is_enum {
+    let adt = world.adt(adt_index);
+    if adt.is_enum {
         return NONE32;
     }
-    let v = wd.variant(w(a.va));
-    let fi = wd.find_field(v, field);
-    if fi == NONE32 {
+    let variant = world.variant(w(adt.va));
+    let field_index = world.find_field(variant, field);
+    if field_index == NONE32 {
         return NONE32;
     }
-    let vars = wd.vars_of(in t, a, adt_ty);
-    let fty = wd.field(w(fi)).ty;
-    substitute(inout t, fty, in vars)
+    let vars = world.vars_of(in types, adt, adt_ty);
+    let field_ty = world.field(w(field_index)).ty;
+    substitute(inout types, field_ty, in vars)
 }
 
 // A projection's field as a tuple index (`str::parse::<usize>`), or NONE64.
-pub fn parse_index(in b: B, s: u32) -> u64 {
-    let n = b.names.size(s);
-    if n == 0 {
+pub fn parse_index(in builder: B, sym: u32) -> u64 {
+    let len = builder.names.size(sym);
+    if len == 0 {
         return NONE64;
     }
     let mut start: u64 = 0;
-    if b.names.byte(s, 0) == 43 {
+    if builder.names.byte(sym, 0) == 43 {
         start = 1;
-        if n == 1 {
+        if len == 1 {
             return NONE64;
         }
     }
-    let mut v: u64 = 0;
-    for i in start..n {
-        let c = b.names.byte(s, i);
-        if c < 48 || c > 57 {
+    let mut value: u64 = 0;
+    for i in start..len {
+        let byte = builder.names.byte(sym, i);
+        if byte < 48 || byte > 57 {
             return NONE64;
         }
-        let next = wrapping_add(wrapping_mul(v, 10), widen_u64(wrapping_sub(c, 48)));
-        if v > 1844674407370955161 || next < v {
+        let next = wrapping_add(wrapping_mul(value, 10), widen_u64(wrapping_sub(byte, 48)));
+        if value > 1844674407370955161 || next < value {
             return NONE64;
         }
-        v = next;
+        value = next;
     }
-    v
+    value
 }
 
 // ----- projections and updates ----------------------------------------------------
@@ -499,204 +510,219 @@ pub fn parse_index(in b: B, s: u32) -> u64 {
 // `project(base, path, ty)` (src/lean_ir.rs) is the base under projections:
 // `proj_count` counts them, `proj_tail` writes them after the base and
 // raises the out-of-range tuple error where Rust does.
-fn proj_count(in b: B, in t: Types, in path: ChunkSeq[u32], ty: u32) -> u64 {
+fn proj_count(in builder: B, in types: Types, in path: ChunkSeq[u32], ty: u32) -> u64 {
     let mut cur = ty;
-    let mut n: u64 = 0;
+    let mut count: u64 = 0;
     for i in 0..path.len() {
         let field = u32_at(in path, i);
-        let node = t.node(cur);
-        let k = parse_index(in b, field);
-        if cur != NONE32 && node.kind == TyKind::Tuple && k != NONE64 {
-            if k >= w(node.n) {
-                return n;
+        let node = types.node(cur);
+        let index = parse_index(in builder, field);
+        if cur != NONE32 && node.kind == TyKind::Tuple && index != NONE64 {
+            if index >= w(node.n) {
+                return count;
             }
-            n = add(n, k);
-            if inc(k) < w(node.n) {
-                n = inc(n);
+            count = add(count, index);
+            if inc(index) < w(node.n) {
+                count = inc(count);
             }
-            cur = t.arg(cur, k);
+            cur = types.arg(cur, index);
         } else {
-            n = inc(n);
+            count = inc(count);
             cur = NONE32;
         }
     }
-    n
+    count
 }
 
-fn proj_tail(inout b: B, in t: Types, in path: ChunkSeq[u32], ty: u32) {
+fn proj_tail(inout builder: B, in types: Types, in path: ChunkSeq[u32], ty: u32) {
     let mut cur = ty;
     for i in 0..path.len() {
         let field = u32_at(in path, i);
-        let node = t.node(cur);
-        let k = parse_index(in b, field);
-        if cur != NONE32 && node.kind == TyKind::Tuple && k != NONE64 {
-            if k >= w(node.n) {
-                b.fail(in "tuple projection is outside Lean tuple type");
+        let node = types.node(cur);
+        let index = parse_index(in builder, field);
+        if cur != NONE32 && node.kind == TyKind::Tuple && index != NONE64 {
+            if index >= w(node.n) {
+                builder.fail(in "tuple projection is outside Lean tuple type");
                 return;
             }
-            for j in 0..k {
-                b.w(1);
-                b.w(2);
+            for j in 0..index {
+                builder.w(1);
+                builder.w(2);
             }
-            if inc(k) < w(node.n) {
-                b.w(1);
-                b.w(1);
+            if inc(index) < w(node.n) {
+                builder.w(1);
+                builder.w(1);
             }
-            cur = t.arg(cur, k);
+            cur = types.arg(cur, index);
         } else {
-            b.w(0);
-            b.ident(field);
+            builder.w(0);
+            builder.ident(field);
             cur = NONE32;
         }
     }
 }
 
 // `project(source_ref(root), path, ty)`.
-fn project_ref(inout b: B, in t: Types, root: u32, in path: ChunkSeq[u32], ty: u32) {
-    let n = proj_count(in b, in t, in path, ty);
-    for i in 0..n {
-        b.w(T_PROJECT);
+fn project_ref(inout builder: B, in types: Types, root: u32, in path: ChunkSeq[u32], ty: u32) {
+    let count = proj_count(in builder, in types, in path, ty);
+    for i in 0..count {
+        builder.w(T_PROJECT);
     }
-    b.sref(root);
-    proj_tail(inout b, in t, in path, ty);
+    builder.sref(root);
+    proj_tail(inout builder, in types, in path, ty);
 }
 
 // `project(value(v), path, ty)`.
-fn project_value(inout b: B, in t: Types, v: u64, in path: ChunkSeq[u32], ty: u32) {
-    let n = proj_count(in b, in t, in path, ty);
-    for i in 0..n {
-        b.w(T_PROJECT);
+fn project_value(
+    inout builder: B,
+    in types: Types,
+    value_id: u64,
+    in path: ChunkSeq[u32],
+    ty: u32
+) {
+    let count = proj_count(in builder, in types, in path, ty);
+    for i in 0..count {
+        builder.w(T_PROJECT);
     }
-    value(inout b, v);
-    proj_tail(inout b, in t, in path, ty);
+    value(inout builder, value_id);
+    proj_tail(inout builder, in types, in path, ty);
 }
 
-// The base of an update at depth `d`: `root.f1.f2...fd` as field
+// The base of an update at depth `depth`: `root.f1.f2...fd` as field
 // projections.
-fn update_base(inout b: B, root: u32, in path: ChunkSeq[u32], d: u64) {
-    for i in 0..d {
-        b.w(T_PROJECT);
+fn update_base(inout builder: B, root: u32, in path: ChunkSeq[u32], depth: u64) {
+    for i in 0..depth {
+        builder.w(T_PROJECT);
     }
-    b.sref(root);
-    for i in 0..d {
-        b.w(0);
-        b.ident(u32_at(in path, i));
+    builder.sref(root);
+    for i in 0..depth {
+        builder.w(0);
+        builder.ident(u32_at(in path, i));
     }
 }
 
 // `update_place_typed(world, place, value, root_ty, rec)`: `value` was
 // written and cut out already.
 fn update(
-    inout b: B,
-    inout t: Types,
-    in x: X,
+    inout builder: B,
+    inout types: Types,
+    in env: X,
     root: u32,
     in path: ChunkSeq[u32],
-    d: u64,
+    depth: u64,
     ty: u32,
     in value: ChunkSeq[u64]
 ) {
-    if d >= path.len() {
-        b.paste(in value);
+    if depth >= path.len() {
+        builder.paste(in value);
         return;
     }
-    let field = u32_at(in path, d);
-    let fty = field_type(inout t, in b, in x.wd, ty, field);
-    b.check(field, in "identifier");
-    let node = t.node(ty);
-    let mut ai = NONE32;
+    let field = u32_at(in path, depth);
+    let field_ty = field_type(inout types, in builder, in env.world, ty, field);
+    builder.check(field, in "identifier");
+    let node = types.node(ty);
+    let mut adt_index = NONE32;
     if ty != NONE32 && node.kind == TyKind::Named {
-        ai = x.wd.lookup(node.name);
+        adt_index = env.world.lookup(node.name);
     }
     let mut is_rec = false;
-    if ai != NONE32 {
-        is_rec = x.rec.try_get(w(ai)).unwrap_or(false);
+    if adt_index != NONE32 {
+        is_rec = env.recursive_structs.try_get(w(adt_index)).unwrap_or(false);
     }
     if is_rec {
-        let a = x.wd.adt(ai);
-        let v = x.wd.variant(w(a.va));
-        let m = b.app(w(v.fc));
-        b.w(T_REF);
-        let mk = b.intern(in "mk");
-        name2_quiet(inout b, false, a.name, mk);
-        b.args(m);
-        for i in 0..w(v.fc) {
-            let fl = x.wd.field(add(w(v.fa), i));
-            b.arg();
-            if fl.name == field {
-                update(inout b, inout t, in x, root, in path, inc(d), fty, in value);
+        let adt = env.world.adt(adt_index);
+        let variant = env.world.variant(w(adt.va));
+        let mark = builder.app(w(variant.fc));
+        builder.w(T_REF);
+        let mk_sym = builder.intern(in "mk");
+        name2_quiet(inout builder, false, adt.name, mk_sym);
+        builder.args(mark);
+        for i in 0..w(variant.fc) {
+            let field_row = env.world.field(add(w(variant.fa), i));
+            builder.arg();
+            if field_row.name == field {
+                update(
+                    inout builder,
+                    inout types,
+                    in env,
+                    root,
+                    in path,
+                    inc(depth),
+                    field_ty,
+                    in value
+                );
             } else {
                 // lean_nodes::project: a fixed identifier, never refused
-                b.w(T_PROJECT);
-                b.quiet = inc(b.quiet);
-                update_base(inout b, root, in path, d);
-                b.w(0);
-                b.ident(fl.name);
-                b.quiet = wrapping_sub(b.quiet, 1);
+                builder.w(T_PROJECT);
+                builder.quiet = inc(builder.quiet);
+                update_base(inout builder, root, in path, depth);
+                builder.w(0);
+                builder.ident(field_row.name);
+                builder.quiet = wrapping_sub(builder.quiet, 1);
             }
         }
-        name2_check(inout b, a.name, mk);
+        name2_check(inout builder, adt.name, mk_sym);
         return;
     }
-    b.w(T_UPDATE);
-    b.w(1);
-    update_base(inout b, root, in path, d);
-    b.ident(field);
-    update(inout b, inout t, in x, root, in path, inc(d), fty, in value);
+    builder.w(T_UPDATE);
+    builder.w(1);
+    update_base(inout builder, root, in path, depth);
+    builder.ident(field);
+    update(inout builder, inout types, in env, root, in path, inc(depth), field_ty, in value);
 }
 
 // The path of place-ir path `i` as symbols.
-fn ir_path(in p: Program, i: u64) -> ChunkSeq[u32] {
-    let row = p.path(i);
+fn ir_path(in program: Program, i: u64) -> ChunkSeq[u32] {
+    let row = program.path(i);
     let mut out: ChunkSeq[u32] = ChunkSeq::new[u32]();
     for k in 0..row.n {
-        out.push(p.path_name(i, k));
+        out.push(program.path_name(i, k));
     }
     out
 }
 
 // `let root := update(place, <cut value>)`.
 fn let_update(
-    inout b: B,
-    inout t: Types,
-    in x: X,
-    in f: Fun,
+    inout builder: B,
+    inout types: Types,
+    in env: X,
+    in func: Fun,
     root: u32,
     in path: ChunkSeq[u32],
     in value: ChunkSeq[u64]
 ) {
-    b.w(S_LET);
-    b.w(0);
-    b.w(P_BIND);
-    b.ident(root);
-    b.w(0);
-    update(inout b, inout t, in x, root, in path, 0, f.local_ty(root), in value);
+    builder.w(S_LET);
+    builder.w(0);
+    builder.w(P_BIND);
+    builder.ident(root);
+    builder.w(0);
+    update(inout builder, inout types, in env, root, in path, 0, func.local_ty(root), in value);
 }
 
 // A `Write` place `a.b.c`: the root symbol and the path.
-fn split_place(inout b: B, s: u32, inout path: ChunkSeq[u32]) -> u32 {
-    let n = b.names.size(s);
+fn split_place(inout builder: B, sym: u32, inout path: ChunkSeq[u32]) -> u32 {
+    let len = builder.names.size(sym);
     let mut part: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut root = NONE32;
-    for i in 0..n {
-        let c = b.names.byte(s, i);
-        if c == 46 {
-            let y = b.names.intern(in part.as_slice());
+    for i in 0..len {
+        let byte = builder.names.byte(sym, i);
+        if byte == 46 {
+            let part_sym = builder.names.intern(in part.as_slice());
             if root == NONE32 {
-                root = y;
+                root = part_sym;
             } else {
-                path.push(y);
+                path.push(part_sym);
             }
             part.clear();
         } else {
-            part.push(c);
+            part.push(byte);
         }
     }
-    let y = b.names.intern(in part.as_slice());
+    let part_sym = builder.names.intern(in part.as_slice());
     if root == NONE32 {
-        root = y;
+        root = part_sym;
     } else {
-        path.push(y);
+        path.push(part_sym);
     }
     root
 }
@@ -704,9 +730,9 @@ fn split_place(inout b: B, s: u32, inout path: ChunkSeq[u32]) -> u32 {
 // ----- literals ---------------------------------------------------------------------
 
 // The decimal digits of the 128-bit magnitude (hi, lo).
-pub fn put_u128(inout o: ChunkSeq[u8], hi: u64, lo: u64) {
+pub fn put_u128(inout out: ChunkSeq[u8], hi: u64, lo: u64) {
     if hi == 0 {
-        put_decimal(inout o, lo);
+        put_decimal(inout out, lo);
         return;
     }
     // Long division by 10 over 32-bit limbs, most significant first.
@@ -721,10 +747,10 @@ pub fn put_u128(inout o: ChunkSeq[u8], hi: u64, lo: u64) {
         let mut rem: u64 = 0;
         for i in 0..4 {
             let cur = wrapping_add(wrapping_shl_u64(rem, 32), u64_at(in limbs, i));
-            let q = cur / 10;
+            let quotient = cur / 10;
             rem = cur % 10;
-            let ok = limbs.try_set(i, q);
-            if q != 0 {
+            let ok = limbs.try_set(i, quotient);
+            if quotient != 0 {
                 zero = false;
             }
         }
@@ -740,29 +766,29 @@ pub fn put_u128(inout o: ChunkSeq[u8], hi: u64, lo: u64) {
         }
         i = wrapping_sub(i, 1);
         match digits.try_get(i) {
-            Option::Some(c) => o.push(c),
+            Option::Some(digit) => out.push(digit),
             Option::None => {},
         }
     }
 }
 
-fn nat_u128(inout b: B, hi: u64, lo: u64) {
-    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    put_u128(inout o, hi, lo);
-    let s = b.names.intern(in o.as_slice());
-    b.w(T_NAT);
-    b.sym(s);
+fn nat_u128(inout builder: B, hi: u64, lo: u64) {
+    let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_u128(inout digits, hi, lo);
+    let sym = builder.names.intern(in digits.as_slice());
+    builder.w(T_NAT);
+    builder.sym(sym);
 }
 
-fn nat_u64(inout b: B, v: u64) {
-    nat_u128(inout b, 0, v);
+fn nat_u64(inout builder: B, value: u64) {
+    nat_u128(inout builder, 0, value);
 }
 
-// `(x as f32).to_bits()` of the f64 with bits `d`, round to nearest even.
-pub fn f32_bits(d: u64) -> u64 {
-    let sign = wrapping_shl_u64(wrapping_shr_u64(d, 63), 31);
-    let exp = wrapping_shr_u64(d, 52) & 2047;
-    let mant = d & 4503599627370495;
+// `(x as f32).to_bits()` of the f64 with bits `bits`, round to nearest even.
+pub fn f32_bits(bits: u64) -> u64 {
+    let sign = wrapping_shl_u64(wrapping_shr_u64(bits, 63), 31);
+    let exp = wrapping_shr_u64(bits, 52) & 2047;
+    let mant = bits & 4503599627370495;
     if exp == 2047 {
         if mant == 0 {
             return sign | 2139095040;
@@ -772,162 +798,164 @@ pub fn f32_bits(d: u64) -> u64 {
     if exp == 0 {
         return sign;
     }
-    let m = mant | 4503599627370496;
+    let significand = mant | 4503599627370496;
     // the f32 exponent field, before rounding
-    let e = wrapping_sub(wrapping_add(exp, 127), 1023);
-    let ei = wrapping_i64(e);
-    if ei >= 255 {
+    let biased_exp = wrapping_sub(wrapping_add(exp, 127), 1023);
+    let signed_exp = wrapping_i64(biased_exp);
+    if signed_exp >= 255 {
         return sign | 2139095040;
     }
     let mut shift: u64 = 29;
-    if ei <= 0 {
-        shift = wrapping_add(30, wrapping_u64(wrapping_sub(0, ei)));
+    if signed_exp <= 0 {
+        shift = wrapping_add(30, wrapping_u64(wrapping_sub(0, signed_exp)));
     }
     if shift >= 64 {
         return sign;
     }
-    let mut q = wrapping_shr_u64(m, wrapping_u32(shift));
-    let rem = m & wrapping_sub(wrapping_shl_u64(1, wrapping_u32(shift)), 1);
+    let mut rounded = wrapping_shr_u64(significand, wrapping_u32(shift));
+    let rem = significand & wrapping_sub(wrapping_shl_u64(1, wrapping_u32(shift)), 1);
     let half = wrapping_shl_u64(1, wrapping_u32(wrapping_sub(shift, 1)));
-    if rem > half || (rem == half && (q & 1) != 0) {
-        q = inc(q);
+    if rem > half || (rem == half && (rounded & 1) != 0) {
+        rounded = inc(rounded);
     }
-    if ei <= 0 {
-        return sign | q;
+    if signed_exp <= 0 {
+        return sign | rounded;
     }
     // q has the hidden bit at 2^23; a carry to 2^24 bumps the exponent.
-    sign | wrapping_add(wrapping_shl_u64(e, 23), wrapping_sub(q, 8388608))
+    sign | wrapping_add(wrapping_shl_u64(biased_exp, 23), wrapping_sub(rounded, 8388608))
 }
 
 // `typed_literal(l, ty)` for the literal at `i` (kind, lo or symbol, hi).
-fn literal(inout b: B, in t: Types, in x: X, i: u64, ty: u32) {
-    let kind = x.p.op(i);
-    let lo = x.p.op(inc(i));
-    let hi = x.p.op(add(i, 2));
+fn literal(inout builder: B, in types: Types, in env: X, i: u64, ty: u32) {
+    let kind = env.program.op(i);
+    let lo = env.program.op(inc(i));
+    let hi = env.program.op(add(i, 2));
     if kind == Lit::Int {
         if wrapping_shr_u64(hi, 63) != 0 {
             // the magnitude of a negative i128
-            let nlo = wrapping_add(lo ^ 18446744073709551615, 1);
-            let mut nhi = hi ^ 18446744073709551615;
-            if nlo == 0 {
-                nhi = wrapping_add(nhi, 1);
+            let neg_lo = wrapping_add(lo ^ 18446744073709551615, 1);
+            let mut neg_hi = hi ^ 18446744073709551615;
+            if neg_lo == 0 {
+                neg_hi = wrapping_add(neg_hi, 1);
             }
-            b.w(T_UNARY);
-            b.w(U_NEG);
-            nat_u128(inout b, nhi, nlo);
+            builder.w(T_UNARY);
+            builder.w(U_NEG);
+            nat_u128(inout builder, neg_hi, neg_lo);
         } else {
-            nat_u128(inout b, hi, lo);
+            nat_u128(inout builder, hi, lo);
         }
     } else if kind == Lit::WideInt {
-        nat_u128(inout b, hi, lo);
+        nat_u128(inout builder, hi, lo);
     } else if kind == Lit::Float {
-        let n = t.node(ty);
-        if n.kind == TyKind::Named && spells(in b, n.name, in "f32") {
-            global_app(inout b, in "Float32", in "ofBits");
-            nat_u64(inout b, f32_bits(lo));
+        let node = types.node(ty);
+        if node.kind == TyKind::Named && spells(in builder, node.name, in "f32") {
+            global_app(inout builder, in "Float32", in "ofBits");
+            nat_u64(inout builder, f32_bits(lo));
         } else {
-            global_app(inout b, in "Float", in "ofBits");
-            nat_u64(inout b, lo);
+            global_app(inout builder, in "Float", in "ofBits");
+            nat_u64(inout builder, lo);
         }
     } else if kind == Lit::Bool {
-        b.w(T_BOOL);
-        b.w(lo);
+        builder.w(T_BOOL);
+        builder.w(lo);
     } else {
-        b.w(T_STRING);
-        b.sym(n32(lo));
+        builder.w(T_STRING);
+        builder.sym(n32(lo));
     }
 }
 
 // ----- patterns ---------------------------------------------------------------------
 
 // Whether the pattern at `i` is a built-in `Box` pattern (`is_box_pattern`).
-fn box_pattern(inout b: B, in x: X, i: u64) -> bool {
-    if !x.fip || x.p.op(i) != Pat::Constructor {
+fn box_pattern(inout builder: B, in env: X, i: u64) -> bool {
+    if !env.fip || env.program.op(i) != Pat::Constructor {
         return false;
     }
-    let name = n32(x.p.op(add(i, 3)));
-    let n = x.p.op(add(i, 5));
-    if !(spells(in b, name, in "Box") || spells(in b, name, in "Box::Box")) || n != 1 {
+    let name = n32(env.program.op(add(i, 3)));
+    let field_count = env.program.op(add(i, 5));
+    if !(spells(in builder, name, in "Box") || spells(in builder, name, in "Box::Box"))
+        || field_count != 1
+    {
         return false;
     }
-    spells(in b, n32(x.p.op(add(i, 6))), in "0")
+    spells(in builder, n32(env.program.op(add(i, 6))), in "0")
 }
 
 // `Emitter::pattern` of the pattern at `i`.
-fn pattern(inout b: B, in t: Types, in x: X, i: u64) {
-    if box_pattern(inout b, in x, i) {
-        pattern(inout b, in t, in x, add(i, 7));
+fn pattern(inout builder: B, in types: Types, in env: X, i: u64) {
+    if box_pattern(inout builder, in env, i) {
+        pattern(inout builder, in types, in env, add(i, 7));
         return;
     }
-    let kind = x.p.op(i);
-    let j = add(i, 3);
+    let kind = env.program.op(i);
+    let payload = add(i, 3);
     if kind == Pat::Bind {
-        b.w(P_BIND);
-        b.ident(n32(x.p.op(j)));
+        builder.w(P_BIND);
+        builder.ident(n32(env.program.op(payload)));
     } else if kind == Pat::Wild {
-        b.w(P_WILD);
+        builder.w(P_WILD);
     } else if kind == Pat::Literal {
-        let lk = x.p.op(j);
-        if lk == Lit::Int {
-            b.w(P_INT);
-            b.w(x.p.op(inc(j)));
-            b.w(x.p.op(add(j, 2)));
-        } else if lk == Lit::Bool {
-            b.w(P_BOOL);
-            b.w(x.p.op(inc(j)));
-        } else if lk == Lit::String {
-            b.w(P_STRING);
-            b.sym(n32(x.p.op(inc(j))));
-        } else if lk == Lit::WideInt {
-            b.fail(in "128-bit literal patterns are unsupported in Lean extraction");
-            b.w(P_WILD);
+        let lit_kind = env.program.op(payload);
+        if lit_kind == Lit::Int {
+            builder.w(P_INT);
+            builder.w(env.program.op(inc(payload)));
+            builder.w(env.program.op(add(payload, 2)));
+        } else if lit_kind == Lit::Bool {
+            builder.w(P_BOOL);
+            builder.w(env.program.op(inc(payload)));
+        } else if lit_kind == Lit::String {
+            builder.w(P_STRING);
+            builder.sym(n32(env.program.op(inc(payload))));
+        } else if lit_kind == Lit::WideInt {
+            builder.fail(in "128-bit literal patterns are unsupported in Lean extraction");
+            builder.w(P_WILD);
         } else {
-            b.fail(in "floating-point patterns are unsupported in Lean extraction");
-            b.w(P_WILD);
+            builder.fail(in "floating-point patterns are unsupported in Lean extraction");
+            builder.w(P_WILD);
         }
     } else if kind == Pat::Tuple {
-        let n = x.p.op(j);
-        if n != 1 {
-            b.w(P_TUPLE);
-            b.w(n);
+        let count = env.program.op(payload);
+        if count != 1 {
+            builder.w(P_TUPLE);
+            builder.w(count);
         }
-        let mut k = inc(j);
-        for m in 0..n {
-            pattern(inout b, in t, in x, k);
-            k = pattern_end(in x.p, k);
+        let mut cursor = inc(payload);
+        for m in 0..count {
+            pattern(inout builder, in types, in env, cursor);
+            cursor = pattern_end(in env.program, cursor);
         }
     } else if kind == Pat::Constructor {
-        let c = lookup_constructor(inout b, in x.wd, n32(x.p.op(j)));
-        if c == NONE64 {
-            b.fail(in "unknown Lean pattern");
-            b.w(P_WILD);
+        let ctor = lookup_constructor(inout builder, in env.world, n32(env.program.op(payload)));
+        if ctor == NONE64 {
+            builder.fail(in "unknown Lean pattern");
+            builder.w(P_WILD);
             return;
         }
-        let v = variant_of(in x.wd, c);
-        b.w(P_CTOR);
-        b.quiet = inc(b.quiet);
-        constructor_name(inout b, in x.wd, c);
-        b.quiet = wrapping_sub(b.quiet, 1);
-        b.w(w(v.fc));
-        let nf = x.p.op(add(j, 2));
-        for fi in 0..w(v.fc) {
-            let field = x.wd.field(add(w(v.fa), fi)).name;
-            let mut k = add(j, 3);
+        let variant = variant_of(in env.world, ctor);
+        builder.w(P_CTOR);
+        builder.quiet = inc(builder.quiet);
+        constructor_name(inout builder, in env.world, ctor);
+        builder.quiet = wrapping_sub(builder.quiet, 1);
+        builder.w(w(variant.fc));
+        let field_count = env.program.op(add(payload, 2));
+        for field_index in 0..w(variant.fc) {
+            let field = env.world.field(add(w(variant.fa), field_index)).name;
+            let mut cursor = add(payload, 3);
             let mut at = NONE64;
-            for m in 0..nf {
-                if at == NONE64 && n32(x.p.op(k)) == field {
-                    at = inc(k);
+            for m in 0..field_count {
+                if at == NONE64 && n32(env.program.op(cursor)) == field {
+                    at = inc(cursor);
                 }
-                k = pattern_end(in x.p, inc(k));
+                cursor = pattern_end(in env.program, inc(cursor));
             }
             if at == NONE64 {
-                b.fail(in "missing pattern field");
-                b.w(P_WILD);
+                builder.fail(in "missing pattern field");
+                builder.w(P_WILD);
             } else {
-                pattern(inout b, in t, in x, at);
+                pattern(inout builder, in types, in env, at);
             }
         }
-        constructor_check(inout b, in x.wd, c);
+        constructor_check(inout builder, in env.world, ctor);
     }
 }
 
@@ -935,77 +963,77 @@ fn pattern(inout b: B, in t: Types, in x: X, i: u64) {
 
 // `let $value{dest} : ty := ` before the right-hand side; `let_dest_end`
 // makes the type's check after it.
-fn let_dest(inout b: B, in t: Types, in x: X, ins: InstRow) {
-    b.w(S_LET);
-    b.w(0);
-    b.w(P_BIND);
-    let s = value_sym(inout b, w(ins.dest));
-    b.ident(s);
-    b.w(1);
-    emit_ty(inout b, in t, ins.ty, x.fip);
+fn let_dest(inout builder: B, in types: Types, in env: X, inst: InstRow) {
+    builder.w(S_LET);
+    builder.w(0);
+    builder.w(P_BIND);
+    let sym = value_sym(inout builder, w(inst.dest));
+    builder.ident(sym);
+    builder.w(1);
+    emit_ty(inout builder, in types, inst.ty, env.fip);
 }
 
-fn let_dest_end(inout b: B, in t: Types, in x: X, ins: InstRow) {
-    ty_check(inout b, in t, ins.ty, x.fip);
+fn let_dest_end(inout builder: B, in types: Types, in env: X, inst: InstRow) {
+    ty_check(inout builder, in types, inst.ty, env.fip);
 }
 
 // `arith_term(op, kind, a, b)` after the operator: writes the prefix and
 // returns how the operands go: 0 binary (write a, then b), 1 the signed
 // `%` (`binary_mod_rest`), 2 refused.
-fn arith_prefix(inout b: B, op: u32, signed: bool) -> u64 {
-    let code = arith_code(in b, op);
+fn arith_prefix(inout builder: B, op: u32, signed: bool) -> u64 {
+    let code = arith_code(in builder, op);
     if code == NONE64 {
-        let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        put(inout m, in "unsupported Lean binary operator \"");
-        let n = b.names.size(op);
-        for i in 0..n {
-            let c = b.names.byte(op, i);
-            if c == 34 || c == 92 {
-                m.push(92);
+        let mut message: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put(inout message, in "unsupported Lean binary operator \"");
+        let len = builder.names.size(op);
+        for i in 0..len {
+            let byte = builder.names.byte(op, i);
+            if byte == 34 || byte == 92 {
+                message.push(92);
             }
-            m.push(c);
+            message.push(byte);
         }
-        put(inout m, in "\"");
-        if !b.failed {
-            b.failed = true;
-            b.err = m;
+        put(inout message, in "\"");
+        if !builder.failed {
+            builder.failed = true;
+            builder.err = message;
         }
-        unit_tuple(inout b);
+        unit_tuple(inout builder);
         return 2;
     }
     if code == OP_MOD && signed {
         return 1;
     }
-    b.binary(code);
+    builder.binary(code);
     0
 }
 
-fn arith_code(in b: B, op: u32) -> u64 {
-    if spells(in b, op, in "+") {
+fn arith_code(in builder: B, op: u32) -> u64 {
+    if spells(in builder, op, in "+") {
         OP_ADD
-    } else if spells(in b, op, in "-") {
+    } else if spells(in builder, op, in "-") {
         OP_SUB
-    } else if spells(in b, op, in "*") {
+    } else if spells(in builder, op, in "*") {
         OP_MUL
-    } else if spells(in b, op, in "/") {
+    } else if spells(in builder, op, in "/") {
         OP_DIV
-    } else if spells(in b, op, in "%") {
+    } else if spells(in builder, op, in "%") {
         OP_MOD
-    } else if spells(in b, op, in "==") {
+    } else if spells(in builder, op, in "==") {
         OP_BOOL_EQ
-    } else if spells(in b, op, in "!=") {
+    } else if spells(in builder, op, in "!=") {
         OP_BOOL_NE
-    } else if spells(in b, op, in "<") {
+    } else if spells(in builder, op, in "<") {
         OP_LT
-    } else if spells(in b, op, in "<=") {
+    } else if spells(in builder, op, in "<=") {
         OP_LE
-    } else if spells(in b, op, in ">") {
+    } else if spells(in builder, op, in ">") {
         OP_GT
-    } else if spells(in b, op, in ">=") {
+    } else if spells(in builder, op, in ">=") {
         OP_GE
-    } else if spells(in b, op, in "&&") {
+    } else if spells(in builder, op, in "&&") {
         OP_BOOL_AND
-    } else if spells(in b, op, in "||") {
+    } else if spells(in builder, op, in "||") {
         OP_BOOL_OR
     } else {
         NONE64
@@ -1013,174 +1041,183 @@ fn arith_code(in b: B, op: u32) -> u64 {
 }
 
 // The signed `%`: `if b == -1 then 0 else a % b`, from the operands' words.
-fn signed_mod(inout b: B, in a: ChunkSeq[u64], in c: ChunkSeq[u64]) {
-    b.w(T_IF);
-    b.binary(OP_BOOL_EQ);
-    b.paste(in c);
-    b.w(T_UNARY);
-    b.w(U_NEG);
-    nat_u64(inout b, 1);
-    nat_u64(inout b, 0);
-    b.binary(OP_MOD);
-    b.paste(in a);
-    b.paste(in c);
+fn signed_mod(inout builder: B, in lhs: ChunkSeq[u64], in rhs: ChunkSeq[u64]) {
+    builder.w(T_IF);
+    builder.binary(OP_BOOL_EQ);
+    builder.paste(in rhs);
+    builder.w(T_UNARY);
+    builder.w(U_NEG);
+    nat_u64(inout builder, 1);
+    nat_u64(inout builder, 0);
+    builder.binary(OP_MOD);
+    builder.paste(in lhs);
+    builder.paste(in rhs);
 }
 
 // `wrapping_intrinsic(op).unwrap_or(op)`.
-fn unwrapped(inout b: B, op: u32) -> u32 {
-    if spells(in b, op, in "wrapping_add") {
-        b.intern(in "+")
-    } else if spells(in b, op, in "wrapping_sub") {
-        b.intern(in "-")
-    } else if spells(in b, op, in "wrapping_mul") {
-        b.intern(in "*")
+fn unwrapped(inout builder: B, op: u32) -> u32 {
+    if spells(in builder, op, in "wrapping_add") {
+        builder.intern(in "+")
+    } else if spells(in builder, op, in "wrapping_sub") {
+        builder.intern(in "-")
+    } else if spells(in builder, op, in "wrapping_mul") {
+        builder.intern(in "*")
     } else {
         op
     }
 }
 
 // Whether `name` has `prefix` and then exactly `rest`.
-fn spells_after(in b: B, name: u32, in prefix: Str, in rest: Str) -> bool {
-    let n = b.names.size(name);
-    let k = prefix.len();
-    if n != add(k, rest.len()) {
+fn spells_after(in builder: B, name: u32, in prefix: Str, in rest: Str) -> bool {
+    let len = builder.names.size(name);
+    let prefix_len = prefix.len();
+    if len != add(prefix_len, rest.len()) {
         return false;
     }
-    let pb = prefix.as_bytes();
-    let rb = rest.as_bytes();
-    for i in 0..n {
-        let want = if i < k {
-            pb.try_get(i).unwrap_or(0)
+    let prefix_bytes = prefix.as_bytes();
+    let rest_bytes = rest.as_bytes();
+    for i in 0..len {
+        let want = if i < prefix_len {
+            prefix_bytes.try_get(i).unwrap_or(0)
         } else {
-            rb.try_get(wrapping_sub(i, k)).unwrap_or(0)
+            rest_bytes.try_get(wrapping_sub(i, prefix_len)).unwrap_or(0)
         };
-        if b.names.byte(name, i) != want {
+        if builder.names.byte(name, i) != want {
             return false;
         }
     }
     true
 }
 
-fn float_kind_after(in b: B, name: u32, in prefix: Str) -> bool {
-    spells_after(in b, name, in prefix, in "f32") || spells_after(in b, name, in prefix, in "f64")
+fn float_kind_after(in builder: B, name: u32, in prefix: Str) -> bool {
+    spells_after(in builder, name, in prefix, in "f32")
+        || spells_after(in builder, name, in prefix, in "f64")
 }
 
-fn integer_kind_after(in b: B, name: u32, in prefix: Str) -> bool {
-    spells_after(in b, name, in prefix, in "u8")
-        || spells_after(in b, name, in prefix, in "u16")
-        || spells_after(in b, name, in prefix, in "u32")
-        || spells_after(in b, name, in prefix, in "u64")
-        || spells_after(in b, name, in prefix, in "usize")
-        || spells_after(in b, name, in prefix, in "i8")
-        || spells_after(in b, name, in prefix, in "i16")
-        || spells_after(in b, name, in prefix, in "i32")
-        || spells_after(in b, name, in prefix, in "i64")
-        || spells_after(in b, name, in prefix, in "isize")
-        || spells_after(in b, name, in prefix, in "i128")
-        || spells_after(in b, name, in prefix, in "u128")
+fn integer_kind_after(in builder: B, name: u32, in prefix: Str) -> bool {
+    spells_after(in builder, name, in prefix, in "u8")
+        || spells_after(in builder, name, in prefix, in "u16")
+        || spells_after(in builder, name, in prefix, in "u32")
+        || spells_after(in builder, name, in prefix, in "u64")
+        || spells_after(in builder, name, in prefix, in "usize")
+        || spells_after(in builder, name, in prefix, in "i8")
+        || spells_after(in builder, name, in prefix, in "i16")
+        || spells_after(in builder, name, in prefix, in "i32")
+        || spells_after(in builder, name, in prefix, in "i64")
+        || spells_after(in builder, name, in prefix, in "isize")
+        || spells_after(in builder, name, in prefix, in "i128")
+        || spells_after(in builder, name, in prefix, in "u128")
 }
 
 // `numeric::float::is_float_intrinsic`.
-fn float_intrinsic(in b: B, name: u32) -> bool {
-    spells(in b, name, in "sqrt")
-        || spells(in b, name, in "abs")
-        || spells(in b, name, in "floor")
-        || spells(in b, name, in "ceil")
-        || spells(in b, name, in "round")
-        || spells(in b, name, in "trunc")
-        || spells(in b, name, in "min")
-        || spells(in b, name, in "max")
-        || spells(in b, name, in "fma")
-        || float_kind_after(in b, name, in "widen_")
-        || float_kind_after(in b, name, in "nearest_")
-        || integer_kind_after(in b, name, in "saturating_")
-        || float_kind_after(in b, name, in "to_bits_")
-        || float_kind_after(in b, name, in "from_bits_")
+fn float_intrinsic(in builder: B, name: u32) -> bool {
+    spells(in builder, name, in "sqrt")
+        || spells(in builder, name, in "abs")
+        || spells(in builder, name, in "floor")
+        || spells(in builder, name, in "ceil")
+        || spells(in builder, name, in "round")
+        || spells(in builder, name, in "trunc")
+        || spells(in builder, name, in "min")
+        || spells(in builder, name, in "max")
+        || spells(in builder, name, in "fma")
+        || float_kind_after(in builder, name, in "widen_")
+        || float_kind_after(in builder, name, in "nearest_")
+        || integer_kind_after(in builder, name, in "saturating_")
+        || float_kind_after(in builder, name, in "to_bits_")
+        || float_kind_after(in builder, name, in "from_bits_")
 }
 
-// Statements of instruction `ins`; returns how many.
-fn instruction(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u64 {
-    let a = ins.a;
-    let op = ins.op;
+// Statements of instruction `inst`; returns how many.
+fn instruction(
+    inout builder: B,
+    inout types: Types,
+    in env: X,
+    in emitter: S,
+    inst: InstRow
+) -> u64 {
+    let operand_at = inst.a;
+    let op = inst.op;
     if op == Op::Bind {
-        b.w(S_LET);
-        b.w(0);
-        pattern(inout b, in t, in x, inc(a));
-        b.w(0);
-        value(inout b, x.p.op(a));
-        let_dest(inout b, in t, in x, ins);
-        unit_tuple(inout b);
-        let_dest_end(inout b, in t, in x, ins);
+        builder.w(S_LET);
+        builder.w(0);
+        pattern(inout builder, in types, in env, inc(operand_at));
+        builder.w(0);
+        value(inout builder, env.program.op(operand_at));
+        let_dest(inout builder, in types, in env, inst);
+        unit_tuple(inout builder);
+        let_dest_end(inout builder, in types, in env, inst);
         return 2;
     }
     if op == Op::Write {
         let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        let root = split_place(inout b, n32(x.p.op(a)), inout path);
-        let o = n32(x.p.op(inc(a)));
-        let v = x.p.op(add(a, 2));
-        let mark = b.slice_len();
-        if spells(in b, o, in "=") {
-            value(inout b, v);
+        let root = split_place(inout builder, n32(env.program.op(operand_at)), inout path);
+        let op_sym = n32(env.program.op(inc(operand_at)));
+        let value_id = env.program.op(add(operand_at, 2));
+        let mark = builder.slice_len();
+        if spells(in builder, op_sym, in "=") {
+            value(inout builder, value_id);
         } else {
-            let n = b.names.size(o);
-            if n == 0 || b.names.byte(o, wrapping_sub(n, 1)) != 61 {
-                b.fail(in "invalid Lean compound operator");
-                unit_tuple(inout b);
+            let op_len = builder.names.size(op_sym);
+            if op_len == 0 || builder.names.byte(op_sym, wrapping_sub(op_len, 1)) != 61 {
+                builder.fail(in "invalid Lean compound operator");
+                unit_tuple(inout builder);
             } else {
                 let mut stripped: ChunkSeq[u8] = ChunkSeq::new[u8]();
-                for i in 0..wrapping_sub(n, 1) {
-                    stripped.push(b.names.byte(o, i));
+                for i in 0..wrapping_sub(op_len, 1) {
+                    stripped.push(builder.names.byte(op_sym, i));
                 }
-                let so = b.names.intern(in stripped.as_slice());
-                let signed = signed_kind(in b, in t, s.f.value_ty(v));
-                let base_mark = b.slice_len();
-                project_ref(inout b, in t, root, in path, s.f.local_ty(root));
-                let lhs = b.cut(base_mark);
-                let vm = b.slice_len();
-                value(inout b, v);
-                let rhs = b.cut(vm);
-                let how = arith_prefix(inout b, so, signed);
+                let stripped_sym = builder.names.intern(in stripped.as_slice());
+                let signed = signed_kind(in builder, in types, emitter.func.value_ty(value_id));
+                let base_mark = builder.slice_len();
+                project_ref(inout builder, in types, root, in path, emitter.func.local_ty(root));
+                let lhs = builder.cut(base_mark);
+                let value_mark = builder.slice_len();
+                value(inout builder, value_id);
+                let rhs = builder.cut(value_mark);
+                let how = arith_prefix(inout builder, stripped_sym, signed);
                 if how == 0 {
-                    b.paste(in lhs);
-                    b.paste(in rhs);
+                    builder.paste(in lhs);
+                    builder.paste(in rhs);
                 } else if how == 1 {
-                    signed_mod(inout b, in lhs, in rhs);
+                    signed_mod(inout builder, in lhs, in rhs);
                 }
             }
         }
-        let new = b.cut(mark);
-        let_update(inout b, inout t, in x, in s.f, root, in path, in new);
-        let_dest(inout b, in t, in x, ins);
-        unit_tuple(inout b);
-        let_dest_end(inout b, in t, in x, ins);
+        let new = builder.cut(mark);
+        let_update(inout builder, inout types, in env, in emitter.func, root, in path, in new);
+        let_dest(inout builder, in types, in env, inst);
+        unit_tuple(inout builder);
+        let_dest_end(inout builder, in types, in env, inst);
         return 2;
     }
     if op == Op::Indirect {
-        return indirect(inout b, inout t, in x, in s, ins);
+        return indirect(inout builder, inout types, in env, in emitter, inst);
     }
     if op == Op::Call {
-        return call(inout b, inout t, in x, in s, ins);
+        return call(inout builder, inout types, in env, in emitter, inst);
     }
     if op == Op::Tiled {
-        return tiled(inout b, inout t, in x, in s, ins);
+        return tiled(inout builder, inout types, in env, in emitter, inst);
     }
-    if (op == Op::Unary || op == Op::Binary) && float_intrinsic(in b, n32(x.p.op(a))) {
+    if (op == Op::Unary || op == Op::Binary)
+        && float_intrinsic(in builder, n32(env.program.op(operand_at)))
+    {
         // float_math::lean_refusal
-        let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        put(inout m, in "Lean extraction does not model the float intrinsic '");
-        b.names.write(n32(x.p.op(a)), inout m);
+        let mut message: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put(inout message, in "Lean extraction does not model the float intrinsic '");
+        builder.names.write(n32(env.program.op(operand_at)), inout message);
         put(
-            inout m,
+            inout message,
             in "' yet (vesper.float.ieee754/1: only + - * /, negation and comparisons of f32 and f64 are modeled)"
         );
-        if !b.failed {
-            b.failed = true;
-            b.err = m;
+        if !builder.failed {
+            builder.failed = true;
+            builder.err = message;
         }
         return 0;
     }
     if op == Op::Loop || op == Op::Exit {
-        b.fail(in LOOP_REFUSAL);
+        builder.fail(in LOOP_REFUSAL);
         return 0;
     }
     if !(op == Op::Const
@@ -1194,368 +1231,388 @@ fn instruction(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u6
         || op == Op::Project
         || op == Op::Fip)
     {
-        b.fail(in "unsupported operation in Lean CFG extraction");
+        builder.fail(in "unsupported operation in Lean CFG extraction");
         return 0;
     }
     if op == Op::Closure {
         // The binders' types and the lifted name are checked after the
         // arguments.
-        let_dest(inout b, in t, in x, ins);
-        closure(inout b, in t, in x, in s, ins);
-        let_dest_end(inout b, in t, in x, ins);
+        let_dest(inout builder, in types, in env, inst);
+        closure(inout builder, in types, in env, in emitter, inst);
+        let_dest_end(inout builder, in types, in env, inst);
         return 1;
     }
-    let_dest(inout b, in t, in x, ins);
+    let_dest(inout builder, in types, in env, inst);
     if op == Op::Const {
-        b.w(T_ASCRIBE);
-        literal(inout b, in t, in x, a, ins.ty);
-        typ(inout b, in t, in x, ins.ty);
+        builder.w(T_ASCRIBE);
+        literal(inout builder, in types, in env, operand_at, inst.ty);
+        typ(inout builder, in types, in env, inst.ty);
     } else if op == Op::Unit {
-        unit_tuple(inout b);
+        unit_tuple(inout builder);
     } else if op == Op::Read {
-        let root = n32(x.p.op(a));
-        let callee = x.fx.find(root);
-        if callee != NONE32 && s.f.slot_bit(root) == NONE64 {
-            if x.fx.sig(w(callee)).pn == 0 {
-                b.w(T_FUN);
-                b.w(1);
-                b.w(B_EXPLICIT);
-                b.w(0);
-                b.global(in "Unit");
-                b.sref(root);
+        let root = n32(env.program.op(operand_at));
+        let callee = env.fns.find(root);
+        if callee != NONE32 && emitter.func.slot_bit(root) == NONE64 {
+            if env.fns.sig(w(callee)).param_count == 0 {
+                builder.w(T_FUN);
+                builder.w(1);
+                builder.w(B_EXPLICIT);
+                builder.w(0);
+                builder.global(in "Unit");
+                builder.sref(root);
             } else {
-                b.sref(root);
+                builder.sref(root);
             }
         } else {
-            let path = ir_path(in x.p, x.p.op(inc(a)));
-            project_ref(inout b, in t, root, in path, s.f.local_ty(root));
+            let path = ir_path(in env.program, env.program.op(inc(operand_at)));
+            project_ref(inout builder, in types, root, in path, emitter.func.local_ty(root));
         }
     } else if op == Op::Unary {
-        let o = n32(x.p.op(a));
-        if spells(in b, o, in "-") || spells(in b, o, in "!") {
-            b.w(T_UNARY);
-            b.w(
-                if spells(in b, o, in "-") {
+        let op_sym = n32(env.program.op(operand_at));
+        if spells(in builder, op_sym, in "-") || spells(in builder, op_sym, in "!") {
+            builder.w(T_UNARY);
+            builder.w(
+                if spells(in builder, op_sym, in "-") {
                     U_NEG
                 } else {
                     U_BOOL_NOT
                 }
             );
-            value(inout b, x.p.op(inc(a)));
+            value(inout builder, env.program.op(inc(operand_at)));
         } else {
-            let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
-            put(inout m, in "unsupported Lean unary operator ");
-            b.names.write(o, inout m);
-            if !b.failed {
-                b.failed = true;
-                b.err = m;
+            let mut message: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            put(inout message, in "unsupported Lean unary operator ");
+            builder.names.write(op_sym, inout message);
+            if !builder.failed {
+                builder.failed = true;
+                builder.err = message;
             }
-            unit_tuple(inout b);
+            unit_tuple(inout builder);
         }
     } else if op == Op::Binary {
-        let o = unwrapped(inout b, n32(x.p.op(a)));
-        let va = x.p.op(inc(a));
-        let vb = x.p.op(add(a, 2));
+        let op_sym = unwrapped(inout builder, n32(env.program.op(operand_at)));
+        let left_value = env.program.op(inc(operand_at));
+        let right_value = env.program.op(add(operand_at, 2));
         let mut cmp = NONE64;
-        if spells(in b, o, in "<") {
+        if spells(in builder, op_sym, in "<") {
             cmp = OP_LT;
-        } else if spells(in b, o, in "<=") {
+        } else if spells(in builder, op_sym, in "<=") {
             cmp = OP_LE;
-        } else if spells(in b, o, in ">") {
+        } else if spells(in builder, op_sym, in ">") {
             cmp = OP_GT;
-        } else if spells(in b, o, in ">=") {
+        } else if spells(in builder, op_sym, in ">=") {
             cmp = OP_GE;
         }
         if cmp != NONE64 {
-            global_app(inout b, in "Decidable", in "decide");
-            b.binary(cmp);
-            value(inout b, va);
-            value(inout b, vb);
+            global_app(inout builder, in "Decidable", in "decide");
+            builder.binary(cmp);
+            value(inout builder, left_value);
+            value(inout builder, right_value);
         } else {
-            let signed = signed_kind(in b, in t, s.f.value_ty(va));
-            let how = arith_prefix(inout b, o, signed);
+            let signed = signed_kind(in builder, in types, emitter.func.value_ty(left_value));
+            let how = arith_prefix(inout builder, op_sym, signed);
             if how == 0 {
-                value(inout b, va);
-                value(inout b, vb);
+                value(inout builder, left_value);
+                value(inout builder, right_value);
             } else if how == 1 {
-                let m1 = b.slice_len();
-                value(inout b, va);
-                let lhs = b.cut(m1);
-                value(inout b, vb);
-                let rhs = b.cut(m1);
-                signed_mod(inout b, in lhs, in rhs);
+                let operand_mark = builder.slice_len();
+                value(inout builder, left_value);
+                let lhs = builder.cut(operand_mark);
+                value(inout builder, right_value);
+                let rhs = builder.cut(operand_mark);
+                signed_mod(inout builder, in lhs, in rhs);
             }
         }
     } else if op == Op::Tuple {
-        let n = x.p.op(a);
-        if n != 1 {
-            b.w(T_TUPLE);
-            b.w(n);
+        let count = env.program.op(operand_at);
+        if count != 1 {
+            builder.w(T_TUPLE);
+            builder.w(count);
         }
-        for k in 0..n {
-            value(inout b, x.p.op(add(inc(a), k)));
+        for k in 0..count {
+            value(inout builder, env.program.op(add(inc(operand_at), k)));
         }
     } else if op == Op::Data {
-        let c = lookup_constructor(inout b, in x.wd, n32(x.p.op(a)));
-        if c == NONE64 {
-            b.fail(in "unknown Lean data");
-            unit_tuple(inout b);
+        let ctor = lookup_constructor(inout builder, in env.world, n32(env.program.op(operand_at)));
+        if ctor == NONE64 {
+            builder.fail(in "unknown Lean data");
+            unit_tuple(inout builder);
         } else {
-            let v = variant_of(in x.wd, c);
-            let m = b.app(w(v.fc));
-            b.w(T_REF);
-            b.quiet = inc(b.quiet);
-            constructor_name(inout b, in x.wd, c);
-            b.quiet = wrapping_sub(b.quiet, 1);
-            b.args(m);
-            let nf = x.p.op(inc(a));
-            for fi in 0..w(v.fc) {
-                let field = x.wd.field(add(w(v.fa), fi)).name;
-                b.arg();
+            let variant = variant_of(in env.world, ctor);
+            let mark = builder.app(w(variant.fc));
+            builder.w(T_REF);
+            builder.quiet = inc(builder.quiet);
+            constructor_name(inout builder, in env.world, ctor);
+            builder.quiet = wrapping_sub(builder.quiet, 1);
+            builder.args(mark);
+            let field_count = env.program.op(inc(operand_at));
+            for field_index in 0..w(variant.fc) {
+                let field = env.world.field(add(w(variant.fa), field_index)).name;
+                builder.arg();
                 let mut found = false;
-                for k in 0..nf {
-                    let at = add(a, add(2, wrapping_mul(k, 2)));
-                    if !found && n32(x.p.op(at)) == field {
-                        value(inout b, x.p.op(inc(at)));
+                for k in 0..field_count {
+                    let at = add(operand_at, add(2, wrapping_mul(k, 2)));
+                    if !found && n32(env.program.op(at)) == field {
+                        value(inout builder, env.program.op(inc(at)));
                         found = true;
                     }
                 }
                 if !found {
-                    b.fail(in "missing Lean field");
-                    unit_tuple(inout b);
+                    builder.fail(in "missing Lean field");
+                    unit_tuple(inout builder);
                 }
             }
-            constructor_check(inout b, in x.wd, c);
+            constructor_check(inout builder, in env.world, ctor);
         }
     } else if op == Op::Project {
-        let v = x.p.op(a);
+        let value_id = env.program.op(operand_at);
         let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        path.push(n32(x.p.op(inc(a))));
-        project_value(inout b, in t, v, in path, s.f.value_ty(v));
+        path.push(n32(env.program.op(inc(operand_at))));
+        project_value(inout builder, in types, value_id, in path, emitter.func.value_ty(value_id));
     } else if op == Op::Fip {
-        let args = inc(a);
-        if x.p.op(args) != 1 {
-            b.fail(in "Box op expects 1 argument");
-            unit_tuple(inout b);
+        let args = inc(operand_at);
+        if env.program.op(args) != 1 {
+            builder.fail(in "Box op expects 1 argument");
+            unit_tuple(inout builder);
         } else {
-            value(inout b, x.p.op(inc(arg_at(args, 0))));
+            value(inout builder, env.program.op(inc(arg_at(args, 0))));
         }
     }
-    let_dest_end(inout b, in t, in x, ins);
+    let_dest_end(inout builder, in types, in env, inst);
     1
 }
 
 // `Op::Closure`: `fun $arg0 .. => $lambda_f_d (T := T).. captures.. $arg0..`.
-fn closure(inout b: B, in t: Types, in x: X, in s: S, ins: InstRow) {
-    let ci = x.fx.closure(s.f.row.name, w(ins.dest));
-    let row = x.fx.closure_at(w(ci));
-    let ty = ins.ty;
-    let np = t.arity(ty);
-    b.w(T_FUN);
-    if np == 0 {
-        b.w(1);
-        b.w(B_EXPLICIT);
-        b.w(0);
-        b.global(in "Unit");
+fn closure(inout builder: B, in types: Types, in env: X, in emitter: S, inst: InstRow) {
+    let closure_index = env.fns.closure(emitter.func.row.name, w(inst.dest));
+    let row = env.fns.closure_at(w(closure_index));
+    let ty = inst.ty;
+    let param_count = types.arity(ty);
+    builder.w(T_FUN);
+    if param_count == 0 {
+        builder.w(1);
+        builder.w(B_EXPLICIT);
+        builder.w(0);
+        builder.global(in "Unit");
     } else {
-        b.w(np);
-        for k in 0..np {
-            b.w(B_EXPLICIT);
-            b.w(1);
-            let a = b.numbered(in "$arg", k);
-            b.ident(a);
-            emit_ty(inout b, in t, t.arg(ty, k), x.fip);
+        builder.w(param_count);
+        for k in 0..param_count {
+            builder.w(B_EXPLICIT);
+            builder.w(1);
+            let arg_sym = builder.numbered(in "$arg", k);
+            builder.ident(arg_sym);
+            emit_ty(inout builder, in types, types.arg(ty, k), env.fip);
         }
     }
-    let n = add(add(generic_count(in x, s.sig), row.n), np);
-    let m = b.app(n);
-    b.quiet = inc(b.quiet);
-    b.sref(row.lifted);
-    b.quiet = wrapping_sub(b.quiet, 1);
-    b.args(m);
-    generic_args(inout b, in x, s.sig);
+    let arity = add(add(generic_count(in env, emitter.sig), row.n), param_count);
+    let mark = builder.app(arity);
+    builder.quiet = inc(builder.quiet);
+    builder.sref(row.lifted);
+    builder.quiet = wrapping_sub(builder.quiet, 1);
+    builder.args(mark);
+    generic_args(inout builder, in env, emitter.sig);
     for k in 0..row.n {
-        b.arg();
-        b.sref(x.fx.capture(row, k));
+        builder.arg();
+        builder.sref(env.fns.capture(row, k));
     }
-    for k in 0..np {
-        b.arg();
-        let a = b.numbered(in "$arg", k);
-        b.sref(a);
+    for k in 0..param_count {
+        builder.arg();
+        let arg_sym = builder.numbered(in "$arg", k);
+        builder.sref(arg_sym);
     }
-    for k in 0..np {
-        ty_check(inout b, in t, t.arg(ty, k), x.fip);
+    for k in 0..param_count {
+        ty_check(inout builder, in types, types.arg(ty, k), env.fip);
     }
-    b.check(row.lifted, in "name");
+    builder.check(row.lifted, in "name");
 }
 
 // The `let ($value{d}, $state{d}_0, ..) := call` of a call with states.
-fn let_states(inout b: B, dest: u64, n: u64) {
-    b.w(S_LET);
-    b.w(0);
-    b.w(P_TUPLE);
-    b.w(inc(n));
-    b.w(P_BIND);
-    let v = b.numbered(in "$value", dest);
-    b.ident(v);
-    for k in 0..n {
-        b.w(P_BIND);
-        let st = state_sym(inout b, dest, k);
-        b.ident(st);
+fn let_states(inout builder: B, dest: u64, state_count: u64) {
+    builder.w(S_LET);
+    builder.w(0);
+    builder.w(P_TUPLE);
+    builder.w(inc(state_count));
+    builder.w(P_BIND);
+    let value_name = builder.numbered(in "$value", dest);
+    builder.ident(value_name);
+    for k in 0..state_count {
+        builder.w(P_BIND);
+        let state_name = state_sym(inout builder, dest, k);
+        builder.ident(state_name);
     }
-    b.w(0);
+    builder.w(0);
 }
 
 // `$state{d}_{k}`.
-fn state_sym(inout b: B, dest: u64, k: u64) -> u32 {
-    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    put(inout o, in "$state");
-    put_decimal(inout o, dest);
-    put(inout o, in "_");
-    put_decimal(inout o, k);
-    b.names.intern(in o.as_slice())
+fn state_sym(inout builder: B, dest: u64, k: u64) -> u32 {
+    let mut spelling: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put(inout spelling, in "$state");
+    put_decimal(inout spelling, dest);
+    put(inout spelling, in "_");
+    put_decimal(inout spelling, k);
+    builder.names.intern(in spelling.as_slice())
 }
 
 // `Op::Indirect`.
-fn indirect(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u64 {
-    let a = ins.a;
-    let args = inc(a);
-    let n = x.p.op(args);
+fn indirect(inout builder: B, inout types: Types, in env: X, in emitter: S, inst: InstRow) -> u64 {
+    let operand_at = inst.a;
+    let args = inc(operand_at);
+    let arg_count = env.program.op(args);
     let mut states: u64 = 0;
-    for k in 0..n {
-        if x.p.op(arg_at(args, k)) == TyPass::Inout {
+    for k in 0..arg_count {
+        if env.program.op(arg_at(args, k)) == TyPass::Inout {
             states = inc(states);
         }
     }
-    let mark = b.slice_len();
+    let mark = builder.slice_len();
     if states == 0 {
-        let_dest(inout b, in t, in x, ins);
+        let_dest(inout builder, in types, in env, inst);
     } else {
-        let_states(inout b, w(ins.dest), states);
+        let_states(inout builder, w(inst.dest), states);
     }
-    let m = b.app(if n == 0 { 1 } else { n });
-    value(inout b, x.p.op(a));
-    b.args(m);
-    if n == 0 {
-        b.arg();
-        unit_tuple(inout b);
+    let app_mark = builder.app(if arg_count == 0 { 1 } else { arg_count });
+    value(inout builder, env.program.op(operand_at));
+    builder.args(app_mark);
+    if arg_count == 0 {
+        builder.arg();
+        unit_tuple(inout builder);
     }
-    for k in 0..n {
-        b.arg();
-        value(inout b, x.p.op(inc(arg_at(args, k))));
+    for k in 0..arg_count {
+        builder.arg();
+        value(inout builder, env.program.op(inc(arg_at(args, k))));
     }
     if states == 0 {
-        let_dest_end(inout b, in t, in x, ins);
+        let_dest_end(inout builder, in types, in env, inst);
         return 1;
     }
     let mut count: u64 = 1;
-    let mut si: u64 = 0;
-    for k in 0..n {
+    let mut state_index: u64 = 0;
+    for k in 0..arg_count {
         let at = arg_at(args, k);
-        if x.p.op(at) == TyPass::Inout {
-            let root = x.p.op(add(at, 2));
+        if env.program.op(at) == TyPass::Inout {
+            let root = env.program.op(add(at, 2));
             if root == 0 {
-                b.fail(in "mutable indirect argument requires place");
+                builder.fail(in "mutable indirect argument requires place");
                 return count;
             }
-            let rs = n32(wrapping_sub(root, 1));
-            let path = ir_path(in x.p, x.p.op(add(at, 3)));
-            let vm = b.slice_len();
-            let st = state_sym(inout b, w(ins.dest), si);
-            b.sref(st);
-            let new = b.cut(vm);
-            let_update(inout b, inout t, in x, in s.f, rs, in path, in new);
+            let root_sym = n32(wrapping_sub(root, 1));
+            let path = ir_path(in env.program, env.program.op(add(at, 3)));
+            let state_mark = builder.slice_len();
+            let state_name = state_sym(inout builder, w(inst.dest), state_index);
+            builder.sref(state_name);
+            let new = builder.cut(state_mark);
+            let_update(
+                inout builder,
+                inout types,
+                in env,
+                in emitter.func,
+                root_sym,
+                in path,
+                in new
+            );
             count = inc(count);
-            si = inc(si);
+            state_index = inc(state_index);
         }
     }
     count
 }
 
 // `Op::Call`.
-fn call(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u64 {
-    let a = ins.a;
-    let callee = n32(x.p.op(a));
-    let args = inc(a);
-    let n = x.p.op(args);
-    let ci = x.fx.find(callee);
-    let sig = x.fx.sig(w(ci));
-    let call_row = x.fx.call(ins.s0, ins.s1);
+fn call(inout builder: B, inout types: Types, in env: X, in emitter: S, inst: InstRow) -> u64 {
+    let operand_at = inst.a;
+    let callee = n32(env.program.op(operand_at));
+    let args = inc(operand_at);
+    let arg_count = env.program.op(args);
+    let sig_index = env.fns.find(callee);
+    let sig = env.fns.sig(w(sig_index));
+    let call_row = env.fns.call(inst.s0, inst.s1);
     // call_states: the inout parameters zipped with the arguments
     let mut states: u64 = 0;
-    for k in 0..n {
-        if k < sig.pn && widen_u64(x.fx.param(sig, k).pass) == TyPass::Inout {
+    for k in 0..arg_count {
+        if k < sig.param_count && widen_u64(env.fns.param(sig, k).pass) == TyPass::Inout {
             states = inc(states);
         }
     }
     if states == 0 {
-        let_dest(inout b, in t, in x, ins);
+        let_dest(inout builder, in types, in env, inst);
     } else {
-        let_states(inout b, w(ins.dest), states);
+        let_states(inout builder, w(inst.dest), states);
     }
-    let mut named: u64 = 0;
+    let mut named_count: u64 = 0;
     for i in 0..sig.gn {
-        let g = x.fx.generic(sig, i);
-        if !g.row && x.fx.call_var(call_row, g.name) != NONE32 {
-            named = inc(named);
+        let generic = env.fns.generic(sig, i);
+        if !generic.row && env.fns.call_var(call_row, generic.name) != NONE32 {
+            named_count = inc(named_count);
         }
     }
-    let m = b.app(add(named, n));
-    b.quiet = inc(b.quiet);
-    b.sref(callee);
-    b.quiet = wrapping_sub(b.quiet, 1);
-    b.args(m);
+    let mark = builder.app(add(named_count, arg_count));
+    builder.quiet = inc(builder.quiet);
+    builder.sref(callee);
+    builder.quiet = wrapping_sub(builder.quiet, 1);
+    builder.args(mark);
     for i in 0..sig.gn {
-        let g = x.fx.generic(sig, i);
-        let vt = x.fx.call_var(call_row, g.name);
-        if !g.row && vt != NONE32 {
-            b.w(1);
-            b.ident(g.name);
-            typ(inout b, in t, in x, vt);
+        let generic = env.fns.generic(sig, i);
+        let var_ty = env.fns.call_var(call_row, generic.name);
+        if !generic.row && var_ty != NONE32 {
+            builder.w(1);
+            builder.ident(generic.name);
+            typ(inout builder, in types, in env, var_ty);
         }
     }
-    for k in 0..n {
-        b.arg();
-        value(inout b, x.p.op(inc(arg_at(args, k))));
+    for k in 0..arg_count {
+        builder.arg();
+        value(inout builder, env.program.op(inc(arg_at(args, k))));
     }
-    b.check(callee, in "name");
+    builder.check(callee, in "name");
     if states == 0 {
-        let_dest_end(inout b, in t, in x, ins);
+        let_dest_end(inout builder, in types, in env, inst);
         return 1;
     }
     let mut count: u64 = 1;
-    let mut si: u64 = 0;
-    for k in 0..n {
-        if k < sig.pn && widen_u64(x.fx.param(sig, k).pass) == TyPass::Inout {
-            let q = x.fx.param(sig, k);
+    let mut state_index: u64 = 0;
+    for k in 0..arg_count {
+        if k < sig.param_count && widen_u64(env.fns.param(sig, k).pass) == TyPass::Inout {
+            let param = env.fns.param(sig, k);
             let at = arg_at(args, k);
-            let root = x.p.op(add(at, 2));
+            let root = env.program.op(add(at, 2));
             if root == 0 {
-                b.fail(in "mutable Lean argument requires a place");
+                builder.fail(in "mutable Lean argument requires a place");
                 return count;
             }
-            let rs = n32(wrapping_sub(root, 1));
-            let st = state_sym(inout b, w(ins.dest), si);
-            let paths = if q.qn == 0 { 1 } else { q.qn };
-            for pi in 0..paths {
+            let root_sym = n32(wrapping_sub(root, 1));
+            let state_name = state_sym(inout builder, w(inst.dest), state_index);
+            let path_count = if param.proj_count == 0 {
+                1
+            } else {
+                param.proj_count
+            };
+            for path_index in 0..path_count {
                 let mut sub: ChunkSeq[u32] = ChunkSeq::new[u32]();
-                if q.qn > 0 {
-                    let pr = x.fx.path(add(q.qa, pi));
-                    for j in 0..pr.n {
-                        sub.push(x.fx.path_sym(pr, j));
+                if param.proj_count > 0 {
+                    let proj_path = env.fns.path(add(param.proj_start, path_index));
+                    for j in 0..proj_path.n {
+                        sub.push(env.fns.path_sym(proj_path, j));
                     }
                 }
-                let vm = b.slice_len();
-                project_ref(inout b, in t, st, in sub, q.ty);
-                let new = b.cut(vm);
-                let mut full = ir_path(in x.p, x.p.op(add(at, 3)));
+                let state_mark = builder.slice_len();
+                project_ref(inout builder, in types, state_name, in sub, param.ty);
+                let new = builder.cut(state_mark);
+                let mut full = ir_path(in env.program, env.program.op(add(at, 3)));
                 for j in 0..sub.len() {
                     full.push(u32_at(in sub, j));
                 }
-                let_update(inout b, inout t, in x, in s.f, rs, in full, in new);
+                let_update(
+                    inout builder,
+                    inout types,
+                    in env,
+                    in emitter.func,
+                    root_sym,
+                    in full,
+                    in new
+                );
                 count = inc(count);
             }
-            si = inc(si);
+            state_index = inc(state_index);
         }
     }
     count
@@ -1563,41 +1620,41 @@ fn call(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u64 {
 
 // The tiled operation of pool entry `i`, from its `Debug` text: its kind
 // symbol's prefix up to the first space.
-fn tiled_kind(in b: B, in x: X, label: u32, in name: Str) -> bool {
-    let n = b.names.size(label);
-    let k = name.len();
-    if n < k {
+fn tiled_kind(in builder: B, in env: X, label: u32, in name: Str) -> bool {
+    let label_len = builder.names.size(label);
+    let name_len = name.len();
+    if label_len < name_len {
         return false;
     }
     let bytes = name.as_bytes();
-    for i in 0..k {
+    for i in 0..name_len {
         match bytes.try_get(i) {
-            Option::Some(c) => {
-                if b.names.byte(label, i) != c {
+            Option::Some(byte) => {
+                if builder.names.byte(label, i) != byte {
                     return false;
                 }
             },
             Option::None => {},
         }
     }
-    n == k || b.names.byte(label, k) == 32
+    label_len == name_len || builder.names.byte(label, name_len) == 32
 }
 
 // The text after `key` up to the next `"` (a field name) in the label.
-fn label_field(inout b: B, label: u32, in key: Str) -> u32 {
-    let n = b.names.size(label);
-    let kb = key.as_bytes();
-    let k = key.len();
+fn label_field(inout builder: B, label: u32, in key: Str) -> u32 {
+    let label_len = builder.names.size(label);
+    let key_bytes = key.as_bytes();
+    let key_len = key.len();
     let mut i: u64 = 0;
     loop {
-        if add(i, k) > n {
+        if add(i, key_len) > label_len {
             return NONE32;
         }
         let mut hit = true;
-        for j in 0..k {
-            match kb.try_get(j) {
-                Option::Some(c) => {
-                    if b.names.byte(label, add(i, j)) != c {
+        for j in 0..key_len {
+            match key_bytes.try_get(j) {
+                Option::Some(byte) => {
+                    if builder.names.byte(label, add(i, j)) != byte {
                         hit = false;
                     }
                 },
@@ -1609,32 +1666,32 @@ fn label_field(inout b: B, label: u32, in key: Str) -> u32 {
         }
         i = inc(i);
     }
-    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let mut j = add(i, k);
+    let mut spelling: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut j = add(i, key_len);
     loop {
-        if j >= n || b.names.byte(label, j) == 34 {
+        if j >= label_len || builder.names.byte(label, j) == 34 {
             break;
         }
-        o.push(b.names.byte(label, j));
+        spelling.push(builder.names.byte(label, j));
         j = inc(j);
     }
-    b.names.intern(in o.as_slice())
+    builder.names.intern(in spelling.as_slice())
 }
 
-fn label_number(in b: B, label: u32, in key: Str) -> u64 {
-    let n = b.names.size(label);
-    let kb = key.as_bytes();
-    let k = key.len();
+fn label_number(in builder: B, label: u32, in key: Str) -> u64 {
+    let label_len = builder.names.size(label);
+    let key_bytes = key.as_bytes();
+    let key_len = key.len();
     let mut i: u64 = 0;
     loop {
-        if add(i, k) > n {
+        if add(i, key_len) > label_len {
             return 0;
         }
         let mut hit = true;
-        for j in 0..k {
-            match kb.try_get(j) {
-                Option::Some(c) => {
-                    if b.names.byte(label, add(i, j)) != c {
+        for j in 0..key_len {
+            match key_bytes.try_get(j) {
+                Option::Some(byte) => {
+                    if builder.names.byte(label, add(i, j)) != byte {
                         hit = false;
                     }
                 },
@@ -1646,310 +1703,331 @@ fn label_number(in b: B, label: u32, in key: Str) -> u64 {
         }
         i = inc(i);
     }
-    let mut v: u64 = 0;
-    let mut j = add(i, k);
+    let mut value: u64 = 0;
+    let mut j = add(i, key_len);
     loop {
-        if j >= n {
+        if j >= label_len {
             break;
         }
-        let c = b.names.byte(label, j);
-        if c < 48 || c > 57 {
+        let byte = builder.names.byte(label, j);
+        if byte < 48 || byte > 57 {
             break;
         }
-        v = wrapping_add(wrapping_mul(v, 10), widen_u64(wrapping_sub(c, 48)));
+        value = wrapping_add(wrapping_mul(value, 10), widen_u64(wrapping_sub(byte, 48)));
         j = inc(j);
     }
-    v
+    value
 }
 
 // `getElem! a0 a1.toNat`.
-fn get_elem(inout b: B, in x: X, args: u64) {
-    let m = global_app2(inout b, in "GetElem?", in "getElem!");
-    b.arg();
-    value(inout b, x.p.op(inc(arg_at(args, 0))));
-    b.arg();
-    to_nat_of_value(inout b, x.p.op(inc(arg_at(args, 1))));
+fn get_elem(inout builder: B, in env: X, args: u64) {
+    let mark = global_app2(inout builder, in "GetElem?", in "getElem!");
+    builder.arg();
+    value(inout builder, env.program.op(inc(arg_at(args, 0))));
+    builder.arg();
+    to_nat_of_value(inout builder, env.program.op(inc(arg_at(args, 1))));
 }
 
 // The term of `tiled_op_term` for the operation with `Debug` text `label`.
-fn tiled_term(inout b: B, in x: X, label: u32, args: u64) {
-    let v0 = x.p.op(inc(arg_at(args, 0)));
-    if tiled_kind(in b, in x, label, in "New") {
-        global_app(inout b, in "Array", in "emptyWithCapacity");
-        nat_u64(inout b, 0);
-    } else if tiled_kind(in b, in x, label, in "WithCapacity")
-        || tiled_kind(in b, in x, label, in "WithRegion")
+fn tiled_term(inout builder: B, in env: X, label: u32, args: u64) {
+    let first_value = env.program.op(inc(arg_at(args, 0)));
+    if tiled_kind(in builder, in env, label, in "New") {
+        global_app(inout builder, in "Array", in "emptyWithCapacity");
+        nat_u64(inout builder, 0);
+    } else if tiled_kind(in builder, in env, label, in "WithCapacity")
+        || tiled_kind(in builder, in env, label, in "WithRegion")
     {
-        global_app(inout b, in "Array", in "emptyWithCapacity");
-        to_nat_of_value(inout b, v0);
-    } else if tiled_kind(in b, in x, label, in "Len") {
-        global_app(inout b, in "Nat", in "toUInt64");
-        global_app(inout b, in "Array", in "size");
-        value(inout b, v0);
-    } else if tiled_kind(in b, in x, label, in "TileCount") {
-        let tw = label_number(in b, label, in "tile_width: ");
-        global_app(inout b, in "Nat", in "toUInt64");
-        b.binary(OP_DIV);
-        b.binary(OP_ADD);
-        global_app(inout b, in "Array", in "size");
-        value(inout b, v0);
-        nat_u64(inout b, wrapping_sub(tw, 1));
-        nat_u64(inout b, tw);
-    } else if tiled_kind(in b, in x, label, in "Get") {
-        get_elem(inout b, in x, args);
-    } else if tiled_kind(in b, in x, label, in "ColGet") {
-        let field = label_field(inout b, label, in "field: \"");
-        b.w(T_PROJECT);
-        get_elem(inout b, in x, args);
-        b.w(0);
-        b.ident(field);
-    } else if tiled_kind(in b, in x, label, in "Push") {
-        let m = global_app2(inout b, in "Array", in "push");
-        b.arg();
-        value(inout b, v0);
-        b.arg();
-        value(inout b, x.p.op(inc(arg_at(args, 1))));
-    } else if tiled_kind(in b, in x, label, in "Set") {
-        let m = b.app(3);
-        b.global2(in "Array", in "setIfInBounds");
-        b.args(m);
-        b.arg();
-        value(inout b, v0);
-        b.arg();
-        to_nat_of_value(inout b, x.p.op(inc(arg_at(args, 1))));
-        b.arg();
-        value(inout b, x.p.op(inc(arg_at(args, 2))));
-    } else if tiled_kind(in b, in x, label, in "ColSet") {
-        let field = label_field(inout b, label, in "field: \"");
-        let m = b.app(3);
-        b.global2(in "Array", in "setIfInBounds");
-        b.args(m);
-        b.arg();
-        value(inout b, v0);
-        b.arg();
-        to_nat_of_value(inout b, x.p.op(inc(arg_at(args, 1))));
-        b.arg();
-        b.w(T_UPDATE);
-        b.w(1);
-        get_elem(inout b, in x, args);
-        b.ident(field);
-        value(inout b, x.p.op(inc(arg_at(args, 2))));
+        global_app(inout builder, in "Array", in "emptyWithCapacity");
+        to_nat_of_value(inout builder, first_value);
+    } else if tiled_kind(in builder, in env, label, in "Len") {
+        global_app(inout builder, in "Nat", in "toUInt64");
+        global_app(inout builder, in "Array", in "size");
+        value(inout builder, first_value);
+    } else if tiled_kind(in builder, in env, label, in "TileCount") {
+        let tile_width = label_number(in builder, label, in "tile_width: ");
+        global_app(inout builder, in "Nat", in "toUInt64");
+        builder.binary(OP_DIV);
+        builder.binary(OP_ADD);
+        global_app(inout builder, in "Array", in "size");
+        value(inout builder, first_value);
+        nat_u64(inout builder, wrapping_sub(tile_width, 1));
+        nat_u64(inout builder, tile_width);
+    } else if tiled_kind(in builder, in env, label, in "Get") {
+        get_elem(inout builder, in env, args);
+    } else if tiled_kind(in builder, in env, label, in "ColGet") {
+        let field = label_field(inout builder, label, in "field: \"");
+        builder.w(T_PROJECT);
+        get_elem(inout builder, in env, args);
+        builder.w(0);
+        builder.ident(field);
+    } else if tiled_kind(in builder, in env, label, in "Push") {
+        let mark = global_app2(inout builder, in "Array", in "push");
+        builder.arg();
+        value(inout builder, first_value);
+        builder.arg();
+        value(inout builder, env.program.op(inc(arg_at(args, 1))));
+    } else if tiled_kind(in builder, in env, label, in "Set") {
+        let mark = builder.app(3);
+        builder.global2(in "Array", in "setIfInBounds");
+        builder.args(mark);
+        builder.arg();
+        value(inout builder, first_value);
+        builder.arg();
+        to_nat_of_value(inout builder, env.program.op(inc(arg_at(args, 1))));
+        builder.arg();
+        value(inout builder, env.program.op(inc(arg_at(args, 2))));
+    } else if tiled_kind(in builder, in env, label, in "ColSet") {
+        let field = label_field(inout builder, label, in "field: \"");
+        let mark = builder.app(3);
+        builder.global2(in "Array", in "setIfInBounds");
+        builder.args(mark);
+        builder.arg();
+        value(inout builder, first_value);
+        builder.arg();
+        to_nat_of_value(inout builder, env.program.op(inc(arg_at(args, 1))));
+        builder.arg();
+        builder.w(T_UPDATE);
+        builder.w(1);
+        get_elem(inout builder, in env, args);
+        builder.ident(field);
+        value(inout builder, env.program.op(inc(arg_at(args, 2))));
     } else {
-        b.fail(in "Lean extraction does not lower SIMD load_tile_vec");
-        unit_tuple(inout b);
+        builder.fail(in "Lean extraction does not lower SIMD load_tile_vec");
+        unit_tuple(inout builder);
     }
 }
 
 // `Op::Tiled`.
-fn tiled(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u64 {
-    let a = ins.a;
-    let label = x.p.pool_row(x.p.op(a)).label;
-    let args = inc(a);
-    let mutates = tiled_kind(in b, in x, label, in "Push")
-        || tiled_kind(in b, in x, label, in "Set")
-        || tiled_kind(in b, in x, label, in "ColSet");
-    let mark = b.slice_len();
-    tiled_term(inout b, in x, label, args);
-    let term = b.cut(mark);
+fn tiled(inout builder: B, inout types: Types, in env: X, in emitter: S, inst: InstRow) -> u64 {
+    let operand_at = inst.a;
+    let label = env.program.pool_row(env.program.op(operand_at)).label;
+    let args = inc(operand_at);
+    let mutates = tiled_kind(in builder, in env, label, in "Push")
+        || tiled_kind(in builder, in env, label, in "Set")
+        || tiled_kind(in builder, in env, label, in "ColSet");
+    let mark = builder.slice_len();
+    tiled_term(inout builder, in env, label, args);
+    let term = builder.cut(mark);
     if !mutates {
-        let_dest(inout b, in t, in x, ins);
-        b.paste(in term);
-        let_dest_end(inout b, in t, in x, ins);
+        let_dest(inout builder, in types, in env, inst);
+        builder.paste(in term);
+        let_dest_end(inout builder, in types, in env, inst);
         return 1;
     }
-    let n = x.p.op(args);
+    let arg_count = env.program.op(args);
     let mut at = NONE64;
-    for k in 0..n {
-        if at == NONE64 && x.p.op(arg_at(args, k)) == TyPass::Inout {
+    for k in 0..arg_count {
+        if at == NONE64 && env.program.op(arg_at(args, k)) == TyPass::Inout {
             at = arg_at(args, k);
         }
     }
-    if at == NONE64 || x.p.op(add(at, 2)) == 0 {
-        b.fail(in "mutable TiledSeq argument requires a place");
+    if at == NONE64 || env.program.op(add(at, 2)) == 0 {
+        builder.fail(in "mutable TiledSeq argument requires a place");
         return 0;
     }
-    let rs = n32(wrapping_sub(x.p.op(add(at, 2)), 1));
-    let path = ir_path(in x.p, x.p.op(add(at, 3)));
-    let_update(inout b, inout t, in x, in s.f, rs, in path, in term);
-    let_dest(inout b, in t, in x, ins);
-    unit_tuple(inout b);
-    let_dest_end(inout b, in t, in x, ins);
+    let root_sym = n32(wrapping_sub(env.program.op(add(at, 2)), 1));
+    let path = ir_path(in env.program, env.program.op(add(at, 3)));
+    let_update(inout builder, inout types, in env, in emitter.func, root_sym, in path, in term);
+    let_dest(inout builder, in types, in env, inst);
+    unit_tuple(inout builder);
+    let_dest_end(inout builder, in types, in env, inst);
     2
 }
 
 // ----- definitions -------------------------------------------------------------------
 
-// The terminator of block `k` (its `pure` result).
-fn terminator(inout b: B, in t: Types, in x: X, in s: S, k: u64) {
-    let blk = s.f.block(in x.p, k);
-    let ta = blk.ta;
-    if blk.term == Term::Return {
-        let n = inout_count(in s.f);
-        pure_app(inout b);
-        if n > 0 {
-            b.w(T_TUPLE);
-            b.w(inc(n));
+// The terminator of block `block_index` (its `pure` result).
+fn terminator(inout builder: B, in types: Types, in env: X, in emitter: S, block_index: u64) {
+    let block = emitter.func.block(in env.program, block_index);
+    let term_at = block.ta;
+    if block.term == Term::Return {
+        let inout_params = inout_count(in emitter.func);
+        pure_app(inout builder);
+        if inout_params > 0 {
+            builder.w(T_TUPLE);
+            builder.w(inc(inout_params));
         }
-        value(inout b, x.p.op(ta));
-        for j in 0..s.f.params.len() {
-            let q = s.f.param(j);
-            if q.pass == TyPass::Inout {
-                b.sref(q.name);
+        value(inout builder, env.program.op(term_at));
+        for j in 0..emitter.func.params.len() {
+            let param_row = emitter.func.param(j);
+            if param_row.pass == TyPass::Inout {
+                builder.sref(param_row.name);
             }
         }
-    } else if blk.term == Term::Jump {
-        pure_app(inout b);
-        call_block(inout b, in x, in s, x.p.op(ta), inc(ta));
-    } else if blk.term == Term::Branch {
-        b.w(T_IF);
-        value(inout b, x.p.op(ta));
-        pure_app(inout b);
-        call_block(inout b, in x, in s, x.p.op(inc(ta)), NONE64);
-        pure_app(inout b);
-        call_block(inout b, in x, in s, x.p.op(add(ta, 2)), NONE64);
-    } else if blk.term == Term::Match {
-        let n = x.p.op(inc(ta));
-        b.w(T_MATCH);
-        b.w(n);
-        value(inout b, x.p.op(ta));
-        let mut i = add(ta, 2);
-        for m in 0..n {
-            let end = pattern_end(in x.p, i);
-            let target = x.p.op(end);
-            let bound = u64_at(in s.arms, target);
+    } else if block.term == Term::Jump {
+        pure_app(inout builder);
+        call_block(inout builder, in env, in emitter, env.program.op(term_at), inc(term_at));
+    } else if block.term == Term::Branch {
+        builder.w(T_IF);
+        value(inout builder, env.program.op(term_at));
+        pure_app(inout builder);
+        call_block(inout builder, in env, in emitter, env.program.op(inc(term_at)), NONE64);
+        pure_app(inout builder);
+        call_block(inout builder, in env, in emitter, env.program.op(add(term_at, 2)), NONE64);
+    } else if block.term == Term::Match {
+        let arm_count = env.program.op(inc(term_at));
+        builder.w(T_MATCH);
+        builder.w(arm_count);
+        value(inout builder, env.program.op(term_at));
+        let mut pattern_at = add(term_at, 2);
+        for m in 0..arm_count {
+            let end = pattern_end(in env.program, pattern_at);
+            let target = env.program.op(end);
+            let bound = u64_at(in emitter.arms, target);
             if bound == NONE64 {
-                pattern(inout b, in t, in x, i);
+                pattern(inout builder, in types, in env, pattern_at);
             } else {
-                pattern(inout b, in t, in x, bound);
+                pattern(inout builder, in types, in env, bound);
             }
-            pure_app(inout b);
-            call_block(inout b, in x, in s, target, NONE64);
-            i = inc(end);
+            pure_app(inout builder);
+            call_block(inout builder, in env, in emitter, target, NONE64);
+            pattern_at = inc(end);
         }
     } else {
-        b.fail(in "unreachable control flow has no pure Lean value");
-        unit_tuple(inout b);
+        builder.fail(in "unreachable control flow has no pure Lean value");
+        unit_tuple(inout builder);
     }
 }
 
 // `partial def $block_f_k {T..} (live..) : result := Id.run do ..`.
-fn block_definition(inout b: B, inout t: Types, in x: X, in s: S, k: u64) {
-    let blk = s.f.block(in x.p, k);
-    let name = block_sym(inout b, in s.f, k);
-    b.w(D_DEF);
-    b.w(K_PARTIAL);
-    b.quiet = inc(b.quiet);
-    b.name(name);
-    b.quiet = wrapping_sub(b.quiet, 1);
-    b.w(add(generic_count(in x, s.sig), live_count(in s, k)));
-    type_params(inout b, in x, s.sig);
-    let mut i = set_next_in(in s, k, 0);
+fn block_definition(
+    inout builder: B,
+    inout types: Types,
+    in env: X,
+    in emitter: S,
+    block_index: u64
+) {
+    let block = emitter.func.block(in env.program, block_index);
+    let name = block_sym(inout builder, in emitter.func, block_index);
+    builder.w(D_DEF);
+    builder.w(K_PARTIAL);
+    builder.quiet = inc(builder.quiet);
+    builder.name(name);
+    builder.quiet = wrapping_sub(builder.quiet, 1);
+    builder.w(add(generic_count(in env, emitter.sig), live_count(in emitter, block_index)));
+    type_params(inout builder, in env, emitter.sig);
+    let mut bit = set_next_in(in emitter, block_index, 0);
     loop {
-        if i == NONE64 {
+        if bit == NONE64 {
             break;
         }
-        b.w(B_EXPLICIT);
-        b.w(1);
-        let sy = local_sym(inout b, in s.f, i);
-        b.ident(sy);
-        typ(inout b, in t, in x, s.f.bit_ty(i));
-        i = set_next_in(in s, k, inc(i));
+        builder.w(B_EXPLICIT);
+        builder.w(1);
+        let local_name = local_sym(inout builder, in emitter.func, bit);
+        builder.ident(local_name);
+        typ(inout builder, in types, in env, emitter.func.bit_ty(bit));
+        bit = set_next_in(in emitter, block_index, inc(bit));
     }
-    result_type(inout b, in t, in x, in s.f);
+    result_type(inout builder, in types, in env, in emitter.func);
     // Id.run (do ..)
-    global_app(inout b, in "Id", in "run");
-    b.w(T_DO);
-    let count = b.hole();
-    let mut n: u64 = 0;
-    let arm = u64_at(in s.arms, k) != NONE64;
-    for j in 0..blk.ic {
-        let ins = x.p.inst(add(blk.i0, j));
+    global_app(inout builder, in "Id", in "run");
+    builder.w(T_DO);
+    let count_at = builder.hole();
+    let mut stmt_count: u64 = 0;
+    let arm = u64_at(in emitter.arms, block_index) != NONE64;
+    for j in 0..block.ic {
+        let inst = env.program.inst(add(block.i0, j));
         if j == 0 && arm {
             // `let $value{d} : Unit := ()`
-            b.w(S_LET);
-            b.w(0);
-            b.w(P_BIND);
-            let sy = value_sym(inout b, w(ins.dest));
-            b.ident(sy);
-            b.w(1);
-            b.global(in "Unit");
-            unit_tuple(inout b);
-            n = inc(n);
+            builder.w(S_LET);
+            builder.w(0);
+            builder.w(P_BIND);
+            let dest_name = value_sym(inout builder, w(inst.dest));
+            builder.ident(dest_name);
+            builder.w(1);
+            builder.global(in "Unit");
+            unit_tuple(inout builder);
+            stmt_count = inc(stmt_count);
         } else {
-            n = add(n, instruction(inout b, inout t, in x, in s, ins));
+            stmt_count = add(
+                stmt_count,
+                instruction(inout builder, inout types, in env, in emitter, inst)
+            );
         }
     }
-    b.fill(count, n);
-    terminator(inout b, in t, in x, in s, k);
-    b.check(name, in "name");
-    result_check(inout b, in t, in x, in s.f);
+    builder.fill(count_at, stmt_count);
+    terminator(inout builder, in types, in env, in emitter, block_index);
+    builder.check(name, in "name");
+    result_check(inout builder, in types, in env, in emitter.func);
 }
 
 // `partial def f {T..} (params..) : result := $block_f_0 ..`.
-fn main_definition(inout b: B, inout t: Types, in x: X, in s: S) {
-    b.w(D_DEF);
-    b.w(K_PARTIAL);
-    b.quiet = inc(b.quiet);
-    b.name(s.f.row.name);
-    b.quiet = wrapping_sub(b.quiet, 1);
-    b.w(add(generic_count(in x, s.sig), s.f.params.len()));
-    type_params(inout b, in x, s.sig);
-    for j in 0..s.f.params.len() {
-        let q = s.f.param(j);
-        b.w(B_EXPLICIT);
-        b.w(1);
-        b.ident(q.name);
-        typ(inout b, in t, in x, q.ty);
+fn main_definition(inout builder: B, inout types: Types, in env: X, in emitter: S) {
+    builder.w(D_DEF);
+    builder.w(K_PARTIAL);
+    builder.quiet = inc(builder.quiet);
+    builder.name(emitter.func.row.name);
+    builder.quiet = wrapping_sub(builder.quiet, 1);
+    builder.w(add(generic_count(in env, emitter.sig), emitter.func.params.len()));
+    type_params(inout builder, in env, emitter.sig);
+    for j in 0..emitter.func.params.len() {
+        let param_row = emitter.func.param(j);
+        builder.w(B_EXPLICIT);
+        builder.w(1);
+        builder.ident(param_row.name);
+        typ(inout builder, in types, in env, param_row.ty);
     }
-    result_type(inout b, in t, in x, in s.f);
-    b.check(s.f.row.name, in "name");
-    result_check(inout b, in t, in x, in s.f);
-    call_block(inout b, in x, in s, 0, NONE64);
+    result_type(inout builder, in types, in env, in emitter.func);
+    builder.check(emitter.func.row.name, in "name");
+    result_check(inout builder, in types, in env, in emitter.func);
+    call_block(inout builder, in env, in emitter, 0, NONE64);
 }
 
-// `extract_function_nodes` of program function `fi`: writes its
+// `extract_function_nodes` of program function `func_index`: writes its
 // definitions (the lifted closures' first) and adds their number to
 // `count`. False when the structured extractor takes the function; stops
 // at the first error.
-pub fn extract(inout b: B, inout t: Types, in x: X, fi: u64, inout count: u64) -> bool {
-    let f = fun(in x.p, in x.fx, fi);
-    if !takes(in x.p, in t, in x.wd, in x.fx, in f) {
+pub fn extract(
+    inout builder: B,
+    inout types: Types,
+    in env: X,
+    func_index: u64,
+    inout count: u64
+) -> bool {
+    let func = fun(in env.program, in env.fns, func_index);
+    if !takes(in env.program, in types, in env.world, in env.fns, in func) {
         return false;
     }
-    for bi in 0..f.row.bc {
-        let blk = f.block(in x.p, bi);
-        for ii in 0..blk.ic {
-            let ins = x.p.inst(add(blk.i0, ii));
-            if ins.op == Op::Closure {
-                let ci = x.fx.closure(f.row.name, w(ins.dest));
-                if ci == NONE32 {
-                    b.fail(in "invalid closure IR");
+    for block_index in 0..func.row.bc {
+        let block = func.block(in env.program, block_index);
+        for inst_index in 0..block.ic {
+            let inst = env.program.inst(add(block.i0, inst_index));
+            if inst.op == Op::Closure {
+                let closure_index = env.fns.closure(func.row.name, w(inst.dest));
+                if closure_index == NONE32 {
+                    builder.fail(in "invalid closure IR");
                     return true;
                 }
-                let lifted = x.fx.closure_at(w(ci)).lifted;
-                let li = u32_at(in x.fn_by_name, w(lifted));
-                if li == 0 {
-                    b.fail(in "invalid closure IR");
+                let lifted = env.fns.closure_at(w(closure_index)).lifted;
+                let lifted_entry = u32_at(in env.fn_by_name, w(lifted));
+                if lifted_entry == 0 {
+                    builder.fail(in "invalid closure IR");
                     return true;
                 }
-                if !extract(inout b, inout t, in x, w(wrapping_sub(li, 1)), inout count) {
+                if !extract(
+                    inout builder,
+                    inout types,
+                    in env,
+                    w(wrapping_sub(lifted_entry, 1)),
+                    inout count
+                ) {
                     return false;
                 }
-                if b.failed {
+                if builder.failed {
                     return true;
                 }
             }
         }
     }
-    let arms = arm_bindings(in x.p, in f);
-    let live = liveness(in x.p, inout b.names, in x.fx, in f, in arms);
-    let sig = x.fx.sig(w(f.sig));
-    let s = S { f: f, live: live, arms: arms, sig: sig };
-    for k in 0..s.f.row.bc {
-        block_definition(inout b, inout t, in x, in s, k);
+    let arms = arm_bindings(in env.program, in func);
+    let live = liveness(in env.program, inout builder.names, in env.fns, in func, in arms);
+    let sig = env.fns.sig(w(func.sig));
+    let emitter = S { func: func, live: live, arms: arms, sig: sig };
+    for k in 0..emitter.func.row.bc {
+        block_definition(inout builder, inout types, in env, in emitter, k);
         count = inc(count);
     }
-    main_definition(inout b, inout t, in x, in s);
+    main_definition(inout builder, inout types, in env, in emitter);
     count = inc(count);
     true
 }
