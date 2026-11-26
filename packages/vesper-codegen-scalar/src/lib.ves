@@ -666,7 +666,8 @@ impl Gen {
         }
         let conv_word = get(in self.tables.conversions, op);
         if (get(in self.tables.float_flags, op) & FLOAT_INTRINSIC) != 0
-            || (conv_word != 0 && self.float_type(value_ty)) {
+            || (conv_word != 0 && self.float_type(value_ty))
+        {
             put(inout self.out, in "float-unary");
             return;
         }
@@ -1144,7 +1145,8 @@ impl Gen {
             return;
         }
         if (get(in self.tables.float_flags, op) & FLOAT_INTRINSIC) != 0
-            || get(in self.tables.bit_builtins, op) != 0 {
+            || get(in self.tables.bit_builtins, op) != 0
+        {
             return;
         }
         let conv_word = get(in self.tables.conversions, op);
@@ -1227,7 +1229,8 @@ impl Gen {
         if (get(in self.tables.float_flags, op) & FLOAT_MATH) != 0
             || get(in self.tables.bit_builtins, op) != 0
             || op == ops.and_and
-            || op == ops.or_or {
+            || op == ops.or_or
+        {
             return;
         }
         let coerce_words = widen_u64(result_word | (lhs_word << 8) | (rhs_word << 16));
@@ -1240,7 +1243,8 @@ impl Gen {
                 || (
                     (op == ops.shl || op == ops.shr)
                         && self.ctx.world.may_overflow(inst.s0, inst.s1)
-                ) {
+                )
+            {
                 return;
             }
             let shift_op = if op == ops.shl {
@@ -1284,7 +1288,8 @@ impl Gen {
             return;
         }
         if (kind != 0 && self.ctx.world.may_overflow(inst.s0, inst.s1))
-            || get(in self.tables.bit_intrinsics, op) != 0 {
+            || get(in self.tables.bit_intrinsics, op) != 0
+        {
             return;
         }
         if ops.is_comparison(op) {

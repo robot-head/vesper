@@ -226,7 +226,8 @@ fn on_synchronized(
         && has(f, syn_bit())
         && !has(f, ack_bit())
         && !is_rst
-        && seg.h.seq == t.rcv_isn {
+        && seg.h.seq == t.rcv_isn
+    {
         mark_first_lost(inout t);
         return no_recv();
     }
@@ -294,7 +295,8 @@ fn on_synchronized(
             } else if s == State::Established
                 || s == State::FinWait1
                 || s == State::FinWait2
-                || s == State::CloseWait {
+                || s == State::CloseWait
+            {
                 enter_closed(inout t, Option::Some(CloseReason::Reset));
             } else {
                 enter_closed(inout t, Option::None);

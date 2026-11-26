@@ -133,7 +133,8 @@ fn escaped_width(b: u64) -> u64 {
         || b == Ascii::Cr
         || b == Ascii::Tab
         || b == Ascii::Backspace
-        || b == Ascii::Ff {
+        || b == Ascii::Ff
+    {
         ESCAPE_LEN
     } else {
         UNICODE_ESCAPE_LEN

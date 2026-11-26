@@ -277,7 +277,8 @@ impl EGraph {
                 && u32_at(in self.memo_op, key) == op
                 && i64_at(in self.memo_data, key) == data
                 && u32_at(in self.memo_child0, key) == child0
-                && u32_at(in self.memo_child1, key) == child1 {
+                && u32_at(in self.memo_child1, key) == child1
+            {
                 return (at, wrapping_u32(key));
             }
             at = wrapping_add(at, 1) & self.slot_mask;
@@ -444,7 +445,8 @@ impl EGraph {
             return false;
         }
         if u32_at(in self.parent_len, widen_u64(kept))
-            < u32_at(in self.parent_len, widen_u64(absorbed)) {
+            < u32_at(in self.parent_len, widen_u64(absorbed))
+        {
             let swap = kept;
             kept = absorbed;
             absorbed = swap;

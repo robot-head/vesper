@@ -1186,7 +1186,8 @@ fn gap(p: u8, c: u8, block: bool, after_block: bool) -> u8 {
                 || c == K_WITH
                 || c == K_EQ
                 || c == K_FAT_ARROW
-        ) {
+        )
+    {
         return G_HARD;
     }
     if c == K_COMMENT || c == K_BLOCK_COMMENT || p == K_BLOCK_COMMENT {
@@ -1202,7 +1203,8 @@ fn gap(p: u8, c: u8, block: bool, after_block: bool) -> u8 {
         return G_NONE;
     }
     if (c == K_DOT_DOT || c == K_DOT_DOT_EQ) && ends_operand(p)
-        || (p == K_DOT_DOT || p == K_DOT_DOT_EQ) && starts_range_bound(c) {
+        || (p == K_DOT_DOT || p == K_DOT_DOT_EQ) && starts_range_bound(c)
+    {
         return G_NONE;
     }
     if c == K_ARROW {
@@ -1223,7 +1225,8 @@ fn gap(p: u8, c: u8, block: bool, after_block: bool) -> u8 {
         || c == K_COLON_COLON
         || c == K_QUESTION
         || c == K_R_PAREN
-        || c == K_R_BRACKET {
+        || c == K_R_BRACKET
+    {
         return G_NONE;
     }
     if p == K_DOT || p == K_COLON_COLON || p == K_AT || p == K_AT_AT {
@@ -1241,7 +1244,8 @@ fn gap(p: u8, c: u8, block: bool, after_block: bool) -> u8 {
     // `handle (`, `sink (` and `inout (` are calls of a value of that name
     // too (#1244).
     if c == K_L_PAREN
-        && (p == K_EFF || p == K_EFFECT || p == K_HANDLE || p == K_SINK || p == K_INOUT) {
+        && (p == K_EFF || p == K_EFFECT || p == K_HANDLE || p == K_SINK || p == K_INOUT)
+    {
         return G_NONE;
     }
     G_SOFT
@@ -1364,7 +1368,9 @@ fn nest_continuation(inout d: Doc, lead: u64, content: u64) -> u64 eff [Fail[Fmt
 }
 
 // Each recursive operand contains only stronger breaks, bounding the
-// stack by the number of precedence levels even for long chains.
+// stack by the number of precedence levels even for long chains. `trail`
+// (or NONE) ends the outermost group, so it breaks exactly when that group's
+// weakest breaks do.
 fn layout_line(
     in ids: ChunkSeq[u32],
     in breaks: ChunkSeq[LayoutBreak],
@@ -1372,6 +1378,7 @@ fn layout_line(
     end: u64,
     first: u64,
     last: u64,
+    trail: u64,
     inout d: Doc
 ) -> u64 eff [Fail[FmtFail]] {
     if first == last {
@@ -1392,7 +1399,16 @@ fn layout_line(
         let b = break_at(in breaks, i);
         if b.level == weakest {
             if operand < b.offset {
-                let rhs = layout_line(in ids, in breaks, operand, b.offset, child, i, inout d);
+                let rhs = layout_line(
+                    in ids,
+                    in breaks,
+                    operand,
+                    b.offset,
+                    child,
+                    i,
+                    NONE,
+                    inout d
+                );
                 segments.push(wrapping_u32(nest_continuation(inout d, lead, rhs)));
             }
             lead = w32(in ids, b.offset);
@@ -1400,8 +1416,11 @@ fn layout_line(
             child = wrapping_add(i, 1);
         }
     }
-    let rhs = layout_line(in ids, in breaks, operand, end, child, last, inout d);
+    let rhs = layout_line(in ids, in breaks, operand, end, child, last, NONE, inout d);
     segments.push(wrapping_u32(nest_continuation(inout d, lead, rhs)));
+    if trail != NONE {
+        segments.push(wrapping_u32(trail));
+    }
     let concat = push_concat(inout d, in segments.as_slice());
     push_group(inout d, concat)
 }
@@ -1417,12 +1436,28 @@ fn concat_group(
             let concat = push_concat(inout d, in ids.as_slice());
             push_group(inout d, concat)
         } else {
-            layout_line(in ids, in breaks, 0, ids.len(), 0, breaks.len(), inout d)
+            layout_line(in ids, in breaks, 0, ids.len(), 0, breaks.len(), NONE, inout d)
         };
         out.push(wrapping_u32(group));
         ids.truncate(0);
         breaks.truncate(0);
     }
+}
+
+// A control-flow head that can break at its operators or dots, with the
+// space before its block's `{`: when the head takes more than one line, the
+// `{` goes on a line of its own at the head's indent, like rustfmt.
+fn head_group(
+    inout ids: ChunkSeq[u32],
+    inout breaks: ChunkSeq[LayoutBreak],
+    inout d: Doc,
+    inout out: ChunkSeq[u32]
+) eff [Fail[FmtFail]] {
+    let separator = push_leaf(inout d, D_SOFT_SPACE);
+    let group = layout_line(in ids, in breaks, 0, ids.len(), 0, breaks.len(), separator, inout d);
+    out.push(wrapping_u32(group));
+    ids.truncate(0);
+    breaks.truncate(0);
 }
 
 fn close_of(k: u8) -> u8 {
@@ -1545,7 +1580,8 @@ fn short_if_else(in at: Atoms, start: u64, end: u8, in src: Slice[u8]) -> u64 {
             || kind == K_BLOCK_COMMENT
             || kind == K_SEMI
             || i > start && sugar != SGAP_NONE
-            || depth == 0 && (kind == K_COMMA || kind == K_ARROW) {
+            || depth == 0 && (kind == K_COMMA || kind == K_ARROW)
+        {
             return NONE;
         }
         if has_prev && spaced(prev, kind, unary) {
@@ -1605,7 +1641,8 @@ fn short_if_else(in at: Atoms, start: u64, end: u8, in src: Slice[u8]) -> u64 {
         || k == K_COMMA
         || k == K_R_PAREN
         || k == K_R_BRACKET
-        || k == K_R_BRACE {
+        || k == K_R_BRACE
+    {
         close
     } else {
         NONE
@@ -1619,7 +1656,8 @@ fn spaced(prev: u8, kind: u8, unary: bool) -> bool {
         || prev == K_L_BRACKET
         || kind == K_R_PAREN
         || kind == K_R_BRACKET
-        || unary {
+        || unary
+    {
         false
     } else if prev == K_L_BRACE || kind == K_R_BRACE {
         true
@@ -1663,7 +1701,8 @@ fn block_argument(in at: Atoms, open: u64, in src: Slice[u8], inout width: u64) 
             || kind == K_BLOCK_COMMENT
             || kind == K_SEMI
             || kind == K_R_BRACE
-            || sugar_at(in at, i) {
+            || sugar_at(in at, i)
+        {
             return NONE;
         }
         // The first token of an argument.
@@ -1671,7 +1710,8 @@ fn block_argument(in at: Atoms, open: u64, in src: Slice[u8], inout width: u64) 
         if kind == K_L_BRACE {
             if depth != 0
                 || aflags(in at, i) & ATOM_TAGGED != 0
-                || !(params == PARAMS_AFTER || starts && params == PARAMS_OUTSIDE) {
+                || !(params == PARAMS_AFTER || starts && params == PARAMS_OUTSIDE)
+            {
                 return NONE;
             }
             width = wrapping_add(width, 1);
@@ -1757,7 +1797,8 @@ fn overflow_argument(in at: Atoms, open: u64, in src: Slice[u8]) -> u64 {
                 || kind == K_BLOCK_COMMENT
                 || kind == K_SEMI
                 || depth == 0 && kind == K_COMMA
-                || sugar_at(in at, i) {
+                || sugar_at(in at, i)
+            {
                 return NONE;
             }
             if kind == K_L_BRACE && depth == 0 {
@@ -1809,7 +1850,8 @@ fn overflow_argument(in at: Atoms, open: u64, in src: Slice[u8]) -> u64 {
                 && !name
                 && akind(in at, wrapping_sub(i, 1)) == K_UPPER
                 && aflags(in at, i) & ATOM_EXPR != 0
-                && tagged_layout(in at, i) == TAG_NO {
+                && tagged_layout(in at, i) == TAG_NO
+            {
                 width = wrapping_add(width, 2);
                 delimiter = i;
                 break;
@@ -1938,7 +1980,8 @@ fn sequence(
             if close == NONE
                 || !starts_statement
                 || next >= n
-                || end != NO_END && akind(in at, next) == end {
+                || end != NO_END && akind(in at, next) == end
+            {
                 close
             } else {
                 NONE
@@ -1966,6 +2009,8 @@ fn sequence(
         let hugged = hug && is_block && !has_prev;
         // A branch of a short `if` breaks only with the whole `if`.
         let soft_block = is_block && short_close != NONE;
+        // The block after an `if`, `match`, `for` or `while` head.
+        let after_head = is_block && head;
         let cs0 = w32(in at.start, pos);
         let ce0 = w32(in at.end, pos);
         if c == K_IF
@@ -1974,7 +2019,8 @@ fn sequence(
                 && (
                     text_is(in src, cs0, ce0, in "for".as_bytes())
                         || text_is(in src, cs0, ce0, in "while".as_bytes())
-                ) {
+                )
+        {
             head = true;
         } else if c == K_L_BRACE || c == K_SEMI {
             head = false;
@@ -2110,11 +2156,16 @@ fn sequence(
             }
         }
         if is_block && !soft_block {
-            concat_group(inout line, inout breaks, inout d, inout output);
-            line_start = indent;
-            if spacing == G_SOFT || spacing == G_SPACE {
-                output.push(wrapping_u32(push_leaf(inout d, D_SPACE)));
+            let spaced = spacing == G_SOFT || spacing == G_SPACE;
+            if spaced && after_head && breaks.len() != 0 {
+                head_group(inout line, inout breaks, inout d, inout output);
+            } else {
+                concat_group(inout line, inout breaks, inout d, inout output);
+                if spaced {
+                    output.push(wrapping_u32(push_leaf(inout d, D_SPACE)));
+                }
             }
+            line_start = indent;
         }
         if short_if_close != NONE {
             short_close = short_if_close;
@@ -2498,7 +2549,8 @@ fn may_have_test_block(in src: Slice[u8]) -> bool {
         if byte(in src, i) == 116
             && byte(in src, wrapping_add(i, 1)) == 101
             && byte(in src, wrapping_add(i, 2)) == 115
-            && byte(in src, wrapping_add(i, 3)) == 116 {
+            && byte(in src, wrapping_add(i, 3)) == 116
+        {
             let mut j = wrapping_add(i, 4);
             loop {
                 if j >= n {
@@ -2797,7 +2849,8 @@ fn sugar_group(inout at: Atoms, in p: P, in src: Slice[u8], start: u64, end: u64
                     || prev == K_WITH
                     || prev == K_EFF
                     || prev == K_LINEAR
-            ) {
+            )
+        {
             let gap = if aflags(in at, i) & ATOM_GLUED != 0 {
                 // A nested tagged call (`zip{ a, b }`).
                 if k == K_L_BRACE && prev == K_LOWER {
@@ -2836,7 +2889,8 @@ fn sugar_group(inout at: Atoms, in p: P, in src: Slice[u8], start: u64, end: u64
                     join(inout at, a1, G_NONE);
                 } else if a2 < end
                     && ascii_punctuation(in src, w32(in at.start, a1), w32(in at.end, a1))
-                    && (k2 == K_STAR || k2 == K_PLUS) {
+                    && (k2 == K_STAR || k2 == K_PLUS)
+                {
                     join(inout at, a1, G_NONE);
                     join(inout at, a2, G_NONE);
                 }
@@ -2891,7 +2945,8 @@ fn annotate(inout at: Atoms, in p: P, in src: Slice[u8], in nodes: ChunkSeq[u64]
             // In a typed hole the sort is the final token: `$name:sort`.
             if akind(in at, wrapping_sub(end, 1)) == K_LOWER
                 && end >= 2
-                && akind(in at, wrapping_sub(end, 2)) == K_COLON {
+                && akind(in at, wrapping_sub(end, 2)) == K_COLON
+            {
                 join(inout at, wrapping_sub(end, 1), G_NONE);
             }
         } else if kind == NODE_SUGAR_DECL {
@@ -2904,7 +2959,8 @@ fn annotate(inout at: Atoms, in p: P, in src: Slice[u8], in nodes: ChunkSeq[u64]
                     let s = w32(in at.start, i);
                     let e = w32(in at.end, i);
                     if text_is(in src, s, e, in "pub".as_bytes())
-                        || text_is(in src, s, e, in "sugar".as_bytes()) {
+                        || text_is(in src, s, e, in "sugar".as_bytes())
+                    {
                         set_gap(inout at, i, G_HARD, 0);
                         break;
                     }
@@ -2913,7 +2969,8 @@ fn annotate(inout at: Atoms, in p: P, in src: Slice[u8], in nodes: ChunkSeq[u64]
             }
         } else if kind == NODE_SUGAR_PATTERN
             || kind == NODE_SUGAR_TEMPLATE
-            || kind == NODE_SUGAR_GROUP {
+            || kind == NODE_SUGAR_GROUP
+        {
             if kind == NODE_SUGAR_PATTERN {
                 join(inout at, start, G_SPACE);
             }
@@ -3142,7 +3199,8 @@ fn macro_syntax(
     for i in 0..ntok {
         if tok_kind(in ms.t, i) != tok_kind(in t, i)
             || tok_start(in ms.t, i) != tok_start(in t, i)
-            || tok_end(in ms.t, i) != tok_end(in t, i) {
+            || tok_end(in ms.t, i) != tok_end(in t, i)
+        {
             fail(E_CONSERVATION);
         }
     }
@@ -3336,7 +3394,8 @@ fn format_work(
     let second = again.out;
     if second.len() != output.len()
         || !same_words(in first_nodes, in again.nodes)
-        || again.opaque != opaque {
+        || again.opaque != opaque
+    {
         fail(E_IDEMPOTENT);
     }
     for i in 0..output.len() {
@@ -3741,7 +3800,8 @@ fn capture(
     let second = again.out;
     if second.len() != output.len()
         || !same_words(in first_nodes, in again.nodes)
-        || again.opaque != opaque {
+        || again.opaque != opaque
+    {
         fail(E_IDEMPOTENT);
     }
     for i in 0..output.len() {
@@ -4216,7 +4276,8 @@ fn recovery_once(
         if word(in r.decls, wrapping_add(at, D_KIND)) == DECL_FUNCTION
             && word(in r.decls, wrapping_add(at, D_STATUS)) == DECL_COMPLETE
             && word(in r.decls, wrapping_add(at, D_BODY_START)) != U64_MAX
-            && holds(in top, word(in r.decls, wrapping_add(at, D_START))) {
+            && holds(in top, word(in r.decls, wrapping_add(at, D_START)))
+        {
             picked.push(j);
         }
     }
@@ -4356,7 +4417,8 @@ fn inventory_equal(
             || word(in a.decls, wrapping_add(at, D_STATUS))
                 != word(in b.decls, wrapping_add(at, D_STATUS))
             || (word(in a.decls, wrapping_add(at, D_BODY_START)) == U64_MAX)
-                != (word(in b.decls, wrapping_add(at, D_BODY_START)) == U64_MAX) {
+                != (word(in b.decls, wrapping_add(at, D_BODY_START)) == U64_MAX)
+        {
             return false;
         }
         let an = word(in a.decls, wrapping_add(at, D_NAME_START));
@@ -4372,7 +4434,8 @@ fn inventory_equal(
                 in b_src,
                 bn,
                 word(in b.decls, wrapping_add(at, D_NAME_END))
-            ) {
+            )
+        {
             return false;
         }
     }
@@ -4381,7 +4444,8 @@ fn inventory_equal(
     for j in 0..ns {
         let at = wrapping_mul(j, SITE_WORDS);
         if word(in a.sites, wrapping_add(at, 2)) != word(in b.sites, wrapping_add(at, 2))
-            || word(in a.sites, wrapping_add(at, 3)) != word(in b.sites, wrapping_add(at, 3)) {
+            || word(in a.sites, wrapping_add(at, 3)) != word(in b.sites, wrapping_add(at, 3))
+        {
             return false;
         }
     }
@@ -4472,7 +4536,8 @@ fn recovery_check(
                 in out,
                 tok_start(in after_tokens, j),
                 tok_end(in after_tokens, j)
-            ) {
+            )
+        {
             fail(E_CONSERVATION);
         }
         i = wrapping_add(i, 1);
@@ -4492,7 +4557,8 @@ fn recovery_check(
         }
     );
     if second.edits.len() != 0
-        || !same_text(in out, 0, out.len(), in again.as_slice(), 0, again.len()) {
+        || !same_text(in out, 0, out.len(), in again.as_slice(), 0, again.len())
+    {
         fail(E_IDEMPOTENT);
     }
     ! same_text(in src, 0, src.len(), in out, 0, out.len())

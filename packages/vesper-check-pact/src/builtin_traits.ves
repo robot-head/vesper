@@ -372,7 +372,8 @@ fn type_conforms(
                     in req_trait,
                     in req_struct,
                     inout memo_state
-                ) {
+                )
+            {
                 return false;
             }
         }

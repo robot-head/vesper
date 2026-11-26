@@ -9,7 +9,8 @@ fn accept_text(
     let mut rec = no_recv();
     let s = t.st;
     if !(s == State::Established || s == State::FinWait1 || s == State::FinWait2)
-        || seg.pay_len == 0 {
+        || seg.pay_len == 0
+    {
         return rec;
     }
     let mut start = match seqmap_abs(t.rcv_isn, t.rcv_nxt, seg.h.seq) {

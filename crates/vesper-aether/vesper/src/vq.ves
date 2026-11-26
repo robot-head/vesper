@@ -475,7 +475,8 @@ pub fn vq_packed_walk(
                             | VQ_FLAG_USED
                     )
             )
-            != 0 {
+            != 0
+        {
             return Result::Err(VqFault::UnsupportedFlags);
         }
         slots = wrapping_add(slots, 1);

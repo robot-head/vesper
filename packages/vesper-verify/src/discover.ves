@@ -332,7 +332,8 @@ fn tokenize(in s: Slice[u8], inout l: Lx) -> Toks {
                         c == 46
                             && wrapping_add(l.i, 1) < s.len()
                             && ident_start(byte(in s, wrapping_add(l.i, 1)))
-                    ) {
+                    )
+                {
                     l.i = wrapping_add(l.i, 1);
                 } else {
                     break;
@@ -574,7 +575,8 @@ pub fn discover(in s: Slice[u8]) -> Found {
             || same_str(in w, in "unsafe")
             || same_str(in w, in "partial")
             || same_str(in w, in "scoped")
-            || same_str(in w, in "local") {
+            || same_str(in w, in "local")
+        {
             idx = wrapping_add(idx, 1);
         } else if same_str(in w, in "private") {
             private = true;
@@ -715,7 +717,8 @@ pub fn discover(in s: Slice[u8]) -> Found {
                 );
             }
             if next_kind == T_GUILLEMET
-                || (next_kind == T_WORD && (next_dot || keyword(in s[ns..ne]))) {
+                || (next_kind == T_WORD && (next_dot || keyword(in s[ns..ne])))
+            {
                 return msg2(
                     in "unsupported ",
                     in kind_text,

@@ -295,12 +295,14 @@ pub fn pvh_parse(
     if byte(in elf, ElfHeader::Mag0) != ElfMagic::Del
         || byte(in elf, ElfHeader::Mag1) != ElfMagic::E
         || byte(in elf, ElfHeader::Mag2) != ElfMagic::L
-        || byte(in elf, ElfHeader::Mag3) != ElfMagic::F {
+        || byte(in elf, ElfHeader::Mag3) != ElfMagic::F
+    {
         return Result::Err(PvhFault::BadMagic);
     }
     if byte(in elf, ElfHeader::Class) != ELFCLASS64
         || byte(in elf, ElfHeader::Data) != ELFDATA2LSB
-        || byte(in elf, ElfHeader::IdentVersion) != EV_CURRENT {
+        || byte(in elf, ElfHeader::IdentVersion) != EV_CURRENT
+    {
         return Result::Err(PvhFault::NotElf64LittleEndian);
     }
     let e_type = match le(in elf, 0, n, ElfHeader::Type, 2) {
@@ -416,7 +418,8 @@ pub fn pvh_parse(
         let p = seg_word(in out, k, LoadSegment::Paddr);
         if seg_word(in out, k, LoadSegment::Executable) != 0
             && p <= e
-            && e < wrapping_add(p, seg_word(in out, k, LoadSegment::Filesz)) {
+            && e < wrapping_add(p, seg_word(in out, k, LoadSegment::Filesz))
+        {
             return Result::Ok((entry32, count));
         }
     }

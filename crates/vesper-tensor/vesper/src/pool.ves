@@ -65,7 +65,8 @@ pub fn kv_layout(
         || tokens == 0
         || tokens > MAX_TOKENS_PER_SEQUENCE
         || max_bytes == 0
-        || max_bytes > MAX_STORAGE {
+        || max_bytes > MAX_STORAGE
+    {
         return 11;
     }
     // Checked products, as the Rust build's `checked_mul`.
@@ -158,7 +159,8 @@ fn validate_pages(
         if pages[q] != 1
             || pages[wrapping_add(q, 1)] != slot
             || pages[wrapping_add(q, 2)] != generation
-            || pages[wrapping_add(q, 3)] != page_generation {
+            || pages[wrapping_add(q, 3)] != page_generation
+        {
             return 4;
         }
         at = wrapping_add(at, 2);

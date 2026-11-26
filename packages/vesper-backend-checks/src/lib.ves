@@ -119,7 +119,8 @@ fn item_start(in ctx: Cx, span_start: u64, span_end: u64) -> u64 {
     loop {
         // `source.get(start..end)` fails off char boundaries.
         if (start < source_len && is_continuation(src(in ctx, start)))
-            || (end < source_len && is_continuation(src(in ctx, end))) {
+            || (end < source_len && is_continuation(src(in ctx, end)))
+        {
             break;
         }
         let mut trimmed = start;
@@ -131,7 +132,8 @@ fn item_start(in ctx: Cx, span_start: u64, span_end: u64) -> u64 {
         }
         if wrapping_add(trimmed, 1) < end
             && src(in ctx, trimmed) == 47
-            && src(in ctx, wrapping_add(trimmed, 1)) == 47 {
+            && src(in ctx, wrapping_add(trimmed, 1)) == 47
+        {
             let mut line_end = trimmed;
             loop {
                 if line_end >= end || src(in ctx, line_end) == 10 {

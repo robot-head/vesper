@@ -238,7 +238,8 @@ fn decide(in state: St, ob: Ob) -> u8 {
         return 1;
     }
     if (dim_node(in state, ob.dim).factor_count == 0)
-        && (dim_node(in state, ob.multiple).factor_count == 0) {
+        && (dim_node(in state, ob.multiple).factor_count == 0)
+    {
         return 0;
     }
     2
@@ -451,7 +452,8 @@ fn signature(inout state: St, inout ctx: Cx, in ast: Ast, fn_id: u32) {
         for i in 0..list_len(in ast, row.instances) {
             let effect = effectn(in ast, list_at(in ast, row.instances, i));
             if nm(in state, effect.name) == state.kv_pool_name
-                && list_len(in ast, effect.args) > 0 {
+                && list_len(in ast, effect.args) > 0
+            {
                 if list_len(in ast, effect.args) != 2 {
                     err_s(
                         inout state,
@@ -686,7 +688,8 @@ fn adt_infos(inout state: St, inout ctx: Cx, in ast: Ast) {
         let mut at = n;
         for i in 0..n {
             if cmp_names(in state, u32_at(in ctx.info_names, widen_u64(u32_at(in sorted, i))), name)
-                > 0 {
+                > 0
+            {
                 at = i;
                 break;
             }
@@ -910,7 +913,8 @@ fn opaque(inout state: St, name: u32, start: u64, end: u64, in what: Str) -> boo
     if base_name == state.tensor_name
         || base_name == state.lease_name
         || base_name == state.seq_name
-        || base_name == state.dims_name {
+        || base_name == state.dims_name
+    {
         let mut message = ChunkSeq::new[u8]();
         message.push(39);
         state.names.write(base_name, inout message);
@@ -944,7 +948,8 @@ fn variant_fields(
     }
     let adt_name = node.primary;
     if (adt_name == state.option_name && variant == state.some_name)
-        || (adt_name == state.result_name && variant == state.ok_name) {
+        || (adt_name == state.result_name && variant == state.ok_name)
+    {
         field_names.push(ctx.zero_name);
         field_tys.push(or_unknown(in state, adt_ty_arg(in state, ty, 0)));
         return;
@@ -1078,7 +1083,8 @@ fn field(inout state: St, in ctx: Cx, ty: u32, field_name: u32, start: u64, end:
                     i
                 )
             )
-                == field_name {
+                == field_name
+            {
                 return sub_ty_or(
                     inout state,
                     in subst,
@@ -1283,7 +1289,8 @@ fn struct_literal(
                         j
                     )
                 )
-                    == field_name {
+                    == field_name
+                {
                     field_ty = sub_ty_or(
                         inout state,
                         in renaming,
@@ -1351,7 +1358,8 @@ fn struct_literal(
         }
         if is_dim
             && !(find(in subst.dim_keys, in subst.dim_values, fresh_var) != NONE)
-            && any_tensor {
+            && any_tensor
+        {
             let mut message = ChunkSeq::new[u8]();
             put(inout message, in "cannot infer dimension '");
             state.names.write(generic, inout message);
@@ -1451,7 +1459,8 @@ fn indirect(
 fn strip_flexible(inout state: St, ty: u32) -> u32 {
     let node = ty_node(in state, ty);
     if node.kind == T_VAR
-        && (state.names.size(node.primary) > 0 && state.names.byte(node.primary, 0) == 63) {
+        && (state.names.size(node.primary) > 0 && state.names.byte(node.primary, 0) == 63)
+    {
         return state.unknown;
     }
     if node.kind == T_ADT {
@@ -1570,7 +1579,8 @@ fn apply(
     let current_sig = ctx.current_sig;
     if pool == 1
         && current_sig != NONE
-        && u8_at(in ctx.sig_uses_pool, widen_u64(current_sig)) == 1 {
+        && u8_at(in ctx.sig_uses_pool, widen_u64(current_sig)) == 1
+    {
         let caller_kv = u32_at(in ctx.sig_kv_heads, widen_u64(current_sig));
         let caller_hd = u32_at(in ctx.sig_head_dims, widen_u64(current_sig));
         let callee_kv = sub_dim_or(inout state, in renaming, pool_kv_heads);
@@ -1793,7 +1803,8 @@ fn call(inout state: St, inout ctx: Cx, in ast: Ast, expr_id: u32, expected: u32
         return indirect(inout state, inout ctx, in ast, expr_id, local, args, expected);
     }
     if (name == state.some_name || name == state.ok_name || name == state.err_name)
-        && list_len(in ast, args) == 1 {
+        && list_len(in ast, args) == 1
+    {
         let expected_node = ty_node(in state, expected);
         let mut inner = NONE;
         if expected != NONE && expected_node.kind == T_ADT {
@@ -2060,7 +2071,8 @@ fn tensor_arity(in state: St, op: u32) -> u64 {
         || spells(in state, op, in "mul")
         || spells(in state, op, in "swiglu")
         || spells(in state, op, in "qmatvec")
-        || spells(in state, op, in "rope") {
+        || spells(in state, op, in "rope")
+    {
         return 2;
     }
     if spells(in state, op, in "reshape")
@@ -2070,7 +2082,8 @@ fn tensor_arity(in state: St, op: u32) -> u64 {
         || spells(in state, op, in "to_bf16")
         || spells(in state, op, in "to_f32")
         || spells(in state, op, in "argmax")
-        || spells(in state, op, in "fill") {
+        || spells(in state, op, in "fill")
+    {
         return 1;
     }
     if spells(in state, op, in "rms_norm") || spells(in state, op, in "block_scale") {
@@ -2164,7 +2177,8 @@ fn tensor_op(
         || spells(in state, op, in "matvec")
         || spells(in state, op, in "add")
         || spells(in state, op, in "mul")
-        || spells(in state, op, in "swiglu") {
+        || spells(in state, op, in "swiglu")
+    {
         let arg0_ok = want_tensor(inout state, arg0_ty, arg0_start, arg0_end, in arg0_what);
         let arg1_ok = want_tensor(inout state, arg1_ty, arg1_start, arg1_end, in arg1_what);
         if !arg0_ok || !arg1_ok {
@@ -2183,7 +2197,8 @@ fn tensor_op(
                 arg1_start,
                 arg1_end,
                 in arg1_what
-            ) {
+            )
+        {
             return state.unknown;
         }
         let lhs_shape = ty_items(in state, arg0_ty);
@@ -2292,7 +2307,8 @@ fn tensor_op(
         || spells(in state, op, in "softmax")
         || spells(in state, op, in "argmax")
         || spells(in state, op, in "silu")
-        || spells(in state, op, in "rope") {
+        || spells(in state, op, in "rope")
+    {
         if !want_tensor(inout state, arg0_ty, arg0_start, arg0_end, in arg0_what) {
             return state.unknown;
         }
@@ -2382,7 +2398,8 @@ fn tensor_op(
                 arg1_start,
                 arg1_end,
                 in arg1_what
-            ) {
+            )
+        {
             return state.unknown;
         }
         let input_shape = ty_items(in state, arg0_ty);
@@ -2516,7 +2533,8 @@ fn pool_arity(in state: St, op: u32) -> u64 {
     if spells(in state, op, in "tokens")
         || spells(in state, op, in "page_tokens")
         || spells(in state, op, in "release_sequence")
-        || spells(in state, op, in "release_page") {
+        || spells(in state, op, in "release_page")
+    {
         return 1;
     }
     9
@@ -2574,7 +2592,8 @@ fn pool_op(
                 if payload_ty != NONE {
                     let payload_node = ty_node(in state, payload_ty);
                     if (is_begin && payload_node.kind == T_SEQ)
-                        || (!is_begin && payload_node.kind == T_LEASE) {
+                        || (!is_begin && payload_node.kind == T_LEASE)
+                    {
                         expected_kv = payload_node.primary;
                         expected_hd = payload_node.secondary;
                     }
@@ -2919,7 +2938,8 @@ pub fn expr(inout state: St, inout ctx: Cx, in ast: Ast, expr_id: u32, expected:
         let inner_node = ty_node(in state, operand_ty);
         if inner_node.kind == T_ADT
             && (inner_node.primary == state.result_name || inner_node.primary == state.option_name)
-            && inner_node.arity > 0 {
+            && inner_node.arity > 0
+        {
             return or_unknown(in state, adt_ty_arg(in state, operand_ty, 0));
         }
         return state.unknown;
@@ -3175,7 +3195,8 @@ fn sig_obs_equal(in ctx: Cx, row: u32) -> bool {
         if sig_ob.kind != body_ob.kind
             || sig_ob.dim != body_ob.dim
             || sig_ob.multiple != body_ob.multiple
-            || sig_ob.reason != body_ob.reason {
+            || sig_ob.reason != body_ob.reason
+        {
             return false;
         }
     }
@@ -3206,7 +3227,8 @@ pub fn analyze(inout state: St, inout ctx: Cx, in ast: Ast) {
                         )
                     )
                 )
-                    != NONE {
+                    != NONE
+                {
                     mentions = true;
                 }
             }
@@ -3229,7 +3251,8 @@ pub fn analyze(inout state: St, inout ctx: Cx, in ast: Ast) {
         } else if item.kind == 4 {
             let impl_node = impln(in ast, item.node);
             if type_mentions(in state, in ast, impl_node.ty)
-                || fns_mention(inout state, in ast, impl_node.methods) {
+                || fns_mention(inout state, in ast, impl_node.methods)
+            {
                 let mut span_start: u64 = 0;
                 let mut span_end: u64 = 0;
                 if list_len(in ast, impl_node.methods) > 0 {
@@ -3248,7 +3271,8 @@ pub fn analyze(inout state: St, inout ctx: Cx, in ast: Ast) {
         } else if item.kind == 6 {
             let conf = confn(in ast, item.node);
             if fns_mention(inout state, in ast, conf.methods)
-                || type_mentions(in state, in ast, conf.self_ty) {
+                || type_mentions(in state, in ast, conf.self_ty)
+            {
                 err_s(
                     inout state,
                     C_UNSUPPORTED,
@@ -3282,7 +3306,8 @@ pub fn analyze(inout state: St, inout ctx: Cx, in ast: Ast) {
     for i in 0..ast.m_items.len() {
         let item = item_at(in ast, i);
         if item.kind == 2
-            && at32(in ctx.sig_rows, (nm(in state, fnn(in ast, item.node).name))) != NONE {
+            && at32(in ctx.sig_rows, (nm(in state, fnn(in ast, item.node).name))) != NONE
+        {
             fns.push(item.node);
         }
     }

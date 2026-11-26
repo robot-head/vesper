@@ -486,7 +486,8 @@ pub fn iocp_roundtrip_check() -> u64 eff [Ffi[PulseSys]] {
         || !p1.fired
         || p1.bytes != 64
         || p1.key != PulseSys::KEY_POSTED
-        || p1.overlapped != token {
+        || p1.overlapped != token
+    {
         return 3;
     }
     100
@@ -606,7 +607,8 @@ pub fn driver_kind_from_name(in name: Slice[u8]) -> Option[DriverKind] {
     }
     if eq_trimmed_lower(in name, a, b, in "io_uring".as_bytes())
         || eq_trimmed_lower(in name, a, b, in "io-uring".as_bytes())
-        || eq_trimmed_lower(in name, a, b, in "uring".as_bytes()) {
+        || eq_trimmed_lower(in name, a, b, in "uring".as_bytes())
+    {
         return Option::Some(DriverKind::IoUring);
     }
     if eq_trimmed_lower(in name, a, b, in "epoll".as_bytes()) {

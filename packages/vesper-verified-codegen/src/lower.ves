@@ -1734,7 +1734,8 @@ fn row_caps(in lw: Lw, f: Fn, inout out: ChunkSeq[u32]) {
         if e.name == lw.sy.region
             && e.label != 0
             && e.n == 0
-            && lw.c.names.byte(wrapping_sub(e.label, 1), 0) != 36 {
+            && lw.c.names.byte(wrapping_sub(e.label, 1), 0) != 36
+        {
             out.push(wrapping_sub(e.label, 1));
         }
     }
@@ -2500,7 +2501,8 @@ fn int_kind_other(in lw: Lw, s: u32, lo: u64, hi: u64) -> u8 {
         || s == k.i32_
         || s == k.isize_
         || s == k.i128_
-        || s == k.u128_ {
+        || s == k.u128_
+    {
         1
     } else {
         0
@@ -4376,7 +4378,8 @@ fn relocate(r: Lir, out: u64) -> Lir {
         || t == LIR_WRAPPING
         || t == LIR_COMPARE
         || t == LIR_FARITH
-        || t == LIR_FCOMPARE {
+        || t == LIR_FCOMPARE
+    {
         return lir(t, r.op, r.kind, add(r.f1, out), add(r.f2, out), add(r.f3, out));
     }
     if t == LIR_STORE_OUT || t == LIR_STORE_IN {

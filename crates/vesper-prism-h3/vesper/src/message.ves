@@ -78,7 +78,8 @@ fn same(in b: Slice[u8], a: Span, c: Span) -> bool {
         || a.hi > b.len()
         || c.hi > b.len()
         || a.lo > a.hi
-        || c.lo > c.hi {
+        || c.lo > c.hi
+    {
         return false;
     }
     bytes_eq(in b[a.lo..a.hi], in b[c.lo..c.hi])
@@ -130,11 +131,13 @@ fn check_regular(in b: Slice[u8], l: Line) -> Option[MessageError] {
             wrapping_sub(l.mid, l.lo) == 17
                 && is(in b, l.lo, l.mid, in "transfer-encoding".as_bytes())
         )
-        || (wrapping_sub(l.mid, l.lo) == 7 && is(in b, l.lo, l.mid, in "upgrade".as_bytes())) {
+        || (wrapping_sub(l.mid, l.lo) == 7 && is(in b, l.lo, l.mid, in "upgrade".as_bytes()))
+    {
         return Option::Some(MessageError::ConnectionSpecificField);
     }
     if (wrapping_sub(l.mid, l.lo) == 2 && is(in b, l.lo, l.mid, in "te".as_bytes()))
-        && !(wrapping_sub(l.hi, l.mid) == 8 && is(in b, l.mid, l.hi, in "trailers".as_bytes())) {
+        && !(wrapping_sub(l.hi, l.mid) == 8 && is(in b, l.mid, l.hi, in "trailers".as_bytes()))
+    {
         return Option::Some(MessageError::ConnectionSpecificField);
     }
     Option::None
@@ -346,7 +349,8 @@ pub fn message_parse_request(
         (wrapping_sub(s.hi, s.lo) == 4 && is(in b, s.lo, s.hi, in "http".as_bytes()))
             || (wrapping_sub(s.hi, s.lo) == 5 && is(in b, s.lo, s.hi, in "https".as_bytes()))
     )
-        && empty_or_none(auth) {
+        && empty_or_none(auth)
+    {
         return Result::Err(MessageError::MissingPseudoHeader);
     }
     let cl = match content_length(in b, in meta, pseudo) {

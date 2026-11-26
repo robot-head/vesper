@@ -332,7 +332,8 @@ fn valid_offset(in t: Slice[u8], offset: u64) -> Unit eff [Fail[Failure]] {
     if offset > 0
         && byte(in t, wrapping_sub(offset, 1)) == Ascii::Cr
         && offset < t.len()
-        && byte(in t, offset) == Ascii::Lf {
+        && byte(in t, offset) == Ascii::Lf
+    {
         Fail::raise(Failure::LineEndingInterior);
     }
 }
@@ -639,7 +640,8 @@ fn quoted_size(in b: Slice[u8], off: u64, len: u64) -> u64 {
             || x == Ascii::Tab
             || x == Ascii::Lf
             || x == Ascii::FormFeed
-            || x == Ascii::Cr {
+            || x == Ascii::Cr
+        {
             wrapping_add(size, Json::Escape)
         } else if x < Ascii::Space {
             wrapping_add(size, Json::UnicodeEscape)
@@ -1110,7 +1112,8 @@ fn source_lines(in t: Slice[u8], n: u64, pad: u64) -> ChunkSeq[u64] {
         if found < total
             && byte(in t, found) == Ascii::Cr
             && end < n
-            && byte(in t, end) == Ascii::Lf {
+            && byte(in t, end) == Ascii::Lf
+        {
             end = wrapping_add(end, 1);
         }
         let count = if end <= n {
@@ -2165,7 +2168,8 @@ pub fn terminal(
         && (
             byte(in t, wrapping_sub(n, 1)) == Ascii::Cr
                 || byte(in t, wrapping_sub(n, 1)) == Ascii::Lf
-        ) {
+        )
+    {
         1
     } else {
         0

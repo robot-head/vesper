@@ -151,7 +151,8 @@ fn ident(in toks: Slice[u64], in text: Slice[u8], inout p: Parser) -> u64 {
     if kind(in toks, in p) == Tk::Ident
         && !text_is(in toks, in text, p.pos, in "let")
         && !text_is(in toks, in text, p.pos, in "handle")
-        && !text_is(in toks, in text, p.pos, in "with") {
+        && !text_is(in toks, in text, p.pos, in "with")
+    {
         p.pos = wrapping_add(p.pos, 1);
         wrapping_sub(p.pos, 1)
     } else {

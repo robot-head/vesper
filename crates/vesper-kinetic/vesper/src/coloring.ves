@@ -74,7 +74,8 @@ fn sort_order(
         || n < ORDER_RADIX_MIN
         || bits > 64
         || keys.len() < wrapping_mul(n, 2)
-        || hist.len() < ORDER_RADIX_BUCKETS {
+        || hist.len() < ORDER_RADIX_BUCKETS
+    {
         sort_by_key(in keys[0..n], inout order[0..n]);
         return;
     }

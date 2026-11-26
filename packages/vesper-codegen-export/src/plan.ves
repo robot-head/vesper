@@ -646,7 +646,8 @@ impl Planner {
             || n.kind == K_SLICE
             || n.kind == K_BOX
             || n.kind == K_STR
-            || n.kind == K_OBJECT {
+            || n.kind == K_OBJECT
+        {
             return true;
         }
         if n.kind == K_SCALAR || n.kind == K_EXTERN || n.kind == K_CALLBACK {
@@ -672,7 +673,8 @@ impl Planner {
             || n.kind == K_SEQ
             || n.kind == K_SLICE
             || n.kind == K_TUPLE
-            || n.kind == K_NAMED {
+            || n.kind == K_NAMED
+        {
             for i in 0..n.n {
                 if self.contains_extern(self.akid(n, i)) {
                     return true;
