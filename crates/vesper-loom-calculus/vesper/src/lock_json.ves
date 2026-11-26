@@ -1170,12 +1170,11 @@ fn component(in s: Slice[u8], from: u64, to: u64) -> bool {
     }
     for i in from..to {
         let c = at(in s, i);
-        if !(
-            (c >= Ch::LowerA && c <= Ch::LowerZ)
-                || is_digit(c)
-                || c == Ch::Minus
-                || c == Ch::Underscore
-        ) {
+        if !((c >= Ch::LowerA && c <= Ch::LowerZ)
+            || is_digit(c)
+            || c == Ch::Minus
+            || c == Ch::Underscore)
+        {
             return false;
         }
     }

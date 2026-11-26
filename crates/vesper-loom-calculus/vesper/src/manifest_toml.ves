@@ -1393,7 +1393,7 @@ fn struct_value(inout d: D, in src: Slice[u8], id: u32, k: u64) -> bool {
     true
 }
 
-fn has_default_json(t: u64) -> bool {
+pub fn has_default_json(t: u64) -> bool {
     !(t == T_NAME
         || t == T_VERSION
         || t == T_REQ
