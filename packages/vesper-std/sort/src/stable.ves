@@ -1,6 +1,6 @@
 // @vesper-std/sort::stable: a stable bottom-up merge sort.
 use self::unstable::{lt, insertion};
-use @vesper-std/sugar::{guard, when};
+use @vesper-std/sugar::{guard, when, while};
 
 // The length of the runs `stable_sort` insertion sorts before merging.
 const RUN: u64 = 16;
@@ -53,10 +53,7 @@ fn merge[T: mod copy + Ord](in src: Slice[T], inout dst: Slice[T], lo: u64, mid:
 // `n`); a last run without a partner is copied.
 fn pass[T: mod copy + Ord](in src: Slice[T], inout dst: Slice[T], n: u64, width: u64) {
     let mut lo: u64 = 0;
-    loop {
-        if lo >= n {
-            break;
-        }
+    while lo < n {
         let mid = min_u64(wrapping_add(lo, width), n);
         // `hi` wraps past the end only when `width` is near `u64::MAX`.
         let hi_unclamped = wrapping_add(mid, width);
@@ -67,7 +64,7 @@ fn pass[T: mod copy + Ord](in src: Slice[T], inout dst: Slice[T], n: u64, width:
         };
         merge(in src, inout dst, lo, mid, hi);
         lo = hi;
-    }
+    };
 }
 
 // Sorts `s` in place, ascending, keeping equal elements in their order.
@@ -79,14 +76,11 @@ pub fn stable_sort[T: mod copy + Ord](inout s: Slice[T]) {
         return;
     }
     let mut lo: u64 = 0;
-    loop {
-        if lo >= n {
-            break;
-        }
+    while lo < n {
         let hi = min_u64(wrapping_add(lo, RUN), n);
         insertion(inout s, lo, hi);
         lo = hi;
-    }
+    };
     if n <= RUN {
         return;
     }
@@ -102,10 +96,7 @@ fn merge_runs[T: mod copy + Ord](inout s: Slice[T], n: u64, run: u64, first: T) 
     scratch.resize(n, first);
     let mut width = run;
     let mut in_scratch = false;
-    loop {
-        if width >= n {
-            break;
-        }
+    while width < n {
         if in_scratch {
             pass(in scratch.as_slice(), inout s, n, width);
         } else {
@@ -113,7 +104,7 @@ fn merge_runs[T: mod copy + Ord](inout s: Slice[T], n: u64, run: u64, first: T) 
         }
         in_scratch = !in_scratch;
         width = wrapping_mul(width, 2);
-    }
+    };
     if in_scratch {
         s.try_copy_from(0, in scratch.as_slice());
     }

@@ -3,14 +3,14 @@
 //
 // Import the forms a module uses, as with any other item:
 //
-//     use @vesper-std/sugar::{guard, when};
+//     use @vesper-std/sugar::{guard, when, while};
 //
-// Each form expands to the `match` it names, before checking. A template's
+// The pattern forms expand to `match` before checking. A template's
 // `$rhs` runs once, and `$body` or `$diverge` only on its own arm, so the
 // expansion has exactly the effects and cost of the hand-written `match`.
 //
-// There is no `while` here: Forge binds an expression hole used inside a
-// template `loop` once, before the loop, so a condition could not re-run.
+// `while` re-reads two names in a comparison, or re-evaluates a condition
+// block on each iteration. An expression hole here would run only once.
 
 // The package version, for diagnostics.
 pub fn version() -> u64 {
@@ -49,6 +49,28 @@ pub sugar when: stmt {
         match $rhs {
             $pat => $body,
             _ => {},
+        }
+    }
+}
+
+// Test the condition once before every iteration, including the first.
+// The parentheses keep the condition's braces separate from the body.
+// Ordinary break and continue inside the body apply to the generated loop.
+pub sugar while: expr {
+    rule (while $left:ident < $right:ident $body:block) => {
+        loop {
+            if !($left < $right) {
+                break;
+            }
+            $body;
+        }
+    }
+    rule (while($condition:block) $body:block) => {
+        loop {
+            if !($condition) {
+                break;
+            }
+            $body;
         }
     }
 }
@@ -95,9 +117,45 @@ test {
         sum_present(in s, a, b) == expected
     }
 
+    fn while_paths(limit: u64, stop: bool, expected_checks: u64, expected_sum: u64) -> bool {
+        let mut cursor: u64 = 0;
+        let mut checks: u64 = 0;
+        let mut sum: u64 = 0;
+        while(
+            {
+                checks = wrapping_add(checks, 1);
+                cursor < limit
+            }
+        ) {
+            cursor = wrapping_add(cursor, 1);
+            if cursor == 1 {
+                continue;
+            }
+            if stop && cursor == 3 {
+                break;
+            }
+            sum = wrapping_add(sum, cursor);
+        };
+        checks == expected_checks && sum == expected_sum
+    }
+
+    fn comparison_rereads_both_names() -> bool {
+        let mut cursor: u64 = 0;
+        let mut limit: u64 = 6;
+        while cursor < limit {
+            cursor = wrapping_add(cursor, 1);
+            limit = wrapping_sub(limit, 1);
+        };
+        cursor == 3 && limit == 3
+    }
+
     // @case stops_at_end(in "ab", 5, 195)
     // @case all_present(in "abc", 2, 195)
     fn test_guard_break_leaves_the_loop(in s: Str, n: u64, expected: u64) -> bool {
         sum_until_missing(in s, n) == expected
+            && while_paths(0, false, 1, 0)
+            && while_paths(3, false, 4, 5)
+            && while_paths(8, true, 3, 2)
+            && comparison_rereads_both_names()
     }
 }
