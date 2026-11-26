@@ -2203,7 +2203,21 @@ fn world_words(in w: Collected, inout o: ChunkSeq[u8]) {
     }
 }
 
-// The harness and driver entry: 1 then the `WorldDecls` stream of
+// The hybrid driver's entry (#2024 slice 2c-2): the `WorldDecls` stream of
+// `source`'s checked world, or None when the checker elaborates the module
+// first (the session encodes it).
+pub fn decls_bytes(in source: Str) -> Option[ChunkSeq[u8]] {
+    let probe = lower_source(in source).ast;
+    if declined(in source, in probe) {
+        return Option::None;
+    }
+    let mut o = ChunkSeq::new[u8]();
+    let w = collected(in source);
+    world_words(in w, inout o);
+    Option::Some(o)
+}
+
+// The harness entry: 1 then the `WorldDecls` stream of
 // `source`'s checked world, or 0 when the checker elaborates the module
 // first (Rust encodes it).
 pub fn decls_words(in source: Str) -> ChunkSeq[u64] {

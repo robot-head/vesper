@@ -59,6 +59,8 @@ use @vesper/driver-commands::{
 use @vesper/driver::triple::{is_windows as triple_is_windows};
 // The package assembly of the package load (#1986).
 use self::assemble::{assembled_words};
+// The checked world's declarations from the Vesper collector (#2024).
+use @vesper/check-collect::{decls_bytes};
 // hd_step group 2 (#1893): the front-end passes in Vesper.
 use self::front::{parse_clean, cst_text};
 use self::interface::{interface_json};
@@ -147,6 +149,10 @@ fn step_wasm_build() -> u32 {
 
 fn step_world_decls() -> u32 {
     80
+}
+
+fn step_world_begin() -> u32 {
+    81
 }
 
 fn step_native_object() -> u32 {
@@ -461,6 +467,9 @@ fn drive(
             Option::None => (),
         }
     }
+    // The session's module is the parse of `source` itself, so the Vesper
+    // collector can give its checked world's declarations.
+    let held = r != declined();
     if r == declined() {
         r = step(inout s, step_parse());
     }
@@ -521,7 +530,7 @@ fn drive(
             return pass_failed(in s, r);
         }
         let package = text(in s);
-        let r = step(inout s, step_world_decls());
+        let r = world_decls(inout s, in source.as_slice(), held);
         if is_failure(r) {
             return pass_failed(in s, r);
         }
@@ -537,13 +546,13 @@ fn drive(
         }
     }
     if c == cmd_run() {
-        return run(inout s, in o);
+        return run(inout s, in o, in source.as_slice(), held);
     }
     if c == cmd_jit() {
         return pass(inout s, step_jit());
     }
     if c == cmd_build() {
-        return build(inout s, in o);
+        return build(inout s, in o, in source.as_slice(), held);
     }
     emit(inout s, in o)
 }
@@ -552,6 +561,24 @@ fn drive(
 // pass to run.
 fn declined() -> i64 {
     -3
+}
+
+// `WorldDecls`: with the world swap on and a standalone source the driver
+// parsed itself (`held`), the Vesper collector's declarations of its
+// checked world (@vesper/check-collect, which declines a module the
+// checker elaborates first); else the session's encoding. The AST
+// optimizer keeps the declarations, so its re-check changes none.
+fn world_decls(inout s: Session, in source: Slice[u8], held: bool) -> i64 eff [Ffi[HybridDriver]] {
+    if held && step(inout s, step_world_begin()) == 1 {
+        match String::from_utf8(in source) {
+            Option::Some(t) => match decls_bytes(in t.as_str()) {
+                Option::Some(d) => return step_with(inout s, step_world_decls(), in d.as_slice()),
+                Option::None => (),
+            },
+            Option::None => (),
+        }
+    }
+    step(inout s, step_world_decls())
 }
 
 // `crate::write` of `cli()`: the command's output to `-o`'s path, or to
@@ -602,7 +629,9 @@ fn pass_with(inout s: Session, which: u32, in a: Slice[u8]) -> i64 eff [Ffi[Hybr
 
 fn build(
     inout s: Session,
-    in o: Options
+    in o: Options,
+    in source: Slice[u8],
+    held: bool
 ) -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver], Ffi[HybridCommands]] {
     // Wave-eight lane 2: the direct verified code generator (§42).
     if has(in o, slot_codegen()) {
@@ -625,7 +654,7 @@ fn build(
         return error(in "build currently requires entry 'main'".as_bytes());
     }
     // An executable's `main`, over the world the driver holds.
-    let r = step(inout s, step_world_decls());
+    let r = world_decls(inout s, in source, held);
     if is_failure(r) {
         return pass_failed(in s, r);
     }
@@ -1202,8 +1231,13 @@ fn write_file(
 
 // `vesper run`: the entry's checks over the world the driver holds, then
 // the evaluator (the pass prints the value).
-fn run(inout s: Session, in o: Options) -> i64 eff [Ffi[HybridDriver]] {
-    let r = step(inout s, step_world_decls());
+fn run(
+    inout s: Session,
+    in o: Options,
+    in source: Slice[u8],
+    held: bool
+) -> i64 eff [Ffi[HybridDriver]] {
+    let r = world_decls(inout s, in source, held);
     if is_failure(r) {
         return pass_failed(in s, r);
     }

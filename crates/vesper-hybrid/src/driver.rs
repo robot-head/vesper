@@ -369,9 +369,12 @@ enum Step {
     LoadPackage = 70,
     /// The checked world's declarations, for the Vesper driver to hold.
     WorldDecls = 80,
+    /// 1 when the Vesper driver collects the declarations itself (the
+    /// world swap, #2024 slice 2c), else 0.
+    WorldBegin = 81,
 }
 
-const STEPS: [Step; 33] = [
+const STEPS: [Step; 34] = [
     Step::Load,
     Step::EbpfBuild,
     Step::Parse,
@@ -405,6 +408,7 @@ const STEPS: [Step; 33] = [
     Step::VerifiedInput,
     Step::LoadPackage,
     Step::WorldDecls,
+    Step::WorldBegin,
 ];
 
 /// A pass failed; its message is the session's text.
@@ -525,7 +529,7 @@ impl Session {
             | Step::WasmInput
             | Step::EbpfInput
             | Step::VerifiedInput => self.backends_step(step, arg),
-            Step::WorldDecls => self.world_step(step),
+            Step::WorldDecls | Step::WorldBegin => self.world_step(step, arg),
         }
     }
 }
