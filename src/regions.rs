@@ -76,7 +76,7 @@
 //! touch a freed or foreign region) and escape freedom. It is a theorem
 //! about that model, not about this checker.
 use crate::ast::*;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 pub use vesper_syntax::parser::{MAX_REGION_CAPACITY, REGION_EFFECT, REGION_MARKER};
 
@@ -711,16 +711,6 @@ fn pattern_binds(p: &Pattern) -> Vec<String> {
         }
         PatternKind::Wild | PatternKind::Literal(_) => vec![],
     }
-}
-
-/// Source labels of the region capabilities a function signature declares.
-pub fn signature_labels(f: &Function) -> BTreeSet<String> {
-    f.effects
-        .instances
-        .iter()
-        .filter(|e| e.name == REGION_EFFECT)
-        .filter_map(|e| e.label.clone())
-        .collect()
 }
 
 pub mod native_runtime;

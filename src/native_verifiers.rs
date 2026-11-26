@@ -796,20 +796,6 @@ pub fn verify_emitted(
     Ok(report)
 }
 
-/// Compile and verify in one call.
-pub fn verify_native(
-    world: &World,
-    entry: &str,
-    target: Option<&str>,
-    optimize: bool,
-    verifiers: &BTreeSet<NativeVerifier>,
-    policy: &NativeVerifierPolicy,
-) -> Result<(Vec<u8>, String, NativeVerifierReport), String> {
-    let (bytes, clif, functions) = emit_and_collect(world, entry, target, optimize)?;
-    let report = verify_emitted(world, &functions, target, verifiers, policy)?;
-    Ok((bytes, clif, report))
-}
-
 /// Render findings with `file:line:col` locations.
 pub fn render(report: &NativeVerifierReport, file: &str, source: &str) -> String {
     let mut out = String::new();
