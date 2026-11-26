@@ -1110,7 +1110,7 @@ fn kskipped(k: u64, i: u64, in json: Slice[u8]) -> bool {
 }
 
 // `PackageName::parse` on s[a..b].
-fn name_ok(in s: Slice[u8], a: u64, b: u64) -> bool {
+pub fn name_ok(in s: Slice[u8], a: u64, b: u64) -> bool {
     let has_at = b > a && at(in s, a) == Ch::At;
     let start = if has_at { wrapping_add(a, 1) } else { a };
     let mut slash = b;

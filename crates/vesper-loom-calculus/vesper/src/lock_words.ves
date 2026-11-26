@@ -1,0 +1,644 @@
+// Module lock_words of @vesper/loom-calculus (see lib.ves): a solution's
+// canonical JSON (what `lock_json` writes, `serde_json::to_string` of a
+// `Solution`) into the input word stream of `validate_solution`, the way
+// `Enc::solution` in src/port.rs writes it. The canonical text has passed
+// serde's checks, so every key is present, every version and requirement
+// parses and every set is ascending; only native requirements can still be
+// malformed.
+//
+// Strings are appended to `text` as they are decoded and every occurrence
+// is a fresh entry: the table goes without the order flag, so Vesper sorts
+// and merges the occurrences itself.
+use self::semver_text::{SCmp, parse_version, parse_req};
+use self::lock_json::{req_display};
+use @vesper-std/toml::debug::{utf8_at};
+
+const NO_NODE: u64 = 18446744073709551615;
+
+enum Kind: u64 {
+    Object = 0,
+    Array = 1,
+    Text = 2,
+    Number = 3,
+    True = 4,
+    False = 5,
+    Null = 6
+}
+
+enum Ch: u64 {
+    Tab = 9,
+    Lf = 10,
+    Cr = 13,
+    Quote = 34,
+    Comma = 44,
+    Minus = 45,
+    Zero = 48,
+    Nine = 57,
+    Colon = 58,
+    LBracket = 91,
+    Backslash = 92,
+    RBracket = 93,
+    UpperA = 65,
+    LowerA = 97,
+    LowerB = 98,
+    LowerF = 102,
+    LowerN = 110,
+    LowerR = 114,
+    LowerT = 116,
+    LowerU = 117,
+    LBrace = 123,
+    RBrace = 125,
+    Backspace = 8,
+    FormFeed = 12
+}
+
+// The UTF-8 encoding bounds `put_scalar` writes.
+const ONE_BYTE_END: u64 = 128;
+const TWO_BYTE_END: u64 = 2048;
+const TWO_BYTE_LEAD: u64 = 192;
+const THREE_BYTE_LEAD: u64 = 224;
+const CONTINUATION: u64 = 128;
+const CONTINUATION_BITS: u64 = 63;
+const HEX_DIGITS: u64 = 4;
+const HEX_BASE: u64 = 16;
+const HEX_LETTER: u64 = 87;
+const HEX_UPPER_LETTER: u64 = 55;
+
+// `char::is_whitespace` (the White_Space property).
+enum Space: u64 {
+    TabFirst = 9,
+    CrLast = 13,
+    Space = 32,
+    NextLine = 133,
+    NoBreak = 160,
+    Ogham = 5760,
+    EnQuadFirst = 8192,
+    HairLast = 8202,
+    LineSep = 8232,
+    ParaSep = 8233,
+    NarrowNoBreak = 8239,
+    MediumMath = 8287,
+    Ideographic = 12288
+}
+
+// One JSON value. Text: the decoded bytes are text[a..b]. Number: `a` is
+// its value (non-negative integers; others are not read). Containers link
+// their children from `first` through `next`; an object's children
+// alternate key and value. s0..s1 is the value's span in the canonical
+// text.
+copy struct Node {
+    kind: u64,
+    a: u64,
+    b: u64,
+    s0: u64,
+    s1: u64,
+    first: u64,
+    next: u64
+}
+
+struct Dom {
+    nodes: ChunkSeq[Node],
+    text: ChunkSeq[u8],
+    i: u64
+}
+
+// The word stream under construction (src/port.rs, "Input words").
+struct W {
+    occ: ChunkSeq[u64],
+    vers: ChunkSeq[u64],
+    nver: u64,
+    reqs: ChunkSeq[u64],
+    nreq: u64,
+    body: ChunkSeq[u64],
+    msg: ChunkSeq[u8]
+}
+
+fn at(in c: Slice[u8], i: u64) -> u64 {
+    match c.try_get(i) {
+        Option::Some(b) => widen_u64(b),
+        Option::None => 0,
+    }
+}
+
+fn node(in d: Dom, i: u64) -> Node {
+    match d.nodes.try_get(i) {
+        Option::Some(n) => n,
+        Option::None => Node {
+            kind: Kind::Null,
+            a: 0,
+            b: 0,
+            s0: 0,
+            s1: 0,
+            first: NO_NODE,
+            next: NO_NODE
+        },
+    }
+}
+
+fn hex_value(c: u64) -> u64 {
+    if c <= Ch::Nine {
+        return wrapping_sub(c, Ch::Zero);
+    }
+    if c >= Ch::LowerA {
+        return wrapping_sub(c, HEX_LETTER);
+    }
+    if c >= Ch::UpperA {
+        return wrapping_sub(c, HEX_UPPER_LETTER);
+    }
+    0
+}
+
+fn put_scalar(inout t: ChunkSeq[u8], cp: u64) {
+    if cp < ONE_BYTE_END {
+        t.push(wrapping_u8(cp));
+    } else if cp < TWO_BYTE_END {
+        t.push(wrapping_u8(TWO_BYTE_LEAD | wrapping_shr_u64(cp, 6)));
+        t.push(wrapping_u8(CONTINUATION | (cp & CONTINUATION_BITS)));
+    } else {
+        t.push(wrapping_u8(THREE_BYTE_LEAD | wrapping_shr_u64(cp, 12)));
+        t.push(wrapping_u8(CONTINUATION | (wrapping_shr_u64(cp, 6) & CONTINUATION_BITS)));
+        t.push(wrapping_u8(CONTINUATION | (cp & CONTINUATION_BITS)));
+    }
+}
+
+// A string at d.i (its opening quote), decoded onto d.text.
+fn read_text(inout d: Dom, in c: Slice[u8]) -> (u64, u64) {
+    d.i = wrapping_add(d.i, 1);
+    let a = d.text.len();
+    loop {
+        let ch = at(in c, d.i);
+        if d.i >= c.len() || ch == Ch::Quote {
+            break;
+        }
+        if ch != Ch::Backslash {
+            d.text.push(wrapping_u8(ch));
+            d.i = wrapping_add(d.i, 1);
+            continue;
+        }
+        let e = at(in c, wrapping_add(d.i, 1));
+        d.i = wrapping_add(d.i, 2);
+        if e == Ch::LowerN {
+            d.text.push(wrapping_u8(Ch::Lf));
+        } else if e == Ch::LowerR {
+            d.text.push(wrapping_u8(Ch::Cr));
+        } else if e == Ch::LowerT {
+            d.text.push(wrapping_u8(Ch::Tab));
+        } else if e == Ch::LowerB {
+            d.text.push(wrapping_u8(Ch::Backspace));
+        } else if e == Ch::LowerF {
+            d.text.push(wrapping_u8(Ch::FormFeed));
+        } else if e == Ch::LowerU {
+            let mut cp: u64 = 0;
+            for k in 0..HEX_DIGITS {
+                cp = wrapping_add(wrapping_mul(cp, HEX_BASE), hex_value(at(in c, wrapping_add(d.i, k))));
+            }
+            d.i = wrapping_add(d.i, HEX_DIGITS);
+            put_scalar(inout d.text, cp);
+        } else {
+            d.text.push(wrapping_u8(e));
+        }
+    }
+    d.i = wrapping_add(d.i, 1);
+    (a, d.text.len())
+}
+
+fn push_node(inout d: Dom, kind: u64, a: u64, b: u64, s0: u64) -> u64 {
+    let i = d.nodes.len();
+    d.nodes.push(Node { kind: kind, a: a, b: b, s0: s0, s1: d.i, first: NO_NODE, next: NO_NODE });
+    i
+}
+
+fn link(inout d: Dom, prev: u64, parent: u64, child: u64) {
+    if prev == NO_NODE {
+        let mut p = node(in d, parent);
+        p.first = child;
+        let _ = d.nodes.try_set(parent, p);
+    } else {
+        let mut p = node(in d, prev);
+        p.next = child;
+        let _ = d.nodes.try_set(prev, p);
+    }
+}
+
+fn close(inout d: Dom, n: u64) {
+    let mut x = node(in d, n);
+    x.s1 = d.i;
+    let _ = d.nodes.try_set(n, x);
+}
+
+// One value at d.i (canonical text has no whitespace).
+fn value(inout d: Dom, in c: Slice[u8]) -> u64 {
+    let s0 = d.i;
+    let ch = at(in c, d.i);
+    if ch == Ch::Quote {
+        let (a, b) = read_text(inout d, in c);
+        return push_node(inout d, Kind::Text, a, b, s0);
+    }
+    if ch == Ch::LBrace || ch == Ch::LBracket {
+        let object = ch == Ch::LBrace;
+        let n = push_node(inout d, if object { Kind::Object } else { Kind::Array }, 0, 0, s0);
+        let end = if object { Ch::RBrace } else { Ch::RBracket };
+        d.i = wrapping_add(d.i, 1);
+        let mut prev = NO_NODE;
+        loop {
+            let x = at(in c, d.i);
+            if d.i >= c.len() || x == end {
+                break;
+            }
+            if x == Ch::Comma {
+                d.i = wrapping_add(d.i, 1);
+            }
+            if object {
+                let ks = d.i;
+                let (a, b) = read_text(inout d, in c);
+                let k = push_node(inout d, Kind::Text, a, b, ks);
+                link(inout d, prev, n, k);
+                prev = k;
+                d.i = wrapping_add(d.i, 1);
+            }
+            let v = value(inout d, in c);
+            link(inout d, prev, n, v);
+            prev = v;
+        }
+        d.i = wrapping_add(d.i, 1);
+        close(inout d, n);
+        return n;
+    }
+    if ch == Ch::LowerT || ch == Ch::LowerF || ch == Ch::LowerN {
+        let kind = if ch == Ch::LowerT {
+            Kind::True
+        } else if ch == Ch::LowerF {
+            Kind::False
+        } else {
+            Kind::Null
+        };
+        d.i = wrapping_add(d.i, if ch == Ch::LowerF { 5 } else { 4 });
+        return push_node(inout d, kind, 0, 0, s0);
+    }
+    // A number: digits, sign, point and exponent; only a non-negative
+    // integer's value is kept.
+    let mut v: u64 = 0;
+    loop {
+        let x = at(in c, d.i);
+        if d.i >= c.len() || x == Ch::Comma || x == Ch::RBrace || x == Ch::RBracket {
+            break;
+        }
+        if x >= Ch::Zero && x <= Ch::Nine {
+            v = wrapping_add(wrapping_mul(v, 10), wrapping_sub(x, Ch::Zero));
+        }
+        d.i = wrapping_add(d.i, 1);
+    }
+    push_node(inout d, Kind::Number, v, 0, s0)
+}
+
+fn same(in d: Dom, in n: Node, in name: Str) -> bool {
+    if wrapping_sub(n.b, n.a) != name.len() {
+        return false;
+    }
+    for i in 0..name.len() {
+        let want = match name.try_byte_at(i) {
+            Option::Some(b) => b,
+            Option::None => 0,
+        };
+        let got = match d.text.try_get(wrapping_add(n.a, i)) {
+            Option::Some(b) => b,
+            Option::None => 0,
+        };
+        if want != got {
+            return false;
+        }
+    }
+    true
+}
+
+// The value of an object's member `name`.
+fn field(in d: Dom, obj: u64, in name: Str) -> u64 {
+    let mut k = node(in d, obj).first;
+    loop {
+        if k == NO_NODE {
+            return NO_NODE;
+        }
+        let kn = node(in d, k);
+        if same(in d, in kn, name) {
+            return kn.next;
+        }
+        k = node(in d, kn.next).next;
+    }
+}
+
+fn count(in d: Dom, n: u64) -> u64 {
+    let mut k = node(in d, n).first;
+    let mut c: u64 = 0;
+    loop {
+        if k == NO_NODE {
+            return c;
+        }
+        c = wrapping_add(c, 1);
+        k = node(in d, k).next;
+    }
+}
+
+fn occ(inout w: W, a: u64, b: u64) -> u64 {
+    let i = wrapping_shr_u64(w.occ.len(), 1);
+    w.occ.push(a);
+    w.occ.push(wrapping_sub(b, a));
+    i
+}
+
+fn s(inout w: W, in d: Dom, n: u64) {
+    let x = node(in d, n);
+    let i = occ(inout w, x.a, x.b);
+    w.body.push(i);
+}
+
+fn b(inout w: W, v: bool) {
+    w.body.push(if v { 1 } else { 0 });
+}
+
+fn truth(in d: Dom, n: u64) -> bool {
+    node(in d, n).kind == Kind::True
+}
+
+// A set (or list) of strings: n, string*.
+fn set(inout w: W, in d: Dom, n: u64) {
+    w.body.push(count(in d, n));
+    let mut k = node(in d, n).first;
+    loop {
+        if k == NO_NODE {
+            break;
+        }
+        s(inout w, in d, k);
+        k = node(in d, k).next;
+    }
+}
+
+// `Enc::version`: the index of a new version entry.
+fn version(inout w: W, in d: Dom, n: u64) -> u64 {
+    let x = node(in d, n);
+    let (_ok, v) = parse_version(inout w.msg, in d.text.as_slice(), x.a, x.b);
+    w.msg.clear();
+    let pre = occ(inout w, v.pre_a, v.pre_b);
+    let build = occ(inout w, v.build_a, v.build_b);
+    let text = occ(inout w, 0, 0);
+    w.vers.push(v.major);
+    w.vers.push(v.minor);
+    w.vers.push(v.patch);
+    w.vers.push(pre);
+    w.vers.push(build);
+    w.vers.push(text);
+    w.nver = wrapping_add(w.nver, 1);
+    wrapping_sub(w.nver, 1)
+}
+
+// `Enc::req` of `VersionReq::parse(text[a..b])`: (parsed, index). The
+// requirement's display text is appended to the text.
+fn req(inout w: W, inout d: Dom, a: u64, b: u64) -> (bool, u64) {
+    let mut cs: ChunkSeq[SCmp] = ChunkSeq::new[SCmp]();
+    let ok = parse_req(inout w.msg, in d.text.as_slice(), a, b, inout cs);
+    w.msg.clear();
+    if !ok {
+        return (false, 0);
+    }
+    let display = req_display(in d.text.as_slice(), in cs);
+    let t0 = d.text.len();
+    d.text.extend(in display.as_slice());
+    let text = occ(inout w, t0, d.text.len());
+    w.reqs.push(text);
+    w.reqs.push(cs.len());
+    for i in 0..cs.len() {
+        match cs.try_get(i) {
+            Option::Some(c) => {
+                let pre = occ(inout w, c.pre_a, c.pre_b);
+                w.reqs.push(c.op);
+                w.reqs.push(c.major);
+                w.reqs.push(if c.has_minor { c.minor } else { 0 });
+                w.reqs.push(if c.has_minor { 1 } else { 0 });
+                w.reqs.push(if c.has_patch { c.patch } else { 0 });
+                w.reqs.push(if c.has_patch { 1 } else { 0 });
+                w.reqs.push(pre);
+            },
+            Option::None => (),
+        }
+    }
+    w.nreq = wrapping_add(w.nreq, 1);
+    (true, wrapping_sub(w.nreq, 1))
+}
+
+fn req_of(inout w: W, inout d: Dom, n: u64) -> u64 {
+    let x = node(in d, n);
+    let (_ok, r) = req(inout w, inout d, x.a, x.b);
+    r
+}
+
+fn is_space(cp: u64) -> bool {
+    (cp >= Space::TabFirst && cp <= Space::CrLast)
+        || cp == Space::Space
+        || cp == Space::NextLine
+        || cp == Space::NoBreak
+        || cp == Space::Ogham
+        || (cp >= Space::EnQuadFirst && cp <= Space::HairLast)
+        || cp == Space::LineSep
+        || cp == Space::ParaSep
+        || cp == Space::NarrowNoBreak
+        || cp == Space::MediumMath
+        || cp == Space::Ideographic
+}
+
+// A native requirement: raw, then `ok, name, requirement` from splitting
+// at the first whitespace and parsing the trimmed rest.
+fn sys_dep(inout w: W, inout d: Dom, n: u64) {
+    s(inout w, in d, n);
+    let x = node(in d, n);
+    let mut i = x.a;
+    let mut split = NO_NODE;
+    let mut after = x.b;
+    loop {
+        if i >= x.b {
+            break;
+        }
+        let (cp, len) = utf8_at(in d.text.as_slice(), i);
+        if is_space(cp) {
+            split = i;
+            after = wrapping_add(i, len);
+            break;
+        }
+        i = wrapping_add(i, len);
+    }
+    if split != NO_NODE {
+        // `str::trim`: from the first to past the last non-whitespace.
+        let mut ra = after;
+        let mut rb = after;
+        let mut seen = false;
+        let mut j = after;
+        loop {
+            if j >= x.b {
+                break;
+            }
+            let (cp, len) = utf8_at(in d.text.as_slice(), j);
+            if !is_space(cp) {
+                if !seen {
+                    ra = j;
+                    seen = true;
+                }
+                rb = wrapping_add(j, len);
+            }
+            j = wrapping_add(j, len);
+        }
+        if !seen {
+            ra = x.b;
+            rb = x.b;
+        }
+        let (ok, r) = req(inout w, inout d, ra, rb);
+        if ok {
+            b(inout w, true);
+            let name = occ(inout w, x.a, split);
+            w.body.push(name);
+            w.body.push(r);
+            return;
+        }
+    }
+    b(inout w, false);
+    let empty = occ(inout w, 0, 0);
+    w.body.push(empty);
+    w.body.push(0);
+}
+
+fn manifest(inout w: W, inout d: Dom, m: u64) {
+    let p = field(in d, m, "package");
+    s(inout w, in d, field(in d, p, "name"));
+    let v = version(inout w, in d, field(in d, p, "version"));
+    w.body.push(v);
+    set(inout w, in d, field(in d, p, "capability_ceiling"));
+    b(inout w, truth(in d, field(in d, p, "forbid_unsafe_ffi")));
+    let features = field(in d, m, "features");
+    w.body.push(wrapping_shr_u64(count(in d, features), 1));
+    let mut k = node(in d, features).first;
+    loop {
+        if k == NO_NODE {
+            break;
+        }
+        let f = node(in d, k).next;
+        s(inout w, in d, k);
+        set(inout w, in d, field(in d, f, "enables_effects"));
+        set(inout w, in d, field(in d, f, "deps"));
+        set(inout w, in d, field(in d, f, "features"));
+        let sys = field(in d, f, "sys_deps");
+        w.body.push(count(in d, sys));
+        let mut e = node(in d, sys).first;
+        loop {
+            if e == NO_NODE {
+                break;
+            }
+            sys_dep(inout w, inout d, e);
+            e = node(in d, e).next;
+        }
+        k = node(in d, f).next;
+    }
+    let deps = field(in d, m, "dependencies");
+    w.body.push(wrapping_shr_u64(count(in d, deps), 1));
+    let mut k2 = node(in d, deps).first;
+    loop {
+        if k2 == NO_NODE {
+            break;
+        }
+        let x = node(in d, k2).next;
+        s(inout w, in d, k2);
+        let r = req_of(inout w, inout d, field(in d, x, "version"));
+        w.body.push(r);
+        set(inout w, in d, field(in d, x, "effects"));
+        b(inout w, truth(in d, field(in d, x, "optional")));
+        set(inout w, in d, field(in d, x, "features"));
+        k2 = node(in d, x).next;
+    }
+    let sandbox = field(in d, m, "build-sandbox");
+    if node(in d, sandbox).kind != Kind::Object {
+        b(inout w, false);
+        return;
+    }
+    b(inout w, true);
+    b(inout w, truth(in d, field(in d, sandbox, "allow_network")));
+    let script = field(in d, sandbox, "script");
+    let paths = field(in d, sandbox, "wasi_read_paths");
+    let has_script = node(in d, script).kind == Kind::Text;
+    w.body.push(wrapping_add(count(in d, paths), if has_script { 1 } else { 0 }));
+    if has_script {
+        s(inout w, in d, script);
+    }
+    let mut e = node(in d, paths).first;
+    loop {
+        if e == NO_NODE {
+            break;
+        }
+        s(inout w, in d, e);
+        e = node(in d, e).next;
+    }
+}
+
+// The words and text of `validate_solution` for canonical solution JSON
+// `c`, and the number of roots.
+pub fn solution_words(in c: Slice[u8]) -> (ChunkSeq[u64], ChunkSeq[u8], u64) {
+    let mut d = Dom { nodes: ChunkSeq::new[Node](), text: ChunkSeq::new[u8](), i: 0 };
+    let mut w = W {
+        occ: ChunkSeq::new[u64](),
+        vers: ChunkSeq::new[u64](),
+        nver: 0,
+        reqs: ChunkSeq::new[u64](),
+        nreq: 0,
+        body: ChunkSeq::new[u64](),
+        msg: ChunkSeq::new[u8]()
+    };
+    let top = value(inout d, in c);
+    w.body.push(node(in d, field(in d, top, "schema_version")).a);
+    let roots = field(in d, top, "roots");
+    let nroots = count(in d, roots);
+    w.body.push(nroots);
+    let mut r = node(in d, roots).first;
+    loop {
+        if r == NO_NODE {
+            break;
+        }
+        s(inout w, in d, field(in d, r, "name"));
+        let q = req_of(inout w, inout d, field(in d, r, "version"));
+        w.body.push(q);
+        set(inout w, in d, field(in d, r, "features"));
+        r = node(in d, r).next;
+    }
+    let packages = field(in d, top, "packages");
+    w.body.push(count(in d, packages));
+    let mut p = node(in d, packages).first;
+    loop {
+        if p == NO_NODE {
+            break;
+        }
+        // The occurrence of the selection's own canonical JSON.
+        let x = node(in d, p);
+        let t0 = d.text.len();
+        d.text.extend(in c[x.s0..x.s1]);
+        let json = occ(inout w, t0, d.text.len());
+        w.body.push(json);
+        set(inout w, in d, field(in d, p, "features"));
+        manifest(inout w, inout d, field(in d, p, "manifest"));
+        p = x.next;
+    }
+    let systems = field(in d, top, "system_packages");
+    w.body.push(count(in d, systems));
+    let mut y = node(in d, systems).first;
+    loop {
+        if y == NO_NODE {
+            break;
+        }
+        s(inout w, in d, field(in d, y, "name"));
+        let v = version(inout w, in d, field(in d, y, "version"));
+        w.body.push(v);
+        y = node(in d, y).next;
+    }
+    let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    words.push(wrapping_shr_u64(w.occ.len(), 1));
+    words.extend(in w.occ.as_slice());
+    words.push(w.nver);
+    words.extend(in w.vers.as_slice());
+    words.push(w.nreq);
+    words.extend(in w.reqs.as_slice());
+    words.extend(in w.body.as_slice());
+    (words, d.text, nroots)
+}

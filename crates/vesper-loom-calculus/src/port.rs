@@ -609,6 +609,36 @@ pub fn lock_json(text: &[u8]) -> String {
     String::from_utf8(l.as_ref().pool().to_vec()).expect("the result is UTF-8")
 }
 
+/// The Vesper `vesper graph` (`lock_graph.ves`) on Loom.lock bytes after
+/// the option checks: the status (0 ok, 1 invalid lockfile, 2 semantic
+/// error), stdout and the error message.
+pub fn lock_graph(
+    lock: &[u8],
+    focus: Option<&str>,
+    invert: bool,
+    json: bool,
+    dot: bool,
+) -> (u64, String, String) {
+    let run = binding::lock_graph(
+        lock,
+        focus.is_some(),
+        focus.unwrap_or("").as_bytes(),
+        invert,
+        json,
+        dot,
+    );
+    let r = run.as_ref();
+    let text = |b: Vec<u8>| String::from_utf8(b).expect("graph output is UTF-8");
+    (r.status(), text(r.out().to_vec()), text(r.err().to_vec()))
+}
+
+/// The Vesper `PackageName::parse` error for a `vesper graph --package`
+/// value, or empty.
+pub fn graph_focus_error(name: &str) -> String {
+    let l = binding::lock_graph_focus_error(name.as_bytes());
+    String::from_utf8(l.as_ref().pool().to_vec()).expect("the error is UTF-8")
+}
+
 /// Whether the Vesper TOML reader accepts `text` (its benchmark).
 pub fn toml_accepts(text: &str) -> bool {
     binding::toml_accepts(text.as_bytes())

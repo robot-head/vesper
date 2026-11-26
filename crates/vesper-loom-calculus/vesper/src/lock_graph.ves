@@ -1,0 +1,859 @@
+// Module lock_graph of @vesper/loom-calculus (see lib.ves): `vesper graph`
+// after option parsing (src/package_graph.rs): read the Loom.lock JSON
+// (lock_json), validate it (lock_words into `validate_solution`'s tables
+// and solver), project the validated graph onto the focus and its
+// dependency or dependent closure, and render the report as text,
+// pretty-printed JSON or Graphviz DOT. Strings are read from the solver's
+// pool by id; ids order like the strings, so id order is `BTreeSet` and
+// `BTreeMap` order.
+use self::{GNode, GraphRun, L, Snap};
+use self::decode::{new_l, decode_tables, decode_solution};
+use self::solve::{solve};
+use self::util::{dep, diag, gnode, man, none, req, sedge, ssel, soff, slen, sw, ver};
+use self::lock_json::{solution_from_json, name_ok};
+use self::lock_words::{solution_words};
+use self::manifest_toml::{json_str, put_dec};
+
+// `GraphRun::status`.
+pub const GRAPH_OK: u64 = 0;
+// `err` is serde_json's message; the caller adds "{input}: invalid
+// lockfile: ".
+pub const GRAPH_BAD_LOCKFILE: u64 = 1;
+// `err` is the message; with --json, `out` holds the error report.
+pub const GRAPH_SEMANTIC: u64 = 2;
+
+const REPORT_SCHEMA_VERSION: u64 = 1;
+const INDENT: Str = "  ";
+const NEWLINE: u8 = 10;
+
+// The projection: visible nodes (indices into gn, in name order) and the
+// report's sets, as string ids.
+struct G {
+    nodes: ChunkSeq[u64],
+    roots: ChunkSeq[u64],
+    root: ChunkSeq[bool],
+    sysver: ChunkSeq[u64],
+    // Visible dependency edges: (node, dependency index) pairs; native
+    // edges: (node, gs index) pairs.
+    edges: ChunkSeq[u64],
+    natives: ChunkSeq[u64],
+    systems: ChunkSeq[u64],
+    unused: ChunkSeq[u64],
+    unused_sys: ChunkSeq[u64],
+    invert: bool,
+    has_focus: bool,
+    focus: u64
+}
+
+fn put(inout out: ChunkSeq[u8], in s: Str) {
+    out.extend(in s.as_bytes());
+}
+
+fn put_id(inout out: ChunkSeq[u8], in l: L, id: u64) {
+    let a = soff(in l, id);
+    out.extend(in l.pool[a..wrapping_add(a, slen(in l, id))]);
+}
+
+fn json_id(inout out: ChunkSeq[u8], in l: L, id: u64) {
+    let a = soff(in l, id);
+    json_str(inout out, in l.pool.as_slice(), a, wrapping_add(a, slen(in l, id)));
+}
+
+fn json_text(inout out: ChunkSeq[u8], in t: ChunkSeq[u8]) {
+    json_str(inout out, in t.as_slice(), 0, t.len());
+}
+
+fn json_lit(inout out: ChunkSeq[u8], in s: Str) {
+    json_str(inout out, in s.as_bytes(), 0, s.len());
+}
+
+// `Version`'s Display.
+fn put_ver(inout out: ChunkSeq[u8], in l: L, vi: u64) {
+    let v = ver(in l, vi);
+    put_dec(inout out, v.major);
+    put(inout out, ".");
+    put_dec(inout out, v.minor);
+    put(inout out, ".");
+    put_dec(inout out, v.patch);
+    if slen(in l, v.pre) > 0 {
+        put(inout out, "-");
+        put_id(inout out, in l, v.pre);
+    }
+    if slen(in l, v.build) > 0 {
+        put(inout out, "+");
+        put_id(inout out, in l, v.build);
+    }
+}
+
+fn put_bool(inout out: ChunkSeq[u8], v: bool) {
+    put(inout out, if v { "true" } else { "false" });
+}
+
+// The ids src[at..at + n], sorted and deduplicated.
+fn sorted(in src: ChunkSeq[u64], at: u64, n: u64) -> ChunkSeq[u64] {
+    let mut v: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..n {
+        v.push(sw(in src, wrapping_add(at, i)));
+    }
+    sort_dedup(inout v);
+    v
+}
+
+fn sort_dedup(inout v: ChunkSeq[u64]) {
+    for i in 1..v.len() {
+        let x = sw(in v, i);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let y = sw(in v, wrapping_sub(j, 1));
+            if y <= x {
+                break;
+            }
+            let _ = v.try_set(j, y);
+            j = wrapping_sub(j, 1);
+        }
+        let _ = v.try_set(j, x);
+    }
+    let mut kept: u64 = 0;
+    for i in 0..v.len() {
+        let x = sw(in v, i);
+        if kept == 0 || sw(in v, wrapping_sub(kept, 1)) != x {
+            let _ = v.try_set(kept, x);
+            kept = wrapping_add(kept, 1);
+        }
+    }
+    v.truncate(kept);
+}
+
+// `[a, b]`, the report's `list`.
+fn put_list(inout out: ChunkSeq[u8], in l: L, in ids: ChunkSeq[u64]) {
+    put(inout out, "[");
+    put_join(inout out, in l, in ids);
+    put(inout out, "]");
+}
+
+fn put_join(inout out: ChunkSeq[u8], in l: L, in ids: ChunkSeq[u64]) {
+    for i in 0..ids.len() {
+        if i > 0 {
+            put(inout out, ", ");
+        }
+        put_id(inout out, in l, sw(in ids, i));
+    }
+}
+
+// ------------------------------------------------- pretty-printed JSON
+
+fn indent(inout out: ChunkSeq[u8], depth: u64) {
+    for i in 0..depth {
+        put(inout out, INDENT);
+    }
+}
+
+// A member key at `depth`, after the previous member's separator.
+fn key(inout out: ChunkSeq[u8], depth: u64, in k: Str, first: bool) {
+    if !first {
+        put(inout out, ",");
+    }
+    out.push(NEWLINE);
+    indent(inout out, depth);
+    json_lit(inout out, k);
+    put(inout out, ": ");
+}
+
+// The close of a container whose last member was at depth + 1.
+fn close(inout out: ChunkSeq[u8], depth: u64, in bracket: Str) {
+    out.push(NEWLINE);
+    indent(inout out, depth);
+    put(inout out, bracket);
+}
+
+// A string array at `depth`.
+fn json_ids(inout out: ChunkSeq[u8], in l: L, in ids: ChunkSeq[u64], depth: u64) {
+    if ids.len() == 0 {
+        put(inout out, "[]");
+        return;
+    }
+    put(inout out, "[");
+    for i in 0..ids.len() {
+        if i > 0 {
+            put(inout out, ",");
+        }
+        out.push(NEWLINE);
+        indent(inout out, wrapping_add(depth, 1));
+        json_id(inout out, in l, sw(in ids, i));
+    }
+    close(inout out, depth, "]");
+}
+
+fn code_name(c: u64) -> Str {
+    if c == 0 {
+        "manifest_syntax"
+    } else if c == 1 {
+        "invalid_capability"
+    } else if c == 2 {
+        "unsupported_build_policy"
+    } else if c == 3 {
+        "invalid_feature"
+    } else if c == 4 {
+        "unknown_feature"
+    } else if c == 5 {
+        "unknown_dependency"
+    } else if c == 6 {
+        "invalid_system_requirement"
+    } else if c == 7 {
+        "duplicate_package"
+    } else if c == 8 {
+        "duplicate_system_package"
+    } else if c == 9 {
+        "missing_root"
+    } else if c == 10 {
+        "missing_dependency"
+    } else if c == 11 {
+        "missing_system_package"
+    } else if c == 12 {
+        "version_mismatch"
+    } else if c == 13 {
+        "capability_escalation"
+    } else if c == 14 {
+        "edge_capability_escalation"
+    } else {
+        "unsafe_ffi_forbidden"
+    }
+}
+
+// `semantic_error`: with --json, the error report (a `json!` map, so its
+// keys are sorted) on stdout; the message is the error.
+fn semantic(inout run: GraphRun, in l: L, json: bool, in kind: Str, in message: ChunkSeq[u8], at: u64, n: u64) {
+    run.status = GRAPH_SEMANTIC;
+    run.err.extend(in message.as_slice());
+    if !json {
+        return;
+    }
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put(inout o, "{");
+    key(inout o, 1, "error", true);
+    put(inout o, "{");
+    key(inout o, 2, "diagnostics", true);
+    if n == 0 {
+        put(inout o, "[]");
+    } else {
+        put(inout o, "[");
+        for i in 0..n {
+            if i > 0 {
+                put(inout o, ",");
+            }
+            let d = diag(in l.diags, wrapping_add(at, i));
+            o.push(NEWLINE);
+            indent(inout o, 3);
+            put(inout o, "{");
+            key(inout o, 4, "code", true);
+            json_lit(inout o, code_name(d.code));
+            key(inout o, 4, "message", false);
+            json_str(inout o, in l.pool.as_slice(), d.mo, wrapping_add(d.mo, d.ml));
+            key(inout o, 4, "package", false);
+            if d.pkg == none() {
+                put(inout o, "null");
+            } else {
+                json_id(inout o, in l, d.pkg);
+            }
+            key(inout o, 4, "subject", false);
+            json_str(inout o, in l.pool.as_slice(), d.so, wrapping_add(d.so, d.sl));
+            close(inout o, 3, "}");
+        }
+        close(inout o, 2, "]");
+    }
+    key(inout o, 2, "kind", false);
+    json_lit(inout o, kind);
+    key(inout o, 2, "message", false);
+    json_text(inout o, in message);
+    close(inout o, 1, "}");
+    key(inout o, 1, "schema_version", false);
+    put_dec(inout o, REPORT_SCHEMA_VERSION);
+    key(inout o, 1, "status", false);
+    json_lit(inout o, "error");
+    close(inout o, 0, "}");
+    o.push(NEWLINE);
+    run.out.extend(in o.as_slice());
+}
+
+fn snap(in l: L) -> Snap {
+    match l.snaps.try_get(0) {
+        Option::Some(s) => s,
+        Option::None => Snap {
+            node_at: 0,
+            node_n: 0,
+            root_at: 0,
+            root_n: 0,
+            unused_at: 0,
+            unused_n: 0,
+            sys_at: 0,
+            sys_n: 0,
+            diag_at: 0,
+            diag_n: 0,
+            graph: false
+        },
+    }
+}
+
+fn same_bytes(in l: L, id: u64, in t: Slice[u8]) -> bool {
+    let n = slen(in l, id);
+    if n != t.len() {
+        return false;
+    }
+    let a = soff(in l, id);
+    for i in 0..n {
+        let x = match l.pool.try_get(wrapping_add(a, i)) {
+            Option::Some(b) => b,
+            Option::None => 0,
+        };
+        let y = match t.try_get(i) {
+            Option::Some(b) => b,
+            Option::None => 0,
+        };
+        if x != y {
+            return false;
+        }
+    }
+    true
+}
+
+// `project`'s visible set (by id): every node, or the focus and its
+// dependency (or, inverted, dependent) closure.
+fn visible(in l: L, in s: Snap, in g: G) -> ChunkSeq[bool] {
+    let k = l.k;
+    let mut vis: ChunkSeq[bool] = ChunkSeq::new[bool]();
+    vis.resize(k, !g.has_focus);
+    if !g.has_focus {
+        return vis;
+    }
+    // The adjacency by id, as counts, starts and a list.
+    let mut from: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut to: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..s.node_n {
+        let n = gnode(in l, wrapping_add(s.node_at, i));
+        for e in 0..n.e_n {
+            let x = dep(in l, sw(in l.ge, wrapping_add(n.e_at, e)));
+            if g.invert {
+                from.push(x.name);
+                to.push(n.name);
+            } else {
+                from.push(n.name);
+                to.push(x.name);
+            }
+        }
+    }
+    let mut start: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    start.resize(wrapping_add(k, 1), 0);
+    for i in 0..from.len() {
+        let f = wrapping_add(sw(in from, i), 1);
+        let _ = start.try_set(f, wrapping_add(sw(in start, f), 1));
+    }
+    for i in 0..k {
+        let next = wrapping_add(sw(in start, i), sw(in start, wrapping_add(i, 1)));
+        let _ = start.try_set(wrapping_add(i, 1), next);
+    }
+    let mut fill: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    fill.extend(in start.as_slice());
+    let mut list: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    list.resize(from.len(), 0);
+    for i in 0..from.len() {
+        let f = sw(in from, i);
+        let at = sw(in fill, f);
+        let _ = list.try_set(at, sw(in to, i));
+        let _ = fill.try_set(f, wrapping_add(at, 1));
+    }
+    let mut queue: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    queue.push(g.focus);
+    let mut head: u64 = 0;
+    loop {
+        if head >= queue.len() {
+            break;
+        }
+        let x = sw(in queue, head);
+        head = wrapping_add(head, 1);
+        let seen = match vis.try_get(x) {
+            Option::Some(v) => v,
+            Option::None => true,
+        };
+        if seen {
+            continue;
+        }
+        let _ = vis.try_set(x, true);
+        for j in sw(in start, x)..sw(in start, wrapping_add(x, 1)) {
+            queue.push(sw(in list, j));
+        }
+    }
+    vis
+}
+
+fn is_vis(in vis: ChunkSeq[bool], id: u64) -> bool {
+    match vis.try_get(id) {
+        Option::Some(v) => v,
+        Option::None => false,
+    }
+}
+
+fn direction(in g: G) -> Str {
+    if g.invert { "dependents" } else { "dependencies" }
+}
+
+fn node_ver(in l: L, n: GNode) -> u64 {
+    man(in l, n.man).ver
+}
+
+fn features(in l: L, n: GNode) -> ChunkSeq[u64] {
+    sorted(in l.gids, n.feat_at, n.feat_n)
+}
+
+fn ceiling(in l: L, n: GNode) -> ChunkSeq[u64] {
+    let m = man(in l, n.man);
+    sorted(in l.ids, m.ceil_at, m.ceil_n)
+}
+
+fn required(in l: L, n: GNode) -> ChunkSeq[u64] {
+    sorted(in l.gids, n.req_at, n.req_n)
+}
+
+fn is_root(in g: G, id: u64) -> bool {
+    match g.root.try_get(id) {
+        Option::Some(v) => v,
+        Option::None => false,
+    }
+}
+
+fn edge_node(in l: L, in g: G, i: u64) -> GNode {
+    gnode(in l, sw(in g.edges, wrapping_mul(i, 2)))
+}
+
+fn req_text(in l: L, x: u64) -> u64 {
+    req(in l, dep(in l, x).req).text
+}
+
+// ------------------------------------------------------------ text
+
+fn render_text(inout out: ChunkSeq[u8], in l: L, in g: G) {
+    put(inout out, "Package graph (declared metadata; ");
+    put(inout out, direction(in g));
+    put(inout out, ")\n");
+    if g.has_focus {
+        put(inout out, "focus: ");
+        put_id(inout out, in l, g.focus);
+        put(inout out, "\n");
+    }
+    put(inout out, "Capability requirements describe the full validated snapshot, including when filtered.\n");
+    for i in 0..g.nodes.len() {
+        let n = gnode(in l, sw(in g.nodes, i));
+        put_id(inout out, in l, n.name);
+        put(inout out, " ");
+        put_ver(inout out, in l, node_ver(in l, n));
+        if is_root(in g, n.name) {
+            put(inout out, " [root]");
+        }
+        put(inout out, "\n  features: ");
+        put_list(inout out, in l, in features(in l, n));
+        put(inout out, "\n  declared ceiling: ");
+        put_list(inout out, in l, in ceiling(in l, n));
+        put(inout out, "\n  required capabilities: ");
+        put_list(inout out, in l, in required(in l, n));
+        put(inout out, "\n  forbid unsafe FFI: ");
+        put_bool(inout out, man(in l, n.man).forbid);
+        put(inout out, "\n");
+    }
+    put(inout out, "Dependency constraints (dependent -> dependency):\n");
+    for i in 0..wrapping_shr_u64(g.edges.len(), 1) {
+        let n = edge_node(in l, in g, i);
+        let x = sw(in g.edges, wrapping_add(wrapping_mul(i, 2), 1));
+        let d = dep(in l, x);
+        put(inout out, "  ");
+        put_id(inout out, in l, n.name);
+        put(inout out, " -> ");
+        put_id(inout out, in l, d.name);
+        put(inout out, ": ");
+        put_id(inout out, in l, req_text(in l, x));
+        put(inout out, "; ceiling ");
+        put_list(inout out, in l, in sorted(in l.ids, d.eff_at, d.eff_n));
+        put(inout out, "; requested features ");
+        put_list(inout out, in l, in sorted(in l.ids, d.feat_at, d.feat_n));
+        put(inout out, "\n");
+    }
+    for i in 0..wrapping_shr_u64(g.natives.len(), 1) {
+        let n = gnode(in l, sw(in g.natives, wrapping_mul(i, 2)));
+        let e = sedge(in l.gs, sw(in g.natives, wrapping_add(wrapping_mul(i, 2), 1)));
+        put(inout out, "  ");
+        put_id(inout out, in l, n.name);
+        put(inout out, " -> native ");
+        put_id(inout out, in l, e.name);
+        put(inout out, " ");
+        put_ver(inout out, in l, sw(in g.sysver, e.name));
+        put(inout out, ": ");
+        put_id(inout out, in l, e.text);
+        put(inout out, "\n");
+    }
+    if g.unused.len() > 0 {
+        put(inout out, "Unreachable packages excluded: ");
+        put_join(inout out, in l, in g.unused);
+        put(inout out, "\n");
+    }
+    if g.unused_sys.len() > 0 {
+        put(inout out, "Unused native selections excluded: ");
+        put_list(inout out, in l, in g.unused_sys);
+        put(inout out, "\n");
+    }
+}
+
+// ------------------------------------------------------------- DOT
+
+// `"pkg:" + name` or `"sys:" + name`, JSON-quoted.
+fn dot_id(inout out: ChunkSeq[u8], in l: L, in prefix: Str, id: u64) {
+    let mut t: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put(inout t, prefix);
+    put_id(inout t, in l, id);
+    json_text(inout out, in t);
+}
+
+fn dot_edge(inout out: ChunkSeq[u8], in l: L, in g: G, in pa: Str, a: u64, in pb: Str, b: u64, in label: ChunkSeq[u8]) {
+    put(inout out, "  ");
+    if g.invert {
+        dot_id(inout out, in l, pb, b);
+        put(inout out, " -> ");
+        dot_id(inout out, in l, pa, a);
+    } else {
+        dot_id(inout out, in l, pa, a);
+        put(inout out, " -> ");
+        dot_id(inout out, in l, pb, b);
+    }
+    put(inout out, " [label=");
+    json_text(inout out, in label);
+    put(inout out, "];\n");
+}
+
+fn render_dot(inout out: ChunkSeq[u8], in l: L, in g: G) {
+    put(inout out, "digraph vesper {\n  graph [label=");
+    let mut t: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put(inout t, "Declared metadata: ");
+    put(inout t, direction(in g));
+    json_text(inout out, in t);
+    put(inout out, "];\n");
+    for i in 0..g.nodes.len() {
+        let n = gnode(in l, sw(in g.nodes, i));
+        let root = is_root(in g, n.name);
+        let mut label: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put_id(inout label, in l, n.name);
+        put(inout label, " ");
+        put_ver(inout label, in l, node_ver(in l, n));
+        if root {
+            put(inout label, " [root]");
+        }
+        put(inout label, "\nfeatures: ");
+        put_list(inout label, in l, in features(in l, n));
+        put(inout label, "\ndeclared: ");
+        put_list(inout label, in l, in ceiling(in l, n));
+        put(inout label, "\nrequired: ");
+        put_list(inout label, in l, in required(in l, n));
+        put(inout out, "  ");
+        dot_id(inout out, in l, "pkg:", n.name);
+        put(inout out, " [shape=box, label=");
+        json_text(inout out, in label);
+        put(inout out, if root { ", peripheries=2];\n" } else { ", peripheries=1];\n" });
+    }
+    for i in 0..g.systems.len() {
+        let id = sw(in g.systems, i);
+        let mut label: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put(inout label, "native ");
+        put_id(inout label, in l, id);
+        put(inout label, " ");
+        put_ver(inout label, in l, sw(in g.sysver, id));
+        put(inout out, "  ");
+        dot_id(inout out, in l, "sys:", id);
+        put(inout out, " [shape=ellipse, label=");
+        json_text(inout out, in label);
+        put(inout out, "];\n");
+    }
+    for i in 0..wrapping_shr_u64(g.edges.len(), 1) {
+        let n = edge_node(in l, in g, i);
+        let x = sw(in g.edges, wrapping_add(wrapping_mul(i, 2), 1));
+        let d = dep(in l, x);
+        let mut label: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put_id(inout label, in l, n.name);
+        put(inout label, " requires ");
+        put_id(inout label, in l, d.name);
+        put(inout label, "\nrequirement: ");
+        put_id(inout label, in l, req_text(in l, x));
+        put(inout label, "\nceiling: ");
+        put_list(inout label, in l, in sorted(in l.ids, d.eff_at, d.eff_n));
+        put(inout label, "\nrequested features: ");
+        put_list(inout label, in l, in sorted(in l.ids, d.feat_at, d.feat_n));
+        dot_edge(inout out, in l, in g, "pkg:", n.name, "pkg:", d.name, in label);
+    }
+    for i in 0..wrapping_shr_u64(g.natives.len(), 1) {
+        let n = gnode(in l, sw(in g.natives, wrapping_mul(i, 2)));
+        let e = sedge(in l.gs, sw(in g.natives, wrapping_add(wrapping_mul(i, 2), 1)));
+        let mut label: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put_id(inout label, in l, n.name);
+        put(inout label, " requires native ");
+        put_id(inout label, in l, e.name);
+        put(inout label, "\nrequirement: ");
+        put_id(inout label, in l, e.text);
+        dot_edge(inout out, in l, in g, "pkg:", n.name, "sys:", e.name, in label);
+    }
+    put(inout out, "}\n");
+}
+
+// ------------------------------------------------------------ JSON
+
+fn render_json(inout o: ChunkSeq[u8], in l: L, in g: G) {
+    put(inout o, "{");
+    key(inout o, 1, "schema_version", true);
+    put_dec(inout o, REPORT_SCHEMA_VERSION);
+    key(inout o, 1, "status", false);
+    json_lit(inout o, "graph");
+    key(inout o, 1, "basis", false);
+    json_lit(inout o, "declared_metadata");
+    key(inout o, 1, "direction", false);
+    json_lit(inout o, direction(in g));
+    key(inout o, 1, "focus", false);
+    if g.has_focus {
+        json_id(inout o, in l, g.focus);
+    } else {
+        put(inout o, "null");
+    }
+    key(inout o, 1, "snapshot_roots", false);
+    json_ids(inout o, in l, in g.roots, 1);
+    key(inout o, 1, "packages", false);
+    if g.nodes.len() == 0 {
+        put(inout o, "{}");
+    } else {
+        put(inout o, "{");
+        for i in 0..g.nodes.len() {
+            let n = gnode(in l, sw(in g.nodes, i));
+            if i > 0 {
+                put(inout o, ",");
+            }
+            o.push(NEWLINE);
+            indent(inout o, 2);
+            json_id(inout o, in l, n.name);
+            put(inout o, ": {");
+            key(inout o, 3, "version", true);
+            let mut v: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            put_ver(inout v, in l, node_ver(in l, n));
+            json_text(inout o, in v);
+            key(inout o, 3, "features", false);
+            json_ids(inout o, in l, in features(in l, n), 3);
+            key(inout o, 3, "capability_ceiling", false);
+            json_ids(inout o, in l, in ceiling(in l, n), 3);
+            key(inout o, 3, "required_capabilities", false);
+            json_ids(inout o, in l, in required(in l, n), 3);
+            key(inout o, 3, "forbid_unsafe_ffi", false);
+            put_bool(inout o, man(in l, n.man).forbid);
+            key(inout o, 3, "is_root", false);
+            put_bool(inout o, is_root(in g, n.name));
+            close(inout o, 2, "}");
+        }
+        close(inout o, 1, "}");
+    }
+    key(inout o, 1, "system_packages", false);
+    if g.systems.len() == 0 {
+        put(inout o, "{}");
+    } else {
+        put(inout o, "{");
+        for i in 0..g.systems.len() {
+            let id = sw(in g.systems, i);
+            if i > 0 {
+                put(inout o, ",");
+            }
+            o.push(NEWLINE);
+            indent(inout o, 2);
+            json_id(inout o, in l, id);
+            put(inout o, ": ");
+            let mut v: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            put_ver(inout v, in l, sw(in g.sysver, id));
+            json_text(inout o, in v);
+        }
+        close(inout o, 1, "}");
+    }
+    key(inout o, 1, "dependencies", false);
+    let ne = wrapping_shr_u64(g.edges.len(), 1);
+    if ne == 0 {
+        put(inout o, "[]");
+    } else {
+        put(inout o, "[");
+        for i in 0..ne {
+            let n = edge_node(in l, in g, i);
+            let x = sw(in g.edges, wrapping_add(wrapping_mul(i, 2), 1));
+            let d = dep(in l, x);
+            if i > 0 {
+                put(inout o, ",");
+            }
+            o.push(NEWLINE);
+            indent(inout o, 2);
+            put(inout o, "{");
+            key(inout o, 3, "dependent", true);
+            json_id(inout o, in l, n.name);
+            key(inout o, 3, "dependency", false);
+            json_id(inout o, in l, d.name);
+            key(inout o, 3, "requirement", false);
+            json_id(inout o, in l, req_text(in l, x));
+            key(inout o, 3, "allowed_capabilities", false);
+            json_ids(inout o, in l, in sorted(in l.ids, d.eff_at, d.eff_n), 3);
+            key(inout o, 3, "requested_features", false);
+            json_ids(inout o, in l, in sorted(in l.ids, d.feat_at, d.feat_n), 3);
+            close(inout o, 2, "}");
+        }
+        close(inout o, 1, "]");
+    }
+    key(inout o, 1, "system_dependencies", false);
+    let ns = wrapping_shr_u64(g.natives.len(), 1);
+    if ns == 0 {
+        put(inout o, "[]");
+    } else {
+        put(inout o, "[");
+        for i in 0..ns {
+            let n = gnode(in l, sw(in g.natives, wrapping_mul(i, 2)));
+            let e = sedge(in l.gs, sw(in g.natives, wrapping_add(wrapping_mul(i, 2), 1)));
+            if i > 0 {
+                put(inout o, ",");
+            }
+            o.push(NEWLINE);
+            indent(inout o, 2);
+            put(inout o, "{");
+            key(inout o, 3, "package", true);
+            json_id(inout o, in l, n.name);
+            key(inout o, 3, "system", false);
+            json_id(inout o, in l, e.name);
+            key(inout o, 3, "requirement", false);
+            json_id(inout o, in l, e.text);
+            close(inout o, 2, "}");
+        }
+        close(inout o, 1, "]");
+    }
+    key(inout o, 1, "unused_packages", false);
+    json_ids(inout o, in l, in g.unused, 1);
+    key(inout o, 1, "unused_system_packages", false);
+    json_ids(inout o, in l, in g.unused_sys, 1);
+    close(inout o, 0, "}");
+    o.push(NEWLINE);
+}
+
+// The `PackageName::parse` error for a --package value, or empty.
+pub fn graph_focus_error(in name: Slice[u8]) -> ChunkSeq[u8] {
+    let mut e: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if !name_ok(in name, 0, name.len()) {
+        put(inout e, "invalid package name '");
+        e.extend(in name);
+        put(inout e, "'; use @org/name or reserved std/name");
+    }
+    e
+}
+
+// `vesper graph` on the bytes of a Loom.lock, after the option checks
+// (`graph_focus_error`, --json with --dot) and the file read.
+pub fn graph_run(in lock: Slice[u8], has_focus: bool, in focus: Slice[u8], invert: bool, json: bool, dot: bool) -> GraphRun {
+    let mut run = GraphRun { status: GRAPH_OK, out: ChunkSeq::new[u8](), err: ChunkSeq::new[u8]() };
+    let (ok, canonical) = solution_from_json(in lock);
+    if !ok {
+        run.status = GRAPH_BAD_LOCKFILE;
+        run.err.extend(in canonical.as_slice());
+        return run;
+    }
+    let (words, text, nroots) = solution_words(in canonical.as_slice());
+    let mut l = new_l(in words.as_slice(), in text.as_slice());
+    decode_tables(inout l);
+    decode_solution(inout l);
+    solve(inout l);
+    let s = snap(in l);
+    if nroots == 0 || s.diag_n != 0 || !s.graph {
+        let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        if nroots == 0 {
+            put(inout m, "snapshot must declare at least one root");
+        } else {
+            put(inout m, "invalid snapshot: ");
+            put_dec(inout m, s.diag_n);
+            put(inout m, " validation diagnostic(s)");
+        }
+        semantic(inout run, in l, json, "invalid_snapshot", in m, s.diag_at, s.diag_n);
+        return run;
+    }
+    let mut g = G {
+        nodes: ChunkSeq::new[u64](),
+        roots: sorted(in l.gl, s.root_at, s.root_n),
+        root: ChunkSeq::new[bool](),
+        sysver: ChunkSeq::new[u64](),
+        edges: ChunkSeq::new[u64](),
+        natives: ChunkSeq::new[u64](),
+        systems: ChunkSeq::new[u64](),
+        unused: sorted(in l.gl, s.unused_at, s.unused_n),
+        unused_sys: ChunkSeq::new[u64](),
+        invert: invert,
+        has_focus: has_focus,
+        focus: 0
+    };
+    let k = l.k;
+    g.root.resize(k, false);
+    for i in 0..g.roots.len() {
+        let _ = g.root.try_set(sw(in g.roots, i), true);
+    }
+    g.sysver.resize(k, none());
+    for i in 0..s.sys_n {
+        let b = wrapping_add(s.sys_at, wrapping_mul(i, 2));
+        let _ = g.sysver.try_set(sw(in l.gl, b), sw(in l.gl, wrapping_add(b, 1)));
+    }
+    if has_focus {
+        let mut found = false;
+        for i in 0..s.node_n {
+            let n = gnode(in l, wrapping_add(s.node_at, i));
+            if same_bytes(in l, n.name, in focus) {
+                g.focus = n.name;
+                found = true;
+            }
+        }
+        if !found {
+            let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            put(inout m, "package '");
+            m.extend(in focus);
+            put(inout m, "' is not reachable from the snapshot roots");
+            semantic(inout run, in l, json, "unknown_package", in m, 0, 0);
+            return run;
+        }
+    }
+    // Native selections that the graph does not use.
+    for i in 0..l.ss_n {
+        let id = ssel(in l, wrapping_add(l.ss_at, i)).name;
+        if sw(in g.sysver, id) == none() {
+            g.unused_sys.push(id);
+        }
+    }
+    sort_dedup(inout g.unused_sys);
+    let vis = visible(in l, in s, in g);
+    for i in 0..s.node_n {
+        let ni = wrapping_add(s.node_at, i);
+        let n = gnode(in l, ni);
+        if !is_vis(in vis, n.name) {
+            continue;
+        }
+        g.nodes.push(ni);
+        for e in 0..n.e_n {
+            let x = sw(in l.ge, wrapping_add(n.e_at, e));
+            if is_vis(in vis, dep(in l, x).name) {
+                g.edges.push(ni);
+                g.edges.push(x);
+            }
+        }
+        for j in 0..n.s_n {
+            let gi = wrapping_add(n.s_at, j);
+            g.natives.push(ni);
+            g.natives.push(gi);
+            g.systems.push(sedge(in l.gs, gi).name);
+        }
+    }
+    sort_dedup(inout g.systems);
+    if json {
+        render_json(inout run.out, in l, in g);
+    } else if dot {
+        render_dot(inout run.out, in l, in g);
+    } else {
+        render_text(inout run.out, in l, in g);
+    }
+    run
+}
