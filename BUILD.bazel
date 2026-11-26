@@ -1,4 +1,4 @@
-load("@bazel_skylib//rules:native_binary.bzl", "native_binary")
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
 load("//tools/bazel:defs.bzl", "vesper_crate")
 load("//tools/bazel:vesper_port.bzl", "vesper_package")
 load("//tools/bazel/tests:ci_analysis_test.bzl", "compile_inputs_test", "environment_test", "runfiles_test")
@@ -35,15 +35,32 @@ _TOOLS = [
 # The hybrid under the name the default compiler ships as (#1397, the
 # default switch): started as `vesper`, it runs the gated swap set with no
 # variable (crates/vesper-hybrid/src/swaps.rs), so this is the compiler the
-# default `vesper` switches to. A copy, not a second build of the crate. It
-# sits at `<bin>/shipped/vesper` so that it finds the tools at
+# default `vesper` switches to. A copy, not a second build of the crate, and
+# not a symlink: the tool lookup starts from the resolved executable, so a
+# symlink would look beside `crates/vesper-hybrid/bin/`. The copy sits at
+# `<bin>/shipped/vesper` and finds the tools (data below) at
 # `<bin>/crates/vesper-tools/bin/`, as `//:bin/vesper` does.
-native_binary(
+_HYBRID = "//crates/vesper-hybrid:bin/vesper-hybrid"
+
+copy_file(
+    name = "vesper_shipped_unix",
+    src = _HYBRID,
+    out = "shipped/vesper",
+    is_executable = True,
+)
+
+copy_file(
+    name = "vesper_shipped_windows",
+    src = _HYBRID,
+    out = "shipped/vesper.exe",
+    is_executable = True,
+)
+
+filegroup(
     name = "vesper_shipped",
-    src = "//crates/vesper-hybrid:bin/vesper-hybrid",
-    out = select({
-        "@platforms//os:windows": "shipped/vesper.exe",
-        "//conditions:default": "shipped/vesper",
+    srcs = select({
+        "@platforms//os:windows": [":vesper_shipped_windows"],
+        "//conditions:default": [":vesper_shipped_unix"],
     }),
     data = _TOOLS,
     visibility = ["//visibility:public"],
