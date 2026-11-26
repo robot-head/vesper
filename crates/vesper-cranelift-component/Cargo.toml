@@ -30,3 +30,7 @@ vesper = { path = "../.." }
 vesper-cranelift-sys = { path = "../vesper-cranelift-sys" }
 wasmtime = { version = "50", default-features = false, features = ["cranelift", "component-model", "runtime", "std"] }
 wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
+# tests/wasm_imports.rs wraps the port's core modules as the root
+# crate's Wasm tests do (tests/common/wasm_words.rs).
+wit-component = "=0.261.0"
+wit-parser = "=0.261.0"

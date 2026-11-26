@@ -85,6 +85,8 @@ vesper_crate(
         "//crates/vesper-doc:files",
         # tests/native_export_v2.rs embeds the port pilot's Vesper sources.
         "//crates/vesper-port-pilot:files",
+        # tests/common/wasm_words.rs embeds the Cranelift component's WIT (#2210).
+        "//crates/vesper-cranelift-component:wit/vcl.wit",
     ],
     extra_test_data = [
         "//crates/vesper-doc:files",
@@ -426,6 +428,9 @@ vesper_crate(
             "//crates/vesper-serde:files",
             "//crates/vesper-span:files",
         ],
+        # #2210: @vesper/wit-component against wit-component over the
+        # Cranelift imports.
+        "test/wasm_cranelift_wit_component": glob(["packages/**"]),
         # SH5 lane 11 (#1334): @vesper/wit-component against wit-component
         # over the same programs.
         "test/self_host_wit_component": glob([

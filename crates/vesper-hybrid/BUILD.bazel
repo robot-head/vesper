@@ -91,7 +91,12 @@ vesper_hybrid(
         # Path dependencies are not beside the crate in Bazel.
         "VESPER_HYBRID_OBJECT_PACKAGES_HYBRID_DRIVER": "$(execpath //:std_hash_sys_manifest)",
     },
-    extra_compile_data = ["//:files"],
+    extra_compile_data = [
+        "//:files",
+        # src/swap/wasm_backend.rs includes tests/common/wasm_words.rs, which
+        # embeds the Cranelift component's WIT (#2210).
+        "//crates/vesper-cranelift-component:wit/vcl.wit",
+    ],
     # The differential harness runs the default compiler beside the hybrid
     # over the bootstrap corpus, examples/ and tests/; tests/parse.rs also
     # reads the parser test sources.

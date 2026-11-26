@@ -18,8 +18,8 @@
 use @vesper/check-data::util::{add, inc, w};
 use self::host::{
     Core, Imp, aliased_type, fixup_module, host_name, if_count, iface_of, import_ifaces, imp_at,
-    instance_type, lower_is_drop, lower_is_indirect, lower_kind, lower_ok, lower_uses_realloc,
-    lower_uses_utf8, needs_descriptor_alias, put_decimal, read_core, shim_module
+    iface_imports_needed, instance_type, lower_is_drop, lower_is_indirect, lower_kind, lower_ok,
+    lower_uses_realloc, lower_uses_utf8, needs_descriptor_alias, put_decimal, read_core, shim_module
 };
 use self::wit::{Wit, Ty, Def, Field, Func, ty_at, def_at, field_at, func_at, arg_at, text_at};
 
@@ -813,6 +813,20 @@ pub fn encode(in core: Slice[u8], in wit: Wit, inout out: ChunkSeq[u8]) -> u64 {
         }
         import_iface_ids.push(iface_id);
         lowerings.push(lowering);
+    }
+    for iface in 0..if_count() {
+        let need = iface_imports_needed(wrapping_u8(iface));
+        if need > 0 && at32(in host_insts.as_slice(), iface) != NONE32 {
+            let mut count: u64 = 0;
+            for k in 0..import_iface_ids.len() {
+                if byte(in import_iface_ids.as_slice(), k) == wrapping_u8(iface) {
+                    count = inc(count);
+                }
+            }
+            if count != need {
+                return X_IMPORT;
+            }
+        }
     }
     let mut producer_section = ChunkSeq::new[u8]();
     producers(inout producer_section);

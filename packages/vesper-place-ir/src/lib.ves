@@ -28,7 +28,10 @@
 // - `place_ir_dump` / `place_ir_words`: the harness entries
 //   (tests/self_host_place_ir.rs).
 
-use self::codes::{Lit, Op, Pat, Tag, Term};
+pub use self::codes::{Lit, Op, Pat, PoolKind, Tag, Term};
+pub use self::json::{
+    JsonExtras, json_extras_new, json_program, place_ir_json, place_ir_json_bytes, read_json_extras
+};
 use @vesper/check-data::pack_text;
 use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, u64_at, u8_at, w};
 use @vesper/check-data::names::{Names};

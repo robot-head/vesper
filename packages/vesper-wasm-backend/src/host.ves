@@ -38,6 +38,7 @@ use @vesper/check-data::util::{add, inc};
 use self::enc::{Code, ValTy, code_new, function_bytes, vt};
 use self::err::{WErr, werr};
 use self::module::{Builder};
+use self::vcl_host::{vcl_imports};
 
 const VT_I32: u8 = 127;
 const VT_I64: u8 = 126;
@@ -85,6 +86,8 @@ const MASK32: u64 = 4294967295;
 pub const HOST_ENV: u8 = 3;
 pub const HOST_FS: u8 = 4;
 pub const HOST_PROC: u8 = 5;
+// `Ffi[Cranelift]`: imports of `vesper:cranelift/vcl` (src/vcl_host.ves).
+pub const HOST_VCL: u8 = 6;
 
 // The operations, by index (`op_index`).
 pub const ENV_ARG_COUNT: u64 = 0;
@@ -313,6 +316,10 @@ pub fn op_index(in name: Slice[u8], lib: u8, in passes: ChunkSeq[u8]) -> u64 eff
 pub struct Host {
     env: bool,
     fs: bool,
+    // `Ffi[Cranelift]`, and the index of the first of its imports (the
+    // others follow in `vcl.ves` row order).
+    vcl: bool,
+    i_vcl: u32,
     i_args: u32,
     i_environ: u32,
     i_cwd: u32,
@@ -359,6 +366,8 @@ pub fn host_none() -> Host {
     Host {
         env: false,
         fs: false,
+        vcl: false,
+        i_vcl: NONE32,
         i_args: NONE32,
         i_environ: NONE32,
         i_cwd: NONE32,
@@ -534,12 +543,18 @@ pub fn host_new(inout builder: Builder, in codes: ChunkSeq[u8]) -> Host eff [Fai
                 if code == HOST_FS {
                     host.fs = true;
                 }
+                if code == HOST_VCL {
+                    host.vcl = true;
+                }
             },
             Option::None => {},
         }
     }
-    if !host.env && !host.fs {
+    if !host.env && !host.fs && !host.vcl {
         return host;
+    }
+    if host.vcl {
+        host.i_vcl = vcl_imports(inout builder);
     }
     if host.env {
         host.i_args = imp(inout builder, 0, "get-arguments", in i32s(1));
@@ -591,7 +606,17 @@ pub fn host_new(inout builder: Builder, in codes: ChunkSeq[u8]) -> Host eff [Fai
 
 // The WIT world lines for the imported interfaces.
 pub fn wit_imports(in host: Host) -> Str {
-    if host.env && host.fs {
+    if host.vcl {
+        if host.env && host.fs {
+            "  import wasi:cli/environment@0.2.0;\n  import wasi:filesystem/types@0.2.0;\n  import wasi:filesystem/preopens@0.2.0;\n  import vesper:cranelift/vcl@0.1.0;\n"
+        } else if host.env {
+            "  import wasi:cli/environment@0.2.0;\n  import vesper:cranelift/vcl@0.1.0;\n"
+        } else if host.fs {
+            "  import wasi:filesystem/types@0.2.0;\n  import wasi:filesystem/preopens@0.2.0;\n  import vesper:cranelift/vcl@0.1.0;\n"
+        } else {
+            "  import vesper:cranelift/vcl@0.1.0;\n"
+        }
+    } else if host.env && host.fs {
         "  import wasi:cli/environment@0.2.0;\n  import wasi:filesystem/types@0.2.0;\n  import wasi:filesystem/preopens@0.2.0;\n"
     } else if host.env {
         "  import wasi:cli/environment@0.2.0;\n"
@@ -603,7 +628,7 @@ pub fn wit_imports(in host: Host) -> Str {
 }
 
 pub fn active(in host: Host) -> bool {
-    host.env || host.fs
+    host.env || host.fs || host.vcl
 }
 
 // ----- a small assembler over `Code` (every local is an `i64`) -----------
