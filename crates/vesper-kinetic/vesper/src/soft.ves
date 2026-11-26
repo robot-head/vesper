@@ -1,0 +1,334 @@
+// @vesper/kinetic::soft: the XPBD soft-body world's substeps (the substep
+// loop of `SoftWorld::step` in src/soft.rs: integration, the colour-layer
+// projection of distance and tetrahedral volume constraints, the ground
+// contact with positional friction and the velocities from positions), in
+// binary32 with the Rust build's operation order.
+//
+// A colour's constraints touch disjoint particles, so applying each
+// correction right after computing it gives the bits of the Rust build's
+// compute-then-apply pass.
+//
+// The Rust wrapper lends the state in u64 words of two 32-bit lanes (low,
+// high), every f32 as its bit pattern:
+// - `p`: PARTICLE words per particle: (x, y), (z, inverse mass), (vx, vy),
+//   (vz, 0).
+// - `prev`: PREV words per particle, the position at the start of the
+//   substep: (x, y), (z, 0).
+// - `cs`: CONSTRAINT words per constraint: (rest, compliance), then the
+//   particles (i0, i1), (i2, i3); i2 = DISTANCE marks a distance
+//   constraint (i0, i1), the others are volume constraints over i0..i3.
+// - `layer_off`/`layer_idx`: the colourer's layers.
+// - `params` (u32 lanes): dt, gravity (3), ground (1: present), ground y,
+//   ground friction.
+
+const PARTICLE: u64 = 4;
+const PREV: u64 = 2;
+const CONSTRAINT: u64 = 3;
+const DISTANCE: u32 = 4294967295;
+const LOW: u64 = 4294967295;
+
+fn gw(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn sw(inout s: Slice[u64], i: u64, v: u64) {
+    s.try_set(i, v);
+}
+
+fn gu(in s: Slice[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn gf(in s: Slice[u32], i: u64) -> f32 {
+    from_bits_f32(gu(in s, i))
+}
+
+fn lo(w: u64) -> f32 {
+    from_bits_f32(wrapping_u32(w))
+}
+
+fn hi(w: u64) -> f32 {
+    from_bits_f32(wrapping_u32(w >> 32))
+}
+
+fn pk(a: f32, b: f32) -> u64 {
+    widen_u64(to_bits_f32(a)) | (widen_u64(to_bits_f32(b)) << 32)
+}
+
+// The word `w` with its low lane replaced by `a`.
+fn with_lo(w: u64, a: f32) -> u64 {
+    (w & (LOW << 32)) | widen_u64(to_bits_f32(a))
+}
+
+fn sqrt32(x: f32) -> f32 {
+    nearest_f32(sqrt(widen_f64(x)))
+}
+
+fn fmax(a: f32, b: f32) -> f32 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+// Particle `i`'s position words `w0`, `w1` (as read) moved by (dx, dy, dz).
+fn shift(inout p: Slice[u64], i: u64, w0: u64, w1: u64, dx: f32, dy: f32, dz: f32) {
+    let at = wrapping_mul(i, PARTICLE);
+    sw(inout p, at, pk(lo(w0) + dx, hi(w0) + dy));
+    sw(inout p, wrapping_add(at, 1), with_lo(w1, lo(w1) + dz));
+}
+
+// A distance constraint between particles a and b.
+fn distance(inout p: Slice[u64], a: u64, b: u64, rest: f32, compliance: f32, inv_h2: f32) {
+    // Each constraint is projected once per substep, right after the
+    // multipliers are reset, so its lambda is always 0 here (and its new
+    // value is never read).
+    let lam: f32 = 0.0;
+    let pa = wrapping_mul(a, PARTICLE);
+    let pb = wrapping_mul(b, PARTICLE);
+    let a0 = gw(in p, pa);
+    let a1 = gw(in p, wrapping_add(pa, 1));
+    let b0 = gw(in p, pb);
+    let b1 = gw(in p, wrapping_add(pb, 1));
+    let wa = hi(a1);
+    let wb = hi(b1);
+    let dx = lo(a0) - lo(b0);
+    let dy = hi(a0) - hi(b0);
+    let dz = lo(a1) - lo(b1);
+    let l = sqrt32((dx * dx + dy * dy) + dz * dz);
+    let mut ax: f32 = 0.0;
+    let mut ay: f32 = 0.0;
+    let mut az: f32 = 0.0;
+    let mut bx: f32 = 0.0;
+    let mut by: f32 = 0.0;
+    let mut bz: f32 = 0.0;
+    if l > 0.0 {
+        let inv = 1.0 / l;
+        let nx = dx * inv;
+        let ny = dy * inv;
+        let nz = dz * inv;
+        let alpha = compliance * inv_h2;
+        let denom = (wa + wb) + alpha;
+        if denom > 0.0 {
+            let cval = l - rest;
+            let dl = -(cval + alpha * lam) / denom;
+            let sa = wa * dl;
+            let sb = -(wb * dl);
+            ax = nx * sa;
+            ay = ny * sa;
+            az = nz * sa;
+            bx = nx * sb;
+            by = ny * sb;
+            bz = nz * sb;
+        }
+    }
+    shift(inout p, a, a0, a1, ax, ay, az);
+    shift(inout p, b, b0, b1, bx, by, bz);
+}
+
+// A tetrahedral volume constraint over particles i0..i3.
+fn volume(
+    inout p: Slice[u64],
+    i0: u64,
+    i1: u64,
+    i2: u64,
+    i3: u64,
+    rest_volume: f32,
+    compliance: f32,
+    inv_h2: f32
+) {
+    // Each constraint is projected once per substep, right after the
+    // multipliers are reset, so its lambda is always 0 here (and its new
+    // value is never read).
+    let lam: f32 = 0.0;
+    let q0 = wrapping_mul(i0, PARTICLE);
+    let q1 = wrapping_mul(i1, PARTICLE);
+    let q2 = wrapping_mul(i2, PARTICLE);
+    let q3 = wrapping_mul(i3, PARTICLE);
+    let p00 = gw(in p, q0);
+    let p01 = gw(in p, wrapping_add(q0, 1));
+    let p10 = gw(in p, q1);
+    let p11 = gw(in p, wrapping_add(q1, 1));
+    let p20 = gw(in p, q2);
+    let p21 = gw(in p, wrapping_add(q2, 1));
+    let p30 = gw(in p, q3);
+    let p31 = gw(in p, wrapping_add(q3, 1));
+    let x0 = lo(p00);
+    let y0 = hi(p00);
+    let z0 = lo(p01);
+    let w0 = hi(p01);
+    let w1 = hi(p11);
+    let w2 = hi(p21);
+    let w3 = hi(p31);
+    // e1, e2, e3 = p1 - p0, p2 - p0, p3 - p0.
+    let e1x = lo(p10) - x0;
+    let e1y = hi(p10) - y0;
+    let e1z = lo(p11) - z0;
+    let e2x = lo(p20) - x0;
+    let e2y = hi(p20) - y0;
+    let e2z = lo(p21) - z0;
+    let e3x = lo(p30) - x0;
+    let e3y = hi(p30) - y0;
+    let e3z = lo(p31) - z0;
+    // g1 = e2 x e3, g2 = e3 x e1, g3 = e1 x e2.
+    let g1x = e2y * e3z - e2z * e3y;
+    let g1y = e2z * e3x - e2x * e3z;
+    let g1z = e2x * e3y - e2y * e3x;
+    let g2x = e3y * e1z - e3z * e1y;
+    let g2y = e3z * e1x - e3x * e1z;
+    let g2z = e3x * e1y - e3y * e1x;
+    let g3x = e1y * e2z - e1z * e2y;
+    let g3y = e1z * e2x - e1x * e2z;
+    let g3z = e1x * e2y - e1y * e2x;
+    // g0 = (g1 + g2 + g3) * -1.
+    let g0x = ((g1x + g2x) + g3x) * -1.0;
+    let g0y = ((g1y + g2y) + g3y) * -1.0;
+    let g0z = ((g1z + g2z) + g3z) * -1.0;
+    let mut wsum: f32 = 0.0;
+    wsum = wsum + w0 * ((g0x * g0x + g0y * g0y) + g0z * g0z);
+    wsum = wsum + w1 * ((g1x * g1x + g1y * g1y) + g1z * g1z);
+    wsum = wsum + w2 * ((g2x * g2x + g2y * g2y) + g2z * g2z);
+    wsum = wsum + w3 * ((g3x * g3x + g3y * g3y) + g3z * g3z);
+    let alpha = compliance * inv_h2;
+    let denom = wsum + alpha;
+    if !(denom > 0.0) {
+        shift(inout p, i0, p00, p01, 0.0, 0.0, 0.0);
+        shift(inout p, i1, p10, p11, 0.0, 0.0, 0.0);
+        shift(inout p, i2, p20, p21, 0.0, 0.0, 0.0);
+        shift(inout p, i3, p30, p31, 0.0, 0.0, 0.0);
+        return;
+    }
+    let cval = ((g3x * e3x + g3y * e3y) + g3z * e3z) - 6.0 * rest_volume;
+    let dl = -(cval + alpha * lam) / denom;
+    let s0 = w0 * dl;
+    let s1 = w1 * dl;
+    let s2 = w2 * dl;
+    let s3 = w3 * dl;
+    shift(inout p, i0, p00, p01, g0x * s0, g0y * s0, g0z * s0);
+    shift(inout p, i1, p10, p11, g1x * s1, g1y * s1, g1z * s1);
+    shift(inout p, i2, p20, p21, g2x * s2, g2y * s2, g2z * s2);
+    shift(inout p, i3, p30, p31, g3x * s3, g3y * s3, g3z * s3);
+}
+
+pub fn substeps(
+    substeps: u32,
+    inout p: Slice[u64],
+    inout prev: Slice[u64],
+    in cs: Slice[u64],
+    in layer_off: Slice[u32],
+    in layer_idx: Slice[u32],
+    in params: Slice[u32]
+) {
+    let n = p.len() / PARTICLE;
+    let layers = if layer_off.len() > 0 {
+        wrapping_sub(layer_off.len(), 1)
+    } else {
+        0
+    };
+    let h = gf(in params, 0) / nearest_f32(widen_f64(substeps));
+    let inv_h = 1.0 / h;
+    let inv_h2 = inv_h * inv_h;
+    let gx = gf(in params, 1);
+    let gy = gf(in params, 2);
+    let gz = gf(in params, 3);
+    let has_ground = gu(in params, 4) != 0;
+    let ground = gf(in params, 5);
+    let mu = gf(in params, 6);
+    // scale(g, h), computed once like the Rust build's per-particle product.
+    let ghx = gx * h;
+    let ghy = gy * h;
+    let ghz = gz * h;
+    for _step in 0..widen_u64(substeps) {
+        for i in 0..n {
+            let at = wrapping_mul(i, PARTICLE);
+            let w0 = gw(in p, at);
+            let w1 = gw(in p, wrapping_add(at, 1));
+            let qi = wrapping_mul(i, PREV);
+            sw(inout prev, qi, w0);
+            sw(inout prev, wrapping_add(qi, 1), w1 & LOW);
+            if hi(w1) == 0.0 {
+                continue;
+            }
+            let w2 = gw(in p, wrapping_add(at, 2));
+            let w3 = gw(in p, wrapping_add(at, 3));
+            let vx = lo(w2) + ghx;
+            let vy = hi(w2) + ghy;
+            let vz = lo(w3) + ghz;
+            sw(inout p, wrapping_add(at, 2), pk(vx, vy));
+            sw(inout p, wrapping_add(at, 3), pk(vz, 0.0));
+            sw(inout p, at, pk(lo(w0) + vx * h, hi(w0) + vy * h));
+            sw(inout p, wrapping_add(at, 1), with_lo(w1, lo(w1) + vz * h));
+        }
+        for color in 0..layers {
+            let lo_i = widen_u64(gu(in layer_off, color));
+            let hi_i = widen_u64(gu(in layer_off, wrapping_add(color, 1)));
+            for idx in lo_i..hi_i {
+                let ci = widen_u64(gu(in layer_idx, idx));
+                let at = wrapping_mul(ci, CONSTRAINT);
+                let c0 = gw(in cs, at);
+                let c1 = gw(in cs, wrapping_add(at, 1));
+                let c2 = gw(in cs, wrapping_add(at, 2));
+                if wrapping_u32(c2) == DISTANCE {
+                    distance(inout p, c1 & LOW, c1 >> 32, lo(c0), hi(c0), inv_h2);
+                } else {
+                    volume(inout p, c1 & LOW, c1 >> 32, c2 & LOW, c2 >> 32, lo(c0), hi(c0), inv_h2);
+                }
+            }
+        }
+        if has_ground {
+            for i in 0..n {
+                let at = wrapping_mul(i, PARTICLE);
+                let w0 = gw(in p, at);
+                let w1 = gw(in p, wrapping_add(at, 1));
+                if hi(w1) == 0.0 {
+                    continue;
+                }
+                let depth = ground - hi(w0);
+                if !(depth > 0.0) {
+                    continue;
+                }
+                let mut x = lo(w0);
+                let mut z = lo(w1);
+                if mu > 0.0 {
+                    let qi = wrapping_mul(i, PREV);
+                    let q0 = gw(in prev, qi);
+                    let q1 = gw(in prev, wrapping_add(qi, 1));
+                    let dx = x - lo(q0);
+                    let dz = z - lo(q1);
+                    let t = sqrt32(dx * dx + dz * dz);
+                    if t > 0.0 {
+                        let keep = fmax(0.0, 1.0 - (mu * depth) / t);
+                        x = lo(q0) + dx * keep;
+                        z = lo(q1) + dz * keep;
+                    }
+                }
+                sw(inout p, at, pk(x, ground));
+                sw(inout p, wrapping_add(at, 1), with_lo(w1, z));
+            }
+        }
+        for i in 0..n {
+            let at = wrapping_mul(i, PARTICLE);
+            let w1 = gw(in p, wrapping_add(at, 1));
+            if hi(w1) == 0.0 {
+                continue;
+            }
+            let w0 = gw(in p, at);
+            let qi = wrapping_mul(i, PREV);
+            let q0 = gw(in prev, qi);
+            let q1 = gw(in prev, wrapping_add(qi, 1));
+            sw(
+                inout p,
+                wrapping_add(at, 2),
+                pk((lo(w0) - lo(q0)) * inv_h, (hi(w0) - hi(q0)) * inv_h)
+            );
+            sw(inout p, wrapping_add(at, 3), pk((lo(w1) - lo(q1)) * inv_h, 0.0));
+        }
+    }
+}
