@@ -542,6 +542,15 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]) + ["//crates/vesper-ebpf:files"],
+        # #2024 slice 2: the checker's declaration collector in Vesper against
+        # World::collect over every .ves source of the repository.
+        "test/self_host_check_collect": glob([
+            "crates/**/*.ves",
+            "examples/**/*.ves",
+            "packages/**",
+            "src/**/*.ves",
+            "tests/**/*.ves",
+        ]),
         # Self-hosting SH2 lane 11 (#1183): the dyn passes in Vesper against
         # src/dyn_fn.rs and src/dyn_trait.rs over the dyn suites, mutants and
         # the repository's .ves sources. Anchored globs.
@@ -1285,6 +1294,8 @@ vesper_crate(
         # #1886: the verified backend lowers every corpus main.
         "test/self_host_verified_codegen": "eternal",
         "test/self_host_bounds_hoist_jit": "eternal",
+        # The collect differential collects every .ves source once.
+        "test/self_host_check_collect": "long",
         # The dyn differential runs both passes over every .ves source twice.
         "test/self_host_check_dyn": "long",
         # The package assembler differential (#1178) compiles the AST package.
