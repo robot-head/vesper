@@ -37,9 +37,9 @@ pub fn port_live_allocations() -> i64 {
     port::live_allocations()
 }
 
-/// [`format_source`] through the port alone, for the differential tests:
-/// `None` when the source is one the Rust code formats (the macro
-/// profile).
+/// [`format_source`] through the port alone, for the differential tests.
+/// Since the macro profile moved to the port, it is `None` only for an
+/// error code the port does not define.
 #[cfg(vesper_port)]
 #[doc(hidden)]
 pub fn port_format_source(source: &str, limits: Limits) -> Option<Result<FormatResult, Error>> {
@@ -492,8 +492,8 @@ fn once(
 /// Width is a 100 Unicode-scalar ribbon with four-space nesting. Indivisible
 /// token/comment bytes are never wrapped, so those leaves may exceed the ribbon.
 pub fn format_source(source: &str, limits: Limits) -> Result<FormatResult, Error> {
-    // The native port handles executable grammar, sugar and test blocks
-    // (over @vesper/front's surface CST); the macro profile stays here.
+    // The native port handles executable grammar, sugar, test blocks and
+    // the expression macro profile (over @vesper/front's CSTs).
     if source.len() > limits.max_input_bytes {
         return Err(Error::InputLimit);
     }

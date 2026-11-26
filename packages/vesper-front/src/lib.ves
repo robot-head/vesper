@@ -26,6 +26,10 @@ use self::lex::{
 use self::diag::{diags_new, diag_push, limit_message_observed};
 use self::parse::{parse_tokens, parse_surface_tokens, parse_template_tokens, hard_depth};
 use self::recover::{editor_limits, parse_recovery_tables};
+use self::source_macro::{
+    MacroLimits, MacroSource, MacroError, macro_limits_default, parse_macro_source,
+    parse_macro_surface_tokens
+};
 use self::tree::{tree_new, build_tree, report};
 use self::util::{byte, inc, shl, u8_at, w32};
 
@@ -146,7 +150,15 @@ pub struct P {
     // nested pattern sugar are errors.
     template_scopes: bool,
     before_handler_in: bool,
-    group_end: ChunkSeq[u32]
+    group_end: ChunkSeq[u32],
+    // Header notes for the source macro parser (source_macro.ves): with
+    // `notes`, `params` pushes four words per parameter (span start and
+    // end, the name token and whether it has projections) on
+    // `param_notes`, and `function_header` counts its trait bounds (pending
+    // generic bounds or a `where` clause) in `bounds`.
+    notes: bool,
+    param_notes: ChunkSeq[u64],
+    bounds: u64
 }
 
 // What the parser keeps of a parsed expression: its kind (parse.ves
@@ -264,10 +276,94 @@ pub fn parse_surface_tables(in source: Str, limits: u64, counts: u64) -> ChunkSe
     if t.rejected {
         return report_rejected(in d);
     }
-    let p = parse_surface_tokens(in b, t, d, max_diag, hard_depth(), ((limits >> 32) & 1) == 1);
+    let include_tests = ((limits >> 32) & 1) == 1;
+    let p = if ((limits >> 33) & 1) == 1 {
+        // `parse_surface_with_test_mode`: with the expression macro check
+        // under `surface_macro_limits`.
+        let mut lim = macro_limits_default();
+        let bytes = limits & 4294967295;
+        if bytes < 1048576 {
+            lim.max_source_bytes = bytes;
+        } else {
+            lim.max_source_bytes = 1048576;
+        }
+        let tokens = counts & 4294967295;
+        if tokens < 65536 {
+            lim.max_tokens = tokens;
+        } else {
+            lim.max_tokens = 65536;
+        }
+        if hard_depth() < lim.max_depth {
+            lim.max_depth = hard_depth();
+        }
+        parse_macro_surface_tokens(in b, t, d, max_diag, hard_depth(), include_tests, lim)
+    } else {
+        parse_surface_tokens(in b, t, d, max_diag, hard_depth(), include_tests)
+    };
     let mut tree = tree_new();
     build_tree(inout tree, in p);
     report(in tree, in p)
+}
+
+// `v`, or `default` when it is 0.
+fn or_default(v: u64, default: u64) -> u64 {
+    if v == 0 {
+        default
+    } else {
+        v
+    }
+}
+
+// `macro_source::parse(source, limits)` as rows: on an error its code
+// (source_macro.ves `MacroError`) and span (u64::MAX pairs for none);
+// else 0, the counts of definitions, parameters, functions, parameter
+// names, invocations, arguments and tokens, then those rows
+// (source_macro.ves `Mp`). `limits` is `Limits::default()` with the
+// nonzero fields of `a` (work in bits 0-31, metadata bytes 32-63) and `b`
+// (tokens 0-16, macros 17-24, functions 25-35, invocations 36-48,
+// parameters 49-54, depth 55-62).
+pub fn macro_source_tables(in source: Str, a: u64, b: u64) -> ChunkSeq[u64] {
+    let mut lim = macro_limits_default();
+    lim.max_work = or_default(a & 4294967295, lim.max_work);
+    lim.max_metadata_bytes = or_default(a >> 32, lim.max_metadata_bytes);
+    lim.max_tokens = or_default(b & 131071, lim.max_tokens);
+    lim.max_macros = or_default((b >> 17) & 255, lim.max_macros);
+    lim.max_functions = or_default((b >> 25) & 2047, lim.max_functions);
+    lim.max_invocations = or_default((b >> 36) & 8191, lim.max_invocations);
+    lim.max_parameters = or_default((b >> 49) & 63, lim.max_parameters);
+    lim.max_depth = or_default((b >> 55) & 255, lim.max_depth);
+    handle Fail[MacroError] in {
+        let ms = parse_macro_source(in source.as_bytes(), lim);
+        macro_rows(in ms)
+    } with {
+        return v => v,
+        raise(e, _) => {
+            let mut out = ChunkSeq::new[u64]();
+            out.push(e.code);
+            out.push(e.start);
+            out.push(e.end);
+            out
+        },
+    }
+}
+
+fn macro_rows(in ms: MacroSource) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::new[u64]();
+    out.push(0);
+    out.push(ms.defs.len() >> 3);
+    out.push(ms.params.len() >> 2);
+    out.push(ms.funs.len() >> 3);
+    out.push(ms.names.len() >> 1);
+    out.push(ms.invs.len() >> 3);
+    out.push(ms.args.len() >> 1);
+    out.push(ms.t.kind.len());
+    out.extend(in ms.defs.as_slice());
+    out.extend(in ms.params.as_slice());
+    out.extend(in ms.funs.as_slice());
+    out.extend(in ms.names.as_slice());
+    out.extend(in ms.invs.as_slice());
+    out.extend(in ms.args.as_slice());
+    out
 }
 
 // The template-scopes profile, as the tables of `parse_tables`:

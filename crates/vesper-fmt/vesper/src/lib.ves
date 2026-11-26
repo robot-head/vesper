@@ -12,17 +12,25 @@
 // charges the same work units as Rust, so the same input and limits give the
 // same output or the same error. Sugar sources and test blocks are laid
 // out over @vesper/front's surface CST (`surface::syntax`, `sugar_layout`).
-// Sources in the macro profile (`m!`, `quote`) are `OpaqueMacro` here: the
-// Rust side formats them with its own macro-profile parser, which this
-// package does not port yet.
+// Sources in the macro profile (`m!`, `quote`) go through @vesper/front's
+// expression macro parser (`macro_source::syntax`) and are laid out over its
+// recovery CST, or over the surface CST when they also use sugar.
 
 use @vesper/front::{Tokens, P};
+use @vesper/front::source_macro::{
+    MacroLimits, MacroError, MacroSource, macro_limits_default, parse_macro_source,
+    parse_macro_surface_tokens
+};
+use @vesper/front::recover::{editor_limits, recover};
+use @vesper/front::util::{saturating_mul_u64};
 use @vesper-std/hash::blake3::{Digest};
 use @vesper-std/hash-sys::{hash};
 use @vesper/front::diag::{diags_new};
 use @vesper/front::parse::{parse_tokens, parse_surface_tokens, sugar_operator_at, hard_depth};
 use @vesper/front::{Tokens};
-use @vesper/front::lex::{lex_with_limits, lex_sugar_with_limits, max_diagnostics, token_end};
+use @vesper/front::lex::{
+    lex_with_limits, lex_sugar_with_limits, max_diagnostics, token_end, tokens_new
+};
 use @vesper/front::diag::{diags_new};
 
 // ---------------------------------------------------------------- kinds
@@ -49,6 +57,7 @@ const NODE_SUGAR_PAT: u64 = 218;
 const NODE_SUGAR_OPERATOR: u64 = 220;
 const NODE_TAGGED_LITERAL: u64 = 223;
 const NODE_SURFACE_MACRO_DECL: u64 = 224;
+const NODE_SURFACE_MACRO_CALL: u64 = 225;
 const NODE_SURFACE_MACRO_ARG: u64 = 226;
 
 const K_WHITESPACE: u8 = 0;
@@ -893,10 +902,15 @@ fn lex_hard(in src: Slice[u8]) -> Tokens eff [Fail[FmtFail]] {
     t
 }
 
-// `guarded_lex` with `allow_macros = false` (the sugar surface lexer, so a
-// backtick is a token). Macro syntax is
-// `OpaqueMacro`, which the caller hands to the Rust build.
-fn gate(in src: Slice[u8], in lim: Limits, inout w: Work) -> Tokens eff [Fail[FmtFail]] {
+// `guarded_lex(source, limits, work, allow_macros)` (the sugar surface
+// lexer, so a backtick is a token). Without `allow_macros`, macro syntax
+// is `OpaqueMacro`.
+fn gate(
+    in src: Slice[u8],
+    in lim: Limits,
+    inout w: Work,
+    allow_macros: bool
+) -> Tokens eff [Fail[FmtFail]] {
     charge(inout w, src.len());
     if src.len() > HARD_SOURCE_BYTES {
         fail(E_INPUT);
@@ -929,10 +943,10 @@ fn gate(in src: Slice[u8], in lim: Limits, inout w: Work) -> Tokens eff [Fail[Fm
         }
         let s = tok_start(in t, i);
         let e = tok_end(in t, i);
-        if k == K_BANG && (previous == K_LOWER || previous == K_UPPER) {
+        if !allow_macros && k == K_BANG && (previous == K_LOWER || previous == K_UPPER) {
             fail(E_MACRO);
         }
-        if k == K_LOWER && opaque_word(in src, s, e) {
+        if !allow_macros && k == K_LOWER && opaque_word(in src, s, e) {
             fail(E_MACRO);
         }
         let top = wrapping_sub(counts.len(), 1);
@@ -1039,6 +1053,31 @@ fn gate(in src: Slice[u8], in lim: Limits, inout w: Work) -> Tokens eff [Fail[Fm
     }
     charge(inout w, wrapping_mul(ntok, PARSE_UNITS_PER_TOKEN));
     t
+}
+
+// The first lex of `once`: `guarded_lex` without macros, and on
+// `OpaqueMacro` again with them (`opaque`).
+struct Gated {
+    t: Tokens,
+    opaque: bool
+}
+
+fn gate_once(in src: Slice[u8], in lim: Limits, inout w: Work) -> Gated eff [Fail[FmtFail]] {
+    let g = handle Fail[FmtFail] in {
+        Gated { t: gate(in src, in lim, inout w, false), opaque: false }
+    } with {
+        return v => v,
+        raise(e, _) => if e.code == E_MACRO {
+            Gated { t: tokens_new(0), opaque: true }
+        } else {
+            Fail::raise(e)
+        },
+    };
+    if g.opaque {
+        Gated { t: gate(in src, in lim, inout w, true), opaque: true }
+    } else {
+        g
+    }
 }
 
 // The work units of a second `guarded_lex` of a source the gate accepted
@@ -2203,7 +2242,9 @@ struct Pass {
     out: ChunkSeq[u8],
     nodes: ChunkSeq[u64],
     doc: Doc,
-    root: u64
+    root: u64,
+    // The source is in the macro profile (`Profile::allow_macro_tokens`).
+    opaque: bool
 }
 
 // Lay out and render the parse `p` of `src`.
@@ -2212,12 +2253,25 @@ fn layout(
     in p: P,
     sink nodes: ChunkSeq[u64],
     in lim: Limits,
-    inout w: Work
+    inout w: Work,
+    opaque: bool
 ) -> Pass eff [Fail[FmtFail]] {
     let mut at = atoms(in src, in p.t, in p.ev);
     if nodes.len() != 0 {
         annotate(inout at, in p, in src, in nodes);
     }
+    render_atoms(in src, in at, nodes, in lim, inout w, opaque)
+}
+
+// Lay out and render the significant tokens `at` of `src`.
+fn render_atoms(
+    in src: Slice[u8],
+    in at: Atoms,
+    sink nodes: ChunkSeq[u64],
+    in lim: Limits,
+    inout w: Work,
+    opaque: bool
+) -> Pass eff [Fail[FmtFail]] {
     let mut dl = lim;
     dl.max_work = wrapping_sub(w.max, w.used);
     let mut d = doc_new(in dl, wrapping_add(wrapping_mul(at.kind.len(), 3), 8));
@@ -2228,7 +2282,7 @@ fn layout(
     let out = render(inout d, in src, root);
     charge(inout w, d.w.used);
     charge(inout w, out.len());
-    Pass { out: out, nodes: nodes, doc: d, root: root }
+    Pass { out: out, nodes: nodes, doc: d, root: root, opaque: opaque }
 }
 
 fn first_diag(in p: P) -> u64 {
@@ -2245,8 +2299,12 @@ fn once_tokens(
     in src: Slice[u8],
     sink t: Tokens,
     in lim: Limits,
-    inout w: Work
+    inout w: Work,
+    opaque: bool
 ) -> Pass eff [Fail[FmtFail]] {
+    if opaque {
+        return once_macro(in src, t, in lim, inout w);
+    }
     let ntok = t.kind.len();
     // Ordinary modules use the compiler parser. Its batch mode skips the
     // contents of test blocks, so parse those in surface mode as well.
@@ -2273,7 +2331,7 @@ fn once_tokens(
             parse_tokens(in src, t, diags_new(), max_diagnostics(), hard_depth())
         };
         if p.d.code.len() == 0 {
-            return layout(in src, in p, ChunkSeq::new[u64](), in lim, inout w);
+            return layout(in src, in p, ChunkSeq::new[u64](), in lim, inout w, false);
         }
         core_error = first_diag(in p);
         charge(inout w, wrapping_mul(ntok, PARSE_UNITS_PER_TOKEN));
@@ -2300,7 +2358,240 @@ fn once_tokens(
     if nodes.len() == 0 && core_error != NONE {
         fail_at(core_error);
     }
-    layout(in src, in p, nodes, in lim, inout w)
+    layout(in src, in p, nodes, in lim, inout w, false)
+}
+
+// ---------------------------------------------------------------- macros
+
+// crates/vesper-fmt/src/macro_source.rs: the macro profile's syntax gate.
+
+// Work units the macro-profile parser may spend per token besides its
+// quadratic envelope (`STAGE_UNITS_PER_TOKEN`), and its token ceiling
+// (`MACRO_MAX_TOKENS`).
+const STAGE_UNITS_PER_TOKEN: u64 = 6144;
+const MACRO_MAX_TOKENS: u64 = 8192;
+
+// `allowance`: the work the macro-profile parser may spend.
+fn allowance(len: u64, ntok: u64) -> u64 eff [Fail[FmtFail]] {
+    let square = cmul(cmul(ntok, ntok), 4);
+    let n = cadd(cadd(cadd(square, cmul(ntok, STAGE_UNITS_PER_TOKEN)), cmul(len, 16)), 65536);
+    min64(n, 16777216)
+}
+
+// `a * b`, or `WorkLimit` (`checked_mul` in `allowance`).
+fn cmul(a: u64, b: u64) -> u64 eff [Fail[FmtFail]] {
+    let r = saturating_mul_u64(a, b);
+    if r == U64_MAX {
+        fail(E_WORK);
+    }
+    r
+}
+
+// `profile_limits`.
+fn profile_limits(len: u64, ntok: u64, in lim: Limits) -> MacroLimits eff [Fail[FmtFail]] {
+    let mut ml = macro_limits_default();
+    ml.max_source_bytes = min64(lim.max_input_bytes, 1048576);
+    ml.max_tokens = min64(lim.max_tokens, MACRO_MAX_TOKENS);
+    ml.max_depth = min64(lim.max_depth, 24);
+    ml.max_work = allowance(len, ntok);
+    ml
+}
+
+// `charge_profile`.
+fn charge_profile(ntok: u64, in ml: MacroLimits, inout w: Work) eff [Fail[FmtFail]] {
+    if ntok > ml.max_tokens {
+        fail(E_TOKEN);
+    }
+    charge(inout w, ml.max_work);
+}
+
+// `macro_error`: a budget is `WorkLimit`, an allocation failure
+// `Allocation`, anything else `OpaqueMacro`.
+fn macro_fail(code: u64) -> u64 {
+    if code >= 10 {
+        E_WORK
+    } else if code == 9 {
+        7
+    } else {
+        E_MACRO
+    }
+}
+
+// `parse_macro_source` with its error as the formatter's.
+fn macro_parse(in src: Slice[u8], ml: MacroLimits) -> MacroSource eff [Fail[FmtFail]] {
+    handle Fail[MacroError] in {
+        parse_macro_source(in src, ml)
+    } with {
+        return v => v,
+        raise(e, _) => Fail::raise(FmtFail { code: macro_fail(e.code), offset: 0 }),
+    }
+}
+
+// `macro_source::syntax`: the expression macro profile parsed by the
+// strict macro parser, then laid out over its recovery CST.
+fn macro_syntax(
+    in src: Slice[u8],
+    in t: Tokens,
+    in lim: Limits,
+    inout w: Work
+) -> Pass eff [Fail[FmtFail]] {
+    let ntok = t.kind.len();
+    let ml = profile_limits(src.len(), ntok, in lim);
+    charge_profile(ntok, in ml, inout w);
+    let stage = ml.max_work;
+    let ms = macro_parse(in src, ml);
+    // A bare quote-spelled ordinary identifier is not enough to opt into a
+    // profile that would otherwise permit formatting opaque payloads.
+    if ms.defs.len() == 0 {
+        fail(E_MACRO);
+    }
+    if ms.t.kind.len() != ntok {
+        fail(E_CONSERVATION);
+    }
+    for i in 0..ntok {
+        if tok_kind(in ms.t, i) != tok_kind(in t, i)
+            || tok_start(in ms.t, i) != tok_start(in t, i)
+            || tok_end(in ms.t, i) != tok_end(in t, i) {
+            fail(E_CONSERVATION);
+        }
+    }
+    charge(inout w, stage);
+    // `recovery::Limits`: the default limits with the formatter's parse
+    // limits and the stage's work.
+    let mut rl = editor_limits(0, 0);
+    rl.try_set(0, min64(lim.max_input_bytes, 1048576));
+    rl.try_set(1, min64(lim.max_tokens, MACRO_MAX_TOKENS));
+    rl.try_set(2, max_diagnostics());
+    rl.try_set(3, min64(lim.max_depth, 24));
+    rl.try_set(6, stage);
+    let r = recover(in src, in rl);
+    if r.code != 0 {
+        if r.code >= 10 {
+            fail(E_WORK);
+        }
+        fail(E_CONSERVATION);
+    }
+    let at = atoms(in src, in r.t, in r.ev);
+    render_atoms(in src, in at, ChunkSeq::new[u64](), in lim, inout w, true)
+}
+
+// `parser::{SUGAR_GROUP, SUGAR_TEMPLATE, SUGAR_PATTERN, SURFACE_MACRO_CALL,
+// SURFACE_MACRO_DECL}`: the nodes a macro token may sit in.
+fn macro_group(kind: u64) -> bool {
+    kind == NODE_SUGAR_GROUP
+        || kind == NODE_SUGAR_TEMPLATE
+        || kind == NODE_SUGAR_PATTERN
+        || kind == NODE_SURFACE_MACRO_DECL
+        || kind == NODE_SURFACE_MACRO_CALL
+}
+
+// `macro_tokens_in_groups`: every macro call `!` and quote word of the
+// surface CST lies inside a sugar group, template or pattern, or a surface
+// macro declaration or call.
+fn macro_tokens_in_groups(in src: Slice[u8], in p: P) -> bool {
+    // The open nodes, and how many of them are macro groups.
+    let mut open = ChunkSeq::new[u64]();
+    let mut groups: u64 = 0;
+    let mut previous: u8 = K_EOF;
+    for i in 0..p.ev.len() {
+        let e = u32_at(in p.ev, i);
+        if e == EV_FINISH {
+            let n = open.len();
+            if n > 0 {
+                let k = match open.try_get(wrapping_sub(n, 1)) {
+                    Option::Some(k) => k,
+                    Option::None => 0,
+                };
+                if macro_group(k) {
+                    groups = wrapping_sub(groups, 1);
+                }
+                open.truncate(wrapping_sub(n, 1));
+            }
+        } else if e >= EV_START_BASE {
+            let k = wrapping_sub(e, EV_START_BASE);
+            if macro_group(k) {
+                groups = wrapping_add(groups, 1);
+            }
+            open.push(k);
+        } else {
+            let k = tok_kind(in p.t, e);
+            if k == K_WHITESPACE || k == K_COMMENT || k == K_BLOCK_COMMENT {
+                continue;
+            }
+            let opaque = opaque_word(in src, tok_start(in p.t, e), tok_end(in p.t, e))
+                || (k == K_BANG && (previous == K_UPPER || previous == K_LOWER));
+            if opaque && groups == 0 {
+                return false;
+            }
+            previous = k;
+        }
+    }
+    true
+}
+
+fn has_macro_node(in nodes: ChunkSeq[u64]) -> bool {
+    let mut i: u64 = 0;
+    loop {
+        if i >= nodes.len() {
+            return false;
+        }
+        let k = match nodes.try_get(i) {
+            Option::Some(k) => k,
+            Option::None => 0,
+        };
+        if k == NODE_SURFACE_MACRO_DECL || k == NODE_SURFACE_MACRO_CALL {
+            return true;
+        }
+        i = wrapping_add(i, 3);
+    }
+}
+
+// `surface::syntax` with `opaque`: a source in the macro profile. Its
+// surface parse runs the expression macro check; without sugar it goes to
+// the strict macro parser instead.
+fn once_macro(
+    in src: Slice[u8],
+    sink t: Tokens,
+    in lim: Limits,
+    inout w: Work
+) -> Pass eff [Fail[FmtFail]] {
+    let ntok = t.kind.len();
+    let test_block = may_have_test_block(in src) && contains_test_block(in src, in t);
+    charge(inout w, wrapping_mul(ntok, PARSE_UNITS_PER_TOKEN));
+    let mut ml = profile_limits(src.len(), ntok, in lim);
+    ml.max_work = min64(ml.max_work, wrapping_sub(w.max, w.used));
+    let mut d = diags_new();
+    let st = lex_sugar_with_limits(
+        in src,
+        inout d,
+        HARD_SOURCE_BYTES,
+        HARD_TOKENS,
+        max_diagnostics()
+    );
+    if st.rejected {
+        fail(E_TOKEN);
+    }
+    let p = parse_macro_surface_tokens(in src, st, d, max_diagnostics(), hard_depth(), true, ml);
+    let nodes = surface_nodes(in p.ev, in p.t);
+    if has_macro_node(in nodes) {
+        charge_profile(ntok, in ml, inout w);
+    }
+    let sugar = has_sugar(in nodes);
+    if p.d.code.len() != 0 {
+        // The batch macro parser skips test-only items. A mixed-module
+        // error there must not be accepted through its recovery CST.
+        if !sugar && !test_block {
+            return macro_syntax(in src, in t, in lim, inout w);
+        }
+        fail_at(first_diag(in p));
+    }
+    if !sugar {
+        return macro_syntax(in src, in t, in lim, inout w);
+    }
+    if !macro_tokens_in_groups(in src, in p) {
+        fail(E_MACRO);
+    }
+    layout(in src, in p, nodes, in lim, inout w, true)
 }
 
 // `format_source(source, limits)`: the canonical text, or the error.
@@ -2326,19 +2617,22 @@ pub fn format(
         max_work: max_work
     };
     let mut w = Work { used: 0, max: max_work };
-    let t = gate(in src, in lim, inout w);
-    let first = once_tokens(in src, t, in lim, inout w);
+    let g = gate_once(in src, in lim, inout w);
+    let first = once_tokens(in src, g.t, in lim, inout w, g.opaque);
     let first_nodes = first.nodes;
     let output = first.out;
-    let ts = gate(in src, in lim, inout w);
-    let to = gate(in output.as_slice(), in lim, inout w);
+    let opaque = first.opaque;
+    let ts = gate(in src, in lim, inout w, opaque);
+    let to = gate(in output.as_slice(), in lim, inout w, opaque);
     if !same_pieces(in src, in ts, in output.as_slice(), in to) {
         fail(E_CONSERVATION);
     }
-    let to2 = gate(in output.as_slice(), in lim, inout w);
-    let again = once_tokens(in output.as_slice(), to2, in lim, inout w);
+    let g2 = gate_once(in output.as_slice(), in lim, inout w);
+    let again = once_tokens(in output.as_slice(), g2.t, in lim, inout w, g2.opaque);
     let second = again.out;
-    if second.len() != output.len() || !same_words(in first_nodes, in again.nodes) {
+    if second.len() != output.len()
+        || !same_words(in first_nodes, in again.nodes)
+        || again.opaque != opaque {
         fail(E_IDEMPOTENT);
     }
     for i in 0..output.len() {
