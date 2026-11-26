@@ -11,6 +11,24 @@ use self::json::{pack, put_u64};
 
 const NONE: u64 = 18446744073709551615;
 const MINUTE: u64 = 60000000000;
+// `Debouncer::new` and `PendingRequests::new` table bounds.
+const MAX_DEBOUNCE_ENTRIES: u64 = 4096;
+const MAX_PENDING: u64 = 1024;
+// Bytes per input word.
+const WORD_BYTES: u64 = 8;
+
+// Row bytes: query answers and token flags (`0` false or live, `1` true
+// or cancelled), the ignored timer action, a done op, an op on a table
+// not created yet, and the separators.
+const B_FALSE: u8 = 48;
+const B_TRUE: u8 = 49;
+const B_IGNORE: u8 = 73;
+const B_DONE: u8 = 46;
+const B_NO_TABLE: u8 = 45;
+const B_MINUS: u8 = 45;
+const B_LEN_END: u8 = 58;
+const B_COMMA: u8 = 44;
+const B_NEWLINE: u8 = 10;
 
 // Operation kinds (`lens_state_input` in tests/self_host_lsp_features.rs).
 const D_NEW: u64 = 1;
@@ -41,7 +59,7 @@ fn word(in b: Slice[u8], inout r: Rd) -> u64 {
         Option::Some(x) => x,
         Option::None => 0,
     };
-    r.pos = wrapping_add(r.pos, 8);
+    r.pos = wrapping_add(r.pos, WORD_BYTES);
     x
 }
 
@@ -74,15 +92,15 @@ fn put(inout o: ChunkSeq[u8], in s: Str) {
 
 fn put_bool(inout o: ChunkSeq[u8], v: bool) {
     if v {
-        o.push(49);
+        o.push(B_TRUE);
     } else {
-        o.push(48);
+        o.push(B_FALSE);
     }
 }
 
 // `CancelToken`s: one flag per token, `0` live or `1` cancelled.
 fn cancel(inout tokens: ChunkSeq[u8], k: u64) {
-    let _ = tokens.try_set(k, 49);
+    let _ = tokens.try_set(k, B_TRUE);
 }
 
 fn swap_out(inout v: ChunkSeq[u64], i: u64) {
@@ -165,7 +183,7 @@ fn touch(
     let mut i = entry(in d, in b, at, len);
     if i == NONE {
         if d.u_at.len() >= d.max {
-            o.push(73);
+            o.push(B_IGNORE);
             return;
         }
         i = d.u_at.len();
@@ -187,7 +205,7 @@ fn touch(
         let _ = d.run_tok.try_set(i, NONE);
     }
     if g64(in d.armed, i) == 1 {
-        o.push(73);
+        o.push(B_IGNORE);
     } else {
         let _ = d.armed.try_set(i, 1);
         put_arm(inout o, d.delay);
@@ -198,12 +216,12 @@ fn touch(
 fn timer(inout d: Debouncer, inout o: ChunkSeq[u8], in b: Slice[u8], at: u64, len: u64, now: u64) {
     let i = entry(in d, in b, at, len);
     if i == NONE {
-        o.push(73);
+        o.push(B_IGNORE);
         return;
     }
     let _ = d.armed.try_set(i, 0);
     if g64(in d.fired, i) == 1 {
-        o.push(73);
+        o.push(B_IGNORE);
         return;
     }
     let deadline = g64(in d.deadline, i);
@@ -353,7 +371,7 @@ fn begin(
         return;
     }
     let k = tokens.len();
-    tokens.push(48);
+    tokens.push(B_FALSE);
     p.kind.push(id.kind);
     p.value.push(id.value);
     p.s_at.push(id.s_at);
@@ -378,7 +396,7 @@ fn put_id(inout o: ChunkSeq[u8], in b: Slice[u8], in p: Pending, i: u64) {
         put(inout o, in "i");
         let v = wrapping_i64(g64(in p.value, i));
         if v < 0 {
-            o.push(45);
+            o.push(B_MINUS);
             put_u64(inout o, wrapping_sub(0, wrapping_u64(v)));
         } else {
             put_u64(inout o, wrapping_u64(v));
@@ -388,7 +406,7 @@ fn put_id(inout o: ChunkSeq[u8], in b: Slice[u8], in p: Pending, i: u64) {
         let len = g64(in p.s_len, i);
         put(inout o, in "s");
         put_u64(inout o, len);
-        o.push(58);
+        o.push(B_LEN_END);
         o.extend(in b[at..wrapping_add(at, len)]);
     }
 }
@@ -404,7 +422,7 @@ pub fn lens_state(in input: Str) -> ChunkSeq[u64] {
     let rounds = word(in b, inout r);
     let n = word(in b, inout r);
     let ops_r = r;
-    let ops_t = Rd { pos: wrapping_mul(words, 8) };
+    let ops_t = Rd { pos: wrapping_mul(words, WORD_BYTES) };
     let mut out = ChunkSeq::new[u8]();
     let mut tokens = ChunkSeq::new[u8]();
     let mut d = debouncer(0, 0);
@@ -435,11 +453,11 @@ pub fn lens_state(in input: Str) -> ChunkSeq[u64] {
                 d.fired.truncate(0);
                 d.run_gen.truncate(0);
                 d.run_tok.truncate(0);
-                has_d = x <= MINUTE && y != 0 && y <= 4096;
+                has_d = x <= MINUTE && y != 0 && y <= MAX_DEBOUNCE_ENTRIES;
                 d.delay = x;
                 d.max = y;
                 if has_d {
-                    out.push(46);
+                    out.push(B_DONE);
                 } else {
                     put(inout out, in "E invalid lens limits");
                 }
@@ -449,23 +467,23 @@ pub fn lens_state(in input: Str) -> ChunkSeq[u64] {
                 p.s_at.truncate(0);
                 p.s_len.truncate(0);
                 p.token.truncate(0);
-                has_p = x != 0 && x <= 1024;
+                has_p = x != 0 && x <= MAX_PENDING;
                 p.max = x;
                 if has_p {
-                    out.push(46);
+                    out.push(B_DONE);
                 } else {
                     put(inout out, in "E invalid lens limits");
                 }
             } else if kind == T_NEW {
                 put_u64(inout out, tokens.len());
-                tokens.push(48);
+                tokens.push(B_FALSE);
             } else if kind == T_CANCEL {
                 cancel(inout tokens, z);
-                out.push(46);
+                out.push(B_DONE);
             } else if kind <= D_LEN && !has_d {
-                out.push(45);
+                out.push(B_NO_TABLE);
             } else if kind >= P_BEGIN && kind <= P_LEN && !has_p {
-                out.push(45);
+                out.push(B_NO_TABLE);
             } else if kind == D_TOUCH {
                 touch(inout d, inout tokens, inout out, in b, s_at, s_len, x);
             } else if kind == D_TIMER {
@@ -478,18 +496,18 @@ pub fn lens_state(in input: Str) -> ChunkSeq[u64] {
                     z
                 };
                 started(inout d, inout tokens, in b, s_at, s_len, x, token);
-                out.push(46);
+                out.push(B_DONE);
             } else if kind == D_IS_CURRENT {
                 put_bool(inout out, is_current(in d, in b, s_at, s_len, x));
             } else if kind == D_FINISHED {
                 finished(inout d, in b, s_at, s_len, x);
-                out.push(46);
+                out.push(B_DONE);
             } else if kind == D_FORGET {
                 forget(inout d, inout tokens, in b, s_at, s_len);
-                out.push(46);
+                out.push(B_DONE);
             } else if kind == D_CANCEL_ALL {
                 cancel_every_run(inout d, inout tokens);
-                out.push(46);
+                out.push(B_DONE);
             } else if kind == D_LEN {
                 put_u64(inout out, d.u_at.len());
             } else if kind == P_BEGIN {
@@ -512,7 +530,7 @@ pub fn lens_state(in input: Str) -> ChunkSeq[u64] {
             } else if kind == P_CANCEL_ALL {
                 for i in 0..p.kind.len() {
                     if i > 0 {
-                        out.push(44);
+                        out.push(B_COMMA);
                     }
                     put_id(inout out, in b, in p, i);
                     cancel(inout tokens, g64(in p.token, i));
@@ -525,11 +543,11 @@ pub fn lens_state(in input: Str) -> ChunkSeq[u64] {
             } else if kind == P_LEN {
                 put_u64(inout out, p.kind.len());
             }
-            out.push(10);
+            out.push(B_NEWLINE);
         }
         put(inout out, in "T ");
         out.extend(in tokens.as_slice());
-        out.push(10);
+        out.push(B_NEWLINE);
     }
     pack(in out.as_slice())
 }
