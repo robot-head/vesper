@@ -494,16 +494,14 @@ pub fn router_core_insert(
         r.methods.push(byte(in method, i));
     }
     let t = r.terms.len();
-    r
-        .terms
-        .push(
-            Term {
-                next: terms_of(last, parsed.trailing),
-                method_lo: method_lo,
-                method_hi: r.methods.len(),
-                route: id
-            }
-        );
+    r.terms.push(
+        Term {
+            next: terms_of(last, parsed.trailing),
+            method_lo: method_lo,
+            method_hi: r.methods.len(),
+            route: id
+        }
+    );
     if parsed.trailing {
         last.terms_slash = t;
     } else {

@@ -88,12 +88,10 @@ pub fn pattern_hygiene(inout r: Rd, in mark: ChunkSeq[u8]) -> Sc {
     }
     let a = l.ast;
     let it = match a.m_items.try_get(0) {
-        Option::Some(i) => a
-            .items
-            .get_or(
-                @vesper-std/arena::idx_from_raw[@vesper/ast::ItemNode](i),
-                @vesper/ast::ItemNode { kind: 0, node: 0 }
-            ),
+        Option::Some(i) => a.items.get_or(
+            @vesper-std/arena::idx_from_raw[@vesper/ast::ItemNode](i),
+            @vesper/ast::ItemNode { kind: 0, node: 0 }
+        ),
         Option::None => @vesper/ast::ItemNode { kind: 0, node: 0 },
     };
     if it.kind != 2 {
@@ -145,14 +143,13 @@ pub fn pattern_hygiene(inout r: Rd, in mark: ChunkSeq[u8]) -> Sc {
         } else if p.kind == 5 {
             for i in 0..(list_len(in a, p.b) >> 1) {
                 stack.push(list_at(in a, p.b, inc(i << 1)));
-                stack
-                    .push(
-                        if p.c != 0 {
-                            list_at(in a, p.b, i << 1)
-                        } else {
-                            none()
-                        }
-                    );
+                stack.push(
+                    if p.c != 0 {
+                        list_at(in a, p.b, i << 1)
+                    } else {
+                        none()
+                    }
+                );
             }
         } else if p.kind == 2 {
             let rs = sub(widen_u64(p.start), OFF);

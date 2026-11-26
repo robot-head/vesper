@@ -669,23 +669,21 @@ fn decode(
             let ty = n32(lw.op(add(at, inc(wrapping_mul(i, 2)))));
             lw.flocals.push(Loc { name: name, ty: ty });
         }
-        lw
-            .fns
-            .push(
-                Fn {
-                    name: row.name,
-                    p0: p0,
-                    pn: np,
-                    result: result,
-                    effects: effects,
-                    l0: l0,
-                    ln: nl,
-                    v0: v0,
-                    vn: top,
-                    b0: row.b0,
-                    bc: row.bc
-                }
-            );
+        lw.fns.push(
+            Fn {
+                name: row.name,
+                p0: p0,
+                pn: np,
+                result: result,
+                effects: effects,
+                l0: l0,
+                ln: nl,
+                v0: v0,
+                vn: top,
+                b0: row.b0,
+                bc: row.bc
+            }
+        );
         set_table32(inout lw.by_fn, w(row.name), n32(inc(fi)));
     }
     lw
@@ -1892,11 +1890,10 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
                 }
             }
             let wn = wrapping_sub(wb.len(), wa) / 2;
-            let ok = pps
-                .try_set(
-                    add(pa, i),
-                    PP { pass: q.pass, sh: q.sh, erased: q.erased, wa: wa, wn: wn }
-                );
+            let ok = pps.try_set(
+                add(pa, i),
+                PP { pass: q.pass, sh: q.sh, erased: q.erased, wa: wa, wn: wn }
+            );
         }
         let result = shape(inout lw, f.result, name);
         let ca = calls.len();
@@ -1966,23 +1963,22 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
             }
         }
         let local = local_of(inout lw, f, inout lpool);
-        found
-            .push(
-                Found {
-                    name: name,
-                    fi: fi,
-                    pa: pa,
-                    pn: f.pn,
-                    result: result,
-                    local: local,
-                    ca: ca,
-                    cn: wrapping_sub(calls.len(), ca),
-                    ha: ha,
-                    hn: wrapping_sub(hds.len(), ha),
-                    cpa: cpa,
-                    cpn: cpn
-                }
-            );
+        found.push(
+            Found {
+                name: name,
+                fi: fi,
+                pa: pa,
+                pn: f.pn,
+                result: result,
+                local: local,
+                ca: ca,
+                cn: wrapping_sub(calls.len(), ca),
+                ha: ha,
+                hn: wrapping_sub(hds.len(), ha),
+                cpa: cpa,
+                cpn: cpn
+            }
+        );
     }
     // `fail::codes`: every error type raised anywhere, in key order.
     let mut keys = ChunkSeq::new[u32]();
@@ -2215,22 +2211,21 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
         } else {
             fd.result.n
         };
-        fs
-            .push(
-                Planned {
-                    name: fd.name,
-                    fi: fd.fi,
-                    label: label,
-                    pa: fd.pa,
-                    pn: fd.pn,
-                    result: fd.result,
-                    raises: r,
-                    status: status,
-                    ret_words: ret_words,
-                    cpa: fd.cpa,
-                    cpn: fd.cpn
-                }
-            );
+        fs.push(
+            Planned {
+                name: fd.name,
+                fi: fd.fi,
+                label: label,
+                pa: fd.pa,
+                pn: fd.pn,
+                result: fd.result,
+                raises: r,
+                status: status,
+                ret_words: ret_words,
+                cpa: fd.cpa,
+                cpn: fd.cpn
+            }
+        );
         label = add(label, 2);
     }
     Plan {

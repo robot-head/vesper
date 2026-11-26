@@ -431,15 +431,13 @@ pub fn explore_run(inout c: C, in locals: ChunkSeq[u64], max_states: u64, max_qu
     c.out.push(Out::Ok);
     c.out.push(states);
     c.out.push(completed);
-    c
-        .out
-        .push(
-            if bound_hit {
-                1
-            } else {
-                0
-            }
-        );
+    c.out.push(
+        if bound_hit {
+            1
+        } else {
+            0
+        }
+    );
 }
 
 fn orphans(inout c: C, s: u64, k: u64) {

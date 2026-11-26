@@ -492,41 +492,37 @@ fn deliver_whole(inout s: ServerCore, inout dec: DecoderCore, id: u64) {
     w.push(wrapping_add(base, sc_lo));
     w.push(wrapping_add(base, sc_hi));
     w.push(has_auth);
-    w
-        .push(
-            if has_auth != 0 {
-                wrapping_add(base, au_lo)
-            } else {
-                0
-            }
-        );
-    w
-        .push(
-            if has_auth != 0 {
-                wrapping_add(base, au_hi)
-            } else {
-                0
-            }
-        );
+    w.push(
+        if has_auth != 0 {
+            wrapping_add(base, au_lo)
+        } else {
+            0
+        }
+    );
+    w.push(
+        if has_auth != 0 {
+            wrapping_add(base, au_hi)
+        } else {
+            0
+        }
+    );
     w.push(wrapping_add(base, pa_lo));
     w.push(wrapping_add(base, pa_hi));
     w.push(has_proto);
-    w
-        .push(
-            if has_proto != 0 {
-                wrapping_add(base, pr_lo)
-            } else {
-                0
-            }
-        );
-    w
-        .push(
-            if has_proto != 0 {
-                wrapping_add(base, pr_hi)
-            } else {
-                0
-            }
-        );
+    w.push(
+        if has_proto != 0 {
+            wrapping_add(base, pr_lo)
+        } else {
+            0
+        }
+    );
+    w.push(
+        if has_proto != 0 {
+            wrapping_add(base, pr_hi)
+        } else {
+            0
+        }
+    );
     w.push(has_cl);
     w.push(cl);
     w.push(moff);
@@ -1133,13 +1129,12 @@ pub fn server_drain_unblocked(
                     ubytes.extend(in s.conn.unb_bytes[boff..wrapping_add(boff, total_bytes)]);
                     let mut umeta = ChunkSeq::with_capacity[u64](wrapping_mul(count, 3));
                     for k in 0..wrapping_mul(count, 3) {
-                        umeta
-                            .push(
-                                word(
-                                    in s.conn.unb_meta.as_slice(),
-                                    wrapping_add(wrapping_mul(moff, 3), k),
-                                ),
-                            );
+                        umeta.push(
+                            word(
+                                in s.conn.unb_meta.as_slice(),
+                                wrapping_add(wrapping_mul(moff, 3), k),
+                            ),
+                        );
                     }
                     fields(
                         inout s,

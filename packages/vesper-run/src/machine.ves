@@ -821,11 +821,9 @@ fn split_place(inout m: M, place: u32, code: u64) -> u64 {
         m.wsegs.push(u32_at(in parts, i));
     }
     let row = m.wr.len();
-    m
-        .wr
-        .push(
-            Wr { root: u32_at(in parts, 0), sa: sa, sn: wrapping_sub(parts.len(), 1), code: code }
-        );
+    m.wr.push(
+        Wr { root: u32_at(in parts, 0), sa: sa, sn: wrapping_sub(parts.len(), 1), code: code }
+    );
     row
 }
 
@@ -920,16 +918,14 @@ pub fn scan(inout m: M) {
                     let ok = m.aux.try_set(ix, code);
                 } else if op == Op::Data {
                     let c = ctor_of(inout m, n32(m.p.op(a)));
-                    let ok = m
-                        .aux
-                        .try_set(
-                            ix,
-                            if c == NONE32 {
-                                0
-                            } else {
-                                inc(w(c))
-                            }
-                        );
+                    let ok = m.aux.try_set(
+                        ix,
+                        if c == NONE32 {
+                            0
+                        } else {
+                            inc(w(c))
+                        }
+                    );
                 } else if op == Op::Call {
                     let callee = n32(m.p.op(a));
                     let g = fn_index(in m, callee);
@@ -1753,15 +1749,14 @@ fn invoke(inout m: M, f: u64) {
                     for j in 0..pr.n {
                         m.segs.push(m.p.path_name(path, j));
                     }
-                    slots
-                        .push(
-                            En {
-                                name: p.name,
-                                cell: e.cell,
-                                pa: pa,
-                                pn: wrapping_sub(m.segs.len(), pa)
-                            }
-                        );
+                    slots.push(
+                        En {
+                            name: p.name,
+                            cell: e.cell,
+                            pa: pa,
+                            pn: wrapping_sub(m.segs.len(), pa)
+                        }
+                    );
                     found = true;
                 }
             }
@@ -1771,14 +1766,12 @@ fn invoke(inout m: M, f: u64) {
             }
         } else {
             let cell = m.cells.len();
-            m
-                .cells
-                .push(
-                    match m.argv.try_get(i) {
-                        Option::Some(v) => v,
-                        Option::None => undef(),
-                    }
-                );
+            m.cells.push(
+                match m.argv.try_get(i) {
+                    Option::Some(v) => v,
+                    Option::None => undef(),
+                }
+            );
             slots.push(En { name: p.name, cell: cell, pa: 0, pn: 0 });
         }
     }
@@ -1789,19 +1782,18 @@ fn invoke(inout m: M, f: u64) {
         }
     }
     m.vals.resize(add(vb, fi.nv), undef());
-    m
-        .cur = Fr {
-            f: f,
-            blk: fi.b0,
-            ip: 0,
-            vb: vb,
-            eb: eb,
-            cb: cb,
-            sb: sb,
-            dest: 0,
-            ty: 0,
-            kind: FR_IR
-        };
+    m.cur = Fr {
+        f: f,
+        blk: fi.b0,
+        ip: 0,
+        vb: vb,
+        eb: eb,
+        cb: cb,
+        sb: sb,
+        dest: 0,
+        ty: 0,
+        kind: FR_IR
+    };
 }
 
 // Calls value `callee` (`Op::Indirect`).

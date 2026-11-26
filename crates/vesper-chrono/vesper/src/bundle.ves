@@ -91,12 +91,11 @@ fn push_u64_le(inout out: ChunkSeq[u8], v: u64) {
         if i >= 8 {
             break;
         }
-        out
-            .push(
-                wrapping_u8(
-                    wrapping_shr_u64(v, wrapping_u32(wrapping_mul(i, 8))) & 255,
-                )
-            );
+        out.push(
+            wrapping_u8(
+                wrapping_shr_u64(v, wrapping_u32(wrapping_mul(i, 8))) & 255,
+            )
+        );
         i = wrapping_add(i, 1);
     }
 }
@@ -520,18 +519,17 @@ pub fn open_bundle(
         let payload = slice_copy(in bs, at, plen);
         at = wrapping_add(at, plen);
         let digest_bit = op_tag_digest();
-        records
-            .push(
-                FlightEvent {
-                    lamport_seq: lamport_seq,
-                    fiber_id: fiber_id,
-                    time_ns: time_ns,
-                    effect_id: effect_id,
-                    op_tag: raw_op & wrapping_u16(wrapping_sub(65535, widen_u64(digest_bit))),
-                    digest: (raw_op & digest_bit) != 0,
-                    payload: payload,
-                }
-            );
+        records.push(
+            FlightEvent {
+                lamport_seq: lamport_seq,
+                fiber_id: fiber_id,
+                time_ns: time_ns,
+                effect_id: effect_id,
+                op_tag: raw_op & wrapping_u16(wrapping_sub(65535, widen_u64(digest_bit))),
+                digest: (raw_op & digest_bit) != 0,
+                payload: payload,
+            }
+        );
         ri = wrapping_add(ri, 1);
     }
 
@@ -565,15 +563,14 @@ pub fn open_bundle(
         }
         let img = slice_copy(in bs, at, ilen);
         at = wrapping_add(at, ilen);
-        snaps
-            .push(
-                SnapshotImage {
-                    epoch_id: epoch_id,
-                    start_lamport_seq: start_seq,
-                    time_ns: time_ns,
-                    image: img,
-                }
-            );
+        snaps.push(
+            SnapshotImage {
+                epoch_id: epoch_id,
+                start_lamport_seq: start_seq,
+                time_ns: time_ns,
+                image: img,
+            }
+        );
         si = wrapping_add(si, 1);
     }
 
@@ -602,15 +599,14 @@ pub fn open_bundle(
         let off = read_u32_le(in bs, wrapping_add(at, 9));
         let len = read_u32_le(in bs, wrapping_add(at, 13));
         at = wrapping_add(at, 17);
-        reds
-            .push(
-                RedactionEntry {
-                    target_tag: tag,
-                    target_val: val,
-                    offset: off,
-                    len: len,
-                }
-            );
+        reds.push(
+            RedactionEntry {
+                target_tag: tag,
+                target_val: val,
+                offset: off,
+                len: len,
+            }
+        );
         rdi = wrapping_add(rdi, 1);
     }
     if at != body_len {

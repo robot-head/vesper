@@ -45,11 +45,10 @@ pub fn v_tick_scalar(inout t: Slice[u32], in pan: Slice[u32], v0: f32, inout out
         t.set(wrapping_add(v, Tile::Ic2), to_bits_f32(2.0 * v2 - ic2));
         let y = from_bits_f32(t[wrapping_add(v, Tile::Gain)]) * v2;
         out.set(v, to_bits_f32(y * from_bits_f32(pan[v])));
-        out
-            .set(
-                wrapping_add(v, LANES),
-                to_bits_f32(y * from_bits_f32(pan[wrapping_add(v, LANES)]))
-            );
+        out.set(
+            wrapping_add(v, LANES),
+            to_bits_f32(y * from_bits_f32(pan[wrapping_add(v, LANES)]))
+        );
     }
 }
 

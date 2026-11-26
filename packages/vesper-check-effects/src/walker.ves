@@ -355,16 +355,14 @@ pub fn secret_type(in c: Ctx, inout s: Walk, ty: u32) -> bool {
         }
         s.secret_memo.push(0);
     }
-    let ok = s
-        .secret_memo
-        .try_set(
-            w(ty),
-            if r {
-                2
-            } else {
-                1
-            }
-        );
+    let ok = s.secret_memo.try_set(
+        w(ty),
+        if r {
+            2
+        } else {
+            1
+        }
+    );
     r
 }
 

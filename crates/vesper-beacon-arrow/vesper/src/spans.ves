@@ -174,11 +174,10 @@ pub fn stream_into(
         if width(c) == 8 {
             let base = wrapping_mul(w, rows);
             for i in 0..rows {
-                out
-                    .try_write_u64_le(
-                        wrapping_add(at, wrapping_mul(i, 8)),
-                        word(in wide, wrapping_add(base, i))
-                    );
+                out.try_write_u64_le(
+                    wrapping_add(at, wrapping_mul(i, 8)),
+                    word(in wide, wrapping_add(base, i))
+                );
             }
             w = wrapping_add(w, 1);
         } else {
