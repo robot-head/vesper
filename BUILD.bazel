@@ -964,6 +964,9 @@ vesper_crate(
         "test/self_host_place_ir_jit": 4,
         "test/self_host_swap_inputs": 4,
         "test/wasm_seed_breadth": 4,
+        # Its stage2 builds, split three ways, so no shard waits for one big
+        # memory reservation at the end of "Test all targets".
+        "test/wasm_seed_package_io": 3,
     },
     # Reservations include subprocess overhead; they do not enforce RSS limits.
     # `lean_replay` marks the Lean/Logos suite run by "Native and acceptance
@@ -986,11 +989,13 @@ vesper_crate(
             "resources:memory:5120",
             "resources:cpu:4",
         ],
-        # At most two stage2 compiler builds at once (STAGE2_SLOTS in the test),
-        # each under Wasmtime with up to 4 GiB of linear memory, plus the
-        # in-process compile. Unreserved, it ran the 22GB VM out of memory.
+        # Per shard (test_shards): one stage2 compiler build at a time
+        # (stage2_slots() in the test), under Wasmtime with up to 4 GiB of
+        # linear memory, plus the in-process compile. Locally each of the
+        # three shards peaked at 3.4-4.6 GiB with its subprocesses. Unsharded
+        # and unreserved, it ran the 22GB VM out of memory.
         "test/wasm_seed_package_io": [
-            "resources:memory:12288",
+            "resources:memory:6144",
             "resources:cpu:2",
         ],
         # Peaks near 6.8 GiB locally. Unreserved, it ran alongside the other
