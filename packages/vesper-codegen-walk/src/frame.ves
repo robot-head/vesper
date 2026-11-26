@@ -31,45 +31,14 @@
 // conventions, one block for the whole library.
 
 use @vesper/check-data::pack_text;
-use @vesper/check-data::util::{
-    add,
-    inc,
-    push_decimal,
-    u32_at,
-    u64_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    TyKind,
-    TyPass,
-    Types,
-    default_type,
-    display
-};
-use @vesper/check-data::world::{
-    World
-};
-use @vesper/check-data::input::{
-    Reader,
-    read_ctx
-};
-use @vesper/check-layout::{
-    L_ENUM,
-    Layouts,
-    layout_of,
-    layouts_new,
-    out_new
-};
-use @vesper/place-ir::{
-    read_program
-};
-use @vesper/codegen-calls::data::{
-    Calls,
-    read_calls
-};
+use @vesper/check-data::util::{add, inc, push_decimal, u32_at, u64_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{TyKind, TyPass, Types, default_type, display};
+use @vesper/check-data::world::{World};
+use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/check-layout::{L_ENUM, Layouts, layout_of, layouts_new, out_new};
+use @vesper/place-ir::{read_program};
+use @vesper/codegen-calls::data::{Calls, read_calls};
 use @vesper/codegen-calls::instances::{
     Conc,
     Found,
