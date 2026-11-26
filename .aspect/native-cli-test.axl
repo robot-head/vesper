@@ -13,7 +13,8 @@ load("./lib/process.axl", "check")
 load("./lib/task-fixture.axl", "contains", "equal", "fixture_launcher", "fixture_workspace", "invoke_fixture", "write_fixture")
 load("./wasm-fixture-test.axl", "mock_wasm_cargo")
 
-_TREE_ARGS = ["tree", "--locked", "-p", "vesper", "--edges", "normal", "--prefix", "none"]
+_TREE_ARGS = ["tree", "--locked", "-p", "{package}", "--edges", "normal", "--prefix", "none"]
+_TREE_PACKAGES = ["vesper", "vesper-hybrid"]
 _ORACLE_ARGS = ["run", "--locked", "--quiet", "-p", "vesper-oracles", "--bin", "resource_oracle42", "--", "--fault-peer"]
 
 def _tool_fixture(ctx):
@@ -54,8 +55,11 @@ def _tool_fixture(ctx):
             equal(argv[:-1], _ORACLE_ARGS)
             ctx.std.io.stdout.write(json.encode(argv) + "\n")
             return 7 if argv[-1] == "crash" else 0
-        equal(argv, _TREE_ARGS)
-        ctx.std.io.stdout.write(ctx.std.env.var("FIXTURE_CARGO_TREE") or "")
+        equal(argv[3] in _TREE_PACKAGES, True)
+        equal(argv, [argv[3] if arg == "{package}" else arg for arg in _TREE_ARGS])
+        only = ctx.std.env.var("FIXTURE_CARGO_TREE_PACKAGE")
+        if not only or only == argv[3]:
+            ctx.std.io.stdout.write(ctx.std.env.var("FIXTURE_CARGO_TREE") or "")
         if ctx.std.env.var("FIXTURE_CARGO_FAILURE"):
             ctx.std.io.stderr.write("failed to load dependency graph\n")
             return 29
@@ -142,6 +146,8 @@ def _test(ctx):
         contains("forbidden normal dependencies: " + name, rejected.stderr)
     rejected = run(deps, 1, "dependencies", {"FIXTURE_CARGO_TREE": "wasmtime v1.0.0\nvesper-loom-sandbox v0.0.1\nwasmtime v2.0.0\n"})
     contains("forbidden normal dependencies: vesper-loom-sandbox, wasmtime\n", rejected.stderr)
+    hybrid = run(deps, 1, "dependencies", {"FIXTURE_CARGO_TREE": "wasmtime v1.0.0\n", "FIXTURE_CARGO_TREE_PACKAGE": "vesper-hybrid"})
+    contains("Default Vesper CLI (vesper-hybrid) has forbidden normal dependencies: wasmtime\n", hybrid.stderr)
     failed = run(deps, 29, "dependencies", {"FIXTURE_CARGO_FAILURE": "1"})
     contains("failed to load dependency graph", failed.stderr)
 
