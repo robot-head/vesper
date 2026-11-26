@@ -17,7 +17,7 @@
 
 use @vesper/cranelift::{
     Ty, Value, Var, call_arg, call_arg_count, call_builder, call_result, call_op, call_result_value,
-    call_return_builder, cc_eq, cc_ne, cc_sge, cc_sgt, cc_sle, cc_slt, cc_uge, cc_ugt, cc_ule,
+    call_module, call_return_builder, call_return_module, cc_eq, cc_ne, cc_sge, cc_sgt, cc_sle, cc_slt, cc_uge, cc_ugt, cc_ule,
     cc_ult, declare_var, def_var, ins_band, ins_band_imm, ins_bnot, ins_bor, ins_bxor, ins_f64const,
     ins_iadd, ins_icmp, ins_icmp_imm, ins_iconst, ins_imul, ins_ineg, ins_ireduce, ins_ishl,
     ins_ishl_imm, ins_rotl, ins_rotr, ins_isub, ins_sextend, ins_sshr, ins_srem, ins_smulhi,
@@ -679,13 +679,22 @@ pub fn scalar_hook(call: u64) -> u64 eff [Ffi[Cranelift]] {
 }
 
 // The `body` hook (#2094, part 6a): a whole scalar function's body from
-// its body plan (`body.ves`) over the lent builder.
+// its body plan (`body.ves`) over the lent builder, and the lent module
+// its direct calls import their callees from (part 6b).
 pub fn body_hook(call: u64) -> u64 eff [Ffi[Cranelift]] {
     let mut builder = match call_builder(call) {
         Some(builder) => builder,
         None => return DECLINED,
     };
-    let answer = emit_body(call, inout builder);
+    let mut module = match call_module(call) {
+        Some(module) => module,
+        None => {
+            call_return_builder(call, builder);
+            return DECLINED;
+        }
+    };
+    let answer = emit_body(call, inout builder, inout module);
+    call_return_module(call, module);
     call_return_builder(call, builder);
     answer
 }

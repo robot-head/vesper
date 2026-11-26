@@ -76,6 +76,12 @@ thread_local! {
 /// (unplanned).
 static EMITTED: AtomicU64 = AtomicU64::new(0);
 static UNPLANNED: AtomicU64 = AtomicU64::new(0);
+/// Of the functions emitted from Vesper, those with direct calls (part
+/// 6b), and their calls; and the bodies the hook declined for a call the
+/// walk does not make directly.
+static WITH_CALLS: AtomicU64 = AtomicU64::new(0);
+static CALLS: AtomicU64 = AtomicU64::new(0);
+static CALL_DECLINED: AtomicU64 = AtomicU64::new(0);
 
 /// Identifies a lent program for the cache: its address, function count
 /// and instruction count (a later compile may reuse the address).
@@ -133,17 +139,20 @@ fn body(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
         UNPLANNED.fetch_add(1, Ordering::Relaxed);
         return Ok(false);
     };
-    // `[status, source locations, parameter variables...]` from the walk.
-    let [status, locations, vars @ ..] = lent.args else {
+    // `[status, source locations, n, n parameter variables, m, m callees]`
+    // from the walk.
+    let [status, locations, rest @ ..] = lent.args else {
         return Err("a body request without its flags".into());
     };
-    let mut args = vec![
-        u64::from(lent.optimize),
-        *status,
-        *locations,
-        vars.len() as u64,
-    ];
-    args.extend_from_slice(vars);
+    let np = *rest
+        .first()
+        .ok_or("a body request without its parameters")? as usize;
+    let callees = rest
+        .get(np + 2..)
+        .filter(|c| rest.get(np + 1) == Some(&(c.len() as u64)))
+        .ok_or("a body request without its callees")?;
+    let mut args = vec![u64::from(lent.optimize), *status, *locations];
+    args.extend_from_slice(rest);
     args.extend(words);
     let hook = &vesper().hook;
     let (answer, crossing) = vesper_cranelift_sys::lend_as(
@@ -169,7 +178,15 @@ fn body(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
     match answer {
         1 => {
             EMITTED.fetch_add(1, Ordering::Relaxed);
+            if !callees.is_empty() {
+                WITH_CALLS.fetch_add(1, Ordering::Relaxed);
+                CALLS.fetch_add(callees.len() as u64, Ordering::Relaxed);
+            }
             Ok(true)
+        }
+        0 if callees.contains(&codegen_swap::body::NO_CALLEE) => {
+            CALL_DECLINED.fetch_add(1, Ordering::Relaxed);
+            Ok(false)
         }
         BODY_ERROR => Err(format!(
             "body hook ({function}): the plan's words do not read"
@@ -231,7 +248,8 @@ fn both(name: &str, world: &vesper::check::World, run: bool) -> Diff {
 #[test]
 fn vesper_scalar_bodies_match_the_rust_walk() {
     big_stack(|| {
-        let before = [&EMITTED, &UNPLANNED].map(|c| c.load(Ordering::Relaxed));
+        let counters = [&EMITTED, &UNPLANNED, &WITH_CALLS, &CALLS, &CALL_DECLINED];
+        let before = counters.map(|c| c.load(Ordering::Relaxed));
         let worlds: Vec<_> = check_harness::corpus()
             .iter()
             .filter(|c| c.world.functions.contains_key("main"))
@@ -241,11 +259,13 @@ fn vesper_scalar_bodies_match_the_rust_walk() {
         for (i, case) in worlds.iter().enumerate() {
             total.add(both(&case.name, &case.world, runs(i, case)));
         }
-        let [emitted, unplanned] = [&EMITTED, &UNPLANNED].map(|c| c.load(Ordering::Relaxed));
-        let (emitted, unplanned) = (emitted - before[0], unplanned - before[1]);
+        let after = counters.map(|c| c.load(Ordering::Relaxed));
+        let [emitted, unplanned, with_calls, calls, call_declined] =
+            [0, 1, 2, 3, 4].map(|i| after[i] - before[i]);
         eprintln!(
-            "native walk bodies: {}; {emitted} functions emitted from Vesper, \
-             {unplanned} left to Rust",
+            "native walk bodies: {}; {emitted} functions emitted from Vesper \
+             ({with_calls} with {calls} direct calls), {unplanned} left to Rust, \
+             {call_declined} declined for a call",
             total.summary()
         );
         assert!(total.worlds > 0, "no corpus world compiled");
@@ -323,6 +343,105 @@ fn vesper_scalar_bodies_match_across_blocks() {
         assert!(
             emitted >= 4,
             "only {emitted} of the scalar functions came from Vesper"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+/// Direct calls (part 6b): scalar callees called with narrow, `bool` and
+/// float arguments, from branches, loops and other callers, and a call
+/// the walk does not make directly (an effectful callee, inlined), which
+/// keeps its caller in Rust.
+const CALLS_SOURCE: &str = "
+effect Tick {
+    fn tick() -> i64;
+}
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
+}
+fn digits(x: u8, odd: bool) -> u8 {
+    if x < 10 {
+        if odd {
+            x | 1
+        } else {
+            x
+        }
+    } else {
+        digits(x / 10, !odd)
+    }
+}
+fn shrink(x: f64) -> f64 {
+    if x < 1.0 {
+        x
+    } else {
+        shrink(x * 0.5)
+    }
+}
+fn gcd_sum(n: u64) -> u64 {
+    let mut s: u64 = 0;
+    let mut i: u64 = 1;
+    loop {
+        if i > n {
+            break;
+        }
+        s = wrapping_add(s, gcd(i, 12));
+        i = wrapping_add(i, 1);
+    }
+    s
+}
+fn pick(c: bool, x: u8) -> u8 {
+    if c {
+        digits(x, true)
+    } else {
+        digits(x, false)
+    }
+}
+fn small(x: f64) -> f64 {
+    shrink(shrink(x))
+}
+fn ticks() -> i64 eff [Tick] {
+    wrapping_add(Tick::tick(), 1)
+}
+fn counted() -> i64 {
+    handle Tick in { ticks() } with {
+        return v => v,
+        tick(k) => k(41),
+    }
+}
+fn main() -> i64 {
+    let h: i64 = if small(80.0) < 1.0 { 64 } else { 0 };
+    wrapping_i64(gcd_sum(30)) ^ widen_i64(pick(true, 200)) ^ widen_i64(pick(false, 77)) ^ h
+        ^ counted()
+}
+";
+
+#[test]
+fn vesper_bodies_with_direct_calls_match() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(CALLS_SOURCE);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the calls program does not build: {e}");
+        }
+        let counters = [&EMITTED, &WITH_CALLS, &CALLS];
+        let before = counters.map(|c| c.load(Ordering::Relaxed));
+        let total = both("calls", &checked.world, true);
+        let after = counters.map(|c| c.load(Ordering::Relaxed));
+        let [emitted, with_calls, calls] = [0, 1, 2].map(|i| after[i] - before[i]);
+        eprintln!(
+            "calls: {}; {emitted} functions emitted from Vesper, {with_calls} with \
+             {calls} direct calls",
+            total.summary()
+        );
+        assert!(
+            with_calls >= 4,
+            "only {with_calls} functions with calls came from Vesper"
         );
         assert!(total.is_clean(), "{}", total.summary());
     });

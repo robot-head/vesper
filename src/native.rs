@@ -3976,6 +3976,75 @@ impl<M: Module> Codegen<'_, '_, M> {
             PatternKind::Literal(_) => Ok(()),
         }
     }
+    /// The callee of an `Op::Call` that `call_function_into` lowers to one
+    /// `call` of an imported function and nothing else (part 6b of the
+    /// body hook, #2094): a compiled-once, pure, non-generic function of
+    /// scalar `in` parameters and a scalar result, with no status word,
+    /// register result, failure record, caller slot or trace flag, not a
+    /// reserved builtin, constant table or `dyn` stub. `None` for any
+    /// other call, which leaves the body to the Rust walk.
+    fn plain_call(
+        &self,
+        callee: &str,
+        args: &[crate::ir::Argument],
+        capability: Option<&str>,
+        types: &[Type],
+    ) -> Option<FuncId> {
+        let source = self.world.functions.get(callee)?;
+        if capability.is_some()
+            || !types.is_empty()
+            || !source.generics.is_empty()
+            || !source.effects.instances.is_empty()
+            || source.effects.tail.is_some()
+            || callee == crate::ffi_lowering::types::PINNED_ADDRESS
+            || callee == crate::integer_widths::MUL_WIDE
+            || callee == crate::atomics::PARALLEL_FOR
+            || crate::atomics::intercepted(self.world, callee).is_some()
+            || crate::integer_widths::bit_builtin(callee).is_some()
+            || crate::arrays::table_function(callee).is_some()
+            || self.world.dyn_objects.stubs.contains_key(callee)
+            || args.len() != source.params.len()
+            || args.iter().any(|a| a.pass != Pass::In)
+        {
+            return None;
+        }
+        let scalar_type = |t: &Type| {
+            !crate::seq::is_seq_type(t)
+                && !crate::seq::is_slice_type(t)
+                && !matches!(t, Type::Function { .. })
+                && !contains_function(self.world, t)
+                && Layout::of(self.world, t).is_ok_and(|l| !l.aggregate())
+                && scalar(t, &[]).is_ok()
+        };
+        let f = concrete(self.world, callee, &BTreeMap::new()).ok()?;
+        if specialized_function(self.world, &f)
+            || fail_only(self.world, &f)
+            || crate::fip::uses_caller_slot(self.world, &f)
+            || function_value_instance(self.world, source)
+            || !scalar_type(&f.result)
+            || !f.params.iter().all(|p| scalar_type(&p.ty))
+        {
+            return None;
+        }
+        let key = instance_key(callee, &BTreeMap::new());
+        let trace_entry = self.trace_entry.as_ref().map(|(e, _)| e.as_str());
+        if trace_entry == Some(key.as_str())
+            || uses_trace_fail(
+                self.world,
+                self.trace_fail.is_some(),
+                &key,
+                trace_entry.unwrap_or(""),
+                &f,
+            )
+        {
+            return None;
+        }
+        let abi = self.abi.of(&key);
+        if abi.status || abi.result_words.is_some() {
+            return None;
+        }
+        self.ids.get(&key).copied()
+    }
     /// Asks the `body` hook to emit `body` (`codegen_swap::body`), when
     /// the frame leaves the function plain; `true` when it did.
     fn body_hook(
@@ -4013,12 +4082,37 @@ impl<M: Module> Codegen<'_, '_, M> {
             u64::from(self.own_abi.status),
             u64::from(self.source_locations),
         ];
+        args.push(f.params.len() as u64);
         for p in &f.params {
             let Some(var) = self.vars.get(&p.name) else {
                 return Ok(false);
             };
             args.push(u64::from(var.as_u32()));
         }
+        // Each `Op::Call` of the body, in instruction order: the callee's
+        // function id when the walk would emit it as a plain direct call
+        // (part 6b), else `codegen_swap::body::NO_CALLEE`.
+        let calls = body
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .filter_map(|i| match &i.op {
+                crate::ir::Op::Call {
+                    callee,
+                    args,
+                    capability,
+                    types,
+                } => Some(
+                    self.plain_call(callee, args, capability.as_deref(), types)
+                        .map_or(crate::codegen_swap::body::NO_CALLEE, |id| {
+                            u64::from(id.as_u32())
+                        }),
+                ),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        args.push(calls.len() as u64);
+        args.extend(calls);
         crate::codegen_swap::body_request(
             &mut self.b,
             &mut *self.m,

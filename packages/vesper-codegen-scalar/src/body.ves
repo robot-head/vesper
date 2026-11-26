@@ -8,15 +8,20 @@
 // word, `bool`, `f32` and `f64` (and `Unit` or `Never` values), whose
 // instructions are constants, plain local reads, binds and `=` writes,
 // and the operators this package plans (`plan_function`), and whose
-// blocks end in `return`, `jump`, `branch` or `unreachable`. Any other
-// function is left out of the plan, and the Rust walk emits it.
+// blocks end in `return`, `jump`, `branch` or `unreachable`. Part 6b adds
+// direct calls of scalar arguments: the walk's frame names, for each call,
+// the function it would call with one `call` instruction and nothing
+// around it (`Codegen::plain_call`: a compiled-once pure callee with no
+// status word, failure record or caller slot), and the hook declines a
+// body with any other call. Any other function is left out of the plan,
+// and the Rust walk emits it.
 //
 // The Rust side asks only for a function whose frame is plain (no trace,
 // Fail record, caller slot or result buffer, no `inout` or function
 // parameters, the optimize path, not `@fip`), so
 // such a function's locals are all kept in registers
-// (`native::register_locals`: with no calls, every scalar local is) and
-// nothing but the walk itself emits code.
+// (`native::register_locals`: with no calls but pure ones, every scalar
+// local is) and nothing but the walk and its direct calls emits code.
 
 use @vesper/check-data::util::{add, inc, n32, u64_at};
 use @vesper/check-data::types::{TyKind, default_type};
@@ -39,6 +44,7 @@ pub const INST_PLANNED: u64 = 1;
 pub const INST_READ: u64 = 2;
 pub const INST_BIND: u64 = 3;
 pub const INST_WRITE: u64 = 4;
+pub const INST_CALL: u64 = 5;
 
 // A `Bind` of the wildcard pattern binds no local.
 pub const NO_LOCAL: u64 = 18446744073709551615;
@@ -260,6 +266,7 @@ impl Gen {
         in h: Header,
         i: InstRow,
         planned: u64,
+        call: u64,
         inout o: ChunkSeq[u64]
     ) -> bool {
         let dest = self.body_value(in h, widen_u64(i.dest));
@@ -356,6 +363,25 @@ impl Gen {
             extra.push(k);
             extra.push(temp);
             extra.push(stated);
+        } else if i.op == Op::Call {
+            // Part 6b: a direct call. The walk's frame says which calls are
+            // one `call` of an imported function (the request's callee
+            // words, by `call`, the call's position among the function's
+            // calls); the plan reads each argument through its `ir_temp`.
+            kind = INST_CALL;
+            extra.push(call);
+            let n = self.program.op(inc(i.a));
+            for k in 0..n {
+                let at = add(add(i.a, 2), wrapping_mul(k, 4));
+                if !self.body_operand(in h, inc(at), inout ops) {
+                    return false;
+                }
+                let read = self.body_kind(n32(u64_at(in h.vty, u64_at(in ops, k))));
+                if read == NONE64 {
+                    return false;
+                }
+                extra.push(read);
+            }
         } else {
             return false;
         }
@@ -548,6 +574,20 @@ impl Gen {
         }
         // The plan's record of each instruction, by its index in `f`.
         let first = self.program.block(f.b0).i0;
+        // Each call's position among the function's calls, in block and
+        // instruction order (the order of the request's callee words).
+        let mut calls: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut ncalls: u64 = 0;
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            for ii in 0..row.ic {
+                let x = add(row.i0, ii);
+                if self.program.inst(x).op == Op::Call {
+                    set(inout calls, wrapping_sub(x, first), ncalls);
+                    ncalls = inc(ncalls);
+                }
+            }
+        }
         let mut record: ChunkSeq[u64] = ChunkSeq::new[u64]();
         let mut r = from;
         loop {
@@ -572,7 +612,8 @@ impl Gen {
                 } else {
                     wrapping_sub(rec, 1)
                 };
-                if !self.body_inst(in h, self.program.inst(x), planned, inout o) {
+                let call = at(in calls, wrapping_sub(x, first));
+                if !self.body_inst(in h, self.program.inst(x), planned, call, inout o) {
                     return;
                 }
             }
