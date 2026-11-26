@@ -125,6 +125,27 @@ fn list_in<T: Elem>(ptr: *const T, len: usize) -> Val {
     Val::List(s.iter().map(|&x| x.to_val()).collect())
 }
 
+/// A `u32` slice crosses as `list<u64>`.
+fn list_in_wide(ptr: *const u32, len: usize) -> Val {
+    if len == 0 || ptr.is_null() {
+        return Val::List(Vec::new());
+    }
+    // SAFETY: the `.vsys` CSlice contract of the caller.
+    let s = unsafe { std::slice::from_raw_parts(ptr, len) };
+    Val::List(s.iter().map(|&x| Val::U64(u64::from(x))).collect())
+}
+
+unsafe fn list_back_wide(v: &Val, ptr: *mut u32, len: usize) {
+    let Val::List(items) = v else {
+        panic!("not a list: {v:?}")
+    };
+    assert_eq!(items.len(), len, "a handed-back list changed length");
+    for (i, x) in items.iter().enumerate() {
+        // SAFETY: `i < len`, the caller's buffer.
+        unsafe { ptr.add(i).write(u64::from_val(x) as u32) };
+    }
+}
+
 /// Copy a handed-back list over the caller's buffer.
 unsafe fn list_back<T: Elem>(v: &Val, ptr: *mut T, len: usize) {
     let Val::List(items) = v else {

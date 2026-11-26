@@ -10,15 +10,17 @@
 //! runner (`bootstrap/seed/runner/vwasm.c`) is not involved.
 //!
 //! The interface is derived from `packages/vesper-cranelift/cranelift.vsys`
-//! (see [`interface`]); `build.rs` generates the WIT and the export glue,
+//! (see the `interface` module of `build.rs`), which generates the WIT and the export glue,
 //! and [`WIT`] is the text. Cranelift itself is the same crate at the same
 //! version as natively, so an object built through the component is the
 //! object the native shim builds (`tests/objects.rs`).
 
-pub mod interface;
-
 /// The generated WIT package text of `vesper:cranelift@0.1.0`.
 pub const WIT: &str = include_str!(concat!(env!("OUT_DIR"), "/vcl.wit"));
+
+/// The generated import table of the Wasm backend
+/// (`packages/vesper-wasm-backend/src/vcl.ves`).
+pub const VCL_VES: &str = include_str!(concat!(env!("OUT_DIR"), "/vcl.ves"));
 
 #[cfg(target_family = "wasm")]
 // The generated exports of the lend calls ignore their crossing argument.
@@ -107,6 +109,20 @@ mod component {
         }
         fn len(&self) -> usize {
             self.len
+        }
+        fn as_slice(&self) -> &[T] {
+            if self.len == 0 {
+                return &[];
+            }
+            // SAFETY: a lifted list of `len` elements.
+            unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+        }
+        fn as_mut_slice(&mut self) -> &mut [T] {
+            if self.len == 0 {
+                return &mut [];
+            }
+            // SAFETY: as in `as_slice`, owned here.
+            unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
         }
         /// Store the list (pointer, length) at `at` and give up ownership.
         unsafe fn hand_back(self, at: *mut u8) {
