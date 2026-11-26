@@ -1,0 +1,318 @@
+use @vesper/codegen-freestanding::codes::{
+    Ehdr, Et, Ident, Page, RelEnt, Shdr, Shf, Shn, Sht, Stb, Stt, Stv, SymEnt
+};
+use @vesper/codegen-freestanding::obj::{section_header};
+use @vesper/codegen-freestanding::util::{align_up, grow, push16, push32, push64, put64};
+
+// The byte slice contains .text followed by the symbol names. The words are
+// [text size, text alignment, symbol count], then symbol records and
+// relocations. Symbols give [name offset, name size, text offset, size, kind].
+// Relocations give [text offset, zero-based symbol, kind, signed addend bits].
+const HEADER_WORDS: u64 = 3;
+const TEXT_SIZE: u64 = 0;
+const TEXT_ALIGNMENT: u64 = 1;
+const SYMBOL_COUNT: u64 = 2;
+const SYMBOL_WORDS: u64 = 5;
+const SYM_NAME: u64 = 0;
+const SYM_NAME_SIZE: u64 = 1;
+const SYM_VALUE: u64 = 2;
+const SYM_SIZE: u64 = 3;
+const SYM_KIND: u64 = 4;
+const LOCAL: u64 = 0;
+const EXPORTED: u64 = 1;
+const UNDEFINED: u64 = 2;
+const HIDDEN: u64 = 3;
+const RELOC_WORDS: u64 = 4;
+const RELOC_OFFSET: u64 = 0;
+const RELOC_SYMBOL: u64 = 1;
+const RELOC_KIND: u64 = 2;
+const RELOC_ADDEND: u64 = 3;
+const ABS64: u64 = 1;
+const PC32: u64 = 2;
+const PLT32: u64 = 3;
+
+const EM_X86_64: u16 = 62;
+const R_X86_64_64: u64 = 1;
+const R_X86_64_PC32: u64 = 2;
+const R_X86_64_PLT32: u64 = 4;
+const ABS64_FIELD_BYTES: u64 = 8;
+const PC32_FIELD_BYTES: u64 = 4;
+const REL_SYMBOL_SHIFT: u32 = 32;
+const ELF_WORD_ALIGNMENT: u64 = 8;
+const MAX_STRING_OFFSET: u64 = 0xffffffff;
+const TEXT_SECTION: u64 = 1;
+const SYMBOL_SECTION: u64 = 3;
+const STRINGS_SECTION: u64 = 4;
+const SECTION_NAMES_SECTION: u16 = 6;
+const SECTION_COUNT: u16 = 7;
+
+struct Symbols {
+    table: ChunkSeq[u8],
+    names: ChunkSeq[u8],
+    indices: ChunkSeq[u64],
+    first_global: u64,
+}
+
+fn word(in words: Slice[u64], at: u64) -> u64 {
+    words.try_get(at).unwrap_or(0)
+}
+
+fn fits(start: u64, size: u64, end: u64) -> bool {
+    start <= end && size <= wrapping_sub(end, start)
+}
+
+fn append_name(inout strings: ChunkSeq[u8], in name: Slice[u8]) -> u64 {
+    let at = strings.len();
+    strings.extend(in name);
+    strings.push(0);
+    at
+}
+
+fn make_symbols(
+    in words: Slice[u64],
+    in bytes: Slice[u8],
+    text_size: u64,
+    count: u64
+) -> Option[Symbols] {
+    let mut table = ChunkSeq::new[u8]();
+    let mut names = ChunkSeq::new[u8]();
+    let mut indices = ChunkSeq::with_capacity[u64](count);
+    let _ = grow(inout table, SymEnt::Bytes);
+    names.push(0);
+    indices.resize(count, 0);
+    let mut elf_index: u64 = 1;
+    let mut first_global: u64 = 1;
+    let local_pass: u64 = 0;
+    let symbol_passes: u64 = 2;
+    for pass in 0..symbol_passes {
+        for index in 0..count {
+            let at = wrapping_add(HEADER_WORDS, wrapping_mul(index, SYMBOL_WORDS));
+            let kind = word(in words, wrapping_add(at, SYM_KIND));
+            let local = kind == LOCAL;
+            if local != (pass == local_pass) {
+                continue;
+            }
+            let undefined = kind == UNDEFINED;
+            let value = word(in words, wrapping_add(at, SYM_VALUE));
+            let size = word(in words, wrapping_add(at, SYM_SIZE));
+            let name_at = word(in words, wrapping_add(at, SYM_NAME));
+            let name_size = word(in words, wrapping_add(at, SYM_NAME_SIZE));
+            let supported = local || undefined || kind == EXPORTED || kind == HIDDEN;
+            if !supported
+                || name_size == 0
+                || name_at < text_size
+                || !fits(name_at, name_size, bytes.len())
+                || !fits(names.len(), name_size, MAX_STRING_OFFSET)
+                || (undefined && (value != 0 || size != 0))
+                || (!undefined && !fits(value, size, text_size))
+            {
+                return Option::None;
+            }
+            let name = bytes[name_at..wrapping_add(name_at, name_size)];
+            for byte in 0..name.len() {
+                if name.try_get(byte).unwrap_or(0) == 0 {
+                    return Option::None;
+                }
+            }
+            let string_offset = append_name(inout names, in name);
+            let binding = if local { Stb::Local } else { Stb::Global };
+            let symbol_type = if undefined { Stt::Notype } else { Stt::Func };
+            let visibility = if kind == HIDDEN { Stv::Hidden } else { 0 };
+            let section = if undefined { Shn::Undef } else { TEXT_SECTION };
+            push32(inout table, wrapping_u32(string_offset));
+            table.push((binding << Stb::Shift) | symbol_type);
+            table.push(visibility);
+            push16(inout table, wrapping_u16(section));
+            push64(inout table, value);
+            push64(inout table, size);
+            let _ = indices.try_set(index, elf_index);
+            elf_index = wrapping_add(elf_index, 1);
+        }
+        if pass == local_pass {
+            first_global = elf_index;
+        }
+    }
+    Option::Some(Symbols {
+        table: table,
+        names: names,
+        indices: indices,
+        first_global: first_global
+    })
+}
+
+fn append_relocations(
+    inout out: ChunkSeq[u8],
+    in words: Slice[u64],
+    in symbols: Symbols,
+    text_size: u64
+) -> bool {
+    if words.len() % RELOC_WORDS != 0 {
+        return false;
+    }
+    for index in 0..(words.len() / RELOC_WORDS) {
+        let at = wrapping_mul(index, RELOC_WORDS);
+        let kind = word(in words, wrapping_add(at, RELOC_KIND));
+        let relocation = match kind {
+            ABS64 => R_X86_64_64,
+            PC32 => R_X86_64_PC32,
+            PLT32 => R_X86_64_PLT32,
+            _ => return false,
+        };
+        let field_size = if kind == ABS64 {
+            ABS64_FIELD_BYTES
+        } else {
+            PC32_FIELD_BYTES
+        };
+        let offset = word(in words, wrapping_add(at, RELOC_OFFSET));
+        if !fits(offset, field_size, text_size) {
+            return false;
+        }
+        let symbol = word(in words, wrapping_add(at, RELOC_SYMBOL));
+        let elf_index = match symbols.indices.try_get(symbol) {
+            Option::Some(index) => index,
+            Option::None => return false,
+        };
+        push64(inout out, offset);
+        push64(inout out, wrapping_shl_u64(elf_index, REL_SYMBOL_SHIFT) | relocation);
+        push64(inout out, word(in words, wrapping_add(at, RELOC_ADDEND)));
+    }
+    true
+}
+
+fn pad(inout out: ChunkSeq[u8], alignment: u64) -> u64 {
+    let at = align_up(out.len(), alignment);
+    out.resize(at, 0);
+    at
+}
+
+fn header(inout out: ChunkSeq[u8]) {
+    out.push(Ident::Mag0);
+    out.push(Ident::Mag1);
+    out.push(Ident::Mag2);
+    out.push(Ident::Mag3);
+    out.push(Ident::Class64);
+    out.push(Ident::Data2Lsb);
+    out.push(Ident::Current);
+    out.resize(Ehdr::Kind, 0);
+    push16(inout out, Et::Rel);
+    push16(inout out, EM_X86_64);
+    push32(inout out, Ident::Current);
+    out.resize(Ehdr::Flags, 0);
+    push32(inout out, 0);
+    push16(inout out, Ehdr::Bytes);
+    out.resize(Ehdr::Shentsize, 0);
+    push16(inout out, Shdr::Bytes);
+    push16(inout out, SECTION_COUNT);
+    push16(inout out, SECTION_NAMES_SECTION);
+}
+
+pub fn write_elf(in words: Slice[u64], in bytes: Slice[u8]) -> ChunkSeq[u8] {
+    if words.len() < HEADER_WORDS {
+        return ChunkSeq::new[u8]();
+    }
+    let text_size = word(in words, TEXT_SIZE);
+    let alignment = word(in words, TEXT_ALIGNMENT);
+    let count = word(in words, SYMBOL_COUNT);
+    if text_size > bytes.len()
+        || alignment == 0
+        || alignment > Page::Bytes
+        || (alignment & wrapping_sub(alignment, 1)) != 0
+        || count > wrapping_sub(words.len(), HEADER_WORDS) / SYMBOL_WORDS
+        || count >= MAX_STRING_OFFSET
+    {
+        return ChunkSeq::new[u8]();
+    }
+    let symbols = match make_symbols(in words, in bytes, text_size, count) {
+        Option::Some(symbols) => symbols,
+        Option::None => return ChunkSeq::new[u8](),
+    };
+    let reloc_start = wrapping_add(HEADER_WORDS, wrapping_mul(count, SYMBOL_WORDS));
+    let mut out = ChunkSeq::new[u8]();
+    header(inout out);
+    let text = pad(inout out, alignment);
+    out.extend(in bytes[0..text_size]);
+    let rela = pad(inout out, ELF_WORD_ALIGNMENT);
+    if !append_relocations(inout out, in words[reloc_start..words.len()], in symbols, text_size) {
+        return ChunkSeq::new[u8]();
+    }
+    let rela_size = wrapping_sub(out.len(), rela);
+    let symtab = pad(inout out, ELF_WORD_ALIGNMENT);
+    out.extend(in symbols.table.as_slice());
+    let strings = out.len();
+    out.extend(in symbols.names.as_slice());
+    let section_names = out.len();
+    let mut names = ChunkSeq::new[u8]();
+    names.push(0);
+    let text_name = append_name(inout names, in ".text".as_bytes());
+    let rela_name = append_name(inout names, in ".rela.text".as_bytes());
+    let symtab_name = append_name(inout names, in ".symtab".as_bytes());
+    let strings_name = append_name(inout names, in ".strtab".as_bytes());
+    let stack_name = append_name(inout names, in ".note.GNU-stack".as_bytes());
+    let section_names_name = append_name(inout names, in ".shstrtab".as_bytes());
+    out.extend(in names.as_slice());
+    let sections = pad(inout out, ELF_WORD_ALIGNMENT);
+    put64(inout out, Ehdr::Shoff, sections);
+    let _ = grow(inout out, Shdr::Bytes);
+    section_header(
+        inout out,
+        text_name,
+        Sht::Progbits,
+        Shf::Alloc | Shf::Execinstr,
+        text,
+        text_size,
+        0,
+        0,
+        alignment,
+        0
+    );
+    section_header(
+        inout out,
+        rela_name,
+        Sht::Rela,
+        Shf::InfoLink,
+        rela,
+        rela_size,
+        SYMBOL_SECTION,
+        TEXT_SECTION,
+        ELF_WORD_ALIGNMENT,
+        RelEnt::RelaBytes
+    );
+    section_header(
+        inout out,
+        symtab_name,
+        Sht::Symtab,
+        0,
+        symtab,
+        symbols.table.len(),
+        STRINGS_SECTION,
+        symbols.first_global,
+        ELF_WORD_ALIGNMENT,
+        SymEnt::Bytes
+    );
+    section_header(
+        inout out,
+        strings_name,
+        Sht::Strtab,
+        0,
+        strings,
+        symbols.names.len(),
+        0,
+        0,
+        1,
+        0
+    );
+    section_header(inout out, stack_name, Sht::Progbits, 0, section_names, 0, 0, 0, 1, 0);
+    section_header(
+        inout out,
+        section_names_name,
+        Sht::Strtab,
+        0,
+        section_names,
+        names.len(),
+        0,
+        0,
+        1,
+        0
+    );
+    out
+}

@@ -278,6 +278,9 @@ vesper_hybrid(
             "//:place_ir_package",
             "//crates/vesper-lean-syntax:port_package",
         ],
+        "hybrid_native_backend": [
+            "//:codegen_freestanding_package",
+        ],
         # The verified code generator (#1886) builds on
         # @vesper/verified-codegen.
         "hybrid_verified_codegen": [

@@ -6,6 +6,8 @@
 #[allow(clippy::all)]
 #[path = "../port/native_backend.rs"]
 mod binding;
+#[path = "native_backend/elf.rs"]
+mod elf;
 
 use cranelift_codegen::ir::{
     AbiParam, BlockArg, Endianness, InstBuilder, MemFlags, Opcode, StackSlotData, StackSlotKind,

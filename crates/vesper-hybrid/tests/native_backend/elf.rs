@@ -1,0 +1,227 @@
+use super::binding;
+use object::write::{Object as WriteObject, Relocation, Symbol, SymbolSection};
+use object::{
+    Architecture, BinaryFormat, Endianness, Object, ObjectSection, ObjectSymbol, RelocationFlags,
+    RelocationTarget, SectionKind, SymbolFlags, SymbolKind, SymbolScope, elf,
+};
+use std::collections::BTreeMap;
+
+const ENTRY: &[u8] = b"sh7_entry";
+const EXTERNAL: &[u8] = b"sh7_plus";
+const LOCAL: &[u8] = b"sh7_local";
+const ADDRESS: &[u8] = b"sh7_addr";
+const TEXT_ALIGNMENT: u64 = 16;
+const TEXT: &[u8] = &[
+    0x48, 0x83, 0xec, 0x08, // sub rsp, 8
+    0xe8, 0, 0, 0, 0, // call sh7_local
+    0x89, 0xc7, // mov edi, eax
+    0xe8, 0, 0, 0, 0, // call sh7_plus
+    0x48, 0x83, 0xc4, 0x08, // add rsp, 8
+    0xc3, // ret
+    0, 0, 0, // pad to the helper
+    0xb8, 17, 0, 0, 0,    // mov eax, 17
+    0xc3, // ret
+    0, 0, // pad to the address helper
+    0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0,    // movabs rax, sh7_entry + 3
+    0xc3, // ret
+];
+const ENTRY_SIZE: u64 = 21;
+const LOCAL_START: u64 = 24;
+const LOCAL_SIZE: u64 = 6;
+const ADDRESS_START: u64 = 32;
+const ADDRESS_SIZE: u64 = 11;
+
+fn request() -> (Vec<u64>, Vec<u8>) {
+    let mut words = vec![TEXT.len() as u64, TEXT_ALIGNMENT, 4];
+    let mut bytes = TEXT.to_vec();
+    for (name, value, size, kind) in [
+        (ENTRY, 0, ENTRY_SIZE, 1),
+        (EXTERNAL, 0, 0, 2),
+        (LOCAL, LOCAL_START, LOCAL_SIZE, 0),
+        (ADDRESS, ADDRESS_START, ADDRESS_SIZE, 3),
+    ] {
+        words.extend([bytes.len() as u64, name.len() as u64, value, size, kind]);
+        bytes.extend(name);
+    }
+    words.extend([5, 2, 2, (-4i64) as u64]);
+    words.extend([12, 1, 3, (-4i64) as u64]);
+    words.extend([34, 0, 1, 3]);
+    (words, bytes)
+}
+
+fn reference() -> Vec<u8> {
+    let mut object = WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+    let text = object.add_section(Vec::new(), b".text".to_vec(), SectionKind::Text);
+    object.append_section_data(text, TEXT, TEXT_ALIGNMENT);
+    object.add_section(Vec::new(), b".note.GNU-stack".to_vec(), SectionKind::Other);
+    let mut add = |name: &[u8], value, size, scope, section| {
+        object.add_symbol(Symbol {
+            name: name.to_vec(),
+            value,
+            size,
+            kind: if section == SymbolSection::Undefined {
+                SymbolKind::Unknown
+            } else {
+                SymbolKind::Text
+            },
+            scope,
+            weak: false,
+            section,
+            flags: SymbolFlags::None,
+        })
+    };
+    let entry = add(
+        ENTRY,
+        0,
+        ENTRY_SIZE,
+        SymbolScope::Dynamic,
+        SymbolSection::Section(text),
+    );
+    let imported = add(
+        EXTERNAL,
+        0,
+        0,
+        SymbolScope::Unknown,
+        SymbolSection::Undefined,
+    );
+    let local = add(
+        LOCAL,
+        LOCAL_START,
+        LOCAL_SIZE,
+        SymbolScope::Compilation,
+        SymbolSection::Section(text),
+    );
+    add(
+        ADDRESS,
+        ADDRESS_START,
+        ADDRESS_SIZE,
+        SymbolScope::Linkage,
+        SymbolSection::Section(text),
+    );
+    for (offset, symbol, r_type, addend) in [
+        (5, local, elf::R_X86_64_PC32, -4),
+        (12, imported, elf::R_X86_64_PLT32, -4),
+        (34, entry, elf::R_X86_64_64, 3),
+    ] {
+        object
+            .add_relocation(
+                text,
+                Relocation {
+                    offset,
+                    symbol,
+                    addend,
+                    flags: RelocationFlags::Elf { r_type },
+                },
+            )
+            .unwrap();
+    }
+    object.write().unwrap()
+}
+
+#[test]
+fn elf_writer_matches_text_symbols_and_relocations() {
+    let (words, bytes) = request();
+    let output = binding::x86_64_elf_object(&words, &bytes);
+    let expected = reference();
+    let candidate = object::File::parse(output.as_slice()).unwrap();
+    let baseline = object::File::parse(expected.as_slice()).unwrap();
+    assert_eq!(candidate.kind(), object::ObjectKind::Relocatable);
+    assert_eq!(candidate.architecture(), Architecture::X86_64);
+    assert_eq!(candidate.endianness(), Endianness::Little);
+    let section = candidate.section_by_name(".text").unwrap();
+    let reference_section = baseline.section_by_name(".text").unwrap();
+    assert_eq!(section.align(), reference_section.align());
+    assert_eq!(section.flags(), reference_section.flags());
+    assert_eq!(section.data().unwrap(), reference_section.data().unwrap());
+    let symbols = |file: &object::File<'_>| {
+        file.symbols()
+            .map(|symbol| {
+                (
+                    symbol.name_bytes().unwrap().to_vec(),
+                    (
+                        symbol.address(),
+                        symbol.size(),
+                        symbol.scope(),
+                        symbol.flags(),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(symbols(&candidate), symbols(&baseline));
+    let relocations = |file: &object::File<'_>| {
+        file.section_by_name(".text")
+            .unwrap()
+            .relocations()
+            .map(|(offset, relocation)| {
+                let RelocationTarget::Symbol(index) = relocation.target() else {
+                    panic!("expected a symbol relocation");
+                };
+                let symbol = file.symbol_by_index(index).unwrap();
+                (
+                    offset,
+                    symbol.name_bytes().unwrap().to_vec(),
+                    relocation.flags(),
+                    relocation.addend(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(relocations(&candidate), relocations(&baseline));
+    let stack = candidate.section_by_name(".note.GNU-stack").unwrap();
+    assert_eq!(stack.flags(), object::SectionFlags::Elf { sh_flags: 0 });
+    assert!(stack.data().unwrap().is_empty());
+    assert!(binding::x86_64_elf_object(&words[..words.len() - 1], &bytes).is_empty());
+    assert!(binding::x86_64_elf_object(&words, &bytes[..bytes.len() - 1]).is_empty());
+    let mut invalid = words;
+    invalid[1] = 3;
+    assert!(binding::x86_64_elf_object(&invalid, &bytes).is_empty());
+}
+
+#[test]
+fn elf_writer_links_an_import_and_local_call() {
+    use std::fs;
+    use std::process::Command;
+
+    if Command::new("cc").arg("--version").output().is_err() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("vesper-sh7-elf-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    let source = dir.join("main.c");
+    fs::write(
+        &source,
+        "#include <stdint.h>\n\
+         extern int sh7_entry(void);\n\
+         extern uintptr_t sh7_addr(void);\n\
+         int sh7_plus(int n) { return n + 5; }\n\
+         int main(void) {\n\
+             return sh7_entry() == 22 && sh7_addr() == (uintptr_t)sh7_entry + 3 ? 0 : 1;\n\
+         }\n",
+    )
+    .unwrap();
+    let (words, bytes) = request();
+    for (name, object) in [
+        ("vesper", binding::x86_64_elf_object(&words, &bytes)),
+        ("reference", reference()),
+    ] {
+        let relocatable = dir.join(format!("{name}.o"));
+        let exe = dir.join(name);
+        fs::write(&relocatable, object).unwrap();
+        let output = Command::new("cc")
+            .arg("-no-pie")
+            .arg(&source)
+            .arg(&relocatable)
+            .arg("-o")
+            .arg(&exe)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(Command::new(&exe).status().unwrap().success(), "{name}");
+    }
+    fs::remove_dir_all(dir).unwrap();
+}

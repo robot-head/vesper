@@ -1,8 +1,14 @@
 // @export abi 4
 
 use self::scalar::{encode_block};
+use self::elf::{write_elf};
 
 // An empty result declines the block before the hybrid defines its symbol.
 pub fn x86_64_integer_block(in words: Slice[u64]) -> ChunkSeq[u8] {
     encode_block(in words)
+}
+
+// An empty result declines the object request.
+pub fn x86_64_elf_object(in words: Slice[u64], in bytes: Slice[u8]) -> ChunkSeq[u8] {
+    write_elf(in words, in bytes)
 }
