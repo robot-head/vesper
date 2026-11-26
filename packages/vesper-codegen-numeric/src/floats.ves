@@ -72,6 +72,76 @@ const F64_HALF: u64 = 4602678819172646912;
 const F64_ONE: u64 = 4607182418800017408;
 const F64_MIN_POSITIVE: u64 = 4503599627370496;
 
+// The f64 -> f32 narrowing of `f32_bits_of`.
+const F64_SIGN_SHIFT: u64 = 63;
+const F32_SIGN_SHIFT: u64 = 31;
+const F64_MANTISSA_BITS: u64 = 52;
+const F64_MANTISSA_MASK: u64 = 4503599627370495;
+const F64_IMPLICIT_BIT: u64 = 4503599627370496;
+const F64_EXPONENT_MASK: u64 = 2047;
+const F32_MANTISSA_BITS: u64 = 23;
+// The f64 mantissa bits an f32 drops.
+const F32_DROPPED_BITS: u64 = 29;
+const F32_INFINITY: u64 = 2139095040;
+const F32_QUIET_NAN: u64 = 2143289344;
+// f64 biased exponents: the f32 exponent is the f64 one less 896 (1023 -
+// 127); 897 is the least normal f32 and 1151 the first that overflows.
+const F32_EXPONENT_REBIAS: u64 = 896;
+const F32_LEAST_NORMAL_EXPONENT: u64 = 897;
+const F32_OVERFLOW_EXPONENT: u64 = 1151;
+// A shift that drops every significand bit.
+const WORD_BITS: u64 = 64;
+
+// `to_bits_f32(nearest_f32(from_bits_f64(bits)))` in integer arithmetic:
+// the f32 nearest the f64 `bits` (ties to even), with an infinity for an
+// overflow, a signed zero for an underflow and a quiet NaN that keeps the
+// payload's top bits for a NaN. Stage 2's Wasm backend has no `f32`, and
+// this is the package's only `f32` value (#2210).
+fn f32_bits_of(bits: u64) -> u32 {
+    let sign = (bits >> F64_SIGN_SHIFT) << F32_SIGN_SHIFT;
+    let exponent = (bits >> F64_MANTISSA_BITS) & F64_EXPONENT_MASK;
+    let mantissa = bits & F64_MANTISSA_MASK;
+    if exponent == F64_EXPONENT_MASK {
+        if mantissa == 0 {
+            return wrapping_u32(sign | F32_INFINITY);
+        }
+        return wrapping_u32(sign | F32_QUIET_NAN | (mantissa >> F32_DROPPED_BITS));
+    }
+    if exponent >= F32_OVERFLOW_EXPONENT {
+        return wrapping_u32(sign | F32_INFINITY);
+    }
+    if exponent == 0 {
+        return wrapping_u32(sign);
+    }
+    let (significand, shift, base) = if exponent >= F32_LEAST_NORMAL_EXPONENT {
+        (
+            mantissa,
+            F32_DROPPED_BITS,
+            wrapping_sub(exponent, F32_EXPONENT_REBIAS) << F32_MANTISSA_BITS
+        )
+    } else {
+        (
+            mantissa | F64_IMPLICIT_BIT,
+            wrapping_add(F32_DROPPED_BITS, wrapping_sub(F32_LEAST_NORMAL_EXPONENT, exponent)),
+            0
+        )
+    };
+    if shift >= WORD_BITS {
+        return wrapping_u32(sign);
+    }
+    let bit: u64 = 1;
+    let kept = wrapping_shr_u64(significand, wrapping_u32(shift));
+    let rest = significand & wrapping_sub(wrapping_shl_u64(bit, wrapping_u32(shift)), 1);
+    let half = wrapping_shl_u64(bit, wrapping_u32(wrapping_sub(shift, 1)));
+    let rounded = if rest > half || (rest == half && (kept & 1) == 1) {
+        wrapping_add(kept, 1)
+    } else {
+        kept
+    };
+    // A carry out of the mantissa moves into the exponent (up to infinity).
+    wrapping_u32(sign | wrapping_add(base, rounded))
+}
+
 fn fty(code: u32) -> Ty {
     Ty { code: code }
 }
@@ -106,7 +176,7 @@ fn float_const_like(
 // `float_const(ty, x)` of an `f64` bit pattern: `x as f32` for `f32`.
 fn float_const_of(inout builder: Builder, f32_kind: bool, bits: u64) -> Value eff [Ffi[Cranelift]] {
     if f32_kind {
-        ins_f32const(inout builder, wrapping_u32(to_bits_f32(nearest_f32(from_bits_f64(bits)))))
+        ins_f32const(inout builder, f32_bits_of(bits))
     } else {
         ins_f64const(inout builder, bits)
     }
