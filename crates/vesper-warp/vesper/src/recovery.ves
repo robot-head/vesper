@@ -282,11 +282,10 @@ fn ent_get(in ents: Slice[RecEntry], at: u64) -> RecEntry {
 }
 
 fn emit(inout st: RecState, inout evs: Slice[RecEvent], kind: u8, e: RecEntry, count: u64) {
-    evs
-        .try_set(
-            st.n_events,
-            RecEvent { kind: kind, pn: e.pn, sent_ns: e.sent_ns, bytes: e.bytes, count: count }
-        );
+    evs.try_set(
+        st.n_events,
+        RecEvent { kind: kind, pn: e.pn, sent_ns: e.sent_ns, bytes: e.bytes, count: count }
+    );
     st.n_events = wrapping_add(st.n_events, 1);
 }
 
@@ -402,8 +401,12 @@ fn scan(in st: RecState, in r: Rtt, in spaces: Slice[RecSpace], now_ns: u64) -> 
     }
 }
 
-pub fn rec_pto_time_and_space(in st: RecState, in r: Rtt, in spaces: Slice[RecSpace], now_ns: u64)
-    -> PtoOut {
+pub fn rec_pto_time_and_space(
+    in st: RecState,
+    in r: Rtt,
+    in spaces: Slice[RecSpace],
+    now_ns: u64
+) -> PtoOut {
     scan(in st, in r, in spaces, now_ns).pto
 }
 
@@ -502,18 +505,17 @@ pub fn rec_on_packet_sent(
     s.last_sent_pn = pkt.pn;
     st.last_sent_ns = pkt.sent_ns;
     let at = slot(in st, in s, i, s.len);
-    ents
-        .try_set(
-            at,
-            RecEntry {
-                pn: pkt.pn,
-                sent_ns: pkt.sent_ns,
-                bytes: pkt.bytes,
-                ack_eliciting: pkt.ack_eliciting,
-                in_flight: true,
-                status: in_flight_st()
-            }
-        );
+    ents.try_set(
+        at,
+        RecEntry {
+            pn: pkt.pn,
+            sent_ns: pkt.sent_ns,
+            bytes: pkt.bytes,
+            ack_eliciting: pkt.ack_eliciting,
+            in_flight: true,
+            status: in_flight_st()
+        }
+    );
     s.len = wrapping_add(s.len, 1);
     if pkt.ack_eliciting {
         s.has_last_ack_eliciting = true;
@@ -526,8 +528,13 @@ pub fn rec_on_packet_sent(
 }
 
 // The first record of space `i` with `pn >= smallest` (binary search).
-fn partition_point(in st: RecState, in s: RecSpace, in ents: Slice[RecEntry], i: u64, smallest: u64)
-    -> u64 {
+fn partition_point(
+    in st: RecState,
+    in s: RecSpace,
+    in ents: Slice[RecEntry],
+    i: u64,
+    smallest: u64
+) -> u64 {
     let mut lo: u64 = 0;
     let mut hi = s.len;
     loop {

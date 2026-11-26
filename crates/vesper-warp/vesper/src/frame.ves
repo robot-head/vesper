@@ -861,8 +861,11 @@ pub fn fr_encode_stream_header(
     w_vi(inout out, at, len)
 }
 
-pub fn fr_encode_crypto_header(inout out: Slice[u8], offset: u64, len: u64)
-    -> u64 eff [Fail[FrameErr]] {
+pub fn fr_encode_crypto_header(
+    inout out: Slice[u8],
+    offset: u64,
+    len: u64
+) -> u64 eff [Fail[FrameErr]] {
     if !end_ok(offset, len) {
         enc();
     }

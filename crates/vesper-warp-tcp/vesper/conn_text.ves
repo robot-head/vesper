@@ -1,6 +1,11 @@
 // Seventh step: accept segment text into the stream.
-fn accept_text(inout t: Tcb, now: u64, seg: Seg, in bytes: Slice[u8], inout ring: Slice[u8])
-    -> RecvOut {
+fn accept_text(
+    inout t: Tcb,
+    now: u64,
+    seg: Seg,
+    in bytes: Slice[u8],
+    inout ring: Slice[u8]
+) -> RecvOut {
     let mut rec = no_recv();
     let s = t.st;
     if !(s == State::Established || s == State::FinWait1 || s == State::FinWait2)

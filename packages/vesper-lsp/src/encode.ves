@@ -727,8 +727,11 @@ fn decimal_len(v: u64) -> u64 {
 }
 
 // `encode_frame`: the whole frame, or the first limit it breaks.
-pub fn encode_frame(in w: Slice[u64], in pool: Slice[u8], l: Plimits)
-    -> ChunkSeq[u8] eff [Fail[Perr]] {
+pub fn encode_frame(
+    in w: Slice[u64],
+    in pool: Slice[u8],
+    l: Plimits
+) -> ChunkSeq[u8] eff [Fail[Perr]] {
     let b = validate_output(in w, l);
     let mut o = Out { bytes: ChunkSeq::new(), b: b };
     put_envelope(inout o, in w, in pool);

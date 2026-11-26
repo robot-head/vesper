@@ -1,6 +1,9 @@
 // Shape-generic decoder pieces: RMSNorm, RoPE, a SwiGLU MLP and softmax.
-fn norm_rope[H: dim, D: dim](x: Tensor[F32, [H, D]], w: Tensor[F32, [H * D]], pos: u64)
-    -> Tensor[F32, [H, D]] eff [Tensor] {
+fn norm_rope[H: dim, D: dim](
+    x: Tensor[F32, [H, D]],
+    w: Tensor[F32, [H * D]],
+    pos: u64
+) -> Tensor[F32, [H, D]] eff [Tensor] {
     let flat = Tensor::reshape[[H * D]](x);
     let normed = Tensor::rms_norm(flat, w, 0.00001);
     Tensor::rope(Tensor::reshape[[H, D]](normed), pos)

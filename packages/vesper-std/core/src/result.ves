@@ -45,16 +45,20 @@ pub fn unwrap_or_else[T: mod copy, E: mod copy](r: Result[T, E], sink f: fn(E) -
     }
 }
 
-pub fn map[T: mod copy, U: mod copy, E: mod copy](r: Result[T, E], sink f: fn(T) -> U)
-    -> Result[U, E] {
+pub fn map[T: mod copy, U: mod copy, E: mod copy](
+    r: Result[T, E],
+    sink f: fn(T) -> U
+) -> Result[U, E] {
     match r {
         Result::Ok(x) => Result::Ok(f(x)),
         Result::Err(e) => Result::Err(e),
     }
 }
 
-pub fn map_err[T: mod copy, E: mod copy, F: mod copy](r: Result[T, E], sink f: fn(E) -> F)
-    -> Result[T, F] {
+pub fn map_err[T: mod copy, E: mod copy, F: mod copy](
+    r: Result[T, E],
+    sink f: fn(E) -> F
+) -> Result[T, F] {
     match r {
         Result::Ok(x) => Result::Ok(x),
         Result::Err(e) => Result::Err(f(e)),
@@ -150,8 +154,11 @@ test {
     // @case first_success_second_error(Result::Ok(4), Result::Err(7), Result::Ok(4))
     // @case fallback_success(Result::Err(7), Result::Ok(9), Result::Ok(9))
     // @case fallback_error(Result::Err(7), Result::Err(8), Result::Err(8))
-    fn test_result_or(first: Result[u64, u8], fallback: Result[u64, u8], expected: Result[u64, u8])
-        -> bool {
+    fn test_result_or(
+        first: Result[u64, u8],
+        fallback: Result[u64, u8],
+        expected: Result[u64, u8]
+    ) -> bool {
         or(first, fallback) == expected
     }
 }

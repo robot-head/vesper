@@ -122,20 +122,18 @@ pub fn take_module(inout b: B, inout d: Defs, owner: u64) -> bool {
         }
         let key = text_symbol(in b, off, len);
         let block = starts_with(in b, off, len, in "$block_");
-        d
-            .defs
-            .push(
-                Def {
-                    owner: owner,
-                    key: key,
-                    at: base,
-                    binders: add(base, wrapping_sub(ba, kind_at)),
-                    body: add(base, wrapping_sub(bo, kind_at)),
-                    end: add(base, wrapping_sub(end, kind_at)),
-                    nullary: wd_at(in s, ba) == 0,
-                    block: block
-                }
-            );
+        d.defs.push(
+            Def {
+                owner: owner,
+                key: key,
+                at: base,
+                binders: add(base, wrapping_sub(ba, kind_at)),
+                body: add(base, wrapping_sub(bo, kind_at)),
+                end: add(base, wrapping_sub(end, kind_at)),
+                nullary: wd_at(in s, ba) == 0,
+                block: block
+            }
+        );
         at = end;
     }
     true
@@ -172,8 +170,13 @@ fn names_less(in b: B, x: u32, y: u32) -> bool {
 
 // `order_definitions(definitions, recursive)` over `d.defs[from..]`;
 // `reach` gets 1 at each owner in, or reaching, a recursive group.
-pub fn order(inout b: B, in d: Defs, from: u64, recursive: u64, inout reach: ChunkSeq[u32])
-    -> Ordered {
+pub fn order(
+    inout b: B,
+    in d: Defs,
+    from: u64,
+    recursive: u64,
+    inout reach: ChunkSeq[u32]
+) -> Ordered {
     let n = wrapping_sub(d.defs.len(), from);
     let pool = match String::from_utf8(in b.names.text.as_slice()) {
         Option::Some(s) => s,

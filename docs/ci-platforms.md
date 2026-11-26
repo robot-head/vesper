@@ -145,9 +145,10 @@ finished (#1321). To keep pull requests within the limit:
   Linux runner ahead of everything else (#1479). The gate also stops a pull
   request that changes the generated `docs/maintenance/rust-census.md` along
   with anything else: lanes edit the STATUS tables in
-  `.aspect/rust-census.axl`, and `.github/workflows/rust-census.yml`
-  regenerates the census after each push to main into one "Refresh the Rust
-  census" pull request, which changes only that file.
+  `.aspect/rust-census.axl`, and the report is regenerated with
+  `aspect maintenance rust-census` in a pull request of its own. Nothing
+  regenerates it automatically; the refresh workflow kept CI busy after
+  every push to main.
 - `macOS (AArch64)` and `Windows (x86_64 MSVC)` start only when a pull
   request can merge. Platforms no longer runs on pull request pushes;
   `Native platform checks` (`.github/workflows/native-checks.yml`) runs on

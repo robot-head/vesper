@@ -170,8 +170,14 @@ fn ptags(inout o: ChunkSeq[u8], flex: bool) {
 // The frame's length field (written by `finish`) and the request header
 // v1 (v2 with its tag section for a flexible body): api key, version,
 // correlation id and client id.
-fn head(key: i64, version: i64, corr: i64, in cid: Slice[u8], flex: bool, body: u64)
-    -> ChunkSeq[u8] eff [Fail[KwErr]] {
+fn head(
+    key: i64,
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    flex: bool,
+    body: u64
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
     let mut o = ChunkSeq::with_capacity[u8](wrapping_add(wrapping_add(16, cid.len()), body));
     p32(inout o, 0);
     p16(inout o, key);
@@ -214,31 +220,46 @@ const END_TXN: i64 = 26;
 const TXN_OFFSET_COMMIT: i64 = 28;
 const SASL_AUTHENTICATE: i64 = 36;
 
-pub fn req_api_versions(version: i64, corr: i64, in cid: Slice[u8])
-    -> ChunkSeq[u8] eff [Fail[KwErr]] {
+pub fn req_api_versions(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
     let mut o = head(API_VERSIONS, version, corr, in cid, false, 0);
     finish(inout o);
     o
 }
 
-pub fn req_sasl_handshake(version: i64, corr: i64, in cid: Slice[u8], in mech: Slice[u8])
-    -> ChunkSeq[u8] eff [Fail[KwErr]] {
+pub fn req_sasl_handshake(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in mech: Slice[u8]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
     let mut o = head(SASL_HANDSHAKE, version, corr, in cid, false, wrapping_add(2, mech.len()));
     pstr(inout o, false, in mech);
     finish(inout o);
     o
 }
 
-pub fn req_sasl_authenticate(version: i64, corr: i64, in cid: Slice[u8], in msg: Slice[u8])
-    -> ChunkSeq[u8] eff [Fail[KwErr]] {
+pub fn req_sasl_authenticate(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in msg: Slice[u8]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
     let mut o = head(SASL_AUTHENTICATE, version, corr, in cid, false, wrapping_add(4, msg.len()));
     pbytes(inout o, false, in msg);
     finish(inout o);
     o
 }
 
-pub fn req_metadata(version: i64, corr: i64, in cid: Slice[u8], in topic: Slice[u8])
-    -> ChunkSeq[u8] eff [Fail[KwErr]] {
+pub fn req_metadata(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in topic: Slice[u8]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
     let mut o = head(METADATA, version, corr, in cid, false, wrapping_add(9, topic.len()));
     plen(inout o, false, 1);
     pstr(inout o, false, in topic);
@@ -1429,15 +1450,14 @@ pub fn resp_produce(in b: Slice[u8], partition: i64) -> ChunkSeq[i64] eff [Fail[
                 let _ = out.try_set(0, 1);
                 let _ = out.try_set(1, code);
                 let _ = out.try_set(2, base);
-                let _ = out
-                    .try_set(
-                        3,
-                        if m < 0 {
-                            0
-                        } else {
-                            wrapping_i64(wrapping_sub(at, wrapping_u64(m)))
-                        }
-                    );
+                let _ = out.try_set(
+                    3,
+                    if m < 0 {
+                        0
+                    } else {
+                        wrapping_i64(wrapping_sub(at, wrapping_u64(m)))
+                    }
+                );
                 let _ = out.try_set(4, m);
             }
         }
@@ -1598,8 +1618,11 @@ pub fn resp_offset_errors(in b: Slice[u8], flex: bool) eff [Fail[KwErr]] {
 // `su(in lens, i)` bytes and partition `si(in parts, i)`. The topics are the distinct
 // names in sorted order; the user data is the distinct (topic, partition)
 // bindings in sorted order (`subscription`'s `BTreeSet`s).
-pub fn subscription(in data: Slice[u8], in lens: Slice[u64], in parts: Slice[i64])
-    -> ChunkSeq[u8] eff [Fail[KwErr]] {
+pub fn subscription(
+    in data: Slice[u8],
+    in lens: Slice[u64],
+    in parts: Slice[i64]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
     let n = lens.len();
     let mut starts = ChunkSeq::with_capacity[u64](n);
     let mut at: u64 = 0;

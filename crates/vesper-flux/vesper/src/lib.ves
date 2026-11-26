@@ -871,8 +871,12 @@ pub fn log_frame_ok(in body: Slice[u8], len: u64) -> bool eff [Ffi[Blake3]] {
 }
 
 // A checked payload's sets: per input its row count, then its cells.
-pub fn log_decode(in payload: Slice[u8], epoch: u64, in widths: Slice[u64], max_rows: u64)
-    -> ChunkSeq[i64] eff [Fail[LogErr]] {
+pub fn log_decode(
+    in payload: Slice[u8],
+    epoch: u64,
+    in widths: Slice[u64],
+    max_rows: u64
+) -> ChunkSeq[i64] eff [Fail[LogErr]] {
     frame_decode(in payload, epoch, in widths, max_rows)
 }
 
@@ -907,8 +911,10 @@ pub copy enum CpErr {
 }
 
 // The execution identity digest of a circuit's flattened words.
-pub fn cp_identity(in words: Slice[u64], inout budget: u64)
-    -> ChunkSeq[u8] eff [Ffi[Blake3], Fail[CpErr]] {
+pub fn cp_identity(
+    in words: Slice[u64],
+    inout budget: u64
+) -> ChunkSeq[u8] eff [Ffi[Blake3], Fail[CpErr]] {
     identity(in words, inout budget)
 }
 
@@ -932,8 +938,12 @@ pub fn cp_check(in image: Slice[u8]) eff [Ffi[Blake3], Fail[CpErr]] {
 }
 
 // A checked body's head through its source.
-pub fn cp_head(in body: Slice[u8], in expected: Slice[u8], max_sources: u64, inout budget: u64)
-    -> ChunkSeq[u64] eff [Fail[CpErr]] {
+pub fn cp_head(
+    in body: Slice[u8],
+    in expected: Slice[u8],
+    max_sources: u64,
+    inout budget: u64
+) -> ChunkSeq[u64] eff [Fail[CpErr]] {
     image_head(
         in body,
         in "VFLUXCP1".as_bytes(),
@@ -1024,8 +1034,12 @@ pub fn dur_manifest(
 }
 
 // A manifest's head through its source.
-pub fn dur_head(in body: Slice[u8], in expected: Slice[u8], max_sources: u64, inout budget: u64)
-    -> ChunkSeq[u64] eff [Fail[CpErr]] {
+pub fn dur_head(
+    in body: Slice[u8],
+    in expected: Slice[u8],
+    max_sources: u64,
+    inout budget: u64
+) -> ChunkSeq[u64] eff [Fail[CpErr]] {
     image_head(
         in body,
         in "VFLUXDM2".as_bytes(),
@@ -1119,23 +1133,38 @@ pub copy enum KwErr {
     }
 }
 
-pub fn kw_req_api_versions(version: i64, corr: i64, in cid: Slice[u8])
-    -> ChunkSeq[u8] eff [Fail[KwErr]] {
+pub fn kw_req_api_versions(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
     req_api_versions(version, corr, in cid)
 }
 
-pub fn kw_req_sasl_handshake(version: i64, corr: i64, in cid: Slice[u8], in mech: Slice[u8])
-    -> ChunkSeq[u8] eff [Fail[KwErr]] {
+pub fn kw_req_sasl_handshake(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in mech: Slice[u8]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
     req_sasl_handshake(version, corr, in cid, in mech)
 }
 
-pub fn kw_req_sasl_authenticate(version: i64, corr: i64, in cid: Slice[u8], in msg: Slice[u8])
-    -> ChunkSeq[u8] eff [Fail[KwErr]] {
+pub fn kw_req_sasl_authenticate(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in msg: Slice[u8]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
     req_sasl_authenticate(version, corr, in cid, in msg)
 }
 
-pub fn kw_req_metadata(version: i64, corr: i64, in cid: Slice[u8], in topic: Slice[u8])
-    -> ChunkSeq[u8] eff [Fail[KwErr]] {
+pub fn kw_req_metadata(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in topic: Slice[u8]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
     req_metadata(version, corr, in cid, in topic)
 }
 
@@ -1452,8 +1481,11 @@ pub fn kw_resp_offset_errors(in b: Slice[u8], flex: bool) eff [Fail[KwErr]] {
     resp_offset_errors(in b, flex)
 }
 
-pub fn kw_subscription(in data: Slice[u8], in lens: Slice[u64], in parts: Slice[i64])
-    -> ChunkSeq[u8] eff [Fail[KwErr]] {
+pub fn kw_subscription(
+    in data: Slice[u8],
+    in lens: Slice[u64],
+    in parts: Slice[i64]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
     subscription(in data, in lens, in parts)
 }
 

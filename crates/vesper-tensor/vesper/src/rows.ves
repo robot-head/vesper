@@ -198,8 +198,10 @@ fn push_half(inout out: ChunkSeq[u8], bits: u16) {
 }
 
 // GGML reference Q8_0.
-pub fn quantize_q8_0(in data: Slice[u32], cols: u64)
-    -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+pub fn quantize_q8_0(
+    in data: Slice[u32],
+    cols: u64
+) -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
     check_rows(in data, cols, BLOCK);
     let blocks = data.len() / BLOCK;
     let mut out = ChunkSeq::with_capacity[u8](blocks * Q8_0_BYTES);
@@ -232,8 +234,10 @@ fn q4(v: f32, id: f32) -> u8 eff [Fail[ArithOverflow]] {
 }
 
 // GGML reference Q4_0.
-pub fn quantize_q4_0(in data: Slice[u32], cols: u64)
-    -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+pub fn quantize_q4_0(
+    in data: Slice[u32],
+    cols: u64
+) -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
     check_rows(in data, cols, BLOCK);
     let blocks = data.len() / BLOCK;
     let mut out = ChunkSeq::with_capacity[u8](blocks * Q4_0_BYTES);
@@ -278,8 +282,10 @@ fn mxfp4_code(d: f32, x: f32) -> u8 eff [Fail[ArithOverflow]] {
 }
 
 // GGML / gguf-py MXFP4 quantization with an exact exponent.
-pub fn quantize_mxfp4(in data: Slice[u32], cols: u64)
-    -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+pub fn quantize_mxfp4(
+    in data: Slice[u32],
+    cols: u64
+) -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
     check_rows(in data, cols, BLOCK);
     let blocks = data.len() / BLOCK;
     let mut out = ChunkSeq::with_capacity[u8](blocks * MXFP4_BYTES);
@@ -332,8 +338,11 @@ pub fn fp8_scale(in data: Slice[u32], e5m2: bool) -> f32 eff [Fail[RuntimeError]
     scale
 }
 
-pub fn fp8_codes(in data: Slice[u32], e5m2: bool, scale: f32)
-    -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn fp8_codes(
+    in data: Slice[u32],
+    e5m2: bool,
+    scale: f32
+) -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     let mut out = ChunkSeq::with_capacity[u8](data.len());
     for i in 0..data.len() {
         out.push(fp8_encode(e5m2, f(in data, i) / scale));
@@ -343,8 +352,10 @@ pub fn fp8_codes(in data: Slice[u32], e5m2: bool, scale: f32)
 
 // `Matrix::from_bytes`: whether every element or block scale of a payload
 // of whole blocks is finite (format codes as in `decode_piece`).
-pub fn finite_payload(format: u8, in raw: Slice[u8])
-    -> bool eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn finite_payload(
+    format: u8,
+    in raw: Slice[u8]
+) -> bool eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     let n = raw.len();
     if format == FORMAT_F32 {
         for i in u64_zero()..n / 4 {

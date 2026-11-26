@@ -658,8 +658,13 @@ fn is_bound(in bound: ChunkSeq[u32], s: u32) -> bool {
 }
 
 // One instruction of the instance `name` (arguments `vars`): its new row.
-fn instruction(inout m: Mo, i: InstRow, name: u32, in vars: Vars, in bound: ChunkSeq[u32])
-    -> InstRow eff [Fail[VErr]] {
+fn instruction(
+    inout m: Mo,
+    i: InstRow,
+    name: u32,
+    in vars: Vars,
+    in bound: ChunkSeq[u32]
+) -> InstRow eff [Fail[VErr]] {
     let generic = vars.keys.len() != 0;
     let mut row = i;
     if generic {
@@ -760,20 +765,17 @@ fn instantiate(inout m: Mo, f: FnRow, name: u32, in vars: Vars) eff [Fail[VErr]]
             let row = instruction(inout m, i, name, in vars, in bound);
             m.p.insts.push(row);
         }
-        m
-            .p
-            .blocks
-            .push(
-                BlockRow {
-                    ha: blk.ha,
-                    hn: blk.hn,
-                    i0: i0,
-                    ic: blk.ic,
-                    term: blk.term,
-                    ta: blk.ta,
-                    tn: blk.tn
-                }
-            );
+        m.p.blocks.push(
+            BlockRow {
+                ha: blk.ha,
+                hn: blk.hn,
+                i0: i0,
+                ic: blk.ic,
+                term: blk.term,
+                ta: blk.ta,
+                tn: blk.tn
+            }
+        );
     }
     m.p.fns.push(FnRow { name: name, ha: ha, hn: f.hn, b0: b0, bc: f.bc, ta: f.ta, tn: f.tn });
 }

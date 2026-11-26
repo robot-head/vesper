@@ -293,8 +293,12 @@ pub fn rb_insert(
     true
 }
 
-pub fn rb_read(inout s: RecvSt, in data: Slice[u8], inout have: Slice[u64], inout out: Slice[u8])
-    -> u64 {
+pub fn rb_read(
+    inout s: RecvSt,
+    in data: Slice[u8],
+    inout have: Slice[u64],
+    inout out: Slice[u8]
+) -> u64 {
     let n = min64(out.len(), wrapping_sub(s.contig, s.read));
     ring_read(in data, s.read, inout out, 0, n);
     bits_clear(inout have, s.cap, s.read, wrapping_add(s.read, n));

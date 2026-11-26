@@ -798,15 +798,13 @@ pub fn core_flush_begin(
             hint_changed(inout c, id, p);
             c.fl_bidi.push(id);
             c.fl_bidi.push(widen_u64(p.urgency));
-            c
-                .fl_bidi
-                .push(
-                    if p.incremental {
-                        1
-                    } else {
-                        0
-                    }
-                );
+            c.fl_bidi.push(
+                if p.incremental {
+                    1
+                } else {
+                    0
+                }
+            );
         }
     }
     if c.fl_bidi.len() == 0 {

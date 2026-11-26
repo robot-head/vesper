@@ -51,8 +51,10 @@ pub fn argmax(in x: Slice[u32]) -> u64 eff [Fail[RuntimeError], Fail[Fault]] {
     best
 }
 
-pub fn sample_mult(in probs: Slice[u32], coin: f32)
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn sample_mult(
+    in probs: Slice[u32],
+    coin: f32
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     let mut cdf: f32 = 0.0;
     for i in 0..probs.len() {
         cdf = cdf + f(in probs, i);
@@ -117,8 +119,12 @@ fn sort_prefix(inout s: Slice[u64], n: u64) eff [Fail[ArithOverflow], Fail[Runti
 // `(!bits(p) << 32) | id`: probabilities are non-negative, so ascending
 // words are descending probabilities, then ascending ids. `scratch` has at
 // least `probs.len()` words.
-pub fn sample_top_p(in probs: Slice[u32], top_p: f32, coin: f32, inout scratch: Slice[u64])
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn sample_top_p(
+    in probs: Slice[u32],
+    top_p: f32,
+    coin: f32,
+    inout scratch: Slice[u64]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     let n = probs.len();
     if n == 1 {
         return 0;

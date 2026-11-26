@@ -400,8 +400,13 @@ fn dyn_candidate(call: u64, inout b: Builder) eff [Ffi[Cranelift]] {
     call_result_block(call, no);
 }
 
-fn build_vtable_data(call: u64, inout m: Module, in sym: Slice[u8], words: u64, slot_count: u64)
-    -> Option[DataId] eff [Ffi[Cranelift]] {
+fn build_vtable_data(
+    call: u64,
+    inout m: Module,
+    in sym: Slice[u8],
+    words: u64,
+    slot_count: u64
+) -> Option[DataId] eff [Ffi[Cranelift]] {
     let self_size = call_arg(call, 1);
     let has_drop = call_arg(call, 2);
     let mut d: Data = match data_new() {

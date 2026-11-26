@@ -1558,20 +1558,18 @@ fn set_span(inout p: P, id: u32, s: u64, e: u64) {
 // it into container `c`.
 fn add_entry(inout p: P, c: u32, keyed: bool, k: Part, child: u32) -> u32 {
     let e = wrapping_u32(p.ents.len());
-    p
-        .ents
-        .push(
-            Ent {
-                has_key: keyed,
-                koff: k.koff,
-                klen: k.klen,
-                hash: k.hash,
-                ks: k.ks,
-                ke: k.ke,
-                child: child,
-                next: NONE
-            }
-        );
+    p.ents.push(
+        Ent {
+            has_key: keyed,
+            koff: k.koff,
+            klen: k.klen,
+            hash: k.hash,
+            ks: k.ks,
+            ke: k.ke,
+            child: child,
+            next: NONE
+        }
+    );
     link(inout p.nodes, inout p.ents, c, e);
     e
 }
@@ -1683,17 +1681,16 @@ fn value(in s: Slice[u8], inout p: P) -> u32 {
             cx(inout p, wrapping_add(E_CHAR, APOS));
             return NONE;
         }
-        p
-            .pos = wrapping_add(
-                p.pos,
-                if c == 102 {
-                    5
-                } else if c == 116 {
-                    4
-                } else {
-                    3
-                }
-            );
+        p.pos = wrapping_add(
+            p.pos,
+            if c == 102 {
+                5
+            } else if c == 116 {
+                4
+            } else {
+                3
+            }
+        );
         if c == 116 || c == 102 {
             let mut n = empty_node(K_BOOL);
             n.a = if c == 116 {
@@ -2078,8 +2075,14 @@ fn duplicate_key_err(inout p: P, in s: Slice[u8], in path: ChunkSeq[Part], i: u6
 }
 
 // `ParseState::descend_path(table, path[from..to], dotted)`.
-fn descend(inout p: P, in path: ChunkSeq[Part], table: u32, from: u64, to: u64, dotted: bool)
-    -> u32 {
+fn descend(
+    inout p: P,
+    in path: ChunkSeq[Part],
+    table: u32,
+    from: u64,
+    to: u64,
+    dotted: bool
+) -> u32 {
     let mut t = table;
     for i in from..to {
         let k = part_at(in path, i);

@@ -77,17 +77,15 @@ pub fn decode(inout t: Tree, in w: Slice[u64]) {
             ccount: nc
         };
         for j in 0..np {
-            t
-                .props
-                .push(
-                    TProp {
-                        property: get_u64(in w, at),
-                        tag: get_u64(in w, inc(at)),
-                        payload: get_u64(in w, add(at, 2)),
-                        tstart: get_u64(in w, add(at, 3)),
-                        tlen: get_u64(in w, add(at, 4))
-                    }
-                );
+            t.props.push(
+                TProp {
+                    property: get_u64(in w, at),
+                    tag: get_u64(in w, inc(at)),
+                    payload: get_u64(in w, add(at, 2)),
+                    tstart: get_u64(in w, add(at, 3)),
+                    tlen: get_u64(in w, add(at, 4))
+                }
+            );
             at = add(at, 5);
         }
         for j in 0..ns {

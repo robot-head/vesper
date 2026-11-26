@@ -786,8 +786,15 @@ fn ratio_le_one(ey: Exact, ex: Exact) -> bool {
     big_cmp(in a, in b) <= 0
 }
 
-fn atan2_eval(inout c: Slice[u32], ey: Exact, ex: Exact, ly: i64, lx: i64, y_le_x: bool, p: u64)
-    -> Approx {
+fn atan2_eval(
+    inout c: Slice[u32],
+    ey: Exact,
+    ex: Exact,
+    ly: i64,
+    lx: i64,
+    y_le_x: bool,
+    p: u64
+) -> Approx {
     let d = wrapping_sub(ly, lx);
     let ad = wrapping_u64(
         if d < 0 {

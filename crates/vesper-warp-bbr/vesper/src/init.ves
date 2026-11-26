@@ -196,8 +196,12 @@ fn congested(in b: Bbrv3) -> u64 {
     sat_add(b.lost, b.ce_bytes)
 }
 
-fn snapshot_fault(pn: u64, s: PacketDeliveryState, delivered: u64, congested_bytes: u64)
-    -> Option[BbrFault] {
+fn snapshot_fault(
+    pn: u64,
+    s: PacketDeliveryState,
+    delivered: u64,
+    congested_bytes: u64
+) -> Option[BbrFault] {
     if s.delivered > delivered || s.lost > congested_bytes {
         Option::Some(BbrFault::ForeignSnapshot { pn: pn })
     } else {

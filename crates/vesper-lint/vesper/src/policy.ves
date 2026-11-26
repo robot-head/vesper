@@ -618,18 +618,9 @@ fn set_node(inout t: Toml, id: u32, n: TNode) {
 
 fn new_node(inout t: Toml, kind: u8, implicit: bool, dotted: bool) -> u32 {
     let id = wrapping_u32(t.nodes.len());
-    t
-        .nodes
-        .push(
-            TNode {
-                kind: kind,
-                implicit: implicit,
-                dotted: dotted,
-                first: NONE,
-                last: NONE,
-                count: 0
-            }
-        );
+    t.nodes.push(
+        TNode { kind: kind, implicit: implicit, dotted: dotted, first: NONE, last: NONE, count: 0 }
+    );
     id
 }
 
@@ -641,17 +632,15 @@ fn scalar(inout t: Toml, kind: u8) -> u32 {
 // container `c`.
 fn append(inout t: Toml, c: u32, kstart: u64, klen: u64, hash: u64, child: u32) {
     let e = wrapping_u32(t.ents.len());
-    t
-        .ents
-        .push(
-            TEnt {
-                kstart: wrapping_u32(kstart),
-                klen: wrapping_u32(klen),
-                hash: hash,
-                child: child,
-                next: NONE
-            }
-        );
+    t.ents.push(
+        TEnt {
+            kstart: wrapping_u32(kstart),
+            klen: wrapping_u32(klen),
+            hash: hash,
+            child: child,
+            next: NONE
+        }
+    );
     let mut n = node(in t, c);
     if n.last == NONE {
         n.first = e;
@@ -1116,8 +1105,13 @@ fn part(in t: Toml, i: u64) -> (u64, u64, u64) {
 
 // `ParseState::descend_path` (and `inline_table::descend_path` when
 // `inline`) over parts `0..n` of `path`.
-fn descend(inout t: Toml, table: u32, n: u64, dotted: bool, inline: bool)
-    -> u32 eff [Fail[LintFail]] {
+fn descend(
+    inout t: Toml,
+    table: u32,
+    n: u64,
+    dotted: bool,
+    inline: bool
+) -> u32 eff [Fail[LintFail]] {
     let mut c = table;
     for i in 0..n {
         let (ks, kl, h) = part(in t, i);
@@ -1336,8 +1330,12 @@ fn digit_run(
 
 // `dec_int`: false on a backtrack; the digits (sign excluded) go to `out`
 // and `neg` tells the sign.
-fn dec_int(in s: Slice[u8], inout t: Toml, inout out: ChunkSeq[u8], inout neg: bool)
-    -> bool eff [Fail[LintFail]] {
+fn dec_int(
+    in s: Slice[u8],
+    inout t: Toml,
+    inout out: ChunkSeq[u8],
+    inout neg: bool
+) -> bool eff [Fail[LintFail]] {
     out.clear();
     let c = cur(in s, in t);
     neg = false;
@@ -2093,8 +2091,14 @@ fn extract(in t: Toml, inout b: Budget, inout levels: ChunkSeq[u64]) eff [Fail[L
 // `Policy::parse`. The result: the severities of the seven lints in
 // `LintName` order (0 none, 1 allow, 2 warn, 3 deny), the configured mask,
 // then the usage: decoded bytes, tokens, nodes and work.
-pub fn parse_policy(in source: Str, bytes: u64, depth: u64, tokens: u64, nodes: u64, work: u64)
-    -> ChunkSeq[u64] eff [Fail[LintFail]] {
+pub fn parse_policy(
+    in source: Str,
+    bytes: u64,
+    depth: u64,
+    tokens: u64,
+    nodes: u64,
+    work: u64
+) -> ChunkSeq[u64] eff [Fail[LintFail]] {
     let lim = Limits { bytes: bytes, depth: depth, tokens: tokens, nodes: nodes, work: work };
     validate_limits(in lim);
     let mut b = Budget { lim: lim, work: 0, nodes: 0, value_bytes: 0 };

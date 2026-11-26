@@ -23,8 +23,13 @@ const EV_CHILD_REMOVED: u64 = 8;
 const EV_CHILD_INSERTED: u64 = 9;
 const EV_CHILD_MOVED: u64 = 10;
 
-pub fn patch_bind_slot(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in text: Slice[u8])
-    -> Option[BackendFault] {
+pub fn patch_bind_slot(
+    inout s: RState,
+    lim: Lim,
+    in w: Slice[u64],
+    base: u64,
+    in text: Slice[u8]
+) -> Option[BackendFault] {
     if !session_ok(in s, word(in w, base, 1)) {
         return foreign();
     }
@@ -62,30 +67,33 @@ pub fn patch_bind_slot(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, i
     } else {
         0
     };
-    s
-        .slots
-        .push(
-            RSlot {
-                serial: slot,
-                widget: widget,
-                property: property,
-                tag: vtag,
-                payload: payload,
-                tstart: at,
-                tlen: if vtag == ValueTag::Text {
-                    tlen
-                } else {
-                    0
-                }
+    s.slots.push(
+        RSlot {
+            serial: slot,
+            widget: widget,
+            property: property,
+            tag: vtag,
+            payload: payload,
+            tstart: at,
+            tlen: if vtag == ValueTag::Text {
+                tlen
+            } else {
+                0
             }
-        );
+        }
+    );
     s.slive.push(true);
     s.nslots = inc(s.nslots);
     record(inout s, lim, op(EV_SLOT_BOUND, slot, 0, 0, 0))
 }
 
-pub fn patch_set_slot(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in text: Slice[u8])
-    -> Option[BackendFault] {
+pub fn patch_set_slot(
+    inout s: RState,
+    lim: Lim,
+    in w: Slice[u64],
+    base: u64,
+    in text: Slice[u8]
+) -> Option[BackendFault] {
     if !session_ok(in s, word(in w, base, 1)) {
         return foreign();
     }
@@ -124,29 +132,32 @@ pub fn patch_set_slot(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in
     } else {
         0
     };
-    s
-        .slots
-        .try_set(
-            k,
-            RSlot {
-                serial: old.serial,
-                widget: old.widget,
-                property: old.property,
-                tag: vtag,
-                payload: payload,
-                tstart: at,
-                tlen: if vtag == ValueTag::Text {
-                    tlen
-                } else {
-                    0
-                }
+    s.slots.try_set(
+        k,
+        RSlot {
+            serial: old.serial,
+            widget: old.widget,
+            property: old.property,
+            tag: vtag,
+            payload: payload,
+            tstart: at,
+            tlen: if vtag == ValueTag::Text {
+                tlen
+            } else {
+                0
             }
-        );
+        }
+    );
     record(inout s, lim, op(EV_SLOT_CHANGED, slot, 0, 0, 0))
 }
 
-pub fn patch_unbind_slot(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in text: Slice[u8])
-    -> Option[BackendFault] {
+pub fn patch_unbind_slot(
+    inout s: RState,
+    lim: Lim,
+    in w: Slice[u64],
+    base: u64,
+    in text: Slice[u8]
+) -> Option[BackendFault] {
     let widget_session = word(in w, base, 1);
     let widget = word(in w, base, 2);
     let property = word(in w, base, 3);
@@ -170,8 +181,13 @@ pub fn patch_unbind_slot(inout s: RState, lim: Lim, in w: Slice[u64], base: u64,
     record(inout s, lim, op(EV_SLOT_UNBOUND, slot, 0, 0, 0))
 }
 
-pub fn patch_subscribe(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in text: Slice[u8])
-    -> Option[BackendFault] {
+pub fn patch_subscribe(
+    inout s: RState,
+    lim: Lim,
+    in w: Slice[u64],
+    base: u64,
+    in text: Slice[u8]
+) -> Option[BackendFault] {
     if !session_ok(in s, word(in w, base, 1)) {
         return foreign();
     }
@@ -208,8 +224,13 @@ pub fn patch_subscribe(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, i
     record(inout s, lim, op(EV_SUBSCRIBED, sub, 0, 0, 0))
 }
 
-pub fn patch_disconnect(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in text: Slice[u8])
-    -> Option[BackendFault] {
+pub fn patch_disconnect(
+    inout s: RState,
+    lim: Lim,
+    in w: Slice[u64],
+    base: u64,
+    in text: Slice[u8]
+) -> Option[BackendFault] {
     if !session_ok(in s, word(in w, base, 1)) {
         return foreign();
     }
@@ -231,8 +252,13 @@ pub fn patch_disconnect(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, 
     record(inout s, lim, op(EV_DISCONNECTED, sub, 0, 0, 0))
 }
 
-pub fn patch_children(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in text: Slice[u8])
-    -> Option[BackendFault] {
+pub fn patch_children(
+    inout s: RState,
+    lim: Lim,
+    in w: Slice[u64],
+    base: u64,
+    in text: Slice[u8]
+) -> Option[BackendFault] {
     let tag = word(in w, base, 0);
     if !session_ok(in s, word(in w, base, 1)) {
         return foreign();

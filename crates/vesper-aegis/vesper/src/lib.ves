@@ -79,8 +79,11 @@ pub copy struct Rd {
 }
 
 // SnpReport::parse.
-pub fn snp_parse(in b: Slice[u8], inout w: Slice[u64], inout d: Slice[u8])
-    -> Unit eff [Fail[AErr]] {
+pub fn snp_parse(
+    in b: Slice[u8],
+    inout w: Slice[u64],
+    inout d: Slice[u8]
+) -> Unit eff [Fail[AErr]] {
     snp_parse_impl(in b, inout w, inout d)
 }
 
@@ -103,8 +106,11 @@ pub fn sgx_parse(in b: Slice[u8], mode: u64, inout w: Slice[u64]) -> u64 eff [Fa
 
 // cca::decode_value: one CBOR item at the start of `b` as preorder nodes
 // in `w` (module cbor), with `st` the decoder's stack; the bytes it used.
-pub fn cbor_decode(in b: Slice[u8], inout w: Slice[u64], inout st: Slice[u64])
-    -> u64 eff [Fail[AErr]] {
+pub fn cbor_decode(
+    in b: Slice[u8],
+    inout w: Slice[u64],
+    inout st: Slice[u64]
+) -> u64 eff [Fail[AErr]] {
     cbor_decode_impl(in b, inout w, inout st)
 }
 
@@ -130,14 +136,20 @@ pub fn cca_platform_claims(
 }
 
 // The platform token's profile: CcaPlatformProfile in declaration order.
-pub fn cca_platform_profile(in b: Slice[u8], inout n: Slice[u64], inout st: Slice[u64])
-    -> u64 eff [Fail[AErr]] {
+pub fn cca_platform_profile(
+    in b: Slice[u8],
+    inout n: Slice[u64],
+    inout st: Slice[u64]
+) -> u64 eff [Fail[AErr]] {
     platform_profile(in b, inout n, inout st)
 }
 
 // The realm token's profile: CcaRealmProfile in declaration order.
-pub fn cca_realm_profile(in b: Slice[u8], inout n: Slice[u64], inout st: Slice[u64])
-    -> u64 eff [Fail[AErr]] {
+pub fn cca_realm_profile(
+    in b: Slice[u8],
+    inout n: Slice[u64],
+    inout st: Slice[u64]
+) -> u64 eff [Fail[AErr]] {
     realm_profile(in b, inout n, inout st)
 }
 
@@ -228,14 +240,20 @@ pub fn corim_meta_parse(
 }
 
 // CcaCorimStore::add endorsement profile validator (module corim_cca).
-pub fn corim_validate_cca(now_sec: u64, in w: Slice[u64], in b: Slice[u8])
-    -> u64 eff [Fail[AtErr]] {
+pub fn corim_validate_cca(
+    now_sec: u64,
+    in w: Slice[u64],
+    in b: Slice[u8]
+) -> u64 eff [Fail[AtErr]] {
     corim_validate_cca_impl(now_sec, in w, in b)
 }
 
 // appraise_cca_with_options (module corim_cca).
-pub fn cca_appraise(in w: Slice[u64], in b: Slice[u8], inout w_out: Slice[u64])
-    -> Unit eff [Fail[AtErr]] {
+pub fn cca_appraise(
+    in w: Slice[u64],
+    in b: Slice[u8],
+    inout w_out: Slice[u64]
+) -> Unit eff [Fail[AtErr]] {
     cca_appraise_impl(in w, in b, inout w_out)
 }
 

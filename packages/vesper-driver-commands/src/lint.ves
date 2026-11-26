@@ -126,8 +126,12 @@ pub fn run_lint(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail
     fail(in err.as_slice())
 }
 
-fn emit_invalid(json: bool, in error: Slice[u8], has_config: bool, in config: Slice[u8])
-    -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
+fn emit_invalid(
+    json: bool,
+    in error: Slice[u8],
+    has_config: bool,
+    in config: Slice[u8]
+) -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
     if json {
         let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
         line.extend(in "{\"config\":".as_bytes());

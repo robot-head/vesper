@@ -3,17 +3,19 @@
 //! conversions between the crate's public types and the port's.
 //!
 //! Most Vesper types have the crate's own layout and field names, so they
-//! are the crate's types under the binding's names. Three differ: the port
+//! are the crate's types under the binding's names. Four differ: the port
 //! numbers registers with a plain `u8` where the crate has [`Reg`]
 //! (`PortInsn`, `PortOperand`), names the reserved field of a
-//! `DecodeError` by number (`PortDecodeError`), and holds a MAC address as
-//! the low 48 bits of a word (`PortEthWire`).
+//! `DecodeError` by number (`PortDecodeError`), holds a MAC address as
+//! the low 48 bits of a word (`PortEthWire`), and renames `MapKind::Array`
+//! (`PortMapKind`).
 
 #![allow(non_camel_case_types)]
 
 pub(crate) use crate::port_binding as ffi;
 
 use crate::insn::{self, AluOp, AtomicOp, CallTarget, Endian, Imm64, JmpOp, RawInsn, Reg, Size};
+use crate::program::MapKind;
 #[cfg(feature = "vesper-port")]
 use crate::wire::{EthIpv4TcpWire, WireError};
 
@@ -23,9 +25,7 @@ pub use crate::insn::{
     Imm64 as vesper__ebpf__insn__Imm64, JmpOp as vesper__ebpf__insn__JmpOp,
     RawInsn as vesper__ebpf__insn__RawInsn, Size as vesper__ebpf__insn__Size,
 };
-pub use crate::program::{
-    MapKind as vesper__ebpf__program__MapKind, ProgramType as vesper__ebpf__program__ProgramType,
-};
+pub use crate::program::ProgramType as vesper__ebpf__program__ProgramType;
 pub use crate::scalar::{
     Scalar as vesper__ebpf__scalar__Scalar, Tnum as vesper__ebpf__scalar__Tnum,
 };
@@ -37,6 +37,7 @@ pub use PortDecodeError as vesper__ebpf__insn__DecodeError;
 pub use PortEncoded as vesper__ebpf__insn__Encoded;
 pub use PortEthWire as vesper__ebpf__wire__EthIpv4TcpWire;
 pub use PortInsn as vesper__ebpf__insn__Insn;
+pub use PortMapKind as vesper__ebpf__program__MapKind;
 pub use PortOperand as vesper__ebpf__insn__Operand;
 pub use PortVerifierWord as vesper__ebpf__verifier__R;
 
@@ -50,6 +51,48 @@ pub struct PortVerifierWord {
     pub z: u64,
     pub off: i64,
     pub var: crate::scalar::Scalar,
+}
+
+/// `program::MapKind` with `ArrayMap` for `Array`: Vesper enum variants
+/// share one namespace in a package world, and `@vesper/serde::Kind` has an
+/// `Array` too (#2074).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortMapKind {
+    Hash,
+    ArrayMap,
+    PerCpuHash,
+    PerCpuArray,
+    LruHash,
+    RingBuf,
+    ProgArray,
+}
+
+impl From<MapKind> for PortMapKind {
+    fn from(k: MapKind) -> Self {
+        match k {
+            MapKind::Hash => PortMapKind::Hash,
+            MapKind::Array => PortMapKind::ArrayMap,
+            MapKind::PerCpuHash => PortMapKind::PerCpuHash,
+            MapKind::PerCpuArray => PortMapKind::PerCpuArray,
+            MapKind::LruHash => PortMapKind::LruHash,
+            MapKind::RingBuf => PortMapKind::RingBuf,
+            MapKind::ProgArray => PortMapKind::ProgArray,
+        }
+    }
+}
+
+impl From<PortMapKind> for MapKind {
+    fn from(k: PortMapKind) -> Self {
+        match k {
+            PortMapKind::Hash => MapKind::Hash,
+            PortMapKind::ArrayMap => MapKind::Array,
+            PortMapKind::PerCpuHash => MapKind::PerCpuHash,
+            PortMapKind::PerCpuArray => MapKind::PerCpuArray,
+            PortMapKind::LruHash => MapKind::LruHash,
+            PortMapKind::RingBuf => MapKind::RingBuf,
+            PortMapKind::ProgArray => MapKind::ProgArray,
+        }
+    }
 }
 
 /// `insn::Operand` with a register number.
@@ -522,7 +565,7 @@ pub(crate) fn eth_decode(b: &[u8]) -> Result<EthIpv4TcpWire, WireError> {
 pub(crate) fn map_validate(def: &crate::program::MapDef) -> Result<(), String> {
     let rule = ffi::program_map_validate(
         &def.name,
-        def.kind,
+        def.kind.into(),
         def.key_size,
         def.value_size,
         def.max_entries,

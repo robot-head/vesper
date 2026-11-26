@@ -1,0 +1,519 @@
+// The checker's preludes as the collector sees them (#2024 slice 2b): what
+// a module's function bodies mention (`capability_effects::used_names`,
+// `regions::visit_expr`), whether a module brings in each prelude, and the
+// prelude sources (src/strings.rs, src/option_methods.rs). Each prelude
+// is lowered on its own and printed with its spans shifted to where the
+// checker parses it (`integer_widths::parse_at` at one past the end of the
+// module and the preludes before it).
+
+use @vesper/ast::{
+    Ast, AdtNode, ArgNode, EffectDeclNode, ClauseNode, ConfNode, FnNode, ImplNode, ItemNode,
+    ParamNode, StmtNode, TraitNode, expr_at, list_at, list_len, none, type_at, type_name
+};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{Interner, interner_new, symbol_from_id};
+
+// ---------------------------------------------------------------- sources
+
+// `strings::PRELUDE`, byte for byte.
+pub fn strings_source() -> Str {
+    "\nimpl Str {\n    fn is_char_boundary(in self, i: u64) -> bool {\n        if i == self.len() {\n            true\n        } else {\n            match self.try_byte_at(i) {\n                Option::Some(b) => (b & 192) != 128,\n                Option::None => false,\n            }\n        }\n    }\n    fn utf8_continuation(in self, i: u64) -> u32 {\n        match self.try_byte_at(i) {\n            Option::Some(b) => widen_u32(b) & 63,\n            Option::None => 0,\n        }\n    }\n    fn next_char(in self, i: u64) -> Option[(u32, u64)] {\n        match self.try_byte_at(i) {\n            Option::None => Option::None,\n            Option::Some(lead) => {\n                let b0 = widen_u32(lead);\n                if b0 < 128 {\n                    Option::Some((b0, wrapping_add(i, 1)))\n                } else if b0 < 192 {\n                    Option::None\n                } else if b0 < 224 {\n                    let c1 = Str::utf8_continuation(in self, wrapping_add(i, 1));\n                    Option::Some((wrapping_mul(b0 & 31, 64) | c1, wrapping_add(i, 2)))\n                } else if b0 < 240 {\n                    let c1 = Str::utf8_continuation(in self, wrapping_add(i, 1));\n                    let c2 = Str::utf8_continuation(in self, wrapping_add(i, 2));\n                    Option::Some((wrapping_mul(b0 & 15, 4096) | wrapping_mul(c1, 64) | c2, wrapping_add(i, 3)))\n                } else {\n                    let c1 = Str::utf8_continuation(in self, wrapping_add(i, 1));\n                    let c2 = Str::utf8_continuation(in self, wrapping_add(i, 2));\n                    let c3 = Str::utf8_continuation(in self, wrapping_add(i, 3));\n                    Option::Some((wrapping_mul(b0 & 7, 262144) | wrapping_mul(c1, 4096) | wrapping_mul(c2, 64) | c3, wrapping_add(i, 4)))\n                }\n            }\n        }\n    }\n    fn char_at(in self, i: u64) -> u32 eff [Fail[RuntimeError]] {\n        match Str::next_char(in self, i) {\n            Option::Some(decoded) => {\n                let (c, next) = decoded;\n                c\n            }\n            Option::None => Fail::raise(RuntimeError::IndexOutOfBounds),\n        }\n    }\n    fn char_count(in self) -> u64 {\n        let n = self.len();\n        let mut count: u64 = 0;\n        for i in 0..n {\n            match self.try_byte_at(i) {\n                Option::Some(b) => {\n                    if (b & 192) != 128 {\n                        count = wrapping_add(count, 1);\n                    }\n                }\n                Option::None => {}\n            }\n        }\n        count\n    }\n    fn concat(in self, in other: Str) -> String {\n        let mut out = String::with_capacity(wrapping_add(self.len(), other.len()));\n        out.push_str(in self);\n        out.push_str(in other);\n        out\n    }\n}\nimpl String {\n    fn new() -> String {\n        \"\"\n    }\n    fn with_capacity(n: u64) -> String {\n        let mut s = \"\";\n        s.reserve(n);\n        s\n    }\n    fn is_char_boundary(in self, i: u64) -> bool {\n        Str::is_char_boundary(in self, i)\n    }\n    fn next_char(in self, i: u64) -> Option[(u32, u64)] {\n        Str::next_char(in self, i)\n    }\n    fn char_at(in self, i: u64) -> u32 eff [Fail[RuntimeError]] {\n        Str::char_at(in self, i)\n    }\n    fn char_count(in self) -> u64 {\n        Str::char_count(in self)\n    }\n    fn concat(in self, in other: Str) -> String {\n        Str::concat(in self, in other)\n    }\n    fn utf8_byte(in bytes: Slice[u8], i: u64) -> u32 {\n        match bytes.try_get(i) {\n            Option::Some(b) => widen_u32(b),\n            Option::None => 0,\n        }\n    }\n    fn utf8_width(in bytes: Slice[u8], i: u64) -> u64 {\n        let b0 = String::utf8_byte(in bytes, i);\n        let b1 = String::utf8_byte(in bytes, wrapping_add(i, 1));\n        let c2 = (String::utf8_byte(in bytes, wrapping_add(i, 2)) & 192) == 128;\n        let c3 = (String::utf8_byte(in bytes, wrapping_add(i, 3)) & 192) == 128;\n        if b0 < 128 {\n            1\n        } else if b0 < 194 {\n            0\n        } else if b0 < 224 {\n            if (b1 & 192) == 128 { 2 } else { 0 }\n        } else if b0 < 240 {\n            let lo: u32 = if b0 == 224 { 160 } else { 128 };\n            let hi: u32 = if b0 == 237 { 159 } else { 191 };\n            if b1 >= lo && b1 <= hi && c2 { 3 } else { 0 }\n        } else if b0 < 245 {\n            let lo: u32 = if b0 == 240 { 144 } else { 128 };\n            let hi: u32 = if b0 == 244 { 143 } else { 191 };\n            if b1 >= lo && b1 <= hi && c2 && c3 { 4 } else { 0 }\n        } else {\n            0\n        }\n    }\n    fn utf8_decode(in bytes: Slice[u8], i: u64, w: u64) -> u32 {\n        let b0 = String::utf8_byte(in bytes, i);\n        let c1 = String::utf8_byte(in bytes, wrapping_add(i, 1)) & 63;\n        let c2 = String::utf8_byte(in bytes, wrapping_add(i, 2)) & 63;\n        let c3 = String::utf8_byte(in bytes, wrapping_add(i, 3)) & 63;\n        if w == 1 {\n            b0\n        } else if w == 2 {\n            wrapping_mul(b0 & 31, 64) | c1\n        } else if w == 3 {\n            wrapping_mul(b0 & 15, 4096) | wrapping_mul(c1, 64) | c2\n        } else {\n            wrapping_mul(b0 & 7, 262144) | wrapping_mul(c1, 4096) | wrapping_mul(c2, 64) | c3\n        }\n    }\n    fn from_utf8(in bytes: Slice[u8]) -> Option[String] {\n        let n = bytes.len();\n        let mut out = String::with_capacity(n);\n        let mut i: u64 = 0;\n        let mut valid = true;\n        loop {\n            if i >= n {\n                break;\n            }\n            let w = String::utf8_width(in bytes, i);\n            if w == 0 || w > wrapping_sub(n, i) {\n                valid = false;\n                break;\n            }\n            out.push_char(String::utf8_decode(in bytes, i, w));\n            i = wrapping_add(i, w);\n        }\n        if valid {\n            Option::Some(out)\n        } else {\n            Option::None\n        }\n    }\n}\n"
+}
+
+// `option_methods::PRELUDE`, byte for byte.
+pub fn option_source() -> Str {
+    "\nimpl [T: mod copy] Option[T] {\n    fn is_some(self) -> bool {\n        match self {\n            Option::Some(_) => true,\n            Option::None => false,\n        }\n    }\n    fn is_none(self) -> bool {\n        match self {\n            Option::Some(_) => false,\n            Option::None => true,\n        }\n    }\n    fn unwrap_or(self, fallback: T) -> T {\n        match self {\n            Option::Some(x) => x,\n            Option::None => fallback,\n        }\n    }\n    fn or(self, other: Option[T]) -> Option[T] {\n        match self {\n            Option::Some(x) => Option::Some(x),\n            Option::None => other,\n        }\n    }\n}\n"
+}
+
+// ---------------------------------------------------------------- nodes
+
+fn p_item(in a: Ast, i: u32) -> ItemNode {
+    a.items.get_or(idx_from_raw[ItemNode](i), ItemNode { kind: 0, node: none() })
+}
+
+fn p_fn(in a: Ast, i: u32) -> FnNode {
+    a.fns.get_or(
+        idx_from_raw[FnNode](i),
+        FnNode {
+            name: none(),
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: none(),
+            effects: none(),
+            body: none(),
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+fn adt_end(in a: Ast, i: u32) -> u32 {
+    a.adts
+        .get_or(
+            idx_from_raw[AdtNode](i),
+            AdtNode {
+                name: none(),
+                mode: 0,
+                generics: 0,
+                variants: 0,
+                is_enum: false,
+                tiled: false,
+                tile_width: 0,
+                start: 0,
+                end: 0
+            }
+        )
+        .end
+}
+
+fn effect_end(in a: Ast, i: u32) -> u32 {
+    a.effect_decls
+        .get_or(
+            idx_from_raw[EffectDeclNode](i),
+            EffectDeclNode { name: none(), linear: false, generics: 0, ops: 0, start: 0, end: 0 }
+        )
+        .end
+}
+
+fn p_impl(in a: Ast, i: u32) -> ImplNode {
+    a.impls.get_or(idx_from_raw[ImplNode](i), ImplNode { ty: none(), generics: 0, methods: 0 })
+}
+
+fn p_trait(in a: Ast, i: u32) -> TraitNode {
+    a.traits.get_or(
+        idx_from_raw[TraitNode](i),
+        TraitNode {
+            name: none(),
+            public: false,
+            generics: 0,
+            assoc: 0,
+            methods: 0,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+fn p_conf(in a: Ast, i: u32) -> ConfNode {
+    a.confs.get_or(
+        idx_from_raw[ConfNode](i),
+        ConfNode {
+            model: none(),
+            public: false,
+            generics: 0,
+            trait_ref: none(),
+            self_ty: none(),
+            wheres: 0,
+            assoc: 0,
+            methods: 0,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+fn p_param(in a: Ast, i: u32) -> ParamNode {
+    a.params.get_or(
+        idx_from_raw[ParamNode](i),
+        ParamNode { name: none(), pass: 0, projections: 0, ty: none(), start: 0, end: 0 }
+    )
+}
+
+fn p_stmt(in a: Ast, i: u32) -> StmtNode {
+    a.stmts.get_or(
+        idx_from_raw[StmtNode](i),
+        StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
+    )
+}
+
+fn p_arg(in a: Ast, i: u32) -> ArgNode {
+    a.args.get_or(idx_from_raw[ArgNode](i), ArgNode { pass: 0, explicit: false, expr: none() })
+}
+
+fn p_clause(in a: Ast, i: u32) -> ClauseNode {
+    a.clauses
+        .get_or(idx_from_raw[ClauseNode](i), ClauseNode { name: none(), pats: 0, body: none() })
+}
+
+fn sym_is(in a: Ast, sym: u32, in lit: Str) -> bool {
+    if sym == none() {
+        return false;
+    }
+    a.names.symbol_eq(symbol_from_id(sym), in lit)
+}
+
+// ---------------------------------------------------------------- uses
+
+// What a module's function bodies mention.
+pub struct Uses {
+    // `used_names`: the last `::` segment of every name, and every field.
+    names: Interner,
+    // A name expression is one of `strings::PRELUDE_PATHS`.
+    string_path: bool,
+    // A parameter's type mentions `Str` (`strings::mentions_str`).
+    str_param: bool
+}
+
+fn use_name(inout u: Uses, in a: Ast, sym: u32) {
+    if sym == none() {
+        return;
+    }
+    let mut s = String::new();
+    let ok = a.names.resolve_into(symbol_from_id(sym), inout s);
+    let b = s.as_bytes();
+    let n = b.len();
+    let mut from: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if wrapping_add(i, 1) >= n {
+            break;
+        }
+        if b.try_get(i) == Option::Some(58) && b.try_get(wrapping_add(i, 1)) == Option::Some(58) {
+            from = wrapping_add(i, 2);
+        }
+        i = wrapping_add(i, 1);
+    }
+    let sym2 = u.names.intern(in s[from..n]);
+}
+
+fn visit_list(in a: Ast, list: u32, inout u: Uses) {
+    for i in 0..list_len(in a, list) {
+        visit(in a, list_at(in a, list, i), inout u);
+    }
+}
+
+// The odd words of a list of pairs.
+fn visit_pairs(in a: Ast, list: u32, inout u: Uses) {
+    let n = list_len(in a, list) / 2;
+    for i in 0..n {
+        visit(in a, list_at(in a, list, wrapping_add(wrapping_mul(i, 2), 1)), inout u);
+    }
+}
+
+// `e` and every expression inside it (`regions::visit_expr`).
+fn visit(in a: Ast, e: u32, inout u: Uses) {
+    if e == none() {
+        return;
+    }
+    let x = expr_at(in a, e);
+    let k = x.kind;
+    if k == 2 {
+        use_name(inout u, in a, x.a);
+        if sym_is(in a, x.a, "String::new")
+            || sym_is(in a, x.a, "String::with_capacity")
+            || sym_is(in a, x.a, "String::from_utf8") {
+            u.string_path = true;
+        }
+    } else if k == 3 {
+        visit_list(in a, x.a, inout u);
+    } else if k == 4 {
+        visit_pairs(in a, x.b, inout u);
+    } else if k == 5 {
+        for i in 0..list_len(in a, x.a) {
+            visit(in a, p_stmt(in a, list_at(in a, x.a, i)).value, inout u);
+        }
+        visit(in a, x.b, inout u);
+    } else if k == 6 {
+        visit(in a, x.a, inout u);
+        for i in 0..list_len(in a, x.c) {
+            visit(in a, p_arg(in a, list_at(in a, x.c, i)).expr, inout u);
+        }
+    } else if k == 7 {
+        let sym = x.b;
+        if sym != none() {
+            let mut s = String::new();
+            let ok = a.names.resolve_into(symbol_from_id(sym), inout s);
+            let s2 = u.names.intern(in s.as_str());
+        }
+        visit(in a, x.a, inout u);
+    } else if k == 8 {
+        visit(in a, x.a, inout u);
+        visit(in a, x.b, inout u);
+    } else if k == 9 || k == 17 {
+        visit(in a, x.a, inout u);
+    } else if k == 10 {
+        visit(in a, x.b, inout u);
+    } else if k == 11 || k == 12 {
+        visit(in a, x.b, inout u);
+        visit(in a, x.c, inout u);
+    } else if k == 13 {
+        visit(in a, x.a, inout u);
+        visit(in a, x.b, inout u);
+        visit(in a, x.c, inout u);
+    } else if k == 14 {
+        visit(in a, x.a, inout u);
+        visit_pairs(in a, x.b, inout u);
+    } else if k == 15 {
+        visit(in a, x.e, inout u);
+    } else if k == 16 {
+        if x.b != none() {
+            visit(in a, x.c, inout u);
+        }
+        visit(in a, x.d, inout u);
+        for i in 0..list_len(in a, x.e) {
+            visit(in a, p_clause(in a, list_at(in a, x.e, i)).body, inout u);
+        }
+    } else if k == 18 {
+        visit(in a, x.b, inout u);
+        visit(in a, x.c, inout u);
+    } else if k == 19 {
+        visit(in a, x.a, inout u);
+        visit(in a, x.b, inout u);
+    } else if k == 20 || k == 21 {
+        visit(in a, x.a, inout u);
+    }
+}
+
+// Whether type `t` mentions `Str` (`strings::mentions_str`).
+fn mentions_str(in a: Ast, t: u32) -> bool {
+    if t == none() {
+        return false;
+    }
+    let n = type_at(in a, t);
+    if n.kind == 1 {
+        if sym_is(in a, n.a, "Str") {
+            return true;
+        }
+        for i in 0..list_len(in a, n.b) {
+            if mentions_str(in a, list_at(in a, n.b, i)) {
+                return true;
+            }
+        }
+    } else if n.kind == 2 {
+        for i in 0..list_len(in a, n.a) {
+            if mentions_str(in a, list_at(in a, n.a, i)) {
+                return true;
+            }
+        }
+    } else if n.kind == 3 {
+        let pairs = list_len(in a, n.a) / 2;
+        for i in 0..pairs {
+            if mentions_str(in a, list_at(in a, n.a, wrapping_add(wrapping_mul(i, 2), 1))) {
+                return true;
+            }
+        }
+        return mentions_str(in a, n.b);
+    }
+    false
+}
+
+fn use_function(in a: Ast, f: u32, inout u: Uses) {
+    let n = p_fn(in a, f);
+    for i in 0..list_len(in a, n.params) {
+        if mentions_str(in a, p_param(in a, list_at(in a, n.params, i)).ty) {
+            u.str_param = true;
+        }
+    }
+    visit(in a, n.body, inout u);
+}
+
+fn use_functions(in a: Ast, list: u32, inout u: Uses) {
+    for i in 0..list_len(in a, list) {
+        use_function(in a, list_at(in a, list, i), inout u);
+    }
+}
+
+// The uses of every function, `impl` method, trait method and
+// conformance method of `a`'s module.
+pub fn uses_of(in a: Ast) -> Uses {
+    let mut u = Uses { names: interner_new(), string_path: false, str_param: false };
+    for i in 0..a.m_items.len() {
+        let it = p_item(in a, word(in a.m_items, i));
+        if it.kind == 2 {
+            use_function(in a, it.node, inout u);
+        } else if it.kind == 4 {
+            use_functions(in a, p_impl(in a, it.node).methods, inout u);
+        } else if it.kind == 5 {
+            use_functions(in a, p_trait(in a, it.node).methods, inout u);
+        } else if it.kind == 6 {
+            use_functions(in a, p_conf(in a, it.node).methods, inout u);
+        }
+    }
+    u
+}
+
+pub fn used(in u: Uses, in name: Str) -> bool {
+    match u.names.lookup(in name) {
+        Option::Some(s) => true,
+        Option::None => false,
+    }
+}
+
+fn word(in s: ChunkSeq[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// ---------------------------------------------------------------- preludes
+
+// Whether the module brings in the string prelude (`strings::needs_prelude`).
+pub fn needs_strings(in u: Uses) -> bool {
+    u.str_param
+        || u.string_path
+        || used(in u, "is_char_boundary")
+        || used(in u, "next_char")
+        || used(in u, "char_at")
+        || used(in u, "char_count")
+        || used(in u, "concat")
+        || used(in u, "from_utf8")
+}
+
+// The `impl` methods the module defines that replace a prelude's: keys
+// `String::m` and `Str::m` of `impl String` and `impl Str` blocks (no type
+// arguments), and `Option::m` of `impl Option[..]` blocks.
+pub fn defined_methods(in a: Ast) -> Interner {
+    let mut out = interner_new();
+    for i in 0..a.m_items.len() {
+        let it = p_item(in a, word(in a.m_items, i));
+        if it.kind == 4 {
+            let b = p_impl(in a, it.node);
+            let ty = type_name(in a, b.ty);
+            let bare = ty != none() && list_len(in a, type_at(in a, b.ty).b) == 0;
+            let text = bare && (sym_is(in a, ty, "String") || sym_is(in a, ty, "Str"));
+            if text || sym_is(in a, ty, "Option") {
+                for j in 0..list_len(in a, b.methods) {
+                    let f = p_fn(in a, list_at(in a, b.methods, j));
+                    let mut key = String::new();
+                    let ok = a.names.resolve_into(symbol_from_id(ty), inout key);
+                    key.push_str(in "::");
+                    let ok2 = a.names.resolve_into(symbol_from_id(f.name), inout key);
+                    let s = out.intern(in key.as_str());
+                }
+            }
+        }
+    }
+    out
+}
+
+// Whether the module brings in the option prelude: it mentions a method
+// it does not define itself (`option_methods::prelude`).
+pub fn needs_option(in u: Uses, in defined: Interner) -> bool {
+    option_name(in u, in defined, "is_some", "Option::is_some")
+        || option_name(in u, in defined, "is_none", "Option::is_none")
+        || option_name(in u, in defined, "unwrap_or", "Option::unwrap_or")
+        || option_name(in u, in defined, "or", "Option::or")
+}
+
+fn option_name(in u: Uses, in defined: Interner, in name: Str, in key: Str) -> bool {
+    let d = match defined.lookup(in key) {
+        Option::Some(s) => true,
+        Option::None => false,
+    };
+    used(in u, name) && !d
+}
+
+// The largest span end of `a`'s items (`integer_widths::module_end`): an
+// `impl` block ends with its last method, and a prelude's methods the
+// module replaces (`defined`, when `skip`) do not count.
+pub fn module_end(in a: Ast, skip: bool, in defined: Interner) -> u32 {
+    let mut end: u32 = 0;
+    for i in 0..a.m_items.len() {
+        let it = p_item(in a, word(in a.m_items, i));
+        let e = if it.kind == 1 {
+            adt_end(in a, it.node)
+        } else if it.kind == 2 {
+            p_fn(in a, it.node).end
+        } else if it.kind == 3 {
+            effect_end(in a, it.node)
+        } else if it.kind == 4 {
+            let b = p_impl(in a, it.node);
+            let mut m: u32 = 0;
+            for j in 0..list_len(in a, b.methods) {
+                let f = p_fn(in a, list_at(in a, b.methods, j));
+                if !(skip && replaced(in a, b.ty, f.name, in defined)) && f.end > m {
+                    m = f.end;
+                }
+            }
+            m
+        } else if it.kind == 5 {
+            p_trait(in a, it.node).end
+        } else {
+            p_conf(in a, it.node).end
+        };
+        if e > end {
+            end = e;
+        }
+    }
+    end
+}
+
+// Whether method `name` of an `impl` of type `ty` is one `defined` lists.
+pub fn replaced(in a: Ast, ty: u32, name: u32, in defined: Interner) -> bool {
+    let t = type_name(in a, ty);
+    if t == none() {
+        return false;
+    }
+    let mut key = String::new();
+    let ok = a.names.resolve_into(symbol_from_id(t), inout key);
+    key.push_str(in "::");
+    let ok2 = a.names.resolve_into(symbol_from_id(name), inout key);
+    match defined.lookup(in key.as_str()) {
+        Option::Some(s) => true,
+        Option::None => false,
+    }
+}
+
+// The symbols of `k` in byte order of their texts.
+pub fn sorted_symbols(in k: Interner) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::new[u32]();
+    for i in 0..k.len() {
+        let id = wrapping_u32(i);
+        let mut j = out.len();
+        out.push(id);
+        loop {
+            if j == 0 {
+                break;
+            }
+            let prev = match out.try_get(wrapping_sub(j, 1)) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            if cmp_keys(in k, prev, id) <= 0 {
+                break;
+            }
+            let ok = out.try_set(j, prev);
+            j = wrapping_sub(j, 1);
+        }
+        let ok = out.try_set(j, id);
+    }
+    out
+}
+
+fn cmp_keys(in k: Interner, x: u32, y: u32) -> i64 {
+    let (xs, xe) = k.span(symbol_from_id(x));
+    let (ys, ye) = k.span(symbol_from_id(y));
+    let xl = wrapping_sub(xe, xs);
+    let yl = wrapping_sub(ye, ys);
+    let n = if xl < yl {
+        xl
+    } else {
+        yl
+    };
+    for i in 0..n {
+        let a = match k.text_byte(wrapping_add(xs, i)) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        let b = match k.text_byte(wrapping_add(ys, i)) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if a != b {
+            return if a < b {
+                -1
+            } else {
+                1
+            };
+        }
+    }
+    if xl < yl {
+        -1
+    } else if xl > yl {
+        1
+    } else {
+        0
+    }
+}

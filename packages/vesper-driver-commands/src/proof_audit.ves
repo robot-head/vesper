@@ -135,8 +135,10 @@ fn pack_args(in args: Args, n: u64) -> ChunkSeq[u8] {
     packed
 }
 
-fn run_packed(in args: Args, n: u64)
-    -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
+fn run_packed(
+    in args: Args,
+    n: u64
+) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     let packed = pack_args(in args, n);
     let err_len = HybridCommands::hc_proof_audit_run(in packed.as_slice());
     if err_len == 0 {
@@ -154,8 +156,9 @@ fn run_packed(in args: Args, n: u64)
     fail(in err.as_slice())
 }
 
-pub fn run_proof_audit(in args: Args)
-    -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
+pub fn run_proof_audit(
+    in args: Args
+) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     let n = args_count(in args);
     let mut has_module = false;
     let mut module: ChunkSeq[u8] = ChunkSeq::new[u8]();

@@ -308,8 +308,7 @@ impl Code {
     pub fn f64_const(inout self, bits: u64) {
         self.bytes.push(OP_F64_CONST);
         for k in 0..8 {
-            self
-                .bytes
+            self.bytes
                 .push(wrapping_u8(wrapping_shr_u64(bits, wrapping_u32(wrapping_mul(k, 8))) & 255));
         }
         self.count = wrapping_add(self.count, 1);
@@ -383,8 +382,11 @@ impl Code {
 
 // A finished function body: `Function::new(locals)` then the code (the
 // locals as `(count, type)` runs, each as given).
-pub fn function_bytes(in locals: ChunkSeq[u32], in types: ChunkSeq[ValTy], in code: Code)
-    -> ChunkSeq[u8] {
+pub fn function_bytes(
+    in locals: ChunkSeq[u32],
+    in types: ChunkSeq[ValTy],
+    in code: Code
+) -> ChunkSeq[u8] {
     let mut out = ChunkSeq::new[u8]();
     out.reserve(wrapping_add(wrapping_mul(locals.len(), 4), wrapping_add(code.bytes.len(), 16)));
     uleb(inout out, locals.len());

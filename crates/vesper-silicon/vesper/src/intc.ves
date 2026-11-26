@@ -480,11 +480,9 @@ pub fn m_add_aplic(
             Option::None => (),
         }
     }
-    f
-        .dom
-        .push(
-            DomTopo { parent: none(), child_off: 0, nchild: 0, idc_off: idc_off, nidc: idcs.len() }
-        );
+    f.dom.push(
+        DomTopo { parent: none(), child_off: 0, nchild: 0, idc_off: idc_off, nidc: idcs.len() }
+    );
 }
 
 // The domain's parent (none() for a root, or a parent not modelled) and its
@@ -723,8 +721,13 @@ pub fn m_truncate_files(inout f: Fabric, b: u64, k: u64, keep: u64) {
     }
 }
 
-pub fn m_file_csr_read(in f: Fabric, b: u64, k: u64, g: u64, isel: u64)
-    -> u64 eff [Fail[IntcFault]] {
+pub fn m_file_csr_read(
+    in f: Fabric,
+    b: u64,
+    k: u64,
+    g: u64,
+    isel: u64
+) -> u64 eff [Fail[IntcFault]] {
     let i = file_idx(in f, b, k, g);
     let r: Lifted = handle Fail[AiaFault] in {
         ok(m_imsic_csr_read(in f.imsic, i, isel))

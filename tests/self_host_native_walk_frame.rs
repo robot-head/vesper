@@ -463,6 +463,7 @@ fn the_entry_plans_swap_matches_rust() {
          ({:?} in the hook)",
         times.0, times.1, times.2
     );
+    println!("flip-gate differential differences={bad} cases={compiled}");
     assert!(compiled > 50, "only {compiled} compiles");
     assert!(
         answered * 2 > calls,
@@ -630,6 +631,7 @@ fn the_entry_plans_swap_matches_rust_on_trace_hosts() {
          answers, {plans} plans, {flagged} with the trace flag; compiles {rust_time:?} Rust, \
          {hooked_time:?} hooked"
     );
+    println!("flip-gate differential differences={bad} cases={compiled}");
     assert!(compiled >= 10, "only {compiled} compiles");
     assert!(flagged > 0, "no plan took the trace flag");
     assert_eq!(bad, 0);
@@ -746,10 +748,183 @@ fn the_export_plans_swap_matches_rust() {
         "export_plans swap: {compiled} libraries, {bad} differ; hook asked {calls}, answered \
          {answered}, {plans} Vesper plans; builds {rust_time:?} Rust, {hooked_time:?} hooked"
     );
+    println!("flip-gate differential differences={bad} cases={compiled}");
     assert!(compiled > 50, "only {compiled} libraries");
     assert!(
         answered * 2 > calls,
         "the hook answered {answered} of {calls}"
     );
     assert_eq!(bad, 0);
+}
+
+/// The flip gate's ABBA workloads (`scripts/ci/flip-gate/native-walk.json`,
+/// part 5): each epoch times Rust, the package, the package, Rust, and
+/// prints `flip-gate pairs <workload> rust:vesper ...` in nanoseconds.
+///
+/// - `entries`: every entry compile (`object_with_options`, opt off and on)
+///   of the sampled corpus worlds and the trace-host objects, with the
+///   package at `entry_plans` against without it.
+/// - `exports`: the sampled worlds' library objects (`compile_world`) with
+///   the package at `export_plans` against without it.
+///
+/// `NATIVE_WALK_GATE_WORKLOAD` picks one, `NATIVE_WALK_GATE_EPOCHS`
+/// (default 12) and `NATIVE_WALK_GATE_STEP` (default 16) size them. Runs
+/// only with `CHECK_HARNESS_SPEED=1`.
+#[test]
+fn flip_gate() {
+    if !speed() {
+        return;
+    }
+    use vesper::native::export::{LibraryOptions, compile_world};
+    big_stack(|| {
+        let _ = frames_entry();
+        let epochs = env_or("NATIVE_WALK_GATE_EPOCHS", 12);
+        let step = env_or("NATIVE_WALK_GATE_STEP", 16);
+        let worlds: Vec<(String, World)> = corpus()
+            .iter()
+            .step_by(step)
+            .map(|c| (c.name.clone(), c.world.clone()))
+            .collect();
+        let traced = trace_worlds();
+        let entry_hooks = CodegenHooks {
+            entry_plans: Some(vesper_entry_plans),
+            ..CodegenHooks::default()
+        };
+        let export_hooks = CodegenHooks {
+            export_plans: Some(vesper_export_plans),
+            ..CodegenHooks::default()
+        };
+        // The compiles each arm repeats: the ones Rust finishes without
+        // panicking.
+        let quiet = quiet_panics();
+        let mut compiles: Vec<(&World, String, bool, bool)> = vec![];
+        for (w, trace) in worlds
+            .iter()
+            .map(|(_, w)| (w, false))
+            .chain(traced.iter().map(|(_, w)| (w, true)))
+        {
+            for entry in entries(w, 2) {
+                for optimize in [false, true] {
+                    let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        compile_one(w, &entry, optimize, trace)
+                    }))
+                    .is_ok();
+                    if ok {
+                        compiles.push((w, entry.clone(), optimize, trace));
+                    }
+                }
+            }
+        }
+        let mut libraries: Vec<(&World, std::collections::BTreeSet<String>, bool)> = vec![];
+        for (_, w) in &worlds {
+            let public: std::collections::BTreeSet<String> = entries(w, 4).into_iter().collect();
+            if public.is_empty() {
+                continue;
+            }
+            for optimize in [false, true] {
+                let options = LibraryOptions {
+                    library: "walk",
+                    target: None,
+                    optimize,
+                };
+                let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    compile_world(w, &public, &options).is_ok()
+                }))
+                .unwrap_or(false);
+                if ok {
+                    libraries.push((w, public.clone(), optimize));
+                }
+            }
+        }
+        drop(quiet);
+        let entries_arm = |vesper: bool| {
+            let hooks = if vesper {
+                entry_hooks
+            } else {
+                CodegenHooks::default()
+            };
+            time(|| {
+                codegen_swap::with_hooks(hooks, || {
+                    for (w, entry, optimize, trace) in &compiles {
+                        let _ = std::hint::black_box(compile_one(w, entry, *optimize, *trace));
+                    }
+                })
+            })
+            .as_nanos()
+        };
+        let exports_arm = |vesper: bool| {
+            let hooks = if vesper {
+                export_hooks
+            } else {
+                CodegenHooks::default()
+            };
+            time(|| {
+                codegen_swap::with_hooks(hooks, || {
+                    for (w, public, optimize) in &libraries {
+                        let options = LibraryOptions {
+                            library: "walk",
+                            target: None,
+                            optimize: *optimize,
+                        };
+                        let _ = std::hint::black_box(compile_world(w, public, &options));
+                    }
+                })
+            })
+            .as_nanos()
+        };
+        let only = std::env::var("NATIVE_WALK_GATE_WORKLOAD").ok();
+        let wants = |w: &str| only.as_deref().is_none_or(|o| o == w);
+        let (mut entry_pairs, mut export_pairs) = (String::new(), String::new());
+        // Warm-up, untimed.
+        if wants("entries") {
+            entries_arm(false);
+            entries_arm(true);
+        }
+        if wants("exports") {
+            exports_arm(false);
+            exports_arm(true);
+        }
+        for _ in 0..epochs {
+            if wants("entries") {
+                let (r1, v1, v2, r2) = (
+                    entries_arm(false),
+                    entries_arm(true),
+                    entries_arm(true),
+                    entries_arm(false),
+                );
+                entry_pairs += &format!(" {}:{}", r1 + r2, v1 + v2);
+            }
+            if wants("exports") {
+                let (r1, v1, v2, r2) = (
+                    exports_arm(false),
+                    exports_arm(true),
+                    exports_arm(true),
+                    exports_arm(false),
+                );
+                export_pairs += &format!(" {}:{}", r1 + r2, v1 + v2);
+            }
+        }
+        if wants("entries") {
+            eprintln!("entries workload: {} compiles", compiles.len());
+            println!("flip-gate pairs entries{entry_pairs}");
+        }
+        if wants("exports") {
+            eprintln!("exports workload: {} libraries", libraries.len());
+            println!("flip-gate pairs exports{export_pairs}");
+        }
+    });
+}
+
+/// One entry compile of the gate: an object, or a trace-host object.
+fn compile_one(
+    w: &World,
+    entry: &str,
+    optimize: bool,
+    trace: bool,
+) -> Result<(Vec<u8>, String), String> {
+    if trace {
+        native::object_traced_with_options(w, entry, None, optimize)
+    } else {
+        native::object_with_options(w, entry, None, optimize)
+    }
 }

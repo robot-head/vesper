@@ -498,8 +498,13 @@ pub fn fabric_truncate_files(inout f: Fabric, b: u64, k: u64, keep: u64) {
     m_truncate_files(inout f, b, k, keep)
 }
 
-pub fn fabric_file_csr_read(in f: Fabric, b: u64, k: u64, g: u64, isel: u64)
-    -> u64 eff [Fail[IntcFault]] {
+pub fn fabric_file_csr_read(
+    in f: Fabric,
+    b: u64,
+    k: u64,
+    g: u64,
+    isel: u64
+) -> u64 eff [Fail[IntcFault]] {
     m_file_csr_read(in f, b, k, g, isel)
 }
 

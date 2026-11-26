@@ -337,8 +337,13 @@ fn valid_offset(in t: Slice[u8], offset: u64) -> Unit eff [Fail[Failure]] {
 }
 
 // `prepare` before the copies: the label and text totals.
-pub fn prepare_check(in text: Str, in input: Slice[u64], count: u64, in caps: Caps, in sizes: Sizes)
-    -> Totals eff [Fail[Failure]] {
+pub fn prepare_check(
+    in text: Str,
+    in input: Slice[u64],
+    count: u64,
+    in caps: Caps,
+    in sizes: Sizes
+) -> Totals eff [Fail[Failure]] {
     validate(in caps);
     let t = text.as_bytes();
     let n = text.len();
@@ -609,11 +614,10 @@ fn put_decimal(inout out: ChunkSeq[u8], n: u64) {
     out.resize(wrapping_add(base, d), Ascii::Zero);
     let mut x = n;
     for i in 0..d {
-        let ok = out
-            .try_set(
-                wrapping_sub(wrapping_add(base, d), wrapping_add(i, 1)),
-                wrapping_u8(wrapping_add(x % 10, Ascii::Zero))
-            );
+        let ok = out.try_set(
+            wrapping_sub(wrapping_add(base, d), wrapping_add(i, 1)),
+            wrapping_u8(wrapping_add(x % 10, Ascii::Zero))
+        );
         x = x / 10;
     }
 }
@@ -1603,15 +1607,13 @@ fn report_labels(
         }
         r.lab.push(sc);
         r.lab.push(ec);
-        r
-            .lab
-            .push(
-                if first != last {
-                    1
-                } else {
-                    0
-                }
-            );
+        r.lab.push(
+            if first != last {
+                1
+            } else {
+                0
+            }
+        );
         if l == 0 {
             r.lab.push(d.message);
             r.lab.push(d.message_len);

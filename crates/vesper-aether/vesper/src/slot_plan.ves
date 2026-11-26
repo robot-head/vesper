@@ -138,8 +138,11 @@ fn region_error(r: PlannedRegion, limits: KvmHostLimits) -> Option[SlotError] {
 }
 
 // `first_overlap`: sort by (start, end, id) and keep the running reach.
-fn first_overlap(inout starts: ChunkSeq[u64], inout ends: ChunkSeq[u64], inout ids: ChunkSeq[u64])
-    -> Option[(u32, u32)] {
+fn first_overlap(
+    inout starts: ChunkSeq[u64],
+    inout ends: ChunkSeq[u64],
+    inout ids: ChunkSeq[u64]
+) -> Option[(u32, u32)] {
     sort3(inout starts, inout ends, inout ids);
     let n = starts.len();
     let mut have = false;
@@ -186,8 +189,10 @@ fn first_duplicate(inout values: ChunkSeq[u64]) -> Option[u64] {
 
 // `KvmSlotPlan::verify` over a plan's regions (already non-empty and at
 // most MAX_PLAN_REGIONS, which `from_regions` checks).
-pub fn slot_plan_verify(in regions: Slice[PlannedRegion], limits: KvmHostLimits)
-    -> Option[SlotError] {
+pub fn slot_plan_verify(
+    in regions: Slice[PlannedRegion],
+    limits: KvmHostLimits
+) -> Option[SlotError] {
     let bits = widen_u64(limits.guest_phys_bits);
     if limits.max_slots == 0 || bits == 0 || bits > 64 {
         return Option::Some(SlotError::InvalidLimits);

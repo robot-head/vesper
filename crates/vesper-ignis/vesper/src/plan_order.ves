@@ -363,16 +363,15 @@ fn push_hazard(inout out: ChunkSeq[Edge], i: u64, j: u64, a: Use, b: Use) {
             3
         };
         if kind != 5 {
-            out
-                .push(
-                    Edge {
-                        before: wrapping_u32(i),
-                        after: wrapping_u32(j),
-                        kind: kind,
-                        has_resource: 1,
-                        resource: a.resource
-                    }
-                );
+            out.push(
+                Edge {
+                    before: wrapping_u32(i),
+                    after: wrapping_u32(j),
+                    kind: kind,
+                    has_resource: 1,
+                    resource: a.resource
+                }
+            );
         }
     }
 }
@@ -596,10 +595,9 @@ fn hazard_edges(in g: Graph) -> ChunkSeq[Edge] {
     let mut explicit: ChunkSeq[Edge] = ChunkSeq::new[Edge]();
     for e in 0..g.explicit.len() {
         match g.explicit.try_get(e) {
-            Option::Some(x) => explicit
-                .push(
-                    Edge { before: x.before, after: x.after, kind: 4, has_resource: 0, resource: 0 }
-                ),
+            Option::Some(x) => explicit.push(
+                Edge { before: x.before, after: x.after, kind: 4, has_resource: 0, resource: 0 }
+            ),
             Option::None => (),
         }
     }

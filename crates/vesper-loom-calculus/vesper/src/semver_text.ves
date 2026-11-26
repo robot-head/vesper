@@ -400,8 +400,13 @@ fn comparator(inout m: ChunkSeq[u8], in s: Slice[u8], a: u64, b: u64) -> (bool, 
 }
 
 // `VersionReq::from_str`: the comparators go to `out` (none for `*`).
-pub fn parse_req(inout m: ChunkSeq[u8], in s: Slice[u8], a0: u64, b: u64, inout out: ChunkSeq[SCmp])
-    -> bool {
+pub fn parse_req(
+    inout m: ChunkSeq[u8],
+    in s: Slice[u8],
+    a0: u64,
+    b: u64,
+    inout out: ChunkSeq[SCmp]
+) -> bool {
     let a = spaces(in s, a0, b);
     let w = at(in s, a, b);
     if is_wildcard(w) {

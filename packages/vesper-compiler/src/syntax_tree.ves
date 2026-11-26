@@ -180,8 +180,10 @@ fn syntax_heads(p: ParseCursor, rows: i64, values: i64) -> ParseCursor eff [Synt
     }
 }
 
-fn syntax_bind(p: ParseCursor, row: bool)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn syntax_bind(
+    p: ParseCursor,
+    row: bool
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if row {
         syntax_heads(p, syntax_name(p.cur, p.row_head), p.value_head)
     } else {

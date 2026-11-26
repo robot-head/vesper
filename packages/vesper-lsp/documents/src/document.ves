@@ -300,8 +300,12 @@ fn index_lines(in text: Str, l: StoreLimits) -> ChunkSeq[u64] eff [Fail[StoreErr
     }
 }
 
-fn span_of(in text: Str, in lines: ChunkSeq[u64], l: StoreLimits, r: Range)
-    -> (u64, u64) eff [Fail[StoreError]] {
+fn span_of(
+    in text: Str,
+    in lines: ChunkSeq[u64],
+    l: StoreLimits,
+    r: Range
+) -> (u64, u64) eff [Fail[StoreError]] {
     let got: Result[(u64, u64), SpanError] = handle Fail[SpanError] in {
         let b = span(in text, in lines[0..lines.len()], l.index.max_work, r);
         span_ok(widen_u64(b.start), widen_u64(b.end))
@@ -368,8 +372,12 @@ fn maybe_compact(inout s: Store) {
 }
 
 // `open`.
-pub fn store_open(inout s: Store, in uri: Str, version: i64, in text: Str)
-    -> u64 eff [Fail[StoreError]] {
+pub fn store_open(
+    inout s: Store,
+    in uri: Str,
+    version: i64,
+    in text: Str
+) -> u64 eff [Fail[StoreError]] {
     if !valid_uri(in s, in uri) {
         Fail::raise(StoreError::SInvalidUri);
     }
@@ -411,8 +419,12 @@ fn text_copy(in s: Store, at: u64) -> String {
 
 // `change`: every change applies to the candidate before it; nothing is
 // committed until all succeed.
-pub fn store_change(inout s: Store, in uri: Str, version: i64, in changes: ChunkSeq[Change])
-    -> u64 eff [Fail[StoreError]] {
+pub fn store_change(
+    inout s: Store,
+    in uri: Str,
+    version: i64,
+    in changes: ChunkSeq[Change]
+) -> u64 eff [Fail[StoreError]] {
     let at = lookup(in s, in uri);
     let old_version = match s.versions.try_get(at) {
         Option::Some(v) => v,

@@ -266,8 +266,15 @@ pub fn absent(v: u64) -> bool {
     v == NONE
 }
 
-pub fn names_of(in a: Str, in b: Str, in c: Str, in d: Str, in e: Str, in f: Str, in g: Str)
-    -> Strs {
+pub fn names_of(
+    in a: Str,
+    in b: Str,
+    in c: Str,
+    in d: Str,
+    in e: Str,
+    in f: Str,
+    in g: Str
+) -> Strs {
     let mut s = strs_new();
     push(inout s, in a.as_bytes());
     push(inout s, in b.as_bytes());

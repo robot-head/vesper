@@ -58,8 +58,13 @@ fn min_u64(a: u64, b: u64) -> u64 {
 
 // Entry numbers 0..n in stable order. With `by_row`, entries compare by
 // their first `width` cells; otherwise by the cell at offset `width`.
-fn sort_entries(in cells: Slice[i64], n: u64, stride: u64, width: u64, by_row: bool)
-    -> ChunkSeq[u64] {
+fn sort_entries(
+    in cells: Slice[i64],
+    n: u64,
+    stride: u64,
+    width: u64,
+    by_row: bool
+) -> ChunkSeq[u64] {
     let mut a = ChunkSeq::new[u64]();
     let mut b = ChunkSeq::new[u64]();
     for i in 0..n {

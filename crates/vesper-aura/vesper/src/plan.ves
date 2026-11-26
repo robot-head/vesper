@@ -106,8 +106,13 @@ pub fn prepared_empty(session: u64, base: u64, serial: u64) -> Prepared {
 
 // A prepared update for the validated `tree`, with the next mounted state
 // sized to the tree's shape.
-pub fn prepared_for(session: u64, base: u64, serial: u64, sink tree: Tree, text_len: u64)
-    -> Prepared {
+pub fn prepared_for(
+    session: u64,
+    base: u64,
+    serial: u64,
+    sink tree: Tree,
+    text_len: u64
+) -> Prepared {
     let n = tree.nodes.len();
     let np = tree.props.len();
     let ns = tree.subs.len();
@@ -276,23 +281,20 @@ pub fn mount_next(
             if tp.tag == ValueTag::Text && fits(tp.tstart, tp.tlen, text.len()) {
                 p.m.text.extend(in text[tp.tstart..add(tp.tstart, tp.tlen)]);
             }
-            p
-                .m
-                .props
-                .push(
-                    MProp {
-                        property: tp.property,
-                        slot: slot,
-                        tag: tp.tag,
-                        payload: tp.payload,
-                        tstart: tstart,
-                        tlen: if tp.tag == ValueTag::Text {
-                            tp.tlen
-                        } else {
-                            0
-                        }
+            p.m.props.push(
+                MProp {
+                    property: tp.property,
+                    slot: slot,
+                    tag: tp.tag,
+                    payload: tp.payload,
+                    tstart: tstart,
+                    tlen: if tp.tag == ValueTag::Text {
+                        tp.tlen
+                    } else {
+                        0
                     }
-                );
+                }
+            );
         }
         let sstart = p.m.subs.len();
         for j in 0..tn.scount {
@@ -321,23 +323,20 @@ pub fn mount_next(
             p.m.kids.push(seq_u64(in p.tree.kids, add(tn.cstart, j)));
             p.m.kidx.push(seq_u64(in pos, seq_u64(in p.tree.kidx, add(tn.cstart, j))));
         }
-        p
-            .m
-            .nodes
-            .push(
-                MNode {
-                    key: tn.key,
-                    id: id,
-                    kind: tn.kind,
-                    src: ti,
-                    pstart: pstart,
-                    pcount: tn.pcount,
-                    sstart: sstart,
-                    scount: tn.scount,
-                    cstart: cstart,
-                    ccount: tn.ccount
-                }
-            );
+        p.m.nodes.push(
+            MNode {
+                key: tn.key,
+                id: id,
+                kind: tn.kind,
+                src: ti,
+                pstart: pstart,
+                pcount: tn.pcount,
+                sstart: sstart,
+                scount: tn.scount,
+                cstart: cstart,
+                ccount: tn.ccount
+            }
+        );
         p.m.keys.push(tn.key);
         p.prev.push(prev);
         p.cur_start.push(0);
@@ -577,15 +576,13 @@ pub fn plan(in old: Mounted, inout p: Prepared, has_tree: bool, in text: Slice[u
         };
         found.push(nj);
         let same = nj != NONE_ID && mnode(in p.m.nodes, nj).kind == node.kind;
-        p
-            .succ
-            .push(
-                if same {
-                    nj
-                } else {
-                    NONE_ID
-                }
-            );
+        p.succ.push(
+            if same {
+                nj
+            } else {
+                NONE_ID
+            }
+        );
     }
     let old_root = mnode(in old.nodes, 0).id;
     let new_root = mnode(in p.m.nodes, 0).id;

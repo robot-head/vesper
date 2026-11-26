@@ -89,8 +89,12 @@ fn zero_words(inout b: Builder, ptr: Value, size: u32) eff [Ffi[Cranelift]] {
     }
 }
 
-fn helper_load(inout b: Builder, ptr: Value, is_agg: bool, scalar_ty: u64)
-    -> Value eff [Ffi[Cranelift]] {
+fn helper_load(
+    inout b: Builder,
+    ptr: Value,
+    is_agg: bool,
+    scalar_ty: u64
+) -> Value eff [Ffi[Cranelift]] {
     if is_agg {
         ptr
     } else {

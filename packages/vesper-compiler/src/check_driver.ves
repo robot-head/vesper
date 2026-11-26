@@ -10,8 +10,12 @@ fn c_fn_at(at: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow
         at
     }
 }
-fn c_next_decl(last: Tok, kind: i64, at: i64, best: i64)
-    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_next_decl(
+    last: Tok,
+    kind: i64,
+    at: i64,
+    best: i64
+) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if c_kind(at) == 70 {
         best
     } else {
@@ -49,8 +53,11 @@ fn c_validate_adts(last: Tok) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[Ari
         c_validate_adts(d.name)
     }
 }
-fn c_bind_params(at: i64, env: CEnv, row: i64)
-    -> CEnv eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_bind_params(
+    at: i64,
+    env: CEnv,
+    row: i64
+) -> CEnv eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if c_kind(at) == 33 {
         env
     } else {
@@ -77,8 +84,11 @@ fn c_bind_params(at: i64, env: CEnv, row: i64)
         c_bind_params(next, c_push(env, CBinding { name: p.name, ty: p.ty, pass: p.pass }), row)
     }
 }
-fn c_valid_row(row: i64, start: i64, end: i64)
-    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_valid_row(
+    row: i64,
+    start: i64,
+    end: i64
+) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if row < 0 || c_kind(row) == 37 {
         0
     } else {
@@ -168,8 +178,12 @@ fn c_finish_error(error: CheckError) -> i64 eff [Fail[Diag], Fail[ArithOverflow]
 
 // The source-token adapter has no token buffer yet. Bound repeated scans
 // before resolution, rather than spending unbounded work on a large unit.
-fn c_budget(at: i64, tokens: i64, decls: i64, depth: i64)
-    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_budget(
+    at: i64,
+    tokens: i64,
+    decls: i64,
+    depth: i64
+) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let t = c_token(at);
     let k = t.kind;
     if k == 70 {

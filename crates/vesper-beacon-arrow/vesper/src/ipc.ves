@@ -19,34 +19,32 @@ pub fn int_field(inout fb: Fb, in name: Slice[u8], bits: u64, signed: bool, null
     let children = fb.create_offsets(in none);
     let t = fb.start_table();
     // Int: bitWidth (i32, 4), is_signed (bool, 6).
-    fb
-        .add_scalar(
-            6,
-            if signed {
-                1
-            } else {
-                0
-            },
-            1,
+    fb.add_scalar(
+        6,
+        if signed {
+            1
+        } else {
             0
-        );
+        },
+        1,
+        0
+    );
     fb.add_scalar(4, bits, 4, 0);
     let int_at = fb.end_table(t);
     let f = fb.start_table();
     // Field: name 4, nullable 6, type_type 8, type 10, children 14.
     fb.add_offset(4, name_at);
     fb.add_scalar(8, TYPE_INT, 1, 0);
-    fb
-        .add_scalar(
-            6,
-            if nullable {
-                1
-            } else {
-                0
-            },
-            1,
+    fb.add_scalar(
+        6,
+        if nullable {
+            1
+        } else {
             0
-        );
+        },
+        1,
+        0
+    );
     fb.add_offset(14, children);
     fb.add_offset(10, int_at);
     fb.end_table(f)

@@ -428,14 +428,10 @@ fn grow(inout i: I, n: u64, init: bool) {
 // `Env::alloc`: a region of `len` zero bytes.
 fn alloc(inout i: I, kind: u64, len: u64, init: bool) -> u64 {
     let base = i.next_base;
-    i
-        .next_base = add(
-            base,
-            add(
-                mul(shr(add(add(len, PAGE_SIZE), sub(PAGE_SIZE, 1)), PAGE_SHIFT), PAGE_SIZE),
-                PAGE_SIZE
-            )
-        );
+    i.next_base = add(
+        base,
+        add(mul(shr(add(add(len, PAGE_SIZE), sub(PAGE_SIZE, 1)), PAGE_SHIFT), PAGE_SIZE), PAGE_SIZE)
+    );
     let off = i.mem.len();
     grow(inout i, pad8(len), init);
     let id = shr(i.rt.len(), 3);
@@ -971,8 +967,15 @@ fn ret_err(e: u64) -> Val {
     scalar(neg(e))
 }
 
-fn map_elem(inout i: I, pc: u64, id: u64, a0: Val, a1: Val, a2: Val, a3: Val)
-    -> Val eff [Fail[IErr]] {
+fn map_elem(
+    inout i: I,
+    pc: u64,
+    id: u64,
+    a0: Val,
+    a1: Val,
+    a2: Val,
+    a3: Val
+) -> Val eff [Fail[IErr]] {
     let m = map_of(in i, pc, a0);
     let t = mword(in i, m, 0);
     if t == MapType::Ringbuf {
@@ -1340,15 +1343,13 @@ fn push_frame(inout i: I, ret_pc: u64, lp: bool, entry: u64, n: u64, arg: Val) {
     i.frames.push(gw(in i.rv, 10));
     i.frames.push(gw(in i.rp, 10));
     i.frames.push(ret_pc);
-    i
-        .frames
-        .push(
-            if lp {
-                1
-            } else {
-                0
-            }
-        );
+    i.frames.push(
+        if lp {
+            1
+        } else {
+            0
+        }
+    );
     i.frames.push(entry);
     i.frames.push(0);
     i.frames.push(n);
@@ -1956,15 +1957,14 @@ fn save(inout i: I) {
             let w = gw(in spill, k);
             if w != 0 {
                 let t = gw(in ids, sub(w, 1));
-                spill
-                    .try_set(
-                        k,
-                        if t == none() {
-                            1
-                        } else {
-                            add(t, 1)
-                        }
-                    );
+                spill.try_set(
+                    k,
+                    if t == none() {
+                        1
+                    } else {
+                        add(t, 1)
+                    }
+                );
             }
         }
         i.rt = nrt;
@@ -2028,15 +2028,14 @@ fn save_appended(inout i: I) {
         let w = gw(in vs, k);
         if w > np {
             let t = gw(in ids, sub(sub(w, 1), np));
-            vs
-                .try_set(
-                    k,
-                    if t == none() {
-                        1
-                    } else {
-                        add(t, 1)
-                    }
-                );
+            vs.try_set(
+                k,
+                if t == none() {
+                    1
+                } else {
+                    add(t, 1)
+                }
+            );
         }
     }
     i.rt.truncate(mul(np, 8));
@@ -2052,14 +2051,13 @@ fn save_appended(inout i: I) {
         let w = gw(in i.spill, gw(in i.ptrans, k));
         if w > np {
             let t = gw(in ids, sub(sub(w, 1), np));
-            moved
-                .push(
-                    if t == none() {
-                        1
-                    } else {
-                        add(t, 1)
-                    }
-                );
+            moved.push(
+                if t == none() {
+                    1
+                } else {
+                    add(t, 1)
+                }
+            );
         } else {
             moved.push(w);
         }
@@ -2273,14 +2271,13 @@ fn run_body(
     w.clear();
     w.reserve(add(add(16, i.nmaps), i.rlog.len()));
     bytes.reserve(i.rbytes.len());
-    w
-        .push(
-            if res.code == 0 {
-                0
-            } else {
-                1
-            }
-        );
+    w.push(
+        if res.code == 0 {
+            0
+        } else {
+            1
+        }
+    );
     w.push(res.code);
     w.push(res.pc);
     w.push(res.d);

@@ -391,16 +391,14 @@ impl Fip {
         if at >= self.box_memo.len() {
             self.box_memo.resize(inc(at), 0);
         }
-        let ok = self
-            .box_memo
-            .try_set(
-                at,
-                if found {
-                    2
-                } else {
-                    1
-                }
-            );
+        let ok = self.box_memo.try_set(
+            at,
+            if found {
+                2
+            } else {
+                1
+            }
+        );
         found
     }
 
@@ -714,13 +712,12 @@ impl Fip {
     fn check_non_fip(inout self, ei: u32) {
         let e = self.ast.expr(ei);
         if self.callee_is(e, self.s.box_nic) {
-            self
-                .simple(
-                    "E0802",
-                    e.start,
-                    e.end,
-                    "Box::new_in_caller is only permitted inside @fip functions"
-                );
+            self.simple(
+                "E0802",
+                e.start,
+                e.end,
+                "Box::new_in_caller is only permitted inside @fip functions"
+            );
         }
         let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
         self.children(ei, inout kids);
@@ -1055,15 +1052,14 @@ impl Fip {
             let r = b.row(at);
             let moved = b.moved_of(name);
             if self.has_remaining(r.ty, in moved) {
-                self
-                    .named(
-                        "E0806",
-                        r.start,
-                        r.end,
-                        "@fip function cannot drop owned Box in ",
-                        name,
-                        " without unpacking or moving it"
-                    );
+                self.named(
+                    "E0806",
+                    r.start,
+                    r.end,
+                    "@fip function cannot drop owned Box in ",
+                    name,
+                    " without unpacking or moving it"
+                );
             }
         }
     }
@@ -1090,24 +1086,21 @@ impl Fip {
         let p = self.ast.pat(pi);
         if p.kind == PT_WILD {
             if self.contains_box(ty) {
-                self
-                    .simple(
-                        "E0806",
-                        p.start,
-                        p.end,
-                        "@fip function cannot discard Box value with '_' pattern"
-                    );
+                self.simple(
+                    "E0806",
+                    p.start,
+                    p.end,
+                    "@fip function cannot discard Box value with '_' pattern"
+                );
             }
             return;
         }
         if p.kind == PT_BIND {
             if self.contains_box(ty) {
-                st
-                    .binds
-                    .insert(
-                        in self.c.names,
-                        BindRow { name: p.a, ty: ty, start: p.start, end: p.end }
-                    );
+                st.binds.insert(
+                    in self.c.names,
+                    BindRow { name: p.a, ty: ty, start: p.start, end: p.end }
+                );
             }
             return;
         }
@@ -1118,12 +1111,11 @@ impl Fip {
                     if i >= w(n.n) {
                         break;
                     }
-                    self
-                        .bind_pattern(
-                            self.ast.at(add(w(p.a), i)),
-                            self.c.types.arg(ty, i),
-                            inout st
-                        );
+                    self.bind_pattern(
+                        self.ast.at(add(w(p.a), i)),
+                        self.c.types.arg(ty, i),
+                        inout st
+                    );
                 }
             }
             return;
@@ -1208,13 +1200,12 @@ impl Fip {
     ) {
         let ret_inner = self.box_inner(f.result);
         if ret_inner == NONE32 {
-            self
-                .simple(
-                    "E0807",
-                    start,
-                    end,
-                    "Box::new_in_caller requires @fip function to return Box[T]"
-                );
+            self.simple(
+                "E0807",
+                start,
+                end,
+                "Box::new_in_caller requires @fip function to return Box[T]"
+            );
             return;
         }
         if !self.slots_match(f, produced, ret_inner) {
@@ -1226,13 +1217,12 @@ impl Fip {
             self.end_diag();
         }
         if st.caller_used {
-            self
-                .simple(
-                    "E0808",
-                    start,
-                    end,
-                    "caller ReuseSlot already consumed on this execution path"
-                );
+            self.simple(
+                "E0808",
+                start,
+                end,
+                "caller ReuseSlot already consumed on this execution path"
+            );
         }
         st.caller_used = true;
     }
@@ -1295,29 +1285,33 @@ impl Fip {
         for i in 0..flags.len() {
             let bits = u8_at(in flags, i);
             if (bits & 1) != 0 {
-                self
-                    .simple(
-                        "E0808",
-                        start,
-                        end,
-                        "all non-diverging paths of an @fip function must agree on consuming caller ReuseSlot"
-                    );
+                self.simple(
+                    "E0808",
+                    start,
+                    end,
+                    "all non-diverging paths of an @fip function must agree on consuming caller ReuseSlot"
+                );
             }
             if (bits & 2) != 0 {
-                self
-                    .simple(
-                        "E0809",
-                        start,
-                        end,
-                        "branches leave incompatible remaining Box ReuseSlots"
-                    );
+                self.simple(
+                    "E0809",
+                    start,
+                    end,
+                    "branches leave incompatible remaining Box ReuseSlots"
+                );
             }
         }
     }
 
     // `merge_states(vec![a, b])`.
-    fn merge2(inout self, f: FnRow, sink a: FipState, sink b: FipState, start: u64, end: u64)
-        -> FipState {
+    fn merge2(
+        inout self,
+        f: FnRow,
+        sink a: FipState,
+        sink b: FipState,
+        start: u64,
+        end: u64
+    ) -> FipState {
         let mut acc = state_new(true);
         let mut have = false;
         let mut flags: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -1392,15 +1386,14 @@ impl Fip {
         let callee = self.ast.func(fi);
         let e_ty = self.expr_type(e);
         if self.fn_allocs(callee) {
-            self
-                .named(
-                    "E0801",
-                    e.start,
-                    e.end,
-                    "@fip function cannot call ",
-                    name,
-                    " with 'Alloc' effect"
-                );
+            self.named(
+                "E0801",
+                e.start,
+                e.end,
+                "@fip function cannot call ",
+                name,
+                " with 'Alloc' effect"
+            );
         }
         let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
         if recv != NONE32 {
@@ -1408,15 +1401,14 @@ impl Fip {
         }
         self.call_args(e, inout args);
         if self.non_fip_call_uses_box(callee, fi, in args, e_ty) {
-            self
-                .named(
-                    "E0801",
-                    e.start,
-                    e.end,
-                    "@fip function cannot call non-@fip function ",
-                    name,
-                    " that uses Box"
-                );
+            self.named(
+                "E0801",
+                e.start,
+                e.end,
+                "@fip function cannot call non-@fip function ",
+                name,
+                " that uses Box"
+            );
         }
         let mut first: u64 = 0;
         if recv != NONE32 {
@@ -1426,13 +1418,12 @@ impl Fip {
             let base_ty = self.expr_type(base);
             self.check_expr(f, recv, inout st, recv_owned, false);
             if !recv_owned && !self.is_place(recv) && self.contains_box(base_ty) {
-                self
-                    .simple(
-                        "E0806",
-                        base.start,
-                        base.end,
-                        "@fip function drops temporary Box passed as receiver by borrow"
-                    );
+                self.simple(
+                    "E0806",
+                    base.start,
+                    base.end,
+                    "@fip function drops temporary Box passed as receiver by borrow"
+                );
             }
         }
         // `args.iter().zip(params)` (after the receiver's parameter).
@@ -1448,13 +1439,12 @@ impl Fip {
             let arg_ty = self.expr_type(a);
             self.check_expr(f, arg, inout st, arg_owned, false);
             if !arg_owned && !self.is_place(arg) && self.contains_box(arg_ty) {
-                self
-                    .simple(
-                        "E0806",
-                        a.start,
-                        a.end,
-                        "@fip function drops temporary Box passed by borrow"
-                    );
+                self.simple(
+                    "E0806",
+                    a.start,
+                    a.end,
+                    "@fip function drops temporary Box passed by borrow"
+                );
             }
         }
         if flag(in self.caller_slot, fi) {
@@ -1534,13 +1524,12 @@ impl Fip {
                     }
                     if sub != NONE32 && self.contains_box(sub) {
                         let lhs = self.ast.expr(e.a);
-                        self
-                            .simple(
-                                "E0806",
-                                lhs.start,
-                                lhs.end,
-                                "@fip function cannot overwrite an owned Box without unpacking or moving it first"
-                            );
+                        self.simple(
+                            "E0806",
+                            lhs.start,
+                            lhs.end,
+                            "@fip function cannot overwrite an owned Box without unpacking or moving it first"
+                        );
                     }
                 }
             }
@@ -1580,13 +1569,12 @@ impl Fip {
                     let se_ty = self.expr_type(v);
                     self.check_expr(f, value, inout st, true, false);
                     if self.contains_box(se_ty) {
-                        self
-                            .simple(
-                                "E0806",
-                                v.start,
-                                v.end,
-                                "@fip function drops temporary Box value in statement"
-                            );
+                        self.simple(
+                            "E0806",
+                            v.start,
+                            v.end,
+                            "@fip function drops temporary Box value in statement"
+                        );
                     }
                 }
             }
@@ -1596,13 +1584,12 @@ impl Fip {
             self.close_scope(inout st, in outer);
         } else if k >= E_LOOP && k <= E_CONTINUE {
             // Loops and early exits leave the FIP ownership model.
-            self
-                .simple(
-                    "E0806",
-                    e.start,
-                    e.end,
-                    "@fip function cannot use loop, for, break or return; write the iteration as tail recursion"
-                );
+            self.simple(
+                "E0806",
+                e.start,
+                e.end,
+                "@fip function cannot use loop, for, break or return; write the iteration as tail recursion"
+            );
             st.diverged = true;
         } else if k == E_IF {
             self.check_expr(f, e.a, inout st, true, false);
@@ -1621,13 +1608,12 @@ impl Fip {
             }
         } else if k == E_HANDLE {
             if e.a == self.s.alloc {
-                self
-                    .simple(
-                        "E0801",
-                        e.start,
-                        e.end,
-                        "@fip function cannot handle the 'Alloc' effect"
-                    );
+                self.simple(
+                    "E0801",
+                    e.start,
+                    e.end,
+                    "@fip function cannot handle the 'Alloc' effect"
+                );
             }
             if e.b != 0 {
                 let it = self.expr_type(self.ast.expr(e.c));
@@ -1665,13 +1651,12 @@ impl Fip {
                 }
             }
             if borrowed && self.contains_box(scrutinee_ty) {
-                self
-                    .simple(
-                        "E0806",
-                        v.start,
-                        v.end,
-                        "@fip function cannot match a borrowed Box value; its boxes belong to the caller and supply no ReuseSlot (take it `sink`)"
-                    );
+                self.simple(
+                    "E0806",
+                    v.start,
+                    v.end,
+                    "@fip function cannot match a borrowed Box value; its boxes belong to the caller and supply no ReuseSlot (take it `sink`)"
+                );
             }
         }
         self.check_expr(f, e.a, inout st, true, false);
@@ -1731,13 +1716,12 @@ impl Fip {
             }
             if self.is_fn_type(self.expr_type(c)) {
                 self.check_args(f, e, inout st, false);
-                self
-                    .simple(
-                        "E0801",
-                        e.start,
-                        e.end,
-                        "@fip function cannot perform indirect calls to unverified closures"
-                    );
+                self.simple(
+                    "E0801",
+                    e.start,
+                    e.end,
+                    "@fip function cannot perform indirect calls to unverified closures"
+                );
                 return true;
             }
             let fi = self.ast.fn_named(name);
@@ -1747,15 +1731,14 @@ impl Fip {
             }
             // A builtin vector, tiled or arithmetic intrinsic, or an effect op.
             if self.has_path_sep(name) && self.contains_box(e_ty) {
-                self
-                    .named(
-                        "E0801",
-                        e.start,
-                        e.end,
-                        "@fip function cannot call effect operation ",
-                        name,
-                        " producing Box"
-                    );
+                self.named(
+                    "E0801",
+                    e.start,
+                    e.end,
+                    "@fip function cannot call effect operation ",
+                    name,
+                    " producing Box"
+                );
             }
             self.check_args(f, e, inout st, false);
             return true;
@@ -1771,13 +1754,12 @@ impl Fip {
         }
         self.check_expr(f, e.a, inout st, false, false);
         self.check_args(f, e, inout st, true);
-        self
-            .simple(
-                "E0801",
-                e.start,
-                e.end,
-                "@fip function cannot perform indirect calls to unverified closures"
-            );
+        self.simple(
+            "E0801",
+            e.start,
+            e.end,
+            "@fip function cannot perform indirect calls to unverified closures"
+        );
         false
     }
 
@@ -1793,25 +1775,22 @@ impl Fip {
         for i in 0..w(f.pn) {
             let p = self.ast.param(add(w(f.pa), i));
             if p.pass == TyPass::Sink && self.contains_box(p.ty) {
-                st
-                    .binds
-                    .insert(
-                        in self.c.names,
-                        BindRow { name: p.name, ty: p.ty, start: p.start, end: p.end }
-                    );
+                st.binds.insert(
+                    in self.c.names,
+                    BindRow { name: p.name, ty: p.ty, start: p.start, end: p.end }
+                );
             }
         }
         self.check_expr(f, f.body, inout st, true, true);
         if !st.diverged {
             for i in 0..st.slots.len() {
                 let s = st.slot(i);
-                self
-                    .simple(
-                        "E0805",
-                        s.start,
-                        s.end,
-                        "@fip function leaves an unconsumed Box ReuseSlot (would drop/deallocate)"
-                    );
+                self.simple(
+                    "E0805",
+                    s.start,
+                    s.end,
+                    "@fip function leaves an unconsumed Box ReuseSlot (would drop/deallocate)"
+                );
             }
             let mut all: ChunkSeq[u32] = ChunkSeq::new[u32]();
             for i in 0..st.binds.len() {
