@@ -542,6 +542,16 @@ fn vesper_port_matches_rust_verify_pieces() {
     let _ = fs::remove_dir_all(&dir.0);
     fs::create_dir_all(dir.0.join("in")).unwrap();
     let binary = build_driver(&dir.0);
+    // The driver's own start (no inputs), the floor of each port time.
+    let startup = (0..5)
+        .map(|_| {
+            let started = Instant::now();
+            let output = Command::new(&binary).arg("discover").output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            started.elapsed()
+        })
+        .min()
+        .unwrap();
 
     // Discovery inputs: whole files (at most 128 KiB, as `read_source`
     // reads them), prefixes cut on character boundaries, edges.
@@ -617,7 +627,7 @@ fn vesper_port_matches_rust_verify_pieces() {
     }
     assert!(actual == expected, "the port differs from Rust");
     eprintln!(
-        "discovery: {} inputs ({} found theorems), 0 diffs; Rust {rust:?}, port {port:?} (one process)",
+        "discovery: {} inputs ({} found theorems), 0 diffs; Rust {rust:?}, port {port:?} (one process; {startup:?} of it starting the process)",
         inputs.len(),
         ok,
     );
@@ -700,7 +710,7 @@ fn vesper_port_matches_rust_verify_pieces() {
         }
     }
     eprintln!(
-        "format model: {} inputs ({ok} witnesses, {macros} macro-profile skipped), {diffs} diffs; Rust {rust:?}, port {port:?} (one process)",
+        "format model: {} inputs ({ok} witnesses, {macros} macro-profile skipped), {diffs} diffs; Rust {rust:?}, port {port:?} (one process; {startup:?} of it starting the process)",
         inputs.len()
     );
     assert_eq!(diffs, 0, "the port differs from Rust");
