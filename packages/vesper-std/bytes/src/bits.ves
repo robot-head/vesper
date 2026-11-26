@@ -15,7 +15,20 @@ pub sugar bits: tag {
             width $width:expr
         }
     ) => {
-        extract_field($word, $offset, $width)
+        {
+            let word: u64 = $word;
+            let offset: u64 = $offset;
+            let width: u64 = $width;
+            let word_bits: u64 = 64;
+            if width == 0 || offset >= word_bits || width > wrapping_sub(word_bits, offset) {
+                Option::None
+            } else if width == word_bits {
+                Option::Some(word)
+            } else {
+                let mask = wrapping_sub(wrapping_shl_u64(1, wrapping_u32(width)), 1);
+                Option::Some(wrapping_shr_u64(word, wrapping_u32(offset)) & mask)
+            }
+        }
     }
 
     rule (bits{ $($field:ident: $width:expr = $value:expr),* }) => {
@@ -45,11 +58,11 @@ copy struct PackedBits {
 }
 
 fn append_field(previous: PackedBits, width: u64, value: u64) -> Option[PackedBits] {
-    if width == 0 || width > wrapping_sub(WORD_BITS, previous.used) {
+    if width == 0 || width > wrapping_sub(64, previous.used) {
         return Option::None;
     }
-    if width == WORD_BITS {
-        return Option::Some(PackedBits { word: value, used: WORD_BITS });
+    if width == 64 {
+        return Option::Some(PackedBits { word: value, used: 64 });
     }
     let shift = wrapping_u32(width);
     if wrapping_shr_u64(value, shift) != 0 {
@@ -59,20 +72,6 @@ fn append_field(previous: PackedBits, width: u64, value: u64) -> Option[PackedBi
         word: wrapping_shl_u64(previous.word, shift) | value,
         used: wrapping_add(previous.used, width)
     })
-}
-
-const WORD_BITS: u64 = 64;
-
-// All three arguments have already been evaluated, once and in order.
-fn extract_field(word: u64, offset: u64, width: u64) -> Option[u64] {
-    if width == 0 || offset >= WORD_BITS || width > wrapping_sub(WORD_BITS, offset) {
-        return Option::None;
-    }
-    if width == WORD_BITS {
-        return Option::Some(word);
-    }
-    let mask = wrapping_sub(wrapping_shl_u64(1, wrapping_u32(width)), 1);
-    Option::Some(wrapping_shr_u64(word, wrapping_u32(offset)) & mask)
 }
 
 test {
