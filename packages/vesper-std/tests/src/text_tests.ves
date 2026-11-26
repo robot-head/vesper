@@ -110,7 +110,22 @@ test {
         // Build the wire fixture 0x1234 from a version nibble and a 12-bit length.
         let header: Option[u64] = bits{ version: 4 = 1, length: 12 = 0x234 };
         let a16: u16 = match header {
-            Option::Some(word) => wrapping_u16(word),
+            Option::Some(word) => {
+                let version = bits{
+                    from word;
+                    offset 12,
+                    width 4
+                };
+                let length = bits{
+                    from word;
+                    offset 0,
+                    width 12
+                };
+                if version != Option::Some(1) || length != Option::Some(0x234) {
+                    return 30;
+                }
+                wrapping_u16(word)
+            },
             Option::None => return 30,
         };
         let a32: u32 = 305419896;
