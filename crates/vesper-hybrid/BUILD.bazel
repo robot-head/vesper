@@ -84,6 +84,7 @@ vesper_hybrid(
     build_script_env = {
         # Path dependencies are not beside the crate in Bazel.
         "VESPER_HYBRID_OBJECT_PACKAGES_HYBRID_PROOF_AUDIT": "$(execpath //:std_hash_sys_manifest)",
+        "VESPER_HYBRID_OBJECT_PACKAGES_HYBRID_VERIFY": "$(execpath //:std_hash_sys_manifest)",
     },
     extra_compile_data = ["//:files"],
     # The differential harness runs the default compiler beside the hybrid
@@ -265,6 +266,20 @@ vesper_hybrid(
             "//:std_hash_package",
             "//:std_hash_sys_package",
             "//:std_process_package",
+            "//crates/vesper-serde:port_package",
+        ],
+        # `vesper verify SOURCE --format` (#1341) is @vesper/verify.
+        "hybrid_verify": [
+            "//:front_package",
+            "//:proof_audit_package",
+            "//:std_env_package",
+            "//:std_fs_package",
+            "//:std_hash_package",
+            "//:std_hash_sys_package",
+            "//:std_process_package",
+            "//:verify_package",
+            "//crates/vesper-fmt:port_package",
+            "//crates/vesper-lean-syntax:port_package",
             "//crates/vesper-serde:port_package",
         ],
         # The verified code generator (#1886) builds on

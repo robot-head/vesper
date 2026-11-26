@@ -662,6 +662,16 @@ vesper_crate(
             "//crates/vesper-lean-syntax:files",
             "//crates/vesper-serde:files",
         ],
+        # #1341: `vesper verify SOURCE --format` built from @vesper/verify,
+        # beside Rust's; lean/** holds the pinned model it checks.
+        "test/self_host_verify_format": glob([
+            "packages/**",
+            "lean/**",
+        ]) + [
+            "//crates/vesper-fmt:files",
+            "//crates/vesper-lean-syntax:files",
+            "//crates/vesper-serde:files",
+        ],
         # Self-hosting SH5 lane 18 (#1341): @vesper/lean-extract against
         # lean::extract on the same corpus; it imports @vesper/lean-syntax.
         "test/self_host_lean_extract": glob([
@@ -1040,6 +1050,11 @@ vesper_crate(
             "resources:memory:9216",
             "resources:cpu:1",
         ],
+        # Rust's two Lean compiles and audit, then the port's.
+        "test/self_host_verify_format": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
         "test/verify_extract_cli": [
             "resources:memory:9216",
             "resources:cpu:1",
@@ -1154,6 +1169,11 @@ vesper_crate(
         }),
         # proof_audit_cli's replays twice over (Rust and the Vesper port).
         "test/self_host_proof_audit": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # format_proof_cli's kernel checks twice over (Rust and the port).
+        "test/self_host_verify_format": select({
             "@platforms//os:macos": ["@platforms//:incompatible"],
             "//conditions:default": [],
         }),
@@ -1366,6 +1386,7 @@ vesper_crate(
         "test/self_host_lean_extract": "long",
         # 76 proof-audit cases, 38 kernel replays each way: ~7 min locally.
         "test/self_host_proof_audit": "long",
+        "test/self_host_verify_format": "long",
         # The optimizer differential (#1249) checks every corpus world.
         "test/self_host_optimize": "eternal",
         "test/self_host_optimize_search": "eternal",
@@ -1653,6 +1674,24 @@ vesper_package(
         ":std_hash_sys_package",
         ":std_process_package",
         "//crates/vesper-serde:port_package",
+    ],
+)
+
+# @vesper/verify, `vesper verify SOURCE --format` in Vesper (SH5 lane 18,
+# #1341), for the hybrid's `verify` swap.
+vesper_package(
+    name = "verify_package",
+    srcs = glob(["packages/vesper-verify/src/**/*.ves"]),
+    manifest = "packages/vesper-verify/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":proof_audit_package",
+        ":std_env_package",
+        ":std_fs_package",
+        ":std_hash_sys_package",
+        ":std_process_package",
+        "//crates/vesper-fmt:port_package",
+        "//crates/vesper-lean-syntax:port_package",
     ],
 )
 
