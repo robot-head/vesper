@@ -394,6 +394,17 @@ pub fn symlink_metadata(in path: Str) -> Metadata eff [Ffi[StdFs], Fail[IoError]
     meta_path(in path.as_bytes(), false)
 }
 
+// `std::fs::canonicalize`: WASI 0.2 has no call for it (`std` returns
+// `Unsupported` there).
+pub fn canonicalize(in path: Str) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    canonicalize_path(in path.as_bytes())
+}
+
+pub fn canonicalize_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    let _ = path.len();
+    raise_kind(unsupported())
+}
+
 // Whether `path` (following symbolic links) is a regular file: WASI has
 // no execute bit, so any file can run (`std`'s non-Unix check). Never fails.
 pub fn is_executable(in path: Str) -> bool eff [Ffi[StdFs]] {

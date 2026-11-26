@@ -27,7 +27,8 @@ use self::sys::{
     os_parent_len,
     os_unique,
     os_word_kind,
-    os_is_executable
+    os_is_executable,
+    os_canonicalize
 };
 
 // Why an operation failed. `kind` is one of the codes below
@@ -430,6 +431,21 @@ pub fn is_executable(in path: Str) -> bool eff [Ffi[StdFs]] {
 
 pub fn is_executable_path(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
     os_is_executable(in path)
+}
+
+// `std::fs::canonicalize`: the absolute path of `path` with every symbolic
+// link, `.` and `..` resolved (`realpath`). The path must exist.
+pub fn canonicalize(in path: Str) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    canonicalize_path(in path.as_bytes())
+}
+
+pub fn canonicalize_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    let mut err: u64 = 0;
+    let out = os_canonicalize(in path, inout err);
+    if err != 0 {
+        return raise_io(err);
+    }
+    out
 }
 
 // Whether `path` names anything (following symbolic links). Never fails.

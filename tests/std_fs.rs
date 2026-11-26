@@ -12,7 +12,7 @@ use std_io_support::{MODES, Temp, agree, check_driver, lit};
 const DRIVER: &str = r#"use @vesper-std/fs::{
     IoError, Metadata, read, read_path, read_string, write, append, create_new, replace, rename,
     remove_file, remove_dir, remove_dir_all, create_dir, create_dir_all, metadata,
-    symlink_metadata, exists, kind_file, kind_dir, is_executable, write_stdout,
+    symlink_metadata, exists, kind_file, kind_dir, is_executable, canonicalize, write_stdout,
     write_stderr
 };
 use @vesper-std/fs::walk::{
@@ -60,6 +60,27 @@ pub fn stdio() -> u64 eff [Ffi[StdFs]] {
         return v => v,
         raise(e, _) => widen_u64(e.os),
     }
+}
+
+// The hash of each path's canonical form, or 1000 + kind when it fails.
+fn canon(in p: Str) -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        let c = canonicalize(in p);
+        hash(in c.as_slice())
+    } with {
+        return v => v,
+        raise(e, _) => code(e),
+    }
+}
+
+pub fn canonical_paths() -> u64 eff [Ffi[StdFs]] {
+    let a = canon(in "@DIR@/x/run");
+    let b = canon(in "@DIR@/x/../x/plain");
+    let c = canon(in "@DIR@/x");
+    let d = canon(in "@DIR@/x/missing");
+    let e = canon(in "@DIR@/x/link");
+    let f = canon(in "@DIR@/x/dangling");
+    mix(mix(mix(mix(mix(a, b), c), d), e), f)
 }
 
 // Bit i is set when the i-th path is executable.
@@ -808,4 +829,41 @@ fn stdout_and_stderr_are_written_unbuffered() {
             assert_eq!(status.code(), Some(28), "{mode}");
         }
     }
+}
+
+/// `canonicalize` is `std::fs::canonicalize`: links, `.` and `..`
+/// resolved, and a missing path (or a dangling link) an error.
+#[test]
+fn canonicalize_matches_std() {
+    let dir = Temp::new("std-fs");
+    let x = dir.path().join("x");
+    fs::create_dir_all(&x).unwrap();
+    fs::write(x.join("run"), b"run").unwrap();
+    fs::write(x.join("plain"), b"text").unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(x.join("run"), x.join("link")).unwrap();
+        std::os::unix::fs::symlink(x.join("gone"), x.join("dangling")).unwrap();
+    }
+    let rust = |p: &Path| -> u64 {
+        match fs::canonicalize(p) {
+            Ok(c) => hash(&std_io_support::oracle::os_bytes(c.as_os_str())),
+            Err(e) => code(&e),
+        }
+    };
+    let names = [
+        "x/run",
+        "x/../x/plain",
+        "x",
+        "x/missing",
+        "x/link",
+        "x/dangling",
+    ];
+    let mut want = 0;
+    for (i, n) in names.iter().enumerate() {
+        let h = rust(&dir.path().join(n));
+        want = if i == 0 { h } else { mix(want, h) };
+    }
+    let checked = check_driver(&source(&dir));
+    assert_eq!(agree(&checked, "canonical_paths", &MODES), want);
 }

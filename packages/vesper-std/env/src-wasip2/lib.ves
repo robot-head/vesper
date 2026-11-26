@@ -95,6 +95,12 @@ pub fn var_at_bytes(i: u64) -> Option[ChunkSeq[u8]] eff [Ffi[StdEnv]] {
 }
 
 // The current directory as path bytes.
+// The path of the running executable: WASI has none (`std` returns
+// `Unsupported` on wasm32-wasip2).
+pub fn current_exe_bytes() -> ChunkSeq[u8] eff [Ffi[StdEnv], Fail[IoError]] {
+    raise_kind(11)
+}
+
 pub fn current_dir_bytes() -> ChunkSeq[u8] eff [Ffi[StdEnv], Fail[IoError]] {
     let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
     buf.resize(256, 0);

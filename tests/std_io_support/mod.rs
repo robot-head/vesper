@@ -308,6 +308,8 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
         fn kill(pid: i32, sig: i32) -> i32;
         fn exit(code: i32) -> !;
+        fn readlink(path: *const c_char, buf: *mut c_char, n: usize) -> isize;
+        fn realpath(path: *const c_char, resolved: *mut c_char) -> *mut c_char;
         #[cfg_attr(target_os = "macos", link_name = "__error")]
         #[cfg_attr(not(target_os = "macos"), link_name = "__errno_location")]
         fn errno_address() -> *mut i32;
@@ -388,6 +390,8 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("waitpid", waitpid as *const u8),
         ("kill", kill as *const u8),
         ("exit", exit as *const u8),
+        ("readlink", readlink as *const u8),
+        ("realpath", realpath as *const u8),
         (
             if cfg!(target_os = "macos") {
                 "__error"
@@ -514,6 +518,8 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ) -> i32;
         fn SetHandleInformation(h_object: *mut c_void, dw_mask: u32, dw_flags: u32) -> i32;
         fn GetStdHandle(n_std_handle: i32) -> *mut c_void;
+        fn GetFinalPathNameByHandleW(h_file: u64, path: *mut u16, n: u32, flags: u32) -> u32;
+        fn GetModuleFileNameW(h_module: *mut c_void, name: *mut u16, n: u32) -> u32;
         fn CreateProcessW(
             lp_application_name: *const u16,
             lp_command_line: *mut u16,
@@ -588,6 +594,11 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("CreatePipe", CreatePipe as *const u8),
         ("SetHandleInformation", SetHandleInformation as *const u8),
         ("GetStdHandle", GetStdHandle as *const u8),
+        (
+            "GetFinalPathNameByHandleW",
+            GetFinalPathNameByHandleW as *const u8,
+        ),
+        ("GetModuleFileNameW", GetModuleFileNameW as *const u8),
         ("CreateProcessW", CreateProcessW as *const u8),
         ("WaitForSingleObject", WaitForSingleObject as *const u8),
         ("GetExitCodeProcess", GetExitCodeProcess as *const u8),

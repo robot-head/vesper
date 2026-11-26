@@ -359,6 +359,32 @@ pub fn os_is_executable(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
     }
 }
 
+// `std::fs::canonicalize`: `realpath(path, NULL)`, copied out and freed;
+// empty with `err` set on failure.
+pub fn os_canonicalize(in path: Slice[u8], inout err: u64) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    match StdFs::realpath(in path, 0) {
+        Result::Ok((at, e)) => {
+            if at == 0 {
+                err = os_error_word(e);
+                return out;
+            }
+            let n = wrapping_sub(StdFs::find_byte(at, 0), at);
+            out.resize(n, 0);
+            if n != 0 {
+                StdFs::copy_from(at, inout out.as_slice_mut());
+            }
+            StdFs::free(at);
+            err = 0;
+            out
+        },
+        Result::Err(_) => {
+            err = bad_path();
+            out
+        },
+    }
+}
+
 // The length of the open file `fd` (0 when it cannot be read).
 pub fn os_file_len(fd: i32) -> u64 eff [Ffi[StdFs]] {
     let mut st = new_stat();
