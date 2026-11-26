@@ -155,14 +155,35 @@ Stage 1 guard: no guarded path changed; the change is inside
 **Rust lines deleted:** 0. `src/verified_codegen` (9,760 lines) goes at
 the retirement.
 
+## Part 5b: the gated hybrid under the shipped name (piece S2)
+
+### What changed
+
+- **`src/swaps.rs`**: a hybrid started as `vesper` (the file name without
+  `.exe`) defaults to `gated`, like a `gated-default` build. Started as
+  `vesper-hybrid`, as the port lanes and their tests run it, it still
+  defaults to `all`. The variables override both.
+- **`//crates/vesper-hybrid:vesper`**: the hybrid binary copied under the
+  shipped name (`shipped/vesper`, `shipped/vesper.exe` on Windows), so
+  Bazel has the gated compiler without a second build of the crate. The
+  Rust `//:bin/vesper` is unchanged: it still builds the port objects and
+  is what every task runs until piece S4 moves them.
+- **`tests/swaps.rs`**: `the_shipped_name_runs_the_gated_set` copies the
+  hybrid to a `vesper` file and checks that it runs exactly the gated set
+  with no variable, that the parser stays on Rust, and that
+  `VESPER_HYBRID_SWAPS=all` still turns every swap on.
+
+**Rust lines deleted:** 0.
+
 ## The default switch, in pieces
 
 Plan of 2026-11-26. The default `vesper` switches to the gated hybrid
 in pieces, each of which keeps the Rust binary and changes no output:
 
 - S1: the `gated-default` build (part 5a).
-- S2: Bazel's `//:vesper` is the gated hybrid; the Rust binary becomes an
-  internal boot compiler that only the port rules use.
+- S2: Bazel's `//crates/vesper-hybrid:vesper`, the gated hybrid under the
+  shipped name (part 5b); the Rust binary stays the boot compiler of the
+  port rules.
 - S3: the same for Cargo: the root package's binary is renamed and the
   hybrid crate's binary becomes `vesper`.
 - S4: the required checks run their CLI tests against the gated hybrid.
@@ -206,7 +227,7 @@ Besides the compiler rows that have not passed the gate (checklist item
   once the complete compiler builds to wasm; the no-Rust CI check.
 - Part 3: `bootstrap/stage2.lock` for the complete compiler and the CI
   gate on it.
-- Part 5b onward: pieces S2 to S5 of the default switch, then the
+- Part 5c onward: pieces S3 to S5 of the default switch, then the
   retirement PR (the plan's checklist).
 - Census: lane 2's rows (`codegen_swap`, `ir_swap`, `swap_input`,
   `compiler_modules`, `vesper-hybrid`) change only at the retirement.

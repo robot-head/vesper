@@ -4,7 +4,8 @@
 //! `VESPER_HYBRID_SWAPS` picks the set:
 //!
 //! - `all` (the default): every swap below, as the hybrid has always run.
-//!   A hybrid built with the `gated-default` feature defaults to `gated`
+//!   A hybrid started as `vesper` (Bazel's `//crates/vesper-hybrid:vesper`)
+//!   or built with the `gated-default` feature defaults to `gated`
 //!   instead: that build is the one the default `vesper` switches to, and
 //!   it needs no environment variable (docs/maintenance/rust-exit-plan.md,
 //!   "The default switch"). The variables below still override it.
@@ -82,20 +83,34 @@ impl Set {
     }
 }
 
-/// The set when neither variable names one: `gated` in the build the
-/// default `vesper` switches to (the `gated-default` feature), else `all`.
-pub(crate) const DEFAULT: Set = if cfg!(feature = "gated-default") {
-    Set::Gated
-} else {
-    Set::All
-};
+/// The file name (without `.exe`) the hybrid is shipped under as the
+/// default compiler (docs/maintenance/rust-exit-plan.md, "The default
+/// switch"); the port lanes run it as `vesper-hybrid`.
+const SHIPPED_NAME: &str = "vesper";
+
+/// The set when neither variable names one: `gated` for the build the
+/// default `vesper` switches to, that is a hybrid started as `vesper`
+/// (Bazel's `//crates/vesper-hybrid:vesper`) or built with the
+/// `gated-default` feature; else `all`.
+fn default_set() -> Set {
+    let shipped = std::env::args_os().next().is_some_and(|arg0| {
+        std::path::Path::new(&arg0)
+            .file_stem()
+            .is_some_and(|stem| stem == SHIPPED_NAME)
+    });
+    if shipped || cfg!(feature = "gated-default") {
+        Set::Gated
+    } else {
+        Set::All
+    }
+}
 
 /// Reads the set from the environment, or explains a value it does not
 /// know.
 fn read() -> Result<Set, String> {
     match std::env::var("VESPER_HYBRID_SWAPS") {
         Ok(v) => match v.as_str() {
-            "" => Ok(DEFAULT),
+            "" => Ok(default_set()),
             "all" => Ok(Set::All),
             "gated" => Ok(Set::Gated),
             "none" => Ok(Set::None),
@@ -110,7 +125,7 @@ fn read() -> Result<Set, String> {
             if std::env::var_os("VESPER_HYBRID_GATED").is_some_and(|v| v == "1") {
                 Ok(Set::Gated)
             } else {
-                Ok(DEFAULT)
+                Ok(default_set())
             }
         }
     }
