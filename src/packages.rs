@@ -2231,7 +2231,10 @@ impl Renamer<'_> {
             }
             return Some(target);
         }
-        if let Some((owner, shown)) = self.variants.get(n)
+        // Variants are values: a type such as `String` is never one, even
+        // when some package's enum has a variant of that spelling.
+        if ns != Kind::Type
+            && let Some((owner, shown)) = self.variants.get(n)
             && !self.names.values().any(|(t, _)| t == owner)
         {
             self.diagnostics.push(

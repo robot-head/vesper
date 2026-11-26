@@ -287,25 +287,45 @@ pub fn read(in path: Str) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
 }
 
 pub fn read_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    read_path_limit(in path, 18446744073709551615)
+}
+
+// At most the first `limit` bytes of the file at `path` (`Read::take`):
+// no more is read, however long the file is.
+pub fn read_path_limit(in path: Slice[u8], limit: u64)
+    -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
     let h = open_handle(in path, StdFs::GENERIC_READ, StdFs::OPEN_EXISTING);
     let mut fsize: i64 = 0;
     let (sok, _) = StdFs::GetFileSizeEx(h, inout fsize);
-    let hint: u64 = if sok != 0 && fsize > 0 {
+    let wanted: u64 = if sok != 0 && fsize > 0 {
         wrapping_add(wrapping_u64(fsize), 1)
     } else {
         4096
+    };
+    let hint = if wanted < limit {
+        wanted
+    } else {
+        limit
     };
     let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
     buf.resize(hint, 0);
     let mut total: u64 = 0;
     let mut err: u32 = 0;
     loop {
+        if total >= limit {
+            break;
+        }
         let cap = buf.len();
         if total == cap {
-            let next_cap = if cap < 4096 {
+            let grown = if cap < 4096 {
                 4096
             } else {
                 wrapping_mul(cap, 2)
+            };
+            let next_cap = if grown < limit {
+                grown
+            } else {
+                limit
             };
             buf.resize(next_cap, 0);
         }

@@ -285,6 +285,21 @@ fn traits_models_and_bounds_work_across_modules() {
 }
 
 #[test]
+fn a_variant_spelled_like_a_type_leaves_the_type_alone() {
+    // `@accept/kinds` has a variant `Kind::String`; a module that sees no
+    // `Kind` still names the `String` type. 1 * 10 + "four".len().
+    let o = cli()
+        .args([
+            "run",
+            "tests/fixtures/packages/accept/variant_named_like_type",
+        ])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "14");
+}
+
+#[test]
 fn optional_dependencies_are_not_loaded() {
     let o = cli()
         .args(["run", "tests/fixtures/packages/accept/optional_dependency"])
