@@ -1,0 +1,8 @@
+// @vesper/verify: the pure pieces of `vesper verify --extract`
+// (src/verify_commands.rs, SH5 lane 18, #1341). `discover` finds the
+// theorems a Lean proofs file declares (discover.ves); `bindings` writes
+// the contract-binding theorems (contracts.ves). A failure carries the
+// message Rust's `Failure` carries (truncated to 4096 bytes on a character
+// boundary), whose stage is "proofs" or "contracts".
+pub use self::discover::{discover, Found};
+pub use self::contracts::{bindings, Bound};
