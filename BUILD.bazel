@@ -549,6 +549,15 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]) + ["//crates/vesper-ebpf:files"],
+        # #2024 slice 2: the checker's declaration collector in Vesper against
+        # World::collect over the repository's .ves sources (the crates' are
+        # their own Bazel packages, so only `cargo test` sees them).
+        "test/self_host_check_collect": glob([
+            "examples/**/*.ves",
+            "packages/**",
+            "src/**/*.ves",
+            "tests/**/*.ves",
+        ]),
         # Self-hosting SH2 lane 11 (#1183): the dyn passes in Vesper against
         # src/dyn_fn.rs and src/dyn_trait.rs over the dyn suites, mutants and
         # the repository's .ves sources. Anchored globs.
@@ -1294,6 +1303,8 @@ vesper_crate(
         # #1886: the verified backend lowers every corpus main.
         "test/self_host_verified_codegen": "eternal",
         "test/self_host_bounds_hoist_jit": "eternal",
+        # The collect differential collects every .ves source once.
+        "test/self_host_check_collect": "long",
         # The dyn differential runs both passes over every .ves source twice.
         "test/self_host_check_dyn": "long",
         # The package assembler differential (#1178) compiles the AST package.
@@ -1519,6 +1530,29 @@ vesper_package(
     ],
 )
 
+# The package assembler as a dependency of the hybrid driver's package load
+# (#1986), with @vesper-std/collections.
+vesper_package(
+    name = "std_collections_package",
+    srcs = glob(["packages/vesper-std/collections/src/**/*.ves"]),
+    manifest = "packages/vesper-std/collections/Loom.toml",
+    visibility = ["//visibility:public"],
+)
+
+vesper_package(
+    name = "check_names_packages_package",
+    srcs = glob(["packages/vesper-check-names-packages/src/**/*.ves"]),
+    manifest = "packages/vesper-check-names-packages/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ast_package",
+        ":check_data_package",
+        ":std_arena_package",
+        ":std_collections_package",
+        ":std_intern_package",
+    ],
+)
+
 # Fip checker as a dependency of the hybrid compiler's fip module
 # (self-hosting SH2 lane 12, #1184).
 vesper_package(
@@ -1567,6 +1601,23 @@ vesper_package(
 
 # Self-hosting SH5 lane 18 (#1341): Lean extraction, for the hybrid's
 # `lean_extract` swap.
+# @vesper/proof-audit, `vesper proof-audit` in Vesper (SH5 lane 18, #1341),
+# for the hybrid's `proof_audit` swap.
+vesper_package(
+    name = "proof_audit_package",
+    srcs = glob(["packages/vesper-proof-audit/src/**/*.ves"]),
+    manifest = "packages/vesper-proof-audit/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":std_env_package",
+        ":std_fs_package",
+        ":std_hash_package",
+        ":std_hash_sys_package",
+        ":std_process_package",
+        "//crates/vesper-serde:port_package",
+    ],
+)
+
 vesper_package(
     name = "lean_extract_package",
     srcs = glob(["packages/vesper-lean-extract/src/**/*.ves"]),

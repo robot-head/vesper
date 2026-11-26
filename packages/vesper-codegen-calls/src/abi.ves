@@ -18,12 +18,14 @@ use self::instances::{
     Found,
     Inst,
     Syms,
+    bare_trace,
     capability_abi,
     capability_only,
     concrete,
     contains_function,
     fail_only,
-    is_foreign
+    is_foreign,
+    is_root
 };
 
 const NONE32: u32 = 4294967295;
@@ -292,6 +294,44 @@ pub fn check_entry(
     entry: u32,
     inout err: Errs
 ) -> bool {
+    check_entry_traced(inout t, in names, in wd, in d, entry, false, inout err)
+}
+
+// `trace_ok` of `compile_entry`: a trace-host task whose entry, with Beacon
+// active, has a closed row holding the bare `Trace` and otherwise only
+// foreign capabilities.
+pub fn trace_entry_ok(in t: Types, in names: Names, in d: Calls, k: Syms, entry: u32) -> bool {
+    let fi = d.function(entry);
+    if fi == NONE32 || !d.trace_active {
+        return false;
+    }
+    let r = t.row(d.fn_info(fi).row);
+    if r.tail != 0 {
+        return false;
+    }
+    let mut any = false;
+    for i in 0..w(r.n) {
+        let e = t.effect_at(add(w(r.a), i));
+        if bare_trace(k, e) {
+            any = true;
+        } else if !is_foreign(in names, e.name) {
+            return false;
+        }
+    }
+    any
+}
+
+// [`check_entry`] of a task; `trace_ok` ([`trace_entry_ok`]) lets the
+// entry leave the bare `Trace` unhandled.
+pub fn check_entry_traced(
+    inout t: Types,
+    in names: Names,
+    in wd: World,
+    in d: Calls,
+    entry: u32,
+    trace_ok: bool,
+    inout err: Errs
+) -> bool {
     let fi = d.function(entry);
     if fi == NONE32 {
         err.text.clear();
@@ -306,7 +346,7 @@ pub fn check_entry(
             handled = false;
         }
     }
-    if !handled {
+    if !handled && !trace_ok {
         err.text.clear();
         err.text.extend(in "native entry must handle all effects".as_bytes());
         return false;
@@ -389,12 +429,45 @@ pub fn declare(
     inout o: ChunkSeq[u8],
     inout err: Errs
 ) -> bool {
+    let mut roots: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    roots.push(entry);
+    declare_roots(
+        inout ls,
+        inout t,
+        inout names,
+        in wd,
+        in d,
+        k,
+        in found,
+        in roots,
+        optimize,
+        inout o,
+        inout err
+    )
+}
+
+// [`declare`] with every root a boundary (a library's exports keep the
+// failure-record ABI, `native_export::compile_exports`); a root's line
+// names its source symbol.
+pub fn declare_roots(
+    inout ls: Layouts,
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    in d: Calls,
+    k: Syms,
+    in found: Found,
+    in roots: ChunkSeq[u32],
+    optimize: bool,
+    inout o: ChunkSeq[u8],
+    inout err: Errs
+) -> bool {
     let n = found.insts.len();
     let mut abis: ChunkSeq[FnAbi] = ChunkSeq::with_capacity[FnAbi](n);
     for i in 0..n {
         let x = found.inst(i);
         let mut abi = default_abi();
-        if optimize && x.key != entry {
+        if optimize && !is_root(in roots, x.key) {
             let vars = found.vars_of(x);
             let f = concrete(inout t, inout names, in d, x.name, in vars);
             if !internal(
@@ -447,8 +520,8 @@ pub fn declare(
         lines.extend(in " = ".as_bytes());
         names.write(x.name, inout lines);
         lines.extend(in " @ ".as_bytes());
-        if x.key == entry {
-            names.write(entry, inout lines);
+        if is_root(in roots, x.key) {
+            names.write(x.key, inout lines);
         } else {
             lines.extend(in "vesper_function_".as_bytes());
             push_decimal(inout lines, i);
