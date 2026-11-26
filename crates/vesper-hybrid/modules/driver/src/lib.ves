@@ -753,9 +753,8 @@ fn wasm_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[Hybri
     if failed != 0 {
         return pass(inout s, step_wasm_build());
     }
-    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    fmt{
-        inout line;
+    let line = fmt{
+        new;
         write_str(in "built "),
         write_bytes(in path.as_slice()),
         write_str(in " (wasm32-wasip2 component)\n")
@@ -860,9 +859,8 @@ fn verified_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[H
     if failed != 0 {
         return pass(inout s, step_verified_build());
     }
-    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    fmt{
-        inout line;
+    let line = fmt{
+        new;
         write_str(in "built "),
         write_bytes(in path.as_slice()),
         write_str(in " (verified codegen, "),
@@ -1109,9 +1107,8 @@ fn native_code(
     if accepted == 0 {
         return count_error(wrapping_i64(findings), in "native verifier finding(s)");
     }
-    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    fmt{
-        inout line;
+    let line = fmt{
+        new;
         write_str(in "verified "),
         write_u64(functions),
         write_str(in " emitted function(s): "),
