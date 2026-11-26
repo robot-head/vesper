@@ -162,6 +162,23 @@ const PROGRAMS: &[(&str, &str)] = &[
          with { return v => v, stop(k) => 7, }; wrapping_add(wrapping_mul(r, 1000), x) }",
     ),
     (
+        "resumed_continuations",
+        "effect Ask { fn ask(x: i64) -> i64; } \
+         fn f(n: i64) -> i64 eff [Ask] { let mut s = 0; for i in 0..n { s = wrapping_add(s, Ask::ask(i)); } s } \
+         fn main() -> (i64, i64) { (handle Ask in { f(10) } with { return v => wrapping_mul(v, 2), \
+         ask(x, k) => k(wrapping_mul(x, x)) }, handle Ask in { wrapping_add(Ask::ask(1), 100) } \
+         with { return v => v, ask(x, k) => wrapping_add(k(x), 1000) }) }",
+    ),
+    (
+        "state_handlers",
+        "linear effect Counter { fn next() -> i64; } \
+         fn main() -> (i64, (i64, i64)) { (handle Counter state c = 0 in { \
+         wrapping_add(Counter::next(), Counter::next()) } with { \
+         return (v, c) => wrapping_add(wrapping_mul(v, 10), c), next(c, k) => k(c, wrapping_add(c, 1)), }, \
+         handle Counter state c = 5 in { Counter::next() } with { \
+         return p => p, next(c, k) => k(c, wrapping_mul(c, 2)), }) }",
+    ),
+    (
         "unhandled_in_clause",
         "fn d(a: u64, b: u64) -> u64 eff [Fail[RuntimeError]] { a / b } \
          fn main() -> u64 { handle Fail[RuntimeError] in { \
