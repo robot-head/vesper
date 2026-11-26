@@ -51,8 +51,11 @@ fn checked_sum(
 }
 
 // The sum of `terms` (`None` for none), each add checked into `overflow`.
-fn outer_sum(inout b: Builder, in terms: Slice[Value], inout overflow: Value)
-    -> Option[Value] eff [Ffi[Cranelift]] {
+fn outer_sum(
+    inout b: Builder,
+    in terms: Slice[Value],
+    inout overflow: Value
+) -> Option[Value] eff [Ffi[Cranelift]] {
     if terms.len() == 0 {
         return None;
     }
@@ -60,8 +63,13 @@ fn outer_sum(inout b: Builder, in terms: Slice[Value], inout overflow: Value)
 }
 
 // `x + t` when there is a `t`, checked into `overflow` when `check`.
-fn add_term(inout b: Builder, x: Value, t: Option[Value], check: bool, inout overflow: Value)
-    -> Value eff [Ffi[Cranelift]] {
+fn add_term(
+    inout b: Builder,
+    x: Value,
+    t: Option[Value],
+    check: bool,
+    inout overflow: Value
+) -> Value eff [Ffi[Cranelift]] {
     match t {
         None => x,
         Some(v) => if check {
@@ -76,8 +84,12 @@ fn add_term(inout b: Builder, x: Value, t: Option[Value], check: bool, inout ove
 }
 
 // `x * c`, checked into `overflow`.
-fn checked_mul(inout b: Builder, x: Value, c: Value, inout overflow: Value)
-    -> Value eff [Ffi[Cranelift]] {
+fn checked_mul(
+    inout b: Builder,
+    x: Value,
+    c: Value,
+    inout overflow: Value
+) -> Value eff [Ffi[Cranelift]] {
     let p = ins_overflow(inout b, UMUL_OVERFLOW, x, c);
     let o = inst_result(inout b, 1);
     overflow = ins_bor(inout b, overflow, o);

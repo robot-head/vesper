@@ -14,24 +14,15 @@ pub fn sub(a: u64, b: u64) -> u64 {
 }
 
 pub fn byte(in s: Slice[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(b) => b,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 pub fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(b) => b,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 pub fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 pub fn bit(b: bool) -> u64 {
@@ -228,10 +219,7 @@ pub struct Reader {
 
 impl Reader {
     pub fn word(inout self, in b: Slice[u8]) -> u64 {
-        let x = match b.try_read_u64_le(self.pos) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let x = b.try_read_u64_le(self.pos).unwrap_or(0);
         self.pos = add(self.pos, 8);
         x
     }

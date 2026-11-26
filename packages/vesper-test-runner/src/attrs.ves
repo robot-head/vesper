@@ -152,17 +152,11 @@ impl Stream {
     }
 
     fn start_at(in self, offset: u64) -> u64 {
-        match self.start.try_get(add(self.pos, offset)) {
-            Option::Some(s) => s,
-            Option::None => self.len,
-        }
+        self.start.try_get(add(self.pos, offset)).unwrap_or(self.len)
     }
 
     fn end_at(in self, offset: u64) -> u64 {
-        match self.end.try_get(add(self.pos, offset)) {
-            Option::Some(e) => e,
-            Option::None => self.len,
-        }
+        self.end.try_get(add(self.pos, offset)).unwrap_or(self.len)
     }
 
     fn at_word(in self, in b: Slice[u8], offset: u64, in w: Str) -> bool {
