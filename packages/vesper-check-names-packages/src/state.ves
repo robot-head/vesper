@@ -214,6 +214,11 @@ pub struct St {
     // The outputs: diagnostics, `SourceMap::qualified` (mangled -> shown),
     // and `Module::public_items`.
     diags: ChunkSeq[u8],
+    // The same diagnostics as rows for the Vesper driver (#1986): per
+    // diagnostic its file, code, start, end, message length and help length
+    // (`u64::MAX` for none), the message and help bytes in `diag_text`.
+    diag_rows: ChunkSeq[u64],
+    diag_text: ChunkSeq[u8],
     qualified: FlatTable[u32, u32],
     public_out: ChunkSeq[u32],
     // The module being renamed (`Renamer`): its bound names (local ->
@@ -255,6 +260,9 @@ pub struct St {
     s_super: u32,
     s_self_ty: u32,
     cached_ls: ChunkSeq[L],
+    // Parse diagnostics of every module (the Vesper driver's package load
+    // assembles only graphs without any, #1986).
+    parse_errors: u64,
     s_empty: u32
 }
 
@@ -351,6 +359,8 @@ pub fn st_new() -> St {
         var_shown: flat_table_new[u32, u32](),
         globals: flat_table_new[u32, u32](),
         diags: ChunkSeq::new[u8](),
+        diag_rows: ChunkSeq::new[u64](),
+        diag_text: ChunkSeq::new[u8](),
         qualified: flat_table_new[u32, u32](),
         public_out: ChunkSeq::new[u32](),
         names: flat_table_new[u32, u64](),
@@ -369,6 +379,7 @@ pub fn st_new() -> St {
         seen_tref: flat_table_new[u32, u8](),
         const_flag: ChunkSeq::new[u8](),
         cached_ls: ChunkSeq::new[L](),
+        parse_errors: 0,
         made_from: 0,
         groups: flat_table_new[u32, u64](),
         group_pool: ChunkSeq::new[u32](),
@@ -711,6 +722,18 @@ pub fn err(inout s: St, code: u32, start: u32, end: u32) {
 // Writes the pending error as a diagnostic of `file`, one line:
 // `diag <file> E0<code> <start>..<end> <message>[ help: <help>]`.
 pub fn emit(inout s: St, file: u32) {
+    s.diag_rows.push(w(file));
+    s.diag_rows.push(w(s.err_code));
+    s.diag_rows.push(w(s.err_start));
+    s.diag_rows.push(w(s.err_end));
+    s.diag_rows.push(s.err_msg.len());
+    s.diag_text.extend(in s.err_msg.as_bytes());
+    if s.err_has_help {
+        s.diag_rows.push(s.err_help.len());
+        s.diag_text.extend(in s.err_help.as_bytes());
+    } else {
+        s.diag_rows.push(18446744073709551615);
+    }
     s.diags.extend(in "diag ".as_bytes());
     put_decimal(inout s.diags, w(file));
     s.diags.extend(in " E0".as_bytes());

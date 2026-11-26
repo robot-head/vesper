@@ -128,6 +128,18 @@ pub fn decode(source: &str, words: &[u64]) -> Parse {
     }
 }
 
+/// Reads one `ast` section (`put_ast` of modules/parse/src/words.ves) at
+/// `*at`, and moves `*at` past it: the Vesper driver's assembled modules
+/// (swap/assemble.rs, #1986). The parse swap's copy of this file does not
+/// call it.
+#[allow(dead_code)]
+pub fn read_module(words: &[u64], at: &mut usize) -> Module {
+    let mut r = Words { w: words, at: *at };
+    let module = Ast::read(&mut r).module();
+    *at = r.at;
+    module
+}
+
 /// The arenas of `@vesper/ast`'s `Ast`, in the stream's order.
 struct Ast<'a> {
     text: String,

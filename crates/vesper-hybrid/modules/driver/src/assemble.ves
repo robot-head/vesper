@@ -1,0 +1,145 @@
+// The package assembly of the driver's package load (#1986): the Rust
+// loader reads the package graph (`packages::read_for_target`) and the
+// Vesper driver assembles it with `@vesper/check-names-packages`, as
+// `Loader::assemble` does. The result goes back to the Rust session as one
+// word stream, read by crates/vesper-hybrid/src/swap/assemble.rs:
+//
+//   format        `assembled_format()`
+//   parse errors  the number of parse diagnostics in the graph's modules;
+//                 when it is not 0 the stream ends here (the Rust loader
+//                 loads such a graph, reporting them)
+//   modules       count; per module its file, then its renamed AST as the
+//                 `ast` section of `parse_words` (`put_ast` of
+//                 modules/parse/src/words.ves)
+//   public        count; per name a text
+//   qualified     count; per renamed item its internal name and its
+//                 display name, two texts
+//   diagnostics   count; per diagnostic its file, code (111 for E0111),
+//                 start, end, message (a text), then 1 and the help text,
+//                 or 0
+//
+// A text is its byte length, then its bytes eight per word, little-endian.
+
+use @vesper/check-names-packages::{
+    assemble_next_bytes,
+    assembly_begin_bytes,
+    assembly_metadata,
+    assembly_parse_errors
+};
+use @vesper/hybrid-parse::words::{
+    pack,
+    put_ast
+};
+use @vesper-std/intern::{
+    Interner,
+    symbol_from_id
+};
+
+// The layout version of `assembled_words`; the Rust reader checks it.
+fn assembled_format() -> u64 {
+    1
+}
+
+fn put_text(inout o: ChunkSeq[u64], in b: Slice[u8]) {
+    o.push(b.len());
+    pack(inout o, in b, 0, b.len());
+}
+
+fn put_name(inout o: ChunkSeq[u64], in names: Interner, sym: u32) {
+    let (a, b) = names.span(symbol_from_id(sym));
+    let mut t = ChunkSeq::new[u8]();
+    for i in a..b {
+        match names.text_byte(i) {
+            Option::Some(c) => t.push(c),
+            Option::None => {},
+        }
+    }
+    put_text(inout o, in t.as_slice());
+}
+
+fn row(in rows: ChunkSeq[u64], i: u64) -> u64 {
+    match rows.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn none_len() -> u64 {
+    18446744073709551615
+}
+
+// Assembles the encoded package graph `graph` (the input of
+// `assembly_begin`) into the stream above.
+pub fn assembled_words(in graph: Slice[u8]) -> ChunkSeq[u64] {
+    let mut o = ChunkSeq::new[u64]();
+    o.push(assembled_format());
+    let mut a = assembly_begin_bytes(in graph);
+    let errors = assembly_parse_errors(in a);
+    o.push(errors);
+    if errors != 0 {
+        return o;
+    }
+    // The module count, filled in once every module is written.
+    let at = o.len();
+    o.push(0);
+    let mut n: u64 = 0;
+    loop {
+        match assemble_next_bytes(inout a, in graph) {
+            Option::Some(m) => {
+                o.push(widen_u64(m.file));
+                put_ast(inout o, in m.ast);
+                n = wrapping_add(n, 1);
+            },
+            Option::None => break,
+        }
+    }
+    let _ = o.try_set(at, n);
+    let meta = assembly_metadata(sink a);
+    let np = meta.public_items.len();
+    o.push(np);
+    for i in 0..np {
+        let sym = match meta.public_items.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        put_name(inout o, in meta.names, sym);
+    }
+    let nq = meta.qualified.len();
+    o.push(nq);
+    for i in 0..nq {
+        match meta.qualified.entry_at(i) {
+            Option::Some((k, v)) => {
+                put_name(inout o, in meta.names, k);
+                put_name(inout o, in meta.names, v);
+            },
+            Option::None => {
+                put_text(inout o, in "".as_bytes());
+                put_text(inout o, in "".as_bytes());
+            },
+        }
+    }
+    let rows = meta.diagnostic_rows;
+    let text = meta.diagnostic_text.as_slice();
+    let nd = rows.len() / 6;
+    o.push(nd);
+    let mut pos: u64 = 0;
+    for d in 0..nd {
+        let r = wrapping_mul(d, 6);
+        o.push(row(in rows, r));
+        o.push(row(in rows, wrapping_add(r, 1)));
+        o.push(row(in rows, wrapping_add(r, 2)));
+        o.push(row(in rows, wrapping_add(r, 3)));
+        let ml = row(in rows, wrapping_add(r, 4));
+        put_text(inout o, in text[pos..wrapping_add(pos, ml)]);
+        pos = wrapping_add(pos, ml);
+        let hl = row(in rows, wrapping_add(r, 5));
+        if hl == none_len() {
+            o.push(0);
+        } else {
+            o.push(1);
+            put_text(inout o, in text[pos..wrapping_add(pos, hl)]);
+            pos = wrapping_add(pos, hl);
+        }
+    }
+    o
+}

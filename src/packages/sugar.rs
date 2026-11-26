@@ -31,6 +31,16 @@ pub(super) struct Declaration {
 }
 
 impl ModuleSugar {
+    /// Whether the module has no sugar at all: no surface syntax, no
+    /// declarations, no expanded regions and no Forge audit.
+    pub fn is_plain(&self) -> bool {
+        !self.surface
+            && self.declarations.is_empty()
+            && self.origins.is_empty()
+            && self.original.is_none()
+            && self.audited.is_none()
+    }
+
     pub fn discover(text: &str, core: &mut parser::Parse, tests: bool) -> Self {
         let mut result = Self {
             tests,

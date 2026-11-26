@@ -575,10 +575,37 @@ fn load_with_parser(
     wasi: bool,
     os: &str,
 ) -> Result<Assembled, String> {
+    Ok(read_with_parser(
+        dir,
+        parse,
+        replacement,
+        root_tests,
+        prepare,
+        wasi,
+        os,
+        false,
+    )?
+    .assemble())
+}
+
+/// Reads the package graph (`Loader::package` and the sugar expansion):
+/// everything [`load_with_parser`] does before assembly.
+#[allow(clippy::too_many_arguments)]
+fn read_with_parser<'a>(
+    dir: &Path,
+    parse: Option<&mut RootParser<'_>>,
+    replacement: Option<(&'a Path, &'a str)>,
+    root_tests: bool,
+    prepare: Option<&mut PreparedParser<'_>>,
+    wasi: bool,
+    os: &'a str,
+    defer_parse: bool,
+) -> Result<Loading<'a>, String> {
     let mut loader = Loader {
         wasi,
         os,
         replacement,
+        defer_parse,
         ..Loader::default()
     };
     let root = loader.package(dir, dir.to_path_buf(), &mut vec![], parse, root_tests)?;
@@ -587,15 +614,68 @@ fn load_with_parser(
     {
         loader.expand_sugars(root, prepare)?;
     }
-    let package = root
-        .map(|i| loader.packages[i].name.as_str().to_owned())
-        .unwrap_or_default();
-    let modules = root.map(|i| &loader.packages[i].modules[..]).unwrap_or(&[]);
-    let root_module = modules.iter().find(|m| m.path.is_empty()).map(|m| m.file);
-    let root_package_files: Vec<usize> = modules.iter().map(|m| m.file).collect();
-    if !loader.manifest_errors.is_empty() || root.is_none() {
-        return Ok(Assembled {
-            module: Module::default(),
+    Ok(Loading {
+        loader,
+        root,
+        root_tests,
+        deferred: defer_parse,
+    })
+}
+
+/// Read the package graph [`load_for_target`] assembles, without assembling
+/// it or (`defer_parse`) parsing its modules, for the Vesper driver to
+/// assemble from [`Loading::assembly_input`] (#1986). A graph read without
+/// its parses has neither parse diagnostics nor sugar, so only the Vesper
+/// assembler, which parses every module, may assemble it, and only when no
+/// module has a parse diagnostic; any other graph is loaded again with
+/// [`load_for_target`].
+pub fn read_for_target(
+    dir: &Path,
+    target: Option<&str>,
+    include_tests: bool,
+    defer_parse: bool,
+) -> Result<Loading<'static>, String> {
+    let wasi = target == Some(crate::wasm_backend::TARGET);
+    let os = if wasi {
+        "wasip2"
+    } else if let Some(triple) = target {
+        VSYS_TARGETS
+            .iter()
+            .find(|v| v.triple == triple)
+            .map_or(std::env::consts::OS, |v| v.os)
+    } else {
+        std::env::consts::OS
+    };
+    read_with_parser(dir, None, None, include_tests, None, wasi, os, defer_parse)
+}
+
+/// A package graph read from disk: its manifests checked, its modules
+/// parsed and its sugar expanded, before [`Loader::assemble`].
+pub struct Loading<'a> {
+    loader: Loader<'a>,
+    root: Option<usize>,
+    root_tests: bool,
+    /// Read with `defer_parse`: the modules were not parsed.
+    deferred: bool,
+}
+
+impl Loading<'_> {
+    /// The fields of [`Assembled`] the assembly leaves alone, around
+    /// `module`.
+    fn finish(self, module: Module) -> Assembled {
+        let loader = self.loader;
+        let package = self
+            .root
+            .map(|i| loader.packages[i].name.as_str().to_owned())
+            .unwrap_or_default();
+        let modules = self
+            .root
+            .map(|i| &loader.packages[i].modules[..])
+            .unwrap_or(&[]);
+        let root_module = modules.iter().find(|m| m.path.is_empty()).map(|m| m.file);
+        let root_package_files: Vec<usize> = modules.iter().map(|m| m.file).collect();
+        Assembled {
+            module,
             sources: loader.sources,
             diagnostics: loader.diagnostics,
             manifest_errors: loader.manifest_errors,
@@ -604,20 +684,126 @@ fn load_with_parser(
             root_package_files,
             vsys: loader.vsys,
             objects: loader.objects,
-        });
+        }
     }
-    let module = loader.assemble(root.unwrap_or_default());
-    Ok(Assembled {
-        module,
-        sources: loader.sources,
-        diagnostics: loader.diagnostics,
-        manifest_errors: loader.manifest_errors,
-        package,
-        root_module,
-        root_package_files,
-        vsys: loader.vsys,
-        objects: loader.objects,
-    })
+
+    /// Whether the modules were left unparsed (`defer_parse`).
+    pub fn deferred(&self) -> bool {
+        self.deferred
+    }
+
+    /// Assembles the graph with [`Loader::assemble`]; a graph with manifest
+    /// errors or no root package assembles to the empty module. The graph
+    /// must have been read with its parses.
+    pub fn assemble(mut self) -> Assembled {
+        assert!(!self.deferred, "packages: assembling an unparsed graph");
+        let module = match self.root {
+            Some(root) if self.loader.manifest_errors.is_empty() => self.loader.assemble(root),
+            _ => Module::default(),
+        };
+        self.finish(module)
+    }
+
+    /// The input of `@vesper/check-names-packages`'s `assembly_begin` (the
+    /// layout is documented in that package's src/load.ves) when the
+    /// Vesper assembler can assemble this graph exactly as
+    /// [`Loader::assemble`] would: no manifest errors, no test-only
+    /// declarations (the assembler parses every module with the ordinary
+    /// parser) and no sugar anywhere (it keeps no expanded regions). The
+    /// root package is package 0, and modules follow `Loader::assemble`'s
+    /// order.
+    pub fn assembly_input(&self) -> Option<Vec<u8>> {
+        let root = self.root?;
+        let l = &self.loader;
+        if root != 0
+            || !l.manifest_errors.is_empty()
+            || self.root_tests
+            // The parse refuses sources over its byte budget.
+            || l.sources.files.iter().any(|f| {
+                f.text.len() > crate::parser::ParseLimits::default().max_source_bytes
+            })
+            || l.packages.iter().any(|p| {
+                p.modules
+                    .iter()
+                    .any(|m| !m.sugar.is_plain() || !m.parsed.sugar_origins.is_empty())
+            })
+        {
+            return None;
+        }
+        fn put(out: &mut Vec<u8>, x: usize) {
+            out.extend((x as u64).to_le_bytes());
+        }
+        fn put_str(out: &mut Vec<u8>, s: &str) {
+            put(out, s.len());
+            out.extend(s.as_bytes());
+            out.resize(out.len().next_multiple_of(8), 0);
+        }
+        let mut out = vec![];
+        put(&mut out, l.packages.len());
+        for p in &l.packages {
+            put_str(&mut out, p.name.as_str());
+            put(&mut out, p.deps.len());
+            for (name, &dep) in &p.deps {
+                put_str(&mut out, name);
+                put(&mut out, dep);
+            }
+            let optional: Vec<_> = p
+                .manifest
+                .dependencies
+                .iter()
+                .filter(|(_, d)| d.optional)
+                .collect();
+            put(&mut out, optional.len());
+            for (name, _) in optional {
+                put_str(&mut out, name.as_str());
+            }
+        }
+        put(&mut out, l.sources.files.len());
+        for f in &l.sources.files {
+            put_str(&mut out, &f.display);
+            put(&mut out, f.base);
+        }
+        put(&mut out, l.packages.iter().map(|p| p.modules.len()).sum());
+        for (i, p) in l.packages.iter().enumerate() {
+            for m in &p.modules {
+                put(&mut out, i);
+                put(&mut out, m.path.len());
+                for segment in &m.path {
+                    put_str(&mut out, segment);
+                }
+                put(&mut out, m.file);
+                put_str(&mut out, &l.sources.files[m.file].text);
+            }
+        }
+        put(
+            &mut out,
+            l.packages.iter().map(|p| p.foreign_types.len()).sum(),
+        );
+        for (i, p) in l.packages.iter().enumerate() {
+            for name in p.foreign_types.keys() {
+                put(&mut out, i);
+                put_str(&mut out, name);
+            }
+        }
+        // No sugar declarations (see above).
+        put(&mut out, 0);
+        Some(out)
+    }
+
+    /// The graph as the Vesper assembler assembled it from
+    /// [`Loading::assembly_input`]: its renamed module, the qualified
+    /// display names of the renamed items and its diagnostics, which follow
+    /// the loader's.
+    pub fn assembled(
+        mut self,
+        module: Module,
+        qualified: BTreeMap<String, String>,
+        diagnostics: Vec<PackageDiagnostic>,
+    ) -> Assembled {
+        self.loader.sources.qualified.extend(qualified);
+        self.loader.diagnostics.extend(diagnostics);
+        self.finish(module)
+    }
 }
 
 #[derive(Default)]
@@ -633,6 +819,9 @@ struct Loader<'a> {
     objects: Vec<PackageObject>,
     os: &'a str,
     replacement: Option<(&'a Path, &'a str)>,
+    /// Leave every module unparsed (an empty module, no diagnostics and no
+    /// sugar): the Vesper driver parses them as it assembles (#1986).
+    defer_parse: bool,
 }
 
 fn manifest_error(code: &str, message: impl Into<String>) -> Diagnostic {
@@ -852,7 +1041,13 @@ impl Loader<'_> {
                     Some((replaced, text)) if normalize(&path) == replaced => text.to_owned(),
                     _ => read_source(&path)?,
                 };
-                let parsed = if include_tests {
+                let parsed = if self.defer_parse {
+                    crate::parser::Parse {
+                        module: Module::default(),
+                        green: crate::parser::parse("").green,
+                        diagnostics: vec![],
+                    }
+                } else if include_tests {
                     crate::parser::parse_for_tests(&text)
                 } else {
                     crate::parser::parse(&text)
