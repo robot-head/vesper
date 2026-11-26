@@ -5,6 +5,15 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Checked Baseline128 JIT byte scanner and explicitly targeted SIMD objects"
 publish = false
+build = "build.rs"
+
+[features]
+# Build the scanner and decide profile support with the Vesper port
+# (vesper/, #1969) instead of the Rust code. The Rust stays the default
+# until the port is the only build (docs/maintenance/porting-a-crate.md).
+vesper-port = ["dep:vesper-port-harness", "dep:vesper-cranelift-sys", "dep:vesper-port-abi"]
+# A deliberately wrong Vesper build (build.rs `EDITS`): its tests must fail.
+vesper-port-divergent = ["vesper-port"]
 
 [dependencies]
 cranelift-codegen = { version = "0.125", features = ["arm64", "x86"] }
@@ -15,6 +24,13 @@ cranelift-module = "0.125"
 cranelift-jit = { version = "0.125", features = ["selinux-fix"] }
 cranelift-object = "0.125"
 target-lexicon = "0.13"
+# The port's generated binding, and the Cranelift shim its object calls
+# and lends modules through.
+vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+vesper-cranelift-sys = { path = "../vesper-cranelift-sys", optional = true }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness", optional = true }
 
 [dev-dependencies]
 object = { version = "0.37", default-features = false, features = ["read", "std", "elf"] }

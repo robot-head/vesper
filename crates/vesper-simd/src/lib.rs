@@ -75,6 +75,7 @@ enum Features {
     Other,
 }
 
+#[cfg(not(feature = "vesper-port"))]
 fn check_features(features: Features) -> Result<(), Error> {
     let supported = match features {
         Features::X86 {
@@ -91,6 +92,46 @@ fn check_features(features: Features) -> Result<(), Error> {
     } else {
         Err(Error::MissingBaselineFeatures)
     }
+}
+
+/// The Vesper port's answer codes (`vesper/src/lib.ves`) as this crate's
+/// results.
+#[cfg(feature = "vesper-port")]
+fn port_answer(code: u64, profile: IsaProfileKind) -> Result<(), Error> {
+    match code {
+        0 => Ok(()),
+        1 => Err(Error::UnsupportedProfile(profile)),
+        2 => Err(Error::UnsupportedHost),
+        3 => Err(Error::MissingBaselineFeatures),
+        other => Err(Error::Codegen(format!("unknown support answer {other}"))),
+    }
+}
+
+/// The feature words `check_features` takes in the Vesper port.
+#[cfg(feature = "vesper-port")]
+fn feature_words(features: Features) -> (u64, [bool; 5]) {
+    match features {
+        Features::X86 {
+            sse3,
+            ssse3,
+            sse41,
+            sse42,
+        } => (1, [sse3, ssse3, sse41, sse42, false]),
+        Features::Aarch64 { neon } => (2, [false, false, false, false, neon]),
+        Features::Other => (0, [false; 5]),
+    }
+}
+
+#[cfg(feature = "vesper-port")]
+#[cfg_attr(not(test), allow(dead_code, reason = "discovery tests call it"))]
+fn check_features(features: Features) -> Result<(), Error> {
+    port_answer(check_features_code(features), IsaProfileKind::Baseline128)
+}
+
+#[cfg(feature = "vesper-port")]
+fn check_features_code(features: Features) -> u64 {
+    let (arch, [sse3, ssse3, sse41, sse42, neon]) = feature_words(features);
+    port::check_features(arch, sse3, ssse3, sse41, sse42, neon)
 }
 
 // Keep all variants compiled so discovery decisions can be tested without
@@ -120,6 +161,33 @@ fn host_features() -> Features {
 /// Non-executable discovery result. Unsupported profiles remain explicit even
 /// when the machine has the corresponding hardware.
 pub fn profile_support(profile: IsaProfileKind) -> Result<(), Error> {
+    #[cfg(feature = "vesper-port")]
+    {
+        let code = port::profile_support(
+            profile_code(profile),
+            usize::BITS as u64,
+            check_features_code(host_features()),
+        );
+        port_answer(code, profile)
+    }
+    #[cfg(not(feature = "vesper-port"))]
+    reference_profile_support(profile)
+}
+
+/// `IsaProfileKind` as the Vesper port numbers it.
+#[cfg(feature = "vesper-port")]
+fn profile_code(profile: IsaProfileKind) -> u64 {
+    match profile {
+        IsaProfileKind::Baseline128 => 0,
+        IsaProfileKind::Avx2 => 1,
+        IsaProfileKind::Avx512 => 2,
+        IsaProfileKind::Sve2 => 3,
+        IsaProfileKind::Rvv1 => 4,
+    }
+}
+
+#[cfg(not(feature = "vesper-port"))]
+fn reference_profile_support(profile: IsaProfileKind) -> Result<(), Error> {
     if profile != IsaProfileKind::Baseline128 {
         return Err(Error::UnsupportedProfile(profile));
     }
@@ -233,7 +301,17 @@ fn metadata(isa: &dyn isa::TargetIsa) -> CodeMetadata {
 // object ABI is C: uint64_t scan(const uint8_t*, uint64_t, uint8_t, uint8_t*).
 // The raw ABI is private in the safe JIT API; external object users must provide
 // readable [ptr, ptr+len) and a writable output byte, with no aliasing mutation.
-fn define_scanner<M: Module>(module: &mut M) -> Result<(cranelift_module::FuncId, String), Error> {
+//
+// The Rust builder is the reference; with the `vesper-port` feature the
+// Vesper port (`vesper/src/lib.ves`) builds the same function into the
+// lent module.
+#[cfg_attr(
+    all(feature = "vesper-port", not(test)),
+    allow(dead_code, reason = "the reference the port is compared against")
+)]
+fn reference_define_scanner<M: Module>(
+    module: &mut M,
+) -> Result<(cranelift_module::FuncId, String), Error> {
     let mut ctx = module.make_context();
     ctx.func.signature.params.extend([
         AbiParam::new(types::I64),
@@ -243,11 +321,7 @@ fn define_scanner<M: Module>(module: &mut M) -> Result<(cranelift_module::FuncId
     ]);
     ctx.func.signature.returns.push(AbiParam::new(types::I64));
     let id = module
-        .declare_function(
-            "vesper_simd_scan_baseline128_v1",
-            Linkage::Export,
-            &ctx.func.signature,
-        )
+        .declare_function(SCANNER, Linkage::Export, &ctx.func.signature)
         .map_err(codegen)?;
     let mut frontend = FunctionBuilderContext::new();
     {
@@ -358,6 +432,49 @@ fn define_scanner<M: Module>(module: &mut M) -> Result<(cranelift_module::FuncId
     Ok((id, clif))
 }
 
+/// The exported scanner's symbol.
+const SCANNER: &str = "vesper_simd_scan_baseline128_v1";
+
+#[cfg(not(feature = "vesper-port"))]
+fn define_scanner<M: Module>(
+    module: &mut M,
+    _jit: bool,
+) -> Result<(cranelift_module::FuncId, String), Error> {
+    reference_define_scanner(module)
+}
+
+/// The scanner from the Vesper port, defined in `module` lent as a JIT or
+/// an object module. Its answer is 0 and the CLIF text, or 1 and why.
+#[cfg(feature = "vesper-port")]
+fn define_scanner<M: Module>(
+    module: &mut M,
+    jit: bool,
+) -> Result<(cranelift_module::FuncId, String), Error> {
+    use vesper_cranelift_sys::ModuleKind;
+    let kind = if jit {
+        ModuleKind::Jit
+    } else {
+        ModuleKind::Object
+    };
+    let (answer, crossing) =
+        vesper_cranelift_sys::lend_module_as(kind, module, 0, &[], port::define_scanner);
+    if let Some(e) = crossing.error {
+        return Err(Error::Codegen(e));
+    }
+    if crossing.unreturned {
+        return Err(Error::Codegen("the port kept the lent module".into()));
+    }
+    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+    match answer.split_first() {
+        Some((0, clif)) => match module.get_name(SCANNER) {
+            Some(cranelift_module::FuncOrDataId::Func(id)) => Ok((id, text(clif))),
+            _ => Err(Error::Codegen(format!("the port declared no {SCANNER}"))),
+        },
+        Some((_, why)) => Err(Error::Codegen(text(why))),
+        None => Err(Error::Codegen("the port gave no answer".into())),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ScanResult {
     pub matches: u64,
@@ -420,7 +537,7 @@ impl JitScanner {
             default_libcall_names(),
         ))));
         let module = memory.0.as_mut().expect("module just created");
-        let (id, clif) = define_scanner(module)?;
+        let (id, clif) = define_scanner(module, true)?;
         module.finalize_definitions().map_err(codegen)?;
         let pointer = module.get_finalized_function(id);
         // SAFETY: define_scanner uses precisely this C signature and both
@@ -481,7 +598,7 @@ impl ObjectArtifact {
         let builder =
             ObjectBuilder::new(isa, "vesper-simd", default_libcall_names()).map_err(codegen)?;
         let mut module = ObjectModule::new(builder);
-        let (_, clif) = define_scanner(&mut module)?;
+        let (_, clif) = define_scanner(&mut module, false)?;
         let bytes = module.finish().emit().map_err(codegen)?;
         Ok(Self {
             bytes,
@@ -502,6 +619,11 @@ impl ObjectArtifact {
 }
 
 pub mod vvec;
+
+#[cfg(feature = "vesper-port")]
+#[rustfmt::skip]
+#[path = "../port/binding.rs"]
+mod port;
 
 #[cfg(test)]
 mod tests;
