@@ -562,7 +562,8 @@ fn proof_command(
     let mut current = NO_TOKEN;
     for d in 0..open.at.len() {
         if current == NO_TOKEN
-            && same(in doc, in body, uri, in blob, g64(in open.at, d), g64(in open.len, d)) {
+            && same(in doc, in body, uri, in blob, g64(in open.at, d), g64(in open.len, d))
+        {
             current = g64(in open.version, d);
         }
     }
@@ -675,7 +676,8 @@ fn check_row(
             NO_TOKEN
         };
         if kind_is(in doc, id, Kind::String)
-            && token(in doc, id).decoded_len <= MAX_CANCEL_ID_BYTES {
+            && token(in doc, id).decoded_len <= MAX_CANCEL_ID_BYTES
+        {
             put(inout o, in "s ");
             put_string(inout o, in doc, in body, id);
         } else {
