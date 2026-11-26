@@ -983,16 +983,21 @@ fn short_if_else(atoms: &[Piece<'_>], start: usize, end: Option<K>) -> Option<us
     });
     ends.then_some(close)
 }
-/// A call's one argument that, like rustfmt, stays on the call's line and
-/// breaks inside instead (`push(Row {`, `wrap(inner(`, `n32(match x {`): a
-/// struct literal, a call or a `match`, with nothing after its last
-/// delimiter. `open` is the call's `(`. Returns the argument's width up to
-/// and including the delimiter that breaks.
-fn sole_argument(atoms: &[Piece<'_>], open: usize) -> Option<usize> {
+/// A call's argument that, like rustfmt, stays on the call's line and breaks
+/// inside instead, with nothing after its last delimiter: a one argument
+/// that is a struct literal, a call or a `match` (`push(Row {`,
+/// `wrap(inner(`, `n32(match x {`), or a last argument that is a block or a
+/// closure with a block body, after arguments that stay on that line too
+/// (`fold(xs, 0, |a, x| {`). `open` is the call's `(`. Returns the width of
+/// the arguments up to and including the delimiter that breaks.
+fn overflow_argument(atoms: &[Piece<'_>], open: usize) -> Option<usize> {
     let first = atoms.get(open + 1)?;
     let mut i = open + 1;
     let mut width = 0usize;
-    let delimiter = if first.kind == K::Match {
+    let delimiter = if let Some((brace, before)) = block_argument(atoms, open) {
+        width = before;
+        brace
+    } else if first.kind == K::Match {
         // `match` and its scrutinee, up to the `{` of its arms.
         let mut depth = 0usize;
         let mut previous: Option<K> = None;
@@ -1080,8 +1085,78 @@ fn sole_argument(atoms: &[Piece<'_>], open: usize) -> Option<usize> {
     }
     (j > delimiter + 1 && atoms.get(j + 1)?.kind == K::RParen).then_some(width)
 }
+/// Where `block_argument` is relative to a closure's parameters.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Params {
+    Outside,
+    Inside,
+    After,
+}
+/// A call's last argument that is a block or a closure with a block body,
+/// after arguments with no braces, comments or other closures in them: the
+/// block's `{` and the width of the arguments up to and including it.
+fn block_argument(atoms: &[Piece<'_>], open: usize) -> Option<(usize, usize)> {
+    let mut i = open + 1;
+    let mut width = 0usize;
+    let mut depth = 0usize;
+    let mut previous: Option<K> = None;
+    let mut unary = false;
+    let mut params = Params::Outside;
+    loop {
+        let atom = atoms.get(i)?;
+        let kind = atom.kind;
+        if matches!(kind, K::Comment | K::BlockComment | K::Semi | K::RBrace)
+            || atom.sugar_gap.is_some()
+        {
+            return None;
+        }
+        // The first token of an argument.
+        let starts = depth == 0 && previous.is_none_or(|p| p == K::Comma);
+        if kind == K::LBrace {
+            if depth != 0
+                || atom.tagged
+                || !(params == Params::After || starts && params == Params::Outside)
+            {
+                return None;
+            }
+            return width
+                .checked_add(1 + usize::from(previous.is_some()))
+                .map(|w| (i, w));
+        }
+        if params == Params::After && depth == 0 && kind == K::Comma {
+            return None;
+        }
+        // Spaced as `sequence` spaces a closure's parameters: they hug their
+        // pipes.
+        let space = match previous {
+            None => false,
+            Some(K::Pipe) if params == Params::Inside => kind == K::Pipe,
+            Some(K::Comma) if params == Params::Inside => true,
+            Some(_) if params == Params::Inside && kind == K::Pipe => false,
+            Some(p) => spaced(p, *atom, unary),
+        };
+        if kind == K::Pipe {
+            params = match params {
+                Params::Outside if starts => Params::Inside,
+                Params::Inside => Params::After,
+                _ => return None,
+            };
+        }
+        width = width.checked_add(usize::from(space))?;
+        width = width.checked_add(atom.text.chars().count())?;
+        unary =
+            matches!(kind, K::Minus | K::Bang | K::Tilde) && !previous.is_some_and(ends_operand);
+        previous = Some(kind);
+        match kind {
+            K::LParen | K::LBracket => depth += 1,
+            K::RParen | K::RBracket => depth = depth.checked_sub(1)?,
+            _ => {}
+        }
+        i += 1;
+    }
+}
 /// Whether a space separates two tokens on one line, for the width
-/// estimates of `short_if_else` and `sole_argument`.
+/// estimates of `short_if_else` and `overflow_argument`.
 fn spaced(previous: K, atom: Piece<'_>, unary: bool) -> bool {
     if matches!(previous, K::LParen | K::LBracket)
         || matches!(atom.kind, K::RParen | K::RBracket)
@@ -1193,6 +1268,9 @@ fn sequence<'a>(
     let mut closure_open = false;
     // The column `line` starts at.
     let mut line_start = column;
+    // A call's arguments kept on its line (`fold(xs, 0, |a, x| {`), which
+    // start past `indent`: their commas never break.
+    let inline = list && column != indent;
     while *pos < atoms.len() && Some(atoms[*pos].kind) != end {
         let current = atoms[*pos];
         // An `if` used as a value (`let x = if ..`, an argument, a match arm,
@@ -1324,7 +1402,7 @@ fn sequence<'a>(
                 }
                 output.push(document.push(Doc::HardLine)?);
             }
-            Gap::Soft if list && after_comma => {
+            Gap::Soft if list && after_comma && !inline => {
                 line.flush(document, &mut output)?;
                 line_start = indent;
                 separators.push(output.len());
@@ -1373,9 +1451,10 @@ fn sequence<'a>(
             let start = document.push(Doc::Text(current.text))?;
             let fill =
                 current.kind == K::LBrace && previous.is_some_and(|p| p.kind == K::ColonColon);
-            // A call's one argument stays on the call's line when its first
-            // line fits there, as in rustfmt (`push(Row {`), and breaks
-            // inside instead: the column the argument would start at.
+            // A call's one argument, or a closure after its others, stays on
+            // the call's line when its first line fits there, as in rustfmt
+            // (`push(Row {`, `fold(xs, 0, |a, x| {`), and breaks inside
+            // instead: the column the arguments would start at.
             let overflow = if current.kind == K::LParen
                 && current.expr
                 && previous.is_some_and(|p| matches!(p.kind, K::Lower | K::Upper))
@@ -1389,7 +1468,7 @@ fn sequence<'a>(
                 }
                 width
                     .and_then(|w| w.checked_add(1))
-                    .zip(sole_argument(atoms, *pos - 1))
+                    .zip(overflow_argument(atoms, *pos - 1))
                     .filter(|&(at, head)| at.saturating_add(head) <= DEFAULT_LINE_WIDTH)
                     .map(|(at, _)| at)
             } else {
