@@ -1,0 +1,77 @@
+// @vesper/run: the evaluator behind `vesper run` (src/runtime.rs, the
+// explicit CEK machine) in Vesper, for the Stage 2 retirement of the Rust
+// compiler (#1397, claim #2053).
+//
+// The Rust evaluator runs the drop-lowered, optimized Place IR of the
+// checked world (`ffi_lowering::drops::lower_world`, then
+// `ir_opt::optimize`) one `Control` at a time, and evaluates the AST only
+// for closure and handler bodies. This package runs the same program,
+// read through `@vesper/place-ir`, with the same machine: one fuel unit
+// per `drive` iteration (an instruction, a terminator or a returned
+// value), the same frames and the same error texts, so `vesper run`
+// prints the same value or the same error for every fuel limit.
+//
+// Slice 1 (machine.ves) is the core machine: integers of the 64-bit kinds
+// and narrower, `bool`, string literals, tuples, data, function values,
+// direct and indirect calls with `inout` places, patterns, `?` and the
+// primitive failures. A program reaching anything else (closures,
+// handlers, sequences, floats, 128-bit integers, vector, tiled and `Box`
+// operations) is declined before it runs (`scan`), and the caller runs
+// the Rust evaluator instead.
+//
+// The input (tests/common/run_words.rs `run_input`): check-data's names,
+// types and world, the program section of `ir_words::program_input`, then
+// the fuel and the entry's name index. The output: a status word, then a
+// text as `put_text_words` words:
+//
+// - 0: the result's `Display` text (what `vesper run` prints);
+// - 1: the error text (`Runtime::run`'s `Err`);
+// - 2: declined; the text says what the machine does not run yet.
+
+use @vesper/check-data::util::{put_text_words};
+use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/place-ir::{read_program};
+use self::machine::{M, machine_new, load, scan, drive};
+
+pub const RUN_OK: u64 = 0;
+pub const RUN_ERROR: u64 = 1;
+pub const RUN_DECLINED: u64 = 2;
+
+// The layout version of `run_words`.
+pub fn format() -> u64 {
+    1
+}
+
+pub fn run_words(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in b);
+    let p = read_program(inout r, in b, in c);
+    let fuel = r.word(in b);
+    let entry = r.word(in b);
+    let mut m = machine_new(c, p, fuel);
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    load(inout m, entry);
+    if !m.declined {
+        scan(inout m);
+    }
+    if m.declined {
+        out.push(RUN_DECLINED);
+        put_text_words(inout out, in m.msg[0..m.msg.len()]);
+        return out;
+    }
+    drive(inout m);
+    if m.failed {
+        out.push(RUN_ERROR);
+    } else {
+        out.push(RUN_OK);
+    }
+    put_text_words(inout out, in m.msg[0..m.msg.len()]);
+    out
+}
+
+// `run_words` from the harness's `Str` input (tests/self_host_run.rs).
+pub fn run_str(in input: Str) -> ChunkSeq[u64] {
+    run_words(in input.as_bytes())
+}

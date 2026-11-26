@@ -55,6 +55,13 @@ impl Session {
                         Some(_) => 0,
                     });
                 }
+                // The Vesper evaluator (#2053), unless it declines the program.
+                if let Some(answer) =
+                    crate::vesper_hybrid::driver_run(world, entry, o.fuel, o.optimize)
+                {
+                    println!("{}", answer?);
+                    return Ok(0);
+                }
                 let mut runtime = Runtime::new(world);
                 runtime.fuel = o.fuel;
                 runtime.optimize = o.optimize;
