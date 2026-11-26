@@ -2944,12 +2944,8 @@ fn heavy(in p: Prog, f: Fun, in blocks: ChunkSeq[u8]) -> bool {
     false
 }
 
-// `site::split`: the best partial inlining whose copy costs at most `budget`.
-fn split(in p: Prog, g: Tgt, in fd: Folded, budget: u64) -> Split {
-    let f = p.fun(g.f);
-    if own_handles(in p, g.f) > 0 {
-        return no_split();
-    }
+// Marks each block of `f` whose instructions are all `pure`.
+fn pure_blocks(in p: Prog, g: Tgt, f: Fun) -> ChunkSeq[u8] {
     let n = w(f.fc);
     let mut pure_block = zeros8(n);
     for b in 0..n {
@@ -2965,7 +2961,14 @@ fn split(in p: Prog, g: Tgt, in fd: Folded, budget: u64) -> Split {
             set_u8(inout pure_block, b, 1);
         }
     }
-    // Predecessors: counts, and a flat list per block.
+    pure_block
+}
+
+// Marks the pure head of `f`: the live entry block when it is pure, then
+// every live, pure block whose predecessors are all in the head.
+fn pure_head(in p: Prog, f: Fun, in fd: Folded, in pure_block: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let n = w(f.fc);
+    // Each folded edge, as parallel `pred_from -> pred_to` lists.
     let mut pred_from: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut pred_to: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut succ: ChunkSeq[u32] = ChunkSeq::new[u32]();
@@ -3009,6 +3012,69 @@ fn split(in p: Prog, g: Tgt, in fd: Folded, budget: u64) -> Split {
             }
         }
     }
+    head
+}
+
+// Inserts `t` into the ascending `targets`, unless it is already there.
+fn insert_target(inout targets: ChunkSeq[u32], t: u32) {
+    let mut at: u64 = 0;
+    loop {
+        if at >= targets.len() {
+            break;
+        }
+        let x = u32_at(in targets, at);
+        if x == t {
+            return;
+        }
+        if x > t {
+            break;
+        }
+        at = inc(at);
+    }
+    targets.push(t);
+    let mut k = sub(targets.len(), 1);
+    loop {
+        if k <= at {
+            break;
+        }
+        set_u32(inout targets, k, u32_at(in targets, sub(k, 1)));
+        k = sub(k, 1);
+    }
+    set_u32(inout targets, at, t);
+}
+
+// Fills `targets` with the distinct successors of `bk`'s branch or match,
+// and says whether `bk` can be split there: a branch needs two different
+// targets, and a match one target per arm.
+fn split_targets(in p: Prog, bk: Blk, inout targets: ChunkSeq[u32]) -> bool {
+    let ta = w(bk.ta);
+    targets.clear();
+    if bk.term == T_BRANCH {
+        let yes = n32(p.op(inc(ta)));
+        let no = n32(p.op(add(ta, 2)));
+        targets.push(yes);
+        targets.push(no);
+        yes != no
+    } else if bk.term == T_MATCH {
+        let arms = p.op(inc(ta));
+        for j in 0..arms {
+            insert_target(inout targets, n32(p.op(add(add(ta, 3), wrapping_mul(j, 2)))));
+        }
+        targets.len() == arms
+    } else {
+        false
+    }
+}
+
+// `site::split`: the best partial inlining whose copy costs at most `budget`.
+fn split(in p: Prog, g: Tgt, in fd: Folded, budget: u64) -> Split {
+    let f = p.fun(g.f);
+    if own_handles(in p, g.f) > 0 {
+        return no_split();
+    }
+    let pure_block = pure_blocks(in p, g, f);
+    let head = pure_head(in p, f, in fd, in pure_block);
+    let n = w(f.fc);
     let mut best = no_split();
     let mut best_heavy = false;
     let mut targets: ChunkSeq[u32] = ChunkSeq::new[u32]();
@@ -3016,55 +3082,7 @@ fn split(in p: Prog, g: Tgt, in fd: Folded, budget: u64) -> Split {
         if u8_at(in head, b) == 0 || fd.jump(b) != NONE32 {
             continue;
         }
-        let bk = p.block(f, b);
-        let ta = w(bk.ta);
-        targets.clear();
-        if bk.term == T_BRANCH {
-            let yes = n32(p.op(inc(ta)));
-            let no = n32(p.op(add(ta, 2)));
-            if yes == no {
-                continue;
-            }
-            targets.push(yes);
-            targets.push(no);
-        } else if bk.term == T_MATCH {
-            let arms = p.op(inc(ta));
-            for j in 0..arms {
-                let t = n32(p.op(add(add(ta, 3), wrapping_mul(j, 2))));
-                // sorted, deduplicated
-                let mut at: u64 = 0;
-                let mut dup = false;
-                loop {
-                    if at >= targets.len() {
-                        break;
-                    }
-                    let x = u32_at(in targets, at);
-                    if x == t {
-                        dup = true;
-                        break;
-                    }
-                    if x > t {
-                        break;
-                    }
-                    at = inc(at);
-                }
-                if !dup {
-                    targets.push(t);
-                    let mut k = sub(targets.len(), 1);
-                    loop {
-                        if k <= at {
-                            break;
-                        }
-                        set_u32(inout targets, k, u32_at(in targets, sub(k, 1)));
-                        k = sub(k, 1);
-                    }
-                    set_u32(inout targets, at, t);
-                }
-            }
-            if targets.len() != arms {
-                continue;
-            }
-        } else {
+        if !split_targets(in p, p.block(f, b), inout targets) {
             continue;
         }
         for k in 0..targets.len() {
