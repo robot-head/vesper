@@ -1,0 +1,48 @@
+# The frozen Rust seed copy of vesper-simd (package vesper-simd-seed,
+# library vesper_simd): ../src built without the port. Written by hand
+# because its sources live in the parent package; see "Crates the compiler
+# links" in docs/maintenance/porting-a-crate.md.
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("@rules_rs//rs/private:all_crate_deps.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_clippy_test")
+load("@vesper_cargo//:packages.bzl", "PACKAGES")
+
+# The seed's dependencies, from its Cargo metadata as vesper_crate derives
+# them.
+_DATA = PACKAGES["crates/vesper-simd/seed"].crate_data()
+
+_NORMAL = all_crate_deps(_DATA, platforms = _DATA["platforms"], normal = True)
+
+_DEV = all_crate_deps(_DATA, platforms = _DATA["platforms"], normal_dev = True)
+
+rust_library(
+    name = "seed",
+    srcs = ["//crates/vesper-simd:rust_srcs"],
+    crate_name = "vesper_simd",
+    crate_root = "//crates/vesper-simd:src/lib.rs",
+    edition = "2024",
+    rustc_env = {
+        "CARGO_PKG_NAME": "vesper-simd-seed",
+        "CARGO_PKG_VERSION": "0.1.0",
+    },
+    version = "0.1.0",
+    visibility = ["//visibility:public"],
+    deps = _NORMAL,
+)
+
+rust_test(
+    name = "seed_unit_test",
+    crate = ":seed",
+    edition = "2024",
+    deps = _DEV,
+)
+
+rust_clippy_test(
+    name = "clippy",
+    targets = [":seed"],
+    tags = [
+        "clippy",
+        "lint",
+    ],
+)

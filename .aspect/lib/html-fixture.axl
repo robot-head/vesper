@@ -1,0 +1,83 @@
+"""Collect start tags and attributes from generated documentation HTML."""
+
+_LETTER = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+_SPACE = "\t\n\f\r "
+
+def _consume(chars, start, stop):
+    for index in range(start, len(chars)):
+        if chars[index] in stop:
+            return index
+    return len(chars)
+
+def _skip(chars, start, allowed):
+    for index in range(start, len(chars)):
+        if chars[index] not in allowed:
+            return index
+    return len(chars)
+
+def _attribute_value(chars, start):
+    if start >= len(chars):
+        return "", start
+    quote = chars[start]
+    if quote == "'" or quote == '"':
+        end = _consume(chars, start + 1, quote)
+        return "".join(chars[start + 1:end]), min(end + 1, len(chars))
+    end = _consume(chars, start, _SPACE + ">")
+    return "".join(chars[start:end]), end
+
+def _start_tag(chars, start):
+    end = _consume(chars, start, _SPACE + "/>")
+    tag = "".join(chars[start:end]).lower()
+    attrs = []
+    for _ in range(len(chars) - start):
+        name_start = _skip(chars, end, _SPACE + "/")
+        if name_start >= len(chars) or chars[name_start] == ">":
+            return tag, attrs, name_start + 1
+        name_end = _consume(chars, name_start, _SPACE + "=/><")
+        if name_end == name_start:
+            return tag, attrs, name_end + 1
+        name = "".join(chars[name_start:name_end]).lower()
+        end = _skip(chars, name_end, _SPACE)
+        value = None
+        if end < len(chars) and chars[end] == "=":
+            value, end = _attribute_value(chars, _skip(chars, end + 1, _SPACE))
+        attrs.append((name, value))
+    return tag, attrs, len(chars)
+
+def tags(html):
+    chars = list(html.elems())
+    entries = []
+    next_tag = 0
+    for index, char in enumerate(chars):
+        if index < next_tag or char != "<" or index + 1 >= len(chars):
+            continue
+        if chars[index:index + 4] == ["<", "!", "-", "-"]:
+            close = html.find("-->", index + 4)
+            next_tag = len(chars) if close < 0 else close + 3
+        elif chars[index + 1] in _LETTER:
+            tag, attrs, next_tag = _start_tag(chars, index + 1)
+            entries.append((tag, attrs))
+            if tag in ["style", "script"]:
+                close = html.lower().find("</" + tag, next_tag)
+                next_tag = len(chars) if close < 0 else close
+    return entries
+
+def fragment_attribute(value):
+    if value == None:
+        return ""
+    parts = value.split("&")
+    decoded = [parts[0]]
+    for part in parts[1:]:
+        name, semicolon, suffix = part.partition(";")
+        replacement = {"amp": "&", "lt": "<", "gt": ">", "quot": '"', "apos": "'"}.get(name)
+        if semicolon and name.startswith("#"):
+            hexadecimal = name.startswith("#x") or name.startswith("#X")
+            digits = name[2:] if hexadecimal else name[1:]
+            base = 16 if hexadecimal else 10
+            valid = "0123456789abcdefABCDEF" if base == 16 else "0123456789"
+            if digits and len(digits) <= 8 and all([digit in valid for digit in digits.elems()]):
+                code = int(digits, base = base)
+                if 0 < code and code < 128:
+                    replacement = str(bytes([code]))
+        decoded.append(replacement + suffix if semicolon and replacement != None else "&" + part)
+    return "".join(decoded)

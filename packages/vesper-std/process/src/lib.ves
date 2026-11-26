@@ -18,6 +18,29 @@
 // arg(inout c, in "--version");
 // let out = output(c);
 // ```
+//
+// A child that may hang runs in its own process group and is waited for
+// with a deadline; past it, the whole tree is killed:
+//
+// ```vesper
+// let mut c = command(in "lean");
+// process_group(inout c);
+// stdio(inout c, stdout_stream(), capture());
+// capture_limit(inout c, 1048576);
+// match spawn(c) {
+//     Result::Ok(ch) => {
+//         let mut ch = ch;
+//         match wait_timeout(inout ch, 30000) {
+//             Result::Ok(Option::None) => {
+//                 let _ = kill_tree(inout ch);
+//             },
+//             _ => {},
+//         }
+//         release(ch);
+//     },
+//     Result::Err(_) => {},
+// }
+// ```
 use @vesper-std/fs::{
     IoError,
     invalid_input
@@ -74,6 +97,9 @@ pub fn null() -> u32 {
 // key_ends[i]]`, sets it to the matching range of `values` when `ops[i]`
 // is 1 and removes it when 0; the last edit of a key wins, as in Rust's
 // `Command`. `nul` records a NUL byte in any text, which `spawn` refuses.
+// `group` starts the child in a process group of its own
+// (`process_group`); `limit` caps each captured stream (`capture_limit`,
+// 0 for none).
 pub linear struct ProcCommand {
     program: ChunkSeq[u8],
     args: ChunkSeq[u8],
@@ -89,17 +115,27 @@ pub linear struct ProcCommand {
     stdin: u32,
     stdout: u32,
     stderr: u32,
+    group: bool,
+    limit: u64,
 }
 
 // A spawned child: `pid` until it is waited for (then 0), the read ends
 // of its captured streams until they are drained (then -1), and what they
-// carried.
+// carried. `reaped` is set once `waitpid` has returned the child's raw
+// `status` while its streams were still open (`wait_timeout`); `group`
+// when it leads its own process group; `cut` once a captured stream went
+// past `limit` bytes.
 pub linear struct ProcChild {
     pid: i32,
     out_fd: i32,
     err_fd: i32,
     out: ChunkSeq[u8],
     err: ChunkSeq[u8],
+    group: bool,
+    limit: u64,
+    cut: bool,
+    reaped: bool,
+    status: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +224,8 @@ pub fn command_path(in program: Slice[u8]) -> ProcCommand eff [Ffi[StdProcess]] 
         stdin: inherit(),
         stdout: inherit(),
         stderr: inherit(),
+        group: false,
+        limit: 0,
     }
 }
 
@@ -259,6 +297,19 @@ pub fn stdio(inout c: ProcCommand, stream: u32, mode: u32) eff [Ffi[StdProcess]]
     }
 }
 
+// Start the child as the leader of a new process group, so `kill_tree`
+// also stops every process it starts (unless one leaves the group).
+pub fn process_group(inout c: ProcCommand) eff [Ffi[StdProcess]] {
+    c.group = true;
+}
+
+// Keep at most `bytes` of each captured stream (0: no limit). The rest is
+// still read, so the child never blocks on a full pipe, and dropped;
+// `truncated` reports it.
+pub fn capture_limit(inout c: ProcCommand, bytes: u64) eff [Ffi[StdProcess]] {
+    c.limit = bytes;
+}
+
 // Throw a command away without running it.
 pub fn discard(sink c: ProcCommand) eff [Ffi[StdProcess]] {
     let ProcCommand {
@@ -276,6 +327,8 @@ pub fn discard(sink c: ProcCommand) eff [Ffi[StdProcess]] {
         stdin,
         stdout,
         stderr,
+        group,
+        limit,
     } = c;
 }
 
@@ -636,10 +689,12 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
     let _ = StdProcess::posix_spawnattr_setsigmask(inout attr, in set);
     let _ = StdProcess::sigaddset(inout set, StdProcess::SIGPIPE);
     let _ = StdProcess::posix_spawnattr_setsigdefault(inout attr, in set);
-    let _ = StdProcess::posix_spawnattr_setflags(
-        inout attr,
-        StdProcess::POSIX_SPAWN_SETSIGDEF | StdProcess::POSIX_SPAWN_SETSIGMASK
-    );
+    let mut flags = StdProcess::POSIX_SPAWN_SETSIGDEF | StdProcess::POSIX_SPAWN_SETSIGMASK;
+    if c.group {
+        let _ = StdProcess::posix_spawnattr_setpgroup(inout attr, 0);
+        flags = flags | StdProcess::POSIX_SPAWN_SETPGROUP;
+    }
+    let _ = StdProcess::posix_spawnattr_setflags(inout attr, flags);
     let mut failed: u32 = if fa == 0 {
         12
     } else {
@@ -732,6 +787,8 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
     let _ = StdProcess::posix_spawnattr_destroy(inout attr);
     close_fd(out_wr);
     close_fd(err_wr);
+    let group = c.group;
+    let limit = c.limit;
     discard(c);
     if failed != 0 {
         close_fd(out_rd);
@@ -745,6 +802,11 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
             err_fd: err_rd,
             out: ChunkSeq::new[u8](),
             err: ChunkSeq::new[u8](),
+            group: group,
+            limit: limit,
+            cut: false,
+            reaped: false,
+            status: 0,
         }
     )
 }
@@ -754,14 +816,22 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
 
 // One `read` of up to 8 KiB from `fd` onto the end of `buf`: the bytes
 // read (0 at end of file), or -1 with `err` set. `EINTR` is retried.
-fn read_some(fd: i32, inout buf: ChunkSeq[u8], inout err: u64) -> i64 eff [Ffi[StdProcess]] {
+// With a `limit` (not 0), bytes past it are dropped and `cut` is set.
+fn read_some(fd: i32, inout buf: ChunkSeq[u8], limit: u64, inout cut: bool, inout err: u64)
+    -> i64 eff [Ffi[StdProcess]] {
     let at = buf.len();
     let end = wrapping_add(at, 8192);
     buf.resize(end, 0);
     loop {
         let (n, e) = StdProcess::read(fd, inout buf[at..end]);
         if n >= 0 {
-            buf.truncate(wrapping_add(at, wrapping_u64(n)));
+            let have = wrapping_add(at, wrapping_u64(n));
+            if limit != 0 && have > limit {
+                buf.truncate(limit);
+                cut = true;
+            } else {
+                buf.truncate(have);
+            }
             return n;
         }
         if e != StdProcess::EINTR {
@@ -803,7 +873,7 @@ fn drain(inout ch: ProcChild, inout err: u64) -> u32 eff [Ffi[StdProcess]] {
             read_err = wrapping_shr_u64(fb, 48) != 0;
         }
         if read_out {
-            let n = read_some(a, inout ch.out, inout err);
+            let n = read_some(a, inout ch.out, ch.limit, inout ch.cut, inout err);
             if n < 0 {
                 return 1;
             }
@@ -813,7 +883,7 @@ fn drain(inout ch: ProcChild, inout err: u64) -> u32 eff [Ffi[StdProcess]] {
             }
         }
         if read_err {
-            let n = read_some(b, inout ch.err, inout err);
+            let n = read_some(b, inout ch.err, ch.limit, inout ch.cut, inout err);
             if n < 0 {
                 return 1;
             }
@@ -839,6 +909,48 @@ fn reap(pid: i32) -> Result[u32, u32] eff [Ffi[StdProcess]] {
     }
 }
 
+// `waitpid(pid, WNOHANG)`, retrying `EINTR`: `Some(raw status)` once the
+// child has ended, `None` while it runs, or `Err(errno)`.
+fn try_reap(pid: i32) -> Result[Option[u32], u32] eff [Ffi[StdProcess]] {
+    loop {
+        let mut status: i32 = 0;
+        let (r, e) = StdProcess::waitpid(pid, inout status, StdProcess::WNOHANG);
+        if r > 0 {
+            return Result::Ok(Option::Some(wrapping_u32(status)));
+        }
+        if r == 0 {
+            return Result::Ok(Option::None);
+        }
+        if e != StdProcess::EINTR {
+            return Result::Err(e);
+        }
+    }
+}
+
+// A raw `waitpid` status as an `ExitStatus`.
+fn decode(s: u32) -> ExitStatus {
+    let low = s & 127;
+    if low == 0 {
+        return ExitStatus {
+            code: wrapping_i64(wrapping_shr_u32(s, 8) & 255),
+            signal: 0,
+            exited: true,
+        };
+    }
+    ExitStatus {
+        code: 0,
+        signal: low,
+        exited: false,
+    }
+}
+
+fn io_word(err: u64) -> IoError {
+    IoError {
+        kind: wrapping_u32(err & 255),
+        os: wrapping_u32(err >> 32),
+    }
+}
+
 // Wait for the child to end, collecting captured output while it runs.
 // Waiting twice is an `invalid_input()` error.
 pub fn wait(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProcess]] {
@@ -847,35 +959,186 @@ pub fn wait(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProc
     }
     let mut err: u64 = 0;
     if drain(inout ch, inout err) != 0 {
-        return Result::Err(
-            IoError {
-                kind: wrapping_u32(err & 255),
-                os: wrapping_u32(err >> 32),
-            }
-        );
+        return Result::Err(io_word(err));
     }
-    let s = match reap(ch.pid) {
-        Result::Ok(s) => s,
-        Result::Err(e) => return Result::Err(io_errno(e)),
+    let s = if ch.reaped {
+        ch.status
+    } else {
+        match reap(ch.pid) {
+            Result::Ok(s) => s,
+            Result::Err(e) => return Result::Err(io_errno(e)),
+        }
     };
     ch.pid = 0;
-    let low = s & 127;
-    if low == 0 {
-        return Result::Ok(
-            ExitStatus {
-                code: wrapping_i64(wrapping_shr_u32(s, 8) & 255),
-                signal: 0,
-                exited: true,
-            }
-        );
+    Result::Ok(decode(s))
+}
+
+// Milliseconds on the monotonic clock.
+fn now_ms() -> u64 eff [Ffi[StdProcess]] {
+    let mut ts = TimeSpec {
+        sec: 0,
+        nsec: 0,
+    };
+    let _ = StdProcess::clock_gettime(StdProcess::CLOCK_MONOTONIC, inout ts);
+    wrapping_add(wrapping_mul(ts.sec, 1000), ts.nsec / 1000000)
+}
+
+// One round of reading the captured streams: wait up to `ms`
+// milliseconds for data on the open read ends (or just sleep that long
+// when none is open), then read what is ready, closing an end at end of
+// file. 0, or 1 with `err` set.
+fn pump(inout ch: ProcChild, ms: u64, inout err: u64) -> u32 eff [Ffi[StdProcess]] {
+    let a = ch.out_fd;
+    let b = ch.err_fd;
+    let events = wrapping_mul(StdProcess::POLLIN, 4294967296);
+    let mut fds: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if a >= 0 {
+        fds.push(widen_u64(wrapping_u32(a)) | events);
     }
-    Result::Ok(
-        ExitStatus {
-            code: 0,
-            signal: low,
-            exited: false,
+    if b >= 0 {
+        fds.push(widen_u64(wrapping_u32(b)) | events);
+    }
+    let n = fds.len();
+    let (r, e) = StdProcess::poll(inout fds[0..n], wrapping_i32(ms));
+    if r < 0 {
+        if e == StdProcess::EINTR {
+            return 0;
         }
-    )
+        err = os_error_word(e);
+        return 1;
+    }
+    if r == 0 {
+        return 0;
+    }
+    let mut k: u64 = 0;
+    if a >= 0 {
+        let ready = wrapping_shr_u64(word_at(in fds.as_slice(), 0), 48) != 0;
+        k = 1;
+        if ready {
+            let got = read_some(a, inout ch.out, ch.limit, inout ch.cut, inout err);
+            if got < 0 {
+                return 1;
+            }
+            if got == 0 {
+                close_fd(a);
+                ch.out_fd = -1;
+            }
+        }
+    }
+    if b >= 0 {
+        let ready = wrapping_shr_u64(word_at(in fds.as_slice(), k), 48) != 0;
+        if ready {
+            let got = read_some(b, inout ch.err, ch.limit, inout ch.cut, inout err);
+            if got < 0 {
+                return 1;
+            }
+            if got == 0 {
+                close_fd(b);
+                ch.err_fd = -1;
+            }
+        }
+    }
+    0
+}
+
+// Wait at most `millis` milliseconds for the child to end, collecting
+// captured output meanwhile: `Some(status)` once it has ended and its
+// captured streams are drained, as `wait` returns it (the child is then
+// waited for), or `None` when the time runs out first (the child, and
+// what it wrote so far, stay; wait again, or `kill_tree`). 0 milliseconds
+// only checks. Waiting for a waited child is an `invalid_input()` error.
+pub fn wait_timeout(inout ch: ProcChild, millis: u64)
+    -> Result[Option[ExitStatus], IoError] eff [Ffi[StdProcess]] {
+    if ch.pid <= 0 {
+        return Result::Err(io_kind(invalid_input()));
+    }
+    let start = now_ms();
+    let mut err: u64 = 0;
+    // Past the deadline, one last round reads what is ready without
+    // waiting, so a 0 ms check still collects output and sees the end.
+    let mut last = false;
+    loop {
+        if !ch.reaped {
+            match try_reap(ch.pid) {
+                Result::Ok(Option::Some(s)) => {
+                    ch.reaped = true;
+                    ch.status = s;
+                },
+                Result::Ok(Option::None) => {},
+                Result::Err(e) => return Result::Err(io_errno(e)),
+            }
+        }
+        let open = ch.out_fd >= 0 || ch.err_fd >= 0;
+        if ch.reaped && !open {
+            ch.pid = 0;
+            return Result::Ok(Option::Some(decode(ch.status)));
+        }
+        if last {
+            return Result::Ok(Option::None);
+        }
+        let spent = wrapping_sub(now_ms(), start);
+        last = spent >= millis;
+        // An ended child is only waited on for end of file, which `poll`
+        // reports at once; a running one is checked every 10 ms.
+        let left = if last {
+            0
+        } else {
+            wrapping_sub(millis, spent)
+        };
+        let slice = if ch.reaped || left < 10 {
+            left
+        } else {
+            10
+        };
+        let slice = if slice > 1000000 {
+            1000000
+        } else {
+            slice
+        };
+        if pump(inout ch, slice, inout err) != 0 {
+            return Result::Err(io_word(err));
+        }
+    }
+}
+
+// Kill the child with `SIGKILL` — its whole process group when it was
+// started with `process_group` — and reap it. The captured streams are
+// closed without reading on (a process that left the group may still
+// hold them); what they carried so far stays. The child's status (killed
+// by signal 9, or how it had ended), or `invalid_input()` for a child
+// already waited for.
+pub fn kill_tree(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProcess]] {
+    if ch.pid <= 0 {
+        return Result::Err(io_kind(invalid_input()));
+    }
+    if ch.group {
+        let _ = StdProcess::kill(wrapping_sub(0, ch.pid), StdProcess::SIGKILL);
+    }
+    if !ch.reaped {
+        let _ = StdProcess::kill(ch.pid, StdProcess::SIGKILL);
+    }
+    close_fd(ch.out_fd);
+    ch.out_fd = -1;
+    close_fd(ch.err_fd);
+    ch.err_fd = -1;
+    let s = if ch.reaped {
+        ch.status
+    } else {
+        match reap(ch.pid) {
+            Result::Ok(s) => s,
+            Result::Err(e) => return Result::Err(io_errno(e)),
+        }
+    };
+    ch.pid = 0;
+    ch.reaped = true;
+    ch.status = s;
+    Result::Ok(decode(s))
+}
+
+// Whether a captured stream went past the `capture_limit` (its first
+// bytes were kept, the rest dropped).
+pub fn truncated(in ch: ProcChild) -> bool eff [Ffi[StdProcess]] {
+    ch.cut
 }
 
 // What a waited child wrote to a captured stdout (empty before `wait`, or
@@ -901,7 +1164,8 @@ pub fn child_id(in ch: ProcChild) -> u64 eff [Ffi[StdProcess]] {
     }
 }
 
-// Release a child. One that was never waited for is killed and reaped.
+// Release a child. One that was never waited for is killed (with its
+// process group, under `process_group`) and reaped.
 pub fn release(sink ch: ProcChild) eff [Ffi[StdProcess]] {
     let ProcChild {
         pid,
@@ -909,12 +1173,22 @@ pub fn release(sink ch: ProcChild) eff [Ffi[StdProcess]] {
         err_fd,
         out,
         err,
+        group,
+        limit,
+        cut,
+        reaped,
+        status,
     } = ch;
     close_fd(out_fd);
     close_fd(err_fd);
     if pid > 0 {
-        let _ = StdProcess::kill(pid, StdProcess::SIGKILL);
-        let _ = reap(pid);
+        if group {
+            let _ = StdProcess::kill(wrapping_sub(0, pid), StdProcess::SIGKILL);
+        }
+        if !reaped {
+            let _ = StdProcess::kill(pid, StdProcess::SIGKILL);
+            let _ = reap(pid);
+        }
     }
 }
 

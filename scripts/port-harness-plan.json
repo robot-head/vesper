@@ -35,7 +35,8 @@
   ],
   [
     {"crates": ["vesper-ebpf"], "task": ["crate", "ebpf", "check"]},
-    {"crates": ["vesper-silicon"], "task": ["crate", "silicon", "check"]}
+    {"crates": ["vesper-silicon"], "task": ["crate", "silicon", "check"]},
+    {"crates": ["vesper-simd"], "task": ["crate", "simd", "test-port"]}
   ],
   [
     {"crates": ["vesper-warp"], "task": ["crate", "warp", "check"]},

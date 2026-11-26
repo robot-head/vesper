@@ -28,6 +28,10 @@ unsafe extern "C" {
     fn vesper_hybrid_test_runner_doctest_wrappers_words(input: *mut u64) -> i64;
     fn vesper_hybrid_test_runner_format() -> i64;
     fn vesper_hybrid_test_runner_mutants_words(input: *mut u64) -> i64;
+    fn vesper_hybrid_test_runner_report_baseline_text_words(input: *mut u64) -> i64;
+    fn vesper_hybrid_test_runner_report_doc_text_words(input: *mut u64) -> i64;
+    fn vesper_hybrid_test_runner_report_mutants_text_words(input: *mut u64) -> i64;
+    fn vesper_hybrid_test_runner_report_unit_text_words(input: *mut u64) -> i64;
 }
 
 /// The sequence runtime of the Vesper library `hybrid_test_runner`.
@@ -129,5 +133,41 @@ pub fn mutants_words(input: &[u8]) -> Vec<u64> {
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_hybrid_test_runner_mutants_words(view_input) });
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `report_baseline_text_words` of the Vesper library `hybrid_test_runner` (`vesper_hybrid_test_runner_report_baseline_text_words`).
+pub fn report_baseline_text_words(input: &[u8]) -> Vec<u64> {
+    // SAFETY: `vesper_hybrid_test_runner_report_baseline_text_words` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_hybrid_test_runner_report_baseline_text_words(view_input) });
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `report_doc_text_words` of the Vesper library `hybrid_test_runner` (`vesper_hybrid_test_runner_report_doc_text_words`).
+pub fn report_doc_text_words(input: &[u8]) -> Vec<u64> {
+    // SAFETY: `vesper_hybrid_test_runner_report_doc_text_words` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_hybrid_test_runner_report_doc_text_words(view_input) });
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `report_mutants_text_words` of the Vesper library `hybrid_test_runner` (`vesper_hybrid_test_runner_report_mutants_text_words`).
+pub fn report_mutants_text_words(input: &[u8]) -> Vec<u64> {
+    // SAFETY: `vesper_hybrid_test_runner_report_mutants_text_words` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_hybrid_test_runner_report_mutants_text_words(view_input) });
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `report_unit_text_words` of the Vesper library `hybrid_test_runner` (`vesper_hybrid_test_runner_report_unit_text_words`).
+pub fn report_unit_text_words(input: &[u8]) -> Vec<u64> {
+    // SAFETY: `vesper_hybrid_test_runner_report_unit_text_words` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_hybrid_test_runner_report_unit_text_words(view_input) });
     unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
 }

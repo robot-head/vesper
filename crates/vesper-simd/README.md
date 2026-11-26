@@ -16,6 +16,13 @@ assert_eq!(result.matches, 2);
 # }
 ```
 
+With the `vesper-port` feature, the Vesper port in `vesper/` (#1969) builds the
+scanner and makes the profile decisions instead. The crate lends its JIT or
+object module to the port through `vesper-cranelift-sys`, and the port builds
+the same function through `@vesper/cranelift`. The tests check that its CLIF
+text and object bytes equal the Rust builder's. The Rust code stays the default
+until the port is the only build.
+
 `Baseline128Capability` has a private constructor and can be obtained only after
 runtime feature detection. On x86_64 detection checks SSE3, SSSE3, SSE4.1, and
 SSE4.2 before executable code creation. Codegen enables exactly that SSE preset;
