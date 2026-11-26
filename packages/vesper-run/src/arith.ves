@@ -3,9 +3,9 @@
 // and `bitwise` of src/runtime.rs and src/capability_effects.rs) for the
 // 64-bit kinds and narrower.
 //
-// A value of kind `k` is its bit pattern in one word: sign-extended for the
+// A value of an integer kind is its bit pattern in one word: sign-extended for the
 // signed kinds, zero-extended for the unsigned ones. `exact` reads it as
-// the `i128` the Rust evaluator computes with; `pattern` writes an in-range
+// the `i128` the Rust evaluator computes with; `pattern_of` writes an in-range
 // `i128` back.
 
 // Value kinds (`Value::Int`, `UInt(_, w)`, `SInt(_, w)`). `usize` is a
@@ -26,16 +26,16 @@ pub const F_DIV_ZERO: u8 = 2;
 // An evaluator error (`Fault::Error`): the message is the caller's.
 pub const F_ERROR: u8 = 3;
 
-pub fn is_signed(k: u8) -> bool {
-    k == K_I64 || k == K_I8 || k == K_I16 || k == K_I32
+pub fn is_signed(kind: u8) -> bool {
+    kind == K_I64 || kind == K_I8 || kind == K_I16 || kind == K_I32
 }
 
-pub fn bits(k: u8) -> u64 {
-    if k == K_U8 || k == K_I8 {
+pub fn bits(kind: u8) -> u64 {
+    if kind == K_U8 || kind == K_I8 {
         8
-    } else if k == K_U16 || k == K_I16 {
+    } else if kind == K_U16 || kind == K_I16 {
         16
-    } else if k == K_U32 || k == K_I32 {
+    } else if kind == K_U32 || kind == K_I32 {
         32
     } else {
         64
@@ -43,70 +43,70 @@ pub fn bits(k: u8) -> u64 {
 }
 
 // The mask of the kind's bits in a word.
-pub fn mask(k: u8) -> u64 {
-    let b = bits(k);
-    if b >= 64 {
+pub fn mask(kind: u8) -> u64 {
+    let width = bits(kind);
+    if width >= 64 {
         18446744073709551615
     } else {
-        wrapping_sub(wrapping_shl_u64(1, wrapping_u32(b)), 1)
+        wrapping_sub(wrapping_shl_u64(1, wrapping_u32(width)), 1)
     }
 }
 
-pub fn min_of(k: u8) -> i128 {
-    if is_signed(k) {
-        let m: i128 = wrapping_shl_i128_1(wrapping_sub(bits(k), 1));
-        wrapping_sub(0, m)
+pub fn min_of(kind: u8) -> i128 {
+    if is_signed(kind) {
+        let sign_bit: i128 = wrapping_shl_i128_1(wrapping_sub(bits(kind), 1));
+        wrapping_sub(0, sign_bit)
     } else {
         0
     }
 }
 
-pub fn max_of(k: u8) -> i128 {
-    if is_signed(k) {
-        let m: i128 = wrapping_shl_i128_1(wrapping_sub(bits(k), 1));
-        wrapping_sub(m, 1)
+pub fn max_of(kind: u8) -> i128 {
+    if is_signed(kind) {
+        let sign_bit: i128 = wrapping_shl_i128_1(wrapping_sub(bits(kind), 1));
+        wrapping_sub(sign_bit, 1)
     } else {
-        widen_i128(mask(k))
+        widen_i128(mask(kind))
     }
 }
 
 // 2^n for n < 127.
 fn wrapping_shl_i128_1(n: u64) -> i128 {
-    let mut x: i128 = 1;
+    let mut power: i128 = 1;
     for i in 0..n {
-        x = wrapping_add(x, x);
+        power = wrapping_add(power, power);
     }
-    x
+    power
 }
 
-pub fn fits(k: u8, n: i128) -> bool {
-    n >= min_of(k) && n <= max_of(k)
+pub fn fits(kind: u8, value: i128) -> bool {
+    value >= min_of(kind) && value <= max_of(kind)
 }
 
-// The exact value of the pattern `x` of kind `k`.
-pub fn exact(k: u8, x: u64) -> i128 {
-    if is_signed(k) {
-        widen_i128(wrapping_i64(x))
+// The exact value of `pattern`, a bit pattern of kind `kind`.
+pub fn exact(kind: u8, pattern: u64) -> i128 {
+    if is_signed(kind) {
+        widen_i128(wrapping_i64(pattern))
     } else {
-        widen_i128(x)
+        widen_i128(pattern)
     }
 }
 
 // `IntegerKind::wrap`: `n` modulo 2^bits, read in the kind, as a pattern.
-pub fn wrap(k: u8, n: i128) -> u64 {
-    let p = wrapping_u64(n) & mask(k);
-    if is_signed(k) && bits(k) < 64 {
-        let sign = wrapping_shl_u64(1, wrapping_u32(wrapping_sub(bits(k), 1)));
-        if p & sign != 0 {
-            return p | (mask(k) ^ 18446744073709551615);
+pub fn wrap(kind: u8, n: i128) -> u64 {
+    let pattern = wrapping_u64(n) & mask(kind);
+    if is_signed(kind) && bits(kind) < 64 {
+        let sign_bit = wrapping_shl_u64(1, wrapping_u32(wrapping_sub(bits(kind), 1)));
+        if pattern & sign_bit != 0 {
+            return pattern | (mask(kind) ^ 18446744073709551615);
         }
     }
-    p
+    pattern
 }
 
 // The pattern of an in-range exact value.
-pub fn pattern_of(k: u8, n: i128) -> u64 {
-    wrap(k, n)
+pub fn pattern_of(kind: u8, value: i128) -> u64 {
+    wrap(kind, value)
 }
 
 fn udiv(a: u64, b: u64) -> u64 {
@@ -185,168 +185,174 @@ pub const B_BXOR: u8 = 26;
 pub const B_BSHL: u8 = 27;
 pub const B_BSHR: u8 = 28;
 
-// `IntegerKind::checked` on in-range operands `a`, `b` of kind `k`
-// (`+ - * / %`); the failure in `st`.
-pub fn checked(k: u8, op: u8, a: i128, b: i128, inout st: u8) -> i128 {
-    let mut r: i128 = 0;
+// `IntegerKind::checked` on in-range operands `lhs`, `rhs` of kind `kind`
+// (`+ - * / %`); the failure code in `failure`.
+pub fn checked(kind: u8, op: u8, lhs: i128, rhs: i128, inout failure: u8) -> i128 {
+    let mut result: i128 = 0;
     if op == B_ADD {
-        r = wrapping_add(a, b);
+        result = wrapping_add(lhs, rhs);
     } else if op == B_SUB {
-        r = wrapping_sub(a, b);
+        result = wrapping_sub(lhs, rhs);
     } else if op == B_MUL {
         // u64 x u64 may pass i128; such a product never fits 64 bits.
         let big: i128 = 4294967296;
-        if !is_signed(k) && a >= big && b >= big {
-            st = F_OVERFLOW;
+        if !is_signed(kind) && lhs >= big && rhs >= big {
+            failure = F_OVERFLOW;
             return 0;
         }
-        r = wrapping_mul(a, b);
+        result = wrapping_mul(lhs, rhs);
     } else if op == B_DIV || op == B_REM {
-        if b == 0 {
-            st = F_DIV_ZERO;
+        if rhs == 0 {
+            failure = F_DIV_ZERO;
             return 0;
         }
-        if is_signed(k) {
-            let x = wrapping_i64(a);
-            let y = wrapping_i64(b);
-            if y == -1 {
+        if is_signed(kind) {
+            let lhs_word = wrapping_i64(lhs);
+            let rhs_word = wrapping_i64(rhs);
+            if rhs_word == -1 {
                 if op == B_REM {
                     return 0;
                 }
-                r = wrapping_sub(0, a);
+                result = wrapping_sub(0, lhs);
             } else if op == B_DIV {
-                r = widen_i128(sdiv(x, y));
+                result = widen_i128(sdiv(lhs_word, rhs_word));
             } else {
-                r = widen_i128(srem(x, y));
+                result = widen_i128(srem(lhs_word, rhs_word));
             }
         } else {
-            let x = wrapping_u64(a);
-            let y = wrapping_u64(b);
+            let lhs_word = wrapping_u64(lhs);
+            let rhs_word = wrapping_u64(rhs);
             if op == B_DIV {
-                r = widen_i128(udiv(x, y));
+                result = widen_i128(udiv(lhs_word, rhs_word));
             } else {
-                r = widen_i128(urem(x, y));
+                result = widen_i128(urem(lhs_word, rhs_word));
             }
         }
     } else {
-        st = F_OVERFLOW;
+        failure = F_OVERFLOW;
         return 0;
     }
-    if fits(k, r) {
-        r
+    if fits(kind, result) {
+        result
     } else {
-        st = F_OVERFLOW;
+        failure = F_OVERFLOW;
         0
     }
 }
 
 // `IntegerKind::wrapping`.
-pub fn wrapping(k: u8, op: u8, a: i128, b: i128) -> i128 {
-    let r = if op == B_WADD {
-        wrapping_add(a, b)
+pub fn wrapping(kind: u8, op: u8, lhs: i128, rhs: i128) -> i128 {
+    let result = if op == B_WADD {
+        wrapping_add(lhs, rhs)
     } else if op == B_WSUB {
-        wrapping_sub(a, b)
+        wrapping_sub(lhs, rhs)
     } else {
-        wrapping_mul(a, b)
+        wrapping_mul(lhs, rhs)
     };
-    exact(k, wrap(k, r))
+    exact(kind, wrap(kind, result))
 }
 
 // `IntegerKind::bit` (`& | ^`).
-pub fn bit(k: u8, op: u8, a: i128, b: i128) -> i128 {
-    let x = wrapping_u64(a) & mask(k);
-    let y = wrapping_u64(b) & mask(k);
-    let p = if op == B_AND || op == B_BAND {
-        x & y
+pub fn bit(kind: u8, op: u8, lhs: i128, rhs: i128) -> i128 {
+    let lhs_bits = wrapping_u64(lhs) & mask(kind);
+    let rhs_bits = wrapping_u64(rhs) & mask(kind);
+    let pattern = if op == B_AND || op == B_BAND {
+        lhs_bits & rhs_bits
     } else if op == B_OR || op == B_BOR {
-        x | y
+        lhs_bits | rhs_bits
     } else {
-        x ^ y
+        lhs_bits ^ rhs_bits
     };
-    exact(k, wrap(k, widen_i128(p)))
+    exact(kind, wrap(kind, widen_i128(pattern)))
 }
 
 // `IntegerKind::not`.
-pub fn not(k: u8, a: i128) -> i128 {
-    let p = (wrapping_u64(a) & mask(k)) ^ mask(k);
-    exact(k, wrap(k, widen_i128(p)))
+pub fn not(kind: u8, operand: i128) -> i128 {
+    let pattern = (wrapping_u64(operand) & mask(kind)) ^ mask(kind);
+    exact(kind, wrap(kind, widen_i128(pattern)))
 }
 
 // `IntegerKind::shift`: the amount must be in `0..bits`.
-pub fn shift(k: u8, op: u8, a: i128, amount: i128, inout st: u8) -> i128 {
-    let width: i128 = widen_i128(bits(k));
+pub fn shift(kind: u8, op: u8, operand: i128, amount: i128, inout failure: u8) -> i128 {
+    let width: i128 = widen_i128(bits(kind));
     if amount < 0 || amount >= width {
-        st = F_OVERFLOW;
+        failure = F_OVERFLOW;
         return 0;
     }
-    let n = wrapping_u32(wrapping_u64(amount));
-    let p = wrapping_u64(a) & mask(k);
+    let shift_by = wrapping_u32(wrapping_u64(amount));
+    let pattern = wrapping_u64(operand) & mask(kind);
     if op == B_SHL {
-        exact(k, wrap(k, widen_i128(wrapping_shl_u64(p, n))))
-    } else if !is_signed(k) {
-        widen_i128(wrapping_shr_u64(p, n))
+        exact(kind, wrap(kind, widen_i128(wrapping_shl_u64(pattern, shift_by))))
+    } else if !is_signed(kind) {
+        widen_i128(wrapping_shr_u64(pattern, shift_by))
     } else {
-        widen_i128(wrapping_shr_i64(wrapping_i64(a), n))
+        widen_i128(wrapping_shr_i64(wrapping_i64(operand), shift_by))
     }
 }
 
 // `x >> n` on an i64 (arithmetic), n < 64.
 fn wrapping_shr_i64(x: i64, n: u32) -> i64 {
-    let all: u64 = 18446744073709551615;
+    let all_ones: u64 = 18446744073709551615;
     if x >= 0 {
         wrapping_i64(wrapping_shr_u64(wrapping_u64(x), n))
     } else {
-        wrapping_i64(wrapping_shr_u64(wrapping_u64(x) ^ all, n) ^ all)
+        wrapping_i64(wrapping_shr_u64(wrapping_u64(x) ^ all_ones, n) ^ all_ones)
     }
 }
 
 // `IntegerKind::rotate`: the amount modulo the width.
-pub fn rotate(k: u8, left: bool, a: i128, amount: i128) -> i128 {
-    let width = bits(k);
+pub fn rotate(kind: u8, left: bool, operand: i128, amount: i128) -> i128 {
+    let width = bits(kind);
     // rem_euclid: the amount is a 64-bit kind's value.
-    let n0 = if amount >= 0 {
+    let amount_mod = if amount >= 0 {
         urem(wrapping_u64(amount), width)
     } else {
-        let r = urem(wrapping_u64(wrapping_sub(0, amount)), width);
-        if r == 0 { 0 } else { wrapping_sub(width, r) }
+        let neg_rem = urem(wrapping_u64(wrapping_sub(0, amount)), width);
+        if neg_rem == 0 {
+            0
+        } else {
+            wrapping_sub(width, neg_rem)
+        }
     };
-    let n = if left {
-        n0
+    let left_by = if left {
+        amount_mod
     } else {
-        urem(wrapping_sub(width, n0), width)
+        urem(wrapping_sub(width, amount_mod), width)
     };
-    let p = wrapping_u64(a) & mask(k);
-    let r = if n == 0 {
-        p
+    let pattern = wrapping_u64(operand) & mask(kind);
+    let rotated = if left_by == 0 {
+        pattern
     } else {
         (
-            wrapping_shl_u64(p, wrapping_u32(n))
-                | wrapping_shr_u64(p, wrapping_u32(wrapping_sub(width, n)))
+            wrapping_shl_u64(pattern, wrapping_u32(left_by)) | wrapping_shr_u64(
+                pattern,
+                wrapping_u32(wrapping_sub(width, left_by))
+            )
         )
-            & mask(k)
+            & mask(kind)
     };
-    exact(k, wrap(k, widen_i128(r)))
+    exact(kind, wrap(kind, widen_i128(rotated)))
 }
 
 // `capability_effects::bitwise` (`bit_and` ... `bit_shr`): the amount is
 // taken modulo the width.
-pub fn bitwise(k: u8, op: u8, a: i128, b: i128) -> i128 {
-    let width = bits(k);
-    let amount = wrapping_u32(urem(wrapping_u64(b), width));
-    let pa = wrapping_u64(a) & mask(k);
-    let pb = wrapping_u64(b) & mask(k);
-    let v: i128 = if op == B_BAND {
-        widen_i128(pa & pb)
+pub fn bitwise(kind: u8, op: u8, lhs: i128, rhs: i128) -> i128 {
+    let width = bits(kind);
+    let amount = wrapping_u32(urem(wrapping_u64(rhs), width));
+    let lhs_bits = wrapping_u64(lhs) & mask(kind);
+    let rhs_bits = wrapping_u64(rhs) & mask(kind);
+    let result: i128 = if op == B_BAND {
+        widen_i128(lhs_bits & rhs_bits)
     } else if op == B_BOR {
-        widen_i128(pa | pb)
+        widen_i128(lhs_bits | rhs_bits)
     } else if op == B_BXOR {
-        widen_i128(pa ^ pb)
+        widen_i128(lhs_bits ^ rhs_bits)
     } else if op == B_BSHL {
-        widen_i128(wrapping_shl_u64(pa, amount) & mask(k))
-    } else if !is_signed(k) {
-        widen_i128(wrapping_shr_u64(pa, amount))
+        widen_i128(wrapping_shl_u64(lhs_bits, amount) & mask(kind))
+    } else if !is_signed(kind) {
+        widen_i128(wrapping_shr_u64(lhs_bits, amount))
     } else {
-        widen_i128(wrapping_shr_i64(wrapping_i64(a), amount))
+        widen_i128(wrapping_shr_i64(wrapping_i64(lhs), amount))
     };
-    exact(k, wrap(k, v))
+    exact(kind, wrap(kind, result))
 }
