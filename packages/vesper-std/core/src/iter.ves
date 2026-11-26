@@ -73,6 +73,38 @@ pub sugar all: tag {
     }
 }
 
+// Checked numeric fold from §7.8. The braced projection runs in the
+// iteration binding's scope. Use ordinary += rather than silent wrapping.
+pub sugar sum: tag emits eff [Fail] {
+    rule (
+        sum{
+            $projection:block | $element:pat in $lo:expr.. $hi:expr
+        }
+    ) => {
+        {
+            let mut total = 0;
+            for $element in $lo.. $hi {
+                total += $projection;
+            }
+            total
+        }
+    }
+
+    rule (
+        sum{
+            $projection:block | $element:pat in $source:expr
+        }
+    ) => {
+        {
+            let mut total = 0;
+            for $element in $source {
+                total += $projection;
+            }
+            total
+        }
+    }
+}
+
 test {
     fn mark(inout log: u64, digit: u64) -> u64 {
         log = wrapping_add(wrapping_mul(log, 10), digit);
@@ -162,5 +194,141 @@ test {
             | byte in bytes
         };
         has_b == found && only_a == accepted
+    }
+}
+
+test {
+    fn sum_signed(in data: Slice[i64]) -> i64 eff [Fail[ArithOverflow]] {
+        sum{
+            {
+                n
+            }
+            | n in data
+        }
+    }
+
+    fn handwritten(in data: Slice[i64]) -> i64 eff [Fail[ArithOverflow]] {
+        let mut total: i64 = 0;
+        for n in data {
+            total += n;
+        }
+        total
+    }
+
+    fn sum_mark(inout log: u64, n: u64) -> u64 {
+        log = wrapping_add(wrapping_mul(log, 10), n);
+        n
+    }
+
+    fn sum_range(inout log: u64, start: u64, end: u64) -> u64 eff [Fail[ArithOverflow]] {
+        sum{
+            {
+                sum_mark(inout log, n)
+            }
+            | n in sum_mark(inout log, start)..sum_mark(inout log, end)
+        }
+    }
+
+    fn sum_numbers(inout log: u64) -> ChunkSeq[u64] {
+        sum_mark(inout log, 1);
+        let mut xs = ChunkSeq::new[u64]();
+        xs.push(2);
+        xs.push(3);
+        xs
+    }
+
+    fn sum_sourced(inout log: u64) -> u64 eff [Fail[ArithOverflow]] {
+        sum{
+            {
+                sum_mark(inout log, n)
+            }
+            | n in sum_numbers(inout log)
+        }
+    }
+
+    fn sum_with_overflow(inout visits: u64, first: u64) -> u64 eff [Fail[ArithOverflow]] {
+        let mut xs = ChunkSeq::new[u64]();
+        xs.push(first);
+        xs.push(1);
+        xs.push(3);
+        sum{
+            {
+                visits = wrapping_add(visits, 1);
+                n
+            }
+            | n in xs.as_slice()
+        }
+    }
+
+    // @case signed_empty()
+    fn signed_sum_is_zero_for_empty_slice() -> bool {
+        let empty = ChunkSeq::new[i64]();
+        handle Fail[ArithOverflow] in {
+            sum_signed(in empty.as_slice()) == 0
+        } with {
+            return value => value,
+            raise(_, _) => false,
+        }
+    }
+
+    // @case negative_total(-25, 8)
+    // @case positive_total(7, 35)
+    // @case signed_high_overflow(9223372036854775807, 1)
+    // @case signed_low_overflow(-9223372036854775808, -1)
+    fn signed_fold_matches_checked_effect(a: i64, b: i64) -> bool {
+        let mut data = ChunkSeq::new[i64]();
+        data.push(a);
+        data.push(b);
+        let actual: Option[i64] = handle Fail[ArithOverflow] in {
+            Option::Some(sum_signed(in data.as_slice()))
+        } with {
+            return value => value,
+            raise(_, _) => Option::None,
+        };
+        let expected: Option[i64] = handle Fail[ArithOverflow] in {
+            Option::Some(handwritten(in data.as_slice()))
+        } with {
+            return value => value,
+            raise(_, _) => Option::None,
+        };
+        actual == expected
+    }
+
+    // @case nonempty_bounds(1, 4, 6, 14123)
+    // @case empty_bounds(2, 2, 0, 22)
+    fn sum_runs_bounds_once_in_order(start: u64, end: u64, expected: u64, trace: u64) -> bool {
+        let mut log: u64 = 0;
+        let ok = handle Fail[ArithOverflow] in {
+            sum_range(inout log, start, end) == expected
+        } with {
+            return value => value,
+            raise(_, _) => false,
+        };
+        ok && log == trace
+    }
+
+    // @case evaluates_iterable_once()
+    fn sum_evaluates_iterable_once() -> bool {
+        let mut log: u64 = 0;
+        let ok = handle Fail[ArithOverflow] in {
+            sum_sourced(inout log) == 5
+        } with {
+            return value => value,
+            raise(_, _) => false,
+        };
+        ok && log == 123
+    }
+
+    // @case unsigned_overflow(18446744073709551615, true, 2)
+    // @case unsigned_no_overflow(38, false, 3)
+    fn sum_overflow_does_not_visit_later_elements(first: u64, fails: bool, count: u64) -> bool {
+        let mut visits: u64 = 0;
+        let ok = handle Fail[ArithOverflow] in {
+            sum_with_overflow(inout visits, first)
+        } with {
+            return value => !fails && value == 42,
+            raise(_, _) => fails,
+        };
+        ok && visits == count
     }
 }

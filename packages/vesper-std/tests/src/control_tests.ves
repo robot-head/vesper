@@ -1,5 +1,6 @@
 // Test the public sugar through an ordinary package dependency.
 use @vesper-std/core::control::ensure;
+use @vesper-std/core::iter::sum;
 use @vesper-std/core::pipe::pipe_try;
 use @vesper-std/core::pipeline::pipe_at;
 
@@ -46,6 +47,35 @@ test {
         wrapping_add(inner, count)
     }
 
+    fn sum_values(in values: Slice[u64]) -> u64 eff [Fail[ArithOverflow]] {
+        sum{
+            {
+                value
+            }
+            | value in values
+        }
+    }
+
+    fn checked_total(in values: Slice[u64]) -> Option[u64] {
+        handle Fail[ArithOverflow] in {
+            Option::Some(sum_values(in values))
+        } with {
+            return value => value,
+            raise(_, _) => Option::None,
+        }
+    }
+
+    fn sum_through_public_import() -> bool {
+        let mut values = ChunkSeq::new[u64]();
+        values.push(19);
+        values.push(23);
+        if checked_total(in values.as_slice()) != Option::Some(42) {
+            return false;
+        }
+        values.push(18446744073709551615);
+        checked_total(in values.as_slice()) == Option::None
+    }
+
     pub fn check_core_control() -> u64 {
         // The failure expression never runs on success.
         if observed(10) != Result::Ok(11) {
@@ -60,6 +90,9 @@ test {
         }
         if observed(0) != Result::Err(99) {
             return 3;
+        }
+        if !sum_through_public_import() {
+            return 6;
         }
         // The condition runs once and the expansion stops at the inner block.
         handle Fail[u64] in {
