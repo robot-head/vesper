@@ -248,17 +248,14 @@ fn vesper_body(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool, St
         BODY_DECLINED.fetch_add(1, Relaxed);
         return Ok(false);
     };
-    // `[status, source locations, parameter variables...]` from the walk.
-    let [status, locations, vars @ ..] = lent.args else {
-        return Err("codegen (body): a request without its flags".into());
-    };
-    let mut args = vec![
-        u64::from(lent.optimize),
-        *status,
-        *locations,
-        vars.len() as u64,
-    ];
-    args.extend_from_slice(vars);
+    // `[status, source locations, n, n parameter variables, m, m callees]`
+    // from the walk (`codegen_swap::body::FUNCTION`), forwarded after the
+    // optimizer flag.
+    if vesper::codegen_swap::body::callees(lent.args).is_none() {
+        return Err("codegen (body): a request without its parameters and callees".into());
+    }
+    let mut args = vec![u64::from(lent.optimize)];
+    args.extend_from_slice(lent.args);
     args.extend(words);
     let kind = if lent.jit {
         vesper_cranelift_sys::ModuleKind::Jit

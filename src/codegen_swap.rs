@@ -1264,6 +1264,22 @@ pub mod body {
     /// A call [`FUNCTION`]'s hook cannot emit as one direct `call`: the
     /// hook declines the body.
     pub const NO_CALLEE: u64 = u64::MAX;
+
+    /// [`FUNCTION`]'s leading flags, `status` and `locations`: the words
+    /// before the parameter count.
+    pub const FLAGS: usize = 2;
+
+    /// The callee words of a [`FUNCTION`] request's arguments (after the
+    /// parameters and the callee count), or `None` when the arguments do
+    /// not have that layout.
+    pub fn callees(args: &[u64]) -> Option<&[u64]> {
+        let params = usize::try_from(*args.get(FLAGS)?).ok()?;
+        // The parameter count, then the parameter variables.
+        let count_at = FLAGS + 1 + params;
+        let count = usize::try_from(*args.get(count_at)?).ok()?;
+        args.get(count_at + 1..)
+            .filter(|callees| callees.len() == count)
+    }
 }
 
 /// The `seq` family's helper requests (self-hosting SH4 lane 9, #1283).

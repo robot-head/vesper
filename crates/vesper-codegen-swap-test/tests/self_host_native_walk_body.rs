@@ -143,19 +143,11 @@ fn body(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
         return Ok(false);
     };
     // `[status, source locations, n, n parameter variables, m, m callees]`
-    // from the walk.
-    let [status, locations, rest @ ..] = lent.args else {
-        return Err("a body request without its flags".into());
-    };
-    let np = *rest
-        .first()
-        .ok_or("a body request without its parameters")? as usize;
-    let callees = rest
-        .get(np + 2..)
-        .filter(|c| rest.get(np + 1) == Some(&(c.len() as u64)))
-        .ok_or("a body request without its callees")?;
-    let mut args = vec![u64::from(lent.optimize), *status, *locations];
-    args.extend_from_slice(rest);
+    // from the walk, forwarded after the optimizer flag.
+    let callees =
+        codegen_swap::body::callees(lent.args).ok_or("a body request without its callees")?;
+    let mut args = vec![u64::from(lent.optimize)];
+    args.extend_from_slice(lent.args);
     args.extend(words);
     let hook = &vesper().hook;
     let (answer, crossing) = vesper_cranelift_sys::lend_as(
