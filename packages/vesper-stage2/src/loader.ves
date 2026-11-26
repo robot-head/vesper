@@ -803,7 +803,15 @@ fn include_path(in lit: Slice[u8]) -> Option[ChunkSeq[u8]] {
             i = wrapping_add(i, 1);
         }
     }
-    let p = path.as_slice();
+    if !path_is_hermetic(in path.as_slice()) {
+        return Option::None;
+    }
+    Option::Some(path)
+}
+
+// Whether `p` is `/`-separated names, none empty, `.` or `..`, and none
+// holding `\`, `:` or NUL: a file inside the package.
+fn path_is_hermetic(in p: Slice[u8]) -> bool {
     let mut name_start: u64 = 0;
     for k in 0..wrapping_add(p.len(), 1) {
         let at_end = k == p.len();
@@ -815,14 +823,14 @@ fn include_path(in lit: Slice[u8]) -> Option[ChunkSeq[u8]] {
                 && byte_at(in p, name_start) == 46
                 && byte_at(in p, wrapping_add(name_start, 1)) == 46;
             if len == 0 || dot || dots {
-                return Option::None;
+                return false;
             }
             name_start = wrapping_add(k, 1);
         } else if b == 92 || b == 58 || b == 0 {
-            return Option::None;
+            return false;
         }
     }
-    Option::Some(path)
+    true
 }
 
 // `bytes` as a string literal, escaped as `serde_json::to_string` escapes it.
