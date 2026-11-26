@@ -578,10 +578,7 @@ fn canon(in s: Slice[u8], inout at: u64, inout out: ChunkSeq[u8]) {
         let idx = order(in keys);
         out.push(123);
         for j in 0..idx.len() {
-            let i = match idx.try_get(j) {
-                Option::Some(i) => i,
-                Option::None => 0,
-            };
+            let i = idx.try_get(j).unwrap_or(0);
             if j > 0 {
                 out.push(44);
             }

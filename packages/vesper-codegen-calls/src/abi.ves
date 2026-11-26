@@ -408,26 +408,14 @@ pub fn put_sig(in sig: Sig, inout out: ChunkSeq[u8]) {
         if i > 0 {
             out.extend(in ", ".as_bytes());
         }
-        put_code(
-            match sig.params.try_get(i) {
-                Option::Some(code) => code,
-                Option::None => V_I64,
-            },
-            inout out
-        );
+        put_code(sig.params.try_get(i).unwrap_or(V_I64), inout out);
     }
     out.extend(in ") -> ".as_bytes());
     for i in 0..sig.returns.len() {
         if i > 0 {
             out.extend(in ", ".as_bytes());
         }
-        put_code(
-            match sig.returns.try_get(i) {
-                Option::Some(code) => code,
-                Option::None => V_I64,
-            },
-            inout out
-        );
+        put_code(sig.returns.try_get(i).unwrap_or(V_I64), inout out);
     }
 }
 

@@ -258,10 +258,7 @@ pub fn elab_remove(inout ctx: Cx, start: u64, end: u64) {
 // ----- tables keyed by name -------------------------------------------------------
 
 pub fn at32(in table: ChunkSeq[u32], i: u32) -> u32 {
-    match table.try_get(widen_u64(i)) {
-        Option::Some(value) => value,
-        Option::None => NONE,
-    }
+    table.try_get(widen_u64(i)).unwrap_or(NONE)
 }
 
 pub fn set32(inout table: ChunkSeq[u32], i: u32, value: u32) {
@@ -416,10 +413,7 @@ pub fn confn(in ast: Ast, i: u32) -> ConfNode {
 // The module's items.
 
 pub fn item_at(in ast: Ast, i: u64) -> ItemNode {
-    let id = match ast.m_items.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => NONE,
-    };
+    let id = ast.m_items.try_get(i).unwrap_or(NONE);
     itemn(in ast, id)
 }
 

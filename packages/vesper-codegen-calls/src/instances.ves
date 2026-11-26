@@ -879,18 +879,9 @@ fn drop_callees(in calls: Calls, in facts: ProgramFacts, name: u32, inout out: C
     let start = out.len();
     for i in 0..facts.fn_names.len() {
         let fn_name = u32_at(in facts.fn_names, i);
-        let nested = match facts.nested.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => false,
-        };
-        let span_start = match facts.nested_starts.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
-        let span_end = match facts.nested_ends.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let nested = facts.nested.try_get(i).unwrap_or(false);
+        let span_start = facts.nested_starts.try_get(i).unwrap_or(0);
+        let span_end = facts.nested_ends.try_get(i).unwrap_or(0);
         if fn_name != name && !(nested && span_start >= info.s0 && span_end <= info.s1) {
             continue;
         }

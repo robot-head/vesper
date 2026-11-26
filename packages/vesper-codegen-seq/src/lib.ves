@@ -102,10 +102,7 @@ fn syms_new(inout n: Names) -> Syms {
 // ----- small tables -------------------------------------------------------------
 
 fn bool_at(in s: ChunkSeq[bool], i: u64) -> bool {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => false,
-    }
+    s.try_get(i).unwrap_or(false)
 }
 
 // Grows `s` with `fill` so that index `i` exists.
@@ -861,10 +858,7 @@ fn bytes_eq(in a: ChunkSeq[u8], lo: u64, hi: u64, in b: Str) -> bool {
         return false;
     }
     for i in 0..bb.len() {
-        let y = match bb.try_get(i) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
+        let y = bb.try_get(i).unwrap_or(0);
         if u8_at(in a, add(lo, i)) != y {
             return false;
         }

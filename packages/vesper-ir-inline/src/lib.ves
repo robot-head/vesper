@@ -341,10 +341,7 @@ fn zeros64(n: u64) -> ChunkSeq[u64] {
 }
 
 fn none32_at(in seq: ChunkSeq[u32], i: u64) -> u32 {
-    match seq.try_get(i) {
-        Option::Some(value) => value,
-        Option::None => NONE32,
-    }
+    seq.try_get(i).unwrap_or(NONE32)
 }
 
 // The program and everything the pass reads about it.
@@ -1199,10 +1196,7 @@ fn is_const_function(in prog: Prog, symbol: u32) -> bool {
         }
         let mut same = true;
         for j in 0..marker_len {
-            let byte = match marker.try_get(j) {
-                Option::Some(byte) => byte,
-                Option::None => 0,
-            };
+            let byte = marker.try_get(j).unwrap_or(0);
             if name_byte(in prog, symbol, add(at, j)) != byte {
                 same = false;
                 break;
@@ -4765,10 +4759,7 @@ const MODE_PROGRAM: u64 = 3;
 //   (`put_program_words`), which the hybrid's `inline` hook reads back.
 pub fn inline_entry(in input: Str) -> ChunkSeq[u64] {
     let bytes = input.as_bytes();
-    let mode = match bytes.try_read_u64_le(0) {
-        Option::Some(first_word) => first_word,
-        Option::None => MODE_REPORT,
-    };
+    let mode = bytes.try_read_u64_le(0).unwrap_or(MODE_REPORT);
     if mode == MODE_PROGRAM {
         return inline_program_words(in bytes[8..bytes.len()]);
     }
