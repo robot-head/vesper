@@ -671,6 +671,83 @@ fn fmt_fixture(dir: &Path) {
     }
 }
 
+/// `vesper fmt` over a tree with a directory it cannot read: the walk
+/// fails with that directory's error, in Vesper as in Rust. As root the
+/// directory stays readable, and both compilers simply format it.
+#[cfg(unix)]
+#[test]
+fn fmt_unreadable_directory_matches_the_default_compiler() {
+    use std::os::unix::fs::PermissionsExt;
+    let default = default_compiler();
+    let hybrid = hybrid();
+    let root = scratch("vesper-cli-fmt-unreadable");
+    let mut mismatches = vec![];
+    let mut readable = true;
+    for args in [
+        &[][..],
+        &["--json"],
+        &["--check"],
+        &["locked"],
+        &[".", "--check", "--json"],
+    ] {
+        let mut runs = vec![];
+        for (name, compiler) in [("default", &default), ("hybrid", &hybrid)] {
+            let dir = root.join(name);
+            if dir.join("locked").exists() {
+                let _ = std::fs::set_permissions(
+                    dir.join("locked"),
+                    std::fs::Permissions::from_mode(0o755),
+                );
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("locked")).unwrap();
+            std::fs::write(dir.join("a.ves"), b"fn main() -> i64 {   1 }\n").unwrap();
+            std::fs::write(dir.join("locked/b.ves"), b"fn main() -> i64 {   1 }\n").unwrap();
+            std::fs::set_permissions(dir.join("locked"), std::fs::Permissions::from_mode(0o000))
+                .unwrap();
+            readable = std::fs::read_dir(dir.join("locked")).is_ok();
+            let output = Command::new(compiler)
+                .current_dir(&dir)
+                .arg("fmt")
+                .args(args)
+                .env("RUST_BACKTRACE", "0")
+                .env_remove("VESPER_HYBRID_STATS")
+                .output()
+                .unwrap();
+            std::fs::set_permissions(dir.join("locked"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            runs.push((output, fmt_snapshot(&dir)));
+        }
+        let (d, h) = (&runs[0], &runs[1]);
+        if d.0.status.code() != h.0.status.code()
+            || d.0.stdout != h.0.stdout
+            || d.0.stderr != h.0.stderr
+            || d.1 != h.1
+        {
+            mismatches.push(format!(
+                "fmt {args:?}: default {:?} {:?} {:?}, hybrid {:?} {:?} {:?}",
+                d.0.status,
+                String::from_utf8_lossy(&d.0.stdout),
+                String::from_utf8_lossy(&d.0.stderr),
+                h.0.status,
+                String::from_utf8_lossy(&h.0.stdout),
+                String::from_utf8_lossy(&h.0.stderr),
+            ));
+        }
+        if !readable {
+            assert!(
+                !d.0.status.success(),
+                "fmt {args:?} read a locked directory"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    if readable {
+        eprintln!("fmt unreadable directory: running as root, the directory stays readable");
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
 fn fmt_vectors() -> Vec<Vec<&'static str>> {
     let mut v: Vec<Vec<&str>> = vec![
         vec![],

@@ -1287,23 +1287,18 @@ fn io_word(e: IoError) -> u64 {
 // as in Rust. 0, or the error word of a directory that cannot be read.
 fn list_bounded(in dir: Slice[u8], budget: u64, inout out: Entries, inout over: bool)
     -> u64 eff [Ffi[StdFs]] {
-    let mut err_word: u64 = 0;
-    let listed = handle Fail[IoError] in {
-        list_dir_path(in dir)
+    // The error comes back in the handled value: a clause's assignment to
+    // an outer local changes only the clause's copy.
+    let result = handle Fail[IoError] in {
+        Result::Ok(list_dir_path(in dir))
     } with {
         return v => v,
-        raise(e, _k) => {
-            err_word = io_word(e);
-            Entries {
-                bytes: ChunkSeq::new[u8](),
-                ends: ChunkSeq::new[u64](),
-                kinds: ChunkSeq::new[u32](),
-            }
-        },
+        raise(e, _k) => Result::Err(io_word(e)),
     };
-    if err_word != 0 {
-        return err_word;
-    }
+    let listed = match result {
+        Result::Ok(l) => l,
+        Result::Err(word) => return word,
+    };
     if listed.ends.len() > budget {
         over = true;
         return 0;
