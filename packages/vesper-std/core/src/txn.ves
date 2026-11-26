@@ -1,0 +1,161 @@
+// Copy-state rollback, from manuscript §7.7. Only the named binding is
+// restored; writes elsewhere remain visible. Fail[E] is handled and raised
+// again with the same payload. A local Fail handler inside the body can
+// recover normally, in which case the writes commit.
+fn snapshot[T: mod copy](in value: T) -> T {
+    value
+}
+
+fn restore[T: mod copy](inout dst: T, value: T) {
+    dst = value;
+}
+
+// Usage: transact inout config on [ConfigError] { ... }
+// The seed needs an explicit Fail payload type for a lexical handler.
+// An identifier prevents a projected/indexed place from being evaluated
+// twice. The handler records the exit without capturing the inout place;
+// only the error arm outside the handler restores the snapshot. As in any
+// handled body, break and continue cannot target a loop outside the body.
+pub sugar transact: expr emits eff [Fail] {
+    rule (transact inout $target:ident on[$error:ty] $body:block) => {
+        {
+            let before = snapshot(in $target);
+            let outcome = handle Fail[$error] in {
+                $body
+            } with {
+                return value => Result::Ok(value),
+                raise(failure, _) => Result::Err(failure),
+            };
+            match outcome {
+                Result::Ok(value) => value,
+                Result::Err(failure) => {
+                    restore(inout $target, before);
+                    Fail::raise(failure)
+                },
+            }
+        }
+    }
+}
+
+test {
+    copy struct State {
+        balance: u64,
+        count: u64,
+    }
+
+    copy struct Rejected {
+        code: u64,
+    }
+
+    fn apply(inout target: State, inout changes: u64, rejected: bool) -> u64 eff [Fail[Rejected]] {
+        transact inout target on[Rejected] {
+            target.balance = 5;
+            changes = wrapping_add(changes, 1);
+            if rejected {
+                Fail::raise(
+                    Rejected {
+                        code: 77
+                    }
+                );
+            }
+            target.count = 9;
+            target.balance
+        }
+    }
+
+    // @case commit(false, 5, 5, 9)
+    // @case rollback(true, 77, 12, 2)
+    fn test_rollback_only_the_target(
+        rejected: bool,
+        outcome: u64,
+        balance: u64,
+        count: u64
+    ) -> bool {
+        let mut target = State { balance: 12, count: 2 };
+        let mut changes: u64 = 0;
+        let result = handle Fail[Rejected] in {
+            apply(inout target, inout changes, rejected)
+        } with {
+            return value => value,
+            raise(error, _) => error.code,
+        };
+        result == outcome && target.balance == balance && target.count == count && changes == 1
+    }
+
+    fn nested(inout target: u64) -> u64 eff [Fail[u64]] {
+        transact inout target on[u64] {
+            target = 21;
+            let result = handle Fail[u64] in {
+                transact inout target on[u64] {
+                    target = 22;
+                    Fail::raise(23)
+                }
+            } with {
+                return _ => 0,
+                raise(error, _) => error,
+            };
+            if target != 21 || result != 23 {
+                return 0;
+            }
+            transact inout target on[u64] {
+                target = 24;
+            };
+            Fail::raise(25)
+        }
+    }
+
+    fn test_outer_rollback_after_inner_commit() -> bool {
+        let mut target: u64 = 42;
+        let result = handle Fail[u64] in {
+            nested(inout target)
+        } with {
+            return value => value,
+            raise(error, _) => error,
+        };
+        result == 25 && target == 42
+    }
+
+    fn early_return(inout target: u64) -> u64 eff [Fail[u64]] {
+        transact inout target on[u64] {
+            target = 42;
+            return 17;
+        }
+    }
+
+    fn test_return_keeps_writes() -> bool {
+        let mut target: u64 = 0;
+        let value = handle Fail[u64] in {
+            early_return(inout target)
+        } with {
+            return value => value,
+            raise(_, _) => 0,
+        };
+        target == 42 && value == 17
+    }
+
+    fn loop_exits(inout target: u64) eff [Fail[u64]] {
+        transact inout target on[u64] {
+            for i in 0..4 {
+                target = wrapping_add(target, 1);
+                if i == 0 {
+                    continue;
+                }
+                if i == 1 {
+                    break;
+                }
+                target = 0;
+            }
+        };
+    }
+
+    fn test_loop_exits_keep_writes() -> bool {
+        let mut target: u64 = 40;
+        let result = handle Fail[u64] in {
+            loop_exits(inout target)
+        } with {
+            return _ => true,
+            raise(_, _) => false,
+        };
+        result && target == 42
+    }
+}
