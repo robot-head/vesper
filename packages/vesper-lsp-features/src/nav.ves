@@ -161,17 +161,11 @@ pub fn n32(x: u64) -> u32 {
 }
 
 pub fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => NONE,
-    }
+    s.try_get(i).unwrap_or(NONE)
 }
 
 pub fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 fn fail(inout x: Ix, code: u64) -> bool {
@@ -340,10 +334,7 @@ pub fn name_contains(in a: Ast, sym: u32, in q: Slice[u8]) -> bool {
     for start in 0..wrapping_add(wrapping_sub(n, m), 1) {
         let mut hit = true;
         for j in 0..m {
-            let c = match a.names.text_byte(wrapping_add(wrapping_add(s, start), j)) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
+            let c = a.names.text_byte(wrapping_add(wrapping_add(s, start), j)).unwrap_or(0);
             if c != byte(in q, j) {
                 hit = false;
                 break;

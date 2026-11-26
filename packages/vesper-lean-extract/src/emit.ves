@@ -620,10 +620,7 @@ fn update(
     }
     let mut is_rec = false;
     if ai != NONE32 {
-        is_rec = match x.rec.try_get(w(ai)) {
-            Option::Some(r) => r,
-            Option::None => false,
-        };
+        is_rec = x.rec.try_get(w(ai)).unwrap_or(false);
     }
     if is_rec {
         let a = x.wd.adt(ai);
@@ -1063,15 +1060,9 @@ fn spells_after(in b: B, name: u32, in prefix: Str, in rest: Str) -> bool {
     let rb = rest.as_bytes();
     for i in 0..n {
         let want = if i < k {
-            match pb.try_get(i) {
-                Option::Some(c) => c,
-                Option::None => 0,
-            }
+            pb.try_get(i).unwrap_or(0)
         } else {
-            match rb.try_get(wrapping_sub(i, k)) {
-                Option::Some(c) => c,
-                Option::None => 0,
-            }
+            rb.try_get(wrapping_sub(i, k)).unwrap_or(0)
         };
         if b.names.byte(name, i) != want {
             return false;

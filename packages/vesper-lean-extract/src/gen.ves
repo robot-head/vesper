@@ -385,10 +385,7 @@ impl G {
     }
 
     fn ix(in self, i: u64) -> u64 {
-        match self.idx.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        }
+        self.idx.try_get(i).unwrap_or(0)
     }
 
     fn layer(in self, i: u64) -> Layer {
@@ -787,10 +784,7 @@ fn guard_abort(inout b: B, in g: G, may_abort: bool) {
 // `sync(out)`: reports each enclosing body layer's frame.
 fn sync(inout b: B, in g: G, inout out: ChunkSeq[T]) {
     for k in g.bl_start..g.body_layers.len() {
-        let index = match g.body_layers.try_get(k) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let index = g.body_layers.try_get(k).unwrap_or(0);
         let l = g.layer(index);
         if l.fz == 0 {
             continue;
@@ -1063,10 +1057,7 @@ fn is_tuple(in t: Types, ty: u32) -> bool {
 }
 
 fn rec_struct(in y: Y, ai: u32) -> bool {
-    match y.x.rec.try_get(w(ai)) {
-        Option::Some(x) => x,
-        Option::None => false,
-    }
+    y.x.rec.try_get(w(ai)).unwrap_or(false)
 }
 
 // `fip::box_inner`, or NONE32.
@@ -1877,10 +1868,7 @@ fn operands(
     let mut terms = empty();
     let mut lits: ChunkSeq[bool] = ChunkSeq::new[bool]();
     for i in 0..es.len() {
-        let e = match es.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let e = es.try_get(i).unwrap_or(0);
         let mut buffer = empty();
         let term = expr(inout b, inout t, in y, inout g, e, inout buffer);
         buffers.push(buffer);
@@ -1904,10 +1892,7 @@ fn operands(
             Option::Some(bi) => extend(inout out, in bi),
             Option::None => {},
         }
-        let lit = match lits.try_get(i) {
-            Option::Some(l) => l,
-            Option::None => false,
-        };
+        let lit = lits.try_get(i).unwrap_or(false);
         let term = get(in terms, i);
         if later && !lit {
             let tmp = temp(inout b, inout g);
@@ -2704,10 +2689,7 @@ fn seq_op(
     inout out: ChunkSeq[T]
 ) -> T {
     let terms = operands(inout b, inout t, in y, inout g, in es, inout out);
-    let e0 = match es.try_get(0) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    };
+    let e0 = es.try_get(0).unwrap_or(0);
     let a0 = get(in terms, 0);
     let a1 = get(in terms, 1);
     let a2 = get(in terms, 2);
@@ -2850,10 +2832,7 @@ fn starts_with(in b: B, s: u32, in prefix: Str) -> bool {
         return false;
     }
     for i in 0..p.len() {
-        let c = match p.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let c = p.try_get(i).unwrap_or(0);
         if b.names.byte(s, i) != c {
             return false;
         }
@@ -3025,10 +3004,7 @@ fn call(
                 if !(skip_first && i == 0) {
                     es
                         .push(
-                            match args.try_get(i) {
-                                Option::Some(x) => x,
-                                Option::None => 0,
-                            }
+                            args.try_get(i).unwrap_or(0)
                         );
                 }
             }
@@ -3040,10 +3016,7 @@ fn call(
                 if place == 1 {
                     pe = y.a.x(callee, 0);
                 } else if place == 2 {
-                    pe = match args.try_get(0) {
-                        Option::Some(x) => x,
-                        Option::None => NONE,
-                    };
+                    pe = args.try_get(0).unwrap_or(NONE);
                 }
                 let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
                 let root = if pe == NONE {
@@ -3081,10 +3054,7 @@ fn call(
                 for i in 0..args.len() {
                     actual
                         .push(
-                            match args.try_get(i) {
-                                Option::Some(x) => x,
-                                Option::None => 0,
-                            }
+                            args.try_get(i).unwrap_or(0)
                         );
                 }
                 return call(inout b, inout t, in y, inout g, e, callee, mn, in actual, inout out);
@@ -3225,10 +3195,7 @@ fn call(
             b.fail(in "Box::new expects one argument");
             return unit(inout b);
         }
-        let x = match args.try_get(0) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let x = args.try_get(0).unwrap_or(0);
         return expr(inout b, inout t, in y, inout g, x, inout out);
     }
     if lookup_constructor(inout b, in y.x.wd, n) != NONE64 && !local {
@@ -3294,10 +3261,7 @@ fn call(
                         src: 0,
                         qa: p.qa,
                         qn: p.qn,
-                        arg: match args.try_get(i) {
-                            Option::Some(x) => x,
-                            Option::None => 0,
-                        }
+                        arg: args.try_get(i).unwrap_or(0)
                     }
                 );
         }
@@ -3441,10 +3405,7 @@ fn local_call(
                         src: 2,
                         qa: 0,
                         qn: 0,
-                        arg: match args.try_get(i) {
-                            Option::Some(x) => x,
-                            Option::None => 0,
-                        }
+                        arg: args.try_get(i).unwrap_or(0)
                     }
                 );
         }
@@ -3698,10 +3659,7 @@ fn callee_sync(
     has = false;
     let mut frames = false;
     for k in g.bl_start..g.body_layers.len() {
-        let index = match g.body_layers.try_get(k) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let index = g.body_layers.try_get(k).unwrap_or(0);
         if g.layer(index).fz > 0 {
             frames = true;
         }
@@ -3860,10 +3818,7 @@ fn perform_op(
         let mut lenses = empty();
         for k in 0..info.an {
             let i = g.ix(add(info.aa, k));
-            let arg = match args.try_get(i) {
-                Option::Some(x) => x,
-                Option::None => 0,
-            };
+            let arg = args.try_get(i).unwrap_or(0);
             let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
             let root = place_of(in y, arg, inout path);
             let li = if root == NONE32 {
@@ -4009,10 +3964,7 @@ fn perform_op(
                         src: 1,
                         qa: p.qa,
                         qn: p.qn,
-                        arg: match args.try_get(i) {
-                            Option::Some(x) => x,
-                            Option::None => 0,
-                        }
+                        arg: args.try_get(i).unwrap_or(0)
                     }
                 );
         }
@@ -5164,10 +5116,7 @@ fn closure(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
         let_local(inout b, inout ss, lean, r, false, none, true);
         g
             .set_cur(
-                match ids.try_get(i) {
-                    Option::Some(x) => x,
-                    Option::None => 0,
-                },
+                ids.try_get(i).unwrap_or(0),
                 lean
             );
     }

@@ -36,10 +36,7 @@ copy struct Reader {
 }
 
 fn word(in b: Slice[u8], inout r: Reader) -> u64 {
-    let x = match b.try_read_u64_le(r.pos) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    };
+    let x = b.try_read_u64_le(r.pos).unwrap_or(0);
     r.pos = wrapping_add(r.pos, 8);
     x
 }
@@ -390,14 +387,8 @@ pub fn lsp_workspace_symbols(in input: Str) -> ChunkSeq[u64] {
     out.push(82);
     out.push(91);
     for d in 0..docs {
-        let uri_len = match lens.try_get(wrapping_add(d, d)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
-        let src_len = match lens.try_get(wrapping_add(wrapping_add(d, d), 1)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let uri_len = lens.try_get(wrapping_add(d, d)).unwrap_or(0);
+        let src_len = lens.try_get(wrapping_add(wrapping_add(d, d), 1)).unwrap_or(0);
         let uri = text_at(in b, at, uri_len);
         let src = text_at(in b, wrapping_add(at, uri_len), src_len);
         at = wrapping_add(wrapping_add(at, uri_len), src_len);
@@ -529,17 +520,11 @@ pub fn lsp_hovers(in input: Str) -> ChunkSeq[u64] {
 }
 
 fn map_name(in f: Facts, i: u64) -> u32 {
-    match f.c.nmap.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 4294967295,
-    }
+    f.c.nmap.try_get(i).unwrap_or(4294967295)
 }
 
 fn map_type(in f: Facts, i: u64) -> u32 {
-    match f.c.tmap.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 4294967295,
-    }
+    f.c.tmap.try_get(i).unwrap_or(4294967295)
 }
 
 // `proof_model::all` (src/lsp/proof_model.rs): the proof-lens model of

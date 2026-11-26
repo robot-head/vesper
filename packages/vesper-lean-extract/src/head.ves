@@ -237,10 +237,7 @@ fn recursive(in g: Graph, in s: Tarjan, in wd: World) -> ChunkSeq[bool] {
 }
 
 fn is_rec(in rec: ChunkSeq[bool], v: u32) -> bool {
-    match rec.try_get(w(v)) {
-        Option::Some(x) => x,
-        Option::None => false,
-    }
+    rec.try_get(w(v)).unwrap_or(false)
 }
 
 // The non-row generics of `a`, as `(name : Type)` binders of `kind`.

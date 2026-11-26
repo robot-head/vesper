@@ -1759,10 +1759,7 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
     }
 
     for i in 0..sc.infer_used.len() {
-        let used = match sc.infer_used.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => true,
-        };
+        let used = sc.infer_used.try_get(i).unwrap_or(true);
         if !used {
             let mut msg: ChunkSeq[u8] = ChunkSeq::new[u8]();
             put_str(inout msg, "inference variable `");

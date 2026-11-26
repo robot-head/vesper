@@ -86,10 +86,7 @@ const H0: [u32; 8] = [
 ];
 
 fn be32(in bytes: Slice[u8], at: u64) -> u32 {
-    match bytes.try_read_u32_be(at) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    bytes.try_read_u32_be(at).unwrap_or(0)
 }
 
 fn compress(h: [u32; 8], in bytes: Slice[u8], base: u64) -> [u32; 8] {
@@ -174,10 +171,7 @@ pub fn sha256_hex(in bytes: Slice[u8]) -> ChunkSeq[u8] {
     }
     let mut hex: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](64);
     for i in 0..32 {
-        let bv = match raw.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let bv = raw.try_get(i).unwrap_or(0);
         let hi = bv >> 4;
         let lo = bv & 15;
         hex.push(hex_nibble(hi));

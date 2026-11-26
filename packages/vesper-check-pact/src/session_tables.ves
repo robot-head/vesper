@@ -374,10 +374,7 @@ pub fn build_tables(
     let mut mo_acc: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut mo_sym: ChunkSeq[u32] = ChunkSeq::new[u32]();
     for j in 0..fe.acc_conf.len() {
-        let is_m = match fe.acc_model.try_get(j) {
-            Option::Some(v) => v,
-            Option::None => false,
-        };
+        let is_m = fe.acc_model.try_get(j).unwrap_or(false);
         let psym = u32_at(in fe.acc_path, j);
         let cf_j = d.conf(w(u32_at(in fe.acc_conf, j)));
         if is_m {
@@ -822,10 +819,7 @@ pub fn build_tables(
 }
 
 fn is_eff_local(in meta: SessionMeta, i: u64) -> bool {
-    match meta.eff_local.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => false,
-    }
+    meta.eff_local.try_get(i).unwrap_or(false)
 }
 
 fn sort_u32_pairs(in names: Names, inout syms: ChunkSeq[u32], inout vals: ChunkSeq[u32]) {
@@ -935,10 +929,7 @@ fn starts_at(in b: Slice[u8], at: u64, in pat: Slice[u8]) -> bool {
 }
 
 fn u8_at_slice(in b: Slice[u8], i: u64) -> u8 {
-    match b.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    b.try_get(i).unwrap_or(0)
 }
 
 fn is_ascii_alnum(c: u8) -> bool {

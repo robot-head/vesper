@@ -91,24 +91,15 @@ struct Wt {
 }
 
 fn g32(in v: ChunkSeq[u32], i: u64) -> u32 {
-    match v.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => NONE,
-    }
+    v.try_get(i).unwrap_or(NONE)
 }
 
 fn g64(in v: ChunkSeq[u64], i: u64) -> u64 {
-    match v.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    v.try_get(i).unwrap_or(0)
 }
 
 fn g8(in v: ChunkSeq[u8], i: u64) -> u8 {
-    match v.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    v.try_get(i).unwrap_or(0)
 }
 
 // A lexical scope (`Scope`): bindings in order, each with its frame.
@@ -738,10 +729,7 @@ fn starts_with(in t: ChunkSeq[u8], in p: Str) -> bool {
         return false;
     }
     for i in 0..q.len() {
-        let d = match q.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let d = q.try_get(i).unwrap_or(0);
         if g8(in t, i) != d {
             return false;
         }
@@ -755,10 +743,7 @@ fn rest_is(in t: ChunkSeq[u8], from: u64, in p: Str) -> bool {
         return false;
     }
     for i in 0..q.len() {
-        let d = match q.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let d = q.try_get(i).unwrap_or(0);
         if g8(in t, wrapping_add(from, i)) != d {
             return false;
         }
@@ -1266,10 +1251,7 @@ copy struct Rd {
 }
 
 fn word(in b: Slice[u8], inout r: Rd) -> u64 {
-    let x = match b.try_read_u64_le(r.pos) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    };
+    let x = b.try_read_u64_le(r.pos).unwrap_or(0);
     r.pos = wrapping_add(r.pos, 8);
     x
 }
