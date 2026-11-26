@@ -1687,7 +1687,8 @@ fn stack_bound_speed() {
 
 /// ABBA timing of the atomics task alone, with the flip gate's 95%
 /// interval (`CHECK_HARNESS_SPEED=1`; ignored by default). Vesper times
-/// include decoding the input, not encoding it.
+/// include decoding the input, not encoding it; the second run adds the
+/// encoding a per-call hybrid swap would pay.
 #[test]
 #[ignore]
 fn atomics_speed() {
@@ -1738,6 +1739,37 @@ fn atomics_speed() {
             time(|| {
                 for i in &inputs {
                     std::hint::black_box(f.words(i));
+                }
+            })
+        },
+    );
+    // What a hybrid swap pays per call: the encoding too.
+    abba_ci(
+        "atomics with encode",
+        10,
+        &mut || {
+            time(|| {
+                for (c, p) in corpus.iter().zip(&programs) {
+                    std::hint::black_box(vesper::atomics::needs_prelude(&c.module));
+                    std::hint::black_box(vesper::atomics::needs_workers(&c.module));
+                    std::hint::black_box(vesper::atomics::check_world(&c.world));
+                    if let Some(p) = p {
+                        std::hint::black_box(vesper::atomics::check_program(&c.world, p));
+                    }
+                }
+            })
+        },
+        &mut || {
+            time(|| {
+                for (c, p) in corpus.iter().zip(&programs) {
+                    let i = encode(&c.world, |e, t| {
+                        t.push(u64::from(c.world.atomic_prelude));
+                        t.push(u64::from(c.world.workers_prelude));
+                        world_functions(e, t, &c.world);
+                        module_items(e, t, &c.module);
+                        ir_section(e, t, p.as_ref());
+                    });
+                    std::hint::black_box(f.words(&i));
                 }
             })
         },
