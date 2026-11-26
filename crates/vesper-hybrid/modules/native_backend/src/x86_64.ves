@@ -7,8 +7,8 @@ const RSI: u8 = 6;
 const RDI: u8 = 7;
 const R8: u8 = 8;
 const R9: u8 = 9;
-const R10: u8 = 10;
-const R11: u8 = 11;
+pub const R10: u8 = 10;
+pub const R11: u8 = 11;
 
 pub const ARGUMENTS: u64 = 6;
 pub const UNASSIGNED: u8 = 255;

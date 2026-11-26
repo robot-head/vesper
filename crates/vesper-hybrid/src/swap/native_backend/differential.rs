@@ -37,6 +37,7 @@ enum Case {
     GuardedMemory,
     JoinedMemory,
     StackFrame(u32),
+    SpilledValues { fixed_slot: bool },
     CompareImmediate,
     Select,
     SelectKeepingArms,
@@ -133,6 +134,8 @@ fn integer_backend_matches_cranelift_results() {
         Case::JoinedMemory,
         Case::StackFrame(16),
         Case::StackFrame(256),
+        Case::SpilledValues { fixed_slot: false },
+        Case::SpilledValues { fixed_slot: true },
     ];
     let cases: Vec<_> = cases
         .into_iter()
@@ -443,6 +446,40 @@ fn integer_backend_matches_cranelift_results() {
                     .load(types::I64, MemFlags::trusted(), base, offset);
                 builder.ins().isub(wide, misalignment)
             }
+            Case::SpilledValues { fixed_slot } => {
+                let predicate = builder.ins().iadd(a, b);
+                let yes = builder.ins().imul(c, d);
+                let no = builder.ins().bxor(e, f);
+                let count = builder.ins().isub(d, f);
+                let selected = builder.ins().select(predicate, yes, no);
+                let shifted = builder.ins().ishl(selected, count);
+                let slot = fixed_slot.then(|| {
+                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        16,
+                        4,
+                    ));
+                    builder.ins().stack_store(shifted, slot, 8);
+                    slot
+                });
+                let taken = builder.create_block();
+                let skipped = builder.create_block();
+                builder.ins().brif(predicate, taken, &[], skipped, &[]);
+                builder.switch_to_block(taken);
+                let taken_result = if let Some(slot) = slot {
+                    builder.ins().stack_load(types::I64, slot, 8)
+                } else {
+                    shifted
+                };
+                builder.ins().return_(&[taken_result]);
+                builder.switch_to_block(skipped);
+                let left = builder.ins().isub(a, b);
+                let middle = builder.ins().band(c, d);
+                let right = builder.ins().bor(e, f);
+                let pair = builder.ins().iadd(left, middle);
+                let all = builder.ins().iadd(pair, right);
+                builder.ins().isub(all, shifted)
+            }
             Case::CompareImmediate => {
                 let byte = builder.ins().ireduce(types::I8, a);
                 let zero = builder.ins().icmp_imm(IntCC::Equal, byte, 0);
@@ -478,6 +515,10 @@ fn integer_backend_matches_cranelift_results() {
             integer_block_words(&context.func).unwrap_or_else(|| panic!("declined {case:?}"));
         let bytes = binding::x86_64_integer_block(&request);
         assert!(!bytes.is_empty(), "{case:?}");
+        if matches!(case, Case::SpilledValues { fixed_slot: false }) {
+            // This function has no explicit slots. The prologue reserves spills.
+            assert!(bytes.starts_with(&[0x48, 0x83, 0xec]));
+        }
         if matches!(case, Case::RetainedLoad) {
             // The first read (mov rax, [rdi + 8]) is emitted even though the
             // function returns only the second read.
@@ -595,7 +636,7 @@ fn integer_backend_matches_cranelift_results() {
 }
 
 #[test]
-fn integer_backend_declines_register_pressure_and_unsupported_operations() {
+fn integer_backend_declines_excessive_spill_frames_and_unsupported_operations() {
     let mut context = cranelift_codegen::Context::new();
     context.func.signature.call_conv = cranelift_codegen::isa::CallConv::SystemV;
     context
@@ -605,11 +646,14 @@ fn integer_backend_declines_register_pressure_and_unsupported_operations() {
         .push(AbiParam::new(types::I64));
     let mut builder_context = FunctionBuilderContext::new();
     let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+    let slot =
+        builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 4088, 0));
     let entry = builder.create_block();
     builder.switch_to_block(entry);
     let constants: Vec<_> = (1..=10)
         .map(|n| builder.ins().iconst(types::I64, n))
         .collect();
+    builder.ins().stack_store(constants[0], slot, 0);
     let sum = constants
         .into_iter()
         .reduce(|a, b| builder.ins().iadd(a, b))
