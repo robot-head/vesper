@@ -9,6 +9,7 @@ test {
         FlatTable,
         flat_table_new
     };
+    use @vesper-std/core::config::update;
     use @vesper-std/core::option::is_none;
     use self::support::{
         check,
@@ -157,6 +158,11 @@ test {
             Option::None => 0,
         };
         r = check(low == 49, 2, r);
+        // Just the second field distinguishes this miss from the stored key.
+        let miss = update probe {
+            y = 2
+        };
+        r = check(is_none(t.get(miss)) && is_none(f.get(miss)), 3, r);
         r
     }
 
