@@ -42,126 +42,166 @@ fn none_outcome() -> ResolveOutcome {
     ResolveOutcome { status: ST_NONE, text: ChunkSeq::new[u8]() }
 }
 
-pub fn err_diag(in code: Str, s: u64, e: u64, in msg: ChunkSeq[u8]) -> ResolveOutcome {
+pub fn err_diag(
+    in code: Str,
+    span_start: u64,
+    span_end: u64,
+    in msg: ChunkSeq[u8]
+) -> ResolveOutcome {
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     put_str(inout out, in code);
     out.push(32);
-    put_num(inout out, s);
+    put_num(inout out, span_start);
     out.push(32);
-    put_num(inout out, e);
+    put_num(inout out, span_end);
     out.push(32);
     for i in 0..msg.len() {
-        let b = u8_at(in msg, i);
-        if b == 10 {
+        let byte = u8_at(in msg, i);
+        if byte == 10 {
             out.push(1);
         } else {
-            out.push(b);
+            out.push(byte);
         }
     }
     out.push(10);
     ResolveOutcome { status: ST_ERR, text: out }
 }
 
-fn err_str(in code: Str, s: u64, e: u64, in msg: Str) -> ResolveOutcome {
-    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    put_str(inout m, in msg);
-    err_diag(in code, s, e, in m)
+fn err_str(in code: Str, span_start: u64, span_end: u64, in msg: Str) -> ResolveOutcome {
+    let mut message: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout message, in msg);
+    err_diag(in code, span_start, span_end, in message)
 }
 
-fn push_packed_outcome(inout out: ChunkSeq[u64], in r: ResolveOutcome) {
-    out.push(widen_u64(r.status));
-    let p = pack_text(in r.text);
-    out.extend(in p.as_slice());
+fn push_packed_outcome(inout out: ChunkSeq[u64], in outcome: ResolveOutcome) {
+    out.push(widen_u64(outcome.status));
+    let packed = pack_text(in outcome.text);
+    out.extend(in packed.as_slice());
 }
 
-pub fn trait_at(in d: Decls, i: u64) -> TraitRow {
-    match d.traits.try_get(i) {
+pub fn trait_at(in decls: Decls, i: u64) -> TraitRow {
+    match decls.traits.try_get(i) {
         Option::Some(v) => v,
-        Option::None => TraitRow { name: 0, s: 0, e: 0, ga: 0, gn: 0, aa: 0, an: 0, ma: 0, mn: 0 },
-    }
-}
-
-pub fn conf_at(in d: Decls, i: u64) -> Conf {
-    match d.confs.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => Conf {
-            model: false,
-            mname: 0,
-            ga: 0,
-            gn: 0,
-            tref: 0,
-            self_ty: 0,
-            wa: 0,
-            wn: 0,
-            ba: 0,
-            bn: 0,
-            ma: 0,
-            mn: 0,
-            s: 0,
-            e: 0
+        Option::None => TraitRow {
+            name: 0,
+            span_start: 0,
+            span_end: 0,
+            gen_start: 0,
+            gen_count: 0,
+            assoc_start: 0,
+            assoc_count: 0,
+            method_start: 0,
+            method_count: 0
         },
     }
 }
 
-fn sig_at(in d: Decls, i: u64) -> Sig {
-    match d.sigs.try_get(i) {
+pub fn conf_at(in decls: Decls, i: u64) -> Conf {
+    match decls.confs.try_get(i) {
         Option::Some(v) => v,
-        Option::None => Sig { name: 0, s: 0, e: 0, ga: 0, gn: 0, pa: 0, pn: 0, result: 0, row: 0 },
+        Option::None => Conf {
+            model: false,
+            model_name: 0,
+            gen_start: 0,
+            gen_count: 0,
+            tref: 0,
+            self_ty: 0,
+            where_start: 0,
+            where_count: 0,
+            bind_start: 0,
+            bind_count: 0,
+            method_start: 0,
+            method_count: 0,
+            span_start: 0,
+            span_end: 0
+        },
     }
 }
 
-fn par_at(in d: Decls, i: u64) -> Par {
-    match d.pars.try_get(i) {
+fn sig_at(in decls: Decls, i: u64) -> Sig {
+    match decls.sigs.try_get(i) {
         Option::Some(v) => v,
-        Option::None => Par { name: 0, pass: 0, ja: 0, jn: 0, ty: 0, s: 0, e: 0 },
+        Option::None => Sig {
+            name: 0,
+            span_start: 0,
+            span_end: 0,
+            gen_start: 0,
+            gen_count: 0,
+            par_start: 0,
+            par_count: 0,
+            result: 0,
+            row: 0
+        },
     }
 }
 
-pub fn gen_at(in gs: ChunkSeq[Gen], i: u64) -> Gen {
-    match gs.try_get(i) {
+fn par_at(in decls: Decls, i: u64) -> Par {
+    match decls.pars.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => Par {
+            name: 0,
+            pass: 0,
+            proj_start: 0,
+            proj_count: 0,
+            ty: 0,
+            span_start: 0,
+            span_end: 0
+        },
+    }
+}
+
+pub fn gen_at(in gens: ChunkSeq[Gen], i: u64) -> Gen {
+    match gens.try_get(i) {
         Option::Some(v) => v,
         Option::None => Gen { name: 0, bound: 0, row: false },
     }
 }
 
-pub fn tref_at(in d: Decls, i: u64) -> TRef {
-    match d.trefs.try_get(i) {
+pub fn tref_at(in decls: Decls, i: u64) -> TRef {
+    match decls.trefs.try_get(i) {
         Option::Some(v) => v,
-        Option::None => TRef { pkg: 0, name: 0, xa: 0, xn: 0, s: 0, e: 0 },
+        Option::None => TRef {
+            pkg: 0,
+            name: 0,
+            arg_start: 0,
+            arg_count: 0,
+            span_start: 0,
+            span_end: 0
+        },
     }
 }
 
-fn where_at(in d: Decls, i: u64) -> Where {
-    match d.wheres.try_get(i) {
+fn where_at(in decls: Decls, i: u64) -> Where {
+    match decls.wheres.try_get(i) {
         Option::Some(v) => v,
         Option::None => Where { ty: 0, tref: 0 },
     }
 }
 
-fn bind_at(in d: Decls, i: u64) -> Bind {
-    match d.binds.try_get(i) {
+fn bind_at(in decls: Decls, i: u64) -> Bind {
+    match decls.binds.try_get(i) {
         Option::Some(v) => v,
-        Option::None => Bind { name: 0, ty: 0, s: 0, e: 0 },
+        Option::None => Bind { name: 0, ty: 0, span_start: 0, span_end: 0 },
     }
 }
 
-fn node_at(in t: Types, ty: u32) -> TypeNode {
-    match t.nodes.try_get(w(ty)) {
+fn node_at(in types: Types, ty: u32) -> TypeNode {
+    match types.nodes.try_get(w(ty)) {
         Option::Some(v) => v,
         Option::None => TypeNode { kind: 0, mode: 0, name: 0, a: 0, n: 0, r: 0, r2: 0, lit: 0 },
     }
 }
 
-pub fn sym_eq_str(in names: Names, s: u32, in target: Str) -> bool {
-    names.spells(s, in target.as_bytes())
+pub fn sym_eq_str(in names: Names, symbol: u32, in target: Str) -> bool {
+    names.spells(symbol, in target.as_bytes())
 }
 
-pub fn sym_starts_with(in names: Names, s: u32, in prefix: Str) -> bool {
-    names.has_prefix(s, in prefix.as_bytes())
+pub fn sym_starts_with(in names: Names, symbol: u32, in prefix: Str) -> bool {
+    names.has_prefix(symbol, in prefix.as_bytes())
 }
 
-pub fn put_sym_bytes(in names: Names, s: u32, inout out: ChunkSeq[u8]) {
-    put_sym(inout out, in names, s);
+pub fn put_sym_bytes(in names: Names, symbol: u32, inout out: ChunkSeq[u8]) {
+    put_sym(inout out, in names, symbol);
 }
 
 fn split_path_sym(inout names: Names, callee: u32) -> (bool, u32, u32) {
@@ -172,20 +212,20 @@ fn split_path_sym(inout names: Names, callee: u32) -> (bool, u32, u32) {
     let start = names.start(callee);
     let mut i = wrapping_sub(len, 2);
     loop {
-        let a = u8_at(in names.text, add(start, i));
-        let b = u8_at(in names.text, add(start, add(i, 1)));
-        if a == 58 && b == 58 {
-            let mut hb = ChunkSeq::with_capacity[u8](i);
+        let byte = u8_at(in names.text, add(start, i));
+        let next_byte = u8_at(in names.text, add(start, add(i, 1)));
+        if byte == 58 && next_byte == 58 {
+            let mut head_bytes = ChunkSeq::with_capacity[u8](i);
             for k in 0..i {
-                hb.push(u8_at(in names.text, add(start, k)));
+                head_bytes.push(u8_at(in names.text, add(start, k)));
             }
             let tail_len = wrapping_sub(len, add(i, 2));
-            let mut tb = ChunkSeq::with_capacity[u8](tail_len);
+            let mut tail_bytes = ChunkSeq::with_capacity[u8](tail_len);
             for k in add(i, 2)..len {
-                tb.push(u8_at(in names.text, add(start, k)));
+                tail_bytes.push(u8_at(in names.text, add(start, k)));
             }
-            let head = names.intern(in hb.as_slice());
-            let tail = names.intern(in tb.as_slice());
+            let head = names.intern(in head_bytes.as_slice());
+            let tail = names.intern(in tail_bytes.as_slice());
             return (true, head, tail);
         }
         if i == 0 {
@@ -196,10 +236,10 @@ fn split_path_sym(inout names: Names, callee: u32) -> (bool, u32, u32) {
     (false, NONE32, NONE32)
 }
 
-fn trait_has_method(in d: Decls, tr_idx: u64, method: u32) -> bool {
-    let tr = trait_at(in d, tr_idx);
-    for i in 0..w(tr.mn) {
-        let sig = sig_at(in d, add(w(tr.ma), i));
+fn trait_has_method(in decls: Decls, tr_idx: u64, method: u32) -> bool {
+    let trait_row = trait_at(in decls, tr_idx);
+    for i in 0..w(trait_row.method_count) {
+        let sig = sig_at(in decls, add(w(trait_row.method_start), i));
         if sig.name == method {
             return true;
         }
@@ -207,90 +247,96 @@ fn trait_has_method(in d: Decls, tr_idx: u64, method: u32) -> bool {
     false
 }
 
-pub fn find_trait_idx(in d: Decls, name: u32) -> u64 {
-    for i in 0..d.traits.len() {
-        if trait_at(in d, i).name == name {
+pub fn find_trait_idx(in decls: Decls, name: u32) -> u64 {
+    for i in 0..decls.traits.len() {
+        if trait_at(in decls, i).name == name {
             return i;
         }
     }
     NONE64
 }
 
-fn find_model_conf_idx(in d: Decls, model_name: u32) -> u64 {
-    for i in 0..d.confs.len() {
-        let c = conf_at(in d, i);
-        if c.model && c.mname == model_name {
+fn find_model_conf_idx(in decls: Decls, model_name: u32) -> u64 {
+    for i in 0..decls.confs.len() {
+        let conf = conf_at(in decls, i);
+        if conf.model && conf.model_name == model_name {
             return i;
         }
     }
     NONE64
 }
 
-fn put_impl_key(in t: Types, in names: Names, in d: Decls, c: Conf, inout out: ChunkSeq[u8]) {
-    let tr = tref_at(in d, w(c.tref));
-    if tr.xn == 0 {
-        put_sym(inout out, in names, tr.name);
+fn put_impl_key(
+    in types: Types,
+    in names: Names,
+    in decls: Decls,
+    conf: Conf,
+    inout out: ChunkSeq[u8]
+) {
+    let trait_row = tref_at(in decls, w(conf.tref));
+    if trait_row.arg_count == 0 {
+        put_sym(inout out, in names, trait_row.name);
     } else {
-        put_sym(inout out, in names, tr.name);
+        put_sym(inout out, in names, trait_row.name);
         out.push(45);
         out.push(48);
         out.push(45);
-        for i in 0..w(tr.xn) {
+        for i in 0..w(trait_row.arg_count) {
             if i > 0 {
                 out.push(45);
                 out.push(49);
                 out.push(45);
             }
-            let arg_ty = u32_at(in d.words, add(w(tr.xa), i));
-            key_segment(in t, in names, arg_ty, inout out);
+            let arg_ty = u32_at(in decls.words, add(w(trait_row.arg_start), i));
+            key_segment(in types, in names, arg_ty, inout out);
         }
         out.push(45);
         out.push(50);
     }
     out.push(46);
-    key_segment(in t, in names, c.self_ty, inout out);
+    key_segment(in types, in names, conf.self_ty, inout out);
 }
 
 pub fn generated_name_for_conf(
-    in t: Types,
+    in types: Types,
     in names: Names,
-    in d: Decls,
-    c: Conf,
+    in decls: Decls,
+    conf: Conf,
     method: u32,
     inout out: ChunkSeq[u8]
 ) {
-    if c.model {
+    if conf.model {
         put_str(inout out, "model$");
-        put_sym(inout out, in names, c.mname);
+        put_sym(inout out, in names, conf.model_name);
         out.push(36);
         put_sym(inout out, in names, method);
     } else {
         put_str(inout out, "impl$");
-        put_impl_key(in t, in names, in d, c, inout out);
+        put_impl_key(in types, in names, in decls, conf, inout out);
         out.push(36);
         put_sym(inout out, in names, method);
     }
 }
 
-fn conf_has_generated_fn(in sess: PactSession, c: Conf, fn_name: u32) -> bool {
+fn conf_has_generated_fn(in sess: PactSession, conf: Conf, fn_name: u32) -> bool {
     let mut target = ChunkSeq::new[u8]();
-    let flen = sess.c.names.size(fn_name);
-    let fstart = sess.c.names.start(fn_name);
-    for i in 0..w(c.mn) {
-        let sig = sig_at(in sess.d, add(w(c.ma), i));
+    let fn_len = sess.ctx.names.size(fn_name);
+    let fn_start = sess.ctx.names.start(fn_name);
+    for i in 0..w(conf.method_count) {
+        let sig = sig_at(in sess.decls, add(w(conf.method_start), i));
         target.clear();
         generated_name_for_conf(
-            in sess.c.types,
-            in sess.c.names,
-            in sess.d,
-            c,
+            in sess.ctx.types,
+            in sess.ctx.names,
+            in sess.decls,
+            conf,
             sig.name,
             inout target
         );
-        if target.len() == flen {
+        if target.len() == fn_len {
             let mut eq = true;
-            for j in 0..flen {
-                if u8_at(in target, j) != u8_at(in sess.c.names.text, add(fstart, j)) {
+            for j in 0..fn_len {
+                if u8_at(in target, j) != u8_at(in sess.ctx.names.text, add(fn_start, j)) {
                     eq = false;
                     break;
                 }
@@ -303,35 +349,35 @@ fn conf_has_generated_fn(in sess: PactSession, c: Conf, fn_name: u32) -> bool {
     false
 }
 
-fn conf_has_method(in d: Decls, c: Conf, method: u32) -> bool {
-    for i in 0..w(c.mn) {
-        if sig_at(in d, add(w(c.ma), i)).name == method {
+fn conf_has_method(in decls: Decls, conf: Conf, method: u32) -> bool {
+    for i in 0..w(conf.method_count) {
+        if sig_at(in decls, add(w(conf.method_start), i)).name == method {
             return true;
         }
     }
     false
 }
 
-fn put_conf_path(in sess: PactSession, c: Conf, inout out: ChunkSeq[u8]) {
-    put_sym(inout out, in sess.c.names, sess.d.identity);
+fn put_conf_path(in sess: PactSession, conf: Conf, inout out: ChunkSeq[u8]) {
+    put_sym(inout out, in sess.ctx.names, sess.decls.identity);
     put_str(inout out, "::");
-    if c.model {
+    if conf.model {
         put_str(inout out, "model#");
-        put_sym(inout out, in sess.c.names, c.mname);
+        put_sym(inout out, in sess.ctx.names, conf.model_name);
     } else {
         put_str(inout out, "impl#");
-        put_impl_key(in sess.c.types, in sess.c.names, in sess.d, c, inout out);
+        put_impl_key(in sess.ctx.types, in sess.ctx.names, in sess.decls, conf, inout out);
     }
 }
 
-pub fn has_infer(in t: Types, ty: u32) -> bool {
-    let n = node_at(in t, ty);
-    if n.kind == K_INFER {
+pub fn has_infer(in types: Types, ty: u32) -> bool {
+    let node = node_at(in types, ty);
+    if node.kind == K_INFER {
         return true;
     }
-    if n.kind == K_NAMED || n.kind == K_TUPLE {
-        for i in 0..w(n.n) {
-            if has_infer(in t, u32_at(in t.items, add(w(n.a), i))) {
+    if node.kind == K_NAMED || node.kind == K_TUPLE {
+        for i in 0..w(node.n) {
+            if has_infer(in types, u32_at(in types.items, add(w(node.a), i))) {
                 return true;
             }
         }
@@ -339,22 +385,22 @@ pub fn has_infer(in t: Types, ty: u32) -> bool {
     false
 }
 
-fn is_builtin_derive_trait(in names: Names, tname: u32) -> bool {
-    sym_eq_str(in names, tname, "Eq")
-        || sym_eq_str(in names, tname, "Ord")
-        || sym_eq_str(in names, tname, "Hash")
+fn is_builtin_derive_trait(in names: Names, trait_name: u32) -> bool {
+    sym_eq_str(in names, trait_name, "Eq")
+        || sym_eq_str(in names, trait_name, "Ord")
+        || sym_eq_str(in names, trait_name, "Hash")
 }
 
-fn is_scalar_name(in names: Names, n: u32) -> bool {
-    sym_eq_str(in names, n, "u8")
-        || sym_eq_str(in names, n, "u32")
-        || sym_eq_str(in names, n, "u64")
-        || sym_eq_str(in names, n, "i64")
-        || sym_eq_str(in names, n, "bool")
+fn is_scalar_name(in names: Names, name: u32) -> bool {
+    sym_eq_str(in names, name, "u8")
+        || sym_eq_str(in names, name, "u32")
+        || sym_eq_str(in names, name, "u64")
+        || sym_eq_str(in names, name, "i64")
+        || sym_eq_str(in names, name, "bool")
 }
 
 fn put_derive_hint(
-    in t: Types,
+    in types: Types,
     in names: Names,
     what: u32,
     receiver: u32,
@@ -363,13 +409,13 @@ fn put_derive_hint(
     if !is_builtin_derive_trait(in names, what) {
         return;
     }
-    let n = node_at(in t, receiver);
-    if n.kind == K_NAMED && !is_scalar_name(in names, n.name) {
-        if n.n == 0 {
+    let node = node_at(in types, receiver);
+    if node.kind == K_NAMED && !is_scalar_name(in names, node.name) {
+        if node.n == 0 {
             put_str(inout out, "; to derive it, write `impl ");
             put_sym(inout out, in names, what);
             put_str(inout out, " for ");
-            put_sym(inout out, in names, n.name);
+            put_sym(inout out, in names, node.name);
             put_str(inout out, " {}`");
         } else {
             put_str(
@@ -378,20 +424,20 @@ fn put_derive_hint(
             );
             put_sym(inout out, in names, what);
             put_str(inout out, " for ");
-            put_sym(inout out, in names, n.name);
+            put_sym(inout out, in names, node.name);
             put_str(inout out, "[T] {}`");
         }
     }
 }
 
-fn trim_end_len(in b: Slice[u8]) -> u64 {
-    let mut len = b.len();
+fn trim_end_len(in bytes: Slice[u8]) -> u64 {
+    let mut len = bytes.len();
     loop {
         if len == 0 {
             break;
         }
-        let c = b.try_get(wrapping_sub(len, 1)).unwrap_or(0);
-        if c == 32 || c == 9 || c == 10 || c == 13 {
+        let byte = bytes.try_get(wrapping_sub(len, 1)).unwrap_or(0);
+        if byte == 32 || byte == 9 || byte == 10 || byte == 13 {
             len = wrapping_sub(len, 1);
         } else {
             break;
@@ -400,12 +446,12 @@ fn trim_end_len(in b: Slice[u8]) -> u64 {
     len
 }
 
-fn unique_assoc_trait(in d: Decls, in names: Names, assoc: u32) -> (bool, u64, ChunkSeq[u8]) {
+fn unique_assoc_trait(in decls: Decls, in names: Names, assoc: u32) -> (bool, u64, ChunkSeq[u8]) {
     let mut matches: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    for ti in 0..d.traits.len() {
-        let tr = trait_at(in d, ti);
-        if trait_has_assoc(in d, tr, assoc) {
-            matches.push(n32(ti));
+    for trait_idx in 0..decls.traits.len() {
+        let trait_row = trait_at(in decls, trait_idx);
+        if trait_has_assoc(in decls, trait_row, assoc) {
+            matches.push(n32(trait_idx));
         }
     }
     if matches.len() == 1 {
@@ -424,7 +470,7 @@ fn unique_assoc_trait(in d: Decls, in names: Names, assoc: u32) -> (bool, u64, C
             if i > 0 {
                 put_str(inout msg, ", ");
             }
-            put_sym(inout msg, in names, trait_at(in d, w(u32_at(in matches, i))).name);
+            put_sym(inout msg, in names, trait_at(in decls, w(u32_at(in matches, i))).name);
         }
         put_str(inout msg, "); write <T as Trait>::");
         put_sym(inout msg, in names, assoc);
@@ -432,15 +478,15 @@ fn unique_assoc_trait(in d: Decls, in names: Names, assoc: u32) -> (bool, u64, C
     (false, NONE64, msg)
 }
 
-pub fn put_bytes(inout out: ChunkSeq[u8], in b: Slice[u8]) {
-    for i in 0..b.len() {
-        let c = b.try_get(i).unwrap_or(0);
-        out.push(c);
+pub fn put_bytes(inout out: ChunkSeq[u8], in bytes: Slice[u8]) {
+    for i in 0..bytes.len() {
+        let byte = bytes.try_get(i).unwrap_or(0);
+        out.push(byte);
     }
 }
 
 pub fn failure_msg(
-    in t: Types,
+    in types: Types,
     in names: Names,
     in what_bytes: Slice[u8],
     what_sym: u32,
@@ -448,18 +494,18 @@ pub fn failure_msg(
     tag: u64,
     in msg_raw: Slice[u8]
 ) -> (u8, ChunkSeq[u8]) {
-    let tlen = trim_end_len(in msg_raw);
-    let msg = msg_raw[0..tlen];
+    let trim_len = trim_end_len(in msg_raw);
+    let msg = msg_raw[0..trim_len];
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     if tag == 1 {
         put_str(inout out, "no implementation of ");
         put_bytes(inout out, in what_bytes);
         put_str(inout out, " for ");
-        display(in t, in names, receiver, inout out);
+        display(in types, in names, receiver, inout out);
         put_str(inout out, ": ");
         put_bytes(inout out, in msg);
         if what_sym != NONE32 {
-            put_derive_hint(in t, in names, what_sym, receiver, inout out);
+            put_derive_hint(in types, in names, what_sym, receiver, inout out);
         }
         return (1, out);
     }
@@ -467,10 +513,10 @@ pub fn failure_msg(
         put_str(inout out, "ambiguous implementation of ");
         put_bytes(inout out, in what_bytes);
         put_str(inout out, " for ");
-        display(in t, in names, receiver, inout out);
+        display(in types, in names, receiver, inout out);
         put_str(inout out, ": ");
         put_bytes(inout out, in msg);
-        if has_infer(in t, receiver) {
+        if has_infer(in types, receiver) {
             put_str(inout out, "; annotate the receiver or bind it to a typed local");
         }
         return (2, out);
@@ -479,7 +525,7 @@ pub fn failure_msg(
         put_str(inout out, "trait solving overflowed for ");
         put_bytes(inout out, in what_bytes);
         put_str(inout out, " on ");
-        display(in t, in names, receiver, inout out);
+        display(in types, in names, receiver, inout out);
         put_str(inout out, " (");
         put_bytes(inout out, in msg);
         out.push(41);
@@ -489,7 +535,7 @@ pub fn failure_msg(
         put_str(inout out, "unsupported generic dictionary dispatch for ");
         put_bytes(inout out, in what_bytes);
         put_str(inout out, " on ");
-        display(in t, in names, receiver, inout out);
+        display(in types, in names, receiver, inout out);
         put_str(inout out, ": ");
         put_bytes(inout out, in msg);
         return (0, out);
@@ -497,25 +543,25 @@ pub fn failure_msg(
     put_str(inout out, "unsupported trait obligation ");
     put_bytes(inout out, in what_bytes);
     put_str(inout out, " on ");
-    display(in t, in names, receiver, inout out);
+    display(in types, in names, receiver, inout out);
     put_str(inout out, ": ");
     put_bytes(inout out, in msg);
     (0, out)
 }
 
 pub fn failure_diag(
-    in t: Types,
+    in types: Types,
     in names: Names,
     in what_bytes: Slice[u8],
     what_sym: u32,
     receiver: u32,
     tag: u64,
     in msg_raw: Slice[u8],
-    s: u64,
-    e: u64
+    span_start: u64,
+    span_end: u64
 ) -> ResolveOutcome {
     let (code_tag, out) = failure_msg(
-        in t,
+        in types,
         in names,
         in what_bytes,
         what_sym,
@@ -532,34 +578,34 @@ pub fn failure_diag(
     } else {
         "E0607"
     };
-    err_diag(in code, s, e, in out)
+    err_diag(in code, span_start, span_end, in out)
 }
 
-fn boxed_trait_name(in t: Types, in names: Names, ty: u32) -> (bool, u32) {
-    let n = node_at(in t, ty);
-    if n.kind == K_NAMED && sym_eq_str(in names, n.name, "Box") && n.n == 1 {
-        let inner = node_at(in t, u32_at(in t.items, w(n.a)));
+fn boxed_trait_name(in types: Types, in names: Names, ty: u32) -> (bool, u32) {
+    let node = node_at(in types, ty);
+    if node.kind == K_NAMED && sym_eq_str(in names, node.name, "Box") && node.n == 1 {
+        let inner = node_at(in types, u32_at(in types.items, w(node.a)));
         if inner.kind == K_NAMED && sym_eq_str(in names, inner.name, "dyn") && inner.n == 1 {
-            let tr = node_at(in t, u32_at(in t.items, w(inner.a)));
-            if tr.kind == K_NAMED {
-                return (true, tr.name);
+            let trait_node = node_at(in types, u32_at(in types.items, w(inner.a)));
+            if trait_node.kind == K_NAMED {
+                return (true, trait_node.name);
             }
         }
     }
     (false, NONE32)
 }
 
-fn sig_contains_projection(in t: Types, sy: Sy, in d: Decls, s: Sig) -> bool {
-    for i in 0..w(s.pn) {
-        let p = par_at(in d, add(w(s.pa), i));
-        if contains_projection(in t, sy, p.ty) {
+fn sig_contains_projection(in types: Types, syms: Sy, in decls: Decls, sig: Sig) -> bool {
+    for i in 0..w(sig.par_count) {
+        let param = par_at(in decls, add(w(sig.par_start), i));
+        if contains_projection(in types, syms, param.ty) {
             return true;
         }
     }
-    if contains_projection(in t, sy, s.result) {
+    if contains_projection(in types, syms, sig.result) {
         return true;
     }
-    if s.row != NONE32 && contains_projection(in t, sy, s.row) {
+    if sig.row != NONE32 && contains_projection(in types, syms, sig.row) {
         return true;
     }
     false
@@ -569,17 +615,27 @@ fn bound_stub(
     in sess: PactSession,
     tr_idx: u64,
     method: u32,
-    s: u64,
-    e: u64,
+    span_start: u64,
+    span_end: u64,
     dyn_mode: bool
 ) -> ResolveOutcome {
-    let tr = trait_at(in sess.d, tr_idx);
+    let trait_row = trait_at(in sess.decls, tr_idx);
     let mut found_sig = false;
-    let mut sig = Sig { name: 0, s: 0, e: 0, ga: 0, gn: 0, pa: 0, pn: 0, result: 0, row: 0 };
-    for i in 0..w(tr.mn) {
-        let m = sig_at(in sess.d, add(w(tr.ma), i));
-        if m.name == method {
-            sig = m;
+    let mut sig = Sig {
+        name: 0,
+        span_start: 0,
+        span_end: 0,
+        gen_start: 0,
+        gen_count: 0,
+        par_start: 0,
+        par_count: 0,
+        result: 0,
+        row: 0
+    };
+    for i in 0..w(trait_row.method_count) {
+        let candidate = sig_at(in sess.decls, add(w(trait_row.method_start), i));
+        if candidate.name == method {
+            sig = candidate;
             found_sig = true;
             break;
         }
@@ -587,23 +643,23 @@ fn bound_stub(
     if !found_sig {
         let mut msg = ChunkSeq::new[u8]();
         put_str(inout msg, "trait '");
-        put_sym(inout msg, in sess.c.names, tr.name);
+        put_sym(inout msg, in sess.ctx.names, trait_row.name);
         put_str(inout msg, "' has no method '");
-        put_sym(inout msg, in sess.c.names, method);
+        put_sym(inout msg, in sess.ctx.names, method);
         msg.push(39);
-        return err_diag("E0608", s, e, in msg);
+        return err_diag("E0608", span_start, span_end, in msg);
     }
-    if sig_contains_projection(in sess.c.types, sess.sy, in sess.d, sig) {
+    if sig_contains_projection(in sess.ctx.types, sess.syms, in sess.decls, sig) {
         let mut msg = ChunkSeq::new[u8]();
         msg.push(39);
-        put_sym(inout msg, in sess.c.names, tr.name);
+        put_sym(inout msg, in sess.ctx.names, trait_row.name);
         put_str(inout msg, "::");
-        put_sym(inout msg, in sess.c.names, method);
+        put_sym(inout msg, in sess.ctx.names, method);
         put_str(
             inout msg,
             "' mentions an associated type; calling it on a bounded type parameter is not supported yet"
         );
-        return err_diag("E0607", s, e, in msg);
+        return err_diag("E0607", span_start, span_end, in msg);
     }
     let mut out = ChunkSeq::new[u8]();
     if dyn_mode {
@@ -611,9 +667,9 @@ fn bound_stub(
     } else {
         put_str(inout out, "bound$");
     }
-    put_sym(inout out, in sess.c.names, tr.name);
+    put_sym(inout out, in sess.ctx.names, trait_row.name);
     out.push(36);
-    put_sym(inout out, in sess.c.names, method);
+    put_sym(inout out, in sess.ctx.names, method);
     ResolveOutcome { status: ST_OK, text: out }
 }
 
@@ -630,89 +686,91 @@ fn add_gen_bounds(
     inout sess: PactSession,
     in gen_names: ChunkSeq[u32],
     in gen_rows: ChunkSeq[bool],
-    in b_gen_idx: ChunkSeq[u32],
-    in b_trait: ChunkSeq[u32],
-    in b_arg_a: ChunkSeq[u32],
-    in b_arg_n: ChunkSeq[u32],
-    in b_arg_tys: ChunkSeq[u32],
+    in bound_gen_idx: ChunkSeq[u32],
+    in bound_traits: ChunkSeq[u32],
+    in bound_arg_start: ChunkSeq[u32],
+    in bound_arg_count: ChunkSeq[u32],
+    in bound_arg_tys: ChunkSeq[u32],
     inout assumptions: ChunkSeq[QGoal],
     inout args: ChunkSeq[QArg]
 ) {
-    for bi in 0..b_trait.len() {
-        let gi = w(u32_at(in b_gen_idx, bi));
-        let gname = u32_at(in gen_names, gi);
-        let grow = gen_rows.try_get(gi).unwrap_or(false);
-        if grow {
+    for bound_idx in 0..bound_traits.len() {
+        let gen_idx = w(u32_at(in bound_gen_idx, bound_idx));
+        let gen_name = u32_at(in gen_names, gen_idx);
+        let gen_is_row = gen_rows.try_get(gen_idx).unwrap_or(false);
+        if gen_is_row {
             continue;
         }
-        let tname = u32_at(in b_trait, bi);
-        let tr_idx = find_trait_idx(in sess.d, tname);
+        let trait_name = u32_at(in bound_traits, bound_idx);
+        let tr_idx = find_trait_idx(in sess.decls, trait_name);
         if tr_idx == NONE64 {
             continue;
         }
-        let tr = trait_at(in sess.d, tr_idx);
-        let ba = w(u32_at(in b_arg_a, bi));
-        let bn = w(u32_at(in b_arg_n, bi));
-        if w(tr.gn) != bn {
+        let trait_row = trait_at(in sess.decls, tr_idx);
+        let arg_tys_at = w(u32_at(in bound_arg_start, bound_idx));
+        let arg_count = w(u32_at(in bound_arg_count, bound_idx));
+        if w(trait_row.gen_count) != arg_count {
             continue;
         }
-        let self_ty = sess.c.types.named0(gname);
-        let arg_a = n32(args.len());
-        for ai in 0..bn {
-            let tg = gen_at(in sess.d.gens, add(w(tr.ga), ai));
-            let raw_ty = u32_at(in b_arg_tys, add(ba, ai));
-            let arg_ty = if tg.row {
-                row_arg(inout sess.c.types, raw_ty)
+        let self_ty = sess.ctx.types.named0(gen_name);
+        let arg_start = n32(args.len());
+        for ai in 0..arg_count {
+            let trait_gen = gen_at(in sess.decls.gens, add(w(trait_row.gen_start), ai));
+            let raw_ty = u32_at(in bound_arg_tys, add(arg_tys_at, ai));
+            let arg_ty = if trait_gen.row {
+                row_arg(inout sess.ctx.types, raw_ty)
             } else {
                 raw_ty
             };
-            args.push(QArg { is_row: tg.row, ty: arg_ty });
+            args.push(QArg { is_row: trait_gen.row, ty: arg_ty });
         }
-        assumptions.push(QGoal {
-            self_ty: self_ty,
-            trait_name: tname,
-            brand_opt: 0,
-            arg_a: arg_a,
-            arg_n: tr.gn
-        });
+        assumptions.push(
+            QGoal {
+                self_ty: self_ty,
+                trait_name: trait_name,
+                brand_opt: 0,
+                arg_start: arg_start,
+                arg_count: trait_row.gen_count
+            }
+        );
     }
 }
 
 pub fn read_cx_header(
-    inout r: Reader,
-    in b: Slice[u8],
+    inout reader: Reader,
+    in bytes: Slice[u8],
     inout sess: PactSession,
     in nmap: ChunkSeq[u32],
     in tmap: ChunkSeq[u32],
     fn_name: u32
 ) -> CxHeader {
-    let ng = r.word(in b);
-    let mut env_params = ChunkSeq::with_capacity[Gen](ng);
-    let mut gen_names = ChunkSeq::with_capacity[u32](ng);
-    let mut gen_rows = ChunkSeq::with_capacity[bool](ng);
-    let mut b_gen_idx = ChunkSeq::new[u32]();
-    let mut b_trait = ChunkSeq::new[u32]();
-    let mut b_arg_a = ChunkSeq::new[u32]();
-    let mut b_arg_n = ChunkSeq::new[u32]();
-    let mut b_arg_tys = ChunkSeq::new[u32]();
+    let gen_count = reader.word(in bytes);
+    let mut env_params = ChunkSeq::with_capacity[Gen](gen_count);
+    let mut gen_names = ChunkSeq::with_capacity[u32](gen_count);
+    let mut gen_rows = ChunkSeq::with_capacity[bool](gen_count);
+    let mut bound_gen_idx = ChunkSeq::new[u32]();
+    let mut bound_traits = ChunkSeq::new[u32]();
+    let mut bound_arg_start = ChunkSeq::new[u32]();
+    let mut bound_arg_count = ChunkSeq::new[u32]();
+    let mut bound_arg_tys = ChunkSeq::new[u32]();
 
-    for gi in 0..ng {
-        let gname = sym(in nmap, r.word(in b));
-        let gbound = wrapping_u8(r.word(in b));
-        let grow = r.word(in b) != 0;
-        env_params.push(Gen { name: gname, bound: gbound, row: grow });
-        gen_names.push(gname);
-        gen_rows.push(grow);
-        let nb = r.word(in b);
-        for _ in 0..nb {
-            let bt = sym(in nmap, r.word(in b));
-            let na = r.word(in b);
-            b_gen_idx.push(n32(gi));
-            b_trait.push(bt);
-            b_arg_a.push(n32(b_arg_tys.len()));
-            b_arg_n.push(n32(na));
-            for _ in 0..na {
-                b_arg_tys.push(u32_at(in tmap, r.word(in b)));
+    for gi in 0..gen_count {
+        let gen_name = sym(in nmap, reader.word(in bytes));
+        let gen_bound = wrapping_u8(reader.word(in bytes));
+        let gen_is_row = reader.word(in bytes) != 0;
+        env_params.push(Gen { name: gen_name, bound: gen_bound, row: gen_is_row });
+        gen_names.push(gen_name);
+        gen_rows.push(gen_is_row);
+        let bound_count = reader.word(in bytes);
+        for _ in 0..bound_count {
+            let trait_sym = sym(in nmap, reader.word(in bytes));
+            let arg_count = reader.word(in bytes);
+            bound_gen_idx.push(n32(gi));
+            bound_traits.push(trait_sym);
+            bound_arg_start.push(n32(bound_arg_tys.len()));
+            bound_arg_count.push(n32(arg_count));
+            for _ in 0..arg_count {
+                bound_arg_tys.push(u32_at(in tmap, reader.word(in bytes)));
             }
         }
     }
@@ -720,35 +778,40 @@ pub fn read_cx_header(
     let mut assumptions = ChunkSeq::new[QGoal]();
     let mut args = ChunkSeq::new[QArg]();
 
-    // If `fn_name` is a generated conformance function, prepend `c`'s where clauses.
-    for ci in 0..sess.d.confs.len() {
-        let c = conf_at(in sess.d, ci);
-        if conf_has_generated_fn(in sess, c, fn_name) {
-            for wi in 0..w(c.wn) {
-                let wh = where_at(in sess.d, add(w(c.wa), wi));
-                let tref = tref_at(in sess.d, w(wh.tref));
-                let tr_idx = find_trait_idx(in sess.d, tref.name);
+    // If `fn_name` is a generated conformance function, prepend `conf`'s where clauses.
+    for ci in 0..sess.decls.confs.len() {
+        let conf = conf_at(in sess.decls, ci);
+        if conf_has_generated_fn(in sess, conf, fn_name) {
+            for wi in 0..w(conf.where_count) {
+                let where_decl = where_at(in sess.decls, add(w(conf.where_start), wi));
+                let tref = tref_at(in sess.decls, w(where_decl.tref));
+                let tr_idx = find_trait_idx(in sess.decls, tref.name);
                 if tr_idx != NONE64 {
-                    let tr = trait_at(in sess.d, tr_idx);
-                    if w(tr.gn) == w(tref.xn) {
-                        let arg_a = n32(args.len());
-                        for ai in 0..w(tref.xn) {
-                            let tg = gen_at(in sess.d.gens, add(w(tr.ga), ai));
-                            let raw_ty = u32_at(in sess.d.words, add(w(tref.xa), ai));
-                            let arg_ty = if tg.row {
-                                row_arg(inout sess.c.types, raw_ty)
+                    let trait_row = trait_at(in sess.decls, tr_idx);
+                    if w(trait_row.gen_count) == w(tref.arg_count) {
+                        let arg_start = n32(args.len());
+                        for ai in 0..w(tref.arg_count) {
+                            let trait_gen = gen_at(
+                                in sess.decls.gens,
+                                add(w(trait_row.gen_start), ai)
+                            );
+                            let raw_ty = u32_at(in sess.decls.words, add(w(tref.arg_start), ai));
+                            let arg_ty = if trait_gen.row {
+                                row_arg(inout sess.ctx.types, raw_ty)
                             } else {
                                 raw_ty
                             };
-                            args.push(QArg { is_row: tg.row, ty: arg_ty });
+                            args.push(QArg { is_row: trait_gen.row, ty: arg_ty });
                         }
-                        assumptions.push(QGoal {
-                            self_ty: wh.ty,
-                            trait_name: tref.name,
-                            brand_opt: 0,
-                            arg_a: arg_a,
-                            arg_n: tr.gn
-                        });
+                        assumptions.push(
+                            QGoal {
+                                self_ty: where_decl.ty,
+                                trait_name: tref.name,
+                                brand_opt: 0,
+                                arg_start: arg_start,
+                                arg_count: trait_row.gen_count
+                            }
+                        );
                     }
                 }
             }
@@ -756,43 +819,45 @@ pub fn read_cx_header(
         }
     }
 
-    let ncb = r.word(in b);
-    for _ in 0..ncb {
-        let gty = u32_at(in tmap, r.word(in b));
-        let bt = sym(in nmap, r.word(in b));
-        let na = r.word(in b);
-        let tr_idx = find_trait_idx(in sess.d, bt);
-        let arg_a = n32(args.len());
+    let call_bound_count = reader.word(in bytes);
+    for _ in 0..call_bound_count {
+        let bound_ty = u32_at(in tmap, reader.word(in bytes));
+        let trait_sym = sym(in nmap, reader.word(in bytes));
+        let arg_count = reader.word(in bytes);
+        let tr_idx = find_trait_idx(in sess.decls, trait_sym);
+        let arg_start = n32(args.len());
         let mut ok = tr_idx != NONE64;
         if ok {
-            let tr = trait_at(in sess.d, tr_idx);
-            if w(tr.gn) != na {
+            let trait_row = trait_at(in sess.decls, tr_idx);
+            if w(trait_row.gen_count) != arg_count {
                 ok = false;
             }
-            for ai in 0..na {
-                let raw_ty = u32_at(in tmap, r.word(in b));
+            for ai in 0..arg_count {
+                let raw_ty = u32_at(in tmap, reader.word(in bytes));
                 if ok {
-                    let tg = gen_at(in sess.d.gens, add(w(tr.ga), ai));
-                    let arg_ty = if tg.row {
-                        row_arg(inout sess.c.types, raw_ty)
+                    let trait_gen = gen_at(in sess.decls.gens, add(w(trait_row.gen_start), ai));
+                    let arg_ty = if trait_gen.row {
+                        row_arg(inout sess.ctx.types, raw_ty)
                     } else {
                         raw_ty
                     };
-                    args.push(QArg { is_row: tg.row, ty: arg_ty });
+                    args.push(QArg { is_row: trait_gen.row, ty: arg_ty });
                 }
             }
             if ok {
-                assumptions.push(QGoal {
-                    self_ty: gty,
-                    trait_name: bt,
-                    brand_opt: 0,
-                    arg_a: arg_a,
-                    arg_n: tr.gn
-                });
+                assumptions.push(
+                    QGoal {
+                        self_ty: bound_ty,
+                        trait_name: trait_sym,
+                        brand_opt: 0,
+                        arg_start: arg_start,
+                        arg_count: trait_row.gen_count
+                    }
+                );
             }
         } else {
-            for _ in 0..na {
-                let _ = r.word(in b);
+            for _ in 0..arg_count {
+                let _ = reader.word(in bytes);
             }
         }
     }
@@ -801,25 +866,25 @@ pub fn read_cx_header(
         inout sess,
         in gen_names,
         in gen_rows,
-        in b_gen_idx,
-        in b_trait,
-        in b_arg_a,
-        in b_arg_n,
-        in b_arg_tys,
+        in bound_gen_idx,
+        in bound_traits,
+        in bound_arg_start,
+        in bound_arg_count,
+        in bound_arg_tys,
         inout assumptions,
         inout args
     );
 
-    let ns = r.word(in b);
-    let mut scope_at = ChunkSeq::with_capacity[u32](ns);
-    let mut scope_len = ChunkSeq::with_capacity[u32](ns);
+    let scope_count = reader.word(in bytes);
+    let mut scope_at = ChunkSeq::with_capacity[u32](scope_count);
+    let mut scope_len = ChunkSeq::with_capacity[u32](scope_count);
     let mut scope_models = ChunkSeq::new[u32]();
-    for _ in 0..ns {
+    for _ in 0..scope_count {
         scope_at.push(n32(scope_models.len()));
-        let sl = r.word(in b);
-        scope_len.push(n32(sl));
-        for _ in 0..sl {
-            scope_models.push(sym(in nmap, r.word(in b)));
+        let models_len = reader.word(in bytes);
+        scope_len.push(n32(models_len));
+        for _ in 0..models_len {
+            scope_models.push(sym(in nmap, reader.word(in bytes)));
         }
     }
 
@@ -835,29 +900,29 @@ pub fn read_cx_header(
 
 pub fn select_in_cx(
     inout sess: PactSession,
-    in cx: CxHeader,
+    in context: CxHeader,
     trait_name: u32,
     self_ty: u32,
     brand_opt: u32,
     in targs: Slice[u32]
 ) -> SolveOutcome {
-    let mut args = ChunkSeq::with_capacity[QArg](add(cx.args.len(), targs.len()));
-    args.extend(in cx.args.as_slice());
-    let arg_a = n32(args.len());
+    let mut args = ChunkSeq::with_capacity[QArg](add(context.args.len(), targs.len()));
+    args.extend(in context.args.as_slice());
+    let arg_start = n32(args.len());
     for i in 0..targs.len() {
         let ty = targs.try_get(i).unwrap_or(0);
         args.push(QArg { is_row: false, ty: ty });
     }
-    let mut env_params = ChunkSeq::with_capacity[Gen](cx.env_params.len());
-    env_params.extend(in cx.env_params.as_slice());
-    let mut assumptions = ChunkSeq::with_capacity[QGoal](cx.assumptions.len());
-    assumptions.extend(in cx.assumptions.as_slice());
-    let mut scope_at = ChunkSeq::with_capacity[u32](cx.scope_at.len());
-    scope_at.extend(in cx.scope_at.as_slice());
-    let mut scope_len = ChunkSeq::with_capacity[u32](cx.scope_len.len());
-    scope_len.extend(in cx.scope_len.as_slice());
-    let mut scope_models = ChunkSeq::with_capacity[u32](cx.scope_models.len());
-    scope_models.extend(in cx.scope_models.as_slice());
+    let mut env_params = ChunkSeq::with_capacity[Gen](context.env_params.len());
+    env_params.extend(in context.env_params.as_slice());
+    let mut assumptions = ChunkSeq::with_capacity[QGoal](context.assumptions.len());
+    assumptions.extend(in context.assumptions.as_slice());
+    let mut scope_at = ChunkSeq::with_capacity[u32](context.scope_at.len());
+    scope_at.extend(in context.scope_at.as_slice());
+    let mut scope_len = ChunkSeq::with_capacity[u32](context.scope_len.len());
+    scope_len.extend(in context.scope_len.as_slice());
+    let mut scope_models = ChunkSeq::with_capacity[u32](context.scope_models.len());
+    scope_models.extend(in context.scope_models.as_slice());
     let spec = QuerySpec {
         env_params: env_params,
         assumptions: assumptions,
@@ -871,8 +936,8 @@ pub fn select_in_cx(
             self_ty: self_ty,
             trait_name: trait_name,
             brand_opt: brand_opt,
-            arg_a: arg_a,
-            arg_n: n32(targs.len())
+            arg_start: arg_start,
+            arg_count: n32(targs.len())
         }
     };
     solve_spec(inout sess, in spec)
@@ -880,46 +945,46 @@ pub fn select_in_cx(
 
 fn resolve_call_one(
     inout sess: PactSession,
-    in cx: CxHeader,
+    in context: CxHeader,
     fn_name: u32,
     callee: u32,
     is_path: bool,
     raw_receiver: u32,
-    s: u64,
-    e: u64
+    span_start: u64,
+    span_end: u64
 ) -> ResolveOutcome {
-    let receiver = default_type(inout sess.c.types, raw_receiver);
+    let receiver = default_type(inout sess.ctx.types, raw_receiver);
     let mut keys: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut method: u32 = NONE32;
     let mut brand: u32 = NONE32;
 
     if is_path {
-        let (ok, head, tail) = split_path_sym(inout sess.c.names, callee);
+        let (ok, head, tail) = split_path_sym(inout sess.ctx.names, callee);
         if !ok {
             return none_outcome();
         }
         method = tail;
-        let tr_idx = find_trait_idx(in sess.d, head);
+        let tr_idx = find_trait_idx(in sess.decls, head);
         if tr_idx != NONE64 {
             keys.push(n32(tr_idx));
         } else {
-            let m_idx = find_model_conf_idx(in sess.d, head);
-            if m_idx == NONE64 {
+            let model_conf_idx = find_model_conf_idx(in sess.decls, head);
+            if model_conf_idx == NONE64 {
                 return none_outcome();
             }
-            let mc = conf_at(in sess.d, m_idx);
-            let tref = tref_at(in sess.d, w(mc.tref));
-            let m_tr_idx = find_trait_idx(in sess.d, tref.name);
-            if m_tr_idx == NONE64 {
+            let model_conf = conf_at(in sess.decls, model_conf_idx);
+            let tref = tref_at(in sess.decls, w(model_conf.tref));
+            let model_trait_idx = find_trait_idx(in sess.decls, tref.name);
+            if model_trait_idx == NONE64 {
                 return none_outcome();
             }
-            keys.push(n32(m_tr_idx));
+            keys.push(n32(model_trait_idx));
             brand = head;
         }
     } else {
         method = callee;
-        for ti in 0..sess.d.traits.len() {
-            if trait_has_method(in sess.d, ti, callee) {
+        for ti in 0..sess.decls.traits.len() {
+            if trait_has_method(in sess.decls, ti, callee) {
                 keys.push(n32(ti));
             }
         }
@@ -930,47 +995,47 @@ fn resolve_call_one(
 
     let mut any_has = false;
     for ki in 0..keys.len() {
-        if trait_has_method(in sess.d, w(u32_at(in keys, ki)), method) {
+        if trait_has_method(in sess.decls, w(u32_at(in keys, ki)), method) {
             any_has = true;
             break;
         }
     }
     if !any_has {
-        let tr = trait_at(in sess.d, w(u32_at(in keys, 0)));
+        let trait_row = trait_at(in sess.decls, w(u32_at(in keys, 0)));
         let mut msg = ChunkSeq::new[u8]();
         put_str(inout msg, "trait '");
-        put_sym(inout msg, in sess.c.names, tr.name);
+        put_sym(inout msg, in sess.ctx.names, trait_row.name);
         put_str(inout msg, "' has no method '");
-        put_sym(inout msg, in sess.c.names, method);
+        put_sym(inout msg, in sess.ctx.names, method);
         msg.push(39);
-        return err_diag("E0608", s, e, in msg);
+        return err_diag("E0608", span_start, span_end, in msg);
     }
 
-    let (is_box, obj_trait) = boxed_trait_name(in sess.c.types, in sess.c.names, receiver);
+    let (is_box, obj_trait) = boxed_trait_name(in sess.ctx.types, in sess.ctx.names, receiver);
     if is_box {
         for ki in 0..keys.len() {
             let ti = w(u32_at(in keys, ki));
-            if trait_at(in sess.d, ti).name == obj_trait && brand == NONE32 {
-                return bound_stub(in sess, ti, method, s, e, true);
+            if trait_at(in sess.decls, ti).name == obj_trait && brand == NONE32 {
+                return bound_stub(in sess, ti, method, span_start, span_end, true);
             }
         }
         let mut msg = ChunkSeq::new[u8]();
-        display(in sess.c.types, in sess.c.names, receiver, inout msg);
+        display(in sess.ctx.types, in sess.ctx.names, receiver, inout msg);
         put_str(inout msg, " has no method '");
-        put_sym(inout msg, in sess.c.names, method);
+        put_sym(inout msg, in sess.ctx.names, method);
         put_str(inout msg, "': its trait is '");
-        put_sym(inout msg, in sess.c.names, obj_trait);
+        put_sym(inout msg, in sess.ctx.names, obj_trait);
         msg.push(39);
-        return err_diag("E0608", s, e, in msg);
+        return err_diag("E0608", span_start, span_end, in msg);
     }
 
-    let mut found_ti: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut found_traits: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut found_conf: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    let mut bounded_ti: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    let mut fail_ti: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut bounded_traits: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut fail_traits: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut fail_tag: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    let mut fail_msg_a: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    let mut fail_msg_n: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut fail_msg_start: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut fail_msg_len: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut fail_msg_bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
 
     let brand_opt: u32 = if brand == NONE32 {
@@ -981,311 +1046,323 @@ fn resolve_call_one(
     let no_targs: ChunkSeq[u32] = ChunkSeq::new[u32]();
     for ki in 0..keys.len() {
         let ti = u32_at(in keys, ki);
-        let tname = trait_at(in sess.d, w(ti)).name;
-        let out = select_in_cx(
+        let tname = trait_at(in sess.decls, w(ti)).name;
+        let outcome = select_in_cx(
             inout sess,
-            in cx,
+            in context,
             tname,
             receiver,
             brand_opt,
             in no_targs.as_slice()
         );
-        if out.status == 0 {
-            found_ti.push(ti);
-            found_conf.push(out.val);
-        } else if out.val == 5 {
-            bounded_ti.push(ti);
+        if outcome.status == 0 {
+            found_traits.push(ti);
+            found_conf.push(outcome.val);
+        } else if outcome.val == 5 {
+            bounded_traits.push(ti);
         } else {
-            fail_ti.push(ti);
-            fail_tag.push(out.val);
-            fail_msg_a.push(n32(fail_msg_bytes.len()));
-            fail_msg_n.push(n32(out.msg.len()));
-            fail_msg_bytes.extend(in out.msg.as_slice());
+            fail_traits.push(ti);
+            fail_tag.push(outcome.val);
+            fail_msg_start.push(n32(fail_msg_bytes.len()));
+            fail_msg_len.push(n32(outcome.msg.len()));
+            fail_msg_bytes.extend(in outcome.msg.as_slice());
         }
     }
 
-    if bounded_ti.len() == 1 && found_ti.len() == 0 {
-        let ti = w(u32_at(in bounded_ti, 0));
-        let rn = node_at(in sess.c.types, receiver);
-        let is_dyn = rn.kind == K_NAMED
-            && rn.n == 0
-            && sym_starts_with(in sess.c.names, rn.name, "__dyn__");
-        return bound_stub(in sess, ti, method, s, e, is_dyn);
+    if bounded_traits.len() == 1 && found_traits.len() == 0 {
+        let ti = w(u32_at(in bounded_traits, 0));
+        let receiver_node = node_at(in sess.ctx.types, receiver);
+        let is_dyn = receiver_node.kind == K_NAMED
+            && receiver_node.n == 0
+            && sym_starts_with(in sess.ctx.names, receiver_node.name, "__dyn__");
+        return bound_stub(in sess, ti, method, span_start, span_end, is_dyn);
     }
 
-    if bounded_ti.len() > 0 {
+    if bounded_traits.len() > 0 {
         let mut msg = ChunkSeq::new[u8]();
         put_str(inout msg, "ambiguous method '");
-        put_sym(inout msg, in sess.c.names, method);
+        put_sym(inout msg, in sess.ctx.names, method);
         put_str(inout msg, "' on ");
-        display(in sess.c.types, in sess.c.names, receiver, inout msg);
+        display(in sess.ctx.types, in sess.ctx.names, receiver, inout msg);
         put_str(inout msg, ": provided by ");
         let mut first = true;
-        for fi in 0..found_ti.len() {
+        for fi in 0..found_traits.len() {
             if !first {
                 put_str(inout msg, ", ");
             }
             first = false;
             put_sym(
                 inout msg,
-                in sess.c.names,
-                trait_at(in sess.d, w(u32_at(in found_ti, fi))).name
+                in sess.ctx.names,
+                trait_at(in sess.decls, w(u32_at(in found_traits, fi))).name
             );
         }
-        for bi in 0..bounded_ti.len() {
+        for bi in 0..bounded_traits.len() {
             if !first {
                 put_str(inout msg, ", ");
             }
             first = false;
             put_sym(
                 inout msg,
-                in sess.c.names,
-                trait_at(in sess.d, w(u32_at(in bounded_ti, bi))).name
+                in sess.ctx.names,
+                trait_at(in sess.decls, w(u32_at(in bounded_traits, bi))).name
             );
         }
         put_str(inout msg, "; call it as Trait::");
-        put_sym(inout msg, in sess.c.names, method);
+        put_sym(inout msg, in sess.ctx.names, method);
         put_str(inout msg, "(...)");
-        return err_diag("E0609", s, e, in msg);
+        return err_diag("E0609", span_start, span_end, in msg);
     }
 
-    if found_ti.len() == 1 {
-        let ci = u64_at(in found_conf, 0);
-        let c = conf_at(in sess.d, ci);
-        if !conf_has_method(in sess.d, c, method) {
+    if found_traits.len() == 1 {
+        let conf_idx = u64_at(in found_conf, 0);
+        let conf = conf_at(in sess.decls, conf_idx);
+        if !conf_has_method(in sess.decls, conf, method) {
             let mut msg = ChunkSeq::new[u8]();
-            put_conf_path(in sess, c, inout msg);
+            put_conf_path(in sess, conf, inout msg);
             put_str(inout msg, " has no method '");
-            put_sym(inout msg, in sess.c.names, method);
+            put_sym(inout msg, in sess.ctx.names, method);
             msg.push(39);
-            return err_diag("E0610", s, e, in msg);
+            return err_diag("E0610", span_start, span_end, in msg);
         }
         let mut out = ChunkSeq::new[u8]();
-        generated_name_for_conf(in sess.c.types, in sess.c.names, in sess.d, c, method, inout out);
+        generated_name_for_conf(
+            in sess.ctx.types,
+            in sess.ctx.names,
+            in sess.decls,
+            conf,
+            method,
+            inout out
+        );
         return ResolveOutcome { status: ST_OK, text: out };
     }
 
-    if found_ti.len() == 0 {
-        let mut best_i: u64 = 0;
+    if found_traits.len() == 0 {
+        let mut best_idx: u64 = 0;
         let mut best_tag: u64 = u64_at(in fail_tag, 0);
-        for i in 1..fail_ti.len() {
-            let ft = u64_at(in fail_tag, i);
-            if ft > best_tag {
-                best_tag = ft;
-                best_i = i;
+        for i in 1..fail_traits.len() {
+            let cand_tag = u64_at(in fail_tag, i);
+            if cand_tag > best_tag {
+                best_tag = cand_tag;
+                best_idx = i;
             }
         }
-        let ti = w(u32_at(in fail_ti, best_i));
-        let tname = trait_at(in sess.d, ti).name;
-        let f_a = w(u32_at(in fail_msg_a, best_i));
-        let f_n = w(u32_at(in fail_msg_n, best_i));
-        let fslice = fail_msg_bytes[f_a..add(f_a, f_n)];
+        let ti = w(u32_at(in fail_traits, best_idx));
+        let tname = trait_at(in sess.decls, ti).name;
+        let fail_start = w(u32_at(in fail_msg_start, best_idx));
+        let fail_len = w(u32_at(in fail_msg_len, best_idx));
+        let fail_text = fail_msg_bytes[fail_start..add(fail_start, fail_len)];
         if brand != NONE32 && best_tag == 1 {
             let mut msg = ChunkSeq::new[u8]();
             put_str(inout msg, "model '");
-            put_sym(inout msg, in sess.c.names, brand);
+            put_sym(inout msg, in sess.ctx.names, brand);
             put_str(inout msg, "' is not a model of ");
-            put_sym(inout msg, in sess.c.names, tname);
+            put_sym(inout msg, in sess.ctx.names, tname);
             put_str(inout msg, " for ");
-            display(in sess.c.types, in sess.c.names, receiver, inout msg);
+            display(in sess.ctx.types, in sess.ctx.names, receiver, inout msg);
             put_str(inout msg, " (wrong model brand): ");
-            put_bytes(inout msg, in fslice);
-            return err_diag("E0613", s, e, in msg);
+            put_bytes(inout msg, in fail_text);
+            return err_diag("E0613", span_start, span_end, in msg);
         }
         if best_tag == 1 {
-            let mut any_g = false;
-            for gi in 0..cx.env_params.len() {
-                if mentions(in sess.c.types, receiver, gen_at(in cx.env_params, gi).name) {
-                    any_g = true;
+            let mut any_generic = false;
+            for gi in 0..context.env_params.len() {
+                if mentions(in sess.ctx.types, receiver, gen_at(in context.env_params, gi).name) {
+                    any_generic = true;
                     break;
                 }
             }
-            if any_g {
+            if any_generic {
                 let mut msg = ChunkSeq::new[u8]();
                 put_str(inout msg, "no static implementation of ");
-                put_sym(inout msg, in sess.c.names, tname);
+                put_sym(inout msg, in sess.ctx.names, tname);
                 put_str(inout msg, " for generic ");
-                display(in sess.c.types, in sess.c.names, receiver, inout msg);
+                display(in sess.ctx.types, in sess.ctx.names, receiver, inout msg);
                 put_str(inout msg, ": ");
-                let flen = trim_end_len(in fslice);
-                put_bytes(inout msg, in fslice[0..flen]);
+                let trim_len = trim_end_len(in fail_text);
+                put_bytes(inout msg, in fail_text[0..trim_len]);
                 put_str(inout msg, "; add the bound `");
-                display(in sess.c.types, in sess.c.names, receiver, inout msg);
+                display(in sess.ctx.types, in sess.ctx.names, receiver, inout msg);
                 put_str(inout msg, ": ");
-                put_sym(inout msg, in sess.c.names, tname);
+                put_sym(inout msg, in sess.ctx.names, tname);
                 put_str(inout msg, "` to '");
-                put_sym(inout msg, in sess.c.names, fn_name);
+                put_sym(inout msg, in sess.ctx.names, fn_name);
                 msg.push(39);
-                return err_diag("E0607", s, e, in msg);
+                return err_diag("E0607", span_start, span_end, in msg);
             }
         }
-        let mut wbytes = ChunkSeq::new[u8]();
-        put_sym_bytes(in sess.c.names, tname, inout wbytes);
+        let mut what_bytes = ChunkSeq::new[u8]();
+        put_sym_bytes(in sess.ctx.names, tname, inout what_bytes);
         return failure_diag(
-            in sess.c.types,
-            in sess.c.names,
-            in wbytes.as_slice(),
+            in sess.ctx.types,
+            in sess.ctx.names,
+            in what_bytes.as_slice(),
             tname,
             receiver,
             best_tag,
-            in fslice,
-            s,
-            e
+            in fail_text,
+            span_start,
+            span_end
         );
     }
 
     let mut msg = ChunkSeq::new[u8]();
     put_str(inout msg, "ambiguous method '");
-    put_sym(inout msg, in sess.c.names, method);
+    put_sym(inout msg, in sess.ctx.names, method);
     put_str(inout msg, "' on ");
-    display(in sess.c.types, in sess.c.names, receiver, inout msg);
+    display(in sess.ctx.types, in sess.ctx.names, receiver, inout msg);
     put_str(inout msg, ": implemented through traits ");
-    for fi in 0..found_ti.len() {
+    for fi in 0..found_traits.len() {
         if fi > 0 {
             put_str(inout msg, ", ");
         }
-        put_sym(inout msg, in sess.c.names, trait_at(in sess.d, w(u32_at(in found_ti, fi))).name);
+        put_sym(
+            inout msg,
+            in sess.ctx.names,
+            trait_at(in sess.decls, w(u32_at(in found_traits, fi))).name
+        );
     }
     put_str(inout msg, "; call it as Trait::");
-    put_sym(inout msg, in sess.c.names, method);
+    put_sym(inout msg, in sess.ctx.names, method);
     put_str(inout msg, "(...)");
-    err_diag("E0609", s, e, in msg)
+    err_diag("E0609", span_start, span_end, in msg)
 }
 
 fn match_type(
-    in t: Types,
+    in types: Types,
     pattern: u32,
     actual: u32,
-    in d: Decls,
-    ga: u32,
-    gn: u32,
-    inout vnames: ChunkSeq[u32],
-    inout vtys: ChunkSeq[u32]
+    in decls: Decls,
+    gen_start: u32,
+    gen_count: u32,
+    inout var_names: ChunkSeq[u32],
+    inout var_tys: ChunkSeq[u32]
 ) -> bool {
-    let pn = node_at(in t, pattern);
-    let an = node_at(in t, actual);
-    if pn.kind == K_NAMED && pn.n == 0 {
+    let pattern_node = node_at(in types, pattern);
+    let actual_node = node_at(in types, actual);
+    if pattern_node.kind == K_NAMED && pattern_node.n == 0 {
         let mut is_gen = false;
-        for gi in 0..w(gn) {
-            if gen_at(in d.gens, add(w(ga), gi)).name == pn.name {
+        for gi in 0..w(gen_count) {
+            if gen_at(in decls.gens, add(w(gen_start), gi)).name == pattern_node.name {
                 is_gen = true;
                 break;
             }
         }
         if is_gen {
-            for vi in 0..vnames.len() {
-                if u32_at(in vnames, vi) == pn.name {
-                    let bound = u32_at(in vtys, vi);
-                    return same_type(in t, sess_sy_dummy(), bound, actual);
+            for vi in 0..var_names.len() {
+                if u32_at(in var_names, vi) == pattern_node.name {
+                    let bound = u32_at(in var_tys, vi);
+                    return same_type(in types, sess_sy_dummy(), bound, actual);
                 }
             }
-            vnames.push(pn.name);
-            vtys.push(actual);
+            var_names.push(pattern_node.name);
+            var_tys.push(actual);
             return true;
         }
     }
-    if pn.kind == K_NAMED && an.kind == K_NAMED {
-        if pn.name != an.name || pn.n != an.n {
+    if pattern_node.kind == K_NAMED && actual_node.kind == K_NAMED {
+        if pattern_node.name != actual_node.name || pattern_node.n != actual_node.n {
             return false;
         }
-        for i in 0..w(pn.n) {
+        for i in 0..w(pattern_node.n) {
             if !match_type(
-                in t,
-                u32_at(in t.items, add(w(pn.a), i)),
-                u32_at(in t.items, add(w(an.a), i)),
-                in d,
-                ga,
-                gn,
-                inout vnames,
-                inout vtys
+                in types,
+                u32_at(in types.items, add(w(pattern_node.a), i)),
+                u32_at(in types.items, add(w(actual_node.a), i)),
+                in decls,
+                gen_start,
+                gen_count,
+                inout var_names,
+                inout var_tys
             ) {
                 return false;
             }
         }
         return true;
     }
-    if pn.kind == K_TUPLE && an.kind == K_TUPLE {
-        if pn.n != an.n {
+    if pattern_node.kind == K_TUPLE && actual_node.kind == K_TUPLE {
+        if pattern_node.n != actual_node.n {
             return false;
         }
-        for i in 0..w(pn.n) {
+        for i in 0..w(pattern_node.n) {
             if !match_type(
-                in t,
-                u32_at(in t.items, add(w(pn.a), i)),
-                u32_at(in t.items, add(w(an.a), i)),
-                in d,
-                ga,
-                gn,
-                inout vnames,
-                inout vtys
+                in types,
+                u32_at(in types.items, add(w(pattern_node.a), i)),
+                u32_at(in types.items, add(w(actual_node.a), i)),
+                in decls,
+                gen_start,
+                gen_count,
+                inout var_names,
+                inout var_tys
             ) {
                 return false;
             }
         }
         return true;
     }
-    if pn.kind == K_ROW && an.kind == K_ROW {
+    if pattern_node.kind == K_ROW && actual_node.kind == K_ROW {
         return true;
     }
-    same_type_raw(in t, pattern, actual)
+    same_type_raw(in types, pattern, actual)
 }
 
-fn same_type_raw(in t: Types, a: u32, b: u32) -> bool {
-    let na = node_at(in t, a);
-    let nb = node_at(in t, b);
-    if na.kind != nb.kind {
+fn same_type_raw(in types: Types, a: u32, b: u32) -> bool {
+    let a_node = node_at(in types, a);
+    let b_node = node_at(in types, b);
+    if a_node.kind != b_node.kind {
         return false;
     }
     if a == b {
         return true;
     }
-    if na.kind == K_NAMED {
-        if na.name != nb.name || na.n != nb.n {
+    if a_node.kind == K_NAMED {
+        if a_node.name != b_node.name || a_node.n != b_node.n {
             return false;
         }
-        for i in 0..w(na.n) {
+        for i in 0..w(a_node.n) {
             if !same_type_raw(
-                in t,
-                u32_at(in t.items, add(w(na.a), i)),
-                u32_at(in t.items, add(w(nb.a), i))
+                in types,
+                u32_at(in types.items, add(w(a_node.a), i)),
+                u32_at(in types.items, add(w(b_node.a), i))
             ) {
                 return false;
             }
         }
         return true;
     }
-    if na.kind == K_TUPLE {
-        if na.n != nb.n {
+    if a_node.kind == K_TUPLE {
+        if a_node.n != b_node.n {
             return false;
         }
-        for i in 0..w(na.n) {
+        for i in 0..w(a_node.n) {
             if !same_type_raw(
-                in t,
-                u32_at(in t.items, add(w(na.a), i)),
-                u32_at(in t.items, add(w(nb.a), i))
+                in types,
+                u32_at(in types.items, add(w(a_node.a), i)),
+                u32_at(in types.items, add(w(b_node.a), i))
             ) {
                 return false;
             }
         }
         return true;
     }
-    if na.kind == K_FN {
-        if na.mode != nb.mode || na.n != nb.n || na.r2 != nb.r2 {
+    if a_node.kind == K_FN {
+        if a_node.mode != b_node.mode || a_node.n != b_node.n || a_node.r2 != b_node.r2 {
             return false;
         }
-        for i in 0..w(na.n) {
+        for i in 0..w(a_node.n) {
             if !same_type_raw(
-                in t,
-                u32_at(in t.items, add(w(na.a), i)),
-                u32_at(in t.items, add(w(nb.a), i))
+                in types,
+                u32_at(in types.items, add(w(a_node.a), i)),
+                u32_at(in types.items, add(w(b_node.a), i))
             ) {
                 return false;
             }
-            if u8_at(in t.passes, add(w(na.a), i)) != u8_at(in t.passes, add(w(nb.a), i)) {
+            if u8_at(in types.passes, add(w(a_node.a), i))
+                != u8_at(in types.passes, add(w(b_node.a), i)) {
                 return false;
             }
         }
-        return same_type_raw(in t, na.r, nb.r);
+        return same_type_raw(in types, a_node.r, b_node.r);
     }
     false
 }
@@ -1302,14 +1379,14 @@ fn sess_sy_dummy() -> Sy {
     }
 }
 
-fn eq_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
-    if a.len() != b.len() {
+fn eq_bytes(in lhs: Slice[u8], in rhs: Slice[u8]) -> bool {
+    if lhs.len() != rhs.len() {
         return false;
     }
-    for i in 0..a.len() {
-        let ca = a.try_get(i).unwrap_or(0);
-        let cb = b.try_get(i).unwrap_or(0);
-        if ca != cb {
+    for i in 0..lhs.len() {
+        let lhs_byte = lhs.try_get(i).unwrap_or(0);
+        let rhs_byte = rhs.try_get(i).unwrap_or(0);
+        if lhs_byte != rhs_byte {
             return false;
         }
     }
@@ -1319,8 +1396,8 @@ fn eq_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
 fn stack_contains(in stack: ChunkSeq[ChunkSeq[u8]], in what: Slice[u8]) -> bool {
     for i in 0..stack.len() {
         match stack.try_get(i) {
-            Option::Some(s) => {
-                if eq_bytes(in s.as_slice(), in what) {
+            Option::Some(entry) => {
+                if eq_bytes(in entry.as_slice(), in what) {
                     return true;
                 }
             }
@@ -1330,280 +1407,347 @@ fn stack_contains(in stack: ChunkSeq[ChunkSeq[u8]], in what: Slice[u8]) -> bool 
     false
 }
 
-fn binding_for(in d: Decls, c: Conf, assoc: u32) -> (bool, u32) {
-    for i in 0..w(c.bn) {
-        let b = bind_at(in d, add(w(c.ba), i));
-        if b.name == assoc {
-            return (true, b.ty);
+fn binding_for(in decls: Decls, conf: Conf, assoc: u32) -> (bool, u32) {
+    for i in 0..w(conf.bind_count) {
+        let bind = bind_at(in decls, add(w(conf.bind_start), i));
+        if bind.name == assoc {
+            return (true, bind.ty);
         }
     }
     (false, 0)
 }
 
 fn conform_type_vars(
-    inout t: Types,
-    sy: Sy,
-    in d: Decls,
+    inout types: Types,
+    syms: Sy,
+    in decls: Decls,
     ty: u32,
-    c: Conf,
-    in vnames: ChunkSeq[u32],
-    in vtys: ChunkSeq[u32]
+    conf: Conf,
+    in var_names: ChunkSeq[u32],
+    in var_tys: ChunkSeq[u32]
 ) -> u32 {
-    if is_projection(in t, sy, ty) {
-        let ps = proj_self(in t, ty);
-        let pt_name = proj_trait(in t, sy, ty);
-        let pt_ty = proj_trait_ty(in t, ty);
-        let pa = proj_assoc(in t, ty);
-        let tref = tref_at(in d, w(c.tref));
-        if ps == t.named0(sy.self_ty) && (pt_name == NONE32 || pt_name == tref.name) {
-            let (found, bty) = binding_for(in d, c, pa);
+    if is_projection(in types, syms, ty) {
+        let proj_self_ty = proj_self(in types, ty);
+        let proj_trait_name = proj_trait(in types, syms, ty);
+        let trait_ty = proj_trait_ty(in types, ty);
+        let assoc = proj_assoc(in types, ty);
+        let tref = tref_at(in decls, w(conf.tref));
+        if proj_self_ty == types.named0(syms.self_ty)
+            && (proj_trait_name == NONE32 || proj_trait_name == tref.name) {
+            let (found, bound_ty) = binding_for(in decls, conf, assoc);
             if found {
-                return conform_type_vars(inout t, sy, in d, bty, c, in vnames, in vtys);
+                return conform_type_vars(
+                    inout types,
+                    syms,
+                    in decls,
+                    bound_ty,
+                    conf,
+                    in var_names,
+                    in var_tys
+                );
             }
         }
-        let n_ps = conform_type_vars(inout t, sy, in d, ps, c, in vnames, in vtys);
-        let n_pt = if pt_ty == 0 {
+        let new_self = conform_type_vars(
+            inout types,
+            syms,
+            in decls,
+            proj_self_ty,
+            conf,
+            in var_names,
+            in var_tys
+        );
+        let new_trait = if trait_ty == 0 {
             0
         } else {
-            conform_type_vars(inout t, sy, in d, pt_ty, c, in vnames, in vtys)
+            conform_type_vars(inout types, syms, in decls, trait_ty, conf, in var_names, in var_tys)
         };
-        let mut pargs = ChunkSeq::with_capacity[u32](3);
-        pargs.push(n_ps);
-        if n_pt != 0 {
-            pargs.push(n_pt);
+        let mut proj_args = ChunkSeq::with_capacity[u32](3);
+        proj_args.push(new_self);
+        if new_trait != 0 {
+            proj_args.push(new_trait);
         } else {
-            pargs.push(t.named0(sy.empty));
+            proj_args.push(types.named0(syms.empty));
         }
-        pargs.push(t.named0(pa));
-        return t.named(sy.projection, in pargs);
+        proj_args.push(types.named0(assoc));
+        return types.named(syms.projection, in proj_args);
     }
-    let n = node_at(in t, ty);
-    if n.kind == K_NAMED && n.n == 0 {
-        if n.name == sy.self_ty {
-            return c.self_ty;
+    let node = node_at(in types, ty);
+    if node.kind == K_NAMED && node.n == 0 {
+        if node.name == syms.self_ty {
+            return conf.self_ty;
         }
-        for i in 0..vnames.len() {
-            if u32_at(in vnames, i) == n.name {
-                return u32_at(in vtys, i);
+        for i in 0..var_names.len() {
+            if u32_at(in var_names, i) == node.name {
+                return u32_at(in var_tys, i);
             }
         }
         return ty;
     }
-    if n.kind == K_NAMED {
-        let mut nargs = ChunkSeq::with_capacity[u32](w(n.n));
-        for i in 0..w(n.n) {
-            nargs.push(conform_type_vars(
-                inout t,
-                sy,
-                in d,
-                u32_at(in t.items, add(w(n.a), i)),
-                c,
-                in vnames,
-                in vtys
-            ));
+    if node.kind == K_NAMED {
+        let mut new_args = ChunkSeq::with_capacity[u32](w(node.n));
+        for i in 0..w(node.n) {
+            new_args.push(
+                conform_type_vars(
+                    inout types,
+                    syms,
+                    in decls,
+                    u32_at(in types.items, add(w(node.a), i)),
+                    conf,
+                    in var_names,
+                    in var_tys
+                )
+            );
         }
-        return t.named(n.name, in nargs);
+        return types.named(node.name, in new_args);
     }
-    if n.kind == K_TUPLE {
-        let mut nargs = ChunkSeq::with_capacity[u32](w(n.n));
-        for i in 0..w(n.n) {
-            nargs.push(conform_type_vars(
-                inout t,
-                sy,
-                in d,
-                u32_at(in t.items, add(w(n.a), i)),
-                c,
-                in vnames,
-                in vtys
-            ));
+    if node.kind == K_TUPLE {
+        let mut new_args = ChunkSeq::with_capacity[u32](w(node.n));
+        for i in 0..w(node.n) {
+            new_args.push(
+                conform_type_vars(
+                    inout types,
+                    syms,
+                    in decls,
+                    u32_at(in types.items, add(w(node.a), i)),
+                    conf,
+                    in var_names,
+                    in var_tys
+                )
+            );
         }
-        return t.tuple(in nargs);
+        return types.tuple(in new_args);
     }
-    if n.kind == K_FN {
-        let mut ptys = ChunkSeq::with_capacity[u32](w(n.n));
-        for i in 0..w(n.n) {
-            ptys.push(conform_type_vars(
-                inout t,
-                sy,
-                in d,
-                u32_at(in t.items, add(w(n.a), i)),
-                c,
-                in vnames,
-                in vtys
-            ));
+    if node.kind == K_FN {
+        let mut param_tys = ChunkSeq::with_capacity[u32](w(node.n));
+        for i in 0..w(node.n) {
+            param_tys.push(
+                conform_type_vars(
+                    inout types,
+                    syms,
+                    in decls,
+                    u32_at(in types.items, add(w(node.a), i)),
+                    conf,
+                    in var_names,
+                    in var_tys
+                )
+            );
         }
-        let nres = conform_type_vars(inout t, sy, in d, n.r, c, in vnames, in vtys);
-        let nrow = conform_row_vars(inout t, sy, in d, n.r2, c, in vnames, in vtys);
-        let p0 = t.passes.len();
-        for i in 0..w(n.n) {
-            t.passes.push(u8_at(in t.passes, add(w(n.a), i)));
+        let new_result = conform_type_vars(
+            inout types,
+            syms,
+            in decls,
+            node.r,
+            conf,
+            in var_names,
+            in var_tys
+        );
+        let new_row = conform_row_vars(
+            inout types,
+            syms,
+            in decls,
+            node.r2,
+            conf,
+            in var_names,
+            in var_tys
+        );
+        let pass_start = types.passes.len();
+        for i in 0..w(node.n) {
+            types.passes.push(u8_at(in types.passes, add(w(node.a), i)));
         }
-        return t.mk(K_FN, n.mode, 0, in ptys, nres, nrow, 0);
+        return types.mk(K_FN, node.mode, 0, in param_tys, new_result, new_row, 0);
     }
-    if n.kind == K_ROW {
-        let nrow = conform_row_vars(inout t, sy, in d, n.r2, c, in vnames, in vtys);
-        return t.row_type(nrow);
+    if node.kind == K_ROW {
+        let new_row = conform_row_vars(
+            inout types,
+            syms,
+            in decls,
+            node.r2,
+            conf,
+            in var_names,
+            in var_tys
+        );
+        return types.row_type(new_row);
     }
     ty
 }
 
 fn conform_row_vars(
-    inout t: Types,
-    sy: Sy,
-    in d: Decls,
-    r: u32,
-    c: Conf,
-    in vnames: ChunkSeq[u32],
-    in vtys: ChunkSeq[u32]
+    inout types: Types,
+    syms: Sy,
+    in decls: Decls,
+    row_id: u32,
+    conf: Conf,
+    in var_names: ChunkSeq[u32],
+    in var_tys: ChunkSeq[u32]
 ) -> u32 {
-    let rn = t.row(r);
-    let mut effs = ChunkSeq::with_capacity[EffNode](w(rn.n));
-    let mut eargs = ChunkSeq::new[u32]();
-    for i in 0..w(rn.n) {
-        let en = t.effect_at(add(w(rn.a), i));
-        let ea = n32(eargs.len());
-        for j in 0..w(en.n) {
-            eargs.push(conform_type_vars(
-                inout t,
-                sy,
-                in d,
-                u32_at(in t.items, add(w(en.a), j)),
-                c,
-                in vnames,
-                in vtys
-            ));
+    let row = types.row(row_id);
+    let mut effs = ChunkSeq::with_capacity[EffNode](w(row.n));
+    let mut eff_args = ChunkSeq::new[u32]();
+    for i in 0..w(row.n) {
+        let eff_node = types.effect_at(add(w(row.a), i));
+        let arg_start = n32(eff_args.len());
+        for j in 0..w(eff_node.n) {
+            eff_args.push(
+                conform_type_vars(
+                    inout types,
+                    syms,
+                    in decls,
+                    u32_at(in types.items, add(w(eff_node.a), j)),
+                    conf,
+                    in var_names,
+                    in var_tys
+                )
+            );
         }
-        effs.push(EffNode { label: en.label, name: en.name, a: ea, n: en.n });
+        effs.push(
+            EffNode { label: eff_node.label, name: eff_node.name, a: arg_start, n: eff_node.n }
+        );
     }
-    t.mk_row(in effs, in eargs, rn.tail)
+    types.mk_row(in effs, in eff_args, row.tail)
 }
 
 fn normalize_rec(
     inout sess: PactSession,
     in fe: Fe,
-    in cx: CxHeader,
+    in context: CxHeader,
     ty: u32,
-    s: u64,
-    e: u64,
+    span_start: u64,
+    span_end: u64,
     inout stack: ChunkSeq[ChunkSeq[u8]]
 ) -> (bool, u32, ResolveOutcome) {
-    if is_projection(in sess.c.types, sess.sy, ty) {
-        let raw_self = proj_self(in sess.c.types, ty);
-        let (ok_s, self_ty, err_s) = normalize_rec(
+    if is_projection(in sess.ctx.types, sess.syms, ty) {
+        let raw_self = proj_self(in sess.ctx.types, ty);
+        let (self_ok, self_ty, self_error) = normalize_rec(
             inout sess,
             in fe,
-            in cx,
+            in context,
             raw_self,
-            s,
-            e,
+            span_start,
+            span_end,
             inout stack
         );
-        if !ok_s {
-            return (false, 0, err_s);
+        if !self_ok {
+            return (false, 0, self_error);
         }
-        let pt_name = proj_trait(in sess.c.types, sess.sy, ty);
-        let pt_ty = proj_trait_ty(in sess.c.types, ty);
-        let assoc = proj_assoc(in sess.c.types, ty);
+        let proj_trait_name = proj_trait(in sess.ctx.types, sess.syms, ty);
+        let trait_ty = proj_trait_ty(in sess.ctx.types, ty);
+        let assoc = proj_assoc(in sess.ctx.types, ty);
 
         let mut tr_idx: u64 = NONE64;
-        if pt_name != NONE32 {
-            tr_idx = find_trait_idx(in sess.d, pt_name);
+        if proj_trait_name != NONE32 {
+            tr_idx = find_trait_idx(in sess.decls, proj_trait_name);
             if tr_idx == NONE64 {
                 let mut msg = ChunkSeq::new[u8]();
                 put_str(inout msg, "unknown trait '");
-                put_sym(inout msg, in sess.c.names, pt_name);
+                put_sym(inout msg, in sess.ctx.names, proj_trait_name);
                 put_str(inout msg, "' in a projection");
-                return (false, 0, err_diag("E0612", s, e, in msg));
+                return (false, 0, err_diag("E0612", span_start, span_end, in msg));
             }
         } else {
-            let (u_ok, u_idx, u_msg) = unique_assoc_trait(in sess.d, in sess.c.names, assoc);
-            if !u_ok {
-                return (false, 0, err_diag("E0612", s, e, in u_msg));
+            let (unique_ok, unique_idx, unique_msg) = unique_assoc_trait(
+                in sess.decls,
+                in sess.ctx.names,
+                assoc
+            );
+            if !unique_ok {
+                return (false, 0, err_diag("E0612", span_start, span_end, in unique_msg));
             }
-            tr_idx = u_idx;
+            tr_idx = unique_idx;
         }
 
-        let tr = trait_at(in sess.d, tr_idx);
-        if !trait_has_assoc(in sess.d, tr, assoc) {
+        let trait_row = trait_at(in sess.decls, tr_idx);
+        if !trait_has_assoc(in sess.decls, trait_row, assoc) {
             let mut msg = ChunkSeq::new[u8]();
             put_str(inout msg, "trait '");
-            put_sym(inout msg, in sess.c.names, tr.name);
+            put_sym(inout msg, in sess.ctx.names, trait_row.name);
             put_str(inout msg, "' has no associated type '");
-            put_sym(inout msg, in sess.c.names, assoc);
+            put_sym(inout msg, in sess.ctx.names, assoc);
             msg.push(39);
-            return (false, 0, err_diag("E0612", s, e, in msg));
+            return (false, 0, err_diag("E0612", span_start, span_end, in msg));
         }
 
-        let mut raw_targs: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        if pt_ty != 0 {
-            let ptn = node_at(in sess.c.types, pt_ty);
-            if ptn.kind == K_NAMED && ptn.n > 0 {
-                for i in 0..w(ptn.n) {
-                    raw_targs.push(u32_at(in sess.c.types.items, add(w(ptn.a), i)));
+        let mut raw_trait_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        if trait_ty != 0 {
+            let trait_node = node_at(in sess.ctx.types, trait_ty);
+            if trait_node.kind == K_NAMED && trait_node.n > 0 {
+                for i in 0..w(trait_node.n) {
+                    raw_trait_args.push(u32_at(in sess.ctx.types.items, add(w(trait_node.a), i)));
                 }
             }
         }
-        if raw_targs.len() > 0 && raw_targs.len() != w(tr.gn) {
+        if raw_trait_args.len() > 0 && raw_trait_args.len() != w(trait_row.gen_count) {
             return (
                 false,
                 0,
-                err_str("E0612", s, e, "wrong number of trait arguments in a projection")
+                err_str(
+                    "E0612",
+                    span_start,
+                    span_end,
+                    "wrong number of trait arguments in a projection"
+                )
             );
         }
-        let mut targs: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](raw_targs.len());
-        for i in 0..raw_targs.len() {
-            let (ok_a, na, err_a) = normalize_rec(
+        let mut trait_args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](raw_trait_args.len());
+        for i in 0..raw_trait_args.len() {
+            let (arg_ok, norm_arg, arg_error) = normalize_rec(
                 inout sess,
                 in fe,
-                in cx,
-                u32_at(in raw_targs, i),
-                s,
-                e,
+                in context,
+                u32_at(in raw_trait_args, i),
+                span_start,
+                span_end,
                 inout stack
             );
-            if !ok_a {
-                return (false, 0, err_a);
+            if !arg_ok {
+                return (false, 0, arg_error);
             }
-            targs.push(na);
+            trait_args.push(norm_arg);
         }
 
         let mut what = ChunkSeq::new[u8]();
         what.push(60);
-        display(in sess.c.types, in sess.c.names, self_ty, inout what);
+        display(in sess.ctx.types, in sess.ctx.names, self_ty, inout what);
         put_str(inout what, " as ");
-        put_sym(inout what, in sess.c.names, tr.name);
-        if targs.len() > 0 {
+        put_sym(inout what, in sess.ctx.names, trait_row.name);
+        if trait_args.len() > 0 {
             what.push(91);
-            for i in 0..targs.len() {
+            for i in 0..trait_args.len() {
                 if i > 0 {
                     put_str(inout what, ", ");
                 }
-                display(in sess.c.types, in sess.c.names, u32_at(in targs, i), inout what);
+                display(in sess.ctx.types, in sess.ctx.names, u32_at(in trait_args, i), inout what);
             }
             what.push(93);
         }
         put_str(inout what, ">::");
-        put_sym(inout what, in sess.c.names, assoc);
+        put_sym(inout what, in sess.ctx.names, assoc);
 
         if stack_contains(in stack, in what.as_slice()) {
             let mut msg = ChunkSeq::new[u8]();
             put_str(inout msg, "projection ");
             put_bytes(inout msg, in what.as_slice());
             put_str(inout msg, " is defined in terms of itself");
-            return (false, 0, err_diag("E0612", s, e, in msg));
+            return (false, 0, err_diag("E0612", span_start, span_end, in msg));
         }
 
-        let sel = select_in_cx(inout sess, in cx, tr.name, self_ty, 0, in targs.as_slice());
-        if sel.status != 0 {
-            if sel.val == 1 || sel.val == 4 {
+        let selection = select_in_cx(
+            inout sess,
+            in context,
+            trait_row.name,
+            self_ty,
+            0,
+            in trait_args.as_slice()
+        );
+        if selection.status != 0 {
+            if selection.val == 1 || selection.val == 4 {
                 let mut msg = ChunkSeq::new[u8]();
                 put_str(inout msg, "unresolved projection ");
                 put_bytes(inout msg, in what.as_slice());
                 put_str(inout msg, " escapes static elaboration: ");
-                put_bytes(inout msg, in sel.msg.as_slice());
-                return (false, 0, err_diag("E0612", s, e, in msg));
+                put_bytes(inout msg, in selection.msg.as_slice());
+                return (false, 0, err_diag("E0612", span_start, span_end, in msg));
             }
-            if sel.val == 5 {
+            if selection.val == 5 {
                 let mut msg = ChunkSeq::new[u8]();
                 put_str(inout msg, "unsupported projection ");
                 put_bytes(inout msg, in what.as_slice());
@@ -1611,180 +1755,184 @@ fn normalize_rec(
                     inout msg,
                     ": associated types of a bounded type parameter are not supported yet"
                 );
-                return (false, 0, err_diag("E0607", s, e, in msg));
+                return (false, 0, err_diag("E0607", span_start, span_end, in msg));
             }
             return (
                 false,
                 0,
                 failure_diag(
-                    in sess.c.types,
-                    in sess.c.names,
+                    in sess.ctx.types,
+                    in sess.ctx.names,
                     in what.as_slice(),
                     NONE32,
                     self_ty,
-                    sel.val,
-                    in sel.msg.as_slice(),
-                    s,
-                    e
+                    selection.val,
+                    in selection.msg.as_slice(),
+                    span_start,
+                    span_end
                 )
             );
         }
 
-        let c = conf_at(in sess.d, sel.val);
-        let (has_b, binding) = binding_for(in sess.d, c, assoc);
-        if !has_b {
+        let conf = conf_at(in sess.decls, selection.val);
+        let (has_binding, binding) = binding_for(in sess.decls, conf, assoc);
+        if !has_binding {
             let mut msg = ChunkSeq::new[u8]();
-            put_conf_path(in sess, c, inout msg);
+            put_conf_path(in sess, conf, inout msg);
             put_str(inout msg, " binds no ");
-            put_sym(inout msg, in sess.c.names, assoc);
-            return (false, 0, err_diag("E0612", s, e, in msg));
+            put_sym(inout msg, in sess.ctx.names, assoc);
+            return (false, 0, err_diag("E0612", span_start, span_end, in msg));
         }
 
-        let mut vnames = ChunkSeq::new[u32]();
-        let mut vtys = ChunkSeq::new[u32]();
+        let mut var_names = ChunkSeq::new[u32]();
+        let mut var_tys = ChunkSeq::new[u32]();
         if !match_type(
-            in sess.c.types,
-            c.self_ty,
+            in sess.ctx.types,
+            conf.self_ty,
             self_ty,
-            in sess.d,
-            c.ga,
-            c.gn,
-            inout vnames,
-            inout vtys
+            in sess.decls,
+            conf.gen_start,
+            conf.gen_count,
+            inout var_names,
+            inout var_tys
         ) {
             let mut msg = ChunkSeq::new[u8]();
             put_str(inout msg, "cannot instantiate ");
-            put_conf_path(in sess, c, inout msg);
+            put_conf_path(in sess, conf, inout msg);
             put_str(inout msg, " for ");
-            display(in sess.c.types, in sess.c.names, self_ty, inout msg);
-            return (false, 0, err_diag("E0612", s, e, in msg));
+            display(in sess.ctx.types, in sess.ctx.names, self_ty, inout msg);
+            return (false, 0, err_diag("E0612", span_start, span_end, in msg));
         }
-        vnames.push(sess.sy.self_ty);
-        vtys.push(self_ty);
+        var_names.push(sess.syms.self_ty);
+        var_tys.push(self_ty);
         let conformed = conform_type_vars(
-            inout sess.c.types,
-            sess.sy,
-            in sess.d,
+            inout sess.ctx.types,
+            sess.syms,
+            in sess.decls,
             binding,
-            c,
-            in vnames,
-            in vtys
+            conf,
+            in var_names,
+            in var_tys
         );
         let mut vars = vars_new();
-        for vi in 0..vnames.len() {
-            vars.set(u32_at(in vnames, vi), u32_at(in vtys, vi));
+        for vi in 0..var_names.len() {
+            vars.set(u32_at(in var_names, vi), u32_at(in var_tys, vi));
         }
-        let value = substitute(inout sess.c.types, conformed, in vars);
+        let value = substitute(inout sess.ctx.types, conformed, in vars);
         stack.push(what);
-        let (ok_r, res_ty, err_r) = normalize_rec(
+        let (result_ok, res_ty, result_error) = normalize_rec(
             inout sess,
             in fe,
-            in cx,
+            in context,
             value,
-            s,
-            e,
+            span_start,
+            span_end,
             inout stack
         );
         let _ = stack.pop();
-        return (ok_r, res_ty, err_r);
+        return (result_ok, res_ty, result_error);
     }
 
-    let n = node_at(in sess.c.types, ty);
-    if n.kind == K_NAMED {
-        let mut nargs = ChunkSeq::with_capacity[u32](w(n.n));
-        for i in 0..w(n.n) {
-            let (ok_a, na, err_a) = normalize_rec(
+    let node = node_at(in sess.ctx.types, ty);
+    if node.kind == K_NAMED {
+        let mut new_args = ChunkSeq::with_capacity[u32](w(node.n));
+        for i in 0..w(node.n) {
+            let (arg_ok, norm_arg, arg_error) = normalize_rec(
                 inout sess,
                 in fe,
-                in cx,
-                u32_at(in sess.c.types.items, add(w(n.a), i)),
-                s,
-                e,
+                in context,
+                u32_at(in sess.ctx.types.items, add(w(node.a), i)),
+                span_start,
+                span_end,
                 inout stack
             );
-            if !ok_a {
-                return (false, 0, err_a);
+            if !arg_ok {
+                return (false, 0, arg_error);
             }
-            nargs.push(na);
+            new_args.push(norm_arg);
         }
-        return (true, sess.c.types.named(n.name, in nargs), none_outcome());
+        return (true, sess.ctx.types.named(node.name, in new_args), none_outcome());
     }
-    if n.kind == K_TUPLE {
-        let mut nargs = ChunkSeq::with_capacity[u32](w(n.n));
-        for i in 0..w(n.n) {
-            let (ok_a, na, err_a) = normalize_rec(
+    if node.kind == K_TUPLE {
+        let mut new_args = ChunkSeq::with_capacity[u32](w(node.n));
+        for i in 0..w(node.n) {
+            let (arg_ok, norm_arg, arg_error) = normalize_rec(
                 inout sess,
                 in fe,
-                in cx,
-                u32_at(in sess.c.types.items, add(w(n.a), i)),
-                s,
-                e,
+                in context,
+                u32_at(in sess.ctx.types.items, add(w(node.a), i)),
+                span_start,
+                span_end,
                 inout stack
             );
-            if !ok_a {
-                return (false, 0, err_a);
+            if !arg_ok {
+                return (false, 0, arg_error);
             }
-            nargs.push(na);
+            new_args.push(norm_arg);
         }
-        return (true, sess.c.types.tuple(in nargs), none_outcome());
+        return (true, sess.ctx.types.tuple(in new_args), none_outcome());
     }
-    if n.kind == K_FN {
-        let mut ptys = ChunkSeq::with_capacity[u32](w(n.n));
-        for i in 0..w(n.n) {
-            let (ok_p, np, err_p) = normalize_rec(
+    if node.kind == K_FN {
+        let mut param_tys = ChunkSeq::with_capacity[u32](w(node.n));
+        for i in 0..w(node.n) {
+            let (param_ok, norm_param, param_error) = normalize_rec(
                 inout sess,
                 in fe,
-                in cx,
-                u32_at(in sess.c.types.items, add(w(n.a), i)),
-                s,
-                e,
+                in context,
+                u32_at(in sess.ctx.types.items, add(w(node.a), i)),
+                span_start,
+                span_end,
                 inout stack
             );
-            if !ok_p {
-                return (false, 0, err_p);
+            if !param_ok {
+                return (false, 0, param_error);
             }
-            ptys.push(np);
+            param_tys.push(norm_param);
         }
-        let (ok_res, nres, err_res) = normalize_rec(
+        let (ret_ok, new_result, ret_error) = normalize_rec(
             inout sess,
             in fe,
-            in cx,
-            n.r,
-            s,
-            e,
+            in context,
+            node.r,
+            span_start,
+            span_end,
             inout stack
         );
-        if !ok_res {
-            return (false, 0, err_res);
+        if !ret_ok {
+            return (false, 0, ret_error);
         }
-        let (ok_row, nrow, err_row) = normalize_row_rec(
+        let (row_ok, new_row, row_error) = normalize_row_rec(
             inout sess,
             in fe,
-            in cx,
-            n.r2,
-            s,
-            e,
+            in context,
+            node.r2,
+            span_start,
+            span_end,
             inout stack
         );
-        if !ok_row {
-            return (false, 0, err_row);
+        if !row_ok {
+            return (false, 0, row_error);
         }
-        return (true, sess.c.types.mk(K_FN, n.mode, 0, in ptys, nres, nrow, 0), none_outcome());
+        return (
+            true,
+            sess.ctx.types.mk(K_FN, node.mode, 0, in param_tys, new_result, new_row, 0),
+            none_outcome()
+        );
     }
-    if n.kind == K_ROW {
-        let (ok_row, nrow, err_row) = normalize_row_rec(
+    if node.kind == K_ROW {
+        let (row_ok, new_row, row_error) = normalize_row_rec(
             inout sess,
             in fe,
-            in cx,
-            n.r2,
-            s,
-            e,
+            in context,
+            node.r2,
+            span_start,
+            span_end,
             inout stack
         );
-        if !ok_row {
-            return (false, 0, err_row);
+        if !row_ok {
+            return (false, 0, row_error);
         }
-        return (true, sess.c.types.row_type(nrow), none_outcome());
+        return (true, sess.ctx.types.row_type(new_row), none_outcome());
     }
     (true, ty, none_outcome())
 }
@@ -1792,114 +1940,147 @@ fn normalize_rec(
 fn normalize_row_rec(
     inout sess: PactSession,
     in fe: Fe,
-    in cx: CxHeader,
-    r: u32,
-    s: u64,
-    e: u64,
+    in context: CxHeader,
+    row_id: u32,
+    span_start: u64,
+    span_end: u64,
     inout stack: ChunkSeq[ChunkSeq[u8]]
 ) -> (bool, u32, ResolveOutcome) {
-    let rn = sess.c.types.row(r);
-    let mut effs = ChunkSeq::with_capacity[EffNode](w(rn.n));
-    let mut eargs = ChunkSeq::new[u32]();
-    for i in 0..w(rn.n) {
-        let en = sess.c.types.effect_at(add(w(rn.a), i));
-        let ea = n32(eargs.len());
-        for j in 0..w(en.n) {
-            let (ok_a, na, err_a) = normalize_rec(
+    let row = sess.ctx.types.row(row_id);
+    let mut effs = ChunkSeq::with_capacity[EffNode](w(row.n));
+    let mut eff_args = ChunkSeq::new[u32]();
+    for i in 0..w(row.n) {
+        let eff_node = sess.ctx.types.effect_at(add(w(row.a), i));
+        let arg_start = n32(eff_args.len());
+        for j in 0..w(eff_node.n) {
+            let (arg_ok, norm_arg, arg_error) = normalize_rec(
                 inout sess,
                 in fe,
-                in cx,
-                u32_at(in sess.c.types.items, add(w(en.a), j)),
-                s,
-                e,
+                in context,
+                u32_at(in sess.ctx.types.items, add(w(eff_node.a), j)),
+                span_start,
+                span_end,
                 inout stack
             );
-            if !ok_a {
-                return (false, 0, err_a);
+            if !arg_ok {
+                return (false, 0, arg_error);
             }
-            eargs.push(na);
+            eff_args.push(norm_arg);
         }
-        effs.push(EffNode { label: en.label, name: en.name, a: ea, n: en.n });
+        effs.push(
+            EffNode { label: eff_node.label, name: eff_node.name, a: arg_start, n: eff_node.n }
+        );
     }
-    (true, sess.c.types.mk_row(in effs, in eargs, rn.tail), none_outcome())
+    (true, sess.ctx.types.mk_row(in effs, in eff_args, row.tail), none_outcome())
 }
 
 // Entrypoint for `check_pact_resolve` (`[session_input][n_queries, queries...]`).
-pub fn resolve_words(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
-    let mut sess = session_open_reader(inout r, in b);
+pub fn resolve_words(in bytes: Slice[u8]) -> ChunkSeq[u64] {
+    let mut reader = Reader { pos: 0 };
+    let mut sess = session_open_reader(inout reader, in bytes);
     let mut out = ChunkSeq::new[u64]();
-    let p_out = pack_text(in sess.out);
-    out.extend(in p_out.as_slice());
+    let packed_out = pack_text(in sess.out);
+    out.extend(in packed_out.as_slice());
     if !sess.ok {
         out.push(0);
         return out;
     }
     out.push(1);
-    let nq = r.word(in b);
-    out.push(nq);
-    for _ in 0..nq {
-        let qlen = r.word(in b);
-        let qstart = r.pos;
-        let padded = wrapping_mul(wrapping_add(qlen, 7) / 8, 8);
-        r.pos = wrapping_add(qstart, padded);
-        let qb = b[qstart..add(qstart, qlen)];
-        let mut qr = Reader { pos: 0 };
+    let query_count = reader.word(in bytes);
+    out.push(query_count);
+    for _ in 0..query_count {
+        let query_len = reader.word(in bytes);
+        let query_start = reader.pos;
+        let padded = wrapping_mul(wrapping_add(query_len, 7) / 8, 8);
+        reader.pos = wrapping_add(query_start, padded);
+        let query_bytes = bytes[query_start..add(query_start, query_len)];
+        let mut query_reader = Reader { pos: 0 };
         let mut nmap = ChunkSeq::new[u32]();
-        read_q_names(inout qr, in qb, inout sess.c.names, inout nmap);
+        read_q_names(inout query_reader, in query_bytes, inout sess.ctx.names, inout nmap);
         let mut tmap = ChunkSeq::new[u32]();
-        read_q_types(inout qr, in qb, inout sess.c, in nmap, inout tmap);
-        let s = qr.word(in qb);
-        let e = qr.word(in qb);
-        let fn_name = sym(in nmap, qr.word(in qb));
-        let cx = read_cx_header(inout qr, in qb, inout sess, in nmap, in tmap, fn_name);
-        let callee = sym(in nmap, qr.word(in qb));
-        let is_path = qr.word(in qb) != 0;
-        let receiver = u32_at(in tmap, qr.word(in qb));
-        let res = resolve_call_one(inout sess, in cx, fn_name, callee, is_path, receiver, s, e);
-        push_packed_outcome(inout out, in res);
+        read_q_types(inout query_reader, in query_bytes, inout sess.ctx, in nmap, inout tmap);
+        let span_start = query_reader.word(in query_bytes);
+        let span_end = query_reader.word(in query_bytes);
+        let fn_name = sym(in nmap, query_reader.word(in query_bytes));
+        let context = read_cx_header(
+            inout query_reader,
+            in query_bytes,
+            inout sess,
+            in nmap,
+            in tmap,
+            fn_name
+        );
+        let callee = sym(in nmap, query_reader.word(in query_bytes));
+        let is_path = query_reader.word(in query_bytes) != 0;
+        let receiver = u32_at(in tmap, query_reader.word(in query_bytes));
+        let outcome = resolve_call_one(
+            inout sess,
+            in context,
+            fn_name,
+            callee,
+            is_path,
+            receiver,
+            span_start,
+            span_end
+        );
+        push_packed_outcome(inout out, in outcome);
     }
     out
 }
 
 // Entrypoint for `check_pact_normalize` (`[session_input][n_queries, queries...]`).
-pub fn normalize_words(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
-    let mut sess = session_open_reader(inout r, in b);
+pub fn normalize_words(in bytes: Slice[u8]) -> ChunkSeq[u64] {
+    let mut reader = Reader { pos: 0 };
+    let mut sess = session_open_reader(inout reader, in bytes);
     let mut out = ChunkSeq::new[u64]();
-    let p_out = pack_text(in sess.out);
-    out.extend(in p_out.as_slice());
+    let packed_out = pack_text(in sess.out);
+    out.extend(in packed_out.as_slice());
     if !sess.ok {
         out.push(0);
         return out;
     }
     out.push(1);
-    let fe = fe_new(sess.sy);
-    let nq = r.word(in b);
-    out.push(nq);
-    for _ in 0..nq {
-        let qlen = r.word(in b);
-        let qstart = r.pos;
-        let padded = wrapping_mul(wrapping_add(qlen, 7) / 8, 8);
-        r.pos = wrapping_add(qstart, padded);
-        let qb = b[qstart..add(qstart, qlen)];
-        let mut qr = Reader { pos: 0 };
+    let fe = fe_new(sess.syms);
+    let query_count = reader.word(in bytes);
+    out.push(query_count);
+    for _ in 0..query_count {
+        let query_len = reader.word(in bytes);
+        let query_start = reader.pos;
+        let padded = wrapping_mul(wrapping_add(query_len, 7) / 8, 8);
+        reader.pos = wrapping_add(query_start, padded);
+        let query_bytes = bytes[query_start..add(query_start, query_len)];
+        let mut query_reader = Reader { pos: 0 };
         let mut nmap = ChunkSeq::new[u32]();
-        read_q_names(inout qr, in qb, inout sess.c.names, inout nmap);
+        read_q_names(inout query_reader, in query_bytes, inout sess.ctx.names, inout nmap);
         let mut tmap = ChunkSeq::new[u32]();
-        read_q_types(inout qr, in qb, inout sess.c, in nmap, inout tmap);
-        let s = qr.word(in qb);
-        let e = qr.word(in qb);
-        let fn_name = sym(in nmap, qr.word(in qb));
-        let cx = read_cx_header(inout qr, in qb, inout sess, in nmap, in tmap, fn_name);
-        let ty = u32_at(in tmap, qr.word(in qb));
+        read_q_types(inout query_reader, in query_bytes, inout sess.ctx, in nmap, inout tmap);
+        let span_start = query_reader.word(in query_bytes);
+        let span_end = query_reader.word(in query_bytes);
+        let fn_name = sym(in nmap, query_reader.word(in query_bytes));
+        let context = read_cx_header(
+            inout query_reader,
+            in query_bytes,
+            inout sess,
+            in nmap,
+            in tmap,
+            fn_name
+        );
+        let ty = u32_at(in tmap, query_reader.word(in query_bytes));
         let mut stack: ChunkSeq[ChunkSeq[u8]] = ChunkSeq::new[ChunkSeq[u8]]();
-        let (ok, res_ty, err) = normalize_rec(inout sess, in fe, in cx, ty, s, e, inout stack);
+        let (ok, res_ty, err) = normalize_rec(
+            inout sess,
+            in fe,
+            in context,
+            ty,
+            span_start,
+            span_end,
+            inout stack
+        );
         if ok {
             let mut text = ChunkSeq::new[u8]();
-            display(in sess.c.types, in sess.c.names, res_ty, inout text);
-            let res = ResolveOutcome { status: ST_OK, text: text };
-            push_packed_outcome(inout out, in res);
+            display(in sess.ctx.types, in sess.ctx.names, res_ty, inout text);
+            let outcome = ResolveOutcome { status: ST_OK, text: text };
+            push_packed_outcome(inout out, in outcome);
         } else {
             push_packed_outcome(inout out, in err);
         }
