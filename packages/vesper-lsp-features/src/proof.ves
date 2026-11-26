@@ -246,7 +246,8 @@ fn kind_at(inout b: B, in a: Ast, in c: Ctx, in y: Syms, e: u32) -> u8 {
         } else if c.names.spells(t.name, in "i64".as_bytes()) {
             k = K_I64;
         } else if c.names.spells(t.name, in "bool".as_bytes())
-            || c.names.spells(t.name, in "Bool".as_bytes()) {
+            || c.names.spells(t.name, in "Bool".as_bytes())
+        {
             k = K_BOOL;
         } else if c.names.spells(t.name, in "Unit".as_bytes()) {
             k = K_UNIT;
@@ -971,7 +972,8 @@ fn block(
                 value = rhs;
             } else if is_op(op, y.y_add_assign)
                 || is_op(op, y.y_sub_assign)
-                || is_op(op, y.y_mul_assign) {
+                || is_op(op, y.y_mul_assign)
+            {
                 let o = if is_op(op, y.y_add_assign) {
                     OP_ADD
                 } else if is_op(op, y.y_sub_assign) {

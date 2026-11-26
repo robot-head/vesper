@@ -539,7 +539,8 @@ fn specialize_function_arguments(
                     let root = n32(p.op(i.a));
                     if p.path(p.op(inc(i.a))).n == 0
                         && !is_bound(in p, f, root)
-                        && u32_at(in idx, w(root)) != 0 {
+                        && u32_at(in idx, w(root)) != 0
+                    {
                         rd.push(i.dest);
                         rf.push(root);
                     }
@@ -1444,7 +1445,8 @@ fn tail_resumptive(
                     }
                 } else if i.op == Op::Read
                     && p.path(p.op(inc(i.a))).n == 0
-                    && has32(in bound, n32(p.op(i.a))) {
+                    && has32(in bound, n32(p.op(i.a)))
+                {
                     alias.push(i.dest);
                     if !has32(in retyped, i.dest) {
                         retyped.push(i.dest);
@@ -1765,7 +1767,8 @@ fn specialize(
                     && c.names.size(callee) > 0
                     && c.names.byte(callee, 0) != 36
                     && exists(in idx, callee)
-                    && row_has(in c.types, load_effects(in p, in idx, callee), s.effect) {
+                    && row_has(in c.types, load_effects(in p, in idx, callee), s.effect)
+                {
                     let mut argw = ChunkSeq::new[u64]();
                     for q in 0..n {
                         argw.push(add(add(i.a, 2), wrapping_mul(q, 4)));
@@ -1824,7 +1827,8 @@ fn specialize(
                 }
                 if ty != NONE32
                     && c.types.node(ty).kind == TyKind::Fn
-                    && row_has(in c.types, ty, s.effect) {
+                    && row_has(in c.types, ty, s.effect)
+                {
                     let d = d_eff(in c.names, "a function value performing ", s.effect, "");
                     Fail::raise(uerr(in c.names, old, d));
                 }

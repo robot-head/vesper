@@ -837,7 +837,8 @@ fn set_pending(inout a: Aplic, h: AplicHdr, src: u64) {
     let mode = mode_h(in a, h, src);
     if mode == SourceMode::Detached
         || mode == SourceMode::EdgeRising
-        || mode == SourceMode::EdgeFalling {
+        || mode == SourceMode::EdgeFalling
+    {
         set_src_flag(inout a.pending, h, src, true);
     } else if is_level(mode) {
         if h.dm && rectify(mode, src_flag(in a.raw, h, src)) {
@@ -1082,7 +1083,8 @@ pub fn m_aplic_read32(inout a: Aplic, d: u64, addr: u64) -> u64 eff [Fail[AiaFau
         || off == AplicReg::Setienum
         || off == AplicReg::Clrienum
         || off == AplicReg::SetipnumLe
-        || off == AplicReg::SetipnumBe {
+        || off == AplicReg::SetipnumBe
+    {
         return 0;
     }
     if in_words(off, AplicReg::Clrie, nw) {

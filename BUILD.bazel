@@ -39,6 +39,8 @@ vesper_crate(
     compile_data = [
         "assets/fonts/**",
         "examples/*.ves",
+        # The checker's preludes (src/strings.rs and the rest embed them).
+        "packages/vesper-preludes/preludes/*.ves",
         "src/**/*.ves",
         "tests/fixtures/source_macros/keep.ves",
         "lean/StylusAndLintSafety.lean",
@@ -937,6 +939,9 @@ vesper_crate(
         "test/closure_modes_collections": [":files"],
         # Milestone 7: the verified backend over the self-hosted front end.
         "test/verified_codegen_fail_front_end": glob(["packages/**/*.ves"]),
+        "test/verified_codegen_front_end": glob(["packages/**"]) + [
+            "docs/parallel-results/verified-codegen-front-end-inventory.txt",
+        ],
         "test/self_host_front_end": glob([
             "packages/**/*.ves",
             "examples/**/*.ves",

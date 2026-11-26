@@ -251,7 +251,8 @@ pub fn pair_total(
                 && gf(in smin, wrapping_add(bt, 1)) <= max1
                 && min2 <= gf(in smax, wrapping_add(bt, 2))
                 && gf(in smin, wrapping_add(bt, 2)) <= max2
-                && c != U32_MAX {
+                && c != U32_MAX
+            {
                 c = wrapping_add(c, 1);
             }
             t = inc(t);
@@ -302,7 +303,8 @@ pub fn write_pairs(
                 && min1 <= gf(in smax, wrapping_add(bt, 1))
                 && gf(in smin, wrapping_add(bt, 1)) <= max1
                 && min2 <= gf(in smax, wrapping_add(bt, 2))
-                && gf(in smin, wrapping_add(bt, 2)) <= max2 {
+                && gf(in smin, wrapping_add(bt, 2)) <= max2
+            {
                 let b = widen_u64(g32(in order, t));
                 if a < b {
                     out.try_set(at, (a << 32) | b);

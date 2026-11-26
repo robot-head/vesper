@@ -113,7 +113,8 @@ fn scoreboard_losses(inout t: Tcb, now: u64) {
             sacked_bytes = wrapping_add(sacked_bytes, widen_u64(seg_bytes(s)));
         } else if !s.lost
             && !s.rexmit_in_recovery
-            && (sacked_count >= dup_thresh() || sacked_bytes > limit) {
+            && (sacked_count >= dup_thresh() || sacked_bytes > limit)
+        {
             mark_lost(inout t, now, i);
             any = true;
         }

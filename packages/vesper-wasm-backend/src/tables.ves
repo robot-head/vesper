@@ -330,7 +330,8 @@ impl L {
                 shape.ty,
                 in bounds
             )
-                != TyMode::Copy {
+                != TyMode::Copy
+            {
                 return NONE64;
             }
             let n_elems = self.ctx.arity(shape.ty);
@@ -354,7 +355,8 @@ impl L {
                 shape.ty,
                 in bounds
             )
-                != TyMode::Copy {
+                != TyMode::Copy
+            {
                 return NONE64;
             }
             let n_fields = self.ctx.field_count(shape, 0);
@@ -379,7 +381,8 @@ impl L {
                 shape.ty,
                 in bounds
             )
-                != TyMode::Copy {
+                != TyMode::Copy
+            {
                 return NONE64;
             }
             let mut max_fc: u64 = 0;
@@ -649,14 +652,16 @@ impl L {
         op_pos: u64
     ) -> bool eff [Fail[WErr]] {
         if sym_ends_with(in self.ctx.names, callee, in "stage2_1heap_1mark".as_bytes())
-            || sym_ends_with(in self.ctx.names, callee, in "stage2_heap_mark".as_bytes()) {
+            || sym_ends_with(in self.ctx.names, callee, in "stage2_heap_mark".as_bytes())
+        {
             let dest = self.dest(dest_val);
             self.cur_fn.code.global_get(self.heap);
             self.cur_fn.code.set(dest);
             return true;
         }
         if sym_ends_with(in self.ctx.names, callee, in "stage2_1heap_1reset".as_bytes())
-            || sym_ends_with(in self.ctx.names, callee, in "stage2_heap_reset".as_bytes()) {
+            || sym_ends_with(in self.ctx.names, callee, in "stage2_heap_reset".as_bytes())
+        {
             let mark = self.value(self.ctx.ir.word(add(op_pos, 3)));
             self.cur_fn.code.get(mark);
             self.cur_fn.code.i64_const(0);
@@ -671,7 +676,8 @@ impl L {
             return true;
         }
         if sym_ends_with(in self.ctx.names, callee, in "stage2_1heap_1swap".as_bytes())
-            || sym_ends_with(in self.ctx.names, callee, in "stage2_heap_swap".as_bytes()) {
+            || sym_ends_with(in self.ctx.names, callee, in "stage2_heap_swap".as_bytes())
+        {
             let mark = self.value(self.ctx.ir.word(add(op_pos, 3)));
             let dest = self.dest(dest_val);
             self.cur_fn.code.global_get(self.heap);

@@ -3,7 +3,7 @@
 // Element reads use `try_get`, whose `None` arm no index here reaches, so
 // the functions are total and raise nothing.
 use @vesper-std/core::iter::all;
-use @vesper-std/sugar::{guard, when};
+use @vesper-std/sugar::{guard, when, while};
 
 // Whether `a` sorts before `b`.
 pub fn lt[T: mod copy + Ord](a: T, b: T) -> bool {
@@ -44,16 +44,10 @@ pub fn is_sorted[T: mod copy + Ord](in s: Slice[T]) -> bool {
 // Insertion sort of `s[lo..hi]`.
 pub fn insertion[T: mod copy + Ord](inout s: Slice[T], lo: u64, hi: u64) {
     let mut i = wrapping_add(lo, 1);
-    loop {
-        if i >= hi {
-            break;
-        }
+    while i < hi {
         when let Option::Some(x) = s.try_get(i) {
             let mut j = i;
-            loop {
-                if j <= lo {
-                    break;
-                }
+            while lo < j {
                 let k = wrapping_sub(j, 1);
                 let y = s.try_get(k).unwrap_or(x);
                 if !lt(x, y) {

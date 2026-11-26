@@ -425,7 +425,8 @@ pub fn open_bundle(
         || byte_at(in bytes, 4) != 79
         || byte_at(in bytes, 5) != 78
         || byte_at(in bytes, 6) != 79
-        || byte_at(in bytes, 7) != 49 {
+        || byte_at(in bytes, 7) != 49
+    {
         return Result::Err(3);
     }
     let body_len = wrapping_sub(bytes.len(), 32);
@@ -441,7 +442,8 @@ pub fn open_bundle(
                     break;
                 }
                 if byte_at(in mac_bytes.as_slice(), mi)
-                    != byte_at(in bytes, wrapping_add(body_len, mi)) {
+                    != byte_at(in bytes, wrapping_add(body_len, mi))
+                {
                     return Result::Err(6);
                 }
                 mi = wrapping_add(mi, 1);

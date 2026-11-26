@@ -320,7 +320,8 @@ pub fn lex(in bytes: Slice[u8]) -> Lexed eff [Fail[VsysError]] {
             });
         } else if byte == 45
             && wrapping_add(at, 1) < n
-            && byte_at(in bytes, wrapping_add(at, 1)) == 62 {
+            && byte_at(in bytes, wrapping_add(at, 1)) == 62
+        {
             at = wrapping_add(at, 2);
             toks.push(Tok {
                 kind: tok_arrow(),
@@ -333,7 +334,8 @@ pub fn lex(in bytes: Slice[u8]) -> Lexed eff [Fail[VsysError]] {
         } else if byte == 46
             && wrapping_add(at, 2) < n
             && byte_at(in bytes, wrapping_add(at, 1)) == 46
-            && byte_at(in bytes, wrapping_add(at, 2)) == 46 {
+            && byte_at(in bytes, wrapping_add(at, 2)) == 46
+        {
             at = wrapping_add(at, 3);
             toks.push(Tok {
                 kind: tok_ellipsis(),

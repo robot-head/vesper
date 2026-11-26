@@ -24,7 +24,8 @@ fn c_type(at: i64, depth: i64) -> CTypeAt eff [Fail[CheckError], Fail[Diag], Fai
                 || c_word(at, 0x663332)
                 || c_word(at, 0x663634)
                 || c_word(at, 0x537472696e67)
-                || c_word(at, 0x4e65766572) {
+                || c_word(at, 0x4e65766572)
+            {
                 c_unsupported(2, at)
             } else {
                 0

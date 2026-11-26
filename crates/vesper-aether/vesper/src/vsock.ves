@@ -706,7 +706,8 @@ fn vsock_guest_packet_inner(inout st: VsockState, in bytes: Slice[u8]) -> u64 {
     if slot == VSOCK_NONE {
         if h.op == VSOCK_OP_REQUEST
             && vsock_listener_kind(in st, h.dst_port) == widen_u64(h.kind)
-            && st.keys.len() < VSOCK_MAX_CONNECTIONS {
+            && st.keys.len() < VSOCK_MAX_CONNECTIONS
+        {
             let mut c = vsock_new_conn(h.kind, true);
             c.peer_buf_alloc = h.buf_alloc;
             c.peer_fwd_cnt = h.fwd_cnt;

@@ -435,7 +435,8 @@ pub fn run_verify(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fa
         );
     }
     if format
-        && (has_proofs || has_theorem || has_contract || has_allowed_axiom || has_olean_store) {
+        && (has_proofs || has_theorem || has_contract || has_allowed_axiom || has_olean_store)
+    {
         return fail_verify(
             has_json,
             has_extract,

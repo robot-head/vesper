@@ -1,0 +1,44 @@
+// The checker's built-in preludes as source text. The Rust checker embeds
+// the same files with `include_str!` (src/strings.rs and the rest), and the
+// Vesper ports of the checker read them here.
+
+// `atomics::PRELUDE`: the `Atomic[T]` cell, its orders and its operations.
+pub fn atomics_source() -> Str {
+    include_str("preludes/atomics.ves")
+}
+
+// `option_methods::PRELUDE`: `Option`'s methods.
+pub fn option_source() -> Str {
+    include_str("preludes/option.ves")
+}
+
+// `regions::PRELUDE`: the built-in `Region` effect.
+pub fn regions_source() -> Str {
+    include_str("preludes/regions.ves")
+}
+
+// `strings::PRELUDE`: every UTF-8 operation of `Str` and `String`.
+pub fn strings_source() -> Str {
+    include_str("preludes/strings.ves")
+}
+
+// `trace_effects::TELEMETRABLE_PRELUDE`: added only when a module names
+// `Telemetrable`.
+pub fn telemetrable_source() -> Str {
+    include_str("preludes/telemetrable.ves")
+}
+
+// `tensor_types::PRELUDE`: the built-in tensor and KV-cache declarations.
+pub fn tensor_source() -> Str {
+    include_str("preludes/tensor.ves")
+}
+
+// `trace_effects::PRELUDE`: the built-in `Trace` declarations.
+pub fn trace_source() -> Str {
+    include_str("preludes/trace.ves")
+}
+
+// `atomics::WORKERS_PRELUDE`: the sequential schedule of `parallel_for`.
+pub fn workers_source() -> Str {
+    include_str("preludes/workers.ves")
+}

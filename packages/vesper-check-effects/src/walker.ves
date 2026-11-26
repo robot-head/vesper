@@ -379,7 +379,8 @@ fn secret_visit(in ctx: Ctx, syms: Syms, ty: u32, inout seen: ChunkSeq[u32]) -> 
                         syms,
                         ctx.world.field(add(w(variant.fa), field_index)).ty,
                         inout seen
-                    ) {
+                    )
+                {
                     found = true;
                 }
             }
@@ -1669,7 +1670,8 @@ fn binary(
         && (
             ctx.world.may_overflow(node.start, node.end)
                 || ctx.world.is_partial(node.start, node.end)
-        ) {
+        )
+    {
         if walk.emit {
             let code_start = begin(inout walk, E_SECRET_LATENCY);
             put(inout walk, "eff [ConstTime] checked '");
@@ -1811,7 +1813,8 @@ fn closure(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32, node: 
             || (
                 !secret_type(in ctx, inout walk, declared_ty)
                     && !carries_no_information(in ctx, walk.syms, declared_ty)
-            ) {
+            )
+        {
             let tail_node = tail_span(in prog, node.e);
             let code_start = begin(inout walk, E_SECRET_RESULT);
             put(inout walk, "eff [ConstTime] closure returns a secret-derived value as non-secret");
@@ -2461,7 +2464,8 @@ fn call_value(
                 && has(in walk, CT)
                 && !lexical
                 && !secret_type(in ctx, inout walk, param_ty)
-                && walk.emit {
+                && walk.emit
+            {
                 let arg_node = prog.expr(arg);
                 let code_start = begin(inout walk, E_SECRET_TO_PUBLIC);
                 put(

@@ -134,7 +134,8 @@ fn content_type(in s: Slice[u8], a: u64, b: u64) -> Unit eff [Fail[Perr]] {
     let first = find(in s, a, b, Ascii::Semicolon);
     let (ma, mb) = trim(in s, a, first);
     if !eq_ic(in s, ma, mb, "application/vscode-jsonrpc")
-        && !eq_ic(in s, ma, mb, "application/json") {
+        && !eq_ic(in s, ma, mb, "application/json")
+    {
         Fail::raise(Perr::PUnsupportedEncoding);
     }
     let mut charset = false;

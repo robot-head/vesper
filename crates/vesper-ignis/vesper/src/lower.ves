@@ -601,7 +601,8 @@ pub fn lower_plan(
                                                 match active.try_get(a) {
                                                     Option::Some(x) => {
                                                         if found == active.len()
-                                                            && same_split(x, kb) {
+                                                            && same_split(x, kb)
+                                                        {
                                                             found = a;
                                                         }
                                                     },

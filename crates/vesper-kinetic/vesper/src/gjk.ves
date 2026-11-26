@@ -463,7 +463,8 @@ fn gjk_cores(
     let vv = dot(v, v);
     let distance = if vv <= REL_TOL_SQ * size * size
         || simplex.len() == 4
-        || (stalled && vv <= REL_TOL * size * size) {
+        || (stalled && vv <= REL_TOL * size * size)
+    {
         0.0
     } else {
         sqrt(vv)
@@ -695,7 +696,8 @@ fn epa(
     if !make_face(in pts, 0, 1, 2, inside, inout faces)
         || !make_face(in pts, 0, 1, 3, inside, inout faces)
         || !make_face(in pts, 0, 2, 3, inside, inout faces)
-        || !make_face(in pts, 1, 2, 3, inside, inout faces) {
+        || !make_face(in pts, 1, 2, 3, inside, inout faces)
+    {
         return degenerate();
     }
     let size = fmax(extent, 1.0);

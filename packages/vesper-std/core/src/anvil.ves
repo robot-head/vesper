@@ -1,0 +1,20 @@
+// Named Anvil unit tests (manuscript §7.8). The identifier is the test
+// name in Anvil's reports and filters; it need not start with `test_`.
+// Use a regular `test { ... }` block for helpers and parameterized cases.
+pub sugar test: item {
+    rule (test $name:ident $body:block) => {
+        test {
+            @test fn $name() -> bool $body
+        }
+    }
+}
+
+// Named Anvil properties use ordinary typed value parameters. Anvil
+// generates the inputs and reports any counterexample under the given name.
+pub sugar prop: item {
+    rule (prop $name:ident[$($arg:ident: $ty:ty),+] $body:block) => {
+        test {
+            @test fn $name($($arg: $ty),+) -> bool $body
+        }
+    }
+}

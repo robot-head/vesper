@@ -347,7 +347,8 @@ pub fn lookup(
     if sym_len(in loader, name) > 0
         && first_byte >= 65
         && first_byte <= 90
-        && mod_path_len(in loader, target_module) == 0 {
+        && mod_path_len(in loader, target_module) == 0
+    {
         loader.err_help.push_str(
             in "a `.vsys` library is not an item: every module names it directly, as `Lib::f(..)` and `eff [Ffi[Lib]]`, with no import"
         );
@@ -536,7 +537,8 @@ pub fn reexports(inout loader: St) {
                                         let local_member = join_path(inout loader, local, member);
                                         if !loader
                                             .reexport_key
-                                            .contains_key(pair(n32(module), local_member)) {
+                                            .contains_key(pair(n32(module), local_member))
+                                        {
                                             reexp_add(
                                                 inout loader,
                                                 n32(module),
@@ -800,7 +802,8 @@ pub fn qualified(inout loader: St, cur_module: u32, path: u32, start: u32, end: 
             && inc(module_len) < rest
             && sym_len(in loader, item) > 0
             && first_byte >= 97
-            && first_byte <= 122 {
+            && first_byte <= 122
+        {
             err(inout loader, unknown_import(), start, end);
             let mut msg = String::new();
             msg.push_str(in "no module ");

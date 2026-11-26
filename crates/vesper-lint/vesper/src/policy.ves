@@ -175,7 +175,8 @@ fn validate_limits(in l: Limits) eff [Fail[LintFail]] {
         || l.nodes == 0
         || l.nodes > HARD_NODES
         || l.work == 0
-        || l.work > HARD_WORK {
+        || l.work > HARD_WORK
+    {
         fail(P_INVALID_LIMITS);
     }
 }
@@ -663,7 +664,8 @@ fn key_eq(in t: Toml, a: u64, alen: u64, b: u64, blen: u64) -> bool {
     }
     for i in 0..alen {
         if at(in t.text.as_slice(), wrapping_add(a, i))
-            != at(in t.text.as_slice(), wrapping_add(b, i)) {
+            != at(in t.text.as_slice(), wrapping_add(b, i))
+        {
             return false;
         }
     }
@@ -993,7 +995,8 @@ fn ml_basic_string(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
                     if e == Ascii::Space || e == Ascii::Tab {
                         bump(inout t);
                     } else if e == Ascii::Lf
-                        || (e == Ascii::Cr && peek_at(in s, in t, 1) == Ascii::Lf) {
+                        || (e == Ascii::Cr && peek_at(in s, in t, 1) == Ascii::Lf)
+                    {
                         newline(in s, inout t);
                     } else {
                         break;
@@ -1475,7 +1478,8 @@ fn float(in s: Slice[u8], inout t: Toml) -> bool eff [Fail[LintFail]] {
     let b = peek_at(in s, in t, 1);
     let d = peek_at(in s, in t, 2);
     if (a == Ascii::LowerI && b == Ascii::LowerN && d == Ascii::LowerF)
-        || (a == Ascii::LowerN && b == Ascii::LowerA && d == Ascii::LowerN) {
+        || (a == Ascii::LowerN && b == Ascii::LowerA && d == Ascii::LowerN)
+    {
         t.pos = wrapping_add(t.pos, 3);
         return true;
     }
@@ -1812,7 +1816,8 @@ fn marker_first(in t: Toml) -> bool {
                 let mut same = true;
                 for i in 0..m.len() {
                     if at(in t.text.as_slice(), wrapping_add(widen_u64(e.kstart), i))
-                        != at(in m, i) {
+                        != at(in m, i)
+                    {
                         same = false;
                     }
                 }
@@ -1900,7 +1905,8 @@ fn validate_tree(in t: Toml, inout b: Budget) eff [Fail[LintFail]] {
         } else if x.kind == N_INTEGER
             || x.kind == N_FLOAT
             || x.kind == N_BOOL
-            || x.kind == N_DATETIME {
+            || x.kind == N_DATETIME
+        {
             text(inout b, 8);
         } else {
             let len = widen_u64(x.count);
