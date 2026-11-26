@@ -726,14 +726,7 @@ fn string_literal_end(in s: Slice[u8], start: u64) -> u64 {
         if b == 34 {
             return wrapping_add(i, 1);
         }
-        i = wrapping_add(
-            i,
-            if b == 92 {
-                2
-            } else {
-                1
-            }
-        );
+        i = wrapping_add(i, if b == 92 { 2 } else { 1 });
     }
 }
 

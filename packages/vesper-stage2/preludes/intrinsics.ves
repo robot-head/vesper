@@ -24,11 +24,7 @@ pub fn checked_mul_u64(a: u64, b: u64) -> Option[u64] {
 }
 pub fn checked_add_u128(a: u128, b: u128) -> Option[u128] {
     let s = wrapping_add(a, b);
-    if s < a {
-        Option::None
-    } else {
-        Option::Some(s)
-    }
+    if s < a { Option::None } else { Option::Some(s) }
 }
 pub fn checked_mul_u128(a: u128, b: u128) -> Option[u128] {
     if a == 0 || b == 0 {

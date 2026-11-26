@@ -25,38 +25,14 @@ impl String {
         } else if b0 < 194 {
             0
         } else if b0 < 224 {
-            if (b1 & 192) == 128 {
-                2
-            } else {
-                0
-            }
+            if (b1 & 192) == 128 { 2 } else { 0 }
         } else if b0 < 240 {
-            let lo: u32 = if b0 == 224 {
-                160
-            } else {
-                128
-            };
-            let hi: u32 = if b0 == 237 {
-                159
-            } else {
-                191
-            };
-            if b1 >= lo && b1 <= hi && c2 {
-                3
-            } else {
-                0
-            }
+            let lo: u32 = if b0 == 224 { 160 } else { 128 };
+            let hi: u32 = if b0 == 237 { 159 } else { 191 };
+            if b1 >= lo && b1 <= hi && c2 { 3 } else { 0 }
         } else if b0 < 245 {
-            let lo: u32 = if b0 == 240 {
-                144
-            } else {
-                128
-            };
-            let hi: u32 = if b0 == 244 {
-                143
-            } else {
-                191
-            };
+            let lo: u32 = if b0 == 240 { 144 } else { 128 };
+            let hi: u32 = if b0 == 244 { 143 } else { 191 };
             if b1 >= lo && b1 <= hi && c2 && c3 {
                 4
             } else {

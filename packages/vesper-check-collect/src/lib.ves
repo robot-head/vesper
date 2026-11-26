@@ -23,7 +23,9 @@ use @vesper/ast::{
 };
 use @vesper/ast::lower::{lower_source};
 use @vesper/check-data::{pack_text};
-use @vesper/preludes::{atomics_source, option_source, regions_source, strings_source, workers_source};
+use @vesper/preludes::{
+    atomics_source, option_source, regions_source, strings_source, workers_source
+};
 use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{Interner, interner_new, symbol_from_id};
 use self::prelude::{
