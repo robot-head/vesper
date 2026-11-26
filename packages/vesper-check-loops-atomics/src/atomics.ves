@@ -614,10 +614,8 @@ fn expr_mentions(
             }
         }
         if row.is_let
-            && (
-                type_mentions(in types, in syms, row.let_ty)
-                    || pattern_mentions(in names, in exprs, in syms, row.pat)
-            )
+            && (type_mentions(in types, in syms, row.let_ty)
+                || pattern_mentions(in names, in exprs, in syms, row.pat))
         {
             return true;
         }

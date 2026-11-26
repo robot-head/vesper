@@ -208,9 +208,8 @@ fn claim(
         if start < re && rs < end {
             if start == rs
                 && end == re
-                && (
-                    role == rr || (len == UOFFSET_BYTES && role >= ROLE_VECTOR && rr >= ROLE_VECTOR)
-                )
+                && (role == rr
+                    || (len == UOFFSET_BYTES && role >= ROLE_VECTOR && rr >= ROLE_VECTOR))
             {
                 return;
             }

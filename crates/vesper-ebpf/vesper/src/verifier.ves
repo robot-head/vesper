@@ -3816,13 +3816,12 @@ fn bounded_iteration(in v: V, pc: u64, rid: u64, in st: St) -> bool {
     }
     // only an active iterator, the same instance the earlier visit used
     let r1 = reg(in st, 1);
-    if !(
-        r1.tag == 6
-            && wrapping_add(r1.x, 1) == nframes(in st)
-            && bits(r1.off) & 7 == 0
-            && r1.off >= NEG_STACK_BYTES
-            && r1.off < 0
-    ) {
+    if !(r1.tag == 6
+        && wrapping_add(r1.x, 1) == nframes(in st)
+        && bits(r1.off) & 7 == 0
+        && r1.off >= NEG_STACK_BYTES
+        && r1.off < 0)
+    {
         return false;
     }
     let at = shr(bits(wrapping_add(r1.off, STACK_BYTES_I)), 3);

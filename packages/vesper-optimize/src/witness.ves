@@ -1298,10 +1298,9 @@ fn check_rule(
                 return e;
             }
             let premise = proof_at(in proofs, step.guard);
-            if !(
-                (premise.from == erased && total_leaf(in terms, premise.to))
-                    || (premise.to == erased && total_leaf(in terms, premise.from))
-            ) {
+            if !((premise.from == erased && total_leaf(in terms, premise.to))
+                || (premise.to == erased && total_leaf(in terms, premise.from)))
+            {
                 return E_UNPROVEN_TOTALITY;
             }
         } else if !total_leaf(in terms, erased) {

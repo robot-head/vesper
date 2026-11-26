@@ -379,16 +379,14 @@ fn quoted(inout p: P, in pool: Str, off: u64, len: u64, delimiter: u32) {
             Option::Some(d) => d,
             Option::None => (0, end),
         };
-        let plain = !(
-            c == Ch::Backslash
-                || c == Ch::Lf
-                || c == Ch::Cr
-                || c == Ch::Tab
-                || c == delimiter
-                || (is_control(c) && c <= Ch::Latin1Last)
-                || c == Ch::LineSeparator
-                || c == Ch::ParagraphSeparator
-        );
+        let plain = !(c == Ch::Backslash
+            || c == Ch::Lf
+            || c == Ch::Cr
+            || c == Ch::Tab
+            || c == delimiter
+            || (is_control(c) && c <= Ch::Latin1Last)
+            || c == Ch::LineSeparator
+            || c == Ch::ParagraphSeparator);
         if !plain {
             p.out.push_str(pool[run..i]);
             if c == Ch::Backslash {

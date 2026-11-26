@@ -14,6 +14,15 @@ use @vesper/check-data::util::{inc, n32, u32_at, u64_at, u8_at, w};
 use @vesper/check-data::input::Reader;
 use @vesper/check-data::names::{Names, names_new};
 use @vesper/check-data::types::{TyMode, TyPass};
+use @vesper-std/bytes::ascii::{
+    COLON, DIGIT_NINE, DIGIT_ZERO, DOT, LOWER_A, LOWER_Z, SPACE, UNDERSCORE
+};
+use self::iface::{
+    ABI_V1_TAG, ABI_V2_TAG, ABI_V3, ABI_V3_TAG, ABI_V4, ABI_V4_TAG, K_BOX, K_CALLBACK, K_EXTERN,
+    K_NAMED, K_OBJECT, K_SCALAR, K_SEQ, K_SLICE, K_STR, K_TUPLE, M_CONVERTED, M_NONE, M_REPR_C,
+    RESULT_ARGS
+};
+use self::text::{WORD_BYTES, WORD_ROUND_UP};
 
 // Type classes (plan_words.rs `C_*`).
 const C_OTHER: u8 = 0;
@@ -29,18 +38,6 @@ const C_NAMED: u8 = 9;
 const C_EXTERN: u8 = 10;
 const C_CALLBACK: u8 = 11;
 
-// ABI type kinds (words.rs `K_*`).
-const K_SCALAR: u8 = 0;
-const K_TUPLE: u8 = 1;
-const K_NAMED: u8 = 2;
-const K_SEQ: u8 = 3;
-const K_SLICE: u8 = 4;
-const K_BOX: u8 = 5;
-const K_STR: u8 = 6;
-const K_OBJECT: u8 = 7;
-const K_EXTERN: u8 = 8;
-const K_CALLBACK: u8 = 9;
-
 // Positions (`Position`): a parameter's pass, then these.
 const POS_RESULT: u8 = 3;
 const POS_ERROR: u8 = 4;
@@ -54,12 +51,24 @@ const E_TYPE: u8 = 4;
 const E_INSTANCE: u8 = 5;
 const E_COMPILE: u8 = 6;
 
-const MIRROR_NONE: u8 = 0;
-const MIRROR_REPR_C: u8 = 1;
-const MIRROR_CONVERTED: u8 = 2;
-
 // A failed step's answer; the refusal is in `Planner::pending`.
 const FAIL: u32 = 4294967295;
+
+// `fail_words`: FAIL as a word count; and `fail_record_size`'s header and
+// smallest payload, in bytes.
+const FAIL_WORDS: u64 = 18446744073709551615;
+const FAIL_HEADER_BYTES: u64 = 8;
+const FAIL_MIN_PAYLOAD: u64 = 8;
+
+// The answer's status word: planned, or refused.
+const STATUS_PLANNED: u64 = 0;
+const STATUS_REFUSED: u64 = 1;
+
+// The answer packs a string's bytes eight to a word (a byte's bits each),
+// and starts with room for this many words.
+const BYTE_BITS: u32 = 8;
+const PACK_BYTES: u32 = 8;
+const PLAN_WORDS_CAPACITY: u64 = 4096;
 
 // One input type.
 copy struct TNode {
@@ -331,7 +340,10 @@ fn read_str(inout r: Reader, in b: Slice[u8], inout names: Names) -> u32 {
     let len = r.word(in b);
     let start = r.pos;
     let s = names.intern(in b[start..wrapping_add(start, len)]);
-    r.pos = wrapping_add(start, wrapping_mul(wrapping_add(len, 7) / 8, 8));
+    r.pos = wrapping_add(
+        start,
+        wrapping_mul(wrapping_add(len, WORD_ROUND_UP) / WORD_BYTES, WORD_BYTES)
+    );
     s
 }
 
@@ -371,7 +383,7 @@ fn put_u64(inout o: ChunkSeq[u8], v: u64) {
     if v >= 10 {
         put_u64(inout o, v / 10);
     }
-    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+    o.push(wrapping_u8(wrapping_add(v % 10, widen_u64(DIGIT_ZERO))));
 }
 
 pub fn read_planner(in b: Slice[u8]) -> Planner {
@@ -559,7 +571,7 @@ pub fn read_planner(in b: Slice[u8]) -> Planner {
         refusals: ChunkSeq::new[Refusal](),
         pending: Refusal { kind: 0, a: 0, b: 0, c: 0 },
         v2: false,
-        v4: abi == 4,
+        v4: abi == ABI_V4,
         s_unit: s_unit,
         s_fail: s_fail,
         s_in: s_in,
@@ -714,7 +726,7 @@ impl Planner {
             return false;
         }
         let d = self.decl_of(n.name);
-        d != 0 && self.decl(wrapping_sub(d, 1)).mirror == MIRROR_REPR_C
+        d != 0 && self.decl(wrapping_sub(d, 1)).mirror == M_REPR_C
     }
 
     fn lent(in self, a: u32, options: bool) -> bool {
@@ -731,7 +743,7 @@ impl Planner {
         if n.name == self.s_option {
             return n.n == 1;
         }
-        n.name == self.s_result && n.n == 2
+        n.name == self.s_result && n.n == RESULT_ARGS
     }
 
     fn wide_by_pointer(in self, a: u32) -> bool {
@@ -889,7 +901,7 @@ impl Planner {
         let mut o = ChunkSeq::new[u8]();
         for i in 0..nd.vn {
             if i > 0 {
-                o.push(32);
+                o.push(SPACE);
             }
             put_sym(inout o, in self.names, u32_at(in self.adt_vars, wrapping_add(nd.va, i)));
         }
@@ -1072,12 +1084,12 @@ impl Planner {
             self.decls.push(Decl {
                 name: n,
                 is_enum: nd.is_enum,
-                words: nd.size / 8,
+                words: nd.size / WORD_BYTES,
                 is_handle: is_handle,
                 linear: linear,
                 drop: drop,
                 owns_sequence: false,
-                mirror: MIRROR_NONE,
+                mirror: M_NONE,
                 reason: 0,
                 va: 0,
                 vn: 0
@@ -1123,7 +1135,7 @@ impl Planner {
                         if reason != 0 {
                             let mut o = ChunkSeq::new[u8]();
                             put_sym(inout o, in self.names, n);
-                            o.push(46);
+                            o.push(DOT);
                             put_sym(inout o, in self.names, lf.name);
                             let d = intern_buf(inout self.names, in o);
                             return self.refuse3(E_TYPE, function, d, reason);
@@ -1131,7 +1143,7 @@ impl Planner {
                     }
                     fnames.push(lf.name);
                     ftys.push(fty);
-                    foffs.push(lf.offset / 8);
+                    foffs.push(lf.offset / WORD_BYTES);
                 }
             }
             let va = self.dvars.len();
@@ -1197,7 +1209,7 @@ impl Planner {
 
     // `fail_record_size(world, f) / 8`, or FAIL (`ExportError::Compile`).
     fn fail_words(inout self, f: FnIn) -> u64 {
-        let mut payload: u64 = 8;
+        let mut payload: u64 = FAIL_MIN_PAYLOAD;
         for i in 0..f.en {
             let e = match self.effs.try_get(wrapping_add(f.ea, i)) {
                 Option::Some(e) => e,
@@ -1208,15 +1220,18 @@ impl Planner {
                 if !nd.lok {
                     let r = nd.lreason;
                     let x = self.refuse3(E_COMPILE, r, 0, 0);
-                    return 18446744073709551615;
+                    return FAIL_WORDS;
                 }
                 if nd.size > payload {
                     payload = nd.size;
                 }
             }
         }
-        let bytes = wrapping_add(8, wrapping_mul(wrapping_add(payload, 7) / 8, 8));
-        bytes / 8
+        let bytes = wrapping_add(
+            FAIL_HEADER_BYTES,
+            wrapping_mul(wrapping_add(payload, WORD_ROUND_UP) / WORD_BYTES, WORD_BYTES)
+        );
+        bytes / WORD_BYTES
     }
 
     // `Planner::function`: the exported function of input function `fi`,
@@ -1319,7 +1334,7 @@ impl Planner {
         let mut fail: u64 = 0;
         if errors.len() > 0 {
             let words = self.fail_words(f);
-            if words == 18446744073709551615 {
+            if words == FAIL_WORDS {
                 return FAIL;
             }
             fail = wrapping_add(words, 1);
@@ -1358,7 +1373,7 @@ impl Planner {
             pa: pa,
             pn: pnames.len(),
             result: result,
-            result_words: rn.size / 8,
+            result_words: rn.size / WORD_BYTES,
             result_pointer: rn.aggregate || wide_result,
             ea: ea,
             en: errors.len(),
@@ -1482,7 +1497,7 @@ impl Planner {
                 continue;
             }
             if d.is_enum {
-                d.mirror = MIRROR_CONVERTED;
+                d.mirror = M_CONVERTED;
                 d.reason = intern_text(
                     inout self.names,
                     "an enum's payload words have no fixed Rust layout (tag and payload validity), so it is converted as in v2"
@@ -1493,13 +1508,13 @@ impl Planner {
                     Option::None => 0,
                 };
                 if first == 0 {
-                    d.mirror = MIRROR_CONVERTED;
+                    d.mirror = M_CONVERTED;
                     d.reason = intern_text(
                         inout self.names,
                         "a struct without fields is one ignored word"
                     );
                 } else {
-                    d.mirror = MIRROR_REPR_C;
+                    d.mirror = M_REPR_C;
                 }
             }
             let ok = self.decls.try_set(i, d);
@@ -1515,12 +1530,14 @@ fn valid_library_name(in names: Names, s: u32) -> bool {
         return false;
     }
     let c0 = names.byte(s, 0);
-    if c0 < 97 || c0 > 122 {
+    if c0 < LOWER_A || c0 > LOWER_Z {
         return false;
     }
     for i in 1..n {
         let c = names.byte(s, i);
-        if !(c >= 97 && c <= 122 || c >= 48 && c <= 57 || c == 95) {
+        if !(
+            c >= LOWER_A && c <= LOWER_Z || c >= DIGIT_ZERO && c <= DIGIT_NINE || c == UNDERSCORE
+        ) {
             return false;
         }
     }
@@ -1530,7 +1547,7 @@ fn valid_library_name(in names: Names, s: u32) -> bool {
 fn has_path(in names: Names, s: u32) -> bool {
     let n = names.size(s);
     for i in 1..n {
-        if names.byte(s, wrapping_sub(i, 1)) == 58 && names.byte(s, i) == 58 {
+        if names.byte(s, wrapping_sub(i, 1)) == COLON && names.byte(s, i) == COLON {
             return true;
         }
     }
@@ -1668,8 +1685,8 @@ pub fn plan(inout p: Planner) {
     if p.refusals.len() > 0 {
         return;
     }
-    let v4 = p.abi == 4;
-    let v3 = p.abi == 3 || v4;
+    let v4 = p.abi == ABI_V4;
+    let v3 = p.abi == ABI_V3 || v4;
     let options = v3 && p.option_mirrors;
     let v2 = v3 || p.v2 || p.vsys.len() > 0 || p.insts.len() > 0;
     if v3 {
@@ -1721,9 +1738,9 @@ fn put_str(inout out: ChunkSeq[u64], in names: Names, s: u32) {
     let mut x: u64 = 0;
     let mut k: u32 = 0;
     for i in 0..n {
-        x = x | wrapping_shl_u64(widen_u64(names.byte(s, i)), wrapping_mul(k, 8));
+        x = x | wrapping_shl_u64(widen_u64(names.byte(s, i)), wrapping_mul(k, BYTE_BITS));
         k = wrapping_add(k, 1);
-        if k == 8 {
+        if k == PACK_BYTES {
             out.push(x);
             x = 0;
             k = 0;
@@ -1776,9 +1793,9 @@ fn put_abi(inout out: ChunkSeq[u64], in s: Str) {
     let mut x: u64 = 0;
     let mut k: u32 = 0;
     for i in 0..o.len() {
-        x = x | wrapping_shl_u64(widen_u64(u8_at(in o, i)), wrapping_mul(k, 8));
+        x = x | wrapping_shl_u64(widen_u64(u8_at(in o, i)), wrapping_mul(k, BYTE_BITS));
         k = wrapping_add(k, 1);
-        if k == 8 {
+        if k == PACK_BYTES {
             out.push(x);
             x = 0;
             k = 0;
@@ -1794,9 +1811,9 @@ fn put_buf(inout out: ChunkSeq[u64], in o: ChunkSeq[u8]) {
     let mut x: u64 = 0;
     let mut k: u32 = 0;
     for i in 0..o.len() {
-        x = x | wrapping_shl_u64(widen_u64(u8_at(in o, i)), wrapping_mul(k, 8));
+        x = x | wrapping_shl_u64(widen_u64(u8_at(in o, i)), wrapping_mul(k, BYTE_BITS));
         k = wrapping_add(k, 1);
-        if k == 8 {
+        if k == PACK_BYTES {
             out.push(x);
             x = 0;
             k = 0;
@@ -1818,14 +1835,14 @@ fn runtime_name(inout out: ChunkSeq[u64], in p: Planner, in what: Str) {
 }
 
 pub fn write_plan(in p: Planner) -> ChunkSeq[u64] {
-    let mut out = ChunkSeq::with_capacity[u64](4096);
+    let mut out = ChunkSeq::with_capacity[u64](PLAN_WORDS_CAPACITY);
     if p.refusals.len() > 0 {
-        out.push(1);
+        out.push(STATUS_REFUSED);
         out.push(p.refusals.len());
         for i in 0..p.refusals.len() {
             let r = match p.refusals.try_get(i) {
                 Option::Some(r) => r,
-                Option::None => Refusal { kind: 1, a: 0, b: 0, c: 0 },
+                Option::None => Refusal { kind: E_NO_EXPORTS, a: 0, b: 0, c: 0 },
             };
             out.push(widen_u64(r.kind));
             if r.kind == E_NO_EXPORTS {
@@ -1841,17 +1858,17 @@ pub fn write_plan(in p: Planner) -> ChunkSeq[u64] {
         }
         return out;
     }
-    out.push(0);
-    let v4 = p.abi == 4;
-    let v3 = p.abi == 3 || v4;
+    out.push(STATUS_PLANNED);
+    let v4 = p.abi == ABI_V4;
+    let v3 = p.abi == ABI_V3 || v4;
     if v4 {
-        put_abi(inout out, "vesper.native.export-abi/4");
+        put_abi(inout out, ABI_V4_TAG);
     } else if v3 {
-        put_abi(inout out, "vesper.native.export-abi/3");
+        put_abi(inout out, ABI_V3_TAG);
     } else if p.v2 {
-        put_abi(inout out, "vesper.native.export-abi/2");
+        put_abi(inout out, ABI_V2_TAG);
     } else {
-        put_abi(inout out, "vesper.native.export-abi/1");
+        put_abi(inout out, ABI_V1_TAG);
     }
     put_str(inout out, in p.names, p.library);
     put_flag(inout out, v3 && p.option_mirrors);
@@ -1898,7 +1915,7 @@ pub fn write_plan(in p: Planner) -> ChunkSeq[u64] {
         put_opt(inout out, in p.names, d.drop);
         put_flag(inout out, d.owns_sequence);
         out.push(widen_u64(d.mirror));
-        if d.mirror == MIRROR_CONVERTED {
+        if d.mirror == M_CONVERTED {
             put_str(inout out, in p.names, d.reason);
         }
         out.push(d.vn);

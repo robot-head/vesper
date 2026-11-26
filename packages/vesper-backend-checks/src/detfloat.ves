@@ -181,10 +181,7 @@ fn prefix_is(in names: Names, name_id: u32, n: u64, in lit: Str) -> bool {
         return false;
     }
     for k in 0..n {
-        let byte = match lit_bytes.try_get(k) {
-            Option::Some(byte) => byte,
-            Option::None => 0,
-        };
+        let byte = lit_bytes.try_get(k).unwrap_or(0);
         if names.byte(name_id, k) != byte {
             return false;
         }
@@ -683,14 +680,10 @@ fn is_canonicalizer(in ctx: Cx, func: u64, row: u64) -> bool {
     let cond_value = arg(in ctx, row, 0);
     let true_value = arg(in ctx, row, 1);
     let false_value = arg(in ctx, row, 2);
-    (
-        is_nan_test_of(in ctx, func, cond_value, false_value, true)
-            && is_canonical_nan_const(in ctx, func, true_value)
-    )
-        || (
-            is_nan_test_of(in ctx, func, cond_value, true_value, false)
-                && is_canonical_nan_const(in ctx, func, false_value)
-        )
+    (is_nan_test_of(in ctx, func, cond_value, false_value, true)
+        && is_canonical_nan_const(in ctx, func, true_value))
+        || (is_nan_test_of(in ctx, func, cond_value, true_value, false)
+            && is_canonical_nan_const(in ctx, func, false_value))
 }
 
 fn check_nan_escape(inout ctx: Cx, func: u64, fname: u64) {

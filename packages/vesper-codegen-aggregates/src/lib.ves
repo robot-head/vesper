@@ -833,12 +833,10 @@ fn split_walk(inout e: Env, inout c: Ctx, layout: u32, base: i64, inout out: Lea
         let known = c.world.k;
         let word = ty_node.kind == TyKind::Named
             && ty_node.n == 0
-            && (
-                integer_name(in e, in c, ty_node.name)
-                    || ty_node.name == known.f32_
-                    || ty_node.name == known.f64_
-                    || ty_node.name == known.bool_
-            );
+            && (integer_name(in e, in c, ty_node.name)
+                || ty_node.name == known.f32_
+                || ty_node.name == known.f64_
+                || ty_node.name == known.bool_);
         if word {
             out.pa.push(out.syms.len());
             out.pn.push(out.stack.len());
@@ -2109,10 +2107,8 @@ fn window_ok(
                 ok = u8_at(in members, p.op(operands)) != 0;
             } else if op == Op::Read {
                 ok = u8_at(in members, w(inst.dest)) != 0
-                    || (
-                        p.op(inc(operands)) == 0
-                            && scalar_local(inout e, inout c, in g, in syms, n32(p.op(operands)))
-                    );
+                    || (p.op(inc(operands)) == 0
+                        && scalar_local(inout e, inout c, in g, in syms, n32(p.op(operands))));
             } else if op == Op::Data {
                 ok = true;
                 for j in 0..p.op(inc(operands)) {
@@ -2238,10 +2234,7 @@ fn drop_unsafe_once(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in sy
             if j <= at {
                 break;
             }
-            let prev = match groups.try_get(wrapping_sub(j, 1)) {
-                Option::Some(entry) => entry,
-                Option::None => new_group,
-            };
+            let prev = groups.try_get(wrapping_sub(j, 1)).unwrap_or(new_group);
             let ok = groups.try_set(j, prev);
             j = wrapping_sub(j, 1);
         }
@@ -3976,10 +3969,7 @@ fn shapes_new() -> Shapes {
 }
 
 fn i32_at(in seq: ChunkSeq[i32], i: u64) -> i32 {
-    match seq.try_get(i) {
-        Option::Some(value) => value,
-        Option::None => 0,
-    }
+    seq.try_get(i).unwrap_or(0)
 }
 
 impl Shapes {
@@ -4202,10 +4192,7 @@ fn label_is(in p: Program, in names: Names, pool: u64, in text: Str, prefix: boo
 }
 
 fn u8_at_slice(in slice: Slice[u8], i: u64) -> u8 {
-    match slice.try_get(i) {
-        Option::Some(byte) => byte,
-        Option::None => 0,
-    }
+    slice.try_get(i).unwrap_or(0)
 }
 
 // Whether the label of pool row `pool` contains `text`.

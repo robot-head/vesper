@@ -769,11 +769,17 @@ fn specialize_function_arguments(
 }
 
 // `prune`: only the functions the entry reaches by calls and handlers.
-fn prune(inout c: Ctx, inout p: Program, in ex: Ex, in idx: ChunkSeq[u32], entry: u32) {
+fn prune(
+    inout c: Ctx,
+    inout p: Program,
+    in ex: Ex,
+    in idx: ChunkSeq[u32],
+    in entries: ChunkSeq[u32]
+) {
     let mut seen = ChunkSeq::new[u32]();
     let mut queue = ChunkSeq::new[u32]();
     let mut keep = ChunkSeq::new[FnRow]();
-    queue.push(entry);
+    queue.extend(in entries.as_slice());
     let mut head: u64 = 0;
     loop {
         if head >= queue.len() {
@@ -2394,12 +2400,33 @@ pub fn evidence(
     entry: u32,
     regions_active: bool
 ) -> Sites eff [Fail[VErr]] {
+    let mut entries = ChunkSeq::new[u32]();
+    entries.push(entry);
+    let skip = ChunkSeq::new[u64]();
+    let mut at: u64 = 0;
+    evidence_from(inout c, inout p, in ex, in entries, regions_active, in skip, inout at)
+}
+
+// `rewrite` from every symbol of `entries`, leaving out the sites whose
+// ordinals (in rewriting order) are in `skip`; `at` is the function
+// symbol << 32 | the ordinal of the site being rewritten, so a caller that catches a site's error knows
+// which one failed (coverage reruns the pass without it, which is the
+// program Rust's rewrite of a copy leaves).
+pub fn evidence_from(
+    inout c: Ctx,
+    inout p: Program,
+    in ex: Ex,
+    in entries: ChunkSeq[u32],
+    regions_active: bool,
+    in skip: ChunkSeq[u64],
+    inout at: u64
+) -> Sites eff [Fail[VErr]] {
     let mut idx = ChunkSeq::new[u32]();
     for i in 0..p.fns.len() {
         set32(inout idx, w(fn_at(in p.fns, i).name), n32(inc(i)));
     }
     specialize_function_arguments(inout c, inout p, in ex, inout idx);
-    prune(inout c, inout p, in ex, in idx, entry);
+    prune(inout c, inout p, in ex, in idx, in entries);
     idx.clear();
     for i in 0..p.fns.len() {
         set32(inout idx, w(fn_at(in p.fns, i).name), n32(inc(i)));
@@ -2455,8 +2482,18 @@ pub fn evidence(
     // Rewriting a site moves the instructions after it; go backwards.
     let ns = sf.len();
     for n in 0..ns {
+        let mut skipped = false;
+        for q in 0..skip.len() {
+            if u64_at(in skip, q) == n {
+                skipped = true;
+            }
+        }
+        if skipped {
+            continue;
+        }
         let j = wrapping_sub(wrapping_sub(ns, 1), n);
         let name = u32_at(in sf, j);
+        at = (w(name) << 32) | n;
         let b = u64_at(in sb, j);
         let k = u64_at(in sk, j);
         let f = load_fn(in p, in idx, name);

@@ -352,10 +352,8 @@ fn append(inout result: ChunkSeq[Segment], next: Segment) {
     if n > 0 {
         let last = cseg(in result, dec(n));
         let same = last.upper_bounded == next.lower_bounded
-            && (
-                !last.upper_bounded
-                    || (last.upper_hi == next.lower_hi && last.upper_lo == next.lower_lo)
-            );
+            && (!last.upper_bounded
+                || (last.upper_hi == next.lower_hi && last.upper_lo == next.lower_lo));
         if same && (last.upper_inclusive || next.lower_inclusive) {
             result.try_set(
                 dec(n),
@@ -488,10 +486,8 @@ pub fn do_classify_differences(in segments: Slice[Segment], max_difference: i64)
     if last.upper_bounded && !w_slt(threshold, seg_upper(last)) {
         Outcome::Pass
     } else if first.lower_bounded
-        && (
-            w_slt(threshold, seg_lower(first))
-                || (w_eq(seg_lower(first), threshold) && !first.lower_inclusive)
-        )
+        && (w_slt(threshold, seg_lower(first))
+            || (w_eq(seg_lower(first), threshold) && !first.lower_inclusive))
     {
         Outcome::Regression
     } else {

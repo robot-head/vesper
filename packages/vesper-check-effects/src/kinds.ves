@@ -1,0 +1,70 @@
+// The node kinds and pool layouts of the task program (prog.ves), which
+// numbers its nodes as @vesper/ast does.
+
+// Expression kinds.
+pub const EXPR_LITERAL: u8 = 1;
+pub const EXPR_NAME: u8 = 2;
+pub const EXPR_TUPLE: u8 = 3;
+pub const EXPR_STRUCT: u8 = 4;
+pub const EXPR_BLOCK: u8 = 5;
+pub const EXPR_CALL: u8 = 6;
+pub const EXPR_FIELD: u8 = 7;
+pub const EXPR_INDEX: u8 = 8;
+pub const EXPR_TRY: u8 = 9;
+pub const EXPR_UNARY: u8 = 10;
+pub const EXPR_BINARY: u8 = 11;
+pub const EXPR_ASSIGN: u8 = 12;
+pub const EXPR_IF: u8 = 13;
+pub const EXPR_MATCH: u8 = 14;
+pub const EXPR_CLOSURE: u8 = 15;
+pub const EXPR_HANDLE: u8 = 16;
+pub const EXPR_LOOP: u8 = 17;
+pub const EXPR_FOR: u8 = 18;
+pub const EXPR_RANGE: u8 = 19;
+pub const EXPR_BREAK: u8 = 20;
+pub const EXPR_RETURN: u8 = 21;
+pub const EXPR_CONTINUE: u8 = 22;
+
+// Pattern kinds.
+pub const PAT_WILD: u8 = 1;
+pub const PAT_BIND: u8 = 2;
+pub const PAT_LITERAL: u8 = 3;
+pub const PAT_TUPLE: u8 = 4;
+pub const PAT_CONSTRUCTOR: u8 = 5;
+
+// Statement kinds (a block statement's `Kind` word).
+pub const STMT_LET: u32 = 1;
+
+// A pool list of pairs: a struct's and a constructor pattern's (name,
+// node), a call's (pass, Expr) and a match's (Pattern, Expr).
+pub const PAIR_WORDS: u64 = 2;
+
+// A block statement in the pool.
+pub enum StmtWord: u64 {
+    Kind = 0,
+    Pat = 1,
+    Type = 2,
+    Value = 3,
+    Words = 4,
+}
+
+// A closure parameter in the pool.
+pub enum ParamWord: u64 {
+    Name = 0,
+    Pass = 1,
+    Type = 2,
+    Words = 3,
+}
+
+// A handler clause in the pool.
+pub enum ClauseWord: u64 {
+    Name = 0,
+    PatsFirst = 1,
+    PatsLen = 2,
+    Body = 3,
+    Words = 4,
+}
+
+// A handler's return clause binds (value, state) as two patterns, or as
+// one pair pattern.
+pub const STATE_PAIR_LEN: u32 = 2;
