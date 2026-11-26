@@ -840,6 +840,12 @@ vesper_crate(
         "test/std_env": [":files"],
         "test/std_fs": [":files"],
         "test/std_process": [":files"],
+        # The proof-lens runner (#1828 part 8): a driver over
+        # @vesper/lsp-proof-run and @vesper-std/fs, process and env.
+        "test/self_host_proof_lens": [":files"] + glob([
+            "packages/vesper-lsp-proof-run/**",
+            "packages/vesper-std/**",
+        ]),
         "test/bench_pmu_port": [
             ":files",
             "//crates/vesper-bench-pmu:vesper_pkg",
@@ -1271,6 +1277,9 @@ vesper_crate(
         # The LSP core differential (#1339) records live `vesper lsp` sessions
         # and JIT-compiles three packages: about 2.5 min unoptimized.
         "test/self_host_lsp_core": "long",
+        # The proof-lens runner differential (#1828 part 8) runs 53 fake
+        # toolchain scenarios on both sides, some waiting out timeouts.
+        "test/self_host_proof_lens": "long",
         # The LSP features differential (#1340) JIT-compiles @vesper/lsp-features
         # and answers about 51,000 navigation requests on the corpus.
         "test/self_host_lsp_features": "long",

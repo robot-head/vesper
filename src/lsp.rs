@@ -87,6 +87,61 @@ pub fn lens_view_for_port(
         },
     )
 }
+/// A prepared proof-lens job (`proof_lens::prepare`), for the Vesper
+/// port's differential test of the runner.
+#[doc(hidden)]
+pub struct ProofJobForPort(proof_lens::Job);
+impl ProofJobForPort {
+    /// The job as the Vesper runner reads it (`proof_lens::job_words`).
+    pub fn words(&self) -> Vec<u8> {
+        proof_lens::job_words(&self.0)
+    }
+    /// Each model's function and Lean module name, in job order.
+    pub fn modules(&self) -> Vec<(String, String)> {
+        self.0
+            .models
+            .iter()
+            .map(|m| (m.function.clone(), m.module_name()))
+            .collect()
+    }
+    /// Run the job with a token nobody cancels; its outcome as text
+    /// (`proof_lens::outcome_rows`).
+    pub fn run(&self) -> String {
+        let cancel = vesper_lsp::lens::CancelToken::new();
+        proof_lens::outcome_rows(proof_lens::run(&self.0, &cancel).as_ref())
+    }
+}
+
+/// Prepare the proof-lens job for `source` (checked under the default
+/// analysis limits): the extraction obligations of `extraction` and the
+/// semantic models of `models` (functions without a model are skipped),
+/// with the given toolchain.
+#[doc(hidden)]
+pub fn proof_job_for_port(
+    source: &str,
+    extraction: &[String],
+    models: &[String],
+    launcher: &str,
+    auditor: Option<&std::path::Path>,
+    timeout: u64,
+    cache: Option<&std::path::Path>,
+) -> Result<ProofJobForPort, String> {
+    let snapshot = crate::tooling::frontend::check_source(source, Default::default())
+        .map_err(|e| e.to_string())?;
+    let all = proof_model::all(snapshot.checked());
+    let chosen = models
+        .iter()
+        .filter_map(|name| all.get(name)?.as_ref().ok().cloned())
+        .collect();
+    let toolchain = proof_lens::Toolchain {
+        launcher: launcher.to_owned(),
+        auditor: auditor.map(std::path::Path::to_path_buf),
+        timeout,
+        cache: cache.map(std::path::Path::to_path_buf),
+    };
+    proof_lens::prepare(&snapshot, extraction, chosen, &toolchain).map(ProofJobForPort)
+}
+
 /// The Lens request layer (poison notices, member completion, obligation
 /// hovers, inlay hints) on `document` at `uri`, against the view of
 /// `view_text`: its checked snapshot when `checked`, else its semantic or

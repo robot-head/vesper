@@ -589,9 +589,86 @@ Rust lines deleted: 0.
 
 ## Left in the Lens
 
-- `proof_lens.rs`: the extraction text and the audit report are pure and
-  portable. Its Lean runner needs `@vesper-std/process` support that is
-  missing today: a non-blocking wait or timeout, process groups and a
-  kill-tree (and their Windows forms).
+- `proof_lens.rs`: the Lean runner is ported in part 8 below.
 - The code lenses and `vesper.proofAudit` command, which wait on the
   proof runner.
+
+# Part 8 (#1828): the proof-lens Lean runner
+
+The runner of `src/lsp/proof_lens.rs` is ported to the new package
+`@vesper/lsp-proof-run` with 0 diffs, at 0.87x Rust's time end to end. It
+takes a prepared job and does what `proof_lens::run` does:
+
+- finds Lean through the launcher and requires Lean 4.35.0
+- compiles the extraction module and each semantic model in a private
+  staging directory (mode 0o700), with only `LEAN_PATH` and
+  `LEAN_ABORT_ON_PANIC` in the environment
+- reuses `.olean` files and recorded outcomes from the content-keyed cache,
+  and makes the cache directory private as `Cache::open` does
+- runs the `bv_decide` rendering when `omega` fails, and renders a
+  counterexample as source values
+- replays every theorem through one `vesper proof-audit` run and reads its
+  JSON report with serde_json's rules, error messages included
+
+Each child runs in its own process group, with both streams captured up to
+8 MiB, and is killed with its tree at the deadline. This uses
+`@vesper-std/process` timeouts (#1991) and the fs modes, permissions and
+copy of #2012.
+
+Rust stays the default until the hybrid wiring part. Cancellation from the
+server's `CancelToken` is not ported yet; the wiring adds it.
+
+## What changed
+
+- `src/lsp/proof_lens.rs` adds `job_words`, the prepared job as words, and
+  `outcome_rows`, an outcome as text rows. `src/lsp.rs` adds the hidden
+  hooks `proof_job_for_port` and `ProofJobForPort` (`words`, `modules`,
+  `run`). `proof_model::Kind` gets a `code`.
+- `packages/vesper-lsp-proof-run`: `lib.ves` (job, files, children, cache,
+  stages, the `proof_run` entry), `json.ves` (serde_json `from_slice`),
+  `text.ves` (lossy UTF-8, trimming, `first_error`, error displays) and
+  `numbers.ves` (a copy of `@vesper/lsp`'s number range check; depending
+  on `@vesper/lsp` puts `@vesper/serde`'s `Kind::String` in the scope of
+  `String::` paths, a resolver bug worth its own issue).
+- `tests/self_host_proof_lens.rs` adds `proof_runs_match_rust` and the
+  ignored `proof_run_speed`.
+
+## Differential
+
+Both sides run the same job against a fake toolchain of shell scripts: a
+launcher, a `lean` whose compiles succeed, fail, stall or report a
+`bv_decide` counterexample per module, and an auditor that builds a report
+from its `--theorem` arguments or replays a fixed one. The test compares
+the outcome rows, a log of every Lean and auditor call (arguments,
+directory, `LEAN_PATH`, environment), and the cache tree with permission
+bits. Cached scenarios run twice on each side's own cache, then once on
+the other side's cache.
+
+53 scenarios matched with 0 diffs (927 rows and log lines; about 4.5 min):
+
+- all proved, with and without the cache
+- no auditor, a missing or failing launcher, the wrong Lean version
+- an extraction or run module that does not compile, a compile timeout
+- omega failing with bv_decide finding nothing, a counterexample (hex,
+  decimal, `+`, CRLF lines, noise lines, values that do not parse,
+  overflow), a bv_decide failure with and without output, a bv_decide
+  timeout
+- forbidden or non-string axioms, a failing or stalled auditor
+- 34 fixed reports: kernel not replayed, missing or duplicate fields,
+  non-UTF-8 bytes, every serde_json syntax error class, numbers out of
+  range, trailing characters, and nesting at and past the 128 limit
+
+All scenarios run in the JIT with the optimizer on and off. The evaluator
+runs the 19 toolchain scenarios and the first 4 fixed reports.
+
+## Numbers
+
+One all-proved job (2 obligations, 3 models: 5 Lean compiles and one
+audit), JIT, mean of 20 runs. Both sides are dominated by starting the
+child processes.
+
+| | Rust | Vesper | Ratio |
+|---|--:|--:|--:|
+| Proof run, all proved | 128.7 ms | 111.4 ms | **0.87x** |
+
+Rust lines deleted: 0.
