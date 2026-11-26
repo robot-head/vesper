@@ -1,0 +1,62 @@
+// Test the public sugar through an ordinary package dependency.
+use @vesper-std/core::control::ensure;
+
+test {
+    fn error_value() -> u64 eff [Fail[u64]] {
+        Fail::raise(99)
+    }
+
+    fn checked(input: u64) -> u64 eff [Fail[u64]] {
+        ensure input <= 10 else input;
+        ensure input != 0 else error_value();
+        wrapping_add(input, 1)
+    }
+
+    fn observed(input: u64) -> Result[u64, u64] {
+        handle Fail[u64] in {
+            checked(input)
+        } with {
+            return value => Result::Ok(value),
+            raise(error, _) => Result::Err(error),
+        }
+    }
+
+    fn tick(inout count: u64) -> bool {
+        count = wrapping_add(count, 1);
+        true
+    }
+
+    fn scoped() -> u64 eff [Fail[u64]] {
+        let mut count: u64 = 0;
+        let inner = {
+            ensure tick(inout count) else 77;
+            41
+        };
+        wrapping_add(inner, count)
+    }
+
+    pub fn check_core_control() -> u64 {
+        // The failure expression never runs on success.
+        if observed(10) != Result::Ok(11) {
+            return 1;
+        }
+        // The first failed guard skips the second guard and the block tail.
+        if observed(12) != Result::Err(12) {
+            return 2;
+        }
+        if observed(0) != Result::Err(99) {
+            return 3;
+        }
+        // The condition runs once and the expansion stops at the inner block.
+        handle Fail[u64] in {
+            scoped()
+        } with {
+            return value => if value == 42 {
+                0
+            } else {
+                4
+            },
+            raise(_, _) => 4,
+        }
+    }
+}

@@ -1,0 +1,46 @@
+"""Run Aspect integration fixtures in an isolated workspace."""
+
+load("./process.axl", "check", "command", "exit_code", "scratch_dir")
+
+def equal(actual, expected):
+    if actual != expected:
+        fail("Expected %r, got %r" % (expected, actual))
+
+def contains(needle, haystack):
+    if needle not in haystack:
+        fail("Missing %r in %r" % (needle, haystack))
+
+def fixture_workspace(ctx, prefix):
+    source = ctx.std.env.aspect_root_dir()
+    root = scratch_dir(ctx, prefix) + "/workspace with spaces"
+    cwd = root + "/nested directory"
+    ctx.std.fs.create_dir_all(cwd)
+    check(ctx, "cp", ["-R", source + "/.aspect", root + "/.aspect"], root)
+    return struct(source = source, root = root, cwd = cwd)
+
+def write_fixture(ctx, path, data):
+    ctx.std.fs.create_dir_all(path.rpartition("/")[0])
+    ctx.std.fs.write(path, data)
+
+def invoke_fixture(ctx, argv, cwd, expected = 0, env = {}, tool = None):
+    process = command(ctx, tool or ctx.std.env.current_exe(), argv, cwd, dict({"CI": "true"}, **env))
+    output = process.stdout("piped").stderr("piped").spawn().wait_with_output()
+    if exit_code(output.status) != expected:
+        fail("Unexpected status for %r: %s%s" % (argv, output.stdout, output.stderr))
+    return output
+
+def fixture_launcher(ctx, workspace, variant, names):
+    bin_dir = workspace.root + "/bin"
+    ctx.std.fs.create_dir_all(bin_dir)
+    launcher = bin_dir + "/fixture launcher"
+    check(ctx, "rustc", ["--edition=2021", workspace.source + "/.aspect/fixtures/tool-launcher.rs", "-o", launcher], workspace.root)
+    for name in names:
+        check(ctx, "ln", ["-s", launcher, bin_dir + "/" + name], workspace.root)
+    return {
+        "VESPER_FIXTURE_ASPECT": ctx.std.env.current_exe(),
+        "VESPER_FIXTURE_SOURCE": workspace.source,
+        "VESPER_FIXTURE_CASE": variant,
+        "VESPER_FIXTURE_LAUNCHER": launcher,
+        "VESPER_FIXTURE_PATH": ctx.std.env.var("PATH"),
+        "PATH": bin_dir + ":" + ctx.std.env.var("PATH"),
+    }

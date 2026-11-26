@@ -32,7 +32,7 @@
 //!
 //! `ABBA_WORKLOADS=a,b` runs only the named workloads. `abba flip-gate <workload>`
 //! runs one workload for the flip gate (`ABBA_EPOCHS`, default 30) and prints
-//! its pairs line (scripts/ci/flip_gate.py).
+//! its pairs line (aspect ci flip-gate --).
 //!
 //! `ABBA_ONLY=rust|port` with `ABBA_WORKLOAD=kernel|graph|simd` runs one arm of
 //! one workload once and nothing else (for `valgrind --tool=callgrind`).
@@ -431,7 +431,7 @@ fn time(f: &mut dyn FnMut() -> u64) -> (f64, u64) {
 }
 
 /// Under `flip-gate`, [`abba`] prints the gate's pairs line instead of the
-/// summary (scripts/ci/flip_gate.py, "ABBA protocol").
+/// summary (aspect ci flip-gate --, "ABBA protocol").
 struct Mode {
     gate: bool,
     epochs: usize,
@@ -482,7 +482,7 @@ fn abba(
 
 fn main() {
     // `abba flip-gate <workload>`: one workload, 30 epochs by default, and
-    // the flip gate's pairs line (crates/vesper-resonance/flip-gate.toml).
+    // the flip gate's pairs line (crates/vesper-resonance/flip-gate.json).
     let args: Vec<String> = std::env::args().collect();
     let gate = args.get(1).is_some_and(|a| a == "flip-gate");
     if !gate {

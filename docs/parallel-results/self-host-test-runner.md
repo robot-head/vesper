@@ -331,9 +331,45 @@ words in tests/common/doctest_verdict_words.rs.
   **1.07x** (first cut was 6.8x from per-offset rescans of the file).
 - **Swapped in the hybrid** (`doctest_verdict`).
 
-## Left after part 7
+## Part 8: the text reports of `vesper test` and `vesper test --doc`
 
-- Reports.
+`packages/vesper-test-runner/src/report.ves` ports the text the two
+commands print, moved from src/doctest_commands.rs and src/test_runner.rs
+into the src/test_report.rs swap point (`TestReportTable`):
+
+- `doc_text`: a file's base diagnostics, then per example its PASS/FAIL
+  line (index, message, engine) and its diagnostics.
+- `unit_text`: per file its error or each test's line (name, message,
+  engine) with its pin and replay-capsule lines, then the
+  `tests: N passed, M failed (K file error(s))` summary.
+- `baseline_text`: the file errors and failing tests the mutation gate
+  prints when the baseline suite fails.
+- `mutants_text`: each killed or surviving mutant, then the
+  `mutation gate:` summary.
+
+The JSON reports (serde) stay in Rust for now. Entries `report_*_words`
+and `report_*_str`; words in tests/common/test_report_words.rs. The
+package's `put_text` now copies whole words from the input rather than
+packing byte by byte, which every entry's result uses.
+
+- **Differential** (tests/self_host_test_report.rs): every `.ves` file
+  gives doctest, unit, baseline and mutant reports whose names,
+  messages, codes, pins and capsules are its lines and identifiers
+  (non-ASCII, braces, empty), under two seeds of counts, positions up to
+  `u64::MAX`, pass/fail, engines, file errors and mutant outcomes; plus
+  the empty reports.
+- **Numbers:** 0 diffs over 7,552 reports (138,256 lines); unoptimized
+  build 0 diffs on every 13th file. ABBA, best of six: rendering alone
+  over encoded words **1.06-1.13x**; end to end with the word encoding
+  and decoding of the hybrid swap **1.72-1.85x**. The boundary copies
+  every string once more, which costs about as much as Rust's whole
+  rendering, so the end-to-end number is bound by the word boundary, not
+  the port; a Vesper-only compiler pays the rendering alone.
+- **Swapped in the hybrid** (`test_report`); Rust stays the default.
+
+## Left after part 8
+
+- JSON reports.
 - A hybrid end-to-end test of `vesper test`.
 - Execution (anvil_jit, the evaluator, anvil_sim) stays Rust until the
   compiler is retired.

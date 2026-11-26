@@ -1,0 +1,110 @@
+"""Exact ratios and binomial order statistics for the Rust exit gate."""
+
+def _digits(text):
+    return bool(text) and all([char in "0123456789" for char in text.elems()])
+
+def natural(text):
+    return int(text) if _digits(text) else None
+
+def _positive_ratio(numerator, denominator):
+    a, b = numerator, denominator
+    # Euclid requires at most twice the number of decimal digits per operand.
+    for _ in range(5 * len(str(min(a, b))) + 1):
+        if b == 0:
+            break
+        a, b = b, a % b
+    return (numerator // a, denominator // a)
+
+def threshold_ratio(text):
+    text = text.strip().removeprefix("+").lower()
+    if "/" in text:
+        numerator, _, denominator = text.partition("/")
+        n, d = natural(numerator), natural(denominator)
+        return _positive_ratio(n, d) if n and d else None
+    coefficient, mark, exponent = text.partition("e")
+    power = 0
+    if mark:
+        negative = exponent.startswith("-")
+        power = natural(exponent[1:] if negative else exponent.removeprefix("+"))
+        if power == None or power > 308:
+            return None
+        if negative:
+            power = -power
+    whole, _, fraction = coefficient.partition(".")
+    numerator = natural(whole + fraction)
+    if not numerator:
+        return None
+    scale = len(fraction) - power
+    magnitude = 1
+    for _ in range(abs(scale)):
+        magnitude *= 10
+    if scale < 0:
+        return _positive_ratio(numerator * magnitude, 1)
+    return _positive_ratio(numerator, magnitude)
+
+def fraction_string(ratio):
+    return str(ratio[0]) if ratio[1] == 1 else "%d/%d" % ratio
+
+def fraction_number(ratio):
+    return float(ratio[0]) / float(ratio[1]) if ratio != None else None
+
+def display_ratio(ratio):
+    if ratio == None:
+        return "-"
+    n, d = ratio
+    rounded = n * 100 // d
+    remainder = n * 100 % d
+    if remainder * 2 > d or (remainder * 2 == d and rounded % 2):
+        rounded += 1
+    cents = str(rounded % 100)
+    return "%d.%sx" % (rounded // 100, ("0" + cents)[-2:])
+
+def _compare(a, b):
+    return a[0] * b[1] - b[0] * a[1]
+
+def median_interval(pairs):
+    # Starlark has no comparator-based sort. Merge exact rational values in
+    # sorted runs so even large harness reports avoid rounding and quadratic work.
+    ratios = [[(candidate, rust)] for rust, candidate in pairs]
+    for _ in range(len(str(len(pairs))) * 4):
+        if len(ratios) == 1:
+            break
+        merged = []
+        for index in range(0, len(ratios) - 1, 2):
+            left, right = ratios[index:index + 2]
+            run = []
+            l, r = 0, 0
+            for _ in range(len(left) + len(right)):
+                if r == len(right) or (l < len(left) and _compare(left[l], right[r]) <= 0):
+                    run.append(left[l])
+                    l += 1
+                else:
+                    run.append(right[r])
+                    r += 1
+            merged.append(run)
+        if len(ratios) % 2:
+            merged.append(ratios[-1])
+        ratios = merged
+
+    ordered = ratios[0]
+    n = len(ordered)
+    left, right = ordered[(n - 1) // 2], ordered[n // 2]
+    median = (left[0] * right[1] + right[0] * left[1], 2 * left[1] * right[1])
+    total = 1 << n
+    coefficient, tail, rank = 1, 0, 0
+    for index in range(n // 2):
+        tail += coefficient
+        if tail * 40 > total:
+            break
+        rank = index + 1
+        coefficient = coefficient * (n - index) // (index + 1)
+    return struct(lower = ordered[rank - 1] if rank else None, upper = ordered[n - rank] if rank else None, median = median)
+
+def decision(interval, threshold):
+    if interval.upper == None:
+        return "inconclusive"
+    if _compare(interval.upper, threshold) <= 0:
+        return "pass"
+    if _compare(interval.lower, threshold) > 0:
+        return "regression"
+    return "inconclusive"

@@ -1,0 +1,59 @@
+name: Repository automation policy
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: write
+  pull-requests: read
+
+concurrency:
+  group: automation-policy-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  policy:
+    name: No new scripts or inline workflow logic
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the pull request head for the merge gate
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: .gate
+          fetch-depth: 0
+          sparse-checkout: |
+            .github/actions
+            .aspect
+      - name: Set up Aspect for the merge gate
+        if: github.event_name == 'pull_request'
+        uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
+        with:
+          launcher-version: '2026.47.12'
+          bazelrc-generate: 'false'
+          bazelisk-cache: 'false'
+          disk-cache: 'false'
+      - name: Merge gate
+        if: github.event_name == 'pull_request'
+        uses: ./.gate/.github/actions/merge-gate
+        with:
+          number: ${{ github.event.pull_request.number }}
+          base-ref: ${{ github.event.pull_request.base.ref }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/aspect
+      - name: Test the automation policy
+        run: aspect ci tests automation-policy
+      - name: Inspect the changed files and configuration
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: aspect ci check-automation-policy

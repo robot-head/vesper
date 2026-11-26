@@ -1,7 +1,8 @@
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 
-$root = Resolve-Path (Join-Path $PSScriptRoot '../..')
+$toolRoot = Resolve-Path (Join-Path $PSScriptRoot '../..')
+$root = if ($env:PLATFORM_WORKSPACE) { Resolve-Path -LiteralPath $env:PLATFORM_WORKSPACE } else { $toolRoot }
 Push-Location $root
 try {
     if ($env:VESPER_PORT_HARNESS_SHARD) {
@@ -15,7 +16,11 @@ try {
     }
 
     $selected = if ($env:VESPER_PORT_HARNESS_CRATES) { $env:VESPER_PORT_HARNESS_CRATES -split '\s+' } else { @('all') }
-    $plan = Get-Content -Raw -LiteralPath 'scripts/port-abi-plan.json' | ConvertFrom-Json
+    $planPath = 'scripts/port-abi-plan.json'
+    if (!(Test-Path -LiteralPath $planPath -PathType Leaf)) {
+        $planPath = Join-Path $toolRoot $planPath
+    }
+    $plan = Get-Content -Raw -LiteralPath $planPath | ConvertFrom-Json
     foreach ($group in $plan) {
         if ('all' -notin $selected -and !($group.crates | Where-Object { $_ -cin $selected })) {
             continue

@@ -1,0 +1,82 @@
+"""Capture bounded subprocess output while feeding optional binary input."""
+
+load("./lib/process.axl", "command", "exit_code")
+
+def utf8(data):
+    text = str(data)
+    if bytes(text) != data:
+        fail("Expected UTF-8 output")
+    return text
+
+def _feed(ctx: TaskContext) -> int:
+    values = ctx.args.tool_args
+    if len(values) < 2:
+        fail("Provide the program and its private scratch directory")
+    binary, work = values[:2]
+    root = ctx.std.env.aspect_root_dir()
+    child = command(ctx, binary, values[2:], root).stdin("piped").stdout(
+        ctx.std.fs.create(work + "/stdout"),
+    ).stderr(ctx.std.fs.create(work + "/stderr")).spawn()
+    payload = ctx.std.fs.open(work + "/input").read()
+    input = child.stdin()
+    offset = 0
+    for _ in range(len(payload)):
+        if offset == len(payload):
+            break
+        written = input.write(payload[offset:])
+        if not written:
+            fail("Child stopped accepting input")
+        offset += written
+    input.close()
+    ctx.std.fs.write(work + "/status", str(exit_code(child.wait())))
+    return 0
+
+feed_stdio = task(
+    kind = "feed-stdio",
+    group = ["acceptance", "internal"],
+    summary = "Feed a subprocess inside a separately monitored process group",
+    implementation = _feed,
+    args = {"tool_args": args.trailing_var_args(description = "Program, private scratch directory and program arguments.")},
+)
+
+def _input(ctx, path, data):
+    stream = ctx.std.fs.create(path)
+    written = stream.write(data)
+    stream.close()
+    if written != len(data):
+        fail("Could not write the complete subprocess input")
+
+def bounded_run(ctx, root, work, binary, argv, *, timeout, stdout_limit, stderr_limit, label, input = None):
+    stdout = work + "/stdout"
+    stderr = work + "/stderr"
+    if input == None:
+        child = command(ctx, binary, argv, root).process_group(0).stdin("null").stdout(ctx.std.fs.create(stdout)).stderr(ctx.std.fs.create(stderr)).spawn()
+    else:
+        for path in [stdout, stderr, work + "/status"]:
+            ctx.std.fs.write(path, "")
+        _input(ctx, work + "/input", bytes(input))
+        # Monitor the writer separately so the deadline covers a blocked pipe
+        # write as well as waiting for the program to exit.
+        worker = ["acceptance", "internal", "feed-stdio", "--", binary, work] + argv
+        child = command(ctx, ctx.std.env.current_exe(), worker, root, {"CI": "false"}).process_group(0).stdout("null").stderr(ctx.std.fs.create(work + "/worker")).spawn()
+    status = None
+    for _ in range(timeout * 4):
+        status = child.try_wait(timeout_ms = 250)
+        if ctx.std.fs.metadata(stdout).size > stdout_limit or ctx.std.fs.metadata(stderr).size > stderr_limit:
+            if status == None:
+                child.kill()
+                child.wait()
+            fail(label + " output exceeded its finite allowance")
+        if status != None:
+            break
+    if status == None:
+        child.kill()
+        child.wait()
+        fail(label + " process deadline exceeded")
+    code = exit_code(status)
+    if input != None:
+        if code:
+            ctx.std.io.stderr.write(ctx.std.fs.open(work + "/worker").read())
+            fail(label + " input worker failed (exit %d)" % code)
+        code = int(ctx.std.fs.read_to_string(work + "/status"))
+    return struct(code = code, stdout = ctx.std.fs.open(stdout).read(), stderr = ctx.std.fs.open(stderr).read())
