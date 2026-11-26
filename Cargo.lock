@@ -5625,7 +5625,7 @@ dependencies = [
  "vesper-semver-seed",
  "vesper-serde-seed",
  "vesper-silicon-seed",
- "vesper-simd",
+ "vesper-simd-seed",
  "vesper-span-seed",
  "vesper-syntax",
  "vesper-tensor-seed",
@@ -6205,7 +6205,7 @@ dependencies = [
  "vesper-semver-seed",
  "vesper-serde-seed",
  "vesper-silicon-seed",
- "vesper-simd",
+ "vesper-simd-seed",
  "vesper-span-seed",
  "vesper-syntax",
  "vesper-tensor-seed",
@@ -6782,6 +6782,23 @@ dependencies = [
  "libc",
  "object 0.37.3",
  "target-lexicon",
+ "vesper-cranelift-sys",
+ "vesper-port-abi",
+ "vesper-port-harness",
+]
+
+[[package]]
+name = "vesper-simd-seed"
+version = "0.1.0"
+dependencies = [
+ "cranelift-codegen 0.125.4",
+ "cranelift-frontend 0.125.4",
+ "cranelift-jit",
+ "cranelift-module",
+ "cranelift-object",
+ "libc",
+ "object 0.37.3",
+ "target-lexicon",
 ]
 
 [[package]]
@@ -6896,7 +6913,7 @@ dependencies = [
  "vesper-migrate",
  "vesper-semver-seed",
  "vesper-serde-seed",
- "vesper-simd",
+ "vesper-simd-seed",
  "vesper-span-seed",
 ]
 

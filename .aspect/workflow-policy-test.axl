@@ -348,6 +348,13 @@ def _self_host_differentials_run_as_their_own_buildbuddy_check(h):
         _equal(actions[name]["timeout"], "60m")
         # Per-target times, to balance the split on.
         _contains("--test_summary=short", command(name))
+        _contains("--config=ci_opt", command(name).split())
+    _absent("--config=ci_opt", everything.split())
+    bazelrc = h.read(".bazelrc").splitlines()
+    for option in ["--compilation_mode=opt",
+                   "--@rules_rust//rust/settings:extra_rustc_flag=-Cdebug-assertions=on",
+                   "--@rules_rust//rust/settings:extra_rustc_flag=-Coverflow-checks=on"]:
+        _contains("common:ci_opt " + option, bazelrc)
     defs = h.read("tools/bazel/defs.bzl")
     _contains('startswith("self_host_")', defs)
     _contains('"self_host_codegen"', defs)

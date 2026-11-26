@@ -282,3 +282,33 @@ The macOS copy gets the same driver over kqueue, as `kqueue_driver_*`.
 - **Test.** `uring_completion_driver_matches_rust` covers pipe reads before and after data, file I/O at offsets, a zero-length read, an `EBADF` returned by the kernel, a cancel issued twice, stream I/O, the eventfd and shutdown. It sums each completion's hash, so the order in which completions arrive across polls doesn't matter. It passed 5 of 5 runs locally.
 
 The Rust driver stays until the runtime stops using it. Speed is not measured yet.
+
+## vesper-simd: the Baseline128 scanner builder (#1969)
+
+`crates/vesper-simd/vesper/` (`@vesper/simd`) builds the §14 delimiter-count/XOR
+scanner and makes the profile decisions in Vesper. It is part 1 of the crate's
+port, behind the `vesper-port` feature.
+
+- **How it runs.** The Rust crate keeps the target ISA (the exact SSE4.2 preset
+  on x86_64) and the JIT and object modules. It lends the module to the port's
+  `define_scanner` with `vesper_cranelift_sys::lend_module_as`. The port declares
+  the exported `vesper_simd_scan_baseline128_v1` and builds its body through
+  `@vesper/cranelift`, in the same block, parameter and instruction order as the
+  Rust builder. Its answer is a status byte followed by the CLIF text (or the
+  reason it failed). `check_features` and `profile_support` return the crate's
+  `Error` variants as codes.
+- **Tests.** `vesper_port_builds_the_reference_scanner` checks the Vesper and Rust
+  builders against each other. They produce the same CLIF and byte-identical ELF
+  objects for x86_64 and AArch64, and the same CLIF in a JIT module.
+  `vesper_port_profile_decisions_match_rust` covers every simulated host and
+  every profile. The crate's other tests (all byte values, seeded tails, guard
+  pages, the Lean model) run against the port unchanged.
+- **Divergence check.** `vesper-port-divergent` counts each delimiter three times;
+  `aspect crate simd test-port` requires the scanner tests to fail. It runs in
+  Platforms Linux port shard 6.
+- **Speed.** The scanned code is the same machine code. Building it (400
+  `JitScanner::compile` and `ObjectArtifact::emit` calls, release,
+  `-C target-cpu=native`) takes 0.76 to 1.18 ms per call with either builder. The run
+  noise is larger than the difference, so the ratio is about 1.0x.
+- **Left.** The `vvec` profiles (the scalar reference, and the SVE and RVV `asm!`
+  backends) are unported. The Rust builder stays the default until the flip.

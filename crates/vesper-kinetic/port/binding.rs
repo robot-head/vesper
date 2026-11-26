@@ -188,6 +188,7 @@ unsafe extern "C" {
     fn vesper_kinetic_sap_pair_total(smin: *mut u64, smax: *mut u64, axis: i64, counts: *mut u64) -> i64;
     fn vesper_kinetic_sap_sortable(bits: i64) -> i64;
     fn vesper_kinetic_sap_write_pairs(order: *mut u64, smin: *mut u64, smax: *mut u64, axis: i64, counts: *mut u64, out: *mut u64, tk: *mut u64, novals: *mut u64, tv: *mut u64, hist: *mut u64) -> i64;
+    fn vesper_kinetic_world_substeps(substeps: i64, bodies: *mut u64, jf: *mut u64, ju: *mut u64, contacts: *mut u64, layer_off: *mut u64, layer_idx: *mut u64, params: *mut u64, state: *mut u64, prev: *mut u64) -> i64;
 }
 
 /// The sequence runtime of the Vesper library `kinetic`.
@@ -629,5 +630,14 @@ pub fn sap_write_pairs(order: &[u32], smin: &[u32], smax: &[u32], axis: u64, cou
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(order, |view_order| vesper_port_abi::with_slice(smin, |view_smin| vesper_port_abi::with_slice(smax, |view_smax| vesper_port_abi::with_slice(counts, |view_counts| vesper_port_abi::with_slice_mut(out, |view_out| vesper_port_abi::with_slice_mut(tk, |view_tk| vesper_port_abi::with_slice_mut(novals, |view_novals| vesper_port_abi::with_slice_mut(tv, |view_tv| vesper_port_abi::with_slice_mut(hist, |view_hist| unsafe { vesper_kinetic_sap_write_pairs(view_order, view_smin, view_smax, axis as i64, view_counts, view_out, view_tk, view_novals, view_tv, view_hist) })))))))));
+    { let _ = raw; }
+}
+
+/// Calls `world_substeps` of the Vesper library `kinetic` (`vesper_kinetic_world_substeps`).
+pub fn world_substeps(substeps: u32, bodies: &mut [u64], jf: &[u64], ju: &[u64], contacts: &[u64], layer_off: &[u32], layer_idx: &[u32], params: &[u32], state: &mut [u64], prev: &mut [u64]) -> () {
+    // SAFETY: `vesper_kinetic_world_substeps` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(bodies, |view_bodies| vesper_port_abi::with_slice(jf, |view_jf| vesper_port_abi::with_slice(ju, |view_ju| vesper_port_abi::with_slice(contacts, |view_contacts| vesper_port_abi::with_slice(layer_off, |view_layer_off| vesper_port_abi::with_slice(layer_idx, |view_layer_idx| vesper_port_abi::with_slice(params, |view_params| vesper_port_abi::with_slice_mut(state, |view_state| vesper_port_abi::with_slice_mut(prev, |view_prev| unsafe { vesper_kinetic_world_substeps(substeps as i64, view_bodies, view_jf, view_ju, view_contacts, view_layer_off, view_layer_idx, view_params, view_state, view_prev) })))))))));
     { let _ = raw; }
 }

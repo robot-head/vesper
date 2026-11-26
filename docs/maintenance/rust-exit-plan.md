@@ -180,16 +180,16 @@ gated set over the whole corpus with 0 differences. Today `gated` holds
    `stage2.cwasm` under the pinned wasmtime CLI (#1928). Four packages are
    gaps, listed in `STAGE2_PACKAGE_GAPS` with the reason: the native
    Cranelift glue (`codegen-base`, `codegen-control-emit`,
-   `codegen-numeric`, whose `cranelift.vsys` handle types Stage 2 does not
-   resolve and whose `Ffi[Cranelift]` entry points a Wasm build cannot
-   carry; they drive the native backend over `vesper-cranelift-sys`, and
-   Stage 2 emits only Wasm) and `driver-commands`, whose printing, help and
+   `codegen-numeric`: they assemble and check, since the Stage 2 loader
+   reads each package's `[package] vsys` types, but they drive the native
+   backend over `vesper-cranelift-sys`, and Stage 2 emits only Wasm, where
+   the Cranelift imports and `Ffi[Cranelift]` entry points have no host) and `driver-commands`, whose printing, help and
    formatting go through the `HybridCommands` import that only the hybrid's
    Rust implements (item 2). `@vesper-std/process` builds for WASI
    (`src-wasip2`: every start is refused with Unsupported, since WASI 0.2
    cannot start a process), and the Wasm backend takes `Ffi[StdProcess]`
    as a host capability that imports nothing. The
-   test fails when a gap closes, and `stage2_fixed_point_lists_every_package`
+   test fails when a gap closes or fails before the Wasm backend, and `stage2_fixed_point_lists_every_package`
    fails when a package under `packages/` is in no list. What is not yet
    covered is the whole compiler as one program, which waits for item 2.
    `bootstrap/seed/runner/vwasm.c` is frozen (owner decision): it is not a

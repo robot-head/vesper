@@ -177,9 +177,58 @@ proposals, is a different module and is not part of this port.
 
 **Rust lines deleted:** 0. `lower.rs` and `fail.rs` go at the retirement.
 
+## Part 4b: monomorphization
+
+### What changed
+
+- `packages/vesper-verified-codegen/src/mono.ves` ports
+  `src/verified_codegen/mono.rs`. Starting from the entry, it collects the
+  reachable instances `(function, type arguments)` breadth first. Each
+  instance gets a copy of its function with every type substituted
+  (parameters, result, effect arguments, values, locals, instruction and
+  call types) and every direct callee renamed to the callee's instance,
+  `name<T=i64,...>`. The instance limit and the `Unsupported::Generic`
+  errors have the Rust text.
+- An instance's copy shares the input's operand words wherever nothing
+  changes (block headers, terminators, the fip trailer). Only substituted
+  headers, call types and renamed calls get new words.
+- The input is the world and the Place IR after ir_opt
+  (`tests/common/ir_words.rs`), then an extra section: the entry, the
+  instance limit, the generics of the program's functions and the
+  `World::calls` entries of its calls, by name and type index. The output
+  is the program's `put_program` words, which the test decodes with
+  `ir_words::decode_program` and compares by the canonical dump.
+- `front_text` runs monomorphization and then the part 4a lowering in one
+  pass over one input, as `compile` will once evidence passing is ported.
+  The test compares it with Rust's monomorphization, evidence passing and
+  lowering on the programs that evidence passing leaves unchanged.
+- `src/verified_codegen.rs` gains `#[doc(hidden)]` hooks `mono_for_test`,
+  `front_for_test` and `front_timing_for_test`. `prepare` now calls the
+  shared `optimized` step; the steps and their order are unchanged.
+- Not ported yet (part 4c): `handle` expressions, whose nested handler
+  bodies are named by AST spans. For a program with one, the package
+  answers `not ported`.
+
+### Evidence (Linux x86_64 host, release)
+
+| Check | Result |
+|---|---|
+| Monomorphization, corpus programs, optimized and not | **0 of 222 differ** (42 with generic instances or `Generic` errors; 142 not ported) |
+| Monomorphization and lowering in one pass, same corpus | **0 of 212 differ** (144 lowered; 126 not ported) |
+| ABBA, front half over the corpus ×5: Rust mono + evidence + plan + lowering + text, Vesper decode + mono + plan + lowering + text | rust 32.9 ms, vesper 25.0 ms: **0.76x** |
+| ABBA, monomorphization alone (Vesper includes the decode and the output words) | rust 10.5 ms, vesper 16.3 ms: 1.55x |
+
+Monomorphization alone is over the bar because reading and writing the
+IR words costs about as much as the whole Rust pass: an identity round
+trip of the same inputs takes 10-13 ms. That cost is the crossing, which
+Stage 2 removes, so the gate that decides the swap is the front half,
+where the pass runs on the program the lowering reads.
+
+**Rust lines deleted:** 0. `mono.rs` goes at the retirement.
+
 ## Left
 
 - Optional: compare the per-arch `encoding_listing` text.
-- Part 4b: `mono`. Part 4c: handlers, `evidence` and regions. Part 4d:
+- Part 4c: handlers, `evidence` and regions. Part 4d:
   `coverage`, `cli`, then the swap into the hybrid and `bootstrap/stage1.rs`, with `bootstrap/stage1.lock`
   reproduced, and the Rust deleted at the retirement.

@@ -57,6 +57,7 @@ fn entry(name: &'static str) -> &'static Entry {
             "lsp_lens_facts",
             "lsp_lens_repair",
             "lsp_lens_view",
+            "lsp_lens_requests",
         ]
         .into_iter()
         .map(|n| (n, features().entry(n, optimize())))
@@ -2123,6 +2124,57 @@ fn lsp_features_speed() {
         v.as_secs_f64() / r.as_secs_f64(),
         basis / views.len() as u32
     );
+    // The Lens request layer (poison notices, completion, obligation
+    // hovers, inlay hints) on one view per document: rounds of answers
+    // less the one-time view on both sides.
+    let lens_docs: Vec<_> = lens_documents()
+        .into_iter()
+        .map(|d| {
+            let r = lens_requests(&d.doc, true);
+            (d, r)
+        })
+        .collect();
+    const ANSWERS: u64 = 16;
+    let request_inputs: Vec<[Vec<u8>; 2]> = lens_docs
+        .iter()
+        .map(|(d, r)| [0, ANSWERS].map(|reps| lens_requests_input(d, r, reps)))
+        .collect();
+    let request_entry = entry("lsp_lens_requests");
+    let (mut rust, mut basis, mut fixed, mut full) =
+        (Duration::MAX, Duration::MAX, Duration::MAX, Duration::MAX);
+    for _ in 0..3 {
+        rust = rust.min(time(|| {
+            for (d, r) in &lens_docs {
+                std::hint::black_box(rust_lens_requests(d, r, ANSWERS));
+            }
+        }));
+        basis = basis.min(time(|| {
+            for (d, r) in &lens_docs {
+                std::hint::black_box(rust_lens_requests(d, r, 0));
+            }
+        }));
+        fixed = fixed.min(time(|| {
+            for [none, _] in &request_inputs {
+                std::hint::black_box(request_entry.text(none));
+            }
+        }));
+        full = full.min(time(|| {
+            for [_, all] in &request_inputs {
+                std::hint::black_box(request_entry.text(all));
+            }
+        }));
+    }
+    let n = lens_docs.len() as u32 * ANSWERS as u32;
+    let (r, v) = (
+        rust.saturating_sub(basis) / n,
+        full.saturating_sub(fixed) / n,
+    );
+    eprintln!(
+        "lens requests per document ({} x {ANSWERS}), on one view: rust {r:?} vesper {v:?} \
+         ratio {:.2}",
+        lens_docs.len(),
+        v.as_secs_f64() / r.as_secs_f64()
+    );
     let per_doc: Vec<Vec<Position>> = docs
         .iter()
         .map(|d| positions(d).into_iter().step_by(8).collect())
@@ -2712,7 +2764,26 @@ fn lens_view_input(
     q: &ViewRequests,
     reps: u64,
 ) -> Vec<u8> {
+    lens_view_input_basis(text, regions, limits, q, reps, false)
+}
+
+/// The input of `lsp_lens_view`; with `snapshot`, of the view of the
+/// text's checked snapshot (`View::checked`: status 5, or the editor
+/// guard's refusal when the text does not check).
+fn lens_view_input_basis(
+    text: &str,
+    regions: &str,
+    limits: AnalysisLimits,
+    q: &ViewRequests,
+    reps: u64,
+    snapshot: bool,
+) -> Vec<u8> {
     let (status, checked) = view_basis(text, limits);
+    let status = match (snapshot, status) {
+        (false, status) => status,
+        (true, 0) => 5,
+        (true, _) => 4,
+    };
     let mut world = vesper::check::World::default();
     let mut diags = vec![];
     if let Some(checked) = &checked {
@@ -3008,6 +3079,275 @@ fn lens_view_matches_rust() {
         "lens views: {} views, {rows} rows ({poisoned} poisoned sets, {completions} ranked \
          completions: {tiers:?}), scopes {scopes:?}, {diffs} differ",
         views.len()
+    );
+    assert_eq!(diffs, 0);
+}
+
+/// A document the Lens request layer answers on: its text, the text and
+/// repair-dump regions of its view, and whether that view is the text's
+/// checked snapshot's (`View::checked`).
+struct LensDoc {
+    name: String,
+    doc: String,
+    view_text: String,
+    regions: String,
+    checked: bool,
+}
+
+const LENS_URI: &str = "file:///lens/main.ves";
+
+/// Every corpus document (checked), the semantic-error sources, and each
+/// damaged source with its repaired prefix.
+fn lens_documents() -> Vec<LensDoc> {
+    let mut out = vec![];
+    for d in corpus_docs() {
+        let doc = d.checked.source().to_string();
+        out.push(LensDoc {
+            name: d.name.clone(),
+            view_text: doc.clone(),
+            doc,
+            regions: String::new(),
+            checked: true,
+        });
+    }
+    for (name, doc) in semantic_docs() {
+        out.push(LensDoc {
+            name,
+            view_text: doc.clone(),
+            doc,
+            regions: String::new(),
+            checked: false,
+        });
+    }
+    for (name, doc) in damaged_docs() {
+        let Ok(syntax) =
+            vesper_syntax::parser::parse_recovery(&doc, vesper_syntax::recovery::Limits::default())
+        else {
+            continue;
+        };
+        let dump = vesper::lsp::lens_repair_for_port(&syntax, lens_limits());
+        if let Some((regions, text)) = dump.split_once("T\n") {
+            out.push(LensDoc {
+                name,
+                doc,
+                view_text: text.to_string(),
+                regions: regions.to_string(),
+                checked: false,
+            });
+        }
+    }
+    out
+}
+
+/// Requests on one document.
+struct LensRequests {
+    completions: Vec<Position>,
+    hovers: Vec<Position>,
+    inlays: Vec<vesper_span::Range>,
+    ceiling: Option<std::collections::BTreeSet<String>>,
+}
+
+/// Completion just after each `.` and one character later, hovers at
+/// evenly spaced characters, inlay hints over the whole document (and past
+/// its end), its first half and its second half; each list also has a
+/// position past the last line.
+fn lens_requests(doc: &str, ceiling: bool) -> LensRequests {
+    let index = LineIndex::new(Arc::from(doc), index_limits()).expect("line index");
+    let at = |offset: usize| index.position(offset).expect("char boundary");
+    // Offsets with a position (not inside a CRLF pair).
+    let bounds: Vec<usize> = doc
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain([doc.len()])
+        .filter(|&i| index.position(i).is_ok())
+        .collect();
+    let far = Position {
+        line: 10_000,
+        character: 0,
+    };
+    let mut completions = vec![];
+    for (i, _) in doc.match_indices('.') {
+        if !bounds.contains(&(i + 1)) {
+            continue;
+        }
+        completions.push(at(i + 1));
+        if let Some(&next) = bounds.iter().find(|&&b| b > i + 1) {
+            completions.push(at(next));
+        }
+    }
+    completions.truncate(96);
+    completions.push(far);
+    let step = (bounds.len() / 48).max(1);
+    let mut hovers: Vec<Position> = bounds.iter().step_by(step).map(|&b| at(b)).collect();
+    hovers.push(far);
+    let lines = doc.lines().count() as u32;
+    let half = bounds[bounds.len() / 2];
+    let start = Position {
+        line: 0,
+        character: 0,
+    };
+    let end = Position {
+        line: lines + 3,
+        character: 0,
+    };
+    let inlays = vec![
+        vesper_span::Range { start, end },
+        vesper_span::Range {
+            start,
+            end: at(half),
+        },
+        vesper_span::Range {
+            start: at(half),
+            end: at(doc.len()),
+        },
+        vesper_span::Range { start: far, end },
+    ];
+    let ceiling = ceiling.then(|| {
+        let mut set = std::collections::BTreeSet::new();
+        for (i, d) in doc.match_indices("effect ").enumerate() {
+            let name: String = doc[d.0 + 7..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if i % 2 == 1 && !name.is_empty() {
+                set.insert(name);
+            }
+        }
+        set
+    });
+    LensRequests {
+        completions,
+        hovers,
+        inlays,
+        ceiling,
+    }
+}
+
+/// The Rust request layer (`requests_dump`) on one view, `rounds` times.
+fn rust_lens_requests(d: &LensDoc, r: &LensRequests, rounds: u64) -> String {
+    vesper::lsp::lens_requests_for_port(
+        LENS_URI,
+        &d.doc,
+        &d.view_text,
+        &d.regions,
+        d.checked,
+        lens_limits(),
+        index_limits(),
+        &r.completions,
+        &r.hovers,
+        &r.inlays,
+        r.ceiling.as_ref(),
+        rounds,
+    )
+}
+
+/// The input of `lsp_lens_requests`.
+fn lens_requests_input(d: &LensDoc, r: &LensRequests, reps: u64) -> Vec<u8> {
+    let q = ViewRequests {
+        cursors: vec![],
+        bindings: vec![],
+        members: vec![],
+        ceiling: r.ceiling.clone(),
+    };
+    let mut input =
+        lens_view_input_basis(&d.view_text, &d.regions, lens_limits(), &q, reps, d.checked);
+    index_words(&mut input, index_limits());
+    push_word(&mut input, LENS_URI.len() as u64);
+    push_word(&mut input, d.doc.len() as u64);
+    let rows: Vec<Vec<&str>> = d
+        .regions
+        .lines()
+        .take_while(|l| *l != "T")
+        .filter(|l| l.starts_with("G\t"))
+        .map(|l| l.split('\t').collect())
+        .collect();
+    let mut names = String::new();
+    for row in &rows {
+        let n = |i: usize| row[i].parse::<u64>().unwrap();
+        names.push_str(row[1]);
+        for w in [row[1].len() as u64, n(8), n(4), n(9), n(10)] {
+            push_word(&mut input, w);
+        }
+    }
+    for list in [&r.completions, &r.hovers] {
+        push_word(&mut input, list.len() as u64);
+        for p in list.iter() {
+            push_word(&mut input, p.line as u64);
+            push_word(&mut input, p.character as u64);
+        }
+    }
+    push_word(&mut input, r.inlays.len() as u64);
+    for range in &r.inlays {
+        for w in [
+            range.start.line,
+            range.start.character,
+            range.end.line,
+            range.end.character,
+        ] {
+            push_word(&mut input, w as u64);
+        }
+    }
+    input.extend_from_slice(LENS_URI.as_bytes());
+    input.extend_from_slice(d.doc.as_bytes());
+    input.extend_from_slice(names.as_bytes());
+    input
+}
+
+/// The Lens request layer on every Lens document (checked snapshots,
+/// semantic-error sources and repaired prefixes of damaged ones), with and
+/// without a capability ceiling, against the Vesper port: poison notices
+/// and Lens metadata, completion items, obligation hover text and inlay
+/// hints, as JSON.
+#[test]
+fn lens_requests_match_rust() {
+    let docs = lens_documents();
+    let entry = entry("lsp_lens_requests");
+    let (mut rows, mut items, mut hovers, mut hints, mut notices, mut errors, mut diffs) =
+        (0, 0, 0, 0, 0, 0, 0);
+    for d in &docs {
+        for ceiling in [false, true] {
+            let r = lens_requests(&d.doc, ceiling);
+            let rust = rust_lens_requests(d, &r, 1);
+            let port = entry.text(&lens_requests_input(d, &r, 1));
+            for line in rust.lines() {
+                rows += 1;
+                let (kind, body) = line.split_once('\t').unwrap_or((line, ""));
+                if body.starts_with("{\"error\"") {
+                    errors += 1;
+                    continue;
+                }
+                match kind {
+                    "D" => notices += body.matches("VESPER_POISONED_RECOVERY").count(),
+                    "C" => items += body.matches("\"sortText\"").count(),
+                    "H" if body != "null" => hovers += 1,
+                    "I" => hints += body.matches("\"paddingLeft\"").count(),
+                    _ => {}
+                }
+            }
+            if rust != port {
+                diffs += 1;
+                if diffs <= 6 {
+                    let (a, b): (Vec<_>, Vec<_>) = (rust.lines().collect(), port.lines().collect());
+                    let i = a
+                        .iter()
+                        .zip(&b)
+                        .position(|(x, y)| x != y)
+                        .unwrap_or(a.len().min(b.len()));
+                    eprintln!(
+                        "{} (ceiling {ceiling}) line {i}:\n  rust   {:?}\n  vesper {:?}",
+                        d.name,
+                        a.get(i),
+                        b.get(i)
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "lens requests: {} documents, {rows} answers ({notices} poison notices, {items} \
+         completion items, {hovers} obligation hovers, {hints} inlay hints, {errors} errors), \
+         {diffs} differ",
+        docs.len()
     );
     assert_eq!(diffs, 0);
 }
