@@ -1,5 +1,7 @@
 // Test the public sugar through an ordinary package dependency.
 use @vesper-std/core::control::ensure;
+use @vesper-std/core::pipe::pipe_try;
+use @vesper-std/core::pipeline::pipe_at;
 
 test {
     fn error_value() -> u64 eff [Fail[u64]] {
@@ -12,9 +14,18 @@ test {
         wrapping_add(input, 1)
     }
 
+    fn parsed(frame: u64, in cfg: u64) -> Result[u64, u64] {
+        if frame <= cfg {
+            Result::Ok(frame)
+        } else {
+            Result::Err(frame)
+        }
+    }
+
     fn observed(input: u64) -> Result[u64, u64] {
+        let cfg: u64 = 12;
         handle Fail[u64] in {
-            checked(input)
+            input |> parsed(_, in cfg) |?> checked(_)
         } with {
             return value => Result::Ok(value),
             raise(error, _) => Result::Err(error),
@@ -43,6 +54,9 @@ test {
         // The first failed guard skips the second guard and the block tail.
         if observed(12) != Result::Err(12) {
             return 2;
+        }
+        if observed(13) != Result::Err(13) {
+            return 5;
         }
         if observed(0) != Result::Err(99) {
             return 3;

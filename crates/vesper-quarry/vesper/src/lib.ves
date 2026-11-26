@@ -54,6 +54,10 @@ use self::internal::{
     route as internal_route_impl
 };
 use self::leaf::check as leaf_check_impl;
+use self::vector::{
+    vaggregate_rows_q,
+    vexecute_q
+};
 use self::paths::{
     access_paths_q
 };
@@ -251,6 +255,77 @@ pub struct D {
     counts: ChunkSeq[u64]
 }
 
+// The vectorized executor's state (vesper/src/vector.ves): the tuple
+// width, the batch size and the cumulative intermediate rows and bytes of
+// `join::Run`, the binding, table column and type of every slot, scratch
+// three-valued columns and the selection mask, and the inner-chain orders.
+pub struct V {
+    nb: u64,
+    batch: u64,
+    rows: u64,
+    bytes: u64,
+    sbind: ChunkSeq[u64],
+    scol: ChunkSeq[u64],
+    sty: ChunkSeq[u64],
+    tri: ChunkSeq[u8],
+    sel: ChunkSeq[u8],
+    orders: ChunkSeq[u64],
+    norders: u64
+}
+
+// A materialized relation: `n` tuples of `nb` words, each the position in
+// the input of the row bound to that binding (or none: not bound, or
+// NULL-extended by an outer join). `mask` has a bit per binding present.
+pub struct Rel {
+    t: ChunkSeq[u64],
+    n: u64,
+    mask: u64
+}
+
+// An evaluated expression over one batch. k: Scalar 0 (`v`), slot column 1
+// (`s` = slot), three-valued boolean column 2 (`s` = its offset in
+// `V::tri`: 0 false, 1 true, 2 NULL). `ty` is the operand's data type
+// (`ScalarType` index), none for a NULL scalar.
+pub copy struct Opd {
+    k: u64,
+    v: Val,
+    s: u64,
+    ty: u64
+}
+
+// An aggregate accumulator (`Acc`). kind: Count 0, IntSum 1 (an i128 in
+// `lo`, `hi`; `unsigned` for a U64 column), FloatSum 2 (`fbits`), Extreme 3
+// (`best` when `has`; `max` for MAX). `agg` is the aggregate (CountRows 0,
+// Count 1, Sum 2, Min 3, Max 4) of output column `idx`.
+pub copy struct Acc {
+    kind: u64,
+    agg: u64,
+    idx: u64,
+    n: u64,
+    lo: u64,
+    hi: u64,
+    fbits: u64,
+    seen: bool,
+    unsigned: bool,
+    max: bool,
+    has: bool,
+    best: Val
+}
+
+// Hash groups of a relation's join keys: `gid` per row (none for a NULL
+// key), per group its representative row, member count and the start of
+// its members (ascending rows) in `members`; `table` holds group ids by
+// key hash (open addressing, `size` a power of two).
+pub struct G {
+    gid: ChunkSeq[u64],
+    rep: ChunkSeq[u64],
+    count: ChunkSeq[u64],
+    start: ChunkSeq[u64],
+    members: ChunkSeq[u64],
+    table: ChunkSeq[u64],
+    size: u64
+}
+
 // The exported API. Each entry point is documented where it is implemented.
 
 pub fn ddl_apply(
@@ -280,6 +355,16 @@ pub fn prepare(
 
 pub fn execute(in prog: Slice[u64], in text: Slice[u8]) -> Q {
     execute_q(in prog, in text)
+}
+
+// The vectorized executor (src/vector.rs); see vesper/src/vector.ves.
+pub fn vexecute(in prog: Slice[u64], in text: Slice[u8], in extra: Slice[u64]) -> Q {
+    vexecute_q(in prog, in text, in extra)
+}
+
+// `vector::aggregate_rows`; see vesper/src/vector.ves.
+pub fn vaggregate_rows(in prog: Slice[u64], in text: Slice[u8]) -> Q {
+    vaggregate_rows_q(in prog, in text)
 }
 
 pub fn set_rows(in prog: Slice[u64], in text: Slice[u8]) -> Q {

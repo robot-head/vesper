@@ -333,10 +333,9 @@ fn rust(
     source: Option<&str>,
     options: &Options,
 ) -> Option<Result<Compiled, EbpfBackendError>> {
-    let quiet = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
+    let quiet = quiet_panics();
     let r = std::panic::catch_unwind(|| compile_world(w, source, options)).ok();
-    std::panic::set_hook(quiet);
+    drop(quiet);
     r
 }
 

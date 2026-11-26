@@ -206,10 +206,9 @@ fn check_world(frames: &Entry, name: &str, w: &World, per: usize, tally: &mut Ta
     for ((entry, optimize), block) in tasks.iter().zip(blocks) {
         tally.tasks += 1;
         let start = Instant::now();
-        let quiet = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        let quiet = quiet_panics();
         let rust = std::panic::catch_unwind(|| rust_task(w, entry, *optimize));
-        std::panic::set_hook(quiet);
+        drop(quiet);
         tally.rust += start.elapsed();
         let Ok(rust) = rust else {
             tally.unverified += 1;
@@ -383,8 +382,7 @@ fn the_entry_plans_swap_matches_rust() {
         for (name, w) in worlds {
             for entry in entries(w, per) {
                 for optimize in [false, true] {
-                    let quiet = std::panic::take_hook();
-                    std::panic::set_hook(Box::new(|_| {}));
+                    let quiet = quiet_panics();
                     let start = Instant::now();
                     let rust = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         native::object_with_options(w, &entry, None, optimize)
@@ -397,7 +395,7 @@ fn the_entry_plans_swap_matches_rust() {
                         })
                     }));
                     hooked_time += start.elapsed();
-                    std::panic::set_hook(quiet);
+                    drop(quiet);
                     let label = format!("{name} {entry} opt={optimize}");
                     // A task whose Rust compile panics is unsupported; one
                     // that panics only with the hook is a difference.
