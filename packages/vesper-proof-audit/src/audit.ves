@@ -129,7 +129,7 @@ fn is_sep(b: u8) -> bool {
 }
 
 fn sep() -> u8 {
-    if windows() { 92 } else { 47 }
+    if windows() { BACKSLASH } else { SLASH }
 }
 
 // `base.join(part)` for a relative `part`.
@@ -325,7 +325,7 @@ fn temp_dir() -> ChunkSeq[u8] eff [Ffi[StdEnv]] {
                 },
             },
         };
-        if dir.len() == 0 || byte(in dir.as_slice(), wrapping_sub(dir.len(), 1)) != 92 {
+        if dir.len() == 0 || byte(in dir.as_slice(), wrapping_sub(dir.len(), 1)) != BACKSLASH {
             dir.push(BACKSLASH);
         }
         return dir;

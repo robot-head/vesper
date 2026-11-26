@@ -154,7 +154,7 @@ pub fn put_u64(inout out: ChunkSeq[u8], n: u64) {
         if m == 0 {
             break;
         }
-        digits.push(wrapping_add(wrapping_u8(m % 10), 48));
+        digits.push(wrapping_add(wrapping_u8(m % 10), DIGIT_ZERO));
         m = m / 10;
     }
     let mut i = digits.len();
