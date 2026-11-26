@@ -2,11 +2,10 @@
 //! record of the Vesper formatter (`vesper/src/lib.ves`) and the forwarding
 //! of [`crate::format_source`].
 //!
-//! The port formats every source the Rust code formats with its ordinary
-//! parser, lexing with the same hard ceilings (`lex_with_limits`). Sources
-//! in the macro profile (`m!`, `quote`) come back as `OpaqueMacro`, and the
-//! Rust code formats them from the start, so the result is the Rust
-//! result.
+//! The port formats every source the Rust code formats, lexing with the
+//! same hard ceilings (`lex_with_limits`): ordinary modules, sugar, test
+//! blocks and the expression macro profile (`m!`, `quote`), so its result
+//! is the Rust result.
 
 pub use crate::port_binding::*;
 use crate::{Error, FormatResult, Limits};
@@ -74,9 +73,9 @@ fn error(e: FmtFail) -> Option<Error> {
         9 => Error::Syntax {
             offset: e.offset as usize,
         },
+        10 => Error::OpaqueMacro,
         11 => Error::Conservation,
         12 => Error::NotIdempotent,
-        // OpaqueMacro (10): the Rust build formats the macro profile.
         _ => return None,
     })
 }
