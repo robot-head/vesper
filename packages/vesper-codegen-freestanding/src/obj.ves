@@ -109,10 +109,7 @@ fn w32(x: Option[u32]) -> u64 {
 }
 
 fn w64(x: Option[u64]) -> u64 {
-    match x {
-        Option::Some(v) => v,
-        Option::None => Absent::Row,
-    }
+    x.unwrap_or(Absent::Row)
 }
 
 // `start..start + size` lies inside the object.
@@ -314,18 +311,9 @@ pub fn parse_object(
                 name_len: 0,
                 name_ok: true,
                 info: rd8(in b, add(at, SymEnt::Info)),
-                shndx: match rd16(in b, add(at, SymEnt::Shndx)) {
-                    Option::Some(v) => v,
-                    Option::None => 0,
-                },
-                value: match rd64(in b, add(at, SymEnt::Value)) {
-                    Option::Some(v) => v,
-                    Option::None => 0,
-                },
-                size: match rd64(in b, add(at, SymEnt::Size)) {
-                    Option::Some(v) => v,
-                    Option::None => 0,
-                }
+                shndx: rd16(in b, add(at, SymEnt::Shndx)).unwrap_or(0),
+                value: rd64(in b, add(at, SymEnt::Value)).unwrap_or(0),
+                size: rd64(in b, add(at, SymEnt::Size)).unwrap_or(0)
             };
             match c_string(in b, strs.data_at, strs.size, name_off) {
                 Option::Some(n) => {
@@ -445,23 +433,14 @@ pub fn rel_at(in b: Slice[u8], r: Sec, k: u64) -> Rel {
         RelEnt::RelBytes
     };
     let at = add(r.data_at, wrapping_mul(k, size));
-    let info = match rd64(in b, add(at, RelEnt::Info)) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    };
+    let info = rd64(in b, add(at, RelEnt::Info)).unwrap_or(0);
     let addend = if r.sh_type == Sht::Rela {
-        match rd64(in b, add(at, RelEnt::Addend)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        }
+        rd64(in b, add(at, RelEnt::Addend)).unwrap_or(0)
     } else {
         0
     };
     Rel {
-        offset: match rd64(in b, at) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        },
+        offset: rd64(in b, at).unwrap_or(0),
         sym: info >> 32,
         r_type: wrapping_u32(info & 4294967295),
         addend: addend
@@ -489,10 +468,7 @@ pub fn string_table(
         // Insertion sort; tables here hold a handful of strings.
         let mut pos = order.len();
         for j in 0..order.len() {
-            let other = match order.try_get(j) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
+            let other = order.try_get(j).unwrap_or(0);
             if rev_greater(in strs, in starts, in lens, i, other) {
                 pos = j;
                 break;
@@ -505,10 +481,7 @@ pub fn string_table(
                 break;
             }
             k = wrapping_sub(k, 1);
-            let prev = match order.try_get(wrapping_sub(k, 1)) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
+            let prev = order.try_get(wrapping_sub(k, 1)).unwrap_or(0);
             let ok = order.try_set(k, prev);
         }
         let ok = order.try_set(pos, i);
@@ -518,10 +491,7 @@ pub fn string_table(
     let mut offset = base;
     let mut prev: u64 = Absent::Row;
     for k in 0..order.len() {
-        let id = match order.try_get(k) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let id = order.try_get(k).unwrap_or(0);
         let s = at64(in starts, id);
         let l = at64(in lens, id);
         if prev != Absent::Row
@@ -530,13 +500,7 @@ pub fn string_table(
         } else {
             let ok = offsets.try_set(id, offset);
             for c in 0..l {
-                data
-                    .push(
-                        match strs.try_get(add(s, c)) {
-                            Option::Some(v) => v,
-                            Option::None => 0,
-                        }
-                    );
+                data.push(strs.try_get(add(s, c)).unwrap_or(0));
             }
             data.push(0);
             offset = add(offset, add(l, 1));
@@ -546,10 +510,7 @@ pub fn string_table(
 }
 
 fn at64(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 // Byte `pos` (1-based from the end) of string `id`, 0 past its start.
@@ -564,10 +525,7 @@ fn rev_byte(
     if pos > l {
         return 0;
     }
-    match strs.try_get(add(at64(in starts, id), wrapping_sub(l, pos))) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    strs.try_get(add(at64(in starts, id), wrapping_sub(l, pos))).unwrap_or(0)
 }
 
 // String `a` sorts before string `b`.

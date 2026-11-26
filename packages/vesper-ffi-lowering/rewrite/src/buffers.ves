@@ -122,24 +122,15 @@ pub struct W {
 }
 
 fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
-    match s.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => NONE,
-    }
+    s.try_get(i).unwrap_or(NONE)
 }
 
 fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 fn w64(x: u32) -> u64 {
@@ -486,14 +477,8 @@ fn sym_starts(in a: Ast, x: u32, in p: Str) -> bool {
         return false;
     }
     for i in 0..b.len() {
-        let c = match a.names.text_byte(wrapping_add(s, i)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
-        let d = match b.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let c = a.names.text_byte(wrapping_add(s, i)).unwrap_or(0);
+        let d = b.try_get(i).unwrap_or(0);
         if c != d {
             return false;
         }
@@ -1206,10 +1191,7 @@ fn walk_function(in a: Ast, inout w: W, fi: u32) {
 }
 
 fn item_at(in a: Ast, i: u64) -> ItemNode {
-    let it = match a.m_items.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => NONE,
-    };
+    let it = a.m_items.try_get(i).unwrap_or(NONE);
     a.items.get_or(idx_from_raw[ItemNode](it), ItemNode { kind: 0, node: NONE })
 }
 
