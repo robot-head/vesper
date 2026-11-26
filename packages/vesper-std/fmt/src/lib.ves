@@ -154,6 +154,11 @@ pub fn write_bytes(inout out: ChunkSeq[u8], in s: Slice[u8]) {
     out.extend(in s);
 }
 
+// Append the UTF-8 bytes of `s`.
+pub fn write_str(inout out: ChunkSeq[u8], in s: Str) {
+    write_bytes(inout out, in s.as_bytes());
+}
+
 // Parse all of `s` as an unsigned integer in `radix` (2..=36). Letters may
 // be either case. There is no sign, prefix or separator.
 pub fn parse_u64_radix(in s: Slice[u8], radix: u64) -> Result[u64, ParseIntError] {
@@ -236,7 +241,52 @@ pub fn fnv1a64(in s: Slice[u8]) -> u64 {
     h
 }
 
+// Append a sequence of typed writer calls to one destination. Each named
+// writer receives inout destination first, then its original arguments.
+// The calls run left to right, once each, with no intermediate buffer.
+pub sugar fmt: tag {
+    rule (
+        fmt{
+            inout $destination:ident;
+            $($writer:ident($..arguments:args)),*
+        }
+    ) => {
+        {
+            $($writer(inout $destination, $..arguments);)*
+        }
+    }
+}
+
 test {
+    fn next(inout trace: u64, n: u64) -> u64 {
+        trace = wrapping_add(wrapping_mul(trace, 10), n);
+        n
+    }
+
+    fn appends_utf8_then_numbers_in_order() -> bool {
+        let mut out = ChunkSeq::new[u8]();
+        let mut trace: u64 = 0;
+        write_str(inout out, in "pré:");
+        fmt{
+            inout out;
+            write_str(in "digits="),
+            write_u64(next(inout trace, 1)),
+            write_i64(-9),
+            write_str(in ", hex="),
+            write_hex_u64(next(inout trace, 2), 3)
+        };
+        trace == 12 && out.as_slice().eq(in "pré:digits=1-9, hex=002".as_bytes())
+    }
+
+    fn empty_sequence_is_a_noop() -> bool {
+        let mut out = ChunkSeq::new[u8]();
+        write_str(inout out, in "-");
+        fmt{
+            inout out;
+        };
+        out.as_slice().eq(in "-".as_bytes())
+    }
+
     // @case empty(in "", 0)
     // @case empty_suffix(in "prefix", 6)
     fn test_reverse_empty_tail(in text: Str, from: u64) -> bool {
@@ -279,6 +329,8 @@ test {
         let mut out = ChunkSeq::new[u8]();
         write_u64(inout out, value);
         bytes_equal(in out.as_slice(), in expected.as_bytes())
+            && appends_utf8_then_numbers_in_order()
+            && empty_sequence_is_a_noop()
     }
 
     // @case zero(0, in "0")

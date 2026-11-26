@@ -10,16 +10,14 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 #[path = "../../port/sugar.rs"]
 mod sugar_binding;
 
-#[path = "../sugar_words.rs"]
+#[path = "../../../../tests/common/sugar_words.rs"]
 mod sugar_words;
 
 use super::{Registry, Swap, must, on, open, stats};
 
 /// Expansions run by the Vesper driver.
 static SUGAR_CALLS: AtomicU64 = AtomicU64::new(0);
-/// Expansions left to Rust: a source or import with a surface macro (the
-/// Vesper surface profile does not run `macro_source::validate_surface`
-/// yet), or a length the input's numbers cannot hold.
+/// Expansions left to Rust: a length the input's numbers cannot hold.
 static SUGAR_KEPT: AtomicU64 = AtomicU64::new(0);
 /// The sugar swap's costs.
 static COST: stats::Cost = stats::Cost::new("sugar");
@@ -37,14 +35,8 @@ const VESPER_SUGAR: vesper_syntax::sugar_expand::SugarExpandTable =
                     include_tests,
                 )
             };
-            let macros =
-                source.contains("macro") || imports.iter().any(|(_, d)| d.contains("macro"));
             let timer = stats::Timer::start();
-            let input = if macros {
-                None
-            } else {
-                sugar_words::input(source, imports, scopes, visible)
-            };
+            let input = sugar_words::input(source, imports, scopes, visible);
             let Some(input) = input else {
                 SUGAR_KEPT.fetch_add(1, Relaxed);
                 return rust();
@@ -63,7 +55,7 @@ const VESPER_SUGAR: vesper_syntax::sugar_expand::SugarExpandTable =
 /// The flip-gate rows of this file's swaps (`swaps::on`).
 pub(super) const SWAPS: &[Swap] = &[open(
     "sugar",
-    "0 diffs, driver 1.38x; surface macros stay on Rust until part 6",
+    "0 diffs, driver 1.38x; no release ABBA run yet",
 )];
 
 pub(super) fn register(_r: &mut Registry) {

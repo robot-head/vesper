@@ -18,6 +18,10 @@ use vesper_ffi::{Endian, FieldKind, WireLayout};
 
 /// Most argument words a host function may take.
 pub const MAX_WORDS: usize = 10;
+/// Bytes of one `u64` word of a marshalled argument buffer.
+const WORD_BYTES: usize = 8;
+/// UTF-16 code units per word of a marshalled argument buffer.
+const UTF16_UNITS_PER_WORD: usize = 4;
 
 struct Foreign {
     descriptor: FunctionDescriptor,
@@ -165,7 +169,7 @@ impl EvalHost {
                             ),
                         ));
                     }
-                    let mut buf = vec![0u64; (bytes.len() + 1).div_ceil(8)];
+                    let mut buf = vec![0u64; (bytes.len() + 1).div_ceil(WORD_BYTES)];
                     as_bytes(&mut buf)[..bytes.len()].copy_from_slice(&bytes);
                     Slot::Buffer(Some((buf, bytes.len())))
                 }
@@ -185,7 +189,7 @@ impl EvalHost {
                             ),
                         ));
                     }
-                    let mut buf = vec![0u64; (units.len() + 1).div_ceil(4)];
+                    let mut buf = vec![0u64; (units.len() + 1).div_ceil(UTF16_UNITS_PER_WORD)];
                     let dst = as_bytes(&mut buf);
                     for (i, u) in units.iter().enumerate() {
                         dst[i * 2..i * 2 + 2].copy_from_slice(&u.to_ne_bytes());
@@ -197,7 +201,7 @@ impl EvalHost {
                         .iter()
                         .map(|b| int(b).map(|b| b as u8))
                         .collect::<Result<Vec<u8>, _>>()?;
-                    let mut buf = vec![0u64; (bytes.len() + 1).div_ceil(8)];
+                    let mut buf = vec![0u64; (bytes.len() + 1).div_ceil(WORD_BYTES)];
                     as_bytes(&mut buf)[..bytes.len()].copy_from_slice(&bytes);
                     let starts = cstr_list_starts(&bytes);
                     let array = vec![0u64; starts.len() + 1];
@@ -210,7 +214,7 @@ impl EvalHost {
                     Some(v) => {
                         let items = elements(v)?;
                         let size = element.size();
-                        let mut buf = vec![0u64; (items.len() * size).div_ceil(8).max(1)];
+                        let mut buf = vec![0u64; (items.len() * size).div_ceil(WORD_BYTES).max(1)];
                         for (i, item) in items.iter().enumerate() {
                             encode(element, item, &mut as_bytes(&mut buf)[i * size..])?;
                         }
@@ -222,7 +226,7 @@ impl EvalHost {
                 } => match option(v, *nullable)? {
                     None => Slot::Buffer(None),
                     Some(v) => {
-                        let mut buf = vec![0u64; pointee.size().div_ceil(8).max(1)];
+                        let mut buf = vec![0u64; pointee.size().div_ceil(WORD_BYTES).max(1)];
                         encode(pointee, v, as_bytes(&mut buf))?;
                         Slot::Buffer(Some((buf, 1)))
                     }
@@ -605,7 +609,9 @@ fn decode_struct(layout: &WireLayout, bytes: &[u8]) -> Result<Value, String> {
 fn as_bytes(words: &mut [u64]) -> &mut [u8] {
     // SAFETY: u64 has no padding and every byte pattern is valid; the view
     // covers exactly the words' bytes.
-    unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), words.len() * 8) }
+    unsafe {
+        std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), words.len() * WORD_BYTES)
+    }
 }
 
 /// Call the C function at `address` with `w` as its integer arguments.

@@ -85,24 +85,15 @@ const LINEAR: u8 = 2;
 const PASS_SINK: u8 = 2;
 
 fn g32(in v: ChunkSeq[u32], i: u64) -> u32 {
-    match v.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => NONE,
-    }
+    v.try_get(i).unwrap_or(NONE)
 }
 
 fn g64(in v: ChunkSeq[u64], i: u64) -> u64 {
-    match v.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    v.try_get(i).unwrap_or(0)
 }
 
 fn g8(in v: ChunkSeq[u8], i: u64) -> u8 {
-    match v.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    v.try_get(i).unwrap_or(0)
 }
 
 fn w(x: u32) -> u64 {
@@ -263,10 +254,7 @@ fn ow_clear(inout o: Ow) {
 }
 
 fn table_get(in t: ChunkSeq[u32], i: u32) -> u32 {
-    match t.try_get(w(i)) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    t.try_get(w(i)).unwrap_or(0)
 }
 
 fn table_set(inout t: ChunkSeq[u32], i: u32, v: u32) {
@@ -477,10 +465,7 @@ fn push_scope(inout o: Ow) {
 }
 
 fn pop_scope(inout o: Ow) {
-    let n = match o.marks.pop() {
-        Option::Some(x) => x,
-        Option::None => 0,
-    };
+    let n = o.marks.pop().unwrap_or(0);
     loop {
         if o.scope.len() <= n {
             break;
@@ -544,14 +529,8 @@ fn path_parts(in a: Ast, s: u32, inout first: u64, inout last: u64) -> u64 {
         if inc(i) >= len {
             break;
         }
-        let x = match a.names.text_byte(wrapping_add(from, i)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
-        let y = match a.names.text_byte(wrapping_add(from, inc(i))) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let x = a.names.text_byte(wrapping_add(from, i)).unwrap_or(0);
+        let y = a.names.text_byte(wrapping_add(from, inc(i))).unwrap_or(0);
         if x == 58 && y == 58 {
             count = inc(count);
             if first == NONE64 {
@@ -704,10 +683,7 @@ fn parse_index(in a: Ast, s: u32) -> u64 {
         if i >= to {
             break;
         }
-        let d = match a.names.text_byte(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let d = a.names.text_byte(i).unwrap_or(0);
         if d < 48 || d > 57 {
             return NONE64;
         }
@@ -1477,10 +1453,7 @@ copy struct Rd {
 }
 
 fn word(in b: Slice[u8], inout r: Rd) -> u64 {
-    let x = match b.try_read_u64_le(r.pos) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    };
+    let x = b.try_read_u64_le(r.pos).unwrap_or(0);
     r.pos = wrapping_add(r.pos, 8);
     x
 }

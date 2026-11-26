@@ -62,6 +62,26 @@ impl RecoveryFormatResult {
     pub fn into_output(self) -> String {
         self.output
     }
+    /// The port's result (`port::format_recovery_source`).
+    #[cfg(vesper_port)]
+    pub(crate) fn from_port(
+        output: String,
+        edits: Vec<(Range<usize>, String)>,
+        source_hash: [u8; 32],
+        formatted_declarations: usize,
+        changed: bool,
+    ) -> Self {
+        Self {
+            output,
+            edits: edits
+                .into_iter()
+                .map(|(span, replacement)| RecoveryEdit { span, replacement })
+                .collect(),
+            source_hash,
+            formatted_declarations,
+            changed,
+        }
+    }
 }
 
 fn add(a: usize, b: usize) -> Result<usize, Error> {
@@ -353,6 +373,12 @@ fn inventory_equal(a: &RecoverySyntax, b: &RecoverySyntax, work: &mut Work) -> R
 /// All opaque/damaged gaps are copied exactly. No source checking or execution
 /// occurs, and zero eligible declarations returns an unchanged proposal.
 pub fn format_recovery_source(source: &str, limits: Limits) -> Result<RecoveryFormatResult, Error> {
+    // The native port formats recovery sources over @vesper/front's
+    // editor syntax (`recover`).
+    #[cfg(vesper_port)]
+    if let Some(result) = crate::port::format_recovery_source(source, limits) {
+        return result;
+    }
     let mut work = Work::new(limits.max_work);
     let before_tokens = lex(source, limits, &mut work)?;
     let before = snapshot(source, limits, &mut work)?;

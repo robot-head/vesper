@@ -103,3 +103,47 @@ pub(crate) fn format_source(source: &str, limits: Limits) -> Option<Result<Forma
         Err(e) => error(e).map(Err),
     }
 }
+
+/// `format_recovery_source` through the port, or `None` for an error code
+/// the port does not define. The edits come back as (start, end,
+/// replacement length) over the source; the replacements are the output's
+/// bytes at the shifted positions, and the source digest is computed here.
+pub(crate) fn format_recovery_source(
+    source: &str,
+    limits: Limits,
+) -> Option<Result<crate::recovery::RecoveryFormatResult, Error>> {
+    let w = |n: usize| n as u64;
+    let r = format_recovery(
+        source,
+        w(limits.max_input_bytes),
+        w(limits.max_output_bytes),
+        w(limits.max_tokens),
+        w(limits.max_doc_nodes),
+        w(limits.max_depth),
+        w(limits.max_work),
+    );
+    if !recovery_ok(&r) {
+        return error(recovery_error(&r)).map(Err);
+    }
+    let Ok(output) = String::from_utf8(recovery_output(&r)) else {
+        return Some(Err(Error::Conservation));
+    };
+    let words = recovery_edits(&r);
+    let mut edits = Vec::with_capacity(words.len() / 3);
+    // `shift`: how far the output has moved past the source so far.
+    let mut shift: isize = 0;
+    for &[start, end, len] in words.as_chunks::<3>().0 {
+        let (start, end, len) = (start as usize, end as usize, len as usize);
+        let at = start.checked_add_signed(shift)?;
+        let replacement = output.get(at..at + len)?.to_owned();
+        shift += len as isize - (end - start) as isize;
+        edits.push((start..end, replacement));
+    }
+    Some(Ok(crate::recovery::RecoveryFormatResult::from_port(
+        output,
+        edits,
+        *blake3::hash(source.as_bytes()).as_bytes(),
+        recovery_formatted(&r) as usize,
+        recovery_changed(&r),
+    )))
+}
