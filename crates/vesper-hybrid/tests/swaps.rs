@@ -37,6 +37,11 @@ fn hybrid() -> PathBuf {
 /// command exits before the report on Windows, #1486), with `env` set and
 /// the stats report on.
 fn emit(env: &[(&str, &str)]) -> Output {
+    emit_with(&hybrid(), env)
+}
+
+/// `emit` with the hybrid started from `compiler`.
+fn emit_with(compiler: &Path, env: &[(&str, &str)]) -> Output {
     let out = std::env::temp_dir().join(format!(
         "vesper-hybrid-swaps-{}-{}.o",
         std::process::id(),
@@ -44,7 +49,7 @@ fn emit(env: &[(&str, &str)]) -> Output {
             .map(|(k, v)| format!("{k}{v}"))
             .collect::<String>()
     ));
-    let mut cmd = Command::new(hybrid());
+    let mut cmd = Command::new(compiler);
     cmd.current_dir(repository())
         .env("VESPER_HYBRID_STATS", "1")
         .env_remove("VESPER_HYBRID_SWAPS")
@@ -216,6 +221,29 @@ fn gated_default_builds_run_the_gated_set() {
         assert_eq!(line.on, line.config.is_some(), "swap {}", line.name);
     }
     assert_eq!(count(&output, "vesper-hybrid: parse answered "), 0);
+}
+
+/// Started as `vesper` (how the default compiler ships it: Bazel's
+/// `//crates/vesper-hybrid:vesper`), the hybrid runs the gated set with no
+/// variable; `VESPER_HYBRID_SWAPS=all` still turns every swap on.
+#[test]
+fn the_shipped_name_runs_the_gated_set() {
+    let dir = std::env::temp_dir().join(format!("vesper-hybrid-shipped-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create the shipped directory");
+    let shipped = dir.join(format!("vesper{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(hybrid(), &shipped).expect("copy the hybrid as vesper");
+    let output = emit_with(&shipped, &[]);
+    let all = emit_with(&shipped, &[("VESPER_HYBRID_SWAPS", "all")]);
+    let _ = std::fs::remove_dir_all(&dir);
+    let (set, lines) = swaps(&output);
+    assert_eq!(set, "gated");
+    for line in &lines {
+        assert_eq!(line.on, line.config.is_some(), "swap {}", line.name);
+    }
+    assert_eq!(count(&output, "vesper-hybrid: parse answered "), 0);
+    let (set, lines) = swaps(&all);
+    assert_eq!(set, "all");
+    assert!(lines.iter().all(|l| l.on), "all: a swap is off");
 }
 
 #[test]

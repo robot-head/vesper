@@ -143,9 +143,11 @@ both and that the others really stay on Rust, and
 gated set over the whole corpus with 0 differences. Today `gated` holds
 `component` (wit-component), `hoist` (bounds-hoist), `optimize`,
 `entry_plans` and `export_plans` (native-walk), `sugar` and
-`verified_codegen`. A hybrid built with the `gated-default` feature runs
-`gated` when no variable names a set: that build is the one the default
-`vesper` switches to.
+`verified_codegen`. A hybrid started as `vesper` (Bazel's
+`//crates/vesper-hybrid:vesper`, a copy of the hybrid under the shipped
+name) or built with the `gated-default` feature runs `gated` when no
+variable names a set: that is the compiler the default `vesper` switches
+to.
 
 ### Before the retirement PR
 
