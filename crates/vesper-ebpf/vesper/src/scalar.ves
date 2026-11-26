@@ -37,10 +37,7 @@ pub copy struct Scalar {
 }
 
 fn tn(value: u64, mask: u64) -> Tnum {
-    Tnum {
-        value: value,
-        mask: mask
-    }
+    Tnum { value: value, mask: mask }
 }
 
 pub fn tnum_unknown() -> Tnum {
@@ -146,33 +143,15 @@ pub fn tnum_truncate(a: Tnum, width: u32) -> Tnum {
 // Scalar.
 
 pub fn scalar_unknown() -> Scalar {
-    Scalar {
-        umin: 0,
-        umax: umax(),
-        smin: smin_i64(),
-        smax: smax_i64(),
-        var: tnum_unknown()
-    }
+    Scalar { umin: 0, umax: umax(), smin: smin_i64(), smax: smax_i64(), var: tnum_unknown() }
 }
 
 pub fn scalar_konst(v: u64) -> Scalar {
-    Scalar {
-        umin: v,
-        umax: v,
-        smin: signed(v),
-        smax: signed(v),
-        var: tnum_konst(v)
-    }
+    Scalar { umin: v, umax: v, smin: signed(v), smax: signed(v), var: tnum_konst(v) }
 }
 
 fn parts(umin: u64, umax: u64, smin: i64, smax: i64, var: Tnum) -> Scalar {
-    Scalar {
-        umin: umin,
-        umax: umax,
-        smin: smin,
-        smax: smax,
-        var: var
-    }
+    Scalar { umin: umin, umax: umax, smin: smin, smax: smax, var: var }
 }
 
 pub fn scalar_urange(min: u64, max: u64) -> Scalar {

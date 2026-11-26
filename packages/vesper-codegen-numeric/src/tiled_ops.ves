@@ -98,9 +98,7 @@ fn tw_value(inout w: Words) -> Value eff [Ffi[Cranelift]] {
 }
 
 fn tt(code: u32) -> Ty {
-    Ty {
-        code: code
-    }
+    Ty { code: code }
 }
 
 fn t_iconst(inout b: Builder, v: u64) -> Value eff [Ffi[Cranelift]] {
@@ -296,14 +294,10 @@ fn t_new(inout b: Builder, inout m: Module, jit: bool, kind: u64, inout w: Words
     let cold = tw_next(inout w);
     // `with_region` reads the region variable before the constants.
     let region = if kind == TK_WITH_REGION {
-        let var = Var {
-            id: wrapping_u32(tw_next(inout w))
-        };
+        let var = Var { id: wrapping_u32(tw_next(inout w)) };
         use_var(inout b, var)
     } else {
-        Value {
-            id: 0
-        }
+        Value { id: 0 }
     };
     let wv = t_iconst(inout b, width);
     let sv = t_iconst(inout b, stride);
@@ -443,10 +437,7 @@ fn t_load_tile_vec(inout b: Builder, inout m: Module, jit: bool, inout w: Words)
 pub fn tiled_request(call: u64, inout b: Builder, inout m: Module) -> Value eff [Ffi[Cranelift]] {
     let kind = call_arg(call, TW_KIND);
     let jit = call_arg(call, TW_JIT) != 0;
-    let mut w = Words {
-        call: call,
-        at: TW_FIRST
-    };
+    let mut w = Words { call: call, at: TW_FIRST };
     if kind == TK_NEW || kind == TK_WITH_CAPACITY || kind == TK_WITH_REGION {
         return t_new(inout b, inout m, jit, kind, inout w);
     }

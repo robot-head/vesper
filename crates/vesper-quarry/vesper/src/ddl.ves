@@ -216,16 +216,7 @@ pub fn ddl_apply_q(
             if !bound(inout q, bn, 4, "catalog table limit") {
                 return q;
             }
-            q
-                .tabs
-                .push(
-                    CTab {
-                        noff: noff,
-                        nlen: nlen,
-                        start: 0,
-                        n: 0
-                    }
-                );
+            q.tabs.push(CTab { noff: noff, nlen: nlen, start: 0, n: 0 });
             live = wrapping_add(live, 1);
             p = wrapping_add(
                 wrapping_add(p, 4),

@@ -169,10 +169,7 @@ pub copy struct ValTy {
 }
 
 pub fn vt(kind: u8) -> ValTy {
-    ValTy {
-        kind: kind,
-        index: 0
-    }
+    ValTy { kind: kind, index: 0 }
 }
 
 pub fn vt_ref(nullable: bool, index: u32) -> ValTy {
@@ -225,10 +222,7 @@ pub struct Code {
 }
 
 pub fn code_new() -> Code {
-    Code {
-        bytes: ChunkSeq::new[u8](),
-        count: 0
-    }
+    Code { bytes: ChunkSeq::new[u8](), count: 0 }
 }
 
 impl Code {

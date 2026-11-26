@@ -64,21 +64,11 @@ fn sum(in counts: ChunkSeq[u32]) -> u64 {
 pub fn accounting_check(total: u32, in counts: ChunkSeq[u32]) -> Option[AuditError] {
     let actual = sum(in counts);
     if actual != widen_u64(total) {
-        return Option::Some(
-            AuditError::TotalMismatch {
-                expected: total,
-                actual: actual
-            }
-        );
+        return Option::Some(AuditError::TotalMismatch { expected: total, actual: actual });
     }
     let leaked = at32(in counts, LOC_LEAKED);
     if leaked != 0 {
-        return Option::Some(
-            AuditError::Leaked {
-                count: leaked,
-                first_chunk: Option::None
-            }
-        );
+        return Option::Some(AuditError::Leaked { count: leaked, first_chunk: Option::None });
     }
     Option::None
 }
@@ -93,10 +83,7 @@ impl Device {
                 break;
             }
         }
-        AuditError::Leaked {
-            count: count,
-            first_chunk: first
-        }
+        AuditError::Leaked { count: count, first_chunk: first }
     }
 
     fn pending_leaked(in self) -> u32 {
@@ -125,22 +112,11 @@ pub fn xsk_audit_driver(in d: Device) -> Option[AuditError] {
         )
     );
     if actual != widen_u64(total) {
-        return Option::Some(
-            AuditError::TotalMismatch {
-                expected: total,
-                actual: actual
-            }
-        );
+        return Option::Some(AuditError::TotalMismatch { expected: total, actual: actual });
     }
     let free_len = wrapping_u32(d.free.len());
     if c.free != free_len {
-        return Option::Some(
-            AuditError::SideMismatch {
-                side: 0,
-                driver: c.free,
-                device: free_len
-            }
-        );
+        return Option::Some(AuditError::SideMismatch { side: 0, driver: c.free, device: free_len });
     }
     let pending = d.pending_leaked();
     let leaked = wrapping_add(c.leaked, pending);
@@ -163,12 +139,7 @@ fn mark(inout seen: ChunkSeq[u8], chunk: u32, inout fault: Option[AuditError]) {
     };
     seen.try_set(i, next);
     if next > 1 {
-        first(
-            inout fault,
-            AuditError::Duplicate {
-                chunk: chunk
-            }
-        );
+        first(inout fault, AuditError::Duplicate { chunk: chunk });
     }
 }
 
@@ -207,11 +178,7 @@ fn visit(
     if !ok {
         first(
             inout fault,
-            AuditError::Misplaced {
-                chunk: chunk,
-                device: wrapping_u32(loc),
-                driver: loc_of(here)
-            }
+            AuditError::Misplaced { chunk: chunk, device: wrapping_u32(loc), driver: loc_of(here) }
         );
     }
     mark(inout seen, chunk, inout fault);
@@ -493,21 +460,13 @@ pub fn xsk_audit_counts(inout d: Device) -> Result[LocationCounts, AuditError] {
     let rx_side = wrapping_add(wrapping_add(kernel.fill_ring, kernel.nic_rx), kernel.rx_ring);
     if rx_side != driver.fill_posted {
         return Result::Err(
-            AuditError::SideMismatch {
-                side: 1,
-                driver: driver.fill_posted,
-                device: rx_side
-            }
+            AuditError::SideMismatch { side: 1, driver: driver.fill_posted, device: rx_side }
         );
     }
     let tx_side = wrapping_add(wrapping_add(kernel.tx_ring, kernel.nic_tx), kernel.completion_ring);
     if tx_side != driver.tx_posted {
         return Result::Err(
-            AuditError::SideMismatch {
-                side: 2,
-                driver: driver.tx_posted,
-                device: tx_side
-            }
+            AuditError::SideMismatch { side: 2, driver: driver.tx_posted, device: tx_side }
         );
     }
     if audit_clean(inout d, total) {
@@ -525,11 +484,7 @@ pub fn xsk_audit_counts(inout d: Device) -> Result[LocationCounts, AuditError] {
         if here != L_FREE {
             first(
                 inout fault,
-                AuditError::Misplaced {
-                    chunk: chunk,
-                    device: 0,
-                    driver: loc_of(here)
-                }
+                AuditError::Misplaced { chunk: chunk, device: 0, driver: loc_of(here) }
             );
         }
         mark(inout d.seen, chunk, inout fault);
@@ -548,11 +503,7 @@ pub fn xsk_audit_counts(inout d: Device) -> Result[LocationCounts, AuditError] {
     for c in 0..widen_u64(total) {
         match d.seen.try_get(c) {
             Option::Some(0) => {
-                return Result::Err(
-                    AuditError::Missing {
-                        chunk: wrapping_u32(c)
-                    }
-                );
+                return Result::Err(AuditError::Missing { chunk: wrapping_u32(c) });
             },
             _ => (),
         }
@@ -563,12 +514,7 @@ pub fn xsk_audit_counts(inout d: Device) -> Result[LocationCounts, AuditError] {
 fn counts_total(acc: LocationCounts, total: u32) -> Result[LocationCounts, AuditError] {
     let actual = counts_sum(acc);
     if actual != widen_u64(total) {
-        return Result::Err(
-            AuditError::TotalMismatch {
-                expected: total,
-                actual: actual
-            }
-        );
+        return Result::Err(AuditError::TotalMismatch { expected: total, actual: actual });
     }
     Result::Ok(acc)
 }
@@ -582,12 +528,7 @@ pub fn xsk_audit(inout d: Device) -> Result[LocationCounts, AuditError] {
     let total = d.nic.config.frame_count;
     let actual = counts_sum(acc);
     if actual != widen_u64(total) {
-        return Result::Err(
-            AuditError::TotalMismatch {
-                expected: total,
-                actual: actual
-            }
-        );
+        return Result::Err(AuditError::TotalMismatch { expected: total, actual: actual });
     }
     if acc.leaked != 0 {
         return Result::Err(d.leaked_error(acc.leaked));

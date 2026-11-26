@@ -222,16 +222,7 @@ pub fn patch_subscribe(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, i
     if !event_valid(rwidget(in s.widgets, i).kind, event) {
         return invalid(Invalid::Event);
     }
-    s
-        .subs
-        .push(
-            RSub {
-                serial: sub,
-                widget: widget,
-                event: event,
-                handler: handler
-            }
-        );
+    s.subs.push(RSub { serial: sub, widget: widget, event: event, handler: handler });
     s.blive.push(true);
     s.nsubs = inc(s.nsubs);
     if s.created == MAX_U64 {
@@ -325,10 +316,7 @@ pub fn patch_children(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in
         if count >= lim.children {
             return budget(Budget::Children);
         }
-        let e = Edge {
-            parent: parent,
-            child: child
-        };
+        let e = Edge { parent: parent, child: child };
         if at == NONE_ID {
             s.edges.push(e);
         } else {

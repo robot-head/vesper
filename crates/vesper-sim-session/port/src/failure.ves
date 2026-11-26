@@ -46,11 +46,7 @@ pub fn failure_table_new(in rules_slice: Slice[u64]) -> FailureTable {
         rules.push(w);
         i = wrapping_add(i, 1);
     }
-    FailureTable {
-        rules: rules,
-        keys: ChunkSeq::new[u64](),
-        counts: ChunkSeq::new[u64]()
-    }
+    FailureTable { rules: rules, keys: ChunkSeq::new[u64](), counts: ChunkSeq::new[u64]() }
 }
 
 pub fn failure_table_clone(in t: FailureTable) -> FailureTable {

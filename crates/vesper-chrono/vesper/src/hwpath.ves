@@ -101,10 +101,7 @@ fn anchor_at(in anchors: Slice[EffectAnchor], idx: u64) -> EffectAnchor {
         copy_anchor(in anchors[idx])
     } with {
         return x => x,
-        raise(e, k) => EffectAnchor {
-            lamport_seq: 0,
-            tsc: 0
-        },
+        raise(e, k) => EffectAnchor { lamport_seq: 0, tsc: 0 },
     }
 }
 
@@ -121,11 +118,7 @@ pub fn new_branch_timeline(
         let a0 = anchor_at(in anchors.as_slice(), wrapping_sub(i, 1));
         let a1 = anchor_at(in anchors.as_slice(), i);
         if a1.lamport_seq <= a0.lamport_seq || a1.tsc < a0.tsc {
-            return Result::Err(
-                PathError::AnchorsOutOfOrder {
-                    index: i
-                }
-            );
+            return Result::Err(PathError::AnchorsOutOfOrder { index: i });
         }
         i = wrapping_add(i, 1);
     }
@@ -149,11 +142,7 @@ pub fn new_branch_timeline(
             },
         };
         if bad {
-            return Result::Err(
-                PathError::BadInterval {
-                    index: j
-                }
-            );
+            return Result::Err(PathError::BadInterval { index: j });
         }
         j = wrapping_add(j, 1);
     }
@@ -180,11 +169,7 @@ pub fn new_branch_timeline(
             },
         };
         if ooo {
-            return Result::Err(
-                PathError::StepsOutOfOrder {
-                    index: k
-                }
-            );
+            return Result::Err(PathError::StepsOutOfOrder { index: k });
         }
         k = wrapping_add(k, 1);
     }
@@ -230,20 +215,12 @@ fn clone_opt_u64(in o: Option[u64]) -> Option[u64] {
 
 fn clone_branch_kind(in k: BranchKind) -> BranchKind {
     match k {
-        BranchKind::Conditional {
-            taken
-        } => BranchKind::Conditional {
-            taken: taken
-        },
+        BranchKind::Conditional { taken } => BranchKind::Conditional { taken: taken },
         BranchKind::DirectJump => BranchKind::DirectJump,
         BranchKind::DirectCall => BranchKind::DirectCall,
         BranchKind::IndirectJump => BranchKind::IndirectJump,
         BranchKind::IndirectCall => BranchKind::IndirectCall,
-        BranchKind::Return {
-            compressed
-        } => BranchKind::Return {
-            compressed: compressed
-        },
+        BranchKind::Return { compressed } => BranchKind::Return { compressed: compressed },
         BranchKind::Far => BranchKind::Far,
         BranchKind::Async => BranchKind::Async,
         BranchKind::Enable => BranchKind::Enable,
@@ -326,17 +303,11 @@ fn push_ete_step(
     in el: EteElement,
 ) {
     match el {
-        EteElement::Timestamp {
-            timestamp,
-            cycle_count: _
-        } => {
+        EteElement::Timestamp { timestamp, cycle_count: _ } => {
             flush_steps(inout open, inout steps, Option::Some(timestamp));
             ts = Option::Some(timestamp);
         }
-        EteElement::Address {
-            address,
-            isa
-        } => {
+        EteElement::Address { address, isa } => {
             let from = at;
             at = address;
             open
@@ -350,35 +321,25 @@ fn push_ete_step(
                     }
                 );
         }
-        EteElement::Atom {
-            executed
-        } => {
+        EteElement::Atom { executed } => {
             open
                 .push(
                     TraceStep {
                         from: at,
                         to: Option::None,
-                        kind: StepKind::StepAtom {
-                            executed: executed
-                        },
+                        kind: StepKind::StepAtom { executed: executed },
                         tsc_lo: clone_opt_u64(in ts),
                         tsc_hi: Option::None,
                     }
                 );
         }
-        EteElement::Exception {
-            exception_type,
-            preferred_return,
-            isa: _
-        } => {
+        EteElement::Exception { exception_type, preferred_return, isa: _ } => {
             open
                 .push(
                     TraceStep {
                         from: preferred_return,
                         to: Option::None,
-                        kind: StepKind::StepException {
-                            exception_type: exception_type
-                        },
+                        kind: StepKind::StepException { exception_type: exception_type },
                         tsc_lo: clone_opt_u64(in ts),
                         tsc_hi: Option::None,
                     }
@@ -441,11 +402,7 @@ fn anchor_index(in tl: BranchTimeline, lamport_seq: u64) -> Result[u64, PathErro
             hi = mid;
         }
     }
-    Result::Err(
-        PathError::UnknownSeq {
-            lamport_seq: lamport_seq
-        }
-    )
+    Result::Err(PathError::UnknownSeq { lamport_seq: lamport_seq })
 }
 
 fn partition_lo_le(in steps: Slice[TraceStep], tsc: u64) -> u64 {

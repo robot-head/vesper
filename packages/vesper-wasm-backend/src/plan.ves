@@ -176,13 +176,7 @@ pub struct Cx {
 }
 
 pub fn cx_new(sink c: Ctx, sink f: Facts, sink ir: Ir) -> Cx {
-    let Ctx {
-        names,
-        types,
-        world,
-        tmap,
-        nmap
-    } = c;
+    let Ctx { names, types, world, tmap, nmap } = c;
     let mut names = names;
     let s = syms_new(inout names);
     let k = world.k;
@@ -278,12 +272,7 @@ pub copy struct Shape {
 }
 
 fn shape_of(kind: u8, scalar: u8, adt: u32, ty: u32) -> Shape {
-    Shape {
-        kind: kind,
-        scalar: scalar,
-        adt: adt,
-        ty: ty
-    }
+    Shape { kind: kind, scalar: scalar, adt: adt, ty: ty }
 }
 
 impl Cx {
@@ -622,10 +611,7 @@ pub struct TVars {
 }
 
 pub fn tvars_new() -> TVars {
-    TVars {
-        keys: ChunkSeq::new[u32](),
-        vals: ChunkSeq::new[u32]()
-    }
+    TVars { keys: ChunkSeq::new[u32](), vals: ChunkSeq::new[u32]() }
 }
 
 impl TVars {
@@ -1195,13 +1181,7 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                     let cv = call_vars(inout cx, callee, ins.s0, ins.s1, in explicit, in vars);
                     let key = instance_name(inout cx, callee, in cv);
                     let s_pc = stage2_heap_swap(perm);
-                    p_calls
-                        .push(
-                            CallTarget {
-                                dest: widen_u64(ins.dest),
-                                callee: key
-                            }
-                        );
+                    p_calls.push(CallTarget { dest: widen_u64(ins.dest), callee: key });
                     perm = stage2_heap_swap(s_pc);
                     let mut ls = ChunkSeq::new[u32]();
                     row_labels(in cx, inout ls, callee);

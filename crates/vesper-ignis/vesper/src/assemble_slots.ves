@@ -220,10 +220,7 @@ copy struct SlotRange {
 fn get_range(in s: ChunkSeq[SlotRange], i: u64) -> SlotRange {
     match s.try_get(i) {
         Option::Some(r) => r,
-        Option::None => SlotRange {
-            start: 0,
-            count: 0
-        },
+        Option::None => SlotRange { start: 0, count: 0 },
     }
 }
 
@@ -265,13 +262,7 @@ fn needed_waits(inout ck: Clocks, q: u32, in producers: ChunkSeq[u32]) -> ChunkS
                 in ck.by_q,
                 wrapping_add(get64(in ck.q_start, dq), wrapping_sub(widen_u64(pos), 1))
             );
-            candidates
-                .push(
-                    Pair {
-                        key: wrapping_u32(dq),
-                        value: d
-                    }
-                );
+            candidates.push(Pair { key: wrapping_u32(dq), value: d });
         }
     }
     let mut out: ChunkSeq[Pair] = ChunkSeq::new[Pair]();
@@ -353,16 +344,7 @@ fn emit_slot(
             Option::None => (),
         }
     }
-    out
-        .cmds
-        .push(
-            CmdRec {
-                queue: queue,
-                tag: 1,
-                a: start,
-                b: r.count
-            }
-        );
+    out.cmds.push(CmdRec { queue: queue, tag: 1, a: start, b: r.count });
 }
 
 fn emit_waits(inout out: PlanOut, in list: ChunkSeq[Pair], in value_of: ChunkSeq[u64], queue: u32) {

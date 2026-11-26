@@ -55,6 +55,59 @@ fn use_groups_stay_on_one_line_when_they_fit() {
     );
 }
 #[test]
+fn struct_literals_stay_on_one_line_when_they_fit() {
+    assert_eq!(
+        verify(
+            "struct P{x:u64,y:u64}\nfn f(a:u64)->P{let p=P{x:1,y:P{x:2,y:3}.x};match p{P{x:x,y:y}=>P{x:x,y:y}}}"
+        ),
+        "struct P {
+    x: u64,
+    y: u64
+}
+fn f(a: u64) -> P {
+    let p = P { x: 1, y: P { x: 2, y: 3 }.x };
+    match p {
+        P { x: x, y: y } => P { x: x, y: y }
+    }
+}
+"
+    );
+    // Blocks after a type name stay blocks: a loop bound, a condition, a
+    // return type.
+    assert_eq!(
+        verify("const N:u64=4;fn f(a:u64)->u64{for i in 0..N{g(i)}if a==N{a}else{N}}"),
+        "const N: u64 = 4;
+fn f(a: u64) -> u64 {
+    for i in 0..N {
+        g(i)
+    }
+    if a == N {
+        a
+    } else {
+        N
+    }
+}
+"
+    );
+    // Too long for the ribbon, or a trailing comma: one field per line.
+    assert_eq!(
+        verify(
+            "fn f()->P{P{x:first_long_function_name(1,2,3),y:second_long_function_name(4,5,6,7,8,9,10,11)}}"
+        ),
+        "fn f() -> P {
+    P {
+        x: first_long_function_name(1, 2, 3),
+        y: second_long_function_name(4, 5, 6, 7, 8, 9, 10, 11)
+    }
+}
+"
+    );
+    assert_eq!(
+        verify("fn f()->P{P{x:1,y:2,}}"),
+        "fn f() -> P {\n    P {\n        x: 1,\n        y: 2,\n    }\n}\n"
+    );
+}
+#[test]
 fn parser_sugar_keeps_its_surface_syntax() {
     assert_eq!(
         verify(

@@ -404,10 +404,7 @@ fn new_c_for_raft() -> C {
 fn ge_log(in pool: ChunkSeq[RaftEntry], i: u64) -> RaftEntry {
     match pool.try_get(i) {
         Option::Some(e) => e,
-        Option::None => RaftEntry {
-            term: 0,
-            cmd: 0
-        },
+        Option::None => RaftEntry { term: 0, cmd: 0 },
     }
 }
 
@@ -526,15 +523,7 @@ fn node_log_push(inout rc: RaftCluster, i: u64, e: RaftEntry) {
             wrapping_mul(cap, 2)
         };
         let new_off = rc.log_pool.len();
-        rc
-            .log_pool
-            .resize(
-                wrapping_add(new_off, new_cap),
-                RaftEntry {
-                    term: 0,
-                    cmd: 0
-                }
-            );
+        rc.log_pool.resize(wrapping_add(new_off, new_cap), RaftEntry { term: 0, cmd: 0 });
         for k in 0..len {
             let cur_e = ge_log(in rc.log_pool, wrapping_add(off, k));
             let _ = rc.log_pool.try_set(wrapping_add(new_off, k), cur_e);
@@ -564,15 +553,7 @@ fn node_log_replace_from_tmp(inout rc: RaftCluster, i: u64) {
     } else {
         let new_cap = wrapping_mul(need, 2);
         let new_off = rc.log_pool.len();
-        rc
-            .log_pool
-            .resize(
-                wrapping_add(new_off, new_cap),
-                RaftEntry {
-                    term: 0,
-                    cmd: 0
-                }
-            );
+        rc.log_pool.resize(wrapping_add(new_off, new_cap), RaftEntry { term: 0, cmd: 0 });
         setw(inout rc.nd_log_off, i, new_off);
         setw(inout rc.nd_log_cap, i, new_cap);
         new_off
@@ -593,15 +574,7 @@ fn node_log_replace_from_slice(inout rc: RaftCluster, i: u64, in s: Slice[RaftEn
     } else {
         let new_cap = wrapping_mul(need, 2);
         let new_off = rc.log_pool.len();
-        rc
-            .log_pool
-            .resize(
-                wrapping_add(new_off, new_cap),
-                RaftEntry {
-                    term: 0,
-                    cmd: 0
-                }
-            );
+        rc.log_pool.resize(wrapping_add(new_off, new_cap), RaftEntry { term: 0, cmd: 0 });
         setw(inout rc.nd_log_off, i, new_off);
         setw(inout rc.nd_log_cap, i, new_cap);
         new_off
@@ -609,10 +582,7 @@ fn node_log_replace_from_slice(inout rc: RaftCluster, i: u64, in s: Slice[RaftEn
     for k in 0..need {
         let e = match s.try_get(k) {
             Option::Some(v) => v,
-            Option::None => RaftEntry {
-                term: 0,
-                cmd: 0
-            },
+            Option::None => RaftEntry { term: 0, cmd: 0 },
         };
         let _ = rc.log_pool.try_set(wrapping_add(target_off, k), e);
     }
@@ -627,15 +597,7 @@ fn sy_log_set_from_arena(inout rc: RaftCluster, i: u64, src_off: u64, need: u64)
     } else {
         let new_cap = wrapping_mul(need, 2);
         let new_off = rc.sy_pool.len();
-        rc
-            .sy_pool
-            .resize(
-                wrapping_add(new_off, new_cap),
-                RaftEntry {
-                    term: 0,
-                    cmd: 0
-                }
-            );
+        rc.sy_pool.resize(wrapping_add(new_off, new_cap), RaftEntry { term: 0, cmd: 0 });
         setw(inout rc.sy_log_off, i, new_off);
         setw(inout rc.sy_log_cap, i, new_cap);
         new_off
@@ -656,15 +618,7 @@ fn sy_log_set_from_slice(inout rc: RaftCluster, i: u64, in s: Slice[RaftEntry]) 
     } else {
         let new_cap = wrapping_mul(need, 2);
         let new_off = rc.sy_pool.len();
-        rc
-            .sy_pool
-            .resize(
-                wrapping_add(new_off, new_cap),
-                RaftEntry {
-                    term: 0,
-                    cmd: 0
-                }
-            );
+        rc.sy_pool.resize(wrapping_add(new_off, new_cap), RaftEntry { term: 0, cmd: 0 });
         setw(inout rc.sy_log_off, i, new_off);
         setw(inout rc.sy_log_cap, i, new_cap);
         new_off
@@ -672,10 +626,7 @@ fn sy_log_set_from_slice(inout rc: RaftCluster, i: u64, in s: Slice[RaftEntry]) 
     for k in 0..need {
         let e = match s.try_get(k) {
             Option::Some(v) => v,
-            Option::None => RaftEntry {
-                term: 0,
-                cmd: 0
-            },
+            Option::None => RaftEntry { term: 0, cmd: 0 },
         };
         let _ = rc.sy_pool.try_set(wrapping_add(target_off, k), e);
     }
@@ -1104,14 +1055,7 @@ fn node_maybe_change_membership(inout rc: RaftCluster, i: u64) {
     } else {
         members | bit_at(r)
     };
-    node_log_push(
-        inout rc,
-        i,
-        RaftEntry {
-            term: term,
-            cmd: CONFIG_FLAG | next
-        }
-    );
+    node_log_push(inout rc, i, RaftEntry { term: term, cmd: CONFIG_FLAG | next });
     rc.config_changes = inc(rc.config_changes);
     push_ev(inout rc, NodeEv::LogChanged, 0);
     if member(next, r) {
@@ -1158,14 +1102,7 @@ fn node_send_appends(inout rc: RaftCluster, i: u64, now: u64) {
         let cmd = inc(rc.next_cmd);
         rc.next_cmd = cmd;
         let term = sw(in rc.nd_term, i);
-        node_log_push(
-            inout rc,
-            i,
-            RaftEntry {
-                term: term,
-                cmd: cmd
-            }
-        );
+        node_log_push(inout rc, i, RaftEntry { term: term, cmd: cmd });
         rc.proposals = inc(rc.proposals);
         push_ev(inout rc, NodeEv::LogChanged, 0);
         node_advance_commit(inout rc, i);
@@ -2421,25 +2358,9 @@ pub fn raft_new(seed: u64, in cfg: RaftCfg) -> RaftCluster {
     } else {
         INIT_LOG_CAP
     };
-    rc
-        .log_pool
-        .resize(
-            wrapping_mul(n, init_cap),
-            RaftEntry {
-                term: 0,
-                cmd: 0
-            }
-        );
+    rc.log_pool.resize(wrapping_mul(n, init_cap), RaftEntry { term: 0, cmd: 0 });
     if cfg.durable {
-        rc
-            .sy_pool
-            .resize(
-                wrapping_mul(n, init_cap),
-                RaftEntry {
-                    term: 0,
-                    cmd: 0
-                }
-            );
+        rc.sy_pool.resize(wrapping_mul(n, init_cap), RaftEntry { term: 0, cmd: 0 });
     }
     for i in 0..n {
         rc.nd_up.push(true);
@@ -2675,10 +2596,7 @@ fn logs_slice_eq_sy(in rc: RaftCluster, i: u64, in s: Slice[RaftEntry]) -> bool 
     for k in 0..len {
         let a = match s.try_get(k) {
             Option::Some(v) => v,
-            Option::None => RaftEntry {
-                term: 0,
-                cmd: 0
-            },
+            Option::None => RaftEntry { term: 0, cmd: 0 },
         };
         let b = ge_log(in rc.sy_pool, wrapping_add(off, k));
         if a.term != b.term || a.cmd != b.cmd {

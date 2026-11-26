@@ -2,7 +2,5 @@ copy struct Receipt {
     id: u64
 }
 fn receipt(id: u64) -> Receipt eff [Fail[u32]] {
-    Receipt {
-        id
-    }
+    Receipt { id }
 }

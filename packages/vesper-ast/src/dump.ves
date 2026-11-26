@@ -181,28 +181,13 @@ fn put_lit(inout o: ChunkSeq[u8], in a: Ast, li: u32) {
 // ---------------------------------------------------------------- types
 
 fn effects_at(in a: Ast, e: u32) -> EffectsNode {
-    a
-        .effects
-        .get_or(
-            idx_from_raw[EffectsNode](e),
-            EffectsNode {
-                instances: 0,
-                tail: none()
-            }
-        )
+    a.effects.get_or(idx_from_raw[EffectsNode](e), EffectsNode { instances: 0, tail: none() })
 }
 
 fn effect_at(in a: Ast, e: u32) -> EffectNode {
     a
         .effect_nodes
-        .get_or(
-            idx_from_raw[EffectNode](e),
-            EffectNode {
-                label: none(),
-                name: none(),
-                args: 0
-            }
-        )
+        .get_or(idx_from_raw[EffectNode](e), EffectNode { label: none(), name: none(), args: 0 })
 }
 
 fn dump_effect(inout o: ChunkSeq[u8], in a: Ast, e: u32, depth: u64) {
@@ -348,14 +333,7 @@ fn param_at(in a: Ast, p: u32) -> ParamNode {
         .params
         .get_or(
             idx_from_raw[ParamNode](p),
-            ParamNode {
-                name: none(),
-                pass: 0,
-                projections: 0,
-                ty: none(),
-                start: 0,
-                end: 0
-            }
+            ParamNode { name: none(), pass: 0, projections: 0, ty: none(), start: 0, end: 0 }
         )
 }
 
@@ -385,14 +363,7 @@ fn dump_param(inout o: ChunkSeq[u8], in a: Ast, p: u32, depth: u64) {
 fn clause_at(in a: Ast, c: u32) -> ClauseNode {
     a
         .clauses
-        .get_or(
-            idx_from_raw[ClauseNode](c),
-            ClauseNode {
-                name: none(),
-                pats: 0,
-                body: none()
-            }
-        )
+        .get_or(idx_from_raw[ClauseNode](c), ClauseNode { name: none(), pats: 0, body: none() })
 }
 
 fn dump_clause(inout o: ChunkSeq[u8], in a: Ast, c: u32, depth: u64) {
@@ -473,11 +444,7 @@ fn dump_expr(inout o: ChunkSeq[u8], in a: Ast, e: u32, depth: u64) {
                 .args
                 .get_or(
                     idx_from_raw[ArgNode](list_at(in a, n.c, i)),
-                    ArgNode {
-                        pass: 0,
-                        explicit: false,
-                        expr: none()
-                    }
+                    ArgNode { pass: 0, explicit: false, expr: none() }
                 );
             open(inout o, d1);
             put(inout o, in "arg pass=");
@@ -623,13 +590,7 @@ fn dump_stmt(inout o: ChunkSeq[u8], in a: Ast, s: u32, depth: u64) {
         .stmts
         .get_or(
             idx_from_raw[StmtNode](s),
-            StmtNode {
-                kind: 0,
-                pat: none(),
-                ty: none(),
-                value: none(),
-                mutable: false
-            }
+            StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
         );
     let d1 = wrapping_add(depth, 1);
     open(inout o, depth);
@@ -655,11 +616,7 @@ fn dump_generics(inout o: ChunkSeq[u8], in a: Ast, list: u32, depth: u64) {
             .generics
             .get_or(
                 idx_from_raw[GenericNode](list_at(in a, list, i)),
-                GenericNode {
-                    name: none(),
-                    bound: 0,
-                    row: false
-                }
+                GenericNode { name: none(), bound: 0, row: false }
             );
         open(inout o, depth);
         put(inout o, in "generic ");
@@ -721,13 +678,7 @@ fn dump_trait_ref(inout o: ChunkSeq[u8], in a: Ast, t: u32, depth: u64) {
         .trait_refs
         .get_or(
             idx_from_raw[TraitRefNode](t),
-            TraitRefNode {
-                package: none(),
-                name: none(),
-                args: 0,
-                start: 0,
-                end: 0
-            }
+            TraitRefNode { package: none(), name: none(), args: 0, start: 0, end: 0 }
         );
     open(inout o, depth);
     put(inout o, in "trait_ref pkg=");
@@ -746,12 +697,7 @@ fn dump_field(inout o: ChunkSeq[u8], in a: Ast, f: u32, depth: u64) {
         .fields
         .get_or(
             idx_from_raw[FieldNode](f),
-            FieldNode {
-                name: none(),
-                ty: none(),
-                modality: 3,
-                temperature: 0
-            }
+            FieldNode { name: none(), ty: none(), modality: 3, temperature: 0 }
         );
     open(inout o, depth);
     put(inout o, in "field ");
@@ -809,11 +755,7 @@ fn dump_adt(inout o: ChunkSeq[u8], in a: Ast, x: u32, depth: u64) {
             .variants
             .get_or(
                 idx_from_raw[VariantNode](list_at(in a, n.variants, i)),
-                VariantNode {
-                    name: none(),
-                    fields: 0,
-                    named: false
-                }
+                VariantNode { name: none(), fields: 0, named: false }
             );
         open(inout o, d1);
         put(inout o, in "variant ");
@@ -828,15 +770,7 @@ fn dump_adt(inout o: ChunkSeq[u8], in a: Ast, x: u32, depth: u64) {
 }
 
 fn dump_item(inout o: ChunkSeq[u8], in a: Ast, it: u32, depth: u64) {
-    let item = a
-        .items
-        .get_or(
-            idx_from_raw[ItemNode](it),
-            ItemNode {
-                kind: 0,
-                node: 0
-            }
-        );
+    let item = a.items.get_or(idx_from_raw[ItemNode](it), ItemNode { kind: 0, node: 0 });
     let d1 = wrapping_add(depth, 1);
     if item.kind == 1 {
         dump_adt(inout o, in a, item.node, depth);
@@ -870,11 +804,7 @@ fn dump_item(inout o: ChunkSeq[u8], in a: Ast, it: u32, depth: u64) {
             .impls
             .get_or(
                 idx_from_raw[ImplNode](item.node),
-                ImplNode {
-                    ty: none(),
-                    generics: 0,
-                    methods: 0
-                }
+                ImplNode { ty: none(), generics: 0, methods: 0 }
             );
         label(inout o, depth, in "impl");
         dump_type(inout o, in a, n.ty, d1);
@@ -908,12 +838,7 @@ fn dump_item(inout o: ChunkSeq[u8], in a: Ast, it: u32, depth: u64) {
                 .assoc_decls
                 .get_or(
                     idx_from_raw[AssocDeclNode](list_at(in a, n.assoc, i)),
-                    AssocDeclNode {
-                        name: none(),
-                        bound: 0,
-                        start: 0,
-                        end: 0
-                    }
+                    AssocDeclNode { name: none(), bound: 0, start: 0, end: 0 }
                 );
             open(inout o, d1);
             put(inout o, in "assoc ");
@@ -968,12 +893,7 @@ fn dump_conf(inout o: ChunkSeq[u8], in a: Ast, c: u32, depth: u64) {
             .wheres
             .get_or(
                 idx_from_raw[WhereNode](list_at(in a, n.wheres, i)),
-                WhereNode {
-                    ty: none(),
-                    trait_ref: none(),
-                    start: 0,
-                    end: 0
-                }
+                WhereNode { ty: none(), trait_ref: none(), start: 0, end: 0 }
             );
         open(inout o, d1);
         put(inout o, in "where");
@@ -987,12 +907,7 @@ fn dump_conf(inout o: ChunkSeq[u8], in a: Ast, c: u32, depth: u64) {
             .assoc_binds
             .get_or(
                 idx_from_raw[AssocBindNode](list_at(in a, n.assoc, i)),
-                AssocBindNode {
-                    name: none(),
-                    ty: none(),
-                    start: 0,
-                    end: 0
-                }
+                AssocBindNode { name: none(), ty: none(), start: 0, end: 0 }
             );
         open(inout o, d1);
         put(inout o, in "assoc_type ");
@@ -1023,13 +938,7 @@ pub fn dump_ast(in a: Ast, inout o: ChunkSeq[u8]) {
             .model_uses
             .get_or(
                 idx_from_raw[ModelUseNode](u32_of(in a.m_model_uses, i)),
-                ModelUseNode {
-                    model: none(),
-                    start: 0,
-                    end: 0,
-                    scope_start: 0,
-                    scope_end: 0
-                }
+                ModelUseNode { model: none(), start: 0, end: 0, scope_start: 0, scope_end: 0 }
             );
         put(inout o, in " model_use ");
         put_q(inout o, in a, u.model);
@@ -1043,13 +952,7 @@ pub fn dump_ast(in a: Ast, inout o: ChunkSeq[u8]) {
             .bounds
             .get_or(
                 idx_from_raw[BoundNode](u32_of(in a.m_bounds, i)),
-                BoundNode {
-                    param: none(),
-                    trait_ref: none(),
-                    start: 0,
-                    end: 0,
-                    owner: none()
-                }
+                BoundNode { param: none(), trait_ref: none(), start: 0, end: 0, owner: none() }
             );
         put(inout o, in " bound ");
         put_q(inout o, in a, b.param);
@@ -1092,12 +995,7 @@ pub fn dump_ast(in a: Ast, inout o: ChunkSeq[u8]) {
                 .use_names
                 .get_or(
                     idx_from_raw[UseNameNode](list_at(in a, u.names, j)),
-                    UseNameNode {
-                        name: none(),
-                        alias: none(),
-                        start: 0,
-                        end: 0
-                    }
+                    UseNameNode { name: none(), alias: none(), start: 0, end: 0 }
                 );
             put(inout o, in "  name ");
             put_q(inout o, in a, un.name);

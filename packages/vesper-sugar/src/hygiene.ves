@@ -92,15 +92,9 @@ pub fn pattern_hygiene(inout r: Rd, in mark: ChunkSeq[u8]) -> Sc {
             .items
             .get_or(
                 @vesper-std/arena::idx_from_raw[@vesper/ast::ItemNode](i),
-                @vesper/ast::ItemNode {
-                    kind: 0,
-                    node: 0
-                }
+                @vesper/ast::ItemNode { kind: 0, node: 0 }
             ),
-        Option::None => @vesper/ast::ItemNode {
-            kind: 0,
-            node: 0
-        },
+        Option::None => @vesper/ast::ItemNode { kind: 0, node: 0 },
     };
     if it.kind != 2 {
         return sc_err(in "missing pattern template wrapper".as_bytes());

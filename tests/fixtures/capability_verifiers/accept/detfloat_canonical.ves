@@ -7,10 +7,7 @@ copy struct Sample {
 }
 
 fn mix(in s: Sample, gain: f64) -> Sample eff [DetFloat] {
-    Sample {
-        left: s.left * gain + s.right * (1.0 - gain),
-        right: s.right * gain - s.left / 2.0
-    }
+    Sample { left: s.left * gain + s.right * (1.0 - gain), right: s.right * gain - s.left / 2.0 }
 }
 
 fn energy(in s: Sample) -> f64 eff [DetFloat] {
@@ -18,12 +15,6 @@ fn energy(in s: Sample) -> f64 eff [DetFloat] {
 }
 
 fn main() -> f64 {
-    let s = mix(
-        in Sample {
-            left: 0.5,
-            right: 0.25
-        },
-        0.75
-    );
+    let s = mix(in Sample { left: 0.5, right: 0.25 }, 0.75);
     energy(in s)
 }

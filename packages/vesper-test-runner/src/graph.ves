@@ -46,40 +46,16 @@ fn stmt_at(in a: Ast, i: u32) -> StmtNode {
         .stmts
         .get_or(
             idx_from_raw[StmtNode](i),
-            StmtNode {
-                kind: 0,
-                pat: 0,
-                ty: 0,
-                value: 0,
-                mutable: false
-            }
+            StmtNode { kind: 0, pat: 0, ty: 0, value: 0, mutable: false }
         )
 }
 
 fn arg_at(in a: Ast, i: u32) -> ArgNode {
-    a
-        .args
-        .get_or(
-            idx_from_raw[ArgNode](i),
-            ArgNode {
-                pass: 0,
-                explicit: false,
-                expr: 0
-            }
-        )
+    a.args.get_or(idx_from_raw[ArgNode](i), ArgNode { pass: 0, explicit: false, expr: 0 })
 }
 
 fn clause_at(in a: Ast, i: u32) -> ClauseNode {
-    a
-        .clauses
-        .get_or(
-            idx_from_raw[ClauseNode](i),
-            ClauseNode {
-                name: 0,
-                pats: 0,
-                body: 0
-            }
-        )
+    a.clauses.get_or(idx_from_raw[ClauseNode](i), ClauseNode { name: 0, pats: 0, body: 0 })
 }
 
 fn param_at(in a: Ast, i: u32) -> ParamNode {
@@ -87,53 +63,22 @@ fn param_at(in a: Ast, i: u32) -> ParamNode {
         .params
         .get_or(
             idx_from_raw[ParamNode](i),
-            ParamNode {
-                name: 0,
-                pass: 0,
-                projections: 0,
-                ty: 0,
-                start: 0,
-                end: 0
-            }
+            ParamNode { name: 0, pass: 0, projections: 0, ty: 0, start: 0, end: 0 }
         )
 }
 
 fn generic_at(in a: Ast, i: u32) -> GenericNode {
-    a
-        .generics
-        .get_or(
-            idx_from_raw[GenericNode](i),
-            GenericNode {
-                name: 0,
-                bound: 0,
-                row: false
-            }
-        )
+    a.generics.get_or(idx_from_raw[GenericNode](i), GenericNode { name: 0, bound: 0, row: false })
 }
 
 fn effects_at(in a: Ast, i: u32) -> EffectsNode {
-    a
-        .effects
-        .get_or(
-            idx_from_raw[EffectsNode](i),
-            EffectsNode {
-                instances: 0,
-                tail: none()
-            }
-        )
+    a.effects.get_or(idx_from_raw[EffectsNode](i), EffectsNode { instances: 0, tail: none() })
 }
 
 fn effect_at(in a: Ast, i: u32) -> EffectNode {
     a
         .effect_nodes
-        .get_or(
-            idx_from_raw[EffectNode](i),
-            EffectNode {
-                label: none(),
-                name: 0,
-                args: 0
-            }
-        )
+        .get_or(idx_from_raw[EffectNode](i), EffectNode { label: none(), name: 0, args: 0 })
 }
 
 fn fn_at(in a: Ast, i: u32) -> FnNode {
@@ -944,9 +889,7 @@ fn put_string(inout res: ChunkSeq[u64], in s: String) {
 }
 
 pub fn graph(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let (ss, se) = r.text(in b);
     let text = match String::from_utf8(in b[ss..se]) {
         Option::Some(x) => x,
@@ -967,16 +910,7 @@ pub fn graph(in b: Slice[u8]) -> ChunkSeq[u64] {
             Option::Some(v) => v,
             Option::None => 0,
         };
-        let item = l
-            .ast
-            .items
-            .get_or(
-                idx_from_raw[ItemNode](it),
-                ItemNode {
-                    kind: 0,
-                    node: 0
-                }
-            );
+        let item = l.ast.items.get_or(idx_from_raw[ItemNode](it), ItemNode { kind: 0, node: 0 });
         if item.kind == 2 {
             let f = fn_at(in l.ast, item.node);
             keys.push(f.name);
@@ -987,11 +921,7 @@ pub fn graph(in b: Slice[u8]) -> ChunkSeq[u64] {
                 .impls
                 .get_or(
                     idx_from_raw[ImplNode](item.node),
-                    ImplNode {
-                        ty: 0,
-                        generics: 0,
-                        methods: 0
-                    }
+                    ImplNode { ty: 0, generics: 0, methods: 0 }
                 );
             // impl_type_key
             owner.clear();

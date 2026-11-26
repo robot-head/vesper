@@ -254,14 +254,7 @@ fn back(in lo: Lowered, arch: u64, os: u64, protocol: u8, max_code: u64, inout b
         for i in lo_row..hi {
             let r = match lo.rows.try_get(i) {
                 Option::Some(r) => r,
-                Option::None => Lir {
-                    tag: 0,
-                    op: 0,
-                    kind: 0,
-                    f1: 0,
-                    f2: 0,
-                    f3: 0
-                },
+                Option::None => Lir { tag: 0, op: 0, kind: 0, f1: 0, f2: 0, f3: 0 },
             };
             ms.clear();
             select(in r, inout ms);

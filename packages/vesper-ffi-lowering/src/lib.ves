@@ -405,22 +405,11 @@ fn byte(in b: Slice[u8], i: u64) -> u8 {
 }
 
 fn vt_unit() -> Vt {
-    Vt {
-        tag: VT_UNIT,
-        sc: 0,
-        name: NONE,
-        nullable: false
-    }
+    Vt { tag: VT_UNIT, sc: 0, name: NONE, nullable: false }
 }
 
 fn no_err() -> Err {
-    Err {
-        kind: 0,
-        msg: NONE,
-        has_span: false,
-        start: 0,
-        end: 0
-    }
+    Err { kind: 0, msg: NONE, has_span: false, start: 0, end: 0 }
 }
 
 pub fn s_new() -> S {
@@ -607,12 +596,7 @@ impl S {
     pub fn enum_row(in self, i: u64) -> EnumRow {
         match self.enums.try_get(i) {
             Option::Some(x) => x,
-            Option::None => EnumRow {
-                name: NONE,
-                scalar: 0,
-                v0: 0,
-                vn: 0
-            },
+            Option::None => EnumRow { name: NONE, scalar: 0, v0: 0, vn: 0 },
         }
     }
 
@@ -652,13 +636,7 @@ impl S {
     pub fn ws(in self, i: u64) -> Ws {
         match self.wss.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Ws {
-                name: NONE,
-                size: 0,
-                align: 0,
-                f0: 0,
-                fc: 0
-            },
+            Option::None => Ws { name: NONE, size: 0, align: 0, f0: 0, fc: 0 },
         }
     }
 
@@ -694,82 +672,49 @@ impl S {
     pub fn const_row(in self, i: u64) -> ConstRow {
         match self.consts.try_get(i) {
             Option::Some(x) => x,
-            Option::None => ConstRow {
-                name: NONE,
-                scalar: 0,
-                neg: false,
-                value: 0
-            },
+            Option::None => ConstRow { name: NONE, scalar: 0, neg: false, value: 0 },
         }
     }
 
     pub fn tn(in self, i: u32) -> Tn {
         match self.tns.try_get(w(i)) {
             Option::Some(x) => x,
-            Option::None => Tn {
-                kind: TK_TUPLE,
-                name: NONE,
-                a: 0,
-                n: 0
-            },
+            Option::None => Tn { kind: TK_TUPLE, name: NONE, a: 0, n: 0 },
         }
     }
 
     pub fn gs(in self, i: u64) -> Gs {
         match self.gss.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Gs {
-                name: NONE,
-                ok: false,
-                err: NONE,
-                f0: 0,
-                fc: 0
-            },
+            Option::None => Gs { name: NONE, ok: false, err: NONE, f0: 0, fc: 0 },
         }
     }
 
     pub fn gf(in self, i: u64) -> Gf {
         match self.gfs.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Gf {
-                name: NONE,
-                ty: NONE
-            },
+            Option::None => Gf { name: NONE, ty: NONE },
         }
     }
 
     pub fn ge(in self, i: u64) -> Ge {
         match self.ges.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Ge {
-                name: NONE,
-                row: 0
-            },
+            Option::None => Ge { name: NONE, row: 0 },
         }
     }
 
     pub fn gh(in self, i: u64) -> Gh {
         match self.ghs.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Gh {
-                name: NONE,
-                linear: false,
-                copy: false,
-                mapping: NONE
-            },
+            Option::None => Gh { name: NONE, linear: false, copy: false, mapping: NONE },
         }
     }
 
     pub fn sh(in self, i: u64) -> Sh {
         match self.shs.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Sh {
-                ok: false,
-                err: NONE,
-                p0: 0,
-                pn: 0,
-                result: NONE
-            },
+            Option::None => Sh { ok: false, err: NONE, p0: 0, pn: 0, result: NONE },
         }
     }
 
@@ -799,16 +744,7 @@ impl S {
             self.targs.push(u32_at(in args, i));
         }
         let t = n32(self.tns.len());
-        self
-            .tns
-            .push(
-                Tn {
-                    kind: TK_NAMED,
-                    name: name,
-                    a: a,
-                    n: args.len()
-                }
-            );
+        self.tns.push(Tn { kind: TK_NAMED, name: name, a: a, n: args.len() });
         t
     }
 
@@ -1034,10 +970,7 @@ fn peek_is(in r: Reader, in b: Slice[u8], in t: Str) -> bool {
     if r.at_end() {
         return false;
     }
-    let mut p = Reader {
-        pos: r.pos,
-        stop: r.stop
-    };
+    let mut p = Reader { pos: r.pos, stop: r.stop };
     let (a, e) = p.field(in b);
     let want = t.as_bytes();
     if wrapping_sub(e, a) != want.len() {
@@ -1291,10 +1224,7 @@ fn parse_const_int(in b: Slice[u8], a: u64, e: u64) -> (bool, u64) {
 
 // One canonical descriptor `b[a..e]` with its handler tier, as a library row.
 pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
-    let mut r = Reader {
-        pos: a,
-        stop: e
-    };
+    let mut r = Reader { pos: a, stop: e };
     let schema = r.field(in b);
     let name = field_sym(inout r, in b, inout s);
     let triple = field_sym(inout r, in b, inout s);
@@ -1324,16 +1254,7 @@ pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
             s.vars.push(vname);
             let value = r.field(in b);
         }
-        s
-            .enums
-            .push(
-                EnumRow {
-                    name: en,
-                    scalar: sc,
-                    v0: v0,
-                    vn: nv
-                }
-            );
+        s.enums.push(EnumRow { name: en, scalar: sc, v0: v0, vn: nv });
     }
     let f0 = s.funs.len();
     let nd = r.count(in b);
@@ -1402,17 +1323,7 @@ pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
                 }
                 s.wfs.push(f);
             }
-            s
-                .wss
-                .push(
-                    Ws {
-                        name: wn,
-                        size: size,
-                        align: align,
-                        f0: fa,
-                        fc: nfl
-                    }
-                );
+            s.wss.push(Ws { name: wn, size: size, align: align, f0: fa, fc: nfl });
         }
     }
     let wn = wrapping_sub(s.wss.len(), w0);
@@ -1501,17 +1412,7 @@ pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
     for i in 0..nf {
         let f = s.fun(add(f0, i));
         if f.indirect {
-            s
-                .xts
-                .push(
-                    Xt {
-                        name: f.sym,
-                        linear: false,
-                        copy: true,
-                        drop: NONE,
-                        mapping: NONE
-                    }
-                );
+            s.xts.push(Xt { name: f.sym, linear: false, copy: true, drop: NONE, mapping: NONE });
         }
     }
     let c0 = s.consts.len();
@@ -1523,16 +1424,7 @@ pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
             let csc = scalar_code(field_sym(inout r, in b, inout s));
             let (va, ve) = r.field(in b);
             let (neg, value) = parse_const_int(in b, va, ve);
-            s
-                .consts
-                .push(
-                    ConstRow {
-                        name: cname,
-                        scalar: csc,
-                        neg: neg,
-                        value: value
-                    }
-                );
+            s.consts.push(ConstRow { name: cname, scalar: csc, neg: neg, value: value });
         }
     }
     s
@@ -1629,13 +1521,7 @@ fn field_integer(inout s: S, bits: u64, signed: bool) -> u32 {
 // in the table's lookup order: callers compare, then keep or drop it).
 fn struct_adt(inout s: S, lib: u64, row: u64, depth: u64) -> Gs {
     let st = s.ws(row);
-    let mut g = Gs {
-        name: st.name,
-        ok: true,
-        err: NONE,
-        f0: s.gfs.len(),
-        fc: 0
-    };
+    let mut g = Gs { name: st.name, ok: true, err: NONE, f0: s.gfs.len(), fc: 0 };
     let mut fields = ChunkSeq::new[Gf]();
     for j in 0..st.fc {
         let f = s.wf(add(st.f0, j));
@@ -1665,13 +1551,7 @@ fn struct_adt(inout s: S, lib: u64, row: u64, depth: u64) -> Gs {
             ty = s.ty_name(f.sname);
         }
         if f.kind != F_PAD {
-            fields
-                .push(
-                    Gf {
-                        name: f.name,
-                        ty: ty
-                    }
-                );
+            fields.push(Gf { name: f.name, ty: ty });
         }
     }
     g.f0 = s.gfs.len();
@@ -1742,13 +1622,7 @@ fn duplicate(inout s: S, name: u32) -> Err {
     s.put(in "imported libraries declare '");
     s.put_name(name);
     s.put(in "' differently");
-    Err {
-        kind: K_DUPLICATE,
-        msg: s.intern_tail(mark),
-        has_span: false,
-        start: 0,
-        end: 0
-    }
+    Err { kind: K_DUPLICATE, msg: s.intern_tail(mark), has_span: false, start: 0, end: 0 }
 }
 
 // `Generated::new`: no error (msg NONE) or the first duplicate.
@@ -1774,14 +1648,7 @@ pub fn generate(inout s: S) -> Err {
             let name = s.enum_row(row).name;
             let at = find_ge(in s, name);
             if at == NONE64 {
-                s
-                    .ges
-                    .push(
-                        Ge {
-                            name: name,
-                            row: row
-                        }
-                    );
+                s.ges.push(Ge { name: name, row: row });
             } else if !enum_eq(in s, s.ge(at).row, row) {
                 return duplicate(inout s, name);
             }
@@ -1796,16 +1663,7 @@ pub fn generate(inout s: S) -> Err {
                 || find_ge(in s, x.name) != NONE64 {
                 return duplicate(inout s, x.name);
             }
-            s
-                .ghs
-                .push(
-                    Gh {
-                        name: x.name,
-                        linear: x.linear,
-                        copy: x.copy,
-                        mapping: x.mapping
-                    }
-                );
+            s.ghs.push(Gh { name: x.name, linear: x.linear, copy: x.copy, mapping: x.mapping });
         }
     }
     for i in 0..s.pars.len() {
@@ -1824,13 +1682,7 @@ pub fn generate(inout s: S) -> Err {
 }
 
 fn shape_err(inout s: S, mark: u64) -> Sh {
-    Sh {
-        ok: false,
-        err: s.intern_tail(mark),
-        p0: 0,
-        pn: 0,
-        result: NONE
-    }
+    Sh { ok: false, err: s.intern_tail(mark), p0: 0, pn: 0, result: NONE }
 }
 
 // `Generated::pointee`: the source type of a pointee, or NONE after
@@ -2096,13 +1948,7 @@ pub fn compute_shape(inout s: S, fi: u64) -> Sh {
             Option::None => {},
         }
     }
-    Sh {
-        ok: true,
-        err: NONE,
-        p0: p0,
-        pn: params.len(),
-        result: result
-    }
+    Sh { ok: true, err: NONE, p0: p0, pn: params.len(), result: result }
 }
 
 fn takes_cstr(in s: S, fi: u64) -> bool {
@@ -2574,13 +2420,7 @@ fn put_err(inout s: S, e: Err) {
 }
 
 fn err_at(kind: u8, msg: u32, has_span: bool, start: u64, end: u64) -> Err {
-    Err {
-        kind: kind,
-        msg: msg,
-        has_span: has_span,
-        start: start,
-        end: end
-    }
+    Err { kind: kind, msg: msg, has_span: has_span, start: start, end: end }
 }
 
 // ----- `check_collisions` -----------------------------------------------------
@@ -2676,11 +2516,7 @@ pub fn check_collisions(inout s: S, in items: ChunkSeq[Item]) -> Err {
     for i in 0..items.len() {
         let it = match items.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Item {
-                name: NONE,
-                start: 0,
-                end: 0
-            },
+            Option::None => Item { name: NONE, start: 0, end: 0 },
         };
         let mut hit = is_library(in s, it.name);
         for j in 0..generated.len() {
@@ -3237,10 +3073,7 @@ fn opt_sym(inout r: Reader, in b: Slice[u8], inout s: S) -> u32 {
 }
 
 fn run(in b: Slice[u8], inout s: S) {
-    let mut r = Reader {
-        pos: 0,
-        stop: b.len()
-    };
+    let mut r = Reader { pos: 0, stop: b.len() };
     let nl = r.word(in b);
     for i in 0..nl {
         let handler = r.word(in b);
@@ -3261,15 +3094,7 @@ fn run(in b: Slice[u8], inout s: S) {
             for k in 0..n {
                 lens.push(r.word(in b));
             }
-            insts
-                .push(
-                    Inst {
-                        lib: lib,
-                        sym: sym,
-                        a: a,
-                        n: n
-                    }
-                );
+            insts.push(Inst { lib: lib, sym: sym, a: a, n: n });
         }
     }
     let g = generate(inout s);
@@ -3297,14 +3122,7 @@ fn run(in b: Slice[u8], inout s: S) {
             let name = text_sym(inout r, in b, inout s);
             let start = r.word(in b);
             let end = r.word(in b);
-            items
-                .push(
-                    Item {
-                        name: name,
-                        start: start,
-                        end: end
-                    }
-                );
+            items.push(Item { name: name, start: start, end: end });
         }
         if g.msg == NONE {
             let e = check_collisions(inout s, in items);

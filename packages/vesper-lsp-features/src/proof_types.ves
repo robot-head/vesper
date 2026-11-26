@@ -103,39 +103,18 @@ pub fn ty_at(in a: Ast, i: u32) -> TypeNode {
         .types
         .get_or(
             idx_from_raw[TypeNode](i),
-            TypeNode {
-                kind: AT_INFER,
-                a: NONE,
-                b: NONE,
-                c: NONE,
-                d: NONE
-            }
+            TypeNode { kind: AT_INFER, a: NONE, b: NONE, c: NONE, d: NONE }
         )
 }
 
 pub fn effects_at(in a: Ast, i: u32) -> EffectsNode {
-    a
-        .effects
-        .get_or(
-            idx_from_raw[EffectsNode](i),
-            EffectsNode {
-                instances: NONE,
-                tail: NONE
-            }
-        )
+    a.effects.get_or(idx_from_raw[EffectsNode](i), EffectsNode { instances: NONE, tail: NONE })
 }
 
 pub fn effect_at(in a: Ast, i: u32) -> EffectNode {
     a
         .effect_nodes
-        .get_or(
-            idx_from_raw[EffectNode](i),
-            EffectNode {
-                label: NONE,
-                name: NONE,
-                args: NONE
-            }
-        )
+        .get_or(idx_from_raw[EffectNode](i), EffectNode { label: NONE, name: NONE, args: NONE })
 }
 
 // `Kind::of` of a source type.

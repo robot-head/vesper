@@ -377,15 +377,11 @@ fn rg_fault_body(inout b: Builder, inout m: Module, in im: RegionImports, index:
     for i in 0..REGION_FAULTS {
         let at = widen_u64(i);
         let block = match blocks.try_get(at) {
-            Some(x) => Block {
-                id: x
-            },
+            Some(x) => Block { id: x },
             None => return,
         };
         let data = match im.messages.try_get(at) {
-            Some(x) => DataId {
-                id: x
-            },
+            Some(x) => DataId { id: x },
             None => return,
         };
         let len = match im.lengths.try_get(at) {

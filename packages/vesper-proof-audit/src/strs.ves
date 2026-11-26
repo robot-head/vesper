@@ -6,10 +6,7 @@ pub struct Strs {
 }
 
 pub fn strs_new() -> Strs {
-    Strs {
-        bytes: ChunkSeq::new[u8](),
-        ends: ChunkSeq::new[u64]()
-    }
+    Strs { bytes: ChunkSeq::new[u8](), ends: ChunkSeq::new[u64]() }
 }
 
 pub fn count(in s: Strs) -> u64 {

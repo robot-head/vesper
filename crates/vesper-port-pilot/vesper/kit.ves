@@ -160,10 +160,7 @@ pub fn largest[T: mod copy](in xs: Slice[T], init: T) -> T where T: Ord {
 
 // Owned handles: constructor, methods, view.
 pub fn counter_new() -> Counter {
-    Counter {
-        hits: ChunkSeq::new[u64](),
-        total: 0
-    }
+    Counter { hits: ChunkSeq::new[u64](), total: 0 }
 }
 
 pub fn counter_record(inout c: Counter, v: u64) {
@@ -192,15 +189,11 @@ pub fn counter_reset(inout c: Counter) {
 }
 
 pub fn ticket_open(id: u64) -> Ticket {
-    Ticket {
-        id: id
-    }
+    Ticket { id: id }
 }
 
 pub fn ticket_close(sink t: Ticket) -> u64 {
-    let Ticket {
-        id
-    } = t;
+    let Ticket { id } = t;
     id
 }
 
@@ -231,10 +224,7 @@ pub fn tree_sum(sink t: Tree) -> u64 {
 }
 
 pub fn tokens_new() -> Tokens {
-    Tokens {
-        ring: ChunkSeq::new[u64](),
-        head: 0
-    }
+    Tokens { ring: ChunkSeq::new[u64](), head: 0 }
 }
 
 pub fn tokens_push(inout q: Tokens, token: u64) {
@@ -290,19 +280,13 @@ pub fn shout(inout s: String) {
 pub fn note_new(in text: Str) -> Note {
     let mut t = String::with_capacity(text.len());
     t.push_str(text);
-    Note {
-        text: t,
-        edits: 0
-    }
+    Note { text: t, edits: 0 }
 }
 
 // A by-value string that the returned handle keeps: the binding copies it
 // into a buffer of this library, which the Note then owns.
 pub fn note_adopt(sink text: String) -> Note {
-    Note {
-        text: text,
-        edits: 0
-    }
+    Note { text: text, edits: 0 }
 }
 
 pub fn note_append(inout n: Note, in more: Str) {
@@ -356,13 +340,7 @@ pub fn expired(now: u64, deadline: u64) -> bool {
 pub fn plan_sends(peers: u32, bytes: u64, pause: u64) -> ChunkSeq[Command] {
     let mut plan: ChunkSeq[Command] = ChunkSeq::new[Command]();
     for p in 0..peers {
-        plan
-            .push(
-                Command::Send {
-                    to: p,
-                    bytes: bytes
-                }
-            );
+        plan.push(Command::Send { to: p, bytes: bytes });
         plan.push(Command::Wait(pause));
     }
     plan

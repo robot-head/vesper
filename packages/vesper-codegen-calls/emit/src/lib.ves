@@ -59,16 +59,12 @@ fn answer_results(call: u64, inout b: Builder, count: u32) eff [Ffi[Cranelift]] 
 fn emit(call: u64, inout b: Builder) -> u64 eff [Ffi[Cranelift]] {
     let op = call_op(call);
     if op == CALL {
-        let f = FuncRef {
-            id: arg_u32(call, 0)
-        };
+        let f = FuncRef { id: arg_u32(call, 0) };
         let args = call_values(call, 1);
         let count = ins_call(inout b, f, in args.as_slice());
         answer_results(call, inout b, count);
     } else if op == CALL_INDIRECT {
-        let sig = SigRef {
-            id: arg_u32(call, 0)
-        };
+        let sig = SigRef { id: arg_u32(call, 0) };
         let target = arg_value(call, 1);
         let args = call_values(call, 2);
         let count = ins_call_indirect(inout b, sig, target, in args.as_slice());
