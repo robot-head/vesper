@@ -832,7 +832,8 @@ pub fn evidence(in program: Program, inout diags: Diags) {
                     if has_token {
                         if inst.tok_in != current
                             || (is_action && inst.tok_out == inst.tok_in)
-                            || (is_read && inst.tok_in != inst.tok_out) {
+                            || (is_read && inst.tok_in != inst.tok_out)
+                        {
                             e0411(
                                 inout diags,
                                 "instruction uses stale or invalid state-token evidence",
@@ -1165,7 +1166,8 @@ impl State {
     pub fn same(in self, in other: State) -> bool {
         if self.slots.len() != other.slots.len()
             || self.moved.len() != other.moved.len()
-            || self.values.len() != other.values.len() {
+            || self.values.len() != other.values.len()
+        {
             return false;
         }
         for i in 0..self.slots.len() {
@@ -1173,7 +1175,8 @@ impl State {
             let other_slot = other.slot_at(i);
             if slot.rank != other_slot.rank
                 || slot.ty != other_slot.ty
-                || slot.pass != other_slot.pass {
+                || slot.pass != other_slot.pass
+            {
                 return false;
             }
         }
@@ -1189,7 +1192,8 @@ impl State {
                 || val.ty != other_val.ty
                 || val.owned != other_val.owned
                 || val.consumed != other_val.consumed
-                || val.loan_pass != other_val.loan_pass {
+                || val.loan_pass != other_val.loan_pass
+            {
                 return false;
             }
             if val.loan_pass != 255 {
@@ -1198,7 +1202,8 @@ impl State {
                 }
                 for j in 0..w(val.loan_count) {
                     if self.loan(add(w(val.loan_start), j))
-                        != other.loan(add(w(other_val.loan_start), j)) {
+                        != other.loan(add(w(other_val.loan_start), j))
+                    {
                         return false;
                     }
                 }
@@ -1553,7 +1558,8 @@ impl Flow {
         let mut label_count: u32 = 0;
         if first_span.kind == 3
             && first_span.s0 < first_span.s1
-            && !(first_span.s0 == s0 && first_span.s1 == s1) {
+            && !(first_span.s0 == s0 && first_span.s1 == s1)
+        {
             let label_start = self.diags.text.len();
             push_label(inout self.diags, first_span.label, first_span.id == 1);
             self.diags.rel.push(RelRow {
@@ -1571,7 +1577,8 @@ impl Flow {
                 label_count == 1
                     && first_span.s0 == second_span.s0
                     && first_span.s1 == second_span.s1
-            ) {
+            )
+        {
             let label_start = self.diags.text.len();
             push_label(inout self.diags, second_span.label, second_span.id == 1);
             self.diags.rel.push(RelRow {
@@ -1827,7 +1834,8 @@ impl Flow {
             let val = state.val_at(vi);
             if val.loan_pass != 255
                 && !val.consumed
-                && (exclusive || (val.loan_pass == TyPass::Inout && !self.reserved(val.id))) {
+                && (exclusive || (val.loan_pass == TyPass::Inout && !self.reserved(val.id)))
+            {
                 let mut hit = false;
                 for j in 0..w(val.loan_count) {
                     let loan = state.loan(add(w(val.loan_start), j));
@@ -1939,9 +1947,8 @@ impl Flow {
                         let inout_loan = state.loan(add(w(inout_val.loan_start), pi));
                         if found == 18446744073709551615
                             && place_root(inout_loan) == place_root(arg_loan)
-                            && program
-                                .paths
-                                .overlaps(place_path(inout_loan), place_path(arg_loan)) {
+                            && program.paths.overlaps(place_path(inout_loan), place_path(arg_loan))
+                        {
                             found = arg_loan;
                         }
                     }
@@ -2007,7 +2014,8 @@ impl Flow {
             state.put_slot(SlotS { rank: program.rank_of(name), name: name, ty: ty, pass: pass });
         } else if kind == 0 {
             if pass == TyPass::Sink
-                && self.mode(inout types, in names, in world, ty) == TyMode::Linear {
+                && self.mode(inout types, in names, in world, ty) == TyMode::Linear
+            {
                 self.say("IR wildcard discards a linear value");
                 self.caused(
                     s0,
@@ -2115,7 +2123,8 @@ impl Flow {
         for i in 0.. state.slots.len() {
             let slot = state.slot_at(i);
             if self.live_linear_slot(in state, inout types, in names, in world, slot)
-                && !self.external_has(slot.name) {
+                && !self.external_has(slot.name)
+            {
                 if end {
                     self.say_name(
                         in names,
@@ -2151,7 +2160,8 @@ impl Flow {
             let val = state.val_at(i);
             if val.owned
                 && !val.consumed
-                && self.mode(inout types, in names, in world, val.ty) == TyMode::Linear {
+                && self.mode(inout types, in names, in world, val.ty) == TyMode::Linear
+            {
                 if end {
                     self.say_id("linear temporary ", val.id, " remains live at IR return");
                     self.caused(
@@ -2252,7 +2262,8 @@ impl Flow {
                 let slot_index = state.find_slot(program.rank_of(root));
                 if slot_index < 9223372036854775808
                     && state.slot_at(slot_index).pass != TyPass::Sink
-                    && self.mode(inout types, in names, in world, inst.ty) != TyMode::Copy {
+                    && self.mode(inout types, in names, in world, inst.ty) != TyMode::Copy
+                {
                     pass = TyPass::In;
                 }
             }
@@ -2261,13 +2272,15 @@ impl Flow {
             if pass == TyPass::Sink
                 && path_count == 1
                 && program.op(add(operand_start, 4)) == 0
-                && self.callee(inst.dest) {
+                && self.callee(inst.dest)
+            {
                 let slot_index = state.find_slot(program.rank_of(root));
                 let ty_node = types.node(inst.ty);
                 if slot_index < 9223372036854775808
                     && state.slot_at(slot_index).pass != TyPass::Sink
                     && ty_node.kind == TyKind::Fn
-                    && ty_node.mode != TyMode::Copy {
+                    && ty_node.mode != TyMode::Copy
+                {
                     pass = TyPass::In;
                 }
             }
@@ -2395,7 +2408,8 @@ impl Flow {
                     if !val.owned
                         && ty_node.kind == TyKind::Named
                         && ty_node.n == 0
-                        && (ty_node.name == known.string || ty_node.name == known.str_) {
+                        && (ty_node.name == known.string || ty_node.name == known.str_)
+                    {
                         state.set_val_at(
                             val_index,
                             ValS {
@@ -2465,7 +2479,8 @@ impl Flow {
             let val_index = state.find_val(val_id);
             if val_index < 9223372036854775808
                 && self.mode(inout types, in names, in world, state.val_at(val_index).ty)
-                    == TyMode::Linear {
+                    == TyMode::Linear
+            {
                 self.say("projection would abandon a temporary linear aggregate");
                 self.caused(
                     s0,
@@ -2699,7 +2714,8 @@ impl Flow {
                 let old_val = out.val_at(val_index);
                 if self.mode(inout types, in names, in world, old_val.ty) == TyMode::Linear
                     && old_val.owned
-                    && old_val.consumed != val.consumed {
+                    && old_val.consumed != val.consumed
+                {
                     self.say_id(
                         "linear temporary ",
                         val.id,
@@ -2887,7 +2903,8 @@ impl Flow {
                     let n = program.op(args_start);
                     for j in 0..n {
                         if wrapping_u8(program.op(add(args_start, inc(wrapping_mul(j, 2)))))
-                            == TyPass::Inout {
+                            == TyPass::Inout
+                        {
                             let added = set_insert(
                                 inout self.reservable,
                                 n32(program.op(add(args_start, add(2, wrapping_mul(j, 2)))))

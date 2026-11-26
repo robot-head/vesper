@@ -183,7 +183,8 @@ fn op_passes(op_code: u64) -> Str {
     if op_code == ENV_ARG_COUNT
         || op_code == ENV_VAR_COUNT
         || op_code == ENV_OS
-        || op_code == FS_UNIQUE {
+        || op_code == FS_UNIQUE
+    {
         ""
     } else if op_code == ENV_ARG || op_code == ENV_VAR || op_code == ENV_VAR_AT {
         "io"

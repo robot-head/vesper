@@ -334,7 +334,8 @@ fn mb_find(in net: SimNetCore, chan: u64, from_r: u64, to_r: u64) -> u64 {
         let j = wrapping_sub(e, 1);
         if sw(in net.mb_chan, j) == chan
             && sw(in net.mb_from, j) == from_r
-            && sw(in net.mb_to, j) == to_r {
+            && sw(in net.mb_to, j) == to_r
+        {
             return j;
         }
         at = wrapping_add(at, 1) & net.mb_mask;
@@ -354,7 +355,8 @@ fn mb_get_or_insert(inout net: SimNetCore, chan: u64, from_r: u64, to_r: u64) ->
         let j = wrapping_sub(e, 1);
         if sw(in net.mb_chan, j) == chan
             && sw(in net.mb_from, j) == from_r
-            && sw(in net.mb_to, j) == to_r {
+            && sw(in net.mb_to, j) == to_r
+        {
             return j;
         }
         at = wrapping_add(at, 1) & net.mb_mask;

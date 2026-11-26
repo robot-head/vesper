@@ -468,7 +468,8 @@ fn read_into(in elf: Slice[u8], inout out: ChunkSeq[u8], inout err: ChunkSeq[u8]
         || rd8(in elf, 0) != Ident::Mag0
         || rd8(in elf, 1) != Ident::Mag1
         || rd8(in elf, 2) != Ident::Mag2
-        || rd8(in elf, 3) != Ident::Mag3 {
+        || rd8(in elf, 3) != Ident::Mag3
+    {
         set_err(inout err, in "not an ELF file");
         return;
     }

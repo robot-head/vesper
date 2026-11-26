@@ -531,7 +531,8 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                 tc.str_ty
             }
         } else if tc.types.kind(expected) == TyKind::Named
-            && tc.world.k.is_integer(tc.types.name(expected)) {
+            && tc.world.k.is_integer(tc.types.name(expected))
+        {
             expected
         } else if e.a == Lit::Int && e.b > 9223372036854775807 && e.c == 0 {
             tc.u64_ty
@@ -592,7 +593,8 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         }
         if adt != NONE32
             && tc.types.kind(dt) == TyKind::Named
-            && tc.types.name(dt) == tc.world.adt(adt).name {
+            && tc.types.name(dt) == tc.world.adt(adt).name
+        {
             dt
         } else if adt != NONE32 {
             tc.types.named0(tc.world.adt(adt).name)
@@ -644,7 +646,8 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             || is_op(in tc, op, in "<=")
             || is_op(in tc, op, in ">=")
             || is_op(in tc, op, in "&&")
-            || is_op(in tc, op, in "||") {
+            || is_op(in tc, op, in "||")
+        {
             let lt = check_expr(inout tc, in a, e.b, tc.infer_ty);
             let _rt = check_expr(inout tc, in a, e.c, lt);
             tc.bool_ty
@@ -907,7 +910,8 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 let ad = tc.world.adt(adt);
                                 let aname = ad.name;
                                 if tc.types.kind(dt) == TyKind::Named
-                                    && tc.types.name(dt) == aname {
+                                    && tc.types.name(dt) == aname
+                                {
                                     dt
                                 } else if gnames.len() > 0 {
                                     tc.scratch1.clear();
@@ -928,7 +932,8 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 is_op(in tc, cname, in "ChunkSeq::new")
                                     || is_op(in tc, cname, in "ChunkSeq::with_capacity")
                             )
-                                && e.m > 0 {
+                                && e.m > 0
+                            {
                                 let cs_nm = tc.names.intern(in "ChunkSeq".as_bytes());
                                 named1(inout tc, cs_nm, n32(u64_at(in a.xs, e.c)))
                             } else if is_op(in tc, cname, in "String::new") {
@@ -979,13 +984,15 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                         is_op(in tc, mname, in "push")
                                             || is_op(in tc, mname, in "fill")
                                     )
-                                        && ai == 0 {
+                                        && ai == 0
+                                    {
                                         pt = tc.types.arg(bt, 0);
                                     } else if (
                                         is_op(in tc, mname, in "try_set")
                                             || is_op(in tc, mname, in "set")
                                     )
-                                        && ai == 1 {
+                                        && ai == 1
+                                    {
                                         pt = tc.types.arg(bt, 0);
                                     }
                                 }
@@ -997,7 +1004,8 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 || is_op(in tc, mname, in "try_set")
                                 || is_op(in tc, mname, in "set")
                                 || is_op(in tc, mname, in "try_fill")
-                                || is_op(in tc, mname, in "push_char") {
+                                || is_op(in tc, mname, in "push_char")
+                            {
                                 tc.bool_ty
                             } else if is_op(in tc, mname, in "push")
                                 || is_op(in tc, mname, in "clear")
@@ -1008,10 +1016,12 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 || is_op(in tc, mname, in "fill")
                                 || is_op(in tc, mname, in "fill_range")
                                 || is_op(in tc, mname, in "swap")
-                                || is_op(in tc, mname, in "push_str") {
+                                || is_op(in tc, mname, in "push_str")
+                            {
                                 tc.unit_ty
                             } else if is_op(in tc, mname, in "as_str")
-                                || is_op(in tc, mname, in "sub_str") {
+                                || is_op(in tc, mname, in "sub_str")
+                            {
                                 tc.str_ty
                             } else if is_op(in tc, mname, in "as_bytes") {
                                 let u8t = tc.types.named0(tc.world.k.u8_);
@@ -1021,7 +1031,8 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 is_op(in tc, mname, in "as_slice")
                                     || is_op(in tc, mname, in "sub_slice")
                             )
-                                && tc.types.arity(bt) > 0 {
+                                && tc.types.arity(bt) > 0
+                            {
                                 let a0 = tc.types.arg(bt, 0);
                                 let sl_nm = tc.names.intern(in "Slice".as_bytes());
                                 named1(inout tc, sl_nm, a0)
@@ -1029,7 +1040,8 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 is_op(in tc, mname, in "get_or")
                                     || is_op(in tc, mname, in "replace")
                             )
-                                && tc.types.arity(bt) > 0 {
+                                && tc.types.arity(bt) > 0
+                            {
                                 tc.types.arg(bt, 0)
                             } else if is_op(in tc, mname, in "byte_at") {
                                 tc.types.named0(tc.world.k.u8_)
@@ -1044,7 +1056,8 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                     || is_op(in tc, mname, in "pop")
                                     || is_op(in tc, mname, in "last")
                             )
-                                && tc.types.arity(bt) > 0 {
+                                && tc.types.arity(bt) > 0
+                            {
                                 let a0 = tc.types.arg(bt, 0);
                                 let opt_nm = tc.names.intern(in "Option".as_bytes());
                                 named1(inout tc, opt_nm, a0)
@@ -1052,16 +1065,19 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 || is_op(in tc, mname, in "try_read_u64_be")
                                 || is_op(in tc, mname, in "find_byte")
                                 || is_op(in tc, mname, in "find_either")
-                                || is_op(in tc, mname, in "find_not_in") {
+                                || is_op(in tc, mname, in "find_not_in")
+                            {
                                 let opt_nm = tc.names.intern(in "Option".as_bytes());
                                 named1(inout tc, opt_nm, tc.u64_ty)
                             } else if is_op(in tc, mname, in "try_read_u32_le")
-                                || is_op(in tc, mname, in "try_read_u32_be") {
+                                || is_op(in tc, mname, in "try_read_u32_be")
+                            {
                                 let u32t = tc.types.named0(tc.world.k.u32_);
                                 let opt_nm = tc.names.intern(in "Option".as_bytes());
                                 named1(inout tc, opt_nm, u32t)
                             } else if is_op(in tc, mname, in "try_read_u16_le")
-                                || is_op(in tc, mname, in "try_read_u16_be") {
+                                || is_op(in tc, mname, in "try_read_u16_be")
+                            {
                                 let u16t = tc.types.named0(tc.names.intern(in "u16".as_bytes()));
                                 let opt_nm = tc.names.intern(in "Option".as_bytes());
                                 named1(inout tc, opt_nm, u16t)
@@ -1070,7 +1086,8 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 || is_op(in tc, mname, in "try_write_u32_le")
                                 || is_op(in tc, mname, in "try_write_u32_be")
                                 || is_op(in tc, mname, in "try_write_u64_le")
-                                || is_op(in tc, mname, in "try_write_u64_be") {
+                                || is_op(in tc, mname, in "try_write_u64_be")
+                            {
                                 tc.bool_ty
                             } else {
                                 let eres = find_eop_result(in a, inout tc.names, cname);
@@ -1448,7 +1465,8 @@ pub fn typecheck_ast(
             && tc.spans.len() < max_spans
             && tc.calls.len() < max_calls
             && tc.pairs.len() < max_pairs
-            && tc_perm < tc_perm_end {
+            && tc_perm < tc_perm_end
+        {
             let mut dtc = dummy_tc(tc.world.k);
             swap(inout tc, inout dtc);
             let (ntc, next_perm) = rebuild_tc(

@@ -648,7 +648,8 @@ fn foreign(in ck: Ck, ty: u32) -> bool {
             || name == known.region_box
             || name == known.f32_
             || name == known.dyn_
-            || name == ck.atomic_sym {
+            || name == ck.atomic_sym
+        {
             return true;
         }
     }
@@ -928,7 +929,8 @@ fn tuple_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
         if expected_node.kind == TyKind::Tuple && expected_node.n == ex.n {
             let expected_elem = item(in ck.ctx.types, add(w(expected_node.a), i));
             if float_name(in ck, expected_elem)
-                || ck.ctx.types.kind(expected_elem) == TyKind::Tuple {
+                || ck.ctx.types.kind(expected_elem) == TyKind::Tuple
+            {
                 goal = expected_elem;
             }
         }
@@ -1491,7 +1493,8 @@ fn constrain_literals(inout ck: Ck, e: u32, target: u32) {
         if actual_kind == TyKind::Lit && int_kind(in ck, target) != NONE32 {
             record(inout ck, e, target);
         } else if (actual_kind == TyKind::Named || actual_kind == TyKind::Tuple)
-            && compatible(in ck.ctx.types, known, target, actual) {
+            && compatible(in ck.ctx.types, known, target, actual)
+        {
             let refined = refine_annotation(inout ck.ctx.types, target, actual);
             record(inout ck, e, refined);
         }

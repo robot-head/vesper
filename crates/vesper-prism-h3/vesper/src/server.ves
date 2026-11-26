@@ -1013,7 +1013,8 @@ fn request_frames(
             if phase == PHASE_BODY || phase == PHASE_STREAMING {
                 let bq = word(in s.r_body_q.as_slice(), f.idx);
                 if phase == PHASE_BODY
-                    && dlen > sat_sub(s.conn.cfg.max_body_bytes, q_len(in s.conn.pool, bq)) {
+                    && dlen > sat_sub(s.conn.cfg.max_body_bytes, q_len(in s.conn.pool, bq))
+                {
                     let next_q = q_consume(inout s.conn.pool, step.rx_q, dlen);
                     let _uq = s.r_rx_q.try_set(f.idx, next_q);
                     malformed(inout s, inout dec, id, CODE_EXCESSIVE_LOAD);
@@ -1537,7 +1538,8 @@ fn build_and_encode_response(
     fmeta.extend(in meta);
 
     if has_cl
-        && !(status == HttpStatus::NoContent || (status == HttpStatus::NotModified && cl == 0)) {
+        && !(status == HttpStatus::NoContent || (status == HttpStatus::NotModified && cl == 0))
+    {
         let cl_name = "content-length".as_bytes();
         fbytes.extend(in cl_name);
         let dlen = push_u64_ascii(inout fbytes, cl);
@@ -1576,7 +1578,8 @@ pub fn server_send_interim(
     }
     if status < HttpStatus::Continue
         || status >= HttpStatus::Ok
-        || status == HttpStatus::SwitchingProtocols {
+        || status == HttpStatus::SwitchingProtocols
+    {
         return Result::Err(SendError::InvalidResponse(MessageError::InvalidStatus));
     }
     match check_response_fields(inout s, in bytes, in meta) {
@@ -1721,7 +1724,8 @@ pub fn server_finish_response(
     let sent = word(in s.r_reply_sent.as_slice(), idx);
     if (flags & RF_HEAD_REQ) == 0
         && (flags & RF_REPLY_HAS_CL) != 0
-        && word(in s.r_reply_cl.as_slice(), idx) != sent {
+        && word(in s.r_reply_cl.as_slice(), idx) != sent
+    {
         return Result::Err(SendError::InvalidResponse(MessageError::ContentLengthMismatch));
     }
     let trl_count = trl_meta.len() / 3;

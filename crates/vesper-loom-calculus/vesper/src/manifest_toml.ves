@@ -1182,7 +1182,8 @@ fn seq_value(inout d: D, in src: Slice[u8], id: u32, t: u64) -> bool {
         let len = qw(in q, wrapping_add(wrapping_mul(i, 4), 1));
         if t != T_STRING_VEC
             && written > 0
-            && same_text(in d.doc.text.as_slice(), a, len, last_a, last_n) {
+            && same_text(in d.doc.text.as_slice(), a, len, last_a, last_n)
+        {
             continue;
         }
         if written > 0 {
@@ -1327,12 +1328,8 @@ fn struct_value(inout d: D, in src: Slice[u8], id: u32, k: u64) -> bool {
         let x = ent(in d.doc.ents, e);
         let mut f = field_of(k, x.hash);
         if f < count
-            && !same_name(
-                in d.doc.text.as_slice(),
-                x.koff,
-                x.klen,
-                in field_name(k, f).as_bytes()
-            ) {
+            && !same_name(in d.doc.text.as_slice(), x.koff, x.klen, in field_name(k, f).as_bytes())
+        {
             f = count;
         }
         if f == count {

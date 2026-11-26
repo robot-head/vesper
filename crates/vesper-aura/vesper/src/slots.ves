@@ -160,7 +160,8 @@ pub fn patch_unbind_slot(
     if k == NONE_ID
         || !session_ok(in s, widget_session)
         || owner.widget != widget
-        || owner.property != property {
+        || owner.property != property
+    {
         return Option::Some(BackendFault::StaleSlot);
     }
     if widget_index(in s, widget) == NONE_ID {

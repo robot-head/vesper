@@ -534,7 +534,8 @@ fn ast_row_profiles(in ast: Ast, effects: u32, inout out: ChunkSeq[u8]) {
         let effect = effect_at(in ast, list_at(in ast, row.instances, i));
         if effect.name == NONE
             || !sym_is(in ast, effect.name, in "Isa")
-            || list_len(in ast, effect.args) != 1 {
+            || list_len(in ast, effect.args) != 1
+        {
             continue;
         }
         let arg_node = type_at(in ast, list_at(in ast, effect.args, 0));
@@ -556,7 +557,8 @@ fn elem_bits_of(in ast: Ast, sym: u32) -> u64 {
         32
     } else if sym_is(in ast, sym, in "u64")
         || sym_is(in ast, sym, in "i64")
-        || sym_is(in ast, sym, in "f64") {
+        || sym_is(in ast, sym, in "f64")
+    {
         64
     } else {
         0
@@ -697,7 +699,8 @@ fn intrinsic(in ast: Ast, name: u32) -> u8 {
         if range_is(in text, method_start, text_len, in "to_bits")
             || range_is(in text, method_start, text_len, in "from_bits")
             || range_is(in text, method_start, text_len, in "widen_f64")
-            || range_is(in text, method_start, text_len, in "nearest_f32") {
+            || range_is(in text, method_start, text_len, in "nearest_f32")
+        {
             return I_CONVERT;
         }
         if range_is(in text, method_start, text_len, in "extract") {
@@ -760,7 +763,8 @@ fn word_in(in bytes: ChunkSeq[u8], start: u64, end: u64, in list: Str) -> bool {
                 let mut same = true;
                 for k in 0..len {
                     if u8_at(in bytes, wrapping_add(start, k))
-                        != byte_at(in list_bytes, wrapping_add(word_start, k)) {
+                        != byte_at(in list_bytes, wrapping_add(word_start, k))
+                    {
                         same = false;
                         break;
                     }
@@ -1134,7 +1138,8 @@ fn expr(inout ast: Ast, inout walk: I, id: u32, in available: ChunkSeq[u8]) {
             let callee = expr_at(in ast, cond.a);
             if callee.kind == E_NAME
                 && intrinsic(in ast, callee.a) == I_ISA
-                && list_len(in ast, cond.b) == 1 {
+                && list_len(in ast, cond.b) == 1
+            {
                 let arg_node = type_at(in ast, list_at(in ast, cond.b, 0));
                 if arg_node.kind == AT_NAMED {
                     let profile = profile_of_sym(in ast, arg_node.a);
@@ -1321,7 +1326,8 @@ fn expr(inout ast: Ast, inout walk: I, id: u32, in available: ChunkSeq[u8]) {
         expr(inout ast, inout walk, node.b, in available);
     } else if kind == E_BINARY
         && is_comparison(in ast, node.a)
-        && contains_vector(in ast, inout walk, expr_type(in ast, in walk, node.b), 0) {
+        && contains_vector(in ast, inout walk, expr_type(in ast, in walk, node.b), 0)
+    {
         // Aggregate equality would compare lane bits, not values (-0.0
         // and NaN): lanes are compared with Vec::eq and friends.
         diag_head(inout walk, in "E1402", node.start, node.end);
@@ -1448,7 +1454,8 @@ pub fn isa_text(in input: Str, in source: Str) -> ChunkSeq[u8] {
     for i in 0..adt_count {
         let adt_name = u32_at(in walk.adt_name, i);
         if (adt_name == walk.vec_name || adt_name == walk.mask_name)
-            && u64_at(in walk.adt_generic_count, i) == 2 {
+            && u64_at(in walk.adt_generic_count, i) == 2
+        {
             let start = wrapping_u32(u64_at(in spans, wrapping_mul(i, 2)));
             let end = wrapping_u32(u64_at(in spans, wrapping_add(wrapping_mul(i, 2), 1)));
             diag_head(inout walk, in "E1401", start, end);

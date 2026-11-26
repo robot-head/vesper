@@ -491,7 +491,8 @@ pub fn do_classify_differences(in segments: Slice[Segment], max_difference: i64)
         && (
             w_slt(threshold, seg_lower(first))
                 || (w_eq(seg_lower(first), threshold) && !first.lower_inclusive)
-        ) {
+        )
+    {
         Outcome::Regression
     } else {
         Outcome::CrossesThreshold

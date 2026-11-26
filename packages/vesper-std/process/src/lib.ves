@@ -414,7 +414,8 @@ fn child_environment(in c: ProcCommand) -> ChunkSeq[u8] eff [Ffi[StdProcess]] {
         let end = word_at(in c.key_ends.as_slice(), i);
         let vend = word_at(in c.value_ends.as_slice(), i);
         if byte_at(in c.ops.as_slice(), i) == 1
-            && last_edit(in c, in c.keys.as_slice(), start, end) == i {
+            && last_edit(in c, in c.keys.as_slice(), start, end) == i
+        {
             out.extend(in c.keys[start..end]);
             out.push(61);
             out.extend(in c.values[vstart..vend]);
@@ -445,7 +446,8 @@ fn search_path(in envp: Slice[u8]) -> ChunkSeq[u8] {
     for i in 0..envp.len() {
         if byte_at(in envp, i) == 0 {
             if wrapping_sub(i, start) >= 5
-                && same(in envp, start, wrapping_add(start, 5), in prefix, 0, 5) {
+                && same(in envp, start, wrapping_add(start, 5), in prefix, 0, 5)
+            {
                 out.extend(in envp[wrapping_add(start, 5)..i]);
                 return out;
             }

@@ -196,7 +196,8 @@ fn visit(in a: Ast, e: u32, inout u: Uses) {
         }
         if sym_is(in a, x.a, "String::new")
             || sym_is(in a, x.a, "String::with_capacity")
-            || sym_is(in a, x.a, "String::from_utf8") {
+            || sym_is(in a, x.a, "String::from_utf8")
+        {
             u.string_path = true;
         }
     } else if k == 3 {

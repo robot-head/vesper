@@ -177,7 +177,8 @@ fn preflight(in lim: MacroLimits, n: u64) eff [Fail[MacroError]] {
         || lim.max_parameters > h.max_parameters
         || lim.max_depth > h.max_depth
         || lim.max_metadata_bytes > h.max_metadata_bytes
-        || lim.max_work > h.max_work {
+        || lim.max_work > h.max_work
+    {
         raise(ME_INVALID_LIMITS, none(), none());
     }
     bound(n, lim.max_source_bytes, R_SOURCE);
@@ -567,7 +568,8 @@ fn function(inout m: Mp, inout rp: P, in t: Tokens, in src: Slice[u8]) eff [Fail
     for i in body..close {
         if i > body
             && sk(in m, in t, i) == k_bang()
-            && sk(in m, in t, wrapping_sub(i, 1)) == k_lower() {
+            && sk(in m, in t, wrapping_sub(i, 1)) == k_lower()
+        {
             has_macro = true;
             break;
         }
@@ -687,7 +689,8 @@ fn parameter_names(
         if (k != k_lower() && k != k_self_kw())
             || ts < ps
             || te > pe
-            || !same_text(in src, ts, te, ns, ne) {
+            || !same_text(in src, ts, te, ns, ne)
+        {
             raise(ME_SYNTAX, ps, pe);
         }
         m.names.push(ts);
@@ -955,7 +958,8 @@ pub fn parse_macro_source(
         if word(in m, in t, in src, in "macro".as_bytes()) {
             push_def(inout m, in t, in src);
         } else if word(in m, in t, in src, in "test".as_bytes())
-            && sk(in m, in t, inc(m.pos)) == k_l_brace() {
+            && sk(in m, in t, inc(m.pos)) == k_l_brace()
+        {
             // Test blocks are inactive during ordinary macro expansion.
             m.pos = inc(matching(inout m, in t, inc(m.pos)));
         } else if k == k_fn() {
@@ -965,7 +969,8 @@ pub fn parse_macro_source(
             || k == k_linear()
             || k == k_struct()
             || k == k_enum()
-            || k == k_effect() {
+            || k == k_effect()
+        {
             support(inout m, inout rp, in t);
         } else {
             fail_here(in m, in t, ME_UNSUPPORTED);
@@ -1088,7 +1093,8 @@ fn template_calls(
         }
         if kind(in m, in t) != k_lower()
             || sk(in m, in t, inc(m.pos)) != k_bang()
-            || (m.pos > a && sk(in m, in t, wrapping_sub(m.pos, 1)) == k_dollar()) {
+            || (m.pos > a && sk(in m, in t, wrapping_sub(m.pos, 1)) == k_dollar())
+        {
             bump(inout m, in t);
             continue;
         }
@@ -1333,7 +1339,8 @@ pub fn parse_macro_surface_tokens(
 ) -> P {
     let mut p = parse_surface_tokens(in source, t, d, max_diag, max_depth, include_tests);
     if p.d.code.len() == 0
-        && (contains_byte(in source, 33) || contains_word(in source, in "macro".as_bytes())) {
+        && (contains_byte(in source, 33) || contains_word(in source, in "macro".as_bytes()))
+    {
         let e = validate_surface(in source, in p.t, in p.ev, lim);
         if e.code != 0 {
             let (s, en) = if e.start == none() {

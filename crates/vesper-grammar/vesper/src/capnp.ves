@@ -191,7 +191,8 @@ fn validate_limits(in lim: Slice[u64]) -> Unit eff [Fail[GErr]] {
     if sw(in lim, 0) > HARD_BYTES
         || sw(in lim, 1) > HARD_BYTES
         || sw(in lim, 2) > HARD_WORDS
-        || sw(in lim, 3) > HARD_WORK {
+        || sw(in lim, 3) > HARD_WORK
+    {
         fail(0, 0);
     }
 }

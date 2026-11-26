@@ -85,7 +85,8 @@ pub fn iso8601_utc_to_unix(in s: Slice[u8]) -> Option[u64] {
         || byte(in s, 7) != MINUS
         || byte(in s, 10) != UPPER_T
         || byte(in s, 13) != COLON
-        || byte(in s, 16) != COLON {
+        || byte(in s, 16) != COLON
+    {
         return Option::None;
     }
     let year = num(in s, 0, 4);
@@ -99,7 +100,8 @@ pub fn iso8601_utc_to_unix(in s: Slice[u8]) -> Option[u64] {
         || day == bad()
         || hour == bad()
         || minute == bad()
-        || second == bad() {
+        || second == bad()
+    {
         return Option::None;
     }
     // "Z", or "." with one or more digits and then "Z".
@@ -117,7 +119,8 @@ pub fn iso8601_utc_to_unix(in s: Slice[u8]) -> Option[u64] {
         || month > 12
         || hour > 23
         || minute > 59
-        || second > 59 {
+        || second > 59
+    {
         return Option::None;
     }
     if day == 0 || day > month_days(year, month) {

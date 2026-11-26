@@ -1345,7 +1345,8 @@ fn resize(inout b: Book, index: u64, new_cap: u64, fresh_base: u64, fresh_cap: u
     let base = addr_of(in b, s);
     if is_tip(in b, index)
         && !add_overflows(s.start, new_bytes)
-        && wrapping_add(s.start, new_bytes) <= chunk_at(in b, s.chunk).cap {
+        && wrapping_add(s.start, new_bytes) <= chunk_at(in b, s.chunk).cap
+    {
         set_cursor(inout b, s.chunk, wrapping_add(s.start, new_bytes));
         let mut t = s;
         t.len = new_bytes;

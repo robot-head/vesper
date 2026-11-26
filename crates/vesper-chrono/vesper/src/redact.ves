@@ -151,7 +151,8 @@ fn find_secret_in(
                 break;
             }
             if byte_at(in haystack, wrapping_add(i, j))
-                != byte_at(in secret_buf, wrapping_add(span.offset, j)) {
+                != byte_at(in secret_buf, wrapping_add(span.offset, j))
+            {
                 matched = false;
                 break;
             }

@@ -74,7 +74,8 @@ fn sift_by[K: mod copy + Ord](
         let mut child = left;
         let right = wrapping_add(left, 1);
         if right < n
-            && before_at(in keys, in order, wrapping_add(lo, left), wrapping_add(lo, right)) {
+            && before_at(in keys, in order, wrapping_add(lo, left), wrapping_add(lo, right))
+        {
             child = right;
         }
         if !before_at(in keys, in order, wrapping_add(lo, root), wrapping_add(lo, child)) {

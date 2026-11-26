@@ -275,11 +275,8 @@ fn plan_final_layouts(inout pl: Planner, in g: Graph) -> PlanFault {
                             for i in 0..candidates.len() {
                                 let q = get32(in candidates, i);
                                 if chosen == none32()
-                                    && queue_can_transition(
-                                        get_queue(in g, widen_u64(q)),
-                                        cur,
-                                        fin
-                                    ) {
+                                    && queue_can_transition(get_queue(in g, widen_u64(q)), cur, fin)
+                                {
                                     chosen = q;
                                 }
                             }

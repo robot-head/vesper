@@ -180,7 +180,8 @@ pub fn single_bindings(in f: Fun) -> ChunkSeq[u32] {
             || i.op == OP_INDIRECT
             || i.op == OP_SEQ
             || i.op == OP_TILED
-            || i.op == OP_FIP {
+            || i.op == OP_FIP
+        {
             for j in 0..w(i.gn) {
                 let a = f.arg(add(w(i.g0), j));
                 if a.pass != TyPass::In && a.pass != TyPass::Sink && a.place != 0 {
@@ -211,7 +212,8 @@ pub fn opaque(in f: Fun, in blocks: ChunkSeq[u32]) -> bool {
             if i.op == OP_CLOSURE
                 || i.op == OP_HANDLE
                 || i.op == OP_INDIRECT
-                || f.has_call_slot(i.dest) {
+                || f.has_call_slot(i.dest)
+            {
                 return true;
             }
         }

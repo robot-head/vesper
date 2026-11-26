@@ -378,7 +378,8 @@ pub fn pair_manifold(
                 sf(inout probe, 2, paz);
                 sf(inout probe, 3, 0.0);
                 if g_separation(0, in probe, ka, in da, inout gjk_out) == 0
-                    && gf(in gjk_out, 0) <= tol {
+                    && gf(in gjk_out, 0) <= tol
+                {
                     write_cand(inout cands, nc, pax, pay, paz, sx, sy, sz, depth);
                     nc = wrapping_add(nc, 1);
                 }
@@ -404,7 +405,8 @@ pub fn pair_manifold(
                 sf(inout probe, 2, pbz);
                 sf(inout probe, 3, 0.0);
                 if g_separation(0, in probe, kb, in db, inout gjk_out) == 0
-                    && gf(in gjk_out, 0) <= tol {
+                    && gf(in gjk_out, 0) <= tol
+                {
                     write_cand(inout cands, nc, sx, sy, sz, pbx, pby, pbz, depth);
                     nc = wrapping_add(nc, 1);
                 }

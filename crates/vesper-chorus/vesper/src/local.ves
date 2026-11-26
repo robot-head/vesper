@@ -135,7 +135,8 @@ pub fn mkl(inout c: C, tag: u64, a: u64, b: u64, cc: u64, d: u64, from: u64) -> 
             && sw(in c.lb, m) == b
             && sw(in c.lc, m) == cc
             && sw(in c.ld, m) == d
-            && same_kids(in c, m, from) {
+            && same_kids(in c, m, from)
+        {
             c.tmp.truncate(from);
             return m;
         }
@@ -691,7 +692,8 @@ fn dual_in(inout c: C, a: u64, x: u64, b: u64, y: u64) -> bool {
         if la(in c, x) != b
             || la(in c, y) != a
             || lb(in c, x) != lb(in c, y)
-            || lc(in c, x) != lc(in c, y) {
+            || lc(in c, x) != lc(in c, y)
+        {
             return false;
         }
         let h76 = ld(in c, x);
@@ -708,7 +710,8 @@ fn dual_in(inout c: C, a: u64, x: u64, b: u64, y: u64) -> bool {
         }
         for i in 0..n {
             if lbr(in c, x, i, Br::Label) != lbr(in c, y, i, Br::Label)
-                || lbr(in c, x, i, Br::Payload) != lbr(in c, y, i, Br::Payload) {
+                || lbr(in c, x, i, Br::Payload) != lbr(in c, y, i, Br::Payload)
+            {
                 return false;
             }
             let h78 = lbr(in c, x, i, Br::Next);

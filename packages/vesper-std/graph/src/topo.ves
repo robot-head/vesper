@@ -179,7 +179,8 @@ test {
         let result = toposort(in graph);
         if result.is_dag() != (cycle.len() == 0)
             || result.order_len() != order.len()
-            || result.cycle_len() != cycle.len() {
+            || result.cycle_len() != cycle.len()
+        {
             return false;
         }
         for j in 0..order.len() {
