@@ -620,6 +620,9 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH5 lane 18 (#1341): `vesper proof-audit` built from
+        # @vesper/proof-audit and its @vesper-std dependencies, beside Rust's.
+        "test/self_host_proof_audit": glob(["packages/**"]) + ["//crates/vesper-serde:files"],
         # Self-hosting SH5 lane 18 (#1341): @vesper/lean-extract against
         # lean::extract on the same corpus; it imports @vesper/lean-syntax.
         "test/self_host_lean_extract": glob([
@@ -974,6 +977,11 @@ vesper_crate(
             "resources:memory:9216",
             "resources:cpu:1",
         ],
+        # Rust's audit and the port's in turn, each Lean -M8192.
+        "test/self_host_proof_audit": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
         "test/verify_extract_cli": [
             "resources:memory:9216",
             "resources:cpu:1",
@@ -1083,6 +1091,11 @@ vesper_crate(
         }),
         # Macro provenance audits replay Std serially, like proof_audit_cli.
         "test/forge_provenance_cli": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # proof_audit_cli's replays twice over (Rust and the Vesper port).
+        "test/self_host_proof_audit": select({
             "@platforms//os:macos": ["@platforms//:incompatible"],
             "//conditions:default": [],
         }),
@@ -1286,6 +1299,8 @@ vesper_crate(
         "test/self_host_ir_opt_policy": "eternal",
         # The Lean head differential (#1341) checks every corpus world.
         "test/self_host_lean_extract": "long",
+        # 76 proof-audit cases, 38 kernel replays each way: ~7 min locally.
+        "test/self_host_proof_audit": "long",
         # The optimizer differential (#1249) checks every corpus world.
         "test/self_host_optimize": "eternal",
         "test/self_host_optimize_search": "eternal",

@@ -1,0 +1,373 @@
+// @vesper/proof-audit: `vesper proof-audit` (src/proof_commands.rs, SH5
+// lane 18, #1341). `run` takes the command's arguments and returns what it
+// prints on stdout and, when it fails, the error `main` prints after
+// `vesper: `. The audit replays local Lean artifacts through the kernel of
+// the pinned Lean 4.35.0 and checks theorem axioms against an explicit
+// policy; see src/audit.ves.
+use @vesper-std/process::id;
+use self::audit::{
+    Au,
+    Options,
+    Report,
+    audit,
+    forbidden_axiom
+};
+use self::json::{
+    Json,
+    begin_object,
+    end_object,
+    field_string,
+    field_u64,
+    json_new,
+    key
+};
+use self::strs::{
+    Strs,
+    byte,
+    count,
+    end,
+    push,
+    put_str,
+    same_str,
+    set_of,
+    start,
+    strs_new
+};
+
+pub const HELP: Str = "Usage: vesper proof-audit <Module> --root <artifact-directory> --theorem <Qualified.name> [--theorem ...] [--allow-axiom <Name>] [--lean <path>] [--timeout <seconds>] [--macro-provenance <manifest.json>] [--json]\n\nReplay existing local Lean 4.35.0 artifacts through the kernel and audit named theorems.\nArtifact imports disable package environment extensions and plugins.\nThe selected Lean toolchain and artifact parser remain trusted; this is not an OS sandbox, provenance certificate or reusable proof-cache approval.\nThe default axiom policy is empty; sorryAx, compiler-trust axioms, and generated _native axioms are always forbidden.\nA theorem that depends on macro-expanded definitions (those with `$macro_provenance` markers, see `vesper forge lean`) is rejected unless --macro-provenance names the matching provenance manifest.\n";
+
+// What `run` printed, and its error when `failed`.
+pub struct Outcome {
+    pub out: ChunkSeq[u8],
+    pub failed: bool,
+    pub err: ChunkSeq[u8],
+}
+
+fn alpha(b: u8) -> bool {
+    (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+}
+
+fn digit(b: u8) -> bool {
+    b >= 48 && b <= 57
+}
+
+// `name_valid`: dot-separated ASCII identifiers, at most 1024 bytes.
+pub fn name_valid(in name: Slice[u8]) -> bool {
+    if name.len() > 1024 {
+        return false;
+    }
+    let mut part: u64 = 0;
+    for i in 0..wrapping_add(name.len(), 1) {
+        if i == name.len() || byte(in name, i) == 46 {
+            if i == part {
+                return false;
+            }
+            let first = byte(in name, part);
+            if !alpha(first) && first != 95 {
+                return false;
+            }
+            for k in part..i {
+                let b = byte(in name, k);
+                if !alpha(b) && !digit(b) && b != 95 && b != 39 {
+                    return false;
+                }
+            }
+            part = wrapping_add(i, 1);
+        }
+    }
+    true
+}
+
+// The first component is a trusted toolchain namespace.
+fn toolchain_namespace(in name: Slice[u8]) -> bool {
+    let mut cut = name.len();
+    for i in 0..name.len() {
+        if cut == name.len() && byte(in name, i) == 46 {
+            cut = i;
+        }
+    }
+    let first = name[0..cut];
+    same_str(in first, in "Lean")
+        || same_str(in first, in "Std")
+        || same_str(in first, in "Init")
+        || same_str(in first, in "Lake")
+}
+
+// `str::parse::<u64>`: an optional `+`, then digits, no overflow.
+fn parse_u64(in s: Slice[u8]) -> Option[u64] {
+    let mut i: u64 = 0;
+    if s.len() > 0 && byte(in s, 0) == 43 {
+        i = 1;
+    }
+    if i >= s.len() {
+        return Option::None;
+    }
+    let mut n: u64 = 0;
+    for k in i..s.len() {
+        let b = byte(in s, k);
+        if !digit(b) {
+            return Option::None;
+        }
+        let d = widen_u64(wrapping_sub(b, 48));
+        if n > wrapping_sub(18446744073709551615, d) / 10 {
+            return Option::None;
+        }
+        n = wrapping_add(wrapping_mul(n, 10), d);
+    }
+    Option::Some(n)
+}
+
+fn outcome() -> Outcome {
+    Outcome {
+        out: ChunkSeq::new[u8](),
+        failed: false,
+        err: ChunkSeq::new[u8]()
+    }
+}
+
+fn failed(in why: Str) -> Outcome {
+    let mut o = outcome();
+    o.failed = true;
+    put_str(inout o.err, in why);
+    o
+}
+
+fn failed_bytes(in lead: Str, in what: Slice[u8], in tail: Str) -> Outcome {
+    let mut o = outcome();
+    o.failed = true;
+    put_str(inout o.err, in lead);
+    o.err.extend(in what);
+    put_str(inout o.err, in tail);
+    o
+}
+
+fn seq(in b: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.extend(in b);
+    out
+}
+
+// `vesper proof-audit` with `args` (those after the command name).
+pub fn run(in args: Strs) -> Outcome eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3]] {
+    let mut has_module = false;
+    let mut module: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut has_root = false;
+    let mut root: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut theorems = strs_new();
+    let mut allowed = strs_new();
+    let mut has_lean = false;
+    let mut lean: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut has_timeout = false;
+    let mut timeout: u64 = 0;
+    let mut json = false;
+    let mut has_manifest = false;
+    let mut manifest: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let n = count(in args);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let arg = args.bytes[start(in args, i)..end(in args, i)];
+        i = wrapping_add(i, 1);
+        let has_next = i < n;
+        let next = if has_next {
+            seq(in args.bytes[start(in args, i)..end(in args, i)])
+        } else {
+            ChunkSeq::new[u8]()
+        };
+        if same_str(in arg, in "--help") || same_str(in arg, in "-h") {
+            let mut o = outcome();
+            put_str(inout o.out, in HELP);
+            return o;
+        } else if same_str(in arg, in "--root") {
+            if has_root {
+                return failed(in "--root may only be specified once");
+            }
+            if !has_next {
+                return failed(in "--root requires a directory");
+            }
+            has_root = true;
+            root = next;
+            i = wrapping_add(i, 1);
+        } else if same_str(in arg, in "--theorem") || same_str(in arg, in "--allow-axiom") {
+            if !has_next {
+                return failed_bytes(in "", in arg, in " requires a name");
+            }
+            i = wrapping_add(i, 1);
+            if !name_valid(in next.as_slice()) {
+                return failed_bytes(
+                    in "invalid Lean name '",
+                    in next.as_slice(),
+                    in "'; use qualified ASCII identifiers"
+                );
+            }
+            if same_str(in arg, in "--theorem") {
+                push(inout theorems, in next.as_slice());
+            } else {
+                if forbidden_axiom(in next.as_slice()) {
+                    return failed_bytes(
+                        in "",
+                        in next.as_slice(),
+                        in " cannot be allowed by the audit policy"
+                    );
+                }
+                push(inout allowed, in next.as_slice());
+            }
+        } else if same_str(in arg, in "--lean") {
+            if has_lean {
+                return failed(in "--lean may only be specified once");
+            }
+            if !has_next {
+                return failed(in "--lean requires a path");
+            }
+            has_lean = true;
+            lean = next;
+            i = wrapping_add(i, 1);
+        } else if same_str(in arg, in "--timeout") {
+            if has_timeout {
+                return failed(in "--timeout may only be specified once");
+            }
+            if !has_next {
+                return failed(in "--timeout requires seconds");
+            }
+            i = wrapping_add(i, 1);
+            let seconds = match parse_u64(in next.as_slice()) {
+                Option::Some(s) => s,
+                Option::None => return failed(in "invalid --timeout; expected 1 to 300 seconds"),
+            };
+            if seconds < 1 || seconds > 300 {
+                return failed(in "--timeout must be between 1 and 300 seconds");
+            }
+            has_timeout = true;
+            timeout = seconds;
+        } else if same_str(in arg, in "--json") {
+            json = true;
+        } else if same_str(in arg, in "--macro-provenance") {
+            if has_manifest {
+                return failed(in "--macro-provenance may only be specified once");
+            }
+            if !has_next {
+                return failed(in "--macro-provenance requires a manifest file");
+            }
+            has_manifest = true;
+            manifest = next;
+            i = wrapping_add(i, 1);
+        } else if arg.len() > 0 && byte(in arg, 0) == 45 {
+            return failed_bytes(in "unknown proof-audit option '", in arg, in "'");
+        } else {
+            if has_module {
+                return failed(in "proof-audit accepts one module");
+            }
+            has_module = true;
+            module = seq(in arg);
+        }
+    }
+    if !has_module {
+        return failed(in "missing Lean module");
+    }
+    if !name_valid(in module.as_slice()) || toolchain_namespace(in module.as_slice()) {
+        return failed(
+            in "module must be a qualified ASCII identifier outside trusted toolchain namespaces"
+        );
+    }
+    let theorems = set_of(in theorems);
+    if count(in theorems) == 0 {
+        return failed(in "proof-audit requires at least one --theorem");
+    }
+    if count(in theorems) > 128 {
+        return failed(in "proof-audit supports at most 128 theorem names");
+    }
+    if !has_root {
+        return failed(in "proof-audit requires --root");
+    }
+    let options = Options {
+        module: module,
+        root: root,
+        theorems: theorems,
+        allowed: set_of(in allowed),
+        lean: lean,
+        has_lean: has_lean,
+        timeout: timeout,
+        manifest: manifest,
+        has_manifest: has_manifest
+    };
+    let mut a = Au {
+        failed: false,
+        err: ChunkSeq::new[u8]()
+    };
+    let report = audit(inout a, in options, id());
+    let mut o = outcome();
+    if a.failed {
+        if json {
+            let mut j = json_new(true);
+            begin_object(inout j);
+            key(inout j, in "error");
+            begin_object(inout j);
+            field_string(inout j, in "kind", in "audit_failed".as_bytes());
+            field_string(inout j, in "message", in a.err.as_slice());
+            end_object(inout j);
+            field_u64(inout j, in "schema_version", 1);
+            field_string(inout j, in "status", in "error".as_bytes());
+            end_object(inout j);
+            o.out.extend(in j.out.as_slice());
+            o.out.push(10);
+        }
+        o.failed = true;
+        o.err = a.err;
+        return o;
+    }
+    if json {
+        o.out.extend(in report.json.as_slice());
+        o.out.push(10);
+    } else {
+        text_report(inout o.out, in report);
+    }
+    if !report.accepted {
+        o.failed = true;
+        put_str(inout o.err, in "theorem axioms exceed the explicit audit policy");
+    }
+    o
+}
+
+fn text_report(inout out: ChunkSeq[u8], in r: Report) {
+    put_str(inout out, in "Lean artifact audit: ");
+    if r.accepted {
+        put_str(inout out, in "accepted\n");
+    } else {
+        put_str(inout out, in "rejected\n");
+    }
+    out.extend(in r.version.as_slice());
+    put_str(inout out, in "; ");
+    self::json::put_u64(inout out, r.checked_constants);
+    put_str(inout out, in " kernel-replayed constants\n");
+    for t in 0..count(in r.th_names) {
+        out.extend(in r.th_names.bytes[start(in r.th_names, t)..end(in r.th_names, t)]);
+        put_str(inout out, in ": axioms [");
+        let a0 = if t == 0 {
+            0
+        } else {
+            match r.ax_ends.try_get(wrapping_sub(t, 1)) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            }
+        };
+        let a1 = match r.ax_ends.try_get(t) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        for x in a0..a1 {
+            if x > a0 {
+                put_str(inout out, in ", ");
+            }
+            out.extend(in r.axioms.bytes[start(in r.axioms, x)..end(in r.axioms, x)]);
+        }
+        put_str(inout out, in "]\n");
+    }
+    for k in 0..count(in r.forbidden) {
+        put_str(inout out, in "unapproved axiom: ");
+        out.extend(in r.forbidden.bytes[start(in r.forbidden, k)..end(in r.forbidden, k)]);
+        out.push(10);
+    }
+    put_str(inout out, in "Local audit only; no provenance or proof-cache certificate.\n");
+}

@@ -1,0 +1,745 @@
+// `ProvenanceTable::verify` (src/forge_frontend/provenance.rs, with no
+// sources) and `macro_provenance_gate` (src/proof_commands.rs): the macro
+// provenance admission rule of `vesper proof-audit --macro-provenance`.
+use @vesper-std/hash::blake3::{
+    Digest,
+    digest_bytes
+};
+use @vesper-std/hash-sys::hash;
+use self::json::{
+    Json,
+    begin_array,
+    begin_object,
+    end_array,
+    end_object,
+    json_new,
+    key,
+    null,
+    number,
+    put_u64,
+    string
+};
+use self::reader::Table;
+use self::strs::{
+    Strs,
+    byte,
+    count,
+    end,
+    push,
+    put_str,
+    same,
+    same_str,
+    set_of,
+    start,
+    strs_new
+};
+
+pub const SCHEMA: Str = "vesper.forge.provenance/1";
+pub const MARKER_SUFFIX: Str = "$macro_provenance";
+pub const MODULE_MARKER: Str = "vesper$macro_provenance";
+
+fn at(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn cut_start(in cut: Slice[u64], i: u64) -> u64 {
+    if i == 0 {
+        0
+    } else {
+        at(in cut, wrapping_sub(i, 1))
+    }
+}
+
+// The 64 lowercase hex digits of `d`.
+pub fn hex(d: Digest) -> ChunkSeq[u8] {
+    let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    digest_bytes(d, inout b);
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..b.len() {
+        let x = byte(in b.as_slice(), i);
+        out.push(digit(x >> 4));
+        out.push(digit(x & 15));
+    }
+    out
+}
+
+fn digit(n: u8) -> u8 {
+    if n < 10 {
+        wrapping_add(n, 48)
+    } else {
+        wrapping_add(n, 87)
+    }
+}
+
+pub fn blake3_hex(in data: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Blake3]] {
+    hex(hash(in data))
+}
+
+// `canonical_digest`: BLAKE3 of the schema, a 0 byte and the compact JSON.
+fn canonical(in json: ChunkSeq[u8]) -> ChunkSeq[u8] eff [Ffi[Blake3]] {
+    let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout b, in SCHEMA);
+    b.push(0);
+    b.extend(in json[0..json.len()]);
+    blake3_hex(in b[0..b.len()])
+}
+
+fn field_text(inout j: Json, in k: Str, in v: Slice[u8]) {
+    key(inout j, in k);
+    string(inout j, in v);
+}
+
+fn range_json(inout j: Json, a: u64, b: u64) {
+    begin_object(inout j);
+    key(inout j, in "start");
+    number(inout j, a);
+    key(inout j, in "end");
+    number(inout j, b);
+    end_object(inout j);
+}
+
+fn origin_text(expanded: bool) -> Str {
+    if expanded {
+        "expanded"
+    } else {
+        "source"
+    }
+}
+
+// An `ExpansionRecord` as serde writes it.
+fn expansion_json(inout j: Json, in t: Table, i: u64) {
+    begin_object(inout j);
+    key(inout j, in "ordinal");
+    number(inout j, at(in t.ex_ordinals.as_slice(), i));
+    field_text(
+        inout j,
+        in "macro",
+        in t.ex_macros.bytes[start(in t.ex_macros, i)..end(in t.ex_macros, i)]
+    );
+    key(inout j, in "invocation");
+    range_json(inout j, at(in t.inv_starts.as_slice(), i), at(in t.inv_ends.as_slice(), i));
+    field_text(
+        inout j,
+        in "host_function",
+        in t.ex_hosts.bytes[start(in t.ex_hosts, i)..end(in t.ex_hosts, i)]
+    );
+    key(inout j, in "generated");
+    begin_array(inout j);
+    for g in cut_start(in t.gen_cut.as_slice(), i)..at(in t.gen_cut.as_slice(), i) {
+        range_json(inout j, at(in t.gen_starts.as_slice(), g), at(in t.gen_ends.as_slice(), g));
+    }
+    end_array(inout j);
+    end_object(inout j);
+}
+
+fn expanded(in t: Table, f: u64) -> bool {
+    match t.fn_expanded.try_get(f) {
+        Option::Some(v) => v == 1,
+        Option::None => false,
+    }
+}
+
+fn host_is(in t: Table, e: u64, f: u64) -> bool {
+    same(
+        in t.ex_hosts.bytes[start(in t.ex_hosts, e)..end(in t.ex_hosts, e)],
+        in t.fn_names.bytes[start(in t.fn_names, f)..end(in t.fn_names, f)]
+    )
+}
+
+// `function_digest` of function `f` with its hosted expansions.
+fn function_digest(in t: Table, f: u64) -> ChunkSeq[u8] eff [Ffi[Blake3]] {
+    let mut j = json_new(false);
+    begin_object(inout j);
+    field_text(inout j, in "source_blake3", in t.source_blake3[0..t.source_blake3.len()]);
+    field_text(inout j, in "expanded_blake3", in t.expanded_blake3[0..t.expanded_blake3.len()]);
+    field_text(
+        inout j,
+        in "function",
+        in t.fn_names.bytes[start(in t.fn_names, f)..end(in t.fn_names, f)]
+    );
+    key(inout j, in "origin");
+    string(inout j, in origin_text(expanded(in t, f)).as_bytes());
+    key(inout j, in "expansions");
+    begin_array(inout j);
+    for e in 0..count(in t.ex_hosts) {
+        if host_is(in t, e, f) {
+            expansion_json(inout j, in t, e);
+        }
+    }
+    end_array(inout j);
+    end_object(inout j);
+    canonical(in j.out)
+}
+
+// `compute_digest`: the table with an empty `digest`.
+fn table_digest(in t: Table) -> ChunkSeq[u8] eff [Ffi[Blake3]] {
+    let mut j = json_new(false);
+    begin_object(inout j);
+    field_text(inout j, in "schema", in t.schema[0..t.schema.len()]);
+    field_text(inout j, in "package", in t.package[0..t.package.len()]);
+    field_text(inout j, in "source_blake3", in t.source_blake3[0..t.source_blake3.len()]);
+    field_text(inout j, in "expanded_blake3", in t.expanded_blake3[0..t.expanded_blake3.len()]);
+    key(inout j, in "expansions");
+    begin_array(inout j);
+    for e in 0..count(in t.ex_hosts) {
+        expansion_json(inout j, in t, e);
+    }
+    end_array(inout j);
+    key(inout j, in "functions");
+    begin_array(inout j);
+    for f in 0..count(in t.fn_names) {
+        begin_object(inout j);
+        field_text(
+            inout j,
+            in "function",
+            in t.fn_names.bytes[start(in t.fn_names, f)..end(in t.fn_names, f)]
+        );
+        key(inout j, in "origin");
+        string(inout j, in origin_text(expanded(in t, f)).as_bytes());
+        key(inout j, in "expansions");
+        begin_array(inout j);
+        for k in cut_start(in t.fn_cut.as_slice(), f)..at(in t.fn_cut.as_slice(), f) {
+            number(inout j, at(in t.fn_exps.as_slice(), k));
+        }
+        end_array(inout j);
+        field_text(
+            inout j,
+            in "digest",
+            in t.fn_digests.bytes[start(in t.fn_digests, f)..end(in t.fn_digests, f)]
+        );
+        end_object(inout j);
+    }
+    end_array(inout j);
+    field_text(inout j, in "digest", in "".as_bytes());
+    end_object(inout j);
+    canonical(in j.out)
+}
+
+fn incomplete(inout err: ChunkSeq[u8], in what: Str) {
+    put_str(inout err, in "macro provenance incomplete: ");
+    put_str(inout err, in what);
+}
+
+fn function_named(inout err: ChunkSeq[u8], in lead: Str, in t: Table, f: u64, in tail: Str) {
+    put_str(inout err, in lead);
+    put_str(inout err, in "function `");
+    err.extend(in t.fn_names.bytes[start(in t.fn_names, f)..end(in t.fn_names, f)]);
+    put_str(inout err, in "` ");
+    put_str(inout err, in tail);
+}
+
+// `ProvenanceTable::verify(None)`: empty, or the error text.
+pub fn verify(in t: Table) -> ChunkSeq[u8] eff [Ffi[Blake3]] {
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if !same_str(in t.schema[0..t.schema.len()], in SCHEMA) {
+        put_str(inout err, in "unsupported macro provenance schema");
+        return err;
+    }
+    let nf = count(in t.fn_names);
+    for f in 0..nf {
+        let a = start(in t.fn_names, f);
+        let b = end(in t.fn_names, f);
+        let mut dup = a == b;
+        for g in 0..f {
+            if !dup
+                && same(
+                    in t.fn_names.bytes[a..b],
+                    in t.fn_names.bytes[start(in t.fn_names, g)..end(in t.fn_names, g)]
+                ) {
+                dup = true;
+            }
+        }
+        if dup {
+            incomplete(inout err, in "duplicate or empty function entry");
+            return err;
+        }
+    }
+    for e in 0..count(in t.ex_hosts) {
+        let ordinal = at(in t.ex_ordinals.as_slice(), e);
+        if ordinal != e || start(in t.ex_macros, e) == end(in t.ex_macros, e) {
+            put_str(inout err, in "macro provenance incomplete: expansion ");
+            put_u64(inout err, e);
+            put_str(inout err, in " record");
+            return err;
+        }
+        let mut host = nf;
+        for f in 0..nf {
+            if host == nf && host_is(in t, e, f) {
+                host = f;
+            }
+        }
+        if host == nf {
+            put_str(inout err, in "macro provenance incomplete: expansion ");
+            put_u64(inout err, e);
+            put_str(inout err, in " names unknown function `");
+            err.extend(in t.ex_hosts.bytes[start(in t.ex_hosts, e)..end(in t.ex_hosts, e)]);
+            put_str(inout err, in "`");
+            return err;
+        }
+        let mut listed = false;
+        for k in cut_start(in t.fn_cut.as_slice(), host)..at(in t.fn_cut.as_slice(), host) {
+            if at(in t.fn_exps.as_slice(), k) == ordinal {
+                listed = true;
+            }
+        }
+        if !expanded(in t, host) || !listed {
+            function_named(
+                inout err,
+                in "macro provenance incomplete: ",
+                in t,
+                host,
+                in "omits expansion "
+            );
+            put_u64(inout err, e);
+            return err;
+        }
+    }
+    for f in 0..nf {
+        // The hosted ordinals, in table order, against the listed ones.
+        let mut hosted: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for e in 0..count(in t.ex_hosts) {
+            if host_is(in t, e, f) {
+                hosted.push(at(in t.ex_ordinals.as_slice(), e));
+            }
+        }
+        let a = cut_start(in t.fn_cut.as_slice(), f);
+        let b = at(in t.fn_cut.as_slice(), f);
+        let mut agree = wrapping_sub(b, a) == hosted.len()
+            && (hosted.len() != 0) == expanded(in t, f);
+        for k in 0..hosted.len() {
+            if agree
+                && at(in hosted.as_slice(), k) != at(in t.fn_exps.as_slice(), wrapping_add(a, k)) {
+                agree = false;
+            }
+        }
+        if !agree {
+            function_named(
+                inout err,
+                in "macro provenance incomplete: ",
+                in t,
+                f,
+                in "expansion list"
+            );
+            return err;
+        }
+        let d = function_digest(in t, f);
+        if !same(
+            in d[0..d.len()],
+            in t.fn_digests.bytes[start(in t.fn_digests, f)..end(in t.fn_digests, f)]
+        ) {
+            function_named(inout err, in "macro provenance mismatch: ", in t, f, in "digest");
+            return err;
+        }
+    }
+    let d = table_digest(in t);
+    if !same(in d[0..d.len()], in t.digest[0..t.digest.len()]) {
+        put_str(inout err, in "macro provenance mismatch: table digest");
+    }
+    err
+}
+
+// ---------------------------------------------------------------------------
+// The gate.
+
+// `name.rsplit_once('.')`, else `("", name)`: the length of the namespace
+// part, and where the last component starts.
+fn split_last(in s: Slice[u8]) -> (u64, u64) {
+    let mut i = s.len();
+    loop {
+        if i == 0 {
+            return (0, 0);
+        }
+        i = wrapping_sub(i, 1);
+        if byte(in s, i) == 46 {
+            return (i, wrapping_add(i, 1));
+        }
+    }
+}
+
+fn ends_with(in s: Slice[u8], in tail: Str) -> bool {
+    let t = tail.as_bytes();
+    if s.len() < t.len() {
+        return false;
+    }
+    let a = wrapping_sub(s.len(), t.len());
+    same(in s[a..s.len()], in t)
+}
+
+// Theorem `i`'s dependency range in `deps`.
+pub struct Theorems {
+    pub names: Strs,
+    pub deps: Strs,
+    pub dep_ends: ChunkSeq[u64],
+}
+
+// The report (`MacroProvenanceReport`): per reported theorem, its expanded
+// dependencies `constants/functions[dep_cut[i - 1]..dep_cut[i]]`, each with
+// macros `macros[macro_cut[d - 1]..macro_cut[d]]`.
+pub struct Gate {
+    pub failed: bool,
+    pub err: ChunkSeq[u8],
+    // Whether the report is present (`Some`).
+    pub present: bool,
+    pub manifest: bool,
+    pub manifest_digest: ChunkSeq[u8],
+    pub source_blake3: ChunkSeq[u8],
+    pub expanded_blake3: ChunkSeq[u8],
+    pub theorems: Strs,
+    pub dep_cut: ChunkSeq[u64],
+    pub constants: Strs,
+    pub functions: Strs,
+    pub macro_cut: ChunkSeq[u64],
+    pub macros: Strs,
+}
+
+fn gate_new() -> Gate {
+    Gate {
+        failed: false,
+        err: ChunkSeq::new[u8](),
+        present: false,
+        manifest: false,
+        manifest_digest: ChunkSeq::new[u8](),
+        source_blake3: ChunkSeq::new[u8](),
+        expanded_blake3: ChunkSeq::new[u8](),
+        theorems: strs_new(),
+        dep_cut: ChunkSeq::new[u64](),
+        constants: strs_new(),
+        functions: strs_new(),
+        macro_cut: ChunkSeq::new[u64](),
+        macros: strs_new()
+    }
+}
+
+fn refuse(inout g: Gate, in why: Str) {
+    g.failed = true;
+    put_str(inout g.err, in why);
+}
+
+// The first expanded function whose digest is `value`, or `count`.
+fn expanded_with(in t: Table, in value: Slice[u8]) -> u64 {
+    let nf = count(in t.fn_names);
+    for f in 0..nf {
+        if expanded(in t, f)
+            && same(
+                in t.fn_digests.bytes[start(in t.fn_digests, f)..end(in t.fn_digests, f)],
+                in value
+            ) {
+            return f;
+        }
+    }
+    nf
+}
+
+// `provenance::lean_owner`: the function among `t`'s that owns the Lean
+// declaration `d`, or `count`.
+fn lean_owner(in t: Table, in d: Slice[u8]) -> u64 {
+    let nf = count(in t.fn_names);
+    let prefix = "$block_".as_bytes();
+    let mut stem: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if d.len() >= prefix.len() && same(in d[0..prefix.len()], in prefix) {
+        // `rest.rsplit_once('_')`, with digits after it.
+        let rest = d[prefix.len()..d.len()];
+        let mut u = rest.len();
+        let mut found = false;
+        loop {
+            if u == 0 {
+                break;
+            }
+            u = wrapping_sub(u, 1);
+            if byte(in rest, u) == 95 {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return nf;
+        }
+        let index = rest[wrapping_add(u, 1)..rest.len()];
+        if index.len() == 0 {
+            return nf;
+        }
+        for k in 0..index.len() {
+            let b = byte(in index, k);
+            if b < 48 || b > 57 {
+                return nf;
+            }
+        }
+        stem.extend(in rest[0..u]);
+    } else {
+        let mut cut = d.len();
+        for k in 0..d.len() {
+            if cut == d.len() && byte(in d, k) == 36 {
+                cut = k;
+            }
+        }
+        stem.extend(in d[0..cut]);
+    }
+    for f in 0..nf {
+        if same(
+            in t.fn_names.bytes[start(in t.fn_names, f)..end(in t.fn_names, f)],
+            in stem[0..stem.len()]
+        ) {
+            return f;
+        }
+    }
+    nf
+}
+
+// `macro_provenance_gate`. `marker_names` are sorted and unique (the
+// caller refused duplicates), `marker_values` beside them.
+pub fn gate(
+    in th: Theorems,
+    in marker_names: Strs,
+    in marker_values: Strs,
+    has_manifest: bool,
+    in t: Table
+) -> Gate eff [Ffi[Blake3]] {
+    let mut g = gate_new();
+    // Module markers: (namespace, value) by marker index; function
+    // markers: their stems, by marker index.
+    let mut module_markers: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut stems = strs_new();
+    let mut stem_values = strs_new();
+    let suffix = MARKER_SUFFIX.as_bytes();
+    for m in 0..count(in marker_names) {
+        let name = marker_names.bytes[start(in marker_names, m)..end(in marker_names, m)];
+        let (_ns, last) = split_last(in name);
+        let is_stem = if ends_with(in name, in MARKER_SUFFIX) {
+            let stem = name[0..wrapping_sub(name.len(), suffix.len())];
+            let (_a, l) = split_last(in stem);
+            l < stem.len()
+        } else {
+            false
+        };
+        if same_str(in name[last..name.len()], in MODULE_MARKER) {
+            module_markers.push(m);
+        } else if is_stem {
+            push(inout stems, in name[0..wrapping_sub(name.len(), suffix.len())]);
+            push(
+                inout stem_values,
+                in marker_values.bytes[start(in marker_values, m)..end(in marker_values, m)]
+            );
+        } else {
+            refuse(inout g, in "malformed macro provenance marker: ");
+            g.err.extend(in name);
+            return g;
+        }
+    }
+    if count(in marker_names) == 0 && !has_manifest {
+        return g;
+    }
+    if module_markers.len() > 1 || (count(in stems) != 0 && module_markers.len() == 0) {
+        refuse(inout g, in "macro provenance markers need exactly one module marker");
+        return g;
+    }
+    // The module marker's namespace and value.
+    let mut namespace: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut module_value: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let has_namespace = module_markers.len() == 1;
+    if has_namespace {
+        let m = at(in module_markers.as_slice(), 0);
+        let name = marker_names.bytes[start(in marker_names, m)..end(in marker_names, m)];
+        let (ns, _l) = split_last(in name);
+        namespace.extend(in name[0..ns]);
+        module_value
+            .extend(in marker_values.bytes[start(in marker_values, m)..end(in marker_values, m)]);
+        for s in 0..count(in stems) {
+            let stem = stems.bytes[start(in stems, s)..end(in stems, s)];
+            let (sn, _l2) = split_last(in stem);
+            if !same(in stem[0..sn], in namespace[0..namespace.len()]) {
+                refuse(inout g, in "macro provenance marker outside the module marker's namespace");
+                return g;
+            }
+        }
+    }
+    if has_manifest {
+        if !has_namespace {
+            refuse(
+                inout g,
+                in "macro provenance manifest supplied but the artifact has no module marker"
+            );
+            return g;
+        }
+        if !same(in module_value[0..module_value.len()], in t.digest[0..t.digest.len()]) {
+            refuse(inout g, in "macro provenance manifest does not match the module marker");
+            return g;
+        }
+        // Stems in name order (`BTreeMap` order), which marker order gives.
+        for s in 0..count(in stems) {
+            let v = stem_values.bytes[start(in stem_values, s)..end(in stem_values, s)];
+            if expanded_with(in t, in v) == count(in t.fn_names) {
+                refuse(inout g, in "macro provenance marker for ");
+                g.err.extend(in stems.bytes[start(in stems, s)..end(in stems, s)]);
+                put_str(inout g.err, in " is not in the manifest");
+                return g;
+            }
+        }
+    }
+    g.present = true;
+    g.manifest = has_manifest;
+    if has_manifest {
+        g.manifest_digest.extend(in t.digest[0..t.digest.len()]);
+        g.source_blake3.extend(in t.source_blake3[0..t.source_blake3.len()]);
+        g.expanded_blake3.extend(in t.expanded_blake3[0..t.expanded_blake3.len()]);
+    }
+    for i in 0..count(in th.names) {
+        let name = th.names.bytes[start(in th.names, i)..end(in th.names, i)];
+        // The expanded dependencies: (dependency index, stem index).
+        let mut found_deps: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut found_stems: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for d in cut_start(in th.dep_ends.as_slice(), i)..at(in th.dep_ends.as_slice(), i) {
+            let dep = th.deps.bytes[start(in th.deps, d)..end(in th.deps, d)];
+            if ends_with(in dep, in MARKER_SUFFIX) {
+                continue;
+            }
+            let mut stem = count(in stems);
+            for s in 0..count(in stems) {
+                if stem == count(in stems)
+                    && same(in stems.bytes[start(in stems, s)..end(in stems, s)], in dep) {
+                    stem = s;
+                }
+            }
+            if stem != count(in stems) {
+                found_deps.push(d);
+                found_stems.push(stem);
+            } else if has_manifest && has_namespace {
+                let (sp, last) = split_last(in dep);
+                if same(in dep[0..sp], in namespace[0..namespace.len()]) {
+                    let owner = lean_owner(in t, in dep[last..dep.len()]);
+                    if owner != count(in t.fn_names) && expanded(in t, owner) {
+                        refuse(inout g, in "theorem ");
+                        g.err.extend(in name);
+                        put_str(inout g.err, in " depends on ");
+                        g.err.extend(in dep);
+                        put_str(
+                            inout g.err,
+                            in ", expanded code whose provenance marker is missing"
+                        );
+                        return g;
+                    }
+                }
+            }
+        }
+        if found_deps.len() == 0 {
+            continue;
+        }
+        if !has_manifest {
+            refuse(inout g, in "theorem ");
+            g.err.extend(in name);
+            put_str(inout g.err, in " depends on macro-expanded definitions (");
+            for k in 0..found_deps.len() {
+                if k > 0 {
+                    put_str(inout g.err, in ", ");
+                }
+                let d = at(in found_deps.as_slice(), k);
+                g.err.extend(in th.deps.bytes[start(in th.deps, d)..end(in th.deps, d)]);
+            }
+            put_str(inout g.err, in ") but no --macro-provenance manifest was supplied");
+            return g;
+        }
+        push(inout g.theorems, in name);
+        for k in 0..found_deps.len() {
+            let d = at(in found_deps.as_slice(), k);
+            let constant = th.deps.bytes[start(in th.deps, d)..end(in th.deps, d)];
+            let s = at(in found_stems.as_slice(), k);
+            let f = expanded_with(
+                in t,
+                in stem_values.bytes[start(in stem_values, s)..end(in stem_values, s)]
+            );
+            if f == count(in t.fn_names) {
+                refuse(inout g, in "no expanded function record for ");
+                g.err.extend(in constant);
+                return g;
+            }
+            let mut ms = strs_new();
+            for e in cut_start(in t.fn_cut.as_slice(), f)..at(in t.fn_cut.as_slice(), f) {
+                let x = at(in t.fn_exps.as_slice(), e);
+                if x >= count(in t.ex_macros) {
+                    refuse(inout g, in "missing expansion ");
+                    put_u64(inout g.err, x);
+                    put_str(inout g.err, in " for ");
+                    g.err.extend(in constant);
+                    return g;
+                }
+                push(
+                    inout ms,
+                    in t.ex_macros.bytes[start(in t.ex_macros, x)..end(in t.ex_macros, x)]
+                );
+            }
+            let set = set_of(in ms);
+            if count(in set) == 0 {
+                refuse(inout g, in "expanded dependency ");
+                g.err.extend(in constant);
+                put_str(inout g.err, in " names no macro");
+                return g;
+            }
+            push(inout g.constants, in constant);
+            push(
+                inout g.functions,
+                in t.fn_names.bytes[start(in t.fn_names, f)..end(in t.fn_names, f)]
+            );
+            for m in 0..count(in set) {
+                push(inout g.macros, in set.bytes[start(in set, m)..end(in set, m)]);
+            }
+            g.macro_cut.push(count(in g.macros));
+        }
+        g.dep_cut.push(count(in g.constants));
+    }
+    g
+}
+
+fn optional(inout j: Json, in k: Str, present: bool, in v: ChunkSeq[u8]) {
+    key(inout j, in k);
+    if present {
+        string(inout j, in v[0..v.len()]);
+    } else {
+        null(inout j);
+    }
+}
+
+// The report as serde writes `MacroProvenanceReport`.
+pub fn gate_json(inout j: Json, in g: Gate) {
+    begin_object(inout j);
+    optional(inout j, in "manifest_digest", g.manifest, in g.manifest_digest);
+    optional(inout j, in "source_blake3", g.manifest, in g.source_blake3);
+    optional(inout j, in "expanded_blake3", g.manifest, in g.expanded_blake3);
+    key(inout j, in "theorems");
+    begin_array(inout j);
+    for i in 0..count(in g.theorems) {
+        begin_object(inout j);
+        field_text(
+            inout j,
+            in "theorem",
+            in g.theorems.bytes[start(in g.theorems, i)..end(in g.theorems, i)]
+        );
+        key(inout j, in "expanded_dependencies");
+        begin_array(inout j);
+        for d in cut_start(in g.dep_cut.as_slice(), i)..at(in g.dep_cut.as_slice(), i) {
+            begin_object(inout j);
+            field_text(
+                inout j,
+                in "constant",
+                in g.constants.bytes[start(in g.constants, d)..end(in g.constants, d)]
+            );
+            field_text(
+                inout j,
+                in "function",
+                in g.functions.bytes[start(in g.functions, d)..end(in g.functions, d)]
+            );
+            key(inout j, in "macros");
+            begin_array(inout j);
+            for m in cut_start(in g.macro_cut.as_slice(), d)..at(in g.macro_cut.as_slice(), d) {
+                string(inout j, in g.macros.bytes[start(in g.macros, m)..end(in g.macros, m)]);
+            }
+            end_array(inout j);
+            end_object(inout j);
+        }
+        end_array(inout j);
+        end_object(inout j);
+    }
+    end_array(inout j);
+    end_object(inout j);
+}

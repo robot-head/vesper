@@ -2692,6 +2692,10 @@ const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
         "Stage 1 front end, checked as one unit; bootstrap/stage1.lock (tests/stage2_seed_runner.rs)",
     ),
     (
+        "vesper-proof-audit",
+        "`vesper proof-audit` as a native executable beside Rust's (tests/self_host_proof_audit.rs); it hashes with C BLAKE3 (@vesper-std/hash-sys) and runs Lean, neither of which a Wasm entry has",
+    ),
+    (
         "vesper-stage2",
         "Stage 2 itself: stage2.wasm == stage3.wasm",
     ),

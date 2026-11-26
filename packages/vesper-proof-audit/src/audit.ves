@@ -1,0 +1,1401 @@
+// `audit` of src/proof_commands.rs and what it runs: the Lean toolchain
+// probe, the private staging directory, the artifact snapshot, the child
+// process with a deadline and capture limit, the auditor's record, the
+// fingerprints of every imported module, the macro provenance gate and the
+// report.
+use @vesper-std/fs::{
+    IoError,
+    already_exists,
+    canonicalize_path,
+    create_dir,
+    create_dir_all_path,
+    create_dir_mode,
+    kind_dir,
+    kind_file,
+    kind_symlink,
+    metadata_path,
+    read_path,
+    remove_dir_all,
+    write_path
+};
+use @vesper-std/fs::walk::{
+    Entries,
+    entry_count,
+    entry_end,
+    entry_kind,
+    entry_start,
+    list_dir_path
+};
+use @vesper-std/env::{
+    os,
+    os_windows,
+    var,
+    var_bytes
+};
+use @vesper-std/process::{
+    ExitStatus,
+    ProcChild,
+    ProcCommand,
+    arg_bytes,
+    capture,
+    capture_limit,
+    command_path,
+    cwd,
+    env,
+    env_clear,
+    kill_tree,
+    process_group,
+    release,
+    spawn,
+    stderr,
+    stderr_stream,
+    stdio,
+    stdout,
+    stdout_stream,
+    success,
+    truncated,
+    wait_timeout
+};
+use self::auditor::AUDITOR;
+use self::json::{
+    Json,
+    begin_array,
+    begin_object,
+    end_array,
+    end_object,
+    field_bool,
+    field_string,
+    field_u64,
+    json_new,
+    key,
+    put_string,
+    put_u64,
+    string
+};
+use self::provenance::{
+    Gate,
+    Theorems,
+    blake3_hex,
+    gate,
+    gate_json,
+    verify
+};
+use self::reader::{
+    Raw,
+    Rd,
+    Table,
+    raw_audit,
+    rd_parse,
+    table
+};
+use self::strs::{
+    Strs,
+    byte,
+    count,
+    end,
+    equal,
+    order,
+    push,
+    put_str,
+    same,
+    same_str,
+    set_of,
+    slashes,
+    start,
+    strs_new
+};
+use self::text::{
+    holds,
+    line_at,
+    lossy,
+    put_io,
+    put_status,
+    put_utf8_error,
+    starts_at,
+    take_chars,
+    trim,
+    utf8_valid
+};
+
+pub const MARKER: Str = "VESPER_PROOF_AUDIT_V1:";
+const MARKER_LEN: u64 = 22;
+const MAX_INPUT_BYTES: u64 = 134217728;
+const MAX_FILES: u64 = 4096;
+const MAX_CAPTURE: u64 = 8388608;
+const MAX_PART: u64 = 2147483648;
+const MAX_IMPORTS: u64 = 4294967296;
+const MAX_MANIFEST: u64 = 8388608;
+
+// What the audit was asked: `Options` of src/proof_commands.rs.
+// `theorems` and `allowed` are sets (sorted, unique).
+pub struct Options {
+    pub module: ChunkSeq[u8],
+    pub root: ChunkSeq[u8],
+    pub theorems: Strs,
+    pub allowed: Strs,
+    pub lean: ChunkSeq[u8],
+    pub has_lean: bool,
+    // Seconds; 0 for the default.
+    pub timeout: u64,
+    pub manifest: ChunkSeq[u8],
+    pub has_manifest: bool,
+}
+
+// The audit so far: the first error stops it.
+pub struct Au {
+    pub failed: bool,
+    pub err: ChunkSeq[u8],
+}
+
+fn au_new() -> Au {
+    Au {
+        failed: false,
+        err: ChunkSeq::new[u8]()
+    }
+}
+
+fn refuse(inout a: Au, in why: Str) {
+    if !a.failed {
+        a.failed = true;
+        put_str(inout a.err, in why);
+    }
+}
+
+fn refuse_io(inout a: Au, in lead: Str, e: IoError) {
+    if !a.failed {
+        a.failed = true;
+        put_str(inout a.err, in lead);
+        put_io(inout a.err, e);
+    }
+}
+
+fn refuse_bytes(inout a: Au, in why: Slice[u8]) {
+    if !a.failed {
+        a.failed = true;
+        a.err.extend(in why);
+    }
+}
+
+fn no_error() -> IoError {
+    IoError {
+        kind: 0,
+        os: 0
+    }
+}
+
+fn seq(in b: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.extend(in b);
+    out
+}
+
+fn text_of(in s: Str) -> ChunkSeq[u8] {
+    seq(in s.as_bytes())
+}
+
+// ---------------------------------------------------------------------------
+// Paths, as `Path` treats them on this OS.
+
+fn windows() -> bool {
+    os() == os_windows()
+}
+
+fn is_sep(b: u8) -> bool {
+    b == 47 || (windows() && b == 92)
+}
+
+fn sep() -> u8 {
+    if windows() {
+        92
+    } else {
+        47
+    }
+}
+
+// `base.join(part)` for a relative `part`.
+pub fn join(in base: Slice[u8], in part: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out = seq(in base);
+    if base.len() != 0 && !is_sep(byte(in base, wrapping_sub(base.len(), 1))) {
+        out.push(sep());
+    }
+    out.extend(in part);
+    out
+}
+
+fn join_str(in base: Slice[u8], in part: Str) -> ChunkSeq[u8] {
+    join(in base, in part.as_bytes())
+}
+
+// `Path::starts_with` for canonical paths: `base` is `p` or a whole-component
+// prefix of it. Returns where the relative rest starts, or NONE.
+fn under(in p: Slice[u8], in base: Slice[u8]) -> u64 {
+    if p.len() < base.len() || !same(in p[0..base.len()], in base) {
+        return 18446744073709551615;
+    }
+    if p.len() == base.len() {
+        return p.len();
+    }
+    if base.len() != 0 && is_sep(byte(in base, wrapping_sub(base.len(), 1))) {
+        return base.len();
+    }
+    if is_sep(byte(in p, base.len())) {
+        return wrapping_add(base.len(), 1);
+    }
+    18446744073709551615
+}
+
+// The file name of `p`: what follows its last separator.
+fn name_start(in p: Slice[u8]) -> u64 {
+    let mut i = p.len();
+    loop {
+        if i == 0 {
+            return 0;
+        }
+        if is_sep(byte(in p, wrapping_sub(i, 1))) {
+            return i;
+        }
+        i = wrapping_sub(i, 1);
+    }
+}
+
+// `p.with_extension(ext)`.
+fn with_extension(in p: Slice[u8], in ext: Str) -> ChunkSeq[u8] {
+    let n = name_start(in p);
+    // The extension starts at the last `.` of the name that is not its
+    // first byte.
+    let mut cut = p.len();
+    let mut i = p.len();
+    loop {
+        if i <= wrapping_add(n, 1) {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        if byte(in p, i) == 46 {
+            cut = i;
+            break;
+        }
+    }
+    let mut out = seq(in p[0..cut]);
+    out.push(46);
+    put_str(inout out, in ext);
+    out
+}
+
+fn ends_with(in s: Slice[u8], in tail: Str) -> bool {
+    let t = tail.as_bytes();
+    s.len() >= t.len() && same(in s[wrapping_sub(s.len(), t.len())..s.len()], in t)
+}
+
+fn kind_of(in p: Slice[u8]) -> u32 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        metadata_path(in p).kind
+    } with {
+        return v => v,
+        raise(_e, _k) => 0,
+    }
+}
+
+fn is_file(in p: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    kind_of(in p) == kind_file()
+}
+
+fn canonical(in p: Slice[u8], inout e: IoError) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+    // A handler clause sees copies of the locals it names, so the error
+    // comes back in the handled value.
+    let (out, err) = handle Fail[IoError] in {
+        let c = canonicalize_path(in p);
+        (c, no_error())
+    } with {
+        return v => v,
+        raise(x, _k) => (ChunkSeq::new[u8](), x),
+    };
+    e.kind = err.kind;
+    e.os = err.os;
+    out
+}
+
+fn try_read(in p: Slice[u8]) -> (ChunkSeq[u8], IoError) eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        let d = read_path(in p);
+        (d, no_error())
+    } with {
+        return v => v,
+        raise(x, _k) => (ChunkSeq::new[u8](), x),
+    }
+}
+
+fn try_list(in p: Slice[u8]) -> (Entries, IoError) eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        let l = list_dir_path(in p);
+        (l, no_error())
+    } with {
+        return v => v,
+        raise(x, _k) => (
+            Entries {
+                bytes: ChunkSeq::new[u8](),
+                ends: ChunkSeq::new[u64](),
+                kinds: ChunkSeq::new[u32]()
+            },
+            x
+        ),
+    }
+}
+
+fn try_size(in p: Slice[u8]) -> (u64, IoError) eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        let m = metadata_path(in p);
+        (m.size, no_error())
+    } with {
+        return v => v,
+        raise(x, _k) => (0, x),
+    }
+}
+
+// Create directory `p`, private (0700) on Unix when `private`.
+fn try_mkdir(in p: Slice[u8], private: bool) -> IoError eff [Ffi[StdFs]] {
+    let t = utf8_string(in p);
+    handle Fail[IoError] in {
+        if private && !windows() {
+            create_dir_mode(in t.as_str(), 448);
+        } else {
+            create_dir(in t.as_str());
+        }
+        no_error()
+    } with {
+        return v => v,
+        raise(x, _k) => x,
+    }
+}
+
+// Write `data` to `p`, first creating `p[..parent]` when `parent` is not 0.
+fn try_write(in p: Slice[u8], in data: Slice[u8], parent: u64) -> IoError eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        if parent != 0 {
+            create_dir_all_path(in p[0..parent]);
+        }
+        write_path(in p, in data);
+        no_error()
+    } with {
+        return v => v,
+        raise(x, _k) => x,
+    }
+}
+
+fn utf8_string(in b: Slice[u8]) -> String {
+    match String::from_utf8(in b) {
+        Option::Some(s) => s,
+        Option::None => String::new(),
+    }
+}
+
+// `env::temp_dir()`.
+fn temp_dir() -> ChunkSeq[u8] eff [Ffi[StdEnv]] {
+    if windows() {
+        // `GetTempPath2W`: TMP, TEMP, USERPROFILE, then the Windows
+        // directory, with a final separator.
+        let mut dir: ChunkSeq[u8] = match var_bytes(in "TMP") {
+            Option::Some(v) => v,
+            Option::None => match var_bytes(in "TEMP") {
+                Option::Some(v) => v,
+                Option::None => match var_bytes(in "USERPROFILE") {
+                    Option::Some(v) => v,
+                    Option::None => text_of(in "C:\\Windows"),
+                },
+            },
+        };
+        if dir.len() == 0 || byte(in dir.as_slice(), wrapping_sub(dir.len(), 1)) != 92 {
+            dir.push(92);
+        }
+        return dir;
+    }
+    match var_bytes(in "TMPDIR") {
+        Option::Some(v) => v,
+        Option::None => text_of(in "/tmp"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Running Lean: `execute`.
+
+pub struct Ran {
+    pub status: ExitStatus,
+    pub stdout: ChunkSeq[u8],
+}
+
+fn has_panic(in out: Slice[u8], in err: Slice[u8]) -> bool {
+    let mut at: u64 = 0;
+    loop {
+        if at >= out.len() {
+            break;
+        }
+        let (e, next) = line_at(in out, at);
+        if !starts_at(in out, at, in MARKER) && holds(in out, at, e, in "PANIC") {
+            return true;
+        }
+        at = next;
+    }
+    holds(in err, 0, err.len(), in "PANIC")
+}
+
+fn spawn_failed(inout a: Au, e: IoError) {
+    refuse_io(inout a, in "cannot start Lean: ", e);
+}
+
+// Run `c` with stdout and stderr captured (8 MiB each) for at most
+// `seconds`; a failed or panicking run is an error.
+pub fn execute(inout a: Au, sink c: ProcCommand, seconds: u64) -> Ran eff [Ffi[StdProcess]] {
+    let mut c = c;
+    stdio(inout c, stdout_stream(), capture());
+    stdio(inout c, stderr_stream(), capture());
+    capture_limit(inout c, MAX_CAPTURE);
+    process_group(inout c);
+    let mut ran = Ran {
+        status: ExitStatus {
+            code: 0,
+            signal: 0,
+            exited: true
+        },
+        stdout: ChunkSeq::new[u8]()
+    };
+    let mut ch = match spawn(c) {
+        Result::Ok(ch) => ch,
+        Result::Err(e) => {
+            spawn_failed(inout a, e);
+            return ran;
+        },
+    };
+    let mut ended = false;
+    match wait_timeout(inout ch, wrapping_mul(seconds, 1000)) {
+        Result::Ok(Option::Some(s)) => {
+            ran.status = s;
+            ended = true;
+        },
+        Result::Ok(Option::None) => {
+            let _ = kill_tree(inout ch);
+            refuse(inout a, in "Lean audit timed out");
+        },
+        Result::Err(e) => {
+            let _ = kill_tree(inout ch);
+            refuse_io(inout a, in "waiting for Lean: ", e);
+        },
+    }
+    let out = stdout(in ch);
+    let err = stderr(in ch);
+    let cut = truncated(in ch);
+    release(ch);
+    if !ended {
+        return ran;
+    }
+    if cut {
+        refuse(inout a, in "Lean output exceeded the capture limit");
+        return ran;
+    }
+    if !success(ran.status) || has_panic(in out.as_slice(), in err.as_slice()) {
+        let mut details = lossy(in out.as_slice());
+        details.push(10);
+        let e = lossy(in err.as_slice());
+        details.extend(in e.as_slice());
+        let mut why = text_of(in "Lean audit failed (");
+        put_status(inout why, ran.status);
+        put_str(inout why, in "): ");
+        let shown = take_chars(in details.as_slice(), 4000);
+        why.extend(in shown.as_slice());
+        refuse_bytes(inout a, in why.as_slice());
+        return ran;
+    }
+    ran.stdout = out;
+    ran
+}
+
+// The UTF-8 text of `b`, or `String::from_utf8`'s error.
+fn utf8_or_fail(inout a: Au, in b: Slice[u8]) -> bool {
+    if utf8_valid(in b) {
+        return true;
+    }
+    let mut why: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_utf8_error(inout why, in b);
+    refuse_bytes(inout a, in why.as_slice());
+    false
+}
+
+// `lean_toolchain`: the canonical prefix, the binary and its version line.
+pub struct Toolchain {
+    pub prefix: ChunkSeq[u8],
+    pub binary: ChunkSeq[u8],
+    pub version: ChunkSeq[u8],
+}
+
+pub fn lean_toolchain(inout a: Au, in launcher: Slice[u8])
+    -> Toolchain eff [Ffi[StdProcess], Ffi[StdFs]] {
+    let mut t = Toolchain {
+        prefix: ChunkSeq::new[u8](),
+        binary: ChunkSeq::new[u8](),
+        version: ChunkSeq::new[u8]()
+    };
+    let mut c = command_path(in launcher);
+    arg_bytes(inout c, in "--print-prefix".as_bytes());
+    let ran = execute(inout a, c, 30);
+    if a.failed || !utf8_or_fail(inout a, in ran.stdout.as_slice()) {
+        return t;
+    }
+    let printed = trim(in ran.stdout.as_slice());
+    let mut e = no_error();
+    t.prefix = canonical(in printed.as_slice(), inout e);
+    if e.kind != 0 {
+        refuse_io(inout a, in "Lean toolchain prefix: ", e);
+        return t;
+    }
+    let bin = join_str(in t.prefix.as_slice(), in "bin");
+    t.binary = if windows() {
+        join_str(in bin.as_slice(), in "lean.exe")
+    } else {
+        join_str(in bin.as_slice(), in "lean")
+    };
+    let mut v = command_path(in t.binary.as_slice());
+    arg_bytes(inout v, in "--version".as_bytes());
+    let version = execute(inout a, v, 10);
+    if a.failed || !utf8_or_fail(inout a, in version.stdout.as_slice()) {
+        return t;
+    }
+    t.version = trim(in version.stdout.as_slice());
+    if !holds(in t.version.as_slice(), 0, t.version.len(), in "version 4.35.0,") {
+        let mut why = text_of(in "proof-audit requires Lean 4.35.0; found ");
+        why.extend(in t.version.as_slice());
+        refuse_bytes(inout a, in why.as_slice());
+    }
+    t
+}
+
+// ---------------------------------------------------------------------------
+// The staging directory: `Stage::new`.
+
+pub fn stage_new(inout a: Au, pid: u64) -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[StdEnv]] {
+    let tmp = temp_dir();
+    for n in 0..64 {
+        let mut name = text_of(in "vesper-proof-audit-");
+        put_u64(inout name, pid);
+        name.push(45);
+        put_u64(inout name, n);
+        let path = join(in tmp.as_slice(), in name.as_slice());
+        let e = try_mkdir(in path.as_slice(), true);
+        if e.kind == 0 {
+            return path;
+        }
+        if e.kind != already_exists() {
+            refuse_io(inout a, in "private audit staging directory: ", e);
+            return path;
+        }
+    }
+    refuse(inout a, in "cannot allocate a private audit staging directory");
+    ChunkSeq::new[u8]()
+}
+
+pub fn stage_drop(in path: Slice[u8]) eff [Ffi[StdFs]] {
+    if path.len() == 0 {
+        return;
+    }
+    let p = utf8_string(in path);
+    handle Fail[IoError] in {
+        remove_dir_all(in p.as_str());
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fingerprints: `FileDigest` lists.
+
+pub struct Files {
+    pub paths: Strs,
+    pub bytes: ChunkSeq[u64],
+    pub digests: Strs,
+}
+
+pub fn files_new() -> Files {
+    Files {
+        paths: strs_new(),
+        bytes: ChunkSeq::new[u64](),
+        digests: strs_new()
+    }
+}
+
+fn at64(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// `files` sorted by path (stable).
+fn sorted(in f: Files) -> Files {
+    let idx = order(in f.paths);
+    let mut out = files_new();
+    for k in 0..idx.len() {
+        let i = at64(in idx.as_slice(), k);
+        push(inout out.paths, in f.paths.bytes[start(in f.paths, i)..end(in f.paths, i)]);
+        out.bytes.push(at64(in f.bytes.as_slice(), i));
+        push(inout out.digests, in f.digests.bytes[start(in f.digests, i)..end(in f.digests, i)]);
+    }
+    out
+}
+
+pub fn files_json(inout j: Json, in f: Files) {
+    begin_array(inout j);
+    for i in 0..count(in f.paths) {
+        begin_object(inout j);
+        field_string(
+            inout j,
+            in "path",
+            in f.paths.bytes[start(in f.paths, i)..end(in f.paths, i)]
+        );
+        field_u64(inout j, in "bytes", at64(in f.bytes.as_slice(), i));
+        field_string(
+            inout j,
+            in "blake3",
+            in f.digests.bytes[start(in f.digests, i)..end(in f.digests, i)]
+        );
+        end_object(inout j);
+    }
+    end_array(inout j);
+}
+
+fn artifact_file(in name: Slice[u8]) -> bool {
+    ends_with(in name, in ".olean")
+        || ends_with(in name, in ".olean.server")
+        || ends_with(in name, in ".olean.private")
+        || ends_with(in name, in ".ir")
+}
+
+// `copy_artifacts`: every artifact file under `root` copied to `output`,
+// fingerprinted.
+pub fn copy_artifacts(inout a: Au, in root: Slice[u8], in output: Slice[u8])
+    -> Files eff [Ffi[StdFs], Ffi[Blake3]] {
+    let mut files = files_new();
+    // The pending directories, a stack: paths and depths.
+    let mut pending = strs_new();
+    let mut depths: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    push(inout pending, in root);
+    depths.push(0);
+    let mut total: u64 = 0;
+    let mut entries: u64 = 0;
+    loop {
+        let n = count(in pending);
+        if n == 0 {
+            break;
+        }
+        let last = wrapping_sub(n, 1);
+        let dir = seq(in pending.bytes[start(in pending, last)..end(in pending, last)]);
+        let depth = at64(in depths.as_slice(), last);
+        pending.bytes.truncate(start(in pending, last));
+        pending.ends.truncate(last);
+        depths.truncate(last);
+        if depth > 64 {
+            refuse(inout a, in "artifact directory exceeds the depth limit");
+            return files;
+        }
+        let (listed, e) = try_list(in dir.as_slice());
+        if e.kind != 0 {
+            refuse_io(inout a, in "", e);
+            return files;
+        }
+        for i in 0..entry_count(in listed) {
+            entries = wrapping_add(entries, 1);
+            if entries > wrapping_mul(MAX_FILES, 4) {
+                refuse(inout a, in "artifact directory exceeds the entry limit");
+                return files;
+            }
+            let name = listed.bytes[entry_start(in listed, i)..entry_end(in listed, i)];
+            let path = join(in dir.as_slice(), in name);
+            let kind = entry_kind(in listed, i);
+            if kind == kind_symlink() {
+                refuse(inout a, in "symlinks are not allowed in the artifact directory");
+                return files;
+            }
+            if kind == kind_dir() {
+                push(inout pending, in path.as_slice());
+                depths.push(wrapping_add(depth, 1));
+            } else if kind == kind_file() && artifact_file(in name) {
+                if count(in files.paths) == MAX_FILES {
+                    refuse(inout a, in "too many artifact files");
+                    return files;
+                }
+                let (data, fe) = try_read(in path.as_slice());
+                if fe.kind != 0 {
+                    refuse_io(inout a, in "", fe);
+                    return files;
+                }
+                total = wrapping_add(total, data.len());
+                if total > MAX_INPUT_BYTES {
+                    refuse(inout a, in "artifact snapshot exceeds 128 MiB");
+                    return files;
+                }
+                let rel_at = under(in path.as_slice(), in root);
+                let relative = path[rel_at..path.len()];
+                let dest = join(in output, in relative);
+                let parent = name_start(in dest.as_slice());
+                let cut = if parent > 1 {
+                    wrapping_sub(parent, 1)
+                } else {
+                    0
+                };
+                let we = try_write(in dest.as_slice(), in data.as_slice(), cut);
+                if we.kind != 0 {
+                    refuse_io(inout a, in "", we);
+                    return files;
+                }
+                if !utf8_valid(in relative) {
+                    refuse(inout a, in "artifact paths must be UTF-8");
+                    return files;
+                }
+                let shown = slashes(in relative);
+                push(inout files.paths, in shown.as_slice());
+                files.bytes.push(data.len());
+                let d = blake3_hex(in data.as_slice());
+                push(inout files.digests, in d.as_slice());
+            }
+        }
+    }
+    sorted(in files)
+}
+
+// `digest_file`: the size and BLAKE3 of `path`, recorded as `relative`.
+fn digest_file(inout a: Au, in path: Slice[u8], in relative: Slice[u8], inout f: Files)
+    -> u64 eff [Ffi[StdFs], Ffi[Blake3]] {
+    let (size, me) = try_size(in path);
+    let (data, e) = if me.kind != 0 {
+        (ChunkSeq::new[u8](), me)
+    } else if size > MAX_PART {
+        refuse(inout a, in "an imported artifact exceeds the fingerprinting size limit");
+        return 0;
+    } else {
+        try_read(in path)
+    };
+    if e.kind != 0 {
+        let mut why = lossy(in path);
+        put_str(inout why, in ": ");
+        put_io(inout why, e);
+        refuse_bytes(inout a, in why.as_slice());
+        return 0;
+    }
+    if data.len() > MAX_PART {
+        refuse(inout a, in "an imported artifact grew beyond the fingerprinting limit");
+        return 0;
+    }
+    if !utf8_valid(in relative) {
+        refuse(inout a, in "artifact paths must be UTF-8");
+        return 0;
+    }
+    let shown = slashes(in relative);
+    push(inout f.paths, in shown.as_slice());
+    f.bytes.push(data.len());
+    let d = blake3_hex(in data.as_slice());
+    push(inout f.digests, in d.as_slice());
+    data.len()
+}
+
+// ---------------------------------------------------------------------------
+// The audit.
+
+// What `run` prints: the report and the facts its text form shows.
+pub struct Report {
+    pub accepted: bool,
+    pub version: ChunkSeq[u8],
+    pub checked_constants: u64,
+    pub th_names: Strs,
+    pub axioms: Strs,
+    pub ax_ends: ChunkSeq[u64],
+    pub forbidden: Strs,
+    // The pretty JSON report.
+    pub json: ChunkSeq[u8],
+}
+
+fn report_new() -> Report {
+    Report {
+        accepted: false,
+        version: ChunkSeq::new[u8](),
+        checked_constants: 0,
+        th_names: strs_new(),
+        axioms: strs_new(),
+        ax_ends: ChunkSeq::new[u64](),
+        forbidden: strs_new(),
+        json: ChunkSeq::new[u8]()
+    }
+}
+
+// `forbidden_axiom`.
+pub fn forbidden_axiom(in name: Slice[u8]) -> bool {
+    if same_str(in name, in "sorryAx")
+        || same_str(in name, in "Lean.ofReduceBool")
+        || same_str(in name, in "Lean.trustCompiler") {
+        return true;
+    }
+    let mut part: u64 = 0;
+    for i in 0..wrapping_add(name.len(), 1) {
+        if i == name.len() || byte(in name, i) == 46 {
+            if same_str(in name[part..i], in "_native") {
+                return true;
+            }
+            part = wrapping_add(i, 1);
+        }
+    }
+    false
+}
+
+fn strings_json(inout j: Json, in s: Strs) {
+    begin_array(inout j);
+    for i in 0..count(in s) {
+        string(inout j, in s.bytes[start(in s, i)..end(in s, i)]);
+    }
+    end_array(inout j);
+}
+
+// The request the auditor reads: compact, keys sorted (a `json!` map).
+fn request(in o: Options, in snapshot: Slice[u8], in prefix: Slice[u8]) -> ChunkSeq[u8] {
+    let mut j = json_new(false);
+    begin_object(inout j);
+    key(inout j, in "expected_types");
+    begin_array(inout j);
+    end_array(inout j);
+    field_string(inout j, in "module", in o.module.as_slice());
+    field_string(inout j, in "root", in snapshot);
+    field_u64(inout j, in "schema_version", 1);
+    key(inout j, in "theorems");
+    strings_json(inout j, in o.theorems);
+    field_string(inout j, in "toolchain_prefix", in prefix);
+    end_object(inout j);
+    j.out
+}
+
+// `read_manifest`.
+fn read_manifest(inout a: Au, in path: Slice[u8]) -> Table eff [Ffi[StdFs], Ffi[Blake3]] {
+    let (data, e) = try_read(in path);
+    let mut empty = rd_parse(in "{}".as_bytes());
+    empty.failed = true;
+    if e.kind != 0 {
+        // Opening succeeds on a directory; reading it fails.
+        if kind_of(in path) == kind_dir() {
+            refuse_io(inout a, in "macro provenance manifest: ", e);
+        } else {
+            let mut why = text_of(in "macro provenance manifest ");
+            let shown = lossy(in path);
+            why.extend(in shown.as_slice());
+            put_str(inout why, in ": ");
+            put_io(inout why, e);
+            refuse_bytes(inout a, in why.as_slice());
+        }
+        return table(inout empty);
+    }
+    let cut = if data.len() > wrapping_add(MAX_MANIFEST, 1) {
+        wrapping_add(MAX_MANIFEST, 1)
+    } else {
+        data.len()
+    };
+    let head = data[0..cut];
+    if !utf8_valid(in head) {
+        // `read_to_string`: a cut-off last character is invalid too.
+        refuse(inout a, in "macro provenance manifest: stream did not contain valid UTF-8");
+        return table(inout empty);
+    }
+    if head.len() > MAX_MANIFEST {
+        refuse(inout a, in "macro provenance manifest exceeds 8 MiB");
+        return table(inout empty);
+    }
+    let mut r = rd_parse(in head);
+    let t = table(inout r);
+    if r.failed {
+        let mut why = text_of(in "invalid macro provenance manifest: ");
+        why.extend(in r.err.as_slice());
+        refuse_bytes(inout a, in why.as_slice());
+        return t;
+    }
+    let v = verify(in t);
+    if v.len() != 0 {
+        refuse_bytes(inout a, in v.as_slice());
+    }
+    t
+}
+
+fn file_parts(
+    inout a: Au,
+    in primary: Slice[u8],
+    in base: Slice[u8],
+    inout f: Files,
+    inout total: u64
+) eff [Ffi[StdFs], Ffi[Blake3]] {
+    let mut candidates = strs_new();
+    let mut s = seq(in primary);
+    if is_file(in s.as_slice()) {
+        push(inout candidates, in s.as_slice());
+    }
+    put_str(inout s, in ".server");
+    if is_file(in s.as_slice()) {
+        push(inout candidates, in s.as_slice());
+    }
+    let mut p = seq(in primary);
+    put_str(inout p, in ".private");
+    if is_file(in p.as_slice()) {
+        push(inout candidates, in p.as_slice());
+    }
+    let ir = with_extension(in primary, in "ir");
+    if is_file(in ir.as_slice()) {
+        push(inout candidates, in ir.as_slice());
+    }
+    for c in 0..count(in candidates) {
+        let mut e = no_error();
+        let part = canonical(
+            in candidates.bytes[start(in candidates, c)..end(in candidates, c)],
+            inout e
+        );
+        if e.kind != 0 {
+            refuse_io(inout a, in "", e);
+            return;
+        }
+        let rel = under(in part.as_slice(), in base);
+        if rel > part.len() {
+            refuse(inout a, in "an imported artifact part escaped its root");
+            return;
+        }
+        let n = digest_file(inout a, in part.as_slice(), in part[rel..part.len()], inout f);
+        if a.failed {
+            return;
+        }
+        total = wrapping_add(total, n);
+        if total > MAX_IMPORTS {
+            refuse(inout a, in "imported artifact inventory exceeds 4 GiB");
+            return;
+        }
+    }
+}
+
+fn copy_strs(in s: Strs) -> Strs {
+    let mut out = strs_new();
+    for i in 0..count(in s) {
+        push(inout out, in s.bytes[start(in s, i)..end(in s, i)]);
+    }
+    out
+}
+
+pub fn audit(inout a: Au, in o: Options, pid: u64)
+    -> Report eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3]] {
+    let mut report = report_new();
+    let launcher = if o.has_lean {
+        seq(in o.lean.as_slice())
+    } else {
+        match var_bytes(in "VESPER_LEAN") {
+            Option::Some(v) => v,
+            Option::None => text_of(in "lean"),
+        }
+    };
+    let tc = lean_toolchain(inout a, in launcher.as_slice());
+    if a.failed {
+        return report;
+    }
+    let stage = stage_new(inout a, pid);
+    if a.failed {
+        stage_drop(in stage.as_slice());
+        return report;
+    }
+    audit_in(inout a, in o, in tc, in stage.as_slice(), inout report);
+    stage_drop(in stage.as_slice());
+    report
+}
+
+fn audit_in(
+    inout a: Au,
+    in o: Options,
+    in tc: Toolchain,
+    in stage: Slice[u8],
+    inout report: Report
+) eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3]] {
+    let snapshot = join_str(in stage, in "artifacts");
+    let mut e = try_mkdir(in snapshot.as_slice(), false);
+    if e.kind != 0 {
+        refuse_io(inout a, in "", e);
+        return;
+    }
+    let root = canonical(in o.root.as_slice(), inout e);
+    if e.kind != 0 {
+        refuse_io(inout a, in "artifact root: ", e);
+        return;
+    }
+    let files = copy_artifacts(inout a, in root.as_slice(), in snapshot.as_slice());
+    if a.failed {
+        return;
+    }
+    // The module's .olean: its name's components as directories.
+    let mut module_file = seq(in snapshot.as_slice());
+    let mut part: u64 = 0;
+    let m = o.module.as_slice();
+    for i in 0..wrapping_add(m.len(), 1) {
+        if i == m.len() || byte(in m, i) == 46 {
+            module_file = join(in module_file.as_slice(), in m[part..i]);
+            part = wrapping_add(i, 1);
+        }
+    }
+    let module_file = with_extension(in module_file.as_slice(), in "olean");
+    if !is_file(in module_file.as_slice()) {
+        let mut why = text_of(in "module ");
+        why.extend(in m);
+        put_str(inout why, in " has no .olean artifact in --root");
+        refuse_bytes(inout a, in why.as_slice());
+        return;
+    }
+    let helper = join_str(in stage, in "Audit.lean");
+    let request_path = join_str(in stage, in "request.json");
+    if !utf8_valid(in snapshot.as_slice()) || !utf8_valid(in tc.prefix.as_slice()) {
+        refuse(inout a, in "path contains invalid UTF-8 characters");
+        return;
+    }
+    let body = request(in o, in snapshot.as_slice(), in tc.prefix.as_slice());
+    e = try_write(in helper.as_slice(), in AUDITOR.as_bytes(), 0);
+    if e.kind == 0 {
+        e = try_write(in request_path.as_slice(), in body.as_slice(), 0);
+    }
+    if e.kind != 0 {
+        refuse_io(inout a, in "", e);
+        return;
+    }
+    let mut c = command_path(in tc.binary.as_slice());
+    env_clear(inout c);
+    let lib = join_str(in tc.prefix.as_slice(), in "lib/lean");
+    let lib_text = utf8_string(in lib.as_slice());
+    env(inout c, in "LEAN_PATH", in lib_text.as_str());
+    env(inout c, in "LEAN_ABORT_ON_PANIC", in "1");
+    if windows() {
+        for k in 0..4 {
+            match var(in windows_key(k)) {
+                Option::Some(v) => env(inout c, in windows_key(k), in v.as_str()),
+                Option::None => {},
+            }
+        }
+    }
+    let stage_text = utf8_string(in stage);
+    cwd(inout c, in stage_text.as_str());
+    // Lean 4.35 full-library artifacts require independently loaded
+    // imported and trusted environments during kernel replay.
+    arg_bytes(inout c, in "-j1".as_bytes());
+    arg_bytes(inout c, in "-M8192".as_bytes());
+    arg_bytes(inout c, in "--run".as_bytes());
+    arg_bytes(inout c, in helper.as_slice());
+    arg_bytes(inout c, in request_path.as_slice());
+    let seconds = if o.timeout == 0 {
+        30
+    } else {
+        o.timeout
+    };
+    let ran = execute(inout a, c, seconds);
+    if a.failed || !utf8_or_fail(inout a, in ran.stdout.as_slice()) {
+        return;
+    }
+    // The records: lines that start with the marker.
+    let text = ran.stdout.as_slice();
+    let mut first_start: u64 = 0;
+    let mut first_end: u64 = 0;
+    let mut records: u64 = 0;
+    let mut at: u64 = 0;
+    loop {
+        if at >= text.len() {
+            break;
+        }
+        let (le, next) = line_at(in text, at);
+        if starts_at(in text, at, in MARKER) {
+            if records == 0 {
+                first_start = wrapping_add(at, MARKER_LEN);
+                first_end = le;
+            }
+            records = wrapping_add(records, 1);
+        }
+        at = next;
+    }
+    if records == 0 {
+        refuse(inout a, in "Lean emitted no audit result");
+        return;
+    }
+    let mut rd = rd_parse(in text[first_start..first_end]);
+    let raw = raw_audit(inout rd);
+    if rd.failed {
+        let mut why = text_of(in "invalid Lean audit result: ");
+        why.extend(in rd.err.as_slice());
+        refuse_bytes(inout a, in why.as_slice());
+        return;
+    }
+    if records > 1 || raw.schema_version != 1 || !raw.kernel_replayed {
+        refuse(inout a, in "Lean audit result is duplicate, unsupported or not kernel-replayed");
+        return;
+    }
+    let requested = set_of(in raw.th_names);
+    if !equal(in requested, in o.theorems) || count(in raw.th_names) != count(in requested) {
+        refuse(inout a, in "Lean audit did not check every requested theorem exactly once");
+        return;
+    }
+    if count(in raw.mod_names) > 8192 {
+        refuse(inout a, in "Lean audit exceeds the imported-module limit");
+        return;
+    }
+    let snap = canonical(in snapshot.as_slice(), inout e);
+    if e.kind != 0 {
+        refuse_io(inout a, in "", e);
+        return;
+    }
+    // The imports, digested in record order: names, scopes (true for an
+    // artifact) and files.
+    let mut import_names = strs_new();
+    let mut import_artifact: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut import_files = files_new();
+    let mut import_cut: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut total: u64 = 0;
+    for k in 0..count(in raw.mod_names) {
+        let name = raw.mod_names.bytes[start(in raw.mod_names, k)..end(in raw.mod_names, k)];
+        for prior in 0..count(in import_names) {
+            if same(
+                in import_names.bytes[start(in import_names, prior)..end(in import_names, prior)],
+                in name
+            ) {
+                refuse(inout a, in "Lean audit contains duplicate module identities");
+                return;
+            }
+        }
+        push(inout import_names, in name);
+        let path = raw.mod_paths.bytes[start(in raw.mod_paths, k)..end(in raw.mod_paths, k)];
+        let primary = canonical(in path, inout e);
+        if e.kind != 0 {
+            refuse_io(inout a, in "", e);
+            return;
+        }
+        let in_snapshot = under(in primary.as_slice(), in snap.as_slice()) <= primary.len();
+        let in_prefix = under(in primary.as_slice(), in tc.prefix.as_slice()) <= primary.len();
+        if !in_snapshot && !in_prefix {
+            refuse(inout a, in "imported module escaped the artifact/toolchain roots");
+            return;
+        }
+        import_artifact
+            .push(
+                if in_snapshot {
+                    1
+                } else {
+                    0
+                }
+            );
+        if in_snapshot {
+            file_parts(
+                inout a,
+                in primary.as_slice(),
+                in snap.as_slice(),
+                inout import_files,
+                inout total
+            );
+        } else {
+            file_parts(
+                inout a,
+                in primary.as_slice(),
+                in tc.prefix.as_slice(),
+                inout import_files,
+                inout total
+            );
+        }
+        if a.failed {
+            return;
+        }
+        import_cut.push(count(in import_files.paths));
+    }
+    let mut manifest_rd = rd_parse(in "{}".as_bytes());
+    manifest_rd.failed = true;
+    let manifest = if o.has_manifest {
+        read_manifest(inout a, in o.manifest.as_slice())
+    } else {
+        table(inout manifest_rd)
+    };
+    if a.failed {
+        return;
+    }
+    if count(in raw.marker_names) > 65536 {
+        refuse(inout a, in "Lean audit exceeds the macro provenance marker limit");
+        return;
+    }
+    if count(in set_of(in raw.marker_names)) != count(in raw.marker_names) {
+        refuse(inout a, in "Lean audit reported a duplicate macro provenance marker");
+        return;
+    }
+    let marker_order = order(in raw.marker_names);
+    let mut marker_names = strs_new();
+    let mut marker_values = strs_new();
+    for k in 0..marker_order.len() {
+        let i = at64(in marker_order.as_slice(), k);
+        push(
+            inout marker_names,
+            in raw.marker_names.bytes[start(in raw.marker_names, i)..end(in raw.marker_names, i)]
+        );
+        push(
+            inout marker_values,
+            in raw.marker_values.bytes[start(in raw.marker_values, i)..end(in raw.marker_values, i)]
+        );
+    }
+    let th = Theorems {
+        names: copy_strs(in raw.th_names),
+        deps: copy_strs(in raw.deps),
+        dep_ends: seq64(in raw.dep_ends.as_slice())
+    };
+    let g = gate(in th, in marker_names, in marker_values, o.has_manifest, in manifest);
+    if g.failed {
+        refuse_bytes(inout a, in g.err.as_slice());
+        return;
+    }
+    let mut bad = strs_new();
+    for k in 0..count(in raw.axioms) {
+        let ax = raw.axioms.bytes[start(in raw.axioms, k)..end(in raw.axioms, k)];
+        let allowed = self::strs::contains(in o.allowed, in ax);
+        if forbidden_axiom(in ax) || !allowed {
+            push(inout bad, in ax);
+        }
+    }
+    let forbidden = set_of(in bad);
+    let mut bin = files_new();
+    let _ = digest_file(inout a, in tc.binary.as_slice(), in "bin/lean".as_bytes(), inout bin);
+    if a.failed {
+        return;
+    }
+    let mut inventory = json_new(false);
+    files_json(inout inventory, in files);
+    // The report, fields in `AuditReport` order.
+    let accepted = count(in forbidden) == 0;
+    let mut j = json_new(true);
+    begin_object(inout j);
+    field_u64(inout j, in "schema_version", 1);
+    field_string(inout j, in "status", in "audited".as_bytes());
+    field_bool(inout j, in "accepted", accepted);
+    field_bool(inout j, in "kernel_replayed", true);
+    field_bool(inout j, in "cache_eligible", false);
+    field_string(inout j, in "module", in o.module.as_slice());
+    field_string(inout j, in "lean_version", in tc.version.as_slice());
+    field_string(
+        inout j,
+        in "lean_binary_blake3",
+        in bin.digests.bytes[start(in bin.digests, 0)..end(in bin.digests, 0)]
+    );
+    let auditor = blake3_hex(in AUDITOR.as_bytes());
+    field_string(inout j, in "auditor_blake3", in auditor.as_slice());
+    let inv = blake3_hex(in inventory.out.as_slice());
+    field_string(inout j, in "artifact_inventory_blake3", in inv.as_slice());
+    field_u64(inout j, in "checked_constants", raw.checked_constants);
+    key(inout j, in "allowed_axioms");
+    strings_json(inout j, in o.allowed);
+    key(inout j, in "forbidden_axioms");
+    strings_json(inout j, in forbidden);
+    key(inout j, in "theorems");
+    begin_array(inout j);
+    for t in 0..count(in raw.th_names) {
+        begin_object(inout j);
+        field_string(
+            inout j,
+            in "name",
+            in raw.th_names.bytes[start(in raw.th_names, t)..end(in raw.th_names, t)]
+        );
+        key(inout j, in "axioms");
+        begin_array(inout j);
+        let a0 = if t == 0 {
+            0
+        } else {
+            at64(in raw.ax_ends.as_slice(), wrapping_sub(t, 1))
+        };
+        for x in a0..at64(in raw.ax_ends.as_slice(), t) {
+            string(inout j, in raw.axioms.bytes[start(in raw.axioms, x)..end(in raw.axioms, x)]);
+        }
+        end_array(inout j);
+        field_string(
+            inout j,
+            in "type_repr",
+            in raw.th_types.bytes[start(in raw.th_types, t)..end(in raw.th_types, t)]
+        );
+        end_object(inout j);
+    }
+    end_array(inout j);
+    key(inout j, in "artifact_files");
+    files_json(inout j, in files);
+    key(inout j, in "imports");
+    begin_array(inout j);
+    let idx = order(in import_names);
+    for k in 0..idx.len() {
+        let i = at64(in idx.as_slice(), k);
+        begin_object(inout j);
+        field_string(
+            inout j,
+            in "name",
+            in import_names.bytes[start(in import_names, i)..end(in import_names, i)]
+        );
+        field_string(
+            inout j,
+            in "scope",
+            in scope_name(byte(in import_artifact.as_slice(), i) == 1).as_bytes()
+        );
+        key(inout j, in "files");
+        begin_array(inout j);
+        let f0 = if i == 0 {
+            0
+        } else {
+            at64(in import_cut.as_slice(), wrapping_sub(i, 1))
+        };
+        for x in f0..at64(in import_cut.as_slice(), i) {
+            begin_object(inout j);
+            field_string(
+                inout j,
+                in "path",
+                in import_files
+                    .paths
+                    .bytes[start(in import_files.paths, x)..end(in import_files.paths, x)]
+            );
+            field_u64(inout j, in "bytes", at64(in import_files.bytes.as_slice(), x));
+            field_string(
+                inout j,
+                in "blake3",
+                in import_files
+                    .digests
+                    .bytes[start(in import_files.digests, x)..end(in import_files.digests, x)]
+            );
+            end_object(inout j);
+        }
+        end_array(inout j);
+        end_object(inout j);
+    }
+    end_array(inout j);
+    if g.present {
+        key(inout j, in "macro_provenance");
+        gate_json(inout j, in g);
+    }
+    end_object(inout j);
+    report.accepted = accepted;
+    report.version = seq(in tc.version.as_slice());
+    report.checked_constants = raw.checked_constants;
+    report.th_names = copy_strs(in raw.th_names);
+    report.axioms = copy_strs(in raw.axioms);
+    report.ax_ends = seq64(in raw.ax_ends.as_slice());
+    report.forbidden = forbidden;
+    report.json = j.out;
+}
+
+fn seq64(in s: Slice[u64]) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.extend(in s);
+    out
+}
+
+// The variables a Windows child keeps (`SystemRoot` and friends).
+fn windows_key(k: u64) -> Str {
+    if k == 0 {
+        "SystemRoot"
+    } else if k == 1 {
+        "WINDIR"
+    } else if k == 2 {
+        "TEMP"
+    } else {
+        "TMP"
+    }
+}
+
+fn scope_name(artifact: bool) -> Str {
+    if artifact {
+        "artifact"
+    } else {
+        "toolchain"
+    }
+}
