@@ -126,11 +126,7 @@ pub fn mul(a: u64, b: u64) -> u64 {
 }
 
 pub fn min(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // Order results: 0 less, 1 equal, 2 greater.
@@ -146,11 +142,7 @@ pub fn ord(a: u64, b: u64) -> u64 {
 
 // An optional id as an order key: none sorts first.
 pub fn okey(x: u64) -> u64 {
-    if x == none() {
-        0
-    } else {
-        inc(x)
-    }
+    if x == none() { 0 } else { inc(x) }
 }
 
 pub fn sw(in s: ChunkSeq[u64], i: u64) -> u64 {
@@ -805,11 +797,7 @@ pub fn ident_ord(in l: L, a: u64, b: u64, build: bool) -> u64 {
         }
         pa = inc(ea);
     }
-    if b_done {
-        Order::Equal
-    } else {
-        Order::Less
-    }
+    if b_done { Order::Equal } else { Order::Less }
 }
 
 // Sort orders. kind 0: string occurrences by bytes; 1: selections by

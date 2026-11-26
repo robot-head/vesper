@@ -102,11 +102,7 @@ fn f(a: u64) -> u64 {
     for i in 0..N {
         g(i)
     }
-    if a == N {
-        a
-    } else {
-        N
-    }
+    if a == N { a } else { N }
 }
 "
     );
@@ -538,7 +534,7 @@ fn large_module(items: usize) -> String {
     let mut source = String::new();
     for i in 0..items {
         source.push_str(&format!(
-            "// item {i}\nfn item_{i}(in x: u64, in y: u64) -> u64 {{\n    let pair = (x, y);\n    if x > y {{\n        add(x, y) * 2\n    }} else {{\n        y\n    }}\n}}\n\n"
+            "// item {i}\nfn item_{i}(in x: u64, in y: u64) -> u64 {{\n    let pair = (x, y);\n    if x > y {{ add(x, y) * 2 }} else {{ y }}\n}}\n\n"
         ));
     }
     source.pop();
@@ -861,6 +857,52 @@ fn member_chains_keep_a_short_receiver_and_overflow_their_one_call() {
         "fn f() {
     let ok = assoc_binds
         .alloc(AssocBindNode { name: value_name, ty: value_type, start: v.start, end: v.end });
+}
+"
+    );
+}
+#[test]
+fn short_if_else_expressions_stay_on_one_line_like_rustfmt() {
+    // An `if` used as a value, with one expression in each branch, stays on
+    // one line when it is at most 50 columns.
+    assert_eq!(
+        verify("fn f(a:u64)->u64{let x=if a>1{a}else{2};x}"),
+        "fn f(a: u64) -> u64 {
+    let x = if a > 1 { a } else { 2 };
+    x
+}
+"
+    );
+    // So does one in an argument or a match arm.
+    assert_eq!(
+        verify("fn f(a:bool,k:u8)->u64{g(if a{1}else{2},3);match k{0=>if a{1}else{2},_=>3}}"),
+        "fn f(a: bool, k: u8) -> u64 {
+    g(if a { 1 } else { 2 }, 3);
+    match k {
+        0 => if a { 1 } else { 2 },
+        _ => 3
+    }
+}
+"
+    );
+    // A longer one, or an `if` statement, stays vertical; a block's last
+    // expression is a value, so it stays on one line.
+    assert_eq!(
+        verify(
+            "fn f(a:u64)->u64{let x=if a>first_limit_value{a}else{second_limit_value};if a>1{g()}else{h()}if a>1{a}else{2}}"
+        ),
+        "fn f(a: u64) -> u64 {
+    let x = if a > first_limit_value {
+        a
+    } else {
+        second_limit_value
+    };
+    if a > 1 {
+        g()
+    } else {
+        h()
+    }
+    if a > 1 { a } else { 2 }
 }
 "
     );

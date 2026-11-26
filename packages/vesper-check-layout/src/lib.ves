@@ -189,11 +189,7 @@ fn fits_i32(x: i64) -> bool {
 }
 
 fn max_u32(a: u32, b: u32) -> u32 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // `Layout::of`: the layout id, or NONE32 with the message in `ls.err`.
@@ -243,11 +239,7 @@ fn build(
         );
     }
     let n = t.node(ty);
-    let name = if n.kind == TyKind::Named {
-        n.name
-    } else {
-        0
-    };
+    let name = if n.kind == TyKind::Named { n.name } else { 0 };
     // `i128` and `u128` are two words, low word first (#1174).
     if n.kind == TyKind::Named && n.n == 0 && k.is_wide(name) {
         return ls.scalar_sized(ty, 16);
@@ -363,11 +355,7 @@ fn build(
     let mut all: ChunkSeq[LField] = ChunkSeq::new[LField]();
     for vi in 0..w(a.vn) {
         let v = wd.variant(add(w(a.va), vi));
-        let mut offset: i32 = if a.is_enum {
-            8
-        } else {
-            0
-        };
+        let mut offset: i32 = if a.is_enum { 8 } else { 0 };
         let fa = n32(all.len());
         for fi in 0..w(v.fc) {
             let f = wd.field(add(w(v.fa), fi));

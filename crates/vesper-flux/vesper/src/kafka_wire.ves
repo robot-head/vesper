@@ -352,11 +352,7 @@ fn sat_sub_i64(a: i64, b: i64) -> i64 {
 
 // The bytes of `data` a length field takes: none (-1) takes nothing.
 fn field_bytes(n: i64) -> u64 {
-    if n < 0 {
-        0
-    } else {
-        wrapping_u64(n)
-    }
+    if n < 0 { 0 } else { wrapping_u64(n) }
 }
 
 // `varint(n)` and then, for n > 0, `data[src..src + n]`.

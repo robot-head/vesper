@@ -291,19 +291,11 @@ enum ConfigError: _ {
 }
 
 fn max(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn min(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 fn dec(n: u64) -> u64 {
@@ -702,11 +694,7 @@ fn place(inout b: Book, size: u64, align: u64, fresh_base: u64, fresh_cap: u64) 
     // Reuse spare chunks retained by an earlier rewind. Spares before the
     // first one that fits are released, so the chunk list stays
     // allocation-ordered.
-    let first_spare = if n == 0 {
-        0
-    } else {
-        inc(b.current)
-    };
+    let first_spare = if n == 0 { 0 } else { inc(b.current) };
     let mut found = MAX_U64;
     let mut found_start: u64 = 0;
     for i in first_spare..n {
@@ -1003,11 +991,7 @@ pub fn book_alloc_elems(
     fresh_base: u64,
     fresh_cap: u64
 ) -> Placed {
-    let ecap = if esize == 0 {
-        MAX_U64
-    } else {
-        cap
-    };
+    let ecap = if esize == 0 { MAX_U64 } else { cap };
     let bytes = if esize == 0 {
         0
     } else {

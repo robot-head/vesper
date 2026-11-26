@@ -391,11 +391,7 @@ pub fn read_rows(
                 let x = cell(in out.as_slice(), wrapping_add(prev, k));
                 let y = cell(in out.as_slice(), wrapping_add(row, k));
                 if x != y {
-                    c = if x < y {
-                        -1
-                    } else {
-                        1
-                    };
+                    c = if x < y { -1 } else { 1 };
                     break;
                 }
             }

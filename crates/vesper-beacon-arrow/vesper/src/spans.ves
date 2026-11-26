@@ -17,11 +17,7 @@ const NARROW: u64 = 5;
 // Column `c`'s byte width: trace and span ids, times and the attribute value
 // are u64; flags and codes are u8.
 fn width(c: u64) -> u64 {
-    if c < 6 || c == 11 {
-        8
-    } else {
-        1
-    }
+    if c < 6 || c == 11 { 8 } else { 1 }
 }
 
 fn field(inout fb: Fb, c: u64) -> u64 {

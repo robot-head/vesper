@@ -72,11 +72,7 @@ pub fn parse_int(in b: Slice[u8], s: u64, e: u64, negative: bool) -> Big {
         }
         i = inc(i);
     }
-    let base: u64 = if hex {
-        16
-    } else {
-        10
-    };
+    let base: u64 = if hex { 16 } else { 10 };
     let mut x = Big { ok: true, neg: false, hi: 0, lo: 0 };
     let mut digits: u64 = 0;
     let mut j = start;

@@ -464,11 +464,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
             let sid = list_at(in ast, e.a, i);
             match ast.stmts.get(idx_from_raw[StmtNode](sid)) {
                 Option::Some(st) => {
-                    let is_let: u64 = if st.kind == 1 {
-                        1
-                    } else {
-                        0
-                    };
+                    let is_let: u64 = if st.kind == 1 { 1 } else { 0 };
                     let pat = if st.kind == 1 {
                         let p0 = lower_pat(inout lc, in ast, mod_idx, st.pat);
                         if st.ty != ast_none() {
@@ -701,11 +697,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
                 r = tup;
             }
         }
-        let k: u8 = if e.kind == 11 {
-            X_BINARY
-        } else {
-            X_ASSIGN
-        };
+        let k: u8 = if e.kind == 11 { X_BINARY } else { X_ASSIGN };
         let idx = lc.ir.exs.len();
         lc.ir
             .exs
@@ -873,11 +865,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
     }
     if e.kind == 20 || e.kind == 21 {
         let v = lower_expr(inout lc, in ast, mod_idx, e.a);
-        let k: u8 = if e.kind == 20 {
-            X_BREAK
-        } else {
-            X_RETURN
-        };
+        let k: u8 = if e.kind == 20 { X_BREAK } else { X_RETURN };
         let idx = lc.ir.exs.len();
         lc.ir.exs.push(Ex { kind: k, s0: s0, s1: s1, a: v, b: 0, c: 0, n: 0, m: 0, x: 0 });
         return idx;

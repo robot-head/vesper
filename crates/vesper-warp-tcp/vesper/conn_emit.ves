@@ -8,11 +8,7 @@ fn emit_new(
     inout out: Slice[u8]
 ) -> Result[Tx, TcpFail] {
     let start = t.snd_nxt;
-    let fin_len: u64 = if fin {
-        1
-    } else {
-        0
-    };
+    let fin_len: u64 = if fin { 1 } else { 0 };
     let end = wrapping_add(wrapping_add(start, widen_u64(len)), fin_len);
     let mut entry = no_seg();
     entry.start = start;
@@ -65,22 +61,11 @@ fn base_options(in t: Tcb, now: u64, syn: bool) -> Opts {
         } else {
             Option::None
         };
-        o.sack_permitted = if active_syn {
-            t.cfg.sack
-        } else {
-            t.sack_ok
-        };
+        o.sack_permitted = if active_syn { t.cfg.sack } else { t.sack_ok };
     }
     if (syn && active_syn && t.cfg.timestamps) || t.ts_ok {
         o.timestamps = Option::Some(
-            Timestamps {
-                val: ts_now(now),
-                ecr: if t.ts_ok {
-                    t.ts_recent
-                } else {
-                    0
-                }
-            }
+            Timestamps { val: ts_now(now), ecr: if t.ts_ok { t.ts_recent } else { 0 } }
         );
     }
     o
@@ -230,13 +215,7 @@ fn emit_entry(
         } else {
             t.peer_mss
         };
-        let total = widen_u64(
-            if peer > t.cfg.mss {
-                t.cfg.mss
-            } else {
-                peer
-            }
-        );
+        let total = widen_u64(if peer > t.cfg.mss { t.cfg.mss } else { peer });
         let used = wrapping_add(payload_len, opts_encoded_len(o));
         fill_sack(in t, inout o, sat_sub64(total, used));
     }

@@ -133,17 +133,11 @@ pub struct R {
 }
 
 fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 fn w(x: u32) -> u64 {
@@ -258,14 +252,7 @@ fn is_handle(inout r: R, x: u32) -> bool {
             yes = true;
         }
     }
-    let ok = r.handle_of.try_set(
-        k,
-        if yes {
-            2
-        } else {
-            1
-        }
-    );
+    let ok = r.handle_of.try_set(k, if yes { 2 } else { 1 });
     yes
 }
 
@@ -360,10 +347,7 @@ fn handle_misuse(inout r: R, name: u32, in what: Str, start: u32, end: u32) {
 
 fn module(inout r: R) {
     for i in 0..r.ast.m_items.len() {
-        let it = match r.ast.m_items.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => NONE,
-        };
+        let it = r.ast.m_items.try_get(i).unwrap_or(NONE);
         let item = match r.ast.items.get(idx_from_raw[ItemNode](it)) {
             Option::Some(x) => x,
             Option::None => ItemNode { kind: 0, node: NONE },
@@ -930,20 +914,8 @@ fn call(inout r: R, lib: u64, x: u32, at: u64, args: u32, start: u32, end: u32) 
                 r.sites.push(w(ae.start));
                 r.sites.push(w(ae.end));
                 r.sites.push(w(p.ty));
-                r.sites.push(
-                    if p.nullable {
-                        1
-                    } else {
-                        0
-                    }
-                );
-                r.sites.push(
-                    if p.in_place {
-                        1
-                    } else {
-                        0
-                    }
-                );
+                r.sites.push(if p.nullable { 1 } else { 0 });
+                r.sites.push(if p.in_place { 1 } else { 0 });
             }
             if count > 0 {
                 let ok = r.sites.try_set(wrapping_add(head, 2), count);
@@ -1062,11 +1034,7 @@ fn put_flag(inout s: S, b: bool) {
 // Byte order of two S names (`str::cmp`), then of two length vectors
 // (`Vec<usize>`'s `Ord`): -1, 0 or 1.
 fn vector_cmp(in r: R, a: u64, n: u64, b: u64, m: u64) -> i32 {
-    let k = if n < m {
-        n
-    } else {
-        m
-    };
+    let k = if n < m { n } else { m };
     for i in 0..k {
         let x = u64_at(in r.ilens, wrapping_add(a, i));
         let y = u64_at(in r.ilens, wrapping_add(b, i));
@@ -1364,15 +1332,7 @@ fn read_ty(inout rd: Reader, in b: Slice[u8], inout ast: Ast, inout w: W) -> u32
         let t = read_ty(inout rd, in b, inout ast, inout w);
         items.push(t);
     }
-    w.ty(
-        if kind == 1 {
-            1
-        } else {
-            2
-        },
-        name,
-        in items
-    )
+    w.ty(if kind == 1 { 1 } else { 2 }, name, in items)
 }
 
 // The harness entry of buffers.ves: the case `input` (the rewrite's, then

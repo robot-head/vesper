@@ -173,11 +173,7 @@ pub fn sub_dim(inout st: St, in s: Subst, d0: u32) -> u32 {
 // `Subst::dim(..).unwrap_or(d)`.
 pub fn sub_dim_or(inout st: St, in s: Subst, d: u32) -> u32 {
     let x = sub_dim(inout st, in s, d);
-    if x == NONE {
-        d
-    } else {
-        x
-    }
+    if x == NONE { d } else { x }
 }
 
 pub fn sub_dtype(in s: Subst, d: u32) -> u32 {
@@ -272,11 +268,7 @@ pub fn sub_ty(inout st: St, in s: Subst, t: u32) -> u32 {
 // `s.ty(t).unwrap_or(dflt)`.
 pub fn sub_ty_or(inout st: St, in s: Subst, t: u32, dflt: u32) -> u32 {
     let x = sub_ty(inout st, in s, t);
-    if x == NONE {
-        dflt
-    } else {
-        x
-    }
+    if x == NONE { dflt } else { x }
 }
 
 // The result of a unification: 0 Ok, else the diagnostic code with the

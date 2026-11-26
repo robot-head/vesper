@@ -2356,29 +2356,14 @@ fn binary_expr(
         g.current.truncate(nc);
         let and = op_is(in b, op, in "&&");
         if rhs.len() == 0 {
-            return binary(
-                inout b,
-                if and {
-                    OP_BOOL_AND
-                } else {
-                    OP_BOOL_OR
-                },
-                left,
-                right
-            );
+            return binary(inout b, if and { OP_BOOL_AND } else { OP_BOOL_OR }, left, right);
         }
         let tmp = temp(inout b, inout g);
         let pr = pure(inout b, right);
         let s = sequence(inout b, in rhs, pr);
         let m = b.at();
         b.w(T_BOOL);
-        b.w(
-            if and {
-                0
-            } else {
-                1
-            }
-        );
+        b.w(if and { 0 } else { 1 });
         let lit = b.since(m);
         let other = pure(inout b, lit);
         let it = if and {
@@ -3857,11 +3842,7 @@ fn perform_op(
             };
             let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
             let root = place_of(in y, arg, inout path);
-            let li = if root == NONE32 {
-                NONE64
-            } else {
-                g.find(root)
-            };
+            let li = if root == NONE32 { NONE64 } else { g.find(root) };
             let mut lens = no_t();
             let mut done = false;
             if li != NONE64 {
@@ -3884,11 +3865,7 @@ fn perform_op(
                     let w1 = named(inout b, in "$w");
                     let mut component = tuple_get(inout b, w1, c, n);
                     let st = St { ty: param.ty, src: 1, qa: param.qa, qn: param.qn, arg: arg };
-                    let nq = if param.qn == 0 {
-                        1
-                    } else {
-                        param.qn
-                    };
+                    let nq = if param.qn == 0 { 1 } else { param.qn };
                     for q in 0..nq {
                         let mut proj: ChunkSeq[u32] = ChunkSeq::new[u32]();
                         if param.qn > 0 {
@@ -5115,11 +5092,7 @@ fn closure(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
     }
     let mut arg_names: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut arguments = empty();
-    let pcount = if np < w(fnode.n) {
-        np
-    } else {
-        w(fnode.n)
-    };
+    let pcount = if np < w(fnode.n) { np } else { w(fnode.n) };
     for i in 0..pcount {
         let pname = y.a.xs(e, add(2, i));
         let base = joined(inout b, in "", pname, in "$a");

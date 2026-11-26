@@ -572,11 +572,7 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
                                 .push(Variant { name: vname, fa: fa, fc: fc, named: v.named });
                         }
                         let adt_idx = n32(world.adts.len());
-                        let tile_val: u32 = if a.tiled {
-                            inc32(a.tile_width)
-                        } else {
-                            0
-                        };
+                        let tile_val: u32 = if a.tiled { inc32(a.tile_width) } else { 0 };
                         world.adts.push(
                             Adt {
                                 name: aname,

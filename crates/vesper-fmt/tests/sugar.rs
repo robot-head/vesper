@@ -202,3 +202,26 @@ fn match_pattern_sugar_roundtrips_without_expansion() {
     assert!(out.contains("present value => value"), "{out}");
     assert!(out.contains("$p:pat"), "{out}");
 }
+
+#[test]
+fn a_sugar_template_else_on_its_own_line_keeps_the_if_vertical() {
+    // The template keeps `else` on its own line, so the `if` is not one
+    // group (this used to panic).
+    assert_eq!(
+        formatted("sugar choose:expr{rule(choose $b:block)=>{{let x=if true{1}\nelse{2};x}}}"),
+        "sugar choose: expr {
+    rule (choose $b:block) => {
+        {
+            let x = if true {
+                1
+            }
+            else {
+                2
+            };
+            x
+        }
+    }
+}
+"
+    );
+}

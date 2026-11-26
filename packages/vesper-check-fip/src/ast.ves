@@ -163,11 +163,7 @@ impl Ast {
             return NONE32;
         }
         let x = u32_at(in self.fn_by_name, w(name));
-        if x == 0 {
-            NONE32
-        } else {
-            wrapping_sub(x, 1)
-        }
+        if x == 0 { NONE32 } else { wrapping_sub(x, 1) }
     }
 }
 
@@ -236,11 +232,7 @@ pub fn read_ast(
         if kind == 2 || kind == 16 {
             a = sym(in nmap, w(a));
         }
-        let b2 = if kind == 7 {
-            sym(in nmap, w(bb))
-        } else {
-            bb
-        };
+        let b2 = if kind == 7 { sym(in nmap, w(bb)) } else { bb };
         exprs.push(ExprRow { kind: kind, start: start, end: end, a: a, b: b2, c: c, d: d, e: e });
     }
     let qn = r.word(in b);

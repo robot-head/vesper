@@ -507,11 +507,7 @@ impl Iface {
 
     // `ExportParam::pass()`.
     pub fn pass(in self, p: ParamRow) -> u8 {
-        if p.raw == 0 {
-            P_IN
-        } else {
-            p.raw
-        }
+        if p.raw == 0 { P_IN } else { p.raw }
     }
 
     // Whether the library uses export ABI v2 or later.

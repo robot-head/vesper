@@ -360,13 +360,7 @@ pub fn collect(inout s: St, in a: Ast, m: u32) {
             s.un_start.push(n.start);
             s.un_end.push(n.end);
         }
-        s.use_public.push(
-            if u.public {
-                1
-            } else {
-                0
-            }
-        );
+        s.use_public.push(if u.public { 1 } else { 0 });
         s.use_start.push(u.start);
         s.use_end.push(u.end);
     }
@@ -423,13 +417,7 @@ fn constants(inout s: St, in l: L, m: u32) {
             s.cl_mod.push(m);
             s.cl_item.push(f);
             s.cl_kind.push(v.kind);
-            s.cl_neg.push(
-                if v.neg {
-                    1
-                } else {
-                    0
-                }
-            );
+            s.cl_neg.push(if v.neg { 1 } else { 0 });
             s.cl_bits.push(v.bits);
             s.cl_hi.push(v.hi);
             s.cl_untyped.push(at8(in l.const_untyped, i));

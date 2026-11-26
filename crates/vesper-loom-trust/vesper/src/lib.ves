@@ -1352,11 +1352,7 @@ fn cell(in w: ChunkSeq[u64], i: u64) -> u64 {
 }
 
 fn min(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // Optimal string alignment distance of `a` (the longer) and `b`, over
@@ -1369,11 +1365,7 @@ fn osa(in a: Slice[u8], in b: Slice[u8], limit: u64, inout w: ChunkSeq[u64]) -> 
     let n = a.len();
     let m = b.len();
     if m == 0 {
-        return if limit == NONE || n <= limit {
-            n
-        } else {
-            NONE
-        };
+        return if limit == NONE || n <= limit { n } else { NONE };
     }
     let width = wrapping_add(m, 1);
     let banded = limit != NONE && limit < wrapping_add(n, m);
@@ -1412,11 +1404,7 @@ fn osa(in a: Slice[u8], in b: Slice[u8], limit: u64, inout w: ChunkSeq[u64]) -> 
         for j in lo..wrapping_add(hi, 1) {
             let bj = byte(in b, wrapping_sub(j, 1));
             let up = cell(in w, wrapping_add(p1, j));
-            let cost: u64 = if ai != bj {
-                1
-            } else {
-                0
-            };
+            let cost: u64 = if ai != bj { 1 } else { 0 };
             let mut best = min(
                 min(wrapping_add(up, 1), wrapping_add(left, 1)),
                 wrapping_add(diag, cost)

@@ -164,11 +164,7 @@ pub fn read_path_limit(
     };
     // Read the length the file has now, then whatever it grew by since.
     let len = StdFs::vstd_fs_file_len(in f);
-    let n = if len < limit {
-        len
-    } else {
-        limit
-    };
+    let n = if len < limit { len } else { limit };
     let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
     buf.resize(n, 0);
     let got = StdFs::vstd_fs_read(inout f, inout buf.as_slice_mut(), inout err);
@@ -181,11 +177,7 @@ pub fn read_path_limit(
                 break;
             }
             let room = wrapping_sub(limit, at);
-            let step: u64 = if room < 4096 {
-                room
-            } else {
-                4096
-            };
+            let step: u64 = if room < 4096 { room } else { 4096 };
             let m = StdFs::vstd_fs_read(inout f, inout more[0..step], inout err);
             if m == 0 || err != 0 {
                 break;

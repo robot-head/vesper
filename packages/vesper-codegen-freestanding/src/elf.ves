@@ -202,16 +202,8 @@ pub fn write_executable(
                     in names[s.name_at..add(s.name_at, s.name_len)]
                 );
                 push32(inout symtab, name);
-                let bind: u8 = if s.global {
-                    Stb::Global
-                } else {
-                    Stb::Local
-                };
-                let kind: u8 = if s.function {
-                    Stt::Func
-                } else {
-                    Stt::Notype
-                };
+                let bind: u8 = if s.global { Stb::Global } else { Stb::Local };
+                let kind: u8 = if s.function { Stt::Func } else { Stt::Notype };
                 symtab.push((bind << Stb::Shift) | kind);
                 symtab.push(0);
                 let shndx: u16 = if s.section == Absent::Row {
@@ -247,19 +239,12 @@ pub fn write_executable(
         if s.executable {
             flags = flags | Shf::Execinstr;
         }
-        let kind = if s.nobits {
-            Sht::Nobits
-        } else {
-            Sht::Progbits
-        };
+        let kind = if s.nobits { Sht::Nobits } else { Sht::Progbits };
         let name = match sh_names.try_get(i) {
             Option::Some(v) => widen_u64(v),
             Option::None => 0,
         };
-        let off = match file_offsets.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let off = file_offsets.try_get(i).unwrap_or(0);
         header_at(inout out, name, kind, flags, s.address, off, s.mem_bytes, 0, 0, 8, 0);
     }
     let strtab_index = add(secs.len(), 2);

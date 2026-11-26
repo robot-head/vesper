@@ -226,11 +226,7 @@ test {
     fn test_builder_edges(nodes: u32, from: u32, to: u32, accepted: bool) -> bool {
         let mut builder = graph_builder(nodes);
         let added = builder.add_edge(from, to);
-        let edges: u64 = if accepted {
-            1
-        } else {
-            0
-        };
+        let edges: u64 = if accepted { 1 } else { 0 };
         let graph = builder.build();
         let next = builder.add_node();
         let counts = graph.node_count() == widen_u64(nodes) && graph.edge_count() == edges;

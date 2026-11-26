@@ -1,6 +1,7 @@
 // Unit tests for @vesper-std/core.
 test {
     use @vesper-std/core::{min, max, clamp, ordering_sign, reverse, then_cmp};
+    use @vesper-std/core::iter::max as max_of;
     use @vesper-std/core::mem::swap as swap_places;
     use @vesper-std/core::option::{
         is_some, is_none, unwrap_or, unwrap_or_else, unwrap, map as option_map, map_or,
@@ -37,6 +38,13 @@ test {
         let mut fields = SwapFields { left: 7, right: 42 };
         swap_places inout fields.left with inout fields.right;
         r = check(fields.left == 42 && fields.right == 7, 12, r);
+        let largest = max_of{
+            {
+                value
+            }
+            : u64 | value in [fields.left, fields.right]
+        };
+        r = check(largest == Option::Some(max(fields.left, fields.right)), 13, r);
         r
     }
 
@@ -252,11 +260,7 @@ test {
         let chained = result_and_then(
             good,
             | x: u64 | -> Result[u64, u64] {
-                if x > 5 {
-                    Result::Err(x)
-                } else {
-                    Result::Ok(x)
-                }
+                if x > 5 { Result::Err(x) } else { Result::Ok(x) }
             }
         );
         r = check(some_u64(err(chained), 6), 12, r);

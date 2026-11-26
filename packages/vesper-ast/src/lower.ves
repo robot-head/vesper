@@ -580,11 +580,7 @@ fn int_value(in l: L, i: u64) -> (bool, u64) {
     let e = tend(in l, i);
     let x = u8_at(in l.p.src, inc(s));
     let hex = wrapping_sub(e, s) >= 2 && u8_at(in l.p.src, s) == 48 && (x == 120 || x == 88);
-    let from = if hex {
-        wrapping_add(s, 2)
-    } else {
-        s
-    };
+    let from = if hex { wrapping_add(s, 2) } else { s };
     let mut v: u64 = 0;
     let mut digits: u64 = 0;
     for j in from..e {
@@ -618,16 +614,8 @@ fn int_value_wide(in l: L, i: u64) -> (bool, u64, u64) {
     let e = tend(in l, i);
     let x = u8_at(in l.p.src, inc(s));
     let hex = wrapping_sub(e, s) >= 2 && u8_at(in l.p.src, s) == 48 && (x == 120 || x == 88);
-    let from = if hex {
-        wrapping_add(s, 2)
-    } else {
-        s
-    };
-    let base: u128 = if hex {
-        16
-    } else {
-        10
-    };
+    let from = if hex { wrapping_add(s, 2) } else { s };
+    let base: u128 = if hex { 16 } else { 10 };
     let mut v: u128 = 0;
     let mut digits: u64 = 0;
     for j in from..e {
@@ -972,11 +960,7 @@ fn generics(inout l: L) -> u32 {
                     } else {
                         expect(inout l, k_mod());
                         let md = mode(inout l);
-                        bound = if md == 3 {
-                            2
-                        } else {
-                            md
-                        };
+                        bound = if md == 3 { 2 } else { md };
                     }
                     if !eat(inout l, k_plus()) {
                         break;
@@ -1026,11 +1010,7 @@ fn fields(inout l: L) -> u32 {
         let mut modality: u8 = 3;
         if eat(inout l, k_at_at()) {
             let md = mode(inout l);
-            modality = if md == 3 {
-                2
-            } else {
-                md
-            };
+            modality = if md == 3 { 2 } else { md };
         }
         let f = l.ast
             .fields
@@ -1297,11 +1277,7 @@ fn declaration(inout l: L) -> u32 {
         0
     } else {
         let m = mode(inout l);
-        if m == 3 {
-            1
-        } else {
-            m
-        }
+        if m == 3 { 1 } else { m }
     };
     let k = kind(in l);
     if k == k_struct() {
@@ -1495,11 +1471,7 @@ fn impl_decl(inout l: L, start: u64) -> u32 {
     expect(inout l, k_r_brace());
     let methods = list_from(inout l, m);
     let owner = type_name(in l.ast, t);
-    let owner_name = if owner == none() {
-        l.s.empty
-    } else {
-        owner
-    };
+    let owner_name = if owner == none() { l.s.empty } else { owner };
     for i in bmark..l.ast.m_bounds.len() {
         let b = u32_at(in l.ast.m_bounds, i);
         let o = bound_at(in l, b).owner;
@@ -1562,11 +1534,7 @@ fn function(inout l: L, op: bool, fip: bool) -> u32 {
                 WhereNode { ty: none(), trait_ref: none(), start: 0, end: 0 }
             );
             let tn = type_name(in l.ast, wn.ty);
-            let param = if tn == none() {
-                l.s.empty
-            } else {
-                tn
-            };
+            let param = if tn == none() { l.s.empty } else { tn };
             push_bound(inout l, param, wn.trait_ref, w(wn.start), w(wn.end), name);
         }
     }
@@ -1764,17 +1732,9 @@ fn fold_member(
     } else if op == 2 {
         checked_mul_u64(a, b)
     } else if op == 3 {
-        if b > 0 {
-            Option::Some(a / b)
-        } else {
-            None
-        }
+        if b > 0 { Option::Some(a / b) } else { None }
     } else if op == 4 {
-        if b > 0 {
-            Some(a % b)
-        } else {
-            None
-        }
+        if b > 0 { Some(a % b) } else { None }
     } else if op == 5 {
         Some(a & b)
     } else if op == 6 {
@@ -1793,11 +1753,7 @@ fn fold_member(
             None
         }
     } else if op == 9 {
-        if b < 64 {
-            Some(a >> b)
-        } else {
-            None
-        }
+        if b < 64 { Some(a >> b) } else { None }
     } else {
         None
     };
@@ -1891,11 +1847,7 @@ fn value_enum(inout l: L, name: u32) -> u32 {
             names.push(full);
             // A member past `u64::MAX` never folds (`u64::try_from`), as a
             // negative one does not.
-            let sign: u8 = if neg || mag_hi != 0 {
-                1
-            } else {
-                0
-            };
+            let sign: u8 = if neg || mag_hi != 0 { 1 } else { 0 };
             negs.push(sign);
             bits.push(mag);
         }
@@ -1913,11 +1865,7 @@ fn value_enum(inout l: L, name: u32) -> u32 {
         l.consts.push(full);
         let cl = const_lit(inout l, value);
         l.const_lits.push(cl);
-        let mark: u8 = if untyped {
-            1
-        } else {
-            0
-        };
+        let mark: u8 = if untyped { 1 } else { 0 };
         l.const_untyped.push(mark);
         let vs = espan_start(in l, value);
         let ve = espan_end(in l, value);
@@ -2042,11 +1990,7 @@ fn ty(inout l: L) -> u32 {
     let result = if eat(inout l, k_fn()) {
         let md = if eat(inout l, k_at()) {
             let m = mode(inout l);
-            if m == 3 {
-                1
-            } else {
-                m
-            }
+            if m == 3 { 1 } else { m }
         } else {
             1
         };
@@ -2219,11 +2163,7 @@ fn array_length(inout l: L) -> u64 {
     }
     let i = bump(inout l);
     let (ok, v) = int_value(in l, i);
-    if ok && v <= max_array_length() {
-        v
-    } else {
-        0
-    }
+    if ok && v <= max_array_length() { v } else { 0 }
 }
 
 // The scalar elements of a value of type `t`, through nested tuples.
@@ -2237,11 +2177,7 @@ fn type_leaves(in a: Ast, t: u32) -> u64 {
         let x = type_leaves(in a, list_at(in a, n.a, i));
         sum = saturating_add_u64(sum, x);
     }
-    if sum == 0 {
-        1
-    } else {
-        sum
-    }
+    if sum == 0 { 1 } else { sum }
 }
 
 // `OR_PATTERN_EXPANSION`: the token weight or-pattern alternatives may
@@ -2252,11 +2188,7 @@ fn or_pattern_expansion() -> u64 {
 
 fn saturating_add_u64(a: u64, b: u64) -> u64 {
     let s = wrapping_add(a, b);
-    if s < a {
-        18446744073709551615
-    } else {
-        s
-    }
+    if s < a { 18446744073709551615 } else { s }
 }
 
 fn saturating_mul_u64(a: u64, b: u64) -> u64 {
@@ -2264,27 +2196,15 @@ fn saturating_mul_u64(a: u64, b: u64) -> u64 {
     if (a >> 32) != 0 && (b >> 32) != 0 {
         return max;
     }
-    let big = if a > b {
-        a
-    } else {
-        b
-    };
-    let small = if a > b {
-        b
-    } else {
-        a
-    };
+    let big = if a > b { a } else { b };
+    let small = if a > b { b } else { a };
     let hi = wrapping_mul(big >> 32, small);
     if (hi >> 32) != 0 {
         return max;
     }
     let lo = wrapping_mul(big & 4294967295, small);
     let sum = wrapping_add(lo, wrapping_shl_u64(hi, 32));
-    if sum < lo {
-        max
-    } else {
-        sum
-    }
+    if sum < lo { max } else { sum }
 }
 
 fn dimension(inout l: L) -> u32 {
@@ -2612,11 +2532,7 @@ fn trait_decl(inout l: L, start: u64, public: bool) -> u32 {
             let bound = if eat(inout l, k_colon()) {
                 expect(inout l, k_mod());
                 let md = mode(inout l);
-                if md == 3 {
-                    2
-                } else {
-                    md
-                }
+                if md == 3 { 2 } else { md }
             } else {
                 2
             };
@@ -2955,19 +2871,7 @@ fn for_expr(inout l: L) -> u32 {
         let end = binary(inout l, 3);
         let s = espan_start(in l, first);
         let e = espan_end(in l, end);
-        mk(
-            inout l,
-            19,
-            s,
-            e,
-            first,
-            end,
-            if inclusive {
-                1
-            } else {
-                0
-            }
-        )
+        mk(inout l, 19, s, e, first, end, if inclusive { 1 } else { 0 })
     } else {
         first
     };
@@ -2998,19 +2902,7 @@ fn jump_expr(inout l: L, ret: bool) -> u32 {
         expr(inout l)
     };
     let end = l.last;
-    mk(
-        inout l,
-        if ret {
-            21
-        } else {
-            20
-        },
-        start,
-        end,
-        value,
-        none(),
-        none()
-    )
+    mk(inout l, if ret { 21 } else { 20 }, start, end, value, none(), none())
 }
 
 fn at_continue(in l: L) -> bool {
@@ -3144,14 +3036,7 @@ fn closure(inout l: L) -> u32 {
     let body = expr(inout l);
     vals_restore(inout l, outer);
     let end = l.last;
-    let flags = wrapping_add(
-        widen_u32(md),
-        if infer_effects {
-            256
-        } else {
-            0
-        }
-    );
+    let flags = wrapping_add(widen_u32(md), if infer_effects { 256 } else { 0 });
     mk5(inout l, 15, start, end, ps, flags, result, effs, body)
 }
 
@@ -3255,11 +3140,7 @@ fn region(inout l: L) -> u32 {
     let body = block(inout l);
     let end = l.last;
     let be = espan_end(in l, body);
-    let at_start = if be == 0 {
-        0
-    } else {
-        wrapping_sub(be, 1)
-    };
+    let at_start = if be == 0 { 0 } else { wrapping_sub(be, 1) };
     let bind = mkp(inout l, 2, at_start, be, marker, none(), none());
     let pm = mark(in l);
     push(inout l, bind);
@@ -3373,19 +3254,7 @@ fn binary(inout l: L, min: u8) -> u32 {
         };
         let s = espan_start(in l, lhs);
         let e = espan_end(in l, rhs);
-        lhs = mk(
-            inout l,
-            if right {
-                12
-            } else {
-                11
-            },
-            s,
-            e,
-            op,
-            lhs,
-            rhs
-        );
+        lhs = mk(inout l, if right { 12 } else { 11 }, s, e, op, lhs, rhs);
     }
     lhs
 }
@@ -3603,11 +3472,7 @@ fn expr_leaves(in a: Ast, e: u32) -> u64 {
         for i in 0..list_len(in a, n.a) {
             sum = saturating_add_u64(sum, expr_leaves(in a, list_at(in a, n.a, i)));
         }
-        if sum == 0 {
-            1
-        } else {
-            sum
-        }
+        if sum == 0 { 1 } else { sum }
     } else if n.kind == 5 && n.b != none() {
         expr_leaves(in a, n.b)
     } else {
@@ -3714,16 +3579,8 @@ fn open_interval(inout l: L, base: u32, lo_in: u32) -> u32 {
     };
     let ls = espan_start(in l, lo);
     let he = espan_end(in l, hi);
-    let s = if ls < ds {
-        ls
-    } else {
-        ds
-    };
-    let e = if he > de {
-        he
-    } else {
-        de
-    };
+    let s = if ls < ds { ls } else { ds };
+    let e = if he > de { he } else { de };
     mk(inout l, 11, s, e, op, lo, hi)
 }
 
@@ -3782,11 +3639,7 @@ fn pattern(inout l: L) -> u32 {
     let negative = eat(inout l, k_minus());
     let li = literal(inout l);
     if li != none() {
-        let v = if negative {
-            negate(inout l, li)
-        } else {
-            li
-        };
+        let v = if negative { negate(inout l, li) } else { li };
         let end = l.last;
         return mkp(inout l, 3, start, end, v, none(), none());
     }
@@ -3864,19 +3717,7 @@ fn constructor_pattern(inout l: L, start: u64, name: u32) -> u32 {
     }
     let fields = list_from(inout l, m);
     let end = l.last;
-    mkp(
-        inout l,
-        5,
-        start,
-        end,
-        name,
-        fields,
-        if named_fields {
-            1
-        } else {
-            0
-        }
-    )
+    mkp(inout l, 5, start, end, name, fields, if named_fields { 1 } else { 0 })
 }
 
 // ---------------------------------------------------------------- module

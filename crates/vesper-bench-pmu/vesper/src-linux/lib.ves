@@ -642,11 +642,7 @@ pub copy struct PerfGroup {
 fn make_perf_attr(event_type: u32, config: u64, is_leader: bool) -> PerfEventAttr {
     // READ_FORMAT = 1|2|4|8 = 15 (enabled, running, ID, GROUP)
     // flags: exclude_kernel(1<<5)=32 | exclude_hv(1<<6)=64; leader adds disabled(1) | pinned(1<<2)=4
-    let flags: u64 = if is_leader {
-        101
-    } else {
-        96
-    };
+    let flags: u64 = if is_leader { 101 } else { 96 };
     PerfEventAttr {
         event_type: event_type,
         size: 64,

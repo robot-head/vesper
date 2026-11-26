@@ -409,11 +409,7 @@ fn grow(inout i: I, n: u64, init: bool) {
         if left == 0 {
             break;
         }
-        let k = if left > PAGE_SIZE {
-            PAGE_SIZE
-        } else {
-            left
-        };
+        let k = if left > PAGE_SIZE { PAGE_SIZE } else { left };
         i.mem.extend(in i.zeros[0..k]);
         if init {
             i.ini.extend(in i.ones[0..k]);
@@ -548,17 +544,7 @@ fn read_mem(inout i: I, pc: u64, x: Val, n: u64) -> ChunkSeq[u8] eff [Fail[IErr]
 
 fn pkt_ptr(in i: I, end: bool) -> Val {
     let p = i.pkt;
-    Val {
-        v: add(
-            rt(in i, p, 1),
-            if end {
-                rt(in i, p, 3)
-            } else {
-                i.data_off
-            }
-        ),
-        p: p
-    }
+    Val { v: add(rt(in i, p, 1), if end { rt(in i, p, 3) } else { i.data_off }), p: p }
 }
 
 // `ctx_read`: a pointer or constant field, or `plain()` for bytes read
@@ -1208,11 +1194,7 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
         let lo = gw(in i.cfg, 8);
         let hi = gw(in i.cfg, 9);
         for k in w64(0)..w64(TASK_COMM_LEN) {
-            let w = if k < 8 {
-                lo
-            } else {
-                hi
-            };
+            let w = if k < 8 { lo } else { hi };
             comm.push(wrapping_u8(shr(w, mul(k & 7, 8))));
         }
         let mut name_len: u64 = TASK_COMM_LEN;
@@ -1233,11 +1215,7 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
         }
         let m = add(rt(in i, r, 2), at);
         for k in 0..size {
-            let b = if k < keep {
-                gbyte(in comm, k)
-            } else {
-                0
-            };
+            let b = if k < keep { gbyte(in comm, k) } else { 0 };
             i.mem.try_set(add(m, k), wrapping_u8(b));
         }
         mark_init(inout i, m, size);
@@ -1343,13 +1321,7 @@ fn push_frame(inout i: I, ret_pc: u64, lp: bool, entry: u64, n: u64, arg: Val) {
     i.frames.push(gw(in i.rv, 10));
     i.frames.push(gw(in i.rp, 10));
     i.frames.push(ret_pc);
-    i.frames.push(
-        if lp {
-            1
-        } else {
-            0
-        }
-    );
+    i.frames.push(if lp { 1 } else { 0 });
     i.frames.push(entry);
     i.frames.push(0);
     i.frames.push(n);
@@ -1548,11 +1520,7 @@ fn exec(
                     }
                 }
                 let old = read_n(in i, m, n);
-                let sv = if n == 4 {
-                    s.v & low32()
-                } else {
-                    s.v
-                };
+                let sv = if n == 4 { s.v & low32() } else { s.v };
                 let mut fetch_to = none();
                 let mut nv: u64 = 0;
                 match op {
@@ -1586,16 +1554,8 @@ fn exec(
                     },
                     AtomicOp::CmpXchg => {
                         let r0 = get(in i, pc, 0);
-                        let c = if n == 4 {
-                            r0.v & low32()
-                        } else {
-                            r0.v
-                        };
-                        nv = if c == old {
-                            sv
-                        } else {
-                            old
-                        };
+                        let c = if n == 4 { r0.v & low32() } else { r0.v };
+                        nv = if c == old { sv } else { old };
                         fetch_to = 0;
                     },
                 }
@@ -1730,11 +1690,7 @@ fn exec(
                         for r in w64(6)..w64(11) {
                             i.ri.try_set(r, true);
                         }
-                        let done = if r0.v != 0 {
-                            add(li, 1)
-                        } else {
-                            ln
-                        };
+                        let done = if r0.v != 0 { add(li, 1) } else { ln };
                         set(inout i, 0, scalar(done));
                         to = ret_pc;
                     } else {
@@ -1957,14 +1913,7 @@ fn save(inout i: I) {
             let w = gw(in spill, k);
             if w != 0 {
                 let t = gw(in ids, sub(w, 1));
-                spill.try_set(
-                    k,
-                    if t == none() {
-                        1
-                    } else {
-                        add(t, 1)
-                    }
-                );
+                spill.try_set(k, if t == none() { 1 } else { add(t, 1) });
             }
         }
         i.rt = nrt;
@@ -2028,14 +1977,7 @@ fn save_appended(inout i: I) {
         let w = gw(in vs, k);
         if w > np {
             let t = gw(in ids, sub(sub(w, 1), np));
-            vs.try_set(
-                k,
-                if t == none() {
-                    1
-                } else {
-                    add(t, 1)
-                }
-            );
+            vs.try_set(k, if t == none() { 1 } else { add(t, 1) });
         }
     }
     i.rt.truncate(mul(np, 8));
@@ -2051,13 +1993,7 @@ fn save_appended(inout i: I) {
         let w = gw(in i.spill, gw(in i.ptrans, k));
         if w > np {
             let t = gw(in ids, sub(sub(w, 1), np));
-            moved.push(
-                if t == none() {
-                    1
-                } else {
-                    add(t, 1)
-                }
-            );
+            moved.push(if t == none() { 1 } else { add(t, 1) });
         } else {
             moved.push(w);
         }
@@ -2271,13 +2207,7 @@ fn run_body(
     w.clear();
     w.reserve(add(add(16, i.nmaps), i.rlog.len()));
     bytes.reserve(i.rbytes.len());
-    w.push(
-        if res.code == 0 {
-            0
-        } else {
-            1
-        }
-    );
+    w.push(if res.code == 0 { 0 } else { 1 });
     w.push(res.code);
     w.push(res.pc);
     w.push(res.d);

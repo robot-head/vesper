@@ -13,11 +13,7 @@ fn scalars() -> u64 eff [Ffi[Bridge]] {
 
 fn validity() -> u64 eff [Ffi[Bridge]] {
     let a: u64 = match Bridge::bridge_bool(false) {
-        Ok(b) => if b {
-            10
-        } else {
-            20
-        },
+        Ok(b) => if b { 10 } else { 20 },
         Err(e) => wrapping_add(e.raw, 100),
     };
     let b: u64 = match Bridge::bridge_bool(true) {

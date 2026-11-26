@@ -311,11 +311,7 @@ fn env_override_state(in c: ProcCommand, in key: Slice[u8]) -> u8 {
         let (a, b) = env_key_bounds(in c, i);
         if slice_eq_nocase(in c.env_keys[a..b], in key) {
             let op = byte(in c.env_ops.as_slice(), i);
-            break if op == 1 {
-                1
-            } else {
-                2
-            };
+            break if op == 1 { 1 } else { 2 };
         }
     }
 }
@@ -468,11 +464,7 @@ pub fn cwd(inout c: ProcCommand, in dir: Str) {
 
 pub fn stdio(inout c: ProcCommand, stream: u32, mode: u32) {
     if stream == stdin_stream() {
-        c.stdin_mode = if mode == capture() {
-            null()
-        } else {
-            mode
-        };
+        c.stdin_mode = if mode == capture() { null() } else { mode };
     } else if stream == stdout_stream() {
         c.stdout_mode = mode;
     } else if stream == stderr_stream() {
@@ -1065,11 +1057,7 @@ fn keep(inout dst: ChunkSeq[u8], in src: Slice[u8], n: u64, limit: u64, inout cu
     } else {
         wrapping_sub(limit, dst.len())
     };
-    let take = if n < room {
-        n
-    } else {
-        room
-    };
+    let take = if n < room { n } else { room };
     if take < n {
         cut = true;
     }
@@ -1117,11 +1105,7 @@ fn pump_pipe(
     if avail.v == 0 {
         return (h, false);
     }
-    let want = if avail.v > 65536 {
-        65536
-    } else {
-        avail.v
-    };
+    let want = if avail.v > 65536 { 65536 } else { avail.v };
     let mut tmp: ChunkSeq[u8] = ChunkSeq::new[u8]();
     tmp.resize(widen_u64(want), 0);
     let mut n = DwordBox { v: 0 };
@@ -1200,11 +1184,7 @@ pub fn wait_timeout(
         }
         if !ogot && !egot {
             let left = wrapping_sub(millis, spent);
-            let slice = if left < 5 {
-                left
-            } else {
-                5
-            };
+            let slice = if left < 5 { left } else { 5 };
             if ended {
                 StdProcess::Sleep(wrapping_u32(slice));
             } else {

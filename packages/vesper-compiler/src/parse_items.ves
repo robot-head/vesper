@@ -179,16 +179,7 @@ fn parse_associated(
         } else if parse_at(p, 12) {
             parse_function(p, declaration)
         } else {
-            parse_bump(
-                syntax_issue(
-                    p,
-                    if declaration {
-                        18
-                    } else {
-                        19
-                    }
-                )
-            )
+            parse_bump(syntax_issue(p, if declaration { 18 } else { 19 }))
         };
         parse_associated(q, declaration)
     }
@@ -250,11 +241,7 @@ fn parse_params(
             q
         };
         let c = parse_eat(q, 40);
-        let q = if parse_ate(q, c) {
-            parse_ty(c)
-        } else {
-            q
-        };
+        let q = if parse_ate(q, c) { parse_ty(c) } else { q };
         let r = parse_eat(q, 38);
         if parse_ate(q, r) {
             parse_params(r, end)

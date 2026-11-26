@@ -619,11 +619,7 @@ fn fields(
             } else {
                 SessionKind::Tunnel
             };
-            let kind_u64 = if wt {
-                0
-            } else {
-                1
-            };
+            let kind_u64 = if wt { 0 } else { 1 };
             add_session(inout s.conn.sess, id, kind);
             set_u64_remove(inout s.conn.unparsed, id);
             let idx = bsearch_u64(in s.r_id.as_slice(), id).idx;
@@ -1813,11 +1809,7 @@ pub fn server_send_whole(
     let idx = bsearch_u64(in s.r_id.as_slice(), id).idx;
     let head = (word(in s.r_flags.as_slice(), idx) & RF_HEAD_REQ) != 0;
     let bodyless = status == HttpStatus::NoContent || status == HttpStatus::NotModified;
-    let wire_body = if head || bodyless {
-        0
-    } else {
-        body.len()
-    };
+    let wire_body = if head || bodyless { 0 } else { body.len() };
     if bodyless && body.len() > 0 {
         return Result::Err(SendError::InvalidResponse(MessageError::ContentLengthMismatch));
     }

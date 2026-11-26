@@ -142,11 +142,7 @@ fn entry_words(kind: u64) -> u64 {
 }
 
 fn sext32(v: u64) -> u64 {
-    if v & SIGN_BIT32 != 0 {
-        v | HIGH32
-    } else {
-        v
-    }
+    if v & SIGN_BIT32 != 0 { v | HIGH32 } else { v }
 }
 
 // The byte `i` of the base strings followed by the own strings.
@@ -324,18 +320,10 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
             n = vlen;
         } else if kind == BtfKind::Enum || kind == BtfKind::Enum64 {
             a = sot;
-            b = if kflag {
-                1
-            } else {
-                0
-            };
+            b = if kflag { 1 } else { 0 };
             n = vlen;
         } else if kind == BtfKind::Fwd {
-            a = if kflag {
-                1
-            } else {
-                0
-            };
+            a = if kflag { 1 } else { 0 };
         } else if kind == BtfKind::Func {
             a = sot;
             b = vlen;
@@ -359,13 +347,7 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
                 || kind == BtfKind::FuncProto
         );
         out.push(kind);
-        out.push(
-            if named {
-                name
-            } else {
-                0
-            }
-        );
+        out.push(if named { name } else { 0 });
         out.push(a);
         out.push(b);
         out.push(c);
@@ -387,13 +369,7 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
             } else if kind == BtfKind::Enum {
                 out.push(le32(in types, at));
                 let v = le32(in types, wrapping_add(at, 4));
-                out.push(
-                    if kflag {
-                        sext32(v)
-                    } else {
-                        v
-                    }
-                );
+                out.push(if kflag { sext32(v) } else { v });
             } else if kind == BtfKind::Enum64 {
                 out.push(le32(in types, at));
                 out.push(
@@ -458,11 +434,7 @@ fn validate(
             || kind == BtfKind::FuncProto
             || kind == BtfKind::Datasec {
             // the type is entry word 1 of a member or param, word 0 of a var
-            let at: u64 = if kind == BtfKind::Datasec {
-                0
-            } else {
-                1
-            };
+            let at: u64 = if kind == BtfKind::Datasec { 0 } else { 1 };
             for i in 0..n {
                 let ty = word_at(in out, wrapping_add(wrapping_add(e, wrapping_mul(i, k)), at));
                 if ty >= ntypes {
@@ -514,11 +486,7 @@ fn parse_types(
     }
     let count = word_at(in out, 1);
     // a standalone blob's own types start after `void` (id 0)
-    let first_id: u64 = if split {
-        base_types
-    } else {
-        1
-    };
+    let first_id: u64 = if split { base_types } else { 1 };
     let ntypes = wrapping_add(first_id, count);
     let v = validate(in out, inout bad, first_id, ntypes, in base_strings, in own);
     if v != 0 {

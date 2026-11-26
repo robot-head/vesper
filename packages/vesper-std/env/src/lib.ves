@@ -222,26 +222,10 @@ fn errno_kind(e: u32) -> u32 {
         20 => 4,
         21 => 5,
         22 => 7,
-        39 => if mac {
-            13
-        } else {
-            6
-        },
-        66 => if mac {
-            6
-        } else {
-            13
-        },
-        38 => if mac {
-            13
-        } else {
-            11
-        },
-        78 => if mac {
-            11
-        } else {
-            13
-        },
+        39 => if mac { 13 } else { 6 },
+        66 => if mac { 6 } else { 13 },
+        38 => if mac { 13 } else { 11 },
+        78 => if mac { 11 } else { 13 },
         _ => 13,
     }
 }

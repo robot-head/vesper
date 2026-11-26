@@ -210,11 +210,7 @@ impl Caps {
         let an = wrapping_sub(at64(in self.ke, i), a);
         let b = at64(in self.ka, j);
         let bn = wrapping_sub(at64(in self.ke, j), b);
-        let n = if an < bn {
-            an
-        } else {
-            bn
-        };
+        let n = if an < bn { an } else { bn };
         for k in 0..n {
             let x = at8(in self.text, add(a, k));
             let y = at8(in self.text, add(b, k));

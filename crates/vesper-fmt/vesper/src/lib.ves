@@ -180,11 +180,7 @@ fn cadd(a: u64, b: u64) -> u64 eff [Fail[FmtFail]] {
 }
 
 fn min64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // `Limits` (all fields are `usize` in Rust, at most `u64::MAX` here).
@@ -366,11 +362,7 @@ fn push_text(
     } else {
         chars(in src, s, e)
     };
-    let kind = if comment {
-        D_COMMENT
-    } else {
-        D_TEXT
-    };
+    let kind = if comment { D_COMMENT } else { D_TEXT };
     add_node(inout d, kind, s, e, width, 1)
 }
 
@@ -438,11 +430,7 @@ fn push_concat_range(
         }
         let w = width_at(in d, id);
         if width != NONE {
-            width = if w == NONE {
-                NONE
-            } else {
-                cadd(width, w)
-            };
+            width = if w == NONE { NONE } else { cadd(width, w) };
         }
         d.kids.push(wrapping_u32(id));
     }
@@ -470,11 +458,7 @@ fn text_len(in d: Doc, id: u64) -> u64 {
 
 // A pending render entry: node, flat flag and indentation in one word.
 fn entry(indent: u64, flat: bool, id: u64) -> u64 {
-    let f: u64 = if flat {
-        4294967296
-    } else {
-        0
-    };
+    let f: u64 = if flat { 4294967296 } else { 0 };
     id | f | wrapping_shl_u64(indent, 33)
 }
 
@@ -1134,11 +1118,7 @@ fn gap(p: u8, c: u8, block: bool, after_block: bool) -> u8 {
         return G_HARD;
     }
     if p == K_COMMA {
-        return if block {
-            G_HARD
-        } else {
-            G_SOFT
-        };
+        return if block { G_HARD } else { G_SOFT };
     }
     if after_block
         && !(
@@ -1427,6 +1407,124 @@ fn word_used_as_name(has_prev: bool, prev: u8, c: u8, next: u8) -> bool {
 }
 
 // `sequence`: the atoms from `pos` up to the closing delimiter `end`.
+// The widest short `if` expression that stays on one line, as rustfmt's
+// `single_line_if_else_max_width`.
+const SHORT_IF_ELSE_WIDTH: u64 = 50;
+
+// Where a short `if c { a } else { b }` starting at `start` ends: the index
+// of its last `}` (NONE: it is not one), when each branch holds one
+// expression and no comment, its one-line width is at most
+// SHORT_IF_ELSE_WIDTH, and it ends the expression it is in. rustfmt keeps
+// such an `if` on one line.
+fn short_if_else(in at: Atoms, start: u64, end: u8, in src: Slice[u8]) -> u64 {
+    let n = at.kind.len();
+    // 0: condition, 1: first branch, 2: `else`, 3: its `{`, 4: second branch.
+    let mut state: u8 = 0;
+    let mut depth: u64 = 0;
+    let mut tokens: u64 = 0;
+    let mut width: u64 = 0;
+    let mut has_prev = false;
+    let mut prev: u8 = 0;
+    let mut unary = false;
+    let mut i = start;
+    let mut close = NONE;
+    loop {
+        if i >= n {
+            return NONE;
+        }
+        let kind = akind(in at, i);
+        let sugar = match at.sgap.try_get(i) {
+            Option::Some(g) => g,
+            Option::None => SGAP_NONE,
+        };
+        // A comment, a statement, a separator or a sugar boundary (`else` on
+        // its own line in a template) can break the line, so the `if` cannot
+        // be one group.
+        if kind == K_COMMENT
+            || kind == K_BLOCK_COMMENT
+            || kind == K_SEMI
+            || i > start && sugar != SGAP_NONE
+            || depth == 0 && (kind == K_COMMA || kind == K_ARROW) {
+            return NONE;
+        }
+        if has_prev {
+            let space = if prev == K_L_PAREN
+                || prev == K_L_BRACKET
+                || kind == K_R_PAREN
+                || kind == K_R_BRACKET
+                || unary {
+                false
+            } else if prev == K_L_BRACE || kind == K_R_BRACE {
+                true
+            } else {
+                let g = gap(prev, kind, false, prev == K_R_BRACE);
+                g != G_NONE && g != G_EMPTY
+            };
+            if space {
+                width = wrapping_add(width, 1);
+            }
+        }
+        width = wrapping_add(width, chars(in src, w32(in at.start, i), w32(in at.end, i)));
+        if width > SHORT_IF_ELSE_WIDTH {
+            return NONE;
+        }
+        unary = (kind == K_MINUS || kind == K_BANG || kind == K_TILDE)
+            && !(has_prev && ends_operand(prev));
+        has_prev = true;
+        prev = kind;
+        if kind == K_L_BRACE {
+            if depth == 0 && (state == 0 && tokens > 1 || state == 3) {
+                state = wrapping_add(state, 1);
+                tokens = 0;
+                depth = 1;
+            } else {
+                return NONE;
+            }
+        } else if kind == K_R_BRACE && depth == 1 && (state == 1 || state == 4) {
+            if tokens == 0 {
+                return NONE;
+            }
+            if state == 4 {
+                close = i;
+                break;
+            }
+            state = 2;
+            depth = 0;
+        } else if kind == K_ELSE && depth == 0 && state == 2 {
+            state = 3;
+        } else if depth == 0 && state != 0 {
+            return NONE;
+        } else if kind == K_L_PAREN || kind == K_L_BRACKET {
+            depth = wrapping_add(depth, 1);
+            tokens = wrapping_add(tokens, 1);
+        } else if kind == K_R_PAREN || kind == K_R_BRACKET || kind == K_R_BRACE {
+            if depth == 0 {
+                return NONE;
+            }
+            depth = wrapping_sub(depth, 1);
+            tokens = wrapping_add(tokens, 1);
+        } else {
+            tokens = wrapping_add(tokens, 1);
+        }
+        i = wrapping_add(i, 1);
+    }
+    let next = wrapping_add(close, 1);
+    if next >= n {
+        return close;
+    }
+    let k = akind(in at, next);
+    if end != NO_END && k == end
+        || k == K_SEMI
+        || k == K_COMMA
+        || k == K_R_PAREN
+        || k == K_R_BRACKET
+        || k == K_R_BRACE {
+        close
+    } else {
+        NONE
+    }
+}
+
 fn sequence(
     in at: Atoms,
     inout pos: u64,
@@ -1465,6 +1563,12 @@ fn sequence(
     let mut previous_params = false;
     // The member chain being built on `line` (`out.rows.push(..)`).
     let mut chain = new_chain();
+    // A short `if c { a } else { b }` laid out on `line` as one group: the
+    // index of its last `}` (NONE: none is open), and where its docs and
+    // breaks start on `line`.
+    let mut short_close = NONE;
+    let mut short_docs: u64 = 0;
+    let mut short_breaks: u64 = 0;
     loop {
         if pos >= n {
             break;
@@ -1473,6 +1577,33 @@ fn sequence(
         if end != NO_END && c == end {
             break;
         }
+        // An `if` used as a value (`let x = if ..`, an argument, a match
+        // arm, a block's last expression), as rustfmt decides.
+        let starts_short_if = short_close == NONE && c == K_IF && !(has_prev && prev == K_ELSE);
+        // An `if` that starts a statement is a value only as its block's last
+        // expression.
+        let starts_statement = block
+            && (
+                !has_prev
+                    || previous_block
+                    || prev == K_SEMI
+                    || prev == K_COMMENT
+                    || prev == K_BLOCK_COMMENT
+            );
+        let short_if_close = if starts_short_if {
+            let close = short_if_else(in at, pos, end, in src);
+            let next = wrapping_add(close, 1);
+            if close == NONE
+                || !starts_statement
+                || next >= n
+                || end != NO_END && akind(in at, next) == end {
+                close
+            } else {
+                NONE
+            }
+        } else {
+            NONE
+        };
         let f = aflags(in at, pos);
         let blank = f & 1 != 0;
         let glued = f & 2 != 0;
@@ -1484,6 +1615,8 @@ fn sequence(
         // too, spaced inside its braces.
         let is_record = opens_block && in_expr && !head && has_prev && prev == K_UPPER;
         let is_block = opens_block && !is_record;
+        // A branch of a short `if` breaks only with the whole `if`.
+        let soft_block = is_block && short_close != NONE;
         let cs0 = w32(in at.start, pos);
         let ce0 = w32(in at.end, pos);
         if c == K_IF
@@ -1550,7 +1683,7 @@ fn sequence(
             output.push(wrapping_u32(push_leaf(inout d, D_SOFT_SPACE)));
         } else if spacing == G_SOFT && !is_block && near_comment {
             line.push(wrapping_u32(push_leaf(inout d, D_SOFT_SPACE)));
-        } else if (spacing == G_SOFT || spacing == G_SPACE) && !is_block {
+        } else if (spacing == G_SOFT || spacing == G_SPACE) && (!is_block || soft_block) {
             line.push(wrapping_u32(push_leaf(inout d, D_SPACE)));
         } else if spacing == G_RETURN {
             concat_group(inout line, inout breaks, inout d, inout output);
@@ -1582,11 +1715,16 @@ fn sequence(
                 chain_dot(inout chain, wrapping_sub(breaks.len(), 1));
             }
         }
-        if is_block {
+        if is_block && !soft_block {
             concat_group(inout line, inout breaks, inout d, inout output);
             if spacing == G_SOFT || spacing == G_SPACE {
                 output.push(wrapping_u32(push_leaf(inout d, D_SPACE)));
             }
+        }
+        if short_if_close != NONE {
+            short_close = short_if_close;
+            short_docs = line.len();
+            short_breaks = breaks.len();
         }
         let cs = w32(in at.start, pos);
         let ce = w32(in at.end, pos);
@@ -1635,7 +1773,9 @@ fn sequence(
             } else {
                 let lead = push_leaf(
                     inout d,
-                    if is_block || trailing_comma {
+                    if soft_block {
+                        D_SOFT_SPACE
+                    } else if is_block || trailing_comma {
                         D_HARD
                     } else if is_record {
                         D_SOFT_SPACE
@@ -1647,7 +1787,9 @@ fn sequence(
                 let nest = push_nest(inout d, 4, content);
                 let trail = push_leaf(
                     inout d,
-                    if is_block || last_is_line_comment || trailing_comma {
+                    if soft_block {
+                        D_SOFT_SPACE
+                    } else if is_block || last_is_line_comment || trailing_comma {
                         D_HARD
                     } else if is_record {
                         D_SOFT_SPACE
@@ -1658,8 +1800,8 @@ fn sequence(
                 let all = concat4(inout d, start, nest, trail, finish);
                 // A parameter list before `->` shares its line's group, so it
                 // breaks whenever the signature with its return type cannot
-                // fit on one line.
-                if params {
+                // fit on one line; a short `if`'s branch shares the `if`'s.
+                if params || soft_block {
                     all
                 } else {
                     push_group(inout d, all)
@@ -1668,11 +1810,29 @@ fn sequence(
         } else {
             push_text(inout d, in src, cs, ce, c == K_COMMENT || c == K_BLOCK_COMMENT)
         };
-        if is_block {
+        if is_block && !soft_block {
             output.push(wrapping_u32(node));
         } else {
             line.push(wrapping_u32(node));
             chain_push(inout chain, width_at(in d, node), c == K_L_PAREN, c);
+        }
+        // The short `if` ends: it becomes one group that breaks like any
+        // other `if`, with the breaks in its condition kept on one line.
+        if short_close != NONE && pos > short_close {
+            short_close = NONE;
+            // Unless the line broke inside the `if`, which `short_if_else`
+            // rules out, leaving nothing to group.
+            if short_docs <= line.len() && short_breaks <= breaks.len() {
+                for i in short_breaks..breaks.len() {
+                    let b = break_at(in breaks, i);
+                    let glue = push_leaf(inout d, if b.level == 12 { D_NIL } else { D_SPACE });
+                    let _ = line.try_set(b.offset, wrapping_u32(glue));
+                }
+                breaks.truncate(short_breaks);
+                let inner = push_concat_range(inout d, in line.as_slice(), short_docs, line.len());
+                line.truncate(short_docs);
+                line.push(wrapping_u32(push_group(inout d, inner)));
+            }
         }
         previous_block = is_block;
         previous_params = params;
@@ -2214,16 +2374,8 @@ fn sugar_group(inout at: Atoms, in p: P, in src: Slice[u8], start: u64, end: u64
             if repeat {
                 let a1 = wrapping_add(i, 1);
                 let a2 = wrapping_add(i, 2);
-                let k1 = if a1 < end {
-                    akind(in at, a1)
-                } else {
-                    K_EOF
-                };
-                let k2 = if a2 < end {
-                    akind(in at, a2)
-                } else {
-                    K_EOF
-                };
+                let k1 = if a1 < end { akind(in at, a1) } else { K_EOF };
+                let k2 = if a2 < end { akind(in at, a2) } else { K_EOF };
                 if a1 < end && (k1 == K_STAR || k1 == K_PLUS) {
                     join(inout at, a1, G_NONE);
                 } else if a2 < end
@@ -2481,4 +2633,602 @@ pub copy struct Hash32 {
     w1: u64,
     w2: u64,
     w3: u64
+}
+
+// ---------------------------------------------------------------- proof
+
+// `format_for_verification` (crates/vesper-fmt/src/proof_source.rs) and the
+// arena projection it captures (`proof_model::project`): format `source`
+// under the source-proof limits and keep the first pass's document, read
+// back as a bounded model, with the same limit errors in the same order.
+//
+// The model is the projection's `ModelDoc` tree in prefix order: one kind
+// per node (the `D_` kinds; the formatter's own " " and "\n" are text), a
+// word per node (a nest's spaces, a concatenation's child count, else 0)
+// and, for text and comment nodes, their bytes in order.
+
+// `ProofError` as a code; `resource` names a `Resource` limit (`R_`).
+const P_NONE: u64 = 0;
+const P_INVALID_LIMITS: u64 = 1;
+const P_RESOURCE: u64 = 2;
+const P_INVALID_DOCUMENT: u64 = 3;
+const P_ALLOCATION: u64 = 4;
+// `Formatter(error)`: `fmt` is the error.
+const P_FORMATTER: u64 = 5;
+const P_CONSERVATION: u64 = 6;
+const P_LEAN_SYNTAX: u64 = 7;
+
+const R_ARITHMETIC: u64 = 0;
+const R_WORK: u64 = 1;
+const R_METADATA: u64 = 2;
+const R_NODES: u64 = 3;
+const R_DEPTH: u64 = 4;
+const R_TEXT: u64 = 5;
+const R_SOURCE_WORK: u64 = 6;
+
+// `ProofLimits`.
+pub copy struct ProofLimits {
+    pub max_nodes: u64,
+    pub max_text_bytes: u64,
+    pub max_depth: u64,
+    pub max_metadata_bytes: u64,
+    pub max_lean_bytes: u64,
+    pub max_work: u64
+}
+
+pub fn proof_limits_default() -> ProofLimits {
+    ProofLimits {
+        max_nodes: 4096,
+        max_text_bytes: 131072,
+        max_depth: 64,
+        max_metadata_bytes: 1048576,
+        max_lean_bytes: 1048576,
+        max_work: 67108864
+    }
+}
+
+// `ProofLimits::validate`: every limit from 1 to its `HARD` cap.
+pub fn proof_limits_valid(in l: ProofLimits) -> bool {
+    within(l.max_nodes, 16384)
+        && within(l.max_text_bytes, 262144)
+        && within(l.max_depth, 128)
+        && within(l.max_metadata_bytes, 4194304)
+        && within(l.max_lean_bytes, 2097152)
+        && within(l.max_work, 268435456)
+}
+
+fn within(v: u64, cap: u64) -> bool {
+    v != 0 && v <= cap
+}
+
+// A `ProofError`.
+pub copy struct ProofFail {
+    pub code: u64,
+    pub resource: u64,
+    pub fmt: FmtFail
+}
+
+pub fn no_proof_fail() -> ProofFail {
+    ProofFail { code: P_NONE, resource: 0, fmt: FmtFail { code: 0, offset: 0 } }
+}
+
+fn proof_fail(code: u64) -> ProofFail {
+    ProofFail { code: code, resource: 0, fmt: FmtFail { code: 0, offset: 0 } }
+}
+
+fn resource(r: u64) -> ProofFail {
+    ProofFail { code: P_RESOURCE, resource: r, fmt: FmtFail { code: 0, offset: 0 } }
+}
+
+// `DocumentModel`: the prefix-order tree, its statistics and the comments.
+// The fields are private, like Rust's: only `format_for_verification`
+// builds a model, and readers get copies.
+pub struct Model {
+    kind: ChunkSeq[u8],
+    arg: ChunkSeq[u64],
+    // Text and comment payloads, in prefix order, and where each ends.
+    text: ChunkSeq[u8],
+    text_ends: ChunkSeq[u64],
+    // Each comment's payload number.
+    comment_text: ChunkSeq[u64],
+    node_count: u64,
+    text_bytes: u64,
+    depth: u64,
+    comments: u64
+}
+
+fn model_new() -> Model {
+    Model {
+        kind: ChunkSeq::new[u8](),
+        arg: ChunkSeq::new[u64](),
+        text: ChunkSeq::new[u8](),
+        text_ends: ChunkSeq::new[u64](),
+        comment_text: ChunkSeq::new[u64](),
+        node_count: 0,
+        text_bytes: 0,
+        depth: 0,
+        comments: 0
+    }
+}
+
+// Rust's `size_of` for the projection's charges.
+const SIZE_DOCUMENT_MODEL: u64 = 80;
+const SIZE_FRAME: u64 = 40;
+const SIZE_MODEL_DOC: u64 = 32;
+const SIZE_STRING: u64 = 24;
+const SIZE_TOKEN: u64 = 24;
+
+// `Budget`.
+copy struct Budget {
+    remaining: u64,
+    metadata: u64,
+    max_metadata: u64
+}
+
+fn work(inout b: Budget, units: u64) -> bool {
+    if units > b.remaining {
+        return false;
+    }
+    b.remaining = wrapping_sub(b.remaining, units);
+    true
+}
+
+// `Budget::metadata`: the error, or `P_NONE`.
+fn metadata(inout b: Budget, bytes: u64) -> ProofFail {
+    if b.metadata > wrapping_sub(U64_MAX, bytes) {
+        return resource(R_ARITHMETIC);
+    }
+    b.metadata = wrapping_add(b.metadata, bytes);
+    if b.metadata > b.max_metadata {
+        return resource(R_METADATA);
+    }
+    if !work(inout b, bytes) {
+        return resource(R_WORK);
+    }
+    no_proof_fail()
+}
+
+// `project(document, root, limits)`: `preflight`'s walk, building the
+// prefix-order model as it enters each node (Rust builds it after the walk
+// succeeds; it fails only on allocation after that, so the model is the
+// same). The text of text and comment nodes is `src[a..b]`.
+fn project(
+    in d: Doc,
+    root: u64,
+    in src: Slice[u8],
+    in l: ProofLimits,
+    inout m: Model
+) -> ProofFail {
+    if !proof_limits_valid(in l) {
+        return proof_fail(P_INVALID_LIMITS);
+    }
+    let mut b = Budget { remaining: l.max_work, metadata: 0, max_metadata: l.max_metadata_bytes };
+    let f = metadata(inout b, SIZE_DOCUMENT_MODEL);
+    if f.code != P_NONE {
+        return f;
+    }
+    let f = metadata(inout b, wrapping_mul(l.max_depth, SIZE_FRAME));
+    if f.code != P_NONE {
+        return f;
+    }
+    // The stack: node, depth, next child.
+    let mut s_id: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](l.max_depth);
+    let mut s_depth: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](l.max_depth);
+    let mut s_next: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](l.max_depth);
+    s_id.push(root);
+    s_depth.push(1);
+    s_next.push(0);
+    let mut build_work: u64 = 0;
+    loop {
+        let top = s_id.len();
+        if top == 0 {
+            break;
+        }
+        let t = wrapping_sub(top, 1);
+        if !work(inout b, 1) {
+            return resource(R_WORK);
+        }
+        let id = word(in s_id, t);
+        let depth = word(in s_depth, t);
+        let next = word(in s_next, t);
+        let k = kind_at(in d, id);
+        if next == 0 {
+            // Entering (a leaf or a node before its first child).
+            m.node_count = wrapping_add(m.node_count, 1);
+            if m.node_count > l.max_nodes {
+                return resource(R_NODES);
+            }
+            if depth > m.depth {
+                m.depth = depth;
+            }
+            if m.depth > l.max_depth {
+                return resource(R_DEPTH);
+            }
+            let f = metadata(inout b, SIZE_MODEL_DOC);
+            if f.code != P_NONE {
+                return f;
+            }
+            build_work = wrapping_add(build_work, wrapping_add(SIZE_MODEL_DOC, 4));
+            let text = k == D_TEXT || k == D_COMMENT || k == D_SPACE || k == D_NEWLINE;
+            let mut ta: u64 = 0;
+            let mut tb: u64 = 0;
+            if k == D_TEXT || k == D_COMMENT {
+                ta = u32_at(in d.a, id);
+                tb = u32_at(in d.b, id);
+            }
+            let len = if k == D_SPACE || k == D_NEWLINE {
+                1
+            } else {
+                wrapping_sub(tb, ta)
+            };
+            if text {
+                m.text_bytes = wrapping_add(m.text_bytes, len);
+                if m.text_bytes > l.max_text_bytes {
+                    return resource(R_TEXT);
+                }
+                let f = metadata(inout b, len);
+                if f.code != P_NONE {
+                    return f;
+                }
+                build_work = wrapping_add(build_work, len);
+                if k == D_COMMENT {
+                    m.comments = wrapping_add(m.comments, 1);
+                    let f = metadata(inout b, wrapping_add(SIZE_STRING, len));
+                    if f.code != P_NONE {
+                        return f;
+                    }
+                    build_work = wrapping_add(build_work, wrapping_add(SIZE_STRING, len));
+                }
+            }
+            // The model node.
+            if k == D_SPACE {
+                m.kind.push(D_TEXT);
+                m.arg.push(0);
+                m.text.push(32);
+                m.text_ends.push(m.text.len());
+            } else if k == D_NEWLINE {
+                m.kind.push(D_TEXT);
+                m.arg.push(0);
+                m.text.push(10);
+                m.text_ends.push(m.text.len());
+            } else if text {
+                if k == D_COMMENT {
+                    m.comment_text.push(m.text_ends.len());
+                }
+                m.kind.push(k);
+                m.arg.push(0);
+                m.text.extend(in src[ta..tb]);
+                m.text_ends.push(m.text.len());
+            } else if k == D_NEST {
+                m.kind.push(k);
+                m.arg.push(u32_at(in d.a, id));
+            } else if k == D_CONCAT {
+                m.kind.push(k);
+                m.arg.push(u32_at(in d.b, id));
+            } else {
+                m.kind.push(k);
+                m.arg.push(0);
+            }
+        }
+        // The next child, if any.
+        let mut child = U64_MAX;
+        if k == D_NEST && next == 0 {
+            child = u32_at(in d.b, id);
+        } else if k == D_GROUP && next == 0 {
+            child = u32_at(in d.a, id);
+        } else if k == D_CONCAT && next < u32_at(in d.b, id) {
+            child = u32_at(in d.kids, wrapping_add(u32_at(in d.a, id), next));
+        }
+        if child != U64_MAX {
+            let _ = s_next.try_set(t, wrapping_add(next, 1));
+            let cd = wrapping_add(depth, 1);
+            if cd > l.max_depth {
+                return resource(R_DEPTH);
+            }
+            s_id.push(child);
+            s_depth.push(cd);
+            s_next.push(0);
+        } else {
+            let _ = s_id.pop();
+            let _ = s_depth.pop();
+            let _ = s_next.pop();
+        }
+    }
+    if !work(inout b, build_work) {
+        return resource(R_WORK);
+    }
+    no_proof_fail()
+}
+
+fn word(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// What `format_for_verification` returns: the error, or the output, the
+// two digests and the model.
+pub struct Verified {
+    fail: ProofFail,
+    output: ChunkSeq[u8],
+    changed: bool,
+    source_hash: Hash32,
+    output_hash: Hash32,
+    model: Model
+}
+
+fn verified_fail(f: ProofFail) -> Verified {
+    let z = Hash32 { w0: 0, w1: 0, w2: 0, w3: 0 };
+    Verified {
+        fail: f,
+        output: ChunkSeq::new[u8](),
+        changed: false,
+        source_hash: z,
+        output_hash: z,
+        model: model_new()
+    }
+}
+
+// `bounded_format_limits(Limits::default())`.
+fn proof_format_limits() -> Limits {
+    Limits {
+        max_input_bytes: 131072,
+        max_output_bytes: 262144,
+        max_tokens: 8192,
+        max_doc_nodes: 100000,
+        max_depth: 24,
+        max_work: 134217728
+    }
+}
+
+// `format_with_capture` with a capture: `format`, projecting the first
+// pass. A projection error comes back in the result; a formatter error is
+// raised.
+fn capture(
+    in src: Slice[u8],
+    in lim: Limits,
+    inout w: Work,
+    in pl: ProofLimits
+) -> Verified eff [Fail[FmtFail]] {
+    if src.len() > lim.max_input_bytes {
+        fail(E_INPUT);
+    }
+    let t = gate(in src, in lim, inout w);
+    let first = once_tokens(in src, t, in lim, inout w);
+    let mut m = model_new();
+    let f = project(in first.doc, first.root, in src, in pl, inout m);
+    if f.code != P_NONE {
+        return verified_fail(f);
+    }
+    let first_nodes = first.nodes;
+    let output = first.out;
+    let ts = gate(in src, in lim, inout w);
+    let to = gate(in output.as_slice(), in lim, inout w);
+    if !same_pieces(in src, in ts, in output.as_slice(), in to) {
+        fail(E_CONSERVATION);
+    }
+    let to2 = gate(in output.as_slice(), in lim, inout w);
+    let again = once_tokens(in output.as_slice(), to2, in lim, inout w);
+    let second = again.out;
+    if second.len() != output.len() || !same_words(in first_nodes, in again.nodes) {
+        fail(E_IDEMPOTENT);
+    }
+    for i in 0..output.len() {
+        if byte(in second.as_slice(), i) != byte(in output.as_slice(), i) {
+            fail(E_IDEMPOTENT);
+        }
+    }
+    let mut changed = src.len() != output.len();
+    if !changed {
+        for i in 0..src.len() {
+            if byte(in src, i) != byte(in output.as_slice(), i) {
+                changed = true;
+                break;
+            }
+        }
+    }
+    // Pay for the source association before it runs.
+    let assoc = wrapping_add(
+        wrapping_add(wrapping_mul(src.len(), 8), wrapping_mul(lim.max_tokens, SIZE_TOKEN)),
+        wrapping_add(wrapping_mul(output.len(), 2), wrapping_mul(m.text_bytes, 2))
+    );
+    charge(inout w, assoc);
+    let z = Hash32 { w0: 0, w1: 0, w2: 0, w3: 0 };
+    Verified {
+        fail: no_proof_fail(),
+        output: output,
+        changed: changed,
+        source_hash: z,
+        output_hash: z,
+        model: m
+    }
+}
+
+// `format_for_verification(source, Limits::default(), ProofLimits::default())`.
+pub fn format_for_verification(in source: Str) -> Verified eff [Ffi[Blake3]] {
+    let pl = proof_limits_default();
+    let lim = proof_format_limits();
+    let src = source.as_bytes();
+    let mut w = Work { used: 0, max: wrapping_add(lim.max_work, pl.max_work) };
+    w.used = pl.max_work;
+    let mut v = handle Fail[FmtFail] in {
+        capture(in src, in lim, inout w, in pl)
+    } with {
+        return v => v,
+        raise(e, _k) => verified_fail(ProofFail { code: P_FORMATTER, resource: 0, fmt: e }),
+    };
+    if v.fail.code != P_NONE {
+        return v;
+    }
+    // The comments, in order, are the source's comment tokens.
+    let mut d = diags_new();
+    let t = lex_with_limits(in src, inout d, lim.max_input_bytes, lim.max_tokens, 1);
+    if t.rejected || d.code.len() != 0 {
+        return verified_fail(proof_fail(P_CONSERVATION));
+    }
+    let mut c: u64 = 0;
+    let mut same = true;
+    for i in 0..t.kind.len() {
+        let k = match t.kind.try_get(i) {
+            Option::Some(k) => k,
+            Option::None => 0,
+        };
+        if k != 1 && k != 2 {
+            continue;
+        }
+        let a = match t.start.try_get(i) {
+            Option::Some(s) => widen_u64(s),
+            Option::None => 0,
+        };
+        let e = token_end(in t, i);
+        if !comment_is(in v.model, c, in src[a..e]) {
+            same = false;
+            break;
+        }
+        c = wrapping_add(c, 1);
+    }
+    if !same || c != v.model.comments {
+        return verified_fail(proof_fail(P_CONSERVATION));
+    }
+    v.source_hash = blake3(in source);
+    v.output_hash = hash_bytes(in v.output.as_slice());
+    v
+}
+
+fn hash_bytes(in b: Slice[u8]) -> Hash32 eff [Ffi[Blake3]] {
+    let d = hash(in b);
+    Hash32 { w0: d.w0, w1: d.w1, w2: d.w2, w3: d.w3 }
+}
+
+// Whether the model's comment number `c` is `b`.
+fn comment_is(in m: Model, c: u64, in b: Slice[u8]) -> bool {
+    if c >= m.comment_text.len() {
+        return false;
+    }
+    let t = word(in m.comment_text, c);
+    let a = if t == 0 {
+        0
+    } else {
+        word(in m.text_ends, wrapping_sub(t, 1))
+    };
+    let e = word(in m.text_ends, t);
+    if wrapping_sub(e, a) != b.len() {
+        return false;
+    }
+    for j in 0..b.len() {
+        if byte(in m.text.as_slice(), wrapping_add(a, j)) != byte(in b, j) {
+            return false;
+        }
+    }
+    true
+}
+
+// Read-only views of a `Verified` (`FormatVerification`'s accessors): its
+// error, output, digests and model, copied out, so no caller can pair a
+// model or digest with text that was not formatted.
+pub fn verified_error(in v: Verified) -> ProofFail {
+    v.fail
+}
+
+pub fn verified_output(in v: Verified) -> ChunkSeq[u8] {
+    copy_bytes(in v.output)
+}
+
+pub fn verified_changed(in v: Verified) -> bool {
+    v.changed
+}
+
+pub fn verified_source_hash(in v: Verified) -> Hash32 {
+    v.source_hash
+}
+
+pub fn verified_output_hash(in v: Verified) -> Hash32 {
+    v.output_hash
+}
+
+// The model: kinds, words, payload bytes and ends in prefix order, then
+// `node_count`, `text_bytes`, `depth` and `comments`.
+pub fn model_kinds(in v: Verified) -> ChunkSeq[u8] {
+    copy_bytes(in v.model.kind)
+}
+
+pub fn model_args(in v: Verified) -> ChunkSeq[u64] {
+    copy_words(in v.model.arg)
+}
+
+pub fn model_text(in v: Verified) -> ChunkSeq[u8] {
+    copy_bytes(in v.model.text)
+}
+
+pub fn model_text_ends(in v: Verified) -> ChunkSeq[u64] {
+    copy_words(in v.model.text_ends)
+}
+
+pub fn model_node_count(in v: Verified) -> u64 {
+    v.model.node_count
+}
+
+pub fn model_text_bytes(in v: Verified) -> u64 {
+    v.model.text_bytes
+}
+
+pub fn model_depth(in v: Verified) -> u64 {
+    v.model.depth
+}
+
+pub fn model_comments(in v: Verified) -> u64 {
+    v.model.comments
+}
+
+fn copy_bytes(in s: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](s.len());
+    out.extend(in s.as_slice());
+    out
+}
+
+fn copy_words(in s: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](s.len());
+    for i in 0..s.len() {
+        out.push(word(in s, i));
+    }
+    out
+}
+
+// A formatter error's `Error` variant (the `E_` code) and syntax offset.
+pub fn fail_code(f: FmtFail) -> u64 {
+    f.code
+}
+
+pub fn fail_offset(f: FmtFail) -> u64 {
+    f.offset
+}
+
+// A digest as 64 lower-case hex digits (`blake3::Hash::to_hex`).
+pub fn hash_hex(h: Hash32) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](64);
+    hex_word(inout out, h.w0);
+    hex_word(inout out, h.w1);
+    hex_word(inout out, h.w2);
+    hex_word(inout out, h.w3);
+    out
+}
+
+// The eight bytes of `w`, least significant first, as hex.
+fn hex_word(inout out: ChunkSeq[u8], w: u64) {
+    let mut v = w;
+    for _i in 0..8 {
+        let b = v % 256;
+        out.push(hex_digit(b / 16));
+        out.push(hex_digit(b % 16));
+        v = v / 256;
+    }
+}
+
+fn hex_digit(n: u64) -> u8 {
+    if n < 10 {
+        wrapping_u8(wrapping_add(48, n))
+    } else {
+        wrapping_u8(wrapping_add(87, n))
+    }
 }

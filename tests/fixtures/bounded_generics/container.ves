@@ -30,11 +30,7 @@ fn smallest[T: mod copy](a: T, b: T, c: T) -> T where T: Ord {
 
 fn same[T: mod copy](a: T, b: T) -> u64 where T: Eq, T: Hash {
     if a.eq(b) {
-        if a.hash() == b.hash() {
-            1
-        } else {
-            9
-        }
+        if a.hash() == b.hash() { 1 } else { 9 }
     } else {
         0
     }
@@ -42,11 +38,7 @@ fn same[T: mod copy](a: T, b: T) -> u64 where T: Eq, T: Hash {
 
 fn main() -> i64 {
     let i = Interval { lo: 3, hi: 5 };
-    let inside = if smallest(i.lo, i.hi, 4) == 3 {
-        1
-    } else {
-        0
-    };
+    let inside = if smallest(i.lo, i.hi, 4) == 3 { 1 } else { 0 };
     let canonical = smallest(4, 2, 8);
     let reversed = {
         use model Reverse;
@@ -55,11 +47,7 @@ fn main() -> i64 {
     let tuples = same((1, true), (1, true));
     let differ = same((1, true), (2, true));
     let flags = if tuples == 1 {
-        if differ == 0 {
-            1
-        } else {
-            0
-        }
+        if differ == 0 { 1 } else { 0 }
     } else {
         0
     };

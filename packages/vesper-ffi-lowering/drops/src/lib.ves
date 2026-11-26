@@ -76,10 +76,7 @@ fn sym_starts_with(in names: Names, sym: u32, in prefix: Str) -> bool {
         return false;
     }
     for i in 0..pb.len() {
-        let ch = match pb.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let ch = pb.try_get(i).unwrap_or(0);
         if u8_at(in names.text, add(a, i)) != ch {
             return false;
         }
@@ -106,10 +103,7 @@ fn sym_eq_str(in names: Names, sym: u32, in s: Str) -> bool {
         return false;
     }
     for i in 0..sb.len() {
-        let ch = match sb.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let ch = sb.try_get(i).unwrap_or(0);
         if u8_at(in names.text, add(a, i)) != ch {
             return false;
         }
@@ -299,11 +293,7 @@ fn fn_max_value_id(in p: Program, fi: u64, nv_op: u64) -> u32 {
             }
         }
     }
-    if has {
-        wrapping_add(m, 1)
-    } else {
-        0
-    }
+    if has { wrapping_add(m, 1) } else { 0 }
 }
 
 fn find_fn_by_name(in p: Program, name: u32) -> u64 {

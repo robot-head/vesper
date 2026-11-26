@@ -108,21 +108,13 @@ impl Tables {
     // `world.functions.get(name)`: the function index, or NONE32.
     pub fn find(in self, name: u32) -> u32 {
         let x = u32_at(in self.by_name, w(name));
-        if x == 0 {
-            NONE32
-        } else {
-            wrapping_sub(x, 1)
-        }
+        if x == 0 { NONE32 } else { wrapping_sub(x, 1) }
     }
 
     // `world.effects.get(name)`: the declaration index, or NONE32.
     pub fn find_decl(in self, name: u32) -> u32 {
         let x = u32_at(in self.decl_by_name, w(name));
-        if x == 0 {
-            NONE32
-        } else {
-            wrapping_sub(x, 1)
-        }
+        if x == 0 { NONE32 } else { wrapping_sub(x, 1) }
     }
 }
 

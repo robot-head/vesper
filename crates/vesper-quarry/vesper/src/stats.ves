@@ -115,11 +115,7 @@ const ONE_SIDED_SELECTIVITY: u64 = 4;
 
 pub fn pages(n: u64) -> u64 {
     let p = ceil_div(n, ROWS_PER_PAGE);
-    if p == 0 {
-        1
-    } else {
-        p
-    }
+    if p == 0 { 1 } else { p }
 }
 
 // 1 + ceil(log_128(pages(n))).

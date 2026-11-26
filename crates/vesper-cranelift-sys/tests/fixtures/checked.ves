@@ -357,22 +357,11 @@ fn while_batches(
     inout done: u64
 ) eff [Ffi[Cranelift]] {
     let xv = batch_value(x);
-    let rounds = wrapping_add(
-        n / 512,
-        if n % 512 == 0 {
-            0
-        } else {
-            1
-        }
-    );
+    let rounds = wrapping_add(n / 512, if n % 512 == 0 { 0 } else { 1 });
     for _ in 0..rounds {
         code.clear();
         let left = wrapping_sub(n, done);
-        let count: u64 = if left < 512 {
-            left
-        } else {
-            512
-        };
+        let count: u64 = if left < 512 { left } else { 512 };
         let mut prev = last;
         for i in 0..count {
             batch_binary(inout code, 1, prev, xv);

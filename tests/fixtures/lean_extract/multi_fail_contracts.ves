@@ -19,11 +19,7 @@ fn ensures_forward(which: u64, result: u64) -> bool {
     result == 42
 }
 fn distinct(n: u64, reject: bool) -> u64 eff [Fail[u64], Fail[bool]] {
-    if reject {
-        Fail::raise(false)
-    } else {
-        n
-    }
+    if reject { Fail::raise(false) } else { n }
 }
 fn ensures_distinct(n: u64, reject: bool, result: u64) -> bool {
     result == n

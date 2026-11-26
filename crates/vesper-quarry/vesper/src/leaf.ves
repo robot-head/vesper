@@ -95,16 +95,8 @@ fn utf8_ok(in b: Slice[u8], start: u64, end: u64) -> bool {
             }
             i = wrapping_add(i, 2);
         } else if x < 240 {
-            let lo = if x == 224 {
-                160
-            } else {
-                128
-            };
-            let hi = if x == 237 {
-                159
-            } else {
-                191
-            };
+            let lo = if x == 224 { 160 } else { 128 };
+            let hi = if x == 237 { 159 } else { 191 };
             if wrapping_add(i, 3) > end
                 || !cont(in b, wrapping_add(i, 1), lo, hi)
                 || !cont(in b, wrapping_add(i, 2), 128, 191) {
@@ -112,16 +104,8 @@ fn utf8_ok(in b: Slice[u8], start: u64, end: u64) -> bool {
             }
             i = wrapping_add(i, 3);
         } else if x < 245 {
-            let lo = if x == 240 {
-                144
-            } else {
-                128
-            };
-            let hi = if x == 244 {
-                143
-            } else {
-                191
-            };
+            let lo = if x == 240 { 144 } else { 128 };
+            let hi = if x == 244 { 143 } else { 191 };
             if wrapping_add(i, 4) > end
                 || !cont(in b, wrapping_add(i, 1), lo, hi)
                 || !cont(in b, wrapping_add(i, 2), 128, 191)

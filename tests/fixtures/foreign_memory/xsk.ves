@@ -78,11 +78,7 @@ pub fn rx(packets: u32) -> u64 eff [Ffi[Xsk]] {
         if left == 0 {
             break;
         }
-        let batch = if left < 5 {
-            left
-        } else {
-            5
-        };
+        let batch = if left < 5 { left } else { 5 };
         let got = Xsk::xsk_kernel_rx(inout socket, batch);
         sum = wrapping_add(sum, consume(inout ring, in umem));
         left = if got < left {
@@ -204,11 +200,7 @@ pub fn rx_copy(packets: u32) -> u64 eff [Ffi[Xsk]] {
         if left == 0 {
             break;
         }
-        let batch = if left < 5 {
-            left
-        } else {
-            5
-        };
+        let batch = if left < 5 { left } else { 5 };
         let got = Xsk::xsk_kernel_rx(inout socket, batch);
         sum = wrapping_add(sum, consume_copy(inout socket, inout buf));
         left = if got < left {

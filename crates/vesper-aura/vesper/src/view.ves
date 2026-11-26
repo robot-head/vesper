@@ -26,11 +26,7 @@ pub fn tree_new() -> Tree {
 // least five words, so the count is not trusted past the input.
 pub fn decode_cap(in w: Slice[u64]) -> u64 {
     let n = get_u64(in w, 1);
-    if n < w.len() / 5 {
-        n
-    } else {
-        w.len() / 5
-    }
+    if n < w.len() / 5 { n } else { w.len() / 5 }
 }
 
 // An empty tree with room for `cap` nodes. (A new sequence assigned to a

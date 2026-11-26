@@ -51,11 +51,7 @@ fn has32(in s: ChunkSeq[u32], x: u32) -> bool {
 fn less(in names: Names, a: u32, b: u32) -> bool {
     let na = names.size(a);
     let nb = names.size(b);
-    let n = if na < nb {
-        na
-    } else {
-        nb
-    };
+    let n = if na < nb { na } else { nb };
     for i in 0..n {
         let x = names.byte(a, i);
         let y = names.byte(b, i);
@@ -1100,11 +1096,7 @@ fn next_value(in p: Program, in ef: EF) -> u64 {
             any = true;
         }
     }
-    if any {
-        inc(top)
-    } else {
-        0
-    }
+    if any { inc(top) } else { 0 }
 }
 
 // The values instruction `i` reads (`op_uses`), into `out`.

@@ -14,11 +14,7 @@ pub fn no_fit() -> i64 {
 
 // Offset of the first field: after the tag word of an enum, else 0.
 pub fn first_offset(is_enum: bool) -> i32 {
-    if is_enum {
-        8
-    } else {
-        0
-    }
+    if is_enum { 8 } else { 0 }
 }
 
 // Offset after a field of `size` bytes placed at `offset`. Rust computes
@@ -36,21 +32,13 @@ pub fn next_offset(offset: i32, size: u32) -> i64 {
 // Size of a product whose last field ends at `end`: at least one word.
 pub fn product_size(end: i32) -> u32 {
     let e = wrapping_u32(end);
-    if e < 8 {
-        8
-    } else {
-        e
-    }
+    if e < 8 { 8 } else { e }
 }
 
 // Size of an enum so far (`size`) after a variant ending at `end`.
 pub fn enum_size(size: u32, end: i32) -> u32 {
     let e = wrapping_u32(end);
-    if e > size {
-        e
-    } else {
-        size
-    }
+    if e > size { e } else { size }
 }
 
 // Offset of word `index` of a packed run of words.

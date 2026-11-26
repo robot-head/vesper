@@ -86,19 +86,11 @@ pub fn decide(inout s: S, from: u64, bound: u64) -> u64 {
             } else if bound == lin {
                 1
             } else if at == m_const() && bt == m_const() {
-                if av <= bv {
-                    1
-                } else {
-                    0
-                }
+                if av <= bv { 1 } else { 0 }
             } else if (at == m_var() && is_inf(av)) || (bt == m_var() && is_inf(bv)) {
                 2
             } else if at == m_var() && bt == m_var() {
-                if av == bv {
-                    1
-                } else {
-                    0
-                }
+                if av == bv { 1 } else { 0 }
             } else {
                 0
             };
@@ -111,9 +103,5 @@ pub fn decide(inout s: S, from: u64, bound: u64) -> u64 {
             }
         }
     }
-    if unknown {
-        2
-    } else {
-        0
-    }
+    if unknown { 2 } else { 0 }
 }

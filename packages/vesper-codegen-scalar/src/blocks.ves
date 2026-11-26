@@ -111,11 +111,7 @@ impl Graph {
         let m = u64_at(in self.len, k);
         for j in 0..m {
             let other = self.entry_node(k, j);
-            let d = if self.entry_dir(k, j) == OUT {
-                IN
-            } else {
-                OUT
-            };
+            let d = if self.entry_dir(k, j) == OUT { IN } else { OUT };
             self.remove_entry(other, k, d);
         }
     }

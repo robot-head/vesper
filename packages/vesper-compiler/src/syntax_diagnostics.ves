@@ -16,14 +16,7 @@ fn syntax_diag(
         ()
     } else {
         let base = 1000000 + count * 6;
-        syntax_put(
-            base,
-            if message == 23 {
-                1
-            } else {
-                2
-            }
-        );
+        syntax_put(base, if message == 23 { 1 } else { 2 });
         syntax_put(base + 1, message);
         syntax_put(base + 2, start);
         syntax_put(base + 3, end);

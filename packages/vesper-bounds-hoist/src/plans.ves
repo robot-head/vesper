@@ -366,26 +366,10 @@ impl Counted {
         if x.sign != 0 && sign != 0 {
             return fail_lin();
         }
-        let ya = if negate {
-            y.m0
-        } else {
-            y.p0
-        };
-        let yn = if negate {
-            y.mn
-        } else {
-            y.pn
-        };
-        let za = if negate {
-            y.p0
-        } else {
-            y.m0
-        };
-        let zn = if negate {
-            y.pn
-        } else {
-            y.mn
-        };
+        let ya = if negate { y.m0 } else { y.p0 };
+        let yn = if negate { y.mn } else { y.pn };
+        let za = if negate { y.p0 } else { y.m0 };
+        let zn = if negate { y.pn } else { y.mn };
         let p0 = self.copy_range(x.p0, x.pn);
         let more = self.copy_range(ya, yn);
         let m0 = self.copy_range(x.m0, x.mn);
@@ -515,11 +499,7 @@ fn i128_of(neg: bool, lo: u64, hi: u64) -> I128 {
     }
     // -(hi, lo)
     let nlo = wrapping_add(lo ^ 18446744073709551615, 1);
-    let carry: u64 = if nlo == 0 {
-        1
-    } else {
-        0
-    };
+    let carry: u64 = if nlo == 0 { 1 } else { 0 };
     I128 { lo: nlo, hi: wrapping_add(hi ^ 18446744073709551615, carry) }
 }
 
@@ -645,19 +625,11 @@ fn trip_count(in f: Fun, head: Head) -> (bool, u64) {
             return (false, 0);
         }
         let nlo = wrapping_add(b.lo, 1);
-        let carry: u64 = if nlo == 0 {
-            1
-        } else {
-            0
-        };
+        let carry: u64 = if nlo == 0 { 1 } else { 0 };
         b = I128 { lo: nlo, hi: wrapping_add(b.hi, carry) };
     }
     // d = b - a, saturating
-    let borrow: u64 = if b.lo < a.lo {
-        1
-    } else {
-        0
-    };
+    let borrow: u64 = if b.lo < a.lo { 1 } else { 0 };
     let mut d = I128 {
         lo: wrapping_sub(b.lo, a.lo),
         hi: wrapping_sub(wrapping_sub(b.hi, a.hi), borrow)
@@ -1425,11 +1397,7 @@ fn loop_candidate(
                         pb
                     } else {
                         let d = fa.def(v);
-                        if d == NONE64 {
-                            NONE32
-                        } else {
-                            fa.def_block(d)
-                        }
+                        if d == NONE64 { NONE32 } else { fa.def_block(d) }
                     };
                     if db != NONE32 && !has(in blocks, db) {
                         bound = BoundRow { kind: 2, a: rn.a, b: 0 };
@@ -1663,11 +1631,7 @@ pub fn dominated_list(in f: Fun) -> ChunkSeq[u64] {
             let mut is_stable = s == 2;
             if s == 0 {
                 is_stable = stable_place(in f, in all, recv.place);
-                let mark: u8 = if is_stable {
-                    2
-                } else {
-                    1
-                };
+                let mark: u8 = if is_stable { 2 } else { 1 };
                 let set = stable.try_set(w(recv.place), mark);
             }
             if !is_stable {
@@ -1707,13 +1671,7 @@ pub fn dominated_list(in f: Fun) -> ChunkSeq[u64] {
             ab.push(b);
             ak.push(kk);
             ap.push(recv.place);
-            aconst.push(
-                if is_const {
-                    1
-                } else {
-                    0
-                }
-            );
+            aconst.push(if is_const { 1 } else { 0 });
             alo.push(lo);
             ahi.push(hi);
             achecked.push(
