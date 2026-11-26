@@ -14,13 +14,7 @@
 // self-host-cli-commands.md lists each with its lane or blocker.
 use @vesper/driver::{Args, args_count, arg_start, arg_end, eq};
 use @vesper-std/env::{var_bytes, current_exe_bytes, os, os_linux, os_macos, os_windows};
-use @vesper-std/process::{
-    command_path,
-    arg_bytes as proc_arg,
-    spawn,
-    wait,
-    release
-};
+use @vesper-std/process::{command_path, arg_bytes as proc_arg, spawn, wait, release};
 use @vesper-std/fs::{
     IoError,
     error_text,
