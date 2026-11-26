@@ -465,17 +465,10 @@ pub fn vq_packed_walk(
             return Result::Err(VqFault::IncompleteChain);
         }
         if flags
-            & (
-                65535
-                    ^ (
-                        VQ_FLAG_NEXT
-                            | VQ_FLAG_WRITE
-                            | VQ_FLAG_INDIRECT
-                            | VQ_FLAG_AVAIL
-                            | VQ_FLAG_USED
-                    )
-            )
-            != 0 {
+            & (65535
+                ^ (VQ_FLAG_NEXT | VQ_FLAG_WRITE | VQ_FLAG_INDIRECT | VQ_FLAG_AVAIL | VQ_FLAG_USED))
+            != 0
+        {
             return Result::Err(VqFault::UnsupportedFlags);
         }
         slots = wrapping_add(slots, 1);

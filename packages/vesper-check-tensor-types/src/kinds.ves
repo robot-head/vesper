@@ -217,7 +217,8 @@ pub fn elab_find(in ctx: Cx, start: u64, end: u64) -> u64 {
     for i in 0..n {
         if u8_at(in ctx.elab_kinds, i) != 0
             && u64_at(in ctx.elab_starts, i) == start
-            && u64_at(in ctx.elab_ends, i) == end {
+            && u64_at(in ctx.elab_ends, i) == end
+        {
             return i;
         }
     }
@@ -258,10 +259,7 @@ pub fn elab_remove(inout ctx: Cx, start: u64, end: u64) {
 // ----- tables keyed by name -------------------------------------------------------
 
 pub fn at32(in table: ChunkSeq[u32], i: u32) -> u32 {
-    match table.try_get(widen_u64(i)) {
-        Option::Some(value) => value,
-        Option::None => NONE,
-    }
+    table.try_get(widen_u64(i)).unwrap_or(NONE)
 }
 
 pub fn set32(inout table: ChunkSeq[u32], i: u32, value: u32) {
@@ -416,10 +414,7 @@ pub fn confn(in ast: Ast, i: u32) -> ConfNode {
 // The module's items.
 
 pub fn item_at(in ast: Ast, i: u64) -> ItemNode {
-    let id = match ast.m_items.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => NONE,
-    };
+    let id = ast.m_items.try_get(i).unwrap_or(NONE);
     itemn(in ast, id)
 }
 
@@ -630,7 +625,8 @@ pub fn expr_mentions(inout state: St, in ast: Ast, expr_id: u32) -> bool {
             if stmt.kind == 1 {
                 if type_mentions(in state, in ast, stmt.ty)
                     || pattern_mentions(inout state, in ast, stmt.pat)
-                    || expr_mentions(inout state, in ast, stmt.value) {
+                    || expr_mentions(inout state, in ast, stmt.value)
+                {
                     return true;
                 }
             } else if expr_mentions(inout state, in ast, stmt.value) {
@@ -685,7 +681,8 @@ pub fn expr_mentions(inout state: St, in ast: Ast, expr_id: u32) -> bool {
                     inout state,
                     in ast,
                     list_at(in ast, node.b, inc(wrapping_mul(i, 2)))
-                ) {
+                )
+            {
                 return true;
             }
         }
@@ -714,10 +711,9 @@ pub fn expr_mentions(inout state: St, in ast: Ast, expr_id: u32) -> bool {
             return true;
         }
         if node.b != NONE
-            && (
-                pattern_mentions(inout state, in ast, node.b)
-                    || expr_mentions(inout state, in ast, node.c)
-            ) {
+            && (pattern_mentions(inout state, in ast, node.b)
+                || expr_mentions(inout state, in ast, node.c))
+        {
             return true;
         }
         if expr_mentions(inout state, in ast, node.d) {
@@ -747,7 +743,8 @@ pub fn function_mentions(inout state: St, in ast: Ast, fn_id: u32) -> bool {
         }
     }
     if type_mentions(in state, in ast, func.result)
-        || row_mentions(in state, in ast, func.effects) {
+        || row_mentions(in state, in ast, func.effects)
+    {
         return true;
     }
     if func.body != NONE {
@@ -794,7 +791,8 @@ pub fn mentions_tensors(inout state: St, in ast: Ast) -> bool {
         } else if item.kind == 4 {
             let impl_node = impln(in ast, item.node);
             if type_mentions(in state, in ast, impl_node.ty)
-                || fns_mention(inout state, in ast, impl_node.methods) {
+                || fns_mention(inout state, in ast, impl_node.methods)
+            {
                 return true;
             }
         } else if item.kind == 5 {
@@ -804,7 +802,8 @@ pub fn mentions_tensors(inout state: St, in ast: Ast) -> bool {
         } else if item.kind == 6 {
             let conf = confn(in ast, item.node);
             if fns_mention(inout state, in ast, conf.methods)
-                || type_mentions(in state, in ast, conf.self_ty) {
+                || type_mentions(in state, in ast, conf.self_ty)
+            {
                 return true;
             }
         }
@@ -1076,7 +1075,8 @@ fn kinds_equal(in ctx: Cx, row: u32, in kinds: ChunkSeq[u8]) -> bool {
             in ctx.adt_kind_values,
             wrapping_add(widen_u64(u32_at(in ctx.adt_kind_starts, widen_u64(row))), i)
         )
-            != u8_at(in kinds, i) {
+            != u8_at(in kinds, i)
+        {
             return false;
         }
     }
@@ -1631,7 +1631,8 @@ pub fn scope_ty(inout state: St, in ctx: Cx, in ast: Ast, ty: u32) -> u32 {
         }
         if is_wire_integer(in state, name)
             || name == state.byte_array_name
-            || name == state.zero_pad_name {
+            || name == state.zero_pad_name
+        {
             return err_named(
                 inout state,
                 in "'",

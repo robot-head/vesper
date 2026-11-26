@@ -1210,7 +1210,8 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
         return err_at(in parser, err_type(), 504);
     }
     if !eq_str(in parser.arena.as_slice(), link_start, link_end, in "static")
-        && !eq_str(in parser.arena.as_slice(), link_start, link_end, in "dynamic") {
+        && !eq_str(in parser.arena.as_slice(), link_start, link_end, in "dynamic")
+    {
         return err_at(in parser, err_type(), 505);
     }
     if !is_bare_link_name(in parser.arena[name_start..name_end]) {
@@ -1237,7 +1238,8 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
             let (const_start, const_end) = take_word(inout parser);
             if is_reserved_type(in parser.arena[const_start..const_end])
                 || eq_str(in parser.arena.as_slice(), const_start, const_end, in "true")
-                || eq_str(in parser.arena.as_slice(), const_start, const_end, in "false") {
+                || eq_str(in parser.arena.as_slice(), const_start, const_end, in "false")
+            {
                 return err_at(in parser, err_type(), 510);
             }
             expect_punct(inout parser, 58);
@@ -1342,7 +1344,8 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                 variant_count: variant_count,
             });
         } else if (is_word(in parser, in "linear") || is_word(in parser, in "affine"))
-            && peek_is_word(in parser, 1, in "extern") {
+            && peek_is_word(in parser, 1, in "extern")
+        {
             let linearity: u8 = if is_word(in parser, in "linear") {
                 1
             } else {
@@ -1366,7 +1369,8 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                     && mapping_scalar != 5
                     && mapping_scalar != 7
                     && mapping_scalar != 8
-                    && mapping_scalar != 9 {
+                    && mapping_scalar != 9
+                {
                     return err_at(in parser, err_unsupported(), 532);
                 }
                 expect_punct(inout parser, 93);
@@ -1454,7 +1458,8 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
             });
         } else if is_word(in parser, in "fn")
             || is_word(in parser, in "callback")
-            || peek_is_punct(in parser, 0, 35) {
+            || peek_is_punct(in parser, 0, 35)
+        {
             let mut has_link_attr = false;
             let mut link_name_start: u64 = 0;
             let mut link_name_end: u64 = 0;
@@ -1521,7 +1526,8 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                     && peek_is_punct(in parser, 2, 58)
                     && !peek_is_word(in parser, 1, in "in")
                     && !peek_is_word(in parser, 1, in "out")
-                    && !peek_is_word(in parser, 1, in "inout") {
+                    && !peek_is_word(in parser, 1, in "inout")
+                {
                     let retain = is_word(in parser, in "retain");
                     let _ = bump(inout parser);
                     let (param_name_start, param_name_end) = take_word(inout parser);
@@ -1557,7 +1563,8 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                 }
                 if !is_nocapture
                     && is_word(in parser, in "sink")
-                    && peek_tok(in parser, 1).kind == tok_word() {
+                    && peek_tok(in parser, 1).kind == tok_word()
+                {
                     let _ = bump(inout parser);
                     let (param_name_start, param_name_end) = take_word(inout parser);
                     expect_punct(inout parser, 58);
@@ -1602,7 +1609,8 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                     expect_punct(inout parser, 58);
                     if !is_nocapture
                         && is_word(in parser, in "Pinned")
-                        && peek_is_punct(in parser, 1, 91) {
+                        && peek_is_punct(in parser, 1, 91)
+                    {
                         if access == 3 {
                             return err_at(in parser, err_unsupported(), 552);
                         }
@@ -1712,13 +1720,15 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                 }
                 expect_punct(inout parser, 93);
                 if !has_len
-                    && eq_str(in parser.arena.as_slice(), result_start, result_end, in "CStr") {
+                    && eq_str(in parser.arena.as_slice(), result_start, result_end, in "CStr")
+                {
                     if is_callback {
                         return err_at(in parser, err_unsupported(), 561);
                     }
                     result.tag = 11;
                 } else if !has_len
-                    && eq_str(in parser.arena.as_slice(), result_start, result_end, in "CWStr") {
+                    && eq_str(in parser.arena.as_slice(), result_start, result_end, in "CWStr")
+                {
                     if is_callback {
                         return err_at(in parser, err_unsupported(), 562);
                     }
@@ -1935,7 +1945,8 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
         put_count(inout encoder, enum_def.variant_count);
         for variant_index in 0..enum_def.variant_count {
             let variant = match enum_vars
-                .try_get(wrapping_add(enum_def.variant_start, variant_index)) {
+                .try_get(wrapping_add(enum_def.variant_start, variant_index))
+            {
                 Option::Some(x) => x,
                 Option::None => continue,
             };
@@ -1993,7 +2004,8 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
             put_count(inout encoder, wire.field_count);
             for field_index in 0..wire.field_count {
                 let wire_field = match wire_fields
-                    .try_get(wrapping_add(wire.field_start, field_index)) {
+                    .try_get(wrapping_add(wire.field_start, field_index))
+                {
                     Option::Some(v) => v,
                     Option::None => continue,
                 };

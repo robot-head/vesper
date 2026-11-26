@@ -587,7 +587,8 @@ fn seen_has(in seen: ChunkSeq[u32], name: u32, in modes: ChunkSeq[u8]) -> bool {
             let mut same = true;
             for j in 0..n {
                 if u32_at(in seen, wrapping_add(wrapping_add(i, 2), j))
-                    != widen_u32(u8_at(in modes, j)) {
+                    != widen_u32(u8_at(in modes, j))
+                {
                     same = false;
                     break;
                 }
@@ -766,7 +767,8 @@ fn docs(inout o: Out, in x: Ix, start: u64) -> bool {
             && byte(in b, s) == 47
             && byte(in b, wrapping_add(s, 1)) == 47
             && byte(in b, wrapping_add(s, 2)) == 47
-            && !(wrapping_sub(e, s) >= 4 && byte(in b, wrapping_add(s, 3)) == 47) {
+            && !(wrapping_sub(e, s) >= 4 && byte(in b, wrapping_add(s, 3)) == 47)
+        {
             let mut from = wrapping_add(s, 3);
             if from < e && byte(in b, from) == 32 {
                 from = wrapping_add(from, 1);
@@ -845,7 +847,8 @@ pub fn hover_answer(
                     let q = wrapping_add(pa, j);
                     if u64_at(in f.p_start, q) == w(p.start)
                         && u64_at(in f.p_end, q) == w(p.end)
-                        && u32_at(in f.p_name, q) == ps {
+                        && u32_at(in f.p_name, q) == ps
+                    {
                         let pt = u32_at(in f.p_ty, q);
                         if f.c.types.node(pt).kind != 5 {
                             ty = pt;
@@ -868,7 +871,8 @@ pub fn hover_answer(
         }
         if !t(inout o, in "\ntype mode: ")
             || !t(inout o, in mode_name(mode))
-            || !t(inout o, in " (not current ownership or a live obligation)") {
+            || !t(inout o, in " (not current ownership or a live obligation)")
+        {
             return o.err;
         }
         if param != 0 {
@@ -877,7 +881,8 @@ pub fn hover_answer(
                 || !t(inout o, in pass_name(p.pass))
                 || !t(inout o, in " ")
                 || !ast_name(inout o, in x.ast, p.name)
-                || !selectors(inout o, in x.ast, p.projections) {
+                || !selectors(inout o, in x.ast, p.projections)
+            {
                 return o.err;
             }
         }

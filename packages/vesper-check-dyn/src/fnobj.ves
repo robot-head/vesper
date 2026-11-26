@@ -898,7 +898,8 @@ fn trim_new(inout ctx: D, name: u32) -> u32 {
             && sym_byte(in ctx.ast, name, inc(at)) == 58
             && sym_byte(in ctx.ast, name, wrapping_add(at, 2)) == 110
             && sym_byte(in ctx.ast, name, wrapping_add(at, 3)) == 101
-            && sym_byte(in ctx.ast, name, wrapping_add(at, 4)) == 119 {
+            && sym_byte(in ctx.ast, name, wrapping_add(at, 4)) == 119
+        {
             len = at;
         } else {
             break;
@@ -1040,7 +1041,8 @@ fn callee_params(inout ctx: D, callee: u32, inout out: ChunkSeq[u32]) -> bool {
             }
             index = wrapping_sub(index, 1);
             if sym_byte(in ctx.ast, callee_node.a, index) == 58
-                && sym_byte(in ctx.ast, callee_node.a, wrapping_sub(index, 1)) == 58 {
+                && sym_byte(in ctx.ast, callee_node.a, wrapping_sub(index, 1)) == 58
+            {
                 cut = n32(wrapping_sub(index, 1));
                 break;
             }
@@ -1152,7 +1154,8 @@ fn function(inout ctx: D, func: u32, self_ty: u32) {
                 param_ty = self_ty;
             } else if ty_node.kind == 1
                 && ty_node.a == ctx.known.self_ty
-                && ll(in ctx, ty_node.b) == 0 {
+                && ll(in ctx, ty_node.b) == 0
+            {
                 param_ty = self_ty;
             }
         }
@@ -1197,7 +1200,8 @@ fn lower(inout ctx: D, expr: u32, expected: u32) {
         if callee.kind == 2
             && callee.a == ctx.known.box_new
             && !env_has(in ctx, callee.a)
-            && ex(in ctx, arg).kind == 15 {
+            && ex(in ctx, arg).kind == 15
+        {
             let mut object = NONE;
             if ll(in ctx, node.b) > 0 {
                 let type_arg = la(in ctx, node.b, 0);

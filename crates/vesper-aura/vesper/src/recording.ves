@@ -81,7 +81,8 @@ pub fn widget_index(in s: RState, serial: u64) -> u64 {
     }
     if lo < s.widgets.len()
         && rwidget(in s.widgets, lo).serial == serial
-        && seq_bool(in s.wlive, lo) {
+        && seq_bool(in s.wlive, lo)
+    {
         lo
     } else {
         NONE_ID

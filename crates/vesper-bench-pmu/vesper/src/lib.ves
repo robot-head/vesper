@@ -401,10 +401,9 @@ pub fn encode_sysfs_event(in text: Slice[u8], in t: FormatTable) -> Option[(u64,
                 let (v0, v1) = trim_bounds(in text, wrapping_add(eq, 1), comma);
                 let parsed = if wrapping_sub(v1, v0) >= 2
                     && byte(in text, v0) == 48
-                    && (
-                        byte(in text, wrapping_add(v0, 1)) == 120
-                            || byte(in text, wrapping_add(v0, 1)) == 88
-                    ) {
+                    && (byte(in text, wrapping_add(v0, 1)) == 120
+                        || byte(in text, wrapping_add(v0, 1)) == 88)
+                {
                     parse_u64_hex(in text, wrapping_add(v0, 2), v1)
                 } else {
                     parse_u64_dec(in text, v0, v1)

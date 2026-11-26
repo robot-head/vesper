@@ -1,0 +1,237 @@
+// The verified backend's refusal inventory. The input contains a sorted
+// dictionary of (construct, detail) pairs, grouped by construct, followed
+// by the function records. Strings are length-prefixed UTF-8. All integers
+// are little-endian words. Coverage::listing_input writes the layout.
+
+use self::machine::{put_decimal};
+
+const WORD_BYTES: u64 = 8;
+const NEWLINE: u8 = 10;
+const SPACE: u8 = 32;
+// The inventory aligns detail counts to four columns.
+const DETAIL_WIDTH: u64 = 4;
+
+copy struct Text {
+    start: u64,
+    end: u64,
+}
+
+struct Reader {
+    offset: u64,
+}
+
+impl Reader {
+    fn word(inout self, in input: Slice[u8]) -> u64 {
+        let value = input.try_read_u64_le(self.offset).unwrap_or(0);
+        self.offset = wrapping_add(self.offset, WORD_BYTES);
+        value
+    }
+
+    fn text(inout self, in input: Slice[u8]) -> Text {
+        let len = self.word(in input);
+        let start = self.offset;
+        self.offset = wrapping_add(start, len);
+        Text { start: start, end: self.offset }
+    }
+}
+
+copy struct Construct {
+    name: Text,
+    details_end: u64,
+}
+
+copy struct Detail {
+    construct: u64,
+    text: Text,
+    count: u64,
+}
+
+struct Dictionary {
+    constructs: ChunkSeq[Construct],
+    details: ChunkSeq[Detail],
+}
+
+impl Dictionary {
+    fn construct(in self, index: u64) -> Construct {
+        self.constructs
+            .try_get(index)
+            .unwrap_or(Construct { name: Text { start: 0, end: 0 }, details_end: 0 })
+    }
+
+    fn detail(in self, index: u64) -> Detail {
+        self.details
+            .try_get(index)
+            .unwrap_or(Detail { construct: 0, text: Text { start: 0, end: 0 }, count: 0 })
+    }
+}
+
+fn dictionary(in input: Slice[u8], inout reader: Reader) -> Dictionary {
+    let construct_count = reader.word(in input);
+    let detail_count = reader.word(in input);
+    let mut constructs = ChunkSeq::with_capacity[Construct](construct_count);
+    let mut details = ChunkSeq::with_capacity[Detail](detail_count);
+    for construct in 0..construct_count {
+        let name = reader.text(in input);
+        let count = reader.word(in input);
+        for index in 0..count {
+            let text = reader.text(in input);
+            details.push(Detail { construct: construct, text: text, count: 0 });
+        }
+        constructs.push(Construct { name: name, details_end: details.len() });
+    }
+    Dictionary { constructs: constructs, details: details }
+}
+
+fn put(inout out: ChunkSeq[u8], in text: Str) {
+    out.extend(in text.as_bytes());
+}
+
+fn put_text(inout out: ChunkSeq[u8], in input: Slice[u8], text: Text) {
+    out.extend(in input[text.start..text.end]);
+}
+
+fn count_line(inout out: ChunkSeq[u8], in label: Str, count: u64) {
+    put(inout out, in label);
+    put_decimal(inout out, count);
+    out.push(NEWLINE);
+}
+
+fn detail_text(inout out: ChunkSeq[u8], in input: Slice[u8], in dict: Dictionary, detail: Detail) {
+    let construct = dict.construct(detail.construct);
+    put_text(inout out, in input, construct.name);
+    put(inout out, in ": ");
+    put_text(inout out, in input, detail.text);
+    out.push(NEWLINE);
+}
+
+fn aligned_count(inout out: ChunkSeq[u8], count: u64) {
+    let mut digits: u64 = 1;
+    let mut rest = count / 10;
+    loop {
+        if rest == 0 {
+            break;
+        }
+        digits = wrapping_add(digits, 1);
+        rest = rest / 10;
+    }
+    for column in digits..DETAIL_WIDTH {
+        out.push(SPACE);
+    }
+    put_decimal(inout out, count);
+}
+
+fn details(inout out: ChunkSeq[u8], in input: Slice[u8], in dict: Dictionary, max_count: u64) {
+    // Bucket by frequency. Reverse insertion preserves dictionary order
+    // within each bucket. The links store one-based detail indices.
+    let mut heads = ChunkSeq::with_capacity[u64](wrapping_add(max_count, 1));
+    for count in 0..wrapping_add(max_count, 1) {
+        heads.push(0);
+    }
+    let mut next = ChunkSeq::with_capacity[u64](dict.details.len());
+    let mut index = dict.details.len();
+    loop {
+        if index == 0 {
+            break;
+        }
+        let detail = dict.detail(wrapping_sub(index, 1));
+        next.push(heads.try_get(detail.count).unwrap_or(0));
+        let updated = heads.try_set(detail.count, index);
+        index = wrapping_sub(index, 1);
+    }
+    let mut count = max_count;
+    loop {
+        if count == 0 {
+            break;
+        }
+        let mut link = heads.try_get(count).unwrap_or(0);
+        loop {
+            if link == 0 {
+                break;
+            }
+            let detail = dict.detail(wrapping_sub(link, 1));
+            put(inout out, in "  ");
+            aligned_count(inout out, count);
+            out.push(SPACE);
+            detail_text(inout out, in input, in dict, detail);
+            link = next.try_get(wrapping_sub(dict.details.len(), link)).unwrap_or(0);
+        }
+        count = wrapping_sub(count, 1);
+    }
+}
+
+pub fn coverage_listing(in input: Slice[u8]) -> ChunkSeq[u8] {
+    let mut reader = Reader { offset: 0 };
+    let mut dict = dictionary(in input, inout reader);
+    let function_count = reader.word(in input);
+    let mut own_ok: u64 = 0;
+    let mut complete_ok: u64 = 0;
+    let mut refusal_count: u64 = 0;
+    let mut max_count: u64 = 0;
+    let mut body = ChunkSeq::with_capacity[u8](input.len());
+    for function in 0..function_count {
+        let name = reader.text(in input);
+        let rows = reader.word(in input);
+        let own_count = reader.word(in input);
+        put_text(inout body, in input, name);
+        if own_count == 0 {
+            own_ok = wrapping_add(own_ok, 1);
+        } else {
+            put(inout body, in ":\n");
+        }
+        refusal_count = wrapping_add(refusal_count, own_count);
+        for refusal in 0..own_count {
+            let index = reader.word(in input);
+            let mut detail = dict.detail(index);
+            detail.count = wrapping_add(detail.count, 1);
+            if detail.count > max_count {
+                max_count = detail.count;
+            }
+            let updated = dict.details.try_set(index, detail);
+            put(inout body, in "  ");
+            detail_text(inout body, in input, in dict, detail);
+        }
+        let callee_count = reader.word(in input);
+        if callee_count == 0 && own_count == 0 {
+            complete_ok = wrapping_add(complete_ok, 1);
+            put(inout body, in ": ok, ");
+            put_decimal(inout body, rows);
+            put(inout body, in " rows\n");
+        }
+        if callee_count > 0 {
+            if own_count == 0 {
+                put(inout body, in ":\n");
+            }
+            put(inout body, in "  calls refused: ");
+            for callee in 0..callee_count {
+                if callee != 0 {
+                    put(inout body, in ", ");
+                }
+                put_text(inout body, in input, reader.text(in input));
+            }
+            body.push(NEWLINE);
+        }
+    }
+
+    let mut out = ChunkSeq::with_capacity[u8](input.len());
+    count_line(inout out, in "functions: ", function_count);
+    count_line(inout out, in "without own refusal: ", own_ok);
+    count_line(inout out, in "compiling with all callees: ", complete_ok);
+    count_line(inout out, in "refusals: ", refusal_count);
+    let mut start: u64 = 0;
+    for construct in 0..dict.constructs.len() {
+        let entry = dict.construct(construct);
+        let mut count: u64 = 0;
+        for index in start..entry.details_end {
+            count = wrapping_add(count, dict.detail(index).count);
+        }
+        put(inout out, in "  ");
+        put_text(inout out, in input, entry.name);
+        count_line(inout out, in ": ", count);
+        start = entry.details_end;
+    }
+    put(inout out, in "by detail:\n");
+    details(inout out, in input, in dict, max_count);
+    out.push(NEWLINE);
+    out.extend(in body.as_slice());
+    out
+}

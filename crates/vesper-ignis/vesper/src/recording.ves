@@ -83,13 +83,11 @@ const MAX_PENDING: u64 = 4096;
 const MAX_WORK_PER_POLL: u64 = 1000000;
 
 pub fn recorder_bounds_ok(history_limit: u64, pending_limit: u64, work_per_poll: u64) -> bool {
-    !(
-        history_limit == 0
-            || history_limit > MAX_HISTORY
-            || pending_limit == 0
-            || pending_limit > MAX_PENDING
-            || work_per_poll > MAX_WORK_PER_POLL
-    )
+    !(history_limit == 0
+        || history_limit > MAX_HISTORY
+        || pending_limit == 0
+        || pending_limit > MAX_PENDING
+        || work_per_poll > MAX_WORK_PER_POLL)
 }
 
 pub fn recorder_new(history_limit: u64, pending_limit: u64, work_per_poll: u64) -> Recorder {

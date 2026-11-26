@@ -501,7 +501,8 @@ fn pattern_using(
     let end = widen_u64(pat_node.end);
     if pat_node.kind == 2 {
         if starts_with_mark(in flow, in ast, pat_node.a)
-            || !slice_is(in flow, in skeleton, start, end, in ast, pat_node.a) {
+            || !slice_is(in flow, in skeleton, start, end, in ast, pat_node.a)
+        {
             return;
         }
         let found = env_find(in alts, pat_node.a);
@@ -779,12 +780,14 @@ fn walk(
             earlier = earlier || !inert(in flow, in ast, field_value);
             let value_start = es(in ast, field_value);
             if shorthand(in flow, in skeleton, in ast, fname, value_start, ee(in ast, field_value))
-                && value_start >= PREFIX_LEN {
+                && value_start >= PREFIX_LEN
+            {
                 let rel_start = sub(value_start, PREFIX_LEN);
                 let rel_end = add(rel_start, name_len(in ast, fname));
                 for lit in 0..(flow.literals.len() >> 2) {
                     if w64(in flow.literals, lit << 2) == rel_start
-                        && w64(in flow.literals, inc(lit << 2)) == rel_end {
+                        && w64(in flow.literals, inc(lit << 2)) == rel_end
+                    {
                         let first = w64(in flow.literals, add(lit << 2, 2));
                         let len = w64(in flow.literals, add(lit << 2, 3));
                         let mut text = ChunkSeq::new[u8]();
@@ -1010,7 +1013,8 @@ fn walk(
                 }
                 let alt_body = list_at(in ast, expr_node.b, inc(alt_end << 1));
                 if es(in ast, alt_body) != es(in ast, arm_body)
-                    || ee(in ast, alt_body) != ee(in ast, arm_body) {
+                    || ee(in ast, alt_body) != ee(in ast, arm_body)
+                {
                     break;
                 }
                 alt_end = inc(alt_end);
@@ -1050,7 +1054,8 @@ fn walk(
             let param_end = widen_u64(param.end);
             if param_start < PREFIX_LEN
                 || param_end < param_start
-                || sub(param_end, PREFIX_LEN) > skeleton.src.len() {
+                || sub(param_end, PREFIX_LEN) > skeleton.src.len()
+            {
                 // `slice` is empty: no token matches a nonempty name.
                 if name_len(in ast, param.name) != 0 {
                     continue;
@@ -1059,7 +1064,8 @@ fn walk(
             let mut fragment = ChunkSeq::new[u8]();
             if param_start >= PREFIX_LEN
                 && param_end >= param_start
-                && sub(param_end, PREFIX_LEN) <= skeleton.src.len() {
+                && sub(param_end, PREFIX_LEN) <= skeleton.src.len()
+            {
                 push_range(
                     inout fragment,
                     in skeleton.src,
@@ -1076,7 +1082,8 @@ fn walk(
                     let mut same = true;
                     for byte_index in 0..sub(tok_end, tok_start) {
                         if b8(in fragment, add(tok_start, byte_index))
-                            != name_byte(in ast, param.name, byte_index) {
+                            != name_byte(in ast, param.name, byte_index)
+                        {
                             same = false;
                             break;
                         }
@@ -1215,7 +1222,8 @@ fn function(
         for i in 0..list_len(in ast, fnode.params) {
             let param = param_of(in ast, list_at(in ast, fnode.params, i));
             if starts_with_mark(in flow, in ast, param.name)
-                || name_is(in ast, param.name, in "self".as_bytes()) {
+                || name_is(in ast, param.name, in "self".as_bytes())
+            {
                 continue;
             }
             let param_start = widen_u64(param.start);
@@ -1385,7 +1393,8 @@ fn plan(
                 loop {
                     let usage = add(start, run_len);
                     if usage >= add(from, count)
-                        || path_at(in rows, in paths, usage, inc(common)) != branch {
+                        || path_at(in rows, in paths, usage, inc(common)) != branch
+                    {
                         break;
                     }
                     run_len = inc(run_len);
@@ -1432,7 +1441,8 @@ fn plan(
             let node = path_at(in rows, in paths, from, i);
             let earlier = nd(in flow, node, 5) == 1;
             if nd(in flow, node, 1) != E_ALWAYS
-                || earlier && (i != inc(common) || nd(in flow, node, 4) == NONE) {
+                || earlier && (i != inc(common) || nd(in flow, node, 4) == NONE)
+            {
                 lazy = true;
                 break;
             }
@@ -1640,7 +1650,8 @@ fn emit(
         let slot_end = w64(in skeleton.slots, add(wrapping_mul(slot, 3), 2));
         let cap = hole_cap(in skeleton, hole);
         if sort_in(in caps, cap, in "args".as_bytes())
-            || sort_in(in caps, cap, in "pats".as_bytes()) {
+            || sort_in(in caps, cap, in "pats".as_bytes())
+        {
             let at = value_at(in caps, cap, w64(in skeleton.holes, inc(hole << 2)));
             let value_start = w64(in caps.words, at);
             let value_end = w64(in caps.words, inc(at));
@@ -1654,9 +1665,13 @@ fn emit(
                 };
                 // `str::trim`: Unicode whitespace; the captured text is a
                 // token span, so only ASCII whitespace occurs at its ends.
-                if !(
-                    byte == 32 || byte == 9 || byte == 10 || byte == 13 || byte == 11 || byte == 12
-                ) {
+                if !(byte == 32
+                    || byte == 9
+                    || byte == 10
+                    || byte == 13
+                    || byte == 11
+                    || byte == 12)
+                {
                     blank = false;
                     break;
                 }
@@ -1672,7 +1687,8 @@ fn emit(
                 }
                 loop {
                     if tok >= tok_count
-                        || !trivia_kind(wrapping_u8(w64(in toks, wrapping_mul(tok, 3)))) {
+                        || !trivia_kind(wrapping_u8(w64(in toks, wrapping_mul(tok, 3))))
+                    {
                         break;
                     }
                     tok = inc(tok);
@@ -1860,7 +1876,8 @@ fn nested_spans(in events: ChunkSeq[u32], in toks: @vesper/front::Tokens) -> Chu
                 || kind == 221
                 || kind == 222
                 || kind == 223
-                || kind == 225 {
+                || kind == 225
+            {
                 out.push(start);
                 out.push(offset);
             }

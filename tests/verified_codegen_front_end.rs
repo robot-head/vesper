@@ -2,8 +2,19 @@
 //! §42.2): every function of `packages/vesper-compiler` is planned and
 //! lowered by the verified backend, and every refusal (not only the first)
 //! is listed. `VESPER_BLESS=1` rewrites the checked-in inventory.
+//!
+//! `@vesper/verified-codegen`'s `coverage_text` (#1886, part 4d-4) must
+//! give the same listing for every unit.
+#[path = "common/check_harness.rs"]
+mod check_harness;
+#[path = "common/check_words.rs"]
+mod check_words;
+#[path = "common/ir_words.rs"]
+mod ir_words;
 #[path = "fixtures/self_host/driver.rs"]
 mod support;
+#[path = "common/verified_words.rs"]
+mod verified_words;
 use std::collections::BTreeSet;
 use support::*;
 use vesper::{check, lexer, parser, verified_codegen as verified};
@@ -107,4 +118,143 @@ fn every_front_end_refusal_is_listed() {
         recorded, listing,
         "the verified-codegen front-end inventory changed; rerun with VESPER_BLESS=1"
     );
+}
+
+/// The Vesper coverage (`@vesper/verified-codegen`, mono.ves
+/// `coverage_input`) lists the same refusals of the front end as Rust's.
+#[test]
+fn vesper_coverage_matches_rust_on_the_front_end() {
+    if verified::Target::host().is_none() {
+        return;
+    }
+    on_big_stack(|| {
+        let package = check_harness::Package::load("packages/vesper-verified-codegen");
+        let cover = package.entry("coverage_text", true);
+        for unit in units() {
+            let t0 = std::time::Instant::now();
+            let rust = verified::coverage(&unit.world, Some(&unit.roots), true)
+                .unwrap()
+                .listing();
+            let t1 = std::time::Instant::now();
+            let input = verified_words::coverage_input(&unit.world, Some(&unit.roots), true)
+                .expect("the unit encodes");
+            let t2 = std::time::Instant::now();
+            let vesper = cover.text(&input);
+            let t3 = std::time::Instant::now();
+            assert_eq!(
+                vesper, rust,
+                "the Vesper coverage of the {} unit differs from Rust's",
+                unit.name
+            );
+            eprintln!(
+                "verified coverage {}: Vesper equals Rust; Rust {:.3} s, encoding {:.3} s, \
+                 Vesper {:.3} s",
+                unit.name,
+                (t1 - t0).as_secs_f64(),
+                (t2 - t1).as_secs_f64(),
+                (t3 - t2).as_secs_f64()
+            );
+        }
+    });
+}
+
+#[test]
+fn vesper_coverage_listing_matches_rust() {
+    use check_harness::{Package, abba_ci, speed, time};
+    use std::hint::black_box;
+
+    let package = Package::load("packages/vesper-verified-codegen");
+    let renderer = package.entry("coverage_listing", true);
+    let render = |report: &verified::Coverage| {
+        let input = report.listing_input();
+        let handle = vesper_port_abi::with_slice(&input, |view| {
+            // SAFETY: the entry takes a borrowed Slice[u8], which with_slice
+            // keeps live across the call.
+            unsafe { renderer.0.call(&[view as u64]) }.unwrap()
+        });
+        // SAFETY: the entry returns an owned ChunkSeq[u8].
+        let bytes = unsafe { vesper_port_abi::seq_copy::<u8>(handle) };
+        vesper::seq::native_runtime::vesper_seq_free(handle);
+        String::from_utf8(bytes).unwrap()
+    };
+    let reports = on_big_stack(|| {
+        let refused = |detail| verified::VerifiedError::Unsupported {
+            construct: verified::Unsupported::Type,
+            function: "refused".into(),
+            detail,
+        };
+        let mixed = verified::Coverage {
+            functions: vec![
+                verified::FunctionCoverage {
+                    name: "caller".into(),
+                    refusals: vec![],
+                    refused_callees: BTreeSet::from(["other".into(), "refused".into()]),
+                    rows: 4,
+                },
+                verified::FunctionCoverage {
+                    name: "other".into(),
+                    refusals: vec![verified::VerifiedError::Invalid("invalid detail".into())],
+                    refused_callees: BTreeSet::new(),
+                    rows: 0,
+                },
+                verified::FunctionCoverage {
+                    name: "refused".into(),
+                    refusals: vec![
+                        refused(format!("{}a", "é".repeat(120))),
+                        refused("short detail".into()),
+                        refused(format!("{}b", "é".repeat(120))),
+                    ],
+                    refused_callees: BTreeSet::from(["other".into()]),
+                    rows: 0,
+                },
+            ],
+        };
+        let mut reports = vec![
+            ("empty", verified::Coverage { functions: vec![] }),
+            ("mixed", mixed),
+        ];
+        for unit in units() {
+            reports.push((
+                unit.name,
+                verified::coverage(&unit.world, Some(&unit.roots), true).unwrap(),
+            ));
+        }
+        reports
+    });
+    for (name, report) in &reports {
+        let rust = report.rust_listing();
+        let vesper = render(report);
+        assert!(
+            rust == vesper,
+            "{name}: {:?}",
+            check_harness::first_difference(&rust, &vesper)
+        );
+    }
+    eprintln!("coverage listing: 0 diffs across {} reports", reports.len());
+    if speed() {
+        const ROUNDS: usize = 30;
+        const REPEATS: usize = 20;
+        abba_ci(
+            "verified codegen coverage listing",
+            ROUNDS,
+            &mut || {
+                time(|| {
+                    for _ in 0..REPEATS {
+                        for (_, report) in &reports {
+                            black_box(report.rust_listing());
+                        }
+                    }
+                })
+            },
+            &mut || {
+                time(|| {
+                    for _ in 0..REPEATS {
+                        for (_, report) in &reports {
+                            black_box(render(report));
+                        }
+                    }
+                })
+            },
+        );
+    }
 }

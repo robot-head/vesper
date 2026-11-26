@@ -136,7 +136,8 @@ pub fn valid_utf8(in s: Slice[u8]) -> bool {
             };
             if !in_range(in s, inc(i), lo, hi)
                 || !cont(in s, wrapping_add(i, 2))
-                || !cont(in s, wrapping_add(i, 3)) {
+                || !cont(in s, wrapping_add(i, 3))
+            {
                 return false;
             }
             i = wrapping_add(i, 4);

@@ -285,7 +285,8 @@ impl Facts {
                 && i.sub >= B_LT
                 && i.sub <= B_GE
                 && unsigned_word(in f, i.a)
-                && unsigned_word(in f, i.b) {
+                && unsigned_word(in f, i.b)
+            {
                 return (i.sub, i.a, i.b);
             }
             if i.op == OP_READ && f.depth(i.place) == 1 && self.once(f.root_of(i.place)) {
@@ -356,10 +357,9 @@ impl Facts {
         for p in 0..f.params.len() {
             let q = f.param(p);
             if q.name == root
-                && (
-                    q.pass == TyPass::In
-                        || (q.pass == TyPass::Inout && whole && (q.flags & TY_SLICE) != 0)
-                ) {
+                && (q.pass == TyPass::In
+                    || (q.pass == TyPass::Inout && whole && (q.flags & TY_SLICE) != 0))
+            {
                 borrowed = true;
             }
         }
@@ -630,7 +630,8 @@ impl Facts {
         for b in 0..n {
             if u8_at(in forward, b) != 0 && u8_at(in back, b) != 0 && n32(b) != qb {
                 if self.block_changes(in f, n32(b), mode, arg)
-                    || self.any_changes(in f, n32(b), 0, NONE64, mode, arg) {
+                    || self.any_changes(in f, n32(b), 0, NONE64, mode, arg)
+                {
                     return false;
                 }
             }
@@ -743,7 +744,8 @@ impl Facts {
         let x = self.node(t);
         if x.kind == K_LEN
             && n32(x.a) == place
-            && self.length_kept(in f, place, n32(x.b), x.c, tb, tk) {
+            && self.length_kept(in f, place, n32(x.b), x.c, tb, tk)
+        {
             return true;
         }
         // A join of values that are each at most the length (`min`).
@@ -781,7 +783,8 @@ impl Facts {
             let l = self.term(in f, e.lhs);
             let r = self.term(in f, e.rhs);
             if self.same(in f, l, t)
-                && self.at_most_len(in f, r, place, tb, tk, e.from, inc(depth)) {
+                && self.at_most_len(in f, r, place, tb, tk, e.from, inc(depth))
+            {
                 return true;
             }
         }

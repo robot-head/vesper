@@ -138,7 +138,8 @@ fn bind_group(
     inout exported: ChunkSeq[u32]
 ) {
     if loader.item_kind.contains_key(pair(module, local))
-        || loader.own_prefix.contains_key(pair(module, local)) {
+        || loader.own_prefix.contains_key(pair(module, local))
+    {
         ambiguous_name(
             inout loader,
             local,

@@ -44,7 +44,8 @@ fn declaration_token(in raw: Slice[u8]) -> bool {
         || k == k_struct()
         || k == k_enum()
         || k == k_effect()
-        || k == k_impl() {
+        || k == k_impl()
+    {
         return true;
     }
     if k != k_lower() {

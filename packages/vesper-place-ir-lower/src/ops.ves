@@ -280,7 +280,8 @@ fn shape_of(in ctx: Ctx, ty: u32) -> u64 {
     let known = ctx.world.k;
     if node.kind != TyKind::Named
         || (node.name != known.vec && node.name != known.mask)
-        || node.n != 2 {
+        || node.n != 2
+    {
         return NONE64;
     }
     let elem = elem_from_type(in ctx, ctx.types.arg(ty, 0));
@@ -1592,7 +1593,8 @@ pub fn resolve_vector(inout ctx: Ctx, in ast: Ast, ex: Ex, name: u32) -> VecRes 
         let profile_node = ctx.types.node(profile_ty);
         if profile_node.kind != TyKind::Named
             || profile_node.n != 0
-            || !profile_name(in ctx, profile_node.name) {
+            || !profile_name(in ctx, profile_node.name)
+        {
             return no_vec();
         }
         let mut label_text: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -1671,7 +1673,8 @@ pub fn resolve_vector(inout ctx: Ctx, in ast: Ast, ex: Ex, name: u32) -> VecRes 
         if const_ex.kind != X_LITERAL
             || const_ex.a != Lit::Int
             || const_ex.c != 0
-            || const_ex.b > 65535 {
+            || const_ex.b > 65535
+        {
             return no_vec();
         }
         consts.push(const_ex.b);

@@ -6,6 +6,8 @@
 // - envelope.ves: `parse_envelope` over the serde port's token tape.
 // - numbers.ves: serde_json's "number out of range".
 // - encode.ves: `encode_frame` (the output budget and serde_json's writer).
+// - commands.ves: the session's parameter checks (`validate_input`,
+//   `cancel_params`, the `vesper.proofAudit` arguments).
 // - lib.ves: the entries, and `lsp_serve`, the transport half of the stdio
 //   loop of src/lsp.rs (`dispatch`).
 use self::limits::{Le, LimitWord, Perr, Plimits, perr_code, perr_name, read_limits};
@@ -13,6 +15,7 @@ use self::envelope::{Env, Envelope, Id, NO_TOKEN, decoded, new_doc, parse_envelo
 use @vesper/serde::Doc;
 use self::encode::encode_frame;
 use self::frame::{Body, Cursor, read_frame};
+use self::commands::command_checks;
 
 // A `read_frame` step's status.
 enum Status: _ {
@@ -346,4 +349,13 @@ fn frame_ok(sink v: ChunkSeq[u8]) -> Result[ChunkSeq[u8], Perr] {
 
 fn frame_err(e: Perr) -> Result[ChunkSeq[u8], Perr] {
     Result::Err(e)
+}
+
+// Task "commands": the session's parameter checks (commands.ves), as
+// packed text (a length word, then eight bytes per word).
+pub fn lsp_commands(in input: Str) -> ChunkSeq[u64] {
+    let text = command_checks(in input.as_bytes());
+    let mut out: ChunkSeq[u64] = ChunkSeq::new();
+    put_bytes(inout out, in text[0..text.len()]);
+    out
 }

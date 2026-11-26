@@ -228,7 +228,8 @@ pub fn skip_mods(in tab: Slice[u64], in idx: Slice[u64], id0: u64) -> u64 {
             || k == BtfKind::Volatile
             || k == BtfKind::Const
             || k == BtfKind::Restrict
-            || k == BtfKind::TypeTag {
+            || k == BtfKind::TypeTag
+        {
             id = tf(in tab, in idx, id, 2);
         } else {
             return id;
@@ -249,7 +250,8 @@ pub fn size_of(in tab: Slice[u64], in idx: Slice[u64], id: u64, depth: u64) -> (
         || k == BtfKind::Union
         || k == BtfKind::Enum
         || k == BtfKind::Float
-        || k == BtfKind::Datasec {
+        || k == BtfKind::Datasec
+    {
         return (true, tf(in tab, in idx, t, 2));
     }
     if k == BtfKind::Ptr {
@@ -296,7 +298,8 @@ fn essential_len(in s: Slice[u8], at: u64, n: u64) -> u64 {
         let j = wrapping_add(at, i);
         if bt(in s, j) == ASCII_UNDERSCORE
             && bt(in s, wrapping_add(j, 1)) == ASCII_UNDERSCORE
-            && bt(in s, wrapping_add(j, 2)) == ASCII_UNDERSCORE {
+            && bt(in s, wrapping_add(j, 2)) == ASCII_UNDERSCORE
+        {
             return i;
         }
     }
@@ -475,7 +478,8 @@ fn types_match(
             let mut any = false;
             for j in 0..tn {
                 if !any
-                    && names_match(in ltext, vo, vl, in strs, te(in tab, in idx, tid, 2, j, 0)) {
+                    && names_match(in ltext, vo, vl, in strs, te(in tab, in idx, tid, 2, j, 0))
+                {
                     any = true;
                 }
             }
@@ -552,7 +556,8 @@ fn types_match(
                     te(in tab, in idx, tid, 4, j, 1),
                     false,
                     d1
-                ) {
+                )
+            {
                 any = true;
             }
         }
@@ -581,7 +586,8 @@ fn field_value(kind: u64, bits: u64, width: u64, size: u64, signed: bool, inout 
         let mut off = wrapping_mul(udiv(bits >> 3, sz), sz);
         loop {
             if wrapping_sub(wrapping_add(bits, width), wrapping_mul(off, 8))
-                <= wrapping_mul(sz, 8) {
+                <= wrapping_mul(sz, 8)
+            {
                 break;
             }
             if sz >= 8 {
@@ -683,7 +689,8 @@ pub fn local_value(
     }
     if kind == CoreReloc::TypeExists
         || kind == CoreReloc::EnumvalExists
-        || kind == CoreReloc::TypeMatches {
+        || kind == CoreReloc::TypeMatches
+    {
         out = 1;
         return 0;
     }
@@ -867,7 +874,8 @@ pub fn values_over(
                     code = NO_VALUE;
                     for j in 0..tn {
                         if code == NO_VALUE
-                            && name_is(in ltext, wo, wl, in strs, te(in tab, in idx, id, 2, j, 0)) {
+                            && name_is(in ltext, wo, wl, in strs, te(in tab, in idx, id, 2, j, 0))
+                        {
                             code = 0;
                             v = if kind == CoreReloc::EnumvalValue {
                                 te(in tab, in idx, id, 2, j, 1)

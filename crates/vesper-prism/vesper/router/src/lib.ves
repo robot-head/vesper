@@ -313,7 +313,8 @@ pub fn static_child(in r: RouterCore, node: u64, in key: Slice[u8], lo: u64, hi:
             && key_hi <= r.keys.len()
             && lo <= hi
             && hi <= key.len()
-            && r.keys[key_lo..key_hi].eq(in key[lo..hi]) {
+            && r.keys[key_lo..key_hi].eq(in key[lo..hi])
+        {
             return edge_word(in r, e, EDGE_CHILD);
         }
         e = edge_word(in r, e, EDGE_NEXT);
@@ -332,7 +333,8 @@ fn find_term(in r: RouterCore, first: u64, in method: Slice[u8], lo: u64, hi: u6
             && term.method_hi <= r.methods.len()
             && lo <= hi
             && hi <= method.len()
-            && r.methods[term.method_lo..term.method_hi].eq(in method[lo..hi]) {
+            && r.methods[term.method_lo..term.method_hi].eq(in method[lo..hi])
+        {
             return t;
         }
         t = term.next;
@@ -421,7 +423,8 @@ pub fn router_core_insert(
             0,
             method.len()
         )
-            != none() {
+            != none()
+    {
         return Result::Err(RouteFault::DuplicateRoute);
     }
     // Every refusal was found above; from here the insert cannot fail.

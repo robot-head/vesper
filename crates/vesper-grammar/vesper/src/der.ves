@@ -140,7 +140,8 @@ fn validate_limits(in lim: Slice[u64]) -> Unit eff [Fail[GErr]] {
         || sw(in lim, 4) > MAX_DEPTH
         || sw(in lim, 5) > MAX_WORK
         || sw(in lim, 6) > MAX_METADATA_BYTES
-        || sw(in lim, 8) > MAX_INTERMEDIATE_BYTES {
+        || sw(in lim, 8) > MAX_INTERMEDIATE_BYTES
+    {
         fail(0, 0);
     }
 }
@@ -404,10 +405,8 @@ fn primitive(
         invalid = len != 1 || !(c0 == 0 || c0 == TRUE);
     } else if kind == 1 {
         invalid = len == 0
-            || (
-                len > 1
-                    && ((c0 == 0 && c1 & SIGN_BIT == 0) || (c0 == ALL_ONES && c1 & SIGN_BIT != 0))
-            );
+            || (len > 1
+                && ((c0 == 0 && c1 & SIGN_BIT == 0) || (c0 == ALL_ONES && c1 & SIGN_BIT != 0)));
     } else if kind == 2 {
         if len == 0 || c0 > MAX_UNUSED_BITS || (len == 1 && c0 != 0) {
             invalid = true;
@@ -674,7 +673,8 @@ fn measure(
         let last = sb(in arena, wrapping_add(start, wrapping_sub(len, 1)));
         if unused > 7
             || (len == 0 && unused != 0)
-            || (len != 0 && last & wrapping_sub(shl(1, unused), 1) != 0) {
+            || (len != 0 && last & wrapping_sub(shl(1, unused), 1) != 0)
+        {
             fail(20, 0);
         }
         content = add(1, len);

@@ -510,38 +510,6 @@ pub fn load_for_target(
 
 type RootParser<'a> = dyn FnMut(&Path) -> Result<(String, crate::parser::Parse), String> + 'a;
 
-/// Prepare root sources before resolving imports and assigning global spans.
-/// The callback may append synthetic source, but its AST must use offsets
-/// into the resulting text. Dependencies always use the ordinary parser.
-pub fn load_with_root_parser(dir: &Path, parse: &mut RootParser<'_>) -> Result<Assembled, String> {
-    load_with_parser(
-        dir,
-        Some(parse),
-        None,
-        false,
-        None,
-        false,
-        std::env::consts::OS,
-    )
-}
-
-/// Assemble tests against one changed dependency source held in memory.
-pub fn load_with_dependency_replacement(
-    dir: &Path,
-    parse: &mut RootParser<'_>,
-    replacement: (&Path, &str),
-) -> Result<Assembled, String> {
-    load_with_parser(
-        dir,
-        Some(parse),
-        Some(replacement),
-        false,
-        None,
-        false,
-        std::env::consts::OS,
-    )
-}
-
 type PreparedParser<'a> =
     dyn FnMut(&Path, &mut String) -> Result<crate::parser::Parse, String> + 'a;
 
@@ -564,6 +532,150 @@ pub fn load_test_sources(
 
 fn read_source(path: &Path) -> Result<String, String> {
     fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+/// The name of the compile-time builtin that embeds a file of the package.
+pub const INCLUDE_STR: &str = "include_str";
+
+/// A module's text with every `include_str("path")` call replaced by a
+/// string literal holding the file at `path`, relative to `package_dir`
+/// (the directory of the package's `Loom.toml`).
+///
+/// The loader expands a module as it reads it, so every later stage, the
+/// Vesper ports included, sees an ordinary string literal. The path is a
+/// literal of `/`-separated names, none of them empty, `.` or `..`, so the
+/// file stays inside the package. The literal escapes every newline, so
+/// the lines after a call keep their numbers.
+///
+/// A call is the name (not after `.` or `::`), `(`, a string literal and
+/// `)`, with any whitespace between; comments and string literals are not
+/// searched. `packages/vesper-stage2/src/loader.ves` expands the same way.
+pub fn expand_includes(text: &str, package_dir: &Path) -> Result<String, String> {
+    let b = text.as_bytes();
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let space = |c: u8| matches!(c, b' ' | b'\t' | b'\r' | b'\n');
+    let mut out = String::new();
+    let (mut copied, mut i) = (0, 0);
+    while i < b.len() {
+        match b[i] {
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                i = b[i..]
+                    .iter()
+                    .position(|&c| c == b'\n')
+                    .map_or(b.len(), |n| i + n);
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                let mut depth = 1;
+                i += 2;
+                while depth > 0 && i < b.len() {
+                    if b[i..].starts_with(b"/*") {
+                        depth += 1;
+                        i += 2;
+                    } else if b[i..].starts_with(b"*/") {
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            b'"' => i = string_end(b, i),
+            c if ident(c) && (i == 0 || !ident(b[i - 1])) => {
+                let start = i;
+                while i < b.len() && ident(b[i]) {
+                    i += 1;
+                }
+                // A method (`x.include_str`) or a path (`a::include_str`) is
+                // not a call; a field value (`text: include_str(..)`) is.
+                let method_or_path = b[..start]
+                    .iter()
+                    .rposition(|&c| !space(c))
+                    .is_some_and(|k| b[k] == b'.' || (b[k] == b':' && k > 0 && b[k - 1] == b':'));
+                if &text[start..i] != INCLUDE_STR || method_or_path {
+                    continue;
+                }
+                let mut j = i;
+                let skip = |j: &mut usize| {
+                    while *j < b.len() && space(b[*j]) {
+                        *j += 1;
+                    }
+                };
+                skip(&mut j);
+                if b.get(j) != Some(&b'(') {
+                    continue;
+                }
+                j += 1;
+                skip(&mut j);
+                if b.get(j) != Some(&b'"') {
+                    continue;
+                }
+                let line = 1 + b[..start].iter().filter(|&&c| c == b'\n').count();
+                let fail = |why: String| format!("line {line}: {INCLUDE_STR}: {why}");
+                let literal_end = string_end(b, j);
+                let path = include_path(&text[j..literal_end]).map_err(fail)?;
+                j = literal_end;
+                skip(&mut j);
+                if b.get(j) != Some(&b')') {
+                    return Err(fail("expected `)` after the path".into()));
+                }
+                let file = package_dir.join(&path);
+                let contents = fs::read_to_string(&file)
+                    .map_err(|error| fail(format!("{}: {error}", file.display())))?;
+                out.push_str(&text[copied..start]);
+                out.push_str(&serde_json::to_string(&contents).expect("a string serializes"));
+                // A call over several lines keeps its line breaks after the
+                // literal, so the lines after it keep their numbers.
+                let breaks = b[start..j].iter().filter(|&&c| c == b'\n').count();
+                out.extend(std::iter::repeat_n('\n', breaks));
+                i = j + 1;
+                copied = i;
+            }
+            _ => i += 1,
+        }
+    }
+    if copied == 0 {
+        return Ok(text.to_owned());
+    }
+    out.push_str(&text[copied..]);
+    Ok(out)
+}
+
+/// One past the closing quote of the string literal opening at `b[start]`.
+fn string_end(b: &[u8], start: usize) -> usize {
+    let mut i = start + 1;
+    while i < b.len() && b[i] != b'"' {
+        i += if b[i] == b'\\' { 2 } else { 1 };
+    }
+    (i + 1).min(b.len())
+}
+
+/// The path of an `include_str` literal (with its quotes): `\\` and `\"`
+/// are its only escapes, and it must name a file inside the package.
+fn include_path(literal: &str) -> Result<String, String> {
+    let Some(inner) = literal.strip_prefix('"').and_then(|s| s.strip_suffix('"')) else {
+        return Err("the path's string literal is not closed".into());
+    };
+    let mut path = String::new();
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some(e @ ('\\' | '"')) => path.push(e),
+                _ => return Err("the path's only escapes are `\\\\` and `\\\"`".into()),
+            },
+            _ => path.push(c),
+        }
+    }
+    if path
+        .split('/')
+        .any(|name| matches!(name, "" | "." | "..") || name.contains(['\\', ':', '\0']))
+    {
+        return Err(format!(
+            "`{path}` must be a relative path of `/`-separated names inside the package, \
+             with no empty, `.` or `..` name"
+        ));
+    }
+    Ok(path)
 }
 
 fn load_with_parser(
@@ -1041,6 +1153,8 @@ impl Loader<'_> {
                     Some((replaced, text)) if normalize(&path) == replaced => text.to_owned(),
                     _ => read_source(&path)?,
                 };
+                let text = expand_includes(&text, dir)
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
                 let parsed = if self.defer_parse {
                     crate::parser::Parse {
                         module: Module::default(),
@@ -2920,9 +3034,112 @@ impl Renamer<'_> {
     }
 }
 
+/// The Rust pieces the Vesper driver's package loader still calls (#1986
+/// slice 2): it reads the package graph itself (modules/driver/src/load.ves)
+/// and asks for the manifest decode, the SemVer match and the `.vsys` type
+/// names here, through the driver's host steps.
+pub mod driver_host {
+    use super::*;
+
+    /// `read_for_target`'s source-directory OS and whether the build is the
+    /// WASI component's.
+    pub fn target_os(target: Option<&str>) -> (&'static str, bool) {
+        let wasi = target == Some(crate::wasm_backend::TARGET);
+        let os = if wasi {
+            "wasip2"
+        } else if let Some(triple) = target {
+            VSYS_TARGETS
+                .iter()
+                .find(|v| v.triple == triple)
+                .map_or(std::env::consts::OS, |v| v.os)
+        } else {
+            std::env::consts::OS
+        };
+        (os, wasi)
+    }
+
+    /// The index in [`VSYS_TARGETS`] of the host, which a plain `.vsys`
+    /// path's type names are read for.
+    pub fn host_target() -> Option<usize> {
+        let (triple, _) = vsys_target(None).ok()?;
+        VSYS_TARGETS.iter().position(|t| t.triple == triple)
+    }
+
+    /// The parser's byte budget: `Loading::assembly_input` leaves a graph
+    /// with a larger source to the Rust loader.
+    pub fn max_source_bytes() -> usize {
+        crate::parser::ParseLimits::default().max_source_bytes
+    }
+
+    /// A manifest as `Loader::package` decodes it.
+    pub struct DriverManifest(Manifest);
+
+    /// One `[dependencies]` entry, in name order.
+    pub struct DriverDependency<'a> {
+        pub name: &'a str,
+        pub optional: bool,
+        pub path: Option<&'a str>,
+    }
+
+    impl DriverManifest {
+        /// `vesper_loom_calculus::parse_manifest`, or `None` for a manifest
+        /// error (the Rust loader reports it).
+        pub fn parse(text: &str) -> Option<Self> {
+            vesper_loom_calculus::parse_manifest(text).ok().map(Self)
+        }
+        pub fn name(&self) -> &str {
+            self.0.package.name.as_str()
+        }
+        pub fn vsys(&self) -> &[String] {
+            &self.0.package.vsys
+        }
+        pub fn objects(&self) -> &[String] {
+            &self.0.package.objects
+        }
+        pub fn dependencies(&self) -> impl Iterator<Item = DriverDependency<'_>> {
+            self.0
+                .dependencies
+                .iter()
+                .map(|(name, d)| DriverDependency {
+                    name: name.as_str(),
+                    optional: d.optional,
+                    path: d.path.as_deref(),
+                })
+        }
+        /// Whether dependency `name`'s version requirement accepts
+        /// `found`'s version (`false` when there is no such dependency).
+        pub fn accepts(&self, name: &str, found: &DriverManifest) -> bool {
+            self.0
+                .dependencies
+                .iter()
+                .find(|(n, _)| n.as_str() == name)
+                .is_some_and(|(_, d)| d.version.matches(&found.0.package.version))
+        }
+    }
+
+    /// The `.vsys` library `text` for target `VSYS_TARGETS[target]`
+    /// (`@TARGET@` and `@ABI@` filled in): whether it links statically and
+    /// the type names it declares (extern types, wire structs, enums, as
+    /// [`PackageVsys::type_names`] lists them), or `None` when it does not
+    /// parse.
+    pub fn vsys_names(target: usize, text: &str) -> Option<(bool, Vec<String>)> {
+        let t = VSYS_TARGETS.get(target)?;
+        let source = text.replace("@TARGET@", t.triple).replace("@ABI@", t.abi);
+        let d = vesper_ffi::sys::parse(&source, vesper_ffi::sys::Limits::default()).ok()?;
+        let names = d
+            .extern_types()
+            .iter()
+            .map(|t| t.name().to_owned())
+            .chain(d.wire_structs().iter().map(|w| w.name().to_owned()))
+            .chain(d.enums().iter().map(|e| e.name().to_owned()))
+            .collect();
+        Some((d.link().mode() == vesper_ffi::sys::LinkMode::Static, names))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::mangled;
+    use super::*;
 
     #[test]
     fn mangling_is_injective_across_separator_characters() {
@@ -2947,5 +3164,96 @@ mod tests {
             mangled("@a/b_c", &[], "x"),
             mangled("@a/b", &s(&["c"]), "x")
         );
+    }
+
+    fn included(text: &str, files: &[(&str, &str)]) -> Result<String, String> {
+        let dir = std::env::temp_dir().join(format!(
+            "vesper-include-str-{}-{}",
+            std::process::id(),
+            text.len()
+        ));
+        for (path, contents) in files {
+            let file = dir.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, contents).unwrap();
+        }
+        let out = expand_includes(text, &dir);
+        let _ = fs::remove_dir_all(&dir);
+        out
+    }
+
+    #[test]
+    fn include_str_embeds_a_package_file_as_a_literal() {
+        let files = [("data/a.txt", "one \"two\"\\\n\tthree\u{1}é\n")];
+        let out = included(
+            "fn f() -> Str {\n    include_str( \"data/a.txt\" )\n}\nfn g() {}\n",
+            &files,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "fn f() -> Str {\n    \"one \\\"two\\\"\\\\\\n\\tthree\\u0001é\\n\"\n}\nfn g() {}\n"
+        );
+        let parsed = crate::parser::parse(&out);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let Item::Function(f) = &parsed.module.items[0] else {
+            panic!("{:?}", parsed.module.items)
+        };
+        let ExprKind::Block { tail: Some(t), .. } = &f.body.as_ref().unwrap().kind else {
+            panic!("{f:?}")
+        };
+        assert_eq!(
+            t.kind,
+            ExprKind::Literal(Literal::String(files[0].1.into()))
+        );
+    }
+
+    #[test]
+    fn include_str_works_as_a_field_value_and_over_several_lines() {
+        let files = [("a.txt", "x")];
+        let out = included(
+            "fn f() -> C { C { text: include_str(\"a.txt\") } }\n\
+             fn g() -> Str { include_str(\n    \"a.txt\"\n) }\nfn h() {}\n",
+            &files,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "fn f() -> C { C { text: \"x\" } }\nfn g() -> Str { \"x\"\n\n }\nfn h() {}\n"
+        );
+    }
+
+    #[test]
+    fn include_str_leaves_other_text_alone() {
+        let text = "// include_str(\"x\")\n/* /* include_str(\"x\") */ */\n\
+                    fn f() { s.include_str(\"x\"); m::include_str(\"x\"); \
+                    my_include_str(\"x\"); \"include_str(\\\"x\\\")\"; include_str(n); }\n\
+                    fn include_str(p: Str) -> Str { p }\n";
+        assert_eq!(included(text, &[]).unwrap(), text);
+    }
+
+    #[test]
+    fn include_str_paths_stay_inside_the_package() {
+        for path in [
+            "",
+            "/etc/passwd",
+            "../x",
+            "a/../../x",
+            "a//b",
+            "./a",
+            "a\\\\b",
+            "c:/x",
+        ] {
+            let text = format!("fn f() -> Str {{ include_str(\"{path}\") }}");
+            let error = included(&text, &[]).unwrap_err();
+            assert!(
+                error.starts_with("line 1: include_str: "),
+                "{path}: {error}"
+            );
+        }
+        let error = included("fn f() -> Str {\n include_str(\"missing.txt\") }", &[]).unwrap_err();
+        assert!(error.starts_with("line 2: include_str: "), "{error}");
+        let error = included("fn f() -> Str { include_str(\"a\" \"b\") }", &[("a", "")]);
+        assert!(error.unwrap_err().contains("expected `)`"));
     }
 }

@@ -41,8 +41,12 @@
 use @vesper/check-data::util::{add, inc, inc32, n32, u32_at, w};
 use @vesper/check-data::input::{Ctx, Reader};
 use @vesper/check-data::world::{set_by_symbol};
+use self::kinds::{
+    ClauseWord, EXPR_ASSIGN, EXPR_BINARY, EXPR_BLOCK, EXPR_CLOSURE, EXPR_FIELD, EXPR_HANDLE,
+    EXPR_NAME, EXPR_STRUCT, EXPR_UNARY, PAIR_WORDS, PAT_BIND, PAT_CONSTRUCTOR, ParamWord, StmtWord
+};
 
-const NONE32: u32 = 4294967295;
+pub const NONE32: u32 = 4294967295;
 
 pub copy struct ExprNode {
     kind: u8,
@@ -312,7 +316,7 @@ fn read_fun(
 
 // Maps an encoded name index to its symbol, keeping NONE32.
 fn sym_or_none(in ctx: Ctx, index: u64) -> u32 {
-    if index == 4294967295 {
+    if index == widen_u64(NONE32) {
         NONE32
     } else {
         u32_at(in ctx.nmap, index)
@@ -320,7 +324,7 @@ fn sym_or_none(in ctx: Ctx, index: u64) -> u32 {
 }
 
 fn ty_or_none(in ctx: Ctx, index: u64) -> u32 {
-    if index == 4294967295 {
+    if index == widen_u64(NONE32) {
         NONE32
     } else {
         u32_at(in ctx.tmap, index)
@@ -351,13 +355,19 @@ pub fn read_prog(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Prog
         let mut d = reader.word(in bytes);
         let e = reader.word(in bytes);
         // Names and types in the fields become symbols and type ids.
-        if kind == 2 || kind == 4 || kind == 10 || kind == 11 || kind == 12 || kind == 16 {
+        if kind == EXPR_NAME
+            || kind == EXPR_STRUCT
+            || kind == EXPR_UNARY
+            || kind == EXPR_BINARY
+            || kind == EXPR_ASSIGN
+            || kind == EXPR_HANDLE
+        {
             a = widen_u64(sym_or_none(in ctx, a));
         }
-        if kind == 7 {
+        if kind == EXPR_FIELD {
             bb = widen_u64(sym_or_none(in ctx, bb));
         }
-        if kind == 15 {
+        if kind == EXPR_CLOSURE {
             cc = widen_u64(ty_or_none(in ctx, cc));
             d = widen_u64(ty_or_none(in ctx, d));
         }
@@ -381,7 +391,7 @@ pub fn read_prog(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Prog
         let mut a = reader.word(in bytes);
         let pb = reader.word(in bytes);
         let pc = reader.word(in bytes);
-        if kind == 2 || kind == 5 {
+        if kind == PAT_BIND || kind == PAT_CONSTRUCTOR {
             a = widen_u64(sym_or_none(in ctx, a));
         }
         pats.push(PatNode {
@@ -406,24 +416,32 @@ pub fn read_prog(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Prog
             Option::Some(node) => node,
             Option::None => no_expr(),
         };
-        if node.kind == 4 {
+        if node.kind == EXPR_STRUCT {
             for j in 0..w(node.c) {
-                map_sym(inout pool, in ctx, add(w(node.b), wrapping_mul(j, 2)));
+                map_sym(inout pool, in ctx, add(w(node.b), wrapping_mul(j, PAIR_WORDS)));
             }
-        } else if node.kind == 5 {
+        } else if node.kind == EXPR_BLOCK {
             for j in 0..w(node.b) {
-                map_ty(inout pool, in ctx, add(w(node.a), add(wrapping_mul(j, 4), 2)));
+                map_ty(
+                    inout pool,
+                    in ctx,
+                    add(w(node.a), add(wrapping_mul(j, StmtWord::Words), StmtWord::Type))
+                );
             }
-        } else if node.kind == 15 {
+        } else if node.kind == EXPR_CLOSURE {
             for j in 0..w(node.b) {
-                let at = add(w(node.a), wrapping_mul(j, 3));
+                let at = add(w(node.a), wrapping_mul(j, ParamWord::Words));
                 map_sym(inout pool, in ctx, at);
-                map_ty(inout pool, in ctx, add(at, 2));
+                map_ty(inout pool, in ctx, add(at, ParamWord::Type));
             }
-        } else if node.kind == 16 {
+        } else if node.kind == EXPR_HANDLE {
             let clause_count = w(u32_at(in pool, w(node.e)));
             for j in 0..clause_count {
-                map_sym(inout pool, in ctx, add(inc(w(node.e)), wrapping_mul(j, 4)));
+                map_sym(
+                    inout pool,
+                    in ctx,
+                    add(inc(w(node.e)), wrapping_mul(j, ClauseWord::Words))
+                );
             }
         }
     }
@@ -432,9 +450,9 @@ pub fn read_prog(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Prog
             Option::Some(pat) => pat,
             Option::None => PatNode { kind: 0, start: 0, end: 0, a: 0, b: 0, c: 0 },
         };
-        if pat.kind == 5 {
+        if pat.kind == PAT_CONSTRUCTOR {
             for j in 0..w(pat.c) {
-                map_sym(inout pool, in ctx, add(w(pat.b), wrapping_mul(j, 2)));
+                map_sym(inout pool, in ctx, add(w(pat.b), wrapping_mul(j, PAIR_WORDS)));
             }
         }
     }

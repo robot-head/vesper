@@ -27,6 +27,8 @@ mod session;
 
 use serde_json::json;
 pub use session::LensConfig;
+#[doc(hidden)]
+pub use session::PortCheck;
 
 /// Every proof-lens model of a checked source, for the differential test of
 /// its Vesper port (`tests/self_host_lsp_features.rs`): per function, the
@@ -185,6 +187,18 @@ pub fn lens_requests_for_port(
         },
         rounds,
     )
+}
+/// The session's parameter checks (`validate_input`, `$/cancelRequest`
+/// parameters, the `vesper.proofAudit` arguments against the documents
+/// `open`), each run `rounds` times, as text, for the Vesper port's
+/// differential test.
+#[doc(hidden)]
+pub fn command_checks_for_port(
+    checks: &[(PortCheck, String, Option<serde_json::Value>)],
+    open: &[(String, i32)],
+    rounds: u64,
+) -> String {
+    session::command_checks_dump(checks, open, rounds)
 }
 /// A proof outcome for the Vesper port's proof-lens test: 0 not attempted,
 /// 1 proved (detail), 2 checked (detail), 3 refuted (counterexample),

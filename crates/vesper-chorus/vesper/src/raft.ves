@@ -993,7 +993,8 @@ fn node_advance_commit(inout rc: RaftCluster, i: u64) {
     let cur_commit = sw(in rc.nd_commit, i);
     if sw(in rc.nd_role, i) == RaftRole::Leader
         && !member(members, i)
-        && node_config_index(in rc, i) <= cur_commit {
+        && node_config_index(in rc, i) <= cur_commit
+    {
         rc.leader_step_downs = inc(rc.leader_step_downs);
         setw(inout rc.nd_role, i, RaftRole::Follower);
     }
@@ -1282,10 +1283,8 @@ fn handle_request(inout rc: RaftCluster, i: u64, p: u64, now: u64) {
             let prev = h.prev_log_index;
             let cur_len = node_log_len(in rc, i);
             let prev_ok = prev == 0
-                || (
-                    prev <= cur_len
-                        && node_log_get(in rc, i, wrapping_sub(prev, 1)).term == h.prev_log_term
-                );
+                || (prev <= cur_len
+                    && node_log_get(in rc, i, wrapping_sub(prev, 1)).term == h.prev_log_term);
             if prev_ok {
                 let mut changed = false;
                 let ec = rc.tmp_entries.len();
@@ -1410,10 +1409,8 @@ fn handle_request(inout rc: RaftCluster, i: u64, p: u64, now: u64) {
             if last > sw(in rc.nd_commit, i) {
                 let cur_len = node_log_len(in rc, i);
                 let have = last <= cur_len
-                    && (
-                        last == 0
-                            || node_log_get(in rc, i, wrapping_sub(last, 1)).term == h.prev_log_term
-                    );
+                    && (last == 0
+                        || node_log_get(in rc, i, wrapping_sub(last, 1)).term == h.prev_log_term);
                 if !have {
                     let ilen = rc.tmp_entries.len();
                     let mn = if cur_len < ilen { cur_len } else { ilen };
@@ -1541,7 +1538,8 @@ fn handle_response(inout rc: RaftCluster, i: u64, p: u64, now: u64) {
         }
         if lbl == rc.sym_grant
             && o_term == sw(in rc.nd_term, i)
-            && sw(in rc.nd_role, i) == RaftRole::Candidate {
+            && sw(in rc.nd_role, i) == RaftRole::Candidate
+        {
             let m = sw(in rc.nd_votes_mask, i) | bit_at(src);
             setw(inout rc.nd_votes_mask, i, m);
             node_maybe_win(inout rc, i, now);
@@ -1569,7 +1567,8 @@ fn handle_response(inout rc: RaftCluster, i: u64, p: u64, now: u64) {
     }
     if sw(in rc.nd_role, i) != RaftRole::Leader
         || o_term != sw(in rc.nd_term, i)
-        || widen_u64(ack.follower_id) != o_peer {
+        || widen_u64(ack.follower_id) != o_peer
+    {
         return;
     }
     let idx_slot = wrapping_add(wrapping_mul(i, rc.n), o_peer);
@@ -1752,7 +1751,8 @@ fn node_persistent_differs(in rc: RaftCluster, i: u64) -> bool {
     if sw(in rc.nd_term, i) != sw(in rc.sy_term, i)
         || sw(in rc.nd_voted_for, i) != sw(in rc.sy_voted_for, i)
         || sw(in rc.nd_snap_index, i) != sw(in rc.sy_snap_index, i)
-        || sw(in rc.nd_snap_term, i) != sw(in rc.sy_snap_term, i) {
+        || sw(in rc.nd_snap_term, i) != sw(in rc.sy_snap_term, i)
+    {
         return true;
     }
     let len = node_log_len(in rc, i);

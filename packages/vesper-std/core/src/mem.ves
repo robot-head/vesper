@@ -1,6 +1,7 @@
 // Symmetric in-place exchange from manuscript §7.6. Both captures carry
 // the inout floor and expand to one call, so the checker sees both loans.
 use self::swap as swap_values;
+use self::anvil::prop;
 
 pub sugar swap: stmt {
     rule (swap inout $left:place with inout $right:place;) => {
@@ -8,4 +9,13 @@ pub sugar swap: stmt {
             swap_values(inout $left, inout $right);
         }
     }
+}
+
+prop swapping_twice_restores_both_places[first: u64, second: u64] {
+    let mut left = first;
+    let mut right = second;
+    swap inout left with inout right;
+    let exchanged = left == second && right == first;
+    swap inout left with inout right;
+    exchanged && left == first && right == second
 }

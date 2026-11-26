@@ -656,7 +656,8 @@ fn repr_of(inout c: Ctx, ty: u32) -> u8 {
     }
     if n.kind == TyKind::Named
         && n.n == 0
-        && (n.name == c.world.k.unit || n.name == c.world.k.never) {
+        && (n.name == c.world.k.unit || n.name == c.world.k.never)
+    {
         return REP_UNIT;
     }
     if n.kind == TyKind::Named && n.n == 1 && is(in c.names, n.name, "Option") {
@@ -1086,10 +1087,8 @@ fn packet_effect(inout g: G, inout c: Ctx, in x: Extra, function: u32, decl: XEf
             0
         };
         let result_ok = inner != NONE32
-            && (
-                (want_u8 && is(in c.names, inner_name, "u8"))
-                    || (!want_u8 && is(in c.names, inner_name, "u32"))
-            );
+            && ((want_u8 && is(in c.names, inner_name, "u8"))
+                || (!want_u8 && is(in c.names, inner_name, "u32")));
         if !one_u32 || !result_ok {
             bad_signature(inout g, in c, function, decl, o.name);
             if pk == PK_U8 {
@@ -2397,7 +2396,8 @@ fn allocate(inout g: G, inout c: Ctx, in p: Program, f: FnRow, locals_at: u64) -
                     && u64_at(in g.last_k, w(v)) == k
                     && u64_at(in g.def_block, w(v)) == bi
                     && loc_kind(in g, v) == L_SLOT
-                    && loc_val(in g, v) >= w(base) {
+                    && loc_val(in g, v) >= w(base)
+                {
                     g.free_slot.push(n32(wrapping_sub(loc_val(in g, v), w(base))));
                     g.free_size.push(rep_slots(vrep(in g, v)));
                 }

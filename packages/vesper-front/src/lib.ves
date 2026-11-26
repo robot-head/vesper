@@ -560,16 +560,16 @@ test {
         let leaves: u64 = if retained == 0 { 0 } else { 1 };
         if rows.try_get(0) != Option::Some(leaves)
             || rows.try_get(1) != Option::Some(1)
-            || rows.try_get(2) != Option::Some(1) {
+            || rows.try_get(2) != Option::Some(1)
+        {
             return false;
         }
         if leaves == 1
-            && (
-                rows.try_get(3) != Option::Some(69)
-                    || rows.try_get(4) != Option::Some(0)
-                    || rows.try_get(5) != Option::Some(retained)
-                    || rows.try_get(6) != Option::Some(0)
-            ) {
+            && (rows.try_get(3) != Option::Some(69)
+                || rows.try_get(4) != Option::Some(0)
+                || rows.try_get(5) != Option::Some(retained)
+                || rows.try_get(6) != Option::Some(0))
+        {
             return false;
         }
         let root = wrapping_add(3, leaves << 2);

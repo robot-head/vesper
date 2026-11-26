@@ -6,14 +6,30 @@ use @vesper/check-data::util::{add, inc, inc32, n32, push_decimal, u32_at, u64_a
 use @vesper/check-data::input::{Ctx};
 use @vesper/check-data::world::{set_by_symbol};
 use @vesper/check-data::types::{display};
+use @vesper/check-data::types::{TyKind};
+use @vesper-std/bytes::ascii::{SPACE};
+use self::codes::{CODE_LEN, E_RTBUS_NOT_LINEAR, E_RT_RECURSION, E_SECRET_RESULT};
 use self::keys::{Keys, Sums, keys_new, pair, sums_new};
-use self::prog::{Prog};
+use self::kinds::{EXPR_BLOCK};
+use self::prog::{NONE32, Prog};
 use self::walker::{
-    DRow, Edge, Walk, caps_of, function_body, is_declassify_gate, secret_type, start
+    CT, DRow, Edge, Walk, caps_of, function_body, is_declassify_gate, secret_type, start
 };
 
-const NONE32: u32 = 4294967295;
-const CT: u8 = 1;
+// `summarise`: the fixpoint's round bound, as in Rust: this many, plus this
+// many per function parameter, plus one per effect operation.
+const SUMMARY_ROUNDS: u64 = 4;
+const SUMMARY_ROUNDS_PER_PARAM: u64 = 2;
+
+// The (start, end) of an edge's call span in `spans`.
+const SPAN_WORDS: u64 = 2;
+
+// `push_u32_le`: one byte, and the shifts of a u32's second, third and
+// fourth bytes.
+const BYTE_MASK: u64 = 255;
+const BYTE1_SHIFT: u32 = 8;
+const BYTE2_SHIFT: u32 = 16;
+const BYTE3_SHIFT: u32 = 24;
 
 fn put(inout walk: Walk, in text: Str) {
     walk.text.extend(in text.as_bytes());
@@ -36,7 +52,7 @@ fn finish(inout walk: Walk, code_start: u64, in help: Str, start: u64, end: u64)
         start: start,
         end: end,
         code_start: code_start,
-        message_start: add(code_start, 5),
+        message_start: add(code_start, CODE_LEN),
         help_start: help_start,
         help_end: walk.text.len()
     });
@@ -44,9 +60,9 @@ fn finish(inout walk: Walk, code_start: u64, in help: Str, start: u64, end: u64)
 
 // `summarise`: the facts to a fixpoint; left in `walk.summaries`.
 pub fn summarise(inout ctx: Ctx, in prog: Prog, inout walk: Walk) {
-    let mut bound: u64 = 4;
+    let mut bound: u64 = SUMMARY_ROUNDS;
     for i in 0..prog.funs.len() {
-        bound = add(bound, wrapping_mul(w(prog.fun(n32(i)).param_count), 2));
+        bound = add(bound, wrapping_mul(w(prog.fun(n32(i)).param_count), SUMMARY_ROUNDS_PER_PARAM));
     }
     bound = add(bound, prog.ops.len());
     walk.emit = false;
@@ -74,7 +90,7 @@ pub fn summarise(inout ctx: Ctx, in prog: Prog, inout walk: Walk) {
 
 fn tail_span_start(in prog: Prog, expr_id: u32) -> u64 {
     let node = prog.expr(expr_id);
-    if node.kind == 5 && node.c != NONE32 {
+    if node.kind == EXPR_BLOCK && node.c != NONE32 {
         return tail_span_start(in prog, node.c);
     }
     node.start
@@ -82,7 +98,7 @@ fn tail_span_start(in prog: Prog, expr_id: u32) -> u64 {
 
 fn tail_span_end(in prog: Prog, expr_id: u32) -> u64 {
     let node = prog.expr(expr_id);
-    if node.kind == 5 && node.c != NONE32 {
+    if node.kind == EXPR_BLOCK && node.c != NONE32 {
         return tail_span_end(in prog, node.c);
     }
     node.end
@@ -90,7 +106,7 @@ fn tail_span_end(in prog: Prog, expr_id: u32) -> u64 {
 
 fn carries_no_information(in ctx: Ctx, in walk: Walk, ty: u32) -> bool {
     let ty_node = ctx.types.node(ty);
-    if ty_node.kind == 2 && ty_node.n == 0 {
+    if ty_node.kind == TyKind::Tuple && ty_node.n == 0 {
         return true;
     }
     let name = ctx.types.name(ty);
@@ -109,7 +125,7 @@ pub fn check_world(inout ctx: Ctx, in prog: Prog, inout walk: Walk) -> ChunkSeq[
     for i in 0..prog.effs.len() {
         let decl = prog.decl(n32(i));
         if decl.name == walk.syms.rtbus && !decl.linear {
-            let code_start = begin(inout walk, "E0724");
+            let code_start = begin(inout walk, E_RTBUS_NOT_LINEAR);
             put(
                 inout walk,
                 "'RtBus' must be declared as a linear effect: the realtime bus is resumed exactly once by the host"
@@ -139,8 +155,9 @@ pub fn check_world(inout ctx: Ctx, in prog: Prog, inout walk: Walk) -> ChunkSeq[
                 && tainted
                 && !secret_type(in ctx, inout walk, func.result)
                 && !carries_no_information(in ctx, in walk, func.result)
-                && !walker_gate(in ctx, func.name) {
-                let code_start = begin(inout walk, "E0706");
+                && !walker_gate(in ctx, func.name)
+            {
+                let code_start = begin(inout walk, E_SECRET_RESULT);
                 put(inout walk, "eff [ConstTime] function '");
                 put_name(in ctx, inout walk, func.name);
                 put(inout walk, "' returns a secret-derived value as non-secret '");
@@ -283,7 +300,7 @@ fn realtime_recursion(inout ctx: Ctx, inout walk: Walk, in indirect: Keys) {
     let mut targets: ChunkSeq[u32] = ChunkSeq::new[u32]();
     targets.resize(edge_count, 0);
     let mut spans: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    spans.resize(wrapping_mul(edge_count, 2), 0);
+    spans.resize(wrapping_mul(edge_count, SPAN_WORDS), 0);
     let mut callees: ChunkSeq[u32] = ChunkSeq::new[u32]();
     callees.resize(edge_count, 0);
     for i in 0..edge_count {
@@ -300,8 +317,8 @@ fn realtime_recursion(inout ctx: Ctx, inout walk: Walk, in indirect: Keys) {
             let slot = u64_at(in edge_fill, wrapping_sub(node_slot, 1));
             let ok = edge_fill.try_set(wrapping_sub(node_slot, 1), inc(slot));
             let ok2 = targets.try_set(slot, u32_at(in index, w(edge.callee)));
-            let ok3 = spans.try_set(wrapping_mul(slot, 2), edge.start);
-            let ok4 = spans.try_set(inc(wrapping_mul(slot, 2)), edge.end);
+            let ok3 = spans.try_set(wrapping_mul(slot, SPAN_WORDS), edge.start);
+            let ok4 = spans.try_set(inc(wrapping_mul(slot, SPAN_WORDS)), edge.end);
             let ok5 = callees.try_set(slot, edge.callee);
         }
     }
@@ -319,8 +336,8 @@ fn realtime_recursion(inout ctx: Ctx, inout walk: Walk, in indirect: Keys) {
         let hi = u64_at(in edge_starts, inc(root_index));
         for edge_index in lo..hi {
             let target = u32_at(in targets, edge_index);
-            let start = u64_at(in spans, wrapping_mul(edge_index, 2));
-            let end = u64_at(in spans, inc(wrapping_mul(edge_index, 2)));
+            let start = u64_at(in spans, wrapping_mul(edge_index, SPAN_WORDS));
+            let end = u64_at(in spans, inc(wrapping_mul(edge_index, SPAN_WORDS)));
             let key = pair(n32(start), n32(end));
             if target == 0 || reported.has(key) {
                 continue;
@@ -356,7 +373,7 @@ fn realtime_recursion(inout ctx: Ctx, inout walk: Walk, in indirect: Keys) {
             if cycle {
                 reported.insert(key);
                 let callee = u32_at(in callees, edge_index);
-                let code_start = begin(inout walk, "E0722");
+                let code_start = begin(inout walk, E_RT_RECURSION);
                 if callee == indirect_sym {
                     put(inout walk, "eff [Realtime] call through a function value in '");
                     put_shown(in ctx, inout walk, root);
@@ -486,9 +503,8 @@ fn sorted_rows(in walk: Walk) -> ChunkSeq[u64] {
                     break;
                 }
                 let take_left = j >= hi
-                    || (
-                        i < mid && cmp_rows(in walk, u64_at(in order, i), u64_at(in order, j)) <= 0
-                    );
+                    || (i < mid
+                        && cmp_rows(in walk, u64_at(in order, i), u64_at(in order, j)) <= 0);
                 if take_left {
                     let ok = merged.try_set(k, u64_at(in order, i));
                     i = inc(i);
@@ -529,11 +545,11 @@ pub fn write_text(in walk: Walk, in rows: ChunkSeq[u64], inout out: ChunkSeq[u8]
         for j in diag.code_start..diag.message_start {
             out.push(u8_at(in walk.text, j));
         }
-        out.push(32);
+        out.push(SPACE);
         push_decimal(inout out, diag.start);
         out.extend(in "..".as_bytes());
         push_decimal(inout out, diag.end);
-        out.push(32);
+        out.push(SPACE);
         for j in diag.message_start..diag.help_start {
             out.push(u8_at(in walk.text, j));
         }
@@ -546,10 +562,10 @@ pub fn write_text(in walk: Walk, in rows: ChunkSeq[u64], inout out: ChunkSeq[u8]
 }
 
 pub fn push_u32_le(inout out: ChunkSeq[u8], value: u64) {
-    out.push(wrapping_u8(value & 255));
-    out.push(wrapping_u8((value >> 8) & 255));
-    out.push(wrapping_u8((value >> 16) & 255));
-    out.push(wrapping_u8((value >> 24) & 255));
+    out.push(wrapping_u8(value & BYTE_MASK));
+    out.push(wrapping_u8((value >> BYTE1_SHIFT) & BYTE_MASK));
+    out.push(wrapping_u8((value >> BYTE2_SHIFT) & BYTE_MASK));
+    out.push(wrapping_u8((value >> BYTE3_SHIFT) & BYTE_MASK));
 }
 
 // Binary diagnostic encoding for vesper-hybrid: u32 count, then per row:

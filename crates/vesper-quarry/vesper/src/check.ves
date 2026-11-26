@@ -63,7 +63,8 @@ pub fn find_column(inout q: Q, qoff: u64, qlen: u64, noff: u64, nlen: u64) -> u6
     for i in 0..q.bcols.len() {
         let c = bcol(in q, i);
         if same(in q.pool, c.coff, c.clen, noff, nlen)
-            && (qoff == none() || same(in q.pool, qoff, qlen, c.aoff, c.alen)) {
+            && (qoff == none() || same(in q.pool, qoff, qlen, c.aoff, c.alen))
+        {
             if found != none() {
                 fail_name(inout q, 4, "column ", noff, nlen);
                 return none();

@@ -250,7 +250,8 @@ pub fn client_send_body(
         return Result::Err(ClientError::UnknownStream);
     }
     if wrapping_add(wrapping_add(out_queued(in c.conn.out, in c.conn.pool, id), data.len()), 9)
-        > c.conn.cfg.max_stream_buffer {
+        > c.conn.cfg.max_stream_buffer
+    {
         return Result::Err(ClientError::BufferFull);
     }
     c.conn.scratch.clear();

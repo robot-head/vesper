@@ -66,11 +66,172 @@ pub fn run_input(world: &World, program: &Program, entry: &str, fuel: u64) -> Op
     let mut t = Tables::of(program);
     t.label_names();
     let entry = t.enc.name(entry);
+    let sites = sites(world, program, &mut t);
     let mut tail = t.section();
     let world_words = t.enc.world(world);
     tail.push(fuel);
     tail.push(entry);
+    tail.extend(sites);
     Some(t.enc.finish(&world_words, &tail))
+}
+
+// Site kinds of the effect table.
+const SITE_HANDLE: u64 = 1;
+const SITE_EFFECT_CALL: u64 = 2;
+const SITE_TRY: u64 = 3;
+// Handle flags: the expression has a type (a `Frame::Coerce`); a state.
+const FLAG_COERCE: u64 = 1;
+const FLAG_STATE: u64 = 2;
+// Pattern words besides `name + 1`: `_`, and any other pattern.
+const PAT_WILD: u64 = 0;
+const PAT_OTHER: u64 = u64::MAX;
+
+/// The effect table after the entry: what `Runtime` reads from the AST and
+/// the world at a handler, an effect operation call or a `?`, which the
+/// program section does not carry.
+///
+/// ```text
+/// overflow-key+1  runtime-error-key+1      the primitive failures' Fail keys
+/// n, then per site: instruction (global index), kind, then
+///   handle:  effect label+1 instance-key+1 coerce static-key
+///            free-count free-name... body-fn+1
+///            ret-fn+1 ret-pattern
+///            op-count (op clause-fn+1 pattern-count pattern...)...
+///   effect call: effect op instance-key+1
+///   try:     instance-key+1
+/// ```
+///
+/// A pattern word is 0 for `_`, name + 1 for a binding, or `u64::MAX` for
+/// any other pattern (the machine declines it). A function word is 0 when
+/// the body was not lowered (it would run as an AST expression).
+fn sites(world: &World, program: &Program, t: &mut Tables) -> Vec<u64> {
+    use vesper::ast::{ExprKind, PatternKind};
+    use vesper::ir::Op;
+    use vesper::numeric::instance_key;
+    let named = |n: &str| vesper::ast::Type::Named(n.into(), vec![]);
+    let mut out = vec![];
+    for ty in ["ArithOverflow", "RuntimeError"] {
+        let key = instance_key("Fail", &[named(ty)]).map(|k| t.enc.name(&k) + 1);
+        out.push(key.unwrap_or(0));
+    }
+    let mut rows = vec![];
+    let mut global = 0u64;
+    for f in program.functions.values() {
+        for b in &f.blocks {
+            for i in &b.instructions {
+                let at = global;
+                global += 1;
+                match &i.op {
+                    Op::Handle { expr, .. } => {
+                        let ExprKind::Handle {
+                            effect,
+                            state,
+                            body,
+                            ret,
+                            ops,
+                        } = &expr.kind
+                        else {
+                            continue;
+                        };
+                        let mut row = vec![at, SITE_HANDLE];
+                        row.push(t.enc.name(&effect.name));
+                        row.push(t.enc.opt_name(&effect.label));
+                        row.push(
+                            instance_key(&effect.name, &effect.args)
+                                .map_or(0, |k| t.enc.name(&k) + 1),
+                        );
+                        // `Control::Eval` pushes a `Frame::Coerce` when the
+                        // expression has a type (one more step); a state
+                        // handler also evaluates its initializer.
+                        let coerce = world.types.contains_key(&(expr.span.start, expr.span.end));
+                        let mut flags = 0;
+                        if coerce {
+                            flags |= FLAG_COERCE;
+                        }
+                        if state.is_some() {
+                            flags |= FLAG_STATE;
+                        }
+                        row.push(flags);
+                        row.push(t.enc.name(&format!("$static:$cap{}", expr.span.start)));
+                        let mut free = vesper::check::clause_free_names(ret);
+                        for op in ops {
+                            free.extend(vesper::check::clause_free_names(op));
+                        }
+                        row.push(free.len() as u64);
+                        for n in &free {
+                            row.push(t.enc.name(n));
+                        }
+                        let mut lowered = |kind: &str, e: &vesper::ast::Expr| {
+                            let name = vesper::ir::nested_name(kind, &e.span);
+                            if program.functions.contains_key(&name) {
+                                t.enc.name(&name) + 1
+                            } else {
+                                0
+                            }
+                        };
+                        row.push(lowered("handler_body", body));
+                        row.push(lowered("handler_clause", &ret.body));
+                        let mut clause_fns = vec![];
+                        for op in ops {
+                            clause_fns.push(lowered("handler_clause", &op.body));
+                        }
+                        let pattern = |t: &mut Tables, p: &vesper::ast::Pattern| match &p.kind {
+                            PatternKind::Wild => PAT_WILD,
+                            PatternKind::Bind(n) => t.enc.name(n) + 1,
+                            _ => PAT_OTHER,
+                        };
+                        row.push(ret.pats.first().map_or(PAT_OTHER, |p| pattern(t, p)));
+                        row.push(ops.len() as u64);
+                        for (op, f) in ops.iter().zip(clause_fns) {
+                            let name = t.enc.name(&op.name);
+                            row.extend([name, f, op.pats.len() as u64]);
+                            for p in &op.pats {
+                                row.push(pattern(t, p));
+                            }
+                        }
+                        rows.push(row);
+                    }
+                    Op::Call {
+                        callee,
+                        types,
+                        capability,
+                        ..
+                    } if !world.functions.contains_key(callee) => {
+                        let Some((effect, op)) = callee.split_once("::") else {
+                            continue;
+                        };
+                        if capability.is_some() {
+                            // A labelled operation: its `$label:` key.
+                            continue;
+                        }
+                        let key = instance_key(effect, types).map_or(0, |k| t.enc.name(&k) + 1);
+                        let effect = t.enc.name(effect);
+                        let op = t.enc.name(op);
+                        rows.push(vec![at, SITE_EFFECT_CALL, effect, op, key]);
+                    }
+                    Op::Try(v) => {
+                        let error = f.values.get(v).and_then(|ty| match ty {
+                            vesper::ast::Type::Named(n, args)
+                                if n == "Result" && args.len() == 2 =>
+                            {
+                                Some(args[1].clone())
+                            }
+                            _ => None,
+                        });
+                        let key = instance_key("Fail", &error.into_iter().collect::<Vec<_>>())
+                            .map_or(0, |k| t.enc.name(&k) + 1);
+                        rows.push(vec![at, SITE_TRY, key]);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    out.push(rows.len() as u64);
+    for r in rows {
+        out.extend(r);
+    }
+    out
 }
 
 /// The words `run_words` returns: a status, then the text.

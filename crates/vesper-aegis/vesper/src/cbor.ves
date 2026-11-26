@@ -505,7 +505,8 @@ pub fn decode_at(
             p = string(in b, h, base, field, inout w);
         } else if h.major == CborMajor::Array
             || h.major == CborMajor::Map
-            || h.major == CborMajor::Tag {
+            || h.major == CborMajor::Tag
+        {
             if h.major == CborMajor::Tag {
                 if h.ai == CborAdditional::Indefinite {
                     bad(field);
@@ -514,7 +515,8 @@ pub fn decode_at(
                     let inner = head(in b, h.end, field);
                     if inner.major == CborMajor::Bytes
                         && inner.ai != CborAdditional::Indefinite
-                        && inner.arg <= BIGNUM_MAX_BYTES {
+                        && inner.arg <= BIGNUM_MAX_BYTES
+                    {
                         p = bignum(in b, h.arg, inner, field, inout w);
                         continue;
                     }

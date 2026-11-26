@@ -108,7 +108,8 @@ fn put_erased_ty(in state: St, in ctx: Cx, in ast: Ast, ty: u32, inout out: Chun
         let arg_count = list_len(in ast, node.b);
         if spells(in state, name, in "Tensor")
             || spells(in state, name, in "KvPageLease")
-            || spells(in state, name, in "ActiveKvSeq") {
+            || spells(in state, name, in "ActiveKvSeq")
+        {
             state.names.write(name, inout out);
             return;
         }
@@ -829,7 +830,8 @@ pub fn elaborate_report(in state: St, in ctx: Cx, in ast: Ast) -> ChunkSeq[u8] {
                     let mut generic_kind = KD_TYPE;
                     for k in 0..sig_generic_count {
                         if u32_at(in ctx.sig_generic_names, add(sig_generics_start, k))
-                            == generic_name {
+                            == generic_name
+                        {
                             generic_kind = u8_at(
                                 in ctx.sig_generic_kinds,
                                 add(sig_generics_start, k)
