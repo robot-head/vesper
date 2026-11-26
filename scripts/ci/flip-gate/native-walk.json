@@ -1,0 +1,64 @@
+{
+  "notes": [
+    "Flip gate for the native walk's planning (Rust-exit gap wave 1 lane 11,",
+    "#1509 parts 3b-5): the instances an entry or library compile defines",
+    "(`instances_for_roots`), their internal conventions (`NativeAbi::plan`)",
+    "and their entry blocks (`frame_plan`), ported as @vesper/native-walk",
+    "(packages/vesper-codegen-walk) and installed as the hybrid's",
+    "`entry_plans` and `export_plans` hooks. A compiler module: its Rust",
+    "(src/native.rs, src/native_export.rs) is deleted by the Rust compiler's",
+    "retirement (SH6 lane 2), not by this flip.",
+    "Differential: every entry compile of the corpus and the test sources,",
+    "the Beacon trace hosts and the sampled library objects, CLIF and object",
+    "bytes with the package against without it.",
+    "ABBA: the same compiles end to end (lowering, optimizer, walk and",
+    "Cranelift), the hook's encoding and decoding included."
+  ],
+  "name": "native-walk",
+  "lane": "G1-11",
+  "rust": ["src/native.rs", "src/native_export.rs"],
+  "env": {
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_PROFILE_RELEASE_DEBUG": "0"
+  },
+  "build": [
+    ["cargo", "test", "--locked", "--release", "--test", "self_host_native_walk_frame", "--no-run"]
+  ],
+  "tests": [
+    {
+      "run": ["cargo", "test", "--locked", "--release", "--test", "self_host_native_walk_frame", "frame_plan"]
+    }
+  ],
+  "differential": {
+    "run": {
+      "sequence": [
+        ["cargo", "test", "--locked", "--release", "--test", "self_host_native_walk_frame", "the_entry_plans_swap_matches_rust", "--", "--exact", "--nocapture"],
+        ["cargo", "test", "--locked", "--release", "--test", "self_host_native_walk_frame", "the_entry_plans_swap_matches_rust_on_trace_hosts", "--", "--nocapture"],
+        ["cargo", "test", "--locked", "--release", "--test", "self_host_native_walk_frame", "the_export_plans_swap_matches_rust", "--", "--nocapture"]
+      ]
+    }
+  },
+  "abba": [
+    {
+      "workload": "entries",
+      "run": {
+        "argv": ["cargo", "test", "--locked", "--release", "--test", "self_host_native_walk_frame", "flip_gate", "--", "--nocapture"],
+        "env": {
+          "NATIVE_WALK_GATE_WORKLOAD": "entries",
+          "CHECK_HARNESS_SPEED": "1"
+        }
+      }
+    },
+    {
+      "workload": "exports",
+      "run": {
+        "argv": ["cargo", "test", "--locked", "--release", "--test", "self_host_native_walk_frame", "flip_gate", "--", "--nocapture"],
+        "env": {
+          "NATIVE_WALK_GATE_WORKLOAD": "exports",
+          "CHECK_HARNESS_SPEED": "1"
+        }
+      }
+    }
+  ]
+}
