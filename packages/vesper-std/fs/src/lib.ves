@@ -29,7 +29,9 @@ use self::sys::{
     os_sync_dir,
     os_parent_len,
     os_unique,
-    os_word_kind
+    os_word_kind,
+    os_is_executable,
+    os_canonicalize
 };
 
 // Why an operation failed. `kind` is one of the codes below
@@ -227,6 +229,28 @@ fn write_mode(in path: Slice[u8], in data: Slice[u8], mode: u32, sync: bool) eff
     }
     os_close(fd);
     if err != 0 {
+        raise_io(err)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Standard output and standard error.
+
+// Write all of `data` to standard output, unbuffered: one `write` loop on
+// descriptor 1 (retrying `EINTR`), so it never reorders with other writers
+// of the descriptor that flush before returning.
+pub fn write_stdout(in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    write_stream(1, in data);
+}
+
+// Write all of `data` to standard error (descriptor 2), as `write_stdout`.
+pub fn write_stderr(in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    write_stream(2, in data);
+}
+
+fn write_stream(fd: i32, in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    let mut err: u64 = 0;
+    if os_write(fd, in data, inout err) != 0 {
         raise_io(err)
     }
 }
@@ -439,6 +463,31 @@ pub fn metadata_path(in path: Slice[u8]) -> Metadata eff [Ffi[StdFs], Fail[IoErr
 // The metadata of `path` itself: a symbolic link reports `kind_symlink()`.
 pub fn symlink_metadata(in path: Str) -> Metadata eff [Ffi[StdFs], Fail[IoError]] {
     meta_path(in path.as_bytes(), false)
+}
+
+// Whether `path` (following symbolic links) is a regular file with an
+// execute bit: the check a shell makes before running it. Never fails.
+pub fn is_executable(in path: Str) -> bool eff [Ffi[StdFs]] {
+    os_is_executable(in path.as_bytes())
+}
+
+pub fn is_executable_path(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    os_is_executable(in path)
+}
+
+// `std::fs::canonicalize`: the absolute path of `path` with every symbolic
+// link, `.` and `..` resolved (`realpath`). The path must exist.
+pub fn canonicalize(in path: Str) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    canonicalize_path(in path.as_bytes())
+}
+
+pub fn canonicalize_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    let mut err: u64 = 0;
+    let out = os_canonicalize(in path, inout err);
+    if err != 0 {
+        return raise_io(err);
+    }
+    out
 }
 
 // Whether `path` names anything (following symbolic links). Never fails.
