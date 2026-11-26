@@ -3002,10 +3002,7 @@ fn call(
             }
             for i in 0..args.len() {
                 if !(skip_first && i == 0) {
-                    es
-                        .push(
-                            args.try_get(i).unwrap_or(0)
-                        );
+                    es.push(args.try_get(i).unwrap_or(0));
                 }
             }
             let terms = operands(inout b, inout t, in y, inout g, in es, inout out);
@@ -3052,10 +3049,7 @@ fn call(
                 let mut actual: ChunkSeq[u64] = ChunkSeq::new[u64]();
                 actual.push(base);
                 for i in 0..args.len() {
-                    actual
-                        .push(
-                            args.try_get(i).unwrap_or(0)
-                        );
+                    actual.push(args.try_get(i).unwrap_or(0));
                 }
                 return call(inout b, inout t, in y, inout g, e, callee, mn, in actual, inout out);
             }
@@ -3256,13 +3250,7 @@ fn call(
         if widen_u64(p.pass) == TyPass::Inout && i < args.len() {
             states
                 .push(
-                    St {
-                        ty: p.ty,
-                        src: 0,
-                        qa: p.qa,
-                        qn: p.qn,
-                        arg: args.try_get(i).unwrap_or(0)
-                    }
+                    St { ty: p.ty, src: 0, qa: p.qa, qn: p.qn, arg: args.try_get(i).unwrap_or(0) }
                 );
         }
     }
@@ -3959,13 +3947,7 @@ fn perform_op(
         if p.pass == TyPass::Inout && i < args.len() {
             states
                 .push(
-                    St {
-                        ty: p.ty,
-                        src: 1,
-                        qa: p.qa,
-                        qn: p.qn,
-                        arg: args.try_get(i).unwrap_or(0)
-                    }
+                    St { ty: p.ty, src: 1, qa: p.qa, qn: p.qn, arg: args.try_get(i).unwrap_or(0) }
                 );
         }
     }
@@ -5114,11 +5096,7 @@ fn closure(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
         let r = lref(inout b, sym_at(in snapshot, i));
         let none = unit(inout b);
         let_local(inout b, inout ss, lean, r, false, none, true);
-        g
-            .set_cur(
-                ids.try_get(i).unwrap_or(0),
-                lean
-            );
+        g.set_cur(ids.try_get(i).unwrap_or(0), lean);
     }
     for i in 0..pcount {
         let pname = y.a.xs(e, add(2, i));
