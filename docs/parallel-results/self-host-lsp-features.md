@@ -590,8 +590,8 @@ Rust lines deleted: 0.
 ## Left in the Lens
 
 - `proof_lens.rs`: the Lean runner is ported in part 8 below.
-- The code lenses and `vesper.proofAudit` command, which wait on the
-  proof runner.
+- The code lenses and `vesper.proofAudit` results are ported in part 9
+  below.
 
 # Part 8 (#1828): the proof-lens Lean runner
 
@@ -677,3 +677,75 @@ child, so most of the gap is Rust's polling.
 | Proof run, all proved | 45.3 ms | 12.5 ms | **0.28x** |
 
 Rust lines deleted: 0.
+
+# Part 9 (#1828): proof code lenses and `vesper.proofAudit` results
+
+The proof-lens answers of the server (`src/lsp/session/lens_requests.rs`)
+are ported with 0 diffs, at 1.10x Rust's time:
+
+- `textDocument/codeLens`: an extraction lens per proof-lens function (at
+  most 256) and a semantic lens per function with a model, with the
+  status titles, command arguments and `data.vesper` fields the server
+  sends, a model's reason cut to 80 characters
+- the two bounded proof ledgers (`ProofLedger` in
+  `crates/vesper-lsp/src/lens.rs`): outcomes keyed by source or model key
+  and function, with the oldest entry evicted when a ledger is full
+- which outcomes are recorded: a semantic failure before the prover ran
+  (toolchain or I/O) is dropped
+- the `vesper.proofAudit` command result: the requested obligation's
+  outcome with the cache counts and time, not attempted when the job has
+  none for it, null for a job no command asked for
+- the `vesper/proofStatus` parameters of a finished background run, and no
+  notice when the buffer changed while it ran
+
+Rust stays the default until the hybrid wiring part. The session state
+around these answers (argument validation of `workspace/executeCommand`,
+the debouncer and pending-request table) is a later part.
+
+## What changed
+
+- `src/lsp/session/lens_requests.rs`: the code-lens body moved out of
+  `Session` into `code_lenses_of`, which takes the line index, source hash,
+  functions, model keys and both ledgers. Recording, the command result
+  and the background notice moved into `record_of`, `proof_result_of` and
+  `proof_status_of`, and the function list into `lens_functions`. The
+  session methods call them, so the server's answers are unchanged.
+- `src/lsp.rs` adds the hidden hooks `proof_lens_inputs_for_port` (the
+  functions and model keys the session reads) and `proof_lenses_for_port`
+  (a sequence of `ProofLensOp`s over fresh ledgers, as JSON rows).
+- `packages/vesper-lsp-features/src/proof_lenses.ves` adds the entry
+  `lsp_proof_lenses`: the ledgers, the outcome filter and the three
+  writers. Strings are copied from the input in runs between escaped
+  bytes, eight bytes at a time.
+- `tests/self_host_lsp_features.rs` adds `proof_lenses_match_rust` and the
+  ignored `proof_lenses_speed`.
+
+## Differential
+
+`proof_lenses_match_rust` runs one session on each of the 213 corpus
+documents with proof-lens functions. A session renders the lenses with
+empty ledgers, records five command jobs (extraction and semantic
+requests, an unrequested job, and requests for a missing function), then
+two background runs, one for the current buffer and one for an edited
+buffer, and renders the lenses again for the current and the edited
+source. Outcomes cover every status, failures at the prover, kernel,
+toolchain and cache, a stale model key, and texts that need escapes. The
+ledgers are roomy (1024 and 4096), small enough to evict (3 and 2), or
+single-entry. Every third document has a model reason past 80 characters
+with multi-byte characters at the cut, and every seventh a function span
+past the end of the document.
+
+7,920 lenses, 1,065 command results, 213 background notices and 175 span
+errors matched with 0 diffs.
+
+## Numbers
+
+Each row is one session per document: 12 steps on fresh ledgers. On both
+sides the one-time setup is taken off.
+
+| | Rust | Vesper | Ratio |
+|---|--:|--:|--:|
+| Proof-lens session, per document | 334.7 µs | 368.2 µs | **1.10x** |
+
+Rust lines deleted: 0.
+

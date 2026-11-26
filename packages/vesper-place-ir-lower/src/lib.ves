@@ -16,27 +16,27 @@ use self::lower::{L, l_new, lower_all};
 // The lowered program as `put_program` words (names, types, the program
 // section), then two words: functions lowered and functions skipped.
 pub fn ir_lower_words(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let c = read_ctx(inout r, in b);
-    let a = read_ast(inout r, in b, in c);
-    let mut l = l_new(sink c, sink a);
-    lower_all(inout l);
-    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    put_program(in l.p, in l.c.types, in l.c.names, inout o);
-    o.push(l.lowered);
-    o.push(l.skipped);
-    o
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let ctx = read_ctx(inout reader, in bytes);
+    let ast = read_ast(inout reader, in bytes, in ctx);
+    let mut lowerer = l_new(sink ctx, sink ast);
+    lower_all(inout lowerer);
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    put_program(in lowerer.program, in lowerer.ctx.types, in lowerer.ctx.names, inout out);
+    out.push(lowerer.lowered);
+    out.push(lowerer.skipped);
+    out
 }
 
 // Reads the input and lowers nothing: the decoding cost the timing test
 // subtracts from `ir_lower_words`. Returns the expression row count.
 pub fn ir_lower_read(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let c = read_ctx(inout r, in b);
-    let a = read_ast(inout r, in b, in c);
-    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    o.push(a.exs.len());
-    o
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let ctx = read_ctx(inout reader, in bytes);
+    let ast = read_ast(inout reader, in bytes, in ctx);
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.push(ast.exs.len());
+    out
 }

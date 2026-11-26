@@ -265,3 +265,11 @@ fn a_sugar_template_else_on_its_own_line_keeps_the_if_vertical() {
 "
     );
 }
+
+#[test]
+fn a_comprehension_pipe_is_neither_a_closure_nor_a_bitwise_or() {
+    assert_eq!(
+        formatted("fn f(in d:Slice[i64])->i64{sum{ { n } | n in d }}"),
+        "fn f(in d: Slice[i64]) -> i64 {\n    sum{ { n } | n in d }\n}\n"
+    );
+}

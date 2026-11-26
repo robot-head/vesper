@@ -12,7 +12,7 @@ fn run(x: f64) -> f64 {
     } with {
         return v => v,
         pick(resume) => resume(
-            | y: f64 | -> f64 {
+            |y: f64| -> f64 {
                 y * 2.0
             }
         ),

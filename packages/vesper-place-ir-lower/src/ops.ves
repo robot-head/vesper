@@ -36,19 +36,19 @@ const C_TAIL: u8 = 2;
 pub copy struct SeqRes {
     matched: bool,
     label: u32,
-    has_recv: bool,
-    recv_pass: u8,
+    has_receiver: bool,
+    receiver_pass: u8,
     arg_mode: u8,
 }
 
 pub copy struct TiledRes {
     matched: bool,
     label: u32,
-    cap: u32,
-    recv_pass: u8,
-    recv_proj: u32,
+    region_cap: u32,
+    receiver_pass: u8,
+    receiver_proj: u32,
     skip_first: bool,
-    is_recv_first: bool,
+    is_receiver_first: bool,
 }
 
 pub copy struct VecRes {
@@ -59,18 +59,18 @@ pub copy struct VecRes {
 }
 
 fn no_seq() -> SeqRes {
-    SeqRes { matched: false, label: 0, has_recv: false, recv_pass: TyPass::In, arg_mode: 0 }
+    SeqRes { matched: false, label: 0, has_receiver: false, receiver_pass: TyPass::In, arg_mode: 0 }
 }
 
 fn no_tiled() -> TiledRes {
     TiledRes {
         matched: false,
         label: 0,
-        cap: 0,
-        recv_pass: TyPass::In,
-        recv_proj: NONE32,
+        region_cap: 0,
+        receiver_pass: TyPass::In,
+        receiver_proj: NONE32,
         skip_first: false,
-        is_recv_first: false
+        is_receiver_first: false
     }
 }
 
@@ -78,79 +78,79 @@ fn no_vec() -> VecRes {
     VecRes { matched: false, label: 0, const_lo: 0, const_hi: 0 }
 }
 
-fn span_type(in c: Ctx, s0: u64, s1: u64) -> u32 {
-    let t = c.world.expr_type(s0, s1);
-    if t == NONE32 { c.types.infer } else { t }
+fn span_type(in ctx: Ctx, s0: u64, s1: u64) -> u32 {
+    let ty = ctx.world.expr_type(s0, s1);
+    if ty == NONE32 { ctx.types.infer } else { ty }
 }
 
-pub fn is_seq_type(in c: Ctx, ty: u32) -> bool {
+pub fn is_seq_type(in ctx: Ctx, ty: u32) -> bool {
     ty != NONE32
-        && c.types.kind(ty) == TyKind::Named
-        && c.types.name(ty) == c.world.k.chunk_seq
-        && c.types.arity(ty) == 1
+        && ctx.types.kind(ty) == TyKind::Named
+        && ctx.types.name(ty) == ctx.world.k.chunk_seq
+        && ctx.types.arity(ty) == 1
 }
 
-pub fn is_slice_type(in c: Ctx, ty: u32) -> bool {
+pub fn is_slice_type(in ctx: Ctx, ty: u32) -> bool {
     ty != NONE32
-        && c.types.kind(ty) == TyKind::Named
-        && c.types.name(ty) == c.world.k.slice
-        && c.types.arity(ty) == 1
+        && ctx.types.kind(ty) == TyKind::Named
+        && ctx.types.name(ty) == ctx.world.k.slice
+        && ctx.types.arity(ty) == 1
 }
 
-fn is_seq_or_slice(in c: Ctx, ty: u32) -> bool {
-    is_seq_type(in c, ty) || is_slice_type(in c, ty)
+fn is_seq_or_slice(in ctx: Ctx, ty: u32) -> bool {
+    is_seq_type(in ctx, ty) || is_slice_type(in ctx, ty)
 }
 
-fn is_string_type(in c: Ctx, ty: u32) -> bool {
+fn is_string_type(in ctx: Ctx, ty: u32) -> bool {
     ty != NONE32
-        && c.types.kind(ty) == TyKind::Named
-        && c.types.name(ty) == c.world.k.string
-        && c.types.arity(ty) == 0
+        && ctx.types.kind(ty) == TyKind::Named
+        && ctx.types.name(ty) == ctx.world.k.string
+        && ctx.types.arity(ty) == 0
 }
 
-fn is_str_type(in c: Ctx, ty: u32) -> bool {
+fn is_str_type(in ctx: Ctx, ty: u32) -> bool {
     ty != NONE32
-        && c.types.kind(ty) == TyKind::Named
-        && c.types.name(ty) == c.world.k.str_
-        && c.types.arity(ty) == 0
+        && ctx.types.kind(ty) == TyKind::Named
+        && ctx.types.name(ty) == ctx.world.k.str_
+        && ctx.types.arity(ty) == 0
 }
 
-fn is_text(in c: Ctx, ty: u32) -> bool {
-    is_string_type(in c, ty) || is_str_type(in c, ty)
+fn is_text(in ctx: Ctx, ty: u32) -> bool {
+    is_string_type(in ctx, ty) || is_str_type(in ctx, ty)
 }
 
-fn is_tiled_seq(in c: Ctx, ty: u32) -> bool {
+fn is_tiled_seq(in ctx: Ctx, ty: u32) -> bool {
     ty != NONE32
-        && c.types.kind(ty) == TyKind::Named
-        && c.types.name(ty) == c.world.k.tiled_seq
-        && (c.types.arity(ty) == 1 || c.types.arity(ty) == 2)
+        && ctx.types.kind(ty) == TyKind::Named
+        && ctx.types.name(ty) == ctx.world.k.tiled_seq
+        && (ctx.types.arity(ty) == 1 || ctx.types.arity(ty) == 2)
 }
 
-fn sym_str(inout c: Ctx, in s: Str) -> u32 {
-    c.names.intern(in s.as_bytes())
+fn sym_str(inout ctx: Ctx, in text: Str) -> u32 {
+    ctx.names.intern(in text.as_bytes())
 }
 
-fn eq(in c: Ctx, sym: u32, in s: Str) -> bool {
-    c.names.spells(sym, in s.as_bytes())
+fn eq(in ctx: Ctx, sym: u32, in text: Str) -> bool {
+    ctx.names.spells(sym, in text.as_bytes())
 }
 
-fn put_str(inout out: ChunkSeq[u8], in s: Str) {
-    out.extend(in s.as_bytes());
+fn put_str(inout out: ChunkSeq[u8], in text: Str) {
+    out.extend(in text.as_bytes());
 }
 
-fn put_bool(inout out: ChunkSeq[u8], v: bool) {
-    if v {
+fn put_bool(inout out: ChunkSeq[u8], value: bool) {
+    if value {
         put_str(inout out, "true");
     } else {
         put_str(inout out, "false");
     }
 }
 
-fn put_quoted(inout out: ChunkSeq[u8], in names: Names, s: u32) {
+fn put_quoted(inout out: ChunkSeq[u8], in names: Names, sym: u32) {
     out.push(34);
-    let a = names.start(s);
-    let b = names.end(s);
-    for i in a..b {
+    let text_start = names.start(sym);
+    let text_end = names.end(sym);
+    for i in text_start..text_end {
         let ch = u8_at(in names.text, i);
         if ch == 92 {
             out.push(92);
@@ -176,47 +176,47 @@ fn put_quoted(inout out: ChunkSeq[u8], in names: Names, s: u32) {
 
 // ----- Shapes ----------------------------------------------------------------
 
-fn elem_of_name(in c: Ctx, s: u32) -> u8 {
-    let k = c.world.k;
-    if s == k.u8_ {
+fn elem_of_name(in ctx: Ctx, name: u32) -> u8 {
+    let known = ctx.world.k;
+    if name == known.u8_ {
         E_U8
-    } else if s == k.u32_ {
+    } else if name == known.u32_ {
         E_U32
-    } else if s == k.u64_ {
+    } else if name == known.u64_ {
         E_U64
-    } else if s == k.i64_ {
+    } else if name == known.i64_ {
         E_I64
-    } else if s == k.f32_ {
+    } else if name == known.f32_ {
         E_F32
-    } else if s == k.f64_ {
+    } else if name == known.f64_ {
         E_F64
     } else {
         E_NONE
     }
 }
 
-fn elem_bits(e: u8) -> u64 {
-    if e == E_U8 {
+fn elem_bits(elem: u8) -> u64 {
+    if elem == E_U8 {
         8
-    } else if e == E_U32 || e == E_F32 {
+    } else if elem == E_U32 || elem == E_F32 {
         32
-    } else if e == E_U64 || e == E_I64 || e == E_F64 {
+    } else if elem == E_U64 || elem == E_I64 || elem == E_F64 {
         64
     } else {
         0
     }
 }
 
-fn put_elem(inout out: ChunkSeq[u8], e: u8) {
-    if e == E_U8 {
+fn put_elem(inout out: ChunkSeq[u8], elem: u8) {
+    if elem == E_U8 {
         put_str(inout out, "U8");
-    } else if e == E_U32 {
+    } else if elem == E_U32 {
         put_str(inout out, "U32");
-    } else if e == E_U64 {
+    } else if elem == E_U64 {
         put_str(inout out, "U64");
-    } else if e == E_I64 {
+    } else if elem == E_I64 {
         put_str(inout out, "I64");
-    } else if e == E_F32 {
+    } else if elem == E_F32 {
         put_str(inout out, "F32");
     } else {
         put_str(inout out, "F64");
@@ -231,23 +231,23 @@ fn put_shape(inout out: ChunkSeq[u8], elem: u8, lanes: u64) {
     put_str(inout out, " }");
 }
 
-fn parse_u16_sym(in names: Names, s: u32) -> u64 {
-    let size = names.size(s);
+fn parse_u16_sym(in names: Names, sym: u32) -> u64 {
+    let size = names.size(sym);
     if size == 0 {
         return NONE64;
     }
-    let mut v: u64 = 0;
+    let mut value: u64 = 0;
     for i in 0..size {
-        let b = names.byte(s, i);
-        if b < 48 || b > 57 {
+        let digit = names.byte(sym, i);
+        if digit < 48 || digit > 57 {
             return NONE64;
         }
-        v = add(wrapping_mul(v, 10), widen_u64(wrapping_sub(b, 48)));
-        if v > 65535 {
+        value = add(wrapping_mul(value, 10), widen_u64(wrapping_sub(digit, 48)));
+        if value > 65535 {
             return NONE64;
         }
     }
-    v
+    value
 }
 
 // Packs `(elem as u64) << 16 | lanes` when valid (128, 256, 512 bits), else NONE64.
@@ -263,52 +263,54 @@ fn pack_shape(elem: u8, lanes: u64) -> u64 {
     }
 }
 
-fn elem_from_type(in c: Ctx, ty: u32) -> u8 {
-    let n = c.types.node(ty);
-    if n.kind == TyKind::Named && n.n == 0 {
-        elem_of_name(in c, n.name)
+fn elem_from_type(in ctx: Ctx, ty: u32) -> u8 {
+    let node = ctx.types.node(ty);
+    if node.kind == TyKind::Named && node.n == 0 {
+        elem_of_name(in ctx, node.name)
     } else {
         E_NONE
     }
 }
 
-fn shape_of(in c: Ctx, ty: u32) -> u64 {
+fn shape_of(in ctx: Ctx, ty: u32) -> u64 {
     if ty == NONE32 {
         return NONE64;
     }
-    let n = c.types.node(ty);
-    let k = c.world.k;
-    if n.kind != TyKind::Named || (n.name != k.vec && n.name != k.mask) || n.n != 2 {
+    let node = ctx.types.node(ty);
+    let known = ctx.world.k;
+    if node.kind != TyKind::Named
+        || (node.name != known.vec && node.name != known.mask)
+        || node.n != 2 {
         return NONE64;
     }
-    let elem = elem_from_type(in c, c.types.arg(ty, 0));
+    let elem = elem_from_type(in ctx, ctx.types.arg(ty, 0));
     if elem == E_NONE {
         return NONE64;
     }
-    let cn = c.types.node(c.types.arg(ty, 1));
-    if cn.kind != TyKind::Named || cn.n != 0 {
+    let lanes_node = ctx.types.node(ctx.types.arg(ty, 1));
+    if lanes_node.kind != TyKind::Named || lanes_node.n != 0 {
         return NONE64;
     }
-    let lanes = parse_u16_sym(in c.names, cn.name);
+    let lanes = parse_u16_sym(in ctx.names, lanes_node.name);
     if lanes == NONE64 {
         return NONE64;
     }
     pack_shape(elem, lanes)
 }
 
-fn explicit_shape(in c: Ctx, in a: Ast, e: Ex) -> u64 {
-    if e.m != 2 {
+fn explicit_shape(in ctx: Ctx, in ast: Ast, ex: Ex) -> u64 {
+    if ex.m != 2 {
         return NONE64;
     }
-    let elem = elem_from_type(in c, n32(a.x(e.c)));
+    let elem = elem_from_type(in ctx, n32(ast.x(ex.c)));
     if elem == E_NONE {
         return NONE64;
     }
-    let cn = c.types.node(n32(a.x(inc(e.c))));
-    if cn.kind != TyKind::Named {
+    let lanes_node = ctx.types.node(n32(ast.x(inc(ex.c))));
+    if lanes_node.kind != TyKind::Named {
         return NONE64;
     }
-    let lanes = parse_u16_sym(in c.names, cn.name);
+    let lanes = parse_u16_sym(in ctx.names, lanes_node.name);
     if lanes == NONE64 {
         return NONE64;
     }
@@ -318,14 +320,14 @@ fn explicit_shape(in c: Ctx, in a: Ast, e: Ex) -> u64 {
 // ----- SliceIo & SeqOp -------------------------------------------------------
 
 // Splits `name` at the first `::`; returns index of `:` or NONE64.
-fn split_colons(in names: Names, s: u32) -> u64 {
-    let size = names.size(s);
+fn split_colons(in names: Names, sym: u32) -> u64 {
+    let size = names.size(sym);
     let mut i: u64 = 0;
     loop {
         if inc(i) >= size {
             break;
         }
-        if names.byte(s, i) == 58 && names.byte(s, inc(i)) == 58 {
+        if names.byte(sym, i) == 58 && names.byte(sym, inc(i)) == 58 {
             return i;
         }
         i = inc(i);
@@ -333,82 +335,82 @@ fn split_colons(in names: Names, s: u32) -> u64 {
     NONE64
 }
 
-fn slice_suffix(in names: Names, s: u32, start: u64, in target: Str) -> bool {
-    let size = names.size(s);
-    let tb = target.as_bytes();
-    if wrapping_sub(size, start) != tb.len() {
+fn slice_suffix(in names: Names, sym: u32, start: u64, in target: Str) -> bool {
+    let size = names.size(sym);
+    let target_bytes = target.as_bytes();
+    if wrapping_sub(size, start) != target_bytes.len() {
         return false;
     }
-    for i in 0..tb.len() {
-        let b = match tb.try_get(i) {
-            Option::Some(v) => v,
+    for i in 0..target_bytes.len() {
+        let expected = match target_bytes.try_get(i) {
+            Option::Some(byte) => byte,
             Option::None => 0,
         };
-        if names.byte(s, add(start, i)) != b {
+        if names.byte(sym, add(start, i)) != expected {
             return false;
         }
     }
     true
 }
 
-fn slice_prefix(in names: Names, s: u32, len: u64, in target: Str) -> bool {
-    let tb = target.as_bytes();
-    if len != tb.len() {
+fn slice_prefix(in names: Names, sym: u32, prefix_len: u64, in target: Str) -> bool {
+    let target_bytes = target.as_bytes();
+    if prefix_len != target_bytes.len() {
         return false;
     }
-    for i in 0..len {
-        let b = match tb.try_get(i) {
-            Option::Some(v) => v,
+    for i in 0..prefix_len {
+        let expected = match target_bytes.try_get(i) {
+            Option::Some(byte) => byte,
             Option::None => 0,
         };
-        if names.byte(s, i) != b {
+        if names.byte(sym, i) != expected {
             return false;
         }
     }
     true
 }
 
-fn resolve_slice_io(inout c: Ctx, in a: Ast, e: Ex, n: u32) -> SeqRes {
-    if !c.names.has_prefix(n, in "Vec::".as_bytes()) {
+fn resolve_slice_io(inout ctx: Ctx, in ast: Ast, ex: Ex, name: u32) -> SeqRes {
+    if !ctx.names.has_prefix(name, in "Vec::".as_bytes()) {
         return no_seq();
     }
     let mut store = false;
     let mut masked = false;
-    let mut ok = false;
-    if eq(in c, n, "Vec::load") {
-        ok = true;
-    } else if eq(in c, n, "Vec::store") {
+    let mut is_io = false;
+    if eq(in ctx, name, "Vec::load") {
+        is_io = true;
+    } else if eq(in ctx, name, "Vec::store") {
         store = true;
-        ok = true;
-    } else if eq(in c, n, "Vec::store_masked") {
+        is_io = true;
+    } else if eq(in ctx, name, "Vec::store_masked") {
         store = true;
         masked = true;
-        ok = true;
-    } else if eq(in c, n, "Vec::load_masked") {
-        if e.n > 0 {
-            let a0 = a.ex(a.x(inc(e.b)));
-            let t0 = span_type(in c, a0.s0, a0.s1);
-            if is_seq_or_slice(in c, t0) {
+        is_io = true;
+    } else if eq(in ctx, name, "Vec::load_masked") {
+        if ex.n > 0 {
+            let first_arg = ast.ex(ast.x(inc(ex.b)));
+            let first_arg_ty = span_type(in ctx, first_arg.s0, first_arg.s1);
+            if is_seq_or_slice(in ctx, first_arg_ty) {
                 masked = true;
-                ok = true;
+                is_io = true;
             }
         }
     }
-    if !ok {
+    if !is_io {
         return no_seq();
     }
     let shape = if store {
-        if e.n < 3 {
+        if ex.n < 3 {
             return no_seq();
         }
-        let a2 = a.ex(a.x(add(e.b, 5)));
-        shape_of(in c, span_type(in c, a2.s0, a2.s1))
+        let third_arg = ast.ex(ast.x(add(ex.b, 5)));
+        shape_of(in ctx, span_type(in ctx, third_arg.s0, third_arg.s1))
     } else {
-        let sr = shape_of(in c, span_type(in c, e.s0, e.s1));
-        if sr != NONE64 {
-            sr
+        let result_shape = shape_of(in ctx, span_type(in ctx, ex.s0, ex.s1));
+        if result_shape != NONE64 {
+            result_shape
         } else {
-            explicit_shape(in c, in a, e)
+            explicit_shape(in ctx, in ast, ex)
         }
     };
     if shape == NONE64 {
@@ -416,373 +418,379 @@ fn resolve_slice_io(inout c: Ctx, in a: Ast, e: Ex, n: u32) -> SeqRes {
     }
     let elem = wrapping_u8(wrapping_shr_u64(shape, 16));
     let lanes = shape & 65535;
-    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    put_str(inout buf, "Vector(SliceIo { shape: ");
-    put_shape(inout buf, elem, lanes);
-    put_str(inout buf, ", store: ");
-    put_bool(inout buf, store);
-    put_str(inout buf, ", masked: ");
-    put_bool(inout buf, masked);
-    put_str(inout buf, " })");
-    let label = c.names.intern(in buf.as_slice());
+    let mut label_text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout label_text, "Vector(SliceIo { shape: ");
+    put_shape(inout label_text, elem, lanes);
+    put_str(inout label_text, ", store: ");
+    put_bool(inout label_text, store);
+    put_str(inout label_text, ", masked: ");
+    put_bool(inout label_text, masked);
+    put_str(inout label_text, " })");
+    let label = ctx.names.intern(in label_text.as_slice());
     SeqRes {
         matched: true,
         label: label,
-        has_recv: false,
-        recv_pass: TyPass::In,
+        has_receiver: false,
+        receiver_pass: TyPass::In,
         arg_mode: if store { 3 } else { 4 }
     }
 }
 
-fn wide_parse(inout c: Ctx, method: u32) -> u64 {
+fn wide_parse(inout ctx: Ctx, method: u32) -> u64 {
     // Returns packed (bytes << 3) | (big << 2) | (write << 1) | total, or NONE64.
-    let sizes_ok = c.names.size(method);
-    if sizes_ok < 11 {
+    let method_len = ctx.names.size(method);
+    if method_len < 11 {
         return NONE64;
     }
-    if eq(in c, method, "read_u16_le") {
+    if eq(in ctx, method, "read_u16_le") {
         16
-    } else if eq(in c, method, "read_u16_be") {
+    } else if eq(in ctx, method, "read_u16_be") {
         20
-    } else if eq(in c, method, "read_u32_le") {
+    } else if eq(in ctx, method, "read_u32_le") {
         32
-    } else if eq(in c, method, "read_u32_be") {
+    } else if eq(in ctx, method, "read_u32_be") {
         36
-    } else if eq(in c, method, "read_u64_le") {
+    } else if eq(in ctx, method, "read_u64_le") {
         64
-    } else if eq(in c, method, "read_u64_be") {
+    } else if eq(in ctx, method, "read_u64_be") {
         68
-    } else if eq(in c, method, "write_u16_le") {
+    } else if eq(in ctx, method, "write_u16_le") {
         18
-    } else if eq(in c, method, "write_u16_be") {
+    } else if eq(in ctx, method, "write_u16_be") {
         22
-    } else if eq(in c, method, "write_u32_le") {
+    } else if eq(in ctx, method, "write_u32_le") {
         34
-    } else if eq(in c, method, "write_u32_be") {
+    } else if eq(in ctx, method, "write_u32_be") {
         38
-    } else if eq(in c, method, "write_u64_le") {
+    } else if eq(in ctx, method, "write_u64_le") {
         66
-    } else if eq(in c, method, "write_u64_be") {
+    } else if eq(in ctx, method, "write_u64_be") {
         70
-    } else if eq(in c, method, "try_read_u16_le") {
+    } else if eq(in ctx, method, "try_read_u16_le") {
         17
-    } else if eq(in c, method, "try_read_u16_be") {
+    } else if eq(in ctx, method, "try_read_u16_be") {
         21
-    } else if eq(in c, method, "try_read_u32_le") {
+    } else if eq(in ctx, method, "try_read_u32_le") {
         33
-    } else if eq(in c, method, "try_read_u32_be") {
+    } else if eq(in ctx, method, "try_read_u32_be") {
         37
-    } else if eq(in c, method, "try_read_u64_le") {
+    } else if eq(in ctx, method, "try_read_u64_le") {
         65
-    } else if eq(in c, method, "try_read_u64_be") {
+    } else if eq(in ctx, method, "try_read_u64_be") {
         69
-    } else if eq(in c, method, "try_write_u16_le") {
+    } else if eq(in ctx, method, "try_write_u16_le") {
         19
-    } else if eq(in c, method, "try_write_u16_be") {
+    } else if eq(in ctx, method, "try_write_u16_be") {
         23
-    } else if eq(in c, method, "try_write_u32_le") {
+    } else if eq(in ctx, method, "try_write_u32_le") {
         35
-    } else if eq(in c, method, "try_write_u32_be") {
+    } else if eq(in ctx, method, "try_write_u32_be") {
         39
-    } else if eq(in c, method, "try_write_u64_le") {
+    } else if eq(in ctx, method, "try_write_u64_le") {
         67
-    } else if eq(in c, method, "try_write_u64_be") {
+    } else if eq(in ctx, method, "try_write_u64_be") {
         71
     } else {
         NONE64
     }
 }
 
-fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
-    if eq(in c, method, "copy_from") {
+fn resolve_shared_method(inout ctx: Ctx, method: u32, arity: u64) -> SeqRes {
+    if eq(in ctx, method, "copy_from") {
         return SeqRes {
             matched: true,
-            label: sym_str(inout c, "CopyFrom { total: false }"),
-            has_recv: true,
-            recv_pass: TyPass::Inout,
+            label: sym_str(inout ctx, "CopyFrom { total: false }"),
+            has_receiver: true,
+            receiver_pass: TyPass::Inout,
             arg_mode: 5
         };
     }
-    if eq(in c, method, "try_copy_from") {
+    if eq(in ctx, method, "try_copy_from") {
         return SeqRes {
             matched: true,
-            label: sym_str(inout c, "CopyFrom { total: true }"),
-            has_recv: true,
-            recv_pass: TyPass::Inout,
+            label: sym_str(inout ctx, "CopyFrom { total: true }"),
+            has_receiver: true,
+            receiver_pass: TyPass::Inout,
             arg_mode: 5
         };
     }
-    if eq(in c, method, "copy_within") {
+    if eq(in ctx, method, "copy_within") {
         return SeqRes {
             matched: true,
-            label: sym_str(inout c, "CopyWithin { total: false }"),
-            has_recv: true,
-            recv_pass: TyPass::Inout,
+            label: sym_str(inout ctx, "CopyWithin { total: false }"),
+            has_receiver: true,
+            receiver_pass: TyPass::Inout,
             arg_mode: 0
         };
     }
-    if eq(in c, method, "try_copy_within") {
+    if eq(in ctx, method, "try_copy_within") {
         return SeqRes {
             matched: true,
-            label: sym_str(inout c, "CopyWithin { total: true }"),
-            has_recv: true,
-            recv_pass: TyPass::Inout,
+            label: sym_str(inout ctx, "CopyWithin { total: true }"),
+            has_receiver: true,
+            receiver_pass: TyPass::Inout,
             arg_mode: 0
         };
     }
-    if eq(in c, method, "fill") {
-        let lbl = if arity == 3 {
-            sym_str(inout c, "FillRange { total: false }")
+    if eq(in ctx, method, "fill") {
+        let fill_label = if arity == 3 {
+            sym_str(inout ctx, "FillRange { total: false }")
         } else {
-            sym_str(inout c, "Fill")
+            sym_str(inout ctx, "Fill")
         };
         return SeqRes {
             matched: true,
-            label: lbl,
-            has_recv: true,
-            recv_pass: TyPass::Inout,
+            label: fill_label,
+            has_receiver: true,
+            receiver_pass: TyPass::Inout,
             arg_mode: 0
         };
     }
-    if eq(in c, method, "try_fill") {
+    if eq(in ctx, method, "try_fill") {
         return SeqRes {
             matched: true,
-            label: sym_str(inout c, "FillRange { total: true }"),
-            has_recv: true,
-            recv_pass: TyPass::Inout,
+            label: sym_str(inout ctx, "FillRange { total: true }"),
+            has_receiver: true,
+            receiver_pass: TyPass::Inout,
             arg_mode: 0
         };
     }
-    if eq(in c, method, "sum_be16") {
+    if eq(in ctx, method, "sum_be16") {
         return SeqRes {
             matched: true,
-            label: sym_str(inout c, "SumBe16"),
-            has_recv: true,
-            recv_pass: TyPass::In,
+            label: sym_str(inout ctx, "SumBe16"),
+            has_receiver: true,
+            receiver_pass: TyPass::In,
             arg_mode: 0
         };
     }
-    if eq(in c, method, "eq") {
+    if eq(in ctx, method, "eq") {
         return SeqRes {
             matched: true,
-            label: sym_str(inout c, "BytesEq"),
-            has_recv: true,
-            recv_pass: TyPass::In,
+            label: sym_str(inout ctx, "BytesEq"),
+            has_receiver: true,
+            receiver_pass: TyPass::In,
             arg_mode: 1
         };
     }
-    if eq(in c, method, "cmp") {
+    if eq(in ctx, method, "cmp") {
         return SeqRes {
             matched: true,
-            label: sym_str(inout c, "BytesCmp"),
-            has_recv: true,
-            recv_pass: TyPass::In,
+            label: sym_str(inout ctx, "BytesCmp"),
+            has_receiver: true,
+            receiver_pass: TyPass::In,
             arg_mode: 1
         };
     }
-    if eq(in c, method, "find_byte") {
+    if eq(in ctx, method, "find_byte") {
         return SeqRes {
             matched: true,
-            label: sym_str(inout c, "FindByte"),
-            has_recv: true,
-            recv_pass: TyPass::In,
+            label: sym_str(inout ctx, "FindByte"),
+            has_receiver: true,
+            receiver_pass: TyPass::In,
             arg_mode: 0
         };
     }
-    if eq(in c, method, "find_either") {
+    if eq(in ctx, method, "find_either") {
         return SeqRes {
             matched: true,
-            label: sym_str(inout c, "FindEither"),
-            has_recv: true,
-            recv_pass: TyPass::In,
+            label: sym_str(inout ctx, "FindEither"),
+            has_receiver: true,
+            receiver_pass: TyPass::In,
             arg_mode: 0
         };
     }
-    if eq(in c, method, "find_not_in") {
+    if eq(in ctx, method, "find_not_in") {
         return SeqRes {
             matched: true,
-            label: sym_str(inout c, "FindNotIn"),
-            has_recv: true,
-            recv_pass: TyPass::In,
+            label: sym_str(inout ctx, "FindNotIn"),
+            has_receiver: true,
+            receiver_pass: TyPass::In,
             arg_mode: 0
         };
     }
-    if eq(in c, method, "try_atomic_load") {
+    if eq(in ctx, method, "try_atomic_load") {
         return SeqRes {
             matched: true,
-            label: sym_str(inout c, "AtomicLoad { width: None }"),
-            has_recv: true,
-            recv_pass: TyPass::In,
+            label: sym_str(inout ctx, "AtomicLoad { width: None }"),
+            has_receiver: true,
+            receiver_pass: TyPass::In,
             arg_mode: 0
         };
     }
-    if eq(in c, method, "try_atomic_load_u32") {
+    if eq(in ctx, method, "try_atomic_load_u32") {
         return SeqRes {
             matched: true,
-            label: sym_str(inout c, "AtomicLoad { width: Some(4) }"),
-            has_recv: true,
-            recv_pass: TyPass::In,
+            label: sym_str(inout ctx, "AtomicLoad { width: Some(4) }"),
+            has_receiver: true,
+            receiver_pass: TyPass::In,
             arg_mode: 0
         };
     }
-    if eq(in c, method, "try_atomic_load_u64") {
+    if eq(in ctx, method, "try_atomic_load_u64") {
         return SeqRes {
             matched: true,
-            label: sym_str(inout c, "AtomicLoad { width: Some(8) }"),
-            has_recv: true,
-            recv_pass: TyPass::In,
+            label: sym_str(inout ctx, "AtomicLoad { width: Some(8) }"),
+            has_receiver: true,
+            receiver_pass: TyPass::In,
             arg_mode: 0
         };
     }
-    if eq(in c, method, "try_atomic_store") {
+    if eq(in ctx, method, "try_atomic_store") {
         return SeqRes {
             matched: true,
-            label: sym_str(inout c, "AtomicStore { width: None }"),
-            has_recv: true,
-            recv_pass: TyPass::Inout,
+            label: sym_str(inout ctx, "AtomicStore { width: None }"),
+            has_receiver: true,
+            receiver_pass: TyPass::Inout,
             arg_mode: 0
         };
     }
-    if eq(in c, method, "try_atomic_store_u32") {
+    if eq(in ctx, method, "try_atomic_store_u32") {
         return SeqRes {
             matched: true,
-            label: sym_str(inout c, "AtomicStore { width: Some(4) }"),
-            has_recv: true,
-            recv_pass: TyPass::Inout,
+            label: sym_str(inout ctx, "AtomicStore { width: Some(4) }"),
+            has_receiver: true,
+            receiver_pass: TyPass::Inout,
             arg_mode: 0
         };
     }
-    if eq(in c, method, "try_atomic_store_u64") {
+    if eq(in ctx, method, "try_atomic_store_u64") {
         return SeqRes {
             matched: true,
-            label: sym_str(inout c, "AtomicStore { width: Some(8) }"),
-            has_recv: true,
-            recv_pass: TyPass::Inout,
+            label: sym_str(inout ctx, "AtomicStore { width: Some(8) }"),
+            has_receiver: true,
+            receiver_pass: TyPass::Inout,
             arg_mode: 0
         };
     }
-    if eq(in c, method, "eq_ignore_ascii_case") {
+    if eq(in ctx, method, "eq_ignore_ascii_case") {
         return SeqRes {
             matched: true,
-            label: sym_str(inout c, "EqIgnoreAsciiCase"),
-            has_recv: true,
-            recv_pass: TyPass::In,
+            label: sym_str(inout ctx, "EqIgnoreAsciiCase"),
+            has_receiver: true,
+            receiver_pass: TyPass::In,
             arg_mode: 1
         };
     }
-    if eq(in c, method, "make_ascii_lowercase") {
+    if eq(in ctx, method, "make_ascii_lowercase") {
         return SeqRes {
             matched: true,
-            label: sym_str(inout c, "MakeAsciiLowercase { total: false }"),
-            has_recv: true,
-            recv_pass: TyPass::Inout,
+            label: sym_str(inout ctx, "MakeAsciiLowercase { total: false }"),
+            has_receiver: true,
+            receiver_pass: TyPass::Inout,
             arg_mode: 0
         };
     }
-    if eq(in c, method, "try_make_ascii_lowercase") {
+    if eq(in ctx, method, "try_make_ascii_lowercase") {
         return SeqRes {
             matched: true,
-            label: sym_str(inout c, "MakeAsciiLowercase { total: true }"),
-            has_recv: true,
-            recv_pass: TyPass::Inout,
+            label: sym_str(inout ctx, "MakeAsciiLowercase { total: true }"),
+            has_receiver: true,
+            receiver_pass: TyPass::Inout,
             arg_mode: 0
         };
     }
-    let wbits = wide_parse(inout c, method);
-    if wbits == NONE64 {
+    let wide_code = wide_parse(inout ctx, method);
+    if wide_code == NONE64 {
         return no_seq();
     }
-    let bytes = wrapping_shr_u64(wbits, 3);
-    let big = (wbits & 4) != 0;
-    let write = (wbits & 2) != 0;
-    let total = (wbits & 1) != 0;
-    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    put_str(inout buf, "Wide(Wide { bytes: ");
-    push_decimal(inout buf, bytes);
-    put_str(inout buf, ", big: ");
-    put_bool(inout buf, big);
-    put_str(inout buf, ", write: ");
-    put_bool(inout buf, write);
-    put_str(inout buf, ", total: ");
-    put_bool(inout buf, total);
-    put_str(inout buf, " })");
-    let label = c.names.intern(in buf.as_slice());
+    let bytes = wrapping_shr_u64(wide_code, 3);
+    let big = (wide_code & 4) != 0;
+    let write = (wide_code & 2) != 0;
+    let total = (wide_code & 1) != 0;
+    let mut label_text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout label_text, "Wide(Wide { bytes: ");
+    push_decimal(inout label_text, bytes);
+    put_str(inout label_text, ", big: ");
+    put_bool(inout label_text, big);
+    put_str(inout label_text, ", write: ");
+    put_bool(inout label_text, write);
+    put_str(inout label_text, ", total: ");
+    put_bool(inout label_text, total);
+    put_str(inout label_text, " })");
+    let label = ctx.names.intern(in label_text.as_slice());
     SeqRes {
         matched: true,
         label: label,
-        has_recv: true,
-        recv_pass: if write { TyPass::Inout } else { TyPass::In },
+        has_receiver: true,
+        receiver_pass: if write { TyPass::Inout } else { TyPass::In },
         arg_mode: 0
     }
 }
 
-pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias: bool) -> SeqRes {
-    if e.n == 0 && callee.kind == X_FIELD {
-        let m = n32(callee.b);
-        if eq(in c, m, "as_slice") || eq(in c, m, "as_slice_mut") {
-            let base = a.ex(callee.a);
-            if is_seq_type(in c, span_type(in c, base.s0, base.s1)) {
+pub fn resolve_seq_call(
+    inout ctx: Ctx,
+    in ast: Ast,
+    ex: Ex,
+    callee: Ex,
+    local_alias: bool
+) -> SeqRes {
+    if ex.n == 0 && callee.kind == X_FIELD {
+        let method = n32(callee.b);
+        if eq(in ctx, method, "as_slice") || eq(in ctx, method, "as_slice_mut") {
+            let base = ast.ex(callee.a);
+            if is_seq_type(in ctx, span_type(in ctx, base.s0, base.s1)) {
                 return SeqRes {
                     matched: true,
-                    label: sym_str(inout c, "AsSlice"),
-                    has_recv: true,
-                    recv_pass: TyPass::In,
+                    label: sym_str(inout ctx, "AsSlice"),
+                    has_receiver: true,
+                    receiver_pass: TyPass::In,
                     arg_mode: 0
                 };
             }
         }
     }
     if callee.kind == X_NAME && !local_alias {
-        let n = n32(callee.a);
-        if a.fn_index(n) != NONE64 {
+        let name = n32(callee.a);
+        if ast.fn_index(name) != NONE64 {
             return no_seq();
         }
-        let sio = resolve_slice_io(inout c, in a, e, n);
-        if sio.matched {
-            return sio;
+        let slice_io = resolve_slice_io(inout ctx, in ast, ex, name);
+        if slice_io.matched {
+            return slice_io;
         }
-        if eq(in c, n, "swap") {
+        if eq(in ctx, name, "swap") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "Swap"),
-                has_recv: false,
-                recv_pass: TyPass::In,
+                label: sym_str(inout ctx, "Swap"),
+                has_receiver: false,
+                receiver_pass: TyPass::In,
                 arg_mode: 2
             };
         }
-        if eq(in c, n, "replace") {
+        if eq(in ctx, name, "replace") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "Replace"),
-                has_recv: false,
-                recv_pass: TyPass::In,
+                label: sym_str(inout ctx, "Replace"),
+                has_receiver: false,
+                receiver_pass: TyPass::In,
                 arg_mode: 3
             };
         }
-        if eq(in c, n, "ChunkSeq::new") {
+        if eq(in ctx, name, "ChunkSeq::new") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "New"),
-                has_recv: false,
-                recv_pass: TyPass::In,
+                label: sym_str(inout ctx, "New"),
+                has_receiver: false,
+                receiver_pass: TyPass::In,
                 arg_mode: 0
             };
         }
-        if eq(in c, n, "ChunkSeq::with_capacity") {
+        if eq(in ctx, name, "ChunkSeq::with_capacity") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "WithCapacity"),
-                has_recv: false,
-                recv_pass: TyPass::In,
+                label: sym_str(inout ctx, "WithCapacity"),
+                has_receiver: false,
+                receiver_pass: TyPass::In,
                 arg_mode: 0
             };
         }
-        if eq(in c, n, "ChunkSeq::finish") {
+        if eq(in ctx, name, "ChunkSeq::finish") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "Finish"),
-                has_recv: false,
-                recv_pass: TyPass::In,
+                label: sym_str(inout ctx, "Finish"),
+                has_receiver: false,
+                receiver_pass: TyPass::In,
                 arg_mode: 0
             };
         }
@@ -791,433 +799,433 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
     if callee.kind != X_FIELD {
         return no_seq();
     }
-    let base = a.ex(callee.a);
-    let t = span_type(in c, base.s0, base.s1);
-    let m = n32(callee.b);
-    if is_text(in c, t) {
-        let is_strg = is_string_type(in c, t);
-        if eq(in c, m, "len") {
+    let base = ast.ex(callee.a);
+    let receiver_ty = span_type(in ctx, base.s0, base.s1);
+    let method = n32(callee.b);
+    if is_text(in ctx, receiver_ty) {
+        let is_string = is_string_type(in ctx, receiver_ty);
+        if eq(in ctx, method, "len") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "Str(Len)"),
-                has_recv: true,
-                recv_pass: TyPass::In,
+                label: sym_str(inout ctx, "Str(Len)"),
+                has_receiver: true,
+                receiver_pass: TyPass::In,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "byte_at") {
+        if eq(in ctx, method, "byte_at") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "Str(ByteAt)"),
-                has_recv: true,
-                recv_pass: TyPass::In,
+                label: sym_str(inout ctx, "Str(ByteAt)"),
+                has_receiver: true,
+                receiver_pass: TyPass::In,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "try_byte_at") {
+        if eq(in ctx, method, "try_byte_at") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "Str(TryByteAt)"),
-                has_recv: true,
-                recv_pass: TyPass::In,
+                label: sym_str(inout ctx, "Str(TryByteAt)"),
+                has_receiver: true,
+                receiver_pass: TyPass::In,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "as_str") {
+        if eq(in ctx, method, "as_str") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "Str(AsStr)"),
-                has_recv: true,
-                recv_pass: TyPass::In,
+                label: sym_str(inout ctx, "Str(AsStr)"),
+                has_receiver: true,
+                receiver_pass: TyPass::In,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "as_bytes") {
+        if eq(in ctx, method, "as_bytes") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "Str(AsBytes)"),
-                has_recv: true,
-                recv_pass: TyPass::In,
+                label: sym_str(inout ctx, "Str(AsBytes)"),
+                has_receiver: true,
+                receiver_pass: TyPass::In,
                 arg_mode: 0
             };
         }
-        if is_strg {
-            if eq(in c, m, "push_str") {
+        if is_string {
+            if eq(in ctx, method, "push_str") {
                 return SeqRes {
                     matched: true,
-                    label: sym_str(inout c, "Str(PushStr)"),
-                    has_recv: true,
-                    recv_pass: TyPass::Inout,
+                    label: sym_str(inout ctx, "Str(PushStr)"),
+                    has_receiver: true,
+                    receiver_pass: TyPass::Inout,
                     arg_mode: 1
                 };
             }
-            if eq(in c, m, "push_char") {
+            if eq(in ctx, method, "push_char") {
                 return SeqRes {
                     matched: true,
-                    label: sym_str(inout c, "Str(PushChar)"),
-                    has_recv: true,
-                    recv_pass: TyPass::Inout,
+                    label: sym_str(inout ctx, "Str(PushChar)"),
+                    has_receiver: true,
+                    receiver_pass: TyPass::Inout,
                     arg_mode: 0
                 };
             }
-            if eq(in c, m, "clear") {
+            if eq(in ctx, method, "clear") {
                 return SeqRes {
                     matched: true,
-                    label: sym_str(inout c, "Str(Clear)"),
-                    has_recv: true,
-                    recv_pass: TyPass::Inout,
+                    label: sym_str(inout ctx, "Str(Clear)"),
+                    has_receiver: true,
+                    receiver_pass: TyPass::Inout,
                     arg_mode: 0
                 };
             }
-            if eq(in c, m, "reserve") {
+            if eq(in ctx, method, "reserve") {
                 return SeqRes {
                     matched: true,
-                    label: sym_str(inout c, "Str(Reserve)"),
-                    has_recv: true,
-                    recv_pass: TyPass::Inout,
+                    label: sym_str(inout ctx, "Str(Reserve)"),
+                    has_receiver: true,
+                    receiver_pass: TyPass::Inout,
                     arg_mode: 0
                 };
             }
         }
         return no_seq();
     }
-    if is_seq_type(in c, t) {
-        if eq(in c, m, "len") {
+    if is_seq_type(in ctx, receiver_ty) {
+        if eq(in ctx, method, "len") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "Len"),
-                has_recv: true,
-                recv_pass: TyPass::In,
+                label: sym_str(inout ctx, "Len"),
+                has_receiver: true,
+                receiver_pass: TyPass::In,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "push") {
+        if eq(in ctx, method, "push") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "Push"),
-                has_recv: true,
-                recv_pass: TyPass::Inout,
+                label: sym_str(inout ctx, "Push"),
+                has_receiver: true,
+                receiver_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "pop") {
+        if eq(in ctx, method, "pop") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "Pop"),
-                has_recv: true,
-                recv_pass: TyPass::Inout,
+                label: sym_str(inout ctx, "Pop"),
+                has_receiver: true,
+                receiver_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "get") {
+        if eq(in ctx, method, "get") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "Get"),
-                has_recv: true,
-                recv_pass: TyPass::In,
+                label: sym_str(inout ctx, "Get"),
+                has_receiver: true,
+                receiver_pass: TyPass::In,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "set") {
+        if eq(in ctx, method, "set") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "Set"),
-                has_recv: true,
-                recv_pass: TyPass::Inout,
+                label: sym_str(inout ctx, "Set"),
+                has_receiver: true,
+                receiver_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "try_get") || eq(in c, m, "try_get_mut") {
+        if eq(in ctx, method, "try_get") || eq(in ctx, method, "try_get_mut") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "TryGet"),
-                has_recv: true,
-                recv_pass: TyPass::In,
+                label: sym_str(inout ctx, "TryGet"),
+                has_receiver: true,
+                receiver_pass: TyPass::In,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "last") {
+        if eq(in ctx, method, "last") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "Last"),
-                has_recv: true,
-                recv_pass: TyPass::In,
+                label: sym_str(inout ctx, "Last"),
+                has_receiver: true,
+                receiver_pass: TyPass::In,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "try_set") {
+        if eq(in ctx, method, "try_set") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "TrySet"),
-                has_recv: true,
-                recv_pass: TyPass::Inout,
+                label: sym_str(inout ctx, "TrySet"),
+                has_receiver: true,
+                receiver_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "clear") {
+        if eq(in ctx, method, "clear") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "Clear"),
-                has_recv: true,
-                recv_pass: TyPass::Inout,
+                label: sym_str(inout ctx, "Clear"),
+                has_receiver: true,
+                receiver_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "truncate") {
+        if eq(in ctx, method, "truncate") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "Truncate"),
-                has_recv: true,
-                recv_pass: TyPass::Inout,
+                label: sym_str(inout ctx, "Truncate"),
+                has_receiver: true,
+                receiver_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "reserve") {
+        if eq(in ctx, method, "reserve") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "Reserve"),
-                has_recv: true,
-                recv_pass: TyPass::Inout,
+                label: sym_str(inout ctx, "Reserve"),
+                has_receiver: true,
+                receiver_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "extend") || eq(in c, m, "extend_from_slice") {
+        if eq(in ctx, method, "extend") || eq(in ctx, method, "extend_from_slice") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "Extend"),
-                has_recv: true,
-                recv_pass: TyPass::Inout,
+                label: sym_str(inout ctx, "Extend"),
+                has_receiver: true,
+                receiver_pass: TyPass::Inout,
                 arg_mode: 1
             };
         }
-        if eq(in c, m, "extend_ascii_lowercase") {
+        if eq(in ctx, method, "extend_ascii_lowercase") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "ExtendAsciiLowercase"),
-                has_recv: true,
-                recv_pass: TyPass::Inout,
+                label: sym_str(inout ctx, "ExtendAsciiLowercase"),
+                has_receiver: true,
+                receiver_pass: TyPass::Inout,
                 arg_mode: 1
             };
         }
-        if eq(in c, m, "resize") {
+        if eq(in ctx, method, "resize") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "Resize"),
-                has_recv: true,
-                recv_pass: TyPass::Inout,
+                label: sym_str(inout ctx, "Resize"),
+                has_receiver: true,
+                receiver_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "extend_from_within") {
+        if eq(in ctx, method, "extend_from_within") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "ExtendFromWithin { total: false }"),
-                has_recv: true,
-                recv_pass: TyPass::Inout,
+                label: sym_str(inout ctx, "ExtendFromWithin { total: false }"),
+                has_receiver: true,
+                receiver_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "try_extend_from_within") {
+        if eq(in ctx, method, "try_extend_from_within") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "ExtendFromWithin { total: true }"),
-                has_recv: true,
-                recv_pass: TyPass::Inout,
+                label: sym_str(inout ctx, "ExtendFromWithin { total: true }"),
+                has_receiver: true,
+                receiver_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "extend_reversed") {
+        if eq(in ctx, method, "extend_reversed") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "ExtendReversed"),
-                has_recv: true,
-                recv_pass: TyPass::Inout,
+                label: sym_str(inout ctx, "ExtendReversed"),
+                has_receiver: true,
+                receiver_pass: TyPass::Inout,
                 arg_mode: 1
             };
         }
-        if eq(in c, m, "as_slice") || eq(in c, m, "as_slice_mut") {
+        if eq(in ctx, method, "as_slice") || eq(in ctx, method, "as_slice_mut") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "AsSlice"),
-                has_recv: true,
-                recv_pass: TyPass::In,
+                label: sym_str(inout ctx, "AsSlice"),
+                has_receiver: true,
+                receiver_pass: TyPass::In,
                 arg_mode: 0
             };
         }
-        return resolve_shared_method(inout c, m, e.n);
+        return resolve_shared_method(inout ctx, method, ex.n);
     }
-    if is_slice_type(in c, t) {
-        if eq(in c, m, "len") {
+    if is_slice_type(in ctx, receiver_ty) {
+        if eq(in ctx, method, "len") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "SliceLen"),
-                has_recv: true,
-                recv_pass: TyPass::In,
+                label: sym_str(inout ctx, "SliceLen"),
+                has_receiver: true,
+                receiver_pass: TyPass::In,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "get") {
+        if eq(in ctx, method, "get") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "SliceGet"),
-                has_recv: true,
-                recv_pass: TyPass::In,
+                label: sym_str(inout ctx, "SliceGet"),
+                has_receiver: true,
+                receiver_pass: TyPass::In,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "set") {
+        if eq(in ctx, method, "set") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "SliceSet"),
-                has_recv: true,
-                recv_pass: TyPass::Inout,
+                label: sym_str(inout ctx, "SliceSet"),
+                has_receiver: true,
+                receiver_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "try_get") || eq(in c, m, "try_get_mut") {
+        if eq(in ctx, method, "try_get") || eq(in ctx, method, "try_get_mut") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "TryGet"),
-                has_recv: true,
-                recv_pass: TyPass::In,
+                label: sym_str(inout ctx, "TryGet"),
+                has_receiver: true,
+                receiver_pass: TyPass::In,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "last") {
+        if eq(in ctx, method, "last") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "Last"),
-                has_recv: true,
-                recv_pass: TyPass::In,
+                label: sym_str(inout ctx, "Last"),
+                has_receiver: true,
+                receiver_pass: TyPass::In,
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "try_set") {
+        if eq(in ctx, method, "try_set") {
             return SeqRes {
                 matched: true,
-                label: sym_str(inout c, "TrySet"),
-                has_recv: true,
-                recv_pass: TyPass::Inout,
+                label: sym_str(inout ctx, "TrySet"),
+                has_receiver: true,
+                receiver_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
-        return resolve_shared_method(inout c, m, e.n);
+        return resolve_shared_method(inout ctx, method, ex.n);
     }
     no_seq()
 }
 
 // ----- TiledOp ---------------------------------------------------------------
 
-fn field_arg_name(in c: Ctx, ty: u32) -> u32 {
-    let n = c.types.node(ty);
-    if n.kind == TyKind::Row {
-        let row = c.types.row(n.r2);
+fn field_arg_name(in ctx: Ctx, ty: u32) -> u32 {
+    let node = ctx.types.node(ty);
+    if node.kind == TyKind::Row {
+        let row = ctx.types.row(node.r2);
         if row.n == 0 && row.tail != 0 {
             return wrapping_sub(row.tail, 1);
         }
         return NONE32;
     }
-    if n.kind == TyKind::Named && n.n == 0 {
-        return n.name;
+    if node.kind == TyKind::Named && node.n == 0 {
+        return node.name;
     }
     NONE32
 }
 
-fn col_name_from_type_args(in c: Ctx, in a: Ast, e: Ex, is_static: bool) -> u32 {
-    let idx = if is_static && e.m == 2 { 1 } else { 0 };
-    if idx >= e.m {
+fn col_name_from_type_args(in ctx: Ctx, in ast: Ast, ex: Ex, is_static: bool) -> u32 {
+    let arg_index = if is_static && ex.m == 2 { 1 } else { 0 };
+    if arg_index >= ex.m {
         return NONE32;
     }
-    field_arg_name(in c, n32(a.x(add(e.c, idx))))
+    field_arg_name(in ctx, n32(ast.x(add(ex.c, arg_index))))
 }
 
-fn load_vec_col_name(in c: Ctx, in a: Ast, e: Ex, is_static: bool) -> u32 {
-    let start = if is_static && e.m >= 2 { 1 } else { 0 };
-    let rem = wrapping_sub(e.m, start);
-    if rem == 1 {
-        field_arg_name(in c, n32(a.x(add(e.c, start))))
-    } else if rem == 2 {
-        field_arg_name(in c, n32(a.x(add(e.c, inc(start)))))
+fn load_vec_col_name(in ctx: Ctx, in ast: Ast, ex: Ex, is_static: bool) -> u32 {
+    let start = if is_static && ex.m >= 2 { 1 } else { 0 };
+    let remaining = wrapping_sub(ex.m, start);
+    if remaining == 1 {
+        field_arg_name(in ctx, n32(ast.x(add(ex.c, start))))
+    } else if remaining == 2 {
+        field_arg_name(in ctx, n32(ast.x(add(ex.c, inc(start)))))
     } else {
         NONE32
     }
 }
 
 // Returns ADT index when `seq_ty` is `TiledSeq[T]` for a tiled ADT, else NONE32.
-fn tiled_seq_adt(in c: Ctx, seq_ty: u32) -> u32 {
-    if !is_tiled_seq(in c, seq_ty) {
+fn tiled_seq_adt(in ctx: Ctx, seq_ty: u32) -> u32 {
+    if !is_tiled_seq(in ctx, seq_ty) {
         return NONE32;
     }
-    let elem = c.types.arg(seq_ty, 0);
-    let en = c.types.node(elem);
-    if en.kind != TyKind::Named || en.n != 0 {
+    let elem = ctx.types.arg(seq_ty, 0);
+    let elem_node = ctx.types.node(elem);
+    if elem_node.kind != TyKind::Named || elem_node.n != 0 {
         return NONE32;
     }
-    let ai = c.world.lookup(en.name);
-    if ai == NONE32 || c.world.adt(ai).tile == 0 {
+    let adt_index = ctx.world.lookup(elem_node.name);
+    if adt_index == NONE32 || ctx.world.adt(adt_index).tile == 0 {
         return NONE32;
     }
-    ai
+    adt_index
 }
 
 // ADT name for `TiledSeq::new` / `with_capacity` / `with_region`, or NONE32.
-fn tiled_new_adt(in c: Ctx, in a: Ast, e: Ex) -> u32 {
-    let res = span_type(in c, e.s0, e.s1);
-    let elem = if is_tiled_seq(in c, res) {
-        c.types.arg(res, 0)
-    } else if e.m > 0 {
-        n32(a.x(e.c))
+fn tiled_new_adt(in ctx: Ctx, in ast: Ast, ex: Ex) -> u32 {
+    let result_ty = span_type(in ctx, ex.s0, ex.s1);
+    let elem = if is_tiled_seq(in ctx, result_ty) {
+        ctx.types.arg(result_ty, 0)
+    } else if ex.m > 0 {
+        n32(ast.x(ex.c))
     } else {
         return NONE32;
     };
-    let ename = c.types.name(elem);
-    let ai = c.world.lookup(ename);
-    if ai == NONE32 {
+    let elem_name = ctx.types.name(elem);
+    let adt_index = ctx.world.lookup(elem_name);
+    if adt_index == NONE32 {
         NONE32
     } else {
-        c.world.adt(ai).name
+        ctx.world.adt(adt_index).name
     }
 }
 
-fn format_tiled_adt(inout c: Ctx, in prefix: Str, adt: u32) -> u32 {
-    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    put_str(inout buf, in prefix);
-    put_str(inout buf, " { adt: ");
-    put_quoted(inout buf, in c.names, adt);
-    put_str(inout buf, " }");
-    c.names.intern(in buf.as_slice())
+fn format_tiled_adt(inout ctx: Ctx, in prefix: Str, adt: u32) -> u32 {
+    let mut label_text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout label_text, in prefix);
+    put_str(inout label_text, " { adt: ");
+    put_quoted(inout label_text, in ctx.names, adt);
+    put_str(inout label_text, " }");
+    ctx.names.intern(in label_text.as_slice())
 }
 
-fn format_tiled_col(inout c: Ctx, in prefix: Str, adt: u32, field: u32) -> u32 {
-    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    put_str(inout buf, in prefix);
-    put_str(inout buf, " { adt: ");
-    put_quoted(inout buf, in c.names, adt);
-    put_str(inout buf, ", field: ");
-    put_quoted(inout buf, in c.names, field);
-    put_str(inout buf, " }");
-    c.names.intern(in buf.as_slice())
+fn format_tiled_col(inout ctx: Ctx, in prefix: Str, adt: u32, field: u32) -> u32 {
+    let mut label_text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout label_text, in prefix);
+    put_str(inout label_text, " { adt: ");
+    put_quoted(inout label_text, in ctx.names, adt);
+    put_str(inout label_text, ", field: ");
+    put_quoted(inout label_text, in ctx.names, field);
+    put_str(inout label_text, " }");
+    ctx.names.intern(in label_text.as_slice())
 }
 
-pub fn resolve_tiled(inout c: Ctx, in a: Ast, e: Ex, name: u32, receiver: u64) -> TiledRes {
-    let mut recv_ty = NONE32;
+pub fn resolve_tiled(inout ctx: Ctx, in ast: Ast, ex: Ex, name: u32, receiver: u64) -> TiledRes {
+    let mut receiver_ty = NONE32;
     let mut op_start: u64 = 0;
     if receiver != NONE64 {
-        let base = a.ex(receiver);
-        let bt = span_type(in c, base.s0, base.s1);
-        if !is_tiled_seq(in c, bt) {
+        let base = ast.ex(receiver);
+        let base_ty = span_type(in ctx, base.s0, base.s1);
+        if !is_tiled_seq(in ctx, base_ty) {
             return no_tiled();
         }
-        recv_ty = bt;
+        receiver_ty = base_ty;
         // `name` is "TiledSeq::{method}" from `call`; find last `::` or start after "TiledSeq::".
         op_start = 10;
-        let size = c.names.size(name);
+        let size = ctx.names.size(name);
         let mut i: u64 = 0;
         loop {
             if inc(i) >= size {
                 break;
             }
-            if c.names.byte(name, i) == 58 && c.names.byte(name, inc(i)) == 58 {
+            if ctx.names.byte(name, i) == 58 && ctx.names.byte(name, inc(i)) == 58 {
                 op_start = add(i, 2);
                 i = add(i, 2);
             } else {
@@ -1225,201 +1233,201 @@ pub fn resolve_tiled(inout c: Ctx, in a: Ast, e: Ex, name: u32, receiver: u64) -
             }
         }
     } else {
-        if !c.names.has_prefix(name, in "TiledSeq::".as_bytes()) {
+        if !ctx.names.has_prefix(name, in "TiledSeq::".as_bytes()) {
             return no_tiled();
         }
         op_start = 10;
-        if e.n > 0 {
-            let a0 = a.ex(a.x(inc(e.b)));
-            let t0 = span_type(in c, a0.s0, a0.s1);
-            if is_tiled_seq(in c, t0) {
-                recv_ty = t0;
+        if ex.n > 0 {
+            let first_arg = ast.ex(ast.x(inc(ex.b)));
+            let first_arg_ty = span_type(in ctx, first_arg.s0, first_arg.s1);
+            if is_tiled_seq(in ctx, first_arg_ty) {
+                receiver_ty = first_arg_ty;
             }
         }
     }
-    if receiver == NONE64 && slice_suffix(in c.names, name, op_start, "new") {
-        let adt = tiled_new_adt(in c, in a, e);
+    if receiver == NONE64 && slice_suffix(in ctx.names, name, op_start, "new") {
+        let adt = tiled_new_adt(in ctx, in ast, ex);
         if adt == NONE32 {
             return no_tiled();
         }
         return TiledRes {
             matched: true,
-            label: format_tiled_adt(inout c, "New", adt),
-            cap: 0,
-            recv_pass: TyPass::In,
-            recv_proj: NONE32,
+            label: format_tiled_adt(inout ctx, "New", adt),
+            region_cap: 0,
+            receiver_pass: TyPass::In,
+            receiver_proj: NONE32,
             skip_first: false,
-            is_recv_first: false
+            is_receiver_first: false
         };
     }
-    if receiver == NONE64 && slice_suffix(in c.names, name, op_start, "with_capacity") {
-        let adt = tiled_new_adt(in c, in a, e);
+    if receiver == NONE64 && slice_suffix(in ctx.names, name, op_start, "with_capacity") {
+        let adt = tiled_new_adt(in ctx, in ast, ex);
         if adt == NONE32 {
             return no_tiled();
         }
         return TiledRes {
             matched: true,
-            label: format_tiled_adt(inout c, "WithCapacity", adt),
-            cap: 0,
-            recv_pass: TyPass::In,
-            recv_proj: NONE32,
+            label: format_tiled_adt(inout ctx, "WithCapacity", adt),
+            region_cap: 0,
+            receiver_pass: TyPass::In,
+            receiver_proj: NONE32,
             skip_first: false,
-            is_recv_first: false
+            is_receiver_first: false
         };
     }
-    if receiver == NONE64 && slice_suffix(in c.names, name, op_start, "with_region") {
-        let adt = tiled_new_adt(in c, in a, e);
-        if adt == NONE32 || e.n == 0 {
+    if receiver == NONE64 && slice_suffix(in ctx.names, name, op_start, "with_region") {
+        let adt = tiled_new_adt(in ctx, in ast, ex);
+        if adt == NONE32 || ex.n == 0 {
             return no_tiled();
         }
-        let a0 = a.ex(a.x(inc(e.b)));
-        if a0.kind != X_NAME {
+        let first_arg = ast.ex(ast.x(inc(ex.b)));
+        if first_arg.kind != X_NAME {
             return no_tiled();
         }
-        let rlabel = n32(a0.a);
-        let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        put_str(inout buf, "WithRegion { adt: ");
-        put_quoted(inout buf, in c.names, adt);
-        put_str(inout buf, ", region_label: ");
-        put_quoted(inout buf, in c.names, rlabel);
-        put_str(inout buf, " }");
-        let label = c.names.intern(in buf.as_slice());
+        let region_label = n32(first_arg.a);
+        let mut label_text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put_str(inout label_text, "WithRegion { adt: ");
+        put_quoted(inout label_text, in ctx.names, adt);
+        put_str(inout label_text, ", region_label: ");
+        put_quoted(inout label_text, in ctx.names, region_label);
+        put_str(inout label_text, " }");
+        let label = ctx.names.intern(in label_text.as_slice());
         return TiledRes {
             matched: true,
             label: label,
-            cap: wrapping_add(rlabel, 1),
-            recv_pass: TyPass::In,
-            recv_proj: NONE32,
+            region_cap: wrapping_add(region_label, 1),
+            receiver_pass: TyPass::In,
+            receiver_proj: NONE32,
             skip_first: true,
-            is_recv_first: false
+            is_receiver_first: false
         };
     }
-    if slice_suffix(in c.names, name, op_start, "len") {
+    if slice_suffix(in ctx.names, name, op_start, "len") {
         return TiledRes {
             matched: true,
-            label: sym_str(inout c, "Len"),
-            cap: 0,
-            recv_pass: TyPass::In,
-            recv_proj: NONE32,
+            label: sym_str(inout ctx, "Len"),
+            region_cap: 0,
+            receiver_pass: TyPass::In,
+            receiver_proj: NONE32,
             skip_first: false,
-            is_recv_first: true
+            is_receiver_first: true
         };
     }
-    let ai = tiled_seq_adt(in c, recv_ty);
-    if ai == NONE32 {
+    let adt_index = tiled_seq_adt(in ctx, receiver_ty);
+    if adt_index == NONE32 {
         return no_tiled();
     }
-    let adt_row = c.world.adt(ai);
+    let adt_row = ctx.world.adt(adt_index);
     let width = wrapping_sub(adt_row.tile, 1);
-    if slice_suffix(in c.names, name, op_start, "tile_count") {
-        let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        put_str(inout buf, "TileCount { tile_width: ");
-        push_decimal(inout buf, w(width));
-        put_str(inout buf, " }");
+    if slice_suffix(in ctx.names, name, op_start, "tile_count") {
+        let mut label_text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put_str(inout label_text, "TileCount { tile_width: ");
+        push_decimal(inout label_text, w(width));
+        put_str(inout label_text, " }");
         return TiledRes {
             matched: true,
-            label: c.names.intern(in buf.as_slice()),
-            cap: 0,
-            recv_pass: TyPass::In,
-            recv_proj: NONE32,
+            label: ctx.names.intern(in label_text.as_slice()),
+            region_cap: 0,
+            receiver_pass: TyPass::In,
+            receiver_proj: NONE32,
             skip_first: false,
-            is_recv_first: true
+            is_receiver_first: true
         };
     }
-    if slice_suffix(in c.names, name, op_start, "push") {
+    if slice_suffix(in ctx.names, name, op_start, "push") {
         return TiledRes {
             matched: true,
-            label: format_tiled_adt(inout c, "Push", adt_row.name),
-            cap: 0,
-            recv_pass: TyPass::Inout,
-            recv_proj: NONE32,
+            label: format_tiled_adt(inout ctx, "Push", adt_row.name),
+            region_cap: 0,
+            receiver_pass: TyPass::Inout,
+            receiver_proj: NONE32,
             skip_first: false,
-            is_recv_first: true
+            is_receiver_first: true
         };
     }
-    if slice_suffix(in c.names, name, op_start, "get") {
+    if slice_suffix(in ctx.names, name, op_start, "get") {
         return TiledRes {
             matched: true,
-            label: format_tiled_adt(inout c, "Get", adt_row.name),
-            cap: 0,
-            recv_pass: TyPass::In,
-            recv_proj: NONE32,
+            label: format_tiled_adt(inout ctx, "Get", adt_row.name),
+            region_cap: 0,
+            receiver_pass: TyPass::In,
+            receiver_proj: NONE32,
             skip_first: false,
-            is_recv_first: true
+            is_receiver_first: true
         };
     }
-    if slice_suffix(in c.names, name, op_start, "set") {
+    if slice_suffix(in ctx.names, name, op_start, "set") {
         return TiledRes {
             matched: true,
-            label: format_tiled_adt(inout c, "Set", adt_row.name),
-            cap: 0,
-            recv_pass: TyPass::Inout,
-            recv_proj: NONE32,
+            label: format_tiled_adt(inout ctx, "Set", adt_row.name),
+            region_cap: 0,
+            receiver_pass: TyPass::Inout,
+            receiver_proj: NONE32,
             skip_first: false,
-            is_recv_first: true
+            is_receiver_first: true
         };
     }
-    if slice_suffix(in c.names, name, op_start, "col_get") {
-        let field = col_name_from_type_args(in c, in a, e, receiver == NONE64);
+    if slice_suffix(in ctx.names, name, op_start, "col_get") {
+        let field = col_name_from_type_args(in ctx, in ast, ex, receiver == NONE64);
         if field == NONE32 {
             return no_tiled();
         }
         return TiledRes {
             matched: true,
-            label: format_tiled_col(inout c, "ColGet", adt_row.name, field),
-            cap: 0,
-            recv_pass: TyPass::In,
-            recv_proj: field,
+            label: format_tiled_col(inout ctx, "ColGet", adt_row.name, field),
+            region_cap: 0,
+            receiver_pass: TyPass::In,
+            receiver_proj: field,
             skip_first: false,
-            is_recv_first: true
+            is_receiver_first: true
         };
     }
-    if slice_suffix(in c.names, name, op_start, "col_set") {
-        let field = col_name_from_type_args(in c, in a, e, receiver == NONE64);
+    if slice_suffix(in ctx.names, name, op_start, "col_set") {
+        let field = col_name_from_type_args(in ctx, in ast, ex, receiver == NONE64);
         if field == NONE32 {
             return no_tiled();
         }
         return TiledRes {
             matched: true,
-            label: format_tiled_col(inout c, "ColSet", adt_row.name, field),
-            cap: 0,
-            recv_pass: TyPass::Inout,
-            recv_proj: field,
+            label: format_tiled_col(inout ctx, "ColSet", adt_row.name, field),
+            region_cap: 0,
+            receiver_pass: TyPass::Inout,
+            receiver_proj: field,
             skip_first: false,
-            is_recv_first: true
+            is_receiver_first: true
         };
     }
-    if slice_suffix(in c.names, name, op_start, "load_tile_vec") {
-        let field = load_vec_col_name(in c, in a, e, receiver == NONE64);
+    if slice_suffix(in ctx.names, name, op_start, "load_tile_vec") {
+        let field = load_vec_col_name(in ctx, in ast, ex, receiver == NONE64);
         if field == NONE32 || adt_row.vn == 0 {
             return no_tiled();
         }
-        let v = c.world.variant(w(adt_row.va));
-        let fi = c.world.find_field(v, field);
-        if fi == NONE32 {
+        let variant = ctx.world.variant(w(adt_row.va));
+        let field_index = ctx.world.find_field(variant, field);
+        if field_index == NONE32 {
             return no_tiled();
         }
-        let elem = elem_from_type(in c, c.world.field(w(fi)).ty);
+        let elem = elem_from_type(in ctx, ctx.world.field(w(field_index)).ty);
         let shape = pack_shape(elem, w(width));
         if shape == NONE64 {
             return no_tiled();
         }
-        let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        put_str(inout buf, "LoadTileVec { adt: ");
-        put_quoted(inout buf, in c.names, adt_row.name);
-        put_str(inout buf, ", field: ");
-        put_quoted(inout buf, in c.names, field);
-        put_str(inout buf, ", shape: ");
-        put_shape(inout buf, elem, w(width));
-        put_str(inout buf, " }");
+        let mut label_text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put_str(inout label_text, "LoadTileVec { adt: ");
+        put_quoted(inout label_text, in ctx.names, adt_row.name);
+        put_str(inout label_text, ", field: ");
+        put_quoted(inout label_text, in ctx.names, field);
+        put_str(inout label_text, ", shape: ");
+        put_shape(inout label_text, elem, w(width));
+        put_str(inout label_text, " }");
         return TiledRes {
             matched: true,
-            label: c.names.intern(in buf.as_slice()),
-            cap: 0,
-            recv_pass: TyPass::In,
-            recv_proj: field,
+            label: ctx.names.intern(in label_text.as_slice()),
+            region_cap: 0,
+            receiver_pass: TyPass::In,
+            receiver_proj: field,
             skip_first: false,
-            is_recv_first: true
+            is_receiver_first: true
         };
     }
     no_tiled()
@@ -1427,146 +1435,146 @@ pub fn resolve_tiled(inout c: Ctx, in a: Ast, e: Ex, name: u32, receiver: u64) -
 
 // ----- VectorOp --------------------------------------------------------------
 
-fn profile_name(in c: Ctx, s: u32) -> bool {
-    eq(in c, s, "Baseline128")
-        || eq(in c, s, "Avx2")
-        || eq(in c, s, "Avx512")
-        || eq(in c, s, "Sve2")
-        || eq(in c, s, "Rvv1")
+fn profile_name(in ctx: Ctx, sym: u32) -> bool {
+    eq(in ctx, sym, "Baseline128")
+        || eq(in ctx, sym, "Avx2")
+        || eq(in ctx, sym, "Avx512")
+        || eq(in ctx, sym, "Sve2")
+        || eq(in ctx, sym, "Rvv1")
 }
 
-// Lookup intrinsic Debug string and mode: returns (label bytes in `intr`,
+// Lookup intrinsic Debug string and mode: returns (label bytes in `intrinsic_text`,
 // is_convert, const_mode, is_load_masked), or false if not a vector intrinsic.
 fn lookup_vec_intrinsic(
-    in c: Ctx,
+    in ctx: Ctx,
     name: u32,
-    at: u64,
-    inout intr: ChunkSeq[u8],
-    inout is_conv: bool,
-    inout cmode: u8,
+    sep_at: u64,
+    inout intrinsic_text: ChunkSeq[u8],
+    inout is_convert: bool,
+    inout const_mode: u8,
     inout is_load_masked: bool
 ) -> bool {
-    let op = add(at, 2);
-    is_conv = false;
-    cmode = C_NONE;
+    let method_at = add(sep_at, 2);
+    is_convert = false;
+    const_mode = C_NONE;
     is_load_masked = false;
-    if slice_prefix(in c.names, name, at, "Vec") {
-        if slice_suffix(in c.names, name, op, "splat") {
-            put_str(inout intr, "Splat");
-        } else if slice_suffix(in c.names, name, op, "from") {
-            put_str(inout intr, "From");
-        } else if slice_suffix(in c.names, name, op, "add") {
-            put_str(inout intr, "Binary(Add)");
-        } else if slice_suffix(in c.names, name, op, "sub") {
-            put_str(inout intr, "Binary(Sub)");
-        } else if slice_suffix(in c.names, name, op, "mul") {
-            put_str(inout intr, "Binary(Mul)");
-        } else if slice_suffix(in c.names, name, op, "div") {
-            put_str(inout intr, "Binary(Div)");
-        } else if slice_suffix(in c.names, name, op, "min") {
-            put_str(inout intr, "Binary(Min)");
-        } else if slice_suffix(in c.names, name, op, "max") {
-            put_str(inout intr, "Binary(Max)");
-        } else if slice_suffix(in c.names, name, op, "and") {
-            put_str(inout intr, "Binary(And)");
-        } else if slice_suffix(in c.names, name, op, "or") {
-            put_str(inout intr, "Binary(Or)");
-        } else if slice_suffix(in c.names, name, op, "xor") {
-            put_str(inout intr, "Binary(Xor)");
-        } else if slice_suffix(in c.names, name, op, "saturating_add") {
-            put_str(inout intr, "Binary(SaturatingAdd)");
-        } else if slice_suffix(in c.names, name, op, "saturating_sub") {
-            put_str(inout intr, "Binary(SaturatingSub)");
-        } else if slice_suffix(in c.names, name, op, "not") {
-            put_str(inout intr, "Not");
-        } else if slice_suffix(in c.names, name, op, "sqrt") {
-            put_str(inout intr, "Unary(Sqrt)");
-        } else if slice_suffix(in c.names, name, op, "abs") {
-            put_str(inout intr, "Unary(Abs)");
-        } else if slice_suffix(in c.names, name, op, "neg") {
-            put_str(inout intr, "Unary(Neg)");
-        } else if slice_suffix(in c.names, name, op, "mul_add") {
-            put_str(inout intr, "MulAdd");
-        } else if slice_suffix(in c.names, name, op, "to_bits") {
-            put_str(inout intr, "Convert(ToBits)");
-            is_conv = true;
-        } else if slice_suffix(in c.names, name, op, "from_bits") {
-            put_str(inout intr, "Convert(FromBits)");
-            is_conv = true;
-        } else if slice_suffix(in c.names, name, op, "widen_f64") {
-            put_str(inout intr, "Convert(Widen)");
-            is_conv = true;
-        } else if slice_suffix(in c.names, name, op, "nearest_f32") {
-            put_str(inout intr, "Convert(Narrow)");
-            is_conv = true;
-        } else if slice_suffix(in c.names, name, op, "shl") {
-            put_str(inout intr, "Shift(Shl)");
-        } else if slice_suffix(in c.names, name, op, "shr") {
-            put_str(inout intr, "Shift(Shr)");
-        } else if slice_suffix(in c.names, name, op, "eq") {
-            put_str(inout intr, "Compare(Eq)");
-        } else if slice_suffix(in c.names, name, op, "ne") {
-            put_str(inout intr, "Compare(Ne)");
-        } else if slice_suffix(in c.names, name, op, "lt") {
-            put_str(inout intr, "Compare(Lt)");
-        } else if slice_suffix(in c.names, name, op, "le") {
-            put_str(inout intr, "Compare(Le)");
-        } else if slice_suffix(in c.names, name, op, "gt") {
-            put_str(inout intr, "Compare(Gt)");
-        } else if slice_suffix(in c.names, name, op, "ge") {
-            put_str(inout intr, "Compare(Ge)");
-        } else if slice_suffix(in c.names, name, op, "select") {
-            put_str(inout intr, "Select");
-        } else if slice_suffix(in c.names, name, op, "reduce_add") {
-            put_str(inout intr, "Reduce(Add)");
-        } else if slice_suffix(in c.names, name, op, "reduce_xor") {
-            put_str(inout intr, "Reduce(Xor)");
-        } else if slice_suffix(in c.names, name, op, "reduce_or") {
-            put_str(inout intr, "Reduce(Or)");
-        } else if slice_suffix(in c.names, name, op, "reduce_and") {
-            put_str(inout intr, "Reduce(And)");
-        } else if slice_suffix(in c.names, name, op, "reduce_min") {
-            put_str(inout intr, "Reduce(Min)");
-        } else if slice_suffix(in c.names, name, op, "reduce_max") {
-            put_str(inout intr, "Reduce(Max)");
-        } else if slice_suffix(in c.names, name, op, "extract") {
-            put_str(inout intr, "Extract");
-            cmode = C_SECOND;
-        } else if slice_suffix(in c.names, name, op, "replace") {
-            put_str(inout intr, "Replace");
-            cmode = C_SECOND;
-        } else if slice_suffix(in c.names, name, op, "shuffle") {
-            put_str(inout intr, "Shuffle");
-            cmode = C_TAIL;
-        } else if slice_suffix(in c.names, name, op, "load_masked") {
-            put_str(inout intr, "LoadMasked");
+    if slice_prefix(in ctx.names, name, sep_at, "Vec") {
+        if slice_suffix(in ctx.names, name, method_at, "splat") {
+            put_str(inout intrinsic_text, "Splat");
+        } else if slice_suffix(in ctx.names, name, method_at, "from") {
+            put_str(inout intrinsic_text, "From");
+        } else if slice_suffix(in ctx.names, name, method_at, "add") {
+            put_str(inout intrinsic_text, "Binary(Add)");
+        } else if slice_suffix(in ctx.names, name, method_at, "sub") {
+            put_str(inout intrinsic_text, "Binary(Sub)");
+        } else if slice_suffix(in ctx.names, name, method_at, "mul") {
+            put_str(inout intrinsic_text, "Binary(Mul)");
+        } else if slice_suffix(in ctx.names, name, method_at, "div") {
+            put_str(inout intrinsic_text, "Binary(Div)");
+        } else if slice_suffix(in ctx.names, name, method_at, "min") {
+            put_str(inout intrinsic_text, "Binary(Min)");
+        } else if slice_suffix(in ctx.names, name, method_at, "max") {
+            put_str(inout intrinsic_text, "Binary(Max)");
+        } else if slice_suffix(in ctx.names, name, method_at, "and") {
+            put_str(inout intrinsic_text, "Binary(And)");
+        } else if slice_suffix(in ctx.names, name, method_at, "or") {
+            put_str(inout intrinsic_text, "Binary(Or)");
+        } else if slice_suffix(in ctx.names, name, method_at, "xor") {
+            put_str(inout intrinsic_text, "Binary(Xor)");
+        } else if slice_suffix(in ctx.names, name, method_at, "saturating_add") {
+            put_str(inout intrinsic_text, "Binary(SaturatingAdd)");
+        } else if slice_suffix(in ctx.names, name, method_at, "saturating_sub") {
+            put_str(inout intrinsic_text, "Binary(SaturatingSub)");
+        } else if slice_suffix(in ctx.names, name, method_at, "not") {
+            put_str(inout intrinsic_text, "Not");
+        } else if slice_suffix(in ctx.names, name, method_at, "sqrt") {
+            put_str(inout intrinsic_text, "Unary(Sqrt)");
+        } else if slice_suffix(in ctx.names, name, method_at, "abs") {
+            put_str(inout intrinsic_text, "Unary(Abs)");
+        } else if slice_suffix(in ctx.names, name, method_at, "neg") {
+            put_str(inout intrinsic_text, "Unary(Neg)");
+        } else if slice_suffix(in ctx.names, name, method_at, "mul_add") {
+            put_str(inout intrinsic_text, "MulAdd");
+        } else if slice_suffix(in ctx.names, name, method_at, "to_bits") {
+            put_str(inout intrinsic_text, "Convert(ToBits)");
+            is_convert = true;
+        } else if slice_suffix(in ctx.names, name, method_at, "from_bits") {
+            put_str(inout intrinsic_text, "Convert(FromBits)");
+            is_convert = true;
+        } else if slice_suffix(in ctx.names, name, method_at, "widen_f64") {
+            put_str(inout intrinsic_text, "Convert(Widen)");
+            is_convert = true;
+        } else if slice_suffix(in ctx.names, name, method_at, "nearest_f32") {
+            put_str(inout intrinsic_text, "Convert(Narrow)");
+            is_convert = true;
+        } else if slice_suffix(in ctx.names, name, method_at, "shl") {
+            put_str(inout intrinsic_text, "Shift(Shl)");
+        } else if slice_suffix(in ctx.names, name, method_at, "shr") {
+            put_str(inout intrinsic_text, "Shift(Shr)");
+        } else if slice_suffix(in ctx.names, name, method_at, "eq") {
+            put_str(inout intrinsic_text, "Compare(Eq)");
+        } else if slice_suffix(in ctx.names, name, method_at, "ne") {
+            put_str(inout intrinsic_text, "Compare(Ne)");
+        } else if slice_suffix(in ctx.names, name, method_at, "lt") {
+            put_str(inout intrinsic_text, "Compare(Lt)");
+        } else if slice_suffix(in ctx.names, name, method_at, "le") {
+            put_str(inout intrinsic_text, "Compare(Le)");
+        } else if slice_suffix(in ctx.names, name, method_at, "gt") {
+            put_str(inout intrinsic_text, "Compare(Gt)");
+        } else if slice_suffix(in ctx.names, name, method_at, "ge") {
+            put_str(inout intrinsic_text, "Compare(Ge)");
+        } else if slice_suffix(in ctx.names, name, method_at, "select") {
+            put_str(inout intrinsic_text, "Select");
+        } else if slice_suffix(in ctx.names, name, method_at, "reduce_add") {
+            put_str(inout intrinsic_text, "Reduce(Add)");
+        } else if slice_suffix(in ctx.names, name, method_at, "reduce_xor") {
+            put_str(inout intrinsic_text, "Reduce(Xor)");
+        } else if slice_suffix(in ctx.names, name, method_at, "reduce_or") {
+            put_str(inout intrinsic_text, "Reduce(Or)");
+        } else if slice_suffix(in ctx.names, name, method_at, "reduce_and") {
+            put_str(inout intrinsic_text, "Reduce(And)");
+        } else if slice_suffix(in ctx.names, name, method_at, "reduce_min") {
+            put_str(inout intrinsic_text, "Reduce(Min)");
+        } else if slice_suffix(in ctx.names, name, method_at, "reduce_max") {
+            put_str(inout intrinsic_text, "Reduce(Max)");
+        } else if slice_suffix(in ctx.names, name, method_at, "extract") {
+            put_str(inout intrinsic_text, "Extract");
+            const_mode = C_SECOND;
+        } else if slice_suffix(in ctx.names, name, method_at, "replace") {
+            put_str(inout intrinsic_text, "Replace");
+            const_mode = C_SECOND;
+        } else if slice_suffix(in ctx.names, name, method_at, "shuffle") {
+            put_str(inout intrinsic_text, "Shuffle");
+            const_mode = C_TAIL;
+        } else if slice_suffix(in ctx.names, name, method_at, "load_masked") {
+            put_str(inout intrinsic_text, "LoadMasked");
             is_load_masked = true;
         } else {
             return false;
         }
         return true;
     }
-    if slice_prefix(in c.names, name, at, "Mask") {
-        if slice_suffix(in c.names, name, op, "and") {
-            put_str(inout intr, "MaskBinary(And)");
-        } else if slice_suffix(in c.names, name, op, "or") {
-            put_str(inout intr, "MaskBinary(Or)");
-        } else if slice_suffix(in c.names, name, op, "xor") {
-            put_str(inout intr, "MaskBinary(Xor)");
-        } else if slice_suffix(in c.names, name, op, "not") {
-            put_str(inout intr, "MaskNot");
-        } else if slice_suffix(in c.names, name, op, "count") {
-            put_str(inout intr, "MaskCount");
-        } else if slice_suffix(in c.names, name, op, "bitmask") {
-            put_str(inout intr, "MaskBitmask");
-        } else if slice_suffix(in c.names, name, op, "any") {
-            put_str(inout intr, "MaskAny");
-        } else if slice_suffix(in c.names, name, op, "all") {
-            put_str(inout intr, "MaskAll");
-        } else if slice_suffix(in c.names, name, op, "in_bounds") {
-            put_str(inout intr, "InBounds");
-        } else if slice_suffix(in c.names, name, op, "active") {
-            put_str(inout intr, "Active");
+    if slice_prefix(in ctx.names, name, sep_at, "Mask") {
+        if slice_suffix(in ctx.names, name, method_at, "and") {
+            put_str(inout intrinsic_text, "MaskBinary(And)");
+        } else if slice_suffix(in ctx.names, name, method_at, "or") {
+            put_str(inout intrinsic_text, "MaskBinary(Or)");
+        } else if slice_suffix(in ctx.names, name, method_at, "xor") {
+            put_str(inout intrinsic_text, "MaskBinary(Xor)");
+        } else if slice_suffix(in ctx.names, name, method_at, "not") {
+            put_str(inout intrinsic_text, "MaskNot");
+        } else if slice_suffix(in ctx.names, name, method_at, "count") {
+            put_str(inout intrinsic_text, "MaskCount");
+        } else if slice_suffix(in ctx.names, name, method_at, "bitmask") {
+            put_str(inout intrinsic_text, "MaskBitmask");
+        } else if slice_suffix(in ctx.names, name, method_at, "any") {
+            put_str(inout intrinsic_text, "MaskAny");
+        } else if slice_suffix(in ctx.names, name, method_at, "all") {
+            put_str(inout intrinsic_text, "MaskAll");
+        } else if slice_suffix(in ctx.names, name, method_at, "in_bounds") {
+            put_str(inout intrinsic_text, "InBounds");
+        } else if slice_suffix(in ctx.names, name, method_at, "active") {
+            put_str(inout intrinsic_text, "Active");
         } else {
             return false;
         }
@@ -1575,66 +1583,68 @@ fn lookup_vec_intrinsic(
     false
 }
 
-pub fn resolve_vector(inout c: Ctx, in a: Ast, e: Ex, name: u32) -> VecRes {
-    if eq(in c, name, "Isa::supported") {
-        if e.m != 1 {
+pub fn resolve_vector(inout ctx: Ctx, in ast: Ast, ex: Ex, name: u32) -> VecRes {
+    if eq(in ctx, name, "Isa::supported") {
+        if ex.m != 1 {
             return no_vec();
         }
-        let t0 = n32(a.x(e.c));
-        let nd = c.types.node(t0);
-        if nd.kind != TyKind::Named || nd.n != 0 || !profile_name(in c, nd.name) {
+        let profile_ty = n32(ast.x(ex.c));
+        let profile_node = ctx.types.node(profile_ty);
+        if profile_node.kind != TyKind::Named
+            || profile_node.n != 0
+            || !profile_name(in ctx, profile_node.name) {
             return no_vec();
         }
-        let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        put_str(inout buf, "IsaSupported(");
-        c.names.write(nd.name, inout buf);
-        buf.push(41);
+        let mut label_text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put_str(inout label_text, "IsaSupported(");
+        ctx.names.write(profile_node.name, inout label_text);
+        label_text.push(41);
         return VecRes {
             matched: true,
-            label: c.names.intern(in buf.as_slice()),
+            label: ctx.names.intern(in label_text.as_slice()),
             const_lo: 0,
             const_hi: 0
         };
     }
-    let at = split_colons(in c.names, name);
-    if at == NONE64 {
+    let sep_at = split_colons(in ctx.names, name);
+    if sep_at == NONE64 {
         return no_vec();
     }
-    let mut intr: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let mut is_conv = false;
-    let mut cmode = C_NONE;
+    let mut intrinsic_text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut is_convert = false;
+    let mut const_mode = C_NONE;
     let mut is_load_masked = false;
     if !lookup_vec_intrinsic(
-        in c,
+        in ctx,
         name,
-        at,
-        inout intr,
-        inout is_conv,
-        inout cmode,
+        sep_at,
+        inout intrinsic_text,
+        inout is_convert,
+        inout const_mode,
         inout is_load_masked
     ) {
         return no_vec();
     }
-    let arg0_ty = if e.n > 0 {
-        let a0 = a.ex(a.x(inc(e.b)));
-        span_type(in c, a0.s0, a0.s1)
+    let first_arg_ty = if ex.n > 0 {
+        let first_arg = ast.ex(ast.x(inc(ex.b)));
+        span_type(in ctx, first_arg.s0, first_arg.s1)
     } else {
         NONE32
     };
-    if is_load_masked && is_seq_or_slice(in c, arg0_ty) {
+    if is_load_masked && is_seq_or_slice(in ctx, first_arg_ty) {
         return no_vec();
     }
-    let op_shape = shape_of(in c, arg0_ty);
-    let shape = if is_conv {
+    let op_shape = shape_of(in ctx, first_arg_ty);
+    let shape = if is_convert {
         op_shape
     } else {
-        let res = shape_of(in c, span_type(in c, e.s0, e.s1));
-        if res != NONE64 {
-            res
+        let result_shape = shape_of(in ctx, span_type(in ctx, ex.s0, ex.s1));
+        if result_shape != NONE64 {
+            result_shape
         } else if op_shape != NONE64 {
             op_shape
         } else {
-            explicit_shape(in c, in a, e)
+            explicit_shape(in ctx, in ast, ex)
         }
     };
     if shape == NONE64 {
@@ -1642,51 +1652,54 @@ pub fn resolve_vector(inout c: Ctx, in a: Ast, e: Ex, name: u32) -> VecRes {
     }
     let mut const_lo: u64 = 0;
     let mut const_hi: u64 = 0;
-    if cmode == C_SECOND {
-        if e.n < 2 {
+    if const_mode == C_SECOND {
+        if ex.n < 2 {
             return no_vec();
         }
         const_lo = 1;
         const_hi = 2;
-    } else if cmode == C_TAIL {
-        if e.n == 0 {
+    } else if const_mode == C_TAIL {
+        if ex.n == 0 {
             return no_vec();
         }
         const_lo = 1;
-        const_hi = e.n;
+        const_hi = ex.n;
     }
     let mut consts: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for i in const_lo..const_hi {
-        let ax = a.ex(a.x(add(e.b, inc(wrapping_mul(i, 2)))));
-        if ax.kind != X_LITERAL || ax.a != Lit::Int || ax.c != 0 || ax.b > 65535 {
+        let const_ex = ast.ex(ast.x(add(ex.b, inc(wrapping_mul(i, 2)))));
+        if const_ex.kind != X_LITERAL
+            || const_ex.a != Lit::Int
+            || const_ex.c != 0
+            || const_ex.b > 65535 {
             return no_vec();
         }
-        consts.push(ax.b);
+        consts.push(const_ex.b);
     }
     let elem = wrapping_u8(wrapping_shr_u64(shape, 16));
     let lanes = shape & 65535;
-    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    put_str(inout buf, "Lanes { intrinsic: ");
-    buf.extend(in intr.as_slice());
-    put_str(inout buf, ", shape: ");
-    put_shape(inout buf, elem, lanes);
-    put_str(inout buf, ", constants: [");
+    let mut label_text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout label_text, "Lanes { intrinsic: ");
+    label_text.extend(in intrinsic_text.as_slice());
+    put_str(inout label_text, ", shape: ");
+    put_shape(inout label_text, elem, lanes);
+    put_str(inout label_text, ", constants: [");
     for i in 0..consts.len() {
         if i > 0 {
-            put_str(inout buf, ", ");
+            put_str(inout label_text, ", ");
         }
         push_decimal(
-            inout buf,
+            inout label_text,
             match consts.try_get(i) {
-                Option::Some(v) => v,
+                Option::Some(constant) => constant,
                 Option::None => 0,
             }
         );
     }
-    put_str(inout buf, "] }");
+    put_str(inout label_text, "] }");
     VecRes {
         matched: true,
-        label: c.names.intern(in buf.as_slice()),
+        label: ctx.names.intern(in label_text.as_slice()),
         const_lo: const_lo,
         const_hi: const_hi
     }

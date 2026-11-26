@@ -1059,49 +1059,54 @@ vesper_crate(
             "resources:memory:9216",
             "resources:cpu:1",
         ],
-        # Lean 4.35 full-library audits allow 8 GiB, plus wrapper overhead.
+        # Lean 4.35 full-library audits run under -M8192, but measured peaks
+        # (Nov 2026, process tree) are 6.0 GB anonymous memory plus 1.5 GB of
+        # Lean's memory-mapped library, which concurrent tests share. 6 GiB
+        # lets three of these run at once under ci_tests' 18 GiB.
         "test/lean4lean_foundations42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
         "test/lean4lean_construction42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
         "test/lean4lean_order42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
         "test/lean4lean_map42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
         "test/lean4lean_normalize42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
         "test/lean4lean_normalization42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
         "test/lean4lean_comparison42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
+        # Measured peak: 2.3 GB anonymous memory.
         "test/resource_model42": [
-            "resources:memory:9216",
+            "resources:memory:3072",
             "resources:cpu:1",
             "lean_replay",
         ],
+        # Measured peak: 1.5 GB anonymous memory.
         "test/replay42_kernel": [
-            "resources:memory:9216",
+            "resources:memory:2048",
             "resources:cpu:1",
             "lean_replay",
         ],
@@ -1115,33 +1120,34 @@ vesper_crate(
             "resources:memory:5120",
             "resources:cpu:4",
         ],
+        # Full-library audits, measured as above.
         "test/lean4lean_shape42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
         "test/lean4lean_addability42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
         "test/lean4lean_completion42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
         "test/lean4lean_reconstruction42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
         "test/lean4lean_normalized_completion42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
         "test/lean4lean_map_tree42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],

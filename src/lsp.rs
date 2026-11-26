@@ -186,6 +186,159 @@ pub fn lens_requests_for_port(
         rounds,
     )
 }
+/// A proof outcome for the Vesper port's proof-lens test: 0 not attempted,
+/// 1 proved (detail), 2 checked (detail), 3 refuted (counterexample),
+/// 4 failed (stage, reason).
+#[doc(hidden)]
+pub type PortProofStatus = (u8, String, String);
+/// One step of a proof-lens session for the Vesper port's test: `L` renders
+/// the code lenses of `source`, `P` records a finished `vesper.proofAudit`
+/// job and renders its result, `B` records a finished background run and
+/// renders its `vesper/proofStatus` parameters (nothing when the document
+/// now hashes to `current`, not `source`).
+#[doc(hidden)]
+pub struct ProofLensOp {
+    pub kind: u8,
+    pub source: [u8; 32],
+    pub current: [u8; 32],
+    pub generation: u64,
+    pub requested: Option<(String, bool)>,
+    pub extraction: Vec<(String, PortProofStatus)>,
+    pub semantic: Vec<(String, [u8; 32], PortProofStatus)>,
+    pub reused: usize,
+    pub compiled: usize,
+    pub elapsed_ms: u64,
+}
+/// The proof-lens functions (name, span start) and model keys (or the
+/// reason there is no model) of a checked source, as the session's code
+/// lenses read them.
+#[doc(hidden)]
+#[allow(clippy::type_complexity)]
+pub fn proof_lens_inputs_for_port(
+    snapshot: &crate::tooling::frontend::CheckedSource,
+) -> (
+    Vec<(String, usize)>,
+    Vec<(String, Result<[u8; 32], String>)>,
+) {
+    let models = proof_model::all(snapshot.checked())
+        .into_iter()
+        .map(|(name, model)| (name, model.map(|m| m.key)))
+        .collect();
+    (session::lens_functions(snapshot), models)
+}
+fn port_status((code, a, b): &PortProofStatus) -> vesper_lsp::lens::ProofStatus {
+    use vesper_lsp::lens::ProofStatus;
+    match code {
+        1 => ProofStatus::Proved { detail: a.clone() },
+        2 => ProofStatus::Checked { detail: a.clone() },
+        3 => ProofStatus::Refuted {
+            counterexample: a.clone(),
+        },
+        4 => ProofStatus::Failed {
+            stage: a.clone(),
+            reason: b.clone(),
+        },
+        _ => ProofStatus::NotAttempted,
+    }
+}
+/// The session's proof-lens answers over `ops`, from empty ledgers of the
+/// given capacities, `rounds` times (the last answers, or "" for no
+/// rounds): an `L` row per code-lens answer, a `P` row per command result
+/// and a `B` row per background notification, as JSON.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn proof_lenses_for_port(
+    uri: &str,
+    version: i32,
+    text: &str,
+    index_limits: vesper_span::Limits,
+    functions: &[(String, usize)],
+    models: &[(String, Result<[u8; 32], String>)],
+    capacities: (usize, usize),
+    ops: &[ProofLensOp],
+    rounds: u64,
+) -> String {
+    use std::fmt::Write as _;
+    let index = match vesper_span::LineIndex::new(std::sync::Arc::from(text), index_limits) {
+        Ok(index) => index,
+        Err(error) => return format!("E\t{error}\n"),
+    };
+    let models: std::collections::BTreeMap<&str, Result<[u8; 32], &str>> = models
+        .iter()
+        .map(|(name, m)| {
+            (
+                name.as_str(),
+                m.as_ref().map(|k| *k).map_err(String::as_str),
+            )
+        })
+        .collect();
+    let outcomes: Vec<proof_lens::Outcome> = ops
+        .iter()
+        .map(|op| proof_lens::Outcome {
+            extraction: op
+                .extraction
+                .iter()
+                .map(|(f, s)| (f.clone(), port_status(s)))
+                .collect(),
+            semantic: op
+                .semantic
+                .iter()
+                .map(|(f, k, s)| (f.clone(), *k, port_status(s)))
+                .collect(),
+            reused: op.reused,
+            compiled: op.compiled,
+            elapsed: std::time::Duration::from_millis(op.elapsed_ms),
+        })
+        .collect();
+    let mut out = String::new();
+    for _ in 0..rounds {
+        out.clear();
+        let ledger = |n| vesper_lsp::lens::ProofLedger::new(n).expect("ledger capacity");
+        let (mut proofs, mut model_proofs) = (ledger(capacities.0), ledger(capacities.1));
+        for (op, outcome) in ops.iter().zip(&outcomes) {
+            match op.kind {
+                b'L' => {
+                    let answer = session::code_lenses_of(
+                        uri,
+                        version,
+                        &index,
+                        op.source,
+                        functions,
+                        |name| models.get(name).copied(),
+                        &proofs,
+                        &model_proofs,
+                    );
+                    let answer = answer.unwrap_or_else(
+                        |e| json!({"error":{"code":e.code,"message":e.message,"data":e.data}}),
+                    );
+                    let _ = writeln!(out, "L\t{answer}");
+                }
+                b'P' => {
+                    session::record_of(&mut proofs, &mut model_proofs, op.source, outcome);
+                    let answer =
+                        session::proof_result_of(op.source, op.requested.as_ref(), outcome);
+                    let _ = writeln!(out, "P\t{answer}");
+                }
+                _ => {
+                    session::record_of(&mut proofs, &mut model_proofs, op.source, outcome);
+                    if op.current != op.source {
+                        let _ = writeln!(out, "B\t-");
+                    } else {
+                        let answer = session::proof_status_of(
+                            uri,
+                            version,
+                            op.generation,
+                            op.source,
+                            outcome,
+                        );
+                        let _ = writeln!(out, "B\t{answer}");
+                    }
+                }
+            }
+        }
+    }
+    out
+}
 /// `lens_view_for_port` with the guards, parse and check done once and
 /// the view and its answers built `rounds` times (the last answer, or ""
 /// for no rounds), for the Vesper port's speed comparison.
