@@ -226,7 +226,10 @@ fn plain(name: u32, tainted: bool, ty: u32) -> Local {
 }
 
 fn bool_at(in flags: ChunkSeq[bool], i: u64) -> bool {
-    flags.try_get(i).unwrap_or(false)
+    match flags.try_get(i) {
+        Option::Some(flag) => flag,
+        Option::None => false,
+    }
 }
 
 // ------------------------------------------------------------ type helpers
@@ -348,7 +351,10 @@ pub fn secret_type(in ctx: Ctx, inout walk: Walk, ty: u32) -> bool {
     if ty == NONE32 {
         return false;
     }
-    let memo = walk.secret_memo.try_get(w(ty)).unwrap_or(0);
+    let memo = match walk.secret_memo.try_get(w(ty)) {
+        Option::Some(cached) => cached,
+        Option::None => 0,
+    };
     if memo != 0 {
         return memo == 2;
     }
@@ -582,7 +588,10 @@ pub fn is_declassify_gate(in ctx: Ctx, name: u32) -> bool {
         return false;
     }
     for j in 0..10 {
-        let expected = word.try_get(j).unwrap_or(0);
+        let expected = match word.try_get(j) {
+            Option::Some(byte) => byte,
+            Option::None => 0,
+        };
         if ctx.names.byte(name, add(seg_start, j)) != expected {
             return false;
         }
@@ -672,7 +681,10 @@ pub fn open_scope(inout walk: Walk) {
 
 pub fn close_scope(inout walk: Walk) {
     let last = wrapping_sub(walk.marks.len(), 1);
-    let mark = walk.marks.try_get(last).unwrap_or(0);
+    let mark = match walk.marks.try_get(last) {
+        Option::Some(mark) => mark,
+        Option::None => 0,
+    };
     walk.marks.truncate(last);
     walk.locals.truncate(mark);
 }
