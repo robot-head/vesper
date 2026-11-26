@@ -952,3 +952,19 @@ fn long_bitwise_or_chains_break_before_each_pipe_like_rustfmt() {
 "
     );
 }
+#[test]
+fn closure_pipes_keep_comments_and_empty_closures_apart() {
+    // A line comment before a closing pipe keeps its line break, and an
+    // empty `| |` keeps two pipes.
+    assert_eq!(
+        verify("fn f(){let g=|x // parameter\n| x;let h=| | 1;let k=|/* a */x|x;}"),
+        "fn f() {
+    let g = |x
+    // parameter
+    | x;
+    let h = | | 1;
+    let k = |/* a */ x| x;
+}
+"
+    );
+}

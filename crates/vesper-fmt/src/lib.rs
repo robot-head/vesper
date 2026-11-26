@@ -1088,7 +1088,15 @@ fn sequence<'a>(
             if closure_params {
                 closure_params = false;
                 closure_open = false;
-                Gap::None
+                // A line comment keeps its line break, and the two pipes of
+                // an empty `| |` keep their space so they don't become `||`.
+                if previous.is_some_and(|p| p.kind == K::Pipe) {
+                    Gap::Space
+                } else if matches!(spacing, Gap::Hard) {
+                    spacing
+                } else {
+                    Gap::None
+                }
             } else {
                 closure_params = !operator;
                 closure_open = closure_params;
@@ -1096,7 +1104,11 @@ fn sequence<'a>(
             }
         } else if closure_open {
             closure_open = false;
-            Gap::None
+            if matches!(spacing, Gap::Hard) {
+                spacing
+            } else {
+                Gap::None
+            }
         } else if closure_params && previous.is_some_and(|p| p.kind == K::Comma) {
             Gap::Space
         } else {

@@ -1682,7 +1682,15 @@ fn sequence(
             if closure_params {
                 closure_params = false;
                 closure_open = false;
-                G_NONE
+                // A line comment keeps its line break, and the two pipes of
+                // an empty `| |` keep their space so they don't become `||`.
+                if has_prev && prev == K_PIPE {
+                    G_SPACE
+                } else if spacing == G_HARD {
+                    spacing
+                } else {
+                    G_NONE
+                }
             } else {
                 closure_params = !operator;
                 closure_open = closure_params;
@@ -1690,7 +1698,7 @@ fn sequence(
             }
         } else if closure_open {
             closure_open = false;
-            G_NONE
+            if spacing == G_HARD { spacing } else { G_NONE }
         } else if closure_params && has_prev && prev == K_COMMA {
             G_SPACE
         } else {
