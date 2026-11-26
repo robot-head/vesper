@@ -82,9 +82,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::rc::Rc;
-use vesper_ffi::sys::{
-    self, FunctionDescriptor, LibraryDescriptor, LinkMode, ParameterType,
-};
+use vesper_ffi::sys::{self, FunctionDescriptor, LibraryDescriptor, LinkMode, ParameterType};
 
 #[path = "ffi_lowering/buffers.rs"]
 mod buffers;
