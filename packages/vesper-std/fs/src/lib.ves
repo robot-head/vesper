@@ -12,10 +12,10 @@
 // - `walk`: sorted directory listings and recursive walks (`Entries`).
 // - `sys`: the operations over the C library.
 use self::sys::{
-    os_open, os_close, os_read, os_write, os_sync, os_metadata, os_file_len, os_rename,
-    os_remove_file, os_remove_dir, os_create_dir, os_create_dir_mode, os_set_permissions, os_copy,
-    os_sync_dir, os_parent_len, os_unique, os_word_kind, os_error_message, os_is_executable,
-    os_canonicalize
+    os_open, os_open_nofollow, os_create_private, os_set_file_perm, os_file_id, os_close, os_read,
+    os_write, os_sync, os_metadata, os_file_len, os_rename, os_remove_file, os_remove_dir,
+    os_create_dir, os_create_dir_mode, os_set_permissions, os_copy, os_sync_dir, os_parent_len,
+    os_unique, os_word_kind, os_error_message, os_is_executable, os_canonicalize
 };
 
 // Why an operation failed. `kind` is one of the codes below
@@ -364,6 +364,137 @@ pub fn replace_path(in path: Slice[u8], in data: Slice[u8]) eff [Ffi[StdFs], Fai
 }
 
 // ---------------------------------------------------------------------------
+// Checked replacement.
+//
+// The pieces of a replace that must not follow a link or lose an edit
+// made meanwhile, as `vesper fmt` does it (src/fmt_commands.rs): read a
+// regular file without following a final symbolic link and keep what
+// identifies it (`read_nofollow_limit`), write the new contents to a new
+// private file beside it (`create_staged`), read the original again and
+// compare (`same_file`), and rename the staged file over it.
+
+// What identifies a file that was read: `regular` is whether it is a
+// regular file, the size and modification time as `Metadata` reports
+// them, `dev` and `ino` its device and inode (0 where the OS has none:
+// Windows and WASI), and `perm` the OS's permission word for
+// `create_staged` (`st_mode & 0o7777`; the file attributes on Windows).
+pub copy struct FileId {
+    pub regular: bool,
+    pub size: u64,
+    pub mtime_s: i64,
+    pub mtime_ns: u32,
+    pub dev: u64,
+    pub ino: u64,
+    pub perm: u32,
+}
+
+// A file `read_nofollow_limit` opened: its bytes and identity.
+pub struct Opened {
+    pub bytes: ChunkSeq[u8],
+    pub id: FileId,
+}
+
+// Open `path` without following a final symbolic link or blocking on a
+// FIFO and read at most `limit` bytes of it, as `OpenOptions::read` with
+// `O_NOFOLLOW | O_NONBLOCK` (`FILE_FLAG_OPEN_REPARSE_POINT` on Windows)
+// and `Read::take`. Nothing is read when the open file is not a regular
+// file or is at least `limit` bytes long: the caller decides from `id`.
+pub fn read_nofollow_limit(in path: Slice[u8], limit: u64)
+    -> Opened eff [Ffi[StdFs], Fail[IoError]] {
+    let mut err: u64 = 0;
+    let fd = os_open_nofollow(in path, inout err);
+    if fd < 0 {
+        return raise_io(err);
+    }
+    let id = os_file_id(fd, inout err);
+    if err != 0 {
+        os_close(fd);
+        return raise_io(err);
+    }
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if id.regular && id.size < limit {
+        let mut at: u64 = 0;
+        loop {
+            if at >= limit {
+                break;
+            }
+            let room = wrapping_sub(limit, at);
+            let step: u64 = if room < 65536 {
+                room
+            } else {
+                65536
+            };
+            buf.resize(wrapping_add(at, step), 0);
+            let m = os_read(fd, inout buf, at, inout err);
+            buf.truncate(wrapping_add(at, m));
+            if m < step || err != 0 {
+                break;
+            }
+            at = wrapping_add(at, m);
+        }
+    }
+    os_close(fd);
+    if err != 0 {
+        return raise_io(err);
+    }
+    Opened {
+        bytes: buf,
+        id: id,
+    }
+}
+
+// Whether two reads saw the same file, as `vesper fmt` checks before its
+// rename: the same device and inode (Unix), size and modification time.
+pub fn same_file(a: FileId, b: FileId) -> bool {
+    a.dev == b.dev
+        && a.ino == b.ino
+        && a.size == b.size
+        && a.mtime_s == b.mtime_s
+        && a.mtime_ns == b.mtime_ns
+}
+
+// Write `data` to a new file at `path` (an `already_exists()` error if
+// there is one), created private (0o600 less the umask), then given the
+// permission word `perm` of a `FileId` and flushed to storage: `create_new`,
+// `write_all`, `set_permissions`, `sync_all`. On a failure after the file
+// exists it is removed (`remove_staged`).
+pub fn create_staged(in path: Slice[u8], in data: Slice[u8], perm: u32) eff [
+    Ffi[StdFs],
+    Fail[IoError]
+] {
+    let mut err: u64 = 0;
+    let fd = os_create_private(in path, inout err);
+    if fd < 0 {
+        return raise_io(err);
+    }
+    let mut failed = os_write(fd, in data, inout err);
+    if failed == 0 {
+        failed = os_set_file_perm(fd, perm, inout err);
+    }
+    if failed == 0 {
+        failed = os_sync(fd, inout err);
+    }
+    os_close(fd);
+    if failed != 0 {
+        remove_staged(in path);
+        return raise_io(err);
+    }
+}
+
+// Remove a file `create_staged` made, ignoring errors. On Windows the
+// read-only attribute it may have copied is cleared first; Unix permission
+// bits are left alone.
+pub fn remove_staged(in path: Slice[u8]) eff [Ffi[StdFs]] {
+    let mut err: u64 = 0;
+    let _ = os_remove_file(in path, inout err);
+}
+
+// The id of this process (`std::process::id`).
+pub fn process_id() -> u32 eff [Ffi[StdFs]] {
+    wrapping_u32(wrapping_shr_u64(os_unique(0), 32))
+}
+
+// ---------------------------------------------------------------------------
 // Paths.
 
 fn check(status: u32, err: u64) eff [Fail[IoError]] {
@@ -375,6 +506,11 @@ fn check(status: u32, err: u64) eff [Fail[IoError]] {
 pub fn rename(in from: Str, in to: Str) eff [Ffi[StdFs], Fail[IoError]] {
     let mut err: u64 = 0;
     check(os_rename(in from.as_bytes(), in to.as_bytes(), inout err), err);
+}
+
+pub fn rename_path(in from: Slice[u8], in to: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    let mut err: u64 = 0;
+    check(os_rename(in from, in to, inout err), err);
 }
 
 pub fn remove_file(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
@@ -468,6 +604,10 @@ pub fn metadata_path(in path: Slice[u8]) -> Metadata eff [Ffi[StdFs], Fail[IoErr
 // The metadata of `path` itself: a symbolic link reports `kind_symlink()`.
 pub fn symlink_metadata(in path: Str) -> Metadata eff [Ffi[StdFs], Fail[IoError]] {
     meta_path(in path.as_bytes(), false)
+}
+
+pub fn symlink_metadata_path(in path: Slice[u8]) -> Metadata eff [Ffi[StdFs], Fail[IoError]] {
+    meta_path(in path, false)
 }
 
 // Whether `path` (following symbolic links) is a regular file with an

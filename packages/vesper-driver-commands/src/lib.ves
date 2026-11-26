@@ -17,7 +17,9 @@ use @vesper-std/env::{var_bytes, current_exe_bytes, os, os_linux, os_macos, os_w
 use @vesper-std/process::{command_path, arg_bytes as proc_arg, spawn, wait, release};
 use @vesper-std/fs::{
     IoError, error_text, write_stdout, write_stderr, is_executable_path, canonicalize_path, arch,
-    arch_x86_64, arch_aarch64, arch_wasm32, not_found, symlink_metadata, kind_dir, kind_file
+    arch_x86_64, arch_aarch64, arch_wasm32, not_found, symlink_metadata, symlink_metadata_path,
+    kind_dir, kind_file, Opened, read_nofollow_limit, same_file, create_staged, remove_staged,
+    rename_path, process_id
 };
 use @vesper-std/fs::walk::{Entries, entry_count, entry_start, entry_end, entry_kind, list_dir_path};
 use self::graph::{run_graph};
@@ -910,17 +912,18 @@ fn spawn_failed(in binary: Slice[u8], e: IoError) -> i64 eff [Ffi[StdFs], Fail[P
 }
 
 // ---------------------------------------------------------------------------
-// `vesper fmt` (src/fmt_commands.rs, part 2 of #1336): the options, the
-// single-file and workspace runs, the directory walk, the status lines and
-// the JSON reports are here. One file's bounded read, the formatter and
-// the checked atomic replace stay `fmt_commands::format_file` (the host's
-// `hc_fmt_file`): @vesper-std/fs has no no-follow open, inode identity,
-// permission copy or `sync_all` yet.
+// `vesper fmt` (src/fmt_commands.rs, part 2 of #1336, part 3b of #1996):
+// the options, the single-file and workspace runs, the directory walk, one
+// file's bounded no-follow read, the checked atomic replace, the status
+// lines and the JSON reports are here. The formatter itself is still the
+// host's (`hc_fmt_source`: `fmt_commands::format_text`).
 
 const FMT_MAX_WALK_ENTRIES: u64 = 200000;
 const FMT_STATS: u64 = 5;
+// `MAX_BYTES`: the largest input.
+const FMT_MAX_BYTES: u64 = 262144;
 
-// `hc_fmt_file` statuses.
+// `format_one` statuses.
 fn fmt_unchanged() -> u32 {
     0
 }
@@ -937,7 +940,7 @@ fn fmt_error() -> u32 {
     3
 }
 
-// `hc_fmt_file` stats slots.
+// `format_one` stats slots.
 fn stat_changed() -> u64 {
     0
 }
@@ -1188,7 +1191,7 @@ fn file_report(
     out.push(125);
 }
 
-// The last `hc_fmt_file` error.
+// The last `hc_fmt_source` error.
 fn fmt_error_text() -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
     let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
     buf.resize(ERROR_TEXT_INITIAL_BYTES, 0);
@@ -1481,17 +1484,265 @@ fn walk_delegate() -> u32 {
     2
 }
 
-fn format_one(in path: Slice[u8], check: bool, recovery: bool, inout stats: ChunkSeq[u64])
-    -> u32 eff [Ffi[HybridCommands]] {
+// Why one file could not be formatted: `code` picks the message
+// (`fmt_message`); code `FMT_IO` carries the OS error `io`.
+copy struct FmtStop {
+    code: u32,
+    io: IoError,
+}
+
+const FMT_IO: u32 = 0;
+const FMT_NOT_FILE_NOFOLLOW: u32 = 1;
+const FMT_NOT_FILE: u32 = 2;
+const FMT_TOO_BIG: u32 = 3;
+const FMT_NOT_UTF8: u32 = 4;
+const FMT_CHANGED: u32 = 5;
+const FMT_FORMATTER: u32 = 6;
+const FMT_OK: u32 = 7;
+
+// What one file's run did: its status and stats, or why it stopped.
+copy struct FmtDone {
+    status: u32,
+    stop: FmtStop,
+    changed: bool,
+    input_bytes: u64,
+    output_bytes: u64,
+    has_edits: bool,
+    edits: u64,
+}
+
+fn fmt_stop(code: u32) -> FmtStop {
+    FmtStop { code: code, io: IoError { kind: 0, os: 0 } }
+}
+
+fn fmt_io(e: IoError) -> FmtStop {
+    FmtStop { code: FMT_IO, io: e }
+}
+
+// `fmt_commands::open_input`: the regular UTF-8 file at `path`, read
+// without following a final symbolic link, at most 256 KiB.
+fn fmt_open(in path: Slice[u8]) -> Opened eff [Ffi[StdFs], Fail[FmtStop]] {
+    let kind = handle Fail[IoError] in {
+        symlink_metadata_path(in path).kind
+    } with {
+        return v => v,
+        raise(e, _) => Fail::raise(fmt_io(e)),
+    };
+    if kind != kind_file() {
+        return Fail::raise(fmt_stop(FMT_NOT_FILE_NOFOLLOW));
+    }
+    let o = handle Fail[IoError] in {
+        read_nofollow_limit(in path, wrapping_add(FMT_MAX_BYTES, 1))
+    } with {
+        return v => v,
+        raise(e, _) => Fail::raise(fmt_io(e)),
+    };
+    if !o.id.regular {
+        return Fail::raise(fmt_stop(FMT_NOT_FILE));
+    }
+    if o.id.size > FMT_MAX_BYTES || o.bytes.len() > FMT_MAX_BYTES {
+        return Fail::raise(fmt_stop(FMT_TOO_BIG));
+    }
+    match String::from_utf8(in o.bytes.as_slice()) {
+        Option::Some(_) => {},
+        Option::None => return Fail::raise(fmt_stop(FMT_NOT_UTF8)),
+    }
+    o
+}
+
+// The output of the last successful `hc_fmt_source`.
+fn fmt_output() -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    buf.resize(ERROR_TEXT_INITIAL_BYTES, 0);
+    let mut none = false;
+    loop {
+        let n = HybridCommands::hc_fmt_output(inout buf.as_slice_mut());
+        if !grown(n, inout buf, inout none) {
+            break;
+        }
+    }
+    buf
+}
+
+// `fmt_commands::replace`'s staging path: `.vesper-fmt-<pid>-<next>` in
+// the file's parent directory (`.` when it has none), as `Path::join`
+// writes it.
+fn fmt_stage(in path: Slice[u8], next: u64) -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[StdEnv]] {
+    let windows = os() == os_windows();
+    let mut none = false;
+    let mut out = parent(in path, windows, inout none);
+    if out.len() == 0 {
+        out.push(Ascii::Dot);
+    }
+    let n = out.len();
+    let last = byte_at(in out.as_slice(), wrapping_sub(n, 1));
+    let drive_only = windows && n == 2 && byte_at(in out.as_slice(), 1) == Ascii::Colon;
+    if !is_separator(last, windows) && !drive_only {
+        if windows {
+            out.push(Ascii::Backslash);
+        } else {
+            out.push(Ascii::Slash);
+        }
+    }
+    out.extend(in ".vesper-fmt-".as_bytes());
+    push_decimal(inout out, widen_u64(process_id()));
+    out.push(Ascii::Dash);
+    push_decimal(inout out, next);
+    out
+}
+
+// `replace_at_stage` after the staged file exists: read the input again,
+// refuse a file that changed, and rename the stage over it.
+fn fmt_commit(in path: Slice[u8], in stage: Slice[u8], in input: Opened)
+    -> FmtStop eff [Ffi[StdFs]] {
+    handle Fail[FmtStop] in {
+        let current = fmt_open(in path);
+        if !same(in current.bytes.as_slice(), in input.bytes.as_slice())
+            || !same_file(current.id, input.id) {
+            return Fail::raise(fmt_stop(FMT_CHANGED));
+        }
+        handle Fail[IoError] in {
+            rename_path(in stage, in path);
+        } with {
+            return v => v,
+            raise(e, _) => Fail::raise(fmt_io(e)),
+        }
+        fmt_stop(FMT_OK)
+    } with {
+        return v => v,
+        raise(e, _) => e,
+    }
+}
+
+// `fmt_commands::replace`: stage `output` beside `path` (private, then
+// with the input's permissions, flushed), check the input is unchanged
+// and rename. A failure leaves `path` as it was and removes the stage.
+fn fmt_replace(in path: Slice[u8], in input: Opened, in output: Slice[u8], next: u64) eff [
+    Ffi[StdFs],
+    Ffi[StdEnv],
+    Fail[FmtStop]
+] {
+    let stage = fmt_stage(in path, next);
+    handle Fail[IoError] in {
+        create_staged(in stage.as_slice(), in output, input.id.perm);
+    } with {
+        return v => v,
+        raise(e, _) => Fail::raise(fmt_io(e)),
+    }
+    let done = fmt_commit(in path, in stage.as_slice(), in input);
+    if done.code != FMT_OK {
+        remove_staged(in stage.as_slice());
+        Fail::raise(done)
+    }
+}
+
+// `fmt_commands::format_file` without its JSON: read, format, and replace
+// unless checking.
+fn fmt_steps(in path: Slice[u8], check: bool, recovery: bool, next: u64)
+    -> FmtDone eff [Ffi[StdFs], Ffi[StdEnv], Ffi[HybridCommands], Fail[FmtStop]] {
+    let input = fmt_open(in path);
+    let mut stats: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    stats.resize(4, 0);
     let mut flags: u32 = 0;
-    if check {
-        flags = flags | 1;
-    }
     if recovery {
-        flags = flags | 2;
+        flags = 2;
     }
-    stats.resize(FMT_STATS, 0);
-    HybridCommands::hc_fmt_file(in path, flags, inout stats.as_slice_mut())
+    let formatted = HybridCommands::hc_fmt_source(
+        in input.bytes.as_slice(),
+        flags,
+        inout stats.as_slice_mut()
+    );
+    if formatted != 0 {
+        return Fail::raise(fmt_stop(FMT_FORMATTER));
+    }
+    let changed = span_at(in stats.as_slice(), 0) != 0;
+    let status = if check && changed {
+        fmt_needs_format()
+    } else if changed {
+        fmt_formatted()
+    } else {
+        fmt_unchanged()
+    };
+    if changed && !check {
+        let output = fmt_output();
+        fmt_replace(in path, in input, in output.as_slice(), next);
+    }
+    FmtDone {
+        status: status,
+        stop: fmt_stop(FMT_OK),
+        changed: changed,
+        input_bytes: input.bytes.len(),
+        output_bytes: span_at(in stats.as_slice(), 1),
+        has_edits: span_at(in stats.as_slice(), 2) != 0,
+        edits: span_at(in stats.as_slice(), 3),
+    }
+}
+
+// The error text of a stopped file, as `format_file`'s `Err` reads.
+fn fmt_message(inout out: ChunkSeq[u8], stop: FmtStop) eff [Ffi[StdFs], Ffi[HybridCommands]] {
+    let c = stop.code;
+    if c == FMT_IO {
+        let t = error_text(stop.io);
+        out.extend(in t.as_slice());
+    } else if c == FMT_NOT_FILE_NOFOLLOW {
+        out.extend(in "fmt requires a regular file without final symlinks".as_bytes());
+    } else if c == FMT_NOT_FILE {
+        out.extend(in "fmt requires a regular file".as_bytes());
+    } else if c == FMT_TOO_BIG {
+        out.extend(in "fmt input exceeds 256 KiB".as_bytes());
+    } else if c == FMT_NOT_UTF8 {
+        out.extend(in "fmt input must be UTF-8".as_bytes());
+    } else if c == FMT_CHANGED {
+        out.extend(in "fmt input changed during formatting; retry".as_bytes());
+    } else {
+        let t = fmt_error_text();
+        out.extend(in t.as_slice());
+    }
+}
+
+// One file: its status, with `stats` (`stat_*` slots) or the error in
+// `err`. `next` numbers the staging file.
+fn format_one(
+    in path: Slice[u8],
+    check: bool,
+    recovery: bool,
+    inout stats: ChunkSeq[u64],
+    inout err: ChunkSeq[u8],
+    next: u64
+) -> u32 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[HybridCommands]] {
+    let done = handle Fail[FmtStop] in {
+        fmt_steps(in path, check, recovery, next)
+    } with {
+        return v => v,
+        raise(e, _) => FmtDone {
+            status: fmt_error(),
+            stop: e,
+            changed: false,
+            input_bytes: 0,
+            output_bytes: 0,
+            has_edits: false,
+            edits: 0,
+        },
+    };
+    stats.truncate(0);
+    let mut changed: u64 = 0;
+    if done.changed {
+        changed = 1;
+    }
+    let mut has_edits: u64 = 0;
+    if done.has_edits {
+        has_edits = 1;
+    }
+    stats.push(changed);
+    stats.push(done.input_bytes);
+    stats.push(done.output_bytes);
+    stats.push(has_edits);
+    stats.push(done.edits);
+    err.truncate(0);
+    if done.status == fmt_error() {
+        fmt_message(inout err, done.stop);
+    }
+    done.status
 }
 
 // `{"error":...,"schema_version":1,"status":"error"}` and `vesper: <error>`.
@@ -1579,14 +1830,14 @@ fn fmt(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[HybridCommands], 
         }
     }
     let mut stats: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
     // One explicit non-directory path keeps the single-file report schema.
     if paths.ends.len() == 1 {
         let only = paths_get(in paths, 0);
         if !is_dir(in only.as_slice()) {
-            let status = format_one(in only.as_slice(), check, recovery, inout stats);
+            let status = format_one(in only.as_slice(), check, recovery, inout stats, inout err, 0);
             if status == fmt_error() {
-                let e = fmt_error_text();
-                return fmt_failed(in e.as_slice(), json);
+                return fmt_failed(in err.as_slice(), json);
             }
             let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
             if json {
@@ -1642,20 +1893,19 @@ fn fmt(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[HybridCommands], 
     for i in 0..count {
         let file = paths_get(in files, i);
         let shown = file.as_slice();
-        let status = format_one(in shown, check, recovery, inout stats);
+        let status = format_one(in shown, check, recovery, inout stats, inout err, i);
         if i != 0 {
             reports.push(44);
         }
         if status == fmt_error() {
             failed = wrapping_add(failed, 1);
-            let e = fmt_error_text();
             lines.extend(in "fmt: error ".as_bytes());
             lines.extend(in shown);
             lines.extend(in ": ".as_bytes());
-            line(inout lines, in e.as_slice());
+            line(inout lines, in err.as_slice());
             reports.push(123);
             json_key(inout reports, in "error", true);
-            json_string(inout reports, in e.as_slice());
+            json_string(inout reports, in err.as_slice());
             json_key(inout reports, in "path", false);
             json_string(inout reports, in shown);
             json_key(inout reports, in "status", false);
