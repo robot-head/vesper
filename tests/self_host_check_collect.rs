@@ -9,11 +9,12 @@
 //! key with the block's generics and `self` type), then the diagnostics.
 //! The two dumps must be equal byte for byte.
 //!
-//! Part 1 of the port declines a module that could need one of the
-//! checker's preludes (`needs_prelude` in the package); the test counts the
-//! declined modules and requires every other one to match. The corpus is
-//! every `.ves` file of the repository plus hand-written cases for each
-//! diagnostic.
+//! Every prelude the checker adds comes along (regions, `Box`, secret
+//! operations, the width builtins, transcendentals, strings, atomics and
+//! workers, `Option` methods), with its spans where the checker parses it
+//! and the region labels of signatures normalized. The corpus is every
+//! `.ves` file of the repository plus hand-written cases for each
+//! diagnostic and prelude.
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -319,6 +320,13 @@ const CASES: &[&str] = &[
     "copy struct SecU8 { x: u8 } copy struct SecU32 { y: u32 } fn f(a: SecU8, b: SecU32) -> SecU8 { a.bit_xor(a) }",
     "copy struct SecU64 { v: u64 } impl SecU64 { fn bit_and(self, o: SecU64) -> SecU64 { o } } fn f(a: SecU64) -> SecU64 { a.bit_and(a).bit_or(a) }",
     "struct SecU64 { v: u64 } fn f(a: SecU64) -> SecU64 { a.bit_and(a) }",
+    // The region prelude, its E0797 and the signature labels.
+    "fn f() -> u64 { region r { 1 } }",
+    "fn f(b: RegionBox[r, u64]) -> u64 eff [r: Region] { 1 }",
+    "fn f(b: RegionBox[r, u64], w: Watermark[q]) -> (RegionBox[r, u64], u64) eff [q: Region, r: Region] { (b, 1) }",
+    "effect Region { fn box(sink value: Unit) -> Unit; } fn f() -> u64 { region r { 1 } }",
+    "effect Region { fn x() -> Unit; } fn f() -> u64 { 1 }",
+    "struct S { b: RegionBox[r, u64] }",
 ];
 
 /// Every byte-order, bit and checked builtin, named once.
@@ -350,7 +358,7 @@ fn collect_matches_rust() {
             ));
         }
     }
-    let (mut matched, mut declined, mut skipped) = (0usize, 0usize, 0usize);
+    let (mut matched, mut skipped) = (0usize, 0usize);
     let mut differ = vec![];
     for (name, source) in &sources {
         let parsed = vesper::parser::parse(source);
@@ -359,10 +367,6 @@ fn collect_matches_rust() {
             continue;
         }
         let v = vesper_text(source);
-        if v == "declined\n" {
-            declined += 1;
-            continue;
-        }
         let r = rust_text(&parsed.module);
         if r == v {
             matched += 1;
@@ -375,7 +379,7 @@ fn collect_matches_rust() {
         eprintln!("  {d}");
     }
     eprintln!(
-        "collect: {} sources, {matched} match, {declined} declined (prelude), {skipped} skipped (parse errors), {} differ",
+        "collect: {} sources, {matched} match, {skipped} skipped (parse errors), {} differ",
         sources.len(),
         differ.len()
     );
