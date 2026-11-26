@@ -167,14 +167,12 @@ pub fn build_policies_bin(
                     rt_called.push(callee);
                 }
             }
-            rt_funs.push(
-                RtFunRow {
-                    name: func.name,
-                    start: func.start,
-                    end: func.end,
-                    row: func.row,
-                }
-            );
+            rt_funs.push(RtFunRow {
+                name: func.name,
+                start: func.start,
+                end: func.end,
+                row: func.row,
+            });
         }
 
         if (caps & CD) != 0 {

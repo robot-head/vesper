@@ -418,17 +418,15 @@ fn rd_param(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) -> u32 {
     let start = rd(in w, inout r);
     let end = rd(in w, inout r);
     let id = wrapping_u32(p.params.len());
-    p.params.push(
-        ParamRow {
-            name: name,
-            pass: pass,
-            projections: projections,
-            ty: ty,
-            start: start,
-            end: end,
-            fields: 0
-        }
-    );
+    p.params.push(ParamRow {
+        name: name,
+        pass: pass,
+        projections: projections,
+        ty: ty,
+        start: start,
+        end: end,
+        fields: 0
+    });
     id
 }
 
@@ -503,22 +501,20 @@ fn rd_function(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) {
         fs.push(id);
     }
     let facts = list_new(inout p, in fs);
-    p.fns.push(
-        FnFacts {
-            name: name,
-            owned: owned,
-            body: body,
-            start: start,
-            end: end,
-            generics: generics,
-            params: params,
-            result: result,
-            effects: effects,
-            act_first: act_first,
-            act_len: wrapping_u32(na),
-            facts: facts
-        }
-    );
+    p.fns.push(FnFacts {
+        name: name,
+        owned: owned,
+        body: body,
+        start: start,
+        end: end,
+        generics: generics,
+        params: params,
+        result: result,
+        effects: effects,
+        act_first: act_first,
+        act_len: wrapping_u32(na),
+        facts: facts
+    });
 }
 
 fn decode(in w: Slice[u64], in blob: Str) -> Prog {
@@ -1624,13 +1620,11 @@ pub fn apply_edits(
     let mut keys = ChunkSeq::with_capacity[EditKey](n);
     for i in 0..n {
         let b = inc(wrapping_mul(i, Edit::Words));
-        keys.push(
-            EditKey {
-                start: word(in edits, b),
-                end: word(in edits, wrapping_add(b, Edit::End)),
-                index: i
-            }
-        );
+        keys.push(EditKey {
+            start: word(in edits, b),
+            end: word(in edits, wrapping_add(b, Edit::End)),
+            index: i
+        });
     }
     sort(inout keys.as_slice_mut());
     let mut end: u64 = 0;

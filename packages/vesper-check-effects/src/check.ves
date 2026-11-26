@@ -32,16 +32,14 @@ fn begin(inout walk: Walk, in code: Str) -> u64 {
 fn finish(inout walk: Walk, code_start: u64, in help: Str, start: u64, end: u64) {
     let help_start = walk.text.len();
     put(inout walk, help);
-    walk.rows.push(
-        DRow {
-            start: start,
-            end: end,
-            code_start: code_start,
-            message_start: add(code_start, 5),
-            help_start: help_start,
-            help_end: walk.text.len()
-        }
-    );
+    walk.rows.push(DRow {
+        start: start,
+        end: end,
+        code_start: code_start,
+        message_start: add(code_start, 5),
+        help_start: help_start,
+        help_end: walk.text.len()
+    });
 }
 
 // `summarise`: the facts to a fixpoint; left in `walk.summaries`.

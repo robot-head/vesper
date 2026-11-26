@@ -285,9 +285,10 @@ pub fn signature_half(
     }
     // Six eight-byte words, last first, each stored byte-swapped.
     for k in 0..P384_WORDS {
-        let v = match b.try_read_u64_le(
-            wrapping_add(at, wrapping_sub(P384_LAST_WORD, wrapping_mul(k, WORD_BYTES)))
-        ) {
+        let v = match b.try_read_u64_le(wrapping_add(
+            at,
+            wrapping_sub(P384_LAST_WORD, wrapping_mul(k, WORD_BYTES))
+        )) {
             Option::Some(x) => x,
             Option::None => 0,
         };

@@ -27,20 +27,18 @@ fn ring_make(size: u32, start: u32, desc: bool) -> Result[SpscRing, RingError] {
         l.resize(n, 0);
         o.resize(n, 0);
     }
-    Result::Ok(
-        SpscRing {
-            a: filled(n, 0),
-            l: l,
-            o: o,
-            mask: wrapping_sub(size, 1),
-            producer: start,
-            consumer: start,
-            prod_cached_prod: start,
-            prod_cached_cons: wrapping_add(start, size),
-            cons_cached_prod: start,
-            cons_cached_cons: start
-        }
-    )
+    Result::Ok(SpscRing {
+        a: filled(n, 0),
+        l: l,
+        o: o,
+        mask: wrapping_sub(size, 1),
+        producer: start,
+        consumer: start,
+        prod_cached_prod: start,
+        prod_cached_cons: wrapping_add(start, size),
+        cons_cached_prod: start,
+        cons_cached_cons: start
+    })
 }
 
 impl SpscRing {
@@ -124,9 +122,10 @@ impl SpscRing {
     fn unreserve(inout self, n: u32) -> Option[RingError] {
         let outstanding = self.reserved();
         if n > outstanding {
-            return Option::Some(
-                RingError::CountExceedsWindow { requested: n, outstanding: outstanding }
-            );
+            return Option::Some(RingError::CountExceedsWindow {
+                requested: n,
+                outstanding: outstanding
+            });
         }
         self.prod_cached_prod = wrapping_sub(self.prod_cached_prod, n);
         Option::None
@@ -135,9 +134,10 @@ impl SpscRing {
     fn submit(inout self, n: u32) -> Option[RingError] {
         let outstanding = self.reserved();
         if n > outstanding {
-            return Option::Some(
-                RingError::CountExceedsWindow { requested: n, outstanding: outstanding }
-            );
+            return Option::Some(RingError::CountExceedsWindow {
+                requested: n,
+                outstanding: outstanding
+            });
         }
         self.producer = wrapping_add(self.producer, n);
         Option::None
@@ -166,9 +166,10 @@ impl SpscRing {
     fn unpeek(inout self, n: u32) -> Option[RingError] {
         let outstanding = self.peeked();
         if n > outstanding {
-            return Option::Some(
-                RingError::CountExceedsWindow { requested: n, outstanding: outstanding }
-            );
+            return Option::Some(RingError::CountExceedsWindow {
+                requested: n,
+                outstanding: outstanding
+            });
         }
         self.cons_cached_cons = wrapping_sub(self.cons_cached_cons, n);
         Option::None
@@ -177,9 +178,10 @@ impl SpscRing {
     fn release(inout self, n: u32) -> Option[RingError] {
         let outstanding = self.peeked();
         if n > outstanding {
-            return Option::Some(
-                RingError::CountExceedsWindow { requested: n, outstanding: outstanding }
-            );
+            return Option::Some(RingError::CountExceedsWindow {
+                requested: n,
+                outstanding: outstanding
+            });
         }
         self.consumer = wrapping_add(self.consumer, n);
         Option::None

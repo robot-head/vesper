@@ -115,12 +115,10 @@ pub fn tnt_from_bools(in taken: Slice[bool]) -> Option[Tnt] {
         bits = (bits << 1) | (if t { 1 } else { 0 });
         i = wrapping_add(i, 1);
     }
-    Option::Some(
-        Tnt {
-            bits: bits,
-            count: wrapping_u8(taken.len()),
-        }
-    )
+    Option::Some(Tnt {
+        bits: bits,
+        count: wrapping_u8(taken.len()),
+    })
 }
 
 pub enum PtPacket {
@@ -246,13 +244,11 @@ fn need_bytes(in bytes: Slice[u8], offset: u64, needed: u64) -> Result[u64, PtEr
         0
     };
     if available < needed {
-        Result::Err(
-            PtError::PtTruncated {
-                offset: offset,
-                needed: needed,
-                available: available,
-            }
-        )
+        Result::Err(PtError::PtTruncated {
+            offset: offset,
+            needed: needed,
+            available: available,
+        })
     } else {
         Result::Ok(needed)
     }
@@ -327,13 +323,11 @@ fn decode_cyc(in bytes: Slice[u8], offset: u64) -> Result[PtPacketAt, PtError] {
         len = wrapping_add(len, 1);
         more = (b & 1) == 1;
     }
-    Result::Ok(
-        PtPacketAt {
-            offset: offset,
-            len: len,
-            packet: PtPacket::Cyc { cycles: cycles },
-        }
-    )
+    Result::Ok(PtPacketAt {
+        offset: offset,
+        len: len,
+        packet: PtPacket::Cyc { cycles: cycles },
+    })
 }
 
 fn decode_extended(
@@ -355,13 +349,11 @@ fn decode_extended(
             return Result::Err(PtError::MalformedPsb { offset: offset });
         }
         st.last_ip = 0;
-        return Result::Ok(
-            PtPacketAt {
-                offset: offset,
-                len: 16,
-                packet: PtPacket::Psb,
-            }
-        );
+        return Result::Ok(PtPacketAt {
+            offset: offset,
+            len: 16,
+            packet: PtPacket::Psb,
+        });
     }
     if op == 0x23 {
         return Result::Ok(PtPacketAt { offset: offset, len: 2, packet: PtPacket::PsbEnd });
@@ -389,13 +381,11 @@ fn decode_extended(
             bits: payload & wrapping_sub(shl(1, widen_u64(stop)), 1),
             count: stop,
         };
-        return Result::Ok(
-            PtPacketAt {
-                offset: offset,
-                len: 8,
-                packet: PtPacket::Tnt { tnt: tnt, long: true },
-            }
-        );
+        return Result::Ok(PtPacketAt {
+            offset: offset,
+            len: 8,
+            packet: PtPacket::Tnt { tnt: tnt, long: true },
+        });
     }
     if op == 0x43 {
         match need_bytes(in bytes, offset, 8) {
@@ -403,16 +393,14 @@ fn decode_extended(
             Result::Err(e) => return Result::Err(e),
         }
         let payload = read_le(in bytes, wrapping_add(offset, 2), 6);
-        return Result::Ok(
-            PtPacketAt {
-                offset: offset,
-                len: 8,
-                packet: PtPacket::Pip {
-                    cr3: (payload & bit_not_u64(1)) << 4,
-                    non_root: (payload & 1) == 1,
-                },
-            }
-        );
+        return Result::Ok(PtPacketAt {
+            offset: offset,
+            len: 8,
+            packet: PtPacket::Pip {
+                cr3: (payload & bit_not_u64(1)) << 4,
+                non_root: (payload & 1) == 1,
+            },
+        });
     }
     if op == 0x03 {
         match need_bytes(in bytes, offset, 4) {
@@ -422,13 +410,11 @@ fn decode_extended(
         if byte_at(in bytes, wrapping_add(offset, 3)) != 0 {
             return Result::Err(PtError::ReservedBits { offset: offset });
         }
-        return Result::Ok(
-            PtPacketAt {
-                offset: offset,
-                len: 4,
-                packet: PtPacket::Cbr { ratio: byte_at(in bytes, wrapping_add(offset, 2)) },
-            }
-        );
+        return Result::Ok(PtPacketAt {
+            offset: offset,
+            len: 4,
+            packet: PtPacket::Cbr { ratio: byte_at(in bytes, wrapping_add(offset, 2)) },
+        });
     }
     if op == 0x73 {
         match need_bytes(in bytes, offset, 7) {
@@ -445,13 +431,11 @@ fn decode_extended(
         }
         let ctc = wrapping_u16(widen_u64(b2) | (widen_u64(b3) << 8));
         let fc = wrapping_u16(widen_u64(b5) | (widen_u64(b6 & 1) << 8));
-        return Result::Ok(
-            PtPacketAt {
-                offset: offset,
-                len: 7,
-                packet: PtPacket::Tma { ctc: ctc, fast_counter: fc },
-            }
-        );
+        return Result::Ok(PtPacketAt {
+            offset: offset,
+            len: 7,
+            packet: PtPacket::Tma { ctc: ctc, fast_counter: fc },
+        });
     }
     Result::Err(PtError::UnknownExtended { offset: offset, opcode: op })
 }
@@ -478,13 +462,11 @@ fn decode_one(inout st: PtState, in bytes: Slice[u8]) -> Result[PtPacketAt, PtEr
             bits: widen_u64(payload) & wrapping_sub(shl(1, widen_u64(stop)), 1),
             count: stop,
         };
-        return Result::Ok(
-            PtPacketAt {
-                offset: offset,
-                len: 1,
-                packet: PtPacket::Tnt { tnt: tnt, long: false },
-            }
-        );
+        return Result::Ok(PtPacketAt {
+            offset: offset,
+            len: 1,
+            packet: PtPacket::Tnt { tnt: tnt, long: false },
+        });
     }
     if (b0 & 0x03) == 0x03 {
         return decode_cyc(in bytes, offset);
@@ -494,26 +476,22 @@ fn decode_one(inout st: PtState, in bytes: Slice[u8]) -> Result[PtPacketAt, PtEr
             Result::Ok(_) => {}
             Result::Err(e) => return Result::Err(e),
         }
-        return Result::Ok(
-            PtPacketAt {
-                offset: offset,
-                len: 8,
-                packet: PtPacket::Tsc { tsc: read_le(in bytes, wrapping_add(offset, 1), 7) },
-            }
-        );
+        return Result::Ok(PtPacketAt {
+            offset: offset,
+            len: 8,
+            packet: PtPacket::Tsc { tsc: read_le(in bytes, wrapping_add(offset, 1), 7) },
+        });
     }
     if b0 == 0x59 {
         match need_bytes(in bytes, offset, 2) {
             Result::Ok(_) => {}
             Result::Err(e) => return Result::Err(e),
         }
-        return Result::Ok(
-            PtPacketAt {
-                offset: offset,
-                len: 2,
-                packet: PtPacket::Mtc { ctc: byte_at(in bytes, wrapping_add(offset, 1)) },
-            }
-        );
+        return Result::Ok(PtPacketAt {
+            offset: offset,
+            len: 2,
+            packet: PtPacket::Mtc { ctc: byte_at(in bytes, wrapping_add(offset, 1)) },
+        });
     }
     if b0 == 0x99 {
         match need_bytes(in bytes, offset, 2) {
@@ -526,31 +504,27 @@ fn decode_one(inout st: PtState, in bytes: Slice[u8]) -> Result[PtPacketAt, PtEr
             if (m & 0x1c) != 0 {
                 return Result::Err(PtError::ReservedBits { offset: offset });
             }
-            return Result::Ok(
-                PtPacketAt {
-                    offset: offset,
-                    len: 2,
-                    packet: PtPacket::ModeExec {
-                        cs_l: (m & 1) == 1,
-                        cs_d: (m & 2) == 2,
-                    },
-                }
-            );
+            return Result::Ok(PtPacketAt {
+                offset: offset,
+                len: 2,
+                packet: PtPacket::ModeExec {
+                    cs_l: (m & 1) == 1,
+                    cs_d: (m & 2) == 2,
+                },
+            });
         }
         if leaf == 1 {
             if (m & 0x1c) != 0 {
                 return Result::Err(PtError::ReservedBits { offset: offset });
             }
-            return Result::Ok(
-                PtPacketAt {
-                    offset: offset,
-                    len: 2,
-                    packet: PtPacket::ModeTsx {
-                        in_tx: (m & 1) == 1,
-                        tx_abort: (m & 2) == 2,
-                    },
-                }
-            );
+            return Result::Ok(PtPacketAt {
+                offset: offset,
+                len: 2,
+                packet: PtPacket::ModeTsx {
+                    in_tx: (m & 1) == 1,
+                    tx_abort: (m & 2) == 2,
+                },
+            });
         }
         return Result::Err(PtError::ReservedMode { offset: offset, leaf: leaf });
     }
@@ -569,9 +543,10 @@ fn decode_one(inout st: PtState, in bytes: Slice[u8]) -> Result[PtPacketAt, PtEr
     let ip_b = b0 >> 5;
     let compression = match from_ip_bytes(ip_b) {
         Option::Some(c) => c,
-        Option::None => return Result::Err(
-            PtError::ReservedIpBytes { offset: offset, ip_bytes: ip_b }
-        ),
+        Option::None => return Result::Err(PtError::ReservedIpBytes {
+            offset: offset,
+            ip_bytes: ip_b
+        }),
     };
     let n = ip_payload_len(compression);
     match need_bytes(in bytes, offset, wrapping_add(1, n)) {
@@ -585,17 +560,15 @@ fn decode_one(inout st: PtState, in bytes: Slice[u8]) -> Result[PtPacketAt, PtEr
         }
         Option::None => {}
     }
-    Result::Ok(
-        PtPacketAt {
-            offset: offset,
-            len: wrapping_add(1, n),
-            packet: PtPacket::Ip {
-                kind: kind,
-                compression: compression,
-                ip: ip,
-            },
-        }
-    )
+    Result::Ok(PtPacketAt {
+        offset: offset,
+        len: wrapping_add(1, n),
+        packet: PtPacket::Ip {
+            kind: kind,
+            compression: compression,
+            ip: ip,
+        },
+    })
 }
 
 fn is_pad_or_psb(in p: PtPacket) -> u8 {

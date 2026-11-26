@@ -221,16 +221,14 @@ pub fn m_imsic_push(inout f: Imsic, ids: u64, external: bool) eff [Fail[AiaFault
         f.eip.push(0);
         f.eie.push(0);
     }
-    f.hdr.push(
-        ImsicHdr {
-            ids: ids,
-            delivery: if external { Eidelivery::External } else { 0 },
-            external: external,
-            threshold: 0,
-            off: off,
-            words: words
-        }
-    );
+    f.hdr.push(ImsicHdr {
+        ids: ids,
+        delivery: if external { Eidelivery::External } else { 0 },
+        external: external,
+        threshold: 0,
+        off: off,
+        words: words
+    });
 }
 
 pub fn m_imsic_make(ids: u64, external: bool) -> Imsic eff [Fail[AiaFault]] {
@@ -577,23 +575,21 @@ pub fn m_aplic_push(
         a.idc_force.push(false);
         a.idc_threshold.push(0);
     }
-    a.hdr.push(
-        AplicHdr {
-            base: base,
-            sources: sources,
-            supervisor: supervisor,
-            root: root,
-            msi_capable: msi_capable,
-            direct_capable: idcs > 0,
-            children: children,
-            ie: false,
-            dm: msi_capable && idcs == 0,
-            msicfg: zero_cfg(),
-            src_off: src_off,
-            idc_off: idc_off,
-            idcs: idcs
-        }
-    );
+    a.hdr.push(AplicHdr {
+        base: base,
+        sources: sources,
+        supervisor: supervisor,
+        root: root,
+        msi_capable: msi_capable,
+        direct_capable: idcs > 0,
+        children: children,
+        ie: false,
+        dm: msi_capable && idcs == 0,
+        msicfg: zero_cfg(),
+        src_off: src_off,
+        idc_off: idc_off,
+        idcs: idcs
+    });
 }
 
 pub fn m_aplic_make(

@@ -13,20 +13,18 @@ fn parse_digest() -> i64 eff [Fail[Diag], Fail[ArithOverflow]] {
     // The seed rejects over-budget token streams before parsing; the lexer
     // phase enforces the same budget and its lexical errors come first.
     let lexed = lex_digest();
-    let p = items(
-        open(
-            P {
-                pos: 0,
-                cur: next_sig(0),
-                h: offset_basis(),
-                nostruct: false,
-                rows: false,
-                bounds: false,
-                depth: 0
-            },
-            200
-        )
-    );
+    let p = items(open(
+        P {
+            pos: 0,
+            cur: next_sig(0),
+            h: offset_basis(),
+            nostruct: false,
+            rows: false,
+            bounds: false,
+            depth: 0
+        },
+        200
+    ));
     // The module node ends after the trailing trivia.
     digest(mix(mix(p.h, 3000), source_len()))
 }
