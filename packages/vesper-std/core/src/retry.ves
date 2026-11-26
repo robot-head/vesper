@@ -4,7 +4,41 @@
 // Bind that error inside backoff so linear payloads must be consumed there.
 // The last Result is returned unchanged. To wait on a clock, call the
 // clock operation in backoff: its effect remains visible to the caller.
+// An optional when clause runs only while a retry is available. A false
+// condition returns that same error without running backoff. The when and
+// backoff blocks share the error binding; a linear error must still be live
+// if the condition can reject it.
 pub sugar retry: tag {
+    rule (
+        retry{
+            $limit:expr retries;
+            attempt $attempt:block when($error:ident) $eligible:block backoff $pause:block
+        }
+    ) => {
+        {
+            let mut retries_left: u64 = $limit;
+            loop {
+                match $attempt {
+                    Result::Ok(value) => {
+                        break Result::Ok(value);
+                    },
+                    Result::Err(failure) => {
+                        if retries_left == 0 {
+                            break Result::Err(failure);
+                        }
+                        let $error = failure;
+                        let retryable: bool = $eligible;
+                        if !retryable {
+                            break Result::Err($error);
+                        }
+                        retries_left = wrapping_sub(retries_left, 1);
+                        let paused: () = $pause;
+                    },
+                }
+            }
+        }
+    }
+
     rule (
         retry{
             $limit:expr retries;
@@ -96,6 +130,43 @@ test {
             && limit_evaluations == 1
             && attempts == expected_attempts
             && wait_sum == expected_wait_sum
+            && rejects_without_backoff(1, 4, 1, 1, 0)
+            && rejects_without_backoff(1, 0, 1, 0, 0)
+            && rejects_without_backoff(3, 4, 3, 3, 3)
+            && rejects_without_backoff(0, 2, 3, 2, 3)
+    }
+
+    fn rejects_without_backoff(
+        stop_on: u64,
+        limit: u64,
+        expected: u64,
+        wanted_checks: u64,
+        wanted_pauses: u64
+    ) -> bool {
+        let mut attempts: u64 = 0;
+        let mut checks: u64 = 0;
+        let mut pauses: u64 = 0;
+        let result: Result[u64, Rejected] = retry{
+            limit retries;
+            attempt {
+                attempts = wrapping_add(attempts, 1);
+                Result::Err(reject(attempts))
+            }
+            when(err) {
+                checks = wrapping_add(checks, 1);
+                err.attempt != stop_on
+            }
+            backoff {
+                pauses = wrapping_add(pauses, consume(sink err));
+            }
+        };
+        match result {
+            Result::Ok(_) => false,
+            Result::Err(err) => consume(sink err) == expected
+                && attempts == expected
+                && checks == wanted_checks
+                && pauses == wanted_pauses,
+        }
     }
 
     fn test_backoff_passes_through_clock() -> bool {
