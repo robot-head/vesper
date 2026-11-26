@@ -21,6 +21,13 @@ use std::{
 };
 
 const PACKAGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/packages/vesper-proof-audit");
+
+/// The repository root as an absolute path: under Bazel `CARGO_MANIFEST_DIR`
+/// is `.`, and the driver package written to a temporary directory needs
+/// dependency paths that do not depend on its own location.
+fn repo() -> PathBuf {
+    fs::canonicalize(env!("CARGO_MANIFEST_DIR")).unwrap()
+}
 const AUDITOR_LEAN: &str = include_str!("../tools/proof-audit/Audit.lean");
 const MIXED: &str = include_str!("fixtures/source_macros/provenance_mixed.ves");
 
@@ -128,7 +135,7 @@ pub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3]]
 fn build_port(dir: &Path) -> PathBuf {
     let package = dir.join("driver");
     fs::create_dir_all(package.join("src")).unwrap();
-    let std = Path::new(env!("CARGO_MANIFEST_DIR")).join("packages/vesper-std");
+    let std = repo().join("packages/vesper-std");
     fs::write(
         package.join("Loom.toml"),
         format!(
@@ -137,7 +144,7 @@ fn build_port(dir: &Path) -> PathBuf {
              \"@vesper/proof-audit\" = {{ version = \"^0.1\", path = {} }}\n\
              \"@vesper-std/env\" = {{ version = \"^0.1\", path = {} }}\n\
              \"@vesper-std/fs\" = {{ version = \"^0.1\", path = {} }}\n",
-            serde_json::to_string(PACKAGE).unwrap(),
+            serde_json::to_string(repo().join("packages/vesper-proof-audit").to_str().unwrap()).unwrap(),
             serde_json::to_string(std.join("env").to_str().unwrap()).unwrap(),
             serde_json::to_string(std.join("fs").to_str().unwrap()).unwrap(),
         ),
