@@ -5,10 +5,7 @@
 use @vesper-std/fs::IoError;
 use @vesper-std/process::ExitStatus;
 use @vesper-std/env::os;
-use self::strs::{
-    byte,
-    put_str
-};
+use self::strs::{byte, put_str};
 use self::json::put_u64;
 
 fn os_linux() -> bool {

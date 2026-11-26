@@ -1,10 +1,7 @@
 // `ProvenanceTable::verify` (src/forge_frontend/provenance.rs, with no
 // sources) and `macro_provenance_gate` (src/proof_commands.rs): the macro
 // provenance admission rule of `vesper proof-audit --macro-provenance`.
-use @vesper-std/hash::blake3::{
-    Digest,
-    digest_bytes
-};
+use @vesper-std/hash::blake3::{Digest, digest_bytes};
 use @vesper-std/hash-sys::hash;
 use self::json::{
     Json,
@@ -20,19 +17,7 @@ use self::json::{
     string
 };
 use self::reader::Table;
-use self::strs::{
-    Strs,
-    byte,
-    count,
-    end,
-    push,
-    put_str,
-    same,
-    same_str,
-    set_of,
-    start,
-    strs_new
-};
+use self::strs::{Strs, byte, count, end, push, put_str, same, same_str, set_of, start, strs_new};
 
 pub const SCHEMA: Str = "vesper.forge.provenance/1";
 pub const MARKER_SUFFIX: Str = "$macro_provenance";

@@ -1,7 +1,4 @@
-use @accept/kinds::{
-    Kind,
-    rank
-};
+use @accept/kinds::{Kind, rank};
 use self::text::size;
 
 fn main() -> i64 {

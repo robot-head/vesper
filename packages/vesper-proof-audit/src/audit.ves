@@ -18,20 +18,8 @@ use @vesper-std/fs::{
     remove_dir_all,
     write_path
 };
-use @vesper-std/fs::walk::{
-    Entries,
-    entry_count,
-    entry_end,
-    entry_kind,
-    entry_start,
-    list_dir_path
-};
-use @vesper-std/env::{
-    os,
-    os_windows,
-    var,
-    var_bytes
-};
+use @vesper-std/fs::walk::{Entries, entry_count, entry_end, entry_kind, entry_start, list_dir_path};
+use @vesper-std/env::{os, os_windows, var, var_bytes};
 use @vesper-std/process::{
     ExitStatus,
     ProcChild,
@@ -72,22 +60,8 @@ use self::json::{
     put_u64,
     string
 };
-use self::provenance::{
-    Gate,
-    Theorems,
-    blake3_hex,
-    gate,
-    gate_json,
-    verify
-};
-use self::reader::{
-    Raw,
-    Rd,
-    Table,
-    raw_audit,
-    rd_parse,
-    table
-};
+use self::provenance::{Gate, Theorems, blake3_hex, gate, gate_json, verify};
+use self::reader::{Raw, Rd, Table, raw_audit, rd_parse, table};
 use self::strs::{
     Strs,
     byte,

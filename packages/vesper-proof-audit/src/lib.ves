@@ -5,34 +5,9 @@
 // the pinned Lean 4.35.0 and checks theorem axioms against an explicit
 // policy; see src/audit.ves.
 use @vesper-std/process::id;
-use self::audit::{
-    Au,
-    Options,
-    Report,
-    audit,
-    forbidden_axiom
-};
-use self::json::{
-    Json,
-    begin_object,
-    end_object,
-    field_string,
-    field_u64,
-    json_new,
-    key
-};
-use self::strs::{
-    Strs,
-    byte,
-    count,
-    end,
-    push,
-    put_str,
-    same_str,
-    set_of,
-    start,
-    strs_new
-};
+use self::audit::{Au, Options, Report, audit, forbidden_axiom};
+use self::json::{Json, begin_object, end_object, field_string, field_u64, json_new, key};
+use self::strs::{Strs, byte, count, end, push, put_str, same_str, set_of, start, strs_new};
 
 pub const HELP: Str = "Usage: vesper proof-audit <Module> --root <artifact-directory> --theorem <Qualified.name> [--theorem ...] [--allow-axiom <Name>] [--lean <path>] [--timeout <seconds>] [--macro-provenance <manifest.json>] [--json]\n\nReplay existing local Lean 4.35.0 artifacts through the kernel and audit named theorems.\nArtifact imports disable package environment extensions and plugins.\nThe selected Lean toolchain and artifact parser remain trusted; this is not an OS sandbox, provenance certificate or reusable proof-cache approval.\nThe default axiom policy is empty; sorryAx, compiler-trust axioms, and generated _native axioms are always forbidden.\nA theorem that depends on macro-expanded definitions (those with `$macro_provenance` markers, see `vesper forge lean`) is rejected unless --macro-provenance names the matching provenance manifest.\n";
 
