@@ -19,8 +19,8 @@ build = "build.rs"
 # with the Rust build (docs/parallel-results/port-p3-ebpf.md).
 
 [features]
-# btf, btf_ext, callgraph, core, helpers, insn, interp, program, scalar and
-# verifier are unconditionally Vesper; wire stays behind `vesper-port` until
+# btf, btf_ext, callgraph, core, helpers, insn, interp, program, scalar,
+# verifier and the mitigator's reference model are unconditionally Vesper; wire stays behind `vesper-port` until
 # its ABBA workload `wire` (2.43x since the bulk-bytes interface of #2183)
 # clears 1.50x.
 vesper-port = []
