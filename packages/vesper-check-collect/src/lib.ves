@@ -49,50 +49,44 @@ fn item_node(in a: Ast, i: u32) -> ItemNode {
 }
 
 fn adt_node(in a: Ast, i: u32) -> AdtNode {
-    a
-        .adts
-        .get_or(
-            idx_from_raw[AdtNode](i),
-            AdtNode {
-                name: none(),
-                mode: 0,
-                generics: 0,
-                variants: 0,
-                is_enum: false,
-                tiled: false,
-                tile_width: 0,
-                start: 0,
-                end: 0
-            }
-        )
+    a.adts.get_or(
+        idx_from_raw[AdtNode](i),
+        AdtNode {
+            name: none(),
+            mode: 0,
+            generics: 0,
+            variants: 0,
+            is_enum: false,
+            tiled: false,
+            tile_width: 0,
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 fn fn_node(in a: Ast, i: u32) -> FnNode {
-    a
-        .fns
-        .get_or(
-            idx_from_raw[FnNode](i),
-            FnNode {
-                name: none(),
-                fip: false,
-                generics: 0,
-                params: 0,
-                result: none(),
-                effects: none(),
-                body: none(),
-                start: 0,
-                end: 0
-            }
-        )
+    a.fns.get_or(
+        idx_from_raw[FnNode](i),
+        FnNode {
+            name: none(),
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: none(),
+            effects: none(),
+            body: none(),
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 fn effect_decl_node(in a: Ast, i: u32) -> EffectDeclNode {
-    a
-        .effect_decls
-        .get_or(
-            idx_from_raw[EffectDeclNode](i),
-            EffectDeclNode { name: none(), linear: false, generics: 0, ops: 0, start: 0, end: 0 }
-        )
+    a.effect_decls.get_or(
+        idx_from_raw[EffectDeclNode](i),
+        EffectDeclNode { name: none(), linear: false, generics: 0, ops: 0, start: 0, end: 0 }
+    )
 }
 
 fn impl_node(in a: Ast, i: u32) -> ImplNode {
@@ -100,33 +94,29 @@ fn impl_node(in a: Ast, i: u32) -> ImplNode {
 }
 
 fn param_node(in a: Ast, i: u32) -> ParamNode {
-    a
-        .params
-        .get_or(
-            idx_from_raw[ParamNode](i),
-            ParamNode { name: none(), pass: 0, projections: 0, ty: none(), start: 0, end: 0 }
-        )
+    a.params.get_or(
+        idx_from_raw[ParamNode](i),
+        ParamNode { name: none(), pass: 0, projections: 0, ty: none(), start: 0, end: 0 }
+    )
 }
 
 fn generic_node(in a: Ast, i: u32) -> GenericNode {
-    a
-        .generics
+    a.generics
         .get_or(idx_from_raw[GenericNode](i), GenericNode { name: none(), bound: 0, row: false })
 }
 
 fn variant_node(in a: Ast, i: u32) -> VariantNode {
-    a
-        .variants
-        .get_or(idx_from_raw[VariantNode](i), VariantNode { name: none(), fields: 0, named: false })
+    a.variants.get_or(
+        idx_from_raw[VariantNode](i),
+        VariantNode { name: none(), fields: 0, named: false }
+    )
 }
 
 fn field_node(in a: Ast, i: u32) -> FieldNode {
-    a
-        .fields
-        .get_or(
-            idx_from_raw[FieldNode](i),
-            FieldNode { name: none(), ty: none(), modality: 3, temperature: 0 }
-        )
+    a.fields.get_or(
+        idx_from_raw[FieldNode](i),
+        FieldNode { name: none(), ty: none(), modality: 3, temperature: 0 }
+    )
 }
 
 fn effects_node(in a: Ast, i: u32) -> EffectsNode {
@@ -134,8 +124,7 @@ fn effects_node(in a: Ast, i: u32) -> EffectsNode {
 }
 
 fn effect_node(in a: Ast, i: u32) -> EffectNode {
-    a
-        .effect_nodes
+    a.effect_nodes
         .get_or(idx_from_raw[EffectNode](i), EffectNode { label: none(), name: none(), args: 0 })
 }
 

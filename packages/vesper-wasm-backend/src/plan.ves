@@ -1050,20 +1050,19 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
     for i in 0..l.len() {
         qlabels.push(u32_at(in l, i));
     }
-    queue
-        .push(
-            Queued {
-                key: entry,
-                base: entry,
-                v0: 0,
-                vn: 0,
-                role: R_ORDINARY,
-                handler: 0,
-                op: 0,
-                l0: l0,
-                ln: l.len()
-            }
-        );
+    queue.push(
+        Queued {
+            key: entry,
+            base: entry,
+            v0: 0,
+            vn: 0,
+            role: R_ORDINARY,
+            handler: 0,
+            op: 0,
+            l0: l0,
+            ln: l.len()
+        }
+    );
     let mut seen = ChunkSeq::new[u32]();
     p_insts.reserve(8192);
     p_vkeys.reserve(32768);
@@ -1182,20 +1181,19 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                         qlabels.push(u32_at(in ls, k));
                     }
                     let s_q = stage2_heap_swap(perm);
-                    queue
-                        .push(
-                            Queued {
-                                key: key,
-                                base: callee,
-                                v0: qv0,
-                                vn: cv.len(),
-                                role: R_ORDINARY,
-                                handler: 0,
-                                op: 0,
-                                l0: ql0,
-                                ln: ls.len()
-                            }
-                        );
+                    queue.push(
+                        Queued {
+                            key: key,
+                            base: callee,
+                            v0: qv0,
+                            vn: cv.len(),
+                            role: R_ORDINARY,
+                            handler: 0,
+                            op: 0,
+                            l0: ql0,
+                            ln: ls.len()
+                        }
+                    );
                     perm = stage2_heap_swap(s_q);
                 } else if ins.op == Op::Closure {
                     let (pool, aa, an) = closure_operands(in cx, ins.a);
@@ -1220,20 +1218,19 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                         qlabels.push(u32_at(in qlabels, add(q.l0, k)));
                     }
                     let s_q = stage2_heap_swap(perm);
-                    queue
-                        .push(
-                            Queued {
-                                key: key,
-                                base: fact.fn_,
-                                v0: qv0,
-                                vn: vars.len(),
-                                role: R_ORDINARY,
-                                handler: 0,
-                                op: 0,
-                                l0: ql0,
-                                ln: q.ln
-                            }
-                        );
+                    queue.push(
+                        Queued {
+                            key: key,
+                            base: fact.fn_,
+                            v0: qv0,
+                            vn: vars.len(),
+                            role: R_ORDINARY,
+                            handler: 0,
+                            op: 0,
+                            l0: ql0,
+                            ln: q.ln
+                        }
+                    );
                     perm = stage2_heap_swap(s_q);
                 } else if ins.op == Op::Read {
                     let root = n32(cx.ir.word(ins.a));
@@ -1246,20 +1243,19 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                             qlabels.push(u32_at(in ls, k));
                         }
                         let s_q = stage2_heap_swap(perm);
-                        queue
-                            .push(
-                                Queued {
-                                    key: root,
-                                    base: root,
-                                    v0: 0,
-                                    vn: 0,
-                                    role: R_ORDINARY,
-                                    handler: 0,
-                                    op: 0,
-                                    l0: ql0,
-                                    ln: ls.len()
-                                }
-                            );
+                        queue.push(
+                            Queued {
+                                key: root,
+                                base: root,
+                                v0: 0,
+                                vn: 0,
+                                role: R_ORDINARY,
+                                handler: 0,
+                                op: 0,
+                                l0: ql0,
+                                ln: ls.len()
+                            }
+                        );
                         perm = stage2_heap_swap(s_q);
                     }
                 } else if ins.op == Op::Handle {
@@ -1307,20 +1303,19 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                                 qlabels.push(h.label);
                             }
                         }
-                        queue
-                            .push(
-                                Queued {
-                                    key: key,
-                                    base: base,
-                                    v0: qv0,
-                                    vn: vars.len(),
-                                    role: role,
-                                    handler: id,
-                                    op: op,
-                                    l0: ql0,
-                                    ln: wrapping_sub(qlabels.len(), ql0)
-                                }
-                            );
+                        queue.push(
+                            Queued {
+                                key: key,
+                                base: base,
+                                v0: qv0,
+                                vn: vars.len(),
+                                role: role,
+                                handler: id,
+                                op: op,
+                                l0: ql0,
+                                ln: wrapping_sub(qlabels.len(), ql0)
+                            }
+                        );
                     }
                     for k in 0..h.en {
                         sorted_insert(in cx.names, inout p_keys, u32_at(in p_hw, add(h.e0, k)));
@@ -1332,23 +1327,22 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
         }
         let i = p_insts.len();
         let s_pi = stage2_heap_swap(perm);
-        p_insts
-            .push(
-                Inst {
-                    key: q.key,
-                    base: q.base,
-                    fi: fi,
-                    v0: v0,
-                    vn: vars.len(),
-                    role: q.role,
-                    handler: q.handler,
-                    op: q.op,
-                    c0: c0,
-                    cn: wrapping_sub(p_calls.len(), c0),
-                    l0: pl0,
-                    ln: q.ln
-                }
-            );
+        p_insts.push(
+            Inst {
+                key: q.key,
+                base: q.base,
+                fi: fi,
+                v0: v0,
+                vn: vars.len(),
+                role: q.role,
+                handler: q.handler,
+                op: q.op,
+                c0: c0,
+                cn: wrapping_sub(p_calls.len(), c0),
+                l0: pl0,
+                ln: q.ln
+            }
+        );
         perm = stage2_heap_swap(s_pi);
         set_by_symbol(inout p_by_key, q.key, n32(inc(i)));
         if scratch_end != 0 && stage2_heap_mark() >= scratch_end {
@@ -1847,22 +1841,21 @@ fn handler(
             p_hw.push(t);
         }
         let function = instance_name(inout cx, cfn, in vars);
-        p_clauses
-            .push(
-                HClause {
-                    op: op,
-                    sig: od.sig,
-                    function: function,
-                    base: cfn,
-                    mode: mode,
-                    pats: pats,
-                    npats: npats,
-                    resume: resume,
-                    k0: k0,
-                    kn: caps.len(),
-                    t0: t0
-                }
-            );
+        p_clauses.push(
+            HClause {
+                op: op,
+                sig: od.sig,
+                function: function,
+                base: cfn,
+                mode: mode,
+                pats: pats,
+                npats: npats,
+                resume: resume,
+                k0: k0,
+                kn: caps.len(),
+                t0: t0
+            }
+        );
     }
     if np == 0 {
         Fail::raise(werr(K_INVALID, 0, 55));

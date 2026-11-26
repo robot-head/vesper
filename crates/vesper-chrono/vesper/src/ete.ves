@@ -463,14 +463,13 @@ fn decode_context_info(inout st: EteState, in bytes: Slice[u8], at: u64) -> Resu
         context_id = Option::Some(wrapping_u32(c0 | c1 | c2 | c3));
         len = wrapping_add(len, 4);
     }
-    st
-        .context = EteContext {
-            el: info & 0x03,
-            sixty_four: (info & 0x10) != 0,
-            non_secure: (info & 0x20) != 0,
-            vmid: vmid,
-            context_id: context_id,
-        };
+    st.context = EteContext {
+        el: info & 0x03,
+        sixty_four: (info & 0x10) != 0,
+        non_secure: (info & 0x20) != 0,
+        vmid: vmid,
+        context_id: context_id,
+    };
     Result::Ok(len)
 }
 
@@ -480,15 +479,14 @@ fn emit_atoms(inout out: ChunkSeq[EteElementAt], offset: u64, pattern: u64, coun
         if i >= count {
             break;
         }
-        out
-            .push(
-                EteElementAt {
-                    offset: offset,
-                    element: EteElement::Atom {
-                        executed: (shr(pattern, i) & 1) == 1,
-                    },
-                }
-            );
+        out.push(
+            EteElementAt {
+                offset: offset,
+                element: EteElement::Atom {
+                    executed: (shr(pattern, i) & 1) == 1,
+                },
+            }
+        );
         i = wrapping_add(i, 1);
     }
 }
@@ -528,26 +526,24 @@ fn decode_packet(
     if !st.synced {
         if is_async_at(in bytes, offset) {
             st.synced = true;
-            out
-                .push(
-                    EteElementAt {
-                        offset: offset,
-                        element: EteElement::Sync,
-                    }
-                );
+            out.push(
+                EteElementAt {
+                    offset: offset,
+                    element: EteElement::Sync,
+                }
+            );
             return Result::Ok(async_len());
         }
         return Result::Err(EteError::NotSynchronized { offset: offset });
     }
     if h == 0x00 {
         if is_async_at(in bytes, offset) {
-            out
-                .push(
-                    EteElementAt {
-                        offset: offset,
-                        element: EteElement::Sync,
-                    }
-                );
+            out.push(
+                EteElementAt {
+                    offset: offset,
+                    element: EteElement::Sync,
+                }
+            );
             return Result::Ok(async_len());
         }
         match need_bytes(in bytes, offset, 2) {
@@ -556,23 +552,21 @@ fn decode_packet(
         }
         let b1 = byte_at(in bytes, wrapping_add(offset, 1));
         if b1 == 0x03 {
-            out
-                .push(
-                    EteElementAt {
-                        offset: offset,
-                        element: EteElement::Discard,
-                    }
-                );
+            out.push(
+                EteElementAt {
+                    offset: offset,
+                    element: EteElement::Discard,
+                }
+            );
             return Result::Ok(2);
         }
         if b1 == 0x05 {
-            out
-                .push(
-                    EteElementAt {
-                        offset: offset,
-                        element: EteElement::Overflow,
-                    }
-                );
+            out.push(
+                EteElementAt {
+                    offset: offset,
+                    element: EteElement::Overflow,
+                }
+            );
             return Result::Ok(2);
         }
         if b1 == 0x00 {
@@ -627,18 +621,17 @@ fn decode_packet(
             f3 = r.value;
             len = wrapping_add(len, r.len);
         }
-        out
-            .push(
-                EteElementAt {
-                    offset: offset,
-                    element: EteElement::TraceInfo {
-                        info: f0,
-                        key: f1,
-                        spec: f2,
-                        cyct: f3,
-                    },
-                }
-            );
+        out.push(
+            EteElementAt {
+                offset: offset,
+                element: EteElement::TraceInfo {
+                    info: f0,
+                    key: f1,
+                    spec: f2,
+                    cyct: f3,
+                },
+            }
+        );
         return Result::Ok(wrapping_add(1, len));
     }
     if h == 0x02 || h == 0x03 {
@@ -678,26 +671,24 @@ fn decode_packet(
             len = wrapping_add(len, cc.len);
             cycle_count = Option::Some(cc.value);
         }
-        out
-            .push(
-                EteElementAt {
-                    offset: offset,
-                    element: EteElement::Timestamp {
-                        timestamp: st.timestamp,
-                        cycle_count: cycle_count,
-                    },
-                }
-            );
+        out.push(
+            EteElementAt {
+                offset: offset,
+                element: EteElement::Timestamp {
+                    timestamp: st.timestamp,
+                    cycle_count: cycle_count,
+                },
+            }
+        );
         return Result::Ok(wrapping_add(1, len));
     }
     if h == 0x04 {
-        out
-            .push(
-                EteElementAt {
-                    offset: offset,
-                    element: EteElement::TraceOn,
-                }
-            );
+        out.push(
+            EteElementAt {
+                offset: offset,
+                element: EteElement::TraceOn,
+            }
+        );
         return Result::Ok(1);
     }
     if h == 0x06 {
@@ -743,58 +734,53 @@ fn decode_packet(
                 Result::Err(e) => return Result::Err(e),
             };
             total = wrapping_add(total, clen);
-            out
-                .push(
-                    EteElementAt {
-                        offset: offset,
-                        element: EteElement::Context(clone_ctx(in st.context)),
-                    }
-                );
-        }
-        out
-            .push(
+            out.push(
                 EteElementAt {
                     offset: offset,
-                    element: EteElement::Exception {
-                        exception_type: wrapping_u16(exception_type),
-                        preferred_return: ao.address,
-                        isa: ao.isa,
-                    },
+                    element: EteElement::Context(clone_ctx(in st.context)),
                 }
             );
+        }
+        out.push(
+            EteElementAt {
+                offset: offset,
+                element: EteElement::Exception {
+                    exception_type: wrapping_u16(exception_type),
+                    preferred_return: ao.address,
+                    isa: ao.isa,
+                },
+            }
+        );
         return Result::Ok(wrapping_add(1, total));
     }
     if h == 0x07 {
-        out
-            .push(
-                EteElementAt {
-                    offset: offset,
-                    element: EteElement::ExceptionReturn,
-                }
-            );
+        out.push(
+            EteElementAt {
+                offset: offset,
+                element: EteElement::ExceptionReturn,
+            }
+        );
         return Result::Ok(1);
     }
     if h == 0x70 {
         return Result::Ok(1);
     }
     if h >= 0x71 && h <= 0x7f {
-        out
-            .push(
-                EteElementAt {
-                    offset: offset,
-                    element: EteElement::Event { mask: h & 0x0f },
-                }
-            );
+        out.push(
+            EteElementAt {
+                offset: offset,
+                element: EteElement::Event { mask: h & 0x0f },
+            }
+        );
         return Result::Ok(1);
     }
     if h == 0x80 {
-        out
-            .push(
-                EteElementAt {
-                    offset: offset,
-                    element: EteElement::Context(clone_ctx(in st.context)),
-                }
-            );
+        out.push(
+            EteElementAt {
+                offset: offset,
+                element: EteElement::Context(clone_ctx(in st.context)),
+            }
+        );
         return Result::Ok(1);
     }
     if h == 0x81 {
@@ -802,13 +788,12 @@ fn decode_packet(
             Result::Ok(v) => v,
             Result::Err(e) => return Result::Err(e),
         };
-        out
-            .push(
-                EteElementAt {
-                    offset: offset,
-                    element: EteElement::Context(clone_ctx(in st.context)),
-                }
-            );
+        out.push(
+            EteElementAt {
+                offset: offset,
+                element: EteElement::Context(clone_ctx(in st.context)),
+            }
+        );
         return Result::Ok(wrapping_add(1, n));
     }
     if is_addr_with_context(h) {
@@ -820,23 +805,21 @@ fn decode_packet(
             Result::Ok(v) => v,
             Result::Err(e) => return Result::Err(e),
         };
-        out
-            .push(
-                EteElementAt {
-                    offset: offset,
-                    element: EteElement::Context(clone_ctx(in st.context)),
-                }
-            );
-        out
-            .push(
-                EteElementAt {
-                    offset: offset,
-                    element: EteElement::Address {
-                        address: ao.address,
-                        isa: ao.isa,
-                    },
-                }
-            );
+        out.push(
+            EteElementAt {
+                offset: offset,
+                element: EteElement::Context(clone_ctx(in st.context)),
+            }
+        );
+        out.push(
+            EteElementAt {
+                offset: offset,
+                element: EteElement::Address {
+                    address: ao.address,
+                    isa: ao.isa,
+                },
+            }
+        );
         return Result::Ok(wrapping_add(wrapping_add(1, ao.len), c));
     }
     if is_addr_header(h) {
@@ -844,16 +827,15 @@ fn decode_packet(
             Result::Ok(v) => v,
             Result::Err(e) => return Result::Err(e),
         };
-        out
-            .push(
-                EteElementAt {
-                    offset: offset,
-                    element: EteElement::Address {
-                        address: ao.address,
-                        isa: ao.isa,
-                    },
-                }
-            );
+        out.push(
+            EteElementAt {
+                offset: offset,
+                element: EteElement::Address {
+                    address: ao.address,
+                    isa: ao.isa,
+                },
+            }
+        );
         return Result::Ok(wrapping_add(1, ao.len));
     }
     if h == 0xf6 || h == 0xf7 {

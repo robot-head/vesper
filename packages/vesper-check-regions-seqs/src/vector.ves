@@ -286,14 +286,13 @@ pub fn isa_row_entry(
         display(in t, in names, u32_at(in t.items, add(w(e.a), j)), inout d.text);
     }
     d.text.push(93);
-    d
-        .close(
-            c,
-            m,
-            "use Isa[Baseline128], Isa[Avx2], Isa[Avx512], Isa[Sve2] or Isa[Rvv1]",
-            start,
-            stop
-        );
+    d.close(
+        c,
+        m,
+        "use Isa[Baseline128], Isa[Avx2], Isa[Avx512], Isa[Sve2] or Isa[Rvv1]",
+        start,
+        stop
+    );
     true
 }
 

@@ -84,8 +84,9 @@ impl L {
         for i in 0..words.len() {
             let x = u64_at(in words, i);
             for k in 0..8 {
-                bytes
-                    .push(wrapping_u8(wrapping_shr_u64(x, wrapping_u32(wrapping_mul(k, 8))) & 255));
+                bytes.push(
+                    wrapping_u8(wrapping_shr_u64(x, wrapping_u32(wrapping_mul(k, 8))) & 255)
+                );
             }
         }
         self.b.data(in bytes)

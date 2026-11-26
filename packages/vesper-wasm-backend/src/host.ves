@@ -555,13 +555,12 @@ pub fn host_new(inout b: Builder, in codes: ChunkSeq[u8]) -> Host eff [Fail[WErr
         h.i_unlink = imp(inout b, 1, "[method]descriptor.unlink-file-at", in i32s(4));
         h.i_rename = imp(inout b, 1, "[method]descriptor.rename-at", in i32s(7));
         h.i_readdir = imp(inout b, 1, "[method]descriptor.read-directory", in i32s(2));
-        h
-            .i_read_entry = imp(
-                inout b,
-                1,
-                "[method]directory-entry-stream.read-directory-entry",
-                in i32s(2)
-            );
+        h.i_read_entry = imp(
+            inout b,
+            1,
+            "[method]directory-entry-stream.read-directory-entry",
+            in i32s(2)
+        );
         h.i_drop_desc = imp(inout b, 1, "[resource-drop]descriptor", in i32s(1));
         h.i_drop_stream = imp(inout b, 1, "[resource-drop]directory-entry-stream", in i32s(1));
     }
@@ -656,19 +655,17 @@ impl A {
     // an `i64` load of width `op` at `base + off` (a local base)
     fn ldw(inout self, base: u32, off: u64, op: u8) {
         self.w32(base);
-        self
-            .c
-            .mem(
-                op,
-                if op == OP_I64_LOAD {
-                    3
-                } else if op == OP_I64_LOAD32_U {
-                    2
-                } else {
-                    0
-                },
-                off
-            );
+        self.c.mem(
+            op,
+            if op == OP_I64_LOAD {
+                3
+            } else if op == OP_I64_LOAD32_U {
+                2
+            } else {
+                0
+            },
+            off
+        );
     }
 
     fn ld(inout self, base: u32, off: u64) {
@@ -686,19 +683,17 @@ impl A {
     // loads at a static address
     fn lda(inout self, addr: u64, op: u8) {
         self.c.i32_const(0);
-        self
-            .c
-            .mem(
-                op,
-                if op == OP_I64_LOAD {
-                    3
-                } else if op == OP_I64_LOAD32_U {
-                    2
-                } else {
-                    0
-                },
-                addr
-            );
+        self.c.mem(
+            op,
+            if op == OP_I64_LOAD {
+                3
+            } else if op == OP_I64_LOAD32_U {
+                2
+            } else {
+                0
+            },
+            addr
+        );
     }
 
     // store local `v` at `base + off`
@@ -1479,16 +1474,15 @@ fn emit_path_op(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[W
     a.w32(ra);
     a.w32(rn);
     a.i32k(h.scr);
-    a
-        .call(
-            if k == P_MKDIR {
-                h.i_mkdir
-            } else if k == P_RMDIR {
-                h.i_rmdir
-            } else {
-                h.i_unlink
-            }
-        );
+    a.call(
+        if k == P_MKDIR {
+            h.i_mkdir
+        } else if k == P_RMDIR {
+            h.i_rmdir
+        } else {
+            h.i_unlink
+        }
+    );
     failed(inout a, in h);
     a.open(OP_IF);
     put_wasi_err(inout b, inout h, inout a, 1, add(h.scr, 1));
@@ -1526,14 +1520,13 @@ fn emit_env(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]
     }
     let args = k == ENV_ARG_COUNT || k == ENV_ARG;
     a.i32k(h.scr);
-    a
-        .call(
-            if args {
-                h.i_args
-            } else {
-                h.i_environ
-            }
-        );
+    a.call(
+        if args {
+            h.i_args
+        } else {
+            h.i_environ
+        }
+    );
     a.lda(h.scr, OP_I64_LOAD32_U);
     a.set(lp);
     a.lda(add(h.scr, 4), OP_I64_LOAD32_U);
@@ -1552,14 +1545,13 @@ fn emit_env(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]
         a.end();
         a.get(lp);
         a.get(0);
-        a
-            .k(
-                if args {
-                    8
-                } else {
-                    16
-                }
-            );
+        a.k(
+            if args {
+                8
+            } else {
+                16
+            }
+        );
         a.op(OP_I64_MUL);
         a.op(OP_I64_ADD);
         a.set(e);
@@ -1943,14 +1935,13 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
     if k == FS_CLOSE || k == FS_DIR_CLOSE {
         slot_desc(inout a, 0, 0, desc);
         a.w32(desc);
-        a
-            .call(
-                if k == FS_CLOSE {
-                    h.i_drop_desc
-                } else {
-                    h.i_drop_stream
-                }
-            );
+        a.call(
+            if k == FS_CLOSE {
+                h.i_drop_desc
+            } else {
+                h.i_drop_stream
+            }
+        );
         if k == FS_DIR_CLOSE {
             slot_desc(inout a, 0, 32, desc);
             a.w32(desc);

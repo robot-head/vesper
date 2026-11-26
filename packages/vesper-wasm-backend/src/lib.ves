@@ -118,17 +118,16 @@ fn compile_with_facts_core(
         if d_perm_end != 0 && d_perm >= d_perm_end {
             Fail::raise(werr_syms(K_LIMIT, 0, 93, inst.key, 0));
         }
-        if l
-            .can_rewind_define(
-                in lim,
-                n_mask,
-                n_tmask,
-                n_rmask,
-                n_eqp,
-                n_btypes,
-                n_bvals,
-                n_bfuncs
-            ) {
+        if l.can_rewind_define(
+            in lim,
+            n_mask,
+            n_tmask,
+            n_rmask,
+            n_eqp,
+            n_btypes,
+            n_bvals,
+            n_bfuncs
+        ) {
             let mut dl = dummy_l(l.cx.k, l.cx.s);
             swap(inout l, inout dl);
             let (fl0, next_perm) = rebuild_l(dl, d_mark, d_perm);

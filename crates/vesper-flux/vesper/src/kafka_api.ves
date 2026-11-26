@@ -1450,15 +1450,14 @@ pub fn resp_produce(in b: Slice[u8], partition: i64) -> ChunkSeq[i64] eff [Fail[
                 let _ = out.try_set(0, 1);
                 let _ = out.try_set(1, code);
                 let _ = out.try_set(2, base);
-                let _ = out
-                    .try_set(
-                        3,
-                        if m < 0 {
-                            0
-                        } else {
-                            wrapping_i64(wrapping_sub(at, wrapping_u64(m)))
-                        }
-                    );
+                let _ = out.try_set(
+                    3,
+                    if m < 0 {
+                        0
+                    } else {
+                        wrapping_i64(wrapping_sub(at, wrapping_u64(m)))
+                    }
+                );
                 let _ = out.try_set(4, m);
             }
         }

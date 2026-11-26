@@ -308,25 +308,23 @@ impl Linker {
                     }
                 }
                 let ok = self.piece_of.try_set(add(o.sec0, si), self.pieces.len());
-                self
-                    .pieces
-                    .push(
-                        Piece {
-                            obj: oi,
-                            sec: si,
-                            out: out,
-                            boot: text_eq(in b, s.name_at, s.name_len, in ".text.boot"),
-                            align: if s.align == 0 {
-                                1
-                            } else {
-                                s.align
-                            },
-                            data_at: data_at,
-                            data_len: data_len,
-                            size: s.size,
-                            address: 0
-                        }
-                    );
+                self.pieces.push(
+                    Piece {
+                        obj: oi,
+                        sec: si,
+                        out: out,
+                        boot: text_eq(in b, s.name_at, s.name_len, in ".text.boot"),
+                        align: if s.align == 0 {
+                            1
+                        } else {
+                            s.align
+                        },
+                        data_at: data_at,
+                        data_len: data_len,
+                        size: s.size,
+                        address: 0
+                    }
+                );
             }
         }
         let mut boots: u64 = 0;
@@ -429,19 +427,17 @@ impl Linker {
                 if global {
                     self.globals.push(self.linked.len());
                 }
-                self
-                    .linked
-                    .push(
-                        Linked {
-                            obj: oi,
-                            hash: hash,
-                            name_at: at,
-                            name_len: s.name_len,
-                            address: address,
-                            size: s.size,
-                            global: global
-                        }
-                    );
+                self.linked.push(
+                    Linked {
+                        obj: oi,
+                        hash: hash,
+                        name_at: at,
+                        name_len: s.name_len,
+                        address: address,
+                        size: s.size,
+                        global: global
+                    }
+                );
             }
         }
         let start = self.global(in "_start".as_bytes());
@@ -661,42 +657,42 @@ impl Linker {
                     let p = piece_at(in self.pieces, i);
                     if widen_u64(p.out) == k {
                         let o = add(data_at, sub(p.address, start));
-                        let ok = data
-                            .try_copy_from(o, in self.pdata[p.data_at..add(p.data_at, p.data_len)]);
+                        let ok = data.try_copy_from(
+                            o,
+                            in self.pdata[p.data_at..add(p.data_at, p.data_len)]
+                        );
                     }
                 }
             }
-            secs
-                .push(
-                    OutSec {
-                        name: k,
-                        address: start,
-                        data_at: data_at,
-                        data_len: if bss {
-                            0
-                        } else {
-                            sub(end, start)
-                        },
-                        mem_bytes: sub(end, start),
-                        nobits: bss,
-                        writable: k >= widen_u64(Out::Data),
-                        executable: k == widen_u64(Out::Text)
-                    }
-                );
-        }
-        secs
-            .push(
+            secs.push(
                 OutSec {
-                    name: Out::Stack,
-                    address: self.stack_bottom,
-                    data_at: data.len(),
-                    data_len: 0,
-                    mem_bytes: sub(self.stack_top, self.stack_bottom),
-                    nobits: true,
-                    writable: true,
-                    executable: false
+                    name: k,
+                    address: start,
+                    data_at: data_at,
+                    data_len: if bss {
+                        0
+                    } else {
+                        sub(end, start)
+                    },
+                    mem_bytes: sub(end, start),
+                    nobits: bss,
+                    writable: k >= widen_u64(Out::Data),
+                    executable: k == widen_u64(Out::Text)
                 }
             );
+        }
+        secs.push(
+            OutSec {
+                name: Out::Stack,
+                address: self.stack_bottom,
+                data_at: data.len(),
+                data_len: 0,
+                mem_bytes: sub(self.stack_top, self.stack_bottom),
+                nobits: true,
+                writable: true,
+                executable: false
+            }
+        );
         let mut segs: ChunkSeq[OutSeg] = ChunkSeq::new[OutSeg]();
         segs.push(OutSeg { first: Out::Text, end: Out::Data, flags: pf_rx() });
         segs.push(OutSeg { first: Out::Data, end: secs.len(), flags: pf_rw() });
@@ -704,63 +700,58 @@ impl Linker {
         for i in 0..self.linked.len() {
             let l = linked_at(in self.linked, i);
             let section = section_of(in secs, l.address);
-            out_syms
-                .push(
-                    OutSym {
-                        name_at: l.name_at,
-                        name_len: l.name_len,
-                        value: l.address,
-                        size: l.size,
-                        global: l.global,
-                        function: section == Out::Text,
-                        section: section
-                    }
-                );
+            out_syms.push(
+                OutSym {
+                    name_at: l.name_at,
+                    name_len: l.name_len,
+                    value: l.address,
+                    size: l.size,
+                    global: l.global,
+                    function: section == Out::Text,
+                    section: section
+                }
+            );
         }
         for i in 0..LINKER_SYMBOLS {
             let at = self.names.len();
             let n = linker_name(i).as_bytes();
             self.names.extend(in n);
             let value = w_at(in self.defined, i);
-            out_syms
-                .push(
-                    OutSym {
-                        name_at: at,
-                        name_len: n.len(),
-                        value: value,
-                        size: 0,
-                        global: true,
-                        function: false,
-                        section: Absent::Row
-                    }
-                );
-            self
-                .linked
-                .push(
-                    Linked {
-                        obj: LINKER_OBJECT,
-                        hash: 0,
-                        name_at: at,
-                        name_len: n.len(),
-                        address: value,
-                        size: 0,
-                        global: true
-                    }
-                );
+            out_syms.push(
+                OutSym {
+                    name_at: at,
+                    name_len: n.len(),
+                    value: value,
+                    size: 0,
+                    global: true,
+                    function: false,
+                    section: Absent::Row
+                }
+            );
+            self.linked.push(
+                Linked {
+                    obj: LINKER_OBJECT,
+                    hash: 0,
+                    name_at: at,
+                    name_len: n.len(),
+                    address: value,
+                    size: 0,
+                    global: true
+                }
+            );
         }
         let machine = machine_of(self.opts.target);
-        self
-            .elf = write_executable(
-                machine,
-                self.e_flags,
-                self.entry,
-                in secs,
-                in data,
-                in segs,
-                in self.names,
-                in out_syms,
-                inout self.placements
-            );
+        self.elf = write_executable(
+            machine,
+            self.e_flags,
+            self.entry,
+            in secs,
+            in data,
+            in segs,
+            in self.names,
+            in out_syms,
+            inout self.placements
+        );
     }
 
     // `resolve_traps` and `patch_trap_table`: the PC of each entry, written

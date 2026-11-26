@@ -123,14 +123,13 @@ pub fn report_into(inout out: ChunkSeq[u64], in tree: Tree, in t: Tokens, in d: 
     for i in 0..nodes {
         out.push(widen_u64(u8_at(in tree.node_kind, i)));
         let parent = w32(in tree.node_parent, i);
-        out
-            .push(
-                if parent == Parent::Root {
-                    nodes
-                } else {
-                    parent
-                }
-            );
+        out.push(
+            if parent == Parent::Root {
+                nodes
+            } else {
+                parent
+            }
+        );
         out.push(w32(in tree.node_start, i));
         out.push(w32(in tree.node_end, i));
     }

@@ -1977,27 +1977,25 @@ fn add_nested(inout l: L, kind: u8, body: u64, in ps: ChunkSeq[Pm], result: u32,
     } else {
         name
     };
-    l
-        .a
-        .add_function(
-            FnR {
-                key: name,
-                name: name,
-                has_body: true,
-                body: body,
-                pa: pa,
-                pn: ps.len(),
-                result: result,
-                effects: effects,
-                ga: l.fga,
-                gn: l.fgn,
-                ca: ca,
-                cn: cn,
-                owner: owner,
-                xa: xa,
-                xn: xn
-            }
-        );
+    l.a.add_function(
+        FnR {
+            key: name,
+            name: name,
+            has_body: true,
+            body: body,
+            pa: pa,
+            pn: ps.len(),
+            result: result,
+            effects: effects,
+            ga: l.fga,
+            gn: l.fgn,
+            ca: ca,
+            cn: cn,
+            owner: owner,
+            xa: xa,
+            xn: xn
+        }
+    );
 }
 
 // The free names of `body` (minus the bound ones), or false when a
@@ -2640,35 +2638,27 @@ pub fn lower_all(inout l: L) {
     let mut max_acaps = wrapping_add(l.a.caps.len(), 16384);
     let mut max_aexts = wrapping_add(l.a.exts.len(), 16384);
     let low_entry = stage2_heap_swap(low_perm);
-    l
-        .p
-        .reserve_lower(
-            max_fns,
-            max_blocks,
-            max_insts,
-            max_ops,
-            max_tags,
-            max_paths,
-            max_path_syms,
-            max_pool
-        );
+    l.p.reserve_lower(
+        max_fns,
+        max_blocks,
+        max_insts,
+        max_ops,
+        max_tags,
+        max_paths,
+        max_path_syms,
+        max_pool
+    );
     l.a.reserve_lower(16384, 32768, 16384, 16384);
-    l
-        .c
-        .names
-        .reserve_names(
-            wrapping_add(l.c.names.len(), 32768),
-            wrapping_add(l.c.names.text.len(), 524288)
-        );
-    l
-        .c
-        .types
-        .reserve_types(
-            wrapping_add(l.c.types.nodes.len(), 32768),
-            wrapping_add(l.c.types.items_len(), 32768),
-            wrapping_add(l.c.types.rows.len(), 16384),
-            wrapping_add(l.c.types.effs.len(), 8192)
-        );
+    l.c.names.reserve_names(
+        wrapping_add(l.c.names.len(), 32768),
+        wrapping_add(l.c.names.text.len(), 524288)
+    );
+    l.c.types.reserve_types(
+        wrapping_add(l.c.types.nodes.len(), 32768),
+        wrapping_add(l.c.types.items_len(), 32768),
+        wrapping_add(l.c.types.rows.len(), 16384),
+        wrapping_add(l.c.types.effs.len(), 8192)
+    );
     for i in 0..l.a.pool_count {
         l.p.pool.push(PoolRow { kind: PoolKind::Expr, label: 0 });
     }
@@ -2755,18 +2745,16 @@ pub fn lower_all(inout l: L) {
                     max_apms = wrapping_add(l.a.pms.len(), 32768);
                     max_acaps = wrapping_add(l.a.caps.len(), 16384);
                     max_aexts = wrapping_add(l.a.exts.len(), 16384);
-                    l
-                        .p
-                        .reserve_lower(
-                            max_fns,
-                            max_blocks,
-                            max_insts,
-                            max_ops,
-                            max_tags,
-                            max_paths,
-                            max_path_syms,
-                            max_pool
-                        );
+                    l.p.reserve_lower(
+                        max_fns,
+                        max_blocks,
+                        max_insts,
+                        max_ops,
+                        max_tags,
+                        max_paths,
+                        max_path_syms,
+                        max_pool
+                    );
                     l.a.reserve_lower(16384, 32768, 16384, 16384);
                     if low_perm < low_perm_end {
                         low_perm = stage2_heap_swap(s_pre);
@@ -3141,66 +3129,57 @@ fn flush(inout l: L, f: FnR) {
             } else {
                 0
             };
-            l
-                .p
-                .insts
-                .push(
-                    InstRow {
-                        dest: y.dest,
-                        ty: y.ty,
-                        s0: y.s0,
-                        s1: y.s1,
-                        has_token: has,
-                        tin: u64_at(in tin, i),
-                        tout: u64_at(in tout, i),
-                        fallible: if y.fallible {
-                            1
-                        } else {
-                            0
-                        },
-                        op: y.op,
-                        a: a,
-                        n: y.n
-                    }
-                );
+            l.p.insts.push(
+                InstRow {
+                    dest: y.dest,
+                    ty: y.ty,
+                    s0: y.s0,
+                    s1: y.s1,
+                    has_token: has,
+                    tin: u64_at(in tin, i),
+                    tout: u64_at(in tout, i),
+                    fallible: if y.fallible {
+                        1
+                    } else {
+                        0
+                    },
+                    op: y.op,
+                    a: a,
+                    n: y.n
+                }
+            );
         }
         let ic = wrapping_sub(l.p.insts.len(), i0);
         let ta = l.p.ops.len();
         for j in x.ta..add(x.ta, x.tn) {
             put_p(inout l, sop(in l, j), u8_at(in l.stags, j));
         }
-        l
-            .p
-            .blocks
-            .push(
-                BlockRow {
-                    ha: bha,
-                    hn: bhn,
-                    i0: i0,
-                    ic: ic,
-                    term: x.term,
-                    ta: ta,
-                    tn: wrapping_sub(l.p.ops.len(), ta)
-                }
-            );
+        l.p.blocks.push(
+            BlockRow {
+                ha: bha,
+                hn: bhn,
+                i0: i0,
+                ic: ic,
+                term: x.term,
+                ta: ta,
+                tn: wrapping_sub(l.p.ops.len(), ta)
+            }
+        );
     }
     // The trailer: no fip side tables at lowering.
     let ta = l.p.ops.len();
     for j in 0..5 {
         put_p(inout l, 0, Tag::Raw);
     }
-    l
-        .p
-        .fns
-        .push(
-            FnRow {
-                name: f.name,
-                ha: ha,
-                hn: hn,
-                b0: b0,
-                bc: nb,
-                ta: ta,
-                tn: wrapping_sub(l.p.ops.len(), ta)
-            }
-        );
+    l.p.fns.push(
+        FnRow {
+            name: f.name,
+            ha: ha,
+            hn: hn,
+            b0: b0,
+            bc: nb,
+            ta: ta,
+            tn: wrapping_sub(l.p.ops.len(), ta)
+        }
+    );
 }
