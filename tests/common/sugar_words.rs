@@ -1,5 +1,6 @@
 // The sugar expansion swap's words (SH1 lane 14, #1157), shared by
-// src/swap/sugar.rs and tests/sugar.rs: `input` writes the text that
+// crates/vesper-hybrid (src/swap/sugar.rs, tests/sugar.rs) and
+// tests/self_host_sugar.rs: `input` writes the text that
 // modules/sugar's `expand_words` reads (`@vesper/sugar::
 // sugar_expand_scoped_words`' layout), and `decode` reads its words back
 // into what `vesper_syntax::sugar_expand::rust_expand_sugar` returns.
