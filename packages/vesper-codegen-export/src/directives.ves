@@ -301,9 +301,8 @@ impl TyParser {
             if !primitive(in id) {
                 self.skip();
                 if !self.at_end()
-                    && (
-                        self.peek() == COLON || self.peek() == PIPE || self.peek() == OPEN_BRACKET
-                    ) {
+                    && (self.peek() == COLON || self.peek() == PIPE || self.peek() == OPEN_BRACKET)
+                {
                     // Labeled rows, `E | r` rows and paths are not ported.
                     self.bad = true;
                     return 0;
@@ -701,7 +700,8 @@ pub fn parse_directives(in input: Str) -> ChunkSeq[u64] {
                 inout err
             );
         } else if starts_with(in rest, VSYS_DIRECTIVE)
-            && is_link(in after(in rest, VSYS_DIRECTIVE)) {
+            && is_link(in after(in rest, VSYS_DIRECTIVE))
+        {
             let spec = after(in rest, VSYS_DIRECTIVE);
             let ws = words(in spec);
             let library = word(in spec, in ws, 0);
@@ -717,7 +717,8 @@ pub fn parse_directives(in input: Str) -> ChunkSeq[u64] {
                     handler = HANDLER_ISOLATED;
                 } else if starts_with(in wd, RUST_OPTION)
                     && wd.len() > RUST_OPTION_LEN
-                    && !has_rust {
+                    && !has_rust
+                {
                     rust = after(in wd, RUST_OPTION);
                     has_rust = true;
                 } else {

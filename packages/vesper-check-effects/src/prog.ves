@@ -360,7 +360,8 @@ pub fn read_prog(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Prog
             || kind == EXPR_UNARY
             || kind == EXPR_BINARY
             || kind == EXPR_ASSIGN
-            || kind == EXPR_HANDLE {
+            || kind == EXPR_HANDLE
+        {
             a = widen_u64(sym_or_none(in ctx, a));
         }
         if kind == EXPR_FIELD {

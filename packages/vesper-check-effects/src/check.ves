@@ -155,7 +155,8 @@ pub fn check_world(inout ctx: Ctx, in prog: Prog, inout walk: Walk) -> ChunkSeq[
                 && tainted
                 && !secret_type(in ctx, inout walk, func.result)
                 && !carries_no_information(in ctx, in walk, func.result)
-                && !walker_gate(in ctx, func.name) {
+                && !walker_gate(in ctx, func.name)
+            {
                 let code_start = begin(inout walk, E_SECRET_RESULT);
                 put(inout walk, "eff [ConstTime] function '");
                 put_name(in ctx, inout walk, func.name);
