@@ -1,0 +1,3128 @@
+// Place IR (`ir::Program` of src/ir.rs) rendered as pretty JSON matching
+// `serde_json::to_string_pretty(&program)` byte for byte (#2245, part of
+// #1894 and #1397).
+
+use self::codes::{Lit, Op, Pat, PoolKind, Term};
+use self::{Program, read_program};
+use @vesper/check-data::pack_text;
+use @vesper/check-data::input::{Ctx, Reader, read_ctx};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{EffNode, RowNode, TyKind, TyMode, TyPass, TypeNode, Types};
+use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, u64_at, u8_at, w};
+
+// Indentation width of `serde_json::to_string_pretty`: two spaces per level.
+const INDENT_SPACES: u64 = 2;
+const FUNCTIONS_ENTRY_DEPTH: u64 = 2;
+
+// Maximum pattern nesting depth (`ir_words.rs` `Dec::pattern`).
+const MAX_PATTERN_DEPTH: u64 = 512;
+
+// Word strides and field offsets in `Program.ops`.
+const PAIR_WORDS: u64 = 2;
+const TRIPLE_WORDS: u64 = 3;
+const ARG_WORDS: u64 = 4;
+const ARG_VALUE_OFFSET: u64 = 1;
+const ARG_ROOT_OFFSET: u64 = 2;
+const ARG_PATH_OFFSET: u64 = 3;
+const CALL_SLOT_WORDS: u64 = 5;
+const CALL_SLOT_SIZE_OFFSET: u64 = 3;
+const CALL_SLOT_INDEX_OFFSET: u64 = 2;
+const JOIN_SLOT_HEADER_WORDS: u64 = 3;
+const JOIN_SLOT_INCOMING_OFFSET: u64 = 2;
+const DROP_VALUE_WORDS: u64 = 3;
+const DROP_PLACE_WORDS: u64 = 4;
+const DROP_TYPE_OFFSET_VALUE: u64 = 2;
+const DROP_PATH_OFFSET_PLACE: u64 = 2;
+const DROP_TYPE_OFFSET_PLACE: u64 = 3;
+const DROP_KEEP_OFFSET_OTHER: u64 = 3;
+const READ_PASS_OFFSET: u64 = 2;
+const READ_NPROJ_OFFSET: u64 = 3;
+const READ_PROJS_OFFSET: u64 = 4;
+const WRITE_VALUE_OFFSET: u64 = 2;
+const BINARY_RHS_OFFSET: u64 = 2;
+const DATA_FIELDS_OFFSET: u64 = 2;
+const HANDLE_POOL_OFFSET: u64 = 2;
+const HANDLE_ALIASES_OFFSET: u64 = 3;
+const BRANCH_NO_OFFSET: u64 = 2;
+const MATCH_ARMS_OFFSET: u64 = 2;
+const PARAM_NPROJ_OFFSET: u64 = 2;
+const PARAM_SPAN_END_OFFSET: u64 = 2;
+const PARAM_TAIL_WORDS: u64 = 3;
+const CTOR_PAT_COUNT_OFFSET: u64 = 2;
+const CTOR_PAT_FIELDS_OFFSET: u64 = 3;
+const HEX_ESCAPE_DIGITS: u64 = 2;
+
+// Literal operand offsets after the kind word.
+const LIT_LO_OFFSET: u64 = 1;
+const LIT_HI_OFFSET: u64 = 2;
+const LIT_WORDS: u64 = 3;
+
+// Pattern header offsets: kind, span start, span end.
+const PAT_SPAN_START_OFFSET: u64 = 1;
+const PAT_SPAN_END_OFFSET: u64 = 2;
+const PAT_HEADER_WORDS: u64 = 3;
+
+// Multi-precision decimal formatting constants for 128-bit literals.
+const DECIMAL_RADIX: u64 = 10;
+const HEX_RADIX: u64 = 16;
+const HEX_ALPHA_THRESHOLD: u64 = 10;
+const LIMB_BITS_U32: u32 = 32;
+const LIMB_MASK: u64 = 4294967295;
+const SIGN_BIT_64: u64 = 9223372036854775808;
+const EXP_MASK_F64: u64 = 9218868437227405312;
+const MAGNITUDE_MASK_F64: u64 = 9223372036854775807;
+
+// `TypeNode.mode` flag marking a negative `Type::IntLiteral`.
+const NEGATIVE_TYPE_LIT_MODE: u8 = 1;
+
+// `PoolKind::Hoisted` numeric label layout (`ir_words.rs` `made_payload`).
+const HOISTED_GET: u64 = 0;
+const HOISTED_SET: u64 = 1;
+const HOISTED_TRY_GET: u64 = 2;
+const HOISTED_WIDE_BASE: u64 = 32;
+const HOISTED_WIDE_LIMIT: u64 = 56;
+const WIDE_TOTAL_STRIDE: u64 = 12;
+const WIDE_WRITE_STRIDE: u64 = 6;
+const WIDE_WIDTH_DIVISOR: u64 = 2;
+const WIDE_WIDTH_COUNT: u64 = 3;
+const WIDE_BYTES_U16: u64 = 2;
+const WIDE_BYTES_U32: u64 = 4;
+const WIDE_BYTES_U64: u64 = 8;
+
+// `PoolKind::Guard` numeric label bitfields (`ir_words.rs` `made_payload`).
+const GUARD_INCLUSIVE_BIT: u64 = 1;
+const GUARD_NEGATED_BIT: u64 = 2;
+const GUARD_SCALED_BIT: u64 = 4;
+const GUARD_PLUS_SHIFT: u32 = 8;
+const GUARD_MINUS_SHIFT: u32 = 12;
+const GUARD_OUTER_PLUS_SHIFT: u32 = 16;
+const GUARD_OUTER_MINUS_SHIFT: u32 = 20;
+const GUARD_WIDTH_SHIFT: u32 = 24;
+const GUARD_NIBBLE_MASK: u64 = 15;
+const GUARD_BYTE_MASK: u64 = 255;
+
+// UTF-8 encoding thresholds and bit masks for unescaping Rust `Debug` strings.
+const UTF8_ONE_MAX: u64 = 127;
+const UTF8_TWO_MAX: u64 = 2047;
+const UTF8_THREE_MAX: u64 = 65535;
+const UTF8_CONT_MASK: u64 = 63;
+const UTF8_CONT_TAG: u64 = 128;
+const UTF8_TWO_TAG: u64 = 192;
+const UTF8_THREE_TAG: u64 = 224;
+const UTF8_FOUR_TAG: u64 = 240;
+const UTF8_SHIFT_6: u32 = 6;
+const UTF8_SHIFT_12: u32 = 12;
+const UTF8_SHIFT_18: u32 = 18;
+
+// `CallSlot` codes in the function trailer.
+enum CallSlotCode: _ {
+    CallerSlot = 0,
+    ReuseSlot = 1,
+}
+
+// `FipDrop` codes in the function trailer.
+enum DropCode: _ {
+    Value = 0,
+    Place = 1,
+    OtherFields = 2,
+}
+
+// Named ASCII byte constants.
+const CH_BS: u8 = 8;
+const CH_TAB: u8 = 9;
+const CH_LF: u8 = 10;
+const CH_FF: u8 = 12;
+const CH_CR: u8 = 13;
+const CH_SPACE: u8 = 32;
+const CH_QUOTE: u8 = 34;
+const CH_SQUOTE: u8 = 39;
+const CH_LPAREN: u8 = 40;
+const CH_RPAREN: u8 = 41;
+const CH_COMMA: u8 = 44;
+const CH_MINUS: u8 = 45;
+const CH_ZERO: u8 = 48;
+const CH_NINE: u8 = 57;
+const CH_LBRACKET: u8 = 91;
+const CH_BACKSLASH: u8 = 92;
+const CH_RBRACKET: u8 = 93;
+const CH_UPPER_A: u8 = 65;
+const CH_UPPER_F: u8 = 70;
+const CH_LOWER_A: u8 = 97;
+const CH_LOWER_B: u8 = 98;
+const CH_LOWER_F: u8 = 102;
+const CH_LOWER_N: u8 = 110;
+const CH_LOWER_R: u8 = 114;
+const CH_LOWER_T: u8 = 116;
+const CH_LOWER_U: u8 = 117;
+const CH_LOWER_X: u8 = 120;
+const CH_LBRACE: u8 = 123;
+const CH_RBRACE: u8 = 125;
+
+// Companion tables for payloads that `@vesper/place-ir` does not model
+// structurally: `Payload::Expr` (`Op::Closure` / `Op::Handle`) and canonical
+// `serde_json` strings for `Literal::Float` bit patterns.
+pub struct JsonExtras {
+    expr_pools: ChunkSeq[u64],
+    expr_syms: ChunkSeq[u32],
+    float_bits: ChunkSeq[u64],
+    float_syms: ChunkSeq[u32],
+}
+
+pub fn json_extras_new() -> JsonExtras {
+    JsonExtras {
+        expr_pools: ChunkSeq::new[u64](),
+        expr_syms: ChunkSeq::new[u32](),
+        float_bits: ChunkSeq::new[u64](),
+        float_syms: ChunkSeq::new[u32](),
+    }
+}
+
+impl JsonExtras {
+    pub fn expr_sym(in self, pool_idx: u64) -> u32 {
+        for i in 0..self.expr_pools.len() {
+            if u64_at(in self.expr_pools, i) == pool_idx {
+                return u32_at(in self.expr_syms, i);
+            }
+        }
+        0
+    }
+
+    pub fn has_float(in self, bits: u64) -> bool {
+        for i in 0..self.float_bits.len() {
+            if u64_at(in self.float_bits, i) == bits {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn float_sym(in self, bits: u64) -> u32 {
+        for i in 0..self.float_bits.len() {
+            if u64_at(in self.float_bits, i) == bits {
+                return u32_at(in self.float_syms, i);
+            }
+        }
+        0
+    }
+}
+
+// Reads the optional sidecar trailer written by `ir_words::program_json_input`
+// after `read_program`. When absent (`r.pos >= b.len()`), both counts read as 0.
+pub fn read_json_extras(inout r: Reader, in b: Slice[u8], in c: Ctx) -> JsonExtras {
+    let mut ex = json_extras_new();
+    let ne = r.word(in b);
+    for _ in 0..ne {
+        ex.expr_pools.push(r.word(in b));
+        ex.expr_syms.push(u32_at(in c.nmap, r.word(in b)));
+    }
+    let nf = r.word(in b);
+    for _ in 0..nf {
+        ex.float_bits.push(r.word(in b));
+        ex.float_syms.push(u32_at(in c.nmap, r.word(in b)));
+    }
+    ex
+}
+
+// ----- low-level JSON emitters --------------------------------------------------
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn indent(inout o: ChunkSeq[u8], depth: u64) {
+    let count = wrapping_mul(depth, INDENT_SPACES);
+    for _ in 0..count {
+        o.push(CH_SPACE);
+    }
+}
+
+fn newline_indent(inout o: ChunkSeq[u8], depth: u64) {
+    o.push(CH_LF);
+    indent(inout o, depth);
+}
+
+fn put_bool(inout o: ChunkSeq[u8], flag: bool) {
+    if flag {
+        put(inout o, "true");
+    } else {
+        put(inout o, "false");
+    }
+}
+
+fn hex_lower(nibble: u64) -> u8 {
+    if nibble < HEX_ALPHA_THRESHOLD {
+        wrapping_u8(add(nibble, widen_u64(CH_ZERO)))
+    } else {
+        wrapping_u8(add(wrapping_sub(nibble, HEX_ALPHA_THRESHOLD), widen_u64(CH_LOWER_A)))
+    }
+}
+
+// RFC 8259 / `serde_json` string escaping over raw UTF-8 bytes.
+fn json_bytes(inout o: ChunkSeq[u8], in bytes: Slice[u8]) {
+    o.push(CH_QUOTE);
+    for i in 0..bytes.len() {
+        let c = match bytes.try_get(i) {
+            Option::Some(b) => b,
+            Option::None => 0,
+        };
+        if c == CH_QUOTE {
+            o.push(CH_BACKSLASH);
+            o.push(CH_QUOTE);
+        } else if c == CH_BACKSLASH {
+            o.push(CH_BACKSLASH);
+            o.push(CH_BACKSLASH);
+        } else if c == CH_BS {
+            o.push(CH_BACKSLASH);
+            o.push(CH_LOWER_B);
+        } else if c == CH_FF {
+            o.push(CH_BACKSLASH);
+            o.push(CH_LOWER_F);
+        } else if c == CH_LF {
+            o.push(CH_BACKSLASH);
+            o.push(CH_LOWER_N);
+        } else if c == CH_CR {
+            o.push(CH_BACKSLASH);
+            o.push(CH_LOWER_R);
+        } else if c == CH_TAB {
+            o.push(CH_BACKSLASH);
+            o.push(CH_LOWER_T);
+        } else if c < CH_SPACE {
+            o.push(CH_BACKSLASH);
+            o.push(CH_LOWER_U);
+            o.push(CH_ZERO);
+            o.push(CH_ZERO);
+            o.push(hex_lower(widen_u64(c) / HEX_RADIX));
+            o.push(hex_lower(widen_u64(c) % HEX_RADIX));
+        } else {
+            o.push(c);
+        }
+    }
+    o.push(CH_QUOTE);
+}
+
+fn json_sym(inout o: ChunkSeq[u8], in names: Names, sym: u32) {
+    let a = names.start(sym);
+    let e = names.end(sym);
+    json_bytes(inout o, in names.text[a..e]);
+}
+
+fn json_opt_sym(inout o: ChunkSeq[u8], in names: Names, opt_sym: u64) {
+    if opt_sym == 0 {
+        put(inout o, "null");
+    } else {
+        json_sym(inout o, in names, n32(wrapping_sub(opt_sym, 1)));
+    }
+}
+
+fn json_u64_key(inout o: ChunkSeq[u8], key: u64) {
+    o.push(CH_QUOTE);
+    push_decimal(inout o, key);
+    o.push(CH_QUOTE);
+    put(inout o, ": ");
+}
+
+fn json_field_key(inout o: ChunkSeq[u8], depth: u64, in key: Str) {
+    indent(inout o, depth);
+    o.push(CH_QUOTE);
+    put(inout o, in key);
+    put(inout o, "\": ");
+}
+
+// Unsigned 128-bit integer `(lo, hi)` as unquoted decimal.
+fn push_u128(inout o: ChunkSeq[u8], lo: u64, hi: u64) {
+    if hi == 0 {
+        push_decimal(inout o, lo);
+        return;
+    }
+    let mut d3 = wrapping_shr_u64(hi, LIMB_BITS_U32);
+    let mut d2 = hi & LIMB_MASK;
+    let mut d1 = wrapping_shr_u64(lo, LIMB_BITS_U32);
+    let mut d0 = lo & LIMB_MASK;
+    let mut digits = ChunkSeq::new[u8]();
+    loop {
+        if d3 == 0 && d2 == 0 && d1 == 0 && d0 == 0 {
+            break;
+        }
+        let q3 = d3 / DECIMAL_RADIX;
+        let r3 = d3 % DECIMAL_RADIX;
+        let cur2 = wrapping_add(wrapping_shl_u64(r3, LIMB_BITS_U32), d2);
+        let q2 = cur2 / DECIMAL_RADIX;
+        let r2 = cur2 % DECIMAL_RADIX;
+        let cur1 = wrapping_add(wrapping_shl_u64(r2, LIMB_BITS_U32), d1);
+        let q1 = cur1 / DECIMAL_RADIX;
+        let r1 = cur1 % DECIMAL_RADIX;
+        let cur0 = wrapping_add(wrapping_shl_u64(r1, LIMB_BITS_U32), d0);
+        let q0 = cur0 / DECIMAL_RADIX;
+        let rem = cur0 % DECIMAL_RADIX;
+        digits.push(wrapping_u8(add(rem, widen_u64(CH_ZERO))));
+        d3 = q3;
+        d2 = q2;
+        d1 = q1;
+        d0 = q0;
+    }
+    let mut i = digits.len();
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        o.push(u8_at(in digits, i));
+    }
+}
+
+// Signed two's-complement 128-bit integer `(lo, hi)` as unquoted decimal.
+fn push_i128(inout o: ChunkSeq[u8], lo: u64, hi: u64) {
+    if (hi & SIGN_BIT_64) == 0 {
+        push_u128(inout o, lo, hi);
+        return;
+    }
+    o.push(CH_MINUS);
+    let neg_lo = wrapping_sub(0, lo);
+    let borrow: u64 = if lo == 0 { 0 } else { 1 };
+    let neg_hi = wrapping_sub(wrapping_sub(0, hi), borrow);
+    push_u128(inout o, neg_lo, neg_hi);
+}
+
+fn push_float_json(inout o: ChunkSeq[u8], in names: Names, in ex: JsonExtras, bits: u64) {
+    if ex.has_float(bits) {
+        names.write(ex.float_sym(bits), inout o);
+        return;
+    }
+    // Fallback when `extras` is empty: non-finite floats are `null`, +/-0.0.
+    if (bits & EXP_MASK_F64) == EXP_MASK_F64 {
+        put(inout o, "null");
+    } else if (bits & MAGNITUDE_MASK_F64) == 0 {
+        if (bits & SIGN_BIT_64) != 0 {
+            put(inout o, "-0.0");
+        } else {
+            put(inout o, "0.0");
+        }
+    } else {
+        put(inout o, "0.0");
+    }
+}
+
+// ----- BTreeMap / BTreeSet ordering helpers -------------------------------------
+
+fn names_lt(in names: Names, a: u32, b: u32) -> bool {
+    if a == b {
+        return false;
+    }
+    let a0 = names.start(a);
+    let alen = wrapping_sub(names.end(a), a0);
+    let b0 = names.start(b);
+    let blen = wrapping_sub(names.end(b), b0);
+    let min_len = if alen < blen { alen } else { blen };
+    for i in 0..min_len {
+        let ca = u8_at(in names.text, add(a0, i));
+        let cb = u8_at(in names.text, add(b0, i));
+        if ca != cb {
+            return ca < cb;
+        }
+    }
+    alen < blen
+}
+
+// Insertion-sorts `(keys, vals)` in ascending UTF-8 order of `keys` (`u32` name symbols).
+// Already-sorted inputs from `Tables::of` run in O(n) with zero writes.
+fn sort_by_name(in names: Names, inout keys: ChunkSeq[u32], inout vals: ChunkSeq[u64]) {
+    let n = keys.len();
+    for i in 1..n {
+        let k = u32_at(in keys, i);
+        let v = u64_at(in vals, i);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let prev_idx = wrapping_sub(j, 1);
+            let prev_k = u32_at(in keys, prev_idx);
+            if !names_lt(in names, k, prev_k) {
+                break;
+            }
+            let _ = keys.try_set(j, prev_k);
+            let _ = vals.try_set(j, u64_at(in vals, prev_idx));
+            j = prev_idx;
+        }
+        if j != i {
+            let _ = keys.try_set(j, k);
+            let _ = vals.try_set(j, v);
+        }
+    }
+}
+
+// Insertion-sorts `(keys, vals)` in ascending numeric order of `keys`.
+fn sort_by_u64(inout keys: ChunkSeq[u64], inout vals: ChunkSeq[u64]) {
+    let n = keys.len();
+    for i in 1..n {
+        let k = u64_at(in keys, i);
+        let v = u64_at(in vals, i);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let prev_idx = wrapping_sub(j, 1);
+            let prev_k = u64_at(in keys, prev_idx);
+            if prev_k <= k {
+                break;
+            }
+            let _ = keys.try_set(j, prev_k);
+            let _ = vals.try_set(j, u64_at(in vals, prev_idx));
+            j = prev_idx;
+        }
+        if j != i {
+            let _ = keys.try_set(j, k);
+            let _ = vals.try_set(j, v);
+        }
+    }
+}
+
+// ----- AST / check-data types ---------------------------------------------------
+
+fn json_mode(inout o: ChunkSeq[u8], mode: u8) {
+    if mode == TyMode::Copy {
+        put(inout o, "\"Copy\"");
+    } else if mode == TyMode::Affine {
+        put(inout o, "\"Affine\"");
+    } else {
+        put(inout o, "\"Linear\"");
+    }
+}
+
+fn json_pass(inout o: ChunkSeq[u8], pass: u8) {
+    if pass == TyPass::In {
+        put(inout o, "\"In\"");
+    } else if pass == TyPass::Inout {
+        put(inout o, "\"Inout\"");
+    } else {
+        put(inout o, "\"Sink\"");
+    }
+}
+
+fn json_span(inout o: ChunkSeq[u8], s0: u64, s1: u64, depth: u64) {
+    let inner = inc(depth);
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "start");
+    push_decimal(inout o, s0);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "end");
+    push_decimal(inout o, s1);
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACE);
+}
+
+fn json_path(inout o: ChunkSeq[u8], in p: Program, in names: Names, path_idx: u64, depth: u64) {
+    let row = p.path(path_idx);
+    if row.n == 0 {
+        put(inout o, "[]");
+        return;
+    }
+    let inner = inc(depth);
+    o.push(CH_LBRACKET);
+    for k in 0..row.n {
+        if k > 0 {
+            o.push(CH_COMMA);
+        }
+        newline_indent(inout o, inner);
+        json_sym(inout o, in names, p.path_name(path_idx, k));
+    }
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACKET);
+}
+
+fn json_place(
+    inout o: ChunkSeq[u8],
+    in p: Program,
+    in names: Names,
+    root_sym: u32,
+    path_idx: u64,
+    depth: u64
+) {
+    let inner = inc(depth);
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "root");
+    json_sym(inout o, in names, root_sym);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "path");
+    json_path(inout o, in p, in names, path_idx, inner);
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACE);
+}
+
+fn json_effects(inout o: ChunkSeq[u8], in t: Types, in names: Names, row_id: u32, depth: u64) {
+    let row = t.row(row_id);
+    let inner = inc(depth);
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "instances");
+    if row.n == 0 {
+        put(inout o, "[]");
+    } else {
+        let elem_depth = inc(inner);
+        let field_depth = inc(elem_depth);
+        o.push(CH_LBRACKET);
+        for i in 0..w(row.n) {
+            if i > 0 {
+                o.push(CH_COMMA);
+            }
+            let eff = t.effect_at(add(w(row.a), i));
+            newline_indent(inout o, elem_depth);
+            o.push(CH_LBRACE);
+            o.push(CH_LF);
+            json_field_key(inout o, field_depth, "label");
+            json_opt_sym(inout o, in names, w(eff.label));
+            o.push(CH_COMMA);
+            o.push(CH_LF);
+            json_field_key(inout o, field_depth, "name");
+            json_sym(inout o, in names, eff.name);
+            o.push(CH_COMMA);
+            o.push(CH_LF);
+            json_field_key(inout o, field_depth, "args");
+            if eff.n == 0 {
+                put(inout o, "[]");
+            } else {
+                let arg_depth = inc(field_depth);
+                o.push(CH_LBRACKET);
+                for j in 0..w(eff.n) {
+                    if j > 0 {
+                        o.push(CH_COMMA);
+                    }
+                    newline_indent(inout o, arg_depth);
+                    json_type(
+                        inout o,
+                        in t,
+                        in names,
+                        u32_at(in t.items, add(w(eff.a), j)),
+                        arg_depth
+                    );
+                }
+                newline_indent(inout o, field_depth);
+                o.push(CH_RBRACKET);
+            }
+            newline_indent(inout o, elem_depth);
+            o.push(CH_RBRACE);
+        }
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACKET);
+    }
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "tail");
+    json_opt_sym(inout o, in names, w(row.tail));
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACE);
+}
+
+fn json_type_items(inout o: ChunkSeq[u8], in t: Types, in names: Names, ty: u32, depth: u64) {
+    let node = t.node(ty);
+    if node.n == 0 {
+        put(inout o, "[]");
+        return;
+    }
+    let inner = inc(depth);
+    o.push(CH_LBRACKET);
+    for i in 0..w(node.n) {
+        if i > 0 {
+            o.push(CH_COMMA);
+        }
+        newline_indent(inout o, inner);
+        json_type(inout o, in t, in names, u32_at(in t.items, add(w(node.a), i)), inner);
+    }
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACKET);
+}
+
+pub fn json_type(inout o: ChunkSeq[u8], in t: Types, in names: Names, ty: u32, depth: u64) {
+    let node = t.node(ty);
+    let inner = inc(depth);
+    if node.kind == TyKind::Lit {
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, inner, "IntLiteral");
+        if node.mode == NEGATIVE_TYPE_LIT_MODE {
+            o.push(CH_MINUS);
+        }
+        push_decimal(inout o, wrapping_u64(node.lit));
+        newline_indent(inout o, depth);
+        o.push(CH_RBRACE);
+    } else if node.kind == TyKind::Named {
+        let elem_depth = inc(inner);
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, inner, "Named");
+        o.push(CH_LBRACKET);
+        newline_indent(inout o, elem_depth);
+        json_sym(inout o, in names, node.name);
+        o.push(CH_COMMA);
+        newline_indent(inout o, elem_depth);
+        json_type_items(inout o, in t, in names, ty, elem_depth);
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACKET);
+        newline_indent(inout o, depth);
+        o.push(CH_RBRACE);
+    } else if node.kind == TyKind::Tuple {
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, inner, "Tuple");
+        json_type_items(inout o, in t, in names, ty, inner);
+        newline_indent(inout o, depth);
+        o.push(CH_RBRACE);
+    } else if node.kind == TyKind::Fn {
+        let fn_depth = inc(inner);
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, inner, "Function");
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, fn_depth, "params");
+        if node.n == 0 {
+            put(inout o, "[]");
+        } else {
+            let tup_depth = inc(fn_depth);
+            let item_depth = inc(tup_depth);
+            o.push(CH_LBRACKET);
+            for i in 0..w(node.n) {
+                if i > 0 {
+                    o.push(CH_COMMA);
+                }
+                newline_indent(inout o, tup_depth);
+                o.push(CH_LBRACKET);
+                newline_indent(inout o, item_depth);
+                json_pass(inout o, t.param_pass(ty, i));
+                o.push(CH_COMMA);
+                newline_indent(inout o, item_depth);
+                json_type(inout o, in t, in names, t.arg(ty, i), item_depth);
+                newline_indent(inout o, tup_depth);
+                o.push(CH_RBRACKET);
+            }
+            newline_indent(inout o, fn_depth);
+            o.push(CH_RBRACKET);
+        }
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, fn_depth, "result");
+        json_type(inout o, in t, in names, node.r, fn_depth);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, fn_depth, "effects");
+        json_effects(inout o, in t, in names, node.r2, fn_depth);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, fn_depth, "mode");
+        json_mode(inout o, node.mode);
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+        newline_indent(inout o, depth);
+        o.push(CH_RBRACE);
+    } else if node.kind == TyKind::Row {
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, inner, "Row");
+        json_effects(inout o, in t, in names, node.r2, inner);
+        newline_indent(inout o, depth);
+        o.push(CH_RBRACE);
+    } else {
+        put(inout o, "\"Infer\"");
+    }
+}
+
+// ----- literals, patterns, arguments --------------------------------------------
+
+fn json_literal(
+    inout o: ChunkSeq[u8],
+    in p: Program,
+    in names: Names,
+    in ex: JsonExtras,
+    at: u64,
+    depth: u64
+) {
+    let kind = wrapping_u8(p.op(at));
+    let lo = p.op(add(at, LIT_LO_OFFSET));
+    let hi = p.op(add(at, LIT_HI_OFFSET));
+    let inner = inc(depth);
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    if kind == Lit::Int {
+        json_field_key(inout o, inner, "Int");
+        push_i128(inout o, lo, hi);
+    } else if kind == Lit::Float {
+        json_field_key(inout o, inner, "Float");
+        push_float_json(inout o, in names, in ex, lo);
+    } else if kind == Lit::Bool {
+        json_field_key(inout o, inner, "Bool");
+        put_bool(inout o, lo != 0);
+    } else if kind == Lit::WideInt {
+        json_field_key(inout o, inner, "WideInt");
+        push_u128(inout o, lo, hi);
+    } else {
+        json_field_key(inout o, inner, "String");
+        json_sym(inout o, in names, n32(lo));
+    }
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACE);
+}
+
+// Emits a `Pattern` starting at `at` in `p.ops` and returns the next `ops` index.
+fn json_pattern(
+    inout o: ChunkSeq[u8],
+    in p: Program,
+    in names: Names,
+    in ex: JsonExtras,
+    at: u64,
+    depth: u64,
+    nest: u64
+) -> u64 {
+    let kind = wrapping_u8(p.op(at));
+    let s0 = p.op(add(at, PAT_SPAN_START_OFFSET));
+    let s1 = p.op(add(at, PAT_SPAN_END_OFFSET));
+    let mut pos = add(at, PAT_HEADER_WORDS);
+    let inner = inc(depth);
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "kind");
+    if nest > MAX_PATTERN_DEPTH {
+        put(inout o, "\"Wild\"");
+    } else if kind == Pat::Bind {
+        let sym = n32(p.op(pos));
+        pos = inc(pos);
+        let kind_inner = inc(inner);
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, kind_inner, "Bind");
+        json_sym(inout o, in names, sym);
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    } else if kind == Pat::Literal {
+        let kind_inner = inc(inner);
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, kind_inner, "Literal");
+        json_literal(inout o, in p, in names, in ex, pos, kind_inner);
+        pos = add(pos, LIT_WORDS);
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    } else if kind == Pat::Tuple {
+        let count = p.op(pos);
+        pos = inc(pos);
+        let kind_inner = inc(inner);
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, kind_inner, "Tuple");
+        if count == 0 {
+            put(inout o, "[]");
+        } else {
+            let elem_depth = inc(kind_inner);
+            o.push(CH_LBRACKET);
+            for i in 0..count {
+                if i > 0 {
+                    o.push(CH_COMMA);
+                }
+                newline_indent(inout o, elem_depth);
+                pos = json_pattern(inout o, in p, in names, in ex, pos, elem_depth, inc(nest));
+            }
+            newline_indent(inout o, kind_inner);
+            o.push(CH_RBRACKET);
+        }
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    } else if kind == Pat::Constructor {
+        let ctor_name = n32(p.op(pos));
+        let named = p.op(inc(pos)) != 0;
+        let count = p.op(add(pos, CTOR_PAT_COUNT_OFFSET));
+        pos = add(pos, CTOR_PAT_FIELDS_OFFSET);
+        let kind_inner = inc(inner);
+        let ctor_inner = inc(kind_inner);
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, kind_inner, "Constructor");
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, ctor_inner, "name");
+        json_sym(inout o, in names, ctor_name);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, ctor_inner, "fields");
+        if count == 0 {
+            put(inout o, "[]");
+        } else {
+            let pair_depth = inc(ctor_inner);
+            let item_depth = inc(pair_depth);
+            o.push(CH_LBRACKET);
+            for i in 0..count {
+                if i > 0 {
+                    o.push(CH_COMMA);
+                }
+                let field_sym = n32(p.op(pos));
+                pos = inc(pos);
+                newline_indent(inout o, pair_depth);
+                o.push(CH_LBRACKET);
+                newline_indent(inout o, item_depth);
+                json_sym(inout o, in names, field_sym);
+                o.push(CH_COMMA);
+                newline_indent(inout o, item_depth);
+                pos = json_pattern(inout o, in p, in names, in ex, pos, item_depth, inc(nest));
+                newline_indent(inout o, pair_depth);
+                o.push(CH_RBRACKET);
+            }
+            newline_indent(inout o, ctor_inner);
+            o.push(CH_RBRACKET);
+        }
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, ctor_inner, "named");
+        put_bool(inout o, named);
+        newline_indent(inout o, kind_inner);
+        o.push(CH_RBRACE);
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    } else {
+        put(inout o, "\"Wild\"");
+    }
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "span");
+    json_span(inout o, s0, s1, inner);
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACE);
+    pos
+}
+
+fn json_values(inout o: ChunkSeq[u8], in p: Program, at: u64, depth: u64) -> u64 {
+    let count = p.op(at);
+    let mut pos = inc(at);
+    if count == 0 {
+        put(inout o, "[]");
+        return pos;
+    }
+    let inner = inc(depth);
+    o.push(CH_LBRACKET);
+    for i in 0..count {
+        if i > 0 {
+            o.push(CH_COMMA);
+        }
+        newline_indent(inout o, inner);
+        push_decimal(inout o, p.op(pos));
+        pos = inc(pos);
+    }
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACKET);
+    pos
+}
+
+fn json_args(inout o: ChunkSeq[u8], in p: Program, in names: Names, at: u64, depth: u64) -> u64 {
+    let count = p.op(at);
+    let mut pos = inc(at);
+    if count == 0 {
+        put(inout o, "[]");
+        return pos;
+    }
+    let elem_depth = inc(depth);
+    let field_depth = inc(elem_depth);
+    o.push(CH_LBRACKET);
+    for i in 0..count {
+        if i > 0 {
+            o.push(CH_COMMA);
+        }
+        let pass = wrapping_u8(p.op(pos));
+        let val = p.op(add(pos, ARG_VALUE_OFFSET));
+        let root_opt = p.op(add(pos, ARG_ROOT_OFFSET));
+        let path_idx = p.op(add(pos, ARG_PATH_OFFSET));
+        pos = add(pos, ARG_WORDS);
+        newline_indent(inout o, elem_depth);
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, field_depth, "pass");
+        json_pass(inout o, pass);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, field_depth, "value");
+        push_decimal(inout o, val);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, field_depth, "place");
+        if root_opt == 0 {
+            put(inout o, "null");
+        } else {
+            json_place(
+                inout o,
+                in p,
+                in names,
+                n32(wrapping_sub(root_opt, 1)),
+                path_idx,
+                field_depth
+            );
+        }
+        newline_indent(inout o, elem_depth);
+        o.push(CH_RBRACE);
+    }
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACKET);
+    pos
+}
+
+fn json_aliases(inout o: ChunkSeq[u8], in p: Program, in names: Names, at: u64, depth: u64) -> u64 {
+    let count = p.op(at);
+    let mut pos = inc(at);
+    if count == 0 {
+        put(inout o, "{}");
+        return pos;
+    }
+    let mut keys = ChunkSeq::with_capacity[u32](count);
+    let mut vals = ChunkSeq::with_capacity[u64](count);
+    for _ in 0..count {
+        keys.push(n32(p.op(pos)));
+        vals.push(p.op(inc(pos)));
+        pos = add(pos, PAIR_WORDS);
+    }
+    sort_by_name(in names, inout keys, inout vals);
+    let inner = inc(depth);
+    o.push(CH_LBRACE);
+    for i in 0..count {
+        if i > 0 {
+            o.push(CH_COMMA);
+        }
+        newline_indent(inout o, inner);
+        json_sym(inout o, in names, u32_at(in keys, i));
+        put(inout o, ": ");
+        json_sym(inout o, in names, n32(u64_at(in vals, i)));
+    }
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACE);
+    pos
+}
+
+fn json_moves(inout o: ChunkSeq[u8], in p: Program, in names: Names, at: u64, depth: u64) -> u64 {
+    let count = p.op(at);
+    let mut pos = inc(at);
+    if count == 0 {
+        put(inout o, "[]");
+        return pos;
+    }
+    let inner = inc(depth);
+    o.push(CH_LBRACKET);
+    for i in 0..count {
+        if i > 0 {
+            o.push(CH_COMMA);
+        }
+        let root = n32(p.op(pos));
+        let path_idx = p.op(inc(pos));
+        pos = add(pos, PAIR_WORDS);
+        newline_indent(inout o, inner);
+        json_place(inout o, in p, in names, root, path_idx, inner);
+    }
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACKET);
+    pos
+}
+
+// ----- Pool payload parsers & JSON formatters -----------------------------------
+
+fn slice_eq(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        let ca = match a.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        let cb = match b.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        if ca != cb {
+            return false;
+        }
+    }
+    true
+}
+
+fn starts_with(in s: Slice[u8], in prefix: Slice[u8]) -> bool {
+    if s.len() < prefix.len() {
+        return false;
+    }
+    slice_eq(in s[0..prefix.len()], in prefix)
+}
+
+fn ends_with(in s: Slice[u8], in suffix: Slice[u8]) -> bool {
+    if s.len() < suffix.len() {
+        return false;
+    }
+    let at = wrapping_sub(s.len(), suffix.len());
+    slice_eq(in s[at..s.len()], in suffix)
+}
+
+// Index of `needle` inside `s`, or `s.len()` when absent.
+fn find_subslice(in s: Slice[u8], in needle: Slice[u8]) -> u64 {
+    if needle.len() == 0 {
+        return 0;
+    }
+    if s.len() < needle.len() {
+        return s.len();
+    }
+    let limit = inc(wrapping_sub(s.len(), needle.len()));
+    for i in 0..limit {
+        if slice_eq(in s[i..add(i, needle.len())], in needle) {
+            return i;
+        }
+    }
+    s.len()
+}
+
+fn hex_val(c: u8) -> u64 {
+    if c >= CH_ZERO && c <= CH_NINE {
+        widen_u64(wrapping_sub(c, CH_ZERO))
+    } else if c >= CH_LOWER_A && c <= CH_LOWER_F {
+        add(HEX_ALPHA_THRESHOLD, widen_u64(wrapping_sub(c, CH_LOWER_A)))
+    } else if c >= CH_UPPER_A && c <= CH_UPPER_F {
+        add(HEX_ALPHA_THRESHOLD, widen_u64(wrapping_sub(c, CH_UPPER_A)))
+    } else {
+        0
+    }
+}
+
+fn push_utf8_scalar(inout o: ChunkSeq[u8], code: u64) {
+    if code <= UTF8_ONE_MAX {
+        o.push(wrapping_u8(code));
+    } else if code <= UTF8_TWO_MAX {
+        o.push(wrapping_u8(UTF8_TWO_TAG | wrapping_shr_u64(code, UTF8_SHIFT_6)));
+        o.push(wrapping_u8(UTF8_CONT_TAG | (code & UTF8_CONT_MASK)));
+    } else if code <= UTF8_THREE_MAX {
+        o.push(wrapping_u8(UTF8_THREE_TAG | wrapping_shr_u64(code, UTF8_SHIFT_12)));
+        o.push(wrapping_u8(
+            UTF8_CONT_TAG | (wrapping_shr_u64(code, UTF8_SHIFT_6) & UTF8_CONT_MASK)
+        ));
+        o.push(wrapping_u8(UTF8_CONT_TAG | (code & UTF8_CONT_MASK)));
+    } else {
+        o.push(wrapping_u8(UTF8_FOUR_TAG | wrapping_shr_u64(code, UTF8_SHIFT_18)));
+        o.push(wrapping_u8(
+            UTF8_CONT_TAG | (wrapping_shr_u64(code, UTF8_SHIFT_12) & UTF8_CONT_MASK)
+        ));
+        o.push(wrapping_u8(
+            UTF8_CONT_TAG | (wrapping_shr_u64(code, UTF8_SHIFT_6) & UTF8_CONT_MASK)
+        ));
+        o.push(wrapping_u8(UTF8_CONT_TAG | (code & UTF8_CONT_MASK)));
+    }
+}
+
+// Unescapes a Rust `Debug`-quoted string starting at `s[0] == '"'` into `raw`,
+// returning the byte offset immediately after the closing `'"'`.
+fn unescape_debug_str(in s: Slice[u8], inout raw: ChunkSeq[u8]) -> u64 {
+    if s.len() == 0 {
+        return 0;
+    }
+    let mut i: u64 = 1;
+    loop {
+        if i >= s.len() {
+            break;
+        }
+        let c = match s.try_get(i) {
+            Option::Some(b) => b,
+            Option::None => 0,
+        };
+        i = inc(i);
+        if c == CH_QUOTE {
+            return i;
+        }
+        if c == CH_BACKSLASH && i < s.len() {
+            let esc = match s.try_get(i) {
+                Option::Some(b) => b,
+                Option::None => 0,
+            };
+            i = inc(i);
+            if esc == CH_BACKSLASH {
+                raw.push(CH_BACKSLASH);
+            } else if esc == CH_QUOTE {
+                raw.push(CH_QUOTE);
+            } else if esc == CH_SQUOTE {
+                raw.push(CH_SQUOTE);
+            } else if esc == CH_LOWER_N {
+                raw.push(CH_LF);
+            } else if esc == CH_LOWER_R {
+                raw.push(CH_CR);
+            } else if esc == CH_LOWER_T {
+                raw.push(CH_TAB);
+            } else if esc == CH_ZERO {
+                raw.push(0);
+            } else if esc == CH_LOWER_X && add(i, HEX_ESCAPE_DIGITS) <= s.len() {
+                let h1 = match s.try_get(i) {
+                    Option::Some(b) => b,
+                    Option::None => CH_ZERO,
+                };
+                let h2 = match s.try_get(inc(i)) {
+                    Option::Some(b) => b,
+                    Option::None => CH_ZERO,
+                };
+                i = add(i, HEX_ESCAPE_DIGITS);
+                raw.push(wrapping_u8(add(wrapping_mul(hex_val(h1), HEX_RADIX), hex_val(h2))));
+            } else if esc == CH_LOWER_U && i < s.len() {
+                // Skip '{' and read hex digits up to '}'.
+                i = inc(i);
+                let mut code: u64 = 0;
+                loop {
+                    if i >= s.len() {
+                        break;
+                    }
+                    let ch = match s.try_get(i) {
+                        Option::Some(b) => b,
+                        Option::None => CH_RBRACE,
+                    };
+                    i = inc(i);
+                    if ch == CH_RBRACE {
+                        break;
+                    }
+                    code = add(wrapping_mul(code, HEX_RADIX), hex_val(ch));
+                }
+                push_utf8_scalar(inout raw, code);
+            } else {
+                raw.push(esc);
+            }
+        } else {
+            raw.push(c);
+        }
+    }
+    i
+}
+
+fn json_quoted_raw(inout o: ChunkSeq[u8], in ident: Slice[u8]) {
+    o.push(CH_QUOTE);
+    o.extend(in ident);
+    o.push(CH_QUOTE);
+}
+
+// Formats `Shape { elem: <E>, lanes: <L> }` into JSON.
+fn json_shape_debug(inout o: ChunkSeq[u8], in s: Slice[u8], depth: u64) {
+    let pfx = "Shape { elem: ".as_bytes();
+    let sfx = " }".as_bytes();
+    let inner_slice = s[pfx.len()..wrapping_sub(s.len(), sfx.len())];
+    let sep = ", lanes: ".as_bytes();
+    let at = find_subslice(in inner_slice, in sep);
+    let elem = inner_slice[0..at];
+    let lanes = inner_slice[add(at, sep.len())..inner_slice.len()];
+    let inner = inc(depth);
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "elem");
+    json_quoted_raw(inout o, in elem);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "lanes");
+    o.extend(in lanes);
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACE);
+}
+
+fn json_wide_fields(
+    inout o: ChunkSeq[u8],
+    bytes_val: u64,
+    big: bool,
+    write_flag: bool,
+    total: bool,
+    depth: u64
+) {
+    let inner = inc(depth);
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "bytes");
+    push_decimal(inout o, bytes_val);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "big");
+    put_bool(inout o, big);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "write");
+    put_bool(inout o, write_flag);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "total");
+    put_bool(inout o, total);
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACE);
+}
+
+// Formats `Wide(Wide { bytes: <B>, big: <G>, write: <W>, total: <T> })` as `{"Wide": { ... }}`.
+fn json_wide_debug(inout o: ChunkSeq[u8], in s: Slice[u8], depth: u64) {
+    let pfx = "Wide(Wide { bytes: ".as_bytes();
+    let sfx = " })".as_bytes();
+    let body = s[pfx.len()..wrapping_sub(s.len(), sfx.len())];
+    let s_big = ", big: ".as_bytes();
+    let s_write = ", write: ".as_bytes();
+    let s_total = ", total: ".as_bytes();
+    let i_big = find_subslice(in body, in s_big);
+    let after_big = add(i_big, s_big.len());
+    let rest1 = body[after_big..body.len()];
+    let i_write = find_subslice(in rest1, in s_write);
+    let after_write = add(i_write, s_write.len());
+    let rest2 = rest1[after_write..rest1.len()];
+    let i_total = find_subslice(in rest2, in s_total);
+    let inner = inc(depth);
+    let w_depth = inc(inner);
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "Wide");
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, w_depth, "bytes");
+    o.extend(in body[0..i_big]);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, w_depth, "big");
+    o.extend(in rest1[0..i_write]);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, w_depth, "write");
+    o.extend(in rest2[0..i_total]);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, w_depth, "total");
+    o.extend(in rest2[add(i_total, s_total.len())..rest2.len()]);
+    newline_indent(inout o, inner);
+    o.push(CH_RBRACE);
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACE);
+}
+
+fn json_guard_values(
+    inout o: ChunkSeq[u8],
+    inclusive: bool,
+    negated: bool,
+    plus: u64,
+    minus: u64,
+    scaled: bool,
+    outer_plus: u64,
+    outer_minus: u64,
+    width: u64,
+    depth: u64
+) {
+    let inner = inc(depth);
+    let bg_depth = inc(inner);
+    let form_depth = inc(bg_depth);
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "BoundsGuard");
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, bg_depth, "inclusive");
+    put_bool(inout o, inclusive);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, bg_depth, "form");
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, form_depth, "negated");
+    put_bool(inout o, negated);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, form_depth, "plus");
+    push_decimal(inout o, plus);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, form_depth, "minus");
+    push_decimal(inout o, minus);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, form_depth, "scaled");
+    put_bool(inout o, scaled);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, form_depth, "outer_plus");
+    push_decimal(inout o, outer_plus);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, form_depth, "outer_minus");
+    push_decimal(inout o, outer_minus);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, form_depth, "width");
+    push_decimal(inout o, width);
+    newline_indent(inout o, bg_depth);
+    o.push(CH_RBRACE);
+    newline_indent(inout o, inner);
+    o.push(CH_RBRACE);
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACE);
+}
+
+fn parse_u64_slice(in s: Slice[u8]) -> u64 {
+    let mut v: u64 = 0;
+    for i in 0..s.len() {
+        let c = match s.try_get(i) {
+            Option::Some(b) => b,
+            Option::None => CH_ZERO,
+        };
+        if c >= CH_ZERO && c <= CH_NINE {
+            v = add(wrapping_mul(v, DECIMAL_RADIX), widen_u64(wrapping_sub(c, CH_ZERO)));
+        }
+    }
+    v
+}
+
+fn json_seq_debug(inout o: ChunkSeq[u8], in s: Slice[u8], depth: u64) {
+    let inner = inc(depth);
+    let brace_sfx = " }".as_bytes();
+    let paren_sfx = ")".as_bytes();
+    let total_sep = " { total: ".as_bytes();
+    let total_at = find_subslice(in s, in total_sep);
+    if total_at < s.len() && ends_with(in s, in brace_sfx) {
+        let variant = s[0..total_at];
+        let val_slice = s[add(total_at, total_sep.len())..wrapping_sub(s.len(), brace_sfx.len())];
+        let v_depth = inc(inner);
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        indent(inout o, inner);
+        json_quoted_raw(inout o, in variant);
+        put(inout o, ": {\n");
+        json_field_key(inout o, v_depth, "total");
+        o.extend(in val_slice);
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+        newline_indent(inout o, depth);
+        o.push(CH_RBRACE);
+        return;
+    }
+    let width_sep = " { width: ".as_bytes();
+    let width_at = find_subslice(in s, in width_sep);
+    if width_at < s.len() && ends_with(in s, in brace_sfx) {
+        let variant = s[0..width_at];
+        let w_slice = s[add(width_at, width_sep.len())..wrapping_sub(s.len(), brace_sfx.len())];
+        let some_pfx = "Some(".as_bytes();
+        let v_depth = inc(inner);
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        indent(inout o, inner);
+        json_quoted_raw(inout o, in variant);
+        put(inout o, ": {\n");
+        json_field_key(inout o, v_depth, "width");
+        if slice_eq(in w_slice, in "None".as_bytes()) {
+            put(inout o, "null");
+        } else {
+            o.extend(in w_slice[some_pfx.len()..wrapping_sub(w_slice.len(), paren_sfx.len())]);
+        }
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+        newline_indent(inout o, depth);
+        o.push(CH_RBRACE);
+        return;
+    }
+    let str_pfx = "Str(".as_bytes();
+    if starts_with(in s, in str_pfx) && ends_with(in s, in paren_sfx) {
+        let sub = s[str_pfx.len()..wrapping_sub(s.len(), paren_sfx.len())];
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, inner, "Str");
+        json_quoted_raw(inout o, in sub);
+        newline_indent(inout o, depth);
+        o.push(CH_RBRACE);
+        return;
+    }
+    if starts_with(in s, in "Wide(Wide { ".as_bytes()) {
+        json_wide_debug(inout o, in s, depth);
+        return;
+    }
+    let hoist_pfx = "Hoisted(".as_bytes();
+    if starts_with(in s, in hoist_pfx) && ends_with(in s, in paren_sfx) {
+        let acc = s[hoist_pfx.len()..wrapping_sub(s.len(), paren_sfx.len())];
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, inner, "Hoisted");
+        if starts_with(in acc, in "Wide(Wide { ".as_bytes()) {
+            json_wide_debug(inout o, in acc, inner);
+        } else {
+            json_quoted_raw(inout o, in acc);
+        }
+        newline_indent(inout o, depth);
+        o.push(CH_RBRACE);
+        return;
+    }
+    let guard_sfx = " } }".as_bytes();
+    if starts_with(in s, in "BoundsGuard { ".as_bytes()) && ends_with(in s, in guard_sfx) {
+        let pfx = "BoundsGuard { inclusive: ".as_bytes();
+        let body = s[pfx.len()..wrapping_sub(s.len(), guard_sfx.len())];
+        let s_form = ", form: IndexForm { negated: ".as_bytes();
+        let s_plus = ", plus: ".as_bytes();
+        let s_minus = ", minus: ".as_bytes();
+        let s_scaled = ", scaled: ".as_bytes();
+        let s_op = ", outer_plus: ".as_bytes();
+        let s_om = ", outer_minus: ".as_bytes();
+        let s_w = ", width: ".as_bytes();
+        let i0 = find_subslice(in body, in s_form);
+        let inc_flag = slice_eq(in body[0..i0], in "true".as_bytes());
+        let r0 = body[add(i0, s_form.len())..body.len()];
+        let i1 = find_subslice(in r0, in s_plus);
+        let neg_flag = slice_eq(in r0[0..i1], in "true".as_bytes());
+        let r1 = r0[add(i1, s_plus.len())..r0.len()];
+        let i2 = find_subslice(in r1, in s_minus);
+        let plus = parse_u64_slice(in r1[0..i2]);
+        let r2 = r1[add(i2, s_minus.len())..r1.len()];
+        let i3 = find_subslice(in r2, in s_scaled);
+        let minus = parse_u64_slice(in r2[0..i3]);
+        let r3 = r2[add(i3, s_scaled.len())..r2.len()];
+        let i4 = find_subslice(in r3, in s_op);
+        let scaled_flag = slice_eq(in r3[0..i4], in "true".as_bytes());
+        let r4 = r3[add(i4, s_op.len())..r3.len()];
+        let i5 = find_subslice(in r4, in s_om);
+        let op_val = parse_u64_slice(in r4[0..i5]);
+        let r5 = r4[add(i5, s_om.len())..r4.len()];
+        let i6 = find_subslice(in r5, in s_w);
+        let om_val = parse_u64_slice(in r5[0..i6]);
+        let w_val = parse_u64_slice(in r5[add(i6, s_w.len())..r5.len()]);
+        json_guard_values(
+            inout o,
+            inc_flag,
+            neg_flag,
+            plus,
+            minus,
+            scaled_flag,
+            op_val,
+            om_val,
+            w_val,
+            depth
+        );
+        return;
+    }
+    let vec_sfx = " })".as_bytes();
+    if starts_with(in s, in "Vector(SliceIo { ".as_bytes()) && ends_with(in s, in vec_sfx) {
+        let pfx = "Vector(SliceIo { shape: ".as_bytes();
+        let body = s[pfx.len()..wrapping_sub(s.len(), vec_sfx.len())];
+        let s_store = ", store: ".as_bytes();
+        let s_masked = ", masked: ".as_bytes();
+        let i_store = find_subslice(in body, in s_store);
+        let r_store = body[add(i_store, s_store.len())..body.len()];
+        let i_masked = find_subslice(in r_store, in s_masked);
+        let io_depth = inc(inner);
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, inner, "Vector");
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, io_depth, "shape");
+        json_shape_debug(inout o, in body[0..i_store], io_depth);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, io_depth, "store");
+        o.extend(in r_store[0..i_masked]);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, io_depth, "masked");
+        o.extend(in r_store[add(i_masked, s_masked.len())..r_store.len()]);
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+        newline_indent(inout o, depth);
+        o.push(CH_RBRACE);
+        return;
+    }
+    json_quoted_raw(inout o, in s);
+}
+
+fn json_hoisted_code(inout o: ChunkSeq[u8], code: u64, depth: u64) {
+    let inner = inc(depth);
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "Hoisted");
+    if code == HOISTED_GET {
+        put(inout o, "\"Get\"");
+    } else if code == HOISTED_SET {
+        put(inout o, "\"Set\"");
+    } else if code == HOISTED_TRY_GET {
+        put(inout o, "\"TryGet\"");
+    } else if code >= HOISTED_WIDE_BASE && code < HOISTED_WIDE_LIMIT {
+        let k = wrapping_sub(code, HOISTED_WIDE_BASE);
+        let w_kind = (k / WIDE_WIDTH_DIVISOR) % WIDE_WIDTH_COUNT;
+        let bytes_val = if w_kind == 0 {
+            WIDE_BYTES_U16
+        } else if w_kind == 1 {
+            WIDE_BYTES_U32
+        } else {
+            WIDE_BYTES_U64
+        };
+        let big = (k % WIDE_WIDTH_DIVISOR) == 1;
+        let write_flag = ((k / WIDE_WRITE_STRIDE) % WIDE_WIDTH_DIVISOR) == 1;
+        let total = k >= WIDE_TOTAL_STRIDE;
+        let wide_inner = inc(inner);
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, wide_inner, "Wide");
+        json_wide_fields(inout o, bytes_val, big, write_flag, total, wide_inner);
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    } else {
+        put(inout o, "\"TrySet\"");
+    }
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACE);
+}
+
+fn json_guard_code(inout o: ChunkSeq[u8], label: u64, depth: u64) {
+    let inclusive = (label & GUARD_INCLUSIVE_BIT) != 0;
+    let negated = (label & GUARD_NEGATED_BIT) != 0;
+    let scaled = (label & GUARD_SCALED_BIT) != 0;
+    let plus = wrapping_shr_u64(label, GUARD_PLUS_SHIFT) & GUARD_NIBBLE_MASK;
+    let minus = wrapping_shr_u64(label, GUARD_MINUS_SHIFT) & GUARD_NIBBLE_MASK;
+    let op_val = wrapping_shr_u64(label, GUARD_OUTER_PLUS_SHIFT) & GUARD_NIBBLE_MASK;
+    let om_val = wrapping_shr_u64(label, GUARD_OUTER_MINUS_SHIFT) & GUARD_NIBBLE_MASK;
+    let raw_w = wrapping_shr_u64(label, GUARD_WIDTH_SHIFT) & GUARD_BYTE_MASK;
+    let width = if raw_w == 0 { 1 } else { raw_w };
+    json_guard_values(
+        inout o,
+        inclusive,
+        negated,
+        plus,
+        minus,
+        scaled,
+        op_val,
+        om_val,
+        width,
+        depth
+    );
+}
+
+fn json_vector_debug(inout o: ChunkSeq[u8], in s: Slice[u8], depth: u64) {
+    let inner = inc(depth);
+    let isa_pfx = "IsaSupported(".as_bytes();
+    let paren_sfx = ")".as_bytes();
+    if starts_with(in s, in isa_pfx) && ends_with(in s, in paren_sfx) {
+        let prof = s[isa_pfx.len()..wrapping_sub(s.len(), paren_sfx.len())];
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, inner, "IsaSupported");
+        json_quoted_raw(inout o, in prof);
+        newline_indent(inout o, depth);
+        o.push(CH_RBRACE);
+        return;
+    }
+    // `Lanes { intrinsic: <I>, shape: <S>, constants: [<C>] }`
+    let pfx = "Lanes { intrinsic: ".as_bytes();
+    let brace_sfx = " }".as_bytes();
+    let body = s[pfx.len()..wrapping_sub(s.len(), brace_sfx.len())];
+    let s_shape = ", shape: ".as_bytes();
+    let s_consts = ", constants: [".as_bytes();
+    let i_shape = find_subslice(in body, in s_shape);
+    let intr = body[0..i_shape];
+    let r_shape = body[add(i_shape, s_shape.len())..body.len()];
+    let i_consts = find_subslice(in r_shape, in s_consts);
+    let shape_slice = r_shape[0..i_consts];
+    let consts_slice = r_shape[add(i_consts, s_consts.len())..wrapping_sub(r_shape.len(), 1)];
+    let lanes_depth = inc(inner);
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "Lanes");
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, lanes_depth, "intrinsic");
+    let paren = find_subslice(in intr, in "(".as_bytes());
+    if paren < intr.len() && ends_with(in intr, in ")".as_bytes()) {
+        let outer_name = intr[0..paren];
+        let inner_name = intr[inc(paren)..wrapping_sub(intr.len(), 1)];
+        let intr_depth = inc(lanes_depth);
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        indent(inout o, intr_depth);
+        json_quoted_raw(inout o, in outer_name);
+        put(inout o, ": ");
+        json_quoted_raw(inout o, in inner_name);
+        newline_indent(inout o, lanes_depth);
+        o.push(CH_RBRACE);
+    } else {
+        json_quoted_raw(inout o, in intr);
+    }
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, lanes_depth, "shape");
+    json_shape_debug(inout o, in shape_slice, lanes_depth);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, lanes_depth, "constants");
+    if consts_slice.len() == 0 {
+        put(inout o, "[]");
+    } else {
+        let c_depth = inc(lanes_depth);
+        let sep = ", ".as_bytes();
+        o.push(CH_LBRACKET);
+        let mut pos: u64 = 0;
+        let mut first = true;
+        loop {
+            let rem = consts_slice[pos..consts_slice.len()];
+            let next_sep = find_subslice(in rem, in sep);
+            if !first {
+                o.push(CH_COMMA);
+            }
+            first = false;
+            newline_indent(inout o, c_depth);
+            if next_sep >= rem.len() {
+                o.extend(in rem);
+                break;
+            }
+            o.extend(in rem[0..next_sep]);
+            pos = add(pos, add(next_sep, sep.len()));
+        }
+        newline_indent(inout o, lanes_depth);
+        o.push(CH_RBRACKET);
+    }
+    newline_indent(inout o, inner);
+    o.push(CH_RBRACE);
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACE);
+}
+
+fn json_tiled_debug(inout o: ChunkSeq[u8], in s: Slice[u8], depth: u64) {
+    if slice_eq(in s, in "Len".as_bytes()) {
+        put(inout o, "\"Len\"");
+        return;
+    }
+    let inner = inc(depth);
+    let v_depth = inc(inner);
+    let brace_sfx = " }".as_bytes();
+    let tile_pfx = "TileCount { tile_width: ".as_bytes();
+    if starts_with(in s, in tile_pfx) && ends_with(in s, in brace_sfx) {
+        let w_slice = s[tile_pfx.len()..wrapping_sub(s.len(), brace_sfx.len())];
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, inner, "TileCount");
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "tile_width");
+        o.extend(in w_slice);
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+        newline_indent(inout o, depth);
+        o.push(CH_RBRACE);
+        return;
+    }
+    let sep = " { adt: ".as_bytes();
+    let kind_end = find_subslice(in s, in sep);
+    let kind = s[0..kind_end];
+    let body = s[add(kind_end, sep.len())..wrapping_sub(s.len(), brace_sfx.len())];
+    let mut adt_raw = ChunkSeq::new[u8]();
+    let after_adt = unescape_debug_str(in body, inout adt_raw);
+    let tail = body[after_adt..body.len()];
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    indent(inout o, inner);
+    json_quoted_raw(inout o, in kind);
+    put(inout o, ": {\n");
+    json_field_key(inout o, v_depth, "adt");
+    json_bytes(inout o, in adt_raw.as_slice());
+    if slice_eq(in kind, in "WithRegion".as_bytes()) {
+        let r_pfx = ", region_label: ".as_bytes();
+        let mut reg_raw = ChunkSeq::new[u8]();
+        let _ = unescape_debug_str(in tail[r_pfx.len()..tail.len()], inout reg_raw);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "region_label");
+        json_bytes(inout o, in reg_raw.as_slice());
+    } else if slice_eq(in kind, in "ColGet".as_bytes())
+        || slice_eq(in kind, in "ColSet".as_bytes())
+    {
+        let f_pfx = ", field: ".as_bytes();
+        let mut fld_raw = ChunkSeq::new[u8]();
+        let _ = unescape_debug_str(in tail[f_pfx.len()..tail.len()], inout fld_raw);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "field");
+        json_bytes(inout o, in fld_raw.as_slice());
+    } else if slice_eq(in kind, in "LoadTileVec".as_bytes()) {
+        let f_pfx = ", field: ".as_bytes();
+        let after_fpfx = tail[f_pfx.len()..tail.len()];
+        let mut fld_raw = ChunkSeq::new[u8]();
+        let after_fld = unescape_debug_str(in after_fpfx, inout fld_raw);
+        let sh_pfx = ", shape: ".as_bytes();
+        let sh_slice = after_fpfx[add(after_fld, sh_pfx.len())..after_fpfx.len()];
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "field");
+        json_bytes(inout o, in fld_raw.as_slice());
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "shape");
+        json_shape_debug(inout o, in sh_slice, v_depth);
+    }
+    newline_indent(inout o, inner);
+    o.push(CH_RBRACE);
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACE);
+}
+
+fn json_fip_debug(inout o: ChunkSeq[u8], in s: Slice[u8], depth: u64) {
+    if slice_eq(in s, in "BoxNew".as_bytes()) || slice_eq(in s, in "BoxNewInCaller".as_bytes()) {
+        json_quoted_raw(inout o, in s);
+        return;
+    }
+    let pfx = "BoxReuse { bind_dest: ".as_bytes();
+    let brace_sfx = " }".as_bytes();
+    let body = s[pfx.len()..wrapping_sub(s.len(), brace_sfx.len())];
+    let s_slot = ", slot_index: ".as_bytes();
+    let s_size = ", size: ".as_bytes();
+    let i_slot = find_subslice(in body, in s_slot);
+    let r_slot = body[add(i_slot, s_slot.len())..body.len()];
+    let i_size = find_subslice(in r_slot, in s_size);
+    let inner = inc(depth);
+    let r_depth = inc(inner);
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "BoxReuse");
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, r_depth, "bind_dest");
+    o.extend(in body[0..i_slot]);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, r_depth, "slot_index");
+    o.extend(in r_slot[0..i_size]);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, r_depth, "size");
+    o.extend(in r_slot[add(i_size, s_size.len())..r_slot.len()]);
+    newline_indent(inout o, inner);
+    o.push(CH_RBRACE);
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACE);
+}
+
+fn json_expr_pool(
+    inout o: ChunkSeq[u8],
+    in names: Names,
+    in ex: JsonExtras,
+    pool_idx: u64,
+    depth: u64
+) {
+    let sym = ex.expr_sym(pool_idx);
+    if sym != 0 {
+        let a = names.start(sym);
+        let e = names.end(sym);
+        for i in a..e {
+            let c = u8_at(in names.text, i);
+            o.push(c);
+            if c == CH_LF {
+                indent(inout o, depth);
+            }
+        }
+        return;
+    }
+    let inner = inc(depth);
+    let k_depth = inc(inner);
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "kind");
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, k_depth, "Tuple");
+    put(inout o, "[]");
+    newline_indent(inout o, inner);
+    o.push(CH_RBRACE);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "span");
+    json_span(inout o, 0, 0, inner);
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACE);
+}
+
+fn json_pool_op(
+    inout o: ChunkSeq[u8],
+    in p: Program,
+    in names: Names,
+    in ex: JsonExtras,
+    pool_idx: u64,
+    depth: u64
+) {
+    let row = p.pool_row(pool_idx);
+    if row.kind == PoolKind::Hoisted {
+        json_hoisted_code(inout o, w(row.label), depth);
+        return;
+    }
+    if row.kind == PoolKind::Guard {
+        json_guard_code(inout o, w(row.label), depth);
+        return;
+    }
+    if row.kind == PoolKind::Expr {
+        json_expr_pool(inout o, in names, in ex, pool_idx, depth);
+        return;
+    }
+    let a = names.start(row.label);
+    let e = names.end(row.label);
+    let s = names.text[a..e];
+    if row.kind == PoolKind::Seq || row.kind == PoolKind::MakeSeq {
+        json_seq_debug(inout o, in s, depth);
+    } else if row.kind == PoolKind::Vector || row.kind == PoolKind::MakeVector {
+        json_vector_debug(inout o, in s, depth);
+    } else if row.kind == PoolKind::Tiled || row.kind == PoolKind::MakeTiled {
+        json_tiled_debug(inout o, in s, depth);
+    } else {
+        json_fip_debug(inout o, in s, depth);
+    }
+}
+
+// ----- Op, Instruction, Terminator, Block, FunctionIr, Program ------------------
+
+fn json_op(
+    inout o: ChunkSeq[u8],
+    in p: Program,
+    in t: Types,
+    in names: Names,
+    in ex: JsonExtras,
+    opcode: u8,
+    at: u64,
+    depth: u64
+) {
+    if opcode == Op::Unit {
+        put(inout o, "\"Unit\"");
+        return;
+    }
+    if opcode == Op::Loop {
+        put(inout o, "\"Loop\"");
+        return;
+    }
+    let inner = inc(depth);
+    let v_depth = inc(inner);
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    if opcode == Op::Const {
+        json_field_key(inout o, inner, "Constant");
+        json_literal(inout o, in p, in names, in ex, at, inner);
+    } else if opcode == Op::Read {
+        let root = n32(p.op(at));
+        let path_idx = p.op(inc(at));
+        let pass = wrapping_u8(p.op(add(at, READ_PASS_OFFSET)));
+        let nproj = p.op(add(at, READ_NPROJ_OFFSET));
+        json_field_key(inout o, inner, "Read");
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "root");
+        json_sym(inout o, in names, root);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "path");
+        json_path(inout o, in p, in names, path_idx, v_depth);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "pass");
+        json_pass(inout o, pass);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "projections");
+        if nproj == 0 {
+            put(inout o, "[]");
+        } else {
+            let p_depth = inc(v_depth);
+            o.push(CH_LBRACKET);
+            for i in 0..nproj {
+                if i > 0 {
+                    o.push(CH_COMMA);
+                }
+                newline_indent(inout o, p_depth);
+                json_path(
+                    inout o,
+                    in p,
+                    in names,
+                    p.op(add(at, add(READ_PROJS_OFFSET, i))),
+                    p_depth
+                );
+            }
+            newline_indent(inout o, v_depth);
+            o.push(CH_RBRACKET);
+        }
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    } else if opcode == Op::Bind {
+        let val = p.op(at);
+        json_field_key(inout o, inner, "Bind");
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "pattern");
+        let _ = json_pattern(inout o, in p, in names, in ex, inc(at), v_depth, 0);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "value");
+        push_decimal(inout o, val);
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    } else if opcode == Op::Write {
+        json_field_key(inout o, inner, "Write");
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "place");
+        json_sym(inout o, in names, n32(p.op(at)));
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "op");
+        json_sym(inout o, in names, n32(p.op(inc(at))));
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "value");
+        push_decimal(inout o, p.op(add(at, WRITE_VALUE_OFFSET)));
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    } else if opcode == Op::Unary {
+        json_field_key(inout o, inner, "Unary");
+        o.push(CH_LBRACKET);
+        newline_indent(inout o, v_depth);
+        json_sym(inout o, in names, n32(p.op(at)));
+        o.push(CH_COMMA);
+        newline_indent(inout o, v_depth);
+        push_decimal(inout o, p.op(inc(at)));
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACKET);
+    } else if opcode == Op::Binary {
+        json_field_key(inout o, inner, "Binary");
+        o.push(CH_LBRACKET);
+        newline_indent(inout o, v_depth);
+        json_sym(inout o, in names, n32(p.op(at)));
+        o.push(CH_COMMA);
+        newline_indent(inout o, v_depth);
+        push_decimal(inout o, p.op(inc(at)));
+        o.push(CH_COMMA);
+        newline_indent(inout o, v_depth);
+        push_decimal(inout o, p.op(add(at, BINARY_RHS_OFFSET)));
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACKET);
+    } else if opcode == Op::Tuple {
+        json_field_key(inout o, inner, "Tuple");
+        let _ = json_values(inout o, in p, at, inner);
+    } else if opcode == Op::Data {
+        let name_sym = n32(p.op(at));
+        let nfields = p.op(inc(at));
+        let mut pos = add(at, DATA_FIELDS_OFFSET);
+        json_field_key(inout o, inner, "Data");
+        o.push(CH_LBRACKET);
+        newline_indent(inout o, v_depth);
+        json_sym(inout o, in names, name_sym);
+        o.push(CH_COMMA);
+        newline_indent(inout o, v_depth);
+        if nfields == 0 {
+            put(inout o, "[]");
+        } else {
+            let pair_depth = inc(v_depth);
+            let item_depth = inc(pair_depth);
+            o.push(CH_LBRACKET);
+            for i in 0..nfields {
+                if i > 0 {
+                    o.push(CH_COMMA);
+                }
+                newline_indent(inout o, pair_depth);
+                o.push(CH_LBRACKET);
+                newline_indent(inout o, item_depth);
+                json_sym(inout o, in names, n32(p.op(pos)));
+                o.push(CH_COMMA);
+                newline_indent(inout o, item_depth);
+                push_decimal(inout o, p.op(inc(pos)));
+                pos = add(pos, PAIR_WORDS);
+                newline_indent(inout o, pair_depth);
+                o.push(CH_RBRACKET);
+            }
+            newline_indent(inout o, v_depth);
+            o.push(CH_RBRACKET);
+        }
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACKET);
+    } else if opcode == Op::Project {
+        json_field_key(inout o, inner, "Project");
+        o.push(CH_LBRACKET);
+        newline_indent(inout o, v_depth);
+        push_decimal(inout o, p.op(at));
+        o.push(CH_COMMA);
+        newline_indent(inout o, v_depth);
+        json_sym(inout o, in names, n32(p.op(inc(at))));
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACKET);
+    } else if opcode == Op::Index {
+        json_field_key(inout o, inner, "Index");
+        o.push(CH_LBRACKET);
+        newline_indent(inout o, v_depth);
+        push_decimal(inout o, p.op(at));
+        o.push(CH_COMMA);
+        newline_indent(inout o, v_depth);
+        push_decimal(inout o, p.op(inc(at)));
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACKET);
+    } else if opcode == Op::Call {
+        let callee = n32(p.op(at));
+        json_field_key(inout o, inner, "Call");
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "callee");
+        json_sym(inout o, in names, callee);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "args");
+        let mut pos = json_args(inout o, in p, in names, inc(at), v_depth);
+        let ntypes = p.op(pos);
+        pos = inc(pos);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "types");
+        if ntypes == 0 {
+            put(inout o, "[]");
+        } else {
+            let ty_depth = inc(v_depth);
+            o.push(CH_LBRACKET);
+            for i in 0..ntypes {
+                if i > 0 {
+                    o.push(CH_COMMA);
+                }
+                newline_indent(inout o, ty_depth);
+                json_type(inout o, in t, in names, n32(p.op(pos)), ty_depth);
+                pos = inc(pos);
+            }
+            newline_indent(inout o, v_depth);
+            o.push(CH_RBRACKET);
+        }
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "capability");
+        json_opt_sym(inout o, in names, p.op(pos));
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    } else if opcode == Op::Indirect {
+        json_field_key(inout o, inner, "Indirect");
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "callee");
+        push_decimal(inout o, p.op(at));
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "args");
+        let _ = json_args(inout o, in p, in names, inc(at), v_depth);
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    } else if opcode == Op::Try {
+        json_field_key(inout o, inner, "Try");
+        push_decimal(inout o, p.op(at));
+    } else if opcode == Op::Closure {
+        let pool_idx = p.op(at);
+        json_field_key(inout o, inner, "Closure");
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "expr");
+        json_pool_op(inout o, in p, in names, in ex, pool_idx, v_depth);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "aliases");
+        let pos = json_aliases(inout o, in p, in names, inc(at), v_depth);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "moves");
+        let _ = json_moves(inout o, in p, in names, pos, v_depth);
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    } else if opcode == Op::Handle {
+        let has_state = p.op(at) != 0;
+        let state_val = p.op(inc(at));
+        let pool_idx = p.op(add(at, HANDLE_POOL_OFFSET));
+        json_field_key(inout o, inner, "Handle");
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "state_value");
+        if has_state {
+            push_decimal(inout o, state_val);
+        } else {
+            put(inout o, "null");
+        }
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "expr");
+        json_pool_op(inout o, in p, in names, in ex, pool_idx, v_depth);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "aliases");
+        let pos = json_aliases(inout o, in p, in names, add(at, HANDLE_ALIASES_OFFSET), v_depth);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "moves");
+        let _ = json_moves(inout o, in p, in names, pos, v_depth);
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    } else if opcode == Op::Vector {
+        json_field_key(inout o, inner, "Vector");
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "op");
+        json_pool_op(inout o, in p, in names, in ex, p.op(at), v_depth);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "args");
+        let _ = json_values(inout o, in p, inc(at), v_depth);
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    } else if opcode == Op::Tiled {
+        json_field_key(inout o, inner, "Tiled");
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "op");
+        json_pool_op(inout o, in p, in names, in ex, p.op(at), v_depth);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "args");
+        let pos = json_args(inout o, in p, in names, inc(at), v_depth);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "capability");
+        json_opt_sym(inout o, in names, p.op(pos));
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    } else if opcode == Op::Seq {
+        json_field_key(inout o, inner, "Seq");
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "op");
+        json_pool_op(inout o, in p, in names, in ex, p.op(at), v_depth);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "args");
+        let _ = json_args(inout o, in p, in names, inc(at), v_depth);
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    } else if opcode == Op::Fip {
+        json_field_key(inout o, inner, "Fip");
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "op");
+        json_pool_op(inout o, in p, in names, in ex, p.op(at), v_depth);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "args");
+        let _ = json_args(inout o, in p, in names, inc(at), v_depth);
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    } else {
+        json_field_key(inout o, inner, "Exit");
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "value");
+        push_decimal(inout o, p.op(at));
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "owner");
+        json_sym(inout o, in names, n32(p.op(inc(at))));
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    }
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACE);
+}
+
+fn json_inst(
+    inout o: ChunkSeq[u8],
+    in p: Program,
+    in t: Types,
+    in names: Names,
+    in ex: JsonExtras,
+    inst_idx: u64,
+    depth: u64
+) {
+    let inst = p.inst(inst_idx);
+    let inner = inc(depth);
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "dest");
+    push_decimal(inout o, w(inst.dest));
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "op");
+    json_op(inout o, in p, in t, in names, in ex, inst.op, inst.a, inner);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "ty");
+    json_type(inout o, in t, in names, inst.ty, inner);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "span");
+    json_span(inout o, inst.s0, inst.s1, inner);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "token");
+    if inst.has_token == 0 {
+        put(inout o, "null");
+    } else {
+        let tok_depth = inc(inner);
+        o.push(CH_LBRACKET);
+        newline_indent(inout o, tok_depth);
+        push_decimal(inout o, inst.tin);
+        o.push(CH_COMMA);
+        newline_indent(inout o, tok_depth);
+        push_decimal(inout o, inst.tout);
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACKET);
+    }
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "fallible");
+    put_bool(inout o, inst.fallible != 0);
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACE);
+}
+
+fn json_terminator(
+    inout o: ChunkSeq[u8],
+    in p: Program,
+    in names: Names,
+    in ex: JsonExtras,
+    term: u8,
+    at: u64,
+    depth: u64
+) {
+    if term == Term::Unreachable {
+        put(inout o, "\"Unreachable\"");
+        return;
+    }
+    let inner = inc(depth);
+    let v_depth = inc(inner);
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    if term == Term::Return {
+        json_field_key(inout o, inner, "Return");
+        push_decimal(inout o, p.op(at));
+    } else if term == Term::Jump {
+        json_field_key(inout o, inner, "Jump");
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "block");
+        push_decimal(inout o, p.op(at));
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "args");
+        let _ = json_values(inout o, in p, inc(at), v_depth);
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    } else if term == Term::Branch {
+        json_field_key(inout o, inner, "Branch");
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "condition");
+        push_decimal(inout o, p.op(at));
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "yes");
+        push_decimal(inout o, p.op(inc(at)));
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "no");
+        push_decimal(inout o, p.op(add(at, BRANCH_NO_OFFSET)));
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    } else {
+        let val = p.op(at);
+        let narms = p.op(inc(at));
+        let mut pos = add(at, MATCH_ARMS_OFFSET);
+        json_field_key(inout o, inner, "Match");
+        o.push(CH_LBRACE);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "value");
+        push_decimal(inout o, val);
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, v_depth, "arms");
+        if narms == 0 {
+            put(inout o, "[]");
+        } else {
+            let arm_depth = inc(v_depth);
+            let item_depth = inc(arm_depth);
+            o.push(CH_LBRACKET);
+            for i in 0..narms {
+                if i > 0 {
+                    o.push(CH_COMMA);
+                }
+                newline_indent(inout o, arm_depth);
+                o.push(CH_LBRACKET);
+                newline_indent(inout o, item_depth);
+                pos = json_pattern(inout o, in p, in names, in ex, pos, item_depth, 0);
+                o.push(CH_COMMA);
+                newline_indent(inout o, item_depth);
+                push_decimal(inout o, p.op(pos));
+                pos = inc(pos);
+                newline_indent(inout o, arm_depth);
+                o.push(CH_RBRACKET);
+            }
+            newline_indent(inout o, v_depth);
+            o.push(CH_RBRACKET);
+        }
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    }
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACE);
+}
+
+fn json_block(
+    inout o: ChunkSeq[u8],
+    in p: Program,
+    in t: Types,
+    in names: Names,
+    in ex: JsonExtras,
+    block_idx: u64,
+    depth: u64
+) {
+    let bk = p.block(block_idx);
+    let inner = inc(depth);
+    let mut pos = bk.ha;
+    let entry_token = p.op(pos);
+    let nincoming = p.op(inc(pos));
+    pos = add(pos, PAIR_WORDS);
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "entry_token");
+    push_decimal(inout o, entry_token);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "incoming_tokens");
+    if nincoming == 0 {
+        put(inout o, "[]");
+    } else {
+        let pair_depth = inc(inner);
+        let item_depth = inc(pair_depth);
+        o.push(CH_LBRACKET);
+        for i in 0..nincoming {
+            if i > 0 {
+                o.push(CH_COMMA);
+            }
+            newline_indent(inout o, pair_depth);
+            o.push(CH_LBRACKET);
+            newline_indent(inout o, item_depth);
+            push_decimal(inout o, p.op(pos));
+            o.push(CH_COMMA);
+            newline_indent(inout o, item_depth);
+            push_decimal(inout o, p.op(inc(pos)));
+            pos = add(pos, PAIR_WORDS);
+            newline_indent(inout o, pair_depth);
+            o.push(CH_RBRACKET);
+        }
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACKET);
+    }
+    let outgoing = p.op(pos);
+    pos = inc(pos);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "outgoing_token");
+    push_decimal(inout o, outgoing);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "params");
+    let _ = json_values(inout o, in p, pos, inner);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "instructions");
+    if bk.ic == 0 {
+        put(inout o, "[]");
+    } else {
+        let inst_depth = inc(inner);
+        o.push(CH_LBRACKET);
+        for k in 0..bk.ic {
+            if k > 0 {
+                o.push(CH_COMMA);
+            }
+            newline_indent(inout o, inst_depth);
+            json_inst(inout o, in p, in t, in names, in ex, add(bk.i0, k), inst_depth);
+        }
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACKET);
+    }
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "terminator");
+    json_terminator(inout o, in p, in names, in ex, bk.term, bk.ta, inner);
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACE);
+}
+
+// ----- trailer (`@fip` reuse slots and `Box` drops) -----------------------------
+
+fn drop_words(in p: Program, at: u64) -> u64 {
+    let kind = p.op(at);
+    if kind == DropCode::Value {
+        DROP_VALUE_WORDS
+    } else {
+        DROP_PLACE_WORDS
+    }
+}
+
+fn json_drop(
+    inout o: ChunkSeq[u8],
+    in p: Program,
+    in t: Types,
+    in names: Names,
+    at: u64,
+    depth: u64
+) -> u64 {
+    let kind = p.op(at);
+    let inner = inc(depth);
+    let v_depth = inc(inner);
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    if kind == DropCode::Value {
+        json_field_key(inout o, inner, "Value");
+        o.push(CH_LBRACKET);
+        newline_indent(inout o, v_depth);
+        push_decimal(inout o, p.op(inc(at)));
+        o.push(CH_COMMA);
+        newline_indent(inout o, v_depth);
+        json_type(inout o, in t, in names, n32(p.op(add(at, DROP_TYPE_OFFSET_VALUE))), v_depth);
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACKET);
+        newline_indent(inout o, depth);
+        o.push(CH_RBRACE);
+        return add(at, DROP_VALUE_WORDS);
+    }
+    if kind == DropCode::Place {
+        json_field_key(inout o, inner, "Place");
+        o.push(CH_LBRACKET);
+        newline_indent(inout o, v_depth);
+        json_place(
+            inout o,
+            in p,
+            in names,
+            n32(p.op(inc(at))),
+            p.op(add(at, DROP_PATH_OFFSET_PLACE)),
+            v_depth
+        );
+        o.push(CH_COMMA);
+        newline_indent(inout o, v_depth);
+        json_type(inout o, in t, in names, n32(p.op(add(at, DROP_TYPE_OFFSET_PLACE))), v_depth);
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACKET);
+        newline_indent(inout o, depth);
+        o.push(CH_RBRACE);
+        return add(at, DROP_PLACE_WORDS);
+    }
+    json_field_key(inout o, inner, "OtherFields");
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, v_depth, "value");
+    push_decimal(inout o, p.op(inc(at)));
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, v_depth, "ty");
+    json_type(inout o, in t, in names, n32(p.op(add(at, DROP_TYPE_OFFSET_VALUE))), v_depth);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, v_depth, "keep");
+    json_sym(inout o, in names, n32(p.op(add(at, DROP_KEEP_OFFSET_OTHER))));
+    newline_indent(inout o, inner);
+    o.push(CH_RBRACE);
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACE);
+    add(at, DROP_PLACE_WORDS)
+}
+
+fn skip_inst_drops(
+    in p: Program,
+    at: u64,
+    inout keys: ChunkSeq[u64],
+    inout offs: ChunkSeq[u64]
+) -> u64 {
+    let count = p.op(at);
+    let mut pos = inc(at);
+    for _ in 0..count {
+        keys.push(p.op(pos));
+        offs.push(inc(pos));
+        let m = p.op(inc(pos));
+        pos = add(pos, PAIR_WORDS);
+        for _ in 0..m {
+            // inst_idx word, then drop words
+            pos = inc(pos);
+            pos = add(pos, drop_words(in p, pos));
+        }
+    }
+    pos
+}
+
+fn json_inst_drops_map(
+    inout o: ChunkSeq[u8],
+    in p: Program,
+    in t: Types,
+    in names: Names,
+    in keys: ChunkSeq[u64],
+    in offs: ChunkSeq[u64],
+    depth: u64
+) {
+    let inner = inc(depth);
+    let arr_depth = inc(inner);
+    let tup_depth = inc(arr_depth);
+    o.push(CH_LBRACE);
+    for i in 0..keys.len() {
+        if i > 0 {
+            o.push(CH_COMMA);
+        }
+        newline_indent(inout o, inner);
+        json_u64_key(inout o, u64_at(in keys, i));
+        let mut pos = u64_at(in offs, i);
+        let m = p.op(pos);
+        pos = inc(pos);
+        if m == 0 {
+            put(inout o, "[]");
+        } else {
+            o.push(CH_LBRACKET);
+            for j in 0..m {
+                if j > 0 {
+                    o.push(CH_COMMA);
+                }
+                let inst_idx = p.op(pos);
+                pos = inc(pos);
+                newline_indent(inout o, arr_depth);
+                o.push(CH_LBRACKET);
+                newline_indent(inout o, tup_depth);
+                push_decimal(inout o, inst_idx);
+                o.push(CH_COMMA);
+                newline_indent(inout o, tup_depth);
+                pos = json_drop(inout o, in p, in t, in names, pos, tup_depth);
+                newline_indent(inout o, arr_depth);
+                o.push(CH_RBRACKET);
+            }
+            newline_indent(inout o, inner);
+            o.push(CH_RBRACKET);
+        }
+    }
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACE);
+}
+
+fn json_trailer(
+    inout o: ChunkSeq[u8],
+    in p: Program,
+    in t: Types,
+    in names: Names,
+    at: u64,
+    depth: u64
+) {
+    let mut pos = at;
+    let n_call = p.op(pos);
+    pos = inc(pos);
+    let mut call_keys = ChunkSeq::with_capacity[u64](n_call);
+    let mut call_offs = ChunkSeq::with_capacity[u64](n_call);
+    for _ in 0..n_call {
+        call_keys.push(p.op(pos));
+        call_offs.push(inc(pos));
+        pos = add(pos, CALL_SLOT_WORDS);
+    }
+    sort_by_u64(inout call_keys, inout call_offs);
+
+    let n_join = p.op(pos);
+    pos = inc(pos);
+    let mut join_keys = ChunkSeq::with_capacity[u64](n_join);
+    let mut join_offs = ChunkSeq::with_capacity[u64](n_join);
+    for _ in 0..n_join {
+        join_keys.push(p.op(pos));
+        join_offs.push(inc(pos));
+        let m = p.op(inc(pos));
+        pos = add(pos, PAIR_WORDS);
+        for _ in 0..m {
+            let inc_len = p.op(add(pos, JOIN_SLOT_INCOMING_OFFSET));
+            pos = add(pos, add(JOIN_SLOT_HEADER_WORDS, wrapping_mul(inc_len, TRIPLE_WORDS)));
+        }
+    }
+    sort_by_u64(inout join_keys, inout join_offs);
+
+    let mut before_keys = ChunkSeq::new[u64]();
+    let mut before_offs = ChunkSeq::new[u64]();
+    pos = skip_inst_drops(in p, pos, inout before_keys, inout before_offs);
+    sort_by_u64(inout before_keys, inout before_offs);
+
+    let mut after_keys = ChunkSeq::new[u64]();
+    let mut after_offs = ChunkSeq::new[u64]();
+    pos = skip_inst_drops(in p, pos, inout after_keys, inout after_offs);
+    sort_by_u64(inout after_keys, inout after_offs);
+
+    let n_term = p.op(pos);
+    pos = inc(pos);
+    let mut term_keys = ChunkSeq::with_capacity[u64](n_term);
+    let mut term_offs = ChunkSeq::with_capacity[u64](n_term);
+    for _ in 0..n_term {
+        term_keys.push(p.op(pos));
+        term_offs.push(inc(pos));
+        let m = p.op(inc(pos));
+        pos = add(pos, PAIR_WORDS);
+        for _ in 0..m {
+            pos = add(pos, drop_words(in p, pos));
+        }
+    }
+    sort_by_u64(inout term_keys, inout term_offs);
+
+    if n_call > 0 {
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, depth, "fip_call_slots");
+        let map_depth = inc(depth);
+        let slot_depth = inc(map_depth);
+        let r_depth = inc(slot_depth);
+        o.push(CH_LBRACE);
+        for i in 0..n_call {
+            if i > 0 {
+                o.push(CH_COMMA);
+            }
+            newline_indent(inout o, map_depth);
+            json_u64_key(inout o, u64_at(in call_keys, i));
+            let off = u64_at(in call_offs, i);
+            if p.op(off) == CallSlotCode::CallerSlot {
+                put(inout o, "\"CallerSlot\"");
+            } else {
+                o.push(CH_LBRACE);
+                o.push(CH_LF);
+                json_field_key(inout o, slot_depth, "ReuseSlot");
+                o.push(CH_LBRACE);
+                o.push(CH_LF);
+                json_field_key(inout o, r_depth, "bind_dest");
+                push_decimal(inout o, p.op(inc(off)));
+                o.push(CH_COMMA);
+                o.push(CH_LF);
+                json_field_key(inout o, r_depth, "slot_index");
+                push_decimal(inout o, p.op(add(off, CALL_SLOT_INDEX_OFFSET)));
+                o.push(CH_COMMA);
+                o.push(CH_LF);
+                json_field_key(inout o, r_depth, "size");
+                push_decimal(inout o, p.op(add(off, CALL_SLOT_SIZE_OFFSET)));
+                newline_indent(inout o, slot_depth);
+                o.push(CH_RBRACE);
+                newline_indent(inout o, map_depth);
+                o.push(CH_RBRACE);
+            }
+        }
+        newline_indent(inout o, depth);
+        o.push(CH_RBRACE);
+    }
+
+    if n_join > 0 {
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, depth, "fip_join_slots");
+        let map_depth = inc(depth);
+        let arr_depth = inc(map_depth);
+        let obj_depth = inc(arr_depth);
+        let sub_depth = inc(obj_depth);
+        let tup_depth = inc(sub_depth);
+        o.push(CH_LBRACE);
+        for i in 0..n_join {
+            if i > 0 {
+                o.push(CH_COMMA);
+            }
+            newline_indent(inout o, map_depth);
+            json_u64_key(inout o, u64_at(in join_keys, i));
+            let mut jpos = u64_at(in join_offs, i);
+            let m = p.op(jpos);
+            jpos = inc(jpos);
+            if m == 0 {
+                put(inout o, "[]");
+            } else {
+                o.push(CH_LBRACKET);
+                for j in 0..m {
+                    if j > 0 {
+                        o.push(CH_COMMA);
+                    }
+                    let dv = p.op(jpos);
+                    let ds = p.op(inc(jpos));
+                    let inc_len = p.op(add(jpos, JOIN_SLOT_INCOMING_OFFSET));
+                    jpos = add(jpos, JOIN_SLOT_HEADER_WORDS);
+                    newline_indent(inout o, arr_depth);
+                    o.push(CH_LBRACE);
+                    o.push(CH_LF);
+                    json_field_key(inout o, obj_depth, "dest_slot");
+                    o.push(CH_LBRACKET);
+                    newline_indent(inout o, sub_depth);
+                    push_decimal(inout o, dv);
+                    o.push(CH_COMMA);
+                    newline_indent(inout o, sub_depth);
+                    push_decimal(inout o, ds);
+                    newline_indent(inout o, obj_depth);
+                    o.push(CH_RBRACKET);
+                    o.push(CH_COMMA);
+                    o.push(CH_LF);
+                    json_field_key(inout o, obj_depth, "incoming");
+                    if inc_len == 0 {
+                        put(inout o, "[]");
+                    } else {
+                        o.push(CH_LBRACKET);
+                        for k in 0..inc_len {
+                            if k > 0 {
+                                o.push(CH_COMMA);
+                            }
+                            newline_indent(inout o, sub_depth);
+                            o.push(CH_LBRACKET);
+                            newline_indent(inout o, tup_depth);
+                            push_decimal(inout o, p.op(jpos));
+                            o.push(CH_COMMA);
+                            newline_indent(inout o, tup_depth);
+                            push_decimal(inout o, p.op(inc(jpos)));
+                            o.push(CH_COMMA);
+                            newline_indent(inout o, tup_depth);
+                            push_decimal(inout o, p.op(add(jpos, JOIN_SLOT_INCOMING_OFFSET)));
+                            jpos = add(jpos, TRIPLE_WORDS);
+                            newline_indent(inout o, sub_depth);
+                            o.push(CH_RBRACKET);
+                        }
+                        newline_indent(inout o, obj_depth);
+                        o.push(CH_RBRACKET);
+                    }
+                    newline_indent(inout o, arr_depth);
+                    o.push(CH_RBRACE);
+                }
+                newline_indent(inout o, map_depth);
+                o.push(CH_RBRACKET);
+            }
+        }
+        newline_indent(inout o, depth);
+        o.push(CH_RBRACE);
+    }
+
+    if before_keys.len() > 0 {
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, depth, "box_drops_before_inst");
+        json_inst_drops_map(inout o, in p, in t, in names, in before_keys, in before_offs, depth);
+    }
+
+    if after_keys.len() > 0 {
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, depth, "box_drops_after_inst");
+        json_inst_drops_map(inout o, in p, in t, in names, in after_keys, in after_offs, depth);
+    }
+
+    if n_term > 0 {
+        o.push(CH_COMMA);
+        o.push(CH_LF);
+        json_field_key(inout o, depth, "box_drops_before_term");
+        let map_depth = inc(depth);
+        let arr_depth = inc(map_depth);
+        o.push(CH_LBRACE);
+        for i in 0..n_term {
+            if i > 0 {
+                o.push(CH_COMMA);
+            }
+            newline_indent(inout o, map_depth);
+            json_u64_key(inout o, u64_at(in term_keys, i));
+            let mut tpos = u64_at(in term_offs, i);
+            let m = p.op(tpos);
+            tpos = inc(tpos);
+            if m == 0 {
+                put(inout o, "[]");
+            } else {
+                o.push(CH_LBRACKET);
+                for j in 0..m {
+                    if j > 0 {
+                        o.push(CH_COMMA);
+                    }
+                    newline_indent(inout o, arr_depth);
+                    tpos = json_drop(inout o, in p, in t, in names, tpos, arr_depth);
+                }
+                newline_indent(inout o, map_depth);
+                o.push(CH_RBRACKET);
+            }
+        }
+        newline_indent(inout o, depth);
+        o.push(CH_RBRACE);
+    }
+}
+
+// ----- FunctionIr & Program -----------------------------------------------------
+
+fn json_function(
+    inout o: ChunkSeq[u8],
+    in p: Program,
+    in t: Types,
+    in names: Names,
+    in ex: JsonExtras,
+    fn_idx: u64,
+    depth: u64
+) {
+    let f = p.function(fn_idx);
+    let inner = inc(depth);
+    let mut pos = f.ha;
+    let np = p.op(pos);
+    pos = inc(pos);
+
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "name");
+    json_sym(inout o, in names, f.name);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "params");
+    if np == 0 {
+        put(inout o, "[]");
+    } else {
+        let p_depth = inc(inner);
+        let pf_depth = inc(p_depth);
+        o.push(CH_LBRACKET);
+        for i in 0..np {
+            if i > 0 {
+                o.push(CH_COMMA);
+            }
+            let pname = n32(p.op(pos));
+            let ppass = wrapping_u8(p.op(inc(pos)));
+            let nproj = p.op(add(pos, PARAM_NPROJ_OFFSET));
+            pos = add(pos, PARAM_TAIL_WORDS);
+            newline_indent(inout o, p_depth);
+            o.push(CH_LBRACE);
+            o.push(CH_LF);
+            json_field_key(inout o, pf_depth, "name");
+            json_sym(inout o, in names, pname);
+            o.push(CH_COMMA);
+            o.push(CH_LF);
+            json_field_key(inout o, pf_depth, "pass");
+            json_pass(inout o, ppass);
+            o.push(CH_COMMA);
+            o.push(CH_LF);
+            json_field_key(inout o, pf_depth, "projections");
+            if nproj == 0 {
+                put(inout o, "[]");
+            } else {
+                let pr_depth = inc(pf_depth);
+                o.push(CH_LBRACKET);
+                for j in 0..nproj {
+                    if j > 0 {
+                        o.push(CH_COMMA);
+                    }
+                    newline_indent(inout o, pr_depth);
+                    json_path(inout o, in p, in names, p.op(pos), pr_depth);
+                    pos = inc(pos);
+                }
+                newline_indent(inout o, pf_depth);
+                o.push(CH_RBRACKET);
+            }
+            let pty = n32(p.op(pos));
+            let s0 = p.op(inc(pos));
+            let s1 = p.op(add(pos, PARAM_SPAN_END_OFFSET));
+            pos = add(pos, PARAM_TAIL_WORDS);
+            o.push(CH_COMMA);
+            o.push(CH_LF);
+            json_field_key(inout o, pf_depth, "ty");
+            json_type(inout o, in t, in names, pty, pf_depth);
+            o.push(CH_COMMA);
+            o.push(CH_LF);
+            json_field_key(inout o, pf_depth, "span");
+            json_span(inout o, s0, s1, pf_depth);
+            newline_indent(inout o, p_depth);
+            o.push(CH_RBRACE);
+        }
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACKET);
+    }
+
+    let res_ty = n32(p.op(pos));
+    let eff_ty = n32(p.op(inc(pos)));
+    pos = add(pos, PAIR_WORDS);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "result");
+    json_type(inout o, in t, in names, res_ty, inner);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "effects");
+    json_effects(inout o, in t, in names, t.node(eff_ty).r2, inner);
+
+    let nb = p.op(pos);
+    pos = inc(pos);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "bounds");
+    if nb == 0 {
+        put(inout o, "{}");
+    } else {
+        let mut bkeys = ChunkSeq::with_capacity[u32](nb);
+        let mut bvals = ChunkSeq::with_capacity[u64](nb);
+        for _ in 0..nb {
+            bkeys.push(n32(p.op(pos)));
+            bvals.push(p.op(inc(pos)));
+            pos = add(pos, PAIR_WORDS);
+        }
+        sort_by_name(in names, inout bkeys, inout bvals);
+        let b_depth = inc(inner);
+        o.push(CH_LBRACE);
+        for i in 0..nb {
+            if i > 0 {
+                o.push(CH_COMMA);
+            }
+            newline_indent(inout o, b_depth);
+            json_sym(inout o, in names, u32_at(in bkeys, i));
+            put(inout o, ": ");
+            json_mode(inout o, wrapping_u8(u64_at(in bvals, i)));
+        }
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    }
+
+    let nc = p.op(pos);
+    pos = inc(pos);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "external_captures");
+    if nc == 0 {
+        put(inout o, "[]");
+    } else {
+        let mut ckeys = ChunkSeq::with_capacity[u32](nc);
+        let mut cdummy = ChunkSeq::with_capacity[u64](nc);
+        for _ in 0..nc {
+            ckeys.push(n32(p.op(pos)));
+            cdummy.push(0);
+            pos = inc(pos);
+        }
+        sort_by_name(in names, inout ckeys, inout cdummy);
+        let c_depth = inc(inner);
+        o.push(CH_LBRACKET);
+        for i in 0..nc {
+            if i > 0 {
+                o.push(CH_COMMA);
+            }
+            newline_indent(inout o, c_depth);
+            json_sym(inout o, in names, u32_at(in ckeys, i));
+        }
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACKET);
+    }
+
+    // `FunctionIr` declares `blocks` BEFORE `values` and `locals` (`src/ir.rs`).
+    // `pos` currently sits at `values` in `f.ha`; emit `blocks` first, then
+    // continue reading `values` and `locals` from `pos`.
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "blocks");
+    if f.bc == 0 {
+        put(inout o, "[]");
+    } else {
+        let bk_depth = inc(inner);
+        o.push(CH_LBRACKET);
+        for bi in 0..f.bc {
+            if bi > 0 {
+                o.push(CH_COMMA);
+            }
+            newline_indent(inout o, bk_depth);
+            json_block(inout o, in p, in t, in names, in ex, add(f.b0, bi), bk_depth);
+        }
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACKET);
+    }
+
+    let nv = p.op(pos);
+    pos = inc(pos);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "values");
+    if nv == 0 {
+        put(inout o, "{}");
+    } else {
+        let mut vkeys = ChunkSeq::with_capacity[u64](nv);
+        let mut vtys = ChunkSeq::with_capacity[u64](nv);
+        for _ in 0..nv {
+            vkeys.push(p.op(pos));
+            vtys.push(p.op(inc(pos)));
+            pos = add(pos, PAIR_WORDS);
+        }
+        sort_by_u64(inout vkeys, inout vtys);
+        let v_depth = inc(inner);
+        o.push(CH_LBRACE);
+        for i in 0..nv {
+            if i > 0 {
+                o.push(CH_COMMA);
+            }
+            newline_indent(inout o, v_depth);
+            json_u64_key(inout o, u64_at(in vkeys, i));
+            json_type(inout o, in t, in names, n32(u64_at(in vtys, i)), v_depth);
+        }
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    }
+
+    let nl = p.op(pos);
+    pos = inc(pos);
+    o.push(CH_COMMA);
+    o.push(CH_LF);
+    json_field_key(inout o, inner, "locals");
+    if nl == 0 {
+        put(inout o, "{}");
+    } else {
+        let mut lkeys = ChunkSeq::with_capacity[u32](nl);
+        let mut ltys = ChunkSeq::with_capacity[u64](nl);
+        for _ in 0..nl {
+            lkeys.push(n32(p.op(pos)));
+            ltys.push(p.op(inc(pos)));
+            pos = add(pos, PAIR_WORDS);
+        }
+        sort_by_name(in names, inout lkeys, inout ltys);
+        let l_depth = inc(inner);
+        o.push(CH_LBRACE);
+        for i in 0..nl {
+            if i > 0 {
+                o.push(CH_COMMA);
+            }
+            newline_indent(inout o, l_depth);
+            json_sym(inout o, in names, u32_at(in lkeys, i));
+            put(inout o, ": ");
+            json_type(inout o, in t, in names, n32(u64_at(in ltys, i)), l_depth);
+        }
+        newline_indent(inout o, inner);
+        o.push(CH_RBRACE);
+    }
+
+    json_trailer(inout o, in p, in t, in names, f.ta, inner);
+    newline_indent(inout o, depth);
+    o.push(CH_RBRACE);
+}
+
+// Renders `p` as `serde_json::to_string_pretty(&program)` UTF-8 bytes into `o`.
+pub fn json_program(
+    in p: Program,
+    in t: Types,
+    in names: Names,
+    in ex: JsonExtras,
+    inout o: ChunkSeq[u8]
+) {
+    o.push(CH_LBRACE);
+    o.push(CH_LF);
+    json_field_key(inout o, 1, "functions");
+    let nf = p.fn_count();
+    if nf == 0 {
+        put(inout o, "{}");
+    } else {
+        let mut fkeys = ChunkSeq::with_capacity[u32](nf);
+        let mut fidxs = ChunkSeq::with_capacity[u64](nf);
+        for fi in 0..nf {
+            fkeys.push(p.function(fi).name);
+            fidxs.push(fi);
+        }
+        sort_by_name(in names, inout fkeys, inout fidxs);
+        o.push(CH_LBRACE);
+        for i in 0..nf {
+            if i > 0 {
+                o.push(CH_COMMA);
+            }
+            newline_indent(inout o, FUNCTIONS_ENTRY_DEPTH);
+            json_sym(inout o, in names, u32_at(in fkeys, i));
+            put(inout o, ": ");
+            json_function(
+                inout o,
+                in p,
+                in t,
+                in names,
+                in ex,
+                u64_at(in fidxs, i),
+                FUNCTIONS_ENTRY_DEPTH
+            );
+        }
+        newline_indent(inout o, 1);
+        o.push(CH_RBRACE);
+    }
+    o.push(CH_LF);
+    o.push(CH_RBRACE);
+}
+
+// Entry returning raw UTF-8 JSON bytes for `ir_words::program_json_input`
+// (used by `modules/driver` for `vesper emit --format ir`).
+pub fn place_ir_json_bytes(in b: Slice[u8]) -> ChunkSeq[u8] {
+    let mut r = Reader { pos: 0 };
+    let c = read_ctx(inout r, in b);
+    let p = read_program(inout r, in b, in c);
+    let ex = read_json_extras(inout r, in b, in c);
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    json_program(in p, in c.types, in c.names, in ex, inout o);
+    o
+}
+
+// Harness entry (`tests/self_host_place_ir.rs`) returning text packed as `u64` words.
+pub fn place_ir_json(in input: Str) -> ChunkSeq[u64] {
+    let o = place_ir_json_bytes(in input.as_bytes());
+    pack_text(in o)
+}

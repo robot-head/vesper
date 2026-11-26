@@ -166,6 +166,431 @@ fn vesper_writer_round_trip_is_debug_equal() {
     assert_eq!(bad, 0);
 }
 
+#[test]
+fn vesper_json_matches_rust() {
+    let json = package().entry("place_ir_json", true);
+    let (mut bad, mut skipped, mut bytes) = (0, 0, 0usize);
+    for s in stages() {
+        let Some(input) = ir_words::program_json_input(&s.program) else {
+            skipped += 1;
+            continue;
+        };
+        let expected = serde_json::to_string_pretty(&s.program).expect("serialize Place IR");
+        bytes += expected.len();
+        let actual = json.text(&input);
+        if let Some(d) = first_difference(&expected, &actual) {
+            bad += 1;
+            if bad <= 5 {
+                eprintln!("json: {} differs at {d}", s.name);
+            }
+        }
+    }
+    eprintln!(
+        "json: {bad} of {} stages differ, {skipped} not encodable, {bytes} bytes",
+        stages().len()
+    );
+    assert_eq!(bad, 0);
+}
+
+#[test]
+fn vesper_json_covers_edge_cases() {
+    use std::collections::{BTreeMap, BTreeSet};
+    use vesper::ast::{
+        Effect, Effects, Expr, ExprKind, Literal, Mode, Param, Pass, Pattern, PatternKind, Type,
+    };
+    use vesper::check::Place;
+    use vesper::fip::{CallSlot, FipDrop, FipJoinSlot, FipOp};
+    use vesper::ir::{Argument, Block, FunctionIr, Instruction, Op, Terminator};
+    use vesper::seq::{Access, IndexForm, SeqOp, Wide};
+    use vesper::strings::StrOp;
+    use vesper::tiled::TiledOp;
+    use vesper::vector::{BinOp, Elem, Intrinsic, Profile, Shape, SliceIo, VectorOp};
+
+    let json = package().entry("place_ir_json", true);
+
+    // Empty program `{ "functions": {} }`.
+    let empty = Program::default();
+    let empty_in = ir_words::program_json_input(&empty).expect("empty program encodes");
+    assert_eq!(
+        json.text(&empty_in),
+        serde_json::to_string_pretty(&empty).unwrap()
+    );
+
+    let shape = Shape::new(Elem::U8, 16).unwrap();
+    let wide = Wide {
+        bytes: 4,
+        big: true,
+        write: false,
+        total: true,
+    };
+    let fn_ty = Type::Function {
+        params: vec![(Pass::In, Type::named("i64")), (Pass::Sink, Type::Infer)],
+        result: Box::new(Type::IntLiteral(-42)),
+        effects: Effects {
+            instances: vec![Effect {
+                label: Some("lbl".into()),
+                name: "Fail".into(),
+                args: vec![Type::named("RuntimeError")],
+            }],
+            tail: Some("r".into()),
+        },
+        mode: Mode::Affine,
+    };
+
+    let mk_inst =
+        |dest: u32, op: Op, ty: Type, token: Option<(u32, u32)>, fallible: bool| Instruction {
+            dest,
+            op,
+            ty,
+            span: 3..19,
+            token,
+            fallible,
+        };
+
+    let escaped = "quote\"slash\\bs\x08ff\x0cnl\ncr\rtab\tnul\x00ctrl\x1bdel\x7futf8-λ";
+    let instructions = vec![
+        mk_inst(
+            0,
+            Op::Constant(Literal::Int(i128::MIN)),
+            Type::named("i128"),
+            None,
+            false,
+        ),
+        mk_inst(
+            1,
+            Op::Constant(Literal::Int(i128::MAX)),
+            Type::named("i128"),
+            None,
+            false,
+        ),
+        mk_inst(
+            2,
+            Op::Constant(Literal::Int(-1)),
+            Type::named("i64"),
+            None,
+            false,
+        ),
+        mk_inst(
+            3,
+            Op::Constant(Literal::WideInt(u128::MAX)),
+            Type::named("u128"),
+            None,
+            false,
+        ),
+        mk_inst(
+            4,
+            Op::Constant(Literal::Float(-0.0)),
+            Type::named("f64"),
+            None,
+            false,
+        ),
+        mk_inst(
+            5,
+            Op::Constant(Literal::Float(f64::NAN)),
+            Type::named("f64"),
+            None,
+            false,
+        ),
+        mk_inst(
+            6,
+            Op::Constant(Literal::Float(1.25e-12)),
+            Type::named("f64"),
+            None,
+            false,
+        ),
+        mk_inst(
+            7,
+            Op::Constant(Literal::String(escaped.into())),
+            Type::named("String"),
+            None,
+            false,
+        ),
+        mk_inst(8, Op::Unit, Type::unit(), Some((0, 1)), true),
+        mk_inst(
+            9,
+            Op::Bind {
+                pattern: Pattern {
+                    kind: PatternKind::Constructor {
+                        name: "Pair".into(),
+                        fields: vec![
+                            (
+                                "a".into(),
+                                Pattern {
+                                    kind: PatternKind::Literal(Literal::Float(3.5)),
+                                    span: 1..2,
+                                    integer_kind: None,
+                                },
+                            ),
+                            (
+                                "b".into(),
+                                Pattern {
+                                    kind: PatternKind::Tuple(vec![Pattern {
+                                        kind: PatternKind::Wild,
+                                        span: 2..3,
+                                        integer_kind: None,
+                                    }]),
+                                    span: 2..4,
+                                    integer_kind: None,
+                                },
+                            ),
+                        ],
+                        named: true,
+                    },
+                    span: 1..5,
+                    integer_kind: None,
+                },
+                value: 0,
+            },
+            fn_ty.clone(),
+            None,
+            false,
+        ),
+        mk_inst(
+            10,
+            Op::Closure {
+                expr: Expr {
+                    kind: ExprKind::Literal(Literal::String("inner\nline".into())),
+                    span: 4..9,
+                },
+                aliases: BTreeMap::from([("b".into(), "x".into()), ("a".into(), "y".into())]),
+                moves: vec![Place {
+                    root: "m".into(),
+                    path: vec!["f".into(), "0".into()],
+                }],
+            },
+            fn_ty.clone(),
+            None,
+            false,
+        ),
+        mk_inst(
+            11,
+            Op::Seq {
+                op: SeqOp::Hoisted(Access::Wide(wide)),
+                args: vec![Argument {
+                    pass: Pass::Inout,
+                    value: 0,
+                    place: Some(Place {
+                        root: "buf".into(),
+                        path: vec![],
+                    }),
+                }],
+            },
+            Type::unit(),
+            None,
+            false,
+        ),
+        mk_inst(
+            12,
+            Op::Seq {
+                op: SeqOp::BoundsGuard {
+                    inclusive: true,
+                    form: IndexForm {
+                        negated: true,
+                        plus: 2,
+                        minus: 1,
+                        scaled: true,
+                        outer_plus: 3,
+                        outer_minus: 4,
+                        width: 8,
+                    },
+                },
+                args: vec![],
+            },
+            Type::named("bool"),
+            None,
+            false,
+        ),
+        mk_inst(
+            13,
+            Op::Seq {
+                op: SeqOp::AtomicLoad { width: Some(8) },
+                args: vec![],
+            },
+            Type::named("u64"),
+            None,
+            false,
+        ),
+        mk_inst(
+            14,
+            Op::Seq {
+                op: SeqOp::AtomicStore { width: None },
+                args: vec![],
+            },
+            Type::named("bool"),
+            None,
+            false,
+        ),
+        mk_inst(
+            15,
+            Op::Seq {
+                op: SeqOp::Str(StrOp::PushChar),
+                args: vec![],
+            },
+            Type::named("bool"),
+            None,
+            false,
+        ),
+        mk_inst(
+            16,
+            Op::Seq {
+                op: SeqOp::Vector(SliceIo {
+                    shape,
+                    store: true,
+                    masked: false,
+                }),
+                args: vec![],
+            },
+            Type::unit(),
+            None,
+            false,
+        ),
+        mk_inst(
+            17,
+            Op::Vector {
+                op: VectorOp::Lanes {
+                    intrinsic: Intrinsic::Binary(BinOp::Add),
+                    shape,
+                    constants: vec![0, 7, 15],
+                },
+                args: vec![0, 1],
+            },
+            Type::unit(),
+            None,
+            false,
+        ),
+        mk_inst(
+            18,
+            Op::Vector {
+                op: VectorOp::IsaSupported(Profile::Avx2),
+                args: vec![],
+            },
+            Type::named("bool"),
+            None,
+            false,
+        ),
+        mk_inst(
+            19,
+            Op::Tiled {
+                op: TiledOp::LoadTileVec {
+                    adt: "Row\"λ\x07".into(),
+                    field: "col'1".into(),
+                    shape,
+                },
+                args: vec![],
+                capability: Some("reg".into()),
+            },
+            Type::unit(),
+            None,
+            false,
+        ),
+        mk_inst(
+            20,
+            Op::Fip {
+                op: FipOp::BoxReuse {
+                    bind_dest: 9,
+                    slot_index: 2,
+                    size: 24,
+                },
+                args: vec![],
+            },
+            Type::unit(),
+            None,
+            false,
+        ),
+        mk_inst(21, Op::Loop, Type::unit(), None, false),
+        mk_inst(
+            22,
+            Op::Exit {
+                value: 2,
+                owner: "f".into(),
+            },
+            Type::unit(),
+            None,
+            false,
+        ),
+    ];
+
+    let func = FunctionIr {
+        name: "f".into(),
+        params: vec![Param {
+            name: "p".into(),
+            pass: Pass::Inout,
+            projections: vec![vec!["x".into(), "y".into()]],
+            ty: fn_ty,
+            span: 0..10,
+        }],
+        result: Type::unit(),
+        effects: Effects::default(),
+        bounds: BTreeMap::from([("T".into(), Mode::Linear), ("A".into(), Mode::Copy)]),
+        external_captures: BTreeSet::from(["cap_b".into(), "cap_a".into()]),
+        blocks: vec![Block {
+            entry_token: 0,
+            incoming_tokens: vec![(0, 1)],
+            outgoing_token: 2,
+            params: vec![0],
+            instructions,
+            terminator: Terminator::Unreachable,
+        }],
+        values: BTreeMap::from([(10, Type::unit()), (2, Type::named("i64"))]),
+        locals: BTreeMap::from([
+            ("z".into(), Type::unit()),
+            ("a".into(), Type::IntLiteral(7)),
+        ]),
+        fip_call_slots: BTreeMap::from([
+            (1, CallSlot::CallerSlot),
+            (
+                2,
+                CallSlot::ReuseSlot {
+                    bind_dest: 9,
+                    slot_index: 0,
+                    size: 16,
+                },
+            ),
+        ]),
+        fip_join_slots: BTreeMap::from([(
+            0,
+            vec![FipJoinSlot {
+                dest_slot: (3, 1),
+                incoming: vec![(0, 1, 0), (0, 2, 1)],
+            }],
+        )]),
+        box_drops_before_inst: BTreeMap::from([(
+            0,
+            vec![(0, FipDrop::Value(1, Type::named("Box")))],
+        )]),
+        box_drops_after_inst: BTreeMap::from([(
+            0,
+            vec![(
+                1,
+                FipDrop::Place(
+                    Place {
+                        root: "loc".into(),
+                        path: vec!["0".into()],
+                    },
+                    Type::named("Box"),
+                ),
+            )],
+        )]),
+        box_drops_before_term: BTreeMap::from([(
+            0,
+            vec![FipDrop::OtherFields {
+                value: 4,
+                ty: Type::named("Box"),
+                keep: "0".into(),
+            }],
+        )]),
+    };
+
+    let mut prog = Program::default();
+    prog.functions.insert("f".into(), func);
+    let input = ir_words::program_json_input(&prog).expect("synthetic program encodes");
+    let expected = serde_json::to_string_pretty(&prog).unwrap();
+    let actual = json.text(&input);
+    if let Some(d) = first_difference(&expected, &actual) {
+        panic!("synthetic json differs at {d}");
+    }
+}
+
 /// The cost of a swap, per corpus world at the `lower` boundary: encoding
 /// (Rust), the Vesper read and write, and decoding (Rust), next to the
 /// Rust lowering it would replace. IR lanes subtract it from their pass.

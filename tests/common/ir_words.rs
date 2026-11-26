@@ -910,6 +910,96 @@ pub fn program_only_input(program: &Program) -> Option<(Vec<u8>, Pool)> {
     Some((t.enc.finish(&world, &section), t.pool))
 }
 
+fn collect_pattern_floats(pat: &Pattern, seen: &mut BTreeSet<u64>, bits_out: &mut Vec<u64>) {
+    match &pat.kind {
+        PatternKind::Literal(Literal::Float(x)) => {
+            let bits = x.to_bits();
+            if seen.insert(bits) {
+                bits_out.push(bits);
+            }
+        }
+        PatternKind::Tuple(items) => {
+            for item in items {
+                collect_pattern_floats(item, seen, bits_out);
+            }
+        }
+        PatternKind::Constructor { fields, .. } => {
+            for (_, sub) in fields {
+                collect_pattern_floats(sub, seen, bits_out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// [`program_only_input`] followed by the `JsonExtras` sidecar (`place_ir_json`
+/// and `place_ir_json_bytes` in `packages/vesper-place-ir/src/json.ves`):
+/// pre-serialized JSON for `Payload::Expr` entries and canonical `serde_json`
+/// float representations for distinct `Literal::Float` bit patterns.
+pub fn program_json_input(program: &Program) -> Option<Vec<u8>> {
+    if !program.functions.values().all(function_fits) {
+        return None;
+    }
+    let mut t = Tables::of(program);
+    t.label_names();
+
+    let mut expr_entries = Vec::new();
+    for (pool_idx, item) in t.pool.items.iter().enumerate() {
+        if let Payload::Expr(expr) = item {
+            let json = serde_json::to_string_pretty(expr).ok()?;
+            let sym = t.enc.name(&json);
+            expr_entries.push((pool_idx as u64, sym));
+        }
+    }
+
+    let mut seen_floats = BTreeSet::new();
+    let mut float_bits = Vec::new();
+    for func in program.functions.values() {
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                match &inst.op {
+                    Op::Constant(Literal::Float(x)) => {
+                        let bits = x.to_bits();
+                        if seen_floats.insert(bits) {
+                            float_bits.push(bits);
+                        }
+                    }
+                    Op::Bind { pattern, .. } => {
+                        collect_pattern_floats(pattern, &mut seen_floats, &mut float_bits);
+                    }
+                    _ => {}
+                }
+            }
+            if let Terminator::Match { arms, .. } = &block.terminator {
+                for (pat, _) in arms {
+                    collect_pattern_floats(pat, &mut seen_floats, &mut float_bits);
+                }
+            }
+        }
+    }
+
+    let mut float_entries = Vec::with_capacity(float_bits.len());
+    for bits in float_bits {
+        let json = serde_json::to_string(&f64::from_bits(bits)).ok()?;
+        let sym = t.enc.name(&json);
+        float_entries.push((bits, sym));
+    }
+
+    let mut section = t.section();
+    section.push(expr_entries.len() as u64);
+    for (pool_idx, sym) in expr_entries {
+        section.push(pool_idx);
+        section.push(sym);
+    }
+    section.push(float_entries.len() as u64);
+    for (bits, sym) in float_entries {
+        section.push(bits);
+        section.push(sym);
+    }
+    let world = [0, 0, 0, 0, 0, 0];
+    Some(t.enc.finish(&world, &section))
+}
+
 /// `program` through a Vesper pass `call` (input bytes to output words) and
 /// back: the identity hook of the IR swap point when `call` is
 /// `place_ir_round_trip`. With `world` the input carries it; `None` when
