@@ -233,11 +233,7 @@ pub fn block_plan_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
             if u64_at(in removed, succ) != 0 {
                 continue;
             }
-            let want = if u64_at(in ld, k) == OUT {
-                IN
-            } else {
-                OUT
-            };
+            let want = if u64_at(in ld, k) == OUT { IN } else { OUT };
             let mut found = adj.count(succ);
             for q in 0..adj.count(succ) {
                 if found == adj.count(succ)
