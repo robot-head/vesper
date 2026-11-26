@@ -324,10 +324,8 @@ pub fn rotate(kind: u8, left: bool, operand: i128, amount: i128) -> i128 {
         pattern
     } else {
         (
-            wrapping_shl_u64(pattern, wrapping_u32(left_by)) | wrapping_shr_u64(
-                pattern,
-                wrapping_u32(wrapping_sub(width, left_by))
-            )
+            wrapping_shl_u64(pattern, wrapping_u32(left_by))
+                | wrapping_shr_u64(pattern, wrapping_u32(wrapping_sub(width, left_by)))
         )
             & mask(kind)
     };

@@ -159,9 +159,10 @@ pub fn measure_x86_64(in ctx: Cx, at: u64, len: u64) -> Measured {
             measured.sp_sub = sat32(measured.sp_sub, b3);
             i = wrapping_add(i, 4);
         } else if rest >= 7 && b0 == 72 && b1 == 129 && b2 == 236 {
-            let imm = b3 | (byte(in ctx, at, len, wrapping_add(i, 4)) << 8) | (
-                byte(in ctx, at, len, wrapping_add(i, 5)) << 16
-            ) | (byte(in ctx, at, len, wrapping_add(i, 6)) << 24);
+            let imm = b3
+                | (byte(in ctx, at, len, wrapping_add(i, 4)) << 8)
+                | (byte(in ctx, at, len, wrapping_add(i, 5)) << 16)
+                | (byte(in ctx, at, len, wrapping_add(i, 6)) << 24);
             if imm >= 2147483648 {
                 break;
             }
@@ -180,9 +181,10 @@ pub fn measure_x86_64(in ctx: Cx, at: u64, len: u64) -> Measured {
 
 // The word at byte `i` (little endian).
 fn word32(in ctx: Cx, at: u64, len: u64, i: u64) -> u64 {
-    byte(in ctx, at, len, i) | (byte(in ctx, at, len, wrapping_add(i, 1)) << 8) | (
-        byte(in ctx, at, len, wrapping_add(i, 2)) << 16
-    ) | (byte(in ctx, at, len, wrapping_add(i, 3)) << 24)
+    byte(in ctx, at, len, i)
+        | (byte(in ctx, at, len, wrapping_add(i, 1)) << 8)
+        | (byte(in ctx, at, len, wrapping_add(i, 2)) << 16)
+        | (byte(in ctx, at, len, wrapping_add(i, 3)) << 24)
 }
 
 pub fn measure_aarch64(in ctx: Cx, at: u64, len: u64) -> Measured {
@@ -240,10 +242,8 @@ pub fn measure_aarch64(in ctx: Cx, at: u64, len: u64) -> Measured {
             }
             let mask = wrapping_shl_u64(65535, wrapping_u32(wrapping_mul(hw, 16)))
                 ^ 18446744073709551615;
-            x16 = (x16 & mask) | wrapping_shl_u64(
-                (insn >> 5) & 65535,
-                wrapping_u32(wrapping_mul(hw, 16))
-            );
+            x16 = (x16 & mask)
+                | wrapping_shl_u64((insn >> 5) & 65535, wrapping_u32(wrapping_mul(hw, 16)));
         } else if insn == 3408946175 {
             if !has_x16 {
                 break;

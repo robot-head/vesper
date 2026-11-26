@@ -185,18 +185,17 @@ fn intern_bytes(inout ast: Ast, in bytes: Slice[u8], start: u64, end: u64) -> u3
             (((lead & 31) << 6) | (widen_u64(byte_at(in bytes, wrapping_add(i, 1))) & 63), 2)
         } else if lead < 240 {
             (
-                ((lead & 15) << 12) | (
-                    (widen_u64(byte_at(in bytes, wrapping_add(i, 1))) & 63) << 6
-                ) | (widen_u64(byte_at(in bytes, wrapping_add(i, 2))) & 63),
+                ((lead & 15) << 12)
+                    | ((widen_u64(byte_at(in bytes, wrapping_add(i, 1))) & 63) << 6)
+                    | (widen_u64(byte_at(in bytes, wrapping_add(i, 2))) & 63),
                 3
             )
         } else {
             (
-                ((lead & 7) << 18) | (
-                    (widen_u64(byte_at(in bytes, wrapping_add(i, 1))) & 63) << 12
-                ) | ((widen_u64(byte_at(in bytes, wrapping_add(i, 2))) & 63) << 6) | (
-                    widen_u64(byte_at(in bytes, wrapping_add(i, 3))) & 63
-                ),
+                ((lead & 7) << 18)
+                    | ((widen_u64(byte_at(in bytes, wrapping_add(i, 1))) & 63) << 12)
+                    | ((widen_u64(byte_at(in bytes, wrapping_add(i, 2))) & 63) << 6)
+                    | (widen_u64(byte_at(in bytes, wrapping_add(i, 3))) & 63),
                 4
             )
         };
