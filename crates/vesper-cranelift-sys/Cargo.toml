@@ -16,11 +16,15 @@ crate-type = ["rlib", "staticlib"]
 # the same Cranelift build.
 cranelift-codegen = { version = "0.125", features = ["arm64", "riscv64"] }
 cranelift-frontend = "0.125"
-cranelift-jit = "0.125"
 cranelift-module = "0.125"
 cranelift-object = "0.125"
-cranelift-native = "0.125"
 target-lexicon = "0.13"
+
+# No JIT and no host detection inside a Wasm sandbox (the Cranelift
+# component Stage 2 calls, #2210).
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+cranelift-jit = "0.125"
+cranelift-native = "0.125"
 
 [dev-dependencies]
 vesper = { path = "../.." }

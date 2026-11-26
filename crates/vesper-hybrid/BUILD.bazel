@@ -199,6 +199,7 @@ vesper_hybrid(
         "hybrid_driver": [
             ":hybrid_parse_package",
             "//:ast_package",
+            "//:check_collect_package",
             "//:check_data_package",
             "//:check_layout_package",
             "//:check_names_packages_package",
