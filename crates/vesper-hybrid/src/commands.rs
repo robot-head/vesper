@@ -13,86 +13,8 @@ thread_local! {
     static LAST_LINT_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static LAST_DOC_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static LAST_TEST_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-    static LAST_PROOF_AUDIT_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static LAST_VERIFY_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static LAST_LSP_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-}
-
-/// `vesper proof-audit` from the driver module (#1341, #2091): it takes the
-/// packed arguments and returns the module's result bytes.
-pub(crate) type ProofAuditRun = fn(&[u8]) -> Vec<u8>;
-
-/// The installed [`ProofAuditRun`], when its swap is on
-/// (src/swap/proof_audit.rs).
-static PROOF_AUDIT: std::sync::OnceLock<ProofAuditRun> = std::sync::OnceLock::new();
-
-/// Serve `hc_proof_audit_run` from `run` (`proof_audit_run`, modules/driver).
-pub(crate) fn install_proof_audit(run: ProofAuditRun) -> Result<(), ProofAuditRun> {
-    PROOF_AUDIT.set(run)
-}
-
-/// `vesper verify SOURCE --format` from the driver module (#1341): it takes
-/// the packed arguments and returns the module's result bytes.
-pub(crate) type VerifyRun = fn(&[u8]) -> Vec<u8>;
-
-/// The installed [`VerifyRun`], when its swap is on (src/swap/verify.rs).
-static VERIFY: std::sync::OnceLock<VerifyRun> = std::sync::OnceLock::new();
-
-/// Serve `hc_verify_run`'s `--format` runs from `run` (`modules/driver`).
-pub(crate) fn install_verify(run: VerifyRun) -> Result<(), VerifyRun> {
-    VERIFY.set(run)
-}
-
-/// Whether packed `verify` arguments ask for `--format` (before `--`), as
-/// the command layer parsed them: an option's value (`--proofs --format`)
-/// is not a flag. The command layer has rejected `--format` with
-/// `--extract`.
-fn verify_format(packed: &[u8]) -> bool {
-    const VALUED: [&[u8]; 8] = [
-        b"--proofs",
-        b"--theorem",
-        b"--contract-proof",
-        b"--contract-witness",
-        b"--allow-axiom",
-        b"--olean-store",
-        b"--lean",
-        b"--timeout",
-    ];
-    let mut args = packed.split(|&b| b == 0);
-    while let Some(arg) = args.next() {
-        match arg {
-            b"--" => return false,
-            b"--format" => return true,
-            _ if VALUED.contains(&arg) => {
-                args.next();
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
-/// Print what a Vesper command module (`proof_audit_run` of
-/// `modules/driver`, and its `verify_run`) printed and return its error: a
-/// status byte, the stdout length (8 bytes, little-endian), stdout, then
-/// the error text.
-fn module_result(result: &[u8]) -> Result<(), String> {
-    use std::io::Write;
-    let (Some(&status), Some(len)) = (result.first(), result.get(1..9)) else {
-        std::process::abort();
-    };
-    let len = u64::from_le_bytes(len.try_into().expect("8 bytes")) as usize;
-    let Some(out) = result.get(9..9 + len) else {
-        std::process::abort();
-    };
-    let mut stdout = io::stdout().lock();
-    let _ = stdout.write_all(out);
-    let _ = stdout.flush();
-    if status == 0 {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&result[9 + len..]).into_owned())
-    }
 }
 
 /// Commands the Vesper command layers answered (the driver's
@@ -1225,52 +1147,8 @@ pub mod host {
         })
     }
 
-    /// Run `vesper proof-audit` from the Vesper `proof_audit` command layer
-    /// after CLI validation.
-    ///
-    /// Returns `0` on success, or the byte length of the error message stored in
-    /// `LAST_PROOF_AUDIT_ERR`.
-    ///
-    /// # Safety
-    /// `packed` is a lent readable slice of `packed_len` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn hc_proof_audit_run(packed: *const u8, packed_len: usize) -> u64 {
-        let _flush = FlushOnReturn;
-        // SAFETY: lent for the call.
-        let raw = unsafe { bytes(packed, packed_len) };
-        let result = match super::PROOF_AUDIT.get() {
-            Some(run) => super::module_result(&run(raw)),
-            None => crate::proof_commands::run(unpack_test_args(raw)),
-        };
-        match result {
-            Ok(()) => 0,
-            Err(err) => {
-                let bytes = err.into_bytes();
-                let n = bytes.len() as u64;
-                super::LAST_PROOF_AUDIT_ERR.with(|cell| *cell.borrow_mut() = bytes);
-                n
-            }
-        }
-    }
-
-    /// Copy `LAST_PROOF_AUDIT_ERR` into `buf` (copy-out protocol).
-    ///
-    /// # Safety
-    /// `buf` is a lent writable slice of `len` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn hc_proof_audit_err(buf: *mut u8, len: usize) -> u64 {
-        super::LAST_PROOF_AUDIT_ERR.with(|cell| {
-            let data = cell.borrow();
-            if data.len() <= len && !buf.is_null() && !data.is_empty() {
-                // SAFETY: `buf` holds `len >= data.len()` bytes.
-                unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len()) };
-            }
-            data.len() as u64
-        })
-    }
-
-    /// Run `vesper verify` from the Vesper `verify` command layer after CLI
-    /// validation.
+    /// Run `vesper verify SOURCE --extract` from the Vesper `verify` command
+    /// layer after CLI validation (`--format` runs in @vesper/verify).
     ///
     /// Returns `0` on success, or the byte length of the error message stored in
     /// `LAST_VERIFY_ERR`.
@@ -1282,11 +1160,7 @@ pub mod host {
         let _flush = FlushOnReturn;
         // SAFETY: lent for the call.
         let raw = unsafe { bytes(packed, packed_len) };
-        let result = match super::VERIFY.get() {
-            Some(run) if super::verify_format(raw) => super::module_result(&run(raw)),
-            _ => crate::verify_commands::run(unpack_test_args(raw)),
-        };
-        match result {
+        match crate::verify_commands::run(unpack_test_args(raw)) {
             Ok(()) => 0,
             Err(err) => {
                 let bytes = err.into_bytes();
@@ -1295,31 +1169,6 @@ pub mod host {
                 n
             }
         }
-    }
-
-    /// Emit the `--json` error object on stdout for a `vesper verify` CLI error
-    /// detected in Vesper.
-    ///
-    /// # Safety
-    /// `message` is a lent readable slice of `message_len` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn hc_verify_json_err(
-        extract: bool,
-        message: *const u8,
-        message_len: usize,
-    ) {
-        let _flush = FlushOnReturn;
-        // SAFETY: lent for the call.
-        let msg = String::from_utf8_lossy(unsafe { bytes(message, message_len) });
-        let schema = if extract {
-            "vesper.verify-extract/1"
-        } else {
-            "vesper.format-proof/1"
-        };
-        println!(
-            "{}",
-            serde_json::json!({"schema": schema, "status": "rejected", "stage": "config", "message": msg})
-        );
     }
 
     /// Copy `LAST_VERIFY_ERR` into `buf` (copy-out protocol).

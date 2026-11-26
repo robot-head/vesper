@@ -1747,7 +1747,7 @@ vesper_package(
 # Self-hosting SH5 lane 18 (#1341): Lean extraction, for the hybrid's
 # `lean_extract` swap.
 # @vesper/proof-audit, `vesper proof-audit` in Vesper (SH5 lane 18, #1341),
-# for the hybrid's `proof_audit` swap.
+# which @vesper/driver-commands runs (#1996).
 vesper_package(
     name = "proof_audit_package",
     srcs = glob(["packages/vesper-proof-audit/src/**/*.ves"]),
@@ -1765,7 +1765,7 @@ vesper_package(
 )
 
 # @vesper/verify, `vesper verify SOURCE --format` in Vesper (SH5 lane 18,
-# #1341), for the hybrid's `verify` swap.
+# #1341), which @vesper/driver-commands runs (#1996).
 vesper_package(
     name = "verify_package",
     srcs = glob(["packages/vesper-verify/src/**/*.ves"]),
@@ -2168,9 +2168,11 @@ vesper_package(
     vsys = ["packages/vesper-driver-commands/commands.vsys"],
     deps = [
         ":driver_package",
+        ":proof_audit_package",
         ":std_env_package",
         ":std_fs_package",
         ":std_process_package",
+        ":verify_package",
         "//crates/vesper-fmt:port_package",
         "//crates/vesper-loom-calculus:port_package",
     ],

@@ -39,18 +39,6 @@ mod native_steps;
 #[path = "driver/world.rs"]
 mod world;
 
-/// `proof_audit_run` of the driver module (the `proof_audit` swap,
-/// src/swap/proof_audit.rs).
-pub(crate) fn proof_audit_run(packed: &[u8]) -> Vec<u8> {
-    binding::proof_audit_run(packed)
-}
-
-/// `verify_run` of the driver module (the `verify` swap,
-/// src/swap/verify.rs).
-pub(crate) fn verify_run(packed: &[u8]) -> Vec<u8> {
-    binding::verify_run(packed)
-}
-
 /// The process entry: the Vesper driver on the CLI thread (the same name
 /// and stack as the Rust CLI's), or the Rust CLI when the driver hands the
 /// command back.

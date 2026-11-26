@@ -1846,6 +1846,18 @@ fn proof_audit_matches_the_default_compiler() {
     );
 }
 
+/// The count in the `VESPER_HYBRID_STATS` report of the command layers.
+fn layer_answers(stderr: &str) -> u64 {
+    stderr
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("vesper-hybrid: the command layers answered ")
+                .and_then(|s| s.strip_suffix(" commands from Vesper"))
+                .and_then(|n| n.parse().ok())
+        })
+        .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"))
+}
+
 #[test]
 fn proof_audit_runs_in_vesper() {
     let hybrid = hybrid();
@@ -1871,7 +1883,8 @@ fn proof_audit_runs_in_vesper() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// An audit past the command layer runs in the driver module (#1341).
+/// An audit past the command layer runs in @vesper/proof-audit, which the
+/// command layer calls (#1341, #1996).
 #[test]
 fn proof_audit_audits_in_vesper() {
     let hybrid = hybrid();
@@ -1885,15 +1898,12 @@ fn proof_audit_audits_in_vesper() {
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("vesper-hybrid: proof_audit answered 1 calls from Vesper"),
-        "{stderr}"
-    );
+    assert_eq!(layer_answers(&stderr), 1, "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `vesper verify SOURCE --format` past the command layer runs in
-/// the driver module's `verify_run` (#1341).
+/// @vesper/verify, which the command layer calls (#1341, #1996).
 #[test]
 fn verify_format_runs_in_vesper() {
     let hybrid = hybrid();
@@ -1907,10 +1917,7 @@ fn verify_format_runs_in_vesper() {
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("vesper-hybrid: verify answered 1 calls from Vesper"),
-        "{stderr}"
-    );
+    assert_eq!(layer_answers(&stderr), 1, "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
