@@ -75,6 +75,7 @@ pub mod native_vectorize;
 pub mod native_verifiers;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod optimize;
+pub mod option_methods;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod packages;
 pub mod pact_frontend;
@@ -88,7 +89,6 @@ pub mod seq;
 mod source_analysis;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod stack_bound;
-pub mod option_methods;
 pub mod strings;
 pub mod swap_input;
 pub mod tensor_types;
