@@ -690,6 +690,7 @@ unsafe extern "C" {
     fn vesper_loom_calculus_L_drop(value: *mut u64) -> i64;
     fn vesper_loom_calculus_TomlRead_drop(value: *mut u64) -> i64;
     fn vesper_loom_calculus_check_upgrade(result: *mut u64, words: *mut u64, text: *mut u64) -> i64;
+    fn vesper_loom_calculus_lock_json(result: *mut u64, text: *mut u64) -> i64;
     fn vesper_loom_calculus_manifest_toml(result: *mut u64, text: *mut u64) -> i64;
     fn vesper_loom_calculus_package_name_valid(s: *mut u64) -> i64;
     fn vesper_loom_calculus_read_toml(result: *mut u64, text: *mut u64) -> i64;
@@ -719,6 +720,16 @@ pub fn check_upgrade(words: &[u64], text: &[u8]) -> L {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(words, |view_words| vesper_port_abi::with_slice(text, |view_text| unsafe { vesper_loom_calculus_check_upgrade(result.as_mut_ptr(), view_words, view_text) }));
     unsafe { L::from_words(&result[0..]) }
+}
+
+/// Calls `lock_json` of the Vesper library `loom_calculus` (`vesper_loom_calculus_lock_json`).
+pub fn lock_json(text: &[u8]) -> TomlRead {
+    let mut result = [0u64; 1];
+    // SAFETY: `vesper_loom_calculus_lock_json` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(text, |view_text| unsafe { vesper_loom_calculus_lock_json(result.as_mut_ptr(), view_text) });
+    unsafe { TomlRead::from_words(&result[0..]) }
 }
 
 /// Calls `manifest_toml` of the Vesper library `loom_calculus` (`vesper_loom_calculus_manifest_toml`).

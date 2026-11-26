@@ -602,6 +602,13 @@ pub fn manifest_toml(text: &str) -> String {
     String::from_utf8(l.as_ref().pool().to_vec()).expect("the result is UTF-8")
 }
 
+/// The Vesper `serde_json::from_slice::<Solution>`: the solution's JSON,
+/// or `!` and the error text.
+pub fn lock_json(text: &[u8]) -> String {
+    let l = binding::lock_json(text);
+    String::from_utf8(l.as_ref().pool().to_vec()).expect("the result is UTF-8")
+}
+
 /// Whether the Vesper TOML reader accepts `text` (its benchmark).
 pub fn toml_accepts(text: &str) -> bool {
     binding::toml_accepts(text.as_bytes())

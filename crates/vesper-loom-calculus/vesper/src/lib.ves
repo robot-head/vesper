@@ -20,6 +20,7 @@ use @vesper-std/toml::{parse, dump};
 use self::manifest_toml::{manifest_from_toml};
 use self::semver_text::{SCmp, parse_version, parse_req};
 use self::encode::{encode_manifest_diags, encode_upgrade, encode_validation};
+use self::lock_json::{solution_from_json};
 
 // A SemVer version; pre, build and text are string ids.
 pub copy struct Ver {
@@ -385,6 +386,19 @@ fn put_dec(inout out: ChunkSeq[u8], v: u64) {
 // manifest's JSON (`serde_json::to_string`), or `!` and the error text.
 pub fn manifest_toml(in text: Slice[u8]) -> TomlRead {
     let (ok, body) = manifest_from_toml(in text);
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if !ok {
+        out.push(33);
+    }
+    out.extend(in body.as_slice());
+    TomlRead { pool: out }
+}
+
+// `serde_json::from_slice::<Solution>` for the differential tests: the
+// pool is the solution's JSON (`serde_json::to_string`), or `!` and the
+// error text.
+pub fn lock_json(in text: Slice[u8]) -> TomlRead {
+    let (ok, body) = solution_from_json(in text);
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     if !ok {
         out.push(33);
