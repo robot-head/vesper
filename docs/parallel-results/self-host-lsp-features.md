@@ -870,3 +870,71 @@ checks run at 0.64x and all checks at 1.08x.
 
 Rust lines deleted: 0. The checks are not wired: Rust stays the default
 until the hybrid wiring part.
+
+# Part 11a (#1828): the formatting action
+
+`textDocument/formatting` (src/lsp/actions.rs) now runs in the new
+package `@vesper/lsp-format`, over the formatter port `@vesper/fmt`, with
+0 diffs, at 0.58x Rust's time:
+
+- The action document checks of `ActionDocument::new`: the line table,
+  the URI (1 to 4,096 bytes) and the 128 KiB source bound.
+- The stamp check: an expected version and BLAKE3 source digest must both
+  match, or the answer is `document version/source identity changed`.
+- `format_document`: the canonical formatter with its 128 KiB, 64 Mi work
+  limits. A changed document gives one whole-document edit; an unchanged
+  one gives none.
+- On a syntax error or an opaque macro, `format_complete_declarations`:
+  the recovery formatter's edits to the complete declarations, refused
+  past 256 edits, past 128 KiB of edit text, when no declaration was
+  formatted, or when an edit range is out of order or off a character
+  boundary.
+- The JSON of `Formatting`: the edits, the workspace edit and the
+  provenance (`source_blake3`, the declaration count and the scope of a
+  recovery), with sorted keys as serde_json writes `json!` maps.
+
+The action is its own package because `@vesper/fmt` links C BLAKE3
+(`@vesper-std/hash-sys`), which a Wasm entry does not have. Adding it to
+`@vesper/lsp-features` would make that package fail under Stage 2. The
+action hashes the source with the portable BLAKE3 of `@vesper-std/hash`
+and never reaches a foreign call.
+
+## What changed
+
+- Rust: the hidden hook `vesper::lsp::formatting_for_port` builds the
+  action document and runs `format_document`, as the session does.
+- `packages/vesper-lsp-format` (new): `formatting.ves` and the entry
+  `lsp_formatting` in `lib.ves`. `put_json`, `lines_of` and `put_pos` in
+  `@vesper/lsp-features` (proof_lenses.ves) are now public.
+- `tests/common/check_harness.rs`: a package whose dependencies bind
+  `.vsys` libraries is checked with their imports
+  (`ffi_lowering::check_module`).
+- `tests/self_host_lsp_features.rs` adds `formatting_matches_rust` and the
+  ignored `formatting_speed`.
+- `tests/wasm_seed_package_io.rs` lists the package as covered by the JIT
+  test instead of Stage 2.
+
+## Differential
+
+434 cases. Every seventh `.ves` file under `packages/` up to 128 KiB,
+as it is and in five variants: re-indented, CRLF line ends, an unclosed
+function appended, `) ) )` inserted in the middle, and cut in half. Their
+versions run from -40 upward. Hand-written cases cover empty documents,
+multi-byte text, comments, broken declarations between good ones, URIs
+at 0, 4,096 and 4,097 bytes and with escapes, stale versions and digests,
+and sources at and over the 128 KiB bound.
+
+151 whole-document replacements, 45 recovery proposals, 73 unchanged
+documents and 165 refusals matched with 0 diffs.
+
+## Numbers
+
+Both sides build the action document and format it on every round, 4
+rounds per case, timed ABBA.
+
+| Cases | Rust | Vesper | Ratio |
+|---|--:|--:|--:|
+| All 428 (before merging main) | 3.72 ms | 2.17 ms | **0.58x** |
+
+Rust lines deleted: 0. The action is not wired: Rust stays the default
+until the hybrid wiring part.

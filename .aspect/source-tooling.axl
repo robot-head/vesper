@@ -1,7 +1,7 @@
 """Check real fmt, lint, doc and benchmark commands with disposable sources."""
 
 load("./bounded-stdio.axl", "bounded_run", "utf8")
-load("./lib/bazel_exec.axl", "executable", "run_target")
+load("./lib/bazel_exec.axl", "executable", "run_target", "VESPER")
 load("./lib/html-fixture.axl", "tags")
 load("./lib/process.axl", "root_path", "scratch_dir")
 load("./lib/strict-json.axl", "decode_list", "decode_object")
@@ -208,7 +208,7 @@ check_source_tooling = task(
 
 def _suite(ctx: TaskContext) -> int:
     root = ctx.std.env.aspect_root_dir()
-    binary = executable(ctx, root, "//:bin/vesper")
+    binary = executable(ctx, root, VESPER)
     candidate = binary + ".exe"
     if ctx.std.fs.exists(candidate) and ctx.std.fs.metadata(candidate).is_file:
         binary = candidate
