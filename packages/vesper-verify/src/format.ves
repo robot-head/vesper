@@ -113,10 +113,7 @@ fn mul(a: u64, b: u64) -> u64 {
     if a == U64_MAX || b == U64_MAX {
         return U64_MAX;
     }
-    match checked_mul_u64(a, b) {
-        Option::Some(v) => v,
-        Option::None => U64_MAX,
-    }
+    checked_mul_u64(a, b).unwrap_or(U64_MAX)
 }
 
 // `Preflight`.
@@ -154,17 +151,11 @@ fn text_start(in m: Model, t: u64) -> u64 {
 }
 
 fn word(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 fn kind(in m: Model, i: u64) -> u8 {
-    match m.kind.try_get(i) {
-        Option::Some(k) => k,
-        Option::None => D_NIL,
-    }
+    m.kind.try_get(i).unwrap_or(D_NIL)
 }
 
 // `quoted_bytes`: the printer's escaped length of `s[a..b]`, quotes

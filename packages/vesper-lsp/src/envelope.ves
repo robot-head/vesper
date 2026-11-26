@@ -361,10 +361,7 @@ pub fn parse_envelope(inout doc: Doc, in body: Slice[u8], l: Plimits) -> Env eff
                     Fail::raise(Perr::PInvalidId);
                 }
                 env.id_tag = Id::Int;
-                env.id_int = match parse_i32(in body, t) {
-                    Option::Some(v) => v,
-                    Option::None => 0,
-                };
+                env.id_int = parse_i32(in body, t).unwrap_or(0);
             }
             _ => {}
         }
