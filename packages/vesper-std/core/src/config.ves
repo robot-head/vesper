@@ -1,0 +1,72 @@
+// Copy a configuration and apply the field updates from left to right.
+// The source and each right-hand side are evaluated once.
+pub sugar update: expr {
+    rule (
+        update $source:expr {
+            $($field:ident = $value:expr),*
+        }
+    ) => {
+        {
+            let mut updated = copy_config($source);
+            $(updated.$field = $value;)* updated
+        }
+    }
+}
+
+// Require copy mode rather than silently moving an affine configuration.
+fn copy_config[T: mod copy](value: T) -> T {
+    value
+}
+
+test {
+    copy struct Config {
+        port: i64,
+        tls: bool,
+        attempts: i64,
+    }
+
+    fn config(port: i64) -> Config {
+        Config {
+            port: port,
+            tls: false,
+            attempts: 3
+        }
+    }
+
+    fn mark(inout log: i64, n: i64) -> i64 {
+        log = wrapping_add(wrapping_mul(log, 10), n);
+        n
+    }
+
+    // @case copy_and_update()
+    fn preserves_original_and_unspecified_fields() -> bool {
+        let original = config(12);
+        let updated: i64 = 80;
+        let changed = update original {
+            port = updated,
+            tls = true
+        };
+        original.port == 12
+            && !original.tls
+            && changed.port == 80
+            && changed.tls
+            && changed.attempts == 3
+    }
+
+    // @case evaluation_order()
+    fn evaluates_source_and_values_once_in_order() -> bool {
+        let mut log: i64 = 0;
+        let changed = update config(mark(inout log, 1)) {
+            port = mark(inout log, 2),
+            tls = mark(inout log, 3) == 3
+        };
+        changed.port == 2 && changed.tls && changed.attempts == 3 && log == 123
+    }
+
+    // @case empty_update()
+    fn empty_update_keeps_the_original_value() -> bool {
+        let original = config(12);
+        let changed = update original {};
+        changed.port == 12 && !changed.tls && changed.attempts == 3
+    }
+}

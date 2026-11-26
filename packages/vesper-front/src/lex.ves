@@ -774,15 +774,30 @@ fn intern_new(inout t: Tokens, in b: Slice[u8], s: u64, e: u64, kind: u8, w: u64
 }
 
 pub fn tokens_new(len: u64) -> Tokens {
+    // 256 slots (two words each), or 32 for a short source (a sugar
+    // fragment); `slots_grow` doubles them as symbols arrive.
+    let small = len < 1024;
     let mut slots = ChunkSeq::new[u64]();
-    slots.resize(512, 0);
+    slots
+        .resize(
+            if small {
+                64
+            } else {
+                512
+            },
+            0
+        );
     let cap = inc(len >> 2);
     Tokens {
         kind: ChunkSeq::with_capacity[u8](cap),
         start: ChunkSeq::with_capacity[u32](cap),
         sym: ChunkSeq::with_capacity[u32](cap),
         slots: slots,
-        slot_shift: 56,
+        slot_shift: if small {
+            59
+        } else {
+            56
+        },
         sym_start: ChunkSeq::new[u32](),
         sym_end: ChunkSeq::new[u32](),
         sym_hash: ChunkSeq::new[u64](),
@@ -793,6 +808,25 @@ pub fn tokens_new(len: u64) -> Tokens {
 }
 
 // Logical limits of `LexLimits::default()`.
+// `tokens_new` without the interner's slots, for a lexer that assigns no
+// symbols.
+fn tokens_unclassified(len: u64) -> Tokens {
+    let cap = inc(len >> 2);
+    Tokens {
+        kind: ChunkSeq::with_capacity[u8](cap),
+        start: ChunkSeq::with_capacity[u32](cap),
+        sym: ChunkSeq::new[u32](),
+        slots: ChunkSeq::new[u64](),
+        slot_shift: 56,
+        sym_start: ChunkSeq::new[u32](),
+        sym_end: ChunkSeq::new[u32](),
+        sym_hash: ChunkSeq::new[u64](),
+        limited: false,
+        limit_kind: 0,
+        rejected: false
+    }
+}
+
 pub fn max_source_bytes() -> u64 {
     1048576
 }
@@ -900,6 +934,25 @@ pub fn lex_sugar_with_limits(
     lex_tokens(in b, inout d, true, true, max_tok, max_diag)
 }
 
+// `lex_sugar_with_limits` without symbols (`sym` stays empty), for
+// callers that read only kinds and ranges (@vesper/sugar's matcher).
+pub fn lex_sugar_raw_with_limits(
+    in b: Slice[u8],
+    inout d: Diags,
+    max_source_bytes: u64,
+    max_tok: u64,
+    max_diag: u64
+) -> Tokens {
+    let mut m = ChunkSeq::new[u8]();
+    if lex_preflight(inout m, b.len(), max_source_bytes, max_tok, max_diag) != 0 {
+        diag_push(inout d, 3, 0, 0, in m.as_slice());
+        let mut t = tokens_new(0);
+        t.rejected = true;
+        return t;
+    }
+    lex_tokens(in b, inout d, false, true, max_tok, max_diag)
+}
+
 // Identifier kinds that get a symbol: Upper, Lower and the keywords the
 // parser also takes as names (`self`, `state`, `linear`, `with`).
 fn named_kind(k: u8) -> bool {
@@ -917,7 +970,11 @@ fn lex_tokens(
     max_diag: u64
 ) -> Tokens {
     let n = b.len();
-    let mut t = tokens_new(n);
+    let mut t = if classify {
+        tokens_new(n)
+    } else {
+        tokens_unclassified(n)
+    };
     let mut at: u64 = 0;
     loop {
         if at >= n {

@@ -1,0 +1,485 @@
+"""Compile and independently replay every eligible Lean model with Logos."""
+
+load("@std//time.axl", "monotonic_ns", "sleep_iter")
+load("./lib/flip-statistics.axl", "natural")
+load("./lib/process.axl", "capture", "exit_code", "root_path", "scratch_dir")
+
+_MAX_DECLINES = 8
+_USAGE = """aspect maintenance logos-sweep sweep -- --root SEALED --driver LOGOS42 --lean LEAN --report JSON
+    [--vesper VESPER] [--work ABSENT_DIR] [--jobs N] [--batch-jobs N]"""
+_LAKEFILE = """name = "vesperLogosSweep"
+defaultTargets = ["logos-sweep"]
+
+[[lean_lib]]
+name = "Export"
+
+[[lean_exe]]
+name = "logos-sweep"
+root = "Sweep"
+supportInterpreter = true
+"""
+
+def _require(condition, message):
+    if not condition:
+        fail("logos-sweep: " + message)
+
+def _log(ctx, message):
+    ctx.std.io.stderr.write("logos-sweep: " + message + "\n")
+
+def _seconds(start):
+    return float((monotonic_ns() - start + 50000000) // 100000000) / 10.0
+
+def _parent(path):
+    return path.rsplit("/", 1)[0] or "/"
+
+def _command(ctx, cwd, argv, env):
+    child = ctx.std.process.command(argv[0]).args(argv[1:]).current_dir(cwd)
+    for key, value in env.items():
+        child.env(key, value)
+    return child
+
+def _checked(result, code, label):
+    if code:
+        detail = result.stderr or result.stdout
+        fail("logos-sweep: %s failed (%d):\n%s" % (label, code, detail[-4000:]))
+
+def _run(ctx, cwd, argv, env = {}):
+    child = _command(ctx, cwd, argv, env).stdin("null").stdout("piped").stderr("piped").spawn().wait_with_output()
+    result = struct(stdout = child.stdout, stderr = child.stderr)
+    _checked(result, exit_code(child.status), argv[0].rsplit("/", 1)[-1])
+    return result.stdout
+
+def _spawn(ctx, cwd, argv, env, path):
+    stdout, stderr = path + ".out", path + ".err"
+    child = _command(ctx, cwd, argv, env).process_group(0).stdin("null").stdout(ctx.std.fs.create(stdout)).stderr(ctx.std.fs.create(stderr)).spawn()
+    return struct(child = child, stdout = stdout, stderr = stderr, started = monotonic_ns(), program = argv[0])
+
+def _read_result(ctx, job):
+    return struct(stdout = str(ctx.std.fs.open(job.stdout).read()), stderr = str(ctx.std.fs.open(job.stderr).read()))
+
+def _cancel(jobs):
+    for job in jobs:
+        job.child.cancellation.cancel()
+
+def _json(ctx, path):
+    return json.decode(ctx.std.fs.read_to_string(path))
+
+def _modules(ctx, root):
+    paths = capture(ctx, "find", [root, "-type", "f", "-name", "*.lean", "-print0"], root).split("\x00")[:-1]
+    modules = {}
+    for path in sorted(paths):
+        relative = path[len(root.rstrip("/")) + 1:]
+        name = relative[:-5].replace("/", ".")
+        imports = []
+        for line in ctx.std.fs.read_to_string(path).splitlines():
+            words = line.strip().split()
+            if words and words[0] == "public":
+                words = words[1:]
+            if words and words[0] == "import":
+                imports.extend(words[1:])
+        modules[name] = struct(tree = root, relative = relative, imports = imports)
+    return modules
+
+def _topological(modules):
+    order, states = [], {}
+    # Iterate over explicit DFS frames. Each node is entered and left once,
+    # and every import can add one pending frame.
+    limit = len(modules) * 2
+    for node in modules.values():
+        limit += len(node.imports)
+    pending = [(name, False) for name in reversed(modules.keys())]
+    for _ in range(limit):
+        if not pending:
+            break
+        name, leaving = pending.pop()
+        state = states.get(name)
+        if leaving:
+            states[name] = "done"
+            order.append(name)
+        elif name in modules and state != "done":
+            _require(state != "active", "import cycle through " + name)
+            states[name] = "active"
+            pending.append((name, True))
+            pending.extend([(dependency, False) for dependency in reversed(modules[name].imports)])
+    _require(not pending, "incomplete import traversal")
+    return order
+
+def _extract(ctx, repository, compiler, destination):
+    fixtures = repository + "/tests/fixtures/lean_extract"
+    package = destination + "/VesperExtracted"
+    ctx.std.fs.create_dir_all(package)
+    for entry in sorted([entry.path for entry in ctx.std.fs.read_dir(fixtures) if entry.path.endswith(".ves")]):
+        name = entry.rsplit("/", 1)[-1][:-4]
+        path = fixtures + "/" + name
+        proofs = path + ".proofs.lean"
+        if not ctx.std.fs.exists(proofs) or not ctx.std.fs.metadata(proofs).is_file:
+            continue
+        extracted = _run(ctx, repository, [compiler, "emit", path + ".ves", "--emit", "lean"])
+        module = "".join([part[:1].upper() + part[1:].lower() for part in name.split("_")])
+        ctx.std.fs.write(package + "/" + module + ".lean", extracted + "\n" + ctx.std.fs.read_to_string(proofs))
+    return _modules(ctx, destination)
+
+def _compile(ctx, repository, lean, work, env, jobs, extracted):
+    archived = _modules(ctx, repository + "/tools/lean4lean-foundations42/upstream")
+    models = _modules(ctx, repository + "/lean")
+    sources = {}
+    for tree in [archived, models, extracted]:
+        for name, source in tree.items():
+            _require(name not in sources, "a module name occurs in two source trees: " + name)
+            sources[name] = source
+    pending = _topological(sources)
+    done, running = {}, {}
+    olean = work + "/olean"
+    ctx.std.fs.create_dir_all(olean)
+    logs = work + "/compile"
+    ctx.std.fs.create_dir_all(logs)
+    for _ in sleep_iter(25):
+        remaining = []
+        for name in pending:
+            source = sources[name]
+            if len(running) == jobs or any([item in sources and item not in done for item in source.imports]):
+                remaining.append(name)
+                continue
+            target = olean + "/" + source.relative[:-5] + ".olean"
+            ctx.std.fs.create_dir_all(_parent(target))
+            running[name] = _spawn(ctx, source.tree, [lean, "-o", target, source.relative], env, logs + "/" + name)
+        pending = remaining
+        for name, job in list(running.items()):
+            status = job.child.try_wait()
+            if status != None:
+                running.pop(name)
+                if not status.success:
+                    _cancel(running.values())
+                    _checked(_read_result(ctx, job), exit_code(status), "Lean model " + name)
+                done[name] = True
+        if not pending and not running:
+            break
+    return _topological(models) + _topological(extracted)
+
+def _build(ctx, repository, sealed, work, lake, env):
+    package = work + "/sweeper"
+    ctx.std.fs.create_dir_all(package)
+    for filename in ["Export.lean", "lean-toolchain"]:
+        ctx.std.fs.copy(sealed + "/" + filename, package + "/" + filename)
+    ctx.std.fs.copy(repository + "/tools/logos-sweep/Sweep.lean", package + "/Sweep.lean")
+    ctx.std.fs.write(package + "/lakefile.toml", _LAKEFILE)
+    _run(ctx, package, [lake, "build"], env)
+    return package + "/.lake/build/bin/logos-sweep"
+
+def _expected(rows):
+    expected = {}
+    for row in rows:
+        _require(sorted(row) == ["declaration", "reason"] and type(row["reason"]) == "string" and row["reason"].strip(),
+                 "malformed expected decline %r" % row)
+        name = row["declaration"]
+        _require(type(name) == "string" and bool(name) and name not in expected, "duplicate or invalid expected decline %r" % name)
+        expected[name] = row["reason"]
+    return expected
+
+def _plan(batches, order):
+    _require(type(batches) == "list" and bool(batches), "batch plan is empty")
+    _require(all([type(batch) == "list" and bool(batch) for batch in batches]), "batch plan contains an empty batch")
+    planned = [name for batch in batches for name in batch]
+    _require(sorted(planned) == sorted(order) and len({name: True for name in planned}) == len(planned),
+             "plan does not cover every module exactly once")
+    control = sorted([(len(batch), index) for index, batch in enumerate(batches)])[0][1]
+    ordered = sorted([(-len(batch), index) for index, batch in enumerate(batches)])
+    return control, [index for _, index in ordered]
+
+def _decline(stderr):
+    detail = stderr.strip()[:4000]
+    if not detail.startswith("Logos declined:"):
+        return None, detail
+    _, marker, suffix = detail.partition("declaration '")
+    name, quote, _ = suffix.partition("'")
+    return name if marker and quote and name and "\n" not in name else None, detail
+
+def _export(ctx, h, state):
+    prefix = state["prefix"]
+    ctx.std.fs.write(prefix + ".exclude.json", json.encode(state["exclusions"]))
+    argv = [
+        h.sweeper, prefix + ".ndjson", prefix + ".json",
+        prefix + ".summary.json", prefix + ".exclude.json",
+    ] + state["batch"]
+    _log(ctx, "batch %d: %d module(s), %d withheld root(s)" % (state["index"] + 1, len(state["batch"]), len(state["exclusions"])))
+    state.update(phase = "export", job = h.spawn(ctx, h.repository, argv, h.env, prefix + ".export"))
+
+def _check(ctx, h, state, phase):
+    prefix = state["prefix"]
+    argv = [h.kernel, "--check-manifest", prefix + ".ndjson", prefix + ".json"]
+    state.update(phase = phase, job = h.spawn(ctx, h.repository, argv, {}, prefix + "." + phase))
+
+def _complete(ctx, state):
+    prefix = state["prefix"]
+    ctx.std.fs.remove_file(prefix + ".ndjson")
+    ctx.std.fs.remove_file(prefix + ".json")
+    return {
+        "summary": state["summary"], "logos": state["logos"],
+        "export_bytes": state["export_bytes"], "export_seconds": state["export_seconds"],
+        "check_seconds": state["check_seconds"], "exclusions": state["exclusions"],
+    }
+
+def _advance(ctx, h, state, status, control, declined):
+    job, phase = state["job"], state["phase"]
+    result = _read_result(ctx, job)
+    code = exit_code(status)
+    prefix = state["prefix"]
+    if phase == "export":
+        _checked(result, code, "export batch %d" % state["index"])
+        state.update(summary = _json(ctx, prefix + ".summary.json"),
+                     export_bytes = ctx.std.fs.metadata(prefix + ".ndjson").size,
+                     export_seconds = _seconds(job.started))
+        _check(ctx, h, state, "check")
+        return None
+    if phase == "control":
+        _require(code and "unassociated declaration" in result.stderr,
+                 "coverage control was not refused: %d %s" % (code, result.stderr[:400]))
+        _log(ctx, "coverage control refused as expected")
+        return _complete(ctx, state)
+    if not code:
+        state.update(logos = json.decode(result.stdout), check_seconds = _seconds(job.started))
+        if state["index"] == control:
+            path = prefix + ".json"
+            inventory = _json(ctx, path)
+            _require(bool(inventory), "coverage control needs a nonempty manifest")
+            ctx.std.fs.write(path, json.encode(inventory[1:]))
+            _check(ctx, h, state, "control")
+            return None
+        return _complete(ctx, state)
+    name, detail = _decline(result.stderr)
+    _require(name, "batch %d (%r): %s" % (state["index"], state["batch"], detail))
+    _require(name not in state["exclusions"], name + " declined again after exclusion")
+    _require(len(state["exclusions"]) < _MAX_DECLINES, "batch %d exceeded %d declines" % (state["index"], _MAX_DECLINES))
+    _log(ctx, "Logos declined %s: %s" % (name, detail))
+    declined[name] = detail
+    state["exclusions"].append(name)
+    ctx.std.fs.remove_file(prefix + ".ndjson")
+    ctx.std.fs.remove_file(prefix + ".json")
+    _export(ctx, h, state)
+    return None
+
+def _replay(ctx, h, batches, order, jobs):
+    control, pending = _plan(batches, order)
+    declined, results, running = {}, {}, {}
+    for _ in sleep_iter(25):
+        slots = min(jobs - len(running), len(pending))
+        for index in pending[:slots]:
+            state = {"index": index, "batch": batches[index], "prefix": h.work + "/batch%d" % index, "exclusions": []}
+            _export(ctx, h, state)
+            running[index] = state
+        pending = pending[slots:]
+        for index, state in list(running.items()):
+            status = state["job"].child.try_wait()
+            if status != None:
+                error, completed = catch(_advance, ctx, h, state, status, control, declined)
+                if error != None:
+                    running.pop(index)
+                    _cancel([row["job"] for row in running.values()])
+                    fail(error)
+                if completed != None:
+                    running.pop(index)
+                    results[index] = completed
+        if not running and not pending:
+            break
+    return struct(control = control, declined = declined, results = results)
+
+def _coverage(ctx, replay, batches, order, expected):
+    rows, results = {}, []
+    for index, batch in enumerate(batches):
+        outcome = replay.results[index]
+        summary, logos = outcome["summary"], outcome["logos"]
+        _require(logos.get("checked") == summary["exported"],
+                 "batch %d coverage %r != exported %r" % (index, logos.get("checked"), summary["exported"]))
+        for row in summary["roots"]:
+            _require(row["module"] in batch and row["module"] not in rows, "duplicate or unexpected module summary: " + row["module"])
+            rows[row["module"]] = dict(row, batch = index)
+        exclusions = outcome["exclusions"]
+        results.append({
+            "batch": index, "roots": batch, "closure_modules": summary["modules_in_closure"], "constants": summary["constants"],
+            "logos_checked": logos["checked"], "skipped_unsafe_or_partial": summary["skipped_unsafe_or_partial"],
+            "withheld_after_decline": summary["withheld"], "declined": exclusions, "attempts": len(exclusions) + 1,
+            "export_bytes": outcome["export_bytes"], "export_seconds": outcome["export_seconds"],
+            "check_seconds": outcome["check_seconds"], "validated_primitives": logos["validated_primitives"],
+        })
+    problems = []
+    declined = replay.declined
+    for name in sorted(declined):
+        if name not in expected:
+            problems.append("unexpected Logos decline of %s: %s" % (name, declined[name]))
+    for name in sorted(expected):
+        if name not in declined:
+            problems.append(name + " is listed in expected-declines.json but Logos now accepts it; remove the entry")
+    for name in order:
+        row = rows.get(name)
+        if row == None:
+            problems.append(name + ": missing from every batch summary")
+        elif not row["checked"] and (row["withheld"] or row["skipped_unsafe_or_partial"]):
+            problems.append(name + ": none of its own declarations was checked by Logos")
+    return struct(batches = results, problems = problems, modules = [rows[name] for name in sorted(order) if name in rows])
+
+def sweep(ctx, repository, root, driver, lean, report_path, vesper = None, work = "", jobs = None, batch_jobs = None):
+    cwd = ctx.std.env.current_dir()
+    root, driver, lean, report_path = [root_path(cwd, path) for path in [root, driver, lean, report_path]]
+    lake = _parent(lean) + "/lake"
+    kernel = root + "/.lake/build/rust/release/logos-kernel"
+    for path in [root + "/setup-receipt.json", root + "/Export.lean", kernel, lean, lake]:
+        _require(ctx.std.fs.exists(path) and ctx.std.fs.metadata(path).is_file, "missing " + path)
+    verified = _run(ctx, repository, [driver, "--verify-setup-source", root])
+    source_manifest = json.decode(verified)["source_manifest_blake3"]
+    env = {"PATH": _parent(lean) + ":" + (ctx.std.env.var("PATH") or ""), "LEAN_PATH": None}
+    version = _run(ctx, repository, [lean, "--version"], env).strip()
+    _require("version 4.35.0" in version, "expected Lean 4.35.0, got " + version)
+    if jobs == None or batch_jobs == None:
+        available = 1
+        nproc = ctx.std.process.which("nproc")
+        if nproc:
+            available = natural(_run(ctx, repository, [nproc]).strip()) or 1
+        jobs = jobs if jobs != None else available
+        batch_jobs = batch_jobs if batch_jobs != None else max(1, available // 2)
+    _require(jobs > 0 and batch_jobs > 0, "parallelism must be positive")
+    if work:
+        work = root_path(cwd, work)
+        _require(not ctx.std.fs.exists(work), "work directory already exists: " + work)
+        ctx.std.fs.create_dir_all(_parent(work))
+        ctx.std.fs.create_dir(work)
+    else:
+        work = scratch_dir(ctx, "logos-sweep-")
+    started = monotonic_ns()
+    _log(ctx, "compiling lean/ models")
+    extracted = _extract(ctx, repository, root_path(cwd, vesper), work + "/extracted") if vesper else {}
+    sweep_env = dict(env, LEAN_PATH = work + "/olean")
+    order = _compile(ctx, repository, lean, work, sweep_env, jobs, extracted)
+    compile_seconds = _seconds(started)
+    _log(ctx, "building the sweeper")
+    sweeper = _build(ctx, repository, root, work, lake, env)
+    plan_path = work + "/plan.json"
+    _run(ctx, repository, [sweeper, "--plan", plan_path] + order, sweep_env)
+    batches = _json(ctx, plan_path)
+    replay = _replay(ctx, struct(work = work, sweeper = sweeper, kernel = kernel, repository = repository, env = sweep_env, spawn = _spawn),
+                     batches, order, batch_jobs)
+    expected = _expected(_json(ctx, repository + "/tools/logos-sweep/expected-declines.json"))
+    coverage = _coverage(ctx, replay, batches, order, expected)
+    report = {
+        "schema": 1, "profile": "vesper.logos-sweep/1", "lean": version, "logos_root_source_manifest_blake3": source_manifest,
+        "status": "failed" if coverage.problems else "complete", "problems": coverage.problems,
+        "declined": [{"declaration": name, "detail": replay.declined[name], "reason": expected.get(name)} for name in sorted(replay.declined)],
+        "modules": len(order), "extracted_fixture_modules": sorted(extracted), "compile_seconds": compile_seconds, "total_seconds": _seconds(started),
+        "batches": coverage.batches, "per_module": coverage.modules, "coverage_control": "batch %d: refused" % replay.control,
+        "axiom_policy_audit": "not_run", "implementation_proof_audit": "not_run",
+    }
+    ctx.std.fs.create_dir_all(_parent(report_path))
+    ctx.std.fs.write(report_path, json.encode(report) + "\n")
+    count = 0
+    for result in coverage.batches:
+        count += result["logos_checked"]
+    _log(ctx, "%d modules in %d batches, %d declarations checked by Logos, %d declined" % (len(order), len(batches), count, len(replay.declined)))
+    if coverage.problems:
+        _log(ctx, "FAILED\n" + "\n".join(coverage.problems))
+    return report
+
+def _cli(ctx):
+    options = {}
+    pending = None
+    for value in ctx.args.tool_args:
+        if pending:
+            if value.startswith("--"):
+                ctx.std.process.exit(2, "Missing value for " + pending)
+            options[pending] = value
+            pending = None
+        elif value in ["--help", "-h"]:
+            ctx.std.io.stdout.write(_USAGE + "\n")
+            return 0
+        else:
+            flag, equals, argument = value.partition("=")
+            if flag not in ["--root", "--driver", "--lean", "--report", "--vesper", "--work", "--jobs", "--batch-jobs"]:
+                ctx.std.process.exit(2, "Unknown option: " + value)
+            if equals:
+                options[flag] = argument
+            else:
+                pending = flag
+    required = ["--root", "--driver", "--lean", "--report"]
+    if pending or not all([options.get(flag) for flag in required]):
+        ctx.std.process.exit(2, _USAGE)
+    jobs = [natural(options.get(flag, "")) for flag in ["--jobs", "--batch-jobs"]]
+    if any([flag in options and not jobs[index] for index, flag in enumerate(["--jobs", "--batch-jobs"])]):
+        ctx.std.process.exit(2, "Parallelism must be positive")
+    report = sweep(ctx, ctx.std.env.aspect_root_dir(), options["--root"], options["--driver"],
+                   options["--lean"], options["--report"], options.get("--vesper"),
+                   options.get("--work", ""), jobs[0], jobs[1])
+    return 0 if report["status"] == "complete" else 1
+
+logos_sweep = task(
+    kind = "sweep", group = ["maintenance", "logos-sweep"], summary = "Compile and replay all Lean models with a sealed Logos checker",
+    implementation = _cli, args = {"tool_args": args.trailing_var_args(description = _USAGE)},
+)
+
+def _test_error(call, fragment, *argv):
+    error, _ = catch(call, *argv)
+    _require(error != None and fragment in str(error), "expected error containing " + fragment)
+
+def _test(ctx):
+    graph = {
+        "A": struct(imports = ["B", "external"]),
+        "B": struct(imports = ["C"]),
+        "C": struct(imports = []),
+        "D": struct(imports = ["C"]),
+    }
+    _require(_topological(graph) == ["C", "B", "A", "D"], "dependency order")
+    _test_error(_topological, "import cycle through A", dict(graph, C = struct(imports = ["A"])))
+    _require(_plan([["A", "B"], ["C"], ["D"]], ["C", "B", "A", "D"]) == (1, [0, 1, 2]), "control selection and scheduling order")
+    _test_error(_plan, "exactly once", [["B", "B"]], ["A", "B"])
+    _test_error(_plan, "empty", [[]], [])
+    _require(_decline("Logos declined: resource limit at declaration 'A.name'")[0] == "A.name", "declined declaration")
+    _require(_decline("Logos rejected: resource limit at declaration 'A.name'")[0] == None, "rejections cannot be withheld")
+    known = {"declaration": "A.name", "reason": "resource limit"}
+    expected = _expected([known])
+    _test_error(_expected, "duplicate", [known, known])
+    _test_error(_expected, "malformed", [{"declaration": "A.name", "reason": ""}])
+
+    work = scratch_dir(ctx, "logos-sweep-test-")
+    calls = []
+
+    def spawn(_ctx, cwd, argv, env, path):
+        _require(cwd == work and type(env) == "dict", "owned process arguments")
+        calls.append(list(argv))
+        stdout, stderr = path + ".out", path + ".err"
+        ctx.std.fs.write(stdout, "")
+        ctx.std.fs.write(stderr, "")
+        return struct(stdout = stdout, stderr = stderr, started = monotonic_ns())
+
+    h = struct(repository = work, env = {}, work = work, sweeper = "exporter", kernel = "checker", spawn = spawn)
+    prefix = work + "/batch0"
+    state = {"index": 0, "batch": ["A"], "prefix": prefix, "exclusions": []}
+    row = {"module": "A", "checked": 1, "withheld": 1, "skipped_unsafe_or_partial": 0}
+    report = {"exported": 1, "roots": [row], "modules_in_closure": 1, "constants": 2, "withheld": 1, "skipped_unsafe_or_partial": 0}
+    declined = {}
+    _export(ctx, h, state)
+    for attempt in range(2):
+        ctx.std.fs.write(prefix + ".ndjson", "exported declaration data")
+        ctx.std.fs.write(prefix + ".json", json.encode(["A.keep"]))
+        ctx.std.fs.write(prefix + ".summary.json", json.encode(report))
+        _require(_advance(ctx, h, state, struct(code = 0), 0, declined) == None and state["phase"] == "check", "check follows export")
+        if not attempt:
+            ctx.std.fs.write(state["job"].stderr, "Logos declined: resource limit at declaration 'A.name'")
+            _require(_advance(ctx, h, state, struct(code = 1), 0, declined) == None and state["phase"] == "export", "a permitted decline is retried")
+            _require(_json(ctx, prefix + ".exclude.json") == ["A.name"], "retry writes the exact exclusion")
+    ctx.std.fs.write(state["job"].stdout, json.encode({"checked": 1, "validated_primitives": 1}))
+    _require(_advance(ctx, h, state, struct(code = 0), 0, declined) == None and state["phase"] == "control", "coverage control follows a successful replay")
+    _require(not _json(ctx, prefix + ".json"), "control drops a manifest entry")
+    _test_error(_advance, "control was not refused", ctx, h, state, struct(code = 0), 0, declined)
+    ctx.std.fs.write(state["job"].stderr, "unassociated declaration")
+    result = _advance(ctx, h, state, struct(code = 1), 0, declined)
+    _require([argv[0] for argv in calls] == ["exporter", "checker", "exporter", "checker", "checker"], "direct child protocol")
+    _require(not ctx.std.fs.exists(prefix + ".ndjson") and not ctx.std.fs.exists(prefix + ".json"), "large intermediate files are removed")
+    replay = struct(declined = declined, results = {0: result})
+    coverage = _coverage(ctx, replay, [["A"]], ["A"], expected)
+    _require(not coverage.problems and coverage.batches[0]["attempts"] == 2, "expected decline remains explicit in the report")
+    _require(len(_coverage(ctx, replay, [["A"]], ["A"], {}).problems) == 1, "unexpected decline prevents complete status")
+    _require(len(_coverage(ctx, replay, [["A"]], ["A"], dict(expected, Other = "old")).problems) == 1, "stale decline prevents complete status")
+    ctx.std.io.stdout.write("Passed Logos ordering, retry, coverage control and receipt fixtures\n")
+    return 0
+
+test_logos_sweep = task(
+    kind = "logos-sweep", group = ["ci", "tests"], summary = "Test Logos replay ordering, declines and coverage controls",
+    implementation = _test,
+)

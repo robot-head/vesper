@@ -1,0 +1,64 @@
+{
+  "notes": [
+    "The flip gate's worked example (aspect ci flip-gate --, SH6 lane 1,",
+    "#1396). vesper-span is already port-backed (SH0 lane 6, #1128); the Rust",
+    "left is the frozen seed the compiler links, which the retirement deletes.",
+    "A lane's own file lives at crates/<crate>/flip-gate.json.",
+    "`once <workload> <arm> <batches>` runs one arm; each Rust run takes about 0.5-1.3 s",
+    "so process start and input setup stay small next to the work.",
+    "The seed package builds from the Rust source listed below."
+  ],
+  "name": "vesper-span",
+  "lane": "SH0-6",
+  "rust": ["crates/vesper-span/src/lib.rs"],
+  "env": {
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0"
+  },
+  "build": [
+    ["cargo", "build", "--locked", "--release", "-p", "vesper-span", "--example", "abba"]
+  ],
+  "tests": [
+    {
+      "run": ["cargo", "test", "--locked", "-p", "vesper-span", "-p", "vesper-span-seed"]
+    }
+  ],
+  "differential": {
+    "run": ["cargo", "test", "--locked", "-p", "vesper-span", "--test", "differential"]
+  },
+  "abba": [
+    {
+      "workload": "lookup",
+      "rust": {
+        "cargo_target": "release/examples/abba",
+        "args": ["once", "lookup", "rust", "2000"]
+      },
+      "vesper": {
+        "cargo_target": "release/examples/abba",
+        "args": ["once", "lookup", "vesper", "2000"]
+      }
+    },
+    {
+      "workload": "index",
+      "rust": {
+        "cargo_target": "release/examples/abba",
+        "args": ["once", "index", "rust", "4000"]
+      },
+      "vesper": {
+        "cargo_target": "release/examples/abba",
+        "args": ["once", "index", "vesper", "4000"]
+      }
+    },
+    {
+      "workload": "edits",
+      "rust": {
+        "cargo_target": "release/examples/abba",
+        "args": ["once", "edits", "rust", "10000"]
+      },
+      "vesper": {
+        "cargo_target": "release/examples/abba",
+        "args": ["once", "edits", "vesper", "10000"]
+      }
+    }
+  ]
+}

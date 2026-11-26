@@ -158,6 +158,17 @@ vesper_crate(
             "tests/fmt_cli.rs",
             "tests/package_paths.rs",
         ]) + ["//crates/vesper-syntax:files"],
+        # SH1 lane 14 (#1157) part 4: @vesper/sugar against sugar_expand on
+        # the rules of the sugar test suites.
+        "test/self_host_sugar": glob([
+            "packages/vesper-front/**",
+            "packages/vesper-sugar/**",
+            "src/forge_frontend/sugar.rs",
+            "src/packages/sugar.rs",
+            "tests/forge_cli.rs",
+            "tests/package_paths.rs",
+            "tests/self_host_front_v2.rs",
+        ]) + ["//crates/vesper-syntax:files"],
         # Self-hosting SH1 lane 9 (#1152): the Vesper AST against vesper_core::ast
         # on the same corpus as the front end v2 differential. Anchored globs.
         "test/self_host_ast": glob([
@@ -742,6 +753,14 @@ vesper_crate(
             "src/doctest_extract.rs",
             "tests/doctest_cli.rs",
         ]),
+        # Part 8: the text reports of `vesper test` and `vesper test --doc`
+        # against test_report's Rust renderers, over texts of the .ves files.
+        "test/self_host_test_report": glob([
+            "examples/**/*.ves",
+            "packages/**",
+            "src/**/*.ves",
+            "tests/**/*.ves",
+        ]),
         # Self-hosting SH4 lane 17 (#1291): @vesper/backend-checks against
         # native_verifiers on the verifier fixtures and the corpus. Anchored
         # globs; @vesper/resonance comes from its crate's package.
@@ -1282,6 +1301,7 @@ vesper_crate(
         # The doctest generate differential (#1337) runs 39k snippets twice.
         "test/self_host_doctest_generate": "long",
         "test/self_host_doctest_verdict": "long",
+        "test/self_host_test_report": "long",
         # The backend-checks differential emits every corpus program 4 times.
         "test/self_host_backend_checks": "long",
         # The optimizer policy (#1279) optimizes every corpus world three times.
