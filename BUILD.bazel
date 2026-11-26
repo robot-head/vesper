@@ -1338,7 +1338,18 @@ vesper_package(
     srcs = glob(["packages/vesper-std/sort/src/**/*.ves"]),
     manifest = "packages/vesper-std/sort/Loom.toml",
     visibility = ["//visibility:public"],
-    deps = [":std_sugar_package"],
+    deps = [
+        ":std_core_package",
+        ":std_sugar_package",
+    ],
+)
+
+# @vesper-std/core, for the `Option` methods @vesper-std/sort reads with.
+vesper_package(
+    name = "std_core_package",
+    srcs = glob(["packages/vesper-std/core/src/**/*.ves"]),
+    manifest = "packages/vesper-std/core/Loom.toml",
+    visibility = ["//visibility:public"],
 )
 
 # @vesper-std/sugar, the `guard` and `when` sugars, as a path dependency of

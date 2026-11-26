@@ -3,7 +3,7 @@
 //
 // Import the forms a module uses, as with any other item:
 //
-//     use @vesper-std/sugar::{guard, some_or, when};
+//     use @vesper-std/sugar::{guard, when};
 //
 // Each form expands to the `match` it names, before checking. A template's
 // `$rhs` runs once, and `$body` or `$diverge` only on its own arm, so the
@@ -49,20 +49,6 @@ pub sugar when: stmt {
         match $rhs {
             $pat => $body,
             _ => {},
-        }
-    }
-}
-
-// `some_or rhs else { fallback }` is the value inside `rhs` when it is
-// `Option::Some`, or the `else` block's value, which runs only when `rhs`
-// is `Option::None`:
-//
-//     let x = some_or s.try_get(i) else { 0 };
-pub sugar some_or: expr {
-    rule (some_or $rhs:expr else $fallback:block) => {
-        match $rhs {
-            Option::Some(value) => value,
-            Option::None => $fallback,
         }
     }
 }
@@ -113,35 +99,5 @@ test {
     // @case all_present(in "abc", 2, 195)
     fn test_guard_break_leaves_the_loop(in s: Str, n: u64, expected: u64) -> bool {
         sum_until_missing(in s, n) == expected
-    }
-
-    // The byte at `i`, or `fallback`.
-    fn byte_or(in s: Str, i: u64, fallback: u8) -> u8 {
-        some_or s.as_bytes().try_get(i) else {
-            fallback
-        }
-    }
-
-    // Counts each evaluation of the fallback in `calls`.
-    fn counted(inout calls: u64, v: u8) -> u8 {
-        calls = wrapping_add(calls, 1);
-        v
-    }
-
-    // @case present(in "ab", 1, 0, 98)
-    // @case missing(in "ab", 2, 7, 7)
-    // @case empty(in "", 0, 9, 9)
-    fn test_some_or_unwraps_or_falls_back(in s: Str, i: u64, fallback: u8, expected: u8) -> bool {
-        byte_or(in s, i, fallback) == expected
-    }
-
-    // @case present(in "a", 0, 0)
-    // @case missing(in "a", 3, 1)
-    fn test_some_or_runs_fallback_only_on_none(in s: Str, i: u64, expected_calls: u64) -> bool {
-        let mut calls: u64 = 0;
-        let _ = some_or s.as_bytes().try_get(i) else {
-            counted(inout calls, 0)
-        };
-        calls == expected_calls
     }
 }
