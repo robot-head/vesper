@@ -144,7 +144,7 @@ pub(crate) fn report() {
         let state = if on(s.name) { "on" } else { "off" };
         match s.gate {
             Gate::Pass { config, pr } => eprintln!(
-                "vesper-hybrid: swap {}: {state}, flip gate PASS (scripts/ci/flip-gate/{config}.toml, {pr})",
+                "vesper-hybrid: swap {}: {state}, flip gate PASS (scripts/ci/flip-gate/{config}.json, {pr})",
                 s.name
             ),
             Gate::Open(why) => {

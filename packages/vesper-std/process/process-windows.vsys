@@ -18,6 +18,11 @@ sys library StdProcess (
     const STD_OUTPUT_HANDLE: i32 = -11;
     const STD_ERROR_HANDLE: i32 = -12;
     const INVALID_FILE_ATTRIBUTES: u32 = 4294967295;
+    // `process_group`: the child starts suspended, joins a job object of
+    // its own, then runs, so `kill_tree` reaches everything it starts.
+    const CREATE_SUSPENDED: u32 = 4;
+    const WAIT_OBJECT_0: u32 = 0;
+    const ERROR_BROKEN_PIPE: u32 = 109;
 
     wire struct HandleBox {
         h: u64,
@@ -107,6 +112,22 @@ sys library StdProcess (
     fn GetExitCodeProcess(handle: u64, nocapture inout code: DwordBox) -> ForeignVal[i32] errno;
     fn TerminateProcess(handle: u64, exit_code: u32) -> ForeignVal[i32] errno;
     fn GetProcessId(handle: u64) -> ForeignVal[u32];
+    fn ResumeThread(thread: u64) -> ForeignVal[u32];
+    fn CreateJobObjectW(job_attrs: u64, name: u64) -> ForeignVal[u64] errno;
+    fn AssignProcessToJobObject(job: u64, process: u64) -> ForeignVal[i32] errno;
+    fn TerminateJobObject(job: u64, exit_code: u32) -> ForeignVal[i32] errno;
+    // The bytes waiting in a pipe, without reading them (`wait_timeout`
+    // reads only what is there, so it never blocks).
+    fn PeekNamedPipe(
+        pipe: u64,
+        buf: u64,
+        buf_size: u32,
+        bytes_read: u64,
+        nocapture inout bytes_avail: DwordBox,
+        bytes_left: u64
+    ) -> ForeignVal[i32] errno;
+    fn GetTickCount64() -> ForeignVal[u64];
+    fn Sleep(millis: u32) -> ForeignVal[Unit];
     fn GetCurrentProcessId() -> ForeignVal[u32];
     fn ExitProcess(code: u32) -> ForeignVal[Unit];
     fn GetEnvironmentStringsW() -> ForeignVal[u64];

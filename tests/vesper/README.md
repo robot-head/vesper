@@ -19,7 +19,7 @@ vesper test tests/vesper --engines all --no-cache --fuel 200000000
 One directory per family: the Rust test file it came from, named after it
 (`tests/continue.rs` became `continue/`). Each `.ves` file is one standalone
 program with its own `main` and a `test { }` block, so cases never share
-names. A family converted by `scripts/convert-rust-tests.py` has a
+names. A family converted by `aspect maintenance convert-rust-tests` has a
 `converted.json` that records the Rust file, the number of cases, the
 `#[test]` functions the cases cover completely, and the ones kept in Rust.
 `tests/vesper_suite.rs` checks the case count, so a lost file fails CI.

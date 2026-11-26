@@ -94,6 +94,8 @@ pub mod tensor_types;
 pub mod test_discovery;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod test_mutants;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod test_report;
 pub mod tiled;
 pub mod tooling;
 pub mod trace_effects;

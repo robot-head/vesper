@@ -1,0 +1,70 @@
+{
+  "notes": [
+    "The flip gate for vesper-aegis (aspect ci flip-gate --, SH6 lane 1,",
+    "#1396; this crate's lane: SH6 lane 8, #1403). The ported modules are the",
+    "quote, report and claims parsers, the timestamp parser and the policy",
+    "check (part 1), and the CBOR decoding and CCA claim parsers (part 2),",
+    "whose Rust SH6 lane 8 deleted (the report counts the lines).",
+    "Every ported parser on the vendor samples and thousands of mutations of",
+    "each, 200,000 random claims/policy pairs and 20,000 random CCA claim",
+    "sets, against the recorded results of the Rust builds.",
+    "The harness times both arms (A B B A per epoch; the Rust arm is the",
+    "example built at the last Rust commit, see the benchmark task) and prints the",
+    "gate's pairs line."
+  ],
+  "name": "vesper-aegis",
+  "lane": "SH6-8",
+  "env": {
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0"
+  },
+  "build": [
+    ["cargo", "build", "--locked", "--release", "-p", "vesper-aegis", "--example", "abba"]
+  ],
+  "tests": [
+    {
+      "run": ["cargo", "test", "--locked", "--release", "-p", "vesper-aegis"]
+    }
+  ],
+  "differential": {
+    "run": ["cargo", "test", "--locked", "--release", "-p", "vesper-aegis", "--test", "port_differential"]
+  },
+  "abba": [
+    {
+      "workload": "snp",
+      "run": ["aspect", "crate", "aegis", "bench-abba", "--", "flip-gate", "snp"]
+    },
+    {
+      "workload": "tdx",
+      "run": ["aspect", "crate", "aegis", "bench-abba", "--", "flip-gate", "tdx"]
+    },
+    {
+      "workload": "sgx",
+      "run": ["aspect", "crate", "aegis", "bench-abba", "--", "flip-gate", "sgx"]
+    },
+    {
+      "workload": "policy",
+      "run": ["aspect", "crate", "aegis", "bench-abba", "--", "flip-gate", "policy"]
+    },
+    {
+      "workload": "cca_claims",
+      "run": ["aspect", "crate", "aegis", "bench-abba", "--", "flip-gate", "cca_claims"]
+    },
+    {
+      "workload": "cca_token",
+      "run": ["aspect", "crate", "aegis", "bench-abba", "--", "flip-gate", "cca_token"]
+    },
+    {
+      "workload": "corim",
+      "run": ["aspect", "crate", "aegis", "bench-abba", "--", "flip-gate", "corim"]
+    },
+    {
+      "workload": "corim_store",
+      "run": ["aspect", "crate", "aegis", "bench-abba", "--", "flip-gate", "corim_store"]
+    },
+    {
+      "workload": "appraise_cca",
+      "run": ["aspect", "crate", "aegis", "bench-abba", "--", "flip-gate", "appraise_cca"]
+    }
+  ]
+}
