@@ -202,3 +202,38 @@ fn match_pattern_sugar_roundtrips_without_expansion() {
     assert!(out.contains("present value => value"), "{out}");
     assert!(out.contains("$p:pat"), "{out}");
 }
+
+#[test]
+fn tagged_calls_stay_on_one_line_and_hug_their_block() {
+    // Short calls stay on one line, spaced like struct literals.
+    assert_eq!(
+        formatted("fn f(){sum{\n{\nn\n}\n| n in data\n}}"),
+        "fn f() {\n    sum{ { n } | n in data }\n}\n"
+    );
+    assert_eq!(
+        formatted("fn f(){let p=zip{\na,\nb\n};p}"),
+        "fn f() {\n    let p = zip{ a, b };\n    p\n}\n"
+    );
+    // A block body breaks first; the clause follows its `}` and the call
+    // adds no indentation of its own.
+    assert_eq!(
+        formatted(
+            "fn f(){sum{{visits=wrapping_add(visits,1);x*narrow_i64(weight)}\n\
+             |(x,weight) in zip{inputs.coefficients,inputs.weights}}}"
+        ),
+        "fn f() {\n    sum{ {\n        visits = wrapping_add(visits, 1);\n        \
+         x * narrow_i64(weight)\n    } | (x, weight) in zip{ inputs.coefficients, \
+         inputs.weights } }\n}\n"
+    );
+    assert_eq!(
+        formatted(
+            "fn f()->bool{let found=any{{mark(inout visited, x)==2}|x in \
+             mark(inout visited,1)..mark(inout visited,4)};found}"
+        ),
+        "fn f() -> bool {\n    let found = any{ {\n        mark(inout visited, x) == 2\n    \
+         } | x in mark(inout visited, 1)..mark(inout visited, 4) };\n    found\n}\n"
+    );
+    // A comment or a top-level `;` keeps the block layout.
+    let commented = formatted("fn f(){sum{ { n } // why\n| n in data }}");
+    assert!(commented.contains("// why\n"), "{commented}");
+}

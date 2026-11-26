@@ -1331,6 +1331,48 @@ fn word_used_as_name(has_prev: bool, prev: u8, c: u8, next: u8) -> bool {
         )
 }
 
+// `Tagged`: how a tagged sugar call lays out its braces. `TAG_NO`: not a
+// tagged call, or one whose contents hold a top-level `;` or a comment (an
+// ordinary block); `TAG_HUG`: contents that open with a block, which the
+// call hugs; `TAG_LIST`: other contents, spaced like a struct literal.
+const TAG_NO: u8 = 0;
+const TAG_HUG: u8 = 1;
+const TAG_LIST: u8 = 2;
+
+// `tagged_layout`: the layout of the tagged call whose `{` is atom `open`.
+fn tagged_layout(in at: Atoms, open: u64) -> u8 {
+    if aflags(in at, open) & 8 == 0 {
+        return TAG_NO;
+    }
+    let n = at.kind.len();
+    let mut depth: u64 = 0;
+    let mut i = wrapping_add(open, 1);
+    loop {
+        if i >= n {
+            break;
+        }
+        let k = akind(in at, i);
+        if k == K_L_PAREN || k == K_L_BRACKET || k == K_L_BRACE {
+            depth = wrapping_add(depth, 1);
+        } else if k == K_R_PAREN || k == K_R_BRACKET || k == K_R_BRACE {
+            if depth == 0 {
+                break;
+            }
+            depth = wrapping_sub(depth, 1);
+        } else if is_comment(k) {
+            return TAG_NO;
+        } else if k == K_SEMI && depth == 0 {
+            return TAG_NO;
+        }
+        i = wrapping_add(i, 1);
+    }
+    if akind(in at, wrapping_add(open, 1)) == K_L_BRACE {
+        TAG_HUG
+    } else {
+        TAG_LIST
+    }
+}
+
 // `sequence`: the atoms from `pos` up to the closing delimiter `end`.
 fn sequence(
     in at: Atoms,
@@ -1338,6 +1380,7 @@ fn sequence(
     end: u8,
     block: bool,
     fill: bool,
+    hug: bool,
     inout d: Doc,
     in src: Slice[u8]
 ) -> u64 eff [Fail[FmtFail]] {
@@ -1364,6 +1407,7 @@ fn sequence(
     let mut commented = false;
     // The previous atom was a non-empty parameter list before `->`.
     let mut previous_params = false;
+    let mut previous_hugged = false;
     loop {
         if pos >= n {
             break;
@@ -1382,7 +1426,14 @@ fn sequence(
         // A struct literal or pattern (`Point { x: 1, y: 2 }`) is a list
         // too, spaced inside its braces.
         let is_record = opens_block && in_expr && !head && has_prev && prev == K_UPPER;
-        let is_block = opens_block && !is_record;
+        let tagged = if opens_block && !is_record {
+            tagged_layout(in at, pos)
+        } else {
+            TAG_NO
+        };
+        let is_block = opens_block && !is_record && tagged == TAG_NO;
+        // The block a hugging tagged call opens with.
+        let hugged = hug && is_block && !has_prev;
         let cs0 = w32(in at.start, pos);
         let ce0 = w32(in at.end, pos);
         if c == K_IF
@@ -1410,6 +1461,9 @@ fn sequence(
             G_NONE
         } else if sugar != SGAP_NONE {
             sugar
+        } else if hug && previous_hugged {
+            // The clause after a hugged block follows its `}`.
+            G_SPACE
         } else if previous_unary || package {
             G_NONE
         } else if list && has_prev && prev == K_SEMI {
@@ -1489,7 +1543,16 @@ fn sequence(
             let empty = pos < n && akind(in at, pos) == close;
             let start = push_text(inout d, in src, cs, ce, false);
             let fill = c == K_L_BRACE && has_prev && prev == K_COLON_COLON;
-            let inner = sequence(in at, inout pos, close, is_block, fill, inout d, in src);
+            let inner = sequence(
+                in at,
+                inout pos,
+                close,
+                is_block,
+                fill,
+                tagged == TAG_HUG,
+                inout d,
+                in src
+            );
             let last_is_line_comment = pos > 0 && akind(in at, wrapping_sub(pos, 1)) == K_COMMENT;
             let mut before_close = pos;
             loop {
@@ -1518,21 +1581,34 @@ fn sequence(
             } else {
                 let lead = push_leaf(
                     inout d,
-                    if is_block || trailing_comma {
+                    if hugged {
+                        D_SOFT_SPACE
+                    } else if tagged == TAG_HUG {
+                        D_SPACE
+                    } else if is_block || trailing_comma {
                         D_HARD
-                    } else if is_record {
+                    } else if is_record || tagged == TAG_LIST {
                         D_SOFT_SPACE
                     } else {
                         D_SOFT_EMPTY
                     }
                 );
                 let content = concat4(inout d, lead, inner, 4294967295, 4294967295);
-                let nest = push_nest(inout d, 4, content);
+                // A hugging call does not indent: its block nests its own lines.
+                let nest = if tagged == TAG_HUG {
+                    content
+                } else {
+                    push_nest(inout d, 4, content)
+                };
                 let trail = push_leaf(
                     inout d,
-                    if is_block || last_is_line_comment || trailing_comma {
+                    if hugged && !last_is_line_comment {
+                        D_SOFT_SPACE
+                    } else if tagged == TAG_HUG {
+                        D_SPACE
+                    } else if is_block || last_is_line_comment || trailing_comma {
                         D_HARD
-                    } else if is_record {
+                    } else if is_record || tagged == TAG_LIST {
                         D_SOFT_SPACE
                     } else {
                         D_SOFT_EMPTY
@@ -1541,8 +1617,9 @@ fn sequence(
                 let all = concat4(inout d, start, nest, trail, finish);
                 // A parameter list before `->` shares its line's group, so it
                 // breaks whenever the signature with its return type cannot
-                // fit on one line.
-                if params {
+                // fit on one line. A hugged block shares the group of its
+                // call, so it breaks before the clause after it does.
+                if params || hugged {
                     all
                 } else {
                     push_group(inout d, all)
@@ -1558,6 +1635,7 @@ fn sequence(
         }
         previous_block = is_block;
         previous_params = params;
+        previous_hugged = hugged;
         previous_unary = (c == K_MINUS || c == K_BANG || c == K_TILDE) && !previous_ends_operand;
         let used_as_name = word_used_as_name(has_prev, prev, c, akind(in at, pos));
         has_prev = true;
@@ -1926,6 +2004,12 @@ fn set_gap(inout at: Atoms, i: u64, gap: u8, level: u8) {
     at.slevel.try_set(i, level);
 }
 
+// `Piece::tagged`: flags bit 3 marks the `{` of a tagged sugar call.
+fn mark_tagged(inout at: Atoms, i: u64) {
+    let f = aflags(in at, i);
+    at.flags.try_set(i, f | 8);
+}
+
 // `Layout::join`: a same-line boundary that never swallows a line comment.
 fn join(inout at: Atoms, i: u64, gap: u8) {
     if i > 0 && i < at.kind.len() && akind(in at, wrapping_sub(i, 1)) != K_COMMENT {
@@ -2068,6 +2152,10 @@ fn sugar_group(inout at: Atoms, in p: P, in src: Slice[u8], start: u64, end: u64
                     || prev == K_LINEAR
             ) {
             let gap = if aflags(in at, i) & 2 != 0 {
+                // A nested tagged call (`zip{ a, b }`).
+                if k == K_L_BRACE && prev == K_LOWER {
+                    mark_tagged(inout at, i);
+                }
                 G_NONE
             } else {
                 G_SPACE
@@ -2148,6 +2236,9 @@ fn annotate(inout at: Atoms, in p: P, in src: Slice[u8], in nodes: ChunkSeq[u64]
         }
         if kind == NODE_TAGGED_LITERAL {
             join(inout at, wrapping_add(start, 1), G_NONE);
+            if akind(in at, wrapping_add(start, 1)) == K_L_BRACE {
+                mark_tagged(inout at, wrapping_add(start, 1));
+            }
         } else if kind == NODE_SUGAR_OPERATOR {
             let _ = sugar_operator(inout at, in p, start);
         } else if kind == NODE_SUGAR_CONTINUATION {
@@ -2222,7 +2313,7 @@ fn layout(
     dl.max_work = wrapping_sub(w.max, w.used);
     let mut d = doc_new(in dl, wrapping_add(wrapping_mul(at.kind.len(), 3), 8));
     let mut pos: u64 = 0;
-    let root = sequence(in at, inout pos, 255, false, false, inout d, in src);
+    let root = sequence(in at, inout pos, 255, false, false, false, inout d, in src);
     let end = push_leaf(inout d, D_HARD);
     let root = push_concat2(inout d, root, end);
     let out = render(inout d, in src, root);

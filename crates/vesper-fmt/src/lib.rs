@@ -147,6 +147,9 @@ struct Piece<'a> {
     /// The token's CST parent is an expression or pattern node, where a `{`
     /// right after a type name opens a struct literal or pattern.
     expr: bool,
+    /// The `{` of a tagged sugar call (`sum{ .. }`, `zip{ .. }`), from the
+    /// surface CST.
+    tagged: bool,
 }
 fn pieces<'a>(source: &'a str, tokens: &[Token]) -> Vec<Piece<'a>> {
     tokens
@@ -159,6 +162,7 @@ fn pieces<'a>(source: &'a str, tokens: &[Token]) -> Vec<Piece<'a>> {
             glued: false,
             sugar_gap: None,
             expr: false,
+            tagged: false,
         })
         .collect()
 }
@@ -447,6 +451,7 @@ fn once(
                     expr: token
                         .parent()
                         .is_some_and(|n| matches!(n.kind(), parser::EXPR | parser::PATTERN)),
+                    tagged: false,
                 });
             }
         }
@@ -470,7 +475,7 @@ fn once(
     doc_limits.max_work = work.max - work.used;
     let mut document = Document::new(doc_limits)?;
     let mut pos = 0;
-    let root = sequence(&atoms, &mut pos, None, false, false, &mut document)?;
+    let root = sequence(&atoms, &mut pos, None, false, false, false, &mut document)?;
     let end = document.push(Doc::HardLine)?;
     let root = document.push(Doc::Concat(vec![root, end]))?;
     let output = document.render(root)?;
@@ -787,12 +792,48 @@ fn word_used_as_name(previous: Option<K>, current: K, next: Option<K>) -> bool {
                 && next.is_some_and(|n| matches!(n, K::LParen | K::LBracket))
                 && !matches!(previous, Some(K::At | K::AtAt))))
 }
+/// How a tagged sugar call lays out its braces.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tagged {
+    /// Not a tagged call, or one whose contents hold a top-level `;` or a
+    /// comment: an ordinary block.
+    No,
+    /// Contents that open with a block (`sum{ { .. } | x in xs }`): the
+    /// call hugs the block, which stays on one line when it fits, and the
+    /// clause after it follows its `}`.
+    Hug,
+    /// Other contents (`zip{ a, b }`): spaced like a struct literal, on one
+    /// line when they fit.
+    List,
+}
+fn tagged_layout(atoms: &[Piece<'_>], open: usize) -> Tagged {
+    if !atoms[open].tagged {
+        return Tagged::No;
+    }
+    let mut depth = 0usize;
+    for atom in &atoms[open + 1..] {
+        match atom.kind {
+            K::LParen | K::LBracket | K::LBrace => depth += 1,
+            K::RParen | K::RBracket | K::RBrace if depth == 0 => break,
+            K::RParen | K::RBracket | K::RBrace => depth -= 1,
+            K::Comment | K::BlockComment => return Tagged::No,
+            K::Semi if depth == 0 => return Tagged::No,
+            _ => {}
+        }
+    }
+    if atoms.get(open + 1).is_some_and(|a| a.kind == K::LBrace) {
+        Tagged::Hug
+    } else {
+        Tagged::List
+    }
+}
 fn sequence<'a>(
     atoms: &[Piece<'a>],
     pos: &mut usize,
     end: Option<K>,
     block: bool,
     fill: bool,
+    hug: bool,
     document: &mut Document<'a>,
 ) -> Result<DocId, Error> {
     // A delimited, non-block list breaks at its comma separators: those soft
@@ -821,6 +862,7 @@ fn sequence<'a>(
     let mut commented = false;
     // The previous atom was a non-empty parameter list before `->`.
     let mut previous_params = false;
+    let mut previous_hugged = false;
     while *pos < atoms.len() && Some(atoms[*pos].kind) != end {
         let current = atoms[*pos];
         // `{` after `.` or `::` opens a list, not a block: a tagged literal or
@@ -831,7 +873,14 @@ fn sequence<'a>(
         // too, spaced inside its braces.
         let is_record =
             is_block && current.expr && !head && previous.is_some_and(|p| p.kind == K::Upper);
-        let is_block = is_block && !is_record;
+        let tagged = if is_block {
+            tagged_layout(atoms, *pos)
+        } else {
+            Tagged::No
+        };
+        let is_block = is_block && !is_record && tagged == Tagged::No;
+        // The block a hugging tagged call opens with.
+        let hugged = hug && is_block && previous.is_none();
         if matches!(current.kind, K::If | K::Match)
             || current.kind == K::Lower && matches!(current.text, "for" | "while")
         {
@@ -848,6 +897,9 @@ fn sequence<'a>(
             Gap::None
         } else if let Some(gap) = current.sugar_gap {
             gap
+        } else if hug && previous_hugged {
+            // The clause after a hugged block follows its `}`.
+            Gap::Space
         } else if previous_unary || package {
             Gap::None
         } else if list && previous.is_some_and(|p| p.kind == K::Semi) {
@@ -917,7 +969,15 @@ fn sequence<'a>(
             let start = document.push(Doc::Text(current.text))?;
             let fill =
                 current.kind == K::LBrace && previous.is_some_and(|p| p.kind == K::ColonColon);
-            let inner = sequence(atoms, pos, Some(close), is_block, fill, document)?;
+            let inner = sequence(
+                atoms,
+                pos,
+                Some(close),
+                is_block,
+                fill,
+                tagged == Tagged::Hug,
+                document,
+            )?;
             let last_is_line_comment = *pos > 0 && atoms[*pos - 1].kind == K::Comment;
             // The formatter never adds or removes tokens, so a source trailing
             // comma is kept and selects the vertical layout.
@@ -939,28 +999,41 @@ fn sequence<'a>(
             if empty {
                 document.push(Doc::Concat(vec![start, finish]))?
             } else {
-                let lead = document.push(if is_block || trailing_comma {
+                let lead = document.push(if hugged {
+                    Doc::SoftLineOrSpace
+                } else if tagged == Tagged::Hug {
+                    Doc::Text(" ")
+                } else if is_block || trailing_comma {
                     Doc::HardLine
-                } else if is_record {
+                } else if is_record || tagged == Tagged::List {
                     Doc::SoftLineOrSpace
                 } else {
                     Doc::SoftLineOrEmpty
                 })?;
                 let content = document.push(Doc::Concat(vec![lead, inner]))?;
-                let nest = document.push(Doc::Nest(4, content))?;
-                let trail =
-                    document.push(if is_block || last_is_line_comment || trailing_comma {
-                        Doc::HardLine
-                    } else if is_record {
-                        Doc::SoftLineOrSpace
-                    } else {
-                        Doc::SoftLineOrEmpty
-                    })?;
+                // A hugging call does not indent: its block nests its own lines.
+                let nest = if tagged == Tagged::Hug {
+                    content
+                } else {
+                    document.push(Doc::Nest(4, content))?
+                };
+                let trail = document.push(if hugged && !last_is_line_comment {
+                    Doc::SoftLineOrSpace
+                } else if tagged == Tagged::Hug {
+                    Doc::Text(" ")
+                } else if is_block || last_is_line_comment || trailing_comma {
+                    Doc::HardLine
+                } else if is_record || tagged == Tagged::List {
+                    Doc::SoftLineOrSpace
+                } else {
+                    Doc::SoftLineOrEmpty
+                })?;
                 let all = document.push(Doc::Concat(vec![start, nest, trail, finish]))?;
                 // A parameter list before `->` shares its line's group, so it
                 // breaks whenever the signature with its return type cannot
-                // fit on one line.
-                if params {
+                // fit on one line. A hugged block shares the group of its
+                // call, so it breaks before the clause after it does.
+                if params || hugged {
                     all
                 } else {
                     document.push(Doc::Group(all))?
@@ -980,6 +1053,7 @@ fn sequence<'a>(
         }
         previous_block = is_block;
         previous_params = params;
+        previous_hugged = hugged;
         // A prefix `-`/`!` binds to its operand with no space.
         previous_unary =
             matches!(current.kind, K::Minus | K::Bang | K::Tilde) && !previous_ends_operand;
@@ -1006,6 +1080,7 @@ fn sequence<'a>(
             glued: current.glued,
             sugar_gap: None,
             expr: current.expr,
+            tagged: false,
         });
     }
     line.flush(document, &mut output)?;
