@@ -5,8 +5,9 @@
 // `format_model` and `emit` stages.
 
 use @vesper/fmt::{
-    FmtFail, Model, ProofFail, ProofLimits, Verified, fail_code, fail_offset, hash_hex,
-    no_proof_fail, proof_limits_valid
+    FmtFail, ProofFail, ProofLimits, Verified, fail_code, fail_offset, hash_hex, model_args,
+    model_comments, model_depth, model_kinds, model_node_count, model_text, model_text_bytes,
+    model_text_ends, no_proof_fail, proof_limits_valid, verified_output_hash, verified_source_hash
 };
 use @vesper/lean-syntax::{LeanError, render_module};
 use @vesper/proof-audit::strs::{byte, put_str};
@@ -44,6 +45,31 @@ const D_CONCAT: u8 = 7;
 const D_GROUP: u8 = 8;
 
 const U64_MAX: u64 = 18446744073709551615;
+
+// The captured model, copied out of the sealed `Verified`.
+struct Model {
+    kind: ChunkSeq[u8],
+    arg: ChunkSeq[u64],
+    text: ChunkSeq[u8],
+    text_ends: ChunkSeq[u64],
+    node_count: u64,
+    text_bytes: u64,
+    depth: u64,
+    comments: u64
+}
+
+fn model_of(in v: Verified) -> Model {
+    Model {
+        kind: model_kinds(in v),
+        arg: model_args(in v),
+        text: model_text(in v),
+        text_ends: model_text_ends(in v),
+        node_count: model_node_count(in v),
+        text_bytes: model_text_bytes(in v),
+        depth: model_depth(in v),
+        comments: model_comments(in v)
+    }
+}
 
 // What `emit` returns: the Lean source, or the error (`fail.code` is not
 // `P_NONE`; `lean` is a `LeanSyntax` printer error).
@@ -199,8 +225,14 @@ fn quoted_bytes(in s: Slice[u8], a: u64, b: u64) -> u64 {
 
 // `Preflight::visit` of the node at `at` (prefix order), with its payload
 // numbers counted by `t`. The node's AST depth, or 0 after a failure.
-fn visit(inout p: Pre, in m: Model, inout at: u64, inout t: u64, depth: u64, in l: ProofLimits)
-    -> u64 {
+fn visit(
+    inout p: Pre,
+    in m: Model,
+    inout at: u64,
+    inout t: u64,
+    depth: u64,
+    in l: ProofLimits
+) -> u64 {
     if !pre_charge(inout p, 64, in l) {
         return 0;
     }
@@ -564,7 +596,8 @@ fn definition(inout e: W, kind: u64, in n: Str) {
 // `emit(model, source, output, ProofLimits::default())`.
 pub fn emit(in v: Verified, in l: ProofLimits) -> Emitted {
     let mut f = none();
-    let bound = check(in v.model, in l, inout f);
+    let m = model_of(in v);
+    let bound = check(in m, in l, inout f);
     if f.code != P_NONE {
         return emitted_fail(f);
     }
@@ -591,15 +624,15 @@ pub fn emit(in v: Verified, in l: ProofLimits) -> Emitted {
     reference(inout e, "Vesper.StylusSafety.Doc");
     let mut at: u64 = 0;
     let mut t: u64 = 0;
-    doc_term(inout e, in v.model, inout at, inout t);
+    doc_term(inout e, in m, inout at, inout t);
     // The two digests.
     definition(inout e, 0, "source_blake3");
     reference(inout e, "String");
-    let sh = hash_hex(v.source_hash);
+    let sh = hash_hex(verified_source_hash(in v));
     string_term(inout e, in sh.as_slice());
     definition(inout e, 0, "output_blake3");
     reference(inout e, "String");
-    let oh = hash_hex(v.output_hash);
+    let oh = hash_hex(verified_output_hash(in v));
     string_term(inout e, in oh.as_slice());
     // theorem comments_preserved (width : Nat) (col : Nat) : ... = ... := ...
     w(inout e, 7);

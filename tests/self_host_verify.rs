@@ -26,7 +26,16 @@ fn repo() -> PathBuf {
 }
 
 const DRIVER: &str = r#"use @vesper/verify::{bindings, discover, emit, message};
-use @vesper/fmt::{format_for_verification, hash_hex, proof_limits_default};
+use @vesper/fmt::{
+    format_for_verification,
+    hash_hex,
+    proof_limits_default,
+    verified_changed,
+    verified_error,
+    verified_output,
+    verified_output_hash,
+    verified_source_hash
+};
 use @vesper/proof-audit::strs::{Strs, byte, count, end, push, put_str, start, strs_new};
 use @vesper-std/env::{arg_bytes, arg_count};
 use @vesper-std/fs::{IoError, read_path, write_stdout};
@@ -103,8 +112,9 @@ fn format_case(inout out: ChunkSeq[u8], in text: Slice[u8]) eff [Ffi[Blake3]] {
         Option::None => String::new(),
     };
     let v = format_for_verification(in source.as_str());
-    if v.fail.code != 0 {
-        let m = message(v.fail);
+    let vf = verified_error(in v);
+    if vf.code != 0 {
+        let m = message(vf);
         put_str(inout out, in "err format_model ");
         put_u64(inout out, m.len());
         out.push(10);
@@ -123,24 +133,25 @@ fn format_case(inout out: ChunkSeq[u8], in text: Slice[u8]) eff [Ffi[Blake3]] {
         return;
     }
     put_str(inout out, in "ok ");
-    put_u64(inout out, v.output.len());
+    let output = verified_output(in v);
+    put_u64(inout out, output.len());
     put_str(
         inout out,
-        in if v.changed {
+        in if verified_changed(in v) {
             " 1 "
         } else {
             " 0 "
         }
     );
-    let sh = hash_hex(v.source_hash);
+    let sh = hash_hex(verified_source_hash(in v));
     out.extend(in sh.as_slice());
     out.push(32);
-    let oh = hash_hex(v.output_hash);
+    let oh = hash_hex(verified_output_hash(in v));
     out.extend(in oh.as_slice());
     out.push(32);
     put_u64(inout out, e.lean.len());
     out.push(10);
-    out.extend(in v.output.as_slice());
+    out.extend(in output.as_slice());
     out.extend(in e.lean.as_slice());
 }
 

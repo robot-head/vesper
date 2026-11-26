@@ -2450,18 +2450,20 @@ fn resource(r: u64) -> ProofFail {
 }
 
 // `DocumentModel`: the prefix-order tree, its statistics and the comments.
+// The fields are private, like Rust's: only `format_for_verification`
+// builds a model, and readers get copies.
 pub struct Model {
-    pub kind: ChunkSeq[u8],
-    pub arg: ChunkSeq[u64],
+    kind: ChunkSeq[u8],
+    arg: ChunkSeq[u64],
     // Text and comment payloads, in prefix order, and where each ends.
-    pub text: ChunkSeq[u8],
-    pub text_ends: ChunkSeq[u64],
+    text: ChunkSeq[u8],
+    text_ends: ChunkSeq[u64],
     // Each comment's payload number.
-    pub comment_text: ChunkSeq[u64],
-    pub node_count: u64,
-    pub text_bytes: u64,
-    pub depth: u64,
-    pub comments: u64
+    comment_text: ChunkSeq[u64],
+    node_count: u64,
+    text_bytes: u64,
+    depth: u64,
+    comments: u64
 }
 
 fn model_new() -> Model {
@@ -2519,8 +2521,13 @@ fn metadata(inout b: Budget, bytes: u64) -> ProofFail {
 // prefix-order model as it enters each node (Rust builds it after the walk
 // succeeds; it fails only on allocation after that, so the model is the
 // same). The text of text and comment nodes is `src[a..b]`.
-fn project(in d: Doc, root: u64, in src: Slice[u8], in l: ProofLimits, inout m: Model)
-    -> ProofFail {
+fn project(
+    in d: Doc,
+    root: u64,
+    in src: Slice[u8],
+    in l: ProofLimits,
+    inout m: Model
+) -> ProofFail {
     if !proof_limits_valid(in l) {
         return proof_fail(P_INVALID_LIMITS);
     }
@@ -2672,12 +2679,12 @@ fn word(in s: ChunkSeq[u64], i: u64) -> u64 {
 // What `format_for_verification` returns: the error, or the output, the
 // two digests and the model.
 pub struct Verified {
-    pub fail: ProofFail,
-    pub output: ChunkSeq[u8],
-    pub changed: bool,
-    pub source_hash: Hash32,
-    pub output_hash: Hash32,
-    pub model: Model
+    fail: ProofFail,
+    output: ChunkSeq[u8],
+    changed: bool,
+    source_hash: Hash32,
+    output_hash: Hash32,
+    model: Model
 }
 
 fn verified_fail(f: ProofFail) -> Verified {
@@ -2707,8 +2714,12 @@ fn proof_format_limits() -> Limits {
 // `format_with_capture` with a capture: `format`, projecting the first
 // pass. A projection error comes back in the result; a formatter error is
 // raised.
-fn capture(in src: Slice[u8], in lim: Limits, inout w: Work, in pl: ProofLimits)
-    -> Verified eff [Fail[FmtFail]] {
+fn capture(
+    in src: Slice[u8],
+    in lim: Limits,
+    inout w: Work,
+    in pl: ProofLimits
+) -> Verified eff [Fail[FmtFail]] {
     if src.len() > lim.max_input_bytes {
         fail(E_INPUT);
     }
@@ -2840,6 +2851,77 @@ fn comment_is(in m: Model, c: u64, in b: Slice[u8]) -> bool {
         }
     }
     true
+}
+
+// Read-only views of a `Verified` (`FormatVerification`'s accessors): its
+// error, output, digests and model, copied out, so no caller can pair a
+// model or digest with text that was not formatted.
+pub fn verified_error(in v: Verified) -> ProofFail {
+    v.fail
+}
+
+pub fn verified_output(in v: Verified) -> ChunkSeq[u8] {
+    copy_bytes(in v.output)
+}
+
+pub fn verified_changed(in v: Verified) -> bool {
+    v.changed
+}
+
+pub fn verified_source_hash(in v: Verified) -> Hash32 {
+    v.source_hash
+}
+
+pub fn verified_output_hash(in v: Verified) -> Hash32 {
+    v.output_hash
+}
+
+// The model: kinds, words, payload bytes and ends in prefix order, then
+// `node_count`, `text_bytes`, `depth` and `comments`.
+pub fn model_kinds(in v: Verified) -> ChunkSeq[u8] {
+    copy_bytes(in v.model.kind)
+}
+
+pub fn model_args(in v: Verified) -> ChunkSeq[u64] {
+    copy_words(in v.model.arg)
+}
+
+pub fn model_text(in v: Verified) -> ChunkSeq[u8] {
+    copy_bytes(in v.model.text)
+}
+
+pub fn model_text_ends(in v: Verified) -> ChunkSeq[u64] {
+    copy_words(in v.model.text_ends)
+}
+
+pub fn model_node_count(in v: Verified) -> u64 {
+    v.model.node_count
+}
+
+pub fn model_text_bytes(in v: Verified) -> u64 {
+    v.model.text_bytes
+}
+
+pub fn model_depth(in v: Verified) -> u64 {
+    v.model.depth
+}
+
+pub fn model_comments(in v: Verified) -> u64 {
+    v.model.comments
+}
+
+fn copy_bytes(in s: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](s.len());
+    out.extend(in s.as_slice());
+    out
+}
+
+fn copy_words(in s: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](s.len());
+    for i in 0..s.len() {
+        out.push(word(in s, i));
+    }
+    out
 }
 
 // A formatter error's `Error` variant (the `E_` code) and syntax offset.
