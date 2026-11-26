@@ -47,36 +47,36 @@ const P_HOLE: u64 = 1;
 const P_REPEAT: u64 = 2;
 const PW: u64 = 8;
 
-fn b8(in s: ChunkSeq[u8], i: u64) -> u8 {
+pub fn b8(in s: ChunkSeq[u8], i: u64) -> u8 {
     match s.try_get(i) {
         Option::Some(v) => v,
         Option::None => 0,
     }
 }
 
-fn w32(in s: ChunkSeq[u32], i: u64) -> u64 {
+pub fn w32(in s: ChunkSeq[u32], i: u64) -> u64 {
     match s.try_get(i) {
         Option::Some(v) => widen_u64(v),
         Option::None => 0,
     }
 }
 
-fn w64(in s: ChunkSeq[u64], i: u64) -> u64 {
+pub fn w64(in s: ChunkSeq[u64], i: u64) -> u64 {
     match s.try_get(i) {
         Option::Some(v) => v,
         Option::None => 0,
     }
 }
 
-fn inc(x: u64) -> u64 {
+pub fn inc(x: u64) -> u64 {
     wrapping_add(x, 1)
 }
 
-fn add(a: u64, b: u64) -> u64 {
+pub fn add(a: u64, b: u64) -> u64 {
     wrapping_add(a, b)
 }
 
-fn sub(a: u64, b: u64) -> u64 {
+pub fn sub(a: u64, b: u64) -> u64 {
     wrapping_sub(a, b)
 }
 
@@ -84,7 +84,7 @@ fn push_bytes(inout out: ChunkSeq[u8], in text: Slice[u8]) {
     out.extend(in text);
 }
 
-fn push_range(inout out: ChunkSeq[u8], in b: ChunkSeq[u8], s: u64, e: u64) {
+pub fn push_range(inout out: ChunkSeq[u8], in b: ChunkSeq[u8], s: u64, e: u64) {
     for j in s..e {
         out.push(b8(in b, j));
     }
@@ -101,7 +101,7 @@ pub struct Caps {
     eoff: ChunkSeq[u64]
 }
 
-fn caps_read(sink w: ChunkSeq[u64]) -> Caps {
+pub fn caps_read(sink w: ChunkSeq[u64]) -> Caps {
     let mut cr = ChunkSeq::new[u64]();
     let mut voff = ChunkSeq::new[u64]();
     let mut eoff = ChunkSeq::new[u64]();
@@ -144,17 +144,17 @@ fn caps_read(sink w: ChunkSeq[u64]) -> Caps {
     }
 }
 
-fn cap_count(in c: Caps) -> u64 {
+pub fn cap_count(in c: Caps) -> u64 {
     c.cr.len() / 7
 }
 
-fn cap_at(in c: Caps, cap: u64, k: u64) -> u64 {
+pub fn cap_at(in c: Caps, cap: u64, k: u64) -> u64 {
     w64(in c.cr, add(wrapping_mul(cap, 7), k))
 }
 
 // Word offset of value `v` of capture `cap`: start, end, from_tail, then
 // the indices (length, words).
-fn value_at(in c: Caps, cap: u64, v: u64) -> u64 {
+pub fn value_at(in c: Caps, cap: u64, v: u64) -> u64 {
     w64(in c.voff, add(cap_at(in c, cap, 3), v))
 }
 
@@ -176,7 +176,7 @@ fn text_eq(in c: Caps, at: u64, in b: ChunkSeq[u8], s: u64, e: u64) -> bool {
     true
 }
 
-fn text_is(in c: Caps, at: u64, in w: Slice[u8]) -> bool {
+pub fn text_is(in c: Caps, at: u64, in w: Slice[u8]) -> bool {
     let n = w64(in c.w, at);
     if n != w.len() {
         return false;
@@ -555,7 +555,7 @@ fn parse(in s: ChunkSeq[u8], in t: Tt, inout x: Tx, start: u64, end: u64, depth:
 // The skeleton: the template source with markers, the holes (rows of
 // capture, value, operand start, operand end), the slots (rows of hole,
 // start, end), the step budget, the byte limit and the refusal.
-struct Sk {
+pub struct Sk {
     src: ChunkSeq[u8],
     holes: ChunkSeq[u64],
     slots: ChunkSeq[u64],
@@ -565,7 +565,7 @@ struct Sk {
     msg: ChunkSeq[u8]
 }
 
-fn sk_fail(inout sk: Sk, in text: Slice[u8]) {
+pub fn sk_fail(inout sk: Sk, in text: Slice[u8]) {
     if !sk.failed {
         sk.failed = true;
         sk.msg.clear();
@@ -575,7 +575,7 @@ fn sk_fail(inout sk: Sk, in text: Slice[u8]) {
 
 // `bounded`'s check: false (and the refusal) when `n` more bytes would
 // pass the limit.
-fn room(inout sk: Sk, n: u64) -> bool {
+pub fn room(inout sk: Sk, n: u64) -> bool {
     let left = if sk.src.len() > sk.max {
         0
     } else {
@@ -594,7 +594,7 @@ fn hole_message(inout m: ChunkSeq[u8], in head: Slice[u8], in s: ChunkSeq[u8], n
     push_range(inout m, in s, ns, ne);
 }
 
-fn push_decimal(inout out: ChunkSeq[u8], v: u64) {
+pub fn push_decimal(inout out: ChunkSeq[u8], v: u64) {
     let mut digits = ChunkSeq::new[u8]();
     let mut x = v;
     loop {
@@ -673,7 +673,7 @@ fn operand_span(in text: ChunkSeq[u8]) -> u64 {
     }
 }
 
-fn value_text(in c: Caps, at: u64, in ib: ChunkSeq[u8], in tb: ChunkSeq[u8]) -> ChunkSeq[u8] {
+pub fn value_text(in c: Caps, at: u64, in ib: ChunkSeq[u8], in tb: ChunkSeq[u8]) -> ChunkSeq[u8] {
     let s = w64(in c.w, at);
     let e = w64(in c.w, inc(at));
     let mut out = ChunkSeq::new[u8]();
@@ -685,7 +685,7 @@ fn value_text(in c: Caps, at: u64, in ib: ChunkSeq[u8], in tb: ChunkSeq[u8]) -> 
     out
 }
 
-fn sort_in(in c: Caps, cap: u64, in names: Slice[u8]) -> bool {
+pub fn sort_in(in c: Caps, cap: u64, in names: Slice[u8]) -> bool {
     text_is(in c, cap_at(in c, cap, 1), in names)
 }
 
@@ -850,7 +850,7 @@ fn emit(
     }
 }
 
-fn refused(in m: Slice[u8]) -> ChunkSeq[u64] {
+pub fn refused(in m: Slice[u8]) -> ChunkSeq[u64] {
     let mut out = ChunkSeq::new[u64]();
     out.push(2);
     out.push(m.len());
@@ -864,22 +864,32 @@ fn refused(in m: Slice[u8]) -> ChunkSeq[u64] {
     out
 }
 
-// The skeleton of `template` for the captures `words` (a match of
+// The skeleton of template `s` for the captures `c` (a match of
 // matcher.ves `match_rule_encoded`, whose values are spans of `ib`, or of
-// `tb` from the tail), as `template::skeleton_words` encodes it:
-//   Err(message)  [2, len, message bytes]
-//   Ok(skeleton)  [1, steps left, source (len, bytes), holes (count; per
-//                 hole capture, value, operand start, operand end), slots
-//                 (count; per slot hole, start, end)]
-pub fn skeleton_encoded(
+// `tb` from the tail): `render`'s `skeleton`, with a refusal in
+// `failed`/`msg`.
+pub fn skeleton_run(
     in s: ChunkSeq[u8],
-    sink words: ChunkSeq[u64],
+    in c: Caps,
     in ib: ChunkSeq[u8],
     in tb: ChunkSeq[u8],
     in mark: ChunkSeq[u8],
     max_bytes: u64
-) -> ChunkSeq[u64] {
-    let c = caps_read(words);
+) -> Sk {
+    let steps = if max_bytes > 4611686018427387903 {
+        NONE
+    } else {
+        max_bytes << 2
+    };
+    let mut sk = Sk {
+        src: ChunkSeq::new[u8](),
+        holes: ChunkSeq::new[u64](),
+        slots: ChunkSeq::new[u64](),
+        steps: steps,
+        max: max_bytes,
+        failed: false,
+        msg: ChunkSeq::new[u8]()
+    };
     let mut d = diags_new();
     let raw = lex_sugar_raw_with_limits(
         in s.as_slice(),
@@ -898,10 +908,12 @@ pub fn skeleton_encoded(
         for j in w32(in d.at, 0)..end {
             m.push(b8(in d.text, j));
         }
-        return refused(in m.as_slice());
+        sk_fail(inout sk, in m.as_slice());
+        return sk;
     }
     if d.code.len() != 0 {
-        return refused(in "invalid token in sugar template".as_bytes());
+        sk_fail(inout sk, in "invalid token in sugar template".as_bytes());
+        return sk;
     }
     let mut t = Tt {
         tk: ChunkSeq::new[u32]()
@@ -920,24 +932,30 @@ pub fn skeleton_encoded(
     };
     let top = parse(in s, in t, inout x, 0, sub(tt_len(in t), 1), 0);
     if x.failed {
-        return refused(in x.msg.as_slice());
+        sk_fail(inout sk, in x.msg.as_slice());
+        return sk;
     }
-    let steps = if max_bytes > 4611686018427387903 {
-        NONE
-    } else {
-        max_bytes << 2
-    };
-    let mut sk = Sk {
-        src: ChunkSeq::new[u8](),
-        holes: ChunkSeq::new[u64](),
-        slots: ChunkSeq::new[u64](),
-        steps: steps,
-        max: max_bytes,
-        failed: false,
-        msg: ChunkSeq::new[u8]()
-    };
     let mut ix = ChunkSeq::new[u64]();
     emit(in s, in x, top, in c, in ib, in tb, in mark, inout sk, inout ix);
+    sk
+}
+
+// The skeleton of `template` for the captures `words`, as
+// `template::skeleton_words` encodes it:
+//   Err(message)  [2, len, message bytes]
+//   Ok(skeleton)  [1, steps left, source (len, bytes), holes (count; per
+//                 hole capture, value, operand start, operand end), slots
+//                 (count; per slot hole, start, end)]
+pub fn skeleton_encoded(
+    in s: ChunkSeq[u8],
+    sink words: ChunkSeq[u64],
+    in ib: ChunkSeq[u8],
+    in tb: ChunkSeq[u8],
+    in mark: ChunkSeq[u8],
+    max_bytes: u64
+) -> ChunkSeq[u64] {
+    let c = caps_read(words);
+    let sk = skeleton_run(in s, in c, in ib, in tb, in mark, max_bytes);
     if sk.failed {
         return refused(in sk.msg.as_slice());
     }
