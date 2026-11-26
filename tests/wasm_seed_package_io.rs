@@ -2544,6 +2544,13 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         CompilerExecCheck::CompileOnly,
     ),
     (
+        "check-collect",
+        "@vesper/check-collect",
+        "packages/vesper-check-collect",
+        "collect_text(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
         "check-data",
         "@vesper/check-data",
         "packages/vesper-check-data",
@@ -2688,6 +2695,13 @@ const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[
         "packages/vesper-driver-commands",
         "use @vesper/driver-commands::run;\nuse @vesper/driver::args_new;\npub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands]] { let a = args_new(); wrapping_u64(run(in a)) }\n",
         "its printing, help and formatting go through the HybridCommands import, which only the hybrid compiler's Rust implements (crates/vesper-hybrid/src/commands.rs): the Wasm entry cannot carry Ffi[HybridCommands] (WErr Entry). @vesper-std/process builds for WASI (src-wasip2, #1928)",
+    ),
+    (
+        "run",
+        "@vesper/run",
+        "packages/vesper-run",
+        "use @vesper/run::run_words;\npub fn main() -> u64 { run_words(in \"\".as_bytes()).len() }\n",
+        "the `vesper run` evaluator (#2053) divides under local Fail handlers (packages/vesper-run/src/arith.ves), which the Wasm backend does not lower yet (WErr Unsupported GenericEffectInstance)",
     ),
 ];
 
