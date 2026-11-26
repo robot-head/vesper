@@ -542,10 +542,10 @@ messages are packages/vesper-verify/src/format.ves.
 tests/self_host_verify.rs (`format` mode) compares output, `changed`, the
 digests and the witness, or the `format_model`/`emit` error message, with
 Rust's over every .ves file of the repository up to 128 KiB plus edges:
-1461 inputs, 0 diffs (228 give a witness; most larger files stop at the
+1464 inputs, 0 diffs (237 give a witness; most larger files stop at the
 4096-node or metadata bounds, the same way in both). 64 macro-profile
 sources are skipped until the port formats that profile (#1996 3c-2).
-Release, one process: Rust 1.53 s, the port 1.00 s (0.65x).
+Release, one process, median of three: Rust 1.79 s, the port 1.09 s (0.61x).
 
 **Found on the way.** A file module cannot `use super::` a private item
 (E0112), so the proof code sits in the formatter's own file instead of
