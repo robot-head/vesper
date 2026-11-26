@@ -2,6 +2,7 @@
 // that src/release.rs uses from the `semver` crate (1.0.28): `Version::parse`
 // with its error kinds and messages, `Version::cmp_precedence` and `Display`,
 // and release policy 1 itself (`check_release` after the comparison).
+use @vesper-std/core::config::update;
 use @vesper-std/core::iter::all;
 use self::{R, Ver};
 use self::util::{Class, div_rem, put, put_u64};
@@ -260,9 +261,11 @@ pub fn parse(in t: ChunkSeq[u8]) -> Ver {
     if v.err != ErrorKind::None {
         return v;
     }
-    v.major = major;
-    v.minor = minor;
-    v.patch = patch;
+    v = update v {
+        major = major,
+        minor = minor,
+        patch = patch
+    };
     let mut i = i;
     let mut pos: u64 = Pos::Patch;
     if i == n {
