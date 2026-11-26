@@ -26,15 +26,8 @@ use @vesper/check-data::{pack_text};
 use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{Interner, interner_new, symbol_from_id};
 use self::prelude::{
-    defined_methods,
-    module_end,
-    needs_option,
-    needs_strings,
-    option_source,
-    replaced,
-    sorted_symbols,
-    strings_source,
-    uses_of
+    defined_methods, module_end, needs_option, needs_strings, option_source, replaced,
+    sorted_symbols, strings_source, uses_of
 };
 use self::widths::{reserved_width_name, width_source};
 

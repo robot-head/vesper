@@ -7,24 +7,8 @@
 // module and the preludes before it).
 
 use @vesper/ast::{
-    Ast,
-    AdtNode,
-    ArgNode,
-    EffectDeclNode,
-    ClauseNode,
-    ConfNode,
-    FnNode,
-    ImplNode,
-    ItemNode,
-    ParamNode,
-    StmtNode,
-    TraitNode,
-    expr_at,
-    list_at,
-    list_len,
-    none,
-    type_at,
-    type_name
+    Ast, AdtNode, ArgNode, EffectDeclNode, ClauseNode, ConfNode, FnNode, ImplNode, ItemNode,
+    ParamNode, StmtNode, TraitNode, expr_at, list_at, list_len, none, type_at, type_name
 };
 use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{Interner, interner_new, symbol_from_id};
