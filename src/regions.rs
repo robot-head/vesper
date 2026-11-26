@@ -102,7 +102,7 @@ pub const OPERATIONS: [&str; 8] = [
 /// module uses regions. Its operation signatures fix argument passing modes
 /// for the Place IR; their types are placeholders that the checker replaces
 /// with the generic region typing rules.
-const PRELUDE: &str = include_str!("preludes/regions.ves");
+pub const PRELUDE: &str = include_str!("preludes/regions.ves");
 
 /// Whether the World's `Region` effect is the built-in one (a module that
 /// declares its own `effect Region` and uses no region syntax keeps it).

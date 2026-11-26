@@ -391,16 +391,35 @@ fn returned_literal(text: &str, name: &str) -> String {
 /// file byte for byte, so its spans land where the checker's do.
 #[test]
 fn prelude_copies_match_rust() {
-    let path = repo().join(PACKAGE).join("src/prelude.ves");
-    let text = std::fs::read_to_string(&path).unwrap();
-    for (name, rust) in [
+    let dir = repo().join(PACKAGE).join("src");
+    let mut texts = vec![];
+    for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+        if entry.path().extension().is_some_and(|e| e == "ves") {
+            texts.push((entry.path(), std::fs::read_to_string(entry.path()).unwrap()));
+        }
+    }
+    let copies = [
         ("strings_source", vesper::strings::PRELUDE),
         ("option_source", vesper::option_methods::PRELUDE),
-    ] {
-        assert!(
-            returned_literal(&text, name) == rust,
-            "`{name}` in {} is not the checker's prelude; copy src/preludes again",
-            path.display()
-        );
+        ("atomics_source", vesper::atomics::PRELUDE),
+        ("workers_source", vesper::atomics::WORKERS_PRELUDE),
+        ("region_source", vesper::regions::PRELUDE),
+    ];
+    let mut checked = 0;
+    for (name, rust) in copies {
+        let head = format!("pub fn {name}() -> Str {{");
+        for (path, text) in texts.iter().filter(|(_, t)| t.contains(&head)) {
+            assert!(
+                returned_literal(text, name) == rust,
+                "`{name}` in {} is not the checker's prelude; copy src/preludes again",
+                path.display()
+            );
+            checked += 1;
+        }
     }
+    assert!(
+        checked >= 2,
+        "found {checked} prelude copies in {}",
+        dir.display()
+    );
 }
