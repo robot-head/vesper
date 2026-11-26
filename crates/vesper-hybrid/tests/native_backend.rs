@@ -21,6 +21,9 @@ use cranelift_module::{Linkage, Module};
 use vesper::native::machine::integer_block_words;
 
 const ABI_ARGS: usize = 6;
+const MACHINE_HEADER_WORDS: usize = 2;
+const MACHINE_RECORD_WORDS: usize = 4;
+const MACHINE_BLOCK_LABEL: u64 = 62;
 
 #[derive(Clone, Copy, Debug)]
 enum Case {
@@ -42,6 +45,7 @@ enum Case {
     ReturningBranch,
     ImmediateBranch,
     NestedBranches,
+    SharedTail,
     LoopEdges,
     ShiftCountInRcx,
     ShiftDestinationRcx,
@@ -146,6 +150,7 @@ fn integer_backend_matches_cranelift_results() {
         Case::ReturningBranch,
         Case::ImmediateBranch,
         Case::NestedBranches,
+        Case::SharedTail,
         Case::LoopEdges,
         Case::ShiftCountInRcx,
         Case::ShiftDestinationRcx,
@@ -380,6 +385,24 @@ fn integer_backend_matches_cranelift_results() {
                 }
                 builder.switch_to_block(join);
                 builder.ins().iadd(chosen, f)
+            }
+            Case::SharedTail => {
+                let yes = builder.create_block();
+                let no = builder.create_block();
+                let join = builder.create_block();
+                let chosen = builder.append_block_param(join, types::I64);
+                builder.ins().brif(a, yes, &[], no, &[]);
+                builder.switch_to_block(yes);
+                builder.ins().jump(join, &[BlockArg::Value(b)]);
+                builder.switch_to_block(no);
+                builder.ins().jump(join, &[BlockArg::Value(c)]);
+                builder.switch_to_block(join);
+                let mut accumulator = chosen;
+                for round in 0..24 {
+                    let sum = builder.ins().iadd_imm(accumulator, round);
+                    accumulator = builder.ins().bxor(sum, d);
+                }
+                accumulator
             }
             Case::LoopEdges => {
                 let header = builder.create_block();
@@ -661,6 +684,14 @@ fn integer_backend_matches_cranelift_results() {
 
         let request =
             integer_block_words(&context.func).unwrap_or_else(|| panic!("declined {case:?}"));
+        if matches!(case, Case::SharedTail | Case::NestedBranches) {
+            let labeled = request[MACHINE_HEADER_WORDS..]
+                .as_chunks::<MACHINE_RECORD_WORDS>()
+                .0
+                .iter()
+                .any(|record| record[0] == MACHINE_BLOCK_LABEL);
+            assert_eq!(labeled, matches!(case, Case::SharedTail));
+        }
         let bytes = binding::x86_64_integer_block(&request);
         assert!(!bytes.is_empty(), "{case:?}");
         if matches!(case, Case::SpilledValues { fixed_slot: false }) {

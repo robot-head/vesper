@@ -111,8 +111,9 @@ const STACK_PROBE_INTERVAL: usize = 4096;
 const CFG_HOME_BYTES: u64 = size_of::<u64>() as u64;
 const MAX_GP_ARGUMENTS: usize = GP_REGISTER_ARGUMENTS + STACK_PROBE_INTERVAL / size_of::<u64>() - 1;
 const GP_RESULTS: usize = 2;
-// Limit code duplication when several paths share a suffix.
 const MAX_LINEARIZED_BRANCHES: usize = 32;
+// Keep small joins linear. Compare tape sizes once repeated bodies are substantial.
+const MIN_DUPLICATED_INSTRUCTIONS_FOR_CFG: usize = 32;
 pub(super) const FUNCTION_NAMESPACE: u32 = 0;
 pub(super) const DATA_NAMESPACE: u32 = 1;
 const REL32_BYTES: i64 = size_of::<i32>() as i64;
@@ -239,6 +240,8 @@ struct IntegerBlocks<'a> {
     words: Vec<u64>,
     relocations: bool,
     branches: usize,
+    emitted_blocks: SecondaryMap<Block, bool>,
+    duplicated_instructions: usize,
     needs_cfg: bool,
     allow_hardware_faults: bool,
     declarations: Option<&'a ModuleDeclarations>,
@@ -714,7 +717,12 @@ impl IntegerBlocks<'_> {
                 return None;
             }
             visited[block] = true;
+            let start = self.words.len();
             let terminator = self.emit_block(block, values)?;
+            if self.emitted_blocks[block] {
+                self.duplicated_instructions += (self.words.len() - start) / INSTRUCTION_WORDS;
+            }
+            self.emitted_blocks[block] = true;
             match self.function.dfg.insts[terminator] {
                 InstructionData::Jump {
                     opcode: Opcode::Jump,
@@ -1009,14 +1017,19 @@ impl IntegerBlocks<'_> {
 /// The entry label's right word identifies the private home slot plus one,
 /// or zero when the function needs no cross-block storage.
 pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
-    integer_program(function, false, None).map(|(words, _)| words)
+    integer_program(function, false, None).map(|(primary, _)| primary.words)
+}
+
+struct IntegerProgram {
+    words: Vec<u64>,
+    relocations: bool,
 }
 
 fn integer_program(
     function: &Function,
     allow_hardware_faults: bool,
     declarations: Option<&ModuleDeclarations>,
-) -> Option<(Vec<u64>, bool)> {
+) -> Option<(IntegerProgram, Option<IntegerProgram>)> {
     let signature = &function.signature;
     let arity = signature.params.len();
     if signature.call_conv != CallConv::SystemV
@@ -1053,6 +1066,8 @@ fn integer_program(
         words: vec![0; HEADER_WORDS],
         relocations: false,
         branches: 0,
+        emitted_blocks: SecondaryMap::new(),
+        duplicated_instructions: 0,
         needs_cfg: false,
         allow_hardware_faults,
         declarations,
@@ -1082,10 +1097,35 @@ fn integer_program(
             blocks.words[RETURN_VALUE] = NO_VALUE;
             blocks.relocations = false;
             blocks.labeled_cfg(block)?;
+            return Some((
+                IntegerProgram {
+                    words: blocks.words,
+                    relocations: blocks.relocations,
+                },
+                None,
+            ));
         }
         None => return None,
     }
-    Some((blocks.words, blocks.relocations))
+    let linear = IntegerProgram {
+        words: std::mem::take(&mut blocks.words),
+        relocations: blocks.relocations,
+    };
+    if blocks.duplicated_instructions >= MIN_DUPLICATED_INSTRUCTIONS_FOR_CFG {
+        blocks.words.extend_from_slice(&linear.words[..prefix]);
+        blocks.words[RETURN_VALUE] = NO_VALUE;
+        blocks.relocations = false;
+        if blocks.labeled_cfg(block).is_some() && blocks.words.len() < linear.words.len() {
+            // CFG homes increase frame pressure. Keep the linear form available
+            // if the Vesper encoder cannot allocate the new frame.
+            let labeled = IntegerProgram {
+                words: blocks.words,
+                relocations: blocks.relocations,
+            };
+            return Some((labeled, Some(linear)));
+        }
+    }
+    Some((linear, None))
 }
 
 struct MachineCode {
@@ -1145,16 +1185,19 @@ fn encode_integer_block(
     }
     // Ordinary native ELF objects use CPU memory faults directly. They carry
     // no Cranelift trap table, unlike JIT and freestanding emission.
-    let (words, relocations) = integer_program(function, true, declarations)?;
-    if relocations {
-        let packet = RELOCATION_ENCODER.get()?(&words)?;
-        decode_relocatable(&packet)
-    } else {
-        Some(MachineCode {
-            bytes: encode(&words)?,
-            relocations: Vec::new(),
-        })
-    }
+    let (primary, fallback) = integer_program(function, true, declarations)?;
+    let emit = |program: IntegerProgram| {
+        if program.relocations {
+            let packet = RELOCATION_ENCODER.get()?(&program.words)?;
+            decode_relocatable(&packet)
+        } else {
+            Some(MachineCode {
+                bytes: encode(&program.words)?,
+                relocations: Vec::new(),
+            })
+        }
+    };
+    emit(primary).or_else(|| fallback.and_then(emit))
 }
 
 /// Defines one already-lowered function. JIT and instrumented/observed
