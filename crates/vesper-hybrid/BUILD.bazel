@@ -230,6 +230,7 @@ vesper_hybrid(
         "hybrid_effects": [
             "//:check_data_package",
             "//:check_effects_package",
+            "//:std_bytes_package",
         ],
         # Foreign (.vsys) call emission (#1287), through the shim.
         "hybrid_ffi_lowering": [

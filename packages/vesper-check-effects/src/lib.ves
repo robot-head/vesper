@@ -6,6 +6,8 @@
 // this module against `capability_effects::check_world` over the corpus,
 // the checker fixtures and capability mutants.
 //
+// - kinds.ves: the program's node kinds and pool layouts.
+// - codes.ves: the diagnostic codes.
 // - prog.ves: the program the rules walk (functions with bodies, effect
 //   declarations, call instantiations), decoded from the task words.
 // - keys.ves: sorted key sets, the interprocedural facts.
