@@ -19,29 +19,47 @@ const I64_MAX_MAGNITUDE: u64 = 9223372036854775807;
 const FNV1A64_OFFSET: u64 = 14695981039346656037;
 const FNV1A64_PRIME: u64 = 1099511628211;
 
+// The ASCII bytes the formatters write and the parsers accept.
+const ASCII_PLUS: u8 = 43;
+const ASCII_MINUS: u8 = 45;
+const ASCII_ZERO: u8 = 48;
+const ASCII_NINE: u8 = 57;
+const ASCII_UPPER_A: u8 = 65;
+const ASCII_UPPER_Z: u8 = 90;
+const ASCII_LOWER_A: u8 = 97;
+const ASCII_LOWER_Z: u8 = 122;
+
+// `s[i]`, or 0 out of range.
+fn byte_or_zero(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
 // The ASCII digit for `d` (0..=35): `0`-`9`, then `a`-`z`.
 fn digit(d: u64) -> u8 {
     if d < 10 {
-        wrapping_u8(wrapping_add(d, 48))
+        wrapping_add(ASCII_ZERO, wrapping_u8(d))
     } else {
-        wrapping_u8(wrapping_add(d, 87))
+        wrapping_add(ASCII_LOWER_A, wrapping_u8(wrapping_sub(d, 10)))
     }
 }
 
 // The value of an ASCII digit in `radix`, or `radix` when it is not one.
+// Letters of either case count from 10.
 fn digit_value(b: u8, radix: u64) -> u64 {
-    let c = widen_u64(b);
-    let v = if c >= 48 && c <= 57 {
-        wrapping_sub(c, 48)
-    } else if c >= 97 && c <= 122 {
-        wrapping_sub(c, 87)
-    } else if c >= 65 && c <= 90 {
-        wrapping_sub(c, 55)
+    let value = if b >= ASCII_ZERO && b <= ASCII_NINE {
+        widen_u64(wrapping_sub(b, ASCII_ZERO))
+    } else if b >= ASCII_LOWER_A && b <= ASCII_LOWER_Z {
+        wrapping_add(widen_u64(wrapping_sub(b, ASCII_LOWER_A)), 10)
+    } else if b >= ASCII_UPPER_A && b <= ASCII_UPPER_Z {
+        wrapping_add(widen_u64(wrapping_sub(b, ASCII_UPPER_A)), 10)
     } else {
         radix
     };
-    if v < radix {
-        v
+    if value < radix {
+        value
     } else {
         radix
     }
@@ -62,27 +80,21 @@ fn div_rem(v: u64, d: u64) -> (u64, u64) {
 
 // Reverse `out[from..]` in place.
 fn reverse_tail(inout out: ChunkSeq[u8], from: u64) {
-    let mut i = from;
-    let mut j = out.len();
+    let mut front = from;
+    let mut back = out.len();
     loop {
-        if j <= i {
+        if back <= front {
             break;
         }
-        j = wrapping_sub(j, 1);
-        if j <= i {
+        back = wrapping_sub(back, 1);
+        if back <= front {
             break;
         }
-        let a = match out.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
-        let b = match out.try_get(j) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
-        out.try_set(i, b);
-        out.try_set(j, a);
-        i = wrapping_add(i, 1);
+        let front_byte = byte_or_zero(in out.as_slice(), front);
+        let back_byte = byte_or_zero(in out.as_slice(), back);
+        out.try_set(front, back_byte);
+        out.try_set(back, front_byte);
+        front = wrapping_add(front, 1);
     }
 }
 
@@ -92,15 +104,17 @@ pub fn write_u64_radix(inout out: ChunkSeq[u8], x: u64, radix: u64, min_digits: 
     if radix < MIN_RADIX || radix > MAX_RADIX {
         return;
     }
+    // The digits come out least significant first, so they are written
+    // backwards and reversed at the end.
     let from = out.len();
-    let mut v = x;
-    let mut n: u64 = 0;
+    let mut rest = x;
+    let mut digits_written: u64 = 0;
     loop {
-        let (q, r) = div_rem(v, radix);
-        out.push(digit(r));
-        v = q;
-        n = wrapping_add(n, 1);
-        if v == 0 && n >= min_digits {
+        let (quotient, remainder) = div_rem(rest, radix);
+        out.push(digit(remainder));
+        rest = quotient;
+        digits_written = wrapping_add(digits_written, 1);
+        if rest == 0 && digits_written >= min_digits {
             break;
         }
     }
@@ -115,9 +129,11 @@ pub fn write_u64(inout out: ChunkSeq[u8], x: u64) {
 // Append `x` in decimal, with a leading `-` when negative.
 pub fn write_i64(inout out: ChunkSeq[u8], x: i64) {
     if x < 0 {
-        out.push(45);
-        // Two's complement magnitude; exact for i64::MIN as well.
-        write_u64(inout out, wrapping_add(wrapping_u64(wrapping_sub(0, wrapping_add(x, 1))), 1));
+        out.push(ASCII_MINUS);
+        // `-(x + 1) + 1` in `u64`: the two's complement magnitude, exact for
+        // `i64::MIN` as well.
+        let magnitude = wrapping_add(wrapping_u64(wrapping_sub(0, wrapping_add(x, 1))), 1);
+        write_u64(inout out, magnitude);
     } else {
         write_u64(inout out, wrapping_u64(x));
     }
@@ -131,16 +147,9 @@ pub fn write_hex_u64(inout out: ChunkSeq[u8], x: u64, min_digits: u64) {
 // Append `true` or `false`.
 pub fn write_bool(inout out: ChunkSeq[u8], b: bool) {
     if b {
-        out.push(116);
-        out.push(114);
-        out.push(117);
-        out.push(101);
+        write_bytes(inout out, in "true".as_bytes());
     } else {
-        out.push(102);
-        out.push(97);
-        out.push(108);
-        out.push(115);
-        out.push(101);
+        write_bytes(inout out, in "false".as_bytes());
     }
 }
 
@@ -155,36 +164,28 @@ pub fn parse_u64_radix(in s: Slice[u8], radix: u64) -> Result[u64, ParseIntError
     if radix < MIN_RADIX || radix > MAX_RADIX {
         return Result::Err(ParseIntError::InvalidDigit);
     }
-    let n = s.len();
-    if n == 0 {
+    if s.len() == 0 {
         return Result::Err(ParseIntError::EmptyInput);
     }
-    let (limit, _) = div_rem(U64_MAX, radix);
-    let mut v: u64 = 0;
-    let mut i: u64 = 0;
-    loop {
-        if i >= n {
-            break Result::Ok(v);
-        }
-        let b = match s.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+    // Above this, one more digit overflows whatever it is.
+    let (max_before_scaling, _) = div_rem(U64_MAX, radix);
+    let mut value: u64 = 0;
+    for b in s {
         let d = digit_value(b, radix);
         if d >= radix {
-            break Result::Err(ParseIntError::InvalidDigit);
+            return Result::Err(ParseIntError::InvalidDigit);
         }
-        if v > limit {
-            break Result::Err(ParseIntError::OutOfRange);
+        if value > max_before_scaling {
+            return Result::Err(ParseIntError::OutOfRange);
         }
-        let scaled = wrapping_mul(v, radix);
+        let scaled = wrapping_mul(value, radix);
         let next = wrapping_add(scaled, d);
         if next < scaled {
-            break Result::Err(ParseIntError::OutOfRange);
+            return Result::Err(ParseIntError::OutOfRange);
         }
-        v = next;
-        i = wrapping_add(i, 1);
+        value = next;
     }
+    Result::Ok(value)
 }
 
 // Parse all of `s` as a decimal `u64`.
@@ -198,49 +199,38 @@ pub fn parse_i64(in s: Slice[u8]) -> Result[i64, ParseIntError] {
     if n == 0 {
         return Result::Err(ParseIntError::EmptyInput);
     }
-    let first = match s.try_get(0) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    };
-    let negative = first == 45;
-    let signed = negative || first == 43;
+    let first = byte_or_zero(in s, 0);
+    let negative = first == ASCII_MINUS;
+    let signed = negative || first == ASCII_PLUS;
     if signed && n == 1 {
         return Result::Err(ParseIntError::EmptyInput);
     }
-    let start: u64 = if signed {
+    let digits_start: u64 = if signed {
         1
     } else {
         0
     };
-    let mut v: u64 = 0;
-    let mut i = start;
+    // The largest magnitude the sign allows.
     let bound: u64 = if negative {
         I64_MIN_MAGNITUDE
     } else {
         I64_MAX_MAGNITUDE
     };
-    loop {
-        if i >= n {
-            break;
-        }
-        let b = match s.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+    let mut magnitude: u64 = 0;
+    for b in s[digits_start..n] {
         let d = digit_value(b, 10);
         if d >= 10 {
             return Result::Err(ParseIntError::InvalidDigit);
         }
-        if v > wrapping_sub(bound, d) / 10 {
+        if magnitude > wrapping_sub(bound, d) / 10 {
             return Result::Err(ParseIntError::OutOfRange);
         }
-        v = wrapping_add(wrapping_mul(v, 10), d);
-        i = wrapping_add(i, 1);
+        magnitude = wrapping_add(wrapping_mul(magnitude, 10), d);
     }
     if negative {
-        Result::Ok(wrapping_sub(0, wrapping_i64(v)))
+        Result::Ok(wrapping_sub(0, wrapping_i64(magnitude)))
     } else {
-        Result::Ok(wrapping_i64(v))
+        Result::Ok(wrapping_i64(magnitude))
     }
 }
 
@@ -248,19 +238,10 @@ pub fn parse_i64(in s: Slice[u8]) -> Result[i64, ParseIntError] {
 // and `Hash` documentation use.
 pub fn fnv1a64(in s: Slice[u8]) -> u64 {
     let mut h = FNV1A64_OFFSET;
-    let n = s.len();
-    let mut i: u64 = 0;
-    loop {
-        if i >= n {
-            break h;
-        }
-        let b = match s.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+    for b in s {
         h = wrapping_mul(h ^ widen_u64(b), FNV1A64_PRIME);
-        i = wrapping_add(i, 1);
     }
+    h
 }
 
 test {
