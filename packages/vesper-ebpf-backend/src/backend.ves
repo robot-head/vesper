@@ -1111,10 +1111,8 @@ fn packet_effect(
             0
         };
         let result_ok = inner != NONE32
-            && (
-                (want_u8 && is(in ctx.names, inner_name, "u8"))
-                    || (!want_u8 && is(in ctx.names, inner_name, "u32"))
-            );
+            && ((want_u8 && is(in ctx.names, inner_name, "u8"))
+                || (!want_u8 && is(in ctx.names, inner_name, "u32")));
         if !one_u32 || !result_ok {
             bad_signature(inout backend, in ctx, function, decl, op.name);
             if view == PK_U8 {

@@ -683,9 +683,8 @@ pub fn liveness(
                 clear(inout defs);
                 uses_defs(in program, inout names, in fns, in func, inst, inout uses, inout defs);
                 for j in 0..set_words {
-                    let word = (
-                        u64_at(in required, j) & (u64_at(in defs, j) ^ 18446744073709551615)
-                    )
+                    let word = (u64_at(in required, j)
+                        & (u64_at(in defs, j) ^ 18446744073709551615))
                         | u64_at(in uses, j);
                     let ok = required.try_set(j, word);
                 }

@@ -1227,11 +1227,9 @@ fn in_range(inout builder: B, op: u32, neg: bool, kind: u64, a: T, x: T, inout o
         return a;
     }
     if !neg
-        && (
-            op_is(in builder, op, in "+")
-                || op_is(in builder, op, in "-")
-                || op_is(in builder, op, in "*")
-        )
+        && (op_is(in builder, op, in "+")
+            || op_is(in builder, op, in "-")
+            || op_is(in builder, op, in "*"))
     {
         let min = negative(inout builder, in min_text(kind));
         let a_int = project_fixed(inout builder, a, in "toInt");
@@ -3458,10 +3456,8 @@ fn call(
         );
     }
     if ctx.fip
-        && (
-            spells(in builder, callee_name, in "Box::new")
-                || spells(in builder, callee_name, in "Box::new_in_caller")
-        )
+        && (spells(in builder, callee_name, in "Box::new")
+            || spells(in builder, callee_name, in "Box::new_in_caller"))
     {
         if args.len() != 1 {
             builder.fail(in "Box::new expects one argument");

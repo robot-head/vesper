@@ -2057,13 +2057,11 @@ fn signature(
     let shown = result_text.as_slice();
     let infer = result_text.len() == 1 && byte(in shown, 0) == 95;
     let unit = (result_text.len() == 2 && byte(in shown, 0) == 40 && byte(in shown, 1) == 41)
-        || (
-            result_text.len() == 4
-                && byte(in shown, 0) == 85
-                && byte(in shown, 1) == 110
-                && byte(in shown, 2) == 105
-                && byte(in shown, 3) == 116
-        );
+        || (result_text.len() == 4
+            && byte(in shown, 0) == 85
+            && byte(in shown, 1) == 110
+            && byte(in shown, 2) == 105
+            && byte(in shown, 3) == 116);
     if !infer && !unit {
         put(inout out, in " -> ");
         put_bytes(inout out, in shown);
@@ -2368,17 +2366,15 @@ fn rank_members(
             let prev_tier = g8(in ranked.tier, prev_row);
             let cur_tier = g8(in ranked.tier, i);
             let before = cur_tier < prev_tier
-                || (
-                    cur_tier == prev_tier
-                        && cmp_blob(
-                            in bytes,
-                            g64(in ranked.label_at, i),
-                            g64(in ranked.label_len, i),
-                            g64(in ranked.label_at, prev_row),
-                            g64(in ranked.label_len, prev_row)
-                        )
-                            < 0
-                );
+                || (cur_tier == prev_tier
+                    && cmp_blob(
+                        in bytes,
+                        g64(in ranked.label_at, i),
+                        g64(in ranked.label_len, i),
+                        g64(in ranked.label_at, prev_row),
+                        g64(in ranked.label_len, prev_row)
+                    )
+                        < 0);
             if !before {
                 break;
             }

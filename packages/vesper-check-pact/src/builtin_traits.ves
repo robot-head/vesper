@@ -273,12 +273,11 @@ fn user_impl_covers(in module: BuiltinMod, trait_name: u32, ty: u32) -> bool {
             for ai in 0..w(self_node.n) {
                 let arg_ty = u32_at(in module.ctx.types.items, add(w(self_node.a), ai));
                 let arg_node = node_at(in module.ctx.types, arg_ty);
-                if !(
-                    arg_node.kind == K_NAMED
-                        && arg_node.n == 0
-                        && param_index(in module, conf.gen_start, conf.gen_count, arg_node.name)
-                            != NONE64
-                ) {
+                if !(arg_node.kind == K_NAMED
+                    && arg_node.n == 0
+                    && param_index(in module, conf.gen_start, conf.gen_count, arg_node.name)
+                        != NONE64)
+                {
                     all_params = false;
                     break;
                 }
@@ -841,11 +840,10 @@ pub fn builtin_derive_words(in bytes: Slice[u8]) -> ChunkSeq[u64] {
                         let arg_ty = u32_at(in module.ctx.types.items, add(w(self_node.a), ai));
                         let arg_node = node_at(in module.ctx.types, arg_ty);
                         let conf_gen_name = u32_at(in module.gen_names, add(w(conf.gen_start), ai));
-                        if !(
-                            arg_node.kind == K_NAMED
-                                && arg_node.n == 0
-                                && arg_node.name == conf_gen_name
-                        ) {
+                        if !(arg_node.kind == K_NAMED
+                            && arg_node.n == 0
+                            && arg_node.name == conf_gen_name)
+                        {
                             params_ok = false;
                             break;
                         }

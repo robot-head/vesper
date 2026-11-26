@@ -808,13 +808,9 @@ pub fn doc_target(in index: Ix, in facts: DocFacts, at: u64, inout err: u64) -> 
     let is_doc = comment_len >= 3
         && byte(in bytes, tok_start) == 47
         && byte(in bytes, wrapping_add(tok_start, 1)) == 47
-        && (
-            byte(in bytes, wrapping_add(tok_start, 2)) == 33
-                || (
-                    byte(in bytes, wrapping_add(tok_start, 2)) == 47
-                        && !(comment_len >= 4 && byte(in bytes, wrapping_add(tok_start, 3)) == 47)
-                )
-        );
+        && (byte(in bytes, wrapping_add(tok_start, 2)) == 33
+            || (byte(in bytes, wrapping_add(tok_start, 2)) == 47
+                && !(comment_len >= 4 && byte(in bytes, wrapping_add(tok_start, 3)) == 47)));
     if !is_doc {
         return 0;
     }

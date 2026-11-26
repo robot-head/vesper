@@ -72,15 +72,8 @@ fn blank(in bytes: Slice[u8], s: u64, e: u64) -> bool {
         } else if first == 226 && wrapping_add(i, 2) < e {
             let second = byte(in bytes, wrapping_add(i, 1));
             let third = byte(in bytes, wrapping_add(i, 2));
-            let space = (
-                second == 128
-                    && (
-                        (third >= 128 && third <= 138)
-                            || third == 168
-                            || third == 169
-                            || third == 175
-                    )
-            )
+            let space = (second == 128
+                && ((third >= 128 && third <= 138) || third == 168 || third == 169 || third == 175))
                 || (second == 129 && third == 159);
             if space {
                 i = wrapping_add(i, 3);
@@ -621,11 +614,9 @@ fn group(inout link: Link, in bytes: Slice[u8]) -> bool {
                 at = wrapping_add(at, run_len);
             }
         } else if ch == 91
-            || (
-                ch == 33
-                    && wrapping_add(at, 1) < len
-                    && lb(in link, in bytes, line, wrapping_add(at, 1)) == 91
-            )
+            || (ch == 33
+                && wrapping_add(at, 1) < len
+                && lb(in link, in bytes, line, wrapping_add(at, 1)) == 91)
         {
             let image = ch == 33;
             let start = if image { wrapping_add(at, 1) } else { at };
@@ -797,13 +788,9 @@ pub fn analyze(
             && token_len >= 3
             && byte(in bytes, start) == 47
             && byte(in bytes, wrapping_add(start, 1)) == 47
-            && (
-                byte(in bytes, wrapping_add(start, 2)) == 33
-                    || (
-                        byte(in bytes, wrapping_add(start, 2)) == 47
-                            && !(token_len >= 4 && byte(in bytes, wrapping_add(start, 3)) == 47)
-                    )
-            );
+            && (byte(in bytes, wrapping_add(start, 2)) == 33
+                || (byte(in bytes, wrapping_add(start, 2)) == 47
+                    && !(token_len >= 4 && byte(in bytes, wrapping_add(start, 3)) == 47)));
         if is_doc {
             let mut from = wrapping_add(start, 3);
             if from < end && byte(in bytes, from) == 32 {

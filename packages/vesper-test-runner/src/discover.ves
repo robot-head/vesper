@@ -597,11 +597,9 @@ fn put_test(
     let attr_sims = has_test && test_attr.sim_schedules.has;
     let attr_fault = has_test && test_attr.fault_profile.has;
     let gate = has_test
-        && (
-            test_attr.max_stack.has
-                || test_attr.max_cycles.has
-                || (test_attr.zero_alloc_has && test_attr.zero_alloc)
-        );
+        && (test_attr.max_stack.has
+            || test_attr.max_cycles.has
+            || (test_attr.zero_alloc_has && test_attr.zero_alloc));
     let pins = if has_attrs { fn_attrs.case_count } else { 0 };
     // A case row's wrapper is an explicit unit invocation: no effects.
     let effectful = !is_case;

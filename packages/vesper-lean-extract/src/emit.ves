@@ -400,20 +400,12 @@ fn constructor_name(inout builder: B, in world: World, ctor: u64) {
 fn constructor_check(inout builder: B, in world: World, ctor: u64) {
     let adt = adt_of(in world, ctor);
     let variant = variant_of(in world, ctor);
-    let special = (
-        spells(in builder, adt.name, in "Option")
-            && (
-                spells(in builder, variant.name, in "Some")
-                    || spells(in builder, variant.name, in "None")
-            )
-    )
-        || (
-            spells(in builder, adt.name, in "Result")
-                && (
-                    spells(in builder, variant.name, in "Ok")
-                        || spells(in builder, variant.name, in "Err")
-                )
-        );
+    let special = (spells(in builder, adt.name, in "Option")
+        && (spells(in builder, variant.name, in "Some")
+            || spells(in builder, variant.name, in "None")))
+        || (spells(in builder, adt.name, in "Result")
+            && (spells(in builder, variant.name, in "Ok")
+                || spells(in builder, variant.name, in "Err")));
     if special {
         return;
     }
@@ -1228,18 +1220,17 @@ fn instruction(
         builder.fail(in LOOP_REFUSAL);
         return 0;
     }
-    if !(
-        op == Op::Const
-            || op == Op::Unit
-            || op == Op::Read
-            || op == Op::Closure
-            || op == Op::Unary
-            || op == Op::Binary
-            || op == Op::Tuple
-            || op == Op::Data
-            || op == Op::Project
-            || op == Op::Fip
-    ) {
+    if !(op == Op::Const
+        || op == Op::Unit
+        || op == Op::Read
+        || op == Op::Closure
+        || op == Op::Unary
+        || op == Op::Binary
+        || op == Op::Tuple
+        || op == Op::Data
+        || op == Op::Project
+        || op == Op::Fip)
+    {
         builder.fail(in "unsupported operation in Lean CFG extraction");
         return 0;
     }

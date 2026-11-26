@@ -802,10 +802,8 @@ fn docs(inout out: Out, in index: Ix, start: u64) -> bool {
             && byte(in bytes, tok_start) == 47
             && byte(in bytes, wrapping_add(tok_start, 1)) == 47
             && byte(in bytes, wrapping_add(tok_start, 2)) == 47
-            && !(
-                wrapping_sub(tok_end, tok_start) >= 4
-                    && byte(in bytes, wrapping_add(tok_start, 3)) == 47
-            )
+            && !(wrapping_sub(tok_end, tok_start) >= 4
+                && byte(in bytes, wrapping_add(tok_start, 3)) == 47)
         {
             let mut from = wrapping_add(tok_start, 3);
             if from < tok_end && byte(in bytes, from) == 32 {
