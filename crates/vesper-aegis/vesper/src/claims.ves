@@ -186,7 +186,8 @@ pub fn check_policy(
                 in cb,
                 CB_MEASUREMENT,
                 MEASUREMENT_BYTES
-            ) {
+            )
+        {
             found = true;
         }
     }
@@ -200,7 +201,8 @@ pub fn check_policy(
         deny(6, 0, 0, 0);
     }
     if !ct_eq(in cb, CB_CHANNEL_BINDING, in expected, 0, CHANNEL_BINDING_BYTES)
-        || !ct_eq(in cb, CB_PREFIX, in expected, 0, PREFIX_BYTES) {
+        || !ct_eq(in cb, CB_PREFIX, in expected, 0, PREFIX_BYTES)
+    {
         deny(7, 0, 0, 0);
     }
     if arch == ARCH_SNP {

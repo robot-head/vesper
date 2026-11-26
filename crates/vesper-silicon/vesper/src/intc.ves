@@ -1390,7 +1390,8 @@ fn wired_level(in f: Fabric, want: u64) -> bool {
         let t = topo(in f, d);
         for i in 0..t.nidc {
             if w_at(in f.d_idc, wrapping_add(t.idc_off, i)) == want
-                && m_aplic_idc_asserted(in f.aplic, d, i) {
+                && m_aplic_idc_asserted(in f.aplic, d, i)
+            {
                 return true;
             }
         }
@@ -1441,7 +1442,8 @@ pub fn m_level(in f: Fabric, hart: u64, cause: u64) -> bool {
                 };
                 for k in 0..h.nslot {
                     if now >= w_at(in f.c_cmp, wrapping_add(h.slot_off, k))
-                        && timer_target(in f, h, k) == want {
+                        && timer_target(in f, h, k) == want
+                    {
                         return true;
                     }
                 }
@@ -1505,7 +1507,8 @@ pub fn m_claim_external(inout f: Fabric, hart: u64, cause: u64) -> Claim {
         let t = topo(in f, d);
         for i in 0..t.nidc {
             if w_at(in f.d_idc, wrapping_add(t.idc_off, i)) == want
-                && m_aplic_idc_asserted(in f.aplic, d, i) {
+                && m_aplic_idc_asserted(in f.aplic, d, i)
+            {
                 let v = m_aplic_claimi(inout f.aplic, d, i);
                 return claimed(1, d, 0, v >> 16);
             }

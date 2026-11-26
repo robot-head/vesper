@@ -540,7 +540,8 @@ fn state_action(in l: L, op: u8, ops_start: u64, fallible: bool) -> bool {
         || op == Op::Seq
         || op == Op::Fip
         || op == Op::Exit
-        || fallible {
+        || fallible
+    {
         return true;
     }
     if op == Op::Binary {
@@ -1313,7 +1314,8 @@ fn lower_vector_call(inout l: L, ex: Ex, vector_res: VecRes) -> u32 {
     for i in 0..ex.n {
         if vector_res.const_lo < vector_res.const_hi
             && i >= vector_res.const_lo
-            && i < vector_res.const_hi {
+            && i < vector_res.const_hi
+        {
             continue;
         }
         let arg_id = l.ast.x(add(ex.b, inc(wrapping_mul(i, 2))));
@@ -1408,7 +1410,8 @@ fn call(inout l: L, ex: Ex) -> u32 {
     if receiver == NONE64
         && l.ctx.world.box_active
         && (name == l.box_new_sym || name == l.box_new_in_caller_sym)
-        && ex.n == 1 {
+        && ex.n == 1
+    {
         let fip_label = if name == l.box_new_sym {
             l.fip_box_new_sym
         } else {
@@ -1827,7 +1830,8 @@ fn free_walk(inout l: L, id: u64, inout out: ChunkSeq[u64]) {
         || kind == X_TRY
         || kind == X_LOOP
         || kind == X_BREAK
-        || kind == X_RETURN {
+        || kind == X_RETURN
+    {
         free_walk(inout l, ex.a, inout out);
     } else if kind == X_UNARY {
         free_walk(inout l, ex.b, inout out);
@@ -2807,7 +2811,8 @@ pub fn lower_all(inout l: L) {
                     && l.ctx.names.mask == prev_name_mask
                     && l.ctx.types.mask == prev_type_mask
                     && l.ctx.types.row_mask == prev_row_mask
-                    && low_perm < low_perm_end {
+                    && low_perm < low_perm_end
+                {
                     let mut placeholder = dummy_low();
                     swap(inout l, inout placeholder);
                     let (rebuilt, next_perm) = rebuild_low(
@@ -2899,7 +2904,8 @@ pub fn lower_all(inout l: L) {
         && l.ctx.names.mask == prev_name_mask
         && l.ctx.types.mask == prev_type_mask
         && l.ctx.types.row_mask == prev_row_mask
-        && low_perm < low_perm_end {
+        && low_perm < low_perm_end
+    {
         let mut placeholder = dummy_low();
         swap(inout l, inout placeholder);
         let (rebuilt, next_perm) = rebuild_low(

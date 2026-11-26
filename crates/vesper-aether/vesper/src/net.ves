@@ -51,7 +51,8 @@ pub fn net_parse_ctrl(in readable: Slice[u8], features: u64, max_pairs: u16) -> 
         return Option::None;
     }
     if net_byte(in readable, 0) != NET_CTRL_MQ
-        || net_byte(in readable, 1) != NET_CTRL_MQ_VQ_PAIRS_SET {
+        || net_byte(in readable, 1) != NET_CTRL_MQ_VQ_PAIRS_SET
+    {
         return Option::None;
     }
     let lo = widen_u32(net_byte(in readable, 2));

@@ -780,7 +780,8 @@ fn write_trailer(
         let mut best: u64 = n;
         for k in 0..n {
             if u8_of(in done, k) == 0
-                && (best == n || at32(in calls.v, k) < at32(in calls.v, best)) {
+                && (best == n || at32(in calls.v, k) < at32(in calls.v, best))
+            {
                 best = k;
             }
         }
@@ -815,7 +816,8 @@ fn write_trailer(
         let mut best: u64 = nbk;
         for k in 0..nbk {
             if u8_of(in bdone, k) == 0
-                && (best == nbk || u64_of(in blocks, k) < u64_of(in blocks, best)) {
+                && (best == nbk || u64_of(in blocks, k) < u64_of(in blocks, best))
+            {
                 best = k;
             }
         }

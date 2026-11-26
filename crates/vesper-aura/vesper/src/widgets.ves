@@ -88,7 +88,8 @@ pub fn patch_destroy(
         || node.has_parent
         || child_count(in s, serial) != 0
         || widget_slot_count(in s, serial) != 0
-        || widget_sub_count(in s, serial) != 0 {
+        || widget_sub_count(in s, serial) != 0
+    {
         return invalid(Invalid::Destroy);
     }
     s.wlive.try_set(i, false);

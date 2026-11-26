@@ -121,7 +121,8 @@ fn ranges_eq(
 ) -> bool {
     if left_end < left_start
         || right_end < right_start
-        || sub(left_end, left_start) != sub(right_end, right_start) {
+        || sub(left_end, left_start) != sub(right_end, right_start)
+    {
         return false;
     }
     for j in 0..sub(left_end, left_start) {
@@ -760,7 +761,8 @@ fn read_definition(
                     in src,
                     key_start,
                     key_end
-                ) {
+                )
+            {
                 known = true;
             }
         }
@@ -882,7 +884,8 @@ fn bind(inout registry: Reg, id: u64, visible_first: u64, visible_len: u64, env:
                     in registry.pool,
                     key_first,
                     add(key_first, key_len)
-                ) {
+                )
+            {
                 let mut message = ChunkSeq::new[u8]();
                 cat(inout message, in "duplicate sugar binding for `");
                 cat_range(inout message, in registry.pool, key_first, add(key_first, key_len));
@@ -930,7 +933,8 @@ fn lookup(
                 in src,
                 key_start,
                 key_end
-            ) {
+            )
+        {
             alias = w64(in registry.heads, add(row, 3)) == 1;
             return w64(in registry.heads, add(row, 2));
         }
@@ -963,7 +967,8 @@ fn author(in state: St, head_start: u64, head_end: u64) -> u64 {
         let hole_first = rg(in state, region, 2);
         for hole in hole_first..add(hole_first, rg(in state, region, 3)) {
             if w64(in state.holes, hole << 1) <= head_start
-                && head_end <= w64(in state.holes, inc(hole << 1)) {
+                && head_end <= w64(in state.holes, inc(hole << 1))
+            {
                 in_hole = true;
             }
         }
@@ -1036,7 +1041,8 @@ fn operator_level(in registry: Reg, def: u64) -> u64 {
         if next == k_question()
             && lexed.kind.len() > 2
             && b8(in lexed.kind, 2) == k_gt()
-            && token_end(in lexed, 1) == w32(in lexed.start, 2) {
+            && token_end(in lexed, 1) == w32(in lexed.start, 2)
+        {
             return 3;
         }
         return 0;
@@ -1051,7 +1057,8 @@ fn operator_level(in registry: Reg, def: u64) -> u64 {
         || next == k_shl()
         || next == k_gt()
         || next == k_ge()
-        || next == k_shr() {
+        || next == k_shr()
+    {
         10
     } else if next == k_pipe() || next == k_pipe_eq() || next == k_or() {
         12
@@ -1063,14 +1070,16 @@ fn operator_level(in registry: Reg, def: u64) -> u64 {
         || next == k_minus()
         || next == k_plus_eq()
         || next == k_minus_eq()
-        || next == k_arrow() {
+        || next == k_arrow()
+    {
         20
     } else if next == k_star()
         || next == k_slash()
         || next == k_percent()
         || next == k_star_eq()
         || next == k_slash_eq()
-        || next == k_percent_eq() {
+        || next == k_percent_eq()
+    {
         22
     } else {
         0
@@ -2101,7 +2110,8 @@ fn expand_call(
         for child in inc(node)..widen_u64(node_info.after) {
             let child_node = node_at(in cst, child);
             if widen_u64(child_node.parent) != node
-                || !(child_node.kind == N_PIPE_EXPR || child_node.kind == N_DOTTED_EXPR) {
+                || !(child_node.kind == N_PIPE_EXPR || child_node.kind == N_DOTTED_EXPR)
+            {
                 continue;
             }
             let op = child_of(in cst, child, N_SUGAR_OPERATOR);
@@ -2138,7 +2148,8 @@ fn expand_call(
                 );
             if (df(in registry, def, 6) == 1 || df(in registry, inner, 6) == 1)
                 && !same_symbol
-                && operator_level(in registry, def) == operator_level(in registry, inner) {
+                && operator_level(in registry, def) == operator_level(in registry, inner)
+            {
                 return step_err(dg_str(
                     in "E0140",
                     in "parenthesize mixed non-associative sugar operators",
@@ -2311,12 +2322,14 @@ fn expand_call(
         if rg(in state, region, 9) == rf(in registry, rule, 6)
             && rg(in state, region, 10) == rf(in registry, rule, 7)
             && rg(in state, region, 0) <= head_start
-            && head_end <= rg(in state, region, 1) {
+            && head_end <= rg(in state, region, 1)
+        {
             let mut in_hole = false;
             let region_hole_first = rg(in state, region, 2);
             for hole in region_hole_first..add(region_hole_first, rg(in state, region, 3)) {
                 if w64(in state.holes, hole << 1) <= head_start
-                    && head_end <= w64(in state.holes, inc(hole << 1)) {
+                    && head_end <= w64(in state.holes, inc(hole << 1))
+                {
                     in_hole = true;
                 }
             }
@@ -2441,7 +2454,8 @@ fn expand_call(
             }
         }
         if ends_with_semi(in invocation, 0, invocation.len())
-            || next_kind != NONE && next_kind != widen_u64(k_r_brace()) {
+            || next_kind != NONE && next_kind != widen_u64(k_r_brace())
+        {
             text.push(59);
         }
     }
@@ -3314,7 +3328,8 @@ fn names_edits(inout names: Names, in state: St, in ast: Ast, inout out: Eds) {
         for binder in 0..binding_count {
             let row = wrapping_mul(binder, 5);
             if same_name(in ast, w64(in names.bindings, row), sym)
-                && copied(in state, w64(in names.bindings, inc(row))) {
+                && copied(in state, w64(in names.bindings, inc(row)))
+            {
                 let binder_scope = w64(in names.bindings, add(row, 3));
                 let mut at = binders.len();
                 loop {
@@ -3323,7 +3338,8 @@ fn names_edits(inout names: Names, in state: St, in ast: Ast, inout out: Eds) {
                             in names.bindings,
                             add(wrapping_mul(w64(in binders, sub(at, 1)), 5), 3)
                         )
-                            <= binder_scope {
+                            <= binder_scope
+                    {
                         break;
                     }
                     at = sub(at, 1);

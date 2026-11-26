@@ -184,7 +184,8 @@ pub fn link_state_same(in a: LinkState, in b: LinkState) -> bool {
     }
     for i in 0..na {
         if at(in a.departures, wrapping_add(a.head, i))
-            != at(in b.departures, wrapping_add(b.head, i)) {
+            != at(in b.departures, wrapping_add(b.head, i))
+        {
             return false;
         }
     }

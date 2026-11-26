@@ -688,13 +688,15 @@ fn step_slice(inout m: Mon, send: bool, peer: u64, in label: Slice[u8], in pty: 
     if send && tag == LTag::Send {
         if m_a(in m, cur) == peer
             && m_sym_eq(in m, m_b(in m, cur), in label)
-            && m_sym_eq(in m, m_c(in m, cur), in pty) {
+            && m_sym_eq(in m, m_c(in m, cur), in pty)
+        {
             found_next = m_d(in m, cur);
         }
     } else if !send && tag == LTag::Recv {
         if m_a(in m, cur) == peer
             && m_sym_eq(in m, m_b(in m, cur), in label)
-            && m_sym_eq(in m, m_c(in m, cur), in pty) {
+            && m_sym_eq(in m, m_c(in m, cur), in pty)
+        {
             found_next = m_d(in m, cur);
         }
     } else if (send && tag == LTag::Select) || (!send && tag == LTag::Offer) {
@@ -735,7 +737,8 @@ fn step_syms(inout m: Mon, send: bool, peer: u64, lsym: u64, psym: u64) -> u64 {
             let n = m_kn(in m, cur);
             for i in 0..n {
                 if m_br(in m, cur, i, Br::Label) == lsym
-                    && m_br(in m, cur, i, Br::Payload) == psym {
+                    && m_br(in m, cur, i, Br::Payload) == psym
+                {
                     found_next = m_br(in m, cur, i, Br::Next);
                     break;
                 }
@@ -892,7 +895,8 @@ pub fn mon_ep_on_frame(
     if f_seq == want {
         setw(inout m.recv_seq, exp_from, inc(want));
         if step_slice(inout m, false, exp_from, in f_label.as_bytes(), in f_pty.as_bytes())
-            != StepErr::Ok {
+            != StepErr::Ok
+        {
             return EpFrameStatus::ProtocolViolation;
         }
         return EpFrameStatus::AcceptedNow;

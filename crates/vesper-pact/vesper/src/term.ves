@@ -349,7 +349,8 @@ pub fn refs(tag: u64) -> u64 {
         || tag == un_mixed()
         || tag == f_node()
         || tag == c_nested()
-        || tag == ce_nosol() {
+        || tag == ce_nosol()
+    {
         if tag == f_node() {
             REF_A | REF_B
         } else {
@@ -524,7 +525,8 @@ pub fn intern_with_kids(inout s: S, tag: u64, a: u64, b: u64, c: u64, from: u64)
             && word_at(in s.fa, m) == a
             && word_at(in s.fb, m) == b
             && word_at(in s.fc, m) == c
-            && word_at(in s.ln, m) == len {
+            && word_at(in s.ln, m) == len
+        {
             let base = word_at(in s.ls, m);
             let mut same = true;
             for j in 0..len {

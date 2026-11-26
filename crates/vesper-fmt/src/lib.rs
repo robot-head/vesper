@@ -588,7 +588,7 @@ impl Line {
                 let concat = document.push(Doc::Concat(std::mem::take(&mut self.docs)))?;
                 document.push(Doc::Group(concat))?
             } else {
-                let node = self.layout(document, 0, self.docs.len(), &self.breaks)?;
+                let node = self.layout(document, 0, self.docs.len(), &self.breaks, None)?;
                 self.docs.clear();
                 self.breaks.clear();
                 node
@@ -597,14 +597,32 @@ impl Line {
         }
         Ok(())
     }
+    /// Flush a control-flow head that can break at its operators or dots,
+    /// with the space before its block's `{`: when the head takes more than
+    /// one line, the `{` goes on a line of its own at the head's indent, like
+    /// rustfmt.
+    fn flush_head(
+        &mut self,
+        document: &mut Document<'_>,
+        out: &mut Vec<DocId>,
+    ) -> Result<(), Error> {
+        let separator = document.push(Doc::SoftLineOrSpace)?;
+        let head = self.layout(document, 0, self.docs.len(), &self.breaks, Some(separator))?;
+        self.docs.clear();
+        self.breaks.clear();
+        out.push(head);
+        Ok(())
+    }
     // Recursion is bounded by the number of precedence levels, independent
-    // of the number of operators in a sequence.
+    // of the number of operators in a sequence. `trail` ends the outermost
+    // group, so it breaks exactly when that group's weakest breaks do.
     fn layout(
         &self,
         document: &mut Document<'_>,
         start: usize,
         end: usize,
         breaks: &[(usize, u8)],
+        trail: Option<DocId>,
     ) -> Result<DocId, Error> {
         let Some(weakest) = breaks.iter().map(|&(_, level)| level).min() else {
             return document.push(Doc::Concat(self.docs[start..end].to_vec()));
@@ -618,15 +636,22 @@ impl Line {
                 continue;
             }
             if operand < offset {
-                let rhs = self.layout(document, operand, offset, &breaks[child_breaks..index])?;
+                let rhs = self.layout(
+                    document,
+                    operand,
+                    offset,
+                    &breaks[child_breaks..index],
+                    None,
+                )?;
                 segments.push(nest_continuation(document, lead, rhs)?);
             }
             lead = Some(self.docs[offset]);
             operand = offset + 1;
             child_breaks = index + 1;
         }
-        let rhs = self.layout(document, operand, end, &breaks[child_breaks..])?;
+        let rhs = self.layout(document, operand, end, &breaks[child_breaks..], None)?;
         segments.push(nest_continuation(document, lead, rhs)?);
+        segments.extend(trail);
         let concat = document.push(Doc::Concat(segments))?;
         document.push(Doc::Group(concat))
     }
@@ -1309,6 +1334,8 @@ fn sequence<'a>(
         let hugged = hug && is_block && previous.is_none();
         // A branch of a short `if` breaks only with the whole `if`.
         let soft_block = is_block && short_if.is_some();
+        // The block after an `if`, `match`, `for` or `while` head.
+        let after_head = is_block && head;
         if matches!(current.kind, K::If | K::Match)
             || current.kind == K::Lower && matches!(current.text, "for" | "while")
         {
@@ -1430,11 +1457,16 @@ fn sequence<'a>(
             _ => {}
         }
         if is_block && !soft_block {
-            line.flush(document, &mut output)?;
-            line_start = indent;
-            if matches!(spacing, Gap::Soft | Gap::Space) {
-                output.push(document.push(Doc::Text(" "))?);
+            let spaced = matches!(spacing, Gap::Soft | Gap::Space);
+            if spaced && after_head && !line.breaks.is_empty() {
+                line.flush_head(document, &mut output)?;
+            } else {
+                line.flush(document, &mut output)?;
+                if spaced {
+                    output.push(document.push(Doc::Text(" "))?);
+                }
             }
+            line_start = indent;
         }
         if let Some(close) = short_if_close {
             short_if = Some((close, line.docs.len(), line.breaks.len()));

@@ -10,7 +10,8 @@ fn config_error(c: UmemConfig) -> Option[u32] {
     }
     if !is_power_of_two(c.frame_size)
         || c.frame_size < MIN_FRAME_SIZE
-        || c.frame_size > MAX_FRAME_SIZE {
+        || c.frame_size > MAX_FRAME_SIZE
+    {
         return Option::Some(1);
     }
     if c.headroom > c.frame_size || wrapping_sub(c.frame_size, c.headroom) < MIN_FRAME_PAYLOAD {
@@ -19,7 +20,8 @@ fn config_error(c: UmemConfig) -> Option[u32] {
     if !ring_size_ok(c.fill_size)
         || !ring_size_ok(c.rx_size)
         || !ring_size_ok(c.tx_size)
-        || !ring_size_ok(c.completion_size) {
+        || !ring_size_ok(c.completion_size)
+    {
         return Option::Some(3);
     }
     if c.fill_size < c.frame_count {

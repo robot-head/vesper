@@ -342,7 +342,8 @@ test {
         if tree.lcount.len() < 3
             || tree.lkeys.len() != wrapping_mul(tree.lcount.len(), 16)
             || tree.ikeys.len() != wrapping_mul(tree.icount.len(), 16)
-            || tree.ikids.len() != wrapping_mul(tree.icount.len(), 17) {
+            || tree.ikids.len() != wrapping_mul(tree.icount.len(), 17)
+        {
             return false;
         }
         let mut leaf = tree.cursor_first().leaf;

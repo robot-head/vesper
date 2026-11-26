@@ -233,7 +233,8 @@ fn is_libm(in names: Names, sym: u64) -> bool {
     let len = names.size(name_id);
     if len > 0
         && names.byte(name_id, wrapping_sub(len, 1)) == 102
-        && libm_name(in names, sym, wrapping_sub(len, 1)) {
+        && libm_name(in names, sym, wrapping_sub(len, 1))
+    {
         return true;
     }
     libm_name(in names, sym, len)
@@ -271,7 +272,8 @@ fn check_fma_and_calls(
                         raw_finding(inout ctx, func_name, true, k, "detfloat.fma", message_at);
                         skip = true;
                     } else if is_fma_libcall(in ctx.names, lib)
-                        || is_rounding_libcall(in ctx.names, lib) {
+                        || is_rounding_libcall(in ctx.names, lib)
+                    {
                         skip = true;
                     }
                 }
@@ -468,7 +470,8 @@ fn lane_tree_compute(in ctx: Cx, func: u64, inout lane_trees: Lt, v: u64) -> u64
         let right_mask = g(in lane_trees.rows, wrapping_add(right_row, 2));
         if g(in lane_trees.rows, left_row) != g(in lane_trees.rows, right_row)
             || !same
-            || left_mask & right_mask != 0 {
+            || left_mask & right_mask != 0
+        {
             return NONE;
         }
         let shape = node(
@@ -510,7 +513,8 @@ fn check_reductions(inout ctx: Cx, func: u64, sequential_order: bool, fname: u64
                     full_mask = wrapping_sub(wrapping_shl_u64(1, wrapping_u32(lane_count)), 1);
                 }
                 if lane_count >= 2
-                    && g(in lane_trees.rows, wrapping_add(tree_row, 2)) == full_mask {
+                    && g(in lane_trees.rows, wrapping_add(tree_row, 2)) == full_mask
+                {
                     let mut expected = 0;
                     if sequential_order {
                         expected = sequential(inout lane_trees.shapes, lane_count);

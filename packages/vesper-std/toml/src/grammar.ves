@@ -2329,7 +2329,8 @@ fn keyval(in s: Slice[u8], inout p: P) -> bool {
 fn document(in s: Slice[u8], inout p: P) -> bool {
     if byte_at(in s, 0) == UTF8_BOM_FIRST
         && byte_at(in s, 1) == UTF8_BOM_SECOND
-        && byte_at(in s, 2) == UTF8_BOM_THIRD {
+        && byte_at(in s, 2) == UTF8_BOM_THIRD
+    {
         p.pos = UTF8_BOM_BYTES;
     }
     ws(in s, inout p);

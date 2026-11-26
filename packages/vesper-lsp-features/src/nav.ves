@@ -1098,7 +1098,8 @@ pub fn put_error(inout o: ChunkSeq[u8], code: u64, span_err: SpanError) {
     if code == ERR_INVALID_SPAN
         || code == ERR_SOURCE_MISMATCH
         || code == ERR_INVALID_LIMITS
-        || code == ERR_NONE {
+        || code == ERR_NONE
+    {
         put(inout o, in "{\"code\":-32603,\"message\":\"navigation: ");
         if code == ERR_SOURCE_MISMATCH {
             put(inout o, in "SourceMismatch");

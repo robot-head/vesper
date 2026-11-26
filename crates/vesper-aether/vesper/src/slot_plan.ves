@@ -103,11 +103,13 @@ fn region_error(r: PlannedRegion, limits: KvmHostLimits) -> Option[SlotError] {
     }
     if !aligned_4k(r.guest_phys_addr)
         || !aligned_4k(r.userspace_addr)
-        || !aligned_4k(r.memory_size) {
+        || !aligned_4k(r.memory_size)
+    {
         return Option::Some(SlotError::Unaligned { slot: slot });
     }
     if add_overflows(r.guest_phys_addr, r.memory_size)
-        || add_overflows(r.userspace_addr, r.memory_size) {
+        || add_overflows(r.userspace_addr, r.memory_size)
+    {
         return Option::Some(SlotError::Overflow { slot: slot });
     }
     if r.userspace_addr == 0 {

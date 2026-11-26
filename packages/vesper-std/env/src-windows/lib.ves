@@ -210,7 +210,8 @@ fn parse_cmdline(
                     } else {
                         if in_quotes
                             && wrapping_add(i, 1) < n
-                            && u16_at(in cmd, wrapping_add(i, 1)) == 34 {
+                            && u16_at(in cmd, wrapping_add(i, 1)) == 34
+                        {
                             if collect {
                                 out.push(34);
                             }
