@@ -33,8 +33,8 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // source.rs draws: replayed values are no longer clamped to the bound.
     (
-        "            value: min_u64(replay, max)\n",
-        "            value: replay\n",
+        "value: min_u64(replay, max) }",
+        "value: replay }",
     ),
     // tape.rs text: hex digits a-f are written one letter off.
     (
