@@ -18,15 +18,11 @@
 // `(disjoint p q)`).
 
 use self::util::{
-    at32,
-    at8,
-    ati,
-    at64,
-    filled32,
-    inc,
+    filled_u32,
+    i64_at,
     mix,
-    n32,
-    w
+    u32_at,
+    u8_at
 };
 
 const NONE: u32 = 4294967295;
@@ -93,7 +89,7 @@ pub struct Rules {
 pub fn rules_new(in arity: ChunkSeq[u8]) -> Rules {
     let mut a: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](arity.len());
     for i in 0..arity.len() {
-        a.push(at8(in arity, i));
+        a.push(u8_at(in arity, i));
     }
     Rules {
         p_kind: ChunkSeq::new[u8](),
@@ -122,7 +118,7 @@ pub fn rules_new(in arity: ChunkSeq[u8]) -> Rules {
         side: 0,
         rel_a: ChunkSeq::new[i64](),
         rel_b: ChunkSeq::new[i64](),
-        rel_slots: filled32(64, 0),
+        rel_slots: filled_u32(64, 0),
         rel_mask: 63
     }
 }
@@ -135,7 +131,7 @@ impl Rules {
     // ------------------------------------------------------------ building
 
     fn push_node(inout self, kind: u8, a: u32, dmode: u8, dval: i64, c0: u32, c1: u32) -> u32 {
-        let id = n32(self.p_kind.len());
+        let id = wrapping_u32(self.p_kind.len());
         self.p_kind.push(kind);
         self.p_a.push(a);
         self.p_dmode.push(dmode);
@@ -147,13 +143,13 @@ impl Rules {
 
     // Starts a pattern (a rule's left or right side).
     pub fn begin(inout self) {
-        self.side = n32(self.p_kind.len());
+        self.side = wrapping_u32(self.p_kind.len());
     }
 
     // Ends the pattern begun last; returns its (start, length).
     pub fn end(inout self) -> (u32, u32) {
         let s = self.side;
-        (s, wrapping_sub(n32(self.p_kind.len()), s))
+        (s, wrapping_sub(wrapping_u32(self.p_kind.len()), s))
     }
 
     // Class variable `v` (0 is `?x`, 1 `?y`, ...).
@@ -184,15 +180,15 @@ impl Rules {
         self.g1.push(g1);
         let mut nv: u32 = 0;
         let mut nd: u32 = 0;
-        for i in 0..w(ll) {
-            let k = wrapping_add(w(ls), i);
-            let a = at32(in self.p_a, k);
-            if at8(in self.p_kind, k) == P_VAR {
+        for i in 0..widen_u64(ll) {
+            let k = wrapping_add(widen_u64(ls), i);
+            let a = u32_at(in self.p_a, k);
+            if u8_at(in self.p_kind, k) == P_VAR {
                 if a >= nv {
                     nv = wrapping_add(a, 1);
                 }
-            } else if at8(in self.p_dmode, k) == D_VAR {
-                let d = wrapping_u32(ati(in self.p_dval, k));
+            } else if u8_at(in self.p_dmode, k) == D_VAR {
+                let d = wrapping_u32(i64_at(in self.p_dval, k));
                 if d >= nd {
                     nd = wrapping_add(d, 1);
                 }
@@ -209,15 +205,15 @@ impl Rules {
         let h = mix(0, a, wrapping_u32(wrapping_u64(b)), wrapping_u32(wrapping_u64(b) >> 32));
         let mut at = h & self.rel_mask;
         loop {
-            let s = at32(in self.rel_slots, at);
+            let s = u32_at(in self.rel_slots, at);
             if s == 0 {
                 return (at, false);
             }
-            let k = w(wrapping_sub(s, 1));
-            if ati(in self.rel_a, k) == a && ati(in self.rel_b, k) == b {
+            let k = widen_u64(wrapping_sub(s, 1));
+            if i64_at(in self.rel_a, k) == a && i64_at(in self.rel_b, k) == b {
                 return (at, true);
             }
-            at = inc(at) & self.rel_mask;
+            at = wrapping_add(at, 1) & self.rel_mask;
         }
     }
 
@@ -235,14 +231,14 @@ impl Rules {
         let k = self.rel_a.len();
         self.rel_a.push(a);
         self.rel_b.push(b);
-        self.rel_slots.try_set(at, n32(inc(k)));
-        if wrapping_mul(inc(k), 2) > self.rel_mask {
+        self.rel_slots.try_set(at, wrapping_u32(wrapping_add(k, 1)));
+        if wrapping_mul(wrapping_add(k, 1), 2) > self.rel_mask {
             let cap = wrapping_mul(wrapping_add(self.rel_mask, 1), 2);
             let mask = wrapping_sub(cap, 1);
-            let mut slots = filled32(cap, 0);
+            let mut slots = filled_u32(cap, 0);
             for j in 0..self.rel_a.len() {
-                let x = ati(in self.rel_a, j);
-                let y = ati(in self.rel_b, j);
+                let x = i64_at(in self.rel_a, j);
+                let y = i64_at(in self.rel_b, j);
                 let h = mix(
                     0,
                     x,
@@ -251,12 +247,12 @@ impl Rules {
                 );
                 let mut p = h & mask;
                 loop {
-                    if at32(in slots, p) == 0 {
+                    if u32_at(in slots, p) == 0 {
                         break;
                     }
-                    p = inc(p) & mask;
+                    p = wrapping_add(p, 1) & mask;
                 }
-                slots.try_set(p, n32(inc(j)));
+                slots.try_set(p, wrapping_u32(wrapping_add(j, 1)));
             }
             self.rel_slots = slots;
             self.rel_mask = mask;
@@ -270,27 +266,29 @@ impl Rules {
     // `subtree_size`).
     fn free_and_size(in self, k: u32, in bound: ChunkSeq[u32], inout seen: ChunkSeq[u8])
         -> (u64, u64) {
-        if at8(in self.p_kind, w(k)) == P_VAR {
-            let v = w(at32(in self.p_a, w(k)));
-            if at8(in seen, v) != 0 {
+        if u8_at(in self.p_kind, widen_u64(k)) == P_VAR {
+            let v = widen_u64(u32_at(in self.p_a, widen_u64(k)));
+            if u8_at(in seen, v) != 0 {
                 return (0, 0);
             }
             seen.try_set(v, 1);
-            if at32(in bound, v) == NONE {
+            if u32_at(in bound, v) == NONE {
                 return (1, 0);
             }
             return (0, 0);
         }
-        let a = at8(in self.arity, w(at32(in self.p_a, w(k))));
+        let a = u8_at(in self.arity, widen_u64(u32_at(in self.p_a, widen_u64(k))));
         let mut free: u64 = 0;
         let mut size: u64 = 1;
         if a >= 1 {
-            let (f, s) = self.free_and_size(at32(in self.p_c0, w(k)), in bound, inout seen);
+            let (f, s) = self
+                .free_and_size(u32_at(in self.p_c0, widen_u64(k)), in bound, inout seen);
             free = wrapping_add(free, f);
             size = wrapping_add(size, s);
         }
         if a >= 2 {
-            let (f, s) = self.free_and_size(at32(in self.p_c1, w(k)), in bound, inout seen);
+            let (f, s) = self
+                .free_and_size(u32_at(in self.p_c1, widen_u64(k)), in bound, inout seen);
             free = wrapping_add(free, f);
             size = wrapping_add(size, s);
         }
@@ -313,17 +311,17 @@ impl Rules {
     // egg breaks ties by hash order, here the last added wins. No rule of
     // either optimizer has two pending nodes at once.
     fn compile(inout self, start: u32, len: u32, nv: u32, nd: u32) {
-        let first = n32(self.code.len() / 6);
-        let mut bound = filled32(w(nv), NONE);
-        let mut dbound: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](w(nd));
-        dbound.resize(w(nd), 0);
+        let first = wrapping_u32(self.code.len() / 6);
+        let mut bound = filled_u32(widen_u64(nv), NONE);
+        let mut dbound: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](widen_u64(nd));
+        dbound.resize(widen_u64(nd), 0);
         let mut todo_node: ChunkSeq[u32] = ChunkSeq::new[u32]();
         let mut todo_reg: ChunkSeq[u32] = ChunkSeq::new[u32]();
         let root = wrapping_sub(wrapping_add(start, len), 1);
         let mut next_out: u32 = 1;
         // add_todo(root, reg 0)
-        if at8(in self.p_kind, w(root)) == P_VAR {
-            bound.try_set(w(at32(in self.p_a, w(root))), 0);
+        if u8_at(in self.p_kind, widen_u64(root)) == P_VAR {
+            bound.try_set(widen_u64(u32_at(in self.p_a, widen_u64(root))), 0);
         } else {
             todo_node.push(root);
             todo_reg.push(0);
@@ -339,9 +337,9 @@ impl Rules {
             let mut best_free: u64 = 0;
             let mut best_size: u64 = 0;
             for t in 0..n {
-                let mut seen: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](w(nv));
-                seen.resize(w(nv), 0);
-                let (f, s) = self.free_and_size(at32(in todo_node, t), in bound, inout seen);
+                let mut seen: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](widen_u64(nv));
+                seen.resize(widen_u64(nv), 0);
+                let (f, s) = self.free_and_size(u32_at(in todo_node, t), in bound, inout seen);
                 let g = f == 0;
                 let better = if t == 0 {
                     true
@@ -359,25 +357,25 @@ impl Rules {
                     best_size = s;
                 }
             }
-            let k = at32(in todo_node, best);
-            let reg = at32(in todo_reg, best);
+            let k = u32_at(in todo_node, best);
+            let reg = u32_at(in todo_reg, best);
             let last = wrapping_sub(n, 1);
-            todo_node.try_set(best, at32(in todo_node, last));
-            todo_reg.try_set(best, at32(in todo_reg, last));
+            todo_node.try_set(best, u32_at(in todo_node, last));
+            todo_reg.try_set(best, u32_at(in todo_reg, last));
             todo_node.truncate(last);
             todo_reg.truncate(last);
-            let op = at32(in self.p_a, w(k));
-            let a = at8(in self.arity, w(op));
+            let op = u32_at(in self.p_a, widen_u64(k));
+            let a = u8_at(in self.arity, widen_u64(op));
             let out = next_out;
             next_out = wrapping_add(next_out, widen_u32(a));
             let mut dmode = B_CONST;
             let mut dix: u32 = 0;
-            let data = ati(in self.p_dval, w(k));
-            if at8(in self.p_dmode, w(k)) == D_VAR {
+            let data = i64_at(in self.p_dval, widen_u64(k));
+            if u8_at(in self.p_dmode, widen_u64(k)) == D_VAR {
                 dix = wrapping_u32(data);
-                if at8(in dbound, w(dix)) == 0 {
+                if u8_at(in dbound, widen_u64(dix)) == 0 {
                     dmode = B_BIND;
-                    dbound.try_set(w(dix), 1);
+                    dbound.try_set(widen_u64(dix), 1);
                 } else {
                     dmode = B_SAME;
                 }
@@ -385,14 +383,14 @@ impl Rules {
             self.emit(I_BIND, reg, out, op, dmode, dix, data);
             for c in 0..widen_u64(a) {
                 let child = if c == 0 {
-                    at32(in self.p_c0, w(k))
+                    u32_at(in self.p_c0, widen_u64(k))
                 } else {
-                    at32(in self.p_c1, w(k))
+                    u32_at(in self.p_c1, widen_u64(k))
                 };
-                let creg = wrapping_add(out, n32(c));
-                if at8(in self.p_kind, w(child)) == P_VAR {
-                    let v = w(at32(in self.p_a, w(child)));
-                    let j = at32(in bound, v);
+                let creg = wrapping_add(out, wrapping_u32(c));
+                if u8_at(in self.p_kind, widen_u64(child)) == P_VAR {
+                    let v = widen_u64(u32_at(in self.p_a, widen_u64(child)));
+                    let j = u32_at(in bound, v);
                     if j == NONE {
                         bound.try_set(v, creg);
                     } else {
@@ -404,12 +402,12 @@ impl Rules {
                 }
             }
         }
-        let count = wrapping_sub(n32(self.code.len() / 6), first);
+        let count = wrapping_sub(wrapping_u32(self.code.len() / 6), first);
         self.prog_start.push(first);
         self.prog_len.push(count);
-        self.vreg_start.push(n32(self.vreg.len()));
-        for v in 0..w(nv) {
-            self.vreg.push(at32(in bound, v));
+        self.vreg_start.push(wrapping_u32(self.vreg.len()));
+        for v in 0..widen_u64(nv) {
+            self.vreg.push(u32_at(in bound, v));
         }
         self.nregs.push(next_out);
     }
@@ -417,49 +415,49 @@ impl Rules {
     // ------------------------------------------------------------ reads
 
     pub fn nvars_of(in self, r: u64) -> u64 {
-        w(at32(in self.nvars, r))
+        widen_u64(u32_at(in self.nvars, r))
     }
 
     pub fn ndvars_of(in self, r: u64) -> u64 {
-        w(at32(in self.ndvars, r))
+        widen_u64(u32_at(in self.ndvars, r))
     }
 
     pub fn nregs_of(in self, r: u64) -> u64 {
-        w(at32(in self.nregs, r))
+        widen_u64(u32_at(in self.nregs, r))
     }
 
     pub fn var_reg(in self, r: u64, v: u64) -> u64 {
-        w(at32(in self.vreg, wrapping_add(w(at32(in self.vreg_start, r)), v)))
+        widen_u64(u32_at(in self.vreg, wrapping_add(widen_u64(u32_at(in self.vreg_start, r)), v)))
     }
 
     pub fn prog(in self, r: u64) -> (u64, u64) {
-        (w(at32(in self.prog_start, r)), w(at32(in self.prog_len, r)))
+        (widen_u64(u32_at(in self.prog_start, r)), widen_u64(u32_at(in self.prog_len, r)))
     }
 
     pub fn instr(in self, pc: u64, f: u64) -> u32 {
-        at32(in self.code, wrapping_add(wrapping_mul(pc, 6), f))
+        u32_at(in self.code, wrapping_add(wrapping_mul(pc, 6), f))
     }
 
     pub fn instr_data(in self, pc: u64) -> i64 {
-        ati(in self.code_data, pc)
+        i64_at(in self.code_data, pc)
     }
 
     pub fn rhs(in self, r: u64) -> (u64, u64) {
-        (w(at32(in self.rhs_start, r)), w(at32(in self.rhs_len, r)))
+        (widen_u64(u32_at(in self.rhs_start, r)), widen_u64(u32_at(in self.rhs_len, r)))
     }
 
     pub fn guard_of(in self, r: u64) -> (u8, u32, u32) {
-        (at8(in self.guard, r), at32(in self.g0, r), at32(in self.g1, r))
+        (u8_at(in self.guard, r), u32_at(in self.g0, r), u32_at(in self.g1, r))
     }
 
     pub fn pnode(in self, k: u64) -> (u8, u32, u8, i64, u32, u32) {
         (
-            at8(in self.p_kind, k),
-            at32(in self.p_a, k),
-            at8(in self.p_dmode, k),
-            ati(in self.p_dval, k),
-            at32(in self.p_c0, k),
-            at32(in self.p_c1, k)
+            u8_at(in self.p_kind, k),
+            u32_at(in self.p_a, k),
+            u8_at(in self.p_dmode, k),
+            i64_at(in self.p_dval, k),
+            u32_at(in self.p_c0, k),
+            u32_at(in self.p_c1, k)
         )
     }
 }
