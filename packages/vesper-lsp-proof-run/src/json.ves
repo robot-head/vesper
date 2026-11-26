@@ -15,7 +15,7 @@ use @vesper-std/bytes::ascii::{
     LOWER_R, LOWER_T, LOWER_U, NEWLINE, OPEN_BRACE, OPEN_BRACKET, PLUS, QUOTE, SLASH, SPACE, TAB,
     UPPER_A, UPPER_E, UPPER_F
 };
-use self::numbers::{number_out_of_range, U64_MAX_TENTH, U64_MAX_LAST_DIGIT};
+use @vesper/lsp::{U64_MAX_LAST_DIGIT, U64_MAX_TENTH, number_out_of_range};
 
 pub const NULL: u8 = 0;
 pub const BOOL: u8 = 1;
