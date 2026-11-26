@@ -1,0 +1,235 @@
+// The Vesper Anvil code actions of `vesper lsp`
+// (src/lsp/anvil_actions.rs `anvil_code_actions`) in Vesper: a command
+// action that runs one `@test` function, and, with a failing property's
+// arguments, a quickfix that pins them as `@test_case(..)` above it.
+//
+// The actions are written as serde_json writes `json!` maps: keys sorted.
+use self::json::{byte, put, put_string, put_u64};
+
+// `ANVIL_RUN_COMMAND` and `CODE_ACTION_SCHEMA`.
+const ANVIL_RUN_COMMAND: Str = "vesper.anvilRun";
+const CODE_ACTION_SCHEMA: Str = "vesper.code-action/1";
+const RUN_TITLE: Str = "Run `@test` in Vesper Anvil";
+const PIN_TITLE: Str = "Pin counterexample as `@test_case(...)`";
+const PIN_PREFIX: Str = "@test_case(";
+const PIN_SUFFIX: Str = ")\n";
+
+const TAB: u8 = 9;
+const NEWLINE: u8 = 10;
+const SPACE: u8 = 32;
+const OPEN_BRACKET: u8 = 91;
+const CLOSE_BRACKET: u8 = 93;
+const COMMA: u8 = 44;
+const CLOSE_BRACE: u8 = 125;
+// A UTF-8 continuation byte is `0b10xx_xxxx`: these top two bits, `0b10`.
+const UTF8_CONTINUATION_MASK: u8 = 192;
+const UTF8_CONTINUATION: u8 = 128;
+// The lead byte bounds of two-, three- and four-byte sequences, and the
+// payload masks of a lead and a continuation byte.
+const ASCII_END: u64 = 128;
+const THREE_BYTE_LEAD: u64 = 224;
+const FOUR_BYTE_LEAD: u64 = 240;
+const TWO_BYTE_PAYLOAD: u64 = 31;
+const THREE_BYTE_PAYLOAD: u64 = 15;
+const FOUR_BYTE_PAYLOAD: u64 = 7;
+const CONTINUATION_PAYLOAD: u64 = 63;
+const CONTINUATION_BITS: u32 = 6;
+
+// The scalar value starting at `i` of valid UTF-8 and its length.
+fn decode(in bytes: Slice[u8], i: u64, inout len: u64) -> u64 {
+    let lead = widen_u64(byte(in bytes, i));
+    if lead < ASCII_END {
+        len = 1;
+        return lead;
+    }
+    let x1 = widen_u64(byte(in bytes, wrapping_add(i, 1))) & CONTINUATION_PAYLOAD;
+    if lead < THREE_BYTE_LEAD {
+        len = 2;
+        return wrapping_shl_u64(lead & TWO_BYTE_PAYLOAD, CONTINUATION_BITS) | x1;
+    }
+    let x2 = widen_u64(byte(in bytes, wrapping_add(i, 2))) & CONTINUATION_PAYLOAD;
+    if lead < FOUR_BYTE_LEAD {
+        len = 3;
+        return wrapping_shl_u64(lead & THREE_BYTE_PAYLOAD, wrapping_mul(CONTINUATION_BITS, 2))
+            | wrapping_shl_u64(x1, CONTINUATION_BITS)
+            | x2;
+    }
+    let x3 = widen_u64(byte(in bytes, wrapping_add(i, 3))) & CONTINUATION_PAYLOAD;
+    len = 4;
+    wrapping_shl_u64(lead & FOUR_BYTE_PAYLOAD, wrapping_mul(CONTINUATION_BITS, 3))
+        | wrapping_shl_u64(x1, wrapping_mul(CONTINUATION_BITS, 2))
+        | wrapping_shl_u64(x2, CONTINUATION_BITS)
+        | x3
+}
+
+// `char::is_whitespace` (Unicode `White_Space`): U+0009..U+000D, space,
+// NEL, NBSP, OGHAM SPACE MARK, U+2000..U+200A, the line and paragraph
+// separators, NNBSP, MMSP and the ideographic space.
+const WS_CONTROL_START: u64 = 9;
+const WS_CONTROL_END: u64 = 13;
+const WS_SPACE: u64 = 32;
+const WS_NEXT_LINE: u64 = 133;
+const WS_NO_BREAK: u64 = 160;
+const WS_OGHAM: u64 = 5760;
+const WS_EN_QUAD: u64 = 8192;
+const WS_HAIR: u64 = 8202;
+const WS_LINE_SEPARATOR: u64 = 8232;
+const WS_PARAGRAPH_SEPARATOR: u64 = 8233;
+const WS_NARROW_NO_BREAK: u64 = 8239;
+const WS_MEDIUM_MATH: u64 = 8287;
+const WS_IDEOGRAPHIC: u64 = 12288;
+
+fn white(c: u64) -> bool {
+    (c >= WS_CONTROL_START && c <= WS_CONTROL_END)
+        || c == WS_SPACE
+        || c == WS_NEXT_LINE
+        || c == WS_NO_BREAK
+        || c == WS_OGHAM
+        || (c >= WS_EN_QUAD && c <= WS_HAIR)
+        || c == WS_LINE_SEPARATOR
+        || c == WS_PARAGRAPH_SEPARATOR
+        || c == WS_NARROW_NO_BREAK
+        || c == WS_MEDIUM_MATH
+        || c == WS_IDEOGRAPHIC
+}
+
+// Narrow `bytes[start..end]` (valid UTF-8) to its `str::trim`.
+fn trim(in bytes: Slice[u8], inout start: u64, inout end: u64) {
+    loop {
+        if start >= end {
+            break;
+        }
+        let mut len: u64 = 0;
+        let scalar = decode(in bytes, start, inout len);
+        if !white(scalar) {
+            break;
+        }
+        start = wrapping_add(start, len);
+    }
+    loop {
+        if end <= start {
+            break;
+        }
+        let mut last_start = wrapping_sub(end, 1);
+        loop {
+            if last_start <= start
+                || (byte(in bytes, last_start) & UTF8_CONTINUATION_MASK) != UTF8_CONTINUATION
+            {
+                break;
+            }
+            last_start = wrapping_sub(last_start, 1);
+        }
+        let mut len: u64 = 0;
+        let scalar = decode(in bytes, last_start, inout len);
+        if !white(scalar) {
+            break;
+        }
+        end = last_start;
+    }
+}
+
+// The number of `str::lines` of `src` and the start of line `want` (when
+// it is one of them): every newline ends a line, and text after the last
+// one is a line too.
+fn line_start(in src: Slice[u8], want: u64, inout start: u64) -> u64 {
+    let mut lines: u64 = 0;
+    let mut at: u64 = 0;
+    let n = src.len();
+    loop {
+        if at >= n {
+            break;
+        }
+        if lines == want {
+            start = at;
+        }
+        lines = wrapping_add(lines, 1);
+        let mut i = at;
+        loop {
+            if i >= n || byte(in src, i) == NEWLINE {
+                break;
+            }
+            i = wrapping_add(i, 1);
+        }
+        at = wrapping_add(i, 1);
+    }
+    lines
+}
+
+fn put_tail(inout o: ChunkSeq[u8], in uri: Slice[u8], in name: Slice[u8], line: u64) {
+    put(inout o, in "\"function\":");
+    put_string(inout o, in name);
+    put(inout o, in ",\"line\":");
+    put_u64(inout o, line);
+    put(inout o, in ",\"schema\":");
+    put_string(inout o, in CODE_ACTION_SCHEMA.as_bytes());
+    put(inout o, in ",\"uri\":");
+    put_string(inout o, in uri);
+    o.push(CLOSE_BRACE);
+}
+
+// The actions of `anvil_code_actions(uri, source, fn_name, fn_line,
+// failing_args)` as a JSON array; `args` is read only when `has_args`.
+pub fn anvil_actions(
+    inout o: ChunkSeq[u8],
+    in uri: Slice[u8],
+    in src: Slice[u8],
+    in name: Slice[u8],
+    fn_line: u64,
+    has_args: bool,
+    in args: Slice[u8]
+) {
+    o.truncate(0);
+    o.push(OPEN_BRACKET);
+    put(inout o, in "{\"command\":{\"arguments\":[");
+    put_string(inout o, in uri);
+    o.push(COMMA);
+    put_string(inout o, in name);
+    put(inout o, in "],\"command\":");
+    put_string(inout o, in ANVIL_RUN_COMMAND.as_bytes());
+    put(inout o, in ",\"title\":");
+    put_string(inout o, in RUN_TITLE.as_bytes());
+    put(inout o, in "},\"data\":{\"action\":\"anvil.run\",");
+    put_tail(inout o, in uri, in name, fn_line);
+    put(inout o, in ",\"kind\":\"source\",\"title\":");
+    put_string(inout o, in RUN_TITLE.as_bytes());
+    o.push(CLOSE_BRACE);
+    if has_args {
+        let mut a: u64 = 0;
+        let mut z = args.len();
+        trim(in args, inout a, inout z);
+        let mut start: u64 = 0;
+        let lines = line_start(in src, fn_line, inout start);
+        let insert = if fn_line < lines { fn_line } else { lines };
+        let mut new_text = ChunkSeq::new[u8]();
+        if insert < lines {
+            let mut i = start;
+            loop {
+                let c = byte(in src, i);
+                if i >= src.len() || (c != SPACE && c != TAB) {
+                    break;
+                }
+                new_text.push(c);
+                i = wrapping_add(i, 1);
+            }
+        }
+        put(inout new_text, in PIN_PREFIX);
+        new_text.extend(in args[a..z]);
+        put(inout new_text, in PIN_SUFFIX);
+        put(inout o, in ",{\"data\":{\"action\":\"anvil.pin_test_case\",\"args\":");
+        put_string(inout o, in args[a..z]);
+        o.push(COMMA);
+        put_tail(inout o, in uri, in name, insert);
+        put(inout o, in ",\"edit\":{\"changes\":{");
+        put_string(inout o, in uri);
+        put(inout o, in ":[{\"newText\":");
+        put_string(inout o, in new_text.as_slice());
+        put(inout o, in ",\"range\":{\"end\":{\"character\":0,\"line\":");
+        put_u64(inout o, insert);
+        put(inout o, in "},\"start\":{\"character\":0,\"line\":");
+        put_u64(inout o, insert);
+        put(inout o, in "}}}]}},\"kind\":\"quickfix\",\"title\":");
+        put_string(inout o, in PIN_TITLE.as_bytes());
+        o.push(CLOSE_BRACE);
+    }
+    o.push(CLOSE_BRACKET);
+}
