@@ -60,10 +60,7 @@ fn put(inout s: ChunkSeq[u32], i: u64, x: u32) {
 }
 
 fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 // Whether the DFS has numbered `b` (true past the table, so the walk never
@@ -292,10 +289,7 @@ fn post_order(inout g: Graph, block_count: u64) {
             break;
         }
         let top = wrapping_sub(depth, 1);
-        let enter = match ev_enter.try_get(top) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let enter = ev_enter.try_get(top).unwrap_or(0);
         let blk = u32_at(in ev_block, top);
         ev_enter.truncate(top);
         ev_block.truncate(top);

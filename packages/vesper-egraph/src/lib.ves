@@ -33,10 +33,7 @@ struct Reader {
 
 impl Reader {
     fn word(inout self, in bytes: Slice[u8]) -> u64 {
-        let value = match bytes.try_read_u64_le(self.pos) {
-            Option::Some(value) => value,
-            Option::None => 0,
-        };
+        let value = bytes.try_read_u64_le(self.pos).unwrap_or(0);
         self.pos = wrapping_add(self.pos, 8);
         value
     }

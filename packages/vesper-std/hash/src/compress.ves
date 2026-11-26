@@ -9,10 +9,7 @@
 // debug compiler; see docs/parallel-results/self-host-std-data.md.
 
 fn word(in m: Slice[u32], i: u64) -> u32 {
-    match m.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    m.try_get(i).unwrap_or(0)
 }
 
 // The quarter round on state words `a`, `b`, `c` and `d` of `v`.
