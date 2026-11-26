@@ -54,6 +54,18 @@ const UNSUPPORTED_SIGNATURE: &str = "
 fn narrow(x: f64) -> f64 { x }
 fn main() -> u64 { if narrow(1.0) > 0.0 { 1 } else { 0 } }
 ";
+const INOUT_MEMORY: &str = "
+fn bump(inout n: u64) -> u64 {
+    let old = n;
+    n = wrapping_add(n, 4);
+    old
+}
+fn main() -> u64 {
+    let mut n: u64 = 19;
+    let old = bump(inout n);
+    wrapping_add(old, n)
+}
+";
 
 fn checked(source: &str) -> check::Checked {
     let parsed = parser::parse(source);
@@ -320,12 +332,18 @@ fn paired_call_results_survive_live_registers_and_spills() {
 }
 
 #[test]
-fn direct_calls_preserve_values_and_pass_register_and_stack_arguments() {
+fn direct_calls_preserve_the_abi_across_object_writers() {
     const REGISTER_ARGUMENTS: u64 = 6;
+    const HEADER_WORDS: usize = 2;
+    const RECORD_WORDS: usize = 4;
+    const LOAD: u64 = 23;
+    const STORE_QWORD: u64 = 27;
     static CALLABLE_BLOCKS: AtomicUsize = AtomicUsize::new(0);
     static STACK_LEAF_BLOCKS: AtomicUsize = AtomicUsize::new(0);
+    static MEMORY_LEAF_BLOCKS: AtomicUsize = AtomicUsize::new(0);
     let program = checked(PROGRAM);
     let stack_arguments = checked(STACK_ARGUMENT);
+    let memory = checked(INOUT_MEMORY);
     let unsupported = checked(UNSUPPORTED_SIGNATURE);
     let compile = |checked: &check::Checked| {
         native::object_with_options(&checked.world, "main", None, false)
@@ -334,6 +352,7 @@ fn direct_calls_preserve_values_and_pass_register_and_stack_arguments() {
     };
     let baseline = compile(&program);
     let baseline_stack = compile(&stack_arguments);
+    let baseline_memory = compile(&memory);
     let baseline_unsupported = compile(&unsupported);
     assert!(
         native::machine::install_integer_encoder(|words| {
@@ -346,6 +365,12 @@ fn direct_calls_preserve_values_and_pass_register_and_stack_arguments() {
                 .is_some_and(|count| *count > REGISTER_ARGUMENTS)
             {
                 STACK_LEAF_BLOCKS.fetch_add(1, Relaxed);
+            }
+            let records = words[HEADER_WORDS..].as_chunks::<RECORD_WORDS>().0;
+            if records.iter().any(|record| record[0] == LOAD)
+                && records.iter().any(|record| record[0] == STORE_QWORD)
+            {
+                MEMORY_LEAF_BLOCKS.fetch_add(1, Relaxed);
             }
             Some(code)
         })
@@ -387,6 +412,9 @@ fn direct_calls_preserve_values_and_pass_register_and_stack_arguments() {
     // The division falls back to Cranelift and calls the Vesper-generated
     // wide function. The stack ABI crosses the boundary in both directions.
     assert_ne!(candidate_stack, baseline_stack);
+    let candidate_memory = compile(&memory);
+    assert_eq!(CALLABLE_BLOCKS.load(Relaxed), 5);
+    assert_eq!(MEMORY_LEAF_BLOCKS.load(Relaxed), 1);
     assert!(
         native::elf::install_object_encoder(|words, bytes| {
             let object = binding::x86_64_elf_object(words, bytes);
@@ -396,8 +424,10 @@ fn direct_calls_preserve_values_and_pass_register_and_stack_arguments() {
     );
     let combined = compile(&program);
     let combined_stack = compile(&stack_arguments);
-    assert_eq!(CALLABLE_BLOCKS.load(Relaxed), 8);
+    let combined_memory = compile(&memory);
+    assert_eq!(CALLABLE_BLOCKS.load(Relaxed), 10);
     assert_eq!(STACK_LEAF_BLOCKS.load(Relaxed), 2);
+    assert_eq!(MEMORY_LEAF_BLOCKS.load(Relaxed), 2);
     assert_ne!(
         combined, candidate,
         "the ELF writer should also be selected"
@@ -414,6 +444,9 @@ fn direct_calls_preserve_values_and_pass_register_and_stack_arguments() {
         ("baseline_stack", baseline_stack, 154),
         ("candidate_stack", candidate_stack, 154),
         ("combined_stack", combined_stack, 154),
+        ("baseline_memory", baseline_memory, 42),
+        ("candidate_memory", candidate_memory, 42),
+        ("combined_memory", combined_memory, 42),
     ] {
         let obj = dir.join(format!("{name}.o"));
         let exe = dir.join(name);

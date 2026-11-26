@@ -4,8 +4,8 @@ use cranelift_codegen::{
     entity::SecondaryMap,
     ir::{
         AbiParam, Block, BlockCall, Endianness, ExternalName, Function, Inst, InstructionData,
-        MemFlags, Opcode, StackSlot, StackSlotKind, Type, Value, ValueDef, condcodes::IntCC,
-        immediates::Offset32, types,
+        MemFlags, Opcode, StackSlot, StackSlotKind, TrapCode, Type, Value, ValueDef,
+        condcodes::IntCC, immediates::Offset32, types,
     },
     isa::CallConv,
 };
@@ -176,9 +176,16 @@ struct IntegerBlocks<'a> {
     words: Vec<u64>,
     calls: bool,
     branches: usize,
+    allow_hardware_faults: bool,
 }
 
 impl IntegerBlocks<'_> {
+    fn supports_memory_access(&self, flags: MemFlags) -> bool {
+        flags.notrap()
+            || (self.allow_hardware_faults
+                && flags.trap_code() == Some(TrapCode::HEAP_OUT_OF_BOUNDS))
+    }
+
     fn append(&mut self, op: IntegerOp, operands: [u64; 3]) -> u64 {
         let value = self.arity + (self.words.len() - HEADER_WORDS) / INSTRUCTION_WORDS;
         self.words.push(op as u64);
@@ -340,7 +347,7 @@ impl IntegerBlocks<'_> {
                     self.append(stack_store_op(ty(source))?, [input(source)?, slot, offset]);
                     continue;
                 }
-                if !flags.notrap() {
+                if !self.supports_memory_access(flags) {
                     return None;
                 }
                 let op = store_op(opcode, ty(source))?;
@@ -415,7 +422,7 @@ impl IntegerBlocks<'_> {
                             Some(self.append(IntegerOp::StackLoad, [slot, offset, width]));
                         continue;
                     }
-                    if !flags.notrap() {
+                    if !self.supports_memory_access(flags) {
                         return None;
                     }
                     let (access_width, signed) = match opcode {
@@ -615,10 +622,10 @@ impl IntegerBlocks<'_> {
 /// CallPair writes its low result and the immediately following CallHigh's
 /// slot holds its high result.
 pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
-    integer_program(function).map(|(words, _)| words)
+    integer_program(function, false).map(|(words, _)| words)
 }
 
-fn integer_program(function: &Function) -> Option<(Vec<u64>, bool)> {
+fn integer_program(function: &Function, allow_hardware_faults: bool) -> Option<(Vec<u64>, bool)> {
     let signature = &function.signature;
     let arity = signature.params.len();
     if signature.call_conv != CallConv::SystemV
@@ -655,6 +662,7 @@ fn integer_program(function: &Function) -> Option<(Vec<u64>, bool)> {
         words: vec![0; HEADER_WORDS],
         calls: false,
         branches: 0,
+        allow_hardware_faults,
     };
     for slot in function.sized_stack_slots.values() {
         if slot.kind != StackSlotKind::ExplicitSlot {
@@ -718,7 +726,9 @@ fn encode_integer_block(
     {
         return None;
     }
-    let (words, calls) = integer_program(function)?;
+    // Ordinary native ELF objects use CPU memory faults directly. They carry
+    // no Cranelift trap table, unlike JIT and freestanding emission.
+    let (words, calls) = integer_program(function, true)?;
     if calls {
         let packet = CALL_ENCODER.get()?(&words)?;
         decode_callable(&packet)
