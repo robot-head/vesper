@@ -4,19 +4,8 @@
 // in a GPU's shape; their outputs do not depend on the grouping, so here
 // each kernel is one loop (the radix sort's per-group histograms become one
 // histogram per pass, which scatters to the same positions).
-use self::{
-    SapError
-};
-use self::util::{
-    box_valid,
-    dec,
-    g32,
-    g64,
-    gf,
-    inc,
-    shr_u64,
-    u
-};
+use self::{SapError};
+use self::util::{box_valid, dec, g32, g64, gf, inc, shr_u64, u};
 
 // IEEE 754 binary32: the sign bit and +-infinity.
 const F32_SIGN_BIT: u32 = 0x80000000;

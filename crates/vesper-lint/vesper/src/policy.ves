@@ -2,20 +2,9 @@
 // the lexical and structural preflight, the TOML reader and the policy
 // extraction. lib.ves exports it as `policy_parse`.
 
-use @vesper-std/sort::unstable::{
-    sort
-};
+use @vesper-std/sort::unstable::{sort};
 use self::LintFail;
-use self::util::{
-    fail,
-    at,
-    word,
-    u32_at,
-    inc,
-    cadd,
-    push_text,
-    put
-};
+use self::util::{fail, at, word, u32_at, inc, cadd, push_text, put};
 
 const NONE: u32 = 4294967295;
 const U64_MAX: u64 = 18446744073709551615;

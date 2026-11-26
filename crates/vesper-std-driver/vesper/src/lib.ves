@@ -18,32 +18,11 @@
 // (`[package] vsys` in packages/vesper-std/{fs,process,env}/Loom.toml); the
 // directives above only name the Rust modules of this crate that provide
 // their symbols.
-use @vesper-std/fs::{
-    IoError,
-    read_path,
-    replace_path,
-    metadata_path,
-    kind_file
-};
-use @vesper-std/fs::walk::{
-    walk_path,
-    entry_count,
-    entry_start,
-    entry_end,
-    entry_kind,
-    entry_join
-};
-use @vesper-std/process::{
-    command_path,
-    arg,
-    output
-};
+use @vesper-std/fs::{IoError, read_path, replace_path, metadata_path, kind_file};
+use @vesper-std/fs::walk::{walk_path, entry_count, entry_start, entry_end, entry_kind, entry_join};
+use @vesper-std/process::{command_path, arg, output};
 use @vesper-std/env::var_bytes;
-use @vesper-std/fmt::{
-    write_u64,
-    write_i64,
-    write_hex_u64
-};
+use @vesper-std/fmt::{write_u64, write_i64, write_hex_u64};
 
 fn fnv(in s: Slice[u8]) -> u64 {
     let mut h: u64 = 14695981039346656037;

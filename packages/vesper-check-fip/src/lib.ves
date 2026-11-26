@@ -14,20 +14,10 @@
 // - state.ves: `FipState` as rows.
 // - check.ves: the checks.
 
-use @vesper/check-data::input::{
-    Reader,
-    read_ctx
-};
-use @vesper/check-data::{
-    pack_text
-};
-use self::ast::{
-    read_ast
-};
-use self::check::{
-    Fip,
-    fip_new
-};
+use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/check-data::{pack_text};
+use self::ast::{read_ast};
+use self::check::{Fip, fip_new};
 
 // Every diagnostic of `fip::check_world` as text, one per line: code, span
 // start, span end and message (packed by `pack_text`).

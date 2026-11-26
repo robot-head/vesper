@@ -16,27 +16,10 @@
 // byte pools, regions and edits are fixed-width rows with their holes,
 // places and copies in their own row pools.
 
-use @vesper/ast::{
-    Ast,
-    ConfNode,
-    ImplNode,
-    ItemNode,
-    expr_at,
-    list_at,
-    list_len,
-    none,
-    pat_at
-};
-use @vesper/ast::lower::{
-    lower_source,
-    lower_surface_source_limits
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper/front::{
-    P
-};
+use @vesper/ast::{Ast, ConfNode, ImplNode, ItemNode, expr_at, list_at, list_len, none, pat_at};
+use @vesper/ast::lower::{lower_source, lower_surface_source_limits};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper/front::{P};
 use @vesper/front::lex::{
     lex_sugar_raw_with_limits,
     lex_sugar_with_limits,
@@ -46,13 +29,8 @@ use @vesper/front::lex::{
     token_end,
     trivia_kind
 };
-use @vesper/front::diag::{
-    diags_new
-};
-use @vesper/front::parse::{
-    hard_depth,
-    parse_surface_tokens
-};
+use @vesper/front::diag::{diags_new};
+use @vesper/front::parse::{hard_depth, parse_surface_tokens};
 use @vesper/front::kinds::{
     k_amp,
     k_amp_eq,
@@ -91,27 +69,10 @@ use @vesper/front::kinds::{
     k_state,
     k_with
 };
-use self::flow::{
-    Rd,
-    arg_of,
-    clause_of,
-    fn_of,
-    name_byte,
-    name_len,
-    param_of,
-    render,
-    stmt_of
-};
-use self::hygiene::{
-    pattern_hygiene
-};
-use self::matcher::{
-    captures_tail,
-    match_rule_encoded
-};
-use self::scope::{
-    lower
-};
+use self::flow::{Rd, arg_of, clause_of, fn_of, name_byte, name_len, param_of, render, stmt_of};
+use self::hygiene::{pattern_hygiene};
+use self::matcher::{captures_tail, match_rule_encoded};
+use self::scope::{lower};
 use self::template::{
     Caps,
     add,

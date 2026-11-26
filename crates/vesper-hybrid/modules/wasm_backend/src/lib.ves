@@ -12,12 +12,8 @@
 
 // @export abi 4
 
-use @vesper/wasm-backend::{
-    wasm_backend_compile_bytes
-};
-use @vesper/wit-component::{
-    wit_component_wrap_bytes
-};
+use @vesper/wasm-backend::{wasm_backend_compile_bytes};
+use @vesper/wit-component::{wit_component_wrap_bytes};
 
 // The layout version of `compile_words`; tests/common/wasm_words.rs checks it.
 pub fn format() -> u64 {

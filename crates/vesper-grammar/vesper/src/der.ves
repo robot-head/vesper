@@ -31,25 +31,9 @@
 //
 // Documents cross as six words per node: kind, start, content, end, next
 // (the index after the node's subtree) and depth.
-use self::{
-    GErr,
-    P2
-};
-use self::common::{
-    add_or,
-    fail,
-    fail2,
-    max,
-    mul_or,
-    none,
-    pair,
-    sb,
-    shl,
-    sw
-};
-use self::utf8::{
-    valid_up_to
-};
+use self::{GErr, P2};
+use self::common::{add_or, fail, fail2, max, mul_or, none, pair, sb, shl, sw};
+use self::utf8::{valid_up_to};
 
 // Ceilings `validate_limits` enforces (src/der.rs `MAX_BYTES`, `MAX_NODES`,
 // `MAX_SCHEMA_NODES`, `MAX_DEPTH`, `MAX_WORK`, `MAX_METADATA_BYTES`,

@@ -10,9 +10,7 @@
 
 // @export abi 4
 
-use @vesper/bounds-hoist::pass::{
-    hoist_bytes
-};
+use @vesper/bounds-hoist::pass::{hoist_bytes};
 
 // The layout version of `hoist_words`.
 pub fn format() -> u64 {

@@ -1,8 +1,6 @@
 // Module varint of @vesper/warp (see lib.ves): RFC 9000 §16
 // variable-length integers (varint.rs).
-use self::{
-    VarIntErr
-};
+use self::{VarIntErr};
 
 // RFC 9000 §16: the two high bits of the first byte give the length (1, 2,
 // 4 or 8 bytes) of a 6-, 14-, 30- or 62-bit value.

@@ -2,14 +2,8 @@
 // deterministic order. Entries are sorted by the bytes of their relative
 // path, so two walks of the same tree agree on every platform whatever
 // order the OS lists a directory in.
-use self::{
-    IoError,
-    raise_io,
-    kind_dir
-};
-use self::sys::{
-    os_list
-};
+use self::{IoError, raise_io, kind_dir};
+use self::sys::{os_list};
 
 // A list of paths relative to the listed directory, separated by `/`, in
 // one byte arena: entry `i` is `bytes[start(i)..ends[i]]` (`start(0)` is

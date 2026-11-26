@@ -1,12 +1,8 @@
 // Module report of @vesper/backend-checks (see lib.ves): building the
 // report's text and rows.
 
-use self::input::{
-    Cx
-};
-use self::util::{
-    put
-};
+use self::input::{Cx};
+use self::util::{put};
 
 const RW: u64 = 7;
 

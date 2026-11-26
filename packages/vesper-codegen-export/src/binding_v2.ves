@@ -3,36 +3,11 @@
 // parameters, owned handle types with their views and methods, the
 // runtime, and for v3 the `repr` mirrors.
 
-use @vesper/check-data::util::{
-    inc,
-    u64_at,
-    u8_at,
-    w
-};
-use self::iface::{
-    DeclRow,
-    FnRow,
-    ParamRow,
-    VarRow
-};
-use self::text::{
-    StrSet,
-    copy_of,
-    nl,
-    put,
-    put_seq,
-    put_u64,
-    same,
-    str_set,
-    text
-};
-use self::binding::{
-    Gen,
-    put_ident
-};
-use self::binding_v4::{
-    v4_items
-};
+use @vesper/check-data::util::{inc, u64_at, u8_at, w};
+use self::iface::{DeclRow, FnRow, ParamRow, VarRow};
+use self::text::{StrSet, copy_of, nl, put, put_seq, put_u64, same, str_set, text};
+use self::binding::{Gen, put_ident};
+use self::binding_v4::{v4_items};
 
 // `AbiType` kinds, passing modes and mirrors (iface.ves).
 const K_SCALAR: u8 = 0;

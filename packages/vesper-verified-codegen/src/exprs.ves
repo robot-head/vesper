@@ -5,22 +5,9 @@
 // keeps the spans that name the nested functions, the free names, and a
 // `handle`'s effect, state flag and clause patterns.
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader
-};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::input::{Ctx, Reader};
 
 // Row kinds.
 pub const X_NONE: u8 = 0;

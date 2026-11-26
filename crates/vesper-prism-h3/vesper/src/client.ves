@@ -19,33 +19,13 @@ use self::{
     Huff,
     ClientCore
 };
-use self::int::{
-    inc,
-    sat_sub,
-    word,
-    remove_word
-};
-use self::varint::{
-    put_record
-};
-use self::frame::{
-    data_type,
-    headers_type
-};
-use self::priority::{
-    priority_update_write
-};
-use self::encoder::{
-    enc_encode
-};
-use self::decoder::{
-    dec_decode_section
-};
-use self::message::{
-    HttpStatus,
-    message_parse_response,
-    message_check_trailers
-};
+use self::int::{inc, sat_sub, word, remove_word};
+use self::varint::{put_record};
+use self::frame::{data_type, headers_type};
+use self::priority::{priority_update_write};
+use self::encoder::{enc_encode};
+use self::decoder::{dec_decode_section};
+use self::message::{HttpStatus, message_parse_response, message_check_trailers};
 use self::pool::{
     MODE_HEADER,
     FRAME_NONE,

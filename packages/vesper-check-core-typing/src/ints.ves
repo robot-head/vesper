@@ -3,9 +3,7 @@
 // `numeric::IntegerKind::{fits, default_for}` over that form, including
 // the 128-bit kinds.
 
-use @vesper/check-data::world::{
-    Known
-};
+use @vesper/check-data::world::{Known};
 
 const I64_MAX: u64 = 9223372036854775807;
 

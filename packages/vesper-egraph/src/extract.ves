@@ -12,15 +12,8 @@
 // that starts with the root's children, last child first, each class
 // emitted once all its children are, and the root last.
 
-use self::util::{
-    filled_u32,
-    i64_at,
-    u32_at,
-    u64_at
-};
-use self::graph::{
-    EGraph
-};
+use self::util::{filled_u32, i64_at, u32_at, u64_at};
+use self::graph::{EGraph};
 
 const NONE: u32 = 4294967295;
 const NO_COST: u64 = 18446744073709551615;

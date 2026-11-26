@@ -1,12 +1,5 @@
 // Module parse of @vesper/quarry (see lib.ves).
-use self::{
-    Bind,
-    Q,
-    Raw,
-    Rng,
-    Sel,
-    Tok
-};
+use self::{Bind, Q, Raw, Rng, Sel, Tok};
 use self::util::{
     bound,
     is_lit,

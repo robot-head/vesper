@@ -2,36 +2,12 @@
 // walks of every function, the realtime recursion check over the call
 // graph, and the diagnostics in source order.
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    inc32,
-    n32,
-    push_decimal,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::input::{
-    Ctx
-};
-use @vesper/check-data::world::{
-    set_by_symbol
-};
-use @vesper/check-data::types::{
-    display
-};
-use self::keys::{
-    Keys,
-    Sums,
-    keys_new,
-    pair,
-    sums_new
-};
-use self::prog::{
-    Prog
-};
+use @vesper/check-data::util::{add, inc, inc32, n32, push_decimal, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::input::{Ctx};
+use @vesper/check-data::world::{set_by_symbol};
+use @vesper/check-data::types::{display};
+use self::keys::{Keys, Sums, keys_new, pair, sums_new};
+use self::prog::{Prog};
 use self::walker::{
     DRow,
     Edge,

@@ -8,9 +8,7 @@
 
 // @export abi 4
 
-use @vesper/ebpf-backend::{
-    ebpf_backend_bytes
-};
+use @vesper/ebpf-backend::{ebpf_backend_bytes};
 
 pub fn compile_words(in input: Slice[u8]) -> ChunkSeq[u64] {
     ebpf_backend_bytes(in input)

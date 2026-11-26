@@ -2,21 +2,8 @@
 // pieces of src/claims.rs and src/policy.rs: AegisAttestationClaimsWire
 // decoding (format code 5, ClaimsWire), constant-time comparison and the
 // relying-party policy check verify_attestation_claims.
-use self::{
-    AErr,
-    PErr,
-    Rd
-};
-use self::reader::{
-    arr,
-    byte,
-    finish,
-    rd,
-    rd_u16,
-    rd_u32,
-    unsupported,
-    put
-};
+use self::{AErr, PErr, Rd};
+use self::reader::{arr, byte, finish, rd, rd_u16, rd_u32, unsupported, put};
 
 // src/claims.rs: the wire's architecture tags (TDX 1, SNP 2, CCA 3), the
 // known enclave flags (bits 0..3), field sizes, and format code 5.

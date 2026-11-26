@@ -29,17 +29,7 @@
 //
 // A rejection raises `Fail[VErr]` after writing the rule and the message
 // into `V.rule` and `V.msg`.
-use self::common::{
-    bits,
-    checked_add_i64,
-    max_u64,
-    min_u64,
-    shl,
-    shr,
-    signed,
-    smin_i64,
-    umax
-};
+use self::common::{bits, checked_add_i64, max_u64, min_u64, shl, shr, signed, smin_i64, umax};
 use self::insn::{
     AluOp,
     AtomicOp,
@@ -68,18 +58,10 @@ use self::scalar::{
     scalar_unknown_bits,
     scalar_zext32
 };
-use self::concrete::{
-    endian
-};
-use self::helpers::{
-    allowed
-};
-use self::program::{
-    ProgramType
-};
-use self::callgraph::{
-    check_stack
-};
+use self::concrete::{endian};
+use self::helpers::{allowed};
+use self::program::{ProgramType};
+use self::callgraph::{check_stack};
 
 // Register and slot tags (see above).
 const T_NOT_INIT: u64 = 0;

@@ -10,9 +10,7 @@
 
 // @export abi 4
 
-use @vesper/place-ir::{
-    place_ir_round_trip
-};
+use @vesper/place-ir::{place_ir_round_trip};
 
 // The layout version of `round_trip_words`.
 pub fn format() -> u64 {

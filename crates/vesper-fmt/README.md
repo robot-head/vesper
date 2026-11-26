@@ -19,7 +19,8 @@ The formatter uses a 100-column ribbon. When an expression wraps, it breaks
 at the weakest operator first. For example, each operand of a long `&&` chain
 can keep its member calls and comparisons on one line. Wrapped method calls
 and return types indent their contents relative to the continuation line.
-Delimited lists keep one item per line when they break. A trailing comma
+Delimited lists keep one item per line when they break. A `use` group
+(`use a::{b, c};`) is such a list, so it stays on one line when it fits. A trailing comma
 selects vertical layout even when comments follow it. Paths joined by `::`
 stay together, and an indivisible token can exceed the ribbon.
 

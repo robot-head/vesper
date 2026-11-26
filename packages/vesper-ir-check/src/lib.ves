@@ -18,21 +18,8 @@
 //   (tests/hybrid_ir_check.rs).
 
 use @vesper/check-data::pack_text;
-use @vesper/check-data::util::{
-    add,
-    fold,
-    inc,
-    inc32,
-    n32,
-    push_decimal,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
+use @vesper/check-data::util::{add, fold, inc, inc32, n32, push_decimal, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{
     Types,
     default_type,
@@ -43,28 +30,9 @@ use @vesper/check-data::types::{
     TyMode,
     TyPass
 };
-use @vesper/check-data::world::{
-    Bounds,
-    Known,
-    World,
-    bounds_new,
-    constructor,
-    field_step,
-    mode_of
-};
-use @vesper/check-data::diag::{
-    DiagRow,
-    Diags,
-    RelRow,
-    diags_new
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    ctx_new,
-    extend_ctx,
-    read_ctx
-};
+use @vesper/check-data::world::{Bounds, Known, World, bounds_new, constructor, field_step, mode_of};
+use @vesper/check-data::diag::{DiagRow, Diags, RelRow, diags_new};
+use @vesper/check-data::input::{Ctx, Reader, ctx_new, extend_ctx, read_ctx};
 
 // Constants cannot be imported across modules yet (check-data gap 1); these
 // copies equal check-data's.

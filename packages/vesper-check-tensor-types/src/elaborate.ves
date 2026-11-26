@@ -23,24 +23,8 @@ use @vesper/ast::{
     expr_at,
     type_at
 };
-use @vesper/check-data::util::{
-    push_decimal,
-    add,
-    inc,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use self::state::{
-    St,
-    dim_exp_at,
-    dim_node,
-    dim_var_at,
-    put,
-    put_dim,
-    spells
-};
+use @vesper/check-data::util::{push_decimal, add, inc, u32_at, u64_at, u8_at, w};
+use self::state::{St, dim_exp_at, dim_node, dim_var_at, put, put_dim, spells};
 use self::kinds::{
     Cx,
     at32,

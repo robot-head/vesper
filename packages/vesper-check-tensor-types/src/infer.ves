@@ -1,27 +1,9 @@
 // Shape inference and the static tensor rules (src/tensor_types/infer.rs):
 // signatures, obligations, the body checker and `analyze`.
 
-use @vesper/ast::{
-    Ast,
-    lit_at,
-    list_len,
-    list_at,
-    type_at,
-    expr_at,
-    pat_at
-};
-use @vesper/check-data::util::{
-    push_decimal
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
+use @vesper/ast::{Ast, lit_at, list_len, list_at, type_at, expr_at, pat_at};
+use @vesper/check-data::util::{push_decimal};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, u8_at, w};
 use self::state::{
     St,
     put,

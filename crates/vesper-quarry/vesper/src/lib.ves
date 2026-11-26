@@ -33,34 +33,14 @@
 //     charges them exactly as the Rust executor did).
 
 use self::store_log::record_decode as sl_record_decode;
-use self::util::{
-    ex,
-    lim,
-    raw
-};
-use self::ddl::{
-    ddl_apply_q
-};
-use self::plan::{
-    optimize_q,
-    prepare_q
-};
-use self::entry::{
-    execute_q,
-    set_rows_q
-};
-use self::internal::{
-    check as internal_check_impl,
-    route as internal_route_impl
-};
+use self::util::{ex, lim, raw};
+use self::ddl::{ddl_apply_q};
+use self::plan::{optimize_q, prepare_q};
+use self::entry::{execute_q, set_rows_q};
+use self::internal::{check as internal_check_impl, route as internal_route_impl};
 use self::leaf::check as leaf_check_impl;
-use self::vector::{
-    vaggregate_rows_q,
-    vexecute_q
-};
-use self::paths::{
-    access_paths_q
-};
+use self::vector::{vaggregate_rows_q, vexecute_q};
+use self::paths::{access_paths_q};
 use self::page::{
     insert as page_insert_impl,
     update as page_update_impl,

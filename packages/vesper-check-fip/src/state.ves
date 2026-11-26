@@ -5,16 +5,8 @@
 // order (byte order of the names, as the map iterates) and moved paths are
 // (name, path id) rows over the checker's path table.
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
+use @vesper/check-data::util::{add, inc, n32, u32_at, w};
+use @vesper/check-data::names::{Names};
 
 pub copy struct SlotRow {
     ty: u32,

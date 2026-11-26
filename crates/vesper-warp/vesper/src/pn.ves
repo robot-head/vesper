@@ -1,11 +1,7 @@
 // Module pn of @vesper/warp (see lib.ves): RFC 9000 Appendix A packet
 // number encoding and decoding (packet_number.rs).
-use self::{
-    PnErr
-};
-use self::varint::{
-    b8
-};
+use self::{PnErr};
+use self::varint::{b8};
 
 // RFC 9000 Appendix A.2: an n-byte packet number covers twice the
 // unacknowledged range, so it holds up to 2^(8n-1) unacked packets.

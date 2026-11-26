@@ -1,42 +1,14 @@
 // Dependency loading (`Frontend::add_dependency`) and cross-package trait
 // reference checking for `@vesper/check-pact` (SH2 lane 13 part 8, #1725).
 
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    read_ctx
-};
-use @vesper/check-data::{
-    pack_text
-};
-use @vesper/check-data::util::{
-    add,
-    n32,
-    u32_at,
-    u8_at,
-    w
-};
-use self::decl::{
-    Decls,
-    read_decls,
-    read_traits
-};
-use self::frontend::{
-    Fe,
-    declaration_pass,
-    fe_new
-};
-use self::resolve::{
-    put_bytes
-};
-use self::session_input::{
-    put_str,
-    read_q_names,
-    read_q_types
-};
-use self::tyops::{
-    sy_new
-};
+use @vesper/check-data::input::{Ctx, Reader, read_ctx};
+use @vesper/check-data::{pack_text};
+use @vesper/check-data::util::{add, n32, u32_at, u8_at, w};
+use self::decl::{Decls, read_decls, read_traits};
+use self::frontend::{Fe, declaration_pass, fe_new};
+use self::resolve::{put_bytes};
+use self::session_input::{put_str, read_q_names, read_q_types};
+use self::tyops::{sy_new};
 
 fn padded_len(n: u64) -> u64 {
     wrapping_mul(add(n, 7) / 8, 8)

@@ -3,13 +3,8 @@
 // order, its name, generic names, and per operation its name, parameters
 // (pass, type) and result. The harness world has effect names only.
 
-use @vesper/check-data::input::{
-    Reader
-};
-use @vesper/check-data::util::{
-    n32,
-    u32_at
-};
+use @vesper/check-data::input::{Reader};
+use @vesper/check-data::util::{n32, u32_at};
 
 pub copy struct Effect {
     name: u32,

@@ -11,27 +11,12 @@
 // `template_skeleton_words` against Rust's test hooks of the same names in
 // `vesper_syntax::sugar_expand` on a rule corpus and a fuzzed corpus.
 
-use self::matcher::{
-    match_rule_encoded
-};
-use self::driver::{
-    expand_words
-};
-use self::flow::{
-    Rd,
-    render
-};
-use self::hygiene::{
-    pattern_hygiene
-};
-use self::scope::{
-    lower
-};
-use self::template::{
-    caps_read,
-    skeleton_encoded,
-    skeleton_run
-};
+use self::matcher::{match_rule_encoded};
+use self::driver::{expand_words};
+use self::flow::{Rd, render};
+use self::hygiene::{pattern_hygiene};
+use self::scope::{lower};
+use self::template::{caps_read, skeleton_encoded, skeleton_run};
 
 // `match_rule(pattern, invocation, tail, work)` as words (see
 // matcher.ves `match_rule_encoded`). `text` is the pattern, then the

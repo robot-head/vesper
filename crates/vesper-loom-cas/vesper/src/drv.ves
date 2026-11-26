@@ -10,10 +10,7 @@
 // buffer, in the order builder, builder version, target (when present),
 // option keys and values interleaved, then input names.
 use self::DrvErr;
-use self::name::{
-    is_utf8,
-    has_control
-};
+use self::name::{is_utf8, has_control};
 
 const MAX_LABEL_BYTES: u64 = 4096;
 const MAX_MAP_ENTRIES: u64 = 4096;

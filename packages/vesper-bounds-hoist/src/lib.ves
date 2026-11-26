@@ -25,23 +25,10 @@
 // - rewrite.ves: unchecked accesses, fresh values and the loop copy.
 // - pass.ves: the pass (`bounds_hoist::run`) on place-ir tables.
 
-use self::fun::{
-    Fun,
-    read_fun,
-    u8_at
-};
-use self::plans::{
-    compared_loop_text,
-    compared_text,
-    counted_text,
-    dominated_text,
-    order_text
-};
+use self::fun::{Fun, read_fun, u8_at};
+use self::plans::{compared_loop_text, compared_text, counted_text, dominated_text, order_text};
 use self::pass::hoist_words;
-use self::hoists::{
-    header_hoists_text,
-    stable_views_text
-};
+use self::hoists::{header_hoists_text, stable_views_text};
 
 // The decision of the step the input asks for.
 pub fn decide(in input: Slice[u8]) -> ChunkSeq[u8] {

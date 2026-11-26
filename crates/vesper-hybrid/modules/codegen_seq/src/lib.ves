@@ -5,9 +5,7 @@
 // the lent Cranelift builder. crates/vesper-hybrid installs `seq` as the
 // `seq` hook of `vesper::codegen_swap`; it emits one typed request of
 // `codegen_swap::seq`, and returns 0 to leave it to Rust.
-use @vesper/codegen-seq-emit::{
-    seq_hook
-};
+use @vesper/codegen-seq-emit::{seq_hook};
 
 // One request: `call` is the address of the lent call. Returns 1 when it
 // emitted the request, 0 to leave it to Rust.

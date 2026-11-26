@@ -3,33 +3,12 @@
 // `src/seq.rs`, `src/strings.rs`, `src/tiled.rs`, `src/vector.rs` and
 // `src/ir.rs`.
 
-use @vesper/check-data::input::{
-    Ctx
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    Types,
-    TyKind,
-    TyPass
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    push_decimal,
-    u32_at,
-    u8_at,
-    w
-};
-use self::ast::{
-    Ast,
-    Ex
-};
-use @vesper/place-ir::codes::{
-    Lit
-};
+use @vesper/check-data::input::{Ctx};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{Types, TyKind, TyPass};
+use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, u8_at, w};
+use self::ast::{Ast, Ex};
+use @vesper/place-ir::codes::{Lit};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;

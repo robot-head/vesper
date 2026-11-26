@@ -31,18 +31,10 @@ use @vesper/ast::{
     type_at,
     lit_at
 };
-use @vesper/ast::lower::{
-    lower_source
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
-use @vesper/check-data::util::{
-    push_decimal
-};
+use @vesper/ast::lower::{lower_source};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
+use @vesper/check-data::util::{push_decimal};
 
 const NONE: u32 = 4294967295;
 const NO_TY: u32 = 4294967295;

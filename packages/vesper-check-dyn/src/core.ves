@@ -42,26 +42,11 @@ use @vesper/ast::{
     pat_at,
     type_at
 };
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
-use @vesper/check-data::names::{
-    Names,
-    names_new
-};
-use @vesper/check-data::types::{
-    Types,
-    EffNode,
-    types_new,
-    display
-};
-use @vesper/check-data::diag::{
-    Diags,
-    diags_new
-};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
+use @vesper/check-data::names::{Names, names_new};
+use @vesper/check-data::types::{Types, EffNode, types_new, display};
+use @vesper/check-data::diag::{Diags, diags_new};
 
 const NONE: u32 = 4294967295;
 

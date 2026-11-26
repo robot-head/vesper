@@ -4,29 +4,10 @@
 // twice; a DATA chunk or a HEADERS payload is copied into `out`, which the
 // Rust wrapper reads after each call.
 
-use self::{
-    Settings,
-    FrameError,
-    FrameOut,
-    FrameReaderCore
-};
-use self::int::{
-    inc,
-    min64,
-    max64,
-    word,
-    drain_front
-};
-use self::varint::{
-    vdec,
-    vput,
-    put_record
-};
-use self::priority::{
-    priority_update_request,
-    priority_update_push,
-    priority_update_parse
-};
+use self::{Settings, FrameError, FrameOut, FrameReaderCore};
+use self::int::{inc, min64, max64, word, drain_front};
+use self::varint::{vdec, vput, put_record};
+use self::priority::{priority_update_request, priority_update_push, priority_update_parse};
 
 // SETTINGS identifiers (RFC 9114 §7.2.4.1, RFC 9204 §5, RFC 9220 §3,
 // RFC 9297 §2.1.1, RFC 9218 §2.1 and the WebTransport drafts; src/frame.rs).
