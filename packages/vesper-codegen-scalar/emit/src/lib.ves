@@ -22,12 +22,16 @@ use @vesper/cranelift::{
     ins_iadd, ins_icmp, ins_icmp_imm, ins_iconst, ins_imul, ins_ineg, ins_ireduce, ins_ishl,
     ins_ishl_imm, ins_rotl, ins_rotr, ins_isub, ins_sextend, ins_sshr, ins_srem, ins_smulhi,
     ins_sshr_imm, ins_udiv, ins_uextend, ins_urem, ins_umulhi, ins_ushr, ty_i16, ty_i32, ty_i64,
-    ty_i8, use_var, value_of_word, value_type
+    ty_i8, use_var, value_of_word, value_type, invalid, is_invalid
 };
+use self::body::{emit_body};
 
 // The request protocol (src/codegen_swap.rs): the answer of a hook.
 pub const HANDLED: u64 = 1;
 pub const DECLINED: u64 = 0;
+// The `body` hook's answer to words that are not a body plan, once it may
+// have emitted: an error, not a decline (`body.ves`).
+pub const BODY_ERROR: u64 = 2;
 
 // The plan's requests (@vesper/codegen-scalar keeps the same numbers).
 pub const PLAN_ZERO: u32 = 1;
@@ -148,7 +152,7 @@ fn code(ty: Ty) -> u32 {
 // `Codegen::coerce` of a one-word value to narrow `kind` (0: none): a
 // narrow move on the optimize path, else a mask or a shift pair, and only
 // on an I64 lane.
-fn coerce(
+pub fn coerce(
     inout builder: Builder,
     value: Value,
     kind: u64,
@@ -229,8 +233,7 @@ fn operands(inout builder: Builder, call: u64, n: u64) -> bool eff [Ffi[Cranelif
 // type, defined as the value. The Rust walk names each operand this way
 // before `expr_at` reads it back with `use_var`, and the variables it
 // declares number the ones after them, so the port declares the same.
-fn temp(inout builder: Builder, call: u64, arg_index: u64) -> Var eff [Ffi[Cranelift]] {
-    let value = value_of_word(call_arg(call, arg_index));
+fn temp(inout builder: Builder, value: Value) -> Var eff [Ffi[Cranelift]] {
     let ty = value_type(inout builder, value);
     let var = declare_var(inout builder, ty);
     def_var(inout builder, var, value);
@@ -529,7 +532,55 @@ fn scalar(call: u64, inout builder: Builder) -> u64 eff [Ffi[Cranelift]] {
     let a = call_arg(call, ARG_A);
     let coerce_words = call_arg(call, ARG_B);
     let optimize = call_arg(call, ARG_OPTIMIZE) != 0;
-    let result = if op == PLAN_ZERO {
+    let count = operand_count(op);
+    if count != 0 && !operands(inout builder, call, count) {
+        return DECLINED;
+    }
+    let lhs = if count >= 1 {
+        value_of_word(call_arg(call, ARG_X))
+    } else {
+        Value { id: invalid() }
+    };
+    let rhs = if count == 2 {
+        value_of_word(call_arg(call, ARG_Y))
+    } else {
+        Value { id: invalid() }
+    };
+    let result = planned(inout builder, op, a, coerce_words, optimize, lhs, rhs);
+    if is_invalid(result) {
+        return DECLINED;
+    }
+    call_result_value(call, result);
+    HANDLED
+}
+
+// The operands a planned request reads: two for a comparison, an
+// operator or a shift, one for a unary operator or a conversion.
+fn operand_count(op: u32) -> u64 {
+    if op == PLAN_ICMP || op == PLAN_BINOP || op == PLAN_SHIFT {
+        2
+    } else if op == PLAN_BNOT || op == PLAN_NOT || op == PLAN_INEG || op == PLAN_CONVERT {
+        1
+    } else {
+        0
+    }
+}
+
+// The planned request `op` with immediates `a` and `coerce_words` on
+// operand values `lhs0` and `rhs0` (as many as `operand_count`), as
+// `expr_at` emits it: each operand named by a temporary
+// (`Codegen::ir_temp`) and read back, then the arm and its `coerce`. An
+// invalid value when `op` is no request.
+pub fn planned(
+    inout builder: Builder,
+    op: u32,
+    a: u64,
+    coerce_words: u64,
+    optimize: bool,
+    lhs0: Value,
+    rhs0: Value
+) -> Value eff [Ffi[Cranelift]] {
+    if op == PLAN_ZERO {
         ins_iconst(inout builder, ty_i64(), 0)
     } else if op == PLAN_ICONST {
         let value = ins_iconst(inout builder, ty_i64(), wrapping_i64(a));
@@ -537,22 +588,16 @@ fn scalar(call: u64, inout builder: Builder) -> u64 eff [Ffi[Cranelift]] {
     } else if op == PLAN_F64CONST {
         ins_f64const(inout builder, a)
     } else if op == PLAN_ICMP {
-        if !operands(inout builder, call, 2) {
-            return DECLINED;
-        }
-        let lhs_var = temp(inout builder, call, ARG_X);
-        let rhs_var = temp(inout builder, call, ARG_Y);
+        let lhs_var = temp(inout builder, lhs0);
+        let rhs_var = temp(inout builder, rhs0);
         let lhs = operand(inout builder, lhs_var, coerce_words >> 8, optimize);
         let rhs = operand(inout builder, rhs_var, coerce_words >> 16, optimize);
         let cmp = ins_icmp(inout builder, cc_of(a), lhs, rhs);
         let value = ins_uextend(inout builder, ty_i64(), cmp);
         coerce(inout builder, value, coerce_words & BYTE, optimize)
     } else if op == PLAN_BINOP {
-        if !operands(inout builder, call, 2) {
-            return DECLINED;
-        }
-        let lhs_var = temp(inout builder, call, ARG_X);
-        let rhs_var = temp(inout builder, call, ARG_Y);
+        let lhs_var = temp(inout builder, lhs0);
+        let rhs_var = temp(inout builder, rhs0);
         let lhs = operand(inout builder, lhs_var, coerce_words >> 8, optimize);
         let rhs = operand(inout builder, rhs_var, coerce_words >> 16, optimize);
         let value = if a == BIN_IADD {
@@ -574,14 +619,11 @@ fn scalar(call: u64, inout builder: Builder) -> u64 eff [Ffi[Cranelift]] {
         } else if a == BIN_BXOR {
             ins_bxor(inout builder, lhs, rhs)
         } else {
-            return DECLINED;
+            return Value { id: invalid() };
         };
         coerce(inout builder, value, coerce_words & BYTE, optimize)
     } else if op == PLAN_BNOT || op == PLAN_NOT || op == PLAN_INEG {
-        if !operands(inout builder, call, 1) {
-            return DECLINED;
-        }
-        let src_var = temp(inout builder, call, ARG_X);
+        let src_var = temp(inout builder, lhs0);
         let src = operand(inout builder, src_var, a >> 8, optimize);
         let value = if op == PLAN_BNOT {
             ins_bnot(inout builder, src)
@@ -594,11 +636,8 @@ fn scalar(call: u64, inout builder: Builder) -> u64 eff [Ffi[Cranelift]] {
         // `bnot`, `ineg` and `!` read the plan's coerce words from `a`.
         coerce(inout builder, value, a & BYTE, optimize)
     } else if op == PLAN_SHIFT {
-        if !operands(inout builder, call, 2) {
-            return DECLINED;
-        }
-        let lhs_var = temp(inout builder, call, ARG_X);
-        let rhs_var = temp(inout builder, call, ARG_Y);
+        let lhs_var = temp(inout builder, lhs0);
+        let rhs_var = temp(inout builder, rhs0);
         let lhs = operand(inout builder, lhs_var, coerce_words >> 8, optimize);
         let amount = operand(inout builder, rhs_var, coerce_words >> 16, optimize);
         let how = a & BYTE;
@@ -613,10 +652,7 @@ fn scalar(call: u64, inout builder: Builder) -> u64 eff [Ffi[Cranelift]] {
         };
         coerce(inout builder, value, coerce_words & BYTE, optimize)
     } else if op == PLAN_CONVERT {
-        if !operands(inout builder, call, 1) {
-            return DECLINED;
-        }
-        let src_var = temp(inout builder, call, ARG_X);
+        let src_var = temp(inout builder, lhs0);
         let src = operand(inout builder, src_var, coerce_words >> 8, optimize);
         let to = (a >> 8) & BYTE;
         // A widening and an unchecked narrowing are the operand itself.
@@ -627,10 +663,8 @@ fn scalar(call: u64, inout builder: Builder) -> u64 eff [Ffi[Cranelift]] {
         };
         coerce(inout builder, value, coerce_words & BYTE, optimize)
     } else {
-        return DECLINED;
-    };
-    call_result_value(call, result);
-    HANDLED
+        Value { id: invalid() }
+    }
 }
 
 // The `scalar` hook: one planned instruction over the lent builder.
@@ -642,4 +676,16 @@ pub fn scalar_hook(call: u64) -> u64 eff [Ffi[Cranelift]] {
     let handled = scalar(call, inout builder);
     call_return_builder(call, builder);
     handled
+}
+
+// The `body` hook (#2094, part 6a): a whole scalar function's body from
+// its body plan (`body.ves`) over the lent builder.
+pub fn body_hook(call: u64) -> u64 eff [Ffi[Cranelift]] {
+    let mut builder = match call_builder(call) {
+        Some(builder) => builder,
+        None => return DECLINED,
+    };
+    let answer = emit_body(call, inout builder);
+    call_return_builder(call, builder);
+    answer
 }
