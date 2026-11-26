@@ -1,0 +1,1488 @@
+// Independent rewrite-witness checker, S-expression reader, rule-set pattern
+// parser, and hash-consed source-term builder (`src/witness.rs`, COMP-03).
+//
+// Kept separate from `engine.ves`: nothing here touches e-classes, saturation,
+// or proof-forest explanations.
+
+use self::util::{Fnv, at8, at32, at64, filled32, filled64, finish, fold, inc, n32, w};
+
+const MAX_STEPS: u64 = 262144;
+const MAX_TERMS: u64 = 262144;
+const MAX_DEPTH: u64 = 4096;
+const INITIAL_BUCKETS: u64 = 1024;
+const EMPTY_SLOT: u32 = 4294967295;
+const DECIMAL_BASE: u64 = 10;
+const I64_POS_LIMIT: u64 = 9223372036854775807;
+const I64_NEG_LIMIT: u64 = 9223372036854775808;
+const LOAD_FACTOR_NUM: u64 = 2;
+
+enum Ascii: _ {
+    Tab = 0x09,
+    Lf = 0x0a,
+    Ff = 0x0c,
+    Cr = 0x0d,
+    Space = 0x20,
+    Quote = 0x22,
+    OpenParen = 0x28,
+    CloseParen = 0x29,
+    Dash = 0x2d,
+    Zero = 0x30,
+    Nine = 0x39,
+    Semicolon = 0x3b,
+    Backslash = 0x5c
+}
+
+enum SxKind: _ {
+    Atom = 0,
+    Str = 1,
+    List = 2
+}
+
+pub enum ParseMode: _ {
+    ProgramRewrites = 0,
+    RuleSet = 1
+}
+
+pub enum ParseStatus: _ {
+    Ok = 0,
+    TooDeep = 1,
+    Unbalanced = 2,
+    EscapeNotAllowed = 3,
+    UnterminatedString = 4,
+    TopLevelAtom = 5,
+    RewriteArity = 6,
+    NoConstructor = 7,
+    NumericHead = 8,
+    NotConstructorRewrite = 9
+}
+
+pub enum SourceStatus: _ {
+    Ok = 0,
+    TooDeep = 1,
+    Unbalanced = 2,
+    EscapeNotAllowed = 3,
+    UnterminatedString = 4,
+    BindingIsAtom = 5,
+    NotLetBinding = 6,
+    BadBinding = 7,
+    UnboundBinding = 8,
+    BindingNoConstructor = 9,
+    NoRootBinding = 10,
+    LimitTerms = 11
+}
+
+pub enum CheckStatus: _ {
+    Ok = 0,
+    LimitSteps = 1,
+    LimitTerms = 2,
+    LimitDepth = 3,
+    RootOutOfRange = 4,
+    TermArenaOrder = 5,
+    UnknownRule = 6,
+    TermOutOfRange = 7,
+    VarBoundTwice = 8,
+    SubstMismatch = 9,
+    UnboundVar = 10,
+    BelowLiteral = 11,
+    PosOutOfRange = 12,
+    SubtermMismatch = 13,
+    GoalMismatch = 14,
+    BadInput = 15
+}
+
+enum PatTag: _ {
+    Var = 0,
+    Int = 1,
+    Str = 2,
+    App = 3
+}
+
+enum NodeTag: _ {
+    Int = 0,
+    Str = 1,
+    App = 2
+}
+
+enum StepDir: _ {
+    Forward = 0,
+    Backward = 1
+}
+
+enum RewriteArityConst: _ {
+    Items = 3,
+    LhsIdx = 1,
+    RhsIdx = 2
+}
+
+enum LetArityConst: _ {
+    Items = 3,
+    NameIdx = 1,
+    BodyIdx = 2
+}
+
+fn slice_u8_at(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn slice_u64_at(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn is_ws(b: u8) -> bool {
+    b == Ascii::Space || b == Ascii::Tab || b == Ascii::Lf || b == Ascii::Cr || b == Ascii::Ff
+}
+
+fn is_delim(b: u8) -> bool {
+    is_ws(b)
+        || b == Ascii::OpenParen
+        || b == Ascii::CloseParen
+        || b == Ascii::Quote
+        || b == Ascii::Semicolon
+}
+
+fn span_eq_lit(in src: Slice[u8], start: u64, len: u64, in lit: Str) -> bool {
+    let lb = lit.as_bytes();
+    if len != lb.len() {
+        return false;
+    }
+    for i in 0..len {
+        if slice_u8_at(in src, wrapping_add(start, i)) != slice_u8_at(in lb, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn spans_eq(in src: Slice[u8], a0: u64, l0: u64, a1: u64, l1: u64) -> bool {
+    if l0 != l1 {
+        return false;
+    }
+    for i in 0..l0 {
+        if slice_u8_at(in src, wrapping_add(a0, i)) != slice_u8_at(in src, wrapping_add(a1, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn hash_span(seed: u64, in src: Slice[u8], start: u64, len: u64) -> u64 {
+    let mut h = fold(seed, len);
+    for i in 0..len {
+        h = fold(h, widen_u64(widen_u32(slice_u8_at(in src, wrapping_add(start, i)))));
+    }
+    h
+}
+
+// Parses `-?[0-9]+` within `i64` range; returns `(true, two_complement_u64)`
+// or `(false, 0)` when non-numeric or out of `i64` range (matching `int_atom`).
+fn parse_int_span(in src: Slice[u8], start: u64, len: u64) -> (bool, u64) {
+    if len == 0 {
+        return (false, 0);
+    }
+    let first = slice_u8_at(in src, start);
+    let neg = first == Ascii::Dash;
+    let d_start = if neg { inc(start) } else { start };
+    let d_len = if neg { wrapping_sub(len, 1) } else { len };
+    if d_len == 0 {
+        return (false, 0);
+    }
+    let limit = if neg { I64_NEG_LIMIT } else { I64_POS_LIMIT };
+    let max_q = limit / DECIMAL_BASE;
+    let max_r = limit % DECIMAL_BASE;
+    let mut acc: u64 = 0;
+    for i in 0..d_len {
+        let ch = slice_u8_at(in src, wrapping_add(d_start, i));
+        if ch < Ascii::Zero || ch > Ascii::Nine {
+            return (false, 0);
+        }
+        let digit = widen_u64(widen_u32(wrapping_sub(ch, Ascii::Zero)));
+        if acc > max_q || (acc == max_q && digit > max_r) {
+            return (false, 0);
+        }
+        acc = wrapping_add(wrapping_mul(acc, DECIMAL_BASE), digit);
+    }
+    let raw = if neg { wrapping_sub(0, acc) } else { acc };
+    (true, raw)
+}
+
+// ---------------------------------------------------------------------------
+// S-expression tree (iterative parser, bounded by `MAX_DEPTH`).
+
+struct SxTree {
+    status: u64,
+    kind: ChunkSeq[u8],
+    a: ChunkSeq[u64],
+    b: ChunkSeq[u64],
+    kids: ChunkSeq[u32],
+    roots: ChunkSeq[u32],
+}
+
+fn parse_sexps(in src: Slice[u8]) -> SxTree {
+    let mut kind = ChunkSeq::new[u8]();
+    let mut a = ChunkSeq::new[u64]();
+    let mut b = ChunkSeq::new[u64]();
+    let mut kids = ChunkSeq::new[u32]();
+    let mut list_buf = ChunkSeq::new[u32]();
+    let mut frame_starts = ChunkSeq::new[u64]();
+    frame_starts.push(0);
+
+    let n = src.len();
+    let mut i: u64 = 0;
+    let mut status: u64 = ParseStatus::Ok;
+    loop {
+        if i >= n {
+            break;
+        }
+        let ch = slice_u8_at(in src, i);
+        if ch == Ascii::Semicolon {
+            loop {
+                if i >= n || slice_u8_at(in src, i) == Ascii::Lf {
+                    break;
+                }
+                i = inc(i);
+            }
+        } else if ch == Ascii::OpenParen {
+            if frame_starts.len() > MAX_DEPTH {
+                status = ParseStatus::TooDeep;
+                break;
+            }
+            frame_starts.push(list_buf.len());
+            i = inc(i);
+        } else if ch == Ascii::CloseParen {
+            if frame_starts.len() <= 1 {
+                status = ParseStatus::Unbalanced;
+                break;
+            }
+            let top_idx = wrapping_sub(frame_starts.len(), 1);
+            let start = at64(in frame_starts, top_idx);
+            frame_starts.resize(top_idx, 0);
+            let k_off = kids.len();
+            let k_len = wrapping_sub(list_buf.len(), start);
+            for j in 0..k_len {
+                kids.push(at32(in list_buf, wrapping_add(start, j)));
+            }
+            list_buf.resize(start, 0);
+            let id = n32(kind.len());
+            kind.push(SxKind::List);
+            a.push(k_off);
+            b.push(k_len);
+            list_buf.push(id);
+            i = inc(i);
+        } else if ch == Ascii::Quote {
+            let s_start = inc(i);
+            i = s_start;
+            let mut escaped = false;
+            loop {
+                if i >= n {
+                    break;
+                }
+                let sc = slice_u8_at(in src, i);
+                if sc == Ascii::Quote {
+                    break;
+                }
+                if sc == Ascii::Backslash {
+                    escaped = true;
+                    break;
+                }
+                i = inc(i);
+            }
+            if escaped {
+                status = ParseStatus::EscapeNotAllowed;
+                break;
+            }
+            if i >= n {
+                status = ParseStatus::UnterminatedString;
+                break;
+            }
+            let id = n32(kind.len());
+            kind.push(SxKind::Str);
+            a.push(s_start);
+            b.push(wrapping_sub(i, s_start));
+            list_buf.push(id);
+            i = inc(i);
+        } else if is_ws(ch) {
+            i = inc(i);
+        } else {
+            let a_start = i;
+            loop {
+                if i >= n || is_delim(slice_u8_at(in src, i)) {
+                    break;
+                }
+                i = inc(i);
+            }
+            let id = n32(kind.len());
+            kind.push(SxKind::Atom);
+            a.push(a_start);
+            b.push(wrapping_sub(i, a_start));
+            list_buf.push(id);
+        }
+    }
+
+    if status == ParseStatus::Ok && frame_starts.len() != 1 {
+        status = ParseStatus::Unbalanced;
+    }
+    SxTree {
+        status: status,
+        kind: kind,
+        a: a,
+        b: b,
+        kids: kids,
+        roots: list_buf,
+    }
+}
+
+// Emits `root_sx` in preorder into `out` and appends `(start, len)` of every
+// pattern variable into `vars`. Returns a `ParseStatus` code.
+fn emit_pattern(
+    in tree: SxTree,
+    in src: Slice[u8],
+    root_sx: u32,
+    inout out: ChunkSeq[u64],
+    inout var_starts: ChunkSeq[u64],
+    inout var_lens: ChunkSeq[u64]
+) -> u64 {
+    let mut stack = ChunkSeq::new[u32]();
+    stack.push(root_sx);
+    loop {
+        if stack.len() == 0 {
+            break;
+        }
+        let top = wrapping_sub(stack.len(), 1);
+        let id = at32(in stack, top);
+        stack.resize(top, 0);
+        let idx = w(id);
+        let k = at8(in tree.kind, idx);
+        let a_val = at64(in tree.a, idx);
+        let b_val = at64(in tree.b, idx);
+        if k == SxKind::Str {
+            out.push(PatTag::Str);
+            out.push(a_val);
+            out.push(b_val);
+        } else if k == SxKind::Atom {
+            let (is_num, raw) = parse_int_span(in src, a_val, b_val);
+            if is_num {
+                out.push(PatTag::Int);
+                out.push(raw);
+            } else {
+                out.push(PatTag::Var);
+                out.push(a_val);
+                out.push(b_val);
+                var_starts.push(a_val);
+                var_lens.push(b_val);
+            }
+        } else {
+            if b_val == 0 {
+                return ParseStatus::NoConstructor;
+            }
+            let head_id = at32(in tree.kids, a_val);
+            let head_idx = w(head_id);
+            if at8(in tree.kind, head_idx) != SxKind::Atom {
+                return ParseStatus::NoConstructor;
+            }
+            let h_start = at64(in tree.a, head_idx);
+            let h_len = at64(in tree.b, head_idx);
+            let (head_num, _) = parse_int_span(in src, h_start, h_len);
+            if head_num {
+                return ParseStatus::NumericHead;
+            }
+            let arg_count = wrapping_sub(b_val, 1);
+            out.push(PatTag::App);
+            out.push(h_start);
+            out.push(h_len);
+            out.push(arg_count);
+            let mut j = arg_count;
+            loop {
+                if j == 0 {
+                    break;
+                }
+                let child = at32(in tree.kids, wrapping_add(a_val, j));
+                stack.push(child);
+                j = wrapping_sub(j, 1);
+            }
+        }
+    }
+    ParseStatus::Ok
+}
+
+fn vars_subset(
+    in src: Slice[u8],
+    in rhs_s: ChunkSeq[u64],
+    in rhs_l: ChunkSeq[u64],
+    in lhs_s: ChunkSeq[u64],
+    in lhs_l: ChunkSeq[u64]
+) -> bool {
+    for i in 0..rhs_s.len() {
+        let rs = at64(in rhs_s, i);
+        let rl = at64(in rhs_l, i);
+        let mut found = false;
+        for j in 0..lhs_s.len() {
+            if spans_eq(in src, rs, rl, at64(in lhs_s, j), at64(in lhs_l, j)) {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn witness_parse_rewrites(in text: Str, mode: u64) -> ChunkSeq[u64] {
+    let src = text.as_bytes();
+    let tree = parse_sexps(in src);
+    let mut out = ChunkSeq::new[u64]();
+    if tree.status != ParseStatus::Ok {
+        out.push(tree.status);
+        out.push(0);
+        return out;
+    }
+
+    let mut body = ChunkSeq::new[u64]();
+    let mut rewrite_count: u64 = 0;
+    for r in 0..tree.roots.len() {
+        let cmd_id = at32(in tree.roots, r);
+        let cmd_idx = w(cmd_id);
+        if at8(in tree.kind, cmd_idx) != SxKind::List {
+            if mode == ParseMode::RuleSet {
+                out.push(ParseStatus::TopLevelAtom);
+                out.push(r);
+                return out;
+            }
+            continue;
+        }
+        let k_off = at64(in tree.a, cmd_idx);
+        let k_len = at64(in tree.b, cmd_idx);
+        if k_len == 0 {
+            continue;
+        }
+        let first_id = at32(in tree.kids, k_off);
+        let first_idx = w(first_id);
+        if at8(in tree.kind, first_idx) != SxKind::Atom {
+            continue;
+        }
+        if !span_eq_lit(
+            in src,
+            at64(in tree.a, first_idx),
+            at64(in tree.b, first_idx),
+            in "rewrite"
+        ) {
+            continue;
+        }
+        if k_len != RewriteArityConst::Items {
+            out.push(ParseStatus::RewriteArity);
+            out.push(rewrite_count);
+            return out;
+        }
+        let lhs_id = at32(in tree.kids, wrapping_add(k_off, RewriteArityConst::LhsIdx));
+        let rhs_id = at32(in tree.kids, wrapping_add(k_off, RewriteArityConst::RhsIdx));
+        let mut lhs_vs = ChunkSeq::new[u64]();
+        let mut lhs_vl = ChunkSeq::new[u64]();
+        let mut rhs_vs = ChunkSeq::new[u64]();
+        let mut rhs_vl = ChunkSeq::new[u64]();
+
+        let lhs_st = emit_pattern(in tree, in src, lhs_id, inout body, inout lhs_vs, inout lhs_vl);
+        if lhs_st != ParseStatus::Ok {
+            out.push(lhs_st);
+            out.push(rewrite_count);
+            return out;
+        }
+        let rhs_st = emit_pattern(in tree, in src, rhs_id, inout body, inout rhs_vs, inout rhs_vl);
+        if rhs_st != ParseStatus::Ok {
+            out.push(rhs_st);
+            out.push(rewrite_count);
+            return out;
+        }
+
+        if mode == ParseMode::RuleSet {
+            let lhs_idx = w(lhs_id);
+            let lhs_is_var = if at8(in tree.kind, lhs_idx) == SxKind::Atom {
+                let (is_num, _) = parse_int_span(
+                    in src,
+                    at64(in tree.a, lhs_idx),
+                    at64(in tree.b, lhs_idx)
+                );
+                !is_num
+            } else {
+                false
+            };
+            if lhs_is_var || !vars_subset(in src, in rhs_vs, in rhs_vl, in lhs_vs, in lhs_vl) {
+                out.push(ParseStatus::NotConstructorRewrite);
+                out.push(rewrite_count);
+                return out;
+            }
+        }
+        rewrite_count = inc(rewrite_count);
+    }
+
+    out.push(ParseStatus::Ok);
+    out.push(0);
+    out.push(rewrite_count);
+    for i in 0..body.len() {
+        out.push(at64(in body, i));
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Hash-consed source-term builder (`source_term`).
+
+struct SpanArena {
+    tag: ChunkSeq[u8],
+    a: ChunkSeq[u64],
+    b: ChunkSeq[u64],
+    kid_off: ChunkSeq[u64],
+    kid_len: ChunkSeq[u64],
+    kids: ChunkSeq[u32],
+    hashes: ChunkSeq[u64],
+    buckets: ChunkSeq[u32],
+}
+
+fn span_arena_new() -> SpanArena {
+    SpanArena {
+        tag: ChunkSeq::new[u8](),
+        a: ChunkSeq::new[u64](),
+        b: ChunkSeq::new[u64](),
+        kid_off: ChunkSeq::new[u64](),
+        kid_len: ChunkSeq::new[u64](),
+        kids: ChunkSeq::new[u32](),
+        hashes: ChunkSeq::new[u64](),
+        buckets: filled32(INITIAL_BUCKETS, EMPTY_SLOT),
+    }
+}
+
+fn span_arena_grow(inout ar: SpanArena) {
+    let new_cap = wrapping_mul(ar.buckets.len(), LOAD_FACTOR_NUM);
+    let mask = wrapping_sub(new_cap, 1);
+    let mut nb = filled32(new_cap, EMPTY_SLOT);
+    for i in 0..ar.tag.len() {
+        let mut pos = at64(in ar.hashes, i) & mask;
+        loop {
+            if at32(in nb, pos) == EMPTY_SLOT {
+                nb.try_set(pos, n32(i));
+                break;
+            }
+            pos = inc(pos) & mask;
+        }
+    }
+    ar.buckets = nb;
+}
+
+fn span_arena_intern(
+    inout ar: SpanArena,
+    in src: Slice[u8],
+    nt: u8,
+    na: u64,
+    nb_val: u64,
+    in child_buf: ChunkSeq[u32],
+    c_start: u64,
+    c_len: u64
+) -> (bool, u32) {
+    let mut h = fold(Fnv::Offset, widen_u64(widen_u32(nt)));
+    if nt == NodeTag::Int {
+        h = fold(h, na);
+    } else {
+        h = hash_span(h, in src, na, nb_val);
+        if nt == NodeTag::App {
+            h = fold(h, c_len);
+            for i in 0..c_len {
+                h = fold(h, w(at32(in child_buf, wrapping_add(c_start, i))));
+            }
+        }
+    }
+    let hv = finish(h);
+    let cap = ar.buckets.len();
+    let mask = wrapping_sub(cap, 1);
+    let mut pos = hv & mask;
+    loop {
+        let slot = at32(in ar.buckets, pos);
+        if slot == EMPTY_SLOT {
+            break;
+        }
+        let idx = w(slot);
+        if at64(in ar.hashes, idx) == hv && at8(in ar.tag, idx) == nt {
+            let eq_node = if nt == NodeTag::Int {
+                at64(in ar.a, idx) == na
+            } else if nt == NodeTag::Str {
+                spans_eq(in src, at64(in ar.a, idx), at64(in ar.b, idx), na, nb_val)
+            } else if at64(in ar.kid_len, idx) == c_len
+                && spans_eq(in src, at64(in ar.a, idx), at64(in ar.b, idx), na, nb_val)
+            {
+                let ko = at64(in ar.kid_off, idx);
+                let mut kids_match = true;
+                for k in 0..c_len {
+                    if at32(in ar.kids, wrapping_add(ko, k))
+                        != at32(in child_buf, wrapping_add(c_start, k))
+                    {
+                        kids_match = false;
+                        break;
+                    }
+                }
+                kids_match
+            } else {
+                false
+            };
+            if eq_node {
+                return (true, slot);
+            }
+        }
+        pos = inc(pos) & mask;
+    }
+
+    if ar.tag.len() >= MAX_TERMS {
+        return (false, 0);
+    }
+    let id = n32(ar.tag.len());
+    let ko = ar.kids.len();
+    for k in 0..c_len {
+        ar.kids.push(at32(in child_buf, wrapping_add(c_start, k)));
+    }
+    ar.tag.push(nt);
+    ar.a.push(na);
+    ar.b.push(nb_val);
+    ar.kid_off.push(ko);
+    ar.kid_len.push(c_len);
+    ar.hashes.push(hv);
+    ar.buckets.try_set(pos, id);
+    if wrapping_mul(inc(ar.tag.len()), LOAD_FACTOR_NUM) > ar.buckets.len() {
+        span_arena_grow(inout ar);
+    }
+    (true, id)
+}
+
+fn env_lookup(
+    in src: Slice[u8],
+    in env_s: ChunkSeq[u64],
+    in env_l: ChunkSeq[u64],
+    in env_id: ChunkSeq[u32],
+    start: u64,
+    len: u64
+) -> Option[u32] {
+    for i in 0..env_s.len() {
+        if spans_eq(in src, at64(in env_s, i), at64(in env_l, i), start, len) {
+            return Option::Some(at32(in env_id, i));
+        }
+    }
+    Option::None
+}
+
+pub fn witness_source_term(in bindings: Str, in root: Str) -> ChunkSeq[u64] {
+    let src = bindings.as_bytes();
+    let tree = parse_sexps(in src);
+    let mut out = ChunkSeq::new[u64]();
+    if tree.status != ParseStatus::Ok {
+        out.push(tree.status);
+        out.push(0);
+        out.push(0);
+        return out;
+    }
+
+    let mut arena = span_arena_new();
+    let mut env_s = ChunkSeq::new[u64]();
+    let mut env_l = ChunkSeq::new[u64]();
+    let mut env_id = ChunkSeq::new[u32]();
+    let empty_kids = ChunkSeq::new[u32]();
+
+    for r in 0..tree.roots.len() {
+        let cmd_id = at32(in tree.roots, r);
+        let cmd_idx = w(cmd_id);
+        if at8(in tree.kind, cmd_idx) != SxKind::List {
+            out.push(SourceStatus::BindingIsAtom);
+            out.push(0);
+            out.push(0);
+            return out;
+        }
+        let k_off = at64(in tree.a, cmd_idx);
+        let k_len = at64(in tree.b, cmd_idx);
+        if k_len != LetArityConst::Items {
+            out.push(SourceStatus::NotLetBinding);
+            out.push(0);
+            out.push(0);
+            return out;
+        }
+        let kw_id = w(at32(in tree.kids, k_off));
+        let nm_id = w(at32(in tree.kids, wrapping_add(k_off, LetArityConst::NameIdx)));
+        let body_sx = at32(in tree.kids, wrapping_add(k_off, LetArityConst::BodyIdx));
+        if at8(in tree.kind, kw_id) != SxKind::Atom || at8(in tree.kind, nm_id) != SxKind::Atom {
+            out.push(SourceStatus::NotLetBinding);
+            out.push(0);
+            out.push(0);
+            return out;
+        }
+        let nm_s = at64(in tree.a, nm_id);
+        let nm_l = at64(in tree.b, nm_id);
+        if !span_eq_lit(in src, at64(in tree.a, kw_id), at64(in tree.b, kw_id), in "let") {
+            out.push(SourceStatus::BadBinding);
+            out.push(nm_s);
+            out.push(nm_l);
+            return out;
+        }
+        match env_lookup(in src, in env_s, in env_l, in env_id, nm_s, nm_l) {
+            Option::Some(_) => {
+                out.push(SourceStatus::BadBinding);
+                out.push(nm_s);
+                out.push(nm_l);
+                return out;
+            }
+            Option::None => {}
+        }
+
+        // Iterative postorder evaluation of `body_sx`.
+        let mut work_sx = ChunkSeq::new[u32]();
+        let mut work_vis = ChunkSeq::new[u8]();
+        let mut val_stack = ChunkSeq::new[u32]();
+        work_sx.push(body_sx);
+        work_vis.push(0);
+        loop {
+            if work_sx.len() == 0 {
+                break;
+            }
+            let top = wrapping_sub(work_sx.len(), 1);
+            let cur_sx = at32(in work_sx, top);
+            let vis = at8(in work_vis, top);
+            work_sx.resize(top, 0);
+            work_vis.resize(top, 0);
+
+            let sx_idx = w(cur_sx);
+            let sk = at8(in tree.kind, sx_idx);
+            let sa = at64(in tree.a, sx_idx);
+            let sb = at64(in tree.b, sx_idx);
+            if sk == SxKind::Str {
+                let (ok, nid) = span_arena_intern(
+                    inout arena,
+                    in src,
+                    NodeTag::Str,
+                    sa,
+                    sb,
+                    in empty_kids,
+                    0,
+                    0
+                );
+                if !ok {
+                    out.push(SourceStatus::LimitTerms);
+                    out.push(0);
+                    out.push(0);
+                    return out;
+                }
+                val_stack.push(nid);
+            } else if sk == SxKind::Atom {
+                let (is_num, raw) = parse_int_span(in src, sa, sb);
+                if is_num {
+                    let (ok, nid) = span_arena_intern(
+                        inout arena,
+                        in src,
+                        NodeTag::Int,
+                        raw,
+                        0,
+                        in empty_kids,
+                        0,
+                        0
+                    );
+                    if !ok {
+                        out.push(SourceStatus::LimitTerms);
+                        out.push(0);
+                        out.push(0);
+                        return out;
+                    }
+                    val_stack.push(nid);
+                } else {
+                    match env_lookup(in src, in env_s, in env_l, in env_id, sa, sb) {
+                        Option::Some(bound_id) => val_stack.push(bound_id),
+                        Option::None => {
+                            out.push(SourceStatus::UnboundBinding);
+                            out.push(sa);
+                            out.push(sb);
+                            return out;
+                        }
+                    }
+                }
+            } else if vis == 0 {
+                if sb == 0 {
+                    out.push(SourceStatus::BindingNoConstructor);
+                    out.push(0);
+                    out.push(0);
+                    return out;
+                }
+                let head_idx = w(at32(in tree.kids, sa));
+                if at8(in tree.kind, head_idx) != SxKind::Atom {
+                    out.push(SourceStatus::BindingNoConstructor);
+                    out.push(0);
+                    out.push(0);
+                    return out;
+                }
+                work_sx.push(cur_sx);
+                work_vis.push(1);
+                let arg_cnt = wrapping_sub(sb, 1);
+                let mut j = arg_cnt;
+                loop {
+                    if j == 0 {
+                        break;
+                    }
+                    work_sx.push(at32(in tree.kids, wrapping_add(sa, j)));
+                    work_vis.push(0);
+                    j = wrapping_sub(j, 1);
+                }
+            } else {
+                let head_idx = w(at32(in tree.kids, sa));
+                let hs = at64(in tree.a, head_idx);
+                let hl = at64(in tree.b, head_idx);
+                let arg_cnt = wrapping_sub(sb, 1);
+                let c_start = wrapping_sub(val_stack.len(), arg_cnt);
+                let (ok, nid) = span_arena_intern(
+                    inout arena,
+                    in src,
+                    NodeTag::App,
+                    hs,
+                    hl,
+                    in val_stack,
+                    c_start,
+                    arg_cnt
+                );
+                if !ok {
+                    out.push(SourceStatus::LimitTerms);
+                    out.push(0);
+                    out.push(0);
+                    return out;
+                }
+                val_stack.resize(c_start, 0);
+                val_stack.push(nid);
+            }
+        }
+
+        let bound = at32(in val_stack, 0);
+        env_s.push(nm_s);
+        env_l.push(nm_l);
+        env_id.push(bound);
+    }
+
+    let mut root_id: u32 = EMPTY_SLOT;
+    for i in 0..env_s.len() {
+        if span_eq_lit(in src, at64(in env_s, i), at64(in env_l, i), in root) {
+            root_id = at32(in env_id, i);
+            break;
+        }
+    }
+    if root_id == EMPTY_SLOT {
+        out.push(SourceStatus::NoRootBinding);
+        out.push(0);
+        out.push(0);
+        return out;
+    }
+
+    out.push(SourceStatus::Ok);
+    out.push(0);
+    out.push(0);
+    out.push(w(root_id));
+    let n_cnt = arena.tag.len();
+    out.push(n_cnt);
+    for i in 0..n_cnt {
+        let t = at8(in arena.tag, i);
+        out.push(widen_u64(widen_u32(t)));
+        out.push(at64(in arena.a, i));
+        if t == NodeTag::Str {
+            out.push(at64(in arena.b, i));
+        } else if t == NodeTag::App {
+            out.push(at64(in arena.b, i));
+            let ko = at64(in arena.kid_off, i);
+            let kl = at64(in arena.kid_len, i);
+            out.push(kl);
+            for k in 0..kl {
+                out.push(w(at32(in arena.kids, wrapping_add(ko, k))));
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Independent hash-consed rewrite-witness replay (`witness::check`).
+
+struct SymArena {
+    tag: ChunkSeq[u8],
+    val: ChunkSeq[u64],
+    kid_off: ChunkSeq[u64],
+    kid_len: ChunkSeq[u64],
+    kids: ChunkSeq[u32],
+    hashes: ChunkSeq[u64],
+    buckets: ChunkSeq[u32],
+}
+
+fn sym_arena_new() -> SymArena {
+    SymArena {
+        tag: ChunkSeq::new[u8](),
+        val: ChunkSeq::new[u64](),
+        kid_off: ChunkSeq::new[u64](),
+        kid_len: ChunkSeq::new[u64](),
+        kids: ChunkSeq::new[u32](),
+        hashes: ChunkSeq::new[u64](),
+        buckets: filled32(INITIAL_BUCKETS, EMPTY_SLOT),
+    }
+}
+
+fn sym_arena_grow(inout ar: SymArena) {
+    let new_cap = wrapping_mul(ar.buckets.len(), LOAD_FACTOR_NUM);
+    let mask = wrapping_sub(new_cap, 1);
+    let mut nb = filled32(new_cap, EMPTY_SLOT);
+    for i in 0..ar.tag.len() {
+        let mut pos = at64(in ar.hashes, i) & mask;
+        loop {
+            if at32(in nb, pos) == EMPTY_SLOT {
+                nb.try_set(pos, n32(i));
+                break;
+            }
+            pos = inc(pos) & mask;
+        }
+    }
+    ar.buckets = nb;
+}
+
+fn sym_arena_intern(
+    inout ar: SymArena,
+    nt: u8,
+    nv: u64,
+    in child_buf: ChunkSeq[u32],
+    c_start: u64,
+    c_len: u64
+) -> (bool, u32) {
+    let mut h = fold(fold(Fnv::Offset, widen_u64(widen_u32(nt))), nv);
+    if nt == NodeTag::App {
+        h = fold(h, c_len);
+        for i in 0..c_len {
+            h = fold(h, w(at32(in child_buf, wrapping_add(c_start, i))));
+        }
+    }
+    let hv = finish(h);
+    let cap = ar.buckets.len();
+    let mask = wrapping_sub(cap, 1);
+    let mut pos = hv & mask;
+    loop {
+        let slot = at32(in ar.buckets, pos);
+        if slot == EMPTY_SLOT {
+            break;
+        }
+        let idx = w(slot);
+        if at64(in ar.hashes, idx) == hv
+            && at8(in ar.tag, idx) == nt
+            && at64(in ar.val, idx) == nv
+            && at64(in ar.kid_len, idx) == c_len
+        {
+            let ko = at64(in ar.kid_off, idx);
+            let mut same = true;
+            for k in 0..c_len {
+                if at32(in ar.kids, wrapping_add(ko, k))
+                    != at32(in child_buf, wrapping_add(c_start, k))
+                {
+                    same = false;
+                    break;
+                }
+            }
+            if same {
+                return (true, slot);
+            }
+        }
+        pos = inc(pos) & mask;
+    }
+
+    if ar.tag.len() >= MAX_TERMS {
+        return (false, 0);
+    }
+    let id = n32(ar.tag.len());
+    let ko = ar.kids.len();
+    for k in 0..c_len {
+        ar.kids.push(at32(in child_buf, wrapping_add(c_start, k)));
+    }
+    ar.tag.push(nt);
+    ar.val.push(nv);
+    ar.kid_off.push(ko);
+    ar.kid_len.push(c_len);
+    ar.hashes.push(hv);
+    ar.buckets.try_set(pos, id);
+    if wrapping_mul(inc(ar.tag.len()), LOAD_FACTOR_NUM) > ar.buckets.len() {
+        sym_arena_grow(inout ar);
+    }
+    (true, id)
+}
+
+// Imports `count` nodes starting at `*cursor` in `words` into `ar`, appending
+// the mapped IDs into `map_out` (`[map_base .. map_base + count)`).
+fn sym_arena_import(
+    inout ar: SymArena,
+    in words: Slice[u64],
+    inout cursor: u64,
+    inout map_out: ChunkSeq[u32]
+) -> u64 {
+    let wlen = words.len();
+    if cursor >= wlen {
+        return CheckStatus::BadInput;
+    }
+    let count = slice_u64_at(in words, cursor);
+    cursor = inc(cursor);
+    let map_base = map_out.len();
+    let empty_kids = ChunkSeq::new[u32]();
+    let mut mapped_kids = ChunkSeq::new[u32]();
+
+    for i in 0..count {
+        if wrapping_add(cursor, 2) > wlen {
+            return CheckStatus::BadInput;
+        }
+        let nt_u64 = slice_u64_at(in words, cursor);
+        let nv = slice_u64_at(in words, inc(cursor));
+        cursor = wrapping_add(cursor, 2);
+        if nt_u64 == NodeTag::Int {
+            let (ok, nid) = sym_arena_intern(inout ar, NodeTag::Int, nv, in empty_kids, 0, 0);
+            if !ok {
+                return CheckStatus::LimitTerms;
+            }
+            map_out.push(nid);
+        } else if nt_u64 == NodeTag::Str {
+            let (ok, nid) = sym_arena_intern(inout ar, NodeTag::Str, nv, in empty_kids, 0, 0);
+            if !ok {
+                return CheckStatus::LimitTerms;
+            }
+            map_out.push(nid);
+        } else if nt_u64 == NodeTag::App {
+            if cursor >= wlen {
+                return CheckStatus::BadInput;
+            }
+            let c_len = slice_u64_at(in words, cursor);
+            cursor = inc(cursor);
+            if wrapping_add(cursor, c_len) > wlen {
+                return CheckStatus::BadInput;
+            }
+            mapped_kids.resize(0, 0);
+            for k in 0..c_len {
+                let raw_child = slice_u64_at(in words, wrapping_add(cursor, k));
+                if raw_child >= i {
+                    return CheckStatus::TermArenaOrder;
+                }
+                mapped_kids.push(at32(in map_out, wrapping_add(map_base, raw_child)));
+            }
+            cursor = wrapping_add(cursor, c_len);
+            let (ok, nid) = sym_arena_intern(inout ar, NodeTag::App, nv, in mapped_kids, 0, c_len);
+            if !ok {
+                return CheckStatus::LimitTerms;
+            }
+            map_out.push(nid);
+        } else {
+            return CheckStatus::BadInput;
+        }
+    }
+    CheckStatus::Ok
+}
+
+// Skips one postorder pattern in `words` starting at `*cursor`, recording its
+// `[start_word, node_count)` and appending any distinct variable symbols into
+// `rule_vars`.
+fn scan_postorder_pat(
+    in words: Slice[u64],
+    inout cursor: u64,
+    inout rule_vars: ChunkSeq[u64]
+) -> (bool, u64, u64) {
+    let wlen = words.len();
+    if cursor >= wlen {
+        return (false, 0, 0);
+    }
+    let node_count = slice_u64_at(in words, cursor);
+    cursor = inc(cursor);
+    if node_count == 0 {
+        return (false, 0, 0);
+    }
+    let start_word = cursor;
+    for i in 0..node_count {
+        if wrapping_add(cursor, 2) > wlen {
+            return (false, 0, 0);
+        }
+        let pt = slice_u64_at(in words, cursor);
+        let pv = slice_u64_at(in words, inc(cursor));
+        cursor = wrapping_add(cursor, 2);
+        if pt == PatTag::Var {
+            let mut seen = false;
+            for j in 0..rule_vars.len() {
+                if at64(in rule_vars, j) == pv {
+                    seen = true;
+                    break;
+                }
+            }
+            if !seen {
+                rule_vars.push(pv);
+            }
+        } else if pt == PatTag::Int || pt == PatTag::Str {
+            // 2 words already consumed.
+        } else if pt == PatTag::App {
+            if cursor >= wlen {
+                return (false, 0, 0);
+            }
+            let c_len = slice_u64_at(in words, cursor);
+            cursor = inc(cursor);
+            if wrapping_add(cursor, c_len) > wlen {
+                return (false, 0, 0);
+            }
+            for k in 0..c_len {
+                if slice_u64_at(in words, wrapping_add(cursor, k)) >= i {
+                    return (false, 0, 0);
+                }
+            }
+            cursor = wrapping_add(cursor, c_len);
+        } else {
+            return (false, 0, 0);
+        }
+    }
+    (true, start_word, node_count)
+}
+
+fn instantiate_postorder_pat(
+    inout ar: SymArena,
+    in words: Slice[u64],
+    pat_start: u64,
+    pat_nodes: u64,
+    in subst_vars: ChunkSeq[u64],
+    in subst_ids: ChunkSeq[u32]
+) -> (u64, u32) {
+    let mut slots = ChunkSeq::with_capacity[u32](pat_nodes);
+    let empty_kids = ChunkSeq::new[u32]();
+    let mut app_kids = ChunkSeq::new[u32]();
+    let mut p = pat_start;
+
+    for _i in 0..pat_nodes {
+        let pt = slice_u64_at(in words, p);
+        let pv = slice_u64_at(in words, inc(p));
+        p = wrapping_add(p, 2);
+        if pt == PatTag::Var {
+            let mut found = false;
+            let mut bound_id: u32 = 0;
+            for j in 0..subst_vars.len() {
+                if at64(in subst_vars, j) == pv {
+                    found = true;
+                    bound_id = at32(in subst_ids, j);
+                    break;
+                }
+            }
+            if !found {
+                return (CheckStatus::UnboundVar, 0);
+            }
+            slots.push(bound_id);
+        } else if pt == PatTag::Int {
+            let (ok, nid) = sym_arena_intern(inout ar, NodeTag::Int, pv, in empty_kids, 0, 0);
+            if !ok {
+                return (CheckStatus::LimitTerms, 0);
+            }
+            slots.push(nid);
+        } else if pt == PatTag::Str {
+            let (ok, nid) = sym_arena_intern(inout ar, NodeTag::Str, pv, in empty_kids, 0, 0);
+            if !ok {
+                return (CheckStatus::LimitTerms, 0);
+            }
+            slots.push(nid);
+        } else {
+            let c_len = slice_u64_at(in words, p);
+            p = inc(p);
+            app_kids.resize(0, 0);
+            for k in 0..c_len {
+                let child_slot = slice_u64_at(in words, wrapping_add(p, k));
+                app_kids.push(at32(in slots, child_slot));
+            }
+            p = wrapping_add(p, c_len);
+            let (ok, nid) = sym_arena_intern(inout ar, NodeTag::App, pv, in app_kids, 0, c_len);
+            if !ok {
+                return (CheckStatus::LimitTerms, 0);
+            }
+            slots.push(nid);
+        }
+    }
+    (CheckStatus::Ok, at32(in slots, wrapping_sub(pat_nodes, 1)))
+}
+
+fn fail_out(code: u64, detail: u64) -> ChunkSeq[u64] {
+    let mut o = ChunkSeq::new[u64]();
+    o.push(code);
+    o.push(detail);
+    o
+}
+
+pub fn witness_check(in words: Slice[u64]) -> ChunkSeq[u64] {
+    let wlen = words.len();
+    if wlen == 0 {
+        return fail_out(CheckStatus::BadInput, 0);
+    }
+    let mut cursor: u64 = 0;
+    let rule_count = slice_u64_at(in words, cursor);
+    cursor = inc(cursor);
+
+    let mut lhs_start = ChunkSeq::with_capacity[u64](rule_count);
+    let mut lhs_nodes = ChunkSeq::with_capacity[u64](rule_count);
+    let mut rhs_start = ChunkSeq::with_capacity[u64](rule_count);
+    let mut rhs_nodes = ChunkSeq::with_capacity[u64](rule_count);
+    let mut var_off = ChunkSeq::with_capacity[u64](rule_count);
+    let mut var_len = ChunkSeq::with_capacity[u64](rule_count);
+    let mut all_vars = ChunkSeq::new[u64]();
+
+    for _r in 0..rule_count {
+        let mut rvars = ChunkSeq::new[u64]();
+        let (ok_l, ls, ln) = scan_postorder_pat(in words, inout cursor, inout rvars);
+        if !ok_l {
+            return fail_out(CheckStatus::BadInput, 0);
+        }
+        let (ok_r, rs, rn) = scan_postorder_pat(in words, inout cursor, inout rvars);
+        if !ok_r {
+            return fail_out(CheckStatus::BadInput, 0);
+        }
+        lhs_start.push(ls);
+        lhs_nodes.push(ln);
+        rhs_start.push(rs);
+        rhs_nodes.push(rn);
+        var_off.push(all_vars.len());
+        var_len.push(rvars.len());
+        for v in 0..rvars.len() {
+            all_vars.push(at64(in rvars, v));
+        }
+    }
+
+    let mut arena = sym_arena_new();
+    let mut smap = ChunkSeq::new[u32]();
+    let st_src = sym_arena_import(inout arena, in words, inout cursor, inout smap);
+    if st_src != CheckStatus::Ok {
+        return fail_out(st_src, 0);
+    }
+    if cursor >= wlen {
+        return fail_out(CheckStatus::BadInput, 0);
+    }
+    let src_root = slice_u64_at(in words, cursor);
+    cursor = inc(cursor);
+    if src_root >= smap.len() {
+        return fail_out(CheckStatus::RootOutOfRange, 0);
+    }
+    let mut cur = at32(in smap, src_root);
+
+    let mut tmap = ChunkSeq::new[u32]();
+    let st_tgt = sym_arena_import(inout arena, in words, inout cursor, inout tmap);
+    if st_tgt != CheckStatus::Ok {
+        return fail_out(st_tgt, 0);
+    }
+    if cursor >= wlen {
+        return fail_out(CheckStatus::BadInput, 0);
+    }
+    let tgt_root = slice_u64_at(in words, cursor);
+    cursor = inc(cursor);
+    if tgt_root >= tmap.len() {
+        return fail_out(CheckStatus::RootOutOfRange, 0);
+    }
+    let goal = at32(in tmap, tgt_root);
+
+    let mut wmap = ChunkSeq::new[u32]();
+    let st_wit = sym_arena_import(inout arena, in words, inout cursor, inout wmap);
+    if st_wit != CheckStatus::Ok {
+        return fail_out(st_wit, 0);
+    }
+    if cursor >= wlen {
+        return fail_out(CheckStatus::BadInput, 0);
+    }
+    let step_count = slice_u64_at(in words, cursor);
+    cursor = inc(cursor);
+    if step_count > MAX_STEPS {
+        return fail_out(CheckStatus::LimitSteps, 0);
+    }
+
+    let mut uses = filled64(rule_count, 0);
+    let mut forward: u64 = 0;
+    let mut backward: u64 = 0;
+    let mut subst_vars = ChunkSeq::new[u64]();
+    let mut subst_ids = ChunkSeq::new[u32]();
+    let mut trail_parent = ChunkSeq::new[u32]();
+    let mut trail_k = ChunkSeq::new[u64]();
+    let mut replace_kids = ChunkSeq::new[u32]();
+
+    for step_idx in 0..step_count {
+        if wrapping_add(cursor, 4) > wlen {
+            return fail_out(CheckStatus::BadInput, step_idx);
+        }
+        let rule_idx = slice_u64_at(in words, cursor);
+        let dir = slice_u64_at(in words, inc(cursor));
+        let path_len = slice_u64_at(in words, wrapping_add(cursor, 2));
+        cursor = wrapping_add(cursor, 3);
+        if wrapping_add(cursor, path_len) > wlen {
+            return fail_out(CheckStatus::BadInput, step_idx);
+        }
+        let path_start = cursor;
+        cursor = wrapping_add(cursor, path_len);
+        if cursor >= wlen {
+            return fail_out(CheckStatus::BadInput, step_idx);
+        }
+        let subst_len = slice_u64_at(in words, cursor);
+        cursor = inc(cursor);
+        let subst_words = wrapping_mul(subst_len, 2);
+        if wrapping_add(cursor, subst_words) > wlen {
+            return fail_out(CheckStatus::BadInput, step_idx);
+        }
+        let subst_start = cursor;
+        cursor = wrapping_add(cursor, subst_words);
+
+        if rule_idx >= rule_count {
+            return fail_out(CheckStatus::UnknownRule, step_idx);
+        }
+        if dir != StepDir::Forward && dir != StepDir::Backward {
+            return fail_out(CheckStatus::BadInput, step_idx);
+        }
+
+        subst_vars.resize(0, 0);
+        subst_ids.resize(0, 0);
+        for s in 0..subst_len {
+            let base = wrapping_add(subst_start, wrapping_mul(s, 2));
+            let sv = slice_u64_at(in words, base);
+            let sterm = slice_u64_at(in words, inc(base));
+            if sterm >= wmap.len() {
+                return fail_out(CheckStatus::TermOutOfRange, step_idx);
+            }
+            for prev in 0..subst_vars.len() {
+                if at64(in subst_vars, prev) == sv {
+                    return fail_out(CheckStatus::VarBoundTwice, step_idx);
+                }
+            }
+            subst_vars.push(sv);
+            subst_ids.push(at32(in wmap, sterm));
+        }
+
+        let rv_off = at64(in var_off, rule_idx);
+        let rv_len = at64(in var_len, rule_idx);
+        if subst_vars.len() != rv_len {
+            return fail_out(CheckStatus::SubstMismatch, step_idx);
+        }
+        for v in 0..rv_len {
+            let want_v = at64(in all_vars, wrapping_add(rv_off, v));
+            let mut present = false;
+            for s in 0..subst_vars.len() {
+                if at64(in subst_vars, s) == want_v {
+                    present = true;
+                    break;
+                }
+            }
+            if !present {
+                return fail_out(CheckStatus::SubstMismatch, step_idx);
+            }
+        }
+
+        if path_len > MAX_DEPTH {
+            return fail_out(CheckStatus::LimitDepth, step_idx);
+        }
+        trail_parent.resize(0, 0);
+        trail_k.resize(0, 0);
+        let mut at = cur;
+        for p in 0..path_len {
+            let child_idx = slice_u64_at(in words, wrapping_add(path_start, p));
+            let at_idx = w(at);
+            if at8(in arena.tag, at_idx) != NodeTag::App {
+                return fail_out(CheckStatus::BelowLiteral, step_idx);
+            }
+            let kl = at64(in arena.kid_len, at_idx);
+            if child_idx >= kl {
+                return fail_out(CheckStatus::PosOutOfRange, step_idx);
+            }
+            let ko = at64(in arena.kid_off, at_idx);
+            trail_parent.push(at);
+            trail_k.push(child_idx);
+            at = at32(in arena.kids, wrapping_add(ko, child_idx));
+        }
+
+        let (from_s, from_n, to_s, to_n) = if dir == StepDir::Forward {
+            (
+                at64(in lhs_start, rule_idx),
+                at64(in lhs_nodes, rule_idx),
+                at64(in rhs_start, rule_idx),
+                at64(in rhs_nodes, rule_idx),
+            )
+        } else {
+            (
+                at64(in rhs_start, rule_idx),
+                at64(in rhs_nodes, rule_idx),
+                at64(in lhs_start, rule_idx),
+                at64(in lhs_nodes, rule_idx),
+            )
+        };
+
+        let (m_st, matched) = instantiate_postorder_pat(
+            inout arena,
+            in words,
+            from_s,
+            from_n,
+            in subst_vars,
+            in subst_ids
+        );
+        if m_st != CheckStatus::Ok {
+            return fail_out(m_st, step_idx);
+        }
+        if matched != at {
+            return fail_out(CheckStatus::SubtermMismatch, step_idx);
+        }
+
+        let (r_st, replacement) = instantiate_postorder_pat(
+            inout arena,
+            in words,
+            to_s,
+            to_n,
+            in subst_vars,
+            in subst_ids
+        );
+        if r_st != CheckStatus::Ok {
+            return fail_out(r_st, step_idx);
+        }
+
+        let mut rebuilt = replacement;
+        let mut d = trail_parent.len();
+        loop {
+            if d == 0 {
+                break;
+            }
+            d = wrapping_sub(d, 1);
+            let par = at32(in trail_parent, d);
+            let par_idx = w(par);
+            let ck = at64(in trail_k, d);
+            let ko = at64(in arena.kid_off, par_idx);
+            let kl = at64(in arena.kid_len, par_idx);
+            replace_kids.resize(0, 0);
+            for k in 0..kl {
+                if k == ck {
+                    replace_kids.push(rebuilt);
+                } else {
+                    replace_kids.push(at32(in arena.kids, wrapping_add(ko, k)));
+                }
+            }
+            let (ok_rep, new_par) = sym_arena_intern(
+                inout arena,
+                NodeTag::App,
+                at64(in arena.val, par_idx),
+                in replace_kids,
+                0,
+                kl
+            );
+            if !ok_rep {
+                return fail_out(CheckStatus::LimitTerms, step_idx);
+            }
+            rebuilt = new_par;
+        }
+        cur = rebuilt;
+        uses.try_set(rule_idx, inc(at64(in uses, rule_idx)));
+        if dir == StepDir::Forward {
+            forward = inc(forward);
+        } else {
+            backward = inc(backward);
+        }
+    }
+
+    if cur != goal {
+        return fail_out(CheckStatus::GoalMismatch, 0);
+    }
+
+    let mut out = ChunkSeq::with_capacity[u64](wrapping_add(rule_count, 3));
+    out.push(CheckStatus::Ok);
+    out.push(forward);
+    out.push(backward);
+    for r in 0..rule_count {
+        out.push(at64(in uses, r));
+    }
+    out
+}
