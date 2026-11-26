@@ -26,6 +26,9 @@ const ZERO_EXTEND: u64 = 16;
 const SIGN_EXTEND: u64 = 17;
 const COMPARE_WORD: u64 = 18;
 const COMPARE_DWORD: u64 = 19;
+const SHL_REGISTER: u64 = 20;
+const SHR_REGISTER: u64 = 21;
+const SAR_REGISTER: u64 = 22;
 
 const EQUAL: u64 = 0;
 const NOT_EQUAL: u64 = 1;
@@ -102,8 +105,17 @@ fn valid_width(width: u64) -> bool {
     width == BYTE_BITS || width == WORD_BITS || width == DWORD_BITS || width == QWORD_BITS
 }
 
+fn is_register_shift(op: u64) -> bool {
+    op >= SHL_REGISTER && op <= SAR_REGISTER
+}
+
 fn reads_right(op: u64) -> bool {
-    (op >= ADD && op <= XOR) || is_comparison(op) || op == SELECT
+    (op >= ADD && op <= XOR) || is_comparison(op) || op == SELECT || is_register_shift(op)
+}
+
+// A shift must keep its count until the destructive instruction reads it.
+fn can_reuse_right(op: u64) -> bool {
+    op != SUB && !is_register_shift(op)
 }
 
 fn condition_code(condition: u64) -> u8 {
@@ -139,10 +151,16 @@ fn find_last_reads(
         let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
-        if record.op > COMPARE_DWORD {
+        if record.op > SAR_REGISTER {
             return Option::None;
         }
         if record.op >= ADD && record.op <= SAR && !valid_width(record.extra) {
+            return Option::None;
+        }
+        if is_register_shift(record.op)
+            && record.extra != DWORD_BITS
+            && record.extra != QWORD_BITS
+        {
             return Option::None;
         }
         if record.op >= TRUNCATE && record.op <= SIGN_EXTEND {
@@ -205,6 +223,9 @@ fn operation(in record: Record, destination: u8, source: u8) -> Instruction {
         NOT => Instruction::Unary(NOT_EXTENSION, destination, width),
         SHL => Instruction::Shift(SHL_EXTENSION, destination, count, width),
         SHR => Instruction::Shift(SHR_EXTENSION, destination, count, width),
+        SHL_REGISTER => Instruction::ShiftRegister(SHL_EXTENSION, destination, source, width),
+        SHR_REGISTER => Instruction::ShiftRegister(SHR_EXTENSION, destination, source, width),
+        SAR_REGISTER => Instruction::ShiftRegister(SAR_EXTENSION, destination, source, width),
         _ => Instruction::Shift(SAR_EXTENSION, destination, count, width),
     }
 }
@@ -270,7 +291,7 @@ pub fn encode_block(in words: Slice[u64]) -> ChunkSeq[u8] {
             third
         } else if left_dies {
             left
-        } else if right_dies && record.op != SUB {
+        } else if right_dies && can_reuse_right(record.op) {
             right
         } else {
             find_register(used)
@@ -309,7 +330,7 @@ pub fn encode_block(in words: Slice[u64]) -> ChunkSeq[u8] {
             // Narrow results stay zero-extended in their physical registers.
             emit(inout output, in Instruction::Move(destination, left));
         } else {
-            let reuse_right = !left_dies && right_dies && record.op != SUB;
+            let reuse_right = !left_dies && right_dies && can_reuse_right(record.op);
             let first = if reuse_right { right } else { left };
             let second = if reuse_right { left } else { right };
             emit(inout output, in Instruction::Move(destination, first));

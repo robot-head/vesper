@@ -1,7 +1,10 @@
 //! Function definition swap for the experimental Vesper machine backend.
 use cranelift_codegen::{
     entity::SecondaryMap,
-    ir::{AbiParam, Function, InstructionData, Opcode, Type, condcodes::IntCC, types},
+    ir::{
+        AbiParam, Block, BlockCall, Function, Inst, InstructionData, Opcode, Type, Value,
+        condcodes::IntCC, types,
+    },
     isa::CallConv,
 };
 use std::sync::OnceLock;
@@ -30,6 +33,9 @@ enum IntegerOp {
     SignExtend = 17,
     CompareWord = 18,
     CompareDword = 19,
+    ShiftLeftRegister = 20,
+    ShiftRightLogicalRegister = 21,
+    ShiftRightArithmeticRegister = 22,
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
@@ -97,14 +103,218 @@ fn integer_bits(bits: i64, ty: Type) -> u64 {
     }
 }
 
-fn append(words: &mut Vec<u64>, arity: usize, op: IntegerOp, operands: [u64; 3]) -> u64 {
-    let value = arity + (words.len() - HEADER_WORDS) / INSTRUCTION_WORDS;
-    words.push(op as u64);
-    words.extend(operands);
-    value as u64
+type Values = SecondaryMap<Value, Option<u64>>;
+
+struct IntegerBlocks<'a> {
+    function: &'a Function,
+    arity: usize,
+    words: Vec<u64>,
 }
 
-/// Encodes one System V i64 block for the Vesper backend. The header holds
+impl IntegerBlocks<'_> {
+    fn append(&mut self, op: IntegerOp, operands: [u64; 3]) -> u64 {
+        let value = self.arity + (self.words.len() - HEADER_WORDS) / INSTRUCTION_WORDS;
+        self.words.push(op as u64);
+        self.words.extend(operands);
+        value as u64
+    }
+
+    fn value_type(&self, value: Value) -> Type {
+        self.function
+            .dfg
+            .value_type(self.function.dfg.resolve_aliases(value))
+    }
+
+    fn edge(&self, edge: BlockCall, values: &mut Values) -> Option<Block> {
+        let dfg = &self.function.dfg;
+        let target = edge.block(&dfg.value_lists);
+        let params = dfg.block_params(target);
+        if params.len() != edge.len(&dfg.value_lists) {
+            return None;
+        }
+        let arguments: Option<Vec<_>> = params
+            .iter()
+            .zip(edge.args(&dfg.value_lists))
+            .map(|(&param, arg)| {
+                let arg = arg.as_value()?;
+                let ty = self.value_type(arg);
+                if integer_width(ty).is_none() || self.value_type(param) != ty {
+                    return None;
+                }
+                values[dfg.resolve_aliases(arg)]
+            })
+            .collect();
+        for (&param, arg) in params.iter().zip(arguments?) {
+            values[param] = Some(arg);
+        }
+        Some(target)
+    }
+
+    // A block's arguments are already mapped by its incoming edge.
+    // The only operations added to the integer stream here are pure.
+    fn emit_block(&mut self, block: Block, values: &mut Values) -> Option<Inst> {
+        let function = self.function;
+        let mut instructions = function.layout.block_insts(block);
+        let terminator = instructions.next_back()?;
+        for inst in instructions {
+            let [value] = *function.dfg.inst_results(inst) else {
+                return None;
+            };
+            let output = function.dfg.value_type(value);
+            let width = integer_width(output)?;
+            let input = |value| values[function.dfg.resolve_aliases(value)];
+            let ty = |value| function.dfg.value_type(function.dfg.resolve_aliases(value));
+            let (op, operands) = match function.dfg.insts[inst] {
+                InstructionData::UnaryImm {
+                    opcode: Opcode::Iconst,
+                    imm,
+                } => (
+                    IntegerOp::Constant,
+                    [integer_bits(imm.bits(), output), 0, 0],
+                ),
+                InstructionData::Unary { opcode, arg } => {
+                    let source_width = integer_width(ty(arg))?;
+                    let op = match opcode {
+                        Opcode::Ineg if source_width == width => IntegerOp::Neg,
+                        Opcode::Bnot if source_width == width => IntegerOp::Not,
+                        Opcode::Ireduce if source_width > width => IntegerOp::Truncate,
+                        Opcode::Uextend if source_width < width => IntegerOp::ZeroExtend,
+                        Opcode::Sextend if source_width < width => IntegerOp::SignExtend,
+                        _ => return None,
+                    };
+                    (op, [input(arg)?, source_width, width])
+                }
+                InstructionData::IntCompare {
+                    opcode: Opcode::Icmp,
+                    cond,
+                    args: [left, right],
+                } if output == types::I8 && ty(left) == ty(right) => (
+                    compare_op(ty(left))?,
+                    [input(left)?, input(right)?, condition(cond)],
+                ),
+                InstructionData::IntCompareImm {
+                    opcode: Opcode::IcmpImm,
+                    cond,
+                    arg,
+                    imm,
+                } if output == types::I8 => {
+                    let op = compare_op(ty(arg))?;
+                    let left = input(arg)?;
+                    let bits = integer_bits(imm.bits(), ty(arg));
+                    let right = self.append(IntegerOp::Constant, [bits, 0, 0]);
+                    (op, [left, right, condition(cond)])
+                }
+                InstructionData::Ternary {
+                    opcode: Opcode::Select,
+                    args: [cond, yes, no],
+                } if integer_width(ty(cond)).is_some() && ty(yes) == output && ty(no) == output => {
+                    (IntegerOp::Select, [input(cond)?, input(yes)?, input(no)?])
+                }
+                InstructionData::Binary {
+                    opcode: opcode @ (Opcode::Ishl | Opcode::Ushr | Opcode::Sshr),
+                    args: [left, right],
+                } if matches!(output, types::I32 | types::I64)
+                    && ty(left) == output
+                    && integer_width(ty(right)).is_some() =>
+                {
+                    let op = match opcode {
+                        Opcode::Ishl => IntegerOp::ShiftLeftRegister,
+                        Opcode::Ushr => IntegerOp::ShiftRightLogicalRegister,
+                        _ => IntegerOp::ShiftRightArithmeticRegister,
+                    };
+                    (op, [input(left)?, input(right)?, width])
+                }
+                InstructionData::Binary {
+                    opcode,
+                    args: [left, right],
+                } if ty(left) == output && ty(right) == output => {
+                    (binary_op(opcode)?, [input(left)?, input(right)?, width])
+                }
+                InstructionData::BinaryImm64 { opcode, arg, imm } if ty(arg) == output => {
+                    let left = input(arg)?;
+                    let bits = integer_bits(imm.bits(), output);
+                    match opcode {
+                        Opcode::IshlImm => (IntegerOp::ShiftLeft, [left, bits, width]),
+                        Opcode::UshrImm => (IntegerOp::ShiftRightLogical, [left, bits, width]),
+                        Opcode::SshrImm => (IntegerOp::ShiftRightArithmetic, [left, bits, width]),
+                        _ => {
+                            let op = binary_op(opcode)?;
+                            let right = self.append(IntegerOp::Constant, [bits, 0, 0]);
+                            (op, [left, right, width])
+                        }
+                    }
+                }
+                _ => return None,
+            };
+            values[value] = Some(self.append(op, operands));
+        }
+        Some(terminator)
+    }
+
+    fn follow_jumps(
+        &mut self,
+        mut block: Block,
+        values: &mut Values,
+        visited: &mut SecondaryMap<Block, bool>,
+    ) -> Option<Inst> {
+        loop {
+            if visited[block] || !self.function.layout.is_block_inserted(block) {
+                return None;
+            }
+            visited[block] = true;
+            let terminator = self.emit_block(block, values)?;
+            match self.function.dfg.insts[terminator] {
+                InstructionData::Jump {
+                    opcode: Opcode::Jump,
+                    destination,
+                } => block = self.edge(destination, values)?,
+                _ => return Some(terminator),
+            }
+        }
+    }
+
+    fn returned(&self, terminator: Inst, values: &Values) -> Option<u64> {
+        let dfg = &self.function.dfg;
+        if dfg.insts[terminator].opcode() != Opcode::Return {
+            return None;
+        }
+        let [value] = *dfg.inst_args(terminator) else {
+            return None;
+        };
+        let value = dfg.resolve_aliases(value);
+        if dfg.value_type(value) != types::I64 {
+            return None;
+        }
+        values[value]
+    }
+
+    // Both arms must be disjoint pure paths to returns. The caller's
+    // existing CLIF optimizer handles conversion of diamonds with joins.
+    fn returned_from_branch(
+        &mut self,
+        condition: Value,
+        arms: [BlockCall; 2],
+        values: Values,
+        visited: &mut SecondaryMap<Block, bool>,
+    ) -> Option<u64> {
+        integer_width(self.value_type(condition))?;
+        let condition = values[self.function.dfg.resolve_aliases(condition)]?;
+        let [yes_edge, no_edge] = arms;
+        let mut yes_values = values.clone();
+        let yes_block = self.edge(yes_edge, &mut yes_values)?;
+        let yes_return = self.follow_jumps(yes_block, &mut yes_values, visited)?;
+        let yes = self.returned(yes_return, &yes_values)?;
+
+        let mut no_values = values;
+        let no_block = self.edge(no_edge, &mut no_values)?;
+        let no_return = self.follow_jumps(no_block, &mut no_values, visited)?;
+        let no = self.returned(no_return, &no_values)?;
+        Some(self.append(IntegerOp::Select, [condition, yes, no]))
+    }
+}
+
+/// Encodes pure System V i64 paths into a value stream for the Vesper backend.
+/// The header holds
 /// the argument count and the return value ID. The remaining words are
 /// (opcode, left, right, extra) records. The extra word is the result width
 /// for arithmetic and conversions, the condition code for comparisons, or
@@ -126,11 +336,7 @@ pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
         return None;
     }
 
-    let mut blocks = function.layout.blocks();
-    let block = blocks.next()?;
-    if blocks.next().is_some() {
-        return None;
-    }
+    let block = function.layout.blocks().next()?;
 
     let params = function.dfg.block_params(block);
     if params.len() != arity
@@ -145,101 +351,24 @@ pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
         values[param] = Some(index as u64);
     }
 
-    let mut instructions = function.layout.block_insts(block);
-    let ret = instructions.next_back()?;
-    if function.dfg.insts[ret].opcode() != Opcode::Return {
-        return None;
-    }
-    let [result] = *function.dfg.inst_args(ret) else {
-        return None;
+    let mut blocks = IntegerBlocks {
+        function,
+        arity,
+        words: vec![0; HEADER_WORDS],
     };
-
-    let mut words = vec![0; HEADER_WORDS];
-    words[ARGUMENT_COUNT] = arity as u64;
-    for inst in instructions {
-        let [value] = *function.dfg.inst_results(inst) else {
-            return None;
-        };
-        let output = function.dfg.value_type(value);
-        let width = integer_width(output)?;
-        let input = |value| values[function.dfg.resolve_aliases(value)];
-        let ty = |value| function.dfg.value_type(function.dfg.resolve_aliases(value));
-        let (op, operands) = match function.dfg.insts[inst] {
-            InstructionData::UnaryImm {
-                opcode: Opcode::Iconst,
-                imm,
-            } => (
-                IntegerOp::Constant,
-                [integer_bits(imm.bits(), output), 0, 0],
-            ),
-            InstructionData::Unary { opcode, arg } => {
-                let source_width = integer_width(ty(arg))?;
-                let op = match opcode {
-                    Opcode::Ineg if source_width == width => IntegerOp::Neg,
-                    Opcode::Bnot if source_width == width => IntegerOp::Not,
-                    Opcode::Ireduce if source_width > width => IntegerOp::Truncate,
-                    Opcode::Uextend if source_width < width => IntegerOp::ZeroExtend,
-                    Opcode::Sextend if source_width < width => IntegerOp::SignExtend,
-                    _ => return None,
-                };
-                (op, [input(arg)?, source_width, width])
-            }
-            InstructionData::IntCompare {
-                opcode: Opcode::Icmp,
-                cond,
-                args: [left, right],
-            } if output == types::I8 && ty(left) == ty(right) => (
-                compare_op(ty(left))?,
-                [input(left)?, input(right)?, condition(cond)],
-            ),
-            InstructionData::IntCompareImm {
-                opcode: Opcode::IcmpImm,
-                cond,
-                arg,
-                imm,
-            } if output == types::I8 => {
-                let op = compare_op(ty(arg))?;
-                let left = input(arg)?;
-                let bits = integer_bits(imm.bits(), ty(arg));
-                let right = append(&mut words, arity, IntegerOp::Constant, [bits, 0, 0]);
-                (op, [left, right, condition(cond)])
-            }
-            InstructionData::Ternary {
-                opcode: Opcode::Select,
-                args: [cond, yes, no],
-            } if integer_width(ty(cond)).is_some() && ty(yes) == output && ty(no) == output => {
-                (IntegerOp::Select, [input(cond)?, input(yes)?, input(no)?])
-            }
-            InstructionData::Binary {
-                opcode,
-                args: [left, right],
-            } if ty(left) == output && ty(right) == output => {
-                (binary_op(opcode)?, [input(left)?, input(right)?, width])
-            }
-            InstructionData::BinaryImm64 { opcode, arg, imm } if ty(arg) == output => {
-                let left = input(arg)?;
-                let bits = integer_bits(imm.bits(), output);
-                match opcode {
-                    Opcode::IshlImm => (IntegerOp::ShiftLeft, [left, bits, width]),
-                    Opcode::UshrImm => (IntegerOp::ShiftRightLogical, [left, bits, width]),
-                    Opcode::SshrImm => (IntegerOp::ShiftRightArithmetic, [left, bits, width]),
-                    _ => {
-                        let op = binary_op(opcode)?;
-                        let right = append(&mut words, arity, IntegerOp::Constant, [bits, 0, 0]);
-                        (op, [left, right, width])
-                    }
-                }
-            }
-            _ => return None,
-        };
-        values[value] = Some(append(&mut words, arity, op, operands));
-    }
-    let result = function.dfg.resolve_aliases(result);
-    if function.dfg.value_type(result) != types::I64 {
-        return None;
-    }
-    words[RETURN_VALUE] = values[result]?;
-    Some(words)
+    let mut visited = SecondaryMap::new();
+    let terminator = blocks.follow_jumps(block, &mut values, &mut visited)?;
+    let result = match function.dfg.insts[terminator] {
+        InstructionData::Brif {
+            opcode: Opcode::Brif,
+            arg,
+            blocks: arms,
+        } => blocks.returned_from_branch(arg, arms, values, &mut visited)?,
+        _ => blocks.returned(terminator, &values)?,
+    };
+    blocks.words[ARGUMENT_COUNT] = arity as u64;
+    blocks.words[RETURN_VALUE] = result;
+    Some(blocks.words)
 }
 
 fn encode_integer_block(

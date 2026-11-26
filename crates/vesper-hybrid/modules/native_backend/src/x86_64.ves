@@ -33,6 +33,8 @@ const UNARY_GROUP: u8 = 0xf7;
 const SHIFT_BYTE_GROUP_IMM8: u8 = 0xc0;
 const OPERAND_SIZE_OVERRIDE: u8 = 0x66;
 const SHIFT_GROUP_IMM8: u8 = 0xc1;
+const SHIFT_GROUP_CL: u8 = 0xd3;
+const XCHG_RM_R64: u8 = 0x87;
 const CMP_RM_R8: u8 = 0x38;
 const CMP_RM_R64: u8 = 0x39;
 const SETCC: u8 = 0x90;
@@ -78,6 +80,7 @@ pub copy enum Instruction {
     Multiply(u8, u8, u64),
     Unary(u8, u8, u64),
     Shift(u8, u8, u8, u64),
+    ShiftRegister(u8, u8, u8, u64),
     Compare(u8, u8, u8, u8, u64),
     Select(u8, u8, u8, u8, u8),
     Truncate(u8, u8, u64),
@@ -260,6 +263,28 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             out.push(modrm(extension, destination));
             out.push(count);
             normalize_small_result(inout out, destination, width);
+        },
+        Instruction::ShiftRegister(extension, destination, count, width) => {
+            // Legacy shifts read CL. Exchange full registers to preserve a
+            // live RCX and restore the count when the operation is finished.
+            let shifted = if count == RCX {
+                destination
+            } else {
+                binary(inout out, XCHG_RM_R64, RCX, count, true);
+                if destination == RCX {
+                    count
+                } else if destination == count {
+                    RCX
+                } else {
+                    destination
+                }
+            };
+            out.push(rex(0, shifted, width == QWORD_BITS));
+            out.push(SHIFT_GROUP_CL);
+            out.push(modrm(extension, shifted));
+            if count != RCX {
+                binary(inout out, XCHG_RM_R64, RCX, count, true);
+            }
         },
         Instruction::Compare(destination, left, right, cc, width) => {
             if width == WORD_BITS {

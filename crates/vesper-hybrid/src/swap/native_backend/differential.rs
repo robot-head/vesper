@@ -1,6 +1,6 @@
 use super::binding;
 use super::machine::integer_block_words;
-use cranelift_codegen::ir::{AbiParam, InstBuilder, Type, condcodes::IntCC, types};
+use cranelift_codegen::ir::{AbiParam, BlockArg, InstBuilder, Type, condcodes::IntCC, types};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
@@ -21,6 +21,12 @@ enum Case {
     NarrowArithmetic(Type),
     NarrowShifts(Type),
     ChainedCasts,
+    JumpChain,
+    ReturningBranch,
+    ShiftCountInRcx,
+    ShiftDestinationRcx,
+    ShiftSameRegister,
+    ShiftDword,
     CompareImmediate,
     Select,
     SelectKeepingArms,
@@ -85,6 +91,12 @@ fn integer_backend_matches_cranelift_results() {
         Case::SelectKeepingTrue,
         Case::ByteExtensions,
         Case::ChainedCasts,
+        Case::JumpChain,
+        Case::ReturningBranch,
+        Case::ShiftCountInRcx,
+        Case::ShiftDestinationRcx,
+        Case::ShiftSameRegister,
+        Case::ShiftDword,
     ];
     let cases: Vec<_> = cases
         .into_iter()
@@ -211,6 +223,59 @@ fn integer_backend_matches_cranelift_results() {
                 let unsigned = builder.ins().uextend(types::I64, signed_word);
                 builder.ins().isub(signed, unsigned)
             }
+            Case::JumpChain => {
+                let first = builder.create_block();
+                let second = builder.create_block();
+                let low = builder.append_block_param(first, types::I64);
+                let high = builder.append_block_param(first, types::I64);
+                let result = builder.append_block_param(second, types::I64);
+                builder
+                    .ins()
+                    .jump(first, &[BlockArg::Value(b), BlockArg::Value(a)]);
+                builder.switch_to_block(first);
+                let difference = builder.ins().isub(high, low);
+                builder.ins().jump(second, &[BlockArg::Value(difference)]);
+                builder.switch_to_block(second);
+                builder.ins().imul(result, c)
+            }
+            Case::ReturningBranch => {
+                let yes = builder.create_block();
+                let no = builder.create_block();
+                let yes_operand = builder.append_block_param(yes, types::I64);
+                let no_operand = builder.append_block_param(no, types::I64);
+                let predicate = builder.ins().icmp(IntCC::SignedLessThan, a, b);
+                builder.ins().brif(
+                    predicate,
+                    yes,
+                    &[BlockArg::Value(e)],
+                    no,
+                    &[BlockArg::Value(f)],
+                );
+                builder.switch_to_block(yes);
+                let result = builder.ins().iadd(yes_operand, c);
+                builder.ins().return_(&[result]);
+                builder.switch_to_block(no);
+                builder.ins().isub(no_operand, d)
+            }
+            Case::ShiftCountInRcx => {
+                let shifted = builder.ins().ushr(a, d);
+                builder.ins().bxor(shifted, d)
+            }
+            Case::ShiftDestinationRcx => {
+                let shifted = builder.ins().ishl(d, e);
+                builder.ins().iadd(shifted, e)
+            }
+            Case::ShiftSameRegister => {
+                let shifted = builder.ins().sshr(e, e);
+                builder.ins().bxor(shifted, d)
+            }
+            Case::ShiftDword => {
+                let word = builder.ins().ireduce(types::I32, a);
+                let count = builder.ins().ireduce(types::I32, e);
+                let shifted = builder.ins().sshr(word, count);
+                let full = builder.ins().uextend(types::I64, shifted);
+                builder.ins().iadd(full, d)
+            }
             Case::CompareImmediate => {
                 let byte = builder.ins().ireduce(types::I8, a);
                 let zero = builder.ins().icmp_imm(IntCC::Equal, byte, 0);
@@ -242,7 +307,8 @@ fn integer_backend_matches_cranelift_results() {
         builder.seal_all_blocks();
         builder.finalize();
 
-        let request = integer_block_words(&context.func).expect("supported CLIF block");
+        let request =
+            integer_block_words(&context.func).unwrap_or_else(|| panic!("declined {case:?}"));
         let bytes = binding::x86_64_integer_block(&request);
         assert!(!bytes.is_empty(), "{case:?}");
         module.define_function(baseline, &mut context).unwrap();
@@ -268,7 +334,8 @@ fn integer_backend_matches_cranelift_results() {
             [0x80, 0x7f, 0, 0, 0x80, 0xff],
             [0x100, u64::MAX - 1, 0, 0, 0x100, 0x80],
             [0x8000, 0x7fff, 0, 0, 0, 0],
-            [0x8000_0000, 0x7fff_ffff, 0, 0, 0, 0],
+            [0x8000_0000, 0x7fff_ffff, 0, 65, 33, 0],
+            [u64::MAX, 0, 0, 32, 65, 0],
         ] {
             assert_eq!(
                 unsafe { candidate(a, b, c, d, e, f) },
@@ -333,4 +400,46 @@ fn integer_backend_declines_register_pressure_and_unsupported_operations() {
     builder.seal_all_blocks();
     builder.finalize();
     assert!(integer_block_words(&context.func).is_none());
+}
+
+#[test]
+fn integer_backend_declines_cycles_and_effectful_branch_arms() {
+    let mut context = cranelift_codegen::Context::new();
+    let mut builder_context = FunctionBuilderContext::new();
+    for cyclic in [false, true] {
+        context.clear();
+        context.func.signature.call_conv = cranelift_codegen::isa::CallConv::SystemV;
+        context
+            .func
+            .signature
+            .params
+            .push(AbiParam::new(types::I64));
+        context
+            .func
+            .signature
+            .returns
+            .push(AbiParam::new(types::I64));
+        let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+        let entry = builder.create_block();
+        let yes = builder.create_block();
+        let no = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let argument = builder.block_params(entry)[0];
+        builder.ins().brif(argument, yes, &[], no, &[]);
+
+        builder.switch_to_block(yes);
+        if cyclic {
+            builder.ins().jump(yes, &[]);
+        } else {
+            let division = builder.ins().sdiv(argument, argument);
+            builder.ins().return_(&[division]);
+        }
+
+        builder.switch_to_block(no);
+        builder.ins().return_(&[argument]);
+        builder.seal_all_blocks();
+        builder.finalize();
+        assert!(integer_block_words(&context.func).is_none());
+    }
 }
