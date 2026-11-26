@@ -1,5 +1,6 @@
 // @vesper-std/sort::keyed: sorting by a parallel key slice.
 use self::unstable::{lt, swap_at, depth_limit};
+use @vesper-std/core::anvil::test;
 use @vesper-std/sugar::{guard, when};
 
 // Whether index `x` sorts before `y`: by key, then by the index itself.
@@ -399,34 +400,6 @@ test {
         !before_at(in "a".as_bytes(), in order.as_slice(), i, j)
     }
 
-    fn test_insertion_preserves_neighbors() -> bool {
-        let mut order = ChunkSeq::new[u32]();
-        order.push(3);
-        order.push(2);
-        order.push(1);
-        order.push(0);
-        insertion_by(in "abcd".as_bytes(), inout order.as_slice_mut(), 1, 3);
-        let neighbors_unchanged = order.try_get(0) == Option::Some(3)
-            && order.try_get(1) == Option::Some(1)
-            && order.try_get(2) == Option::Some(2)
-            && order.try_get(3) == Option::Some(0);
-        // With a range longer than the slice, sort the available indices.
-        insertion_by(in "abcd".as_bytes(), inout order.as_slice_mut(), 0, 6);
-        neighbors_unchanged
-            && order.try_get(0) == Option::Some(0)
-            && order.try_get(1) == Option::Some(1)
-            && order.try_get(2) == Option::Some(2)
-            && order.try_get(3) == Option::Some(3)
-    }
-
-    fn test_heapsort_orders_pair() -> bool {
-        let mut order = ChunkSeq::new[u32]();
-        order.push(0);
-        order.push(1);
-        heapsort_by(in "ab".as_bytes(), inout order.as_slice_mut(), 0, 2);
-        order.try_get(0) == Option::Some(0) && order.try_get(1) == Option::Some(1)
-    }
-
     fn bytes_match(in actual: Slice[u8], in expected: Str) -> bool {
         if actual.len() != expected.len() {
             return false;
@@ -459,4 +432,32 @@ test {
         bytes_match(in ks.as_slice(), in expected_keys)
             && bytes_match(in vs.as_slice(), in expected_values)
     }
+}
+
+test test_insertion_preserves_neighbors {
+    let mut order = ChunkSeq::new[u32]();
+    order.push(3);
+    order.push(2);
+    order.push(1);
+    order.push(0);
+    insertion_by(in "abcd".as_bytes(), inout order.as_slice_mut(), 1, 3);
+    let neighbors_unchanged = order.try_get(0) == Option::Some(3)
+        && order.try_get(1) == Option::Some(1)
+        && order.try_get(2) == Option::Some(2)
+        && order.try_get(3) == Option::Some(0);
+    // With a range longer than the slice, sort the available indices.
+    insertion_by(in "abcd".as_bytes(), inout order.as_slice_mut(), 0, 6);
+    neighbors_unchanged
+        && order.try_get(0) == Option::Some(0)
+        && order.try_get(1) == Option::Some(1)
+        && order.try_get(2) == Option::Some(2)
+        && order.try_get(3) == Option::Some(3)
+}
+
+test test_heapsort_orders_pair {
+    let mut order = ChunkSeq::new[u32]();
+    order.push(0);
+    order.push(1);
+    heapsort_by(in "ab".as_bytes(), inout order.as_slice_mut(), 0, 2);
+    order.try_get(0) == Option::Some(0) && order.try_get(1) == Option::Some(1)
 }
