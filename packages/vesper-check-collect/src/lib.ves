@@ -27,7 +27,7 @@ use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{Interner, interner_new, symbol_from_id};
 use self::prelude::{
     defined_methods, module_end, needs_option, needs_strings, option_source, replaced,
-    sorted_symbols, strings_source, uses_of
+    sorted_symbols, strings_source, used, uses_of, Uses
 };
 use self::widths::{reserved_width_name, width_source};
 
@@ -175,89 +175,85 @@ fn name_is(in a: Ast, sym: u32, in lit: Str) -> bool {
     true
 }
 
-// Whether `sym` starts with `lit`.
-fn name_starts(in a: Ast, sym: u32, in lit: Str) -> bool {
-    let (s, e) = a.names.span(symbol_from_id(sym));
-    let t = lit.as_bytes();
-    if wrapping_sub(e, s) < t.len() {
-        return false;
-    }
-    for i in 0..t.len() {
-        let c = match t.try_get(i) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
-        if name_byte(in a, wrapping_add(s, i)) != c {
-            return false;
-        }
-    }
-    true
-}
-
 // ---------------------------------------------------------------- preludes
 
-// The names that can bring a prelude into the world (part 1 declines
-// them): the prelude types and methods, the byte-order, bit, checked and
-// transcendental families, and `Str` (a `Str` parameter brings in strings).
-fn prelude_name(in a: Ast, sym: u32) -> bool {
-    false
-        || name_is(in a, sym, "Atomic")
-        || name_is(in a, sym, "MemoryOrder")
-        || name_is(in a, sym, "parallel_for")
-        || name_is(in a, sym, "Secret")
-        || name_is(in a, sym, "SecU8")
-        || name_is(in a, sym, "SecU32")
-        || name_is(in a, sym, "SecU64")
-        || name_is(in a, sym, "SecMask64")
-        || name_is(in a, sym, "Watermark")
-        || name_is(in a, sym, "Box")
-        || name_starts(in a, sym, "exp_")
-        || name_starts(in a, sym, "ln_")
-        || name_starts(in a, sym, "sin_")
-        || name_starts(in a, sym, "cos_")
+// Whether the module names `lit` anywhere (its interner holds it).
+fn has_name(in a: Ast, in lit: Str) -> bool {
+    match a.names.lookup(in lit) {
+        Option::Some(s) => true,
+        Option::None => false,
+    }
 }
 
-// Whether `text` contains `lit`.
-fn contains(in text: Slice[u8], in lit: Str) -> bool {
-    let t = lit.as_bytes();
-    if text.len() < t.len() {
-        return false;
-    }
-    for i in 0..wrapping_add(wrapping_sub(text.len(), t.len()), 1) {
-        let mut all = true;
-        for j in 0..t.len() {
-            if text.try_get(wrapping_add(i, j)) != t.try_get(j) {
-                all = false;
-                break;
-            }
-        }
-        if all {
-            return true;
-        }
-    }
-    false
-}
-
-// Whether the module could need a prelude part 1 does not build: it
-// mentions one of `prelude_name`'s names, has an `@fip` function, or its
-// text mentions regions (the lowering interns `Region` for every module,
-// so the source text decides).
-pub fn needs_prelude(in a: Ast, in source: Str) -> bool {
-    if contains(in source.as_bytes(), "egion") {
+// Whether the module could need a prelude this part does not build: each
+// test is a superset of the checker's (`regions::needs_prelude`,
+// `fip::needs_prelude`, `capability_effects::secret_prelude`,
+// `float_math::prelude`, `atomics::needs_prelude` and `needs_workers`),
+// so a declined module may need none, but an accepted one needs no other.
+pub fn needs_prelude(in a: Ast, in u: Uses) -> bool {
+    // Regions: a handle type, a tiled sequence, or a `Region` effect
+    // instance (the lowering interns `Region` for every module, so the
+    // effect nodes decide).
+    if has_name(in a, "RegionBox") || has_name(in a, "Watermark") || has_name(in a, "TiledSeq") {
         return true;
     }
-    let n = a.names.len();
-    for i in 0..n {
-        if prelude_name(in a, wrapping_u32(i)) {
-            return true;
-        }
+    match a.names.lookup(in "Region") {
+        Option::Some(r) => {
+            for i in 0..a.effect_nodes.len() {
+                if effect_node(in a, wrapping_u32(i)).name == r.id() {
+                    return true;
+                }
+            }
+        },
+        Option::None => {},
+    }
+    // `Box`: the type or its constructors, or an `@fip` function.
+    if has_name(in a, "Box")
+        || has_name(in a, "Box::new")
+        || has_name(in a, "Box::new_in_caller")
+        || has_name(in a, "Box::Box") {
+        return true;
     }
     for i in 0..a.fns.len() {
         if fn_node(in a, wrapping_u32(i)).fip {
             return true;
         }
     }
-    false
+    // Atomics and workers.
+    if has_name(in a, "Atomic") || has_name(in a, "MemoryOrder") || has_name(in a, "parallel_for") {
+        return true;
+    }
+    // Transcendentals.
+    if used(in u, "exp_f32")
+        || used(in u, "exp_f64")
+        || used(in u, "ln_f32")
+        || used(in u, "ln_f64")
+        || used(in u, "sin_f32")
+        || used(in u, "sin_f64")
+        || used(in u, "cos_f32")
+        || used(in u, "cos_f64") {
+        return true;
+    }
+    // Secret operations over a declared secret scalar.
+    let scalar = has_name(in a, "SecU8")
+        || has_name(in a, "SecU32")
+        || has_name(in a, "SecU64")
+        || has_name(in a, "SecMask64");
+    scalar
+        && (
+            used(in u, "bit_and")
+                || used(in u, "bit_or")
+                || used(in u, "bit_xor")
+                || used(in u, "wrapping_add")
+                || used(in u, "wrapping_sub")
+                || used(in u, "wrapping_mul")
+                || used(in u, "ct_eq")
+                || used(in u, "ct_is_zero")
+                || used(in u, "ct_not")
+                || used(in u, "ct_select")
+                || used(in u, "declassify_bool")
+                || used(in u, "load_sec_u64le")
+        )
 }
 
 // ---------------------------------------------------------------- the world
@@ -966,7 +962,8 @@ fn world_of(in source: Str, inout o: ChunkSeq[u8]) {
 // build (`needs_prelude`).
 pub fn collect_text(in source: Str) -> ChunkSeq[u64] {
     let mut o = ChunkSeq::new[u8]();
-    if needs_prelude(in lower_source(in source).ast, in source) {
+    let module = lower_source(in source).ast;
+    if needs_prelude(in module, in uses_of(in module)) {
         o.extend(in "declined\n".as_bytes());
         return pack_text(in o);
     }
