@@ -49,12 +49,7 @@ test {
     }
 
     fn sum_values(in values: Slice[u64]) -> u64 eff [Fail[ArithOverflow]] {
-        sum{
-            {
-                value
-            }
-            | value in values
-        }
+        sum{ { value } | value in values }
     }
 
     fn checked_total(in values: Slice[u64]) -> Option[u64] {
@@ -81,15 +76,7 @@ test {
         in totals: Slice[i64],
         in weights: Slice[i64]
     ) -> i64 eff [Fail[ArithOverflow]] {
-        sum{
-            {
-                value * weight
-            }
-            | (value, weight) in zip{
-                totals,
-                weights
-            }
-        }
+        sum{ { value * weight } | (value, weight) in zip{ totals, weights } }
     }
 
     fn check_weighted_sum() -> bool {

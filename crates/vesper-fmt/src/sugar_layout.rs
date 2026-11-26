@@ -105,6 +105,8 @@ impl Layout<'_, '_> {
                         ) =>
                 {
                     let gap = if self.atoms[i].glued {
+                        // A nested tagged call (`zip{ a, b }`).
+                        self.atoms[i].tagged = kind == K::LBrace && prev == Some(K::Lower);
                         Gap::None
                     } else {
                         Gap::Space
@@ -164,6 +166,11 @@ pub(super) fn annotate<'src>(
         }
         if kind == parser::TAGGED_LITERAL.0 {
             layout.join(start + 1, Gap::None);
+            if let Some(open) = layout.atoms.get_mut(start + 1)
+                && open.kind == K::LBrace
+            {
+                open.tagged = true;
+            }
         } else if kind == parser::SUGAR_OPERATOR.0 {
             layout.operator(start);
         } else if kind == parser::SUGAR_CONTINUATION.0 {

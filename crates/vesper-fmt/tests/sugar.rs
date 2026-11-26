@@ -204,6 +204,46 @@ fn match_pattern_sugar_roundtrips_without_expansion() {
 }
 
 #[test]
+fn tagged_calls_stay_on_one_line_and_hug_their_block() {
+    // Short calls stay on one line, spaced like struct literals.
+    assert_eq!(
+        formatted("fn f(){sum{\n{\nn\n}\n| n in data\n}}"),
+        "fn f() {\n    sum{ { n } | n in data }\n}\n"
+    );
+    assert_eq!(
+        formatted("fn f(){let p=zip{\na,\nb\n};p}"),
+        "fn f() {\n    let p = zip{ a, b };\n    p\n}\n"
+    );
+    // A block body breaks first; the clause follows its `}` and the call
+    // adds no indentation of its own.
+    assert_eq!(
+        formatted(
+            "fn f(){sum{{visits=wrapping_add(visits,1);x*narrow_i64(weight)}\n\
+             |(x,weight) in zip{inputs.coefficients,inputs.weights}}}"
+        ),
+        "fn f() {\n    sum{ {\n        visits = wrapping_add(visits, 1);\n        \
+         x * narrow_i64(weight)\n    } | (x, weight) in zip{ inputs.coefficients, \
+         inputs.weights } }\n}\n"
+    );
+    assert_eq!(
+        formatted(
+            "fn f()->bool{let found=any{{mark(inout visited, x)==2}|x in \
+             mark(inout visited,1)..mark(inout visited,4)};found}"
+        ),
+        "fn f() -> bool {\n    let found = any{ {\n        mark(inout visited, x) == 2\n    \
+         } | x in mark(inout visited, 1)..mark(inout visited, 4) };\n    found\n}\n"
+    );
+    // A `:` after the block stays glued to its `}`.
+    assert_eq!(
+        formatted("fn f(){max{{x}:i64|x in xs}}"),
+        "fn f() {\n    max{ { x }: i64 | x in xs }\n}\n"
+    );
+    // A comment or a top-level `;` keeps the block layout.
+    let commented = formatted("fn f(){sum{ { n } // why\n| n in data }}");
+    assert!(commented.contains("// why\n"), "{commented}");
+}
+
+#[test]
 fn a_sugar_template_else_on_its_own_line_keeps_the_if_vertical() {
     // The template keeps `else` on its own line, so the `if` is not one
     // group (this used to panic).
