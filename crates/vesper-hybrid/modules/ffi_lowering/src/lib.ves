@@ -5,9 +5,7 @@
 // lent Cranelift builder. crates/vesper-hybrid installs `ffi` as the `ffi`
 // hook of `vesper::codegen_swap`; it emits one typed request of
 // `codegen_swap::ffi`, and returns 0 to leave it to Rust.
-use @vesper/ffi-emit::{
-    ffi_hook
-};
+use @vesper/ffi-emit::{ffi_hook};
 
 // One request: `call` is the address of the lent call. Returns 1 when it
 // emitted the request, 0 to leave it to Rust.

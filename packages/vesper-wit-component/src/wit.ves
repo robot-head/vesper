@@ -23,11 +23,7 @@
 // wit-component's type maps key on (`TypeId` for definitions, the
 // structure for anonymous types).
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    w
-};
+use @vesper/check-data::util::{add, inc, w};
 use self::host::host_import;
 
 pub const NONE32: u32 = 4294967295;

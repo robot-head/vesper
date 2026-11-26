@@ -39,9 +39,7 @@ use self::{
     UseNameNode,
     ListRef
 };
-use self::dump::{
-    dump_ast
-};
+use self::dump::{dump_ast};
 
 pub struct WordReader {
     pos: u64,

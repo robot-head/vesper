@@ -5,30 +5,11 @@
 // The expression half (`check_world`'s rewind flow and the checker methods
 // of src/regions/check.rs) walks the AST: a later PR of #1181.
 
-use @vesper/check-data::util::{
-    add,
-    inc32,
-    push_decimal,
-    u32_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    EffNode,
-    Types,
-    Vars,
-    display,
-    TyKind
-};
-use @vesper/check-data::world::{
-    Known
-};
-use @vesper/check-data::diag::{
-    Diags
-};
+use @vesper/check-data::util::{add, inc32, push_decimal, u32_at, u8_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{EffNode, Types, Vars, display, TyKind};
+use @vesper/check-data::world::{Known};
+use @vesper/check-data::diag::{Diags};
 
 const NONE32: u32 = 4294967295;
 

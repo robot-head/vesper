@@ -5,22 +5,9 @@
 // petgraph's `tarjan_scc` over a `DiGraphMap`, reproduced here exactly
 // (`Graph`, `scc`).
 
-use @vesper/check-data::types::{
-    Types,
-    TyKind,
-    TyPass
-};
-use @vesper/check-data::util::{
-    add,
-    n32,
-    u32_at,
-    u64_at,
-    w
-};
-use @vesper/check-data::world::{
-    Adt,
-    World
-};
+use @vesper/check-data::types::{Types, TyKind, TyPass};
+use @vesper/check-data::util::{add, n32, u32_at, u64_at, w};
+use @vesper/check-data::world::{Adt, World};
 use self::build::{
     B,
     B_EXPLICIT,
@@ -44,17 +31,8 @@ use self::build::{
     T_PRODUCT,
     T_RECORD
 };
-use self::input::{
-    Effect,
-    Effects,
-    Op,
-    Param
-};
-use self::ty::{
-    emit_ty,
-    spells,
-    ty_check
-};
+use self::input::{Effect, Effects, Op, Param};
+use self::ty::{emit_ty, spells, ty_check};
 
 const NONE32: u32 = 4294967295;
 

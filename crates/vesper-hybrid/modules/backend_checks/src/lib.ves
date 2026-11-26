@@ -4,9 +4,7 @@
 
 // @export abi 4
 
-use @vesper/backend-checks::{
-    backend_verify_report_bytes
-};
+use @vesper/backend-checks::{backend_verify_report_bytes};
 
 pub fn verify_words(in input: Slice[u8]) -> ChunkSeq[u64] {
     backend_verify_report_bytes(in input)

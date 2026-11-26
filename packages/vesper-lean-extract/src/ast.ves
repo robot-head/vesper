@@ -4,19 +4,9 @@
 // documents each payload). Names and types stay input indices in the rows;
 // the accessors map them to symbols and type ids.
 
-use @vesper/check-data::input::{
-    Reader
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at
-};
-use @vesper/check-data::world::{
-    set_by_symbol
-};
+use @vesper/check-data::input::{Reader};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at};
+use @vesper/check-data::world::{set_by_symbol};
 
 pub const NONE: u64 = 18446744073709551615;
 pub const NONE32: u32 = 4294967295;

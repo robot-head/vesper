@@ -1,18 +1,6 @@
 // recording.rs: the root, create and destroy patches.
-use self::apply::{
-    allocate,
-    budget,
-    foreign,
-    invalid,
-    record,
-    stale_widget,
-    word
-};
-use self::codes::{
-    Budget,
-    Invalid,
-    NONE_ID
-};
+use self::apply::{allocate, budget, foreign, invalid, record, stale_widget, word};
+use self::codes::{Budget, Invalid, NONE_ID};
 use self::recording::{
     child_count,
     rwidget,
@@ -21,17 +9,8 @@ use self::recording::{
     widget_slot_count,
     widget_sub_count
 };
-use self::{
-    BackendFault,
-    Lim,
-    RState,
-    RWidget
-};
-use self::util::{
-    dec,
-    inc,
-    op
-};
+use self::{BackendFault, Lim, RState, RWidget};
+use self::util::{dec, inc, op};
 
 // Recorded event tags (Op in lib.ves, decoded by src/ported/codec.rs);
 // constants, not code functions, so that `record` inlines them (see

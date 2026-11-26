@@ -21,14 +21,8 @@
 // both rewrites depend only on the row and the imports, so a row the
 // parser shares between owners gets the rewrite every Rust copy gets.
 
-use self::drops::{
-    append_drops
-};
-use self::buffers::{
-    W,
-    w_new,
-    check_buffers
-};
+use self::drops::{append_drops};
+use self::buffers::{W, w_new, check_buffers};
 use @vesper/ast::{
     Ast,
     Lit,
@@ -56,18 +50,10 @@ use @vesper/ast::{
     pat_at,
     type_at
 };
-use @vesper/ast::lower::{
-    lower_source
-};
-use @vesper/ast::dump::{
-    dump_ast
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
+use @vesper/ast::lower::{lower_source};
+use @vesper/ast::dump::{dump_ast};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
 use @vesper/ffi-lowering::{
     S,
     Err,

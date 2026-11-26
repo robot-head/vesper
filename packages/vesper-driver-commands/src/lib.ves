@@ -12,68 +12,20 @@
 // exit status). The compiler's own commands (`COMPILER_COMMANDS` in
 // src/main.rs) are handed back; docs/parallel-results/
 // self-host-cli-commands.md lists each with its lane or blocker.
-use @vesper/driver::{
-    Args,
-    args_count,
-    arg_start,
-    arg_end,
-    eq
-};
-use @vesper-std/env::{
-    var_bytes,
-    os,
-    os_windows
-};
-use @vesper-std/process::{
-    command_path,
-    arg_bytes as proc_arg,
-    spawn,
-    wait,
-    release
-};
-use @vesper-std/fs::{
-    IoError,
-    error_text,
-    not_found,
-    symlink_metadata,
-    kind_dir,
-    kind_file
-};
-use @vesper-std/fs::walk::{
-    Entries,
-    entry_count,
-    entry_start,
-    entry_end,
-    entry_kind,
-    list_dir_path
-};
-use self::graph::{
-    run_graph
-};
-use self::forge::{
-    run_forge
-};
-use self::ebpf::{
-    run_ebpf
-};
-use self::test::{
-    run_test
-};
-use self::doc::{
-    run_doc
-};
-use self::lint::{
-    run_lint
-};
-use self::proof_audit::{
-    run_proof_audit
-};
-use self::verify::{
-    run_verify
-};
-use self::lsp::{
-    run_lsp
-};
+use @vesper/driver::{Args, args_count, arg_start, arg_end, eq};
+use @vesper-std/env::{var_bytes, os, os_windows};
+use @vesper-std/process::{command_path, arg_bytes as proc_arg, spawn, wait, release};
+use @vesper-std/fs::{IoError, error_text, not_found, symlink_metadata, kind_dir, kind_file};
+use @vesper-std/fs::walk::{Entries, entry_count, entry_start, entry_end, entry_kind, list_dir_path};
+use self::graph::{run_graph};
+use self::forge::{run_forge};
+use self::ebpf::{run_ebpf};
+use self::test::{run_test};
+use self::doc::{run_doc};
+use self::lint::{run_lint};
+use self::proof_audit::{run_proof_audit};
+use self::verify::{run_verify};
+use self::lsp::{run_lsp};
 
 enum Ascii: _ {
     LineFeed = 10,

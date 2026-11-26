@@ -14,9 +14,7 @@
 // 5 `,`, 6 `{`, 7 `}`, 8 `(`, 9 `)`, 10 `[`, 11 `]`. Statements live in
 // the `s_*` arena (1 message, 2 choice, 3 local action, 4 rec,
 // 5 continue, 6 end) and blocks in `sk` as `n stmt..`.
-use self::{
-    C
-};
+use self::{C};
 use self::util::{
     add,
     flag,
@@ -41,12 +39,7 @@ use self::util::{
     Out,
     Wf
 };
-use self::tree::{
-    emit_g,
-    g_mk,
-    gsize,
-    validate
-};
+use self::tree::{emit_g, g_mk, gsize, validate};
 
 // Token kinds (`tk_kind`).
 enum Tok: _ {

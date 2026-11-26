@@ -4,65 +4,22 @@
 // `coherence`, `solver_new`, `solve_query`), verifies modal well-formedness and
 // returns revision-bound query answers without intermediate DTOs.
 
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    read_ctx
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::{
-    pack_text
-};
-use @vesper/check-data::types::{
-    EffNode,
-    TyKind,
-    TyMode,
-    vars_new
-};
+use @vesper/check-data::input::{Ctx, Reader, read_ctx};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::{pack_text};
+use @vesper/check-data::types::{EffNode, TyKind, TyMode, vars_new};
 
 const K_NAMED: u8 = TyKind::Named;
 const K_ROW: u8 = TyKind::Row;
 const K_TUPLE: u8 = TyKind::Tuple;
 const M_COPY: u8 = TyMode::Copy;
 const M_LINEAR: u8 = TyMode::Linear;
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/pact::{
-    S,
-    coherence,
-    program_check,
-    solver_new
-};
-use @vesper/pact::diag::{
-    sort_diags
-};
-use @vesper/pact::program::{
-    rd_env,
-    rd_slist,
-    rd_term
-};
-use @vesper/pact::query::{
-    solve_query
-};
-use @vesper/pact::render::{
-    lit,
-    num,
-    r_arg,
-    r_failure,
-    r_goal,
-    r_id,
-    r_source,
-    r_var
-};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, u8_at, w};
+use @vesper/pact::{S, coherence, program_check, solver_new};
+use @vesper/pact::diag::{sort_diags};
+use @vesper/pact::program::{rd_env, rd_slist, rd_term};
+use @vesper/pact::query::{solve_query};
+use @vesper/pact::render::{lit, num, r_arg, r_failure, r_goal, r_id, r_source, r_var};
 use @vesper/pact::term::{
     am_mode,
     am_multi,
@@ -116,22 +73,9 @@ use @vesper/pact::term::{
     vph,
     word_at
 };
-use self::decl::{
-    Conf,
-    Decls,
-    Gen,
-    TRef,
-    TraitRow,
-    read_decls
-};
-use self::frontend::{
-    Fe,
-    declaration_pass,
-    fe_new
-};
-use self::sha256::{
-    sha256_hex
-};
+use self::decl::{Conf, Decls, Gen, TRef, TraitRow, read_decls};
+use self::frontend::{Fe, declaration_pass, fe_new};
+use self::sha256::{sha256_hex};
 use self::session_input::{
     QArg,
     QGoal,

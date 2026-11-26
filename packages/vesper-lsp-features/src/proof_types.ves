@@ -2,32 +2,10 @@
 // the names it compares against, the tree accessors, `Kind::of` of a source
 // type and `Display`/`Debug` of `ast::Type` for its reasons.
 
-use @vesper/ast::{
-    Ast,
-    TypeNode,
-    EffectsNode,
-    EffectNode,
-    ParamNode,
-    list_len,
-    list_at
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use self::nav::{
-    impl_at,
-    put_name
-};
-use self::lean::{
-    s,
-    K_U8,
-    K_U32,
-    K_U64,
-    K_I64,
-    K_BOOL,
-    K_UNIT,
-    K_NONE
-};
+use @vesper/ast::{Ast, TypeNode, EffectsNode, EffectNode, ParamNode, list_len, list_at};
+use @vesper-std/arena::{idx_from_raw};
+use self::nav::{impl_at, put_name};
+use self::lean::{s, K_U8, K_U32, K_U64, K_I64, K_BOOL, K_UNIT, K_NONE};
 
 const NONE: u32 = 4294967295;
 

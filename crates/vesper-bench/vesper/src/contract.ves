@@ -1,26 +1,9 @@
 // Module contract of @vesper/bench (see lib.ves): contract.rs's bounded
 // `@bench(...)` attribute parser and contract_gate.rs's exact limit
 // arithmetic.
-use self::{
-    ContractOut,
-    ErrorKind,
-    GateError,
-    GateIn,
-    GateOut,
-    ParseError
-};
-use self::util::{
-    NO_BYTE,
-    add,
-    gb,
-    inc,
-    mul,
-    sub
-};
-use self::wide::{
-    w_mul_u64,
-    w_ult
-};
+use self::{ContractOut, ErrorKind, GateError, GateIn, GateOut, ParseError};
+use self::util::{NO_BYTE, add, gb, inc, mul, sub};
+use self::wide::{w_mul_u64, w_ult};
 
 // The bytes the attribute grammar names.
 enum Ascii: _ {

@@ -3,21 +3,9 @@
 // `u` and `i` parameters need; PRIORITY_UPDATE frames; the §10 scheduler
 // order.
 
-use self::{
-    Priority,
-    PriorityUpdate,
-    FrameError
-};
-use self::int::{
-    inc,
-    byte,
-    word
-};
-use self::varint::{
-    vdec,
-    vput,
-    put_record
-};
+use self::{Priority, PriorityUpdate, FrameError};
+use self::int::{inc, byte, word};
+use self::varint::{vdec, vput, put_record};
 
 // RFC 9218 §4.1: urgency is 0..=7, default 3.
 const DEFAULT_URGENCY: u8 = 3;

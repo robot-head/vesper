@@ -4,18 +4,9 @@
 //
 // A ramp crosses as `Ramp`: current, target and step as f32 bits, and the
 // samples remaining. A `RampTile` is lent as its four lane slices.
-use self::{
-    EventFault,
-    Ramp,
-    Wire
-};
-use self::kernels::{
-    f,
-    put
-};
-use self::util::{
-    finite_bits
-};
+use self::{EventFault, Ramp, Wire};
+use self::kernels::{f, put};
+use self::util::{finite_bits};
 
 // The 16-byte wire record: sample offset and node id (u16), then param
 // id, target bits and ramp samples (u32), little-endian.

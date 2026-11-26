@@ -12,17 +12,8 @@
 // loans (part 3), effects (lane 8) and literal typing (part 4) are not
 // here; the clean corpus needs none of them for its expression types.
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u8_at, w};
+use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{
     Types,
     Vars,
@@ -47,17 +38,8 @@ use @vesper/check-data::world::{
     mode_of,
     set_by_symbol
 };
-use @vesper/check-data::input::{
-    Ctx,
-    Reader
-};
-use self::ints::{
-    Lit,
-    default_fits,
-    default_of,
-    fits,
-    lit_max
-};
+use @vesper/check-data::input::{Ctx, Reader};
+use self::ints::{Lit, default_fits, default_of, fits, lit_max};
 use self::relations::{
     compatible,
     infer,
@@ -68,12 +50,7 @@ use self::relations::{
     refine_annotation,
     unresolved
 };
-use self::patterns::{
-    Pats,
-    arms_cover,
-    irrefutable,
-    pats_new
-};
+use self::patterns::{Pats, arms_cover, irrefutable, pats_new};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;

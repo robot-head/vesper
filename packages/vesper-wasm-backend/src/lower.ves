@@ -8,59 +8,15 @@
 // raises `K_NOT_PORTED`. Their absence also means the evidence key set is
 // empty, so every operation finds no frame and traps, as in Rust.
 
-use @vesper/place-ir::codes::{
-    Lit,
-    Op,
-    Pat,
-    PoolKind,
-    Term
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    w
-};
-use @vesper/check-data::types::{
-    TyKind,
-    TyPass,
-    Vars,
-    vars_new
-};
-use self::enc::{
-    Code,
-    ValTy,
-    code_new,
-    function_bytes,
-    vt
-};
-use self::err::{
-    WErr,
-    werr,
-    werr_syms
-};
-use self::ir::{
-    FnInfo,
-    pattern_end
-};
-use self::module::{
-    Builder,
-    builder_new
-};
-use self::fmod::{
-    fmod_code
-};
-use self::host::{
-    Host,
-    host_new,
-    host_fn,
-    op_index,
-    returns_handle,
-    takes_handle,
-    takes_meta
-};
+use @vesper/place-ir::codes::{Lit, Op, Pat, PoolKind, Term};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, w};
+use @vesper/check-data::types::{TyKind, TyPass, Vars, vars_new};
+use self::enc::{Code, ValTy, code_new, function_bytes, vt};
+use self::err::{WErr, werr, werr_syms};
+use self::ir::{FnInfo, pattern_end};
+use self::module::{Builder, builder_new};
+use self::fmod::{fmod_code};
+use self::host::{Host, host_new, host_fn, op_index, returns_handle, takes_handle, takes_meta};
 use self::plan::{
     Cx,
     HClause,
@@ -79,11 +35,7 @@ use self::plan::{
     prefixed_key,
     tvars_new
 };
-use self::tables::{
-    alloc_code,
-    stage2_heap_mark,
-    stage2_heap_reset
-};
+use self::tables::{alloc_code, stage2_heap_mark, stage2_heap_reset};
 
 const VT_I32: u8 = 127;
 const VT_I64: u8 = 126;

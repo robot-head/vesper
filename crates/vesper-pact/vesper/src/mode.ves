@@ -1,9 +1,7 @@
 // Module mode of @vesper/pact (see lib.ves): `mode.rs`, modal kinding of
 // goal types as a join of atoms. An atom is a mode term node, or none()
 // for the mode of an unresolved inference variable.
-use self::{
-    S
-};
+use self::{S};
 use self::term::{
     add,
     field_a,
@@ -27,9 +25,7 @@ use self::term::{
     vkind,
     word_at
 };
-use self::fold::{
-    inst
-};
+use self::fold::{inst};
 
 // Pushes the atoms of a resolved, normalized type onto s.atoms.
 pub fn mode_atoms(inout s: S, env: u64, ty: u64) {

@@ -8,22 +8,9 @@
 // AST does not keep: the capacity of a `Name` or `Binary` string (a `Call`'s
 // type-argument capacity) and a `Call`'s argument capacity.
 
-use @vesper/ast::{
-    Ast,
-    ArgNode,
-    ExprNode,
-    ListRef,
-    Lit,
-    TypeNode,
-    ast_new,
-    none
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    Symbol
-};
+use @vesper/ast::{Ast, ArgNode, ExprNode, ListRef, Lit, TypeNode, ast_new, none};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{Symbol};
 
 pub struct Reader {
     pos: u64

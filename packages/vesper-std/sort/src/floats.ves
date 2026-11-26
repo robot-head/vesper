@@ -1,14 +1,8 @@
 // @vesper-std/sort::floats: sorting floats under the IEEE 754 total order.
-use self::unstable::{
-    sort,
-    is_sorted
-};
+use self::unstable::{sort, is_sorted};
 use self::stable::stable_sort;
 use @vesper-std/core::pact::using;
-use @vesper-std/sugar::{
-    guard,
-    when
-};
+use @vesper-std/sugar::{guard, when};
 
 // `f64::total_cmp` as an `Ord` model: the bit pattern as an `i64`, with the
 // magnitude bits flipped for negative values, compares as the total order

@@ -1,8 +1,6 @@
 // Module diag of @vesper/loom-solver (see lib.ves): diagnostic text in
 // `dp`, the diagnostic list `ds`, its deduplication and the merge sort.
-use @vesper/loom-calculus::{
-    Diag
-};
+use @vesper/loom-calculus::{Diag};
 use @vesper/loom-calculus::util::{
     Ascii,
     Order,
@@ -22,10 +20,7 @@ use @vesper/loom-calculus::util::{
     ver,
     ver_ord
 };
-use self::{
-    Node,
-    S
-};
+use self::{Node, S};
 
 const DECIMAL_BASE: u64 = 10;
 // Dedup once ds holds this many entries past twice the deduplicated count.

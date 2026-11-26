@@ -15,12 +15,7 @@
 // feature. Every function is total: a virtual-clock overflow is a returned
 // outcome, never a raise.
 
-use self::failure::{
-    FailureTable,
-    failure_table_clone,
-    failure_table_new,
-    failure_table_next
-};
+use self::failure::{FailureTable, failure_table_clone, failure_table_new, failure_table_next};
 use self::process::{
     ProcessTable,
     process_table_clone,
@@ -39,14 +34,8 @@ use self::process::{
     validate_warp_link_params,
     warp_admit_allows
 };
-use self::sha256::{
-    sha256_digest
-};
-use self::wal::{
-    ScanResult,
-    frame_bytes,
-    scan_bytes
-};
+use self::sha256::{sha256_digest};
+use self::wal::{ScanResult, frame_bytes, scan_bytes};
 
 const PPM: u64 = 1000000;
 const NS_PER_SEC: u64 = 1000000000;

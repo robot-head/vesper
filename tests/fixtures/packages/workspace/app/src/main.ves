@@ -1,15 +1,6 @@
 // Root module of @demo/app: imports a dependency and a sibling file.
-use @demo/geometry::{
-    Point,
-    point,
-    manhattan,
-    coordinate_sum
-};
-use @demo/geometry::shapes::area::{
-    Shape,
-    area as shape_area,
-    checked_side
-};
+use @demo/geometry::{Point, point, manhattan, coordinate_sum};
+use @demo/geometry::shapes::area::{Shape, area as shape_area, checked_side};
 use @demo/geometry::counting::count_twice;
 use self::report::total;
 

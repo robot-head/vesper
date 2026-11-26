@@ -23,9 +23,7 @@ use self::syntax::{
     connection_options,
     value_ok
 };
-use self::ascii::{
-    Ascii
-};
+use self::ascii::{Ascii};
 
 copy struct Limits {
     max_head_bytes: u64,

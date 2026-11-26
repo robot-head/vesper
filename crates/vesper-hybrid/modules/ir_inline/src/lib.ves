@@ -11,9 +11,7 @@
 
 // @export abi 4
 
-use @vesper/ir-inline::{
-    inline_program_words
-};
+use @vesper/ir-inline::{inline_program_words};
 
 // The layout version of `inline_words`.
 pub fn format() -> u64 {

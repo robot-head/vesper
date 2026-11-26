@@ -1,9 +1,5 @@
 // Canonical byte encoder for `.vsys` `LibraryDescriptor` (`vesper_ffi::sys::canonicalize`).
-use self::lexer::{
-    VsysError,
-    err_limit,
-    fail_vsys
-};
+use self::lexer::{VsysError, err_limit, fail_vsys};
 
 pub struct Encoder {
     pub out: ChunkSeq[u8],

@@ -20,18 +20,10 @@ use @vesper/ast::{
     type_at,
     none
 };
-use @vesper/ast::lower::{
-    lower_source
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
-use @vesper/ffi-lowering::{
-    S
-};
+use @vesper/ast::lower::{lower_source};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
+use @vesper/ffi-lowering::{S};
 
 const NONE: u32 = 4294967295;
 

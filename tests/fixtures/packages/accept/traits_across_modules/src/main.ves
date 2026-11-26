@@ -1,13 +1,5 @@
-use self::score::{
-    best,
-    alike
-};
-use self::shapes::square::{
-    Square,
-    Pair,
-    square,
-    pair
-};
+use self::score::{best, alike};
+use self::shapes::square::{Square, Pair, square, pair};
 
 fn main() -> i64 {
     let x: i64 = 3;

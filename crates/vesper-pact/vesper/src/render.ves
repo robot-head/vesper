@@ -1,9 +1,7 @@
 // Module render of @vesper/pact (see lib.ves): the deterministic `Display`
 // renderings of `term.rs`, `solver.rs` and `diag.rs`, and the `Debug`
 // renderings that diagnostics quote, appended to `s.txt`.
-use self::{
-    S
-};
+use self::{S};
 use self::term::{
     b_canon,
     b_named,

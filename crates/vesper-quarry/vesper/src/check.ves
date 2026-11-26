@@ -1,12 +1,5 @@
 // Module check of @vesper/quarry (see lib.ves).
-use self::{
-    BCol,
-    Bind,
-    CCol,
-    Node,
-    Q,
-    Rng
-};
+use self::{BCol, Bind, CCol, Node, Q, Rng};
 use self::util::{
     bcol,
     bound,

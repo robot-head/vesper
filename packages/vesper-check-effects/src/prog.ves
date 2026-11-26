@@ -38,21 +38,9 @@
 // Pattern kinds: 1 Wild, 2 Bind (a = name), 3 Literal, 4 Tuple (a, b = list
 // of Pattern), 5 Constructor (a = name, b, c = list of (name, Pattern)).
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    inc32,
-    n32,
-    u32_at,
-    w
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader
-};
-use @vesper/check-data::world::{
-    set_by_symbol
-};
+use @vesper/check-data::util::{add, inc, inc32, n32, u32_at, w};
+use @vesper/check-data::input::{Ctx, Reader};
+use @vesper/check-data::world::{set_by_symbol};
 
 const NONE32: u32 = 4294967295;
 

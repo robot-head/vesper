@@ -2,9 +2,7 @@
 // ids each program type may call and the GPL-compatible licenses. The id
 // constants are mirrored below; the `SUPPORTED` name table and `KFUNCS`
 // stay Rust data.
-use self::program::{
-    ProgramType
-};
+use self::program::{ProgramType};
 
 // Kernel helper ids (`enum bpf_func_id`, src/helpers.rs), untyped so the
 // interpreter's `u64` ids and this module's `i32` ids share them.

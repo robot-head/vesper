@@ -3,16 +3,8 @@
 // `quantize_row_q4_K_ref`, `make_qkx2_quants` and `dequantize_row_q4_K`.
 // Every operation is FP32 in the C source's order, without fused
 // multiply-add, so the bytes equal llama.cpp's.
-use self::num::{
-    encode_fp16,
-    decode_fp16,
-    half_at,
-    is_finite,
-    u64_zero
-};
-use self::ocp::{
-    nearest_int
-};
+use self::num::{encode_fp16, decode_fp16, half_at, is_finite, u64_zero};
+use self::ocp::{nearest_int};
 
 // Q4_K block layout (GGML `block_q4_K`): binary16 `d` at 0 and `dmin` at 2,
 // 12 bytes of packed 6-bit scales and minimums, then 128 bytes of nibbles.

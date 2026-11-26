@@ -21,27 +21,10 @@
 //   after inlining (`decode_report` in tests/common/inline_words.rs).
 // - `inline_dump`: the inlined program as the canonical text `dump` writes.
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    inc32,
-    n32,
-    push_decimal,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names,
-    names_new
-};
-use @vesper/check-data::input::{
-    Reader
-};
-use @vesper/check-data::types::{
-    TyPass
-};
+use @vesper/check-data::util::{add, inc, inc32, n32, push_decimal, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names, names_new};
+use @vesper/check-data::input::{Reader};
+use @vesper/check-data::types::{TyPass};
 
 const NONE32: u32 = 4294967295;
 const MAX64: u64 = 18446744073709551615;

@@ -3,58 +3,18 @@
 // boundary (WIT text and export wrappers). Not yet: handlers, WASI host
 // frames, evidence binding (`K_NOT_PORTED`); wit-component stays in Rust.
 
-use self::enc::{
-    Code,
-    code_new
-};
-use self::err::{
-    WErr,
-    werr,
-    werr_syms
-};
-use @vesper/check-data::util::{
-    push_decimal,
-    w
-};
-use self::module::{
-    Builder,
-    builder_new
-};
-use self::ir::{
-    Facts,
-    read_facts,
-    ir_new
-};
-use self::plan::{
-    Cx,
-    Plan,
-    cx_new,
-    plan
-};
-use self::lower::{
-    L,
-    lowerer_new
-};
-use self::component::{
-    exports
-};
-use self::tables::{
-    dummy_l,
-    rebuild_l,
-    stage2_heap_mark,
-    stage2_heap_reset,
-    stage2_heap_swap
-};
+use self::enc::{Code, code_new};
+use self::err::{WErr, werr, werr_syms};
+use @vesper/check-data::util::{push_decimal, w};
+use self::module::{Builder, builder_new};
+use self::ir::{Facts, read_facts, ir_new};
+use self::plan::{Cx, Plan, cx_new, plan};
+use self::lower::{L, lowerer_new};
+use self::component::{exports};
+use self::tables::{dummy_l, rebuild_l, stage2_heap_mark, stage2_heap_reset, stage2_heap_swap};
 use @vesper/check-data::pack_text;
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    read_ctx
-};
-use @vesper/place-ir::{
-    Program,
-    read_program
-};
+use @vesper/check-data::input::{Ctx, Reader, read_ctx};
+use @vesper/place-ir::{Program, read_program};
 
 const K_ENTRY: u8 = 1;
 const K_LIMIT: u8 = 2;

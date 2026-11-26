@@ -2,9 +2,7 @@
 // `WalRecord::frame`, `check` and `scan`). A frame is
 // `[payload_len: u32 LE][lsn: u64 LE][check: 8 bytes][payload]`, where
 // `check` is the first eight bytes of SHA-256 over `lsn LE || payload`.
-use self::sha256::{
-    sha256_digest
-};
+use self::sha256::{sha256_digest};
 
 const FRAME_HEADER_BYTES: u64 = 20;
 const LEN_AT: u64 = 0;

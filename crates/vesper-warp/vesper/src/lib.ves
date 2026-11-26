@@ -33,16 +33,8 @@
 // port-only records here, converted by the wrappers.
 //
 // @export abi 3
-use self::packet::{
-    pk_short_plain
-};
-use self::varint::{
-    vi_decode,
-    vi_encode,
-    vi_encode_with_len,
-    vi_encoded_len,
-    vi_prefix_len
-};
+use self::packet::{pk_short_plain};
+use self::varint::{vi_decode, vi_encode, vi_encode_with_len, vi_encoded_len, vi_prefix_len};
 use self::ack::{
     rx_ack_delay,
     rx_check,
@@ -109,12 +101,7 @@ use self::header::{
     hdr_write_short_to_peer,
     hdr_write_version_negotiation
 };
-use self::pn::{
-    pn_decode_with_largest,
-    pn_encoded_len,
-    pn_read_truncated,
-    pn_write_truncated
-};
+use self::pn::{pn_decode_with_largest, pn_encoded_len, pn_read_truncated, pn_write_truncated};
 
 // ---------------------------------------------------------------------------
 // Records shared with the Rust crate.
