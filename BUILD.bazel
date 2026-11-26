@@ -1612,6 +1612,32 @@ vesper_package(
     visibility = ["//visibility:public"],
 )
 
+# The checker's declaration collector, which the hybrid driver runs for
+# its checked-world declarations (#2024 slice 2c-2).
+vesper_package(
+    name = "check_collect_package",
+    srcs = glob(["packages/vesper-check-collect/src/**/*.ves"]),
+    manifest = "packages/vesper-check-collect/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ast_package",
+        ":check_data_package",
+        ":preludes_package",
+        ":std_arena_package",
+        ":std_intern_package",
+    ],
+)
+
+# The checker's preludes as text. Its sources `include_str` the files
+# under preludes/, which ride along as `objects` (files under the package).
+vesper_package(
+    name = "preludes_package",
+    srcs = glob(["packages/vesper-preludes/src/**/*.ves"]),
+    manifest = "packages/vesper-preludes/Loom.toml",
+    objects = glob(["packages/vesper-preludes/preludes/*.ves"]),
+    visibility = ["//visibility:public"],
+)
+
 vesper_package(
     name = "check_layout_package",
     srcs = glob(["packages/vesper-check-layout/src/**/*.ves"]),
