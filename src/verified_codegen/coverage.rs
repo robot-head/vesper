@@ -12,6 +12,16 @@ use super::{Unsupported, VerifiedError, lower};
 use crate::check::World;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::sync::OnceLock;
+
+type Listing = fn(&Coverage) -> Option<String>;
+static COVERAGE_LISTING: OnceLock<Listing> = OnceLock::new();
+
+/// Installs the hybrid coverage renderer. `None` from the renderer keeps
+/// the Rust listing if the port cannot decode the report.
+pub fn install_coverage_listing(listing: Listing) -> Result<(), Listing> {
+    COVERAGE_LISTING.set(listing)
+}
 
 /// One function's coverage.
 #[derive(Clone, Debug)]
@@ -66,6 +76,15 @@ impl Coverage {
     }
     /// A deterministic text listing: a summary, then one entry per function.
     pub fn listing(&self) -> String {
+        COVERAGE_LISTING
+            .get()
+            .and_then(|listing| listing(self))
+            .unwrap_or_else(|| self.rust_listing())
+    }
+
+    /// Rust reference for the coverage listing differential.
+    #[doc(hidden)]
+    pub fn rust_listing(&self) -> String {
         let total = self.functions.len();
         let own = self
             .functions
@@ -114,6 +133,64 @@ impl Coverage {
             }
         }
         out
+    }
+
+    /// The input of `coverage_listing` in @vesper/verified-codegen.
+    #[doc(hidden)]
+    pub fn listing_input(&self) -> Vec<u8> {
+        fn word(out: &mut Vec<u8>, value: usize) {
+            out.extend_from_slice(&(value as u64).to_le_bytes());
+        }
+        fn text(out: &mut Vec<u8>, value: &str) {
+            word(out, value.len());
+            out.extend_from_slice(value.as_bytes());
+        }
+
+        let mut dictionary = BTreeMap::<String, BTreeMap<String, usize>>::new();
+        let mut details = 0;
+        let mut refusals = Vec::new();
+        for refusal in self.refusals() {
+            let index = dictionary
+                .entry(construct_name(refusal))
+                .or_default()
+                .entry(detail(refusal))
+                .or_insert_with(|| {
+                    let index = details;
+                    details += 1;
+                    index
+                });
+            refusals.push(*index);
+        }
+        let mut input = Vec::new();
+        let mut sorted_indices = vec![0; details];
+        let mut sorted_index = 0;
+        word(&mut input, dictionary.len());
+        word(&mut input, details);
+        for (construct, group) in dictionary {
+            text(&mut input, &construct);
+            word(&mut input, group.len());
+            for (detail, index) in group {
+                text(&mut input, &detail);
+                sorted_indices[index] = sorted_index;
+                sorted_index += 1;
+            }
+        }
+
+        let mut refusals = refusals.into_iter();
+        word(&mut input, self.functions.len());
+        for function in &self.functions {
+            text(&mut input, &function.name);
+            word(&mut input, function.rows);
+            word(&mut input, function.refusals.len());
+            for index in refusals.by_ref().take(function.refusals.len()) {
+                word(&mut input, sorted_indices[index]);
+            }
+            word(&mut input, function.refused_callees.len());
+            for callee in &function.refused_callees {
+                text(&mut input, callee);
+            }
+        }
+        input
     }
 }
 

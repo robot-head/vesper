@@ -157,7 +157,8 @@ pub fn pattern_hygiene(inout rendered: Rd, in mark: ChunkSeq[u8]) -> Sc {
             let mut in_hole = false;
             for hole in 0..(rendered.holes.len() >> 1) {
                 if w64(in rendered.holes, hole << 1) <= binder_start
-                    && binder_end <= w64(in rendered.holes, inc(hole << 1)) {
+                    && binder_end <= w64(in rendered.holes, inc(hole << 1))
+                {
                     in_hole = true;
                     break;
                 }

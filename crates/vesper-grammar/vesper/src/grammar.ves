@@ -154,7 +154,8 @@ pub fn validate(
                 for j in 0..i {
                     charge_or(inout work, 1, 8);
                     if sw(in rules, wrapping_add(wrapping_add(off, 2), wrapping_mul(j, 2)))
-                        == branch_id {
+                        == branch_id
+                    {
                         fail(21, id);
                     }
                 }

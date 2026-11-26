@@ -287,7 +287,8 @@ fn find(in l: Ledger, in b: Slice[u8], key: u64, f_at: u64, f_len: u64) -> u64 {
     for i in 0..l.key.len() {
         if g64(in l.f_len, i) == f_len
             && same(in b, g64(in l.key, i), key, 32)
-            && same(in b, g64(in l.f_at, i), f_at, f_len) {
+            && same(in b, g64(in l.f_at, i), f_at, f_len)
+        {
             return i;
         }
     }
@@ -472,7 +473,8 @@ fn record_outcome(inout proofs: Ledger, inout models: Ledger, in b: Slice[u8], i
         let s = st_at(in o.s_st, i);
         if s.code == FAILED
             && !is(in b, s.a_at, s.a_len, in "prove")
-            && !is(in b, s.a_at, s.a_len, in "kernel") {
+            && !is(in b, s.a_at, s.a_len, in "kernel")
+        {
             continue;
         }
         record(inout models, in b, g64(in o.s_key, i), g64(in o.s_at, i), g64(in o.s_len, i), s);
@@ -565,7 +567,8 @@ fn put_proof_result(inout out: ChunkSeq[u8], in b: Slice[u8], in o: Outcome) {
     if o.requested == 2 {
         for i in 0..o.s_at.len() {
             if g64(in o.s_len, i) == o.req_len
-                && same(in b, g64(in o.s_at, i), o.req_at, o.req_len) {
+                && same(in b, g64(in o.s_at, i), o.req_at, o.req_len)
+            {
                 put_result(
                     inout out,
                     in b,

@@ -344,7 +344,8 @@ fn constructor_pattern(inout loader: St, inout ast: Ast, node: PatNode) -> PatNo
     }
     if list_len(in ast, result.b) == 0
         && result.c == 0
-        && (const_flags(inout loader, new_name) & 2) != 0 {
+        && (const_flags(inout loader, new_name) & 2) != 0
+    {
         let literal = literal_of(in loader, inout ast, new_name);
         if literal != ast_none() {
             result.kind = 3;

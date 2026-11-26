@@ -462,7 +462,8 @@ fn inst_args(in p: Program, inst: InstRow) -> u64 {
         || inst.op == Op::Indirect
         || inst.op == Op::Tiled
         || inst.op == Op::Seq
-        || inst.op == Op::Fip {
+        || inst.op == Op::Fip
+    {
         inc(inst.a)
     } else {
         NONE64
@@ -507,7 +508,8 @@ fn calls_out(in p: Program, in names: Names, inst: InstRow) -> bool {
         || inst.op == Op::Fip
         || inst.op == Op::Indirect
         || inst.op == Op::Closure
-        || inst.op == Op::Handle {
+        || inst.op == Op::Handle
+    {
         return true;
     }
     if inst.op != Op::Seq {

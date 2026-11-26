@@ -349,7 +349,8 @@ fn dim_same(in state: St, id: u32, coeff: u64, in items: ChunkSeq[u32]) -> bool 
     }
     for i in 0..items.len() {
         if u32_at(in state.dim_factors, wrapping_add(widen_u64(node.factors_start), i))
-            != u32_at(in items, i) {
+            != u32_at(in items, i)
+        {
             return false;
         }
     }
@@ -385,7 +386,8 @@ pub fn mk_dim(inout state: St, coeff: u64, in items: ChunkSeq[u32]) -> u32 {
         }
         let id = wrapping_sub(slot, 1);
         if u64_at(in state.dim_hashes, widen_u64(id)) == hash
-            && dim_same(in state, id, coeff, in items) {
+            && dim_same(in state, id, coeff, in items)
+        {
             return id;
         }
         at = inc(at) & state.dim_mask;
@@ -744,12 +746,14 @@ fn ty_same(
     if node.kind != kind
         || node.primary != primary
         || node.secondary != secondary
-        || item_count != items.len() {
+        || item_count != items.len()
+    {
         return false;
     }
     for i in 0..items.len() {
         if u32_at(in state.ty_item_pool, wrapping_add(widen_u64(node.items_start), i))
-            != u32_at(in items, i) {
+            != u32_at(in items, i)
+        {
             return false;
         }
     }
@@ -792,7 +796,8 @@ pub fn mk_ty(
         }
         let id = wrapping_sub(slot, 1);
         if u64_at(in state.ty_hashes, widen_u64(id)) == hash
-            && ty_same(in state, id, kind, primary, secondary, in items) {
+            && ty_same(in state, id, kind, primary, secondary, in items)
+        {
             return id;
         }
         at = inc(at) & state.ty_mask;
@@ -953,7 +958,8 @@ pub fn diag_s(inout state: St, code: u32, start: u64, end: u64, in message: Str)
 pub fn diag_same(in state: St, i: u64, j: u64) -> bool {
     if u32_at(in state.diag_codes, i) != u32_at(in state.diag_codes, j)
         || u64_at(in state.diag_starts, i) != u64_at(in state.diag_starts, j)
-        || u64_at(in state.diag_ends, i) != u64_at(in state.diag_ends, j) {
+        || u64_at(in state.diag_ends, i) != u64_at(in state.diag_ends, j)
+    {
         return false;
     }
     let start_i = u64_at(in state.diag_msg_starts, i);
@@ -965,7 +971,8 @@ pub fn diag_same(in state: St, i: u64, j: u64) -> bool {
     }
     for k in 0..wrapping_sub(end_i, start_i) {
         if u8_at(in state.diag_text, wrapping_add(start_i, k))
-            != u8_at(in state.diag_text, wrapping_add(start_j, k)) {
+            != u8_at(in state.diag_text, wrapping_add(start_j, k))
+        {
             return false;
         }
     }
@@ -1023,7 +1030,8 @@ pub fn err_code(in state: St) -> u32 {
     if err_contains(in state, in "dimension exceeds 1099511627776")
         || err_contains(in state, in "dimensions must be positive")
         || err_contains(in state, in "dimension has more than 16 factors")
-        || err_contains(in state, in "exceeds the supported rank") {
+        || err_contains(in state, in "exceeds the supported rank")
+    {
         762
     } else {
         761

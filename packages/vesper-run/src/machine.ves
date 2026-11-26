@@ -20,7 +20,7 @@ use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, u64_at, u8_a
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{TyKind, Types};
 use @vesper/check-data::world::{constructor};
-use @vesper/check-data::input::{Ctx};
+use @vesper/check-data::input::{Ctx, Reader};
 use @vesper/place-ir::codes::{Lit, Op, Pat, Term};
 use @vesper/place-ir::{BlockRow, FnRow, InstRow, Program};
 use self::arith::{
@@ -39,6 +39,9 @@ pub const T_STR: u8 = 9;
 pub const T_TUPLE: u8 = 10;
 pub const T_DATA: u8 = 11;
 pub const T_FN: u8 = 12;
+// A handler clause's continuation (`Value::Continuation`); calling it is
+// declined (resumption is a later slice).
+pub const T_CONT: u8 = 13;
 pub const T_UNDEF: u8 = 255;
 
 // Unary codes; a conversion is U_CONV + family * 16 + target kind.
@@ -53,10 +56,28 @@ const C_WRAPPING: u64 = 2;
 // Frame kinds (`Frame::IrResume`, `Frame::Try`).
 const FR_IR: u8 = 0;
 const FR_TRY: u8 = 1;
+// `Frame::Handler`: `func_index` is its effect-table site, `block` and `ip`
+// the start and count of its captured environment in `hcap_*`, the bases
+// the arena lengths when it was installed.
+const FR_HANDLER: u8 = 2;
+// `Frame::Coerce`: the returned value takes type `ty`.
+const FR_COERCE: u8 = 3;
 
 // What `drive` holds (`Control::Ir`, `Control::Return`).
 const C_IR: u8 = 0;
 const C_RET: u8 = 1;
+// `Control::Eval` of the handler expression of instruction `pending`.
+const C_INSTALL: u8 = 2;
+
+// Primitive failures (`Failure`).
+const P_OVERFLOW: u8 = 1;
+const P_DIV_ZERO: u8 = 2;
+const P_INDEX: u8 = 4;
+
+// Effect-table site kinds (run_words.rs `sites`).
+const SITE_HANDLE: u64 = 1;
+const SITE_EFFECT_CALL: u64 = 2;
+const SITE_TRY: u64 = 3;
 
 // A type's integer kind is not known yet / it has none.
 const TK_UNSEEN: u8 = 254;
@@ -157,6 +178,23 @@ pub struct M {
     failed: bool,
     declined: bool,
     message: ChunkSeq[u8],
+    // The effect table: its words (names as symbols), and per instruction
+    // its site's offset + 1 or 0.
+    sites: ChunkSeq[u64],
+    site_of: ChunkSeq[u64],
+    // The `Fail` instance keys of the primitive failures (symbol + 1, or 0).
+    key_overflow: u64,
+    key_runtime: u64,
+    // The instruction of a `C_INSTALL`.
+    pending: u64,
+    // Handlers' captured environments (`handler_environment`).
+    hcap_names: ChunkSeq[u32],
+    hcap_vals: ChunkSeq[Val],
+    fail_sym: u32,
+    raise_sym: u32,
+    overflow_sym: u32,
+    div_zero_sym: u32,
+    index_sym: u32,
     // well-known symbols
     ok_sym: u32,
     err_sym: u32,
@@ -220,6 +258,18 @@ pub fn machine_new(sink ctx: Ctx, sink program: Program, fuel: u64) -> M {
         failed: false,
         declined: false,
         message: ChunkSeq::new[u8](),
+        sites: ChunkSeq::new[u64](),
+        site_of: ChunkSeq::new[u64](),
+        key_overflow: 0,
+        key_runtime: 0,
+        pending: 0,
+        hcap_names: ChunkSeq::new[u32](),
+        hcap_vals: ChunkSeq::new[Val](),
+        fail_sym: 0,
+        raise_sym: 0,
+        overflow_sym: 0,
+        div_zero_sym: 0,
+        index_sym: 0,
         ok_sym: 0,
         err_sym: 0,
         zero_sym: 0,
@@ -280,10 +330,473 @@ fn decline(inout machine: M, in reason: Str, sym: u32) {
     }
 }
 
-// A primitive failure (`raise_primitive`): with no handler installed the
-// `Fail::raise` it performs is unhandled.
-fn raise(inout machine: M) {
-    fail(inout machine, "unhandled effect Fail::raise");
+// ----- the effect table --------------------------------------------------------
+
+// Word offsets in a site (`sites` in run_words.rs), from its first word.
+const SITE_INST: u64 = 0;
+const SITE_KIND: u64 = 1;
+// handle: effect, label + 1, instance key + 1, flags, static key, then the
+// captured names (count, names), then `HandleTail`.
+const HS_EFFECT: u64 = 2;
+const HS_LABEL: u64 = 3;
+const HS_KEY: u64 = 4;
+const HS_FLAGS: u64 = 5;
+const HS_FREE_COUNT: u64 = 7;
+const HS_FREE: u64 = 8;
+// After the captured names: body fn + 1, return clause fn + 1, return
+// pattern, operation clause count, then per clause: operation, fn + 1,
+// pattern count, patterns.
+const HT_BODY: u64 = 0;
+const HT_RET: u64 = 1;
+const HT_RET_PAT: u64 = 2;
+const HT_OP_COUNT: u64 = 3;
+const HT_OPS: u64 = 4;
+const CL_OP: u64 = 0;
+const CL_FN: u64 = 1;
+const CL_PAT_COUNT: u64 = 2;
+const CL_PATS: u64 = 3;
+// effect call: effect, operation, instance key + 1.
+const EC_EFFECT: u64 = 2;
+const EC_OP: u64 = 3;
+const EC_KEY: u64 = 4;
+// try: instance key + 1.
+const TRY_KEY: u64 = 2;
+// Handle flags: the expression has a type (a `Frame::Coerce`); a state.
+const FLAG_COERCE: u64 = 1;
+const FLAG_STATE: u64 = 2;
+// Pattern words: `_`, or a pattern the machine does not bind.
+const PAT_WILD: u64 = 0;
+const PAT_OTHER: u64 = 18446744073709551615;
+// `Op::Handle` operands: state flag, state value, pool index, then the
+// alias count and (name, slot) pairs.
+const HO_ALIAS_COUNT: u64 = 3;
+
+fn site_word(in machine: M, at: u64) -> u64 {
+    u64_at(in machine.sites, at)
+}
+
+fn name_word(in machine: M, index: u64) -> u64 {
+    w(u32_at(in machine.ctx.nmap, index))
+}
+
+// A `name + 1` word, or 0.
+fn opt_name_word(in machine: M, word: u64) -> u64 {
+    if word == 0 {
+        0
+    } else {
+        inc(name_word(in machine, wrapping_sub(word, 1)))
+    }
+}
+
+fn pattern_word(in machine: M, word: u64) -> u64 {
+    if word == PAT_WILD || word == PAT_OTHER {
+        word
+    } else {
+        opt_name_word(in machine, word)
+    }
+}
+
+// Reads the effect table after the entry, with names as symbols.
+pub fn read_sites(inout machine: M, inout reader: Reader, in bytes: Slice[u8]) {
+    machine.key_overflow = opt_name_word(in machine, reader.word(in bytes));
+    machine.key_runtime = opt_name_word(in machine, reader.word(in bytes));
+    machine.site_of.resize(machine.program.insts.len(), 0);
+    let site_count = reader.word(in bytes);
+    for i in 0..site_count {
+        let inst_id = reader.word(in bytes);
+        let kind = reader.word(in bytes);
+        let ok = machine.site_of.try_set(inst_id, inc(machine.sites.len()));
+        machine.sites.push(inst_id);
+        machine.sites.push(kind);
+        if kind == SITE_HANDLE {
+            let effect = name_word(in machine, reader.word(in bytes));
+            machine.sites.push(effect);
+            let label = opt_name_word(in machine, reader.word(in bytes));
+            machine.sites.push(label);
+            let key = opt_name_word(in machine, reader.word(in bytes));
+            machine.sites.push(key);
+            machine.sites.push(reader.word(in bytes));
+            let static_key = name_word(in machine, reader.word(in bytes));
+            machine.sites.push(static_key);
+            let free_count = reader.word(in bytes);
+            machine.sites.push(free_count);
+            for j in 0..free_count {
+                let name = name_word(in machine, reader.word(in bytes));
+                machine.sites.push(name);
+            }
+            let body = opt_name_word(in machine, reader.word(in bytes));
+            machine.sites.push(body);
+            let ret = opt_name_word(in machine, reader.word(in bytes));
+            machine.sites.push(ret);
+            let ret_pat = pattern_word(in machine, reader.word(in bytes));
+            machine.sites.push(ret_pat);
+            let op_count = reader.word(in bytes);
+            machine.sites.push(op_count);
+            for j in 0..op_count {
+                let op_name = name_word(in machine, reader.word(in bytes));
+                machine.sites.push(op_name);
+                let clause = opt_name_word(in machine, reader.word(in bytes));
+                machine.sites.push(clause);
+                let pat_count = reader.word(in bytes);
+                machine.sites.push(pat_count);
+                for k in 0..pat_count {
+                    let pat = pattern_word(in machine, reader.word(in bytes));
+                    machine.sites.push(pat);
+                }
+            }
+        } else if kind == SITE_EFFECT_CALL {
+            let effect = name_word(in machine, reader.word(in bytes));
+            machine.sites.push(effect);
+            let op_name = name_word(in machine, reader.word(in bytes));
+            machine.sites.push(op_name);
+            let key = opt_name_word(in machine, reader.word(in bytes));
+            machine.sites.push(key);
+        } else if kind == SITE_TRY {
+            let key = opt_name_word(in machine, reader.word(in bytes));
+            machine.sites.push(key);
+        }
+    }
+}
+
+// The site of instruction `inst_id` of kind `kind`, or NONE64.
+fn site(in machine: M, inst_id: u64, kind: u64) -> u64 {
+    let slot = u64_at(in machine.site_of, inst_id);
+    if slot == 0 {
+        return NONE64;
+    }
+    let at = wrapping_sub(slot, 1);
+    if site_word(in machine, add(at, SITE_KIND)) != kind {
+        return NONE64;
+    }
+    at
+}
+
+// The first word after a handle site's captured names.
+fn handle_tail(in machine: M, at: u64) -> u64 {
+    add(add(at, HS_FREE), site_word(in machine, add(at, HS_FREE_COUNT)))
+}
+
+// The function of a `fn + 1` word, or NONE64.
+fn site_fn(in machine: M, word: u64) -> u64 {
+    if word == 0 {
+        NONE64
+    } else {
+        fn_index(in machine, n32(wrapping_sub(word, 1)))
+    }
+}
+
+// The end of the operation clause at `at`.
+fn clause_end(in machine: M, at: u64) -> u64 {
+    add(add(at, CL_PATS), site_word(in machine, add(at, CL_PAT_COUNT)))
+}
+
+// `scan` of handle site `at`: its bodies are reached, or the machine
+// declines what it does not run yet.
+fn scan_handle(inout machine: M, at: u64, inout work: ChunkSeq[u64]) {
+    if site_word(in machine, add(at, HS_FLAGS)) & FLAG_STATE != 0 {
+        decline(inout machine, "a state handler", NONE32);
+        return;
+    }
+    let tail = handle_tail(in machine, at);
+    let body = site_fn(in machine, site_word(in machine, add(tail, HT_BODY)));
+    let ret = site_fn(in machine, site_word(in machine, add(tail, HT_RET)));
+    if body == NONE64 || ret == NONE64 {
+        decline(inout machine, "a handler body run as an expression", NONE32);
+        return;
+    }
+    if site_word(in machine, add(tail, HT_RET_PAT)) == PAT_OTHER {
+        decline(inout machine, "a handler clause pattern", NONE32);
+        return;
+    }
+    reach(inout machine, body, inout work);
+    reach(inout machine, ret, inout work);
+    let mut clause_at = add(tail, HT_OPS);
+    for i in 0..site_word(in machine, add(tail, HT_OP_COUNT)) {
+        let clause = site_fn(in machine, site_word(in machine, add(clause_at, CL_FN)));
+        if clause == NONE64 {
+            decline(inout machine, "a handler body run as an expression", NONE32);
+            return;
+        }
+        reach(inout machine, clause, inout work);
+        for j in 0..site_word(in machine, add(clause_at, CL_PAT_COUNT)) {
+            if site_word(in machine, add(add(clause_at, CL_PATS), j)) == PAT_OTHER {
+                decline(inout machine, "a handler clause pattern", NONE32);
+                return;
+            }
+        }
+        clause_at = clause_end(in machine, clause_at);
+    }
+}
+
+// The `Eval` of a handler expression (`ExprKind::Handle` without a
+// state): its `Frame::Coerce`, its `Frame::Handler` over the captured
+// environment, then the body's activation over the aliased places.
+fn install(inout machine: M) {
+    let inst_id = machine.pending;
+    let inst = machine.program.inst(inst_id);
+    let at = site(in machine, inst_id, SITE_HANDLE);
+    if site_word(in machine, add(at, HS_FLAGS)) & FLAG_COERCE != 0 {
+        let mut coerce_frame = machine.frame;
+        coerce_frame.kind = FR_COERCE;
+        coerce_frame.ty = inst.ty;
+        machine.stack.push(coerce_frame);
+    }
+    let val_base = machine.vals.len();
+    let env_base = machine.env.len();
+    let cell_base = machine.cells.len();
+    let seg_base = machine.segs.len();
+    // The aliases resolve in the suspended activation.
+    let mut slots: ChunkSeq[En] = ChunkSeq::new[En]();
+    let alias_at = add(inst.a, HO_ALIAS_COUNT);
+    for i in 0..machine.program.op(alias_at) {
+        let pair_at = add(inc(alias_at), wrapping_mul(i, 2));
+        let name = n32(machine.program.op(pair_at));
+        let bound_index = binding(in machine, n32(machine.program.op(inc(pair_at))));
+        if bound_index != NONE64 {
+            let env_entry = entry(in machine, bound_index);
+            let seg_start = machine.segs.len();
+            for j in 0..env_entry.seg_count {
+                machine.segs.push(u32_at(in machine.segs, add(env_entry.seg_start, j)));
+            }
+            slots.push(En {
+                name: name,
+                cell: env_entry.cell,
+                seg_start: seg_start,
+                seg_count: env_entry.seg_count
+            });
+        }
+    }
+    // `handler_environment`: the clauses' free names, by value.
+    let hcap_start = machine.hcap_names.len();
+    for i in 0..site_word(in machine, add(at, HS_FREE_COUNT)) {
+        let name = n32(site_word(in machine, add(add(at, HS_FREE), i)));
+        let mut k = slots.len();
+        loop {
+            if k == 0 {
+                break;
+            }
+            k = wrapping_sub(k, 1);
+            let slot = match slots.try_get(k) {
+                Option::Some(found) => found,
+                Option::None => En { name: 0, cell: 0, seg_start: 0, seg_count: 0 },
+            };
+            if slot.name == name {
+                slot_path(inout machine, slot);
+                let value = read_path(inout machine, slot.cell);
+                if machine.failed {
+                    return;
+                }
+                machine.hcap_names.push(name);
+                machine.hcap_vals.push(value);
+                break;
+            }
+        }
+    }
+    let mut handler_frame = machine.frame;
+    handler_frame.kind = FR_HANDLER;
+    handler_frame.func_index = at;
+    handler_frame.block = hcap_start;
+    handler_frame.ip = wrapping_sub(machine.hcap_names.len(), hcap_start);
+    handler_frame.val_base = val_base;
+    handler_frame.env_base = env_base;
+    handler_frame.cell_base = cell_base;
+    handler_frame.seg_base = seg_base;
+    machine.stack.push(handler_frame);
+    for i in 0..slots.len() {
+        match slots.try_get(i) {
+            Option::Some(env_entry) => machine.env.push(env_entry),
+            Option::None => {},
+        }
+    }
+    let body = site_fn(
+        in machine,
+        site_word(in machine, add(handle_tail(in machine, at), HT_BODY))
+    );
+    let fn_info = func(in machine, body);
+    machine.vals.resize(add(val_base, fn_info.value_count), undef());
+    machine
+        .frame = Fr {
+            func_index: body,
+            block: fn_info.first_block,
+            ip: 0,
+            val_base: val_base,
+            env_base: env_base,
+            cell_base: cell_base,
+            seg_base: seg_base,
+            dest: 0,
+            ty: 0,
+            kind: FR_IR
+        };
+    machine.control = C_IR;
+}
+
+// A clause's activation of function `func_index` where `handler` was
+// installed, over a copy of its captured environment
+// (`snapshot_environment`); the handler's captures are released.
+fn clause_frame(inout machine: M, handler: Fr, func_index: u64) {
+    machine.vals.truncate(handler.val_base);
+    machine.env.truncate(handler.env_base);
+    machine.cells.truncate(handler.cell_base);
+    machine.segs.truncate(handler.seg_base);
+    for i in 0..handler.ip {
+        let cell = machine.cells.len();
+        machine.cells.push(match machine.hcap_vals.try_get(add(handler.block, i)) {
+            Option::Some(value) => value,
+            Option::None => undef(),
+        });
+        machine.env.push(En {
+            name: u32_at(in machine.hcap_names, add(handler.block, i)),
+            cell: cell,
+            seg_start: 0,
+            seg_count: 0
+        });
+    }
+    machine.hcap_names.truncate(handler.block);
+    machine.hcap_vals.truncate(handler.block);
+    let fn_info = func(in machine, func_index);
+    machine.vals.resize(add(handler.val_base, fn_info.value_count), undef());
+    machine
+        .frame = Fr {
+            func_index: func_index,
+            block: fn_info.first_block,
+            ip: 0,
+            val_base: handler.val_base,
+            env_base: handler.env_base,
+            cell_base: handler.cell_base,
+            seg_base: handler.seg_base,
+            dest: 0,
+            ty: 0,
+            kind: FR_IR
+        };
+    machine.control = C_IR;
+}
+
+// The handler's body returned `value` (`Frame::Handler` in `drive`): its
+// return clause runs.
+fn handler_return(inout machine: M, handler: Fr, value: Val) {
+    let tail = handle_tail(in machine, handler.func_index);
+    let ret = site_fn(in machine, site_word(in machine, add(tail, HT_RET)));
+    clause_frame(inout machine, handler, ret);
+    let pat = site_word(in machine, add(tail, HT_RET_PAT));
+    if pat != PAT_WILD {
+        bind_new(inout machine, n32(wrapping_sub(pat, 1)), value);
+    }
+}
+
+// `perform` of `effect::op` on `arg_vals`, with the instance key `key`
+// (symbol + 1, or 0) the raising activation's evidence names: the
+// innermost handler with that key, else the innermost of the effect.
+fn perform(inout machine: M, effect: u32, op_name: u32, key: u64) {
+    let mut found = NONE64;
+    let mut i = machine.stack.len();
+    loop {
+        if i == 0 || key == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        let frame = stack_at(in machine, i);
+        if frame.kind == FR_HANDLER && site_word(in machine, add(frame.func_index, HS_KEY)) == key {
+            found = i;
+            break;
+        }
+    }
+    i = machine.stack.len();
+    loop {
+        if i == 0 || found != NONE64 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        let frame = stack_at(in machine, i);
+        if frame.kind == FR_HANDLER
+            && site_word(in machine, add(frame.func_index, HS_EFFECT)) == w(effect)
+        {
+            found = i;
+        }
+    }
+    if found == NONE64 {
+        if !machine.failed {
+            machine.failed = true;
+            machine.message.clear();
+            put(inout machine.message, "unhandled effect ");
+            put_sym(inout machine.message, in machine.ctx.names, effect);
+            put(inout machine.message, "::");
+            put_sym(inout machine.message, in machine.ctx.names, op_name);
+        }
+        return;
+    }
+    let handler = stack_at(in machine, found);
+    machine.stack.truncate(found);
+    let tail = handle_tail(in machine, handler.func_index);
+    let mut clause_at = add(tail, HT_OPS);
+    let mut clause = NONE64;
+    for j in 0..site_word(in machine, add(tail, HT_OP_COUNT)) {
+        if clause == NONE64 && site_word(in machine, add(clause_at, CL_OP)) == w(op_name) {
+            clause = clause_at;
+        }
+        clause_at = clause_end(in machine, clause_at);
+    }
+    if clause == NONE64 {
+        fail(inout machine, "handler lacks operation");
+        return;
+    }
+    // The arguments, then the continuation.
+    let pat_count = site_word(in machine, add(clause, CL_PAT_COUNT));
+    let arg_count = machine.arg_vals.len();
+    if inc(arg_count) != pat_count {
+        fail(inout machine, "operation handler pattern arity mismatch");
+        return;
+    }
+    let mut args: ChunkSeq[Val] = ChunkSeq::new[Val]();
+    for j in 0..arg_count {
+        args.push(match machine.arg_vals.try_get(j) {
+            Option::Some(value) => value,
+            Option::None => undef(),
+        });
+    }
+    args.push(Val { tag: T_CONT, payload: 0 });
+    clause_frame(
+        inout machine,
+        handler,
+        site_fn(in machine, site_word(in machine, add(clause, CL_FN)))
+    );
+    for j in 0..pat_count {
+        let pat = site_word(in machine, add(add(clause, CL_PATS), j));
+        if pat != PAT_WILD {
+            let value = match args.try_get(j) {
+                Option::Some(found_value) => found_value,
+                Option::None => undef(),
+            };
+            bind_new(inout machine, n32(wrapping_sub(pat, 1)), value);
+        }
+    }
+}
+
+fn stack_at(in machine: M, index: u64) -> Fr {
+    match machine.stack.try_get(index) {
+        Option::Some(frame) => frame,
+        Option::None => fr_zero(),
+    }
+}
+
+// A primitive failure (`raise_primitive`): `Fail::raise` of the failure's
+// value through the typed `Fail` instance in scope.
+fn raise(inout machine: M, failure: u8) {
+    let ctor = if failure == P_OVERFLOW {
+        machine.overflow_sym
+    } else if failure == P_DIV_ZERO {
+        machine.div_zero_sym
+    } else {
+        machine.index_sym
+    };
+    let key = if failure == P_OVERFLOW {
+        machine.key_overflow
+    } else {
+        machine.key_runtime
+    };
+    let payload = make(inout machine, T_DATA, ctor, machine.kids.len());
+    machine.arg_vals.clear();
+    machine.arg_vals.push(payload);
+    perform(inout machine, machine.fail_sym, machine.raise_sym, key);
 }
 
 // ----- symbols -----------------------------------------------------------------
@@ -337,7 +850,8 @@ fn short_of(inout machine: M, sym: u32) -> u32 {
             break;
         }
         if u8_at(in machine.ctx.names.text, pos) == 58
-            && u8_at(in machine.ctx.names.text, inc(pos)) == 58 {
+            && u8_at(in machine.ctx.names.text, inc(pos)) == 58
+        {
             tail_start = add(pos, 2);
             pos = add(pos, 2);
         } else {
@@ -368,7 +882,8 @@ fn ctor_of(inout machine: M, sym: u32) -> u32 {
             break;
         }
         if u8_at(in machine.ctx.names.text, pos) == 58
-            && u8_at(in machine.ctx.names.text, inc(pos)) == 58 {
+            && u8_at(in machine.ctx.names.text, inc(pos)) == 58
+        {
             sep_count = inc(sep_count);
             sep_at = pos;
             pos = add(pos, 2);
@@ -478,15 +993,15 @@ fn type_ok(in machine: M, ty: u32, depth: u64) -> bool {
             || name == known.region_box
             || name == known.watermark
             || name == known.dyn_
-            || spells(in machine, name, "Atomic") {
+            || spells(in machine, name, "Atomic")
+        {
             return false;
         }
     }
     if node.kind == TyKind::Fn {
-        let row = machine.ctx.types.row(node.r2);
-        if row.n != 0 || row.tail != 0 {
-            return false;
-        }
+        // A function value with effects is a function the program names or
+        // a handler clause's continuation: its evidence is the caller's, as
+        // in `invoke_scoped`.
         if !type_ok(in machine, node.r, inc(depth)) {
             return false;
         }
@@ -649,6 +1164,11 @@ pub fn load(inout machine: M, entry_index: u64) {
     machine.err_sym = machine.ctx.names.intern(in "Err".as_bytes());
     machine.zero_sym = machine.ctx.names.intern(in "0".as_bytes());
     machine.dot_sym = machine.ctx.names.intern(in ".".as_bytes());
+    machine.fail_sym = machine.ctx.names.intern(in "Fail".as_bytes());
+    machine.raise_sym = machine.ctx.names.intern(in "raise".as_bytes());
+    machine.overflow_sym = machine.ctx.names.intern(in "ArithOverflow".as_bytes());
+    machine.div_zero_sym = machine.ctx.names.intern(in "DivisionByZero".as_bytes());
+    machine.index_sym = machine.ctx.names.intern(in "IndexOutOfBounds".as_bytes());
     let entry_sym = u32_at(in machine.ctx.nmap, entry_index);
     machine.aux.resize(machine.program.insts.len(), 0);
     machine.block_params.resize(machine.program.blocks.len(), 0);
@@ -958,7 +1478,11 @@ pub fn scan(inout machine: M) {
                     let callee = n32(machine.program.op(operand_at));
                     let callee_index = fn_index(in machine, callee);
                     if callee_index == NONE64 {
-                        decline(inout machine, "a call of ", callee);
+                        if site(in machine, inst_id, SITE_EFFECT_CALL) == NONE64 {
+                            decline(inout machine, "a call of ", callee);
+                        } else {
+                            let ok = machine.aux.try_set(inst_id, NONE64);
+                        }
                     } else {
                         reach(inout machine, callee_index, inout work);
                         let ok = machine.aux.try_set(inst_id, callee_index);
@@ -973,10 +1497,16 @@ pub fn scan(inout machine: M) {
                     || op == Op::Index
                     || op == Op::Indirect
                     || op == Op::Try
-                    || op == Op::Loop {} else if op == Op::Closure {
+                    || op == Op::Loop
+                {} else if op == Op::Closure {
                     decline(inout machine, "a closure in ", fn_info.name);
                 } else if op == Op::Handle {
-                    decline(inout machine, "a handler in ", fn_info.name);
+                    let handle_site = site(in machine, inst_id, SITE_HANDLE);
+                    if handle_site == NONE64 {
+                        decline(inout machine, "a handler in ", fn_info.name);
+                    } else {
+                        scan_handle(inout machine, handle_site, inout work);
+                    }
                 } else if op == Op::Seq {
                     decline(inout machine, "a sequence operation in ", fn_info.name);
                 } else {
@@ -1104,7 +1634,8 @@ fn display(in machine: M, value: Val, inout out: ChunkSeq[u8], depth: u64) {
         let mut numeric = true;
         for i in 0..aggregate.kid_count {
             if index_of(in machine, u32_at(in machine.kid_names, add(aggregate.kid_start, i)))
-                == NONE64 {
+                == NONE64
+            {
                 numeric = false;
             }
         }
@@ -1862,6 +2393,10 @@ fn invoke(inout machine: M, func_index: u64) {
 
 // Calls value `callee` (`Op::Indirect`).
 fn call_value(inout machine: M, callee: Val) {
+    if callee.tag == T_CONT {
+        decline(inout machine, "a resumed continuation", NONE32);
+        return;
+    }
     if callee.tag == T_FN {
         let func_index = fn_index(in machine, n32(callee.payload));
         if func_index == NONE64 {
@@ -1970,7 +2505,7 @@ fn step(inout machine: M) {
             new = binary(inout machine, write_row.code, old, value, inout failure);
             if failure != F_OK {
                 suspend(inout machine, inst.dest, inst.ty);
-                raise(inout machine);
+                raise(inout machine, failure);
                 return;
             }
             if machine.failed {
@@ -2070,7 +2605,7 @@ fn step(inout machine: M) {
         let aggregate = agg(in machine, base);
         if neg || index_value.payload >= aggregate.kid_count {
             suspend(inout machine, inst.dest, inst.ty);
-            raise(inout machine);
+            raise(inout machine, P_INDEX);
             return;
         }
         result = kid(in machine, add(aggregate.kid_start, index_value.payload));
@@ -2080,7 +2615,24 @@ fn step(inout machine: M) {
             return;
         }
         suspend(inout machine, inst.dest, inst.ty);
-        invoke(inout machine, u64_at(in machine.aux, inst_id));
+        let callee_index = u64_at(in machine.aux, inst_id);
+        if callee_index == NONE64 {
+            // An effect operation (`Value::EffectOp`).
+            let at = site(in machine, inst_id, SITE_EFFECT_CALL);
+            perform(
+                inout machine,
+                n32(site_word(in machine, add(at, EC_EFFECT))),
+                n32(site_word(in machine, add(at, EC_OP))),
+                site_word(in machine, add(at, EC_KEY))
+            );
+            return;
+        }
+        invoke(inout machine, callee_index);
+        return;
+    } else if op == Op::Handle {
+        suspend(inout machine, inst.dest, inst.ty);
+        machine.pending = inst_id;
+        machine.control = C_INSTALL;
         return;
     } else if op == Op::Indirect {
         let callee = get(inout machine, machine.program.op(operand_at));
@@ -2099,6 +2651,13 @@ fn step(inout machine: M) {
         suspend(inout machine, inst.dest, inst.ty);
         let mut try_frame = machine.frame;
         try_frame.kind = FR_TRY;
+        // The `Fail` instance key the `?` raises through.
+        let try_site = site(in machine, inst_id, SITE_TRY);
+        try_frame.dest = if try_site == NONE64 {
+            0
+        } else {
+            n32(site_word(in machine, add(try_site, TRY_KEY)))
+        };
         machine.stack.push(try_frame);
         machine.ret_value = value;
         machine.control = C_RET;
@@ -2113,7 +2672,7 @@ fn step(inout machine: M) {
     if failure != F_OK {
         // `primitive_failure`: the raise is unhandled.
         suspend(inout machine, inst.dest, inst.ty);
-        raise(inout machine);
+        raise(inout machine, failure);
         return;
     }
     let coerced = coerce(inout machine, result, inst.ty);
@@ -2232,11 +2791,24 @@ fn resume(inout machine: M) -> bool {
                     machine.ret_value = kid(in machine, add(aggregate.kid_start, payload_index));
                     return true;
                 }
-                raise(inout machine);
+                let payload = kid(in machine, add(aggregate.kid_start, payload_index));
+                machine.arg_vals.clear();
+                machine.arg_vals.push(payload);
+                perform(inout machine, machine.fail_sym, machine.raise_sym, w(frame.dest));
                 return true;
             }
         }
         fail(inout machine, "'?' requires Result");
+        return true;
+    }
+    if frame.kind == FR_COERCE {
+        let value = machine.ret_value;
+        machine.ret_value = coerce(inout machine, value, frame.ty);
+        return true;
+    }
+    if frame.kind == FR_HANDLER {
+        let value = machine.ret_value;
+        handler_return(inout machine, frame, value);
         return true;
     }
     machine.frame = frame;
@@ -2257,7 +2829,7 @@ pub fn drive(inout machine: M) {
     invoke(inout machine, machine.entry);
     machine.control = C_IR;
     loop {
-        if machine.failed {
+        if machine.failed || machine.declined {
             return;
         }
         if machine.fuel == 0 {
@@ -2267,6 +2839,8 @@ pub fn drive(inout machine: M) {
         machine.fuel = wrapping_sub(machine.fuel, 1);
         if machine.control == C_IR {
             step(inout machine);
+        } else if machine.control == C_INSTALL {
+            install(inout machine);
         } else if !resume(inout machine) {
             break;
         }

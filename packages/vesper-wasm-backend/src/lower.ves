@@ -1336,7 +1336,8 @@ impl L {
             let effect = self.ctx.facts.eff(add(sig.eff_start, k));
             if effect.name != self.ctx.syms.fail
                 && !self.ctx.facts.is_capability(effect.name)
-                && !self.host_effect(effect.name) {
+                && !self.host_effect(effect.name)
+            {
                 return false;
             }
         }
@@ -2191,7 +2192,8 @@ impl L {
                     || shape.kind == SH_STRUCT
                     || shape.kind == SH_ENUM
             )
-                && self.evacuable(ty) {
+                && self.evacuable(ty)
+            {
                 let copy_idx = self.copy_fn(ty);
                 copy_vals.push(u32_at(in args, i));
                 copy_fns.push(copy_idx);
@@ -2613,7 +2615,8 @@ impl L {
             if elem_entry != 0
                 && self.ctx.ir.word(inc(operands)) == Pat::Constructor
                 && self.ctx.ir.word(add(operands, 6)) == 1
-                && self.ctx.ir.word(add(operands, 8)) == Pat::Bind {
+                && self.ctx.ir.word(add(operands, 8)) == Pat::Bind
+            {
                 let bind_name = n32(self.ctx.ir.word(add(operands, 11)));
                 let slot_pos = self.slot_index(bind_name);
                 if slot_pos != NONE64 {
@@ -3267,7 +3270,8 @@ impl L {
                 let key = u32_at(in self.env_keys, n);
                 if key == eff_key
                     || (exact != NONE32 && key == exact)
-                    || (label_key2 != NONE32 && key == label_key2) {
+                    || (label_key2 != NONE32 && key == label_key2)
+                {
                     let ok1 = first.try_set(n, src_exact);
                     let ok2 = fallback.try_set(n, src_fallback);
                     let ok3 = has.try_set(n, true);
@@ -4634,7 +4638,8 @@ impl L {
             self.cmp(lhs, rhs, if signed { OP_I64_GE_S } else { OP_I64_GE_U });
         } else if self.is_op(op_sym, "wrapping_add")
             || self.is_op(op_sym, "wrapping_sub")
-            || self.is_op(op_sym, "wrapping_mul") {
+            || self.is_op(op_sym, "wrapping_mul")
+        {
             let wasm_op = if self.is_op(op_sym, "wrapping_add") {
                 OP_I64_ADD
             } else if self.is_op(op_sym, "wrapping_sub") {
@@ -5433,7 +5438,8 @@ impl L {
         let recv_dty = self.ctx.default_ty(recv_ty);
         let recv_name = self.ctx.types.node(recv_dty).name;
         if seq_op == SQ_SUB_SLICE
-            && (recv_name == self.ctx.syms.string || recv_name == self.ctx.syms.str_) {
+            && (recv_name == self.ctx.syms.string || recv_name == self.ctx.syms.str_)
+        {
             self.sub_str(args_at, recv, recv_ty, dest_val);
             return;
         }

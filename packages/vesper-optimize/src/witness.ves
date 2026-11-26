@@ -901,8 +901,8 @@ pub fn compare_output(
         let deeper = wrapping_add(depth, 1);
         if is_int_literal(in t, x)
             && current.tag == T_CONST
-            && int_value(in t, x) == current.value {} else if x.kind == X_NAME
-            && current.tag == T_INPUT {
+            && int_value(in t, x) == current.value
+        {} else if x.kind == X_NAME && current.tag == T_INPUT {
             let e = metadata(inout b, cap_at(in t.cap1, ei));
             if e != 0 {
                 return e;
@@ -1290,7 +1290,8 @@ fn check_rule(
         || rule == 9
         || rule == 10
         || rule == 11
-        || rule == 17 {
+        || rule == 17
+    {
         let wrapping = rule >= 9;
         let op = if rule == 1 || rule == 9 {
             OP_ADD

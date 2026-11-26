@@ -755,7 +755,8 @@ pub fn lane_error(intrinsic: u32, elem: u32) -> Str {
         }
     } else if family == I_BINARY
         && (op == B_SATURATING_ADD || op == B_SATURATING_SUB)
-        && elem != E_U8 {
+        && elem != E_U8
+    {
         "saturating lane arithmetic is defined for u8 lanes only"
     } else if elem_is_float(elem)
         && (
@@ -763,7 +764,8 @@ pub fn lane_error(intrinsic: u32, elem: u32) -> Str {
                 || family == I_NOT
                 || family == I_SHIFT
                 || (family == I_REDUCE && (op == RD_AND || op == RD_OR || op == RD_XOR))
-        ) {
+        )
+    {
         "bitwise lane operations are not defined for float lanes"
     } else if (family == I_LOAD_MASKED || family == I_IN_BOUNDS) && elem != E_U8 {
         "string loads produce u8 lanes"

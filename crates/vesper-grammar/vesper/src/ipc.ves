@@ -210,7 +210,8 @@ fn claim(
                 && end == re
                 && (
                     role == rr || (len == UOFFSET_BYTES && role >= ROLE_VECTOR && rr >= ROLE_VECTOR)
-                ) {
+                )
+            {
                 return;
             }
             ffail(f, 14, start);
@@ -326,7 +327,8 @@ fn table(
     if length < VTABLE_HEADER_BYTES
         || length & VOFFSET_MASK != 0
         || length > MAX_VTABLE_BYTES
-        || object < UOFFSET_BYTES {
+        || object < UOFFSET_BYTES
+    {
         ffail(f, 12, vtable);
     }
     claim(f, inout b, inout regs, in lim, vtable, length, ROLE_VTABLE);
@@ -346,7 +348,8 @@ fn table(
             let align = min(width, STRUCT_ALIGN);
             if off < UOFFSET_BYTES
                 || add_or(off, width, 9, off) > object
-                || add_or(pos, off, 9, pos) & wrapping_sub(align, 1) != 0 {
+                || add_or(pos, off, 9, pos) & wrapping_sub(align, 1) != 0
+            {
                 ffail(f, 12, wrapping_add(pos, off));
             }
             for prior in 0..index {
@@ -770,7 +773,8 @@ fn batch(
     let nf = fields.len() / FIELD_WORDS;
     if nodes.b != nf
         || buffers.b != mul_or(nf, BUFFERS_PER_FIELD, 9, nf)
-        || (nf == 0 && body_len != 0) {
+        || (nf == 0 && body_len != 0)
+    {
         ffail(f, 28, t.pos);
     }
     reserve(inout b, in lim, nf, sw(in lim, 14));
@@ -796,7 +800,8 @@ fn batch(
                 fail(13, wrapping_add(body_at, range.a));
             }
             if profile == P_HOST_ADDRESS64
-                && add_or(body_address, range.a, 9, body_address) & ALIGN_64_MASK != 0 {
+                && add_or(body_address, range.a, 9, body_address) & ALIGN_64_MASK != 0
+            {
                 fail(13, wrapping_add(body_at, range.a));
             }
         }
@@ -859,7 +864,8 @@ fn validate_limits(in lim: Slice[u64]) -> Unit eff [Fail[GErr]] {
         || sw(in lim, 7) > HARD_NAME_BYTES
         || sw(in lim, 8) > HARD_METADATA_OBJECTS
         || sw(in lim, 10) > HARD_WORK
-        || sw(in lim, 11) > HARD_ALLOCATION_BYTES {
+        || sw(in lim, 11) > HARD_ALLOCATION_BYTES
+    {
         fail(0, 0);
     }
     if sw(in lim, 9) == 0 || sw(in lim, 9) > HARD_DEPTH {

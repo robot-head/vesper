@@ -225,7 +225,8 @@ impl Rules {
             }
             let key = widen_u64(wrapping_sub(slot, 1));
             if i64_at(in self.rel_first, key) == first
-                && i64_at(in self.rel_second, key) == second {
+                && i64_at(in self.rel_second, key) == second
+            {
                 return (at, true);
             }
             at = wrapping_add(at, 1) & self.rel_mask;

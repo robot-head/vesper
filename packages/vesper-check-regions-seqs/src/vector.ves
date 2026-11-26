@@ -200,7 +200,8 @@ pub fn shape_of(in types: Types, in names: Names, known: Known, ty: u32) -> Shap
     let count_node = types.node(types.arg(ty, 1));
     if count_node.kind != TyKind::Named
         || count_node.n != 0
-        || !is_lane_count(in names, count_node.name) {
+        || !is_lane_count(in names, count_node.name)
+    {
         return no_shape();
     }
     let lanes = lane_value(in names, count_node.name);
@@ -220,7 +221,8 @@ pub fn type_error(
     inout out: ChunkSeq[u8]
 ) -> bool {
     if !is_vector_spelling(in types, in names, known, ty)
-        || shape_of(in types, in names, known, ty).elem != 0 {
+        || shape_of(in types, in names, known, ty).elem != 0
+    {
         return false;
     }
     let first = types.arg(ty, 0);

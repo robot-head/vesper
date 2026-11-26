@@ -383,7 +383,8 @@ pub fn scratch_check(
                 if c.tag == 2
                     && c.graph == pass_graph
                     && c.index == pass_index
-                    && widen_u64(c.stream) < stream {
+                    && widen_u64(c.stream) < stream
+                {
                     stream = widen_u64(c.stream);
                 }
             },

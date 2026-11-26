@@ -55,11 +55,11 @@ pub fn insertion[T: mod copy + Ord](inout s: Slice[T], lo: u64, hi: u64) {
                 }
                 s.try_set(j, y);
                 j = k;
-            };
+            }
             s.try_set(j, x);
         }
         i = wrapping_add(i, 1);
-    };
+    }
 }
 
 // Restores the max-heap below `root` of the heap `s[lo..lo + n]`.

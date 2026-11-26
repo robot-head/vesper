@@ -199,7 +199,8 @@ fn inline_ok(
         let inner = c.types.arg(ty, 0);
         if contains_box(inout c, inner) {
             if !load_ok(inout st, inout c, inner)
-                || !value_ok(inout st, inout c, inout m, inner, inout seen) {
+                || !value_ok(inout st, inout c, inout m, inner, inout seen)
+            {
                 return false;
             }
         }
@@ -218,7 +219,8 @@ fn inline_ok(
             let f = st.ls.lfield(add(w(node.a), i));
             if contains_box(inout c, f.ty) {
                 if !load_ok(inout st, inout c, f.ty)
-                    || !value_ok(inout st, inout c, inout m, f.ty, inout seen) {
+                    || !value_ok(inout st, inout c, inout m, f.ty, inout seen)
+                {
                     return false;
                 }
             }
@@ -231,7 +233,8 @@ fn inline_ok(
             let f = st.ls.lfield(add(w(var.fa), i));
             if contains_box(inout c, f.ty) {
                 if !load_ok(inout st, inout c, f.ty)
-                    || !value_ok(inout st, inout c, inout m, f.ty, inout seen) {
+                    || !value_ok(inout st, inout c, inout m, f.ty, inout seen)
+                {
                     return false;
                 }
             }

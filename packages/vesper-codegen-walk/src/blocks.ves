@@ -238,7 +238,8 @@ pub fn block_plan_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
             for q in 0..adj.count(succ) {
                 if found == adj.count(succ)
                     && adj.node_at(succ, q) == u
-                    && adj.dir_at(succ, q) == want {
+                    && adj.dir_at(succ, q) == want
+                {
                     found = q;
                 }
             }

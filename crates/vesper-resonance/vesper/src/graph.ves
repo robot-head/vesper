@@ -110,7 +110,8 @@ fn source_fill(inout s: Slice[u32], in tab: Slice[u32], seed: u64, t0: u64) eff 
     let from = wrapping_add(GEN_MODULUS, widen_u64(tab[v0 % GEN_MODULUS]));
     if last <= GEN_NO_WRAP
         && v0 <= wrapping_sub(U64_MAX, span)
-        && n <= wrapping_sub(tab.len(), from) {
+        && n <= wrapping_sub(tab.len(), from)
+    {
         s.copy_from(0, in tab[from..wrapping_add(from, n)]);
     } else {
         for k in 0..n {
@@ -387,7 +388,8 @@ fn plan(
             let i = k + j * Words::Input;
             let kind = get(in sched, i);
             if (kind == InputKind::Forward && get(in sched, i + Input::HasLine) == 1)
-                || kind == InputKind::Feedback {
+                || kind == InputKind::Feedback
+            {
                 p.push(get(in sched, i + Input::Scratch) * block);
             } else {
                 p.push(get(in sched, i + Input::Buffer) * block);

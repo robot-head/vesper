@@ -464,7 +464,8 @@ fn validate_plat_refs(in w: Slice[u64], in b: Slice[u8], inout c: Cur) -> Unit e
                     mk_off,
                     mk_len,
                     "cca.platform-manufacturing-config".as_bytes()
-                ) {
+                )
+            {
                 check_plain_values(
                     has_other,
                     has_ver,
@@ -878,7 +879,8 @@ fn sw_ref_matches(
         if (has_alg == 0 || alg == dalg)
             && want != 0
             && dlen == want
-            && ct_eq(in b, doff, dlen, sw_val_off, sw_val_len) {
+            && ct_eq(in b, doff, dlen, sw_val_off, sw_val_len)
+        {
             dig_ok = true;
         }
         d = wrapping_add(d, 1);
@@ -890,7 +892,8 @@ fn sw_ref_matches(
         return (false, c);
     }
     if r_has_name != 0
-        && (has_type == 0 || !ct_eq(in b, r_name_off, r_name_len, type_off, type_len)) {
+        && (has_type == 0 || !ct_eq(in b, r_name_off, r_name_len, type_off, type_len))
+    {
         return (false, c);
     }
     if r_has_ver != 0 && (has_ver == 0 || !ct_eq(in b, r_ver_off, r_ver_len, ver_off, ver_len)) {

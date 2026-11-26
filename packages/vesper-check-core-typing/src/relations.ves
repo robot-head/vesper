@@ -67,7 +67,8 @@ pub fn compatible(in types: Types, known: Known, a: u32, b: u32) -> bool {
     if a_node.kind == TyKind::Fn && b_node.kind == TyKind::Fn {
         if !effects_include(in types, known, a_node.r2, b_node.r2)
             || b_node.mode > a_node.mode
-            || a_node.n != b_node.n {
+            || a_node.n != b_node.n
+        {
             return false;
         }
         for i in 0..w(a_node.n) {
@@ -131,7 +132,8 @@ pub fn effects_include(in types: Types, known: Known, expected: u32, actual: u32
             let expected_effect = types.effect_at(add(w(expected_row.a), j));
             if expected_effect.name == actual_effect.name
                 && (expected_effect.label == 0 || expected_effect.label == actual_effect.label)
-                && expected_effect.n == actual_effect.n {
+                && expected_effect.n == actual_effect.n
+            {
                 let mut all = true;
                 for arg_index in 0..w(expected_effect.n) {
                     if !compatible(
@@ -287,7 +289,8 @@ pub fn refine_annotation(inout types: Types, expected: u32, actual: u32) -> u32 
             && actual_node.kind == TyKind::Named
             && expected_node.name == actual_node.name
     )
-        || (expected_node.kind == TyKind::Tuple && actual_node.kind == TyKind::Tuple) {
+        || (expected_node.kind == TyKind::Tuple && actual_node.kind == TyKind::Tuple)
+    {
         // `zip`: the shorter list wins.
         let mut zip_len = w(expected_node.n);
         if w(actual_node.n) < zip_len {
@@ -360,7 +363,8 @@ pub fn join_types(inout types: Types, known: Known, a: u32, b: u32, inout errors
             && a_node.name == b_node.name
             && a_node.n == b_node.n
     )
-        || (a_node.kind == TyKind::Tuple && b_node.kind == TyKind::Tuple && a_node.n == b_node.n) {
+        || (a_node.kind == TyKind::Tuple && b_node.kind == TyKind::Tuple && a_node.n == b_node.n)
+    {
         let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(a_node.n));
         for i in 0..w(a_node.n) {
             let a_arg = item(in types, add(w(a_node.a), i));
@@ -410,7 +414,8 @@ pub fn infer(
     let actual_node = types.node(actual);
     if expected_node.kind == TyKind::Named
         && expected_node.n == 0
-        && is_generic(in generics, expected_node.name) {
+        && is_generic(in generics, expected_node.name)
+    {
         let current = vars.get(expected_node.name);
         if current == NONE32 || current == types.infer {
             vars.set(expected_node.name, actual);
@@ -439,7 +444,8 @@ pub fn infer(
         return;
     }
     if (expected_node.kind == TyKind::Named && actual_node.kind == TyKind::Named)
-        || (expected_node.kind == TyKind::Tuple && actual_node.kind == TyKind::Tuple) {
+        || (expected_node.kind == TyKind::Tuple && actual_node.kind == TyKind::Tuple)
+    {
         let mut zip_len = w(expected_node.n);
         if w(actual_node.n) < zip_len {
             zip_len = w(actual_node.n);
