@@ -59,6 +59,8 @@ use @vesper/driver-commands::{
 use @vesper/driver::triple::{is_windows as triple_is_windows};
 // The package assembly of the package load (#1986).
 use self::assemble::{assembled_words};
+// The package graph read of the package load (#1986 slice 2).
+use self::load::{read_graph};
 // `vesper proof-audit` (SH5 lane 18, #1341; moved here from its own
 // module by #2091).
 use @vesper/proof-audit::{run as proof_audit_command};
@@ -376,7 +378,7 @@ fn load_input(
         if err.len() != 0 {
             return error(in err.as_slice());
         }
-        load_package(inout s)
+        load_package(inout s, in input.as_slice())
     } else {
         let failed = handle Fail[IoError] in {
             source = read_path(in input.as_slice());
@@ -403,10 +405,18 @@ fn load_input(
     0
 }
 
-// `packages::load_for_target`: the Rust loader reads the package graph,
-// and when it hands the graph over (as the session's text) the driver
-// assembles it (assemble.ves, #1986).
-fn load_package(inout s: Session) -> i64 eff [Ffi[HybridDriver]] {
+// `packages::load_for_target`: the driver reads the package graph itself
+// (load.ves, #1986 slice 2), or else the Rust loader reads it and, when it
+// hands the graph over (as the session's text), the driver assembles it
+// (assemble.ves, #1986).
+fn load_package(inout s: Session, in input: Slice[u8]) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+    match read_graph(inout s, in input, os() == os_windows()) {
+        Option::Some(graph) => {
+            let words = assembled_words(in graph.as_slice());
+            return HybridDriver::hd_assembled(inout s, in words.as_slice());
+        },
+        Option::None => {},
+    }
     let r = step(inout s, step_load_package());
     if r != 0 {
         return r;
