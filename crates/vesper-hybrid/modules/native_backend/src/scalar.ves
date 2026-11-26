@@ -30,6 +30,10 @@ const SHL_REGISTER: u64 = 20;
 const SHR_REGISTER: u64 = 21;
 const SAR_REGISTER: u64 = 22;
 const LOAD: u64 = 23;
+const STORE_BYTE: u64 = 24;
+const STORE_WORD: u64 = 25;
+const STORE_DWORD: u64 = 26;
+const STORE_QWORD: u64 = 27;
 
 const EQUAL: u64 = 0;
 const NOT_EQUAL: u64 = 1;
@@ -111,8 +115,25 @@ fn is_register_shift(op: u64) -> bool {
     op >= SHL_REGISTER && op <= SAR_REGISTER
 }
 
+fn is_store(op: u64) -> bool {
+    op >= STORE_BYTE && op <= STORE_QWORD
+}
+
+fn store_width(op: u64) -> u64 {
+    match op {
+        STORE_BYTE => BYTE_BITS,
+        STORE_WORD => WORD_BITS,
+        STORE_DWORD => DWORD_BITS,
+        _ => QWORD_BITS,
+    }
+}
+
 fn reads_right(op: u64) -> bool {
-    (op >= ADD && op <= XOR) || is_comparison(op) || op == SELECT || is_register_shift(op)
+    (op >= ADD && op <= XOR)
+        || is_comparison(op)
+        || op == SELECT
+        || is_register_shift(op)
+        || is_store(op)
 }
 
 // A shift must keep its count until the destructive instruction reads it.
@@ -135,8 +156,8 @@ fn condition_code(condition: u64) -> u8 {
     }
 }
 
-// Walk backwards to discard dead arithmetic while keeping memory reads
-// and their address computations in program order.
+// Walk backwards to discard dead arithmetic while keeping memory operations
+// and their inputs in program order.
 fn find_last_reads(
     in words: Slice[u64],
     arguments: u64,
@@ -153,7 +174,7 @@ fn find_last_reads(
         let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
-        if record.op > LOAD {
+        if record.op > STORE_QWORD {
             return Option::None;
         }
         if record.op >= ADD && record.op <= SAR && !valid_width(record.extra) {
@@ -178,6 +199,11 @@ fn find_last_reads(
         if record.op == LOAD && (!valid_width(record.extra) || record.right > DISP32_MASK) {
             return Option::None;
         }
+        let stores = is_store(record.op);
+        let result_live = last_read(in reads, value) != NEVER_READ;
+        if stores && (result_live || record.extra > DISP32_MASK) {
+            return Option::None;
+        }
         let has_left = record.op != CONSTANT;
         let has_right = reads_right(record.op);
         let has_third = record.op == SELECT;
@@ -188,7 +214,7 @@ fn find_last_reads(
         {
             return Option::None;
         }
-        if last_read(in reads, value) != NEVER_READ || record.op == LOAD {
+        if result_live || record.op == LOAD || stores {
             if has_left {
                 first_read_backwards(inout reads, record.left, value);
             }
@@ -269,7 +295,8 @@ pub fn encode_block(in words: Slice[u64]) -> ChunkSeq[u8] {
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
         let result_live = last_read(in reads, value) != NEVER_READ;
-        if !result_live && record.op != LOAD {
+        let stores = is_store(record.op);
+        if !result_live && record.op != LOAD && !stores {
             registers.push(UNASSIGNED);
             continue;
         }
@@ -291,7 +318,9 @@ pub fn encode_block(in words: Slice[u64]) -> ChunkSeq[u8] {
 
         // For select, use a dying arm as the default. For comparisons,
         // the operands are read before the result overwrites either one.
-        let destination = if conditional && right_dies {
+        let destination = if stores {
+            UNASSIGNED
+        } else if conditional && right_dies {
             right
         } else if third_dies {
             third
@@ -302,11 +331,19 @@ pub fn encode_block(in words: Slice[u64]) -> ChunkSeq[u8] {
         } else {
             find_register(used)
         };
-        if destination == UNASSIGNED {
+        if stores {
+            emit(
+                inout output,
+                in Instruction::Store(
+                    right,
+                    left,
+                    wrapping_u32(record.extra),
+                    store_width(record.op)
+                )
+            );
+        } else if destination == UNASSIGNED {
             return ChunkSeq::new[u8]();
-        }
-
-        if record.op == CONSTANT {
+        } else if record.op == CONSTANT {
             emit(inout output, in Instruction::Immediate(destination, record.left));
         } else if record.op == LOAD {
             emit(

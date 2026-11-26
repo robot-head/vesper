@@ -2,8 +2,8 @@
 use cranelift_codegen::{
     entity::SecondaryMap,
     ir::{
-        AbiParam, Block, BlockCall, Endianness, Function, Inst, InstructionData, Opcode, Type,
-        Value, condcodes::IntCC, types,
+        AbiParam, Block, BlockCall, Endianness, Function, Inst, InstructionData, MemFlags, Opcode,
+        Type, Value, condcodes::IntCC, types,
     },
     isa::CallConv,
 };
@@ -37,6 +37,10 @@ enum IntegerOp {
     ShiftRightLogicalRegister = 21,
     ShiftRightArithmeticRegister = 22,
     Load = 23,
+    StoreByte = 24,
+    StoreWord = 25,
+    StoreDword = 26,
+    StoreQword = 27,
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
@@ -112,6 +116,27 @@ enum PathKind {
     Speculated,
 }
 
+fn supports_memory(path: PathKind, flags: MemFlags) -> bool {
+    matches!(path, PathKind::Executed)
+        && flags.notrap()
+        && !flags.checked()
+        && flags.endianness(Endianness::Little) == Endianness::Little
+}
+
+fn store_op(opcode: Opcode, ty: Type) -> Option<IntegerOp> {
+    Some(match (opcode, ty) {
+        (Opcode::Store, types::I8) | (Opcode::Istore8, types::I16 | types::I32 | types::I64) => {
+            IntegerOp::StoreByte
+        }
+        (Opcode::Store, types::I16) | (Opcode::Istore16, types::I32 | types::I64) => {
+            IntegerOp::StoreWord
+        }
+        (Opcode::Store, types::I32) | (Opcode::Istore32, types::I64) => IntegerOp::StoreDword,
+        (Opcode::Store, types::I64) => IntegerOp::StoreQword,
+        _ => return None,
+    })
+}
+
 struct IntegerBlocks<'a> {
     function: &'a Function,
     arity: usize,
@@ -164,13 +189,34 @@ impl IntegerBlocks<'_> {
         let mut instructions = function.layout.block_insts(block);
         let terminator = instructions.next_back()?;
         for inst in instructions {
+            let input = |value| values[function.dfg.resolve_aliases(value)];
+            let ty = |value| function.dfg.value_type(function.dfg.resolve_aliases(value));
+            if let InstructionData::Store {
+                opcode,
+                flags,
+                args: [source, base],
+                offset,
+            } = function.dfg.insts[inst]
+            {
+                if !supports_memory(path, flags) || ty(base) != types::I64 {
+                    return None;
+                }
+                let op = store_op(opcode, ty(source))?;
+                self.append(
+                    op,
+                    [
+                        input(base)?,
+                        input(source)?,
+                        u64::from(i32::from(offset) as u32),
+                    ],
+                );
+                continue;
+            }
             let [value] = *function.dfg.inst_results(inst) else {
                 return None;
             };
             let output = function.dfg.value_type(value);
             let width = integer_width(output)?;
-            let input = |value| values[function.dfg.resolve_aliases(value)];
-            let ty = |value| function.dfg.value_type(function.dfg.resolve_aliases(value));
             let (op, operands) = match function.dfg.insts[inst] {
                 InstructionData::UnaryImm {
                     opcode: Opcode::Iconst,
@@ -196,12 +242,7 @@ impl IntegerBlocks<'_> {
                     flags,
                     arg,
                     offset,
-                } if matches!(path, PathKind::Executed)
-                    && ty(arg) == types::I64
-                    && flags.notrap()
-                    && !flags.checked()
-                    && flags.endianness(Endianness::Little) == Endianness::Little =>
-                {
+                } if supports_memory(path, flags) && ty(arg) == types::I64 => {
                     let (access_width, signed) = match opcode {
                         Opcode::Load => (width, false),
                         Opcode::Uload8 => (u64::from(types::I8.bits()), false),
@@ -365,7 +406,9 @@ impl IntegerBlocks<'_> {
 /// (opcode, left, right, extra) records. The extra word is the result width
 /// for operations such as loads and arithmetic, the condition code for comparisons, or
 /// the false value ID for selects. Arguments come first in the value space,
-/// followed by one value per instruction. Operand IDs refer to prior values.
+/// followed by one slot per instruction. A store uses its extra word for
+/// displacement and leaves an unreferenced slot. Operand IDs refer to prior
+/// value-producing instructions or arguments.
 pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
     let signature = &function.signature;
     let arity = signature.params.len();

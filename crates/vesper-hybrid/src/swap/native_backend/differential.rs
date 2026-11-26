@@ -32,6 +32,7 @@ enum Case {
     LoadWidths,
     WideningLoads,
     RetainedLoad,
+    MemoryStores,
     CompareImmediate,
     Select,
     SelectKeepingArms,
@@ -56,6 +57,8 @@ fn integer_backend_matches_cranelift_results() {
     assert!(binding::x86_64_integer_block(&[1, 1]).is_empty());
     // The first instruction cannot reference its own result.
     assert!(binding::x86_64_integer_block(&[1, 1, 1, 1, 0, 0]).is_empty());
+    // A store's slot cannot be returned as a value.
+    assert!(binding::x86_64_integer_block(&[1, 1, 27, 0, 0, 0]).is_empty());
 
     let isa = cranelift_native::builder()
         .unwrap()
@@ -105,6 +108,7 @@ fn integer_backend_matches_cranelift_results() {
         Case::LoadWidths,
         Case::WideningLoads,
         Case::RetainedLoad,
+        Case::MemoryStores,
     ];
     let cases: Vec<_> = cases
         .into_iter()
@@ -313,6 +317,20 @@ fn integer_backend_matches_cranelift_results() {
                 builder.ins().load(types::I64, flags, a, 8);
                 builder.ins().load(types::I64, flags, a, 0)
             }
+            Case::MemoryStores => {
+                let flags = MemFlags::new().with_notrap();
+                let old = builder.ins().load(types::I64, flags, a, -137);
+                builder.ins().store(flags, b, a, -137);
+                builder.ins().istore8(flags, c, a, -136);
+                builder.ins().istore16(flags, d, e, 127);
+                builder.ins().istore32(flags, f, e, 128);
+                let byte = builder.ins().ireduce(types::I8, d);
+                builder.ins().store(flags, byte, a, 0);
+                let new = builder.ins().load(types::I64, flags, a, -137);
+                let overlapping = builder.ins().load(types::I64, flags, e, 126);
+                let diff = builder.ins().bxor(new, old);
+                builder.ins().bxor(diff, overlapping)
+            }
             Case::CompareImmediate => {
                 let byte = builder.ins().ireduce(types::I8, a);
                 let zero = builder.ins().icmp_imm(IntCC::Equal, byte, 0);
@@ -368,6 +386,34 @@ fn integer_backend_matches_cranelift_results() {
         let baseline: Fn6 = unsafe { std::mem::transmute(module.get_finalized_function(baseline)) };
         let candidate: Fn6 =
             unsafe { std::mem::transmute(module.get_finalized_function(candidate)) };
+        let memory: [u8; 512] = std::array::from_fn(|i| i.wrapping_mul(97) as u8);
+        if matches!(case, Case::MemoryStores) {
+            for (first, second) in [(256, 257), (257, 256)] {
+                let mut reference_memory = memory;
+                let mut generated_memory = memory;
+                let run = |function: Fn6, memory: &mut [u8; 512]| {
+                    let base = memory.as_mut_ptr();
+                    // The two pointers share this live buffer. Every offset
+                    // in MemoryStores lands within its allocated bytes.
+                    unsafe {
+                        function(
+                            base.add(first) as u64,
+                            0x1234_5678_90ab_cdef,
+                            0xdcba,
+                            0x7890,
+                            base.add(second) as u64,
+                            0x7654_3210,
+                        )
+                    }
+                };
+                assert_eq!(
+                    run(candidate, &mut generated_memory),
+                    run(baseline, &mut reference_memory),
+                );
+                assert_eq!(generated_memory, reference_memory);
+            }
+            continue;
+        }
         let scalar_inputs = [
             [2, 3, 5, 7, 13, 17],
             [0, 0, 0, 0, 0, 0],
@@ -379,7 +425,6 @@ fn integer_backend_matches_cranelift_results() {
             [0x8000_0000, 0x7fff_ffff, 0, 65, 33, 0],
             [u64::MAX, 0, 0, 32, 65, 0],
         ];
-        let memory: [u8; 512] = std::array::from_fn(|i| i.wrapping_mul(97) as u8);
         let middle = memory[256..].as_ptr() as u64;
         let odd = memory[257..].as_ptr() as u64;
         let memory_inputs = [[middle, 0, 0, 0, odd, 0], [odd, 0, 0, 0, middle, 0]];
@@ -461,7 +506,7 @@ fn integer_backend_declines_register_pressure_and_unsupported_operations() {
 fn integer_backend_declines_cycles_and_effectful_branch_arms() {
     let mut context = cranelift_codegen::Context::new();
     let mut builder_context = FunctionBuilderContext::new();
-    for branch_op in [Opcode::Jump, Opcode::Sdiv, Opcode::Load] {
+    for branch_op in [Opcode::Jump, Opcode::Sdiv, Opcode::Load, Opcode::Store] {
         context.clear();
         context.func.signature.call_conv = cranelift_codegen::isa::CallConv::SystemV;
         context
@@ -498,6 +543,12 @@ fn integer_backend_declines_cycles_and_effectful_branch_arms() {
                     .load(types::I64, MemFlags::trusted(), argument, 0);
                 builder.ins().return_(&[load]);
             }
+            Opcode::Store => {
+                builder
+                    .ins()
+                    .store(MemFlags::trusted(), argument, argument, 0);
+                builder.ins().return_(&[argument]);
+            }
             _ => unreachable!(),
         }
 
@@ -510,13 +561,17 @@ fn integer_backend_declines_cycles_and_effectful_branch_arms() {
 }
 
 #[test]
-fn integer_backend_declines_trapping_and_big_endian_loads() {
+fn integer_backend_declines_trapping_big_endian_and_checked_memory_operations() {
     let mut context = cranelift_codegen::Context::new();
     let mut builder_context = FunctionBuilderContext::new();
-    for flags in [
+    for (flags, opcode) in [
         MemFlags::new(),
         MemFlags::trusted().with_endianness(Endianness::Big),
-    ] {
+        MemFlags::trusted().with_checked(),
+    ]
+    .into_iter()
+    .flat_map(|flags| [(flags, Opcode::Load), (flags, Opcode::Store)])
+    {
         context.clear();
         context.func.signature.call_conv = cranelift_codegen::isa::CallConv::SystemV;
         context
@@ -534,8 +589,13 @@ fn integer_backend_declines_trapping_and_big_endian_loads() {
         builder.append_block_params_for_function_params(entry);
         builder.switch_to_block(entry);
         let base = builder.block_params(entry)[0];
-        let load = builder.ins().load(types::I64, flags, base, 0);
-        builder.ins().return_(&[load]);
+        let result = if opcode == Opcode::Load {
+            builder.ins().load(types::I64, flags, base, 0)
+        } else {
+            builder.ins().store(flags, base, base, 0);
+            base
+        };
+        builder.ins().return_(&[result]);
         builder.seal_all_blocks();
         builder.finalize();
         assert!(integer_block_words(&context.func).is_none());

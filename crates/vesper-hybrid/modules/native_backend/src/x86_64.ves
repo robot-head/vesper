@@ -29,6 +29,7 @@ const RM_SIB: u8 = 4;
 const RM_DISP32_WITHOUT_BASE: u8 = 5;
 const SIB_NO_INDEX: u8 = 0x20;
 const MOD_FIELD_SHIFT: u32 = 3;
+const MOV_RM_R8: u8 = 0x88;
 const MOV_RM_R64: u8 = 0x89;
 const MOV_R64_RM: u8 = 0x8b;
 const MOV_REGISTER_IMMEDIATE: u8 = 0xb8;
@@ -90,6 +91,7 @@ pub copy enum Instruction {
     Shift(u8, u8, u8, u64),
     ShiftRegister(u8, u8, u8, u64),
     Load(u8, u8, u32, u64),
+    Store(u8, u8, u32, u64),
     Compare(u8, u8, u8, u8, u64),
     Select(u8, u8, u8, u8, u8),
     Truncate(u8, u8, u64),
@@ -175,6 +177,25 @@ fn load_memory(inout out: ChunkSeq[u8], destination: u8, base: u8, displacement:
         out.push(MOV_R64_RM);
     }
 
+    memory_operand(inout out, destination, base, displacement);
+}
+
+fn store_memory(inout out: ChunkSeq[u8], source: u8, base: u8, displacement: u32, width: u64) {
+    if width == WORD_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+    }
+    out.push(rex(source, base, width == QWORD_BITS));
+    out.push(
+        if width == BYTE_BITS {
+            MOV_RM_R8
+        } else {
+            MOV_RM_R64
+        }
+    );
+    memory_operand(inout out, source, base, displacement);
+}
+
+fn memory_operand(inout out: ChunkSeq[u8], reg: u8, base: u8, displacement: u32) {
     let low_base = base & LOW_REGISTER_MASK;
     let mode = if displacement == 0 && low_base != RM_DISP32_WITHOUT_BASE {
         0
@@ -183,7 +204,7 @@ fn load_memory(inout out: ChunkSeq[u8], destination: u8, base: u8, displacement:
     } else {
         MOD_DISP32
     };
-    out.push(mode | modrm_fields(destination, base));
+    out.push(mode | modrm_fields(reg, base));
     if low_base == RM_SIB {
         out.push(SIB_NO_INDEX | low_base);
     }
@@ -334,6 +355,13 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
         Instruction::Load(destination, base, displacement, width) => load_memory(
             inout out,
             destination,
+            base,
+            displacement,
+            width
+        ),
+        Instruction::Store(source, base, displacement, width) => store_memory(
+            inout out,
+            source,
             base,
             displacement,
             width
