@@ -1888,7 +1888,7 @@ pub fn batch_head(in b: Slice[u8], at0: u64) -> ChunkSeq[i64] {
     out.push(wrapping_i64(start));
     out.push(wrapping_i64(end));
     out.push(crc);
-    for i in 0..6 {
+    for i in 0..5 {
         out.push(0);
     }
     let post = handle Fail[KwErr] in {

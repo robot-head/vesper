@@ -1427,7 +1427,23 @@ mod tests {
                 let again = bytes.clone();
                 bytes.extend_from_slice(&again);
             }
-            for b in mutants(&mut g, &bytes, 60) {
+            // Checksum-valid shapes the random mutants rarely reach: a body
+            // cut short of the 49-byte header, and negative last offset
+            // deltas or record counts.
+            let mut crafted = Vec::new();
+            for n in 0..60u32 {
+                let mut b = bytes[..(12 + n as usize).min(bytes.len())].to_vec();
+                b[8..12].copy_from_slice(&n.to_be_bytes());
+                crafted.push(recrc(b));
+            }
+            for at in [23, 57] {
+                let mut b = bytes.clone();
+                b[at..at + 4].copy_from_slice(&(-1 - g.below(3) as i32).to_be_bytes());
+                crafted.push(recrc(b));
+            }
+            let random = mutants(&mut g, &bytes, 60);
+            crafted.extend(random.iter().map(|b| recrc(b.clone())));
+            for b in random.into_iter().chain(crafted) {
                 checked += 1;
                 for max in [1 << 20, 64] {
                     same(
@@ -1444,6 +1460,18 @@ mod tests {
             "empty",
         );
         assert!(checked > 10_000, "{checked}");
+    }
+
+    /// Refreshes the first batch's CRC-32C so a mutant gets past the
+    /// checksum and into the header checks.
+    fn recrc(mut b: Vec<u8>) -> Vec<u8> {
+        if b.len() >= 21 {
+            let len = u32::from_be_bytes([b[8], b[9], b[10], b[11]]) as usize;
+            let end = (12 + len).min(b.len()).max(21);
+            let crc = crc32c::crc32c(&b[21..end]);
+            b[17..21].copy_from_slice(&crc.to_be_bytes());
+        }
+        b
     }
 
     /// The consumer protocol codecs against the Rust ones.
