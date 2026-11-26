@@ -1,0 +1,460 @@
+// @vesper/kinetic::couple: two-way soft-rigid coupling substep (`src/couple.rs`).
+use self::gjk::separation as g_separation;
+
+const TANGENT_MIN: f32 = 0.000000000001;
+const TWO_F32: f32 = 2.0;
+const HALF_F32: f32 = 0.5;
+const TWO_F64: f64 = 2.0;
+
+const VEC3_STRIDE: u64 = 3;
+const VEC3_Y: u64 = 1;
+const VEC3_Z: u64 = 2;
+
+const BODY_STRIDE: u64 = 23;
+const BODY_X: u64 = 0;
+const BODY_Q: u64 = 3;
+const BODY_V: u64 = 7;
+const BODY_W: u64 = 10;
+const BODY_INV_MASS: u64 = 13;
+const BODY_INV_INERTIA: u64 = 14;
+const BODY_FRAME: u64 = 17;
+const BODY_HAS_FRAME: u64 = 21;
+const BODY_BOUND: u64 = 22;
+
+const Q_Y: u64 = 1;
+const Q_Z: u64 = 2;
+const Q_W: u64 = 3;
+
+const SHAPE_META_STRIDE: u64 = 3;
+const SHAPE_KIND: u64 = 0;
+const SHAPE_NPTS: u64 = 1;
+const SHAPE_PTS_OFF: u64 = 2;
+
+const SHAPE_KIND_SPHERE: u32 = 0;
+const SHAPE_KIND_POLYTOPE: u32 = 2;
+
+const PROBE_X: u64 = 0;
+const PROBE_Y: u64 = 1;
+const PROBE_Z: u64 = 2;
+const PROBE_RADIUS: u64 = 3;
+const SPHERE_DATA_LEN: u64 = 4;
+
+const SEP_DIST: u64 = 0;
+const SEP_NX: u64 = 1;
+const SEP_NY: u64 = 2;
+const SEP_NZ: u64 = 3;
+const SEP_PBX: u64 = 7;
+const SEP_PBY: u64 = 8;
+const SEP_PBZ: u64 = 9;
+
+const ACC_STRIDE: u64 = 6;
+const ACC_P: u64 = 0;
+const ACC_L: u64 = 3;
+
+const META_STATUS: u64 = 0;
+const META_BODY: u64 = 1;
+const META_CONTACTS: u64 = 2;
+const STATUS_OK: u64 = 0;
+
+copy struct V3 {
+    x: f32,
+    y: f32,
+    z: f32
+}
+
+copy struct Q {
+    x: f32,
+    y: f32,
+    z: f32,
+    w: f32
+}
+
+fn gf32(in s: Slice[f32], i: u64) -> f32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0.0,
+    }
+}
+
+fn sf32(inout s: Slice[f32], i: u64, v: f32) {
+    s.try_set(i, v);
+}
+
+fn gf64(in s: Slice[f64], i: u64) -> f64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0.0,
+    }
+}
+
+fn sf64(inout s: Slice[f64], i: u64, v: f64) {
+    s.try_set(i, v);
+}
+
+fn gu64(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn su64(inout s: Slice[u64], i: u64, v: u64) {
+    s.try_set(i, v);
+}
+
+fn sqrt32(x: f32) -> f32 {
+    nearest_f32(sqrt(widen_f64(x)))
+}
+
+fn is_nan64(x: f64) -> bool {
+    x != x
+}
+
+fn v3_zero() -> V3 {
+    V3 { x: 0.0, y: 0.0, z: 0.0 }
+}
+
+fn v3_add(a: V3, b: V3) -> V3 {
+    V3 { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z }
+}
+
+fn v3_sub(a: V3, b: V3) -> V3 {
+    V3 { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }
+}
+
+fn v3_scale(a: V3, s: f32) -> V3 {
+    V3 { x: a.x * s, y: a.y * s, z: a.z * s }
+}
+
+fn v3_dot(a: V3, b: V3) -> f32 {
+    (a.x * b.x + a.y * b.y) + a.z * b.z
+}
+
+fn v3_cross(a: V3, b: V3) -> V3 {
+    V3 { x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x }
+}
+
+fn load_v3(in s: Slice[f32], off: u64) -> V3 {
+    V3 {
+        x: gf32(in s, off),
+        y: gf32(in s, wrapping_add(off, VEC3_Y)),
+        z: gf32(in s, wrapping_add(off, VEC3_Z))
+    }
+}
+
+fn store_v3(inout s: Slice[f32], off: u64, v: V3) {
+    sf32(inout s, off, v.x);
+    sf32(inout s, wrapping_add(off, VEC3_Y), v.y);
+    sf32(inout s, wrapping_add(off, VEC3_Z), v.z);
+}
+
+fn load_q(in s: Slice[f32], off: u64) -> Q {
+    Q {
+        x: gf32(in s, off),
+        y: gf32(in s, wrapping_add(off, Q_Y)),
+        z: gf32(in s, wrapping_add(off, Q_Z)),
+        w: gf32(in s, wrapping_add(off, Q_W))
+    }
+}
+
+fn store_q(inout s: Slice[f32], off: u64, q: Q) {
+    sf32(inout s, off, q.x);
+    sf32(inout s, wrapping_add(off, Q_Y), q.y);
+    sf32(inout s, wrapping_add(off, Q_Z), q.z);
+    sf32(inout s, wrapping_add(off, Q_W), q.w);
+}
+
+fn qmul(q: Q, p: Q) -> Q {
+    let qv = V3 { x: q.x, y: q.y, z: q.z };
+    let pv = V3 { x: p.x, y: p.y, z: p.z };
+    let c = v3_cross(qv, pv);
+    let v = v3_add(v3_add(v3_scale(pv, q.w), v3_scale(qv, p.w)), c);
+    Q { x: v.x, y: v.y, z: v.z, w: q.w * p.w - v3_dot(qv, pv) }
+}
+
+fn qconj(q: Q) -> Q {
+    Q { x: -q.x, y: -q.y, z: -q.z, w: q.w }
+}
+
+fn rotate(q: Q, v: V3) -> V3 {
+    let u = V3 { x: q.x, y: q.y, z: q.z };
+    let t = v3_scale(v3_cross(u, v), TWO_F32);
+    v3_add(v3_add(v, v3_scale(t, q.w)), v3_cross(u, t))
+}
+
+fn rotate_inv(q: Q, v: V3) -> V3 {
+    rotate(qconj(q), v)
+}
+
+fn normalize_q(q: Q) -> Q {
+    let n = sqrt32(((q.x * q.x + q.y * q.y) + q.z * q.z) + q.w * q.w);
+    if !(n > 0.0) {
+        return Q { x: 0.0, y: 0.0, z: 0.0, w: 1.0 };
+    }
+    let s = 1.0 / n;
+    Q { x: q.x * s, y: q.y * s, z: q.z * s, w: q.w * s }
+}
+
+fn body_principal(in bodies: Slice[f32], base: u64) -> Q {
+    let q = load_q(in bodies, wrapping_add(base, BODY_Q));
+    if gf32(in bodies, wrapping_add(base, BODY_HAS_FRAME)) == 0.0 {
+        q
+    } else {
+        qmul(q, load_q(in bodies, wrapping_add(base, BODY_FRAME)))
+    }
+}
+
+fn inv_inertia_world(in bodies: Slice[f32], base: u64, x: V3) -> V3 {
+    let q = body_principal(in bodies, base);
+    let l = rotate_inv(q, x);
+    let ii = load_v3(in bodies, wrapping_add(base, BODY_INV_INERTIA));
+    rotate(q, V3 { x: l.x * ii.x, y: l.y * ii.y, z: l.z * ii.z })
+}
+
+fn angular_weight(in bodies: Slice[f32], base: u64, x: V3) -> f32 {
+    let l = rotate_inv(body_principal(in bodies, base), x);
+    let ii = load_v3(in bodies, wrapping_add(base, BODY_INV_INERTIA));
+    ((l.x * l.x) * ii.x + (l.y * l.y) * ii.y) + (l.z * l.z) * ii.z
+}
+
+fn point_weight(in bodies: Slice[f32], base: u64, arm: V3, d: V3) -> f32 {
+    let bw = gf32(in bodies, wrapping_add(base, BODY_INV_MASS));
+    if bw == 0.0 {
+        0.0
+    } else {
+        bw + angular_weight(in bodies, base, v3_cross(arm, d))
+    }
+}
+
+fn point_velocity(in bodies: Slice[f32], base: u64, arm: V3) -> V3 {
+    let bw = gf32(in bodies, wrapping_add(base, BODY_INV_MASS));
+    if bw == 0.0 {
+        v3_zero()
+    } else {
+        let bv = load_v3(in bodies, wrapping_add(base, BODY_V));
+        let bw_ang = load_v3(in bodies, wrapping_add(base, BODY_W));
+        v3_add(bv, v3_cross(bw_ang, arm))
+    }
+}
+
+fn push_at(inout bodies: Slice[f32], base: u64, arm: V3, p: V3) {
+    let bw = gf32(in bodies, wrapping_add(base, BODY_INV_MASS));
+    if bw == 0.0 {
+        return;
+    }
+    let bx = load_v3(in bodies, wrapping_add(base, BODY_X));
+    store_v3(inout bodies, wrapping_add(base, BODY_X), v3_add(bx, v3_scale(p, bw)));
+    let dq = inv_inertia_world(in bodies, base, v3_cross(arm, p));
+    let sq = load_q(in bodies, wrapping_add(base, BODY_Q));
+    let rot = qmul(Q { x: dq.x, y: dq.y, z: dq.z, w: 0.0 }, sq);
+    let nq = normalize_q(Q {
+        x: sq.x + HALF_F32 * rot.x,
+        y: sq.y + HALF_F32 * rot.y,
+        z: sq.z + HALF_F32 * rot.z,
+        w: sq.w + HALF_F32 * rot.w
+    });
+    store_q(inout bodies, wrapping_add(base, BODY_Q), nq);
+}
+
+fn place_body_core(
+    kind: u32,
+    in local_pts: Slice[f64],
+    local_off: u64,
+    n_pts: u64,
+    rad: f64,
+    bx: V3,
+    bq: Q,
+    inout dst: Slice[f64]
+) {
+    let x0 = widen_f64(bx.x);
+    let x1 = widen_f64(bx.y);
+    let x2 = widen_f64(bx.z);
+    if kind == SHAPE_KIND_SPHERE && n_pts == 0 {
+        sf64(inout dst, PROBE_X, x0);
+        sf64(inout dst, PROBE_Y, x1);
+        sf64(inout dst, PROBE_Z, x2);
+        sf64(inout dst, PROBE_RADIUS, rad);
+        return;
+    }
+    let u0 = widen_f64(bq.x);
+    let u1 = widen_f64(bq.y);
+    let u2 = widen_f64(bq.z);
+    let qw = widen_f64(bq.w);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n_pts {
+            break;
+        }
+        let sbase = wrapping_add(local_off, wrapping_mul(i, VEC3_STRIDE));
+        let v0 = gf64(in local_pts, sbase);
+        let v1 = gf64(in local_pts, wrapping_add(sbase, VEC3_Y));
+        let v2 = gf64(in local_pts, wrapping_add(sbase, VEC3_Z));
+        let c1x = u1 * v2 - u2 * v1;
+        let c1y = u2 * v0 - u0 * v2;
+        let c1z = u0 * v1 - u1 * v0;
+        let tx = TWO_F64 * c1x;
+        let ty = TWO_F64 * c1y;
+        let tz = TWO_F64 * c1z;
+        let c2x = u1 * tz - u2 * ty;
+        let c2y = u2 * tx - u0 * tz;
+        let c2z = u0 * ty - u1 * tx;
+        let dbase = wrapping_mul(i, VEC3_STRIDE);
+        sf64(inout dst, dbase, x0 + ((v0 + qw * tx) + c2x));
+        sf64(inout dst, wrapping_add(dbase, VEC3_Y), x1 + ((v1 + qw * ty) + c2y));
+        sf64(inout dst, wrapping_add(dbase, VEC3_Z), x2 + ((v2 + qw * tz) + c2z));
+        i = wrapping_add(i, 1);
+    }
+    if kind != SHAPE_KIND_POLYTOPE {
+        sf64(inout dst, wrapping_mul(n_pts, VEC3_STRIDE), rad);
+    }
+}
+
+pub fn substep(
+    inout pos: Slice[f32],
+    inout prev: Slice[f32],
+    in p_inv_mass: Slice[f32],
+    nb: u64,
+    inout bodies: Slice[f32],
+    in shape_meta: Slice[u64],
+    in shape_rad: Slice[f64],
+    in local_pts: Slice[f64],
+    radius: f32,
+    mu: f32,
+    h: f32,
+    dt: f32,
+    inout acc: Slice[f32],
+    inout probe_buf: Slice[f64],
+    inout body_verts: Slice[f64],
+    inout gjk_out: Slice[f64],
+    inout out_meta: Slice[u64]
+) {
+    let np = p_inv_mass.len();
+    let rad64 = widen_f64(radius);
+    let two_radius = TWO_F32 * radius;
+    let mut contacts: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= np {
+            break;
+        }
+        let wp = gf32(in p_inv_mass, i);
+        if wp != 0.0 {
+            let p_off = wrapping_mul(i, VEC3_STRIDE);
+            let mut b: u64 = 0;
+            loop {
+                if b >= nb {
+                    break;
+                }
+                let b_base = wrapping_mul(b, BODY_STRIDE);
+                let centre = load_v3(in bodies, wrapping_add(b_base, BODY_X));
+                let bound = gf32(in bodies, wrapping_add(b_base, BODY_BOUND));
+                let reach = bound + two_radius;
+                let pi = load_v3(in pos, p_off);
+                let off = v3_sub(pi, centre);
+                if !(v3_dot(off, off) > reach * reach) {
+                    sf64(inout probe_buf, PROBE_X, widen_f64(pi.x));
+                    sf64(inout probe_buf, PROBE_Y, widen_f64(pi.y));
+                    sf64(inout probe_buf, PROBE_Z, widen_f64(pi.z));
+                    sf64(inout probe_buf, PROBE_RADIUS, rad64);
+
+                    let sm_base = wrapping_mul(b, SHAPE_META_STRIDE);
+                    let kb = wrapping_u32(gu64(in shape_meta, wrapping_add(sm_base, SHAPE_KIND)));
+                    let n_pts = gu64(in shape_meta, wrapping_add(sm_base, SHAPE_NPTS));
+                    let pts_off = gu64(in shape_meta, wrapping_add(sm_base, SHAPE_PTS_OFF));
+                    let rb = gf64(in shape_rad, b);
+                    let bq = load_q(in bodies, wrapping_add(b_base, BODY_Q));
+                    place_body_core(
+                        kb,
+                        in local_pts,
+                        pts_off,
+                        n_pts,
+                        rb,
+                        centre,
+                        bq,
+                        inout body_verts
+                    );
+
+                    let vlen = if kb == SHAPE_KIND_SPHERE {
+                        SPHERE_DATA_LEN
+                    } else if kb == SHAPE_KIND_POLYTOPE {
+                        wrapping_mul(n_pts, VEC3_STRIDE)
+                    } else {
+                        wrapping_add(wrapping_mul(n_pts, VEC3_STRIDE), 1)
+                    };
+                    let st = g_separation(
+                        SHAPE_KIND_SPHERE,
+                        in probe_buf,
+                        kb,
+                        in body_verts[0..vlen],
+                        inout gjk_out
+                    );
+                    if st != STATUS_OK {
+                        su64(inout out_meta, META_STATUS, st);
+                        su64(inout out_meta, META_BODY, b);
+                        su64(inout out_meta, META_CONTACTS, contacts);
+                        return;
+                    }
+                    let d = gf64(in gjk_out, SEP_DIST);
+                    if !(is_nan64(d) || d >= 0.0) {
+                        let n = V3 {
+                            x: nearest_f32(-gf64(in gjk_out, SEP_NX)),
+                            y: nearest_f32(-gf64(in gjk_out, SEP_NY)),
+                            z: nearest_f32(-gf64(in gjk_out, SEP_NZ))
+                        };
+                        let arm = V3 {
+                            x: nearest_f32(gf64(in gjk_out, SEP_PBX) - widen_f64(centre.x)),
+                            y: nearest_f32(gf64(in gjk_out, SEP_PBY) - widen_f64(centre.y)),
+                            z: nearest_f32(gf64(in gjk_out, SEP_PBZ) - widen_f64(centre.z))
+                        };
+                        let wb = point_weight(in bodies, b_base, arm, n);
+                        let wsum = wp + wb;
+                        contacts = wrapping_add(contacts, 1);
+                        let dl = (-nearest_f32(d)) / wsum;
+                        let before = pi;
+                        let mut pi_cur = v3_add(pi, v3_scale(n, wp * dl));
+                        push_at(inout bodies, b_base, arm, v3_scale(n, -dl));
+                        let mut impulse = v3_scale(n, -dl);
+                        if mu > 0.0 {
+                            let vb_vel = point_velocity(in bodies, b_base, arm);
+                            let prev_i = load_v3(in prev, p_off);
+                            let motion = v3_sub(v3_sub(pi_cur, prev_i), v3_scale(vb_vel, h));
+                            let tan = v3_sub(motion, v3_scale(n, v3_dot(motion, n)));
+                            let lt = sqrt32(v3_dot(tan, tan));
+                            if lt > TANGENT_MIN {
+                                let t = v3_scale(tan, 1.0 / lt);
+                                let wt = wp + point_weight(in bodies, b_base, arm, t);
+                                let stop = lt / wt;
+                                let limit = mu * dl;
+                                let lam = if stop < limit { stop } else { limit };
+                                pi_cur = v3_sub(pi_cur, v3_scale(t, wp * lam));
+                                push_at(inout bodies, b_base, arm, v3_scale(t, lam));
+                                impulse = v3_add(impulse, v3_scale(t, lam));
+                            }
+                        }
+                        store_v3(inout pos, p_off, pi_cur);
+                        if wb > 0.0 {
+                            let dx = v3_sub(pi_cur, before);
+                            let prev_i = load_v3(in prev, p_off);
+                            store_v3(inout prev, p_off, v3_add(prev_i, v3_scale(dx, 1.0 - h / dt)));
+                            let p = v3_scale(impulse, 1.0 / dt);
+                            let acc_base = wrapping_mul(b, ACC_STRIDE);
+                            let ap = load_v3(in acc, wrapping_add(acc_base, ACC_P));
+                            let al = load_v3(in acc, wrapping_add(acc_base, ACC_L));
+                            store_v3(inout acc, wrapping_add(acc_base, ACC_P), v3_add(ap, p));
+                            store_v3(
+                                inout acc,
+                                wrapping_add(acc_base, ACC_L),
+                                v3_add(al, v3_cross(arm, p))
+                            );
+                        }
+                    }
+                }
+                b = wrapping_add(b, 1);
+            }
+        }
+        i = wrapping_add(i, 1);
+    }
+    su64(inout out_meta, META_STATUS, STATUS_OK);
+    su64(inout out_meta, META_BODY, 0);
+    su64(inout out_meta, META_CONTACTS, contacts);
+}

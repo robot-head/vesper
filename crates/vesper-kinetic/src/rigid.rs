@@ -41,7 +41,9 @@
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
 use crate::coloring::{Colorer, ColoringError, ConstraintBodies};
-use crate::gjk::{self, GjkError, Shape};
+#[cfg(not(vesper_port))]
+use crate::gjk;
+use crate::gjk::{GjkError, Shape};
 use crate::lbvh::{Aabb, Lbvh, LbvhError};
 use crate::sap::{SapError, SweepAndPrune};
 use crate::snapshot::{KineticSnapshotWireHdr, WorldHashes};
@@ -697,6 +699,7 @@ fn inv_inertia_world(s: &State, x: V3) -> V3 {
 
 /// `xᵀ I⁻¹ x` (the rotational part of a generalized inverse mass).
 #[inline]
+#[cfg(not(vesper_port))]
 fn angular_weight(s: &State, x: V3) -> f32 {
     let l = rotate_inv(s.principal(), x);
     det::add(
@@ -762,6 +765,7 @@ fn has_volume(v: &[V3]) -> bool {
 
 /// Rotate `s` by the angular impulse `l` (world): `q += ½ [I⁻¹ l, 0] q`.
 #[inline]
+#[cfg(not(vesper_port))]
 fn turn(s: &mut State, l: V3) {
     let dq = inv_inertia_world(s, l);
     let rot = qmul([dq[0], dq[1], dq[2], 0.0], s.q);
@@ -2534,10 +2538,150 @@ impl RigidWorld {
 
 // ----- hooks for soft-rigid coupling (crate::couple) -------------------------
 
+#[cfg(vesper_port)]
+const COUPLE_BODY_STRIDE: usize = 23;
+#[cfg(vesper_port)]
+const COUPLE_BODY_X: usize = 0;
+#[cfg(vesper_port)]
+const COUPLE_BODY_Q: usize = 3;
+#[cfg(vesper_port)]
+const COUPLE_VEC3_LEN: usize = 3;
+#[cfg(vesper_port)]
+const COUPLE_QUAT_LEN: usize = 4;
+#[cfg(vesper_port)]
+const COUPLE_SHAPE_META_STRIDE: usize = 3;
+#[cfg(vesper_port)]
+const COUPLE_SHAPE_KIND_SPHERE: u64 = 0;
+#[cfg(vesper_port)]
+const COUPLE_SHAPE_KIND_CAPSULE: u64 = 1;
+#[cfg(vesper_port)]
+const COUPLE_SHAPE_KIND_POLYTOPE: u64 = 2;
+#[cfg(vesper_port)]
+const COUPLE_NO_PTS: u64 = 0;
+#[cfg(vesper_port)]
+const COUPLE_SINGLE_PT: u64 = 1;
+#[cfg(vesper_port)]
+const COUPLE_CAPSULE_NPTS: u64 = 2;
+#[cfg(vesper_port)]
+const COUPLE_BOX_NPTS: usize = 8;
+#[cfg(vesper_port)]
+const COUPLE_BOX_X_BIT: usize = 1;
+#[cfg(vesper_port)]
+const COUPLE_BOX_Y_BIT: usize = 2;
+#[cfg(vesper_port)]
+const COUPLE_BOX_Z_BIT: usize = 4;
+#[cfg(vesper_port)]
+const COUPLE_HAS_FRAME_TRUE: f32 = 1.0;
+#[cfg(vesper_port)]
+const COUPLE_HAS_FRAME_FALSE: f32 = 0.0;
+
 impl RigidWorld {
+    /// Pack rigid-body poses, inertia parameters, bounding radii and local
+    /// collider core shapes for `@vesper/kinetic::couple`.
+    #[cfg(vesper_port)]
+    pub(crate) fn pack_couple_state(
+        &self,
+        bodies: &mut Vec<f32>,
+        shape_meta: &mut Vec<u64>,
+        shape_rad: &mut Vec<f64>,
+        local_pts: &mut Vec<f64>,
+    ) {
+        let nb = self.bodies.len();
+        bodies.clear();
+        bodies.reserve(nb * COUPLE_BODY_STRIDE);
+        shape_meta.clear();
+        shape_meta.reserve(nb * COUPLE_SHAPE_META_STRIDE);
+        shape_rad.clear();
+        shape_rad.reserve(nb);
+        local_pts.clear();
+
+        for s in &self.bodies {
+            bodies.extend_from_slice(&s.x);
+            bodies.extend_from_slice(&s.q);
+            bodies.extend_from_slice(&s.v);
+            bodies.extend_from_slice(&s.w);
+            bodies.push(s.inv_mass);
+            bodies.extend_from_slice(&s.inv_inertia);
+            bodies.extend_from_slice(&s.frame.unwrap_or(IDENTITY));
+            bodies.push(if s.frame.is_some() {
+                COUPLE_HAS_FRAME_TRUE
+            } else {
+                COUPLE_HAS_FRAME_FALSE
+            });
+            bodies.push(self.bound_radius(s.collider));
+
+            let pts_off = local_pts.len() as u64;
+            let (kind, n_pts, rad) = match &self.colliders[s.collider as usize].shape {
+                ColliderShape::Sphere { radius } => {
+                    (COUPLE_SHAPE_KIND_SPHERE, COUPLE_NO_PTS, f64::from(*radius))
+                }
+                ColliderShape::Capsule {
+                    half_height,
+                    radius,
+                } => {
+                    let h = f64::from(*half_height);
+                    local_pts.extend_from_slice(&[0.0, -h, 0.0, 0.0, h, 0.0]);
+                    (
+                        COUPLE_SHAPE_KIND_CAPSULE,
+                        COUPLE_CAPSULE_NPTS,
+                        f64::from(*radius),
+                    )
+                }
+                ColliderShape::Box { half_extents } => {
+                    let [hx, hy, hz] = to64(*half_extents);
+                    for i in 0..COUPLE_BOX_NPTS {
+                        let sx = if i & COUPLE_BOX_X_BIT == 0 { -hx } else { hx };
+                        let sy = if i & COUPLE_BOX_Y_BIT == 0 { -hy } else { hy };
+                        let sz = if i & COUPLE_BOX_Z_BIT == 0 { -hz } else { hz };
+                        local_pts.extend_from_slice(&[sx, sy, sz]);
+                    }
+                    (COUPLE_SHAPE_KIND_POLYTOPE, COUPLE_BOX_NPTS as u64, 0.0)
+                }
+                ColliderShape::ConvexHull { vertices } => {
+                    for v in vertices {
+                        local_pts.extend_from_slice(&to64(*v));
+                    }
+                    (COUPLE_SHAPE_KIND_POLYTOPE, vertices.len() as u64, 0.0)
+                }
+                ColliderShape::Segment { a, b, radius } => {
+                    local_pts.extend_from_slice(&to64(*a));
+                    let rad = f64::from(*radius);
+                    if a != b {
+                        local_pts.extend_from_slice(&to64(*b));
+                        (COUPLE_SHAPE_KIND_CAPSULE, COUPLE_CAPSULE_NPTS, rad)
+                    } else if rad > 0.0 {
+                        (COUPLE_SHAPE_KIND_SPHERE, COUPLE_SINGLE_PT, rad)
+                    } else {
+                        (COUPLE_SHAPE_KIND_POLYTOPE, COUPLE_SINGLE_PT, 0.0)
+                    }
+                }
+            };
+            shape_meta.extend_from_slice(&[kind, n_pts, pts_off]);
+            shape_rad.push(rad);
+        }
+    }
+
+    /// Write back dynamic body positions and orientations projected during
+    /// `@vesper/kinetic::couple`.
+    #[cfg(vesper_port)]
+    pub(crate) fn unpack_couple_poses(&mut self, bodies: &[f32]) {
+        for (b, s) in self.bodies.iter_mut().enumerate() {
+            if s.inv_mass != 0.0 {
+                let base = b * COUPLE_BODY_STRIDE;
+                s.x.copy_from_slice(
+                    &bodies[base + COUPLE_BODY_X..base + COUPLE_BODY_X + COUPLE_VEC3_LEN],
+                );
+                s.q.copy_from_slice(
+                    &bodies[base + COUPLE_BODY_Q..base + COUPLE_BODY_Q + COUPLE_QUAT_LEN],
+                );
+            }
+        }
+    }
+
     /// Signed distance from a sphere of `radius` at `p` to body `i`'s
     /// collider, the unit normal from the body towards the sphere, and the
     /// arm from the body's centre to the witness point on its surface.
+    #[cfg(not(vesper_port))]
     pub(crate) fn sphere_query(
         &mut self,
         i: usize,
@@ -2560,6 +2704,7 @@ impl RigidWorld {
     }
 
     /// Centre and bounding radius of body `i`'s collider.
+    #[cfg(not(vesper_port))]
     pub(crate) fn bounding_sphere(&self, i: usize) -> (V3, f32) {
         let s = &self.bodies[i];
         (s.x, self.bound_radius(s.collider))
@@ -2567,6 +2712,7 @@ impl RigidWorld {
 
     /// Generalized inverse mass of body `i` in direction `d` at `arm` (zero
     /// for a static body).
+    #[cfg(not(vesper_port))]
     pub(crate) fn point_weight(&self, i: usize, arm: V3, d: V3) -> f32 {
         let s = &self.bodies[i];
         if s.inv_mass == 0.0 {
@@ -2577,6 +2723,7 @@ impl RigidWorld {
 
     /// Positional impulse `p` at `arm` on body `i`: position and
     /// orientation, like a contact projection.
+    #[cfg(not(vesper_port))]
     pub(crate) fn push_at(&mut self, i: usize, arm: V3, p: V3) {
         let s = &mut self.bodies[i];
         if s.inv_mass == 0.0 {
@@ -2600,6 +2747,7 @@ impl RigidWorld {
 
     /// The velocity of body `i`'s material point at `arm` (zero for a
     /// static body).
+    #[cfg(not(vesper_port))]
     pub(crate) fn point_velocity(&self, i: usize, arm: V3) -> V3 {
         let s = &self.bodies[i];
         if s.inv_mass == 0.0 {
