@@ -308,6 +308,12 @@ const CASES: &[&str] = &[
     "struct Atomic { x: u64 } fn f(a: Atomic) -> u64 { 1 }",
     "fn body(in d: u64, i: u64) { } fn f() { parallel_for(in 1, 2, body); }",
     "fn f(o: Option[u64]) -> u64 { let c = Atomic::new(1); parallel_for(in c, 1, g); o.unwrap_or(0) }",
+    // The float prelude.
+    "fn f(x: f64) -> f64 { exp_f64(x) }",
+    "fn f(x: f32) -> f32 { cos_f32(sin_f32(x)) + ln_f32(x) }",
+    "fn float_kernel_sin_f64(x: f64, y: f64, i: u64) -> f64 { x } fn f(x: f64) -> f64 { sin_f64(x) }",
+    "fn exp_f64(x: f64) -> f64 { x } fn f(x: f32) -> f32 { exp_f32(x) }",
+    "fn f(x: f64, s: Str) -> f64 { let n = checked_add_u64(1, 2); exp_f64(x) }",
 ];
 
 /// Every byte-order, bit and checked builtin, named once.
