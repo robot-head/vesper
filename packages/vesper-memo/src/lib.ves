@@ -22,10 +22,7 @@ copy struct Reader {
 }
 
 fn word(in b: Slice[u8], inout r: Reader) -> u64 {
-    let x = match b.try_read_u64_le(r.pos) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    };
+    let x = b.try_read_u64_le(r.pos).unwrap_or(0);
     r.pos = wrapping_add(r.pos, WORD_BYTES);
     x
 }

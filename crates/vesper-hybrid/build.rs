@@ -85,8 +85,8 @@ fn swap_registry() {
 /// takes two words, so every enum layout moves (mirrored in BUILD.bazel).
 #[cfg(feature = "divergent")]
 const DIVERGENT_EDIT: (&str, &str) = (
-    "        8\n    } else {\n        0\n",
-    "        16\n    } else {\n        0\n",
+    "    if is_enum { 8 } else { 0 }\n",
+    "    if is_enum { 16 } else { 0 }\n",
 );
 
 /// With the whole layout swapped (#1177) the pilot's word arithmetic runs

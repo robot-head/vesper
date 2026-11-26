@@ -107,6 +107,10 @@ pub struct Budget {
     pub caller_handles: usize,
 }
 
+/// How many times its own size [`Budget::for_program`] lets inlining grow
+/// a program.
+pub const PROGRAM_GROWTH_FACTOR: usize = 3;
+
 impl Default for Budget {
     fn default() -> Self {
         Self {
@@ -121,6 +125,24 @@ impl Default for Budget {
 }
 
 impl Budget {
+    /// [`Budget::default`] with the program-wide cap scaled to `program`:
+    /// inlining may add up to [`PROGRAM_GROWTH_FACTOR`] times the program's
+    /// own [`cost`]. A fixed cap runs out in a large program before the walk
+    /// reaches its small helpers (the `@vesper/sugar` driver with the front
+    /// end and the AST lowering is 46,076 and stops at 40,000 of the 107,000
+    /// it would add), while the per-caller and per-callee caps still bound
+    /// each function.
+    pub fn for_program(world: &World, program: &Program) -> Self {
+        let base = Self::default();
+        let size: usize = program.functions.values().map(|f| cost(world, f)).sum();
+        Self {
+            program_growth: base
+                .program_growth
+                .max(size.saturating_mul(PROGRAM_GROWTH_FACTOR)),
+            ..base
+        }
+    }
+
     /// A budget that inlines nothing.
     pub fn none() -> Self {
         Self {

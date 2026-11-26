@@ -472,13 +472,16 @@ def _hybrid_and_ports_skip_pull_requests(h):
     for event in ["push", "schedule", "workflow_dispatch"]:
         _contains(event, hybrid["on"])
     include = hybrid["jobs"]["hybrid"]["strategy"]["matrix"]["include"]
-    _equal([row["os"] for row in include], ["ubuntu-latest", "macos-latest", "windows-latest"])
+    _equal([row["os"] for row in include], ["ubuntu-latest", "ubuntu-latest", "macos-latest", "windows-latest"])
+    # The divergent rebuilds run in a Linux job of their own (#2147).
+    _equal([row["os"] for row in include if row.get("divergent")], ["ubuntu-latest"])
     hybrid_steps = hybrid["jobs"]["hybrid"]["steps"]
     divergent = [step for step in hybrid_steps if " catches a divergent " in step.get("name", "")]
     _equal(len(divergent), 12)
     for step in divergent:
-        _equal(step.get("if"), "runner.os == 'Linux'")
-    _absent("if", _first([step for step in hybrid_steps if step.get("name") == "Build and test the hybrid compiler"]))
+        _equal(step.get("if"), "${{ matrix.divergent }}")
+    _equal(_first([step for step in hybrid_steps if step.get("name") == "Build and test the hybrid compiler"])["if"],
+           "${{ !matrix.divergent }}")
     step = _ids(h.platforms["jobs"]["plan"]["steps"])["ports"]
     output = scratch_dir(h.ctx, "vesper-workflow-ports-") + "/outputs"
     env = {"PULL_REQUEST": "1311", "GITHUB_OUTPUT": output, "REQUESTED_PROFILE": "pr", "EVENT": "workflow_dispatch", "BASE_SHA": ""}

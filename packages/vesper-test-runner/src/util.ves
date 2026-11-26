@@ -1,6 +1,34 @@
 // Byte, text and word helpers. Indices stay far below 2^32 (test sources
 // are at most 512 KiB), so arithmetic on them is `wrapping_*`.
 
+use @vesper-std/bytes::ascii::{DIGIT_NINE, DIGIT_ZERO, LOWER_A, LOWER_Z, NEWLINE, UPPER_A, UPPER_Z};
+
+// The status word that starts a result (`status` of
+// tests/common/test_runner_words.rs and its siblings): ok, or an error
+// and its message.
+pub const STATUS_OK: u64 = 0;
+pub const STATUS_ERROR: u64 = 1;
+
+// A word's bytes and bits, a byte's bits, the shift of a word's top
+// byte, and what rounds a byte length up to whole words (`WORD_BYTES - 1`).
+pub const WORD_BYTES: u64 = 8;
+pub const WORD_BITS: u32 = 64;
+pub const BYTE_BITS: u32 = 8;
+pub const TOP_BYTE_SHIFT: u32 = 56;
+const WORD_ROUND_UP: u64 = 7;
+// The low 32 bits of a word (`n as u32`).
+pub const U32_MASK: u64 = 4294967295;
+// A (start, end) range or another pair, as two words of a sequence.
+pub const PAIR_WORDS: u64 = 2;
+
+// Hex digits: subtracted from `a`-`f` and `A`-`F` to give 10 to 15
+// (`'a' - 10`, `'A' - 10`), the bytes of a `0x` prefix, and a digit value
+// past every radix for a byte that is no digit.
+pub const HEX_LETTER_BASE: u8 = 87;
+pub const HEX_UPPER_LETTER_BASE: u8 = 55;
+pub const HEX_PREFIX_BYTES: u64 = 2;
+pub const NOT_A_DIGIT: u64 = 99;
+
 pub fn inc(x: u64) -> u64 {
     wrapping_add(x, 1)
 }
@@ -59,11 +87,11 @@ pub fn starts_with(in b: Slice[u8], s: u64, e: u64, in w: Str) -> bool {
 }
 
 pub fn is_alpha(c: u8) -> bool {
-    (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+    (c >= UPPER_A && c <= UPPER_Z) || (c >= LOWER_A && c <= LOWER_Z)
 }
 
 pub fn is_digit(c: u8) -> bool {
-    c >= 48 && c <= 57
+    c >= DIGIT_ZERO && c <= DIGIT_NINE
 }
 
 pub fn is_alnum(c: u8) -> bool {
@@ -183,7 +211,7 @@ pub fn location(in b: Slice[u8], offset: u64) -> (u64, u64) {
     let mut column: u64 = 1;
     for i in 0..end {
         let c = byte(in b, i);
-        if c == 10 {
+        if c == NEWLINE {
             line = inc(line);
             column = 1;
         } else if !is_continuation(c) {
@@ -197,7 +225,7 @@ pub fn push_decimal(inout out: ChunkSeq[u8], v: u64) {
     if v >= 10 {
         push_decimal(inout out, v / 10);
     }
-    out.push(wrapping_u8(wrapping_add(v % 10, 48)));
+    out.push(wrapping_u8(wrapping_add(v % 10, widen_u64(DIGIT_ZERO))));
 }
 
 pub fn push_range(inout out: ChunkSeq[u8], in b: Slice[u8], s: u64, e: u64) {
@@ -216,7 +244,7 @@ pub struct Reader {
 impl Reader {
     pub fn word(inout self, in b: Slice[u8]) -> u64 {
         let x = b.try_read_u64_le(self.pos).unwrap_or(0);
-        self.pos = add(self.pos, 8);
+        self.pos = add(self.pos, WORD_BYTES);
         x
     }
 
@@ -224,7 +252,7 @@ impl Reader {
     pub fn text(inout self, in b: Slice[u8]) -> (u64, u64) {
         let len = self.word(in b);
         let s = self.pos;
-        self.pos = add(s, wrapping_mul(add(len, 7) / 8, 8));
+        self.pos = add(s, wrapping_mul(add(len, WORD_ROUND_UP) / WORD_BYTES, WORD_BYTES));
         (s, add(s, len))
     }
 }
@@ -236,14 +264,14 @@ pub fn put_text(inout out: ChunkSeq[u64], in b: Slice[u8], s: u64, e: u64) {
     // Whole words straight from `b`, then the tail byte by byte.
     let mut p = s;
     loop {
-        if add(p, 8) > e {
+        if add(p, WORD_BYTES) > e {
             break;
         }
         match b.try_read_u64_le(p) {
             Option::Some(x) => out.push(x),
             Option::None => out.push(0),
         }
-        p = add(p, 8);
+        p = add(p, WORD_BYTES);
     }
     if p < e {
         let mut x: u64 = 0;
@@ -253,7 +281,7 @@ pub fn put_text(inout out: ChunkSeq[u64], in b: Slice[u8], s: u64, e: u64) {
                 break;
             }
             let c = widen_u64(byte(in b, p));
-            x = x | wrapping_shl_u64(c, wrapping_u32(wrapping_mul(k, 8)));
+            x = x | wrapping_shl_u64(c, wrapping_u32(wrapping_mul(k, widen_u64(BYTE_BITS))));
             k = inc(k);
             p = inc(p);
         }

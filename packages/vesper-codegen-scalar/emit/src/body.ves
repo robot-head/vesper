@@ -1,0 +1,395 @@
+// The `body` hook's emission (#2094, part 6a of #1509): a whole scalar
+// function's body on the lent builder, from @vesper/codegen-scalar's body
+// plan (`codegen_scalar_body_plan`), in the order `Codegen::ir_graph_at`
+// (src/native.rs) makes its builder calls, so the CLIF is the Rust walk's.
+//
+// A request's arguments are `[optimize, status, locations, n, n parameter
+// variables, the function's plan words]`: the optimizer flag, whether the
+// function returns a status word beside its value (the register-status
+// Fail ABI), whether instructions carry source locations, and the
+// variables the entry block bound the parameters to.
+//
+// The plan words are, in order:
+//
+// - the block count and the parameter count;
+// - the locals, in name order: a lane code for a local the body declares
+//   and zeroes, `LOCAL_PARAM` plus the index for a parameter;
+// - the values, a lane code each: each gets a zeroed register variable;
+// - each block's parameters (a count, then value indexes);
+// - the lowering order, a block and its seal flag per position;
+// - per block in that order, its instructions and its terminator.
+//
+// An instruction is `[kind, dest, post, location, n, n operand values]`
+// (the location is a source offset, or NO_LOCATION), then a
+// planned request and its two immediates (INST_PLANNED), a local and the
+// read's kind (INST_READ), a local or NO_LOCAL (INST_BIND), or a local,
+// the temporary's kind and the statement's kind (INST_WRITE). A
+// terminator is `[code, ...]`: a value and the lane of the default that
+// stands for a `Never` value (0: none) for `return`; a target block and
+// that pair per argument for `jump`; a condition and two blocks for
+// `branch`; nothing for `unreachable`.
+
+use @vesper/cranelift::{
+    Block, Ty, Value, Var, append_block_param, call_arg, call_arg_count, create_block,
+    current_block, declare_var, def_var, ins_brif0, ins_f32const, ins_f64const, ins_iconst,
+    ins_jump, ins_return, ins_trap, invalid, is_invalid, seal_block, set_srcloc, switch_to_block,
+    trap_user, ty_f32, ty_f64, ty_i64, use_var, value_type
+};
+use super::{BODY_ERROR, HANDLED, coerce, planned};
+
+// The plan's lane codes (@vesper/codegen-scalar's `body.ves`).
+const LANE_I64: u64 = 1;
+const LANE_F32: u64 = 2;
+const LANE_F64: u64 = 3;
+const LOCAL_PARAM: u64 = 16;
+const INST_PLANNED: u64 = 1;
+const INST_READ: u64 = 2;
+const INST_BIND: u64 = 3;
+const INST_WRITE: u64 = 4;
+const NO_LOCAL: u64 = 18446744073709551615;
+const TERM_RETURN: u64 = 0;
+const TERM_JUMP: u64 = 1;
+const TERM_BRANCH: u64 = 2;
+const TERM_UNREACHABLE: u64 = 4;
+
+// Argument positions.
+const ARG_OPTIMIZE: u64 = 0;
+const ARG_STATUS: u64 = 1;
+const ARG_LOCATIONS: u64 = 2;
+const ARG_PARAMS: u64 = 3;
+
+// An instruction with no span keeps the location before it.
+const NO_LOCATION: u64 = 18446744073709551615;
+
+// A reader over the request's words.
+struct Words {
+    call: u64,
+    at: u64,
+}
+
+impl Words {
+    fn next(inout self) -> u64 eff [Ffi[Cranelift]] {
+        let w = call_arg(self.call, self.at);
+        self.at = wrapping_add(self.at, 1);
+        w
+    }
+}
+
+fn at32(in s: ChunkSeq[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => invalid(),
+    }
+}
+
+fn at64(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn var_at(in s: ChunkSeq[u32], i: u64) -> Var {
+    Var { id: at32(in s, i) }
+}
+
+fn lane_type(lane: u64) -> Ty {
+    if lane == LANE_F32 {
+        ty_f32()
+    } else if lane == LANE_F64 {
+        ty_f64()
+    } else {
+        ty_i64()
+    }
+}
+
+// `scalar_zero` (and `default_value`) of a lane.
+fn zero_of(inout b: Builder, lane: u64) -> Value eff [Ffi[Cranelift]] {
+    if lane == LANE_F32 {
+        ins_f32const(inout b, 0)
+    } else if lane == LANE_F64 {
+        ins_f64const(inout b, 0)
+    } else {
+        ins_iconst(inout b, ty_i64(), 0)
+    }
+}
+
+// A fresh variable of `lane`, defined as its zero.
+fn zeroed(inout b: Builder, lane: u64) -> u32 eff [Ffi[Cranelift]] {
+    let var = declare_var(inout b, lane_type(lane));
+    let zero = zero_of(inout b, lane);
+    def_var(inout b, var, zero);
+    var.id
+}
+
+// The function's emission state.
+struct Body {
+    optimize: bool,
+    locations: bool,
+    // block index -> its Cranelift block
+    blocks: ChunkSeq[u32],
+    // local index -> its variable
+    locals: ChunkSeq[u32],
+    // value index -> its register variable, its block parameter (if
+    // any), and the Cranelift value the walk last read it as
+    registers: ChunkSeq[u32],
+    params: ChunkSeq[u32],
+    values: ChunkSeq[u32],
+}
+
+impl Body {
+    fn value(in self, i: u64) -> Value {
+        Value { id: at32(in self.values, i) }
+    }
+
+    fn block(in self, i: u64) -> Block {
+        Block { id: at32(in self.blocks, i) }
+    }
+
+    // The walk's read of value `i` from its register.
+    fn read(inout self, inout b: Builder, i: u64) eff [Ffi[Cranelift]] {
+        let v = use_var(inout b, var_at(in self.registers, i));
+        let ok = self.values.try_set(i, v.id);
+    }
+
+    // One instruction (`ir_graph_at`'s instruction loop): its operands
+    // read from their registers, its arm, the `coerce` to its type and the
+    // definition of its register. False on a word the plan never writes.
+    fn inst(inout self, inout b: Builder, inout w: Words) -> bool eff [Ffi[Cranelift]] {
+        let kind = w.next();
+        let dest = w.next();
+        let post = w.next();
+        let location = w.next();
+        let n = w.next();
+        let mut ops: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for k in 0..n {
+            let op = w.next();
+            ops.push(op);
+            self.read(inout b, op);
+        }
+        // `set_location`, after the operands' reads; the arm's own
+        // `expr_located` sets and restores the same location.
+        if self.locations && location != NO_LOCATION {
+            set_srcloc(inout b, wrapping_u32(location));
+        }
+        let none = Value { id: invalid() };
+        let x = if n >= 1 {
+            self.value(at64(in ops, 0))
+        } else {
+            none
+        };
+        let y = if n >= 2 {
+            self.value(at64(in ops, 1))
+        } else {
+            none
+        };
+        let v = if kind == INST_PLANNED {
+            let request = w.next();
+            let a = w.next();
+            let k = w.next();
+            let r = planned(inout b, wrapping_u32(request), a, k, self.optimize, x, y);
+            if is_invalid(r) {
+                return false;
+            }
+            r
+        } else if kind == INST_READ {
+            // `expr_at`'s read of a local: `use_var`, then `coerce` to the
+            // local's type.
+            let local = var_at(in self.locals, w.next());
+            let read = w.next();
+            let raw = use_var(inout b, local);
+            coerce(inout b, raw, read, self.optimize)
+        } else if kind == INST_BIND {
+            let local = w.next();
+            if local != NO_LOCAL {
+                def_var(inout b, var_at(in self.locals, local), x);
+            }
+            ins_iconst(inout b, ty_i64(), 0)
+        } else if kind == INST_WRITE {
+            // `ir_temp` of the value, then the assignment: the temporary
+            // read back, the local defined, and the statement's zero.
+            let local = var_at(in self.locals, w.next());
+            let temp = w.next();
+            let stated = w.next();
+            let lane = value_type(inout b, x);
+            let t = declare_var(inout b, lane);
+            def_var(inout b, t, x);
+            let back = use_var(inout b, t);
+            let value = coerce(inout b, back, temp, self.optimize);
+            def_var(inout b, local, value);
+            let zero = ins_iconst(inout b, ty_i64(), 0);
+            coerce(inout b, zero, stated, self.optimize)
+        } else {
+            return false;
+        };
+        let v = coerce(inout b, v, post, self.optimize);
+        let ok = self.values.try_set(dest, v.id);
+        def_var(inout b, var_at(in self.registers, dest), v);
+        true
+    }
+
+    // A block's terminator, after its operands' reads.
+    fn terminator(
+        inout self,
+        inout b: Builder,
+        inout w: Words,
+        status: bool
+    ) -> bool eff [Ffi[Cranelift]] {
+        let code = w.next();
+        if code == TERM_RETURN {
+            let i = w.next();
+            let default = w.next();
+            self.read(inout b, i);
+            let v = if default != 0 {
+                zero_of(inout b, default)
+            } else {
+                self.value(i)
+            };
+            let mut out: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            out.push(v.id);
+            if status {
+                // `return_value`'s zero (success) status.
+                let ok = ins_iconst(inout b, ty_i64(), 0);
+                out.push(ok.id);
+            }
+            ins_return(inout b, in out.as_slice());
+            return true;
+        }
+        if code == TERM_JUMP {
+            let target = w.next();
+            let n = w.next();
+            let mut args: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            for k in 0..n {
+                let i = w.next();
+                args.push(i);
+                args.push(w.next());
+                self.read(inout b, i);
+            }
+            let mut out: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            for k in 0..n {
+                let i = at64(in args, wrapping_mul(k, 2));
+                let default = at64(in args, wrapping_add(wrapping_mul(k, 2), 1));
+                let v = if default != 0 {
+                    zero_of(inout b, default)
+                } else {
+                    self.value(i)
+                };
+                out.push(v.id);
+            }
+            ins_jump(inout b, self.block(target), in out.as_slice());
+            return true;
+        }
+        if code == TERM_BRANCH {
+            let c = w.next();
+            let yes = w.next();
+            let no = w.next();
+            self.read(inout b, c);
+            ins_brif0(inout b, self.value(c), self.block(yes), self.block(no));
+            return true;
+        }
+        if code == TERM_UNREACHABLE {
+            ins_trap(inout b, trap_user(1));
+            return true;
+        }
+        false
+    }
+}
+
+// The whole body of one planned function on the lent builder, whose
+// current block is the function's entry: HANDLED, or BODY_ERROR when the
+// words are not a body plan (nothing is declined once emission starts).
+pub fn emit_body(call: u64, inout b: Builder) -> u64 eff [Ffi[Cranelift]] {
+    let np = call_arg(call, ARG_PARAMS);
+    let mut w = Words { call: call, at: wrapping_add(wrapping_add(ARG_PARAMS, 1), np) };
+    if call_arg_count(call) < wrapping_add(w.at, 2) {
+        return BODY_ERROR;
+    }
+    let nb = w.next();
+    if w.next() != np || nb == 0 {
+        return BODY_ERROR;
+    }
+    let mut s = Body {
+        optimize: call_arg(call, ARG_OPTIMIZE) != 0,
+        locations: call_arg(call, ARG_LOCATIONS) != 0,
+        blocks: ChunkSeq::new[u32](),
+        locals: ChunkSeq::new[u32](),
+        registers: ChunkSeq::new[u32](),
+        params: ChunkSeq::new[u32](),
+        values: ChunkSeq::new[u32](),
+    };
+    let status = call_arg(call, ARG_STATUS) != 0;
+    // The graph's blocks: the entry is the current block.
+    s.blocks.push(current_block(inout b).id);
+    for k in 1..nb {
+        s.blocks.push(create_block(inout b).id);
+    }
+    // Locals, in name order.
+    let nl = w.next();
+    for k in 0..nl {
+        let entry = w.next();
+        if entry >= LOCAL_PARAM {
+            let p = wrapping_sub(entry, LOCAL_PARAM);
+            s.locals
+                .push(wrapping_u32(call_arg(call, wrapping_add(wrapping_add(ARG_PARAMS, 1), p))));
+        } else {
+            s.locals.push(zeroed(inout b, entry));
+        }
+    }
+    // Each value's register.
+    let nv = w.next();
+    let mut lanes: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for k in 0..nv {
+        let lane = w.next();
+        lanes.push(lane);
+        s.registers.push(zeroed(inout b, lane));
+        s.params.push(invalid());
+        s.values.push(invalid());
+    }
+    // Block parameters, and where each block's list is.
+    let mut starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for bi in 0..nb {
+        starts.push(w.at);
+        let n = w.next();
+        for k in 0..n {
+            let i = w.next();
+            let p = append_block_param(inout b, s.block(bi), lane_type(at64(in lanes, i)));
+            let ok = s.params.try_set(i, p.id);
+        }
+    }
+    // The lowering order.
+    let mut order: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut seal: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for k in 0..nb {
+        order.push(w.next());
+        seal.push(w.next());
+    }
+    for k in 0..nb {
+        let bi = at64(in order, k);
+        let blk = s.block(bi);
+        if current_block(inout b).id != blk.id {
+            switch_to_block(inout b, blk);
+        }
+        if at64(in seal, k) != 0 {
+            seal_block(inout b, blk);
+        }
+        // The block's parameters define their registers.
+        let mut pw = Words { call: call, at: at64(in starts, bi) };
+        let n = pw.next();
+        for j in 0..n {
+            let i = pw.next();
+            let p = Value { id: at32(in s.params, i) };
+            def_var(inout b, var_at(in s.registers, i), p);
+            let ok = s.values.try_set(i, p.id);
+        }
+        let ic = w.next();
+        for j in 0..ic {
+            if !s.inst(inout b, inout w) {
+                return BODY_ERROR;
+            }
+        }
+        if !s.terminator(inout b, inout w, status) {
+            return BODY_ERROR;
+        }
+    }
+    HANDLED
+}

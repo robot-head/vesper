@@ -11,6 +11,7 @@
 // tests/self_host_test_runner.rs runs both on the repository's corpus.
 //
 // - util.ves: bytes, text and the input/result words.
+// - ast_kinds.ves: the node kind numbers of @vesper/ast.
 // - big.ves: the `i128` of integer attribute values.
 // - attrs.ves: `extract_test_attrs`.
 // - discover.ves: `case_rows`, `discover` and `classify`.

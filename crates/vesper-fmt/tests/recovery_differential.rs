@@ -212,7 +212,10 @@ fn mutate(rng: &mut Rng, source: &str) -> String {
                     .collect();
                 s.replace_range(a..b, &piece);
             }
-            3 => s.truncate(b.max(s.len() / 2)),
+            3 => {
+                let at = snap(&s, b.max(s.len() / 2));
+                s.truncate(at);
+            }
             _ => s.insert_str(a, FRAGMENTS[rng.below(FRAGMENTS.len())]),
         }
     }

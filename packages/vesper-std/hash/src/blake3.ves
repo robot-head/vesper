@@ -121,10 +121,7 @@ fn le_words(in b: Slice[u8], n: u64) -> ChunkSeq[u32] {
         if i >= n {
             break;
         }
-        let x = match b.try_read_u32_le(wrapping_mul(i, 4)) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let x = b.try_read_u32_le(wrapping_mul(i, 4)).unwrap_or(0);
         w.push(x);
         i = wrapping_add(i, 1);
     }
@@ -160,10 +157,7 @@ fn digest_of(in b: Slice[u8]) -> Digest {
 }
 
 fn read_word(in b: Slice[u8], at: u64) -> u64 {
-    match b.try_read_u64_le(at) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    b.try_read_u64_le(at).unwrap_or(0)
 }
 
 impl Blake3 {
@@ -186,10 +180,7 @@ impl Blake3 {
             if i >= 16 {
                 break;
             }
-            let x = match self.block.try_read_u32_le(wrapping_mul(i, 4)) {
-                Option::Some(x) => x,
-                Option::None => 0,
-            };
+            let x = self.block.try_read_u32_le(wrapping_mul(i, 4)).unwrap_or(0);
             self.words.try_set(i, x);
             i = wrapping_add(i, 1);
         }
@@ -335,10 +326,7 @@ impl Blake3 {
                 if i >= 16 || done >= n {
                     break;
                 }
-                let w = match words.try_get(i) {
-                    Option::Some(x) => x,
-                    Option::None => 0,
-                };
+                let w = words.try_get(i).unwrap_or(0);
                 let mut b: u32 = 0;
                 loop {
                     if b >= 32 || done >= n {
@@ -424,10 +412,7 @@ pub fn digest_hex(d: Digest, inout out: String) {
         if i >= 32 {
             break;
         }
-        let x = match b.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let x = b.try_get(i).unwrap_or(0);
         out.push_char(hex_digit(x >> 4));
         out.push_char(hex_digit(x & 15));
         i = wrapping_add(i, 1);

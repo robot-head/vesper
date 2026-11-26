@@ -323,10 +323,7 @@ fn name_has(in names: Names, s: u32, in t: Str) -> bool {
     for i in 0..inc(wrapping_sub(n, b.len())) {
         let mut all = true;
         for j in 0..b.len() {
-            let c = match b.try_get(j) {
-                Option::Some(x) => x,
-                Option::None => 0,
-            };
+            let c = b.try_get(j).unwrap_or(0);
             if names.byte(s, add(i, j)) != c {
                 all = false;
                 break;
@@ -519,10 +516,7 @@ impl Enc {
 }
 
 fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 // Skips a fip drop from `x`; pushes (block, root, path) for a place drop.

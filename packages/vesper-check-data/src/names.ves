@@ -24,27 +24,27 @@ pub fn names_sized(slots: u64) -> Names {
     slots_seq.resize(slots, 0);
     let mut starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
     starts.push(0);
-    let mut n = Names {
+    let mut table = Names {
         text: ChunkSeq::new[u8](),
         starts: starts,
         hashes: ChunkSeq::new[u64](),
         slots: slots_seq,
         mask: wrapping_sub(slots, 1),
     };
-    let empty = n.intern(in "".as_bytes());
-    n
+    let empty = table.intern(in "".as_bytes());
+    table
 }
 
-pub fn hash_bytes(in b: Slice[u8]) -> u64 {
-    let mut h: u64 = 14695981039346656037;
-    for i in 0..b.len() {
-        let c = match b.try_get(i) {
-            Option::Some(c) => c,
+pub fn hash_bytes(in bytes: Slice[u8]) -> u64 {
+    let mut hash: u64 = 14695981039346656037;
+    for i in 0..bytes.len() {
+        let byte = match bytes.try_get(i) {
+            Option::Some(byte) => byte,
             Option::None => 0,
         };
-        h = wrapping_mul(h ^ widen_u64(c), 1099511628211);
+        hash = wrapping_mul(hash ^ widen_u64(byte), 1099511628211);
     }
-    h
+    hash
 }
 
 impl Names {
@@ -93,9 +93,9 @@ impl Names {
         let mut text = if self.text.len() == 0 {
             ChunkSeq::new[u8]()
         } else {
-            let mut t = ChunkSeq::with_capacity[u8](self.text.len());
-            t.extend(in self.text.as_slice());
-            t
+            let mut copied = ChunkSeq::with_capacity[u8](self.text.len());
+            copied.extend(in self.text.as_slice());
+            copied
         };
         Names {
             text: text,
@@ -122,40 +122,40 @@ impl Names {
         }
     }
 
-    pub fn start(in self, s: u32) -> u64 {
-        u64_at(in self.starts, w(s))
+    pub fn start(in self, sym: u32) -> u64 {
+        u64_at(in self.starts, w(sym))
     }
 
-    pub fn end(in self, s: u32) -> u64 {
-        u64_at(in self.starts, inc(w(s)))
+    pub fn end(in self, sym: u32) -> u64 {
+        u64_at(in self.starts, inc(w(sym)))
     }
 
-    pub fn size(in self, s: u32) -> u64 {
-        wrapping_sub(self.end(s), self.start(s))
+    pub fn size(in self, sym: u32) -> u64 {
+        wrapping_sub(self.end(sym), self.start(sym))
     }
 
-    pub fn byte(in self, s: u32, i: u64) -> u8 {
-        u8_at(in self.text, add(self.start(s), i))
+    pub fn byte(in self, sym: u32, i: u64) -> u8 {
+        u8_at(in self.text, add(self.start(sym), i))
     }
 
-    // Whether symbol `s` spells `b`.
-    pub fn spells(in self, s: u32, in b: Slice[u8]) -> bool {
-        let a = self.start(s);
-        let n = wrapping_sub(self.end(s), a);
-        if n != b.len() {
+    // Whether symbol `sym` spells `bytes`.
+    pub fn spells(in self, sym: u32, in bytes: Slice[u8]) -> bool {
+        let start = self.start(sym);
+        let len = wrapping_sub(self.end(sym), start);
+        if len != bytes.len() {
             return false;
         }
         let mut i: u64 = 0;
         loop {
-            if i >= n {
+            if i >= len {
                 break;
             }
-            let x = u8_at(in self.text, add(a, i));
-            let y = match b.try_get(i) {
-                Option::Some(c) => c,
+            let actual = u8_at(in self.text, add(start, i));
+            let expected = match bytes.try_get(i) {
+                Option::Some(byte) => byte,
                 Option::None => 0,
             };
-            if x != y {
+            if actual != expected {
                 return false;
             }
             i = inc(i);
@@ -163,18 +163,18 @@ impl Names {
         true
     }
 
-    pub fn has_prefix(in self, s: u32, in b: Slice[u8]) -> bool {
-        let a = self.start(s);
-        let n = wrapping_sub(self.end(s), a);
-        if n < b.len() {
+    pub fn has_prefix(in self, sym: u32, in bytes: Slice[u8]) -> bool {
+        let start = self.start(sym);
+        let len = wrapping_sub(self.end(sym), start);
+        if len < bytes.len() {
             return false;
         }
-        for i in 0..b.len() {
-            let y = match b.try_get(i) {
-                Option::Some(c) => c,
+        for i in 0..bytes.len() {
+            let expected = match bytes.try_get(i) {
+                Option::Some(byte) => byte,
                 Option::None => 0,
             };
-            if u8_at(in self.text, add(a, i)) != y {
+            if u8_at(in self.text, add(start, i)) != expected {
                 return false;
             }
         }
@@ -187,88 +187,88 @@ impl Names {
         slots.resize(cap, 0);
         let mask = wrapping_sub(cap, 1);
         for id in 0..self.hashes.len() {
-            let mut at = u64_at(in self.hashes, id) & mask;
+            let mut probe = u64_at(in self.hashes, id) & mask;
             loop {
-                if u32_at(in slots, at) == 0 {
+                if u32_at(in slots, probe) == 0 {
                     break;
                 }
-                at = inc(at) & mask;
+                probe = inc(probe) & mask;
             }
-            let ok = slots.try_set(at, n32(inc(id)));
+            let ok = slots.try_set(probe, n32(inc(id)));
         }
         self.slots = slots;
         self.mask = mask;
     }
 
-    pub fn lookup(in self, in b: Slice[u8]) -> u32 {
-        let h = hash_bytes(in b);
-        let mut at = h & self.mask;
+    pub fn lookup(in self, in bytes: Slice[u8]) -> u32 {
+        let hash = hash_bytes(in bytes);
+        let mut probe = hash & self.mask;
         loop {
-            let slot = u32_at(in self.slots, at);
+            let slot = u32_at(in self.slots, probe);
             if slot == 0 {
                 return 4294967295;
             }
             let id = wrapping_sub(slot, 1);
-            if u64_at(in self.hashes, w(id)) == h && self.spells(id, in b) {
+            if u64_at(in self.hashes, w(id)) == hash && self.spells(id, in bytes) {
                 return id;
             }
-            at = inc(at) & self.mask;
+            probe = inc(probe) & self.mask;
         }
     }
 
-    pub fn intern(inout self, in b: Slice[u8]) -> u32 {
-        let h = hash_bytes(in b);
-        let mut at = h & self.mask;
+    pub fn intern(inout self, in bytes: Slice[u8]) -> u32 {
+        let hash = hash_bytes(in bytes);
+        let mut probe = hash & self.mask;
         loop {
-            let slot = u32_at(in self.slots, at);
+            let slot = u32_at(in self.slots, probe);
             if slot == 0 {
                 break;
             }
             let id = wrapping_sub(slot, 1);
-            if u64_at(in self.hashes, w(id)) == h && self.spells(id, in b) {
+            if u64_at(in self.hashes, w(id)) == hash && self.spells(id, in bytes) {
                 return id;
             }
-            at = inc(at) & self.mask;
+            probe = inc(probe) & self.mask;
         }
         let id = n32(self.hashes.len());
-        self.text.extend(in b);
+        self.text.extend(in bytes);
         self.starts.push(self.text.len());
-        self.hashes.push(h);
-        let ok = self.slots.try_set(at, inc32(id));
+        self.hashes.push(hash);
+        let ok = self.slots.try_set(probe, inc32(id));
         if wrapping_mul(self.hashes.len(), 2) > self.mask {
             self.grow();
         }
         id
     }
 
-    // The text of `s` as `put_text_words` words.
-    pub fn put_words(in self, s: u32, inout out: ChunkSeq[u64]) {
-        let a = self.start(s);
-        let b = self.end(s);
-        if a < b && b <= self.text.len() {
-            put_text_words(inout out, in self.text[a..b]);
+    // The text of `sym` as `put_text_words` words.
+    pub fn put_words(in self, sym: u32, inout out: ChunkSeq[u64]) {
+        let start = self.start(sym);
+        let end = self.end(sym);
+        if start < end && end <= self.text.len() {
+            put_text_words(inout out, in self.text[start..end]);
         } else {
             out.push(0);
         }
     }
 
-    // Appends the text of `s` to `out`.
-    pub fn write(in self, s: u32, inout out: ChunkSeq[u8]) {
-        let a = self.start(s);
-        let b = self.end(s);
-        if a < b && b <= self.text.len() {
-            out.extend(in self.text[a..b]);
+    // Appends the text of `sym` to `out`.
+    pub fn write(in self, sym: u32, inout out: ChunkSeq[u8]) {
+        let start = self.start(sym);
+        let end = self.end(sym);
+        if start < end && end <= self.text.len() {
+            out.extend(in self.text[start..end]);
         }
     }
 
     // Digest of a name's bytes (what Rust folds for a `String`).
-    pub fn fold_name(in self, h: u64, s: u32) -> u64 {
-        let mut x = h;
-        let a = self.start(s);
-        let b = self.end(s);
-        for i in a..b {
-            x = fold(x, widen_u64(u8_at(in self.text, i)));
+    pub fn fold_name(in self, seed: u64, sym: u32) -> u64 {
+        let mut hash = seed;
+        let start = self.start(sym);
+        let end = self.end(sym);
+        for i in start..end {
+            hash = fold(hash, widen_u64(u8_at(in self.text, i)));
         }
-        fold(x, 255)
+        fold(hash, 255)
     }
 }

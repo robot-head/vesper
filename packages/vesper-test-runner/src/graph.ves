@@ -20,7 +20,65 @@ use @vesper/ast::lower::{lower_source};
 use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{symbol_from_id};
 use @vesper-std/hash::blake3::{Digest, blake3, digest_bytes, digest_hex};
-use self::util::{Reader, is_text, put_text, u8_at};
+use @vesper-std/bytes::ascii::NUL;
+use self::ast_kinds::{
+    CLOSURE_INFER_SHIFT, CLOSURE_MODE_MASK, EXPR_ASSIGN, EXPR_BINARY, EXPR_BLOCK, EXPR_BREAK,
+    EXPR_CALL, EXPR_CLOSURE, EXPR_FIELD, EXPR_FOR, EXPR_HANDLE, EXPR_IF, EXPR_INDEX, EXPR_LITERAL,
+    EXPR_LOOP, EXPR_MATCH, EXPR_NAME, EXPR_RANGE, EXPR_RETURN, EXPR_STRUCT, EXPR_TRY, EXPR_TUPLE,
+    EXPR_UNARY, ITEM_FUNCTION, ITEM_IMPL, LIT_BOOL, LIT_FLOAT, LIT_INT, LIT_WIDE_INT, MODE_COPY,
+    MODE_LINEAR, MODE_NONE, PASS_IN, PASS_INOUT, PAT_BIND, PAT_LITERAL, PAT_TUPLE, PAT_WILD,
+    STMT_LET, TYPE_FUNCTION, TYPE_NAMED, TYPE_ROW, TYPE_TUPLE
+};
+use self::util::{BYTE_BITS, PAIR_WORDS, Reader, STATUS_OK, WORD_BITS, is_text, put_text, u8_at};
+
+// The domain prefix of a function's canonical bytes, and a digest's length.
+const FN_HASH_DOMAIN: Str = "vesper.anvil.fn_blake3.v1";
+const DIGEST_BYTES: u64 = 32;
+
+// The tags of the canonical bytes (src/anvil_hash.rs): an `Option`'s
+// presence, then the variant of a type, literal, pattern, statement and
+// expression.
+const HASH_NONE: u8 = 0;
+const HASH_SOME: u8 = 1;
+const HASH_TYPE_NAMED: u8 = 1;
+const HASH_TYPE_TUPLE: u8 = 2;
+const HASH_TYPE_FUNCTION: u8 = 3;
+const HASH_TYPE_ROW: u8 = 4;
+const HASH_TYPE_INFER: u8 = 5;
+const HASH_LIT_INT: u8 = 0;
+const HASH_LIT_FLOAT: u8 = 1;
+const HASH_LIT_BOOL: u8 = 2;
+const HASH_LIT_STRING: u8 = 3;
+const HASH_LIT_WIDE_INT: u8 = 4;
+const HASH_PAT_WILD: u8 = 0;
+const HASH_PAT_BIND: u8 = 1;
+const HASH_PAT_LITERAL: u8 = 2;
+const HASH_PAT_TUPLE: u8 = 3;
+const HASH_PAT_CONSTRUCTOR: u8 = 4;
+const HASH_STMT_LET: u8 = 0;
+const HASH_STMT_EXPR: u8 = 1;
+const HASH_EXPR_LITERAL: u8 = 0;
+const HASH_EXPR_NAME: u8 = 1;
+const HASH_EXPR_TUPLE: u8 = 2;
+const HASH_EXPR_STRUCT: u8 = 3;
+const HASH_EXPR_BLOCK: u8 = 4;
+const HASH_EXPR_CALL: u8 = 5;
+const HASH_EXPR_FIELD: u8 = 6;
+const HASH_EXPR_INDEX: u8 = 7;
+const HASH_EXPR_TRY: u8 = 8;
+const HASH_EXPR_UNARY: u8 = 9;
+const HASH_EXPR_BINARY: u8 = 10;
+const HASH_EXPR_ASSIGN: u8 = 11;
+const HASH_EXPR_IF: u8 = 12;
+const HASH_EXPR_MATCH: u8 = 13;
+const HASH_EXPR_CLOSURE: u8 = 14;
+const HASH_EXPR_HANDLE: u8 = 15;
+const HASH_EXPR_LOOP: u8 = 16;
+const HASH_EXPR_FOR: u8 = 17;
+const HASH_EXPR_RANGE: u8 = 18;
+const HASH_EXPR_BREAK: u8 = 19;
+const HASH_EXPR_RETURN: u8 = 20;
+const HASH_EXPR_CONTINUE: u8 = 21;
 
 // ------------------------------------------------------------ node access
 
@@ -93,11 +151,11 @@ fn put_bool(inout b: ChunkSeq[u8], v: bool) {
 fn put_u64(inout b: ChunkSeq[u8], v: u64) {
     let mut s: u32 = 0;
     loop {
-        if s >= 64 {
+        if s >= WORD_BITS {
             break;
         }
         b.push(wrapping_u8(wrapping_shr_u64(v, s)));
-        s = wrapping_add(s, 8);
+        s = wrapping_add(s, BYTE_BITS);
     }
 }
 
@@ -121,38 +179,38 @@ fn put_mode(inout b: ChunkSeq[u8], m: u64) {
 
 fn put_type(inout b: ChunkSeq[u8], in a: Ast, t: u32, inout tmp: String) {
     let n = type_at(in a, t);
-    if n.kind == 1 {
-        put_u8(inout b, 1);
+    if n.kind == TYPE_NAMED {
+        put_u8(inout b, HASH_TYPE_NAMED);
         put_sym(inout b, in a, n.a, inout tmp);
         let m = list_len(in a, n.b);
         put_u64(inout b, m);
         for i in 0..m {
             put_type(inout b, in a, list_at(in a, n.b, i), inout tmp);
         }
-    } else if n.kind == 2 {
-        put_u8(inout b, 2);
+    } else if n.kind == TYPE_TUPLE {
+        put_u8(inout b, HASH_TYPE_TUPLE);
         let m = list_len(in a, n.a);
         put_u64(inout b, m);
         for i in 0..m {
             put_type(inout b, in a, list_at(in a, n.a, i), inout tmp);
         }
-    } else if n.kind == 3 {
-        put_u8(inout b, 3);
-        let m = list_len(in a, n.a) / 2;
+    } else if n.kind == TYPE_FUNCTION {
+        put_u8(inout b, HASH_TYPE_FUNCTION);
+        let m = list_len(in a, n.a) / PAIR_WORDS;
         put_u64(inout b, m);
         for i in 0..m {
-            let k = wrapping_mul(i, 2);
+            let k = wrapping_mul(i, PAIR_WORDS);
             put_u8(inout b, wrapping_u8(widen_u64(list_at(in a, n.a, k))));
             put_type(inout b, in a, list_at(in a, n.a, wrapping_add(k, 1)), inout tmp);
         }
         put_type(inout b, in a, n.b, inout tmp);
         put_effects(inout b, in a, n.c, inout tmp);
         put_mode(inout b, widen_u64(n.d));
-    } else if n.kind == 4 {
-        put_u8(inout b, 4);
+    } else if n.kind == TYPE_ROW {
+        put_u8(inout b, HASH_TYPE_ROW);
         put_effects(inout b, in a, n.a, inout tmp);
     } else {
-        put_u8(inout b, 5);
+        put_u8(inout b, HASH_TYPE_INFER);
     }
 }
 
@@ -160,10 +218,10 @@ fn put_type(inout b: ChunkSeq[u8], in a: Ast, t: u32, inout tmp: String) {
 fn put_effect(inout b: ChunkSeq[u8], in a: Ast, e: u32, inout tmp: String) {
     let n = effect_at(in a, e);
     if n.label != none() {
-        put_u8(inout b, 1);
+        put_u8(inout b, HASH_SOME);
         put_sym(inout b, in a, n.label, inout tmp);
     } else {
-        put_u8(inout b, 0);
+        put_u8(inout b, HASH_NONE);
     }
     put_sym(inout b, in a, n.name, inout tmp);
     let m = list_len(in a, n.args);
@@ -175,9 +233,9 @@ fn put_effect(inout b: ChunkSeq[u8], in a: Ast, e: u32, inout tmp: String) {
 
 // Whether the 32 bytes of `x` at `i` sort before those at `j`.
 fn digest_less(in d: ChunkSeq[u8], i: u64, j: u64) -> bool {
-    for k in 0..32 {
-        let p = u8_at(in d, wrapping_add(wrapping_mul(i, 32), k));
-        let q = u8_at(in d, wrapping_add(wrapping_mul(j, 32), k));
+    for k in 0..DIGEST_BYTES {
+        let p = u8_at(in d, wrapping_add(wrapping_mul(i, DIGEST_BYTES), k));
+        let q = u8_at(in d, wrapping_add(wrapping_mul(j, DIGEST_BYTES), k));
         if p != q {
             return p < q;
         }
@@ -217,8 +275,8 @@ fn put_effects(inout b: ChunkSeq[u8], in a: Ast, effs: u32, inout tmp: String) {
     put_u64(inout b, m);
     for i in 0..m {
         let x = order.try_get(i).unwrap_or(0);
-        let s = wrapping_mul(x, 32);
-        for k in s..wrapping_add(s, 32) {
+        let s = wrapping_mul(x, DIGEST_BYTES);
+        for k in s..wrapping_add(s, DIGEST_BYTES) {
             match digests.try_get(k) {
                 Option::Some(v) => b.push(v),
                 Option::None => {},
@@ -226,10 +284,10 @@ fn put_effects(inout b: ChunkSeq[u8], in a: Ast, effs: u32, inout tmp: String) {
         }
     }
     if n.tail != none() {
-        put_u8(inout b, 1);
+        put_u8(inout b, HASH_SOME);
         put_sym(inout b, in a, n.tail, inout tmp);
     } else {
-        put_u8(inout b, 0);
+        put_u8(inout b, HASH_NONE);
     }
 }
 
@@ -242,8 +300,8 @@ fn put_u128(inout b: ChunkSeq[u8], lo: u64, hi: u64) {
 // `hash_literal` of literal `l`.
 fn put_lit(inout b: ChunkSeq[u8], in a: Ast, l: u32, inout tmp: String) {
     let x = lit_at(in a, l);
-    if x.kind == 1 {
-        put_u8(inout b, 0);
+    if x.kind == LIT_INT {
+        put_u8(inout b, HASH_LIT_INT);
         if x.neg {
             // The two's complement of the magnitude.
             let lo = wrapping_add(!x.bits, 1);
@@ -252,46 +310,46 @@ fn put_lit(inout b: ChunkSeq[u8], in a: Ast, l: u32, inout tmp: String) {
         } else {
             put_u128(inout b, x.bits, x.hi);
         }
-    } else if x.kind == 2 {
-        put_u8(inout b, 1);
+    } else if x.kind == LIT_FLOAT {
+        put_u8(inout b, HASH_LIT_FLOAT);
         put_u64(inout b, x.bits);
-    } else if x.kind == 3 {
-        put_u8(inout b, 2);
+    } else if x.kind == LIT_BOOL {
+        put_u8(inout b, HASH_LIT_BOOL);
         put_bool(inout b, x.bits != 0);
-    } else if x.kind == 5 {
-        put_u8(inout b, 4);
+    } else if x.kind == LIT_WIDE_INT {
+        put_u8(inout b, HASH_LIT_WIDE_INT);
         put_u128(inout b, x.bits, x.hi);
     } else {
-        put_u8(inout b, 3);
+        put_u8(inout b, HASH_LIT_STRING);
         put_sym(inout b, in a, wrapping_u32(x.bits), inout tmp);
     }
 }
 
 fn put_pat(inout b: ChunkSeq[u8], in a: Ast, p: u32, inout tmp: String) {
     let n = pat_at(in a, p);
-    if n.kind == 1 {
-        put_u8(inout b, 0);
-    } else if n.kind == 2 {
-        put_u8(inout b, 1);
+    if n.kind == PAT_WILD {
+        put_u8(inout b, HASH_PAT_WILD);
+    } else if n.kind == PAT_BIND {
+        put_u8(inout b, HASH_PAT_BIND);
         put_sym(inout b, in a, n.a, inout tmp);
-    } else if n.kind == 3 {
-        put_u8(inout b, 2);
+    } else if n.kind == PAT_LITERAL {
+        put_u8(inout b, HASH_PAT_LITERAL);
         put_lit(inout b, in a, n.a, inout tmp);
-    } else if n.kind == 4 {
-        put_u8(inout b, 3);
+    } else if n.kind == PAT_TUPLE {
+        put_u8(inout b, HASH_PAT_TUPLE);
         let m = list_len(in a, n.a);
         put_u64(inout b, m);
         for i in 0..m {
             put_pat(inout b, in a, list_at(in a, n.a, i), inout tmp);
         }
     } else {
-        put_u8(inout b, 4);
+        put_u8(inout b, HASH_PAT_CONSTRUCTOR);
         put_sym(inout b, in a, n.a, inout tmp);
         put_bool(inout b, n.c != 0);
-        let m = list_len(in a, n.b) / 2;
+        let m = list_len(in a, n.b) / PAIR_WORDS;
         put_u64(inout b, m);
         for i in 0..m {
-            let k = wrapping_mul(i, 2);
+            let k = wrapping_mul(i, PAIR_WORDS);
             put_sym(inout b, in a, list_at(in a, n.b, k), inout tmp);
             put_pat(inout b, in a, list_at(in a, n.b, wrapping_add(k, 1)), inout tmp);
         }
@@ -332,10 +390,10 @@ fn put_clause(inout b: ChunkSeq[u8], in a: Ast, c: u32, inout tmp: String) {
 
 fn put_opt_expr(inout b: ChunkSeq[u8], in a: Ast, e: u32, inout tmp: String) {
     if e != none() {
-        put_u8(inout b, 1);
+        put_u8(inout b, HASH_SOME);
         put_expr(inout b, in a, e, inout tmp);
     } else {
-        put_u8(inout b, 0);
+        put_u8(inout b, HASH_NONE);
     }
 }
 
@@ -343,49 +401,49 @@ fn put_opt_expr(inout b: ChunkSeq[u8], in a: Ast, e: u32, inout tmp: String) {
 fn put_expr(inout b: ChunkSeq[u8], in a: Ast, x: u32, inout tmp: String) {
     let e = expr_at(in a, x);
     let k = e.kind;
-    if k == 1 {
-        put_u8(inout b, 0);
+    if k == EXPR_LITERAL {
+        put_u8(inout b, HASH_EXPR_LITERAL);
         put_lit(inout b, in a, e.a, inout tmp);
-    } else if k == 2 {
-        put_u8(inout b, 1);
+    } else if k == EXPR_NAME {
+        put_u8(inout b, HASH_EXPR_NAME);
         put_sym(inout b, in a, e.a, inout tmp);
-    } else if k == 3 {
-        put_u8(inout b, 2);
+    } else if k == EXPR_TUPLE {
+        put_u8(inout b, HASH_EXPR_TUPLE);
         let m = list_len(in a, e.a);
         put_u64(inout b, m);
         for i in 0..m {
             put_expr(inout b, in a, list_at(in a, e.a, i), inout tmp);
         }
-    } else if k == 4 {
-        put_u8(inout b, 3);
+    } else if k == EXPR_STRUCT {
+        put_u8(inout b, HASH_EXPR_STRUCT);
         put_sym(inout b, in a, e.a, inout tmp);
-        let m = list_len(in a, e.b) / 2;
+        let m = list_len(in a, e.b) / PAIR_WORDS;
         put_u64(inout b, m);
         for i in 0..m {
-            let q = wrapping_mul(i, 2);
+            let q = wrapping_mul(i, PAIR_WORDS);
             put_sym(inout b, in a, list_at(in a, e.b, q), inout tmp);
             put_expr(inout b, in a, list_at(in a, e.b, wrapping_add(q, 1)), inout tmp);
         }
-    } else if k == 5 {
-        put_u8(inout b, 4);
+    } else if k == EXPR_BLOCK {
+        put_u8(inout b, HASH_EXPR_BLOCK);
         let m = list_len(in a, e.a);
         put_u64(inout b, m);
         for i in 0..m {
             let s = stmt_at(in a, list_at(in a, e.a, i));
-            if s.kind == 1 {
-                put_u8(inout b, 0);
+            if s.kind == STMT_LET {
+                put_u8(inout b, HASH_STMT_LET);
                 put_pat(inout b, in a, s.pat, inout tmp);
                 put_type(inout b, in a, s.ty, inout tmp);
                 put_expr(inout b, in a, s.value, inout tmp);
                 put_bool(inout b, s.mutable);
             } else {
-                put_u8(inout b, 1);
+                put_u8(inout b, HASH_STMT_EXPR);
                 put_expr(inout b, in a, s.value, inout tmp);
             }
         }
         put_opt_expr(inout b, in a, e.b, inout tmp);
-    } else if k == 6 {
-        put_u8(inout b, 5);
+    } else if k == EXPR_CALL {
+        put_u8(inout b, HASH_EXPR_CALL);
         put_expr(inout b, in a, e.a, inout tmp);
         let nt = list_len(in a, e.b);
         put_u64(inout b, nt);
@@ -400,68 +458,68 @@ fn put_expr(inout b: ChunkSeq[u8], in a: Ast, x: u32, inout tmp: String) {
             put_bool(inout b, g.explicit);
             put_expr(inout b, in a, g.expr, inout tmp);
         }
-    } else if k == 7 {
-        put_u8(inout b, 6);
+    } else if k == EXPR_FIELD {
+        put_u8(inout b, HASH_EXPR_FIELD);
         put_expr(inout b, in a, e.a, inout tmp);
         put_sym(inout b, in a, e.b, inout tmp);
-    } else if k == 8 {
-        put_u8(inout b, 7);
+    } else if k == EXPR_INDEX {
+        put_u8(inout b, HASH_EXPR_INDEX);
         put_expr(inout b, in a, e.a, inout tmp);
         put_expr(inout b, in a, e.b, inout tmp);
-    } else if k == 9 {
-        put_u8(inout b, 8);
+    } else if k == EXPR_TRY {
+        put_u8(inout b, HASH_EXPR_TRY);
         put_expr(inout b, in a, e.a, inout tmp);
-    } else if k == 10 {
-        put_u8(inout b, 9);
+    } else if k == EXPR_UNARY {
+        put_u8(inout b, HASH_EXPR_UNARY);
         put_sym(inout b, in a, e.a, inout tmp);
         put_expr(inout b, in a, e.b, inout tmp);
-    } else if k == 11 || k == 12 {
-        if k == 11 {
-            put_u8(inout b, 10);
+    } else if k == EXPR_BINARY || k == EXPR_ASSIGN {
+        if k == EXPR_BINARY {
+            put_u8(inout b, HASH_EXPR_BINARY);
         } else {
-            put_u8(inout b, 11);
+            put_u8(inout b, HASH_EXPR_ASSIGN);
         }
         put_sym(inout b, in a, e.a, inout tmp);
         put_expr(inout b, in a, e.b, inout tmp);
         put_expr(inout b, in a, e.c, inout tmp);
-    } else if k == 13 {
-        put_u8(inout b, 12);
+    } else if k == EXPR_IF {
+        put_u8(inout b, HASH_EXPR_IF);
         put_expr(inout b, in a, e.a, inout tmp);
         put_expr(inout b, in a, e.b, inout tmp);
         put_opt_expr(inout b, in a, e.c, inout tmp);
-    } else if k == 14 {
-        put_u8(inout b, 13);
+    } else if k == EXPR_MATCH {
+        put_u8(inout b, HASH_EXPR_MATCH);
         put_expr(inout b, in a, e.a, inout tmp);
-        let m = list_len(in a, e.b) / 2;
+        let m = list_len(in a, e.b) / PAIR_WORDS;
         put_u64(inout b, m);
         for i in 0..m {
-            let q = wrapping_mul(i, 2);
+            let q = wrapping_mul(i, PAIR_WORDS);
             put_pat(inout b, in a, list_at(in a, e.b, q), inout tmp);
             put_expr(inout b, in a, list_at(in a, e.b, wrapping_add(q, 1)), inout tmp);
         }
-    } else if k == 15 {
-        put_u8(inout b, 14);
+    } else if k == EXPR_CLOSURE {
+        put_u8(inout b, HASH_EXPR_CLOSURE);
         put_params(inout b, in a, e.a, inout tmp);
-        let mode = widen_u64(e.b) & 255;
-        if mode == 3 {
-            put_u8(inout b, 0);
+        let mode = widen_u64(e.b) & CLOSURE_MODE_MASK;
+        if mode == widen_u64(MODE_NONE) {
+            put_u8(inout b, HASH_NONE);
         } else {
-            put_u8(inout b, 1);
+            put_u8(inout b, HASH_SOME);
             put_mode(inout b, mode);
         }
         put_type(inout b, in a, e.c, inout tmp);
         put_effects(inout b, in a, e.d, inout tmp);
-        put_bool(inout b, ((widen_u64(e.b) >> 8) & 1) != 0);
+        put_bool(inout b, ((widen_u64(e.b) >> CLOSURE_INFER_SHIFT) & 1) != 0);
         put_expr(inout b, in a, e.e, inout tmp);
-    } else if k == 16 {
-        put_u8(inout b, 15);
+    } else if k == EXPR_HANDLE {
+        put_u8(inout b, HASH_EXPR_HANDLE);
         put_effect(inout b, in a, e.a, inout tmp);
         if e.b != none() {
-            put_u8(inout b, 1);
+            put_u8(inout b, HASH_SOME);
             put_pat(inout b, in a, e.b, inout tmp);
             put_expr(inout b, in a, e.c, inout tmp);
         } else {
-            put_u8(inout b, 0);
+            put_u8(inout b, HASH_NONE);
         }
         put_expr(inout b, in a, e.d, inout tmp);
         let m = list_len(in a, e.e);
@@ -473,27 +531,27 @@ fn put_expr(inout b: ChunkSeq[u8], in a: Ast, x: u32, inout tmp: String) {
         for i in 1..m {
             put_clause(inout b, in a, list_at(in a, e.e, i), inout tmp);
         }
-    } else if k == 17 {
-        put_u8(inout b, 16);
+    } else if k == EXPR_LOOP {
+        put_u8(inout b, HASH_EXPR_LOOP);
         put_expr(inout b, in a, e.a, inout tmp);
-    } else if k == 18 {
-        put_u8(inout b, 17);
+    } else if k == EXPR_FOR {
+        put_u8(inout b, HASH_EXPR_FOR);
         put_pat(inout b, in a, e.a, inout tmp);
         put_expr(inout b, in a, e.b, inout tmp);
         put_expr(inout b, in a, e.c, inout tmp);
-    } else if k == 19 {
-        put_u8(inout b, 18);
+    } else if k == EXPR_RANGE {
+        put_u8(inout b, HASH_EXPR_RANGE);
         put_expr(inout b, in a, e.a, inout tmp);
         put_expr(inout b, in a, e.b, inout tmp);
         put_bool(inout b, e.c != 0);
-    } else if k == 20 {
-        put_u8(inout b, 19);
+    } else if k == EXPR_BREAK {
+        put_u8(inout b, HASH_EXPR_BREAK);
         put_opt_expr(inout b, in a, e.a, inout tmp);
-    } else if k == 21 {
-        put_u8(inout b, 20);
+    } else if k == EXPR_RETURN {
+        put_u8(inout b, HASH_EXPR_RETURN);
         put_opt_expr(inout b, in a, e.a, inout tmp);
     } else {
-        put_u8(inout b, 21);
+        put_u8(inout b, HASH_EXPR_CONTINUE);
     }
 }
 
@@ -506,8 +564,8 @@ fn put_function(
     inout tmp: String
 ) {
     b.clear();
-    b.extend(in "vesper.anvil.fn_blake3.v1".as_bytes());
-    b.push(0);
+    b.extend(in FN_HASH_DOMAIN.as_bytes());
+    b.push(NUL);
     put_bytes(inout b, in key);
     put_bool(inout b, f.fip);
     let ng = list_len(in a, f.generics);
@@ -529,7 +587,7 @@ fn put_function(
 // `Type`'s `Display` (`impl_type_key` of a type that is not Named).
 fn type_text(in a: Ast, t: u32, inout out: String, inout tmp: String) {
     let n = type_at(in a, t);
-    if n.kind == 1 {
+    if n.kind == TYPE_NAMED {
         tmp.clear();
         let ok = a.names.resolve_into(symbol_from_id(n.a), inout tmp);
         let m = list_len(in a, n.b);
@@ -549,7 +607,7 @@ fn type_text(in a: Ast, t: u32, inout out: String, inout tmp: String) {
             }
             out.push_str(in "]");
         }
-    } else if n.kind == 2 {
+    } else if n.kind == TYPE_TUPLE {
         out.push_str(in "(");
         let m = list_len(in a, n.a);
         for i in 0..m {
@@ -559,23 +617,23 @@ fn type_text(in a: Ast, t: u32, inout out: String, inout tmp: String) {
             type_text(in a, list_at(in a, n.a, i), inout out, inout tmp);
         }
         out.push_str(in ")");
-    } else if n.kind == 3 {
+    } else if n.kind == TYPE_FUNCTION {
         out.push_str(in "fn(");
-        let m = list_len(in a, n.a) / 2;
+        let m = list_len(in a, n.a) / PAIR_WORDS;
         for i in 0..m {
             if i > 0 {
                 out.push_str(in ", ");
             }
             type_text(
                 in a,
-                list_at(in a, n.a, wrapping_add(wrapping_mul(i, 2), 1)),
+                list_at(in a, n.a, wrapping_add(wrapping_mul(i, PAIR_WORDS), 1)),
                 inout out,
                 inout tmp
             );
         }
         out.push_str(in ") -> ");
         type_text(in a, n.b, inout out, inout tmp);
-    } else if n.kind == 4 {
+    } else if n.kind == TYPE_ROW {
         // `Type::Row(e)` displays as `eff {e:?}`.
         out.push_str(in "eff ");
         effects_debug(in a, n.a, inout out, inout tmp);
@@ -609,28 +667,28 @@ fn types_debug(in a: Ast, list: u32, inout out: String, inout tmp: String) {
 // The derived `Debug` text of a `Type`.
 fn type_debug(in a: Ast, t: u32, inout out: String, inout tmp: String) {
     let n = type_at(in a, t);
-    if n.kind == 1 {
+    if n.kind == TYPE_NAMED {
         out.push_str(in "Named(");
         sym_debug(in a, n.a, inout out, inout tmp);
         out.push_str(in ", ");
         types_debug(in a, n.b, inout out, inout tmp);
         out.push_str(in ")");
-    } else if n.kind == 2 {
+    } else if n.kind == TYPE_TUPLE {
         out.push_str(in "Tuple(");
         types_debug(in a, n.a, inout out, inout tmp);
         out.push_str(in ")");
-    } else if n.kind == 3 {
+    } else if n.kind == TYPE_FUNCTION {
         out.push_str(in "Function { params: [");
-        let m = list_len(in a, n.a) / 2;
+        let m = list_len(in a, n.a) / PAIR_WORDS;
         for i in 0..m {
             if i > 0 {
                 out.push_str(in ", ");
             }
-            let k = wrapping_mul(i, 2);
+            let k = wrapping_mul(i, PAIR_WORDS);
             let pass = list_at(in a, n.a, k);
-            if pass == 0 {
+            if pass == PASS_IN {
                 out.push_str(in "(In, ");
-            } else if pass == 1 {
+            } else if pass == PASS_INOUT {
                 out.push_str(in "(Inout, ");
             } else {
                 out.push_str(in "(Sink, ");
@@ -642,14 +700,14 @@ fn type_debug(in a: Ast, t: u32, inout out: String, inout tmp: String) {
         type_debug(in a, n.b, inout out, inout tmp);
         out.push_str(in ", effects: ");
         effects_debug(in a, n.c, inout out, inout tmp);
-        if n.d == 0 {
+        if n.d == MODE_COPY {
             out.push_str(in ", mode: Copy }");
-        } else if n.d == 2 {
+        } else if n.d == MODE_LINEAR {
             out.push_str(in ", mode: Linear }");
         } else {
             out.push_str(in ", mode: Affine }");
         }
-    } else if n.kind == 4 {
+    } else if n.kind == TYPE_ROW {
         out.push_str(in "Row(");
         effects_debug(in a, n.a, inout out, inout tmp);
         out.push_str(in ")");
@@ -726,17 +784,17 @@ fn add_callee(inout c: Calls, key: u32) {
 fn calls(in a: Ast, x: u32, inout c: Calls) {
     let e = expr_at(in a, x);
     let k = e.kind;
-    if k == 3 {
+    if k == EXPR_TUPLE {
         let m = list_len(in a, e.a);
         for i in 0..m {
             calls(in a, list_at(in a, e.a, i), inout c);
         }
-    } else if k == 4 {
-        let m = list_len(in a, e.b) / 2;
+    } else if k == EXPR_STRUCT {
+        let m = list_len(in a, e.b) / PAIR_WORDS;
         for i in 0..m {
-            calls(in a, list_at(in a, e.b, wrapping_add(wrapping_mul(i, 2), 1)), inout c);
+            calls(in a, list_at(in a, e.b, wrapping_add(wrapping_mul(i, PAIR_WORDS), 1)), inout c);
         }
-    } else if k == 5 {
+    } else if k == EXPR_BLOCK {
         let m = list_len(in a, e.a);
         for i in 0..m {
             calls(in a, stmt_at(in a, list_at(in a, e.a, i)).value, inout c);
@@ -744,13 +802,13 @@ fn calls(in a: Ast, x: u32, inout c: Calls) {
         if e.b != none() {
             calls(in a, e.b, inout c);
         }
-    } else if k == 6 {
+    } else if k == EXPR_CALL {
         let callee = expr_at(in a, e.a);
-        if callee.kind == 2 {
+        if callee.kind == EXPR_NAME {
             if sym_flag(in c.known, callee.a) {
                 add_callee(inout c, callee.a);
             }
-        } else if callee.kind == 7 {
+        } else if callee.kind == EXPR_FIELD {
             calls(in a, callee.a, inout c);
             let mut m = match c.method_head.try_get(widen_u64(callee.b)) {
                 Option::Some(v) => v,
@@ -777,34 +835,34 @@ fn calls(in a: Ast, x: u32, inout c: Calls) {
         for i in 0..na {
             calls(in a, arg_at(in a, list_at(in a, e.c, i)).expr, inout c);
         }
-    } else if k == 7 || k == 9 || k == 17 {
+    } else if k == EXPR_FIELD || k == EXPR_TRY || k == EXPR_LOOP {
         calls(in a, e.a, inout c);
-    } else if k == 10 {
+    } else if k == EXPR_UNARY {
         calls(in a, e.b, inout c);
-    } else if k == 8 || k == 19 {
+    } else if k == EXPR_INDEX || k == EXPR_RANGE {
         calls(in a, e.a, inout c);
         calls(in a, e.b, inout c);
-    } else if k == 11 || k == 12 {
+    } else if k == EXPR_BINARY || k == EXPR_ASSIGN {
         calls(in a, e.b, inout c);
         calls(in a, e.c, inout c);
-    } else if k == 13 {
+    } else if k == EXPR_IF {
         calls(in a, e.a, inout c);
         calls(in a, e.b, inout c);
         if e.c != none() {
             calls(in a, e.c, inout c);
         }
-    } else if k == 14 {
+    } else if k == EXPR_MATCH {
         calls(in a, e.a, inout c);
-        let m = list_len(in a, e.b) / 2;
+        let m = list_len(in a, e.b) / PAIR_WORDS;
         for i in 0..m {
-            calls(in a, list_at(in a, e.b, wrapping_add(wrapping_mul(i, 2), 1)), inout c);
+            calls(in a, list_at(in a, e.b, wrapping_add(wrapping_mul(i, PAIR_WORDS), 1)), inout c);
         }
-    } else if k == 15 {
+    } else if k == EXPR_CLOSURE {
         calls(in a, e.e, inout c);
-    } else if k == 18 {
+    } else if k == EXPR_FOR {
         calls(in a, e.b, inout c);
         calls(in a, e.c, inout c);
-    } else if k == 16 {
+    } else if k == EXPR_HANDLE {
         if e.b != none() {
             calls(in a, e.c, inout c);
         }
@@ -813,7 +871,7 @@ fn calls(in a: Ast, x: u32, inout c: Calls) {
         for i in 0..m {
             calls(in a, clause_at(in a, list_at(in a, e.e, i)).body, inout c);
         }
-    } else if k == 20 || k == 21 {
+    } else if k == EXPR_BREAK || k == EXPR_RETURN {
         if e.a != none() {
             calls(in a, e.a, inout c);
         }
@@ -867,11 +925,11 @@ pub fn graph(in b: Slice[u8]) -> ChunkSeq[u64] {
     for i in 0..items {
         let it = l.ast.m_items.try_get(i).unwrap_or(0);
         let item = l.ast.items.get_or(idx_from_raw[ItemNode](it), ItemNode { kind: 0, node: 0 });
-        if item.kind == 2 {
+        if item.kind == ITEM_FUNCTION {
             let f = fn_at(in l.ast, item.node);
             keys.push(f.name);
             fns.push(item.node);
-        } else if item.kind == 4 {
+        } else if item.kind == ITEM_IMPL {
             let im = l.ast.impls.get_or(
                 idx_from_raw[ImplNode](item.node),
                 ImplNode { ty: 0, generics: 0, methods: 0 }
@@ -879,7 +937,7 @@ pub fn graph(in b: Slice[u8]) -> ChunkSeq[u64] {
             // impl_type_key
             owner.clear();
             let n = type_at(in l.ast, im.ty);
-            if n.kind == 1 {
+            if n.kind == TYPE_NAMED {
                 let ok = l.ast.names.resolve_into(symbol_from_id(n.a), inout owner);
             } else {
                 type_text(in l.ast, im.ty, inout owner, inout tmp);
@@ -919,10 +977,10 @@ pub fn graph(in b: Slice[u8]) -> ChunkSeq[u64] {
     }
     // The method chains, in reverse so each chain runs in declaration
     // order (the order does not matter to a set).
-    let nm = methods.len() / 2;
+    let nm = methods.len() / PAIR_WORDS;
     for q in 0..nm {
-        let name = methods.try_get(wrapping_mul(q, 2)).unwrap_or(0);
-        let entry = methods.try_get(wrapping_add(wrapping_mul(q, 2), 1)).unwrap_or(0);
+        let name = methods.try_get(wrapping_mul(q, PAIR_WORDS)).unwrap_or(0);
+        let entry = methods.try_get(wrapping_add(wrapping_mul(q, PAIR_WORDS), 1)).unwrap_or(0);
         let ks = keys.try_get(widen_u64(entry)).unwrap_or(0);
         let head = match c.method_head.try_get(widen_u64(name)) {
             Option::Some(v) => v,
@@ -933,7 +991,7 @@ pub fn graph(in b: Slice[u8]) -> ChunkSeq[u64] {
         let ok = c.method_head.try_set(widen_u64(name), wrapping_u32(q));
     }
     let mut res: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    res.push(0);
+    res.push(STATUS_OK);
     res.push(n);
     let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut hex = String::new();

@@ -14,6 +14,7 @@ use @vesper-std/process::{
     env_clear, kill_tree, process_group, release, spawn, stderr, stderr_stream, stdio, stdout,
     stdout_stream, success, truncated, wait_timeout
 };
+use @vesper-std/bytes::ascii::{BACKSLASH, DOT, HYPHEN, NEWLINE, SLASH};
 use self::auditor::AUDITOR;
 use self::json::{
     Json, begin_array, begin_object, end_array, end_object, field_bool, field_string, field_u64,
@@ -22,8 +23,8 @@ use self::json::{
 use self::provenance::{Gate, Theorems, blake3_hex, gate, gate_json, verify};
 use self::reader::{NONE, Raw, Rd, Table, raw_audit, rd_parse, table};
 use self::strs::{
-    BACKSLASH, DOT, HYPHEN, NEWLINE, SLASH, Strs, byte, count, end, equal, order, push, put_str,
-    same, same_str, set_of, slashes, start, strs_new
+    Strs, byte, count, end, equal, order, push, put_str, same, same_str, set_of, slashes, start,
+    strs_new
 };
 use self::text::{
     holds, line_at, lossy, put_io, put_status, put_utf8_error, starts_at, take_chars, trim,
@@ -129,7 +130,7 @@ fn is_sep(b: u8) -> bool {
 }
 
 fn sep() -> u8 {
-    if windows() { 92 } else { 47 }
+    if windows() { BACKSLASH } else { SLASH }
 }
 
 // `base.join(part)` for a relative `part`.
@@ -325,7 +326,7 @@ fn temp_dir() -> ChunkSeq[u8] eff [Ffi[StdEnv]] {
                 },
             },
         };
-        if dir.len() == 0 || byte(in dir.as_slice(), wrapping_sub(dir.len(), 1)) != 92 {
+        if dir.len() == 0 || byte(in dir.as_slice(), wrapping_sub(dir.len(), 1)) != BACKSLASH {
             dir.push(BACKSLASH);
         }
         return dir;

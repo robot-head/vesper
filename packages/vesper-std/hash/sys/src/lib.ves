@@ -16,10 +16,7 @@
 use @vesper-std/hash::blake3::Digest;
 
 fn read_word(in b: Slice[u8], at: u64) -> u64 {
-    match b.try_read_u64_le(at) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    b.try_read_u64_le(at).unwrap_or(0)
 }
 
 fn digest_of(in b: Slice[u8]) -> Digest {

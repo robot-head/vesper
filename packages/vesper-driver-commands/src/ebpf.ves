@@ -36,29 +36,29 @@ pub fn run_ebpf(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail
         if i >= n {
             break;
         }
-        let a_buf = arg(in args, i);
-        let a = a_buf.as_slice();
-        if eq(in a, in "-h") || eq(in a, in "--help") {
+        let arg_buf = arg(in args, i);
+        let arg_text = arg_buf.as_slice();
+        if eq(in arg_text, in "-h") || eq(in arg_text, in "--help") {
             print_help();
             return 0;
-        } else if eq(in a, in "--load") {
+        } else if eq(in arg_text, in "--load") {
             load = true;
-        } else if eq(in a, in "--disassemble") {
+        } else if eq(in arg_text, in "--disassemble") {
             disassemble = true;
-        } else if eq(in a, in "--stack-budget") {
+        } else if eq(in arg_text, in "--stack-budget") {
             i = wrapping_add(i, 1);
             if i >= n {
                 return fail(in "--stack-budget requires a byte count".as_bytes());
             }
-            let val_buf = arg(in args, i);
-            match parse_u64_decimal(in val_buf.as_slice()) {
-                Option::Some(v) => budget = v,
+            let value_buf = arg(in args, i);
+            match parse_u64_decimal(in value_buf.as_slice()) {
+                Option::Some(parsed) => budget = parsed,
                 Option::None => return fail(in "--stack-budget requires a byte count".as_bytes()),
             }
-        } else if a.len() != 0 && byte_at(in a, 0) == 45 {
+        } else if arg_text.len() != 0 && byte_at(in arg_text, 0) == 45 {
             let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
             err.extend(in "unknown ebpf check option '".as_bytes());
-            err.extend(in a);
+            err.extend(in arg_text);
             err.push(39);
             return fail(in err.as_slice());
         } else {
@@ -66,7 +66,7 @@ pub fn run_ebpf(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail
                 return fail(in "only one program is supported".as_bytes());
             }
             has_input = true;
-            input.extend(in a);
+            input.extend(in arg_text);
         }
         i = wrapping_add(i, 1);
     }
@@ -97,21 +97,21 @@ fn print_help() eff [Ffi[StdFs], Fail[PrintFailed]] {
     );
 }
 
-fn parse_u64_decimal(in s: Slice[u8]) -> Option[u64] {
-    if s.len() == 0 {
+fn parse_u64_decimal(in digits: Slice[u8]) -> Option[u64] {
+    if digits.len() == 0 {
         return Option::None;
     }
     let mut acc: u64 = 0;
-    for i in 0..s.len() {
-        let b = byte_at(in s, i);
-        if b < 48 || b > 57 {
+    for i in 0..digits.len() {
+        let byte = byte_at(in digits, i);
+        if byte < 48 || byte > 57 {
             return Option::None;
         }
-        let d = wrapping_sub(widen_u64(b), 48);
-        if acc > 429496729 || (acc == 429496729 && d > 5) {
+        let digit = wrapping_sub(widen_u64(byte), 48);
+        if acc > 429496729 || (acc == 429496729 && digit > 5) {
             return Option::None;
         }
-        acc = wrapping_add(wrapping_mul(acc, 10), d);
+        acc = wrapping_add(wrapping_mul(acc, 10), digit);
     }
     Option::Some(acc)
 }

@@ -10,7 +10,7 @@
 use @vesper/hybrid-parse::{parse_words};
 use @vesper/ast::lower::{lower_source};
 use @vesper/front::lex::{max_source_bytes, token_end};
-use @vesper-std/fmt::{write_u64};
+use @vesper-std/fmt::{fmt, write_str, write_u64};
 use @vesper-std/toml::debug::{put_debug_str};
 
 fn word_at(in w: ChunkSeq[u64], i: u64) -> u64 {
@@ -68,12 +68,15 @@ fn byte_at(in s: Slice[u8], i: u64) -> u8 {
 
 // rowan's `{:?}` of a kind and range: `SyntaxKind(<kind>)@<start>..<end>`.
 fn put_head(inout out: ChunkSeq[u8], kind: u64, start: u64, end: u64) {
-    out.extend(in "SyntaxKind(".as_bytes());
-    write_u64(inout out, kind);
-    out.extend(in ")@".as_bytes());
-    write_u64(inout out, start);
-    out.extend(in "..".as_bytes());
-    write_u64(inout out, end);
+    fmt{
+        inout out;
+        write_str(in "SyntaxKind("),
+        write_u64(kind),
+        write_str(in ")@"),
+        write_u64(start),
+        write_str(in ".."),
+        write_u64(end)
+    };
 }
 
 fn indent(inout out: ChunkSeq[u8], level: u64) {
