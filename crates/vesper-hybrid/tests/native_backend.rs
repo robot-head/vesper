@@ -35,10 +35,12 @@ enum Case {
     Compare64(IntCC),
     CompareNarrow(Type, IntCC),
     NarrowArithmetic(Type),
+    ImmediateBoundaries(Type),
     NarrowShifts(Type),
     ChainedCasts,
     JumpChain,
     ReturningBranch,
+    ImmediateBranch,
     NestedBranches,
     ShiftCountInRcx,
     ShiftDestinationRcx,
@@ -141,6 +143,7 @@ fn integer_backend_matches_cranelift_results() {
         Case::ChainedCasts,
         Case::JumpChain,
         Case::ReturningBranch,
+        Case::ImmediateBranch,
         Case::NestedBranches,
         Case::ShiftCountInRcx,
         Case::ShiftDestinationRcx,
@@ -172,6 +175,7 @@ fn integer_backend_matches_cranelift_results() {
                     }),
             )
             .chain([types::I8, types::I16, types::I32].map(Case::NarrowArithmetic))
+            .chain([types::I8, types::I16, types::I32, types::I64].map(Case::ImmediateBoundaries))
             .chain([types::I8, types::I16, types::I32].map(Case::NarrowShifts))
             .chain([types::I32, types::I64].into_iter().flat_map(|width| {
                 [false, true].map(move |signed| Case::MultiplyHigh(width, signed))
@@ -342,6 +346,17 @@ fn integer_backend_matches_cranelift_results() {
                 builder.ins().return_(&[result]);
                 builder.switch_to_block(no);
                 builder.ins().isub(no_operand, d)
+            }
+            Case::ImmediateBranch => {
+                let yes = builder.create_block();
+                let no = builder.create_block();
+                let word = builder.ins().ireduce(types::I16, a);
+                let predicate = builder.ins().icmp_imm(IntCC::SignedLessThan, word, -128);
+                builder.ins().brif(predicate, yes, &[], no, &[]);
+                builder.switch_to_block(yes);
+                builder.ins().return_(&[b]);
+                builder.switch_to_block(no);
+                c
             }
             Case::NestedBranches => {
                 let yes = builder.create_block();
@@ -555,6 +570,30 @@ fn integer_backend_matches_cranelift_results() {
                 let predicate = builder.ins().bor(zero, low);
                 builder.ins().uextend(types::I64, predicate)
             }
+            Case::ImmediateBoundaries(width) => {
+                let input = if width == types::I64 {
+                    a
+                } else {
+                    builder.ins().ireduce(width, a)
+                };
+                let plus = builder.ins().iadd_imm(input, -128);
+                let product = builder.ins().imul_imm(plus, 128);
+                let constant = builder.ins().iconst(width, i64::from(i32::MIN));
+                let difference = builder.ins().isub(product, constant);
+                let mask = builder.ins().band_imm(difference, i64::from(u32::MAX));
+                let bits = builder.ins().bor_imm(mask, 0x8000);
+                let bits = builder.ins().bxor_imm(bits, -129);
+                let pred = builder
+                    .ins()
+                    .icmp_imm(IntCC::UnsignedLessThan, bits, 0x8000);
+                let data = if width == types::I64 {
+                    bits
+                } else {
+                    builder.ins().uextend(types::I64, bits)
+                };
+                let pred = builder.ins().uextend(types::I64, pred);
+                builder.ins().bxor(data, pred)
+            }
             Case::Select => builder.ins().select(a, e, f),
             Case::SelectKeepingArms => {
                 let predicate = builder.ins().icmp(IntCC::UnsignedGreaterThan, a, b);
@@ -702,6 +741,25 @@ fn integer_backend_matches_cranelift_results() {
     );
     // All code pointers have gone out of scope.
     unsafe { module.free_memory() };
+}
+
+#[test]
+fn adjacent_branch_only_comparisons_use_flags_directly() {
+    // The first comparison is used only by the branch.
+    let mut words = [2, 1, 12, 0, 1, 0, 28, 2, 0, 0, 29, 0, 0, 3];
+    let setcc = |bytes: &[u8]| {
+        bytes
+            .windows(2)
+            .any(|pair| pair[0] == 0x0f && pair[1] & 0xf0 == 0x90)
+    };
+    let only_branch = binding::x86_64_integer_block(&words);
+    assert!(!only_branch.is_empty());
+    assert!(!setcc(&only_branch));
+
+    // Returning the comparison on the false arm also needs the boolean.
+    words[1] = 2;
+    let also_returned = binding::x86_64_integer_block(&words);
+    assert!(setcc(&also_returned));
 }
 
 #[test]
@@ -933,7 +991,7 @@ fn integer_backend_declines_excessive_spill_frames_and_unsupported_operations() 
     let entry = builder.create_block();
     builder.switch_to_block(entry);
     let constants: Vec<_> = (1..=10)
-        .map(|n| builder.ins().iconst(types::I64, n))
+        .map(|n| builder.ins().iconst(types::I64, i64::from(u32::MAX) + n))
         .collect();
     builder.ins().stack_store(constants[0], slot, 0);
     let sum = constants

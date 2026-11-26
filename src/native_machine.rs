@@ -68,6 +68,16 @@ enum IntegerOp {
     UnsignedRem = 49,
     SignedMulHigh = 50,
     UnsignedMulHigh = 51,
+    AddImmediate = 52,
+    SubImmediate = 53,
+    MulImmediate = 54,
+    AndImmediate = 55,
+    OrImmediate = 56,
+    XorImmediate = 57,
+    CompareImmediate = 58,
+    CompareByteImmediate = 59,
+    CompareWordImmediate = 60,
+    CompareDwordImmediate = 61,
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
@@ -119,14 +129,41 @@ fn integer_width(ty: Type) -> Option<u64> {
     matches!(ty, types::I8 | types::I16 | types::I32 | types::I64).then(|| u64::from(ty.bits()))
 }
 
-fn compare_op(ty: Type) -> Option<IntegerOp> {
-    match ty {
-        types::I8 => Some(IntegerOp::CompareByte),
-        types::I16 => Some(IntegerOp::CompareWord),
-        types::I32 => Some(IntegerOp::CompareDword),
-        types::I64 => Some(IntegerOp::Compare),
+fn compare_op(ty: Type, immediate: bool) -> Option<IntegerOp> {
+    match (ty, immediate) {
+        (types::I8, false) => Some(IntegerOp::CompareByte),
+        (types::I16, false) => Some(IntegerOp::CompareWord),
+        (types::I32, false) => Some(IntegerOp::CompareDword),
+        (types::I64, false) => Some(IntegerOp::Compare),
+        (types::I8, true) => Some(IntegerOp::CompareByteImmediate),
+        (types::I16, true) => Some(IntegerOp::CompareWordImmediate),
+        (types::I32, true) => Some(IntegerOp::CompareDwordImmediate),
+        (types::I64, true) => Some(IntegerOp::CompareImmediate),
         _ => None,
     }
+}
+
+fn immediate_op(op: IntegerOp) -> IntegerOp {
+    match op {
+        IntegerOp::Add => IntegerOp::AddImmediate,
+        IntegerOp::Sub => IntegerOp::SubImmediate,
+        IntegerOp::Mul => IntegerOp::MulImmediate,
+        IntegerOp::And => IntegerOp::AndImmediate,
+        IntegerOp::Or => IntegerOp::OrImmediate,
+        IntegerOp::Xor => IntegerOp::XorImmediate,
+        _ => unreachable!(),
+    }
+}
+
+fn sign_extended_immediate(bits: i64, ty: Type) -> Option<u64> {
+    let signed = match ty {
+        types::I8 => i32::from(bits as i8),
+        types::I16 => i32::from(bits as i16),
+        types::I32 => bits as i32,
+        types::I64 => i32::try_from(bits).ok()?,
+        _ => return None,
+    };
+    Some(u64::from(signed as u32))
 }
 
 // Keep the transport independent of Cranelift's discriminants and x86 encodings.
@@ -217,6 +254,20 @@ impl IntegerBlocks<'_> {
         self.function
             .dfg
             .value_type(self.function.dfg.resolve_aliases(value))
+    }
+
+    fn constant_bits(&self, value: Value) -> Option<i64> {
+        let dfg = &self.function.dfg;
+        let ValueDef::Result(inst, _) = dfg.value_def(dfg.resolve_aliases(value)) else {
+            return None;
+        };
+        match dfg.insts[inst] {
+            InstructionData::UnaryImm {
+                opcode: Opcode::Iconst,
+                imm,
+            } => Some(imm.bits()),
+            _ => None,
+        }
     }
 
     fn stack_location(&self, slot: StackSlot, offset: Offset32, access: u32) -> Option<[u64; 2]> {
@@ -515,21 +566,38 @@ impl IntegerBlocks<'_> {
                     opcode: Opcode::Icmp,
                     cond,
                     args: [left, right],
-                } if output == types::I8 && ty(left) == ty(right) => (
-                    compare_op(ty(left))?,
-                    [input(left)?, input(right)?, condition(cond)],
-                ),
+                } if output == types::I8 && ty(left) == ty(right) => {
+                    let left_id = input(left)?;
+                    let right_id = input(right)?;
+                    if let Some(bits) = self
+                        .constant_bits(right)
+                        .and_then(|bits| sign_extended_immediate(bits, ty(right)))
+                    {
+                        (
+                            compare_op(ty(left), true)?,
+                            [left_id, bits, condition(cond)],
+                        )
+                    } else {
+                        (
+                            compare_op(ty(left), false)?,
+                            [left_id, right_id, condition(cond)],
+                        )
+                    }
+                }
                 InstructionData::IntCompareImm {
                     opcode: Opcode::IcmpImm,
                     cond,
                     arg,
                     imm,
                 } if output == types::I8 => {
-                    let op = compare_op(ty(arg))?;
                     let left = input(arg)?;
-                    let bits = integer_bits(imm.bits(), ty(arg));
-                    let right = self.append(IntegerOp::Constant, [bits, 0, 0]);
-                    (op, [left, right, condition(cond)])
+                    if let Some(bits) = sign_extended_immediate(imm.bits(), ty(arg)) {
+                        (compare_op(ty(arg), true)?, [left, bits, condition(cond)])
+                    } else {
+                        let bits = integer_bits(imm.bits(), ty(arg));
+                        let right = self.append(IntegerOp::Constant, [bits, 0, 0]);
+                        (compare_op(ty(arg), false)?, [left, right, condition(cond)])
+                    }
                 }
                 InstructionData::Ternary {
                     opcode: Opcode::Select,
@@ -580,7 +648,23 @@ impl IntegerBlocks<'_> {
                     opcode,
                     args: [left, right],
                 } if ty(left) == output && ty(right) == output => {
-                    (binary_op(opcode)?, [input(left)?, input(right)?, width])
+                    let op = binary_op(opcode)?;
+                    let left_id = input(left)?;
+                    let right_id = input(right)?;
+                    if let Some(bits) = self
+                        .constant_bits(right)
+                        .and_then(|bits| sign_extended_immediate(bits, output))
+                    {
+                        (immediate_op(op), [left_id, bits, width])
+                    } else if opcode != Opcode::Isub
+                        && let Some(bits) = self
+                            .constant_bits(left)
+                            .and_then(|bits| sign_extended_immediate(bits, output))
+                    {
+                        (immediate_op(op), [right_id, bits, width])
+                    } else {
+                        (op, [left_id, right_id, width])
+                    }
                 }
                 InstructionData::BinaryImm64 { opcode, arg, imm } if ty(arg) == output => {
                     let left = input(arg)?;
@@ -591,8 +675,12 @@ impl IntegerBlocks<'_> {
                         Opcode::SshrImm => (IntegerOp::ShiftRightArithmetic, [left, bits, width]),
                         _ => {
                             let op = binary_op(opcode)?;
-                            let right = self.append(IntegerOp::Constant, [bits, 0, 0]);
-                            (op, [left, right, width])
+                            if let Some(bits) = sign_extended_immediate(imm.bits(), output) {
+                                (immediate_op(op), [left, bits, width])
+                            } else {
+                                let right = self.append(IntegerOp::Constant, [bits, 0, 0]);
+                                (op, [left, right, width])
+                            }
                         }
                     }
                 }
@@ -704,6 +792,8 @@ impl IntegerBlocks<'_> {
 /// followed by one slot per instruction. A store uses its extra word for
 /// displacement and leaves an unreferenced slot. Operand IDs refer to prior
 /// value-producing instructions or arguments.
+/// Immediate arithmetic and comparisons use a 32-bit literal in the right
+/// word. It is sign-extended to 64 bits or truncated to the operand width.
 /// BranchZero skips to the instruction after its matching EarlyReturn. Each
 /// EarlyReturn's extra word is the slot ID of its BranchZero. These records
 /// leave unreferenced slots. An early return from a procedure uses NO_VALUE.

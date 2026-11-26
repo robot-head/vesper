@@ -1,9 +1,10 @@
 use self::x86_64::{
-    ADD_RM_R64, AND_RM_R64, ARGUMENTS, BYTE_BITS, DWORD_BITS, QWORD_BITS, WORD_BITS, CC_A, CC_AE,
-    CC_B, CC_BE, CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, FixedArithmetic, Instruction, NEG_EXTENSION,
-    NOT_EXTENSION, OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION, SHL_EXTENSION, SHR_EXTENSION,
-    SUB_RM_R64, UNASSIGNED, XOR_RM_R64, REGISTER_CODES, arg_register, emit, emit_direct_call,
-    emit_symbol_address, find_register, patch_forward_branch, register_bit
+    ADD_RM_R64, ALU_ADD_EXTENSION, ALU_AND_EXTENSION, ALU_OR_EXTENSION, ALU_SUB_EXTENSION,
+    ALU_XOR_EXTENSION, AND_RM_R64, ARGUMENTS, BYTE_BITS, DWORD_BITS, QWORD_BITS, WORD_BITS, CC_A,
+    CC_AE, CC_B, CC_BE, CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, FixedArithmetic, Instruction,
+    NEG_EXTENSION, NOT_EXTENSION, OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION, SHL_EXTENSION,
+    SHR_EXTENSION, SUB_RM_R64, UNASSIGNED, XOR_RM_R64, REGISTER_CODES, arg_register, emit,
+    emit_direct_call, emit_symbol_address, find_register, patch_forward_branch, register_bit
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -59,6 +60,16 @@ const SIGNED_REM: u64 = 48;
 const UNSIGNED_REM: u64 = 49;
 const SIGNED_MUL_HIGH: u64 = 50;
 const UNSIGNED_MUL_HIGH: u64 = 51;
+const ADD_IMMEDIATE: u64 = 52;
+const SUB_IMMEDIATE: u64 = 53;
+const MUL_IMMEDIATE: u64 = 54;
+const AND_IMMEDIATE: u64 = 55;
+const OR_IMMEDIATE: u64 = 56;
+const XOR_IMMEDIATE: u64 = 57;
+const COMPARE_IMMEDIATE: u64 = 58;
+const COMPARE_BYTE_IMMEDIATE: u64 = 59;
+const COMPARE_WORD_IMMEDIATE: u64 = 60;
+const COMPARE_DWORD_IMMEDIATE: u64 = 61;
 
 // Relocation kinds shared with src/native_machine.rs.
 const PLT_CALL: u64 = 0;
@@ -75,6 +86,7 @@ const UNSIGNED_LESS: u64 = 6;
 const UNSIGNED_GREATER_EQUAL: u64 = 7;
 const UNSIGNED_GREATER: u64 = 8;
 const UNSIGNED_LESS_EQUAL: u64 = 9;
+const INVERT_CONDITION: u8 = 1;
 
 const ARGUMENT_COUNT: u64 = 0;
 const RETURN_VALUE: u64 = 1;
@@ -219,14 +231,26 @@ fn first_read_backwards(inout reads: ChunkSeq[u64], value: u64, user: u64) {
 }
 
 fn is_comparison(op: u64) -> bool {
-    op == COMPARE || op == COMPARE_BYTE || op == COMPARE_WORD || op == COMPARE_DWORD
+    op == COMPARE
+        || op == COMPARE_BYTE
+        || op == COMPARE_WORD
+        || op == COMPARE_DWORD
+        || is_immediate_comparison(op)
+}
+
+fn is_immediate_comparison(op: u64) -> bool {
+    op >= COMPARE_IMMEDIATE && op <= COMPARE_DWORD_IMMEDIATE
+}
+
+fn is_immediate_arithmetic(op: u64) -> bool {
+    op >= ADD_IMMEDIATE && op <= XOR_IMMEDIATE
 }
 
 fn comparison_width(op: u64) -> u64 {
     match op {
-        COMPARE_BYTE => BYTE_BITS,
-        COMPARE_WORD => WORD_BITS,
-        COMPARE_DWORD => DWORD_BITS,
+        COMPARE_BYTE | COMPARE_BYTE_IMMEDIATE => BYTE_BITS,
+        COMPARE_WORD | COMPARE_WORD_IMMEDIATE => WORD_BITS,
+        COMPARE_DWORD | COMPARE_DWORD_IMMEDIATE => DWORD_BITS,
         _ => QWORD_BITS,
     }
 }
@@ -337,7 +361,7 @@ fn reads_left(in record: Record) -> bool {
 fn reads_right(in record: Record, paired: bool) -> bool {
     let op = record.op;
     (op >= ADD && op <= XOR)
-        || is_comparison(op)
+        || (is_comparison(op) && !is_immediate_comparison(op))
         || op == SELECT
         || is_register_shift(op)
         || is_fixed_arithmetic(op)
@@ -363,6 +387,12 @@ fn condition_code(condition: u64) -> u8 {
         UNSIGNED_GREATER => CC_A,
         _ => CC_BE,
     }
+}
+
+fn comparison_feeds_branch(in reads: ChunkSeq[u64], value: u64, in branch: Record) -> bool {
+    branch.op == BRANCH_ZERO
+        && branch.left == value
+        && last_read(in reads, value) == wrapping_add(value, 1)
 }
 
 // Walk backwards to discard dead arithmetic while keeping memory operations
@@ -396,7 +426,7 @@ fn find_last_reads(
         let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
-        if record.op > UNSIGNED_MUL_HIGH
+        if record.op > COMPARE_DWORD_IMMEDIATE
             || (record.op == STACK_SLOT && index >= frame.slots.len())
             || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
             || (record.op == TRAP && (reverse_index != 0 || result != NO_VALUE))
@@ -433,6 +463,12 @@ fn find_last_reads(
             frame.used = frame.used || record.op != STACK_ADDRESS || last != NEVER_READ;
         }
         if record.op >= ADD && record.op <= SAR && !valid_width(record.extra) {
+            return Option::None;
+        }
+        if (is_immediate_arithmetic(record.op)
+            && (!valid_width(record.extra) || record.right > DISP32_MASK))
+            || (is_immediate_comparison(record.op) && record.right > DISP32_MASK)
+        {
             return Option::None;
         }
         if is_register_shift(record.op)
@@ -782,6 +818,29 @@ fn operation(in record: Record, destination: u8, source: u8) -> Instruction {
     }
 }
 
+fn emit_immediate_arithmetic(
+    inout output: ChunkSeq[u8],
+    in record: Record,
+    destination: u8,
+    source: u8
+) {
+    let bits = wrapping_u32(record.right);
+    let width = record.extra;
+    if record.op == MUL_IMMEDIATE {
+        emit(inout output, in Instruction::MultiplyImmediate(destination, source, bits, width));
+    } else {
+        let extension = match record.op {
+            ADD_IMMEDIATE => ALU_ADD_EXTENSION,
+            SUB_IMMEDIATE => ALU_SUB_EXTENSION,
+            AND_IMMEDIATE => ALU_AND_EXTENSION,
+            OR_IMMEDIATE => ALU_OR_EXTENSION,
+            _ => ALU_XOR_EXTENSION,
+        };
+        emit(inout output, in Instruction::Move(destination, source));
+        emit(inout output, in Instruction::BinaryImmediate(extension, destination, bits, width));
+    }
+}
+
 fn in_register(in location: Location, expected: u8) -> bool {
     match location {
         Location::Register(reg) => reg == expected,
@@ -1070,6 +1129,59 @@ pub fn encode_block(
         if record.op == CALL_HIGH || !emits_instruction(record.op, result_live) {
             continue;
         }
+        if is_comparison(record.op) && wrapping_add(index, 1) < count {
+            let next = read_record(in words, wrapping_add(index, 1));
+            if comparison_feeds_branch(in reads, value, in next) {
+                continue;
+            }
+        }
+        if record.op == BRANCH_ZERO {
+            let comparison = if index != 0 {
+                let previous = read_record(in words, wrapping_sub(index, 1));
+                if is_comparison(previous.op)
+                    && comparison_feeds_branch(in reads, wrapping_sub(value, 1), in record)
+                {
+                    Option::Some(previous)
+                } else {
+                    Option::None
+                }
+            } else {
+                Option::None
+            };
+            let instruction = match comparison {
+                Option::Some(compare) => {
+                    // The branch skips the true arm when the comparison is false.
+                    let cc = condition_code(compare.extra) ^ INVERT_CONDITION;
+                    let width = comparison_width(compare.op);
+                    let home = assigned(in allocation.locations, compare.left);
+                    let lhs = materialize(inout output, in home, LEFT_SCRATCH);
+                    if is_immediate_comparison(compare.op) {
+                        Instruction::BranchCompareImmediate(
+                            lhs,
+                            wrapping_u32(compare.right),
+                            cc,
+                            width
+                        )
+                    } else {
+                        let home = assigned(in allocation.locations, compare.right);
+                        let rhs = materialize(inout output, in home, RIGHT_SCRATCH);
+                        Instruction::BranchCompare(lhs, rhs, cc, width)
+                    }
+                },
+                Option::None => {
+                    let home = assigned(in allocation.locations, record.left);
+                    Instruction::BranchZero(materialize(inout output, in home, LEFT_SCRATCH))
+                },
+            };
+            emit(inout output, in instruction);
+            if branch_depth == branch_ends.len() {
+                branch_ends.push(output.len());
+            } else {
+                let _ = branch_ends.try_set(branch_depth, output.len());
+            }
+            branch_depth = wrapping_add(branch_depth, 1);
+            continue;
+        }
         let call = is_call(record.op);
         if call || is_fixed_arithmetic(record.op) {
             let saved = match allocation.saved_masks.try_get(clobber_index) {
@@ -1154,15 +1266,7 @@ pub fn encode_block(
             Location::Spill(_) => LEFT_SCRATCH,
             Location::Absent => UNASSIGNED,
         };
-        if record.op == BRANCH_ZERO {
-            emit(inout output, in Instruction::BranchZero(left));
-            if branch_depth == branch_ends.len() {
-                branch_ends.push(output.len());
-            } else {
-                let _ = branch_ends.try_set(branch_depth, output.len());
-            }
-            branch_depth = wrapping_add(branch_depth, 1);
-        } else if is_store(record.op) {
+        if is_store(record.op) {
             emit(
                 inout output,
                 in Instruction::Store(
@@ -1208,16 +1312,22 @@ pub fn encode_block(
                 emit(inout output, in Instruction::Select(destination, left, third, right, CC_NE));
             }
         } else if is_comparison(record.op) {
-            emit(
-                inout output,
-                in Instruction::Compare(
+            let cc = condition_code(record.extra);
+            let width = comparison_width(record.op);
+            let instruction = if is_immediate_comparison(record.op) {
+                Instruction::CompareImmediate(
                     destination,
                     left,
-                    right,
-                    condition_code(record.extra),
-                    comparison_width(record.op)
+                    wrapping_u32(record.right),
+                    cc,
+                    width
                 )
-            );
+            } else {
+                Instruction::Compare(destination, left, right, cc, width)
+            };
+            emit(inout output, in instruction);
+        } else if is_immediate_arithmetic(record.op) {
+            emit_immediate_arithmetic(inout output, in record, destination, left);
         } else if record.op == TRUNCATE {
             emit(inout output, in Instruction::Truncate(destination, left, record.extra));
         } else if record.op == SIGN_EXTEND {
