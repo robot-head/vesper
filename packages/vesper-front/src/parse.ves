@@ -1545,15 +1545,13 @@ fn params(inout p: P, end: u8) {
             p.param_notes.push(start);
             p.param_notes.push(last_end(in p));
             p.param_notes.push(name);
-            p
-                .param_notes
-                .push(
-                    if projected {
-                        1
-                    } else {
-                        0
-                    }
-                );
+            p.param_notes.push(
+                if projected {
+                    1
+                } else {
+                    0
+                }
+            );
         }
         if !eat(inout p, k_comma()) {
             return;
