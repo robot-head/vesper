@@ -114,11 +114,57 @@ fn b_methods(in a: Ast, it: ItemNode) -> u32 {
     }
 }
 
+// Whether a type's name is the mode's: `Box` (1), or `Atomic` or
+// `MemoryOrder` (2, `atomics::type_mentions`).
+fn head_is(m: u8, in a: Ast, sym: u32) -> bool {
+    if m == 1 {
+        is(in a, sym, "Box")
+    } else {
+        is(in a, sym, "Atomic") || is(in a, sym, "MemoryOrder")
+    }
+}
+
+// `atomics::path_mentions`: the first `::` segment is `Atomic` or
+// `MemoryOrder`.
+fn path_head(in a: Ast, sym: u32) -> bool {
+    if sym == none() {
+        return false;
+    }
+    let (s, e) = a.names.span(symbol_from_id(sym));
+    let mut end = e;
+    let mut i = s;
+    loop {
+        if wrapping_add(i, 1) >= e {
+            break;
+        }
+        if a.names.text_byte(i) == Option::Some(58)
+            && a.names.text_byte(wrapping_add(i, 1)) == Option::Some(58) {
+            end = i;
+            break;
+        }
+        i = wrapping_add(i, 1);
+    }
+    span_is(in a, s, end, "Atomic") || span_is(in a, s, end, "MemoryOrder")
+}
+
+fn span_is(in a: Ast, s: u64, e: u64, in lit: Str) -> bool {
+    let t = lit.as_bytes();
+    if wrapping_sub(e, s) != t.len() {
+        return false;
+    }
+    for i in 0..t.len() {
+        if a.names.text_byte(wrapping_add(s, i)) != t.try_get(i) {
+            return false;
+        }
+    }
+    true
+}
+
 fn is(in a: Ast, sym: u32, in lit: Str) -> bool {
     sym != none() && a.names.symbol_eq(symbol_from_id(sym), in lit)
 }
 
-fn effects_mention(in a: Ast, e: u32) -> bool {
+fn effects_mention(m: u8, in a: Ast, e: u32) -> bool {
     if e == none() {
         return false;
     }
@@ -132,16 +178,16 @@ fn effects_mention(in a: Ast, e: u32) -> bool {
                 idx_from_raw[EffectNode](list_at(in a, n.instances, i)),
                 EffectNode { label: none(), name: none(), args: 0 }
             );
-        if types_mention(in a, x.args) {
+        if types_mention(m, in a, x.args) {
             return true;
         }
     }
     false
 }
 
-fn types_mention(in a: Ast, list: u32) -> bool {
+fn types_mention(m: u8, in a: Ast, list: u32) -> bool {
     for i in 0..list_len(in a, list) {
-        if type_mentions(in a, list_at(in a, list, i)) {
+        if type_mentions(m, in a, list_at(in a, list, i)) {
             return true;
         }
     }
@@ -149,50 +195,51 @@ fn types_mention(in a: Ast, list: u32) -> bool {
 }
 
 // `fip::type_mentions_box`.
-fn type_mentions(in a: Ast, t: u32) -> bool {
+fn type_mentions(m: u8, in a: Ast, t: u32) -> bool {
     if t == none() {
         return false;
     }
     let n = type_at(in a, t);
     if n.kind == 1 {
-        is(in a, n.a, "Box") || types_mention(in a, n.b)
+        head_is(m, in a, n.a) || types_mention(m, in a, n.b)
     } else if n.kind == 2 {
-        types_mention(in a, n.a)
+        types_mention(m, in a, n.a)
     } else if n.kind == 3 {
         let pairs = list_len(in a, n.a) / 2;
         for i in 0..pairs {
-            if type_mentions(in a, list_at(in a, n.a, wrapping_add(wrapping_mul(i, 2), 1))) {
+            if type_mentions(m, in a, list_at(in a, n.a, wrapping_add(wrapping_mul(i, 2), 1))) {
                 return true;
             }
         }
-        type_mentions(in a, n.b) || effects_mention(in a, n.c)
+        type_mentions(m, in a, n.b) || (m == 1 && effects_mention(m, in a, n.c))
     } else if n.kind == 4 {
-        effects_mention(in a, n.a)
+        m == 1 && effects_mention(m, in a, n.a)
     } else {
         false
     }
 }
 
 // `fip::pattern_mentions_box`.
-fn pattern_mentions(in a: Ast, p: u32) -> bool {
+fn pattern_mentions(m: u8, in a: Ast, p: u32) -> bool {
     if p == none() {
         return false;
     }
     let n = pat_at(in a, p);
     if n.kind == 4 {
         for i in 0..list_len(in a, n.a) {
-            if pattern_mentions(in a, list_at(in a, n.a, i)) {
+            if pattern_mentions(m, in a, list_at(in a, n.a, i)) {
                 return true;
             }
         }
         false
     } else if n.kind == 5 {
-        if is(in a, n.a, "Box") || is(in a, n.a, "Box::Box") {
+        if (m == 1 && (is(in a, n.a, "Box") || is(in a, n.a, "Box::Box")))
+            || (m == 2 && path_head(in a, n.a)) {
             return true;
         }
         let pairs = list_len(in a, n.b) / 2;
         for i in 0..pairs {
-            if pattern_mentions(in a, list_at(in a, n.b, wrapping_add(wrapping_mul(i, 2), 1))) {
+            if pattern_mentions(m, in a, list_at(in a, n.b, wrapping_add(wrapping_mul(i, 2), 1))) {
                 return true;
             }
         }
@@ -212,30 +259,30 @@ fn param_type(in a: Ast, p: u32) -> u32 {
         .ty
 }
 
-fn params_mention(in a: Ast, list: u32) -> bool {
+fn params_mention(m: u8, in a: Ast, list: u32) -> bool {
     for i in 0..list_len(in a, list) {
-        if type_mentions(in a, param_type(in a, list_at(in a, list, i))) {
+        if type_mentions(m, in a, param_type(in a, list_at(in a, list, i))) {
             return true;
         }
     }
     false
 }
 
-fn clause_uses(in a: Ast, c: u32) -> bool {
+fn clause_uses(m: u8, in a: Ast, c: u32) -> bool {
     let n = a
         .clauses
         .get_or(idx_from_raw[ClauseNode](c), ClauseNode { name: none(), pats: 0, body: none() });
     for i in 0..list_len(in a, n.pats) {
-        if pattern_mentions(in a, list_at(in a, n.pats, i)) {
+        if pattern_mentions(m, in a, list_at(in a, n.pats, i)) {
             return true;
         }
     }
-    expr_uses(in a, n.body)
+    expr_uses(m, in a, n.body)
 }
 
-fn exprs_use(in a: Ast, list: u32) -> bool {
+fn exprs_use(m: u8, in a: Ast, list: u32) -> bool {
     for i in 0..list_len(in a, list) {
-        if expr_uses(in a, list_at(in a, list, i)) {
+        if expr_uses(m, in a, list_at(in a, list, i)) {
             return true;
         }
     }
@@ -243,35 +290,38 @@ fn exprs_use(in a: Ast, list: u32) -> bool {
 }
 
 // `fip::expr_uses_box`.
-fn expr_uses(in a: Ast, e: u32) -> bool {
+fn expr_uses(m: u8, in a: Ast, e: u32) -> bool {
     if e == none() {
         return false;
     }
     let x = expr_at(in a, e);
     let k = x.kind;
     if k == 2 {
+        if m == 2 {
+            return path_head(in a, x.a);
+        }
         is(in a, x.a, "Box") || is(in a, x.a, "Box::new") || is(in a, x.a, "Box::new_in_caller")
     } else if k == 3 {
-        exprs_use(in a, x.a)
+        exprs_use(m, in a, x.a)
     } else if k == 4 {
-        if is(in a, x.a, "Box") {
+        if (m == 1 && is(in a, x.a, "Box")) || (m == 2 && path_head(in a, x.a)) {
             return true;
         }
         let pairs = list_len(in a, x.b) / 2;
         for i in 0..pairs {
-            if expr_uses(in a, list_at(in a, x.b, wrapping_add(wrapping_mul(i, 2), 1))) {
+            if expr_uses(m, in a, list_at(in a, x.b, wrapping_add(wrapping_mul(i, 2), 1))) {
                 return true;
             }
         }
         false
     } else if k == 7 || k == 9 || k == 17 {
-        expr_uses(in a, x.a)
+        expr_uses(m, in a, x.a)
     } else if k == 10 {
-        expr_uses(in a, x.b)
+        expr_uses(m, in a, x.b)
     } else if k == 8 || k == 19 {
-        expr_uses(in a, x.a) || expr_uses(in a, x.b)
+        expr_uses(m, in a, x.a) || expr_uses(m, in a, x.b)
     } else if k == 11 || k == 12 || k == 18 {
-        expr_uses(in a, x.b) || expr_uses(in a, x.c)
+        expr_uses(m, in a, x.b) || expr_uses(m, in a, x.c)
     } else if k == 5 {
         for i in 0..list_len(in a, x.a) {
             let s = a
@@ -281,18 +331,18 @@ fn expr_uses(in a: Ast, e: u32) -> bool {
                     StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
                 );
             if s.kind == 1 {
-                if pattern_mentions(in a, s.pat)
-                    || type_mentions(in a, s.ty)
-                    || expr_uses(in a, s.value) {
+                if pattern_mentions(m, in a, s.pat)
+                    || type_mentions(m, in a, s.ty)
+                    || expr_uses(m, in a, s.value) {
                     return true;
                 }
-            } else if expr_uses(in a, s.value) {
+            } else if expr_uses(m, in a, s.value) {
                 return true;
             }
         }
-        expr_uses(in a, x.b)
+        expr_uses(m, in a, x.b)
     } else if k == 6 {
-        if expr_uses(in a, x.a) || types_mention(in a, x.b) {
+        if expr_uses(m, in a, x.a) || types_mention(m, in a, x.b) {
             return true;
         }
         for i in 0..list_len(in a, x.c) {
@@ -302,58 +352,61 @@ fn expr_uses(in a: Ast, e: u32) -> bool {
                     idx_from_raw[ArgNode](list_at(in a, x.c, i)),
                     ArgNode { pass: 0, explicit: false, expr: none() }
                 );
-            if expr_uses(in a, arg.expr) {
+            if expr_uses(m, in a, arg.expr) {
                 return true;
             }
         }
         false
     } else if k == 13 {
-        expr_uses(in a, x.a) || expr_uses(in a, x.b) || expr_uses(in a, x.c)
+        expr_uses(m, in a, x.a) || expr_uses(m, in a, x.b) || expr_uses(m, in a, x.c)
     } else if k == 14 {
-        if expr_uses(in a, x.a) {
+        if expr_uses(m, in a, x.a) {
             return true;
         }
         let pairs = list_len(in a, x.b) / 2;
         for i in 0..pairs {
             let p = list_at(in a, x.b, wrapping_mul(i, 2));
             let b = list_at(in a, x.b, wrapping_add(wrapping_mul(i, 2), 1));
-            if pattern_mentions(in a, p) || expr_uses(in a, b) {
+            if pattern_mentions(m, in a, p) || expr_uses(m, in a, b) {
                 return true;
             }
         }
         false
     } else if k == 15 {
-        params_mention(in a, x.a) || type_mentions(in a, x.c) || expr_uses(in a, x.e)
+        params_mention(m, in a, x.a) || type_mentions(m, in a, x.c) || expr_uses(m, in a, x.e)
     } else if k == 16 {
-        if x.b != none() && (pattern_mentions(in a, x.b) || expr_uses(in a, x.c)) {
+        if x.b != none()
+            && ((m == 1 && pattern_mentions(m, in a, x.b)) || expr_uses(m, in a, x.c)) {
             return true;
         }
-        if expr_uses(in a, x.d) {
+        if expr_uses(m, in a, x.d) {
             return true;
         }
         for i in 0..list_len(in a, x.e) {
-            if clause_uses(in a, list_at(in a, x.e, i)) {
+            if clause_uses(m, in a, list_at(in a, x.e, i)) {
                 return true;
             }
         }
         false
     } else if k == 20 || k == 21 {
-        expr_uses(in a, x.a)
+        expr_uses(m, in a, x.a)
     } else {
         false
     }
 }
 
 // `fip::function_uses_box`.
-fn function_uses(in a: Ast, f: u32) -> bool {
+fn function_uses(m: u8, in a: Ast, f: u32) -> bool {
     let n = b_fn(in a, f);
-    type_mentions(in a, n.result) || params_mention(in a, n.params) || expr_uses(in a, n.body)
+    type_mentions(m, in a, n.result)
+        || params_mention(m, in a, n.params)
+        || expr_uses(m, in a, n.body)
 }
 
-fn methods_need(in a: Ast, list: u32, fip: bool) -> bool {
+fn methods_need(m: u8, in a: Ast, list: u32, fip: bool) -> bool {
     for i in 0..list_len(in a, list) {
         let f = list_at(in a, list, i);
-        if (fip && b_fn(in a, f).fip) || function_uses(in a, f) {
+        if (fip && b_fn(in a, f).fip) || function_uses(m, in a, f) {
             return true;
         }
     }
@@ -361,13 +414,13 @@ fn methods_need(in a: Ast, list: u32, fip: bool) -> bool {
 }
 
 // `fip::needs_prelude`.
-pub fn needs_box(in a: Ast) -> bool {
+fn needs(m: u8, in a: Ast) -> bool {
     for i in 0..a.m_items.len() {
         let it = match a.m_items.try_get(i) {
             Option::Some(v) => b_item(in a, v),
             Option::None => ItemNode { kind: 0, node: none() },
         };
-        if it.kind == 1 && is(in a, b_adt(in a, it.node).name, "Box") {
+        if it.kind == 1 && head_is(m, in a, b_adt(in a, it.node).name) {
             return false;
         }
     }
@@ -393,22 +446,40 @@ pub fn needs_box(in a: Ast) -> bool {
                             idx_from_raw[FieldNode](list_at(in a, v.fields, k)),
                             FieldNode { name: none(), ty: none(), modality: 3, temperature: 0 }
                         );
-                    if type_mentions(in a, f.ty) {
+                    if type_mentions(m, in a, f.ty) {
                         found = true;
                     }
                 }
             }
             found
         } else if it.kind == 2 {
-            b_fn(in a, it.node).fip || function_uses(in a, it.node)
+            (m == 1 && b_fn(in a, it.node).fip) || function_uses(m, in a, it.node)
+        } else if it.kind == 4 && m == 2 {
+            let b = a
+                .impls
+                .get_or(
+                    idx_from_raw[ImplNode](it.node),
+                    ImplNode { ty: none(), generics: 0, methods: 0 }
+                );
+            type_mentions(m, in a, b.ty) || methods_need(m, in a, b.methods, false)
         } else if it.kind == 3 {
-            methods_need(in a, b_effect_decl(in a, it.node).ops, false)
+            methods_need(m, in a, b_effect_decl(in a, it.node).ops, false)
         } else {
-            methods_need(in a, b_methods(in a, it), true)
+            methods_need(m, in a, b_methods(in a, it), m == 1)
         };
         if need {
             return true;
         }
     }
     false
+}
+
+// `fip::needs_prelude`.
+pub fn needs_box(in a: Ast) -> bool {
+    needs(1, in a)
+}
+
+// `atomics::needs_prelude`.
+pub fn needs_atomics(in a: Ast) -> bool {
+    needs(2, in a)
 }

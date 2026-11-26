@@ -27,9 +27,10 @@ use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{Interner, interner_new, symbol_from_id};
 use self::prelude::{
     defined_methods, module_end, needs_option, needs_strings, option_source, replaced,
-    sorted_symbols, strings_source, used, uses_of, Uses
+    sorted_symbols, strings_source, used, uses_of, Uses, atomics_source, workers_source,
+    needs_workers
 };
-use self::boxes::{box_dump, needs_box};
+use self::boxes::{box_dump, needs_atomics, needs_box};
 use self::widths::{reserved_width_name, width_source};
 
 // The builtin declarations every world starts from (`World::collect`'s
@@ -207,10 +208,6 @@ pub fn needs_prelude(in a: Ast, in u: Uses) -> bool {
             }
         },
         Option::None => {},
-    }
-    // Atomics and workers.
-    if has_name(in a, "Atomic") || has_name(in a, "MemoryOrder") || has_name(in a, "parallel_for") {
-        return true;
     }
     // Transcendentals.
     if used(in u, "exp_f32")
@@ -772,7 +769,9 @@ struct Srcs {
     strings: Ast,
     option: Ast,
     width: Ast,
+    atomics: Ast,
     w_shift: u32,
+    a_shift: u32,
     s_shift: u32,
     o_shift: u32
 }
@@ -784,6 +783,8 @@ fn shift_of(in s: Srcs, src: u8) -> u32 {
         s.o_shift
     } else if src == 4 {
         s.w_shift
+    } else if src == 6 {
+        s.a_shift
     } else {
         0
     }
@@ -803,6 +804,8 @@ fn dump_adt(inout o: ChunkSeq[u8], in s: Srcs, e: Entry) {
         put_adt(inout o, in s.strings, e.node, sh);
     } else if e.src == 4 {
         put_adt(inout o, in s.width, e.node, sh);
+    } else if e.src == 6 {
+        put_adt(inout o, in s.atomics, e.node, sh);
     } else {
         put_adt(inout o, in s.option, e.node, sh);
     }
@@ -818,6 +821,8 @@ fn dump_effect(inout o: ChunkSeq[u8], in s: Srcs, e: Entry) {
         put_effect(inout o, in s.strings, e.node, sh);
     } else if e.src == 4 {
         put_effect(inout o, in s.width, e.node, sh);
+    } else if e.src == 6 {
+        put_effect(inout o, in s.atomics, e.node, sh);
     } else {
         put_effect(inout o, in s.option, e.node, sh);
     }
@@ -833,6 +838,8 @@ fn dump_function(inout o: ChunkSeq[u8], in s: Srcs, e: Entry) {
         put_function(inout o, in s.strings, e.node, e.imp, 1, sh);
     } else if e.src == 4 {
         put_function(inout o, in s.width, e.node, e.imp, 1, sh);
+    } else if e.src == 6 {
+        put_function(inout o, in s.atomics, e.node, e.imp, 1, sh);
     } else {
         put_function(inout o, in s.option, e.node, e.imp, 1, sh);
     }
@@ -918,7 +925,17 @@ fn world_of(in source: Str, inout o: ChunkSeq[u8]) {
     } else {
         lower_source(in "").ast
     };
-    let after = max32(w_end, prelude_end(in strings, s_shift, in defined));
+    let s_end = max32(w_end, prelude_end(in strings, s_shift, in defined));
+    let a_shift = wrapping_add(max32(s_end, module_last), 1);
+    let mut asrc = String::new();
+    if needs_atomics(in module) {
+        asrc.push_str(in atomics_source());
+    }
+    if needs_workers(in uses, in module) {
+        asrc.push_str(in workers_source());
+    }
+    let atomics = lower_source(in asrc.as_str()).ast;
+    let after = max32(s_end, prelude_end(in atomics, a_shift, in defined));
     let o_shift = wrapping_add(max32(after, module_last), 1);
     let option = if needs_option(in uses, in defined) {
         lower_source(in option_source()).ast
@@ -931,7 +948,9 @@ fn world_of(in source: Str, inout o: ChunkSeq[u8]) {
         strings: strings,
         option: option,
         width: width,
+        atomics: atomics,
         w_shift: w_shift,
+        a_shift: a_shift,
         s_shift: s_shift,
         o_shift: o_shift
     };
@@ -951,6 +970,7 @@ fn world_of(in source: Str, inout o: ChunkSeq[u8]) {
     collect_all(inout c, in s.module, 1, 0, false, in none_defined);
     collect_all(inout c, in s.width, 4, w_shift, false, in none_defined);
     collect_all(inout c, in s.strings, 2, s_shift, true, in defined);
+    collect_all(inout c, in s.atomics, 6, a_shift, false, in none_defined);
     collect_all(inout c, in s.option, 3, o_shift, true, in defined);
     dump(in c, in s, inout o);
 }

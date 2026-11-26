@@ -302,6 +302,12 @@ const CASES: &[&str] = &[
     "fn f(o: Option[i64]) -> i64 { match o { Option::Some(Box::Box(x)) => x, _ => 0 } }",
     "struct Box { x: i64 } fn f(b: Box) -> i64 { 1 }",
     "struct S { b: Box[u8] }",
+    // The atomic and worker preludes.
+    "fn f(a: Atomic[u64]) -> u64 { 1 }",
+    "fn f() -> u64 { let o = MemoryOrder::SeqCst; 1 }",
+    "struct Atomic { x: u64 } fn f(a: Atomic) -> u64 { 1 }",
+    "fn body(in d: u64, i: u64) { } fn f() { parallel_for(in 1, 2, body); }",
+    "fn f(o: Option[u64]) -> u64 { let c = Atomic::new(1); parallel_for(in c, 1, g); o.unwrap_or(0) }",
 ];
 
 /// Every byte-order, bit and checked builtin, named once.
