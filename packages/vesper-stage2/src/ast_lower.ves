@@ -826,7 +826,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
             }
             let pa = push_xs(inout lc, in pats);
             let cbody = lower_expr(inout lc, in ast, mod_idx, cnode.body);
-            cls.push(Cl { name: cname, pa: pa, pn: pn, body: cbody });
+            cls.push(Cl { name: cname, pattern_start: pa, pattern_count: pn, body: cbody });
         }
         let ret = lc.ir.cls.len();
         for ci in 0..cls.len() {
@@ -850,17 +850,17 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
             pool: pool,
             label: lbl,
             eff_name: ename,
-            ta: ta,
-            tn: tn,
+            arg_ty_start: ta,
+            arg_ty_count: tn,
             has_state: has_state,
-            spat: spat,
-            sexpr: sexpr,
+            state_pattern: spat,
+            state_expr: sexpr,
             body: body,
-            ret: ret,
-            on: on,
+            return_clause: ret,
+            op_count: on,
             outgoing: empty_row,
-            ma: 0,
-            mn: 0
+            move_start: 0,
+            move_count: 0
         });
         let idx = lc.ir.exs.len();
         lc.ir
@@ -949,8 +949,8 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
             lc.ir.pms.push(Pm {
                 name: pname,
                 pass: pm.pass,
-                qa: 0,
-                qn: 0,
+                proj_start: 0,
+                proj_count: 0,
                 ty: pty,
                 s0: widen_u64(pm.start),
                 s1: widen_u64(pm.end)
@@ -1082,8 +1082,8 @@ pub fn build_ir_ast_for_entry(
                     lc.ir.pms.push(Pm {
                         name: pm.name,
                         pass: pm.pass,
-                        qa: 0,
-                        qn: 0,
+                        proj_start: 0,
+                        proj_count: 0,
                         ty: pm.ty,
                         s0: 0,
                         s1: 0
@@ -1096,7 +1096,7 @@ pub fn build_ir_ast_for_entry(
         for gi in 0..w(f.gn) {
             match prog.fn_generics.try_get(wrapping_add(w(f.ga), gi)) {
                 Option::Some(gn) => {
-                    lc.ir.gens.push(Gn { name: gn.name, bound: gn.bound, row: gn.row });
+                    lc.ir.gens.push(Gn { name: gn.name, bound: gn.bound, is_row: gn.row });
                 },
                 Option::None => {},
             }
@@ -1120,17 +1120,17 @@ pub fn build_ir_ast_for_entry(
             name: f.name,
             has_body: has_b,
             body: body_id,
-            pa: pa,
-            pn: widen_u64(f.pn),
+            param_start: pa,
+            param_count: widen_u64(f.pn),
             result: f.result,
             effects: f.effects,
-            ga: ga,
-            gn: widen_u64(f.gn),
-            ca: 0,
-            cn: 0,
+            generic_start: ga,
+            generic_count: widen_u64(f.gn),
+            cap_start: 0,
+            cap_count: 0,
             owner: f.name,
-            xa: 0,
-            xn: 0
+            ext_start: 0,
+            ext_count: 0
         });
         set_by_symbol(inout lc.ir.fn_by_key, f.name, n32(wrapping_add(fidx, 1)));
     }
@@ -1159,8 +1159,8 @@ pub fn build_ir_ast_for_entry(
                         lc.ir.pms.push(Pm {
                             name: pm.name,
                             pass: pm.pass,
-                            qa: 0,
-                            qn: 0,
+                            proj_start: 0,
+                            proj_count: 0,
                             ty: pm.ty,
                             s0: 0,
                             s1: 0
@@ -1169,16 +1169,21 @@ pub fn build_ir_ast_for_entry(
                     Option::None => {},
                 }
             }
-            lc.ir.eops.push(Eop { name: op.name, pa: pa, pn: widen_u64(op.pn), result: op.result });
+            lc.ir.eops.push(Eop {
+                name: op.name,
+                param_start: pa,
+                param_count: widen_u64(op.pn),
+                result: op.result
+            });
         }
         let eidx = lc.ir.effs.len();
         lc.ir.effs.push(Ef {
             name: ed.name,
             linear: ed.linear,
-            ga: ga,
-            gn: widen_u64(ed.gn),
-            oa: oa,
-            on: widen_u64(ed.on)
+            generic_start: ga,
+            generic_count: widen_u64(ed.gn),
+            op_start: oa,
+            op_count: widen_u64(ed.on)
         });
         set_by_symbol(inout lc.ir.eff_by_name, ed.name, n32(wrapping_add(eidx, 1)));
     }

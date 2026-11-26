@@ -130,8 +130,8 @@ fn assoc_right(inout rules: Rules, op: u32) -> (u32, u32) {
 
 // The 18 rules of `optimize::rules()`, in its order.
 pub fn math_rules() -> Rules {
-    let arity = math_arity();
-    let mut rules = rules_new(in arity);
+    let arities = math_arity();
+    let mut rules = rules_new(in arities);
     // add-zero, zero-add, sub-zero, mul-one, one-mul
     let lhs = op_var_const(inout rules, M_ADD, 0);
     let rhs = just_var(inout rules, 0);
@@ -221,7 +221,7 @@ pub fn egraph_math(in input: Str) -> ChunkSeq[u64] {
     let bytes = input.as_bytes();
     let mut reader = Reader { pos: 0 };
     let rules = math_rules();
-    let arity = math_arity();
+    let arities = math_arity();
     let cases = reader.word(in bytes);
     let iter_limit = reader.word(in bytes);
     let node_limit = reader.word(in bytes);
@@ -233,9 +233,9 @@ pub fn egraph_math(in input: Str) -> ChunkSeq[u64] {
     for case in 0..cases {
         let lo = wrapping_i64(reader.word(in bytes));
         let hi = wrapping_i64(reader.word(in bytes));
-        let vars = wrapping_i64(reader.word(in bytes));
+        let var_count = wrapping_i64(reader.word(in bytes));
         let node_count = reader.word(in bytes);
-        let mut graph = egraph_new(in arity);
+        let mut graph = egraph_new(in arities);
         let mut ids: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](node_count);
         let mut root: u32 = 0;
         for node in 0..node_count {
@@ -266,7 +266,7 @@ pub fn egraph_math(in input: Str) -> ChunkSeq[u64] {
             input_op: M_INPUT,
             lo: lo,
             hi: hi,
-            vars: vars
+            var_count: var_count
         };
         let mut records = records_new();
         let (stop, iters) = run_egg(inout graph, in rules, config, root, inout records);
@@ -276,8 +276,8 @@ pub fn egraph_math(in input: Str) -> ChunkSeq[u64] {
         out.push(graph.memo_len());
         out.push(graph.class_count());
         let mut digest: u64 = 14695981039346656037;
-        for k in 0..graph.raw_len() {
-            let id = wrapping_u32(k);
+        for index in 0..graph.raw_len() {
+            let id = wrapping_u32(index);
             digest = fold(digest, widen_u64(graph.raw_op(id)));
             digest = fold(digest, wrapping_u64(graph.raw_data(id)));
             digest = fold(digest, widen_u64(graph.raw_child(id, 0)));
@@ -332,8 +332,8 @@ pub fn memory_arity() -> ChunkSeq[u8] {
 //   (rewrite (Read (Write s p v) p) v)
 //   (rule ((= r (Read (Write s p v) q)) (disjoint p q)) ((union r (Read s q))))
 pub fn memory_rules() -> Rules {
-    let arity = memory_arity();
-    let mut rules = rules_new(in arity);
+    let arities = memory_arity();
+    let mut rules = rules_new(in arities);
     // Read binds p (data 0); the Write's data must equal it.
     rules.begin();
     let state = rules.var(0);
@@ -385,13 +385,13 @@ fn set_token(inout states: ChunkSeq[u32], token: u64, id: u32) -> bool {
 pub fn egraph_memory(in input: Str) -> ChunkSeq[u64] {
     let bytes = input.as_bytes();
     let mut reader = Reader { pos: 0 };
-    let arity = memory_arity();
+    let arities = memory_arity();
     let rounds = reader.word(in bytes);
     let blocks = reader.word(in bytes);
     let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for block in 0..blocks {
         let mut rules = memory_rules();
-        let mut graph = egraph_new(in arity);
+        let mut graph = egraph_new(in arities);
         let mut tokens: ChunkSeq[u32] = ChunkSeq::new[u32]();
         let mut ill_formed = false;
         let pairs = reader.word(in bytes);
@@ -466,13 +466,13 @@ pub fn egraph_memory(in input: Str) -> ChunkSeq[u64] {
         for query in 0..queries {
             let dest = wrapping_i64(reader.word(in bytes));
             let candidates = reader.word(in bytes);
-            let root = graph.lookup(V_REF, dest, 0, 0);
+            let dest_class = graph.lookup(V_REF, dest, 0, 0);
             let mut found: u32 = NONE;
             for candidate_index in 0..candidates {
                 let candidate = reader.word(in bytes);
-                if found == NONE && !ill_formed && root != NONE {
-                    let written = graph.lookup(V_REF, wrapping_i64(candidate), 0, 0);
-                    if written != NONE && written == root {
+                if found == NONE && !ill_formed && dest_class != NONE {
+                    let candidate_class = graph.lookup(V_REF, wrapping_i64(candidate), 0, 0);
+                    if candidate_class != NONE && candidate_class == dest_class {
                         found = wrapping_u32(candidate);
                     }
                 }

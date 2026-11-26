@@ -29,10 +29,14 @@ const U_OPERATION: u8 = 13;
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
 
-fn lookup_word(in dests: ChunkSeq[u64], in vals: ChunkSeq[u64], v: u64) -> u64 eff [Fail[WErr]] {
-    for q in 0..dests.len() {
-        if u64_at(in dests, q) == v {
-            return u64_at(in vals, q);
+fn lookup_word(
+    in dests: ChunkSeq[u64],
+    in vals: ChunkSeq[u64],
+    value: u64
+) -> u64 eff [Fail[WErr]] {
+    for i in 0..dests.len() {
+        if u64_at(in dests, i) == value {
+            return u64_at(in vals, i);
         }
     }
     Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 246));
@@ -44,35 +48,35 @@ impl L {
     // constant function `NAME` builds a tuple of literals, which becomes
     // read-only static data of 8-byte words, the layout of a tuple value.
     // Uses only read it (`TABLE[i]`), as natively.
-    pub fn table_call(inout self, dv: u64, callee: u32) -> bool eff [Fail[WErr]] {
-        let n = self.cx.names.size(callee);
+    pub fn table_call(inout self, dest_val: u64, callee: u32) -> bool eff [Fail[WErr]] {
+        let n = self.ctx.names.size(callee);
         let mut prefix = ChunkSeq::new[u8]();
         prefix.extend(in "$table$".as_bytes());
         if n <= prefix.len() {
             return false;
         }
-        for k in 0..prefix.len() {
-            if self.cx.names.byte(callee, k) != u8_at(in prefix, k) {
+        for i in 0..prefix.len() {
+            if self.ctx.names.byte(callee, i) != u8_at(in prefix, i) {
                 return false;
             }
         }
         let cached = u64_at(in self.tables, w(callee));
-        let at = if cached != 0 {
+        let addr = if cached != 0 {
             wrapping_sub(cached, 1)
         } else {
             let mut rest = ChunkSeq::new[u8]();
-            for k in prefix.len()..n {
-                rest.push(self.cx.names.byte(callee, k));
+            for i in prefix.len()..n {
+                rest.push(self.ctx.names.byte(callee, i));
             }
-            let name = self.cx.intern(in rest);
+            let name = self.ctx.intern(in rest);
             let words = self.table_words(name);
-            let a = self.static_words(in words);
-            set64(inout self.tables, callee, inc(a));
-            a
+            let words_addr = self.static_words(in words);
+            set64(inout self.tables, callee, inc(words_addr));
+            words_addr
         };
-        let d = self.dest(dv);
-        self.e.code.u64_const(at);
-        self.e.code.set(d);
+        let dest = self.dest(dest_val);
+        self.cur_fn.code.u64_const(addr);
+        self.cur_fn.code.set(dest);
         true
     }
 
@@ -82,14 +86,14 @@ impl L {
         }
         let mut bytes = ChunkSeq::new[u8]();
         for i in 0..words.len() {
-            let x = u64_at(in words, i);
-            for k in 0..8 {
+            let word_val = u64_at(in words, i);
+            for byte_index in 0..8 {
                 bytes.push(wrapping_u8(
-                    wrapping_shr_u64(x, wrapping_u32(wrapping_mul(k, 8))) & 255
+                    wrapping_shr_u64(word_val, wrapping_u32(wrapping_mul(byte_index, 8))) & 255
                 ));
             }
         }
-        self.b.data(in bytes)
+        self.builder.data(in bytes)
     }
 
     // The words of the aggregate that constant function `name` returns:
@@ -97,44 +101,44 @@ impl L {
     // If `name` is a 0-arg constant function returning a scalar, return its
     // 64-bit word; otherwise Fail(246).
     fn const_scalar(inout self, name: u32) -> u64 eff [Fail[WErr]] {
-        let fi = self.cx.ir.find(name);
-        if fi == 0 {
+        let found_fn = self.ctx.ir.find(name);
+        if found_fn == 0 {
             Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 246));
         }
-        let row = self.cx.ir.p.function(wrapping_sub(fi, 1));
+        let row = self.ctx.ir.program.function(wrapping_sub(found_fn, 1));
         if row.bc != 1 {
             Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 246));
         }
-        let blk = self.cx.ir.p.block(row.b0);
+        let blk = self.ctx.ir.program.block(row.b0);
         let mut dests = ChunkSeq::new[u64]();
         let mut vals = ChunkSeq::new[u64]();
         let mut last: u64 = 0;
         let mut has_last = false;
         for j in 0..blk.ic {
-            let ins = self.cx.ir.p.inst(add(blk.i0, j));
-            let a = ins.a;
-            if ins.op == Op::Const {
-                let lk = self.cx.ir.word(a);
-                let lo = self.cx.ir.word(inc(a));
-                let hi = self.cx.ir.word(add(a, 2));
-                let val = if lk == Lit::String {
+            let instr = self.ctx.ir.program.inst(add(blk.i0, j));
+            let args_at = instr.a;
+            if instr.op == Op::Const {
+                let lit_kind = self.ctx.ir.word(args_at);
+                let lo = self.ctx.ir.word(inc(args_at));
+                let hi = self.ctx.ir.word(add(args_at, 2));
+                let word_val = if lit_kind == Lit::String {
                     let text = n32(lo);
                     let addr = self.string_literal(text);
-                    add(addr, 8) | wrapping_shl_u64(self.cx.names.size(text), 32)
+                    add(addr, 8) | wrapping_shl_u64(self.ctx.names.size(text), 32)
                 } else {
-                    wrapping_u64(self.constant_bits(lk, lo, hi, ins.ty))
+                    wrapping_u64(self.constant_bits(lit_kind, lo, hi, instr.ty))
                 };
-                dests.push(widen_u64(ins.dest));
-                vals.push(val);
-                last = val;
+                dests.push(widen_u64(instr.dest));
+                vals.push(word_val);
+                last = word_val;
                 has_last = true;
-            } else if ins.op == Op::Unit {
-                dests.push(widen_u64(ins.dest));
+            } else if instr.op == Op::Unit {
+                dests.push(widen_u64(instr.dest));
                 vals.push(0);
                 last = 0;
                 has_last = true;
-            } else if ins.op == Op::Exit {
-                last = lookup_word(in dests, in vals, self.cx.ir.word(inc(a)));
+            } else if instr.op == Op::Exit {
+                last = lookup_word(in dests, in vals, self.ctx.ir.word(inc(args_at)));
                 has_last = true;
             } else {
                 Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 246));
@@ -147,72 +151,72 @@ impl L {
     }
 
     fn table_words(inout self, name: u32) -> ChunkSeq[u64] eff [Fail[WErr]] {
-        let fi = self.cx.ir.find(name);
-        if fi == 0 {
+        let found_fn = self.ctx.ir.find(name);
+        if found_fn == 0 {
             Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 246));
         }
-        let row = self.cx.ir.p.function(wrapping_sub(fi, 1));
+        let row = self.ctx.ir.program.function(wrapping_sub(found_fn, 1));
         if row.bc != 1 {
             Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 246));
         }
-        let blk = self.cx.ir.p.block(row.b0);
+        let blk = self.ctx.ir.program.block(row.b0);
         // (dest, value) of each instruction, and the last aggregate's words
         let mut dests = ChunkSeq::new[u64]();
         let mut vals = ChunkSeq::new[u64]();
         let mut out = ChunkSeq::new[u64]();
         let mut has_out = false;
         for j in 0..blk.ic {
-            let ins = self.cx.ir.p.inst(add(blk.i0, j));
-            let a = ins.a;
-            if ins.op == Op::Const {
-                let lk = self.cx.ir.word(a);
-                let lo = self.cx.ir.word(inc(a));
-                let hi = self.cx.ir.word(add(a, 2));
-                let val = if lk == Lit::String {
+            let instr = self.ctx.ir.program.inst(add(blk.i0, j));
+            let args_at = instr.a;
+            if instr.op == Op::Const {
+                let lit_kind = self.ctx.ir.word(args_at);
+                let lo = self.ctx.ir.word(inc(args_at));
+                let hi = self.ctx.ir.word(add(args_at, 2));
+                let word_val = if lit_kind == Lit::String {
                     let text = n32(lo);
                     let addr = self.string_literal(text);
-                    add(addr, 8) | wrapping_shl_u64(self.cx.names.size(text), 32)
-                } else if self.is_u128(ins.ty) {
-                    let mut w2 = ChunkSeq::new[u64]();
-                    w2.push(lo);
-                    w2.push(hi);
-                    self.static_words(in w2)
+                    add(addr, 8) | wrapping_shl_u64(self.ctx.names.size(text), 32)
+                } else if self.is_u128(instr.ty) {
+                    let mut wide_words = ChunkSeq::new[u64]();
+                    wide_words.push(lo);
+                    wide_words.push(hi);
+                    self.static_words(in wide_words)
                 } else {
-                    wrapping_u64(self.constant_bits(lk, lo, hi, ins.ty))
+                    wrapping_u64(self.constant_bits(lit_kind, lo, hi, instr.ty))
                 };
-                dests.push(widen_u64(ins.dest));
-                vals.push(val);
-            } else if ins.op == Op::Unit {
-                dests.push(widen_u64(ins.dest));
+                dests.push(widen_u64(instr.dest));
+                vals.push(word_val);
+            } else if instr.op == Op::Unit {
+                dests.push(widen_u64(instr.dest));
                 vals.push(0);
-            } else if ins.op == Op::Call {
-                let callee = n32(self.cx.ir.word(a));
-                let nargs = self.cx.ir.word(inc(a));
+            } else if instr.op == Op::Call {
+                let callee = n32(self.ctx.ir.word(args_at));
+                let nargs = self.ctx.ir.word(inc(args_at));
                 if nargs != 0 {
                     Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 246));
                 }
-                let val = self.const_scalar(callee);
-                dests.push(widen_u64(ins.dest));
-                vals.push(val);
-            } else if ins.op == Op::Exit {
+                let word_val = self.const_scalar(callee);
+                dests.push(widen_u64(instr.dest));
+                vals.push(word_val);
+            } else if instr.op == Op::Exit {
                 // Constant functions end with `Op::Exit` returning the aggregate.
-            } else if ins.op == Op::Tuple {
+            } else if instr.op == Op::Tuple {
                 out.clear();
-                let k = self.cx.ir.word(a);
-                for i in 0..k {
-                    let v = self.cx.ir.word(add(inc(a), i));
-                    out.push(lookup_word(in dests, in vals, v));
+                let n_elems = self.ctx.ir.word(args_at);
+                for i in 0..n_elems {
+                    let elem_val = self.ctx.ir.word(add(inc(args_at), i));
+                    out.push(lookup_word(in dests, in vals, elem_val));
                 }
                 has_out = true;
                 let addr = self.static_words(in out);
-                dests.push(widen_u64(ins.dest));
+                dests.push(widen_u64(instr.dest));
                 vals.push(addr);
-            } else if ins.op == Op::Data {
-                let cname = n32(self.cx.ir.word(a));
-                let (index, is_enum, sh) = self.cx.variant_of(ins.ty, cname);
-                let nf = self.cx.field_count(sh, index);
+            } else if instr.op == Op::Data {
+                let cname = n32(self.ctx.ir.word(args_at));
+                let (index, is_enum, shape) = self.ctx.variant_of(instr.ty, cname);
+                let n_fields = self.ctx.field_count(shape, index);
                 let base: u64 = if is_enum { 1 } else { 0 };
-                let slots = add(nf, base);
+                let slots = add(n_fields, base);
                 out.clear();
                 for _i in 0..slots {
                     out.push(0);
@@ -220,20 +224,22 @@ impl L {
                 if is_enum {
                     set64(inout out, 0, index);
                 }
-                let n = self.cx.ir.word(inc(a));
-                for k in 0..n {
-                    let fname = n32(self.cx.ir.word(add(add(a, 2), wrapping_mul(k, 2))));
-                    let vid = self.cx.ir.word(add(add(a, 3), wrapping_mul(k, 2)));
-                    let fi0 = self.cx.field_index(sh, index, fname);
-                    if fi0 == NONE64 {
+                let n = self.ctx.ir.word(inc(args_at));
+                for init_index in 0..n {
+                    let fname = n32(
+                        self.ctx.ir.word(add(add(args_at, 2), wrapping_mul(init_index, 2)))
+                    );
+                    let vid = self.ctx.ir.word(add(add(args_at, 3), wrapping_mul(init_index, 2)));
+                    let slot = self.ctx.field_index(shape, index, fname);
+                    if slot == NONE64 {
                         Fail::raise(werr(K_INVALID, 0, 195));
                     }
-                    let fv = lookup_word(in dests, in vals, vid);
-                    set64(inout out, wrapping_u32(add(fi0, base)), fv);
+                    let field_word = lookup_word(in dests, in vals, vid);
+                    set64(inout out, wrapping_u32(add(slot, base)), field_word);
                 }
                 has_out = true;
                 let addr = self.static_words(in out);
-                dests.push(widen_u64(ins.dest));
+                dests.push(widen_u64(instr.dest));
                 vals.push(addr);
             } else {
                 Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 246));
@@ -248,19 +254,19 @@ impl L {
     // A host capability of the plan (`plan.host`): the WASI libraries
     // (StdProcess imports nothing).
     pub fn host_effect(in self, name: u32) -> bool {
-        let code: u8 = if name == self.cx.s.ffi_env {
+        let code: u8 = if name == self.ctx.syms.ffi_env {
             3
-        } else if name == self.cx.s.ffi_fs {
+        } else if name == self.ctx.syms.ffi_fs {
             4
-        } else if name == self.cx.s.ffi_proc {
+        } else if name == self.ctx.syms.ffi_proc {
             5
         } else {
             return false;
         };
-        for k in 0..self.plan.host.len() {
-            match self.plan.host.try_get(k) {
-                Option::Some(x) => {
-                    if x == code {
+        for i in 0..self.plan.host.len() {
+            match self.plan.host.try_get(i) {
+                Option::Some(host_code) => {
+                    if host_code == code {
                         return true;
                     }
                 },
@@ -274,101 +280,119 @@ impl L {
         if self.is_u128(ty) {
             return false;
         }
-        let dt = self.cx.default_ty(ty);
-        let pn = self.cx.types.node(dt);
-        if pn.kind == TyKind::Tuple && pn.n == 0 {
+        let resolved = self.ctx.default_ty(ty);
+        let node = self.ctx.types.node(resolved);
+        if node.kind == TyKind::Tuple && node.n == 0 {
             return true;
         }
-        pn.kind == TyKind::Named && pn.n == 0 && self.cx.k.is_scalar(pn.name)
+        node.kind == TyKind::Named && node.n == 0 && self.ctx.known.is_scalar(node.name)
     }
 
     pub fn returns_copy_size(inout self) -> u64 eff [Fail[WErr]] {
-        let fs = self.cx.fn_sig(self.e.inst.base);
-        if fs == 0 {
+        let sig_ref = self.ctx.fn_sig(self.cur_fn.inst.base);
+        if sig_ref == 0 {
             return NONE64;
         }
-        let sig = self.cx.f.sig(wrapping_sub(fs, 1));
-        for ei in 0..sig.en {
-            if self.host_effect(self.cx.f.eff(add(sig.e0, ei)).name) {
+        let sig = self.ctx.facts.sig(wrapping_sub(sig_ref, 1));
+        for eff_index in 0..sig.eff_count {
+            if self.host_effect(self.ctx.facts.eff(add(sig.eff_start, eff_index)).name) {
                 return NONE64;
             }
         }
-        let b = Bounds { keys: ChunkSeq::new[u32](), modes: ChunkSeq::new[u8]() };
+        let bounds = Bounds { keys: ChunkSeq::new[u32](), modes: ChunkSeq::new[u8]() };
         for i in 0..sig.pn {
-            let pm = self.cx.f.param(add(sig.p0, i));
+            let param = self.ctx.facts.param(add(sig.p0, i));
             // Exclude heap-allocated inout params (including i128/u128 wide_blocks
             // and Copy structs/tuples/enums) because writes/reassignments escape mark.
-            if pm.pass == 1 {
-                let pty = self.cx.subst(pm.ty, in self.e.vars);
-                if !self.is_inline_scalar(pty) {
+            if param.pass == 1 {
+                let param_ty = self.ctx.subst(param.ty, in self.cur_fn.vars);
+                if !self.is_inline_scalar(param_ty) {
                     return NONE64;
                 }
             }
         }
-        let rty = self.cx.subst(self.e.info.result, in self.e.vars);
-        if self.is_u128(rty) {
+        let result_ty = self.ctx.subst(self.cur_fn.info.result, in self.cur_fn.vars);
+        if self.is_u128(result_ty) {
             return NONE64;
         }
-        let sh = self.cx.shape(rty);
-        if sh.kind == SH_SCALAR {
+        let shape = self.ctx.shape(result_ty);
+        if shape.kind == SH_SCALAR {
             return 0;
         }
-        if sh.kind == SH_TUPLE && self.cx.types.node(sh.ty).n == 0 {
+        if shape.kind == SH_TUPLE && self.ctx.types.node(shape.ty).n == 0 {
             return 0;
         }
-        if sh.kind == SH_TUPLE {
-            if mode_of(inout self.cx.types, in self.cx.names, in self.cx.world, sh.ty, in b)
+        if shape.kind == SH_TUPLE {
+            if mode_of(
+                inout self.ctx.types,
+                in self.ctx.names,
+                in self.ctx.world,
+                shape.ty,
+                in bounds
+            )
                 != TyMode::Copy {
                 return NONE64;
             }
-            let ar = self.cx.arity(sh.ty);
-            for ti in 0..ar {
-                if !self.is_inline_scalar(self.cx.tuple_elem(sh.ty, ti)) {
+            let n_elems = self.ctx.arity(shape.ty);
+            for elem_index in 0..n_elems {
+                if !self.is_inline_scalar(self.ctx.tuple_elem(shape.ty, elem_index)) {
                     return NONE64;
                 }
             }
-            return wrapping_mul(8, ar);
+            return wrapping_mul(8, n_elems);
         }
-        if sh.kind == SH_STRUCT {
-            let adt = self.cx.world.adt(sh.adt);
+        if shape.kind == SH_STRUCT {
+            let adt = self.ctx.world.adt(shape.adt);
             if adt.gn == 0 {
                 if adt.mode != TyMode::Copy {
                     return NONE64;
                 }
-            } else if mode_of(inout self.cx.types, in self.cx.names, in self.cx.world, sh.ty, in b)
+            } else if mode_of(
+                inout self.ctx.types,
+                in self.ctx.names,
+                in self.ctx.world,
+                shape.ty,
+                in bounds
+            )
                 != TyMode::Copy {
                 return NONE64;
             }
-            let fc = self.cx.field_count(sh, 0);
-            for fi in 0..fc {
-                let (_fname, fty) = self.cx.variant_field(sh, 0, fi);
+            let n_fields = self.ctx.field_count(shape, 0);
+            for field in 0..n_fields {
+                let (_fname, fty) = self.ctx.variant_field(shape, 0, field);
                 if !self.is_inline_scalar(fty) {
                     return NONE64;
                 }
             }
-            return wrapping_mul(8, fc);
+            return wrapping_mul(8, n_fields);
         }
-        if sh.kind == SH_ENUM {
-            let adt = self.cx.world.adt(sh.adt);
+        if shape.kind == SH_ENUM {
+            let adt = self.ctx.world.adt(shape.adt);
             if adt.gn == 0 {
                 if adt.mode != TyMode::Copy {
                     return NONE64;
                 }
-            } else if mode_of(inout self.cx.types, in self.cx.names, in self.cx.world, sh.ty, in b)
+            } else if mode_of(
+                inout self.ctx.types,
+                in self.ctx.names,
+                in self.ctx.world,
+                shape.ty,
+                in bounds
+            )
                 != TyMode::Copy {
                 return NONE64;
             }
             let mut max_fc: u64 = 0;
-            for i in 0..self.cx.variant_count(sh) {
-                let fc = self.cx.field_count(sh, i);
-                for fi in 0..fc {
-                    let (_fname, fty) = self.cx.variant_field(sh, i, fi);
+            for i in 0..self.ctx.variant_count(shape) {
+                let n_fields = self.ctx.field_count(shape, i);
+                for field in 0..n_fields {
+                    let (_fname, fty) = self.ctx.variant_field(shape, i, field);
                     if !self.is_inline_scalar(fty) {
                         return NONE64;
                     }
                 }
-                if fc > max_fc {
-                    max_fc = fc;
+                if n_fields > max_fc {
+                    max_fc = n_fields;
                 }
             }
             return wrapping_mul(8, inc(max_fc));
@@ -376,111 +400,111 @@ impl L {
         NONE64
     }
 
-    pub fn emit_return_rewind(inout self, x: u32) eff [Fail[WErr]] {
-        if self.e.mark == 4294967295 {
+    pub fn emit_return_rewind(inout self, ret_val: u32) eff [Fail[WErr]] {
+        if self.cur_fn.heap_mark == 4294967295 {
             return;
         }
-        let rsz = self.returns_copy_size();
-        if rsz == NONE64 && rsz != 0 {
+        let ret_size = self.returns_copy_size();
+        if ret_size == NONE64 && ret_size != 0 {
             return;
         }
-        if rsz == 0 {
-            self.e.code.get(self.e.mark);
-            self.e.code.global_set(self.heap);
-        } else if rsz != NONE64 {
-            let csz = self.local();
-            self.e.code.get(x);
-            self.e.code.get(self.e.mark);
-            self.e.code.op(OP_I64_GE_U);
-            self.e.code.open(OP_IF);
-            self.e.code.i64_const(wrapping_i64(rsz));
-            self.e.code.global_get(self.heap);
-            self.e.code.get(x);
-            self.e.code.op(OP_I64_SUB);
-            self.e.code.i64_const(wrapping_i64(rsz));
-            self.e.code.global_get(self.heap);
-            self.e.code.get(x);
-            self.e.code.op(OP_I64_SUB);
-            self.e.code.op(OP_I64_LT_U);
-            self.e.code.op(OP_SELECT);
-            self.e.code.set(csz);
-            self.e.code.get(self.e.mark);
-            self.e.code.op(OP_I32_WRAP_I64);
-            self.e.code.get(x);
-            self.e.code.op(OP_I32_WRAP_I64);
-            self.e.code.get(csz);
-            self.e.code.op(OP_I32_WRAP_I64);
-            self.e.code.memory_copy();
-            self.e.code.get(self.e.mark);
-            self.e.code.get(csz);
-            self.e.code.op(OP_I64_ADD);
-            self.e.code.global_set(self.heap);
-            self.e.code.get(self.e.mark);
-            self.e.code.op(OP_RETURN);
-            self.e.code.op(OP_END);
-            self.e.code.get(self.e.mark);
-            self.e.code.global_set(self.heap);
+        if ret_size == 0 {
+            self.cur_fn.code.get(self.cur_fn.heap_mark);
+            self.cur_fn.code.global_set(self.heap);
+        } else if ret_size != NONE64 {
+            let copy_size = self.local();
+            self.cur_fn.code.get(ret_val);
+            self.cur_fn.code.get(self.cur_fn.heap_mark);
+            self.cur_fn.code.op(OP_I64_GE_U);
+            self.cur_fn.code.open(OP_IF);
+            self.cur_fn.code.i64_const(wrapping_i64(ret_size));
+            self.cur_fn.code.global_get(self.heap);
+            self.cur_fn.code.get(ret_val);
+            self.cur_fn.code.op(OP_I64_SUB);
+            self.cur_fn.code.i64_const(wrapping_i64(ret_size));
+            self.cur_fn.code.global_get(self.heap);
+            self.cur_fn.code.get(ret_val);
+            self.cur_fn.code.op(OP_I64_SUB);
+            self.cur_fn.code.op(OP_I64_LT_U);
+            self.cur_fn.code.op(OP_SELECT);
+            self.cur_fn.code.set(copy_size);
+            self.cur_fn.code.get(self.cur_fn.heap_mark);
+            self.cur_fn.code.op(OP_I32_WRAP_I64);
+            self.cur_fn.code.get(ret_val);
+            self.cur_fn.code.op(OP_I32_WRAP_I64);
+            self.cur_fn.code.get(copy_size);
+            self.cur_fn.code.op(OP_I32_WRAP_I64);
+            self.cur_fn.code.memory_copy();
+            self.cur_fn.code.get(self.cur_fn.heap_mark);
+            self.cur_fn.code.get(copy_size);
+            self.cur_fn.code.op(OP_I64_ADD);
+            self.cur_fn.code.global_set(self.heap);
+            self.cur_fn.code.get(self.cur_fn.heap_mark);
+            self.cur_fn.code.op(OP_RETURN);
+            self.cur_fn.code.op(OP_END);
+            self.cur_fn.code.get(self.cur_fn.heap_mark);
+            self.cur_fn.code.global_set(self.heap);
         }
     }
 }
 
 pub fn alloc_code(heap: u32) -> Code {
-    let mut c = code_new();
-    c.global_get(heap);
-    c.tee(1);
-    c.get(0);
-    c.i64_const(7);
-    c.op(OP_I64_ADD);
-    c.i64_const(-8);
-    c.op(OP_I64_AND);
-    c.op(OP_I64_ADD);
-    c.tee(2);
-    c.memory_size();
-    c.op(OP_I64_EXTEND_I32_U);
-    c.i64_const(16);
-    c.op(OP_I64_SHL);
-    c.op(OP_I64_GT_U);
-    c.open(OP_IF);
-    c.get(2);
-    c.memory_size();
-    c.op(OP_I64_EXTEND_I32_U);
-    c.i64_const(16);
-    c.op(OP_I64_SHL);
-    c.op(OP_I64_SUB);
-    c.i64_const(65535);
-    c.op(OP_I64_ADD);
-    c.i64_const(16);
-    c.op(OP_I64_SHR_U);
-    c.op(OP_I32_WRAP_I64);
-    c.memory_grow();
-    c.i32_const(-1);
-    c.op(OP_I32_EQ);
-    c.open(OP_IF);
-    c.op(OP_UNREACHABLE);
-    c.op(OP_END);
-    c.op(OP_END);
-    c.get(2);
-    c.global_set(heap);
-    c.get(1);
-    c.op(OP_END);
-    c
+    let mut code = code_new();
+    code.global_get(heap);
+    code.tee(1);
+    code.get(0);
+    code.i64_const(7);
+    code.op(OP_I64_ADD);
+    code.i64_const(-8);
+    code.op(OP_I64_AND);
+    code.op(OP_I64_ADD);
+    code.tee(2);
+    code.memory_size();
+    code.op(OP_I64_EXTEND_I32_U);
+    code.i64_const(16);
+    code.op(OP_I64_SHL);
+    code.op(OP_I64_GT_U);
+    code.open(OP_IF);
+    code.get(2);
+    code.memory_size();
+    code.op(OP_I64_EXTEND_I32_U);
+    code.i64_const(16);
+    code.op(OP_I64_SHL);
+    code.op(OP_I64_SUB);
+    code.i64_const(65535);
+    code.op(OP_I64_ADD);
+    code.i64_const(16);
+    code.op(OP_I64_SHR_U);
+    code.op(OP_I32_WRAP_I64);
+    code.memory_grow();
+    code.i32_const(-1);
+    code.op(OP_I32_EQ);
+    code.open(OP_IF);
+    code.op(OP_UNREACHABLE);
+    code.op(OP_END);
+    code.op(OP_END);
+    code.get(2);
+    code.global_set(heap);
+    code.get(1);
+    code.op(OP_END);
+    code
 }
 
 pub fn sym_contains(in names: Names, sym: u32, in sub: Slice[u8]) -> bool {
     let n = names.size(sym);
-    let m = sub.len();
-    if n < m {
+    let sub_len = sub.len();
+    if n < sub_len {
         return false;
     }
-    let lim = wrapping_add(wrapping_sub(n, m), 1);
-    for off in 0..lim {
+    let n_offsets = wrapping_add(wrapping_sub(n, sub_len), 1);
+    for off in 0..n_offsets {
         let mut ok = true;
-        for i in 0..m {
-            let sb = match sub.try_get(i) {
-                Option::Some(b) => b,
+        for i in 0..sub_len {
+            let sub_byte = match sub.try_get(i) {
+                Option::Some(byte_val) => byte_val,
                 Option::None => 0,
             };
-            if names.byte(sym, wrapping_add(off, i)) != sb {
+            if names.byte(sym, wrapping_add(off, i)) != sub_byte {
                 ok = false;
                 break;
             }
@@ -492,19 +516,19 @@ pub fn sym_contains(in names: Names, sym: u32, in sub: Slice[u8]) -> bool {
     false
 }
 
-pub fn sym_ends_with(in names: Names, sym: u32, in suf: Slice[u8]) -> bool {
+pub fn sym_ends_with(in names: Names, sym: u32, in suffix: Slice[u8]) -> bool {
     let n = names.size(sym);
-    let m = suf.len();
-    if n < m {
+    let suf_len = suffix.len();
+    if n < suf_len {
         return false;
     }
-    let off = wrapping_sub(n, m);
-    for i in 0..m {
-        let sb = match suf.try_get(i) {
-            Option::Some(b) => b,
+    let start = wrapping_sub(n, suf_len);
+    for i in 0..suf_len {
+        let suf_byte = match suffix.try_get(i) {
+            Option::Some(byte_val) => byte_val,
             Option::None => 0,
         };
-        if names.byte(sym, wrapping_add(off, i)) != sb {
+        if names.byte(sym, wrapping_add(start, i)) != suf_byte {
             return false;
         }
     }
@@ -513,13 +537,13 @@ pub fn sym_ends_with(in names: Names, sym: u32, in suf: Slice[u8]) -> bool {
 
 impl L {
     pub fn pre_reserve_define_all(inout self) -> ChunkSeq[u64] {
-        let m_types = wrapping_add(self.b.types.len(), 2048);
-        let m_vals = wrapping_add(self.b.vals.len(), 16384);
-        let m_funcs = wrapping_add(self.b.funcs.len(), 8192);
-        let m_data = wrapping_add(self.b.data.len(), 524288);
+        let m_types = wrapping_add(self.builder.types.len(), 2048);
+        let m_vals = wrapping_add(self.builder.vals.len(), 16384);
+        let m_funcs = wrapping_add(self.builder.funcs.len(), 8192);
+        let m_data = wrapping_add(self.builder.data.len(), 524288);
         let mut m_bodies = 16777216;
-        if self.b.bodies.len() >= 16000000 {
-            m_bodies = wrapping_add(self.b.bodies.len(), 8388608);
+        if self.builder.bodies.len() >= 16000000 {
+            m_bodies = wrapping_add(self.builder.bodies.len(), 8388608);
         }
         let m_eq = wrapping_add(self.eq.len(), 8192);
         let m_eqp = wrapping_add(self.eq_pending.len(), 2048);
@@ -527,63 +551,63 @@ impl L {
         let m_str = wrapping_add(self.strings.len(), 8192);
         let m_tbl = wrapping_add(self.tables.len(), 8192);
         let m_wide = wrapping_add(self.wide_fns.len(), 8192);
-        let m_copy = wrapping_add(self.copies.len(), 8192);
+        let m_copy = wrapping_add(self.copy_fns.len(), 8192);
         let m_hcap = wrapping_add(self.hcap_name.len(), 1024);
-        let m_btbl = wrapping_add(self.b.table.len(), 8192);
-        let m_bdecl = wrapping_add(self.b.declared.len(), 8192);
-        self.b.types.reserve(m_types);
-        self.b.vals.reserve(m_vals);
-        self.b.funcs.reserve(m_funcs);
-        self.b.data.reserve(m_data);
-        self.b.bodies.reserve(m_bodies);
+        let m_btbl = wrapping_add(self.builder.table.len(), 8192);
+        let m_bdecl = wrapping_add(self.builder.declared.len(), 8192);
+        self.builder.types.reserve(m_types);
+        self.builder.vals.reserve(m_vals);
+        self.builder.funcs.reserve(m_funcs);
+        self.builder.data.reserve(m_data);
+        self.builder.bodies.reserve(m_bodies);
         self.eq.reserve(m_eq);
         self.eq_pending.reserve(m_eqp);
         self.trampolines.reserve(m_tramp);
         self.strings.reserve(m_str);
         self.tables.reserve(m_tbl);
         self.wide_fns.reserve(m_wide);
-        self.copies.reserve(m_copy);
+        self.copy_fns.reserve(m_copy);
         self.hcap_name.reserve(m_hcap);
         self.hcap_off.reserve(m_hcap);
-        self.b.table.reserve(m_btbl);
-        self.b.declared.reserve(m_bdecl);
-        let max_names = wrapping_add(self.cx.names.len(), 16384);
-        let max_text = wrapping_add(self.cx.names.text_len(), 262144);
-        self.cx.names.reserve_names(max_names, max_text);
-        let max_nodes = wrapping_add(self.cx.types.nodes.len(), 16384);
-        let max_items = wrapping_add(self.cx.types.items_len(), 32768);
-        let max_rows = wrapping_add(self.cx.types.rows.len(), 8192);
-        let max_effs = wrapping_add(self.cx.types.effs_len(), 16384);
-        self.cx.types.reserve_types(max_nodes, max_items, max_rows, max_effs);
-        let mut s = ChunkSeq::new[u64]();
-        s.reserve(24);
-        s.push(max_nodes);
-        s.push(max_rows);
-        s.push(m_funcs);
-        s.push(m_data);
-        s.push(m_eq);
-        s.push(m_eqp);
-        s.push(m_tramp);
-        s.push(m_str);
-        s.push(m_tbl);
-        s.push(m_wide);
-        s.push(m_copy);
-        s.push(m_hcap);
-        s.push(max_names);
-        s.push(max_text);
-        s.push(max_items);
-        s.push(max_effs);
-        s.push(m_types);
-        s.push(m_vals);
-        s.push(m_bodies);
-        s.push(m_btbl);
-        s.push(m_bdecl);
-        s
+        self.builder.table.reserve(m_btbl);
+        self.builder.declared.reserve(m_bdecl);
+        let max_names = wrapping_add(self.ctx.names.len(), 16384);
+        let max_text = wrapping_add(self.ctx.names.text_len(), 262144);
+        self.ctx.names.reserve_names(max_names, max_text);
+        let max_nodes = wrapping_add(self.ctx.types.nodes.len(), 16384);
+        let max_items = wrapping_add(self.ctx.types.items_len(), 32768);
+        let max_rows = wrapping_add(self.ctx.types.rows.len(), 8192);
+        let max_effs = wrapping_add(self.ctx.types.effs_len(), 16384);
+        self.ctx.types.reserve_types(max_nodes, max_items, max_rows, max_effs);
+        let mut limits = ChunkSeq::new[u64]();
+        limits.reserve(24);
+        limits.push(max_nodes);
+        limits.push(max_rows);
+        limits.push(m_funcs);
+        limits.push(m_data);
+        limits.push(m_eq);
+        limits.push(m_eqp);
+        limits.push(m_tramp);
+        limits.push(m_str);
+        limits.push(m_tbl);
+        limits.push(m_wide);
+        limits.push(m_copy);
+        limits.push(m_hcap);
+        limits.push(max_names);
+        limits.push(max_text);
+        limits.push(max_items);
+        limits.push(max_effs);
+        limits.push(m_types);
+        limits.push(m_vals);
+        limits.push(m_bodies);
+        limits.push(m_btbl);
+        limits.push(m_bdecl);
+        limits
     }
 
     pub fn can_rewind_define(
         in self,
-        in lim: ChunkSeq[u64],
+        in reserve_limits: ChunkSeq[u64],
         n_mask: u64,
         n_tmask: u64,
         n_rmask: u64,
@@ -592,68 +616,73 @@ impl L {
         n_bvals: u64,
         n_bfuncs: u64
     ) -> bool {
-        self.b.types.len() == n_btypes
-            && self.b.vals.len() == n_bvals
+        self.builder.types.len() == n_btypes
+            && self.builder.vals.len() == n_bvals
             && self.eq_pending.len() == n_eqp
-            && self.b.funcs.len() == n_bfuncs
-            && self.cx.names.mask_val() == n_mask
-            && self.cx.names.len() < u64_at(in lim, 12)
-            && self.cx.names.text_len() < u64_at(in lim, 13)
-            && self.cx.types.t_mask() == n_tmask
-            && self.cx.types.r_mask() == n_rmask
-            && self.cx.types.nodes.len() < u64_at(in lim, 0)
-            && self.cx.types.items_len() < u64_at(in lim, 14)
-            && self.cx.types.rows.len() < u64_at(in lim, 1)
-            && self.cx.types.effs_len() < u64_at(in lim, 15)
-            && self.b.bodies.len() < u64_at(in lim, 18)
-            && self.b.data.len() < u64_at(in lim, 3)
-            && self.eq.len() < u64_at(in lim, 4)
-            && self.trampolines.len() < u64_at(in lim, 6)
-            && self.strings.len() < u64_at(in lim, 7)
-            && self.tables.len() < u64_at(in lim, 8)
-            && self.wide_fns.len() < u64_at(in lim, 9)
-            && self.copies.len() < u64_at(in lim, 10)
-            && self.hcap_name.len() < u64_at(in lim, 11)
-            && self.b.table.len() < u64_at(in lim, 19)
-            && self.b.declared.len() < u64_at(in lim, 20)
+            && self.builder.funcs.len() == n_bfuncs
+            && self.ctx.names.mask_val() == n_mask
+            && self.ctx.names.len() < u64_at(in reserve_limits, 12)
+            && self.ctx.names.text_len() < u64_at(in reserve_limits, 13)
+            && self.ctx.types.t_mask() == n_tmask
+            && self.ctx.types.r_mask() == n_rmask
+            && self.ctx.types.nodes.len() < u64_at(in reserve_limits, 0)
+            && self.ctx.types.items_len() < u64_at(in reserve_limits, 14)
+            && self.ctx.types.rows.len() < u64_at(in reserve_limits, 1)
+            && self.ctx.types.effs_len() < u64_at(in reserve_limits, 15)
+            && self.builder.bodies.len() < u64_at(in reserve_limits, 18)
+            && self.builder.data.len() < u64_at(in reserve_limits, 3)
+            && self.eq.len() < u64_at(in reserve_limits, 4)
+            && self.trampolines.len() < u64_at(in reserve_limits, 6)
+            && self.strings.len() < u64_at(in reserve_limits, 7)
+            && self.tables.len() < u64_at(in reserve_limits, 8)
+            && self.wide_fns.len() < u64_at(in reserve_limits, 9)
+            && self.copy_fns.len() < u64_at(in reserve_limits, 10)
+            && self.hcap_name.len() < u64_at(in reserve_limits, 11)
+            && self.builder.table.len() < u64_at(in reserve_limits, 19)
+            && self.builder.declared.len() < u64_at(in reserve_limits, 20)
     }
 
-    pub fn try_heap_intrinsic(inout self, callee: u32, dv: u64, a: u64) -> bool eff [Fail[WErr]] {
-        if sym_ends_with(in self.cx.names, callee, in "stage2_1heap_1mark".as_bytes())
-            || sym_ends_with(in self.cx.names, callee, in "stage2_heap_mark".as_bytes()) {
-            let d = self.dest(dv);
-            self.e.code.global_get(self.heap);
-            self.e.code.set(d);
+    pub fn try_heap_intrinsic(
+        inout self,
+        callee: u32,
+        dest_val: u64,
+        op_pos: u64
+    ) -> bool eff [Fail[WErr]] {
+        if sym_ends_with(in self.ctx.names, callee, in "stage2_1heap_1mark".as_bytes())
+            || sym_ends_with(in self.ctx.names, callee, in "stage2_heap_mark".as_bytes()) {
+            let dest = self.dest(dest_val);
+            self.cur_fn.code.global_get(self.heap);
+            self.cur_fn.code.set(dest);
             return true;
         }
-        if sym_ends_with(in self.cx.names, callee, in "stage2_1heap_1reset".as_bytes())
-            || sym_ends_with(in self.cx.names, callee, in "stage2_heap_reset".as_bytes()) {
-            let m = self.value(self.cx.ir.word(add(a, 3)));
-            self.e.code.get(m);
-            self.e.code.i64_const(0);
-            self.e.code.op(OP_I64_NE);
-            self.e.code.open(OP_IF);
-            self.e.code.get(m);
-            self.e.code.global_set(self.heap);
-            self.e.code.op(OP_END);
-            let d = self.dest(dv);
-            self.e.code.i64_const(0);
-            self.e.code.set(d);
+        if sym_ends_with(in self.ctx.names, callee, in "stage2_1heap_1reset".as_bytes())
+            || sym_ends_with(in self.ctx.names, callee, in "stage2_heap_reset".as_bytes()) {
+            let mark = self.value(self.ctx.ir.word(add(op_pos, 3)));
+            self.cur_fn.code.get(mark);
+            self.cur_fn.code.i64_const(0);
+            self.cur_fn.code.op(OP_I64_NE);
+            self.cur_fn.code.open(OP_IF);
+            self.cur_fn.code.get(mark);
+            self.cur_fn.code.global_set(self.heap);
+            self.cur_fn.code.op(OP_END);
+            let dest = self.dest(dest_val);
+            self.cur_fn.code.i64_const(0);
+            self.cur_fn.code.set(dest);
             return true;
         }
-        if sym_ends_with(in self.cx.names, callee, in "stage2_1heap_1swap".as_bytes())
-            || sym_ends_with(in self.cx.names, callee, in "stage2_heap_swap".as_bytes()) {
-            let m = self.value(self.cx.ir.word(add(a, 3)));
-            let d = self.dest(dv);
-            self.e.code.global_get(self.heap);
-            self.e.code.set(d);
-            self.e.code.get(m);
-            self.e.code.i64_const(0);
-            self.e.code.op(OP_I64_NE);
-            self.e.code.open(OP_IF);
-            self.e.code.get(m);
-            self.e.code.global_set(self.heap);
-            self.e.code.op(OP_END);
+        if sym_ends_with(in self.ctx.names, callee, in "stage2_1heap_1swap".as_bytes())
+            || sym_ends_with(in self.ctx.names, callee, in "stage2_heap_swap".as_bytes()) {
+            let mark = self.value(self.ctx.ir.word(add(op_pos, 3)));
+            let dest = self.dest(dest_val);
+            self.cur_fn.code.global_get(self.heap);
+            self.cur_fn.code.set(dest);
+            self.cur_fn.code.get(mark);
+            self.cur_fn.code.i64_const(0);
+            self.cur_fn.code.op(OP_I64_NE);
+            self.cur_fn.code.open(OP_IF);
+            self.cur_fn.code.get(mark);
+            self.cur_fn.code.global_set(self.heap);
+            self.cur_fn.code.op(OP_END);
             return true;
         }
         false
@@ -663,107 +692,113 @@ impl L {
         inout self,
         root: u32,
         in segs: ChunkSeq[u32],
-        opn: u32,
+        op_sym: u32,
         pair: u32
     ) eff [Fail[WErr]] {
-        let idx = self.local();
+        let index = self.local();
         self.load(pair, 0);
-        self.e.code.set(idx);
+        self.cur_fn.code.set(index);
         let rhs = self.local();
         self.load(pair, 8);
-        self.e.code.set(rhs);
+        self.cur_fn.code.set(rhs);
         let (arr, arr_ty) = self.read_place(root, in segs);
-        if self.cx.types.kind(arr_ty) != TyKind::Tuple {
-            Fail::raise(werr_syms(K_UNSUPPORTED, U_INDEX, 196, self.e.inst.base, opn));
+        if self.ctx.types.kind(arr_ty) != TyKind::Tuple {
+            Fail::raise(werr_syms(K_UNSUPPORTED, U_INDEX, 196, self.cur_fn.inst.base, op_sym));
         }
-        let n = self.cx.arity(arr_ty);
-        self.e.code.get(idx);
-        self.e.code.u64_const(n);
-        self.e.code.op(OP_I64_GE_U);
-        self.e.code.open(OP_IF);
-        let oob = self.cx.s.index_oob;
+        let n = self.ctx.arity(arr_ty);
+        self.cur_fn.code.get(index);
+        self.cur_fn.code.u64_const(n);
+        self.cur_fn.code.op(OP_I64_GE_U);
+        self.cur_fn.code.open(OP_IF);
+        let oob = self.ctx.syms.index_oob;
         self.raise_runtime_error(oob);
-        self.e.code.op(OP_END);
+        self.cur_fn.code.op(OP_END);
         let dst = self.alloc_block(wrapping_mul(8, n));
         if n > 0 {
             let off = self.local();
-            self.e.code.i64_const(0);
-            self.e.code.set(off);
-            self.e.code.open(OP_LOOP);
-            self.e.code.get(dst);
-            self.e.code.get(off);
-            self.e.code.op(OP_I64_ADD);
-            self.e.code.op(OP_I32_WRAP_I64);
-            self.e.code.get(arr);
-            self.e.code.get(off);
-            self.e.code.op(OP_I64_ADD);
-            self.e.code.op(OP_I32_WRAP_I64);
-            self.e.code.load(0);
-            self.e.code.store(0);
-            self.e.code.get(off);
-            self.e.code.i64_const(8);
-            self.e.code.op(OP_I64_ADD);
-            self.e.code.tee(off);
-            self.e.code.u64_const(wrapping_mul(8, n));
-            self.e.code.op(OP_I64_LT_U);
-            self.e.code.br_if(0);
-            self.e.code.op(OP_END);
+            self.cur_fn.code.i64_const(0);
+            self.cur_fn.code.set(off);
+            self.cur_fn.code.open(OP_LOOP);
+            self.cur_fn.code.get(dst);
+            self.cur_fn.code.get(off);
+            self.cur_fn.code.op(OP_I64_ADD);
+            self.cur_fn.code.op(OP_I32_WRAP_I64);
+            self.cur_fn.code.get(arr);
+            self.cur_fn.code.get(off);
+            self.cur_fn.code.op(OP_I64_ADD);
+            self.cur_fn.code.op(OP_I32_WRAP_I64);
+            self.cur_fn.code.load(0);
+            self.cur_fn.code.store(0);
+            self.cur_fn.code.get(off);
+            self.cur_fn.code.i64_const(8);
+            self.cur_fn.code.op(OP_I64_ADD);
+            self.cur_fn.code.tee(off);
+            self.cur_fn.code.u64_const(wrapping_mul(8, n));
+            self.cur_fn.code.op(OP_I64_LT_U);
+            self.cur_fn.code.br_if(0);
+            self.cur_fn.code.op(OP_END);
         }
-        let new_val = if self.cx.names.spells(opn, in "[]=".as_bytes()) {
+        let new_val = if self.ctx.names.spells(op_sym, in "[]=".as_bytes()) {
             rhs
         } else {
-            let base = self.strip_eq(opn, 2);
+            let base = self.strip_eq(op_sym, 2);
             if base == NONE32 {
-                Fail::raise(werr_syms(K_UNSUPPORTED, U_OPERATION, 193, self.e.inst.base, opn));
+                Fail::raise(werr_syms(
+                    K_UNSUPPORTED,
+                    U_OPERATION,
+                    193,
+                    self.cur_fn.inst.base,
+                    op_sym
+                ));
             }
             let old = self.local();
-            self.e.code.get(arr);
-            self.e.code.get(idx);
-            self.e.code.i64_const(3);
-            self.e.code.op(OP_I64_SHL);
-            self.e.code.op(OP_I64_ADD);
-            self.e.code.op(OP_I32_WRAP_I64);
-            self.e.code.load(0);
-            self.e.code.set(old);
-            let et = self.cx.types.arg(arr_ty, 0);
-            let s = self.scalar_of(et);
-            self.binary(base, old, rhs, s, s)
+            self.cur_fn.code.get(arr);
+            self.cur_fn.code.get(index);
+            self.cur_fn.code.i64_const(3);
+            self.cur_fn.code.op(OP_I64_SHL);
+            self.cur_fn.code.op(OP_I64_ADD);
+            self.cur_fn.code.op(OP_I32_WRAP_I64);
+            self.cur_fn.code.load(0);
+            self.cur_fn.code.set(old);
+            let elem_ty = self.ctx.types.arg(arr_ty, 0);
+            let scalar = self.scalar_of(elem_ty);
+            self.binary(base, old, rhs, scalar, scalar)
         };
-        self.e.code.get(dst);
-        self.e.code.get(idx);
-        self.e.code.i64_const(3);
-        self.e.code.op(OP_I64_SHL);
-        self.e.code.op(OP_I64_ADD);
-        self.e.code.op(OP_I32_WRAP_I64);
-        self.e.code.get(new_val);
-        self.e.code.store(0);
+        self.cur_fn.code.get(dst);
+        self.cur_fn.code.get(index);
+        self.cur_fn.code.i64_const(3);
+        self.cur_fn.code.op(OP_I64_SHL);
+        self.cur_fn.code.op(OP_I64_ADD);
+        self.cur_fn.code.op(OP_I32_WRAP_I64);
+        self.cur_fn.code.get(new_val);
+        self.cur_fn.code.store(0);
         self.write_place(root, in segs, dst);
     }
 }
 
-pub fn dummy_l(k: Known, s: Syms) -> L eff [Fail[WErr]] {
-    let mut dn = names_new();
-    let dt = types_new(inout dn);
-    let dw = world_new(k);
-    let df = empty_facts(0, 1, 1, 1);
-    let di = ir_new(program_new());
-    let cx = Cx {
-        names: dn,
-        types: dt,
-        world: dw,
-        k: k,
-        f: df,
-        ir: di,
-        s: s,
+pub fn dummy_l(known: Known, syms: Syms) -> L eff [Fail[WErr]] {
+    let mut names = names_new();
+    let types = types_new(inout names);
+    let world = world_new(known);
+    let facts = empty_facts(0, 1, 1, 1);
+    let ir = ir_new(program_new());
+    let ctx = Cx {
+        names: names,
+        types: types,
+        world: world,
+        known: known,
+        facts: facts,
+        ir: ir,
+        syms: syms,
     };
-    lowerer_new(cx, empty_plan(), 0)
+    lowerer_new(ctx, empty_plan(), 0)
 }
 
-pub fn rebuild_l(sink dl: L, d_mark: u64, d_perm: u64) -> (L, u64) {
+pub fn rebuild_l(sink old_lowerer: L, d_mark: u64, d_perm: u64) -> (L, u64) {
     let L {
-        cx,
+        ctx,
         plan,
-        b,
+        builder,
         funcs,
         heap,
         abort,
@@ -786,15 +821,15 @@ pub fn rebuild_l(sink dl: L, d_mark: u64, d_perm: u64) -> (L, u64) {
         strings,
         tables,
         wide_fns,
-        copies,
+        copy_fns: copies,
         hfns,
         hcap_name,
         hcap_off,
         arity,
         instructions,
         max_instructions,
-        e,
-    } = dl;
+        cur_fn,
+    } = old_lowerer;
     let Builder {
         imports,
         data,
@@ -809,28 +844,28 @@ pub fn rebuild_l(sink dl: L, d_mark: u64, d_perm: u64) -> (L, u64) {
         tags,
         exports,
         text,
-    } = b;
+    } = builder;
     let Cx {
-        names: cx_names,
-        types: cx_types,
-        world: cx_world,
-        k: cx_k,
-        f: cx_f,
-        ir: cx_ir,
-        s: cx_s,
-    } = cx;
+        names: ctx_names,
+        types: ctx_types,
+        world: ctx_world,
+        known: ctx_known,
+        facts: ctx_facts,
+        ir: ctx_ir,
+        syms: ctx_syms,
+    } = ctx;
     stage2_heap_reset(d_mark);
-    let s_rb = stage2_heap_swap(d_perm);
-    let fresh_cx = Cx {
-        names: cx_names.clone_in_heap(),
-        types: cx_types.clone_in_heap(),
-        world: cx_world,
-        k: cx_k,
-        f: cx_f,
-        ir: cx_ir,
-        s: cx_s,
+    let scratch_at_rebuild = stage2_heap_swap(d_perm);
+    let fresh_ctx = Cx {
+        names: ctx_names.clone_in_heap(),
+        types: ctx_types.clone_in_heap(),
+        world: ctx_world,
+        known: ctx_known,
+        facts: ctx_facts,
+        ir: ctx_ir,
+        syms: ctx_syms,
     };
-    let fresh_b = Builder {
+    let fresh_builder = Builder {
         imports: imports,
         data: data,
         heap_global: heap_global,
@@ -845,10 +880,10 @@ pub fn rebuild_l(sink dl: L, d_mark: u64, d_perm: u64) -> (L, u64) {
         exports: exports,
         text: text,
     };
-    let fresh_l = L {
-        cx: fresh_cx,
+    let fresh_lowerer = L {
+        ctx: fresh_ctx,
         plan: plan,
-        b: fresh_b,
+        builder: fresh_builder,
         funcs: funcs,
         heap: heap,
         abort: abort,
@@ -871,15 +906,15 @@ pub fn rebuild_l(sink dl: L, d_mark: u64, d_perm: u64) -> (L, u64) {
         strings: strings,
         tables: tables,
         wide_fns: wide_fns,
-        copies: copies,
+        copy_fns: copies,
         hfns: hfns,
         hcap_name: hcap_name,
         hcap_off: hcap_off,
         arity: arity,
         instructions: instructions,
         max_instructions: max_instructions,
-        e: e,
+        cur_fn: cur_fn,
     };
-    let next_perm = stage2_heap_swap(s_rb);
-    (fresh_l, next_perm)
+    let next_perm = stage2_heap_swap(scratch_at_rebuild);
+    (fresh_lowerer, next_perm)
 }

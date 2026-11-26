@@ -32,23 +32,23 @@ pub copy struct ParamRow {
 }
 
 // An effect instance of a row: label (NONE32 when absent), name and
-// arguments `tys[a0..a0+an]`.
+// arguments `arg_tys[arg_start..arg_start+arg_count]`.
 pub copy struct EffInst {
     label: u32,
     name: u32,
-    a0: u64,
-    an: u64,
+    arg_start: u64,
+    arg_count: u64,
 }
 
 // A function or operation signature.
 pub copy struct Sig {
-    g0: u64,
-    gn: u64,
+    gen_start: u64,
+    gen_count: u64,
     p0: u64,
     pn: u64,
     result: u32,
-    e0: u64,
-    en: u64,
+    eff_start: u64,
+    eff_count: u64,
     // the row's tail symbol, or NONE32
     tail: u32,
 }
@@ -56,12 +56,12 @@ pub copy struct Sig {
 pub copy struct EffDecl {
     name: u32,
     linear: bool,
-    // generic names: gsyms[g0..g0+gn]
-    g0: u64,
-    gn: u64,
-    // operations: ops[o0..o0+on]
-    o0: u64,
-    on: u64,
+    // generic names: gen_syms[gen_start..gen_start+gen_count]
+    gen_start: u64,
+    gen_count: u64,
+    // operations: ops[op_start..op_start+op_count]
+    op_start: u64,
+    op_count: u64,
 }
 
 pub copy struct OpDecl {
@@ -90,13 +90,13 @@ pub enum ExprFactKind: _ {
 }
 
 // A closure records its nested function and free names. A handler records
-// its free names and the handler data at `hops[h0..]` (see `read_handler`).
+// its free names and the handler data at `hops[hop_start..]` (see `read_handler`).
 pub copy struct ExprFact {
     kind: u64,
     fn_: u32,
-    f0: u64,
-    fc: u64,
-    h0: u64,
+    free_start: u64,
+    free_count: u64,
+    hop_start: u64,
 }
 
 pub struct Facts {
@@ -112,11 +112,11 @@ pub struct Facts {
     gens: ChunkSeq[GenRow],
     params: ChunkSeq[ParamRow],
     effs: ChunkSeq[EffInst],
-    tys: ChunkSeq[u32],
+    arg_tys: ChunkSeq[u32],
     // symbol -> sig index + 1
     fn_sig: ChunkSeq[u32],
     decls: ChunkSeq[EffDecl],
-    gsyms: ChunkSeq[u32],
+    gen_syms: ChunkSeq[u32],
     ops: ChunkSeq[OpDecl],
     // symbol -> decl index + 1
     eff_by_sym: ChunkSeq[u32],
@@ -129,112 +129,127 @@ pub struct Facts {
     hops: ChunkSeq[u64],
 }
 
-fn sym(in c: Ctx, x: u64) -> u32 {
-    u32_at(in c.nmap, x)
+fn sym(in ctx: Ctx, name_index: u64) -> u32 {
+    u32_at(in ctx.nmap, name_index)
 }
 
-fn opt_sym(in c: Ctx, x: u64) -> u32 {
-    if x == 0 {
+fn opt_sym(in ctx: Ctx, encoded: u64) -> u32 {
+    if encoded == 0 {
         NONE32
     } else {
-        u32_at(in c.nmap, wrapping_sub(x, 1))
+        u32_at(in ctx.nmap, wrapping_sub(encoded, 1))
     }
 }
 
-fn tid(in c: Ctx, x: u64) -> u32 {
-    u32_at(in c.tmap, x)
+fn tid(in ctx: Ctx, type_index: u64) -> u32 {
+    u32_at(in ctx.tmap, type_index)
 }
 
-fn read_eff(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts) -> EffInst {
-    let label = opt_sym(in c, r.word(in b));
-    let name = sym(in c, r.word(in b));
-    let an = r.word(in b);
-    let a0 = f.tys.len();
-    for i in 0..an {
-        f.tys.push(tid(in c, r.word(in b)));
+fn read_eff(inout reader: Reader, in input: Slice[u8], in ctx: Ctx, inout facts: Facts) -> EffInst {
+    let label = opt_sym(in ctx, reader.word(in input));
+    let name = sym(in ctx, reader.word(in input));
+    let arg_count = reader.word(in input);
+    let arg_start = facts.arg_tys.len();
+    for i in 0..arg_count {
+        facts.arg_tys.push(tid(in ctx, reader.word(in input)));
     }
-    EffInst { label: label, name: name, a0: a0, an: an }
+    EffInst { label: label, name: name, arg_start: arg_start, arg_count: arg_count }
 }
 
-fn read_sig(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts) -> u64 {
-    let gn = r.word(in b);
-    let g0 = f.gens.len();
-    for i in 0..gn {
-        let name = sym(in c, r.word(in b));
-        let row = r.word(in b) != 0;
-        f.gens.push(GenRow { name: name, row: row });
+fn read_sig(inout reader: Reader, in input: Slice[u8], in ctx: Ctx, inout facts: Facts) -> u64 {
+    let gen_count = reader.word(in input);
+    let gen_start = facts.gens.len();
+    for i in 0..gen_count {
+        let name = sym(in ctx, reader.word(in input));
+        let row = reader.word(in input) != 0;
+        facts.gens.push(GenRow { name: name, row: row });
     }
-    let pn = r.word(in b);
-    let p0 = f.params.len();
-    for i in 0..pn {
-        let name = sym(in c, r.word(in b));
-        let pass = wrapping_u8(r.word(in b));
-        let ty = tid(in c, r.word(in b));
-        f.params.push(ParamRow { name: name, pass: pass, ty: ty });
+    let param_count = reader.word(in input);
+    let param_start = facts.params.len();
+    for i in 0..param_count {
+        let name = sym(in ctx, reader.word(in input));
+        let pass = wrapping_u8(reader.word(in input));
+        let ty = tid(in ctx, reader.word(in input));
+        facts.params.push(ParamRow { name: name, pass: pass, ty: ty });
     }
-    let result = tid(in c, r.word(in b));
-    let en = r.word(in b);
-    // instances first, into a scratch list: their arguments go to `tys`
-    let mut row = ChunkSeq::new[EffInst]();
-    for i in 0..en {
-        row.push(read_eff(inout r, in b, in c, inout f));
+    let result = tid(in ctx, reader.word(in input));
+    let eff_count = reader.word(in input);
+    // instances first, into a scratch list: their arguments go to `arg_tys`
+    let mut insts = ChunkSeq::new[EffInst]();
+    for i in 0..eff_count {
+        insts.push(read_eff(inout reader, in input, in ctx, inout facts));
     }
-    let e0 = f.effs.len();
-    for i in 0..en {
-        match row.try_get(i) {
-            Option::Some(e) => f.effs.push(e),
+    let eff_start = facts.effs.len();
+    for i in 0..eff_count {
+        match insts.try_get(i) {
+            Option::Some(inst) => facts.effs.push(inst),
             Option::None => {},
         }
     }
-    let tail = opt_sym(in c, r.word(in b));
-    let i = f.sigs.len();
-    f.sigs.push(Sig { g0: g0, gn: gn, p0: p0, pn: pn, result: result, e0: e0, en: en, tail: tail });
-    i
+    let tail = opt_sym(in ctx, reader.word(in input));
+    let sig_index = facts.sigs.len();
+    facts.sigs.push(Sig {
+        gen_start: gen_start,
+        gen_count: gen_count,
+        p0: param_start,
+        pn: param_count,
+        result: result,
+        eff_start: eff_start,
+        eff_count: eff_count,
+        tail: tail
+    });
+    sig_index
 }
 
 // A pattern copied into `hops` with its names as symbols.
-fn copy_pattern(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts, depth: u64) {
-    let kind = r.word(in b);
-    f.hops.push(kind);
-    f.hops.push(r.word(in b));
-    f.hops.push(r.word(in b));
+fn copy_pattern(
+    inout reader: Reader,
+    in input: Slice[u8],
+    in ctx: Ctx,
+    inout facts: Facts,
+    depth: u64
+) {
+    let kind = reader.word(in input);
+    facts.hops.push(kind);
+    facts.hops.push(reader.word(in input));
+    facts.hops.push(reader.word(in input));
     if depth > 512 {
         return;
     }
     if kind == Pat::Bind {
-        f.hops.push(w(sym(in c, r.word(in b))));
+        facts.hops.push(w(sym(in ctx, reader.word(in input))));
     } else if kind == Pat::Literal {
-        let lk = r.word(in b);
-        f.hops.push(lk);
-        if lk == Lit::String {
-            f.hops.push(w(sym(in c, r.word(in b))));
+        let lit_kind = reader.word(in input);
+        facts.hops.push(lit_kind);
+        if lit_kind == Lit::String {
+            facts.hops.push(w(sym(in ctx, reader.word(in input))));
         } else {
-            f.hops.push(r.word(in b));
+            facts.hops.push(reader.word(in input));
         }
-        f.hops.push(r.word(in b));
+        facts.hops.push(reader.word(in input));
     } else if kind == Pat::Tuple {
-        let n = r.word(in b);
-        f.hops.push(n);
+        let n = reader.word(in input);
+        facts.hops.push(n);
         for i in 0..n {
-            copy_pattern(inout r, in b, in c, inout f, inc(depth));
+            copy_pattern(inout reader, in input, in ctx, inout facts, inc(depth));
         }
     } else if kind == Pat::Constructor {
-        f.hops.push(w(sym(in c, r.word(in b))));
-        f.hops.push(r.word(in b));
-        let n = r.word(in b);
-        f.hops.push(n);
+        facts.hops.push(w(sym(in ctx, reader.word(in input))));
+        facts.hops.push(reader.word(in input));
+        let n = reader.word(in input);
+        facts.hops.push(n);
         for i in 0..n {
-            f.hops.push(w(sym(in c, r.word(in b))));
-            copy_pattern(inout r, in b, in c, inout f, inc(depth));
+            facts.hops.push(w(sym(in ctx, reader.word(in input))));
+            copy_pattern(inout reader, in input, in ctx, inout facts, inc(depth));
         }
     }
 }
 
-fn copy_names(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts) {
-    let n = r.word(in b);
-    f.hops.push(n);
+fn copy_names(inout reader: Reader, in input: Slice[u8], in ctx: Ctx, inout facts: Facts) {
+    let n = reader.word(in input);
+    facts.hops.push(n);
     for i in 0..n {
-        f.hops.push(w(sym(in c, r.word(in b))));
+        facts.hops.push(w(sym(in ctx, reader.word(in input))));
     }
 }
 
@@ -242,48 +257,48 @@ fn copy_names(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts) {
 // argument types), has state, body function, return function, the
 // return clause's patterns (n, patterns) and free names (n, names), then
 // n clauses of (name, function, patterns, free names).
-fn read_handler(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts) {
-    let label = r.word(in b);
-    f.hops.push(
+fn read_handler(inout reader: Reader, in input: Slice[u8], in ctx: Ctx, inout facts: Facts) {
+    let label = reader.word(in input);
+    facts.hops.push(
         if label == 0 {
             0
         } else {
-            inc(w(sym(in c, wrapping_sub(label, 1))))
+            inc(w(sym(in ctx, wrapping_sub(label, 1))))
         }
     );
-    f.hops.push(w(sym(in c, r.word(in b))));
-    let na = r.word(in b);
-    f.hops.push(na);
-    for i in 0..na {
-        f.hops.push(w(tid(in c, r.word(in b))));
+    facts.hops.push(w(sym(in ctx, reader.word(in input))));
+    let n_args = reader.word(in input);
+    facts.hops.push(n_args);
+    for i in 0..n_args {
+        facts.hops.push(w(tid(in ctx, reader.word(in input))));
     }
-    f.hops.push(r.word(in b));
-    f.hops.push(w(sym(in c, r.word(in b))));
-    f.hops.push(w(sym(in c, r.word(in b))));
-    let np = r.word(in b);
-    f.hops.push(np);
-    for i in 0..np {
-        copy_pattern(inout r, in b, in c, inout f, 0);
+    facts.hops.push(reader.word(in input));
+    facts.hops.push(w(sym(in ctx, reader.word(in input))));
+    facts.hops.push(w(sym(in ctx, reader.word(in input))));
+    let n_patterns = reader.word(in input);
+    facts.hops.push(n_patterns);
+    for i in 0..n_patterns {
+        copy_pattern(inout reader, in input, in ctx, inout facts, 0);
     }
-    copy_names(inout r, in b, in c, inout f);
-    let nc = r.word(in b);
-    f.hops.push(nc);
-    for k in 0..nc {
-        f.hops.push(w(sym(in c, r.word(in b))));
-        f.hops.push(w(sym(in c, r.word(in b))));
-        let n = r.word(in b);
-        f.hops.push(n);
+    copy_names(inout reader, in input, in ctx, inout facts);
+    let n_clauses = reader.word(in input);
+    facts.hops.push(n_clauses);
+    for clause in 0..n_clauses {
+        facts.hops.push(w(sym(in ctx, reader.word(in input))));
+        facts.hops.push(w(sym(in ctx, reader.word(in input))));
+        let n = reader.word(in input);
+        facts.hops.push(n);
         for i in 0..n {
-            copy_pattern(inout r, in b, in c, inout f, 0);
+            copy_pattern(inout reader, in input, in ctx, inout facts, 0);
         }
-        copy_names(inout r, in b, in c, inout f);
+        copy_names(inout reader, in input, in ctx, inout facts);
     }
 }
 
-fn read_free(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts) -> u64 {
-    let n = r.word(in b);
+fn read_free(inout reader: Reader, in input: Slice[u8], in ctx: Ctx, inout facts: Facts) -> u64 {
+    let n = reader.word(in input);
     for i in 0..n {
-        f.free.push(sym(in c, r.word(in b)));
+        facts.free.push(sym(in ctx, reader.word(in input)));
     }
     n
 }
@@ -304,10 +319,10 @@ pub fn empty_facts(entry: u32, max_pages: u64, max_functions: u64, max_instructi
         gens: ChunkSeq::new[GenRow](),
         params: ChunkSeq::new[ParamRow](),
         effs: ChunkSeq::new[EffInst](),
-        tys: ChunkSeq::new[u32](),
+        arg_tys: ChunkSeq::new[u32](),
         fn_sig: ChunkSeq::new[u32](),
         decls: ChunkSeq::new[EffDecl](),
-        gsyms: ChunkSeq::new[u32](),
+        gen_syms: ChunkSeq::new[u32](),
         ops: ChunkSeq::new[OpDecl](),
         eff_by_sym: ChunkSeq::new[u32](),
         calls: ChunkSeq::new[CallRow](),
@@ -319,8 +334,8 @@ pub fn empty_facts(entry: u32, max_pages: u64, max_functions: u64, max_instructi
 }
 
 pub fn add_fn_sig(
-    inout f: Facts,
-    in c: Ctx,
+    inout facts: Facts,
+    in ctx: Ctx,
     name: u32,
     in gnames: ChunkSeq[u32],
     in grows: ChunkSeq[bool],
@@ -330,55 +345,69 @@ pub fn add_fn_sig(
     result: u32,
     effects: u32
 ) {
-    let g0 = f.gens.len();
-    let gn = gnames.len();
-    for i in 0..gn {
-        let nm = u32_at(in gnames, i);
-        let rw = match grows.try_get(i) {
-            Option::Some(b) => b,
+    let gen_start = facts.gens.len();
+    let gen_count = gnames.len();
+    for i in 0..gen_count {
+        let gen_name = u32_at(in gnames, i);
+        let is_row = match grows.try_get(i) {
+            Option::Some(flag) => flag,
             Option::None => false,
         };
-        f.gens.push(GenRow { name: nm, row: rw });
+        facts.gens.push(GenRow { name: gen_name, row: is_row });
     }
-    let p0 = f.params.len();
-    let pn = pnames.len();
-    for i in 0..pn {
-        let nm = u32_at(in pnames, i);
-        let ps = match ppasses.try_get(i) {
-            Option::Some(p) => p,
+    let param_start = facts.params.len();
+    let param_count = pnames.len();
+    for i in 0..param_count {
+        let param_name = u32_at(in pnames, i);
+        let pass = match ppasses.try_get(i) {
+            Option::Some(mode) => mode,
             Option::None => 0,
         };
         let ty = u32_at(in ptys, i);
-        f.params.push(ParamRow { name: nm, pass: ps, ty: ty });
+        facts.params.push(ParamRow { name: param_name, pass: pass, ty: ty });
     }
-    let e0 = f.effs.len();
-    let row = c.types.row(effects);
-    let en = w(row.n);
-    for i in 0..en {
-        let ef = c.types.effect_at(wrapping_add(w(row.a), i));
-        let lbl = if ef.label == 0 {
+    let eff_start = facts.effs.len();
+    let row = ctx.types.row(effects);
+    let eff_count = w(row.n);
+    for i in 0..eff_count {
+        let effect = ctx.types.effect_at(wrapping_add(w(row.a), i));
+        let label = if effect.label == 0 {
             NONE32
         } else {
-            wrapping_sub(ef.label, 1)
+            wrapping_sub(effect.label, 1)
         };
-        let a0 = f.tys.len();
-        for j in 0..w(ef.n) {
-            f.tys.push(u32_at(in c.types.items, wrapping_add(w(ef.a), j)));
+        let arg_start = facts.arg_tys.len();
+        for j in 0..w(effect.n) {
+            facts.arg_tys.push(u32_at(in ctx.types.items, wrapping_add(w(effect.a), j)));
         }
-        f.effs.push(EffInst { label: lbl, name: ef.name, a0: a0, an: w(ef.n) });
+        facts.effs.push(EffInst {
+            label: label,
+            name: effect.name,
+            arg_start: arg_start,
+            arg_count: w(effect.n)
+        });
     }
     let tail = if row.tail == 0 {
         NONE32
     } else {
         wrapping_sub(row.tail, 1)
     };
-    let sidx = f.sigs.len();
-    f.sigs.push(Sig { g0: g0, gn: gn, p0: p0, pn: pn, result: result, e0: e0, en: en, tail: tail });
-    set_by_symbol(inout f.fn_sig, name, n32(inc(sidx)));
+    let sig_index = facts.sigs.len();
+    facts.sigs.push(Sig {
+        gen_start: gen_start,
+        gen_count: gen_count,
+        p0: param_start,
+        pn: param_count,
+        result: result,
+        eff_start: eff_start,
+        eff_count: eff_count,
+        tail: tail
+    });
+    set_by_symbol(inout facts.fn_sig, name, n32(inc(sig_index)));
 }
 
 pub fn add_eff_decl(
-    inout f: Facts,
+    inout facts: Facts,
     name: u32,
     linear: bool,
     in gnames: ChunkSeq[u32],
@@ -390,73 +419,94 @@ pub fn add_eff_decl(
     in ptys: ChunkSeq[u32],
     in op_results: ChunkSeq[u32]
 ) {
-    let g0 = f.gsyms.len();
-    let gn = gnames.len();
-    for i in 0..gn {
-        f.gsyms.push(u32_at(in gnames, i));
+    let gen_start = facts.gen_syms.len();
+    let gen_count = gnames.len();
+    for i in 0..gen_count {
+        facts.gen_syms.push(u32_at(in gnames, i));
     }
-    let o0 = f.ops.len();
-    let on = op_names.len();
-    for oi in 0..on {
-        let opa = match op_pa.try_get(oi) {
-            Option::Some(v) => v,
+    let op_start = facts.ops.len();
+    let op_count = op_names.len();
+    for op_idx in 0..op_count {
+        let param_start = match op_pa.try_get(op_idx) {
+            Option::Some(value) => value,
             Option::None => 0,
         };
-        let opn = match op_pn.try_get(oi) {
-            Option::Some(v) => v,
+        let param_count = match op_pn.try_get(op_idx) {
+            Option::Some(value) => value,
             Option::None => 0,
         };
-        let p0 = f.params.len();
-        for pi in 0..opn {
-            let idx = wrapping_add(opa, pi);
-            let ps = match ppasses.try_get(idx) {
-                Option::Some(p) => p,
+        let first_param = facts.params.len();
+        for param_offset in 0..param_count {
+            let param_index = wrapping_add(param_start, param_offset);
+            let pass = match ppasses.try_get(param_index) {
+                Option::Some(mode) => mode,
                 Option::None => 0,
             };
-            f.params.push(ParamRow {
-                name: u32_at(in pnames, idx),
-                pass: ps,
-                ty: u32_at(in ptys, idx)
+            facts.params.push(ParamRow {
+                name: u32_at(in pnames, param_index),
+                pass: pass,
+                ty: u32_at(in ptys, param_index)
             });
         }
-        let sidx = f.sigs.len();
-        f.sigs.push(Sig {
-            g0: 0,
-            gn: 0,
-            p0: p0,
-            pn: opn,
-            result: u32_at(in op_results, oi),
-            e0: 0,
-            en: 0,
+        let sig_index = facts.sigs.len();
+        facts.sigs.push(Sig {
+            gen_start: 0,
+            gen_count: 0,
+            p0: first_param,
+            pn: param_count,
+            result: u32_at(in op_results, op_idx),
+            eff_start: 0,
+            eff_count: 0,
             tail: NONE32
         });
-        f.ops.push(OpDecl { name: u32_at(in op_names, oi), sig: sidx });
+        facts.ops.push(OpDecl { name: u32_at(in op_names, op_idx), sig: sig_index });
     }
-    let d = f.decls.len();
-    f.decls.push(EffDecl { name: name, linear: linear, g0: g0, gn: gn, o0: o0, on: on });
-    set_by_symbol(inout f.eff_by_sym, name, n32(inc(d)));
+    let decl_index = facts.decls.len();
+    facts.decls.push(EffDecl {
+        name: name,
+        linear: linear,
+        gen_start: gen_start,
+        gen_count: gen_count,
+        op_start: op_start,
+        op_count: op_count
+    });
+    set_by_symbol(inout facts.eff_by_sym, name, n32(inc(decl_index)));
 }
 
-pub fn push_hop(inout f: Facts, w: u64) {
-    f.hops.push(w);
+pub fn push_hop(inout facts: Facts, word_val: u64) {
+    facts.hops.push(word_val);
 }
 
-pub fn set_expr_handler(inout f: Facts, pool: u64, h0: u64, in free_names: ChunkSeq[u32]) {
-    let f0 = f.free.len();
-    let fc = free_names.len();
-    for i in 0..fc {
-        f.free.push(u32_at(in free_names, i));
+pub fn set_expr_handler(
+    inout facts: Facts,
+    pool: u64,
+    hop_start: u64,
+    in free_names: ChunkSeq[u32]
+) {
+    let free_start = facts.free.len();
+    let free_count = free_names.len();
+    for i in 0..free_count {
+        facts.free.push(u32_at(in free_names, i));
     }
     loop {
-        if f.exprs.len() > pool {
+        if facts.exprs.len() > pool {
             break;
         }
-        f.exprs.push(ExprFact { kind: 0, fn_: 0, f0: 0, fc: 0, h0: 0 });
+        facts.exprs.push(ExprFact { kind: 0, fn_: 0, free_start: 0, free_count: 0, hop_start: 0 });
     }
-    f.exprs.try_set(pool, ExprFact { kind: 2, fn_: 0, f0: f0, fc: fc, h0: h0 });
+    facts.exprs.try_set(
+        pool,
+        ExprFact {
+            kind: 2,
+            fn_: 0,
+            free_start: free_start,
+            free_count: free_count,
+            hop_start: hop_start
+        }
+    );
 }
 
-pub fn read_facts(inout r: Reader, in b: Slice[u8], in c: Ctx, pool: u64) -> Facts {
+pub fn read_facts(inout reader: Reader, in input: Slice[u8], in ctx: Ctx, pool: u64) -> Facts {
     let mut f = Facts {
         plugin: false,
         stack_switching: false,
@@ -470,10 +520,10 @@ pub fn read_facts(inout r: Reader, in b: Slice[u8], in c: Ctx, pool: u64) -> Fac
         gens: ChunkSeq::new[GenRow](),
         params: ChunkSeq::new[ParamRow](),
         effs: ChunkSeq::new[EffInst](),
-        tys: ChunkSeq::new[u32](),
+        arg_tys: ChunkSeq::new[u32](),
         fn_sig: ChunkSeq::new[u32](),
         decls: ChunkSeq::new[EffDecl](),
-        gsyms: ChunkSeq::new[u32](),
+        gen_syms: ChunkSeq::new[u32](),
         ops: ChunkSeq::new[OpDecl](),
         eff_by_sym: ChunkSeq::new[u32](),
         calls: ChunkSeq::new[CallRow](),
@@ -482,73 +532,86 @@ pub fn read_facts(inout r: Reader, in b: Slice[u8], in c: Ctx, pool: u64) -> Fac
         free: ChunkSeq::new[u32](),
         hops: ChunkSeq::new[u64](),
     };
-    f.plugin = r.word(in b) == 1;
-    f.stack_switching = r.word(in b) != 0;
-    f.max_pages = r.word(in b);
-    f.max_functions = r.word(in b);
-    f.max_instructions = r.word(in b);
-    f.entry = sym(in c, r.word(in b));
-    f.trace_active = r.word(in b) != 0;
-    let ncaps = r.word(in b);
+    f.plugin = reader.word(in input) == 1;
+    f.stack_switching = reader.word(in input) != 0;
+    f.max_pages = reader.word(in input);
+    f.max_functions = reader.word(in input);
+    f.max_instructions = reader.word(in input);
+    f.entry = sym(in ctx, reader.word(in input));
+    f.trace_active = reader.word(in input) != 0;
+    let ncaps = reader.word(in input);
     for i in 0..ncaps {
-        f.caps.push(sym(in c, r.word(in b)));
+        f.caps.push(sym(in ctx, reader.word(in input)));
     }
-    let nf = r.word(in b);
-    for i in 0..nf {
-        let name = sym(in c, r.word(in b));
-        let s = read_sig(inout r, in b, in c, inout f);
-        set_by_symbol(inout f.fn_sig, name, n32(inc(s)));
+    let n_fns = reader.word(in input);
+    for i in 0..n_fns {
+        let name = sym(in ctx, reader.word(in input));
+        let sig_index = read_sig(inout reader, in input, in ctx, inout f);
+        set_by_symbol(inout f.fn_sig, name, n32(inc(sig_index)));
     }
-    let ne = r.word(in b);
-    for i in 0..ne {
-        let name = sym(in c, r.word(in b));
-        let linear = r.word(in b) != 0;
-        let gn = r.word(in b);
-        let g0 = f.gsyms.len();
-        for k in 0..gn {
-            f.gsyms.push(sym(in c, r.word(in b)));
+    let n_effects = reader.word(in input);
+    for i in 0..n_effects {
+        let name = sym(in ctx, reader.word(in input));
+        let linear = reader.word(in input) != 0;
+        let gen_count = reader.word(in input);
+        let gen_start = f.gen_syms.len();
+        for k in 0..gen_count {
+            f.gen_syms.push(sym(in ctx, reader.word(in input)));
         }
-        let on = r.word(in b);
+        let op_count = reader.word(in input);
         // signatures first (they append to the shared tables)
         let mut names = ChunkSeq::new[u32]();
         let mut sigs = ChunkSeq::new[u64]();
-        for k in 0..on {
-            names.push(sym(in c, r.word(in b)));
-            sigs.push(read_sig(inout r, in b, in c, inout f));
+        for k in 0..op_count {
+            names.push(sym(in ctx, reader.word(in input)));
+            sigs.push(read_sig(inout reader, in input, in ctx, inout f));
         }
-        let o0 = f.ops.len();
-        for k in 0..on {
+        let op_start = f.ops.len();
+        for k in 0..op_count {
             f.ops.push(OpDecl { name: u32_at(in names, k), sig: u64_at(in sigs, k) });
         }
-        let d = f.decls.len();
-        f.decls.push(EffDecl { name: name, linear: linear, g0: g0, gn: gn, o0: o0, on: on });
-        set_by_symbol(inout f.eff_by_sym, name, n32(inc(d)));
+        let decl_index = f.decls.len();
+        f.decls.push(EffDecl {
+            name: name,
+            linear: linear,
+            gen_start: gen_start,
+            gen_count: gen_count,
+            op_start: op_start,
+            op_count: op_count
+        });
+        set_by_symbol(inout f.eff_by_sym, name, n32(inc(decl_index)));
     }
-    let ncalls = r.word(in b);
+    let ncalls = reader.word(in input);
     for i in 0..ncalls {
-        let s0 = r.word(in b);
-        let s1 = r.word(in b);
-        let k = r.word(in b);
-        let v0 = f.pairs.len();
-        for j in 0..k {
-            let name = sym(in c, r.word(in b));
-            let ty = tid(in c, r.word(in b));
+        let s0 = reader.word(in input);
+        let s1 = reader.word(in input);
+        let n_pairs = reader.word(in input);
+        let pair_start = f.pairs.len();
+        for j in 0..n_pairs {
+            let name = sym(in ctx, reader.word(in input));
+            let ty = tid(in ctx, reader.word(in input));
             f.pairs.push(Pair { name: name, ty: ty });
         }
-        f.calls.push(CallRow { s0: s0, s1: s1, v0: v0, vn: k });
+        f.calls.push(CallRow { s0: s0, s1: s1, v0: pair_start, vn: n_pairs });
     }
     for i in 0..pool {
-        let kind = r.word(in b);
-        let mut fact = ExprFact { kind: kind, fn_: 0, f0: f.free.len(), fc: 0, h0: f.hops.len() };
+        let kind = reader.word(in input);
+        let mut fact = ExprFact {
+            kind: kind,
+            fn_: 0,
+            free_start: f.free.len(),
+            free_count: 0,
+            hop_start: f.hops.len()
+        };
         if kind == ExprFactKind::Closure {
-            fact.fn_ = sym(in c, r.word(in b));
-            fact.f0 = f.free.len();
-            fact.fc = read_free(inout r, in b, in c, inout f);
+            fact.fn_ = sym(in ctx, reader.word(in input));
+            fact.free_start = f.free.len();
+            fact.free_count = read_free(inout reader, in input, in ctx, inout f);
         } else if kind == ExprFactKind::Handler {
-            fact.f0 = f.free.len();
-            fact.fc = read_free(inout r, in b, in c, inout f);
-            fact.h0 = f.hops.len();
-            read_handler(inout r, in b, in c, inout f);
+            fact.free_start = f.free.len();
+            fact.free_count = read_free(inout reader, in input, in ctx, inout f);
+            fact.hop_start = f.hops.len();
+            read_handler(inout reader, in input, in ctx, inout f);
         }
         f.exprs.push(fact);
     }
@@ -560,13 +623,13 @@ impl Facts {
         match self.sigs.try_get(i) {
             Option::Some(s) => s,
             Option::None => Sig {
-                g0: 0,
-                gn: 0,
+                gen_start: 0,
+                gen_count: 0,
                 p0: 0,
                 pn: 0,
                 result: 0,
-                e0: 0,
-                en: 0,
+                eff_start: 0,
+                eff_count: 0,
                 tail: NONE32
             },
         }
@@ -594,12 +657,12 @@ impl Facts {
     pub fn eff(in self, i: u64) -> EffInst {
         match self.effs.try_get(i) {
             Option::Some(e) => e,
-            Option::None => EffInst { label: NONE32, name: 0, a0: 0, an: 0 },
+            Option::None => EffInst { label: NONE32, name: 0, arg_start: 0, arg_count: 0 },
         }
     }
 
     pub fn ty_at(in self, i: u64) -> u32 {
-        u32_at(in self.tys, i)
+        u32_at(in self.arg_tys, i)
     }
 
     // `world.effects.get(name)`: a decl index + 1, or 0.
@@ -610,7 +673,14 @@ impl Facts {
     pub fn decl(in self, i: u64) -> EffDecl {
         match self.decls.try_get(i) {
             Option::Some(d) => d,
-            Option::None => EffDecl { name: 0, linear: false, g0: 0, gn: 0, o0: 0, on: 0 },
+            Option::None => EffDecl {
+                name: 0,
+                linear: false,
+                gen_start: 0,
+                gen_count: 0,
+                op_start: 0,
+                op_count: 0
+            },
         }
     }
 
@@ -639,15 +709,15 @@ impl Facts {
                 break;
             }
             let mid = wrapping_add(lo, wrapping_sub(hi, lo) / 2);
-            let c = self.call(mid);
-            if c.s0 < s0 || (c.s0 == s0 && c.s1 < s1) {
+            let row = self.call(mid);
+            if row.s0 < s0 || (row.s0 == s0 && row.s1 < s1) {
                 lo = inc(mid);
             } else {
                 hi = mid;
             }
         }
-        let c = self.call(lo);
-        if lo < self.calls.len() && c.s0 == s0 && c.s1 == s1 {
+        let row = self.call(lo);
+        if lo < self.calls.len() && row.s0 == s0 && row.s1 == s1 {
             lo
         } else {
             self.calls.len()
@@ -671,7 +741,13 @@ impl Facts {
     pub fn expr(in self, i: u64) -> ExprFact {
         match self.exprs.try_get(i) {
             Option::Some(e) => e,
-            Option::None => ExprFact { kind: ExprFactKind::None, fn_: 0, f0: 0, fc: 0, h0: 0 },
+            Option::None => ExprFact {
+                kind: ExprFactKind::None,
+                fn_: 0,
+                free_start: 0,
+                free_count: 0,
+                hop_start: 0
+            },
         }
     }
 
@@ -683,19 +759,19 @@ impl Facts {
 // ----- function headers ---------------------------------------------------------
 
 // A function's decoded header (ops of place-ir `FnRow.ha..`): params
-// `fparams[p0..]`, result, effects, locals `flocals[l0..]` (in name order,
-// as the Rust `BTreeMap` iterates), and the value types: `vtys[v0 + id]`
-// for value ids below `vn` (NONE32 where a value has no type).
+// `fn_params[p0..]`, result, effects, locals `fn_locals[local_start..]` (in name order,
+// as the Rust `BTreeMap` iterates), and the value types: `value_tys[value_start + id]`
+// for value ids below `value_count` (NONE32 where a value has no type).
 pub copy struct FnInfo {
     name: u32,
     p0: u64,
     pn: u64,
     result: u32,
     effects: u32,
-    l0: u64,
-    ln: u64,
-    v0: u64,
-    vn: u64,
+    local_start: u64,
+    local_count: u64,
+    value_start: u64,
+    value_count: u64,
 }
 
 pub copy struct IrParam {
@@ -710,91 +786,91 @@ pub copy struct IrLocal {
 }
 
 pub struct Ir {
-    p: Program,
+    program: Program,
     fns: ChunkSeq[FnInfo],
-    fparams: ChunkSeq[IrParam],
-    flocals: ChunkSeq[IrLocal],
-    vtys: ChunkSeq[u32],
+    fn_params: ChunkSeq[IrParam],
+    fn_locals: ChunkSeq[IrLocal],
+    value_tys: ChunkSeq[u32],
     // symbol -> function index + 1
     by_name: ChunkSeq[u32],
 }
 
-fn op_at(in p: Program, i: u64) -> u64 {
-    u64_at(in p.ops, i)
+fn op_at(in program: Program, i: u64) -> u64 {
+    u64_at(in program.ops, i)
 }
 
-pub fn ir_new(sink p: Program) -> Ir {
+pub fn ir_new(sink program: Program) -> Ir {
     let mut ir = Ir {
-        p: p,
+        program: program,
         fns: ChunkSeq::new[FnInfo](),
-        fparams: ChunkSeq::new[IrParam](),
-        flocals: ChunkSeq::new[IrLocal](),
-        vtys: ChunkSeq::new[u32](),
+        fn_params: ChunkSeq::new[IrParam](),
+        fn_locals: ChunkSeq::new[IrLocal](),
+        value_tys: ChunkSeq::new[u32](),
         by_name: ChunkSeq::new[u32](),
     };
-    for fi in 0..ir.p.fns.len() {
-        let row = ir.p.function(fi);
-        let mut at = row.ha;
-        let np = op_at(in ir.p, at);
-        at = inc(at);
-        let p0 = ir.fparams.len();
-        for i in 0..np {
-            let name = n32(op_at(in ir.p, at));
-            let pass = wrapping_u8(op_at(in ir.p, inc(at)));
-            let k = op_at(in ir.p, add(at, 2));
-            at = add(at, add(3, k));
-            let ty = n32(op_at(in ir.p, at));
-            at = add(at, 3);
-            ir.fparams.push(IrParam { name: name, pass: pass, ty: ty });
+    for fn_index in 0..ir.program.fns.len() {
+        let row = ir.program.function(fn_index);
+        let mut pos = row.ha;
+        let n_params = op_at(in ir.program, pos);
+        pos = inc(pos);
+        let param_start = ir.fn_params.len();
+        for i in 0..n_params {
+            let name = n32(op_at(in ir.program, pos));
+            let pass = wrapping_u8(op_at(in ir.program, inc(pos)));
+            let n_paths = op_at(in ir.program, add(pos, 2));
+            pos = add(pos, add(3, n_paths));
+            let ty = n32(op_at(in ir.program, pos));
+            pos = add(pos, 3);
+            ir.fn_params.push(IrParam { name: name, pass: pass, ty: ty });
         }
-        let result = n32(op_at(in ir.p, at));
-        let effects = n32(op_at(in ir.p, inc(at)));
-        at = add(at, 2);
-        let nb = op_at(in ir.p, at);
-        at = add(at, add(1, wrapping_mul(nb, 2)));
-        let nc = op_at(in ir.p, at);
-        at = add(at, add(1, nc));
-        let nv = op_at(in ir.p, at);
-        at = inc(at);
+        let result = n32(op_at(in ir.program, pos));
+        let effects = n32(op_at(in ir.program, inc(pos)));
+        pos = add(pos, 2);
+        let n_bounds = op_at(in ir.program, pos);
+        pos = add(pos, add(1, wrapping_mul(n_bounds, 2)));
+        let n_names = op_at(in ir.program, pos);
+        pos = add(pos, add(1, n_names));
+        let n_values = op_at(in ir.program, pos);
+        pos = inc(pos);
         // the largest value id fixes the table's size
         let mut top: u64 = 0;
-        for i in 0..nv {
-            let v = op_at(in ir.p, add(at, wrapping_mul(i, 2)));
-            if inc(v) > top {
-                top = inc(v);
+        for i in 0..n_values {
+            let value = op_at(in ir.program, add(pos, wrapping_mul(i, 2)));
+            if inc(value) > top {
+                top = inc(value);
             }
         }
-        let v0 = ir.vtys.len();
+        let value_start = ir.value_tys.len();
         for i in 0..top {
-            ir.vtys.push(NONE32);
+            ir.value_tys.push(NONE32);
         }
-        for i in 0..nv {
-            let v = op_at(in ir.p, add(at, wrapping_mul(i, 2)));
-            let t = n32(op_at(in ir.p, add(at, inc(wrapping_mul(i, 2)))));
-            let ok = ir.vtys.try_set(add(v0, v), t);
+        for i in 0..n_values {
+            let value = op_at(in ir.program, add(pos, wrapping_mul(i, 2)));
+            let value_ty = n32(op_at(in ir.program, add(pos, inc(wrapping_mul(i, 2)))));
+            let ok = ir.value_tys.try_set(add(value_start, value), value_ty);
         }
-        at = add(at, wrapping_mul(nv, 2));
-        let nl = op_at(in ir.p, at);
-        at = inc(at);
-        let l0 = ir.flocals.len();
-        for i in 0..nl {
-            ir.flocals.push(IrLocal {
-                name: n32(op_at(in ir.p, add(at, wrapping_mul(i, 2)))),
-                ty: n32(op_at(in ir.p, add(at, inc(wrapping_mul(i, 2)))))
+        pos = add(pos, wrapping_mul(n_values, 2));
+        let n_locals = op_at(in ir.program, pos);
+        pos = inc(pos);
+        let local_start = ir.fn_locals.len();
+        for i in 0..n_locals {
+            ir.fn_locals.push(IrLocal {
+                name: n32(op_at(in ir.program, add(pos, wrapping_mul(i, 2)))),
+                ty: n32(op_at(in ir.program, add(pos, inc(wrapping_mul(i, 2)))))
             });
         }
         ir.fns.push(FnInfo {
             name: row.name,
-            p0: p0,
-            pn: np,
+            p0: param_start,
+            pn: n_params,
             result: result,
             effects: effects,
-            l0: l0,
-            ln: nl,
-            v0: v0,
-            vn: top
+            local_start: local_start,
+            local_count: n_locals,
+            value_start: value_start,
+            value_count: top
         });
-        set_by_symbol(inout ir.by_name, row.name, n32(inc(fi)));
+        set_by_symbol(inout ir.by_name, row.name, n32(inc(fn_index)));
     }
     ir
 }
@@ -814,50 +890,50 @@ impl Ir {
                 pn: 0,
                 result: 0,
                 effects: 0,
-                l0: 0,
-                ln: 0,
-                v0: 0,
-                vn: 0
+                local_start: 0,
+                local_count: 0,
+                value_start: 0,
+                value_count: 0
             },
         }
     }
 
     pub fn param(in self, i: u64) -> IrParam {
-        match self.fparams.try_get(i) {
+        match self.fn_params.try_get(i) {
             Option::Some(p) => p,
             Option::None => IrParam { name: 0, pass: 0, ty: 0 },
         }
     }
 
     pub fn local(in self, i: u64) -> IrLocal {
-        match self.flocals.try_get(i) {
+        match self.fn_locals.try_get(i) {
             Option::Some(l) => l,
             Option::None => IrLocal { name: 0, ty: 0 },
         }
     }
 
-    // The type of value `v` of function `f`, or NONE32.
-    pub fn value_type(in self, f: FnInfo, v: u64) -> u32 {
-        if v >= f.vn {
+    // The type of value `value` of function `func`, or NONE32.
+    pub fn value_type(in self, func: FnInfo, value: u64) -> u32 {
+        if value >= func.value_count {
             return NONE32;
         }
-        u32_at(in self.vtys, add(f.v0, v))
+        u32_at(in self.value_tys, add(func.value_start, value))
     }
 
-    // The type of local `name` of function `f`, or NONE32.
-    pub fn local_type(in self, f: FnInfo, name: u32) -> u32 {
-        for i in 0..f.ln {
-            let l = self.local(add(f.l0, i));
-            if l.name == name {
-                return l.ty;
+    // The type of local `name` of function `func`, or NONE32.
+    pub fn local_type(in self, func: FnInfo, name: u32) -> u32 {
+        for i in 0..func.local_count {
+            let local = self.local(add(func.local_start, i));
+            if local.name == name {
+                return local.ty;
             }
         }
         NONE32
     }
 
-    pub fn has_local(in self, f: FnInfo, name: u32) -> bool {
-        for i in 0..f.ln {
-            if self.local(add(f.l0, i)).name == name {
+    pub fn has_local(in self, func: FnInfo, name: u32) -> bool {
+        for i in 0..func.local_count {
+            if self.local(add(func.local_start, i)).name == name {
                 return true;
             }
         }
@@ -865,17 +941,17 @@ impl Ir {
     }
 
     pub fn word(in self, i: u64) -> u64 {
-        u64_at(in self.p.ops, i)
+        u64_at(in self.program.ops, i)
     }
 
-    // Block `k` of function `fi`'s block parameters: (first op, count).
-    pub fn block_params(in self, fi: u64, k: u64) -> (u64, u64) {
-        let row = self.p.function(fi);
-        let b = self.p.block(add(row.b0, k));
+    // Block `block_index` of function `fn_index`'s block parameters: (first op, count).
+    pub fn block_params(in self, fn_index: u64, block_index: u64) -> (u64, u64) {
+        let row = self.program.function(fn_index);
+        let block = self.program.block(add(row.b0, block_index));
         // entry token, ni, ni x (block, token), outgoing token, np, values
-        let ni = self.word(inc(b.ha));
-        let at = add(add(b.ha, 2), wrapping_mul(ni, 2));
-        let np_at = inc(at);
+        let ni = self.word(inc(block.ha));
+        let outgoing_at = add(add(block.ha, 2), wrapping_mul(ni, 2));
+        let np_at = inc(outgoing_at);
         (inc(np_at), self.word(np_at))
     }
 }
@@ -883,26 +959,26 @@ impl Ir {
 // The index just past the pattern at `ops[at]` (ir_words.rs layout).
 pub fn pattern_end(in ops: ChunkSeq[u64], at: u64, depth: u64) -> u64 {
     let kind = u64_at(in ops, at);
-    let mut i = add(at, 3);
+    let mut end = add(at, 3);
     if depth > 512 {
-        return i;
+        return end;
     }
     if kind == Pat::Bind {
-        i = inc(i);
+        end = inc(end);
     } else if kind == Pat::Literal {
-        i = add(i, 3);
+        end = add(end, 3);
     } else if kind == Pat::Tuple {
-        let n = u64_at(in ops, i);
-        i = inc(i);
+        let n = u64_at(in ops, end);
+        end = inc(end);
         for k in 0..n {
-            i = pattern_end(in ops, i, inc(depth));
+            end = pattern_end(in ops, end, inc(depth));
         }
     } else if kind == Pat::Constructor {
-        let n = u64_at(in ops, add(i, 2));
-        i = add(i, 3);
+        let n = u64_at(in ops, add(end, 2));
+        end = add(end, 3);
         for k in 0..n {
-            i = pattern_end(in ops, inc(i), inc(depth));
+            end = pattern_end(in ops, inc(end), inc(depth));
         }
     }
-    i
+    end
 }

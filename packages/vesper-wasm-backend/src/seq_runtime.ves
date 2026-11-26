@@ -34,83 +34,83 @@ impl L {
         if self.h_seq_reserve != NONE32 {
             return self.h_seq_reserve;
         }
-        let idx = self.b.declare(in i64s(3), in i64s(1));
-        self.h_seq_reserve = idx;
+        let func = self.builder.declare(in i64s(3), in i64s(1));
+        self.h_seq_reserve = func;
         let p: u32 = 0;
         let need: u32 = 1;
         let stride: u32 = 2;
         let cap: u32 = 3;
         let len: u32 = 4;
-        let nc: u32 = 5;
-        let q: u32 = 6;
-        let mut c = code_new();
-        c.get(p);
-        c.op(OP_I32_WRAP_I64);
-        c.load(0);
-        c.tee(len);
-        c.i64_const(32);
-        c.op(OP_I64_SHR_U);
-        c.set(cap);
-        c.get(len);
-        c.u64_const(LOW32);
-        c.op(OP_I64_AND);
-        c.set(len);
-        c.get(need);
-        c.get(cap);
-        c.op(OP_I64_LE_U);
-        c.open(OP_IF);
-        c.get(p);
-        c.op(OP_RETURN);
-        c.op(OP_END);
-        c.get(cap);
-        c.i64_const(1);
-        c.op(OP_I64_SHL);
-        c.set(nc);
-        c.get(nc);
-        c.get(need);
-        c.op(OP_I64_LT_U);
-        c.open(OP_IF);
-        c.get(need);
-        c.set(nc);
-        c.op(OP_END);
-        c.get(nc);
-        c.i64_const(4);
-        c.op(OP_I64_LT_U);
-        c.open(OP_IF);
-        c.i64_const(4);
-        c.set(nc);
-        c.op(OP_END);
-        c.get(nc);
-        c.get(stride);
-        c.op(OP_I64_MUL);
-        c.i64_const(8);
-        c.op(OP_I64_ADD);
-        c.call(self.alloc);
-        c.tee(q);
-        c.i64_const(8);
-        c.op(OP_I64_ADD);
-        c.op(OP_I32_WRAP_I64);
-        c.get(p);
-        c.i64_const(8);
-        c.op(OP_I64_ADD);
-        c.op(OP_I32_WRAP_I64);
-        c.get(len);
-        c.get(stride);
-        c.op(OP_I64_MUL);
-        c.op(OP_I32_WRAP_I64);
-        c.memory_copy();
-        c.get(q);
-        c.op(OP_I32_WRAP_I64);
-        c.get(len);
-        c.get(nc);
-        c.i64_const(32);
-        c.op(OP_I64_SHL);
-        c.op(OP_I64_OR);
-        c.store(0);
-        c.get(q);
-        c.op(OP_END);
-        self.b.define(idx, in body_n(4, in c));
-        idx
+        let new_cap: u32 = 5;
+        let new_buf: u32 = 6;
+        let mut code = code_new();
+        code.get(p);
+        code.op(OP_I32_WRAP_I64);
+        code.load(0);
+        code.tee(len);
+        code.i64_const(32);
+        code.op(OP_I64_SHR_U);
+        code.set(cap);
+        code.get(len);
+        code.u64_const(LOW32);
+        code.op(OP_I64_AND);
+        code.set(len);
+        code.get(need);
+        code.get(cap);
+        code.op(OP_I64_LE_U);
+        code.open(OP_IF);
+        code.get(p);
+        code.op(OP_RETURN);
+        code.op(OP_END);
+        code.get(cap);
+        code.i64_const(1);
+        code.op(OP_I64_SHL);
+        code.set(new_cap);
+        code.get(new_cap);
+        code.get(need);
+        code.op(OP_I64_LT_U);
+        code.open(OP_IF);
+        code.get(need);
+        code.set(new_cap);
+        code.op(OP_END);
+        code.get(new_cap);
+        code.i64_const(4);
+        code.op(OP_I64_LT_U);
+        code.open(OP_IF);
+        code.i64_const(4);
+        code.set(new_cap);
+        code.op(OP_END);
+        code.get(new_cap);
+        code.get(stride);
+        code.op(OP_I64_MUL);
+        code.i64_const(8);
+        code.op(OP_I64_ADD);
+        code.call(self.alloc);
+        code.tee(new_buf);
+        code.i64_const(8);
+        code.op(OP_I64_ADD);
+        code.op(OP_I32_WRAP_I64);
+        code.get(p);
+        code.i64_const(8);
+        code.op(OP_I64_ADD);
+        code.op(OP_I32_WRAP_I64);
+        code.get(len);
+        code.get(stride);
+        code.op(OP_I64_MUL);
+        code.op(OP_I32_WRAP_I64);
+        code.memory_copy();
+        code.get(new_buf);
+        code.op(OP_I32_WRAP_I64);
+        code.get(len);
+        code.get(new_cap);
+        code.i64_const(32);
+        code.op(OP_I64_SHL);
+        code.op(OP_I64_OR);
+        code.store(0);
+        code.get(new_buf);
+        code.op(OP_END);
+        self.builder.define(func, in body_n(4, in code));
+        func
     }
 
     // `$bytes_eq(a, n, b, m)`: the byte ranges are equal.
@@ -118,50 +118,50 @@ impl L {
         if self.h_bytes_eq != NONE32 {
             return self.h_bytes_eq;
         }
-        let idx = self.b.declare(in i64s(4), in i64s(1));
-        self.h_bytes_eq = idx;
+        let func = self.builder.declare(in i64s(4), in i64s(1));
+        self.h_bytes_eq = func;
         let i: u32 = 4;
-        let mut c = code_new();
-        c.get(1);
-        c.get(3);
-        c.op(OP_I64_NE);
-        c.open(OP_IF);
-        c.i64_const(0);
-        c.op(OP_RETURN);
-        c.op(OP_END);
-        c.open(OP_LOOP);
-        c.get(i);
-        c.get(1);
-        c.op(OP_I64_GE_U);
-        c.open(OP_IF);
-        c.i64_const(1);
-        c.op(OP_RETURN);
-        c.op(OP_END);
-        c.get(0);
-        c.get(i);
-        c.op(OP_I64_ADD);
-        c.op(OP_I32_WRAP_I64);
-        c.mem(OP_I64_LOAD8_U, 0, 0);
-        c.get(2);
-        c.get(i);
-        c.op(OP_I64_ADD);
-        c.op(OP_I32_WRAP_I64);
-        c.mem(OP_I64_LOAD8_U, 0, 0);
-        c.op(OP_I64_NE);
-        c.open(OP_IF);
-        c.i64_const(0);
-        c.op(OP_RETURN);
-        c.op(OP_END);
-        c.get(i);
-        c.i64_const(1);
-        c.op(OP_I64_ADD);
-        c.set(i);
-        c.br(0);
-        c.op(OP_END);
-        c.op(OP_UNREACHABLE);
-        c.op(OP_END);
-        self.b.define(idx, in body_n(1, in c));
-        idx
+        let mut code = code_new();
+        code.get(1);
+        code.get(3);
+        code.op(OP_I64_NE);
+        code.open(OP_IF);
+        code.i64_const(0);
+        code.op(OP_RETURN);
+        code.op(OP_END);
+        code.open(OP_LOOP);
+        code.get(i);
+        code.get(1);
+        code.op(OP_I64_GE_U);
+        code.open(OP_IF);
+        code.i64_const(1);
+        code.op(OP_RETURN);
+        code.op(OP_END);
+        code.get(0);
+        code.get(i);
+        code.op(OP_I64_ADD);
+        code.op(OP_I32_WRAP_I64);
+        code.mem(OP_I64_LOAD8_U, 0, 0);
+        code.get(2);
+        code.get(i);
+        code.op(OP_I64_ADD);
+        code.op(OP_I32_WRAP_I64);
+        code.mem(OP_I64_LOAD8_U, 0, 0);
+        code.op(OP_I64_NE);
+        code.open(OP_IF);
+        code.i64_const(0);
+        code.op(OP_RETURN);
+        code.op(OP_END);
+        code.get(i);
+        code.i64_const(1);
+        code.op(OP_I64_ADD);
+        code.set(i);
+        code.br(0);
+        code.op(OP_END);
+        code.op(OP_UNREACHABLE);
+        code.op(OP_END);
+        self.builder.define(func, in body_n(1, in code));
+        func
     }
 
     // `$utf8(c, at) -> width`: the UTF-8 encoding of scalar value `c` at
@@ -170,71 +170,71 @@ impl L {
         if self.h_utf8 != NONE32 {
             return self.h_utf8;
         }
-        let idx = self.b.declare(in i64s(2), in i64s(1));
-        self.h_utf8 = idx;
-        let ch: u32 = 0;
+        let func = self.builder.declare(in i64s(2), in i64s(1));
+        self.h_utf8 = func;
+        let scalar: u32 = 0;
         let at: u32 = 1;
-        let mut c = code_new();
+        let mut code = code_new();
         // One byte below 0x80.
-        c.get(ch);
-        c.i64_const(128);
-        c.op(OP_I64_LT_U);
-        c.open(OP_IF);
-        c.get(at);
-        c.op(OP_I32_WRAP_I64);
-        c.get(ch);
-        c.mem(OP_I64_STORE8, 0, 0);
-        c.i64_const(1);
-        c.op(OP_RETURN);
-        c.op(OP_END);
+        code.get(scalar);
+        code.i64_const(128);
+        code.op(OP_I64_LT_U);
+        code.open(OP_IF);
+        code.get(at);
+        code.op(OP_I32_WRAP_I64);
+        code.get(scalar);
+        code.mem(OP_I64_STORE8, 0, 0);
+        code.i64_const(1);
+        code.op(OP_RETURN);
+        code.op(OP_END);
         // Width w: 2 below 0x800, 3 below 0x10000, else 4. The lead byte
         // is `prefix | c >> 6(w-1)`, then `0x80 | (c >> 6k) & 63`.
-        for wd in 2..5 {
-            let limit: u64 = if wd == 2 {
+        for width in 2..5 {
+            let limit: u64 = if width == 2 {
                 2048
-            } else if wd == 3 {
+            } else if width == 3 {
                 65536
             } else {
                 1114112
             };
-            let prefix: i64 = if wd == 2 {
+            let prefix: i64 = if width == 2 {
                 192
-            } else if wd == 3 {
+            } else if width == 3 {
                 224
             } else {
                 240
             };
-            c.get(ch);
-            c.u64_const(limit);
-            c.op(OP_I64_LT_U);
-            c.open(OP_IF);
-            c.get(at);
-            c.op(OP_I32_WRAP_I64);
-            c.get(ch);
-            c.u64_const(wrapping_mul(6, wrapping_sub(wd, 1)));
-            c.op(OP_I64_SHR_U);
-            c.i64_const(prefix);
-            c.op(OP_I64_OR);
-            c.mem(OP_I64_STORE8, 0, 0);
-            for k in 1..wd {
-                c.get(at);
-                c.op(OP_I32_WRAP_I64);
-                c.get(ch);
-                c.u64_const(wrapping_mul(6, wrapping_sub(wd, inc(k))));
-                c.op(OP_I64_SHR_U);
-                c.i64_const(63);
-                c.op(OP_I64_AND);
-                c.i64_const(128);
-                c.op(OP_I64_OR);
-                c.mem(OP_I64_STORE8, 0, k);
+            code.get(scalar);
+            code.u64_const(limit);
+            code.op(OP_I64_LT_U);
+            code.open(OP_IF);
+            code.get(at);
+            code.op(OP_I32_WRAP_I64);
+            code.get(scalar);
+            code.u64_const(wrapping_mul(6, wrapping_sub(width, 1)));
+            code.op(OP_I64_SHR_U);
+            code.i64_const(prefix);
+            code.op(OP_I64_OR);
+            code.mem(OP_I64_STORE8, 0, 0);
+            for byte_index in 1..width {
+                code.get(at);
+                code.op(OP_I32_WRAP_I64);
+                code.get(scalar);
+                code.u64_const(wrapping_mul(6, wrapping_sub(width, inc(byte_index))));
+                code.op(OP_I64_SHR_U);
+                code.i64_const(63);
+                code.op(OP_I64_AND);
+                code.i64_const(128);
+                code.op(OP_I64_OR);
+                code.mem(OP_I64_STORE8, 0, byte_index);
             }
-            c.u64_const(wd);
-            c.op(OP_RETURN);
-            c.op(OP_END);
+            code.u64_const(width);
+            code.op(OP_RETURN);
+            code.op(OP_END);
         }
-        c.op(OP_UNREACHABLE);
-        c.op(OP_END);
-        self.b.define(idx, in body_n(0, in c));
-        idx
+        code.op(OP_UNREACHABLE);
+        code.op(OP_END);
+        self.builder.define(func, in body_n(0, in code));
+        func
     }
 }
