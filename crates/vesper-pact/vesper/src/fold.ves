@@ -23,9 +23,7 @@
 // key and every fold returns at once (the Rust `?`). A subterm whose flags
 // show neither a variable the operation rewrites nor an unsorted row folds
 // to itself, so it is returned without a walk.
-use self::{
-    S
-};
+use self::{S};
 use self::term::{
     add,
     b_var,

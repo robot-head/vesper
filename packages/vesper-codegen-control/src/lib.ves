@@ -17,27 +17,12 @@
 // plan for it and the gaps found so far.
 
 use @vesper/check-data::pack_text;
-use @vesper/check-data::util::{
-    n32,
-    u32_at,
-    w
-};
-use @vesper/check-data::input::{
-    Reader,
-    read_ctx
-};
-use @vesper/check-layout::{
-    layouts_new
-};
-use self::tables::{
-    read_tables
-};
+use @vesper/check-data::util::{n32, u32_at, w};
+use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/check-layout::{layouts_new};
+use self::tables::{read_tables};
 use self::freshness::freshness_text;
-use self::session::{
-    EffBinding,
-    OpBinding,
-    planner_new
-};
+use self::session::{EffBinding, OpBinding, planner_new};
 
 // Task "sessions": the function and effect-declaration sections
 // (tables.ves), then cases: an entry name and its bindings, each an effect

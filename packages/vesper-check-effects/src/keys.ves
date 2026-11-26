@@ -2,10 +2,7 @@
 // small sets the rules keep. A fact keyed by a name and an index is
 // symbol * 2^32 + index, so a name's facts are one run of the set.
 
-use @vesper/check-data::util::{
-    inc,
-    u64_at
-};
+use @vesper/check-data::util::{inc, u64_at};
 
 pub struct Keys {
     v: ChunkSeq[u64],

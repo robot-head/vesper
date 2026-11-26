@@ -1,9 +1,7 @@
 // The `$fmod` helper body for @vesper/wasm-backend (split from lower.ves,
 // which reached the parser's token limit).
 
-use self::enc::{
-    Code
-};
+use self::enc::{Code};
 
 const OP_BLOCK: u8 = 2;
 const OP_LOOP: u8 = 3;

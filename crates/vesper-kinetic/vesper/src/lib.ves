@@ -5,15 +5,9 @@
 //
 // The export ABI has no f32, so an f32 crosses the boundary as its bit
 // pattern (a `u32`), as in @vesper/tensor.
-use self::diff::{
-    detect_contacts as d_detect_contacts,
-    tape_backward as d_tape_backward
-};
+use self::diff::{detect_contacts as d_detect_contacts, tape_backward as d_tape_backward};
 use self::manifold::pair_manifold as m_pair_manifold;
-use self::sleep::{
-    update_sleep_pass as s_update_sleep_pass,
-    wake_island_pass as s_wake_island_pass
-};
+use self::sleep::{update_sleep_pass as s_update_sleep_pass, wake_island_pass as s_wake_island_pass};
 use self::morton::{
     compact as m_compact,
     compact21 as m_compact21,
@@ -23,14 +17,8 @@ use self::morton::{
     spread as m_spread,
     spread21 as m_spread21
 };
-use self::coloring::{
-    color_pairs as c_color_pairs,
-    color_sets as c_color_sets
-};
-use self::lbvh::{
-    build as l_build,
-    pairs as l_pairs
-};
+use self::coloring::{color_pairs as c_color_pairs, color_sets as c_color_sets};
+use self::lbvh::{build as l_build, pairs as l_pairs};
 use self::sap::{
     build as s_build,
     pair_total as s_pair_total,
@@ -43,9 +31,7 @@ use self::crmath::{
     log_bits as c_log_bits,
     sin_cos_bits as c_sin_cos_bits
 };
-use self::gjk::{
-    separation as g_separation
-};
+use self::gjk::{separation as g_separation};
 use self::fastmath::{
     atan2 as f_atan2,
     atan2f as f_atan2f,

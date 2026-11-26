@@ -5,13 +5,7 @@
 // capsule (1) `[ax, ay, az, bx, by, bz, r]`, a polytope (2) its vertices,
 // three numbers each. The Rust wrapper lends them; internal functions
 // return a status (0 ok, else a `GjkError` code) and the export raises.
-use self::util::{
-    dec,
-    inc,
-    shl_u64,
-    shr_u64,
-    u
-};
+use self::util::{dec, inc, shl_u64, shr_u64, u};
 
 pub copy struct V3 {
     x: f64,

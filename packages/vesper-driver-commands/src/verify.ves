@@ -2,22 +2,9 @@
 // delegating Lean formatter-model / extraction verification (`src/verify_commands.rs`)
 // to `HybridCommands::hc_verify_run`. (`vesper verify --refute` continues to dispatch
 // to `vesper-refute` in `lib.ves`.)
-use @vesper/driver::{
-    Args,
-    args_count,
-    eq
-};
-use super::{
-    arg,
-    byte_at,
-    print,
-    fail,
-    stdout_stream
-};
-use super::proof_audit::{
-    name_valid,
-    forbidden_axiom
-};
+use @vesper/driver::{Args, args_count, eq};
+use super::{arg, byte_at, print, fail, stdout_stream};
+use super::proof_audit::{name_valid, forbidden_axiom};
 
 fn print_verify_help() eff [Ffi[HybridCommands]] {
     print(

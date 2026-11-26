@@ -5,22 +5,8 @@
 // is one compare. That is most of why the census samples ran at 0.34x to
 // 0.87x of Rust's time; keep it.
 
-use self::util::{
-    add,
-    copy_seq,
-    fold,
-    inc,
-    inc32,
-    n32,
-    push_decimal,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use self::names::{
-    Names
-};
+use self::util::{add, copy_seq, fold, inc, inc32, n32, push_decimal, u32_at, u64_at, u8_at, w};
+use self::names::{Names};
 
 const NONE32: u32 = 4294967295;
 

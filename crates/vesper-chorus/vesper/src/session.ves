@@ -1,42 +1,10 @@
 // Module session of @vesper/chorus (see lib.ves): dynamic protocol Monitor,
 // LeakAuditor, and Endpoint sequence-dedup / reorder state machine (src/session.rs).
-use self::{
-    new_c,
-    C
-};
-use self::util::{
-    add,
-    inc,
-    intern_slice,
-    iw,
-    none,
-    setw,
-    sw,
-    tb_str,
-    tb_sym,
-    Br,
-    LTag,
-    Out
-};
-use self::local::{
-    alpha_eq,
-    emit_l,
-    la,
-    lb,
-    lbr,
-    lc,
-    ld,
-    lkn,
-    lt,
-    read_local,
-    unfold
-};
-use self::tree::{
-    read_chor
-};
-use self::project::{
-    project_role
-};
+use self::{new_c, C};
+use self::util::{add, inc, intern_slice, iw, none, setw, sw, tb_str, tb_sym, Br, LTag, Out};
+use self::local::{alpha_eq, emit_l, la, lb, lbr, lc, ld, lkn, lt, read_local, unfold};
+use self::tree::{read_chor};
+use self::project::{project_role};
 
 const MAX_U64: u64 = 18446744073709551615;
 const REORDER_LIMIT: u64 = 1024;

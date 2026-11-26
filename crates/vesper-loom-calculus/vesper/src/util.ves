@@ -1,20 +1,6 @@
 // Module util of @vesper/loom-calculus (see lib.ves): accessors, pool text,
 // byte order and the merge sort.
-use self::{
-    Cmp,
-    Dep,
-    Diag,
-    Feat,
-    GNode,
-    L,
-    Man,
-    Req,
-    Root,
-    SEdge,
-    Sys,
-    SysSel,
-    Ver
-};
+use self::{Cmp, Dep, Diag, Feat, GNode, L, Man, Req, Root, SEdge, Sys, SysSel, Ver};
 
 // Diagnostic codes, in the order of `Code` (src/lib.rs).
 pub enum Code: _ {

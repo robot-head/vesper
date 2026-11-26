@@ -23,38 +23,12 @@
 // tests/self_host_ir_opt.rs from `fip::pattern_box_slots`, `box_inner`,
 // `caller_slot_functions` and `slot_key`).
 
-use @vesper/place-ir::codes::{
-    Op,
-    PoolKind,
-    Tag,
-    Term
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::input::{
-    Reader
-};
-use @vesper/place-ir::{
-    BlockRow,
-    FnRow,
-    InstRow,
-    PoolRow,
-    Program
-};
-use self::view::{
-    FnView,
-    at32,
-    block_params_at,
-    class_of,
-    fn_view
-};
+use @vesper/place-ir::codes::{Op, PoolKind, Tag, Term};
+use @vesper/check-data::util::{add, inc, n32, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::input::{Reader};
+use @vesper/place-ir::{BlockRow, FnRow, InstRow, PoolRow, Program};
+use self::view::{FnView, at32, block_params_at, class_of, fn_view};
 
 // Constants are copied, not imported: the Vesper package assembler
 // (@vesper/check-names-packages) does not resolve an imported constant

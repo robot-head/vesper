@@ -1,28 +1,10 @@
 // Module paths of @vesper/loom-audit (see lib.ves): the validated graph
 // and `dependency_paths`, one shortest deterministic path from each
 // reaching root to every reachable Vesper and native package.
-use @vesper/loom-calculus::{
-    Snap
-};
-use @vesper/loom-calculus::util::{
-    Order,
-    dep,
-    gnode,
-    man,
-    none,
-    sedge,
-    sw
-};
-use self::{
-    A
-};
-use self::util::{
-    ErrorKind,
-    fail,
-    setw,
-    spend,
-    word
-};
+use @vesper/loom-calculus::{Snap};
+use @vesper/loom-calculus::util::{Order, dep, gnode, man, none, sedge, sw};
+use self::{A};
+use self::util::{ErrorKind, fail, setw, spend, word};
 
 fn snap0(in s: A) -> Snap {
     match s.l.snaps.try_get(0) {

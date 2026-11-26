@@ -18,15 +18,9 @@
 // writes `(code, detail, detail)` to `status` (see `fail`) and raises
 // `Fault::Format`; codes 30 and 31 ask the caller to retry with a larger
 // tape and name table (`names.len() / 2` slots, a power of two).
-use self::{
-    Fault
-};
-use self::num::{
-    u64_zero
-};
-use self::text::{
-    utf8_ok
-};
+use self::{Fault};
+use self::num::{u64_zero};
+use self::text::{utf8_ok};
 
 // GGUF limits (src/gguf.rs `DEFAULT_ALIGNMENT`, `MAX_TENSORS`,
 // `MAX_METADATA`, `MAX_STRING`).

@@ -16,41 +16,14 @@
 // a block egglog would refuse (a state read before it is defined, or a token
 // defined twice; the e-graph lane's `egraph_memory` check).
 
-use @vesper/place-ir::codes::{
-    Op,
-    Pat,
-    Tag
-};
-use @vesper/check-data::types::{
-    TyPass
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    w
-};
-use @vesper/check-data::names::{
-    Names,
-    names_new
-};
-use @vesper/place-ir::{
-    BlockRow,
-    FnRow,
-    InstRow,
-    Program
-};
-use @vesper/egraph::graph::{
-    EGraph,
-    egraph_new
-};
-use @vesper/egraph::run::{
-    run_rounds
-};
-use @vesper/egraph::{
-    memory_arity,
-    memory_rules
-};
+use @vesper/place-ir::codes::{Op, Pat, Tag};
+use @vesper/check-data::types::{TyPass};
+use @vesper/check-data::util::{add, inc, n32, w};
+use @vesper/check-data::names::{Names, names_new};
+use @vesper/place-ir::{BlockRow, FnRow, InstRow, Program};
+use @vesper/egraph::graph::{EGraph, egraph_new};
+use @vesper/egraph::run::{run_rounds};
+use @vesper/egraph::{memory_arity, memory_rules};
 use self::view::{
     FnView,
     at32,

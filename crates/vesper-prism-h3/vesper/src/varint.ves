@@ -1,16 +1,8 @@
 // QUIC variable-length integers (RFC 9000 §16), as vesper_warp::varint
 // decodes and encodes them for frame.rs and capsule.rs.
 
-use self::int::{
-    inc,
-    byte,
-    shl,
-    shr
-};
-use self::prefix::{
-    Num,
-    max_int
-};
+use self::int::{inc, byte, shl, shr};
+use self::prefix::{Num, max_int};
 
 // QUIC variable-length integers (RFC 9000 §16): the top two bits of the
 // first byte give the length (1, 2, 4 or 8 bytes), the rest is the value.

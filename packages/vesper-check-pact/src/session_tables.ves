@@ -2,44 +2,18 @@
 // formatting (`CODE START END MESSAGE`) and `IdTables::rename_ids` for
 // `@vesper/check-pact`'s session.
 
-use @vesper/check-data::input::{
-    Ctx
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    TyMode
-};
+use @vesper/check-data::input::{Ctx};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{TyMode};
 
 const M_AFFINE: u8 = TyMode::Affine;
 const M_COPY: u8 = TyMode::Copy;
 const M_LINEAR: u8 = TyMode::Linear;
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/pact::term::{
-    kd_row,
-    kd_type
-};
-use self::decl::{
-    Decls
-};
-use self::frontend::{
-    Fe
-};
-use self::modes::{
-    MAX_MODE_COMBINATIONS,
-    SCHEME_OK,
-    SCHEME_TOO_MANY_COMBOS,
-    derive_adt_scheme
-};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, u8_at, w};
+use @vesper/pact::term::{kd_row, kd_type};
+use self::decl::{Decls};
+use self::frontend::{Fe};
+use self::modes::{MAX_MODE_COMBINATIONS, SCHEME_OK, SCHEME_TOO_MANY_COMBOS, derive_adt_scheme};
 use self::session_input::{
     SessionMeta,
     cmp_sym_ascii,

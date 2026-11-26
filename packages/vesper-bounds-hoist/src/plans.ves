@@ -44,22 +44,8 @@ use self::rules::{
     stable_place,
     stable_root
 };
-use self::facts::{
-    Edge,
-    Facts,
-    TermNode,
-    facts_new
-};
-use self::text::{
-    Keys,
-    keys_new,
-    put,
-    put_blocks,
-    put_bool,
-    put_i128,
-    put_u128,
-    put_u64
-};
+use self::facts::{Edge, Facts, TermNode, facts_new};
+use self::text::{Keys, keys_new, put, put_blocks, put_bool, put_i128, put_u128, put_u64};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;

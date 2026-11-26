@@ -1,11 +1,7 @@
 // `vesper lsp`: stdio LSP command routing in Vesper, delegating
 // `src/lsp.rs::serve` to `HybridCommands::hc_lsp_serve`.
-use @vesper/driver::{
-    Args
-};
-use super::{
-    fail
-};
+use @vesper/driver::{Args};
+use super::{fail};
 
 pub fn run_lsp(in _args: Args) -> i64 eff [Ffi[HybridCommands]] {
     let err_len = HybridCommands::hc_lsp_serve();

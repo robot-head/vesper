@@ -2,20 +2,9 @@
 // the scalar escape-mask reference and `JsonSizeBound` arithmetic) and the
 // SWAR key matcher of src/tiles.rs (`SwarKey`). Their `const fn` parts stay
 // in Rust, where a constant must be computed at compile time.
-use self::{
-    Bound,
-    Error,
-    ErrorKind,
-    Swar
-};
-use self::index::{
-    at,
-    raise,
-    strings_equal
-};
-use self::ascii::{
-    Ascii
-};
+use self::{Bound, Error, ErrorKind, Swar};
+use self::index::{at, raise, strings_equal};
+use self::ascii::{Ascii};
 
 // A SWAR key is at most 7 bytes, so it and its closing quote fit a word.
 const SWAR_MAX_KEY: u64 = 7;

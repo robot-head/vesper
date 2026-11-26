@@ -33,27 +33,11 @@ use @vesper/ast::{
     pat_at,
     type_at
 };
-use @vesper/ast::lower::{
-    lower_source
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
-use @vesper-std/hash::blake3::{
-    Digest,
-    blake3,
-    digest_bytes,
-    digest_hex
-};
-use self::util::{
-    Reader,
-    is_text,
-    put_text,
-    u8_at
-};
+use @vesper/ast::lower::{lower_source};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
+use @vesper-std/hash::blake3::{Digest, blake3, digest_bytes, digest_hex};
+use self::util::{Reader, is_text, put_text, u8_at};
 
 // ------------------------------------------------------------ node access
 

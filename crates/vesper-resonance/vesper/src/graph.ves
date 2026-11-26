@@ -3,30 +3,10 @@
 // run block by block as `CompiledGraph::process_block` runs them
 // (src/pdc.rs), entirely in Vesper, for the differential test and the ABBA
 // benchmark.
-use self::pdc::{
-    Header,
-    Input,
-    InputKind,
-    Line,
-    Op,
-    PdcCode,
-    Words,
-    p_compile
-};
-use self::seqs::{
-    at,
-    get
-};
-use self::slab::{
-    SlabWords,
-    Slot,
-    Totals,
-    s_advance,
-    s_delays
-};
-use self::{
-    SlabFault
-};
+use self::pdc::{Header, Input, InputKind, Line, Op, PdcCode, Words, p_compile};
+use self::seqs::{at, get};
+use self::slab::{SlabWords, Slot, Totals, s_advance, s_delays};
+use self::{SlabFault};
 
 // The processors. The Rust `CompiledGraph` runs `Box<dyn DspProcessor>`
 // objects; the built-in kinds here are a closed set, so each processor is a

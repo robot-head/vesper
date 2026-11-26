@@ -2,10 +2,7 @@
 // navigation responses use (objects with sorted keys, arrays, unsigned
 // numbers and strings), and the packing the harness reads.
 
-use @vesper/span::{
-    Position,
-    Range
-};
+use @vesper/span::{Position, Range};
 
 // Byte `i` of `b`, or 0 past its end.
 pub fn byte(in b: Slice[u8], i: u64) -> u8 {

@@ -2,56 +2,14 @@
 // `DropCallees`) in Vesper over `@vesper/place-ir` and `@vesper/check-data`
 // (self-hosting SH4 lane 13, #1287 / #1714).
 
-use @vesper/check-data::{
-    pack_text
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    read_ctx
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    TyKind,
-    TyPass,
-    Types,
-    Vars,
-    display,
-    substitute,
-    vars_new
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    push_decimal,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::world::{
-    Adt,
-    World,
-    constructor,
-    field_step
-};
-use @vesper/place-ir::{
-    BlockRow,
-    FnRow,
-    InstRow,
-    Program,
-    put_program,
-    read_program
-};
-use @vesper/place-ir::codes::{
-    Op,
-    Pat,
-    Tag,
-    Term
-};
+use @vesper/check-data::{pack_text};
+use @vesper/check-data::input::{Ctx, Reader, read_ctx};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{TyKind, TyPass, Types, Vars, display, substitute, vars_new};
+use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::world::{Adt, World, constructor, field_step};
+use @vesper/place-ir::{BlockRow, FnRow, InstRow, Program, put_program, read_program};
+use @vesper/place-ir::codes::{Op, Pat, Tag, Term};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;

@@ -1,34 +1,11 @@
 // Module raft of @vesper/chorus (see lib.ves): Raft cluster simulation state
 // machine, ChaosPlan, RawSession choreography monitors, wire encoding/decoding,
 // and invariant checking (src/raft.rs).
-use self::{
-    new_c,
-    C
-};
-use self::util::{
-    inc,
-    intern_str,
-    none,
-    sat_add,
-    setw,
-    sw,
-    LTag
-};
-use self::local::{
-    choice,
-    l_action,
-    l_init,
-    l_msg,
-    lt as ltag
-};
-use self::session::{
-    c_mon_action,
-    c_mon_step
-};
-use self::simnet::{
-    sm_chance,
-    sm_range
-};
+use self::{new_c, C};
+use self::util::{inc, intern_str, none, sat_add, setw, sw, LTag};
+use self::local::{choice, l_action, l_init, l_msg, lt as ltag};
+use self::session::{c_mon_action, c_mon_step};
+use self::simnet::{sm_chance, sm_range};
 use self::wire::{
     ack_decode_range,
     ack_encode_seq,

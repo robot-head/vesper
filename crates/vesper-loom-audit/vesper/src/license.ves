@@ -2,27 +2,9 @@
 // subset, the tokenizer and the WITH > AND > OR parser of license.rs, and
 // the policy allowlist. Every branch is parsed before the value counts, so
 // the value is computed while parsing: a failure anywhere discards it.
-use self::{
-    A,
-    Val
-};
-use self::util::{
-    ErrorKind,
-    ascii_alnum,
-    byte,
-    copy_range,
-    fail,
-    lit,
-    str_len,
-    str_off,
-    word
-};
-use @vesper/loom-calculus::util::{
-    Ascii,
-    is_lit,
-    none,
-    sbool
-};
+use self::{A, Val};
+use self::util::{ErrorKind, ascii_alnum, byte, copy_range, fail, lit, str_len, str_off, word};
+use @vesper/loom-calculus::util::{Ascii, is_lit, none, sbool};
 
 // The supported SPDX license IDs, in license.rs order.
 enum License: _ {

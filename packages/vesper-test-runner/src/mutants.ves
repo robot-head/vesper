@@ -22,27 +22,11 @@ use @vesper/ast::{
     lit_at,
     none
 };
-use @vesper/ast::lower::{
-    lower_source
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
-use @vesper/front::kinds::{
-    k_block_comment,
-    k_comment,
-    k_whitespace
-};
-use self::discover::{
-    Toks,
-    case_marker,
-    is_test_marker,
-    preceding_comments,
-    toks
-};
+use @vesper/ast::lower::{lower_source};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
+use @vesper/front::kinds::{k_block_comment, k_comment, k_whitespace};
+use self::discover::{Toks, case_marker, is_test_marker, preceding_comments, toks};
 use self::util::{
     Reader,
     add,

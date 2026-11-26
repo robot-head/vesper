@@ -15,9 +15,7 @@
 // product's coefficient and factor count in node order, as the Rust build
 // does, then a backward pass counts the paths from `id` to each unbound
 // symbol, and the symbol is listed once per path.
-use self::num::{
-    u64_zero
-};
+use self::num::{u64_zero};
 
 const U64_MAX: u64 = 18446744073709551615;
 

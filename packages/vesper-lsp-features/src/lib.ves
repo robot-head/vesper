@@ -14,47 +14,15 @@
 // `E` and the JSON-RPC error object the session sends, or `D` for a
 // definition left to the documentation-link fallback (not ported yet).
 
-use @vesper/span::{
-    Limits
-};
+use @vesper/span::{Limits};
 use @vesper/span::Error as SpanError;
-use self::json::{
-    put,
-    put_bytes,
-    put_u64,
-    put_string,
-    pack
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader as CtxReader,
-    read_ctx
-};
-use self::doc_links::{
-    DocFacts,
-    WordReader,
-    doc_facts_new,
-    doc_target,
-    read_doc_facts
-};
-use self::proof::{
-    proof_models
-};
-use self::ownership::{
-    lens_facts,
-    lens_requests,
-    lens_view
-};
-use self::repair::{
-    lens_repair
-};
-use self::hover::{
-    Facts,
-    facts_new,
-    fact_function,
-    fact_param,
-    hover_answer
-};
+use self::json::{put, put_bytes, put_u64, put_string, pack};
+use @vesper/check-data::input::{Ctx, Reader as CtxReader, read_ctx};
+use self::doc_links::{DocFacts, WordReader, doc_facts_new, doc_target, read_doc_facts};
+use self::proof::{proof_models};
+use self::ownership::{lens_facts, lens_requests, lens_view};
+use self::repair::{lens_repair};
+use self::hover::{Facts, facts_new, fact_function, fact_param, hover_answer};
 use self::nav::{
     Ix,
     MAX_DOCUMENTS,

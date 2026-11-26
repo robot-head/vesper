@@ -2,34 +2,11 @@
 // value, the locals, the operands' layout, and the place a memory operation
 // names as text.
 
-use @vesper/place-ir::codes::{
-    Op,
-    Pat,
-    Tag,
-    Term
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    Types,
-    TyPass
-};
-use @vesper/place-ir::{
-    BlockRow,
-    FnRow,
-    InstRow,
-    Program
-};
+use @vesper/place-ir::codes::{Op, Pat, Tag, Term};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{Types, TyPass};
+use @vesper/place-ir::{BlockRow, FnRow, InstRow, Program};
 
 pub const NONE: u32 = 4294967295;
 const ASCII_DOT: u8 = 46;

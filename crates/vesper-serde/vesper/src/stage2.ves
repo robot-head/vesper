@@ -3,14 +3,7 @@
 // in Rust until source `VVec`, #587) with an explicit bounded stack and
 // builds the same token tape, work total and errors as the scalar parser,
 // mapping each error through that parser's work frontier.
-use self::{
-    Doc,
-    Error,
-    ErrorKind,
-    Kind,
-    Limits,
-    Token
-};
+use self::{Doc, Error, ErrorKind, Kind, Limits, Token};
 use self::index::{
     at,
     check_duplicate,
@@ -22,9 +15,7 @@ use self::index::{
     tok,
     utf8_len
 };
-use self::ascii::{
-    Ascii
-};
+use self::ascii::{Ascii};
 
 // `byte` past the end: no byte has this value.
 const NO_BYTE: u64 = 256;

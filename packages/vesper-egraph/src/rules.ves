@@ -17,13 +17,7 @@
 // relation table holds the pair of data variables, egglog's
 // `(disjoint p q)`).
 
-use self::util::{
-    filled_u32,
-    i64_at,
-    mix,
-    u32_at,
-    u8_at
-};
+use self::util::{filled_u32, i64_at, mix, u32_at, u8_at};
 
 const NONE: u32 = 4294967295;
 

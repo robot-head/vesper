@@ -1,25 +1,7 @@
 // recording.rs: the recording backend's state and lookups.
-use self::codes::{
-    NONE_ID
-};
-use self::{
-    BackendFault,
-    Edge,
-    Op,
-    RSlot,
-    RState,
-    RSub,
-    RWidget,
-    Recorder
-};
-use self::util::{
-    add,
-    dec,
-    fits,
-    inc,
-    limits_from,
-    seq_bool
-};
+use self::codes::{NONE_ID};
+use self::{BackendFault, Edge, Op, RSlot, RState, RSub, RWidget, Recorder};
+use self::util::{add, dec, fits, inc, limits_from, seq_bool};
 
 pub fn rstate_new() -> RState {
     RState {

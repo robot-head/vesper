@@ -20,13 +20,8 @@
 
 // @export abi 4
 
-use self::json::{
-    pretty
-};
-use self::page::{
-    linked,
-    page
-};
+use self::json::{pretty};
+use self::page::{linked, page};
 
 // The layout version of the requests and results; the Rust encoder
 // (crates/vesper-doc/src/swap.rs `FORMAT`) checks it.

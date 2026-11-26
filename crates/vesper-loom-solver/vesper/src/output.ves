@@ -1,29 +1,9 @@
 // Module output of @vesper/loom-solver (see lib.ves): result words in
 // `out` (documented in src/port.rs).
-use @vesper/loom-calculus::util::{
-    add,
-    diag,
-    is_lit,
-    man,
-    none,
-    slen,
-    soff,
-    sw
-};
-use self::{
-    S
-};
-use self::closure::{
-    assigned,
-    has_entry
-};
-use self::diag::{
-    Objective,
-    ResultTag,
-    SolverSort,
-    dedup,
-    msort
-};
+use @vesper/loom-calculus::util::{add, diag, is_lit, man, none, slen, soff, sw};
+use self::{S};
+use self::closure::{assigned, has_entry};
+use self::diag::{Objective, ResultTag, SolverSort, dedup, msort};
 
 pub fn w(inout s: S, x: u64) {
     s.out.push(x);

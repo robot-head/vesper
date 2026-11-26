@@ -6,24 +6,9 @@
 // QPACK codecs, the priority table and the session layer live there.
 // Streams are kept in stream ID order, as the Rust driver's map was.
 
-use self::{
-    Settings,
-    FrameError,
-    FrameOut,
-    FrameReaderCore,
-    ConnectionError,
-    UniCmd,
-    UniCore
-};
-use self::int::{
-    inc,
-    word,
-    byte,
-    remove_word
-};
-use self::varint::{
-    vdec
-};
+use self::{Settings, FrameError, FrameOut, FrameReaderCore, ConnectionError, UniCmd, UniCore};
+use self::int::{inc, word, byte, remove_word};
+use self::varint::{vdec};
 use self::frame::{
     cancel_push_type,
     data_type,
@@ -37,10 +22,7 @@ use self::frame::{
     settings_type,
     webtransport_stream_type
 };
-use self::priority::{
-    priority_update_push,
-    priority_update_request
-};
+use self::priority::{priority_update_push, priority_update_request};
 
 // Stream types (RFC 9114 §6.2, draft-ietf-webtrans-http3 §4.2).
 const STREAM_CONTROL: u64 = 0x00;

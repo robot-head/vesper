@@ -1,35 +1,13 @@
 // Module snap of @vesper/loom-solver (see lib.ves): the calculus
 // validator on the current assignment, and putting the calculus state
 // back afterwards.
-use @vesper/loom-calculus::{
-    Root,
-    Snap
-};
-use @vesper/loom-calculus::solve::{
-    solve
-};
-use @vesper/loom-calculus::util::{
-    Code,
-    add,
-    diag,
-    gnode,
-    man,
-    none,
-    sw
-};
-use self::{
-    S
-};
-use self::closure::{
-    assigned,
-    has_entry
-};
-use self::diag::{
-    copy_calculus
-};
-use self::input::{
-    sysv
-};
+use @vesper/loom-calculus::{Root, Snap};
+use @vesper/loom-calculus::solve::{solve};
+use @vesper/loom-calculus::util::{Code, add, diag, gnode, man, none, sw};
+use self::{S};
+use self::closure::{assigned, has_entry};
+use self::diag::{copy_calculus};
+use self::input::{sysv};
 
 // The calculus table lengths in `marks`, in the order `mark` pushes them.
 enum Mark: _ {

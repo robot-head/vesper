@@ -7,33 +7,10 @@
 // Reduction shapes are trees in `Sh` (leaf: lane; node: two children), and
 // a lane tree is memoized per value as a row of `Lt`.
 
-use @vesper/check-data::names::{
-    Names
-};
-use self::input::{
-    Cx,
-    arg,
-    block_row,
-    ent_row,
-    fw,
-    iw,
-    nargs,
-    pw,
-    val
-};
-use self::report::{
-    raw_finding
-};
-use self::util::{
-    contains,
-    filled,
-    g,
-    put,
-    putn,
-    puts,
-    spells,
-    st
-};
+use @vesper/check-data::names::{Names};
+use self::input::{Cx, arg, block_row, ent_row, fw, iw, nargs, pw, val};
+use self::report::{raw_finding};
+use self::util::{contains, filled, g, put, putn, puts, spells, st};
 
 const EXT_KNOWN: u64 = 3;
 const EXT_LIBCALL: u64 = 2;

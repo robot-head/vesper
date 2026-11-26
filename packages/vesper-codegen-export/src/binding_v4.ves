@@ -2,28 +2,10 @@
 // owned `<Type>Tree`s with their encoders and decoders, `<Elem>Seq<'a>`
 // views of sequences of handles, and lent `.vsys` extern-type handles.
 
-use @vesper/check-data::util::{
-    inc,
-    u8_at,
-    w
-};
-use self::iface::{
-    DeclRow,
-    VarRow
-};
-use self::text::{
-    StrSet,
-    copy_of,
-    nl,
-    put,
-    put_seq,
-    put_u64,
-    str_set,
-    text
-};
-use self::binding::{
-    Gen
-};
+use @vesper/check-data::util::{inc, u8_at, w};
+use self::iface::{DeclRow, VarRow};
+use self::text::{StrSet, copy_of, nl, put, put_seq, put_u64, str_set, text};
+use self::binding::{Gen};
 
 // `AbiType` kinds, passing modes and mirrors (iface.ves).
 const K_SCALAR: u8 = 0;

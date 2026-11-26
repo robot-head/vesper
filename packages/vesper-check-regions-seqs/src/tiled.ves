@@ -3,35 +3,13 @@
 // `check_world_adts` (E1501-E1503). The `TiledSeq` call rules of
 // src/tiled/check.rs walk the AST: a later PR of #1181.
 
-use @vesper/check-data::util::{
-    add,
-    n32,
-    push_decimal,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    Types,
-    display,
-    TyKind
-};
-use @vesper/check-data::world::{
-    Known,
-    World
-};
-use @vesper/check-data::diag::{
-    Diags
-};
-use self::seqs::{
-    Sigs
-};
-use self::vector::{
-    Shape,
-    elem_of,
-    shape_new
-};
+use @vesper/check-data::util::{add, n32, push_decimal, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{Types, display, TyKind};
+use @vesper/check-data::world::{Known, World};
+use @vesper/check-data::diag::{Diags};
+use self::seqs::{Sigs};
+use self::vector::{Shape, elem_of, shape_new};
 
 const NONE32: u32 = 4294967295;
 const T_HOT: u8 = 1;

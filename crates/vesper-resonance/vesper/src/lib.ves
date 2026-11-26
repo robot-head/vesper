@@ -25,38 +25,12 @@ use self::pdc::{
     p_scale,
     p_zero
 };
-use self::confine::{
-    c_verify
-};
-use self::graph::{
-    g_render
-};
-use self::lease::{
-    l_complete,
-    l_silence,
-    l_takes,
-    l_write
-};
-use self::slab::{
-    s_advance,
-    s_delays,
-    s_read,
-    s_tiled,
-    s_write
-};
-use self::simd::{
-    v_ramp4,
-    v_ramp8,
-    v_tick4,
-    v_tick8,
-    v_tick_scalar
-};
-use self::kernels::{
-    k_pid_check,
-    k_pid_step,
-    k_render,
-    k_render_reference
-};
+use self::confine::{c_verify};
+use self::graph::{g_render};
+use self::lease::{l_complete, l_silence, l_takes, l_write};
+use self::slab::{s_advance, s_delays, s_read, s_tiled, s_write};
+use self::simd::{v_ramp4, v_ramp8, v_tick4, v_tick8, v_tick_scalar};
+use self::kernels::{k_pid_check, k_pid_step, k_render, k_render_reference};
 
 // events::RtParamEvent with the target as its f32 bits.
 pub copy struct Wire {

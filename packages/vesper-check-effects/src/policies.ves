@@ -2,35 +2,12 @@
 // policy inputs (`ConstTimeInput`, `RealtimeInput`, `DetFloatInput`,
 // `ConstDenormInput`) from an accepted world (#1864, part of #1180).
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    w
-};
-use @vesper/check-data::input::{
-    Ctx
-};
-use self::keys::{
-    pair
-};
-use self::prog::{
-    Prog
-};
-use self::walker::{
-    Walk,
-    caps_of,
-    expr,
-    is_declassify_gate,
-    secret_type,
-    start
-};
-use self::check::{
-    cmp_names,
-    push_u32_le,
-    summarise
-};
+use @vesper/check-data::util::{add, inc, n32, u32_at, w};
+use @vesper/check-data::input::{Ctx};
+use self::keys::{pair};
+use self::prog::{Prog};
+use self::walker::{Walk, caps_of, expr, is_declassify_gate, secret_type, start};
+use self::check::{cmp_names, push_u32_le, summarise};
 
 const NONE32: u32 = 4294967295;
 const CT: u8 = 1;

@@ -18,11 +18,7 @@
 //   manifolds is a joint.
 // - `scratch`: SCRATCH f32 lanes per body (start-of-substep pose and
 //   velocities, the integrated pose).
-use self::{
-    fastmath_atan2f,
-    fastmath_cosf,
-    fastmath_sinf
-};
+use self::{fastmath_atan2f, fastmath_cosf, fastmath_sinf};
 
 const BODY: u64 = 22;
 const MAN: u64 = 41;
