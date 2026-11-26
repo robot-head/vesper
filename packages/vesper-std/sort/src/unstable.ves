@@ -3,7 +3,8 @@
 // Element reads use `try_get`, whose `None` arm no index here reaches, so
 // the functions are total and raise nothing.
 use @vesper-std/sugar::{
-    guard
+    guard,
+    some_or
 };
 
 // Whether `a` sorts before `b`.
@@ -67,9 +68,8 @@ pub fn insertion[T: mod copy + Ord](inout s: Slice[T], lo: u64, hi: u64) {
                         break;
                     }
                     let k = wrapping_sub(j, 1);
-                    let y = match s.try_get(k) {
-                        Option::Some(y) => y,
-                        Option::None => x,
+                    let y = some_or s.try_get(k) else {
+                        x
                     };
                     if !lt(x, y) {
                         break;
@@ -158,9 +158,8 @@ fn partition_at[T: mod copy + Ord](inout s: Slice[T], lo: u64, hi: u64, p: T) ->
             if i >= last {
                 break;
             }
-            xi = match s.try_get(i) {
-                Option::Some(x) => x,
-                Option::None => p,
+            xi = some_or s.try_get(i) else {
+                p
             };
             if !lt(xi, p) {
                 break;
@@ -168,9 +167,8 @@ fn partition_at[T: mod copy + Ord](inout s: Slice[T], lo: u64, hi: u64, p: T) ->
         }
         loop {
             j = wrapping_sub(j, 1);
-            xj = match s.try_get(j) {
-                Option::Some(x) => x,
-                Option::None => p,
+            xj = some_or s.try_get(j) else {
+                p
             };
             if !lt(p, xj) {
                 break;
