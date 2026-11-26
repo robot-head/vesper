@@ -551,11 +551,37 @@ Release, one process, median of three: Rust 1.79 s, the port 1.09 s (0.61x).
 (E0112), so the proof code sits in the formatter's own file instead of
 making its internals public.
 
+## Part 6c: `vesper verify SOURCE --format` in Vesper
+
+`run_format` (packages/vesper-verify/src/run.ves) is `verify_commands::run`
+for `--format`: it reads the bounded source (a regular file without a final
+symlink, at most 128 KiB, UTF-8), captures the formatter model and emits
+its witness (part 6b), writes the pinned model (`src/model.ves`, generated
+from lean/StylusAndLintSafety.lean and kept current by the test) and the
+witness into a private stage, compiles both with Lean under the same
+`LEAN_PATH`-only environment, replays the two theorems through
+@vesper/proof-audit's audit (`audit_generated`), and prints the witness,
+the text line or the `vesper.format-proof/1` report (the audit object
+re-serialized with sorted keys, as `serde_json::Value` prints it), or the
+rejection document and the `formatter model verification failed:` error.
+
+The hybrid serves it from `modules/verify` (swap `verify`):
+`hc_verify_run` hands `--format` runs to the module and keeps `--extract`
+in Rust. It is its own module, like proof_audit, because it links
+hash-sys's BLAKE3 C.
+
+tests/self_host_verify_format.rs builds a driver from the package and runs
+each case beside `vesper verify`: missing, directory, oversized and
+symlinked sources, four rejected sources (parse error, unclosed comment,
+raw macro tokens, invalid UTF-8), Lean paths that cannot start, and with
+Lean 4.35.0 three sources in text, `--json` and `--emit-lean` form.
+29 cases, 0 diffs (9 with real Lean). Debug builds, total wall time:
+Rust 170.5 s, the port 48.2 s (0.28x); Lean dominates both.
+
 ## What is left
 
-- **Verify command** (`src/verify_commands.rs`): `--format` needs the
-  formatter's proof model (`vesper-fmt` proof_model.rs, proof_lean.rs)
-  in Vesper; `--extract` needs the checked world in Vesper. Both reuse
+- **Verify command** (`src/verify_commands.rs`): `--format` is in Vesper
+  (part 6c); `--extract` needs the checked world in Vesper and reuses
   `@vesper/proof-audit`'s audit (`audit_generated`, `audit_policy`).
 - **`extract_report` callers**: `verify --extract` and the forge
   provenance path still build the Rust `Extraction`; they move with the
