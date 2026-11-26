@@ -46,20 +46,16 @@ fn append_utf16_as_utf8(in src: Slice[u16], inout out: ChunkSeq[u8]) {
         if i >= n {
             break;
         }
-        let w1 = widen_u32(
-            match src.try_get(i) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            }
-        );
+        let w1 = widen_u32(match src.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        });
         i = wrapping_add(i, 1);
         if w1 >= 55296 && w1 <= 56319 && i < n {
-            let w2 = widen_u32(
-                match src.try_get(i) {
-                    Option::Some(v) => v,
-                    Option::None => 0,
-                }
-            );
+            let w2 = widen_u32(match src.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            });
             if w2 >= 56320 && w2 <= 57343 {
                 i = wrapping_add(i, 1);
                 let hi = wrapping_shl_u32(wrapping_sub(w1, 55296), 10);

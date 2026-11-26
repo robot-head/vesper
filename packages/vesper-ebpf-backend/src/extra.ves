@@ -237,20 +237,18 @@ pub fn read_extra(inout r: Reader, in b: Slice[u8], inout t: Types, inout names:
         }
         let tail = r.word(in b) != 0;
         set_by_symbol(inout x.fn_by, name, inc32(n32(x.fns.len())));
-        x.fns.push(
-            XFn {
-                name: name,
-                s0: s0,
-                s1: s1,
-                ngen: ngen,
-                pa: pa,
-                pn: pn,
-                result: result,
-                ea: ea,
-                en: en,
-                tail: tail
-            }
-        );
+        x.fns.push(XFn {
+            name: name,
+            s0: s0,
+            s1: s1,
+            ngen: ngen,
+            pa: pa,
+            pn: pn,
+            result: result,
+            ea: ea,
+            en: en,
+            tail: tail
+        });
     }
     let nd = r.word(in b);
     for i in 0..nd {

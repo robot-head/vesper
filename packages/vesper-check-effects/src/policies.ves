@@ -22,25 +22,25 @@ copy struct RtFunRow {
     row: u32,
 }
 
-fn push_name(in c: Ctx, inout o: ChunkSeq[u8], name: u32) {
-    push_u32_le(inout o, c.names.size(name));
-    c.names.write(name, inout o);
+fn push_name(in ctx: Ctx, inout out: ChunkSeq[u8], name: u32) {
+    push_u32_le(inout out, ctx.names.size(name));
+    ctx.names.write(name, inout out);
 }
 
-fn has_u32(in xs: ChunkSeq[u32], x: u32) -> bool {
-    for i in 0..xs.len() {
-        if u32_at(in xs, i) == x {
+fn has_u32(in values: ChunkSeq[u32], value: u32) -> bool {
+    for i in 0..values.len() {
+        if u32_at(in values, i) == value {
             return true;
         }
     }
     false
 }
 
-// Collect sorted, deduplicated direct callee names from `s.direct`.
-fn sorted_callees(in c: Ctx, in s: Walk) -> ChunkSeq[u32] {
+// Collect sorted, deduplicated direct callee names from `walk.direct_callees`.
+fn sorted_callees(in ctx: Ctx, in walk: Walk) -> ChunkSeq[u32] {
     let mut out = ChunkSeq::new[u32]();
-    for i in 0..s.direct.len() {
-        let callee = u32_at(in s.direct, i);
+    for i in 0..walk.direct_callees.len() {
+        let callee = u32_at(in walk.direct_callees, i);
         if !has_u32(in out, callee) {
             out.push(callee);
         }
@@ -55,7 +55,7 @@ fn sorted_callees(in c: Ctx, in s: Walk) -> ChunkSeq[u32] {
                 break;
             }
             let prev = u32_at(in out, wrapping_sub(j, 1));
-            if cmp_names(in c, prev, key) <= 0 {
+            if cmp_names(in ctx, prev, key) <= 0 {
                 break;
             }
             let _ok = out.try_set(j, prev);
@@ -66,161 +66,164 @@ fn sorted_callees(in c: Ctx, in s: Walk) -> ChunkSeq[u32] {
     out
 }
 
-fn push_name_list(in c: Ctx, inout o: ChunkSeq[u8], in names: ChunkSeq[u32]) {
-    push_u32_le(inout o, names.len());
+fn push_name_list(in ctx: Ctx, inout out: ChunkSeq[u8], in names: ChunkSeq[u32]) {
+    push_u32_le(inout out, names.len());
     for i in 0..names.len() {
-        push_name(in c, inout o, u32_at(in names, i));
+        push_name(in ctx, inout out, u32_at(in names, i));
     }
 }
 
-fn push_u32_list(inout o: ChunkSeq[u8], in xs: ChunkSeq[u32]) {
-    push_u32_le(inout o, xs.len());
-    for i in 0..xs.len() {
-        push_u32_le(inout o, w(u32_at(in xs, i)));
+fn push_u32_list(inout out: ChunkSeq[u8], in values: ChunkSeq[u32]) {
+    push_u32_le(inout out, values.len());
+    for i in 0..values.len() {
+        push_u32_le(inout out, w(u32_at(in values, i)));
     }
 }
 
-pub fn build_policies_bin(inout c: Ctx, in p: Prog, inout s: Walk, inout o: ChunkSeq[u8]) {
-    summarise(inout c, in p, inout s);
-    s.emit = false;
+pub fn build_policies_bin(
+    inout ctx: Ctx,
+    in prog: Prog,
+    inout walk: Walk,
+    inout out: ChunkSeq[u8]
+) {
+    summarise(inout ctx, in prog, inout walk);
+    walk.emit = false;
     let mut ct_buf = ChunkSeq::new[u8]();
-    let mut ct_n: u64 = 0;
+    let mut ct_count: u64 = 0;
     let mut rt_funs = ChunkSeq::new[RtFunRow]();
     let mut rt_calls_buf = ChunkSeq::new[u8]();
-    let mut rt_calls_n: u64 = 0;
+    let mut rt_calls_count: u64 = 0;
     let mut rt_called = ChunkSeq::new[u32]();
     let mut df_buf = ChunkSeq::new[u8]();
-    let mut df_n: u64 = 0;
+    let mut df_count: u64 = 0;
     let mut cd_buf = ChunkSeq::new[u8]();
-    let mut cd_n: u64 = 0;
+    let mut cd_count: u64 = 0;
 
-    for i in 0..p.funs.len() {
-        let f = p.fun(n32(i));
-        let caps = caps_of(in c, s.k, f.row);
+    for i in 0..prog.funs.len() {
+        let func = prog.fun(n32(i));
+        let caps = caps_of(in ctx, walk.syms, func.row);
         if caps == 0 {
             continue;
         }
-        start(inout c, in p, inout s, n32(i), caps, true);
-        if f.body != NONE32 {
-            let _t = expr(inout c, in p, inout s, f.body);
+        start(inout ctx, in prog, inout walk, n32(i), caps, true);
+        if func.body != NONE32 {
+            let _t = expr(inout ctx, in prog, inout walk, func.body);
         }
-        let callees = sorted_callees(in c, in s);
+        let callees = sorted_callees(in ctx, in walk);
 
         if (caps & CT) != 0 {
-            ct_n = inc(ct_n);
-            push_name(in c, inout ct_buf, f.name);
-            push_u32_le(inout ct_buf, f.start);
-            push_u32_le(inout ct_buf, f.end);
-            let mut sec_params = ChunkSeq::new[u32]();
-            let mut inf_params = ChunkSeq::new[u32]();
-            for pi in 0..w(f.pn) {
-                let param = p.param(add(w(f.pa), pi));
-                let is_sec = secret_type(in c, inout s, param.ty);
-                let is_inf = s.cur.inferred.has(pair(f.name, n32(pi)));
-                if is_sec || is_inf {
-                    sec_params.push(n32(pi));
+            ct_count = inc(ct_count);
+            push_name(in ctx, inout ct_buf, func.name);
+            push_u32_le(inout ct_buf, func.start);
+            push_u32_le(inout ct_buf, func.end);
+            let mut secret_params = ChunkSeq::new[u32]();
+            let mut inferred_params = ChunkSeq::new[u32]();
+            for param_index in 0..w(func.param_count) {
+                let param = prog.param(add(w(func.param_start), param_index));
+                let is_secret = secret_type(in ctx, inout walk, param.ty);
+                let is_inferred = walk.summaries.inferred.has(pair(func.name, n32(param_index)));
+                if is_secret || is_inferred {
+                    secret_params.push(n32(param_index));
                 }
-                if !is_sec && is_inf {
-                    inf_params.push(n32(pi));
+                if !is_secret && is_inferred {
+                    inferred_params.push(n32(param_index));
                 }
             }
-            push_u32_list(inout ct_buf, in sec_params);
-            push_u32_list(inout ct_buf, in inf_params);
-            let sec_res: u8 = if secret_type(in c, inout s, f.result) {
+            push_u32_list(inout ct_buf, in secret_params);
+            push_u32_list(inout ct_buf, in inferred_params);
+            let secret_result: u8 = if secret_type(in ctx, inout walk, func.result) {
                 1
             } else {
                 0
             };
-            let gate: u8 = if is_declassify_gate(in c, f.name) {
+            let is_gate: u8 = if is_declassify_gate(in ctx, func.name) {
                 1
             } else {
                 0
             };
-            ct_buf.push(sec_res);
-            ct_buf.push(gate);
+            ct_buf.push(secret_result);
+            ct_buf.push(is_gate);
             let mut ct_callees = ChunkSeq::new[u32]();
-            let mut de_callees = ChunkSeq::new[u32]();
-            for ci in 0..callees.len() {
-                let callee = u32_at(in callees, ci);
-                if is_declassify_gate(in c, callee) {
-                    de_callees.push(callee);
+            let mut declassify_callees = ChunkSeq::new[u32]();
+            for j in 0..callees.len() {
+                let callee = u32_at(in callees, j);
+                if is_declassify_gate(in ctx, callee) {
+                    declassify_callees.push(callee);
                 } else {
                     ct_callees.push(callee);
                 }
             }
-            push_name_list(in c, inout ct_buf, in ct_callees);
-            push_name_list(in c, inout ct_buf, in de_callees);
+            push_name_list(in ctx, inout ct_buf, in ct_callees);
+            push_name_list(in ctx, inout ct_buf, in declassify_callees);
         }
 
         if (caps & RT) != 0 {
-            for ci in 0..callees.len() {
-                let callee = u32_at(in callees, ci);
-                rt_calls_n = inc(rt_calls_n);
-                push_name(in c, inout rt_calls_buf, f.name);
-                push_name(in c, inout rt_calls_buf, callee);
+            for j in 0..callees.len() {
+                let callee = u32_at(in callees, j);
+                rt_calls_count = inc(rt_calls_count);
+                push_name(in ctx, inout rt_calls_buf, func.name);
+                push_name(in ctx, inout rt_calls_buf, callee);
                 if !has_u32(in rt_called, callee) {
                     rt_called.push(callee);
                 }
             }
-            rt_funs.push(
-                RtFunRow {
-                    name: f.name,
-                    start: f.start,
-                    end: f.end,
-                    row: f.row,
-                }
-            );
+            rt_funs.push(RtFunRow {
+                name: func.name,
+                start: func.start,
+                end: func.end,
+                row: func.row,
+            });
         }
 
         if (caps & CD) != 0 {
-            cd_n = inc(cd_n);
-            push_name(in c, inout cd_buf, f.name);
-            push_u32_le(inout cd_buf, f.start);
-            push_u32_le(inout cd_buf, f.end);
+            cd_count = inc(cd_count);
+            push_name(in ctx, inout cd_buf, func.name);
+            push_u32_le(inout cd_buf, func.start);
+            push_u32_le(inout cd_buf, func.end);
         }
 
         if (caps & DF) != 0 {
-            df_n = inc(df_n);
-            push_name(in c, inout df_buf, f.name);
-            push_u32_le(inout df_buf, f.start);
-            push_u32_le(inout df_buf, f.end);
-            push_name_list(in c, inout df_buf, in callees);
+            df_count = inc(df_count);
+            push_name(in ctx, inout df_buf, func.name);
+            push_u32_le(inout df_buf, func.start);
+            push_u32_le(inout df_buf, func.end);
+            push_name_list(in ctx, inout df_buf, in callees);
         }
     }
 
-    push_u32_le(inout o, ct_n);
-    o.extend(in ct_buf.as_slice());
+    push_u32_le(inout out, ct_count);
+    out.extend(in ct_buf.as_slice());
 
-    push_u32_le(inout o, rt_funs.len());
+    push_u32_le(inout out, rt_funs.len());
     for i in 0..rt_funs.len() {
         match rt_funs.try_get(i) {
-            Option::Some(rf) => {
-                push_name(in c, inout o, rf.name);
-                push_u32_le(inout o, rf.start);
-                push_u32_le(inout o, rf.end);
-                let is_root: u8 = if !has_u32(in rt_called, rf.name) {
+            Option::Some(rt_fun) => {
+                push_name(in ctx, inout out, rt_fun.name);
+                push_u32_le(inout out, rt_fun.start);
+                push_u32_le(inout out, rt_fun.end);
+                let is_root: u8 = if !has_u32(in rt_called, rt_fun.name) {
                     1
                 } else {
                     0
                 };
-                o.push(is_root);
-                let tn = c.types.node(rf.row);
-                let tr = c.types.row(tn.r2);
-                push_u32_le(inout o, w(tr.n));
-                for ei in 0..w(tr.n) {
-                    let eff = c.types.effect_at(add(w(tr.a), ei));
-                    push_name(in c, inout o, eff.name);
+                out.push(is_root);
+                let ty_node = ctx.types.node(rt_fun.row);
+                let row_node = ctx.types.row(ty_node.r2);
+                push_u32_le(inout out, w(row_node.n));
+                for ei in 0..w(row_node.n) {
+                    let eff = ctx.types.effect_at(add(w(row_node.a), ei));
+                    push_name(in ctx, inout out, eff.name);
                 }
             },
             Option::None => {},
         }
     }
-    push_u32_le(inout o, rt_calls_n);
-    o.extend(in rt_calls_buf.as_slice());
+    push_u32_le(inout out, rt_calls_count);
+    out.extend(in rt_calls_buf.as_slice());
 
-    push_u32_le(inout o, df_n);
-    o.extend(in df_buf.as_slice());
+    push_u32_le(inout out, df_count);
+    out.extend(in df_buf.as_slice());
 
-    push_u32_le(inout o, cd_n);
-    o.extend(in cd_buf.as_slice());
+    push_u32_le(inout out, cd_count);
+    out.extend(in cd_buf.as_slice());
 }

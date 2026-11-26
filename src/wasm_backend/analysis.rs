@@ -9,6 +9,12 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+/// Dispatch arity the host `Trace` frame needs: `start_child` and
+/// `emit_err` take three arguments.
+const TRACE_DISPATCH_ARITY: usize = 3;
+/// How many join blocks the tail-value searches follow before giving up.
+const MAX_FLOW_DEPTH: usize = 64;
+
 /// How a handler's nested function is compiled.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Role {
@@ -218,7 +224,7 @@ pub(crate) fn plan(
 ) -> Result<Plan, WasmError> {
     let host = super::host::capabilities(world, entry)?;
     let min_arity = if host.contains(&super::host::HostCapability::Trace) {
-        3
+        TRACE_DISPATCH_ARITY
     } else {
         1
     };
@@ -711,7 +717,7 @@ fn first_class(name: &str) -> WasmError {
 
 /// Whether `value`, defined last in block `b`, reaches a `Return` unchanged.
 pub(crate) fn flows_to_return(f: &FunctionIr, b: usize, value: ValueId, depth: usize) -> bool {
-    if depth > 64 {
+    if depth > MAX_FLOW_DEPTH {
         return false;
     }
     match &f.blocks[b].terminator {
@@ -743,7 +749,7 @@ fn resumed_value(
     if tail.contains(&value) {
         return true;
     }
-    if depth > 64 {
+    if depth > MAX_FLOW_DEPTH {
         return false;
     }
     let Some(pos) = f.blocks[b].params.iter().position(|p| *p == value) else {

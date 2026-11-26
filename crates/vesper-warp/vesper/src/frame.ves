@@ -436,9 +436,11 @@ pub fn fr_wire_next(in pairs: Slice[u8], at: u64, prev_smallest: u64) -> Option[
                 if len > largest {
                     return Option::None;
                 }
-                Option::Some(
-                    WireStep { smallest: wrapping_sub(largest, len), largest: largest, next: q2 }
-                )
+                Option::Some(WireStep {
+                    smallest: wrapping_sub(largest, len),
+                    largest: largest,
+                    next: q2
+                })
             },
         },
     }

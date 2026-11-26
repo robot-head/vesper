@@ -59,7 +59,7 @@ const S_ITEMS: u8 = 11;
 // its balanced tree (`i + 1` for an atom).
 pub struct Toks {
     // Rows of four words: kind, start, end, tree end.
-    tk: ChunkSeq[u32]
+    tokens: ChunkSeq[u32]
 }
 
 // Matcher state: the budget, the refusal, the compiled rule, the
@@ -71,20 +71,20 @@ pub struct Mx {
     // Ops: rows of three words, kind, a, b.
     ops: ChunkSeq[u64],
     // Each repetition's capture names: rows of (repetition op, capture).
-    rn: ChunkSeq[u64],
+    rep_names: ChunkSeq[u64],
     // Captures: rows of four words, the pattern tokens of the name and
     // the sort, the sort's code and the passing mode.
     caps: ChunkSeq[u64],
     // Event log rows of `REC` words: previous record, first and count of
-    // its indices in `idx_pool`, kind (0 value, 1 extent), and a, b, c,
+    // its indices in `index_pool`, kind (0 value, 1 extent), and a, b, c,
     // from_tail (value: capture, start, end; extent: repetition op, count).
-    rec: ChunkSeq[u64],
-    idx_pool: ChunkSeq[u64],
+    records: ChunkSeq[u64],
+    index_pool: ChunkSeq[u64],
     // Backtracking stack rows of `TD` words: pc, pos, log, pending op (or
     // NONE), pending range, first word and count of its frames in
-    // `fr_pool`.
-    td: ChunkSeq[u64],
-    fr_pool: ChunkSeq[u64]
+    // `frame_pool`.
+    stack: ChunkSeq[u64],
+    frame_pool: ChunkSeq[u64]
 }
 
 fn mx_new(work: u64) -> Mx {
@@ -93,39 +93,39 @@ fn mx_new(work: u64) -> Mx {
         failed: false,
         msg: ChunkSeq::new[u8](),
         ops: ChunkSeq::new[u64](),
-        rn: ChunkSeq::new[u64](),
+        rep_names: ChunkSeq::new[u64](),
         caps: ChunkSeq::new[u64](),
-        rec: ChunkSeq::new[u64](),
-        idx_pool: ChunkSeq::new[u64](),
-        td: ChunkSeq::new[u64](),
-        fr_pool: ChunkSeq::new[u64]()
+        records: ChunkSeq::new[u64](),
+        index_pool: ChunkSeq::new[u64](),
+        stack: ChunkSeq::new[u64](),
+        frame_pool: ChunkSeq::new[u64]()
     }
 }
 
-fn b8(in s: ChunkSeq[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
+fn b8(in seq: ChunkSeq[u8], i: u64) -> u8 {
+    match seq.try_get(i) {
+        Option::Some(value) => value,
         Option::None => 0,
     }
 }
 
-fn w32(in s: ChunkSeq[u32], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(v) => widen_u64(v),
+fn w32(in seq: ChunkSeq[u32], i: u64) -> u64 {
+    match seq.try_get(i) {
+        Option::Some(value) => widen_u64(value),
         Option::None => 0,
     }
 }
 
-fn w64(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
+fn w64(in seq: ChunkSeq[u64], i: u64) -> u64 {
+    match seq.try_get(i) {
+        Option::Some(value) => value,
         Option::None => 0,
     }
 }
 
-// Word `k` of event record `r`.
-fn rec_at(in m: Mx, r: u64, k: u64) -> u64 {
-    w64(in m.rec, add(wrapping_mul(r, REC), k))
+// Word `field` of event record `record`.
+fn rec_at(in matcher: Mx, record: u64, field: u64) -> u64 {
+    w64(in matcher.records, add(wrapping_mul(record, REC), field))
 }
 
 fn inc(x: u64) -> u64 {
@@ -140,64 +140,64 @@ fn sub(a: u64, b: u64) -> u64 {
     wrapping_sub(a, b)
 }
 
-fn fail(inout m: Mx, in text: Slice[u8]) {
-    if !m.failed {
-        m.failed = true;
-        m.msg.clear();
-        m.msg.extend(in text);
+fn fail(inout matcher: Mx, in text: Slice[u8]) {
+    if !matcher.failed {
+        matcher.failed = true;
+        matcher.msg.clear();
+        matcher.msg.extend(in text);
     }
 }
 
 // `spend`: false (and the refusal) once the budget cannot pay `n`.
-fn spend(inout m: Mx, n: u64) -> bool {
-    if n > m.work {
-        fail(inout m, in "sugar pattern matching work limit exceeded".as_bytes());
+fn spend(inout matcher: Mx, n: u64) -> bool {
+    if n > matcher.work {
+        fail(inout matcher, in "sugar pattern matching work limit exceeded".as_bytes());
         return false;
     }
-    m.work = sub(m.work, n);
+    matcher.work = sub(matcher.work, n);
     true
 }
 
-fn len(in t: Toks) -> u64 {
-    t.tk.len() >> 2
+fn len(in toks: Toks) -> u64 {
+    toks.tokens.len() >> 2
 }
 
 // `Tokens::kind`: Eof past the end.
-fn kind(in t: Toks, i: u64) -> u8 {
-    match t.tk.try_get(i << 2) {
+fn kind(in toks: Toks, i: u64) -> u8 {
+    match toks.tokens.try_get(i << 2) {
         Option::Some(k) => wrapping_u8(widen_u64(k)),
         Option::None => k_eof(),
     }
 }
 
-fn tok_s(in t: Toks, i: u64) -> u64 {
-    w32(in t.tk, inc(i << 2))
+fn tok_s(in toks: Toks, i: u64) -> u64 {
+    w32(in toks.tokens, inc(i << 2))
 }
 
-fn tok_e(in t: Toks, i: u64) -> u64 {
-    w32(in t.tk, add(i << 2, 2))
+fn tok_e(in toks: Toks, i: u64) -> u64 {
+    w32(in toks.tokens, add(i << 2, 2))
 }
 
-fn tree_end(in t: Toks, i: u64) -> u64 {
-    w32(in t.tk, add(i << 2, 3))
+fn tree_end(in toks: Toks, i: u64) -> u64 {
+    w32(in toks.tokens, add(i << 2, 3))
 }
 
 // `Tokens::text(i) == w`; past the end the text is empty.
-fn text_is(in b: ChunkSeq[u8], in t: Toks, i: u64, in w: Slice[u8]) -> bool {
-    if i >= len(in t) {
-        return w.len() == 0;
+fn text_is(in text: ChunkSeq[u8], in toks: Toks, i: u64, in expected: Slice[u8]) -> bool {
+    if i >= len(in toks) {
+        return expected.len() == 0;
     }
-    let s = tok_s(in t, i);
-    let n = sub(tok_e(in t, i), s);
-    if n != w.len() {
+    let start = tok_s(in toks, i);
+    let n = sub(tok_e(in toks, i), start);
+    if n != expected.len() {
         return false;
     }
     for j in 0..n {
-        let c = match w.try_get(j) {
-            Option::Some(c) => c,
+        let byte = match expected.try_get(j) {
+            Option::Some(byte) => byte,
             Option::None => 0,
         };
-        if b8(in b, add(s, j)) != c {
+        if b8(in text, add(start, j)) != byte {
             return false;
         }
     }
@@ -206,132 +206,132 @@ fn text_is(in b: ChunkSeq[u8], in t: Toks, i: u64, in w: Slice[u8]) -> bool {
 
 // `p.text(i) == t.text(j)` across two texts.
 fn same_text(
-    in pb: ChunkSeq[u8],
-    in p: Toks,
+    in pattern: ChunkSeq[u8],
+    in pattern_toks: Toks,
     i: u64,
-    in tb: ChunkSeq[u8],
-    in t: Toks,
+    in target: ChunkSeq[u8],
+    in target_toks: Toks,
     j: u64
 ) -> bool {
-    let pn = if i < len(in p) {
-        sub(tok_e(in p, i), tok_s(in p, i))
+    let pattern_len = if i < len(in pattern_toks) {
+        sub(tok_e(in pattern_toks, i), tok_s(in pattern_toks, i))
     } else {
         0
     };
-    let tn = if j < len(in t) {
-        sub(tok_e(in t, j), tok_s(in t, j))
+    let target_len = if j < len(in target_toks) {
+        sub(tok_e(in target_toks, j), tok_s(in target_toks, j))
     } else {
         0
     };
-    if pn != tn {
+    if pattern_len != target_len {
         return false;
     }
-    let ps = tok_s(in p, i);
-    let ts = tok_s(in t, j);
-    for k in 0..pn {
-        if b8(in pb, add(ps, k)) != b8(in tb, add(ts, k)) {
+    let pattern_start = tok_s(in pattern_toks, i);
+    let target_start = tok_s(in target_toks, j);
+    for k in 0..pattern_len {
+        if b8(in pattern, add(pattern_start, k)) != b8(in target, add(target_start, k)) {
             return false;
         }
     }
     true
 }
 
-fn close(k: u8) -> u8 {
-    if k == k_l_paren() {
+fn close(tok_kind: u8) -> u8 {
+    if tok_kind == k_l_paren() {
         k_r_paren()
-    } else if k == k_l_bracket() {
+    } else if tok_kind == k_l_bracket() {
         k_r_bracket()
-    } else if k == k_l_brace() {
+    } else if tok_kind == k_l_brace() {
         k_r_brace()
     } else {
         k_eof()
     }
 }
 
-fn closer(k: u8) -> bool {
-    k == k_r_paren() || k == k_r_bracket() || k == k_r_brace()
+fn closer(tok_kind: u8) -> bool {
+    tok_kind == k_r_paren() || tok_kind == k_r_bracket() || tok_kind == k_r_brace()
 }
 
 // `Tokens::new`: false (and the refusal) for a lexer refusal, a lexer
 // diagnostic or unbalanced delimiters.
-fn toks_new(in b: ChunkSeq[u8], inout m: Mx, inout t: Toks) -> bool {
-    let mut d = diags_new();
+fn toks_new(in source: ChunkSeq[u8], inout matcher: Mx, inout toks: Toks) -> bool {
+    let mut diags = diags_new();
     let raw = lex_sugar_raw_with_limits(
-        in b.as_slice(),
-        inout d,
+        in source.as_slice(),
+        inout diags,
         max_source_bytes(),
         max_tokens(),
         max_diagnostics()
     );
     if raw.rejected {
-        let end = if d.at.len() > 1 {
-            w32(in d.at, 1)
+        let end = if diags.at.len() > 1 {
+            w32(in diags.at, 1)
         } else {
-            d.text.len()
+            diags.text.len()
         };
         let mut text = ChunkSeq::new[u8]();
-        for j in w32(in d.at, 0)..end {
-            text.push(b8(in d.text, j));
+        for j in w32(in diags.at, 0)..end {
+            text.push(b8(in diags.text, j));
         }
-        fail(inout m, in text.as_slice());
+        fail(inout matcher, in text.as_slice());
         return false;
     }
-    if d.code.len() != 0 {
-        fail(inout m, in "invalid token in sugar rule or invocation".as_bytes());
+    if diags.code.len() != 0 {
+        fail(inout matcher, in "invalid token in sugar rule or invocation".as_bytes());
         return false;
     }
     for i in 0..raw.kind.len() {
-        let k = b8(in raw.kind, i);
-        if !trivia_kind(k) && k != k_eof() {
-            t.tk.push(widen_u32(k));
-            t.tk.push(wrapping_u32(w32(in raw.start, i)));
-            t.tk.push(wrapping_u32(token_end(in raw, i)));
-            t.tk.push(wrapping_u32(inc(t.tk.len() >> 2)));
+        let tok_kind = b8(in raw.kind, i);
+        if !trivia_kind(tok_kind) && tok_kind != k_eof() {
+            toks.tokens.push(widen_u32(tok_kind));
+            toks.tokens.push(wrapping_u32(w32(in raw.start, i)));
+            toks.tokens.push(wrapping_u32(token_end(in raw, i)));
+            toks.tokens.push(wrapping_u32(inc(toks.tokens.len() >> 2)));
         }
     }
     let mut stack = ChunkSeq::new[u64]();
-    for i in 0..len(in t) {
-        let k = kind(in t, i);
-        if close(k) != k_eof() {
+    for i in 0..len(in toks) {
+        let tok_kind = kind(in toks, i);
+        if close(tok_kind) != k_eof() {
             stack.push(i);
-        } else if closer(k) {
+        } else if closer(tok_kind) {
             if stack.len() == 0 {
-                fail(inout m, in "unmatched sugar delimiter".as_bytes());
+                fail(inout matcher, in "unmatched sugar delimiter".as_bytes());
                 return false;
             }
             let start = w64(in stack, sub(stack.len(), 1));
             stack.truncate(sub(stack.len(), 1));
-            if close(kind(in t, start)) != k {
-                fail(inout m, in "mismatched sugar delimiter".as_bytes());
+            if close(kind(in toks, start)) != tok_kind {
+                fail(inout matcher, in "mismatched sugar delimiter".as_bytes());
                 return false;
             }
-            t.tk.try_set(add(start << 2, 3), wrapping_u32(inc(i)));
+            toks.tokens.try_set(add(start << 2, 3), wrapping_u32(inc(i)));
         }
     }
     if stack.len() != 0 {
-        fail(inout m, in "unclosed sugar delimiter".as_bytes());
+        fail(inout matcher, in "unclosed sugar delimiter".as_bytes());
         return false;
     }
     true
 }
 
 fn toks_empty() -> Toks {
-    Toks { tk: ChunkSeq::new[u32]() }
+    Toks { tokens: ChunkSeq::new[u32]() }
 }
 
-fn joined(in t: Toks, i: u64) -> bool {
-    tok_e(in t, sub(i, 1)) == tok_s(in t, i)
+fn joined(in toks: Toks, i: u64) -> bool {
+    tok_e(in toks, sub(i, 1)) == tok_s(in toks, i)
 }
 
 // `parser::sugar_operator(tokens, start)`'s end, or 0 when there is none.
-fn sugar_operator_end(in t: Toks, start: u64) -> u64 {
-    let n = len(in t);
+fn sugar_operator_end(in toks: Toks, start: u64) -> u64 {
+    let n = len(in toks);
     if inc(start) >= n {
         return 0;
     }
-    let head = kind(in t, start);
-    let next = kind(in t, inc(start));
-    if tok_e(in t, start) != tok_s(in t, inc(start)) {
+    let head = kind(in toks, start);
+    let next = kind(in toks, inc(start));
+    if tok_e(in toks, start) != tok_s(in toks, inc(start)) {
         return 0;
     }
     if head == k_pipe() {
@@ -340,7 +340,7 @@ fn sugar_operator_end(in t: Toks, start: u64) -> u64 {
         }
         if next == k_question() {
             let last = add(start, 2);
-            if last < n && kind(in t, last) == k_gt() && joined(in t, last) {
+            if last < n && kind(in toks, last) == k_gt() && joined(in toks, last) {
                 return add(start, 3);
             }
         }
@@ -383,19 +383,19 @@ fn sugar_operator_end(in t: Toks, start: u64) -> u64 {
         if end >= n {
             break;
         }
-        let k = kind(in t, end);
-        let symbol = k == k_dot()
-            || k == k_dot_dot()
-            || k == k_dot_dot_eq()
-            || k == k_question()
-            || k == k_tilde()
-            || k == k_bang()
-            || k == k_fat_arrow()
-            || k == k_arrow()
-            || k == k_pipe_eq()
-            || k == k_amp_eq()
-            || core_operator_kind(k);
-        if !symbol || !joined(in t, end) {
+        let tok_kind = kind(in toks, end);
+        let symbol = tok_kind == k_dot()
+            || tok_kind == k_dot_dot()
+            || tok_kind == k_dot_dot_eq()
+            || tok_kind == k_question()
+            || tok_kind == k_tilde()
+            || tok_kind == k_bang()
+            || tok_kind == k_fat_arrow()
+            || tok_kind == k_arrow()
+            || tok_kind == k_pipe_eq()
+            || tok_kind == k_amp_eq()
+            || core_operator_kind(tok_kind);
+        if !symbol || !joined(in toks, end) {
             break;
         }
         end = inc(end);
@@ -404,53 +404,57 @@ fn sugar_operator_end(in t: Toks, start: u64) -> u64 {
 }
 
 // `tail_name(t).is_some()`.
-fn has_tail_name(in b: ChunkSeq[u8], in t: Toks) -> bool {
-    if len(in t) < 5 {
+fn has_tail_name(in text: ChunkSeq[u8], in toks: Toks) -> bool {
+    if len(in toks) < 5 {
         return false;
     }
-    let i = sub(len(in t), 5);
-    kind(in t, i) == k_dollar()
-        && kind(in t, inc(i)) == k_dot_dot()
-        && kind(in t, add(i, 3)) == k_colon()
+    let dollar = sub(len(in toks), 5);
+    kind(in toks, dollar) == k_dollar()
+        && kind(in toks, inc(dollar)) == k_dot_dot()
+        && kind(in toks, add(dollar, 3)) == k_colon()
         && (
-            text_is(in b, in t, add(i, 4), in "stmts".as_bytes())
-                || text_is(in b, in t, add(i, 4), in "scope".as_bytes())
+            text_is(in text, in toks, add(dollar, 4), in "stmts".as_bytes())
+                || text_is(in text, in toks, add(dollar, 4), in "scope".as_bytes())
         )
 }
 
 // `captures_tail(pattern)`.
 pub fn captures_tail(in pattern: ChunkSeq[u8]) -> bool {
-    let mut m = mx_new(0);
-    let mut t = toks_empty();
-    toks_new(in pattern, inout m, inout t) && has_tail_name(in pattern, in t)
+    let mut matcher = mx_new(0);
+    let mut toks = toks_empty();
+    toks_new(in pattern, inout matcher, inout toks) && has_tail_name(in pattern, in toks)
 }
 
-fn head_kind(k: u8) -> bool {
-    k == k_lower() || k == k_with() || k == k_eff() || k == k_linear() || k == k_state()
+fn head_kind(tok_kind: u8) -> bool {
+    tok_kind == k_lower()
+        || tok_kind == k_with()
+        || tok_kind == k_eff()
+        || tok_kind == k_linear()
+        || tok_kind == k_state()
 }
 
-fn sort_code(in b: ChunkSeq[u8], in t: Toks, i: u64) -> u8 {
-    if text_is(in b, in t, i, in "ident".as_bytes()) {
+fn sort_code(in text: ChunkSeq[u8], in toks: Toks, i: u64) -> u8 {
+    if text_is(in text, in toks, i, in "ident".as_bytes()) {
         S_IDENT
-    } else if text_is(in b, in t, i, in "place".as_bytes()) {
+    } else if text_is(in text, in toks, i, in "place".as_bytes()) {
         S_PLACE
-    } else if text_is(in b, in t, i, in "block".as_bytes()) {
+    } else if text_is(in text, in toks, i, in "block".as_bytes()) {
         S_BLOCK
-    } else if text_is(in b, in t, i, in "scope".as_bytes()) {
+    } else if text_is(in text, in toks, i, in "scope".as_bytes()) {
         S_SCOPE
-    } else if text_is(in b, in t, i, in "expr".as_bytes()) {
+    } else if text_is(in text, in toks, i, in "expr".as_bytes()) {
         S_EXPR
-    } else if text_is(in b, in t, i, in "ty".as_bytes()) {
+    } else if text_is(in text, in toks, i, in "ty".as_bytes()) {
         S_TY
-    } else if text_is(in b, in t, i, in "pat".as_bytes()) {
+    } else if text_is(in text, in toks, i, in "pat".as_bytes()) {
         S_PAT
-    } else if text_is(in b, in t, i, in "args".as_bytes()) {
+    } else if text_is(in text, in toks, i, in "args".as_bytes()) {
         S_ARGS
-    } else if text_is(in b, in t, i, in "pats".as_bytes()) {
+    } else if text_is(in text, in toks, i, in "pats".as_bytes()) {
         S_PATS
-    } else if text_is(in b, in t, i, in "stmts".as_bytes()) {
+    } else if text_is(in text, in toks, i, in "stmts".as_bytes()) {
         S_STMTS
-    } else if text_is(in b, in t, i, in "items".as_bytes()) {
+    } else if text_is(in text, in toks, i, in "items".as_bytes()) {
         S_ITEMS
     } else {
         S_OTHER
@@ -458,180 +462,191 @@ fn sort_code(in b: ChunkSeq[u8], in t: Toks, i: u64) -> u8 {
 }
 
 // The passing mode before a capture: 0 none, 1 in, 2 inout, 3 out, 4 sink.
-fn pass_code(in b: ChunkSeq[u8], in t: Toks, i: u64) -> u8 {
-    if text_is(in b, in t, i, in "in".as_bytes()) {
+fn pass_code(in text: ChunkSeq[u8], in toks: Toks, i: u64) -> u8 {
+    if text_is(in text, in toks, i, in "in".as_bytes()) {
         1
-    } else if text_is(in b, in t, i, in "inout".as_bytes()) {
+    } else if text_is(in text, in toks, i, in "inout".as_bytes()) {
         2
-    } else if text_is(in b, in t, i, in "out".as_bytes()) {
+    } else if text_is(in text, in toks, i, in "out".as_bytes()) {
         3
-    } else if text_is(in b, in t, i, in "sink".as_bytes()) {
+    } else if text_is(in text, in toks, i, in "sink".as_bytes()) {
         4
     } else {
         0
     }
 }
 
-fn op_a(in m: Mx, pc: u64) -> u64 {
-    w64(in m.ops, inc(wrapping_mul(pc, 3)))
+fn op_a(in matcher: Mx, pc: u64) -> u64 {
+    w64(in matcher.ops, inc(wrapping_mul(pc, 3)))
 }
 
-fn op_b(in m: Mx, pc: u64) -> u64 {
-    w64(in m.ops, add(wrapping_mul(pc, 3), 2))
+fn op_b(in matcher: Mx, pc: u64) -> u64 {
+    w64(in matcher.ops, add(wrapping_mul(pc, 3), 2))
 }
 
-fn cap_count(in m: Mx) -> u64 {
-    m.caps.len() >> 2
+fn cap_count(in matcher: Mx) -> u64 {
+    matcher.caps.len() >> 2
 }
 
-// Word `k` of capture `c`.
-fn cap_at(in m: Mx, c: u64, k: u64) -> u64 {
-    w64(in m.caps, add(c << 2, k))
+// Word `field` of capture `cap`.
+fn cap_at(in matcher: Mx, cap: u64, field: u64) -> u64 {
+    w64(in matcher.caps, add(cap << 2, field))
 }
 
-fn push_op(inout m: Mx, k: u8, a: u64, b: u64) {
-    m.ops.push(widen_u64(k));
-    m.ops.push(a);
-    m.ops.push(b);
+fn push_op(inout matcher: Mx, op: u8, a: u64, b: u64) {
+    matcher.ops.push(widen_u64(op));
+    matcher.ops.push(a);
+    matcher.ops.push(b);
 }
 
-fn op_count(in m: Mx) -> u64 {
-    m.ops.len() / 3
+fn op_count(in matcher: Mx) -> u64 {
+    matcher.ops.len() / 3
 }
 
-fn op_kind(in m: Mx, pc: u64) -> u8 {
-    match m.ops.try_get(wrapping_mul(pc, 3)) {
-        Option::Some(k) => wrapping_u8(k),
+fn op_kind(in matcher: Mx, pc: u64) -> u8 {
+    match matcher.ops.try_get(wrapping_mul(pc, 3)) {
+        Option::Some(word) => wrapping_u8(word),
         Option::None => 255,
     }
 }
 
 // `compile`: false (and the refusal) for a malformed rule.
-fn compile(in pb: ChunkSeq[u8], in p: Toks, inout m: Mx) -> bool {
+fn compile(in pattern: ChunkSeq[u8], in pattern_toks: Toks, inout matcher: Mx) -> bool {
     // Open repetition groups: the op of each `Repeat` and the token index
     // of its closing parenthesis.
-    let mut g_op = ChunkSeq::new[u64]();
-    let mut g_end = ChunkSeq::new[u64]();
-    let mut i: u64 = 0;
+    let mut group_ops = ChunkSeq::new[u64]();
+    let mut group_ends = ChunkSeq::new[u64]();
+    let mut tok: u64 = 0;
     let mut symbol_end: u64 = 0;
-    let n = len(in p);
+    let n = len(in pattern_toks);
     loop {
-        if i >= n {
+        if tok >= n {
             break;
         }
-        if g_op.len() != 0 && i == w64(in g_end, sub(g_end.len(), 1)) {
-            let begin = w64(in g_op, sub(g_op.len(), 1));
-            g_op.truncate(sub(g_op.len(), 1));
-            g_end.truncate(sub(g_end.len(), 1));
-            i = inc(i);
-            let sep = if kind(in p, i) == k_star() || kind(in p, i) == k_plus() {
+        if group_ops.len() != 0 && tok == w64(in group_ends, sub(group_ends.len(), 1)) {
+            let begin = w64(in group_ops, sub(group_ops.len(), 1));
+            group_ops.truncate(sub(group_ops.len(), 1));
+            group_ends.truncate(sub(group_ends.len(), 1));
+            tok = inc(tok);
+            let sep = if kind(in pattern_toks, tok) == k_star()
+                || kind(in pattern_toks, tok) == k_plus() {
                 NONE
             } else {
-                let s = i;
-                i = inc(i);
-                s
+                let sep_tok = tok;
+                tok = inc(tok);
+                sep_tok
             };
-            let minimum: u64 = if kind(in p, i) == k_plus() {
+            let minimum: u64 = if kind(in pattern_toks, tok) == k_plus() {
                 1
-            } else if kind(in p, i) == k_star() {
+            } else if kind(in pattern_toks, tok) == k_star() {
                 0
             } else {
-                fail(inout m, in "invalid sugar repetition".as_bytes());
+                fail(inout matcher, in "invalid sugar repetition".as_bytes());
                 return false;
             };
-            m.ops.try_set(inc(wrapping_mul(begin, 3)), op_count(in m));
-            m.ops.try_set(add(wrapping_mul(begin, 3), 2), minimum);
-            push_op(inout m, OP_NEXT, begin, sep);
-            i = inc(i);
+            matcher.ops.try_set(inc(wrapping_mul(begin, 3)), op_count(in matcher));
+            matcher.ops.try_set(add(wrapping_mul(begin, 3), 2), minimum);
+            push_op(inout matcher, OP_NEXT, begin, sep);
+            tok = inc(tok);
             continue;
         }
-        if kind(in p, i) != k_dollar() {
-            let joint: u64 = if i < symbol_end {
+        if kind(in pattern_toks, tok) != k_dollar() {
+            let joint: u64 = if tok < symbol_end {
                 1
             } else {
-                let end = sugar_operator_end(in p, i);
+                let end = sugar_operator_end(in pattern_toks, tok);
                 if end != 0 {
                     symbol_end = end;
                 }
-                let last_literal = op_count(in m) != 0
-                    && op_kind(in m, sub(op_count(in m), 1)) == OP_LITERAL;
-                if i > 0
+                let last_literal = op_count(in matcher) != 0
+                    && op_kind(in matcher, sub(op_count(in matcher), 1)) == OP_LITERAL;
+                if tok > 0
                     && last_literal
-                    && head_kind(kind(in p, sub(i, 1)))
-                    && (kind(in p, i) == k_l_brace() || kind(in p, i) == k_string()) {
-                    if joined(in p, i) { 1 } else { 2 }
+                    && head_kind(kind(in pattern_toks, sub(tok, 1)))
+                    && (
+                        kind(in pattern_toks, tok) == k_l_brace()
+                            || kind(in pattern_toks, tok) == k_string()
+                    ) {
+                    if joined(in pattern_toks, tok) { 1 } else { 2 }
                 } else {
                     0
                 }
             };
-            push_op(inout m, OP_LITERAL, i, joint);
-            i = inc(i);
+            push_op(inout matcher, OP_LITERAL, tok, joint);
+            tok = inc(tok);
             continue;
         }
-        let start = i;
-        i = inc(i);
-        if kind(in p, i) == k_l_paren() {
-            if g_op.len() >= HARD_PARSE_DEPTH {
-                fail(inout m, in "sugar repetition nesting limit exceeded".as_bytes());
+        let start = tok;
+        tok = inc(tok);
+        if kind(in pattern_toks, tok) == k_l_paren() {
+            if group_ops.len() >= HARD_PARSE_DEPTH {
+                fail(inout matcher, in "sugar repetition nesting limit exceeded".as_bytes());
                 return false;
             }
-            g_op.push(op_count(in m));
-            g_end.push(sub(tree_end(in p, i), 1));
-            push_op(inout m, OP_REPEAT, 0, 0);
-            i = inc(i);
+            group_ops.push(op_count(in matcher));
+            group_ends.push(sub(tree_end(in pattern_toks, tok), 1));
+            push_op(inout matcher, OP_REPEAT, 0, 0);
+            tok = inc(tok);
             continue;
         }
-        let sequence = kind(in p, i) == k_dot_dot();
+        let sequence = kind(in pattern_toks, tok) == k_dot_dot();
         if sequence {
-            i = inc(i);
+            tok = inc(tok);
         }
-        if !(kind(in p, i) == k_lower() || kind(in p, i) == k_upper())
-            || kind(in p, inc(i)) != k_colon()
-            || kind(in p, add(i, 2)) != k_lower() {
-            fail(inout m, in "malformed sugar capture".as_bytes());
+        if !(kind(in pattern_toks, tok) == k_lower() || kind(in pattern_toks, tok) == k_upper())
+            || kind(in pattern_toks, inc(tok)) != k_colon()
+            || kind(in pattern_toks, add(tok, 2)) != k_lower() {
+            fail(inout matcher, in "malformed sugar capture".as_bytes());
             return false;
         }
-        let name = i;
-        let sort = add(i, 2);
+        let name = tok;
+        let sort = add(tok, 2);
         let pass = if start > 0 {
-            pass_code(in pb, in p, sub(start, 1))
+            pass_code(in pattern, in pattern_toks, sub(start, 1))
         } else {
             0
         };
-        for c in 0..cap_count(in m) {
-            if same_text(in pb, in p, cap_at(in m, c, 0), in pb, in p, name) {
+        for other in 0..cap_count(in matcher) {
+            if same_text(
+                in pattern,
+                in pattern_toks,
+                cap_at(in matcher, other, 0),
+                in pattern,
+                in pattern_toks,
+                name
+            ) {
                 let mut text = ChunkSeq::new[u8]();
                 text.extend(in "duplicate sugar capture `$".as_bytes());
-                for j in tok_s(in p, name)..tok_e(in p, name) {
-                    text.push(b8(in pb, j));
+                for j in tok_s(in pattern_toks, name)..tok_e(in pattern_toks, name) {
+                    text.push(b8(in pattern, j));
                 }
                 text.push(96);
-                fail(inout m, in text.as_slice());
+                fail(inout matcher, in text.as_slice());
                 return false;
             }
         }
-        let cap = cap_count(in m);
-        m.caps.push(name);
-        m.caps.push(sort);
-        m.caps.push(widen_u64(sort_code(in pb, in p, sort)));
-        m.caps.push(widen_u64(pass));
-        if !spend(inout m, g_op.len()) {
+        let cap = cap_count(in matcher);
+        matcher.caps.push(name);
+        matcher.caps.push(sort);
+        matcher.caps.push(widen_u64(sort_code(in pattern, in pattern_toks, sort)));
+        matcher.caps.push(widen_u64(pass));
+        if !spend(inout matcher, group_ops.len()) {
             return false;
         }
-        for g in 0..g_op.len() {
-            m.rn.push(w64(in g_op, g));
-            m.rn.push(cap);
+        for group in 0..group_ops.len() {
+            matcher.rep_names.push(w64(in group_ops, group));
+            matcher.rep_names.push(cap);
         }
-        i = add(i, 3);
-        let sc = sort_code(in pb, in p, sort);
-        if sequence && i == n && (sc == S_SCOPE || sc == S_STMTS) {
-            push_op(inout m, OP_TAIL, cap, 0);
+        tok = add(tok, 3);
+        let sort_kind = sort_code(in pattern, in pattern_toks, sort);
+        if sequence && tok == n && (sort_kind == S_SCOPE || sort_kind == S_STMTS) {
+            push_op(inout matcher, OP_TAIL, cap, 0);
         } else {
-            push_op(inout m, OP_HOLE, cap, if sequence { 1 } else { 0 });
+            push_op(inout matcher, OP_HOLE, cap, if sequence { 1 } else { 0 });
         }
     }
-    if g_op.len() != 0 {
-        fail(inout m, in "unclosed sugar repetition".as_bytes());
+    if group_ops.len() != 0 {
+        fail(inout matcher, in "unclosed sugar repetition".as_bytes());
         return false;
     }
     true
@@ -641,66 +656,67 @@ fn compile(in pb: ChunkSeq[u8], in p: Toks, inout m: Mx) -> bool {
 fn valid_fragment(
     sort: u8,
     sequence: bool,
-    in tb: ChunkSeq[u8],
-    in t: Toks,
-    rs: u64,
-    re: u64,
-    inout m: Mx
+    in invocation: ChunkSeq[u8],
+    in invocation_toks: Toks,
+    range_start: u64,
+    range_end: u64,
+    inout matcher: Mx
 ) -> u64 {
-    if !spend(inout m, sub(re, rs)) {
+    if !spend(inout matcher, sub(range_end, range_start)) {
         return 2;
     }
-    if !sequence && re == rs {
+    if !sequence && range_end == range_start {
         return 0;
     }
-    let one_tree = re != rs && tree_end(in t, rs) == re;
+    let one_tree = range_end != range_start
+        && tree_end(in invocation_toks, range_start) == range_end;
     if sort == S_IDENT {
-        let k = kind(in t, rs);
-        let ok = sub(re, rs) == 1
+        let tok_kind = kind(in invocation_toks, range_start);
+        let ok = sub(range_end, range_start) == 1
             && (
-                k == k_lower()
-                    || k == k_upper()
-                    || k == k_state()
-                    || k == k_with()
-                    || k == k_linear()
-                    || k == k_eff()
+                tok_kind == k_lower()
+                    || tok_kind == k_upper()
+                    || tok_kind == k_state()
+                    || tok_kind == k_with()
+                    || tok_kind == k_linear()
+                    || tok_kind == k_eff()
             );
         return if ok { 1 } else { 0 };
     }
     if sort == S_PLACE {
-        let k = kind(in t, rs);
+        let tok_kind = kind(in invocation_toks, range_start);
         if !(
-            k == k_lower()
-                || k == k_self_kw()
-                || k == k_state()
-                || k == k_with()
-                || k == k_linear()
-                || k == k_eff()
+            tok_kind == k_lower()
+                || tok_kind == k_self_kw()
+                || tok_kind == k_state()
+                || tok_kind == k_with()
+                || tok_kind == k_linear()
+                || tok_kind == k_eff()
         ) {
             return 0;
         }
-        let mut i = inc(rs);
+        let mut tok = inc(range_start);
         loop {
-            if i >= re {
+            if tok >= range_end {
                 break;
             }
-            let k = kind(in t, i);
-            if k == k_dot() && head_kind(kind(in t, inc(i))) {
-                i = add(i, 2);
-            } else if k == k_l_bracket()
-                && tree_end(in t, i) <= re
-                && tree_end(in t, i) > add(i, 2) {
-                i = tree_end(in t, i);
+            let tok_kind = kind(in invocation_toks, tok);
+            if tok_kind == k_dot() && head_kind(kind(in invocation_toks, inc(tok))) {
+                tok = add(tok, 2);
+            } else if tok_kind == k_l_bracket()
+                && tree_end(in invocation_toks, tok) <= range_end
+                && tree_end(in invocation_toks, tok) > add(tok, 2) {
+                tok = tree_end(in invocation_toks, tok);
             } else {
                 return 0;
             }
         }
-        if i != re {
+        if tok != range_end {
             return 0;
         }
     } else if (sort == S_BLOCK || sort == S_SCOPE)
         && !sequence
-        && (!one_tree || kind(in t, rs) != k_l_brace()) {
+        && (!one_tree || kind(in invocation_toks, range_start) != k_l_brace()) {
         return 0;
     }
     let mut wrapped = ChunkSeq::new[u8]();
@@ -727,141 +743,152 @@ fn valid_fragment(
         return 3;
     }
     if !sequence {
-        let mut i = rs;
+        let mut tok = range_start;
         loop {
-            if i >= re {
+            if tok >= range_end {
                 break;
             }
-            let k = kind(in t, i);
-            if k == k_semi() || k == k_comma() {
+            let tok_kind = kind(in invocation_toks, tok);
+            if tok_kind == k_semi() || tok_kind == k_comma() {
                 return 0;
             }
-            i = tree_end(in t, i);
+            tok = tree_end(in invocation_toks, tok);
         }
     }
-    let (ss, se) = if re == rs {
+    let (span_start, span_end) = if range_end == range_start {
         (0, 0)
     } else {
-        (tok_s(in t, rs), tok_e(in t, sub(re, 1)))
+        (tok_s(in invocation_toks, range_start), tok_e(in invocation_toks, sub(range_end, 1)))
     };
-    if !spend(inout m, add(add(wrapped.len(), sub(se, ss)), suffix.len())) {
+    if !spend(inout matcher, add(add(wrapped.len(), sub(span_end, span_start)), suffix.len())) {
         return 2;
     }
-    for j in ss..se {
-        wrapped.push(b8(in tb, j));
+    for j in span_start..span_end {
+        wrapped.push(b8(in invocation, j));
     }
     wrapped.extend(in suffix.as_slice());
     let mut text = ChunkSeq::new[u8]();
     let status = surface_fragment_status(in wrapped.as_slice(), inout text);
     if status == 2 {
-        fail(inout m, in text.as_slice());
+        fail(inout matcher, in text.as_slice());
         return 2;
     }
     if status == 0 { 1 } else { 0 }
 }
 
-// `State::record`: log one event under the first `nf` frames of `frames`.
+// `State::record`: log one event under the first `frame_count` frames of `frames`.
 fn record(
-    inout m: Mx,
+    inout matcher: Mx,
     in frames: ChunkSeq[u64],
-    nf: u64,
+    frame_count: u64,
     log: u64,
-    k: u8,
+    event_kind: u8,
     a: u64,
     b: u64,
     c: u64,
     from_tail: u8
 ) -> u64 {
-    if !spend(inout m, inc(nf)) {
+    if !spend(inout matcher, inc(frame_count)) {
         return NONE;
     }
-    let id = m.rec.len() / REC;
-    m.rec.push(log);
-    m.rec.push(m.idx_pool.len());
-    m.rec.push(nf);
-    for f in 0..nf {
-        m.idx_pool.push(w64(in frames, inc(wrapping_mul(f, 3))));
+    let id = matcher.records.len() / REC;
+    matcher.records.push(log);
+    matcher.records.push(matcher.index_pool.len());
+    matcher.records.push(frame_count);
+    for frame in 0..frame_count {
+        matcher.index_pool.push(w64(in frames, inc(wrapping_mul(frame, 3))));
     }
-    m.rec.push(widen_u64(k));
-    m.rec.push(a);
-    m.rec.push(b);
-    m.rec.push(c);
-    m.rec.push(widen_u64(from_tail));
+    matcher.records.push(widen_u64(event_kind));
+    matcher.records.push(a);
+    matcher.records.push(b);
+    matcher.records.push(c);
+    matcher.records.push(widen_u64(from_tail));
     id
 }
 
-// Pushes a state with the first `nf` frames of `frames`.
+// Pushes a state with the first `frame_count` frames of `frames`.
 fn push_state(
-    inout m: Mx,
+    inout matcher: Mx,
     pc: u64,
     pos: u64,
     log: u64,
-    ppc: u64,
-    ps: u64,
-    pe: u64,
+    pending_pc: u64,
+    pending_start: u64,
+    pending_end: u64,
     in frames: ChunkSeq[u64],
-    nf: u64
+    frame_count: u64
 ) {
-    m.td.push(pc);
-    m.td.push(pos);
-    m.td.push(log);
-    m.td.push(ppc);
-    m.td.push(ps);
-    m.td.push(pe);
-    m.td.push(m.fr_pool.len());
-    m.td.push(nf);
-    for j in 0..wrapping_mul(nf, 3) {
-        m.fr_pool.push(w64(in frames, j));
+    matcher.stack.push(pc);
+    matcher.stack.push(pos);
+    matcher.stack.push(log);
+    matcher.stack.push(pending_pc);
+    matcher.stack.push(pending_start);
+    matcher.stack.push(pending_end);
+    matcher.stack.push(matcher.frame_pool.len());
+    matcher.stack.push(frame_count);
+    for j in 0..wrapping_mul(frame_count, 3) {
+        matcher.frame_pool.push(w64(in frames, j));
     }
 }
 
-fn ext_less(in m: Mx, a_first: u64, a_len: u64, b_first: u64, b_len: u64) -> bool {
+fn ext_less(in matcher: Mx, a_first: u64, a_len: u64, b_first: u64, b_len: u64) -> bool {
     let mut i: u64 = 0;
     loop {
         if i >= a_len || i >= b_len {
             return a_len < b_len;
         }
-        let x = w64(in m.idx_pool, add(a_first, i));
-        let y = w64(in m.idx_pool, add(b_first, i));
-        if x != y {
-            return x < y;
+        let left = w64(in matcher.index_pool, add(a_first, i));
+        let right = w64(in matcher.index_pool, add(b_first, i));
+        if left != right {
+            return left < right;
         }
         i = inc(i);
     }
     false
 }
 
-fn name_less(in pb: ChunkSeq[u8], in p: Toks, a: u64, b: u64) -> bool {
-    let (xs, xe) = (tok_s(in p, a), tok_e(in p, a));
-    let (ys, ye) = (tok_s(in p, b), tok_e(in p, b));
+fn name_less(
+    in pattern: ChunkSeq[u8],
+    in pattern_toks: Toks,
+    left_tok: u64,
+    right_tok: u64
+) -> bool {
+    let (left_start, left_end) = (
+        tok_s(in pattern_toks, left_tok),
+        tok_e(in pattern_toks, left_tok)
+    );
+    let (right_start, right_end) = (
+        tok_s(in pattern_toks, right_tok),
+        tok_e(in pattern_toks, right_tok)
+    );
     let mut i: u64 = 0;
     loop {
-        if add(xs, i) >= xe || add(ys, i) >= ye {
-            return sub(xe, xs) < sub(ye, ys);
+        if add(left_start, i) >= left_end || add(right_start, i) >= right_end {
+            return sub(left_end, left_start) < sub(right_end, right_start);
         }
-        let x = b8(in pb, add(xs, i));
-        let y = b8(in pb, add(ys, i));
-        if x != y {
-            return x < y;
+        let left_byte = b8(in pattern, add(left_start, i));
+        let right_byte = b8(in pattern, add(right_start, i));
+        if left_byte != right_byte {
+            return left_byte < right_byte;
         }
         i = inc(i);
     }
     false
 }
 
-fn push_text(inout out: ChunkSeq[u64], in b: ChunkSeq[u8], s: u64, e: u64) {
-    out.push(sub(e, s));
-    for j in s..e {
-        out.push(widen_u64(b8(in b, j)));
+fn push_text(inout out: ChunkSeq[u64], in bytes: ChunkSeq[u8], start: u64, end: u64) {
+    out.push(sub(end, start));
+    for j in start..end {
+        out.push(widen_u64(b8(in bytes, j)));
     }
 }
 
 // The captures of a match whose log ends at `log`: [1, work, captures]
 // (see `match_rule_encoded`), or false (and the refusal).
 fn collect(
-    in pb: ChunkSeq[u8],
-    in p: Toks,
-    inout m: Mx,
+    in pattern: ChunkSeq[u8],
+    in pattern_toks: Toks,
+    inout matcher: Mx,
     log: u64,
     inout out: ChunkSeq[u64]
 ) -> bool {
@@ -873,155 +900,179 @@ fn collect(
             break;
         }
         chain.push(at);
-        at = rec_at(in m, at, 0);
+        at = rec_at(in matcher, at, 0);
     }
     // Per record, in the walk's order: the values it adds, or the extents.
-    for c in 0..chain.len() {
-        let r = w64(in chain, c);
-        let il = rec_at(in m, r, 2);
-        if rec_at(in m, r, 3) == 0 {
-            let span = sub(rec_at(in m, r, 6), rec_at(in m, r, 5));
-            if !spend(inout m, add(span, il)) {
+    for link in 0..chain.len() {
+        let event = w64(in chain, link);
+        let index_len = rec_at(in matcher, event, 2);
+        if rec_at(in matcher, event, 3) == 0 {
+            let span = sub(rec_at(in matcher, event, 6), rec_at(in matcher, event, 5));
+            if !spend(inout matcher, add(span, index_len)) {
                 return false;
             }
         } else {
-            let begin = rec_at(in m, r, 4);
-            for j in 0..(m.rn.len() >> 1) {
-                if w64(in m.rn, j << 1) == begin && !spend(inout m, inc(il)) {
+            let begin = rec_at(in matcher, event, 4);
+            for j in 0..(matcher.rep_names.len() >> 1) {
+                if w64(in matcher.rep_names, j << 1) == begin
+                    && !spend(inout matcher, inc(index_len)) {
                     return false;
                 }
             }
         }
     }
     // Captures in name order.
-    let nc = cap_count(in m);
+    let num_caps = cap_count(in matcher);
     let mut order = ChunkSeq::new[u64]();
-    for c in 0..nc {
-        let mut k = order.len();
-        order.push(c);
+    for cap_index in 0..num_caps {
+        let mut slot = order.len();
+        order.push(cap_index);
         loop {
-            if k == 0 {
+            if slot == 0 {
                 break;
             }
-            let prev = w64(in order, sub(k, 1));
-            if !name_less(in pb, in p, cap_at(in m, c, 0), cap_at(in m, prev, 0)) {
+            let prev = w64(in order, sub(slot, 1));
+            if !name_less(
+                in pattern,
+                in pattern_toks,
+                cap_at(in matcher, cap_index, 0),
+                cap_at(in matcher, prev, 0)
+            ) {
                 break;
             }
-            order.try_set(k, prev);
-            k = sub(k, 1);
+            order.try_set(slot, prev);
+            slot = sub(slot, 1);
         }
-        order.try_set(k, c);
+        order.try_set(slot, cap_index);
     }
     out.push(1);
-    out.push(m.work);
-    out.push(nc);
-    for o in 0..nc {
-        let cap = w64(in order, o);
-        let name = cap_at(in m, cap, 0);
-        push_text(inout out, in pb, tok_s(in p, name), tok_e(in p, name));
-        let sort = cap_at(in m, cap, 1);
-        push_text(inout out, in pb, tok_s(in p, sort), tok_e(in p, sort));
-        out.push(cap_at(in m, cap, 3));
+    out.push(matcher.work);
+    out.push(num_caps);
+    for rank in 0..num_caps {
+        let cap = w64(in order, rank);
+        let name = cap_at(in matcher, cap, 0);
+        push_text(
+            inout out,
+            in pattern,
+            tok_s(in pattern_toks, name),
+            tok_e(in pattern_toks, name)
+        );
+        let sort = cap_at(in matcher, cap, 1);
+        push_text(
+            inout out,
+            in pattern,
+            tok_s(in pattern_toks, sort),
+            tok_e(in pattern_toks, sort)
+        );
+        out.push(cap_at(in matcher, cap, 3));
         // Values oldest first.
         let mut vals = ChunkSeq::new[u64]();
-        let mut c = chain.len();
+        let mut val_link = chain.len();
         loop {
-            if c == 0 {
+            if val_link == 0 {
                 break;
             }
-            c = sub(c, 1);
-            let r = w64(in chain, c);
-            if rec_at(in m, r, 3) == 0 && rec_at(in m, r, 4) == cap {
-                vals.push(r);
+            val_link = sub(val_link, 1);
+            let event = w64(in chain, val_link);
+            if rec_at(in matcher, event, 3) == 0 && rec_at(in matcher, event, 4) == cap {
+                vals.push(event);
             }
         }
         out.push(vals.len());
         for v in 0..vals.len() {
-            let r = w64(in vals, v);
-            out.push(rec_at(in m, r, 5));
-            out.push(rec_at(in m, r, 6));
-            out.push(rec_at(in m, r, 7));
-            let f = rec_at(in m, r, 1);
-            let l = rec_at(in m, r, 2);
-            out.push(l);
-            for j in 0..l {
-                out.push(w64(in m.idx_pool, add(f, j)));
+            let event = w64(in vals, v);
+            out.push(rec_at(in matcher, event, 5));
+            out.push(rec_at(in matcher, event, 6));
+            out.push(rec_at(in matcher, event, 7));
+            let idx_first = rec_at(in matcher, event, 1);
+            let idx_len = rec_at(in matcher, event, 2);
+            out.push(idx_len);
+            for j in 0..idx_len {
+                out.push(w64(in matcher.index_pool, add(idx_first, j)));
             }
         }
         // Extents: the oldest record of each index vector wins (Rust walks
         // newest first and overwrites), sorted by index vector.
         let mut ext = ChunkSeq::new[u64]();
-        let mut c = chain.len();
+        let mut ext_link = chain.len();
         loop {
-            if c == 0 {
+            if ext_link == 0 {
                 break;
             }
-            c = sub(c, 1);
-            let r = w64(in chain, c);
-            if rec_at(in m, r, 3) != 1 {
+            ext_link = sub(ext_link, 1);
+            let event = w64(in chain, ext_link);
+            if rec_at(in matcher, event, 3) != 1 {
                 continue;
             }
-            let begin = rec_at(in m, r, 4);
+            let begin = rec_at(in matcher, event, 4);
             let mut named = false;
-            for j in 0..(m.rn.len() >> 1) {
-                if w64(in m.rn, j << 1) == begin && w64(in m.rn, inc(j << 1)) == cap {
+            for j in 0..(matcher.rep_names.len() >> 1) {
+                if w64(in matcher.rep_names, j << 1) == begin
+                    && w64(in matcher.rep_names, inc(j << 1)) == cap {
                     named = true;
                 }
             }
             if !named {
                 continue;
             }
-            let f = rec_at(in m, r, 1);
-            let l = rec_at(in m, r, 2);
+            let idx_first = rec_at(in matcher, event, 1);
+            let idx_len = rec_at(in matcher, event, 2);
             let mut seen = false;
-            for e in 0..ext.len() {
-                let q = w64(in ext, e);
-                let qf = rec_at(in m, q, 1);
-                let ql = rec_at(in m, q, 2);
-                if !ext_less(in m, f, l, qf, ql) && !ext_less(in m, qf, ql, f, l) {
+            for ext_pos in 0..ext.len() {
+                let other = w64(in ext, ext_pos);
+                let other_first = rec_at(in matcher, other, 1);
+                let other_len = rec_at(in matcher, other, 2);
+                if !ext_less(in matcher, idx_first, idx_len, other_first, other_len)
+                    && !ext_less(in matcher, other_first, other_len, idx_first, idx_len) {
                     seen = true;
                 }
             }
             if seen {
                 continue;
             }
-            let mut k = ext.len();
-            ext.push(r);
+            let mut slot = ext.len();
+            ext.push(event);
             loop {
-                if k == 0 {
+                if slot == 0 {
                     break;
                 }
-                let q = w64(in ext, sub(k, 1));
-                if !ext_less(in m, f, l, rec_at(in m, q, 1), rec_at(in m, q, 2)) {
+                let other = w64(in ext, sub(slot, 1));
+                if !ext_less(
+                    in matcher,
+                    idx_first,
+                    idx_len,
+                    rec_at(in matcher, other, 1),
+                    rec_at(in matcher, other, 2)
+                ) {
                     break;
                 }
-                ext.try_set(k, q);
-                k = sub(k, 1);
+                ext.try_set(slot, other);
+                slot = sub(slot, 1);
             }
-            ext.try_set(k, r);
+            ext.try_set(slot, event);
         }
         out.push(ext.len());
-        for e in 0..ext.len() {
-            let r = w64(in ext, e);
-            let f = rec_at(in m, r, 1);
-            let l = rec_at(in m, r, 2);
-            out.push(l);
-            for j in 0..l {
-                out.push(w64(in m.idx_pool, add(f, j)));
+        for ext_pos in 0..ext.len() {
+            let event = w64(in ext, ext_pos);
+            let idx_first = rec_at(in matcher, event, 1);
+            let idx_len = rec_at(in matcher, event, 2);
+            out.push(idx_len);
+            for j in 0..idx_len {
+                out.push(w64(in matcher.index_pool, add(idx_first, j)));
             }
-            out.push(rec_at(in m, r, 5));
+            out.push(rec_at(in matcher, event, 5));
         }
     }
     true
 }
 
-fn refused(in m: Mx) -> ChunkSeq[u64] {
+fn refused(in matcher: Mx) -> ChunkSeq[u64] {
     let mut out = ChunkSeq::new[u64]();
     out.push(2);
-    out.push(m.work);
-    out.push(m.msg.len());
-    for j in 0..m.msg.len() {
-        out.push(widen_u64(b8(in m.msg, j)));
+    out.push(matcher.work);
+    out.push(matcher.msg.len());
+    for j in 0..matcher.msg.len() {
+        out.push(widen_u64(b8(in matcher.msg, j)));
     }
     out
 }
@@ -1039,29 +1090,29 @@ fn refused(in m: Mx) -> ChunkSeq[u64] {
 // invocation, or of the tail when `from_tail` (the matcher reads only the
 // tail's length).
 pub fn match_rule_encoded(
-    in pb: ChunkSeq[u8],
-    in ib: ChunkSeq[u8],
+    in pattern: ChunkSeq[u8],
+    in invocation: ChunkSeq[u8],
     has_tail: bool,
     tail_len: u64,
     work: u64
 ) -> ChunkSeq[u64] {
-    let mut m = mx_new(work);
-    if !spend(inout m, add(pb.len(), ib.len())) {
-        return refused(in m);
+    let mut matcher = mx_new(work);
+    if !spend(inout matcher, add(pattern.len(), invocation.len())) {
+        return refused(in matcher);
     }
-    let mut p = toks_empty();
-    if !toks_new(in pb, inout m, inout p) {
-        return refused(in m);
+    let mut pattern_toks = toks_empty();
+    if !toks_new(in pattern, inout matcher, inout pattern_toks) {
+        return refused(in matcher);
     }
-    let mut t = toks_empty();
-    if !toks_new(in ib, inout m, inout t) {
-        return refused(in m);
+    let mut invocation_toks = toks_empty();
+    if !toks_new(in invocation, inout matcher, inout invocation_toks) {
+        return refused(in matcher);
     }
-    if !compile(in pb, in p, inout m) {
-        return refused(in m);
+    if !compile(in pattern, in pattern_toks, inout matcher) {
+        return refused(in matcher);
     }
-    let nops = op_count(in m);
-    let mut limit = len(in t);
+    let nops = op_count(in matcher);
+    let mut limit = len(in invocation_toks);
     // A statement ending in a brace may carry an optional semicolon.
     let mut last_semi = false;
     let mut j = nops;
@@ -1070,107 +1121,129 @@ pub fn match_rule_encoded(
             break;
         }
         j = sub(j, 1);
-        let k = op_kind(in m, j);
-        if k != OP_TAIL {
-            last_semi = k == OP_LITERAL && text_is(in pb, in p, op_a(in m, j), in ";".as_bytes());
+        let last_kind = op_kind(in matcher, j);
+        if last_kind != OP_TAIL {
+            last_semi = last_kind == OP_LITERAL
+                && text_is(in pattern, in pattern_toks, op_a(in matcher, j), in ";".as_bytes());
             break;
         }
     }
     if limit >= 2
-        && kind(in t, sub(limit, 1)) == k_semi()
-        && kind(in t, sub(limit, 2)) == k_r_brace()
+        && kind(in invocation_toks, sub(limit, 1)) == k_semi()
+        && kind(in invocation_toks, sub(limit, 2)) == k_r_brace()
         && !last_semi {
         limit = sub(limit, 1);
     }
     let mut frames = ChunkSeq::new[u64]();
-    push_state(inout m, 0, 0, NONE, NONE, 0, 0, in frames, 0);
+    push_state(inout matcher, 0, 0, NONE, NONE, 0, 0, in frames, 0);
     loop {
-        let top = m.td.len() / TD;
+        let top = matcher.stack.len() / TD;
         if top == 0 {
             break;
         }
         let at = sub(top, 1);
-        let mut pc = w64(in m.td, add(wrapping_mul(at, TD), 0));
-        let mut pos = w64(in m.td, add(wrapping_mul(at, TD), 1));
-        let mut log = w64(in m.td, add(wrapping_mul(at, TD), 2));
-        let ppc = w64(in m.td, add(wrapping_mul(at, TD), 3));
-        let ps = w64(in m.td, add(wrapping_mul(at, TD), 4));
-        let pe = w64(in m.td, add(wrapping_mul(at, TD), 5));
-        let ff = w64(in m.td, add(wrapping_mul(at, TD), 6));
-        let fl = w64(in m.td, add(wrapping_mul(at, TD), 7));
+        let mut pc = w64(in matcher.stack, add(wrapping_mul(at, TD), 0));
+        let mut pos = w64(in matcher.stack, add(wrapping_mul(at, TD), 1));
+        let mut log = w64(in matcher.stack, add(wrapping_mul(at, TD), 2));
+        let pending_pc = w64(in matcher.stack, add(wrapping_mul(at, TD), 3));
+        let pending_start = w64(in matcher.stack, add(wrapping_mul(at, TD), 4));
+        let pending_end = w64(in matcher.stack, add(wrapping_mul(at, TD), 5));
+        let frame_first = w64(in matcher.stack, add(wrapping_mul(at, TD), 6));
+        let frame_len = w64(in matcher.stack, add(wrapping_mul(at, TD), 7));
         frames.clear();
-        for j in 0..wrapping_mul(fl, 3) {
-            frames.push(w64(in m.fr_pool, add(ff, j)));
+        for j in 0..wrapping_mul(frame_len, 3) {
+            frames.push(w64(in matcher.frame_pool, add(frame_first, j)));
         }
-        m.fr_pool.truncate(ff);
-        m.td.truncate(wrapping_mul(at, TD));
-        if ppc != NONE {
-            let cap = op_a(in m, ppc);
-            let sequence = op_b(in m, ppc) == 1;
-            let v = valid_fragment(
-                wrapping_u8(cap_at(in m, cap, 2)),
+        matcher.frame_pool.truncate(frame_first);
+        matcher.stack.truncate(wrapping_mul(at, TD));
+        if pending_pc != NONE {
+            let cap = op_a(in matcher, pending_pc);
+            let sequence = op_b(in matcher, pending_pc) == 1;
+            let validity = valid_fragment(
+                wrapping_u8(cap_at(in matcher, cap, 2)),
                 sequence,
-                in ib,
-                in t,
-                ps,
-                pe,
-                inout m
+                in invocation,
+                in invocation_toks,
+                pending_start,
+                pending_end,
+                inout matcher
             );
-            if v == 3 {
+            if validity == 3 {
                 let mut text = ChunkSeq::new[u8]();
                 text.extend(in "unknown sugar hole sort `".as_bytes());
-                let sort = cap_at(in m, cap, 1);
-                for j in tok_s(in p, sort)..tok_e(in p, sort) {
-                    text.push(b8(in pb, j));
+                let sort = cap_at(in matcher, cap, 1);
+                for j in tok_s(in pattern_toks, sort)..tok_e(in pattern_toks, sort) {
+                    text.push(b8(in pattern, j));
                 }
                 text.push(96);
-                fail(inout m, in text.as_slice());
-                return refused(in m);
+                fail(inout matcher, in text.as_slice());
+                return refused(in matcher);
             }
-            if v == 2 {
-                return refused(in m);
+            if validity == 2 {
+                return refused(in matcher);
             }
-            if v == 0 {
+            if validity == 0 {
                 continue;
             }
-            let (bs, be) = if pe == ps {
-                let x = if ps < len(in t) {
-                    tok_s(in t, ps)
+            let (value_start, value_end) = if pending_end == pending_start {
+                let offset = if pending_start < len(in invocation_toks) {
+                    tok_s(in invocation_toks, pending_start)
                 } else {
-                    ib.len()
+                    invocation.len()
                 };
-                (x, x)
+                (offset, offset)
             } else {
-                (tok_s(in t, ps), tok_e(in t, sub(pe, 1)))
+                (
+                    tok_s(in invocation_toks, pending_start),
+                    tok_e(in invocation_toks, sub(pending_end, 1))
+                )
             };
-            log = record(inout m, in frames, frames.len() / 3, log, 0, cap, bs, be, 0);
+            log = record(
+                inout matcher,
+                in frames,
+                frames.len() / 3,
+                log,
+                0,
+                cap,
+                value_start,
+                value_end,
+                0
+            );
             if log == NONE {
-                return refused(in m);
+                return refused(in matcher);
             }
         }
         loop {
-            if !spend(inout m, 1) {
-                return refused(in m);
+            if !spend(inout matcher, 1) {
+                return refused(in matcher);
             }
             if pc >= nops {
                 if pos != limit {
                     break;
                 }
                 let mut out = ChunkSeq::new[u64]();
-                if !collect(in pb, in p, inout m, log, inout out) {
-                    return refused(in m);
+                if !collect(in pattern, in pattern_toks, inout matcher, log, inout out) {
+                    return refused(in matcher);
                 }
                 return out;
             }
-            let op = op_kind(in m, pc);
-            let a = op_a(in m, pc);
-            let b = op_b(in m, pc);
-            let nf = frames.len() / 3;
+            let op = op_kind(in matcher, pc);
+            let a = op_a(in matcher, pc);
+            let b = op_b(in matcher, pc);
+            let frame_count = frames.len() / 3;
             if op == OP_LITERAL {
-                if pos == limit || !same_text(in pb, in p, a, in ib, in t, pos) {
+                if pos == limit
+                    || !same_text(
+                        in pattern,
+                        in pattern_toks,
+                        a,
+                        in invocation,
+                        in invocation_toks,
+                        pos
+                    ) {
                     break;
                 }
-                if b != 0 && (pos == 0 || joined(in t, pos) != (b == 1)) {
+                if b != 0 && (pos == 0 || joined(in invocation_toks, pos) != (b == 1)) {
                     break;
                 }
                 pos = inc(pos);
@@ -1182,50 +1255,72 @@ pub fn match_rule_encoded(
                 if pos != limit {
                     break;
                 }
-                log = record(inout m, in frames, nf, log, 0, a, 0, tail_len, 1);
+                log = record(inout matcher, in frames, frame_count, log, 0, a, 0, tail_len, 1);
                 if log == NONE {
-                    return refused(in m);
+                    return refused(in matcher);
                 }
                 pc = inc(pc);
             } else if op == OP_HOLE {
                 let sequence = b == 1;
                 let start = pos;
                 let mut end = start;
-                let scalar = wrapping_u8(cap_at(in m, a, 2));
+                let scalar = wrapping_u8(cap_at(in matcher, a, 2));
                 loop {
-                    if !spend(inout m, 1) {
-                        return refused(in m);
+                    if !spend(inout matcher, 1) {
+                        return refused(in matcher);
                     }
                     let length_ok = (sequence || end > start)
                         && (
                             if scalar == S_IDENT {
                                 end == inc(start)
                             } else if (scalar == S_BLOCK || scalar == S_SCOPE) && !sequence {
-                                kind(in t, start) == k_l_brace()
-                                    && start < len(in t)
-                                    && tree_end(in t, start) == end
+                                kind(in invocation_toks, start) == k_l_brace()
+                                    && start < len(in invocation_toks)
+                                    && tree_end(in invocation_toks, start) == end
                             } else {
                                 true
                             }
                         );
-                    let nk = op_kind(in m, inc(pc));
-                    let next_ok = if nk == 255 || nk == OP_TAIL {
+                    let next_kind = op_kind(in matcher, inc(pc));
+                    let next_ok = if next_kind == 255 || next_kind == OP_TAIL {
                         end == limit
-                    } else if nk == OP_LITERAL {
-                        end < limit && same_text(in pb, in p, op_a(in m, inc(pc)), in ib, in t, end)
+                    } else if next_kind == OP_LITERAL {
+                        end < limit
+                            && same_text(
+                                in pattern,
+                                in pattern_toks,
+                                op_a(in matcher, inc(pc)),
+                                in invocation,
+                                in invocation_toks,
+                                end
+                            )
                     } else {
                         true
                     };
                     if length_ok && next_ok {
-                        if !spend(inout m, inc(nf)) {
-                            return refused(in m);
+                        if !spend(inout matcher, inc(frame_count)) {
+                            return refused(in matcher);
                         }
-                        push_state(inout m, inc(pc), end, log, pc, start, end, in frames, nf);
+                        push_state(
+                            inout matcher,
+                            inc(pc),
+                            end,
+                            log,
+                            pc,
+                            start,
+                            end,
+                            in frames,
+                            frame_count
+                        );
                     }
-                    if end == limit || closer(kind(in t, end)) {
+                    if end == limit || closer(kind(in invocation_toks, end)) {
                         break;
                     }
-                    if !sequence && (kind(in t, end) == k_comma() || kind(in t, end) == k_semi()) {
+                    if !sequence
+                        && (
+                            kind(in invocation_toks, end) == k_comma()
+                                || kind(in invocation_toks, end) == k_semi()
+                        ) {
                         break;
                     }
                     if end > start
@@ -1235,19 +1330,39 @@ pub fn match_rule_encoded(
                         ) {
                         break;
                     }
-                    end = tree_end(in t, end);
+                    end = tree_end(in invocation_toks, end);
                 }
                 break;
             } else if op == OP_REPEAT {
                 if b == 0 {
-                    if !spend(inout m, inc(nf)) {
-                        return refused(in m);
+                    if !spend(inout matcher, inc(frame_count)) {
+                        return refused(in matcher);
                     }
-                    let skip_log = record(inout m, in frames, nf, log, 1, pc, 0, 0, 0);
+                    let skip_log = record(
+                        inout matcher,
+                        in frames,
+                        frame_count,
+                        log,
+                        1,
+                        pc,
+                        0,
+                        0,
+                        0
+                    );
                     if skip_log == NONE {
-                        return refused(in m);
+                        return refused(in matcher);
                     }
-                    push_state(inout m, inc(a), pos, skip_log, NONE, 0, 0, in frames, nf);
+                    push_state(
+                        inout matcher,
+                        inc(a),
+                        pos,
+                        skip_log,
+                        NONE,
+                        0,
+                        0,
+                        in frames,
+                        frame_count
+                    );
                 }
                 frames.push(pc);
                 frames.push(0);
@@ -1255,23 +1370,31 @@ pub fn match_rule_encoded(
                 pc = inc(pc);
             } else {
                 // Next: `a` is the repetition's op, `b` its separator.
-                let top_f = sub(nf, 1);
-                let index = w64(in frames, add(wrapping_mul(top_f, 3), 1));
-                let fstart = w64(in frames, add(wrapping_mul(top_f, 3), 2));
-                if pos == fstart {
+                let top_frame = sub(frame_count, 1);
+                let index = w64(in frames, add(wrapping_mul(top_frame, 3), 1));
+                let frame_start = w64(in frames, add(wrapping_mul(top_frame, 3), 2));
+                if pos == frame_start {
                     break;
                 }
                 let count = inc(index);
-                if !spend(inout m, inc(nf)) {
-                    return refused(in m);
+                if !spend(inout matcher, inc(frame_count)) {
+                    return refused(in matcher);
                 }
-                let done_log = record(inout m, in frames, top_f, log, 1, a, count, 0, 0);
+                let done_log = record(inout matcher, in frames, top_frame, log, 1, a, count, 0, 0);
                 if done_log == NONE {
-                    return refused(in m);
+                    return refused(in matcher);
                 }
-                push_state(inout m, inc(pc), pos, done_log, NONE, 0, 0, in frames, top_f);
+                push_state(inout matcher, inc(pc), pos, done_log, NONE, 0, 0, in frames, top_frame);
                 if b != NONE {
-                    if pos == limit || !same_text(in pb, in p, b, in ib, in t, pos) {
+                    if pos == limit
+                        || !same_text(
+                            in pattern,
+                            in pattern_toks,
+                            b,
+                            in invocation,
+                            in invocation_toks,
+                            pos
+                        ) {
                         break;
                     }
                     pos = inc(pos);
@@ -1279,14 +1402,14 @@ pub fn match_rule_encoded(
                 if pos == limit {
                     break;
                 }
-                frames.try_set(add(wrapping_mul(top_f, 3), 1), count);
-                frames.try_set(add(wrapping_mul(top_f, 3), 2), pos);
+                frames.try_set(add(wrapping_mul(top_frame, 3), 1), count);
+                frames.try_set(add(wrapping_mul(top_frame, 3), 2), pos);
                 pc = inc(a);
             }
         }
     }
     let mut out = ChunkSeq::new[u64]();
     out.push(0);
-    out.push(m.work);
+    out.push(matcher.work);
     out
 }

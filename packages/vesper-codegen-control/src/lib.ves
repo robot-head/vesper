@@ -55,17 +55,15 @@ pub fn control_session_plans(in input: Str) -> ChunkSeq[u64] {
                 let cancel_ctor = r.word(in b) == 0;
                 let x = r.word(in b);
                 let cancel = if cancel_ctor { u32_at(in c.nmap, x) } else { 0 };
-                ops.push(
-                    OpBinding {
-                        op: op,
-                        read: read,
-                        value: value,
-                        error: error,
-                        cancel_ctor: cancel_ctor,
-                        cancel: cancel,
-                        code: x
-                    }
-                );
+                ops.push(OpBinding {
+                    op: op,
+                    read: read,
+                    value: value,
+                    error: error,
+                    cancel_ctor: cancel_ctor,
+                    cancel: cancel,
+                    code: x
+                });
             }
             bindings.push(EffBinding { eff_name: eff_name, a: a, n: n32(on) });
         }

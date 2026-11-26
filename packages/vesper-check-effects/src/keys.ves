@@ -5,36 +5,36 @@
 use @vesper/check-data::util::{inc, u64_at};
 
 pub struct Keys {
-    v: ChunkSeq[u64],
+    sorted: ChunkSeq[u64],
 }
 
 pub fn keys_new() -> Keys {
-    Keys { v: ChunkSeq::new[u64]() }
+    Keys { sorted: ChunkSeq::new[u64]() }
 }
 
-pub fn pair(a: u32, b: u32) -> u64 {
-    wrapping_add(wrapping_mul(widen_u64(a), 4294967296), widen_u64(b))
+pub fn pair(high: u32, low: u32) -> u64 {
+    wrapping_add(wrapping_mul(widen_u64(high), 4294967296), widen_u64(low))
 }
 
 impl Keys {
     pub fn len(in self) -> u64 {
-        self.v.len()
+        self.sorted.len()
     }
 
     pub fn get(in self, i: u64) -> u64 {
-        u64_at(in self.v, i)
+        u64_at(in self.sorted, i)
     }
 
     // The first index whose key is >= k.
-    pub fn lower(in self, k: u64) -> u64 {
+    pub fn lower(in self, key: u64) -> u64 {
         let mut lo: u64 = 0;
-        let mut hi = self.v.len();
+        let mut hi = self.sorted.len();
         loop {
             if lo >= hi {
                 break;
             }
             let mid = wrapping_add(lo, wrapping_sub(hi, lo) / 2);
-            if u64_at(in self.v, mid) < k {
+            if u64_at(in self.sorted, mid) < key {
                 lo = inc(mid);
             } else {
                 hi = mid;
@@ -43,55 +43,55 @@ impl Keys {
         lo
     }
 
-    pub fn has(in self, k: u64) -> bool {
-        let i = self.lower(k);
-        i < self.v.len() && u64_at(in self.v, i) == k
+    pub fn has(in self, key: u64) -> bool {
+        let i = self.lower(key);
+        i < self.sorted.len() && u64_at(in self.sorted, i) == key
     }
 
-    pub fn insert(inout self, k: u64) {
-        let i = self.lower(k);
-        if i < self.v.len() && u64_at(in self.v, i) == k {
+    pub fn insert(inout self, key: u64) {
+        let i = self.lower(key);
+        if i < self.sorted.len() && u64_at(in self.sorted, i) == key {
             return;
         }
-        self.v.push(k);
-        let mut j = wrapping_sub(self.v.len(), 1);
+        self.sorted.push(key);
+        let mut j = wrapping_sub(self.sorted.len(), 1);
         loop {
             if j <= i {
                 break;
             }
-            let prev = u64_at(in self.v, wrapping_sub(j, 1));
-            let ok = self.v.try_set(j, prev);
+            let prev = u64_at(in self.sorted, wrapping_sub(j, 1));
+            let ok = self.sorted.try_set(j, prev);
             j = wrapping_sub(j, 1);
         }
-        let ok = self.v.try_set(i, k);
+        let ok = self.sorted.try_set(i, key);
     }
 
     pub fn clear(inout self) {
-        self.v.clear();
+        self.sorted.clear();
     }
 
-    pub fn same(in self, in o: Keys) -> bool {
-        if self.v.len() != o.v.len() {
+    pub fn same(in self, in other: Keys) -> bool {
+        if self.sorted.len() != other.sorted.len() {
             return false;
         }
-        for i in 0..self.v.len() {
-            if u64_at(in self.v, i) != u64_at(in o.v, i) {
+        for i in 0..self.sorted.len() {
+            if u64_at(in self.sorted, i) != u64_at(in other.sorted, i) {
                 return false;
             }
         }
         true
     }
 
-    pub fn merge(inout self, in o: Keys) {
-        for i in 0..o.v.len() {
-            self.insert(u64_at(in o.v, i));
+    pub fn merge(inout self, in other: Keys) {
+        for i in 0..other.sorted.len() {
+            self.insert(u64_at(in other.sorted, i));
         }
     }
 
-    pub fn assign(inout self, in o: Keys) {
-        self.v.clear();
-        for i in 0..o.v.len() {
-            self.v.push(u64_at(in o.v, i));
+    pub fn assign(inout self, in other: Keys) {
+        self.sorted.clear();
+        for i in 0..other.sorted.len() {
+            self.sorted.push(u64_at(in other.sorted, i));
         }
     }
 }
@@ -102,11 +102,11 @@ pub struct Sums {
     inferred: Keys,
     outputs: Keys,
     resumed: Keys,
-    addr: Keys,
+    addr_taken: Keys,
 }
 
 pub fn sums_new() -> Sums {
-    Sums { inferred: keys_new(), outputs: keys_new(), resumed: keys_new(), addr: keys_new() }
+    Sums { inferred: keys_new(), outputs: keys_new(), resumed: keys_new(), addr_taken: keys_new() }
 }
 
 impl Sums {
@@ -114,27 +114,27 @@ impl Sums {
         self.inferred.clear();
         self.outputs.clear();
         self.resumed.clear();
-        self.addr.clear();
+        self.addr_taken.clear();
     }
 
-    pub fn merge(inout self, in o: Sums) {
-        self.inferred.merge(in o.inferred);
-        self.outputs.merge(in o.outputs);
-        self.resumed.merge(in o.resumed);
-        self.addr.merge(in o.addr);
+    pub fn merge(inout self, in other: Sums) {
+        self.inferred.merge(in other.inferred);
+        self.outputs.merge(in other.outputs);
+        self.resumed.merge(in other.resumed);
+        self.addr_taken.merge(in other.addr_taken);
     }
 
-    pub fn assign(inout self, in o: Sums) {
-        self.inferred.assign(in o.inferred);
-        self.outputs.assign(in o.outputs);
-        self.resumed.assign(in o.resumed);
-        self.addr.assign(in o.addr);
+    pub fn assign(inout self, in other: Sums) {
+        self.inferred.assign(in other.inferred);
+        self.outputs.assign(in other.outputs);
+        self.resumed.assign(in other.resumed);
+        self.addr_taken.assign(in other.addr_taken);
     }
 
-    pub fn same(in self, in o: Sums) -> bool {
-        self.inferred.same(in o.inferred)
-            && self.outputs.same(in o.outputs)
-            && self.resumed.same(in o.resumed)
-            && self.addr.same(in o.addr)
+    pub fn same(in self, in other: Sums) -> bool {
+        self.inferred.same(in other.inferred)
+            && self.outputs.same(in other.outputs)
+            && self.resumed.same(in other.resumed)
+            && self.addr_taken.same(in other.addr_taken)
     }
 }

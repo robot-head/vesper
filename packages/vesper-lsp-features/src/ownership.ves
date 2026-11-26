@@ -2654,14 +2654,12 @@ fn rq_range_err(e: SpanError) -> Result[Range, SpanError] {
 
 fn rq_range(in d: Doc, s: u64, e: u64) -> Result[Range, SpanError] {
     handle Fail[SpanError] in {
-        rq_range_ok(
-            range(
-                in d.text,
-                in d.lines.as_slice(),
-                d.max_work,
-                ByteSpan { start: narrow_usize(s), end: narrow_usize(e) }
-            )
-        )
+        rq_range_ok(range(
+            in d.text,
+            in d.lines.as_slice(),
+            d.max_work,
+            ByteSpan { start: narrow_usize(s), end: narrow_usize(e) }
+        ))
     } with {
         return v => v,
         raise(err, resume) => rq_range_err(err),

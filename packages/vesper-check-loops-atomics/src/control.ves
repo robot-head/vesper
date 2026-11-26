@@ -70,10 +70,7 @@ impl Control {
     }
 
     fn frame(in self, i: u64) -> u8 {
-        match self.frames.try_get(i) {
-            Option::Some(f) => f,
-            Option::None => F_FN,
-        }
+        self.frames.try_get(i).unwrap_or(F_FN)
     }
 
     fn last(in self) -> u8 {
@@ -103,10 +100,7 @@ impl Control {
             }
             i = wrapping_sub(i, 1);
             if self.frame(i) == F_FN {
-                return match self.expected.try_get(i) {
-                    Option::Some(t) => t,
-                    Option::None => NONE32,
-                };
+                return self.expected.try_get(i).unwrap_or(NONE32);
             }
         }
     }

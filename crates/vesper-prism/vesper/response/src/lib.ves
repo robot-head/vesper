@@ -435,9 +435,10 @@ pub fn response_plan_finish(
         Fail::raise(ResponseError::BodyForbidden);
     }
     if body.len() != p.representation_length {
-        Fail::raise(
-            ResponseError::LengthMismatch { expected: p.representation_length, actual: body.len() }
-        );
+        Fail::raise(ResponseError::LengthMismatch {
+            expected: p.representation_length,
+            actual: body.len()
+        });
     }
     match check_sizes(p.limits, p.head, p.representation_length, p.head_length, p.header_count) {
         Option::Some(e) => Fail::raise(e),

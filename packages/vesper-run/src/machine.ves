@@ -821,9 +821,12 @@ fn split_place(inout m: M, place: u32, code: u64) -> u64 {
         m.wsegs.push(u32_at(in parts, i));
     }
     let row = m.wr.len();
-    m.wr.push(
-        Wr { root: u32_at(in parts, 0), sa: sa, sn: wrapping_sub(parts.len(), 1), code: code }
-    );
+    m.wr.push(Wr {
+        root: u32_at(in parts, 0),
+        sa: sa,
+        sn: wrapping_sub(parts.len(), 1),
+        code: code
+    });
     row
 }
 
@@ -1727,14 +1730,12 @@ fn invoke(inout m: M, f: u64) {
                     for j in 0..pr.n {
                         m.segs.push(m.p.path_name(path, j));
                     }
-                    slots.push(
-                        En {
-                            name: p.name,
-                            cell: e.cell,
-                            pa: pa,
-                            pn: wrapping_sub(m.segs.len(), pa)
-                        }
-                    );
+                    slots.push(En {
+                        name: p.name,
+                        cell: e.cell,
+                        pa: pa,
+                        pn: wrapping_sub(m.segs.len(), pa)
+                    });
                     found = true;
                 }
             }
@@ -1744,12 +1745,10 @@ fn invoke(inout m: M, f: u64) {
             }
         } else {
             let cell = m.cells.len();
-            m.cells.push(
-                match m.argv.try_get(i) {
-                    Option::Some(v) => v,
-                    Option::None => undef(),
-                }
-            );
+            m.cells.push(match m.argv.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => undef(),
+            });
             slots.push(En { name: p.name, cell: cell, pa: 0, pn: 0 });
         }
     }

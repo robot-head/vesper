@@ -17,6 +17,7 @@ unsafe extern "C" {
     fn vesper_hybrid_codegen_walk_seq_free(seq: i64) -> i64;
     fn vesper_hybrid_codegen_walk_live_allocations() -> i64;
     fn vesper_hybrid_codegen_walk_box_new(size: i64) -> i64;
+    fn vesper_hybrid_codegen_walk_block_plan_words(input: *mut u64) -> i64;
     fn vesper_hybrid_codegen_walk_frame_plans_words(input: *mut u64) -> i64;
     fn vesper_hybrid_codegen_walk_register_locals_words(input: *mut u64) -> i64;
 }
@@ -31,6 +32,15 @@ pub const RUNTIME: vesper_port_abi::SeqRuntime = vesper_port_abi::SeqRuntime {
 pub fn live_allocations() -> i64 {
     // SAFETY: the function only reads two counters.
     unsafe { vesper_hybrid_codegen_walk_live_allocations() }
+}
+
+/// Calls `block_plan_words` of the Vesper library `hybrid_codegen_walk` (`vesper_hybrid_codegen_walk_block_plan_words`).
+pub fn block_plan_words(input: &[u8]) -> Vec<u64> {
+    // SAFETY: `vesper_hybrid_codegen_walk_block_plan_words` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_hybrid_codegen_walk_block_plan_words(view_input) });
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
 }
 
 /// Calls `frame_plans_words` of the Vesper library `hybrid_codegen_walk` (`vesper_hybrid_codegen_walk_frame_plans_words`).

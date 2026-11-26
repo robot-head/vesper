@@ -22,20 +22,18 @@ pub fn segment_parse(in bytes: Slice[u8]) -> Result[Parsed, WireError] {
     }
     match opts_parse_at(in bytes, HEADER_LEN, header_len) {
         Result::Err(e) => Result::Err(e),
-        Result::Ok(options) => Result::Ok(
-            Parsed {
-                src_port: wrapping_u16(w0 >> 48),
-                dst_port: wrapping_u16(w0 >> 32),
-                seq: wrapping_u32(w0),
-                ack: wrapping_u32(w1 >> 32),
-                flags: wrapping_u8(w1 >> 16),
-                window: wrapping_u16(w1),
-                checksum: wrapping_u16(w2 >> 16),
-                urgent: wrapping_u16(w2),
-                header_len: header_len,
-                options: options
-            }
-        ),
+        Result::Ok(options) => Result::Ok(Parsed {
+            src_port: wrapping_u16(w0 >> 48),
+            dst_port: wrapping_u16(w0 >> 32),
+            seq: wrapping_u32(w0),
+            ack: wrapping_u32(w1 >> 32),
+            flags: wrapping_u8(w1 >> 16),
+            window: wrapping_u16(w1),
+            checksum: wrapping_u16(w2 >> 16),
+            urgent: wrapping_u16(w2),
+            header_len: header_len,
+            options: options
+        }),
     }
 }
 

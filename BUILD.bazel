@@ -430,6 +430,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Part 6a (#2094): @vesper/native-walk's block plans against
+        # `native::block_plan` over the corpus compiles.
+        "test/self_host_native_walk_blocks": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         "test/self_host_place_ir_jit": glob([
             "examples/**",
             "packages/**",
@@ -1312,6 +1319,10 @@ vesper_crate(
         # (optimize off and on); about 600 s of Rust compiles at step 1 in a
         # release build, so it gets the same headroom.
         "test/self_host_native_walk_frame": "eternal",
+        # The block plan twin (#2094) compiles every 4th corpus main three
+        # times (Rust, Vesper plans, a perturbed plan) for each of optimize
+        # off and on; 80 s in a release build.
+        "test/self_host_native_walk_blocks": "eternal",
         "test/self_host_check_harness": "long",
         # The trait declaration differential (#1185) checks every corpus world.
         "test/self_host_check_pact": "eternal",
@@ -1511,6 +1522,21 @@ vesper_package(
         ":front_package",
         ":std_arena_package",
         ":std_hash_package",
+        ":std_intern_package",
+    ],
+)
+
+# @vesper/sugar for the hybrid compiler's sugar expansion swap (SH1 lane
+# 14, #1157).
+vesper_package(
+    name = "sugar_package",
+    srcs = glob(["packages/vesper-sugar/src/**/*.ves"]),
+    manifest = "packages/vesper-sugar/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ast_package",
+        ":front_package",
+        ":std_arena_package",
         ":std_intern_package",
     ],
 )

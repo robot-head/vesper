@@ -20,7 +20,7 @@ const MAX_STEPS: usize = 8192;
 const MAX_BYTES: usize = lexer::HARD_SOURCE_BYTES;
 const WORK: usize = 64 * 1024 * 1024;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SugarSourceSpan {
     pub expanded: Span,
     pub original: Span,
@@ -28,7 +28,7 @@ pub struct SugarSourceSpan {
     pub copied: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ExpandedSugar {
     pub source: String,
     pub fresh_prefix: String,
@@ -615,6 +615,43 @@ pub fn expand_sugar_with_scopes(
     expand_sugar_with_scopes_for_execution(source, imports, scopes, visible, true)
 }
 
+/// The result of [`expand_sugar_with_scopes_for_execution`].
+pub type Expansion = Result<Option<ExpandedSugar>, Diagnostic>;
+
+/// [`expand_sugar_with_scopes_for_execution`]'s signature: the source, its
+/// imports (alias, declaration), their definition scopes, the visible
+/// imports and whether test items are expanded.
+pub type ExpandFn = fn(&str, &[(&str, &str)], &[&[(String, usize)]], &[usize], bool) -> Expansion;
+
+/// The swap-in point of sugar expansion (self-hosting SH1 lane 14, #1157):
+/// the hybrid Stage 2 build (crates/vesper-hybrid) installs a table whose
+/// `expand` is served by `@vesper/sugar`, from its static constructor.
+/// Nothing in the default compiler installs one, so every entry point here
+/// runs [`RUST_SUGAR_EXPAND`]. An installed `expand` must return exactly
+/// what [`rust_expand_sugar`] returns (the hybrid's tests check it).
+#[derive(Clone, Copy)]
+pub struct SugarExpandTable {
+    /// [`expand_sugar_with_scopes_for_execution`].
+    pub expand: ExpandFn,
+}
+
+/// The Rust expansion driver, the default [`SugarExpandTable`].
+pub const RUST_SUGAR_EXPAND: SugarExpandTable = SugarExpandTable {
+    expand: rust_expand_sugar,
+};
+
+static SUGAR_EXPAND_TABLE: std::sync::OnceLock<SugarExpandTable> = std::sync::OnceLock::new();
+
+/// Replace [`RUST_SUGAR_EXPAND`] for the rest of the process. Only the
+/// first call takes effect; a later one returns its table back.
+pub fn install_sugar_expand(table: SugarExpandTable) -> Result<(), SugarExpandTable> {
+    SUGAR_EXPAND_TABLE.set(table)
+}
+
+fn table() -> &'static SugarExpandTable {
+    SUGAR_EXPAND_TABLE.get().unwrap_or(&RUST_SUGAR_EXPAND)
+}
+
 /// Package compiler entry point with explicit test visibility.
 pub fn expand_sugar_with_scopes_for_execution(
     source: &str,
@@ -622,7 +659,19 @@ pub fn expand_sugar_with_scopes_for_execution(
     scopes: &[&[(String, usize)]],
     visible: &[usize],
     include_tests: bool,
-) -> Result<Option<ExpandedSugar>, Diagnostic> {
+) -> Expansion {
+    (table().expand)(source, imports, scopes, visible, include_tests)
+}
+
+/// [`expand_sugar_with_scopes_for_execution`] by the Rust driver, whatever
+/// table is installed.
+pub fn rust_expand_sugar(
+    source: &str,
+    imports: &[(&str, &str)],
+    scopes: &[&[(String, usize)]],
+    visible: &[usize],
+    include_tests: bool,
+) -> Expansion {
     if source.len() > MAX_BYTES || imports.len() > MAX_STEPS {
         return Err(limit(0..0));
     }

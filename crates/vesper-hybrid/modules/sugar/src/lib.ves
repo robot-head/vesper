@@ -1,0 +1,27 @@
+// @vesper/hybrid-sugar: `vesper_syntax::sugar_expand::
+// expand_sugar_with_scopes_for_execution` served from Vesper in the hybrid
+// Stage 2 build (self-hosting SH1 lane 14, #1157).
+//
+// `expand_words` takes the source with its imports and definition scopes
+// as one text (`@vesper/sugar::sugar_expand_scoped_words`' layout, written
+// by src/swap/sugar.rs) and returns the driver's words: 0 for no sugar,
+// 2 and a diagnostic, or 1 and the expansion.
+
+// @export abi 4
+
+use @vesper/sugar::{sugar_expand_scoped_words};
+
+// The layout version of `expand_words`.
+pub fn format() -> u64 {
+    1
+}
+
+pub fn expand_words(in text: Str, include_tests: u64) -> ChunkSeq[u64] {
+    divergent(sugar_expand_scoped_words(in text, include_tests, 0))
+}
+
+// The divergent build (build.rs `divergent-sugar`) swaps this body for one
+// that reports every source as having no sugar.
+fn divergent(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    words
+}

@@ -20,183 +20,195 @@ const OUT: u8 = 0;
 const IN: u8 = 1;
 const NONE64: u64 = 18446744073709551615;
 
-fn put(inout o: ChunkSeq[u8], in s: Str) {
-    o.extend(in s.as_bytes());
+fn put(inout out: ChunkSeq[u8], in text: Str) {
+    out.extend(in text.as_bytes());
 }
 
-fn set64(inout s: ChunkSeq[u64], i: u64, x: u64) {
-    let ok = s.try_set(i, x);
+fn set64(inout seq: ChunkSeq[u64], index: u64, value: u64) {
+    let ok = seq.try_set(index, value);
 }
 
-fn set8(inout s: ChunkSeq[u8], i: u64, x: u8) {
-    let ok = s.try_set(i, x);
+fn set8(inout seq: ChunkSeq[u8], index: u64, value: u8) {
+    let ok = seq.try_set(index, value);
 }
 
 fn zeros64(n: u64) -> ChunkSeq[u64] {
-    let mut s: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
-    s.resize(n, 0);
-    s
+    let mut seq: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    seq.resize(n, 0);
+    seq
 }
 
 fn zeros8(n: u64) -> ChunkSeq[u8] {
-    let mut s: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
-    s.resize(n, 0);
-    s
+    let mut seq: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    seq.resize(n, 0);
+    seq
 }
 
-fn list(inout o: ChunkSeq[u8], in s: Str, in xs: ChunkSeq[u64]) {
-    put(inout o, in s);
-    for i in 0..xs.len() {
-        o.push(32);
-        push_decimal(inout o, u64_at(in xs, i));
+fn list(inout out: ChunkSeq[u8], in label: Str, in values: ChunkSeq[u64]) {
+    put(inout out, in label);
+    for i in 0..values.len() {
+        out.push(32);
+        push_decimal(inout out, u64_at(in values, i));
     }
-    o.push(10);
+    out.push(10);
 }
 
 // The petgraph `GraphMap` of one graph's blocks.
 struct Graph {
-    // adjacency entries of node k: node[start[k]..start[k] + len[k]]
-    start: ChunkSeq[u64],
-    len: ChunkSeq[u64],
-    node: ChunkSeq[u64],
-    dir: ChunkSeq[u8],
+    // adjacency entries of node k:
+    // neighbor[entry_start[k]..entry_start[k] + entry_count[k]], with their direction
+    entry_start: ChunkSeq[u64],
+    entry_count: ChunkSeq[u64],
+    neighbor: ChunkSeq[u64],
+    direction: ChunkSeq[u8],
     // the `IndexMap` order of the nodes present, and each node's index in
     // it (NONE64 once removed)
     order: ChunkSeq[u64],
-    pos: ChunkSeq[u64],
+    order_index: ChunkSeq[u64],
 }
 
 impl Graph {
-    fn entry_node(in self, k: u64, j: u64) -> u64 {
-        u64_at(in self.node, add(u64_at(in self.start, k), j))
+    fn entry_node(in self, node: u64, entry: u64) -> u64 {
+        u64_at(in self.neighbor, add(u64_at(in self.entry_start, node), entry))
     }
 
-    fn entry_dir(in self, k: u64, j: u64) -> u8 {
-        u8_at(in self.dir, add(u64_at(in self.start, k), j))
+    fn entry_dir(in self, node: u64, entry: u64) -> u8 {
+        u8_at(in self.direction, add(u64_at(in self.entry_start, node), entry))
     }
 
-    // `remove_single_edge(a, b, dir)`: the first entry (b, dir) of a's list
-    // swap-removed.
-    fn remove_entry(inout self, a: u64, b: u64, d: u8) {
-        if u64_at(in self.pos, a) == NONE64 {
+    // `remove_single_edge(node, other, direction)`: the first entry (other,
+    // direction) of node's list swap-removed.
+    fn remove_entry(inout self, node: u64, other: u64, direction: u8) {
+        if u64_at(in self.order_index, node) == NONE64 {
             return;
         }
-        let s = u64_at(in self.start, a);
-        let n = u64_at(in self.len, a);
-        for j in 0..n {
-            if u64_at(in self.node, add(s, j)) == b && u8_at(in self.dir, add(s, j)) == d {
-                let last = add(s, wrapping_sub(n, 1));
-                let x = u64_at(in self.node, last);
-                let y = u8_at(in self.dir, last);
-                set64(inout self.node, add(s, j), x);
-                set8(inout self.dir, add(s, j), y);
-                set64(inout self.len, a, wrapping_sub(n, 1));
+        let start = u64_at(in self.entry_start, node);
+        let count = u64_at(in self.entry_count, node);
+        for j in 0..count {
+            if u64_at(in self.neighbor, add(start, j)) == other
+                && u8_at(in self.direction, add(start, j)) == direction {
+                let last = add(start, wrapping_sub(count, 1));
+                let last_neighbor = u64_at(in self.neighbor, last);
+                let last_direction = u8_at(in self.direction, last);
+                set64(inout self.neighbor, add(start, j), last_neighbor);
+                set8(inout self.direction, add(start, j), last_direction);
+                set64(inout self.entry_count, node, wrapping_sub(count, 1));
                 return;
             }
         }
     }
 
     // `GraphMap::remove_node`.
-    fn remove_node(inout self, k: u64) {
-        let i = u64_at(in self.pos, k);
-        if i == NONE64 {
+    fn remove_node(inout self, node: u64) {
+        let index = u64_at(in self.order_index, node);
+        if index == NONE64 {
             return;
         }
         let n = self.order.len();
         let last = u64_at(in self.order, wrapping_sub(n, 1));
-        set64(inout self.order, i, last);
-        set64(inout self.pos, last, i);
+        set64(inout self.order, index, last);
+        set64(inout self.order_index, last, index);
         self.order.truncate(wrapping_sub(n, 1));
-        set64(inout self.pos, k, NONE64);
-        let m = u64_at(in self.len, k);
-        for j in 0..m {
-            let other = self.entry_node(k, j);
-            let d = if self.entry_dir(k, j) == OUT { IN } else { OUT };
-            self.remove_entry(other, k, d);
+        set64(inout self.order_index, node, NONE64);
+        let entry_count = u64_at(in self.entry_count, node);
+        for j in 0..entry_count {
+            let other = self.entry_node(node, j);
+            let reverse = if self.entry_dir(node, j) == OUT {
+                IN
+            } else {
+                OUT
+            };
+            self.remove_entry(other, node, reverse);
         }
     }
 }
 
 // The deduplicated edge targets of every block, in `add_edge` order.
 struct Targets {
-    // targets of block b: to[at[b]..at[b] + count[b]]
-    at: ChunkSeq[u64],
+    // targets of block b: target[start[b]..start[b] + count[b]]
+    start: ChunkSeq[u64],
     count: ChunkSeq[u64],
-    to: ChunkSeq[u64],
+    target: ChunkSeq[u64],
 }
 
-fn targets(in p: Program, f: FnRow) -> Targets {
-    let n = f.bc;
-    let mut t = Targets { at: zeros64(n), count: zeros64(n), to: ChunkSeq::new[u64]() };
-    // mark[x] == b + 1: block b already has the edge to x
+fn targets(in program: Program, func: FnRow) -> Targets {
+    let n = func.bc;
+    let mut edges = Targets { start: zeros64(n), count: zeros64(n), target: ChunkSeq::new[u64]() };
+    // mark[target] == block + 1: `block` already has the edge to `target`
     let mut mark = zeros64(n);
-    for b in 0..n {
-        let row = p.block(add(f.b0, b));
-        set64(inout t.at, b, t.to.len());
-        let mut c: u64 = 0;
+    for block in 0..n {
+        let row = program.block(add(func.b0, block));
+        set64(inout edges.start, block, edges.target.len());
+        let mut count: u64 = 0;
         for i in row.ta..add(row.ta, row.tn) {
-            if p.tag(i) == Tag::Block {
-                let x = p.op(i);
-                if x < n && u64_at(in mark, x) != inc(b) {
-                    set64(inout mark, x, inc(b));
-                    t.to.push(x);
-                    c = inc(c);
+            if program.tag(i) == Tag::Block {
+                let target = program.op(i);
+                if target < n && u64_at(in mark, target) != inc(block) {
+                    set64(inout mark, target, inc(block));
+                    edges.target.push(target);
+                    count = inc(count);
                 }
             }
         }
-        set64(inout t.count, b, c);
+        set64(inout edges.count, block, count);
     }
-    t
+    edges
 }
 
-fn build(in t: Targets, n: u64) -> Graph {
-    let mut deg = zeros64(n);
-    for b in 0..n {
-        let a = u64_at(in t.at, b);
-        let c = u64_at(in t.count, b);
-        set64(inout deg, b, add(u64_at(in deg, b), c));
-        for j in 0..c {
-            let x = u64_at(in t.to, add(a, j));
-            if x != b {
-                set64(inout deg, x, inc(u64_at(in deg, x)));
+fn build(in edges: Targets, n: u64) -> Graph {
+    let mut degree = zeros64(n);
+    for block in 0..n {
+        let start = u64_at(in edges.start, block);
+        let count = u64_at(in edges.count, block);
+        set64(inout degree, block, add(u64_at(in degree, block), count));
+        for j in 0..count {
+            let target = u64_at(in edges.target, add(start, j));
+            if target != block {
+                set64(inout degree, target, inc(u64_at(in degree, target)));
             }
         }
     }
-    let mut g = Graph {
-        start: zeros64(n),
-        len: zeros64(n),
-        node: ChunkSeq::new[u64](),
-        dir: ChunkSeq::new[u8](),
+    let mut graph = Graph {
+        entry_start: zeros64(n),
+        entry_count: zeros64(n),
+        neighbor: ChunkSeq::new[u64](),
+        direction: ChunkSeq::new[u8](),
         order: zeros64(n),
-        pos: zeros64(n)
+        order_index: zeros64(n)
     };
     let mut total: u64 = 0;
-    for b in 0..n {
-        set64(inout g.start, b, total);
-        total = add(total, u64_at(in deg, b));
-        set64(inout g.order, b, b);
-        set64(inout g.pos, b, b);
+    for block in 0..n {
+        set64(inout graph.entry_start, block, total);
+        total = add(total, u64_at(in degree, block));
+        set64(inout graph.order, block, block);
+        set64(inout graph.order_index, block, block);
     }
-    g.node.resize(total, 0);
-    g.dir.resize(total, 0);
-    for b in 0..n {
-        let a = u64_at(in t.at, b);
-        let c = u64_at(in t.count, b);
-        for j in 0..c {
-            let x = u64_at(in t.to, add(a, j));
-            let k = add(u64_at(in g.start, b), u64_at(in g.len, b));
-            set64(inout g.node, k, x);
-            set8(inout g.dir, k, OUT);
-            set64(inout g.len, b, inc(u64_at(in g.len, b)));
-            if x != b {
-                let k2 = add(u64_at(in g.start, x), u64_at(in g.len, x));
-                set64(inout g.node, k2, b);
-                set8(inout g.dir, k2, IN);
-                set64(inout g.len, x, inc(u64_at(in g.len, x)));
+    graph.neighbor.resize(total, 0);
+    graph.direction.resize(total, 0);
+    for block in 0..n {
+        let start = u64_at(in edges.start, block);
+        let count = u64_at(in edges.count, block);
+        for j in 0..count {
+            let target = u64_at(in edges.target, add(start, j));
+            let slot = add(
+                u64_at(in graph.entry_start, block),
+                u64_at(in graph.entry_count, block)
+            );
+            set64(inout graph.neighbor, slot, target);
+            set8(inout graph.direction, slot, OUT);
+            set64(inout graph.entry_count, block, inc(u64_at(in graph.entry_count, block)));
+            if target != block {
+                let back_slot = add(
+                    u64_at(in graph.entry_start, target),
+                    u64_at(in graph.entry_count, target)
+                );
+                set64(inout graph.neighbor, back_slot, block);
+                set8(inout graph.direction, back_slot, IN);
+                set64(inout graph.entry_count, target, inc(u64_at(in graph.entry_count, target)));
             }
         }
     }
-    g
+    graph
 }
 
 // petgraph's iterative DFS from `root` (`DfsPostOrder::next`, and the first
@@ -204,7 +216,7 @@ fn build(in t: Targets, n: u64) -> Graph {
 // successor and finished when it is popped a second time. Appends the
 // finished nodes to `post`.
 fn dfs_from(
-    in g: Graph,
+    in graph: Graph,
     root: u64,
     inout discovered: ChunkSeq[u8],
     inout finished: ChunkSeq[u8],
@@ -213,96 +225,96 @@ fn dfs_from(
     let mut stack: ChunkSeq[u64] = ChunkSeq::new[u64]();
     stack.push(root);
     loop {
-        let sn = stack.len();
-        if sn == 0 {
+        let stack_len = stack.len();
+        if stack_len == 0 {
             break;
         }
-        let nx = u64_at(in stack, wrapping_sub(sn, 1));
-        if u8_at(in discovered, nx) == 0 {
-            set8(inout discovered, nx, 1);
-            let m = u64_at(in g.len, nx);
-            for j in 0..m {
-                if g.entry_dir(nx, j) == OUT {
-                    let succ = g.entry_node(nx, j);
+        let node = u64_at(in stack, wrapping_sub(stack_len, 1));
+        if u8_at(in discovered, node) == 0 {
+            set8(inout discovered, node, 1);
+            let entry_count = u64_at(in graph.entry_count, node);
+            for j in 0..entry_count {
+                if graph.entry_dir(node, j) == OUT {
+                    let succ = graph.entry_node(node, j);
                     if u8_at(in discovered, succ) == 0 {
                         stack.push(succ);
                     }
                 }
             }
         } else {
-            stack.truncate(wrapping_sub(sn, 1));
-            if u8_at(in finished, nx) == 0 {
-                set8(inout finished, nx, 1);
-                post.push(nx);
+            stack.truncate(wrapping_sub(stack_len, 1));
+            if u8_at(in finished, node) == 0 {
+                set8(inout finished, node, 1);
+                post.push(node);
             }
         }
     }
 }
 
 // Prints the `order`, `cyclic` and `sealed` lines of one function.
-pub fn block_layout(in p: Program, f: FnRow, inout o: ChunkSeq[u8]) {
-    let n = f.bc;
-    let none: ChunkSeq[u64] = ChunkSeq::new[u64]();
+pub fn block_layout(in program: Program, func: FnRow, inout out: ChunkSeq[u8]) {
+    let n = func.bc;
+    let empty: ChunkSeq[u64] = ChunkSeq::new[u64]();
     if n == 0 {
-        list(inout o, in "order", in none);
-        list(inout o, in "cyclic", in none);
-        list(inout o, in "sealed", in none);
+        list(inout out, in "order", in empty);
+        list(inout out, in "cyclic", in empty);
+        list(inout out, in "sealed", in empty);
         return;
     }
-    let t = targets(in p, f);
-    let mut g = build(in t, n);
+    let edges = targets(in program, func);
+    let mut graph = build(in edges, n);
     // the postorder of the whole graph from the entry
     let mut post: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut reached = zeros8(n);
-    let mut seen = zeros8(n);
-    dfs_from(in g, 0, inout seen, inout reached, inout post);
+    let mut visited = zeros8(n);
+    dfs_from(in graph, 0, inout visited, inout reached, inout post);
     // the live graph: the unreached blocks removed in ascending order
     let mut unreached: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    for b in 0..n {
-        if u8_at(in reached, b) == 0 {
-            unreached.push(b);
-            g.remove_node(b);
+    for block in 0..n {
+        if u8_at(in reached, block) == 0 {
+            unreached.push(block);
+            graph.remove_node(block);
         }
     }
     // `toposort`'s finish order over the live nodes in `IndexMap` order
     let mut finish: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut discovered = zeros8(n);
     let mut finished = zeros8(n);
-    for i in 0..g.order.len() {
-        let k = u64_at(in g.order, i);
-        if u8_at(in discovered, k) == 0 {
-            dfs_from(in g, k, inout discovered, inout finished, inout finish);
+    for i in 0..graph.order.len() {
+        let node = u64_at(in graph.order, i);
+        if u8_at(in discovered, node) == 0 {
+            dfs_from(in graph, node, inout discovered, inout finished, inout finish);
         }
     }
     // strongly connected components (Kosaraju over the incoming entries),
     // in reverse finish order
-    let mut comp = zeros64(n);
-    let mut size: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    size.push(0);
+    let mut component = zeros64(n);
+    let mut component_size: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    component_size.push(0);
     let mut stack: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    let fl = finish.len();
-    for r in 0..fl {
-        let k = u64_at(in finish, wrapping_sub(wrapping_sub(fl, 1), r));
-        if u64_at(in comp, k) == 0 {
-            let id = size.len();
-            size.push(0);
-            set64(inout comp, k, id);
-            stack.push(k);
+    let finish_len = finish.len();
+    for step in 0..finish_len {
+        let node = u64_at(in finish, wrapping_sub(wrapping_sub(finish_len, 1), step));
+        if u64_at(in component, node) == 0 {
+            let id = component_size.len();
+            component_size.push(0);
+            set64(inout component, node, id);
+            stack.push(node);
             loop {
-                let sn = stack.len();
-                if sn == 0 {
+                let stack_len = stack.len();
+                if stack_len == 0 {
                     break;
                 }
-                let x = u64_at(in stack, wrapping_sub(sn, 1));
-                stack.truncate(wrapping_sub(sn, 1));
-                set64(inout size, id, inc(u64_at(in size, id)));
-                let m = u64_at(in g.len, x);
-                for j in 0..m {
-                    if g.entry_dir(x, j) == IN {
-                        let y = g.entry_node(x, j);
-                        if u64_at(in comp, y) == 0 {
-                            set64(inout comp, y, id);
-                            stack.push(y);
+                let top = u64_at(in stack, wrapping_sub(stack_len, 1));
+                stack.truncate(wrapping_sub(stack_len, 1));
+                set64(inout component_size, id, inc(u64_at(in component_size, id)));
+                let entry_count = u64_at(in graph.entry_count, top);
+                for j in 0..entry_count {
+                    if graph.entry_dir(top, j) == IN {
+                        let pred = graph.entry_node(top, j);
+                        if u64_at(in component, pred) == 0 {
+                            set64(inout component, pred, id);
+                            stack.push(pred);
                         }
                     }
                 }
@@ -311,33 +323,33 @@ pub fn block_layout(in p: Program, f: FnRow, inout o: ChunkSeq[u8]) {
     }
     let mut cyclic = zeros8(n);
     let mut cyclic_list: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    for b in 0..n {
-        let c = u64_at(in comp, b);
-        if c != 0 {
-            let mut on = u64_at(in size, c) > 1;
-            if !on {
-                let m = u64_at(in g.len, b);
-                for j in 0..m {
-                    if g.entry_dir(b, j) == OUT && g.entry_node(b, j) == b {
-                        on = true;
+    for block in 0..n {
+        let comp_id = u64_at(in component, block);
+        if comp_id != 0 {
+            let mut on_cycle = u64_at(in component_size, comp_id) > 1;
+            if !on_cycle {
+                let entry_count = u64_at(in graph.entry_count, block);
+                for j in 0..entry_count {
+                    if graph.entry_dir(block, j) == OUT && graph.entry_node(block, j) == block {
+                        on_cycle = true;
                     }
                 }
             }
-            if on {
-                set8(inout cyclic, b, 1);
-                cyclic_list.push(b);
+            if on_cycle {
+                set8(inout cyclic, block, 1);
+                cyclic_list.push(block);
             }
         }
     }
     let mut order: ChunkSeq[u64] = ChunkSeq::new[u64]();
     if cyclic_list.len() == 0 {
-        for r in 0..fl {
-            order.push(u64_at(in finish, wrapping_sub(wrapping_sub(fl, 1), r)));
+        for step in 0..finish_len {
+            order.push(u64_at(in finish, wrapping_sub(wrapping_sub(finish_len, 1), step)));
         }
     } else {
-        let pl = post.len();
-        for r in 0..pl {
-            order.push(u64_at(in post, wrapping_sub(wrapping_sub(pl, 1), r)));
+        let post_len = post.len();
+        for step in 0..post_len {
+            order.push(u64_at(in post, wrapping_sub(wrapping_sub(post_len, 1), step)));
         }
     }
     for i in 0..unreached.len() {
@@ -346,28 +358,28 @@ pub fn block_layout(in p: Program, f: FnRow, inout o: ChunkSeq[u8]) {
     // A block is sealed when it is lowered if no predecessor (itself, for a
     // self loop) is still to come.
     let mut pending = zeros64(n);
-    for b in 0..n {
-        let a = u64_at(in t.at, b);
-        let c = u64_at(in t.count, b);
-        for j in 0..c {
-            let x = u64_at(in t.to, add(a, j));
-            set64(inout pending, x, inc(u64_at(in pending, x)));
+    for block in 0..n {
+        let start = u64_at(in edges.start, block);
+        let count = u64_at(in edges.count, block);
+        for j in 0..count {
+            let target = u64_at(in edges.target, add(start, j));
+            set64(inout pending, target, inc(u64_at(in pending, target)));
         }
     }
     let mut sealed: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    for k in 0..order.len() {
-        let b = u64_at(in order, k);
-        if b != 0 && u8_at(in cyclic, b) == 0 && u64_at(in pending, b) == 0 {
-            sealed.push(b);
+    for pos in 0..order.len() {
+        let block = u64_at(in order, pos);
+        if block != 0 && u8_at(in cyclic, block) == 0 && u64_at(in pending, block) == 0 {
+            sealed.push(block);
         }
-        let a = u64_at(in t.at, b);
-        let c = u64_at(in t.count, b);
-        for j in 0..c {
-            let x = u64_at(in t.to, add(a, j));
-            set64(inout pending, x, wrapping_sub(u64_at(in pending, x), 1));
+        let start = u64_at(in edges.start, block);
+        let count = u64_at(in edges.count, block);
+        for j in 0..count {
+            let target = u64_at(in edges.target, add(start, j));
+            set64(inout pending, target, wrapping_sub(u64_at(in pending, target), 1));
         }
     }
-    list(inout o, in "order", in order);
-    list(inout o, in "cyclic", in cyclic_list);
-    list(inout o, in "sealed", in sealed);
+    list(inout out, in "order", in order);
+    list(inout out, in "cyclic", in cyclic_list);
+    list(inout out, in "sealed", in sealed);
 }

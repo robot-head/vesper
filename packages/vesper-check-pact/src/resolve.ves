@@ -668,9 +668,13 @@ fn add_gen_bounds(
             };
             args.push(QArg { is_row: tg.row, ty: arg_ty });
         }
-        assumptions.push(
-            QGoal { self_ty: self_ty, trait_name: tname, brand_opt: 0, arg_a: arg_a, arg_n: tr.gn }
-        );
+        assumptions.push(QGoal {
+            self_ty: self_ty,
+            trait_name: tname,
+            brand_opt: 0,
+            arg_a: arg_a,
+            arg_n: tr.gn
+        });
     }
 }
 
@@ -738,15 +742,13 @@ pub fn read_cx_header(
                             };
                             args.push(QArg { is_row: tg.row, ty: arg_ty });
                         }
-                        assumptions.push(
-                            QGoal {
-                                self_ty: wh.ty,
-                                trait_name: tref.name,
-                                brand_opt: 0,
-                                arg_a: arg_a,
-                                arg_n: tr.gn
-                            }
-                        );
+                        assumptions.push(QGoal {
+                            self_ty: wh.ty,
+                            trait_name: tref.name,
+                            brand_opt: 0,
+                            arg_a: arg_a,
+                            arg_n: tr.gn
+                        });
                     }
                 }
             }
@@ -780,9 +782,13 @@ pub fn read_cx_header(
                 }
             }
             if ok {
-                assumptions.push(
-                    QGoal { self_ty: gty, trait_name: bt, brand_opt: 0, arg_a: arg_a, arg_n: tr.gn }
-                );
+                assumptions.push(QGoal {
+                    self_ty: gty,
+                    trait_name: bt,
+                    brand_opt: 0,
+                    arg_a: arg_a,
+                    arg_n: tr.gn
+                });
             }
         } else {
             for _ in 0..na {
@@ -1386,51 +1392,45 @@ fn conform_type_vars(
     if n.kind == K_NAMED {
         let mut nargs = ChunkSeq::with_capacity[u32](w(n.n));
         for i in 0..w(n.n) {
-            nargs.push(
-                conform_type_vars(
-                    inout t,
-                    sy,
-                    in d,
-                    u32_at(in t.items, add(w(n.a), i)),
-                    c,
-                    in vnames,
-                    in vtys
-                )
-            );
+            nargs.push(conform_type_vars(
+                inout t,
+                sy,
+                in d,
+                u32_at(in t.items, add(w(n.a), i)),
+                c,
+                in vnames,
+                in vtys
+            ));
         }
         return t.named(n.name, in nargs);
     }
     if n.kind == K_TUPLE {
         let mut nargs = ChunkSeq::with_capacity[u32](w(n.n));
         for i in 0..w(n.n) {
-            nargs.push(
-                conform_type_vars(
-                    inout t,
-                    sy,
-                    in d,
-                    u32_at(in t.items, add(w(n.a), i)),
-                    c,
-                    in vnames,
-                    in vtys
-                )
-            );
+            nargs.push(conform_type_vars(
+                inout t,
+                sy,
+                in d,
+                u32_at(in t.items, add(w(n.a), i)),
+                c,
+                in vnames,
+                in vtys
+            ));
         }
         return t.tuple(in nargs);
     }
     if n.kind == K_FN {
         let mut ptys = ChunkSeq::with_capacity[u32](w(n.n));
         for i in 0..w(n.n) {
-            ptys.push(
-                conform_type_vars(
-                    inout t,
-                    sy,
-                    in d,
-                    u32_at(in t.items, add(w(n.a), i)),
-                    c,
-                    in vnames,
-                    in vtys
-                )
-            );
+            ptys.push(conform_type_vars(
+                inout t,
+                sy,
+                in d,
+                u32_at(in t.items, add(w(n.a), i)),
+                c,
+                in vnames,
+                in vtys
+            ));
         }
         let nres = conform_type_vars(inout t, sy, in d, n.r, c, in vnames, in vtys);
         let nrow = conform_row_vars(inout t, sy, in d, n.r2, c, in vnames, in vtys);
@@ -1463,17 +1463,15 @@ fn conform_row_vars(
         let en = t.effect_at(add(w(rn.a), i));
         let ea = n32(eargs.len());
         for j in 0..w(en.n) {
-            eargs.push(
-                conform_type_vars(
-                    inout t,
-                    sy,
-                    in d,
-                    u32_at(in t.items, add(w(en.a), j)),
-                    c,
-                    in vnames,
-                    in vtys
-                )
-            );
+            eargs.push(conform_type_vars(
+                inout t,
+                sy,
+                in d,
+                u32_at(in t.items, add(w(en.a), j)),
+                c,
+                in vnames,
+                in vtys
+            ));
         }
         effs.push(EffNode { label: en.label, name: en.name, a: ea, n: en.n });
     }

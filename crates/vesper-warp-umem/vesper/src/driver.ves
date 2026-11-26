@@ -148,9 +148,11 @@ impl Device {
         if len > 0 && end <= widen_u64(frame_size) {
             return Option::None;
         }
-        Option::Some(
-            PortError::LengthOutOfFrame { offset: offset, len: len, frame_size: frame_size }
-        )
+        Option::Some(PortError::LengthOutOfFrame {
+            offset: offset,
+            len: len,
+            frame_size: frame_size
+        })
     }
 
     // Posts a kernel-bound chunk to the fill ring; falls back to the free

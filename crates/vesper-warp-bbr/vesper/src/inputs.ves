@@ -129,9 +129,10 @@ pub fn ack_check(
 // `ack_check`.
 pub fn ack_check_totals(p: AckProgress, inflight: u64, delivered: u64) eff [Fail[BbrFault]] {
     if p.released > inflight {
-        Fail::raise(
-            BbrFault::InflightUnderflow { bytes_in_flight: inflight, released: p.released }
-        );
+        Fail::raise(BbrFault::InflightUnderflow {
+            bytes_in_flight: inflight,
+            released: p.released
+        });
     }
     if add_overflows(delivered, p.newly_delivered) {
         Fail::raise(BbrFault::CounterOverflow);

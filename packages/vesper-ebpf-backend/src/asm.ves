@@ -162,15 +162,13 @@ impl Asm {
     }
 
     pub fn atomic_add(inout self, size: Size, dst: u8, off: i16, src: u8) {
-        self.insn(
-            Insn::Atomic {
-                size: size,
-                op: AtomicOp::Add { fetch: false },
-                dst: dst,
-                src: src,
-                off: off
-            }
-        );
+        self.insn(Insn::Atomic {
+            size: size,
+            op: AtomicOp::Add { fetch: false },
+            dst: dst,
+            src: src,
+            off: off
+        });
     }
 
     pub fn call(inout self, helper: i32) {

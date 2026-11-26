@@ -898,14 +898,12 @@ fn range_err(e: SpanError) -> Result[Range, SpanError] {
 
 fn try_range(in x: Ix, s: u64, e: u64) -> Result[Range, SpanError] {
     handle Fail[SpanError] in {
-        range_ok(
-            range(
-                in x.src,
-                in x.lines.as_slice(),
-                x.max_work,
-                ByteSpan { start: narrow_usize(s), end: narrow_usize(e) }
-            )
-        )
+        range_ok(range(
+            in x.src,
+            in x.lines.as_slice(),
+            x.max_work,
+            ByteSpan { start: narrow_usize(s), end: narrow_usize(e) }
+        ))
     } with {
         return v => v,
         raise(err, resume) => range_err(err),

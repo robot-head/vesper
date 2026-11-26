@@ -424,15 +424,13 @@ pub fn scalar_hull(a: Scalar, b: Scalar) -> Scalar {
 
 pub fn scalar_meet(a: Scalar, b: Scalar) -> Option[Scalar] {
     match tnum_intersect(a.var, b.var) {
-        Option::Some(var) => scalar_normalize(
-            parts(
-                max_u64(a.umin, b.umin),
-                min_u64(a.umax, b.umax),
-                max_i64(a.smin, b.smin),
-                min_i64(a.smax, b.smax),
-                var
-            )
-        ),
+        Option::Some(var) => scalar_normalize(parts(
+            max_u64(a.umin, b.umin),
+            min_u64(a.umax, b.umax),
+            max_i64(a.smin, b.smin),
+            min_i64(a.smax, b.smax),
+            var
+        )),
         Option::None => Option::None,
     }
 }

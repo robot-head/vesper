@@ -73,20 +73,18 @@ pub fn vsock_decode_hdr(in b: Slice[u8]) -> Option[VsockHeader] {
     if b.len() < VSOCK_HEADER_BYTES {
         return Option::None;
     }
-    Option::Some(
-        VsockHeader {
-            src_cid: vsock_read_u64_le(in b, 0),
-            dst_cid: vsock_read_u64_le(in b, 8),
-            src_port: vsock_read_u32_le(in b, 16),
-            dst_port: vsock_read_u32_le(in b, 20),
-            len: vsock_read_u32_le(in b, 24),
-            kind: vsock_read_u16_le(in b, 28),
-            op: vsock_read_u16_le(in b, 30),
-            flags: vsock_read_u32_le(in b, 32),
-            buf_alloc: vsock_read_u32_le(in b, 36),
-            fwd_cnt: vsock_read_u32_le(in b, 40),
-        }
-    )
+    Option::Some(VsockHeader {
+        src_cid: vsock_read_u64_le(in b, 0),
+        dst_cid: vsock_read_u64_le(in b, 8),
+        src_port: vsock_read_u32_le(in b, 16),
+        dst_port: vsock_read_u32_le(in b, 20),
+        len: vsock_read_u32_le(in b, 24),
+        kind: vsock_read_u16_le(in b, 28),
+        op: vsock_read_u16_le(in b, 30),
+        flags: vsock_read_u32_le(in b, 32),
+        buf_alloc: vsock_read_u32_le(in b, 36),
+        fwd_cnt: vsock_read_u32_le(in b, 40),
+    })
 }
 
 pub fn vsock_peer_credit(peer_buf_alloc: u32, tx_cnt: u32, peer_fwd_cnt: u32) -> u32 {

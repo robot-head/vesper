@@ -10,6 +10,10 @@ use wasm_encoder::{
 
 /// First byte of static data (string literals); the heap follows it.
 pub(crate) const DATA_START: u64 = 16;
+/// Alignment of each static data item, in bytes (one value slot).
+const DATA_ALIGN: usize = 8;
+/// Bytes of one Wasm linear-memory page.
+const PAGE_BYTES: u64 = 65536;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum TypeDef {
@@ -93,7 +97,7 @@ impl Builder {
     pub(crate) fn data(&mut self, bytes: &[u8]) -> u64 {
         let at = DATA_START + self.data.len() as u64;
         self.data.extend_from_slice(bytes);
-        while !self.data.len().is_multiple_of(8) {
+        while !self.data.len().is_multiple_of(DATA_ALIGN) {
             self.data.push(0);
         }
         at
@@ -167,7 +171,7 @@ impl Builder {
         });
         module.section(&tables);
         let heap_start = self.heap_start();
-        let min_pages = heap_start.div_ceil(65536).max(1);
+        let min_pages = heap_start.div_ceil(PAGE_BYTES).max(1);
         if min_pages > u64::from(max_pages) {
             return Err("static data exceeds max_memory_pages".into());
         }

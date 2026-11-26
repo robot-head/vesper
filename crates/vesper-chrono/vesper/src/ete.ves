@@ -168,13 +168,11 @@ fn need_bytes(in bytes: Slice[u8], offset: u64, needed: u64) -> Result[u64, EteE
         0
     };
     if available < needed {
-        Result::Err(
-            EteError::Truncated {
-                offset: offset,
-                needed: needed,
-                available: available,
-            }
-        )
+        Result::Err(EteError::Truncated {
+            offset: offset,
+            needed: needed,
+            available: available,
+        })
     } else {
         Result::Ok(needed)
     }
@@ -293,13 +291,11 @@ fn decode_address(
             };
             let addr = (prev & bit_not_u64(mask)) | low;
             push_address(inout st, addr, in InstructionSet::Is0);
-            return Result::Ok(
-                AddrOut {
-                    address: addr,
-                    isa: InstructionSet::Is0,
-                    len: len,
-                }
-            );
+            return Result::Ok(AddrOut {
+                address: addr,
+                isa: InstructionSet::Is0,
+                len: len,
+            });
         } else {
             let mask: u64 = if two { 0xfffe } else { 0xfe };
             let low: u64 = if two {
@@ -309,13 +305,11 @@ fn decode_address(
             };
             let addr = (prev & bit_not_u64(mask)) | low;
             push_address(inout st, addr, in InstructionSet::Is1);
-            return Result::Ok(
-                AddrOut {
-                    address: addr,
-                    isa: InstructionSet::Is1,
-                    len: len,
-                }
-            );
+            return Result::Ok(AddrOut {
+                address: addr,
+                isa: InstructionSet::Is1,
+                len: len,
+            });
         }
     }
     if h == 0x9a || h == 0x82 || h == 0x9d || h == 0x85 {
@@ -342,13 +336,11 @@ fn decode_address(
             (prev & bit_not_u64(0xffff_ffff)) | a
         };
         push_address(inout st, addr, in InstructionSet::Is0);
-        return Result::Ok(
-            AddrOut {
-                address: addr,
-                isa: InstructionSet::Is0,
-                len: n,
-            }
-        );
+        return Result::Ok(AddrOut {
+            address: addr,
+            isa: InstructionSet::Is0,
+            len: n,
+        });
     }
     if h == 0x9b || h == 0x83 || h == 0x9e || h == 0x86 {
         let wide = h == 0x9e || h == 0x86;
@@ -372,13 +364,11 @@ fn decode_address(
             (prev & bit_not_u64(0xffff_ffff)) | a
         };
         push_address(inout st, addr, in InstructionSet::Is1);
-        return Result::Ok(
-            AddrOut {
-                address: addr,
-                isa: InstructionSet::Is1,
-                len: n,
-            }
-        );
+        return Result::Ok(AddrOut {
+            address: addr,
+            isa: InstructionSet::Is1,
+            len: n,
+        });
     }
     if h == 0x90 {
         if !st.has_h0 {
@@ -455,14 +445,12 @@ fn emit_atoms(inout out: ChunkSeq[EteElementAt], offset: u64, pattern: u64, coun
         if i >= count {
             break;
         }
-        out.push(
-            EteElementAt {
-                offset: offset,
-                element: EteElement::Atom {
-                    executed: (shr(pattern, i) & 1) == 1,
-                },
-            }
-        );
+        out.push(EteElementAt {
+            offset: offset,
+            element: EteElement::Atom {
+                executed: (shr(pattern, i) & 1) == 1,
+            },
+        });
         i = wrapping_add(i, 1);
     }
 }
@@ -502,24 +490,20 @@ fn decode_packet(
     if !st.synced {
         if is_async_at(in bytes, offset) {
             st.synced = true;
-            out.push(
-                EteElementAt {
-                    offset: offset,
-                    element: EteElement::Sync,
-                }
-            );
+            out.push(EteElementAt {
+                offset: offset,
+                element: EteElement::Sync,
+            });
             return Result::Ok(async_len());
         }
         return Result::Err(EteError::NotSynchronized { offset: offset });
     }
     if h == 0x00 {
         if is_async_at(in bytes, offset) {
-            out.push(
-                EteElementAt {
-                    offset: offset,
-                    element: EteElement::Sync,
-                }
-            );
+            out.push(EteElementAt {
+                offset: offset,
+                element: EteElement::Sync,
+            });
             return Result::Ok(async_len());
         }
         match need_bytes(in bytes, offset, 2) {
@@ -528,21 +512,17 @@ fn decode_packet(
         }
         let b1 = byte_at(in bytes, wrapping_add(offset, 1));
         if b1 == 0x03 {
-            out.push(
-                EteElementAt {
-                    offset: offset,
-                    element: EteElement::Discard,
-                }
-            );
+            out.push(EteElementAt {
+                offset: offset,
+                element: EteElement::Discard,
+            });
             return Result::Ok(2);
         }
         if b1 == 0x05 {
-            out.push(
-                EteElementAt {
-                    offset: offset,
-                    element: EteElement::Overflow,
-                }
-            );
+            out.push(EteElementAt {
+                offset: offset,
+                element: EteElement::Overflow,
+            });
             return Result::Ok(2);
         }
         if b1 == 0x00 {
@@ -597,17 +577,15 @@ fn decode_packet(
             f3 = r.value;
             len = wrapping_add(len, r.len);
         }
-        out.push(
-            EteElementAt {
-                offset: offset,
-                element: EteElement::TraceInfo {
-                    info: f0,
-                    key: f1,
-                    spec: f2,
-                    cyct: f3,
-                },
-            }
-        );
+        out.push(EteElementAt {
+            offset: offset,
+            element: EteElement::TraceInfo {
+                info: f0,
+                key: f1,
+                spec: f2,
+                cyct: f3,
+            },
+        });
         return Result::Ok(wrapping_add(1, len));
     }
     if h == 0x02 || h == 0x03 {
@@ -647,24 +625,20 @@ fn decode_packet(
             len = wrapping_add(len, cc.len);
             cycle_count = Option::Some(cc.value);
         }
-        out.push(
-            EteElementAt {
-                offset: offset,
-                element: EteElement::Timestamp {
-                    timestamp: st.timestamp,
-                    cycle_count: cycle_count,
-                },
-            }
-        );
+        out.push(EteElementAt {
+            offset: offset,
+            element: EteElement::Timestamp {
+                timestamp: st.timestamp,
+                cycle_count: cycle_count,
+            },
+        });
         return Result::Ok(wrapping_add(1, len));
     }
     if h == 0x04 {
-        out.push(
-            EteElementAt {
-                offset: offset,
-                element: EteElement::TraceOn,
-            }
-        );
+        out.push(EteElementAt {
+            offset: offset,
+            element: EteElement::TraceOn,
+        });
         return Result::Ok(1);
     }
     if h == 0x06 {
@@ -710,53 +684,43 @@ fn decode_packet(
                 Result::Err(e) => return Result::Err(e),
             };
             total = wrapping_add(total, clen);
-            out.push(
-                EteElementAt {
-                    offset: offset,
-                    element: EteElement::Context(clone_ctx(in st.context)),
-                }
-            );
-        }
-        out.push(
-            EteElementAt {
+            out.push(EteElementAt {
                 offset: offset,
-                element: EteElement::Exception {
-                    exception_type: wrapping_u16(exception_type),
-                    preferred_return: ao.address,
-                    isa: ao.isa,
-                },
-            }
-        );
+                element: EteElement::Context(clone_ctx(in st.context)),
+            });
+        }
+        out.push(EteElementAt {
+            offset: offset,
+            element: EteElement::Exception {
+                exception_type: wrapping_u16(exception_type),
+                preferred_return: ao.address,
+                isa: ao.isa,
+            },
+        });
         return Result::Ok(wrapping_add(1, total));
     }
     if h == 0x07 {
-        out.push(
-            EteElementAt {
-                offset: offset,
-                element: EteElement::ExceptionReturn,
-            }
-        );
+        out.push(EteElementAt {
+            offset: offset,
+            element: EteElement::ExceptionReturn,
+        });
         return Result::Ok(1);
     }
     if h == 0x70 {
         return Result::Ok(1);
     }
     if h >= 0x71 && h <= 0x7f {
-        out.push(
-            EteElementAt {
-                offset: offset,
-                element: EteElement::Event { mask: h & 0x0f },
-            }
-        );
+        out.push(EteElementAt {
+            offset: offset,
+            element: EteElement::Event { mask: h & 0x0f },
+        });
         return Result::Ok(1);
     }
     if h == 0x80 {
-        out.push(
-            EteElementAt {
-                offset: offset,
-                element: EteElement::Context(clone_ctx(in st.context)),
-            }
-        );
+        out.push(EteElementAt {
+            offset: offset,
+            element: EteElement::Context(clone_ctx(in st.context)),
+        });
         return Result::Ok(1);
     }
     if h == 0x81 {
@@ -764,12 +728,10 @@ fn decode_packet(
             Result::Ok(v) => v,
             Result::Err(e) => return Result::Err(e),
         };
-        out.push(
-            EteElementAt {
-                offset: offset,
-                element: EteElement::Context(clone_ctx(in st.context)),
-            }
-        );
+        out.push(EteElementAt {
+            offset: offset,
+            element: EteElement::Context(clone_ctx(in st.context)),
+        });
         return Result::Ok(wrapping_add(1, n));
     }
     if is_addr_with_context(h) {
@@ -781,21 +743,17 @@ fn decode_packet(
             Result::Ok(v) => v,
             Result::Err(e) => return Result::Err(e),
         };
-        out.push(
-            EteElementAt {
-                offset: offset,
-                element: EteElement::Context(clone_ctx(in st.context)),
-            }
-        );
-        out.push(
-            EteElementAt {
-                offset: offset,
-                element: EteElement::Address {
-                    address: ao.address,
-                    isa: ao.isa,
-                },
-            }
-        );
+        out.push(EteElementAt {
+            offset: offset,
+            element: EteElement::Context(clone_ctx(in st.context)),
+        });
+        out.push(EteElementAt {
+            offset: offset,
+            element: EteElement::Address {
+                address: ao.address,
+                isa: ao.isa,
+            },
+        });
         return Result::Ok(wrapping_add(wrapping_add(1, ao.len), c));
     }
     if is_addr_header(h) {
@@ -803,15 +761,13 @@ fn decode_packet(
             Result::Ok(v) => v,
             Result::Err(e) => return Result::Err(e),
         };
-        out.push(
-            EteElementAt {
-                offset: offset,
-                element: EteElement::Address {
-                    address: ao.address,
-                    isa: ao.isa,
-                },
-            }
-        );
+        out.push(EteElementAt {
+            offset: offset,
+            element: EteElement::Address {
+                address: ao.address,
+                isa: ao.isa,
+            },
+        });
         return Result::Ok(wrapping_add(1, ao.len));
     }
     if h == 0xf6 || h == 0xf7 {

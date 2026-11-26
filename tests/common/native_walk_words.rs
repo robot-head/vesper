@@ -211,3 +211,45 @@ pub fn decode_entry_plans(words: &[u64]) -> Option<vesper::native::EntryPlans> {
     }
     Some(plans)
 }
+
+/// Encodes one graph's successor lists (`native::block_targets`) for
+/// `@vesper/native-walk::native_walk_block_plan_bytes` (#2094): the block
+/// count, then per block its successor count and successors, as
+/// little-endian words.
+pub fn block_targets_input(targets: &[Vec<usize>]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 * (1 + targets.iter().map(|t| 1 + t.len()).sum::<usize>()));
+    let mut word = |w: usize| out.extend_from_slice(&(w as u64).to_le_bytes());
+    word(targets.len());
+    for t in targets {
+        word(t.len());
+        for &b in t {
+            word(b);
+        }
+    }
+    out
+}
+
+/// Decodes `native_walk_block_plan_bytes`'s answer for a graph of `n`
+/// blocks: the order, then the cyclic and the sealed blocks, each a count
+/// and the indices. `None` when the package declined (no words) or the
+/// answer does not parse.
+pub fn decode_block_plan(words: &[u64], n: usize) -> Option<vesper::native::BlockPlan> {
+    let mut it = words.iter().map(|&w| usize::try_from(w).ok());
+    let order = (0..n)
+        .map(|_| it.next().flatten())
+        .collect::<Option<Vec<_>>>()?;
+    let mut set = || -> Option<BTreeSet<usize>> {
+        let k = it.next().flatten()?;
+        (0..k).map(|_| it.next().flatten()).collect()
+    };
+    let cyclic = set()?;
+    let sealed = set()?;
+    if it.next().is_some() {
+        return None;
+    }
+    Some(vesper::native::BlockPlan {
+        order,
+        cyclic,
+        sealed,
+    })
+}

@@ -113,14 +113,14 @@ fn mark_mut_element_views(inout l: L) {
     vs1.reserve(512);
     let m_v = stage2_heap_mark();
     let mut grew = false;
-    let ex_len = l.a.exs.len();
+    let ex_len = l.ast.exs.len();
     for ii in 0..ex_len {
-        let e = l.a.ex(ii);
+        let e = l.ast.ex(ii);
         if e.kind == 14 && e.a < ex_len {
-            let sc = l.a.ex(e.a);
+            let sc = l.ast.ex(e.a);
             if sc.kind == 11 && sc.n == 1 && sc.a < ex_len {
-                let ce = l.a.ex(sc.a);
-                if ce.kind == 5 && l.c.names.spells(n32(ce.b), in "try_get_mut".as_bytes()) {
+                let ce = l.ast.ex(sc.a);
+                if ce.kind == 5 && l.ctx.names.spells(n32(ce.b), in "try_get_mut".as_bytes()) {
                     if vs0.len() >= 512 {
                         grew = true;
                     }
@@ -136,20 +136,20 @@ fn mark_mut_element_views(inout l: L) {
         }
         return;
     }
-    for ii in 0..l.p.insts.len() {
-        let inst = match l.p.insts.try_get(ii) {
+    for ii in 0..l.program.insts.len() {
+        let inst = match l.program.insts.try_get(ii) {
             Option::Some(v) => v,
             Option::None => continue,
         };
         if inst.op != Op::Seq || inst.n < 3 {
             continue;
         }
-        let pid = u64_at(in l.p.ops, inst.a);
-        let pr = l.p.pool_row(pid);
-        if pr.kind == PoolKind::MakeSeq && l.c.names.spells(pr.label, in "TryGet".as_bytes()) {
+        let pid = u64_at(in l.program.ops, inst.a);
+        let pr = l.program.pool_row(pid);
+        if pr.kind == PoolKind::MakeSeq && l.ctx.names.spells(pr.label, in "TryGet".as_bytes()) {
             for vi in 0..vs0.len() {
                 if u64_at(in vs0, vi) == inst.s0 && u64_at(in vs1, vi) == inst.s1 {
-                    let _ok = l.p.ops.try_set(add(inst.a, 2), widen_u64(TyPass::Inout));
+                    let _ok = l.program.ops.try_set(add(inst.a, 2), widen_u64(TyPass::Inout));
                     break;
                 }
             }
@@ -327,16 +327,16 @@ fn stage2_compile_dir_impl(
     let mut low = l_new(sink c, sink ir_ast);
     lower_all(inout low);
     mark_mut_element_views(inout low);
-    for fi in 0..low.a.fns.len() {
-        match low.a.fns.try_get(fi) {
+    for fi in 0..low.ast.fns.len() {
+        match low.ast.fns.try_get(fi) {
             Option::Some(f) => {
                 let mut gnames = ChunkSeq::new[u32]();
                 let mut grows = ChunkSeq::new[bool]();
-                for gi in 0..f.gn {
-                    match low.a.gens.try_get(wrapping_add(f.ga, gi)) {
+                for gi in 0..f.generic_count {
+                    match low.ast.gens.try_get(wrapping_add(f.generic_start, gi)) {
                         Option::Some(g) => {
                             gnames.push(g.name);
-                            grows.push(g.row);
+                            grows.push(g.is_row);
                         },
                         Option::None => {},
                     }
@@ -344,8 +344,8 @@ fn stage2_compile_dir_impl(
                 let mut pnames = ChunkSeq::new[u32]();
                 let mut ppasses = ChunkSeq::new[u8]();
                 let mut ptys = ChunkSeq::new[u32]();
-                for pi in 0..f.pn {
-                    match low.a.pms.try_get(wrapping_add(f.pa, pi)) {
+                for pi in 0..f.param_count {
+                    match low.ast.pms.try_get(wrapping_add(f.param_start, pi)) {
                         Option::Some(pm) => {
                             pnames.push(pm.name);
                             ppasses.push(pm.pass);
@@ -356,7 +356,7 @@ fn stage2_compile_dir_impl(
                 }
                 add_fn_sig(
                     inout facts,
-                    in low.c,
+                    in low.ctx,
                     f.name,
                     in gnames,
                     in grows,
@@ -370,12 +370,12 @@ fn stage2_compile_dir_impl(
             Option::None => {},
         }
     }
-    for ei in 0..low.a.effs.len() {
-        match low.a.effs.try_get(ei) {
+    for ei in 0..low.ast.effs.len() {
+        match low.ast.effs.try_get(ei) {
             Option::Some(ef) => {
                 let mut gnames = ChunkSeq::new[u32]();
-                for gi in 0..ef.gn {
-                    match low.a.egens.try_get(wrapping_add(ef.ga, gi)) {
+                for gi in 0..ef.generic_count {
+                    match low.ast.egens.try_get(wrapping_add(ef.generic_start, gi)) {
                         Option::Some(g) => gnames.push(g),
                         Option::None => {},
                     }
@@ -387,15 +387,15 @@ fn stage2_compile_dir_impl(
                 let mut ppasses = ChunkSeq::new[u8]();
                 let mut ptys = ChunkSeq::new[u32]();
                 let mut op_results = ChunkSeq::new[u32]();
-                for oi in 0..ef.on {
-                    match low.a.eops.try_get(wrapping_add(ef.oa, oi)) {
+                for oi in 0..ef.op_count {
+                    match low.ast.eops.try_get(wrapping_add(ef.op_start, oi)) {
                         Option::Some(op) => {
                             op_names.push(op.name);
                             op_pa.push(pnames.len());
-                            op_pn.push(op.pn);
+                            op_pn.push(op.param_count);
                             op_results.push(op.result);
-                            for pi in 0..op.pn {
-                                match low.a.pms.try_get(wrapping_add(op.pa, pi)) {
+                            for pi in 0..op.param_count {
+                                match low.ast.pms.try_get(wrapping_add(op.param_start, pi)) {
                                     Option::Some(pm) => {
                                         pnames.push(pm.name);
                                         ppasses.push(pm.pass);
@@ -425,8 +425,8 @@ fn stage2_compile_dir_impl(
             Option::None => {},
         }
     }
-    let mut c2 = low.c;
-    let prog = low.p;
+    let mut c2 = low.ctx;
+    let prog = low.program;
     let mut fn_by_sym = ChunkSeq::new[u32]();
     for fi in 0..prog.fns.len() {
         match prog.fns.try_get(fi) {
@@ -434,36 +434,36 @@ fn stage2_compile_dir_impl(
             Option::None => {},
         }
     }
-    for hi in 0..low.a.hds.len() {
-        match low.a.hds.try_get(hi) {
+    for hi in 0..low.ast.hds.len() {
+        match low.ast.hds.try_get(hi) {
             Option::Some(h) => {
                 let h0 = facts.hops.len();
                 push_hop(inout facts, widen_u64(h.label));
                 push_hop(inout facts, widen_u64(h.eff_name));
-                push_hop(inout facts, h.tn);
-                for ti in 0..h.tn {
-                    let ta = match low.a.xs.try_get(wrapping_add(h.ta, ti)) {
+                push_hop(inout facts, h.arg_ty_count);
+                for ti in 0..h.arg_ty_count {
+                    let ta = match low.ast.xs.try_get(wrapping_add(h.arg_ty_start, ti)) {
                         Option::Some(v) => v,
                         Option::None => 0,
                     };
                     push_hop(inout facts, ta);
                 }
                 push_hop(inout facts, if h.has_state { 1 } else { 0 });
-                let bx = low.a.ex(h.body);
+                let bx = low.ast.ex(h.body);
                 let body_fn = nested_sym(inout c2, in "$handler_body_", bx.s0, bx.s1);
                 push_hop(inout facts, widen_u64(body_fn));
-                let rc = low.a.clause(h.ret);
-                let rx = low.a.ex(rc.body);
+                let rc = low.ast.clause(h.return_clause);
+                let rx = low.ast.ex(rc.body);
                 let ret_fn = nested_sym(inout c2, in "$handler_clause_", rx.s0, rx.s1);
                 push_hop(inout facts, widen_u64(ret_fn));
-                push_hop(inout facts, rc.pn);
+                push_hop(inout facts, rc.pattern_count);
                 let mut r_binds: u64 = if h.has_state { 1 } else { 0 };
-                for pi in 0..rc.pn {
-                    let pid = match low.a.xs.try_get(wrapping_add(rc.pa, pi)) {
+                for pi in 0..rc.pattern_count {
+                    let pid = match low.ast.xs.try_get(wrapping_add(rc.pattern_start, pi)) {
                         Option::Some(v) => v,
                         Option::None => 0,
                     };
-                    let pt = low.a.pt(pid);
+                    let pt = low.ast.pt(pid);
                     if pt.kind == Pat::Bind {
                         push_hop(inout facts, 1);
                         push_hop(inout facts, pt.s0);
@@ -486,21 +486,21 @@ fn stage2_compile_dir_impl(
                 for fi in 0..r_nfree {
                     push_hop(inout facts, widen_u64(u32_at(in r_ps, fi)));
                 }
-                push_hop(inout facts, h.on);
-                for oi in 0..h.on {
-                    let oc = low.a.clause(wrapping_add(h.ret, wrapping_add(oi, 1)));
+                push_hop(inout facts, h.op_count);
+                for oi in 0..h.op_count {
+                    let oc = low.ast.clause(wrapping_add(h.return_clause, wrapping_add(oi, 1)));
                     push_hop(inout facts, widen_u64(oc.name));
-                    let ox = low.a.ex(oc.body);
+                    let ox = low.ast.ex(oc.body);
                     let op_fn = nested_sym(inout c2, in "$handler_clause_", ox.s0, ox.s1);
                     push_hop(inout facts, widen_u64(op_fn));
-                    push_hop(inout facts, oc.pn);
+                    push_hop(inout facts, oc.pattern_count);
                     let mut o_binds: u64 = if h.has_state { 1 } else { 0 };
-                    for pi in 0..oc.pn {
-                        let pid = match low.a.xs.try_get(wrapping_add(oc.pa, pi)) {
+                    for pi in 0..oc.pattern_count {
+                        let pid = match low.ast.xs.try_get(wrapping_add(oc.pattern_start, pi)) {
                             Option::Some(v) => v,
                             Option::None => 0,
                         };
-                        let pt = low.a.pt(pid);
+                        let pt = low.ast.pt(pid);
                         if pt.kind == Pat::Bind {
                             push_hop(inout facts, 1);
                             push_hop(inout facts, pt.s0);

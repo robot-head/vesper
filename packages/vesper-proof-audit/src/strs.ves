@@ -1,3 +1,41 @@
+// ASCII bytes, by the character each one is.
+pub const BACKSPACE: u8 = 8;
+pub const TAB: u8 = 9;
+pub const NEWLINE: u8 = 10;
+pub const FORM_FEED: u8 = 12;
+pub const CARRIAGE_RETURN: u8 = 13;
+pub const SPACE: u8 = 32;
+pub const QUOTE: u8 = 34;
+pub const DOLLAR: u8 = 36;
+pub const APOSTROPHE: u8 = 39;
+pub const CLOSE_PAREN: u8 = 41;
+pub const PLUS: u8 = 43;
+pub const COMMA: u8 = 44;
+pub const HYPHEN: u8 = 45;
+pub const DOT: u8 = 46;
+pub const SLASH: u8 = 47;
+pub const DIGIT_ZERO: u8 = 48;
+pub const DIGIT_NINE: u8 = 57;
+pub const COLON: u8 = 58;
+pub const UPPER_A: u8 = 65;
+pub const UPPER_Z: u8 = 90;
+pub const OPEN_BRACKET: u8 = 91;
+pub const BACKSLASH: u8 = 92;
+pub const CLOSE_BRACKET: u8 = 93;
+pub const UNDERSCORE: u8 = 95;
+pub const LOWER_A: u8 = 97;
+pub const LOWER_B: u8 = 98;
+pub const LOWER_F: u8 = 102;
+pub const LOWER_N: u8 = 110;
+pub const LOWER_R: u8 = 114;
+pub const LOWER_T: u8 = 116;
+pub const LOWER_U: u8 = 117;
+pub const LOWER_Z: u8 = 122;
+pub const OPEN_BRACE: u8 = 123;
+pub const CLOSE_BRACE: u8 = 125;
+// Added to a nibble of 10 to 15 to give `a` to `f`: `'a' - 10`.
+pub const HEX_LETTER_BASE: u8 = 87;
+
 // Byte strings in one buffer: the `Vec<String>` and `BTreeSet<String>` of
 // src/proof_commands.rs. String order is byte order, as Rust's.
 pub struct Strs {
@@ -162,7 +200,7 @@ pub fn slashes(in s: Slice[u8]) -> ChunkSeq[u8] {
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     for i in 0..s.len() {
         let b = byte(in s, i);
-        out.push(if b == 92 { 47 } else { b });
+        out.push(if b == BACKSLASH { SLASH } else { b });
     }
     out
 }

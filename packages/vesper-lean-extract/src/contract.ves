@@ -84,19 +84,17 @@ pub fn read_contracts(inout r: Reader, in bytes: Slice[u8], in nmap: ChunkSeq[u3
         let ea = cs.gens.len();
         read_gens(inout r, in bytes, in nmap, inout cs.gens);
         let ez = cs.gens.len();
-        cs.list.push(
-            Contract {
-                f: f,
-                requires: requires,
-                ensures: ensures,
-                fa: fa,
-                fz: ra,
-                ra: ra,
-                rz: ea,
-                ea: ea,
-                ez: ez
-            }
-        );
+        cs.list.push(Contract {
+            f: f,
+            requires: requires,
+            ensures: ensures,
+            fa: fa,
+            fz: ra,
+            ra: ra,
+            rz: ea,
+            ea: ea,
+            ez: ez
+        });
     }
     cs
 }
