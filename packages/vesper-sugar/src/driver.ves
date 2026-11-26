@@ -271,19 +271,17 @@ fn build_cst(in p: P) -> Cst {
                 wrapping_u32(w64(in open, sub(open.len(), 1)))
             };
             open.push(c.nodes.len());
-            c
-                .nodes
-                .push(
-                    Node {
-                        kind: wrapping_u8(sub(e, 2147483648)),
-                        parent: parent,
-                        start: wrapping_u32(offset),
-                        end: wrapping_u32(offset),
-                        lo: wrapping_u32(c.leaf.len()),
-                        hi: wrapping_u32(c.leaf.len()),
-                        after: 0
-                    }
-                );
+            c.nodes.push(
+                Node {
+                    kind: wrapping_u8(sub(e, 2147483648)),
+                    parent: parent,
+                    start: wrapping_u32(offset),
+                    end: wrapping_u32(offset),
+                    lo: wrapping_u32(c.leaf.len()),
+                    hi: wrapping_u32(c.leaf.len()),
+                    after: 0
+                }
+            );
         } else {
             offset = w64(in c.te, e);
             c.leaf.push(wrapping_u32(e));
@@ -643,12 +641,10 @@ fn read_definition(inout r: Reg, in src: ChunkSeq[u8], in c: Cst, decl: u64, imp
             if it.kind == 2 {
                 let f = fn_of(in a, it.node);
                 if f.effects != none() {
-                    let fx = a
-                        .effects
-                        .get_or(
-                            idx_from_raw[@vesper/ast::EffectsNode](f.effects),
-                            @vesper/ast::EffectsNode { instances: 0, tail: none() }
-                        );
+                    let fx = a.effects.get_or(
+                        idx_from_raw[@vesper/ast::EffectsNode](f.effects),
+                        @vesper/ast::EffectsNode { instances: 0, tail: none() }
+                    );
                     if fx.tail != none() {
                         return diag(in "sugar emits must declare a closed effect row", ds, de);
                     }
@@ -729,15 +725,7 @@ fn read_definition(inout r: Reg, in src: ChunkSeq[u8], in c: Cst, decl: u64, imp
         r.rules.push(sub(sub(be, 1), inc(bs)));
         r.rules.push(n_start(in c, rule));
         r.rules.push(n_end(in c, rule));
-        r
-            .rules
-            .push(
-                if tail {
-                    1
-                } else {
-                    0
-                }
-            );
+        r.rules.push(if tail { 1 } else { 0 });
     }
     let nf = pool_push(inout r, in src, leaf_s(in c, name_l), leaf_e(in c, name_l));
     r.defs.push(nf);
@@ -753,15 +741,7 @@ fn read_definition(inout r: Reg, in src: ChunkSeq[u8], in c: Cst, decl: u64, imp
         r.defs.push(NONE);
         r.defs.push(0);
     }
-    r
-        .defs
-        .push(
-            if nonassoc {
-                1
-            } else {
-                0
-            }
-        );
+    r.defs.push(if nonassoc { 1 } else { 0 });
     r.defs.push(emits_first);
     r.defs.push(emits_len);
     r.defs.push(rule_first);
@@ -832,15 +812,7 @@ fn bind(inout r: Reg, id: u64, vf: u64, vl: u64, env: u64) -> Dg {
         r.heads.push(kf);
         r.heads.push(kl);
         r.heads.push(id);
-        r
-            .heads
-            .push(
-                if alias {
-                    1
-                } else {
-                    0
-                }
-            );
+        r.heads.push(if alias { 1 } else { 0 });
         r.heads.push(env);
     }
     dg_ok()
@@ -1093,22 +1065,10 @@ fn original_span(in st: St, s: u64, e: u64) -> (u64, u64) {
             }
             j = inc(j);
         }
-        let last = if j == 0 {
-            0
-        } else {
-            sub(j, 1)
-        };
+        let last = if j == 0 { 0 } else { sub(j, 1) };
         let (ls, le) = project(in st.maps, last, e, e);
-        let a = if fs < ls {
-            fs
-        } else {
-            ls
-        };
-        let b = if fe > le {
-            fe
-        } else {
-            le
-        };
+        let a = if fs < ls { fs } else { ls };
+        let b = if fe > le { fe } else { le };
         return (a, b);
     }
     if n == 0 {
@@ -1199,16 +1159,8 @@ fn project_span(in x: Eds, i: u64, s: u64, e: u64, inout out: ChunkSeq[u64]) {
         let ne = w64(in x.copies, inc(row));
         let ps = w64(in x.copies, add(row, 2));
         let pe = w64(in x.copies, add(row, 3));
-        let a = if s > ps {
-            s
-        } else {
-            ps
-        };
-        let b = if e < pe {
-            e
-        } else {
-            pe
-        };
+        let a = if s > ps { s } else { ps };
+        let b = if e < pe { e } else { pe };
         if a < b && sub(ne, ns) == sub(pe, ps) {
             let base = add(os, ns);
             out.push(add(base, sub(a, ps)));
@@ -1233,16 +1185,8 @@ fn emit_maps(in st: St, fs: u64, fe: u64, to: u64, inout out: ChunkSeq[u64]) {
         if es >= fe {
             break;
         }
-        let a = if es > fs {
-            es
-        } else {
-            fs
-        };
-        let b = if ee < fe {
-            ee
-        } else {
-            fe
-        };
+        let a = if es > fs { es } else { fs };
+        let b = if ee < fe { ee } else { fe };
         if a < b {
             let (os, oe) = project(in st.maps, m, a, b);
             out.push(sub(add(to, a), fs));
@@ -2088,11 +2032,7 @@ fn expand_call(
             let vs = w64(in caps.w, vo);
             let ve = w64(in caps.w, inc(vo));
             let from_tail = w64(in caps.w, add(vo, 2)) != 0;
-            let base = if from_tail {
-                ce
-            } else {
-                cs
-            };
+            let base = if from_tail { ce } else { cs };
             let start = add(base, vs);
             let end = add(base, ve);
             let mut probe = NONE;
@@ -2254,19 +2194,11 @@ fn expand_call(
         t.push(10);
         push_plain(inout edits, at, at, in t, os, oe);
     }
-    let end = if rule_tail {
-        tail_end
-    } else {
-        ce
-    };
+    let end = if rule_tail { tail_end } else { ce };
     let expr = sort_is(in reg, def, in "expr")
         || sort_is(in reg, def, in "infix")
         || sort_is(in reg, def, in "tag");
-    let prefix: u64 = if expr {
-        1
-    } else {
-        0
-    };
+    let prefix: u64 = if expr { 1 } else { 0 };
     let mut text = ChunkSeq::new[u8]();
     if expr {
         text.push(40);
@@ -2455,33 +2387,29 @@ fn protect(inout st: St, include_tests: bool, inout work: u64) -> Dg {
         if it.kind == 2 {
             scan(inout nm, in st, in tokens, in a, it.node);
         } else if it.kind == 4 {
-            let n = a
-                .impls
-                .get_or(
-                    idx_from_raw[ImplNode](it.node),
-                    ImplNode { ty: none(), generics: 0, methods: 0 }
-                );
+            let n = a.impls.get_or(
+                idx_from_raw[ImplNode](it.node),
+                ImplNode { ty: none(), generics: 0, methods: 0 }
+            );
             for m in 0..list_len(in a, n.methods) {
                 scan(inout nm, in st, in tokens, in a, list_at(in a, n.methods, m));
             }
         } else if it.kind == 6 {
-            let n = a
-                .confs
-                .get_or(
-                    idx_from_raw[ConfNode](it.node),
-                    ConfNode {
-                        model: none(),
-                        public: false,
-                        generics: 0,
-                        trait_ref: none(),
-                        self_ty: none(),
-                        wheres: 0,
-                        assoc: 0,
-                        methods: 0,
-                        start: 0,
-                        end: 0
-                    }
-                );
+            let n = a.confs.get_or(
+                idx_from_raw[ConfNode](it.node),
+                ConfNode {
+                    model: none(),
+                    public: false,
+                    generics: 0,
+                    trait_ref: none(),
+                    self_ty: none(),
+                    wheres: 0,
+                    assoc: 0,
+                    methods: 0,
+                    start: 0,
+                    end: 0
+                }
+            );
             for m in 0..list_len(in a, n.methods) {
                 scan(inout nm, in st, in tokens, in a, list_at(in a, n.methods, m));
             }
@@ -2741,15 +2669,7 @@ fn walk(inout nm: Names, in st: St, in tokens: ChunkSeq[u64], in a: Ast, e: u32)
             nm.refs.push(widen_u64(n.a));
             nm.refs.push(s);
             nm.refs.push(t);
-            nm
-                .refs
-                .push(
-                    if copied(in st, s) {
-                        1
-                    } else {
-                        0
-                    }
-                );
+            nm.refs.push(if copied(in st, s) { 1 } else { 0 });
         }
     } else if k == 4 {
         for i in 0..(list_len(in a, n.b) >> 1) {
@@ -2801,11 +2721,7 @@ fn name_lt(in a: Ast, x: u64, y: u64) -> bool {
     let ys = wrapping_u32(y);
     let nx = name_len(in a, xs);
     let ny = name_len(in a, ys);
-    let n = if nx < ny {
-        nx
-    } else {
-        ny
-    };
+    let n = if nx < ny { nx } else { ny };
     for j in 0..n {
         let cx = name_byte(in a, xs, j);
         let cy = name_byte(in a, ys, j);
@@ -2822,11 +2738,7 @@ fn same_name(in a: Ast, x: u64, y: u64) -> bool {
 }
 
 fn max_u64(x: u64, y: u64) -> u64 {
-    if x > y {
-        x
-    } else {
-        y
-    }
+    if x > y { x } else { y }
 }
 
 fn zeros(n: u64) -> ChunkSeq[u8] {
@@ -3098,15 +3010,7 @@ fn names_edits(inout nm: Names, in st: St, in a: Ast, inout out: Eds) {
             let ns = scopes.len() >> 1;
             if ns != 0 && ss <= w64(in scopes, inc(sub(ns, 1) << 1)) {
                 let pe = w64(in scopes, inc(sub(ns, 1) << 1));
-                scopes
-                    .try_set(
-                        inc(sub(ns, 1) << 1),
-                        if se > pe {
-                            se
-                        } else {
-                            pe
-                        }
-                    );
+                scopes.try_set(inc(sub(ns, 1) << 1), if se > pe { se } else { pe });
             } else {
                 scopes.push(ss);
                 scopes.push(se);

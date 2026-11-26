@@ -84,8 +84,9 @@ impl L {
         for i in 0..words.len() {
             let x = u64_at(in words, i);
             for k in 0..8 {
-                bytes
-                    .push(wrapping_u8(wrapping_shr_u64(x, wrapping_u32(wrapping_mul(k, 8))) & 255));
+                bytes.push(
+                    wrapping_u8(wrapping_shr_u64(x, wrapping_u32(wrapping_mul(k, 8))) & 255)
+                );
             }
         }
         self.b.data(in bytes)
@@ -210,11 +211,7 @@ impl L {
                 let cname = n32(self.cx.ir.word(a));
                 let (index, is_enum, sh) = self.cx.variant_of(ins.ty, cname);
                 let nf = self.cx.field_count(sh, index);
-                let base: u64 = if is_enum {
-                    1
-                } else {
-                    0
-                };
+                let base: u64 = if is_enum { 1 } else { 0 };
                 let slots = add(nf, base);
                 out.clear();
                 for _i in 0..slots {

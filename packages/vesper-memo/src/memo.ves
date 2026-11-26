@@ -96,11 +96,7 @@ fn set_word(inout s: ChunkSeq[u64], i: u64, x: u64) {
 }
 
 fn max64(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // salsa's `Revision::start()`.

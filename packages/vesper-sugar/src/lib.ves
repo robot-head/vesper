@@ -118,14 +118,7 @@ pub fn template_skeleton_words(in text: Str, max_bytes: u64, work: u64) -> Chunk
     let nt = base128(in b, 8);
     let nl = base128(in b, 12);
     let nm = base128(in b, 16);
-    let tail_len = wrapping_sub(
-        nt,
-        if nt == 0 {
-            0
-        } else {
-            1
-        }
-    );
+    let tail_len = wrapping_sub(nt, if nt == 0 { 0 } else { 1 });
     let mut at: u64 = 20;
     let pattern = copy_bytes(in b, at, np);
     at = wrapping_add(at, np);
@@ -279,19 +272,8 @@ fn render_encoded(
     let nt = base128(in b, 8);
     let nl = base128(in b, 12);
     let nm = base128(in b, 16);
-    let tail_len = wrapping_sub(
-        nt,
-        if nt == 0 {
-            0
-        } else {
-            1
-        }
-    );
-    let mut at: u64 = if scoped {
-        32
-    } else {
-        20
-    };
+    let tail_len = wrapping_sub(nt, if nt == 0 { 0 } else { 1 });
+    let mut at: u64 = if scoped { 32 } else { 20 };
     let pattern = copy_bytes(in b, at, np);
     at = wrapping_add(at, np);
     let invocation = copy_bytes(in b, at, ni);
@@ -302,11 +284,7 @@ fn render_encoded(
     at = wrapping_add(at, nl);
     let mark = copy_bytes(in b, at, nm);
     at = wrapping_add(at, nm);
-    let ns = if scoped {
-        base128(in b, 20)
-    } else {
-        0
-    };
+    let ns = if scoped { base128(in b, 20) } else { 0 };
     let call_s = base128(in b, 24);
     let call_e = base128(in b, 28);
     let source = copy_bytes(in b, at, ns);

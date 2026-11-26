@@ -303,11 +303,7 @@ fn tid(inout o: Ow, inout c: Ctx, in a: Ast, t: u32) -> u32 {
     let n = ty_at(in a, t);
     let mut id: u32 = c.types.infer;
     if n.kind == AT_NAMED || n.kind == AT_TUPLE {
-        let list = if n.kind == AT_NAMED {
-            n.b
-        } else {
-            n.a
-        };
+        let list = if n.kind == AT_NAMED { n.b } else { n.a };
         let len = list_len(in a, list);
         let mut args = ChunkSeq::with_capacity[u32](len);
         for j in 0..len {
@@ -451,24 +447,8 @@ fn bind(
     o.b_os.push(os);
     o.b_oe.push(oe);
     o.b_ty.push(ty);
-    o
-        .b_lin
-        .push(
-            if linear {
-                1
-            } else {
-                0
-            }
-        );
-    o
-        .b_own
-        .push(
-            if owned {
-                1
-            } else {
-                0
-            }
-        );
+    o.b_lin.push(if linear { 1 } else { 0 });
+    o.b_own.push(if owned { 1 } else { 0 });
     o.b_ss.push(ss);
     o.b_se.push(se);
     o.b_head.push(0);
@@ -542,11 +522,7 @@ fn ty_of(in o: Ow, in c: Ctx, in a: Ast, e: u32) -> u32 {
         }
     }
     let t = c.world.expr_type(w(n.start), w(n.end));
-    if t == NONE {
-        c.types.infer
-    } else {
-        t
-    }
+    if t == NONE { c.types.infer } else { t }
 }
 
 // The check-data symbol of AST name `s`, if the checker has one.
@@ -836,11 +812,7 @@ fn args(inout o: Ow, inout c: Ctx, in a: Ast, in k: Callees, list: u32, pa: u64,
 // `args_by_pass` with the passes of a function type.
 fn args_of_type(inout o: Ow, inout c: Ctx, in a: Ast, in k: Callees, list: u32, fty: u32) -> bool {
     let fnode = c.types.node(fty);
-    let pn = if fnode.kind == CT_FN {
-        w(fnode.n)
-    } else {
-        0
-    };
+    let pn = if fnode.kind == CT_FN { w(fnode.n) } else { 0 };
     for i in 0..list_len(in a, list) {
         let x = arg_at(in a, list_at(in a, list, i));
         let pass = if x.explicit {
@@ -882,11 +854,7 @@ fn branch(
 // The function of AST symbol `s` (index), or NONE.
 fn function(in k: Callees, s: u32) -> u32 {
     let x = table_get(in k.fn_by_sym, s);
-    if x == 0 {
-        NONE
-    } else {
-        wrapping_sub(x, 1)
-    }
+    if x == 0 { NONE } else { wrapping_sub(x, 1) }
 }
 
 // A call `callee(args)` (`ExprKind::Call`).
@@ -1369,11 +1337,7 @@ fn function_at(in o: Ow, at: u64) -> u64 {
     let i = wrapping_sub(lo, 1);
     let mut f = NONE64;
     let mut len: u64 = 0;
-    let from = if i > 0 {
-        wrapping_sub(i, 1)
-    } else {
-        i
-    };
+    let from = if i > 0 { wrapping_sub(i, 1) } else { i };
     let mut j = from;
     loop {
         if j > i {
@@ -1988,11 +1952,7 @@ fn grants(
 
 // Byte order of names[a..+al] and names[b..+bl]: -1, 0 or 1.
 fn cmp_blob(in bytes: Slice[u8], a: u64, al: u64, b: u64, bl: u64) -> i64 {
-    let n = if al < bl {
-        al
-    } else {
-        bl
-    };
+    let n = if al < bl { al } else { bl };
     for i in 0..n {
         let x = byte(in bytes, wrapping_add(a, i));
         let y = byte(in bytes, wrapping_add(b, i));
@@ -2179,15 +2139,13 @@ fn rank_members(
         rk.l_len.push(wrapping_sub(len, pl));
         rk.t_at.push(start);
         rk.d_len.push(dl);
-        rk
-            .g_len
-            .push(
-                if badged {
-                    wrapping_sub(wrapping_sub(rk.pool.len(), start), dl)
-                } else {
-                    NONE64
-                }
-            );
+        rk.g_len.push(
+            if badged {
+                wrapping_sub(wrapping_sub(rk.pool.len(), start), dl)
+            } else {
+                NONE64
+            }
+        );
     }
     // Stable order by tier, then label.
     for i in 0..rk.tier.len() {

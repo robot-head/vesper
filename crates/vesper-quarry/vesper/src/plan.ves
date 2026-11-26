@@ -107,9 +107,9 @@ pub fn decode_plan(inout q: Q, p: u64) -> (u64, u64) {
         let ta = ex(in q, wrapping_add(p, 1));
         let tb = ex(in q, wrapping_add(p, 2));
         let tc = ex(in q, wrapping_add(p, 3));
-        q
-            .plan
-            .push(Node { kind: 0, a: ta, b: tb, c: tc, d: slots_at, e: nslots, f: first, g: last });
+        q.plan.push(
+            Node { kind: 0, a: ta, b: tb, c: tc, d: slots_at, e: nslots, f: first, g: last }
+        );
         (wrapping_sub(q.plan.len(), 1), e)
     } else if kind == 1 {
         let pred = wrapping_add(p, 1);
@@ -257,11 +257,7 @@ pub fn prepare_q(
     // limit is only checked by `lex`: an oversized query must still fail
     // with the limit error, not reserve buffers in proportion to its length.
     let cap: u64 = 4096;
-    let n = if sql.len() < cap {
-        sql.len()
-    } else {
-        cap
-    };
+    let n = if sql.len() < cap { sql.len() } else { cap };
     let mut q = new_q_sized(
         wrapping_add(wrapping_add(text.len(), wrapping_mul(n, 2)), 32),
         wrapping_add(wrapping_mul(n, 2), 48),
@@ -318,8 +314,7 @@ pub fn prepare_q(
         if b.kind == 1 || b.kind == 3 {
             set_nullable(inout q, left_end, right_end);
         }
-        q
-            .plan
+        q.plan
             .push(Node { kind: 2, a: b.kind, b: plan, c: rhs, d: on, e: 0, f: none(), g: none() });
         plan = wrapping_sub(q.plan.len(), 1);
     }

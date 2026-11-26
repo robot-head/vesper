@@ -966,11 +966,7 @@ fn node_advance_commit(inout rc: RaftCluster, i: u64) {
     let commit = sw(in rc.nd_commit, i);
     let log_len = node_log_len(in rc, i);
     let base = wrapping_mul(i, rc.n);
-    let self_cnt: u64 = if member(members, i) {
-        1
-    } else {
-        0
-    };
+    let self_cnt: u64 = if member(members, i) { 1 } else { 0 };
     let mut idx = log_len;
     loop {
         if idx <= commit {
@@ -1120,11 +1116,7 @@ fn node_send_appends(inout rc: RaftCluster, i: u64, now: u64) {
             node_log_get(in rc, i, wrapping_sub(prev, 1)).term
         };
         let avail = wrapping_sub(log_len, prev);
-        let count = if avail < max_batch {
-            avail
-        } else {
-            max_batch
-        };
+        let count = if avail < max_batch { avail } else { max_batch };
         let term = sw(in rc.nd_term, i);
         let h = WireHeader {
             term: term,
@@ -1234,11 +1226,7 @@ fn handle_request(inout rc: RaftCluster, i: u64, p: u64, now: u64) {
             setw(inout rc.nd_voted_for, i, cand_u64);
             node_reset_election(inout rc, i, now);
         }
-        let rlbl = if grant {
-            rc.sym_grant
-        } else {
-            rc.sym_deny
-        };
+        let rlbl = if grant { rc.sym_grant } else { rc.sym_deny };
         let rpty = rc.sym_vote_resp;
         let mon2 = c_mon_step(inout rc.c, mon1, true, PROTO_CANDIDATE, rlbl, rpty);
         let rboff = rc.pkt_bytes.len();
@@ -1421,11 +1409,7 @@ fn handle_request(inout rc: RaftCluster, i: u64, p: u64, now: u64) {
                     );
                 if !have {
                     let ilen = rc.tmp_entries.len();
-                    let mn = if cur_len < ilen {
-                        cur_len
-                    } else {
-                        ilen
-                    };
+                    let mn = if cur_len < ilen { cur_len } else { ilen };
                     let mut first_diff = mn;
                     for k in 0..mn {
                         let a = node_log_get(in rc, i, k);
@@ -1458,11 +1442,7 @@ fn handle_request(inout rc: RaftCluster, i: u64, p: u64, now: u64) {
         let ack = WireAck {
             follower_id: wrapping_u32(i),
             term: sw(in rc.nd_term, i),
-            match_index: if accepted {
-                last
-            } else {
-                0
-            },
+            match_index: if accepted { last } else { 0 },
             accepted: accepted
         };
         let rboff = rc.pkt_bytes.len();
@@ -1600,11 +1580,7 @@ fn handle_response(inout rc: RaftCluster, i: u64, p: u64, now: u64) {
             node_advance_commit(inout rc, i);
         } else if !ack.accepted {
             let ni = sw(in rc.nd_next_index, idx_slot);
-            let dec_ni = if ni <= 1 {
-                1
-            } else {
-                wrapping_sub(ni, 1)
-            };
+            let dec_ni = if ni <= 1 { 1 } else { wrapping_sub(ni, 1) };
             setw(inout rc.nd_next_index, idx_slot, dec_ni);
         }
     } else if ack.accepted && ack.match_index == o_last {
@@ -1990,11 +1966,7 @@ fn route_step_out(inout rc: RaftCluster, now: u64) -> (bool, u64) {
         if dup {
             rc.duplicated = inc(rc.duplicated);
         }
-        let copies: u64 = if dup {
-            2
-        } else {
-            1
-        };
+        let copies: u64 = if dup { 2 } else { 1 };
         for ci in 0..copies {
             let lat = sm_range(inout rc.rng, rc.cfg.min_latency_ns, rc.cfg.max_latency_ns);
             let at = sat_add(now, lat);
@@ -2721,14 +2693,7 @@ pub fn raft_shutdown_and_digest(inout rc: RaftCluster) -> u64 {
     for i in 0..rc.n {
         digest = mix_fnv(digest, sw(in rc.nd_term, i));
         let vf = sw(in rc.nd_voted_for, i);
-        digest = mix_fnv(
-            digest,
-            if vf == none() {
-                MAX_U64
-            } else {
-                vf
-            }
-        );
+        digest = mix_fnv(digest, if vf == none() { MAX_U64 } else { vf });
         digest = mix_fnv(digest, sw(in rc.nd_commit, i));
         digest = mix_fnv(digest, sw(in rc.nd_snap_index, i));
         let off = sw(in rc.nd_log_off, i);

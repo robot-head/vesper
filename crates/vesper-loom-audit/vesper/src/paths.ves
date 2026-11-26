@@ -54,11 +54,7 @@ fn ref_ord(in s: A, a: u64, b: u64) -> u64 {
     let ka = a >= s.nn;
     let kb = b >= s.nn;
     if ka != kb {
-        return if kb {
-            0
-        } else {
-            2
-        };
+        return if kb { 0 } else { 2 };
     }
     let x = ref_name(in s, a);
     let y = ref_name(in s, b);

@@ -353,61 +353,14 @@ pub fn needs_workers(module: &Module) -> bool {
 /// The scoped-worker prelude: the sequential schedule of the fork-join
 /// loop. It takes a function value, so native code specializes it into its
 /// callers, and the JIT intercepts the call before that ([`workers`]).
-pub const WORKERS_PRELUDE: &str = "\
-fn parallel_for[A, e: eff](in data: A, n: u64, body: fn @copy(in A, u64) eff [e]) eff [e] {
-    for i in 0..n { body(in data, i); }
-}
-";
+pub const WORKERS_PRELUDE: &str = include_str!("preludes/workers.ves");
 
 /// The prelude source: the cell type, the orders and the operations. A
 /// method body only types the call. Every operation that updates the cell
 /// recurses instead, so no inliner copies a body in place of the
 /// intercepted call, and a backend that does not intercept it overflows its
 /// stack rather than silently dropping the update.
-pub const PRELUDE: &str = "\
-struct Atomic[T: mod copy] { cell: ChunkSeq[T] }
-copy enum MemoryOrder { Relaxed, Acquire, Release, AcqRel, SeqCst }
-impl [T: mod copy] Atomic[T] {
-    fn new(value: T) -> Atomic[T] {
-        let mut cell: ChunkSeq[T] = ChunkSeq::with_capacity[T](1);
-        cell.push(value);
-        Atomic { cell: cell }
-    }
-    fn load(in self, order: MemoryOrder) -> T {
-        match self.cell.try_get(0) { Option::Some(v) => v, Option::None => self.load(order) }
-    }
-    fn store(in self, value: T, order: MemoryOrder) {
-        match self.cell.try_get(0) { Option::Some(_) => self.store(value, order), Option::None => () }
-    }
-    fn swap(in self, value: T, order: MemoryOrder) -> T {
-        match self.cell.try_get(0) { Option::Some(_) => self.swap(value, order), Option::None => value }
-    }
-    fn compare_exchange(in self, current: T, new: T, success: MemoryOrder, failure: MemoryOrder) -> Result[T, T] {
-        match self.cell.try_get(0) {
-            Option::Some(_) => self.compare_exchange(current, new, success, failure),
-            Option::None => Result::Err(current),
-        }
-    }
-    fn fetch_add(in self, value: T, order: MemoryOrder) -> T {
-        match self.cell.try_get(0) { Option::Some(_) => self.fetch_add(value, order), Option::None => value }
-    }
-    fn fetch_sub(in self, value: T, order: MemoryOrder) -> T {
-        match self.cell.try_get(0) { Option::Some(_) => self.fetch_sub(value, order), Option::None => value }
-    }
-    fn fetch_and(in self, value: T, order: MemoryOrder) -> T {
-        match self.cell.try_get(0) { Option::Some(_) => self.fetch_and(value, order), Option::None => value }
-    }
-    fn fetch_or(in self, value: T, order: MemoryOrder) -> T {
-        match self.cell.try_get(0) { Option::Some(_) => self.fetch_or(value, order), Option::None => value }
-    }
-    fn fetch_xor(in self, value: T, order: MemoryOrder) -> T {
-        match self.cell.try_get(0) { Option::Some(_) => self.fetch_xor(value, order), Option::None => value }
-    }
-    fn into_inner(sink self) -> T {
-        self.load(MemoryOrder::SeqCst)
-    }
-}
-";
+pub const PRELUDE: &str = include_str!("preludes/atomics.ves");
 
 /// The atomic and worker preludes for `module` (empty unless
 /// [`needs_prelude`] or [`needs_workers`]), with

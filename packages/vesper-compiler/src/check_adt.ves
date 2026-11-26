@@ -25,15 +25,7 @@ fn c_ctor_find(
     at: i64
 ) -> CCtor eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if c_kind(at) == 70 {
-        let error = c_error(
-            201,
-            owner.start,
-            if qualified {
-                variant.end
-            } else {
-                owner.end
-            }
-        );
+        let error = c_error(201, owner.start, if qualified { variant.end } else { owner.end });
         CCtor { adt: c_decl(0), variant: variant, fields: -1, named: false }
     } else {
         let d = c_decl(at);
@@ -52,20 +44,12 @@ fn c_ctor_find(
             } else {
                 0
             };
-            let fields = if d.kind == 8 {
-                d.body
-            } else {
-                c_next(found)
-            };
+            let fields = if d.kind == 8 { d.body } else { c_next(found) };
             let k = c_kind(fields);
             CCtor {
                 adt: d,
                 variant: c_token(found),
-                fields: if k == 32 || k == 34 {
-                    fields
-                } else {
-                    -1
-                },
+                fields: if k == 32 || k == 34 { fields } else { -1 },
                 named: k == 34
             }
         }
@@ -75,14 +59,7 @@ fn c_field_next(
     at: i64,
     named: bool
 ) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
-    let ty = c_type(
-        if named {
-            c_take(c_next(at), 40)
-        } else {
-            at
-        },
-        0
-    );
+    let ty = c_type(if named { c_take(c_next(at), 40) } else { at }, 0);
     let next = if c_kind(ty.next) == 45 {
         c_next(c_next(ty.next))
     } else {
@@ -113,18 +90,7 @@ fn c_init(
         } else {
             0
         };
-        c_result(
-            CType { tag: 0, at: 0 },
-            if done {
-                c_next(at)
-            } else {
-                at
-            },
-            env,
-            start,
-            end,
-            -1
-        )
+        c_result(CType { tag: 0, at: 0 }, if done { c_next(at) } else { at }, env, start, end, -1)
     } else {
         let ty = c_type(
             if named {
@@ -186,11 +152,7 @@ fn c_bind_pattern(
             c_result(ty, t.end, c_bind_name(env, t, ty, 2), t.start, t.end, -1)
         } else if t.kind == 3 {
             let qualified = c_kind(t.end) == 41;
-            let variant = if qualified {
-                c_token(c_next(t.end))
-            } else {
-                t
-            };
+            let variant = if qualified { c_token(c_next(t.end)) } else { t };
             let ctor = c_ctor_find(t, variant, qualified, 0);
             let end = c_pattern_end(at);
             let valid = if !c_payload_irrefutable(at, ctor, depth + 1) {
@@ -204,11 +166,7 @@ fn c_bind_pattern(
             } else {
                 0
             };
-            let args = if qualified {
-                variant.end
-            } else {
-                t.end
-            };
+            let args = if qualified { variant.end } else { t.end };
             if ctor.fields < 0 {
                 c_result(ty, args, env, t.start, args, -1)
             } else {
@@ -362,11 +320,7 @@ fn c_irrefutable(
     } else if c_kind(at) == 3 {
         let t = c_token(at);
         let qualified = c_kind(t.end) == 41;
-        let v = if qualified {
-            c_token(c_next(t.end))
-        } else {
-            t
-        };
+        let v = if qualified { c_token(c_next(t.end)) } else { t };
         let ctor = c_ctor_find(t, v, qualified, 0);
         let ctor_ty = CType { tag: 3, at: ctor.adt.name.start };
         let single = ctor.adt.kind == 8 || c_kind(c_variant_next(c_next(ctor.adt.body))) == 35;

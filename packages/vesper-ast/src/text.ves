@@ -255,11 +255,7 @@ fn shr1(inout a: ChunkSeq[u64]) {
 // -1, 0 or 1 as `a` is below, equal to or above `b`.
 fn cmp(in a: ChunkSeq[u64], in b: ChunkSeq[u64]) -> i64 {
     if a.len() != b.len() {
-        return if a.len() < b.len() {
-            -1
-        } else {
-            1
-        };
+        return if a.len() < b.len() { -1 } else { 1 };
     }
     let mut i = a.len();
     loop {
@@ -270,11 +266,7 @@ fn cmp(in a: ChunkSeq[u64], in b: ChunkSeq[u64]) -> i64 {
         let x = limb(in a, i);
         let y = limb(in b, i);
         if x != y {
-            return if x < y {
-                -1
-            } else {
-                1
-            };
+            return if x < y { -1 } else { 1 };
         }
     }
     0

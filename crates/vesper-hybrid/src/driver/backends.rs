@@ -27,6 +27,9 @@ impl Session {
                 Ok(0)
             }
             Step::VerifiedBuild => {
+                if self.verified_input {
+                    crate::vesper_hybrid::DRIVER_VERIFIED_FALLBACKS.fetch_add(1, Relaxed);
+                }
                 let world = &self.checked()?.world;
                 vesper::dyn_trait::refuse(world, "verified code generator")
                     .map_err(|d| format!("{}: {}", d.code, d.message))?;
@@ -96,6 +99,29 @@ impl Session {
                         self.text = input;
                         self.wasm_input = true;
                         crate::vesper_hybrid::DRIVER_WASM_INPUTS.fetch_add(1, Relaxed);
+                        Ok(1)
+                    }
+                    None => Ok(0),
+                }
+            }
+            Step::VerifiedInput => {
+                // The Vesper driver builds and writes the executable itself
+                // from the `verified_codegen` swap's input; 0 leaves the
+                // build to `VerifiedBuild` (the swap is off, the target is
+                // not a Linux ELF one, or the program does not encode).
+                let world = &self.checked()?.world;
+                vesper::dyn_trait::refuse(world, "verified code generator")
+                    .map_err(|d| format!("{}: {}", d.code, d.message))?;
+                match crate::vesper_hybrid::verified_build_input(
+                    world,
+                    o.entry(),
+                    o.target(),
+                    o.optimize,
+                ) {
+                    Some(input) => {
+                        self.text = input;
+                        self.verified_input = true;
+                        crate::vesper_hybrid::DRIVER_VERIFIED_INPUTS.fetch_add(1, Relaxed);
                         Ok(1)
                     }
                     None => Ok(0),

@@ -176,11 +176,7 @@ pub fn add(a: u64, b: u64) -> u64 eff [Fail[Perr]] {
 }
 
 pub fn sat_sub(a: u64, b: u64) -> u64 {
-    if b > a {
-        0
-    } else {
-        wrapping_sub(a, b)
-    }
+    if b > a { 0 } else { wrapping_sub(a, b) }
 }
 
 pub fn sat_add(a: u64, b: u64) -> u64 {
@@ -192,11 +188,7 @@ pub fn sat_add(a: u64, b: u64) -> u64 {
 }
 
 pub fn min64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // The index of a `Perr` (its Rust discriminant).

@@ -198,11 +198,7 @@ fn put_setting(inout out: ChunkSeq[u8], id: u64, value: Option[u64]) -> bool {
 
 fn on(b: bool) -> Option[u64] {
     let one: u64 = 1;
-    if b {
-        Option::Some(one)
-    } else {
-        Option::None
-    }
+    if b { Option::Some(one) } else { Option::None }
 }
 
 // `Settings::encode`: the SETTINGS frame, with one reserved identifier as

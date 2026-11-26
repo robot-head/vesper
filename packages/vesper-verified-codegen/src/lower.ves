@@ -669,23 +669,21 @@ fn decode(
             let ty = n32(lw.op(add(at, inc(wrapping_mul(i, 2)))));
             lw.flocals.push(Loc { name: name, ty: ty });
         }
-        lw
-            .fns
-            .push(
-                Fn {
-                    name: row.name,
-                    p0: p0,
-                    pn: np,
-                    result: result,
-                    effects: effects,
-                    l0: l0,
-                    ln: nl,
-                    v0: v0,
-                    vn: top,
-                    b0: row.b0,
-                    bc: row.bc
-                }
-            );
+        lw.fns.push(
+            Fn {
+                name: row.name,
+                p0: p0,
+                pn: np,
+                result: result,
+                effects: effects,
+                l0: l0,
+                ln: nl,
+                v0: v0,
+                vn: top,
+                b0: row.b0,
+                bc: row.bc
+            }
+        );
         set_table32(inout lw.by_fn, w(row.name), n32(inc(fi)));
     }
     lw
@@ -1105,11 +1103,7 @@ pub copy struct FailRow {
 fn cmp_sym(in names: Names, a: u32, b: u32) -> i64 {
     let na = names.size(a);
     let nb = names.size(b);
-    let n = if na < nb {
-        na
-    } else {
-        nb
-    };
+    let n = if na < nb { na } else { nb };
     for i in 0..n {
         let x = names.byte(a, i);
         let y = names.byte(b, i);
@@ -1684,11 +1678,7 @@ fn pp(in plan: Plan, i: u64) -> PP {
 }
 
 fn result_base(p: Planned) -> u64 {
-    if p.status {
-        1
-    } else {
-        0
-    }
+    if p.status { 1 } else { 0 }
 }
 
 pub fn not_ported(in s: Str) -> VErr {
@@ -1892,11 +1882,10 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
                 }
             }
             let wn = wrapping_sub(wb.len(), wa) / 2;
-            let ok = pps
-                .try_set(
-                    add(pa, i),
-                    PP { pass: q.pass, sh: q.sh, erased: q.erased, wa: wa, wn: wn }
-                );
+            let ok = pps.try_set(
+                add(pa, i),
+                PP { pass: q.pass, sh: q.sh, erased: q.erased, wa: wa, wn: wn }
+            );
         }
         let result = shape(inout lw, f.result, name);
         let ca = calls.len();
@@ -1966,23 +1955,22 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
             }
         }
         let local = local_of(inout lw, f, inout lpool);
-        found
-            .push(
-                Found {
-                    name: name,
-                    fi: fi,
-                    pa: pa,
-                    pn: f.pn,
-                    result: result,
-                    local: local,
-                    ca: ca,
-                    cn: wrapping_sub(calls.len(), ca),
-                    ha: ha,
-                    hn: wrapping_sub(hds.len(), ha),
-                    cpa: cpa,
-                    cpn: cpn
-                }
-            );
+        found.push(
+            Found {
+                name: name,
+                fi: fi,
+                pa: pa,
+                pn: f.pn,
+                result: result,
+                local: local,
+                ca: ca,
+                cn: wrapping_sub(calls.len(), ca),
+                ha: ha,
+                hn: wrapping_sub(hds.len(), ha),
+                cpa: cpa,
+                cpn: cpn
+            }
+        );
     }
     // `fail::codes`: every error type raised anywhere, in key order.
     let mut keys = ChunkSeq::new[u32]();
@@ -2104,11 +2092,7 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
                 ti = q;
             }
         }
-        let code = (inc(ti) << 1) | if escape {
-            0
-        } else {
-            1
-        };
+        let code = (inc(ti) << 1) | if escape { 0 } else { 1 };
         loop {
             if site.len() > w(f) {
                 break;
@@ -2215,22 +2199,21 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
         } else {
             fd.result.n
         };
-        fs
-            .push(
-                Planned {
-                    name: fd.name,
-                    fi: fd.fi,
-                    label: label,
-                    pa: fd.pa,
-                    pn: fd.pn,
-                    result: fd.result,
-                    raises: r,
-                    status: status,
-                    ret_words: ret_words,
-                    cpa: fd.cpa,
-                    cpn: fd.cpn
-                }
-            );
+        fs.push(
+            Planned {
+                name: fd.name,
+                fi: fd.fi,
+                label: label,
+                pa: fd.pa,
+                pn: fd.pn,
+                result: fd.result,
+                raises: r,
+                status: status,
+                ret_words: ret_words,
+                cpa: fd.cpa,
+                cpn: fd.cpn
+            }
+        );
         label = add(label, 2);
     }
     Plan {
@@ -2511,11 +2494,7 @@ fn int_fits(in lw: Lw, ty: u32, lo: u64, hi: u64) -> u8 {
         // the other integer kinds never get a one-word shape here
         return int_kind_other(in lw, s, lo, hi);
     };
-    if fits {
-        1
-    } else {
-        2
-    }
+    if fits { 1 } else { 2 }
 }
 
 // `from_type` of the integer kinds without a one-word shape (shape rejects
@@ -3151,11 +3130,7 @@ fn nested_args(
             continue;
         }
         let a = alias_of(in lw, aliases, p.name);
-        let name = if a == NONE32 {
-            p.name
-        } else {
-            a
-        };
+        let name = if a == NONE32 { p.name } else { a };
         let (ls, lsh) = local(inout lw, inout fl, name);
         if lsh.n != q.sh.n {
             let mut d = tx("capture '");
@@ -3164,11 +3139,7 @@ fn nested_args(
             lw.put_sym(target.name, inout d);
             Fail::raise(err(E_INVALID, d));
         }
-        let place = if p.pass == 1 {
-            ls
-        } else {
-            NONE
-        };
+        let place = if p.pass == 1 { ls } else { NONE };
         out.push(Arg { src: ls, words: q.sh.n, place: place });
     }
     out
@@ -3440,11 +3411,7 @@ fn region_operation(
         store_ptr(inout fl, header, H_ALLOCS, allocs2);
         // A zero-word payload still takes one word, so that distinct boxes
         // get distinct handles.
-        let words = if sh.n == 0 {
-            1
-        } else {
-            sh.n
-        };
+        let words = if sh.n == 0 { 1 } else { sh.n };
         let (globals, first, top, after) = heap_alloc(in lw, inout fl, words);
         // An allocation in a region that is not the innermost pins the heap
         // words below it until the outer region closes.

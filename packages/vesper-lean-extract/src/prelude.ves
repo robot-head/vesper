@@ -223,11 +223,7 @@ fn width_of(i: u64) -> u64 {
 fn rule_proposition(inout b: B, k: u64, r: u64) {
     let kind = kind_name(k);
     if r < 2 {
-        let op = if r == 0 {
-            OP_LE
-        } else {
-            OP_LT
-        };
+        let op = if r == 0 { OP_LE } else { OP_LT };
         b.w(T_FORALL);
         xy_binders(inout b, in kind);
         b.binary(OP_IFF);

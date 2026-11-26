@@ -618,18 +618,9 @@ fn set_node(inout t: Toml, id: u32, n: TNode) {
 
 fn new_node(inout t: Toml, kind: u8, implicit: bool, dotted: bool) -> u32 {
     let id = wrapping_u32(t.nodes.len());
-    t
-        .nodes
-        .push(
-            TNode {
-                kind: kind,
-                implicit: implicit,
-                dotted: dotted,
-                first: NONE,
-                last: NONE,
-                count: 0
-            }
-        );
+    t.nodes.push(
+        TNode { kind: kind, implicit: implicit, dotted: dotted, first: NONE, last: NONE, count: 0 }
+    );
     id
 }
 
@@ -641,17 +632,15 @@ fn scalar(inout t: Toml, kind: u8) -> u32 {
 // container `c`.
 fn append(inout t: Toml, c: u32, kstart: u64, klen: u64, hash: u64, child: u32) {
     let e = wrapping_u32(t.ents.len());
-    t
-        .ents
-        .push(
-            TEnt {
-                kstart: wrapping_u32(kstart),
-                klen: wrapping_u32(klen),
-                hash: hash,
-                child: child,
-                next: NONE
-            }
-        );
+    t.ents.push(
+        TEnt {
+            kstart: wrapping_u32(kstart),
+            klen: wrapping_u32(klen),
+            hash: hash,
+            child: child,
+            next: NONE
+        }
+    );
     let mut n = node(in t, c);
     if n.last == NONE {
         n.first = e;
@@ -874,11 +863,7 @@ fn escape(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
     } else if c == Ascii::Quote {
         t.text.push(Ascii::Quote);
     } else if c == Ascii::LowerU || c == Ascii::UpperU {
-        let digits: u64 = if c == Ascii::LowerU {
-            4
-        } else {
-            8
-        };
+        let digits: u64 = if c == Ascii::LowerU { 4 } else { 8 };
         let mut v: u64 = 0;
         for i in 0..digits {
             let d = cur(in s, in t);
@@ -1128,11 +1113,7 @@ fn descend(
         let (ks, kl, h) = part(in t, i);
         let e = lookup(in t, c, ks, kl, h);
         if e == NONE {
-            let kind = if inline {
-                N_INLINE
-            } else {
-                N_TABLE
-            };
+            let kind = if inline { N_INLINE } else { N_TABLE };
             let child = new_node(inout t, kind, true, dotted);
             append(inout t, c, ks, kl, h, child);
             c = child;
@@ -1421,11 +1402,7 @@ fn overflows(in d: ChunkSeq[u8], exp: i64) -> bool {
         } else {
             48
         };
-        let b = if i < m {
-            at(in th, i)
-        } else {
-            48
-        };
+        let b = if i < m { at(in th, i) } else { 48 };
         if a != b {
             return a > b;
         }
@@ -1477,11 +1454,7 @@ fn float(in s: Slice[u8], inout t: Toml) -> bool eff [Fail[LintFail]] {
                         );
                     }
                 }
-                exp = if eneg {
-                    wrapping_neg_i64(v)
-                } else {
-                    v
-                };
+                exp = if eneg { wrapping_neg_i64(v) } else { v };
             }
             if !neg && overflows(in sig, wrapping_add(exp, wrapping_i64(point))) {
                 terr();
@@ -1564,11 +1537,7 @@ fn integer(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
     if !dec_int(in s, inout t, inout ds, inout neg) {
         terr();
     }
-    let max = if neg {
-        inc(i64_max)
-    } else {
-        i64_max
-    };
+    let max = if neg { inc(i64_max) } else { i64_max };
     if !fits(in ds, 10, max) {
         terr();
     }
@@ -1859,11 +1828,7 @@ fn key_lt(in t: Toml, a: u32, b: u32) -> bool {
     let y = ent(in t, b);
     let xl = widen_u64(x.klen);
     let yl = widen_u64(y.klen);
-    let n = if xl < yl {
-        xl
-    } else {
-        yl
-    };
+    let n = if xl < yl { xl } else { yl };
     for i in 0..n {
         let p = at(in t.text.as_slice(), wrapping_add(widen_u64(x.kstart), i));
         let q = at(in t.text.as_slice(), wrapping_add(widen_u64(y.kstart), i));

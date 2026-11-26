@@ -18,34 +18,7 @@ use crate::ast::*;
 use std::collections::BTreeSet;
 
 /// The option prelude.
-pub const PRELUDE: &str = r#"
-impl [T: mod copy] Option[T] {
-    fn is_some(self) -> bool {
-        match self {
-            Option::Some(_) => true,
-            Option::None => false,
-        }
-    }
-    fn is_none(self) -> bool {
-        match self {
-            Option::Some(_) => false,
-            Option::None => true,
-        }
-    }
-    fn unwrap_or(self, fallback: T) -> T {
-        match self {
-            Option::Some(x) => x,
-            Option::None => fallback,
-        }
-    }
-    fn or(self, other: Option[T]) -> Option[T] {
-        match self {
-            Option::Some(x) => Option::Some(x),
-            Option::None => other,
-        }
-    }
-}
-"#;
+pub const PRELUDE: &str = include_str!("preludes/option.ves");
 
 /// The method names that bring in the prelude when a module mentions them.
 pub const PRELUDE_NAMES: &[&str] = &["is_some", "is_none", "unwrap_or", "or"];

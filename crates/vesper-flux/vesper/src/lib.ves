@@ -256,11 +256,7 @@ pub fn zs_copy_check(width: u64, n: u64, max_columns: u64, max_rows: u64, inout 
     } else {
         n
     };
-    let kr = if n > max_rows {
-        max_rows
-    } else {
-        n
-    };
+    let kr = if n > max_rows { max_rows } else { n };
     if kw < n && kw <= kr {
         Fail::raise(ZErr::Work);
     }
@@ -444,11 +440,7 @@ pub fn zs_filter(
         budget = wrapping_sub(budget, 1);
         let at = wrapping_mul(e, stride);
         let x = cell(in a, wrapping_add(at, column));
-        let pass = if kind == 0 {
-            x == value
-        } else {
-            x >= value
-        };
+        let pass = if kind == 0 { x == value } else { x >= value };
         if pass {
             if budget < stride {
                 Fail::raise(ZErr::Work);

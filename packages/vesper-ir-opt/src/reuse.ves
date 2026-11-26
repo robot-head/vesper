@@ -112,11 +112,7 @@ pub fn read_facts(inout r: Reader, in b: Slice[u8], in p: Program) -> Facts {
         f.fip.push(1);
         f.ret.push(r.word(in b));
         let count = r.word(in b);
-        let base = if row.bc == 0 {
-            0
-        } else {
-            p.block(row.b0).i0
-        };
+        let base = if row.bc == 0 { 0 } else { p.block(row.b0).i0 };
         for k in 0..count {
             let at = add(base, k);
             let kind = wrapping_u8(r.word(in b));
@@ -542,17 +538,16 @@ fn reuse_function(
                         let key = u64_of(in facts.skey, add(fa, j));
                         let size = u64_of(in facts.ssize, add(fa, j));
                         let r = bump_rank(inout ranks, inout touched, key);
-                        live
-                            .push(
-                                Slot {
-                                    slot_id: next_slot,
-                                    bind: i.dest,
-                                    sidx: j,
-                                    key: key,
-                                    rank: r,
-                                    size: size
-                                }
-                            );
+                        live.push(
+                            Slot {
+                                slot_id: next_slot,
+                                bind: i.dest,
+                                sidx: j,
+                                key: key,
+                                rank: r,
+                                size: size
+                            }
+                        );
                         next_slot = wrapping_add(next_slot, 1);
                     }
                 }
@@ -719,17 +714,9 @@ fn join(
                 jin.push(w(sp.bind));
                 jin.push(sp.sidx);
             }
-            live
-                .push(
-                    Slot {
-                        slot_id: 0,
-                        bind: n32(canon),
-                        sidx: 0,
-                        key: s0.key,
-                        rank: 0,
-                        size: s0.size
-                    }
-                );
+            live.push(
+                Slot { slot_id: 0, bind: n32(canon), sidx: 0, key: s0.key, rank: 0, size: s0.size }
+            );
         }
     }
 }

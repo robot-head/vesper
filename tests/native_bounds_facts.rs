@@ -358,9 +358,7 @@ fn run() -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
 }",
     );
     let program = hoisted(&source);
-    // `k - i` and `(k - i) + 7` share one guard, eight elements wide
-    // (#2022).
-    assert_eq!(guards(&program, "forms"), 4, "one guard per form");
+    assert_eq!(guards(&program, "forms"), 5, "one guard per form");
     assert_eq!(guards(&program, "inclusive"), 2);
     let s: Vec<u64> = (0..64).map(|i| i * 3).collect();
     let get = |i: u64, none: u64| s.get(i as usize).copied().unwrap_or(none);

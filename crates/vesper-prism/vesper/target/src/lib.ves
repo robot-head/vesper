@@ -124,11 +124,7 @@ fn first_byte(in s: Slice[u8], b: u8) -> Option[u64] {
 // `lo <= hi <= s.len()`, and `b` is never 0, so bytes past the end never
 // match (as with `byte`, which reads them as 0).
 fn find(in s: Slice[u8], lo: u64, hi: u64, b: u8) -> u64 {
-    let end = if hi < s.len() {
-        hi
-    } else {
-        s.len()
-    };
+    let end = if hi < s.len() { hi } else { s.len() };
     if lo < end {
         match first_byte(in s[lo..end], b) {
             Option::Some(i) => {

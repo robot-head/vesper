@@ -424,16 +424,8 @@ fn validate_plat_refs(in w: Slice[u64], in b: Slice[u8], inout c: Cur) -> Unit e
             if mk_kind != 1 {
                 col_err(P_PLAT_REF, R_MKEY_STRING, j, 0, 0, 0);
             }
-            let has_dig = if dcount > 0 {
-                1
-            } else {
-                0
-            };
-            let has_ck = if ck_count > 0 {
-                1
-            } else {
-                0
-            };
+            let has_dig = if dcount > 0 { 1 } else { 0 };
+            let has_ck = if ck_count > 0 { 1 } else { 0 };
             if slice_eq_lit(in b, mk_off, mk_len, "cca.software-component".as_bytes()) {
                 check_plain_values(
                     has_other,
@@ -665,16 +657,8 @@ fn validate_realm_comid(in w: Slice[u64], in b: Slice[u8], inout c: Cur) -> Unit
             if mk_kind != 1 {
                 col_err(P_REALM_REF, R_MKEY_STRING, j, 0, 0, 0);
             }
-            let has_dig = if dcount > 0 {
-                1
-            } else {
-                0
-            };
-            let has_ck = if ck_count > 0 {
-                1
-            } else {
-                0
-            };
+            let has_dig = if dcount > 0 { 1 } else { 0 };
+            let has_ck = if ck_count > 0 { 1 } else { 0 };
             let is_rim = slice_eq_lit(in b, mk_off, mk_len, "cca.rim".as_bytes());
             let rem_idx = if slice_eq_lit(in b, mk_off, mk_len, "cca.rem0".as_bytes()) {
                 0

@@ -189,11 +189,7 @@ fn fits_i32(x: i64) -> bool {
 }
 
 fn max_u32(a: u32, b: u32) -> u32 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // `Layout::of`: the layout id, or NONE32 with the message in `ls.err`.
@@ -234,21 +230,16 @@ fn build(
 ) -> u32 {
     let k = wd.k;
     if depth > 128 {
-        return ls
-            .fail(
-                in t,
-                in names,
-                "value layout exceeds 128 levels; use an owning indirection for recursive data",
-                NONE32,
-                ""
-            );
+        return ls.fail(
+            in t,
+            in names,
+            "value layout exceeds 128 levels; use an owning indirection for recursive data",
+            NONE32,
+            ""
+        );
     }
     let n = t.node(ty);
-    let name = if n.kind == TyKind::Named {
-        n.name
-    } else {
-        0
-    };
+    let name = if n.kind == TyKind::Named { n.name } else { 0 };
     // `i128` and `u128` are two words, low word first (#1174).
     if n.kind == TyKind::Named && n.n == 0 && k.is_wide(name) {
         return ls.scalar_sized(ty, 16);
@@ -312,15 +303,14 @@ fn build(
             text.push(36);
             push_decimal(inout text, i);
             let fname = names.intern(in text.as_slice());
-            fs
-                .push(
-                    LField {
-                        name: fname,
-                        ty: word_ty,
-                        offset: wrapping_i32(wrapping_mul(i, 8)),
-                        layout: wl
-                    }
-                );
+            fs.push(
+                LField {
+                    name: fname,
+                    ty: word_ty,
+                    offset: wrapping_i32(wrapping_mul(i, 8)),
+                    layout: wl
+                }
+            );
         }
         return ls.product(ty, wrapping_mul(words, 8), in fs);
     }
@@ -349,14 +339,13 @@ fn build(
     }
     for i in 0..ls.seen.len() {
         if u32_at(in ls.seen, i) == ty {
-            return ls
-                .fail(
-                    in t,
-                    in names,
-                    "recursive inline layout of ",
-                    ty,
-                    "; an owning indirection is required"
-                );
+            return ls.fail(
+                in t,
+                in names,
+                "recursive inline layout of ",
+                ty,
+                "; an owning indirection is required"
+            );
         }
     }
     ls.seen.push(ty);
@@ -366,11 +355,7 @@ fn build(
     let mut all: ChunkSeq[LField] = ChunkSeq::new[LField]();
     for vi in 0..w(a.vn) {
         let v = wd.variant(add(w(a.va), vi));
-        let mut offset: i32 = if a.is_enum {
-            8
-        } else {
-            0
-        };
+        let mut offset: i32 = if a.is_enum { 8 } else { 0 };
         let fa = n32(all.len());
         for fi in 0..w(v.fc) {
             let f = wd.field(add(w(v.fa), fi));
@@ -402,8 +387,7 @@ fn build(
         let va = n32(ls.variants.len());
         for i in 0..vs.len() {
             match vs.try_get(i) {
-                Option::Some(v) => ls
-                    .variants
+                Option::Some(v) => ls.variants
                     .push(LVariant { name: v.name, fa: wrapping_add(v.fa, base), fc: v.fc }),
                 Option::None => {}
             }
@@ -417,17 +401,15 @@ fn build(
             Option::None => LVariant { name: 0, fa: 0, fc: 0 },
         };
         let id = n32(ls.nodes.len());
-        ls
-            .nodes
-            .push(
-                LNode {
-                    ty: ty,
-                    size: size,
-                    kind: L_PRODUCT,
-                    a: wrapping_add(first.fa, base),
-                    n: first.fc
-                }
-            );
+        ls.nodes.push(
+            LNode {
+                ty: ty,
+                size: size,
+                kind: L_PRODUCT,
+                a: wrapping_add(first.fa, base),
+                n: first.fc
+            }
+        );
         id
     }
 }
@@ -550,13 +532,12 @@ impl Out {
             out.push(name);
             out.push(w(e.n));
             for j in 0..args.len() {
-                out
-                    .push(
-                        match args.try_get(j) {
-                            Option::Some(a) => a,
-                            Option::None => 0,
-                        }
-                    );
+                out.push(
+                    match args.try_get(j) {
+                        Option::Some(a) => a,
+                        Option::None => 0,
+                    }
+                );
             }
         }
         let tail = self.opt_name(in names, row.tail);
@@ -591,13 +572,12 @@ impl Out {
             }
             words.push(w(n.n));
             for i in 0..args.len() {
-                words
-                    .push(
-                        match args.try_get(i) {
-                            Option::Some(a) => a,
-                            Option::None => 0,
-                        }
-                    );
+                words.push(
+                    match args.try_get(i) {
+                        Option::Some(a) => a,
+                        Option::None => 0,
+                    }
+                );
             }
         } else if n.kind == TyKind::Fn {
             let mut ps: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -610,13 +590,12 @@ impl Out {
             words.push(w(n.n));
             for i in 0..ps.len() {
                 words.push(widen_u64(t.param_pass(ty, i)));
-                words
-                    .push(
-                        match ps.try_get(i) {
-                            Option::Some(a) => a,
-                            Option::None => 0,
-                        }
-                    );
+                words.push(
+                    match ps.try_get(i) {
+                        Option::Some(a) => a,
+                        Option::None => 0,
+                    }
+                );
             }
             words.push(r);
             self.row(in t, in names, n.r2, inout words);

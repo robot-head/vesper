@@ -48,10 +48,6 @@ pub enum SeqWord: _ {
     // `Hoisted + access_word(a)`: get, set, try_get, try_set.
     Hoisted = 14,
     Guard = 18,
-    // `Wide + w.code()`: a fixed-width access `Wide(w)` (24 of them, #2022).
-    Wide = 32,
-    // `HoistedWide + w.code()`: `Hoisted(Wide(w))`.
-    HoistedWide = 64,
 }
 
 // The ASCII bytes the decoder and encoder look for in names.

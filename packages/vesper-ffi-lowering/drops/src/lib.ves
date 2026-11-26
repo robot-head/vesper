@@ -76,10 +76,7 @@ fn sym_starts_with(in names: Names, sym: u32, in prefix: Str) -> bool {
         return false;
     }
     for i in 0..pb.len() {
-        let ch = match pb.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let ch = pb.try_get(i).unwrap_or(0);
         if u8_at(in names.text, add(a, i)) != ch {
             return false;
         }
@@ -106,10 +103,7 @@ fn sym_eq_str(in names: Names, sym: u32, in s: Str) -> bool {
         return false;
     }
     for i in 0..sb.len() {
-        let ch = match sb.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let ch = sb.try_get(i).unwrap_or(0);
         if u8_at(in names.text, add(a, i)) != ch {
             return false;
         }
@@ -299,11 +293,7 @@ fn fn_max_value_id(in p: Program, fi: u64, nv_op: u64) -> u32 {
             }
         }
     }
-    if has {
-        wrapping_add(m, 1)
-    } else {
-        0
-    }
+    if has { wrapping_add(m, 1) } else { 0 }
 }
 
 fn find_fn_by_name(in p: Program, name: u32) -> u64 {
@@ -660,8 +650,9 @@ fn release_wildcards(
             let _ = p.insts.try_set(ii, inst);
             fn_set_value_type(inout p, fi, inst.dest, target_res);
             let hidx = list_find_u32(in handles, handle);
-            sites
-                .push(DropSite { graph: f.name, handle: handle, effect: u32_at(in effects, hidx) });
+            sites.push(
+                DropSite { graph: f.name, handle: handle, effect: u32_at(in effects, hidx) }
+            );
         }
     }
 }
@@ -955,23 +946,21 @@ fn emit_drop(
         p.put(d.path, Tag::Path);
         p.put(w(TyPass::Sink), Tag::Raw);
         p.put(0, Tag::Raw);
-        p
-            .insts
-            .push(
-                InstRow {
-                    dest: val,
-                    ty: d.ty,
-                    s0: 0,
-                    s1: 0,
-                    has_token: 0,
-                    tin: 0,
-                    tout: 0,
-                    fallible: 0,
-                    op: Op::Read,
-                    a: rop,
-                    n: 4
-                }
-            );
+        p.insts.push(
+            InstRow {
+                dest: val,
+                ty: d.ty,
+                s0: 0,
+                s1: 0,
+                has_token: 0,
+                tin: 0,
+                tout: 0,
+                fallible: 0,
+                op: Op::Read,
+                a: rop,
+                n: 4
+            }
+        );
     }
     let dest = next_val;
     next_val = wrapping_add(next_val, 1);
@@ -985,23 +974,21 @@ fn emit_drop(
     p.put(0, Tag::Path);
     p.put(0, Tag::Raw);
     p.put(0, Tag::OptName);
-    p
-        .insts
-        .push(
-            InstRow {
-                dest: dest,
-                ty: target_res,
-                s0: 0,
-                s1: 0,
-                has_token: 0,
-                tin: 0,
-                tout: 0,
-                fallible: 0,
-                op: Op::Call,
-                a: cop,
-                n: 8
-            }
-        );
+    p.insts.push(
+        InstRow {
+            dest: dest,
+            ty: target_res,
+            s0: 0,
+            s1: 0,
+            has_token: 0,
+            tin: 0,
+            tout: 0,
+            fallible: 0,
+            op: Op::Call,
+            a: cop,
+            n: 8
+        }
+    );
     let hidx = list_find_u32(in handles, handle);
     sites.push(DropSite { graph: f.name, handle: handle, effect: u32_at(in effects, hidx) });
     true
@@ -1616,17 +1603,16 @@ pub fn ffi_drops_entry(in input: Str) -> ChunkSeq[u64] {
                 bt.push(read_drop_item(inout r, in b, in c, inout p, blk, 0));
             }
         }
-        plans
-            .push(
-                FnPlan {
-                    fi: fi,
-                    ok: ok,
-                    splits: splits,
-                    before_inst: bi,
-                    after_inst: ai,
-                    before_term: bt
-                }
-            );
+        plans.push(
+            FnPlan {
+                fi: fi,
+                ok: ok,
+                splits: splits,
+                before_inst: bi,
+                after_inst: ai,
+                before_term: bt
+            }
+        );
     }
     let (handles, effects) = droppable_resolved(inout c, in p);
     let mut sites = ChunkSeq::new[DropSite]();

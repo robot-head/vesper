@@ -132,11 +132,7 @@ fn mark(inout seen: ChunkSeq[u8], chunk: u32, inout fault: Option[AuditError]) {
         Option::Some(v) => v,
         Option::None => return,
     };
-    let next = if v == 255 {
-        v
-    } else {
-        wrapping_add(v, 1)
-    };
+    let next = if v == 255 { v } else { wrapping_add(v, 1) };
     seen.try_set(i, next);
     if next > 1 {
         first(inout fault, AuditError::Duplicate { chunk: chunk });
@@ -334,11 +330,7 @@ fn kernel_one(
     epoch: u32
 ) -> u64 {
     let here = loc_in(in table, total, chunk);
-    let ok = if rx {
-        rx_held(here)
-    } else {
-        tx_held(here)
-    };
+    let ok = if rx { rx_held(here) } else { tx_held(here) };
     if !ok {
         return 18446744073709551615;
     }

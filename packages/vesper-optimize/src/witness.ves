@@ -211,11 +211,7 @@ fn wrapping_op(in o: Ops, sym: u32) -> u8 {
 
 // `op_name(op, wrapping).len()`.
 fn op_name_len(wrapping: bool) -> u64 {
-    if wrapping {
-        WRAPPING_NAME_LEN
-    } else {
-        1
-    }
+    if wrapping { WRAPPING_NAME_LEN } else { 1 }
 }
 
 // `IntegerKind::fits` for the four closed kinds.
@@ -252,11 +248,7 @@ fn int_value(in t: Tree, e: ExprNode) -> i128 {
     let l = lit_at(in t.ast, e.a);
     // The 128-bit magnitude `hi`:`bits` (2^127 wraps to `i128::MIN`).
     let m = wrapping_shl_i128(widen_i128(wrapping_i64(l.hi)), 64) | widen_i128(l.bits);
-    if l.neg {
-        wrapping_neg_i128(m)
-    } else {
-        m
-    }
+    if l.neg { wrapping_neg_i128(m) } else { m }
 }
 
 fn is_int_literal(in t: Tree, e: ExprNode) -> bool {
@@ -296,13 +288,10 @@ fn same_term(x: TermRow, y: TermRow) -> bool {
 }
 
 fn arg_at(in t: Tree, list: u32, i: u64) -> ArgNode {
-    t
-        .ast
-        .args
-        .get_or(
-            idx_from_raw[ArgNode](list_at(in t.ast, list, i)),
-            ArgNode { pass: 255, explicit: false, expr: none() }
-        )
+    t.ast.args.get_or(
+        idx_from_raw[ArgNode](list_at(in t.ast, list, i)),
+        ArgNode { pass: 255, explicit: false, expr: none() }
+    )
 }
 
 // `call_parts`: the operation, the callee and the two argument
@@ -377,11 +366,7 @@ fn intern_term(inout bound: Bound, term: TermRow, inout b: Budget, inout id: u32
         }
         i = wrapping_add(i, 1);
     }
-    let compared = if found < n {
-        wrapping_add(found, 1)
-    } else {
-        n
-    };
+    let compared = if found < n { wrapping_add(found, 1) } else { n };
     let e = work_units(inout b, compared);
     if e != 0 {
         return e;
@@ -408,11 +393,7 @@ fn intern_term(inout bound: Bound, term: TermRow, inout b: Budget, inout id: u32
 fn binary_term(kind: u8, wrapping: bool, op: u8, left: u32, right: u32) -> TermRow {
     TermRow {
         kind: kind,
-        tag: if wrapping {
-            T_WRAPPING
-        } else {
-            T_CHECKED
-        },
+        tag: if wrapping { T_WRAPPING } else { T_CHECKED },
         op: op,
         value: 0,
         a: left,
@@ -688,11 +669,7 @@ fn bytes_of(n: u64, size: u64) -> u64 {
 fn capped_sum(a: u64, b: u64, cap: u64) -> u64 {
     let s = saturating_add(a, b);
     let c = saturating_add(cap, 1);
-    if s < c {
-        s
-    } else {
-        c
-    }
+    if s < c { s } else { c }
 }
 
 // `validate_terms`: every term of the source's kind, in range and
@@ -772,11 +749,7 @@ pub fn validate_terms(
             if e != 0 {
                 return e;
             }
-            let w: u64 = if wrapping {
-                1
-            } else {
-                0
-            };
+            let w: u64 = if wrapping { 1 } else { 0 };
             let nodes = capped_sum(
                 wrapping_add(w, 1),
                 capped_sum(x.nodes, y.nodes, b.max_output_nodes),
@@ -1247,11 +1220,7 @@ fn application(
     c: u32
 ) -> bool {
     let x = term_at(in terms, id);
-    let tag = if wrapping {
-        T_WRAPPING
-    } else {
-        T_CHECKED
-    };
+    let tag = if wrapping { T_WRAPPING } else { T_CHECKED };
     x.tag == tag && x.op == op && x.a == a && x.b == c
 }
 
@@ -1302,11 +1271,7 @@ fn check_rule(
     let z = step.b2;
     let guarded = (rule >= 6 && rule <= 8) || rule == 17 || rule == 18 || rule == 16;
     if guarded {
-        let erased = if rule == 16 {
-            y
-        } else {
-            x
-        };
+        let erased = if rule == 16 { y } else { x };
         if step.has_guard {
             let e = prior(in proofs, step.guard, index);
             if e != 0 {
@@ -1345,11 +1310,7 @@ fn check_rule(
         } else {
             OP_MUL
         };
-        let identity: i128 = if rule == 4 || rule == 11 {
-            1
-        } else {
-            0
-        };
+        let identity: i128 = if rule == 4 || rule == 11 { 1 } else { 0 };
         let lhs = is_binary(source)
             && source.a == x
             && constant(in terms, source.b, identity)
@@ -1361,16 +1322,8 @@ fn check_rule(
         };
         lhs && rhs
     } else if rule == 2 || rule == 5 || rule == 7 {
-        let op = if rule == 2 {
-            OP_ADD
-        } else {
-            OP_MUL
-        };
-        let identity: i128 = if rule == 5 {
-            1
-        } else {
-            0
-        };
+        let op = if rule == 2 { OP_ADD } else { OP_MUL };
+        let identity: i128 = if rule == 5 { 1 } else { 0 };
         let lhs = is_binary(source)
             && source.b == x
             && constant(in terms, source.a, identity)
@@ -1384,18 +1337,10 @@ fn check_rule(
     } else if rule == 8 || rule == 18 {
         application(in terms, from, rule == 18, OP_SUB, x, x) && constant(in terms, to, 0)
     } else if rule == 12 || rule == 13 {
-        let op = if rule == 12 {
-            OP_ADD
-        } else {
-            OP_MUL
-        };
+        let op = if rule == 12 { OP_ADD } else { OP_MUL };
         application(in terms, from, true, op, x, y) && application(in terms, to, true, op, y, x)
     } else if rule == 14 || rule == 15 {
-        let op = if rule == 14 {
-            OP_ADD
-        } else {
-            OP_MUL
-        };
+        let op = if rule == 14 { OP_ADD } else { OP_MUL };
         is_binary(source)
             && is_binary(target)
             && source.b == z
@@ -1459,11 +1404,7 @@ fn check_rule(
         }
         application(in terms, from, wrapping, op, x, y) && ok && expected == target.value
     };
-    if valid {
-        0
-    } else {
-        E_INVALID_RULE_INSTANCE
-    }
+    if valid { 0 } else { E_INVALID_RULE_INSTANCE }
 }
 
 // ---------------------------------------------------------------- verify

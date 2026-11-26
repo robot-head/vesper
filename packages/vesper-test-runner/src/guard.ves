@@ -28,90 +28,72 @@ fn item_at(in a: Ast, i: u32) -> ItemNode {
 }
 
 fn adt_at(in a: Ast, i: u32) -> AdtNode {
-    a
-        .adts
-        .get_or(
-            idx_from_raw[AdtNode](i),
-            AdtNode {
-                name: 0,
-                mode: 0,
-                generics: none(),
-                variants: none(),
-                is_enum: false,
-                tiled: false,
-                tile_width: 0,
-                start: 0,
-                end: 0
-            }
-        )
+    a.adts.get_or(
+        idx_from_raw[AdtNode](i),
+        AdtNode {
+            name: 0,
+            mode: 0,
+            generics: none(),
+            variants: none(),
+            is_enum: false,
+            tiled: false,
+            tile_width: 0,
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 fn variant_at(in a: Ast, i: u32) -> VariantNode {
-    a
-        .variants
-        .get_or(idx_from_raw[VariantNode](i), VariantNode { name: 0, fields: none(), named: false })
+    a.variants.get_or(
+        idx_from_raw[VariantNode](i),
+        VariantNode { name: 0, fields: none(), named: false }
+    )
 }
 
 fn field_at(in a: Ast, i: u32) -> FieldNode {
-    a
-        .fields
-        .get_or(
-            idx_from_raw[FieldNode](i),
-            FieldNode { name: 0, ty: none(), modality: 3, temperature: 0 }
-        )
+    a.fields.get_or(
+        idx_from_raw[FieldNode](i),
+        FieldNode { name: 0, ty: none(), modality: 3, temperature: 0 }
+    )
 }
 
 fn effect_decl_at(in a: Ast, i: u32) -> EffectDeclNode {
-    a
-        .effect_decls
-        .get_or(
-            idx_from_raw[EffectDeclNode](i),
-            EffectDeclNode {
-                name: 0,
-                linear: false,
-                generics: none(),
-                ops: none(),
-                start: 0,
-                end: 0
-            }
-        )
+    a.effect_decls.get_or(
+        idx_from_raw[EffectDeclNode](i),
+        EffectDeclNode { name: 0, linear: false, generics: none(), ops: none(), start: 0, end: 0 }
+    )
 }
 
 fn impl_at(in a: Ast, i: u32) -> ImplNode {
-    a
-        .impls
-        .get_or(
-            idx_from_raw[ImplNode](i),
-            ImplNode { ty: none(), generics: none(), methods: none() }
-        )
+    a.impls.get_or(
+        idx_from_raw[ImplNode](i),
+        ImplNode { ty: none(), generics: none(), methods: none() }
+    )
 }
 
 fn fn_at(in a: Ast, i: u32) -> FnNode {
-    a
-        .fns
-        .get_or(
-            idx_from_raw[FnNode](i),
-            FnNode {
-                name: 0,
-                fip: false,
-                generics: none(),
-                params: none(),
-                result: none(),
-                effects: none(),
-                body: none(),
-                start: 0,
-                end: 0
-            }
-        )
+    a.fns.get_or(
+        idx_from_raw[FnNode](i),
+        FnNode {
+            name: 0,
+            fip: false,
+            generics: none(),
+            params: none(),
+            result: none(),
+            effects: none(),
+            body: none(),
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 fn param_at(in a: Ast, i: u32) -> ParamNode {
-    a
-        .params
-        .get_or(
-            idx_from_raw[ParamNode](i),
-            ParamNode { name: 0, pass: 0, projections: none(), ty: none(), start: 0, end: 0 }
-        )
+    a.params.get_or(
+        idx_from_raw[ParamNode](i),
+        ParamNode { name: 0, pass: 0, projections: none(), ty: none(), start: 0, end: 0 }
+    )
 }
 
 fn effects_at(in a: Ast, i: u32) -> EffectsNode {
@@ -119,18 +101,15 @@ fn effects_at(in a: Ast, i: u32) -> EffectsNode {
 }
 
 fn effect_at(in a: Ast, i: u32) -> EffectNode {
-    a
-        .effect_nodes
+    a.effect_nodes
         .get_or(idx_from_raw[EffectNode](i), EffectNode { label: none(), name: 0, args: none() })
 }
 
 fn stmt_at(in a: Ast, i: u32) -> StmtNode {
-    a
-        .stmts
-        .get_or(
-            idx_from_raw[StmtNode](i),
-            StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
-        )
+    a.stmts.get_or(
+        idx_from_raw[StmtNode](i),
+        StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
+    )
 }
 
 fn arg_at(in a: Ast, i: u32) -> ArgNode {
@@ -201,16 +180,7 @@ fn builtin(in a: Ast, inout w: Walk, name: u32) -> bool {
     w.tmp.clear();
     let ok = a.names.resolve_into(symbol_from_id(name), inout w.tmp);
     let yes = builtin_text(in w.tmp);
-    let set = w
-        .builtin
-        .try_set(
-            k,
-            if yes {
-                2
-            } else {
-                1
-            }
-        );
+    let set = w.builtin.try_set(k, if yes { 2 } else { 1 });
     yes
 }
 
@@ -630,11 +600,7 @@ fn text_less(in a: Ast, x: u32, y: u32, inout t1: String, inout t2: String) -> b
     let b2 = t2.as_bytes();
     let n1 = b1.len();
     let n2 = b2.len();
-    let n = if n1 < n2 {
-        n1
-    } else {
-        n2
-    };
+    let n = if n1 < n2 { n1 } else { n2 };
     for i in 0..n {
         let c1 = b1.try_get(i).unwrap_or(0);
         let c2 = b2.try_get(i).unwrap_or(0);

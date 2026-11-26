@@ -200,8 +200,7 @@ impl Builder {
             self.vals.push(val_at(in results, k));
         }
         let i = self.types.len();
-        self
-            .types
+        self.types
             .push(TypeDef { kind: TD_FUNC, p0: p0, pn: params.len(), rn: results.len(), func: 0 });
         wrapping_u32(i)
     }

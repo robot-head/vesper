@@ -15,35 +15,19 @@ pub fn smax_i64() -> i64 {
 }
 
 pub fn min_u64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 pub fn max_u64(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 pub fn min_i64(a: i64, b: i64) -> i64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 pub fn max_i64(a: i64, b: i64) -> i64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // The bit pattern of `x`.

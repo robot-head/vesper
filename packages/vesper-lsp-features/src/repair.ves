@@ -293,11 +293,7 @@ fn candidates(in tk: Tk, kind: u64, ss: u64, se: u64, damage: u64) -> Patches {
         }
     }
     let member = kind == D_STRUCT || kind == D_ENUM || kind == D_EFFECT;
-    let base: u64 = if kind == D_IMPL {
-        1
-    } else {
-        0
-    };
+    let base: u64 = if kind == D_IMPL { 1 } else { 0 };
     let depth_n = st.kind.len();
     let mut body_level = NONE64;
     let mut i = base;
@@ -369,11 +365,7 @@ fn candidates(in tk: Tk, kind: u64, ss: u64, se: u64, damage: u64) -> Patches {
         if fn_start == NONE64 {
             return ps;
         }
-        let limit = if next_fn == NONE64 {
-            se
-        } else {
-            next_fn
-        };
+        let limit = if next_fn == NONE64 { se } else { next_fn };
         let mut body = NONE64;
         let mut rparen = NONE64;
         for j in 0..n {
@@ -645,16 +637,14 @@ fn repair(
             continue;
         }
         tk.kind.push(k);
-        tk
-            .s
-            .push(
-                widen_u64(
-                    match t.start.try_get(i) {
-                        Option::Some(x) => x,
-                        Option::None => 0,
-                    }
-                )
-            );
+        tk.s.push(
+            widen_u64(
+                match t.start.try_get(i) {
+                    Option::Some(x) => x,
+                    Option::None => 0,
+                }
+            )
+        );
         tk.e.push(token_end(in t, i));
     }
     let nd = rs.d_kind.len();
@@ -676,13 +666,12 @@ fn repair(
     }
     let mut src = ChunkSeq::with_capacity[u8](b.len());
     for i in 0..b.len() {
-        src
-            .push(
-                match b.try_get(i) {
-                    Option::Some(x) => x,
-                    Option::None => 0,
-                }
-            );
+        src.push(
+            match b.try_get(i) {
+                Option::Some(x) => x,
+                Option::None => 0,
+            }
+        );
     }
     let mut base = copy_bytes(in src);
     for j in 0..damaged.len() {
@@ -843,14 +832,7 @@ fn repair(
         tab_u(inout regions, de);
         tab_u(inout regions, g64(in ps.scope_s, p));
         tab_u(inout regions, g64(in ps.scope_e, p));
-        tab_u(
-            inout regions,
-            if pk == R_HEADER {
-                de
-            } else {
-                cut
-            }
-        );
+        tab_u(inout regions, if pk == R_HEADER { de } else { cut });
         tab_u(inout regions, g64(in ps.depth, p));
         tab_u(inout regions, dmg_s);
         tab_u(inout regions, dmg_e);

@@ -376,11 +376,7 @@ fn last_is(in names: Names, s: u32, in lit: Str) -> bool {
 fn name_cmp(in names: Names, a: u32, b: u32) -> i64 {
     let na = names.size(a);
     let nb = names.size(b);
-    let n = if na < nb {
-        na
-    } else {
-        nb
-    };
+    let n = if na < nb { na } else { nb };
     for i in 0..n {
         let x = names.byte(a, i);
         let y = names.byte(b, i);
@@ -954,11 +950,7 @@ fn effect_prefix(inout names: Names, callee: u32) -> u32 {
 }
 
 fn variant_names_are(in c: Ctx, adt: Adt, action: u8) -> bool {
-    let want: u32 = if action == 0 {
-        5
-    } else {
-        8
-    };
+    let want: u32 = if action == 0 { 5 } else { 8 };
     if adt.vn != want {
         return false;
     }
@@ -1434,18 +1426,9 @@ fn map_effect(
     }
     let index = g.map_defs.len();
     let msym = c.names.intern(in map_name.as_slice());
-    g
-        .map_defs
-        .push(
-            MapRow {
-                name: msym,
-                kind: mkind,
-                key: key_bytes,
-                value: value_bytes,
-                max: max,
-                flags: 0
-            }
-        );
+    g.map_defs.push(
+        MapRow { name: msym, kind: mkind, key: key_bytes, value: value_bytes, max: max, flags: 0 }
+    );
     g.map_effects.push(name);
     for k in 0..decl.on {
         let o = x.op(add(decl.oa, k));
@@ -1661,18 +1644,16 @@ fn read_params(inout g: G, in p: Program, f: FnRow) {
         let pass = wrapping_u8(p.op(inc(at)));
         let k = p.op(add(at, 2));
         let t = add(at, add(3, k));
-        g
-            .params
-            .push(
-                PInfo {
-                    name: name,
-                    pass: pass,
-                    nproj: k,
-                    ty: pos32(in p, t),
-                    s0: p.op(inc(t)),
-                    s1: p.op(add(t, 2))
-                }
-            );
+        g.params.push(
+            PInfo {
+                name: name,
+                pass: pass,
+                nproj: k,
+                ty: pos32(in p, t),
+                s0: p.op(inc(t)),
+                s1: p.op(add(t, 2))
+            }
+        );
         at = add(t, 3);
     }
 }
@@ -2595,11 +2576,7 @@ fn line(inout g: G, in x: Extra, offset: u64, force: bool) {
             hi = mid;
         }
     }
-    let li = if lo < 1 {
-        0
-    } else {
-        wrapping_sub(lo, 1)
-    };
+    let li = if lo < 1 { 0 } else { wrapping_sub(lo, 1) };
     let start = u64_at(in g.line_starts, li);
     let n = x.source.len();
     let mut end = start;
@@ -2974,29 +2951,13 @@ fn binary(inout g: G, inout c: Ctx, in p: Program, i: InstRow) -> bool {
     } else if ne {
         JmpOp::Ne
     } else if is(in c.names, bop, "<") {
-        if signed {
-            JmpOp::SLt
-        } else {
-            JmpOp::Lt
-        }
+        if signed { JmpOp::SLt } else { JmpOp::Lt }
     } else if is(in c.names, bop, "<=") {
-        if signed {
-            JmpOp::SLe
-        } else {
-            JmpOp::Le
-        }
+        if signed { JmpOp::SLe } else { JmpOp::Le }
     } else if is(in c.names, bop, ">") {
-        if signed {
-            JmpOp::SGt
-        } else {
-            JmpOp::Gt
-        }
+        if signed { JmpOp::SGt } else { JmpOp::Gt }
     } else if is(in c.names, bop, ">=") {
-        if signed {
-            JmpOp::SGe
-        } else {
-            JmpOp::Ge
-        }
+        if signed { JmpOp::SGe } else { JmpOp::Ge }
     } else {
         is_cmp = false;
         JmpOp::Eq
@@ -3309,16 +3270,8 @@ fn effect_op(inout g: G, in c: Ctx, in p: Program, e: EOp, i: InstRow) -> bool {
         if !has {
             return true;
         }
-        let data: i16 = if g.action == 0 {
-            0
-        } else {
-            76
-        };
-        let data_end: i16 = if g.action == 0 {
-            4
-        } else {
-            80
-        };
+        let data: i16 = if g.action == 0 { 0 } else { 76 };
+        let data_end: i16 = if g.action == 0 { 4 } else { 80 };
         let none = g.asm.label();
         let done = g.asm.label();
         g.asm.ldx(Size::W, R2, R9, data);
@@ -3483,16 +3436,8 @@ fn literal_at(in p: Program, at: u64) -> i64 {
 // `terminator`.
 fn terminator(inout g: G, inout c: Ctx, in p: Program, f: FnRow, bi: u64) -> bool {
     let b = fn_block(in p, f, bi);
-    let s0 = if g.f_has_span {
-        g.f_s0
-    } else {
-        0
-    };
-    let s1 = if g.f_has_span {
-        g.f_s1
-    } else {
-        0
-    };
+    let s0 = if g.f_has_span { g.f_s0 } else { 0 };
+    let s1 = if g.f_has_span { g.f_s1 } else { 0 };
     let a = b.ta;
     if b.term == Term::Return {
         let v = pos32(in p, a);
@@ -3553,11 +3498,7 @@ fn terminator(inout g: G, inout c: Ctx, in p: Program, f: FnRow, bi: u64) -> boo
     if b.term == Term::Match {
         let v = pos32(in p, a);
         let r0 = vrep(in g, v);
-        let r = if r0 == REP_BAD {
-            REP_UNIT
-        } else {
-            r0
-        };
+        let r = if r0 == REP_BAD { REP_UNIT } else { r0 };
         let ty = vty(in g, v);
         if !ld(inout g, in c, R1, v, 0, s0, s1) {
             return false;
@@ -3600,11 +3541,7 @@ fn terminator(inout g: G, inout c: Ctx, in p: Program, f: FnRow, bi: u64) -> boo
                 }
             } else if kind == Pat::Constructor && r == REP_ENUM {
                 let name = pos32(in p, add(pat, 3));
-                let ety = if ty == NONE32 {
-                    c.types.infer
-                } else {
-                    ty
-                };
+                let ety = if ty == NONE32 { c.types.infer } else { ty };
                 let tag = variant_tag(inout c, ety, name);
                 if tag < 0 {
                     err_at(inout g, R_OPERATION, p.op(inc(pat)), p.op(add(pat, 2)));

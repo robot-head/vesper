@@ -142,11 +142,7 @@ pub fn unify_ty(inout s: S, inout cx: ChunkSeq[u64], a: u64, b: u64) -> u64 {
         return bind_ty(inout s, inout cx, x, a);
     }
     if ta == t_var() && tb == t_var() {
-        return if a == b {
-            0
-        } else {
-            1
-        };
+        return if a == b { 0 } else { 1 };
     }
     if ta == t_ctor() && tb == t_ctor() {
         if field_a(in s, a) != field_a(in s, b) {
@@ -288,18 +284,10 @@ pub fn unify_row(inout s: S, inout cx: ChunkSeq[u64], a: u64, b: u64) -> u64 {
     let empty_a = kid_count(in s, oa) == 0;
     let empty_b = kid_count(in s, ob) == 0;
     if ta == none() && tb == none() {
-        return if empty_a && empty_b {
-            0
-        } else {
-            1
-        };
+        return if empty_a && empty_b { 0 } else { 1 };
     }
     if ta != none() && ta == tb {
-        return if empty_a && empty_b {
-            0
-        } else {
-            1
-        };
+        return if empty_a && empty_b { 0 } else { 1 };
     }
     let ia = ta != none() && is_inf(ta);
     let ib = tb != none() && is_inf(tb);

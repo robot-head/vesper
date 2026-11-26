@@ -105,11 +105,7 @@ fn key_nodes(in s: A, key: u64) -> u64 {
 
 // Write the element ref r: kind, name id, version.
 fn elem(inout s: A, r: u64) {
-    let kind: u64 = if r < s.nn {
-        0
-    } else {
-        1
-    };
+    let kind: u64 = if r < s.nn { 0 } else { 1 };
     let name = ref_name(in s, r);
     let v = ref_ver(in s, r);
     s.fout.push(kind);
@@ -196,11 +192,7 @@ pub fn findings(inout s: A) {
                 word(in s.natof, id)
             };
             if j != none() {
-                let key = if pass == 0 {
-                    j
-                } else {
-                    wrapping_add(s.nn, j)
-                };
+                let key = if pass == 0 { j } else { wrapping_add(s.nn, j) };
                 // Advisories: one unit per advisory, one per range of the
                 // advisories of this identity (as the Rust loop spends).
                 let mut cost = nadv;
@@ -264,11 +256,7 @@ pub fn findings(inout s: A) {
                         c = word(in s.n_next, c);
                     }
                 }
-                let lc = if eid == none() {
-                    1
-                } else {
-                    str_len(in s, eid)
-                };
+                let lc = if eid == none() { 1 } else { str_len(in s, eid) };
                 if !spend(inout s, lc) {
                     return;
                 }
@@ -348,14 +336,7 @@ pub fn findings(inout s: A) {
         0
     };
     w(inout s, outcome);
-    w(
-        inout s,
-        if denied {
-            1
-        } else {
-            0
-        }
-    );
+    w(inout s, if denied { 1 } else { 0 });
     let nn = s.nn;
     let ns = s.ns;
     w(inout s, nn);

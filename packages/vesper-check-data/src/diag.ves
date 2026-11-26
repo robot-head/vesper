@@ -54,21 +54,19 @@ impl Diags {
     pub fn close(inout self, code_a: u64, msg_a: u64, in help: Str, start: u64, stop: u64) {
         let help_a = self.text.len();
         self.text.extend(in help.as_bytes());
-        self
-            .rows
-            .push(
-                DiagRow {
-                    code_a: code_a,
-                    msg_a: msg_a,
-                    msg_b: help_a,
-                    help_a: help_a,
-                    end: self.text.len(),
-                    start: start,
-                    stop: stop,
-                    ra: n32(self.rel.len()),
-                    rn: 0
-                }
-            );
+        self.rows.push(
+            DiagRow {
+                code_a: code_a,
+                msg_a: msg_a,
+                msg_b: help_a,
+                help_a: help_a,
+                end: self.text.len(),
+                start: start,
+                stop: stop,
+                ra: n32(self.rel.len()),
+                rn: 0
+            }
+        );
     }
 
     pub fn row(in self, i: u64) -> DiagRow {

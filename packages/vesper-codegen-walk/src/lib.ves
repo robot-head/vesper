@@ -130,11 +130,7 @@ fn sig_at(in s: Sigs, i: u64) -> Sig {
 // The signature index of `name`, or NONE64.
 fn sig_of(in s: Sigs, name: u32) -> u64 {
     let k = u64_at(in s.by_name, w(name));
-    if k == 0 {
-        NONE64
-    } else {
-        wrapping_sub(k, 1)
-    }
+    if k == 0 { NONE64 } else { wrapping_sub(k, 1) }
 }
 
 fn name_word(inout r: Reader, in b: Slice[u8], in c: Ctx) -> u32 {
@@ -167,9 +163,9 @@ fn read_sigs(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Sigs {
             s.ppass.push(r.word(in b));
             s.pty.push(type_word(inout r, in b, in c));
         }
-        s
-            .rows
-            .push(Sig { name: name, generics: generics, result: result, row: row, pa: pa, pn: np });
+        s.rows.push(
+            Sig { name: name, generics: generics, result: result, row: row, pa: pa, pn: np }
+        );
         if w(name) >= s.by_name.len() {
             s.by_name.resize(inc(w(name)), 0);
         }
@@ -199,14 +195,13 @@ impl Gen {
         let mut params = ChunkSeq::with_capacity[ParamInfo](g.pn);
         for i in 0..g.pn {
             let k = add(g.pa, i);
-            params
-                .push(
-                    ParamInfo {
-                        name: u32_at(in self.s.pname, k),
-                        pass: wrapping_u8(u64_at(in self.s.ppass, k)),
-                        ty: u32_at(in self.s.pty, k)
-                    }
-                );
+            params.push(
+                ParamInfo {
+                    name: u32_at(in self.s.pname, k),
+                    pass: wrapping_u8(u64_at(in self.s.ppass, k)),
+                    ty: u32_at(in self.s.pty, k)
+                }
+            );
         }
         let conc = Conc { f: 0, params: params, result: g.result, row: g.row };
         let res = specialized(
@@ -216,11 +211,7 @@ impl Gen {
             self.syms,
             in conc
         );
-        let tag: u8 = if res {
-            2
-        } else {
-            1
-        };
+        let tag: u8 = if res { 2 } else { 1 };
         set8(inout self.spec_cache, si, tag);
         res
     }
@@ -737,11 +728,7 @@ impl Gen {
                 continue;
             }
             let t = u64_at(in touched, s);
-            let others = if t > loans {
-                wrapping_sub(t, loans)
-            } else {
-                0
-            };
+            let others = if t > loans { wrapping_sub(t, loans) } else { 0 };
             if keeps_in_home(others, loans) {
                 mark(inout memory, n32(s));
             }

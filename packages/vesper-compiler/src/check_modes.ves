@@ -1,10 +1,6 @@
 // Modal kinding, owned bindings, path joins and the Fail frame condition.
 fn c_max(a: i64, b: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 fn c_mode(ty: CType, depth: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     c_kind_walk(ty, 0, 0, depth).mode
@@ -81,14 +77,7 @@ fn c_kind_fields(
     if c_kind(at) == 35 || c_kind(at) == 33 {
         CKind { mode: 0, seen: seen }
     } else {
-        let ty = c_type(
-            if named {
-                c_take(c_next(at), 40)
-            } else {
-                at
-            },
-            0
-        );
+        let ty = c_type(if named { c_take(c_next(at), 40) } else { at }, 0);
         let head = c_kind_walk(ty.ty, seen, active, depth);
         let effective = if c_kind(ty.next) == 45 {
             c_kind(c_next(ty.next)) - 14
@@ -160,14 +149,7 @@ fn c_validate_fields(
         } else {
             0
         };
-        let ty = c_type(
-            if named {
-                c_take(c_next(at), 40)
-            } else {
-                at
-            },
-            0
-        );
+        let ty = c_type(if named { c_take(c_next(at), 40) } else { at }, 0);
         let valid = c_valid_type(ty.ty, d.start, d.end, 0);
         let mode = c_mode(ty.ty, 0);
         let override = c_kind(ty.next) == 45;
@@ -473,26 +455,10 @@ fn c_literal_name(
     third: i64
 ) -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     t.end - t.start == length
-        && word(
-            t.start,
-            if length > 6 {
-                t.start + 6
-            } else {
-                t.end
-            }
-        )
-            == first
+        && word(t.start, if length > 6 { t.start + 6 } else { t.end }) == first
         && (
             length <= 6
-                || word(
-                    t.start + 6,
-                    if length > 12 {
-                        t.start + 12
-                    } else {
-                        t.end
-                    }
-                )
-                    == second
+                || word(t.start + 6, if length > 12 { t.start + 12 } else { t.end }) == second
         )
         && (length <= 12 || word(t.start + 12, t.end) == third)
 }

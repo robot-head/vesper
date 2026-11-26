@@ -9,11 +9,12 @@
 //! key with the block's generics and `self` type), then the diagnostics.
 //! The two dumps must be equal byte for byte.
 //!
-//! Part 1 of the port declines a module that could need one of the
-//! checker's preludes (`needs_prelude` in the package); the test counts the
-//! declined modules and requires every other one to match. The corpus is
-//! every `.ves` file of the repository plus hand-written cases for each
-//! diagnostic.
+//! Every prelude the checker adds comes along (regions, `Box`, secret
+//! operations, the width builtins, transcendentals, strings, atomics and
+//! workers, `Option` methods), with its spans where the checker parses it
+//! and the region labels of signatures normalized. The corpus is every
+//! `.ves` file of the repository plus hand-written cases for each
+//! diagnostic and prelude.
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -296,6 +297,38 @@ const CASES: &[&str] = &[
     "fn checked_mul_u64(a: u64, b: u64) -> Option[u64] { Option::None } fn f() -> u64 { checked_mul_u64(1, 2); 0 }",
     "fn leading_zeros_u32(x: u32) -> u32 { x } fn f() -> u32 { 0 }",
     "fn to_le_bytes_u8(x: u8) -> u8 { x } fn f() -> u8 { to_le_bytes_u8(1) }",
+    // The `Box` prelude.
+    "fn f(b: Box[i64]) -> i64 { 1 }",
+    "fn f() -> i64 { let b = Box::new(1); 1 }",
+    "fn f(o: Option[i64]) -> i64 { match o { Option::Some(Box::Box(x)) => x, _ => 0 } }",
+    "struct Box { x: i64 } fn f(b: Box) -> i64 { 1 }",
+    "struct S { b: Box[u8] }",
+    // The atomic and worker preludes.
+    "fn f(a: Atomic[u64]) -> u64 { 1 }",
+    "fn f() -> u64 { let o = MemoryOrder::SeqCst; 1 }",
+    "struct Atomic { x: u64 } fn f(a: Atomic) -> u64 { 1 }",
+    "effect E { fn op(x: MemoryOrder) -> u64; } fn f() -> u64 { handle E in { 1 } with { return v => v, op(MemoryOrder::SeqCst, resume) => 0, } }",
+    "effect E { fn op(x: u64) -> u64; } fn f() -> u64 { handle E in { 1 } with { return v => v, op(Atomic::A, resume) => 0, } }",
+    "fn body(in d: u64, i: u64) { } fn f() { parallel_for(in 1, 2, body); }",
+    "fn f(o: Option[u64]) -> u64 { let c = Atomic::new(1); parallel_for(in c, 1, g); o.unwrap_or(0) }",
+    // The float prelude.
+    "fn f(x: f64) -> f64 { exp_f64(x) }",
+    "fn f(x: f32) -> f32 { cos_f32(sin_f32(x)) + ln_f32(x) }",
+    "fn float_kernel_sin_f64(x: f64, y: f64, i: u64) -> f64 { x } fn f(x: f64) -> f64 { sin_f64(x) }",
+    "fn exp_f64(x: f64) -> f64 { x } fn f(x: f32) -> f32 { exp_f32(x) }",
+    "fn f(x: f64, s: Str) -> f64 { let n = checked_add_u64(1, 2); exp_f64(x) }",
+    // The secret prelude.
+    "copy struct SecU64 { v: u64 } copy struct SecMask64 { m: u64 } fn f(a: SecU64, b: SecU64) -> bool { let k = a.ct_eq(b); let z = a.wrapping_add(b); let s = ct_select(k, a, b); let t = k.ct_select(a, b); let l = load_sec_u64le((1, 2, 3, 4, 5, 6, 7, 8)); k.ct_not().declassify_bool() }",
+    "copy struct SecU8 { x: u8 } copy struct SecU32 { y: u32 } fn f(a: SecU8, b: SecU32) -> SecU8 { a.bit_xor(a) }",
+    "copy struct SecU64 { v: u64 } impl SecU64 { fn bit_and(self, o: SecU64) -> SecU64 { o } } fn f(a: SecU64) -> SecU64 { a.bit_and(a).bit_or(a) }",
+    "struct SecU64 { v: u64 } fn f(a: SecU64) -> SecU64 { a.bit_and(a) }",
+    // The region prelude, its E0797 and the signature labels.
+    "fn f() -> u64 { region r { 1 } }",
+    "fn f(b: RegionBox[r, u64]) -> u64 eff [r: Region] { 1 }",
+    "fn f(b: RegionBox[r, u64], w: Watermark[q]) -> (RegionBox[r, u64], u64) eff [q: Region, r: Region] { (b, 1) }",
+    "effect Region { fn box(sink value: Unit) -> Unit; } fn f() -> u64 { region r { 1 } }",
+    "effect Region { fn x() -> Unit; } fn f() -> u64 { 1 }",
+    "struct S { b: RegionBox[r, u64] }",
 ];
 
 /// Every byte-order, bit and checked builtin, named once.
@@ -327,7 +360,7 @@ fn collect_matches_rust() {
             ));
         }
     }
-    let (mut matched, mut declined, mut skipped) = (0usize, 0usize, 0usize);
+    let (mut matched, mut skipped) = (0usize, 0usize);
     let mut differ = vec![];
     for (name, source) in &sources {
         let parsed = vesper::parser::parse(source);
@@ -336,10 +369,6 @@ fn collect_matches_rust() {
             continue;
         }
         let v = vesper_text(source);
-        if v == "declined\n" {
-            declined += 1;
-            continue;
-        }
         let r = rust_text(&parsed.module);
         if r == v {
             matched += 1;
@@ -352,10 +381,74 @@ fn collect_matches_rust() {
         eprintln!("  {d}");
     }
     eprintln!(
-        "collect: {} sources, {matched} match, {declined} declined (prelude), {skipped} skipped (parse errors), {} differ",
+        "collect: {} sources, {matched} match, {skipped} skipped (parse errors), {} differ",
         sources.len(),
         differ.len()
     );
     assert!(matched > CASES.len(), "too few compared");
     assert_eq!(differ.len(), 0);
+}
+
+// ------------------------------------------------------------ prelude copies
+
+/// The string literal that `pub fn <name>() -> Str` returns in `text`,
+/// unescaped.
+fn returned_literal(text: &str, name: &str) -> String {
+    let head = format!("pub fn {name}() -> Str {{");
+    let start = text.find(&head).unwrap_or_else(|| panic!("no `{head}`"));
+    let rest = &text[start + head.len()..];
+    let open = rest.find('"').expect("no string literal");
+    let mut out = String::new();
+    let mut chars = rest[open + 1..].chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return out,
+            '\\' => match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some(c) => out.push(c),
+                None => break,
+            },
+            c => out.push(c),
+        }
+    }
+    panic!("unterminated string literal in `{name}`")
+}
+
+/// The package keeps its own copy of each prelude it lowers (it cannot
+/// embed a file); every copy must be the checker's `src/preludes/*.ves`
+/// file byte for byte, so its spans land where the checker's do.
+#[test]
+fn prelude_copies_match_rust() {
+    let dir = repo().join(PACKAGE).join("src");
+    let mut texts = vec![];
+    for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+        if entry.path().extension().is_some_and(|e| e == "ves") {
+            texts.push((entry.path(), std::fs::read_to_string(entry.path()).unwrap()));
+        }
+    }
+    let copies = [
+        ("strings_source", vesper::strings::PRELUDE),
+        ("option_source", vesper::option_methods::PRELUDE),
+        ("atomics_source", vesper::atomics::PRELUDE),
+        ("workers_source", vesper::atomics::WORKERS_PRELUDE),
+        ("region_source", vesper::regions::PRELUDE),
+    ];
+    let mut checked = 0;
+    for (name, rust) in copies {
+        let head = format!("pub fn {name}() -> Str {{");
+        for (path, text) in texts.iter().filter(|(_, t)| t.contains(&head)) {
+            assert!(
+                returned_literal(text, name) == rust,
+                "`{name}` in {} is not the checker's prelude; copy src/preludes again",
+                path.display()
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 2,
+        "found {checked} prelude copies in {}",
+        dir.display()
+    );
 }

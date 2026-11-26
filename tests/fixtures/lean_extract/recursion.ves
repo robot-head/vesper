@@ -16,11 +16,7 @@ fn length(sink l: List) -> u64 {
 }
 
 fn drain(n: u64) -> u64 {
-    if n == 0 {
-        0
-    } else {
-        drain(wrapping_sub(n, 1))
-    }
+    if n == 0 { 0 } else { drain(wrapping_sub(n, 1)) }
 }
 
 fn is_even(n: u64) -> bool {

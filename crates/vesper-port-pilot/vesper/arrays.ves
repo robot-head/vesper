@@ -86,16 +86,8 @@ pub fn board_add(inout b: Board, lo: u64, hi: u64) -> u64 {
         if !merged && i < b.len {
             let x = b.blocks[i];
             if lo <= x.hi && x.lo <= hi {
-                let nlo = if lo < x.lo {
-                    lo
-                } else {
-                    x.lo
-                };
-                let nhi = if hi > x.hi {
-                    hi
-                } else {
-                    x.hi
-                };
+                let nlo = if lo < x.lo { lo } else { x.lo };
+                let nhi = if hi > x.hi { hi } else { x.hi };
                 b.blocks[i] = Block { lo: nlo, hi: nhi };
                 merged = true;
             }

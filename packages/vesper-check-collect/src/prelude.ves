@@ -15,14 +15,24 @@ use @vesper-std/intern::{Interner, interner_new, symbol_from_id};
 
 // ---------------------------------------------------------------- sources
 
-// `strings::PRELUDE`, byte for byte.
+// `strings::PRELUDE` (src/preludes/strings.ves), byte for byte.
 pub fn strings_source() -> Str {
-    "\nimpl Str {\n    fn is_char_boundary(in self, i: u64) -> bool {\n        if i == self.len() {\n            true\n        } else {\n            match self.try_byte_at(i) {\n                Option::Some(b) => (b & 192) != 128,\n                Option::None => false,\n            }\n        }\n    }\n    fn utf8_continuation(in self, i: u64) -> u32 {\n        match self.try_byte_at(i) {\n            Option::Some(b) => widen_u32(b) & 63,\n            Option::None => 0,\n        }\n    }\n    fn next_char(in self, i: u64) -> Option[(u32, u64)] {\n        match self.try_byte_at(i) {\n            Option::None => Option::None,\n            Option::Some(lead) => {\n                let b0 = widen_u32(lead);\n                if b0 < 128 {\n                    Option::Some((b0, wrapping_add(i, 1)))\n                } else if b0 < 192 {\n                    Option::None\n                } else if b0 < 224 {\n                    let c1 = Str::utf8_continuation(in self, wrapping_add(i, 1));\n                    Option::Some((wrapping_mul(b0 & 31, 64) | c1, wrapping_add(i, 2)))\n                } else if b0 < 240 {\n                    let c1 = Str::utf8_continuation(in self, wrapping_add(i, 1));\n                    let c2 = Str::utf8_continuation(in self, wrapping_add(i, 2));\n                    Option::Some((wrapping_mul(b0 & 15, 4096) | wrapping_mul(c1, 64) | c2, wrapping_add(i, 3)))\n                } else {\n                    let c1 = Str::utf8_continuation(in self, wrapping_add(i, 1));\n                    let c2 = Str::utf8_continuation(in self, wrapping_add(i, 2));\n                    let c3 = Str::utf8_continuation(in self, wrapping_add(i, 3));\n                    Option::Some((wrapping_mul(b0 & 7, 262144) | wrapping_mul(c1, 4096) | wrapping_mul(c2, 64) | c3, wrapping_add(i, 4)))\n                }\n            }\n        }\n    }\n    fn char_at(in self, i: u64) -> u32 eff [Fail[RuntimeError]] {\n        match Str::next_char(in self, i) {\n            Option::Some(decoded) => {\n                let (c, next) = decoded;\n                c\n            }\n            Option::None => Fail::raise(RuntimeError::IndexOutOfBounds),\n        }\n    }\n    fn char_count(in self) -> u64 {\n        let n = self.len();\n        let mut count: u64 = 0;\n        for i in 0..n {\n            match self.try_byte_at(i) {\n                Option::Some(b) => {\n                    if (b & 192) != 128 {\n                        count = wrapping_add(count, 1);\n                    }\n                }\n                Option::None => {}\n            }\n        }\n        count\n    }\n    fn concat(in self, in other: Str) -> String {\n        let mut out = String::with_capacity(wrapping_add(self.len(), other.len()));\n        out.push_str(in self);\n        out.push_str(in other);\n        out\n    }\n}\nimpl String {\n    fn new() -> String {\n        \"\"\n    }\n    fn with_capacity(n: u64) -> String {\n        let mut s = \"\";\n        s.reserve(n);\n        s\n    }\n    fn is_char_boundary(in self, i: u64) -> bool {\n        Str::is_char_boundary(in self, i)\n    }\n    fn next_char(in self, i: u64) -> Option[(u32, u64)] {\n        Str::next_char(in self, i)\n    }\n    fn char_at(in self, i: u64) -> u32 eff [Fail[RuntimeError]] {\n        Str::char_at(in self, i)\n    }\n    fn char_count(in self) -> u64 {\n        Str::char_count(in self)\n    }\n    fn concat(in self, in other: Str) -> String {\n        Str::concat(in self, in other)\n    }\n    fn utf8_byte(in bytes: Slice[u8], i: u64) -> u32 {\n        match bytes.try_get(i) {\n            Option::Some(b) => widen_u32(b),\n            Option::None => 0,\n        }\n    }\n    fn utf8_width(in bytes: Slice[u8], i: u64) -> u64 {\n        let b0 = String::utf8_byte(in bytes, i);\n        let b1 = String::utf8_byte(in bytes, wrapping_add(i, 1));\n        let c2 = (String::utf8_byte(in bytes, wrapping_add(i, 2)) & 192) == 128;\n        let c3 = (String::utf8_byte(in bytes, wrapping_add(i, 3)) & 192) == 128;\n        if b0 < 128 {\n            1\n        } else if b0 < 194 {\n            0\n        } else if b0 < 224 {\n            if (b1 & 192) == 128 { 2 } else { 0 }\n        } else if b0 < 240 {\n            let lo: u32 = if b0 == 224 { 160 } else { 128 };\n            let hi: u32 = if b0 == 237 { 159 } else { 191 };\n            if b1 >= lo && b1 <= hi && c2 { 3 } else { 0 }\n        } else if b0 < 245 {\n            let lo: u32 = if b0 == 240 { 144 } else { 128 };\n            let hi: u32 = if b0 == 244 { 143 } else { 191 };\n            if b1 >= lo && b1 <= hi && c2 && c3 { 4 } else { 0 }\n        } else {\n            0\n        }\n    }\n    fn utf8_decode(in bytes: Slice[u8], i: u64, w: u64) -> u32 {\n        let b0 = String::utf8_byte(in bytes, i);\n        let c1 = String::utf8_byte(in bytes, wrapping_add(i, 1)) & 63;\n        let c2 = String::utf8_byte(in bytes, wrapping_add(i, 2)) & 63;\n        let c3 = String::utf8_byte(in bytes, wrapping_add(i, 3)) & 63;\n        if w == 1 {\n            b0\n        } else if w == 2 {\n            wrapping_mul(b0 & 31, 64) | c1\n        } else if w == 3 {\n            wrapping_mul(b0 & 15, 4096) | wrapping_mul(c1, 64) | c2\n        } else {\n            wrapping_mul(b0 & 7, 262144) | wrapping_mul(c1, 4096) | wrapping_mul(c2, 64) | c3\n        }\n    }\n    fn from_utf8(in bytes: Slice[u8]) -> Option[String] {\n        let n = bytes.len();\n        let mut out = String::with_capacity(n);\n        let mut i: u64 = 0;\n        let mut valid = true;\n        loop {\n            if i >= n {\n                break;\n            }\n            let w = String::utf8_width(in bytes, i);\n            if w == 0 || w > wrapping_sub(n, i) {\n                valid = false;\n                break;\n            }\n            out.push_char(String::utf8_decode(in bytes, i, w));\n            i = wrapping_add(i, w);\n        }\n        if valid {\n            Option::Some(out)\n        } else {\n            Option::None\n        }\n    }\n}\n"
+    "// The string prelude (src/strings.rs): every UTF-8 operation of `Str` and `String`.\nimpl Str {\n    fn is_char_boundary(in self, i: u64) -> bool {\n        if i == self.len() {\n            true\n        } else {\n            match self.try_byte_at(i) {\n                Option::Some(b) => (b & 192) != 128,\n                Option::None => false,\n            }\n        }\n    }\n    fn utf8_continuation(in self, i: u64) -> u32 {\n        match self.try_byte_at(i) {\n            Option::Some(b) => widen_u32(b) & 63,\n            Option::None => 0,\n        }\n    }\n    fn next_char(in self, i: u64) -> Option[(u32, u64)] {\n        match self.try_byte_at(i) {\n            Option::None => Option::None,\n            Option::Some(lead) => {\n                let b0 = widen_u32(lead);\n                if b0 < 128 {\n                    Option::Some((b0, wrapping_add(i, 1)))\n                } else if b0 < 192 {\n                    Option::None\n                } else if b0 < 224 {\n                    let c1 = Str::utf8_continuation(in self, wrapping_add(i, 1));\n                    Option::Some((wrapping_mul(b0 & 31, 64) | c1, wrapping_add(i, 2)))\n                } else if b0 < 240 {\n                    let c1 = Str::utf8_continuation(in self, wrapping_add(i, 1));\n                    let c2 = Str::utf8_continuation(in self, wrapping_add(i, 2));\n                    Option::Some(\n                        (\n                            wrapping_mul(b0 & 15, 4096) | wrapping_mul(c1, 64) | c2,\n                            wrapping_add(i, 3)\n                        )\n                    )\n                } else {\n                    let c1 = Str::utf8_continuation(in self, wrapping_add(i, 1));\n                    let c2 = Str::utf8_continuation(in self, wrapping_add(i, 2));\n                    let c3 = Str::utf8_continuation(in self, wrapping_add(i, 3));\n                    Option::Some(\n                        (\n                            wrapping_mul(b0 & 7, 262144) | wrapping_mul(c1, 4096) | wrapping_mul(\n                                c2,\n                                64\n                            ) | c3,\n                            wrapping_add(i, 4)\n                        )\n                    )\n                }\n            }\n        }\n    }\n    fn char_at(in self, i: u64) -> u32 eff [Fail[RuntimeError]] {\n        match Str::next_char(in self, i) {\n            Option::Some(decoded) => {\n                let (c, next) = decoded;\n                c\n            }\n            Option::None => Fail::raise(RuntimeError::IndexOutOfBounds),\n        }\n    }\n    fn char_count(in self) -> u64 {\n        let n = self.len();\n        let mut count: u64 = 0;\n        for i in 0..n {\n            match self.try_byte_at(i) {\n                Option::Some(b) => {\n                    if (b & 192) != 128 {\n                        count = wrapping_add(count, 1);\n                    }\n                }\n                Option::None => {}\n            }\n        }\n        count\n    }\n    fn concat(in self, in other: Str) -> String {\n        let mut out = String::with_capacity(wrapping_add(self.len(), other.len()));\n        out.push_str(in self);\n        out.push_str(in other);\n        out\n    }\n}\nimpl String {\n    fn new() -> String {\n        \"\"\n    }\n    fn with_capacity(n: u64) -> String {\n        let mut s = \"\";\n        s.reserve(n);\n        s\n    }\n    fn is_char_boundary(in self, i: u64) -> bool {\n        Str::is_char_boundary(in self, i)\n    }\n    fn next_char(in self, i: u64) -> Option[(u32, u64)] {\n        Str::next_char(in self, i)\n    }\n    fn char_at(in self, i: u64) -> u32 eff [Fail[RuntimeError]] {\n        Str::char_at(in self, i)\n    }\n    fn char_count(in self) -> u64 {\n        Str::char_count(in self)\n    }\n    fn concat(in self, in other: Str) -> String {\n        Str::concat(in self, in other)\n    }\n    fn utf8_byte(in bytes: Slice[u8], i: u64) -> u32 {\n        match bytes.try_get(i) {\n            Option::Some(b) => widen_u32(b),\n            Option::None => 0,\n        }\n    }\n    fn utf8_width(in bytes: Slice[u8], i: u64) -> u64 {\n        let b0 = String::utf8_byte(in bytes, i);\n        let b1 = String::utf8_byte(in bytes, wrapping_add(i, 1));\n        let c2 = (String::utf8_byte(in bytes, wrapping_add(i, 2)) & 192) == 128;\n        let c3 = (String::utf8_byte(in bytes, wrapping_add(i, 3)) & 192) == 128;\n        if b0 < 128 {\n            1\n        } else if b0 < 194 {\n            0\n        } else if b0 < 224 {\n            if (b1 & 192) == 128 { 2 } else { 0 }\n        } else if b0 < 240 {\n            let lo: u32 = if b0 == 224 { 160 } else { 128 };\n            let hi: u32 = if b0 == 237 { 159 } else { 191 };\n            if b1 >= lo && b1 <= hi && c2 { 3 } else { 0 }\n        } else if b0 < 245 {\n            let lo: u32 = if b0 == 240 { 144 } else { 128 };\n            let hi: u32 = if b0 == 244 { 143 } else { 191 };\n            if b1 >= lo && b1 <= hi && c2 && c3 {\n                4\n            } else {\n                0\n            }\n        } else {\n            0\n        }\n    }\n    fn utf8_decode(in bytes: Slice[u8], i: u64, w: u64) -> u32 {\n        let b0 = String::utf8_byte(in bytes, i);\n        let c1 = String::utf8_byte(in bytes, wrapping_add(i, 1)) & 63;\n        let c2 = String::utf8_byte(in bytes, wrapping_add(i, 2)) & 63;\n        let c3 = String::utf8_byte(in bytes, wrapping_add(i, 3)) & 63;\n        if w == 1 {\n            b0\n        } else if w == 2 {\n            wrapping_mul(b0 & 31, 64) | c1\n        } else if w == 3 {\n            wrapping_mul(b0 & 15, 4096) | wrapping_mul(c1, 64) | c2\n        } else {\n            wrapping_mul(b0 & 7, 262144) | wrapping_mul(c1, 4096) | wrapping_mul(c2, 64) | c3\n        }\n    }\n    fn from_utf8(in bytes: Slice[u8]) -> Option[String] {\n        let n = bytes.len();\n        let mut out = String::with_capacity(n);\n        let mut i: u64 = 0;\n        let mut valid = true;\n        loop {\n            if i >= n {\n                break;\n            }\n            let w = String::utf8_width(in bytes, i);\n            if w == 0 || w > wrapping_sub(n, i) {\n                valid = false;\n                break;\n            }\n            out.push_char(String::utf8_decode(in bytes, i, w));\n            i = wrapping_add(i, w);\n        }\n        if valid {\n            Option::Some(out)\n        } else {\n            Option::None\n        }\n    }\n}\n"
 }
 
-// `option_methods::PRELUDE`, byte for byte.
+// `option_methods::PRELUDE` (src/preludes/option.ves), byte for byte.
 pub fn option_source() -> Str {
-    "\nimpl [T: mod copy] Option[T] {\n    fn is_some(self) -> bool {\n        match self {\n            Option::Some(_) => true,\n            Option::None => false,\n        }\n    }\n    fn is_none(self) -> bool {\n        match self {\n            Option::Some(_) => false,\n            Option::None => true,\n        }\n    }\n    fn unwrap_or(self, fallback: T) -> T {\n        match self {\n            Option::Some(x) => x,\n            Option::None => fallback,\n        }\n    }\n    fn or(self, other: Option[T]) -> Option[T] {\n        match self {\n            Option::Some(x) => Option::Some(x),\n            Option::None => other,\n        }\n    }\n}\n"
+    "// The option prelude (src/option_methods.rs): `Option`'s methods.\nimpl [T: mod copy] Option[T] {\n    fn is_some(self) -> bool {\n        match self {\n            Option::Some(_) => true,\n            Option::None => false,\n        }\n    }\n    fn is_none(self) -> bool {\n        match self {\n            Option::Some(_) => false,\n            Option::None => true,\n        }\n    }\n    fn unwrap_or(self, fallback: T) -> T {\n        match self {\n            Option::Some(x) => x,\n            Option::None => fallback,\n        }\n    }\n    fn or(self, other: Option[T]) -> Option[T] {\n        match self {\n            Option::Some(x) => Option::Some(x),\n            Option::None => other,\n        }\n    }\n}\n"
+}
+
+// `atomics::PRELUDE`, byte for byte.
+pub fn atomics_source() -> Str {
+    "// The atomic prelude (src/atomics.rs): the `Atomic[T]` cell, its orders and its operations.\nstruct Atomic[T: mod copy] {\n    cell: ChunkSeq[T]\n}\ncopy enum MemoryOrder {\n    Relaxed,\n    Acquire,\n    Release,\n    AcqRel,\n    SeqCst\n}\nimpl [T: mod copy] Atomic[T] {\n    fn new(value: T) -> Atomic[T] {\n        let mut cell: ChunkSeq[T] = ChunkSeq::with_capacity[T](1);\n        cell.push(value);\n        Atomic { cell: cell }\n    }\n    fn load(in self, order: MemoryOrder) -> T {\n        match self.cell.try_get(0) {\n            Option::Some(v) => v,\n            Option::None => self.load(order)\n        }\n    }\n    fn store(in self, value: T, order: MemoryOrder) {\n        match self.cell.try_get(0) {\n            Option::Some(_) => self.store(value, order),\n            Option::None => ()\n        }\n    }\n    fn swap(in self, value: T, order: MemoryOrder) -> T {\n        match self.cell.try_get(0) {\n            Option::Some(_) => self.swap(value, order),\n            Option::None => value\n        }\n    }\n    fn compare_exchange(\n        in self,\n        current: T,\n        new: T,\n        success: MemoryOrder,\n        failure: MemoryOrder\n    ) -> Result[T, T] {\n        match self.cell.try_get(0) {\n            Option::Some(_) => self.compare_exchange(current, new, success, failure),\n            Option::None => Result::Err(current),\n        }\n    }\n    fn fetch_add(in self, value: T, order: MemoryOrder) -> T {\n        match self.cell.try_get(0) {\n            Option::Some(_) => self.fetch_add(value, order),\n            Option::None => value\n        }\n    }\n    fn fetch_sub(in self, value: T, order: MemoryOrder) -> T {\n        match self.cell.try_get(0) {\n            Option::Some(_) => self.fetch_sub(value, order),\n            Option::None => value\n        }\n    }\n    fn fetch_and(in self, value: T, order: MemoryOrder) -> T {\n        match self.cell.try_get(0) {\n            Option::Some(_) => self.fetch_and(value, order),\n            Option::None => value\n        }\n    }\n    fn fetch_or(in self, value: T, order: MemoryOrder) -> T {\n        match self.cell.try_get(0) {\n            Option::Some(_) => self.fetch_or(value, order),\n            Option::None => value\n        }\n    }\n    fn fetch_xor(in self, value: T, order: MemoryOrder) -> T {\n        match self.cell.try_get(0) {\n            Option::Some(_) => self.fetch_xor(value, order),\n            Option::None => value\n        }\n    }\n    fn into_inner(sink self) -> T {\n        self.load(MemoryOrder::SeqCst)\n    }\n}\n"
+}
+
+// `atomics::WORKERS_PRELUDE`, byte for byte.
+pub fn workers_source() -> Str {
+    "// The scoped-worker prelude (src/atomics.rs): the sequential schedule of `parallel_for`.\nfn parallel_for[A, e: eff](in data: A, n: u64, body: fn @copy (in A, u64) eff [e]) eff [e] {\n    for i in 0..n {\n        body(in data, i);\n    }\n}\n"
 }
 
 // ---------------------------------------------------------------- nodes
@@ -32,27 +42,24 @@ fn p_item(in a: Ast, i: u32) -> ItemNode {
 }
 
 fn p_fn(in a: Ast, i: u32) -> FnNode {
-    a
-        .fns
-        .get_or(
-            idx_from_raw[FnNode](i),
-            FnNode {
-                name: none(),
-                fip: false,
-                generics: 0,
-                params: 0,
-                result: none(),
-                effects: none(),
-                body: none(),
-                start: 0,
-                end: 0
-            }
-        )
+    a.fns.get_or(
+        idx_from_raw[FnNode](i),
+        FnNode {
+            name: none(),
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: none(),
+            effects: none(),
+            body: none(),
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 fn adt_end(in a: Ast, i: u32) -> u32 {
-    a
-        .adts
+    a.adts
         .get_or(
             idx_from_raw[AdtNode](i),
             AdtNode {
@@ -71,8 +78,7 @@ fn adt_end(in a: Ast, i: u32) -> u32 {
 }
 
 fn effect_end(in a: Ast, i: u32) -> u32 {
-    a
-        .effect_decls
+    a.effect_decls
         .get_or(
             idx_from_raw[EffectDeclNode](i),
             EffectDeclNode { name: none(), linear: false, generics: 0, ops: 0, start: 0, end: 0 }
@@ -85,58 +91,50 @@ fn p_impl(in a: Ast, i: u32) -> ImplNode {
 }
 
 fn p_trait(in a: Ast, i: u32) -> TraitNode {
-    a
-        .traits
-        .get_or(
-            idx_from_raw[TraitNode](i),
-            TraitNode {
-                name: none(),
-                public: false,
-                generics: 0,
-                assoc: 0,
-                methods: 0,
-                start: 0,
-                end: 0
-            }
-        )
+    a.traits.get_or(
+        idx_from_raw[TraitNode](i),
+        TraitNode {
+            name: none(),
+            public: false,
+            generics: 0,
+            assoc: 0,
+            methods: 0,
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 fn p_conf(in a: Ast, i: u32) -> ConfNode {
-    a
-        .confs
-        .get_or(
-            idx_from_raw[ConfNode](i),
-            ConfNode {
-                model: none(),
-                public: false,
-                generics: 0,
-                trait_ref: none(),
-                self_ty: none(),
-                wheres: 0,
-                assoc: 0,
-                methods: 0,
-                start: 0,
-                end: 0
-            }
-        )
+    a.confs.get_or(
+        idx_from_raw[ConfNode](i),
+        ConfNode {
+            model: none(),
+            public: false,
+            generics: 0,
+            trait_ref: none(),
+            self_ty: none(),
+            wheres: 0,
+            assoc: 0,
+            methods: 0,
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 fn p_param(in a: Ast, i: u32) -> ParamNode {
-    a
-        .params
-        .get_or(
-            idx_from_raw[ParamNode](i),
-            ParamNode { name: none(), pass: 0, projections: 0, ty: none(), start: 0, end: 0 }
-        )
+    a.params.get_or(
+        idx_from_raw[ParamNode](i),
+        ParamNode { name: none(), pass: 0, projections: 0, ty: none(), start: 0, end: 0 }
+    )
 }
 
 fn p_stmt(in a: Ast, i: u32) -> StmtNode {
-    a
-        .stmts
-        .get_or(
-            idx_from_raw[StmtNode](i),
-            StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
-        )
+    a.stmts.get_or(
+        idx_from_raw[StmtNode](i),
+        StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
+    )
 }
 
 fn p_arg(in a: Ast, i: u32) -> ArgNode {
@@ -144,8 +142,7 @@ fn p_arg(in a: Ast, i: u32) -> ArgNode {
 }
 
 fn p_clause(in a: Ast, i: u32) -> ClauseNode {
-    a
-        .clauses
+    a.clauses
         .get_or(idx_from_raw[ClauseNode](i), ClauseNode { name: none(), pats: 0, body: none() })
 }
 
@@ -165,7 +162,10 @@ pub struct Uses {
     // A name expression is one of `strings::PRELUDE_PATHS`.
     string_path: bool,
     // A parameter's type mentions `Str` (`strings::mentions_str`).
-    str_param: bool
+    str_param: bool,
+    // A function, `impl` or conformance method calls `parallel_for` by
+    // that name (`atomics::needs_workers`; trait methods do not count).
+    workers_call: bool
 }
 
 fn use_name(inout u: Uses, in a: Ast, sym: u32) {
@@ -213,6 +213,9 @@ fn visit(in a: Ast, e: u32, inout u: Uses) {
     let k = x.kind;
     if k == 2 {
         use_name(inout u, in a, x.a);
+        if sym_is(in a, x.a, "parallel_for") {
+            u.workers_call = true;
+        }
         if sym_is(in a, x.a, "String::new")
             || sym_is(in a, x.a, "String::with_capacity")
             || sym_is(in a, x.a, "String::from_utf8") {
@@ -330,7 +333,12 @@ fn use_functions(in a: Ast, list: u32, inout u: Uses) {
 // The uses of every function, `impl` method, trait method and
 // conformance method of `a`'s module.
 pub fn uses_of(in a: Ast) -> Uses {
-    let mut u = Uses { names: interner_new(), string_path: false, str_param: false };
+    let mut u = Uses {
+        names: interner_new(),
+        string_path: false,
+        str_param: false,
+        workers_call: false
+    };
     for i in 0..a.m_items.len() {
         let it = p_item(in a, word(in a.m_items, i));
         if it.kind == 2 {
@@ -338,7 +346,9 @@ pub fn uses_of(in a: Ast) -> Uses {
         } else if it.kind == 4 {
             use_functions(in a, p_impl(in a, it.node).methods, inout u);
         } else if it.kind == 5 {
+            let calls = u.workers_call;
             use_functions(in a, p_trait(in a, it.node).methods, inout u);
+            u.workers_call = calls;
         } else if it.kind == 6 {
             use_functions(in a, p_conf(in a, it.node).methods, inout u);
         }
@@ -500,11 +510,7 @@ fn cmp_keys(in k: Interner, x: u32, y: u32) -> i64 {
     let (ys, ye) = k.span(symbol_from_id(y));
     let xl = wrapping_sub(xe, xs);
     let yl = wrapping_sub(ye, ys);
-    let n = if xl < yl {
-        xl
-    } else {
-        yl
-    };
+    let n = if xl < yl { xl } else { yl };
     for i in 0..n {
         let a = match k.text_byte(wrapping_add(xs, i)) {
             Option::Some(c) => c,
@@ -515,11 +521,7 @@ fn cmp_keys(in k: Interner, x: u32, y: u32) -> i64 {
             Option::None => 0,
         };
         if a != b {
-            return if a < b {
-                -1
-            } else {
-                1
-            };
+            return if a < b { -1 } else { 1 };
         }
     }
     if xl < yl {
@@ -529,4 +531,19 @@ fn cmp_keys(in k: Interner, x: u32, y: u32) -> i64 {
     } else {
         0
     }
+}
+
+// `atomics::needs_workers`: the module calls `parallel_for` and does not
+// define it.
+pub fn needs_workers(in u: Uses, in a: Ast) -> bool {
+    if !u.workers_call {
+        return false;
+    }
+    for i in 0..a.m_items.len() {
+        let it = p_item(in a, word(in a.m_items, i));
+        if it.kind == 2 && sym_is(in a, p_fn(in a, it.node).name, "parallel_for") {
+            return false;
+        }
+    }
+    true
 }

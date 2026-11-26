@@ -35,11 +35,7 @@ pub fn run_forge(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fai
             check = true;
         }
     }
-    let arg_count = if n > 1 {
-        wrapping_sub(n, 1)
-    } else {
-        0
-    };
+    let arg_count = if n > 1 { wrapping_sub(n, 1) } else { 0 };
     if arg_count > 16 {
         return reject_config(check, in "source macro argument budget exceeded".as_bytes());
     }
@@ -175,17 +171,15 @@ pub fn run_forge(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fai
 fn reject_config(check: bool, in message: Slice[u8]) -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
     if check {
         let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        line
-            .extend(
-                in "{\"schema\":\"vesper.forge.source/1\",\"status\":\"rejected\",\"stage\":\"config\",\"message\":"
-                    .as_bytes()
-            );
+        line.extend(
+            in "{\"schema\":\"vesper.forge.source/1\",\"status\":\"rejected\",\"stage\":\"config\",\"message\":"
+                .as_bytes()
+        );
         push_json_str(inout line, in message);
-        line
-            .extend(
-                in ",\"source_blake3\":null,\"expanded_source\":null,\"diagnostics\":[],\"source_map\":[]}\n"
-                    .as_bytes()
-            );
+        line.extend(
+            in ",\"source_blake3\":null,\"expanded_source\":null,\"diagnostics\":[],\"source_map\":[]}\n"
+                .as_bytes()
+        );
         print(stdout_stream(), in line.as_slice());
     }
     fail(in message)

@@ -3,6 +3,7 @@ use @vesper-std/core::control::ensure;
 use @vesper-std/core::iter::sum;
 use @vesper-std/core::pipe::pipe_try;
 use @vesper-std/core::pipeline::pipe_at;
+use @vesper-std/core::txn::transact;
 
 test {
     fn error_value() -> u64 eff [Fail[u64]] {
@@ -48,12 +49,7 @@ test {
     }
 
     fn sum_values(in values: Slice[u64]) -> u64 eff [Fail[ArithOverflow]] {
-        sum{
-            {
-                value
-            }
-            | value in values
-        }
+        sum{ { value } | value in values }
     }
 
     fn checked_total(in values: Slice[u64]) -> Option[u64] {
@@ -76,6 +72,60 @@ test {
         checked_total(in values.as_slice()) == Option::None
     }
 
+    fn weighted_total(
+        in totals: Slice[i64],
+        in weights: Slice[i64]
+    ) -> i64 eff [Fail[ArithOverflow]] {
+        sum{ { value * weight } | (value, weight) in zip{ totals, weights } }
+    }
+
+    fn check_weighted_sum() -> bool {
+        let mut totals = ChunkSeq::new[i64]();
+        totals.push(6);
+        totals.push(9223372036854775807);
+        let mut weights = ChunkSeq::new[i64]();
+        weights.push(7);
+        handle Fail[ArithOverflow] in {
+            weighted_total(in totals.as_slice(), in weights.as_slice()) == 42
+        } with {
+            return value => value,
+            raise(_, _) => false,
+        }
+    }
+
+    copy struct SegmentWindow {
+        start: u64,
+        length: u64,
+    }
+
+    fn stage_segment(inout window: SegmentWindow, length: u64) -> u64 eff [Fail[u64]] {
+        transact inout window on[u64] returning[u64] {
+            window.start = wrapping_add(window.start, window.length);
+            window.length = length;
+            ensure window.length <= 32 else window.length;
+            window.start
+        }
+    }
+
+    fn observe_segment(inout window: SegmentWindow, length: u64) -> Result[u64, u64] {
+        handle Fail[u64] in {
+            stage_segment(inout window, length)
+        } with {
+            return pos => Result::Ok(pos),
+            raise(error, _) => Result::Err(error),
+        }
+    }
+
+    fn check_segment_rollback() -> bool {
+        let mut window = SegmentWindow { start: 10, length: 12 };
+        if observe_segment(inout window, 20) != Result::Ok(22) {
+            return false;
+        }
+        observe_segment(inout window, 77) == Result::Err(77)
+            && window.start == 22
+            && window.length == 20
+    }
+
     pub fn check_core_control() -> u64 {
         // The failure expression never runs on success.
         if observed(10) != Result::Ok(11) {
@@ -94,15 +144,17 @@ test {
         if !sum_through_public_import() {
             return 6;
         }
+        if !check_weighted_sum() {
+            return 7;
+        }
+        if !check_segment_rollback() {
+            return 8;
+        }
         // The condition runs once and the expansion stops at the inner block.
         handle Fail[u64] in {
             scoped()
         } with {
-            return value => if value == 42 {
-                0
-            } else {
-                4
-            },
+            return value => if value == 42 { 0 } else { 4 },
             raise(_, _) => 4,
         }
     }

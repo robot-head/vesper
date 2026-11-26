@@ -14,20 +14,12 @@ fn statements(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
         if ate(p, l) {
             let q = pattern(l);
             let c = eat(q, 40);
-            let q = if ate(q, c) {
-                ty(c)
-            } else {
-                q
-            };
+            let q = if ate(q, c) { ty(c) } else { q };
             statements(expect(expr(expect(q, 48)), 39))
         } else {
             let q = expr(p);
             let s = eat(q, 39);
-            if ate(q, s) {
-                statements(s)
-            } else {
-                q
-            }
+            if ate(q, s) { statements(s) } else { q }
         }
     }
 }
@@ -73,11 +65,7 @@ fn if_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     let q = block(restricted(expect(p, 28)));
     let e = eat(q, 29);
     if ate(q, e) {
-        if at(e, 28) {
-            if_expr(e)
-        } else {
-            block(e)
-        }
+        if at(e, 28) { if_expr(e) } else { block(e) }
     } else {
         q
     }
@@ -112,27 +100,15 @@ fn closure(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
         expect(params(expect(p, 68), 68), 68)
     };
     let a = eat(q, 44);
-    let q = if ate(q, a) {
-        mode(a)
-    } else {
-        q
-    };
+    let q = if ate(q, a) { mode(a) } else { q };
     let r = eat(q, 46);
-    let q = if ate(q, r) {
-        ty(r)
-    } else {
-        q
-    };
+    let q = if ate(q, r) { ty(r) } else { q };
     expr(effects(q))
 }
 
 fn handle_expr(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     let q = expect(p, 23);
-    let q = if at(q, 4) {
-        expect(lower(q), 40)
-    } else {
-        q
-    };
+    let q = if at(q, 4) { expect(lower(q), 40) } else { q };
     let q = type_args(upper(q));
     let s = eat(q, 24);
     let q = if ate(q, s) {
@@ -271,11 +247,7 @@ fn args(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     } else {
         let q = expr(pass(p));
         let r = eat(q, 38);
-        if ate(q, r) {
-            args(r)
-        } else {
-            r
-        }
+        if ate(q, r) { args(r) } else { r }
     }
 }
 
@@ -292,11 +264,7 @@ fn primary_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     } else if k == 3 {
         let q = bump(p);
         let c = eat(q, 41);
-        let q = if ate(q, c) {
-            ident(c)
-        } else {
-            q
-        };
+        let q = if ate(q, c) { ident(c) } else { q };
         if at(q, 34) && !q.nostruct {
             expect(field_values(bump(q)), 35)
         } else {
@@ -317,17 +285,9 @@ fn field_values(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     } else {
         let q = lower(p);
         let c = eat(q, 40);
-        let q = if ate(q, c) {
-            expr(c)
-        } else {
-            q
-        };
+        let q = if ate(q, c) { expr(c) } else { q };
         let r = eat(q, 38);
-        if ate(q, r) {
-            field_values(r)
-        } else {
-            r
-        }
+        if ate(q, r) { field_values(r) } else { r }
     }
 }
 
@@ -337,11 +297,7 @@ fn tuple_values(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     } else {
         let q = expr(p);
         let r = eat(q, 38);
-        if ate(q, r) {
-            tuple_values(r)
-        } else {
-            r
-        }
+        if ate(q, r) { tuple_values(r) } else { r }
     }
 }
 
@@ -367,11 +323,7 @@ fn pattern_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     } else if k == 3 {
         let q = upper(n);
         let c = eat(q, 41);
-        let q = if ate(q, c) {
-            upper(c)
-        } else {
-            q
-        };
+        let q = if ate(q, c) { upper(c) } else { q };
         let l = eat(q, 32);
         if ate(q, l) {
             expect(pattern_list(l, 33), 33)
@@ -396,11 +348,7 @@ fn pattern_list(p: P, end: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     } else {
         let q = pattern(p);
         let r = eat(q, 38);
-        if ate(q, r) {
-            pattern_list(r, end)
-        } else {
-            r
-        }
+        if ate(q, r) { pattern_list(r, end) } else { r }
     }
 }
 
@@ -410,16 +358,8 @@ fn field_patterns(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     } else {
         let q = lower(p);
         let c = eat(q, 40);
-        let q = if ate(q, c) {
-            pattern(c)
-        } else {
-            q
-        };
+        let q = if ate(q, c) { pattern(c) } else { q };
         let r = eat(q, 38);
-        if ate(q, r) {
-            field_patterns(r)
-        } else {
-            r
-        }
+        if ate(q, r) { field_patterns(r) } else { r }
     }
 }

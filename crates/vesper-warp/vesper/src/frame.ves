@@ -539,11 +539,7 @@ pub fn fr_kind_is_probing(kind: u64) -> bool {
 }
 
 fn flag(b: bool, v: u64) -> u64 {
-    if b {
-        v
-    } else {
-        0
-    }
+    if b { v } else { 0 }
 }
 
 // The kind and type bits of a frame's words.
@@ -649,11 +645,7 @@ pub fn fr_encode(
     match f {
         FrameW::Padding { len } => {
             // The Rust writer fills the room it has before failing.
-            let n = if len > out.len() {
-                out.len()
-            } else {
-                len
-            };
+            let n = if len > out.len() { out.len() } else { len };
             for i in 0..n {
                 out.try_set(i, 0);
             }
@@ -876,19 +868,11 @@ pub fn fr_encode_crypto_header(
 
 fn vl(v: u64) -> u64 {
     let n = vi_len_or_zero(v);
-    if n == 0 {
-        8
-    } else {
-        n
-    }
+    if n == 0 { 8 } else { n }
 }
 
 pub fn fr_stream_header_len(stream_id: u64, offset: u64, len: u64) -> u64 {
-    let off = if offset != 0 {
-        vl(offset)
-    } else {
-        0
-    };
+    let off = if offset != 0 { vl(offset) } else { 0 };
     wrapping_add(wrapping_add(wrapping_add(1, vl(stream_id)), off), vl(len))
 }
 
