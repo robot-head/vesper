@@ -15,3 +15,19 @@ Never start the Platforms workflow by hand, for a pull request or a branch. `Nat
 # Magic values
 
 Name every magic value. A number or string whose meaning isn't plain where it's used, such as a size, limit, timeout, record offset, opcode, flag bit or a tag compared as text, gets a named constant, or an enum when it is one of a closed set. Define a value once and reuse it wherever it means the same thing. In Vesper, use `const`; in a package whose language subset has no `const`, such as `packages/vesper-compiler`, use a zero-argument function as that package already does. Leave plain values alone: 0, 1 and -1 as identities or steps, test fixture data, and a value already named by what it initializes, such as a field in a `Default` impl.
+
+# Workflow and pull requests
+
+Check open pull requests (`gh pr list --state open`) and issues (`gh issue list --state open`) for collisions before starting work, and open or claim a GitHub issue for your slice first. Target `main` directly from a fresh `origin/main` branch; CI refuses pull requests that carry commits from an unmerged pull request or conflict with `main`.
+
+Before every push, format Vesper sources with `vesper fmt` (`vesper fmt --check`), check Rust formatting with `rustfmt +1.100.0 --edition 2024 --check`, run `cargo +1.100.0 clippy` with `-D warnings` on touched crates and targets, and verify Bazel package sync with `bazel query @vesper_cargo//:packages.bzl` (or `aspect maintenance bazel sync-build-files -- --check`).
+
+Serialize merges that touch root `Cargo.toml`, `Cargo.lock`, or `crates/vesper-hybrid` so concurrent branches do not collide without a merge queue. Wait for all four BuildBuddy checks (`Native and acceptance scripts`, `Self-host codegen differentials`, `Self-host differentials`, `Test all targets`) and the automatic `Native platform checks` (`macOS` and `Windows`) to finish green before merging with `gh pr merge <num> --squash` (do not pass `--delete-branch`, which can fail local worktree cleanup).
+
+# Rust-exit rules
+
+The Typst manuscript under `docs/manuscript/` is the sole language and library specification; never edit `docs/manuscript/` without flagging the change for owner review.
+
+Flipping a crate or compiler module from Rust to Vesper requires 0 differential discrepancies across its test and corpus suites and a 95% confidence upper bound `<= 1.50x` Rust on its ABBA flip-gate benchmark (`aspect ci flip-gate`, configured in `flip-gate.json` or `scripts/ci/flip-gate/*.json`). Keep Rust as the default until a port clears both bars.
+
+Record Rust-exit status updates in `.aspect/rust-census.axl`. Never edit `docs/maintenance/rust-census.md` in a feature or lane pull request; the merge gate rejects mixed changes to that file, which is refreshed only in a standalone pull request via `aspect maintenance rust-census`.
