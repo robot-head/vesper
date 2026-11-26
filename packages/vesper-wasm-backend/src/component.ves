@@ -1137,9 +1137,15 @@ pub fn exports(inout l: L) -> ChunkSeq[u8] eff [Fail[WErr]] {
     let mut args = ChunkSeq::new[u32]();
     for i in 0..sig.pn {
         let p = l.cx.f.param(add(sig.p0, i));
-        args.push(
-            lift(inout l, inout c, inout locals, nparams, p.ty, in flat_params, inout cursor)
-        );
+        args.push(lift(
+            inout l,
+            inout c,
+            inout locals,
+            nparams,
+            p.ty,
+            in flat_params,
+            inout cursor
+        ));
     }
     for i in 0..args.len() {
         match args.try_get(i) {

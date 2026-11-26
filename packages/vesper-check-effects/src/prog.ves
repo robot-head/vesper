@@ -348,18 +348,16 @@ pub fn read_prog(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Prog {
             cc = widen_u64(ty_or_none(in c, cc));
             d = widen_u64(ty_or_none(in c, d));
         }
-        exprs.push(
-            ExprNode {
-                kind: kind,
-                start: start,
-                end: end,
-                a: n32(a),
-                b: n32(bb),
-                c: n32(cc),
-                d: n32(d),
-                e: n32(e)
-            }
-        );
+        exprs.push(ExprNode {
+            kind: kind,
+            start: start,
+            end: end,
+            a: n32(a),
+            b: n32(bb),
+            c: n32(cc),
+            d: n32(d),
+            e: n32(e)
+        });
     }
     let np = r.word(in b);
     let mut pats: ChunkSeq[PatNode] = ChunkSeq::with_capacity[PatNode](np);
@@ -373,9 +371,14 @@ pub fn read_prog(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Prog {
         if kind == 2 || kind == 5 {
             a = widen_u64(sym_or_none(in c, a));
         }
-        pats.push(
-            PatNode { kind: kind, start: start, end: end, a: n32(a), b: n32(pb), c: n32(pc) }
-        );
+        pats.push(PatNode {
+            kind: kind,
+            start: start,
+            end: end,
+            a: n32(a),
+            b: n32(pb),
+            c: n32(pc)
+        });
     }
     // The pool holds expression and pattern indices and passes, and the
     // names and types of the lists that have them, which are mapped to
@@ -453,18 +456,16 @@ pub fn read_prog(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Prog {
             ops.push(f);
         }
         set_by_symbol(inout eff_by_name, name, inc32(n32(effs.len())));
-        effs.push(
-            EffDecl {
-                name: name,
-                linear: linear,
-                start: start,
-                end: end,
-                ga: ga,
-                gn: n32(gn),
-                oa: oa,
-                on: n32(on)
-            }
-        );
+        effs.push(EffDecl {
+            name: name,
+            linear: linear,
+            start: start,
+            end: end,
+            ga: ga,
+            gn: n32(gn),
+            oa: oa,
+            on: n32(on)
+        });
     }
     let nc = r.word(in b);
     let mut calls: ChunkSeq[CallRow] = ChunkSeq::with_capacity[CallRow](nc);

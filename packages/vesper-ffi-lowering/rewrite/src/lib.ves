@@ -551,18 +551,16 @@ fn expr(inout r: R, x: u32) {
             if ci != NONE64 {
                 let cname = r.s.const_row(ci).name;
                 let fn_name = const_fn_sym(inout r, lib, cname);
-                let callee_idx = r.ast.exprs.alloc(
-                    ExprNode {
-                        kind: E_NAME,
-                        start: e.start,
-                        end: e.start,
-                        a: fn_name,
-                        b: 0,
-                        c: 0,
-                        d: 0,
-                        e: 0
-                    }
-                );
+                let callee_idx = r.ast.exprs.alloc(ExprNode {
+                    kind: E_NAME,
+                    start: e.start,
+                    end: e.start,
+                    a: fn_name,
+                    b: 0,
+                    c: 0,
+                    d: 0,
+                    e: 0
+                });
                 let ok = r.ast.exprs.set(
                     idx_from_raw[ExprNode](x),
                     ExprNode {

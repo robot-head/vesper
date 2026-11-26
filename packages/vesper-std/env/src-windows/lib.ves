@@ -474,12 +474,10 @@ pub fn current_exe_bytes() -> ChunkSeq[u8] eff [Ffi[StdEnv], Fail[IoError]] {
     loop {
         let (n, err) = StdEnv::GetModuleFileNameW(0, inout buf.as_slice_mut());
         if n == 0 {
-            return Fail::raise(
-                IoError {
-                    kind: errno_kind(err),
-                    os: err,
-                }
-            );
+            return Fail::raise(IoError {
+                kind: errno_kind(err),
+                os: err,
+            });
         }
         // The call is told the buffer holds `buf.len()` units (half what it
         // does); a name of that length or more was cut short.
@@ -500,12 +498,10 @@ pub fn current_dir_bytes() -> ChunkSeq[u8] eff [Ffi[StdEnv], Fail[IoError]] {
         let cap = wrapping_u32(buf.len());
         let (n, err) = StdEnv::GetCurrentDirectoryW(cap, inout buf.as_slice_mut());
         if n == 0 {
-            return Fail::raise(
-                IoError {
-                    kind: errno_kind(err),
-                    os: err,
-                }
-            );
+            return Fail::raise(IoError {
+                kind: errno_kind(err),
+                os: err,
+            });
         }
         let nu = widen_u64(n);
         if nu < buf.len() {

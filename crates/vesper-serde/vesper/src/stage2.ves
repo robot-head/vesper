@@ -199,17 +199,15 @@ fn push(
     if n >= b.capacity {
         err(in b, in t, in escapes, ErrorKind::AllocationLimit, start);
     }
-    toks.push(
-        Token {
-            start: start,
-            end: 0,
-            next: wrapping_add(n, 1),
-            kind: kind,
-            decoded_len: 0,
-            escaped: false,
-            depth: depth
-        }
-    );
+    toks.push(Token {
+        start: start,
+        end: 0,
+        next: wrapping_add(n, 1),
+        kind: kind,
+        decoded_len: 0,
+        escaped: false,
+        depth: depth
+    });
     n
 }
 

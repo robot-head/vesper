@@ -451,15 +451,19 @@ pub fn xsk_audit_counts(inout d: Device) -> Result[LocationCounts, AuditError] {
     };
     let rx_side = wrapping_add(wrapping_add(kernel.fill_ring, kernel.nic_rx), kernel.rx_ring);
     if rx_side != driver.fill_posted {
-        return Result::Err(
-            AuditError::SideMismatch { side: 1, driver: driver.fill_posted, device: rx_side }
-        );
+        return Result::Err(AuditError::SideMismatch {
+            side: 1,
+            driver: driver.fill_posted,
+            device: rx_side
+        });
     }
     let tx_side = wrapping_add(wrapping_add(kernel.tx_ring, kernel.nic_tx), kernel.completion_ring);
     if tx_side != driver.tx_posted {
-        return Result::Err(
-            AuditError::SideMismatch { side: 2, driver: driver.tx_posted, device: tx_side }
-        );
+        return Result::Err(AuditError::SideMismatch {
+            side: 2,
+            driver: driver.tx_posted,
+            device: tx_side
+        });
     }
     if audit_clean(inout d, total) {
         return counts_total(acc, total);

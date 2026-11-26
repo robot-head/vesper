@@ -1070,9 +1070,10 @@ pub fn adt_kinds(inout st: St, inout cx: Cx, in a: Ast) {
             let adt = adtn(in a, item.node);
             names.clear();
             for generic_idx in 0..list_len(in a, adt.generics) {
-                names.push(
-                    nm(in st, genericn(in a, list_at(in a, adt.generics, generic_idx)).name)
-                );
+                names.push(nm(
+                    in st,
+                    genericn(in a, list_at(in a, adt.generics, generic_idx)).name
+                ));
             }
             cx.gset.clear();
             cx.gset.extend(in names.as_slice());

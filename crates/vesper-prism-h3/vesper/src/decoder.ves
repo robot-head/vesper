@@ -218,14 +218,24 @@ fn line(
         }
         split = wrapping_sub(out.len(), start);
         sensitive = first & NameRef::Never != 0;
-        return num_end(
-            decode_string(in h, in buf, wrapping_add(at, n.used), VALUE_PREFIX, max, inout out)
-        );
+        return num_end(decode_string(
+            in h,
+            in buf,
+            wrapping_add(at, n.used),
+            VALUE_PREFIX,
+            max,
+            inout out
+        ));
     }
     if first & LiteralName::Bits != 0 {
-        let mid = match num_end(
-            decode_string(in h, in buf, at, LiteralName::Prefix, max, inout out)
-        ) {
+        let mid = match num_end(decode_string(
+            in h,
+            in buf,
+            at,
+            LiteralName::Prefix,
+            max,
+            inout out
+        )) {
             Result::Ok(m) => m,
             Result::Err(r) => {
                 return Result::Err(r);

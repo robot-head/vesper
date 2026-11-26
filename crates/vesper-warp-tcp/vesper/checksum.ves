@@ -19,12 +19,10 @@ pub fn pseudo_header_sum(ips: Ips, tcp_len: u64) -> Result[u64, WireError] {
             if tcp_len > MAX_IPV4_TCP_LEN {
                 Result::Err(WireError::TooLong)
             } else {
-                Result::Ok(
-                    wrapping_add(
-                        wrapping_add(wrapping_add(words16_32(src), words16_32(dst)), IPPROTO_TCP),
-                        tcp_len
-                    )
-                )
+                Result::Ok(wrapping_add(
+                    wrapping_add(wrapping_add(words16_32(src), words16_32(dst)), IPPROTO_TCP),
+                    tcp_len
+                ))
             }
         },
         Ips::V6 { s0, s1, d0, d1 } => {
@@ -35,12 +33,10 @@ pub fn pseudo_header_sum(ips: Ips, tcp_len: u64) -> Result[u64, WireError] {
                     wrapping_add(words16_64(s0), words16_64(s1)),
                     wrapping_add(words16_64(d0), words16_64(d1))
                 );
-                Result::Ok(
-                    wrapping_add(
-                        wrapping_add(addrs, wrapping_add(tcp_len >> 16, tcp_len & 65535)),
-                        6
-                    )
-                )
+                Result::Ok(wrapping_add(
+                    wrapping_add(addrs, wrapping_add(tcp_len >> 16, tcp_len & 65535)),
+                    6
+                ))
             }
         },
     }

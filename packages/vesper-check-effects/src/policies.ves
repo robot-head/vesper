@@ -162,14 +162,12 @@ pub fn build_policies_bin(inout c: Ctx, in p: Prog, inout s: Walk, inout o: Chun
                     rt_called.push(callee);
                 }
             }
-            rt_funs.push(
-                RtFunRow {
-                    name: f.name,
-                    start: f.start,
-                    end: f.end,
-                    row: f.row,
-                }
-            );
+            rt_funs.push(RtFunRow {
+                name: f.name,
+                start: f.start,
+                end: f.end,
+                row: f.row,
+            });
         }
 
         if (caps & CD) != 0 {

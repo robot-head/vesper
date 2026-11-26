@@ -271,17 +271,15 @@ fn build_cst(in p: P) -> Cst {
                 wrapping_u32(w64(in open, sub(open.len(), 1)))
             };
             open.push(c.nodes.len());
-            c.nodes.push(
-                Node {
-                    kind: wrapping_u8(sub(e, 2147483648)),
-                    parent: parent,
-                    start: wrapping_u32(offset),
-                    end: wrapping_u32(offset),
-                    lo: wrapping_u32(c.leaf.len()),
-                    hi: wrapping_u32(c.leaf.len()),
-                    after: 0
-                }
-            );
+            c.nodes.push(Node {
+                kind: wrapping_u8(sub(e, 2147483648)),
+                parent: parent,
+                start: wrapping_u32(offset),
+                end: wrapping_u32(offset),
+                lo: wrapping_u32(c.leaf.len()),
+                hi: wrapping_u32(c.leaf.len()),
+                after: 0
+            });
         } else {
             offset = w64(in c.te, e);
             c.leaf.push(wrapping_u32(e));
@@ -1935,14 +1933,12 @@ fn expand_call(
             if (df(in reg, def, 6) == 1 || df(in reg, inner, 6) == 1)
                 && !same_symbol
                 && operator_level(in reg, def) == operator_level(in reg, inner) {
-                return step_err(
-                    dg_str(
-                        in "E0140",
-                        in "parenthesize mixed non-associative sugar operators",
-                        os,
-                        oe
-                    )
-                );
+                return step_err(dg_str(
+                    in "E0140",
+                    in "parenthesize mixed non-associative sugar operators",
+                    os,
+                    oe
+                ));
             }
         }
     }

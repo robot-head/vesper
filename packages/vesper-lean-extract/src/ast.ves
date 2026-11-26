@@ -325,18 +325,16 @@ pub fn read_ast(
         let polymorphic = r.word(in b) != 0;
         let row = u32_at(in a.tmap, r.word(in b));
         let req_result = u32_at(in a.tmap, r.word(in b));
-        a.fns.push(
-            SrcFn {
-                name: name,
-                body: body,
-                pa: pa,
-                pn: pn,
-                result: result,
-                polymorphic: polymorphic,
-                row: row,
-                req_result: req_result
-            }
-        );
+        a.fns.push(SrcFn {
+            name: name,
+            body: body,
+            pa: pa,
+            pn: pn,
+            result: result,
+            polymorphic: polymorphic,
+            row: row,
+            req_result: req_result
+        });
         set_by_symbol(inout a.fn_by_name, name, n32(inc(i)));
     }
     let np = r.word(in b);

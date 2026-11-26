@@ -559,12 +559,10 @@ fn adt_infos(inout st: St, inout cx: Cx, in a: Ast) {
         let mut kinds = ChunkSeq::new[u8]();
         if kinds_row != NONE {
             for kind_idx in 0..widen_u64(u32_at(in cx.ak_n, widen_u64(kinds_row))) {
-                kinds.push(
-                    u8_at(
-                        in cx.ak_k,
-                        wrapping_add(widen_u64(u32_at(in cx.ak_a, widen_u64(kinds_row))), kind_idx)
-                    )
-                );
+                kinds.push(u8_at(
+                    in cx.ak_k,
+                    wrapping_add(widen_u64(u32_at(in cx.ak_a, widen_u64(kinds_row))), kind_idx)
+                ));
             }
         }
         set_scope_from(inout cx, in names, in kinds);
@@ -913,12 +911,10 @@ fn variant_fields(
     }
     let subst = adt_subst(in st, in cx, info_row, t);
     for i in 0..widen_u64(u32_at(in cx.vr_fn, widen_u64(variant_row))) {
-        names.push(
-            u32_at(
-                in cx.fr_name,
-                wrapping_add(widen_u64(u32_at(in cx.vr_fa, widen_u64(variant_row))), i)
-            )
-        );
+        names.push(u32_at(
+            in cx.fr_name,
+            wrapping_add(widen_u64(u32_at(in cx.vr_fa, widen_u64(variant_row))), i)
+        ));
         let field_ty = sub_ty_or(
             inout st,
             in subst,
@@ -1145,18 +1141,14 @@ fn struct_literal(
     let mut gnames = ChunkSeq::new[u32]();
     let mut gkinds = ChunkSeq::new[u8]();
     for i in 0..generic_count {
-        gnames.push(
-            u32_at(
-                in cx.ai_syms,
-                wrapping_add(widen_u64(u32_at(in cx.ai_ga, widen_u64(info_row))), i)
-            )
-        );
-        gkinds.push(
-            u8_at(
-                in cx.ai_kinds,
-                wrapping_add(widen_u64(u32_at(in cx.ai_ka, widen_u64(info_row))), i)
-            )
-        );
+        gnames.push(u32_at(
+            in cx.ai_syms,
+            wrapping_add(widen_u64(u32_at(in cx.ai_ga, widen_u64(info_row))), i)
+        ));
+        gkinds.push(u8_at(
+            in cx.ai_kinds,
+            wrapping_add(widen_u64(u32_at(in cx.ai_ka, widen_u64(info_row))), i)
+        ));
     }
     let mut renaming = subst_new();
     let mut fresh = ChunkSeq::new[u32]();
@@ -1634,18 +1626,21 @@ fn apply_sig(
     let mut gnames = ChunkSeq::new[u32]();
     let mut gkinds = ChunkSeq::new[u8]();
     for i in 0..widen_u64(u32_at(in cx.sg_gn, widen_u64(row))) {
-        gnames.push(
-            u32_at(in cx.sg_gsym, wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i))
-        );
-        gkinds.push(
-            u8_at(in cx.sg_gkind, wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i))
-        );
+        gnames.push(u32_at(
+            in cx.sg_gsym,
+            wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i)
+        ));
+        gkinds.push(u8_at(
+            in cx.sg_gkind,
+            wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i)
+        ));
     }
     let mut ptys = ChunkSeq::new[u32]();
     for i in 0..widen_u64(u32_at(in cx.sg_pn, widen_u64(row))) {
-        ptys.push(
-            u32_at(in cx.sg_pty, wrapping_add(widen_u64(u32_at(in cx.sg_pa, widen_u64(row))), i))
-        );
+        ptys.push(u32_at(
+            in cx.sg_pty,
+            wrapping_add(widen_u64(u32_at(in cx.sg_pa, widen_u64(row))), i)
+        ));
     }
     let mut obs = ChunkSeq::new[Ob]();
     for i in 0..widen_u64(u32_at(in cx.sg_on, widen_u64(row))) {
@@ -1738,12 +1733,10 @@ fn call(inout st: St, inout cx: Cx, in a: Ast, e: u32, expected: u32) -> u32 {
         let variant_row = info_variant(in st, in cx, info_row, variant);
         let mut ptys = ChunkSeq::new[u32]();
         for i in 0..widen_u64(u32_at(in cx.vr_fn, widen_u64(variant_row))) {
-            ptys.push(
-                u32_at(
-                    in cx.fr_ty,
-                    wrapping_add(widen_u64(u32_at(in cx.vr_fa, widen_u64(variant_row))), i)
-                )
-            );
+            ptys.push(u32_at(
+                in cx.fr_ty,
+                wrapping_add(widen_u64(u32_at(in cx.vr_fa, widen_u64(variant_row))), i)
+            ));
         }
         let generic_count = info_gen_count(in cx, info_row);
         let mut gnames = ChunkSeq::new[u32]();
@@ -2956,12 +2949,14 @@ fn check_body(inout st: St, inout cx: Cx, in a: Ast, fn_id: u32, row: u32) {
     cx.sc_name.clear();
     cx.sc_kind.clear();
     for i in 0..widen_u64(u32_at(in cx.sg_gn, widen_u64(row))) {
-        cx.sc_name.push(
-            u32_at(in cx.sg_gsym, wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i))
-        );
-        cx.sc_kind.push(
-            u8_at(in cx.sg_gkind, wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i))
-        );
+        cx.sc_name.push(u32_at(
+            in cx.sg_gsym,
+            wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i)
+        ));
+        cx.sc_kind.push(u8_at(
+            in cx.sg_gkind,
+            wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i)
+        ));
     }
     let mut param_count = list_len(in a, func.params);
     if widen_u64(u32_at(in cx.sg_pn, widen_u64(row))) < param_count {

@@ -57,18 +57,16 @@ fn read_extra(inout s: S) {
         minv = rd(inout s.l);
         block = rd_bool(inout s.l);
     }
-    s.mx.push(
-        Mx {
-            has_json: has_json,
-            json: json,
-            resolver: resolver,
-            opt_at: opt_at,
-            opt_n: opt_n,
-            has_min: has_min,
-            min: minv,
-            block: block
-        }
-    );
+    s.mx.push(Mx {
+        has_json: has_json,
+        json: json,
+        resolver: resolver,
+        opt_at: opt_at,
+        opt_n: opt_n,
+        has_min: has_min,
+        min: minv,
+        block: block
+    });
 }
 
 // tables; root manifest, extra; exact root requirement; requested
@@ -121,17 +119,15 @@ pub fn decode_metadata(inout s: S, with_limits: bool) {
         let trust = rd(inout s.l);
         let repro = rd(inout s.l);
         let vetted = rd_bool(inout s.l);
-        s.metas.push(
-            Meta {
-                name: name,
-                ver: vt,
-                cve: cve,
-                stale: stale,
-                trust: trust,
-                repro: repro,
-                vetted: vetted
-            }
-        );
+        s.metas.push(Meta {
+            name: name,
+            ver: vt,
+            cve: cve,
+            stale: stale,
+            trust: trust,
+            repro: repro,
+            vetted: vetted
+        });
     }
 }
 

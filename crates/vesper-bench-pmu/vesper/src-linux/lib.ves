@@ -685,15 +685,13 @@ pub fn perf_group_open(sys_perf_event_open: i64) -> Option[PerfGroup] eff [Ffi[P
         let _ = PerfSys::close(lfd);
         return Option::None;
     }
-    Option::Some(
-        PerfGroup {
-            leader_fd: lfd,
-            member_fd: mfd,
-            id0: id0,
-            id1: id1,
-            last_errno: 0,
-        }
-    )
+    Option::Some(PerfGroup {
+        leader_fd: lfd,
+        member_fd: mfd,
+        id0: id0,
+        id1: id1,
+        last_errno: 0,
+    })
 }
 
 pub fn perf_group_enable(in g: PerfGroup) -> bool eff [Ffi[PerfSys]] {

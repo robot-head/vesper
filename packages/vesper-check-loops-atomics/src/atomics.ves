@@ -881,19 +881,17 @@ pub fn read_ir(
             }
             ir.insts.push(inst);
         }
-        ir.fns.push(
-            IrFn {
-                name: name,
-                la: la,
-                ln: ln,
-                pa: pa,
-                pn: pn,
-                va: va,
-                vn: vn,
-                ia: ia,
-                in_: wrapping_u32(k)
-            }
-        );
+        ir.fns.push(IrFn {
+            name: name,
+            la: la,
+            ln: ln,
+            pa: pa,
+            pn: pn,
+            va: va,
+            vn: vn,
+            ia: ia,
+            in_: wrapping_u32(k)
+        });
     }
     ir
 }

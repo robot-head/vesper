@@ -557,9 +557,18 @@ pub fn pooled_frame_next(
         let avail = q_len(in p, rx_q);
         if mode == MODE_HEADER {
             if avail == 0 {
-                return Result::Ok(
-                    step_frame_res(rx_q, mode, rem, ty, flen, FRAME_NONE, false, 0, 0, 0)
-                );
+                return Result::Ok(step_frame_res(
+                    rx_q,
+                    mode,
+                    rem,
+                    ty,
+                    flen,
+                    FRAME_NONE,
+                    false,
+                    0,
+                    0,
+                    0
+                ));
             }
             let hr = q_head_range(in p, rx_q);
             let hdr_slice_contig = hr.len >= VARINT_HDR_MAX || hr.len == avail;
@@ -572,9 +581,18 @@ pub fn pooled_frame_next(
                 decode_two_hdr(in scratch.as_slice())
             };
             if !hdr.ok {
-                return Result::Ok(
-                    step_frame_res(rx_q, mode, rem, ty, flen, FRAME_NONE, false, 0, 0, 0)
-                );
+                return Result::Ok(step_frame_res(
+                    rx_q,
+                    mode,
+                    rem,
+                    ty,
+                    flen,
+                    FRAME_NONE,
+                    false,
+                    0,
+                    0,
+                    0
+                ));
             }
             rx_q = q_consume(inout p, rx_q, hdr.used);
             let fty = hdr.ty;
@@ -584,26 +602,42 @@ pub fn pooled_frame_next(
             }
             if fty == webtransport_stream_type() && webtransport {
                 mode = MODE_OPAQUE;
-                return Result::Ok(
-                    step_frame_res(rx_q, mode, rem, ty, flen, FRAME_WT_STREAM, false, 0, 0, f_len)
-                );
+                return Result::Ok(step_frame_res(
+                    rx_q,
+                    mode,
+                    rem,
+                    ty,
+                    flen,
+                    FRAME_WT_STREAM,
+                    false,
+                    0,
+                    0,
+                    f_len
+                ));
             }
             if fty == data_type() {
                 if f_len == 0 {
-                    return Result::Ok(
-                        step_frame_res(rx_q, mode, rem, ty, flen, FRAME_DATA, false, 0, 0, 0)
-                    );
+                    return Result::Ok(step_frame_res(
+                        rx_q,
+                        mode,
+                        rem,
+                        ty,
+                        flen,
+                        FRAME_DATA,
+                        false,
+                        0,
+                        0,
+                        0
+                    ));
                 }
                 mode = MODE_DATA;
                 rem = f_len;
             } else if buffered_type(fty) {
                 if f_len > max_payload {
-                    return Result::Err(
-                        FrameError::TooLarge {
-                            frame_type: fty,
-                            len: f_len,
-                        }
-                    );
+                    return Result::Err(FrameError::TooLarge {
+                        frame_type: fty,
+                        len: f_len,
+                    });
                 }
                 mode = MODE_PAYLOAD;
                 ty = fty;
@@ -611,15 +645,33 @@ pub fn pooled_frame_next(
             } else {
                 mode = MODE_SKIP;
                 rem = f_len;
-                return Result::Ok(
-                    step_frame_res(rx_q, mode, rem, ty, flen, FRAME_UNKNOWN, false, 0, 0, fty)
-                );
+                return Result::Ok(step_frame_res(
+                    rx_q,
+                    mode,
+                    rem,
+                    ty,
+                    flen,
+                    FRAME_UNKNOWN,
+                    false,
+                    0,
+                    0,
+                    fty
+                ));
             }
         } else if mode == MODE_DATA {
             if avail == 0 {
-                return Result::Ok(
-                    step_frame_res(rx_q, mode, rem, ty, flen, FRAME_NONE, false, 0, 0, 0)
-                );
+                return Result::Ok(step_frame_res(
+                    rx_q,
+                    mode,
+                    rem,
+                    ty,
+                    flen,
+                    FRAME_NONE,
+                    false,
+                    0,
+                    0,
+                    0
+                ));
             }
             let n = min64(rem, avail);
             rem = wrapping_sub(rem, n);
@@ -627,49 +679,83 @@ pub fn pooled_frame_next(
                 mode = MODE_HEADER;
             }
             // Data bytes stay at the front of rx_q for direct transfer or consume.
-            return Result::Ok(
-                step_frame_res(rx_q, mode, rem, ty, flen, FRAME_DATA, false, 0, n, 0)
-            );
+            return Result::Ok(step_frame_res(
+                rx_q,
+                mode,
+                rem,
+                ty,
+                flen,
+                FRAME_DATA,
+                false,
+                0,
+                n,
+                0
+            ));
         } else if mode == MODE_SKIP {
             let n = min64(rem, avail);
             rx_q = q_consume(inout p, rx_q, n);
             rem = wrapping_sub(rem, n);
             if rem > 0 {
-                return Result::Ok(
-                    step_frame_res(rx_q, mode, rem, ty, flen, FRAME_NONE, false, 0, 0, 0)
-                );
+                return Result::Ok(step_frame_res(
+                    rx_q,
+                    mode,
+                    rem,
+                    ty,
+                    flen,
+                    FRAME_NONE,
+                    false,
+                    0,
+                    0,
+                    0
+                ));
             }
             mode = MODE_HEADER;
         } else if mode == MODE_PAYLOAD {
             if avail < flen {
-                return Result::Ok(
-                    step_frame_res(rx_q, mode, rem, ty, flen, FRAME_NONE, false, 0, 0, 0)
-                );
+                return Result::Ok(step_frame_res(
+                    rx_q,
+                    mode,
+                    rem,
+                    ty,
+                    flen,
+                    FRAME_NONE,
+                    false,
+                    0,
+                    0,
+                    0
+                ));
             }
             mode = MODE_HEADER;
             if ty == headers_type() {
                 let hr = q_head_range(in p, rx_q);
                 if hr.len >= flen {
-                    return Result::Ok(
-                        step_frame_res(
-                            rx_q,
-                            mode,
-                            rem,
-                            ty,
-                            flen,
-                            FRAME_HEADERS,
-                            false,
-                            hr.off,
-                            flen,
-                            0
-                        )
-                    );
+                    return Result::Ok(step_frame_res(
+                        rx_q,
+                        mode,
+                        rem,
+                        ty,
+                        flen,
+                        FRAME_HEADERS,
+                        false,
+                        hr.off,
+                        flen,
+                        0
+                    ));
                 }
                 q_gather(in p, rx_q, flen, inout scratch);
                 rx_q = q_consume(inout p, rx_q, flen);
-                return Result::Ok(
-                    step_frame_res(rx_q, mode, rem, ty, flen, FRAME_HEADERS, true, 0, flen, 0)
-                );
+                return Result::Ok(step_frame_res(
+                    rx_q,
+                    mode,
+                    rem,
+                    ty,
+                    flen,
+                    FRAME_HEADERS,
+                    true,
+                    0,
+                    flen,
+                    0
+                ));
             }
             // Non-HEADERS buffered frame on request/response stream (e.g., SETTINGS/GOAWAY/etc.):
             // validate syntax through `frame::parse_payload`, then treat as unexpected in callers.
@@ -685,9 +771,18 @@ pub fn pooled_frame_next(
             rx_q = q_consume(inout p, rx_q, flen);
             match check {
                 Result::Ok(_fo) => {
-                    return Result::Ok(
-                        step_frame_res(rx_q, mode, rem, ty, flen, FRAME_OTHER, false, 0, 0, ty)
-                    );
+                    return Result::Ok(step_frame_res(
+                        rx_q,
+                        mode,
+                        rem,
+                        ty,
+                        flen,
+                        FRAME_OTHER,
+                        false,
+                        0,
+                        0,
+                        ty
+                    ));
                 }
                 Result::Err(e) => return Result::Err(e),
             }
@@ -769,12 +864,10 @@ pub fn pooled_capsule_next(
                     max_value
                 };
                 if c_len > bound {
-                    return Result::Err(
-                        CapsuleError::TooLarge {
-                            capsule_type: cty,
-                            len: c_len,
-                        }
-                    );
+                    return Result::Err(CapsuleError::TooLarge {
+                        capsule_type: cty,
+                        len: c_len,
+                    });
                 }
                 mode = MODE_PAYLOAD;
                 ty = cty;
@@ -782,9 +875,16 @@ pub fn pooled_capsule_next(
             } else {
                 mode = MODE_SKIP;
                 rem = c_len;
-                return Result::Ok(
-                    step_cap_res(cap_q, mode, rem, ty, flen, CAPSULE_UNKNOWN, 0, cty)
-                );
+                return Result::Ok(step_cap_res(
+                    cap_q,
+                    mode,
+                    rem,
+                    ty,
+                    flen,
+                    CAPSULE_UNKNOWN,
+                    0,
+                    cty
+                ));
             }
         } else if mode == MODE_SKIP {
             let n = min64(rem, avail);
@@ -810,24 +910,52 @@ pub fn pooled_capsule_next(
             cap_q = q_consume(inout p, cap_q, flen);
             match res {
                 Result::Ok(CapsuleOut::Datagram) => {
-                    return Result::Ok(
-                        step_cap_res(cap_q, mode, rem, ty, flen, CAPSULE_DATAGRAM, 0, 0)
-                    );
+                    return Result::Ok(step_cap_res(
+                        cap_q,
+                        mode,
+                        rem,
+                        ty,
+                        flen,
+                        CAPSULE_DATAGRAM,
+                        0,
+                        0
+                    ));
                 }
                 Result::Ok(CapsuleOut::CloseSession(code)) => {
-                    return Result::Ok(
-                        step_cap_res(cap_q, mode, rem, ty, flen, CAPSULE_CLOSE, code, 0)
-                    );
+                    return Result::Ok(step_cap_res(
+                        cap_q,
+                        mode,
+                        rem,
+                        ty,
+                        flen,
+                        CAPSULE_CLOSE,
+                        code,
+                        0
+                    ));
                 }
                 Result::Ok(CapsuleOut::DrainSession) => {
-                    return Result::Ok(
-                        step_cap_res(cap_q, mode, rem, ty, flen, CAPSULE_DRAIN, 0, 0)
-                    );
+                    return Result::Ok(step_cap_res(
+                        cap_q,
+                        mode,
+                        rem,
+                        ty,
+                        flen,
+                        CAPSULE_DRAIN,
+                        0,
+                        0
+                    ));
                 }
                 Result::Ok(CapsuleOut::Unknown(u)) => {
-                    return Result::Ok(
-                        step_cap_res(cap_q, mode, rem, ty, flen, CAPSULE_UNKNOWN, 0, u)
-                    );
+                    return Result::Ok(step_cap_res(
+                        cap_q,
+                        mode,
+                        rem,
+                        ty,
+                        flen,
+                        CAPSULE_UNKNOWN,
+                        0,
+                        u
+                    ));
                 }
                 Result::Ok(CapsuleOut::None) => {
                     return Result::Ok(step_cap_res(cap_q, mode, rem, ty, flen, CAPSULE_NONE, 0, 0));

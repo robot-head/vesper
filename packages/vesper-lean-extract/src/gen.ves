@@ -3005,12 +3005,10 @@ fn call(
             }
             for i in 0..args.len() {
                 if !(skip_first && i == 0) {
-                    es.push(
-                        match args.try_get(i) {
-                            Option::Some(x) => x,
-                            Option::None => 0,
-                        }
-                    );
+                    es.push(match args.try_get(i) {
+                        Option::Some(x) => x,
+                        Option::None => 0,
+                    });
                 }
             }
             let terms = operands(inout b, inout t, in y, inout g, in es, inout out);
@@ -3060,12 +3058,10 @@ fn call(
                 let mut actual: ChunkSeq[u64] = ChunkSeq::new[u64]();
                 actual.push(base);
                 for i in 0..args.len() {
-                    actual.push(
-                        match args.try_get(i) {
-                            Option::Some(x) => x,
-                            Option::None => 0,
-                        }
-                    );
+                    actual.push(match args.try_get(i) {
+                        Option::Some(x) => x,
+                        Option::None => 0,
+                    });
                 }
                 return call(inout b, inout t, in y, inout g, e, callee, mn, in actual, inout out);
             }
@@ -3266,18 +3262,16 @@ fn call(
     for i in 0..s.pn {
         let p = y.x.fx.param(s, i);
         if widen_u64(p.pass) == TyPass::Inout && i < args.len() {
-            states.push(
-                St {
-                    ty: p.ty,
-                    src: 0,
-                    qa: p.qa,
-                    qn: p.qn,
-                    arg: match args.try_get(i) {
-                        Option::Some(x) => x,
-                        Option::None => 0,
-                    }
+            states.push(St {
+                ty: p.ty,
+                src: 0,
+                qa: p.qa,
+                qn: p.qn,
+                arg: match args.try_get(i) {
+                    Option::Some(x) => x,
+                    Option::None => 0,
                 }
-            );
+            });
         }
     }
     let mut vars = vars_new();
@@ -3412,18 +3406,16 @@ fn local_call(
     let mut states: ChunkSeq[St] = ChunkSeq::new[St]();
     for i in 0..w(ft.n) {
         if i < args.len() && widen_u64(t.param_pass(l.ty, i)) == TyPass::Inout {
-            states.push(
-                St {
-                    ty: t.arg(l.ty, i),
-                    src: 2,
-                    qa: 0,
-                    qn: 0,
-                    arg: match args.try_get(i) {
-                        Option::Some(x) => x,
-                        Option::None => 0,
-                    }
+            states.push(St {
+                ty: t.arg(l.ty, i),
+                src: 2,
+                qa: 0,
+                qn: 0,
+                arg: match args.try_get(i) {
+                    Option::Some(x) => x,
+                    Option::None => 0,
                 }
-            );
+            });
         }
     }
     if states.len() > 0 && abortable_row(in t, in y, ft.r2) {
@@ -3970,18 +3962,16 @@ fn perform_op(
     for i in 0..sig.pn {
         let p = y.a.op_param(sig, i);
         if p.pass == TyPass::Inout && i < args.len() {
-            states.push(
-                St {
-                    ty: p.ty,
-                    src: 1,
-                    qa: p.qa,
-                    qn: p.qn,
-                    arg: match args.try_get(i) {
-                        Option::Some(x) => x,
-                        Option::None => 0,
-                    }
+            states.push(St {
+                ty: p.ty,
+                src: 1,
+                qa: p.qa,
+                qn: p.qn,
+                arg: match args.try_get(i) {
+                    Option::Some(x) => x,
+                    Option::None => 0,
                 }
-            );
+            });
         }
     }
     if states.len() == 0 {
@@ -4749,16 +4739,14 @@ fn handler(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
                 }
                 g.abinds.push(ABind { id: bid, pa: gpa, pn: path.len() });
             }
-            g.aliases.push(
-                Alias {
-                    lens: lens,
-                    raw: whole,
-                    ty: pt,
-                    pass: param.pass,
-                    ba: ba,
-                    bn: wrapping_sub(g.abinds.len(), ba)
-                }
-            );
+            g.aliases.push(Alias {
+                lens: lens,
+                raw: whole,
+                ty: pt,
+                pass: param.pass,
+                ba: ba,
+                bn: wrapping_sub(g.abinds.len(), ba)
+            });
         }
         let alias_n = wrapping_sub(g.aliases.len(), alias_a);
         if stateful {
@@ -4819,20 +4807,18 @@ fn handler(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
                 let_local(inout b, inout cl, f, lam, false, none4, false);
                 fallback = f;
             }
-            g.conts.push(
-                Resumption {
-                    key: k_name,
-                    resume: resume,
-                    state: st_var,
-                    stateful: stateful,
-                    frame: frame_var,
-                    context: g.context,
-                    depth: g.layers.len(),
-                    aa: alias_a,
-                    an: alias_n,
-                    fallback: fallback
-                }
-            );
+            g.conts.push(Resumption {
+                key: k_name,
+                resume: resume,
+                state: st_var,
+                stateful: stateful,
+                frame: frame_var,
+                context: g.context,
+                depth: g.layers.len(),
+                aa: alias_a,
+                an: alias_n,
+                fallback: fallback
+            });
         }
         let ov2 = expr(inout b, inout t, in y, inout g, c.body, inout cl);
         let r = temp(inout b, inout g);
@@ -4914,15 +4900,13 @@ fn handler(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
         let fv = app(inout b, f, in nones);
         let fld = record_field(inout b, c.name, fv);
         fields.push(fld);
-        own_infos.push(
-            OpInfo {
-                name: c.name,
-                implementation: implementation,
-                aa: al_a,
-                an: al_n,
-                post_access: post_access
-            }
-        );
+        own_infos.push(OpInfo {
+            name: c.name,
+            implementation: implementation,
+            aa: al_a,
+            an: al_n,
+            post_access: post_access
+        });
     }
     let oa = g.infos.len();
     for i in 0..own_infos.len() {
@@ -4954,21 +4938,19 @@ fn handler(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
     for i in 0..frame.len() {
         g.idx.push(u64_at(in frame, i));
     }
-    g.layers.push(
-        Layer {
-            state: st,
-            output: answer,
-            base: parent,
-            child: child,
-            inst: inst,
-            fa: fa,
-            fz: frame.len(),
-            frame_ty: frame_ty,
-            oa: oa,
-            on: on,
-            closures: g.closures
-        }
-    );
+    g.layers.push(Layer {
+        state: st,
+        output: answer,
+        base: parent,
+        child: child,
+        inst: inst,
+        fa: fa,
+        fz: frame.len(),
+        frame_ty: frame_ty,
+        oa: oa,
+        on: on,
+        closures: g.closures
+    });
     let index = wrapping_sub(g.layers.len(), 1);
     g.body_layers.push(index);
     g.monad = child;
@@ -5071,15 +5053,13 @@ fn closure(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
             if x.label != 0 {
                 let c = g.cap(wrapping_sub(x.label, 1));
                 if !c.removed {
-                    g.unlabeled.push(
-                        Cap {
-                            key: x.name,
-                            removed: false,
-                            inst: c.inst,
-                            term: c.term,
-                            depth: c.depth
-                        }
-                    );
+                    g.unlabeled.push(Cap {
+                        key: x.name,
+                        removed: false,
+                        inst: c.inst,
+                        term: c.term,
+                        depth: c.depth
+                    });
                 }
             }
         }

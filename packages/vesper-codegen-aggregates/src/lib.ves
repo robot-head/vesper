@@ -5505,9 +5505,15 @@ fn rewrite_scalar_enums(
             }
             tn = wrapping_sub(p.ops.len(), ta);
         }
-        blocks.push(
-            BlockRow { ha: ha, hn: hn, i0: i0, ic: rows.len(), term: block.term, ta: ta, tn: tn }
-        );
+        blocks.push(BlockRow {
+            ha: ha,
+            hn: hn,
+            i0: i0,
+            ic: rows.len(),
+            term: block.term,
+            ta: ta,
+            tn: tn
+        });
     }
     let b0 = p.blocks.len();
     for i in 0..blocks.len() {

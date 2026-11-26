@@ -599,19 +599,17 @@ pub fn read_program(
                 let op = wrapping_u8(r.word(in b));
                 let a = n32(p.ops.len());
                 read_op(inout r, in b, in nmap, inout p, op);
-                p.insts.push(
-                    Inst {
-                        dest: dest,
-                        ty: ty,
-                        s0: s0,
-                        s1: s1,
-                        tok_in: tin,
-                        tok_out: tout,
-                        flags: flags,
-                        op: op,
-                        a: a
-                    }
-                );
+                p.insts.push(Inst {
+                    dest: dest,
+                    ty: ty,
+                    s0: s0,
+                    s1: s1,
+                    tok_in: tin,
+                    tok_out: tout,
+                    flags: flags,
+                    op: op,
+                    a: a
+                });
             }
             let term = wrapping_u8(r.word(in b));
             let ta = n32(p.ops.len());
@@ -636,35 +634,31 @@ pub fn read_program(
                 p.ops.push(r.word(in b));
                 p.ops.push(r.word(in b));
             }
-            p.blocks.push(
-                Blk {
-                    entry: entry,
-                    ia: ia,
-                    in_n: n32(inn),
-                    out_tok: out_tok,
-                    pa: bpa,
-                    pn: n32(bpn),
-                    i0: i0,
-                    ic: n32(ic),
-                    term: term,
-                    ta: ta
-                }
-            );
+            p.blocks.push(Blk {
+                entry: entry,
+                ia: ia,
+                in_n: n32(inn),
+                out_tok: out_tok,
+                pa: bpa,
+                pn: n32(bpn),
+                i0: i0,
+                ic: n32(ic),
+                term: term,
+                ta: ta
+            });
         }
-        p.fns.push(
-            FnRow {
-                pa: pa,
-                pn: n32(pn),
-                ba: ba,
-                bn: n32(bn),
-                ea: ea,
-                en: n32(en),
-                va: va,
-                vn: n32(vn),
-                b0: b0,
-                bc: n32(nb)
-            }
-        );
+        p.fns.push(FnRow {
+            pa: pa,
+            pn: n32(pn),
+            ba: ba,
+            bn: n32(bn),
+            ea: ea,
+            en: n32(en),
+            va: va,
+            vn: n32(vn),
+            b0: b0,
+            bc: n32(nb)
+        });
     }
     p
 }
@@ -2415,17 +2409,15 @@ impl Flow {
                 s.loans.push(place(n32(p.op(a)), n32(p.op(add(loan_from, j)))));
             }
         }
-        s.put_val(
-            ValS {
-                id: i.dest,
-                ty: ty,
-                owned: owned,
-                consumed: false,
-                lpass: lpass,
-                la: la,
-                ln: n32(loan_n)
-            }
-        );
+        s.put_val(ValS {
+            id: i.dest,
+            ty: ty,
+            owned: owned,
+            consumed: false,
+            lpass: lpass,
+            la: la,
+            ln: n32(loan_n)
+        });
     }
 
     // `out = merge(out, b)`: `out` holds a clone of the old state.
@@ -2531,17 +2523,15 @@ impl Flow {
                         out.loans.push(b.loan(add(w(v.la), j)));
                     }
                 }
-                out.put_val(
-                    ValS {
-                        id: v.id,
-                        ty: v.ty,
-                        owned: v.owned,
-                        consumed: v.consumed,
-                        lpass: v.lpass,
-                        la: la,
-                        ln: v.ln
-                    }
-                );
+                out.put_val(ValS {
+                    id: v.id,
+                    ty: v.ty,
+                    owned: v.owned,
+                    consumed: v.consumed,
+                    lpass: v.lpass,
+                    la: la,
+                    ln: v.ln
+                });
             }
         }
     }
@@ -2720,9 +2710,12 @@ impl Flow {
                 Option::Some(x) => x,
                 Option::None => ParamRow { name: 0, pass: 0, ty: 0, s0: 0, s1: 0 },
             };
-            state.put_slot(
-                SlotS { rank: p.rank_of(pr.name), name: pr.name, ty: pr.ty, pass: pr.pass }
-            );
+            state.put_slot(SlotS {
+                rank: p.rank_of(pr.name),
+                name: pr.name,
+                ty: pr.ty,
+                pass: pr.pass
+            });
         }
         pool.store(0, in state);
         let mut queue: ChunkSeq[u32] = ChunkSeq::new[u32]();
@@ -2789,17 +2782,15 @@ impl Flow {
                         let arg = n32(p.op(add(add(ta, 2), j)));
                         let param = n32(p.op(add(w(tb.pa), j)));
                         self.consume(inout edge, inout t, in names, in wd, arg, s0, s1);
-                        edge.put_val(
-                            ValS {
-                                id: param,
-                                ty: param_type(in p, f, param),
-                                owned: true,
-                                consumed: false,
-                                lpass: 255,
-                                la: 0,
-                                ln: 0
-                            }
-                        );
+                        edge.put_val(ValS {
+                            id: param,
+                            ty: param_type(in p, f, param),
+                            owned: true,
+                            consumed: false,
+                            lpass: 255,
+                            la: 0,
+                            ln: 0
+                        });
                     }
                 }
                 let had = pool.has(w(target));

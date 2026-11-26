@@ -413,23 +413,23 @@ pub fn add_eff_decl(
                 Option::Some(p) => p,
                 Option::None => 0,
             };
-            f.params.push(
-                ParamRow { name: u32_at(in pnames, idx), pass: ps, ty: u32_at(in ptys, idx) }
-            );
+            f.params.push(ParamRow {
+                name: u32_at(in pnames, idx),
+                pass: ps,
+                ty: u32_at(in ptys, idx)
+            });
         }
         let sidx = f.sigs.len();
-        f.sigs.push(
-            Sig {
-                g0: 0,
-                gn: 0,
-                p0: p0,
-                pn: opn,
-                result: u32_at(in op_results, oi),
-                e0: 0,
-                en: 0,
-                tail: NONE32
-            }
-        );
+        f.sigs.push(Sig {
+            g0: 0,
+            gn: 0,
+            p0: p0,
+            pn: opn,
+            result: u32_at(in op_results, oi),
+            e0: 0,
+            en: 0,
+            tail: NONE32
+        });
         f.ops.push(OpDecl { name: u32_at(in op_names, oi), sig: sidx });
     }
     let d = f.decls.len();
@@ -778,26 +778,22 @@ pub fn ir_new(sink p: Program) -> Ir {
         at = inc(at);
         let l0 = ir.flocals.len();
         for i in 0..nl {
-            ir.flocals.push(
-                IrLocal {
-                    name: n32(op_at(in ir.p, add(at, wrapping_mul(i, 2)))),
-                    ty: n32(op_at(in ir.p, add(at, inc(wrapping_mul(i, 2)))))
-                }
-            );
+            ir.flocals.push(IrLocal {
+                name: n32(op_at(in ir.p, add(at, wrapping_mul(i, 2)))),
+                ty: n32(op_at(in ir.p, add(at, inc(wrapping_mul(i, 2)))))
+            });
         }
-        ir.fns.push(
-            FnInfo {
-                name: row.name,
-                p0: p0,
-                pn: np,
-                result: result,
-                effects: effects,
-                l0: l0,
-                ln: nl,
-                v0: v0,
-                vn: top
-            }
-        );
+        ir.fns.push(FnInfo {
+            name: row.name,
+            p0: p0,
+            pn: np,
+            result: result,
+            effects: effects,
+            l0: l0,
+            ln: nl,
+            v0: v0,
+            vn: top
+        });
         set_by_symbol(inout ir.by_name, row.name, n32(inc(fi)));
     }
     ir

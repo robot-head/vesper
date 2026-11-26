@@ -120,12 +120,10 @@ pub fn current_dir() -> String eff [Ffi[StdEnv], Fail[IoError]] {
     let b = current_dir_bytes();
     match String::from_utf8(in b.as_slice()) {
         Option::Some(s) => s,
-        Option::None => Fail::raise(
-            IoError {
-                kind: 7,
-                os: 0,
-            }
-        ),
+        Option::None => Fail::raise(IoError {
+            kind: 7,
+            os: 0,
+        }),
     }
 }
 

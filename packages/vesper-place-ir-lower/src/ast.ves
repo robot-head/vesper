@@ -246,25 +246,23 @@ impl Ast {
         let fn_n = wrapping_sub(ast.fns.len(), n_fns);
         for i in n_fns..ast.fns.len() {
             match ast.fns.try_get(i) {
-                Option::Some(row) => new_fns.push(
-                    FnR {
-                        key: row.key,
-                        name: row.name,
-                        has_body: row.has_body,
-                        body: row.body,
-                        pa: row.pa,
-                        pn: row.pn,
-                        result: row.result,
-                        effects: row.effects,
-                        ga: row.ga,
-                        gn: row.gn,
-                        ca: row.ca,
-                        cn: row.cn,
-                        owner: row.owner,
-                        xa: row.xa,
-                        xn: row.xn
-                    }
-                ),
+                Option::Some(row) => new_fns.push(FnR {
+                    key: row.key,
+                    name: row.name,
+                    has_body: row.has_body,
+                    body: row.body,
+                    pa: row.pa,
+                    pn: row.pn,
+                    result: row.result,
+                    effects: row.effects,
+                    ga: row.ga,
+                    gn: row.gn,
+                    ca: row.ca,
+                    cn: row.cn,
+                    owner: row.owner,
+                    xa: row.xa,
+                    xn: row.xn
+                }),
                 Option::None => {},
             }
         }
@@ -273,25 +271,23 @@ impl Ast {
         }
         for i in 0..new_fns.len() {
             match new_fns.try_get(i) {
-                Option::Some(row) => ast.fns.push(
-                    FnR {
-                        key: row.key,
-                        name: row.name,
-                        has_body: row.has_body,
-                        body: row.body,
-                        pa: row.pa,
-                        pn: row.pn,
-                        result: row.result,
-                        effects: row.effects,
-                        ga: row.ga,
-                        gn: row.gn,
-                        ca: row.ca,
-                        cn: row.cn,
-                        owner: row.owner,
-                        xa: row.xa,
-                        xn: row.xn
-                    }
-                ),
+                Option::Some(row) => ast.fns.push(FnR {
+                    key: row.key,
+                    name: row.name,
+                    has_body: row.has_body,
+                    body: row.body,
+                    pa: row.pa,
+                    pn: row.pn,
+                    result: row.result,
+                    effects: row.effects,
+                    ga: row.ga,
+                    gn: row.gn,
+                    ca: row.ca,
+                    cn: row.cn,
+                    owner: row.owner,
+                    xa: row.xa,
+                    xn: row.xn
+                }),
                 Option::None => {},
             }
         }
@@ -299,17 +295,15 @@ impl Ast {
         let pm_n = wrapping_sub(ast.pms.len(), n_pms);
         for i in n_pms..ast.pms.len() {
             match ast.pms.try_get(i) {
-                Option::Some(row) => new_pms.push(
-                    Pm {
-                        name: row.name,
-                        pass: row.pass,
-                        qa: row.qa,
-                        qn: row.qn,
-                        ty: row.ty,
-                        s0: row.s0,
-                        s1: row.s1
-                    }
-                ),
+                Option::Some(row) => new_pms.push(Pm {
+                    name: row.name,
+                    pass: row.pass,
+                    qa: row.qa,
+                    qn: row.qn,
+                    ty: row.ty,
+                    s0: row.s0,
+                    s1: row.s1
+                }),
                 Option::None => {},
             }
         }
@@ -318,17 +312,15 @@ impl Ast {
         }
         for i in 0..new_pms.len() {
             match new_pms.try_get(i) {
-                Option::Some(row) => ast.pms.push(
-                    Pm {
-                        name: row.name,
-                        pass: row.pass,
-                        qa: row.qa,
-                        qn: row.qn,
-                        ty: row.ty,
-                        s0: row.s0,
-                        s1: row.s1
-                    }
-                ),
+                Option::Some(row) => ast.pms.push(Pm {
+                    name: row.name,
+                    pass: row.pass,
+                    qa: row.qa,
+                    qn: row.qn,
+                    ty: row.ty,
+                    s0: row.s0,
+                    s1: row.s1
+                }),
                 Option::None => {},
             }
         }
@@ -382,78 +374,70 @@ impl Ast {
         let mut exs = ChunkSeq::with_capacity[Ex](self.exs.len());
         for i in 0..self.exs.len() {
             match self.exs.try_get(i) {
-                Option::Some(src) => exs.push(
-                    Ex {
-                        kind: src.kind,
-                        s0: src.s0,
-                        s1: src.s1,
-                        a: src.a,
-                        b: src.b,
-                        c: src.c,
-                        n: src.n,
-                        m: src.m,
-                        x: src.x,
-                    }
-                ),
+                Option::Some(src) => exs.push(Ex {
+                    kind: src.kind,
+                    s0: src.s0,
+                    s1: src.s1,
+                    a: src.a,
+                    b: src.b,
+                    c: src.c,
+                    n: src.n,
+                    m: src.m,
+                    x: src.x,
+                }),
                 Option::None => {},
             }
         }
         let mut pts = ChunkSeq::with_capacity[Pt](self.pts.len());
         for i in 0..self.pts.len() {
             match self.pts.try_get(i) {
-                Option::Some(src) => pts.push(
-                    Pt {
-                        kind: src.kind,
-                        s0: src.s0,
-                        s1: src.s1,
-                        a: src.a,
-                        b: src.b,
-                        c: src.c,
-                        n: src.n,
-                    }
-                ),
+                Option::Some(src) => pts.push(Pt {
+                    kind: src.kind,
+                    s0: src.s0,
+                    s1: src.s1,
+                    a: src.a,
+                    b: src.b,
+                    c: src.c,
+                    n: src.n,
+                }),
                 Option::None => {},
             }
         }
         let mut fns = ChunkSeq::with_capacity[FnR](self.fns.len());
         for i in 0..self.fns.len() {
             match self.fns.try_get(i) {
-                Option::Some(src) => fns.push(
-                    FnR {
-                        key: src.key,
-                        name: src.name,
-                        has_body: src.has_body,
-                        body: src.body,
-                        pa: src.pa,
-                        pn: src.pn,
-                        result: src.result,
-                        effects: src.effects,
-                        ga: src.ga,
-                        gn: src.gn,
-                        ca: src.ca,
-                        cn: src.cn,
-                        owner: src.owner,
-                        xa: src.xa,
-                        xn: src.xn,
-                    }
-                ),
+                Option::Some(src) => fns.push(FnR {
+                    key: src.key,
+                    name: src.name,
+                    has_body: src.has_body,
+                    body: src.body,
+                    pa: src.pa,
+                    pn: src.pn,
+                    result: src.result,
+                    effects: src.effects,
+                    ga: src.ga,
+                    gn: src.gn,
+                    ca: src.ca,
+                    cn: src.cn,
+                    owner: src.owner,
+                    xa: src.xa,
+                    xn: src.xn,
+                }),
                 Option::None => {},
             }
         }
         let mut pms = ChunkSeq::with_capacity[Pm](self.pms.len());
         for i in 0..self.pms.len() {
             match self.pms.try_get(i) {
-                Option::Some(src) => pms.push(
-                    Pm {
-                        name: src.name,
-                        pass: src.pass,
-                        qa: src.qa,
-                        qn: src.qn,
-                        ty: src.ty,
-                        s0: src.s0,
-                        s1: src.s1,
-                    }
-                ),
+                Option::Some(src) => pms.push(Pm {
+                    name: src.name,
+                    pass: src.pass,
+                    qa: src.qa,
+                    qn: src.qn,
+                    ty: src.ty,
+                    s0: src.s0,
+                    s1: src.s1,
+                }),
                 Option::None => {},
             }
         }
@@ -467,77 +451,71 @@ impl Ast {
         let mut gens = ChunkSeq::with_capacity[Gn](self.gens.len());
         for i in 0..self.gens.len() {
             match self.gens.try_get(i) {
-                Option::Some(src) => gens.push(
-                    Gn { name: src.name, bound: src.bound, row: src.row }
-                ),
+                Option::Some(src) => gens.push(Gn {
+                    name: src.name,
+                    bound: src.bound,
+                    row: src.row
+                }),
                 Option::None => {},
             }
         }
         let mut effs = ChunkSeq::with_capacity[Ef](self.effs.len());
         for i in 0..self.effs.len() {
             match self.effs.try_get(i) {
-                Option::Some(src) => effs.push(
-                    Ef {
-                        name: src.name,
-                        linear: src.linear,
-                        ga: src.ga,
-                        gn: src.gn,
-                        oa: src.oa,
-                        on: src.on,
-                    }
-                ),
+                Option::Some(src) => effs.push(Ef {
+                    name: src.name,
+                    linear: src.linear,
+                    ga: src.ga,
+                    gn: src.gn,
+                    oa: src.oa,
+                    on: src.on,
+                }),
                 Option::None => {},
             }
         }
         let mut eops = ChunkSeq::with_capacity[Eop](self.eops.len());
         for i in 0..self.eops.len() {
             match self.eops.try_get(i) {
-                Option::Some(src) => eops.push(
-                    Eop {
-                        name: src.name,
-                        pa: src.pa,
-                        pn: src.pn,
-                        result: src.result,
-                    }
-                ),
+                Option::Some(src) => eops.push(Eop {
+                    name: src.name,
+                    pa: src.pa,
+                    pn: src.pn,
+                    result: src.result,
+                }),
                 Option::None => {},
             }
         }
         let mut hds = ChunkSeq::with_capacity[Hd](self.hds.len());
         for i in 0..self.hds.len() {
             match self.hds.try_get(i) {
-                Option::Some(src) => hds.push(
-                    Hd {
-                        pool: src.pool,
-                        label: src.label,
-                        eff_name: src.eff_name,
-                        ta: src.ta,
-                        tn: src.tn,
-                        has_state: src.has_state,
-                        spat: src.spat,
-                        sexpr: src.sexpr,
-                        body: src.body,
-                        ret: src.ret,
-                        on: src.on,
-                        outgoing: src.outgoing,
-                        ma: src.ma,
-                        mn: src.mn,
-                    }
-                ),
+                Option::Some(src) => hds.push(Hd {
+                    pool: src.pool,
+                    label: src.label,
+                    eff_name: src.eff_name,
+                    ta: src.ta,
+                    tn: src.tn,
+                    has_state: src.has_state,
+                    spat: src.spat,
+                    sexpr: src.sexpr,
+                    body: src.body,
+                    ret: src.ret,
+                    on: src.on,
+                    outgoing: src.outgoing,
+                    ma: src.ma,
+                    mn: src.mn,
+                }),
                 Option::None => {},
             }
         }
         let mut cls = ChunkSeq::with_capacity[Cl](self.cls.len());
         for i in 0..self.cls.len() {
             match self.cls.try_get(i) {
-                Option::Some(src) => cls.push(
-                    Cl {
-                        name: src.name,
-                        pa: src.pa,
-                        pn: src.pn,
-                        body: src.body,
-                    }
-                ),
+                Option::Some(src) => cls.push(Cl {
+                    name: src.name,
+                    pa: src.pa,
+                    pn: src.pn,
+                    body: src.body,
+                }),
                 Option::None => {},
             }
         }
@@ -986,24 +964,22 @@ fn read_handler(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) {
     let mn = r.word(in b);
     let ma = a.xs.len();
     read_moves(inout r, in b, in c, inout a, mn);
-    a.hds.push(
-        Hd {
-            pool: pool,
-            label: label,
-            eff_name: eff_name,
-            ta: ta,
-            tn: tn,
-            has_state: has_state,
-            spat: spat,
-            sexpr: sexpr,
-            body: body,
-            ret: ret,
-            on: on,
-            outgoing: outgoing,
-            ma: ma,
-            mn: mn
-        }
-    );
+    a.hds.push(Hd {
+        pool: pool,
+        label: label,
+        eff_name: eff_name,
+        ta: ta,
+        tn: tn,
+        has_state: has_state,
+        spat: spat,
+        sexpr: sexpr,
+        body: body,
+        ret: ret,
+        on: on,
+        outgoing: outgoing,
+        ma: ma,
+        mn: mn
+    });
 }
 
 fn inc32w(value: u32) -> u32 {
@@ -1061,25 +1037,23 @@ pub fn read_ast(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Ast {
             a.caps.push(sym(in c, r.word(in b)));
             a.caps.push(sym(in c, r.word(in b)));
         }
-        a.fns.push(
-            FnR {
-                key: key,
-                name: name,
-                has_body: has_body,
-                body: body,
-                pa: pa,
-                pn: pn,
-                result: result,
-                effects: effects,
-                ga: ga,
-                gn: gn,
-                ca: ca,
-                cn: cn,
-                owner: name,
-                xa: 0,
-                xn: 0
-            }
-        );
+        a.fns.push(FnR {
+            key: key,
+            name: name,
+            has_body: has_body,
+            body: body,
+            pa: pa,
+            pn: pn,
+            result: result,
+            effects: effects,
+            ga: ga,
+            gn: gn,
+            ca: ca,
+            cn: cn,
+            owner: name,
+            xa: 0,
+            xn: 0
+        });
         set_by_symbol(inout a.fn_by_key, key, n32(inc(i)));
     }
     let effect_count = r.word(in b);

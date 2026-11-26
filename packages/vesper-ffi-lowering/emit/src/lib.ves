@@ -1294,9 +1294,15 @@ fn the_call(call: u64, inout b: Builder, inout m: Module, indirect: bool) eff [F
         NO_VALUE
     };
     if len_word != NO_VALUE && raw != NO_VALUE {
-        raw = value_word(
-            foreign_mapping(inout b, inout m, val(raw), val(len_word), len_i64, map_stride, reg_id)
-        );
+        raw = value_word(foreign_mapping(
+            inout b,
+            inout m,
+            val(raw),
+            val(len_word),
+            len_i64,
+            map_stride,
+            reg_id
+        ));
     }
     if rel_n > 0 {
         let free = libc(inout b, inout m, FREE, 1, false);

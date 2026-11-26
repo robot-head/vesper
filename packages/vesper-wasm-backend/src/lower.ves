@@ -934,20 +934,18 @@ impl L {
             let bi = self.inst_of(h.body);
             let body_params = self.cx.ir.info(bi.fi).pn;
             offset = add(offset, wrapping_mul(8, body_params));
-            self.hfns.push(
-                HFns {
-                    dispatch_slot: dispatch_slot,
-                    dispatch: dispatch,
-                    ret: ret,
-                    abort: abort,
-                    frame_size: offset,
-                    pending_offset: pending_offset,
-                    env_offset: env_offset,
-                    body_offset: body_offset,
-                    c0: c0,
-                    cn: names.len()
-                }
-            );
+            self.hfns.push(HFns {
+                dispatch_slot: dispatch_slot,
+                dispatch: dispatch,
+                ret: ret,
+                abort: abort,
+                frame_size: offset,
+                pending_offset: pending_offset,
+                env_offset: env_offset,
+                body_offset: body_offset,
+                c0: c0,
+                cn: names.len()
+            });
         }
     }
 
@@ -2541,9 +2539,13 @@ impl L {
                     return;
                 }
                 if self.cx.fn_sig(root) != 0 {
-                    Fail::raise(
-                        werr_syms(K_UNSUPPORTED, U_FUNCTION_VALUE, 190, self.e.inst.key, root)
-                    );
+                    Fail::raise(werr_syms(
+                        K_UNSUPPORTED,
+                        U_FUNCTION_VALUE,
+                        190,
+                        self.e.inst.key,
+                        root
+                    ));
                 }
                 Fail::raise(werr_syms(K_INVALID, 0, 191, self.e.inst.key, root));
             }
@@ -3410,9 +3412,13 @@ impl L {
             return;
         }
         if ename == NONE32 || self.cx.f.decl_of(ename) == 0 {
-            Fail::raise(
-                werr_syms(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 221, self.e.inst.base, callee)
-            );
+            Fail::raise(werr_syms(
+                K_UNSUPPORTED,
+                U_EXTERNAL_FUNCTION,
+                221,
+                self.e.inst.base,
+                callee
+            ));
         }
         let decl = self.cx.f.decl(wrapping_sub(self.cx.f.decl_of(ename), 1));
         let mut passes = ChunkSeq::new[u8]();
@@ -3741,9 +3747,10 @@ impl L {
             if gi != NONE32 {
                 out.targets.push(gi);
             }
-            out.tn.push(
-                wrapping_sub(out.targets.len(), u64_at(in out.t0, wrapping_sub(out.t0.len(), 1)))
-            );
+            out.tn.push(wrapping_sub(
+                out.targets.len(),
+                u64_at(in out.t0, wrapping_sub(out.t0.len(), 1))
+            ));
         }
         out
     }

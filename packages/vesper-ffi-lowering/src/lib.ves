@@ -1134,19 +1134,17 @@ fn read_function(inout r: Reader, in b: Slice[u8], inout s: S, lib: u64, indirec
         let marker = r.field(in b);
         let link = r.field(in b);
     }
-    s.funs.push(
-        Fun {
-            sym: sym,
-            p0: p0,
-            pn: np,
-            result: result,
-            errno: errno,
-            has_variadic: has_variadic,
-            variadic_first: variadic_first,
-            lib: lib,
-            indirect: indirect
-        }
-    );
+    s.funs.push(Fun {
+        sym: sym,
+        p0: p0,
+        pn: np,
+        result: result,
+        errno: errno,
+        has_variadic: has_variadic,
+        variadic_first: variadic_first,
+        lib: lib,
+        indirect: indirect
+    });
 }
 
 // Function rows funs[f0..f0+n] in symbol order (insertion sort, stable).
@@ -1317,15 +1315,13 @@ pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
         for i in 0..nx {
             let xn = field_sym(inout r, in b, inout s);
             let (c, d) = r.field(in b);
-            s.xts.push(
-                Xt {
-                    name: xn,
-                    linear: field_is(in b, c, d, in "linear"),
-                    copy: false,
-                    drop: NONE,
-                    mapping: NONE
-                }
-            );
+            s.xts.push(Xt {
+                name: xn,
+                linear: field_is(in b, c, d, in "linear"),
+                copy: false,
+                drop: NONE,
+                mapping: NONE
+            });
         }
         if peek_is(in r, in b, in "drop-imports") {
             let marker2 = r.field(in b);
@@ -1388,23 +1384,21 @@ pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
             s.consts.push(ConstRow { name: cname, scalar: csc, neg: neg, value: value });
         }
     }
-    s.libs.push(
-        Lib {
-            name: name,
-            handler: handler,
-            triple: triple,
-            e0: e0,
-            en: ne,
-            f0: f0,
-            fc: nf,
-            w0: w0,
-            wn: wn,
-            x0: x0,
-            xn: wrapping_sub(s.xts.len(), x0),
-            c0: c0,
-            cn: wrapping_sub(s.consts.len(), c0)
-        }
-    );
+    s.libs.push(Lib {
+        name: name,
+        handler: handler,
+        triple: triple,
+        e0: e0,
+        en: ne,
+        f0: f0,
+        fc: nf,
+        w0: w0,
+        wn: wn,
+        x0: x0,
+        xn: wrapping_sub(s.xts.len(), x0),
+        c0: c0,
+        cn: wrapping_sub(s.consts.len(), c0)
+    });
 }
 
 // ----- the type mapping (types.rs) --------------------------------------------

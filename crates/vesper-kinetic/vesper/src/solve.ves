@@ -1629,14 +1629,12 @@ pub fn solve(
             let w = bw(in b, i);
             let spin = qmul(Q4 { x: w.x, y: w.y, z: w.z, w: 0.0 }, q0);
             let half_h = 0.5 * h;
-            let q = normalize_q(
-                Q4 {
-                    x: q0.x + half_h * spin.x,
-                    y: q0.y + half_h * spin.y,
-                    z: q0.z + half_h * spin.z,
-                    w: q0.w + half_h * spin.w
-                }
-            );
+            let q = normalize_q(Q4 {
+                x: q0.x + half_h * spin.x,
+                y: q0.y + half_h * spin.y,
+                z: q0.z + half_h * spin.z,
+                w: q0.w + half_h * spin.w
+            });
             set_q(inout b, i, q);
             sv(inout sc, wrapping_add(s, 13), x);
             sq(inout sc, wrapping_add(s, 16), q);

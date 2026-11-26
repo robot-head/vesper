@@ -236,16 +236,14 @@ fn copy_param(inout dst: Ast, in src: Ast, id: u32, base: u32) -> u32 {
     let name = copy_sym(inout dst, in src, p.name);
     let ty = copy_type(inout dst, in src, p.ty);
     dst.params
-        .alloc(
-            ParamNode {
-                name: name,
-                pass: p.pass,
-                projections: 0,
-                ty: ty,
-                start: wrapping_add(p.start, base),
-                end: wrapping_add(p.end, base)
-            }
-        )
+        .alloc(ParamNode {
+            name: name,
+            pass: p.pass,
+            projections: 0,
+            ty: ty,
+            start: wrapping_add(p.start, base),
+            end: wrapping_add(p.end, base)
+        })
         .raw
 }
 
@@ -275,16 +273,14 @@ fn copy_pat(inout dst: Ast, in src: Ast, id: u32, base: u32) -> u32 {
         b = alloc_list(inout dst, in fields);
     }
     dst.pats
-        .alloc(
-            PatNode {
-                kind: p.kind,
-                start: wrapping_add(p.start, base),
-                end: wrapping_add(p.end, base),
-                a: a,
-                b: b,
-                c: p.c
-            }
-        )
+        .alloc(PatNode {
+            kind: p.kind,
+            start: wrapping_add(p.start, base),
+            end: wrapping_add(p.end, base),
+            a: a,
+            b: b,
+            c: p.c
+        })
         .raw
 }
 
@@ -344,18 +340,16 @@ fn copy_expr(inout dst: Ast, in src: Ast, id: u32, base: u32) -> u32 {
         b = alloc_list(inout dst, in arms);
     }
     dst.exprs
-        .alloc(
-            ExprNode {
-                kind: e.kind,
-                start: wrapping_add(e.start, base),
-                end: wrapping_add(e.end, base),
-                a: a,
-                b: b,
-                c: c,
-                d: e.d,
-                e: e.e
-            }
-        )
+        .alloc(ExprNode {
+            kind: e.kind,
+            start: wrapping_add(e.start, base),
+            end: wrapping_add(e.end, base),
+            a: a,
+            b: b,
+            c: c,
+            d: e.d,
+            e: e.e
+        })
         .raw
 }
 
@@ -384,19 +378,17 @@ fn copy_fn(inout dst: Ast, in src: Ast, id: u32, base: u32, new_name: u32) -> u3
     let effects = copy_effects(inout dst, in src, f.effects);
     let body = copy_expr(inout dst, in src, f.body, base);
     dst.fns
-        .alloc(
-            FnNode {
-                name: new_name,
-                fip: f.fip,
-                generics: 0,
-                params: param_list,
-                result: result,
-                effects: effects,
-                body: body,
-                start: wrapping_add(f.start, base),
-                end: wrapping_add(f.end, base)
-            }
-        )
+        .alloc(FnNode {
+            name: new_name,
+            fip: f.fip,
+            generics: 0,
+            params: param_list,
+            result: result,
+            effects: effects,
+            body: body,
+            start: wrapping_add(f.start, base),
+            end: wrapping_add(f.end, base)
+        })
         .raw
 }
 

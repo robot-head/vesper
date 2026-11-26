@@ -1538,22 +1538,8 @@ fn short_if_else(in at: Atoms, start: u64, end: u8, in src: Slice[u8]) -> u64 {
             || depth == 0 && (kind == K_COMMA || kind == K_ARROW) {
             return NONE;
         }
-        if has_prev {
-            let space = if prev == K_L_PAREN
-                || prev == K_L_BRACKET
-                || kind == K_R_PAREN
-                || kind == K_R_BRACKET
-                || unary {
-                false
-            } else if prev == K_L_BRACE || kind == K_R_BRACE {
-                true
-            } else {
-                let g = gap(prev, kind, false, prev == K_R_BRACE);
-                g != G_NONE && g != G_EMPTY
-            };
-            if space {
-                width = wrapping_add(width, 1);
-            }
+        if has_prev && spaced(prev, kind, unary) {
+            width = wrapping_add(width, 1);
         }
         width = wrapping_add(width, chars(in src, w32(in at.start, i), w32(in at.end, i)));
         if width > SHORT_IF_ELSE_WIDTH {
@@ -1616,6 +1602,152 @@ fn short_if_else(in at: Atoms, start: u64, end: u8, in src: Slice[u8]) -> u64 {
     }
 }
 
+// Whether a space separates two tokens on one line, for the width estimates
+// of `short_if_else` and `sole_argument`.
+fn spaced(prev: u8, kind: u8, unary: bool) -> bool {
+    if prev == K_L_PAREN
+        || prev == K_L_BRACKET
+        || kind == K_R_PAREN
+        || kind == K_R_BRACKET
+        || unary {
+        false
+    } else if prev == K_L_BRACE || kind == K_R_BRACE {
+        true
+    } else {
+        let g = gap(prev, kind, false, prev == K_R_BRACE);
+        g != G_NONE && g != G_EMPTY
+    }
+}
+
+fn sugar_at(in at: Atoms, i: u64) -> bool {
+    match at.sgap.try_get(i) {
+        Option::Some(g) => g != SGAP_NONE,
+        Option::None => false,
+    }
+}
+
+// A call's one argument that, like rustfmt, stays on the call's line and
+// breaks inside instead (`push(Row {`, `wrap(inner(`, `n32(match x {`): a
+// struct literal, a call or a `match`, with nothing after its last delimiter.
+// `open` is the call's `(`. Returns the argument's width up to and including
+// the delimiter that breaks, or NONE.
+fn sole_argument(in at: Atoms, open: u64, in src: Slice[u8]) -> u64 {
+    let n = at.kind.len();
+    let mut i = wrapping_add(open, 1);
+    if i >= n {
+        return NONE;
+    }
+    let mut width: u64 = 0;
+    let mut delimiter = NONE;
+    if akind(in at, i) == K_MATCH {
+        // `match` and its scrutinee, up to the `{` of its arms.
+        let mut depth: u64 = 0;
+        let mut has_prev = false;
+        let mut prev: u8 = 0;
+        let mut unary = false;
+        loop {
+            if i >= n {
+                return NONE;
+            }
+            let kind = akind(in at, i);
+            if kind == K_COMMENT
+                || kind == K_BLOCK_COMMENT
+                || kind == K_SEMI
+                || depth == 0 && kind == K_COMMA
+                || sugar_at(in at, i) {
+                return NONE;
+            }
+            if kind == K_L_BRACE && depth == 0 {
+                if i < wrapping_add(open, 3) {
+                    return NONE;
+                }
+                width = wrapping_add(width, 2);
+                delimiter = i;
+                break;
+            }
+            if has_prev && spaced(prev, kind, unary) {
+                width = wrapping_add(width, 1);
+            }
+            width = wrapping_add(width, chars(in src, w32(in at.start, i), w32(in at.end, i)));
+            unary = (kind == K_MINUS || kind == K_BANG || kind == K_TILDE)
+                && !(has_prev && ends_operand(prev));
+            has_prev = true;
+            prev = kind;
+            if kind == K_L_PAREN || kind == K_L_BRACKET {
+                depth = wrapping_add(depth, 1);
+            } else if kind == K_R_PAREN || kind == K_R_BRACKET {
+                if depth == 0 {
+                    return NONE;
+                }
+                depth = wrapping_sub(depth, 1);
+            } else if kind == K_L_BRACE || kind == K_R_BRACE {
+                return NONE;
+            }
+            i = wrapping_add(i, 1);
+        }
+    } else {
+        // A path: `Row`, `ast::Node`, `wrap`, `Option::Some`.
+        let mut name = true;
+        loop {
+            if i >= n {
+                return NONE;
+            }
+            let kind = akind(in at, i);
+            if (kind == K_LOWER || kind == K_UPPER) && name {
+                name = false;
+            } else if kind == K_COLON_COLON && !name {
+                name = true;
+            } else if kind == K_L_PAREN && !name && i > wrapping_add(open, 1) {
+                width = wrapping_add(width, 1);
+                delimiter = i;
+                break;
+            } else if kind == K_L_BRACE
+                && !name
+                && akind(in at, wrapping_sub(i, 1)) == K_UPPER
+                && aflags(in at, i) & 4 != 0
+                && tagged_layout(in at, i) == TAG_NO {
+                width = wrapping_add(width, 2);
+                delimiter = i;
+                break;
+            } else {
+                return NONE;
+            }
+            if sugar_at(in at, i) {
+                return NONE;
+            }
+            width = wrapping_add(width, chars(in src, w32(in at.start, i), w32(in at.end, i)));
+            i = wrapping_add(i, 1);
+        }
+    }
+    // The delimiter holds something and closes right before the call's `)`.
+    let mut depth: u64 = 0;
+    let mut j = delimiter;
+    loop {
+        if j >= n || sugar_at(in at, j) {
+            return NONE;
+        }
+        let kind = akind(in at, j);
+        if kind == K_L_PAREN || kind == K_L_BRACKET || kind == K_L_BRACE {
+            depth = wrapping_add(depth, 1);
+        } else if kind == K_R_PAREN || kind == K_R_BRACKET || kind == K_R_BRACE {
+            if depth == 0 {
+                return NONE;
+            }
+            depth = wrapping_sub(depth, 1);
+            if depth == 0 {
+                break;
+            }
+        }
+        j = wrapping_add(j, 1);
+    }
+    let after = wrapping_add(j, 1);
+    if j > wrapping_add(delimiter, 1) && after < n && akind(in at, after) == K_R_PAREN {
+        width
+    } else {
+        NONE
+    }
+}
+
 fn sequence(
     in at: Atoms,
     inout pos: u64,
@@ -1627,6 +1759,10 @@ fn sequence(
     // delimiter or block it is nested in adds 4 once it breaks, and a line
     // break inside one means it broke.
     indent: u64,
+    // The column the sequence's first line starts at, when the lines before
+    // it are as estimated: `indent`, unless the sequence is a call's one
+    // argument kept on the call's line.
+    column: u64,
     inout d: Doc,
     in src: Slice[u8]
 ) -> u64 eff [Fail[FmtFail]] {
@@ -1666,6 +1802,8 @@ fn sequence(
     let mut closure_open = false;
     let mut short_docs: u64 = 0;
     let mut short_breaks: u64 = 0;
+    // The column `line` starts at.
+    let mut line_start = column;
     loop {
         if pos >= n {
             break;
@@ -1817,12 +1955,14 @@ fn sequence(
         }
         if spacing == G_HARD {
             concat_group(inout line, inout breaks, inout d, inout output);
+            line_start = indent;
             if blank {
                 output.push(wrapping_u32(push_leaf(inout d, D_NEWLINE)));
             }
             output.push(wrapping_u32(push_leaf(inout d, D_HARD)));
         } else if spacing == G_SOFT && list && after_comma {
             concat_group(inout line, inout breaks, inout d, inout output);
+            line_start = indent;
             separators.push(wrapping_u32(output.len()));
             output.push(wrapping_u32(push_leaf(inout d, D_SOFT_SPACE)));
         } else if spacing == G_SOFT && !is_block && near_comment {
@@ -1831,6 +1971,7 @@ fn sequence(
             line.push(wrapping_u32(push_leaf(inout d, D_SPACE)));
         } else if spacing == G_RETURN {
             concat_group(inout line, inout breaks, inout d, inout output);
+            line_start = indent;
             let lead = push_leaf(inout d, D_SOFT_SPACE);
             breaks.push(LayoutBreak { offset: line.len(), level: 1 });
             line.push(wrapping_u32(lead));
@@ -1863,6 +2004,7 @@ fn sequence(
         }
         if is_block && !soft_block {
             concat_group(inout line, inout breaks, inout d, inout output);
+            line_start = indent;
             if spacing == G_SOFT || spacing == G_SPACE {
                 output.push(wrapping_u32(push_leaf(inout d, D_SPACE)));
             }
@@ -1881,6 +2023,35 @@ fn sequence(
             let empty = pos < n && akind(in at, pos) == close;
             let start = push_text(inout d, in src, cs, ce, false);
             let fill = c == K_L_BRACE && has_prev && prev == K_COLON_COLON;
+            // A call's one argument stays on the call's line when its first
+            // line fits there, as in rustfmt (`push(Row {`), and breaks
+            // inside instead: the column the argument would start at.
+            let mut overflow = NONE;
+            if c == K_L_PAREN && in_expr && has_prev && (prev == K_LOWER || prev == K_UPPER) {
+                let mut at_column = line_start;
+                for i in 0..line.len() {
+                    let w = width_at(in d, w32(in line, i));
+                    at_column = if at_column == NONE || w == NONE {
+                        NONE
+                    } else {
+                        wrapping_add(at_column, w)
+                    };
+                }
+                if at_column != NONE {
+                    at_column = wrapping_add(at_column, 1);
+                    let head = sole_argument(in at, wrapping_sub(pos, 1), in src);
+                    if head != NONE && wrapping_add(at_column, head) <= LINE_WIDTH {
+                        overflow = at_column;
+                    }
+                }
+            }
+            // A hugging call does not indent its contents, nor does a call
+            // whose argument stays on its line.
+            let inner_indent = if tagged == TAG_HUG || overflow != NONE {
+                indent
+            } else {
+                cadd(indent, 4)
+            };
             let inner = sequence(
                 in at,
                 inout pos,
@@ -1888,11 +2059,11 @@ fn sequence(
                 is_block,
                 fill,
                 tagged == TAG_HUG,
-                // A hugging call does not indent its contents.
-                if tagged == TAG_HUG {
-                    indent
+                inner_indent,
+                if overflow != NONE {
+                    overflow
                 } else {
-                    cadd(indent, 4)
+                    inner_indent
                 },
                 inout d,
                 in src
@@ -1922,6 +2093,9 @@ fn sequence(
             params = c == K_L_PAREN && !empty && pos < n && akind(in at, pos) == K_ARROW;
             if empty {
                 concat4(inout d, start, finish, 4294967295, 4294967295)
+            } else if overflow != NONE {
+                let all = concat4(inout d, start, inner, finish, 4294967295);
+                push_group(inout d, all)
             } else {
                 let lead = push_leaf(
                     inout d,
@@ -2685,7 +2859,7 @@ fn render_atoms(
     dl.max_work = wrapping_sub(w.max, w.used);
     let mut d = doc_new(in dl, wrapping_add(wrapping_mul(at.kind.len(), 3), 8));
     let mut pos: u64 = 0;
-    let root = sequence(in at, inout pos, 255, false, false, false, 0, inout d, in src);
+    let root = sequence(in at, inout pos, 255, false, false, false, 0, 0, inout d, in src);
     let end = push_leaf(inout d, D_HARD);
     let root = push_concat2(inout d, root, end);
     let out = render(inout d, in src, root);

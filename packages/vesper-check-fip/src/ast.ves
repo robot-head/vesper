@@ -280,21 +280,19 @@ pub fn read_ast(
         let effects = ty(in tmap, r.word(in b));
         let body = opt(r.word(in b));
         set_index(inout by_name, name, wrapping_add(n32(i), 1));
-        fns.push(
-            FnRow {
-                name: name,
-                fip: fip,
-                start: start,
-                end: end,
-                ga: ga,
-                gn: n32(gn),
-                pa: pa,
-                pn: n32(qn2),
-                result: result,
-                effects: effects,
-                body: body
-            }
-        );
+        fns.push(FnRow {
+            name: name,
+            fip: fip,
+            start: start,
+            end: end,
+            ga: ga,
+            gn: n32(gn),
+            pa: pa,
+            pn: n32(qn2),
+            result: result,
+            effects: effects,
+            body: body
+        });
     }
     Ast {
         pool: pool,

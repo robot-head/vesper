@@ -457,9 +457,10 @@ impl Rules {
     }
 
     pub fn var_reg(in self, rule: u64, var: u64) -> u64 {
-        widen_u64(
-            u32_at(in self.vreg, wrapping_add(widen_u64(u32_at(in self.vreg_start, rule)), var))
-        )
+        widen_u64(u32_at(
+            in self.vreg,
+            wrapping_add(widen_u64(u32_at(in self.vreg_start, rule)), var)
+        ))
     }
 
     pub fn prog(in self, rule: u64) -> (u64, u64) {

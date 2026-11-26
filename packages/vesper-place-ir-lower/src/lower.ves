@@ -1976,25 +1976,23 @@ fn add_nested(inout l: L, kind: u8, body: u64, in params: ChunkSeq[Pm], result: 
         }
     }
     let owner = if kind == NK_BODY { l.owner } else { name };
-    l.a.add_function(
-        FnR {
-            key: name,
-            name: name,
-            has_body: true,
-            body: body,
-            pa: pa,
-            pn: params.len(),
-            result: result,
-            effects: effects,
-            ga: l.fga,
-            gn: l.fgn,
-            ca: ca,
-            cn: cn,
-            owner: owner,
-            xa: xa,
-            xn: xn
-        }
-    );
+    l.a.add_function(FnR {
+        key: name,
+        name: name,
+        has_body: true,
+        body: body,
+        pa: pa,
+        pn: params.len(),
+        result: result,
+        effects: effects,
+        ga: l.fga,
+        gn: l.fgn,
+        ca: ca,
+        cn: cn,
+        owner: owner,
+        xa: xa,
+        xn: xn
+    });
 }
 
 // The free names of `body` (minus the bound ones), or false when a
@@ -3136,53 +3134,47 @@ fn flush(inout l: L, f: FnR) {
                 put_p(inout l, sop(in l, j), u8_at(in l.stags, j));
             }
             let has_token = if inst.action || inst.read { 1 } else { 0 };
-            l.p.insts.push(
-                InstRow {
-                    dest: inst.dest,
-                    ty: inst.ty,
-                    s0: inst.s0,
-                    s1: inst.s1,
-                    has_token: has_token,
-                    tin: u64_at(in tin, i),
-                    tout: u64_at(in tout, i),
-                    fallible: if inst.fallible { 1 } else { 0 },
-                    op: inst.op,
-                    a: ops_start,
-                    n: inst.n
-                }
-            );
+            l.p.insts.push(InstRow {
+                dest: inst.dest,
+                ty: inst.ty,
+                s0: inst.s0,
+                s1: inst.s1,
+                has_token: has_token,
+                tin: u64_at(in tin, i),
+                tout: u64_at(in tout, i),
+                fallible: if inst.fallible { 1 } else { 0 },
+                op: inst.op,
+                a: ops_start,
+                n: inst.n
+            });
         }
         let ic = wrapping_sub(l.p.insts.len(), i0);
         let ta = l.p.ops.len();
         for j in block_row.ta..add(block_row.ta, block_row.tn) {
             put_p(inout l, sop(in l, j), u8_at(in l.stags, j));
         }
-        l.p.blocks.push(
-            BlockRow {
-                ha: bha,
-                hn: bhn,
-                i0: i0,
-                ic: ic,
-                term: block_row.term,
-                ta: ta,
-                tn: wrapping_sub(l.p.ops.len(), ta)
-            }
-        );
+        l.p.blocks.push(BlockRow {
+            ha: bha,
+            hn: bhn,
+            i0: i0,
+            ic: ic,
+            term: block_row.term,
+            ta: ta,
+            tn: wrapping_sub(l.p.ops.len(), ta)
+        });
     }
     // The trailer: no fip side tables at lowering.
     let ta = l.p.ops.len();
     for j in 0..5 {
         put_p(inout l, 0, Tag::Raw);
     }
-    l.p.fns.push(
-        FnRow {
-            name: f.name,
-            ha: ha,
-            hn: hn,
-            b0: b0,
-            bc: block_count,
-            ta: ta,
-            tn: wrapping_sub(l.p.ops.len(), ta)
-        }
-    );
+    l.p.fns.push(FnRow {
+        name: f.name,
+        ha: ha,
+        hn: hn,
+        b0: b0,
+        bc: block_count,
+        ta: ta,
+        tn: wrapping_sub(l.p.ops.len(), ta)
+    });
 }

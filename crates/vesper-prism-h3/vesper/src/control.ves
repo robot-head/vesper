@@ -235,14 +235,12 @@ fn pending_bytes(
         remove_at(inout c, i);
         let start = wrapping_add(n, s.used);
         let at = put_out(inout c, in buf[start..len]);
-        c.cmds.push(
-            UniCmd::WebTransportStream {
-                stream_id: id,
-                session: s.value,
-                at: at,
-                len: wrapping_sub(len, start)
-            }
-        );
+        c.cmds.push(UniCmd::WebTransportStream {
+            stream_id: id,
+            session: s.value,
+            at: at,
+            len: wrapping_sub(len, start)
+        });
         return Result::Ok(true);
     }
     let kind = if ty == STREAM_CONTROL {
@@ -302,9 +300,10 @@ fn control_frames(inout c: UniCore, id: u64) -> Result[bool, ConnectionError] {
     loop {
         let f = match reader_next(inout c.reader) {
             Result::Ok(f) => f,
-            Result::Err(e) => return Result::Err(
-                ConnectionError::Frame { stream_id: id, error: e }
-            ),
+            Result::Err(e) => return Result::Err(ConnectionError::Frame {
+                stream_id: id,
+                error: e
+            }),
         };
         let done = match f {
             FrameOut::None => true,
