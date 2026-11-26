@@ -1563,6 +1563,10 @@ fn seq_option_op(op: crate::seq::SeqOp, shape: &EnumShape) -> bool {
     shape.words.len() == 2
         && (matches!(op, crate::seq::SeqOp::Pop | crate::seq::SeqOp::Last)
             || matches!(op, crate::seq::SeqOp::Wide(w) if !w.write && w.total)
+            || matches!(
+                op,
+                crate::seq::SeqOp::Hoisted(crate::seq::Access::Wide(w)) if !w.write && w.total
+            )
             || op.byte_scan())
 }
 

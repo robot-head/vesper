@@ -4,8 +4,8 @@
 // writes the decision text `Step::decision` holds.
 
 use self::fun::{
-    Arg, Blk, Fun, Ins, add, calls_out, has, has_receiver, hoistable, inc, insert, is_hoisted,
-    keeps_length, n32, set_u32, set_u8, u32_at, u64_at, u8_at, w
+    Arg, Blk, Fun, Ins, access_width, add, counted_access, calls_out, has, has_receiver, hoistable,
+    inc, insert, is_hoisted, is_wide, keeps_length, n32, set_u32, set_u8, u32_at, u64_at, u8_at, w
 };
 use self::graph::{
     Graph, entered_inside, graph, is_loop_header, natural_loop, no_cut, outside_preds, successors
@@ -40,6 +40,9 @@ const B_WADD: u64 = 6;
 const B_SUB: u64 = 7;
 const B_WSUB: u64 = 8;
 const B_EQ: u64 = 9;
+const B_MUL: u64 = 10;
+const B_WMUL: u64 = 11;
+const B_SHL: u64 = 12;
 const S_GET: u64 = 2;
 const S_SLICE_SET: u64 = 5;
 const S_GUARD: u64 = 18;
@@ -58,8 +61,35 @@ pub fn put_access(inout o: ChunkSeq[u8], a: u64) {
         put(inout o, "set");
     } else if a == 2 {
         put(inout o, "try_get");
+    } else if is_wide(a) {
+        put_wide(inout o, wrapping_sub(a, 32));
     } else {
         put(inout o, "try_set");
+    }
+}
+
+// `Wide::name` of the access numbered `k` (`Wide::code`).
+fn put_wide(inout o: ChunkSeq[u8], k: u64) {
+    if k >= 12 {
+        put(inout o, "try_");
+    }
+    if (k / 6) % 2 == 1 {
+        put(inout o, "write_u");
+    } else {
+        put(inout o, "read_u");
+    }
+    let width = (k / 2) % 3;
+    if width == 0 {
+        put(inout o, "16");
+    } else if width == 1 {
+        put(inout o, "32");
+    } else {
+        put(inout o, "64");
+    }
+    if k % 2 == 1 {
+        put(inout o, "_be");
+    } else {
+        put(inout o, "_le");
     }
 }
 
@@ -300,7 +330,9 @@ pub fn sort_u64(inout s: ChunkSeq[u64]) {
 }
 
 // A linear index form: `sign * i + plus.. - minus..`, its terms in
-// `Counted.offs` (kind << 62 | value or instruction index).
+// `Counted.offs` (kind << 62 | value or instruction index); with a `scale`
+// `c` (0 for none), `c * (sign * i + plus.. - minus..) + outer_plus.. -
+// outer_minus..` (`q` and `r`, #2022).
 pub copy struct Lin {
     ok: bool,
     sign: i64,
@@ -308,6 +340,22 @@ pub copy struct Lin {
     pn: u32,
     m0: u32,
     mn: u32,
+    scale: u64,
+    q0: u32,
+    qn: u32,
+    r0: u32,
+    rn: u32,
+}
+
+// The largest sum of constant offsets folded into a guard's width.
+const MAX_EXTENT: u64 = 64;
+
+// The largest constant a scaled index multiplies by (`MAX_SCALE`).
+const MAX_SCALE: u64 = 2147483648;
+
+// `Linear::terms`.
+pub fn lin_terms(l: Lin) -> u64 {
+    add(add(w(l.pn), w(l.mn)), add(w(l.qn), w(l.rn)))
 }
 
 const O_VALUE: u64 = 0;
@@ -315,7 +363,7 @@ const O_LOCAL: u64 = 1;
 const O_CONST: u64 = 2;
 
 pub fn fail_lin() -> Lin {
-    Lin { ok: false, sign: 0, p0: 0, pn: 0, m0: 0, mn: 0 }
+    Lin { ok: false, sign: 0, p0: 0, pn: 0, m0: 0, mn: 0, scale: 0, q0: 0, qn: 0, r0: 0, rn: 0 }
 }
 
 // The index analysis of one counted loop (`Affine`).
@@ -344,7 +392,7 @@ impl Counted {
     fn term(inout self, kind: u64, x: u64) -> Lin {
         let p0 = n32(self.offs.len());
         self.offs.push(wrapping_shl_u64(kind, 62) | x);
-        Lin { ok: true, sign: 0, p0: p0, pn: 1, m0: 0, mn: 0 }
+        Lin { ok: true, sign: 0, p0: p0, pn: 1, m0: 0, mn: 0, scale: 0, q0: 0, qn: 0, r0: 0, rn: 0 }
     }
 
     fn copy_range(inout self, a: u32, n: u32) -> u32 {
@@ -356,7 +404,8 @@ impl Counted {
         start
     }
 
-    // `Linear::combine`: `x + y` (`x - y` when `negate`).
+    // `Linear::combine`: `x + y` (`x - y` when `negate`). The terms of the
+    // side without the loop index join the scaled side's outer terms.
     fn combine(inout self, x: Lin, y: Lin, negate: bool) -> Lin {
         let sign = if negate {
             wrapping_neg_i64(y.sign)
@@ -366,26 +415,62 @@ impl Counted {
         if x.sign != 0 && sign != 0 {
             return fail_lin();
         }
-        let ya = if negate {
-            y.m0
+        // y's plus, minus, outer plus and outer minus ranges, negated
+        let (ya, yn, za, zn) = if negate {
+            (y.m0, y.mn, y.p0, y.pn)
         } else {
-            y.p0
+            (y.p0, y.pn, y.m0, y.mn)
         };
-        let yn = if negate {
-            y.mn
+        let (yqa, yqn, yra, yrn) = if negate {
+            (y.r0, y.rn, y.q0, y.qn)
         } else {
-            y.pn
+            (y.q0, y.qn, y.r0, y.rn)
         };
-        let za = if negate {
-            y.p0
-        } else {
-            y.m0
-        };
-        let zn = if negate {
-            y.pn
-        } else {
-            y.mn
-        };
+        if x.scale != 0 && y.scale != 0 {
+            return fail_lin();
+        }
+        if x.scale != 0 {
+            let p0 = self.copy_range(x.p0, x.pn);
+            let m0 = self.copy_range(x.m0, x.mn);
+            let q0 = self.copy_range(x.q0, x.qn);
+            let more = self.copy_range(ya, yn);
+            let r0 = self.copy_range(x.r0, x.rn);
+            let more2 = self.copy_range(za, zn);
+            return Lin {
+                ok: true,
+                sign: x.sign,
+                p0: p0,
+                pn: x.pn,
+                m0: m0,
+                mn: x.mn,
+                scale: x.scale,
+                q0: q0,
+                qn: wrapping_add(x.qn, yn),
+                r0: r0,
+                rn: wrapping_add(x.rn, zn)
+            };
+        }
+        if y.scale != 0 {
+            let p0 = self.copy_range(ya, yn);
+            let m0 = self.copy_range(za, zn);
+            let q0 = self.copy_range(x.p0, x.pn);
+            let more = self.copy_range(yqa, yqn);
+            let r0 = self.copy_range(x.m0, x.mn);
+            let more2 = self.copy_range(yra, yrn);
+            return Lin {
+                ok: true,
+                sign: sign,
+                p0: p0,
+                pn: yn,
+                m0: m0,
+                mn: zn,
+                scale: y.scale,
+                q0: q0,
+                qn: wrapping_add(x.pn, yqn),
+                r0: r0,
+                rn: wrapping_add(x.mn, yrn)
+            };
+        }
         let p0 = self.copy_range(x.p0, x.pn);
         let more = self.copy_range(ya, yn);
         let m0 = self.copy_range(x.m0, x.mn);
@@ -396,8 +481,74 @@ impl Counted {
             p0: p0,
             pn: wrapping_add(x.pn, yn),
             m0: m0,
-            mn: wrapping_add(x.mn, zn)
+            mn: wrapping_add(x.mn, zn),
+            scale: 0,
+            q0: 0,
+            qn: 0,
+            r0: 0,
+            rn: 0
         }
+    }
+
+    // `Linear::without_constants`: `l` without its constant terms added
+    // last (outer plus when scaled, else plus), and their sum when it is
+    // at most MAX_EXTENT (else `l` and 0).
+    fn without_constants(inout self, in f: Fun, l: Lin) -> (Lin, u64) {
+        let (a0, an) = if l.scale != 0 {
+            (l.q0, l.qn)
+        } else {
+            (l.p0, l.pn)
+        };
+        let mut sum: u64 = 0;
+        let mut big = false;
+        for q in 0..w(an) {
+            let x = u64_at(in self.offs, add(w(a0), q));
+            if (x >> 62) == O_CONST {
+                let ci = f.inst(x & 4611686018427387903);
+                if ci.hi != 0 || ci.lo > MAX_EXTENT {
+                    big = true;
+                } else {
+                    sum = add(sum, ci.lo);
+                }
+            }
+        }
+        if sum == 0 || big || sum > MAX_EXTENT {
+            return (l, 0);
+        }
+        let start = n32(self.offs.len());
+        let mut kept: u32 = 0;
+        for q in 0..w(an) {
+            let x = u64_at(in self.offs, add(w(a0), q));
+            if (x >> 62) != O_CONST {
+                self.offs.push(x);
+                kept = wrapping_add(kept, 1);
+            }
+        }
+        let mut out = l;
+        if l.scale != 0 {
+            out.q0 = start;
+            out.qn = kept;
+        } else {
+            out.p0 = start;
+            out.pn = kept;
+        }
+        (out, sum)
+    }
+
+    // `Linear::scaled`: `c * l`, for an unscaled form in the loop index.
+    fn scaled(in self, l: Lin, c: SlotConst) -> Lin {
+        if !l.ok {
+            return fail_lin();
+        }
+        if !c.neg && c.hi == 0 && c.lo == 1 {
+            return l;
+        }
+        if l.sign == 0 || l.scale != 0 || c.neg || c.hi != 0 || c.lo < 2 || c.lo > MAX_SCALE {
+            return fail_lin();
+        }
+        let mut out = l;
+        out.scale = c.lo;
+        out
     }
 
     // `Affine::linear`: the linear form of the `u64` value `v`.
@@ -406,7 +557,19 @@ impl Counted {
             return fail_lin();
         }
         if has(in self.induction, v) {
-            return Lin { ok: true, sign: 1, p0: 0, pn: 0, m0: 0, mn: 0 };
+            return Lin {
+                ok: true,
+                sign: 1,
+                p0: 0,
+                pn: 0,
+                m0: 0,
+                mn: 0,
+                scale: 0,
+                q0: 0,
+                qn: 0,
+                r0: 0,
+                rn: 0
+            };
         }
         if !has(in self.defined, v) {
             return self.term(O_VALUE, w(v));
@@ -451,6 +614,38 @@ impl Counted {
                 return fail_lin();
             }
             return self.combine(a, b, negate);
+        }
+        // `x * c` or `c * x` for a constant `c` (#2022).
+        if i.op == OP_BINARY && (i.sub == B_MUL || i.sub == B_WMUL) {
+            let cb = constant_value(in f, i.b, 0);
+            if cb.ok {
+                let a = self.linear (in f, i.a, inc(depth));
+                return self.scaled(a, cb);
+            }
+            let ca = constant_value(in f, i.a, 0);
+            if !ca.ok {
+                return fail_lin();
+            }
+            let b = self.linear (in f, i.b, inc(depth));
+            return self.scaled(b, ca);
+        }
+        // `x << c` for a constant `c` below 32.
+        if i.op == OP_BINARY && i.sub == B_SHL {
+            let c = constant_value(in f, i.b, 0);
+            if !c.ok || c.neg || c.hi != 0 || c.lo >= 32 {
+                return fail_lin();
+            }
+            let a = self.linear (in f, i.a, inc(depth));
+            return self
+                .scaled(
+                    a,
+                    SlotConst {
+                        ok: true,
+                        neg: false,
+                        lo: wrapping_shl_u64(1, wrapping_u32(c.lo)),
+                        hi: 0
+                    }
+                );
         }
         fail_lin()
     }
@@ -500,6 +695,14 @@ impl Counted {
         self.put_terms(in f, l.p0, l.pn, 43, inout o);
         o.push(45);
         self.put_terms(in f, l.m0, l.mn, 45, inout o);
+        if l.scale != 0 {
+            o.push(42);
+            put_u64(inout o, l.scale);
+            o.push(43);
+            self.put_terms(in f, l.q0, l.qn, 43, inout o);
+            o.push(45);
+            self.put_terms(in f, l.r0, l.rn, 45, inout o);
+        }
     }
 }
 
@@ -755,6 +958,8 @@ pub struct CountedPlan {
     rkey: ChunkSeq[u64],
     rread: ChunkSeq[u64],
     rform: ChunkSeq[Lin],
+    // the elements each access of the receiver touches
+    rwidth: ChunkSeq[u64],
     // (dest << 8 | access)
     accesses: ChunkSeq[u64],
 }
@@ -778,6 +983,7 @@ fn no_plan(head: Head) -> CountedPlan {
         rkey: ChunkSeq::new[u64](),
         rread: ChunkSeq::new[u64](),
         rform: ChunkSeq::new[Lin](),
+        rwidth: ChunkSeq::new[u64](),
         accesses: ChunkSeq::new[u64]()
     }
 }
@@ -804,6 +1010,11 @@ pub fn counted_text(in f: Fun, inout o: ChunkSeq[u8]) {
             o.push(32);
         }
         plan.keys.put_key(u64_at(in plan.rkey, q), inout o);
+        let width = u64_at(in plan.rwidth, q);
+        if width != 1 {
+            o.push(47);
+            put_u64(inout o, width);
+        }
         o.push(58);
         put_u64(inout o, w(f.inst(u64_at(in plan.rread, q)).dest));
     }
@@ -1154,6 +1365,7 @@ pub fn counted_plan(in f: Fun) -> CountedPlan {
     let mut kread: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut kstable: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut kform: ChunkSeq[Lin] = ChunkSeq::new[Lin]();
+    let mut kwidth: ChunkSeq[u64] = ChunkSeq::new[u64]();
     // candidates: (dest, access, key), the last insertion of a dest wins
     let mut cdest: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut cacc: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -1167,7 +1379,7 @@ pub fn counted_plan(in f: Fun) -> CountedPlan {
             if i.op != OP_SEQ || i.gn < 2 {
                 continue;
             }
-            let access = hoistable(i.sub);
+            let access = counted_access(i.sub);
             if access == 4 {
                 continue;
             }
@@ -1181,7 +1393,7 @@ pub fn counted_plan(in f: Fun) -> CountedPlan {
                 continue;
             }
             let form = c.linear (in f, index.value, 0);
-            if !form.ok || form.sign == 0 || add(w(form.pn), w(form.mn)) > MAX_TERMS {
+            if !form.ok || form.sign == 0 || lin_terms(form) > MAX_TERMS {
                 continue;
             }
             let read = f.inst(wrapping_sub(rd, 1));
@@ -1190,8 +1402,11 @@ pub fn counted_plan(in f: Fun) -> CountedPlan {
             }
             buf.clear();
             f.put_place(recv.place, inout buf);
+            // Constant offsets added last widen the guarded window.
+            let (form, extra) = c.without_constants(in f, form);
             buf.push(64);
             c.put_key(in f, form, inout buf);
+            let width = add(access_width(access), extra);
             let mut key = NONE64;
             for q in 0..keys.count() {
                 if keys.equals(q, in buf) {
@@ -1204,6 +1419,9 @@ pub fn counted_plan(in f: Fun) -> CountedPlan {
                 kread.push(wrapping_sub(rd, 1));
                 kstable.push(0);
                 kform.push(form);
+                kwidth.push(width);
+            } else if width > u64_at(in kwidth, key) {
+                let okw = kwidth.try_set(key, width);
             }
             let mut found = false;
             for q in 0..cdest.len() {
@@ -1265,6 +1483,7 @@ pub fn counted_plan(in f: Fun) -> CountedPlan {
             Option::None => fail_lin(),
         };
         plan.rform.push(form);
+        plan.rwidth.push(u64_at(in kwidth, key));
     }
     for q in 0..cdest.len() {
         if u8_at(in kstable, u64_at(in ckey, q)) != 0 {
