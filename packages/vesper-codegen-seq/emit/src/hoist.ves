@@ -229,11 +229,10 @@ pub fn emit_bounds_guard(call: u64, inout b: Builder) eff [Ffi[Cranelift]] {
             outer_plus.push(value_of_word(call_arg(call, wrapping_add(wrapping_add(at, 5), q))));
         }
         for q in 0..nom {
-            outer_minus.push(
-                value_of_word(
-                    call_arg(call, wrapping_add(wrapping_add(at, 5), wrapping_add(nop, q)))
-                )
-            );
+            outer_minus.push(value_of_word(call_arg(
+                call,
+                wrapping_add(wrapping_add(at, 5), wrapping_add(nop, q))
+            )));
         }
     }
 
