@@ -182,14 +182,16 @@ def _aegis(ctx: TaskContext) -> int:
     parsers = ctx.std.env.var("AEGIS_RUST_COMMIT") or "a8570f2857d85dfb8fdbbdda74977b41f478c49d"
     cbor = ctx.std.env.var("AEGIS_RUST_CBOR_COMMIT") or "11cdaefab068dd34735c3d8b17fe230a7cfc3522"
     cose = ctx.std.env.var("AEGIS_RUST_COSE_COMMIT") or "0f5a9eba809fd81ad7050d7d083a0e729ce009d4"
+    crypto = ctx.std.env.var("AEGIS_RUST_CRYPTO_COMMIT") or "fb9909ef037e34ec40ea63899f46780db267966c"
     codec_workloads = ["cca_token", "corim", "corim_store", "appraise_cca"]
+    crypto_workloads = ["measure", "ecdsa"]
     _build(ctx, "aegis", root, target, quiet = True)
     port = _example(target, _exe_suffix(ctx))
     if values and values[0] == "flip-gate":
         if len(values) != 2:
             ctx.std.process.exit(2, "flip-gate requires a workload")
         workload = values[1]
-        commit = cbor if workload == "cca_claims" else cose if workload in codec_workloads else parsers
+        commit = cbor if workload == "cca_claims" else cose if workload in codec_workloads else crypto if workload in crypto_workloads else parsers
         rust = _aegis_baseline(ctx, root, target, commit, commit != parsers or workload in ["cca_claims"] + codec_workloads)
         check(ctx, port, ["flip-gate", workload, rust], root)
     else:
@@ -197,6 +199,7 @@ def _aegis(ctx: TaskContext) -> int:
             (parsers, False, ["snp", "tdx", "sgx", "policy"]),
             (cbor, True, ["cca_claims"]),
             (cose, True, codec_workloads),
+            (crypto, True, crypto_workloads),
         ]:
             rust = _aegis_baseline(ctx, root, target, commit, overlay)
             check(ctx, port, ["compare", rust] + workloads, root)

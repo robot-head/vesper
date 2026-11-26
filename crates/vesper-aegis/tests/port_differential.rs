@@ -13,6 +13,8 @@
 //! differential compared. `AEGIS_DIFFERENTIAL_RECORD=1` prints the
 //! digests instead of checking them.
 
+mod support;
+
 use std::path::PathBuf;
 use vesper_aegis as port;
 
@@ -1292,4 +1294,163 @@ fn cca_appraisal_agrees() {
         }
     }
     r.check();
+}
+
+/// The CCA crypto paths (SH6 lane 8 part 4a): the Vesper report data, the
+/// register extends, the RIM measurement and the RAK hash on random inputs
+/// of every algorithm; fixed-width ECDSA on test keys (valid, and with the
+/// message, signature or key changed); and whole CCA tokens through
+/// `verify_cca_endorsed`, `verify_cca_token` and `cca_vesper_claims`,
+/// valid and with 2,000 byte mutations each. Keys and signatures are fresh
+/// per run, so only results that do not show them are folded in.
+#[test]
+fn cca_crypto_agrees() {
+    use port::cca::{
+        CcaEndorsement, cca_rim_measurement, cca_vesper_claims, rak_hash, verify_cca_endorsed,
+        verify_cca_token,
+    };
+    use port::claims::{GuestRuntimeClaims, RegisterHash, single_extend};
+    use port::{Curve, EcPublicKey};
+    let mut r = Results::new("cca_crypto_agrees");
+    let mut rng = SplitMix(0xCC_A4A);
+    let bytes =
+        |rng: &mut SplitMix, n: usize| -> Vec<u8> { (0..n).map(|_| rng.next() as u8).collect() };
+    let algs = [
+        RegisterHash::Sha256,
+        RegisterHash::Sha384,
+        RegisterHash::Sha512,
+    ];
+
+    for _ in 0..2_000 {
+        let rt = GuestRuntimeClaims {
+            channel_binding: bytes(&mut rng, 48).try_into().unwrap(),
+            loom_lock_blake3: bytes(&mut rng, 32).try_into().unwrap(),
+            olean_spec_mif: bytes(&mut rng, 32).try_into().unwrap(),
+        };
+        r.add("report_data", rt.report_data());
+    }
+    for alg in algs {
+        for pad in [0usize, 32, 48, 64, 100] {
+            for _ in 0..200 {
+                let d: [u8; 32] = bytes(&mut rng, 32).try_into().unwrap();
+                r.add("single_extend", single_extend(alg, pad, &d));
+            }
+        }
+        for _ in 0..500 {
+            let n = rng.below(130) as usize;
+            let rim = bytes(&mut rng, n);
+            r.add("cca_rim_measurement", cca_rim_measurement(alg, &rim));
+            r.add("rak_hash", rak_hash(alg, &rim));
+        }
+    }
+
+    for curve in [Curve::P256, Curve::P384] {
+        let signer = support::Signer::generate(curve);
+        let other = support::Signer::generate(curve);
+        let key = EcPublicKey::from_sec1(curve, &signer.sec1()).unwrap();
+        let wrong = EcPublicKey::from_sec1(curve, &other.sec1()).unwrap();
+        let mut bad_point = signer.sec1();
+        bad_point[5] ^= 1;
+        let bad_point = EcPublicKey {
+            curve,
+            sec1: bad_point,
+        };
+        for _ in 0..300 {
+            let n = rng.below(300) as usize;
+            let msg = bytes(&mut rng, n);
+            let sig = signer.sign(&msg);
+            r.add("verify_fixed ok", key.verify_fixed(&msg, &sig, "t"));
+            r.add("verify_fixed key", wrong.verify_fixed(&msg, &sig, "t"));
+            r.add(
+                "verify_fixed point",
+                bad_point.verify_fixed(&msg, &sig, "t"),
+            );
+            let mut m2 = msg.clone();
+            m2.push(1);
+            r.add("verify_fixed msg", key.verify_fixed(&m2, &sig, "t"));
+            let mut s2 = sig.clone();
+            let i = rng.below(s2.len() as u64) as usize;
+            s2[i] ^= 1 << rng.below(8);
+            r.add("verify_fixed sig", key.verify_fixed(&msg, &s2, "t"));
+            r.add("verify_fixed short", key.verify_fixed(&msg, &sig[1..], "t"));
+        }
+    }
+
+    // The tokens and chains are fixtures (tests/data/cca-crypto), written
+    // once by `write_cca_crypto_fixtures`: fresh ECDSA signatures would make
+    // a mutation that rewrites a signature byte with its own value succeed
+    // in one run and fail in the next.
+    for (name, realm_hash) in [
+        ("p384-sha256", RegisterHash::Sha256),
+        ("p256-sha384", RegisterHash::Sha384),
+        ("p384-sha512", RegisterHash::Sha512),
+    ] {
+        let f = |ext: &str| data(&format!("../cca-crypto/{name}.{ext}"));
+        let token = f("token");
+        let iak_curve = if name.starts_with("p256") {
+            Curve::P256
+        } else {
+            Curve::P384
+        };
+        let root = port::TrustRoot::from_der(f("root")).unwrap();
+        let der_chain = vec![f("leaf"), f("intermediate")];
+        let runtime = support::CcaParams {
+            realm_hash,
+            ..Default::default()
+        }
+        .runtime;
+        let endorsement = CcaEndorsement {
+            instance_id: vec![1; 33],
+            implementation_id: Some(vec![2; 32]),
+            cpak: EcPublicKey::from_sec1(iak_curve, &f("cpak")).unwrap(),
+        };
+        let mut other_rt = runtime;
+        other_rt.olean_spec_mif[0] ^= 1;
+        let mut cases = vec![token.clone()];
+        for _ in 0..2_000 {
+            cases.push(mutate_cbor(&mut rng, &token));
+        }
+        for t in &cases {
+            let endorsed = verify_cca_endorsed(t, std::slice::from_ref(&endorsement));
+            r.add("verify_cca_endorsed", endorsed.as_ref().map(|_| ()));
+            if let Ok(v) = &endorsed {
+                r.add("cca_vesper_claims", cca_vesper_claims(v, &runtime));
+                r.add("cca_vesper_claims other", cca_vesper_claims(v, &other_rt));
+            }
+            r.add(
+                "verify_cca_token",
+                verify_cca_token(t, &der_chain, &root, support::NOW_NS, &runtime),
+            );
+        }
+    }
+    r.check();
+}
+
+/// Writes the CCA token and chain fixtures of `cca_crypto_agrees`.
+#[test]
+#[ignore = "writes tests/data/cca-crypto; run once by hand"]
+fn write_cca_crypto_fixtures() {
+    use port::Curve;
+    use port::claims::RegisterHash;
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/cca-crypto");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, iak_curve, realm_hash) in [
+        ("p384-sha256", Curve::P384, RegisterHash::Sha256),
+        ("p256-sha384", Curve::P256, RegisterHash::Sha384),
+        ("p384-sha512", Curve::P384, RegisterHash::Sha512),
+    ] {
+        let chain = support::chain(Curve::P384, iak_curve, false);
+        let rak = support::Signer::generate(Curve::P384);
+        let p = support::CcaParams {
+            realm_hash,
+            ..Default::default()
+        };
+        let write =
+            |ext: &str, b: &[u8]| std::fs::write(dir.join(format!("{name}.{ext}")), b).unwrap();
+        write("token", &support::cca_token(&chain.leaf, &rak, &p));
+        write("root", &chain.root_der);
+        write("leaf", &chain.leaf_der);
+        write("intermediate", &chain.intermediate_der);
+        write("cpak", &chain.leaf.sec1());
+    }
 }

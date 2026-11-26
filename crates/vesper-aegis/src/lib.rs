@@ -38,6 +38,10 @@
 // port.
 #![deny(unsafe_code)]
 
+// The Crypto calls of the compiled `@vesper/aegis` object (module measure)
+// resolve to this shim.
+extern crate vesper_crypto_sys;
+
 pub mod amd;
 pub mod cca;
 pub mod chain;

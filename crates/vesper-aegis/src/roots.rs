@@ -22,7 +22,6 @@
 
 use crate::chain::TrustRoot;
 use crate::error::AttestError;
-use ring::digest;
 
 /// One pinned certificate.
 #[derive(Debug)]
@@ -38,8 +37,8 @@ pub struct PinnedCert {
 impl PinnedCert {
     /// The DER bytes, after checking they still hash to [`Self::sha256`].
     pub fn der(&self) -> Result<&'static [u8], AttestError> {
-        let got = digest::digest(&digest::SHA256, self.der);
-        if got.as_ref() != self.sha256 {
+        let mut scratch = [0u8; 32];
+        if !crate::port::vesper::sha256_matches(self.der, &self.sha256, &mut scratch) {
             return Err(AttestError::PinnedRootDigestMismatch { name: self.name });
         }
         Ok(self.der)

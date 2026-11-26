@@ -10,7 +10,9 @@
     "sets, against the recorded results of the Rust builds.",
     "The harness times both arms (A B B A per epoch; the Rust arm is the",
     "example built at the last Rust commit, see the benchmark task) and prints the",
-    "gate's pairs line."
+    "gate's pairs line.",
+    "Part 4a: the measurement hashes and fixed-width ECDSA checks over the",
+    "crypto shim, against the last build with the ring calls."
   ],
   "name": "vesper-aegis",
   "lane": "SH6-8",
@@ -65,6 +67,14 @@
     {
       "workload": "appraise_cca",
       "run": ["aspect", "crate", "aegis", "bench-abba", "--", "flip-gate", "appraise_cca"]
+    },
+    {
+      "workload": "measure",
+      "run": ["aspect", "crate", "aegis", "bench-abba", "--", "flip-gate", "measure"]
+    },
+    {
+      "workload": "ecdsa",
+      "run": ["aspect", "crate", "aegis", "bench-abba", "--", "flip-gate", "ecdsa"]
     }
   ]
 }

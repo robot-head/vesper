@@ -1,0 +1,203 @@
+// Measurement hashes and fixed-width signature checks (SH6 lane 8 part 4a,
+// #1403): the SHA-2 formulas of claims.rs, cca.rs, policy.rs, tdx.rs and
+// roots.rs, and EcPublicKey::verify_fixed of chain.rs, over the crypto
+// shim (`@vesper/crypto`). Hash codes are the shim's HashAlg (1 SHA-256,
+// 2 SHA-384, 3 SHA-512, the order of RegisterHash), curve codes 0 P-256
+// and 1 P-384 (the order of Curve).
+//
+// Every output buffer comes from the caller and is cleared first, so its
+// leading bytes double as the zero padding the formulas hash in. A
+// function returns false only when the shim refuses a call (an unknown
+// code or a wrongly sized buffer), which the Rust adapter treats as a bug.
+use @vesper/crypto::{
+    CryptoError,
+    Hash,
+    ct_eq,
+    ecdsa_verify,
+    hash_into,
+    hash_len,
+    hasher_digest,
+    hasher_free,
+    hasher_new,
+    hasher_update,
+    rsa_verify,
+    wipe
+};
+
+const SHA256: u32 = 1;
+const SHA384: u32 = 2;
+const SHA256_LEN: u64 = 32;
+const SHA384_LEN: u64 = 48;
+// The extend data is a 32-byte digest, padded to `pad_to` bytes.
+const EXTEND_DATA_LEN: u64 = 32;
+const ECDSA_P256_SHA256_FIXED: u32 = 1;
+const ECDSA_P384_SHA384_FIXED: u32 = 2;
+const RSA_PSS_SHA384: u32 = 2;
+
+// The digest of the hasher `h` into `out` (exactly its length), and
+// release it.
+fn finish(sink h: Hash, inout out: Slice[u8]) -> bool eff [Ffi[Crypto]] {
+    let ok = handle Fail[CryptoError] in {
+        hasher_digest(in h, inout out);
+        true
+    } with {
+        return v => v,
+        raise(_e, _) => false,
+    };
+    hasher_free(h);
+    ok
+}
+
+// `out = H(data)`.
+fn digest(alg: u32, in data: Slice[u8], inout out: Slice[u8]) -> bool eff [Ffi[Crypto]] {
+    handle Fail[CryptoError] in {
+        hash_into(alg, in data, inout out);
+        true
+    } with {
+        return v => v,
+        raise(_e, _) => false,
+    }
+}
+
+// GuestRuntimeClaims::report_data into the 64 bytes of `out`:
+// `SHA-384("vesper-aegis/report-data/v1\0" || cb || loom || olean) || 0^16`.
+pub fn report_data(in cb: Slice[u8], in loom: Slice[u8], in olean: Slice[u8], inout out: Slice[u8])
+    -> bool eff [Ffi[Crypto]] {
+    wipe(inout out);
+    match hasher_new(SHA384) {
+        Option::Some(h) => {
+            let mut h = h;
+            hasher_update(inout h, in "vesper-aegis/report-data/v1".as_bytes());
+            hasher_update(inout h, in out[0..1]);
+            hasher_update(inout h, in cb);
+            hasher_update(inout h, in loom);
+            hasher_update(inout h, in olean);
+            finish(h, inout out[0..SHA384_LEN])
+        },
+        Option::None => false,
+    }
+}
+
+// claims::single_extend into `out` (the digest length of `alg`):
+// `H(0^n || data || 0^(pad_to - 32))`, no padding when `pad_to` <= 32.
+pub fn single_extend(alg: u32, pad_to: u64, in data: Slice[u8], inout out: Slice[u8])
+    -> bool eff [Ffi[Crypto]] {
+    wipe(inout out);
+    let n = out.len();
+    match hasher_new(alg) {
+        Option::Some(h) => {
+            let mut h = h;
+            hasher_update(inout h, in out);
+            hasher_update(inout h, in data);
+            let mut left = 0;
+            if pad_to > EXTEND_DATA_LEN {
+                left = wrapping_sub(pad_to, EXTEND_DATA_LEN);
+            }
+            loop {
+                if left == 0 {
+                    break;
+                }
+                let take = if left < n {
+                    left
+                } else {
+                    n
+                };
+                hasher_update(inout h, in out[0..take]);
+                left = wrapping_sub(left, take);
+            }
+            finish(h, inout out)
+        },
+        Option::None => false,
+    }
+}
+
+// cca::cca_rim_measurement into the 48 bytes of `out`:
+// `SHA-384("vesper-aegis/cca-rim/v1\0" || algo name || 0 || rim)`.
+pub fn cca_rim_measurement(alg: u32, in rim: Slice[u8], inout out: Slice[u8])
+    -> bool eff [Ffi[Crypto]] {
+    wipe(inout out);
+    match hasher_new(SHA384) {
+        Option::Some(h) => {
+            let mut h = h;
+            hasher_update(inout h, in "vesper-aegis/cca-rim/v1".as_bytes());
+            hasher_update(inout h, in out[0..1]);
+            if alg == 1 {
+                hasher_update(inout h, in "sha-256".as_bytes());
+            } else if alg == 2 {
+                hasher_update(inout h, in "sha-384".as_bytes());
+            } else {
+                hasher_update(inout h, in "sha-512".as_bytes());
+            }
+            hasher_update(inout h, in out[0..1]);
+            hasher_update(inout h, in rim);
+            finish(h, inout out)
+        },
+        Option::None => false,
+    }
+}
+
+// cca::rak_hash into `out` (the digest length of `alg`).
+pub fn rak_hash(alg: u32, in rak: Slice[u8], inout out: Slice[u8]) -> bool eff [Ffi[Crypto]] {
+    digest(alg, in rak, inout out)
+}
+
+// policy::tls_key_channel_binding into the 48 bytes of `out`:
+// `SHA-384("vesper-aegis/ra-tls-key/v1\0" || spki)`.
+pub fn tls_key_channel_binding(in spki: Slice[u8], inout out: Slice[u8]) -> bool eff [Ffi[Crypto]] {
+    wipe(inout out);
+    match hasher_new(SHA384) {
+        Option::Some(h) => {
+            let mut h = h;
+            hasher_update(inout h, in "vesper-aegis/ra-tls-key/v1".as_bytes());
+            hasher_update(inout h, in out[0..1]);
+            hasher_update(inout h, in spki);
+            finish(h, inout out)
+        },
+        Option::None => false,
+    }
+}
+
+// TdxQuote::expected_qe_report_data into the 64 bytes of `out`:
+// `SHA-256(attestation key || QE auth data) || 0^32`.
+pub fn expected_qe_report_data(in key: Slice[u8], in auth: Slice[u8], inout out: Slice[u8])
+    -> bool eff [Ffi[Crypto]] {
+    wipe(inout out);
+    match hasher_new(SHA256) {
+        Option::Some(h) => {
+            let mut h = h;
+            hasher_update(inout h, in key);
+            hasher_update(inout h, in auth);
+            finish(h, inout out[0..SHA256_LEN])
+        },
+        Option::None => false,
+    }
+}
+
+// PinnedCert::der: whether `der` hashes (SHA-256) to `expected`, with
+// `scratch` 32 bytes.
+pub fn sha256_matches(in der: Slice[u8], in expected: Slice[u8], inout scratch: Slice[u8])
+    -> bool eff [Ffi[Crypto]] {
+    if hash_len(SHA256) != scratch.len() || !digest(SHA256, in der, inout scratch) {
+        return false;
+    }
+    ct_eq(in scratch, in expected)
+}
+
+// EcPublicKey::verify_fixed: whether `rs` (r || s) signs `msg` under the
+// uncompressed SEC1 point `sec1` on `curve`.
+pub fn ecdsa_fixed_verify(curve: u64, in sec1: Slice[u8], in msg: Slice[u8], in rs: Slice[u8])
+    -> bool eff [Ffi[Crypto]] {
+    let alg = if curve == 0 {
+        ECDSA_P256_SHA256_FIXED
+    } else {
+        ECDSA_P384_SHA384_FIXED
+    };
+    ecdsa_verify(alg, in sec1, in msg, in rs)
+}
+
+// AmdRsaPssSha384: whether `sig` is an RSASSA-PSS SHA-384 signature of
+// `msg` under the PKCS #1 RSAPublicKey `public`.
+pub fn rsa_pss_sha384_verify(in public: Slice[u8], in msg: Slice[u8], in sig: Slice[u8])
+    -> bool eff [Ffi[Crypto]] {
+    rsa_verify(RSA_PSS_SHA384, in public, in msg, in sig)
+}

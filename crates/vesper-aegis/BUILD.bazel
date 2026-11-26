@@ -9,6 +9,7 @@ vesper_package(
     name = "port_package",
     srcs = glob(["vesper/src/**/*.ves"]),
     manifest = "vesper/Loom.toml",
+    deps = ["//packages/vesper-crypto:crypto_package"],
 )
 
 vesper_port_object(
@@ -43,6 +44,7 @@ DIVERGENT = {
     "corim_cca": ("corim_cca", {"const CCA_IMPLEMENTATION_ID_LEN: u64 = 32;": "const CCA_IMPLEMENTATION_ID_LEN: u64 = 31;"}),
     "gpa": ("gpa", {"if idx >= count || iv_start(in iv, idx) > s {": "if true {"}),
     "host": ("host", {"if wrapping_sub(reported, prev) > max_step {": "if false {"}),
+    "measure": ("measure", {"if pad_to > EXTEND_DATA_LEN {": "if false {"}),
 }
 
 [

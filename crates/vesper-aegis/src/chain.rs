@@ -2,7 +2,6 @@
 //! ECDSA verification of hardware signatures (ring).
 
 use crate::error::{AttestError, ParseError};
-use ring::signature::{self, UnparsedPublicKey};
 use rustls_pki_types::{
     AlgorithmIdentifier, CertificateDer, InvalidSignature, SignatureVerificationAlgorithm,
     UnixTime, alg_id,
@@ -62,9 +61,11 @@ impl SignatureVerificationAlgorithm for AmdRsaPssSha384 {
         message: &[u8],
         signature: &[u8],
     ) -> Result<(), InvalidSignature> {
-        UnparsedPublicKey::new(&signature::RSA_PSS_2048_8192_SHA384, public_key)
-            .verify(message, signature)
-            .map_err(|_| InvalidSignature)
+        if crate::port::vesper::rsa_pss_sha384_verify(public_key, message, signature) {
+            Ok(())
+        } else {
+            Err(InvalidSignature)
+        }
     }
 
     fn public_key_alg_id(&self) -> AlgorithmIdentifier {
@@ -120,13 +121,6 @@ impl Curve {
             Curve::P384 => P384_SCALAR_LEN,
         }
     }
-
-    fn fixed_alg(self) -> &'static signature::EcdsaVerificationAlgorithm {
-        match self {
-            Curve::P256 => &signature::ECDSA_P256_SHA256_FIXED,
-            Curve::P384 => &signature::ECDSA_P384_SHA384_FIXED,
-        }
-    }
 }
 
 /// An uncompressed SEC1 elliptic-curve public key.
@@ -172,9 +166,15 @@ impl EcPublicKey {
         r_s: &[u8],
         what: &'static str,
     ) -> Result<(), AttestError> {
-        UnparsedPublicKey::new(self.curve.fixed_alg(), &self.sec1)
-            .verify(message, r_s)
-            .map_err(|_| AttestError::BadSignature { what })
+        let curve = match self.curve {
+            Curve::P256 => 0,
+            Curve::P384 => 1,
+        };
+        if crate::port::vesper::ecdsa_fixed_verify(curve, &self.sec1, message, r_s) {
+            Ok(())
+        } else {
+            Err(AttestError::BadSignature { what })
+        }
     }
 }
 

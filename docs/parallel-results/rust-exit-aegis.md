@@ -298,13 +298,55 @@ The manuscript's §33.3 example still spells the egress constructor
 `CiphertextSlice::from_sealed`. That is the language-level API, and it is
 left for the owner's review.
 
+## Part 4a: measurement hashes and fixed-width ECDSA over the crypto shim
+
+The crate's remaining `ring` calls move to Vesper (`vesper/src/measure.ves`)
+over lane 17's crypto shim (`@vesper/crypto`, `vesper-crypto-sys`), so the
+library no longer depends on `ring` directly (it stays a dev-dependency for
+the test signers, and webpki keeps its own ring backend for X.509 paths):
+
+- `GuestRuntimeClaims::report_data`, `claims::single_extend`;
+- `cca::cca_rim_measurement`, `cca::rak_hash`;
+- `policy::tls_key_channel_binding`;
+- `TdxQuote::expected_qe_report_data`;
+- `PinnedCert::der`'s SHA-256 pin check (constant-time compare);
+- `EcPublicKey::verify_fixed` (P-256/SHA-256 and P-384/SHA-384, the TDX,
+  SGX and CCA COSE signatures);
+- AMD's RSASSA-PSS SHA-384 verifier for the VCEK chain.
+
+The Rust functions keep their signatures and lend the output buffer, which
+Vesper clears and also uses as the zero padding the formulas hash in, so a
+call allocates nothing on the Vesper side.
+
+Differential: `cca_crypto_agrees` (23,860 cases) folds 2,000 random report
+data inputs, `single_extend` over three hashes and five pads, RIM and RAK
+hashes, fixed-width ECDSA on good and broken keys, messages and signatures,
+and 2,000 CBOR mutations each of three committed CCA token fixtures
+(`tests/data/cca-crypto/`, P-384 and P-256 platform keys, SHA-256/384/512
+realms) through `verify_cca_endorsed`, `cca_vesper_claims` and
+`verify_cca_token`. It was recorded from the Rust build at
+`fb9909ef037e34ec40ea63899f46780db267966c` and matches with 0 differences.
+DIVERGENT `measure` (no extend padding) makes it fail.
+
+ABBA (`measure`, `ecdsa`, against the example built at `fb9909e`):
+
+```
+measure: 1.06x [1.01x, 1.09x] n=30 (bootstrap 95% median interval)
+ecdsa:   0.99x [0.92x, 1.05x] n=30
+```
+
+Both pass the bar (upper bound <= 1.50x, release, `RUSTFLAGS="-C
+target-cpu=native"`). The hashes are a few hundred nanoseconds each, so the
+crossing shows in `measure`; signature checks are dominated by the curve
+arithmetic, which is the same ring code behind the shim.
+
 ## What is left
 
 The crate's remaining Rust, by the part that will move it:
 
 | Rust | Lines | Part | Needs |
 | --- | --: | --- | --- |
-| `cca.rs`, `corim.rs` rest: public types, ECDSA `verify_sign1`, `ec_public_key_from_pem`, test encoders, adapters | 1,153 | part 4 | SHA-2 and ECDSA behind lane 17's shim |
+| `cca.rs`, `corim.rs` rest: public types, `verify_sign1` (ECDSA now Vesper, part 4a), `ec_public_key_from_pem`, test encoders, adapters | 1,153 | part 4 | SPKI/PEM parsing in Vesper |
 | `gate.rs`: the Vault-keyed gate | 251 | part 3b | Vault `SecretSlot`s in Vesper (lane 3), the aperture (#1037), callbacks (G5) |
 | `gpa.rs`, `host.rs`, `linear.rs` | 1,012 | part 3 | atomics in source (#1037) for the leak ledger |
 | `intel.rs`, `amd.rs`: collateral, TCB status, CRL floors | 1,655 | part 4 | JSON collateral in Vesper; X.509 and ECDSA behind lane 17's shim |

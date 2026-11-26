@@ -28,7 +28,6 @@ use crate::claims::{
     SupplyChainEvidence, TeeArch, ct_eq, single_extend,
 };
 use crate::error::{AttestError, ParseError};
-use ring::digest;
 
 pub const CCA_COLLECTION_TAG: u64 = 399;
 /// CMW collection tag (`draft-ffm-rats-cca-token-03`).
@@ -493,19 +492,18 @@ pub fn encode_realm_cose_key(sec1: &[u8]) -> Vec<u8> {
 /// Normalized 48-byte measurement for a CCA RIM:
 /// `SHA-384("vesper-aegis/cca-rim/v1\0" || algo || 0 || rim)`.
 pub fn cca_rim_measurement(hash_algo: RegisterHash, rim: &[u8]) -> [u8; 48] {
-    let mut ctx = digest::Context::new(&digest::SHA384);
-    ctx.update(b"vesper-aegis/cca-rim/v1\0");
-    ctx.update(algo_name(hash_algo).as_bytes());
-    ctx.update(&[0]);
-    ctx.update(rim);
     let mut out = [0u8; 48];
-    out.copy_from_slice(ctx.finish().as_ref());
+    let ok = crate::port::vesper::cca_rim_measurement(hash_algo.shim_code(), rim, &mut out);
+    assert!(ok, "the crypto shim hashes SHA-384");
     out
 }
 
 /// Hash of the realm public key, which the platform challenge must equal.
 pub fn rak_hash(algo: RegisterHash, rak: &[u8]) -> Vec<u8> {
-    digest::digest(algo.algorithm(), rak).as_ref().to_vec()
+    let mut out = vec![0u8; algo.len()];
+    let ok = crate::port::vesper::rak_hash(algo.shim_code(), rak, &mut out);
+    assert!(ok, "the crypto shim hashes SHA-2");
+    out
 }
 
 /// A platform attestation key endorsed for one platform instance, as a

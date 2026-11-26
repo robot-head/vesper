@@ -5652,6 +5652,7 @@ dependencies = [
  "spki",
  "subtle",
  "vesper-bench",
+ "vesper-crypto-sys",
  "vesper-loom-cas",
  "vesper-port-abi",
  "vesper-port-harness",

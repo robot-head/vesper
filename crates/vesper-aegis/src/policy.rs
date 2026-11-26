@@ -9,7 +9,6 @@ use crate::claims::{
 use crate::error::{AegisVerifyError, AttestError};
 use crate::snp::verify_snp_report;
 use crate::tdx::verify_tdx_quote;
-use ring::digest;
 
 /// Minimum normalized TCB SVN per architecture. The design has one floor;
 /// the normalized values are not comparable across vendors, so the floor
@@ -116,11 +115,9 @@ pub fn verify_attestation_claims(
 /// Channel binding for an RA-TLS server key:
 /// `SHA-384("vesper-aegis/ra-tls-key/v1\0" || SubjectPublicKeyInfo DER)`.
 pub fn tls_key_channel_binding(spki_der: &[u8]) -> [u8; 48] {
-    let mut ctx = digest::Context::new(&digest::SHA384);
-    ctx.update(b"vesper-aegis/ra-tls-key/v1\0");
-    ctx.update(spki_der);
     let mut out = [0u8; 48];
-    out.copy_from_slice(ctx.finish().as_ref());
+    let ok = crate::port::vesper::tls_key_channel_binding(spki_der, &mut out);
+    assert!(ok, "the crypto shim hashes SHA-384");
     out
 }
 
