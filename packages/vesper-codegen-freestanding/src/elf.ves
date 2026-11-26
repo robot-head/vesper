@@ -146,11 +146,7 @@ pub fn write_executable(
     for k in 0..phnum {
         let seg = match segs.try_get(k) {
             Option::Some(v) => v,
-            Option::None => OutSeg {
-                first: 0,
-                end: 0,
-                flags: 0
-            },
+            Option::None => OutSeg { first: 0, end: 0, flags: 0 },
         };
         let first = s_at(in secs, seg.first);
         let mut off = out.len();
@@ -350,20 +346,11 @@ pub fn write_executable(
     for k in 0..phnum {
         let seg = match segs.try_get(k) {
             Option::Some(v) => v,
-            Option::None => OutSeg {
-                first: 0,
-                end: 0,
-                flags: 0
-            },
+            Option::None => OutSeg { first: 0, end: 0, flags: 0 },
         };
         let p = match placements.try_get(k) {
             Option::Some(v) => v,
-            Option::None => Placement {
-                vaddr: 0,
-                offset: 0,
-                file_bytes: 0,
-                mem_bytes: 0
-            },
+            Option::None => Placement { vaddr: 0, offset: 0, file_bytes: 0, mem_bytes: 0 },
         };
         let mut ph: ChunkSeq[u8] = ChunkSeq::new[u8]();
         push32(inout ph, Pt::Load);

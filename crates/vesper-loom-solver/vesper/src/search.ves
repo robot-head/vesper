@@ -351,15 +351,7 @@ fn branch(inout s: S, n: u64, next: u64, opt: bool, needs_meta: bool) {
         let mi = sw(in s.cbuf, j);
         if !opt || admit(inout s, mi, needs_meta) {
             let at = s.nodes.len();
-            s
-                .nodes
-                .push(
-                    Node {
-                        parent: n,
-                        name: next,
-                        man: mi
-                    }
-                );
+            s.nodes.push(Node { parent: n, name: next, man: mi });
             s.stack.push(at);
         }
     }
@@ -587,15 +579,7 @@ pub fn search(inout s: S, opt: bool) {
     let root = man(in s.l, s.root).name;
     s.nodes.clear();
     s.stack.clear();
-    s
-        .nodes
-        .push(
-            Node {
-                parent: none(),
-                name: root,
-                man: rm
-            }
-        );
+    s.nodes.push(Node { parent: none(), name: root, man: rm });
     s.stack.push(0);
     s.sdec = 0;
     s.sunsup = false;

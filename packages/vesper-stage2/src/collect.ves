@@ -215,15 +215,7 @@ pub fn lower_effects(
                         args.push(aty);
                     }
                 }
-                es
-                    .push(
-                        EffNode {
-                            label: lbl,
-                            name: nm,
-                            a: a0,
-                            n: n32(ac)
-                        }
-                    );
+                es.push(EffNode { label: lbl, name: nm, a: a0, n: n32(ac) });
             },
             Option::None => {},
         }
@@ -338,14 +330,7 @@ fn collect_generics_into(
         match ast.generics.get(idx_from_raw[GenericNode](gid)) {
             Option::Some(g) => {
                 let nm = translate_sym(in ast, g.name, inout names, inout cache, inout tmp);
-                dst
-                    .push(
-                        Generic {
-                            name: nm,
-                            bound: g.bound,
-                            row: g.row
-                        }
-                    );
+                dst.push(Generic { name: nm, bound: g.bound, row: g.row });
             },
             Option::None => {},
         }
@@ -455,14 +440,7 @@ fn collect_fn_into(
                 sub_pty
             }
         };
-        params
-            .push(
-                ParamInfo {
-                    name: pname,
-                    pass: p.pass,
-                    ty: pty
-                }
-            );
+        params.push(ParamInfo { name: pname, pass: p.pass, ty: pty });
     }
     let raw_res = lower_ty(
         in ast,
@@ -518,14 +496,7 @@ fn add_ffi_op(
             Option::Some(v) => v,
             Option::None => 0,
         };
-        params
-            .push(
-                ParamInfo {
-                    name: names.intern(in "a".as_bytes()),
-                    pass: pass,
-                    ty: ty
-                }
-            );
+        params.push(ParamInfo { name: names.intern(in "a".as_bytes()), pass: pass, ty: ty });
     }
     eff_ops
         .push(
@@ -626,24 +597,11 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
                                 };
                                 world
                                     .fields
-                                    .push(
-                                        Field {
-                                            name: fname,
-                                            ty: fty,
-                                            modality: mod_val
-                                        }
-                                    );
+                                    .push(Field { name: fname, ty: fty, modality: mod_val });
                             }
                             world
                                 .variants
-                                .push(
-                                    Variant {
-                                        name: vname,
-                                        fa: fa,
-                                        fc: fc,
-                                        named: v.named
-                                    }
-                                );
+                                .push(Variant { name: vname, fa: fa, fc: fc, named: v.named });
                         }
                         let adt_idx = n32(world.adts.len());
                         let tile_val: u32 = if a.tiled {
@@ -711,14 +669,7 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
                             inout tmp
                         );
                         let eidx = n32(world.effects.len());
-                        world
-                            .effects
-                            .push(
-                                EffectRow {
-                                    name: ename,
-                                    linear: ed.linear
-                                }
-                            );
+                        world.effects.push(EffectRow { name: ename, linear: ed.linear });
                         set_by_symbol(inout world.effect_by_name, ename, inc32(eidx));
                         let (ega, egn) = collect_generics_into(
                             in m.ast,
@@ -766,14 +717,7 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
                                     inout cache,
                                     inout tmp
                                 );
-                                params
-                                    .push(
-                                        ParamInfo {
-                                            name: pname,
-                                            pass: p.pass,
-                                            ty: pty
-                                        }
-                                    );
+                                params.push(ParamInfo { name: pname, pass: p.pass, ty: pty });
                             }
                             let ores = lower_ty(
                                 in m.ast,
@@ -783,15 +727,7 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
                                 inout cache,
                                 inout tmp
                             );
-                            eff_ops
-                                .push(
-                                    EffOpInfo {
-                                        name: oname,
-                                        pa: opa,
-                                        pn: opn,
-                                        result: ores
-                                    }
-                                );
+                            eff_ops.push(EffOpInfo { name: oname, pa: opa, pn: opn, result: ores });
                         }
                         eff_decls
                             .push(
@@ -867,15 +803,7 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
     if !has_opt {
         let t_gen = names.intern(in "T".as_bytes());
         let oga = n32(world.generics.len());
-        world
-            .generics
-            .push(
-                Generic {
-                    name: t_gen,
-                    bound: 0,
-                    row: false
-                }
-            );
+        world.generics.push(Generic { name: t_gen, bound: 0, row: false });
         let ofa = n32(world.fields.len());
         world
             .fields
@@ -890,23 +818,11 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
         world
             .variants
             .push(
-                Variant {
-                    name: names.intern(in "Some".as_bytes()),
-                    fa: ofa,
-                    fc: 1,
-                    named: false
-                }
+                Variant { name: names.intern(in "Some".as_bytes()), fa: ofa, fc: 1, named: false }
             );
         world
             .variants
-            .push(
-                Variant {
-                    name: names.intern(in "None".as_bytes()),
-                    fa: 0,
-                    fc: 0,
-                    named: false
-                }
-            );
+            .push(Variant { name: names.intern(in "None".as_bytes()), fa: 0, fc: 0, named: false });
         let oidx = n32(world.adts.len());
         world
             .adts
@@ -937,24 +853,8 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
             let t_gen = names.intern(in "T".as_bytes());
             let e_gen = names.intern(in "E".as_bytes());
             let rga = n32(world.generics.len());
-            world
-                .generics
-                .push(
-                    Generic {
-                        name: t_gen,
-                        bound: 0,
-                        row: false
-                    }
-                );
-            world
-                .generics
-                .push(
-                    Generic {
-                        name: e_gen,
-                        bound: 0,
-                        row: false
-                    }
-                );
+            world.generics.push(Generic { name: t_gen, bound: 0, row: false });
+            world.generics.push(Generic { name: e_gen, bound: 0, row: false });
             let f0 = n32(world.fields.len());
             world
                 .fields
@@ -979,22 +879,12 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
             world
                 .variants
                 .push(
-                    Variant {
-                        name: names.intern(in "Ok".as_bytes()),
-                        fa: f0,
-                        fc: 1,
-                        named: false
-                    }
+                    Variant { name: names.intern(in "Ok".as_bytes()), fa: f0, fc: 1, named: false }
                 );
             world
                 .variants
                 .push(
-                    Variant {
-                        name: names.intern(in "Err".as_bytes()),
-                        fa: f1,
-                        fc: 1,
-                        named: false
-                    }
+                    Variant { name: names.intern(in "Err".as_bytes()), fa: f1, fc: 1, named: false }
                 );
             let res_idx = n32(world.adts.len());
             world
@@ -1077,25 +967,11 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
     };
     if !has_fail {
         let eidx = n32(world.effects.len());
-        world
-            .effects
-            .push(
-                EffectRow {
-                    name: fail_sym,
-                    linear: false
-                }
-            );
+        world.effects.push(EffectRow { name: fail_sym, linear: false });
         set_by_symbol(inout world.effect_by_name, fail_sym, inc32(eidx));
         let e_gen = names.intern(in "E".as_bytes());
         let ega = n32(eff_gens.len());
-        eff_gens
-            .push(
-                Generic {
-                    name: e_gen,
-                    bound: 0,
-                    row: false
-                }
-            );
+        eff_gens.push(Generic { name: e_gen, bound: 0, row: false });
         let opa = n32(params.len());
         params
             .push(
@@ -1116,16 +992,7 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
                 }
             );
         eff_decls
-            .push(
-                EffDeclInfo {
-                    name: fail_sym,
-                    linear: false,
-                    ga: ega,
-                    gn: 1,
-                    oa: eoa,
-                    on: 1
-                }
-            );
+            .push(EffDeclInfo { name: fail_sym, linear: false, ga: ega, gn: 1, oa: eoa, on: 1 });
     }
     let u64_t = types.named0(world.k.u64_);
     let i64_t = types.named0(world.k.i64_);
@@ -1221,17 +1088,7 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
         in t_s_u,
         i64_t
     );
-    eff_decls
-        .push(
-            EffDeclInfo {
-                name: env_sym,
-                linear: false,
-                ga: 0,
-                gn: 0,
-                oa: env_oa,
-                on: 6
-            }
-        );
+    eff_decls.push(EffDeclInfo { name: env_sym, linear: false, ga: 0, gn: 0, oa: env_oa, on: 6 });
 
     let fs_sym = names.intern(in "Ffi$StdFs".as_bytes());
     let fs_oa = n32(eff_ops.len());
@@ -1450,17 +1307,7 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
         in t_dc,
         unit_t
     );
-    eff_decls
-        .push(
-            EffDeclInfo {
-                name: fs_sym,
-                linear: false,
-                ga: 0,
-                gn: 0,
-                oa: fs_oa,
-                on: 17
-            }
-        );
+    eff_decls.push(EffDeclInfo { name: fs_sym, linear: false, ga: 0, gn: 0, oa: fs_oa, on: 17 });
     CollectedProgram {
         names: names,
         types: types,

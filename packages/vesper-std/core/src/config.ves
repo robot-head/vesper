@@ -26,11 +26,7 @@ test {
     }
 
     fn config(port: i64) -> Config {
-        Config {
-            port: port,
-            tls: false,
-            attempts: 3
-        }
+        Config { port: port, tls: false, attempts: 3 }
     }
 
     fn mark(inout log: i64, n: i64) -> i64 {

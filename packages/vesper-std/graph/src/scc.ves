@@ -213,11 +213,7 @@ pub fn scc(in g: Graph) -> Scc {
         starts,
         component_count,
     } = state;
-    Scc {
-        comp: comp,
-        nodes: nodes,
-        starts: starts
-    }
+    Scc { comp: comp, nodes: nodes, starts: starts }
 }
 
 test {

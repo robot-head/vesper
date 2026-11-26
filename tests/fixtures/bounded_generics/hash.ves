@@ -11,10 +11,7 @@ fn digest[T: mod copy](x: T) -> u64 where T: Hash {
 }
 
 fn main() -> u64 {
-    let p = Point {
-        x: wrapping_sub(0, 1),
-        y: 7
-    };
+    let p = Point { x: wrapping_sub(0, 1), y: 7 };
     wrapping_add(
         wrapping_add(digest(wrapping_sub(0, 1)), digest(p)),
         wrapping_add(digest((true, 3)), digest(42))

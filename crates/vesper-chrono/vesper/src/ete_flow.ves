@@ -19,16 +19,8 @@ pub fn new_code_image() -> CodeImage {
 
 pub fn single_code_image(base: u64, inout bytes: ChunkSeq[u8]) -> CodeImage {
     let mut segs: ChunkSeq[CodeSegment] = ChunkSeq::new();
-    segs
-        .push(
-            CodeSegment {
-                base: base,
-                bytes: replace(inout bytes, ChunkSeq::new())
-            }
-        );
-    CodeImage {
-        segments: segs
-    }
+    segs.push(CodeSegment { base: base, bytes: replace(inout bytes, ChunkSeq::new()) });
+    CodeImage { segments: segs }
 }
 
 pub enum BranchKind {
@@ -181,18 +173,10 @@ pub fn classify(pc: u64, insn: u32) -> Option[A64Flow] {
     if (i & 0xfe1f_0000) == 0xd61f_0000 {
         let opc = (i >> 21) & 0x0f;
         if opc == 0 || opc == 8 {
-            return Option::Some(
-                A64Flow::Indirect {
-                    call: false
-                }
-            );
+            return Option::Some(A64Flow::Indirect { call: false });
         }
         if opc == 1 || opc == 9 {
-            return Option::Some(
-                A64Flow::Indirect {
-                    call: true
-                }
-            );
+            return Option::Some(A64Flow::Indirect { call: true });
         }
         if opc == 2 {
             return Option::Some(A64Flow::A64Return);
@@ -221,11 +205,7 @@ pub fn add_segment(inout img: CodeImage, base: u64, inout bytes: ChunkSeq[u8])
     -> Result[u64, EteFlowError] {
     let len = bytes.len();
     if wrapping_sub(0xffff_ffff_ffff_ffff, base) < len {
-        return Result::Err(
-            EteFlowError::BadSegment {
-                base: base
-            }
-        );
+        return Result::Err(EteFlowError::BadSegment { base: base });
     }
     let end = wrapping_add(base, len);
     let mut ok = true;
@@ -248,11 +228,7 @@ pub fn add_segment(inout img: CodeImage, base: u64, inout bytes: ChunkSeq[u8])
                 Option::None => break,
             }
         }
-        return Result::Err(
-            EteFlowError::BadSegment {
-                base: base
-            }
-        );
+        return Result::Err(EteFlowError::BadSegment { base: base });
     }
     let mut right: ChunkSeq[CodeSegment] = ChunkSeq::new();
     loop {
@@ -267,14 +243,7 @@ pub fn add_segment(inout img: CodeImage, base: u64, inout bytes: ChunkSeq[u8])
             Option::None => break,
         }
     }
-    img
-        .segments
-        .push(
-            CodeSegment {
-                base: base,
-                bytes: replace(inout bytes, ChunkSeq::new())
-            }
-        );
+    img.segments.push(CodeSegment { base: base, bytes: replace(inout bytes, ChunkSeq::new()) });
     let mut right_rev: ChunkSeq[CodeSegment] = ChunkSeq::new();
     loop {
         match right.pop() {
@@ -425,20 +394,12 @@ fn clone_opt_u64(in o: Option[u64]) -> Option[u64] {
 
 fn clone_branch_kind(in k: BranchKind) -> BranchKind {
     match k {
-        BranchKind::Conditional {
-            taken
-        } => BranchKind::Conditional {
-            taken: taken
-        },
+        BranchKind::Conditional { taken } => BranchKind::Conditional { taken: taken },
         BranchKind::DirectJump => BranchKind::DirectJump,
         BranchKind::DirectCall => BranchKind::DirectCall,
         BranchKind::IndirectJump => BranchKind::IndirectJump,
         BranchKind::IndirectCall => BranchKind::IndirectCall,
-        BranchKind::Return {
-            compressed
-        } => BranchKind::Return {
-            compressed: compressed
-        },
+        BranchKind::Return { compressed } => BranchKind::Return { compressed: compressed },
         BranchKind::Far => BranchKind::Far,
         BranchKind::Async => BranchKind::Async,
         BranchKind::Enable => BranchKind::Enable,
@@ -537,9 +498,7 @@ fn walk_to_branch(inout w: Walker, in img: CodeImage, element_index: u64)
     let mut ip = match w.pc {
         Option::Some(v) => v,
         Option::None => return Result::Err(
-            EteFlowError::NoAddress {
-                element_index: element_index
-            }
+            EteFlowError::NoAddress { element_index: element_index }
         ),
     };
     loop {
@@ -554,21 +513,13 @@ fn walk_to_branch(inout w: Walker, in img: CodeImage, element_index: u64)
         let flow = match classify(ip, insn) {
             Option::Some(f) => f,
             Option::None => return Result::Err(
-                EteFlowError::UnsupportedInsn {
-                    ip: ip,
-                    insn: insn
-                }
+                EteFlowError::UnsupportedInsn { ip: ip, insn: insn }
             ),
         };
         if is_sequential(in flow) {
             ip = wrapping_add(ip, 4);
         } else {
-            return Result::Ok(
-                WalkOut {
-                    ip: ip,
-                    flow: flow
-                }
-            );
+            return Result::Ok(WalkOut { ip: ip, flow: flow });
         }
     }
 }
@@ -582,9 +533,7 @@ fn walker_atom(inout w: Walker, in img: CodeImage, executed: bool, i: u64)
     let ip = wo.ip;
     match wo.flow {
         A64Flow::Sequential => Result::Ok(0),
-        A64Flow::Conditional {
-            target
-        } => {
+        A64Flow::Conditional { target } => {
             let to = if executed {
                 target
             } else {
@@ -594,25 +543,15 @@ fn walker_atom(inout w: Walker, in img: CodeImage, executed: bool, i: u64)
                 inout w,
                 ip,
                 Option::Some(to),
-                BranchKind::Conditional {
-                    taken: executed
-                },
+                BranchKind::Conditional { taken: executed },
                 i
             );
             w.pc = Option::Some(to);
             Result::Ok(0)
         }
-        A64Flow::Direct {
-            target,
-            call
-        } => {
+        A64Flow::Direct { target, call } => {
             if !executed {
-                return Result::Err(
-                    EteFlowError::UnexpectedNotTaken {
-                        ip: ip,
-                        element_index: i
-                    }
-                );
+                return Result::Err(EteFlowError::UnexpectedNotTaken { ip: ip, element_index: i });
             }
             let kind = if call {
                 BranchKind::DirectCall
@@ -623,26 +562,16 @@ fn walker_atom(inout w: Walker, in img: CodeImage, executed: bool, i: u64)
             w.pc = Option::Some(target);
             Result::Ok(0)
         }
-        A64Flow::Indirect {
-            call
-        } => {
+        A64Flow::Indirect { call } => {
             if !executed {
-                return Result::Err(
-                    EteFlowError::UnexpectedNotTaken {
-                        ip: ip,
-                        element_index: i
-                    }
-                );
+                return Result::Err(EteFlowError::UnexpectedNotTaken { ip: ip, element_index: i });
             }
             let kind = if call {
                 BranchKind::IndirectCall
             } else {
                 BranchKind::IndirectJump
             };
-            w.waiting = Waiting::WaitIndirect {
-                from: ip,
-                kind: kind
-            };
+            w.waiting = Waiting::WaitIndirect { from: ip, kind: kind };
             w.pending_lo = clone_opt_u64(in w.ts);
             w.pending_hi = Option::None;
             w.pc = Option::None;
@@ -650,19 +579,13 @@ fn walker_atom(inout w: Walker, in img: CodeImage, executed: bool, i: u64)
         }
         A64Flow::A64Return => {
             if !executed {
-                return Result::Err(
-                    EteFlowError::UnexpectedNotTaken {
-                        ip: ip,
-                        element_index: i
-                    }
-                );
+                return Result::Err(EteFlowError::UnexpectedNotTaken { ip: ip, element_index: i });
             }
-            w.waiting = Waiting::WaitIndirect {
-                from: ip,
-                kind: BranchKind::Return {
-                    compressed: false
-                },
-            };
+            w
+                .waiting = Waiting::WaitIndirect {
+                    from: ip,
+                    kind: BranchKind::Return { compressed: false },
+                };
             w.pending_lo = clone_opt_u64(in w.ts);
             w.pending_hi = Option::None;
             w.pc = Option::None;
@@ -670,17 +593,9 @@ fn walker_atom(inout w: Walker, in img: CodeImage, executed: bool, i: u64)
         }
         A64Flow::A64ExceptionReturn => {
             if !executed {
-                return Result::Err(
-                    EteFlowError::UnexpectedNotTaken {
-                        ip: ip,
-                        element_index: i
-                    }
-                );
+                return Result::Err(EteFlowError::UnexpectedNotTaken { ip: ip, element_index: i });
             }
-            w.waiting = Waiting::WaitIndirect {
-                from: ip,
-                kind: BranchKind::Far
-            };
+            w.waiting = Waiting::WaitIndirect { from: ip, kind: BranchKind::Far };
             w.pending_lo = clone_opt_u64(in w.ts);
             w.pending_hi = Option::None;
             w.pc = Option::None;
@@ -709,10 +624,7 @@ fn walker_exception(
                 let flow = match classify(ip, insn) {
                     Option::Some(f) => f,
                     Option::None => return Result::Err(
-                        EteFlowError::UnsupportedInsn {
-                            ip: ip,
-                            insn: insn
-                        }
+                        EteFlowError::UnsupportedInsn { ip: ip, insn: insn }
                     ),
                 };
                 match flow {
@@ -737,9 +649,7 @@ fn walker_exception(
         }
         Option::None => {}
     }
-    w.waiting = Waiting::WaitException {
-        from: preferred_return
-    };
+    w.waiting = Waiting::WaitException { from: preferred_return };
     w.pending_lo = clone_opt_u64(in w.ts);
     w.pending_hi = Option::None;
     w.pc = Option::None;
@@ -760,23 +670,14 @@ fn walker_address(
     i: u64,
 ) -> Result[u64, EteFlowError] {
     if !is_isa_is0(in isa) {
-        return Result::Err(
-            EteFlowError::NotA64 {
-                element_index: i
-            }
-        );
+        return Result::Err(EteFlowError::NotA64 { element_index: i });
     }
     let prev_waiting = replace(inout w.waiting, Waiting::WaitNothing);
     match prev_waiting {
-        Waiting::WaitIndirect {
-            from,
-            kind
-        } => {
+        Waiting::WaitIndirect { from, kind } => {
             walker_push_pending(inout w, from, address, kind, i);
         }
-        Waiting::WaitException {
-            from
-        } => {
+        Waiting::WaitException { from } => {
             walker_push_pending(inout w, from, address, BranchKind::Far, i);
         }
         Waiting::WaitNothing => {
@@ -807,42 +708,21 @@ fn process_element(
     i: u64,
 ) -> Result[u64, EteFlowError] {
     match el {
-        EteElement::Atom {
-            executed
-        } => {
+        EteElement::Atom { executed } => {
             if w.aarch32 {
-                return Result::Err(
-                    EteFlowError::NotA64 {
-                        element_index: i
-                    }
-                );
+                return Result::Err(EteFlowError::NotA64 { element_index: i });
             }
             walker_atom(inout w, in img, executed, i)
         }
-        EteElement::Address {
-            address,
-            isa
-        } => {
+        EteElement::Address { address, isa } => {
             if w.aarch32 {
-                return Result::Err(
-                    EteFlowError::NotA64 {
-                        element_index: i
-                    }
-                );
+                return Result::Err(EteFlowError::NotA64 { element_index: i });
             }
             walker_address(inout w, address, in isa, i)
         }
-        EteElement::Exception {
-            exception_type: _,
-            preferred_return,
-            isa: _
-        } => {
+        EteElement::Exception { exception_type: _, preferred_return, isa: _ } => {
             if w.aarch32 {
-                return Result::Err(
-                    EteFlowError::NotA64 {
-                        element_index: i
-                    }
-                );
+                return Result::Err(EteFlowError::NotA64 { element_index: i });
             }
             walker_exception(inout w, in img, preferred_return, i)
         }
@@ -850,10 +730,7 @@ fn process_element(
             w.aarch32 = !c.sixty_four;
             Result::Ok(0)
         }
-        EteElement::Timestamp {
-            timestamp,
-            cycle_count: _
-        } => {
+        EteElement::Timestamp { timestamp, cycle_count: _ } => {
             if !waiting_is_nothing(in w.waiting) {
                 match w.pending_hi {
                     Option::None => {
@@ -918,13 +795,8 @@ pub fn reconstruct(
     }
     flush_open(inout w, Option::None);
     let stopped_at = match w.waiting {
-        Waiting::WaitIndirect {
-            from,
-            kind: _
-        } => Option::Some(from),
-        Waiting::WaitException {
-            from
-        } => Option::Some(from),
+        Waiting::WaitIndirect { from, kind: _ } => Option::Some(from),
+        Waiting::WaitException { from } => Option::Some(from),
         Waiting::WaitNothing => w.pc,
     };
     Result::Ok(

@@ -144,15 +144,7 @@ fn insert_ooo(inout t: Tcb, start: u64, end: u64) -> bool {
         return false;
     }
     // Capacity is reserved at construction; this push never reallocates.
-    t
-        .ooo
-        .push(
-            OooRange {
-                start: ns,
-                end: ne,
-                stamp: stamp
-            }
-        );
+    t.ooo.push(OooRange { start: ns, end: ne, stamp: stamp });
     true
 }
 

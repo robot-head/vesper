@@ -31,9 +31,7 @@ use self::session::{EffBinding, OpBinding, planner_new};
 // or `err <message>`.
 pub fn control_session_plans(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let tb = read_tables(inout r, in b, in c);
     let mut p = planner_new(inout c.names);
@@ -74,14 +72,7 @@ pub fn control_session_plans(in input: Str) -> ChunkSeq[u64] {
                         }
                     );
             }
-            bindings
-                .push(
-                    EffBinding {
-                        eff_name: eff_name,
-                        a: a,
-                        n: n32(on)
-                    }
-                );
+            bindings.push(EffBinding { eff_name: eff_name, a: a, n: n32(on) });
         }
         let m = ls.mark();
         let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();

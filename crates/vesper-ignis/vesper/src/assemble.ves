@@ -34,15 +34,7 @@ fn assemble(inout pl: Planner, in g: Graph, inout out: PlanOut) {
                         break;
                     }
                     members.push(e.sub);
-                    coords
-                        .push(
-                            SubPos {
-                                flat: e.sub,
-                                mip: e.mip,
-                                slice: e.slice,
-                                plane: e.plane
-                            }
-                        );
+                    coords.push(SubPos { flat: e.sub, mip: e.mip, slice: e.slice, plane: e.plane });
                     j = wrapping_add(j, 1);
                 },
                 Option::None => {
@@ -106,29 +98,11 @@ fn assemble(inout pl: Planner, in g: Graph, inout out: PlanOut) {
     let mut post: ChunkSeq[SlotRange] = ChunkSeq::new[SlotRange]();
     let mut fin: ChunkSeq[SlotRange] = ChunkSeq::new[SlotRange]();
     for p in 0..n {
-        pre
-            .push(
-                SlotRange {
-                    start: 0,
-                    count: 0
-                }
-            );
-        post
-            .push(
-                SlotRange {
-                    start: 0,
-                    count: 0
-                }
-            );
+        pre.push(SlotRange { start: 0, count: 0 });
+        post.push(SlotRange { start: 0, count: 0 });
     }
     for q in 0..nq {
-        fin
-            .push(
-                SlotRange {
-                    start: 0,
-                    count: 0
-                }
-            );
+        fin.push(SlotRange { start: 0, count: 0 });
     }
     let mut k: u64 = 0;
     loop {
@@ -152,10 +126,7 @@ fn assemble(inout pl: Planner, in g: Graph, inout out: PlanOut) {
                 },
             }
         }
-        let r = SlotRange {
-            start: k,
-            count: wrapping_sub(j, k)
-        };
+        let r = SlotRange { start: k, count: wrapping_sub(j, k) };
         let at = widen_u64(head.value);
         if head.slot == 0 {
             pre.try_set(at, r);
@@ -226,37 +197,17 @@ fn assemble(inout pl: Planner, in g: Graph, inout out: PlanOut) {
     let mut waits: ChunkSeq[WaitRec] = ChunkSeq::new[WaitRec]();
     let mut wait_at: ChunkSeq[SlotRange] = ChunkSeq::new[SlotRange]();
     for p in 0..n {
-        wait_at
-            .push(
-                SlotRange {
-                    start: 0,
-                    count: 0
-                }
-            );
+        wait_at.push(SlotRange { start: 0, count: 0 });
     }
     for x in 0..out.order.len() {
         let p = get32(in out.order, x);
         let q = get32(in ck.pass_queue, widen_u64(p));
         let producers = producers_of(in pl.cross, p);
         let w = needed_waits(inout ck, q, in producers);
-        wait_at
-            .try_set(
-                widen_u64(p),
-                SlotRange {
-                    start: waits.len(),
-                    count: w.len()
-                }
-            );
+        wait_at.try_set(widen_u64(p), SlotRange { start: waits.len(), count: w.len() });
         for i in 0..w.len() {
             match w.try_get(i) {
-                Option::Some(c) => waits
-                    .push(
-                        WaitRec {
-                            pass: p,
-                            queue: c.key,
-                            producer: c.value
-                        }
-                    ),
+                Option::Some(c) => waits.push(WaitRec { pass: p, queue: c.key, producer: c.value }),
                 Option::None => (),
             }
         }
@@ -275,22 +226,12 @@ fn assemble(inout pl: Planner, in g: Graph, inout out: PlanOut) {
             for i in 0..w.len() {
                 match w.try_get(i) {
                     Option::Some(c) => final_lists
-                        .push(
-                            Pair {
-                                key: wrapping_u32(q),
-                                value: c.key
-                            }
-                        ),
+                        .push(Pair { key: wrapping_u32(q), value: c.key }),
                     Option::None => (),
                 }
                 match w.try_get(i) {
                     Option::Some(c) => final_lists
-                        .push(
-                            Pair {
-                                key: wrapping_u32(q),
-                                value: c.value
-                            }
-                        ),
+                        .push(Pair { key: wrapping_u32(q), value: c.value }),
                     Option::None => (),
                 }
             }
@@ -333,28 +274,10 @@ fn assemble(inout pl: Planner, in g: Graph, inout out: PlanOut) {
                 }
             }
             emit_slot(inout out, in items, in pending, get_range(in pre, p), q32);
-            out
-                .cmds
-                .push(
-                    CmdRec {
-                        queue: q32,
-                        tag: 2,
-                        a: p,
-                        b: 0
-                    }
-                );
+            out.cmds.push(CmdRec { queue: q32, tag: 2, a: p, b: 0 });
             emit_slot(inout out, in items, in pending, get_range(in post, p), q32);
             if getb(in ck.signaled, p) {
-                out
-                    .cmds
-                    .push(
-                        CmdRec {
-                            queue: q32,
-                            tag: 3,
-                            a: 0,
-                            b: get64(in value_of, p)
-                        }
-                    );
+                out.cmds.push(CmdRec { queue: q32, tag: 3, a: 0, b: get64(in value_of, p) });
             }
         }
         let mut f: u64 = 0;
@@ -476,14 +399,7 @@ pub fn graph_plan(in g: Graph, split_barriers: bool) -> PlanOut {
             Option::Some(x) => {
                 if get_pass(in g, widen_u64(x.before)).queue
                     != get_pass(in g, widen_u64(x.after)).queue {
-                    pl
-                        .cross
-                        .push(
-                            Pair {
-                                key: x.after,
-                                value: x.before
-                            }
-                        );
+                    pl.cross.push(Pair { key: x.after, value: x.before });
                 }
             },
             Option::None => (),

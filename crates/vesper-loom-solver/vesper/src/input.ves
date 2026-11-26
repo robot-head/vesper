@@ -41,10 +41,7 @@ pub fn mxv(in s: S, i: u64) -> Mx {
 pub fn sysv(in s: S, i: u64) -> SysSel {
     match s.sys.try_get(i) {
         Option::Some(x) => x,
-        Option::None => SysSel {
-            name: 0,
-            ver: 0
-        },
+        Option::None => SysSel { name: 0, ver: 0 },
     }
 }
 
@@ -108,14 +105,7 @@ pub fn decode_request(inout s: S) {
     for i in 0..nsys {
         let name = rd_str(inout s.l);
         let v = rd(inout s.l);
-        s
-            .sys
-            .push(
-                SysSel {
-                    name: name,
-                    ver: v
-                }
-            );
+        s.sys.push(SysSel { name: name, ver: v });
     }
     s.maxd = rd(inout s.l);
 }

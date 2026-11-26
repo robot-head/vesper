@@ -58,9 +58,7 @@ fn put_debug(inout o: ChunkSeq[u8], in c: Ctx, ty: u32) {
 //   (name, Debug) and a `-` line. The harness sorts each case's V lines.
 pub fn core_typing_relations(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let k = c.world.k;
     let mut o = ChunkSeq::new[u8]();
@@ -138,9 +136,7 @@ fn read_pat(inout r: Reader, in b: Slice[u8], in c: Ctx, inout ps: Pats) -> u32 
 //   the type (no E0212), then I per arm with whether it is irrefutable.
 pub fn core_typing_patterns(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let mut ps = pats_new(inout c.names);
     let mut o = ChunkSeq::new[u8]();
@@ -183,9 +179,7 @@ pub fn core_typing_patterns(in input: Str) -> ChunkSeq[u64] {
 // Expression typing: the per-span types of every supported function.
 pub fn core_typing_exprs(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let mut ck = ck_new(sink c);
     check_exprs(inout r, in b, inout ck);

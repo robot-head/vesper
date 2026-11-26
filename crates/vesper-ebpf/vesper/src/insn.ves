@@ -303,13 +303,7 @@ pub copy struct Encoded {
 }
 
 fn raw(code: u8, dst: u8, src: u8, off: i16, imm: i32) -> RawInsn {
-    RawInsn {
-        code: code,
-        dst: dst,
-        src: src,
-        off: off,
-        imm: imm
-    }
+    RawInsn { code: code, dst: dst, src: src, off: off, imm: imm }
 }
 
 pub fn raw_zero() -> RawInsn {
@@ -317,39 +311,20 @@ pub fn raw_zero() -> RawInsn {
 }
 
 fn bad(pc: usize, code: u8) -> Never eff [Fail[DecodeError]] {
-    Fail::raise(
-        DecodeError::InvalidOpcode {
-            pc: pc,
-            code: code
-        }
-    )
+    Fail::raise(DecodeError::InvalidOpcode { pc: pc, code: code })
 }
 
 fn reserved(pc: usize, field: u8) -> Never eff [Fail[DecodeError]] {
-    Fail::raise(
-        DecodeError::ReservedFieldSet {
-            pc: pc,
-            field: field
-        }
-    )
+    Fail::raise(DecodeError::ReservedFieldSet { pc: pc, field: field })
 }
 
 fn broken(pc: usize) -> Never eff [Fail[DecodeError]] {
-    Fail::raise(
-        DecodeError::BrokenLdImm64 {
-            pc: pc
-        }
-    )
+    Fail::raise(DecodeError::BrokenLdImm64 { pc: pc })
 }
 
 fn reg(pc: usize, n: u8) -> u8 eff [Fail[DecodeError]] {
     if n > MAX_REG {
-        Fail::raise(
-            DecodeError::BadRegister {
-                pc: pc,
-                reg: n
-            }
-        );
+        Fail::raise(DecodeError::BadRegister { pc: pc, reg: n });
     }
     n
 }
@@ -486,32 +461,16 @@ fn atomic_from_imm(imm: i32) -> Option[AtomicOp] {
     let fetch = (imm & BpfAtomic::Fetch) != 0;
     let code = imm & ~BpfAtomic::Fetch;
     if code == BpfAtomic::Add {
-        return Option::Some(
-            AtomicOp::Add {
-                fetch: fetch
-            }
-        );
+        return Option::Some(AtomicOp::Add { fetch: fetch });
     }
     if code == BpfAtomic::Or {
-        return Option::Some(
-            AtomicOp::Or {
-                fetch: fetch
-            }
-        );
+        return Option::Some(AtomicOp::Or { fetch: fetch });
     }
     if code == BpfAtomic::And {
-        return Option::Some(
-            AtomicOp::And {
-                fetch: fetch
-            }
-        );
+        return Option::Some(AtomicOp::And { fetch: fetch });
     }
     if code == BpfAtomic::Xor {
-        return Option::Some(
-            AtomicOp::Xor {
-                fetch: fetch
-            }
-        );
+        return Option::Some(AtomicOp::Xor { fetch: fetch });
     }
     Option::None
 }
@@ -526,18 +485,10 @@ fn fetch_bit(f: bool) -> i32 {
 
 fn atomic_imm(op: AtomicOp) -> i32 {
     match op {
-        AtomicOp::Add {
-            fetch
-        } => BpfAtomic::Add | fetch_bit(fetch),
-        AtomicOp::Or {
-            fetch
-        } => BpfAtomic::Or | fetch_bit(fetch),
-        AtomicOp::And {
-            fetch
-        } => BpfAtomic::And | fetch_bit(fetch),
-        AtomicOp::Xor {
-            fetch
-        } => BpfAtomic::Xor | fetch_bit(fetch),
+        AtomicOp::Add { fetch } => BpfAtomic::Add | fetch_bit(fetch),
+        AtomicOp::Or { fetch } => BpfAtomic::Or | fetch_bit(fetch),
+        AtomicOp::And { fetch } => BpfAtomic::And | fetch_bit(fetch),
+        AtomicOp::Xor { fetch } => BpfAtomic::Xor | fetch_bit(fetch),
         AtomicOp::Xchg => BpfAtomic::Xchg,
         AtomicOp::CmpXchg => BpfAtomic::Cmpxchg,
     }
@@ -626,11 +577,7 @@ fn decode_alu(pc: usize, r: RawInsn) -> Insn eff [Fail[DecodeError]] {
         } else {
             bad(pc, r.code)
         };
-        return Insn::Endian {
-            kind: kind,
-            bits: width,
-            dst: dst
-        };
+        return Insn::Endian { kind: kind, bits: width, dst: dst };
     }
     let op = match alu_op(opc, r.off, wide) {
         Option::Some(o) => o,
@@ -665,12 +612,7 @@ fn decode_alu(pc: usize, r: RawInsn) -> Insn eff [Fail[DecodeError]] {
     if is_movsx && !x {
         bad(pc, r.code);
     }
-    Insn::Alu {
-        wide: wide,
-        op: op,
-        dst: dst,
-        src: src
-    }
+    Insn::Alu { wide: wide, op: op, dst: dst, src: src }
 }
 
 fn decode_jmp(pc: usize, r: RawInsn) -> Insn eff [Fail[DecodeError]] {
@@ -685,14 +627,10 @@ fn decode_jmp(pc: usize, r: RawInsn) -> Insn eff [Fail[DecodeError]] {
         zero_u8(pc, r.src, FIELD_SRC);
         if wide {
             zero_i32(pc, r.imm, FIELD_IMM);
-            return Insn::Ja {
-                off: widen_i32(r.off)
-            };
+            return Insn::Ja { off: widen_i32(r.off) };
         }
         zero_i16(pc, r.off, FIELD_OFF);
-        return Insn::Ja {
-            off: r.imm
-        };
+        return Insn::Ja { off: r.imm };
     }
     if opc == BpfJmp::Call && wide {
         if x {
@@ -733,13 +671,7 @@ fn decode_jmp(pc: usize, r: RawInsn) -> Insn eff [Fail[DecodeError]] {
         zero_u8(pc, r.src, FIELD_SRC);
         Operand::Imm(r.imm)
     };
-    Insn::Jcond {
-        wide: wide,
-        op: op,
-        dst: dst,
-        src: src,
-        off: r.off
-    }
+    Insn::Jcond { wide: wide, op: op, dst: dst, src: src, off: r.off }
 }
 
 fn decode_ld(pc: usize, r: RawInsn, has_hi: bool, hi: RawInsn) -> Insn eff [Fail[DecodeError]] {
@@ -764,18 +696,11 @@ fn decode_ld(pc: usize, r: RawInsn, has_hi: bool, hi: RawInsn) -> Insn eff [Fail
             }
             Imm64::MapFd(r.imm)
         } else if r.src >= PseudoLd::Value && r.src <= PseudoLd::IdxValue {
-            Imm64::Pseudo {
-                src: r.src,
-                imm_lo: r.imm,
-                imm_hi: hi.imm
-            }
+            Imm64::Pseudo { src: r.src, imm_lo: r.imm, imm_hi: hi.imm }
         } else {
             bad(pc, r.code)
         };
-        return Insn::LdImm64 {
-            dst: dst,
-            imm: imm
-        };
+        return Insn::LdImm64 { dst: dst, imm: imm };
     }
     if (mode == BpfMode::Abs || mode == BpfMode::Ind) && !is_dw(size) {
         zero_u8(pc, r.dst, FIELD_DST);
@@ -787,12 +712,7 @@ fn decode_ld(pc: usize, r: RawInsn, has_hi: bool, hi: RawInsn) -> Insn eff [Fail
             zero_u8(pc, r.src, FIELD_SRC);
             0
         };
-        return Insn::LdLegacy {
-            size: size,
-            indirect: indirect,
-            src: src,
-            imm: r.imm
-        };
+        return Insn::LdLegacy { size: size, indirect: indirect, src: src, imm: r.imm };
     }
     bad(pc, r.code)
 }
@@ -812,37 +732,21 @@ fn decode_mem(pc: usize, r: RawInsn) -> Insn eff [Fail[DecodeError]] {
         zero_i32(pc, r.imm, FIELD_IMM);
         let dst = reg(pc, r.dst);
         let src = reg(pc, r.src);
-        return Insn::Ldx {
-            size: size,
-            dst: dst,
-            src: src,
-            off: r.off,
-            sign_extend: sign_extend
-        };
+        return Insn::Ldx { size: size, dst: dst, src: src, off: r.off, sign_extend: sign_extend };
     }
     if cls == 2 {
         if mode != BpfMode::Mem {
             bad(pc, r.code);
         }
         zero_u8(pc, r.src, FIELD_SRC);
-        return Insn::St {
-            size: size,
-            dst: reg(pc, r.dst),
-            off: r.off,
-            imm: r.imm
-        };
+        return Insn::St { size: size, dst: reg(pc, r.dst), off: r.off, imm: r.imm };
     }
     // STX
     if mode == BpfMode::Mem {
         zero_i32(pc, r.imm, FIELD_IMM);
         let dst = reg(pc, r.dst);
         let src = reg(pc, r.src);
-        return Insn::Stx {
-            size: size,
-            dst: dst,
-            src: src,
-            off: r.off
-        };
+        return Insn::Stx { size: size, dst: dst, src: src, off: r.off };
     }
     let atomic_size = match size {
         Size::W => true,
@@ -856,13 +760,7 @@ fn decode_mem(pc: usize, r: RawInsn) -> Insn eff [Fail[DecodeError]] {
         };
         let dst = reg(pc, r.dst);
         let src = reg(pc, r.src);
-        return Insn::Atomic {
-            size: size,
-            op: op,
-            dst: dst,
-            src: src,
-            off: r.off
-        };
+        return Insn::Atomic { size: size, op: op, dst: dst, src: src, off: r.off };
     }
     bad(pc, r.code)
 }
@@ -871,11 +769,7 @@ fn decode_mem(pc: usize, r: RawInsn) -> Insn eff [Fail[DecodeError]] {
 // slot `pc` and `hi` slot `pc + 1` (zero when absent).
 pub fn decode(pc: usize, len: usize, lo: RawInsn, hi: RawInsn) -> Insn eff [Fail[DecodeError]] {
     if pc >= len {
-        Fail::raise(
-            DecodeError::TruncatedProgram {
-                len: wrapping_mul(len, SLOT_BYTES)
-            }
-        );
+        Fail::raise(DecodeError::TruncatedProgram { len: wrapping_mul(len, SLOT_BYTES) });
     }
     decode_slot(pc, lo, wrapping_add(pc, 1) < len, hi)
 }
@@ -902,10 +796,7 @@ fn slot_at(in slots: Slice[RawInsn], i: usize) -> RawInsn {
 
 fn is_ld_imm64(i: Insn) -> bool {
     match i {
-        Insn::LdImm64 {
-            dst,
-            imm
-        } => true,
+        Insn::LdImm64 { dst, imm } => true,
         _ => false,
     }
 }
@@ -960,11 +851,7 @@ pub fn decode_slots(
 }
 
 fn one(r: RawInsn) -> Encoded {
-    Encoded {
-        n: 1,
-        lo: r,
-        hi: raw_zero()
-    }
+    Encoded { n: 1, lo: r, hi: raw_zero() }
 }
 
 fn op_src(o: Operand) -> (u8, u8, i32) {
@@ -977,12 +864,7 @@ fn op_src(o: Operand) -> (u8, u8, i32) {
 // Encode one instruction into one or two slots.
 pub fn encode(i: Insn) -> Encoded {
     match i {
-        Insn::Alu {
-            wide,
-            op,
-            dst,
-            src
-        } => {
+        Insn::Alu { wide, op, dst, src } => {
             let cls: u8 = if wide {
                 BpfClass::Alu64
             } else {
@@ -992,11 +874,7 @@ pub fn encode(i: Insn) -> Encoded {
             let (x, sreg, imm) = op_src(src);
             one(raw(cls | opc | x, dst, sreg, off, imm))
         },
-        Insn::Endian {
-            kind,
-            bits,
-            dst
-        } => {
+        Insn::Endian { kind, bits, dst } => {
             let code: u8 = match kind {
                 Endian::ToLe => BpfClass::Alu | BpfAlu::End,
                 Endian::ToBe => BpfClass::Alu | BpfAlu::End | BpfSrc::ToBe,
@@ -1004,20 +882,12 @@ pub fn encode(i: Insn) -> Encoded {
             };
             one(raw(code, dst, 0, 0, widen_i32(bits)))
         },
-        Insn::Ja {
-            off
-        } => if off >= -32768 && off <= 32767 {
+        Insn::Ja { off } => if off >= -32768 && off <= 32767 {
             one(raw(BpfClass::Jmp | BpfJmp::Ja, 0, 0, wrapping_i16(off), 0))
         } else {
             one(raw(BpfClass::Jmp32 | BpfJmp::Ja, 0, 0, 0, off))
         },
-        Insn::Jcond {
-            wide,
-            op,
-            dst,
-            src,
-            off
-        } => {
+        Insn::Jcond { wide, op, dst, src, off } => {
             let cls: u8 = if wide {
                 BpfClass::Jmp
             } else {
@@ -1036,18 +906,11 @@ pub fn encode(i: Insn) -> Encoded {
             ),
         },
         Insn::Exit => one(raw(BpfClass::Jmp | BpfJmp::Exit, 0, 0, 0, 0)),
-        Insn::LdImm64 {
-            dst,
-            imm
-        } => {
+        Insn::LdImm64 { dst, imm } => {
             let (src, lo, up): (u8, i32, i32) = match imm {
                 Imm64::Value(v) => (0, wrapping_i32(v), wrapping_i32(v >> 32)),
                 Imm64::MapFd(fd) => (PseudoLd::Fd, fd, 0),
-                Imm64::Pseudo {
-                    src,
-                    imm_lo,
-                    imm_hi
-                } => (src, imm_lo, imm_hi),
+                Imm64::Pseudo { src, imm_lo, imm_hi } => (src, imm_lo, imm_hi),
             };
             Encoded {
                 n: 2,
@@ -1055,13 +918,7 @@ pub fn encode(i: Insn) -> Encoded {
                 hi: raw(0, 0, 0, 0, up)
             }
         },
-        Insn::Ldx {
-            size,
-            dst,
-            src,
-            off,
-            sign_extend
-        } => {
+        Insn::Ldx { size, dst, src, off, sign_extend } => {
             let mode: u8 = if sign_extend {
                 BpfMode::Memsx
             } else {
@@ -1069,33 +926,16 @@ pub fn encode(i: Insn) -> Encoded {
             };
             one(raw(BpfClass::Ldx | mode | size_code(size), dst, src, off, 0))
         },
-        Insn::St {
-            size,
-            dst,
-            off,
-            imm
-        } => one(raw(BpfClass::St | BpfMode::Mem | size_code(size), dst, 0, off, imm)),
-        Insn::Stx {
-            size,
-            dst,
-            src,
-            off
-        } => one(raw(BpfClass::Stx | BpfMode::Mem | size_code(size), dst, src, off, 0)),
-        Insn::Atomic {
-            size,
-            op,
-            dst,
-            src,
-            off
-        } => one(
+        Insn::St { size, dst, off, imm } => one(
+            raw(BpfClass::St | BpfMode::Mem | size_code(size), dst, 0, off, imm)
+        ),
+        Insn::Stx { size, dst, src, off } => one(
+            raw(BpfClass::Stx | BpfMode::Mem | size_code(size), dst, src, off, 0)
+        ),
+        Insn::Atomic { size, op, dst, src, off } => one(
             raw(BpfClass::Stx | BpfMode::Atomic | size_code(size), dst, src, off, atomic_imm(op))
         ),
-        Insn::LdLegacy {
-            size,
-            indirect,
-            src,
-            imm
-        } => {
+        Insn::LdLegacy { size, indirect, src, imm } => {
             let mode: u8 = if indirect {
                 BpfMode::Ind
             } else {
@@ -1142,11 +982,7 @@ fn byte(in b: Slice[u8], i: u64) -> u8 {
 pub fn slots_from_bytes(in bytes: Slice[u8]) -> ChunkSeq[RawInsn] eff [Fail[DecodeError]] {
     let n = bytes.len();
     if n & 7 != 0 {
-        Fail::raise(
-            DecodeError::TruncatedProgram {
-                len: narrow_usize(n)
-            }
-        );
+        Fail::raise(DecodeError::TruncatedProgram { len: narrow_usize(n) });
     }
     let mut out: ChunkSeq[RawInsn] = ChunkSeq::new[RawInsn]();
     let mut at: u64 = 0;

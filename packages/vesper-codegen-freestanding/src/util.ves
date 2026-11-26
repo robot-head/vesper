@@ -140,10 +140,7 @@ pub struct Reader {
 }
 
 pub fn reader() -> Reader {
-    Reader {
-        pos: 0,
-        bad: false
-    }
+    Reader { pos: 0, bad: false }
 }
 
 impl Reader {
@@ -168,16 +165,10 @@ impl Reader {
         let end = wrapping_add(start, len);
         if end < start || end > b.len() {
             self.bad = true;
-            return Span {
-                start: 0,
-                len: 0
-            };
+            return Span { start: 0, len: 0 };
         }
         self.pos = end;
-        Span {
-            start: start,
-            len: len
-        }
+        Span { start: start, len: len }
     }
 }
 

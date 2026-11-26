@@ -312,23 +312,11 @@ pub fn read_ast(in names: Str, inout r: Reader, in b: Slice[u8]) -> Ast {
     for _ in 0..n_items {
         let _ = a
             .items
-            .alloc(
-                ItemNode {
-                    kind: wrapping_u8(r.word(in b)),
-                    node: wrapping_u32(r.word(in b))
-                }
-            );
+            .alloc(ItemNode { kind: wrapping_u8(r.word(in b)), node: wrapping_u32(r.word(in b)) });
     }
     let n_lists = r.word(in b);
     for _ in 0..n_lists {
-        let _ = a
-            .lists
-            .alloc(
-                ListRef {
-                    first: n32(r.word(in b)),
-                    len: n32(r.word(in b))
-                }
-            );
+        let _ = a.lists.alloc(ListRef { first: n32(r.word(in b)), len: n32(r.word(in b)) });
     }
     let n_pool = r.word(in b);
     for _ in 0..n_pool {

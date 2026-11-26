@@ -159,9 +159,7 @@ fn isa_lines(inout o: ChunkSeq[u8], in c: Ctx, in vn: VecNames, row: u32, i: u64
 // Task words: l, l pairs (source label, capability) of names; n, n types.
 pub fn regions_seqs_types(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let k = c.world.k;
     let vn = vec_names_new(inout c.names);
@@ -319,29 +317,12 @@ fn read_sigs(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Sigs {
             let ty = u32_at(in c.tmap, r.word(in b));
             let ps = r.word(in b);
             let pe = r.word(in b);
-            sg
-                .params
-                .push(
-                    Param {
-                        name: pname,
-                        pass: pass,
-                        ty: ty,
-                        start: ps,
-                        stop: pe
-                    }
-                );
+            sg.params.push(Param { name: pname, pass: pass, ty: ty, start: ps, stop: pe });
         }
         sg
             .sigs
             .push(
-                Sig {
-                    name: name,
-                    start: start,
-                    stop: stop,
-                    result: result,
-                    pa: pa,
-                    pn: n32(np)
-                }
+                Sig { name: name, start: start, stop: stop, result: result, pa: pa, pn: n32(np) }
             );
     }
     for i in 0..c.world.adts.len() {
@@ -358,9 +339,7 @@ fn read_sigs(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Sigs {
 // diagnostic per line. Task words: the lane 9 world section.
 pub fn regions_seqs_world(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let sg = read_sigs(inout r, in b, in c);
     let mut d = diags_new();
@@ -382,9 +361,7 @@ pub fn regions_seqs_world(in input: Str) -> ChunkSeq[u64] {
 // or 0 for a free call).
 pub fn regions_seqs_resolve(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let k = c.world.k;
     let sn = seq_names_new(inout c.names);
@@ -428,9 +405,7 @@ pub fn regions_seqs_resolve(in input: Str) -> ChunkSeq[u64] {
 // test subtracts from the type task's time.
 pub fn regions_seqs_decode(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let vn = vec_names_new(inout c.names);
     let o = ChunkSeq::new[u8]();

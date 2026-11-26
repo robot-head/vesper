@@ -13,9 +13,24 @@
 // src/main.rs) are handed back; docs/parallel-results/
 // self-host-cli-commands.md lists each with its lane or blocker.
 use @vesper/driver::{Args, args_count, arg_start, arg_end, eq};
-use @vesper-std/env::{var_bytes, os, os_windows};
+use @vesper-std/env::{var_bytes, current_exe_bytes, os, os_linux, os_macos, os_windows};
 use @vesper-std/process::{command_path, arg_bytes as proc_arg, spawn, wait, release};
-use @vesper-std/fs::{IoError, error_text, not_found, symlink_metadata, kind_dir, kind_file};
+use @vesper-std/fs::{
+    IoError,
+    error_text,
+    write_stdout,
+    write_stderr,
+    is_executable_path,
+    canonicalize_path,
+    arch,
+    arch_x86_64,
+    arch_aarch64,
+    arch_wasm32,
+    not_found,
+    symlink_metadata,
+    kind_dir,
+    kind_file
+};
 use @vesper-std/fs::walk::{Entries, entry_count, entry_start, entry_end, entry_kind, list_dir_path};
 use self::graph::{run_graph};
 use self::forge::{run_forge};
@@ -32,10 +47,12 @@ enum Ascii: _ {
     DoubleQuote = 34,
     RightParen = 41,
     Dash = 45,
+    Dot = 46,
     Slash = 47,
     Digit0 = 48,
     Digit9 = 57,
     Colon = 58,
+    Question = 63,
     Semicolon = 59,
     UpperA = 65,
     UpperZ = 90,
@@ -46,9 +63,10 @@ enum Ascii: _ {
     NonAsciiStart = 128,
 }
 
-const HOST_TEXT_INITIAL_BYTES: u64 = 256;
 const ERROR_TEXT_INITIAL_BYTES: u64 = 128;
 const SIGNAL_EXIT_BASE: i64 = 128;
+// The status of a Rust program whose `main` panicked.
+const PANIC_EXIT: i64 = 101;
 
 // `run`'s result when the Rust CLI should run the command instead (the
 // driver's `delegate()`).
@@ -64,26 +82,9 @@ fn stderr_stream() -> u32 {
     2
 }
 
-// `hc_text` keys.
-fn text_version() -> u32 {
-    1
-}
-
-fn text_arch() -> u32 {
-    2
-}
-
-fn text_os() -> u32 {
-    3
-}
-
-// The directory of `env::current_exe()`, and of its canonical path.
-fn text_exe_dir() -> u32 {
-    4
-}
-
-fn text_exe_canonical_dir() -> u32 {
-    5
+// The CLI's version (`env!("CARGO_PKG_VERSION")` of the workspace).
+fn cli_version() -> Str {
+    "0.1.0"
 }
 
 // ---------------------------------------------------------------------------
@@ -93,9 +94,19 @@ fn text_exe_canonical_dir() -> u32 {
 // program name), or `delegate()`.
 pub fn run(in args: Args)
     -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands]] {
+    handle Fail[PrintFailed] in {
+        route(in args)
+    } with {
+        return v => v,
+        raise(f, _) => print_panic(f),
+    }
+}
+
+fn route(in args: Args)
+    -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands], Fail[PrintFailed]] {
     let n = args_count(in args);
     if n == 0 {
-        HybridCommands::hc_help();
+        print(stdout_stream(), in cli_help().as_bytes());
         return 0;
     }
     let command = arg(in args, 0);
@@ -109,7 +120,7 @@ pub fn run(in args: Args)
     // commands to the CLI.
     if byte_at(in c, 0) == Ascii::Dash {
         if eq(in c, in "--help") || eq(in c, in "-h") {
-            HybridCommands::hc_help();
+            print(stdout_stream(), in cli_help().as_bytes());
             return 0;
         }
         if eq(in c, in "--version") || eq(in c, in "-V") {
@@ -264,12 +275,144 @@ pub fn byte_at(in s: Slice[u8], i: u64) -> u8 {
     }
 }
 
-pub fn print(stream: u32, in text: Slice[u8]) eff [Ffi[HybridCommands]] {
-    HybridCommands::hc_print(stream, in text);
+// A failed write to a standard stream: Rust's `print!`/`eprint!` panics
+// (`failed printing to stdout: <e>`), which ends the CLI with status 101.
+pub copy struct PrintFailed {
+    pub stream: u32,
+    pub error: IoError,
+}
+
+// `print!("{}", String::from_utf8_lossy(text))` on stdout, or `eprint!` on
+// stderr: the bytes go straight to the stream (Rust's stdout flushes every
+// line, and every text printed here ends one), and a failed write raises
+// `PrintFailed`, which `run` turns into Rust's panic.
+pub fn print(stream: u32, in text: Slice[u8]) eff [Ffi[StdFs], Fail[PrintFailed]] {
+    if utf8(in text) {
+        write_stream(stream, in text);
+    } else {
+        let fixed = lossy(in text);
+        write_stream(stream, in fixed.as_slice());
+    }
+}
+
+fn write_stream(stream: u32, in text: Slice[u8]) eff [Ffi[StdFs], Fail[PrintFailed]] {
+    handle Fail[IoError] in {
+        if stream == stderr_stream() {
+            write_stderr(in text);
+        } else {
+            write_stdout(in text);
+        }
+    } with {
+        return v => v,
+        raise(e, _) => Fail::raise(PrintFailed { stream: stream, error: e }),
+    }
+}
+
+// `String::from_utf8_lossy`: each maximal ill-formed subpart of `s`
+// becomes U+FFFD (as `Utf8Chunks` splits it).
+fn lossy(in s: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= s.len() {
+            break;
+        }
+        let b = byte_at(in s, i);
+        if b < Ascii::NonAsciiStart {
+            out.push(b);
+            i = wrapping_add(i, 1);
+            continue;
+        }
+        let mut need: u64 = 0;
+        let mut lo: u8 = 128;
+        let mut hi: u8 = 191;
+        if b >= 194 && b <= 223 {
+            need = 1;
+        } else if b == 224 {
+            need = 2;
+            lo = 160;
+        } else if (b >= 225 && b <= 236) || b == 238 || b == 239 {
+            need = 2;
+        } else if b == 237 {
+            need = 2;
+            hi = 159;
+        } else if b == 240 {
+            need = 3;
+            lo = 144;
+        } else if b >= 241 && b <= 243 {
+            need = 3;
+        } else if b == 244 {
+            need = 3;
+            hi = 143;
+        }
+        // The bytes of the longest valid prefix of a sequence.
+        let mut got: u64 = 1;
+        if need != 0 {
+            loop {
+                if got > need {
+                    break;
+                }
+                let at = wrapping_add(i, got);
+                if at >= s.len() {
+                    break;
+                }
+                let c = byte_at(in s, at);
+                let ok = if got == 1 {
+                    c >= lo && c <= hi
+                } else {
+                    c >= 128 && c <= 191
+                };
+                if !ok {
+                    break;
+                }
+                got = wrapping_add(got, 1);
+            }
+        }
+        if need != 0 && got == wrapping_add(need, 1) {
+            out.extend(in s[i..wrapping_add(i, got)]);
+        } else {
+            out.push(239);
+            out.push(191);
+            out.push(189);
+        }
+        i = wrapping_add(i, got);
+    }
+    out
+}
+
+// Rust's panic for a failed `print!`, as the CLI's panic hook writes it,
+// and the status a panicking `main` exits with. A failed write of the
+// message itself is ignored, as the hook ignores it.
+fn print_panic(f: PrintFailed) -> i64 eff [Ffi[StdFs]] {
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    m
+        .extend(
+            in "thread 'vesper' panicked at library/std/src/io/stdio.rs:\nfailed printing to "
+                .as_bytes()
+        );
+    if f.stream == stderr_stream() {
+        m.extend(in "stderr: ".as_bytes());
+    } else {
+        m.extend(in "stdout: ".as_bytes());
+    }
+    let t = error_text(f.error);
+    m.extend(in t.as_slice());
+    m
+        .extend(
+            in "\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+                .as_bytes()
+        );
+    handle Fail[IoError] in {
+        write_stderr(in m.as_slice());
+    } with {
+        return v => v,
+        raise(_, _) => (),
+    }
+    PANIC_EXIT
 }
 
 // `vesper: <message>` on stderr (`main`'s `Err` arm); exit code 1.
-pub fn fail(in message: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
+pub fn fail(in message: Slice[u8]) -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
     let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
     line.extend(in "vesper: ".as_bytes());
     line.extend(in message);
@@ -279,7 +422,7 @@ pub fn fail(in message: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
 }
 
 // `unknown command '<c>'; see --help` (the end of `cli()`).
-fn unknown_command(in c: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
+fn unknown_command(in c: Slice[u8]) -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
     let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
     m.extend(in "unknown command '".as_bytes());
     m.extend(in c);
@@ -305,24 +448,6 @@ fn grown(n: i64, inout buf: ChunkSeq[u8], inout none: bool) -> bool {
     false
 }
 
-// Host text `which`, and whether it exists.
-fn host_text(which: u32, inout none: bool) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
-    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    buf.resize(HOST_TEXT_INITIAL_BYTES, 0);
-    loop {
-        let n = HybridCommands::hc_text(which, 0, inout buf.as_slice_mut());
-        if !grown(n, inout buf, inout none) {
-            break;
-        }
-    }
-    buf
-}
-
-fn host_text_or_empty(which: u32) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
-    let mut none = false;
-    host_text(which, inout none)
-}
-
 // Rust's `Display` of the `io::Error` with this error word (the kind in
 // the low byte, the OS error in the high half): @vesper-std/fs's text.
 pub fn io_error_text(word: u64) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
@@ -337,17 +462,14 @@ pub fn io_error_text(word: u64) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
 // ---------------------------------------------------------------------------
 // `--version` (`format_version_banner` in src/main.rs).
 
-fn version() -> i64 eff [Ffi[HybridCommands]] {
+fn version() -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
     let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
     b.extend(in "  \\\\    //   vesper ".as_bytes());
-    let v = host_text_or_empty(text_version());
-    b.extend(in v.as_slice());
+    b.extend(in cli_version().as_bytes());
     b.extend(in " (stage3-ddc)\n   \\\\  //    target: ".as_bytes());
-    let arch = host_text_or_empty(text_arch());
-    b.extend(in arch.as_slice());
+    b.extend(in arch_name().as_bytes());
     b.push(Ascii::Dash);
-    let os = host_text_or_empty(text_os());
-    b.extend(in os.as_slice());
+    b.extend(in os_name().as_bytes());
     b
         .extend(
             in " (cranelift + lean4)\n    \\\\||/    modes: copy <= affine <= linear | 0 sorryAx\n     \\/\n"
@@ -355,6 +477,39 @@ fn version() -> i64 eff [Ffi[HybridCommands]] {
         );
     print(stdout_stream(), in b.as_slice());
     0
+}
+
+// `std::env::consts::ARCH` and `OS` of the host.
+fn arch_name() -> Str {
+    let a = arch();
+    if a == arch_x86_64() {
+        "x86_64"
+    } else if a == arch_aarch64() {
+        "aarch64"
+    } else if a == arch_wasm32() {
+        "wasm32"
+    } else {
+        ""
+    }
+}
+
+fn os_name() -> Str {
+    let o = os();
+    if o == os_linux() {
+        "linux"
+    } else if o == os_macos() {
+        "macos"
+    } else if o == os_windows() {
+        "windows"
+    } else {
+        "wasi"
+    }
+}
+
+// The help of the CLI (`HELP` in src/main.rs; the CLI tests compare the
+// two byte for byte).
+fn cli_help() -> Str {
+    "Vesper — modal ownership and lexical effects\n\nUsage: vesper <command> [FILE|DIR] [options]   (most commands take one .ves file; check/run/jit/build/emit also take a package directory with a Loom.toml; see vesper <command> --help)\n\nCommands:\n  forge   Check and expand explicit source Expr macros (forge --help)\n  grammar Validate canonical protocol bytes and Arrow IPC\n  verify  Kernel-check formatter document models (--format), or refute a contract (--refute)\n  fuzz    Crucible fuzzing of a source function (fuzz --help)\n  migrate Lift C/Rust signatures into .ves/.vsys (migrate --help)\n  replay  Verify and replay a Chrono .vchrono bundle (replay --help)\n  ebpf    Pre-flight verify an eBPF program (ebpf check --help)\n  fmt     Format supported source without changing tokens/comments\n  highlight  Chroma semantic highlighting: --html, --ansi, --json, --css (highlight --help)\n  shot    Render an SVG or 1x-4x PNG code card (shot --help)\n  lint    Analyze checked source and validate supported fixes\n  doc     Generate checked API docs, heatmaps and a search bundle (doc --help)\n  test    Run unit tests, or run doctests with --doc\n  bench   Measure finite scalar source kernels (bench --help)\n  check   Check types, effects, ownership, and places\n  run     Execute with the one-shot effect stack machine\n  jit     Execute native code with Cranelift\n  build   Compile and link a native executable (-o <path>), or a C-ABI library (--lib)\n  emit    Emit cst, hir, ir, clif, object, lean, or interface (--emit <kind>)\n  resolve Resolve or validate a locked local Loom catalog\n  graph   Inspect a solution snapshot (see graph --help)\n  sbom    Emit a CycloneDX snapshot inventory (see sbom --help)\n  audit   Audit declared dependencies against local policies (see audit --help)\n  top     Inspect Pulse fiber telemetry and linear obligations (top --help)\n  publish Run offline release gates and publish to a local CAS (publish --help)\n  json    Validate bounded JSON documents (see json --help)\n  traceparent  Validate W3C TraceContext v00 (see traceparent --help)\n  simd    Run the native byte scanner (see simd --help)\n  proof-audit  Kernel-replay local Lean artifacts (see proof-audit --help)\n  attest  Verify and import configured-key signed artifacts (see attest --help)\n  cas     Ingest, verify and materialize local content (see cas --help)\n  semver  Compare baseline and candidate interface JSON files\n  lsp     Serve incremental diagnostics over stdio\n\nOptions:\n  -o <path>       Output file (stdout for textual output by default)\n  --emit <kind>   Output format (default: ir)\n  --package <id>  Interface namespace (@org/name or std/name)\n  --entry <name>  Entry function (default: main)\n  --include-tests  check/run/jit: enable test-only declarations\n  --fuel <steps>  Evaluation step limit (default: 10000000)\n  --target <triple>  Object/executable target (default: host)\n  --target-features <list>  With --target: CPU features to use, as Rust's names (ssse3,avx2,...; cargo's CARGO_CFG_TARGET_FEATURE)\n  --linker <path>    Linker for build (default: cc)\n  --link-search <dir>  build: a directory the linker searches for .vsys libraries (repeatable)\n  --codegen verified  build: direct verified code generator (scalar subset, no Cranelift)\n  --no-opt       Disable equality saturation (both optimizers)\n  --no-ast-opt   run/jit/emit: disable only the AST optimizer\n  --no-ir-opt    run/jit/emit: disable only the IR optimizer\n  --verify=<list>    Run Stage-5 verifiers on emitted Cranelift (const-time,stack,realtime,detfloat,all)\n  --verify-<name>    One verifier (--verify-const-time, --verify-stack, ...)\n  --verify-policy <file>  Verifier policy JSON (vesper.native-verifiers/1)\n  --lib          build: a C-ABI library object (--lib-name, --interface, --rust-binding, --rust-types, --instance f[T])\n  --tee          build: write the TDX RTMR / CCA REM measurement of the executable\n  --json         Machine-readable diagnostics\n  -h, --help     Show help\n  -V, --version  Show version\n"
 }
 
 // ---------------------------------------------------------------------------
@@ -420,14 +575,137 @@ fn same(in a: Slice[u8], in b: Slice[u8]) -> bool {
     true
 }
 
-fn executable(in path: Slice[u8]) -> bool eff [Ffi[HybridCommands]] {
-    HybridCommands::hc_executable(in path) != 0
+// `is_executable`: a regular file (following links), with an execute bit
+// on Unix.
+fn executable(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    is_executable_path(in path)
+}
+
+// `Path::parent` of the executable's path: everything before its last
+// component, without the separators (and `.` components) before that;
+// none for a root or an empty path.
+fn parent(in p: Slice[u8], windows: bool, inout none: bool) -> ChunkSeq[u8] {
+    let root = root_len(in p, windows);
+    let verbatim = windows && starts_verbatim(in p);
+    let mut end = trim_back(in p, p.len(), root, windows, verbatim);
+    if end <= root {
+        none = true;
+        return ChunkSeq::new[u8]();
+    }
+    loop {
+        if end <= root || is_sep(byte_at(in p, wrapping_sub(end, 1)), windows, verbatim) {
+            break;
+        }
+        end = wrapping_sub(end, 1);
+    }
+    end = trim_back(in p, end, root, windows, verbatim);
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.extend(in p[0..end]);
+    out
+}
+
+fn is_sep(b: u8, windows: bool, verbatim: bool) -> bool {
+    if verbatim {
+        b == Ascii::Backslash
+    } else {
+        is_separator(b, windows)
+    }
+}
+
+// `p[..end]` without trailing separators and `.` components, keeping the
+// first `root` bytes.
+fn trim_back(in p: Slice[u8], end: u64, root: u64, windows: bool, verbatim: bool) -> u64 {
+    let mut e = end;
+    loop {
+        if e <= root {
+            break;
+        }
+        let last = byte_at(in p, wrapping_sub(e, 1));
+        if is_sep(last, windows, verbatim) {
+            e = wrapping_sub(e, 1);
+        } else if !verbatim
+            && last == Ascii::Dot
+            && (
+                wrapping_sub(e, 1) == root
+                    || is_sep(byte_at(in p, wrapping_sub(e, 2)), windows, verbatim)
+            ) {
+            // A `.` component, unless it is the path's first (`./x` keeps it).
+            if wrapping_sub(e, 1) == 0 {
+                break;
+            }
+            e = wrapping_sub(e, 1);
+        } else {
+            break;
+        }
+    }
+    e
+}
+
+fn starts_verbatim(in p: Slice[u8]) -> bool {
+    p.len() >= 4
+        && byte_at(in p, 0) == Ascii::Backslash
+        && byte_at(in p, 1) == Ascii::Backslash
+        && byte_at(in p, 2) == Ascii::Question
+        && byte_at(in p, 3) == Ascii::Backslash
+}
+
+// The bytes of the prefix and root of `p`: `/` on Unix; `X:`, `X:\`,
+// `\\?\X:\` or `\` on Windows.
+fn root_len(in p: Slice[u8], windows: bool) -> u64 {
+    if !windows {
+        if p.len() != 0 && byte_at(in p, 0) == Ascii::Slash {
+            return 1;
+        }
+        return 0;
+    }
+    let mut n: u64 = 0;
+    if starts_verbatim(in p) {
+        n = 4;
+        if p.len() >= 6 && ascii_letter(byte_at(in p, 4)) && byte_at(in p, 5) == Ascii::Colon {
+            n = 6;
+        }
+        if n < p.len() && byte_at(in p, n) == Ascii::Backslash {
+            n = wrapping_add(n, 1);
+        }
+        return n;
+    }
+    if p.len() >= 2 && ascii_letter(byte_at(in p, 0)) && byte_at(in p, 1) == Ascii::Colon {
+        n = 2;
+    }
+    if n < p.len() && is_separator(byte_at(in p, n), true) {
+        n = wrapping_add(n, 1);
+    }
+    n
+}
+
+// The directory of `env::current_exe()` (`canonical`: of its canonical
+// path), and whether there is none.
+fn exe_parent_dir(canonical: bool, inout none: bool) -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[StdEnv]] {
+    let windows = os() == os_windows();
+    let exe = handle Fail[IoError] in {
+        let e = current_exe_bytes();
+        if canonical {
+            Option::Some(canonicalize_path(in e.as_slice()))
+        } else {
+            Option::Some(e)
+        }
+    } with {
+        return v => v,
+        raise(_, _) => Option::None,
+    };
+    match exe {
+        Option::Some(e) => parent(in e.as_slice(), windows, inout none),
+        Option::None => {
+            none = true;
+            ChunkSeq::new[u8]()
+        },
+    }
 }
 
 // The candidates in one directory beside the executable: Cargo puts the
 // tools beside `vesper`, Bazel at `<bin>/crates/vesper-tools/bin/`.
 fn in_exe_dir(in dir: Slice[u8], in name: Slice[u8], windows: bool)
-    -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    -> ChunkSeq[u8] eff [Ffi[StdFs]] {
     let direct = join(in dir, in name, windows);
     if executable(in direct.as_slice()) {
         return direct;
@@ -470,11 +748,11 @@ fn span_at(in spans: Slice[u64], i: u64) -> u64 {
 }
 
 // `locate`: the tool's executable, or empty when there is none.
-fn locate(in t: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdEnv], Ffi[HybridCommands]] {
+fn locate(in t: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[StdEnv]] {
     let windows = os() == os_windows();
     let name = binary_name(in t);
     let mut no_exe = false;
-    let exe_dir = host_text(text_exe_dir(), inout no_exe);
+    let exe_dir = exe_parent_dir(false, inout no_exe);
     if !no_exe {
         let found = in_exe_dir(in exe_dir.as_slice(), in name.as_slice(), windows);
         if found.len() != 0 {
@@ -483,7 +761,7 @@ fn locate(in t: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdEnv], Ffi[HybridCommands]
         // A symlinked `vesper` (an install prefix, a Bazel runfiles tree)
         // also finds tools beside its target.
         let mut no_canonical = false;
-        let canonical = host_text(text_exe_canonical_dir(), inout no_canonical);
+        let canonical = exe_parent_dir(true, inout no_canonical);
         if !no_canonical && !same(in canonical.as_slice(), in exe_dir.as_slice()) {
             let found = in_exe_dir(in canonical.as_slice(), in name.as_slice(), windows);
             if found.len() != 0 {
@@ -527,7 +805,7 @@ fn has_arg(in args: Args, in needle: Str) -> bool {
 }
 
 // `missing`: a known tool whose binary is not there.
-fn missing(in t: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
+fn missing(in t: Slice[u8]) -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
     let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
     m.extend(in "`vesper ".as_bytes());
     m.extend(in t);
@@ -545,7 +823,7 @@ fn missing(in t: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
 // inheriting the standard streams; its exit code, 128 plus the signal that
 // killed it, or 1.
 fn run_tool(in binary: Slice[u8], in args: Args)
-    -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[HybridCommands]] {
+    -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Fail[PrintFailed]] {
     let mut c = command_path(in binary);
     let n = args_count(in args);
     for i in 1..n {
@@ -575,8 +853,17 @@ fn run_tool(in binary: Slice[u8], in args: Args)
 // `measure_tee` of src/main.rs for `vesper build --tee` (hd_step group 1,
 // #1896): `vesper-tee measure <path>` with the CLI's standard streams; 0,
 // or 1 once its error is printed.
-pub fn measure_tee(in path: Slice[u8])
-    -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands]] {
+pub fn measure_tee(in path: Slice[u8]) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess]] {
+    handle Fail[PrintFailed] in {
+        tee_measure(in path)
+    } with {
+        return v => v,
+        raise(f, _) => print_panic(f),
+    }
+}
+
+fn tee_measure(in path: Slice[u8])
+    -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Fail[PrintFailed]] {
     let binary = locate(in "tee".as_bytes());
     if binary.len() == 0 {
         return missing(in "tee".as_bytes());
@@ -620,7 +907,7 @@ pub fn measure_tee(in path: Slice[u8])
 }
 
 // `{binary}: {e}`.
-fn spawn_failed(in binary: Slice[u8], e: IoError) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands]] {
+fn spawn_failed(in binary: Slice[u8], e: IoError) -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
     let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
     m.extend(in binary);
     m.extend(in ": ".as_bytes());
@@ -945,29 +1232,40 @@ fn io_word(e: IoError) -> u64 {
     widen_u64(e.kind) | (widen_u64(e.os) << 32)
 }
 
+// A directory listing, or the error word of the read that failed.
+struct Listed {
+    entries: Entries,
+    err: u64,
+}
+
 // Directory `dir`'s names and kinds (not following symbolic links) into
 // `out`, in the OS's order, reading at most `budget` entries: one more sets
 // `over` and stops, so the walk's limit holds while the listing is read,
 // as in Rust. 0, or the error word of a directory that cannot be read.
 fn list_bounded(in dir: Slice[u8], budget: u64, inout out: Entries, inout over: bool)
     -> u64 eff [Ffi[StdFs]] {
-    let mut err_word: u64 = 0;
-    let listed = handle Fail[IoError] in {
-        list_dir_path(in dir)
+    // The error comes back in the handled value: a clause's assignment to
+    // an outer local changes only the clause's copy (#2038).
+    let got = handle Fail[IoError] in {
+        Listed {
+            entries: list_dir_path(in dir),
+            err: 0,
+        }
     } with {
         return v => v,
-        raise(e, _k) => {
-            err_word = io_word(e);
-            Entries {
+        raise(e, _k) => Listed {
+            entries: Entries {
                 bytes: ChunkSeq::new[u8](),
                 ends: ChunkSeq::new[u64](),
                 kinds: ChunkSeq::new[u32](),
-            }
+            },
+            err: io_word(e),
         },
     };
-    if err_word != 0 {
-        return err_word;
+    if got.err != 0 {
+        return got.err;
     }
+    let listed = got.entries;
     if listed.ends.len() > budget {
         over = true;
         return 0;
@@ -1118,7 +1416,7 @@ fn skipped_dir(in name: Slice[u8]) -> bool {
 // many entries; or `walk_delegate()` when a Windows name may have been
 // listed lossily, so the Rust CLI, which keeps the `OsString`, must run.
 fn walk(in root: Slice[u8], inout files: Paths, inout visited: u64, inout err: ChunkSeq[u8])
-    -> u32 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[HybridCommands]] {
+    -> u32 eff [Ffi[StdFs], Ffi[StdEnv]] {
     let windows = os() == os_windows();
     let mut pending = paths_new();
     paths_push(inout pending, in root);
@@ -1209,7 +1507,7 @@ fn format_one(in path: Slice[u8], check: bool, recovery: bool, inout stats: Chun
 }
 
 // `{"error":...,"schema_version":1,"status":"error"}` and `vesper: <error>`.
-fn fmt_failed(in error: Slice[u8], json: bool) -> i64 eff [Ffi[HybridCommands]] {
+fn fmt_failed(in error: Slice[u8], json: bool) -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
     if json {
         let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
         out.push(123);
@@ -1232,7 +1530,7 @@ fn line(inout out: ChunkSeq[u8], in text: Slice[u8]) {
 }
 
 // `fmt_commands::run`.
-fn fmt(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[HybridCommands]] {
+fn fmt(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[HybridCommands], Fail[PrintFailed]] {
     let n = args_count(in args);
     // The Rust CLI panics on an argument that is not UTF-8.
     for i in 1..n {

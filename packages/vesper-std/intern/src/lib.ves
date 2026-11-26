@@ -24,9 +24,7 @@ impl Hash for Symbol {}
 
 // The symbol with id `id` (as stored elsewhere); `resolve` checks it.
 pub fn symbol_from_id(id: u32) -> Symbol {
-    Symbol {
-        id: id
-    }
+    Symbol { id: id }
 }
 
 impl Symbol {
@@ -229,11 +227,7 @@ impl Interner {
             Option::Some(v) => if v == 0 {
                 Option::None
             } else {
-                Option::Some(
-                    Symbol {
-                        id: wrapping_sub(v, 1)
-                    }
-                )
+                Option::Some(Symbol { id: wrapping_sub(v, 1) })
             },
             Option::None => Option::None,
         }
@@ -280,9 +274,7 @@ impl Interner {
             Option::None => 0,
         };
         if v != 0 {
-            Symbol {
-                id: wrapping_sub(v, 1)
-            }
+            Symbol { id: wrapping_sub(v, 1) }
         } else {
             let id = self.hashes.len();
             self.text.push_str(in s);
@@ -294,9 +286,7 @@ impl Interner {
             if wrapping_mul(self.hashes.len(), 2) > self.slots.len() {
                 self.grow();
             }
-            Symbol {
-                id: wrapping_u32(id)
-            }
+            Symbol { id: wrapping_u32(id) }
         }
     }
 

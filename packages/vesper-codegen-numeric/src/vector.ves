@@ -192,9 +192,7 @@ const RD_MIN: u32 = 4;
 const ALL_LANES_64: u32 = 64;
 
 fn vty(code: u32) -> Ty {
-    Ty {
-        code: code
-    }
+    Ty { code: code }
 }
 fn vx_i64() -> Ty {
     vty(TyCode::I64)
@@ -313,12 +311,8 @@ fn vx_store_chunks(inout b: Builder, in m: Module, e: u32, lanes: u32, in chunks
 
 fn vx_chunk(in chunks: Slice[u32], c: u64) -> Value {
     match chunks.try_get(c) {
-        Some(x) => Value {
-            id: x
-        },
-        None => Value {
-            id: 0
-        },
+        Some(x) => Value { id: x },
+        None => Value { id: 0 },
     }
 }
 
@@ -729,9 +723,7 @@ fn vx_emit(call: u64, inout b: Builder, in m: Module, i: u32, e: u32, lanes: u32
             let x = vx_chunk(in a.as_slice(), c);
             let y = vx_chunk(in c2.as_slice(), c);
             let z = vx_chunk(in c3.as_slice(), c);
-            let v = Value {
-                id: Cranelift::vcl_ternary(inout b, Ternary::Fma, x.id, y.id, z.id)
-            };
+            let v = Value { id: Cranelift::vcl_ternary(inout b, Ternary::Fma, x.id, y.id, z.id) };
             out.push(v.id);
         }
         return vx_store_chunks(inout b, in m, e, lanes, in out.as_slice());
@@ -857,9 +849,7 @@ fn vx_emit(call: u64, inout b: Builder, in m: Module, i: u32, e: u32, lanes: u32
     }
     if family == I_REDUCE {
         let chunks = vx_load_chunks(inout b, vx_operand(call, 0), e, lanes, false);
-        let mut acc = Value {
-            id: 0
-        };
+        let mut acc = Value { id: 0 };
         for k in 0..widen_u64(lanes) {
             let lane = ins_extractlane(
                 inout b,

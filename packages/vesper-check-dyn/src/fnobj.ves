@@ -901,11 +901,7 @@ fn erase_module(inout d: D) {
                 set_impl(
                     inout d,
                     x,
-                    ImplNode {
-                        ty: t,
-                        generics: im.generics,
-                        methods: im.methods
-                    }
+                    ImplNode { ty: t, generics: im.generics, methods: im.methods }
                 );
             }
             erase_fns(inout d, im.methods);
@@ -1018,15 +1014,7 @@ fn infer(inout d: D, e: u32) -> u32 {
         let lit = d
             .ast
             .lits
-            .get_or(
-                idx_from_raw[Lit](n.a),
-                Lit {
-                    kind: 0,
-                    neg: false,
-                    bits: 0,
-                    hi: 0
-                }
-            );
+            .get_or(idx_from_raw[Lit](n.a), Lit { kind: 0, neg: false, bits: 0, hi: 0 });
         if lit.kind == 1 {
             return d.t_i64;
         }
@@ -1465,13 +1453,7 @@ fn hoist(inout d: D, e: u32, in prefix: Str, mutable: bool, inout stmts: ChunkSe
     let pat = new_pat(inout d, 2, ps, inc32(ps), name, NONE, NONE);
     let st = new_stmt(
         inout d,
-        StmtNode {
-            kind: 1,
-            pat: pat,
-            ty: d.t_infer,
-            value: value,
-            mutable: mutable
-        }
+        StmtNode { kind: 1, pat: pat, ty: d.t_infer, value: value, mutable: mutable }
     );
     stmts.push(st);
 }
@@ -1835,29 +1817,12 @@ fn coerce(inout d: D, e: u32, kind: u32, sig: u32) {
         let f = d
             .ast
             .fields
-            .alloc(
-                FieldNode {
-                    name: fname,
-                    ty: u32_at(in cap_t, i),
-                    modality: 3,
-                    temperature: 0
-                }
-            )
+            .alloc(FieldNode { name: fname, ty: u32_at(in cap_t, i), modality: 3, temperature: 0 })
             .raw();
         fields.push(f);
     }
     let fl = mk_list(inout d, in fields);
-    let v = d
-        .ast
-        .variants
-        .alloc(
-            VariantNode {
-                name: struct_name,
-                fields: fl,
-                named: true
-            }
-        )
-        .raw();
+    let v = d.ast.variants.alloc(VariantNode { name: struct_name, fields: fl, named: true }).raw();
     let vl = list1(inout d, v);
     let adt_span = span(inout d);
     let adt = d
@@ -1941,13 +1906,7 @@ fn coerce(inout d: D, e: u32, kind: u32, sig: u32) {
         let cp = new_pat(inout d, 5, pat_span, inc32(pat_span), struct_name, pl, 1);
         let st = new_stmt(
             inout d,
-            StmtNode {
-                kind: 1,
-                pat: cp,
-                ty: d.t_infer,
-                value: self_expr,
-                mutable: true
-            }
+            StmtNode { kind: 1, pat: cp, ty: d.t_infer, value: self_expr, mutable: true }
         );
         let stl = list1(inout d, st);
         new_body = new_ex(inout d, exn(5, bs, inc32(bs), stl, body, NONE));
@@ -1982,13 +1941,7 @@ fn coerce(inout d: D, e: u32, kind: u32, sig: u32) {
         .ast
         .trait_refs
         .alloc(
-            TraitRefNode {
-                package: NONE,
-                name: trait_name,
-                args: 0,
-                start: trs,
-                end: inc32(trs)
-            }
+            TraitRefNode { package: NONE, name: trait_name, args: 0, start: trs, end: inc32(trs) }
         )
         .raw();
     let self_t = named(inout d, struct_name, 0);

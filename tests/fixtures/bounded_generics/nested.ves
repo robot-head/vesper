@@ -38,18 +38,9 @@ fn code(b: bool) -> i64 {
 }
 
 fn main() -> i64 {
-    let p = Pair {
-        a: 1,
-        b: 2
-    };
-    let q = Pair {
-        a: 1,
-        b: 3
-    };
-    let r = Pair {
-        a: 2,
-        b: 0
-    };
+    let p = Pair { a: 1, b: 2 };
+    let q = Pair { a: 1, b: 3 };
+    let r = Pair { a: 2, b: 0 };
     let pairs = code(sorted(p, q, r));
     let ints = code(sorted(1, 2, 3));
     let reversed = {

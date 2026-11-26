@@ -2531,11 +2531,7 @@ copy struct Outcome {
 }
 
 fn no_error() -> GpuErr {
-    GpuErr {
-        kind: 0,
-        detail: 0,
-        code: 0
-    }
+    GpuErr { kind: 0, detail: 0, code: 0 }
 }
 
 // One run: the timeline value it submitted (0 when nothing was submitted),
@@ -2602,10 +2598,7 @@ fn imm4(a: u32, b: u32, c: u32, e: u32)
     -> ChunkSeq[u8] eff [Fail[RuntimeError], Fail[ArithOverflow]] {
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     out.resize(16, 0);
-    let mut s = Scratch {
-        base: 0,
-        image: out
-    };
+    let mut s = Scratch { base: 0, image: out };
     put32(inout s, 0, a);
     put32(inout s, 4, b);
     put32(inout s, 8, c);
@@ -2748,18 +2741,10 @@ pub fn bp_run(
     let mut r = rec_new(in d);
     let submitted = handle Fail[GpuErr] in {
         bp_record(in d, inout r, in k, in b, n, max_pairs);
-        Outcome {
-            failed: false,
-            value: rec_submit(in d, in r, previous),
-            err: no_error()
-        }
+        Outcome { failed: false, value: rec_submit(in d, in r, previous), err: no_error() }
     } with {
         return v => v,
-        raise(e, k2) => Outcome {
-            failed: true,
-            value: 0,
-            err: e
-        },
+        raise(e, k2) => Outcome { failed: true, value: 0, err: e },
     };
     if submitted.failed {
         rec_free(in d, in r);
@@ -2768,29 +2753,17 @@ pub fn bp_run(
     let value = submitted.value;
     let waited = handle Fail[GpuErr] in {
         wait_value(in d, value);
-        Outcome {
-            failed: false,
-            value: value,
-            err: no_error()
-        }
+        Outcome { failed: false, value: value, err: no_error() }
     } with {
         return v => v,
-        raise(e, k3) => Outcome {
-            failed: true,
-            value: 0,
-            err: e
-        },
+        raise(e, k3) => Outcome { failed: true, value: 0, err: e },
     };
     if waited.failed {
         // The value was signalled or the device is lost: report it with the
         // error, so the crate still advances its timeline past it.
         wait_idle(in d);
         rec_free(in d, in r);
-        return BpRun {
-            value: value,
-            total: 0,
-            err: waited.err
-        };
+        return BpRun { value: value, total: 0, err: waited.err };
     }
     rec_free(in d, in r);
     let mut total: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -2879,18 +2852,10 @@ const U32_MAX: u64 = 4294967295;
 // `a * b`, or `Kind::Limit` `what` when it overflows.
 fn mul_or(a: u64, b: u64, what: u32) -> u64 eff [Fail[GpuErr], Fail[ArithOverflow]] {
     let r = handle Fail[ArithOverflow] in {
-        Outcome {
-            failed: false,
-            value: a * b,
-            err: no_error()
-        }
+        Outcome { failed: false, value: a * b, err: no_error() }
     } with {
         return v => v,
-        raise(e, k) => Outcome {
-            failed: true,
-            value: 0,
-            err: no_error()
-        },
+        raise(e, k) => Outcome { failed: true, value: 0, err: no_error() },
     };
     if r.failed {
         fail(Kind::Limit, what, 0);
@@ -2926,10 +2891,7 @@ fn groups_for(n: u64, per: u64) -> u32 eff [Fail[GpuErr], Fail[RuntimeError], Fa
 fn immediates(in words: Slice[u32]) -> ChunkSeq[u8] eff [Fail[RuntimeError], Fail[ArithOverflow]] {
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     out.resize(words.len() * 4, 0);
-    let mut s = Scratch {
-        base: 0,
-        image: out
-    };
+    let mut s = Scratch { base: 0, image: out };
     for i in 0..words.len() {
         put32(inout s, i * 4, words[i]);
     }
@@ -3216,12 +3178,7 @@ const LAYER_WORDS: u64 = 22;
 fn layer_buf(in layers: Slice[u64], l: u64, slot: u64)
     -> Buf eff [Fail[RuntimeError], Fail[ArithOverflow]] {
     let at = l * LAYER_WORDS + slot * 2;
-    Buf {
-        buffer: layers[at],
-        memory: 0,
-        ptr: 0,
-        len: layers[at + 1]
-    }
+    Buf { buffer: layers[at], memory: 0, ptr: 0, len: layers[at + 1] }
 }
 
 // Records one llama2.c decode step at `shape.position` (`14 * layers + 2`

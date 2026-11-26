@@ -370,12 +370,7 @@ pub fn reader_next(inout r: FrameReaderCore) -> Result[FrameOut, FrameError] {
                 r.remaining = len;
             } else if buffered_type(ty) {
                 if len > r.max_payload {
-                    return Result::Err(
-                        FrameError::TooLarge {
-                            frame_type: ty,
-                            len: len
-                        }
-                    );
+                    return Result::Err(FrameError::TooLarge { frame_type: ty, len: len });
                 }
                 r.mode = Mode::Payload;
                 r.ty = ty;

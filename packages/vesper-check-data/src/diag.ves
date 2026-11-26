@@ -111,12 +111,7 @@ impl Diags {
         for j in 0..w(r.rn) {
             let l = match self.rel.try_get(add(w(r.ra), j)) {
                 Option::Some(l) => l,
-                Option::None => RelRow {
-                    a: 0,
-                    b: 0,
-                    start: 0,
-                    stop: 0
-                },
+                Option::None => RelRow { a: 0, b: 0, start: 0, stop: 0 },
             };
             h = fold(fold(h, l.start), l.stop);
             h = self.fold_range(h, l.a, l.b);
@@ -136,12 +131,7 @@ impl Diags {
             for j in 0..w(r.rn) {
                 let l = match self.rel.try_get(add(w(r.ra), j)) {
                     Option::Some(l) => l,
-                    Option::None => RelRow {
-                        a: 0,
-                        b: 0,
-                        start: 0,
-                        stop: 0
-                    },
+                    Option::None => RelRow { a: 0, b: 0, start: 0, stop: 0 },
                 };
                 h = fold(fold(h, l.start), l.stop);
                 h = self.fold_range(h, l.a, l.b);

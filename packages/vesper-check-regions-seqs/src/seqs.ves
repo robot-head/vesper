@@ -145,9 +145,7 @@ pub fn seq_names_new(inout n: Names) -> SeqNames {
     intern(inout n, inout s, "try_write_u64_le");
     intern(inout n, inout s, "try_write_u64_be");
     intern(inout n, inout s, "try_get_mut");
-    SeqNames {
-        syms: s
-    }
+    SeqNames { syms: s }
 }
 
 impl SeqNames {
@@ -783,27 +781,14 @@ impl Sigs {
     pub fn sig(in self, i: u64) -> Sig {
         match self.sigs.try_get(i) {
             Option::Some(s) => s,
-            Option::None => Sig {
-                name: 0,
-                start: 0,
-                stop: 0,
-                result: 0,
-                pa: 0,
-                pn: 0
-            },
+            Option::None => Sig { name: 0, start: 0, stop: 0, result: 0, pa: 0, pn: 0 },
         }
     }
 
     pub fn param(in self, i: u64) -> Param {
         match self.params.try_get(i) {
             Option::Some(p) => p,
-            Option::None => Param {
-                name: 0,
-                pass: 0,
-                ty: 0,
-                start: 0,
-                stop: 0
-            },
+            Option::None => Param { name: 0, pass: 0, ty: 0, start: 0, stop: 0 },
         }
     }
 

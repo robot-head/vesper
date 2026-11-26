@@ -113,12 +113,7 @@ pub fn guest_mem_plan(in layout: Slice[u64], inout out_table: Slice[u64]) -> Res
 // offset in the backing host byte buffer.
 pub fn guest_mem_locate(in table: Slice[u64], gpa: u64, len: u64) -> Result[u64, MemFault] {
     if add_overflows(gpa, len) {
-        return Result::Err(
-            MemFault::OutOfBounds {
-                gpa: gpa,
-                len: len
-            }
-        );
+        return Result::Err(MemFault::OutOfBounds { gpa: gpa, len: len });
     }
     let end = wrapping_add(gpa, len);
     let count = table.len() / 3;
@@ -132,10 +127,5 @@ pub fn guest_mem_locate(in table: Slice[u64], gpa: u64, len: u64) -> Result[u64,
             return Result::Ok(wrapping_add(r_off, wrapping_sub(gpa, r_gpa)));
         }
     }
-    Result::Err(
-        MemFault::OutOfBounds {
-            gpa: gpa,
-            len: len
-        }
-    )
+    Result::Err(MemFault::OutOfBounds { gpa: gpa, len: len })
 }

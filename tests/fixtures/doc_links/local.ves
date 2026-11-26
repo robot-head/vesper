@@ -6,9 +6,7 @@ linear struct Tx {
 impl Tx {
     /// Commit consumes a [Tx].
     fn commit(sink self) -> u64 {
-        let Tx {
-            id
-        } = self;
+        let Tx { id } = self;
         id
     }
 }

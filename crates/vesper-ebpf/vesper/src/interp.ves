@@ -304,16 +304,7 @@ fn neg(a: u64) -> u64 {
 }
 
 fn raise(code: u64, pc: u64, d: u64, a: u64, b: u64, c: u64) -> Never eff [Fail[IErr]] {
-    Fail::raise(
-        IErr {
-            code: code,
-            pc: pc,
-            d: d,
-            a: a,
-            b: b,
-            c: c
-        }
-    )
+    Fail::raise(IErr { code: code, pc: pc, d: d, a: a, b: b, c: c })
 }
 
 // InvalidAccess (code 2) and BadHelperArg (code 4) with detail `d`.
@@ -326,10 +317,7 @@ fn bad(pc: u64, d: u64) -> Never eff [Fail[IErr]] {
 }
 
 fn scalar(v: u64) -> Val {
-    Val {
-        v: v,
-        p: none()
-    }
+    Val { v: v, p: none() }
 }
 
 fn size_bytes(s: Size) -> u64 {
@@ -343,10 +331,7 @@ fn size_bytes(s: Size) -> u64 {
 
 fn slots_of(i: Insn) -> u64 {
     match i {
-        Insn::LdImm64 {
-            dst,
-            imm
-        } => 2,
+        Insn::LdImm64 { dst, imm } => 2,
         _ => 1,
     }
 }
@@ -386,18 +371,12 @@ fn get(in i: I, pc: u64, r: u64) -> Val eff [Fail[IErr]] {
     if !gb(in i.ri, r) {
         raise(1, pc, 0, r, 0, 0);
     }
-    Val {
-        v: gw(in i.rv, r),
-        p: gw(in i.rp, r)
-    }
+    Val { v: gw(in i.rv, r), p: gw(in i.rp, r) }
 }
 
 // The register without the init check (helper arguments).
 fn peek(in i: I, r: u64) -> Val {
-    Val {
-        v: gw(in i.rv, r),
-        p: gw(in i.rp, r)
-    }
+    Val { v: gw(in i.rv, r), p: gw(in i.rp, r) }
 }
 
 fn set(inout i: I, r: u64, x: Val) {
@@ -622,20 +601,14 @@ fn ctx_read(in i: I, pc: u64, at: u64, n: u64) -> Val eff [Fail[IErr]] {
             return pkt_ptr(in i, true);
         }
         if at < SkBuff::Data {
-            return Val {
-                v: 0,
-                p: plain()
-            };
+            return Val { v: 0, p: plain() };
         }
         access(pc, 6, at, n, 0);
     }
     if t == PType::Tracepoint && at < TRACE_COMMON_BYTES {
         access(pc, 6, at, n, 0);
     }
-    Val {
-        v: 0,
-        p: plain()
-    }
+    Val { v: 0, p: plain() }
 }
 
 fn skb_writable(at: u64) -> bool {
@@ -675,10 +648,7 @@ fn store(inout i: I, pc: u64, x: Val, off: u64, n: u64, v: Val) eff [Fail[IErr]]
 
 fn new_stack(inout i: I) -> Val {
     let r = alloc(inout i, Region::Stack, STACK_BYTES, false);
-    Val {
-        v: add(rt(in i, r, 1), STACK_BYTES),
-        p: r
-    }
+    Val { v: add(rt(in i, r, 1), STACK_BYTES), p: r }
 }
 
 fn kill(inout i: I, x: Val) {
@@ -871,10 +841,7 @@ fn reserve(inout i: I, m: u64, len: u64) -> Val {
     let zb = le32_bytes(0);
     ring_log(inout i, m, add(hdr, 4), in zb);
     i.maps.try_set(add(mul(m, 7), 5), new_prod);
-    Val {
-        v: hdr,
-        p: add(hdr, RINGBUF_HDR_SZ) & mask
-    }
+    Val { v: hdr, p: add(hdr, RINGBUF_HDR_SZ) & mask }
 }
 
 // The ring byte at `pos` as this run's log leaves it.
@@ -955,10 +922,7 @@ fn s32(v: u64) -> i64 {
 
 // `call_kfunc`: the value of r0, or NONE in `p` and `v` when r0 is unset.
 fn call_kfunc(inout i: I, pc: u64, code: u64) -> Val eff [Fail[IErr]] {
-    let unset = Val {
-        v: none(),
-        p: plain()
-    };
+    let unset = Val { v: none(), p: plain() };
     if code == 4 {
         let at = kslot(in i, pc, code);
         let r = karg(in i, pc, 0).p;
@@ -998,10 +962,7 @@ fn call_kfunc(inout i: I, pc: u64, code: u64) -> Val eff [Fail[IErr]] {
             return scalar(0);
         }
         kwrite(inout i, r, at, pack(add(wrapping_u64(cur), 1), wrapping_u64(end)));
-        return Val {
-            v: add(rt(in i, r, 1), at),
-            p: r
-        };
+        return Val { v: add(rt(in i, r, 1), at), p: r };
     }
     if code == 8 {
         let at = kslot(in i, pc, code);
@@ -1039,10 +1000,7 @@ fn map_elem(inout i: I, pc: u64, id: u64, a0: Val, a1: Val, a2: Val, a3: Val)
             return scalar(0);
         }
         let r = gw(in i.ent, add(mul(e, 4), 3));
-        return Val {
-            v: rt(in i, r, 1),
-            p: r
-        };
+        return Val { v: rt(in i, r, 1), p: r };
     }
     if id == Helper::MapUpdateElem {
         let vs = mword(in i, m, 2);
@@ -1151,10 +1109,7 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
         set_rt(inout i, r, 6, res.p);
         set_rt(inout i, r, 7, res.v);
         i.held.push(r);
-        return Val {
-            v: rt(in i, r, 1),
-            p: r
-        };
+        return Val { v: rt(in i, r, 1), p: r };
     }
     if id == Helper::RingbufSubmit || id == Helper::RingbufDiscard {
         let r = a0.p;
@@ -1230,10 +1185,7 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
         }
         let r = alloc(inout i, Region::Socket, 8, true);
         i.held.push(r);
-        return Val {
-            v: rt(in i, r, 1),
-            p: r
-        };
+        return Val { v: rt(in i, r, 1), p: r };
     }
     if id == Helper::SkRelease {
         let r = a0.p;
@@ -1310,24 +1262,17 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
 
 fn decode_code(e: DecodeError) -> u64 {
     match e {
-        DecodeError::TruncatedProgram {
-            len
-        } => shl(widen_u64(len), 12),
-        DecodeError::BadRegister {
-            pc,
-            reg
-        } => 1 | shl(widen_u64(reg), 4) | shl(widen_u64(pc), 12),
-        DecodeError::InvalidOpcode {
-            pc,
-            code
-        } => 2 | shl(widen_u64(code), 4) | shl(widen_u64(pc), 12),
-        DecodeError::ReservedFieldSet {
-            pc,
-            field
-        } => 3 | shl(widen_u64(field), 4) | shl(widen_u64(pc), 12),
-        DecodeError::BrokenLdImm64 {
-            pc
-        } => 4 | shl(widen_u64(pc), 12),
+        DecodeError::TruncatedProgram { len } => shl(widen_u64(len), 12),
+        DecodeError::BadRegister { pc, reg } => 1 | shl(widen_u64(reg), 4) | shl(widen_u64(pc), 12),
+        DecodeError::InvalidOpcode { pc, code } => 2 | shl(widen_u64(code), 4) | shl(
+            widen_u64(pc),
+            12
+        ),
+        DecodeError::ReservedFieldSet { pc, field } => 3 | shl(widen_u64(field), 4) | shl(
+            widen_u64(pc),
+            12
+        ),
+        DecodeError::BrokenLdImm64 { pc } => 4 | shl(widen_u64(pc), 12),
     }
 }
 
@@ -1468,12 +1413,7 @@ fn exec(
         let next = add(pc, slots_of(ins));
         let mut to = next;
         match ins {
-            Insn::Alu {
-                wide,
-                op,
-                dst,
-                src
-            } => {
+            Insn::Alu { wide, op, dst, src } => {
                 let b = match src {
                     Operand::Imm(c) => scalar(
                         if wide {
@@ -1516,35 +1456,16 @@ fn exec(
                         _ => {},
                     }
                 }
-                set(
-                    inout i,
-                    reg(dst),
-                    Val {
-                        v: v,
-                        p: p
-                    }
-                );
+                set(inout i, reg(dst), Val { v: v, p: p });
             },
-            Insn::Endian {
-                kind,
-                bits,
-                dst
-            } => {
+            Insn::Endian { kind, bits, dst } => {
                 let a = get(in i, pc, reg(dst));
                 set(inout i, reg(dst), scalar(endian(kind, bits, a.v)));
             },
-            Insn::Ja {
-                off
-            } => {
+            Insn::Ja { off } => {
                 to = jump(pc, imm_bits(off));
             },
-            Insn::Jcond {
-                wide,
-                op,
-                dst,
-                src,
-                off
-            } => {
+            Insn::Jcond { wide, op, dst, src, off } => {
                 let a = get(in i, pc, reg(dst));
                 let b = match src {
                     Operand::Imm(c) => if wide {
@@ -1558,10 +1479,7 @@ fn exec(
                     to = jump(pc, off16(off));
                 }
             },
-            Insn::LdImm64 {
-                dst,
-                imm
-            } => {
+            Insn::LdImm64 { dst, imm } => {
                 match imm {
                     Imm64::Value(v) => set(inout i, reg(dst), scalar(v)),
                     Imm64::MapFd(m) => {
@@ -1572,11 +1490,7 @@ fn exec(
                         let mv = gw(in i.cmaps, mi);
                         set(inout i, reg(dst), scalar(map_tag() | mv));
                     },
-                    Imm64::Pseudo {
-                        src,
-                        imm_lo,
-                        imm_hi
-                    } => {
+                    Imm64::Pseudo { src, imm_lo, imm_hi } => {
                         if src != 4 {
                             raise(5, pc, 0, 0, 0, 0);
                         }
@@ -1588,20 +1502,11 @@ fn exec(
                     },
                 }
             },
-            Insn::Ldx {
-                size,
-                dst,
-                src,
-                off,
-                sign_extend
-            } => {
+            Insn::Ldx { size, dst, src, off, sign_extend } => {
                 let p = get(in i, pc, reg(src));
                 let n = size_bytes(size);
                 let at = resolve(in i, pc, p, off16(off), n);
-                let mut v = Val {
-                    v: 0,
-                    p: plain()
-                };
+                let mut v = Val { v: 0, p: plain() };
                 if rt(in i, p.p, 0) == Region::Ctx {
                     v = ctx_read(in i, pc, at, n);
                 }
@@ -1619,42 +1524,23 @@ fn exec(
                             prov = sub(s, 1);
                         }
                     }
-                    v = Val {
-                        v: read_n(in i, m, n),
-                        p: prov
-                    };
+                    v = Val { v: read_n(in i, m, n), p: prov };
                 }
                 if sign_extend {
                     v = scalar(sext_const(v.v, mul(n, 8)));
                 }
                 set(inout i, reg(dst), v);
             },
-            Insn::St {
-                size,
-                dst,
-                off,
-                imm
-            } => {
+            Insn::St { size, dst, off, imm } => {
                 let p = get(in i, pc, reg(dst));
                 store(inout i, pc, p, off16(off), size_bytes(size), scalar(imm_bits(imm)));
             },
-            Insn::Stx {
-                size,
-                dst,
-                src,
-                off
-            } => {
+            Insn::Stx { size, dst, src, off } => {
                 let p = get(in i, pc, reg(dst));
                 let v = get(in i, pc, reg(src));
                 store(inout i, pc, p, off16(off), size_bytes(size), v);
             },
-            Insn::Atomic {
-                size,
-                op,
-                dst,
-                src,
-                off
-            } => {
+            Insn::Atomic { size, op, dst, src, off } => {
                 let p = get(in i, pc, reg(dst));
                 let s = get(in i, pc, reg(src));
                 let n = size_bytes(size);
@@ -1678,33 +1564,25 @@ fn exec(
                 let mut fetch_to = none();
                 let mut nv: u64 = 0;
                 match op {
-                    AtomicOp::Add {
-                        fetch
-                    } => {
+                    AtomicOp::Add { fetch } => {
                         nv = add(old, sv);
                         if fetch {
                             fetch_to = reg(src);
                         }
                     },
-                    AtomicOp::Or {
-                        fetch
-                    } => {
+                    AtomicOp::Or { fetch } => {
                         nv = old | sv;
                         if fetch {
                             fetch_to = reg(src);
                         }
                     },
-                    AtomicOp::And {
-                        fetch
-                    } => {
+                    AtomicOp::And { fetch } => {
                         nv = old & sv;
                         if fetch {
                             fetch_to = reg(src);
                         }
                     },
-                    AtomicOp::Xor {
-                        fetch
-                    } => {
+                    AtomicOp::Xor { fetch } => {
                         nv = old ^ sv;
                         if fetch {
                             fetch_to = reg(src);
@@ -1836,12 +1714,7 @@ fn exec(
                     },
                 }
             },
-            Insn::LdLegacy {
-                size,
-                indirect,
-                src,
-                imm
-            } => {
+            Insn::LdLegacy { size, indirect, src, imm } => {
                 raise(5, pc, 0, 0, 0, 0);
             },
             Insn::Exit => {
@@ -1876,10 +1749,7 @@ fn exec(
                         let k = add(li, 1);
                         i.frames.try_set(add(sub(i.frames.len(), 17), 13), k);
                         let entry = fw(in i, 12);
-                        let argv = Val {
-                            v: fw(in i, 15),
-                            p: fw(in i, 16)
-                        };
+                        let argv = Val { v: fw(in i, 15), p: fw(in i, 16) };
                         let st = new_stack(inout i);
                         i.rv.try_set(10, st.v);
                         i.rp.try_set(10, st.p);
@@ -2398,23 +2268,13 @@ fn run_body(
         i.mem.try_copy_from(rt(in i, c, 2), in ctxb);
     }
     i.ctx = c;
-    let ctx_ptr = Val {
-        v: rt(in i, c, 1),
-        p: c
-    };
+    let ctx_ptr = Val { v: rt(in i, c, 1), p: c };
     set(inout i, 1, ctx_ptr);
     let stk = new_stack(inout i);
     set(inout i, 10, stk);
     let res: IErr = handle Fail[IErr] in {
         let r0 = exec(inout i, ctx_ptr, in tails, in tslots, in taux);
-        IErr {
-            code: 0,
-            pc: 0,
-            d: 0,
-            a: r0,
-            b: 0,
-            c: 0
-        }
+        IErr { code: 0, pc: 0, d: 0, a: r0, b: 0, c: 0 }
     } with {
         return x => x,
         raise(e, k) => e,

@@ -1668,14 +1668,7 @@ fn read_params(inout g: G, in p: Program, f: FnRow) {
 fn param_at(in g: G, k: u64) -> PInfo {
     match g.params.try_get(k) {
         Option::Some(x) => x,
-        Option::None => PInfo {
-            name: 0,
-            pass: 0,
-            nproj: 0,
-            ty: 0,
-            s0: 0,
-            s1: 0
-        },
+        Option::None => PInfo { name: 0, pass: 0, nproj: 0, ty: 0, s0: 0, s1: 0 },
     }
 }
 

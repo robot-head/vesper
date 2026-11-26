@@ -34,10 +34,7 @@ effect Counters {
 }
 
 fn counters_map() -> BpfMapSpec {
-    BpfMapSpec {
-        kind: BpfMapKind::PerCpuArray,
-        max_entries: 4
-    }
+    BpfMapSpec { kind: BpfMapKind::PerCpuArray, max_entries: 4 }
 }
 
 // Sum of the 16-bit words i..10 of the IPv4 header; 0x100000 when the

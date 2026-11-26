@@ -64,9 +64,7 @@ fn value_of(r: Option[u64]) -> u64 {
 
 // Unsafe: the acknowledgement leaves before the record is durable.
 fn serve_ack_first(client: u64) -> u64 eff [Disk, Net] {
-    let lease = Lease {
-        id: client
-    };
+    let lease = Lease { id: client };
     let recovered = Disk::recover();
     let acked = match put_of(Net::recv(200)) {
         Some(v) => {
@@ -77,17 +75,13 @@ fn serve_ack_first(client: u64) -> u64 eff [Disk, Net] {
         },
         None => 0,
     };
-    let Lease {
-        id
-    } = lease;
+    let Lease { id } = lease;
     acked
 }
 
 // Corrected: acknowledge only after the flush made the record durable.
 fn serve_flush_first(client: u64) -> u64 eff [Disk, Net] {
-    let lease = Lease {
-        id: client
-    };
+    let lease = Lease { id: client };
     let recovered = Disk::recover();
     let acked = match put_of(Net::recv(200)) {
         Some(v) => {
@@ -105,9 +99,7 @@ fn serve_flush_first(client: u64) -> u64 eff [Disk, Net] {
         },
         None => 0,
     };
-    let Lease {
-        id
-    } = lease;
+    let Lease { id } = lease;
     acked
 }
 
@@ -163,9 +155,5 @@ fn audit() -> Audit eff [Disk] {
     let records = Disk::recover();
     let first = value_of(Disk::read(0));
     let last = value_of(Disk::read(1));
-    Audit {
-        records: records,
-        first: first,
-        last: last
-    }
+    Audit { records: records, first: first, last: last }
 }
