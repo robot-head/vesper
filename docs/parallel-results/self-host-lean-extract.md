@@ -409,10 +409,75 @@ in the hybrid, while Rust moves `y * 100` first). That is upstream of
 extraction, so the test compares those three again with `--no-ast-opt`,
 where they agree.
 
+## Part 5: `vesper proof-audit` in Vesper
+
+`@vesper/proof-audit` (packages/vesper-proof-audit) is the whole command
+of `src/proof_commands.rs`: option parsing and its errors, the Lean
+toolchain probe, the private staging directory, the artifact snapshot
+and its limits, Lean run with a deadline and an 8 MiB capture limit
+(`wait_timeout`, `kill_tree`, `capture_limit`, #1991), the auditor's
+record, the fingerprints of every imported module, the macro provenance
+gate with `ProvenanceTable::verify`, and the report in JSON or text.
+
+- **JSON out** (`json.ves`) writes what serde_json writes: compact or
+  `to_string_pretty`, its escapes, keys in struct order or sorted for
+  `json!` maps.
+- **JSON in** (`reader.ves`) reads `RawAudit` and `ProvenanceTable` over
+  the @vesper/serde tape with serde_json's nesting limit, unknown fields
+  denied, `ByteRange`'s ignored.
+- **Hashing** is BLAKE3 in C (@vesper-std/hash-sys). An audit digests
+  every imported module (706 MB for a `Std` import), so pure-Vesper
+  BLAKE3 would not meet the bar.
+- **The auditor** (`tools/proof-audit/Audit.lean`) is a generated string
+  constant, `src/auditor.ves`; the test checks it is current
+  (`VESPER_PROOF_AUDIT_BLESS=1` rewrites it).
+
+### Differential
+
+`tests/self_host_proof_audit.rs` builds a small executable from the
+package and runs each case through it and through `vesper proof-audit`.
+stdout, stderr and the exit status must be byte-identical. The staging
+directory's name, which holds a process id, is masked.
+
+| Cases | Count | Differences |
+|---|--:|--:|
+| Option errors, `--help`, a Lean that cannot start | 38 | 0 |
+| Real Lean 4.35.0 replays: accepted, rejected and allowed axioms, `sorry`, a non-theorem, a partial definition, a 1 s timeout, a symlink, nested directories | 18 | 0 |
+| Macro provenance: with and without manifests, nine broken or forged manifests, stripped and missing markers | 20 | 0 |
+
+When a manifest or auditor record is not the JSON its struct expects,
+both sides fail with the same prefix (`invalid macro provenance
+manifest: `), but the rest is serde_json's own text (`EOF while parsing
+an object at line 1 column 1`). The port names the field or says the
+text is not JSON, and the test masks that detail.
+
+### Speed
+
+Over the 38 Lean cases, Rust took 173.5 s and the port 169.1 s (0.97x).
+Both spend nearly all of it in Lean.
+
+### Found on the way
+
+- **A variant spelled like a type.** A package whose enum has a variant
+  `String` (`@vesper/serde`'s `Kind::String`) made every `String` type in
+  the solution an error: "variant 'String' belongs to enum ..., which is
+  not declared or imported". Name resolution checked the global variant
+  names in the type namespace too. `src/packages.rs` and the port
+  (`@vesper/check-names-packages`, `rename.ves`) now check them only for
+  values. The fixture `tests/fixtures/packages/accept/variant_named_like_type`
+  covers it.
+- **Handler clauses get copies.** An assignment to an outer local inside
+  a `raise` clause changes the clause's copy and is lost, so an error has
+  to come back in the handled value. The port does that throughout.
+
 ## What is left
 
-- **Verify and proof commands** (`src/verify_commands.rs`,
-  `src/proof_commands.rs`): port onto `@vesper/driver-commands`.
+- **Driver hookup**: `@vesper/driver-commands` still runs the Rust
+  command (`hc_proof_audit_run`); it moves to `@vesper/proof-audit`
+  next. `audit_generated` and `audit_policy` (verify, publish) use the
+  same audit.
+- **Verify command** (`src/verify_commands.rs`): port onto
+  `@vesper/driver-commands`.
 - **`extract_report` callers**: `verify --extract` and the forge
   provenance path still build the Rust `Extraction`; they move with the
   verify command, then the Rust extractor goes.
