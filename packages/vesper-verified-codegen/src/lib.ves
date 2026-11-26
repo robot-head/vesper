@@ -15,35 +15,15 @@
 
 use self::aarch64::{emit as aarch64_emit, exits as aarch64_exits, start as aarch64_start};
 use self::asm::{
-    Asm,
-    ERR_INVALID,
-    ERR_LIMIT,
-    ERR_NONE,
-    WHY_AARCH64_RANGE,
-    WHY_BOUND_TWICE,
-    WHY_RISCV_CALL,
-    WHY_RISCV_JUMP,
-    WHY_UNBOUND,
-    WHY_X86_64_RANGE,
-    asm,
-    finish,
-    here,
-    last_exits
+    Asm, ERR_INVALID, ERR_LIMIT, ERR_NONE, WHY_AARCH64_RANGE, WHY_BOUND_TWICE, WHY_RISCV_CALL,
+    WHY_RISCV_JUMP, WHY_UNBOUND, WHY_X86_64_RANGE, asm, finish, here, last_exits
 };
 use self::certificate::{certify, check_input, validate_input};
 use self::lower::{lower_input};
 use self::mono::{front_input, front_rows, mono_input};
 use self::container::{EM_AARCH64, EM_RISCV, EM_X86_64, coff_object, elf_executable, macho_object};
 use self::machine::{
-    LIR_LOAD_PTR,
-    LIR_STORE_PTR,
-    Lir,
-    Lowered,
-    M,
-    lowered_new,
-    put_decimal,
-    put_selected,
-    select,
+    LIR_LOAD_PTR, LIR_STORE_PTR, Lir, Lowered, M, lowered_new, put_decimal, put_selected, select,
     table_listing
 };
 use self::riscv64::{emit as riscv64_emit, exits as riscv64_exits, start as riscv64_start};
@@ -390,7 +370,12 @@ pub fn build_words(in input: Str) -> ChunkSeq[u64] {
 // entry result words) and the certificate as `check_input` writes it;
 // then the artifact's bytes (none on an error).
 pub fn compile_words(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
+    compile_bytes(in input.as_bytes())
+}
+
+// `compile_words` of the input's bytes (the hybrid's `verified_codegen`
+// swap).
+pub fn compile_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
     let arch = word_at(in b, 0);
     let os = word_at(in b, 1);
     let protocol = wrapping_u8(word_at(in b, 2));

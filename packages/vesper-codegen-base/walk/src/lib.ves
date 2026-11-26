@@ -27,18 +27,8 @@
 // store that normalizes (`PLACE_COERCES`) or of an aggregate copies.
 
 use @vesper/cranelift::{
-    Block,
-    Value,
-    Var,
-    block_word,
-    declare_var,
-    def_var,
-    ins_load,
-    ins_store,
-    use_var,
-    value_of_word,
-    value_type,
-    value_word
+    Block, Value, Var, block_word, declare_var, def_var, ins_load, ins_store, use_var,
+    value_of_word, value_type, value_word
 };
 
 // The answer to a query that has none.

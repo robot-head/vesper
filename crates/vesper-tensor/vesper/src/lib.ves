@@ -34,63 +34,36 @@
 // wrapper (src/port.rs) lends in place. Typed errors are `Fault`; the
 // wrapper maps each to the crate's `Error` with the Rust build's message.
 use self::num::{
-    decode_bf16 as h_decode_bf16,
-    decode_fp16 as h_decode_fp16,
-    encode_bf16 as h_encode_bf16,
-    encode_fp16 as h_encode_fp16,
-    is_finite,
-    is_nan,
-    u64_zero
+    decode_bf16 as h_decode_bf16, decode_fp16 as h_decode_fp16, encode_bf16 as h_encode_bf16,
+    encode_fp16 as h_encode_fp16, is_finite, is_nan, u64_zero
 };
 use self::llama::{
-    check_checkpoint as l_check_checkpoint,
-    check_tokenizer as l_check_tokenizer,
-    decode_piece as l_decode_piece,
-    validate as l_validate
+    check_checkpoint as l_check_checkpoint, check_tokenizer as l_check_tokenizer,
+    decode_piece as l_decode_piece, validate as l_validate
 };
 use self::ocp::{
-    e8m0_half as f_e8m0_half,
-    fp8_decode as f_fp8_decode,
-    fp8_encode as f_fp8_encode,
+    e8m0_half as f_e8m0_half, fp8_decode as f_fp8_decode, fp8_encode as f_fp8_encode,
     nearest_int as f_nearest_int
 };
 use self::qk::{check_block, dequantize_block, make_qkx2, quantize_block, scale_min};
 use self::rows::{
-    check_rows,
-    decode_piece as b_decode_piece,
-    dequantize_mxfp4,
-    dequantize_q4_0,
-    dequantize_q8_0,
-    fp8_codes as b_fp8_codes,
-    finite_payload as b_finite_payload,
-    fp8_scale as b_fp8_scale,
-    quantize_mxfp4 as b_quantize_mxfp4,
-    quantize_q4_0 as b_quantize_q4_0,
+    check_rows, decode_piece as b_decode_piece, dequantize_mxfp4, dequantize_q4_0, dequantize_q8_0,
+    fp8_codes as b_fp8_codes, finite_payload as b_finite_payload, fp8_scale as b_fp8_scale,
+    quantize_mxfp4 as b_quantize_mxfp4, quantize_q4_0 as b_quantize_q4_0,
     quantize_q8_0 as b_quantize_q8_0
 };
 use self::store::{parse_gguf as g_parse_gguf};
 use self::text::{parse_json as j_parse_json};
 use self::tokens::{build_table as t_build_table, encode as t_encode, lookup as t_lookup};
 use self::pool::{
-    kv_append as p_kv_append,
-    kv_begin as p_kv_begin,
-    kv_checkpoint as p_kv_checkpoint,
-    kv_layout as p_kv_layout,
-    kv_len as p_kv_len,
-    kv_read as p_kv_read,
-    kv_read_page as p_kv_read_page,
-    kv_release as p_kv_release,
-    kv_rollback as p_kv_rollback,
+    kv_append as p_kv_append, kv_begin as p_kv_begin, kv_checkpoint as p_kv_checkpoint,
+    kv_layout as p_kv_layout, kv_len as p_kv_len, kv_read as p_kv_read,
+    kv_read_page as p_kv_read_page, kv_release as p_kv_release, kv_rollback as p_kv_rollback,
     kv_stats as p_kv_stats
 };
 use self::sampling::{
-    add_assign as s_add_assign,
-    argmax as s_argmax,
-    rms_norm as s_rms_norm,
-    rng_f32,
-    rng_next,
-    sample_mult as s_sample_mult,
-    sample_top_p as s_sample_top_p
+    add_assign as s_add_assign, argmax as s_argmax, rms_norm as s_rms_norm, rng_f32, rng_next,
+    sample_mult as s_sample_mult, sample_top_p as s_sample_top_p
 };
 use self::shape::{gqa_ratio as d_gqa_ratio, normalize as d_normalize};
 

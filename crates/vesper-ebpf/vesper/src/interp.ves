@@ -35,16 +35,7 @@ use self::common::{sext_const, shl, shr, umax};
 use self::concrete::{alu_concrete, cmp_concrete, endian};
 use self::helpers::{Helper, allowed};
 use self::insn::{
-    AluOp,
-    AtomicOp,
-    CallTarget,
-    DecodeError,
-    Imm64,
-    Insn,
-    Operand,
-    RawInsn,
-    Size,
-    decode_slots
+    AluOp, AtomicOp, CallTarget, DecodeError, Imm64, Insn, Operand, RawInsn, Size, decode_slots
 };
 use self::program::{MapType, ProgramType};
 

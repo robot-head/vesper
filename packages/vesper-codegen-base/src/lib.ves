@@ -16,42 +16,12 @@
 // it over in @vesper/codegen-aggregates.
 
 use @vesper/cranelift::{
-    Block,
-    Ty,
-    Value,
-    append_block_param,
-    block_of_word,
-    block_param,
-    block_word,
-    call_arg,
-    call_arg_count,
-    call_builder,
-    call_module,
-    call_op,
-    call_result,
-    call_result_value,
-    call_return_builder,
-    call_return_module,
-    cc_eq,
-    create_block,
-    create_stack_slot,
-    ins_band,
-    ins_brif0,
-    ins_iadd_imm,
-    ins_iconst,
-    ins_icmp_imm,
-    ins_jump,
-    ins_load,
-    ins_stack_addr,
-    ins_store,
-    module_pointer_type,
-    switch_to_block,
-    ty_i64,
-    ty_i8,
-    ty_of_word,
-    vals1,
-    value_of_word,
-    value_word
+    Block, Ty, Value, append_block_param, block_of_word, block_param, block_word, call_arg,
+    call_arg_count, call_builder, call_module, call_op, call_result, call_result_value,
+    call_return_builder, call_return_module, cc_eq, create_block, create_stack_slot, ins_band,
+    ins_brif0, ins_iadd_imm, ins_iconst, ins_icmp_imm, ins_jump, ins_load, ins_stack_addr,
+    ins_store, module_pointer_type, switch_to_block, ty_i64, ty_i8, ty_of_word, vals1,
+    value_of_word, value_word
 };
 
 // The request protocol (src/codegen_swap.rs): the answer of a hook.

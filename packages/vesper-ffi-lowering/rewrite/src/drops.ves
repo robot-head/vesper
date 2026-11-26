@@ -2,23 +2,8 @@
 // `generated`) over `@vesper/ast` (SH4 lane 13, #1287 / #1714).
 
 use @vesper/ast::{
-    Ast,
-    ExprNode,
-    PatNode,
-    TypeNode,
-    ArgNode,
-    ParamNode,
-    EffectsNode,
-    EffectNode,
-    FnNode,
-    ItemNode,
-    ListRef,
-    list_len,
-    list_at,
-    expr_at,
-    pat_at,
-    type_at,
-    none
+    Ast, ExprNode, PatNode, TypeNode, ArgNode, ParamNode, EffectsNode, EffectNode, FnNode, ItemNode,
+    ListRef, list_len, list_at, expr_at, pat_at, type_at, none
 };
 use @vesper/ast::lower::{lower_source};
 use @vesper-std/arena::{idx_from_raw};

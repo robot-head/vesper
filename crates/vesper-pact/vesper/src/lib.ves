@@ -15,13 +15,7 @@
 // deriv (`check_derivation`) and out (result words).
 use self::term::{inc, new_arena};
 use self::program::{
-    index_impls,
-    rd_conformance,
-    rd_der,
-    rd_env,
-    rd_program,
-    rd_query,
-    validate_program,
+    index_impls, rd_conformance, rd_der, rd_env, rd_program, rd_query, validate_program,
     validate_query
 };
 use self::diag::{sort_diags, truncate_diags};

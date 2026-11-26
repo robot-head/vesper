@@ -12,20 +12,7 @@
 // returns.
 use self::{C};
 use self::util::{
-    add,
-    inc,
-    intern_slice,
-    iw,
-    sat_add,
-    set_flag,
-    flag,
-    setw,
-    sw,
-    valid_ident,
-    Br,
-    GTag,
-    Limit,
-    Wf,
+    add, inc, intern_slice, iw, sat_add, set_flag, flag, setw, sw, valid_ident, Br, GTag, Limit, Wf,
     Wire
 };
 

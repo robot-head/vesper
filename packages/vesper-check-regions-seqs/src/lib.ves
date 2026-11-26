@@ -31,57 +31,17 @@ use @vesper/check-data::{pack_text};
 use self::isa::isa_text;
 use self::regions::{is_handle_type, mismatch, normalize, region_display, validate_type};
 use self::seqs::{
-    Param,
-    SeqNames,
-    Sig,
-    Sigs,
-    array_element,
-    byte_scan,
-    elem,
-    fallible,
-    grows,
-    has_receiver,
-    holds_sequence,
-    is_seq_type,
-    is_slice_type,
-    is_str_type,
-    is_string_type,
-    mentions_slice,
-    mentions_str,
-    mutates,
-    op_debug,
-    op_name,
-    place_primitive,
-    receiver_pass,
-    resolve,
-    seq_check_world,
-    seq_names_new,
-    sigs_new,
-    with_arity
+    Param, SeqNames, Sig, Sigs, array_element, byte_scan, elem, fallible, grows, has_receiver,
+    holds_sequence, is_seq_type, is_slice_type, is_str_type, is_string_type, mentions_slice,
+    mentions_str, mutates, op_debug, op_name, place_primitive, receiver_pass, resolve,
+    seq_check_world, seq_names_new, sigs_new, with_arity
 };
 use self::tiled::{
-    check_world_adts,
-    hot_elem_bytes,
-    hot_vector_shape,
-    is_tiled_seq,
-    seq_adt,
-    seq_elem
+    check_world_adts, hot_elem_bytes, hot_vector_shape, is_tiled_seq, seq_adt, seq_elem
 };
 use self::vector::{
-    Shape,
-    VecNames,
-    elem_bits,
-    lanes_per_chunk,
-    elem_name,
-    is_vector_spelling,
-    isa_row_entry,
-    layout_words,
-    required_profile,
-    profile_name,
-    shape_bits,
-    shape_display,
-    shape_of,
-    type_error,
+    Shape, VecNames, elem_bits, lanes_per_chunk, elem_name, is_vector_spelling, isa_row_entry,
+    layout_words, required_profile, profile_name, shape_bits, shape_display, shape_of, type_error,
     vec_names_new
 };
 

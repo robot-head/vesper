@@ -2,18 +2,7 @@
 // the logical work budget, saturating arithmetic and stamped marks.
 use @vesper/loom-calculus::{L};
 use @vesper/loom-calculus::util::{
-    Ascii,
-    Order,
-    gb,
-    min,
-    none,
-    ord,
-    pre_ord,
-    slen,
-    soff,
-    sw,
-    ver,
-    ver_ord
+    Ascii, Order, gb, min, none, ord, pre_ord, slen, soff, sw, ver, ver_ord
 };
 use self::{A, Adv, Nat, Rng};
 

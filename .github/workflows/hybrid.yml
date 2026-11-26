@@ -141,6 +141,9 @@ jobs:
       - name: The Lean differential catches a divergent Lean extraction module
         if: runner.os == 'Linux'
         run: cargo test --locked -p vesper-hybrid --features divergent-lean-extract --test lean_extract hybrid_lean_matches_the_default_compiler -- --nocapture
+      - name: The verified codegen differential catches a divergent verified code generator
+        if: runner.os == 'Linux'
+        run: cargo test --locked -p vesper-hybrid --features divergent-verified-codegen --test verified_codegen hybrid_verified_builds_match_rust -- --nocapture
       - name: The stack-bound check catches a divergent stack bound
         if: runner.os == 'Linux'
         run: cargo test --locked -p vesper-hybrid --features divergent-stack-bound --test stack_bound -- --nocapture

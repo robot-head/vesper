@@ -11,47 +11,14 @@ use @vesper/front::lex::{lex, token_end};
 use @vesper/front::diag::{diags_new};
 use @vesper/front::kinds::{k_comment, k_whitespace};
 use self::attrs::{
-    Arg,
-    Attrs,
-    CaseAttr,
-    FnAttrs,
-    OptNum,
-    OptText,
-    TestAttr,
-    V_BOOL,
-    V_FLOAT,
-    V_IDENT,
-    V_INT,
-    V_RAW,
-    V_STRING,
-    Val,
-    extract_test_attrs,
-    test_attr_new
+    Arg, Attrs, CaseAttr, FnAttrs, OptNum, OptText, TestAttr, V_BOOL, V_FLOAT, V_IDENT, V_INT,
+    V_RAW, V_STRING, Val, extract_test_attrs, test_attr_new
 };
 use self::big::{push_big};
 use self::util::{
-    Reader,
-    add,
-    bit,
-    byte,
-    char_at,
-    inc,
-    is_alnum,
-    is_alpha,
-    is_text,
-    location,
-    push_decimal,
-    push_range,
-    put_buf,
-    put_text,
-    same,
-    starts_with,
-    starts_with_space,
-    sub,
-    trim_end,
-    trim_start,
-    u8_at,
-    u64_at
+    Reader, add, bit, byte, char_at, inc, is_alnum, is_alpha, is_text, location, push_decimal,
+    push_range, put_buf, put_text, same, starts_with, starts_with_space, sub, trim_end, trim_start,
+    u8_at, u64_at
 };
 
 // A case row stores the payload and the full source comment's span.

@@ -21,18 +21,8 @@
 //
 // @export abi 4 options
 use @vesper/crypto::{
-    Aead,
-    Block,
-    CryptoError,
-    aead_free,
-    aead_new,
-    aead_open,
-    aead_seal,
-    aes_encrypt_block,
-    chacha20_block,
-    hkdf_expand,
-    hkdf_extract,
-    wipe
+    Aead, Block, CryptoError, aead_free, aead_new, aead_open, aead_seal, aes_encrypt_block,
+    chacha20_block, hkdf_expand, hkdf_extract, wipe
 };
 
 // ---------------------------------------------------------------------------

@@ -48,6 +48,10 @@ vesper_hybrid(
             "edit_src": "modules/lean_extract/src/lib.ves",
             "edits": {"(sink text: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    text\n": "(sink text: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = text;\n    let _ = t.try_set(0, 0);\n    t\n"},
         },
+        "hybrid_verified_codegen": {
+            "edit_src": "modules/verified_codegen/src/lib.ves",
+            "edits": {"(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    words\n": "(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = words;\n    let _ = t.try_set(0, 0);\n    t\n"},
+        },
         "hybrid_layout": {
             "edit_src": "modules/layout/src/lib.ves",
             "edits": {"        8\n    } else {\n        0\n": "        16\n    } else {\n        0\n"},
@@ -260,6 +264,15 @@ vesper_hybrid(
             "//:std_process_package",
             "//crates/vesper-serde:port_package",
         ],
+        # The verified code generator (#1886) builds on
+        # @vesper/verified-codegen.
+        "hybrid_verified_codegen": [
+            "//:check_data_package",
+            "//:check_layout_package",
+            "//:place_ir_package",
+            "//:std_collections_package",
+            "//:verified_codegen_package",
+        ],
         # The AST optimizer (#1249): its producer and checker.
         "hybrid_optimize": [
             "//:ast_package",
@@ -285,6 +298,12 @@ vesper_hybrid(
         "hybrid_place_ir": [
             "//:check_data_package",
             "//:place_ir_package",
+        ],
+        # The `vesper run` evaluator (#2053) builds on @vesper/run.
+        "hybrid_run": [
+            "//:check_data_package",
+            "//:place_ir_package",
+            "//:run_package",
         ],
         # The stack-bound swap (#1182) builds on @vesper/check-loops-atomics.
         "hybrid_stack_bound": [
@@ -388,6 +407,8 @@ vesper_hybrid(
         "test/codegen_export": "long",
         "test/differential": "long",
         "test/driver_front": "long",
+        # Every examples/ and tests/fixtures/ program, four runs each.
+        "test/run": "long",
         "test/driver_packages": "long",
     },
     test_path_binaries = {
@@ -409,6 +430,8 @@ vesper_hybrid(
             ":bin/vesper-hybrid",
             "//:bin/vesper",
         ],
+        # The verified code generator (#1886) through the CLI.
+        "test/verified_codegen": [":bin/vesper-hybrid"],
         "test/driver": [
             ":bin/vesper-hybrid",
             "//:bin/vesper",
@@ -442,6 +465,8 @@ vesper_hybrid(
             ":bin/vesper-hybrid",
             "//:bin/vesper",
         ],
+        # The `run` swap (#2053) with and without the Vesper evaluator.
+        "test/run": [":bin/vesper-hybrid"],
         # SH4 lane 2 (#1276): the hybrid's own cost report.
         "test/swap_inputs": [":bin/vesper-hybrid"],
         # SH5 lane 10 (#1333): the shared-world cost report.

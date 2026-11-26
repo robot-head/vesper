@@ -9,21 +9,7 @@ use self::{C};
 use self::util::{add, intern_tb, none, role_sym, setw, sw, tb_str, tb_sym, Br, GTag, LTag};
 use self::tree::{ga, gb, gbr, gc, gt, free_vars_within, involves};
 use self::local::{
-    alpha_eq,
-    choice,
-    l_action,
-    l_rec,
-    la,
-    lb,
-    lbr,
-    lc,
-    ld,
-    lkn,
-    lt,
-    mentions,
-    mkl,
-    subst,
-    l_var,
+    alpha_eq, choice, l_action, l_rec, la, lb, lbr, lc, ld, lkn, lt, mentions, mkl, subst, l_var,
     summary
 };
 

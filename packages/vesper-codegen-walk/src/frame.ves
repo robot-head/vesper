@@ -40,33 +40,12 @@ use @vesper/check-layout::{L_ENUM, Layouts, layout_of, layouts_new, out_new};
 use @vesper/place-ir::{read_program};
 use @vesper/codegen-calls::data::{Calls, read_calls};
 use @vesper/codegen-calls::instances::{
-    Conc,
-    Found,
-    IVars,
-    Syms,
-    bare_trace,
-    concrete,
-    discover_roots,
-    fail_only,
-    is_root,
-    program_facts,
-    syms_new,
-    trace_host_direct
+    Conc, Found, IVars, Syms, bare_trace, concrete, discover_roots, fail_only, is_root,
+    program_facts, syms_new, trace_host_direct
 };
 use @vesper/codegen-calls::abi::{
-    Errs,
-    FnAbi,
-    V_F32,
-    V_F64,
-    V_I128,
-    check_entry_traced,
-    declare_roots,
-    default_abi,
-    internal,
-    layout_facts,
-    scalar,
-    trace_entry_ok,
-    uses_caller_slot
+    Errs, FnAbi, V_F32, V_F64, V_I128, check_entry_traced, declare_roots, default_abi, internal,
+    layout_facts, scalar, trace_entry_ok, uses_caller_slot
 };
 
 const NONE32: u32 = 4294967295;

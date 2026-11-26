@@ -16,41 +16,19 @@
 
 use @vesper/place-ir::codes::{Lit, Op, Pat, PoolKind, Tag, Term};
 use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    push_decimal,
-    stage2_heap_mark,
-    stage2_heap_reset,
-    stage2_heap_swap,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
+    add, inc, n32, push_decimal, stage2_heap_mark, stage2_heap_reset, stage2_heap_swap, u32_at,
+    u64_at, u8_at, w
 };
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{
-    Types,
-    Vars,
-    default_type,
-    substitute,
-    vars_new,
-    TyKind,
-    TyMode,
-    TyPass
+    Types, Vars, default_type, substitute, vars_new, TyKind, TyMode, TyPass
 };
 use @vesper/check-data::world::{Adt, Variant, constructor, field_step, set_by_symbol};
 use @vesper/check-data::input::{Ctx, ctx_new};
 use @vesper/place-ir::{BlockRow, FnRow, InstRow, PoolRow, Program, program_new};
 use self::ast::{Ast, Ex, FnR, Gn, Pm, Pt, ast_empty};
 use self::ops::{
-    SeqRes,
-    TiledRes,
-    VecRes,
-    is_seq_type,
-    is_slice_type,
-    resolve_seq_call,
-    resolve_tiled,
+    SeqRes, TiledRes, VecRes, is_seq_type, is_slice_type, resolve_seq_call, resolve_tiled,
     resolve_vector
 };
 

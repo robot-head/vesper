@@ -12,15 +12,7 @@ use @vesper/place-ir::codes::{Op};
 use @vesper/check-data::util::{add, inc, inc32, n32, u32_at, u8_at, w};
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{
-    EffNode,
-    TyKind,
-    TyPass,
-    Types,
-    Vars,
-    debug_type,
-    default_type,
-    substitute,
-    substitute_row,
+    EffNode, TyKind, TyPass, Types, Vars, debug_type, default_type, substitute, substitute_row,
     vars_new
 };
 use @vesper/check-data::world::{World, set_by_symbol};
