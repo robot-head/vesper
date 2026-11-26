@@ -28,13 +28,40 @@ const FMT_NODES: u64 = 1000000;
 const FMT_DEPTH: u64 = 24;
 // The most edits a recovery proposal may carry.
 const MAX_RECOVERY_EDITS: u64 = 256;
-// `vesper_fmt::Error` codes (`FmtFail::code`) that send formatting to the
-// recovery formatter.
+// `vesper_fmt::Error` codes (`FmtFail::code`), in the enum's order. A
+// syntax error or an opaque macro sends formatting to the recovery
+// formatter.
+const FMT_INPUT_LIMIT: u64 = 0;
+const FMT_OUTPUT_LIMIT: u64 = 1;
+const FMT_TOKEN_LIMIT: u64 = 2;
+const FMT_NODE_LIMIT: u64 = 3;
+const FMT_DEPTH_LIMIT: u64 = 4;
+const FMT_WORK_LIMIT: u64 = 5;
+const FMT_OVERFLOW: u64 = 6;
+const FMT_ALLOCATION: u64 = 7;
+const FMT_INVALID_DOC: u64 = 8;
 const FMT_SYNTAX: u64 = 9;
 const FMT_MACRO: u64 = 10;
+const FMT_CONSERVATION: u64 = 11;
 // Words per recovery edit: start, end, replacement length.
 const EDIT_WORDS: u64 = 3;
 const DIGEST_BYTES: u64 = 32;
+// JSON punctuation bytes.
+const QUOTE: u8 = 34;
+const COMMA: u8 = 44;
+const OPEN_BRACKET: u8 = 91;
+const CLOSE_BRACKET: u8 = 93;
+const CLOSE_BRACE: u8 = 125;
+// Lower-case hex digits: `0` and `a` minus ten.
+const DIGIT_ZERO: u8 = 48;
+const HEX_LETTER_BASE: u8 = 87;
+const HEX_DIGITS: u8 = 10;
+// A byte as two hex digits: the high nibble, then the low one.
+const NIBBLE_BITS: u8 = 4;
+const NIBBLE_MASK: u8 = 15;
+// UTF-8 continuation bytes are 0x80..0xC0.
+const CONTINUATION_START: u8 = 128;
+const CONTINUATION_END: u8 = 192;
 
 // The line table of the document being formatted.
 struct Doc {
@@ -77,20 +104,32 @@ fn run_format(in src: Str) -> Formatted {
 
 // `vesper_fmt::Error`'s `Display` (its `Debug`).
 fn put_fmt_error(inout o: ChunkSeq[u8], code: u64, offset: u64) {
-    let name = match code {
-        0 => "InputLimit",
-        1 => "OutputLimit",
-        2 => "TokenLimit",
-        3 => "NodeLimit",
-        4 => "DepthLimit",
-        5 => "WorkLimit",
-        6 => "Overflow",
-        7 => "Allocation",
-        8 => "InvalidDoc",
-        9 => "Syntax { offset: ",
-        10 => "OpaqueMacro",
-        11 => "Conservation",
-        _ => "NotIdempotent",
+    let name = if code == FMT_INPUT_LIMIT {
+        "InputLimit"
+    } else if code == FMT_OUTPUT_LIMIT {
+        "OutputLimit"
+    } else if code == FMT_TOKEN_LIMIT {
+        "TokenLimit"
+    } else if code == FMT_NODE_LIMIT {
+        "NodeLimit"
+    } else if code == FMT_DEPTH_LIMIT {
+        "DepthLimit"
+    } else if code == FMT_WORK_LIMIT {
+        "WorkLimit"
+    } else if code == FMT_OVERFLOW {
+        "Overflow"
+    } else if code == FMT_ALLOCATION {
+        "Allocation"
+    } else if code == FMT_INVALID_DOC {
+        "InvalidDoc"
+    } else if code == FMT_SYNTAX {
+        "Syntax { offset: "
+    } else if code == FMT_MACRO {
+        "OpaqueMacro"
+    } else if code == FMT_CONSERVATION {
+        "Conservation"
+    } else {
+        "NotIdempotent"
     };
     put(inout o, in name);
     if code == FMT_SYNTAX {
@@ -131,7 +170,7 @@ fn put_range(inout o: ChunkSeq[u8], r: Range) {
     put_pos(inout o, r.end);
     put(inout o, in ",\"start\":");
     put_pos(inout o, r.start);
-    o.push(125);
+    o.push(CLOSE_BRACE);
 }
 
 // The proposed edits: ranges and the texts they take, in `texts`.
@@ -148,10 +187,10 @@ fn g64(in v: ChunkSeq[u64], i: u64) -> u64 {
 
 // `[TextEdit::to_json, ..]`.
 fn put_edits(inout o: ChunkSeq[u8], in e: Edits) {
-    o.push(91);
+    o.push(OPEN_BRACKET);
     for k in 0..e.ranges.len() {
         if k != 0 {
-            o.push(44);
+            o.push(COMMA);
         }
         put(inout o, in "{\"newText\":");
         put_json(inout o, in e.texts.as_slice(), g64(in e.text_at, k), g64(in e.text_len, k));
@@ -164,26 +203,26 @@ fn put_edits(inout o: ChunkSeq[u8], in e: Edits) {
             },
         };
         put_range(inout o, r);
-        o.push(125);
+        o.push(CLOSE_BRACE);
     }
-    o.push(93);
+    o.push(CLOSE_BRACKET);
 }
 
 fn put_hex(inout o: ChunkSeq[u8], in digest: ChunkSeq[u8]) {
-    o.push(34);
+    o.push(QUOTE);
     for i in 0..digest.len() {
         let x = digest.try_get(i).unwrap_or(0);
-        o.push(hex(x >> 4));
-        o.push(hex(x & 15));
+        o.push(hex(x >> NIBBLE_BITS));
+        o.push(hex(x & NIBBLE_MASK));
     }
-    o.push(34);
+    o.push(QUOTE);
 }
 
 fn hex(d: u8) -> u8 {
-    if d < 10 {
-        wrapping_add(d, 48)
+    if d < HEX_DIGITS {
+        wrapping_add(d, DIGIT_ZERO)
     } else {
-        wrapping_add(d, 87)
+        wrapping_add(d, HEX_LETTER_BASE)
     }
 }
 
@@ -195,7 +234,7 @@ fn put_identity(inout o: ChunkSeq[u8], in uri: Str, version: i64, in digest: Chu
     put_json(inout o, in uri.as_bytes(), 0, uri.len());
     put(inout o, in ",\"version\":");
     put_i64(inout o, version);
-    o.push(125);
+    o.push(CLOSE_BRACE);
 }
 
 // The three lines of a `Formatting`: `to_json`, `workspace_edit_json`
@@ -272,7 +311,7 @@ fn boundary(in b: Slice[u8], i: u64) -> bool {
         return i == b.len();
     }
     let c = b.try_get(i).unwrap_or(0);
-    c < 128 || c >= 192
+    c < CONTINUATION_START || c >= CONTINUATION_END
 }
 
 // `format_complete_declarations`: the recovery formatter's edits, or the
