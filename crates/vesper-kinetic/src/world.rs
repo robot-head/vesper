@@ -256,7 +256,9 @@ pub struct StepTimings {
     pub broadphase: std::time::Duration,
     /// Constraint colouring and batch planning.
     pub coloring: std::time::Duration,
-    /// Constraint projection, summed over substeps.
+    /// Constraint projection, summed over substeps. The port build's serial
+    /// solvers run the whole substep loop (integration, projection,
+    /// velocities, restitution) in one call, so there it is that loop's time.
     pub solve: std::time::Duration,
     /// The whole step.
     pub total: std::time::Duration,
