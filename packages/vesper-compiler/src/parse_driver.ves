@@ -22,24 +22,22 @@ fn parse_build() -> i64 eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     syntax_put(6, 0);
     syntax_put(7, 0);
     let lexed = syntax_lex();
-    let p = parse_items(
-        parse_open(
-            ParseCursor {
-                pos: 0,
-                cur: syntax_tok(syntax_sig(0)),
-                h: offset_basis(),
-                nostruct: false,
-                rows: false,
-                bounds: false,
-                depth: 0,
-                index: syntax_sig(0),
-                token_pos: 0,
-                row_head: 0,
-                value_head: 0
-            },
-            200
-        )
-    );
+    let p = parse_items(parse_open(
+        ParseCursor {
+            pos: 0,
+            cur: syntax_tok(syntax_sig(0)),
+            h: offset_basis(),
+            nostruct: false,
+            rows: false,
+            bounds: false,
+            depth: 0,
+            index: syntax_sig(0),
+            token_pos: 0,
+            row_head: 0,
+            value_head: 0
+        },
+        200
+    ));
     // The module node ends after the trailing trivia.
     syntax_attach(p.token_pos, syntax_cell(0) - 1);
     syntax_close(source_len());

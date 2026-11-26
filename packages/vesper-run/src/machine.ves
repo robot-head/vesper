@@ -704,16 +704,14 @@ pub fn load(inout machine: M, entry_index: u64) {
                 }
             }
         }
-        machine.fns.push(
-            Fi {
-                name: fn_row.name,
-                param_start: param_start,
-                param_count: param_count,
-                value_count: value_count,
-                first_block: fn_row.b0,
-                reached: false
-            }
-        );
+        machine.fns.push(Fi {
+            name: fn_row.name,
+            param_start: param_start,
+            param_count: param_count,
+            value_count: value_count,
+            first_block: fn_row.b0,
+            reached: false
+        });
         if w(fn_row.name) >= machine.fn_of.len() {
             machine.fn_of.resize(inc(w(fn_row.name)), 0);
         }
@@ -845,14 +843,12 @@ fn split_place(inout machine: M, place: u32, code: u64) -> u64 {
         machine.write_segs.push(u32_at(in parts, i));
     }
     let row = machine.writes.len();
-    machine.writes.push(
-        Wr {
-            root: u32_at(in parts, 0),
-            seg_start: seg_start,
-            seg_count: wrapping_sub(parts.len(), 1),
-            code: code
-        }
-    );
+    machine.writes.push(Wr {
+        root: u32_at(in parts, 0),
+        seg_start: seg_start,
+        seg_count: wrapping_sub(parts.len(), 1),
+        code: code
+    });
     row
 }
 
@@ -1820,14 +1816,12 @@ fn invoke(inout machine: M, func_index: u64) {
                     for j in 0..path_row.n {
                         machine.segs.push(machine.program.path_name(path, j));
                     }
-                    slots.push(
-                        En {
-                            name: param_row.name,
-                            cell: env_entry.cell,
-                            seg_start: seg_start,
-                            seg_count: wrapping_sub(machine.segs.len(), seg_start)
-                        }
-                    );
+                    slots.push(En {
+                        name: param_row.name,
+                        cell: env_entry.cell,
+                        seg_start: seg_start,
+                        seg_count: wrapping_sub(machine.segs.len(), seg_start)
+                    });
                     found = true;
                 }
             }
@@ -1837,12 +1831,10 @@ fn invoke(inout machine: M, func_index: u64) {
             }
         } else {
             let cell = machine.cells.len();
-            machine.cells.push(
-                match machine.arg_vals.try_get(i) {
-                    Option::Some(value) => value,
-                    Option::None => undef(),
-                }
-            );
+            machine.cells.push(match machine.arg_vals.try_get(i) {
+                Option::Some(value) => value,
+                Option::None => undef(),
+            });
             slots.push(En { name: param_row.name, cell: cell, seg_start: 0, seg_count: 0 });
         }
     }

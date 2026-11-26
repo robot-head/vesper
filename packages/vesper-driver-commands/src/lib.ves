@@ -441,12 +441,10 @@ fn grown(host_len: i64, inout buf: ChunkSeq[u8], inout none: bool) -> bool {
 // Rust's `Display` of the `io::Error` with this error word (the kind in
 // the low byte, the OS error in the high half): @vesper-std/fs's text.
 pub fn io_error_text(word: u64) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
-    error_text(
-        IoError {
-            kind: wrapping_u32(word & 255),
-            os: wrapping_u32(word >> 32),
-        }
-    )
+    error_text(IoError {
+        kind: wrapping_u32(word & 255),
+        os: wrapping_u32(word >> 32),
+    })
 }
 
 // ---------------------------------------------------------------------------

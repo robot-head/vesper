@@ -860,12 +860,10 @@ fn response_fin(
     let rxq = word(in c.c_rx_q.as_slice(), f.idx);
     let mode = word(in c.c_fr_mode.as_slice(), f.idx);
     if !pooled_frame_at_boundary(in c.conn.pool, rxq, mode) {
-        return Result::Err(
-            ConnectionError::Frame {
-                stream_id: id,
-                error: FrameError::Malformed,
-            }
-        );
+        return Result::Err(ConnectionError::Frame {
+            stream_id: id,
+            error: FrameError::Malformed,
+        });
     }
     if phase == C_PHASE_HEADERS {
         malformed(inout c, inout dec, id, CODE_REQUEST_INCOMPLETE);
@@ -1000,12 +998,10 @@ fn frames(
                 return Result::Ok(());
             }
             Result::Err(err) => {
-                return Result::Err(
-                    ConnectionError::Frame {
-                        stream_id: id,
-                        error: err,
-                    }
-                );
+                return Result::Err(ConnectionError::Frame {
+                    stream_id: id,
+                    error: err,
+                });
             }
         };
 
@@ -1049,12 +1045,10 @@ fn frames(
                     let next_q = q_consume(inout c.conn.pool, step.rx_q, step.len);
                     let _uq = c.c_rx_q.try_set(f.idx, next_q);
                 }
-                return Result::Err(
-                    ConnectionError::FrameUnexpected {
-                        stream_id: id,
-                        frame_type: headers_type(),
-                    }
-                );
+                return Result::Err(ConnectionError::FrameUnexpected {
+                    stream_id: id,
+                    frame_type: headers_type(),
+                });
             }
         } else if step.kind == FRAME_DATA {
             let dlen = step.len;
@@ -1101,20 +1095,16 @@ fn frames(
             } else {
                 let next_q = q_consume(inout c.conn.pool, step.rx_q, dlen);
                 let _uq = c.c_rx_q.try_set(f.idx, next_q);
-                return Result::Err(
-                    ConnectionError::FrameUnexpected {
-                        stream_id: id,
-                        frame_type: data_type(),
-                    }
-                );
+                return Result::Err(ConnectionError::FrameUnexpected {
+                    stream_id: id,
+                    frame_type: data_type(),
+                });
             }
         } else {
-            return Result::Err(
-                ConnectionError::FrameUnexpected {
-                    stream_id: id,
-                    frame_type: step.val,
-                }
-            );
+            return Result::Err(ConnectionError::FrameUnexpected {
+                stream_id: id,
+                frame_type: step.val,
+            });
         }
     }
 }

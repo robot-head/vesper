@@ -300,26 +300,22 @@ fn read_sigs(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Sigs {
             let param_ty = u32_at(in ctx.tmap, reader.word(in bytes));
             let param_span_start = reader.word(in bytes);
             let param_span_stop = reader.word(in bytes);
-            sigs.params.push(
-                Param {
-                    name: param_name,
-                    pass: param_pass,
-                    ty: param_ty,
-                    start: param_span_start,
-                    stop: param_span_stop
-                }
-            );
+            sigs.params.push(Param {
+                name: param_name,
+                pass: param_pass,
+                ty: param_ty,
+                start: param_span_start,
+                stop: param_span_stop
+            });
         }
-        sigs.sigs.push(
-            Sig {
-                name: name,
-                start: start,
-                stop: stop,
-                result: result,
-                param_start: first_param,
-                param_count: n32(param_count)
-            }
-        );
+        sigs.sigs.push(Sig {
+            name: name,
+            start: start,
+            stop: stop,
+            result: result,
+            param_start: first_param,
+            param_count: n32(param_count)
+        });
     }
     for i in 0..ctx.world.adts.len() {
         sigs.adt_start.push(reader.word(in bytes));

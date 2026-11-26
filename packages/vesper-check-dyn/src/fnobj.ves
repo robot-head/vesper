@@ -376,9 +376,9 @@ fn hidden_trait(inout ctx: D, kind: u32, sig: u32) -> u32 {
             break;
         }
         digit = wrapping_sub(digit, 1);
-        ctx.buf.push_char(
-            hex_char(wrapping_shr_u64(hash, wrapping_u32(wrapping_mul(digit, 4))) & 15)
-        );
+        ctx.buf.push_char(hex_char(
+            wrapping_shr_u64(hash, wrapping_u32(wrapping_mul(digit, 4))) & 15
+        ));
     }
     let name = intern_buf(inout ctx);
     if contains(in ctx.trait_names, name) {
@@ -419,34 +419,30 @@ fn hidden_trait(inout ctx: D, kind: u32, sig: u32) -> u32 {
     let param_list = mk_list(inout ctx, in params);
     let func = ctx.ast
         .fns
-        .alloc(
-            FnNode {
-                name: ctx.known.call,
-                fip: false,
-                generics: 0,
-                params: param_list,
-                result: sig_node.b,
-                effects: sig_node.c,
-                body: NONE,
-                start: 0,
-                end: 0
-            }
-        )
+        .alloc(FnNode {
+            name: ctx.known.call,
+            fip: false,
+            generics: 0,
+            params: param_list,
+            result: sig_node.b,
+            effects: sig_node.c,
+            body: NONE,
+            start: 0,
+            end: 0
+        })
         .raw();
     let method_list = list1(inout ctx, func);
     let trait_node = ctx.ast
         .traits
-        .alloc(
-            TraitNode {
-                name: name,
-                public: false,
-                generics: 0,
-                assoc: 0,
-                methods: method_list,
-                start: 0,
-                end: 0
-            }
-        )
+        .alloc(TraitNode {
+            name: name,
+            public: false,
+            generics: 0,
+            assoc: 0,
+            methods: method_list,
+            start: 0,
+            end: 0
+        })
         .raw();
     ctx.trait_names.push(name);
     ctx.trait_nodes.push(trait_node);
@@ -1739,14 +1735,12 @@ fn coerce(inout ctx: D, expr: u32, kind: u32, sig: u32) {
         let cap_field = field_name(in ctx, u32_at(in cap_names, i));
         let field = ctx.ast
             .fields
-            .alloc(
-                FieldNode {
-                    name: cap_field,
-                    ty: u32_at(in cap_types, i),
-                    modality: 3,
-                    temperature: 0
-                }
-            )
+            .alloc(FieldNode {
+                name: cap_field,
+                ty: u32_at(in cap_types, i),
+                modality: 3,
+                temperature: 0
+            })
             .raw();
         fields.push(field);
     }
@@ -1759,19 +1753,17 @@ fn coerce(inout ctx: D, expr: u32, kind: u32, sig: u32) {
     let adt_span = span(inout ctx);
     let adt = ctx.ast
         .adts
-        .alloc(
-            AdtNode {
-                name: struct_name,
-                mode: 1,
-                generics: 0,
-                variants: variant_list,
-                is_enum: false,
-                tiled: false,
-                tile_width: 0,
-                start: adt_span,
-                end: inc32(adt_span)
-            }
-        )
+        .alloc(AdtNode {
+            name: struct_name,
+            mode: 1,
+            generics: 0,
+            variants: variant_list,
+            is_enum: false,
+            tiled: false,
+            tile_width: 0,
+            start: adt_span,
+            end: inc32(adt_span)
+        })
         .raw();
     let receiver = pass_of(kind, in ctx);
     let mut method_params = ChunkSeq::new[u32]();
@@ -1855,52 +1847,46 @@ fn coerce(inout ctx: D, expr: u32, kind: u32, sig: u32) {
     let method_start = span(inout ctx);
     let method_fn = ctx.ast
         .fns
-        .alloc(
-            FnNode {
-                name: ctx.known.call,
-                fip: false,
-                generics: 0,
-                params: param_list,
-                result: sig_node.b,
-                effects: body_effects,
-                body: new_body,
-                start: method_start,
-                end: inc32(method_start)
-            }
-        )
+        .alloc(FnNode {
+            name: ctx.known.call,
+            fip: false,
+            generics: 0,
+            params: param_list,
+            result: sig_node.b,
+            effects: body_effects,
+            body: new_body,
+            start: method_start,
+            end: inc32(method_start)
+        })
         .raw();
     let trait_ref_start = span(inout ctx);
     let trait_ref = ctx.ast
         .trait_refs
-        .alloc(
-            TraitRefNode {
-                package: NONE,
-                name: trait_name,
-                args: 0,
-                start: trait_ref_start,
-                end: inc32(trait_ref_start)
-            }
-        )
+        .alloc(TraitRefNode {
+            package: NONE,
+            name: trait_name,
+            args: 0,
+            start: trait_ref_start,
+            end: inc32(trait_ref_start)
+        })
         .raw();
     let self_ty = named(inout ctx, struct_name, 0);
     let method_list = list1(inout ctx, method_fn);
     let conf_start = span(inout ctx);
     let conf = ctx.ast
         .confs
-        .alloc(
-            ConfNode {
-                model: NONE,
-                public: false,
-                generics: 0,
-                trait_ref: trait_ref,
-                self_ty: self_ty,
-                wheres: 0,
-                assoc: 0,
-                methods: method_list,
-                start: conf_start,
-                end: inc32(conf_start)
-            }
-        )
+        .alloc(ConfNode {
+            model: NONE,
+            public: false,
+            generics: 0,
+            trait_ref: trait_ref,
+            self_ty: self_ty,
+            wheres: 0,
+            assoc: 0,
+            methods: method_list,
+            start: conf_start,
+            end: inc32(conf_start)
+        })
         .raw();
     ctx.gen_adts.push(adt);
     ctx.gen_confs.push(conf);

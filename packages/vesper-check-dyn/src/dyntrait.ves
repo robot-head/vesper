@@ -560,15 +560,13 @@ fn lower_function(inout ctx: D, func: u32, owner: u32) {
         generics.push(generic);
         let trait_ref = ctx.ast
             .trait_refs
-            .alloc(
-                TraitRefNode {
-                    package: NONE,
-                    name: trait_node.a,
-                    args: trait_node.b,
-                    start: param.start,
-                    end: param.end
-                }
-            )
+            .alloc(TraitRefNode {
+                package: NONE,
+                name: trait_node.a,
+                args: trait_node.b,
+                start: param.start,
+                end: param.end
+            })
             .raw();
         let bound_node = new_bound(
             inout ctx,

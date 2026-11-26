@@ -281,9 +281,10 @@ pub fn verify(
                                 wrapping_add(base, 1)
                             );
                             for q in 0..g(in ctx.policy.rt_symbols, wrapping_add(base, 2)) {
-                                effects.push(
-                                    g(in ctx.policy.list_pool, wrapping_add(symbol_effects_at, q))
-                                );
+                                effects.push(g(
+                                    in ctx.policy.list_pool,
+                                    wrapping_add(symbol_effects_at, q)
+                                ));
                             }
                             callee = add_node(
                                 inout graph,

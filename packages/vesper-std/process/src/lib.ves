@@ -788,20 +788,18 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
         close_fd(err_rd);
         return Result::Err(io_errno(failed));
     }
-    Result::Ok(
-        ProcChild {
-            pid: pid,
-            out_fd: out_rd,
-            err_fd: err_rd,
-            out: ChunkSeq::new[u8](),
-            err: ChunkSeq::new[u8](),
-            group: group,
-            limit: limit,
-            cut: false,
-            reaped: false,
-            status: 0,
-        }
-    )
+    Result::Ok(ProcChild {
+        pid: pid,
+        out_fd: out_rd,
+        err_fd: err_rd,
+        out: ChunkSeq::new[u8](),
+        err: ChunkSeq::new[u8](),
+        group: group,
+        limit: limit,
+        cut: false,
+        reaped: false,
+        status: 0,
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -86,12 +86,10 @@ pub fn raise_io[T](word: u64) -> T eff [Fail[IoError]] {
 }
 
 pub fn raise_kind[T](kind: u32) -> T eff [Fail[IoError]] {
-    Fail::raise(
-        IoError {
-            kind: kind,
-            os: 0,
-        }
-    )
+    Fail::raise(IoError {
+        kind: kind,
+        os: 0,
+    })
 }
 
 // Open modes of `vstd_fs_open`.

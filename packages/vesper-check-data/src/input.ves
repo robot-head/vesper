@@ -179,24 +179,25 @@ fn read_world(
                 let modality = wrapping_u8(reader.word(in bytes));
                 world.fields.push(Field { name: fname, ty: field_ty, modality: modality });
             }
-            world.variants.push(
-                Variant { name: vname, fa: field_start, fc: n32(field_count), named: named }
-            );
+            world.variants.push(Variant {
+                name: vname,
+                fa: field_start,
+                fc: n32(field_count),
+                named: named
+            });
         }
         let id = n32(world.adts.len());
-        world.adts.push(
-            Adt {
-                name: name,
-                mode: mode,
-                ga: generic_start,
-                gn: n32(generic_count),
-                va: variant_start,
-                vn: n32(variant_count),
-                is_enum: is_enum,
-                tile: tile,
-                span_zero: span_zero
-            }
-        );
+        world.adts.push(Adt {
+            name: name,
+            mode: mode,
+            ga: generic_start,
+            gn: n32(generic_count),
+            va: variant_start,
+            vn: n32(variant_count),
+            is_enum: is_enum,
+            tile: tile,
+            span_zero: span_zero
+        });
         world.index(name, id);
     }
     let effect_count = reader.word(in bytes);

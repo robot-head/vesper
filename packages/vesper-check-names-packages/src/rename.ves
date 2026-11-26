@@ -493,18 +493,16 @@ fn name_expr(inout loader: St, inout ast: Ast, node: ExprNode) -> ExprNode {
     } else {
         let pos = sh(in loader, result.start);
         let callee = ast.exprs
-            .alloc(
-                ExprNode {
-                    kind: 2,
-                    start: pos,
-                    end: pos,
-                    a: result.a,
-                    b: ast_none(),
-                    c: ast_none(),
-                    d: ast_none(),
-                    e: ast_none()
-                }
-            )
+            .alloc(ExprNode {
+                kind: 2,
+                start: pos,
+                end: pos,
+                a: result.a,
+                b: ast_none(),
+                c: ast_none(),
+                d: ast_none(),
+                e: ast_none()
+            })
             .raw();
         result.kind = 6;
         result.a = callee;

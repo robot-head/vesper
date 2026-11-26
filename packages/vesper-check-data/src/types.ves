@@ -181,18 +181,16 @@ impl Types {
         let tail_nodes = wrapping_sub(types.nodes.len(), n_nodes);
         for i in n_nodes..types.nodes.len() {
             match types.nodes.try_get(i) {
-                Option::Some(node) => new_nodes.push(
-                    TypeNode {
-                        kind: node.kind,
-                        mode: node.mode,
-                        name: node.name,
-                        a: node.a,
-                        n: node.n,
-                        r: node.r,
-                        r2: node.r2,
-                        lit: node.lit,
-                    }
-                ),
+                Option::Some(node) => new_nodes.push(TypeNode {
+                    kind: node.kind,
+                    mode: node.mode,
+                    name: node.name,
+                    a: node.a,
+                    n: node.n,
+                    r: node.r,
+                    r2: node.r2,
+                    lit: node.lit,
+                }),
                 Option::None => {},
             }
         }
@@ -201,18 +199,16 @@ impl Types {
         }
         for i in 0..new_nodes.len() {
             match new_nodes.try_get(i) {
-                Option::Some(node) => types.nodes.push(
-                    TypeNode {
-                        kind: node.kind,
-                        mode: node.mode,
-                        name: node.name,
-                        a: node.a,
-                        n: node.n,
-                        r: node.r,
-                        r2: node.r2,
-                        lit: node.lit,
-                    }
-                ),
+                Option::Some(node) => types.nodes.push(TypeNode {
+                    kind: node.kind,
+                    mode: node.mode,
+                    name: node.name,
+                    a: node.a,
+                    n: node.n,
+                    r: node.r,
+                    r2: node.r2,
+                    lit: node.lit,
+                }),
                 Option::None => {},
             }
         }
@@ -239,14 +235,12 @@ impl Types {
         let tail_effs = wrapping_sub(types.effs.len(), n_effs);
         for i in n_effs..types.effs.len() {
             match types.effs.try_get(i) {
-                Option::Some(eff) => new_effs.push(
-                    EffNode {
-                        label: eff.label,
-                        name: eff.name,
-                        a: eff.a,
-                        n: eff.n,
-                    }
-                ),
+                Option::Some(eff) => new_effs.push(EffNode {
+                    label: eff.label,
+                    name: eff.name,
+                    a: eff.a,
+                    n: eff.n,
+                }),
                 Option::None => {},
             }
         }
@@ -255,14 +249,12 @@ impl Types {
         }
         for i in 0..new_effs.len() {
             match new_effs.try_get(i) {
-                Option::Some(eff) => types.effs.push(
-                    EffNode {
-                        label: eff.label,
-                        name: eff.name,
-                        a: eff.a,
-                        n: eff.n,
-                    }
-                ),
+                Option::Some(eff) => types.effs.push(EffNode {
+                    label: eff.label,
+                    name: eff.name,
+                    a: eff.a,
+                    n: eff.n,
+                }),
                 Option::None => {},
             }
         }
@@ -316,45 +308,39 @@ impl Types {
         let mut nodes = ChunkSeq::with_capacity[TypeNode](self.nodes.len());
         for i in 0..self.nodes.len() {
             match self.nodes.try_get(i) {
-                Option::Some(node) => nodes.push(
-                    TypeNode {
-                        kind: node.kind,
-                        mode: node.mode,
-                        name: node.name,
-                        a: node.a,
-                        n: node.n,
-                        r: node.r,
-                        r2: node.r2,
-                        lit: node.lit,
-                    }
-                ),
+                Option::Some(node) => nodes.push(TypeNode {
+                    kind: node.kind,
+                    mode: node.mode,
+                    name: node.name,
+                    a: node.a,
+                    n: node.n,
+                    r: node.r,
+                    r2: node.r2,
+                    lit: node.lit,
+                }),
                 Option::None => {},
             }
         }
         let mut rows = ChunkSeq::with_capacity[RowNode](self.rows.len());
         for i in 0..self.rows.len() {
             match self.rows.try_get(i) {
-                Option::Some(row) => rows.push(
-                    RowNode {
-                        a: row.a,
-                        n: row.n,
-                        tail: row.tail,
-                    }
-                ),
+                Option::Some(row) => rows.push(RowNode {
+                    a: row.a,
+                    n: row.n,
+                    tail: row.tail,
+                }),
                 Option::None => {},
             }
         }
         let mut effs = ChunkSeq::with_capacity[EffNode](self.effs.len());
         for i in 0..self.effs.len() {
             match self.effs.try_get(i) {
-                Option::Some(eff) => effs.push(
-                    EffNode {
-                        label: eff.label,
-                        name: eff.name,
-                        a: eff.a,
-                        n: eff.n,
-                    }
-                ),
+                Option::Some(eff) => effs.push(EffNode {
+                    label: eff.label,
+                    name: eff.name,
+                    a: eff.a,
+                    n: eff.n,
+                }),
                 Option::None => {},
             }
         }
@@ -540,18 +526,16 @@ impl Types {
                 self.passes.push(0);
             }
         }
-        self.nodes.push(
-            TypeNode {
-                kind: kind,
-                mode: mode,
-                name: name,
-                a: item_start,
-                n: n32(items.len()),
-                r: result,
-                r2: row,
-                lit: lit
-            }
-        );
+        self.nodes.push(TypeNode {
+            kind: kind,
+            mode: mode,
+            name: name,
+            a: item_start,
+            n: n32(items.len()),
+            r: result,
+            r2: row,
+            lit: lit
+        });
         self.hashes.push(hash);
         let ok = self.slots.try_set(probe, inc32(id));
         if wrapping_mul(self.hashes.len(), 2) > self.mask {

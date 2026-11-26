@@ -283,9 +283,14 @@ pub fn read_pat(
     let start = reader.word(in bytes);
     let end = reader.word(in bytes);
     let id = wrapping_u32(exprs.pats.len());
-    exprs.pats.push(
-        PatRow { kind: kind, start: start, end: end, name: NONE32, kid_start: 0, kid_count: 0 }
-    );
+    exprs.pats.push(PatRow {
+        kind: kind,
+        start: start,
+        end: end,
+        name: NONE32,
+        kid_start: 0,
+        kid_count: 0
+    });
     let mut name = NONE32;
     let mark = exprs.stack.len();
     if kind == P_BIND {

@@ -12,6 +12,8 @@ vesper_package(
     name = "port_package",
     srcs = glob(["vesper/src/**/*.ves"]),
     manifest = "vesper/Loom.toml",
+    # @vesper/verify (//:verify_package) uses its formatter model.
+    visibility = ["//visibility:public"],
     deps = [
         "//:front_package",
         "//:std_hash_package",

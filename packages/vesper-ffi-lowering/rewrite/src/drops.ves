@@ -236,16 +236,14 @@ fn copy_param(inout dst: Ast, in src: Ast, id: u32, base: u32) -> u32 {
     let name = copy_sym(inout dst, in src, param.name);
     let ty = copy_type(inout dst, in src, param.ty);
     dst.params
-        .alloc(
-            ParamNode {
-                name: name,
-                pass: param.pass,
-                projections: 0,
-                ty: ty,
-                start: wrapping_add(param.start, base),
-                end: wrapping_add(param.end, base)
-            }
-        )
+        .alloc(ParamNode {
+            name: name,
+            pass: param.pass,
+            projections: 0,
+            ty: ty,
+            start: wrapping_add(param.start, base),
+            end: wrapping_add(param.end, base)
+        })
         .raw
 }
 
@@ -269,23 +267,24 @@ fn copy_pat(inout dst: Ast, in src: Ast, id: u32, base: u32) -> u32 {
         for i in 0..n {
             let k = wrapping_mul(i, 2);
             fields.push(copy_sym(inout dst, in src, list_at(in src, pat.b, k)));
-            fields.push(
-                copy_pat(inout dst, in src, list_at(in src, pat.b, wrapping_add(k, 1)), base)
-            );
+            fields.push(copy_pat(
+                inout dst,
+                in src,
+                list_at(in src, pat.b, wrapping_add(k, 1)),
+                base
+            ));
         }
         b = alloc_list(inout dst, in fields);
     }
     dst.pats
-        .alloc(
-            PatNode {
-                kind: pat.kind,
-                start: wrapping_add(pat.start, base),
-                end: wrapping_add(pat.end, base),
-                a: a,
-                b: b,
-                c: pat.c
-            }
-        )
+        .alloc(PatNode {
+            kind: pat.kind,
+            start: wrapping_add(pat.start, base),
+            end: wrapping_add(pat.end, base),
+            a: a,
+            b: b,
+            c: pat.c
+        })
         .raw
 }
 
@@ -340,25 +339,26 @@ fn copy_expr(inout dst: Ast, in src: Ast, id: u32, base: u32) -> u32 {
         for i in 0..n {
             let k = wrapping_mul(i, 2);
             arms.push(copy_pat(inout dst, in src, list_at(in src, node.b, k), base));
-            arms.push(
-                copy_expr(inout dst, in src, list_at(in src, node.b, wrapping_add(k, 1)), base)
-            );
+            arms.push(copy_expr(
+                inout dst,
+                in src,
+                list_at(in src, node.b, wrapping_add(k, 1)),
+                base
+            ));
         }
         b = alloc_list(inout dst, in arms);
     }
     dst.exprs
-        .alloc(
-            ExprNode {
-                kind: node.kind,
-                start: wrapping_add(node.start, base),
-                end: wrapping_add(node.end, base),
-                a: a,
-                b: b,
-                c: c,
-                d: node.d,
-                e: node.e
-            }
-        )
+        .alloc(ExprNode {
+            kind: node.kind,
+            start: wrapping_add(node.start, base),
+            end: wrapping_add(node.end, base),
+            a: a,
+            b: b,
+            c: c,
+            d: node.d,
+            e: node.e
+        })
         .raw
 }
 
@@ -387,19 +387,17 @@ fn copy_fn(inout dst: Ast, in src: Ast, id: u32, base: u32, new_name: u32) -> u3
     let effects = copy_effects(inout dst, in src, func.effects);
     let body = copy_expr(inout dst, in src, func.body, base);
     dst.fns
-        .alloc(
-            FnNode {
-                name: new_name,
-                fip: func.fip,
-                generics: 0,
-                params: param_list,
-                result: result,
-                effects: effects,
-                body: body,
-                start: wrapping_add(func.start, base),
-                end: wrapping_add(func.end, base)
-            }
-        )
+        .alloc(FnNode {
+            name: new_name,
+            fip: func.fip,
+            generics: 0,
+            params: param_list,
+            result: result,
+            effects: effects,
+            body: body,
+            start: wrapping_add(func.start, base),
+            end: wrapping_add(func.end, base)
+        })
         .raw
 }
 

@@ -314,19 +314,17 @@ impl Linker {
                     }
                 }
                 let ok = self.piece_of.try_set(add(obj.sec_start, sec_index), self.pieces.len());
-                self.pieces.push(
-                    Piece {
-                        obj_index: obj_index,
-                        sec_index: sec_index,
-                        out_index: out_index,
-                        boot: text_eq(in req, section.name_at, section.name_len, in ".text.boot"),
-                        align: if section.align == 0 { 1 } else { section.align },
-                        data_at: data_at,
-                        data_len: data_len,
-                        size: section.size,
-                        address: 0
-                    }
-                );
+                self.pieces.push(Piece {
+                    obj_index: obj_index,
+                    sec_index: sec_index,
+                    out_index: out_index,
+                    boot: text_eq(in req, section.name_at, section.name_len, in ".text.boot"),
+                    align: if section.align == 0 { 1 } else { section.align },
+                    data_at: data_at,
+                    data_len: data_len,
+                    size: section.size,
+                    address: 0
+                });
             }
         }
         let mut boot_count: u64 = 0;
@@ -432,17 +430,15 @@ impl Linker {
                 if global {
                     self.globals.push(self.linked.len());
                 }
-                self.linked.push(
-                    Linked {
-                        obj_index: obj_index,
-                        hash: hash,
-                        name_at: name_at,
-                        name_len: symbol.name_len,
-                        address: address,
-                        size: symbol.size,
-                        global: global
-                    }
-                );
+                self.linked.push(Linked {
+                    obj_index: obj_index,
+                    hash: hash,
+                    name_at: name_at,
+                    name_len: symbol.name_len,
+                    address: address,
+                    size: symbol.size,
+                    global: global
+                });
             }
         }
         let start_row = self.global(in "_start".as_bytes());
@@ -666,31 +662,27 @@ impl Linker {
                     }
                 }
             }
-            secs.push(
-                OutSec {
-                    name: out_index,
-                    address: start,
-                    data_at: data_at,
-                    data_len: if bss { 0 } else { sub(end, start) },
-                    mem_bytes: sub(end, start),
-                    nobits: bss,
-                    writable: out_index >= widen_u64(Out::Data),
-                    executable: out_index == widen_u64(Out::Text)
-                }
-            );
+            secs.push(OutSec {
+                name: out_index,
+                address: start,
+                data_at: data_at,
+                data_len: if bss { 0 } else { sub(end, start) },
+                mem_bytes: sub(end, start),
+                nobits: bss,
+                writable: out_index >= widen_u64(Out::Data),
+                executable: out_index == widen_u64(Out::Text)
+            });
         }
-        secs.push(
-            OutSec {
-                name: Out::Stack,
-                address: self.stack_bottom,
-                data_at: data.len(),
-                data_len: 0,
-                mem_bytes: sub(self.stack_top, self.stack_bottom),
-                nobits: true,
-                writable: true,
-                executable: false
-            }
-        );
+        secs.push(OutSec {
+            name: Out::Stack,
+            address: self.stack_bottom,
+            data_at: data.len(),
+            data_len: 0,
+            mem_bytes: sub(self.stack_top, self.stack_bottom),
+            nobits: true,
+            writable: true,
+            executable: false
+        });
         let mut segs: ChunkSeq[OutSeg] = ChunkSeq::new[OutSeg]();
         segs.push(OutSeg { first: Out::Text, end: Out::Data, flags: pf_rx() });
         segs.push(OutSeg { first: Out::Data, end: secs.len(), flags: pf_rw() });
@@ -698,45 +690,39 @@ impl Linker {
         for i in 0..self.linked.len() {
             let linked_sym = linked_at(in self.linked, i);
             let section = section_of(in secs, linked_sym.address);
-            out_syms.push(
-                OutSym {
-                    name_at: linked_sym.name_at,
-                    name_len: linked_sym.name_len,
-                    value: linked_sym.address,
-                    size: linked_sym.size,
-                    global: linked_sym.global,
-                    function: section == Out::Text,
-                    section: section
-                }
-            );
+            out_syms.push(OutSym {
+                name_at: linked_sym.name_at,
+                name_len: linked_sym.name_len,
+                value: linked_sym.address,
+                size: linked_sym.size,
+                global: linked_sym.global,
+                function: section == Out::Text,
+                section: section
+            });
         }
         for i in 0..LINKER_SYMBOLS {
             let at = self.names.len();
             let name_bytes = linker_name(i).as_bytes();
             self.names.extend(in name_bytes);
             let value = w_at(in self.defined_values, i);
-            out_syms.push(
-                OutSym {
-                    name_at: at,
-                    name_len: name_bytes.len(),
-                    value: value,
-                    size: 0,
-                    global: true,
-                    function: false,
-                    section: Absent::Row
-                }
-            );
-            self.linked.push(
-                Linked {
-                    obj_index: LINKER_OBJECT,
-                    hash: 0,
-                    name_at: at,
-                    name_len: name_bytes.len(),
-                    address: value,
-                    size: 0,
-                    global: true
-                }
-            );
+            out_syms.push(OutSym {
+                name_at: at,
+                name_len: name_bytes.len(),
+                value: value,
+                size: 0,
+                global: true,
+                function: false,
+                section: Absent::Row
+            });
+            self.linked.push(Linked {
+                obj_index: LINKER_OBJECT,
+                hash: 0,
+                name_at: at,
+                name_len: name_bytes.len(),
+                address: value,
+                size: 0,
+                global: true
+            });
         }
         let machine = machine_of(self.opts.target);
         self.elf = write_executable(

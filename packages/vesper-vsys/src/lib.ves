@@ -1271,15 +1271,13 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                 }
             }
             expect_punct(inout parser, 59);
-            consts.push(
-                ConstDef {
-                    name_start: const_start,
-                    name_end: const_end,
-                    scalar: scalar,
-                    negative: negative,
-                    magnitude: magnitude,
-                }
-            );
+            consts.push(ConstDef {
+                name_start: const_start,
+                name_end: const_end,
+                scalar: scalar,
+                negative: negative,
+                magnitude: magnitude,
+            });
         } else if is_word(in parser, in "enum") {
             let _ = bump(inout parser);
             let (enum_start, enum_end) = take_word(inout parser);
@@ -1321,13 +1319,11 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                         return err_at(in parser, err_duplicate(), 524);
                     }
                 }
-                enum_vars.push(
-                    EnumVar {
-                        name_start: variant_name_start,
-                        name_end: variant_name_end,
-                        value: value,
-                    }
-                );
+                enum_vars.push(EnumVar {
+                    name_start: variant_name_start,
+                    name_end: variant_name_end,
+                    value: value,
+                });
                 variant_count = wrapping_add(variant_count, 1);
                 if !eat_punct(inout parser, 44) {
                     expect_punct(inout parser, 125);
@@ -1338,15 +1334,13 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                 return err_at(in parser, err_type(), 525);
             }
             sort_vars(inout enum_vars, variant_start, variant_count, in parser.arena.as_slice());
-            enums.push(
-                EnumDef {
-                    name_start: enum_start,
-                    name_end: enum_end,
-                    scalar: scalar,
-                    variant_start: variant_start,
-                    variant_count: variant_count,
-                }
-            );
+            enums.push(EnumDef {
+                name_start: enum_start,
+                name_end: enum_end,
+                scalar: scalar,
+                variant_start: variant_start,
+                variant_count: variant_count,
+            });
         } else if (is_word(in parser, in "linear") || is_word(in parser, in "affine"))
             && peek_is_word(in parser, 1, in "extern") {
             let linearity: u8 = if is_word(in parser, in "linear") {
@@ -1377,17 +1371,15 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                 }
                 expect_punct(inout parser, 93);
                 expect_punct(inout parser, 59);
-                externs.push(
-                    ExternDef {
-                        name_start: extern_start,
-                        name_end: extern_end,
-                        linearity: 1,
-                        has_drop: false,
-                        drop_start: 0,
-                        drop_end: 0,
-                        mapping: mapping_scalar,
-                    }
-                );
+                externs.push(ExternDef {
+                    name_start: extern_start,
+                    name_end: extern_end,
+                    linearity: 1,
+                    has_drop: false,
+                    drop_start: 0,
+                    drop_end: 0,
+                    mapping: mapping_scalar,
+                });
             } else {
                 expect_word(inout parser, in "type");
                 let (extern_start, extern_end) = take_word(inout parser);
@@ -1408,17 +1400,15 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                     drop_end = word_end;
                 }
                 expect_punct(inout parser, 59);
-                externs.push(
-                    ExternDef {
-                        name_start: extern_start,
-                        name_end: extern_end,
-                        linearity: linearity,
-                        has_drop: has_drop,
-                        drop_start: drop_start,
-                        drop_end: drop_end,
-                        mapping: 0,
-                    }
-                );
+                externs.push(ExternDef {
+                    name_start: extern_start,
+                    name_end: extern_end,
+                    linearity: linearity,
+                    has_drop: has_drop,
+                    drop_start: drop_start,
+                    drop_end: drop_end,
+                    mapping: 0,
+                });
             }
         } else if is_word(in parser, in "wire") {
             let wire_tok = cur(in parser);
@@ -1452,18 +1442,16 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                     break;
                 }
             }
-            wires.push(
-                WireStructDef {
-                    name_start: wire_start,
-                    name_end: wire_end,
-                    field_start: field_start,
-                    field_count: field_count,
-                    size: 0,
-                    alignment: 0,
-                    span_start: wire_tok.span_start,
-                    span_end: wire_tok.span_end,
-                }
-            );
+            wires.push(WireStructDef {
+                name_start: wire_start,
+                name_end: wire_end,
+                field_start: field_start,
+                field_count: field_count,
+                size: 0,
+                alignment: 0,
+                span_start: wire_tok.span_start,
+                span_end: wire_tok.span_end,
+            });
         } else if is_word(in parser, in "fn")
             || is_word(in parser, in "callback")
             || peek_is_punct(in parser, 0, 35) {
@@ -1492,25 +1480,23 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
             let mut param_count: u64 = 0;
             if is_callback {
                 let (callee_start, callee_end) = push_str_arena(inout parser.arena, in "callee");
-                pars.push(
-                    ParDef {
-                        name_start: callee_start,
-                        name_end: callee_end,
-                        kind: 4,
-                        access: 1,
-                        flag: false,
-                        val_ty: ValTy {
-                            tag: 1,
-                            num_kind: 0,
-                            name_start: 0,
-                            name_end: 0,
-                        },
-                        pointee_scalar: 0,
-                        pointee_start: sym_start,
-                        pointee_end: sym_end,
-                        is_struct: false,
-                    }
-                );
+                pars.push(ParDef {
+                    name_start: callee_start,
+                    name_end: callee_end,
+                    kind: 4,
+                    access: 1,
+                    flag: false,
+                    val_ty: ValTy {
+                        tag: 1,
+                        num_kind: 0,
+                        name_start: 0,
+                        name_end: 0,
+                    },
+                    pointee_scalar: 0,
+                    pointee_start: sym_start,
+                    pointee_end: sym_end,
+                    is_struct: false,
+                });
                 param_count = 1;
             }
             let mut has_variadic = false;
@@ -1541,25 +1527,23 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                     let (param_name_start, param_name_end) = take_word(inout parser);
                     expect_punct(inout parser, 58);
                     let (callback_start, callback_end) = take_word(inout parser);
-                    pars.push(
-                        ParDef {
-                            name_start: param_name_start,
-                            name_end: param_name_end,
-                            kind: 8,
-                            access: 1,
-                            flag: retain,
-                            val_ty: ValTy {
-                                tag: 1,
-                                num_kind: 0,
-                                name_start: 0,
-                                name_end: 0,
-                            },
-                            pointee_scalar: 0,
-                            pointee_start: callback_start,
-                            pointee_end: callback_end,
-                            is_struct: false,
-                        }
-                    );
+                    pars.push(ParDef {
+                        name_start: param_name_start,
+                        name_end: param_name_end,
+                        kind: 8,
+                        access: 1,
+                        flag: retain,
+                        val_ty: ValTy {
+                            tag: 1,
+                            num_kind: 0,
+                            name_start: 0,
+                            name_end: 0,
+                        },
+                        pointee_scalar: 0,
+                        pointee_start: callback_start,
+                        pointee_end: callback_end,
+                        is_struct: false,
+                    });
                     param_count = wrapping_add(param_count, 1);
                     if !eat_punct(inout parser, 44) {
                         expect_punct(inout parser, 41);
@@ -1578,25 +1562,23 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                     let (param_name_start, param_name_end) = take_word(inout parser);
                     expect_punct(inout parser, 58);
                     let (handle_start, handle_end) = take_word(inout parser);
-                    pars.push(
-                        ParDef {
-                            name_start: param_name_start,
-                            name_end: param_name_end,
-                            kind: 4,
-                            access: 4,
-                            flag: false,
-                            val_ty: ValTy {
-                                tag: 1,
-                                num_kind: 0,
-                                name_start: 0,
-                                name_end: 0,
-                            },
-                            pointee_scalar: 0,
-                            pointee_start: handle_start,
-                            pointee_end: handle_end,
-                            is_struct: false,
-                        }
-                    );
+                    pars.push(ParDef {
+                        name_start: param_name_start,
+                        name_end: param_name_end,
+                        kind: 4,
+                        access: 4,
+                        flag: false,
+                        val_ty: ValTy {
+                            tag: 1,
+                            num_kind: 0,
+                            name_start: 0,
+                            name_end: 0,
+                        },
+                        pointee_scalar: 0,
+                        pointee_start: handle_start,
+                        pointee_end: handle_end,
+                        is_struct: false,
+                    });
                     param_count = wrapping_add(param_count, 1);
                     if !eat_punct(inout parser, 44) {
                         expect_punct(inout parser, 41);
@@ -1632,55 +1614,49 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                             return err_at(in parser, err_unsupported(), 553);
                         }
                         expect_punct(inout parser, 93);
-                        pars.push(
-                            ParDef {
-                                name_start: param_name_start,
-                                name_end: param_name_end,
-                                kind: 9,
-                                access: access,
-                                flag: false,
-                                val_ty: ValTy {
-                                    tag: 1,
-                                    num_kind: 0,
-                                    name_start: 0,
-                                    name_end: 0,
-                                },
-                                pointee_scalar: scalar,
-                                pointee_start: 0,
-                                pointee_end: 0,
-                                is_struct: false,
-                            }
-                        );
+                        pars.push(ParDef {
+                            name_start: param_name_start,
+                            name_end: param_name_end,
+                            kind: 9,
+                            access: access,
+                            flag: false,
+                            val_ty: ValTy {
+                                tag: 1,
+                                num_kind: 0,
+                                name_start: 0,
+                                name_end: 0,
+                            },
+                            pointee_scalar: scalar,
+                            pointee_start: 0,
+                            pointee_end: 0,
+                            is_struct: false,
+                        });
                     } else if is_nocapture {
-                        pars.push(
-                            parse_borrowed_param(
-                                inout parser,
-                                param_name_start,
-                                param_name_end,
-                                access
-                            )
-                        );
+                        pars.push(parse_borrowed_param(
+                            inout parser,
+                            param_name_start,
+                            param_name_end,
+                            access
+                        ));
                     } else {
                         let (handle_start, handle_end) = take_word(inout parser);
-                        pars.push(
-                            ParDef {
-                                name_start: param_name_start,
-                                name_end: param_name_end,
-                                kind: 4,
-                                access: access,
-                                flag: false,
-                                val_ty: ValTy {
-                                    tag: 1,
-                                    num_kind: 0,
-                                    name_start: 0,
-                                    name_end: 0,
-                                },
-                                pointee_scalar: 0,
-                                pointee_start: handle_start,
-                                pointee_end: handle_end,
-                                is_struct: false,
-                            }
-                        );
+                        pars.push(ParDef {
+                            name_start: param_name_start,
+                            name_end: param_name_end,
+                            kind: 4,
+                            access: access,
+                            flag: false,
+                            val_ty: ValTy {
+                                tag: 1,
+                                num_kind: 0,
+                                name_start: 0,
+                                name_end: 0,
+                            },
+                            pointee_scalar: 0,
+                            pointee_start: handle_start,
+                            pointee_end: handle_end,
+                            is_struct: false,
+                        });
                     }
                 } else {
                     if is_nocapture {
@@ -1689,20 +1665,18 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                     let (param_name_start, param_name_end) = take_word(inout parser);
                     expect_punct(inout parser, 58);
                     let val_ty = parse_raw_val_type(inout parser);
-                    pars.push(
-                        ParDef {
-                            name_start: param_name_start,
-                            name_end: param_name_end,
-                            kind: 1,
-                            access: 0,
-                            flag: false,
-                            val_ty: val_ty,
-                            pointee_scalar: 0,
-                            pointee_start: 0,
-                            pointee_end: 0,
-                            is_struct: false,
-                        }
-                    );
+                    pars.push(ParDef {
+                        name_start: param_name_start,
+                        name_end: param_name_end,
+                        kind: 1,
+                        access: 0,
+                        flag: false,
+                        val_ty: val_ty,
+                        pointee_scalar: 0,
+                        pointee_start: 0,
+                        pointee_end: 0,
+                        is_struct: false,
+                    });
                 }
                 param_count = wrapping_add(param_count, 1);
                 if !eat_punct(inout parser, 44) {
@@ -1772,39 +1746,35 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
             }
             expect_punct(inout parser, 59);
             if is_callback {
-                externs.push(
-                    ExternDef {
-                        name_start: sym_start,
-                        name_end: sym_end,
-                        linearity: 3,
-                        has_drop: false,
-                        drop_start: 0,
-                        drop_end: 0,
-                        mapping: 0,
-                    }
-                );
+                externs.push(ExternDef {
+                    name_start: sym_start,
+                    name_end: sym_end,
+                    linearity: 3,
+                    has_drop: false,
+                    drop_start: 0,
+                    drop_end: 0,
+                    mapping: 0,
+                });
             }
-            funs.push(
-                FunDef {
-                    sym_start: sym_start,
-                    sym_end: sym_end,
-                    param_start: param_start,
-                    param_count: param_count,
-                    result: result,
-                    has_len: has_len,
-                    len_name_start: len_name_start,
-                    len_name_end: len_name_end,
-                    mapping_len: 0,
-                    has_mapping_len: false,
-                    errno: errno,
-                    has_variadic: has_variadic,
-                    variadic_from: variadic_from,
-                    has_link: has_link_attr,
-                    link_name_start: link_name_start,
-                    link_name_end: link_name_end,
-                    indirect: is_callback,
-                }
-            );
+            funs.push(FunDef {
+                sym_start: sym_start,
+                sym_end: sym_end,
+                param_start: param_start,
+                param_count: param_count,
+                result: result,
+                has_len: has_len,
+                len_name_start: len_name_start,
+                len_name_end: len_name_end,
+                mapping_len: 0,
+                has_mapping_len: false,
+                errno: errno,
+                has_variadic: has_variadic,
+                variadic_from: variadic_from,
+                has_link: has_link_attr,
+                link_name_start: link_name_start,
+                link_name_end: link_name_end,
+                indirect: is_callback,
+            });
         } else {
             return err_at(in parser, err_syntax(), 570);
         }

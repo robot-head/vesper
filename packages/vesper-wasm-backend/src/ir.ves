@@ -188,18 +188,16 @@ fn read_sig(inout reader: Reader, in input: Slice[u8], in ctx: Ctx, inout facts:
     }
     let tail = opt_sym(in ctx, reader.word(in input));
     let sig_index = facts.sigs.len();
-    facts.sigs.push(
-        Sig {
-            gen_start: gen_start,
-            gen_count: gen_count,
-            p0: param_start,
-            pn: param_count,
-            result: result,
-            eff_start: eff_start,
-            eff_count: eff_count,
-            tail: tail
-        }
-    );
+    facts.sigs.push(Sig {
+        gen_start: gen_start,
+        gen_count: gen_count,
+        p0: param_start,
+        pn: param_count,
+        result: result,
+        eff_start: eff_start,
+        eff_count: eff_count,
+        tail: tail
+    });
     sig_index
 }
 
@@ -382,14 +380,12 @@ pub fn add_fn_sig(
         for j in 0..w(effect.n) {
             facts.arg_tys.push(u32_at(in ctx.types.items, wrapping_add(w(effect.a), j)));
         }
-        facts.effs.push(
-            EffInst {
-                label: label,
-                name: effect.name,
-                arg_start: arg_start,
-                arg_count: w(effect.n)
-            }
-        );
+        facts.effs.push(EffInst {
+            label: label,
+            name: effect.name,
+            arg_start: arg_start,
+            arg_count: w(effect.n)
+        });
     }
     let tail = if row.tail == 0 {
         NONE32
@@ -397,18 +393,16 @@ pub fn add_fn_sig(
         wrapping_sub(row.tail, 1)
     };
     let sig_index = facts.sigs.len();
-    facts.sigs.push(
-        Sig {
-            gen_start: gen_start,
-            gen_count: gen_count,
-            p0: param_start,
-            pn: param_count,
-            result: result,
-            eff_start: eff_start,
-            eff_count: eff_count,
-            tail: tail
-        }
-    );
+    facts.sigs.push(Sig {
+        gen_start: gen_start,
+        gen_count: gen_count,
+        p0: param_start,
+        pn: param_count,
+        result: result,
+        eff_start: eff_start,
+        eff_count: eff_count,
+        tail: tail
+    });
     set_by_symbol(inout facts.fn_sig, name, n32(inc(sig_index)));
 }
 
@@ -448,40 +442,34 @@ pub fn add_eff_decl(
                 Option::Some(mode) => mode,
                 Option::None => 0,
             };
-            facts.params.push(
-                ParamRow {
-                    name: u32_at(in pnames, param_index),
-                    pass: pass,
-                    ty: u32_at(in ptys, param_index)
-                }
-            );
+            facts.params.push(ParamRow {
+                name: u32_at(in pnames, param_index),
+                pass: pass,
+                ty: u32_at(in ptys, param_index)
+            });
         }
         let sig_index = facts.sigs.len();
-        facts.sigs.push(
-            Sig {
-                gen_start: 0,
-                gen_count: 0,
-                p0: first_param,
-                pn: param_count,
-                result: u32_at(in op_results, op_idx),
-                eff_start: 0,
-                eff_count: 0,
-                tail: NONE32
-            }
-        );
+        facts.sigs.push(Sig {
+            gen_start: 0,
+            gen_count: 0,
+            p0: first_param,
+            pn: param_count,
+            result: u32_at(in op_results, op_idx),
+            eff_start: 0,
+            eff_count: 0,
+            tail: NONE32
+        });
         facts.ops.push(OpDecl { name: u32_at(in op_names, op_idx), sig: sig_index });
     }
     let decl_index = facts.decls.len();
-    facts.decls.push(
-        EffDecl {
-            name: name,
-            linear: linear,
-            gen_start: gen_start,
-            gen_count: gen_count,
-            op_start: op_start,
-            op_count: op_count
-        }
-    );
+    facts.decls.push(EffDecl {
+        name: name,
+        linear: linear,
+        gen_start: gen_start,
+        gen_count: gen_count,
+        op_start: op_start,
+        op_count: op_count
+    });
     set_by_symbol(inout facts.eff_by_sym, name, n32(inc(decl_index)));
 }
 
@@ -583,16 +571,14 @@ pub fn read_facts(inout reader: Reader, in input: Slice[u8], in ctx: Ctx, pool: 
             f.ops.push(OpDecl { name: u32_at(in names, k), sig: u64_at(in sigs, k) });
         }
         let decl_index = f.decls.len();
-        f.decls.push(
-            EffDecl {
-                name: name,
-                linear: linear,
-                gen_start: gen_start,
-                gen_count: gen_count,
-                op_start: op_start,
-                op_count: op_count
-            }
-        );
+        f.decls.push(EffDecl {
+            name: name,
+            linear: linear,
+            gen_start: gen_start,
+            gen_count: gen_count,
+            op_start: op_start,
+            op_count: op_count
+        });
         set_by_symbol(inout f.eff_by_sym, name, n32(inc(decl_index)));
     }
     let ncalls = reader.word(in input);
@@ -868,26 +854,22 @@ pub fn ir_new(sink program: Program) -> Ir {
         pos = inc(pos);
         let local_start = ir.fn_locals.len();
         for i in 0..n_locals {
-            ir.fn_locals.push(
-                IrLocal {
-                    name: n32(op_at(in ir.program, add(pos, wrapping_mul(i, 2)))),
-                    ty: n32(op_at(in ir.program, add(pos, inc(wrapping_mul(i, 2)))))
-                }
-            );
+            ir.fn_locals.push(IrLocal {
+                name: n32(op_at(in ir.program, add(pos, wrapping_mul(i, 2)))),
+                ty: n32(op_at(in ir.program, add(pos, inc(wrapping_mul(i, 2)))))
+            });
         }
-        ir.fns.push(
-            FnInfo {
-                name: row.name,
-                p0: param_start,
-                pn: n_params,
-                result: result,
-                effects: effects,
-                local_start: local_start,
-                local_count: n_locals,
-                value_start: value_start,
-                value_count: top
-            }
-        );
+        ir.fns.push(FnInfo {
+            name: row.name,
+            p0: param_start,
+            pn: n_params,
+            result: result,
+            effects: effects,
+            local_start: local_start,
+            local_count: n_locals,
+            value_start: value_start,
+            value_count: top
+        });
         set_by_symbol(inout ir.by_name, row.name, n32(inc(fn_index)));
     }
     ir

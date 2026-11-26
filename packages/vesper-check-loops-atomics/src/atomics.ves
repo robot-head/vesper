@@ -936,19 +936,17 @@ pub fn read_ir(
             }
             ir.insts.push(inst);
         }
-        ir.fns.push(
-            IrFn {
-                name: name,
-                local_start: local_start,
-                local_count: local_count,
-                param_start: param_start,
-                param_count: param_count,
-                value_start: value_start,
-                value_count: value_count,
-                inst_start: inst_start,
-                inst_count: wrapping_u32(inst_count)
-            }
-        );
+        ir.fns.push(IrFn {
+            name: name,
+            local_start: local_start,
+            local_count: local_count,
+            param_start: param_start,
+            param_count: param_count,
+            value_start: value_start,
+            value_count: value_count,
+            inst_start: inst_start,
+            inst_count: wrapping_u32(inst_count)
+        });
     }
     ir
 }

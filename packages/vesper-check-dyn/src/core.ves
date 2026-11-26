@@ -535,9 +535,13 @@ pub fn new_bound(
 ) -> u32 {
     ctx.ast
         .bounds
-        .alloc(
-            BoundNode { param: param, trait_ref: trait_ref, start: start, end: end, owner: owner }
-        )
+        .alloc(BoundNode {
+            param: param,
+            trait_ref: trait_ref,
+            start: start,
+            end: end,
+            owner: owner
+        })
         .raw()
 }
 

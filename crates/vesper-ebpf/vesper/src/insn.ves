@@ -886,12 +886,20 @@ pub fn encode(i: Insn) -> Encoded {
         },
         Insn::Call(t) => match t {
             CallTarget::Helper(n) => one(raw(BpfClass::Jmp | BpfJmp::Call, 0, 0, 0, n)),
-            CallTarget::Local(n) => one(
-                raw(BpfClass::Jmp | BpfJmp::Call, 0, PseudoCall::Call, 0, n)
-            ),
-            CallTarget::Kfunc(n) => one(
-                raw(BpfClass::Jmp | BpfJmp::Call, 0, PseudoCall::KfuncCall, 0, n)
-            ),
+            CallTarget::Local(n) => one(raw(
+                BpfClass::Jmp | BpfJmp::Call,
+                0,
+                PseudoCall::Call,
+                0,
+                n
+            )),
+            CallTarget::Kfunc(n) => one(raw(
+                BpfClass::Jmp | BpfJmp::Call,
+                0,
+                PseudoCall::KfuncCall,
+                0,
+                n
+            )),
         },
         Insn::Exit => one(raw(BpfClass::Jmp | BpfJmp::Exit, 0, 0, 0, 0)),
         Insn::LdImm64 { dst, imm } => {
@@ -914,15 +922,27 @@ pub fn encode(i: Insn) -> Encoded {
             };
             one(raw(BpfClass::Ldx | mode | size_code(size), dst, src, off, 0))
         },
-        Insn::St { size, dst, off, imm } => one(
-            raw(BpfClass::St | BpfMode::Mem | size_code(size), dst, 0, off, imm)
-        ),
-        Insn::Stx { size, dst, src, off } => one(
-            raw(BpfClass::Stx | BpfMode::Mem | size_code(size), dst, src, off, 0)
-        ),
-        Insn::Atomic { size, op, dst, src, off } => one(
-            raw(BpfClass::Stx | BpfMode::Atomic | size_code(size), dst, src, off, atomic_imm(op))
-        ),
+        Insn::St { size, dst, off, imm } => one(raw(
+            BpfClass::St | BpfMode::Mem | size_code(size),
+            dst,
+            0,
+            off,
+            imm
+        )),
+        Insn::Stx { size, dst, src, off } => one(raw(
+            BpfClass::Stx | BpfMode::Mem | size_code(size),
+            dst,
+            src,
+            off,
+            0
+        )),
+        Insn::Atomic { size, op, dst, src, off } => one(raw(
+            BpfClass::Stx | BpfMode::Atomic | size_code(size),
+            dst,
+            src,
+            off,
+            atomic_imm(op)
+        )),
         Insn::LdLegacy { size, indirect, src, imm } => {
             let mode: u8 = if indirect { BpfMode::Ind } else { BpfMode::Abs };
             let s: u8 = if indirect { src } else { 0 };

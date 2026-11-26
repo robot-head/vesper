@@ -96,11 +96,9 @@ fn push_u64_le(inout out: ChunkSeq[u8], v: u64) {
         if i >= 8 {
             break;
         }
-        out.push(
-            wrapping_u8(
-                wrapping_shr_u64(v, wrapping_u32(wrapping_mul(i, 8))) & 255,
-            )
-        );
+        out.push(wrapping_u8(
+            wrapping_shr_u64(v, wrapping_u32(wrapping_mul(i, 8))) & 255,
+        ));
         i = wrapping_add(i, 1);
     }
 }
@@ -365,12 +363,10 @@ pub fn decode_checkpoint(
             let slot = read_u64_le(in bs, at);
             let target = read_u64_le(in bs, wrapping_add(at, 8));
             at = wrapping_add(at, 16);
-            words.push(
-                StackWord {
-                    slot: slot,
-                    target: target,
-                }
-            );
+            words.push(StackWord {
+                slot: slot,
+                target: target,
+            });
             wi = wrapping_add(wi, 1);
         }
         stack = StackShape {
@@ -415,14 +411,12 @@ pub fn decode_checkpoint(
         }
         let edata = slice_copy(in bs, at, elen);
         at = wrapping_add(at, elen);
-        journal.push(
-            JournalEntry {
-                park: epark,
-                data: edata,
-                tag: etag,
-                value: eval,
-            }
-        );
+        journal.push(JournalEntry {
+            park: epark,
+            data: edata,
+            tag: etag,
+            value: eval,
+        });
         ji = wrapping_add(ji, 1);
     }
 
@@ -458,20 +452,18 @@ pub fn decode_checkpoint(
         return Result::Err(5);
     }
 
-    Result::Ok(
-        ActivationCheckpoint {
-            fiber_id: fiber_id,
-            generation: generation,
-            park: park,
-            data_at_park: data_at_park,
-            data: data,
-            has_stack: has_stack,
-            stack: stack,
-            journal: journal,
-            has_image: has_image,
-            image: image,
-        }
-    )
+    Result::Ok(ActivationCheckpoint {
+        fiber_id: fiber_id,
+        generation: generation,
+        park: park,
+        data_at_park: data_at_park,
+        data: data,
+        has_stack: has_stack,
+        stack: stack,
+        journal: journal,
+        has_image: has_image,
+        image: image,
+    })
 }
 
 pub fn capture_epoch(

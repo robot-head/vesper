@@ -80,6 +80,18 @@ What the port hands back to the Rust code:
   repository files that spell `quote` or a macro call format the same as
   the seed. Before this, the port returned code 10 for them and the Rust
   code formatted them.
+- **Recovery formatting (#1996 part 3c-3):** `format_recovery_source`
+  (`vesper fmt --recovery`, the LSP's partial formatting) runs in the port
+  as `format_recovery`. It formats each complete top-level function of a
+  damaged buffer through the same formatter, over @vesper/front's editor
+  syntax (`recover`), charges the same work, and copies every other byte.
+  `parse_complete_items` is not run again, because `recover` already parsed
+  each complete declaration alone with the same parser and limits. Its
+  prepaid work is still charged. tests/recovery_differential.rs compares
+  output, edits, counts, digest and errors with the seed. It covers every
+  repository file, 1,500 damaged copies and sweeps of every limit, with
+  0 diffs. On 1,806 damaged, non-canonical sources (766 with edits) the
+  port takes 0.54x the seed's time (5 ABBA rounds).
 - **Large sources stay in the port:** the gate lexes with lane 10's
   `lex_with_limits` at the hard ceilings and one diagnostic, as
   `guarded_lex` does, so sources past the front end's defaults (65,536

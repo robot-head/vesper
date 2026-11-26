@@ -1321,14 +1321,12 @@ pub fn discover_roots(
                     || trace_host_direct(inout types, in world, in calls, syms, in func)
             );
         if kept || !specialized(inout types, in names, in world, syms, in func) || bound_any {
-            found.insts.push(
-                Inst {
-                    key: key,
-                    name: name,
-                    pair_start: n32(found.keys.len()),
-                    pair_count: n32(vars.len())
-                }
-            );
+            found.insts.push(Inst {
+                key: key,
+                name: name,
+                pair_start: n32(found.keys.len()),
+                pair_count: n32(vars.len())
+            });
             for i in 0..vars.len() {
                 found.keys.push(vars.key(i));
                 found.tys.push(vars.ty(i));

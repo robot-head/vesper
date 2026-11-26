@@ -356,21 +356,19 @@ pub fn read_calls(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Cal
             n32(wrapping_sub(body, 1))
         };
         set_by_symbol(inout calls.fn_by_name, name, inc32(n32(calls.fns.len())));
-        calls.fns.push(
-            FnInfo {
-                name: name,
-                fip: fip,
-                s0: s0,
-                s1: s1,
-                generic_start: generic_start,
-                generic_count: n32(generic_count),
-                param_start: param_start,
-                param_count: n32(param_count),
-                result: result,
-                row: row,
-                body: root
-            }
-        );
+        calls.fns.push(FnInfo {
+            name: name,
+            fip: fip,
+            s0: s0,
+            s1: s1,
+            generic_start: generic_start,
+            generic_count: n32(generic_count),
+            param_start: param_start,
+            param_count: n32(param_count),
+            result: result,
+            row: row,
+            body: root
+        });
     }
     let expr_count = reader.word(in bytes);
     for i in 0..expr_count {
@@ -385,9 +383,14 @@ pub fn read_calls(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Cal
         };
         let children = n32(reader.word(in bytes));
         let size = n32(reader.word(in bytes));
-        calls.exprs.push(
-            ExprNode { kind: kind, s0: s0, s1: s1, sym: expr_sym, children: children, size: size }
-        );
+        calls.exprs.push(ExprNode {
+            kind: kind,
+            s0: s0,
+            s1: s1,
+            sym: expr_sym,
+            children: children,
+            size: size
+        });
     }
     let call_count = reader.word(in bytes);
     for i in 0..call_count {
@@ -395,9 +398,13 @@ pub fn read_calls(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Cal
         let s1 = reader.word(in bytes);
         let pair_count = reader.word(in bytes);
         let pair_start = read_pairs(inout reader, in bytes, in ctx, inout calls, pair_count);
-        calls.calls.push(
-            VarsRow { s0: s0, s1: s1, name: 0, pair_start: pair_start, pair_count: n32(pair_count) }
-        );
+        calls.calls.push(VarsRow {
+            s0: s0,
+            s1: s1,
+            name: 0,
+            pair_start: pair_start,
+            pair_count: n32(pair_count)
+        });
     }
     let dyn_count = reader.word(in bytes);
     for i in 0..dyn_count {
@@ -405,15 +412,13 @@ pub fn read_calls(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Cal
         let pair_count = reader.word(in bytes);
         let pair_start = read_pairs(inout reader, in bytes, in ctx, inout calls, pair_count);
         set_by_symbol(inout calls.dyn_by_name, func_sym, inc32(n32(calls.dyn_params.len())));
-        calls.dyn_params.push(
-            VarsRow {
-                s0: 0,
-                s1: 0,
-                name: func_sym,
-                pair_start: pair_start,
-                pair_count: n32(pair_count)
-            }
-        );
+        calls.dyn_params.push(VarsRow {
+            s0: 0,
+            s1: 0,
+            name: func_sym,
+            pair_start: pair_start,
+            pair_count: n32(pair_count)
+        });
     }
     read_names_into(inout reader, in bytes, in ctx, inout calls.stubs);
     let vtable_count = reader.word(in bytes);
@@ -426,39 +431,33 @@ pub fn read_calls(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Cal
             let method = sym(in ctx, reader.word(in bytes));
             let pair_count = reader.word(in bytes);
             let pair_start = read_pairs(inout reader, in bytes, in ctx, inout calls, pair_count);
-            calls.methods.push(
-                VarsRow {
-                    s0: 0,
-                    s1: 0,
-                    name: method,
-                    pair_start: pair_start,
-                    pair_count: n32(pair_count)
-                }
-            );
+            calls.methods.push(VarsRow {
+                s0: 0,
+                s1: 0,
+                name: method,
+                pair_start: pair_start,
+                pair_count: n32(pair_count)
+            });
         }
-        calls.vtables.push(
-            VTableRow {
-                object: object,
-                self_ty: self_ty,
-                method_start: method_start,
-                method_count: n32(method_count)
-            }
-        );
+        calls.vtables.push(VTableRow {
+            object: object,
+            self_ty: self_ty,
+            method_start: method_start,
+            method_count: n32(method_count)
+        });
     }
     read_names_into(inout reader, in bytes, in ctx, inout calls.caller_slot_fns);
     let task_count = reader.word(in bytes);
     for i in 0..task_count {
         let entry = sym(in ctx, reader.word(in bytes));
         let flags = reader.word(in bytes);
-        calls.tasks.push(
-            Task {
-                entry: entry,
-                optimize: flags & 1 != 0,
-                trace_host: flags & 2 != 0,
-                library: flags & 4 != 0,
-                more_roots: flags & 8 != 0
-            }
-        );
+        calls.tasks.push(Task {
+            entry: entry,
+            optimize: flags & 1 != 0,
+            trace_host: flags & 2 != 0,
+            library: flags & 4 != 0,
+            more_roots: flags & 8 != 0
+        });
     }
     calls
 }

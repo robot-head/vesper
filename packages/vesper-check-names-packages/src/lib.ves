@@ -528,12 +528,10 @@ fn assemble_module_bytes(inout loader: St, in input: Slice[u8], module: u32) -> 
     loader.is_root = module == loader.root_mod;
     let file = at32(in loader.mod_file, w(module));
     loader
-        .shift = n32(
-            match loader.file_base.try_get(w(file)) {
-                Option::Some(base) => base,
-                Option::None => 0,
-            }
-        );
+        .shift = n32(match loader.file_base.try_get(w(file)) {
+            Option::Some(base) => base,
+            Option::None => 0,
+        });
     loader.values.clear();
     loader.types.clear();
     let mut lowered = match loader.cached_lowerings.pop() {

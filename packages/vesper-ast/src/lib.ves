@@ -439,18 +439,16 @@ pub fn ast_clone_in_heap(in a: Ast, inout tmp: String) -> Ast {
     for i in 0..a.exprs.len() {
         match a.exprs.at(i) {
             Option::Some(v) => {
-                let _ = exprs.alloc(
-                    ExprNode {
-                        kind: v.kind,
-                        start: v.start,
-                        end: v.end,
-                        a: v.a,
-                        b: v.b,
-                        c: v.c,
-                        d: v.d,
-                        e: v.e
-                    }
-                );
+                let _ = exprs.alloc(ExprNode {
+                    kind: v.kind,
+                    start: v.start,
+                    end: v.end,
+                    a: v.a,
+                    b: v.b,
+                    c: v.c,
+                    d: v.d,
+                    e: v.e
+                });
             },
             Option::None => {},
         }
@@ -463,9 +461,14 @@ pub fn ast_clone_in_heap(in a: Ast, inout tmp: String) -> Ast {
     for i in 0..a.pats.len() {
         match a.pats.at(i) {
             Option::Some(v) => {
-                let _ = pats.alloc(
-                    PatNode { kind: v.kind, start: v.start, end: v.end, a: v.a, b: v.b, c: v.c }
-                );
+                let _ = pats.alloc(PatNode {
+                    kind: v.kind,
+                    start: v.start,
+                    end: v.end,
+                    a: v.a,
+                    b: v.b,
+                    c: v.c
+                });
             },
             Option::None => {},
         }
@@ -491,15 +494,13 @@ pub fn ast_clone_in_heap(in a: Ast, inout tmp: String) -> Ast {
     for i in 0..a.stmts.len() {
         match a.stmts.at(i) {
             Option::Some(v) => {
-                let _ = stmts.alloc(
-                    StmtNode {
-                        kind: v.kind,
-                        pat: v.pat,
-                        ty: v.ty,
-                        value: v.value,
-                        mutable: v.mutable
-                    }
-                );
+                let _ = stmts.alloc(StmtNode {
+                    kind: v.kind,
+                    pat: v.pat,
+                    ty: v.ty,
+                    value: v.value,
+                    mutable: v.mutable
+                });
             },
             Option::None => {},
         }
@@ -538,16 +539,14 @@ pub fn ast_clone_in_heap(in a: Ast, inout tmp: String) -> Ast {
     for i in 0..a.params.len() {
         match a.params.at(i) {
             Option::Some(v) => {
-                let _ = params.alloc(
-                    ParamNode {
-                        name: v.name,
-                        pass: v.pass,
-                        projections: v.projections,
-                        ty: v.ty,
-                        start: v.start,
-                        end: v.end
-                    }
-                );
+                let _ = params.alloc(ParamNode {
+                    name: v.name,
+                    pass: v.pass,
+                    projections: v.projections,
+                    ty: v.ty,
+                    start: v.start,
+                    end: v.end
+                });
             },
             Option::None => {},
         }
@@ -600,14 +599,12 @@ pub fn ast_clone_in_heap(in a: Ast, inout tmp: String) -> Ast {
     for i in 0..a.fields.len() {
         match a.fields.at(i) {
             Option::Some(v) => {
-                let _ = fields.alloc(
-                    FieldNode {
-                        name: v.name,
-                        ty: v.ty,
-                        modality: v.modality,
-                        temperature: v.temperature
-                    }
-                );
+                let _ = fields.alloc(FieldNode {
+                    name: v.name,
+                    ty: v.ty,
+                    modality: v.modality,
+                    temperature: v.temperature
+                });
             },
             Option::None => {},
         }
@@ -634,19 +631,17 @@ pub fn ast_clone_in_heap(in a: Ast, inout tmp: String) -> Ast {
     for i in 0..a.adts.len() {
         match a.adts.at(i) {
             Option::Some(v) => {
-                let _ = adts.alloc(
-                    AdtNode {
-                        name: v.name,
-                        mode: v.mode,
-                        generics: v.generics,
-                        variants: v.variants,
-                        is_enum: v.is_enum,
-                        tiled: v.tiled,
-                        tile_width: v.tile_width,
-                        start: v.start,
-                        end: v.end
-                    }
-                );
+                let _ = adts.alloc(AdtNode {
+                    name: v.name,
+                    mode: v.mode,
+                    generics: v.generics,
+                    variants: v.variants,
+                    is_enum: v.is_enum,
+                    tiled: v.tiled,
+                    tile_width: v.tile_width,
+                    start: v.start,
+                    end: v.end
+                });
             },
             Option::None => {},
         }
@@ -659,19 +654,17 @@ pub fn ast_clone_in_heap(in a: Ast, inout tmp: String) -> Ast {
     for i in 0..a.fns.len() {
         match a.fns.at(i) {
             Option::Some(v) => {
-                let _ = fns.alloc(
-                    FnNode {
-                        name: v.name,
-                        fip: v.fip,
-                        generics: v.generics,
-                        params: v.params,
-                        result: v.result,
-                        effects: v.effects,
-                        body: v.body,
-                        start: v.start,
-                        end: v.end
-                    }
-                );
+                let _ = fns.alloc(FnNode {
+                    name: v.name,
+                    fip: v.fip,
+                    generics: v.generics,
+                    params: v.params,
+                    result: v.result,
+                    effects: v.effects,
+                    body: v.body,
+                    start: v.start,
+                    end: v.end
+                });
             },
             Option::None => {},
         }
@@ -684,16 +677,14 @@ pub fn ast_clone_in_heap(in a: Ast, inout tmp: String) -> Ast {
     for i in 0..a.effect_decls.len() {
         match a.effect_decls.at(i) {
             Option::Some(v) => {
-                let _ = effect_decls.alloc(
-                    EffectDeclNode {
-                        name: v.name,
-                        linear: v.linear,
-                        generics: v.generics,
-                        ops: v.ops,
-                        start: v.start,
-                        end: v.end
-                    }
-                );
+                let _ = effect_decls.alloc(EffectDeclNode {
+                    name: v.name,
+                    linear: v.linear,
+                    generics: v.generics,
+                    ops: v.ops,
+                    start: v.start,
+                    end: v.end
+                });
             },
             Option::None => {},
         }
@@ -720,17 +711,15 @@ pub fn ast_clone_in_heap(in a: Ast, inout tmp: String) -> Ast {
     for i in 0..a.traits.len() {
         match a.traits.at(i) {
             Option::Some(v) => {
-                let _ = traits.alloc(
-                    TraitNode {
-                        name: v.name,
-                        public: v.public,
-                        generics: v.generics,
-                        assoc: v.assoc,
-                        methods: v.methods,
-                        start: v.start,
-                        end: v.end
-                    }
-                );
+                let _ = traits.alloc(TraitNode {
+                    name: v.name,
+                    public: v.public,
+                    generics: v.generics,
+                    assoc: v.assoc,
+                    methods: v.methods,
+                    start: v.start,
+                    end: v.end
+                });
             },
             Option::None => {},
         }
@@ -743,9 +732,12 @@ pub fn ast_clone_in_heap(in a: Ast, inout tmp: String) -> Ast {
     for i in 0..a.assoc_decls.len() {
         match a.assoc_decls.at(i) {
             Option::Some(v) => {
-                let _ = assoc_decls.alloc(
-                    AssocDeclNode { name: v.name, bound: v.bound, start: v.start, end: v.end }
-                );
+                let _ = assoc_decls.alloc(AssocDeclNode {
+                    name: v.name,
+                    bound: v.bound,
+                    start: v.start,
+                    end: v.end
+                });
             },
             Option::None => {},
         }
@@ -758,15 +750,13 @@ pub fn ast_clone_in_heap(in a: Ast, inout tmp: String) -> Ast {
     for i in 0..a.trait_refs.len() {
         match a.trait_refs.at(i) {
             Option::Some(v) => {
-                let _ = trait_refs.alloc(
-                    TraitRefNode {
-                        package: v.package,
-                        name: v.name,
-                        args: v.args,
-                        start: v.start,
-                        end: v.end
-                    }
-                );
+                let _ = trait_refs.alloc(TraitRefNode {
+                    package: v.package,
+                    name: v.name,
+                    args: v.args,
+                    start: v.start,
+                    end: v.end
+                });
             },
             Option::None => {},
         }
@@ -779,9 +769,12 @@ pub fn ast_clone_in_heap(in a: Ast, inout tmp: String) -> Ast {
     for i in 0..a.wheres.len() {
         match a.wheres.at(i) {
             Option::Some(v) => {
-                let _ = wheres.alloc(
-                    WhereNode { ty: v.ty, trait_ref: v.trait_ref, start: v.start, end: v.end }
-                );
+                let _ = wheres.alloc(WhereNode {
+                    ty: v.ty,
+                    trait_ref: v.trait_ref,
+                    start: v.start,
+                    end: v.end
+                });
             },
             Option::None => {},
         }
@@ -808,20 +801,18 @@ pub fn ast_clone_in_heap(in a: Ast, inout tmp: String) -> Ast {
     for i in 0..a.confs.len() {
         match a.confs.at(i) {
             Option::Some(v) => {
-                let _ = confs.alloc(
-                    ConfNode {
-                        model: v.model,
-                        public: v.public,
-                        generics: v.generics,
-                        trait_ref: v.trait_ref,
-                        self_ty: v.self_ty,
-                        wheres: v.wheres,
-                        assoc: v.assoc,
-                        methods: v.methods,
-                        start: v.start,
-                        end: v.end
-                    }
-                );
+                let _ = confs.alloc(ConfNode {
+                    model: v.model,
+                    public: v.public,
+                    generics: v.generics,
+                    trait_ref: v.trait_ref,
+                    self_ty: v.self_ty,
+                    wheres: v.wheres,
+                    assoc: v.assoc,
+                    methods: v.methods,
+                    start: v.start,
+                    end: v.end
+                });
             },
             Option::None => {},
         }
@@ -847,15 +838,13 @@ pub fn ast_clone_in_heap(in a: Ast, inout tmp: String) -> Ast {
     for i in 0..a.model_uses.len() {
         match a.model_uses.at(i) {
             Option::Some(v) => {
-                let _ = model_uses.alloc(
-                    ModelUseNode {
-                        model: v.model,
-                        start: v.start,
-                        end: v.end,
-                        scope_start: v.scope_start,
-                        scope_end: v.scope_end
-                    }
-                );
+                let _ = model_uses.alloc(ModelUseNode {
+                    model: v.model,
+                    start: v.start,
+                    end: v.end,
+                    scope_start: v.scope_start,
+                    scope_end: v.scope_end
+                });
             },
             Option::None => {},
         }
@@ -868,15 +857,13 @@ pub fn ast_clone_in_heap(in a: Ast, inout tmp: String) -> Ast {
     for i in 0..a.bounds.len() {
         match a.bounds.at(i) {
             Option::Some(v) => {
-                let _ = bounds.alloc(
-                    BoundNode {
-                        param: v.param,
-                        trait_ref: v.trait_ref,
-                        start: v.start,
-                        end: v.end,
-                        owner: v.owner
-                    }
-                );
+                let _ = bounds.alloc(BoundNode {
+                    param: v.param,
+                    trait_ref: v.trait_ref,
+                    start: v.start,
+                    end: v.end,
+                    owner: v.owner
+                });
             },
             Option::None => {},
         }
@@ -889,17 +876,15 @@ pub fn ast_clone_in_heap(in a: Ast, inout tmp: String) -> Ast {
     for i in 0..a.uses.len() {
         match a.uses.at(i) {
             Option::Some(v) => {
-                let _ = uses.alloc(
-                    UseNode {
-                        package: v.package,
-                        supers: v.supers,
-                        path: v.path,
-                        names: v.names,
-                        public: v.public,
-                        start: v.start,
-                        end: v.end
-                    }
-                );
+                let _ = uses.alloc(UseNode {
+                    package: v.package,
+                    supers: v.supers,
+                    path: v.path,
+                    names: v.names,
+                    public: v.public,
+                    start: v.start,
+                    end: v.end
+                });
             },
             Option::None => {},
         }
@@ -912,9 +897,12 @@ pub fn ast_clone_in_heap(in a: Ast, inout tmp: String) -> Ast {
     for i in 0..a.use_names.len() {
         match a.use_names.at(i) {
             Option::Some(v) => {
-                let _ = use_names.alloc(
-                    UseNameNode { name: v.name, alias: v.alias, start: v.start, end: v.end }
-                );
+                let _ = use_names.alloc(UseNameNode {
+                    name: v.name,
+                    alias: v.alias,
+                    start: v.start,
+                    end: v.end
+                });
             },
             Option::None => {},
         }

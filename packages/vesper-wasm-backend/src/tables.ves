@@ -88,11 +88,9 @@ impl L {
         for i in 0..words.len() {
             let word_val = u64_at(in words, i);
             for byte_index in 0..8 {
-                bytes.push(
-                    wrapping_u8(
-                        wrapping_shr_u64(word_val, wrapping_u32(wrapping_mul(byte_index, 8))) & 255
-                    )
-                );
+                bytes.push(wrapping_u8(
+                    wrapping_shr_u64(word_val, wrapping_u32(wrapping_mul(byte_index, 8))) & 255
+                ));
             }
         }
         self.builder.data(in bytes)
@@ -745,9 +743,13 @@ impl L {
         } else {
             let base = self.strip_eq(op_sym, 2);
             if base == NONE32 {
-                Fail::raise(
-                    werr_syms(K_UNSUPPORTED, U_OPERATION, 193, self.cur_fn.inst.base, op_sym)
-                );
+                Fail::raise(werr_syms(
+                    K_UNSUPPORTED,
+                    U_OPERATION,
+                    193,
+                    self.cur_fn.inst.base,
+                    op_sym
+                ));
             }
             let old = self.local();
             self.cur_fn.code.get(arr);

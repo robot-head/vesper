@@ -44,12 +44,10 @@ fn append_field(previous: PackedBits, width: u64, value: u64) -> Option[PackedBi
     if wrapping_shr_u64(value, shift) != 0 {
         return Option::None;
     }
-    Option::Some(
-        PackedBits {
-            word: wrapping_shl_u64(previous.word, shift) | value,
-            used: wrapping_add(previous.used, width)
-        }
-    )
+    Option::Some(PackedBits {
+        word: wrapping_shl_u64(previous.word, shift) | value,
+        used: wrapping_add(previous.used, width)
+    })
 }
 
 test {

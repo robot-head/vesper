@@ -154,14 +154,12 @@ pub fn write_executable(
             }
             mem_end = max64(mem_end, add(out_sec.address, out_sec.mem_bytes));
         }
-        placements.push(
-            Placement {
-                vaddr: seg_base,
-                offset: off,
-                file_bytes: sub(file_end, off),
-                mem_bytes: sub(mem_end, seg_base)
-            }
-        );
+        placements.push(Placement {
+            vaddr: seg_base,
+            offset: off,
+            file_bytes: sub(file_end, off),
+            mem_bytes: sub(mem_end, seg_base)
+        });
     }
     // String tables and symbols.
     let mut shstrtab: ChunkSeq[u8] = ChunkSeq::new[u8]();

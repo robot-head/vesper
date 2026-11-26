@@ -179,14 +179,12 @@ pub fn from_bundle(sink bundle: ReplayBundle) -> Result[ReplaySession, u32] {
         return Result::Err(err);
     }
     let cursor = cursor_at(in timeline, bundle.next_seq);
-    Result::Ok(
-        ReplaySession {
-            bundle: bundle,
-            timeline: timeline,
-            lineage: lineage,
-            cursor: cursor,
-        }
-    )
+    Result::Ok(ReplaySession {
+        bundle: bundle,
+        timeline: timeline,
+        lineage: lineage,
+        cursor: cursor,
+    })
 }
 
 pub fn seek(inout s: ReplaySession, lamport_seq: u64) -> Result[TraceCursor, u32] {
@@ -237,14 +235,12 @@ pub fn query_linear_lineage_into(
                 }
                 match hops.try_get(i) {
                     Option::Some(hop) => {
-                        let encoded = encode_obligation_hop(
-                            ObligationHopWire {
-                                lamport_seq: hop.lamport_seq,
-                                fiber_id: hop.fiber_id,
-                                source_span_id: hop.source_span_id,
-                                hop_kind_tag: hop.kind.tag,
-                            }
-                        );
+                        let encoded = encode_obligation_hop(ObligationHopWire {
+                            lamport_seq: hop.lamport_seq,
+                            fiber_id: hop.fiber_id,
+                            source_span_id: hop.source_span_id,
+                            hop_kind_tag: hop.kind.tag,
+                        });
                         let es = encoded.as_slice();
                         let mut k: u64 = 0;
                         loop {

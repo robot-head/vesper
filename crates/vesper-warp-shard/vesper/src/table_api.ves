@@ -243,15 +243,18 @@ fn lookup_scan_vec(
             };
             let at = wrapping_add(base, wrapping_mul(w, 16));
             let m0 = Mask::bitmask(Vec::eq(Vec::load_masked[u32, 4](in kw, at), k));
-            let m1 = Mask::bitmask(
-                Vec::eq(Vec::load_masked[u32, 4](in kw, wrapping_add(at, 4)), k)
-            );
-            let m2 = Mask::bitmask(
-                Vec::eq(Vec::load_masked[u32, 4](in kw, wrapping_add(at, 8)), k)
-            );
-            let m3 = Mask::bitmask(
-                Vec::eq(Vec::load_masked[u32, 4](in kw, wrapping_add(at, 12)), k)
-            );
+            let m1 = Mask::bitmask(Vec::eq(
+                Vec::load_masked[u32, 4](in kw, wrapping_add(at, 4)),
+                k
+            ));
+            let m2 = Mask::bitmask(Vec::eq(
+                Vec::load_masked[u32, 4](in kw, wrapping_add(at, 8)),
+                k
+            ));
+            let m3 = Mask::bitmask(Vec::eq(
+                Vec::load_masked[u32, 4](in kw, wrapping_add(at, 12)),
+                k
+            ));
             m = m
                 & (
                     m0

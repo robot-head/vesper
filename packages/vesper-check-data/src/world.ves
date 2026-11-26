@@ -268,13 +268,11 @@ fn copy_span_rows(in rows: ChunkSeq[SpanRow]) -> ChunkSeq[SpanRow] {
     let mut out = ChunkSeq::with_capacity[SpanRow](n);
     for i in 0..n {
         match rows.try_get(i) {
-            Option::Some(row) => out.push(
-                SpanRow {
-                    start: row.start,
-                    end: row.end,
-                    ty: row.ty,
-                }
-            ),
+            Option::Some(row) => out.push(SpanRow {
+                start: row.start,
+                end: row.end,
+                ty: row.ty,
+            }),
             Option::None => {},
         }
     }
@@ -286,71 +284,61 @@ impl World {
         let mut adts = ChunkSeq::with_capacity[Adt](self.adts.len());
         for i in 0..self.adts.len() {
             match self.adts.try_get(i) {
-                Option::Some(adt) => adts.push(
-                    Adt {
-                        name: adt.name,
-                        mode: adt.mode,
-                        ga: adt.ga,
-                        gn: adt.gn,
-                        va: adt.va,
-                        vn: adt.vn,
-                        is_enum: adt.is_enum,
-                        tile: adt.tile,
-                        span_zero: adt.span_zero,
-                    }
-                ),
+                Option::Some(adt) => adts.push(Adt {
+                    name: adt.name,
+                    mode: adt.mode,
+                    ga: adt.ga,
+                    gn: adt.gn,
+                    va: adt.va,
+                    vn: adt.vn,
+                    is_enum: adt.is_enum,
+                    tile: adt.tile,
+                    span_zero: adt.span_zero,
+                }),
                 Option::None => {},
             }
         }
         let mut generics = ChunkSeq::with_capacity[Generic](self.generics.len());
         for i in 0..self.generics.len() {
             match self.generics.try_get(i) {
-                Option::Some(generic) => generics.push(
-                    Generic {
-                        name: generic.name,
-                        bound: generic.bound,
-                        row: generic.row,
-                    }
-                ),
+                Option::Some(generic) => generics.push(Generic {
+                    name: generic.name,
+                    bound: generic.bound,
+                    row: generic.row,
+                }),
                 Option::None => {},
             }
         }
         let mut variants = ChunkSeq::with_capacity[Variant](self.variants.len());
         for i in 0..self.variants.len() {
             match self.variants.try_get(i) {
-                Option::Some(variant) => variants.push(
-                    Variant {
-                        name: variant.name,
-                        fa: variant.fa,
-                        fc: variant.fc,
-                        named: variant.named,
-                    }
-                ),
+                Option::Some(variant) => variants.push(Variant {
+                    name: variant.name,
+                    fa: variant.fa,
+                    fc: variant.fc,
+                    named: variant.named,
+                }),
                 Option::None => {},
             }
         }
         let mut fields = ChunkSeq::with_capacity[Field](self.fields.len());
         for i in 0..self.fields.len() {
             match self.fields.try_get(i) {
-                Option::Some(field) => fields.push(
-                    Field {
-                        name: field.name,
-                        ty: field.ty,
-                        modality: field.modality,
-                    }
-                ),
+                Option::Some(field) => fields.push(Field {
+                    name: field.name,
+                    ty: field.ty,
+                    modality: field.modality,
+                }),
                 Option::None => {},
             }
         }
         let mut effects = ChunkSeq::with_capacity[EffectRow](self.effects.len());
         for i in 0..self.effects.len() {
             match self.effects.try_get(i) {
-                Option::Some(effect) => effects.push(
-                    EffectRow {
-                        name: effect.name,
-                        linear: effect.linear,
-                    }
-                ),
+                Option::Some(effect) => effects.push(EffectRow {
+                    name: effect.name,
+                    linear: effect.linear,
+                }),
                 Option::None => {},
             }
         }
