@@ -58,63 +58,66 @@ pub fn limit(value: u64, max: u64) -> u8 {
 // overflows nor builds an `Option`: when `work <= max_work`, the sum fits
 // exactly when `amount <= max_work - work`, and when `work > max_work` every
 // charge fails.
-pub fn work(inout b.{work, max_work}: Budget, amount: u64) -> u8 {
-    let w = b.work;
-    let m = b.max_work;
-    if w > m || amount > wrapping_sub(m, w) {
+pub fn work(inout budget.{work, max_work}: Budget, amount: u64) -> u8 {
+    let spent = budget.work;
+    let ceiling = budget.max_work;
+    if spent > ceiling || amount > wrapping_sub(ceiling, spent) {
         return E_LIMIT;
     }
-    b.work = wrapping_add(w, amount);
+    budget.work = wrapping_add(spent, amount);
     0
 }
 
-// `count` calls of `work(b, 1)` that stop at the first refusal: the counter
+// `count` calls of `work(budget, 1)` that stop at the first refusal: the counter
 // ends where those calls leave it (at `max_work` when one refuses after
 // others passed, unchanged when the first refuses).
-pub fn work_units(inout b.{work, max_work}: Budget, count: u64) -> u8 {
+pub fn work_units(inout budget.{work, max_work}: Budget, count: u64) -> u8 {
     if count == 0 {
         return 0;
     }
-    let w = b.work;
-    let m = b.max_work;
-    if w >= m {
+    let spent = budget.work;
+    let ceiling = budget.max_work;
+    if spent >= ceiling {
         return E_LIMIT;
     }
-    if count > wrapping_sub(m, w) {
-        b.work = m;
+    if count > wrapping_sub(ceiling, spent) {
+        budget.work = ceiling;
         return E_LIMIT;
     }
-    b.work = wrapping_add(w, count);
+    budget.work = wrapping_add(spent, count);
     0
 }
 
 // `WitnessBudget::metadata`: the bytes count as work too.
-pub fn metadata(inout b.{work, max_work, metadata, max_metadata_bytes}: Budget, amount: u64) -> u8 {
-    let x = b.metadata;
-    let m = b.max_metadata_bytes;
-    if x > m || amount > wrapping_sub(m, x) {
+pub fn metadata(
+    inout budget.{work, max_work, metadata, max_metadata_bytes}: Budget,
+    amount: u64
+) -> u8 {
+    let spent = budget.metadata;
+    let ceiling = budget.max_metadata_bytes;
+    if spent > ceiling || amount > wrapping_sub(ceiling, spent) {
         return E_LIMIT;
     }
-    let e = work(inout b, amount);
+    let e = work(inout budget, amount);
     if e != 0 {
         return e;
     }
-    b.metadata = wrapping_add(x, amount);
+    budget.metadata = wrapping_add(spent, amount);
     0
 }
 
 // `WitnessBudget::names`: the bytes count as work too.
-pub fn names(inout b.{work, max_work, names, max_name_bytes}: Budget, amount: u64) -> u8 {
-    let x = b.names;
-    let m = b.max_name_bytes;
-    if x > m || amount > wrapping_sub(m, x) {
+pub fn names(inout budget.{work, max_work, names, max_name_bytes}: Budget, amount: u64) -> u8 {
+    let spent = budget.names;
+    let ceiling = budget.max_name_bytes;
+    if spent > ceiling || amount > wrapping_sub(ceiling, spent) {
         return E_LIMIT;
     }
-    let e = work(inout b, amount);
+    let e = work(inout budget, amount);
     if e != 0 {
         return e;
     }
-    b.names = wrapping_add(x, amount);
+    budget.names = wrapping_add(spent, amount);
     0
 }
 
@@ -123,7 +126,7 @@ pub fn names(inout b.{work, max_work, names, max_name_bytes}: Budget, amount: u6
 // of the requirement, twice the capacity and one element, and charges its
 // bytes before it happens. `cap` becomes the new capacity.
 pub fn reserve(
-    inout b.{max_metadata_bytes, max_work, metadata, work}: Budget,
+    inout budget.{max_metadata_bytes, max_work, metadata, work}: Budget,
     len: u64,
     inout cap: u64,
     additional: u64,
@@ -133,13 +136,13 @@ pub fn reserve(
     if additional <= cap && len <= wrapping_sub(cap, additional) {
         0
     } else {
-        grow(inout b, len, inout cap, additional, size)
+        grow(inout budget, len, inout cap, additional, size)
     }
 }
 
 // `reserve` when the vector grows.
 fn grow(
-    inout b.{max_metadata_bytes, max_work, metadata, work}: Budget,
+    inout budget.{max_metadata_bytes, max_work, metadata, work}: Budget,
     len: u64,
     inout cap: u64,
     additional: u64,
@@ -148,7 +151,7 @@ fn grow(
     // Below these bounds no step overflows (the bytes stay under 2^50), so
     // the plain operations give the checked ones' values.
     if len >= SMALL || additional >= SMALL || cap >= SMALL || size >= SMALL_SIZE {
-        return grow_checked(inout b, len, inout cap, additional, size);
+        return grow_checked(inout budget, len, inout cap, additional, size);
     }
     let required = wrapping_add(len, additional);
     if required <= cap {
@@ -162,7 +165,7 @@ fn grow(
     if capacity < 1 {
         capacity = 1;
     }
-    let e = metadata(inout b, wrapping_mul(capacity, size));
+    let e = metadata(inout budget, wrapping_mul(capacity, size));
     if e != 0 {
         return e;
     }
@@ -175,7 +178,7 @@ const SMALL_SIZE: u64 = 65536;
 
 // `grow` with every step checked.
 fn grow_checked(
-    inout b.{work, max_work, metadata, max_metadata_bytes}: Budget,
+    inout budget.{work, max_work, metadata, max_metadata_bytes}: Budget,
     len: u64,
     inout cap: u64,
     additional: u64,
@@ -203,7 +206,7 @@ fn grow_checked(
         Option::Some(v) => v,
         Option::None => return E_LIMIT,
     };
-    let e = metadata(inout b, bytes);
+    let e = metadata(inout budget, bytes);
     if e != 0 {
         return e;
     }
@@ -212,24 +215,24 @@ fn grow_checked(
 }
 
 // `WitnessBudget::new`: every limit in 1..=HARD, else `InvalidLimits` (1).
-pub fn valid_limits(in b: Budget) -> u8 {
-    let ok = b.max_terms >= 1
-        && b.max_terms <= 16384
-        && b.max_proofs >= 1
-        && b.max_proofs <= 32768
-        && b.max_input_nodes >= 1
-        && b.max_input_nodes <= 2048
-        && b.max_output_nodes >= 1
-        && b.max_output_nodes <= 4096
-        && b.max_depth >= 1
-        && b.max_depth <= 128
-        && b.max_variables >= 1
-        && b.max_variables <= 512
-        && b.max_name_bytes >= 1
-        && b.max_name_bytes <= 65536
-        && b.max_metadata_bytes >= 1
-        && b.max_metadata_bytes <= 16777216
-        && b.max_work >= 1
-        && b.max_work <= 8000000;
+pub fn valid_limits(in budget: Budget) -> u8 {
+    let ok = budget.max_terms >= 1
+        && budget.max_terms <= 16384
+        && budget.max_proofs >= 1
+        && budget.max_proofs <= 32768
+        && budget.max_input_nodes >= 1
+        && budget.max_input_nodes <= 2048
+        && budget.max_output_nodes >= 1
+        && budget.max_output_nodes <= 4096
+        && budget.max_depth >= 1
+        && budget.max_depth <= 128
+        && budget.max_variables >= 1
+        && budget.max_variables <= 512
+        && budget.max_name_bytes >= 1
+        && budget.max_name_bytes <= 65536
+        && budget.max_metadata_bytes >= 1
+        && budget.max_metadata_bytes <= 16777216
+        && budget.max_work >= 1
+        && budget.max_work <= 8000000;
     if ok { 0 } else { 1 }
 }

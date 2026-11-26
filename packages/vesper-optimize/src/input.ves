@@ -17,14 +17,14 @@ pub struct Reader {
 }
 
 impl Reader {
-    pub fn word(inout self, in b: Slice[u8]) -> u64 {
-        let x = b.try_read_u64_le(self.pos).unwrap_or(0);
+    pub fn word(inout self, in bytes: Slice[u8]) -> u64 {
+        let value = bytes.try_read_u64_le(self.pos).unwrap_or(0);
         self.pos = wrapping_add(self.pos, 8);
-        x
+        value
     }
 
-    pub fn word32(inout self, in b: Slice[u8]) -> u32 {
-        wrapping_u32(self.word(in b))
+    pub fn word32(inout self, in bytes: Slice[u8]) -> u32 {
+        wrapping_u32(self.word(in bytes))
     }
 }
 
@@ -33,11 +33,11 @@ pub struct Tree {
     ast: Ast,
     // Per expression: the `Name`/`Binary` string capacity, or a `Call`'s
     // type-argument vector capacity.
-    cap1: ChunkSeq[u64],
+    primary_cap: ChunkSeq[u64],
     // Per expression: a `Call`'s argument vector capacity.
-    cap2: ChunkSeq[u64],
+    args_cap: ChunkSeq[u64],
     // Input name index -> symbol.
-    nmap: ChunkSeq[u32]
+    symbols: ChunkSeq[u32]
 }
 
 // One `TypeMap` entry, reduced to what the checker asks: codes 1-4 are
@@ -92,24 +92,24 @@ pub struct Cert {
     proofs: ChunkSeq[ProofRow]
 }
 
-pub fn cap_at(in s: ChunkSeq[u64], i: u32) -> u64 {
-    s.try_get(widen_u64(i)).unwrap_or(0)
+pub fn cap_at(in caps: ChunkSeq[u64], i: u32) -> u64 {
+    caps.try_get(widen_u64(i)).unwrap_or(0)
 }
 
-fn push_list(inout a: Ast, in words: ChunkSeq[u32]) -> u32 {
+fn push_list(inout ast: Ast, in words: ChunkSeq[u32]) -> u32 {
     let n = words.len();
     if n == 0 {
         return 0;
     }
-    let first = wrapping_u32(a.pool.len());
+    let first = wrapping_u32(ast.pool.len());
     for i in 0..n {
         match words.try_get(i) {
-            Option::Some(v) => a.pool.push(v),
+            Option::Some(v) => ast.pool.push(v),
             Option::None => {}
         }
     }
-    let r = a.lists.alloc(ListRef { first: first, len: wrapping_u32(n) });
-    r.raw()
+    let list = ast.lists.alloc(ListRef { first: first, len: wrapping_u32(n) });
+    list.raw()
 }
 
 fn node(kind: u8, start: u32, end: u32, a: u32, b: u32, c: u32) -> ExprNode {
@@ -118,31 +118,31 @@ fn node(kind: u8, start: u32, end: u32, a: u32, b: u32, c: u32) -> ExprNode {
 
 // Appends an expression to the tree with its two capacities; returns its
 // index.
-pub fn add_expr(inout t: Tree, n: ExprNode, cap1: u64, cap2: u64) -> u32 {
-    let i = t.ast.exprs.alloc(n);
-    t.cap1.push(cap1);
-    t.cap2.push(cap2);
-    i.raw()
+pub fn add_expr(inout tree: Tree, expr: ExprNode, primary_cap: u64, args_cap: u64) -> u32 {
+    let id = tree.ast.exprs.alloc(expr);
+    tree.primary_cap.push(primary_cap);
+    tree.args_cap.push(args_cap);
+    id.raw()
 }
 
-// An integer literal node with the value `v` (in the AST's sign and
-// magnitude form).
-pub fn add_int(inout t: Tree, v: i128, start: u32, end: u32) -> u32 {
-    let neg = v < 0;
+// An integer literal node of `value` (in the AST's sign and magnitude
+// form).
+pub fn add_int(inout tree: Tree, value: i128, start: u32, end: u32) -> u32 {
+    let neg = value < 0;
     // `i128::MIN` negates to itself; its magnitude 2^127 is that bit pattern.
-    let m = wrapping_u128(if neg { wrapping_neg_i128(v) } else { v });
-    let l = t.ast
-        .lits
-        .alloc(Lit { kind: 1, neg: neg, bits: wrapping_u64(m), hi: wrapping_u64(m >> 64) });
-    add_expr(inout t, node(1, start, end, l.raw(), 0, 0), 0, 0)
+    let magnitude = wrapping_u128(if neg { wrapping_neg_i128(value) } else { value });
+    let lit = tree.ast.lits.alloc(
+        Lit { kind: 1, neg: neg, bits: wrapping_u64(magnitude), hi: wrapping_u64(magnitude >> 64) }
+    );
+    add_expr(inout tree, node(1, start, end, lit.raw(), 0, 0), 0, 0)
 }
 
-pub fn add_name(inout t: Tree, sym: u32, len: u64, start: u32, end: u32) -> u32 {
-    add_expr(inout t, node(2, start, end, sym, 0, 0), len, 0)
+pub fn add_name(inout tree: Tree, sym: u32, len: u64, start: u32, end: u32) -> u32 {
+    add_expr(inout tree, node(2, start, end, sym, 0, 0), len, 0)
 }
 
 pub fn add_binary(
-    inout t: Tree,
+    inout tree: Tree,
     op: u32,
     cap: u64,
     left: u32,
@@ -150,47 +150,54 @@ pub fn add_binary(
     start: u32,
     end: u32
 ) -> u32 {
-    add_expr(inout t, node(11, start, end, op, left, right), cap, 0)
+    add_expr(inout tree, node(11, start, end, op, left, right), cap, 0)
 }
 
 // A two-argument call `callee(in left, in right)` with no type arguments.
-pub fn add_call2(inout t: Tree, callee: u32, left: u32, right: u32, start: u32, end: u32) -> u32 {
-    let x = t.ast.args.alloc(ArgNode { pass: 0, explicit: false, expr: left });
-    let y = t.ast.args.alloc(ArgNode { pass: 0, explicit: false, expr: right });
+pub fn add_call2(
+    inout tree: Tree,
+    callee: u32,
+    left: u32,
+    right: u32,
+    start: u32,
+    end: u32
+) -> u32 {
+    let left_arg = tree.ast.args.alloc(ArgNode { pass: 0, explicit: false, expr: left });
+    let right_arg = tree.ast.args.alloc(ArgNode { pass: 0, explicit: false, expr: right });
     let mut words = ChunkSeq::new[u32]();
-    words.push(x.raw());
-    words.push(y.raw());
-    let args = push_list(inout t.ast, in words);
-    add_expr(inout t, node(6, start, end, callee, 0, args), 0, 2)
+    words.push(left_arg.raw());
+    words.push(right_arg.raw());
+    let args = push_list(inout tree.ast, in words);
+    add_expr(inout tree, node(6, start, end, callee, 0, args), 0, 2)
 }
 
 pub fn tree_new() -> Tree {
     Tree {
         ast: ast_new(),
-        cap1: ChunkSeq::new[u64](),
-        cap2: ChunkSeq::new[u64](),
-        nmap: ChunkSeq::new[u32]()
+        primary_cap: ChunkSeq::new[u64](),
+        args_cap: ChunkSeq::new[u64](),
+        symbols: ChunkSeq::new[u32]()
     }
 }
 
-pub fn sym_of(in t: Tree, x: u64) -> u32 {
-    match t.nmap.try_get(x) {
+pub fn sym_of(in tree: Tree, name_index: u64) -> u32 {
+    match tree.symbols.try_get(name_index) {
         Option::Some(v) => v,
         Option::None => none(),
     }
 }
 
 // Names: a count, then each name's byte length and bytes, padded to words.
-pub fn read_names(inout r: Reader, in input: Str, inout t: Tree) {
-    let b = input.as_bytes();
-    t.nmap.clear();
-    let count = r.word(in b);
+pub fn read_names(inout reader: Reader, in input: Str, inout tree: Tree) {
+    let bytes = input.as_bytes();
+    tree.symbols.clear();
+    let count = reader.word(in bytes);
     for i in 0..count {
-        let len = r.word(in b);
-        let start = r.pos;
-        let s = t.ast.names.intern(in input[start..wrapping_add(start, len)]);
-        t.nmap.push(s.id());
-        r.pos = wrapping_add(start, wrapping_mul(wrapping_add(len, 7) / 8, 8));
+        let len = reader.word(in bytes);
+        let start = reader.pos;
+        let sym = tree.ast.names.intern(in input[start..wrapping_add(start, len)]);
+        tree.symbols.push(sym.id());
+        reader.pos = wrapping_add(start, wrapping_mul(wrapping_add(len, 7) / 8, 8));
     }
 }
 
@@ -198,20 +205,20 @@ pub fn read_names(inout r: Reader, in input: Str, inout t: Tree) {
 // UTF-8 and so cannot be a `Str`): the count, then each name's byte length;
 // the names themselves follow one another in `text`.
 pub fn read_names_text(
-    inout r: Reader,
-    in b: Slice[u8],
+    inout reader: Reader,
+    in bytes: Slice[u8],
     in text: Str,
-    inout at: u64,
-    inout t: Tree
+    inout text_offset: u64,
+    inout tree: Tree
 ) {
-    t.nmap.clear();
-    let count = r.word(in b);
+    tree.symbols.clear();
+    let count = reader.word(in bytes);
     for i in 0..count {
-        let len = r.word(in b);
-        let end = wrapping_add(at, len);
-        let s = t.ast.names.intern(in text[at..end]);
-        t.nmap.push(s.id());
-        at = end;
+        let len = reader.word(in bytes);
+        let end = wrapping_add(text_offset, len);
+        let sym = tree.ast.names.intern(in text[text_offset..end]);
+        tree.symbols.push(sym.id());
+        text_offset = end;
     }
 }
 
@@ -223,74 +230,81 @@ pub fn read_names_text(
 //  11 Binary: operator name, string capacity, left, right
 // and nothing for every other kind. Expression words are input indices,
 // read through `map` (input index -> tree index).
-pub fn read_exprs(inout r: Reader, in b: Slice[u8], inout t: Tree, inout map: ChunkSeq[u32]) {
+pub fn read_exprs(
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout tree: Tree,
+    inout map: ChunkSeq[u32]
+) {
     map.clear();
-    let count = r.word(in b);
+    let count = reader.word(in bytes);
     for i in 0..count {
-        let kind = wrapping_u8(r.word(in b));
-        let start = r.word32(in b);
-        let end = r.word32(in b);
+        let kind = wrapping_u8(reader.word(in bytes));
+        let start = reader.word32(in bytes);
+        let end = reader.word32(in bytes);
         let id = if kind == 1 {
-            let lk = wrapping_u8(r.word(in b));
-            let neg = r.word(in b) != 0;
-            let bits = r.word(in b);
-            let hi = r.word(in b);
-            let l = t.ast.lits.alloc(Lit { kind: lk, neg: neg, bits: bits, hi: hi });
-            add_expr(inout t, node(1, start, end, l.raw(), 0, 0), 0, 0)
+            let lit_kind = wrapping_u8(reader.word(in bytes));
+            let neg = reader.word(in bytes) != 0;
+            let bits = reader.word(in bytes);
+            let hi = reader.word(in bytes);
+            let lit = tree.ast.lits.alloc(Lit { kind: lit_kind, neg: neg, bits: bits, hi: hi });
+            add_expr(inout tree, node(1, start, end, lit.raw(), 0, 0), 0, 0)
         } else if kind == 2 {
-            let s = sym_of(in t, r.word(in b));
-            let cap = r.word(in b);
-            add_expr(inout t, node(2, start, end, s, 0, 0), cap, 0)
+            let sym = sym_of(in tree, reader.word(in bytes));
+            let cap = reader.word(in bytes);
+            add_expr(inout tree, node(2, start, end, sym, 0, 0), cap, 0)
         } else if kind == 6 {
-            let callee = mapped(in map, r.word(in b));
-            let ntypes = r.word(in b);
-            let tcap = r.word(in b);
-            let nargs = r.word(in b);
-            let acap = r.word(in b);
-            let mut tw = ChunkSeq::new[u32]();
-            for j in 0..ntypes {
-                let ty = t.ast.types.alloc(TypeNode { kind: 5, a: 0, b: 0, c: 0, d: 0 });
-                tw.push(ty.raw());
+            let callee = mapped(in map, reader.word(in bytes));
+            let type_count = reader.word(in bytes);
+            let types_cap = reader.word(in bytes);
+            let arg_count = reader.word(in bytes);
+            let args_cap = reader.word(in bytes);
+            let mut type_words = ChunkSeq::new[u32]();
+            for j in 0..type_count {
+                let ty = tree.ast.types.alloc(TypeNode { kind: 5, a: 0, b: 0, c: 0, d: 0 });
+                type_words.push(ty.raw());
             }
-            let types = push_list(inout t.ast, in tw);
-            let mut aw = ChunkSeq::new[u32]();
-            for j in 0..nargs {
-                let pass = wrapping_u8(r.word(in b));
-                let explicit = r.word(in b) != 0;
-                let e = mapped(in map, r.word(in b));
-                let x = t.ast.args.alloc(ArgNode { pass: pass, explicit: explicit, expr: e });
-                aw.push(x.raw());
+            let types = push_list(inout tree.ast, in type_words);
+            let mut arg_words = ChunkSeq::new[u32]();
+            for j in 0..arg_count {
+                let pass = wrapping_u8(reader.word(in bytes));
+                let explicit = reader.word(in bytes) != 0;
+                let arg_expr = mapped(in map, reader.word(in bytes));
+                let arg = tree.ast
+                    .args
+                    .alloc(ArgNode { pass: pass, explicit: explicit, expr: arg_expr });
+                arg_words.push(arg.raw());
             }
-            let args = push_list(inout t.ast, in aw);
-            add_expr(inout t, node(6, start, end, callee, types, args), tcap, acap)
+            let args = push_list(inout tree.ast, in arg_words);
+            add_expr(inout tree, node(6, start, end, callee, types, args), types_cap, args_cap)
         } else if kind == 11 {
-            let op = sym_of(in t, r.word(in b));
-            let cap = r.word(in b);
-            let left = mapped(in map, r.word(in b));
-            let right = mapped(in map, r.word(in b));
-            add_expr(inout t, node(11, start, end, op, left, right), cap, 0)
+            let op = sym_of(in tree, reader.word(in bytes));
+            let cap = reader.word(in bytes);
+            let left = mapped(in map, reader.word(in bytes));
+            let right = mapped(in map, reader.word(in bytes));
+            add_expr(inout tree, node(11, start, end, op, left, right), cap, 0)
         } else {
-            add_expr(inout t, node(kind, start, end, none(), none(), none()), 0, 0)
+            add_expr(inout tree, node(kind, start, end, none(), none(), none()), 0, 0)
         };
         map.push(id);
     }
 }
 
-pub fn mapped(in map: ChunkSeq[u32], x: u64) -> u32 {
-    match map.try_get(x) {
+pub fn mapped(in map: ChunkSeq[u32], index: u64) -> u32 {
+    match map.try_get(index) {
         Option::Some(v) => v,
         Option::None => none(),
     }
 }
 
 // Types: a count, then (start, end, code) rows in `TypeMap` order.
-pub fn read_types(inout r: Reader, in b: Slice[u8], inout types: ChunkSeq[TypeRow]) {
+pub fn read_types(inout reader: Reader, in bytes: Slice[u8], inout types: ChunkSeq[TypeRow]) {
     types.clear();
-    let count = r.word(in b);
+    let count = reader.word(in bytes);
     for i in 0..count {
-        let start = r.word32(in b);
-        let end = r.word32(in b);
-        let code = wrapping_u8(r.word(in b));
+        let start = reader.word32(in bytes);
+        let end = reader.word32(in bytes);
+        let code = wrapping_u8(reader.word(in bytes));
         types.push(TypeRow { start: start, end: end, code: code });
     }
 }
@@ -327,22 +341,22 @@ fn wide(lo: u64, hi: u64) -> i128 {
 // conclusion; the terms (kind, tag, then Const low and high words, an
 // InputVar's variable, or an operation's op and children; five words
 // each); the proofs (from, to, tag and six words each).
-pub fn read_cert(inout r: Reader, in b: Slice[u8], inout c: Cert) {
-    c.schema_version = r.word(in b);
-    c.arithmetic_version = r.word(in b);
-    c.terms_cap = r.word(in b);
-    c.proofs_cap = r.word(in b);
-    c.input = r.word32(in b);
-    c.output = r.word32(in b);
-    c.conclusion = r.word32(in b);
-    c.terms.clear();
-    let nterms = r.word(in b);
-    for i in 0..nterms {
-        let kind = wrapping_u8(r.word(in b));
-        let tag = wrapping_u8(r.word(in b));
-        let w1 = r.word(in b);
-        let w2 = r.word(in b);
-        let w3 = r.word(in b);
+pub fn read_cert(inout reader: Reader, in bytes: Slice[u8], inout cert: Cert) {
+    cert.schema_version = reader.word(in bytes);
+    cert.arithmetic_version = reader.word(in bytes);
+    cert.terms_cap = reader.word(in bytes);
+    cert.proofs_cap = reader.word(in bytes);
+    cert.input = reader.word32(in bytes);
+    cert.output = reader.word32(in bytes);
+    cert.conclusion = reader.word32(in bytes);
+    cert.terms.clear();
+    let term_count = reader.word(in bytes);
+    for i in 0..term_count {
+        let kind = wrapping_u8(reader.word(in bytes));
+        let tag = wrapping_u8(reader.word(in bytes));
+        let w1 = reader.word(in bytes);
+        let w2 = reader.word(in bytes);
+        let w3 = reader.word(in bytes);
         let row = if tag == 0 {
             TermRow { kind: kind, tag: 0, op: 0, value: wide(w1, w2), a: 0, b: 0 }
         } else if tag == 1 {
@@ -357,20 +371,20 @@ pub fn read_cert(inout r: Reader, in b: Slice[u8], inout c: Cert) {
                 b: wrapping_u32(w3)
             }
         };
-        c.terms.push(row);
+        cert.terms.push(row);
     }
-    c.proofs.clear();
-    let nproofs = r.word(in b);
-    for i in 0..nproofs {
-        let from = r.word32(in b);
-        let to = r.word32(in b);
-        let tag = wrapping_u8(r.word(in b));
-        let w1 = r.word32(in b);
-        let w2 = r.word32(in b);
-        let w3 = r.word32(in b);
-        let w4 = r.word32(in b);
-        let w5 = r.word32(in b);
-        let w6 = r.word(in b);
+    cert.proofs.clear();
+    let proof_count = reader.word(in bytes);
+    for i in 0..proof_count {
+        let from = reader.word32(in bytes);
+        let to = reader.word32(in bytes);
+        let tag = wrapping_u8(reader.word(in bytes));
+        let w1 = reader.word32(in bytes);
+        let w2 = reader.word32(in bytes);
+        let w3 = reader.word32(in bytes);
+        let w4 = reader.word32(in bytes);
+        let w5 = reader.word32(in bytes);
+        let w6 = reader.word(in bytes);
         let row = if tag == 1 {
             ProofRow {
                 from: from,
@@ -402,7 +416,7 @@ pub fn read_cert(inout r: Reader, in b: Slice[u8], inout c: Cert) {
                 p1: w2
             }
         };
-        c.proofs.push(row);
+        cert.proofs.push(row);
     }
 }
 
