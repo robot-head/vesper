@@ -24,7 +24,6 @@ vesper_crate(
     extra_integration_compile_data = [
         "//:files",
         "//crates/vesper-cranelift-sys:tests/support/mod.rs",
-        "wit/vcl.wit",
     ],
     extra_test_data = [
         "//:files",
