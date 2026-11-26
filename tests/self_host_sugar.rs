@@ -3,7 +3,10 @@
 //! `vesper_syntax::sugar_expand`'s (`matcher::match_rule`, through the
 //! `match_rule_words` test hook): the same captures, values, extents,
 //! refusals and remaining work budget on a rule corpus drawn from the
-//! sugar test suites, and on a fuzzed corpus.
+//! sugar test suites, and on a fuzzed corpus. Part 4b-1: its template
+//! skeleton (template.ves, `template::render` before the flow analysis,
+//! through the `template_skeleton_words` hook) on the rules of the same
+//! suites and on fuzzed templates.
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use vesper::{check, native, packages};
@@ -18,6 +21,7 @@ fn root() -> PathBuf {
 struct Sugar {
     matcher: native::WordFunction,
     batch: native::WordFunction,
+    skeleton: native::WordFunction,
 }
 
 fn sugar() -> &'static Sugar {
@@ -44,6 +48,7 @@ fn sugar() -> &'static Sugar {
         Sugar {
             matcher: compile("match_rule_words"),
             batch: compile("match_rule_batch"),
+            skeleton: compile("template_skeleton_words"),
         }
     })
 }
@@ -602,4 +607,336 @@ fn matcher_speed() {
         cases.len(),
         vesper.as_secs_f64() / rust.as_secs_f64()
     );
+}
+
+struct Render {
+    pattern: String,
+    invocation: String,
+    tail: Option<String>,
+    template: String,
+    max: usize,
+}
+
+const MARK: &str = "__sugar7_3_";
+
+fn vesper_skeleton(r: &Render) -> Vec<u64> {
+    let mut text = String::new();
+    let number = |text: &mut String, n: usize| {
+        for k in 0..4 {
+            text.push(char::from((n >> (7 * k)) as u8 & 127));
+        }
+    };
+    number(&mut text, r.pattern.len());
+    number(&mut text, r.invocation.len());
+    number(&mut text, r.tail.as_ref().map_or(0, |t| t.len() + 1));
+    number(&mut text, r.template.len());
+    number(&mut text, MARK.len());
+    for part in [
+        r.pattern.as_str(),
+        &r.invocation,
+        r.tail.as_deref().unwrap_or(""),
+        &r.template,
+        MARK,
+    ] {
+        text.push_str(part);
+    }
+    let call = vesper_port_abi::HostCall::new()
+        .str(&text)
+        .word(r.max as u64)
+        .word(1 << 20);
+    // SAFETY: as `vesper_match`.
+    unsafe { call.seq(JIT_RUNTIME, |w| sugar().skeleton.call(w).unwrap()) }
+}
+
+/// The cases that match, and the outcomes (skeleton or refusal) seen.
+fn check_renders(renders: &[Render]) -> (usize, usize) {
+    let mut failures = vec![];
+    let (mut matched, mut ok) = (0, 0);
+    for r in renders {
+        let rust = sugar_expand::template_skeleton_words(
+            &r.pattern,
+            &r.invocation,
+            r.tail.as_deref(),
+            &r.template,
+            MARK,
+            r.max,
+            1 << 20,
+        );
+        let vesper = vesper_skeleton(r);
+        matched += usize::from(rust[0] != 0);
+        ok += usize::from(rust[0] == 1);
+        if rust != vesper {
+            failures.push(format!(
+                "pattern {:?} invocation {:?} tail {:?} template {:?} max {}:\n  rust   {:?}\n  vesper {:?}",
+                r.pattern, r.invocation, r.tail, r.template, r.max, rust, vesper
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} renders differ:\n{}",
+        failures.len(),
+        renders.len(),
+        failures[..failures.len().min(20)].join("\n")
+    );
+    (matched, ok)
+}
+
+/// Rules (pattern and template) of the sugar sources, each against the
+/// uses of its own source and a spread of the others.
+fn corpus_renders() -> Vec<Render> {
+    let mut rules = vec![];
+    let mut uses = vec![];
+    for (id, source) in SUGAR_FILES
+        .iter()
+        .filter_map(|file| std::fs::read_to_string(root().join(file)).ok())
+        .flat_map(|text| rust_string_literals(&text))
+        .filter(|s| s.contains("rule"))
+        .enumerate()
+    {
+        let Ok(parse) = parser::parse_surface_cst(&source, Default::default(), true) else {
+            continue;
+        };
+        let inner = |n: &parser::SyntaxNode| {
+            let r = n.text_range();
+            let (s, e) = (usize::from(r.start()), usize::from(r.end()));
+            (e >= s + 2).then(|| source[s + 1..e - 1].to_owned())
+        };
+        for node in parse.syntax().descendants() {
+            if node.kind() == parser::SUGAR_RULE {
+                let part = |k| node.children().find(|n| n.kind() == k);
+                if let (Some(Some(p)), Some(Some(t))) = (
+                    part(parser::SUGAR_PATTERN).map(|n| inner(&n)),
+                    part(parser::SUGAR_TEMPLATE).map(|n| inner(&n)),
+                ) {
+                    rules.push((id, p, t));
+                }
+            } else if matches!(
+                node.kind(),
+                parser::SUGAR_ITEM
+                    | parser::SUGAR_PAT
+                    | parser::SUGAR_STMT
+                    | parser::SUGAR_EXPR
+                    | parser::DOTTED_EXPR
+                    | parser::PIPE_EXPR
+                    | parser::TAGGED_LITERAL
+            ) {
+                let r = node.text_range();
+                let s = significant_start(&node);
+                let e = usize::from(r.end());
+                uses.push((id, source[s..e].to_owned(), source[e..].to_owned()));
+            }
+        }
+    }
+    let mut renders = vec![];
+    for (n, (id, p, t)) in rules.iter().enumerate() {
+        let own = uses.iter().filter(|u| u.0 == *id);
+        let spread = (0..8).map(|k| &uses[(n * 7 + k * 13) % uses.len().max(1)]);
+        for (_, u, rest) in own.chain(spread.filter(|_| !uses.is_empty())) {
+            renders.push(Render {
+                pattern: p.clone(),
+                invocation: u.clone(),
+                tail: p.contains("$..").then(|| rest.clone()),
+                template: t.clone(),
+                max: 1 << 20,
+            });
+        }
+    }
+    renders
+}
+
+/// Templates over the rule examples: repetitions (nested, separated,
+/// empty), splices, shared holes, grouping operands and refusals.
+const TEMPLATES: &[(&str, &str, &str)] = &[
+    (
+        "rows { $( [ $( $v:expr ),* ] );* }",
+        "rows { []; [f(1,2), 3] }",
+        "rows($(row($($v),*)),*)",
+    ),
+    (
+        "rows { $( [ $( $v:expr ),* ] );* }",
+        "rows { []; [f(1,2), 3] }",
+        "$(row($y,$($v),*)),*",
+    ),
+    (
+        "rows { $( [ $( $v:expr ),* ] );* }",
+        "rows { [1]; [2, 3] }",
+        "$( $( $v + $v )+* );*",
+    ),
+    (
+        "rows { $( [ $( $v:expr ),+ ] );+ }",
+        "rows { [1]; [2, 3]; [4] }",
+        "$( $( $v )|+ )=>*",
+    ),
+    ("rows { $( [ $( $v:expr ),* ] );* }", "rows { [1] }", "$v"),
+    (
+        "rows { $( [ $( $v:expr ),* ] );* }",
+        "rows { [1] }",
+        "$($v)*",
+    ),
+    (
+        "rows { $( [ $( $v:expr ),* ] );* }",
+        "rows { [] }",
+        "$($($v)+)*",
+    ),
+    ("twice $e:expr", "twice f(a, b) + 1", "{ let t=$e; t + $e }"),
+    ("twice $e:expr", "twice ((x))", "inner($e, ($e))"),
+    ("twice $e:expr", "twice (x, y)", "$e"),
+    ("twice $e:expr", "twice ((a), (b))", "$e"),
+    ("twice $e:expr", "twice (((a)))", "$e"),
+    ("twice $e:expr", "twice ()", "$e"),
+    ("twice $e:expr", "twice 1", "$..e"),
+    ("twice $e:expr", "twice 1", "$ e $  e"),
+    ("twice $e:expr", "twice 1", "$"),
+    ("twice $e:expr", "twice 1", "$ 3"),
+    ("twice $e:expr", "twice 1", "$( $e"),
+    ("twice $e:expr", "twice 1", "$( $e )"),
+    ("twice $e:expr", "twice 1", "$( $e ) ab *"),
+    ("twice $e:expr", "twice 1", "$( $e ) , ?"),
+    ("twice $e:expr", "twice 1", "$( 1 )*"),
+    ("twice $e:expr", "twice 1", "$x"),
+    ("twice $e:expr", "twice 1", "`"),
+    ("twice $e:expr", "twice 1", "/* open"),
+    ("twice $e:expr", "twice 1", "$( $( $( $e )* )* )*"),
+    (
+        "call $f:ident ( $..a:args )",
+        "call f(1, in x, inout y)",
+        "$f($..a)",
+    ),
+    ("call $f:ident ( $..a:args )", "call f()", "$f($..a, 2)"),
+    ("call $f:ident ( $..a:args )", "call f(1)", "$f($a)"),
+    ("call $f:ident ( $..a:args )", "call f(1)", "$..f($..a)"),
+    ("scoped $s:scope", "scoped { x(); y }", "{ $..s }"),
+    ("scoped $s:scope", "scoped { x(); y }", "$s"),
+    (
+        "defer $b:block $..rest:scope",
+        "defer { tidy(); };",
+        "{ $..rest; $b }",
+    ),
+    (
+        "defer $b:block $..rest:scope",
+        "defer { tidy(); };",
+        "{ $rest; $b }",
+    ),
+    ("each $..body:stmts", "each a(); b();", "$..body $..body"),
+    (
+        "items { $..i:items }",
+        "items { fn a() {} struct B {} }",
+        "mod m { $..i }",
+    ),
+    ("place $p:place", "place ((obj.field))", "read(in $p)"),
+    (
+        "swap inout $a:place with inout $b:place ;",
+        "swap inout a[i] with inout s.y;",
+        "{ let t = $a; $a = $b; $b = t; }",
+    ),
+    (
+        "let2 $( $p:pat ),* = $e:expr",
+        "let2 a, Some(b), _ = x",
+        "match $e { $( $p => 1 ),* }",
+    ),
+    (
+        "let2 $( $p:pat ),* = $e:expr",
+        "let2 a = x",
+        "$( $p ),+ $( $p )|*",
+    ),
+    ("$( $x:expr )* z", "a a a z", "[$($x),*]"),
+    ("$( $x:expr )* z", "z", "[$($x),+]"),
+    ("$( $x:expr )* z", "z", "[$($x),*]"),
+    (
+        "$( $( $x:expr ),* );*",
+        "1, 2; ; 3",
+        "$( [ $( $x ),* ] )..*",
+    ),
+    (
+        "cast $e:expr as $t:ty",
+        "cast x as Vec[u8]",
+        "($e : $t) with state linear eff",
+    ),
+    ("pats ( $..ps:pats )", "pats (a, b, _)", "fn f($..ps) {}"),
+    ("pats ( $..ps:pats )", "pats ()", "f($..ps, 1)"),
+];
+
+fn max_bytes() -> [usize; 4] {
+    [1 << 20, 4096, 24, 7]
+}
+
+#[test]
+fn skeleton_matches_on_the_template_examples() {
+    let mut renders = vec![];
+    for &(pattern, invocation, template) in TEMPLATES {
+        for max in max_bytes() {
+            for tail in [None, Some(" next(); value")] {
+                renders.push(Render {
+                    pattern: pattern.into(),
+                    invocation: invocation.into(),
+                    tail: tail.filter(|_| pattern.contains("$..")).map(str::to_owned),
+                    template: template.into(),
+                    max,
+                });
+            }
+        }
+    }
+    let (matched, ok) = check_renders(&renders);
+    assert!(
+        matched * 2 > renders.len() && ok > 40,
+        "{matched} matched, {ok} ok"
+    );
+}
+
+#[test]
+fn skeleton_matches_on_the_sugar_test_suites() {
+    let renders = corpus_renders();
+    let (matched, ok) = check_renders(&renders);
+    assert!(
+        ok > 50,
+        "{} renders, {matched} matched, {ok} ok",
+        renders.len()
+    );
+}
+
+const TEMPLATE_FRAGMENTS: &[&str] = &[
+    "$x", "$e", "$v", "$p", "$..a", "$..s", "$..e", "$(", ")*", ")+", "),*", ");+", ")|+", "$",
+    "(", ")", "{", "}", ";", ",", "let", "t", "=", "in", "inout", "..", "`", "\"s\"", "1",
+];
+
+#[test]
+fn skeleton_matches_on_the_fuzzed_corpus() {
+    let rounds: usize = std::env::var("VESPER_SUGAR_FUZZ")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4000);
+    let mut rng = Rng(0x5eed_4b01);
+    let mut renders = vec![];
+    for _ in 0..rounds {
+        let (p, i, t) = TEMPLATES[rng.below(TEMPLATES.len())];
+        let mut template: Vec<String> = t.split(' ').map(str::to_owned).collect();
+        for _ in 0..=rng.below(3) {
+            let at = rng.below(template.len() + 1);
+            let f = TEMPLATE_FRAGMENTS[rng.below(TEMPLATE_FRAGMENTS.len())].to_owned();
+            match rng.below(3) {
+                0 if !template.is_empty() => {
+                    template.remove(at.min(template.len() - 1));
+                }
+                1 if !template.is_empty() => {
+                    let k = at.min(template.len() - 1);
+                    template[k] = f;
+                }
+                _ => template.insert(at, f),
+            }
+        }
+        let invocation = if rng.below(3) == 0 {
+            mutate(&mut rng, i)
+        } else {
+            i.to_owned()
+        };
+        renders.push(Render {
+            pattern: p.into(),
+            invocation,
+            tail: p.contains("$..").then(|| " rest(); x".to_owned()),
+            template: template.join(if rng.below(4) == 0 { "" } else { " " }),
+            max: max_bytes()[rng.below(4)],
+        });
+    }
+    check_renders(&renders);
 }

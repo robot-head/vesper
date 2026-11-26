@@ -340,6 +340,15 @@ pub(super) fn render(
     mark: &str,
     max_bytes: usize,
 ) -> Result<Rendered, String> {
+    flow::render(skeleton(template, captures, mark, max_bytes)?)
+}
+
+fn skeleton<'a>(
+    template: &'a str,
+    captures: &'a Captures,
+    mark: &'a str,
+    max_bytes: usize,
+) -> Result<Skeleton<'a>, String> {
     let lexed =
         lexer::sugar_lex_with_limits(template, Default::default()).map_err(|e| e.to_string())?;
     if !lexed.diagnostics.is_empty() {
@@ -356,7 +365,52 @@ pub(super) fn render(
         steps: max_bytes.saturating_mul(4),
     };
     sk.emit(&parts, captures, &mut Vec::new())?;
-    flow::render(sk)
+    Ok(sk)
+}
+
+/// The skeleton of `render` (the template with each hole a marker) as
+/// words: `[2, len, message bytes]` for `Err`, else `[1, steps left]`,
+/// the source (length, bytes), the holes (count; per hole its capture's
+/// index in name order, its value's index, and the operand span) and the
+/// slots (count; per slot its hole and span). The encoding of
+/// `@vesper/sugar`'s `skeleton_encoded` (packages/vesper-sugar/src/
+/// template.ves).
+pub(super) fn skeleton_words(
+    template: &str,
+    captures: &Captures,
+    mark: &str,
+    max_bytes: usize,
+) -> Vec<u64> {
+    let mut out = Vec::new();
+    match skeleton(template, captures, mark, max_bytes) {
+        Err(message) => {
+            out.extend([2, message.len() as u64]);
+            out.extend(message.bytes().map(u64::from));
+        }
+        Ok(sk) => {
+            out.extend([1, sk.steps as u64, sk.source.len() as u64]);
+            out.extend(sk.source.bytes().map(u64::from));
+            out.push(sk.holes.len() as u64);
+            let mut by_id = vec![(0, 0); sk.holes.len()];
+            for (&(name, value), &id) in &sk.ids {
+                let cap = captures.keys().position(|k| k == name).unwrap_or(0);
+                by_id[id] = (cap, value);
+            }
+            for (h, (cap, value)) in sk.holes.iter().zip(by_id) {
+                out.extend([
+                    cap as u64,
+                    value as u64,
+                    h.operand.start as u64,
+                    h.operand.end as u64,
+                ]);
+            }
+            out.push(sk.slots.len() as u64);
+            for s in &sk.slots {
+                out.extend([s.id as u64, s.span.start as u64, s.span.end as u64]);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
