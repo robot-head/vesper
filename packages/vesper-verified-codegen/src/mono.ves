@@ -13,9 +13,8 @@
 // arguments, else `name<T=i64,U=bool>` (keys in name order). A call whose
 // type arguments are not all concrete is `Unsupported::Generic`.
 //
-// Not ported yet (part 4c): `handle` expressions, whose nested handler
-// bodies are named by AST spans; a program with one is answered
-// `not ported`.
+// A `handle` expression's nested functions (named by the AST spans of
+// exprs.ves) are instantiated with the parent's arguments.
 //
 // Representation: an instance's copy shares the input's operand words
 // wherever nothing changes (block headers, terminators, the fip trailer
@@ -34,10 +33,15 @@ use self::lower::{
     ap,
     apn,
     err,
-    not_ported,
     put_error,
     tx,
     unsup
+};
+use self::exprs::{
+    Ex,
+    X_HANDLE,
+    nested_name,
+    read_exprs
 };
 use @vesper/check-data::pack_text;
 use @vesper/check-data::util::{
@@ -122,6 +126,8 @@ fn ms_new(in n: Names) -> Ms {
 
 pub struct Mo {
     c: Ctx,
+    // the pool's expression rows
+    ex: Ex,
     // the input's tables, with `fns` replaced by the instances
     p: Program,
     // the input's functions
@@ -157,7 +163,7 @@ pub struct Mo {
     qv: ChunkSeq[u32],
 }
 
-fn decode(sink c: Ctx, sink p: Program, inout r: Reader, in b: Slice[u8]) -> Mo {
+fn decode(sink c: Ctx, sink p: Program, sink ex: Ex, inout r: Reader, in b: Slice[u8]) -> Mo {
     let mut c2 = c;
     let sy = ms_new(in c2.names);
     let Program {
@@ -173,6 +179,7 @@ fn decode(sink c: Ctx, sink p: Program, inout r: Reader, in b: Slice[u8]) -> Mo 
     let src_n = fns.len();
     let mut m = Mo {
         c: c2,
+        ex: ex,
         p: Program {
             fns: ChunkSeq::new[FnRow](),
             blocks: blocks,
@@ -723,7 +730,23 @@ fn instruction(inout m: Mo, i: InstRow, name: u32, in vars: Vars, in bound: Chun
         row.ty = subst(inout m.c.types, i.ty, in vars);
     }
     if i.op == Op::Handle {
-        Fail::raise(not_ported("handle expressions (part 4c)"));
+        // The nested functions of the handler, in this instance's
+        // arguments: the body, the `return` clause, then the operation
+        // clauses.
+        let x = m.ex.row(m.op(add(i.a, 2)));
+        if x.kind == X_HANDLE {
+            let body = nested_name(inout m.c.names, "handler_body", x.b0, x.b1);
+            enqueue(inout m, body, in vars);
+            let ret = m.ex.clause(x.ret);
+            let rs = nested_name(inout m.c.names, "handler_clause", ret.s0, ret.s1);
+            enqueue(inout m, rs, in vars);
+            for j in 0..x.on {
+                let c = m.ex.clause(add(x.oa, j));
+                let cs = nested_name(inout m.c.names, "handler_clause", c.s0, c.s1);
+                enqueue(inout m, cs, in vars);
+            }
+        }
+        return row;
     }
     if i.op == Op::Read {
         let root = n32(m.op(i.a));
@@ -881,7 +904,8 @@ pub fn mono_input(in b: Slice[u8]) -> ChunkSeq[u64] {
     };
     let c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
-    let mut m = decode(c, p, inout r, in b);
+    let ex = read_exprs(inout r, in b, in c);
+    let mut m = decode(c, p, ex, inout r, in b);
     let e = handle Fail[VErr] in {
         mono_all(inout m);
         err(255, ChunkSeq::new[u8]())
@@ -980,7 +1004,8 @@ pub fn front_input(in b: Slice[u8]) -> ChunkSeq[u8] {
     };
     let c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
-    let mut m = decode(c, p, inout r, in b);
+    let ex = read_exprs(inout r, in b, in c);
+    let mut m = decode(c, p, ex, inout r, in b);
     let e = handle Fail[VErr] in {
         mono_all(inout m);
         err(255, ChunkSeq::new[u8]())
@@ -997,6 +1022,7 @@ pub fn front_input(in b: Slice[u8]) -> ChunkSeq[u8] {
     sort_fns(in m.c.names, inout m.p.fns);
     let Mo {
         c,
+        ex,
         p,
         src,
         sy,
@@ -1022,5 +1048,5 @@ pub fn front_input(in b: Slice[u8]) -> ChunkSeq[u8] {
         qk,
         qv,
     } = m;
-    lower_program(c, p, inout r, in b)
+    lower_program(c, p, ex, inout r, in b)
 }

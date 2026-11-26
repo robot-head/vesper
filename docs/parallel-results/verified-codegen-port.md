@@ -226,9 +226,41 @@ where the pass runs on the program the lowering reads.
 
 **Rust lines deleted:** 0. `mono.rs` goes at the retirement.
 
+## Part 4c-1: `handle Fail` handlers
+
+### What changed
+
+- `packages/vesper-verified-codegen/src/exprs.ves` reads the expressions of
+  the Place IR's payload pool that the backend needs: closures and `handle`
+  expressions, with their spans, free names, effect, state flag and clause
+  patterns. `tests/self_host_verified_codegen.rs` `expr_rows` writes them
+  right after the program section; the AST stays on the Rust side.
+- `mono.ves` instantiates a handler's nested functions (body, `return`
+  clause, operation clauses) with the parent's arguments.
+- `lower.ves` ports `fail::handler` and the non-resuming `handle Fail[E]`
+  lowering: the handled types join the failure codes, the plan resolves
+  each handler and adds its nested functions, the raise-set fixpoint
+  follows handlers, and a body call jumps to the `raise` clause on the
+  handled code. `assigned_capture` and the continuation check (`reads`,
+  over the free names of nested closures and handlers) have the Rust text.
+- Not ported yet: region blocks and region operations (4c-2), and evidence
+  passing (4c-3). For a program with one, the package answers `not ported`.
+
+### Evidence (Linux x86_64 host, release, `-C target-cpu=native`)
+
+| Check | Result |
+|---|---|
+| Lowering, corpus programs without handler sites, optimized and not | **0 of 278 differ** (186 lowered; 26 not ported, down from 82) |
+| Monomorphization, same corpus | **0 of 364 differ** (none left unported) |
+| Monomorphization and lowering in one pass | **0 of 270 differ** (178 lowered; 26 not ported) |
+| ABBA, lowering ×5 | rust 26.5 ms, vesper 30.3 ms: **1.14x** |
+| ABBA, front half ×5 | rust 51.1 ms, vesper 36.2 ms: **0.71x** |
+
+**Rust lines deleted:** 0. `fail.rs` goes at the retirement.
+
 ## Left
 
 - Optional: compare the per-arch `encoding_listing` text.
-- Part 4c: handlers, `evidence` and regions. Part 4d:
+- Part 4c-2: region blocks and region operations. Part 4c-3: `evidence`. Part 4d:
   `coverage`, `cli`, then the swap into the hybrid and `bootstrap/stage1.rs`, with `bootstrap/stage1.lock`
   reproduced, and the Rust deleted at the retirement.

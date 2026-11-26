@@ -1096,18 +1096,113 @@ fn lowering_input(
     entry: &str,
     options: &verified::Options,
 ) -> Option<Vec<u8>> {
-    let (mut bytes, _) = ir_words::program_input(world, program)?;
-    let mut words = vec![];
-    put_string(entry, &mut words);
+    if !ir_words::encodable(world, program) {
+        return None;
+    }
+    let mut t = ir_words::Tables::of(program);
+    t.label_names();
+    let section = t.section();
+    let encoded = t.enc.world(world);
+    let mut words = expr_rows(&mut t)?;
+    lowering_extras(world, entry, options, &mut words);
+    let mut bytes = t.enc.finish(&encoded, &section);
+    bytes.extend(bytes_of(&words));
+    Some(bytes)
+}
+
+/// The lowering's extra section: the entry, the limits, whether the region
+/// prelude is active and the names of the world's functions.
+fn lowering_extras(
+    world: &vesper::check::World,
+    entry: &str,
+    options: &verified::Options,
+    words: &mut Vec<u64>,
+) {
+    put_string(entry, words);
     words.push(options.max_functions as u64);
     words.push(options.max_rows as u64);
     words.push(u64::from(vesper::regions::active(world)));
     words.push(world.functions.len() as u64);
     for name in world.functions.keys() {
-        put_string(name, &mut words);
+        put_string(name, words);
     }
-    bytes.extend(bytes_of(&words));
-    Some(bytes)
+}
+
+/// One clause of a `handle` expression: its operation name, patterns
+/// (0 `_`, 1 a name and the name, 2 any other) and body span.
+fn clause_row(t: &mut ir_words::Tables, c: &vesper::ast::Clause, out: &mut Vec<u64>) {
+    use vesper::ast::PatternKind;
+    let n = t.enc.name(&c.name);
+    out.push(n);
+    out.push(c.pats.len() as u64);
+    for p in &c.pats {
+        match &p.kind {
+            PatternKind::Wild => out.push(0),
+            PatternKind::Bind(b) => {
+                out.push(1);
+                let n = t.enc.name(b);
+                out.push(n);
+            }
+            _ => out.push(2),
+        }
+    }
+    out.extend([c.body.span.start as u64, c.body.span.end as u64]);
+}
+
+/// The expressions of the payload pool, by pool index: 0 for an operation;
+/// else 1 (a closure) or 2 (a `handle`), the span and the free names
+/// (`check::free_names`). A `handle` adds its effect (name, label + 1 or
+/// 0, argument types), whether it is stateful, the body span, the `return`
+/// clause and the operation clauses. `None` when a type cannot be encoded.
+fn expr_rows(t: &mut ir_words::Tables) -> Option<Vec<u64>> {
+    use vesper::ast::ExprKind;
+    let items = t.pool.items.clone();
+    let mut out = vec![items.len() as u64];
+    for item in &items {
+        let ir_words::Payload::Expr(e) = item else {
+            out.push(0);
+            continue;
+        };
+        let handle = matches!(e.kind, ExprKind::Handle { .. });
+        out.push(if handle { 2 } else { 1 });
+        out.extend([e.span.start as u64, e.span.end as u64]);
+        let free = vesper::check::free_names(e);
+        out.push(free.len() as u64);
+        for n in &free {
+            let i = t.enc.name(n);
+            out.push(i);
+        }
+        let ExprKind::Handle {
+            effect,
+            state,
+            body,
+            ret,
+            ops,
+        } = &e.kind
+        else {
+            continue;
+        };
+        if !effect.args.iter().all(ir_words::literal_fits) {
+            return None;
+        }
+        let n = t.enc.name(&effect.name);
+        out.push(n);
+        let label = effect.label.as_ref().map_or(0, |l| t.enc.name(l) + 1);
+        out.push(label);
+        out.push(effect.args.len() as u64);
+        for a in &effect.args {
+            let i = t.enc.ty(a);
+            out.push(i);
+        }
+        out.push(u64::from(state.is_some()));
+        out.extend([body.span.start as u64, body.span.end as u64]);
+        clause_row(t, ret, &mut out);
+        out.push(ops.len() as u64);
+        for c in ops {
+            clause_row(t, c, &mut out);
+        }
+    }
+    Some(out)
 }
 
 /// `lower_input`'s text for the Rust lowering's result.
@@ -1292,7 +1387,7 @@ fn mono_input(
             ..Default::default()
         })
     };
-    let mut words = vec![];
+    let mut words = expr_rows(&mut t)?;
     let e = t.enc.name(entry);
     words.push(e);
     words.push(max_instances as u64);
@@ -1340,15 +1435,7 @@ fn mono_input(
         }
     }
     if let Some(options) = lowering {
-        // `lowering_input`'s extra section.
-        put_string(entry, &mut words);
-        words.push(options.max_functions as u64);
-        words.push(options.max_rows as u64);
-        words.push(u64::from(vesper::regions::active(world)));
-        words.push(world.functions.len() as u64);
-        for name in world.functions.keys() {
-            put_string(name, &mut words);
-        }
+        lowering_extras(world, entry, options, &mut words);
     }
     let mut bytes = t.enc.finish(&encoded, &section);
     bytes.extend(bytes_of(&words));

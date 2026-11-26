@@ -8,9 +8,9 @@
 // (`lower_function`) and prints the rows, or the error, as the Rust
 // `VerifiedError` prints it.
 //
-// Not ported yet (part 4c): `handle` expressions (non-resuming `Fail`
-// handlers and region blocks) and region operations; a program with one
-// is answered `not ported`.
+// Non-resuming `handle Fail[E]` handlers are lowered (part 4c-1; their
+// AST rows are exprs.ves). Not ported yet: region blocks and region
+// operations (4c-2); a program with one is answered `not ported`.
 //
 // Representation:
 //
@@ -71,6 +71,17 @@ use self::machine::{
 };
 use self::certificate::{
     put_debug
+};
+use self::exprs::{
+    Cl,
+    Ex,
+    Hx,
+    P_BIND,
+    P_OTHER,
+    X_HANDLE,
+    nested_instance,
+    nested_name,
+    read_exprs
 };
 use @vesper/check-data::util::{
     add,
@@ -441,6 +452,8 @@ pub copy struct Sh {
 pub struct Lw {
     c: Ctx,
     p: Program,
+    // the pool's expression rows (closures and handlers)
+    ex: Ex,
     sy: Sy,
     fns: ChunkSeq[Fn],
     fparams: ChunkSeq[Prm],
@@ -632,12 +645,13 @@ fn read_string(inout r: Reader, in b: Slice[u8], inout names: Names) -> u32 {
     s
 }
 
-fn decode(sink c: Ctx, sink p: Program, inout r: Reader, in b: Slice[u8]) -> Lw {
+fn decode(sink c: Ctx, sink p: Program, sink ex: Ex, inout r: Reader, in b: Slice[u8]) -> Lw {
     let mut c2 = c;
     let sy = sy_new(inout c2.names);
     let mut lw = Lw {
         c: c2,
         p: p,
+        ex: ex,
         sy: sy,
         fns: ChunkSeq::new[Fn](),
         fparams: ChunkSeq::new[Prm](),
@@ -1441,6 +1455,292 @@ fn local_codes(in lw: Lw, in fails: ChunkSeq[FailRow], l: Local, in pool: ChunkS
     m
 }
 
+// ----- `handle Fail` (fail.rs `handler`) ----------------------------------------
+
+// A resolved non-resuming `handle Fail[E]` in the function `site` at the
+// expression span `s0..s1`: the handled type (defaulted) and its key, the
+// nested functions, and the names the patterns bind (symbol + 1, or 0).
+pub copy struct Hd {
+    site: u32,
+    s0: u64,
+    s1: u64,
+    error: u32,
+    key: u32,
+    body: u32,
+    ret: u32,
+    raise: u32,
+    ret_bind: u32,
+    raise_bind: u32,
+    resume: u32,
+}
+
+fn hd0() -> Hd {
+    Hd {
+        site: 0,
+        s0: 0,
+        s1: 0,
+        error: 0,
+        key: 0,
+        body: 0,
+        ret: 0,
+        raise: 0,
+        ret_bind: 0,
+        raise_bind: 0,
+        resume: 0
+    }
+}
+
+fn hd_at(in hs: ChunkSeq[Hd], i: u64) -> Hd {
+    match hs.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => hd0(),
+    }
+}
+
+// `region_block(..).is_some()`: a labeled `Region` handler whose `return`
+// pattern is the reserved `$region[:capacity]` name, with regions active.
+fn is_region_block(in lw: Lw, x: Hx) -> bool {
+    if !lw.regions_active || x.kind != X_HANDLE || x.effect != lw.sy.region || x.label == 0 {
+        return false;
+    }
+    let r = lw.ex.clause(x.ret);
+    if r.pn != 1 || lw.ex.pat_kind(r, 0) != P_BIND {
+        return false;
+    }
+    let s = lw.ex.pat_name(r, 0);
+    if !starts_with(in lw.c.names, s, "$region") {
+        return false;
+    }
+    let n = lw.c.names.size(s);
+    if n == 7 {
+        return true;
+    }
+    if lw.c.names.byte(s, 7) != 58 {
+        return false;
+    }
+    // `usize::from_str`: an optional `+`, then at least one digit, in range
+    let mut i: u64 = 8;
+    if i < n && lw.c.names.byte(s, i) == 43 {
+        i = inc(i);
+    }
+    if i >= n {
+        return false;
+    }
+    let mut v: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let c = lw.c.names.byte(s, i);
+        if c < 48 || c > 57 {
+            return false;
+        }
+        let d = widen_u64(wrapping_sub(c, 48));
+        if v > wrapping_sub(NONE, d) / 10 {
+            return false;
+        }
+        v = wrapping_add(wrapping_mul(v, 10), d);
+        i = inc(i);
+    }
+    true
+}
+
+// The name pattern `i` of clause `c` binds: symbol + 1, 0 for `_`; raises
+// the Rust error for any other pattern.
+fn bound_name(in lw: Lw, c: Cl, i: u64, site: u32) -> u32 eff [Fail[VErr]] {
+    let k = lw.ex.pat_kind(c, i);
+    if k == P_OTHER {
+        Fail::raise(unsup(U_MATCH, site, tx("a handler clause pattern other than a name or `_`")));
+    }
+    if k == P_BIND {
+        return n32(inc(w(lw.ex.pat_name(c, i))));
+    }
+    0
+}
+
+// The enclosing local the alias map at `ops[at]` (n, then (name, local)
+// pairs) gives `s`, or NONE32.
+fn alias_of(in lw: Lw, at: u64, s: u32) -> u32 {
+    let n = lw.op(at);
+    for i in 0..n {
+        let k = add(inc(at), wrapping_mul(i, 2));
+        if n32(lw.op(k)) == s {
+            return n32(lw.op(inc(k)));
+        }
+    }
+    NONE32
+}
+
+// The alias map of a closure or `handle` instruction: the index of its
+// pair count in `ops`.
+fn aliases_at(ins: InstRow) -> u64 {
+    if ins.op == Op::Handle {
+        add(ins.a, 3)
+    } else {
+        inc(ins.a)
+    }
+}
+
+// `fail::reads`: whether function `fi` reads the local `name`, directly or
+// by an aliased free name of a nested closure or handler.
+fn reads(in lw: Lw, fi: u64, name: u32) -> bool {
+    let f = lw.func(fi);
+    for bi in 0..f.bc {
+        let blk = lw.p.block(add(f.b0, bi));
+        for k in 0..blk.ic {
+            let ins = lw.p.inst(add(blk.i0, k));
+            if ins.op == Op::Read {
+                if n32(lw.op(ins.a)) == name {
+                    return true;
+                }
+            } else if ins.op == Op::Closure || ins.op == Op::Handle {
+                let pool = if ins.op == Op::Handle {
+                    lw.op(add(ins.a, 2))
+                } else {
+                    lw.op(ins.a)
+                };
+                let x = lw.ex.row(pool);
+                let at = aliases_at(ins);
+                for j in 0..x.fnn {
+                    if alias_of(in lw, at, lw.ex.free(x, j)) == name {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+// `assigned_capture`: a parameter of function `fi` captured by value but
+// assigned in its body (symbol + 1), or 0.
+fn assigned_capture(inout lw: Lw, fi: u64) -> u32 {
+    let f = lw.func(fi);
+    for bi in 0..f.bc {
+        let blk = lw.p.block(add(f.b0, bi));
+        for k in 0..blk.ic {
+            let ins = lw.p.inst(add(blk.i0, k));
+            if ins.op == Op::Write {
+                let place = n32(lw.op(ins.a));
+                // the root: the place's text up to its first `.`
+                let n = lw.c.names.size(place);
+                let mut end = n;
+                for i in 0..n {
+                    if lw.c.names.byte(place, i) == 46 {
+                        end = i;
+                        break;
+                    }
+                }
+                let root = if end == n {
+                    place
+                } else {
+                    let mut t = ChunkSeq::new[u8]();
+                    for i in 0..end {
+                        t.push(lw.c.names.byte(place, i));
+                    }
+                    lw.c.names.intern(in t.as_slice())
+                };
+                if by_value_param(in lw, f, root) {
+                    return n32(inc(w(root)));
+                }
+            } else if ins.op == Op::Call {
+                let n = lw.op(inc(ins.a));
+                for j in 0..n {
+                    let at = add(add(ins.a, 2), wrapping_mul(j, 4));
+                    let root = lw.op(add(at, 2));
+                    if lw.op(at) == 1 && root != 0 {
+                        let r = n32(wrapping_sub(root, 1));
+                        if by_value_param(in lw, f, r) {
+                            return n32(inc(w(r)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    0
+}
+
+fn by_value_param(in lw: Lw, f: Fn, s: u32) -> bool {
+    for i in 0..f.pn {
+        let p = lw.param(add(f.p0, i));
+        if p.pass != 1 && p.name == s {
+            return true;
+        }
+    }
+    false
+}
+
+// `fail::handler`: resolve the `handle` instruction `ins` of `site`.
+fn fail_handler(inout lw: Lw, site: u32, ins: InstRow, x: Hx) -> Hd eff [Fail[VErr]] {
+    if x.kind != X_HANDLE {
+        Fail::raise(err(E_INVALID, tx("handle instruction without a handler")));
+    }
+    if x.effect != lw.sy.fail {
+        let mut d = tx("handler for ");
+        lw.put_sym(x.effect, inout d);
+        ap(inout d, " (only Fail handlers)");
+        Fail::raise(unsup(U_EFFECT, site, d));
+    }
+    if x.label != 0 || x.en != 1 {
+        Fail::raise(
+            unsup(U_EFFECT, site, tx("labeled or ill-formed Fail handler (only `handle Fail[E]`)"))
+        );
+    }
+    if x.state || lw.op(ins.a) != 0 {
+        Fail::raise(unsup(U_EFFECT, site, tx("stateful Fail handler")));
+    }
+    if x.on != 1 {
+        Fail::raise(err(E_INVALID, tx("a Fail handler has exactly one raise clause")));
+    }
+    let clause = lw.ex.clause(x.oa);
+    if clause.pn != 2 {
+        Fail::raise(err(E_INVALID, tx("raise clause arity")));
+    }
+    let ret = lw.ex.clause(x.ret);
+    if ret.pn == 0 {
+        Fail::raise(err(E_INVALID, tx("return clause without a pattern")));
+    }
+    let error = lw.dflt(lw.ex.arg(x, 0));
+    let key = fail_key(inout lw, error);
+    let bn = nested_name(inout lw.c.names, "handler_body", x.b0, x.b1);
+    let body = nested_instance(inout lw.c.names, site, bn);
+    let rn = nested_name(inout lw.c.names, "handler_clause", ret.s0, ret.s1);
+    let retf = nested_instance(inout lw.c.names, site, rn);
+    let ret_bind = bound_name(in lw, ret, 0, site);
+    let cn = nested_name(inout lw.c.names, "handler_clause", clause.s0, clause.s1);
+    let raisef = nested_instance(inout lw.c.names, site, cn);
+    let raise_bind = bound_name(in lw, clause, 0, site);
+    let resume = bound_name(in lw, clause, 1, site);
+    for g in [body, retf, raisef] {
+        if lw.find(g) == 0 {
+            let mut d = tx("handler function ");
+            lw.put_sym(g, inout d);
+            ap(inout d, " was not lowered");
+            Fail::raise(err(E_INVALID, d));
+        }
+    }
+    if resume != 0 && reads(in lw, wrapping_sub(lw.find(raisef), 1), wrapping_sub(resume, 1)) {
+        let mut d = tx("raise clause uses its continuation '");
+        lw.put_sym(wrapping_sub(resume, 1), inout d);
+        ap(inout d, "' (only non-resuming Fail handlers)");
+        Fail::raise(unsup(U_EFFECT, site, d));
+    }
+    Hd {
+        site: site,
+        s0: x.s0,
+        s1: x.s1,
+        error: error,
+        key: key,
+        body: body,
+        ret: retf,
+        raise: raisef,
+        ret_bind: ret_bind,
+        raise_bind: raise_bind,
+        resume: resume
+    }
+}
+
 // ----- the plan -----------------------------------------------------------------
 
 // A planned parameter: pass, shape, whether it is erased and its writeback
@@ -1474,6 +1774,8 @@ pub struct Plan {
     // symbol -> planned index + 1
     index: ChunkSeq[u32],
     fails: ChunkSeq[FailRow],
+    // the resolved `handle Fail` sites
+    hd: ChunkSeq[Hd],
 }
 
 fn planned(in plan: Plan, i: u64) -> Planned {
@@ -1596,6 +1898,9 @@ pub copy struct Found {
     // callees: calls[ca..ca+cn]
     ca: u64,
     cn: u64,
+    // `handle` sites: hd[ha..ha+hn]
+    ha: u64,
+    hn: u64,
 }
 
 // `plan` (`plan_with` without coverage, sites or handlers).
@@ -1608,6 +1913,7 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
     let mut lpool = ChunkSeq::new[u64]();
     let mut queue = ChunkSeq::new[u32]();
     let mut seen = ChunkSeq::new[u8]();
+    let mut hds = ChunkSeq::new[Hd]();
     queue.push(entry);
     set_table8(inout seen, w(entry), 1);
     let mut head: u64 = 0;
@@ -1715,13 +2021,26 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
         }
         let result = shape(inout lw, f.result, name);
         let ca = calls.len();
+        let ha = hds.len();
         let sy = lw.sy;
         for bi in 0..f.bc {
             let blk = lw.p.block(add(f.b0, bi));
             for k in 0..blk.ic {
                 let ins = lw.p.inst(add(blk.i0, k));
                 if ins.op == Op::Handle {
-                    Fail::raise(not_ported("handle expressions"));
+                    let x = lw.ex.row(lw.op(add(ins.a, 2)));
+                    if is_region_block(in lw, x) {
+                        Fail::raise(not_ported("region blocks"));
+                    }
+                    let h = fail_handler(inout lw, name, ins, x);
+                    for g in [h.body, h.ret, h.raise] {
+                        if u8_at(in seen, w(g)) == 0 {
+                            set_table8(inout seen, w(g), 1);
+                            queue.push(g);
+                        }
+                    }
+                    hds.push(h);
+                    continue;
                 }
                 if ins.op == Op::Call {
                     let callee = n32(lw.op(ins.a));
@@ -1750,18 +2069,33 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
                     result: result,
                     local: local,
                     ca: ca,
-                    cn: wrapping_sub(calls.len(), ca)
+                    cn: wrapping_sub(calls.len(), ca),
+                    ha: ha,
+                    hn: wrapping_sub(hds.len(), ha)
                 }
             );
     }
     // `fail::codes`: every error type raised anywhere, in key order.
     let mut keys = ChunkSeq::new[u32]();
     let mut tys = ChunkSeq::new[u32]();
+    // the handled error types first (`codes` starts from `handled`), then
+    // every function's own
+    let mut pairs = ChunkSeq::new[u64]();
+    for i in 0..hds.len() {
+        let h = hd_at(in hds, i);
+        pairs.push(w(h.key));
+        pairs.push(w(h.error));
+    }
     for i in 0..found.len() {
         let fd = found_at(in found, i);
-        for j in 0..fd.local.n {
-            let key = n32(u64_at(in lpool, add(fd.local.a, wrapping_mul(j, 2))));
-            let ty = n32(u64_at(in lpool, inc(add(fd.local.a, wrapping_mul(j, 2)))));
+        for j in 0..wrapping_mul(fd.local.n, 2) {
+            pairs.push(u64_at(in lpool, add(fd.local.a, j)));
+        }
+    }
+    for i in 0..1 {
+        for j in 0..pairs.len() / 2 {
+            let key = n32(u64_at(in pairs, wrapping_mul(j, 2)));
+            let ty = n32(u64_at(in pairs, inc(wrapping_mul(j, 2))));
             let mut at = NONE;
             for q in 0..keys.len() {
                 if u32_at(in keys, q) == key {
@@ -1830,6 +2164,24 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
                 let k = w(u32_at(in index, w(c)));
                 if k != 0 {
                     next = next | u64_at(in raises, wrapping_sub(k, 1));
+                }
+            }
+            for j in 0..fd.hn {
+                let h = hd_at(in hds, add(fd.ha, j));
+                let caught = code_of_key(in fails, h.key);
+                let kb = w(u32_at(in index, w(h.body)));
+                if kb != 0 {
+                    let mut m = u64_at(in raises, wrapping_sub(kb, 1));
+                    if caught != 0 {
+                        m = m & (bit(caught) ^ NONE);
+                    }
+                    next = next | m;
+                }
+                for g in [h.ret, h.raise] {
+                    let kg = w(u32_at(in index, w(g)));
+                    if kg != 0 {
+                        next = next | u64_at(in raises, wrapping_sub(kg, 1));
+                    }
                 }
             }
             if next != u64_at(in raises, n) {
@@ -1908,6 +2260,7 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
         wb: wb,
         index: index,
         fails: fails,
+        hd: hds,
     }
 }
 
@@ -1943,7 +2296,9 @@ fn found_at(in found: ChunkSeq[Found], i: u64) -> Found {
                 runtime: false
             },
             ca: 0,
-            cn: 0
+            cn: 0,
+            ha: 0,
+            hn: 0
         },
     }
 }
@@ -2676,6 +3031,21 @@ pub copy struct Arg {
 fn call(inout lw: Lw, inout fl: Fl, in plan: Plan, n: u64, in args: ChunkSeq[Arg], dst: u64) eff [
     Fail[VErr]
 ] {
+    call_catch(inout lw, inout fl, in plan, n, in args, dst, 0, 0);
+}
+
+// `call` with `catch`: a failure with code `code` (0: none) jumps to
+// `handler`.
+fn call_catch(
+    inout lw: Lw,
+    inout fl: Fl,
+    in plan: Plan,
+    n: u64,
+    in args: ChunkSeq[Arg],
+    dst: u64,
+    code: u64,
+    handler: u64
+) eff [Fail[VErr]] {
     let target = planned(in plan, n);
     let ret = target.ret_words;
     let mut area = ret;
@@ -2740,9 +3110,154 @@ fn call(inout lw: Lw, inout fl: Fl, in plan: Plan, n: u64, in args: ChunkSeq[Arg
         let cont = fresh(inout fl);
         push(inout fl, lir(LIR_JUMP, 0, 0, cont, 0, 0));
         push(inout fl, lir(LIR_LABEL, 0, 0, errl, 0, 0));
-        propagate(inout lw, inout fl, in plan, st, target.raises);
+        let mut rest = target.raises;
+        if code != 0 && has(rest, code) {
+            rest = rest & (bit(code) ^ NONE);
+            let other = fresh(inout fl);
+            status_is(inout fl, st, code, inc(st), other);
+            push(inout fl, lir(LIR_JUMP, 0, 0, handler, 0, 0));
+            push(inout fl, lir(LIR_LABEL, 0, 0, other, 0, 0));
+        }
+        propagate(inout lw, inout fl, in plan, st, rest);
         push(inout fl, lir(LIR_LABEL, 0, 0, cont, 0, 0));
     }
+}
+
+// `nested_args`: the argument words of the nested handler function `n`
+// (planned): its captures, the enclosing locals the alias map at
+// `ops[aliases]` names, and the value `bind` names (symbol + 1, or 0) at
+// `slot`.
+fn nested_args(
+    inout lw: Lw,
+    inout fl: Fl,
+    in plan: Plan,
+    n: u64,
+    aliases: u64,
+    bind: u32,
+    slot: u64
+) -> ChunkSeq[Arg] eff [Fail[VErr]] {
+    let target = planned(in plan, n);
+    let f = lw.func(target.fi);
+    let mut out = ChunkSeq::new[Arg]();
+    for i in 0..f.pn {
+        let p = lw.param(add(f.p0, i));
+        let q = pp(in plan, add(target.pa, i));
+        if q.erased {
+            out
+                .push(
+                    Arg {
+                        src: 0,
+                        words: 0,
+                        place: NONE
+                    }
+                );
+            continue;
+        }
+        if bind != 0 && p.name == wrapping_sub(bind, 1) {
+            out
+                .push(
+                    Arg {
+                        src: slot,
+                        words: q.sh.n,
+                        place: NONE
+                    }
+                );
+            continue;
+        }
+        let a = alias_of(in lw, aliases, p.name);
+        let name = if a == NONE32 {
+            p.name
+        } else {
+            a
+        };
+        let (ls, lsh) = local(inout lw, inout fl, name);
+        if lsh.n != q.sh.n {
+            let mut d = tx("capture '");
+            lw.put_sym(p.name, inout d);
+            ap(inout d, "' of ");
+            lw.put_sym(target.name, inout d);
+            Fail::raise(err(E_INVALID, d));
+        }
+        let place = if p.pass == 1 {
+            ls
+        } else {
+            NONE
+        };
+        out
+            .push(
+                Arg {
+                    src: ls,
+                    words: q.sh.n,
+                    place: place
+                }
+            );
+    }
+    out
+}
+
+// The planned index of `name`, or the Rust `unplanned` error.
+fn planned_index(in lw: Lw, in plan: Plan, name: u32) -> u64 eff [Fail[VErr]] {
+    let k = w(u32_at(in plan.index, w(name)));
+    if k == 0 {
+        let mut d = tx("unplanned ");
+        lw.put_sym(name, inout d);
+        Fail::raise(err(E_INVALID, d));
+    }
+    wrapping_sub(k, 1)
+}
+
+// `handle`: `handle Fail[E] in body with { return v => r, raise(e, _) => h }`.
+fn handle_fail(inout lw: Lw, inout fl: Fl, in plan: Plan, ins: InstRow) eff [Fail[VErr]] {
+    let x = lw.ex.row(lw.op(add(ins.a, 2)));
+    if is_region_block(in lw, x) {
+        Fail::raise(not_ported("region blocks"));
+    }
+    let mut found = NONE;
+    for i in 0..plan.hd.len() {
+        let h = hd_at(in plan.hd, i);
+        if found == NONE && h.site == fl.f.name && h.s0 == x.s0 && h.s1 == x.s1 {
+            found = i;
+        }
+    }
+    if found == NONE {
+        Fail::raise(err(E_INVALID, tx("unplanned handler")));
+    }
+    let h = hd_at(in plan.hd, found);
+    let body = planned_index(in lw, in plan, h.body);
+    let ret = planned_index(in lw, in plan, h.ret);
+    let raisef = planned_index(in lw, in plan, h.raise);
+    for g in [h.body, h.ret, h.raise] {
+        let fx = lw.find(g);
+        if fx != 0 {
+            let root = assigned_capture(inout lw, wrapping_sub(fx, 1));
+            if root != 0 {
+                let mut d = tx("handler assigns the captured place '");
+                lw.put_sym(wrapping_sub(root, 1), inout d);
+                ap(inout d, "'");
+                Fail::raise(ufail(in fl, U_EFFECT, d));
+            }
+        }
+    }
+    let aliases = aliases_at(ins);
+    let (dst, dsh) = value_of(inout lw, inout fl, w(ins.dest), ins.ty);
+    let value = alloc(in lw, inout fl, planned(in plan, body).result.n);
+    let code = code_of_key(in plan.fails, h.key);
+    let handler = fresh(inout fl);
+    let end = fresh(inout fl);
+    let args = nested_args(inout lw, inout fl, in plan, body, aliases, 0, 0);
+    call_catch(inout lw, inout fl, in plan, body, in args, value, code, handler);
+    let args2 = nested_args(inout lw, inout fl, in plan, ret, aliases, h.ret_bind, value);
+    call(inout lw, inout fl, in plan, ret, in args2, dst);
+    push(inout fl, lir(LIR_JUMP, 0, 0, end, 0, 0));
+    push(inout fl, lir(LIR_LABEL, 0, 0, handler, 0, 0));
+    let words = words_of(inout lw, h.error, fl.f.name);
+    let payload = alloc(in lw, inout fl, words);
+    for k in 0..words {
+        push(inout fl, lir(LIR_LOAD_OUT, 0, 0, add(payload, k), inc(k), 0));
+    }
+    let args3 = nested_args(inout lw, inout fl, in plan, raisef, aliases, h.raise_bind, payload);
+    call(inout lw, inout fl, in plan, raisef, in args3, dst);
+    push(inout fl, lir(LIR_LABEL, 0, 0, end, 0, 0));
 }
 
 // `try_`: `v?` on a `Result[T, E]`.
@@ -3185,7 +3700,8 @@ fn instruction(inout lw: Lw, inout fl: Fl, in plan: Plan, ins: InstRow) eff [Fai
         return;
     }
     if op == Op::Handle {
-        Fail::raise(not_ported("handle expressions"));
+        handle_fail(inout lw, inout fl, in plan, ins);
+        return;
     }
     Fail::raise(ufail(in fl, U_OPERATION, tx("an IR operation this backend does not know")));
 }
@@ -3722,14 +4238,15 @@ pub fn lower_input(in b: Slice[u8]) -> ChunkSeq[u8] {
     };
     let c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
-    lower_program(c, p, inout r, in b)
+    let ex = read_exprs(inout r, in b, in c);
+    lower_program(c, p, ex, inout r, in b)
 }
 
 // The lowering of a program already read (or made by monomorphization),
 // with the lowering's extra section at `r`.
-pub fn lower_program(sink c: Ctx, sink p: Program, inout r: Reader, in b: Slice[u8])
+pub fn lower_program(sink c: Ctx, sink p: Program, sink ex: Ex, inout r: Reader, in b: Slice[u8])
     -> ChunkSeq[u8] {
-    let mut lw = decode(c, p, inout r, in b);
+    let mut lw = decode(c, p, ex, inout r, in b);
     let mut out = ChunkSeq::new[u8]();
     let e = handle Fail[VErr] in {
         lower_all(inout lw, inout out);
