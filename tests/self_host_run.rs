@@ -170,6 +170,12 @@ const PROGRAMS: &[(&str, &str)] = &[
          with { return v => v, ask(x, k) => wrapping_add(k(x), 1000) }) }",
     ),
     (
+        "aborting_loop",
+        "effect Stop { fn stop() -> i64; } fn main() -> i64 { let mut s = 0; for i in 0..2000 { \
+         s = wrapping_add(s, handle Stop in { wrapping_add(Stop::stop(), i) } \
+         with { return v => v, stop(k) => 2, }); } s }",
+    ),
+    (
         "state_handlers",
         "linear effect Counter { fn next() -> i64; } \
          fn main() -> (i64, (i64, i64)) { (handle Counter state c = 0 in { \

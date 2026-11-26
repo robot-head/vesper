@@ -161,6 +161,7 @@ copy struct Kt {
     depth: u64,
     below: Fr,
     serial: u64,
+    taken: bool,
 }
 
 pub struct M {
@@ -971,7 +972,8 @@ fn kt_at(in machine: M, index: u64) -> Kt {
             hcap_base: 0,
             depth: 0,
             below: fr_zero(),
-            serial: 0
+            serial: 0,
+            taken: false
         },
     }
 }
@@ -981,6 +983,16 @@ fn kt_at(in machine: M, index: u64) -> Kt {
 // above the handler's levels, which `clause_frame` then drops.
 fn capture(inout machine: M, found: u64) -> Val {
     let handler = stack_at(in machine, found);
+    // A continuation captured at this depth or above is resumed only
+    // after its frames moved (declined) or is unreachable: its clause
+    // ended without resuming it. Its snapshot is released.
+    loop {
+        let count = machine.conts.len();
+        if count == 0 || kt_at(in machine, wrapping_sub(count, 1)).depth < found {
+            break;
+        }
+        drop_last(inout machine);
+    }
     machine.k_serial = inc(machine.k_serial);
     let below = if found == 0 {
         fr_zero()
@@ -1002,7 +1014,8 @@ fn capture(inout machine: M, found: u64) -> Val {
         hcap_base: handler.block,
         depth: found,
         below: below,
-        serial: machine.k_serial
+        serial: machine.k_serial,
+        taken: false
     });
     for i in found..machine.stack.len() {
         machine.k_frames.push(stack_at(in machine, i));
@@ -1044,12 +1057,18 @@ fn same_frame(lhs: Fr, rhs: Fr) -> bool {
 fn resume_cont(inout machine: M, cont: Val) {
     let index = cont.payload & CONT_INDEX_MASK;
     let k = kt_at(in machine, index);
-    if k.serial == 0 || wrapping_mul(k.serial, CONT_SERIAL) != wrapping_sub(cont.payload, index) {
+    if index >= machine.conts.len()
+        || wrapping_mul(k.serial, CONT_SERIAL) != wrapping_sub(cont.payload, index)
+    {
+        decline(inout machine, "a released continuation", NONE32);
+        return;
+    }
+    if k.taken {
         fail(inout machine, "one-shot continuation was resumed twice");
         return;
     }
     let mut taken = k;
-    taken.serial = 0;
+    taken.taken = true;
     let ok = machine.conts.try_set(index, taken);
     let handler = fr_at(in machine.k_frames, k.frame_start);
     let expected = if handler.ty == HANDLER_STATE { 2 } else { 1 };
@@ -1146,14 +1165,7 @@ fn resume_cont(inout machine: M, cont: Val) {
         machine.stack.push(frame);
     }
     if last {
-        machine.k_frames.truncate(k.frame_start);
-        machine.k_vals.truncate(k.val_start);
-        machine.k_env.truncate(k.env_start);
-        machine.k_cells.truncate(k.cell_start);
-        machine.k_segs.truncate(k.seg_start);
-        machine.k_hnames.truncate(k.hcap_start);
-        machine.k_hvals.truncate(k.hcap_start);
-        machine.conts.truncate(index);
+        drop_last(inout machine);
     }
     machine.ret_value = val_at(in machine.arg_vals, 0);
     machine.control = C_RET;
@@ -3263,4 +3275,21 @@ fn has_inout_arg(in machine: M, args_at: u64) -> bool {
         }
     }
     false
+}
+
+// Releases the newest continuation and its snapshot.
+fn drop_last(inout machine: M) {
+    let count = machine.conts.len();
+    if count == 0 {
+        return;
+    }
+    let k = kt_at(in machine, wrapping_sub(count, 1));
+    machine.k_frames.truncate(k.frame_start);
+    machine.k_vals.truncate(k.val_start);
+    machine.k_env.truncate(k.env_start);
+    machine.k_cells.truncate(k.cell_start);
+    machine.k_segs.truncate(k.seg_start);
+    machine.k_hnames.truncate(k.hcap_start);
+    machine.k_hvals.truncate(k.hcap_start);
+    machine.conts.truncate(wrapping_sub(count, 1));
 }
