@@ -870,7 +870,8 @@ fn verified_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[H
     // one `VerifiedError::from_display` reads back exactly).
     if verified_error_text(in summary.as_slice()) {
         let line = summary.as_slice();
-        return error(in line[ERROR_PREFIX_LEN..wrapping_sub(line.len(), 1)]);
+        let start = ERROR_PREFIX_LEN;
+        return error(in line[start..wrapping_sub(line.len(), 1)]);
     }
     let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let rest = unpack(in words, at, inout bytes);
