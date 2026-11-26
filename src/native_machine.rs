@@ -91,6 +91,8 @@ enum IntegerOp {
     UnsignedMulOverflow = 72,
     SignedMulOverflow = 73,
     OverflowFlag = 74,
+    BranchTable = 75,
+    BranchTableTarget = 76,
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
@@ -808,6 +810,10 @@ impl IntegerBlocks<'_> {
         mut visited: SecondaryMap<Block, bool>,
     ) -> Option<PathExit> {
         let terminator = self.follow_jumps(entry, &mut values, &mut visited)?;
+        if self.function.dfg.insts[terminator].opcode() == Opcode::BrTable {
+            self.needs_cfg = true;
+            return None;
+        }
         let InstructionData::Brif {
             opcode: Opcode::Brif,
             arg: condition,
@@ -887,7 +893,7 @@ impl IntegerBlocks<'_> {
             let terminator = &dfg.insts[end];
             if !matches!(
                 terminator.opcode(),
-                Opcode::Jump | Opcode::Brif | Opcode::Return | Opcode::Trap
+                Opcode::Jump | Opcode::Brif | Opcode::BrTable | Opcode::Return | Opcode::Trap
             ) {
                 return None;
             }
@@ -1009,6 +1015,33 @@ impl IntegerBlocks<'_> {
                         next_edge += 1;
                     }
                 }
+                InstructionData::BranchTable { arg, table, .. } => {
+                    if self.value_type(arg) != types::I32 {
+                        return None;
+                    }
+                    let table = &dfg.jump_tables[table];
+                    let target = |edge: BlockCall| {
+                        // Table offsets target whole blocks. An edge that transfers
+                        // block arguments would need its own landing code.
+                        let block = edge.block(&dfg.value_lists);
+                        if edge.len(&dfg.value_lists) != 0 || !dfg.block_params(block).is_empty() {
+                            return None;
+                        }
+                        labels[block]
+                    };
+                    let default = target(table.default_block())?;
+                    let cases = table.as_slice();
+                    if cases.is_empty() {
+                        self.append(IntegerOp::JumpLabel, [default, 0, 0]);
+                    } else {
+                        let count = u32::try_from(cases.len()).ok()?;
+                        let index = values[dfg.resolve_aliases(arg)]?;
+                        self.append(IntegerOp::BranchTable, [index, u64::from(count), default]);
+                        for &case in cases {
+                            self.append(IntegerOp::BranchTableTarget, [target(case)?, 0, 0]);
+                        }
+                    }
+                }
                 _ => {
                     let (low, high) =
                         if self.allow_hardware_faults && dfg.insts[end].opcode() == Opcode::Trap {
@@ -1057,6 +1090,8 @@ impl IntegerBlocks<'_> {
 /// and returns through BlockReturn records. BranchLabel skips the taken edge
 /// transfers and its jump to the matching EdgeLabel. Cross-block operands
 /// reload from frame homes, and JumpLabel targets a non-entry BlockLabel.
+/// BranchTable reads an i32 index, case count, and default label. Its following
+/// BranchTableTarget records provide one label per index, in order.
 /// The entry label's right word identifies the private home slot plus one,
 /// or zero when the function needs no cross-block storage.
 pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {

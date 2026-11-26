@@ -27,6 +27,7 @@ pub const QWORD_BITS: u64 = 64;
 const REX: u8 = 0x40;
 const REX_W: u8 = 0x48;
 const REX_R: u8 = 0x04;
+const REX_X: u8 = 0x02;
 const REX_B: u8 = 0x01;
 const LOW_REGISTER_MASK: u8 = 0x07;
 const HIGH_REGISTER: u8 = 0x08;
@@ -36,6 +37,7 @@ const MOD_DISP32: u8 = 0x80;
 const RM_SIB: u8 = 4;
 const RM_DISP32_WITHOUT_BASE: u8 = 5;
 const SIB_NO_INDEX: u8 = 0x20;
+const SIB_SCALE_DWORD: u8 = 0x80;
 const MOD_FIELD_SHIFT: u32 = 3;
 const MOV_RM_R8: u8 = 0x88;
 const MOV_RM_R64: u8 = 0x89;
@@ -71,6 +73,8 @@ const JCC_NEAR: u8 = 0x80;
 const JCC_SHORT: u8 = 0x70;
 const JMP_SHORT: u8 = 0xeb;
 const JMP_REL32: u8 = 0xe9;
+const JMP_RM_GROUP: u8 = 0xff;
+const JMP_RM_EXTENSION: u8 = 4;
 const SIGN_EXTEND_DIVIDEND: u8 = 0x99;
 const MUL_EXTENSION: u8 = 4;
 const IMUL_EXTENSION: u8 = 5;
@@ -330,6 +334,36 @@ pub fn emit_symbol_address(inout out: ChunkSeq[u8], destination: u8, got: bool) 
     displacement
 }
 
+// The final table entry is the default. Clamp the unsigned index before the
+// indexed load so even speculative execution stays inside this function.
+pub fn emit_jump_table(inout out: ChunkSeq[u8], index: u8, case_count: u32) -> bool {
+    truncate(inout out, R10, index, DWORD_BITS);
+    load_constant(inout out, R11, widen_u64(case_count));
+    compare_registers(inout out, R10, R11, DWORD_BITS);
+    out.push(rex(R10, R11, false));
+    out.push(TWO_BYTE_OPCODE);
+    out.push(CMOVCC | CC_AE);
+    out.push(modrm(R10, R11));
+
+    let _ = emit_symbol_address(inout out, R11, false);
+    let address_end = out.len();
+    out.push(rex(R10, R11, true) | REX_X);
+    out.push(MOVSXD_R64_RM32);
+    out.push(modrm_fields(R10, RM_SIB));
+    out.push(SIB_SCALE_DWORD | modrm_fields(R10, R11));
+    binary(inout out, ADD_RM_R64, R10, R11, true);
+    out.push(rex(0, R10, false));
+    out.push(JMP_RM_GROUP);
+    out.push(modrm(JMP_RM_EXTENSION, R10));
+    patch_forward_branch(inout out, address_end)
+}
+
+pub fn emit_jump_table_entry(inout out: ChunkSeq[u8]) -> u64 {
+    let offset = out.len();
+    immediate(inout out, 0, IMM32_BYTES);
+    offset
+}
+
 fn adjust_stack(inout out: ChunkSeq[u8], extension: u8, size: u32) {
     if size == 0 {
         return;
@@ -353,11 +387,17 @@ pub fn patch_forward_branch(inout out: ChunkSeq[u8], branch_end: u64) -> bool {
 }
 
 pub fn patch_relative_branch(inout out: ChunkSeq[u8], branch_end: u64, target: u64) -> bool {
-    let distance = wrapping_sub(target, branch_end);
+    patch_relative_offset(inout out, wrapping_sub(branch_end, IMM32_BYTES), branch_end, target)
+}
+
+pub fn patch_relative_offset(inout out: ChunkSeq[u8], start: u64, base: u64, target: u64) -> bool {
+    if start > out.len() || wrapping_sub(out.len(), start) < IMM32_BYTES {
+        return false;
+    }
+    let distance = wrapping_sub(target, base);
     if distance > DISP32_MAX && distance < I32_MIN_BITS {
         return false;
     }
-    let start = wrapping_sub(branch_end, IMM32_BYTES);
     for i in 0..IMM32_BYTES {
         let shift = wrapping_mul(wrapping_u32(i), wrapping_u32(BYTE_BITS));
         let byte = wrapping_u8(wrapping_shr_u64(distance, shift));

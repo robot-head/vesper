@@ -12,8 +12,8 @@ mod elf;
 mod elf_host;
 
 use cranelift_codegen::ir::{
-    AbiParam, BlockArg, Endianness, InstBuilder, MemFlags, Opcode, StackSlotData, StackSlotKind,
-    Type, condcodes::IntCC, types,
+    AbiParam, Block, BlockArg, BlockCall, Endianness, InstBuilder, JumpTableData, MemFlags, Opcode,
+    StackSlotData, StackSlotKind, Type, Value, condcodes::IntCC, types,
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -26,6 +26,8 @@ const MACHINE_RECORD_WORDS: usize = 4;
 const MACHINE_BLOCK_LABEL: u64 = 62;
 const MACHINE_UNSIGNED_ADD_OVERFLOW: u64 = 68;
 const MACHINE_OVERFLOW_FLAG: u64 = 74;
+const MACHINE_BRANCH_TABLE: u64 = 75;
+const MACHINE_TABLE_TARGET: u64 = 76;
 
 #[derive(Clone, Copy, Debug)]
 enum Case {
@@ -50,6 +52,8 @@ enum Case {
     NestedBranches,
     SharedTail,
     LoopEdges,
+    BranchTable { empty: bool },
+    BranchTableBackedge,
     ShiftCountInRcx,
     ShiftDestinationRcx,
     ShiftSameRegister,
@@ -84,6 +88,17 @@ enum CheckedUse {
     Value,
     ValueAndFlag,
     FlagBranch,
+}
+
+fn branch_table(builder: &mut FunctionBuilder<'_>, index: Value, default: Block, cases: &[Block]) {
+    let pool = &mut builder.func.dfg.value_lists;
+    let default = BlockCall::new(default, [], pool);
+    let cases: Vec<_> = cases
+        .iter()
+        .map(|&target| BlockCall::new(target, [], pool))
+        .collect();
+    let table = builder.create_jump_table(JumpTableData::new(default, &cases));
+    builder.ins().br_table(index, table);
 }
 
 #[test]
@@ -162,6 +177,9 @@ fn integer_backend_matches_cranelift_results() {
         Case::NestedBranches,
         Case::SharedTail,
         Case::LoopEdges,
+        Case::BranchTable { empty: false },
+        Case::BranchTable { empty: true },
+        Case::BranchTableBackedge,
         Case::ShiftCountInRcx,
         Case::ShiftDestinationRcx,
         Case::ShiftSameRegister,
@@ -509,6 +527,51 @@ fn integer_backend_matches_cranelift_results() {
                 let sum = builder.ins().iadd(left, f);
                 builder.ins().isub(sum, right)
             }
+            Case::BranchTable { empty } => {
+                let default = builder.create_block();
+                let index = builder.ins().ireduce(types::I32, a);
+                if empty {
+                    branch_table(&mut builder, index, default, &[]);
+                } else {
+                    let first = builder.create_block();
+                    let second = builder.create_block();
+                    branch_table(
+                        &mut builder,
+                        index,
+                        default,
+                        &[first, default, first, second],
+                    );
+                    builder.switch_to_block(first);
+                    builder.ins().return_(&[b]);
+                    builder.switch_to_block(second);
+                    builder.ins().return_(&[c]);
+                }
+                builder.switch_to_block(default);
+                d
+            }
+            Case::BranchTableBackedge => {
+                let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    size_of::<u64>() as u32,
+                    0,
+                ));
+                let header = builder.create_block();
+                let dispatch = builder.create_block();
+                let exit = builder.create_block();
+                let limit = builder.ins().band_imm(a, 3);
+                builder.ins().stack_store(limit, slot, 0);
+                builder.ins().jump(header, &[]);
+                builder.switch_to_block(header);
+                let value = builder.ins().stack_load(types::I64, slot, 0);
+                let next = builder.ins().iadd_imm(value, -1);
+                builder.ins().stack_store(next, slot, 0);
+                builder.ins().jump(dispatch, &[]);
+                builder.switch_to_block(dispatch);
+                let index = builder.ins().stack_load(types::I32, slot, 0);
+                branch_table(&mut builder, index, exit, &[exit, header, header]);
+                builder.switch_to_block(exit);
+                builder.ins().stack_load(types::I64, slot, 0)
+            }
             Case::ShiftCountInRcx => {
                 let shifted = builder.ins().ushr(a, d);
                 builder.ins().bxor(shifted, d)
@@ -750,13 +813,20 @@ fn integer_backend_matches_cranelift_results() {
 
         let request =
             integer_block_words(&context.func).unwrap_or_else(|| panic!("declined {case:?}"));
+        let records = request[MACHINE_HEADER_WORDS..]
+            .as_chunks::<MACHINE_RECORD_WORDS>()
+            .0;
         if matches!(case, Case::SharedTail | Case::NestedBranches) {
-            let labeled = request[MACHINE_HEADER_WORDS..]
-                .as_chunks::<MACHINE_RECORD_WORDS>()
-                .0
+            let labeled = records
                 .iter()
                 .any(|record| record[0] == MACHINE_BLOCK_LABEL);
             assert_eq!(labeled, matches!(case, Case::SharedTail));
+        }
+        if let Case::BranchTable { empty } = case {
+            let has_table = records
+                .iter()
+                .any(|record| record[0] == MACHINE_BRANCH_TABLE);
+            assert_eq!(has_table, !empty);
         }
         let bytes = binding::x86_64_integer_block(&request);
         assert!(!bytes.is_empty(), "{case:?}");
@@ -859,6 +929,8 @@ fn integer_backend_matches_cranelift_results() {
             [u64::from(u32::MAX), 2, 13, 17, 3, 5],
             [i32::MAX as u64, 2, 13, 17, 3, 5],
             [1 << 31, 2, 13, 17, 3, 5],
+            [1 << 32, 3, 5, 7, 13, 17],
+            [3, 5, 7, 11, 13, 17],
         ];
         let middle = memory[256..].as_ptr() as u64;
         let odd = memory[257..].as_ptr() as u64;
@@ -898,6 +970,46 @@ fn labeled_blocks_reject_unknown_jumps_and_register_values_from_other_blocks() {
         1, NO_VALUE, 62, 0, 0, 1, 64, 1, 0, 0, 62, 1, 0, 1, 66, 0, 0, 0,
     ];
     assert!(binding::x86_64_integer_block(&other_block).is_empty());
+}
+
+#[test]
+fn branch_tables_require_the_declared_targets_and_existing_nonentry_labels() {
+    const NO_VALUE: u64 = u64::MAX;
+    const MACHINE_BLOCK_RETURN: u64 = 66;
+    const TABLE: usize = MACHINE_HEADER_WORDS + MACHINE_RECORD_WORDS;
+    const FIRST_CASE: usize = TABLE + MACHINE_RECORD_WORDS;
+    const TABLE_COUNT: usize = TABLE + 2;
+    const CASE_LABEL: usize = FIRST_CASE + 1;
+    let valid = [
+        1,
+        NO_VALUE,
+        MACHINE_BLOCK_LABEL,
+        0,
+        0,
+        0,
+        MACHINE_BRANCH_TABLE,
+        0,
+        1,
+        1,
+        MACHINE_TABLE_TARGET,
+        1,
+        0,
+        0,
+        MACHINE_BLOCK_LABEL,
+        1,
+        0,
+        0,
+        MACHINE_BLOCK_RETURN,
+        NO_VALUE,
+        0,
+        0,
+    ];
+    assert!(!binding::x86_64_integer_block(&valid).is_empty());
+    for (field, invalid) in [(TABLE_COUNT, 2), (CASE_LABEL, 0), (CASE_LABEL, 2)] {
+        let mut request = valid;
+        request[field] = invalid;
+        assert!(binding::x86_64_integer_block(&request).is_empty());
+    }
 }
 
 #[test]

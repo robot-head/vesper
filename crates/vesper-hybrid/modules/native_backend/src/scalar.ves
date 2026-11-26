@@ -4,8 +4,9 @@ use self::x86_64::{
     CC_AE, CC_B, CC_BE, CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, CC_O, FixedArithmetic, Instruction,
     NEG_EXTENSION, NOT_EXTENSION, OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION, SHL_EXTENSION,
     SHR_EXTENSION, SUB_RM_R64, UNASSIGNED, XOR_RM_R64, REGISTER_CODES, arg_register, emit,
-    emit_direct_call, emit_symbol_address, find_register, fits_signed_byte, patch_forward_branch,
-    patch_relative_branch, register_bit, home_register, HOME_REGISTERS
+    emit_direct_call, emit_jump_table, emit_jump_table_entry, emit_symbol_address, find_register,
+    fits_signed_byte, patch_forward_branch, patch_relative_branch, patch_relative_offset,
+    register_bit, home_register, HOME_REGISTERS
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -84,6 +85,8 @@ const SIGNED_SUB_OVERFLOW: u64 = 71;
 const UNSIGNED_MUL_OVERFLOW: u64 = 72;
 const SIGNED_MUL_OVERFLOW: u64 = 73;
 const OVERFLOW_FLAG: u64 = 74;
+const BRANCH_TABLE: u64 = 75;
+const BRANCH_TABLE_TARGET: u64 = 76;
 
 // Relocation kinds shared with src/native_machine.rs.
 const PLT_CALL: u64 = 0;
@@ -149,6 +152,7 @@ copy enum BlockPart {
     AwaitingEdge(u64),
     Untaken,
     JumpOnly,
+    Table(u64),
 }
 
 copy struct Label {
@@ -160,6 +164,12 @@ copy struct Fixup {
     target: u64,
     end: u64,
     block: bool,
+}
+
+copy struct TableFixup {
+    target: u64,
+    offset: u64,
+    base: u64,
 }
 
 struct FrameLayout {
@@ -337,6 +347,10 @@ fn stack_access_offset(in record: Record) -> u64 {
     }
 }
 
+fn is_cfg_record(op: u64) -> bool {
+    (op >= BLOCK_LABEL && op <= BRANCH_BLOCK) || op == BRANCH_TABLE || op == BRANCH_TABLE_TARGET
+}
+
 fn has_no_result(op: u64) -> bool {
     (op >= STORE_BYTE && op <= STACK_SLOT)
         || is_stack_store(op)
@@ -344,7 +358,7 @@ fn has_no_result(op: u64) -> bool {
         || op == CALL_ARGUMENT
         || op == CALL_VOID
         || op == TRAP
-        || (op >= BLOCK_LABEL && op <= BRANCH_BLOCK)
+        || is_cfg_record(op)
 }
 
 fn is_call(op: u64) -> bool {
@@ -444,6 +458,7 @@ fn reads_left(in record: Record) -> bool {
         && op != BLOCK_LABEL
         && op != EDGE_LABEL
         && op != JUMP_LABEL
+        && op != BRANCH_TABLE_TARGET
         && (!is_branch_return(op) || (record.left != NO_VALUE && record.left != TRAP_VALUE))
 }
 
@@ -484,6 +499,16 @@ fn valid_block_layout(in words: Slice[u64], start: u64, count: u64, returns: u64
                     part = BlockPart::Taken(record.right);
                 } else if record.op == BRANCH_BLOCK {
                     part = BlockPart::JumpOnly;
+                } else if record.op == BRANCH_TABLE {
+                    if record.right == 0
+                        || record.right > DISP32_MASK
+                        || record.right >= wrapping_sub(count, index)
+                        || record.extra == 0
+                        || record.extra >= count
+                    {
+                        return false;
+                    }
+                    part = BlockPart::Table(record.right);
                 } else if record.op == JUMP_LABEL || record.op == BLOCK_RETURN {
                     part = BlockPart::End;
                 } else if record.op == BLOCK_LABEL
@@ -492,6 +517,7 @@ fn valid_block_layout(in words: Slice[u64], start: u64, count: u64, returns: u64
                     || record.op == EARLY_RETURN
                     || record.op == RETURN_PAIR
                     || record.op == TRAP
+                    || record.op == BRANCH_TABLE_TARGET
                 {
                     return false;
                 }
@@ -521,6 +547,16 @@ fn valid_block_layout(in words: Slice[u64], start: u64, count: u64, returns: u64
                     return false;
                 }
                 part = BlockPart::End;
+            },
+            BlockPart::Table(remaining) => {
+                if record.op != BRANCH_TABLE_TARGET || record.left == 0 || record.left >= count {
+                    return false;
+                }
+                part = if remaining == 1 {
+                    BlockPart::End
+                } else {
+                    BlockPart::Table(wrapping_sub(remaining, 1))
+                };
             },
         };
     }
@@ -594,8 +630,8 @@ fn find_last_reads(
         let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
-        if record.op > OVERFLOW_FLAG
-            || (!labeled && record.op >= BLOCK_LABEL && record.op <= BRANCH_BLOCK)
+        if record.op > BRANCH_TABLE_TARGET
+            || (!labeled && is_cfg_record(record.op))
             || (record.op == STACK_SLOT && index >= frame.slots.len())
             || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
             || (record.op == TRAP && (reverse_index != 0 || result != NO_VALUE))
@@ -1411,6 +1447,7 @@ pub fn encode_block(
     let mut clobber_index: u64 = 0;
     let mut labels = ChunkSeq::new[Label]();
     let mut fixups = ChunkSeq::new[Fixup]();
+    let mut table_fixups = ChunkSeq::new[TableFixup]();
     if labeled {
         for index in 0..count {
             labels.push(Label { address: NO_VALUE, block: false });
@@ -1422,6 +1459,7 @@ pub fn encode_block(
         let record = read_record(in words, index);
         let result_live = last_read(in reads, value) != NEVER_READ;
         if record.op == CALL_HIGH
+            || record.op == BRANCH_TABLE_TARGET
             || !emits_instruction(
                 record.op,
                 result_live || live_overflow_flag(in reads, value, record.op)
@@ -1450,6 +1488,22 @@ pub fn encode_block(
             }
             emit(inout output, in Instruction::Jump);
             fixups.push(Fixup { target: record.left, end: output.len(), block: true });
+            continue;
+        }
+        if record.op == BRANCH_TABLE {
+            let home = assigned(in allocation.locations, record.left);
+            let source = materialize(inout output, in home, RIGHT_SCRATCH);
+            if !emit_jump_table(inout output, source, wrapping_u32(record.right)) {
+                return ChunkSeq::new[u8]();
+            }
+            let base = output.len();
+            for case in 0..record.right {
+                let target = read_record(in words, wrapping_add(wrapping_add(index, 1), case));
+                let offset = emit_jump_table_entry(inout output);
+                table_fixups.push(TableFixup { target: target.left, offset: offset, base: base });
+            }
+            let offset = emit_jump_table_entry(inout output);
+            table_fixups.push(TableFixup { target: record.extra, offset: offset, base: base });
             continue;
         }
         if (is_comparison(record.op) || record.op == OVERFLOW_FLAG)
@@ -1727,6 +1781,20 @@ pub fn encode_block(
             if target.address == NO_VALUE
                 || target.block != fixup.block
                 || !patch_relative_branch(inout output, fixup.end, target.address)
+            {
+                return ChunkSeq::new[u8]();
+            }
+        }
+        for index in 0..table_fixups.len() {
+            let fixup = table_fixups
+                .try_get(index)
+                .unwrap_or(TableFixup { target: NO_VALUE, offset: 0, base: 0 });
+            let target = labels
+                .try_get(fixup.target)
+                .unwrap_or(Label { address: NO_VALUE, block: false });
+            if target.address == NO_VALUE
+                || !target.block
+                || !patch_relative_offset(inout output, fixup.offset, fixup.base, target.address)
             {
                 return ChunkSeq::new[u8]();
             }
