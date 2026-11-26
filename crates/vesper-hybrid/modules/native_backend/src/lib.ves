@@ -1,14 +1,8 @@
 // @export abi 4
 
-use self::x86_64::{encode, select_leaf};
+use self::scalar::{encode_block};
 
-// Hybrid inputs describe frameless System V functions with one i64 result.
-// An empty stream declines, leaving the module free to use Cranelift.
-pub fn x86_64_leaf(op: u64, left: u64, right: u64) -> ChunkSeq[u8] {
-    let mut bytes = ChunkSeq::new[u8]();
-    match select_leaf(op, left, right) {
-        Option::Some(machine) => encode(inout bytes, in machine),
-        Option::None => (),
-    };
-    bytes
+// An empty result declines the block before the hybrid defines its symbol.
+pub fn x86_64_integer_block(in words: Slice[u64]) -> ChunkSeq[u8] {
+    encode_block(in words)
 }

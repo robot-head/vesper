@@ -1,0 +1,217 @@
+use self::x86_64::{
+    ADD_RM_R64, AND_RM_R64, ARGUMENTS, Instruction, NEG_EXTENSION, NOT_EXTENSION, OR_RM_R64, RAX,
+    SAR_EXTENSION, SHL_EXTENSION, SHR_EXTENSION, SUB_RM_R64, UNASSIGNED, XOR_RM_R64, arg_register,
+    emit, find_register, register_bit
+};
+
+// Integer block opcodes shared with src/native_machine.rs.
+const CONSTANT: u64 = 0;
+const ADD: u64 = 1;
+const SUB: u64 = 2;
+const MUL: u64 = 3;
+const AND: u64 = 4;
+const OR: u64 = 5;
+const XOR: u64 = 6;
+const NEG: u64 = 7;
+const NOT: u64 = 8;
+const SHL: u64 = 9;
+const SHR: u64 = 10;
+const SAR: u64 = 11;
+
+const ARGUMENT_COUNT: u64 = 0;
+const RETURN_VALUE: u64 = 1;
+const HEADER_WORDS: u64 = 2;
+const OP: u64 = 0;
+const LEFT: u64 = 1;
+const RIGHT: u64 = 2;
+const RECORD_WORDS: u64 = 3;
+const NEVER_READ: u64 = 0;
+const SHIFT_MASK: u64 = 63;
+
+copy struct Record {
+    op: u64,
+    left: u64,
+    right: u64,
+}
+
+fn word_at(in words: Slice[u64], position: u64) -> u64 {
+    match words.try_get(position) {
+        Option::Some(word) => word,
+        Option::None => 0,
+    }
+}
+
+fn read_record(in words: Slice[u64], index: u64) -> Record {
+    let start = wrapping_add(HEADER_WORDS, wrapping_mul(index, RECORD_WORDS));
+    Record {
+        op: word_at(in words, wrapping_add(start, OP)),
+        left: word_at(in words, wrapping_add(start, LEFT)),
+        right: word_at(in words, wrapping_add(start, RIGHT))
+    }
+}
+
+fn last_read(in reads: ChunkSeq[u64], value: u64) -> u64 {
+    match reads.try_get(value) {
+        Option::Some(user) => user,
+        Option::None => NEVER_READ,
+    }
+}
+
+fn first_read_backwards(inout reads: ChunkSeq[u64], value: u64, user: u64) {
+    if last_read(in reads, value) == NEVER_READ {
+        let _ = reads.try_set(value, user);
+    }
+}
+
+// Every accepted opcode is pure. Walk backwards so operands of dead
+// instructions do not become live or consume a register.
+fn find_last_reads(
+    in words: Slice[u64],
+    arguments: u64,
+    count: u64,
+    result: u64
+) -> Option[ChunkSeq[u64]] {
+    let values = wrapping_add(arguments, count);
+    let mut reads = ChunkSeq::with_capacity[u64](values);
+    for i in 0..values {
+        reads.push(NEVER_READ);
+    }
+    let _ = reads.try_set(result, values);
+    for reverse_index in 0..count {
+        let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
+        let value = wrapping_add(arguments, index);
+        let record = read_record(in words, index);
+        if record.op > SAR {
+            return Option::None;
+        }
+        let has_left = record.op != CONSTANT;
+        let has_right = record.op >= ADD && record.op <= XOR;
+        if (has_left && record.left >= value) || (has_right && record.right >= value) {
+            return Option::None;
+        }
+        if last_read(in reads, value) != NEVER_READ {
+            if has_left {
+                first_read_backwards(inout reads, record.left, value);
+            }
+            if has_right {
+                first_read_backwards(inout reads, record.right, value);
+            }
+        }
+    }
+    Option::Some(reads)
+}
+
+fn assigned(in registers: ChunkSeq[u8], value: u64) -> u8 {
+    match registers.try_get(value) {
+        Option::Some(reg) => reg,
+        Option::None => UNASSIGNED,
+    }
+}
+
+fn without_register(used: u32, register: u8) -> u32 {
+    used ^ (used & register_bit(register))
+}
+
+fn operation(in record: Record, destination: u8, source: u8) -> Instruction {
+    match record.op {
+        ADD => Instruction::Binary(ADD_RM_R64, destination, source),
+        SUB => Instruction::Binary(SUB_RM_R64, destination, source),
+        MUL => Instruction::Multiply(destination, source),
+        AND => Instruction::Binary(AND_RM_R64, destination, source),
+        OR => Instruction::Binary(OR_RM_R64, destination, source),
+        XOR => Instruction::Binary(XOR_RM_R64, destination, source),
+        NEG => Instruction::Unary(NEG_EXTENSION, destination),
+        NOT => Instruction::Unary(NOT_EXTENSION, destination),
+        SHL => Instruction::Shift(
+            SHL_EXTENSION,
+            destination,
+            wrapping_u8(record.right & SHIFT_MASK)
+        ),
+        SHR => Instruction::Shift(
+            SHR_EXTENSION,
+            destination,
+            wrapping_u8(record.right & SHIFT_MASK)
+        ),
+        _ => Instruction::Shift(SAR_EXTENSION, destination, wrapping_u8(record.right & SHIFT_MASK)),
+    }
+}
+
+pub fn encode_block(in words: Slice[u64]) -> ChunkSeq[u8] {
+    if words.len() < HEADER_WORDS {
+        return ChunkSeq::new[u8]();
+    }
+    let body_words = wrapping_sub(words.len(), HEADER_WORDS);
+    let count = body_words / RECORD_WORDS;
+    let arguments = word_at(in words, ARGUMENT_COUNT);
+    let result = word_at(in words, RETURN_VALUE);
+    if wrapping_mul(count, RECORD_WORDS) != body_words
+        || arguments > ARGUMENTS
+        || result >= wrapping_add(arguments, count)
+    {
+        return ChunkSeq::new[u8]();
+    }
+    let reads = match find_last_reads(in words, arguments, count, result) {
+        Option::Some(last) => last,
+        Option::None => return ChunkSeq::new[u8](),
+    };
+
+    let mut output = ChunkSeq::new[u8]();
+    let mut registers = ChunkSeq::with_capacity[u8](wrapping_add(arguments, count));
+    let mut used: u32 = 0;
+    for argument in 0..arguments {
+        let reg = arg_register(argument);
+        registers.push(reg);
+        if last_read(in reads, argument) != NEVER_READ {
+            used = used | register_bit(reg);
+        }
+    }
+
+    for index in 0..count {
+        let value = wrapping_add(arguments, index);
+        if last_read(in reads, value) == NEVER_READ {
+            registers.push(UNASSIGNED);
+            continue;
+        }
+        let record = read_record(in words, index);
+        let has_left = record.op != CONSTANT;
+        let has_right = record.op >= ADD && record.op <= XOR;
+        let left = assigned(in registers, record.left);
+        let right = assigned(in registers, record.right);
+        let left_dies = has_left && last_read(in reads, record.left) == value;
+        let right_dies = has_right && last_read(in reads, record.right) == value;
+
+        // Destructive instructions can share a dying register. For a
+        // commutative operation the right input is also a candidate.
+        let reuse_right = !left_dies && right_dies && record.op != SUB;
+        let destination = if left_dies {
+            left
+        } else if reuse_right {
+            right
+        } else {
+            find_register(used)
+        };
+        if destination == UNASSIGNED {
+            return ChunkSeq::new[u8]();
+        }
+        if record.op == CONSTANT {
+            emit(inout output, in Instruction::Immediate(destination, record.left));
+        } else {
+            let first = if reuse_right { right } else { left };
+            let second = if reuse_right { left } else { right };
+            emit(inout output, in Instruction::Move(destination, first));
+            emit(inout output, in operation(in record, destination, second));
+        }
+
+        if left_dies {
+            used = without_register(used, left);
+        }
+        if right_dies {
+            used = without_register(used, right);
+        }
+        used = used | register_bit(destination);
+        registers.push(destination);
+    }
+    emit(inout output, in Instruction::Move(RAX, assigned(in registers, result)));
+    emit(inout output, in Instruction::Return);
+    output
+}

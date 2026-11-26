@@ -14,15 +14,15 @@ static ENCODED: AtomicU64 = AtomicU64::new(0);
 
 pub(super) const SWAPS: &[Swap] = &[open(
     "native_backend",
-    "experimental x86-64 leaf functions, requires VESPER_HYBRID_NATIVE_BACKEND=1",
+    "experimental x86-64 integer blocks, requires VESPER_HYBRID_NATIVE_BACKEND=1",
 )];
 
 pub(super) fn register(_r: &mut Registry) {
     if on("native_backend")
         && std::env::var_os("VESPER_HYBRID_NATIVE_BACKEND").is_some_and(|value| value == "1")
     {
-        must(machine::install_leaf_encoder(|op, left, right| {
-            let bytes = binding::x86_64_leaf(op as u64, left, right);
+        must(machine::install_integer_encoder(|words| {
+            let bytes = binding::x86_64_integer_block(words);
             if bytes.is_empty() {
                 return None;
             }
@@ -34,7 +34,7 @@ pub(super) fn register(_r: &mut Registry) {
 
 pub(super) fn report() {
     eprintln!(
-        "vesper-hybrid: native_backend emitted {} x86-64 leaf functions",
+        "vesper-hybrid: native_backend emitted {} x86-64 integer blocks",
         ENCODED.load(Relaxed),
     );
 }

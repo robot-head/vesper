@@ -1,5 +1,5 @@
 use super::binding;
-use super::machine::LeafOp;
+use super::machine::integer_block_words;
 use cranelift_codegen::ir::{AbiParam, InstBuilder, types};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -12,6 +12,10 @@ enum Case {
     Constant(i64),
     Argument(usize),
     Binary(Binary),
+    Chain,
+    RepeatedOperands,
+    DeadValues,
+    HighRegisters,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -25,9 +29,12 @@ enum Binary {
 }
 
 #[test]
-fn leaf_backend_matches_cranelift_results() {
-    assert!(binding::x86_64_leaf(u64::MAX, 0, 0).is_empty());
-    assert!(binding::x86_64_leaf(LeafOp::ReturnArgument as u64, ABI_ARGS as u64, 0).is_empty());
+fn integer_backend_matches_cranelift_results() {
+    // Reject a truncated header and a return value outside the value space.
+    assert!(binding::x86_64_integer_block(&[1]).is_empty());
+    assert!(binding::x86_64_integer_block(&[1, 1]).is_empty());
+    // The first instruction cannot reference its own result.
+    assert!(binding::x86_64_integer_block(&[1, 1, 1, 1, 0]).is_empty());
 
     let isa = cranelift_native::builder()
         .unwrap()
@@ -58,6 +65,10 @@ fn leaf_backend_matches_cranelift_results() {
         Case::Binary(Binary::And),
         Case::Binary(Binary::Or),
         Case::Binary(Binary::Xor),
+        Case::Chain,
+        Case::RepeatedOperands,
+        Case::DeadValues,
+        Case::HighRegisters,
     ];
     let mut byte_differences = 0;
     for (index, case) in cases.into_iter().enumerate() {
@@ -75,35 +86,61 @@ fn leaf_backend_matches_cranelift_results() {
         let entry = builder.create_block();
         builder.append_block_params_for_function_params(entry);
         builder.switch_to_block(entry);
-        let (result, request) = match case {
-            Case::Constant(bits) => (
-                builder.ins().iconst(types::I64, bits),
-                (LeafOp::ReturnConstant, bits as u64, 0),
-            ),
-            Case::Argument(index) => (
-                builder.block_params(entry)[index],
-                (LeafOp::ReturnArgument, index as u64, 0),
-            ),
-            Case::Binary(op) => {
-                let left = builder.block_params(entry)[4];
-                let right = builder.block_params(entry)[5];
-                let (result, op) = match op {
-                    Binary::Add => (builder.ins().iadd(left, right), LeafOp::AddArguments),
-                    Binary::Sub => (builder.ins().isub(left, right), LeafOp::SubArguments),
-                    Binary::Mul => (builder.ins().imul(left, right), LeafOp::MulArguments),
-                    Binary::And => (builder.ins().band(left, right), LeafOp::AndArguments),
-                    Binary::Or => (builder.ins().bor(left, right), LeafOp::OrArguments),
-                    Binary::Xor => (builder.ins().bxor(left, right), LeafOp::XorArguments),
-                };
-                (result, (op, 4, 5))
+        let [a, b, c, d, e, f] = *builder.block_params(entry) else {
+            unreachable!();
+        };
+        let result = match case {
+            Case::Constant(bits) => builder.ins().iconst(types::I64, bits),
+            Case::Argument(index) => builder.block_params(entry)[index],
+            Case::Binary(op) => match op {
+                Binary::Add => builder.ins().iadd(e, f),
+                Binary::Sub => builder.ins().isub(e, f),
+                Binary::Mul => builder.ins().imul(e, f),
+                Binary::And => builder.ins().band(e, f),
+                Binary::Or => builder.ins().bor(e, f),
+                Binary::Xor => builder.ins().bxor(e, f),
+            },
+            Case::Chain => {
+                let left = builder.ins().iadd_imm(a, i64::MIN);
+                let neg = builder.ins().ineg(b);
+                let high = builder.ins().sshr_imm(left, 33);
+                let low = builder.ins().ushr_imm(neg, 5);
+                let folded = builder.ins().bxor(high, low);
+                let shifted = builder.ins().ishl_imm(folded, 65);
+                builder.ins().bnot(shifted)
+            }
+            Case::RepeatedOperands => {
+                let product = builder.ins().imul(a, a);
+                let difference = builder.ins().isub(product, a);
+                let sum = builder.ins().iadd(difference, product);
+                builder.ins().iadd(sum, product)
+            }
+            Case::DeadValues => {
+                let dead = builder.ins().iadd(e, f);
+                builder.ins().imul(dead, dead);
+                builder.ins().isub(a, a)
+            }
+            Case::HighRegisters => {
+                // Keep all incoming registers live across three temporaries.
+                let first = builder.ins().iadd(a, b);
+                let second = builder.ins().imul(c, d);
+                let third = builder.ins().bxor(e, f);
+                let left = builder.ins().isub(a, b);
+                let middle = builder.ins().band(c, d);
+                let right = builder.ins().bor(e, f);
+                let high = builder.ins().imul(third, second);
+                let low = builder.ins().isub(first, left);
+                let parts = builder.ins().iadd(high, low);
+                let tail = builder.ins().bxor(middle, right);
+                builder.ins().isub(parts, tail)
             }
         };
         builder.ins().return_(&[result]);
         builder.seal_all_blocks();
         builder.finalize();
 
-        let (op, left, right) = request;
-        let bytes = binding::x86_64_leaf(op as u64, left, right);
+        let request = integer_block_words(&context.func).expect("supported CLIF block");
+        let bytes = binding::x86_64_integer_block(&request);
         assert!(!bytes.is_empty(), "{case:?}");
         module.define_function(baseline, &mut context).unwrap();
         let oracle = context.compiled_code().unwrap().code_buffer();
@@ -134,10 +171,60 @@ fn leaf_backend_matches_cranelift_results() {
         }
     }
     eprintln!(
-        "{} of {} selected leaves differ in bytes from Cranelift",
+        "{} of {} selected integer blocks differ in bytes from Cranelift",
         byte_differences,
         cases.len()
     );
     // All code pointers have gone out of scope.
     unsafe { module.free_memory() };
+}
+
+#[test]
+fn integer_backend_declines_register_pressure_and_unsupported_operations() {
+    let mut context = cranelift_codegen::Context::new();
+    context.func.signature.call_conv = cranelift_codegen::isa::CallConv::SystemV;
+    context
+        .func
+        .signature
+        .returns
+        .push(AbiParam::new(types::I64));
+    let mut builder_context = FunctionBuilderContext::new();
+    let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+    let entry = builder.create_block();
+    builder.switch_to_block(entry);
+    let constants: Vec<_> = (1..=10)
+        .map(|n| builder.ins().iconst(types::I64, n))
+        .collect();
+    let sum = constants
+        .into_iter()
+        .reduce(|a, b| builder.ins().iadd(a, b))
+        .unwrap();
+    builder.ins().return_(&[sum]);
+    builder.seal_all_blocks();
+    builder.finalize();
+    let request = integer_block_words(&context.func).unwrap();
+    assert!(binding::x86_64_integer_block(&request).is_empty());
+
+    context.clear();
+    context.func.signature.call_conv = cranelift_codegen::isa::CallConv::SystemV;
+    context
+        .func
+        .signature
+        .params
+        .push(AbiParam::new(types::I64));
+    context
+        .func
+        .signature
+        .returns
+        .push(AbiParam::new(types::I64));
+    let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+    let entry = builder.create_block();
+    builder.append_block_params_for_function_params(entry);
+    builder.switch_to_block(entry);
+    let argument = builder.block_params(entry)[0];
+    let result = builder.ins().sdiv(argument, argument);
+    builder.ins().return_(&[result]);
+    builder.seal_all_blocks();
+    builder.finalize();
+    assert!(integer_block_words(&context.func).is_none());
 }
