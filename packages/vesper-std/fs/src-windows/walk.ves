@@ -187,10 +187,10 @@ fn utf8_to_utf16(in src: Slice[u8]) -> ChunkSeq[u16] eff [Fail[IoError]] {
             if (b1 & 192) != 128 || (b2 & 192) != 128 || (b3 & 192) != 128 {
                 return raise_kind(invalid_input());
             }
-            let cp = wrapping_shl_u32(b0 & 7, 18) | wrapping_shl_u32(
-                b1 & 63,
-                12
-            ) | wrapping_shl_u32(b2 & 63, 6) | (b3 & 63);
+            let cp = wrapping_shl_u32(b0 & 7, 18)
+                | wrapping_shl_u32(b1 & 63, 12)
+                | wrapping_shl_u32(b2 & 63, 6)
+                | (b3 & 63);
             let adj = wrapping_sub(cp, 65536);
             out.push(wrapping_u16(wrapping_add(55296, wrapping_shr_u32(adj, 10))));
             out.push(wrapping_u16(wrapping_add(56320, adj & 1023)));

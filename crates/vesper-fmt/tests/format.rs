@@ -907,3 +907,64 @@ fn short_if_else_expressions_stay_on_one_line_like_rustfmt() {
 "
     );
 }
+#[test]
+fn long_bitwise_or_chains_break_before_each_pipe_like_rustfmt() {
+    // A `|` chain too long for its line breaks before each `|`.
+    assert_eq!(
+        verify(&format!(
+            "fn f()->u64{{let m=first_flag_value_name|second_flag_value_name|third_flag_value_name|{};m}}",
+            "fourth_flag_value"
+        )),
+        "fn f() -> u64 {
+    let m = first_flag_value_name
+        | second_flag_value_name
+        | third_flag_value_name
+        | fourth_flag_value;
+    m
+}
+"
+    );
+    // Tighter operators stay whole on each line.
+    assert_eq!(
+        verify(&format!(
+            "fn f(b:u64,c:u64,d:u64)->u64{{((b&15)<<12)|((byte_at_index(c,1)&63)<<6)|({})}}",
+            "byte_at_index_of_the_input_bytes(d,2)&63"
+        )),
+        "fn f(b: u64, c: u64, d: u64) -> u64 {
+    ((b & 15) << 12)
+        | ((byte_at_index(c, 1) & 63) << 6)
+        | (byte_at_index_of_the_input_bytes(d, 2) & 63)
+}
+"
+    );
+    // A closure's parameters hug their pipes, and a short `|` keeps its
+    // place.
+    assert_eq!(
+        verify("fn f(a:u64)->u64{let g=sink|x|x+1;let h=|x:u64,y:u64|x+y;match a{1|2=>a|1,_=>0}}"),
+        "fn f(a: u64) -> u64 {
+    let g = sink |x| x + 1;
+    let h = |x: u64, y: u64| x + y;
+    match a {
+        1 | 2 => a | 1,
+        _ => 0
+    }
+}
+"
+    );
+}
+#[test]
+fn closure_pipes_keep_comments_and_empty_closures_apart() {
+    // A line comment before a closing pipe keeps its line break, and an
+    // empty `| |` keeps two pipes.
+    assert_eq!(
+        verify("fn f(){let g=|x // parameter\n| x;let h=| | 1;let k=|/* a */x|x;}"),
+        "fn f() {
+    let g = |x
+    // parameter
+    | x;
+    let h = | | 1;
+    let k = |/* a */ x| x;
+}
+"
+    );
+}

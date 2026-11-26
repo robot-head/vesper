@@ -272,11 +272,10 @@ pub fn finish(inout a: Asm) {
                 return;
             }
             let imm = wrapping_u32(rel);
-            let field = (wrapping_shr_u32(imm, 20) & 1)
-                << 31 | (wrapping_shr_u32(imm, 1) & 1023)
-                << 21 | (wrapping_shr_u32(imm, 11) & 1)
-                << 20 | (wrapping_shr_u32(imm, 12) & 255)
-                << 12;
+            let field = (wrapping_shr_u32(imm, 20) & 1) << 31
+                | (wrapping_shr_u32(imm, 1) & 1023) << 21
+                | (wrapping_shr_u32(imm, 11) & 1) << 20
+                | (wrapping_shr_u32(imm, 12) & 255) << 12;
             or32(inout a, f.at, field);
         } else if f.kind == FIX_AUIPC_JALR {
             let rel = wrapping_sub(target, f.at);

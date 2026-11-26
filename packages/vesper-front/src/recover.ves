@@ -548,7 +548,7 @@ fn last_site_owned(in sites: ChunkSeq[u64], owner: u64) -> bool {
 }
 
 // The tokens `start..end` of `t` and an Eof at `eof` (`ranged_tokens`).
-fn ranged_tokens(in t: Tokens, start: u64, end: u64, eof: u64) -> Tokens {
+pub fn ranged_tokens(in t: Tokens, start: u64, end: u64, eof: u64) -> Tokens {
     let mut r = tokens_new(0);
     r.kind.reserve(inc(wrapping_sub(end, start)));
     for i in start..end {
@@ -609,37 +609,61 @@ fn fail(code: u64) -> ChunkSeq[u64] {
     out
 }
 
-// `parse_recovery(source, limits)` as rows (lib.ves `parse_editor_tables`).
-pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[u64] {
-    let b = source.as_bytes();
+// What `parse_recovery` produced: 0 and the tokens, diagnostics, CST
+// (builder events and tree), declarations and sites (see `recover`), or
+// the error code and empty tables.
+pub struct Recovered {
+    pub code: u64,
+    pub t: Tokens,
+    pub d: Diags,
+    pub ev: ChunkSeq[u32],
+    pub tree: Tree,
+    pub decls: ChunkSeq[u64],
+    pub sites: ChunkSeq[u64]
+}
+
+fn failed(code: u64) -> Recovered {
+    Recovered {
+        code: code,
+        t: tokens_new(0),
+        d: diags_new(),
+        ev: ChunkSeq::new[u32](),
+        tree: tree_new(),
+        decls: ChunkSeq::new[u64](),
+        sites: ChunkSeq::new[u64]()
+    }
+}
+
+// `parse_recovery(source, limits)`.
+pub fn recover(in b: Slice[u8], in lim: ChunkSeq[u64]) -> Recovered {
     let n = b.len();
     let pre = preflight(in lim, n, l_work(in lim));
     if pre != 0 {
-        return fail(pre);
+        return failed(pre);
     }
     let mut work = l_work(in lim);
     // `lex`.
     if !charge(inout work, n) {
-        return fail(17);
+        return failed(17);
     }
     let mut d = diags_new();
     let t = lex_with_limits(in b, inout d, l_source(in lim), l_tokens(in lim), l_diags(in lim));
     if t.rejected {
-        return fail(10);
+        return failed(10);
     }
     if t.limited {
-        return fail(if t.limit_kind == 1 { 11 } else { 12 });
+        return failed(if t.limit_kind == 1 { 11 } else { 12 });
     }
     let ntok = t.kind.len();
     let mut opaque = n;
     for i in 0..ntok {
         if !charge(inout work, 1) {
-            return fail(17);
+            return failed(17);
         }
         let k = u8_at(in t.kind, i);
         if (k == k_upper() || k == k_lower())
             && wrapping_sub(token_end(in t, i), w32(in t.start, i)) > l_ident(in lim) {
-            return fail(18);
+            return failed(18);
         }
         if k == k_error() && opaque == n {
             opaque = w32(in t.start, i);
@@ -672,7 +696,7 @@ pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[
             break;
         }
         if !charge(inout work, 1) {
-            return fail(17);
+            return failed(17);
         }
         let start = next(in t, cursor);
         for i in cursor..start {
@@ -683,14 +707,14 @@ pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[
         }
         let owner = decls.len() / 12;
         if owner >= l_decls(in lim) {
-            return fail(15);
+            return failed(15);
         }
         let (pk, name) = prefix(in t, start);
         let kind = if pk == none() { DECL_OTHER } else { pk };
         macros.clear();
         let ext = extent(in b, in t, in lim, start, kind, opaque, inout work, inout macros);
         if ext.err != 0 {
-            return fail(ext.err);
+            return failed(ext.err);
         }
         let mut end = ext.end;
         if end < inc(start) {
@@ -726,19 +750,19 @@ pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[
                     span_start
                 };
                 if !push_site(inout sites, in lim, s, n, 3, owner, 0) {
-                    return fail(14);
+                    return failed(14);
                 }
             }
             for j in 0..(macros.len() >> 1) {
                 let ms = u64_at(in macros, shl(j, 1));
                 let me = u64_at(in macros, inc(shl(j, 1)));
                 if !push_site(inout sites, in lim, ms, me, 4, owner, 0) {
-                    return fail(14);
+                    return failed(14);
                 }
             }
             if !lexical && !last_site_owned(in sites, owner) {
                 if !push_site(inout sites, in lim, span_start, span_end, 2, owner, 0) {
-                    return fail(14);
+                    return failed(14);
                 }
             }
             status = DECL_OPAQUE;
@@ -757,15 +781,15 @@ pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[
                 shl(wrapping_sub(span_end, span_start), 2)
             );
             if !charge(inout work, cost) {
-                return fail(17);
+                return failed(17);
             }
             editor_reset(inout p, ranged_tokens(in t, start, end, span_end));
             let exact = parse_item(inout p);
             if p.halted {
-                return fail(if p.halt_kind == 2 { 12 } else { 13 });
+                return failed(if p.halt_kind == 2 { 12 } else { 13 });
             }
             if p.site_exhausted {
-                return fail(14);
+                return failed(14);
             }
             let has_header = p.hdr.len() != 0;
             if kind == DECL_FUNCTION {
@@ -808,16 +832,16 @@ pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[
                     owner,
                     root
                 ) {
-                    return fail(14);
+                    return failed(14);
                 }
             }
             if p.d.code.len() != 0 && !last_site_owned(in sites, owner) {
                 if !push_site(inout sites, in lim, span_start, span_end, 2, owner, 0) {
-                    return fail(14);
+                    return failed(14);
                 }
             }
             if p.d.code.len() > wrapping_sub(max_diag, d.code.len()) {
-                return fail(12);
+                return failed(12);
             }
             diags_append(inout d, in p.d);
             for j in 0..p.ev.len() {
@@ -833,11 +857,11 @@ pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[
             }
         }
         if d.code.len() > max_diag {
-            return fail(12);
+            return failed(12);
         }
         if status != DECL_COMPLETE && !diag_within(in d, span_start, span_end) {
             if d.code.len() == max_diag {
-                return fail(12);
+                return failed(12);
             }
             diag_push(
                 inout d,
@@ -871,7 +895,7 @@ pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[
     }
     ev.push(Event::NodeFinish);
     if work == 0 {
-        return fail(17);
+        return failed(17);
     }
     let mut tree = tree_new();
     build_events(inout tree, in t, in ev);
@@ -888,8 +912,22 @@ pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[
         in sites
     );
     if checked != 0 {
-        return fail(checked);
+        return failed(checked);
     }
+    Recovered { code: 0, t: t, d: d, ev: ev, tree: tree, decls: decls, sites: sites }
+}
+
+// `parse_recovery(source, limits)` as rows (lib.ves `parse_editor_tables`).
+pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let r = recover(in source.as_bytes(), in lim);
+    if r.code != 0 {
+        return fail(r.code);
+    }
+    let t = r.t;
+    let d = r.d;
+    let tree = r.tree;
+    let decls = r.decls;
+    let sites = r.sites;
     let mut out = ChunkSeq::new[u64]();
     out.push(0);
     out.push(decls.len() / 12);

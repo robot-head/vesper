@@ -1236,14 +1236,12 @@ fn decode_code(e: DecodeError) -> u64 {
     match e {
         DecodeError::TruncatedProgram { len } => shl(widen_u64(len), 12),
         DecodeError::BadRegister { pc, reg } => 1 | shl(widen_u64(reg), 4) | shl(widen_u64(pc), 12),
-        DecodeError::InvalidOpcode { pc, code } => 2 | shl(widen_u64(code), 4) | shl(
-            widen_u64(pc),
-            12
-        ),
-        DecodeError::ReservedFieldSet { pc, field } => 3 | shl(widen_u64(field), 4) | shl(
-            widen_u64(pc),
-            12
-        ),
+        DecodeError::InvalidOpcode { pc, code } => 2
+            | shl(widen_u64(code), 4)
+            | shl(widen_u64(pc), 12),
+        DecodeError::ReservedFieldSet { pc, field } => 3
+            | shl(widen_u64(field), 4)
+            | shl(widen_u64(pc), 12),
         DecodeError::BrokenLdImm64 { pc } => 4 | shl(widen_u64(pc), 12),
     }
 }

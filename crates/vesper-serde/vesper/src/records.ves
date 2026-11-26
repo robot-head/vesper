@@ -340,21 +340,17 @@ fn utf8_bytes(c: u64) -> (u64, u64) {
     } else if c < Utf8::FourByteMin {
         (
             3,
-            (Utf8::Lead3Tag | (c >> 12)) | bit_shl(
-                Utf8::Cont | ((c >> 6) & Utf8::ContPayload),
-                8
-            ) | bit_shl(Utf8::Cont | (c & Utf8::ContPayload), 16)
+            (Utf8::Lead3Tag | (c >> 12))
+                | bit_shl(Utf8::Cont | ((c >> 6) & Utf8::ContPayload), 8)
+                | bit_shl(Utf8::Cont | (c & Utf8::ContPayload), 16)
         )
     } else {
         (
             4,
-            (Utf8::Lead4Tag | (c >> 18)) | bit_shl(
-                Utf8::Cont | ((c >> 12) & Utf8::ContPayload),
-                8
-            ) | bit_shl(Utf8::Cont | ((c >> 6) & Utf8::ContPayload), 16) | bit_shl(
-                Utf8::Cont | (c & Utf8::ContPayload),
-                24
-            )
+            (Utf8::Lead4Tag | (c >> 18))
+                | bit_shl(Utf8::Cont | ((c >> 12) & Utf8::ContPayload), 8)
+                | bit_shl(Utf8::Cont | ((c >> 6) & Utf8::ContPayload), 16)
+                | bit_shl(Utf8::Cont | (c & Utf8::ContPayload), 24)
         )
     }
 }

@@ -10,7 +10,7 @@ fn triple(x: f64) -> f64 eff [DetFloat] {
 }
 
 fn twice_then_triple(x: f64) -> f64 eff [DetFloat] {
-    let double = | y: f64 | -> f64 {
+    let double = |y: f64| -> f64 {
         y * 2.0
     };
     apply(triple, double(x))
@@ -18,7 +18,7 @@ fn twice_then_triple(x: f64) -> f64 eff [DetFloat] {
 
 fn main() -> f64 {
     let a = apply(
-        | x: f64 | -> f64 eff [DetFloat] {
+        |x: f64| -> f64 eff [DetFloat] {
             x - 0.5
         },
         1.0

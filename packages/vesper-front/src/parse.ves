@@ -1399,6 +1399,9 @@ fn function_header(inout p: P) -> bool {
     lower(inout p);
     let mark = p.binds.len();
     let generic = generics(inout p);
+    if p.pending.len() != 0 {
+        p.bounds = inc(p.bounds);
+    }
     p.pending.clear();
     bind_rows(inout p, mark);
     expect(inout p, k_l_paren());
@@ -1410,6 +1413,7 @@ fn function_header(inout p: P) -> bool {
     }
     effects(inout p);
     if at_word(in p, 0, w_where()) {
+        p.bounds = inc(p.bounds);
         where_clauses(inout p);
     }
     generic
@@ -1497,15 +1501,23 @@ fn params(inout p: P, end: u8) {
         if at(in p, end) || at(in p, k_eof()) {
             return;
         }
+        let start = cur_start(in p);
         pass_in(inout p, true);
         let name = lower(inout p);
         let sym = tsym(in p, name);
         p.binds.push(sym);
-        if eat(inout p, k_dot()) {
+        let projected = eat(inout p, k_dot());
+        if projected {
             place_tree(inout p);
         }
         if eat(inout p, k_colon()) {
             ty(inout p);
+        }
+        if p.notes && end == k_r_paren() {
+            p.param_notes.push(start);
+            p.param_notes.push(last_end(in p));
+            p.param_notes.push(name);
+            p.param_notes.push(if projected { 1 } else { 0 });
         }
         if !eat(inout p, k_comma()) {
             return;
@@ -3394,7 +3406,10 @@ fn parse_tokens_new(
         surface: false,
         template_scopes: false,
         before_handler_in: false,
-        group_end: ChunkSeq::new[u32]()
+        group_end: ChunkSeq::new[u32](),
+        notes: false,
+        param_notes: ChunkSeq::new[u64](),
+        bounds: 0
     };
     p.src.extend(in source);
     p.rows.resize(nsyms, 0);
@@ -3526,6 +3541,58 @@ pub fn editor_parser(
     p.editor = true;
     p.site_limit = max_sites;
     p
+}
+
+// `macro_driver::parser`: a batch-mode parser with no tokens for
+// `ranged_reset`, with header notes, 64 diagnostics, the depth limit and
+// the symbol count of the whole source.
+pub fn ranged_parser(in source: Slice[u8], nsyms: u64, max_depth: u64) -> P {
+    let mut p = parse_tokens_new(in source, tokens_new(0), diags_new(), nsyms, 64, max_depth);
+    p.notes = true;
+    p
+}
+
+// `macro_driver::parser` for one token range of the source (ending in an
+// Eof at the end of the range): `p` reset to `t` in batch mode.
+pub fn ranged_reset(inout p: P, sink t: Tokens) {
+    editor_reset(inout p, t);
+    p.editor = false;
+    p.param_notes.clear();
+    p.bounds = 0;
+}
+
+// `parse_source_header` on a ranged parser: 0 when the header parsed
+// cleanly up to the body's `{` with no trait bounds, 1 when the parser
+// halted (`Budget(Depth)`), else 2 (`Syntax`, at the first diagnostic).
+// Whether the function is generic goes in `generic`.
+pub fn source_header(inout p: P, inout generic: bool) -> u64 {
+    start_node(inout p, NodeKind::Module);
+    generic = function_header(inout p);
+    if p.halted {
+        return 1;
+    }
+    if p.d.code.len() != 0 || !at(in p, k_l_brace()) || p.bounds != 0 {
+        return 2;
+    }
+    // The opening brace is the last token before the Eof.
+    if idx(in p, 1) != wrapping_sub(p.ntok, 1) {
+        return 3;
+    }
+    0
+}
+
+// `parse_source_item` on a ranged parser: 0 when one declaration parsed
+// cleanly to the Eof, 1 when the parser halted, else 2.
+pub fn source_item(inout p: P) -> u64 {
+    start_node(inout p, NodeKind::Module);
+    declaration(inout p);
+    if p.halted {
+        return 1;
+    }
+    if p.d.code.len() != 0 || !at(in p, k_eof()) {
+        return 2;
+    }
+    0
 }
 
 // ------------------------------------------------------- surface profile

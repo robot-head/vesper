@@ -659,12 +659,13 @@ fn node_replication_targets(in rc: RaftCluster, i: u64) -> u64 {
     let at = node_config_index(in rc, i);
     let mut targets = node_members(in rc, i);
     if at > sw(in rc.nd_commit, i) {
-        targets = targets | raft_config_of_arena(
-            in rc.log_pool.as_slice(),
-            sw(in rc.nd_log_off, i),
-            wrapping_sub(at, 1),
-            rc.nd_initial_members
-        );
+        targets = targets
+            | raft_config_of_arena(
+                in rc.log_pool.as_slice(),
+                sw(in rc.nd_log_off, i),
+                wrapping_sub(at, 1),
+                rc.nd_initial_members
+            );
     }
     targets
 }

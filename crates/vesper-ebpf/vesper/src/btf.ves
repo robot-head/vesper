@@ -108,9 +108,10 @@ pub fn byte(in s: Slice[u8], at: u64) -> u64 {
 }
 
 pub fn le32(in s: Slice[u8], at: u64) -> u64 {
-    byte(in s, at) | (byte(in s, wrapping_add(at, 1)) << 8) | (
-        byte(in s, wrapping_add(at, 2)) << 16
-    ) | (byte(in s, wrapping_add(at, 3)) << 24)
+    byte(in s, at)
+        | (byte(in s, wrapping_add(at, 1)) << 8)
+        | (byte(in s, wrapping_add(at, 2)) << 16)
+        | (byte(in s, wrapping_add(at, 3)) << 24)
 }
 
 fn failed(code: u64, x: u64) -> ChunkSeq[u64] {
@@ -373,9 +374,8 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
             } else if kind == BtfKind::Enum64 {
                 out.push(le32(in types, at));
                 out.push(
-                    le32(in types, wrapping_add(at, 4)) | (
-                        le32(in types, wrapping_add(at, 8)) << 32
-                    )
+                    le32(in types, wrapping_add(at, 4))
+                        | (le32(in types, wrapping_add(at, 8)) << 32)
                 );
             } else if kind == BtfKind::FuncProto {
                 out.push(le32(in types, at));
