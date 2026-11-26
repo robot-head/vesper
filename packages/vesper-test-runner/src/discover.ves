@@ -14,6 +14,7 @@ use @vesper-std/bytes::ascii::{
     APOSTROPHE, AT_SIGN, BACKSLASH, CARRIAGE_RETURN, CLOSE_BRACE, CLOSE_PAREN, COLON, DELETE,
     DIGIT_ZERO, NEWLINE, NUL, OPEN_BRACKET, OPEN_PAREN, QUOTE, SLASH, SPACE, TAB, UNDERSCORE
 };
+use @vesper-std/bytes::bits::bits;
 use self::attrs::{
     Arg, Attrs, CaseAttr, FnAttrs, OptNum, OptText, TestAttr, V_BOOL, V_FLOAT, V_IDENT, V_INT,
     V_RAW, V_STRING, Val, extract_test_attrs, test_attr_new
@@ -403,7 +404,6 @@ const ORDER_LEN: u64 = 2;
 const UNICODE_ESCAPE_DIGITS: u64 = 6;
 const LAST_UNICODE_ESCAPE_DIGIT: u64 = 5;
 const NIBBLE_BITS: u64 = 4;
-const NIBBLE_MASK: u64 = 15;
 
 // The non-ASCII characters `push_debug_str` escapes: the C1 controls, the
 // soft hyphen and the combining diacritical marks (each range end
@@ -477,8 +477,12 @@ fn push_unicode_escape(inout out: ChunkSeq[u8], c: u64) {
     out.extend(in "\\u{".as_bytes());
     let mut started = false;
     for k in 0..UNICODE_ESCAPE_DIGITS {
-        let shift = wrapping_u32(wrapping_mul(sub(LAST_UNICODE_ESCAPE_DIGIT, k), NIBBLE_BITS));
-        let d = wrapping_shr_u64(c, shift) & NIBBLE_MASK;
+        let shift = wrapping_mul(sub(LAST_UNICODE_ESCAPE_DIGIT, k), NIBBLE_BITS);
+        let d = bits{
+            from c;
+            offset shift,
+            width NIBBLE_BITS
+        }.unwrap_or(0);
         if d != 0 || started || k == LAST_UNICODE_ESCAPE_DIGIT {
             out.push(hex_digit(d));
             started = true;
