@@ -2186,12 +2186,10 @@ impl L {
             if shape.kind == SH_SCALAR {
                 continue;
             }
-            if (
-                shape.kind == SH_STR
-                    || shape.kind == SH_TUPLE
-                    || shape.kind == SH_STRUCT
-                    || shape.kind == SH_ENUM
-            )
+            if (shape.kind == SH_STR
+                || shape.kind == SH_TUPLE
+                || shape.kind == SH_STRUCT
+                || shape.kind == SH_ENUM)
                 && self.evacuable(ty)
             {
                 let copy_idx = self.copy_fn(ty);

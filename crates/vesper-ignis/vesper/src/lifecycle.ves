@@ -173,18 +173,16 @@ const MAX_POLL_EVENTS: u64 = 65536;
 const MAX_DRAIN_POLLS: u64 = 65536;
 
 fn limits_valid(l: Limits) -> bool {
-    !(
-        l.max_queues == 0
-            || l.max_queues > MAX_QUEUES
-            || l.max_inflight == 0
-            || l.max_inflight > MAX_INFLIGHT
-            || l.max_commands == 0
-            || l.max_commands > MAX_COMMANDS
-            || l.max_scratch > MAX_SCRATCH
-            || l.max_poll_events == 0
-            || l.max_poll_events > MAX_POLL_EVENTS
-            || l.max_drain_polls > MAX_DRAIN_POLLS
-    )
+    !(l.max_queues == 0
+        || l.max_queues > MAX_QUEUES
+        || l.max_inflight == 0
+        || l.max_inflight > MAX_INFLIGHT
+        || l.max_commands == 0
+        || l.max_commands > MAX_COMMANDS
+        || l.max_scratch > MAX_SCRATCH
+        || l.max_poll_events == 0
+        || l.max_poll_events > MAX_POLL_EVENTS
+        || l.max_drain_polls > MAX_DRAIN_POLLS)
 }
 
 // The checks of `Runtime::new` before a runtime id is allocated.

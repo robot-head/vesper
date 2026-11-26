@@ -591,9 +591,11 @@ fn emit(inout l: L, op: u8, ops_start: u64, s0: u64, s1: u64) -> u32 {
     if op == Op::Bind || op == Op::Write || op == Op::Loop {
         ty = l.ctx.types.unit;
     }
-    let fallible = (
-        op == Op::Binary || op == Op::Unary || op == Op::Write || op == Op::Index || op == Op::Seq
-    )
+    let fallible = (op == Op::Binary
+        || op == Op::Unary
+        || op == Op::Write
+        || op == Op::Index
+        || op == Op::Seq)
         && (l.ctx.world.is_partial(s0, s1) || l.ctx.world.may_overflow(s0, s1));
     push_inst(inout l, op, ops_start, s0, s1, ty, fallible)
 }

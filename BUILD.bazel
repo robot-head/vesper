@@ -1667,6 +1667,7 @@ vesper_package(
     visibility = ["//visibility:public"],
     deps = [
         ":check_data_package",
+        ":std_bytes_package",
     ],
 )
 
@@ -2145,7 +2146,10 @@ vesper_package(
     srcs = glob(["packages/vesper-codegen-export/src/**/*.ves"]),
     manifest = "packages/vesper-codegen-export/Loom.toml",
     visibility = ["//visibility:public"],
-    deps = [":check_data_package"],
+    deps = [
+        ":check_data_package",
+        ":std_bytes_package",
+    ],
 )
 
 vesper_package(
@@ -2156,6 +2160,7 @@ vesper_package(
     deps = [
         ":check_data_package",
         ":codegen_export_package",
+        ":std_bytes_package",
         "//packages/vesper-cranelift:cranelift_package",
     ],
 )

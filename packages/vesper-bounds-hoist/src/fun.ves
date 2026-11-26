@@ -509,13 +509,12 @@ impl Fun {
     // Whether instruction `i` lends a place rooted at `root` other than
     // `in` or by value (`lent` of `single_binding` and `invariant_local`).
     pub fn lends_root(in self, i: Ins, root: u32) -> bool {
-        if !(
-            i.op == Word::Call
-                || i.op == Word::Indirect
-                || i.op == Word::Seq
-                || i.op == Word::Tiled
-                || i.op == Word::Fip
-        ) {
+        if !(i.op == Word::Call
+            || i.op == Word::Indirect
+            || i.op == Word::Seq
+            || i.op == Word::Tiled
+            || i.op == Word::Fip)
+        {
             return false;
         }
         for j in 0..w(i.gn) {

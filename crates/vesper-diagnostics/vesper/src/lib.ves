@@ -2165,10 +2165,8 @@ pub fn terminal(
     bound(work, caps.max_work, Res::Work);
     bound(metadata, caps.max_metadata_bytes, Res::Metadata);
     let pad: u64 = if n > 0
-        && (
-            byte(in t, wrapping_sub(n, 1)) == Ascii::Cr
-                || byte(in t, wrapping_sub(n, 1)) == Ascii::Lf
-        )
+        && (byte(in t, wrapping_sub(n, 1)) == Ascii::Cr
+            || byte(in t, wrapping_sub(n, 1)) == Ascii::Lf)
     {
         1
     } else {

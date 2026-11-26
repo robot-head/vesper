@@ -110,7 +110,7 @@ fn equals(in doc: Doc, in body: Slice[u8], i: u64, in text: Str) -> bool {
 
 // `raw().parse::<i32>()` of a number token: `None` past `i32` (a JSON
 // number token is `-?digits` here or has a fraction or exponent).
-fn parse_i32(in body: Slice[u8], t: Token) -> Option[i64] {
+pub fn parse_i32(in body: Slice[u8], t: Token) -> Option[i64] {
     let mut i = t.start;
     let mut neg = false;
     if byte(in body, i) == Ascii::Dash {
@@ -314,7 +314,7 @@ fn preflight(in doc: Doc, in body: Slice[u8], l: Plimits) -> Env eff [Fail[Perr]
 
 // serde_json reads an integer token `-0` as the float -0.0, which has no
 // `as_i64`.
-fn negative_zero(in body: Slice[u8], t: Token) -> bool {
+pub fn negative_zero(in body: Slice[u8], t: Token) -> bool {
     wrapping_sub(t.end, t.start) == NEGATIVE_ZERO_LEN
         && byte(in body, t.start) == Ascii::Dash
         && byte(in body, wrapping_add(t.start, 1)) == Ascii::Zero

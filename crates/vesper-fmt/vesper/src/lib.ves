@@ -1175,18 +1175,16 @@ fn gap(p: u8, c: u8, block: bool, after_block: bool) -> u8 {
         return if block { G_HARD } else { G_SOFT };
     }
     if after_block
-        && !(
-            c == K_COMMA
-                || c == K_SEMI
-                || c == K_R_PAREN
-                || c == K_R_BRACKET
-                || c == K_DOT
-                || c == K_QUESTION
-                || c == K_ELSE
-                || c == K_WITH
-                || c == K_EQ
-                || c == K_FAT_ARROW
-        )
+        && !(c == K_COMMA
+            || c == K_SEMI
+            || c == K_R_PAREN
+            || c == K_R_BRACKET
+            || c == K_DOT
+            || c == K_QUESTION
+            || c == K_ELSE
+            || c == K_WITH
+            || c == K_EQ
+            || c == K_FAT_ARROW)
     {
         return G_HARD;
     }
@@ -1444,9 +1442,10 @@ fn concat_group(
     }
 }
 
-// A control-flow head that can break at its operators or dots, with the
-// space before its block's `{`: when the head takes more than one line, the
-// `{` goes on a line of its own at the head's indent, like rustfmt.
+// A control-flow head that can break at its operators or dots, or inside a
+// parenthesized operand, with the space before its block's `{`: when the
+// head takes more than one line, the `{` goes on a line of its own at the
+// head's indent, like rustfmt.
 fn head_group(
     inout ids: ChunkSeq[u32],
     inout breaks: ChunkSeq[LayoutBreak],
@@ -1454,7 +1453,13 @@ fn head_group(
     inout out: ChunkSeq[u32]
 ) eff [Fail[FmtFail]] {
     let separator = push_leaf(inout d, D_SOFT_SPACE);
-    let group = layout_line(in ids, in breaks, 0, ids.len(), 0, breaks.len(), separator, inout d);
+    let group = if breaks.len() == 0 {
+        ids.push(wrapping_u32(separator));
+        let concat = push_concat(inout d, in ids.as_slice());
+        push_group(inout d, concat)
+    } else {
+        layout_line(in ids, in breaks, 0, ids.len(), 0, breaks.len(), separator, inout d)
+    };
     out.push(wrapping_u32(group));
     ids.truncate(0);
     breaks.truncate(0);
@@ -1490,14 +1495,12 @@ fn concat4(inout d: Doc, a: u64, b: u64, c: u64, e: u64) -> u64 eff [Fail[FmtFai
 fn word_used_as_name(has_prev: bool, prev: u8, c: u8, next: u8) -> bool {
     let modal = c == K_COPY || c == K_AFFINE;
     (c == K_EFFECT || c == K_HANDLE || c == K_SINK || c == K_INOUT || modal)
-        && (
-            has_prev && (prev == K_DOT || prev == K_FN || prev == K_LET)
-                || is_binary_operator(next)
-                || next == K_QUESTION
-                || modal
-                    && (next == K_L_PAREN || next == K_L_BRACKET)
-                    && !(has_prev && (prev == K_AT || prev == K_AT_AT))
-        )
+        && (has_prev && (prev == K_DOT || prev == K_FN || prev == K_LET)
+            || is_binary_operator(next)
+            || next == K_QUESTION
+            || modal
+                && (next == K_L_PAREN || next == K_L_BRACKET)
+                && !(has_prev && (prev == K_AT || prev == K_AT_AT)))
 }
 
 // `Tagged`: how a tagged sugar call lays out its braces. `TAG_NO`: not a
@@ -1772,6 +1775,36 @@ fn block_argument(in at: Atoms, open: u64, in src: Slice[u8], inout width: u64) 
 // block body, after arguments that stay on that line too
 // (`fold(xs, 0, |a, x| {`). `open` is the call's `(`. Returns the width of
 // the arguments up to and including the delimiter that breaks, or NONE.
+// Whether the `(` at `open` groups one operand, which hugs its parentheses
+// like rustfmt (`(b || c)`): no comma, comment, block or sugar boundary
+// inside, so its contents can break without leaving their line's `(`.
+fn grouping_paren(in at: Atoms, open: u64) -> bool {
+    let n = at.kind.len();
+    let mut depth: u64 = 0;
+    for i in wrapping_add(open, 1)..n {
+        let k = akind(in at, i);
+        if k == K_COMMENT
+            || k == K_BLOCK_COMMENT
+            || k == K_SEMI
+            || k == K_L_BRACE
+            || k == K_R_BRACE
+            || depth == 0 && k == K_COMMA
+            || sugar_at(in at, i)
+        {
+            return false;
+        }
+        if k == K_L_PAREN || k == K_L_BRACKET {
+            depth = wrapping_add(depth, 1);
+        } else if k == K_R_PAREN || k == K_R_BRACKET {
+            if depth == 0 {
+                return true;
+            }
+            depth = wrapping_sub(depth, 1);
+        }
+    }
+    false
+}
+
 fn overflow_argument(in at: Atoms, open: u64, in src: Slice[u8]) -> u64 {
     let n = at.kind.len();
     let mut i = wrapping_add(open, 1);
@@ -1921,6 +1954,9 @@ fn sequence(
     let mut prev: u8 = 0;
     let mut previous_block = false;
     let mut previous_unary = false;
+    // The line holds a parenthesized operand, which breaks inside its
+    // parentheses.
+    let mut line_grouped = false;
     let mut previous_ends_operand = false;
     let mut package = false;
     // Inside the head of an `if`, `match`, `for` or `while` at this level,
@@ -1967,13 +2003,11 @@ fn sequence(
         // An `if` that starts a statement is a value only as its block's last
         // expression.
         let starts_statement = block
-            && (
-                !has_prev
-                    || previous_block
-                    || prev == K_SEMI
-                    || prev == K_COMMENT
-                    || prev == K_BLOCK_COMMENT
-            );
+            && (!has_prev
+                || previous_block
+                || prev == K_SEMI
+                || prev == K_COMMENT
+                || prev == K_BLOCK_COMMENT);
         let short_if_close = if starts_short_if {
             let close = short_if_else(in at, pos, end, in src);
             let next = wrapping_add(close, 1);
@@ -2016,10 +2050,8 @@ fn sequence(
         if c == K_IF
             || c == K_MATCH
             || c == K_LOWER
-                && (
-                    text_is(in src, cs0, ce0, in "for".as_bytes())
-                        || text_is(in src, cs0, ce0, in "while".as_bytes())
-                )
+                && (text_is(in src, cs0, ce0, in "for".as_bytes())
+                    || text_is(in src, cs0, ce0, in "while".as_bytes()))
         {
             head = true;
         } else if c == K_L_BRACE || c == K_SEMI {
@@ -2027,10 +2059,8 @@ fn sequence(
         }
         package = glued
             && has_prev
-            && (
-                prev == K_AT && c == K_LOWER
-                    || package && (c == K_LOWER || c == K_MINUS || c == K_SLASH || c == K_INT)
-            );
+            && (prev == K_AT && c == K_LOWER
+                || package && (c == K_LOWER || c == K_MINUS || c == K_SLASH || c == K_INT));
         let sugar = match at.sgap.try_get(pos) {
             Option::Some(g) => g,
             Option::None => SGAP_NONE,
@@ -2108,6 +2138,7 @@ fn sequence(
         }
         if spacing == G_HARD {
             concat_group(inout line, inout breaks, inout d, inout output);
+            line_grouped = false;
             line_start = indent;
             if blank {
                 output.push(wrapping_u32(push_leaf(inout d, D_NEWLINE)));
@@ -2115,6 +2146,7 @@ fn sequence(
             output.push(wrapping_u32(push_leaf(inout d, D_HARD)));
         } else if spacing == G_SOFT && list && after_comma && !inline {
             concat_group(inout line, inout breaks, inout d, inout output);
+            line_grouped = false;
             line_start = indent;
             separators.push(wrapping_u32(output.len()));
             output.push(wrapping_u32(push_leaf(inout d, D_SOFT_SPACE)));
@@ -2124,6 +2156,7 @@ fn sequence(
             line.push(wrapping_u32(push_leaf(inout d, D_SPACE)));
         } else if spacing == G_RETURN {
             concat_group(inout line, inout breaks, inout d, inout output);
+            line_grouped = false;
             line_start = indent;
             let lead = push_leaf(inout d, D_SOFT_SPACE);
             breaks.push(LayoutBreak { offset: line.len(), level: 1 });
@@ -2157,10 +2190,12 @@ fn sequence(
         }
         if is_block && !soft_block {
             let spaced = spacing == G_SOFT || spacing == G_SPACE;
-            if spaced && after_head && breaks.len() != 0 {
+            if spaced && after_head && (breaks.len() != 0 || line_grouped) {
                 head_group(inout line, inout breaks, inout d, inout output);
+                line_grouped = false;
             } else {
                 concat_group(inout line, inout breaks, inout d, inout output);
+                line_grouped = false;
                 if spaced {
                     output.push(wrapping_u32(push_leaf(inout d, D_SPACE)));
                 }
@@ -2176,6 +2211,7 @@ fn sequence(
         let ce = w32(in at.end, pos);
         pos = wrapping_add(pos, 1);
         let mut params = false;
+        let mut grouped = false;
         let node = if c == K_L_PAREN || c == K_L_BRACKET || c == K_L_BRACE {
             let close = close_of(c);
             let empty = pos < n && akind(in at, pos) == close;
@@ -2185,8 +2221,27 @@ fn sequence(
             // the call's line when its first line fits there, as in rustfmt
             // (`push(Row {`, `fold(xs, 0, |a, x| {`), and breaks inside
             // instead: the column the arguments would start at.
-            let mut overflow = NONE;
-            if c == K_L_PAREN && in_expr && has_prev && (prev == K_LOWER || prev == K_UPPER) {
+            let call = c == K_L_PAREN
+                && in_expr
+                && has_prev
+                && (prev == K_LOWER || prev == K_UPPER);
+            // A parenthesized operand (`a && (b || c)`) hugs its parentheses
+            // like rustfmt: its operators break inside them, nested one level.
+            let grouping = c == K_L_PAREN
+                && in_expr
+                && !empty
+                && (!has_prev
+                    || prev != K_LOWER
+                        && prev != K_UPPER
+                        && prev != K_R_PAREN
+                        && prev != K_R_BRACKET
+                        && prev != K_GT
+                        && (prev != K_BANG || previous_unary))
+                && grouping_paren(in at, wrapping_sub(pos, 1));
+            grouped = grouping;
+            // The column after the `(`.
+            let mut after_open = NONE;
+            if call || grouping {
                 let mut at_column = line_start;
                 for i in 0..line.len() {
                     let w = width_at(in d, w32(in line, i));
@@ -2197,16 +2252,19 @@ fn sequence(
                     };
                 }
                 if at_column != NONE {
-                    at_column = wrapping_add(at_column, 1);
-                    let head = overflow_argument(in at, wrapping_sub(pos, 1), in src);
-                    if head != NONE && wrapping_add(at_column, head) <= LINE_WIDTH {
-                        overflow = at_column;
-                    }
+                    after_open = wrapping_add(at_column, 1);
+                }
+            }
+            let mut overflow = NONE;
+            if call && after_open != NONE {
+                let head = overflow_argument(in at, wrapping_sub(pos, 1), in src);
+                if head != NONE && wrapping_add(after_open, head) <= LINE_WIDTH {
+                    overflow = after_open;
                 }
             }
             // A hugging call does not indent its contents, nor does a call
-            // whose argument stays on its line.
-            let inner_indent = if tagged == TAG_HUG || overflow != NONE {
+            // whose argument stays on its line, nor a parenthesized operand.
+            let inner_indent = if tagged == TAG_HUG || overflow != NONE || grouping {
                 indent
             } else {
                 cadd(indent, 4)
@@ -2221,6 +2279,8 @@ fn sequence(
                 inner_indent,
                 if overflow != NONE {
                     overflow
+                } else if grouping && after_open != NONE {
+                    after_open
                 } else {
                     inner_indent
                 },
@@ -2252,7 +2312,7 @@ fn sequence(
             params = c == K_L_PAREN && !empty && pos < n && akind(in at, pos) == K_ARROW;
             if empty {
                 concat4(inout d, start, finish, 4294967295, 4294967295)
-            } else if overflow != NONE {
+            } else if overflow != NONE || grouping {
                 let all = concat4(inout d, start, inner, finish, 4294967295);
                 push_group(inout d, all)
             } else {
@@ -2310,6 +2370,7 @@ fn sequence(
             output.push(wrapping_u32(node));
         } else {
             line.push(wrapping_u32(node));
+            line_grouped = line_grouped || grouped;
             chain_push(inout chain, width_at(in d, node), c == K_L_PAREN, c);
         }
         // The short `if` ends: it becomes one group that breaks like any
@@ -2843,13 +2904,11 @@ fn sugar_group(inout at: Atoms, in p: P, in src: Slice[u8], start: u64, end: u64
             }
         } else if (k == K_L_BRACE || k == K_STRING)
             && i > start
-            && (
-                prev == K_LOWER
-                    || prev == K_STATE
-                    || prev == K_WITH
-                    || prev == K_EFF
-                    || prev == K_LINEAR
-            )
+            && (prev == K_LOWER
+                || prev == K_STATE
+                || prev == K_WITH
+                || prev == K_EFF
+                || prev == K_LINEAR)
         {
             let gap = if aflags(in at, i) & ATOM_GLUED != 0 {
                 // A nested tagged call (`zip{ a, b }`).

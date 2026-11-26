@@ -328,11 +328,9 @@ fn tokenize(in s: Slice[u8], inout l: Lx) -> Toks {
                 }
                 let c = byte(in s, l.i);
                 if ident_continue(c)
-                    || (
-                        c == 46
-                            && wrapping_add(l.i, 1) < s.len()
-                            && ident_start(byte(in s, wrapping_add(l.i, 1)))
-                    )
+                    || (c == 46
+                        && wrapping_add(l.i, 1) < s.len()
+                        && ident_start(byte(in s, wrapping_add(l.i, 1))))
                 {
                     l.i = wrapping_add(l.i, 1);
                 } else {
@@ -660,9 +658,9 @@ pub fn discover(in s: Slice[u8]) -> Found {
                         if cut {
                             let top = scope_name(in sc);
                             let popped = scope_pop(inout sc);
-                            if !(
-                                (popped == 0 || popped == 1) && same(in top.as_slice(), in s[k..e])
-                            ) {
+                            if !((popped == 0 || popped == 1)
+                                && same(in top.as_slice(), in s[k..e]))
+                            {
                                 return msg(
                                     in "mismatched 'end ",
                                     in s[ns..ne],

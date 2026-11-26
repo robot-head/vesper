@@ -360,10 +360,8 @@ impl Facts {
         for p in 0..f.params.len() {
             let q = f.param(p);
             if q.name == root
-                && (
-                    q.pass == TyPass::In
-                        || (q.pass == TyPass::Inout && whole && (q.flags & TY_SLICE) != 0)
-                )
+                && (q.pass == TyPass::In
+                    || (q.pass == TyPass::Inout && whole && (q.flags & TY_SLICE) != 0))
             {
                 borrowed = true;
             }

@@ -617,10 +617,8 @@ fn trim_back(in path: Slice[u8], end: u64, root: u64, windows: bool, verbatim: b
             trimmed_end = wrapping_sub(trimmed_end, 1);
         } else if !verbatim
             && last == Ascii::Dot
-            && (
-                wrapping_sub(trimmed_end, 1) == root
-                    || is_sep(byte_at(in path, wrapping_sub(trimmed_end, 2)), windows, verbatim)
-            )
+            && (wrapping_sub(trimmed_end, 1) == root
+                || is_sep(byte_at(in path, wrapping_sub(trimmed_end, 2)), windows, verbatim))
         {
             // A `.` component, unless it is the path's first (`./x` keeps it).
             if wrapping_sub(trimmed_end, 1) == 0 {

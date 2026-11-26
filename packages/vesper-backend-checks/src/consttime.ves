@@ -449,9 +449,9 @@ fn check(inout ctx: Cx, in taint: Ct, in declassify: ChunkSeq[u64], in trusted: 
                     report(inout ctx, inout seen, k, 2, func_name, ent, message_at);
                 }
             }
-        } else if op == OP_STACK_ADDR || op == OP_STACK_LOAD || op == OP_STACK_STORE {} else if (
-            fmt == FMT_LOAD || fmt == FMT_LOAD_NO_OFFSET
-        )
+        } else if op == OP_STACK_ADDR || op == OP_STACK_LOAD || op == OP_STACK_STORE {} else if (fmt
+            == FMT_LOAD
+            || fmt == FMT_LOAD_NO_OFFSET)
             && flags & CAN_LOAD != 0
         {
             let v = arg(in ctx, row, 0);

@@ -796,3 +796,77 @@ and 1,633 cancelled tokens matched with 0 diffs.
 
 Rust lines deleted: 0.
 
+
+# Part 10b (#1828): parameter checks
+
+The session's parameter checks now run in `@vesper/lsp` over the
+`@vesper/serde` token tape, with 0 diffs, at 1.28x Rust's time:
+
+- `validate_input` (src/lsp/session.rs): the method label (empty, over 256
+  bytes, or holding a C0 or C1 control), then a walk of the parameters
+  that refuses past 64 levels, 2 MiB of key and string bytes, or 65,536
+  nodes. Rust walks a `serde_json::Value` whose objects are `BTreeMap`s,
+  so the walk here visits members in key order too, and the first bound
+  broken is the same one. A linear scan of the tape passes values that
+  are within every bound however they are walked, which is nearly all of
+  them. The walk counts an object's members before reading its keys, as
+  Rust does, and orders them with a merge sort.
+- `cancel_params` (crates/vesper-lsp/src/lens.rs): an `i32` id, or a
+  string id of at most 1,024 bytes.
+- The `vesper.proofAudit` checks of `workspace/executeCommand`, in Rust's
+  order: the command, one argument object, its allowed keys, `uri` and
+  `function` (at most 1,024 bytes), `obligation` (`extraction` or
+  `semantic`), the open document, and the expected version (`-32801` when
+  it changed).
+
+## What changed
+
+- Rust: the argument checks of `Session::execute_command` move unchanged
+  into the free function `proof_command`
+  (src/lsp/session/lens_requests.rs), which `execute_command` calls. The
+  hidden hook `vesper::lsp::command_checks_for_port` runs all three checks
+  as rows.
+- `packages/vesper-lsp/src/commands.ves` adds the entry `lsp_commands`.
+  `parse_i32` and `negative_zero` in envelope.ves are now public, so
+  integer ids and versions follow serde_json's number rules as they do
+  for envelope ids.
+- `tests/self_host_lsp_core.rs` adds `commands_match_rust` and the ignored
+  `commands_speed`.
+
+## Differential
+
+635 checks: 441 `validate_input` cases, 30 cancel parameter cases and 164
+`vesper.proofAudit` calls. They cover:
+
+- method labels at the 256-byte bound and with each kind of control
+- depths 63 to 66, and 65,535 to 65,537 nodes
+- strings and keys at 2 MiB
+- objects whose key order decides which bound breaks first, including
+  escaped keys and objects of 1,000 and 4,000 members in reverse order
+- 400 seeded random values
+- ids and versions at the i32 bounds, `-1`, `-0`, floats and exponents
+- escaped strings at the 1,024-byte bounds
+- every argument refusal
+
+171 refusals and 464 passes matched with 0 diffs.
+
+## Numbers
+
+Rust is timed on parameters that are already `serde_json::Value`s.
+Vesper parses each tape once per 64 rounds. The 2 MiB and 65,536-node
+cases are left out of the timing.
+
+| Checks | Rust | Vesper | Ratio |
+|---|--:|--:|--:|
+| `validate_input` (437) | 52 ns | 64 ns | 1.24x |
+| `cancel_params` (30) | 49 ns | 154 ns | 3.12x |
+| `vesper.proofAudit` (137) | 216 ns | 261 ns | 1.21x |
+| All 604 | 88 ns | 112 ns | **1.28x** |
+
+The cancel cases are slow because of four 1 KiB string ids, two of them
+with escapes. serde's string decoder copies those a character at a time,
+where Rust clones the string. Without parameters over 200 bytes the cancel
+checks run at 0.64x and all checks at 1.08x.
+
+Rust lines deleted: 0. The checks are not wired: Rust stays the default
+until the hybrid wiring part.
