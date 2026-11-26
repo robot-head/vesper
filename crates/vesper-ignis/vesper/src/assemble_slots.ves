@@ -124,17 +124,16 @@ fn boxes(
                 }
             }
         }
-        out
-            .push(
-                SubresourceRange {
-                    first_mip: m0,
-                    mip_count: mips,
-                    first_slice: s0,
-                    slice_count: slices,
-                    first_plane: p0,
-                    plane_count: planes
-                }
-            );
+        out.push(
+            SubresourceRange {
+                first_mip: m0,
+                mip_count: mips,
+                first_slice: s0,
+                slice_count: slices,
+                first_plane: p0,
+                plane_count: planes
+            }
+        );
     }
     out
 }
@@ -171,46 +170,43 @@ fn file_barrier(
         end.sync_before = split_bit();
         let seq1 = items.len();
         let at1 = pending.len();
-        items
-            .push(
-                SlotItem {
-                    slot: 1,
-                    value: pk1,
-                    resource: b.resource,
-                    range: key,
-                    seq: seq1,
-                    barrier: at1
-                }
-            );
+        items.push(
+            SlotItem {
+                slot: 1,
+                value: pk1,
+                resource: b.resource,
+                range: key,
+                seq: seq1,
+                barrier: at1
+            }
+        );
         pending.push(begin);
         let seq2 = items.len();
         let at2 = pending.len();
-        items
-            .push(
-                SlotItem {
-                    slot: 0,
-                    value: pk2,
-                    resource: b.resource,
-                    range: key,
-                    seq: seq2,
-                    barrier: at2
-                }
-            );
+        items.push(
+            SlotItem {
+                slot: 0,
+                value: pk2,
+                resource: b.resource,
+                range: key,
+                seq: seq2,
+                barrier: at2
+            }
+        );
         pending.push(end);
     } else {
         let seq0 = items.len();
         let at0 = pending.len();
-        items
-            .push(
-                SlotItem {
-                    slot: pk0,
-                    value: pk1,
-                    resource: b.resource,
-                    range: key,
-                    seq: seq0,
-                    barrier: at0
-                }
-            );
+        items.push(
+            SlotItem {
+                slot: pk0,
+                value: pk1,
+                resource: b.resource,
+                range: key,
+                seq: seq0,
+                barrier: at0
+            }
+        );
         pending.push(b);
     }
 }
@@ -353,16 +349,14 @@ fn emit_slot(
 fn emit_waits(inout out: PlanOut, in list: ChunkSeq[Pair], in value_of: ChunkSeq[u64], queue: u32) {
     for i in 0..list.len() {
         match list.try_get(i) {
-            Option::Some(w) => out
-                .cmds
-                .push(
-                    CmdRec {
-                        queue: queue,
-                        tag: 0,
-                        a: widen_u64(w.key),
-                        b: get64(in value_of, widen_u64(w.value))
-                    }
-                ),
+            Option::Some(w) => out.cmds.push(
+                CmdRec {
+                    queue: queue,
+                    tag: 0,
+                    a: widen_u64(w.key),
+                    b: get64(in value_of, widen_u64(w.value))
+                }
+            ),
             Option::None => (),
         }
     }

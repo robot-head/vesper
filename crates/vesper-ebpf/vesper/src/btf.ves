@@ -359,14 +359,13 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
                 || kind == BtfKind::FuncProto
         );
         out.push(kind);
-        out
-            .push(
-                if named {
-                    name
-                } else {
-                    0
-                }
-            );
+        out.push(
+            if named {
+                name
+            } else {
+                0
+            }
+        );
         out.push(a);
         out.push(b);
         out.push(c);
@@ -388,22 +387,20 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
             } else if kind == BtfKind::Enum {
                 out.push(le32(in types, at));
                 let v = le32(in types, wrapping_add(at, 4));
-                out
-                    .push(
-                        if kflag {
-                            sext32(v)
-                        } else {
-                            v
-                        }
-                    );
+                out.push(
+                    if kflag {
+                        sext32(v)
+                    } else {
+                        v
+                    }
+                );
             } else if kind == BtfKind::Enum64 {
                 out.push(le32(in types, at));
-                out
-                    .push(
-                        le32(in types, wrapping_add(at, 4)) | (
-                            le32(in types, wrapping_add(at, 8)) << 32
-                        )
-                    );
+                out.push(
+                    le32(in types, wrapping_add(at, 4)) | (
+                        le32(in types, wrapping_add(at, 8)) << 32
+                    )
+                );
             } else if kind == BtfKind::FuncProto {
                 out.push(le32(in types, at));
                 out.push(le32(in types, wrapping_add(at, 4)));

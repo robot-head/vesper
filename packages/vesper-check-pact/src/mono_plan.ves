@@ -524,14 +524,13 @@ fn plan_body(
             for gi in 0..w(tr.gn) {
                 let g = gen_at(in sess.d.gens, add(w(tr.ga), gi));
                 let a = vars.get(g.name);
-                args
-                    .push(
-                        if a != NONE32 {
-                            a
-                        } else {
-                            infer_ty
-                        }
-                    );
+                args.push(
+                    if a != NONE32 {
+                        a
+                    } else {
+                        infer_ty
+                    }
+                );
             }
             let cx = get_call_cx(in cp, in m, origin_idx, cidx);
             let (ok, conf_idx) = select_evidence(
@@ -704,14 +703,13 @@ fn mono_plan_body(
     let nf = m.fn_names.len();
     let mut fn_has_dyn = ChunkSeq::with_capacity[u8](nf);
     for _ in 0..nf {
-        fn_has_dyn
-            .push(
-                if r.word(in b) != 0 {
-                    1
-                } else {
-                    0
-                }
-            );
+        fn_has_dyn.push(
+            if r.word(in b) != 0 {
+                1
+            } else {
+                0
+            }
+        );
     }
     let mut errors = diags_new();
     let bounded = close_bounded(in sess.c.types, in sess.c.names, in m, inout errors);
@@ -744,20 +742,19 @@ fn mono_plan_body(
     out.push(errors.codes.len());
     for i in 0..errors.codes.len() {
         let c = u8_at(in errors.codes, i);
-        out
-            .push(
-                if c == 1 {
-                    1
-                } else if c == 2 {
-                    2
-                } else if c == 3 {
-                    3
-                } else if c == 4 {
-                    4
-                } else {
-                    0
-                }
-            );
+        out.push(
+            if c == 1 {
+                1
+            } else if c == 2 {
+                2
+            } else if c == 3 {
+                3
+            } else if c == 4 {
+                4
+            } else {
+                0
+            }
+        );
         out.push(u64_at(in errors.s, i));
         out.push(u64_at(in errors.e, i));
         let ma = w(u32_at(in errors.msg_a, i));

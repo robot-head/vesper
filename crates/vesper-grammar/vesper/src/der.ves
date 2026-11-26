@@ -931,15 +931,14 @@ fn build(
     }
     if kind == 0 {
         let start = put_header(inout out, at, 0, 1);
-        out
-            .try_set(
-                start,
-                if vw(in vals, vid, 1) != 0 {
-                    wrapping_u8(TRUE)
-                } else {
-                    0
-                }
-            );
+        out.try_set(
+            start,
+            if vw(in vals, vid, 1) != 0 {
+                wrapping_u8(TRUE)
+            } else {
+                0
+            }
+        );
         return wrapping_add(start, 1);
     }
     if kind == 4 {

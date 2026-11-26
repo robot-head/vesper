@@ -143,14 +143,13 @@ fn put_err(inout o: ChunkSeq[u64], in g: G, in names: Names) {
     if g.err == 1 {
         o.push(widen_u64(g.err_rule));
         put_sym(inout o, in names, g.err_fn);
-        o
-            .push(
-                if g.err_has_span {
-                    1
-                } else {
-                    0
-                }
-            );
+        o.push(
+            if g.err_has_span {
+                1
+            } else {
+                0
+            }
+        );
         o.push(g.err_s0);
         o.push(g.err_s1);
     }

@@ -1015,14 +1015,13 @@ impl Gen {
                         put(inout self.o, in "binary ");
                         self.name(op);
                         self.o.push(32);
-                        self
-                            .decide_binary(
-                                op,
-                                self.p.op(inc(i.a)),
-                                self.p.op(add(i.a, 2)),
-                                i.s0,
-                                i.s1
-                            );
+                        self.decide_binary(
+                            op,
+                            self.p.op(inc(i.a)),
+                            self.p.op(add(i.a, 2)),
+                            i.s0,
+                            i.s1
+                        );
                     } else if i.op == Op::Loop {
                         put(inout self.o, in "loop");
                     } else {

@@ -1127,14 +1127,13 @@ fn write_object(in p: Prog, inout out: ChunkSeq[u8]) -> u64 {
         sym_sec.push(0);
         sym_value.push(wrapping_mul(e, 8));
         sym_size.push(wrapping_mul(wrapping_sub(end, e), 8));
-        sym_local
-            .push(
-                if i == 0 {
-                    0
-                } else {
-                    1
-                }
-            );
+        sym_local.push(
+            if i == 0 {
+                0
+            } else {
+                1
+            }
+        );
         sym_func.push(1);
     }
     let nsyms = sym_a.len();

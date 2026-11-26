@@ -434,8 +434,7 @@ pub fn put_u64(inout l: L, n: u64) {
     l.pool.resize(add(base, d), Ascii::Zero);
     x = n;
     for i in 0..d {
-        let _ = l
-            .pool
+        let _ = l.pool
             .try_set(wrapping_sub(add(base, d), inc(i)), wrapping_u8(add(x % 10, Ascii::Zero)));
         x = x / 10;
     }

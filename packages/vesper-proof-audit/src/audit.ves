@@ -1082,14 +1082,13 @@ fn audit_in(
             refuse(inout a, in "imported module escaped the artifact/toolchain roots");
             return;
         }
-        import_artifact
-            .push(
-                if in_snapshot {
-                    1
-                } else {
-                    0
-                }
-            );
+        import_artifact.push(
+            if in_snapshot {
+                1
+            } else {
+                0
+            }
+        );
         if in_snapshot {
             file_parts(
                 inout a,

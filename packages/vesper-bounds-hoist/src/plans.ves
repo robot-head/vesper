@@ -1707,24 +1707,22 @@ pub fn dominated_list(in f: Fun) -> ChunkSeq[u64] {
             ab.push(b);
             ak.push(kk);
             ap.push(recv.place);
-            aconst
-                .push(
-                    if is_const {
-                        1
-                    } else {
-                        0
-                    }
-                );
+            aconst.push(
+                if is_const {
+                    1
+                } else {
+                    0
+                }
+            );
             alo.push(lo);
             ahi.push(hi);
-            achecked
-                .push(
-                    if i.sub >= S_GET && i.sub <= S_SLICE_SET {
-                        1
-                    } else {
-                        0
-                    }
-                );
+            achecked.push(
+                if i.sub >= S_GET && i.sub <= S_SLICE_SET {
+                    1
+                } else {
+                    0
+                }
+            );
         }
     }
     // Facts per block: the checked accesses of the blocks that strictly

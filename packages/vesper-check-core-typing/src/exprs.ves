@@ -575,20 +575,18 @@ pub fn read_fns(inout r: Reader, in b: Slice[u8], inout ck: Ck) {
         let effectful = r.word(in b) != 0;
         let inferred = tyw(in ck.c, r.word(in b));
         let id = n32(ck.fns.len());
-        ck
-            .fns
-            .push(
-                FnSig {
-                    name: name,
-                    ga: ga,
-                    gn: n32(gn),
-                    pa: pa,
-                    pn: n32(pn),
-                    result: result,
-                    effectful: effectful,
-                    inferred: inferred
-                }
-            );
+        ck.fns.push(
+            FnSig {
+                name: name,
+                ga: ga,
+                gn: n32(gn),
+                pa: pa,
+                pn: n32(pn),
+                result: result,
+                effectful: effectful,
+                inferred: inferred
+            }
+        );
         set_by_symbol(inout ck.fn_by_name, name, inc32w(id));
     }
 }
