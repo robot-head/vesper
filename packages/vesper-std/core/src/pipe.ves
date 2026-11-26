@@ -96,8 +96,7 @@ test {
     }
 
     fn run_placeholder(inout log: i64, ok: bool) -> i64 eff [Fail[i64]] {
-        source(inout log, ok)
-            |?> digits(record(inout log, 2), _, record(inout log, 3))
+        source(inout log, ok) |?> digits(record(inout log, 2), _, record(inout log, 3))
     }
 
     // @case success(true, 213, 123)
