@@ -1,0 +1,784 @@
+// The session's parameter checks over the serde port's token tape:
+// `validate_input` (src/lsp/session.rs), `cancel_params`
+// (crates/vesper-lsp/src/lens.rs) and the `vesper.proofAudit` argument
+// checks (`proof_command`, src/lsp/session/lens_requests.rs).
+//
+// Rust walks a `serde_json::Value`, whose objects are `BTreeMap`s, so
+// `validate_input` meets an object's members in key order; the walk here
+// pushes them in that order too, so the first bound it breaks is the same.
+use @vesper/serde::{Doc, Error, Kind, Limits, Token, doc_parse, string_equals};
+use @vesper/serde::index::{tok};
+use self::envelope::{NO_TOKEN, decoded, negative_zero, new_doc, parse_i32};
+use self::limits::{Le, le};
+
+// `validate_input`'s bounds.
+const MAX_METHOD_BYTES: u64 = 256;
+const MAX_PARAM_DEPTH: u64 = 64;
+const MAX_PARAM_STRING_BYTES: u64 = 2097152;
+const MAX_PARAM_NODES: u64 = 65536;
+// `cancel_params`: the longest string id, in bytes.
+const MAX_CANCEL_ID_BYTES: u64 = 1024;
+// `proof_command`: the longest function name, in bytes.
+const MAX_FUNCTION_NAME_BYTES: u64 = 1024;
+
+// JSON-RPC error codes, as magnitudes (every one is negative).
+const CODE_INVALID_REQUEST: u64 = 32600;
+const CODE_INVALID_PARAMS: u64 = 32602;
+const CODE_CONTENT_MODIFIED: u64 = 32801;
+
+// The tape limits the parameters are read under: the widest the tape
+// takes (`HARD_DEPTH` deep), since Rust's checks see the whole value.
+const TAPE_DEPTH: u64 = 128;
+const TAPE_BYTES: u64 = 67108864;
+const TAPE_TOKENS: u64 = 4194304;
+const TAPE_WORK: u64 = 1073741824;
+const TAPE_INDEX_BYTES: u64 = 1073741824;
+
+// UTF-8 bytes of the C0 and C1 controls (`char::is_control`).
+const C0_END: u8 = 0x20;
+const DELETE: u8 = 0x7f;
+const C1_LEAD: u8 = 0xc2;
+const C1_FIRST: u8 = 0x80;
+const C1_LAST: u8 = 0x9f;
+
+// Row bytes.
+const B_SPACE: u8 = 32;
+const B_LEN_END: u8 = 58;
+const B_NEWLINE: u8 = 10;
+const B_ZERO: u8 = 48;
+const DECIMAL: u64 = 10;
+
+// Check kinds (`PortCheck` in src/lsp/session.rs, from 1).
+const CHECK_INPUT: u64 = 1;
+const CHECK_CANCEL: u64 = 2;
+const CHECK_PROOF: u64 = 3;
+
+// Input words: the header, then per open document and per check
+// (`command_checks_input` in tests/self_host_lsp_core.rs).
+const HEADER_WORDS: u64 = 4;
+const DOC_WORDS: u64 = 3;
+const CHECK_WORDS: u64 = 5;
+
+// A refusal (`ServerError` or `LensError::InvalidCancel`), `RfNone` when
+// the check passes; the variants are prefixed `Rf` because variant names
+// share one namespace.
+pub copy enum Refusal {
+    RfNone,
+    RfMethodLabel,
+    RfDepth,
+    RfStringBytes,
+    RfNodes,
+    RfNotObject,
+    RfMissingCommand,
+    RfMissingArguments,
+    RfMissingUri,
+    RfMissingFunction,
+    RfCommandString,
+    RfUriString,
+    RfFunctionString,
+    RfObligationString,
+    RfUnknownCommand,
+    RfOneArgument,
+    RfUnknownArgument,
+    RfFunctionTooLong,
+    RfObligation,
+    RfNotOpen,
+    RfVersion,
+    RfVersionChanged,
+    RfCancel,
+    RfJson
+}
+
+fn code_of(r: Refusal) -> u64 {
+    match r {
+        Refusal::RfMethodLabel => CODE_INVALID_REQUEST,
+        Refusal::RfVersionChanged => CODE_CONTENT_MODIFIED,
+        _ => CODE_INVALID_PARAMS,
+    }
+}
+
+fn message_of(r: Refusal) -> Str {
+    match r {
+        Refusal::RfMethodLabel => "invalid method label",
+        Refusal::RfDepth => "parameter depth exceeds 64",
+        Refusal::RfStringBytes => "parameter string bytes exceed 2 MiB",
+        Refusal::RfNodes => "parameter nodes exceed limit",
+        Refusal::RfNotObject => "parameters must be an object",
+        Refusal::RfMissingCommand => "missing command",
+        Refusal::RfMissingArguments => "missing arguments",
+        Refusal::RfMissingUri => "missing uri",
+        Refusal::RfMissingFunction => "missing function",
+        Refusal::RfCommandString => "command must be a string",
+        Refusal::RfUriString => "uri must be a string",
+        Refusal::RfFunctionString => "function must be a string",
+        Refusal::RfObligationString => "obligation must be a string",
+        Refusal::RfUnknownCommand => "unknown command",
+        Refusal::RfOneArgument => "vesper.proofAudit takes one argument object",
+        Refusal::RfUnknownArgument => "unknown vesper.proofAudit argument",
+        Refusal::RfFunctionTooLong => "function name is too long",
+        Refusal::RfObligation => "obligation must be \"extraction\" or \"semantic\"",
+        Refusal::RfNotOpen => "document URI is not open",
+        Refusal::RfVersion => "version must be an i32",
+        Refusal::RfVersionChanged => "Document version has changed",
+        Refusal::RfCancel => "cancel parameters need an integer or string id",
+        Refusal::RfJson => "parameters are not JSON",
+        Refusal::RfNone => "",
+    }
+}
+
+// The walk's reused storage.
+struct Walk {
+    stack: ChunkSeq[u64],
+    depths: ChunkSeq[u64],
+    keys: ChunkSeq[u64],
+    key_at: ChunkSeq[u64],
+    key_len: ChunkSeq[u64],
+    key_src: ChunkSeq[u64],
+    values: ChunkSeq[u64],
+    scratch: ChunkSeq[u8]
+}
+
+fn g64(in v: ChunkSeq[u64], i: u64) -> u64 {
+    match v.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn token(in doc: Doc, i: u64) -> Token {
+    tok(in doc.tokens, i)
+}
+
+fn kind_is(in doc: Doc, i: u64, k: Kind) -> bool {
+    i != NO_TOKEN && token(in doc, i).kind == k
+}
+
+// The member or element count of the container at `i`.
+fn children(in doc: Doc, i: u64, object: bool) -> u64 {
+    let end = token(in doc, i).next;
+    let mut j = wrapping_add(i, 1);
+    let mut n: u64 = 0;
+    loop {
+        if j >= end {
+            break;
+        }
+        n = wrapping_add(n, 1);
+        if object {
+            j = token(in doc, wrapping_add(j, 1)).next;
+        } else {
+            j = token(in doc, j).next;
+        }
+    }
+    n
+}
+
+// Byte `i` of member key `k`: in the body when it has no escapes, else
+// decoded in the scratch.
+fn key_byte(in body: Slice[u8], in w: Walk, k: u64, i: u64) -> u8 {
+    let at = wrapping_add(g64(in w.key_at, k), i);
+    if g64(in w.key_src, k) == 0 {
+        body.try_get(at).unwrap_or(0)
+    } else {
+        w.scratch.try_get(at).unwrap_or(0)
+    }
+}
+
+// Key `x` sorts before key `y`, bytewise (`String`'s order).
+fn key_less(in body: Slice[u8], in w: Walk, x: u64, y: u64) -> bool {
+    let xn = g64(in w.key_len, x);
+    let yn = g64(in w.key_len, y);
+    let n = if xn < yn { xn } else { yn };
+    for i in 0..n {
+        let p = key_byte(in body, in w, x, i);
+        let q = key_byte(in body, in w, y, i);
+        if p != q {
+            return p < q;
+        }
+    }
+    xn < yn
+}
+
+fn refused(r: Refusal) -> bool {
+    match r {
+        Refusal::RfNone => false,
+        _ => true,
+    }
+}
+
+// An object's members: count them, charge each key, then push the
+// values in key order (the last key's value is walked next).
+fn walk_object(
+    in doc: Doc,
+    in body: Slice[u8],
+    inout w: Walk,
+    i: u64,
+    depth: u64,
+    inout enqueued: u64,
+    inout bytes: u64
+) -> Refusal {
+    w.keys.truncate(0);
+    w.key_at.truncate(0);
+    w.key_len.truncate(0);
+    w.key_src.truncate(0);
+    w.values.truncate(0);
+    w.scratch.truncate(0);
+    let end = token(in doc, i).next;
+    let mut j = wrapping_add(i, 1);
+    loop {
+        if j >= end {
+            break;
+        }
+        let kt = token(in doc, j);
+        bytes = wrapping_add(bytes, kt.decoded_len);
+        if kt.escaped {
+            w.key_at.push(w.scratch.len());
+            w.key_src.push(1);
+            decoded(in doc, in body, j, inout w.scratch);
+        } else {
+            w.key_at.push(wrapping_add(kt.start, 1));
+            w.key_src.push(0);
+        }
+        w.key_len.push(kt.decoded_len);
+        // Insertion by key: `keys` holds member numbers in key order.
+        let k = w.keys.len();
+        w.keys.push(k);
+        let mut p = k;
+        loop {
+            if p == 0 {
+                break;
+            }
+            let before = g64(in w.keys, wrapping_sub(p, 1));
+            if !key_less(in body, in w, k, before) {
+                break;
+            }
+            let _ = w.keys.try_set(p, before);
+            p = wrapping_sub(p, 1);
+        }
+        let _ = w.keys.try_set(p, k);
+        w.values.push(wrapping_add(j, 1));
+        j = token(in doc, wrapping_add(j, 1)).next;
+    }
+    // Rust counts the members, then charges the keys: a byte total only
+    // grows, so the sum breaks the bound exactly when some key does.
+    enqueued = wrapping_add(enqueued, w.keys.len());
+    if enqueued > MAX_PARAM_NODES {
+        return Refusal::RfNodes;
+    }
+    if bytes > MAX_PARAM_STRING_BYTES {
+        return Refusal::RfStringBytes;
+    }
+    for n in 0..w.keys.len() {
+        w.stack.push(g64(in w.values, g64(in w.keys, n)));
+        w.depths.push(wrapping_add(depth, 1));
+    }
+    Refusal::RfNone
+}
+
+// Whether the value at `params` keeps every bound however it is walked:
+// at most 64 below it, at most 2 MiB of key and string bytes and at most
+// 65,536 tokens (keys included, so at least as many as the walk counts).
+// The tape gives a key its value's depth.
+fn within_bounds(in doc: Doc, params: u64) -> bool {
+    let root = token(in doc, params);
+    if wrapping_sub(root.next, params) > MAX_PARAM_NODES {
+        return false;
+    }
+    let deepest = wrapping_add(root.depth, MAX_PARAM_DEPTH);
+    let mut bytes: u64 = 0;
+    for i in params..root.next {
+        let t = token(in doc, i);
+        if t.depth > deepest {
+            return false;
+        }
+        if t.kind == Kind::String {
+            bytes = wrapping_add(bytes, t.decoded_len);
+        }
+    }
+    bytes <= MAX_PARAM_STRING_BYTES
+}
+
+// `validate_input`'s parameter walk over the value at `params`.
+fn validate_params(in doc: Doc, in body: Slice[u8], inout w: Walk, params: u64) -> Refusal {
+    w.stack.truncate(0);
+    w.depths.truncate(0);
+    if params == NO_TOKEN || within_bounds(in doc, params) {
+        return Refusal::RfNone;
+    }
+    w.stack.push(params);
+    w.depths.push(0);
+    let mut enqueued: u64 = 1;
+    let mut bytes: u64 = 0;
+    loop {
+        let top = w.stack.len();
+        if top == 0 {
+            break;
+        }
+        let last = wrapping_sub(top, 1);
+        let i = g64(in w.stack, last);
+        let depth = g64(in w.depths, last);
+        w.stack.truncate(last);
+        w.depths.truncate(last);
+        if depth > MAX_PARAM_DEPTH {
+            return Refusal::RfDepth;
+        }
+        let t = token(in doc, i);
+        match t.kind {
+            Kind::String => {
+                bytes = wrapping_add(bytes, t.decoded_len);
+                if bytes > MAX_PARAM_STRING_BYTES {
+                    return Refusal::RfStringBytes;
+                }
+            }
+            Kind::Array => {
+                enqueued = wrapping_add(enqueued, children(in doc, i, false));
+                if enqueued > MAX_PARAM_NODES {
+                    return Refusal::RfNodes;
+                }
+                let mut j = wrapping_add(i, 1);
+                loop {
+                    if j >= t.next {
+                        break;
+                    }
+                    w.stack.push(j);
+                    w.depths.push(wrapping_add(depth, 1));
+                    j = token(in doc, j).next;
+                }
+            }
+            Kind::Object => {
+                let r = walk_object(
+                    in doc,
+                    in body,
+                    inout w,
+                    i,
+                    depth,
+                    inout enqueued,
+                    inout bytes
+                );
+                if refused(r) {
+                    return r;
+                }
+            }
+            _ => {}
+        }
+    }
+    Refusal::RfNone
+}
+
+// `method.is_empty() || method.len() > 256 || method.chars().any(char::is_control)`.
+fn bad_method(in m: Slice[u8]) -> bool {
+    if m.len() == 0 || m.len() > MAX_METHOD_BYTES {
+        return true;
+    }
+    for i in 0..m.len() {
+        let c = m.try_get(i).unwrap_or(0);
+        if c < C0_END || c == DELETE {
+            return true;
+        }
+        if c == C1_LEAD {
+            let d = m.try_get(wrapping_add(i, 1)).unwrap_or(0);
+            if d >= C1_FIRST && d <= C1_LAST {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// `Map::get`: the value token of key `name` in the object at `object`
+// (keys are unique: the tape refuses duplicates).
+fn field(in doc: Doc, in body: Slice[u8], object: u64, in name: Str) -> u64 {
+    let end = token(in doc, object).next;
+    let mut k = wrapping_add(object, 1);
+    loop {
+        if k >= end {
+            return NO_TOKEN;
+        }
+        if equals(in doc, in body, k, in name) {
+            return wrapping_add(k, 1);
+        }
+        k = token(in doc, wrapping_add(k, 1)).next;
+    }
+}
+
+fn equals(in doc: Doc, in body: Slice[u8], i: u64, in text: Str) -> bool {
+    same(in doc, in body, i, in text.as_bytes(), 0, text.len())
+}
+
+// String token `i` decodes to `text[at..at + len]`. Without escapes its
+// content is its decoded text, compared a word at a time.
+fn same(in doc: Doc, in body: Slice[u8], i: u64, in text: Slice[u8], at: u64, len: u64) -> bool {
+    let t = token(in doc, i);
+    let start = wrapping_add(t.start, 1);
+    if t.escaped {
+        let end = wrapping_add(at, len);
+        return string_equals(in body[start..wrapping_sub(t.end, 1)], in text[at..end]);
+    }
+    if t.decoded_len != len {
+        return false;
+    }
+    let mut k: u64 = 0;
+    loop {
+        if wrapping_add(k, Le::WordBytes) > len {
+            break;
+        }
+        let x = body.try_read_u64_le(wrapping_add(start, k)).unwrap_or(0);
+        let y = text.try_read_u64_le(wrapping_add(at, k)).unwrap_or(1);
+        if x != y {
+            return false;
+        }
+        k = wrapping_add(k, Le::WordBytes);
+    }
+    loop {
+        if k >= len {
+            return true;
+        }
+        if body.try_get(wrapping_add(start, k)) != text.try_get(wrapping_add(at, k)) {
+            return false;
+        }
+        k = wrapping_add(k, 1);
+    }
+}
+
+// `as_i64()` then `i32::try_from`: an integer token (not `-0`) in range.
+fn int32(in doc: Doc, in body: Slice[u8], i: u64) -> Option[i64] {
+    if !kind_is(in doc, i, Kind::Number) {
+        return Option::None;
+    }
+    let t = token(in doc, i);
+    if negative_zero(in body, t) {
+        return Option::None;
+    }
+    parse_i32(in body, t)
+}
+
+// The refusal of string field `i`: missing, or not a string.
+fn string_refusal(in doc: Doc, i: u64, missing: Refusal, not_string: Refusal) -> Refusal {
+    if i == NO_TOKEN {
+        missing
+    } else if !kind_is(in doc, i, Kind::String) {
+        not_string
+    } else {
+        Refusal::RfNone
+    }
+}
+
+fn is_argument(in doc: Doc, in body: Slice[u8], k: u64) -> bool {
+    equals(in doc, in body, k, "uri")
+        || equals(in doc, in body, k, "version")
+        || equals(in doc, in body, k, "function")
+        || equals(in doc, in body, k, "obligation")
+}
+
+// The open documents: URI spans in the blob and versions.
+struct Open {
+    at: ChunkSeq[u64],
+    len: ChunkSeq[u64],
+    version: ChunkSeq[u64]
+}
+
+// `proof_command`'s result: the URI and function tokens, the obligation,
+// or the refusal.
+copy struct Proof {
+    refusal: Refusal,
+    uri: u64,
+    function: u64,
+    semantic: bool
+}
+
+fn refuse(r: Refusal) -> Proof {
+    Proof { refusal: r, uri: NO_TOKEN, function: NO_TOKEN, semantic: false }
+}
+
+fn proof_command(
+    in doc: Doc,
+    in body: Slice[u8],
+    inout w: Walk,
+    params: u64,
+    in blob: Slice[u8],
+    in open: Open
+) -> Proof {
+    let r = validate_params(in doc, in body, inout w, params);
+    if refused(r) {
+        return refuse(r);
+    }
+    if !kind_is(in doc, params, Kind::Object) {
+        return refuse(Refusal::RfNotObject);
+    }
+    let command = field(in doc, in body, params, "command");
+    let r = string_refusal(in doc, command, Refusal::RfMissingCommand, Refusal::RfCommandString);
+    if refused(r) {
+        return refuse(r);
+    }
+    if !equals(in doc, in body, command, "vesper.proofAudit") {
+        return refuse(Refusal::RfUnknownCommand);
+    }
+    let arguments = field(in doc, in body, params, "arguments");
+    if arguments == NO_TOKEN {
+        return refuse(Refusal::RfMissingArguments);
+    }
+    if !kind_is(in doc, arguments, Kind::Array) || children(in doc, arguments, false) != 1 {
+        return refuse(Refusal::RfOneArgument);
+    }
+    let argument = wrapping_add(arguments, 1);
+    if !kind_is(in doc, argument, Kind::Object) {
+        return refuse(Refusal::RfNotObject);
+    }
+    let end = token(in doc, argument).next;
+    let mut k = wrapping_add(argument, 1);
+    loop {
+        if k >= end {
+            break;
+        }
+        if !is_argument(in doc, in body, k) {
+            return refuse(Refusal::RfUnknownArgument);
+        }
+        k = token(in doc, wrapping_add(k, 1)).next;
+    }
+    let uri = field(in doc, in body, argument, "uri");
+    let r = string_refusal(in doc, uri, Refusal::RfMissingUri, Refusal::RfUriString);
+    if refused(r) {
+        return refuse(r);
+    }
+    let function = field(in doc, in body, argument, "function");
+    let r = string_refusal(in doc, function, Refusal::RfMissingFunction, Refusal::RfFunctionString);
+    if refused(r) {
+        return refuse(r);
+    }
+    if token(in doc, function).decoded_len > MAX_FUNCTION_NAME_BYTES {
+        return refuse(Refusal::RfFunctionTooLong);
+    }
+    let mut semantic = false;
+    let obligation = field(in doc, in body, argument, "obligation");
+    if obligation != NO_TOKEN {
+        if !kind_is(in doc, obligation, Kind::String) {
+            return refuse(Refusal::RfObligationString);
+        }
+        if equals(in doc, in body, obligation, "semantic") {
+            semantic = true;
+        } else if !equals(in doc, in body, obligation, "extraction") {
+            return refuse(Refusal::RfObligation);
+        }
+    }
+    let mut current = NO_TOKEN;
+    for d in 0..open.at.len() {
+        if current == NO_TOKEN
+            && same(in doc, in body, uri, in blob, g64(in open.at, d), g64(in open.len, d)) {
+            current = g64(in open.version, d);
+        }
+    }
+    if current == NO_TOKEN {
+        return refuse(Refusal::RfNotOpen);
+    }
+    let version = field(in doc, in body, argument, "version");
+    if version != NO_TOKEN {
+        match int32(in doc, in body, version) {
+            Option::Some(v) => {
+                if wrapping_u64(v) != current {
+                    return refuse(Refusal::RfVersionChanged);
+                }
+            }
+            Option::None => return refuse(Refusal::RfVersion),
+        }
+    }
+    Proof { refusal: Refusal::RfNone, uri: uri, function: function, semantic: semantic }
+}
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn put_u64(inout o: ChunkSeq[u8], v: u64) {
+    if v >= DECIMAL {
+        put_u64(inout o, v / DECIMAL);
+    }
+    o.push(wrapping_u8(wrapping_add(v % DECIMAL, widen_u64(B_ZERO))));
+}
+
+fn put_i64(inout o: ChunkSeq[u8], v: i64) {
+    if v < 0 {
+        put(inout o, in "-");
+        put_u64(inout o, wrapping_sub(0, wrapping_u64(v)));
+    } else {
+        put_u64(inout o, wrapping_u64(v));
+    }
+}
+
+// A decoded string as `<len>:<bytes>`.
+fn put_string(inout o: ChunkSeq[u8], in doc: Doc, in body: Slice[u8], i: u64) {
+    let t = token(in doc, i);
+    put_u64(inout o, t.decoded_len);
+    o.push(B_LEN_END);
+    if t.escaped {
+        decoded(in doc, in body, i, inout o);
+    } else {
+        o.extend(in body[wrapping_add(t.start, 1)..wrapping_sub(t.end, 1)]);
+    }
+}
+
+fn put_refusal(inout o: ChunkSeq[u8], r: Refusal) {
+    match r {
+        Refusal::RfCancel => put(inout o, in "E cancel "),
+        _ => {
+            put(inout o, in "E -");
+            put_u64(inout o, code_of(r));
+            o.push(B_SPACE);
+        }
+    }
+    put(inout o, in message_of(r));
+}
+
+fn parse(inout doc: Doc, in body: Slice[u8]) -> bool {
+    let l = Limits {
+        max_input_bytes: TAPE_BYTES,
+        max_depth: TAPE_DEPTH,
+        max_tokens: TAPE_TOKENS,
+        max_string_bytes: TAPE_BYTES,
+        max_total_string_bytes: TAPE_BYTES,
+        max_work: TAPE_WORK,
+        max_index_bytes: TAPE_INDEX_BYTES
+    };
+    handle Fail[Error] in {
+        doc_parse(inout doc, in body, l);
+        true
+    } with {
+        return v => v,
+        raise(e, resume) => false,
+    }
+}
+
+// One check's row.
+fn check_row(
+    inout o: ChunkSeq[u8],
+    kind: u64,
+    in method: Slice[u8],
+    in doc: Doc,
+    in body: Slice[u8],
+    params: u64,
+    inout w: Walk,
+    in blob: Slice[u8],
+    in open: Open
+) {
+    let mut r = Refusal::RfNone;
+    if kind == CHECK_INPUT {
+        if bad_method(in method) {
+            r = Refusal::RfMethodLabel;
+        } else {
+            r = validate_params(in doc, in body, inout w, params);
+        }
+        if !refused(r) {
+            put(inout o, in ".");
+        }
+    } else if kind == CHECK_CANCEL {
+        let id = if kind_is(in doc, params, Kind::Object) {
+            field(in doc, in body, params, "id")
+        } else {
+            NO_TOKEN
+        };
+        if kind_is(in doc, id, Kind::String)
+            && token(in doc, id).decoded_len <= MAX_CANCEL_ID_BYTES {
+            put(inout o, in "s ");
+            put_string(inout o, in doc, in body, id);
+        } else {
+            match int32(in doc, in body, id) {
+                Option::Some(v) => {
+                    put(inout o, in "i ");
+                    put_i64(inout o, v);
+                }
+                Option::None => {
+                    r = Refusal::RfCancel;
+                }
+            }
+        }
+    } else if kind == CHECK_PROOF {
+        let p = proof_command(in doc, in body, inout w, params, in blob, in open);
+        r = p.refusal;
+        if !refused(r) {
+            put(inout o, in "P ");
+            put_string(inout o, in doc, in body, p.uri);
+            o.push(B_SPACE);
+            put_string(inout o, in doc, in body, p.function);
+            if p.semantic {
+                put(inout o, in " 1");
+            } else {
+                put(inout o, in " 0");
+            }
+        }
+    }
+    if refused(r) {
+        put_refusal(inout o, r);
+    }
+}
+
+// Task "commands": `command_checks_input` in tests/self_host_lsp_core.rs.
+// The input words are the word count W, the rounds, the open document
+// count, the check count, three words per document (URI start and length
+// in the blob, version as an i64) and five per check (kind, method start
+// and length, parameter start and length, start `NO_TOKEN` when there are
+// none), offsets from the blob, which starts at byte W * 8. Each check runs `rounds` times and
+// the result is its last rows' text.
+pub fn command_checks(in b: Slice[u8]) -> ChunkSeq[u8] {
+    let words = le(in b, 0, 0);
+    let rounds = le(in b, 0, 1);
+    let n_docs = le(in b, 0, 2);
+    let n_checks = le(in b, 0, 3);
+    let base = wrapping_mul(words, Le::WordBytes);
+    let mut open = Open { at: ChunkSeq::new(), len: ChunkSeq::new(), version: ChunkSeq::new() };
+    for d in 0..n_docs {
+        let w0 = wrapping_add(HEADER_WORDS, wrapping_mul(d, DOC_WORDS));
+        open.at.push(wrapping_add(base, le(in b, 0, w0)));
+        open.len.push(le(in b, 0, wrapping_add(w0, 1)));
+        open.version.push(le(in b, 0, wrapping_add(w0, 2)));
+    }
+    let checks_at = wrapping_add(HEADER_WORDS, wrapping_mul(n_docs, DOC_WORDS));
+    let mut w = Walk {
+        stack: ChunkSeq::new(),
+        depths: ChunkSeq::new(),
+        keys: ChunkSeq::new(),
+        key_at: ChunkSeq::new(),
+        key_len: ChunkSeq::new(),
+        key_src: ChunkSeq::new(),
+        values: ChunkSeq::new(),
+        scratch: ChunkSeq::new()
+    };
+    let mut doc = new_doc();
+    let mut out: ChunkSeq[u8] = ChunkSeq::new();
+    let mut row: ChunkSeq[u8] = ChunkSeq::new();
+    for c in 0..n_checks {
+        let w0 = wrapping_add(checks_at, wrapping_mul(c, CHECK_WORDS));
+        let kind = le(in b, 0, w0);
+        let m_at = wrapping_add(base, le(in b, 0, wrapping_add(w0, 1)));
+        let m_end = wrapping_add(m_at, le(in b, 0, wrapping_add(w0, 2)));
+        let p_at = le(in b, 0, wrapping_add(w0, 3));
+        let mut b_at: u64 = 0;
+        let mut b_end: u64 = 0;
+        let mut params = NO_TOKEN;
+        let mut json = true;
+        if p_at != NO_TOKEN {
+            b_at = wrapping_add(base, p_at);
+            b_end = wrapping_add(b_at, le(in b, 0, wrapping_add(w0, 4)));
+            json = parse(inout doc, in b[b_at..b_end]);
+            params = 0;
+        }
+        if !json {
+            put_refusal(inout out, Refusal::RfJson);
+        } else {
+            for r in 0..rounds {
+                row.truncate(0);
+                check_row(
+                    inout row,
+                    kind,
+                    in b[m_at..m_end],
+                    in doc,
+                    in b[b_at..b_end],
+                    params,
+                    inout w,
+                    in b,
+                    in open
+                );
+            }
+            out.extend(in row[0..row.len()]);
+        }
+        out.push(B_NEWLINE);
+    }
+    out
+}
