@@ -26,6 +26,7 @@
 // |     fn hd_step(inout s: Session, step: u32, nocapture in arg: CSlice[u8]) -> ForeignVal[i64];
 // |     fn hd_text(in s: Session, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
 // |     fn hd_parsed(inout s: Session, nocapture in words: CSlice[u64]) -> ForeignVal[i64];
+// |     fn hd_assembled(inout s: Session, nocapture in words: CSlice[u64]) -> ForeignVal[i64];
 // |     fn hd_front_begin() -> ForeignVal[u32];
 // |     fn hd_write(inout s: Session, nocapture in text: CSlice[u8]) -> ForeignVal[i64];
 // | }
@@ -53,6 +54,8 @@ use @vesper/driver-commands::{
 };
 // Target triples (#1896).
 use @vesper/driver::triple::{is_windows as triple_is_windows};
+// The package assembly of the package load (#1986).
+use self::assemble::{assembled_words};
 // hd_step group 2 (#1893): the front-end passes in Vesper.
 use self::front::{parse_clean, cst_text};
 use self::interface::{interface_json};
@@ -357,7 +360,7 @@ fn load_input(inout s: Session, in o: Options, inout source: ChunkSeq[u8], inout
         if err.len() != 0 {
             return error(in err.as_slice());
         }
-        step(inout s, step_load_package())
+        load_package(inout s)
     } else {
         let failed = handle Fail[IoError] in {
             source = read_path(in input.as_slice());
@@ -382,6 +385,22 @@ fn load_input(inout s: Session, in o: Options, inout source: ChunkSeq[u8], inout
         return count_error(r, in "package error(s)");
     }
     0
+}
+
+// `packages::load_for_target`: the Rust loader reads the package graph,
+// and when it hands the graph over (as the session's text) the driver
+// assembles it (assemble.ves, #1986).
+fn load_package(inout s: Session) -> i64 eff [Ffi[HybridDriver]] {
+    let r = step(inout s, step_load_package());
+    if r != 0 {
+        return r;
+    }
+    let graph = text(in s);
+    if graph.len() == 0 {
+        return 0;
+    }
+    let words = assembled_words(in graph.as_slice());
+    HybridDriver::hd_assembled(inout s, in words.as_slice())
 }
 
 // `packages::is_package`: `path.is_dir() && path.join("Loom.toml").is_file()`.

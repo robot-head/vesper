@@ -17,17 +17,11 @@ pub fn start(in s: Strs, i: u64) -> u64 {
     if i == 0 {
         return 0;
     }
-    match s.ends.try_get(wrapping_sub(i, 1)) {
-        Option::Some(e) => e,
-        Option::None => 0,
-    }
+    s.ends.try_get(wrapping_sub(i, 1)).unwrap_or(0)
 }
 
 pub fn end(in s: Strs, i: u64) -> u64 {
-    match s.ends.try_get(i) {
-        Option::Some(e) => e,
-        Option::None => 0,
-    }
+    s.ends.try_get(i).unwrap_or(0)
 }
 
 pub fn push(inout s: Strs, in b: Slice[u8]) {
@@ -43,10 +37,7 @@ pub fn get(in s: Strs, i: u64) -> ChunkSeq[u8] {
 }
 
 pub fn byte(in s: Slice[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(b) => b,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 pub fn same(in a: Slice[u8], in b: Slice[u8]) -> bool {
@@ -119,10 +110,7 @@ pub fn order(in s: Strs) -> ChunkSeq[u64] {
             if at == 0 {
                 break;
             }
-            let prev = match idx.try_get(wrapping_sub(at, 1)) {
-                Option::Some(p) => p,
-                Option::None => 0,
-            };
+            let prev = idx.try_get(wrapping_sub(at, 1)).unwrap_or(0);
             let c = compare(
                 in s.bytes[start(in s, prev)..end(in s, prev)],
                 in s.bytes[start(in s, i)..end(in s, i)]
@@ -143,10 +131,7 @@ pub fn set_of(in s: Strs) -> Strs {
     let idx = order(in s);
     let mut out = strs_new();
     for k in 0..idx.len() {
-        let i = match idx.try_get(k) {
-            Option::Some(i) => i,
-            Option::None => 0,
-        };
+        let i = idx.try_get(k).unwrap_or(0);
         let b = s.bytes[start(in s, i)..end(in s, i)];
         let n = count(in out);
         if n == 0

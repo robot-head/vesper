@@ -491,6 +491,7 @@ pub fn collect_all_bytes(inout s: St, in input: Slice[u8]) {
             Option::Some(src) => lower_source_perm(in src.as_str(), inout ast_perm, ast_perm_end),
             Option::None => lower_source_perm(in "", inout ast_perm, ast_perm_end),
         };
+        s.parse_errors = wrapping_add(s.parse_errors, l.p.d.code.len());
         begin_module(inout s);
         collect(inout s, in l.ast, n32(m));
         constants(inout s, in l, n32(m));

@@ -15,10 +15,7 @@ pub const MARKER_SUFFIX: Str = "$macro_provenance";
 pub const MODULE_MARKER: Str = "vesper$macro_provenance";
 
 fn at(in s: Slice[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 fn cut_start(in cut: Slice[u64], i: u64) -> u64 {

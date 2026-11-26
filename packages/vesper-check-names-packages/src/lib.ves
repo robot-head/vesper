@@ -638,7 +638,13 @@ pub struct AssemblyMetadata {
     file_display: ChunkSeq[u32],
     file_base: ChunkSeq[u64],
     // Assembler diagnostics in the canonical `diag ...` text format.
-    diagnostics: ChunkSeq[u8]
+    diagnostics: ChunkSeq[u8],
+    // The same as rows: per diagnostic its file, code (111 for E0111),
+    // start, end (file-local), message length and help length (`u64::MAX`
+    // for none); the message and help bytes follow each other in
+    // `diagnostic_text`.
+    diagnostic_rows: ChunkSeq[u64],
+    diagnostic_text: ChunkSeq[u8]
 }
 
 pub fn assembly_begin(in input: Str) -> Assembly {
@@ -654,6 +660,11 @@ pub fn assembly_begin_bytes(in input: Slice[u8]) -> Assembly {
     hidden_and_variants(inout s);
     literals(inout s);
     Assembly { state: s, next: 0 }
+}
+
+/// The number of parse diagnostics across the graph's modules.
+pub fn assembly_parse_errors(in a: Assembly) -> u64 {
+    a.state.parse_errors
 }
 
 /// `input` is the same encoded graph passed to `assembly_begin`. Each
@@ -680,7 +691,9 @@ pub fn assembly_metadata(sink a: Assembly) -> AssemblyMetadata {
         qualified: a.state.qualified,
         file_display: a.state.file_display,
         file_base: a.state.file_base,
-        diagnostics: a.state.diags
+        diagnostics: a.state.diags,
+        diagnostic_rows: a.state.diag_rows,
+        diagnostic_text: a.state.diag_text
     }
 }
 
