@@ -1,0 +1,76 @@
+// The atomic prelude (src/atomics.rs): the `Atomic[T]` cell, its orders and its operations.
+struct Atomic[T: mod copy] {
+    cell: ChunkSeq[T]
+}
+copy enum MemoryOrder {
+    Relaxed,
+    Acquire,
+    Release,
+    AcqRel,
+    SeqCst
+}
+impl [T: mod copy] Atomic[T] {
+    fn new(value: T) -> Atomic[T] {
+        let mut cell: ChunkSeq[T] = ChunkSeq::with_capacity[T](1);
+        cell.push(value);
+        Atomic { cell: cell }
+    }
+    fn load(in self, order: MemoryOrder) -> T {
+        match self.cell.try_get(0) {
+            Option::Some(v) => v,
+            Option::None => self.load(order)
+        }
+    }
+    fn store(in self, value: T, order: MemoryOrder) {
+        match self.cell.try_get(0) {
+            Option::Some(_) => self.store(value, order),
+            Option::None => ()
+        }
+    }
+    fn swap(in self, value: T, order: MemoryOrder) -> T {
+        match self.cell.try_get(0) {
+            Option::Some(_) => self.swap(value, order),
+            Option::None => value
+        }
+    }
+    fn compare_exchange(in self, current: T, new: T, success: MemoryOrder, failure: MemoryOrder)
+        -> Result[T, T] {
+        match self.cell.try_get(0) {
+            Option::Some(_) => self.compare_exchange(current, new, success, failure),
+            Option::None => Result::Err(current),
+        }
+    }
+    fn fetch_add(in self, value: T, order: MemoryOrder) -> T {
+        match self.cell.try_get(0) {
+            Option::Some(_) => self.fetch_add(value, order),
+            Option::None => value
+        }
+    }
+    fn fetch_sub(in self, value: T, order: MemoryOrder) -> T {
+        match self.cell.try_get(0) {
+            Option::Some(_) => self.fetch_sub(value, order),
+            Option::None => value
+        }
+    }
+    fn fetch_and(in self, value: T, order: MemoryOrder) -> T {
+        match self.cell.try_get(0) {
+            Option::Some(_) => self.fetch_and(value, order),
+            Option::None => value
+        }
+    }
+    fn fetch_or(in self, value: T, order: MemoryOrder) -> T {
+        match self.cell.try_get(0) {
+            Option::Some(_) => self.fetch_or(value, order),
+            Option::None => value
+        }
+    }
+    fn fetch_xor(in self, value: T, order: MemoryOrder) -> T {
+        match self.cell.try_get(0) {
+            Option::Some(_) => self.fetch_xor(value, order),
+            Option::None => value
+        }
+    }
+    fn into_inner(sink self) -> T {
+        self.load(MemoryOrder::SeqCst)
+    }
+}
