@@ -507,19 +507,17 @@ fn translate(
                             let other_base = get64(in l.reserved, other.index);
                             match fence_add(other_base, c.value) {
                                 FenceSum::Value(v) => {
-                                    out.cmds.push(
-                                        SubCmd {
-                                            stream: s32,
-                                            tag: 0,
-                                            point: Point {
-                                                runtime: other.runtime,
-                                                index: other.index,
-                                                value: v
-                                            },
-                                            source: ci,
-                                            initialize: false
-                                        }
-                                    );
+                                    out.cmds.push(SubCmd {
+                                        stream: s32,
+                                        tag: 0,
+                                        point: Point {
+                                            runtime: other.runtime,
+                                            index: other.index,
+                                            value: v
+                                        },
+                                        source: ci,
+                                        initialize: false
+                                    });
                                     emitted = wrapping_add(emitted, 1);
                                 },
                                 FenceSum::Overflow => {
@@ -533,19 +531,17 @@ fn translate(
                                         return refuse(LifeError::FenceOverflow);
                                     }
                                     high = v;
-                                    out.cmds.push(
-                                        SubCmd {
-                                            stream: s32,
-                                            tag: 4,
-                                            point: Point {
-                                                runtime: own.runtime,
-                                                index: own.index,
-                                                value: v
-                                            },
-                                            source: ci,
-                                            initialize: false
-                                        }
-                                    );
+                                    out.cmds.push(SubCmd {
+                                        stream: s32,
+                                        tag: 4,
+                                        point: Point {
+                                            runtime: own.runtime,
+                                            index: own.index,
+                                            value: v
+                                        },
+                                        source: ci,
+                                        initialize: false
+                                    });
                                     emitted = wrapping_add(emitted, 1);
                                 },
                                 FenceSum::Overflow => {
@@ -554,45 +550,39 @@ fn translate(
                             }
                         } else if c.tag == 1 {
                             total = wrapping_add(total, c.barriers);
-                            out.cmds.push(
-                                SubCmd {
-                                    stream: s32,
-                                    tag: 1,
-                                    point: Point { runtime: 0, index: 0, value: 0 },
-                                    source: ci,
-                                    initialize: false
-                                }
-                            );
+                            out.cmds.push(SubCmd {
+                                stream: s32,
+                                tag: 1,
+                                point: Point { runtime: 0, index: 0, value: 0 },
+                                source: ci,
+                                initialize: false
+                            });
                             emitted = wrapping_add(emitted, 1);
                         } else {
                             for x in 0..scratch.len() {
                                 match scratch.try_get(x) {
                                     Option::Some(sc) => {
                                         if sc.pass_graph == c.graph && sc.pass_index == c.index {
-                                            out.cmds.push(
-                                                SubCmd {
-                                                    stream: s32,
-                                                    tag: 2,
-                                                    point: Point { runtime: 0, index: 0, value: 0 },
-                                                    source: x,
-                                                    initialize: sc.initialize
-                                                }
-                                            );
+                                            out.cmds.push(SubCmd {
+                                                stream: s32,
+                                                tag: 2,
+                                                point: Point { runtime: 0, index: 0, value: 0 },
+                                                source: x,
+                                                initialize: sc.initialize
+                                            });
                                             emitted = wrapping_add(emitted, 1);
                                         }
                                     },
                                     Option::None => (),
                                 }
                             }
-                            out.cmds.push(
-                                SubCmd {
-                                    stream: s32,
-                                    tag: 3,
-                                    point: Point { runtime: 0, index: 0, value: 0 },
-                                    source: ci,
-                                    initialize: false
-                                }
-                            );
+                            out.cmds.push(SubCmd {
+                                stream: s32,
+                                tag: 3,
+                                point: Point { runtime: 0, index: 0, value: 0 },
+                                source: ci,
+                                initialize: false
+                            });
                             emitted = wrapping_add(emitted, 1);
                         }
                     }
@@ -673,14 +663,12 @@ pub fn lifecycle_submit(
                         ),
                         Option::None => get_binding(in bindings, 0),
                     };
-                    l.cmds.push(
-                        FlightCmd {
-                            runtime: own.runtime,
-                            index: own.index,
-                            signal: c.tag == 4,
-                            point: c.point
-                        }
-                    );
+                    l.cmds.push(FlightCmd {
+                        runtime: own.runtime,
+                        index: own.index,
+                        signal: c.tag == 4,
+                        point: c.point
+                    });
                 }
             },
             Option::None => (),
@@ -694,16 +682,14 @@ pub fn lifecycle_submit(
         }
     }
     let cmd_count = wrapping_sub(l.cmds.len(), first_cmd);
-    l.flights.push(
-        Flight {
-            ticket: ticket,
-            uncertain: true,
-            first_cmd: first_cmd,
-            cmd_count: cmd_count,
-            first_term: first_term,
-            term_count: t.terminal.len()
-        }
-    );
+    l.flights.push(Flight {
+        ticket: ticket,
+        uncertain: true,
+        first_cmd: first_cmd,
+        cmd_count: cmd_count,
+        first_term: first_term,
+        term_count: t.terminal.len()
+    });
     t
 }
 

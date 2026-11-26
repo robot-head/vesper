@@ -703,22 +703,20 @@ impl Planner {
                 return false;
             }
         }
-        self.bound.push(
-            BoundOp {
-                op: bind.op,
-                read: bind.read,
-                buffer: buffer,
-                buffer_size: buffer_size,
-                result: result,
-                value: bind.value,
-                value_field: value_field,
-                error: bind.error,
-                error_field: error_field,
-                cancel_ctor: bind.cancel_ctor,
-                cancel: bind.cancel,
-                code: bind.code
-            }
-        );
+        self.bound.push(BoundOp {
+            op: bind.op,
+            read: bind.read,
+            buffer: buffer,
+            buffer_size: buffer_size,
+            result: result,
+            value: bind.value,
+            value_field: value_field,
+            error: bind.error,
+            error_field: error_field,
+            cancel_ctor: bind.cancel_ctor,
+            cancel: bind.cancel,
+            code: bind.code
+        });
         true
     }
 
@@ -922,9 +920,11 @@ impl Planner {
                     );
                 }
             }
-            self.effects.push(
-                BoundEffect { name: d.name, a: a, n: n32(wrapping_sub(self.bound.len(), w(a))) }
-            );
+            self.effects.push(BoundEffect {
+                name: d.name,
+                a: a,
+                n: n32(wrapping_sub(self.bound.len(), w(a)))
+            });
         }
         for i in 0..bindings.len() {
             let b = binding_at(in bindings, i);

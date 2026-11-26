@@ -616,13 +616,11 @@ fn offer_stream_chunk(inout c: ConnCore, id: u64, limit: u64) -> Option[FlushSte
     }
     c.fl_cur_id = id;
     c.fl_cur_limit = limit;
-    Option::Some(
-        FlushStep::Write {
-            stream_id: id,
-            off: hr.off,
-            len: min64(hr.len, rem),
-        }
-    )
+    Option::Some(FlushStep::Write {
+        stream_id: id,
+        off: hr.off,
+        len: min64(hr.len, rem),
+    })
 }
 
 fn finish_flush(inout c: ConnCore) -> FlushStep {

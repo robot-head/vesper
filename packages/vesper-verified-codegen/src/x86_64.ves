@@ -293,16 +293,14 @@ fn prologue(inout a: Asm, n: u32) {
     a.frame = n;
     if a.windows {
         let alloc_end = wrapping_u8(wrapping_sub(here(in a), start));
-        a.prologues.push(
-            Prologue {
-                start: start,
-                push_end: push_end,
-                alloc_end: alloc_end,
-                frame: n,
-                has_end: false,
-                end: 0
-            }
-        );
+        a.prologues.push(Prologue {
+            start: start,
+            push_end: push_end,
+            alloc_end: alloc_end,
+            frame: n,
+            has_end: false,
+            end: 0
+        });
     }
 }
 

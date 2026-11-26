@@ -1155,19 +1155,17 @@ fn read_function(
         let marker = reader.field(in bytes);
         let link = reader.field(in bytes);
     }
-    state.funs.push(
-        Fun {
-            sym: sym,
-            param_start: param_start,
-            param_count: param_count,
-            result: result,
-            errno: errno,
-            has_variadic: has_variadic,
-            variadic_first: variadic_first,
-            lib: lib,
-            indirect: indirect
-        }
-    );
+    state.funs.push(Fun {
+        sym: sym,
+        param_start: param_start,
+        param_count: param_count,
+        result: result,
+        errno: errno,
+        has_variadic: has_variadic,
+        variadic_first: variadic_first,
+        lib: lib,
+        indirect: indirect
+    });
 }
 
 // Function rows funs[first..first+n] in symbol order (insertion sort, stable).
@@ -1241,14 +1239,12 @@ pub fn read_library(in bytes: Slice[u8], start: u64, end: u64, handler: u64, ino
             state.variant_names.push(variant_name);
             let value = reader.field(in bytes);
         }
-        state.enums.push(
-            EnumRow {
-                name: enum_name,
-                scalar: scalar,
-                variant_start: variant_start,
-                variant_count: variant_count
-            }
-        );
+        state.enums.push(EnumRow {
+            name: enum_name,
+            scalar: scalar,
+            variant_start: variant_start,
+            variant_count: variant_count
+        });
     }
     let fun_start = state.funs.len();
     let fun_decl_count = reader.count(in bytes);
@@ -1317,15 +1313,13 @@ pub fn read_library(in bytes: Slice[u8], start: u64, end: u64, handler: u64, ino
                 }
                 state.wire_fields.push(field);
             }
-            state.wire_structs.push(
-                Ws {
-                    name: wire_name,
-                    size: size,
-                    align: align,
-                    field_start: field_start,
-                    field_count: field_count
-                }
-            );
+            state.wire_structs.push(Ws {
+                name: wire_name,
+                size: size,
+                align: align,
+                field_start: field_start,
+                field_count: field_count
+            });
         }
     }
     let wire_count = wrapping_sub(state.wire_structs.len(), wire_start);
@@ -1356,15 +1350,13 @@ pub fn read_library(in bytes: Slice[u8], start: u64, end: u64, handler: u64, ino
         for i in 0..extern_count {
             let extern_name = field_sym(inout reader, in bytes, inout state);
             let (lo, hi) = reader.field(in bytes);
-            state.extern_types.push(
-                Xt {
-                    name: extern_name,
-                    linear: field_is(in bytes, lo, hi, in "linear"),
-                    copy: false,
-                    drop: NONE,
-                    mapping: NONE
-                }
-            );
+            state.extern_types.push(Xt {
+                name: extern_name,
+                linear: field_is(in bytes, lo, hi, in "linear"),
+                copy: false,
+                drop: NONE,
+                mapping: NONE
+            });
         }
         if peek_is(in reader, in bytes, in "drop-imports") {
             let marker2 = reader.field(in bytes);
@@ -1431,23 +1423,21 @@ pub fn read_library(in bytes: Slice[u8], start: u64, end: u64, handler: u64, ino
                 .push(ConstRow { name: const_name, scalar: const_scalar, neg: neg, value: value });
         }
     }
-    state.libs.push(
-        Lib {
-            name: name,
-            handler: handler,
-            triple: triple,
-            enum_start: enum_start,
-            enum_count: enum_count,
-            fun_start: fun_start,
-            fun_count: fun_count,
-            wire_start: wire_start,
-            wire_count: wire_count,
-            extern_start: extern_start,
-            extern_count: wrapping_sub(state.extern_types.len(), extern_start),
-            const_start: const_start,
-            const_count: wrapping_sub(state.consts.len(), const_start)
-        }
-    );
+    state.libs.push(Lib {
+        name: name,
+        handler: handler,
+        triple: triple,
+        enum_start: enum_start,
+        enum_count: enum_count,
+        fun_start: fun_start,
+        fun_count: fun_count,
+        wire_start: wire_start,
+        wire_count: wire_count,
+        extern_start: extern_start,
+        extern_count: wrapping_sub(state.extern_types.len(), extern_start),
+        const_start: const_start,
+        const_count: wrapping_sub(state.consts.len(), const_start)
+    });
 }
 
 // ----- the type mapping (types.rs) --------------------------------------------
@@ -1672,14 +1662,12 @@ pub fn generate(inout state: S) -> Err {
                 || find_ge(in state, ext_type.name) != NONE64 {
                 return duplicate(inout state, ext_type.name);
             }
-            state.gen_handles.push(
-                Gh {
-                    name: ext_type.name,
-                    linear: ext_type.linear,
-                    copy: ext_type.copy,
-                    mapping: ext_type.mapping
-                }
-            );
+            state.gen_handles.push(Gh {
+                name: ext_type.name,
+                linear: ext_type.linear,
+                copy: ext_type.copy,
+                mapping: ext_type.mapping
+            });
         }
     }
     for i in 0.. state.params.len() {

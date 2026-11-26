@@ -11,3 +11,7 @@ When migrating an existing script, update its callers and tests to use the repla
 # CI runners
 
 Never start the Platforms workflow by hand, for a pull request or a branch. `Native platform checks` starts its macOS and Windows checks on its own once `Native and acceptance scripts` is green and no BuildBuddy check has failed. A hand start takes one of the account's 5 macOS runners and nine Linux port shards, and runs queued behind hand starts have waited hours. Leave reruns and hand dispatches to a maintainer.
+
+# Magic values
+
+Name every magic value. A number or string whose meaning isn't plain where it's used, such as a size, limit, timeout, record offset, opcode, flag bit or a tag compared as text, gets a named constant, or an enum when it is one of a closed set. Define a value once and reuse it wherever it means the same thing. In Vesper, use `const`; in a package whose language subset has no `const`, such as `packages/vesper-compiler`, use a zero-argument function as that package already does. Leave plain values alone: 0, 1 and -1 as identities or steps, test fixture data, and a value already named by what it initializes, such as a field in a `Default` impl.

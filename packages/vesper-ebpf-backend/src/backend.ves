@@ -1426,9 +1426,14 @@ fn map_effect(
     }
     let index = g.map_defs.len();
     let msym = c.names.intern(in map_name.as_slice());
-    g.map_defs.push(
-        MapRow { name: msym, kind: mkind, key: key_bytes, value: value_bytes, max: max, flags: 0 }
-    );
+    g.map_defs.push(MapRow {
+        name: msym,
+        kind: mkind,
+        key: key_bytes,
+        value: value_bytes,
+        max: max,
+        flags: 0
+    });
     g.map_effects.push(name);
     for k in 0..decl.on {
         let o = x.op(add(decl.oa, k));
@@ -1644,16 +1649,14 @@ fn read_params(inout g: G, in p: Program, f: FnRow) {
         let pass = wrapping_u8(p.op(inc(at)));
         let k = p.op(add(at, 2));
         let t = add(at, add(3, k));
-        g.params.push(
-            PInfo {
-                name: name,
-                pass: pass,
-                nproj: k,
-                ty: pos32(in p, t),
-                s0: p.op(inc(t)),
-                s1: p.op(add(t, 2))
-            }
-        );
+        g.params.push(PInfo {
+            name: name,
+            pass: pass,
+            nproj: k,
+            ty: pos32(in p, t),
+            s0: p.op(inc(t)),
+            s1: p.op(add(t, 2))
+        });
         at = add(t, 3);
     }
 }

@@ -184,15 +184,13 @@ fn on_syn_sent(
 }
 
 fn rst_to_peer(inout t: Tcb, seq: u32) {
-    t.pending_rst = Option::Some(
-        RstSpec {
-            ips: some_ips(t.ips),
-            src_port: t.cfg.local_port,
-            dst_port: t.remote_port,
-            seq: seq,
-            ack: Option::None
-        }
-    );
+    t.pending_rst = Option::Some(RstSpec {
+        ips: some_ips(t.ips),
+        src_port: t.cfg.local_port,
+        dst_port: t.remote_port,
+        seq: seq,
+        ack: Option::None
+    });
 }
 
 fn on_synchronized(

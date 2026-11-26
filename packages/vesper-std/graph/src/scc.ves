@@ -174,9 +174,11 @@ impl Tarjan {
                     self.close_component(v);
                 }
                 if top > 0 {
-                    let caller = widen_u64(
-                        get32(in self.call_node.as_slice(), wrapping_sub(top, 1), 0)
-                    );
+                    let caller = widen_u64(get32(
+                        in self.call_node.as_slice(),
+                        wrapping_sub(top, 1),
+                        0
+                    ));
                     self.lower_low(caller, v_low);
                 }
             }

@@ -89,14 +89,12 @@ test {
             r
         );
         r = check(
-            is_none(
-                option_map(
-                    none,
-                    |x: u64| -> u64 {
-                        x
-                    }
-                )
-            ),
+            is_none(option_map(
+                none,
+                |x: u64| -> u64 {
+                    x
+                }
+            )),
             7,
             r
         );
@@ -137,14 +135,12 @@ test {
         r = check(some_u64(half, 2), 10, r);
         r = check(some_u64(option_or(none, some), 4) && some_u64(option_or(some, none), 4), 11, r);
         r = check(
-            is_none(
-                filter(
-                    some,
-                    |x: u64| -> bool {
-                        x > 10
-                    }
-                )
-            ),
+            is_none(filter(
+                some,
+                |x: u64| -> bool {
+                    x > 10
+                }
+            )),
             12,
             r
         );
@@ -222,14 +218,12 @@ test {
         );
         r = check(result_unwrap_or(doubled, 0) == 12, 8, r);
         r = check(
-            is_err(
-                result_map(
-                    bad,
-                    |x: u64| -> u64 {
-                        x
-                    }
-                )
-            ),
+            is_err(result_map(
+                bad,
+                |x: u64| -> u64 {
+                    x
+                }
+            )),
             9,
             r
         );
@@ -242,14 +236,12 @@ test {
         r = check(some_u64(err(relabeled), 103), 10, r);
         r = check(
             some_u64(
-                ok(
-                    map_err(
-                        good,
-                        |e: u64| -> u64 {
-                            e
-                        }
-                    )
-                ),
+                ok(map_err(
+                    good,
+                    |e: u64| -> u64 {
+                        e
+                    }
+                )),
                 6
             ),
             11,
@@ -263,14 +255,12 @@ test {
         );
         r = check(some_u64(err(chained), 6), 12, r);
         r = check(
-            is_err(
-                result_and_then(
-                    bad,
-                    |x: u64| -> Result[u64, u64] {
-                        Result::Ok(x)
-                    }
-                )
-            ),
+            is_err(result_and_then(
+                bad,
+                |x: u64| -> Result[u64, u64] {
+                    Result::Ok(x)
+                }
+            )),
             13,
             r
         );

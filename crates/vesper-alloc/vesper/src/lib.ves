@@ -894,15 +894,13 @@ fn resolve(in b: Book, slot: u64, serial: u64, kind: u64) -> Result[u64, Fault] 
 
 pub fn book_view(in b: Book, slot: u64, serial: u64, kind: u64) -> Result[View, Fault] {
     match resolve(in b, slot, serial, kind) {
-        Result::Ok(i) => Result::Ok(
-            View {
-                addr: sget(in b, i, SlotWord::Addr),
-                len: sget(in b, i, SlotWord::Len),
-                elen: sget(in b, i, SlotWord::Elen),
-                ecap: sget(in b, i, SlotWord::Ecap),
-                lin: flag(sget(in b, i, SlotWord::Flags), Flag::Lin)
-            }
-        ),
+        Result::Ok(i) => Result::Ok(View {
+            addr: sget(in b, i, SlotWord::Addr),
+            len: sget(in b, i, SlotWord::Len),
+            elen: sget(in b, i, SlotWord::Elen),
+            ecap: sget(in b, i, SlotWord::Ecap),
+            lin: flag(sget(in b, i, SlotWord::Flags), Flag::Lin)
+        }),
         Result::Err(f) => Result::Err(f),
     }
 }

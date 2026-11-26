@@ -155,23 +155,21 @@ pub fn new_arena(len: u64, shard_len: u64) -> Result[ShardArena, u32] {
         dirty.push(false);
         s = wrapping_add(s, 1);
     }
-    Result::Ok(
-        ShardArena {
-            len: len,
-            shard_len: shard_len,
-            shard_count: count,
-            data: data,
-            shared: shared,
-            dirty: dirty,
-            dirty_list: ChunkSeq::new(),
-            epoch: 0,
-            stats: ArenaStats {
-                checkpoints: 0,
-                shard_copies: 0,
-                shards_dirtied: 0,
-            },
-        }
-    )
+    Result::Ok(ShardArena {
+        len: len,
+        shard_len: shard_len,
+        shard_count: count,
+        data: data,
+        shared: shared,
+        dirty: dirty,
+        dirty_list: ChunkSeq::new(),
+        epoch: 0,
+        stats: ArenaStats {
+            checkpoints: 0,
+            shard_copies: 0,
+            shards_dirtied: 0,
+        },
+    })
 }
 
 fn mark_shard_dirty(inout arena: ShardArena, index: u64) {
@@ -384,11 +382,9 @@ fn push_u64_le(inout out: ChunkSeq[u8], v: u64) {
         if i >= 8 {
             break;
         }
-        out.push(
-            wrapping_u8(
-                wrapping_shr_u64(v, wrapping_u32(wrapping_mul(i, 8))) & 255,
-            )
-        );
+        out.push(wrapping_u8(
+            wrapping_shr_u64(v, wrapping_u32(wrapping_mul(i, 8))) & 255,
+        ));
         i = wrapping_add(i, 1);
     }
 }
@@ -550,16 +546,14 @@ pub fn decode_delta(in bytes: Slice[u8], max_shards: u64) -> Result[ArenaDelta, 
         }
         k = wrapping_add(k, 1);
     }
-    Result::Ok(
-        ArenaDelta {
-            keyframe: keyframe,
-            epoch: epoch,
-            len: len,
-            shard_len: shard_len,
-            shard_ids: ids,
-            shard_bytes: sbytes,
-        }
-    )
+    Result::Ok(ArenaDelta {
+        keyframe: keyframe,
+        epoch: epoch,
+        len: len,
+        shard_len: shard_len,
+        shard_ids: ids,
+        shard_bytes: sbytes,
+    })
 }
 
 pub fn apply_delta(in d: ArenaDelta, inout arena: ShardArena) -> u32 {

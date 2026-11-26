@@ -39,24 +39,18 @@ fn put_utf8(inout out: ChunkSeq[u8], c: u64) {
         out.push(wrapping_u8(Utf8::ContinuationPrefix | (c & Utf8::ContinuationMask)));
     } else if c < Scalar::FourByteMin {
         out.push(wrapping_u8(Utf8::ThreeByteLead | wrapping_shr_u64(c, 12)));
-        out.push(
-            wrapping_u8(
-                Utf8::ContinuationPrefix | (wrapping_shr_u64(c, 6) & Utf8::ContinuationMask)
-            )
-        );
+        out.push(wrapping_u8(
+            Utf8::ContinuationPrefix | (wrapping_shr_u64(c, 6) & Utf8::ContinuationMask)
+        ));
         out.push(wrapping_u8(Utf8::ContinuationPrefix | (c & Utf8::ContinuationMask)));
     } else {
         out.push(wrapping_u8(Utf8::FourByteLead | wrapping_shr_u64(c, 18)));
-        out.push(
-            wrapping_u8(
-                Utf8::ContinuationPrefix | (wrapping_shr_u64(c, 12) & Utf8::ContinuationMask)
-            )
-        );
-        out.push(
-            wrapping_u8(
-                Utf8::ContinuationPrefix | (wrapping_shr_u64(c, 6) & Utf8::ContinuationMask)
-            )
-        );
+        out.push(wrapping_u8(
+            Utf8::ContinuationPrefix | (wrapping_shr_u64(c, 12) & Utf8::ContinuationMask)
+        ));
+        out.push(wrapping_u8(
+            Utf8::ContinuationPrefix | (wrapping_shr_u64(c, 6) & Utf8::ContinuationMask)
+        ));
         out.push(wrapping_u8(Utf8::ContinuationPrefix | (c & Utf8::ContinuationMask)));
     }
 }

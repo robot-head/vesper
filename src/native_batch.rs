@@ -30,25 +30,39 @@ impl Default for BatchLimits {
     }
 }
 impl BatchLimits {
+    /// The largest limits a caller may configure; `validate` refuses more.
+    const CEILING: Self = Self {
+        max_entries: 128,
+        max_functions: 512,
+        max_ast_nodes: 50_000,
+        max_ast_depth: 64,
+        max_ir_instructions: 100_000,
+        max_ir_blocks: 4096,
+        max_call_depth: 64,
+        max_execution_work: 1_000_000,
+        max_runs: 100_000_000,
+    };
+
     fn validate(self) -> Result<(), String> {
+        let ceiling = Self::CEILING;
         if self.max_entries == 0
-            || self.max_entries > 128
+            || self.max_entries > ceiling.max_entries
             || self.max_functions == 0
-            || self.max_functions > 512
+            || self.max_functions > ceiling.max_functions
             || self.max_ast_nodes == 0
-            || self.max_ast_nodes > 50_000
+            || self.max_ast_nodes > ceiling.max_ast_nodes
             || self.max_ast_depth == 0
-            || self.max_ast_depth > 64
+            || self.max_ast_depth > ceiling.max_ast_depth
             || self.max_ir_instructions == 0
-            || self.max_ir_instructions > 100_000
+            || self.max_ir_instructions > ceiling.max_ir_instructions
             || self.max_ir_blocks == 0
-            || self.max_ir_blocks > 4096
+            || self.max_ir_blocks > ceiling.max_ir_blocks
             || self.max_call_depth == 0
-            || self.max_call_depth > 64
+            || self.max_call_depth > ceiling.max_call_depth
             || self.max_execution_work == 0
-            || self.max_execution_work > 1_000_000
+            || self.max_execution_work > ceiling.max_execution_work
             || self.max_runs == 0
-            || self.max_runs > 100_000_000
+            || self.max_runs > ceiling.max_runs
         {
             return Err("native batch limit configuration".into());
         }
@@ -294,11 +308,20 @@ impl Drop for NativeBatch {
     }
 }
 
+/// The most ADTs a batch world may declare.
+const MAX_WORLD_ADTS: usize = 256;
+/// The most effects a batch world may declare.
+const MAX_WORLD_EFFECTS: usize = 128;
+/// The most parameters one batch function may take.
+const MAX_FUNCTION_PARAMS: usize = 64;
+/// The most generic parameters one batch function may take.
+const MAX_FUNCTION_GENERICS: usize = 32;
+
 /// Iterative source-tree guard before the existing recursive lowering helpers.
 fn preflight_ast(world: &World, limits: BatchLimits) -> Result<(), String> {
     if world.functions.len() > limits.max_functions
-        || world.adts.len() > 256
-        || world.effects.len() > 128
+        || world.adts.len() > MAX_WORLD_ADTS
+        || world.effects.len() > MAX_WORLD_EFFECTS
         || world.types.len() > limits.max_ast_nodes
         || world.calls.len() > limits.max_ast_nodes
     {
@@ -306,7 +329,7 @@ fn preflight_ast(world: &World, limits: BatchLimits) -> Result<(), String> {
     }
     let mut todo = Vec::new();
     for f in world.functions.values() {
-        if f.params.len() > 64 || f.generics.len() > 32 {
+        if f.params.len() > MAX_FUNCTION_PARAMS || f.generics.len() > MAX_FUNCTION_GENERICS {
             return Err("native batch signature limit".into());
         }
         if let Some(body) = &f.body {

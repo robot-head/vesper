@@ -338,12 +338,10 @@ fn header() -> ChunkSeq[u8] {
 // `(9 - d) >> 63` is 1 exactly when `d > 9`.
 fn hex_digit(d: u64) -> u8 {
     let letter = wrapping_sub(wrapping_sub(DECIMAL_DIGITS, 1), d) >> 63;
-    wrapping_u8(
-        wrapping_add(
-            wrapping_add(d, DIGIT_ZERO),
-            wrapping_mul(letter, wrapping_sub(HEX_LETTER_BIAS, DIGIT_ZERO))
-        )
-    )
+    wrapping_u8(wrapping_add(
+        wrapping_add(d, DIGIT_ZERO),
+        wrapping_mul(letter, wrapping_sub(HEX_LETTER_BIAS, DIGIT_ZERO))
+    ))
 }
 
 // The header line, then one lowercase hex value per line.

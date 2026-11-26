@@ -45,19 +45,54 @@ const BRANCH: u32 = 0x63;
 const JAL: u32 = 0x6f;
 const JALR: u32 = 0x67;
 const AUIPC: u32 = 0x17;
+const OP_FP: u32 = 0x53;
+/// `ecall`.
+const ECALL: u32 = 0x0000_0073;
+
+// Field positions in the instruction word.
+const RD_SHIFT: u32 = 7;
+const FUNCT3_SHIFT: u32 = 12;
+const RS1_SHIFT: u32 = 15;
+const RS2_SHIFT: u32 = 20;
+const FUNCT7_SHIFT: u32 = 25;
+/// The I-type immediate.
+const I_IMM_SHIFT: u32 = 20;
+/// The I- and S-type immediate is 12 bits, signed: `-IMM12_END..IMM12_END`.
+const IMM12_END: u32 = 2048;
+const IMM12_MASK: u32 = 0xfff;
 
 /// R-type `op rd, rs1, rs2`.
 fn r(a: &mut Asm, funct7: u32, funct3: u32, rd: u32, rs1: u32, rs2: u32) {
-    a.u32(funct7 << 25 | rs2 << 20 | rs1 << 15 | funct3 << 12 | rd << 7 | OP);
+    a.u32(
+        funct7 << FUNCT7_SHIFT
+            | rs2 << RS2_SHIFT
+            | rs1 << RS1_SHIFT
+            | funct3 << FUNCT3_SHIFT
+            | rd << RD_SHIFT
+            | OP,
+    );
 }
 /// I-type with a 12-bit signed immediate.
 fn i(a: &mut Asm, opcode: u32, funct3: u32, rd: u32, rs1: u32, imm: i32) {
-    debug_assert!((-2048..2048).contains(&imm));
-    a.u32(((imm as u32) & 0xfff) << 20 | rs1 << 15 | funct3 << 12 | rd << 7 | opcode);
+    debug_assert!((-(IMM12_END as i32)..IMM12_END as i32).contains(&imm));
+    a.u32(
+        ((imm as u32) & IMM12_MASK) << I_IMM_SHIFT
+            | rs1 << RS1_SHIFT
+            | funct3 << FUNCT3_SHIFT
+            | rd << RD_SHIFT
+            | opcode,
+    );
 }
 fn s(a: &mut Asm, funct3: u32, rs1: u32, rs2: u32, imm: i32) {
-    let imm = imm as u32 & 0xfff;
-    a.u32((imm >> 5) << 25 | rs2 << 20 | rs1 << 15 | funct3 << 12 | (imm & 0x1f) << 7 | STORE);
+    let imm = imm as u32 & IMM12_MASK;
+    a.u32(
+        (imm >> 5) << 25
+            | rs2 << RS2_SHIFT
+            | rs1 << RS1_SHIFT
+            | funct3 << FUNCT3_SHIFT
+            | (imm & 0x1f) << 7
+            | STORE,
+    );
 }
 /// B-type with a byte offset known now (only short skips inside one
 /// instruction's sequence).
@@ -66,9 +101,9 @@ fn b(a: &mut Asm, funct3: u32, rs1: u32, rs2: u32, offset: i32) {
     a.u32(
         ((imm >> 12) & 1) << 31
             | ((imm >> 5) & 0x3f) << 25
-            | rs2 << 20
-            | rs1 << 15
-            | funct3 << 12
+            | rs2 << RS2_SHIFT
+            | rs1 << RS1_SHIFT
+            | funct3 << FUNCT3_SHIFT
             | ((imm >> 1) & 0xf) << 8
             | ((imm >> 11) & 1) << 7
             | BRANCH,
@@ -77,6 +112,25 @@ fn b(a: &mut Asm, funct3: u32, rs1: u32, rs2: u32, offset: i32) {
 const BEQ: u32 = 0;
 const BNE: u32 = 1;
 const BLTU: u32 = 6;
+// OP-IMM `funct3`s.
+const ADDI: u32 = 0;
+const SLLI: u32 = 1;
+const SLTIU: u32 = 3;
+const XORI: u32 = 4;
+/// `srli` and, with [`SRA_IMM`], `srai`.
+const SRAI: u32 = 5;
+const ORI: u32 = 6;
+/// The immediate bit that makes `srli` `srai`.
+const SRA_IMM: u32 = 0x400;
+// OP `funct3`s and `funct7`s.
+const SLT: u32 = 2;
+const SLTU: u32 = 3;
+const AND: u32 = 7;
+const FUNCT7_SUB: u32 = 0x20;
+/// The M extension.
+const FUNCT7_MULDIV: u32 = 1;
+/// The LOAD/STORE `funct3` of `ld`/`sd` (doubleword).
+const WIDTH_D: u32 = 3;
 /// The branch with the opposite condition (`beq`/`bne`, `blt`/`bge`,
 /// `bltu`/`bgeu` differ in the low bit of `funct3`).
 fn invert(funct3: u32) -> u32 {
@@ -84,35 +138,35 @@ fn invert(funct3: u32) -> u32 {
 }
 
 fn addi(a: &mut Asm, rd: u32, rs1: u32, imm: i32) {
-    i(a, OP_IMM, 0, rd, rs1, imm);
+    i(a, OP_IMM, ADDI, rd, rs1, imm);
 }
 fn slli(a: &mut Asm, rd: u32, rs1: u32, shamt: u32) {
-    i(a, OP_IMM, 1, rd, rs1, shamt as i32);
+    i(a, OP_IMM, SLLI, rd, rs1, shamt as i32);
 }
 fn srai(a: &mut Asm, rd: u32, rs1: u32, shamt: u32) {
-    i(a, OP_IMM, 5, rd, rs1, (0x400 | shamt) as i32);
+    i(a, OP_IMM, SRAI, rd, rs1, (SRA_IMM | shamt) as i32);
 }
 fn ori(a: &mut Asm, rd: u32, rs1: u32, imm: i32) {
-    i(a, OP_IMM, 6, rd, rs1, imm);
+    i(a, OP_IMM, ORI, rd, rs1, imm);
 }
 fn xori(a: &mut Asm, rd: u32, rs1: u32, imm: i32) {
-    i(a, OP_IMM, 4, rd, rs1, imm);
+    i(a, OP_IMM, XORI, rd, rs1, imm);
 }
 fn add(a: &mut Asm, rd: u32, rs1: u32, rs2: u32) {
     r(a, 0, 0, rd, rs1, rs2);
 }
 fn sub(a: &mut Asm, rd: u32, rs1: u32, rs2: u32) {
-    r(a, 0x20, 0, rd, rs1, rs2);
+    r(a, FUNCT7_SUB, 0, rd, rs1, rs2);
 }
 fn slt(a: &mut Asm, rd: u32, rs1: u32, rs2: u32) {
-    r(a, 0, 2, rd, rs1, rs2);
+    r(a, 0, SLT, rd, rs1, rs2);
 }
 fn sltu(a: &mut Asm, rd: u32, rs1: u32, rs2: u32) {
-    r(a, 0, 3, rd, rs1, rs2);
+    r(a, 0, SLTU, rd, rs1, rs2);
 }
 /// M extension, by `funct3`.
 fn muldiv(a: &mut Asm, funct3: u32, rd: u32, rs1: u32, rs2: u32) {
-    r(a, 1, funct3, rd, rs1, rs2);
+    r(a, FUNCT7_MULDIV, funct3, rd, rs1, rs2);
 }
 const MUL: u32 = 0;
 const MULH: u32 = 1;
@@ -125,39 +179,72 @@ const REMU: u32 = 7;
 /// OP-FP `funct7 rd, rs1, rs2` with `funct3` (the rounding mode for
 /// arithmetic: 0 is round to nearest, ties to even).
 fn fp(a: &mut Asm, funct7: u32, funct3: u32, rd: u32, rs1: u32, rs2: u32) {
-    a.u32(funct7 << 25 | rs2 << 20 | rs1 << 15 | funct3 << 12 | rd << 7 | 0x53);
+    a.u32(
+        funct7 << FUNCT7_SHIFT
+            | rs2 << RS2_SHIFT
+            | rs1 << RS1_SHIFT
+            | funct3 << FUNCT3_SHIFT
+            | rd << RD_SHIFT
+            | OP_FP,
+    );
 }
 /// `fmv.d.x fd, rs1`.
 fn fmv_d_x(a: &mut Asm, fd: u32, rs1: u32) {
-    fp(a, 0x79, 0, fd, rs1, 0);
+    fp(a, FMV_D_X, 0, fd, rs1, 0);
 }
 /// `fmv.x.d rd, fs1`.
 fn fmv_x_d(a: &mut Asm, rd: u32, fs1: u32) {
-    fp(a, 0x71, 0, rd, fs1, 0);
+    fp(a, FMV_X_D, 0, rd, fs1, 0);
 }
+// OP-FP `funct7`s (double precision).
+const FADD_D: u32 = 0x01;
+const FSUB_D: u32 = 0x05;
+const FMUL_D: u32 = 0x09;
+const FDIV_D: u32 = 0x0d;
+/// `fsgnj.d` and friends, by `funct3`.
+const FSGNJ_D: u32 = 0x11;
+/// `feq.d`, `flt.d`, `fle.d`, by `funct3`.
+const FCMP_D: u32 = 0x51;
+const FMV_X_D: u32 = 0x71;
+const FMV_D_X: u32 = 0x79;
+// `funct3`s under `FSGNJ_D` and `FCMP_D`.
+const FSGNJN: u32 = 1;
+const FLE: u32 = 0;
+const FLT: u32 = 1;
+const FEQ: u32 = 2;
+const F0: u32 = 0;
+const F1: u32 = 1;
 
 /// `li rd, w` as a fixed eleven-instruction sequence: the top nine bits,
 /// then five 11-bit chunks shifted in (`ori` takes non-negative 11-bit
 /// immediates without sign extension).
 fn imm(a: &mut Asm, rd: u32, w: u64) {
-    addi(a, rd, ZERO, (w >> 55) as i32);
-    for chunk in (0..5).rev() {
-        slli(a, rd, rd, 11);
-        ori(a, rd, rd, ((w >> (11 * chunk)) & 0x7ff) as i32);
+    addi(a, rd, ZERO, (w >> (IMM_CHUNKS * IMM_CHUNK_BITS)) as i32);
+    for chunk in (0..IMM_CHUNKS).rev() {
+        slli(a, rd, rd, IMM_CHUNK_BITS);
+        ori(
+            a,
+            rd,
+            rd,
+            ((w >> (IMM_CHUNK_BITS * chunk)) & IMM_CHUNK_MASK) as i32,
+        );
     }
 }
+const IMM_CHUNKS: u32 = 5;
+const IMM_CHUNK_BITS: u32 = 11;
+const IMM_CHUNK_MASK: u64 = 0x7ff;
 
 /// `jal rd, label`.
 fn jal(a: &mut Asm, rd: u32, l: Label) {
     let at = a.here();
-    a.u32(rd << 7 | JAL);
+    a.u32(rd << RD_SHIFT | JAL);
     a.fixup(at, l, Fix::Jal);
 }
 /// `auipc rd, hi; jalr rd, lo(rd)`: call `l` anywhere within ±2 GiB.
 fn far_call(a: &mut Asm, rd: u32, l: Label) {
     let at = a.here();
-    a.u32(rd << 7 | AUIPC);
-    a.u32(rd << 15 | rd << 7 | JALR);
+    a.u32(rd << RD_SHIFT | AUIPC);
+    a.u32(rd << RS1_SHIFT | rd << RD_SHIFT | JALR);
     a.fixup(at, l, Fix::AuipcJalr);
 }
 /// Branch to `l` when `rs1 cond rs2`: the inverted branch skips a `jal`.
@@ -169,26 +256,36 @@ fn branch_to(a: &mut Asm, funct3: u32, rs1: u32, rs2: u32, l: Label) {
 /// The base register and byte offset of a frame word.
 fn frame(loc: Loc) -> (u32, u32) {
     match loc {
-        Loc::Slot(n) | Loc::Out(n) => (SP, n * 8),
-        Loc::In(n) => (S0, 16 + n * 8),
+        Loc::Slot(n) | Loc::Out(n) => (SP, n * WORD_BYTES),
+        Loc::In(n) => (S0, INCOMING_OFFSET + n * WORD_BYTES),
     }
 }
+/// Bytes per frame or heap word.
+const WORD_BYTES: u32 = 8;
+/// log2 of [`WORD_BYTES`].
+const WORD_SHIFT: u32 = 3;
+/// The incoming area's offset from `s0` (past the saved `ra` and `s0`).
+const INCOMING_OFFSET: u32 = 16;
+/// The sign bit of a 64-bit word.
+const SIGN_BIT: u32 = 63;
+/// `HEAP_BASE` is `1 << HEAP_BASE_SHIFT`.
+const HEAP_BASE_SHIFT: u32 = 28;
 fn ldst(a: &mut Asm, load: bool, r: u32, loc: Loc) {
     let (mut base, mut offset) = frame(loc);
-    if offset >= 2048 {
+    if offset >= IMM12_END {
         imm(a, T0, u64::from(offset));
         add(a, T0, T0, base);
         (base, offset) = (T0, 0);
     }
     if load {
-        i(a, LOAD, 3, r, base, offset as i32);
+        i(a, LOAD, WIDTH_D, r, base, offset as i32);
     } else {
-        s(a, 3, base, r, offset as i32);
+        s(a, WIDTH_D, base, r, offset as i32);
     }
 }
 /// `sp := sp - bytes`.
 fn sub_sp(a: &mut Asm, bytes: u32) {
-    if bytes < 2048 {
+    if bytes < IMM12_END {
         addi(a, SP, SP, -(bytes as i32));
     } else {
         imm(a, T0, u64::from(bytes));
@@ -198,7 +295,7 @@ fn sub_sp(a: &mut Asm, bytes: u32) {
 /// `rd := i64::MIN`.
 fn int_min(a: &mut Asm, rd: u32) {
     addi(a, rd, ZERO, 1);
-    slli(a, rd, rd, 63);
+    slli(a, rd, rd, SIGN_BIT);
 }
 
 pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
@@ -237,7 +334,7 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
         M::MulChk(Sign::S) => {
             muldiv(a, MULH, A2, A0, A1);
             muldiv(a, MUL, A0, A0, A1);
-            srai(a, T0, A0, 63);
+            srai(a, T0, A0, SIGN_BIT);
             branch_to(a, BNE, A2, T0, ovf);
         }
         M::MulChk(Sign::U) => {
@@ -248,7 +345,7 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
         M::Wrap(WrapOp::Add) => add(a, A0, A0, A1),
         M::Wrap(WrapOp::Sub) => sub(a, A0, A0, A1),
         M::Wrap(WrapOp::Mul) => muldiv(a, MUL, A0, A0, A1),
-        M::AndR2 => r(a, 0, 7, A0, A0, A2),
+        M::AndR2 => r(a, 0, AND, A0, A0, A2),
         M::TrapGtU => branch_to(a, BLTU, A2, A0, ovf),
         M::TrapZero => {
             let l = a.trap_label(TrapKind::DivisionByZero);
@@ -285,7 +382,7 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
             match c {
                 Cond::Eq => {
                     sub(a, T0, A0, A1);
-                    i(a, OP_IMM, 3, A0, T0, 1); // sltiu a0, t0, 1
+                    i(a, OP_IMM, SLTIU, A0, T0, 1); // sltiu a0, t0, 1
                 }
                 Cond::Ne => {
                     sub(a, T0, A0, A1);
@@ -306,34 +403,34 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
         // fmv.d.x f0, a0; fmv.d.x f1, a1; f<op>.d f0, f0, f1 (rne); fmv.x.d a0, f0
         M::FOp(op) => {
             let funct7 = match op {
-                FloatOp::Add => 0x01,
-                FloatOp::Sub => 0x05,
-                FloatOp::Mul => 0x09,
-                FloatOp::Div => 0x0d,
+                FloatOp::Add => FADD_D,
+                FloatOp::Sub => FSUB_D,
+                FloatOp::Mul => FMUL_D,
+                FloatOp::Div => FDIV_D,
             };
-            fmv_d_x(a, 0, A0);
-            fmv_d_x(a, 1, A1);
-            fp(a, funct7, 0, 0, 0, 1);
-            fmv_x_d(a, A0, 0);
+            fmv_d_x(a, F0, A0);
+            fmv_d_x(a, F1, A1);
+            fp(a, funct7, 0, F0, F0, F1);
+            fmv_x_d(a, A0, F0);
         }
         // fmv.d.x f0, a0; fsgnjn.d f0, f0, f0; fmv.x.d a0, f0
         M::FNeg => {
-            fmv_d_x(a, 0, A0);
-            fp(a, 0x11, 1, 0, 0, 0);
-            fmv_x_d(a, A0, 0);
+            fmv_d_x(a, F0, A0);
+            fp(a, FSGNJ_D, FSGNJN, F0, F0, F0);
+            fmv_x_d(a, A0, F0);
         }
         // feq/flt/fle.d write 0 for an unordered pair; `!=` is `feq` negated.
         M::FCmp(c) => {
-            fmv_d_x(a, 0, A0);
-            fmv_d_x(a, 1, A1);
+            fmv_d_x(a, F0, A0);
+            fmv_d_x(a, F1, A1);
             let (funct3, x, y) = match c {
-                Cond::Eq | Cond::Ne => (2, 0, 1),
-                Cond::Lt => (1, 0, 1),
-                Cond::Le => (0, 0, 1),
-                Cond::Gt => (1, 1, 0),
-                Cond::Ge => (0, 1, 0),
+                Cond::Eq | Cond::Ne => (FEQ, F0, F1),
+                Cond::Lt => (FLT, F0, F1),
+                Cond::Le => (FLE, F0, F1),
+                Cond::Gt => (FLT, F1, F0),
+                Cond::Ge => (FLE, F1, F0),
             };
-            fp(a, 0x51, funct3, A0, x, y);
+            fp(a, FCMP_D, funct3, A0, x, y);
             if c == Cond::Ne {
                 xori(a, A0, A0, 1);
             }
@@ -341,21 +438,21 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
         // t0 := HEAP_BASE (1 << 28); t0 += a1 << 3; ld a0, 8*off(t0)
         // (sd a0, ...).
         M::LdH(off) | M::StH(off) => {
-            const _: () = assert!(super::HEAP_BASE == 1 << 28);
+            const _: () = assert!(super::HEAP_BASE == 1 << HEAP_BASE_SHIFT);
             addi(a, T0, ZERO, 1);
-            slli(a, T0, T0, 28);
-            slli(a, T1, A1, 3);
+            slli(a, T0, T0, HEAP_BASE_SHIFT);
+            slli(a, T1, A1, WORD_SHIFT);
             add(a, T0, T0, T1);
-            let mut offset = off * 8;
-            if offset >= 2048 {
+            let mut offset = off * WORD_BYTES;
+            if offset >= IMM12_END {
                 imm(a, T1, u64::from(offset));
                 add(a, T0, T0, T1);
                 offset = 0;
             }
             if matches!(m, M::LdH(_)) {
-                i(a, LOAD, 3, A0, T0, offset as i32);
+                i(a, LOAD, WIDTH_D, A0, T0, offset as i32);
             } else {
-                s(a, 3, T0, A0, offset as i32);
+                s(a, WIDTH_D, T0, A0, offset as i32);
             }
         }
         M::Label(l) => a.bind(l)?,
@@ -365,16 +462,16 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
         // addi sp, sp, -16; sd ra, 8(sp); sd s0, 0(sp); mv s0, sp; sp -= bytes
         M::Enter(words) => {
             addi(a, SP, SP, -16);
-            s(a, 3, SP, RA, 8);
-            s(a, 3, SP, S0, 0);
+            s(a, WIDTH_D, SP, RA, 8);
+            s(a, WIDTH_D, SP, S0, 0);
             addi(a, S0, SP, 0);
-            sub_sp(a, words * 8);
+            sub_sp(a, words * WORD_BYTES);
         }
         // mv sp, s0; ld s0, 0(sp); ld ra, 8(sp); addi sp, sp, 16; ret
         M::Leave => {
             addi(a, SP, S0, 0);
-            i(a, LOAD, 3, S0, SP, 0);
-            i(a, LOAD, 3, RA, SP, 8);
+            i(a, LOAD, WIDTH_D, S0, SP, 0);
+            i(a, LOAD, WIDTH_D, RA, SP, 8);
             addi(a, SP, SP, 16);
             i(a, JALR, 0, ZERO, RA, 0);
         }
@@ -390,8 +487,12 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
 /// `ecall` with the Linux system-call number in `a7`.
 fn syscall(a: &mut Asm, number: i32) {
     addi(a, A7, ZERO, number);
-    a.u32(0x0000_0073);
+    a.u32(ECALL);
 }
+// Linux system-call numbers and the standard output descriptor.
+const SYS_WRITE: i32 = 64;
+const SYS_EXIT: i32 = 93;
+const STDOUT: i32 = 1;
 
 /// The Linux `_start` entry (no libc): reserves the result area, calls the
 /// entry, optionally writes the result words to stdout and exits.
@@ -401,21 +502,21 @@ pub fn start(
     result_words: u32,
     entry: Label,
 ) -> Result<(), VerifiedError> {
-    let area = ((result_words.max(1) + 1) & !1) * 8;
+    let area = ((result_words.max(1) + 1) & !1) * WORD_BYTES;
     sub_sp(a, area);
     far_call(a, RA, entry);
     if protocol == ResultProtocol::Words && result_words > 0 {
-        addi(a, A0, ZERO, 1);
+        addi(a, A0, ZERO, STDOUT);
         addi(a, A1, SP, 0);
-        imm(a, A2, u64::from(result_words) * 8);
-        syscall(a, 64);
+        imm(a, A2, u64::from(result_words) * u64::from(WORD_BYTES));
+        syscall(a, SYS_WRITE);
     }
     if protocol == ResultProtocol::ExitStatus && result_words > 0 {
-        i(a, LOAD, 3, A0, SP, 0);
+        i(a, LOAD, WIDTH_D, A0, SP, 0);
     } else {
         addi(a, A0, ZERO, 0);
     }
-    syscall(a, 93);
+    syscall(a, SYS_EXIT);
     for k in TrapKind::ALL {
         a.bind(k.label())?;
         exit(a, k);
@@ -425,7 +526,7 @@ pub fn start(
 
 fn exit(a: &mut Asm, k: TrapKind) {
     addi(a, A0, ZERO, i32::from(k.exit_status()));
-    syscall(a, 93);
+    syscall(a, SYS_EXIT);
 }
 
 /// Another copy of the abort exits, between functions.

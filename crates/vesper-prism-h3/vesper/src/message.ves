@@ -360,17 +360,15 @@ pub fn message_parse_request(
     if has_protocol && empty_or_none(auth) {
         return Result::Err(MessageError::MissingPseudoHeader);
     }
-    Result::Ok(
-        RequestParts {
-            method: m,
-            scheme: s,
-            authority: auth,
-            path: p,
-            protocol: protocol,
-            pseudo: pseudo,
-            content_length: cl
-        }
-    )
+    Result::Ok(RequestParts {
+        method: m,
+        scheme: s,
+        authority: auth,
+        path: p,
+        protocol: protocol,
+        pseudo: pseudo,
+        content_length: cl
+    })
 }
 
 pub fn message_parse_response(

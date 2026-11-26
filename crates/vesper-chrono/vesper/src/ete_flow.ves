@@ -142,33 +142,25 @@ fn rel_target(pc: u64, imm: u64, bits: u64) -> u64 {
 pub fn classify(pc: u64, insn: u32) -> Option[A64Flow] {
     let i = widen_u64(insn);
     if (i & 0x7c00_0000) == 0x1400_0000 {
-        return Option::Some(
-            A64Flow::Direct {
-                target: rel_target(pc, i & 0x03ff_ffff, 26),
-                call: (i >> 31) == 1,
-            }
-        );
+        return Option::Some(A64Flow::Direct {
+            target: rel_target(pc, i & 0x03ff_ffff, 26),
+            call: (i >> 31) == 1,
+        });
     }
     if (i & 0xff00_0000) == 0x5400_0000 {
-        return Option::Some(
-            A64Flow::Conditional {
-                target: rel_target(pc, (i >> 5) & 0x7ffff, 19),
-            }
-        );
+        return Option::Some(A64Flow::Conditional {
+            target: rel_target(pc, (i >> 5) & 0x7ffff, 19),
+        });
     }
     if (i & 0x7e00_0000) == 0x3400_0000 {
-        return Option::Some(
-            A64Flow::Conditional {
-                target: rel_target(pc, (i >> 5) & 0x7ffff, 19),
-            }
-        );
+        return Option::Some(A64Flow::Conditional {
+            target: rel_target(pc, (i >> 5) & 0x7ffff, 19),
+        });
     }
     if (i & 0x7e00_0000) == 0x3600_0000 {
-        return Option::Some(
-            A64Flow::Conditional {
-                target: rel_target(pc, (i >> 5) & 0x3fff, 14),
-            }
-        );
+        return Option::Some(A64Flow::Conditional {
+            target: rel_target(pc, (i >> 5) & 0x3fff, 14),
+        });
     }
     if (i & 0xfe1f_0000) == 0xd61f_0000 {
         let opc = (i >> 21) & 0x0f;
@@ -308,55 +300,45 @@ fn image_read_byte(in segs: Slice[CodeSegment], ip: u64) -> Option[u8] {
 
 fn read_insn_u32(in img: CodeImage, ip: u64, element_index: u64) -> Result[u32, EteFlowError] {
     if (ip & 3) != 0 {
-        return Result::Err(
-            EteFlowError::IpOutsideImage {
-                ip: ip,
-                element_index: element_index,
-            }
-        );
+        return Result::Err(EteFlowError::IpOutsideImage {
+            ip: ip,
+            element_index: element_index,
+        });
     }
     let b0 = match image_read_byte(in img.segments.as_slice(), ip) {
         Option::Some(v) => v,
         Option::None => {
-            return Result::Err(
-                EteFlowError::IpOutsideImage {
-                    ip: ip,
-                    element_index: element_index,
-                }
-            );
+            return Result::Err(EteFlowError::IpOutsideImage {
+                ip: ip,
+                element_index: element_index,
+            });
         }
     };
     let b1 = match image_read_byte(in img.segments.as_slice(), wrapping_add(ip, 1)) {
         Option::Some(v) => v,
         Option::None => {
-            return Result::Err(
-                EteFlowError::IpOutsideImage {
-                    ip: ip,
-                    element_index: element_index,
-                }
-            );
+            return Result::Err(EteFlowError::IpOutsideImage {
+                ip: ip,
+                element_index: element_index,
+            });
         }
     };
     let b2 = match image_read_byte(in img.segments.as_slice(), wrapping_add(ip, 2)) {
         Option::Some(v) => v,
         Option::None => {
-            return Result::Err(
-                EteFlowError::IpOutsideImage {
-                    ip: ip,
-                    element_index: element_index,
-                }
-            );
+            return Result::Err(EteFlowError::IpOutsideImage {
+                ip: ip,
+                element_index: element_index,
+            });
         }
     };
     let b3 = match image_read_byte(in img.segments.as_slice(), wrapping_add(ip, 3)) {
         Option::Some(v) => v,
         Option::None => {
-            return Result::Err(
-                EteFlowError::IpOutsideImage {
-                    ip: ip,
-                    element_index: element_index,
-                }
-            );
+            return Result::Err(EteFlowError::IpOutsideImage {
+                ip: ip,
+                element_index: element_index,
+            });
         }
     };
     let w = widen_u64(b0) | (widen_u64(b1) << 8) | (widen_u64(b2) << 16) | (widen_u64(b3) << 24);
@@ -413,11 +395,9 @@ fn clone_branch_kind(in k: BranchKind) -> BranchKind {
 fn walker_step(inout w: Walker) -> Result[u64, EteFlowError] {
     w.instructions = wrapping_add(w.instructions, 1);
     if w.instructions > w.max_instructions {
-        return Result::Err(
-            EteFlowError::InstructionBudget {
-                limit: w.max_instructions,
-            }
-        );
+        return Result::Err(EteFlowError::InstructionBudget {
+            limit: w.max_instructions,
+        });
     }
     Result::Ok(0)
 }
@@ -429,16 +409,14 @@ fn walker_push(
     in kind: BranchKind,
     element_index: u64
 ) {
-    w.open.push(
-        Branch {
-            from: from,
-            to: clone_opt_u64(in to),
-            kind: clone_branch_kind(in kind),
-            tsc_lo: clone_opt_u64(in w.ts),
-            tsc_hi: Option::None,
-            packet_index: element_index,
-        }
-    );
+    w.open.push(Branch {
+        from: from,
+        to: clone_opt_u64(in to),
+        kind: clone_branch_kind(in kind),
+        tsc_lo: clone_opt_u64(in w.ts),
+        tsc_hi: Option::None,
+        packet_index: element_index,
+    });
 }
 
 fn flush_open(inout w: Walker, ts: Option[u64]) {
@@ -501,9 +479,9 @@ fn walk_to_branch(
 ) -> Result[WalkOut, EteFlowError] {
     let mut ip = match w.pc {
         Option::Some(v) => v,
-        Option::None => return Result::Err(
-            EteFlowError::NoAddress { element_index: element_index }
-        ),
+        Option::None => return Result::Err(EteFlowError::NoAddress {
+            element_index: element_index
+        }),
     };
     loop {
         let insn = match read_insn_u32(in img, ip, element_index) {
@@ -516,9 +494,10 @@ fn walk_to_branch(
         }
         let flow = match classify(ip, insn) {
             Option::Some(f) => f,
-            Option::None => return Result::Err(
-                EteFlowError::UnsupportedInsn { ip: ip, insn: insn }
-            ),
+            Option::None => return Result::Err(EteFlowError::UnsupportedInsn {
+                ip: ip,
+                insn: insn
+            }),
         };
         if is_sequential(in flow) {
             ip = wrapping_add(ip, 4);
@@ -630,9 +609,10 @@ fn walker_exception(
                 };
                 let flow = match classify(ip, insn) {
                     Option::Some(f) => f,
-                    Option::None => return Result::Err(
-                        EteFlowError::UnsupportedInsn { ip: ip, insn: insn }
-                    ),
+                    Option::None => return Result::Err(EteFlowError::UnsupportedInsn {
+                        ip: ip,
+                        insn: insn
+                    }),
                 };
                 match flow {
                     A64Flow::Sequential => {
@@ -643,13 +623,11 @@ fn walker_exception(
                         ip = wrapping_add(ip, 4);
                     }
                     _ => {
-                        return Result::Err(
-                            EteFlowError::ExceptionPastBranch {
-                                ip: ip,
-                                preferred_return: preferred_return,
-                                element_index: i,
-                            }
-                        );
+                        return Result::Err(EteFlowError::ExceptionPastBranch {
+                            ip: ip,
+                            preferred_return: preferred_return,
+                            element_index: i,
+                        });
                     }
                 }
             }
@@ -806,12 +784,10 @@ pub fn reconstruct(
         Waiting::WaitException { from } => Option::Some(from),
         Waiting::WaitNothing => w.pc,
     };
-    Result::Ok(
-        FlowTrace {
-            branches: w.branches,
-            instructions: w.instructions,
-            overflows: w.overflows,
-            stopped_at: stopped_at,
-        }
-    )
+    Result::Ok(FlowTrace {
+        branches: w.branches,
+        instructions: w.instructions,
+        overflows: w.overflows,
+        stopped_at: stopped_at,
+    })
 }

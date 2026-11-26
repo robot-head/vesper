@@ -14,6 +14,22 @@ use super::{Unsupported, WasmError};
 use crate::{ast::*, check::World};
 use std::collections::BTreeMap;
 
+/// Bytes of one slot of an aggregate block (one uniform `i64` value).
+pub(crate) const SLOT_BYTES: u64 = 8;
+/// [`SLOT_BYTES`] as an `i64.const` operand.
+pub(crate) const SLOT_BYTES_I64: i64 = SLOT_BYTES as i64;
+/// Byte offset of the first field of an enum variant, after the variant
+/// index in slot 0.
+pub(crate) const ENUM_PAYLOAD_OFFSET: u64 = SLOT_BYTES;
+/// Bytes of a `String` block's length slot; its UTF-8 bytes follow it.
+pub(crate) const STR_HEADER_BYTES: u64 = SLOT_BYTES;
+/// [`STR_HEADER_BYTES`] as an `i64.const` operand.
+pub(crate) const STR_HEADER_BYTES_I64: i64 = STR_HEADER_BYTES as i64;
+/// Alignment exponents (log2 of the byte alignment) of a Wasm `MemArg`.
+pub(crate) const ALIGN_2_LOG2: u32 = 1;
+pub(crate) const ALIGN_4_LOG2: u32 = 2;
+pub(crate) const ALIGN_8_LOG2: u32 = 3;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Scalar {
     I64,
@@ -143,12 +159,12 @@ pub(crate) fn field(world: &World, ty: &Type, name: &str) -> Result<(u64, Type),
             let t = ts
                 .get(i)
                 .ok_or_else(|| WasmError::Invalid(format!("tuple {ty} has no field {i}")))?;
-            Ok((8 * i as u64, t.clone()))
+            Ok((SLOT_BYTES * i as u64, t.clone()))
         }
         Shape::Struct { fields, .. } => fields
             .iter()
             .position(|(n, _)| n == name)
-            .map(|i| (8 * i as u64, fields[i].1.clone()))
+            .map(|i| (SLOT_BYTES * i as u64, fields[i].1.clone()))
             .ok_or_else(|| WasmError::Invalid(format!("struct {ty} has no field '{name}'"))),
         _ => Err(WasmError::unsupported(
             Unsupported::Projection,
@@ -198,5 +214,5 @@ pub(crate) fn variant(
 
 /// Byte offset of field `index` of a variant block.
 pub(crate) fn variant_offset(is_enum: bool, index: usize) -> u64 {
-    8 * (index as u64 + u64::from(is_enum))
+    SLOT_BYTES * (index as u64 + u64::from(is_enum))
 }

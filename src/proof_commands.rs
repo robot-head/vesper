@@ -19,6 +19,34 @@ const MAX_INPUT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_FILES: usize = 4096;
 const MAX_CAPTURE: usize = 8 * 1024 * 1024;
 const MARKER: &str = "VESPER_PROOF_AUDIT_V1:";
+/// The longest qualified Lean name accepted, in bytes.
+const MAX_NAME_BYTES: usize = 1024;
+/// The most theorems one audit checks.
+pub const MAX_THEOREMS: usize = 128;
+/// The longest Lean run allowed, in seconds (`--timeout` takes 1 to this).
+pub const MAX_TIMEOUT_SECONDS: u64 = 300;
+/// The Lean run bound when `--timeout` is not given, in seconds.
+pub const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
+/// How deep the artifact directory walk may go.
+const MAX_ARTIFACT_DEPTH: usize = 64;
+/// The read buffer for a child's captured output, in bytes.
+const CAPTURE_CHUNK_BYTES: usize = 8192;
+/// How often a running child is polled for exit.
+const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// How much of a failed audit's output the error message keeps, in chars.
+const MAX_FAILURE_DETAIL_CHARS: usize = 4000;
+/// The largest single imported artifact that is fingerprinted (2 GiB).
+const MAX_ARTIFACT_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// The largest total of imported artifact bytes (4 GiB).
+const MAX_IMPORT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// The most imported modules one audit may report.
+const MAX_IMPORTED_MODULES: usize = 8192;
+/// The most macro provenance markers one audit may report.
+const MAX_MACRO_MARKERS: usize = 65536;
+/// How long the Lean launcher may take to print its prefix.
+const LEAN_PREFIX_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long `lean --version` may take.
+const LEAN_VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 const HELP: &str = "Usage: vesper proof-audit <Module> --root <artifact-directory> --theorem <Qualified.name> [--theorem ...] [--allow-axiom <Name>] [--lean <path>] [--timeout <seconds>] [--macro-provenance <manifest.json>] [--json]\n\nReplay existing local Lean 4.35.0 artifacts through the kernel and audit named theorems.\nArtifact imports disable package environment extensions and plugins.\nThe selected Lean toolchain and artifact parser remain trusted; this is not an OS sandbox, provenance certificate or reusable proof-cache approval.\nThe default axiom policy is empty; sorryAx, compiler-trust axioms, and generated _native axioms are always forbidden.\nA theorem that depends on macro-expanded definitions (those with `$macro_provenance` markers, see `vesper forge lean`) is rejected unless --macro-provenance names the matching provenance manifest.\n";
 
 #[derive(Default)]
@@ -35,7 +63,7 @@ struct Options {
 }
 
 pub fn name_valid(name: &str) -> bool {
-    name.len() <= 1024
+    name.len() <= MAX_NAME_BYTES
         && name.split('.').all(|part| {
             !part.is_empty()
                 && (part.as_bytes()[0].is_ascii_alphabetic() || part.starts_with('_'))
@@ -102,7 +130,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
                     .ok_or("--timeout requires seconds")?
                     .parse::<u64>()
                     .map_err(|_| "invalid --timeout; expected 1 to 300 seconds")?;
-                if !(1..=300).contains(&seconds) {
+                if !(1..=MAX_TIMEOUT_SECONDS).contains(&seconds) {
                     return Err("--timeout must be between 1 and 300 seconds".into());
                 }
                 options.timeout = Some(seconds);
@@ -141,7 +169,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     if options.theorems.is_empty() {
         return Err("proof-audit requires at least one --theorem".into());
     }
-    if options.theorems.len() > 128 {
+    if options.theorems.len() > MAX_THEOREMS {
         return Err("proof-audit supports at most 128 theorem names".into());
     }
     let root = options
@@ -255,7 +283,7 @@ fn copy_artifacts(root: &Path, output: &Path) -> Result<Vec<FileDigest>, String>
     let mut bytes = 0u64;
     let mut entries = 0usize;
     while let Some((directory, depth)) = pending.pop() {
-        if depth > 64 {
+        if depth > MAX_ARTIFACT_DEPTH {
             return Err("artifact directory exceeds the depth limit".into());
         }
         for entry in fs::read_dir(directory).map_err(|e| e.to_string())? {
@@ -308,7 +336,7 @@ fn copy_artifacts(root: &Path, output: &Path) -> Result<Vec<FileDigest>, String>
 
 fn capture(mut reader: impl Read) -> std::io::Result<(Vec<u8>, bool)> {
     let mut saved = vec![];
-    let mut chunk = [0u8; 8192];
+    let mut chunk = [0u8; CAPTURE_CHUNK_BYTES];
     let mut truncated = false;
     loop {
         let count = reader.read(&mut chunk)?;
@@ -336,7 +364,7 @@ pub fn execute(command: &mut Command, timeout: Duration) -> Result<Output, Strin
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
-            Ok(None) if started.elapsed() < timeout => thread::sleep(Duration::from_millis(10)),
+            Ok(None) if started.elapsed() < timeout => thread::sleep(CHILD_POLL_INTERVAL),
             result => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -370,7 +398,10 @@ pub fn execute(command: &mut Command, timeout: Duration) -> Result<Output, Strin
         let details = format!("{stdout_text}\n{stderr_text}");
         return Err(format!(
             "Lean audit failed ({status}): {}",
-            details.chars().take(4000).collect::<String>()
+            details
+                .chars()
+                .take(MAX_FAILURE_DETAIL_CHARS)
+                .collect::<String>()
         ));
     }
     Ok(Output {
@@ -442,13 +473,13 @@ struct AuditReport {
 
 fn digest_file(path: &Path, relative: &Path) -> Result<FileDigest, String> {
     let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    if file.metadata().map_err(|e| e.to_string())?.len() > 2 * 1024 * 1024 * 1024 {
+    if file.metadata().map_err(|e| e.to_string())?.len() > MAX_ARTIFACT_FILE_BYTES {
         return Err("an imported artifact exceeds the fingerprinting size limit".into());
     }
     let mut hasher = blake3::Hasher::new();
-    let bytes = std::io::copy(&mut file.take(2 * 1024 * 1024 * 1024 + 1), &mut hasher)
+    let bytes = std::io::copy(&mut file.take(MAX_ARTIFACT_FILE_BYTES + 1), &mut hasher)
         .map_err(|e| e.to_string())?;
-    if bytes > 2 * 1024 * 1024 * 1024 {
+    if bytes > MAX_ARTIFACT_FILE_BYTES {
         return Err("an imported artifact grew beyond the fingerprinting limit".into());
     }
     Ok(FileDigest {
@@ -469,7 +500,7 @@ pub struct LeanToolchain {
 pub fn lean_toolchain(launcher: &str) -> Result<LeanToolchain, String> {
     let prefix = execute(
         Command::new(launcher).arg("--print-prefix"),
-        Duration::from_secs(30),
+        LEAN_PREFIX_TIMEOUT,
     )?;
     let prefix = PathBuf::from(
         String::from_utf8(prefix.stdout)
@@ -481,10 +512,7 @@ pub fn lean_toolchain(launcher: &str) -> Result<LeanToolchain, String> {
     let binary = prefix
         .join("bin")
         .join(if cfg!(windows) { "lean.exe" } else { "lean" });
-    let version = execute(
-        Command::new(&binary).arg("--version"),
-        Duration::from_secs(10),
-    )?;
+    let version = execute(Command::new(&binary).arg("--version"), LEAN_VERSION_TIMEOUT)?;
     let version = String::from_utf8(version.stdout)
         .map_err(|e| e.to_string())?
         .trim()
@@ -545,7 +573,7 @@ pub fn audit_generated_with_types(
 ) -> Result<serde_json::Value, String> {
     if !name_valid(module)
         || theorems.is_empty()
-        || theorems.len() > 128
+        || theorems.len() > MAX_THEOREMS
         || theorems.iter().any(|name| !name_valid(name))
         || allowed_axioms
             .iter()
@@ -561,7 +589,7 @@ pub fn audit_generated_with_types(
                     })
                     .is_some_and(|function| name_valid(function) && !function.contains('.'))
         })
-        || !(1..=300).contains(&timeout)
+        || !(1..=MAX_TIMEOUT_SECONDS).contains(&timeout)
     {
         return Err("invalid generated proof audit request".into());
     }
@@ -604,7 +632,10 @@ pub fn audit_policy(
                 .into(),
         );
     }
-    if theorems.is_empty() || theorems.len() > 128 || theorems.iter().any(|n| !name_valid(n)) {
+    if theorems.is_empty()
+        || theorems.len() > MAX_THEOREMS
+        || theorems.iter().any(|n| !name_valid(n))
+    {
         return Err("invalid or empty theorem list for proof gate (1..=128 theorems)".into());
     }
     let mut allowed = BTreeSet::new();
@@ -620,7 +651,7 @@ pub fn audit_policy(
         allowed.insert(ax.clone());
     }
     if let Some(secs) = timeout
-        && !(1..=300).contains(&secs)
+        && !(1..=MAX_TIMEOUT_SECONDS).contains(&secs)
     {
         return Err("--timeout must be between 1 and 300 seconds".into());
     }
@@ -694,7 +725,7 @@ fn audit(options: &Options, root: &Path, module: &str) -> Result<AuditReport, St
             .args(["-j1", "-M8192", "--run"])
             .arg(helper)
             .arg(request),
-        Duration::from_secs(options.timeout.unwrap_or(30)),
+        Duration::from_secs(options.timeout.unwrap_or(DEFAULT_TIMEOUT_SECONDS)),
     )?;
     let text = String::from_utf8(output.stdout).map_err(|e| e.to_string())?;
     let mut records = text.lines().filter_map(|line| line.strip_prefix(MARKER));
@@ -711,7 +742,7 @@ fn audit(options: &Options, root: &Path, module: &str) -> Result<AuditReport, St
     if requested != options.theorems || raw.theorems.len() != requested.len() {
         return Err("Lean audit did not check every requested theorem exactly once".into());
     }
-    if raw.modules.len() > 8192 {
+    if raw.modules.len() > MAX_IMPORTED_MODULES {
         return Err("Lean audit exceeds the imported-module limit".into());
     }
     let snapshot = snapshot.canonicalize().map_err(|e| e.to_string())?;
@@ -751,7 +782,7 @@ fn audit(options: &Options, root: &Path, module: &str) -> Result<AuditReport, St
                 .map_err(|_| "an imported artifact part escaped its root")?;
             let digest = digest_file(&part, relative)?;
             import_bytes += digest.bytes;
-            if import_bytes > 4 * 1024 * 1024 * 1024 {
+            if import_bytes > MAX_IMPORT_BYTES {
                 return Err("imported artifact inventory exceeds 4 GiB".into());
             }
             parts.push(digest);
@@ -768,7 +799,7 @@ fn audit(options: &Options, root: &Path, module: &str) -> Result<AuditReport, St
         .as_deref()
         .map(read_manifest)
         .transpose()?;
-    if raw.macro_markers.len() > 65536 {
+    if raw.macro_markers.len() > MAX_MACRO_MARKERS {
         return Err("Lean audit exceeds the macro provenance marker limit".into());
     }
     let mut markers = BTreeMap::new();

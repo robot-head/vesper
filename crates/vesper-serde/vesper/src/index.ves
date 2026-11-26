@@ -612,17 +612,15 @@ fn push(inout p: P, inout toks: ChunkSeq[Token], kind: Kind, depth: u64) -> u64 
     if n >= p.capacity {
         perr(in p, ErrorKind::AllocationLimit);
     }
-    toks.push(
-        Token {
-            start: p.pos,
-            end: 0,
-            next: wrapping_add(n, 1),
-            kind: kind,
-            decoded_len: 0,
-            escaped: false,
-            depth: depth
-        }
-    );
+    toks.push(Token {
+        start: p.pos,
+        end: 0,
+        next: wrapping_add(n, 1),
+        kind: kind,
+        decoded_len: 0,
+        escaped: false,
+        depth: depth
+    });
     n
 }
 

@@ -162,19 +162,17 @@ pub fn read_tables(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Tables {
             t.callees.push(n32(r.word(in b)));
         }
         set_at(inout t.by_name, name, inc32(n32(t.funcs.len())));
-        t.funcs.push(
-            Func {
-                name: name,
-                body: body,
-                generics: generics,
-                pa: pa,
-                pn: pn,
-                result: result,
-                row: row,
-                ca: ca,
-                cn: n32(cn)
-            }
-        );
+        t.funcs.push(Func {
+            name: name,
+            body: body,
+            generics: generics,
+            pa: pa,
+            pn: pn,
+            result: result,
+            row: row,
+            ca: ca,
+            cn: n32(cn)
+        });
     }
     let dc = r.word(in b);
     for i in 0..dc {
@@ -189,19 +187,17 @@ pub fn read_tables(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Tables {
             let pa = n32(t.params.len());
             let pn = read_params(inout r, in b, in c, inout t.params);
             let result = u32_at(in c.tmap, r.word(in b));
-            t.ops.push(
-                Func {
-                    name: op,
-                    body: false,
-                    generics: og,
-                    pa: pa,
-                    pn: pn,
-                    result: result,
-                    row: c.types.empty_row,
-                    ca: 0,
-                    cn: 0
-                }
-            );
+            t.ops.push(Func {
+                name: op,
+                body: false,
+                generics: og,
+                pa: pa,
+                pn: pn,
+                result: result,
+                row: c.types.empty_row,
+                ca: 0,
+                cn: 0
+            });
         }
         set_at(inout t.decl_by_name, name, inc32(n32(t.decls.len())));
         t.decls.push(Decl { name: name, linear: linear, generics: generics, oa: oa, on: n32(on) });

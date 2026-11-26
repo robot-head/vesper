@@ -279,9 +279,14 @@ fn read_sigs(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Sigs {
             let pe = r.word(in b);
             sg.params.push(Param { name: pname, pass: pass, ty: ty, start: ps, stop: pe });
         }
-        sg.sigs.push(
-            Sig { name: name, start: start, stop: stop, result: result, pa: pa, pn: n32(np) }
-        );
+        sg.sigs.push(Sig {
+            name: name,
+            start: start,
+            stop: stop,
+            result: result,
+            pa: pa,
+            pn: n32(np)
+        });
     }
     for i in 0..c.world.adts.len() {
         sg.adt_start.push(r.word(in b));
