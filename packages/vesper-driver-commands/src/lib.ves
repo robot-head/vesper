@@ -1530,20 +1530,11 @@ copy struct FmtDone {
 }
 
 fn fmt_stop(code: u32) -> FmtStop {
-    FmtStop {
-        code: code,
-        io: IoError {
-            kind: 0,
-            os: 0
-        }
-    }
+    FmtStop { code: code, io: IoError { kind: 0, os: 0 } }
 }
 
 fn fmt_io(e: IoError) -> FmtStop {
-    FmtStop {
-        code: FMT_IO,
-        io: e
-    }
+    FmtStop { code: FMT_IO, io: e }
 }
 
 // `fmt_commands::open_input`: the regular UTF-8 file at `path`, read

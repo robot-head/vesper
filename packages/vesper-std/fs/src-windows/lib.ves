@@ -523,7 +523,9 @@ pub struct Opened {
     pub id: FileId,
 }
 
-// `OpenOptions::read` with `FILE_FLAG_OPEN_REPARSE_POINT`, then
+// `OpenOptions::read` with `FILE_FLAG_OPEN_REPARSE_POINT` (and
+// `FILE_FLAG_BACKUP_SEMANTICS`, which `std` sets so a directory opens and
+// reports itself as one), then
 // `File::metadata` (`GetFileInformationByHandle`): a reparse point or a
 // directory is not a regular file. `std` compares no device or inode on
 // Windows, so both are 0; `perm` is the file attributes, which
@@ -537,7 +539,7 @@ pub fn read_nofollow_limit(in path: Slice[u8], limit: u64)
         StdFs::FILE_SHARE_ALL,
         0,
         StdFs::OPEN_EXISTING,
-        StdFs::FILE_FLAG_OPEN_REPARSE_POINT,
+        StdFs::FILE_FLAG_OPEN_REPARSE_POINT | StdFs::FILE_FLAG_BACKUP_SEMANTICS,
         0
     ) {
         Result::Ok((h, err)) => {
