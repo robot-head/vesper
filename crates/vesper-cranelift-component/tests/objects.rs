@@ -262,8 +262,9 @@ fn component_path() -> Option<PathBuf> {
     }
     // Under Bazel the component is an input, never built by the test.
     let cargo = std::env::var_os("CARGO")?;
+    // A relative CARGO_TARGET_DIR is relative to the build's directory.
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
+        .map(|d| repo_root().join(d))
         .unwrap_or_else(|| repo_root().join("target"));
     let out = std::process::Command::new(&cargo)
         .current_dir(repo_root())
@@ -497,6 +498,20 @@ fn the_checked_in_wit_is_the_generated_one() {
     }
     assert!(
         on_disk == vesper_cranelift_component::WIT,
+        "{} is stale: rerun with VESPER_BLESS=1",
+        path.display()
+    );
+}
+#[test]
+fn the_wasm_backend_import_table_is_the_generated_one() {
+    let path = repo().join("packages/vesper-wasm-backend/src/vcl.ves");
+    let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
+    if std::env::var_os("VESPER_BLESS").is_some() {
+        std::fs::write(&path, vesper_cranelift_component::VCL_VES).unwrap();
+        return;
+    }
+    assert!(
+        on_disk == vesper_cranelift_component::VCL_VES,
         "{} is stale: rerun with VESPER_BLESS=1",
         path.display()
     );

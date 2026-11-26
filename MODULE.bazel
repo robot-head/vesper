@@ -191,3 +191,7 @@ use_repo(cargo_workspace, "vesper_cargo")
 
 wasmtime = use_extension("//tools/bazel:wasmtime.bzl", "wasmtime")
 use_repo(wasmtime, "wasmtime")
+
+# `wac plug` composes Stage 2 output with the Cranelift component (#2210).
+wac = use_extension("//tools/bazel:wac.bzl", "wac")
+use_repo(wac, "wac")
