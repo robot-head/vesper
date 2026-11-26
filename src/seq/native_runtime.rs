@@ -30,6 +30,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::ffi::c_void;
+use std::hash::{BuildHasherDefault, Hasher};
 
 /// The most element bytes a sequence keeps inline after its header.
 pub const INLINE_BYTES: i64 = 65536;
@@ -84,14 +85,47 @@ unsafe fn free(ptr: *mut u8) {
     unsafe { c_free(ptr.cast()) }
 }
 
+/// Hashes an address with one multiply (the Fx hash), rotated so the
+/// product's well-mixed high bits pick the bucket (aligned addresses end
+/// in zero bits). Every allocation, growth and drop of a JIT sequence looks
+/// its address up, and SipHash made that bookkeeping a large share of port
+/// timings.
+#[derive(Default)]
+struct AddressHasher(u64);
+
+/// The Fx hash's multiplier.
+const ADDRESS_HASH_SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+/// The rotation `finish` applies (rustc-hash 2's).
+const ADDRESS_HASH_ROTATE: u32 = 26;
+
+impl Hasher for AddressHasher {
+    fn finish(&self) -> u64 {
+        self.0.rotate_left(ADDRESS_HASH_ROTATE)
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(ADDRESS_HASH_SEED);
+    }
+    fn write_usize(&mut self, n: usize) {
+        self.write_u64(n as u64);
+    }
+}
+
+/// A set of addresses.
+type Addresses = HashSet<usize, BuildHasherDefault<AddressHasher>>;
+
 thread_local! {
     /// Live headers and separate buffers of this thread.
     static LIVE: Cell<usize> = const { Cell::new(0) };
     /// Live headers.
-    static HEADERS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+    static HEADERS: RefCell<Addresses> = RefCell::new(Addresses::default());
     /// Separate buffers grown for values this runtime did
     /// not allocate (native strings, §13), by data address.
-    static BUFFERS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+    static BUFFERS: RefCell<Addresses> = RefCell::new(Addresses::default());
     static FAULT: RefCell<Option<String>> = const { RefCell::new(None) };
     /// Allocations the last [`finish`] found live because generated code
     /// had not freed them.
