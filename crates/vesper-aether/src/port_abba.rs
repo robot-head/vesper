@@ -1,7 +1,7 @@
 //! Randomized differentials and ABBA timings of the aether ports that are
 //! not yet Vesper-only (SH6 lane 14, #1409): the vsock header codec,
-//! vmgenid, guest memory, the fork wire and seccomp. Each workload runs the
-//! Vesper port and the Rust reference on the same inputs.
+//! vmgenid, guest memory and the fork wire. Each workload runs the Vesper
+//! port and the Rust reference on the same inputs.
 //!
 //! ```text
 //! RUSTFLAGS="-C target-cpu=native" cargo test --release -p vesper-aether \
@@ -16,7 +16,6 @@ use crate::devices::vmgenid::VmGenIdDevice;
 use crate::devices::vsock::VsockHeader;
 use crate::fork::{VmGenId, VmGenIdWire};
 use crate::guest_mem::GuestMemory;
-use crate::seccomp::{self, Arch, DefaultAction, SeccompProfile};
 
 /// xorshift64*, so every run sees the same inputs.
 struct Rng(u64);
@@ -303,32 +302,5 @@ fn port_abba_guest_mem_locate() {
         "guest_mem_locate",
         || locate_run(&m, black_box(&q), false),
         || locate_run(&m, black_box(&q), true),
-    );
-}
-
-// ---- seccomp compile (the evaluator is Vesper-only:
-// port_reference_tests::abba_seccomp) --------------------------------------
-
-#[test]
-fn seccomp_compile_differential() {
-    for arch in [Arch::X86_64, Arch::Aarch64] {
-        for default in [DefaultAction::KillProcess, DefaultAction::Errno(1)] {
-            let profile = SeccompProfile::vmm(arch, default);
-            let p = profile.compile().unwrap();
-            assert_eq!(p, profile.compile_reference().unwrap());
-            assert_eq!(seccomp::validate(&p), seccomp::validate_reference(&p));
-        }
-    }
-}
-
-#[test]
-#[ignore = "benchmark; run in release with --ignored --nocapture"]
-fn port_abba_seccomp_compile() {
-    let arch = Arch::host().unwrap_or(Arch::X86_64);
-    let profile = SeccompProfile::vmm(arch, DefaultAction::KillProcess);
-    gate(
-        "seccomp_compile",
-        || profile.compile_reference().unwrap().len() as u64,
-        || profile.compile().unwrap().len() as u64,
     );
 }
