@@ -241,6 +241,7 @@ pub fn fnv1a64(in s: Slice[u8]) -> u64 {
 // Append a sequence of typed writer calls to one destination. Each named
 // writer receives inout destination first, then its original arguments.
 // The calls run left to right, once each, with no intermediate buffer.
+// The `new` form creates and returns the destination itself.
 pub sugar fmt: tag {
     rule (
         fmt{
@@ -250,6 +251,17 @@ pub sugar fmt: tag {
     ) => {
         {
             $($writer(inout $destination, $..arguments);)*
+        }
+    }
+    rule (
+        fmt{
+            new;
+            $($writer:ident($..arguments:args)),*
+        }
+    ) => {
+        {
+            let mut destination = ChunkSeq::new[u8]();
+            $($writer(inout destination, $..arguments);)* destination
         }
     }
 }
@@ -275,13 +287,27 @@ test {
         trace == 12 && out.as_slice().eq(in "pré:digits=1-9, hex=002".as_bytes())
     }
 
+    fn fresh_sequence_owns_bytes_and_evaluates_once() -> bool {
+        let mut trace: u64 = 0;
+        let destination = fmt{
+            new;
+            write_str(in "café "),
+            write_u64(next(inout trace, 1)),
+            write_hex_u64(next(inout trace, 2), 2)
+        };
+        trace == 12 && destination.as_slice().eq(in "café 102".as_bytes())
+    }
+
     fn empty_sequence_is_a_noop() -> bool {
         let mut out = ChunkSeq::new[u8]();
         write_str(inout out, in "-");
         fmt{
             inout out;
         };
-        out.as_slice().eq(in "-".as_bytes())
+        let empty = fmt{
+            new;
+        };
+        empty.len() == 0 && out.as_slice().eq(in "-".as_bytes())
     }
 
     // @case empty(in "", 0)
@@ -328,6 +354,7 @@ test {
         bytes_equal(in out.as_slice(), in expected.as_bytes())
             && appends_utf8_then_numbers_in_order()
             && empty_sequence_is_a_noop()
+            && fresh_sequence_owns_bytes_and_evaluates_once()
     }
 
     // @case zero(0, in "0")

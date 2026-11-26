@@ -475,23 +475,24 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
     // Loops, early exits and `let mut` (lane F6, #876) are not in the
     // self-hosted parser yet; such sources join the corpus once
     // packages/vesper-compiler parses them.
-    // Nor are value enums (`enum Word: _ { Int = 0, .. }`, claim #1159):
-    // the Stage 1 parser reads them with a different tree.
+    // Nor are const items (`const NAME: T = v;`, #2204) or value enums
+    // (`enum Word: _ { Int = 0, .. }`, claim #1159): the Stage 1 parser has
+    // no const item, so it stops at the first one.
     out.retain(|path| {
         std::fs::read_to_string(path).map_or(true, |source| {
             let module = vesper::parser::parse(&source).module;
-            !vesper::loops::uses_loop_syntax(&module)
-                && !module.items.iter().any(is_value_enum_member)
+            !vesper::loops::uses_loop_syntax(&module) && !module.items.iter().any(is_const_item)
         })
     });
     out.sort();
     out
 }
 
-/// The seed desugars a value enum's members to const items named
-/// `Enum::Member`.
-fn is_value_enum_member(item: &vesper::ast::Item) -> bool {
-    matches!(item, vesper::ast::Item::Function(f) if f.name.contains("::"))
+/// The seed desugars a const item, and each member of a value enum, to the
+/// parameterless function `const$NAME` (`const$Enum::Member`).
+fn is_const_item(item: &vesper::ast::Item) -> bool {
+    matches!(item, vesper::ast::Item::Function(f)
+        if f.name.starts_with(vesper::parser::CONST_PREFIX) || f.name.contains("::"))
 }
 
 pub(super) fn read_front_end() -> String {

@@ -14,6 +14,8 @@ use vesper_lsp::lens::{
 };
 
 pub(crate) const PROOF_COMMAND: &str = "vesper.proofAudit";
+/// The longest function name `vesper.proofAudit` takes, in bytes.
+const MAX_FUNCTION_NAME_BYTES: usize = 1024;
 
 /// Server-side Lens configuration. Clients cannot choose executables or
 /// directories; they may only switch debounced background runs on or off.
@@ -144,6 +146,56 @@ fn member_receiver(text: &str, offset: usize) -> Option<std::ops::Range<usize>> 
         return None;
     }
     Some(start..end)
+}
+
+/// The checks of `workspace/executeCommand` before any proof work, in
+/// order: the parameter bounds, the command, its one argument object, its
+/// keys and fields, the open document (`version_of` gives its version) and
+/// the expected version. Gives the URI, the function and whether the
+/// semantic obligation was asked for.
+pub(crate) fn proof_command(
+    params: Option<&Value>,
+    version_of: impl Fn(&str) -> Option<i32>,
+) -> Result<(&str, &str, bool), ServerError> {
+    validate_input("workspace/executeCommand", params)?;
+    let params = object(params)?;
+    if string(field(params, "command")?, "command")? != PROOF_COMMAND {
+        return Err(ServerError::params("unknown command"));
+    }
+    let arguments = field(params, "arguments")?
+        .as_array()
+        .filter(|args| args.len() == 1)
+        .ok_or_else(|| ServerError::params("vesper.proofAudit takes one argument object"))?;
+    let argument = object(arguments.first())?;
+    if argument
+        .keys()
+        .any(|k| !matches!(k.as_str(), "uri" | "version" | "function" | "obligation"))
+    {
+        return Err(ServerError::params("unknown vesper.proofAudit argument"));
+    }
+    let uri = string(field(argument, "uri")?, "uri")?;
+    let function = string(field(argument, "function")?, "function")?;
+    if function.len() > MAX_FUNCTION_NAME_BYTES {
+        return Err(ServerError::params("function name is too long"));
+    }
+    let semantic = match argument.get("obligation").map(|v| string(v, "obligation")) {
+        None => false,
+        Some(Ok("extraction")) => false,
+        Some(Ok("semantic")) => true,
+        Some(Ok(_)) => {
+            return Err(ServerError::params(
+                "obligation must be \"extraction\" or \"semantic\"",
+            ));
+        }
+        Some(Err(error)) => return Err(error),
+    };
+    let current = version_of(uri).ok_or_else(|| ServerError::params("document URI is not open"))?;
+    if let Some(expected) = argument.get("version").map(version).transpose()?
+        && expected != current
+    {
+        return Err(ServerError::new(-32801, "Document version has changed"));
+    }
+    Ok((uri, function, semantic))
 }
 
 impl Session {
@@ -358,44 +410,10 @@ impl Session {
         params: Option<Value>,
     ) -> Result<CommandOutcome, ServerError> {
         self.running()?;
-        validate_input("workspace/executeCommand", params.as_ref())?;
-        let params = object(params.as_ref())?;
-        if string(field(params, "command")?, "command")? != PROOF_COMMAND {
-            return Err(ServerError::params("unknown command"));
-        }
-        let arguments = field(params, "arguments")?
-            .as_array()
-            .filter(|args| args.len() == 1)
-            .ok_or_else(|| ServerError::params("vesper.proofAudit takes one argument object"))?;
-        let argument = object(arguments.first())?;
-        if argument
-            .keys()
-            .any(|k| !matches!(k.as_str(), "uri" | "version" | "function" | "obligation"))
-        {
-            return Err(ServerError::params("unknown vesper.proofAudit argument"));
-        }
-        let uri = string(field(argument, "uri")?, "uri")?;
-        let function = string(field(argument, "function")?, "function")?;
-        if function.len() > 1024 {
-            return Err(ServerError::params("function name is too long"));
-        }
-        let semantic = match argument.get("obligation").map(|v| string(v, "obligation")) {
-            None => false,
-            Some(Ok("extraction")) => false,
-            Some(Ok("semantic")) => true,
-            Some(Ok(_)) => {
-                return Err(ServerError::params(
-                    "obligation must be \"extraction\" or \"semantic\"",
-                ));
-            }
-            Some(Err(error)) => return Err(error),
-        };
-        let document = self.document(uri)?;
-        if let Some(expected) = argument.get("version").map(version).transpose()?
-            && expected != document.version()
-        {
-            return Err(ServerError::new(-32801, "Document version has changed"));
-        }
+        let documents = &self.documents;
+        let (uri, function, semantic) = proof_command(params.as_ref(), |uri| {
+            documents.get(uri).map(vesper_lsp::Document::version)
+        })?;
         let snapshot = self.snapshot(uri)?;
         let fail = |stage: &str, reason: String| ProofStatus::Failed {
             stage: stage.into(),

@@ -157,6 +157,7 @@ vesper_hybrid(
         "hybrid_codegen_export": [
             "//:codegen_export_glue_package",
             "//:codegen_export_package",
+            "//:std_bytes_package",
             "//packages/vesper-cranelift:cranelift_package",
         ],
         # Vector and TiledSeq operations (#1285), through the shim too.
@@ -235,6 +236,7 @@ vesper_hybrid(
         "hybrid_effects": [
             "//:check_data_package",
             "//:check_effects_package",
+            "//:std_bytes_package",
         ],
         # Foreign (.vsys) call emission (#1287), through the shim.
         "hybrid_ffi_lowering": [

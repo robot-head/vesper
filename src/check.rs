@@ -5414,14 +5414,6 @@ pub fn literal_type(l: &Literal) -> Type {
         Literal::String(_) => Type::named("String"),
     }
 }
-pub fn function_type(f: &Function) -> Type {
-    Type::Function {
-        params: f.params.iter().map(|p| (p.pass, p.ty.clone())).collect(),
-        result: Box::new(f.result.clone()),
-        effects: f.effects.clone(),
-        mode: Mode::Copy,
-    }
-}
 pub fn integer(t: &Type) -> bool {
     crate::numeric::is_integer_name(t.name()) || matches!(t, Type::IntLiteral(_) | Type::Infer)
 }

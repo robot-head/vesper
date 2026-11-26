@@ -214,12 +214,7 @@ test {
             return false;
         }
         let bytes = expected.as_bytes();
-        for i in 0..actual.len() {
-            if actual.try_get(i) != bytes.try_get(i) {
-                return false;
-            }
-        }
-        true
+        all{ { a == b } | (a, b) in zip{ actual, bytes } }
     }
 
     // @case empty(in "", true, in "")

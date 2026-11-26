@@ -510,38 +510,6 @@ pub fn load_for_target(
 
 type RootParser<'a> = dyn FnMut(&Path) -> Result<(String, crate::parser::Parse), String> + 'a;
 
-/// Prepare root sources before resolving imports and assigning global spans.
-/// The callback may append synthetic source, but its AST must use offsets
-/// into the resulting text. Dependencies always use the ordinary parser.
-pub fn load_with_root_parser(dir: &Path, parse: &mut RootParser<'_>) -> Result<Assembled, String> {
-    load_with_parser(
-        dir,
-        Some(parse),
-        None,
-        false,
-        None,
-        false,
-        std::env::consts::OS,
-    )
-}
-
-/// Assemble tests against one changed dependency source held in memory.
-pub fn load_with_dependency_replacement(
-    dir: &Path,
-    parse: &mut RootParser<'_>,
-    replacement: (&Path, &str),
-) -> Result<Assembled, String> {
-    load_with_parser(
-        dir,
-        Some(parse),
-        Some(replacement),
-        false,
-        None,
-        false,
-        std::env::consts::OS,
-    )
-}
-
 type PreparedParser<'a> =
     dyn FnMut(&Path, &mut String) -> Result<crate::parser::Parse, String> + 'a;
 

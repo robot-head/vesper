@@ -12,9 +12,11 @@ flat. Rust stays the default checker; nothing here replaces Rust code.
 | File | Rust | Vesper |
 |---|---|---|
 | `src/prog.ves` | `world.functions` (with bodies), `world.effects`, `world.calls` | `Prog`: an index graph of expressions and patterns over one word pool, function, parameter, effect and call tables, `read_prog` |
+| `src/kinds.ves` | the `@vesper/ast` kind numbers the task program uses | expression, pattern and statement kinds and the pool's statement, parameter and clause record layouts |
 | `src/keys.ves` | `Summaries`, `BTreeSet`s of facts | `Keys` (sorted `u64` sets), `Sums` |
 | `src/walker.ves` | `Walker` and its helpers | the walk: scopes as one `Local` stack with marks, the call graph as a flat edge list, `secret_type` memoised by type id |
 | `src/check.ves` | `summarise`, `check_world`, `realtime_recursion` | the fixpoint, both walks, the cycle check, a stable merge sort and dedup of the diagnostics |
+| `src/codes.ves` | the capability rules' diagnostic codes | the E07xx codes |
 | `src/lib.ves` | | the entry `check_effects(in input: Str)` |
 
 ## Input

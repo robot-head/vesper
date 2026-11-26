@@ -1007,10 +1007,7 @@ pub fn err_contains(in state: St, in needle: Str) -> bool {
         }
         let mut ok = true;
         for k in 0..needle_len {
-            let byte = match needle_bytes.try_get(k) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
+            let byte = needle_bytes.try_get(k).unwrap_or(0);
             if u8_at(in state.err, wrapping_add(i, k)) != byte {
                 ok = false;
                 break;

@@ -3,24 +3,19 @@
 // views of sequences of handles, and lent `.vsys` extern-type handles.
 
 use @vesper/check-data::util::{inc, u8_at, w};
-use self::iface::{DeclRow, VarRow};
+use self::iface::{
+    DeclRow, K_BOX, K_EXTERN, K_NAMED, K_OBJECT, K_SCALAR, K_SEQ, K_SLICE, K_STR, K_TUPLE, M_REPR_C,
+    P_IN, P_INOUT, P_SINK, VIEW_WORDS, VarRow
+};
 use self::text::{StrSet, copy_of, nl, put, put_seq, put_u64, str_set, text};
 use self::binding::{Gen};
 
-// `AbiType` kinds, passing modes and mirrors (iface.ves).
-const K_SCALAR: u8 = 0;
-const K_TUPLE: u8 = 1;
-const K_NAMED: u8 = 2;
-const K_SEQ: u8 = 3;
-const K_SLICE: u8 = 4;
-const K_BOX: u8 = 5;
-const K_STR: u8 = 6;
-const K_OBJECT: u8 = 7;
-const K_EXTERN: u8 = 8;
-const P_IN: u8 = 1;
-const P_INOUT: u8 = 2;
-const P_SINK: u8 = 3;
-const M_REPR_C: u8 = 1;
+// `encode`'s indentation depths: a struct's field encoders, an enum arm's
+// (inside its `match`), and how much deeper an `Option`'s `Some(x)` arm
+// encodes `x`.
+const STRUCT_FIELD_DEPTH: u64 = 1;
+const ENUM_FIELD_DEPTH: u64 = 3;
+const SOME_ARM_DEPTH: u64 = 2;
 
 impl Gen {
     // `tree_types`: the greatest fixed point of handle types whose fields
@@ -188,7 +183,7 @@ impl Gen {
             put(inout out, "[");
             put_u64(inout out, at);
             put(inout out, "..");
-            put_u64(inout out, wrapping_add(at, 3));
+            put_u64(inout out, wrapping_add(at, VIEW_WORDS));
             put(inout out, "].copy_from_slice(&unsafe { string_words(");
             put_seq(inout out, in e);
             put(inout out, ") });\n");
@@ -261,7 +256,7 @@ impl Gen {
                 in wv,
                 inc(at),
                 inout out,
-                wrapping_add(depth, 2)
+                wrapping_add(depth, SOME_ARM_DEPTH)
             );
             put_seq(inout out, in pad);
             put(inout out, "    }\n");
@@ -506,7 +501,7 @@ impl Gen {
                     let f = self.i.field(wrapping_add(v.f0, j));
                     let mut b = text("f");
                     put_u64(inout b, j);
-                    self.encode(f.ty, in b, in text("w"), f.offset, inout out, 3);
+                    self.encode(f.ty, in b, in text("w"), f.offset, inout out, ENUM_FIELD_DEPTH);
                 }
                 put(inout out, "        }\n");
             }
@@ -517,7 +512,7 @@ impl Gen {
                 let f = self.i.field(wrapping_add(v.f0, j));
                 let mut e = text("&tree.");
                 self.field_name(f.name, inout e);
-                self.encode(f.ty, in e, in text("w"), f.offset, inout out, 1);
+                self.encode(f.ty, in e, in text("w"), f.offset, inout out, STRUCT_FIELD_DEPTH);
             }
         }
         put(inout out, "}\n\n");

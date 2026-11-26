@@ -32,6 +32,7 @@ use self::machine::{
 };
 use self::certificate::{put_debug};
 use self::evidence::{Sites, sites_new};
+use self::cover::{Rf, rf_copy, rf_has, rf_len, rf_new, rf_push};
 use self::exprs::{Cl, Ex, Hx, P_BIND, P_OTHER, X_HANDLE, nested_instance, nested_name, read_exprs};
 use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, u64_at, u8_at, w};
 use @vesper/check-data::names::{Names};
@@ -43,14 +44,14 @@ use @vesper/place-ir::{InstRow, Program, read_program};
 use @vesper/place-ir::codes::{Lit, Op, Pat, Term};
 
 const NONE32: u32 = 4294967295;
-const NONE: u64 = 18446744073709551615;
+pub const NONE: u64 = 18446744073709551615;
 const NO_ADT: u32 = 4294967295;
 
 // `MAX_FRAME_WORDS` and the type nesting limit of lower.rs.
 const MAX_FRAME_WORDS: u64 = 4000;
 const MAX_DEPTH: u64 = 32;
 // `machine::FIRST_FREE_LABEL`: labels below it are the shared abort exits.
-const FIRST_FREE_LABEL: u64 = 4;
+pub const FIRST_FREE_LABEL: u64 = 4;
 // The program heap's globals (heap word indices): words in use beyond the
 // globals, the innermost open region's header and the pin.
 const G_TOP: u64 = 0;
@@ -81,6 +82,8 @@ pub const E_LIMIT: u8 = 3;
 pub const E_INVALID: u8 = 4;
 // Not a Rust error: a construct part 4a does not lower yet.
 pub const E_NOT_PORTED: u8 = 5;
+// No error: what a `Fail[VErr]` handle returns when its body succeeded.
+pub const E_NONE: u8 = 255;
 
 // `Unsupported`, in declaration order.
 const U_FLOAT: u8 = 0;
@@ -91,7 +94,7 @@ const U_INDEX: u8 = 4;
 const U_FUNCTION_VALUE: u8 = 5;
 pub const U_GENERIC: u8 = 6;
 pub const U_EFFECT: u8 = 7;
-const U_EXTERNAL_FUNCTION: u8 = 8;
+pub const U_EXTERNAL_FUNCTION: u8 = 8;
 const U_STRUCTURAL_EQUALITY: u8 = 9;
 const U_TYPE: u8 = 10;
 const U_OPERATION: u8 = 11;
@@ -104,7 +107,7 @@ pub struct VErr {
     detail: ChunkSeq[u8],
 }
 
-fn construct_name(c: u8) -> Str {
+pub fn construct_name(c: u8) -> Str {
     if c == U_FLOAT {
         "Float"
     } else if c == U_STRING {
@@ -408,6 +411,11 @@ pub struct Lw {
     entry: u32,
     max_functions: u64,
     max_rows: u64,
+    // Coverage mode (src/verified_codegen/coverage.rs): plan from every
+    // symbol of `entries` and record refusals in `rf` instead of failing.
+    tolerant: bool,
+    entries: ChunkSeq[u32],
+    rf: Rf,
 }
 
 fn fn0() -> Fn {
@@ -509,7 +517,7 @@ fn set_table32(inout t: ChunkSeq[u32], i: u64, v: u32) {
     let ok = t.try_set(i, v);
 }
 
-fn set_table8(inout t: ChunkSeq[u8], i: u64, v: u8) {
+pub fn set_table8(inout t: ChunkSeq[u8], i: u64, v: u8) {
     loop {
         if t.len() > i {
             break;
@@ -554,7 +562,7 @@ fn read_string(inout r: Reader, in b: Slice[u8], inout names: Names) -> u32 {
     s
 }
 
-fn decode(
+pub fn decode(
     sink c: Ctx,
     sink p: Program,
     sink ex: Ex,
@@ -586,6 +594,9 @@ fn decode(
         entry: 0,
         max_functions: 0,
         max_rows: 0,
+        tolerant: false,
+        entries: ChunkSeq::new[u32](),
+        rf: rf_new(),
     };
     // The harness's extra section: the entry, the limits, whether the
     // region prelude is active and the names of the world's functions.
@@ -1100,7 +1111,7 @@ pub copy struct FailRow {
 }
 
 // Byte order of two symbols' texts (`String` order).
-fn cmp_sym(in names: Names, a: u32, b: u32) -> i64 {
+pub fn cmp_sym(in names: Names, a: u32, b: u32) -> i64 {
     let na = names.size(a);
     let nb = names.size(b);
     let n = if na < nb { na } else { nb };
@@ -1349,7 +1360,7 @@ fn hd0() -> Hd {
     }
 }
 
-fn hd_at(in hs: ChunkSeq[Hd], i: u64) -> Hd {
+pub fn hd_at(in hs: ChunkSeq[Hd], i: u64) -> Hd {
     match hs.try_get(i) {
         Option::Some(x) => x,
         Option::None => hd0(),
@@ -1653,7 +1664,7 @@ pub struct Plan {
     caps: ChunkSeq[u32],
 }
 
-fn planned(in plan: Plan, i: u64) -> Planned {
+pub fn planned(in plan: Plan, i: u64) -> Planned {
     match plan.fs.try_get(i) {
         Option::Some(x) => x,
         Option::None => Planned {
@@ -1741,7 +1752,7 @@ fn row_caps(in lw: Lw, f: Fn, inout out: ChunkSeq[u32]) {
     }
 }
 
-fn is_wrapping(sy: Sy, s: u32) -> bool {
+pub fn is_wrapping(sy: Sy, s: u32) -> bool {
     s == sy.wadd || s == sy.wsub || s == sy.wmul
 }
 
@@ -1768,7 +1779,7 @@ pub copy struct Found {
 }
 
 // `plan` (`plan_with` without coverage, sites or handlers).
-fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
+pub fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
     let entry = lw.entry;
     let mut found = ChunkSeq::new[Found]();
     let mut pps = ChunkSeq::new[PP]();
@@ -1783,10 +1794,23 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
     // none, the row's own)
     let mut qca = ChunkSeq::new[u64]();
     let mut qcn = ChunkSeq::new[u64]();
-    queue.push(entry);
-    qca.push(NONE);
-    qcn.push(0);
-    set_table8(inout seen, w(entry), 1);
+    if lw.tolerant {
+        for i in 0..lw.entries.len() {
+            let e = u32_at(in lw.entries, i);
+            if u8_at(in seen, w(e)) == 0 {
+                queue.push(e);
+                qca.push(NONE);
+                qcn.push(0);
+                set_table8(inout seen, w(e), 1);
+            }
+        }
+    } else {
+        queue.push(entry);
+        qca.push(NONE);
+        qcn.push(0);
+        set_table8(inout seen, w(entry), 1);
+    }
+    let tolerant = lw.tolerant;
     let mut head: u64 = 0;
     loop {
         if head >= queue.len() {
@@ -1802,176 +1826,214 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
             ap(inout d, " reachable functions");
             Fail::raise(err(E_LIMIT, d));
         }
-        let fx = lw.find(name);
-        if fx == 0 {
-            let detail = if u8_at(in lw.world_fn, w(name)) == 1 {
-                "function without a body"
-            } else {
-                "no such function in the checked world"
-            };
-            Fail::raise(unsup(U_EXTERNAL_FUNCTION, name, tx(detail)));
-        }
-        let fi = wrapping_sub(fx, 1);
-        let f = lw.func(fi);
-        let clause = starts_with(in lw.c.names, name, "$handler_clause");
-        let nested = starts_with(in lw.c.names, name, "$");
-        let mut generic = false;
-        for i in 0..f.pn {
-            let p = lw.param(add(f.p0, i));
-            let is_fn = lw.c.types.node(p.ty).kind == TyKind::Fn;
-            if !(clause && is_fn) && mentions_generic(inout lw, p.ty) {
+        // `one()`: in coverage mode a function that cannot be planned is
+        // recorded and left out, after its effect-row refusals.
+        let mut soft = rf_new();
+        let pe = handle Fail[VErr] in {
+            let fx = lw.find(name);
+            if fx == 0 {
+                let detail = if u8_at(in lw.world_fn, w(name)) == 1 {
+                    "function without a body"
+                } else {
+                    "no such function in the checked world"
+                };
+                Fail::raise(unsup(U_EXTERNAL_FUNCTION, name, tx(detail)));
+            }
+            let fi = wrapping_sub(fx, 1);
+            let f = lw.func(fi);
+            let clause = starts_with(in lw.c.names, name, "$handler_clause");
+            let nested = starts_with(in lw.c.names, name, "$");
+            let mut generic = false;
+            for i in 0..f.pn {
+                let p = lw.param(add(f.p0, i));
+                let is_fn = lw.c.types.node(p.ty).kind == TyKind::Fn;
+                if !(clause && is_fn) && mentions_generic(inout lw, p.ty) {
+                    generic = true;
+                }
+            }
+            if !generic && mentions_generic(inout lw, f.result) {
                 generic = true;
             }
-        }
-        if !generic && mentions_generic(inout lw, f.result) {
-            generic = true;
-        }
-        if generic {
-            Fail::raise(unsup(U_GENERIC, name, tx("a type parameter without a concrete instance")));
-        }
-        effects_supported(inout lw, f);
-        let mut cpa = qa;
-        let mut cpn = qn;
-        if qa == NONE {
-            cpa = caps.len();
-            row_caps(in lw, f, inout caps);
-            cpn = wrapping_sub(caps.len(), cpa);
-        }
-        // Nothing supplies the entry's capabilities: the process starts with
-        // no open region.
-        if name == entry && cpn > 0 {
-            let mut d = tx("region capability on the entry (");
-            for j in 0..cpn {
-                if j > 0 {
-                    ap(inout d, ", ");
-                }
-                lw.put_sym(u32_at(in caps, add(cpa, j)), inout d);
+            if generic {
+                Fail::raise(unsup(
+                    U_GENERIC,
+                    name,
+                    tx("a type parameter without a concrete instance")
+                ));
             }
-            ap(inout d, ")");
-            Fail::raise(unsup(U_EFFECT, name, d));
-        }
-        let pa = pps.len();
-        for i in 0..f.pn {
-            let p = lw.param(add(f.p0, i));
-            let erased = nested && clause && lw.c.types.node(p.ty).kind == TyKind::Fn;
-            let sh = if erased {
-                Sh { a: 0, n: 0 }
+            if tolerant {
+                let se = handle Fail[VErr] in {
+                    effects_supported(inout lw, f);
+                    err(E_NONE, ChunkSeq::new[u8]())
+                } with {
+                    return v => v,
+                    raise(e, k) => e,
+                };
+                if se.kind != E_NONE {
+                    rf_push(inout soft, name, in se);
+                }
             } else {
-                shape(inout lw, p.ty, name)
-            };
-            pps.push(PP { pass: p.pass, sh: sh, erased: erased, wa: 0, wn: 0 });
-        }
-        for i in 0..f.pn {
-            let p = lw.param(add(f.p0, i));
-            let q = match pps.try_get(add(pa, i)) {
-                Option::Some(x) => x,
-                Option::None => pp0(),
-            };
-            let wa = wb.len();
-            if p.pn == 0 {
-                wb.push(0);
-                wb.push(q.sh.n);
-            } else {
-                for j in 0..p.pn {
-                    let path = lw.op(add(p.pa, j));
-                    let row = lw.p.path(path);
-                    let mut comps = ChunkSeq::new[u32]();
-                    for k in 0..row.n {
-                        comps.push(u32_at(in lw.p.path_syms, add(row.a, k)));
+                effects_supported(inout lw, f);
+            }
+            let mut cpa = qa;
+            let mut cpn = qn;
+            if qa == NONE {
+                cpa = caps.len();
+                row_caps(in lw, f, inout caps);
+                cpn = wrapping_sub(caps.len(), cpa);
+            }
+            // Nothing supplies the entry's capabilities: the process starts with
+            // no open region.
+            if !tolerant && name == entry && cpn > 0 {
+                let mut d = tx("region capability on the entry (");
+                for j in 0..cpn {
+                    if j > 0 {
+                        ap(inout d, ", ");
                     }
-                    let (s, l) = range(in lw, q.sh, in comps);
-                    wb.push(s);
-                    wb.push(l);
+                    lw.put_sym(u32_at(in caps, add(cpa, j)), inout d);
                 }
+                ap(inout d, ")");
+                Fail::raise(unsup(U_EFFECT, name, d));
             }
-            let wn = wrapping_sub(wb.len(), wa) / 2;
-            let ok = pps.try_set(
-                add(pa, i),
-                PP { pass: q.pass, sh: q.sh, erased: q.erased, wa: wa, wn: wn }
-            );
-        }
-        let result = shape(inout lw, f.result, name);
-        let ca = calls.len();
-        let ha = hds.len();
-        let sy = lw.sy;
-        for bi in 0..f.bc {
-            let blk = lw.p.block(add(f.b0, bi));
-            for k in 0..blk.ic {
-                let ins = lw.p.inst(add(blk.i0, k));
-                if ins.op == Op::Handle {
-                    let x = lw.ex.row(lw.op(add(ins.a, 2)));
-                    if is_region_block(in lw, x) {
-                        // The body sees the enclosing capabilities and its
-                        // own (which shadows an outer one of the same
-                        // label). Its failures pass through the block.
-                        let label = wrapping_sub(x.label, 1);
-                        let bn = nested_name(inout lw.c.names, "handler_body", x.b0, x.b1);
-                        let body = nested_instance(inout lw.c.names, name, bn);
-                        if u8_at(in seen, w(body)) == 0 {
-                            set_table8(inout seen, w(body), 1);
-                            queue.push(body);
-                            let mut inner = ChunkSeq::new[u32]();
-                            for j in 0..cpn {
-                                let c = u32_at(in caps, add(cpa, j));
-                                if c != label {
-                                    inner.push(c);
+            let pa = pps.len();
+            for i in 0..f.pn {
+                let p = lw.param(add(f.p0, i));
+                let erased = nested && clause && lw.c.types.node(p.ty).kind == TyKind::Fn;
+                let sh = if erased {
+                    Sh { a: 0, n: 0 }
+                } else {
+                    shape(inout lw, p.ty, name)
+                };
+                pps.push(PP { pass: p.pass, sh: sh, erased: erased, wa: 0, wn: 0 });
+            }
+            for i in 0..f.pn {
+                let p = lw.param(add(f.p0, i));
+                let q = match pps.try_get(add(pa, i)) {
+                    Option::Some(x) => x,
+                    Option::None => pp0(),
+                };
+                let wa = wb.len();
+                if p.pn == 0 {
+                    wb.push(0);
+                    wb.push(q.sh.n);
+                } else {
+                    for j in 0..p.pn {
+                        let path = lw.op(add(p.pa, j));
+                        let row = lw.p.path(path);
+                        let mut comps = ChunkSeq::new[u32]();
+                        for k in 0..row.n {
+                            comps.push(u32_at(in lw.p.path_syms, add(row.a, k)));
+                        }
+                        let (s, l) = range(in lw, q.sh, in comps);
+                        wb.push(s);
+                        wb.push(l);
+                    }
+                }
+                let wn = wrapping_sub(wb.len(), wa) / 2;
+                let ok = pps.try_set(
+                    add(pa, i),
+                    PP { pass: q.pass, sh: q.sh, erased: q.erased, wa: wa, wn: wn }
+                );
+            }
+            let result = shape(inout lw, f.result, name);
+            let ca = calls.len();
+            let ha = hds.len();
+            let sy = lw.sy;
+            for bi in 0..f.bc {
+                let blk = lw.p.block(add(f.b0, bi));
+                for k in 0..blk.ic {
+                    let ins = lw.p.inst(add(blk.i0, k));
+                    if ins.op == Op::Handle {
+                        let x = lw.ex.row(lw.op(add(ins.a, 2)));
+                        if is_region_block(in lw, x) {
+                            // The body sees the enclosing capabilities and its
+                            // own (which shadows an outer one of the same
+                            // label). Its failures pass through the block.
+                            let label = wrapping_sub(x.label, 1);
+                            let bn = nested_name(inout lw.c.names, "handler_body", x.b0, x.b1);
+                            let body = nested_instance(inout lw.c.names, name, bn);
+                            if u8_at(in seen, w(body)) == 0 {
+                                set_table8(inout seen, w(body), 1);
+                                queue.push(body);
+                                let mut inner = ChunkSeq::new[u32]();
+                                for j in 0..cpn {
+                                    let c = u32_at(in caps, add(cpa, j));
+                                    if c != label {
+                                        inner.push(c);
+                                    }
+                                }
+                                inner.push(label);
+                                qca.push(caps.len());
+                                qcn.push(inner.len());
+                                for j in 0..inner.len() {
+                                    caps.push(u32_at(in inner, j));
                                 }
                             }
-                            inner.push(label);
-                            qca.push(caps.len());
-                            qcn.push(inner.len());
-                            for j in 0..inner.len() {
-                                caps.push(u32_at(in inner, j));
+                            calls.push(body);
+                            continue;
+                        }
+                        let h = fail_handler(inout lw, name, ins, x);
+                        for g in [h.body, h.ret, h.raise] {
+                            if u8_at(in seen, w(g)) == 0 {
+                                set_table8(inout seen, w(g), 1);
+                                queue.push(g);
+                                qca.push(NONE);
+                                qcn.push(0);
                             }
                         }
-                        calls.push(body);
+                        hds.push(h);
                         continue;
                     }
-                    let h = fail_handler(inout lw, name, ins, x);
-                    for g in [h.body, h.ret, h.raise] {
-                        if u8_at(in seen, w(g)) == 0 {
-                            set_table8(inout seen, w(g), 1);
-                            queue.push(g);
-                            qca.push(NONE);
-                            qcn.push(0);
+                    if ins.op == Op::Call {
+                        let callee = n32(lw.op(ins.a));
+                        let n = lw.op(inc(ins.a));
+                        let tat = add(add(ins.a, 2), wrapping_mul(n, 4));
+                        let nt = lw.op(tat);
+                        let cap = lw.op(add(inc(tat), nt));
+                        if cap == 0 && callee != sy.raise && !is_wrapping(sy, callee) {
+                            if u8_at(in seen, w(callee)) == 0 {
+                                set_table8(inout seen, w(callee), 1);
+                                queue.push(callee);
+                                qca.push(NONE);
+                                qcn.push(0);
+                            }
+                            calls.push(callee);
                         }
-                    }
-                    hds.push(h);
-                    continue;
-                }
-                if ins.op == Op::Call {
-                    let callee = n32(lw.op(ins.a));
-                    let n = lw.op(inc(ins.a));
-                    let tat = add(add(ins.a, 2), wrapping_mul(n, 4));
-                    let nt = lw.op(tat);
-                    let cap = lw.op(add(inc(tat), nt));
-                    if cap == 0 && callee != sy.raise && !is_wrapping(sy, callee) {
-                        if u8_at(in seen, w(callee)) == 0 {
-                            set_table8(inout seen, w(callee), 1);
-                            queue.push(callee);
-                            qca.push(NONE);
-                            qcn.push(0);
-                        }
-                        calls.push(callee);
                     }
                 }
             }
+            let local = local_of(inout lw, f, inout lpool);
+            found.push(Found {
+                name: name,
+                fi: fi,
+                pa: pa,
+                pn: f.pn,
+                result: result,
+                local: local,
+                ca: ca,
+                cn: wrapping_sub(calls.len(), ca),
+                ha: ha,
+                hn: wrapping_sub(hds.len(), ha),
+                cpa: cpa,
+                cpn: cpn
+            });
+            err(E_NONE, ChunkSeq::new[u8]())
+        } with {
+            return v => v,
+            raise(e, k) => e,
+        };
+        if pe.kind != E_NONE && !tolerant {
+            Fail::raise(pe);
         }
-        let local = local_of(inout lw, f, inout lpool);
-        found.push(Found {
-            name: name,
-            fi: fi,
-            pa: pa,
-            pn: f.pn,
-            result: result,
-            local: local,
-            ca: ca,
-            cn: wrapping_sub(calls.len(), ca),
-            ha: ha,
-            hn: wrapping_sub(hds.len(), ha),
-            cpa: cpa,
-            cpn: cpn
-        });
+        for i in 0..rf_len(in soft) {
+            rf_copy(inout lw.rf, name, in soft, i);
+        }
+        if pe.kind != E_NONE {
+            rf_push(inout lw.rf, name, in pe);
+        }
+    }
+    if found.len() == 0 {
+        Fail::raise(err(E_ENTRY, tx("no plannable function")));
     }
     // `fail::codes`: every error type raised anywhere, in key order.
     let mut keys = ChunkSeq::new[u32]();
@@ -2152,7 +2214,7 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
         }
     }
     let r0 = u64_at(in raises, 0);
-    if r0 != 0 {
+    if r0 != 0 && !tolerant {
         let mut called = false;
         for j in 0..calls.len() {
             if u32_at(in calls, j) == entry {
@@ -2168,7 +2230,7 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
         }
     }
     for c in 1..64 {
-        if has(r0, c) && trap_kind(in lw, in fails, c) == 255 {
+        if !tolerant && has(r0, c) && trap_kind(in lw, in fails, c) == 255 {
             let mut d = tx("Fail[");
             put_fail_name(in lw, in fails, c, inout d);
             ap(
@@ -2183,7 +2245,7 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
     for n in 0..found.len() {
         let fd = found_at(in found, n);
         let r = u64_at(in raises, n);
-        let status = n > 0 && r != 0;
+        let status = (n > 0 || tolerant) && r != 0;
         let ret_words = if status {
             let pw = payload_words(in fails, r);
             if fd.result.n > pw {
@@ -2278,6 +2340,9 @@ pub struct Fl {
     caps: ChunkSeq[u64],
     // the header slots of the region blocks open around the current call
     open: ChunkSeq[u64],
+    // coverage mode: the body's refusals (`FnLower::refusals`), owner 0
+    tolerant: bool,
+    fr: Rf,
 }
 
 fn lir(tag: u8, op: u8, kind: u8, f1: u64, f2: u64, f3: u64) -> Lir {
@@ -4037,6 +4102,33 @@ fn lower_function(
     max_rows: u64,
     inout lidx: ChunkSeq[u32]
 ) -> ChunkSeq[Lir] eff [Fail[VErr]] {
+    let mut fl = fl_for(inout lw, in plan, idx, next_label, max_rows, inout lidx);
+    let r = lower_body(inout lw, inout fl, in plan);
+    fl_done(inout lw, inout fl, inout next_label, inout lidx);
+    fl.rows
+}
+
+// The symbol table back from `fl` (cleared), and the next free label.
+fn fl_done(inout lw: Lw, inout fl: Fl, inout next_label: u64, inout lidx: ChunkSeq[u32]) {
+    let f = fl.f;
+    for i in 0..f.ln {
+        let l = lw.local_row(add(f.l0, i));
+        let ok = fl.lidx.try_set(w(l.name), 0);
+    }
+    lidx = replace(inout fl.lidx, ChunkSeq::new[u32]());
+    next_label = fl.next_label;
+}
+
+// The lowering state of planned function `idx`, its labels taken from
+// `next_label`.
+fn fl_for(
+    inout lw: Lw,
+    in plan: Plan,
+    idx: u64,
+    next_label: u64,
+    max_rows: u64,
+    inout lidx: ChunkSeq[u32]
+) -> Fl {
     let me = planned(in plan, idx);
     let f = lw.func(me.fi);
     let mut fl = Fl {
@@ -4061,6 +4153,8 @@ fn lower_function(
         stubs: ChunkSeq::new[u64](),
         caps: ChunkSeq::new[u64](),
         open: ChunkSeq::new[u64](),
+        tolerant: lw.tolerant,
+        fr: rf_new(),
     };
     // the symbol table is shared across functions and cleared after
     fl.lidx = replace(inout lidx, ChunkSeq::new[u32]());
@@ -4082,14 +4176,55 @@ fn lower_function(
         let l = fresh(inout fl);
         fl.block_labels.push(l);
     }
-    let r = lower_body(inout lw, inout fl, in plan);
-    for i in 0..f.ln {
-        let l = lw.local_row(add(f.l0, i));
-        let ok = fl.lidx.try_set(w(l.name), 0);
+    fl
+}
+
+// Coverage mode (`FnLower::tolerate`): record `e` and keep lowering. An
+// `Invalid` error after a recorded refusal is its consequence (a value the
+// refused construct would have defined) and is dropped.
+fn tolerate(inout fl: Fl, in e: VErr) {
+    if e.kind == E_INVALID && rf_len(in fl.fr) != 0 {
+        return;
     }
-    lidx = replace(inout fl.lidx, ChunkSeq::new[u32]());
-    next_label = fl.next_label;
-    fl.rows
+    if !rf_has(in fl.fr, 0, in e) {
+        rf_push(inout fl.fr, 0, in e);
+    }
+}
+
+// `value_of` for its words only, tolerated in coverage mode.
+fn define(inout lw: Lw, inout fl: Fl, v: u64, ty: u32) eff [Fail[VErr]] {
+    if !fl.tolerant {
+        let x = value_of(inout lw, inout fl, v, ty);
+        return;
+    }
+    let e = handle Fail[VErr] in {
+        let x = value_of(inout lw, inout fl, v, ty);
+        err(E_NONE, ChunkSeq::new[u8]())
+    } with {
+        return v => v,
+        raise(e, k) => e,
+    };
+    if e.kind != E_NONE {
+        tolerate(inout fl, in e);
+    }
+}
+
+// `instruction`, tolerated in coverage mode.
+fn instruction_or_record(inout lw: Lw, inout fl: Fl, in plan: Plan, ins: InstRow) eff [Fail[VErr]] {
+    if !fl.tolerant {
+        instruction(inout lw, inout fl, in plan, ins);
+        return;
+    }
+    let e = handle Fail[VErr] in {
+        instruction(inout lw, inout fl, in plan, ins);
+        err(E_NONE, ChunkSeq::new[u8]())
+    } with {
+        return v => v,
+        raise(e, k) => e,
+    };
+    if e.kind != E_NONE {
+        tolerate(inout fl, in e);
+    }
 }
 
 fn lower_body(inout lw: Lw, inout fl: Fl, in plan: Plan) eff [Fail[VErr]] {
@@ -4106,7 +4241,7 @@ fn lower_body(inout lw: Lw, inout fl: Fl, in plan: Plan) eff [Fail[VErr]] {
             if ty == NONE32 {
                 Fail::raise(untyped_param(v));
             }
-            let x = value_of(inout lw, inout fl, v, ty);
+            define(inout lw, inout fl, v, ty);
         }
         let b = lw.p.block(add(f.b0, k));
         for j in 0..b.ic {
@@ -4116,7 +4251,7 @@ fn lower_body(inout lw: Lw, inout fl: Fl, in plan: Plan) eff [Fail[VErr]] {
             } else {
                 ins.ty
             };
-            let x = value_of(inout lw, inout fl, w(ins.dest), ty);
+            define(inout lw, inout fl, w(ins.dest), ty);
         }
     }
     push(inout fl, lir(LIR_LABEL, 0, 0, me.label, 0, 0));
@@ -4149,11 +4284,30 @@ fn lower_body(inout lw: Lw, inout fl: Fl, in plan: Plan) eff [Fail[VErr]] {
             continue;
         }
         let name = lw.param(add(f.p0, i)).name;
-        let (slot, s) = local(inout lw, inout fl, name);
-        for k in 0..s.n {
+        let mut slot: u64 = 0;
+        let mut sn: u64 = 0;
+        if fl.tolerant {
+            let e = handle Fail[VErr] in {
+                let (a, s) = local(inout lw, inout fl, name);
+                slot = a;
+                sn = s.n;
+                err(E_NONE, ChunkSeq::new[u8]())
+            } with {
+                return v => v,
+                raise(e, k) => e,
+            };
+            if e.kind != E_NONE {
+                tolerate(inout fl, in e);
+            }
+        } else {
+            let (a, s) = local(inout lw, inout fl, name);
+            slot = a;
+            sn = s.n;
+        }
+        for k in 0..sn {
             push(inout fl, lir(LIR_LOAD_IN, 0, 0, add(slot, k), add(index, k), 0));
         }
-        index = add(index, s.n);
+        index = add(index, sn);
     }
     for j in 0..me.cpn {
         let slot = alloc(in lw, inout fl, 1);
@@ -4209,7 +4363,7 @@ fn lower_body(inout lw: Lw, inout fl: Fl, in plan: Plan) eff [Fail[VErr]] {
                 push(inout fl, lir(LIR_JUMP, 0, 0, inc(me.label), 0, 0));
                 continue;
             }
-            instruction(inout lw, inout fl, in plan, ins);
+            instruction_or_record(inout lw, inout fl, in plan, ins);
         }
         if tail {
             continue;
@@ -4488,12 +4642,12 @@ pub fn lower_rows(
     let mut lw = decode(c, p, ex, sites, inout r, in b);
     let e = handle Fail[VErr] in {
         lower_all(inout lw, inout lo);
-        err(255, ChunkSeq::new[u8]())
+        err(E_NONE, ChunkSeq::new[u8]())
     } with {
         return v => v,
         raise(e, k) => e,
     };
-    if e.kind != 255 {
+    if e.kind != E_NONE {
         let mut o = tx("error: ");
         put_error(in lw.c.names, in e, inout o);
         ap(inout o, "\n");
@@ -4540,4 +4694,51 @@ fn bit(c: u64) -> u64 {
 
 fn has(m: u64, c: u64) -> bool {
     (m >> (c & 63)) & 1 == 1
+}
+
+// ----- coverage (src/verified_codegen/coverage.rs) ---------------------------------
+
+pub fn plan_empty() -> Plan {
+    Plan {
+        fs: ChunkSeq::new[Planned](),
+        pps: ChunkSeq::new[PP](),
+        wb: ChunkSeq::new[u64](),
+        index: ChunkSeq::new[u32](),
+        fails: ChunkSeq::new[FailRow](),
+        site: ChunkSeq::new[u64](),
+        nbase: 0,
+        hd: ChunkSeq::new[Hd](),
+        caps: ChunkSeq::new[u32](),
+    }
+}
+
+// `function_refusals`: planned function `idx` lowered in coverage mode,
+// its refusals in `found` (owner 0). The row count, or NONE when it did
+// not lower.
+pub fn cover_function(
+    inout lw: Lw,
+    in plan: Plan,
+    idx: u64,
+    inout next_label: u64,
+    inout lidx: ChunkSeq[u32],
+    inout found: Rf
+) -> u64 {
+    let mut fl = fl_for(inout lw, in plan, idx, next_label, NONE, inout lidx);
+    fl.tolerant = true;
+    let e = handle Fail[VErr] in {
+        lower_body(inout lw, inout fl, in plan);
+        err(E_NONE, ChunkSeq::new[u8]())
+    } with {
+        return v => v,
+        raise(e, k) => e,
+    };
+    fl_done(inout lw, inout fl, inout next_label, inout lidx);
+    found = replace(inout fl.fr, rf_new());
+    if e.kind != E_NONE {
+        if !(e.kind == E_INVALID && rf_len(in found) != 0) && !rf_has(in found, 0, in e) {
+            rf_push(inout found, 0, in e);
+        }
+        return NONE;
+    }
+    fl.rows.len()
 }
