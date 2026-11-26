@@ -492,24 +492,14 @@ fn once(
 /// Width is a 100 Unicode-scalar ribbon with four-space nesting. Indivisible
 /// token/comment bytes are never wrapped, so those leaves may exceed the ribbon.
 pub fn format_source(source: &str, limits: Limits) -> Result<FormatResult, Error> {
-    // The native port handles executable grammar. Sugar uses the host's
-    // lossless surface CST, including in test bodies skipped by batch parsing.
+    // The native port handles executable grammar, sugar and test blocks
+    // (over @vesper/front's surface CST); the macro profile stays here.
     if source.len() > limits.max_input_bytes {
         return Err(Error::InputLimit);
     }
     #[cfg(vesper_port)]
-    if !surface::may_have_test_block(source)
-        && let Some(result) = port::format_source(source, limits)
-    {
-        let needs_surface = match &result {
-            Err(Error::Syntax { .. }) => true,
-            // Legacy lexing reports a diagnostic limit for multiple backticks.
-            Err(Error::TokenLimit) => source.contains('`'),
-            _ => false,
-        };
-        if !needs_surface {
-            return result;
-        }
+    if let Some(result) = port::format_source(source, limits) {
+        return result;
     }
     let mut work = Work::new(limits.max_work);
     format_with_work(source, limits, &mut work)
