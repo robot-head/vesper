@@ -1,0 +1,103 @@
+// @vesper-std/sugar: control-flow sugar for every Vesper package
+// (manuscript §7.5, `std/sugar`).
+//
+// Import the forms a module uses, as with any other item:
+//
+//     use @vesper-std/sugar::{guard, when};
+//
+// Each form expands to the `match` it names, before checking. A template's
+// `$rhs` runs once, and `$body` or `$diverge` only on its own arm, so the
+// expansion has exactly the effects and cost of the hand-written `match`.
+//
+// There is no `while` here: Forge binds an expression hole used inside a
+// template `loop` once, before the loop, so a condition could not re-run.
+
+// The package version, for diagnostics.
+pub fn version() -> u64 {
+    1
+}
+
+// `guard let PAT = rhs else { .. };` binds `PAT` for the rest of the block
+// when `rhs` matches it, or runs the `else` block, which must leave the
+// block (`return`, `break` or `continue`):
+//
+//     guard let Option::Some(x) = s.try_get(i) else {
+//         return false;
+//     };
+pub sugar guard: stmt {
+    rule (guard let $pat:pat = $rhs:expr else $diverge:block; $..rest:stmts) => {
+        match $rhs {
+            $pat => {
+                $..rest
+            },
+            _ => {
+                let rejected: Never = $diverge;
+                rejected
+            },
+        }
+    }
+}
+
+// `when let PAT = rhs { .. }` runs the block with `PAT` bound when `rhs`
+// matches it, and does nothing otherwise:
+//
+//     when let Option::Some(v) = s.try_get(i) {
+//         out.push(v);
+//     }
+pub sugar when: stmt {
+    rule (when let $pat:pat = $rhs:expr $body:block) => {
+        match $rhs {
+            $pat => $body,
+            _ => {},
+        }
+    }
+}
+
+test {
+    fn first_or(in s: Str, fallback: u8) -> u8 {
+        guard let Option::Some(b) = s.as_bytes().try_get(0) else {
+            return fallback;
+        };
+        b
+    }
+
+    fn sum_present(in s: Str, a: u64, b: u64) -> u64 {
+        let mut total: u64 = 0;
+        for i in [a, b] {
+            when let Option::Some(x) = s.as_bytes().try_get(i) {
+                total = wrapping_add(total, widen_u64(x));
+            }
+        }
+        total
+    }
+
+    fn sum_until_missing(in s: Str, n: u64) -> u64 {
+        let mut total: u64 = 0;
+        for i in 0..n {
+            guard let Option::Some(x) = s.as_bytes().try_get(i) else {
+                break;
+            };
+            total = wrapping_add(total, widen_u64(x));
+        }
+        total
+    }
+
+    // @case present(in "a", 0, 97)
+    // @case missing(in "", 7, 7)
+    fn test_guard_binds_or_leaves(in s: Str, fallback: u8, expected: u8) -> bool {
+        first_or(in s, fallback) == expected
+    }
+
+    // @case both(in "ab", 0, 1, 195)
+    // @case one_missing(in "ab", 0, 5, 97)
+    // @case none(in "", 0, 1, 0)
+    fn test_when_runs_only_on_match(in s: Str, a: u64, b: u64, expected: u64) -> bool {
+        sum_present(in s, a, b) == expected
+    }
+
+    // @case stops_at_end(in "ab", 5, 195)
+    // @case all_present(in "abc", 2, 195)
+    fn test_guard_break_leaves_the_loop(in s: Str, n: u64, expected: u64) -> bool {
+        sum_until_missing(in s, n) == expected
+    }
+}
