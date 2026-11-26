@@ -23,12 +23,12 @@ use self::util::{Reader, put_text, sub};
 
 // ------------------------------------------------------------ node access
 
-fn item_at(in a: Ast, i: u32) -> ItemNode {
-    a.items.get_or(idx_from_raw[ItemNode](i), ItemNode { kind: 0, node: 0 })
+fn item_at(in ast: Ast, i: u32) -> ItemNode {
+    ast.items.get_or(idx_from_raw[ItemNode](i), ItemNode { kind: 0, node: 0 })
 }
 
-fn adt_at(in a: Ast, i: u32) -> AdtNode {
-    a.adts.get_or(
+fn adt_at(in ast: Ast, i: u32) -> AdtNode {
+    ast.adts.get_or(
         idx_from_raw[AdtNode](i),
         AdtNode {
             name: 0,
@@ -44,36 +44,36 @@ fn adt_at(in a: Ast, i: u32) -> AdtNode {
     )
 }
 
-fn variant_at(in a: Ast, i: u32) -> VariantNode {
-    a.variants.get_or(
+fn variant_at(in ast: Ast, i: u32) -> VariantNode {
+    ast.variants.get_or(
         idx_from_raw[VariantNode](i),
         VariantNode { name: 0, fields: none(), named: false }
     )
 }
 
-fn field_at(in a: Ast, i: u32) -> FieldNode {
-    a.fields.get_or(
+fn field_at(in ast: Ast, i: u32) -> FieldNode {
+    ast.fields.get_or(
         idx_from_raw[FieldNode](i),
         FieldNode { name: 0, ty: none(), modality: 3, temperature: 0 }
     )
 }
 
-fn effect_decl_at(in a: Ast, i: u32) -> EffectDeclNode {
-    a.effect_decls.get_or(
+fn effect_decl_at(in ast: Ast, i: u32) -> EffectDeclNode {
+    ast.effect_decls.get_or(
         idx_from_raw[EffectDeclNode](i),
         EffectDeclNode { name: 0, linear: false, generics: none(), ops: none(), start: 0, end: 0 }
     )
 }
 
-fn impl_at(in a: Ast, i: u32) -> ImplNode {
-    a.impls.get_or(
+fn impl_at(in ast: Ast, i: u32) -> ImplNode {
+    ast.impls.get_or(
         idx_from_raw[ImplNode](i),
         ImplNode { ty: none(), generics: none(), methods: none() }
     )
 }
 
-fn fn_at(in a: Ast, i: u32) -> FnNode {
-    a.fns.get_or(
+fn fn_at(in ast: Ast, i: u32) -> FnNode {
+    ast.fns.get_or(
         idx_from_raw[FnNode](i),
         FnNode {
             name: 0,
@@ -89,31 +89,32 @@ fn fn_at(in a: Ast, i: u32) -> FnNode {
     )
 }
 
-fn param_at(in a: Ast, i: u32) -> ParamNode {
-    a.params.get_or(
+fn param_at(in ast: Ast, i: u32) -> ParamNode {
+    ast.params.get_or(
         idx_from_raw[ParamNode](i),
         ParamNode { name: 0, pass: 0, projections: none(), ty: none(), start: 0, end: 0 }
     )
 }
 
-fn effects_at(in a: Ast, i: u32) -> EffectsNode {
-    a.effects.get_or(idx_from_raw[EffectsNode](i), EffectsNode { instances: none(), tail: none() })
+fn effects_at(in ast: Ast, i: u32) -> EffectsNode {
+    ast.effects
+        .get_or(idx_from_raw[EffectsNode](i), EffectsNode { instances: none(), tail: none() })
 }
 
-fn effect_at(in a: Ast, i: u32) -> EffectNode {
-    a.effect_nodes
+fn effect_at(in ast: Ast, i: u32) -> EffectNode {
+    ast.effect_nodes
         .get_or(idx_from_raw[EffectNode](i), EffectNode { label: none(), name: 0, args: none() })
 }
 
-fn stmt_at(in a: Ast, i: u32) -> StmtNode {
-    a.stmts.get_or(
+fn stmt_at(in ast: Ast, i: u32) -> StmtNode {
+    ast.stmts.get_or(
         idx_from_raw[StmtNode](i),
         StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
     )
 }
 
-fn arg_at(in a: Ast, i: u32) -> ArgNode {
-    a.args.get_or(idx_from_raw[ArgNode](i), ArgNode { pass: 0, explicit: false, expr: none() })
+fn arg_at(in ast: Ast, i: u32) -> ArgNode {
+    ast.args.get_or(idx_from_raw[ArgNode](i), ArgNode { pass: 0, explicit: false, expr: none() })
 }
 
 // ---------------------------------------------------------------- errors
@@ -153,40 +154,40 @@ fn message(code: u64) -> Str {
 struct Walk {
     todo: ChunkSeq[u64],
     builtin: ChunkSeq[u8],
-    tmp: String,
+    scratch: String,
     self_sym: u32,
     option_sym: u32,
     result_sym: u32
 }
 
-fn push_node(inout w: Walk, tag: u64, node: u32, depth: u64) {
-    w.todo.push(tag);
-    w.todo.push(widen_u64(node));
-    w.todo.push(depth);
+fn push_node(inout walker: Walk, tag: u64, node: u32, depth: u64) {
+    walker.todo.push(tag);
+    walker.todo.push(widen_u64(node));
+    walker.todo.push(depth);
 }
 
-fn nodes(in w: Walk) -> u64 {
-    w.todo.len() / 3
+fn nodes(in walker: Walk) -> u64 {
+    walker.todo.len() / 3
 }
 
 // Whether the last `::` segment of the name is Some, None, Ok, Err,
 // Option or Result (`builtin_constructor`).
-fn builtin(in a: Ast, inout w: Walk, name: u32) -> bool {
-    let k = widen_u64(name);
-    let known = w.builtin.try_get(k).unwrap_or(0);
+fn builtin(in ast: Ast, inout walker: Walk, name: u32) -> bool {
+    let slot = widen_u64(name);
+    let known = walker.builtin.try_get(slot).unwrap_or(0);
     if known != 0 {
         return known == 2;
     }
-    w.tmp.clear();
-    let ok = a.names.resolve_into(symbol_from_id(name), inout w.tmp);
-    let yes = builtin_text(in w.tmp);
-    let set = w.builtin.try_set(k, if yes { 2 } else { 1 });
+    walker.scratch.clear();
+    let ok = ast.names.resolve_into(symbol_from_id(name), inout walker.scratch);
+    let yes = builtin_text(in walker.scratch);
+    let set = walker.builtin.try_set(slot, if yes { 2 } else { 1 });
     yes
 }
 
-fn builtin_text(in s: String) -> bool {
-    let b = s.as_bytes();
-    let n = b.len();
+fn builtin_text(in text: String) -> bool {
+    let bytes = text.as_bytes();
+    let n = bytes.len();
     // `rsplit("::").next()`: what follows the last `::`.
     let mut start: u64 = 0;
     let mut i = n;
@@ -194,9 +195,9 @@ fn builtin_text(in s: String) -> bool {
         if i < 2 {
             break;
         }
-        let c0 = b.try_get(sub(i, 2)).unwrap_or(0);
-        let c1 = b.try_get(sub(i, 1)).unwrap_or(0);
-        if c0 == 58 && c1 == 58 {
+        let first_byte = bytes.try_get(sub(i, 2)).unwrap_or(0);
+        let second_byte = bytes.try_get(sub(i, 1)).unwrap_or(0);
+        if first_byte == 58 && second_byte == 58 {
             start = i;
             break;
         }
@@ -204,184 +205,201 @@ fn builtin_text(in s: String) -> bool {
     }
     let len = sub(n, start);
     if len == 4 {
-        segment_is(in b, start, in "Some") || segment_is(in b, start, in "None")
+        segment_is(in bytes, start, in "Some") || segment_is(in bytes, start, in "None")
     } else if len == 2 {
-        segment_is(in b, start, in "Ok")
+        segment_is(in bytes, start, in "Ok")
     } else if len == 3 {
-        segment_is(in b, start, in "Err")
+        segment_is(in bytes, start, in "Err")
     } else if len == 6 {
-        segment_is(in b, start, in "Option") || segment_is(in b, start, in "Result")
+        segment_is(in bytes, start, in "Option") || segment_is(in bytes, start, in "Result")
     } else {
         false
     }
 }
 
-fn segment_is(in b: Slice[u8], start: u64, in w: Str) -> bool {
-    let c = w.as_bytes();
-    let n = c.len();
+fn segment_is(in bytes: Slice[u8], start: u64, in text: Str) -> bool {
+    let text_bytes = text.as_bytes();
+    let n = text_bytes.len();
     for i in 0..n {
-        let x = b.try_get(wrapping_add(start, i)).unwrap_or(0);
-        let y = c.try_get(i).unwrap_or(0);
-        if x != y {
+        let actual = bytes.try_get(wrapping_add(start, i)).unwrap_or(0);
+        let expected = text_bytes.try_get(i).unwrap_or(0);
+        if actual != expected {
             return false;
         }
     }
     true
 }
 
-// The argument types of the effect instances of `effs`.
-fn push_effect_args(in a: Ast, inout w: Walk, effs: u32, depth: u64) {
-    let e = effects_at(in a, effs);
-    let m = list_len(in a, e.instances);
-    for i in 0..m {
-        let inst = effect_at(in a, list_at(in a, e.instances, i));
-        let k = list_len(in a, inst.args);
-        for j in 0..k {
-            push_node(inout w, 2, list_at(in a, inst.args, j), depth);
+// The argument types of the effect instances of `effects`.
+fn push_effect_args(in ast: Ast, inout walker: Walk, effects: u32, depth: u64) {
+    let node = effects_at(in ast, effects);
+    let count = list_len(in ast, node.instances);
+    for i in 0..count {
+        let instance = effect_at(in ast, list_at(in ast, node.instances, i));
+        let arg_count = list_len(in ast, instance.args);
+        for j in 0..arg_count {
+            push_node(inout walker, 2, list_at(in ast, instance.args, j), depth);
         }
     }
 }
 
 // `function`: a function's signature and body onto the stack.
-fn function(in a: Ast, inout w: Walk, fi: u32, implicit_self: bool) -> u64 {
-    let f = fn_at(in a, fi);
-    if list_len(in a, f.generics) != 0 {
+fn function(in ast: Ast, inout walker: Walk, fn_id: u32, implicit_self: bool) -> u64 {
+    let func = fn_at(in ast, fn_id);
+    if list_len(in ast, func.generics) != 0 {
         return 7;
     }
-    push_node(inout w, 2, f.result, 1);
-    let m = list_len(in a, f.params);
-    for i in 0..m {
-        let p = param_at(in a, list_at(in a, f.params, i));
-        if implicit_self && p.name == w.self_sym && type_at(in a, p.ty).kind == 5 {
+    push_node(inout walker, 2, func.result, 1);
+    let param_count = list_len(in ast, func.params);
+    for i in 0..param_count {
+        let param = param_at(in ast, list_at(in ast, func.params, i));
+        if implicit_self && param.name == walker.self_sym && type_at(in ast, param.ty).kind == 5 {
             continue;
         }
-        push_node(inout w, 2, p.ty, 1);
+        push_node(inout walker, 2, param.ty, 1);
     }
-    push_effect_args(in a, inout w, f.effects, 1);
-    if f.body != none() {
-        push_node(inout w, 1, f.body, 1);
+    push_effect_args(in ast, inout walker, func.effects, 1);
+    if func.body != none() {
+        push_node(inout walker, 1, func.body, 1);
     }
     0
 }
 
-fn visit_type(in a: Ast, inout w: Walk, t: u32, allow_infer: bool, next: u64) -> u64 {
-    let n = type_at(in a, t);
-    if n.kind == 2 {
-        if list_len(in a, n.a) != 0 {
+fn visit_type(in ast: Ast, inout walker: Walk, type_id: u32, allow_infer: bool, next: u64) -> u64 {
+    let node = type_at(in ast, type_id);
+    if node.kind == 2 {
+        if list_len(in ast, node.a) != 0 {
             return 9;
         }
-    } else if n.kind == 1 {
-        if list_len(in a, n.b) != 0 || n.a == w.option_sym || n.a == w.result_sym {
+    } else if node.kind == 1 {
+        if list_len(in ast, node.b) != 0
+            || node.a == walker.option_sym
+            || node.a == walker.result_sym {
             return 10;
         }
-    } else if n.kind == 5 {
+    } else if node.kind == 5 {
         if !allow_infer {
             return 11;
         }
-    } else if n.kind == 3 {
-        let m = list_len(in a, n.a) / 2;
-        for i in 0..m {
-            push_node(inout w, 2, list_at(in a, n.a, wrapping_add(wrapping_mul(i, 2), 1)), next);
+    } else if node.kind == 3 {
+        let count = list_len(in ast, node.a) / 2;
+        for i in 0..count {
+            push_node(
+                inout walker,
+                2,
+                list_at(in ast, node.a, wrapping_add(wrapping_mul(i, 2), 1)),
+                next
+            );
         }
-        push_node(inout w, 2, n.b, next);
-        push_effect_args(in a, inout w, n.c, next);
-    } else if n.kind == 4 {
-        push_effect_args(in a, inout w, n.a, next);
+        push_node(inout walker, 2, node.b, next);
+        push_effect_args(in ast, inout walker, node.c, next);
+    } else if node.kind == 4 {
+        push_effect_args(in ast, inout walker, node.a, next);
     }
     0
 }
 
-fn visit_pat(in a: Ast, inout w: Walk, p: u32, next: u64) -> u64 {
-    let n = pat_at(in a, p);
-    if n.kind == 4 {
-        if list_len(in a, n.a) != 0 {
+fn visit_pat(in ast: Ast, inout walker: Walk, pat_id: u32, next: u64) -> u64 {
+    let node = pat_at(in ast, pat_id);
+    if node.kind == 4 {
+        if list_len(in ast, node.a) != 0 {
             return 12;
         }
-    } else if n.kind == 5 {
-        if builtin(in a, inout w, n.a) {
+    } else if node.kind == 5 {
+        if builtin(in ast, inout walker, node.a) {
             return 13;
         }
-        let m = list_len(in a, n.b) / 2;
-        for i in 0..m {
-            push_node(inout w, 3, list_at(in a, n.b, wrapping_add(wrapping_mul(i, 2), 1)), next);
+        let count = list_len(in ast, node.b) / 2;
+        for i in 0..count {
+            push_node(
+                inout walker,
+                3,
+                list_at(in ast, node.b, wrapping_add(wrapping_mul(i, 2), 1)),
+                next
+            );
         }
     }
     0
 }
 
-fn visit_expr(in a: Ast, inout w: Walk, x: u32, next: u64) -> u64 {
-    let e = expr_at(in a, x);
-    let k = e.kind;
-    if k == 3 {
-        if list_len(in a, e.a) != 0 {
+fn visit_expr(in ast: Ast, inout walker: Walk, expr_id: u32, next: u64) -> u64 {
+    let expr = expr_at(in ast, expr_id);
+    let kind = expr.kind;
+    if kind == 3 {
+        if list_len(in ast, expr.a) != 0 {
             return 14;
         }
-    } else if k == 15 || k == 16 {
+    } else if kind == 15 || kind == 16 {
         return 15;
-    } else if k == 2 {
-        if builtin(in a, inout w, e.a) {
+    } else if kind == 2 {
+        if builtin(in ast, inout walker, expr.a) {
             return 13;
         }
-    } else if k == 4 {
-        if builtin(in a, inout w, e.a) {
+    } else if kind == 4 {
+        if builtin(in ast, inout walker, expr.a) {
             return 16;
         }
-        let m = list_len(in a, e.b) / 2;
-        for i in 0..m {
-            push_node(inout w, 1, list_at(in a, e.b, wrapping_add(wrapping_mul(i, 2), 1)), next);
+        let count = list_len(in ast, expr.b) / 2;
+        for i in 0..count {
+            push_node(
+                inout walker,
+                1,
+                list_at(in ast, expr.b, wrapping_add(wrapping_mul(i, 2), 1)),
+                next
+            );
         }
-    } else if k == 5 {
-        let m = list_len(in a, e.a);
-        for i in 0..m {
-            let s = stmt_at(in a, list_at(in a, e.a, i));
-            if s.kind == 1 {
-                push_node(inout w, 3, s.pat, next);
-                push_node(inout w, 2 + 256, s.ty, next);
-                push_node(inout w, 1, s.value, next);
+    } else if kind == 5 {
+        let count = list_len(in ast, expr.a);
+        for i in 0..count {
+            let stmt = stmt_at(in ast, list_at(in ast, expr.a, i));
+            if stmt.kind == 1 {
+                push_node(inout walker, 3, stmt.pat, next);
+                push_node(inout walker, 2 + 256, stmt.ty, next);
+                push_node(inout walker, 1, stmt.value, next);
             } else {
-                push_node(inout w, 1, s.value, next);
+                push_node(inout walker, 1, stmt.value, next);
             }
         }
-        if e.b != none() {
-            push_node(inout w, 1, e.b, next);
+        if expr.b != none() {
+            push_node(inout walker, 1, expr.b, next);
         }
-    } else if k == 6 {
-        if list_len(in a, e.b) != 0 {
+    } else if kind == 6 {
+        if list_len(in ast, expr.b) != 0 {
             return 17;
         }
-        push_node(inout w, 1, e.a, next);
-        let m = list_len(in a, e.c);
-        for i in 0..m {
-            push_node(inout w, 1, arg_at(in a, list_at(in a, e.c, i)).expr, next);
+        push_node(inout walker, 1, expr.a, next);
+        let count = list_len(in ast, expr.c);
+        for i in 0..count {
+            push_node(inout walker, 1, arg_at(in ast, list_at(in ast, expr.c, i)).expr, next);
         }
-    } else if k == 7 {
-        if builtin(in a, inout w, e.b) {
+    } else if kind == 7 {
+        if builtin(in ast, inout walker, expr.b) {
             return 13;
         }
-        push_node(inout w, 1, e.a, next);
-    } else if k == 9 {
-        push_node(inout w, 1, e.a, next);
-    } else if k == 10 {
-        push_node(inout w, 1, e.b, next);
-    } else if k == 11 || k == 12 {
-        push_node(inout w, 1, e.b, next);
-        push_node(inout w, 1, e.c, next);
-    } else if k == 8 {
-        push_node(inout w, 1, e.a, next);
-        push_node(inout w, 1, e.b, next);
-    } else if k == 13 {
-        push_node(inout w, 1, e.a, next);
-        push_node(inout w, 1, e.b, next);
-        if e.c != none() {
-            push_node(inout w, 1, e.c, next);
+        push_node(inout walker, 1, expr.a, next);
+    } else if kind == 9 {
+        push_node(inout walker, 1, expr.a, next);
+    } else if kind == 10 {
+        push_node(inout walker, 1, expr.b, next);
+    } else if kind == 11 || kind == 12 {
+        push_node(inout walker, 1, expr.b, next);
+        push_node(inout walker, 1, expr.c, next);
+    } else if kind == 8 {
+        push_node(inout walker, 1, expr.a, next);
+        push_node(inout walker, 1, expr.b, next);
+    } else if kind == 13 {
+        push_node(inout walker, 1, expr.a, next);
+        push_node(inout walker, 1, expr.b, next);
+        if expr.c != none() {
+            push_node(inout walker, 1, expr.c, next);
         }
-    } else if k == 14 {
-        push_node(inout w, 1, e.a, next);
-        let m = list_len(in a, e.b) / 2;
-        for i in 0..m {
-            let q = wrapping_mul(i, 2);
-            push_node(inout w, 3, list_at(in a, e.b, q), next);
-            push_node(inout w, 1, list_at(in a, e.b, wrapping_add(q, 1)), next);
+    } else if kind == 14 {
+        push_node(inout walker, 1, expr.a, next);
+        let count = list_len(in ast, expr.b) / 2;
+        for i in 0..count {
+            let pair_at = wrapping_mul(i, 2);
+            push_node(inout walker, 3, list_at(in ast, expr.b, pair_at), next);
+            push_node(inout walker, 1, list_at(in ast, expr.b, wrapping_add(pair_at, 1)), next);
         }
     }
     0
@@ -389,74 +407,89 @@ fn visit_expr(in a: Ast, inout w: Walk, x: u32, next: u64) -> u64 {
 
 // The items and then the stack, as `rust_guard` before
 // `nominal_expansion`.
-fn walk(in a: Ast, inout w: Walk, max_declarations: u64) -> u64 {
-    let items = a.m_items.len();
+fn walk(in ast: Ast, inout walker: Walk, max_declarations: u64) -> u64 {
+    let items = ast.m_items.len();
     if items > max_declarations {
         return 1;
     }
     for i in 0..items {
-        let it = a.m_items.try_get(i).unwrap_or(0);
-        let item = item_at(in a, it);
+        let item_id = ast.m_items.try_get(i).unwrap_or(0);
+        let item = item_at(in ast, item_id);
         if item.kind == 2 {
-            let c = function(in a, inout w, item.node, false);
-            if c != 0 {
-                return c;
+            let code = function(in ast, inout walker, item.node, false);
+            if code != 0 {
+                return code;
             }
         } else if item.kind == 1 {
-            let adt = adt_at(in a, item.node);
-            if list_len(in a, adt.generics) != 0 {
+            let adt = adt_at(in ast, item.node);
+            if list_len(in ast, adt.generics) != 0 {
                 return 2;
             }
-            let nv = list_len(in a, adt.variants);
-            for v in 0..nv {
-                let var = variant_at(in a, list_at(in a, adt.variants, v));
-                let nf = list_len(in a, var.fields);
-                for f in 0..nf {
-                    push_node(inout w, 2, field_at(in a, list_at(in a, var.fields, f)).ty, 1);
+            let variant_count = list_len(in ast, adt.variants);
+            for v in 0..variant_count {
+                let variant = variant_at(in ast, list_at(in ast, adt.variants, v));
+                let field_count = list_len(in ast, variant.fields);
+                for f in 0..field_count {
+                    push_node(
+                        inout walker,
+                        2,
+                        field_at(in ast, list_at(in ast, variant.fields, f)).ty,
+                        1
+                    );
                 }
             }
         } else if item.kind == 3 {
-            let d = effect_decl_at(in a, item.node);
-            if list_len(in a, d.generics) != 0 {
+            let effect_decl = effect_decl_at(in ast, item.node);
+            if list_len(in ast, effect_decl.generics) != 0 {
                 return 3;
             }
-            let m = list_len(in a, d.ops);
-            for q in 0..m {
-                let c = function(in a, inout w, list_at(in a, d.ops, q), false);
-                if c != 0 {
-                    return c;
+            let member_count = list_len(in ast, effect_decl.ops);
+            for q in 0..member_count {
+                let code = function(
+                    in ast,
+                    inout walker,
+                    list_at(in ast, effect_decl.ops, q),
+                    false
+                );
+                if code != 0 {
+                    return code;
                 }
             }
         } else if item.kind == 4 {
-            let im = impl_at(in a, item.node);
-            if list_len(in a, im.generics) != 0 {
+            let impl_node = impl_at(in ast, item.node);
+            if list_len(in ast, impl_node.generics) != 0 {
                 return 4;
             }
-            push_node(inout w, 2, im.ty, 1);
-            let m = list_len(in a, im.methods);
-            for q in 0..m {
-                let c = function(in a, inout w, list_at(in a, im.methods, q), true);
-                if c != 0 {
-                    return c;
+            push_node(inout walker, 2, impl_node.ty, 1);
+            let member_count = list_len(in ast, impl_node.methods);
+            for q in 0..member_count {
+                let code = function(
+                    in ast,
+                    inout walker,
+                    list_at(in ast, impl_node.methods, q),
+                    true
+                );
+                if code != 0 {
+                    return code;
                 }
             }
         } else {
             return 5;
         }
-        if nodes(in w) > 16384 {
+        if nodes(in walker) > 16384 {
             return 6;
         }
     }
     let mut count: u64 = 0;
     loop {
-        let n = w.todo.len();
-        if n < 3 {
+        let stack_len = walker.todo.len();
+        if stack_len < 3 {
             break;
         }
-        let tag = w.todo.try_get(sub(n, 3)).unwrap_or(0);
-        let node = w.todo.try_get(sub(n, 2)).unwrap_or(0);
-        let depth = w.todo.try_get(sub(n, 1)).unwrap_or(0);
-        w.todo.truncate(sub(n, 3));
+        let tag = walker.todo.try_get(sub(stack_len, 3)).unwrap_or(0);
+        let node = walker.todo.try_get(sub(stack_len, 2)).unwrap_or(0);
+        let depth = walker.todo.try_get(sub(stack_len, 1)).unwrap_or(0);
+        walker.todo.truncate(sub(stack_len, 3));
         count = wrapping_add(count, 1);
         if count > 16384 {
             return 6;
@@ -467,17 +500,17 @@ fn walk(in a: Ast, inout w: Walk, max_declarations: u64) -> u64 {
         let next = wrapping_add(depth, 1);
         let id = wrapping_u32(node);
         let kind = tag & 255;
-        let c = if kind == 1 {
-            visit_expr(in a, inout w, id, next)
+        let code = if kind == 1 {
+            visit_expr(in ast, inout walker, id, next)
         } else if kind == 2 {
-            visit_type(in a, inout w, id, tag >= 256, next)
+            visit_type(in ast, inout walker, id, tag >= 256, next)
         } else {
-            visit_pat(in a, inout w, id, next)
+            visit_pat(in ast, inout walker, id, next)
         };
-        if c != 0 {
-            return c;
+        if code != 0 {
+            return code;
         }
-        if wrapping_add(count, nodes(in w)) > 16384 {
+        if wrapping_add(count, nodes(in walker)) > 16384 {
             return 6;
         }
     }
@@ -494,14 +527,14 @@ struct Nominal {
     adt_of: ChunkSeq[u32]
 }
 
-fn on_path(in s: Nominal, name: u32) -> bool {
-    let n = s.path.len();
+fn on_path(in nominal: Nominal, name: u32) -> bool {
+    let n = nominal.path.len();
     for i in 0..n {
-        let p = match s.path.try_get(i) {
+        let path_name = match nominal.path.try_get(i) {
             Option::Some(v) => v,
             Option::None => none(),
         };
-        if p == name {
+        if path_name == name {
             return true;
         }
     }
@@ -509,169 +542,175 @@ fn on_path(in s: Nominal, name: u32) -> bool {
 }
 
 // `visit` of a `Type::Named(name, args)`, after its budget and depth step.
-fn visit_named(in a: Ast, inout s: Nominal, name: u32, args: u32, depth: u64) -> u64 {
+fn visit_named(in ast: Ast, inout nominal: Nominal, name: u32, args: u32, depth: u64) -> u64 {
     let next = wrapping_add(depth, 1);
-    let m = list_len(in a, args);
-    for i in 0..m {
-        let c = visit_nominal(in a, inout s, list_at(in a, args, i), next);
-        if c != 0 {
-            return c;
+    let count = list_len(in ast, args);
+    for i in 0..count {
+        let code = visit_nominal(in ast, inout nominal, list_at(in ast, args, i), next);
+        if code != 0 {
+            return code;
         }
     }
-    let adt = match s.adt_of.try_get(widen_u64(name)) {
+    let adt = match nominal.adt_of.try_get(widen_u64(name)) {
         Option::Some(v) => v,
         Option::None => none(),
     };
     if adt == none() {
         return 0;
     }
-    if on_path(in s, name) {
+    if on_path(in nominal, name) {
         return 20;
     }
-    s.path.push(name);
-    let d = adt_at(in a, adt);
-    let nv = list_len(in a, d.variants);
-    for v in 0..nv {
-        let var = variant_at(in a, list_at(in a, d.variants, v));
-        let nf = list_len(in a, var.fields);
-        for f in 0..nf {
-            let ty = field_at(in a, list_at(in a, var.fields, f)).ty;
-            let c = visit_nominal(in a, inout s, ty, next);
-            if c != 0 {
-                return c;
+    nominal.path.push(name);
+    let adt_node = adt_at(in ast, adt);
+    let variant_count = list_len(in ast, adt_node.variants);
+    for v in 0..variant_count {
+        let variant = variant_at(in ast, list_at(in ast, adt_node.variants, v));
+        let field_count = list_len(in ast, variant.fields);
+        for f in 0..field_count {
+            let ty = field_at(in ast, list_at(in ast, variant.fields, f)).ty;
+            let code = visit_nominal(in ast, inout nominal, ty, next);
+            if code != 0 {
+                return code;
             }
         }
     }
-    let n = s.path.len();
-    s.path.truncate(sub(n, 1));
+    let path_len = nominal.path.len();
+    nominal.path.truncate(sub(path_len, 1));
     0
 }
 
 // The budget and depth step of `visit`.
-fn step(inout s: Nominal, depth: u64) -> u64 {
-    if s.remaining == 0 {
+fn step(inout nominal: Nominal, depth: u64) -> u64 {
+    if nominal.remaining == 0 {
         return 18;
     }
-    s.remaining = sub(s.remaining, 1);
+    nominal.remaining = sub(nominal.remaining, 1);
     if depth > 48 {
         return 19;
     }
     0
 }
 
-fn visit_nominal(in a: Ast, inout s: Nominal, t: u32, depth: u64) -> u64 {
-    let c = step(inout s, depth);
-    if c != 0 {
-        return c;
+fn visit_nominal(in ast: Ast, inout nominal: Nominal, type_id: u32, depth: u64) -> u64 {
+    let code = step(inout nominal, depth);
+    if code != 0 {
+        return code;
     }
-    let n = type_at(in a, t);
+    let node = type_at(in ast, type_id);
     let next = wrapping_add(depth, 1);
-    if n.kind == 1 {
-        return visit_named(in a, inout s, n.a, n.b, depth);
-    } else if n.kind == 2 {
-        let m = list_len(in a, n.a);
-        for i in 0..m {
-            let c2 = visit_nominal(in a, inout s, list_at(in a, n.a, i), next);
-            if c2 != 0 {
-                return c2;
+    if node.kind == 1 {
+        return visit_named(in ast, inout nominal, node.a, node.b, depth);
+    } else if node.kind == 2 {
+        let count = list_len(in ast, node.a);
+        for i in 0..count {
+            let elem_code = visit_nominal(in ast, inout nominal, list_at(in ast, node.a, i), next);
+            if elem_code != 0 {
+                return elem_code;
             }
         }
-    } else if n.kind == 3 {
-        let m = list_len(in a, n.a) / 2;
-        for i in 0..m {
-            let ty = list_at(in a, n.a, wrapping_add(wrapping_mul(i, 2), 1));
-            let c2 = visit_nominal(in a, inout s, ty, next);
-            if c2 != 0 {
-                return c2;
+    } else if node.kind == 3 {
+        let count = list_len(in ast, node.a) / 2;
+        for i in 0..count {
+            let ty = list_at(in ast, node.a, wrapping_add(wrapping_mul(i, 2), 1));
+            let elem_code = visit_nominal(in ast, inout nominal, ty, next);
+            if elem_code != 0 {
+                return elem_code;
             }
         }
-        return visit_nominal(in a, inout s, n.b, next);
+        return visit_nominal(in ast, inout nominal, node.b, next);
     }
     0
 }
 
-// Whether the text of symbol `x` sorts before that of `y` (byte order).
-fn text_less(in a: Ast, x: u32, y: u32, inout t1: String, inout t2: String) -> bool {
-    t1.clear();
-    t2.clear();
-    let ok1 = a.names.resolve_into(symbol_from_id(x), inout t1);
-    let ok2 = a.names.resolve_into(symbol_from_id(y), inout t2);
-    let b1 = t1.as_bytes();
-    let b2 = t2.as_bytes();
-    let n1 = b1.len();
-    let n2 = b2.len();
-    let n = if n1 < n2 { n1 } else { n2 };
-    for i in 0..n {
-        let c1 = b1.try_get(i).unwrap_or(0);
-        let c2 = b2.try_get(i).unwrap_or(0);
-        if c1 != c2 {
-            return c1 < c2;
+// Whether the text of symbol `lhs` sorts before that of `rhs` (byte order).
+fn text_less(
+    in ast: Ast,
+    lhs: u32,
+    rhs: u32,
+    inout lhs_text: String,
+    inout rhs_text: String
+) -> bool {
+    lhs_text.clear();
+    rhs_text.clear();
+    let ok1 = ast.names.resolve_into(symbol_from_id(lhs), inout lhs_text);
+    let ok2 = ast.names.resolve_into(symbol_from_id(rhs), inout rhs_text);
+    let lhs_bytes = lhs_text.as_bytes();
+    let rhs_bytes = rhs_text.as_bytes();
+    let lhs_len = lhs_bytes.len();
+    let rhs_len = rhs_bytes.len();
+    let common_len = if lhs_len < rhs_len { lhs_len } else { rhs_len };
+    for i in 0..common_len {
+        let lhs_byte = lhs_bytes.try_get(i).unwrap_or(0);
+        let rhs_byte = rhs_bytes.try_get(i).unwrap_or(0);
+        if lhs_byte != rhs_byte {
+            return lhs_byte < rhs_byte;
         }
     }
-    n1 < n2
+    lhs_len < rhs_len
 }
 
-fn nominal_expansion(in a: Ast, limit: u64, nsym: u64) -> u64 {
-    let mut s = Nominal {
+fn nominal_expansion(in ast: Ast, limit: u64, sym_count: u64) -> u64 {
+    let mut nominal = Nominal {
         remaining: limit,
         path: ChunkSeq::new[u32](),
         adt_of: ChunkSeq::new[u32]()
     };
     loop {
-        if s.adt_of.len() >= nsym {
+        if nominal.adt_of.len() >= sym_count {
             break;
         }
-        s.adt_of.push(none());
+        nominal.adt_of.push(none());
     }
     // The ADT names, each once.
     let mut names: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    let items = a.m_items.len();
+    let items = ast.m_items.len();
     for i in 0..items {
-        let it = a.m_items.try_get(i).unwrap_or(0);
-        let item = item_at(in a, it);
+        let item_id = ast.m_items.try_get(i).unwrap_or(0);
+        let item = item_at(in ast, item_id);
         if item.kind == 1 {
-            let name = adt_at(in a, item.node).name;
-            let k = widen_u64(name);
-            let had = match s.adt_of.try_get(k) {
+            let name = adt_at(in ast, item.node).name;
+            let slot = widen_u64(name);
+            let had = match nominal.adt_of.try_get(slot) {
                 Option::Some(v) => v,
                 Option::None => none(),
             };
             if had == none() {
                 names.push(name);
             }
-            let set = s.adt_of.try_set(k, item.node);
+            let set = nominal.adt_of.try_set(slot, item.node);
         }
     }
     // BTreeMap order: by name text.
-    let mut t1 = String::new();
-    let mut t2 = String::new();
+    let mut lhs_text = String::new();
+    let mut rhs_text = String::new();
     let n = names.len();
     for i in 1..n {
-        let x = names.try_get(i).unwrap_or(0);
+        let cur_name = names.try_get(i).unwrap_or(0);
         let mut j = i;
         loop {
             if j == 0 {
                 break;
             }
-            let y = names.try_get(sub(j, 1)).unwrap_or(0);
-            if !text_less(in a, x, y, inout t1, inout t2) {
+            let prev_name = names.try_get(sub(j, 1)).unwrap_or(0);
+            if !text_less(in ast, cur_name, prev_name, inout lhs_text, inout rhs_text) {
                 break;
             }
-            let set = names.try_set(j, y);
+            let set = names.try_set(j, prev_name);
             j = sub(j, 1);
         }
-        let set2 = names.try_set(j, x);
+        let set2 = names.try_set(j, cur_name);
     }
     for i in 0..n {
         let name = names.try_get(i).unwrap_or(0);
-        s.path.clear();
-        let c = step(inout s, 0);
-        if c != 0 {
-            return c;
+        nominal.path.clear();
+        let code = step(inout nominal, 0);
+        if code != 0 {
+            return code;
         }
-        let c2 = visit_named(in a, inout s, name, none(), 0);
-        if c2 != 0 {
-            return c2;
+        let named_code = visit_named(in ast, inout nominal, name, none(), 0);
+        if named_code != 0 {
+            return named_code;
         }
     }
     0
@@ -680,45 +719,45 @@ fn nominal_expansion(in a: Ast, limit: u64, nsym: u64) -> u64 {
 // ------------------------------------------------------------------ entry
 
 // `doctest_guard::rust_guard` over the input words.
-pub fn guard(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
-    let (ss, se) = r.text(in b);
-    let max_declarations = r.word(in b);
-    let max_nominal = r.word(in b);
-    let text = match String::from_utf8(in b[ss..se]) {
-        Option::Some(x) => x,
+pub fn guard(in input: Slice[u8]) -> ChunkSeq[u64] {
+    let mut reader = Reader { pos: 0 };
+    let (src_start, src_end) = reader.text(in input);
+    let max_declarations = reader.word(in input);
+    let max_nominal = reader.word(in input);
+    let text = match String::from_utf8(in input[src_start..src_end]) {
+        Option::Some(decoded) => decoded,
         Option::None => String::new(),
     };
-    let mut l = lower_source(in text.as_str());
-    let self_sym = l.ast.names.intern(in "self").id();
-    let option_sym = l.ast.names.intern(in "Option").id();
-    let result_sym = l.ast.names.intern(in "Result").id();
-    let nsym = l.ast.names.len();
-    let mut w = Walk {
+    let mut lowered = lower_source(in text.as_str());
+    let self_sym = lowered.ast.names.intern(in "self").id();
+    let option_sym = lowered.ast.names.intern(in "Option").id();
+    let result_sym = lowered.ast.names.intern(in "Result").id();
+    let sym_count = lowered.ast.names.len();
+    let mut walker = Walk {
         todo: ChunkSeq::new[u64](),
         builtin: ChunkSeq::new[u8](),
-        tmp: String::new(),
+        scratch: String::new(),
         self_sym: self_sym,
         option_sym: option_sym,
         result_sym: result_sym
     };
     loop {
-        if w.builtin.len() >= nsym {
+        if walker.builtin.len() >= sym_count {
             break;
         }
-        w.builtin.push(0);
+        walker.builtin.push(0);
     }
-    let mut code = walk(in l.ast, inout w, max_declarations);
+    let mut code = walk(in lowered.ast, inout walker, max_declarations);
     if code == 0 {
-        code = nominal_expansion(in l.ast, max_nominal, nsym);
+        code = nominal_expansion(in lowered.ast, max_nominal, sym_count);
     }
     let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
     if code == 0 {
         out.push(0);
     } else {
         out.push(1);
-        let m = message(code).as_bytes();
-        put_text(inout out, in m, 0, m.len());
+        let message_text = message(code).as_bytes();
+        put_text(inout out, in message_text, 0, message_text.len());
     }
     out
 }

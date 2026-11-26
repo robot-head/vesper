@@ -41,34 +41,36 @@ pub struct Toks {
 }
 
 pub fn toks(in src: Slice[u8]) -> Toks {
-    let mut d = diags_new();
-    let t = lex(in src, inout d);
-    let n = t.kind.len();
+    let mut diags = diags_new();
+    let lexed = lex(in src, inout diags);
+    let n = lexed.kind.len();
     let mut start = ChunkSeq::with_capacity[u64](n);
     let mut end = ChunkSeq::with_capacity[u64](n);
     for i in 0..n {
-        start.push(match t.start.try_get(i) {
-            Option::Some(s) => widen_u64(s),
-            Option::None => 0,
-        });
-        end.push(token_end(in t, i));
+        start.push(
+            match lexed.start.try_get(i) {
+                Option::Some(offset) => widen_u64(offset),
+                Option::None => 0,
+            }
+        );
+        end.push(token_end(in lexed, i));
     }
-    Toks { kind: t.kind, start: start, end: end }
+    Toks { kind: lexed.kind, start: start, end: end }
 }
 
 // `preceding_comments(tokens, fn_start)`: the line comments directly before
 // `fn_start`, nearest first, as (start, end) pairs in `out`.
-pub fn preceding_comments(in t: Toks, fn_start: u64, inout out: ChunkSeq[u64]) {
+pub fn preceding_comments(in tokens: Toks, fn_start: u64, inout out: ChunkSeq[u64]) {
     out.clear();
     // partition_point(|t| t.span.end <= fn_start)
     let mut lo: u64 = 0;
-    let mut hi = t.kind.len();
+    let mut hi = tokens.kind.len();
     loop {
         if lo >= hi {
             break;
         }
         let mid = add(lo, sub(hi, lo) / 2);
-        if u64_at(in t.end, mid) <= fn_start {
+        if u64_at(in tokens.end, mid) <= fn_start {
             lo = inc(mid);
         } else {
             hi = mid;
@@ -80,58 +82,58 @@ pub fn preceding_comments(in t: Toks, fn_start: u64, inout out: ChunkSeq[u64]) {
             break;
         }
         i = sub(i, 1);
-        let k = u8_at(in t.kind, i);
-        if k == k_comment() {
-            out.push(u64_at(in t.start, i));
-            out.push(u64_at(in t.end, i));
-        } else if k != k_whitespace() {
+        let kind = u8_at(in tokens.kind, i);
+        if kind == k_comment() {
+            out.push(u64_at(in tokens.start, i));
+            out.push(u64_at(in tokens.end, i));
+        } else if kind != k_whitespace() {
             break;
         }
     }
 }
 
 // `trim_start_matches('/').trim_start()` of a comment.
-fn after_slashes(in src: Slice[u8], s: u64, e: u64) -> u64 {
-    let mut i = s;
+fn after_slashes(in src: Slice[u8], start: u64, end: u64) -> u64 {
+    let mut i = start;
     loop {
-        if i >= e || byte(in src, i) != 47 {
+        if i >= end || byte(in src, i) != 47 {
             break;
         }
         i = inc(i);
     }
-    trim_start(in src, i, e)
+    trim_start(in src, i, end)
 }
 
 // `is_test_marker`.
-pub fn is_test_marker(in src: Slice[u8], s: u64, e: u64) -> bool {
-    let i = after_slashes(in src, s, e);
-    is_text(in src, i, e, in "@test")
-        || starts_with(in src, i, e, in "@test ")
-        || starts_with(in src, i, e, in "@test:")
-        || starts_with(in src, i, e, in "@test(")
+pub fn is_test_marker(in src: Slice[u8], start: u64, end: u64) -> bool {
+    let body_start = after_slashes(in src, start, end);
+    is_text(in src, body_start, end, in "@test")
+        || starts_with(in src, body_start, end, in "@test ")
+        || starts_with(in src, body_start, end, in "@test:")
+        || starts_with(in src, body_start, end, in "@test(")
 }
 
 // `case_marker`: whether the comment is a `@case` row, and the trimmed row.
-pub fn case_marker(in src: Slice[u8], s: u64, e: u64) -> (bool, u64, u64) {
-    let i = after_slashes(in src, s, e);
-    if !starts_with(in src, i, e, in "@case") {
+pub fn case_marker(in src: Slice[u8], start: u64, end: u64) -> (bool, u64, u64) {
+    let body_start = after_slashes(in src, start, end);
+    if !starts_with(in src, body_start, end, in "@case") {
         return (false, 0, 0);
     }
-    let r = add(i, 5);
-    if r < e && !starts_with_space(in src, r, e) {
+    let rest = add(body_start, 5);
+    if rest < end && !starts_with_space(in src, rest, end) {
         return (false, 0, 0);
     }
-    let a = trim_start(in src, r, e);
-    let z = trim_end(in src, a, e);
-    (true, a, z)
+    let row_start = trim_start(in src, rest, end);
+    let row_end = trim_end(in src, row_start, end);
+    (true, row_start, row_end)
 }
 
 fn has_test_marker(in src: Slice[u8], in comments: ChunkSeq[u64]) -> bool {
     let n = comments.len() / 2;
     for k in 0..n {
-        let s = u64_at(in comments, wrapping_mul(k, 2));
-        let e = u64_at(in comments, inc(wrapping_mul(k, 2)));
-        if is_test_marker(in src, s, e) {
+        let comment_start = u64_at(in comments, wrapping_mul(k, 2));
+        let comment_end = u64_at(in comments, inc(wrapping_mul(k, 2)));
+        if is_test_marker(in src, comment_start, comment_end) {
             return true;
         }
     }
@@ -145,12 +147,12 @@ fn put_error(in msg: ChunkSeq[u8]) -> ChunkSeq[u64] {
     out
 }
 
-fn push_location(inout m: ChunkSeq[u8], in src: Slice[u8], offset: u64) {
+fn push_location(inout msg: ChunkSeq[u8], in src: Slice[u8], offset: u64) {
     let (line, column) = location(in src, offset);
-    push_decimal(inout m, line);
-    m.push(58);
-    push_decimal(inout m, column);
-    m.extend(in ": ".as_bytes());
+    push_decimal(inout msg, line);
+    msg.push(58);
+    push_decimal(inout msg, column);
+    msg.extend(in ": ".as_bytes());
 }
 
 // ------------------------------------------------------------ case rows
@@ -158,18 +160,18 @@ fn push_location(inout m: ChunkSeq[u8], in src: Slice[u8], offset: u64) {
 // Input: the source; the names wrappers must avoid (functions and `use`
 // locals); per function item: index, span start, generic, has a body and
 // its name.
-pub fn case_rows(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
-    let (ss, se) = r.text(in b);
-    let src = b[ss..se];
-    let name_count = r.word(in b);
+pub fn case_rows(in input: Slice[u8]) -> ChunkSeq[u64] {
+    let mut reader = Reader { pos: 0 };
+    let (src_start, src_end) = reader.text(in input);
+    let src = input[src_start..src_end];
+    let name_count = reader.word(in input);
     let mut names: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for i in 0..name_count {
-        let (s, e) = r.text(in b);
-        names.push(s);
-        names.push(e);
+        let (name_start, name_end) = reader.text(in input);
+        names.push(name_start);
+        names.push(name_end);
     }
-    let t = toks(in src);
+    let tokens = toks(in src);
     let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
     out.push(0);
     let count_at = out.len();
@@ -182,35 +184,35 @@ pub fn case_rows(in b: Slice[u8]) -> ChunkSeq[u64] {
     let mut row_list: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut msg: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut entry: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let fn_count = r.word(in b);
+    let fn_count = reader.word(in input);
     for f in 0..fn_count {
-        let index = r.word(in b);
-        let fn_start = r.word(in b);
-        let generic = r.word(in b) != 0;
-        let body = r.word(in b) != 0;
-        let (ns, ne) = r.text(in b);
-        preceding_comments(in t, fn_start, inout comments);
+        let index = reader.word(in input);
+        let fn_start = reader.word(in input);
+        let is_generic = reader.word(in input) != 0;
+        let has_body = reader.word(in input) != 0;
+        let (fn_name_start, fn_name_end) = reader.text(in input);
+        preceding_comments(in tokens, fn_start, inout comments);
         row_list.clear();
-        let n = comments.len() / 2;
-        for k in 0..n {
-            let s = u64_at(in comments, wrapping_mul(k, 2));
-            let e = u64_at(in comments, inc(wrapping_mul(k, 2)));
-            let (is_row, a, z) = case_marker(in src, s, e);
+        let comment_count = comments.len() / 2;
+        for k in 0..comment_count {
+            let comment_start = u64_at(in comments, wrapping_mul(k, 2));
+            let comment_end = u64_at(in comments, inc(wrapping_mul(k, 2)));
+            let (is_row, row_start, row_end) = case_marker(in src, comment_start, comment_end);
             if is_row {
-                row_list.push(a);
-                row_list.push(z);
-                row_list.push(s);
-                row_list.push(e);
+                row_list.push(row_start);
+                row_list.push(row_end);
+                row_list.push(comment_start);
+                row_list.push(comment_end);
             }
         }
         if row_list.len() == 0 {
             continue;
         }
-        if generic || !body {
+        if is_generic || !has_body {
             msg.clear();
             msg.extend(in "test function '".as_bytes());
-            push_range(inout msg, in b, ns, ne);
-            if generic {
+            push_range(inout msg, in input, fn_name_start, fn_name_end);
+            if is_generic {
                 msg.extend(in "' cannot be generic".as_bytes());
             } else {
                 msg.extend(in "' must have a body".as_bytes());
@@ -219,20 +221,20 @@ pub fn case_rows(in b: Slice[u8]) -> ChunkSeq[u64] {
         }
         // Labels taken so far for this function: (start, end) in `src`.
         let mut labels: ChunkSeq[u64] = ChunkSeq::new[u64]();
-        let m = row_list.len() / CaseRow::Words;
-        for q in 0..m {
+        let row_count = row_list.len() / CaseRow::Words;
+        for q in 0..row_count {
             // Source order: the nearest comment comes first in `row_list`.
-            let k = sub(sub(m, 1), q);
+            let k = sub(sub(row_count, 1), q);
             let row = wrapping_mul(k, CaseRow::Words);
-            let a = u64_at(in row_list, add(row, CaseRow::PayloadStart));
-            let z = u64_at(in row_list, add(row, CaseRow::PayloadEnd));
+            let row_start = u64_at(in row_list, add(row, CaseRow::PayloadStart));
+            let row_end = u64_at(in row_list, add(row, CaseRow::PayloadEnd));
             let span_start = u64_at(in row_list, add(row, CaseRow::SpanStart));
             let span_end = u64_at(in row_list, add(row, CaseRow::SpanEnd));
             // split_once('(').unwrap_or_default()
-            let mut open = a;
+            let mut open = row_start;
             let mut found = false;
             loop {
-                if open >= z {
+                if open >= row_end {
                     break;
                 }
                 if byte(in src, open) == 40 {
@@ -241,18 +243,18 @@ pub fn case_rows(in b: Slice[u8]) -> ChunkSeq[u64] {
                 }
                 open = inc(open);
             }
-            let (la, lz, args_a, args_z) = if found {
-                (a, trim_end(in src, a, open), inc(open), z)
+            let (label_start, label_end, args_start, args_end) = if found {
+                (row_start, trim_end(in src, row_start, open), inc(open), row_end)
             } else {
-                (a, a, a, a)
+                (row_start, row_start, row_start, row_start)
             };
-            let first = byte(in src, la);
-            let closed = args_z > args_a && byte(in src, sub(args_z, 1)) == 41;
-            let mut valid = lz > la && (is_alpha(first) || first == 95) && closed;
+            let first = byte(in src, label_start);
+            let closed = args_end > args_start && byte(in src, sub(args_end, 1)) == 41;
+            let mut valid = label_end > label_start && (is_alpha(first) || first == 95) && closed;
             if valid {
-                for i in inc(la)..lz {
-                    let c = byte(in src, i);
-                    if !is_alnum(c) && c != 95 {
+                for i in inc(label_start)..label_end {
+                    let cur_byte = byte(in src, i);
+                    if !is_alnum(cur_byte) && cur_byte != 95 {
                         valid = false;
                     }
                 }
@@ -261,27 +263,27 @@ pub fn case_rows(in b: Slice[u8]) -> ChunkSeq[u64] {
                 msg.clear();
                 push_location(inout msg, in src, span_start);
                 msg.extend(in "expected @case name(arguments) for '".as_bytes());
-                push_range(inout msg, in b, ns, ne);
+                push_range(inout msg, in input, fn_name_start, fn_name_end);
                 msg.push(39);
                 return put_error(in msg);
             }
-            let lc = labels.len() / 2;
-            for j in 0..lc {
-                let ps = u64_at(in labels, wrapping_mul(j, 2));
-                let pe = u64_at(in labels, inc(wrapping_mul(j, 2)));
-                if same(in src, ps, pe, in src, la, lz) {
+            let label_count = labels.len() / 2;
+            for j in 0..label_count {
+                let prev_start = u64_at(in labels, wrapping_mul(j, 2));
+                let prev_end = u64_at(in labels, inc(wrapping_mul(j, 2)));
+                if same(in src, prev_start, prev_end, in src, label_start, label_end) {
                     msg.clear();
                     push_location(inout msg, in src, span_start);
                     msg.extend(in "duplicate test case '".as_bytes());
-                    push_range(inout msg, in b, ns, ne);
+                    push_range(inout msg, in input, fn_name_start, fn_name_end);
                     msg.extend(in "::".as_bytes());
-                    push_range(inout msg, in src, la, lz);
+                    push_range(inout msg, in src, label_start, label_end);
                     msg.push(39);
                     return put_error(in msg);
                 }
             }
-            labels.push(la);
-            labels.push(lz);
+            labels.push(label_start);
+            labels.push(label_end);
             // The first free `__vesper_test_case_<n>`.
             loop {
                 entry.clear();
@@ -290,9 +292,9 @@ pub fn case_rows(in b: Slice[u8]) -> ChunkSeq[u64] {
                 next_entry = inc(next_entry);
                 let mut taken = false;
                 for j in 0..name_count {
-                    let s = u64_at(in names, wrapping_mul(j, 2));
-                    let e = u64_at(in names, inc(wrapping_mul(j, 2)));
-                    if same(in b, s, e, in entry.as_slice(), 0, entry.len()) {
+                    let name_start = u64_at(in names, wrapping_mul(j, 2));
+                    let name_end = u64_at(in names, inc(wrapping_mul(j, 2)));
+                    if same(in input, name_start, name_end, in entry.as_slice(), 0, entry.len()) {
                         taken = true;
                     }
                 }
@@ -301,25 +303,25 @@ pub fn case_rows(in b: Slice[u8]) -> ChunkSeq[u64] {
                 }
             }
             expanded = true;
-            let start = add(add(src.len(), suffix.len()), 1);
+            let gen_start = add(add(src.len(), suffix.len()), 1);
             suffix.extend(in "\nfn ".as_bytes());
             suffix.extend(in entry.as_slice());
             suffix.extend(in "() { ".as_bytes());
-            push_range(inout suffix, in b, ns, ne);
+            push_range(inout suffix, in input, fn_name_start, fn_name_end);
             suffix.push(40);
-            push_range(inout suffix, in src, args_a, args_z);
+            push_range(inout suffix, in src, args_start, args_end);
             suffix.extend(in " }".as_bytes());
             let gen_end = add(src.len(), suffix.len());
             // The row: name, span, entry, generated span, function index.
             msg.clear();
-            push_range(inout msg, in b, ns, ne);
+            push_range(inout msg, in input, fn_name_start, fn_name_end);
             msg.extend(in "::".as_bytes());
-            push_range(inout msg, in src, la, lz);
+            push_range(inout msg, in src, label_start, label_end);
             put_buf(inout out, in msg);
             out.push(span_start);
             out.push(span_end);
             put_buf(inout out, in entry);
-            out.push(start);
+            out.push(gen_start);
             out.push(gen_end);
             out.push(index);
             rows = inc(rows);
@@ -334,34 +336,35 @@ pub fn case_rows(in b: Slice[u8]) -> ChunkSeq[u64] {
 // ------------------------------------------------------------ discovery
 
 // One function item of the expanded parse: its name, span, flags, params
-// (`params[pa..pa + pn]`) and effect names (`effects[ea..ea + en]`), every
+// (`params[param_start..param_start + param_count]`) and effect names
+// (`effects[effect_start..effect_start + effect_count]`), every
 // text a range of the input.
 copy struct Item {
     is_fn: bool,
-    ns: u64,
-    ne: u64,
+    name_start: u64,
+    name_end: u64,
     start: u64,
     end: u64,
-    generic: bool,
-    body: bool,
-    pa: u64,
-    pn: u64,
-    ea: u64,
-    en: u64,
+    is_generic: bool,
+    has_body: bool,
+    param_start: u64,
+    param_count: u64,
+    effect_start: u64,
+    effect_count: u64,
 }
 
 copy struct Param {
-    ns: u64,
-    ne: u64,
-    ts: u64,
-    te: u64,
+    name_start: u64,
+    name_end: u64,
+    type_start: u64,
+    type_end: u64,
 }
 
 copy struct Case {
-    es: u64,
-    ee: u64,
-    ns: u64,
-    ne: u64,
+    entry_start: u64,
+    entry_end: u64,
+    name_start: u64,
+    name_end: u64,
     start: u64,
     end: u64,
     target: u64,
@@ -380,27 +383,32 @@ const DEFAULT_SIM_SCHEDULES: u64 = 16;
 const DEFAULT_SEED: u64 = 0;
 
 // `effect_head(eff) == name`.
-fn effect_is(in b: Slice[u8], s: u64, e: u64, in name: Str) -> bool {
-    let a = trim_start(in b, s, e);
-    let z = trim_end(in b, a, e);
-    let mut i = a;
+fn effect_is(in input: Slice[u8], start: u64, end: u64, in name: Str) -> bool {
+    let eff_start = trim_start(in input, start, end);
+    let eff_end = trim_end(in input, eff_start, end);
+    let mut head_end = eff_start;
     loop {
-        if i >= z {
+        if head_end >= eff_end {
             break;
         }
-        let c = byte(in b, i);
-        if c == 91 || c == 32 || c == 9 || c == 64 {
+        let cur_byte = byte(in input, head_end);
+        if cur_byte == 91 || cur_byte == 32 || cur_byte == 9 || cur_byte == 64 {
             break;
         }
-        i = inc(i);
+        head_end = inc(head_end);
     }
-    is_text(in b, a, i, in name)
+    is_text(in input, eff_start, head_end, in name)
 }
 
-fn has_effect(in b: Slice[u8], in effects: ChunkSeq[u64], it: Item, in name: Str) -> bool {
-    for k in 0..it.en {
-        let at = wrapping_mul(add(it.ea, k), 2);
-        if effect_is(in b, u64_at(in effects, at), u64_at(in effects, inc(at)), in name) {
+fn has_effect(in input: Slice[u8], in effects: ChunkSeq[u64], item: Item, in name: Str) -> bool {
+    for k in 0..item.effect_count {
+        let pair_at = wrapping_mul(add(item.effect_start, k), 2);
+        if effect_is(
+            in input,
+            u64_at(in effects, pair_at),
+            u64_at(in effects, inc(pair_at)),
+            in name
+        ) {
             return true;
         }
     }
@@ -415,37 +423,37 @@ const NONDETERMINISTIC_FFI_EFFECTS: Str = "Ffi Unsafe";
 const AMBIENT_IO_EFFECTS: Str = "Io Fs Env Process";
 
 // Whether the function has any of the space-separated effects `names`.
-fn has_any(in b: Slice[u8], in effects: ChunkSeq[u64], it: Item, in names: Str) -> bool {
-    let n = names.as_bytes();
-    let mut s: u64 = 0;
-    for i in 0..inc(n.len()) {
-        if i == n.len() || byte(in n, i) == 32 {
-            let name = names[s..i];
-            if has_effect(in b, in effects, it, in name) {
+fn has_any(in input: Slice[u8], in effects: ChunkSeq[u64], item: Item, in names: Str) -> bool {
+    let name_bytes = names.as_bytes();
+    let mut name_start: u64 = 0;
+    for i in 0..inc(name_bytes.len()) {
+        if i == name_bytes.len() || byte(in name_bytes, i) == 32 {
+            let name = names[name_start..i];
+            if has_effect(in input, in effects, item, in name) {
                 return true;
             }
-            s = inc(i);
+            name_start = inc(i);
         }
     }
     false
 }
 
-fn hex_digit(d: u64) -> u8 {
-    if d < 10 {
-        wrapping_u8(add(d, 48))
+fn hex_digit(nibble: u64) -> u8 {
+    if nibble < 10 {
+        wrapping_u8(add(nibble, 48))
     } else {
-        wrapping_u8(add(d, 87))
+        wrapping_u8(add(nibble, 87))
     }
 }
 
-fn push_unicode_escape(inout out: ChunkSeq[u8], c: u64) {
+fn push_unicode_escape(inout out: ChunkSeq[u8], code_point: u64) {
     out.extend(in "\\u{".as_bytes());
     let mut started = false;
     for k in 0..6 {
         let shift = wrapping_u32(wrapping_mul(sub(5, k), 4));
-        let d = wrapping_shr_u64(c, shift) & 15;
-        if d != 0 || started || k == 5 {
-            out.push(hex_digit(d));
+        let nibble = wrapping_shr_u64(code_point, shift) & 15;
+        if nibble != 0 || started || k == 5 {
+            out.push(hex_digit(nibble));
             started = true;
         }
     }
@@ -453,130 +461,134 @@ fn push_unicode_escape(inout out: ChunkSeq[u8], c: u64) {
 }
 
 // The characters `push_debug_str` escapes as `\u{..}`.
-fn not_printable(c: u64) -> bool {
-    if c < 32 || c == 127 || c == 173 {
+fn not_printable(code_point: u64) -> bool {
+    if code_point < 32 || code_point == 127 || code_point == 173 {
         return true;
     }
-    (c >= 128 && c < 160) || (c >= 768 && c < 880)
+    (code_point >= 128 && code_point < 160) || (code_point >= 768 && code_point < 880)
 }
 
 // `format!("{s:?}")`: quoted, with `char::escape_debug` escapes. Of the
 // characters Rust escapes as not printable, only ASCII and C1 controls,
 // the soft hyphen and combining diacritical marks are recognised here
 // (see the report's compiler gaps).
-fn push_debug_str(inout out: ChunkSeq[u8], in t: Slice[u8], s: u64, e: u64) {
+fn push_debug_str(inout out: ChunkSeq[u8], in text: Slice[u8], start: u64, end: u64) {
     out.push(34);
-    let mut i = s;
+    let mut i = start;
     loop {
-        if i >= e {
+        if i >= end {
             break;
         }
-        let (c, n) = char_at(in t, i);
-        if c == 0 {
+        let (code_point, char_len) = char_at(in text, i);
+        if code_point == 0 {
             out.extend(in "\\0".as_bytes());
-        } else if c == 9 {
+        } else if code_point == 9 {
             out.extend(in "\\t".as_bytes());
-        } else if c == 10 {
+        } else if code_point == 10 {
             out.extend(in "\\n".as_bytes());
-        } else if c == 13 {
+        } else if code_point == 13 {
             out.extend(in "\\r".as_bytes());
-        } else if c == 34 {
+        } else if code_point == 34 {
             out.extend(in "\\\"".as_bytes());
-        } else if c == 92 {
+        } else if code_point == 92 {
             out.extend(in "\\\\".as_bytes());
-        } else if not_printable(c) {
-            push_unicode_escape(inout out, c);
+        } else if not_printable(code_point) {
+            push_unicode_escape(inout out, code_point);
         } else {
-            push_range(inout out, in t, i, add(i, n));
+            push_range(inout out, in text, i, add(i, char_len));
         }
-        i = add(i, n);
+        i = add(i, char_len);
     }
     out.push(34);
 }
 
 // `attr_value_to_string`.
-fn push_value(inout out: ChunkSeq[u8], in txt: Slice[u8], v: Val) {
-    if v.tag == V_INT {
-        push_big(inout out, v.int);
-    } else if v.tag == V_BOOL {
-        if v.flag {
+fn push_value(inout out: ChunkSeq[u8], in text: Slice[u8], value: Val) {
+    if value.tag == V_INT {
+        push_big(inout out, value.int_value);
+    } else if value.tag == V_BOOL {
+        if value.bool_value {
             out.extend(in "true".as_bytes());
         } else {
             out.extend(in "false".as_bytes());
         }
-    } else if v.tag == V_STRING {
-        push_debug_str(inout out, in txt, v.a, v.b);
+    } else if value.tag == V_STRING {
+        push_debug_str(inout out, in text, value.text_start, value.text_end);
     } else {
-        push_range(inout out, in txt, v.a, v.b);
+        push_range(inout out, in text, value.text_start, value.text_end);
     }
 }
 
-fn opt_value(has: bool, v: u64) -> u64 {
-    if has { v } else { 0 }
+fn opt_value(has: bool, value: u64) -> u64 {
+    if has { value } else { 0 }
 }
 
 // One discovered test: index, name, span, the harness plan and the raw
 // `@test_case` pins (`Discovered` in src/test_discovery.rs).
 fn put_test(
     inout out: ChunkSeq[u64],
-    in b: Slice[u8],
+    in input: Slice[u8],
     in src: Slice[u8],
-    in at: Attrs,
+    in attrs: Attrs,
     in params: ChunkSeq[Param],
     in effects: ChunkSeq[u64],
     index: u64,
-    it: Item,
+    item: Item,
     has_attrs: bool,
-    fa: FnAttrs,
+    fn_attrs: FnAttrs,
     is_case: bool,
-    c: Case
+    test_case: Case
 ) {
     out.push(index);
     if is_case {
-        put_text(inout out, in b, c.ns, c.ne);
-        out.push(c.start);
-        out.push(c.end);
+        put_text(inout out, in input, test_case.name_start, test_case.name_end);
+        out.push(test_case.start);
+        out.push(test_case.end);
     } else {
-        put_text(inout out, in b, it.ns, it.ne);
-        out.push(it.start);
-        out.push(it.end);
+        put_text(inout out, in input, item.name_start, item.name_end);
+        out.push(item.start);
+        out.push(item.end);
     }
-    let txt = at.txt.as_slice();
+    let text = attrs.text.as_slice();
     // syntax_attr_to_anvil
-    let has_test = has_attrs && fa.has_test;
-    let t: TestAttr = fa.test;
-    let expect = has_test && t.expect_error.has;
-    let attr_cases = has_test && t.cases.has;
-    let attr_sims = has_test && t.sim_schedules.has;
-    let attr_fault = has_test && t.fault_profile.has;
+    let has_test = has_attrs && fn_attrs.has_test;
+    let test_attr: TestAttr = fn_attrs.test;
+    let expect = has_test && test_attr.expect_error.has;
+    let attr_cases = has_test && test_attr.cases.has;
+    let attr_sims = has_test && test_attr.sim_schedules.has;
+    let attr_fault = has_test && test_attr.fault_profile.has;
     let gate = has_test
-        && (t.max_stack.has || t.max_cycles.has || (t.zero_alloc_has && t.zero_alloc));
-    let pins = if has_attrs { fa.cn } else { 0 };
+        && (
+            test_attr.max_stack.has
+                || test_attr.max_cycles.has
+                || (test_attr.zero_alloc_has && test_attr.zero_alloc)
+        );
+    let pins = if has_attrs { fn_attrs.case_count } else { 0 };
     // A case row's wrapper is an explicit unit invocation: no effects.
     let effectful = !is_case;
-    let const_time = effectful && has_effect(in b, in effects, it, in "ConstTime");
-    let realtime = effectful && has_effect(in b, in effects, it, in "Realtime");
-    let simpulse_effect = effectful && has_any(in b, in effects, it, in SIMPULSE_EFFECTS);
+    let const_time = effectful && has_effect(in input, in effects, item, in "ConstTime");
+    let realtime = effectful && has_effect(in input, in effects, item, in "Realtime");
+    let simpulse_effect = effectful && has_any(in input, in effects, item, in SIMPULSE_EFFECTS);
     let wants_simpulse = simpulse_effect || attr_sims || attr_fault;
     let mut value_params = false;
-    for k in 0..it.pn {
-        let p = match params.try_get(add(it.pa, k)) {
-            Option::Some(p) => p,
-            Option::None => Param { ns: 0, ne: 0, ts: 0, te: 0 },
+    for k in 0..item.param_count {
+        let param = match params.try_get(add(item.param_start, k)) {
+            Option::Some(param) => param,
+            Option::None => Param { name_start: 0, name_end: 0, type_start: 0, type_end: 0 },
         };
-        let capability = is_text(in b, p.ts, p.te, in "SimStorageCtl")
-            || is_text(in b, p.ts, p.te, in "SimNetCtl")
-            || starts_with(in b, p.ts, p.te, in "Cap[");
+        let capability = is_text(in input, param.type_start, param.type_end, in "SimStorageCtl")
+            || is_text(in input, param.type_start, param.type_end, in "SimNetCtl")
+            || starts_with(in input, param.type_start, param.type_end, in "Cap[");
         if !capability {
             value_params = true;
         }
     }
     let has_property = value_params || attr_cases || pins > 0;
-    let nondet = effectful && has_any(in b, in effects, it, in NONDETERMINISTIC_FFI_EFFECTS);
-    let ambient = effectful && has_any(in b, in effects, it, in AMBIENT_IO_EFFECTS);
-    let zero_alloc = gate && t.zero_alloc_has && t.zero_alloc;
-    let max_stack = gate && t.max_stack.has;
-    let max_cycles = gate && t.max_cycles.has;
+    let nondet = effectful && has_any(in input, in effects, item, in NONDETERMINISTIC_FFI_EFFECTS);
+    let ambient = effectful && has_any(in input, in effects, item, in AMBIENT_IO_EFFECTS);
+    let zero_alloc = gate && test_attr.zero_alloc_has && test_attr.zero_alloc;
+    let max_stack = gate && test_attr.max_stack.has;
+    let max_cycles = gate && test_attr.max_cycles.has;
     let budget_active = max_stack || max_cycles || zero_alloc || const_time || realtime;
     let mode = if expect {
         MODE_EXPECT_ERROR
@@ -592,92 +604,102 @@ fn put_test(
     let uses_simpulse = !expect && wants_simpulse;
     let effective_property = !expect && has_property;
     // The plan.
-    put_text(inout out, in b, it.ns, it.ne);
+    put_text(inout out, in input, item.name_start, item.name_end);
     out.push(mode);
     out.push(bit(effective_property));
     out.push(bit(uses_simpulse));
     out.push(bit(max_stack));
-    out.push(opt_value(max_stack, t.max_stack.v));
+    out.push(opt_value(max_stack, test_attr.max_stack.value));
     out.push(bit(max_cycles));
-    out.push(opt_value(max_cycles, t.max_cycles.v));
+    out.push(opt_value(max_cycles, test_attr.max_cycles.value));
     out.push(bit(zero_alloc));
     out.push(bit(const_time));
     out.push(bit(realtime));
     out.push(bit(expect));
     if expect {
-        put_text(inout out, in txt, t.expect_error.a, t.expect_error.b);
+        put_text(
+            inout out,
+            in text,
+            test_attr.expect_error.text_start,
+            test_attr.expect_error.text_end
+        );
         // primary.or(expected_span)
-        if t.primary.has {
+        if test_attr.primary.has {
             out.push(1);
-            put_text(inout out, in txt, t.primary.a, t.primary.b);
-        } else if t.expected_span.has {
+            put_text(inout out, in text, test_attr.primary.text_start, test_attr.primary.text_end);
+        } else if test_attr.expected_span.has {
             out.push(1);
-            put_text(inout out, in txt, t.expected_span.a, t.expected_span.b);
+            put_text(
+                inout out,
+                in text,
+                test_attr.expected_span.text_start,
+                test_attr.expected_span.text_end
+            );
         } else {
             out.push(0);
         }
-        out.push(bit(t.related.has));
-        if t.related.has {
-            put_text(inout out, in txt, t.related.a, t.related.b);
+        out.push(bit(test_attr.related.has));
+        if test_attr.related.has {
+            put_text(inout out, in text, test_attr.related.text_start, test_attr.related.text_end);
         }
-        out.push(bit(t.message.has));
-        if t.message.has {
-            put_text(inout out, in txt, t.message.a, t.message.b);
+        out.push(bit(test_attr.message.has));
+        if test_attr.message.has {
+            put_text(inout out, in text, test_attr.message.text_start, test_attr.message.text_end);
         }
     }
     // `n as u32`.
     let property_cases = if !effective_property {
         0
     } else if attr_cases {
-        t.cases.v & 4294967295
+        test_attr.cases.value & 4294967295
     } else {
         DEFAULT_PROPERTY_CASES
     };
     let sim_schedules = if !uses_simpulse {
         0
     } else if attr_sims {
-        t.sim_schedules.v & 4294967295
+        test_attr.sim_schedules.value & 4294967295
     } else {
         DEFAULT_SIM_SCHEDULES
     };
     out.push(property_cases);
     out.push(sim_schedules);
     if uses_simpulse && attr_fault {
-        let fs = t.fault_profile.a;
-        let fe = t.fault_profile.b;
-        if is_text(in txt, fs, fe, in "TornWalSector") {
+        let fault_start = test_attr.fault_profile.text_start;
+        let fault_end = test_attr.fault_profile.text_end;
+        if is_text(in text, fault_start, fault_end, in "TornWalSector") {
             out.push(1);
-        } else if is_text(in txt, fs, fe, in "NetPartition") {
+        } else if is_text(in text, fault_start, fault_end, in "NetPartition") {
             out.push(2);
-        } else if is_text(in txt, fs, fe, in "ClockSkew") {
+        } else if is_text(in text, fault_start, fault_end, in "ClockSkew") {
             out.push(3);
         } else {
             out.push(4);
-            put_text(inout out, in txt, fs, fe);
+            put_text(inout out, in text, fault_start, fault_end);
         }
     } else {
         out.push(0);
     }
     out.push(DEFAULT_SEED);
     // The pinned cases as source spellings.
-    let mut s: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut spelling: ChunkSeq[u8] = ChunkSeq::new[u8]();
     out.push(pins);
     for k in 0..pins {
-        let ca = match at.cases.try_get(add(fa.ca, k)) {
-            Option::Some(ca) => ca,
-            Option::None => CaseAttr { a: 0, n: 0, start: 0, end: 0 },
+        let case_attr = match attrs.cases.try_get(add(fn_attrs.case_start, k)) {
+            Option::Some(case_attr) => case_attr,
+            Option::None => CaseAttr { first_arg: 0, arg_count: 0, start: 0, end: 0 },
         };
-        out.push(ca.n);
-        for j in 0..ca.n {
-            match at.args.try_get(add(ca.a, j)) {
+        out.push(case_attr.arg_count);
+        for j in 0..case_attr.arg_count {
+            match attrs.args.try_get(add(case_attr.first_arg, j)) {
                 Option::Some(arg) => {
-                    s.clear();
+                    spelling.clear();
                     if arg.has_name {
-                        push_range(inout s, in src, arg.na, arg.nb);
-                        s.extend(in " = ".as_bytes());
+                        push_range(inout spelling, in src, arg.name_start, arg.name_end);
+                        spelling.extend(in " = ".as_bytes());
                     }
-                    push_value(inout s, in txt, arg.val);
-                    put_buf(inout out, in s);
+                    push_value(inout spelling, in text, arg.value);
+                    put_buf(inout out, in spelling);
                 },
                 Option::None => out.push(0),
             }
@@ -692,32 +714,32 @@ fn put_test(
     // The raw pins.
     out.push(pins);
     for k in 0..pins {
-        let ca = match at.cases.try_get(add(fa.ca, k)) {
-            Option::Some(ca) => ca,
-            Option::None => CaseAttr { a: 0, n: 0, start: 0, end: 0 },
+        let case_attr = match attrs.cases.try_get(add(fn_attrs.case_start, k)) {
+            Option::Some(case_attr) => case_attr,
+            Option::None => CaseAttr { first_arg: 0, arg_count: 0, start: 0, end: 0 },
         };
-        out.push(ca.start);
-        out.push(ca.end);
-        out.push(ca.n);
-        for j in 0..ca.n {
-            match at.args.try_get(add(ca.a, j)) {
+        out.push(case_attr.start);
+        out.push(case_attr.end);
+        out.push(case_attr.arg_count);
+        for j in 0..case_attr.arg_count {
+            match attrs.args.try_get(add(case_attr.first_arg, j)) {
                 Option::Some(arg) => {
                     out.push(bit(arg.has_name));
                     if arg.has_name {
-                        put_text(inout out, in src, arg.na, arg.nb);
+                        put_text(inout out, in src, arg.name_start, arg.name_end);
                     }
                     out.push(arg.start);
                     out.push(arg.end);
-                    let v = arg.val;
-                    out.push(widen_u64(v.tag));
-                    if v.tag == V_INT {
-                        out.push(bit(v.int.neg));
-                        out.push(v.int.hi);
-                        out.push(v.int.lo);
-                    } else if v.tag == V_BOOL {
-                        out.push(bit(v.flag));
+                    let value = arg.value;
+                    out.push(widen_u64(value.tag));
+                    if value.tag == V_INT {
+                        out.push(bit(value.int_value.neg));
+                        out.push(value.int_value.hi);
+                        out.push(value.int_value.lo);
+                    } else if value.tag == V_BOOL {
+                        out.push(bit(value.bool_value));
                     } else {
-                        put_text(inout out, in txt, v.a, v.b);
+                        put_text(inout out, in text, value.text_start, value.text_end);
                     }
                 },
                 Option::None => out.push(0),
@@ -726,10 +748,10 @@ fn put_test(
     }
 }
 
-fn put_name_error(in b: Slice[u8], it: Item, in what: Str) -> ChunkSeq[u64] {
+fn put_name_error(in input: Slice[u8], item: Item, in what: Str) -> ChunkSeq[u64] {
     let mut msg: ChunkSeq[u8] = ChunkSeq::new[u8]();
     msg.extend(in "test function '".as_bytes());
-    push_range(inout msg, in b, it.ns, it.ne);
+    push_range(inout msg, in input, item.name_start, item.name_end);
     msg.extend(in what.as_bytes());
     put_error(in msg)
 }
@@ -739,127 +761,177 @@ fn put_name_error(in b: Slice[u8], it: Item, in what: Str) -> ChunkSeq[u64] {
 // params as (name, type) and its effect names); the case rows (entry,
 // name, span, target function index). Result: 0 and the tests in source
 // order, or 1 and the error.
-pub fn discover(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
-    let (ss, se) = r.text(in b);
-    let src = b[ss..se];
-    let item_count = r.word(in b);
+pub fn discover(in input: Slice[u8]) -> ChunkSeq[u64] {
+    let mut reader = Reader { pos: 0 };
+    let (src_start, src_end) = reader.text(in input);
+    let src = input[src_start..src_end];
+    let item_count = reader.word(in input);
     let mut items: ChunkSeq[Item] = ChunkSeq::with_capacity[Item](item_count);
     let mut params: ChunkSeq[Param] = ChunkSeq::new[Param]();
     let mut effects: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for i in 0..item_count {
-        let is_fn = r.word(in b) != 0;
+        let is_fn = reader.word(in input) != 0;
         if !is_fn {
-            items.push(Item {
-                is_fn: false,
-                ns: 0,
-                ne: 0,
-                start: 0,
-                end: 0,
-                generic: false,
-                body: false,
-                pa: 0,
-                pn: 0,
-                ea: 0,
-                en: 0
-            });
+            items.push(
+                Item {
+                    is_fn: false,
+                    name_start: 0,
+                    name_end: 0,
+                    start: 0,
+                    end: 0,
+                    is_generic: false,
+                    has_body: false,
+                    param_start: 0,
+                    param_count: 0,
+                    effect_start: 0,
+                    effect_count: 0
+                }
+            );
             continue;
         }
-        let (ns, ne) = r.text(in b);
-        let start = r.word(in b);
-        let end = r.word(in b);
-        let generic = r.word(in b) != 0;
-        let body = r.word(in b) != 0;
-        let pa = params.len();
-        let pn = r.word(in b);
-        for k in 0..pn {
-            let (pns, pne) = r.text(in b);
-            let (ts, te) = r.text(in b);
-            params.push(Param { ns: pns, ne: pne, ts: ts, te: te });
+        let (name_start, name_end) = reader.text(in input);
+        let start = reader.word(in input);
+        let end = reader.word(in input);
+        let is_generic = reader.word(in input) != 0;
+        let has_body = reader.word(in input) != 0;
+        let param_start = params.len();
+        let param_count = reader.word(in input);
+        for k in 0..param_count {
+            let (param_name_start, param_name_end) = reader.text(in input);
+            let (type_start, type_end) = reader.text(in input);
+            params.push(
+                Param {
+                    name_start: param_name_start,
+                    name_end: param_name_end,
+                    type_start: type_start,
+                    type_end: type_end
+                }
+            );
         }
-        let ea = effects.len() / 2;
-        let en = r.word(in b);
-        for k in 0..en {
-            let (es, ee) = r.text(in b);
-            effects.push(es);
-            effects.push(ee);
+        let effect_start = effects.len() / 2;
+        let effect_count = reader.word(in input);
+        for k in 0..effect_count {
+            let (eff_name_start, eff_name_end) = reader.text(in input);
+            effects.push(eff_name_start);
+            effects.push(eff_name_end);
         }
-        items.push(Item {
-            is_fn: true,
-            ns: ns,
-            ne: ne,
-            start: start,
-            end: end,
-            generic: generic,
-            body: body,
-            pa: pa,
-            pn: pn,
-            ea: ea,
-            en: en
-        });
+        items.push(
+            Item {
+                is_fn: true,
+                name_start: name_start,
+                name_end: name_end,
+                start: start,
+                end: end,
+                is_generic: is_generic,
+                has_body: has_body,
+                param_start: param_start,
+                param_count: param_count,
+                effect_start: effect_start,
+                effect_count: effect_count
+            }
+        );
     }
-    let case_count = r.word(in b);
+    let case_count = reader.word(in input);
     let mut cases: ChunkSeq[Case] = ChunkSeq::with_capacity[Case](case_count);
     for i in 0..case_count {
-        let (es, ee) = r.text(in b);
-        let (ns, ne) = r.text(in b);
-        let start = r.word(in b);
-        let end = r.word(in b);
-        let target = r.word(in b);
-        cases.push(Case { es: es, ee: ee, ns: ns, ne: ne, start: start, end: end, target: target });
+        let (entry_start, entry_end) = reader.text(in input);
+        let (name_start, name_end) = reader.text(in input);
+        let start = reader.word(in input);
+        let end = reader.word(in input);
+        let target = reader.word(in input);
+        cases.push(
+            Case {
+                entry_start: entry_start,
+                entry_end: entry_end,
+                name_start: name_start,
+                name_end: name_end,
+                start: start,
+                end: end,
+                target: target
+            }
+        );
     }
-    let t = toks(in src);
-    let at = extract_test_attrs(in src, in t.kind, in t.start, in t.end);
+    let tokens = toks(in src);
+    let attrs = extract_test_attrs(in src, in tokens.kind, in tokens.start, in tokens.end);
     let mut comments: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
     // Each test's words, and (span start, offset, length) to sort them.
     let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut order: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    let fn_attr_count = at.fns.len();
+    let fn_attr_count = attrs.fns.len();
     for index in 0..item_count {
-        let it = match items.try_get(index) {
-            Option::Some(it) => it,
+        let item = match items.try_get(index) {
+            Option::Some(item) => item,
             Option::None => break,
         };
-        if !it.is_fn {
+        if !item.is_fn {
             continue;
         }
         // attr_map.get(name): the last attribute set of that name.
         let mut has_attrs = false;
-        let mut fa = FnAttrs {
-            na: 0,
-            nb: 0,
+        let mut fn_attrs = FnAttrs {
+            name_start: 0,
+            name_end: 0,
             has_test: false,
             test: test_attr_new(0, 0),
-            ca: 0,
-            cn: 0
+            case_start: 0,
+            case_count: 0
         };
         for k in 0..fn_attr_count {
-            match at.fns.try_get(k) {
-                Option::Some(f) => {
-                    if same(in src, f.na, f.nb, in b, it.ns, it.ne) {
+            match attrs.fns.try_get(k) {
+                Option::Some(named_attrs) => {
+                    if same(
+                        in src,
+                        named_attrs.name_start,
+                        named_attrs.name_end,
+                        in input,
+                        item.name_start,
+                        item.name_end
+                    ) {
                         has_attrs = true;
-                        fa = f;
+                        fn_attrs = named_attrs;
                     }
                 },
                 Option::None => {},
             }
         }
-        let has_real_attr = has_attrs && (fa.has_test || fa.cn > 0);
+        let has_real_attr = has_attrs && (fn_attrs.has_test || fn_attrs.case_count > 0);
         // case_entries.get(name) and case_targets.contains(name).
         let mut is_case = false;
-        let mut c = Case { es: 0, ee: 0, ns: 0, ne: 0, start: 0, end: 0, target: 0 };
+        let mut test_case = Case {
+            entry_start: 0,
+            entry_end: 0,
+            name_start: 0,
+            name_end: 0,
+            start: 0,
+            end: 0,
+            target: 0
+        };
         let mut is_target = false;
         for k in 0..case_count {
             match cases.try_get(k) {
-                Option::Some(x) => {
-                    if same(in b, x.es, x.ee, in b, it.ns, it.ne) {
+                Option::Some(row) => {
+                    if same(
+                        in input,
+                        row.entry_start,
+                        row.entry_end,
+                        in input,
+                        item.name_start,
+                        item.name_end
+                    ) {
                         is_case = true;
-                        c = x;
+                        test_case = row;
                     }
-                    match items.try_get(x.target) {
+                    match items.try_get(row.target) {
                         Option::Some(target) => {
-                            let named = same(in b, target.ns, target.ne, in b, it.ns, it.ne);
+                            let named = same(
+                                in input,
+                                target.name_start,
+                                target.name_end,
+                                in input,
+                                item.name_start,
+                                item.name_end
+                            );
                             if target.is_fn && named {
                                 is_target = true;
                             }
@@ -872,69 +944,69 @@ pub fn discover(in b: Slice[u8]) -> ChunkSeq[u64] {
         }
         let mut legacy = false;
         if !is_target {
-            if starts_with(in b, it.ns, it.ne, in "test_") {
+            if starts_with(in input, item.name_start, item.name_end, in "test_") {
                 legacy = true;
             } else {
-                preceding_comments(in t, it.start, inout comments);
+                preceding_comments(in tokens, item.start, inout comments);
                 legacy = has_test_marker(in src, in comments);
             }
         }
         if !has_real_attr && !legacy && !is_case {
             continue;
         }
-        if it.generic {
-            return put_name_error(in b, it, in "' cannot be generic");
+        if item.is_generic {
+            return put_name_error(in input, item, in "' cannot be generic");
         }
-        if !it.body {
-            return put_name_error(in b, it, in "' must have a body");
+        if !item.has_body {
+            return put_name_error(in input, item, in "' must have a body");
         }
-        if it.pn > 0 && !has_real_attr {
-            return put_name_error(in b, it, in "' must take zero arguments");
+        if item.param_count > 0 && !has_real_attr {
+            return put_name_error(in input, item, in "' must take zero arguments");
         }
         let offset = words.len();
         put_test(
             inout words,
-            in b,
+            in input,
             in src,
-            in at,
+            in attrs,
             in params,
             in effects,
             index,
-            it,
+            item,
             has_attrs,
-            fa,
+            fn_attrs,
             is_case,
-            c
+            test_case
         );
-        let key = if is_case { c.start } else { it.start };
+        let key = if is_case { test_case.start } else { item.start };
         order.push(key);
         order.push(offset);
         order.push(sub(words.len(), offset));
     }
     // A stable insertion sort by span start.
-    let n = order.len() / 3;
-    let mut idx: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
-    for k in 0..n {
+    let test_count = order.len() / 3;
+    let mut sorted: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](test_count);
+    for k in 0..test_count {
         let key = u64_at(in order, wrapping_mul(k, 3));
-        let mut j = idx.len();
-        idx.push(k);
+        let mut j = sorted.len();
+        sorted.push(k);
         loop {
             if j == 0 {
                 break;
             }
-            let prev = u64_at(in idx, sub(j, 1));
+            let prev = u64_at(in sorted, sub(j, 1));
             if u64_at(in order, wrapping_mul(prev, 3)) <= key {
                 break;
             }
-            let ok = idx.try_set(j, prev);
+            let ok = sorted.try_set(j, prev);
             j = sub(j, 1);
         }
-        let ok = idx.try_set(j, k);
+        let ok = sorted.try_set(j, k);
     }
     out.push(0);
-    out.push(n);
-    for k in 0..n {
-        let which = u64_at(in idx, k);
+    out.push(test_count);
+    for k in 0..test_count {
+        let which = u64_at(in sorted, k);
         let offset = u64_at(in order, inc(wrapping_mul(which, 3)));
         let len = u64_at(in order, add(wrapping_mul(which, 3), 2));
         out.extend(in words[offset..add(offset, len)]);

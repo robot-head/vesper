@@ -20,27 +20,27 @@ fn none() -> Big {
 // `m`; `ok` is false past `i128::MAX`.
 fn mul_add(x: Big, m: u64, a: u64) -> Big {
     let mask: u64 = 4294967295;
-    let p0 = wrapping_add(wrapping_mul(x.lo & mask, m), a);
-    let p1 = wrapping_add(wrapping_mul(x.lo >> 32, m), p0 >> 32);
-    let lo = (p0 & mask) | wrapping_shl_u64(p1, 32);
-    let carry = p1 >> 32;
+    let lo_low = wrapping_add(wrapping_mul(x.lo & mask, m), a);
+    let lo_high = wrapping_add(wrapping_mul(x.lo >> 32, m), lo_low >> 32);
+    let lo = (lo_low & mask) | wrapping_shl_u64(lo_high, 32);
+    let carry = lo_high >> 32;
     // x.hi < 2^63 and m <= 16, so the product stays below 2^67: check it
     // in halves.
-    let h0 = wrapping_add(wrapping_mul(x.hi & mask, m), carry);
-    let h1 = wrapping_add(wrapping_mul(x.hi >> 32, m), h0 >> 32);
-    if h1 >= 2147483648 {
+    let hi_low = wrapping_add(wrapping_mul(x.hi & mask, m), carry);
+    let hi_high = wrapping_add(wrapping_mul(x.hi >> 32, m), hi_low >> 32);
+    if hi_high >= 2147483648 {
         return none();
     }
-    Big { ok: true, neg: false, hi: (h0 & mask) | wrapping_shl_u64(h1, 32), lo: lo }
+    Big { ok: true, neg: false, hi: (hi_low & mask) | wrapping_shl_u64(hi_high, 32), lo: lo }
 }
 
-fn digit(c: u8, hex: bool) -> u64 {
-    if c >= 48 && c <= 57 {
-        widen_u64(wrapping_sub(c, 48))
-    } else if hex && c >= 97 && c <= 102 {
-        widen_u64(wrapping_sub(c, 87))
-    } else if hex && c >= 65 && c <= 70 {
-        widen_u64(wrapping_sub(c, 55))
+fn digit(ascii: u8, hex: bool) -> u64 {
+    if ascii >= 48 && ascii <= 57 {
+        widen_u64(wrapping_sub(ascii, 48))
+    } else if hex && ascii >= 97 && ascii <= 102 {
+        widen_u64(wrapping_sub(ascii, 87))
+    } else if hex && ascii >= 65 && ascii <= 70 {
+        widen_u64(wrapping_sub(ascii, 55))
     } else {
         99
     }
@@ -49,48 +49,48 @@ fn digit(c: u8, hex: bool) -> u64 {
 // `parse_int(raw, negative)`: underscores are dropped, `0x`/`0X` is hex;
 // `ok` is false for an empty or invalid spelling or a magnitude past
 // `i128::MAX`.
-pub fn parse_int(in b: Slice[u8], s: u64, e: u64, negative: bool) -> Big {
+pub fn parse_int(in bytes: Slice[u8], start: u64, end: u64, negative: bool) -> Big {
     // The first two non-underscore bytes decide the radix.
-    let mut i = s;
+    let mut i = start;
     let mut seen: u64 = 0;
-    let mut c0: u8 = 0;
+    let mut first_byte: u8 = 0;
     let mut hex = false;
-    let mut start = s;
+    let mut digits_start = start;
     loop {
-        if i >= e || seen >= 2 {
+        if i >= end || seen >= 2 {
             break;
         }
-        let c = byte(in b, i);
-        if c != 95 {
+        let cur_byte = byte(in bytes, i);
+        if cur_byte != 95 {
             if seen == 0 {
-                c0 = c;
-            } else if c0 == 48 && (c == 120 || c == 88) {
+                first_byte = cur_byte;
+            } else if first_byte == 48 && (cur_byte == 120 || cur_byte == 88) {
                 hex = true;
-                start = inc(i);
+                digits_start = inc(i);
             }
             seen = inc(seen);
         }
         i = inc(i);
     }
     let base: u64 = if hex { 16 } else { 10 };
-    let mut x = Big { ok: true, neg: false, hi: 0, lo: 0 };
+    let mut value = Big { ok: true, neg: false, hi: 0, lo: 0 };
     let mut digits: u64 = 0;
-    let mut j = start;
+    let mut j = digits_start;
     loop {
-        if j >= e {
+        if j >= end {
             break;
         }
-        let c = byte(in b, j);
+        let cur_byte = byte(in bytes, j);
         j = inc(j);
-        if c == 95 {
+        if cur_byte == 95 {
             continue;
         }
-        let d = digit(c, hex);
-        if d >= base {
+        let digit_value = digit(cur_byte, hex);
+        if digit_value >= base {
             return none();
         }
-        x = mul_add(x, base, d);
-        if !x.ok {
+        value = mul_add(value, base, digit_value);
+        if !value.ok {
             return none();
         }
         digits = inc(digits);
@@ -98,52 +98,52 @@ pub fn parse_int(in b: Slice[u8], s: u64, e: u64, negative: bool) -> Big {
     if digits == 0 {
         return none();
     }
-    let zero = x.hi == 0 && x.lo == 0;
-    Big { ok: true, neg: negative && !zero, hi: x.hi, lo: x.lo }
+    let zero = value.hi == 0 && value.lo == 0;
+    Big { ok: true, neg: negative && !zero, hi: value.hi, lo: value.lo }
 }
 
 // `u64::try_from(n)`.
-pub fn as_u64(x: Big) -> (bool, u64) {
-    if x.neg || x.hi != 0 {
+pub fn as_u64(value: Big) -> (bool, u64) {
+    if value.neg || value.hi != 0 {
         (false, 0)
     } else {
-        (true, x.lo)
+        (true, value.lo)
     }
 }
 
-// Appends the decimal spelling of `x` (`i128::to_string`).
-pub fn push_big(inout out: ChunkSeq[u8], x: Big) {
-    if x.neg {
+// Appends the decimal spelling of `value` (`i128::to_string`).
+pub fn push_big(inout out: ChunkSeq[u8], value: Big) {
+    if value.neg {
         out.push(45);
     }
     let mask: u64 = 4294967295;
     let mut limbs: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    limbs.push(x.hi >> 32);
-    limbs.push(x.hi & mask);
-    limbs.push(x.lo >> 32);
-    limbs.push(x.lo & mask);
+    limbs.push(value.hi >> 32);
+    limbs.push(value.hi & mask);
+    limbs.push(value.lo >> 32);
+    limbs.push(value.lo & mask);
     let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
     loop {
-        let mut r: u64 = 0;
+        let mut rem: u64 = 0;
         let mut nonzero = false;
         for k in 0..4 {
             let limb = limbs.try_get(k).unwrap_or(0);
-            let cur = wrapping_shl_u64(r, 32) | limb;
-            let q = cur / 10;
-            r = cur % 10;
-            let ok = limbs.try_set(k, q);
-            if q != 0 {
+            let cur = wrapping_shl_u64(rem, 32) | limb;
+            let quot = cur / 10;
+            rem = cur % 10;
+            let ok = limbs.try_set(k, quot);
+            if quot != 0 {
                 nonzero = true;
             }
         }
-        digits.push(wrapping_u8(add(r, 48)));
+        digits.push(wrapping_u8(add(rem, 48)));
         if !nonzero {
             break;
         }
     }
     let n = digits.len();
     for k in 0..n {
-        let c = digits.try_get(sub(sub(n, 1), k)).unwrap_or(48);
-        out.push(c);
+        let digit_byte = digits.try_get(sub(sub(n, 1), k)).unwrap_or(48);
+        out.push(digit_byte);
     }
 }

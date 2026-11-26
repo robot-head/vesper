@@ -20,25 +20,26 @@ pub const V_FLOAT: u8 = 3;
 pub const V_BOOL: u8 = 4;
 pub const V_RAW: u8 = 5;
 
-// One `AttrValue`: the text of Ident, String, Float and Raw is `txt[a..b]`.
+// One `AttrValue`: the text of Ident, String, Float and Raw is
+// `text[text_start..text_end]`.
 pub copy struct Val {
     tag: u8,
-    a: u64,
-    b: u64,
-    int: Big,
-    flag: bool,
+    text_start: u64,
+    text_end: u64,
+    int_value: Big,
+    bool_value: bool,
 }
 
-// An optional text (`txt[a..b]`).
+// An optional text (`text[text_start..text_end]`).
 pub copy struct OptText {
     has: bool,
-    a: u64,
-    b: u64,
+    text_start: u64,
+    text_end: u64,
 }
 
 pub copy struct OptNum {
     has: bool,
-    v: u64,
+    value: u64,
 }
 
 // `TestAttr` (without `extra`, which nothing reads).
@@ -59,48 +60,48 @@ pub copy struct TestAttr {
     zero_alloc: bool,
 }
 
-// One `TestCaseArg`: the name is the source range `na..nb`.
+// One `TestCaseArg`: the name is the source range `name_start..name_end`.
 pub copy struct Arg {
     has_name: bool,
-    na: u64,
-    nb: u64,
-    val: Val,
+    name_start: u64,
+    name_end: u64,
+    value: Val,
     start: u64,
     end: u64,
 }
 
-// One `TestCaseAttr`: `args[a..a + n]`.
+// One `TestCaseAttr`: `args[first_arg..first_arg + arg_count]`.
 pub copy struct CaseAttr {
-    a: u64,
-    n: u64,
+    first_arg: u64,
+    arg_count: u64,
     start: u64,
     end: u64,
 }
 
-// One `FunctionTestAttrs`: the name is the source range `na..nb`, the pins
-// `cases[ca..ca + cn]`.
+// One `FunctionTestAttrs`: the name is the source range `name_start..name_end`,
+// the pins `cases[case_start..case_start + case_count]`.
 pub copy struct FnAttrs {
-    na: u64,
-    nb: u64,
+    name_start: u64,
+    name_end: u64,
     has_test: bool,
     test: TestAttr,
-    ca: u64,
-    cn: u64,
+    case_start: u64,
+    case_count: u64,
 }
 
 pub struct Attrs {
-    txt: ChunkSeq[u8],
+    text: ChunkSeq[u8],
     args: ChunkSeq[Arg],
     cases: ChunkSeq[CaseAttr],
     fns: ChunkSeq[FnAttrs],
 }
 
 fn no_text() -> OptText {
-    OptText { has: false, a: 0, b: 0 }
+    OptText { has: false, text_start: 0, text_end: 0 }
 }
 
 fn no_num() -> OptNum {
-    OptNum { has: false, v: 0 }
+    OptNum { has: false, value: 0 }
 }
 
 fn no_big() -> Big {
@@ -159,29 +160,29 @@ impl Stream {
         self.end.try_get(add(self.pos, offset)).unwrap_or(self.len)
     }
 
-    fn at_word(in self, in b: Slice[u8], offset: u64, in w: Str) -> bool {
+    fn at_word(in self, in src: Slice[u8], offset: u64, in word: Str) -> bool {
         let lower = self.nth_kind(offset) == k_lower();
-        lower && is_text(in b, self.start_at(offset), self.end_at(offset), in w)
+        lower && is_text(in src, self.start_at(offset), self.end_at(offset), in word)
     }
 
     // `bump`: the token's range; Eof does not advance.
     fn bump(inout self) -> (u64, u64) {
-        let s = self.start_at(0);
-        let e = self.end_at(0);
+        let start = self.start_at(0);
+        let end = self.end_at(0);
         if self.pos < self.kind.len() && self.kind() != k_eof() {
             self.pos = inc(self.pos);
         }
-        (s, e)
+        (start, end)
     }
 
     fn is_open(in self) -> bool {
-        let k = self.kind();
-        k == k_l_paren() || k == k_l_bracket() || k == k_l_brace()
+        let kind = self.kind();
+        kind == k_l_paren() || kind == k_l_bracket() || kind == k_l_brace()
     }
 
     fn is_close(in self) -> bool {
-        let k = self.kind();
-        k == k_r_paren() || k == k_r_bracket() || k == k_r_brace()
+        let kind = self.kind();
+        kind == k_r_paren() || kind == k_r_bracket() || kind == k_r_brace()
     }
 
     fn skip_to_comma_or_rparen(inout self) {
@@ -212,71 +213,83 @@ impl Stream {
         }
     }
 
-    fn put_text(inout self, in b: Slice[u8], s: u64, e: u64) -> (u64, u64) {
-        let a = self.out.txt.len();
-        push_range(inout self.out.txt, in b, s, e);
-        (a, self.out.txt.len())
+    fn put_text(inout self, in src: Slice[u8], start: u64, end: u64) -> (u64, u64) {
+        let text_start = self.out.text.len();
+        push_range(inout self.out.text, in src, start, end);
+        (text_start, self.out.text.len())
     }
 
-    fn text_val(inout self, tag: u8, in b: Slice[u8], s: u64, e: u64) -> Val {
-        let (a, z) = self.put_text(in b, s, e);
-        Val { tag: tag, a: a, b: z, int: no_big(), flag: false }
+    fn text_val(inout self, tag: u8, in src: Slice[u8], start: u64, end: u64) -> Val {
+        let (text_start, text_end) = self.put_text(in src, start, end);
+        Val {
+            tag: tag,
+            text_start: text_start,
+            text_end: text_end,
+            int_value: no_big(),
+            bool_value: false
+        }
     }
 
-    // `unescape_string` of a String token `b[s..e]`.
-    fn string_val(inout self, in b: Slice[u8], s: u64, e: u64) -> Val {
-        let mut i = s;
-        let mut j = e;
-        if j > i && byte(in b, i) == 34 {
+    // `unescape_string` of a String token `src[start..end]`.
+    fn string_val(inout self, in src: Slice[u8], start: u64, end: u64) -> Val {
+        let mut i = start;
+        let mut j = end;
+        if j > i && byte(in src, i) == 34 {
             i = inc(i);
-            if j > i && byte(in b, sub(j, 1)) == 34 {
+            if j > i && byte(in src, sub(j, 1)) == 34 {
                 j = sub(j, 1);
             } else {
                 // No closing quote: `strip_suffix` fails, so the raw text
                 // stays whole.
-                i = s;
+                i = start;
             }
         }
-        let a = self.out.txt.len();
+        let text_start = self.out.text.len();
         loop {
             if i >= j {
                 break;
             }
-            let c = byte(in b, i);
+            let cur_byte = byte(in src, i);
             i = inc(i);
-            if c != 92 {
-                self.out.txt.push(c);
+            if cur_byte != 92 {
+                self.out.text.push(cur_byte);
                 continue;
             }
             if i >= j {
-                self.out.txt.push(92);
+                self.out.text.push(92);
                 break;
             }
-            let d = byte(in b, i);
+            let escape = byte(in src, i);
             i = inc(i);
-            if d == 34 {
-                self.out.txt.push(34);
-            } else if d == 92 {
-                self.out.txt.push(92);
-            } else if d == 110 {
-                self.out.txt.push(10);
-            } else if d == 114 {
-                self.out.txt.push(13);
-            } else if d == 116 {
-                self.out.txt.push(9);
-            } else if d == 48 {
-                self.out.txt.push(0);
+            if escape == 34 {
+                self.out.text.push(34);
+            } else if escape == 92 {
+                self.out.text.push(92);
+            } else if escape == 110 {
+                self.out.text.push(10);
+            } else if escape == 114 {
+                self.out.text.push(13);
+            } else if escape == 116 {
+                self.out.text.push(9);
+            } else if escape == 48 {
+                self.out.text.push(0);
             } else {
-                self.out.txt.push(92);
-                self.out.txt.push(d);
+                self.out.text.push(92);
+                self.out.text.push(escape);
             }
         }
-        Val { tag: V_STRING, a: a, b: self.out.txt.len(), int: no_big(), flag: false }
+        Val {
+            tag: V_STRING,
+            text_start: text_start,
+            text_end: self.out.text.len(),
+            int_value: no_big(),
+            bool_value: false
+        }
     }
 
     // `parse_attr_value`: the value up to the next top-level `,` or `)`
     // and its source range.
-    fn value(inout self, in b: Slice[u8]) -> (Val, u64, u64) {
+    fn value(inout self, in src: Slice[u8]) -> (Val, u64, u64) {
         let first = self.pos;
         let start = self.start_at(0);
         let mut depth: u64 = 0;
@@ -296,133 +309,152 @@ impl Stream {
             }
             self.bump();
         }
-        let n = sub(self.pos, first);
-        let end = if n == 0 {
+        let token_count = sub(self.pos, first);
+        let end = if token_count == 0 {
             start
         } else {
             u64_at(in self.end, sub(self.pos, 1))
         };
-        let k0 = u8_at(in self.kind, first);
-        let k1 = u8_at(in self.kind, inc(first));
-        let s0 = u64_at(in self.start, first);
-        let e0 = u64_at(in self.end, first);
-        let s1 = u64_at(in self.start, inc(first));
-        let e1 = u64_at(in self.end, inc(first));
-        let v = if n == 1 && k0 == k_string() {
-            self.string_val(in b, s0, e0)
-        } else if n == 1 && (k0 == k_true() || k0 == k_false()) {
-            Val { tag: V_BOOL, a: 0, b: 0, int: no_big(), flag: k0 == k_true() }
-        } else if n == 1 && k0 == k_int() {
-            self.int_val(in b, s0, e0, false, start, end)
-        } else if n == 2 && k0 == k_minus() && k1 == k_int() {
-            self.int_val(in b, s1, e1, true, start, end)
-        } else if n == 1 && k0 == k_float() {
-            self.text_val(V_FLOAT, in b, s0, e0)
-        } else if n == 2 && k0 == k_minus() && k1 == k_float() {
-            let a = self.out.txt.len();
-            self.out.txt.push(45);
-            push_range(inout self.out.txt, in b, s1, e1);
-            Val { tag: V_FLOAT, a: a, b: self.out.txt.len(), int: no_big(), flag: false }
-        } else if n == 1 && (k0 == k_lower() || k0 == k_upper()) {
-            self.text_val(V_IDENT, in b, s0, e0)
+        let first_kind = u8_at(in self.kind, first);
+        let second_kind = u8_at(in self.kind, inc(first));
+        let first_start = u64_at(in self.start, first);
+        let first_end = u64_at(in self.end, first);
+        let second_start = u64_at(in self.start, inc(first));
+        let second_end = u64_at(in self.end, inc(first));
+        let parsed = if token_count == 1 && first_kind == k_string() {
+            self.string_val(in src, first_start, first_end)
+        } else if token_count == 1 && (first_kind == k_true() || first_kind == k_false()) {
+            Val {
+                tag: V_BOOL,
+                text_start: 0,
+                text_end: 0,
+                int_value: no_big(),
+                bool_value: first_kind == k_true()
+            }
+        } else if token_count == 1 && first_kind == k_int() {
+            self.int_val(in src, first_start, first_end, false, start, end)
+        } else if token_count == 2 && first_kind == k_minus() && second_kind == k_int() {
+            self.int_val(in src, second_start, second_end, true, start, end)
+        } else if token_count == 1 && first_kind == k_float() {
+            self.text_val(V_FLOAT, in src, first_start, first_end)
+        } else if token_count == 2 && first_kind == k_minus() && second_kind == k_float() {
+            let text_start = self.out.text.len();
+            self.out.text.push(45);
+            push_range(inout self.out.text, in src, second_start, second_end);
+            Val {
+                tag: V_FLOAT,
+                text_start: text_start,
+                text_end: self.out.text.len(),
+                int_value: no_big(),
+                bool_value: false
+            }
+        } else if token_count == 1 && (first_kind == k_lower() || first_kind == k_upper()) {
+            self.text_val(V_IDENT, in src, first_start, first_end)
         } else {
-            let ts = trim_start(in b, start, end);
-            let te = trim_end(in b, ts, end);
-            self.text_val(V_RAW, in b, ts, te)
+            let raw_start = trim_start(in src, start, end);
+            let raw_end = trim_end(in src, raw_start, end);
+            self.text_val(V_RAW, in src, raw_start, raw_end)
         };
-        (v, start, end)
+        (parsed, start, end)
     }
 
     fn int_val(
         inout self,
-        in b: Slice[u8],
-        s: u64,
-        e: u64,
+        in src: Slice[u8],
+        int_start: u64,
+        int_end: u64,
         neg: bool,
         start: u64,
         end: u64
     ) -> Val {
-        let x = parse_int(in b, s, e, neg);
-        if x.ok {
-            Val { tag: V_INT, a: 0, b: 0, int: x, flag: false }
+        let parsed = parse_int(in src, int_start, int_end, neg);
+        if parsed.ok {
+            Val { tag: V_INT, text_start: 0, text_end: 0, int_value: parsed, bool_value: false }
         } else {
-            self.text_val(V_RAW, in b, start, end)
+            self.text_val(V_RAW, in src, start, end)
         }
     }
 
-    fn opt_str(in self, v: Val) -> OptText {
-        if v.tag == V_STRING || v.tag == V_IDENT {
-            OptText { has: true, a: v.a, b: v.b }
+    fn opt_str(in self, value: Val) -> OptText {
+        if value.tag == V_STRING || value.tag == V_IDENT {
+            OptText { has: true, text_start: value.text_start, text_end: value.text_end }
         } else {
             no_text()
         }
     }
 
-    fn opt_u64(in self, v: Val) -> OptNum {
-        if v.tag != V_INT {
+    fn opt_u64(in self, value: Val) -> OptNum {
+        if value.tag != V_INT {
             return no_num();
         }
-        let (ok, n) = as_u64(v.int);
-        OptNum { has: ok, v: n }
+        let (ok, number) = as_u64(value.int_value);
+        OptNum { has: ok, value: number }
     }
 
     // `apply_test_kv`: an invalid value leaves the field as it was (and
     // the Rust parser reports a diagnostic nothing reads).
-    fn apply(inout self, inout attr: TestAttr, in b: Slice[u8], ks: u64, ke: u64, v: Val) {
-        if is_text(in b, ks, ke, in "expect_error") {
-            let t = self.opt_str(v);
-            if t.has {
-                attr.expect_error = t;
+    fn apply(
+        inout self,
+        inout attr: TestAttr,
+        in src: Slice[u8],
+        key_start: u64,
+        key_end: u64,
+        value: Val
+    ) {
+        if is_text(in src, key_start, key_end, in "expect_error") {
+            let opt_text = self.opt_str(value);
+            if opt_text.has {
+                attr.expect_error = opt_text;
             }
-        } else if is_text(in b, ks, ke, in "primary") {
-            let t = self.opt_str(v);
-            if t.has {
-                attr.primary = t;
+        } else if is_text(in src, key_start, key_end, in "primary") {
+            let opt_text = self.opt_str(value);
+            if opt_text.has {
+                attr.primary = opt_text;
             }
-        } else if is_text(in b, ks, ke, in "related") {
-            let t = self.opt_str(v);
-            if t.has {
-                attr.related = t;
+        } else if is_text(in src, key_start, key_end, in "related") {
+            let opt_text = self.opt_str(value);
+            if opt_text.has {
+                attr.related = opt_text;
             }
-        } else if is_text(in b, ks, ke, in "message") {
-            let t = self.opt_str(v);
-            if t.has {
-                attr.message = t;
+        } else if is_text(in src, key_start, key_end, in "message") {
+            let opt_text = self.opt_str(value);
+            if opt_text.has {
+                attr.message = opt_text;
             }
-        } else if is_text(in b, ks, ke, in "span") {
-            let t = self.opt_str(v);
-            if t.has {
-                attr.expected_span = t;
+        } else if is_text(in src, key_start, key_end, in "span") {
+            let opt_text = self.opt_str(value);
+            if opt_text.has {
+                attr.expected_span = opt_text;
             }
-        } else if is_text(in b, ks, ke, in "cases") {
-            let n = self.opt_u64(v);
-            if n.has {
-                attr.cases = n;
+        } else if is_text(in src, key_start, key_end, in "cases") {
+            let opt_num = self.opt_u64(value);
+            if opt_num.has {
+                attr.cases = opt_num;
             }
-        } else if is_text(in b, ks, ke, in "sim_schedules") {
-            let n = self.opt_u64(v);
-            if n.has {
-                attr.sim_schedules = n;
+        } else if is_text(in src, key_start, key_end, in "sim_schedules") {
+            let opt_num = self.opt_u64(value);
+            if opt_num.has {
+                attr.sim_schedules = opt_num;
             }
-        } else if is_text(in b, ks, ke, in "fault_profile") {
-            let t = self.opt_str(v);
-            if t.has {
-                attr.fault_profile = t;
+        } else if is_text(in src, key_start, key_end, in "fault_profile") {
+            let opt_text = self.opt_str(value);
+            if opt_text.has {
+                attr.fault_profile = opt_text;
             }
-        } else if is_text(in b, ks, ke, in "max_stack") {
-            let n = self.opt_u64(v);
-            if n.has {
-                attr.max_stack = n;
+        } else if is_text(in src, key_start, key_end, in "max_stack") {
+            let opt_num = self.opt_u64(value);
+            if opt_num.has {
+                attr.max_stack = opt_num;
             }
-        } else if is_text(in b, ks, ke, in "max_cycles") {
-            let n = self.opt_u64(v);
-            if n.has {
-                attr.max_cycles = n;
+        } else if is_text(in src, key_start, key_end, in "max_cycles") {
+            let opt_num = self.opt_u64(value);
+            if opt_num.has {
+                attr.max_cycles = opt_num;
             }
-        } else if is_text(in b, ks, ke, in "zero_alloc") {
-            if v.tag == V_BOOL {
+        } else if is_text(in src, key_start, key_end, in "zero_alloc") {
+            if value.tag == V_BOOL {
                 attr.zero_alloc_has = true;
-                attr.zero_alloc = v.flag;
+                attr.zero_alloc = value.bool_value;
             }
         }
     }
@@ -432,10 +464,10 @@ impl Stream {
     }
 
     // `parse_test_attr`, at `@`.
-    fn test_attr(inout self, in b: Slice[u8]) -> TestAttr {
-        let (at, z) = self.bump();
-        let (w, kw) = self.bump();
-        let mut attr = test_attr_new(at, kw);
+    fn test_attr(inout self, in src: Slice[u8]) -> TestAttr {
+        let (at_start, at_end) = self.bump();
+        let (word_start, word_end) = self.bump();
+        let mut attr = test_attr_new(at_start, word_end);
         if self.kind() != k_l_paren() {
             return attr;
         }
@@ -448,14 +480,14 @@ impl Stream {
                 self.recover();
                 continue;
             }
-            let (ks, ke) = self.bump();
+            let (key_start, key_end) = self.bump();
             if self.kind() != k_eq() {
                 self.recover();
                 continue;
             }
             self.bump();
-            let (v, vs, ve) = self.value(in b);
-            self.apply(inout attr, in b, ks, ke, v);
+            let (value, value_start, value_end) = self.value(in src);
+            self.apply(inout attr, in src, key_start, key_end, value);
             if self.kind() == k_comma() {
                 self.bump();
             } else if self.kind() != k_r_paren() {
@@ -463,20 +495,20 @@ impl Stream {
             }
         }
         if self.kind() == k_r_paren() {
-            let (s, e) = self.bump();
-            attr.end = e;
+            let (tok_start, tok_end) = self.bump();
+            attr.end = tok_end;
         }
         attr
     }
 
     // `parse_test_case_attr`, at `@`.
-    fn test_case_attr(inout self, in b: Slice[u8]) -> CaseAttr {
-        let (at, z) = self.bump();
-        let (w, kw) = self.bump();
-        let a = self.out.args.len();
-        let mut end = kw;
+    fn test_case_attr(inout self, in src: Slice[u8]) -> CaseAttr {
+        let (at_start, at_end) = self.bump();
+        let (word_start, word_end) = self.bump();
+        let first_arg = self.out.args.len();
+        let mut end = word_end;
         if self.kind() != k_l_paren() {
-            return CaseAttr { a: a, n: 0, start: at, end: end };
+            return CaseAttr { first_arg: first_arg, arg_count: 0, start: at_start, end: end };
         }
         self.bump();
         loop {
@@ -485,18 +517,25 @@ impl Stream {
             }
             let arg_start = self.start_at(0);
             let named = self.is_name() && self.nth_kind(1) == k_eq();
-            let mut na: u64 = 0;
-            let mut nb: u64 = 0;
+            let mut name_start: u64 = 0;
+            let mut name_end: u64 = 0;
             if named {
-                let (s, e) = self.bump();
-                na = s;
-                nb = e;
+                let (tok_start, tok_end) = self.bump();
+                name_start = tok_start;
+                name_end = tok_end;
                 self.bump();
             }
-            let (v, vs, ve) = self.value(in b);
-            self.out
-                .args
-                .push(Arg { has_name: named, na: na, nb: nb, val: v, start: arg_start, end: ve });
+            let (value, value_start, value_end) = self.value(in src);
+            self.out.args.push(
+                Arg {
+                    has_name: named,
+                    name_start: name_start,
+                    name_end: name_end,
+                    value: value,
+                    start: arg_start,
+                    end: value_end
+                }
+            );
             if self.kind() == k_comma() {
                 self.bump();
             } else if self.kind() != k_r_paren() {
@@ -504,14 +543,19 @@ impl Stream {
             }
         }
         if self.kind() == k_r_paren() {
-            let (s, e) = self.bump();
-            end = e;
+            let (tok_start, tok_end) = self.bump();
+            end = tok_end;
         }
-        CaseAttr { a: a, n: sub(self.out.args.len(), a), start: at, end: end }
+        CaseAttr {
+            first_arg: first_arg,
+            arg_count: sub(self.out.args.len(), first_arg),
+            start: at_start,
+            end: end
+        }
     }
 
     // `extract_all`.
-    fn extract(inout self, in b: Slice[u8]) {
+    fn extract(inout self, in src: Slice[u8]) {
         let mut brace_depth: u64 = 0;
         let mut test_block = false;
         let mut has_test = false;
@@ -529,7 +573,9 @@ impl Stream {
                 self.bump();
                 continue;
             }
-            if !test_block && self.at_word(in b, 0, in "test") && self.nth_kind(1) == k_l_brace() {
+            if !test_block
+                && self.at_word(in src, 0, in "test")
+                && self.nth_kind(1) == k_l_brace() {
                 has_test = false;
                 self.pending.clear();
                 self.bump();
@@ -544,46 +590,48 @@ impl Stream {
                 test_block = false;
                 continue;
             }
-            if self.kind() == k_at() && self.at_word(in b, 1, in "test") {
-                test = self.test_attr(in b);
+            if self.kind() == k_at() && self.at_word(in src, 1, in "test") {
+                test = self.test_attr(in src);
                 has_test = true;
                 continue;
             }
-            if self.kind() == k_at() && self.at_word(in b, 1, in "test_case") {
-                let c = self.test_case_attr(in b);
-                self.pending.push(c);
+            if self.kind() == k_at() && self.at_word(in src, 1, in "test_case") {
+                let case_attr = self.test_case_attr(in src);
+                self.pending.push(case_attr);
                 continue;
             }
-            if self.kind() == k_at() && self.at_word(in b, 1, in "fip") {
+            if self.kind() == k_at() && self.at_word(in src, 1, in "fip") {
                 self.bump();
                 self.bump();
                 continue;
             }
-            if self.at_word(in b, 0, in "pub") {
+            if self.at_word(in src, 0, in "pub") {
                 self.bump();
                 continue;
             }
             if self.kind() == k_fn() {
                 self.bump();
                 if self.is_name() {
-                    let (ns, ne) = self.bump();
+                    let (name_start, name_end) = self.bump();
                     if has_test || self.pending.len() > 0 {
-                        let ca = self.out.cases.len();
-                        let cn = self.pending.len();
-                        for i in 0..cn {
+                        let case_start = self.out.cases.len();
+                        let case_count = self.pending.len();
+                        for i in 0..case_count {
                             match self.pending.try_get(i) {
-                                Option::Some(c) => self.out.cases.push(c),
+                                Option::Some(case_attr) => self.out.cases.push(case_attr),
                                 Option::None => {},
                             }
                         }
-                        self.out.fns.push(FnAttrs {
-                            na: ns,
-                            nb: ne,
-                            has_test: has_test,
-                            test: test,
-                            ca: ca,
-                            cn: cn
-                        });
+                        self.out.fns.push(
+                            FnAttrs {
+                                name_start: name_start,
+                                name_end: name_end,
+                                has_test: has_test,
+                                test: test,
+                                case_start: case_start,
+                                case_count: case_count
+                            }
+                        );
                     }
                 }
                 has_test = false;
@@ -600,40 +648,40 @@ impl Stream {
     }
 }
 
-// `extract_test_attrs(source)` over the whole token stream of `b`
+// `extract_test_attrs(source)` over the whole token stream of `src`
 // (kinds and ranges, trivia included), which discovery lexes once.
 pub fn extract_test_attrs(
-    in b: Slice[u8],
-    in tkind: ChunkSeq[u8],
-    in tstart: ChunkSeq[u64],
-    in tend: ChunkSeq[u64]
+    in src: Slice[u8],
+    in token_kind: ChunkSeq[u8],
+    in token_start: ChunkSeq[u64],
+    in token_end: ChunkSeq[u64]
 ) -> Attrs {
-    let n = tkind.len();
+    let n = token_kind.len();
     let mut kind = ChunkSeq::with_capacity[u8](n);
     let mut start = ChunkSeq::with_capacity[u64](n);
     let mut end = ChunkSeq::with_capacity[u64](n);
     for i in 0..n {
-        let k = u8_at(in tkind, i);
-        if !trivia_kind(k) {
-            kind.push(k);
-            start.push(u64_at(in tstart, i));
-            end.push(u64_at(in tend, i));
+        let cur_kind = u8_at(in token_kind, i);
+        if !trivia_kind(cur_kind) {
+            kind.push(cur_kind);
+            start.push(u64_at(in token_start, i));
+            end.push(u64_at(in token_end, i));
         }
     }
-    let mut s = Stream {
+    let mut stream = Stream {
         kind: kind,
         start: start,
         end: end,
         pos: 0,
-        len: b.len(),
+        len: src.len(),
         out: Attrs {
-            txt: ChunkSeq::new[u8](),
+            text: ChunkSeq::new[u8](),
             args: ChunkSeq::new[Arg](),
             cases: ChunkSeq::new[CaseAttr](),
             fns: ChunkSeq::new[FnAttrs]()
         },
         pending: ChunkSeq::new[CaseAttr]()
     };
-    s.extract(in b);
-    s.out
+    stream.extract(in src);
+    stream.out
 }
