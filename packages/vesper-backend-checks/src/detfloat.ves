@@ -181,10 +181,7 @@ fn prefix_is(in names: Names, name_id: u32, n: u64, in lit: Str) -> bool {
         return false;
     }
     for k in 0..n {
-        let byte = match lit_bytes.try_get(k) {
-            Option::Some(byte) => byte,
-            Option::None => 0,
-        };
+        let byte = lit_bytes.try_get(k).unwrap_or(0);
         if names.byte(name_id, k) != byte {
             return false;
         }

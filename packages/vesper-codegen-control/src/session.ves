@@ -126,10 +126,7 @@ fn quoted(inout o: ChunkSeq[u8], in names: Names, s: u32) {
 }
 
 fn bool_at(in s: ChunkSeq[bool], i: u64) -> bool {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => false,
-    }
+    s.try_get(i).unwrap_or(false)
 }
 
 fn contains32(in s: ChunkSeq[u32], x: u32) -> bool {

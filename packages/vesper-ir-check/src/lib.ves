@@ -968,17 +968,11 @@ impl State {
     }
 
     pub fn slot_at(in self, i: u64) -> SlotS {
-        match self.slots.try_get(i) {
-            Option::Some(slot) => slot,
-            Option::None => NOSLOT,
-        }
+        self.slots.try_get(i).unwrap_or(NOSLOT)
     }
 
     pub fn val_at(in self, i: u64) -> ValS {
-        match self.values.try_get(i) {
-            Option::Some(val) => val,
-            Option::None => NOVAL,
-        }
+        self.values.try_get(i).unwrap_or(NOVAL)
     }
 
     // Index of the slot with `rank`, or the insertion point with bit 63.

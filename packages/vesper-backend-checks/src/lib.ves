@@ -54,10 +54,7 @@ fn verifier_name(inout out: ChunkSeq[u8], verifier: u64) {
 
 fn text(inout out: ChunkSeq[u8], in report_text: ChunkSeq[u8], at: u64, len: u64) {
     for i in at..wrapping_add(at, len) {
-        let byte = match report_text.try_get(i) {
-            Option::Some(byte) => byte,
-            Option::None => 0,
-        };
+        let byte = report_text.try_get(i).unwrap_or(0);
         out.push(byte);
     }
 }
