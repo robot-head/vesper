@@ -26,46 +26,46 @@ pub copy struct Pat {
     kind: u8,
     // Constructor: the last `::` segment of its name.
     name: u32,
-    // Tuple and constructor sub-patterns: kids[a..a+n] (a constructor's
-    // field names are knames[a..a+n]).
-    a: u32,
-    n: u32,
+    // Tuple and constructor sub-patterns: kids[kid_start..+kid_count] (a
+    // constructor's field names are kid_names[kid_start..+kid_count]).
+    kid_start: u32,
+    kid_count: u32,
 }
 
 pub struct Pats {
     pats: ChunkSeq[Pat],
     kids: ChunkSeq[u32],
-    knames: ChunkSeq[u32],
+    kid_names: ChunkSeq[u32],
     // Symbols of the specialization tags.
-    s_true: u32,
-    s_false: u32,
-    s_tuple: u32,
-    s_bool: u32,
-    // s_index[i]: the symbol of `i.to_string()`, a tuple field's name.
-    s_index: ChunkSeq[u32],
+    true_sym: u32,
+    false_sym: u32,
+    tuple_sym: u32,
+    bool_sym: u32,
+    // index_syms[i]: the symbol of `i.to_string()`, a tuple field's name.
+    index_syms: ChunkSeq[u32],
 }
 
 pub fn pats_new(inout names: Names) -> Pats {
-    let mut p = Pats {
+    let mut pats = Pats {
         pats: ChunkSeq::new[Pat](),
         kids: ChunkSeq::new[u32](),
-        knames: ChunkSeq::new[u32](),
-        s_true: names.intern(in "true".as_bytes()),
-        s_false: names.intern(in "false".as_bytes()),
-        s_tuple: names.intern(in "tuple".as_bytes()),
-        s_bool: names.intern(in "bool".as_bytes()),
-        s_index: ChunkSeq::new[u32]()
+        kid_names: ChunkSeq::new[u32](),
+        true_sym: names.intern(in "true".as_bytes()),
+        false_sym: names.intern(in "false".as_bytes()),
+        tuple_sym: names.intern(in "tuple".as_bytes()),
+        bool_sym: names.intern(in "bool".as_bytes()),
+        index_syms: ChunkSeq::new[u32]()
     };
     let no_kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    let wild = p.add(P_WILD, 0, in no_kids, in no_kids);
-    p
+    let wild = pats.add(P_WILD, 0, in no_kids, in no_kids);
+    pats
 }
 
 impl Pats {
     pub fn pat(in self, i: u32) -> Pat {
         match self.pats.try_get(w(i)) {
             Option::Some(x) => x,
-            Option::None => Pat { kind: P_WILD, name: 0, a: 0, n: 0 },
+            Option::None => Pat { kind: P_WILD, name: 0, kid_start: 0, kid_count: 0 },
         }
     }
 
@@ -74,61 +74,66 @@ impl Pats {
     }
 
     pub fn kname(in self, i: u64) -> u32 {
-        u32_at(in self.knames, i)
+        u32_at(in self.kid_names, i)
     }
 
-    // A pattern with sub-patterns `kids` named `knames` (constructors).
+    // A pattern with sub-patterns `kids` named `kid_names` (constructors).
     pub fn add(
         inout self,
         kind: u8,
         name: u32,
         in kids: ChunkSeq[u32],
-        in knames: ChunkSeq[u32]
+        in kid_names: ChunkSeq[u32]
     ) -> u32 {
-        let a = n32(self.kids.len());
+        let kid_start = n32(self.kids.len());
         for i in 0..kids.len() {
             self.kids.push(u32_at(in kids, i));
-            if i < knames.len() {
-                self.knames.push(u32_at(in knames, i));
+            if i < kid_names.len() {
+                self.kid_names.push(u32_at(in kid_names, i));
             } else {
-                self.knames.push(0);
+                self.kid_names.push(0);
             }
         }
         let id = n32(self.pats.len());
-        self.pats.push(Pat { kind: kind, name: name, a: a, n: n32(kids.len()) });
+        self.pats.push(Pat {
+            kind: kind,
+            name: name,
+            kid_start: kid_start,
+            kid_count: n32(kids.len())
+        });
         id
     }
 
     // The symbol of decimal `i`.
     pub fn index_name(inout self, inout names: Names, i: u64) -> u32 {
         loop {
-            if self.s_index.len() > i {
+            if self.index_syms.len() > i {
                 break;
             }
             let mut text = ChunkSeq::new[u8]();
-            push_decimal_text(inout text, self.s_index.len());
-            let s = names.intern(in text.as_slice());
-            self.s_index.push(s);
+            push_decimal_text(inout text, self.index_syms.len());
+            let sym = names.intern(in text.as_slice());
+            self.index_syms.push(sym);
         }
-        u32_at(in self.s_index, i)
+        u32_at(in self.index_syms, i)
     }
 
-    fn wildcard(in self, p: u32) -> bool {
-        let k = self.pat(p).kind;
-        k == P_WILD || k == P_BIND
+    fn wildcard(in self, pat_id: u32) -> bool {
+        let kind = self.pat(pat_id).kind;
+        kind == P_WILD || kind == P_BIND
     }
 }
 
-fn push_decimal_text(inout out: ChunkSeq[u8], v: u64) {
-    if v >= 10 {
-        push_decimal_text(inout out, v / 10);
+fn push_decimal_text(inout out: ChunkSeq[u8], value: u64) {
+    if value >= 10 {
+        push_decimal_text(inout out, value / 10);
     }
-    out.push(wrapping_u8(wrapping_add(v % 10, 48)));
+    out.push(wrapping_u8(wrapping_add(value % 10, 48)));
 }
 
-fn contains(in s: ChunkSeq[u32], x: u32) -> bool {
-    for i in 0..s.len() {
-        if u32_at(in s, i) == x {
+fn contains(in seq: ChunkSeq[u32], value: u32) -> bool {
+    for i in 0..seq.len() {
+        if u32_at(in seq, i) == value {
             return true;
         }
     }
@@ -136,44 +141,49 @@ fn contains(in s: ChunkSeq[u32], x: u32) -> bool {
 }
 
 // `check::is_uninhabited`; `seen` holds the ADT names being expanded.
-pub fn is_uninhabited(inout t: Types, in wd: World, ty: u32, inout seen: ChunkSeq[u32]) -> bool {
-    let n = t.node(ty);
-    if n.kind == TyKind::Named && n.name == wd.k.never {
+pub fn is_uninhabited(
+    inout types: Types,
+    in world: World,
+    ty: u32,
+    inout seen: ChunkSeq[u32]
+) -> bool {
+    let node = types.node(ty);
+    if node.kind == TyKind::Named && node.name == world.k.never {
         return true;
     }
-    if n.kind == TyKind::Tuple {
-        for i in 0..w(n.n) {
-            let x = item(in t, add(w(n.a), i));
-            if is_uninhabited(inout t, in wd, x, inout seen) {
+    if node.kind == TyKind::Tuple {
+        for i in 0..w(node.n) {
+            let elem_ty = item(in types, add(w(node.a), i));
+            if is_uninhabited(inout types, in world, elem_ty, inout seen) {
                 return true;
             }
         }
         return false;
     }
-    if n.kind != TyKind::Named {
+    if node.kind != TyKind::Named {
         return false;
     }
-    let ai = wd.lookup(n.name);
-    if ai == NONE32 {
+    let adt_index = world.lookup(node.name);
+    if adt_index == NONE32 {
         return false;
     }
-    let a = wd.adt(ai);
-    if a.vn == 0 {
+    let adt = world.adt(adt_index);
+    if adt.vn == 0 {
         return true;
     }
-    if contains(in seen, n.name) {
+    if contains(in seen, node.name) {
         return false;
     }
-    seen.push(n.name);
-    let vars = wd.vars_of(in t, a, ty);
+    seen.push(node.name);
+    let vars = world.vars_of(in types, adt, ty);
     let mut all = true;
-    for vi in 0..w(a.vn) {
-        let v = wd.variant(add(w(a.va), vi));
+    for vi in 0..w(adt.vn) {
+        let variant = world.variant(add(w(adt.va), vi));
         let mut any = false;
-        for fi in 0..w(v.fc) {
-            let f = wd.field(add(w(v.fa), fi));
-            let ft = substitute(inout t, f.ty, in vars);
-            if is_uninhabited(inout t, in wd, ft, inout seen) {
+        for fi in 0..w(variant.fc) {
+            let field = world.field(add(w(variant.fa), fi));
+            let field_ty = substitute(inout types, field.ty, in vars);
+            if is_uninhabited(inout types, in world, field_ty, inout seen) {
                 any = true;
                 break;
             }
@@ -187,32 +197,32 @@ pub fn is_uninhabited(inout t: Types, in wd: World, ty: u32, inout seen: ChunkSe
     all
 }
 
-// A coverage matrix: `rows` rows of `width` pattern ids, row-major, over
+// A coverage matrix: `row_count` rows of `width` pattern ids, row-major, over
 // column types `types`.
 pub struct Matrix {
     cells: ChunkSeq[u32],
-    rows: u64,
+    row_count: u64,
     types: ChunkSeq[u32],
 }
 
 pub fn matrix_new(in types: ChunkSeq[u32]) -> Matrix {
-    let mut ts: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](types.len());
+    let mut col_types: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](types.len());
     for i in 0..types.len() {
-        ts.push(u32_at(in types, i));
+        col_types.push(u32_at(in types, i));
     }
-    Matrix { cells: ChunkSeq::new[u32](), rows: 0, types: ts }
+    Matrix { cells: ChunkSeq::new[u32](), row_count: 0, types: col_types }
 }
 
 impl Matrix {
-    pub fn cell(in self, r: u64, c: u64) -> u32 {
-        u32_at(in self.cells, add(wrapping_mul(r, self.types.len()), c))
+    pub fn cell(in self, row: u64, col: u64) -> u32 {
+        u32_at(in self.cells, add(wrapping_mul(row, self.types.len()), col))
     }
 
     pub fn push_row(inout self, in row: ChunkSeq[u32]) {
         for i in 0..row.len() {
             self.cells.push(u32_at(in row, i));
         }
-        self.rows = inc(self.rows);
+        self.row_count = inc(self.row_count);
     }
 }
 
@@ -220,47 +230,47 @@ impl Matrix {
 // and substituted types), flattened.
 struct Ctors {
     tags: ChunkSeq[u32],
-    // fields of tag i: fnames/ftypes[fa[i]..fa[i+1]]
-    fa: ChunkSeq[u32],
-    fnames: ChunkSeq[u32],
-    ftypes: ChunkSeq[u32],
+    // fields of tag i: field_names/field_types[field_starts[i]..field_starts[i+1]]
+    field_starts: ChunkSeq[u32],
+    field_names: ChunkSeq[u32],
+    field_types: ChunkSeq[u32],
 }
 
 fn ctors_new() -> Ctors {
-    let mut fa: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    fa.push(0);
+    let mut field_starts: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    field_starts.push(0);
     Ctors {
         tags: ChunkSeq::new[u32](),
-        fa: fa,
-        fnames: ChunkSeq::new[u32](),
-        ftypes: ChunkSeq::new[u32]()
+        field_starts: field_starts,
+        field_names: ChunkSeq::new[u32](),
+        field_types: ChunkSeq::new[u32]()
     }
 }
 
 impl Ctors {
     fn close(inout self, tag: u32) {
         self.tags.push(tag);
-        self.fa.push(n32(self.fnames.len()));
+        self.field_starts.push(n32(self.field_names.len()));
     }
 }
 
 // `check::matrix_covered(world, rows, types, depth)`.
 pub fn matrix_covered(
-    inout t: Types,
+    inout types: Types,
     inout names: Names,
-    in wd: World,
-    inout ps: Pats,
-    in m: Matrix,
+    in world: World,
+    inout pats: Pats,
+    in matrix: Matrix,
     depth: u64
 ) -> bool {
-    let width = m.types.len();
+    let width = matrix.types.len();
     if width == 0 {
-        return m.rows != 0;
+        return matrix.row_count != 0;
     }
-    if m.rows == 0 {
+    if matrix.row_count == 0 {
         for i in 0..width {
             let mut seen: ChunkSeq[u32] = ChunkSeq::new[u32]();
-            if is_uninhabited(inout t, in wd, u32_at(in m.types, i), inout seen) {
+            if is_uninhabited(inout types, in world, u32_at(in matrix.types, i), inout seen) {
                 return true;
             }
         }
@@ -269,10 +279,10 @@ pub fn matrix_covered(
     if depth > 64 {
         return false;
     }
-    for r in 0..m.rows {
+    for row_index in 0..matrix.row_count {
         let mut all = true;
-        for c in 0..width {
-            if !ps.wildcard(m.cell(r, c)) {
+        for col in 0..width {
+            if !pats.wildcard(matrix.cell(row_index, col)) {
                 all = false;
                 break;
             }
@@ -281,38 +291,38 @@ pub fn matrix_covered(
             return true;
         }
     }
-    let t0 = u32_at(in m.types, 0);
-    let n0 = t.node(t0);
-    let mut cs = ctors_new();
+    let first_ty = u32_at(in matrix.types, 0);
+    let first_node = types.node(first_ty);
+    let mut ctors = ctors_new();
     let mut known = true;
-    if n0.kind == TyKind::Named && n0.name == ps.s_bool {
-        cs.close(ps.s_true);
-        cs.close(ps.s_false);
-    } else if n0.kind == TyKind::Named {
-        let ai = wd.lookup(n0.name);
-        if ai == NONE32 {
+    if first_node.kind == TyKind::Named && first_node.name == pats.bool_sym {
+        ctors.close(pats.true_sym);
+        ctors.close(pats.false_sym);
+    } else if first_node.kind == TyKind::Named {
+        let adt_index = world.lookup(first_node.name);
+        if adt_index == NONE32 {
             known = false;
         } else {
-            let a = wd.adt(ai);
-            let vars = wd.vars_of(in t, a, t0);
-            for vi in 0..w(a.vn) {
-                let v = wd.variant(add(w(a.va), vi));
-                for fi in 0..w(v.fc) {
-                    let f = wd.field(add(w(v.fa), fi));
-                    cs.fnames.push(f.name);
-                    let ft = substitute(inout t, f.ty, in vars);
-                    cs.ftypes.push(ft);
+            let adt = world.adt(adt_index);
+            let vars = world.vars_of(in types, adt, first_ty);
+            for vi in 0..w(adt.vn) {
+                let variant = world.variant(add(w(adt.va), vi));
+                for fi in 0..w(variant.fc) {
+                    let field = world.field(add(w(variant.fa), fi));
+                    ctors.field_names.push(field.name);
+                    let field_ty = substitute(inout types, field.ty, in vars);
+                    ctors.field_types.push(field_ty);
                 }
-                cs.close(v.name);
+                ctors.close(variant.name);
             }
         }
-    } else if n0.kind == TyKind::Tuple {
-        for i in 0..w(n0.n) {
-            let s = ps.index_name(inout names, i);
-            cs.fnames.push(s);
-            cs.ftypes.push(item(in t, add(w(n0.a), i)));
+    } else if first_node.kind == TyKind::Tuple {
+        for i in 0..w(first_node.n) {
+            let index_sym = pats.index_name(inout names, i);
+            ctors.field_names.push(index_sym);
+            ctors.field_types.push(item(in types, add(w(first_node.a), i)));
         }
-        cs.close(ps.s_tuple);
+        ctors.close(pats.tuple_sym);
     } else {
         known = false;
     }
@@ -320,50 +330,50 @@ pub fn matrix_covered(
         // No constructors: keep the rows whose first column is a wildcard.
         let mut rest_types: ChunkSeq[u32] = ChunkSeq::new[u32]();
         for i in 1..width {
-            rest_types.push(u32_at(in m.types, i));
+            rest_types.push(u32_at(in matrix.types, i));
         }
         let mut rest = matrix_new(in rest_types);
-        for r in 0..m.rows {
-            if ps.wildcard(m.cell(r, 0)) {
+        for row_index in 0..matrix.row_count {
+            if pats.wildcard(matrix.cell(row_index, 0)) {
                 let mut row: ChunkSeq[u32] = ChunkSeq::new[u32]();
-                for c in 1..width {
-                    row.push(m.cell(r, c));
+                for col in 1..width {
+                    row.push(matrix.cell(row_index, col));
                 }
                 rest.push_row(in row);
             }
         }
-        return matrix_covered(inout t, inout names, in wd, inout ps, in rest, inc(depth));
+        return matrix_covered(inout types, inout names, in world, inout pats, in rest, inc(depth));
     }
-    for ci in 0..cs.tags.len() {
-        let tag = u32_at(in cs.tags, ci);
-        let fa = w(u32_at(in cs.fa, ci));
-        let fb = w(u32_at(in cs.fa, inc(ci)));
-        let nf = wrapping_sub(fb, fa);
-        let mut ts: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        for i in fa..fb {
-            ts.push(u32_at(in cs.ftypes, i));
+    for ctor_index in 0..ctors.tags.len() {
+        let tag = u32_at(in ctors.tags, ctor_index);
+        let field_start = w(u32_at(in ctors.field_starts, ctor_index));
+        let field_end = w(u32_at(in ctors.field_starts, inc(ctor_index)));
+        let field_count = wrapping_sub(field_end, field_start);
+        let mut spec_types: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for i in field_start..field_end {
+            spec_types.push(u32_at(in ctors.field_types, i));
         }
         for i in 1..width {
-            ts.push(u32_at(in m.types, i));
+            spec_types.push(u32_at(in matrix.types, i));
         }
-        let mut spec = matrix_new(in ts);
-        for r in 0..m.rows {
-            let p = m.cell(r, 0);
+        let mut spec = matrix_new(in spec_types);
+        for row_index in 0..matrix.row_count {
+            let pat_id = matrix.cell(row_index, 0);
             let mut row: ChunkSeq[u32] = ChunkSeq::new[u32]();
             let mut keep = true;
-            if ps.wildcard(p) {
-                for i in 0..nf {
+            if pats.wildcard(pat_id) {
+                for i in 0..field_count {
                     row.push(0);
                 }
             } else {
-                let x = ps.pat(p);
-                if x.kind == P_CTOR && x.name == tag {
-                    for i in fa..fb {
-                        let fname = u32_at(in cs.fnames, i);
+                let pat = pats.pat(pat_id);
+                if pat.kind == P_CTOR && pat.name == tag {
+                    for i in field_start..field_end {
+                        let fname = u32_at(in ctors.field_names, i);
                         let mut found = NONE32;
-                        for j in 0..w(x.n) {
-                            if ps.kname(add(w(x.a), j)) == fname {
-                                found = ps.kid(add(w(x.a), j));
+                        for j in 0..w(pat.kid_count) {
+                            if pats.kname(add(w(pat.kid_start), j)) == fname {
+                                found = pats.kid(add(w(pat.kid_start), j));
                                 break;
                             }
                         }
@@ -374,25 +384,27 @@ pub fn matrix_covered(
                         }
                         row.push(found);
                     }
-                } else if x.kind == P_TUPLE && tag == ps.s_tuple && w(x.n) == nf {
-                    for j in 0..w(x.n) {
-                        row.push(ps.kid(add(w(x.a), j)));
+                } else if pat.kind == P_TUPLE
+                    && tag == pats.tuple_sym
+                    && w(pat.kid_count) == field_count {
+                    for j in 0..w(pat.kid_count) {
+                        row.push(pats.kid(add(w(pat.kid_start), j)));
                     }
-                } else if (x.kind == P_TRUE && tag == ps.s_true)
-                    || (x.kind == P_FALSE && tag == ps.s_false) {
+                } else if (pat.kind == P_TRUE && tag == pats.true_sym)
+                    || (pat.kind == P_FALSE && tag == pats.false_sym) {
                     keep = true;
                 } else {
                     keep = false;
                 }
             }
             if keep {
-                for c in 1..width {
-                    row.push(m.cell(r, c));
+                for col in 1..width {
+                    row.push(matrix.cell(row_index, col));
                 }
                 spec.push_row(in row);
             }
         }
-        if !matrix_covered(inout t, inout names, in wd, inout ps, in spec, inc(depth)) {
+        if !matrix_covered(inout types, inout names, in world, inout pats, in spec, inc(depth)) {
             return false;
         }
     }
@@ -401,39 +413,39 @@ pub fn matrix_covered(
 
 // `Checker::irrefutable(p, ty)`.
 pub fn irrefutable(
-    inout t: Types,
+    inout types: Types,
     inout names: Names,
-    in wd: World,
-    inout ps: Pats,
-    p: u32,
+    in world: World,
+    inout pats: Pats,
+    pat_id: u32,
     ty: u32
 ) -> bool {
-    let mut ts: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    ts.push(ty);
-    let mut m = matrix_new(in ts);
+    let mut col_types: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    col_types.push(ty);
+    let mut matrix = matrix_new(in col_types);
     let mut row: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    row.push(p);
-    m.push_row(in row);
-    matrix_covered(inout t, inout names, in wd, inout ps, in m, 0)
+    row.push(pat_id);
+    matrix.push_row(in row);
+    matrix_covered(inout types, inout names, in world, inout pats, in matrix, 0)
 }
 
 // Whether the match arms `arms` cover `ty` (`Checker::coverage` raises
 // E0212 when they do not).
 pub fn arms_cover(
-    inout t: Types,
+    inout types: Types,
     inout names: Names,
-    in wd: World,
-    inout ps: Pats,
+    in world: World,
+    inout pats: Pats,
     in arms: ChunkSeq[u32],
     ty: u32
 ) -> bool {
-    let mut ts: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    ts.push(ty);
-    let mut m = matrix_new(in ts);
+    let mut col_types: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    col_types.push(ty);
+    let mut matrix = matrix_new(in col_types);
     for i in 0..arms.len() {
         let mut row: ChunkSeq[u32] = ChunkSeq::new[u32]();
         row.push(u32_at(in arms, i));
-        m.push_row(in row);
+        matrix.push_row(in row);
     }
-    matrix_covered(inout t, inout names, in wd, inout ps, in m, 0)
+    matrix_covered(inout types, inout names, in world, inout pats, in matrix, 0)
 }

@@ -88,143 +88,156 @@ struct Words {
     at: u64,
 }
 
-fn tw_next(inout w: Words) -> u64 eff [Ffi[Cranelift]] {
-    let x = call_arg(w.call, w.at);
-    w.at = wrapping_add(w.at, 1);
-    x
+fn tw_next(inout request: Words) -> u64 eff [Ffi[Cranelift]] {
+    let word = call_arg(request.call, request.at);
+    request.at = wrapping_add(request.at, 1);
+    word
 }
-fn tw_value(inout w: Words) -> Value eff [Ffi[Cranelift]] {
-    value_of_word(tw_next(inout w))
+fn tw_value(inout request: Words) -> Value eff [Ffi[Cranelift]] {
+    value_of_word(tw_next(inout request))
 }
 
 fn tt(code: u32) -> Ty {
     Ty { code: code }
 }
 
-fn t_iconst(inout b: Builder, v: u64) -> Value eff [Ffi[Cranelift]] {
-    ins_iconst(inout b, tt(TyCode::I64), wrapping_i64(v))
+fn t_iconst(inout builder: Builder, value: u64) -> Value eff [Ffi[Cranelift]] {
+    ins_iconst(inout builder, tt(TyCode::I64), wrapping_i64(value))
 }
 
 // `tiled_runtime_call`: declare `name` with one `i64` per argument and an
 // `i64` result (imported in a JIT module, local otherwise), and call it.
 fn t_call(
-    inout b: Builder,
-    inout m: Module,
+    inout builder: Builder,
+    inout module: Module,
     jit: bool,
     in name: Str,
     in args: Slice[u32]
 ) -> Value eff [Ffi[Cranelift]] {
-    let s = sig_new(inout m, call_conv_default());
+    let sig = sig_new(inout module, call_conv_default());
     for _ in 0..args.len() {
-        sig_param(inout m, s, tt(TyCode::I64));
+        sig_param(inout module, sig, tt(TyCode::I64));
     }
-    sig_return(inout m, s, tt(TyCode::I64));
+    sig_return(inout module, sig, tt(TyCode::I64));
     let linkage = if jit {
         linkage_import()
     } else {
         linkage_local()
     };
-    let f = declare_function(inout m, in name.as_bytes(), linkage, s);
-    let r = import_function(inout b, inout m, f);
-    ins_call(inout b, r, in args);
-    inst_result(inout b, 0)
+    let func_id = declare_function(inout module, in name.as_bytes(), linkage, sig);
+    let func_ref = import_function(inout builder, inout module, func_id);
+    ins_call(inout builder, func_ref, in args);
+    inst_result(inout builder, 0)
 }
 
-fn t_vals(a: Value, c: Value, d: Value, e: Value, f: Value, n: u32) -> ChunkSeq[u32] {
-    let mut s = ChunkSeq::with_capacity[u32](5);
-    s.push(a.id);
-    if n > 1 {
-        s.push(c.id);
+fn t_vals(
+    first: Value,
+    second: Value,
+    third: Value,
+    fourth: Value,
+    fifth: Value,
+    count: u32
+) -> ChunkSeq[u32] {
+    let mut values = ChunkSeq::with_capacity[u32](5);
+    values.push(first.id);
+    if count > 1 {
+        values.push(second.id);
     }
-    if n > 2 {
-        s.push(d.id);
+    if count > 2 {
+        values.push(third.id);
     }
-    if n > 3 {
-        s.push(e.id);
+    if count > 3 {
+        values.push(fourth.id);
     }
-    if n > 4 {
-        s.push(f.id);
+    if count > 4 {
+        values.push(fifth.id);
     }
-    s
+    values
 }
 
 // `alloc`: a zeroed stack slot of `max(size, 8)` bytes.
-fn t_alloc(inout b: Builder, inout m: Module, size: u32) -> Value eff [Ffi[Cranelift]] {
+fn t_alloc(inout builder: Builder, inout module: Module, size: u32) -> Value eff [Ffi[Cranelift]] {
     let bytes = if size < 8 { 8 } else { size };
-    let slot = create_stack_slot(inout b, bytes, 3);
-    let ptr = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
+    let slot = create_stack_slot(inout builder, bytes, 3);
+    let ptr = ins_stack_addr(inout builder, module_pointer_type(in module), slot, 0);
     for i in 0..(widen_u64(bytes) >> 3) {
-        let zero = ins_iconst(inout b, tt(TyCode::I64), 0);
-        ins_store(inout b, TF_PLAIN, zero, ptr, wrapping_i32(wrapping_mul(i, T_WORD)));
+        let zero = ins_iconst(inout builder, tt(TyCode::I64), 0);
+        ins_store(inout builder, TF_PLAIN, zero, ptr, wrapping_i32(wrapping_mul(i, T_WORD)));
     }
     ptr
 }
 
 // `value_to_i64_word`.
-fn t_to_word(inout b: Builder, v: Value) -> Value eff [Ffi[Cranelift]] {
-    let ty = value_type(inout b, v).code;
+fn t_to_word(inout builder: Builder, value: Value) -> Value eff [Ffi[Cranelift]] {
+    let ty = value_type(inout builder, value).code;
     if ty == TyCode::F64 {
-        ins_convert(inout b, Cv::Bitcast, tt(TyCode::I64), v)
+        ins_convert(inout builder, Cv::Bitcast, tt(TyCode::I64), value)
     } else if ty == TyCode::F32 {
-        let bits = ins_convert(inout b, Cv::Bitcast, tt(TyCode::I32), v);
-        ins_convert(inout b, Cv::Uextend, tt(TyCode::I64), bits)
+        let bits = ins_convert(inout builder, Cv::Bitcast, tt(TyCode::I32), value);
+        ins_convert(inout builder, Cv::Uextend, tt(TyCode::I64), bits)
     } else if ty != TyCode::I64 && (ty & Lanes::LaneMask) < TyCode::I64 {
-        ins_convert(inout b, Cv::Uextend, tt(TyCode::I64), v)
+        ins_convert(inout builder, Cv::Uextend, tt(TyCode::I64), value)
     } else {
-        v
+        value
     }
 }
 
 // `i64_word_to_type` for a scalar of shim type `ty`.
-fn t_from_word(inout b: Builder, word: Value, ty: u32) -> Value eff [Ffi[Cranelift]] {
+fn t_from_word(inout builder: Builder, word: Value, ty: u32) -> Value eff [Ffi[Cranelift]] {
     if ty == TyCode::F64 {
-        ins_convert(inout b, Cv::Bitcast, tt(TyCode::F64), word)
+        ins_convert(inout builder, Cv::Bitcast, tt(TyCode::F64), word)
     } else if ty == TyCode::F32 {
-        let bits = ins_convert(inout b, Cv::Ireduce, tt(TyCode::I32), word);
-        ins_convert(inout b, Cv::Bitcast, tt(TyCode::F32), bits)
+        let bits = ins_convert(inout builder, Cv::Ireduce, tt(TyCode::I32), word);
+        ins_convert(inout builder, Cv::Bitcast, tt(TyCode::F32), bits)
     } else if ty < TyCode::I64 {
-        ins_convert(inout b, Cv::Ireduce, tt(ty), word)
+        ins_convert(inout builder, Cv::Ireduce, tt(ty), word)
     } else {
         word
     }
 }
 
-// `store_tiled_row`: the row layout follows in `w`.
+// `store_tiled_row`: the row layout follows in `request`.
 fn t_store_row(
-    inout b: Builder,
-    inout m: Module,
+    inout builder: Builder,
+    inout module: Module,
     jit: bool,
-    inout w: Words,
+    inout request: Words,
     seq: Value,
     row: Value,
     record: Value
 ) eff [Ffi[Cranelift]] {
-    let hot = tw_next(inout w);
+    let hot = tw_next(inout request);
     for _ in 0..hot {
-        let offset = wrapping_i32(tw_next(inout w));
-        let tile_offset = tw_next(inout w);
-        let elem_bytes = tw_next(inout w);
-        let word = ins_load(inout b, tt(TyCode::I64), TF_PLAIN, record, offset);
-        let col_off = t_iconst(inout b, tile_offset);
-        let eb = t_iconst(inout b, elem_bytes);
-        let args = t_vals(seq, row, col_off, eb, word, 5);
-        let _r = t_call(inout b, inout m, jit, in "vesper_tiled_hot_store", in args.as_slice());
+        let offset = wrapping_i32(tw_next(inout request));
+        let tile_offset = tw_next(inout request);
+        let elem_bytes = tw_next(inout request);
+        let word = ins_load(inout builder, tt(TyCode::I64), TF_PLAIN, record, offset);
+        let col_off = t_iconst(inout builder, tile_offset);
+        let elem_size = t_iconst(inout builder, elem_bytes);
+        let args = t_vals(seq, row, col_off, elem_size, word, 5);
+        let _r = t_call(
+            inout builder,
+            inout module,
+            jit,
+            in "vesper_tiled_hot_store",
+            in args.as_slice()
+        );
     }
-    let cold = tw_next(inout w);
+    let cold = tw_next(inout request);
     for _ in 0..cold {
-        let aggregate = tw_next(inout w) != 0;
-        let words = tw_next(inout w);
-        let offset = wrapping_i32(tw_next(inout w));
-        let word_offset = tw_next(inout w);
+        let aggregate = tw_next(inout request) != 0;
+        let words = tw_next(inout request);
+        let offset = wrapping_i32(tw_next(inout request));
+        let word_offset = tw_next(inout request);
         let n = if aggregate { words } else { 1 };
         for k in 0..n {
             let off = wrapping_add(offset, wrapping_i32(wrapping_mul(k, T_WORD)));
-            let word = ins_load(inout b, tt(TyCode::I64), TF_PLAIN, record, off);
-            let woff = t_iconst(inout b, wrapping_add(word_offset, k));
-            let args = t_vals(seq, row, woff, word, word, 4);
+            let word = ins_load(inout builder, tt(TyCode::I64), TF_PLAIN, record, off);
+            let word_index = t_iconst(inout builder, wrapping_add(word_offset, k));
+            let args = t_vals(seq, row, word_index, word, word, 4);
             let _r = t_call(
-                inout b,
-                inout m,
+                inout builder,
+                inout module,
                 jit,
                 in "vesper_tiled_cold_store",
                 in args.as_slice()
@@ -235,45 +248,51 @@ fn t_store_row(
 
 // `load_tiled_row` into a fresh zeroed record of `size` bytes.
 fn t_load_row(
-    inout b: Builder,
-    inout m: Module,
+    inout builder: Builder,
+    inout module: Module,
     jit: bool,
-    inout w: Words,
+    inout request: Words,
     seq: Value,
     row: Value,
     size: u32
 ) -> Value eff [Ffi[Cranelift]] {
-    let out = t_alloc(inout b, inout m, size);
-    let hot = tw_next(inout w);
+    let out = t_alloc(inout builder, inout module, size);
+    let hot = tw_next(inout request);
     for _ in 0..hot {
-        let offset = wrapping_i32(tw_next(inout w));
-        let tile_offset = tw_next(inout w);
-        let elem_bytes = tw_next(inout w);
-        let col_off = t_iconst(inout b, tile_offset);
-        let eb = t_iconst(inout b, elem_bytes);
-        let args = t_vals(seq, row, col_off, eb, eb, 4);
-        let word = t_call(inout b, inout m, jit, in "vesper_tiled_hot_load", in args.as_slice());
-        ins_store(inout b, TF_PLAIN, word, out, offset);
+        let offset = wrapping_i32(tw_next(inout request));
+        let tile_offset = tw_next(inout request);
+        let elem_bytes = tw_next(inout request);
+        let col_off = t_iconst(inout builder, tile_offset);
+        let elem_size = t_iconst(inout builder, elem_bytes);
+        let args = t_vals(seq, row, col_off, elem_size, elem_size, 4);
+        let word = t_call(
+            inout builder,
+            inout module,
+            jit,
+            in "vesper_tiled_hot_load",
+            in args.as_slice()
+        );
+        ins_store(inout builder, TF_PLAIN, word, out, offset);
     }
-    let cold = tw_next(inout w);
+    let cold = tw_next(inout request);
     for _ in 0..cold {
-        let aggregate = tw_next(inout w) != 0;
-        let words = tw_next(inout w);
-        let offset = wrapping_i32(tw_next(inout w));
-        let word_offset = tw_next(inout w);
+        let aggregate = tw_next(inout request) != 0;
+        let words = tw_next(inout request);
+        let offset = wrapping_i32(tw_next(inout request));
+        let word_offset = tw_next(inout request);
         let n = if aggregate { words } else { 1 };
         for k in 0..n {
-            let woff = t_iconst(inout b, wrapping_add(word_offset, k));
-            let args = t_vals(seq, row, woff, woff, woff, 3);
+            let word_index = t_iconst(inout builder, wrapping_add(word_offset, k));
+            let args = t_vals(seq, row, word_index, word_index, word_index, 3);
             let word = t_call(
-                inout b,
-                inout m,
+                inout builder,
+                inout module,
                 jit,
                 in "vesper_tiled_cold_load",
                 in args.as_slice()
             );
             let off = wrapping_add(offset, wrapping_i32(wrapping_mul(k, T_WORD)));
-            ins_store(inout b, TF_PLAIN, word, out, off);
+            ins_store(inout builder, TF_PLAIN, word, out, off);
         }
     }
     out
@@ -281,215 +300,267 @@ fn t_load_row(
 
 // `TiledSeq::new`, `with_capacity` and `with_region`.
 fn t_new(
-    inout b: Builder,
-    inout m: Module,
+    inout builder: Builder,
+    inout module: Module,
     jit: bool,
     kind: u64,
-    inout w: Words
+    inout request: Words
 ) -> Value eff [Ffi[Cranelift]] {
-    let width = tw_next(inout w);
-    let stride = tw_next(inout w);
-    let cold = tw_next(inout w);
+    let width = tw_next(inout request);
+    let stride = tw_next(inout request);
+    let cold = tw_next(inout request);
     // `with_region` reads the region variable before the constants.
     let region = if kind == TK_WITH_REGION {
-        let var = Var { id: wrapping_u32(tw_next(inout w)) };
-        use_var(inout b, var)
+        let var = Var { id: wrapping_u32(tw_next(inout request)) };
+        use_var(inout builder, var)
     } else {
         Value { id: 0 }
     };
-    let wv = t_iconst(inout b, width);
-    let sv = t_iconst(inout b, stride);
-    let cv = t_iconst(inout b, cold);
+    let width_value = t_iconst(inout builder, width);
+    let stride_value = t_iconst(inout builder, stride);
+    let cold_value = t_iconst(inout builder, cold);
     let args = if kind == TK_NEW {
-        let zero = ins_iconst(inout b, tt(TyCode::I64), 0);
-        t_vals(wv, sv, cv, zero, zero, 5)
+        let zero = ins_iconst(inout builder, tt(TyCode::I64), 0);
+        t_vals(width_value, stride_value, cold_value, zero, zero, 5)
     } else if kind == TK_WITH_CAPACITY {
-        let zero = ins_iconst(inout b, tt(TyCode::I64), 0);
-        let cap = tw_value(inout w);
-        t_vals(wv, sv, cv, zero, cap, 5)
+        let zero = ins_iconst(inout builder, tt(TyCode::I64), 0);
+        let cap = tw_value(inout request);
+        t_vals(width_value, stride_value, cold_value, zero, cap, 5)
     } else {
-        let cap = tw_value(inout w);
-        t_vals(wv, sv, cv, region, cap, 5)
+        let cap = tw_value(inout request);
+        t_vals(width_value, stride_value, cold_value, region, cap, 5)
     };
-    t_call(inout b, inout m, jit, in "vesper_tiled_new", in args.as_slice())
+    t_call(inout builder, inout module, jit, in "vesper_tiled_new", in args.as_slice())
 }
 
 fn t_col_get(
-    inout b: Builder,
-    inout m: Module,
+    inout builder: Builder,
+    inout module: Module,
     jit: bool,
-    inout w: Words
+    inout request: Words
 ) -> Value eff [Ffi[Cranelift]] {
-    let seq = tw_value(inout w);
-    let row = tw_value(inout w);
-    if tw_next(inout w) == TC_HOT {
-        let col_off = t_iconst(inout b, tw_next(inout w));
-        let eb = t_iconst(inout b, tw_next(inout w));
-        let ty = wrapping_u32(tw_next(inout w));
-        let args = t_vals(seq, row, col_off, eb, eb, 4);
-        let word = t_call(inout b, inout m, jit, in "vesper_tiled_hot_load", in args.as_slice());
-        return t_from_word(inout b, word, ty);
+    let seq = tw_value(inout request);
+    let row = tw_value(inout request);
+    if tw_next(inout request) == TC_HOT {
+        let col_off = t_iconst(inout builder, tw_next(inout request));
+        let elem_size = t_iconst(inout builder, tw_next(inout request));
+        let ty = wrapping_u32(tw_next(inout request));
+        let args = t_vals(seq, row, col_off, elem_size, elem_size, 4);
+        let word = t_call(
+            inout builder,
+            inout module,
+            jit,
+            in "vesper_tiled_hot_load",
+            in args.as_slice()
+        );
+        return t_from_word(inout builder, word, ty);
     }
-    let aggregate = tw_next(inout w) != 0;
-    let size = wrapping_u32(tw_next(inout w));
-    let words = tw_next(inout w);
-    let word_offset = tw_next(inout w);
-    let ty = wrapping_u32(tw_next(inout w));
+    let aggregate = tw_next(inout request) != 0;
+    let size = wrapping_u32(tw_next(inout request));
+    let words = tw_next(inout request);
+    let word_offset = tw_next(inout request);
+    let ty = wrapping_u32(tw_next(inout request));
     if aggregate {
-        let ptr = t_alloc(inout b, inout m, size);
+        let ptr = t_alloc(inout builder, inout module, size);
         for k in 0..words {
-            let woff = t_iconst(inout b, wrapping_add(word_offset, k));
-            let args = t_vals(seq, row, woff, woff, woff, 3);
+            let word_index = t_iconst(inout builder, wrapping_add(word_offset, k));
+            let args = t_vals(seq, row, word_index, word_index, word_index, 3);
             let word = t_call(
-                inout b,
-                inout m,
+                inout builder,
+                inout module,
                 jit,
                 in "vesper_tiled_cold_load",
                 in args.as_slice()
             );
-            ins_store(inout b, TF_PLAIN, word, ptr, wrapping_i32(wrapping_mul(k, T_WORD)));
+            ins_store(inout builder, TF_PLAIN, word, ptr, wrapping_i32(wrapping_mul(k, T_WORD)));
         }
         ptr
     } else {
-        let woff = t_iconst(inout b, word_offset);
-        let args = t_vals(seq, row, woff, woff, woff, 3);
-        let word = t_call(inout b, inout m, jit, in "vesper_tiled_cold_load", in args.as_slice());
-        t_from_word(inout b, word, ty)
+        let word_index = t_iconst(inout builder, word_offset);
+        let args = t_vals(seq, row, word_index, word_index, word_index, 3);
+        let word = t_call(
+            inout builder,
+            inout module,
+            jit,
+            in "vesper_tiled_cold_load",
+            in args.as_slice()
+        );
+        t_from_word(inout builder, word, ty)
     }
 }
 
 fn t_col_set(
-    inout b: Builder,
-    inout m: Module,
+    inout builder: Builder,
+    inout module: Module,
     jit: bool,
-    inout w: Words
+    inout request: Words
 ) -> Value eff [Ffi[Cranelift]] {
-    let seq = tw_value(inout w);
-    let row = tw_value(inout w);
-    let val = tw_value(inout w);
-    if tw_next(inout w) == TC_HOT {
-        let col_off = t_iconst(inout b, tw_next(inout w));
-        let eb = t_iconst(inout b, tw_next(inout w));
-        let word = t_to_word(inout b, val);
-        let args = t_vals(seq, row, col_off, eb, word, 5);
-        let _r = t_call(inout b, inout m, jit, in "vesper_tiled_hot_store", in args.as_slice());
-        return ins_iconst(inout b, tt(TyCode::I64), 0);
+    let seq = tw_value(inout request);
+    let row = tw_value(inout request);
+    let val = tw_value(inout request);
+    if tw_next(inout request) == TC_HOT {
+        let col_off = t_iconst(inout builder, tw_next(inout request));
+        let elem_size = t_iconst(inout builder, tw_next(inout request));
+        let word = t_to_word(inout builder, val);
+        let args = t_vals(seq, row, col_off, elem_size, word, 5);
+        let _r = t_call(
+            inout builder,
+            inout module,
+            jit,
+            in "vesper_tiled_hot_store",
+            in args.as_slice()
+        );
+        return ins_iconst(inout builder, tt(TyCode::I64), 0);
     }
-    let aggregate = tw_next(inout w) != 0;
-    let _size = tw_next(inout w);
-    let words = tw_next(inout w);
-    let word_offset = tw_next(inout w);
+    let aggregate = tw_next(inout request) != 0;
+    let _size = tw_next(inout request);
+    let words = tw_next(inout request);
+    let word_offset = tw_next(inout request);
     if aggregate {
         for k in 0..words {
             let word = ins_load(
-                inout b,
+                inout builder,
                 tt(TyCode::I64),
                 TF_PLAIN,
                 val,
                 wrapping_i32(wrapping_mul(k, T_WORD))
             );
-            let woff = t_iconst(inout b, wrapping_add(word_offset, k));
-            let args = t_vals(seq, row, woff, word, word, 4);
+            let word_index = t_iconst(inout builder, wrapping_add(word_offset, k));
+            let args = t_vals(seq, row, word_index, word, word, 4);
             let _r = t_call(
-                inout b,
-                inout m,
+                inout builder,
+                inout module,
                 jit,
                 in "vesper_tiled_cold_store",
                 in args.as_slice()
             );
         }
     } else {
-        let woff = t_iconst(inout b, word_offset);
-        let word = t_to_word(inout b, val);
-        let args = t_vals(seq, row, woff, word, word, 4);
-        let _r = t_call(inout b, inout m, jit, in "vesper_tiled_cold_store", in args.as_slice());
+        let word_index = t_iconst(inout builder, word_offset);
+        let word = t_to_word(inout builder, val);
+        let args = t_vals(seq, row, word_index, word, word, 4);
+        let _r = t_call(
+            inout builder,
+            inout module,
+            jit,
+            in "vesper_tiled_cold_store",
+            in args.as_slice()
+        );
     }
-    ins_iconst(inout b, tt(TyCode::I64), 0)
+    ins_iconst(inout builder, tt(TyCode::I64), 0)
 }
 
 fn t_load_tile_vec(
-    inout b: Builder,
-    inout m: Module,
+    inout builder: Builder,
+    inout module: Module,
     jit: bool,
-    inout w: Words
+    inout request: Words
 ) -> Value eff [Ffi[Cranelift]] {
-    let seq = tw_value(inout w);
-    let tile = tw_value(inout w);
-    let col_off = t_iconst(inout b, tw_next(inout w));
-    let bytes = wrapping_u32(tw_next(inout w));
-    let chunks = tw_next(inout w);
+    let seq = tw_value(inout request);
+    let tile = tw_value(inout request);
+    let col_off = t_iconst(inout builder, tw_next(inout request));
+    let bytes = wrapping_u32(tw_next(inout request));
+    let chunks = tw_next(inout request);
     let args = t_vals(seq, tile, col_off, col_off, col_off, 3);
-    let col_ptr = t_call(inout b, inout m, jit, in "vesper_tiled_tile_col_ptr", in args.as_slice());
-    let result = t_alloc(inout b, inout m, bytes);
-    let valid = ins_icmp_imm(inout b, IntCc::Ne, col_ptr, 0);
-    let ok_blk = create_block(inout b);
-    let zero_blk = create_block(inout b);
-    let done_blk = create_block(inout b);
-    ins_brif0(inout b, valid, ok_blk, zero_blk);
-    switch_to_block(inout b, ok_blk);
-    for c in 0..chunks {
-        let off = wrapping_i32(wrapping_mul(c, 16));
-        let chunk = ins_load(inout b, tt(chunk_ty(E_U8)), MemFlag::LittleEndian, col_ptr, off);
-        ins_store(inout b, MemFlag::LittleEndian, chunk, result, off);
+    let col_ptr = t_call(
+        inout builder,
+        inout module,
+        jit,
+        in "vesper_tiled_tile_col_ptr",
+        in args.as_slice()
+    );
+    let result = t_alloc(inout builder, inout module, bytes);
+    let valid = ins_icmp_imm(inout builder, IntCc::Ne, col_ptr, 0);
+    let ok_blk = create_block(inout builder);
+    let zero_blk = create_block(inout builder);
+    let done_blk = create_block(inout builder);
+    ins_brif0(inout builder, valid, ok_blk, zero_blk);
+    switch_to_block(inout builder, ok_blk);
+    for chunk_index in 0..chunks {
+        let off = wrapping_i32(wrapping_mul(chunk_index, 16));
+        let chunk = ins_load(
+            inout builder,
+            tt(chunk_ty(E_U8)),
+            MemFlag::LittleEndian,
+            col_ptr,
+            off
+        );
+        ins_store(inout builder, MemFlag::LittleEndian, chunk, result, off);
     }
-    ins_jump0(inout b, done_blk);
-    switch_to_block(inout b, zero_blk);
-    let zero = ins_iconst(inout b, tt(TyCode::I64), 0);
+    ins_jump0(inout builder, done_blk);
+    switch_to_block(inout builder, zero_blk);
+    let zero = ins_iconst(inout builder, tt(TyCode::I64), 0);
     for k in 0..(widen_u64(bytes) >> 3) {
-        ins_store(inout b, TF_PLAIN, zero, result, wrapping_i32(wrapping_mul(k, T_WORD)));
+        ins_store(inout builder, TF_PLAIN, zero, result, wrapping_i32(wrapping_mul(k, T_WORD)));
     }
-    ins_jump0(inout b, done_blk);
-    switch_to_block(inout b, done_blk);
+    ins_jump0(inout builder, done_blk);
+    switch_to_block(inout builder, done_blk);
     result
 }
 
 // One `TILED` request; answers its value.
-pub fn tiled_request(call: u64, inout b: Builder, inout m: Module) -> Value eff [Ffi[Cranelift]] {
+pub fn tiled_request(
+    call: u64,
+    inout builder: Builder,
+    inout module: Module
+) -> Value eff [Ffi[Cranelift]] {
     let kind = call_arg(call, TW_KIND);
     let jit = call_arg(call, TW_JIT) != 0;
-    let mut w = Words { call: call, at: TW_FIRST };
+    let mut request = Words { call: call, at: TW_FIRST };
     if kind == TK_NEW || kind == TK_WITH_CAPACITY || kind == TK_WITH_REGION {
-        return t_new(inout b, inout m, jit, kind, inout w);
+        return t_new(inout builder, inout module, jit, kind, inout request);
     }
     if kind == TK_LEN || kind == TK_TILE_COUNT {
-        let seq = tw_value(inout w);
+        let seq = tw_value(inout request);
         let args = t_vals(seq, seq, seq, seq, seq, 1);
         return if kind == TK_LEN {
-            t_call(inout b, inout m, jit, in "vesper_tiled_len", in args.as_slice())
+            t_call(inout builder, inout module, jit, in "vesper_tiled_len", in args.as_slice())
         } else {
-            t_call(inout b, inout m, jit, in "vesper_tiled_tile_count", in args.as_slice())
+            t_call(
+                inout builder,
+                inout module,
+                jit,
+                in "vesper_tiled_tile_count",
+                in args.as_slice()
+            )
         };
     }
     if kind == TK_PUSH {
-        let seq = tw_value(inout w);
-        let record = tw_value(inout w);
-        let _size = tw_next(inout w);
+        let seq = tw_value(inout request);
+        let record = tw_value(inout request);
+        let _size = tw_next(inout request);
         let args = t_vals(seq, seq, seq, seq, seq, 1);
-        let row = t_call(inout b, inout m, jit, in "vesper_tiled_push_begin", in args.as_slice());
-        t_store_row(inout b, inout m, jit, inout w, seq, row, record);
-        return ins_iconst(inout b, tt(TyCode::I64), 0);
+        let row = t_call(
+            inout builder,
+            inout module,
+            jit,
+            in "vesper_tiled_push_begin",
+            in args.as_slice()
+        );
+        t_store_row(inout builder, inout module, jit, inout request, seq, row, record);
+        return ins_iconst(inout builder, tt(TyCode::I64), 0);
     }
     if kind == TK_GET {
-        let seq = tw_value(inout w);
-        let row = tw_value(inout w);
-        let size = wrapping_u32(tw_next(inout w));
-        return t_load_row(inout b, inout m, jit, inout w, seq, row, size);
+        let seq = tw_value(inout request);
+        let row = tw_value(inout request);
+        let size = wrapping_u32(tw_next(inout request));
+        return t_load_row(inout builder, inout module, jit, inout request, seq, row, size);
     }
     if kind == TK_SET {
-        let seq = tw_value(inout w);
-        let row = tw_value(inout w);
-        let record = tw_value(inout w);
-        let _size = tw_next(inout w);
-        t_store_row(inout b, inout m, jit, inout w, seq, row, record);
-        return ins_iconst(inout b, tt(TyCode::I64), 0);
+        let seq = tw_value(inout request);
+        let row = tw_value(inout request);
+        let record = tw_value(inout request);
+        let _size = tw_next(inout request);
+        t_store_row(inout builder, inout module, jit, inout request, seq, row, record);
+        return ins_iconst(inout builder, tt(TyCode::I64), 0);
     }
     if kind == TK_COL_GET {
-        return t_col_get(inout b, inout m, jit, inout w);
+        return t_col_get(inout builder, inout module, jit, inout request);
     }
     if kind == TK_COL_SET {
-        return t_col_set(inout b, inout m, jit, inout w);
+        return t_col_set(inout builder, inout module, jit, inout request);
     }
-    t_load_tile_vec(inout b, inout m, jit, inout w)
+    t_load_tile_vec(inout builder, inout module, jit, inout request)
 }
 
 pub fn tiled_known(call: u64) -> bool eff [Ffi[Cranelift]] {

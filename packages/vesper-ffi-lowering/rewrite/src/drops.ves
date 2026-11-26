@@ -16,136 +16,136 @@ fn max2(a: u32, b: u32) -> u32 {
     if a > b { a } else { b }
 }
 
-// `drops::span_base`: one past the largest span `end` in `a`.
-pub fn span_base(in a: Ast) -> u32 {
-    let mut m: u32 = 0;
-    for i in 0..a.exprs.len() {
-        m = max2(m, expr_at(in a, wrapping_u32(i)).end);
+// `drops::span_base`: one past the largest span `end` in `ast`.
+pub fn span_base(in ast: Ast) -> u32 {
+    let mut max_end: u32 = 0;
+    for i in 0..ast.exprs.len() {
+        max_end = max2(max_end, expr_at(in ast, wrapping_u32(i)).end);
     }
-    for i in 0..a.pats.len() {
-        m = max2(m, pat_at(in a, wrapping_u32(i)).end);
+    for i in 0..ast.pats.len() {
+        max_end = max2(max_end, pat_at(in ast, wrapping_u32(i)).end);
     }
-    for i in 0..a.params.len() {
-        match a.params.items.try_get(i) {
-            Option::Some(n) => {
-                m = max2(m, n.end);
+    for i in 0..ast.params.len() {
+        match ast.params.items.try_get(i) {
+            Option::Some(node) => {
+                max_end = max2(max_end, node.end);
             },
             Option::None => {},
         }
     }
-    for i in 0..a.adts.len() {
-        match a.adts.items.try_get(i) {
-            Option::Some(n) => {
-                m = max2(m, n.end);
+    for i in 0..ast.adts.len() {
+        match ast.adts.items.try_get(i) {
+            Option::Some(node) => {
+                max_end = max2(max_end, node.end);
             },
             Option::None => {},
         }
     }
-    for i in 0..a.fns.len() {
-        match a.fns.items.try_get(i) {
-            Option::Some(n) => {
-                m = max2(m, n.end);
+    for i in 0..ast.fns.len() {
+        match ast.fns.items.try_get(i) {
+            Option::Some(node) => {
+                max_end = max2(max_end, node.end);
             },
             Option::None => {},
         }
     }
-    for i in 0..a.effect_decls.len() {
-        match a.effect_decls.items.try_get(i) {
-            Option::Some(n) => {
-                m = max2(m, n.end);
+    for i in 0..ast.effect_decls.len() {
+        match ast.effect_decls.items.try_get(i) {
+            Option::Some(node) => {
+                max_end = max2(max_end, node.end);
             },
             Option::None => {},
         }
     }
-    for i in 0..a.traits.len() {
-        match a.traits.items.try_get(i) {
-            Option::Some(n) => {
-                m = max2(m, n.end);
+    for i in 0..ast.traits.len() {
+        match ast.traits.items.try_get(i) {
+            Option::Some(node) => {
+                max_end = max2(max_end, node.end);
             },
             Option::None => {},
         }
     }
-    for i in 0..a.assoc_decls.len() {
-        match a.assoc_decls.items.try_get(i) {
-            Option::Some(n) => {
-                m = max2(m, n.end);
+    for i in 0..ast.assoc_decls.len() {
+        match ast.assoc_decls.items.try_get(i) {
+            Option::Some(node) => {
+                max_end = max2(max_end, node.end);
             },
             Option::None => {},
         }
     }
-    for i in 0..a.trait_refs.len() {
-        match a.trait_refs.items.try_get(i) {
-            Option::Some(n) => {
-                m = max2(m, n.end);
+    for i in 0..ast.trait_refs.len() {
+        match ast.trait_refs.items.try_get(i) {
+            Option::Some(node) => {
+                max_end = max2(max_end, node.end);
             },
             Option::None => {},
         }
     }
-    for i in 0..a.wheres.len() {
-        match a.wheres.items.try_get(i) {
-            Option::Some(n) => {
-                m = max2(m, n.end);
+    for i in 0..ast.wheres.len() {
+        match ast.wheres.items.try_get(i) {
+            Option::Some(node) => {
+                max_end = max2(max_end, node.end);
             },
             Option::None => {},
         }
     }
-    for i in 0..a.assoc_binds.len() {
-        match a.assoc_binds.items.try_get(i) {
-            Option::Some(n) => {
-                m = max2(m, n.end);
+    for i in 0..ast.assoc_binds.len() {
+        match ast.assoc_binds.items.try_get(i) {
+            Option::Some(node) => {
+                max_end = max2(max_end, node.end);
             },
             Option::None => {},
         }
     }
-    for i in 0..a.confs.len() {
-        match a.confs.items.try_get(i) {
-            Option::Some(n) => {
-                m = max2(m, n.end);
+    for i in 0..ast.confs.len() {
+        match ast.confs.items.try_get(i) {
+            Option::Some(node) => {
+                max_end = max2(max_end, node.end);
             },
             Option::None => {},
         }
     }
-    for i in 0..a.model_uses.len() {
-        match a.model_uses.items.try_get(i) {
-            Option::Some(n) => {
-                m = max2(m, n.end);
+    for i in 0..ast.model_uses.len() {
+        match ast.model_uses.items.try_get(i) {
+            Option::Some(node) => {
+                max_end = max2(max_end, node.end);
             },
             Option::None => {},
         }
     }
-    for i in 0..a.bounds.len() {
-        match a.bounds.items.try_get(i) {
-            Option::Some(n) => {
-                m = max2(m, n.end);
+    for i in 0..ast.bounds.len() {
+        match ast.bounds.items.try_get(i) {
+            Option::Some(node) => {
+                max_end = max2(max_end, node.end);
             },
             Option::None => {},
         }
     }
-    for i in 0..a.uses.len() {
-        match a.uses.items.try_get(i) {
-            Option::Some(n) => {
-                m = max2(m, n.end);
+    for i in 0..ast.uses.len() {
+        match ast.uses.items.try_get(i) {
+            Option::Some(node) => {
+                max_end = max2(max_end, node.end);
             },
             Option::None => {},
         }
     }
-    for i in 0..a.use_names.len() {
-        match a.use_names.items.try_get(i) {
-            Option::Some(n) => {
-                m = max2(m, n.end);
+    for i in 0..ast.use_names.len() {
+        match ast.use_names.items.try_get(i) {
+            Option::Some(node) => {
+                max_end = max2(max_end, node.end);
             },
             Option::None => {},
         }
     }
-    wrapping_add(m, 1)
+    wrapping_add(max_end, 1)
 }
 
-fn push_ffi_sym(inout out: String, in s: S, sym: u32) {
-    let a = s.start(sym);
-    let e = s.end(sym);
-    for i in a..e {
-        let b = s.text.try_get(i).unwrap_or(0);
-        let _ = out.push_char(widen_u32(b));
+fn push_ffi_sym(inout out: String, in state: S, sym: u32) {
+    let lo = state.start(sym);
+    let hi = state.end(sym);
+    for i in lo..hi {
+        let byte = state.text.try_get(i).unwrap_or(0);
+        let _ = out.push_char(widen_u32(byte));
     }
 }
 
@@ -153,11 +153,11 @@ fn copy_sym(inout dst: Ast, in src: Ast, sym: u32) -> u32 {
     if sym == none() {
         return none();
     }
-    let (a, e) = src.names.span(symbol_from_id(sym));
+    let (lo, hi) = src.names.span(symbol_from_id(sym));
     let mut text = String::new();
-    for i in a..e {
-        let b = src.names.text_byte(i).unwrap_or(0);
-        let _ = text.push_char(widen_u32(b));
+    for i in lo..hi {
+        let byte = src.names.text_byte(i).unwrap_or(0);
+        let _ = text.push_char(widen_u32(byte));
     }
     dst.names.intern(in text.as_str()).id
 }
@@ -168,8 +168,8 @@ fn alloc_list(inout dst: Ast, in items: ChunkSeq[u32]) -> u32 {
     }
     let first = wrapping_u32(dst.pool.len());
     for i in 0..items.len() {
-        let v = items.try_get(i).unwrap_or(0);
-        dst.pool.push(v);
+        let item = items.try_get(i).unwrap_or(0);
+        dst.pool.push(item);
     }
     dst.lists.alloc(ListRef { first: first, len: wrapping_u32(items.len()) }).raw
 }
@@ -178,183 +178,192 @@ fn copy_type(inout dst: Ast, in src: Ast, id: u32) -> u32 {
     if id == none() {
         return none();
     }
-    let t = type_at(in src, id);
-    if t.kind == 1 {
-        let n = list_len(in src, t.b);
+    let node = type_at(in src, id);
+    if node.kind == 1 {
+        let n = list_len(in src, node.b);
         let mut args = ChunkSeq::new[u32]();
         for i in 0..n {
-            args.push(copy_type(inout dst, in src, list_at(in src, t.b, i)));
+            args.push(copy_type(inout dst, in src, list_at(in src, node.b, i)));
         }
-        let a = copy_sym(inout dst, in src, t.a);
+        let a = copy_sym(inout dst, in src, node.a);
         let b = alloc_list(inout dst, in args);
         return dst.types.alloc(TypeNode { kind: 1, a: a, b: b, c: 0, d: 0 }).raw;
     }
-    if t.kind == 2 {
-        let n = list_len(in src, t.a);
+    if node.kind == 2 {
+        let n = list_len(in src, node.a);
         let mut args = ChunkSeq::new[u32]();
         for i in 0..n {
-            args.push(copy_type(inout dst, in src, list_at(in src, t.a, i)));
+            args.push(copy_type(inout dst, in src, list_at(in src, node.a, i)));
         }
         let a = alloc_list(inout dst, in args);
         return dst.types.alloc(TypeNode { kind: 2, a: a, b: 0, c: 0, d: 0 }).raw;
     }
-    dst.types.alloc(t).raw
+    dst.types.alloc(node).raw
 }
 
 fn copy_effect(inout dst: Ast, in src: Ast, id: u32) -> u32 {
-    let e = src.effect_nodes
+    let effect = src.effect_nodes
         .get_or(idx_from_raw[EffectNode](id), EffectNode { label: NONE, name: NONE, args: 0 });
-    let n = list_len(in src, e.args);
+    let n = list_len(in src, effect.args);
     let mut args = ChunkSeq::new[u32]();
     for i in 0..n {
-        args.push(copy_type(inout dst, in src, list_at(in src, e.args, i)));
+        args.push(copy_type(inout dst, in src, list_at(in src, effect.args, i)));
     }
-    let label = copy_sym(inout dst, in src, e.label);
-    let name = copy_sym(inout dst, in src, e.name);
+    let label = copy_sym(inout dst, in src, effect.label);
+    let name = copy_sym(inout dst, in src, effect.name);
     let arg_list = alloc_list(inout dst, in args);
     dst.effect_nodes.alloc(EffectNode { label: label, name: name, args: arg_list }).raw
 }
 
 fn copy_effects(inout dst: Ast, in src: Ast, id: u32) -> u32 {
-    let e = src.effects
+    let row = src.effects
         .get_or(idx_from_raw[EffectsNode](id), EffectsNode { instances: 0, tail: NONE });
-    let n = list_len(in src, e.instances);
+    let n = list_len(in src, row.instances);
     let mut insts = ChunkSeq::new[u32]();
     for i in 0..n {
-        insts.push(copy_effect(inout dst, in src, list_at(in src, e.instances, i)));
+        insts.push(copy_effect(inout dst, in src, list_at(in src, row.instances, i)));
     }
     let instances = alloc_list(inout dst, in insts);
-    let tail = copy_sym(inout dst, in src, e.tail);
+    let tail = copy_sym(inout dst, in src, row.tail);
     dst.effects.alloc(EffectsNode { instances: instances, tail: tail }).raw
 }
 
 fn copy_param(inout dst: Ast, in src: Ast, id: u32, base: u32) -> u32 {
-    let p = src.params.get_or(
+    let param = src.params.get_or(
         idx_from_raw[ParamNode](id),
         ParamNode { name: NONE, pass: 0, projections: 0, ty: NONE, start: 0, end: 0 }
     );
-    let name = copy_sym(inout dst, in src, p.name);
-    let ty = copy_type(inout dst, in src, p.ty);
+    let name = copy_sym(inout dst, in src, param.name);
+    let ty = copy_type(inout dst, in src, param.ty);
     dst.params
         .alloc(ParamNode {
             name: name,
-            pass: p.pass,
+            pass: param.pass,
             projections: 0,
             ty: ty,
-            start: wrapping_add(p.start, base),
-            end: wrapping_add(p.end, base)
+            start: wrapping_add(param.start, base),
+            end: wrapping_add(param.end, base)
         })
         .raw
 }
 
 fn copy_pat(inout dst: Ast, in src: Ast, id: u32, base: u32) -> u32 {
-    let p = pat_at(in src, id);
-    let mut a = p.a;
-    let mut b = p.b;
-    if p.kind == 2 {
-        a = copy_sym(inout dst, in src, p.a);
-    } else if p.kind == 4 {
-        let n = list_len(in src, p.a);
+    let pat = pat_at(in src, id);
+    let mut a = pat.a;
+    let mut b = pat.b;
+    if pat.kind == 2 {
+        a = copy_sym(inout dst, in src, pat.a);
+    } else if pat.kind == 4 {
+        let n = list_len(in src, pat.a);
         let mut sub = ChunkSeq::new[u32]();
         for i in 0..n {
-            sub.push(copy_pat(inout dst, in src, list_at(in src, p.a, i), base));
+            sub.push(copy_pat(inout dst, in src, list_at(in src, pat.a, i), base));
         }
         a = alloc_list(inout dst, in sub);
-    } else if p.kind == 5 {
-        a = copy_sym(inout dst, in src, p.a);
-        let n = list_len(in src, p.b) >> 1;
+    } else if pat.kind == 5 {
+        a = copy_sym(inout dst, in src, pat.a);
+        let n = list_len(in src, pat.b) >> 1;
         let mut fields = ChunkSeq::new[u32]();
         for i in 0..n {
             let k = wrapping_mul(i, 2);
-            fields.push(copy_sym(inout dst, in src, list_at(in src, p.b, k)));
-            fields
-                .push(copy_pat(inout dst, in src, list_at(in src, p.b, wrapping_add(k, 1)), base));
+            fields.push(copy_sym(inout dst, in src, list_at(in src, pat.b, k)));
+            fields.push(copy_pat(
+                inout dst,
+                in src,
+                list_at(in src, pat.b, wrapping_add(k, 1)),
+                base
+            ));
         }
         b = alloc_list(inout dst, in fields);
     }
     dst.pats
         .alloc(PatNode {
-            kind: p.kind,
-            start: wrapping_add(p.start, base),
-            end: wrapping_add(p.end, base),
+            kind: pat.kind,
+            start: wrapping_add(pat.start, base),
+            end: wrapping_add(pat.end, base),
             a: a,
             b: b,
-            c: p.c
+            c: pat.c
         })
         .raw
 }
 
 fn copy_arg(inout dst: Ast, in src: Ast, id: u32, base: u32) -> u32 {
-    let a = src.args
+    let arg = src.args
         .get_or(idx_from_raw[ArgNode](id), ArgNode { pass: 0, explicit: false, expr: NONE });
-    let expr = copy_expr(inout dst, in src, a.expr, base);
-    dst.args.alloc(ArgNode { pass: a.pass, explicit: a.explicit, expr: expr }).raw
+    let expr = copy_expr(inout dst, in src, arg.expr, base);
+    dst.args.alloc(ArgNode { pass: arg.pass, explicit: arg.explicit, expr: expr }).raw
 }
 
 fn copy_expr(inout dst: Ast, in src: Ast, id: u32, base: u32) -> u32 {
     if id == none() {
         return none();
     }
-    let e = expr_at(in src, id);
-    let mut a = e.a;
-    let mut b = e.b;
-    let mut c = e.c;
-    if e.kind == 2 {
-        a = copy_sym(inout dst, in src, e.a);
-    } else if e.kind == 3 {
-        let n = list_len(in src, e.a);
+    let node = expr_at(in src, id);
+    let mut a = node.a;
+    let mut b = node.b;
+    let mut c = node.c;
+    if node.kind == 2 {
+        a = copy_sym(inout dst, in src, node.a);
+    } else if node.kind == 3 {
+        let n = list_len(in src, node.a);
         let mut sub = ChunkSeq::new[u32]();
         for i in 0..n {
-            sub.push(copy_expr(inout dst, in src, list_at(in src, e.a, i), base));
+            sub.push(copy_expr(inout dst, in src, list_at(in src, node.a, i), base));
         }
         a = alloc_list(inout dst, in sub);
-    } else if e.kind == 5 {
+    } else if node.kind == 5 {
         a = 0;
-        b = copy_expr(inout dst, in src, e.b, base);
-    } else if e.kind == 6 {
-        a = copy_expr(inout dst, in src, e.a, base);
-        let nt = list_len(in src, e.b);
+        b = copy_expr(inout dst, in src, node.b, base);
+    } else if node.kind == 6 {
+        a = copy_expr(inout dst, in src, node.a, base);
+        let ty_count = list_len(in src, node.b);
         let mut tys = ChunkSeq::new[u32]();
-        for i in 0..nt {
-            tys.push(copy_type(inout dst, in src, list_at(in src, e.b, i)));
+        for i in 0..ty_count {
+            tys.push(copy_type(inout dst, in src, list_at(in src, node.b, i)));
         }
         b = alloc_list(inout dst, in tys);
-        let na = list_len(in src, e.c);
+        let arg_count = list_len(in src, node.c);
         let mut args = ChunkSeq::new[u32]();
-        for i in 0..na {
-            args.push(copy_arg(inout dst, in src, list_at(in src, e.c, i), base));
+        for i in 0..arg_count {
+            args.push(copy_arg(inout dst, in src, list_at(in src, node.c, i), base));
         }
         c = alloc_list(inout dst, in args);
-    } else if e.kind == 7 {
-        a = copy_expr(inout dst, in src, e.a, base);
-        b = copy_sym(inout dst, in src, e.b);
-    } else if e.kind == 14 {
-        a = copy_expr(inout dst, in src, e.a, base);
-        let n = list_len(in src, e.b) >> 1;
+    } else if node.kind == 7 {
+        a = copy_expr(inout dst, in src, node.a, base);
+        b = copy_sym(inout dst, in src, node.b);
+    } else if node.kind == 14 {
+        a = copy_expr(inout dst, in src, node.a, base);
+        let n = list_len(in src, node.b) >> 1;
         let mut arms = ChunkSeq::new[u32]();
         for i in 0..n {
             let k = wrapping_mul(i, 2);
-            arms.push(copy_pat(inout dst, in src, list_at(in src, e.b, k), base));
-            arms.push(copy_expr(inout dst, in src, list_at(in src, e.b, wrapping_add(k, 1)), base));
+            arms.push(copy_pat(inout dst, in src, list_at(in src, node.b, k), base));
+            arms.push(copy_expr(
+                inout dst,
+                in src,
+                list_at(in src, node.b, wrapping_add(k, 1)),
+                base
+            ));
         }
         b = alloc_list(inout dst, in arms);
     }
     dst.exprs
         .alloc(ExprNode {
-            kind: e.kind,
-            start: wrapping_add(e.start, base),
-            end: wrapping_add(e.end, base),
+            kind: node.kind,
+            start: wrapping_add(node.start, base),
+            end: wrapping_add(node.end, base),
             a: a,
             b: b,
             c: c,
-            d: e.d,
-            e: e.e
+            d: node.d,
+            e: node.e
         })
         .raw
 }
 
 fn copy_fn(inout dst: Ast, in src: Ast, id: u32, base: u32, new_name: u32) -> u32 {
-    let f = src.fns.get_or(
+    let func = src.fns.get_or(
         idx_from_raw[FnNode](id),
         FnNode {
             name: NONE,
@@ -368,81 +377,81 @@ fn copy_fn(inout dst: Ast, in src: Ast, id: u32, base: u32, new_name: u32) -> u3
             end: 0
         }
     );
-    let np = list_len(in src, f.params);
+    let param_count = list_len(in src, func.params);
     let mut params = ChunkSeq::new[u32]();
-    for i in 0..np {
-        params.push(copy_param(inout dst, in src, list_at(in src, f.params, i), base));
+    for i in 0..param_count {
+        params.push(copy_param(inout dst, in src, list_at(in src, func.params, i), base));
     }
     let param_list = alloc_list(inout dst, in params);
-    let result = copy_type(inout dst, in src, f.result);
-    let effects = copy_effects(inout dst, in src, f.effects);
-    let body = copy_expr(inout dst, in src, f.body, base);
+    let result = copy_type(inout dst, in src, func.result);
+    let effects = copy_effects(inout dst, in src, func.effects);
+    let body = copy_expr(inout dst, in src, func.body, base);
     dst.fns
         .alloc(FnNode {
             name: new_name,
-            fip: f.fip,
+            fip: func.fip,
             generics: 0,
             params: param_list,
             result: result,
             effects: effects,
             body: body,
-            start: wrapping_add(f.start, base),
-            end: wrapping_add(f.end, base)
+            start: wrapping_add(func.start, base),
+            end: wrapping_add(func.end, base)
         })
         .raw
 }
 
 // `drops::generated` over all imported libraries into `dst`.
-pub fn append_drops(inout dst: Ast, in s: S) {
+pub fn append_drops(inout dst: Ast, in state: S) {
     let mut base = span_base(in dst);
-    for li in 0..s.libs.len() {
-        let lib = s.lib(li);
-        for xi in lib.x0..wrapping_add(lib.x0, lib.xn) {
-            let x = s.xt(xi);
-            if x.drop == NONE {
+    for li in 0.. state.libs.len() {
+        let lib = state.lib(li);
+        for xi in lib.extern_start..wrapping_add(lib.extern_start, lib.extern_count) {
+            let ext_type = state.xt(xi);
+            if ext_type.drop == NONE {
                 continue;
             }
             let mut text = String::new();
             text.push_str(in "fn drop_handle(sink h: ");
-            push_ffi_sym(inout text, in s, x.name);
+            push_ffi_sym(inout text, in state, ext_type.name);
             text.push_str(in ") eff [Ffi[");
-            push_ffi_sym(inout text, in s, lib.name);
+            push_ffi_sym(inout text, in state, lib.name);
             text.push_str(in "]] { ");
-            push_ffi_sym(inout text, in s, lib.name);
+            push_ffi_sym(inout text, in state, lib.name);
             text.push_str(in "::");
-            push_ffi_sym(inout text, in s, x.drop);
+            push_ffi_sym(inout text, in state, ext_type.drop);
             text.push_str(in "(h) }\nfn drop_option(sink o: Option[");
-            push_ffi_sym(inout text, in s, x.name);
+            push_ffi_sym(inout text, in state, ext_type.name);
             text.push_str(in "]) eff [Ffi[");
-            push_ffi_sym(inout text, in s, lib.name);
+            push_ffi_sym(inout text, in state, lib.name);
             text.push_str(in "]] {\nmatch o { Some(h) => ");
-            push_ffi_sym(inout text, in s, lib.name);
+            push_ffi_sym(inout text, in state, lib.name);
             text.push_str(in "::");
-            push_ffi_sym(inout text, in s, x.drop);
+            push_ffi_sym(inout text, in state, ext_type.drop);
             text.push_str(in "(h), None => () }\n}\n");
             let parsed = lower_source(in text.as_str());
-            let mut n1 = String::new();
-            n1.push_str(in "$drop$");
-            push_ffi_sym(inout n1, in s, x.name);
-            let mut n2 = String::new();
-            n2.push_str(in "$drop$Option$");
-            push_ffi_sym(inout n2, in s, x.name);
-            let s1 = dst.names.intern(in n1.as_str()).id;
-            let s2 = dst.names.intern(in n2.as_str()).id;
+            let mut drop_name = String::new();
+            drop_name.push_str(in "$drop$");
+            push_ffi_sym(inout drop_name, in state, ext_type.name);
+            let mut option_drop_name = String::new();
+            option_drop_name.push_str(in "$drop$Option$");
+            push_ffi_sym(inout option_drop_name, in state, ext_type.name);
+            let drop_sym = dst.names.intern(in drop_name.as_str()).id;
+            let option_drop_sym = dst.names.intern(in option_drop_name.as_str()).id;
             for ii in 0..parsed.ast.m_items.len() {
                 let item_id = match parsed.ast.m_items.try_get(ii) {
                     Option::Some(v) => v,
                     Option::None => continue,
                 };
-                let it = parsed
+                let item = parsed
                     .ast
                     .items
                     .get_or(idx_from_raw[ItemNode](item_id), ItemNode { kind: 0, node: 0 });
-                if it.kind != 2 {
+                if item.kind != 2 {
                     continue;
                 }
-                let name = if ii == 0 { s1 } else { s2 };
-                let fn_id = copy_fn(inout dst, in parsed.ast, it.node, base, name);
+                let name = if ii == 0 { drop_sym } else { option_drop_sym };
+                let fn_id = copy_fn(inout dst, in parsed.ast, item.node, base, name);
                 let new_item = dst.items.alloc(ItemNode { kind: 2, node: fn_id }).raw;
                 dst.m_items.push(new_item);
             }

@@ -78,9 +78,9 @@ const P_SLICE: u8 = 1;
 const P_POINTER: u8 = 2;
 const P_HANDLE: u8 = 3;
 const P_CSTR: u8 = 4;
-// A Vesper function handed to C as callback type `pname`.
+// A Vesper function handed to C as callback type `type_name`.
 const P_FUNCTION: u8 = 5;
-// A `Pinned[T]` buffer of scalar `psc`.
+// A `Pinned[T]` buffer of scalar `elem_scalar`.
 const P_PINNED: u8 = 6;
 // `nocapture in argv: CStrList`: NUL-ended strings in one `Slice[u8]`.
 const P_CSTR_LIST: u8 = 7;
@@ -114,7 +114,7 @@ const E_BIG: u8 = 2;
 const TK_NAMED: u8 = 0;
 const TK_TUPLE: u8 = 1;
 // A function type: args are the parameters then the result; `name` is the
-// index of the parameters' passes in `fpass`.
+// index of the parameters' passes in `fn_passes`.
 const TK_FN: u8 = 2;
 
 // `FfiErrorKind`s this port raises.
@@ -171,16 +171,16 @@ pub copy struct Lib {
     name: u32,
     handler: u64,
     triple: u32,
-    e0: u64,
-    en: u64,
-    f0: u64,
-    fc: u64,
-    w0: u64,
-    wn: u64,
-    x0: u64,
-    xn: u64,
-    c0: u64,
-    cn: u64,
+    enum_start: u64,
+    enum_count: u64,
+    fun_start: u64,
+    fun_count: u64,
+    wire_start: u64,
+    wire_count: u64,
+    extern_start: u64,
+    extern_count: u64,
+    const_start: u64,
+    const_count: u64,
 }
 
 pub copy struct ConstRow {
@@ -193,54 +193,54 @@ pub copy struct ConstRow {
 pub copy struct EnumRow {
     name: u32,
     scalar: u8,
-    // variant names: vars[v0..v0+vn]
-    v0: u64,
-    vn: u64,
+    // a range of `variant_names`
+    variant_start: u64,
+    variant_count: u64,
 }
 
-// A `ValueType`: `sc` is a scalar code, `name` an enum or handle name.
+// A `ValueType`: `scalar` is a scalar code, `name` an enum or handle name.
 pub copy struct Vt {
     tag: u8,
-    sc: u8,
+    scalar: u8,
     name: u32,
     nullable: bool,
 }
 
 pub copy struct Fun {
     sym: u32,
-    // params[p0..p0+pn]
-    p0: u64,
-    pn: u64,
+    // a range of `params`
+    param_start: u64,
+    param_count: u64,
     result: Vt,
     errno: bool,
     has_variadic: bool,
     variadic_first: u64,
     // the library row
     lib: u64,
-    // the call of a callback type: params[p0] is the pointer itself
+    // the call of a callback type: params[param_start] is the pointer itself
     indirect: bool,
 }
 
-// A `ParameterType`. Pointees and slice elements are a scalar (`psc`) or
-// a wire struct (`pname`); a handle names its type in `pname`.
+// A `ParameterType`. Pointees and slice elements are a scalar (`elem_scalar`) or
+// a wire struct (`type_name`); a handle names its type in `type_name`.
 pub copy struct Par {
     name: u32,
     tag: u8,
-    vt: Vt,
+    value_ty: Vt,
     access: u8,
     nullable: bool,
-    pstruct: bool,
-    psc: u8,
-    pname: u32,
+    elem_is_struct: bool,
+    elem_scalar: u8,
+    type_name: u32,
 }
 
 pub copy struct Ws {
     name: u32,
     size: u64,
     align: u64,
-    // fields[f0..f0+fc]
-    f0: u64,
-    fc: u64,
+    // a range of `wire_fields`
+    field_start: u64,
+    field_count: u64,
 }
 
 pub copy struct Wf {
@@ -251,7 +251,7 @@ pub copy struct Wf {
     endian: u8,
     // bytes of a byte array or pad, size of a nested struct
     size: u64,
-    sname: u32,
+    struct_name: u32,
     offset: u64,
 }
 
@@ -273,13 +273,13 @@ pub copy struct Tn {
     n: u64,
 }
 
-// A generated struct: Ok with fields gf[f0..f0+fc], or Err with `err`.
+// A generated struct: Ok with a range of `gen_fields`, or Err with `err`.
 pub copy struct Gs {
     name: u32,
     ok: bool,
     err: u32,
-    f0: u64,
-    fc: u64,
+    field_start: u64,
+    field_count: u64,
 }
 
 pub copy struct Gf {
@@ -299,12 +299,12 @@ pub copy struct Gh {
     mapping: u32,
 }
 
-// A function's shape: Ok with params sp[p0..p0+pn] and `result`, or Err.
+// A function's shape: Ok with a range of `shape_params` and `result`, or Err.
 pub copy struct Sh {
     ok: bool,
     err: u32,
-    p0: u64,
-    pn: u64,
+    param_start: u64,
+    param_count: u64,
     result: u32,
 }
 
@@ -332,23 +332,23 @@ pub struct S {
     starts: ChunkSeq[u64],
     libs: ChunkSeq[Lib],
     enums: ChunkSeq[EnumRow],
-    vars: ChunkSeq[u32],
+    variant_names: ChunkSeq[u32],
     funs: ChunkSeq[Fun],
-    pars: ChunkSeq[Par],
-    wss: ChunkSeq[Ws],
-    wfs: ChunkSeq[Wf],
-    xts: ChunkSeq[Xt],
+    params: ChunkSeq[Par],
+    wire_structs: ChunkSeq[Ws],
+    wire_fields: ChunkSeq[Wf],
+    extern_types: ChunkSeq[Xt],
     consts: ChunkSeq[ConstRow],
-    tns: ChunkSeq[Tn],
-    targs: ChunkSeq[u32],
-    gss: ChunkSeq[Gs],
-    gfs: ChunkSeq[Gf],
-    ges: ChunkSeq[Ge],
-    ghs: ChunkSeq[Gh],
-    shs: ChunkSeq[Sh],
-    sps: ChunkSeq[Sp],
+    type_nodes: ChunkSeq[Tn],
+    type_args: ChunkSeq[u32],
+    gen_structs: ChunkSeq[Gs],
+    gen_fields: ChunkSeq[Gf],
+    gen_enums: ChunkSeq[Ge],
+    gen_handles: ChunkSeq[Gh],
+    shapes: ChunkSeq[Sh],
+    shape_params: ChunkSeq[Sp],
     // the passes of function types' parameters (`TK_FN`)
-    fpass: ChunkSeq[u8],
+    fn_passes: ChunkSeq[u8],
     invalid: bool,
     // whether an import takes a `Pinned[T]`
     pinned: bool,
@@ -360,8 +360,8 @@ fn w(x: u32) -> u64 {
 }
 
 // The symbol of a scalar code (scalar names are the first symbols).
-fn sym8(x: u8) -> u32 {
-    wrapping_u32(widen_u64(x))
+fn sym8(code: u8) -> u32 {
+    wrapping_u32(widen_u64(code))
 }
 
 fn n32(x: u64) -> u32 {
@@ -376,24 +376,24 @@ fn add(a: u64, b: u64) -> u64 {
     wrapping_add(a, b)
 }
 
-fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
-    s.try_get(i).unwrap_or(NONE)
+fn u32_at(in seq: ChunkSeq[u32], i: u64) -> u32 {
+    seq.try_get(i).unwrap_or(NONE)
 }
 
-fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
-    s.try_get(i).unwrap_or(0)
+fn u64_at(in seq: ChunkSeq[u64], i: u64) -> u64 {
+    seq.try_get(i).unwrap_or(0)
 }
 
-fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
-    s.try_get(i).unwrap_or(0)
+fn u8_at(in seq: ChunkSeq[u8], i: u64) -> u8 {
+    seq.try_get(i).unwrap_or(0)
 }
 
-fn byte(in b: Slice[u8], i: u64) -> u8 {
-    b.try_get(i).unwrap_or(0)
+fn byte(in bytes: Slice[u8], i: u64) -> u8 {
+    bytes.try_get(i).unwrap_or(0)
 }
 
 fn vt_unit() -> Vt {
-    Vt { tag: VT_UNIT, sc: 0, name: NONE, nullable: false }
+    Vt { tag: VT_UNIT, scalar: 0, name: NONE, nullable: false }
 }
 
 fn no_err() -> Err {
@@ -401,159 +401,162 @@ fn no_err() -> Err {
 }
 
 pub fn s_new() -> S {
-    let mut s = S {
+    let mut state = S {
         text: ChunkSeq::new[u8](),
         starts: ChunkSeq::new[u64](),
         libs: ChunkSeq::new[Lib](),
         enums: ChunkSeq::new[EnumRow](),
-        vars: ChunkSeq::new[u32](),
+        variant_names: ChunkSeq::new[u32](),
         funs: ChunkSeq::new[Fun](),
-        pars: ChunkSeq::new[Par](),
-        wss: ChunkSeq::new[Ws](),
-        wfs: ChunkSeq::new[Wf](),
-        xts: ChunkSeq::new[Xt](),
+        params: ChunkSeq::new[Par](),
+        wire_structs: ChunkSeq::new[Ws](),
+        wire_fields: ChunkSeq::new[Wf](),
+        extern_types: ChunkSeq::new[Xt](),
         consts: ChunkSeq::new[ConstRow](),
-        tns: ChunkSeq::new[Tn](),
-        targs: ChunkSeq::new[u32](),
-        gss: ChunkSeq::new[Gs](),
-        gfs: ChunkSeq::new[Gf](),
-        ges: ChunkSeq::new[Ge](),
-        ghs: ChunkSeq::new[Gh](),
-        shs: ChunkSeq::new[Sh](),
-        sps: ChunkSeq::new[Sp](),
-        fpass: ChunkSeq::new[u8](),
+        type_nodes: ChunkSeq::new[Tn](),
+        type_args: ChunkSeq::new[u32](),
+        gen_structs: ChunkSeq::new[Gs](),
+        gen_fields: ChunkSeq::new[Gf](),
+        gen_enums: ChunkSeq::new[Ge](),
+        gen_handles: ChunkSeq::new[Gh](),
+        shapes: ChunkSeq::new[Sh](),
+        shape_params: ChunkSeq::new[Sp](),
+        fn_passes: ChunkSeq::new[u8](),
         invalid: false,
         pinned: false,
         out: ChunkSeq::new[u8]()
     };
-    s.starts.push(0);
-    let u8s = s.intern(in "u8".as_bytes());
-    let i8s = s.intern(in "i8".as_bytes());
-    let u16s = s.intern(in "u16".as_bytes());
-    let i16s = s.intern(in "i16".as_bytes());
-    let u32s = s.intern(in "u32".as_bytes());
-    let i32s = s.intern(in "i32".as_bytes());
-    let u64s = s.intern(in "u64".as_bytes());
-    let i64s = s.intern(in "i64".as_bytes());
-    let usizes = s.intern(in "usize".as_bytes());
-    let bools = s.intern(in "bool".as_bytes());
-    let options = s.intern(in "Option".as_bytes());
-    let results = s.intern(in "Result".as_bytes());
-    let invalids = s.intern(in "ForeignInvalid".as_bytes());
-    let slices = s.intern(in "Slice".as_bytes());
-    let opens = s.intern(in "$open".as_bytes());
-    let raws = s.intern(in "raw".as_bytes());
-    let handles = s.intern(in "$handle".as_bytes());
-    let ffis = s.intern(in "Ffi".as_bytes());
-    let empties = s.intern(in "".as_bytes());
-    let pinneds = s.intern(in "Pinned".as_bytes());
-    let chunk_seqs = s.intern(in "ChunkSeq".as_bytes());
-    let datas = s.intern(in "data".as_bytes());
-    let ts = s.intern(in "T".as_bytes());
-    s
+    state.starts.push(0);
+    let u8s = state.intern(in "u8".as_bytes());
+    let i8s = state.intern(in "i8".as_bytes());
+    let u16s = state.intern(in "u16".as_bytes());
+    let i16s = state.intern(in "i16".as_bytes());
+    let u32s = state.intern(in "u32".as_bytes());
+    let i32s = state.intern(in "i32".as_bytes());
+    let u64s = state.intern(in "u64".as_bytes());
+    let i64s = state.intern(in "i64".as_bytes());
+    let usizes = state.intern(in "usize".as_bytes());
+    let bools = state.intern(in "bool".as_bytes());
+    let options = state.intern(in "Option".as_bytes());
+    let results = state.intern(in "Result".as_bytes());
+    let invalids = state.intern(in "ForeignInvalid".as_bytes());
+    let slices = state.intern(in "Slice".as_bytes());
+    let opens = state.intern(in "$open".as_bytes());
+    let raws = state.intern(in "raw".as_bytes());
+    let handles = state.intern(in "$handle".as_bytes());
+    let ffis = state.intern(in "Ffi".as_bytes());
+    let empties = state.intern(in "".as_bytes());
+    let pinneds = state.intern(in "Pinned".as_bytes());
+    let chunk_seqs = state.intern(in "ChunkSeq".as_bytes());
+    let datas = state.intern(in "data".as_bytes());
+    let ts = state.intern(in "T".as_bytes());
+    state
 }
 
 impl S {
     // ----- names -----
 
-    pub fn start(in self, x: u32) -> u64 {
-        u64_at(in self.starts, w(x))
+    pub fn start(in self, sym: u32) -> u64 {
+        u64_at(in self.starts, w(sym))
     }
 
-    pub fn end(in self, x: u32) -> u64 {
-        u64_at(in self.starts, inc(w(x)))
+    pub fn end(in self, sym: u32) -> u64 {
+        u64_at(in self.starts, inc(w(sym)))
     }
 
-    pub fn size(in self, x: u32) -> u64 {
-        wrapping_sub(self.end(x), self.start(x))
+    pub fn size(in self, sym: u32) -> u64 {
+        wrapping_sub(self.end(sym), self.start(sym))
     }
 
-    pub fn spells(in self, x: u32, in b: Slice[u8]) -> bool {
-        let a = self.start(x);
-        let e = self.end(x);
-        if wrapping_sub(e, a) != b.len() {
+    pub fn spells(in self, sym: u32, in bytes: Slice[u8]) -> bool {
+        let lo = self.start(sym);
+        let hi = self.end(sym);
+        if wrapping_sub(hi, lo) != bytes.len() {
             return false;
         }
-        self.text[a..e].eq(in b)
+        self.text[lo..hi].eq(in bytes)
     }
 
-    pub fn intern(inout self, in b: Slice[u8]) -> u32 {
+    pub fn intern(inout self, in bytes: Slice[u8]) -> u32 {
         let n = wrapping_sub(self.starts.len(), 1);
         for i in 0..n {
-            if self.spells(n32(i), in b) {
+            if self.spells(n32(i), in bytes) {
                 return n32(i);
             }
         }
-        self.text.extend(in b);
+        self.text.extend(in bytes);
         self.starts.push(self.text.len());
         n32(n)
     }
 
-    // The symbol of the bytes `self.out[a..]`, which it then drops.
-    pub fn intern_tail(inout self, a: u64) -> u32 {
-        let n = wrapping_sub(self.out.len(), a);
-        let mut tmp = ChunkSeq::with_capacity[u8](n);
-        for i in a..self.out.len() {
-            tmp.push(u8_at(in self.out, i));
+    // The symbol of the bytes `self.out[from..]`, which it then drops.
+    pub fn intern_tail(inout self, from: u64) -> u32 {
+        let n = wrapping_sub(self.out.len(), from);
+        let mut tail = ChunkSeq::with_capacity[u8](n);
+        for i in from..self.out.len() {
+            tail.push(u8_at(in self.out, i));
         }
-        self.out.truncate(a);
-        self.intern(in tmp[0..n])
+        self.out.truncate(from);
+        self.intern(in tail[0..n])
     }
 
     // Byte order of two names (`str::cmp`): -1, 0 or 1.
-    pub fn name_cmp(in self, x: u32, y: u32) -> i32 {
-        if x == y {
+    pub fn name_cmp(in self, left: u32, right: u32) -> i32 {
+        if left == right {
             return 0;
         }
-        let a = self.start(x);
-        let b = self.start(y);
-        self.text[a..self.end(x)].cmp(in self.text[b..self.end(y)])
+        let left_start = self.start(left);
+        let right_start = self.start(right);
+        self.text[left_start..self.end(left)].cmp(in self.text[right_start..self.end(right)])
     }
 
-    pub fn put(inout self, in t: Str) {
-        self.out.extend(in t.as_bytes());
+    pub fn put(inout self, in text: Str) {
+        self.out.extend(in text.as_bytes());
     }
 
-    pub fn put_name(inout self, x: u32) {
-        let a = self.start(x);
-        let e = self.end(x);
-        for i in a..e {
+    pub fn put_name(inout self, sym: u32) {
+        let lo = self.start(sym);
+        let hi = self.end(sym);
+        for i in lo..hi {
             self.out.push(u8_at(in self.text, i));
         }
     }
 
     // A name quoted as the AST dump quotes strings.
-    pub fn put_q(inout self, x: u32) {
+    pub fn put_q(inout self, sym: u32) {
         self.out.push(Ascii::Quote);
-        let a = self.start(x);
-        let e = self.end(x);
-        for i in a..e {
-            let c = u8_at(in self.text, i);
-            if c < Ascii::Space || c > Ascii::Tilde || c == Ascii::Quote || c == Ascii::Backslash {
+        let lo = self.start(sym);
+        let hi = self.end(sym);
+        for i in lo..hi {
+            let byte = u8_at(in self.text, i);
+            if byte < Ascii::Space
+                || byte > Ascii::Tilde
+                || byte == Ascii::Quote
+                || byte == Ascii::Backslash {
                 self.out.push(Ascii::Backslash);
                 self.out.push(Ascii::LowerX);
-                self.out.push(hex(c >> 4));
-                self.out.push(hex(c & 15));
+                self.out.push(hex(byte >> 4));
+                self.out.push(hex(byte & 15));
             } else {
-                self.out.push(c);
+                self.out.push(byte);
             }
         }
         self.out.push(Ascii::Quote);
     }
 
-    pub fn put_u64(inout self, v: u64) {
-        if v >= 10 {
-            self.put_u64(v / 10);
+    pub fn put_u64(inout self, value: u64) {
+        if value >= 10 {
+            self.put_u64(value / 10);
         }
-        self.out.push(wrapping_u8(wrapping_add(v % 10, widen_u64(Ascii::Digit0))));
+        self.out.push(wrapping_u8(wrapping_add(value % 10, widen_u64(Ascii::Digit0))));
     }
 
     pub fn nl(inout self) {
         self.out.push(Ascii::LineFeed);
     }
 
-    pub fn indent(inout self, d: u64) {
-        for i in 0..d {
+    pub fn indent(inout self, depth: u64) {
+        for i in 0..depth {
             self.out.push(Ascii::Space);
         }
     }
@@ -567,16 +570,16 @@ impl S {
                 name: NONE,
                 handler: 0,
                 triple: NONE,
-                e0: 0,
-                en: 0,
-                f0: 0,
-                fc: 0,
-                w0: 0,
-                wn: 0,
-                x0: 0,
-                xn: 0,
-                c0: 0,
-                cn: 0
+                enum_start: 0,
+                enum_count: 0,
+                fun_start: 0,
+                fun_count: 0,
+                wire_start: 0,
+                wire_count: 0,
+                extern_start: 0,
+                extern_count: 0,
+                const_start: 0,
+                const_count: 0
             },
         }
     }
@@ -584,7 +587,7 @@ impl S {
     pub fn enum_row(in self, i: u64) -> EnumRow {
         match self.enums.try_get(i) {
             Option::Some(x) => x,
-            Option::None => EnumRow { name: NONE, scalar: 0, v0: 0, vn: 0 },
+            Option::None => EnumRow { name: NONE, scalar: 0, variant_start: 0, variant_count: 0 },
         }
     }
 
@@ -593,8 +596,8 @@ impl S {
             Option::Some(x) => x,
             Option::None => Fun {
                 sym: NONE,
-                p0: 0,
-                pn: 0,
+                param_start: 0,
+                param_count: 0,
                 result: vt_unit(),
                 errno: false,
                 has_variadic: false,
@@ -606,30 +609,30 @@ impl S {
     }
 
     pub fn par(in self, i: u64) -> Par {
-        match self.pars.try_get(i) {
+        match self.params.try_get(i) {
             Option::Some(x) => x,
             Option::None => Par {
                 name: NONE,
                 tag: P_CSTR,
-                vt: vt_unit(),
+                value_ty: vt_unit(),
                 access: 0,
                 nullable: false,
-                pstruct: false,
-                psc: 0,
-                pname: NONE
+                elem_is_struct: false,
+                elem_scalar: 0,
+                type_name: NONE
             },
         }
     }
 
     pub fn ws(in self, i: u64) -> Ws {
-        match self.wss.try_get(i) {
+        match self.wire_structs.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Ws { name: NONE, size: 0, align: 0, f0: 0, fc: 0 },
+            Option::None => Ws { name: NONE, size: 0, align: 0, field_start: 0, field_count: 0 },
         }
     }
 
     pub fn wf(in self, i: u64) -> Wf {
-        match self.wfs.try_get(i) {
+        match self.wire_fields.try_get(i) {
             Option::Some(x) => x,
             Option::None => Wf {
                 name: NONE,
@@ -638,14 +641,14 @@ impl S {
                 signed: false,
                 endian: 0,
                 size: 0,
-                sname: NONE,
+                struct_name: NONE,
                 offset: 0
             },
         }
     }
 
     pub fn xt(in self, i: u64) -> Xt {
-        match self.xts.try_get(i) {
+        match self.extern_types.try_get(i) {
             Option::Some(x) => x,
             Option::None => Xt {
                 name: NONE,
@@ -665,49 +668,55 @@ impl S {
     }
 
     pub fn tn(in self, i: u32) -> Tn {
-        match self.tns.try_get(w(i)) {
+        match self.type_nodes.try_get(w(i)) {
             Option::Some(x) => x,
             Option::None => Tn { kind: TK_TUPLE, name: NONE, a: 0, n: 0 },
         }
     }
 
     pub fn gs(in self, i: u64) -> Gs {
-        match self.gss.try_get(i) {
+        match self.gen_structs.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Gs { name: NONE, ok: false, err: NONE, f0: 0, fc: 0 },
+            Option::None => Gs { name: NONE, ok: false, err: NONE, field_start: 0, field_count: 0 },
         }
     }
 
     pub fn gf(in self, i: u64) -> Gf {
-        match self.gfs.try_get(i) {
+        match self.gen_fields.try_get(i) {
             Option::Some(x) => x,
             Option::None => Gf { name: NONE, ty: NONE },
         }
     }
 
     pub fn ge(in self, i: u64) -> Ge {
-        match self.ges.try_get(i) {
+        match self.gen_enums.try_get(i) {
             Option::Some(x) => x,
             Option::None => Ge { name: NONE, row: 0 },
         }
     }
 
     pub fn gh(in self, i: u64) -> Gh {
-        match self.ghs.try_get(i) {
+        match self.gen_handles.try_get(i) {
             Option::Some(x) => x,
             Option::None => Gh { name: NONE, linear: false, copy: false, mapping: NONE },
         }
     }
 
     pub fn sh(in self, i: u64) -> Sh {
-        match self.shs.try_get(i) {
+        match self.shapes.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Sh { ok: false, err: NONE, p0: 0, pn: 0, result: NONE },
+            Option::None => Sh {
+                ok: false,
+                err: NONE,
+                param_start: 0,
+                param_count: 0,
+                result: NONE
+            },
         }
     }
 
     pub fn sp(in self, i: u64) -> Sp {
-        match self.sps.try_get(i) {
+        match self.shape_params.try_get(i) {
             Option::Some(x) => x,
             Option::None => Sp {
                 name: NONE,
@@ -721,19 +730,19 @@ impl S {
     }
 
     pub fn targ(in self, i: u64) -> u32 {
-        u32_at(in self.targs, i)
+        u32_at(in self.type_args, i)
     }
 
     // ----- types -----
 
     pub fn ty_named(inout self, name: u32, in args: ChunkSeq[u32]) -> u32 {
-        let a = self.targs.len();
+        let arg_start = self.type_args.len();
         for i in 0..args.len() {
-            self.targs.push(u32_at(in args, i));
+            self.type_args.push(u32_at(in args, i));
         }
-        let t = n32(self.tns.len());
-        self.tns.push(Tn { kind: TK_NAMED, name: name, a: a, n: args.len() });
-        t
+        let ty = n32(self.type_nodes.len());
+        self.type_nodes.push(Tn { kind: TK_NAMED, name: name, a: arg_start, n: args.len() });
+        ty
     }
 
     pub fn ty_name(inout self, name: u32) -> u32 {
@@ -747,41 +756,43 @@ impl S {
         self.ty_named(name, in args)
     }
 
-    pub fn ty_app2(inout self, name: u32, x: u32, y: u32) -> u32 {
+    pub fn ty_app2(inout self, name: u32, first: u32, second: u32) -> u32 {
         let mut args = ChunkSeq::new[u32]();
-        args.push(x);
-        args.push(y);
+        args.push(first);
+        args.push(second);
         self.ty_named(name, in args)
     }
 
     pub fn ty_tuple(inout self, in args: ChunkSeq[u32]) -> u32 {
-        let t = self.ty_named(NONE, in args);
-        let mut node = self.tn(t);
+        let ty = self.ty_named(NONE, in args);
+        let mut node = self.tn(ty);
         node.kind = TK_TUPLE;
-        self.tns.try_set(w(t), node);
-        t
+        self.type_nodes.try_set(w(ty), node);
+        ty
     }
 
     // `(t, t, ..)` of `n` elements.
-    pub fn ty_repeat(inout self, t: u32, n: u64) -> u32 {
+    pub fn ty_repeat(inout self, elem: u32, n: u64) -> u32 {
         let mut args = ChunkSeq::with_capacity[u32](n);
         for i in 0..n {
-            args.push(t);
+            args.push(elem);
         }
         self.ty_tuple(in args)
     }
 
-    pub fn ty_eq(in self, x: u32, y: u32) -> bool {
-        if x == y {
+    pub fn ty_eq(in self, left: u32, right: u32) -> bool {
+        if left == right {
             return true;
         }
-        let a = self.tn(x);
-        let b = self.tn(y);
-        if a.kind != b.kind || a.name != b.name || a.n != b.n {
+        let left_node = self.tn(left);
+        let right_node = self.tn(right);
+        if left_node.kind != right_node.kind
+            || left_node.name != right_node.name
+            || left_node.n != right_node.n {
             return false;
         }
-        for i in 0..a.n {
-            if !self.ty_eq(self.targ(add(a.a, i)), self.targ(add(b.a, i))) {
+        for i in 0..left_node.n {
+            if !self.ty_eq(self.targ(add(left_node.a, i)), self.targ(add(right_node.a, i))) {
                 return false;
             }
         }
@@ -789,8 +800,8 @@ impl S {
     }
 
     // `Display for Type` (named and tuple types).
-    pub fn put_display(inout self, t: u32) {
-        let node = self.tn(t);
+    pub fn put_display(inout self, ty: u32) {
+        let node = self.tn(ty);
         if node.kind == TK_NAMED {
             self.put_name(node.name);
             if node.n == 0 {
@@ -814,17 +825,17 @@ impl S {
     }
 
     // The AST dump of a type (`T "name"` or `T tuple`, arguments below).
-    pub fn dump_ty(inout self, t: u32, d: u64) {
-        let node = self.tn(t);
-        self.indent(d);
+    pub fn dump_ty(inout self, ty: u32, depth: u64) {
+        let node = self.tn(ty);
+        self.indent(depth);
         if node.kind == TK_FN {
             self.put(in "T fn mode=copy");
             self.nl();
-            let np = wrapping_sub(node.n, 1);
-            for i in 0..np {
-                self.indent(inc(d));
+            let param_count = wrapping_sub(node.n, 1);
+            for i in 0..param_count {
+                self.indent(inc(depth));
                 self.put(in "P pass=");
-                let pass = self.fpass.try_get(add(w(node.name), i)).unwrap_or(PASS_IN);
+                let pass = self.fn_passes.try_get(add(w(node.name), i)).unwrap_or(PASS_IN);
                 if pass == PASS_IN {
                     self.put(in "in");
                 } else if pass == PASS_SINK {
@@ -833,24 +844,24 @@ impl S {
                     self.put(in "inout");
                 }
                 self.nl();
-                self.dump_ty(self.targ(add(node.a, i)), add(d, 2));
+                self.dump_ty(self.targ(add(node.a, i)), add(depth, 2));
             }
-            self.indent(inc(d));
+            self.indent(inc(depth));
             self.put(in "R");
             self.nl();
-            self.dump_ty(self.targ(add(node.a, np)), add(d, 2));
+            self.dump_ty(self.targ(add(node.a, param_count)), add(depth, 2));
             // `callback_row`: each direct library's effect, then `Realtime`.
             for li in 0..self.libs.len() {
-                let l = self.lib(li);
-                if l.handler == H_DIRECT {
-                    self.indent(inc(d));
+                let lib_row = self.lib(li);
+                if lib_row.handler == H_DIRECT {
+                    self.indent(inc(depth));
                     self.put(in "E \"Ffi$");
-                    self.put_name(l.name);
+                    self.put_name(lib_row.name);
                     self.put(in "\"");
                     self.nl();
                 }
             }
-            self.indent(inc(d));
+            self.indent(inc(depth));
             self.put(in "E \"Realtime\"");
             self.nl();
             return;
@@ -863,12 +874,12 @@ impl S {
         }
         self.nl();
         for i in 0..node.n {
-            self.dump_ty(self.targ(add(node.a, i)), inc(d));
+            self.dump_ty(self.targ(add(node.a, i)), inc(depth));
         }
     }
 
-    pub fn mentions_result(in self, t: u32) -> bool {
-        let node = self.tn(t);
+    pub fn mentions_result(in self, ty: u32) -> bool {
+        let node = self.tn(ty);
         if node.kind == TK_NAMED && node.name == S_RESULT {
             return true;
         }
@@ -881,11 +892,11 @@ impl S {
     }
 }
 
-fn hex(x: u8) -> u8 {
-    if x < 10 {
-        wrapping_add(x, Ascii::Digit0)
+fn hex(digit: u8) -> u8 {
+    if digit < 10 {
+        wrapping_add(digit, Ascii::Digit0)
     } else {
-        wrapping_add(x, LOWER_HEX_DIGIT_OFFSET)
+        wrapping_add(digit, LOWER_HEX_DIGIT_OFFSET)
     }
 }
 
@@ -898,35 +909,35 @@ pub struct Reader {
 
 impl Reader {
     // A little-endian input word.
-    pub fn word(inout self, in b: Slice[u8]) -> u64 {
-        let x = b.try_read_u64_le(self.pos).unwrap_or(0);
+    pub fn word(inout self, in bytes: Slice[u8]) -> u64 {
+        let value = bytes.try_read_u64_le(self.pos).unwrap_or(0);
         self.pos = add(self.pos, 8);
-        x
+        value
     }
 
     // An input string: its length word, then its bytes; returns (a, b).
-    pub fn text(inout self, in b: Slice[u8]) -> (u64, u64) {
-        let n = self.word(in b);
-        let a = self.pos;
-        self.pos = add(a, n);
-        (a, self.pos)
+    pub fn text(inout self, in bytes: Slice[u8]) -> (u64, u64) {
+        let len = self.word(in bytes);
+        let start = self.pos;
+        self.pos = add(start, len);
+        (start, self.pos)
     }
 
     // A canonical field: a u32 length, then its bytes.
-    pub fn field(inout self, in b: Slice[u8]) -> (u64, u64) {
-        let n = match b.try_read_u32_le(self.pos) {
+    pub fn field(inout self, in bytes: Slice[u8]) -> (u64, u64) {
+        let len = match bytes.try_read_u32_le(self.pos) {
             Option::Some(x) => widen_u64(x),
             Option::None => 0,
         };
-        let a = add(self.pos, 4);
-        self.pos = add(a, n);
-        (a, self.pos)
+        let start = add(self.pos, 4);
+        self.pos = add(start, len);
+        (start, self.pos)
     }
 
     // A canonical count or other 8-byte field.
-    pub fn count(inout self, in b: Slice[u8]) -> u64 {
-        let (a, e) = self.field(in b);
-        b.try_read_u64_le(a).unwrap_or(0)
+    pub fn count(inout self, in bytes: Slice[u8]) -> u64 {
+        let (start, end) = self.field(in bytes);
+        bytes.try_read_u64_le(start).unwrap_or(0)
     }
 
     pub fn at_end(in self) -> bool {
@@ -934,210 +945,220 @@ impl Reader {
     }
 }
 
-fn field_sym(inout r: Reader, in b: Slice[u8], inout s: S) -> u32 {
-    let (a, e) = r.field(in b);
-    s.intern(in b[a..e])
+fn field_sym(inout reader: Reader, in bytes: Slice[u8], inout state: S) -> u32 {
+    let (start, end) = reader.field(in bytes);
+    state.intern(in bytes[start..end])
 }
 
-fn text_sym(inout r: Reader, in b: Slice[u8], inout s: S) -> u32 {
-    let (a, e) = r.text(in b);
-    s.intern(in b[a..e])
+fn text_sym(inout reader: Reader, in bytes: Slice[u8], inout state: S) -> u32 {
+    let (start, end) = reader.text(in bytes);
+    state.intern(in bytes[start..end])
 }
 
-// Whether the next canonical field spells `t` (without reading it).
-fn peek_is(in r: Reader, in b: Slice[u8], in t: Str) -> bool {
-    if r.at_end() {
+// Whether the next canonical field spells `text` (without reading it).
+fn peek_is(in reader: Reader, in bytes: Slice[u8], in text: Str) -> bool {
+    if reader.at_end() {
         return false;
     }
-    let mut p = Reader { pos: r.pos, stop: r.stop };
-    let (a, e) = p.field(in b);
-    let want = t.as_bytes();
-    if wrapping_sub(e, a) != want.len() {
+    let mut probe = Reader { pos: reader.pos, stop: reader.stop };
+    let (start, end) = probe.field(in bytes);
+    let want = text.as_bytes();
+    if wrapping_sub(end, start) != want.len() {
         return false;
     }
-    b[a..e].eq(in want)
+    bytes[start..end].eq(in want)
 }
 
-fn field_is(in b: Slice[u8], a: u64, e: u64, in t: Str) -> bool {
-    let want = t.as_bytes();
-    if wrapping_sub(e, a) != want.len() {
+fn field_is(in bytes: Slice[u8], start: u64, end: u64, in text: Str) -> bool {
+    let want = text.as_bytes();
+    if wrapping_sub(end, start) != want.len() {
         return false;
     }
-    b[a..e].eq(in want)
+    bytes[start..end].eq(in want)
 }
 
-fn access_code(in b: Slice[u8], a: u64, e: u64) -> u8 {
-    if field_is(in b, a, e, in "in") {
+fn access_code(in bytes: Slice[u8], start: u64, end: u64) -> u8 {
+    if field_is(in bytes, start, end, in "in") {
         A_IN
-    } else if field_is(in b, a, e, in "out") {
+    } else if field_is(in bytes, start, end, in "out") {
         A_OUT
-    } else if field_is(in b, a, e, in "inout") {
+    } else if field_is(in bytes, start, end, in "inout") {
         A_INOUT
     } else {
         A_SINK
     }
 }
 
-fn scalar_code(x: u32) -> u8 {
-    if x < SC_COUNT { wrapping_u8(x) } else { SC_U64 }
+fn scalar_code(sym: u32) -> u8 {
+    if sym < SC_COUNT {
+        wrapping_u8(sym)
+    } else {
+        SC_U64
+    }
 }
 
-fn read_value(inout r: Reader, in b: Slice[u8], inout s: S) -> Vt {
-    let (a, e) = r.field(in b);
-    let mut v = vt_unit();
-    if field_is(in b, a, e, in "unit") {
-        return v;
+fn read_value(inout reader: Reader, in bytes: Slice[u8], inout state: S) -> Vt {
+    let (tag_start, tag_end) = reader.field(in bytes);
+    let mut value_ty = vt_unit();
+    if field_is(in bytes, tag_start, tag_end, in "unit") {
+        return value_ty;
     }
-    if field_is(in b, a, e, in "bool-u8") {
-        v.tag = VT_BOOL;
-        return v;
+    if field_is(in bytes, tag_start, tag_end, in "bool-u8") {
+        value_ty.tag = VT_BOOL;
+        return value_ty;
     }
-    if field_is(in b, a, e, in "nullable-cstr-copy") {
-        v.tag = VT_CSTR;
-        return v;
+    if field_is(in bytes, tag_start, tag_end, in "nullable-cstr-copy") {
+        value_ty.tag = VT_CSTR;
+        return value_ty;
     }
-    if field_is(in b, a, e, in "nullable-cwstr-copy") {
-        v.tag = VT_CWSTR;
-        return v;
+    if field_is(in bytes, tag_start, tag_end, in "nullable-cwstr-copy") {
+        value_ty.tag = VT_CWSTR;
+        return value_ty;
     }
-    let name = field_sym(inout r, in b, inout s);
-    if field_is(in b, a, e, in "scalar") {
-        v.tag = VT_SCALAR;
-        v.sc = scalar_code(name);
-    } else if field_is(in b, a, e, in "float") {
-        v.tag = VT_FLOAT;
-        v.name = name;
-    } else if field_is(in b, a, e, in "enum") {
-        v.tag = VT_ENUM;
-        v.name = name;
-    } else if field_is(in b, a, e, in "address") {
-        v.tag = VT_ADDRESS;
-        v.sc = scalar_code(name);
-    } else if field_is(in b, a, e, in "nullable-address") {
-        v.tag = VT_ADDRESS;
-        v.sc = scalar_code(name);
-        v.nullable = true;
-    } else if field_is(in b, a, e, in "handle") {
-        v.tag = VT_HANDLE;
-        v.name = name;
-    } else if field_is(in b, a, e, in "nullable-handle") {
-        v.tag = VT_HANDLE;
-        v.name = name;
-        v.nullable = true;
+    let name = field_sym(inout reader, in bytes, inout state);
+    if field_is(in bytes, tag_start, tag_end, in "scalar") {
+        value_ty.tag = VT_SCALAR;
+        value_ty.scalar = scalar_code(name);
+    } else if field_is(in bytes, tag_start, tag_end, in "float") {
+        value_ty.tag = VT_FLOAT;
+        value_ty.name = name;
+    } else if field_is(in bytes, tag_start, tag_end, in "enum") {
+        value_ty.tag = VT_ENUM;
+        value_ty.name = name;
+    } else if field_is(in bytes, tag_start, tag_end, in "address") {
+        value_ty.tag = VT_ADDRESS;
+        value_ty.scalar = scalar_code(name);
+    } else if field_is(in bytes, tag_start, tag_end, in "nullable-address") {
+        value_ty.tag = VT_ADDRESS;
+        value_ty.scalar = scalar_code(name);
+        value_ty.nullable = true;
+    } else if field_is(in bytes, tag_start, tag_end, in "handle") {
+        value_ty.tag = VT_HANDLE;
+        value_ty.name = name;
+    } else if field_is(in bytes, tag_start, tag_end, in "nullable-handle") {
+        value_ty.tag = VT_HANDLE;
+        value_ty.name = name;
+        value_ty.nullable = true;
     } else {
-        v.tag = VT_NONNULL;
-        v.name = name;
+        value_ty.tag = VT_NONNULL;
+        value_ty.name = name;
     }
-    v
+    value_ty
 }
 
 // A pointee or slice element: `scalar NAME` or `wire-struct NAME`.
-fn read_pointee(inout r: Reader, in b: Slice[u8], inout s: S, inout p: Par) {
-    let (a, e) = r.field(in b);
-    let name = field_sym(inout r, in b, inout s);
-    if field_is(in b, a, e, in "scalar") {
-        p.psc = scalar_code(name);
+fn read_pointee(inout reader: Reader, in bytes: Slice[u8], inout state: S, inout param: Par) {
+    let (kind_start, kind_end) = reader.field(in bytes);
+    let name = field_sym(inout reader, in bytes, inout state);
+    if field_is(in bytes, kind_start, kind_end, in "scalar") {
+        param.elem_scalar = scalar_code(name);
     } else {
-        p.pstruct = true;
-        p.pname = name;
+        param.elem_is_struct = true;
+        param.type_name = name;
     }
 }
 
-fn read_param(inout r: Reader, in b: Slice[u8], inout s: S) -> Par {
-    let name = field_sym(inout r, in b, inout s);
-    let mut p = Par {
+fn read_param(inout reader: Reader, in bytes: Slice[u8], inout state: S) -> Par {
+    let name = field_sym(inout reader, in bytes, inout state);
+    let mut param = Par {
         name: name,
         tag: P_CSTR,
-        vt: vt_unit(),
+        value_ty: vt_unit(),
         access: A_IN,
         nullable: false,
-        pstruct: false,
-        psc: 0,
-        pname: NONE
+        elem_is_struct: false,
+        elem_scalar: 0,
+        type_name: NONE
     };
-    let (a, e) = r.field(in b);
-    if field_is(in b, a, e, in "value") {
-        p.tag = P_VALUE;
-        p.vt = read_value(inout r, in b, inout s);
-    } else if field_is(in b, a, e, in "nocapture-slice") {
-        p.tag = P_SLICE;
-        let (c, d) = r.field(in b);
-        p.access = access_code(in b, c, d);
-        p.psc = scalar_code(field_sym(inout r, in b, inout s));
-    } else if field_is(in b, a, e, in "nocapture-slice/2") {
-        p.tag = P_SLICE;
-        let (c, d) = r.field(in b);
-        p.access = access_code(in b, c, d);
-        let (f, g) = r.field(in b);
-        p.nullable = field_is(in b, f, g, in "option");
-        read_pointee(inout r, in b, inout s, inout p);
-    } else if field_is(in b, a, e, in "nocapture-pointer") {
-        p.tag = P_POINTER;
-        let (c, d) = r.field(in b);
-        p.access = access_code(in b, c, d);
-        let (f, g) = r.field(in b);
-        p.nullable = field_is(in b, f, g, in "option");
-        read_pointee(inout r, in b, inout s, inout p);
-    } else if field_is(in b, a, e, in "extern-handle") {
-        p.tag = P_HANDLE;
-        let (c, d) = r.field(in b);
-        p.access = access_code(in b, c, d);
-        p.pname = field_sym(inout r, in b, inout s);
-    } else if field_is(in b, a, e, in "callback-function") {
+    let (tag_start, tag_end) = reader.field(in bytes);
+    if field_is(in bytes, tag_start, tag_end, in "value") {
+        param.tag = P_VALUE;
+        param.value_ty = read_value(inout reader, in bytes, inout state);
+    } else if field_is(in bytes, tag_start, tag_end, in "nocapture-slice") {
+        param.tag = P_SLICE;
+        let (access_start, access_end) = reader.field(in bytes);
+        param.access = access_code(in bytes, access_start, access_end);
+        param.elem_scalar = scalar_code(field_sym(inout reader, in bytes, inout state));
+    } else if field_is(in bytes, tag_start, tag_end, in "nocapture-slice/2") {
+        param.tag = P_SLICE;
+        let (access_start, access_end) = reader.field(in bytes);
+        param.access = access_code(in bytes, access_start, access_end);
+        let (option_start, option_end) = reader.field(in bytes);
+        param.nullable = field_is(in bytes, option_start, option_end, in "option");
+        read_pointee(inout reader, in bytes, inout state, inout param);
+    } else if field_is(in bytes, tag_start, tag_end, in "nocapture-pointer") {
+        param.tag = P_POINTER;
+        let (access_start, access_end) = reader.field(in bytes);
+        param.access = access_code(in bytes, access_start, access_end);
+        let (option_start, option_end) = reader.field(in bytes);
+        param.nullable = field_is(in bytes, option_start, option_end, in "option");
+        read_pointee(inout reader, in bytes, inout state, inout param);
+    } else if field_is(in bytes, tag_start, tag_end, in "extern-handle") {
+        param.tag = P_HANDLE;
+        let (access_start, access_end) = reader.field(in bytes);
+        param.access = access_code(in bytes, access_start, access_end);
+        param.type_name = field_sym(inout reader, in bytes, inout state);
+    } else if field_is(in bytes, tag_start, tag_end, in "callback-function") {
         // `retain` or `nocapture`: the plans do not depend on which.
-        p.tag = P_FUNCTION;
-        let keep = r.field(in b);
-        p.pname = field_sym(inout r, in b, inout s);
-    } else if field_is(in b, a, e, in "nocapture-cstr-list") {
+        param.tag = P_FUNCTION;
+        let keep = reader.field(in bytes);
+        param.type_name = field_sym(inout reader, in bytes, inout state);
+    } else if field_is(in bytes, tag_start, tag_end, in "nocapture-cstr-list") {
         // Only a `CStr` can refuse a call, so a list keeps its own tag.
-        p.tag = P_CSTR_LIST;
-    } else if field_is(in b, a, e, in "nocapture-cwstr") {
-        p.tag = P_CWSTR;
-    } else if field_is(in b, a, e, in "pinned-buffer") {
-        p.tag = P_PINNED;
-        let (c, d) = r.field(in b);
-        p.access = access_code(in b, c, d);
-        p.psc = scalar_code(field_sym(inout r, in b, inout s));
+        param.tag = P_CSTR_LIST;
+    } else if field_is(in bytes, tag_start, tag_end, in "nocapture-cwstr") {
+        param.tag = P_CWSTR;
+    } else if field_is(in bytes, tag_start, tag_end, in "pinned-buffer") {
+        param.tag = P_PINNED;
+        let (access_start, access_end) = reader.field(in bytes);
+        param.access = access_code(in bytes, access_start, access_end);
+        param.elem_scalar = scalar_code(field_sym(inout reader, in bytes, inout state));
     }
-    p
+    param
 }
 
 // One function of library row `lib`: symbol, parameters, result and the
 // trailers appended only when declared.
-fn read_function(inout r: Reader, in b: Slice[u8], inout s: S, lib: u64, indirect: bool) {
-    let sym = field_sym(inout r, in b, inout s);
-    let p0 = s.pars.len();
-    let np = r.count(in b);
-    for j in 0..np {
-        let p = read_param(inout r, in b, inout s);
-        s.pars.push(p);
+fn read_function(
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout state: S,
+    lib: u64,
+    indirect: bool
+) {
+    let sym = field_sym(inout reader, in bytes, inout state);
+    let param_start = state.params.len();
+    let param_count = reader.count(in bytes);
+    for j in 0..param_count {
+        let param = read_param(inout reader, in bytes, inout state);
+        state.params.push(param);
     }
-    let result = read_value(inout r, in b, inout s);
-    if peek_is(in r, in b, in "mapping/length-from") {
-        let marker = r.field(in b);
-        let length = r.count(in b);
+    let result = read_value(inout reader, in bytes, inout state);
+    if peek_is(in reader, in bytes, in "mapping/length-from") {
+        let marker = reader.field(in bytes);
+        let length = reader.count(in bytes);
     }
-    let errno = peek_is(in r, in b, in "errno/after-call");
+    let errno = peek_is(in reader, in bytes, in "errno/after-call");
     if errno {
-        let marker = r.field(in b);
+        let marker = reader.field(in bytes);
     }
     let mut has_variadic = false;
     let mut variadic_first: u64 = 0;
-    if peek_is(in r, in b, in "variadic/from") {
-        let marker = r.field(in b);
-        variadic_first = r.count(in b);
+    if peek_is(in reader, in bytes, in "variadic/from") {
+        let marker = reader.field(in bytes);
+        variadic_first = reader.count(in bytes);
         has_variadic = true;
     }
     // The C symbol several declarations may share (`#[link_name]`): the
     // plans and shapes name the declaration's own symbol.
-    if peek_is(in r, in b, in "link-name") {
-        let marker = r.field(in b);
-        let link = r.field(in b);
+    if peek_is(in reader, in bytes, in "link-name") {
+        let marker = reader.field(in bytes);
+        let link = reader.field(in bytes);
     }
-    s.funs.push(Fun {
+    state.funs.push(Fun {
         sym: sym,
-        p0: p0,
-        pn: np,
+        param_start: param_start,
+        param_count: param_count,
         result: result,
         errno: errno,
         has_variadic: has_variadic,
@@ -1147,218 +1168,232 @@ fn read_function(inout r: Reader, in b: Slice[u8], inout s: S, lib: u64, indirec
     });
 }
 
-// Function rows funs[f0..f0+n] in symbol order (insertion sort, stable).
-fn sort_fun_rows(inout s: S, f0: u64, n: u64) {
+// Function rows funs[first..first+n] in symbol order (insertion sort, stable).
+fn sort_fun_rows(inout state: S, first: u64, n: u64) {
     for i in 1..n {
-        let x = s.fun(add(f0, i));
+        let key = state.fun(add(first, i));
         let mut j = i;
         loop {
             if j == 0 {
                 break;
             }
-            let y = s.fun(add(f0, wrapping_sub(j, 1)));
-            if s.name_cmp(y.sym, x.sym) <= 0 {
+            let prev = state.fun(add(first, wrapping_sub(j, 1)));
+            if state.name_cmp(prev.sym, key.sym) <= 0 {
                 break;
             }
-            s.funs.try_set(add(f0, j), y);
+            state.funs.try_set(add(first, j), prev);
             j = wrapping_sub(j, 1);
         }
-        s.funs.try_set(add(f0, j), x);
+        state.funs.try_set(add(first, j), key);
     }
 }
 
-fn parse_const_int(in b: Slice[u8], a: u64, e: u64) -> (bool, u64) {
-    let first = b.try_get(a).unwrap_or(0);
-    let neg = a < e && first == Ascii::Hyphen;
-    let mut i = if neg { inc(a) } else { a };
-    let mut mag: u64 = 0;
+fn parse_const_int(in bytes: Slice[u8], start: u64, end: u64) -> (bool, u64) {
+    let first = bytes.try_get(start).unwrap_or(0);
+    let neg = start < end && first == Ascii::Hyphen;
+    let mut i = if neg { inc(start) } else { start };
+    let mut magnitude: u64 = 0;
     loop {
-        if i >= e {
+        if i >= end {
             break;
         }
-        let d = b.try_get(i).unwrap_or(Ascii::Digit0);
-        mag = wrapping_add(wrapping_mul(mag, 10), widen_u64(wrapping_sub(d, Ascii::Digit0)));
+        let digit = bytes.try_get(i).unwrap_or(Ascii::Digit0);
+        magnitude = wrapping_add(
+            wrapping_mul(magnitude, 10),
+            widen_u64(wrapping_sub(digit, Ascii::Digit0))
+        );
         i = inc(i);
     }
-    (neg, mag)
+    (neg, magnitude)
 }
 
-// One canonical descriptor `b[a..e]` with its handler tier, as a library row.
-pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
-    let mut r = Reader { pos: a, stop: e };
-    let schema = r.field(in b);
-    let name = field_sym(inout r, in b, inout s);
-    let triple = field_sym(inout r, in b, inout s);
-    let convention = r.field(in b);
-    let model = r.field(in b);
-    let mode = r.field(in b);
-    let link_name = r.field(in b);
-    let digest = r.field(in b);
-    let (h0, h1) = r.field(in b);
-    if field_is(in b, h0, h1, in "some") {
-        let header = r.field(in b);
+// One canonical descriptor `bytes[start..end]` with its handler tier, as a library row.
+pub fn read_library(in bytes: Slice[u8], start: u64, end: u64, handler: u64, inout state: S) {
+    let mut reader = Reader { pos: start, stop: end };
+    let schema = reader.field(in bytes);
+    let name = field_sym(inout reader, in bytes, inout state);
+    let triple = field_sym(inout reader, in bytes, inout state);
+    let convention = reader.field(in bytes);
+    let model = reader.field(in bytes);
+    let mode = reader.field(in bytes);
+    let link_name = reader.field(in bytes);
+    let digest = reader.field(in bytes);
+    let (header_tag_start, header_tag_end) = reader.field(in bytes);
+    if field_is(in bytes, header_tag_start, header_tag_end, in "some") {
+        let header = reader.field(in bytes);
     }
-    let (k0, k1) = r.field(in b);
-    if field_is(in b, k0, k1, in "some") {
-        let pkg = r.field(in b);
+    let (pkg_tag_start, pkg_tag_end) = reader.field(in bytes);
+    if field_is(in bytes, pkg_tag_start, pkg_tag_end, in "some") {
+        let pkg = reader.field(in bytes);
     }
-    let lib = s.libs.len();
-    let e0 = s.enums.len();
-    let ne = r.count(in b);
-    for i in 0..ne {
-        let en = field_sym(inout r, in b, inout s);
-        let sc = scalar_code(field_sym(inout r, in b, inout s));
-        let v0 = s.vars.len();
-        let nv = r.count(in b);
-        for j in 0..nv {
-            let vname = field_sym(inout r, in b, inout s);
-            s.vars.push(vname);
-            let value = r.field(in b);
+    let lib = state.libs.len();
+    let enum_start = state.enums.len();
+    let enum_count = reader.count(in bytes);
+    for i in 0..enum_count {
+        let enum_name = field_sym(inout reader, in bytes, inout state);
+        let scalar = scalar_code(field_sym(inout reader, in bytes, inout state));
+        let variant_start = state.variant_names.len();
+        let variant_count = reader.count(in bytes);
+        for j in 0..variant_count {
+            let variant_name = field_sym(inout reader, in bytes, inout state);
+            state.variant_names.push(variant_name);
+            let value = reader.field(in bytes);
         }
-        s.enums.push(EnumRow { name: en, scalar: sc, v0: v0, vn: nv });
+        state.enums.push(EnumRow {
+            name: enum_name,
+            scalar: scalar,
+            variant_start: variant_start,
+            variant_count: variant_count
+        });
     }
-    let f0 = s.funs.len();
-    let nd = r.count(in b);
-    for i in 0..nd {
-        read_function(inout r, in b, inout s, lib, false);
+    let fun_start = state.funs.len();
+    let fun_decl_count = reader.count(in bytes);
+    for i in 0..fun_decl_count {
+        read_function(inout reader, in bytes, inout state, lib, false);
     }
     // Each callback type's call, appended only when present; the rows are
     // then put in symbol order, as the descriptor keeps its functions.
-    if peek_is(in r, in b, in "callbacks") {
-        let marker = r.field(in b);
-        let nc = r.count(in b);
-        for i in 0..nc {
-            read_function(inout r, in b, inout s, lib, true);
+    if peek_is(in reader, in bytes, in "callbacks") {
+        let marker = reader.field(in bytes);
+        let callback_count = reader.count(in bytes);
+        for i in 0..callback_count {
+            read_function(inout reader, in bytes, inout state, lib, true);
         }
     }
-    let nf = wrapping_sub(s.funs.len(), f0);
-    sort_fun_rows(inout s, f0, nf);
-    let w0 = s.wss.len();
-    if peek_is(in r, in b, in "wire-structs") {
-        let marker = r.field(in b);
-        let nw = r.count(in b);
-        for i in 0..nw {
-            let wn = field_sym(inout r, in b, inout s);
-            let size = r.count(in b);
-            let align = r.count(in b);
-            let fa = s.wfs.len();
-            let nfl = r.count(in b);
-            for j in 0..nfl {
-                let fname = field_sym(inout r, in b, inout s);
-                let mut f = Wf {
-                    name: fname,
+    let fun_count = wrapping_sub(state.funs.len(), fun_start);
+    sort_fun_rows(inout state, fun_start, fun_count);
+    let wire_start = state.wire_structs.len();
+    if peek_is(in reader, in bytes, in "wire-structs") {
+        let marker = reader.field(in bytes);
+        let wire_decl_count = reader.count(in bytes);
+        for i in 0..wire_decl_count {
+            let wire_name = field_sym(inout reader, in bytes, inout state);
+            let size = reader.count(in bytes);
+            let align = reader.count(in bytes);
+            let field_start = state.wire_fields.len();
+            let field_count = reader.count(in bytes);
+            for j in 0..field_count {
+                let field_name = field_sym(inout reader, in bytes, inout state);
+                let mut field = Wf {
+                    name: field_name,
                     kind: F_PAD,
                     bits: 0,
                     signed: false,
                     endian: E_NATIVE,
                     size: 0,
-                    sname: NONE,
+                    struct_name: NONE,
                     offset: 0
                 };
-                let (c, d) = r.field(in b);
-                if field_is(in b, c, d, in "integer") {
-                    f.kind = F_INT;
-                    let (g, h) = r.field(in b);
-                    f.signed = field_is(in b, g, h, in "i");
-                    let (x, y) = r.field(in b);
-                    f.bits = match b.try_read_u16_le(x) {
+                let (lo, hi) = reader.field(in bytes);
+                if field_is(in bytes, lo, hi, in "integer") {
+                    field.kind = F_INT;
+                    let (sign_start, sign_end) = reader.field(in bytes);
+                    field.signed = field_is(in bytes, sign_start, sign_end, in "i");
+                    let (bits_start, bits_end) = reader.field(in bytes);
+                    field.bits = match bytes.try_read_u16_le(bits_start) {
                         Option::Some(v) => widen_u64(v),
                         Option::None => 0,
                     };
-                    f.size = f.bits / 8;
-                    let (m, n) = r.field(in b);
-                    if field_is(in b, m, n, in "le") {
-                        f.endian = E_LITTLE;
-                    } else if field_is(in b, m, n, in "be") {
-                        f.endian = E_BIG;
+                    field.size = field.bits / 8;
+                    let (order_start, order_end) = reader.field(in bytes);
+                    if field_is(in bytes, order_start, order_end, in "le") {
+                        field.endian = E_LITTLE;
+                    } else if field_is(in bytes, order_start, order_end, in "be") {
+                        field.endian = E_BIG;
                     }
-                } else if field_is(in b, c, d, in "bytes") {
-                    f.kind = F_BYTES;
-                    f.size = r.count(in b);
-                } else if field_is(in b, c, d, in "zero-pad") {
-                    f.kind = F_PAD;
-                    f.size = r.count(in b);
+                } else if field_is(in bytes, lo, hi, in "bytes") {
+                    field.kind = F_BYTES;
+                    field.size = reader.count(in bytes);
+                } else if field_is(in bytes, lo, hi, in "zero-pad") {
+                    field.kind = F_PAD;
+                    field.size = reader.count(in bytes);
                 } else {
-                    f.kind = F_STRUCT;
-                    f.sname = field_sym(inout r, in b, inout s);
+                    field.kind = F_STRUCT;
+                    field.struct_name = field_sym(inout reader, in bytes, inout state);
                 }
-                s.wfs.push(f);
+                state.wire_fields.push(field);
             }
-            s.wss.push(Ws { name: wn, size: size, align: align, f0: fa, fc: nfl });
+            state.wire_structs.push(Ws {
+                name: wire_name,
+                size: size,
+                align: align,
+                field_start: field_start,
+                field_count: field_count
+            });
         }
     }
-    let wn = wrapping_sub(s.wss.len(), w0);
+    let wire_count = wrapping_sub(state.wire_structs.len(), wire_start);
     // Offsets: fields are packed in order (a wire struct has no implicit
     // padding); a nested struct's size is its own declaration's.
-    for i in 0..wn {
-        let row = s.ws(add(w0, i));
+    for i in 0..wire_count {
+        let row = state.ws(add(wire_start, i));
         let mut offset: u64 = 0;
-        for j in 0..row.fc {
-            let mut f = s.wf(add(row.f0, j));
-            if f.kind == F_STRUCT {
-                for k in 0..wn {
-                    let inner = s.ws(add(w0, k));
-                    if inner.name == f.sname {
-                        f.size = inner.size;
+        for j in 0..row.field_count {
+            let mut field = state.wf(add(row.field_start, j));
+            if field.kind == F_STRUCT {
+                for k in 0..wire_count {
+                    let inner = state.ws(add(wire_start, k));
+                    if inner.name == field.struct_name {
+                        field.size = inner.size;
                     }
                 }
             }
-            f.offset = offset;
-            offset = add(offset, f.size);
-            s.wfs.try_set(add(row.f0, j), f);
+            field.offset = offset;
+            offset = add(offset, field.size);
+            state.wire_fields.try_set(add(row.field_start, j), field);
         }
     }
-    let x0 = s.xts.len();
-    if peek_is(in r, in b, in "extern-types") {
-        let marker = r.field(in b);
-        let nx = r.count(in b);
-        for i in 0..nx {
-            let xn = field_sym(inout r, in b, inout s);
-            let (c, d) = r.field(in b);
-            s.xts.push(Xt {
-                name: xn,
-                linear: field_is(in b, c, d, in "linear"),
+    let extern_start = state.extern_types.len();
+    if peek_is(in reader, in bytes, in "extern-types") {
+        let marker = reader.field(in bytes);
+        let extern_count = reader.count(in bytes);
+        for i in 0..extern_count {
+            let extern_name = field_sym(inout reader, in bytes, inout state);
+            let (lo, hi) = reader.field(in bytes);
+            state.extern_types.push(Xt {
+                name: extern_name,
+                linear: field_is(in bytes, lo, hi, in "linear"),
                 copy: false,
                 drop: NONE,
                 mapping: NONE
             });
         }
-        if peek_is(in r, in b, in "drop-imports") {
-            let marker2 = r.field(in b);
-            for i in 0..nx {
-                let (c, d) = r.field(in b);
-                if c != d {
-                    let mut x = s.xt(add(x0, i));
-                    x.drop = s.intern(in b[c..d]);
-                    s.xts.try_set(add(x0, i), x);
+        if peek_is(in reader, in bytes, in "drop-imports") {
+            let marker2 = reader.field(in bytes);
+            for i in 0..extern_count {
+                let (lo, hi) = reader.field(in bytes);
+                if lo != hi {
+                    let mut ext_type = state.xt(add(extern_start, i));
+                    ext_type.drop = state.intern(in bytes[lo..hi]);
+                    state.extern_types.try_set(add(extern_start, i), ext_type);
                 }
             }
         }
         // One element per extern type of the descriptor, callback types
         // included, in name order: empty unless a mapping.
-        if peek_is(in r, in b, in "mappings") {
-            let marker3 = r.field(in b);
+        if peek_is(in reader, in bytes, in "mappings") {
+            let marker3 = reader.field(in bytes);
             let mut names = ChunkSeq::new[u32]();
-            for i in 0..nx {
-                names.push(s.xt(add(x0, i)).name);
+            for i in 0..extern_count {
+                names.push(state.xt(add(extern_start, i)).name);
             }
-            for i in 0..nf {
-                let f = s.fun(add(f0, i));
-                if f.indirect {
-                    names.push(f.sym);
+            for i in 0..fun_count {
+                let func = state.fun(add(fun_start, i));
+                if func.indirect {
+                    names.push(func.sym);
                 }
             }
-            sort_by_name(in s, inout names);
+            sort_by_name(in state, inout names);
             for i in 0..names.len() {
-                let (c, d) = r.field(in b);
-                if c != d {
-                    let element = s.intern(in b[c..d]);
+                let (lo, hi) = reader.field(in bytes);
+                if lo != hi {
+                    let element = state.intern(in bytes[lo..hi]);
                     let name = u32_at(in names, i);
-                    for j in 0..nx {
-                        let mut x = s.xt(add(x0, j));
-                        if x.name == name {
-                            x.mapping = element;
-                            s.xts.try_set(add(x0, j), x);
+                    for j in 0..extern_count {
+                        let mut ext_type = state.xt(add(extern_start, j));
+                        if ext_type.name == name {
+                            ext_type.mapping = element;
+                            state.extern_types.try_set(add(extern_start, j), ext_type);
                         }
                     }
                 }
@@ -1366,75 +1401,79 @@ pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
         }
     }
     // Each callback declares a copyable handle type of its name.
-    for i in 0..nf {
-        let f = s.fun(add(f0, i));
-        if f.indirect {
-            s.xts.push(Xt { name: f.sym, linear: false, copy: true, drop: NONE, mapping: NONE });
+    for i in 0..fun_count {
+        let func = state.fun(add(fun_start, i));
+        if func.indirect {
+            state
+                .extern_types
+                .push(Xt { name: func.sym, linear: false, copy: true, drop: NONE, mapping: NONE });
         }
     }
-    let c0 = s.consts.len();
-    if peek_is(in r, in b, in "consts") {
-        let marker3 = r.field(in b);
-        let nc = r.count(in b);
-        for i in 0..nc {
-            let cname = field_sym(inout r, in b, inout s);
-            let csc = scalar_code(field_sym(inout r, in b, inout s));
-            let (va, ve) = r.field(in b);
-            let (neg, value) = parse_const_int(in b, va, ve);
-            s.consts.push(ConstRow { name: cname, scalar: csc, neg: neg, value: value });
+    let const_start = state.consts.len();
+    if peek_is(in reader, in bytes, in "consts") {
+        let marker3 = reader.field(in bytes);
+        let const_count = reader.count(in bytes);
+        for i in 0..const_count {
+            let const_name = field_sym(inout reader, in bytes, inout state);
+            let const_scalar = scalar_code(field_sym(inout reader, in bytes, inout state));
+            let (value_start, value_end) = reader.field(in bytes);
+            let (neg, value) = parse_const_int(in bytes, value_start, value_end);
+            state
+                .consts
+                .push(ConstRow { name: const_name, scalar: const_scalar, neg: neg, value: value });
         }
     }
-    s.libs.push(Lib {
+    state.libs.push(Lib {
         name: name,
         handler: handler,
         triple: triple,
-        e0: e0,
-        en: ne,
-        f0: f0,
-        fc: nf,
-        w0: w0,
-        wn: wn,
-        x0: x0,
-        xn: wrapping_sub(s.xts.len(), x0),
-        c0: c0,
-        cn: wrapping_sub(s.consts.len(), c0)
+        enum_start: enum_start,
+        enum_count: enum_count,
+        fun_start: fun_start,
+        fun_count: fun_count,
+        wire_start: wire_start,
+        wire_count: wire_count,
+        extern_start: extern_start,
+        extern_count: wrapping_sub(state.extern_types.len(), extern_start),
+        const_start: const_start,
+        const_count: wrapping_sub(state.consts.len(), const_start)
     });
 }
 
 // ----- the type mapping (types.rs) --------------------------------------------
 
 // The wire struct of library `lib` named `name`, or NONE64.
-fn lib_ws(in s: S, lib: u64, name: u32) -> u64 {
-    let l = s.lib(lib);
-    for i in 0..l.wn {
-        if s.ws(add(l.w0, i)).name == name {
-            return add(l.w0, i);
+fn lib_ws(in state: S, lib: u64, name: u32) -> u64 {
+    let lib_row = state.lib(lib);
+    for i in 0..lib_row.wire_count {
+        if state.ws(add(lib_row.wire_start, i)).name == name {
+            return add(lib_row.wire_start, i);
         }
     }
     NONE64
 }
 
-fn find_gs(in s: S, name: u32) -> u64 {
-    for i in 0..s.gss.len() {
-        if s.gs(i).name == name {
+fn find_gs(in state: S, name: u32) -> u64 {
+    for i in 0.. state.gen_structs.len() {
+        if state.gs(i).name == name {
             return i;
         }
     }
     NONE64
 }
 
-fn find_ge(in s: S, name: u32) -> u64 {
-    for i in 0..s.ges.len() {
-        if s.ge(i).name == name {
+fn find_ge(in state: S, name: u32) -> u64 {
+    for i in 0.. state.gen_enums.len() {
+        if state.ge(i).name == name {
             return i;
         }
     }
     NONE64
 }
 
-fn find_gh(in s: S, name: u32) -> u64 {
-    for i in 0..s.ghs.len() {
-        if s.gh(i).name == name {
+fn find_gh(in state: S, name: u32) -> u64 {
+    for i in 0.. state.gen_handles.len() {
+        if state.gh(i).name == name {
             return i;
         }
     }
@@ -1443,7 +1482,7 @@ fn find_gh(in s: S, name: u32) -> u64 {
 
 // `field_integer`: the source carrier of a wire integer field, or NONE
 // after writing its error at `out[mark..]`.
-fn field_integer(inout s: S, bits: u64, signed: bool) -> u32 {
+fn field_integer(inout state: S, bits: u64, signed: bool) -> u32 {
     let base = if bits == 8 {
         SC_U8
     } else if bits == 16 {
@@ -1453,14 +1492,14 @@ fn field_integer(inout s: S, bits: u64, signed: bool) -> u32 {
     } else if bits == 64 {
         SC_U64
     } else {
-        s.put(in "wire field of ");
+        state.put(in "wire field of ");
         if signed {
-            s.put(in "i");
+            state.put(in "i");
         } else {
-            s.put(in "u");
+            state.put(in "u");
         }
-        s.put_u64(bits);
-        s.put(in " has no source carrier");
+        state.put_u64(bits);
+        state.put(in " has no source carrier");
         return NONE;
     };
     if signed {
@@ -1472,80 +1511,87 @@ fn field_integer(inout s: S, bits: u64, signed: bool) -> u32 {
 
 // `struct_adt` of wire struct row `row`: a new generated struct (not yet
 // in the table's lookup order: callers compare, then keep or drop it).
-fn struct_adt(inout s: S, lib: u64, row: u64, depth: u64) -> Gs {
-    let st = s.ws(row);
-    let mut g = Gs { name: st.name, ok: true, err: NONE, f0: s.gfs.len(), fc: 0 };
+fn struct_adt(inout state: S, lib: u64, row: u64, depth: u64) -> Gs {
+    let wire = state.ws(row);
+    let mut adt = Gs {
+        name: wire.name,
+        ok: true,
+        err: NONE,
+        field_start: state.gen_fields.len(),
+        field_count: 0
+    };
     let mut fields = ChunkSeq::new[Gf]();
-    for j in 0..st.fc {
-        let f = s.wf(add(st.f0, j));
+    for j in 0..wire.field_count {
+        let field = state.wf(add(wire.field_start, j));
         let mut ty = NONE;
-        if f.kind == F_INT {
-            let mark = s.out.len();
-            let sc = field_integer(inout s, f.bits, f.signed);
-            if sc == NONE {
-                g.ok = false;
-                g.err = s.intern_tail(mark);
-                return g;
+        if field.kind == F_INT {
+            let mark = state.out.len();
+            let scalar = field_integer(inout state, field.bits, field.signed);
+            if scalar == NONE {
+                adt.ok = false;
+                adt.err = state.intern_tail(mark);
+                return adt;
             }
-            ty = s.ty_name(sc);
-        } else if f.kind == F_BYTES {
-            let u8t = s.ty_name(sym8(SC_U8));
-            ty = s.ty_repeat(u8t, f.size);
-        } else if f.kind == F_STRUCT {
-            let inner = lib_ws(in s, lib, f.sname);
+            ty = state.ty_name(scalar);
+        } else if field.kind == F_BYTES {
+            let u8_ty = state.ty_name(sym8(SC_U8));
+            ty = state.ty_repeat(u8_ty, field.size);
+        } else if field.kind == F_STRUCT {
+            let inner = lib_ws(in state, lib, field.struct_name);
             if depth < MAX_WIRE_STRUCT_DEPTH {
-                let ig = struct_adt(inout s, lib, inner, inc(depth));
-                if !ig.ok {
-                    g.ok = false;
-                    g.err = ig.err;
-                    return g;
+                let inner_adt = struct_adt(inout state, lib, inner, inc(depth));
+                if !inner_adt.ok {
+                    adt.ok = false;
+                    adt.err = inner_adt.err;
+                    return adt;
                 }
             }
-            ty = s.ty_name(f.sname);
+            ty = state.ty_name(field.struct_name);
         }
-        if f.kind != F_PAD {
-            fields.push(Gf { name: f.name, ty: ty });
+        if field.kind != F_PAD {
+            fields.push(Gf { name: field.name, ty: ty });
         }
     }
-    g.f0 = s.gfs.len();
-    g.fc = fields.len();
+    adt.field_start = state.gen_fields.len();
+    adt.field_count = fields.len();
     for i in 0..fields.len() {
         match fields.try_get(i) {
-            Option::Some(f) => s.gfs.push(f),
+            Option::Some(field) => state.gen_fields.push(field),
             Option::None => {},
         }
     }
-    g
+    adt
 }
 
-fn gs_eq(in s: S, x: Gs, y: Gs) -> bool {
-    if x.ok != y.ok {
+fn gs_eq(in state: S, left: Gs, right: Gs) -> bool {
+    if left.ok != right.ok {
         return false;
     }
-    if !x.ok {
-        return x.err == y.err;
+    if !left.ok {
+        return left.err == right.err;
     }
-    if x.fc != y.fc {
+    if left.field_count != right.field_count {
         return false;
     }
-    for i in 0..x.fc {
-        let a = s.gf(add(x.f0, i));
-        let b = s.gf(add(y.f0, i));
-        if a.name != b.name || !s.ty_eq(a.ty, b.ty) {
+    for i in 0..left.field_count {
+        let left_field = state.gf(add(left.field_start, i));
+        let right_field = state.gf(add(right.field_start, i));
+        if left_field.name != right_field.name || !state.ty_eq(left_field.ty, right_field.ty) {
             return false;
         }
     }
     true
 }
 
-fn enum_eq(in s: S, x: u64, y: u64) -> bool {
-    let a = s.enum_row(x);
-    let b = s.enum_row(y);
-    if a.vn != b.vn {
+fn enum_eq(in state: S, left: u64, right: u64) -> bool {
+    let left_enum = state.enum_row(left);
+    let right_enum = state.enum_row(right);
+    if left_enum.variant_count != right_enum.variant_count {
         return false;
     }
-    for i in 0..a.vn {
-        if u32_at(in s.vars, add(a.v0, i)) != u32_at(in s.vars, add(b.v0, i)) {
+    for i in 0..left_enum.variant_count {
+        if u32_at(in state.variant_names, add(left_enum.variant_start, i))
+            != u32_at(in state.variant_names, add(right_enum.variant_start, i)) {
             return false;
         }
     }
@@ -1553,123 +1599,128 @@ fn enum_eq(in s: S, x: u64, y: u64) -> bool {
 }
 
 // `collect_structs`: wire struct `row` after the structs it nests.
-fn collect_structs(in s: S, lib: u64, row: u64, inout out: ChunkSeq[u64], depth: u64) {
+fn collect_structs(in state: S, lib: u64, row: u64, inout out: ChunkSeq[u64], depth: u64) {
     if depth > MAX_WIRE_STRUCT_DEPTH {
         return;
     }
-    let st = s.ws(row);
-    for j in 0..st.fc {
-        let f = s.wf(add(st.f0, j));
-        if f.kind == F_STRUCT {
-            let inner = lib_ws(in s, lib, f.sname);
+    let wire = state.ws(row);
+    for j in 0..wire.field_count {
+        let field = state.wf(add(wire.field_start, j));
+        if field.kind == F_STRUCT {
+            let inner = lib_ws(in state, lib, field.struct_name);
             if inner != NONE64 {
-                collect_structs(in s, lib, inner, inout out, inc(depth));
+                collect_structs(in state, lib, inner, inout out, inc(depth));
             }
         }
     }
     out.push(row);
 }
 
-fn duplicate(inout s: S, name: u32) -> Err {
-    let mark = s.out.len();
-    s.put(in "imported libraries declare '");
-    s.put_name(name);
-    s.put(in "' differently");
-    Err { kind: K_DUPLICATE, msg: s.intern_tail(mark), has_span: false, start: 0, end: 0 }
+fn duplicate(inout state: S, name: u32) -> Err {
+    let mark = state.out.len();
+    state.put(in "imported libraries declare '");
+    state.put_name(name);
+    state.put(in "' differently");
+    Err { kind: K_DUPLICATE, msg: state.intern_tail(mark), has_span: false, start: 0, end: 0 }
 }
 
 // `Generated::new`: no error (msg NONE) or the first duplicate.
-pub fn generate(inout s: S) -> Err {
-    for li in 0..s.libs.len() {
-        let l = s.lib(li);
+pub fn generate(inout state: S) -> Err {
+    for li in 0.. state.libs.len() {
+        let lib_row = state.lib(li);
         let mut layouts = ChunkSeq::new[u64]();
-        for i in 0..l.wn {
-            collect_structs(in s, li, add(l.w0, i), inout layouts, 0);
+        for i in 0..lib_row.wire_count {
+            collect_structs(in state, li, add(lib_row.wire_start, i), inout layouts, 0);
         }
         for i in 0..layouts.len() {
             let row = u64_at(in layouts, i);
-            let g = struct_adt(inout s, li, row, 0);
-            let at = find_gs(in s, g.name);
+            let adt = struct_adt(inout state, li, row, 0);
+            let at = find_gs(in state, adt.name);
             if at == NONE64 {
-                s.gss.push(g);
-            } else if !gs_eq(in s, s.gs(at), g) {
-                return duplicate(inout s, g.name);
+                state.gen_structs.push(adt);
+            } else if !gs_eq(in state, state.gs(at), adt) {
+                return duplicate(inout state, adt.name);
             }
         }
-        for i in 0..l.en {
-            let row = add(l.e0, i);
-            let name = s.enum_row(row).name;
-            let at = find_ge(in s, name);
+        for i in 0..lib_row.enum_count {
+            let row = add(lib_row.enum_start, i);
+            let name = state.enum_row(row).name;
+            let at = find_ge(in state, name);
             if at == NONE64 {
-                s.ges.push(Ge { name: name, row: row });
-            } else if !enum_eq(in s, s.ge(at).row, row) {
-                return duplicate(inout s, name);
+                state.gen_enums.push(Ge { name: name, row: row });
+            } else if !enum_eq(in state, state.ge(at).row, row) {
+                return duplicate(inout state, name);
             }
         }
     }
-    for li in 0..s.libs.len() {
-        let l = s.lib(li);
-        for i in 0..l.xn {
-            let x = s.xt(add(l.x0, i));
-            if find_gh(in s, x.name) != NONE64
-                || find_gs(in s, x.name) != NONE64
-                || find_ge(in s, x.name) != NONE64 {
-                return duplicate(inout s, x.name);
+    for li in 0.. state.libs.len() {
+        let lib_row = state.lib(li);
+        for i in 0..lib_row.extern_count {
+            let ext_type = state.xt(add(lib_row.extern_start, i));
+            if find_gh(in state, ext_type.name) != NONE64
+                || find_gs(in state, ext_type.name) != NONE64
+                || find_ge(in state, ext_type.name) != NONE64 {
+                return duplicate(inout state, ext_type.name);
             }
-            s.ghs.push(Gh { name: x.name, linear: x.linear, copy: x.copy, mapping: x.mapping });
+            state.gen_handles.push(Gh {
+                name: ext_type.name,
+                linear: ext_type.linear,
+                copy: ext_type.copy,
+                mapping: ext_type.mapping
+            });
         }
     }
-    for i in 0..s.pars.len() {
-        if s.par(i).tag == P_PINNED {
-            s.pinned = true;
+    for i in 0.. state.params.len() {
+        if state.par(i).tag == P_PINNED {
+            state.pinned = true;
         }
     }
-    for fi in 0..s.funs.len() {
-        let sh = compute_shape(inout s, fi);
-        if sh.ok && s.mentions_result(sh.result) {
-            s.invalid = true;
+    for fi in 0.. state.funs.len() {
+        let sh = compute_shape(inout state, fi);
+        if sh.ok && state.mentions_result(sh.result) {
+            state.invalid = true;
         }
-        s.shs.push(sh);
+        state.shapes.push(sh);
     }
     no_err()
 }
 
-fn shape_err(inout s: S, mark: u64) -> Sh {
-    Sh { ok: false, err: s.intern_tail(mark), p0: 0, pn: 0, result: NONE }
+fn shape_err(inout state: S, mark: u64) -> Sh {
+    Sh { ok: false, err: state.intern_tail(mark), param_start: 0, param_count: 0, result: NONE }
 }
 
 // `Generated::pointee`: the source type of a pointee, or NONE after
 // writing the error.
-fn pointee(inout s: S, p: Par) -> u32 {
-    if !p.pstruct {
-        return s.ty_name(sym8(p.psc));
+fn pointee(inout state: S, param: Par) -> u32 {
+    if !param.elem_is_struct {
+        return state.ty_name(sym8(param.elem_scalar));
     }
-    let at = find_gs(in s, p.pname);
+    let at = find_gs(in state, param.type_name);
     if at == NONE64 {
-        s.put(in "wire struct ");
-        s.put_name(p.pname);
-        s.put(in " was not generated");
+        state.put(in "wire struct ");
+        state.put_name(param.type_name);
+        state.put(in " was not generated");
         return NONE;
     }
-    let g = s.gs(at);
-    if !g.ok {
-        s.put(in "wire struct ");
-        s.put_name(p.pname);
-        s.put(in ": ");
-        s.put_name(g.err);
+    let adt = state.gs(at);
+    if !adt.ok {
+        state.put(in "wire struct ");
+        state.put_name(param.type_name);
+        state.put(in ": ");
+        state.put_name(adt.err);
         return NONE;
     }
-    s.ty_name(p.pname)
+    state.ty_name(param.type_name)
 }
 
-fn in_place_element(p: Par) -> bool {
-    !p.pstruct
+fn in_place_element(param: Par) -> bool {
+    !param.elem_is_struct
         && (
-            p.psc == SC_U8
-                || p.psc == SC_U32
-                || p.psc == SC_U64
-                || p.psc == SC_I64
-                || p.psc == SC_USIZE
+            param.elem_scalar == SC_U8
+                || param.elem_scalar == SC_U32
+                || param.elem_scalar == SC_U64
+                || param.elem_scalar == SC_I64
+                || param.elem_scalar == SC_USIZE
         )
 }
 
@@ -1687,224 +1738,224 @@ fn handle_pass(access: u8) -> u8 {
 // as callback type `name` of library row `lib`, or NONE after writing the
 // error. Its parameters and result each cross as one C word or float, and
 // its row holds the direct libraries' effects and `Realtime`.
-fn callback_type(inout s: S, lib: u64, name: u32) -> u32 {
-    let l = s.lib(lib);
+fn callback_type(inout state: S, lib: u64, name: u32) -> u32 {
+    let lib_row = state.lib(lib);
     let mut fi = NONE64;
-    for i in 0..l.fc {
-        let f = s.fun(add(l.f0, i));
-        if f.indirect && f.sym == name {
-            fi = add(l.f0, i);
+    for i in 0..lib_row.fun_count {
+        let func = state.fun(add(lib_row.fun_start, i));
+        if func.indirect && func.sym == name {
+            fi = add(lib_row.fun_start, i);
         }
     }
     if fi == NONE64 {
-        s.put_name(name);
-        s.put(in " is not a callback type");
+        state.put_name(name);
+        state.put(in " is not a callback type");
         return NONE;
     }
-    let f = s.fun(fi);
+    let func = state.fun(fi);
     let mut args = ChunkSeq::new[u32]();
     let mut ok = true;
-    for j in 1..f.pn {
-        let p = s.par(add(f.p0, j));
-        if p.tag == P_VALUE && p.vt.tag == VT_SCALAR {
-            args.push(s.ty_name(sym8(p.vt.sc)));
-        } else if p.tag == P_VALUE && p.vt.tag == VT_FLOAT {
-            args.push(s.ty_name(p.vt.name));
+    for j in 1..func.param_count {
+        let param = state.par(add(func.param_start, j));
+        if param.tag == P_VALUE && param.value_ty.tag == VT_SCALAR {
+            args.push(state.ty_name(sym8(param.value_ty.scalar)));
+        } else if param.tag == P_VALUE && param.value_ty.tag == VT_FLOAT {
+            args.push(state.ty_name(param.value_ty.name));
         } else {
             ok = false;
         }
     }
-    let v = f.result;
-    if v.tag == VT_UNIT {
+    let result_vt = func.result;
+    if result_vt.tag == VT_UNIT {
         let none = ChunkSeq::new[u32]();
-        args.push(s.ty_tuple(in none));
-    } else if v.tag == VT_SCALAR {
-        args.push(s.ty_name(sym8(v.sc)));
-    } else if v.tag == VT_FLOAT {
-        args.push(s.ty_name(v.name));
+        args.push(state.ty_tuple(in none));
+    } else if result_vt.tag == VT_SCALAR {
+        args.push(state.ty_name(sym8(result_vt.scalar)));
+    } else if result_vt.tag == VT_FLOAT {
+        args.push(state.ty_name(result_vt.name));
     } else {
         ok = false;
     }
-    if !ok || f.errno {
-        s.put(in "C calls a Vesper function of callback type ");
-        s.put_name(name);
-        s.put(
+    if !ok || func.errno {
+        state.put(in "C calls a Vesper function of callback type ");
+        state.put_name(name);
+        state.put(
             in " only with integer or float parameters and an integer, float or Unit result, without errno, for now"
         );
         return NONE;
     }
-    let passes = s.fpass.len();
-    for j in 1..f.pn {
-        s.fpass.push(PASS_IN);
+    let passes = state.fn_passes.len();
+    for j in 1..func.param_count {
+        state.fn_passes.push(PASS_IN);
     }
-    let t = s.ty_named(n32(passes), in args);
-    let mut node = s.tn(t);
+    let fn_ty = state.ty_named(n32(passes), in args);
+    let mut node = state.tn(fn_ty);
     node.kind = TK_FN;
-    s.tns.try_set(w(t), node);
-    t
+    state.type_nodes.try_set(w(fn_ty), node);
+    fn_ty
 }
 
 // `Generated::compute_shape` of function row `fi`.
-pub fn compute_shape(inout s: S, fi: u64) -> Sh {
-    let f = s.fun(fi);
-    let mark = s.out.len();
+pub fn compute_shape(inout state: S, fi: u64) -> Sh {
+    let func = state.fun(fi);
+    let mark = state.out.len();
     let mut params = ChunkSeq::new[Sp]();
-    for j in 0..f.pn {
-        let p = s.par(add(f.p0, j));
-        let mut sp = Sp {
-            name: p.name,
+    for j in 0..func.param_count {
+        let param = state.par(add(func.param_start, j));
+        let mut shape_param = Sp {
+            name: param.name,
             pass: PASS_IN,
             slice: false,
             ty: NONE,
             nullable: false,
             in_place: false
         };
-        if p.tag == P_VALUE {
-            let v = p.vt;
-            if v.tag == VT_SCALAR {
-                sp.ty = s.ty_name(sym8(v.sc));
-            } else if v.tag == VT_FLOAT {
-                sp.ty = s.ty_name(v.name);
-            } else if v.tag == VT_BOOL {
-                sp.ty = s.ty_name(S_BOOL);
-            } else if v.tag == VT_ENUM {
-                sp.ty = s.ty_name(v.name);
-            } else if v.tag == VT_UNIT {
-                s.put(in "Unit parameter");
-                return shape_err(inout s, mark);
-            } else if v.tag == VT_CSTR || v.tag == VT_CWSTR {
-                s.put(in "a C string result is not a parameter");
-                return shape_err(inout s, mark);
-            } else if v.tag == VT_HANDLE || v.tag == VT_NONNULL {
-                s.put(in "a handle parameter needs a mode");
-                return shape_err(inout s, mark);
+        if param.tag == P_VALUE {
+            let value_ty = param.value_ty;
+            if value_ty.tag == VT_SCALAR {
+                shape_param.ty = state.ty_name(sym8(value_ty.scalar));
+            } else if value_ty.tag == VT_FLOAT {
+                shape_param.ty = state.ty_name(value_ty.name);
+            } else if value_ty.tag == VT_BOOL {
+                shape_param.ty = state.ty_name(S_BOOL);
+            } else if value_ty.tag == VT_ENUM {
+                shape_param.ty = state.ty_name(value_ty.name);
+            } else if value_ty.tag == VT_UNIT {
+                state.put(in "Unit parameter");
+                return shape_err(inout state, mark);
+            } else if value_ty.tag == VT_CSTR || value_ty.tag == VT_CWSTR {
+                state.put(in "a C string result is not a parameter");
+                return shape_err(inout state, mark);
+            } else if value_ty.tag == VT_HANDLE || value_ty.tag == VT_NONNULL {
+                state.put(in "a handle parameter needs a mode");
+                return shape_err(inout state, mark);
             } else {
-                s.put(
+                state.put(
                     in "address parameters have no source carrier (source code has no raw pointers)"
                 );
-                return shape_err(inout s, mark);
+                return shape_err(inout state, mark);
             }
-        } else if p.tag == P_POINTER {
-            let t = pointee(inout s, p);
-            if t == NONE {
-                return shape_err(inout s, mark);
+        } else if param.tag == P_POINTER {
+            let pointee_ty = pointee(inout state, param);
+            if pointee_ty == NONE {
+                return shape_err(inout state, mark);
             }
-            sp.ty = if p.nullable {
-                s.ty_app1(S_OPTION, t)
+            shape_param.ty = if param.nullable {
+                state.ty_app1(S_OPTION, pointee_ty)
             } else {
-                t
+                pointee_ty
             };
-            sp.pass = if p.access == A_IN {
+            shape_param.pass = if param.access == A_IN {
                 PASS_IN
             } else {
                 PASS_INOUT
             };
-        } else if p.tag == P_SLICE {
-            sp.pass = if p.access == A_IN {
+        } else if param.tag == P_SLICE {
+            shape_param.pass = if param.access == A_IN {
                 PASS_IN
             } else {
                 PASS_INOUT
             };
-            let t = pointee(inout s, p);
-            if t == NONE {
-                return shape_err(inout s, mark);
+            let elem_ty = pointee(inout state, param);
+            if elem_ty == NONE {
+                return shape_err(inout state, mark);
             }
-            sp.slice = true;
-            sp.ty = t;
-            sp.nullable = p.nullable;
-            sp.in_place = in_place_element(p);
-        } else if p.tag == P_HANDLE {
-            sp.pass = handle_pass(p.access);
-            sp.ty = s.ty_name(p.pname);
-        } else if p.tag == P_FUNCTION {
+            shape_param.slice = true;
+            shape_param.ty = elem_ty;
+            shape_param.nullable = param.nullable;
+            shape_param.in_place = in_place_element(param);
+        } else if param.tag == P_HANDLE {
+            shape_param.pass = handle_pass(param.access);
+            shape_param.ty = state.ty_name(param.type_name);
+        } else if param.tag == P_FUNCTION {
             // A named Vesper function, handed to C as a trampoline.
-            sp.ty = callback_type(inout s, f.lib, p.pname);
-            if sp.ty == NONE {
-                return shape_err(inout s, mark);
+            shape_param.ty = callback_type(inout state, func.lib, param.type_name);
+            if shape_param.ty == NONE {
+                return shape_err(inout state, mark);
             }
-        } else if p.tag == P_PINNED {
-            sp.pass = if p.access == A_IN {
+        } else if param.tag == P_PINNED {
+            shape_param.pass = if param.access == A_IN {
                 PASS_IN
             } else {
                 PASS_INOUT
             };
-            let t = s.ty_name(sym8(p.psc));
-            sp.ty = s.ty_app1(S_PINNED, t);
-        } else if p.tag == P_CWSTR {
-            let u16t = s.ty_name(sym8(SC_U16));
-            sp.ty = s.ty_app1(S_SLICE, u16t);
+            let elem_ty = state.ty_name(sym8(param.elem_scalar));
+            shape_param.ty = state.ty_app1(S_PINNED, elem_ty);
+        } else if param.tag == P_CWSTR {
+            let u16_ty = state.ty_name(sym8(SC_U16));
+            shape_param.ty = state.ty_app1(S_SLICE, u16_ty);
         } else {
-            let u8t = s.ty_name(sym8(SC_U8));
-            sp.ty = s.ty_app1(S_SLICE, u8t);
+            let u8_ty = state.ty_name(sym8(SC_U8));
+            shape_param.ty = state.ty_app1(S_SLICE, u8_ty);
         }
-        params.push(sp);
+        params.push(shape_param);
     }
-    let v = f.result;
+    let result_vt = func.result;
     let mut result = NONE;
-    if v.tag == VT_UNIT {
+    if result_vt.tag == VT_UNIT {
         let none = ChunkSeq::new[u32]();
-        result = s.ty_tuple(in none);
-    } else if v.tag == VT_SCALAR {
-        result = s.ty_name(sym8(v.sc));
-    } else if v.tag == VT_FLOAT {
-        result = s.ty_name(v.name);
-    } else if v.tag == VT_BOOL {
-        let t = s.ty_name(S_BOOL);
-        let i = s.ty_name(S_INVALID);
-        result = s.ty_app2(S_RESULT, t, i);
-    } else if v.tag == VT_ENUM {
-        let t = s.ty_name(v.name);
-        let i = s.ty_name(S_INVALID);
-        result = s.ty_app2(S_RESULT, t, i);
-    } else if v.tag == VT_ADDRESS {
-        s.put(
+        result = state.ty_tuple(in none);
+    } else if result_vt.tag == VT_SCALAR {
+        result = state.ty_name(sym8(result_vt.scalar));
+    } else if result_vt.tag == VT_FLOAT {
+        result = state.ty_name(result_vt.name);
+    } else if result_vt.tag == VT_BOOL {
+        let inner_ty = state.ty_name(S_BOOL);
+        let invalid_ty = state.ty_name(S_INVALID);
+        result = state.ty_app2(S_RESULT, inner_ty, invalid_ty);
+    } else if result_vt.tag == VT_ENUM {
+        let inner_ty = state.ty_name(result_vt.name);
+        let invalid_ty = state.ty_name(S_INVALID);
+        result = state.ty_app2(S_RESULT, inner_ty, invalid_ty);
+    } else if result_vt.tag == VT_ADDRESS {
+        state.put(
             in "ForeignVal[Ptr[..]] results have no source carrier (source code has no raw pointers)"
         );
-        return shape_err(inout s, mark);
-    } else if v.tag == VT_CSTR {
-        let byte = s.ty_name(sym8(SC_U8));
-        let text = s.ty_app1(S_CHUNK_SEQ, byte);
-        result = s.ty_app1(S_OPTION, text);
-    } else if v.tag == VT_CWSTR {
-        let unit = s.ty_name(sym8(SC_U16));
-        let text = s.ty_app1(S_CHUNK_SEQ, unit);
-        result = s.ty_app1(S_OPTION, text);
-    } else if v.tag == VT_HANDLE && v.nullable {
-        let t = s.ty_name(v.name);
-        result = s.ty_app1(S_OPTION, t);
-    } else if v.tag == VT_HANDLE {
-        let t = s.ty_name(v.name);
-        let i = s.ty_name(S_INVALID);
-        result = s.ty_app2(S_RESULT, t, i);
+        return shape_err(inout state, mark);
+    } else if result_vt.tag == VT_CSTR {
+        let byte = state.ty_name(sym8(SC_U8));
+        let text = state.ty_app1(S_CHUNK_SEQ, byte);
+        result = state.ty_app1(S_OPTION, text);
+    } else if result_vt.tag == VT_CWSTR {
+        let unit = state.ty_name(sym8(SC_U16));
+        let text = state.ty_app1(S_CHUNK_SEQ, unit);
+        result = state.ty_app1(S_OPTION, text);
+    } else if result_vt.tag == VT_HANDLE && result_vt.nullable {
+        let inner_ty = state.ty_name(result_vt.name);
+        result = state.ty_app1(S_OPTION, inner_ty);
+    } else if result_vt.tag == VT_HANDLE {
+        let inner_ty = state.ty_name(result_vt.name);
+        let invalid_ty = state.ty_name(S_INVALID);
+        result = state.ty_app2(S_RESULT, inner_ty, invalid_ty);
     } else {
-        result = s.ty_name(v.name);
+        result = state.ty_name(result_vt.name);
     }
     // `wrap_result`.
-    if f.errno {
-        let u32t = s.ty_name(sym8(SC_U32));
+    if func.errno {
+        let u32_ty = state.ty_name(sym8(SC_U32));
         let mut pair = ChunkSeq::new[u32]();
         pair.push(result);
-        pair.push(u32t);
-        result = s.ty_tuple(in pair);
+        pair.push(u32_ty);
+        result = state.ty_tuple(in pair);
     }
-    if takes_cstr(in s, fi) {
-        let i = s.ty_name(S_INVALID);
-        result = s.ty_app2(S_RESULT, result, i);
+    if takes_cstr(in state, fi) {
+        let invalid_ty = state.ty_name(S_INVALID);
+        result = state.ty_app2(S_RESULT, result, invalid_ty);
     }
-    let p0 = s.sps.len();
+    let param_start = state.shape_params.len();
     for j in 0..params.len() {
         match params.try_get(j) {
-            Option::Some(x) => s.sps.push(x),
+            Option::Some(x) => state.shape_params.push(x),
             Option::None => {},
         }
     }
-    Sh { ok: true, err: NONE, p0: p0, pn: params.len(), result: result }
+    Sh { ok: true, err: NONE, param_start: param_start, param_count: params.len(), result: result }
 }
 
-fn takes_cstr(in s: S, fi: u64) -> bool {
-    let f = s.fun(fi);
-    for j in 0..f.pn {
-        let tag = s.par(add(f.p0, j)).tag;
+fn takes_cstr(in state: S, fi: u64) -> bool {
+    let func = state.fun(fi);
+    for j in 0..func.param_count {
+        let tag = state.par(add(func.param_start, j)).tag;
         if tag == P_CSTR || tag == P_CWSTR {
             return true;
         }
@@ -1912,10 +1963,10 @@ fn takes_cstr(in s: S, fi: u64) -> bool {
     false
 }
 
-pub fn slice_count(in s: S, sh: Sh) -> u64 {
+pub fn slice_count(in state: S, shape: Sh) -> u64 {
     let mut n: u64 = 0;
-    for j in 0..sh.pn {
-        if s.sp(add(sh.p0, j)).slice {
+    for j in 0..shape.param_count {
+        if state.sp(add(shape.param_start, j)).slice {
             n = inc(n);
         }
     }
@@ -1926,114 +1977,114 @@ pub fn slice_count(in s: S, sh: Sh) -> u64 {
 
 // Sorts `xs` (indices whose names `key` gives) by name: insertion sort,
 // stable, as the BTreeMaps of the Rust side iterate.
-fn sort_by_name(in s: S, inout xs: ChunkSeq[u32]) {
+fn sort_by_name(in state: S, inout xs: ChunkSeq[u32]) {
     let n = xs.len();
     for i in 1..n {
-        let x = u32_at(in xs, i);
+        let key = u32_at(in xs, i);
         let mut j = i;
         loop {
             if j == 0 {
                 break;
             }
-            let y = u32_at(in xs, wrapping_sub(j, 1));
-            if s.name_cmp(y, x) <= 0 {
+            let prev = u32_at(in xs, wrapping_sub(j, 1));
+            if state.name_cmp(prev, key) <= 0 {
                 break;
             }
-            xs.try_set(j, y);
+            xs.try_set(j, prev);
             j = wrapping_sub(j, 1);
         }
-        xs.try_set(j, x);
+        xs.try_set(j, key);
     }
 }
 
 // Generated struct (Ok only), enum and handle names, each table sorted.
-fn sorted_struct_rows(in s: S) -> ChunkSeq[u32] {
+fn sorted_struct_rows(in state: S) -> ChunkSeq[u32] {
     let mut names = ChunkSeq::new[u32]();
-    for i in 0..s.gss.len() {
-        let g = s.gs(i);
-        if g.ok {
-            names.push(g.name);
+    for i in 0.. state.gen_structs.len() {
+        let adt = state.gs(i);
+        if adt.ok {
+            names.push(adt.name);
         }
     }
-    sort_by_name(in s, inout names);
+    sort_by_name(in state, inout names);
     names
 }
 
-fn sorted_enum_names(in s: S) -> ChunkSeq[u32] {
+fn sorted_enum_names(in state: S) -> ChunkSeq[u32] {
     let mut names = ChunkSeq::new[u32]();
-    for i in 0..s.ges.len() {
-        names.push(s.ge(i).name);
+    for i in 0.. state.gen_enums.len() {
+        names.push(state.ge(i).name);
     }
-    sort_by_name(in s, inout names);
+    sort_by_name(in state, inout names);
     names
 }
 
-fn sorted_handle_names(in s: S) -> ChunkSeq[u32] {
+fn sorted_handle_names(in state: S) -> ChunkSeq[u32] {
     let mut names = ChunkSeq::new[u32]();
-    for i in 0..s.ghs.len() {
-        names.push(s.gh(i).name);
+    for i in 0.. state.gen_handles.len() {
+        names.push(state.gh(i).name);
     }
-    sort_by_name(in s, inout names);
+    sort_by_name(in state, inout names);
     names
 }
 
 // ----- `append` ---------------------------------------------------------------
 
-fn put_mode(inout s: S, linear: bool, aff: bool) {
+fn put_mode(inout state: S, linear: bool, affine: bool) {
     if linear {
-        s.put(in "linear");
-    } else if aff {
-        s.put(in "affine");
+        state.put(in "linear");
+    } else if affine {
+        state.put(in "affine");
     } else {
-        s.put(in "copy");
+        state.put(in "copy");
     }
 }
 
-fn put_pass(inout s: S, pass: u8) {
+fn put_pass(inout state: S, pass: u8) {
     if pass == PASS_IN {
-        s.put(in "in");
+        state.put(in "in");
     } else if pass == PASS_INOUT {
-        s.put(in "inout");
+        state.put(in "inout");
     } else {
-        s.put(in "sink");
+        state.put(in "sink");
     }
 }
 
 // `adt NAME mode=.. enum=.. tile=- @0..0` and its variant line.
-fn adt_head(inout s: S, name: u32, linear: bool, aff: bool, is_enum: bool) {
-    s.indent(1);
-    s.put(in "adt ");
-    s.put_q(name);
-    s.put(in " mode=");
-    put_mode(inout s, linear, aff);
+fn adt_head(inout state: S, name: u32, linear: bool, affine: bool, is_enum: bool) {
+    state.indent(1);
+    state.put(in "adt ");
+    state.put_q(name);
+    state.put(in " mode=");
+    put_mode(inout state, linear, affine);
     if is_enum {
-        s.put(in " enum=1");
+        state.put(in " enum=1");
     } else {
-        s.put(in " enum=0");
+        state.put(in " enum=0");
     }
-    s.put(in " tile=- @0..0");
-    s.nl();
+    state.put(in " tile=- @0..0");
+    state.nl();
 }
 
-fn variant_line(inout s: S, name: u32, named: bool) {
-    s.indent(2);
-    s.put(in "variant ");
-    s.put_q(name);
+fn variant_line(inout state: S, name: u32, named: bool) {
+    state.indent(2);
+    state.put(in "variant ");
+    state.put_q(name);
     if named {
-        s.put(in " named=1");
+        state.put(in " named=1");
     } else {
-        s.put(in " named=0");
+        state.put(in " named=0");
     }
-    s.nl();
+    state.nl();
 }
 
-fn field_line(inout s: S, name: u32, ty: u32) {
-    s.indent(3);
-    s.put(in "field ");
-    s.put_q(name);
-    s.put(in " modality=- temp=-");
-    s.nl();
-    s.dump_ty(ty, 4);
+fn field_line(inout state: S, name: u32, ty: u32) {
+    state.indent(3);
+    state.put(in "field ");
+    state.put_q(name);
+    state.put(in " modality=- temp=-");
+    state.nl();
+    state.dump_ty(ty, 4);
 }
 
 // One slice-length vector of an instance: lens[a..a+n].
@@ -2047,110 +2098,114 @@ pub copy struct Inst {
 // `Generated::append` onto an empty module, dumped as the AST dump's
 // items (depth 1). Pass 1 when `pass2` is false; pass 2 declares one
 // operation per vector of `insts` (sorted and unique, as a BTreeSet).
-pub fn append(inout s: S, pass2: bool, in insts: ChunkSeq[Inst], in lens: ChunkSeq[u64]) {
-    let structs = sorted_struct_rows(in s);
+pub fn append(inout state: S, pass2: bool, in insts: ChunkSeq[Inst], in lens: ChunkSeq[u64]) {
+    let structs = sorted_struct_rows(in state);
     for i in 0..structs.len() {
-        let g = s.gs(find_gs(in s, u32_at(in structs, i)));
-        adt_head(inout s, g.name, false, false, false);
-        variant_line(inout s, g.name, true);
-        for j in 0..g.fc {
-            let f = s.gf(add(g.f0, j));
-            field_line(inout s, f.name, f.ty);
+        let adt = state.gs(find_gs(in state, u32_at(in structs, i)));
+        adt_head(inout state, adt.name, false, false, false);
+        variant_line(inout state, adt.name, true);
+        for j in 0..adt.field_count {
+            let field = state.gf(add(adt.field_start, j));
+            field_line(inout state, field.name, field.ty);
         }
     }
-    let enums = sorted_enum_names(in s);
+    let enums = sorted_enum_names(in state);
     for i in 0..enums.len() {
-        let row = s.enum_row(s.ge(find_ge(in s, u32_at(in enums, i))).row);
-        adt_head(inout s, row.name, false, false, true);
-        for j in 0..row.vn {
-            variant_line(inout s, u32_at(in s.vars, add(row.v0, j)), false);
+        let row = state.enum_row(state.ge(find_ge(in state, u32_at(in enums, i))).row);
+        adt_head(inout state, row.name, false, false, true);
+        for j in 0..row.variant_count {
+            variant_line(
+                inout state,
+                u32_at(in state.variant_names, add(row.variant_start, j)),
+                false
+            );
         }
     }
-    let handles = sorted_handle_names(in s);
+    let handles = sorted_handle_names(in state);
     for i in 0..handles.len() {
-        let h = s.gh(find_gh(in s, u32_at(in handles, i)));
-        if h.mapping != NONE {
+        let handle = state.gh(find_gh(in state, u32_at(in handles, i)));
+        if handle.mapping != NONE {
             // A mapping is viewed in place through a sequence over the
             // foreign memory.
-            adt_head(inout s, h.name, true, false, false);
-            variant_line(inout s, h.name, true);
-            let element = s.ty_name(h.mapping);
-            let seq = s.ty_app1(S_CHUNK_SEQ, element);
-            field_line(inout s, S_DATA, seq);
+            adt_head(inout state, handle.name, true, false, false);
+            variant_line(inout state, handle.name, true);
+            let element = state.ty_name(handle.mapping);
+            let seq = state.ty_app1(S_CHUNK_SEQ, element);
+            field_line(inout state, S_DATA, seq);
             continue;
         }
-        adt_head(inout s, h.name, h.linear, !h.linear && !h.copy, false);
-        variant_line(inout s, h.name, true);
-        let u64t = s.ty_name(sym8(SC_U64));
-        field_line(inout s, S_HANDLE, u64t);
+        adt_head(inout state, handle.name, handle.linear, !handle.linear && !handle.copy, false);
+        variant_line(inout state, handle.name, true);
+        let u64_ty = state.ty_name(sym8(SC_U64));
+        field_line(inout state, S_HANDLE, u64_ty);
     }
     // `linear struct Pinned[T] { data: ChunkSeq[T] }`.
-    if s.pinned {
-        adt_head(inout s, S_PINNED, true, false, false);
-        s.indent(2);
-        s.put(in "generic \"T\" bound=linear row=0");
-        s.nl();
-        variant_line(inout s, S_PINNED, true);
-        let t = s.ty_name(S_T);
-        let seq = s.ty_app1(S_CHUNK_SEQ, t);
-        field_line(inout s, S_DATA, seq);
-        s.indent(1);
-        s.put(in "impl");
-        s.nl();
-        s.indent(2);
-        s.put(in "generic \"T\" bound=linear row=0");
-        s.nl();
-        let pt = s.ty_app1(S_PINNED, t);
-        s.dump_ty(pt, 2);
-        s.indent(2);
-        s.put(in "fn \"address\" fip=0 @0..0");
-        s.nl();
-        s.indent(3);
-        s.put(in "param \"self\" pass=in @0..0");
-        s.nl();
-        s.dump_ty(pt, 4);
-        s.indent(3);
-        s.put(in "result");
-        s.nl();
-        let u64t = s.ty_name(sym8(SC_U64));
-        s.dump_ty(u64t, 4);
+    if state.pinned {
+        adt_head(inout state, S_PINNED, true, false, false);
+        state.indent(2);
+        state.put(in "generic \"T\" bound=linear row=0");
+        state.nl();
+        variant_line(inout state, S_PINNED, true);
+        let generic_ty = state.ty_name(S_T);
+        let seq = state.ty_app1(S_CHUNK_SEQ, generic_ty);
+        field_line(inout state, S_DATA, seq);
+        state.indent(1);
+        state.put(in "impl");
+        state.nl();
+        state.indent(2);
+        state.put(in "generic \"T\" bound=linear row=0");
+        state.nl();
+        let pinned_ty = state.ty_app1(S_PINNED, generic_ty);
+        state.dump_ty(pinned_ty, 2);
+        state.indent(2);
+        state.put(in "fn \"address\" fip=0 @0..0");
+        state.nl();
+        state.indent(3);
+        state.put(in "param \"self\" pass=in @0..0");
+        state.nl();
+        state.dump_ty(pinned_ty, 4);
+        state.indent(3);
+        state.put(in "result");
+        state.nl();
+        let u64_ty = state.ty_name(sym8(SC_U64));
+        state.dump_ty(u64_ty, 4);
     }
-    if s.invalid {
-        adt_head(inout s, S_INVALID, false, false, false);
-        variant_line(inout s, S_INVALID, true);
-        let u64t = s.ty_name(sym8(SC_U64));
-        field_line(inout s, S_RAW, u64t);
+    if state.invalid {
+        adt_head(inout state, S_INVALID, false, false, false);
+        variant_line(inout state, S_INVALID, true);
+        let u64_ty = state.ty_name(sym8(SC_U64));
+        field_line(inout state, S_RAW, u64_ty);
     }
-    for li in 0..s.libs.len() {
-        let l = s.lib(li);
-        s.indent(1);
-        s.put(in "effect_decl \"Ffi$");
+    for li in 0.. state.libs.len() {
+        let lib_row = state.lib(li);
+        state.indent(1);
+        state.put(in "effect_decl \"Ffi$");
         // The library name is an identifier: no byte needs quoting.
-        s.put_name(l.name);
-        s.put(in "\" linear=1 @0..0");
-        s.nl();
+        state.put_name(lib_row.name);
+        state.put(in "\" linear=1 @0..0");
+        state.nl();
         let mut syms = ChunkSeq::new[u32]();
-        for i in 0..l.fc {
-            syms.push(n32(add(l.f0, i)));
+        for i in 0..lib_row.fun_count {
+            syms.push(n32(add(lib_row.fun_start, i)));
         }
-        sort_funs(in s, inout syms);
+        sort_funs(in state, inout syms);
         for i in 0..syms.len() {
             let fi = w(u32_at(in syms, i));
-            let f = s.fun(fi);
-            let sh = s.sh(fi);
+            let func = state.fun(fi);
+            let sh = state.sh(fi);
             if !sh.ok {
                 continue;
             }
             if !pass2 {
-                op_decl(inout s, f.sym, sh, false, in lens, 0, 0);
+                op_decl(inout state, func.sym, sh, false, in lens, 0, 0);
                 continue;
             }
             for k in 0..insts.len() {
                 match insts.try_get(k) {
-                    Option::Some(x) => {
-                        if x.lib == l.name && x.sym == f.sym {
-                            let open = x.n != slice_count(in s, sh);
-                            op_decl(inout s, f.sym, sh, !open, in lens, x.a, x.n);
+                    Option::Some(inst) => {
+                        if inst.lib == lib_row.name && inst.sym == func.sym {
+                            let open = inst.n != slice_count(in state, sh);
+                            op_decl(inout state, func.sym, sh, !open, in lens, inst.a, inst.n);
                         }
                     },
                     Option::None => {},
@@ -2159,214 +2214,228 @@ pub fn append(inout s: S, pass2: bool, in insts: ChunkSeq[Inst], in lens: ChunkS
         }
     }
     let mut next_span: u64 = 1;
-    for li in 0..s.libs.len() {
-        let l = s.lib(li);
-        for ci in 0..l.cn {
-            let cr = s.const_row(add(l.c0, ci));
-            s.indent(1);
-            s.put(in "fn \"const$FfiConst$");
-            s.put_name(l.name);
-            s.put(in "$");
-            s.put_name(cr.name);
-            s.put(in "\" fip=0 @0..0");
-            s.nl();
-            s.indent(2);
-            s.put(in "result");
-            s.nl();
-            let cty = s.ty_name(sym8(cr.scalar));
-            s.dump_ty(cty, 3);
-            s.indent(2);
-            s.put(in "effects tail=-");
-            s.nl();
-            s.indent(2);
-            s.put(in "body");
-            s.nl();
-            s.indent(3);
-            s.put(in "E lit int ");
-            if cr.neg && cr.value != 0 {
-                s.put(in "-");
+    for li in 0.. state.libs.len() {
+        let lib_row = state.lib(li);
+        for ci in 0..lib_row.const_count {
+            let const_def = state.const_row(add(lib_row.const_start, ci));
+            state.indent(1);
+            state.put(in "fn \"const$FfiConst$");
+            state.put_name(lib_row.name);
+            state.put(in "$");
+            state.put_name(const_def.name);
+            state.put(in "\" fip=0 @0..0");
+            state.nl();
+            state.indent(2);
+            state.put(in "result");
+            state.nl();
+            let const_ty = state.ty_name(sym8(const_def.scalar));
+            state.dump_ty(const_ty, 3);
+            state.indent(2);
+            state.put(in "effects tail=-");
+            state.nl();
+            state.indent(2);
+            state.put(in "body");
+            state.nl();
+            state.indent(3);
+            state.put(in "E lit int ");
+            if const_def.neg && const_def.value != 0 {
+                state.put(in "-");
             }
-            s.put_u64(cr.value);
-            s.put(in " @");
-            s.put_u64(next_span);
-            s.put(in "..");
-            s.put_u64(next_span);
-            s.nl();
+            state.put_u64(const_def.value);
+            state.put(in " @");
+            state.put_u64(next_span);
+            state.put(in "..");
+            state.put_u64(next_span);
+            state.nl();
             next_span = add(next_span, 1);
         }
     }
 }
 
 // Function rows sorted by symbol.
-fn sort_funs(in s: S, inout xs: ChunkSeq[u32]) {
+fn sort_funs(in state: S, inout xs: ChunkSeq[u32]) {
     let n = xs.len();
     for i in 1..n {
-        let x = u32_at(in xs, i);
+        let key = u32_at(in xs, i);
         let mut j = i;
         loop {
             if j == 0 {
                 break;
             }
-            let y = u32_at(in xs, wrapping_sub(j, 1));
-            if s.name_cmp(s.fun(w(y)).sym, s.fun(w(x)).sym) <= 0 {
+            let prev = u32_at(in xs, wrapping_sub(j, 1));
+            if state.name_cmp(state.fun(w(prev)).sym, state.fun(w(key)).sym) <= 0 {
                 break;
             }
-            xs.try_set(j, y);
+            xs.try_set(j, prev);
             j = wrapping_sub(j, 1);
         }
-        xs.try_set(j, x);
+        xs.try_set(j, key);
     }
 }
 
-// `types::op_name` of `sym` and lens[a..a+n], written to `out`.
-pub fn put_op_name(inout s: S, sym: u32, in lens: ChunkSeq[u64], a: u64, n: u64) {
-    s.put_name(sym);
-    if n == 0 {
+// `types::op_name` of `sym` and `lens[len_start..][..len_count]`, written to `out`.
+pub fn put_op_name(
+    inout state: S,
+    sym: u32,
+    in lens: ChunkSeq[u64],
+    len_start: u64,
+    len_count: u64
+) {
+    state.put_name(sym);
+    if len_count == 0 {
         return;
     }
-    s.put(in "$");
-    for i in 0..n {
+    state.put(in "$");
+    for i in 0..len_count {
         if i > 0 {
-            s.put(in "_");
+            state.put(in "_");
         }
-        let x = u64_at(in lens, add(a, i));
-        if x == NONE64 {
-            s.put(in "s");
+        let len = u64_at(in lens, add(len_start, i));
+        if len == NONE64 {
+            state.put(in "s");
         } else {
-            s.put_u64(x);
+            state.put_u64(len);
         }
     }
 }
 
-// One operation: closed (`fixed`) with lens[a..a+n], or open.
-fn op_decl(inout s: S, sym: u32, sh: Sh, fixed: bool, in lens: ChunkSeq[u64], a: u64, n: u64) {
-    s.indent(2);
-    s.put(in "fn ");
-    let mark = s.out.len();
+// One operation: closed (`fixed`) with `lens[len_start..][..len_count]`, or open.
+fn op_decl(
+    inout state: S,
+    sym: u32,
+    shape: Sh,
+    fixed: bool,
+    in lens: ChunkSeq[u64],
+    len_start: u64,
+    len_count: u64
+) {
+    state.indent(2);
+    state.put(in "fn ");
+    let mark = state.out.len();
     if fixed {
-        put_op_name(inout s, sym, in lens, a, n);
+        put_op_name(inout state, sym, in lens, len_start, len_count);
     } else {
-        s.put_name(sym);
+        state.put_name(sym);
     }
-    let name = s.intern_tail(mark);
-    s.put_q(name);
-    s.put(in " fip=0 @0..0");
-    s.nl();
-    let mut slice: u64 = 0;
-    for j in 0..sh.pn {
-        let p = s.sp(add(sh.p0, j));
-        s.indent(3);
-        s.put(in "param ");
-        s.put_q(p.name);
-        s.put(in " pass=");
-        put_pass(inout s, p.pass);
-        s.put(in " @0..0");
-        s.nl();
-        if !p.slice {
-            s.dump_ty(p.ty, 4);
+    let name = state.intern_tail(mark);
+    state.put_q(name);
+    state.put(in " fip=0 @0..0");
+    state.nl();
+    let mut slice_index: u64 = 0;
+    for j in 0..shape.param_count {
+        let shape_param = state.sp(add(shape.param_start, j));
+        state.indent(3);
+        state.put(in "param ");
+        state.put_q(shape_param.name);
+        state.put(in " pass=");
+        put_pass(inout state, shape_param.pass);
+        state.put(in " @0..0");
+        state.nl();
+        if !shape_param.slice {
+            state.dump_ty(shape_param.ty, 4);
         } else if !fixed {
-            let t = s.ty_name(S_OPEN);
-            s.dump_ty(t, 4);
+            let param_ty = state.ty_name(S_OPEN);
+            state.dump_ty(param_ty, 4);
         } else {
-            let k = u64_at(in lens, add(a, slice));
-            slice = inc(slice);
-            let mut t = if k == NONE64 {
-                s.ty_app1(S_SLICE, p.ty)
+            let len = u64_at(in lens, add(len_start, slice_index));
+            slice_index = inc(slice_index);
+            let mut param_ty = if len == NONE64 {
+                state.ty_app1(S_SLICE, shape_param.ty)
             } else {
-                s.ty_repeat(p.ty, k)
+                state.ty_repeat(shape_param.ty, len)
             };
-            if p.nullable {
-                t = s.ty_app1(S_OPTION, t);
+            if shape_param.nullable {
+                param_ty = state.ty_app1(S_OPTION, param_ty);
             }
-            s.dump_ty(t, 4);
+            state.dump_ty(param_ty, 4);
         }
     }
-    s.indent(3);
-    s.put(in "result");
-    s.nl();
-    s.dump_ty(sh.result, 4);
-    s.indent(3);
-    s.put(in "effects tail=-");
-    s.nl();
+    state.indent(3);
+    state.put(in "result");
+    state.nl();
+    state.dump_ty(shape.result, 4);
+    state.indent(3);
+    state.put(in "effects tail=-");
+    state.nl();
 }
 
 // ----- shapes -----------------------------------------------------------------
 
-fn put_bit(inout s: S, b: bool) {
-    if b {
-        s.out.push(Ascii::Digit1);
+fn put_bit(inout state: S, bit: bool) {
+    if bit {
+        state.out.push(Ascii::Digit1);
     } else {
-        s.out.push(Ascii::Digit0);
+        state.out.push(Ascii::Digit0);
     }
 }
 
 // `shape LIB SYM ok|err ..`, every library's functions in descriptor order.
-pub fn dump_shapes(inout s: S) {
-    for fi in 0..s.funs.len() {
-        let f = s.fun(fi);
-        let sh = s.sh(fi);
-        s.put(in "shape ");
-        s.put_q(s.lib(f.lib).name);
-        s.put(in " ");
-        s.put_q(f.sym);
+pub fn dump_shapes(inout state: S) {
+    for fi in 0.. state.funs.len() {
+        let func = state.fun(fi);
+        let sh = state.sh(fi);
+        state.put(in "shape ");
+        state.put_q(state.lib(func.lib).name);
+        state.put(in " ");
+        state.put_q(func.sym);
         if !sh.ok {
-            s.put(in " err ");
-            s.put_q(sh.err);
-            s.nl();
+            state.put(in " err ");
+            state.put_q(sh.err);
+            state.nl();
             continue;
         }
-        s.put(in " ok slices=");
-        s.put_u64(slice_count(in s, sh));
-        s.nl();
-        for j in 0..sh.pn {
-            let p = s.sp(add(sh.p0, j));
-            s.indent(1);
-            s.put(in "param ");
-            s.put_q(p.name);
-            s.put(in " pass=");
-            put_pass(inout s, p.pass);
-            if p.slice {
-                s.put(in " slice nullable=");
-                put_bit(inout s, p.nullable);
-                s.put(in " in_place=");
-                put_bit(inout s, p.in_place);
+        state.put(in " ok slices=");
+        state.put_u64(slice_count(in state, sh));
+        state.nl();
+        for j in 0..sh.param_count {
+            let shape_param = state.sp(add(sh.param_start, j));
+            state.indent(1);
+            state.put(in "param ");
+            state.put_q(shape_param.name);
+            state.put(in " pass=");
+            put_pass(inout state, shape_param.pass);
+            if shape_param.slice {
+                state.put(in " slice nullable=");
+                put_bit(inout state, shape_param.nullable);
+                state.put(in " in_place=");
+                put_bit(inout state, shape_param.in_place);
             } else {
-                s.put(in " value");
+                state.put(in " value");
             }
-            s.nl();
-            s.dump_ty(p.ty, 2);
+            state.nl();
+            state.dump_ty(shape_param.ty, 2);
         }
-        s.indent(1);
-        s.put(in "result");
-        s.nl();
-        s.dump_ty(sh.result, 2);
+        state.indent(1);
+        state.put(in "result");
+        state.nl();
+        state.dump_ty(sh.result, 2);
     }
 }
 
 // ----- errors -----------------------------------------------------------------
 
-fn put_err(inout s: S, e: Err) {
-    if e.kind == K_DUPLICATE {
-        s.put(in "DuplicateLibrary");
-    } else if e.kind == K_COLLISION {
-        s.put(in "NameCollision");
-    } else if e.kind == K_SLICE {
-        s.put(in "SliceArgument");
-    } else if e.kind == K_TARGET {
-        s.put(in "TargetMismatch");
+fn put_err(inout state: S, err: Err) {
+    if err.kind == K_DUPLICATE {
+        state.put(in "DuplicateLibrary");
+    } else if err.kind == K_COLLISION {
+        state.put(in "NameCollision");
+    } else if err.kind == K_SLICE {
+        state.put(in "SliceArgument");
+    } else if err.kind == K_TARGET {
+        state.put(in "TargetMismatch");
     } else {
-        s.put(in "IsolationUnavailable");
+        state.put(in "IsolationUnavailable");
     }
-    if e.has_span {
-        s.put(in " @");
-        s.put_u64(e.start);
-        s.put(in "..");
-        s.put_u64(e.end);
+    if err.has_span {
+        state.put(in " @");
+        state.put_u64(err.start);
+        state.put(in "..");
+        state.put_u64(err.end);
     } else {
-        s.put(in " -");
+        state.put(in " -");
     }
-    s.put(in " ");
-    s.put_q(e.msg);
+    state.put(in " ");
+    state.put_q(err.msg);
 }
 
 fn err_at(kind: u8, msg: u32, has_span: bool, start: u64, end: u64) -> Err {
@@ -2381,20 +2450,20 @@ pub copy struct Item {
     end: u64,
 }
 
-fn is_reserved(in s: S, x: u32) -> bool {
-    s.spells(x, in "Option".as_bytes())
-        || s.spells(x, in "Result".as_bytes())
-        || s.spells(x, in "RuntimeError".as_bytes())
-        || s.spells(x, in "Unit".as_bytes())
-        || s.spells(x, in "Never".as_bytes())
-        || s.spells(x, in "String".as_bytes())
-        || s.spells(x, in "ArithOverflow".as_bytes())
-        || s.spells(x, in "Fail".as_bytes())
+fn is_reserved(in state: S, name: u32) -> bool {
+    state.spells(name, in "Option".as_bytes())
+        || state.spells(name, in "Result".as_bytes())
+        || state.spells(name, in "RuntimeError".as_bytes())
+        || state.spells(name, in "Unit".as_bytes())
+        || state.spells(name, in "Never".as_bytes())
+        || state.spells(name, in "String".as_bytes())
+        || state.spells(name, in "ArithOverflow".as_bytes())
+        || state.spells(name, in "Fail".as_bytes())
 }
 
-fn is_library(in s: S, x: u32) -> bool {
-    for i in 0..s.libs.len() {
-        if s.lib(i).name == x {
+fn is_library(in state: S, name: u32) -> bool {
+    for i in 0.. state.libs.len() {
+        if state.lib(i).name == name {
             return true;
         }
     }
@@ -2402,33 +2471,33 @@ fn is_library(in s: S, x: u32) -> bool {
 }
 
 // `Generated::names`, sorted.
-fn generated_names(in s: S) -> ChunkSeq[u32] {
+fn generated_names(in state: S) -> ChunkSeq[u32] {
     let mut names = ChunkSeq::new[u32]();
-    for i in 0..s.gss.len() {
-        let g = s.gs(i);
-        if g.ok {
-            names.push(g.name);
+    for i in 0.. state.gen_structs.len() {
+        let adt = state.gs(i);
+        if adt.ok {
+            names.push(adt.name);
         }
     }
-    for i in 0..s.ges.len() {
-        let x = s.ge(i).name;
+    for i in 0.. state.gen_enums.len() {
+        let name = state.ge(i).name;
         let mut seen = false;
         for j in 0..names.len() {
-            if u32_at(in names, j) == x {
+            if u32_at(in names, j) == name {
                 seen = true;
             }
         }
         if !seen {
-            names.push(x);
+            names.push(name);
         }
     }
-    for i in 0..s.ghs.len() {
-        names.push(s.gh(i).name);
+    for i in 0.. state.gen_handles.len() {
+        names.push(state.gh(i).name);
     }
-    if s.pinned {
+    if state.pinned {
         names.push(S_PINNED);
     }
-    if s.invalid {
+    if state.invalid {
         let mut seen = false;
         for j in 0..names.len() {
             if u32_at(in names, j) == S_INVALID {
@@ -2439,52 +2508,52 @@ fn generated_names(in s: S) -> ChunkSeq[u32] {
             names.push(S_INVALID);
         }
     }
-    sort_by_name(in s, inout names);
+    sort_by_name(in state, inout names);
     names
 }
 
 // `Generated::check_collisions` against a module's ADT and eff_name items.
-pub fn check_collisions(inout s: S, in items: ChunkSeq[Item]) -> Err {
-    let generated = generated_names(in s);
+pub fn check_collisions(inout state: S, in items: ChunkSeq[Item]) -> Err {
+    let generated = generated_names(in state);
     for i in 0..generated.len() {
-        let x = u32_at(in generated, i);
-        if is_reserved(in s, x) {
-            let mark = s.out.len();
-            s.put(in "'");
-            s.put_name(x);
-            s.put(in "' is a builtin and cannot be generated from a .vsys");
-            return err_at(K_COLLISION, s.intern_tail(mark), false, 0, 0);
+        let name = u32_at(in generated, i);
+        if is_reserved(in state, name) {
+            let mark = state.out.len();
+            state.put(in "'");
+            state.put_name(name);
+            state.put(in "' is a builtin and cannot be generated from a .vsys");
+            return err_at(K_COLLISION, state.intern_tail(mark), false, 0, 0);
         }
-        if is_library(in s, x) {
-            let mark = s.out.len();
-            s.put(in "'");
-            s.put_name(x);
-            s.put(in "' names both a library and one of its types");
-            return err_at(K_COLLISION, s.intern_tail(mark), false, 0, 0);
+        if is_library(in state, name) {
+            let mark = state.out.len();
+            state.put(in "'");
+            state.put_name(name);
+            state.put(in "' names both a library and one of its types");
+            return err_at(K_COLLISION, state.intern_tail(mark), false, 0, 0);
         }
     }
     for i in 0..items.len() {
-        let it = match items.try_get(i) {
-            Option::Some(x) => x,
+        let item = match items.try_get(i) {
+            Option::Some(name) => name,
             Option::None => Item { name: NONE, start: 0, end: 0 },
         };
-        let mut hit = is_library(in s, it.name);
+        let mut hit = is_library(in state, item.name);
         for j in 0..generated.len() {
-            if u32_at(in generated, j) == it.name {
+            if u32_at(in generated, j) == item.name {
                 hit = true;
             }
         }
         if hit {
-            let mark = s.out.len();
-            s.put(in "source declaration '");
-            s.put_name(it.name);
-            s.put(in "' collides with an imported .vsys name");
-            return err_at(K_COLLISION, s.intern_tail(mark), true, it.start, it.end);
+            let mark = state.out.len();
+            state.put(in "source declaration '");
+            state.put_name(item.name);
+            state.put(in "' collides with an imported .vsys name");
+            return err_at(K_COLLISION, state.intern_tail(mark), true, item.start, item.end);
         }
-        if it.name == S_FFI {
-            let mark = s.out.len();
-            s.put(in "'Ffi' is the foreign capability and cannot be declared in source");
-            return err_at(K_COLLISION, s.intern_tail(mark), true, it.start, it.end);
+        if item.name == S_FFI {
+            let mark = state.out.len();
+            state.put(in "'Ffi' is the foreign capability and cannot be declared in source");
+            return err_at(K_COLLISION, state.intern_tail(mark), true, item.start, item.end);
         }
     }
     no_err()
@@ -2493,48 +2562,48 @@ pub fn check_collisions(inout s: S, in items: ChunkSeq[Item]) -> Err {
 // ----- `demangle` -------------------------------------------------------------
 
 fn find_at(in hay: ChunkSeq[u8], in needle: ChunkSeq[u8], from: u64) -> u64 {
-    let n = needle.len();
-    let h = hay.len();
-    if n > h {
+    let needle_len = needle.len();
+    let hay_len = hay.len();
+    if needle_len > hay_len {
         return NONE64;
     }
-    let last = wrapping_sub(h, n);
+    let last = wrapping_sub(hay_len, needle_len);
     let mut i = from;
     loop {
         if i > last {
             return NONE64;
         }
-        if hay[i..add(i, n)].eq(in needle[0..n]) {
+        if hay[i..add(i, needle_len)].eq(in needle[0..needle_len]) {
             return i;
         }
         i = inc(i);
     }
 }
 
-fn is_word_byte(c: u8) -> bool {
-    (c >= Ascii::Digit0 && c <= Ascii::Digit9)
-        || (c >= Ascii::UpperA && c <= Ascii::UpperZ)
-        || (c >= Ascii::LowerA && c <= Ascii::LowerZ)
-        || c == Ascii::Underscore
+fn is_word_byte(byte: u8) -> bool {
+    (byte >= Ascii::Digit0 && byte <= Ascii::Digit9)
+        || (byte >= Ascii::UpperA && byte <= Ascii::UpperZ)
+        || (byte >= Ascii::LowerA && byte <= Ascii::LowerZ)
+        || byte == Ascii::Underscore
 }
 
-fn is_digit_byte(c: u8) -> bool {
-    (c >= Ascii::Digit0 && c <= Ascii::Digit9) || c == Ascii::Underscore
+fn is_digit_byte(byte: u8) -> bool {
+    (byte >= Ascii::Digit0 && byte <= Ascii::Digit9) || byte == Ascii::Underscore
 }
 
 // `Generated::demangle`: `Ffi$Lib::f$3` as `Lib::f`, `Ffi$Lib` as
 // `Ffi[Lib]`.
-pub fn demangle(inout s: S, msg: u32) -> u32 {
+pub fn demangle(inout state: S, msg: u32) -> u32 {
     let mut out = ChunkSeq::new[u8]();
-    for i in s.start(msg)..s.end(msg) {
-        out.push(u8_at(in s.text, i));
+    for i in state.start(msg).. state.end(msg) {
+        out.push(u8_at(in state.text, i));
     }
-    for li in 0..s.libs.len() {
-        let lib = s.lib(li).name;
+    for li in 0.. state.libs.len() {
+        let lib_name = state.lib(li).name;
         let mut eff_name = ChunkSeq::new[u8]();
         eff_name.extend(in "Ffi$".as_bytes());
-        for i in s.start(lib)..s.end(lib) {
-            eff_name.push(u8_at(in s.text, i));
+        for i in state.start(lib_name).. state.end(lib_name) {
+            eff_name.push(u8_at(in state.text, i));
         }
         let mut path = ChunkSeq::new[u8]();
         path.extend(in eff_name[0..eff_name.len()]);
@@ -2544,9 +2613,9 @@ pub fn demangle(inout s: S, msg: u32) -> u32 {
             if at == NONE64 {
                 break;
             }
-            let rest = add(at, path.len());
+            let sym_start = add(at, path.len());
             let len = out.len();
-            let mut symbol_end = rest;
+            let mut symbol_end = sym_start;
             loop {
                 if symbol_end >= len || !is_word_byte(u8_at(in out, symbol_end)) {
                     break;
@@ -2567,11 +2636,11 @@ pub fn demangle(inout s: S, msg: u32) -> u32 {
             for i in 0..at {
                 next.push(u8_at(in out, i));
             }
-            for i in s.start(lib)..s.end(lib) {
-                next.push(u8_at(in s.text, i));
+            for i in state.start(lib_name).. state.end(lib_name) {
+                next.push(u8_at(in state.text, i));
             }
             next.extend(in "::".as_bytes());
-            for i in rest..symbol_end {
+            for i in sym_start..symbol_end {
                 next.push(u8_at(in out, i));
             }
             for i in end..len {
@@ -2591,8 +2660,8 @@ pub fn demangle(inout s: S, msg: u32) -> u32 {
                 next.push(u8_at(in out, k));
             }
             next.extend(in "Ffi[".as_bytes());
-            for k in s.start(lib)..s.end(lib) {
-                next.push(u8_at(in s.text, k));
+            for k in state.start(lib_name).. state.end(lib_name) {
+                next.push(u8_at(in state.text, k));
             }
             next.push(Ascii::CloseBracket);
             i = add(at, eff_name.len());
@@ -2602,300 +2671,306 @@ pub fn demangle(inout s: S, msg: u32) -> u32 {
         }
         out = next;
     }
-    s.intern(in out[0..out.len()])
+    state.intern(in out[0..out.len()])
 }
 
 // ----- `slice_length` ---------------------------------------------------------
 
 // `slice_length` of an argument type `ty` (NONE: unknown) for a slice of
 // `element`; returns the length (NONE64 for an in-place `Slice`) or writes
-// the error into `e`.
+// the error into `err`.
 pub fn slice_length(
-    inout s: S,
+    inout state: S,
     ty: u32,
     element: u32,
     nullable: bool,
     in_place: bool,
     start: u64,
     end: u64,
-    inout e: Err
+    inout err: Err
 ) -> u64 {
     if ty != NONE {
-        let t = s.tn(ty);
-        if t.kind == TK_NAMED && t.name == S_SLICE {
-            if in_place && !nullable && t.n == 1 && s.ty_eq(s.targ(t.a), element) {
+        let node = state.tn(ty);
+        if node.kind == TK_NAMED && node.name == S_SLICE {
+            if in_place && !nullable && node.n == 1 && state.ty_eq(state.targ(node.a), element) {
                 return NONE64;
             }
-            let mark = s.out.len();
-            s.put(in "a CSlice[");
-            s.put_display(element);
-            s.put(in "] argument may be a Slice[");
-            s.put_display(element);
-            s.put(in "] only when it is not nullable and ");
-            s.put_display(element);
-            s.put(in " is u8, u32, u64, i64 or usize; found ");
-            s.put_display(ty);
-            e = err_at(K_SLICE, s.intern_tail(mark), true, start, end);
+            let mark = state.out.len();
+            state.put(in "a CSlice[");
+            state.put_display(element);
+            state.put(in "] argument may be a Slice[");
+            state.put_display(element);
+            state.put(in "] only when it is not nullable and ");
+            state.put_display(element);
+            state.put(in " is u8, u32, u64, i64 or usize; found ");
+            state.put_display(ty);
+            err = err_at(K_SLICE, state.intern_tail(mark), true, start, end);
             return 0;
         }
     }
     let mut cur = ty;
     if ty != NONE && nullable {
-        let t = s.tn(ty);
-        if t.kind == TK_NAMED && t.name == S_OPTION && t.n == 1 {
-            cur = s.targ(t.a);
+        let node = state.tn(ty);
+        if node.kind == TK_NAMED && node.name == S_OPTION && node.n == 1 {
+            cur = state.targ(node.a);
         } else {
-            slice_error(inout s, element, nullable, ty, start, end, inout e);
+            slice_error(inout state, element, nullable, ty, start, end, inout err);
             return 0;
         }
     }
     if cur == NONE {
-        slice_error(inout s, element, nullable, NONE, start, end, inout e);
+        slice_error(inout state, element, nullable, NONE, start, end, inout err);
         return 0;
     }
-    let t = s.tn(cur);
-    let n = if t.kind == TK_TUPLE {
-        t.n
-    } else if t.kind == TK_NAMED && t.name == unit_sym(inout s) {
+    let node = state.tn(cur);
+    let n = if node.kind == TK_TUPLE {
+        node.n
+    } else if node.kind == TK_NAMED && node.name == unit_sym(inout state) {
         0
     } else {
-        slice_error(inout s, element, nullable, cur, start, end, inout e);
+        slice_error(inout state, element, nullable, cur, start, end, inout err);
         return 0;
     };
     if n > MAX_SLICE {
-        let mark = s.out.len();
-        s.put(in "slice of ");
-        s.put_u64(n);
-        s.put(in " elements exceeds the 4096-element bound");
-        e = err_at(K_SLICE, s.intern_tail(mark), true, start, end);
+        let mark = state.out.len();
+        state.put(in "slice of ");
+        state.put_u64(n);
+        state.put(in " elements exceeds the 4096-element bound");
+        err = err_at(K_SLICE, state.intern_tail(mark), true, start, end);
         return 0;
     }
     n
 }
 
-fn unit_sym(inout s: S) -> u32 {
-    s.intern(in "Unit".as_bytes())
+fn unit_sym(inout state: S) -> u32 {
+    state.intern(in "Unit".as_bytes())
 }
 
 fn slice_error(
-    inout s: S,
+    inout state: S,
     element: u32,
     nullable: bool,
     found: u32,
     start: u64,
     end: u64,
-    inout e: Err
+    inout err: Err
 ) {
-    let mark = s.out.len();
-    s.put(in "a CSlice[");
-    s.put_display(element);
-    s.put(in "] argument must be a tuple ");
+    let mark = state.out.len();
+    state.put(in "a CSlice[");
+    state.put_display(element);
+    state.put(in "] argument must be a tuple ");
     if nullable {
-        s.put(in "Option[(");
-        s.put_display(element);
-        s.put(in ", ...)]");
+        state.put(in "Option[(");
+        state.put_display(element);
+        state.put(in ", ...)]");
     } else {
-        s.put(in "(");
-        s.put_display(element);
-        s.put(in ", ...)");
+        state.put(in "(");
+        state.put_display(element);
+        state.put(in ", ...)");
     }
-    s.put(in "; found ");
+    state.put(in "; found ");
     if found == NONE {
-        s.put(in "an expression of unknown type");
+        state.put(in "an expression of unknown type");
     } else {
-        s.put_display(found);
+        state.put_display(found);
     }
-    e = err_at(K_SLICE, s.intern_tail(mark), true, start, end);
+    err = err_at(K_SLICE, state.intern_tail(mark), true, start, end);
 }
 
 // ----- targets, plans and ABI signatures --------------------------------------
 
 // A target triple's architecture is its first component.
-fn triple_arch(in s: S, x: u32) -> u64 {
-    let a = s.start(x);
-    let e = s.end(x);
-    for i in a..e {
-        if u8_at(in s.text, i) == Ascii::Hyphen {
-            return wrapping_sub(i, a);
+fn triple_arch(in state: S, triple: u32) -> u64 {
+    let lo = state.start(triple);
+    let hi = state.end(triple);
+    for i in lo..hi {
+        if u8_at(in state.text, i) == Ascii::Hyphen {
+            return wrapping_sub(i, lo);
         }
     }
-    wrapping_sub(e, a)
+    wrapping_sub(hi, lo)
 }
 
-fn sym_contains(in s: S, x: u32, in t: Str) -> bool {
-    let want = t.as_bytes();
+fn sym_contains(in state: S, sym: u32, in text: Str) -> bool {
+    let want = text.as_bytes();
     let n = want.len();
-    let a = s.start(x);
-    let e = s.end(x);
-    if n > wrapping_sub(e, a) {
+    let lo = state.start(sym);
+    let hi = state.end(sym);
+    if n > wrapping_sub(hi, lo) {
         return false;
     }
-    for i in a..inc(wrapping_sub(e, n)) {
-        if s.text[i..add(i, n)].eq(in want) {
+    for i in lo..inc(wrapping_sub(hi, n)) {
+        if state.text[i..add(i, n)].eq(in want) {
             return true;
         }
     }
     false
 }
 
-fn triple_os(in s: S, x: u32) -> u64 {
-    if sym_contains(in s, x, in "-linux") {
+fn triple_os(in state: S, triple: u32) -> u64 {
+    if sym_contains(in state, triple, in "-linux") {
         TargetOs::Linux
-    } else if sym_contains(in s, x, in "-darwin") {
+    } else if sym_contains(in state, triple, in "-darwin") {
         TargetOs::Darwin
-    } else if sym_contains(in s, x, in "-windows") {
+    } else if sym_contains(in state, triple, in "-windows") {
         TargetOs::Windows
     } else {
         TargetOs::Other
     }
 }
 
-fn same_arch(in s: S, x: u32, y: u32) -> bool {
-    let n = triple_arch(in s, x);
-    let m = triple_arch(in s, y);
-    n == m && s.text[s.start(x)..add(s.start(x), n)].eq(in s.text[s.start(y)..add(s.start(y), m)])
+fn same_arch(in state: S, left: u32, right: u32) -> bool {
+    let left_len = triple_arch(in state, left);
+    let right_len = triple_arch(in state, right);
+    left_len == right_len
+        && state
+            .text[state.start(left)..add(state.start(left), left_len)]
+            .eq(in state.text[state.start(right)..add(state.start(right), right_len)])
 }
 
-fn is_x86(in s: S, x: u32) -> bool {
-    triple_arch(in s, x) == 6 && s.text[s.start(x)..add(s.start(x), 6)].eq(in "x86_64".as_bytes())
+fn is_x86(in state: S, triple: u32) -> bool {
+    triple_arch(in state, triple) == 6
+        && state.text[state.start(triple)..add(state.start(triple), 6)].eq(in "x86_64".as_bytes())
 }
 
-// `target_support` of library row `li` for the object triple `t`.
-pub fn target_support(inout s: S, li: u64, t: u32) -> Err {
-    let l = s.lib(li);
-    if !same_arch(in s, l.triple, t) || triple_os(in s, l.triple) != triple_os(in s, t) {
-        let mark = s.out.len();
-        s.put(in "library '");
-        s.put_name(l.name);
-        s.put(in "' targets ");
-        s.put_name(l.triple);
-        s.put(in " but the object targets ");
-        s.put_name(t);
-        return err_at(K_TARGET, s.intern_tail(mark), false, 0, 0);
+// `target_support` of library row `li` for the object triple `target`.
+pub fn target_support(inout state: S, li: u64, target: u32) -> Err {
+    let lib_row = state.lib(li);
+    if !same_arch(in state, lib_row.triple, target)
+        || triple_os(in state, lib_row.triple) != triple_os(in state, target) {
+        let mark = state.out.len();
+        state.put(in "library '");
+        state.put_name(lib_row.name);
+        state.put(in "' targets ");
+        state.put_name(lib_row.triple);
+        state.put(in " but the object targets ");
+        state.put_name(target);
+        return err_at(K_TARGET, state.intern_tail(mark), false, 0, 0);
     }
-    if l.handler == H_MPK && !(is_x86(in s, t) && triple_os(in s, t) == TargetOs::Linux) {
-        let mark = s.out.len();
-        s.put(in "isolated(mpk) trampolines are generated for Linux x86-64 (WRPKRU) only; ");
-        s.put_name(t);
-        s.put(in " is not supported (AArch64 POE is not implemented)");
-        return err_at(K_ISOLATION, s.intern_tail(mark), false, 0, 0);
+    if lib_row.handler == H_MPK
+        && !(is_x86(in state, target) && triple_os(in state, target) == TargetOs::Linux) {
+        let mark = state.out.len();
+        state.put(in "isolated(mpk) trampolines are generated for Linux x86-64 (WRPKRU) only; ");
+        state.put_name(target);
+        state.put(in " is not supported (AArch64 POE is not implemented)");
+        return err_at(K_ISOLATION, state.intern_tail(mark), false, 0, 0);
     }
     no_err()
 }
 
-fn put_handler(inout s: S, h: u64) {
-    if h == H_DIRECT {
-        s.put(in "direct");
+fn put_handler(inout state: S, handler: u64) {
+    if handler == H_DIRECT {
+        state.put(in "direct");
     } else {
-        s.put(in "isolated(mpk)");
+        state.put(in "isolated(mpk)");
     }
 }
 
 // `op_plan` of operation `op` of `eff_name`, with the libraries the target
-// `t` (NONE: no target) cannot call blocked.
-pub fn op_plan(inout s: S, t: u32, eff_name: u32, op: u32) {
+// `target` (NONE: no target) cannot call blocked.
+pub fn op_plan(inout state: S, target: u32, eff_name: u32, op: u32) {
     let mut lib = NONE64;
-    for li in 0..s.libs.len() {
-        let name = s.lib(li).name;
-        let n = s.size(name);
-        let a = s.start(eff_name);
-        if s.size(eff_name) == add(n, 4)
-            && s.text[a..add(a, 4)].eq(in "Ffi$".as_bytes())
-            && s.spells(name, in s.text[add(a, 4)..s.end(eff_name)]) {
+    for li in 0.. state.libs.len() {
+        let name = state.lib(li).name;
+        let name_len = state.size(name);
+        let eff_start = state.start(eff_name);
+        if state.size(eff_name) == add(name_len, 4)
+            && state.text[eff_start..add(eff_start, 4)].eq(in "Ffi$".as_bytes())
+            && state.spells(name, in state.text[add(eff_start, 4).. state.end(eff_name)]) {
             lib = li;
         }
     }
     if lib == NONE64 {
-        s.put(in "err ");
-        let mark = s.out.len();
-        s.put(in "no imported library for effect '");
-        s.put_name(eff_name);
-        s.put(in "'");
-        let m = s.intern_tail(mark);
-        s.put_q(m);
+        state.put(in "err ");
+        let mark = state.out.len();
+        state.put(in "no imported library for effect '");
+        state.put_name(eff_name);
+        state.put(in "'");
+        let message = state.intern_tail(mark);
+        state.put_q(message);
         return;
     }
-    if t != NONE {
-        let e = target_support(inout s, lib, t);
+    if target != NONE {
+        let e = target_support(inout state, lib, target);
         if e.msg != NONE {
-            s.put(in "err ");
-            s.put_q(e.msg);
+            state.put(in "err ");
+            state.put_q(e.msg);
             return;
         }
     }
-    let oa = s.start(op);
-    let mut cut = s.end(op);
-    for i in oa..s.end(op) {
-        if u8_at(in s.text, i) == Ascii::Dollar && cut == s.end(op) {
+    let op_start = state.start(op);
+    let mut cut = state.end(op);
+    for i in op_start.. state.end(op) {
+        if u8_at(in state.text, i) == Ascii::Dollar && cut == state.end(op) {
             cut = i;
         }
     }
     let mut sym_bytes = ChunkSeq::new[u8]();
-    for i in oa..cut {
-        sym_bytes.push(u8_at(in s.text, i));
+    for i in op_start..cut {
+        sym_bytes.push(u8_at(in state.text, i));
     }
-    let symbol = s.intern(in sym_bytes[0..sym_bytes.len()]);
-    let l = s.lib(lib);
-    for i in 0..l.fc {
-        let f = s.fun(add(l.f0, i));
-        if f.sym == symbol {
-            s.put(in "ok ");
-            s.put_q(l.name);
-            s.put(in " ");
-            put_handler(inout s, l.handler);
-            s.put(in " ");
-            s.put_q(symbol);
+    let symbol = state.intern(in sym_bytes[0..sym_bytes.len()]);
+    let lib_row = state.lib(lib);
+    for i in 0..lib_row.fun_count {
+        let func = state.fun(add(lib_row.fun_start, i));
+        if func.sym == symbol {
+            state.put(in "ok ");
+            state.put_q(lib_row.name);
+            state.put(in " ");
+            put_handler(inout state, lib_row.handler);
+            state.put(in " ");
+            state.put_q(symbol);
             return;
         }
     }
-    s.put(in "err ");
-    let mark = s.out.len();
-    s.put(in "library '");
-    s.put_name(l.name);
-    s.put(in "' has no function '");
-    s.put_name(symbol);
-    s.put(in "'");
-    let m = s.intern_tail(mark);
-    s.put_q(m);
+    state.put(in "err ");
+    let mark = state.out.len();
+    state.put(in "library '");
+    state.put_name(lib_row.name);
+    state.put(in "' has no function '");
+    state.put_name(symbol);
+    state.put(in "'");
+    let message = state.intern_tail(mark);
+    state.put_q(message);
 }
 
 // The scalar carrier of an enum of library `lib`.
-fn enum_scalar(in s: S, lib: u64, name: u32) -> u8 {
-    let l = s.lib(lib);
-    for i in 0..l.en {
-        let e = s.enum_row(add(l.e0, i));
-        if e.name == name {
-            return e.scalar;
+fn enum_scalar(in state: S, lib: u64, name: u32) -> u8 {
+    let lib_row = state.lib(lib);
+    for i in 0..lib_row.enum_count {
+        let row = state.enum_row(add(lib_row.enum_start, i));
+        if row.name == name {
+            return row.scalar;
         }
     }
     SC_U32
 }
 
 // `carrier`: an ABI type, written; false for `Unit`.
-fn put_carrier(inout s: S, lib: u64, v: Vt) -> bool {
-    if v.tag == VT_UNIT {
+fn put_carrier(inout state: S, lib: u64, value_ty: Vt) -> bool {
+    if value_ty.tag == VT_UNIT {
         return false;
     }
-    if v.tag == VT_SCALAR {
-        s.put_name(sym8(v.sc));
-    } else if v.tag == VT_FLOAT {
-        s.put_name(v.name);
-    } else if v.tag == VT_BOOL {
-        s.put_name(sym8(SC_U8));
-    } else if v.tag == VT_ENUM {
-        s.put_name(sym8(enum_scalar(in s, lib, v.name)));
+    if value_ty.tag == VT_SCALAR {
+        state.put_name(sym8(value_ty.scalar));
+    } else if value_ty.tag == VT_FLOAT {
+        state.put_name(value_ty.name);
+    } else if value_ty.tag == VT_BOOL {
+        state.put_name(sym8(SC_U8));
+    } else if value_ty.tag == VT_ENUM {
+        state.put_name(sym8(enum_scalar(in state, lib, value_ty.name)));
     } else {
-        s.put(in "ptr");
+        state.put(in "ptr");
     }
     true
 }
 
 // Whether extern type `name` of library row `lib` is a mapping.
-fn is_mapping(in s: S, lib: u64, name: u32) -> bool {
-    let l = s.lib(lib);
-    for i in 0..l.xn {
-        let x = s.xt(add(l.x0, i));
-        if x.name == name && x.mapping != NONE {
+fn is_mapping(in state: S, lib: u64, name: u32) -> bool {
+    let lib_row = state.lib(lib);
+    for i in 0..lib_row.extern_count {
+        let ext_type = state.xt(add(lib_row.extern_start, i));
+        if ext_type.name == name && ext_type.mapping != NONE {
             return true;
         }
     }
@@ -2905,325 +2980,329 @@ fn is_mapping(in s: S, lib: u64, name: u32) -> bool {
 // `FunctionDescriptor::abi` of every function: `abi LIB SYM conv=..
 // params=.. result=..`; `none` when a parameter is `Unit` (which no
 // validated descriptor has).
-pub fn dump_abi(inout s: S) {
-    for fi in 0..s.funs.len() {
-        let f = s.fun(fi);
-        let l = s.lib(f.lib);
-        s.put(in "abi ");
-        s.put_q(l.name);
-        s.put(in " ");
-        s.put_q(f.sym);
+pub fn dump_abi(inout state: S) {
+    for fi in 0.. state.funs.len() {
+        let func = state.fun(fi);
+        let lib_row = state.lib(func.lib);
+        state.put(in "abi ");
+        state.put_q(lib_row.name);
+        state.put(in " ");
+        state.put_q(func.sym);
         let mut unit = false;
-        for j in 0..f.pn {
-            let p = s.par(add(f.p0, j));
-            if p.tag == P_VALUE && p.vt.tag == VT_UNIT {
+        for j in 0..func.param_count {
+            let param = state.par(add(func.param_start, j));
+            if param.tag == P_VALUE && param.value_ty.tag == VT_UNIT {
                 unit = true;
             }
         }
         if unit {
-            s.put(in " none");
-            s.nl();
+            state.put(in " none");
+            state.nl();
             continue;
         }
-        s.put(in " conv=");
-        put_convention(inout s, l.triple);
-        s.put(in " params=");
+        state.put(in " conv=");
+        put_convention(inout state, lib_row.triple);
+        state.put(in " params=");
         // A callback's call leaves the pointer out of its C signature.
-        let first: u64 = if f.indirect { 1 } else { 0 };
-        let darwin = triple_os(in s, l.triple) == TargetOs::Darwin;
+        let first: u64 = if func.indirect { 1 } else { 0 };
+        let darwin = triple_os(in state, lib_row.triple) == TargetOs::Darwin;
         let mut integers: u64 = 0;
         let mut emitted = false;
-        for j in first..f.pn {
-            if darwin && f.has_variadic && j == f.variadic_first && integers < 8 {
+        for j in first..func.param_count {
+            if darwin && func.has_variadic && j == func.variadic_first && integers < 8 {
                 let pad = wrapping_sub(8, integers);
                 for k in 0..pad {
                     if emitted {
-                        s.put(in ",");
+                        state.put(in ",");
                     }
-                    s.put(in "u64");
+                    state.put(in "u64");
                     emitted = true;
                 }
             }
-            let p = s.par(add(f.p0, j));
+            let param = state.par(add(func.param_start, j));
             if emitted {
-                s.put(in ",");
+                state.put(in ",");
             }
             emitted = true;
-            if p.tag == P_VALUE {
-                let any = put_carrier(inout s, f.lib, p.vt);
-                if p.vt.tag != VT_FLOAT {
+            if param.tag == P_VALUE {
+                let any = put_carrier(inout state, func.lib, param.value_ty);
+                if param.value_ty.tag != VT_FLOAT {
                     integers = add(integers, 1);
                 }
-            } else if p.tag == P_SLICE || p.tag == P_PINNED {
-                s.put(in "ptr,usize");
+            } else if param.tag == P_SLICE || param.tag == P_PINNED {
+                state.put(in "ptr,usize");
                 integers = add(integers, 2);
-            } else if p.tag == P_HANDLE && is_mapping(in s, f.lib, p.pname) {
-                s.put(in "ptr,usize");
+            } else if param.tag == P_HANDLE && is_mapping(in state, func.lib, param.type_name) {
+                state.put(in "ptr,usize");
                 integers = add(integers, 2);
             } else {
-                s.put(in "ptr");
+                state.put(in "ptr");
                 integers = add(integers, 1);
             }
         }
-        s.put(in " result=");
-        if !put_carrier(inout s, f.lib, f.result) {
-            s.put(in "-");
+        state.put(in " result=");
+        if !put_carrier(inout state, func.lib, func.result) {
+            state.put(in "-");
         }
-        s.nl();
+        state.nl();
     }
 }
 
 // `Target::convention` of a library's triple.
-fn put_convention(inout s: S, triple: u32) {
-    let os = triple_os(in s, triple);
+fn put_convention(inout state: S, triple: u32) {
+    let os = triple_os(in state, triple);
     if os == TargetOs::Windows {
-        s.put(in "win64");
+        state.put(in "win64");
     } else if os == TargetOs::Darwin {
-        s.put(in "darwin64");
-    } else if is_x86(in s, triple) {
-        s.put(in "sysv64");
+        state.put(in "darwin64");
+    } else if is_x86(in state, triple) {
+        state.put(in "sysv64");
     } else {
-        s.put(in "aapcs64");
+        state.put(in "aapcs64");
     }
 }
 
 // ----- the harness entry ------------------------------------------------------
 
-fn read_type(inout r: Reader, in b: Slice[u8], inout s: S, depth: u64) -> u32 {
-    let kind = r.word(in b);
+fn read_type(inout reader: Reader, in bytes: Slice[u8], inout state: S, depth: u64) -> u32 {
+    let kind = reader.word(in bytes);
     let mut name = NONE;
     if kind == 0 {
-        name = text_sym(inout r, in b, inout s);
+        name = text_sym(inout reader, in bytes, inout state);
     }
-    let n = r.word(in b);
+    let arg_count = reader.word(in bytes);
     let mut args = ChunkSeq::new[u32]();
     if depth < MAX_DESCRIPTOR_TYPE_DEPTH {
-        for i in 0..n {
-            args.push(read_type(inout r, in b, inout s, inc(depth)));
+        for i in 0..arg_count {
+            args.push(read_type(inout reader, in bytes, inout state, inc(depth)));
         }
     }
     if kind == 0 {
-        s.ty_named(name, in args)
+        state.ty_named(name, in args)
     } else {
-        s.ty_tuple(in args)
+        state.ty_tuple(in args)
     }
 }
 
-fn opt_sym(inout r: Reader, in b: Slice[u8], inout s: S) -> u32 {
-    let (a, e) = r.text(in b);
-    if a == e { NONE } else { s.intern(in b[a..e]) }
+fn opt_sym(inout reader: Reader, in bytes: Slice[u8], inout state: S) -> u32 {
+    let (start, end) = reader.text(in bytes);
+    if start == end {
+        NONE
+    } else {
+        state.intern(in bytes[start..end])
+    }
 }
 
-fn run(in b: Slice[u8], inout s: S) {
-    let mut r = Reader { pos: 0, stop: b.len() };
-    let nl = r.word(in b);
-    for i in 0..nl {
-        let handler = r.word(in b);
-        let (a, e) = r.text(in b);
-        read_library(in b, a, e, handler, inout s);
+fn run(in bytes: Slice[u8], inout state: S) {
+    let mut reader = Reader { pos: 0, stop: bytes.len() };
+    let lib_count = reader.word(in bytes);
+    for i in 0..lib_count {
+        let handler = reader.word(in bytes);
+        let (desc_start, desc_end) = reader.text(in bytes);
+        read_library(in bytes, desc_start, desc_end, handler, inout state);
     }
     // instances
     let mut insts = ChunkSeq::new[Inst]();
     let mut lens = ChunkSeq::new[u64]();
-    let ni = r.word(in b);
-    for i in 0..ni {
-        let lib = text_sym(inout r, in b, inout s);
-        let sym = text_sym(inout r, in b, inout s);
-        let nv = r.word(in b);
-        for j in 0..nv {
-            let n = r.word(in b);
-            let a = lens.len();
+    let inst_count = reader.word(in bytes);
+    for i in 0..inst_count {
+        let lib = text_sym(inout reader, in bytes, inout state);
+        let sym = text_sym(inout reader, in bytes, inout state);
+        let vector_count = reader.word(in bytes);
+        for j in 0..vector_count {
+            let n = reader.word(in bytes);
+            let len_start = lens.len();
             for k in 0..n {
-                lens.push(r.word(in b));
+                lens.push(reader.word(in bytes));
             }
-            insts.push(Inst { lib: lib, sym: sym, a: a, n: n });
+            insts.push(Inst { lib: lib, sym: sym, a: len_start, n: n });
         }
     }
-    let g = generate(inout s);
-    if g.msg != NONE {
-        s.put(in "G err ");
-        put_err(inout s, g);
-        s.nl();
+    let gen_error = generate(inout state);
+    if gen_error.msg != NONE {
+        state.put(in "G err ");
+        put_err(inout state, gen_error);
+        state.nl();
     } else {
-        s.put(in "G ok");
-        s.nl();
-        dump_shapes(inout s);
-        s.put(in "pass1");
-        s.nl();
-        append(inout s, false, in insts, in lens);
-        s.put(in "pass2");
-        s.nl();
-        append(inout s, true, in insts, in lens);
+        state.put(in "G ok");
+        state.nl();
+        dump_shapes(inout state);
+        state.put(in "pass1");
+        state.nl();
+        append(inout state, false, in insts, in lens);
+        state.put(in "pass2");
+        state.nl();
+        append(inout state, true, in insts, in lens);
     }
     // collision probes
-    let nc = r.word(in b);
-    for i in 0..nc {
+    let collide_count = reader.word(in bytes);
+    for i in 0..collide_count {
         let mut items = ChunkSeq::new[Item]();
-        let k = r.word(in b);
-        for j in 0..k {
-            let name = text_sym(inout r, in b, inout s);
-            let start = r.word(in b);
-            let end = r.word(in b);
+        let item_count = reader.word(in bytes);
+        for j in 0..item_count {
+            let name = text_sym(inout reader, in bytes, inout state);
+            let start = reader.word(in bytes);
+            let end = reader.word(in bytes);
             items.push(Item { name: name, start: start, end: end });
         }
-        if g.msg == NONE {
-            let e = check_collisions(inout s, in items);
+        if gen_error.msg == NONE {
+            let e = check_collisions(inout state, in items);
             if e.msg == NONE {
-                s.put(in "collide ok");
+                state.put(in "collide ok");
             } else {
-                s.put(in "collide err ");
-                put_err(inout s, e);
+                state.put(in "collide err ");
+                put_err(inout state, e);
             }
-            s.nl();
+            state.nl();
         }
     }
     // demangle probes
-    let nd = r.word(in b);
-    for i in 0..nd {
-        let m = text_sym(inout r, in b, inout s);
-        if g.msg == NONE {
-            let d = demangle(inout s, m);
-            s.put(in "demangle ");
-            s.put_q(m);
-            s.put(in " ");
-            s.put_q(d);
-            s.nl();
+    let demangle_count = reader.word(in bytes);
+    for i in 0..demangle_count {
+        let message = text_sym(inout reader, in bytes, inout state);
+        if gen_error.msg == NONE {
+            let demangled = demangle(inout state, message);
+            state.put(in "demangle ");
+            state.put_q(message);
+            state.put(in " ");
+            state.put_q(demangled);
+            state.nl();
         }
     }
     // handle probes
-    let nh = r.word(in b);
-    for i in 0..nh {
-        let x = text_sym(inout r, in b, inout s);
-        if g.msg == NONE {
-            s.put(in "handle ");
-            s.put_q(x);
-            s.put(in " ");
-            put_bit(inout s, find_gh(in s, x) != NONE64);
-            s.nl();
+    let handle_count = reader.word(in bytes);
+    for i in 0..handle_count {
+        let handle_name = text_sym(inout reader, in bytes, inout state);
+        if gen_error.msg == NONE {
+            state.put(in "handle ");
+            state.put_q(handle_name);
+            state.put(in " ");
+            put_bit(inout state, find_gh(in state, handle_name) != NONE64);
+            state.nl();
         }
     }
     // op plans
-    let np = r.word(in b);
-    for i in 0..np {
-        let t = opt_sym(inout r, in b, inout s);
-        let eff_name = text_sym(inout r, in b, inout s);
-        let op = text_sym(inout r, in b, inout s);
-        s.put(in "plan ");
-        if t == NONE {
-            s.put(in "-");
+    let plan_count = reader.word(in bytes);
+    for i in 0..plan_count {
+        let target = opt_sym(inout reader, in bytes, inout state);
+        let eff_name = text_sym(inout reader, in bytes, inout state);
+        let op = text_sym(inout reader, in bytes, inout state);
+        state.put(in "plan ");
+        if target == NONE {
+            state.put(in "-");
         } else {
-            s.put_q(t);
+            state.put_q(target);
         }
-        s.put(in " ");
-        s.put_q(eff_name);
-        s.put(in " ");
-        s.put_q(op);
-        s.put(in " ");
-        op_plan(inout s, t, eff_name, op);
-        s.nl();
+        state.put(in " ");
+        state.put_q(eff_name);
+        state.put(in " ");
+        state.put_q(op);
+        state.put(in " ");
+        op_plan(inout state, target, eff_name, op);
+        state.nl();
     }
     // target support
-    let nt = r.word(in b);
-    for i in 0..nt {
-        let t = text_sym(inout r, in b, inout s);
-        s.put(in "target ");
-        s.put_q(t);
-        s.nl();
-        for li in 0..s.libs.len() {
-            let e = target_support(inout s, li, t);
-            s.indent(1);
-            s.put_q(s.lib(li).name);
+    let target_count = reader.word(in bytes);
+    for i in 0..target_count {
+        let target = text_sym(inout reader, in bytes, inout state);
+        state.put(in "target ");
+        state.put_q(target);
+        state.nl();
+        for li in 0.. state.libs.len() {
+            let e = target_support(inout state, li, target);
+            state.indent(1);
+            state.put_q(state.lib(li).name);
             if e.msg == NONE {
-                s.put(in " ok");
+                state.put(in " ok");
             } else {
-                s.put(in " err ");
-                put_err(inout s, e);
+                state.put(in " err ");
+                put_err(inout state, e);
             }
-            s.nl();
+            state.nl();
         }
     }
     // slice lengths
-    let ns = r.word(in b);
-    for i in 0..ns {
-        let has = r.word(in b);
-        let ty = if has == 1 {
-            read_type(inout r, in b, inout s, 0)
+    let slice_probe_count = reader.word(in bytes);
+    for i in 0..slice_probe_count {
+        let has_ty = reader.word(in bytes);
+        let ty = if has_ty == 1 {
+            read_type(inout reader, in bytes, inout state, 0)
         } else {
             NONE
         };
-        let element = read_type(inout r, in b, inout s, 0);
-        let nullable = r.word(in b) == 1;
-        let in_place = r.word(in b) == 1;
-        let start = r.word(in b);
-        let end = r.word(in b);
+        let element = read_type(inout reader, in bytes, inout state, 0);
+        let nullable = reader.word(in bytes) == 1;
+        let in_place = reader.word(in bytes) == 1;
+        let start = reader.word(in bytes);
+        let end = reader.word(in bytes);
         let mut e = no_err();
-        let n = slice_length(inout s, ty, element, nullable, in_place, start, end, inout e);
-        s.put(in "slice ");
+        let n = slice_length(inout state, ty, element, nullable, in_place, start, end, inout e);
+        state.put(in "slice ");
         if e.msg != NONE {
-            s.put(in "err ");
-            put_err(inout s, e);
+            state.put(in "err ");
+            put_err(inout state, e);
         } else if n == NONE64 {
-            s.put(in "ok s");
+            state.put(in "ok s");
         } else {
-            s.put(in "ok ");
-            s.put_u64(n);
+            state.put(in "ok ");
+            state.put_u64(n);
         }
-        s.nl();
+        state.nl();
     }
     // op names
-    let no = r.word(in b);
-    for i in 0..no {
-        let sym = text_sym(inout r, in b, inout s);
-        let n = r.word(in b);
-        let mut v = ChunkSeq::new[u64]();
+    let opname_count = reader.word(in bytes);
+    for i in 0..opname_count {
+        let sym = text_sym(inout reader, in bytes, inout state);
+        let n = reader.word(in bytes);
+        let mut name_lens = ChunkSeq::new[u64]();
         for k in 0..n {
-            v.push(r.word(in b));
+            name_lens.push(reader.word(in bytes));
         }
-        s.put(in "opname ");
-        s.put_q(sym);
-        s.put(in " ");
-        let mark = s.out.len();
-        put_op_name(inout s, sym, in v, 0, n);
-        let x = s.intern_tail(mark);
-        s.put_q(x);
-        s.nl();
+        state.put(in "opname ");
+        state.put_q(sym);
+        state.put(in " ");
+        let mark = state.out.len();
+        put_op_name(inout state, sym, in name_lens, 0, n);
+        let op_name = state.intern_tail(mark);
+        state.put_q(op_name);
+        state.nl();
     }
-    dump_abi(inout s);
+    dump_abi(inout state);
 }
 
 // The harness entry: the case `input` (tests/self_host_ffi_lowering.rs) to
 // its text, packed as a byte length and eight bytes per word.
 pub fn ffi_plan_text(in input: Str) -> ChunkSeq[u64] {
-    let mut s = s_new();
-    run(in input.as_bytes(), inout s);
-    pack(in s.out)
+    let mut state = s_new();
+    run(in input.as_bytes(), inout state);
+    pack(in state.out)
 }
 
 // The same work without the text: its length, for timing.
 pub fn ffi_plan_count(in input: Str) -> u64 {
-    let mut s = s_new();
-    run(in input.as_bytes(), inout s);
-    s.out.len()
+    let mut state = s_new();
+    run(in input.as_bytes(), inout state);
+    state.out.len()
 }
 
 fn pack(in text: ChunkSeq[u8]) -> ChunkSeq[u64] {
     let n = text.len();
     let mut out = ChunkSeq::with_capacity[u64](wrapping_add(n >> 3, 2));
     out.push(n);
-    let mut x: u64 = 0;
-    let mut k: u32 = 0;
+    let mut word: u64 = 0;
+    let mut filled: u32 = 0;
     for i in 0..n {
-        let c = widen_u64(u8_at(in text, i));
-        x = x | wrapping_shl_u64(c, wrapping_mul(k, 8));
-        k = wrapping_add(k, 1);
-        if k == 8 {
-            out.push(x);
-            x = 0;
-            k = 0;
+        let byte = widen_u64(u8_at(in text, i));
+        word = word | wrapping_shl_u64(byte, wrapping_mul(filled, 8));
+        filled = wrapping_add(filled, 1);
+        if filled == 8 {
+            out.push(word);
+            word = 0;
+            filled = 0;
         }
     }
-    if k != 0 {
-        out.push(x);
+    if filled != 0 {
+        out.push(word);
     }
     out
 }
@@ -3233,28 +3312,28 @@ fn pack(in text: ChunkSeq[u8]) -> ChunkSeq[u64] {
 // symbol; the result is `code_for`'s architecture, then the code and the
 // error message, each a count and a word per byte.
 pub fn ffi_cpu_code(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let target = widen_u64(byte(in b, 0));
-    let n = widen_u64(byte(in b, 1));
-    let name_end = add(2, n);
+    let bytes = input.as_bytes();
+    let target = widen_u64(byte(in bytes, 0));
+    let name_len = widen_u64(byte(in bytes, 1));
+    let name_end = add(2, name_len);
     let mut code: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut error: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let arch = code_for(
-        in b[name_end..b.len()],
+        in bytes[name_end..bytes.len()],
         target,
-        in b[2..name_end],
+        in bytes[2..name_end],
         inout code,
         inout error
     );
-    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    o.push(arch);
-    o.push(code.len());
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.push(arch);
+    out.push(code.len());
     for i in 0..code.len() {
-        o.push(widen_u64(u8_at(in code, i)));
+        out.push(widen_u64(u8_at(in code, i)));
     }
-    o.push(error.len());
+    out.push(error.len());
     for i in 0..error.len() {
-        o.push(widen_u64(u8_at(in error, i)));
+        out.push(widen_u64(u8_at(in error, i)));
     }
-    o
+    out
 }
