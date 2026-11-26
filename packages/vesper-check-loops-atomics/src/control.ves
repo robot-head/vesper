@@ -308,10 +308,8 @@ pub fn visit(
         if is_option(in types, control.option_name, ty) {
             let expected = control.function_result();
             let fine = expected != NONE32
-                && (
-                    is_option(in types, control.option_name, expected)
-                        || types.kind(expected) == TyKind::Infer
-                );
+                && (is_option(in types, control.option_name, expected)
+                    || types.kind(expected) == TyKind::Infer);
             if !fine {
                 line(
                     inout output,

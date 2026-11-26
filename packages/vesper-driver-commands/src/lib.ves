@@ -617,10 +617,9 @@ fn trim_back(in path: Slice[u8], end: u64, root: u64, windows: bool, verbatim: b
             trimmed_end = wrapping_sub(trimmed_end, 1);
         } else if !verbatim
             && last == Ascii::Dot
-            && (
-                wrapping_sub(trimmed_end, 1) == root
-                    || is_sep(byte_at(in path, wrapping_sub(trimmed_end, 2)), windows, verbatim)
-            ) {
+            && (wrapping_sub(trimmed_end, 1) == root
+                || is_sep(byte_at(in path, wrapping_sub(trimmed_end, 2)), windows, verbatim))
+        {
             // A `.` component, unless it is the path's first (`./x` keeps it).
             if wrapping_sub(trimmed_end, 1) == 0 {
                 break;
@@ -655,7 +654,8 @@ fn root_len(in path: Slice[u8], windows: bool) -> u64 {
         n = 4;
         if path.len() >= 6
             && ascii_letter(byte_at(in path, 4))
-            && byte_at(in path, 5) == Ascii::Colon {
+            && byte_at(in path, 5) == Ascii::Colon
+        {
             n = 6;
         }
         if n < path.len() && byte_at(in path, n) == Ascii::Backslash {
@@ -727,7 +727,8 @@ fn path_entries(in path: Slice[u8], windows: bool) -> ChunkSeq[u64] {
         if windows && byte == Ascii::DoubleQuote {
             quoted = !quoted;
         } else if (!windows && byte == Ascii::Colon)
-            || (windows && !quoted && byte == Ascii::Semicolon) {
+            || (windows && !quoted && byte == Ascii::Semicolon)
+        {
             spans.push(start);
             spans.push(i);
             start = wrapping_add(i, 1);
@@ -1355,7 +1356,8 @@ fn replacement_char(in name: Slice[u8]) -> bool {
     for i in 0..wrapping_sub(name.len(), 2) {
         if byte_at(in name, i) == 239
             && byte_at(in name, wrapping_add(i, 1)) == 191
-            && byte_at(in name, wrapping_add(i, 2)) == 189 {
+            && byte_at(in name, wrapping_add(i, 2)) == 189
+        {
             return true;
         }
     }
@@ -1710,7 +1712,8 @@ fn fmt_commit(
     handle Fail[FmtStop] in {
         let current = fmt_open(in path);
         if !same(in current.bytes.as_slice(), in input.bytes.as_slice())
-            || !same_file(current.id, input.id) {
+            || !same_file(current.id, input.id)
+        {
             return Fail::raise(fmt_stop(FMT_CHANGED));
         }
         handle Fail[IoError] in {

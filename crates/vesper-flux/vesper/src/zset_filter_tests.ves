@@ -33,20 +33,12 @@ test {
         match result {
             Result::Ok(value) => budget == remaining
                 && value.len() == wrapping_mul(kept, 2)
-                && (
-                    kept == 0
-                        || (
-                            value.try_get(0) == Option::Some(first)
-                                && value.try_get(1) == Option::Some(weight)
-                        )
-                )
-                && (
-                    kept != 2
-                        || (
-                            value.try_get(2) == Option::Some(5)
-                                && value.try_get(3) == Option::Some(7)
-                        )
-                ),
+                && (kept == 0
+                    || (value.try_get(0) == Option::Some(first)
+                        && value.try_get(1) == Option::Some(weight)))
+                && (kept != 2
+                    || (value.try_get(2) == Option::Some(5)
+                        && value.try_get(3) == Option::Some(7))),
             Result::Err(_) => false,
         }
     }

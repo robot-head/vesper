@@ -1,0 +1,37 @@
+// The diagnostic codes of the capability rules (src/capability_effects.rs).
+// Every code is CODE_LEN bytes, so a row's message starts that far after
+// its code.
+
+pub const CODE_LEN: u64 = 5;
+
+// A capability body calls a callee that does not carry its capabilities.
+pub const E_CALLEE_LACKS_CAPS: Str = "E0700";
+
+// ConstTime: a branch, a variable-latency or aborting operation, an index,
+// a public parameter or result, or a payload read depends on a secret.
+pub const E_SECRET_BRANCH: Str = "E0702";
+pub const E_SECRET_LATENCY: Str = "E0703";
+pub const E_SECRET_INDEX: Str = "E0704";
+pub const E_SECRET_TO_PUBLIC: Str = "E0705";
+pub const E_SECRET_RESULT: Str = "E0706";
+pub const E_SECRET_PAYLOAD: Str = "E0707";
+
+// A function value not checked under the capabilities its type requires,
+// and a callee whose capabilities cannot be determined.
+pub const E_UNCHECKED_FN_VALUE: Str = "E0708";
+pub const E_UNRESOLVED_CALLEE: Str = "E0709";
+
+// Realtime: a forbidden effect, an open effect row, recursion, a resumable
+// handler, and the `RtBus` declaration and its operations.
+pub const E_RT_FORBIDDEN_EFFECT: Str = "E0720";
+pub const E_RT_OPEN_ROW: Str = "E0721";
+pub const E_RT_RECURSION: Str = "E0722";
+pub const E_RT_RESUMABLE_HANDLER: Str = "E0723";
+pub const E_RTBUS_NOT_LINEAR: Str = "E0724";
+pub const E_RTBUS_OUTSIDE_RT: Str = "E0725";
+
+// DetFloat: the float remainder, host float operations, and ConstDenorm
+// in the same scope.
+pub const E_DF_REMAINDER: Str = "E0730";
+pub const E_DF_HOST_OP: Str = "E0731";
+pub const E_DF_DENORM: Str = "E0732";

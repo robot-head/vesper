@@ -19,8 +19,9 @@ use self::asm::{
     WHY_RISCV_JUMP, WHY_UNBOUND, WHY_X86_64_RANGE, asm, finish, here, last_exits
 };
 use self::certificate::{certify, check_input, validate_input};
+use self::coverage::{coverage_listing as render_coverage};
 use self::lower::{lower_input};
-use self::mono::{front_input, front_rows, mono_input};
+use self::mono::{coverage_input, front_input, front_rows, mono_input};
 use self::container::{EM_AARCH64, EM_RISCV, EM_X86_64, coff_object, elf_executable, macho_object};
 use self::machine::{
     LIR_LOAD_PTR, LIR_STORE_PTR, Lir, Lowered, M, lowered_new, put_decimal, put_selected, select,
@@ -80,6 +81,10 @@ pub fn table_listing_text(in input: Str) -> ChunkSeq[u64] {
     let mut out = ChunkSeq::new[u8]();
     table_listing(inout out);
     pack_text(in out)
+}
+
+pub fn coverage_listing(in input: Slice[u8]) -> ChunkSeq[u8] {
+    render_coverage(in input)
 }
 
 fn read_row(in b: Slice[u8], at: u64) -> Lir {
@@ -463,5 +468,11 @@ pub fn mono_words(in input: Str) -> ChunkSeq[u64] {
 // as `lowering_text` prints it.
 pub fn front_text(in input: Str) -> ChunkSeq[u64] {
     let out = front_input(in input.as_bytes());
+    pack_text(in out)
+}
+
+// `verified_codegen::coverage`'s listing (mono.ves `coverage_input`).
+pub fn coverage_text(in input: Str) -> ChunkSeq[u64] {
+    let out = coverage_input(in input.as_bytes());
     pack_text(in out)
 }

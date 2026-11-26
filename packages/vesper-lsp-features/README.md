@@ -40,7 +40,14 @@ under the 1.5x bar, and part 2 adds hover and the documentation links:
   background `vesper/proofStatus` notices (`lsp_proof_lenses`,
   `proof_lenses.ves`): `code_lenses_of`, `record_of`, `proof_result_of`
   and `proof_status_of` of `src/lsp/session/lens_requests.rs` and
-  `ProofLedger` of `crates/vesper-lsp/src/lens.rs`, part 9 (#1828).
+  `ProofLedger` of `crates/vesper-lsp/src/lens.rs`, part 9 (#1828);
+- the Lens request bookkeeping (`lsp_lens_state`, `lens_state.ves`):
+  `Debouncer`, `PendingRequests` and `CancelToken` of
+  `crates/vesper-lsp/src/lens.rs`, part 10a (#1828).
+
+The session's parameter checks (`validate_input`, `cancel_params` and the
+`vesper.proofAudit` arguments, part 10b of #1828) read the JSON-RPC token
+tape, so they live in `@vesper/lsp` (`packages/vesper-lsp/src/commands.ves`).
 
 The source is parsed with `@vesper/front` and `@vesper/ast`, positions use
 `@vesper/span`, and the JSON is written byte for byte as serde_json writes

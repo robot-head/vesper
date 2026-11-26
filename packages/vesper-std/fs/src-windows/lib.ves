@@ -806,7 +806,8 @@ fn remove_dir_all_w(in wpath: Slice[u16]) eff [Ffi[StdFs], Fail[IoError]] {
             child.push(92);
             child.extend(in cname.as_slice());
             if (attrs & StdFs::FILE_ATTRIBUTE_DIRECTORY) != 0
-                && (attrs & StdFs::FILE_ATTRIBUTE_REPARSE_POINT) == 0 {
+                && (attrs & StdFs::FILE_ATTRIBUTE_REPARSE_POINT) == 0
+            {
                 remove_dir_all_w(in child.as_slice());
             } else if (attrs & StdFs::FILE_ATTRIBUTE_DIRECTORY) != 0 {
                 let (rok, rerr) = match StdFs::RemoveDirectoryW(in child.as_slice()) {
@@ -1029,7 +1030,8 @@ fn meta_path(in path: Slice[u8], follow: bool) -> Metadata eff [Ffi[StdFs], Fail
                 | widen_u64(info.nFileSizeLow);
             let (ms, mns) = filetime_to_unix(info.ftLastWriteTimeLow, info.ftLastWriteTimeHigh);
             let kind = if !follow
-                && (info.dwFileAttributes & StdFs::FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+                && (info.dwFileAttributes & StdFs::FILE_ATTRIBUTE_REPARSE_POINT) != 0
+            {
                 kind_symlink()
             } else if (info.dwFileAttributes & StdFs::FILE_ATTRIBUTE_DIRECTORY) != 0 {
                 kind_dir()

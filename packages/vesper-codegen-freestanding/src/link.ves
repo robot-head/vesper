@@ -418,10 +418,9 @@ impl Linker {
                 let name = req[symbol.name_at..add(symbol.name_at, symbol.name_len)];
                 let hash = fnv(in name);
                 if global
-                    && (
-                        self.is_linker_symbol(in name)
-                            || self.global_hashed(in name, hash) != Absent::Row
-                    ) {
+                    && (self.is_linker_symbol(in name)
+                        || self.global_hashed(in name, hash) != Absent::Row)
+                {
                     fail_duplicate(inout err, in name);
                     return false;
                 }
@@ -497,7 +496,8 @@ impl Linker {
             let linked_sym = linked_at(in self.linked, row);
             if linked_sym.hash == hash
                 && linked_sym.name_len == name.len()
-                && bytes_eq(in self.names.as_slice(), linked_sym.name_at, in name, 0, name.len()) {
+                && bytes_eq(in self.names.as_slice(), linked_sym.name_at, in name, 0, name.len())
+            {
                 return row;
             }
         }
@@ -601,7 +601,8 @@ impl Linker {
             let auipc = self.read32(at);
             let jalr = self.read32(add(at, 4));
             if auipc & RvOpcode::Mask != RvOpcode::Auipc
-                || jalr & RvOpcode::Mask != RvOpcode::Jalr {
+                || jalr & RvOpcode::Mask != RvOpcode::Jalr
+            {
                 fail_object_in(
                     inout err,
                     in obj_name,
@@ -761,7 +762,8 @@ impl Linker {
                 let linked_sym = linked_at(in self.linked, k);
                 if found == Absent::Row
                     && linked_sym.obj_index != LINKER_OBJECT
-                    && linked_sym.name_len == trap.function.len {
+                    && linked_sym.name_len == trap.function.len
+                {
                     let name_span = obj_at(in self.objs, linked_sym.obj_index).name;
                     if name_span.len == trap.object.len
                         && bytes_eq(
@@ -777,7 +779,8 @@ impl Linker {
                             in req,
                             trap.function.start,
                             linked_sym.name_len
-                        ) {
+                        )
+                    {
                         found = k;
                     }
                 }
@@ -799,7 +802,8 @@ impl Linker {
                 && name_is(
                     in self.names[linked_sym.name_at..add(linked_sym.name_at, linked_sym.name_len)],
                     in "vesper_trap_table"
-                ) {
+                )
+            {
                 table = linked_sym.address;
             }
         }
@@ -857,7 +861,8 @@ impl Linker {
                 Option::None => Placement { vaddr: 0, offset: 0, file_bytes: 0, mem_bytes: 0 },
             };
             if addr >= placement.vaddr
-                && add(addr, 8) <= add(placement.vaddr, placement.file_bytes) {
+                && add(addr, 8) <= add(placement.vaddr, placement.file_bytes)
+            {
                 return add(placement.offset, sub(addr, placement.vaddr));
             }
         }
@@ -972,7 +977,8 @@ pub fn compare_code(
         if found == Absent::Row
             && sym_entry.name_ok
             && sym_entry.name_len == symbol.len
-            && bytes_eq(in req, sym_entry.name_at, in symbol_name, 0, symbol.len) {
+            && bytes_eq(in req, sym_entry.name_at, in symbol_name, 0, symbol.len)
+        {
             found = k;
         }
     }
@@ -1001,7 +1007,8 @@ pub fn compare_code(
         return;
     }
     if !bytes_eq(in req, add(section.data_at, start), in req, code.start, code.len)
-        || sym_entry.size != code.len {
+        || sym_entry.size != code.len
+    {
         fail_mismatch(inout err, in symbol_name);
     }
 }

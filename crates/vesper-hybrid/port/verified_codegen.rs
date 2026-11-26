@@ -19,6 +19,7 @@ unsafe extern "C" {
     fn vesper_hybrid_verified_codegen_live_allocations() -> i64;
     fn vesper_hybrid_verified_codegen_box_new(size: i64) -> i64;
     fn vesper_hybrid_verified_codegen_compile_input_words(input: *mut u64) -> i64;
+    fn vesper_hybrid_verified_codegen_coverage_listing_bytes(input: *mut u64) -> i64;
     fn vesper_hybrid_verified_codegen_format() -> i64;
 }
 
@@ -41,6 +42,15 @@ pub fn compile_input_words(input: &[u8]) -> Vec<u64> {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_hybrid_verified_codegen_compile_input_words(view_input) });
     unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `coverage_listing_bytes` of the Vesper library `hybrid_verified_codegen` (`vesper_hybrid_verified_codegen_coverage_listing_bytes`).
+pub fn coverage_listing_bytes(input: &[u8]) -> Vec<u8> {
+    // SAFETY: `vesper_hybrid_verified_codegen_coverage_listing_bytes` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_hybrid_verified_codegen_coverage_listing_bytes(view_input) });
+    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
 }
 
 /// Calls `format` of the Vesper library `hybrid_verified_codegen` (`vesper_hybrid_verified_codegen_format`).

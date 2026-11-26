@@ -11,8 +11,8 @@ use crate::{
 };
 pub use lens_requests::LensConfig;
 pub(crate) use lens_requests::{
-    CommandOutcome, PortRequests, TimerOutcome, code_lenses_of, lens_functions, proof_result_of,
-    proof_status_of, record_of, requests_dump,
+    CommandOutcome, PortRequests, TimerOutcome, code_lenses_of, lens_functions, proof_command,
+    proof_result_of, proof_status_of, record_of, requests_dump,
 };
 use salsa::Setter;
 use serde_json::{Value, json};
@@ -1189,6 +1189,60 @@ fn validate_input(method: &str, params: Option<&Value>) -> Result<(), ServerErro
         }
     }
     Ok(())
+}
+
+/// The parameter checks of the Vesper port's command test, as rows:
+/// `PortCheck::Input` runs `validate_input` (`.` when it passes),
+/// `PortCheck::Cancel` reads `$/cancelRequest` parameters (`i <id>` or
+/// `s <len>:<id>`), `PortCheck::Proof` runs the `vesper.proofAudit` checks
+/// against the documents `open` (`P <len>:<uri> <len>:<function> <0|1>`).
+/// A refusal is `E <code> <message>`. Each check runs `rounds` times.
+pub(crate) fn command_checks_dump(
+    checks: &[(PortCheck, String, Option<Value>)],
+    open: &[(String, i32)],
+    rounds: u64,
+) -> String {
+    let version_of = |uri: &str| open.iter().find(|(u, _)| u == uri).map(|(_, v)| *v);
+    let refused = |e: ServerError| format!("E {} {}", e.code, e.message);
+    let mut out = String::new();
+    for (check, method, params) in checks {
+        let mut row = String::new();
+        for _ in 0..rounds.max(1) {
+            row = match check {
+                PortCheck::Input => match validate_input(method, params.as_ref()) {
+                    Ok(()) => ".".to_owned(),
+                    Err(e) => refused(e),
+                },
+                PortCheck::Cancel => match vesper_lsp::lens::cancel_params(params.as_ref()) {
+                    Ok(vesper_lsp::Id::Integer(id)) => format!("i {id}"),
+                    Ok(vesper_lsp::Id::String(id)) => format!("s {}:{id}", id.len()),
+                    Err(e) => format!("E cancel {e}"),
+                },
+                PortCheck::Proof => match proof_command(params.as_ref(), version_of) {
+                    Ok((uri, function, semantic)) => format!(
+                        "P {}:{uri} {}:{function} {}",
+                        uri.len(),
+                        function.len(),
+                        u8::from(semantic)
+                    ),
+                    Err(e) => refused(e),
+                },
+            };
+            std::hint::black_box(&row);
+        }
+        out.push_str(&row);
+        out.push('\n');
+    }
+    out
+}
+
+/// Which check a row of `command_checks_dump` runs.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortCheck {
+    Input,
+    Cancel,
+    Proof,
 }
 
 #[cfg(test)]

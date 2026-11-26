@@ -267,7 +267,8 @@ fn merge(inout c: C, a: u64, b: u64) -> u64 {
         && tb == LTag::Send
         && la(in c, a) == la(in c, b)
         && lb(in c, a) == lb(in c, b)
-        && lc(in c, a) == lc(in c, b) {
+        && lc(in c, a) == lc(in c, b)
+    {
         let h100 = ld(in c, a);
         let h101 = ld(in c, b);
         let m = merge(inout c, h100, h101);
@@ -283,7 +284,8 @@ fn merge(inout c: C, a: u64, b: u64) -> u64 {
     if ta == LTag::Select
         && tb == LTag::Select
         && la(in c, a) == la(in c, b)
-        && same_labels(in c, a, b) {
+        && same_labels(in c, a, b)
+    {
         let f = c.tmp.len();
         let n = lkn(in c, a);
         for i in 0..n {
@@ -347,7 +349,8 @@ fn same_labels(in c: C, a: u64, b: u64) -> bool {
     }
     for i in 0..n {
         if lbr(in c, a, i, Br::Label) != lbr(in c, b, i, Br::Label)
-            || lbr(in c, a, i, Br::Payload) != lbr(in c, b, i, Br::Payload) {
+            || lbr(in c, a, i, Br::Payload) != lbr(in c, b, i, Br::Payload)
+        {
             return false;
         }
     }

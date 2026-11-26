@@ -562,7 +562,8 @@ impl Cx {
             if node.n == 0
                 && self.world.lookup(node.name) == NO_ADT
                 && !self.is_scalar_name(node.name)
-                && node.name != self.syms.string {
+                && node.name != self.syms.string
+            {
                 return true;
             }
             for i in 0..w(node.n) {
@@ -910,7 +911,8 @@ fn capabilities(inout ctx: Cx, inout out: ChunkSeq[u8], entry: u32) eff [Fail[WE
         // src-wasip2 refuses every start itself), so it imports nothing.
         if effect.name == ctx.syms.ffi_env
             || effect.name == ctx.syms.ffi_fs
-            || effect.name == ctx.syms.ffi_proc {
+            || effect.name == ctx.syms.ffi_proc
+        {
             let code: u8 = if effect.name == ctx.syms.ffi_env {
                 3
             } else if effect.name == ctx.syms.ffi_fs {
@@ -936,7 +938,8 @@ fn capabilities(inout ctx: Cx, inout out: ChunkSeq[u8], entry: u32) eff [Fail[WE
         }
         if effect.name == ctx.syms.stdout
             || effect.name == ctx.syms.clock
-            || effect.name == ctx.syms.trace {
+            || effect.name == ctx.syms.trace
+        {
             // The WASI host frames are lowered in part 2 of the port.
             Fail::raise(werr(K_NOT_PORTED, 0, 32));
         }
@@ -1291,7 +1294,8 @@ pub fn plan(inout ctx: Cx) -> Plan eff [Fail[WErr]] {
                             (handler_row.ret, handler_row.ret_base, R_RETURN_CLAUSE, 0)
                         } else {
                             let clause = match p_clauses
-                                .try_get(add(handler_row.clause_start, wrapping_sub(part, 2))) {
+                                .try_get(add(handler_row.clause_start, wrapping_sub(part, 2)))
+                            {
                                 Option::Some(hit) => hit,
                                 Option::None => clause0(),
                             };
@@ -1386,7 +1390,8 @@ pub fn plan(inout ctx: Cx) -> Plan eff [Fail[WErr]] {
             && qkeys.len() <= 130000
             && qvals.len() <= 130000
             && qlabels.len() <= 130000
-            && seen.len() <= 260000 {
+            && seen.len() <= 260000
+        {
             let mut old_cx = dummy_cx(ctx.known, ctx.syms);
             swap(inout ctx, inout old_cx);
             let (rebuilt, next_perm) = rebuild_cx(sink old_cx, scratch_mark, perm);
@@ -1952,7 +1957,8 @@ pub fn inst_operands(in ctx: Cx, op: u8, args_at: u64) -> ChunkSeq[u64] {
         || op == Op::Tiled
         || op == Op::Seq
         || op == Op::Fip
-        || op == Op::Indirect {
+        || op == Op::Indirect
+    {
         if op == Op::Indirect {
             out.push(ctx.ir.word(args_at));
         }
@@ -2171,7 +2177,8 @@ fn clause_mode(in ctx: Cx, fn_index: u64, resume: u32) -> u8 eff [Fail[WErr]] {
         let dest = widen_u64(last.dest);
         if contains64(in calls, dest)
             && flows_to_return(in ctx, fn_index, block_index, dest, 0)
-            && !contains64(in tail, dest) {
+            && !contains64(in tail, dest)
+        {
             tail.push(dest);
         }
     }

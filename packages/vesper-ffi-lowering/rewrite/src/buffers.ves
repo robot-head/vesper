@@ -595,7 +595,8 @@ fn payload(in ast: Ast, inout walk: W, ty: u32, cname: u32, field: u32, i: u64) 
     }
     let name = walk.name(ty);
     if (name == walk.s_option && cname == walk.s_some)
-        || (name == walk.s_result && cname == walk.s_ok) {
+        || (name == walk.s_result && cname == walk.s_ok)
+    {
         return walk.item(ty, 0);
     }
     if name == walk.s_result && cname == walk.s_err {
@@ -737,7 +738,8 @@ fn view_of(in ast: Ast, inout walk: W, expr_id: u32) -> u32 {
     if node.kind == E_CALL {
         let callee = expr_at(in ast, node.a);
         if callee.kind == E_FIELD
-            && (callee.b == walk.s_as_slice || callee.b == walk.s_as_slice_mut) {
+            && (callee.b == walk.s_as_slice || callee.b == walk.s_as_slice_mut)
+        {
             return buffer_of(in ast, inout walk, callee.a);
         }
     }
@@ -941,7 +943,8 @@ fn expr(in ast: Ast, inout walk: W, expr_id: u32, ok: bool) {
                     }
                     if found == NONE
                         && node.b != NONE
-                        && may_call_foreign(in ast, in walk, node.b) {
+                        && may_call_foreign(in ast, in walk, node.b)
+                    {
                         found = node.b;
                     }
                     if found != NONE {

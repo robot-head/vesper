@@ -449,10 +449,11 @@ fn check(inout ctx: Cx, in taint: Ct, in declassify: ChunkSeq[u64], in trusted: 
                     report(inout ctx, inout seen, k, 2, func_name, ent, message_at);
                 }
             }
-        } else if op == OP_STACK_ADDR || op == OP_STACK_LOAD || op == OP_STACK_STORE {} else if (
-            fmt == FMT_LOAD || fmt == FMT_LOAD_NO_OFFSET
-        )
-            && flags & CAN_LOAD != 0 {
+        } else if op == OP_STACK_ADDR || op == OP_STACK_LOAD || op == OP_STACK_STORE {} else if (fmt
+            == FMT_LOAD
+            || fmt == FMT_LOAD_NO_OFFSET)
+            && flags & CAN_LOAD != 0
+        {
             let v = arg(in ctx, row, 0);
             if secret(get_a(in ctx, in taint, v)) {
                 let message_at = ctx.report.text.len();
@@ -553,7 +554,8 @@ fn check(inout ctx: Cx, in taint: Ct, in declassify: ChunkSeq[u64], in trusted: 
                 report(inout ctx, inout seen, k, 7, func_name, ent, message_at);
             }
         } else if (flags & CAN_LOAD != 0 || flags & CAN_STORE != 0)
-            && any_secret(in ctx, in taint, row) {
+            && any_secret(in ctx, in taint, row)
+        {
             let message_at = ctx.report.text.len();
             put(inout ctx.report.text, "memory operation ");
             opname(inout ctx, row);

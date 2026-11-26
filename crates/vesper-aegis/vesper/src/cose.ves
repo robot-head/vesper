@@ -102,7 +102,8 @@ fn classify_alg_int(k: u64, a: u64) -> u64 {
             || (a >= 256 && a <= 259)
             || (a >= 24 && a <= 46)
             || (a >= 9 && a <= 17)
-            || (a >= 2 && a <= 7) {
+            || (a >= 2 && a <= 7)
+        {
             1
         } else {
             0
@@ -185,7 +186,8 @@ fn ws_prefix_len(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], node: u64) 
         }
         if b0 == 226
             && b1 == 128
-            && ((b2 >= 128 && b2 <= 138) || b2 == 168 || b2 == 169 || b2 == 175) {
+            && ((b2 >= 128 && b2 <= 138) || b2 == 168 || b2 == 169 || b2 == 175)
+        {
             return 3;
         }
         if b0 == 226 && b1 == 129 && b2 == 159 {
@@ -221,7 +223,8 @@ fn ws_suffix(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], node: u64) -> b
         }
         if prev2 == 226
             && prev1 == 128
-            && ((last >= 128 && last <= 138) || last == 168 || last == 169 || last == 175) {
+            && ((last >= 128 && last <= 138) || last == 168 || last == 169 || last == 175)
+        {
             return true;
         }
         if prev2 == 226 && prev1 == 129 && last == 159 {

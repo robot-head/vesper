@@ -193,10 +193,7 @@ fn put_expected(inout out: ChunkSeq[u8], c: u64) {
 fn put_context_error(inout out: ChunkSeq[u8], in p: P) {
     let mut newline = false;
     for i in 0..p.ctx.len() {
-        let c = match p.ctx.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let c = p.ctx.try_get(i).unwrap_or(0);
         if c > 0 && c < LABEL_END {
             out.extend(in "invalid ".as_bytes());
             put_label(inout out, c);
@@ -206,10 +203,7 @@ fn put_context_error(inout out: ChunkSeq[u8], in p: P) {
     }
     let mut first = true;
     for i in 0..p.ctx.len() {
-        let c = match p.ctx.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let c = p.ctx.try_get(i).unwrap_or(0);
         if c >= LABEL_END {
             if first {
                 if newline {
@@ -1819,10 +1813,7 @@ fn inline_table(in s: Slice[u8], inout p: P) -> u32 {
 }
 
 fn pair_word(in p: P, i: u64) -> u64 {
-    match p.pairs.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    p.pairs.try_get(i).unwrap_or(0)
 }
 
 // The decoded text of a key part, joined with `.` for a path.
@@ -2329,7 +2320,8 @@ fn keyval(in s: Slice[u8], inout p: P) -> bool {
 fn document(in s: Slice[u8], inout p: P) -> bool {
     if byte_at(in s, 0) == UTF8_BOM_FIRST
         && byte_at(in s, 1) == UTF8_BOM_SECOND
-        && byte_at(in s, 2) == UTF8_BOM_THIRD {
+        && byte_at(in s, 2) == UTF8_BOM_THIRD
+    {
         p.pos = UTF8_BOM_BYTES;
     }
     ws(in s, inout p);

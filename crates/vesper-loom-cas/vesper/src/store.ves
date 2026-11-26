@@ -1288,7 +1288,8 @@ fn read_record(
         || byte(in bytes.as_slice(), 4) != 1
         || byte(in bytes.as_slice(), 5) != 0
         || byte(in bytes.as_slice(), 6) != 0
-        || byte(in bytes.as_slice(), 7) != 0 {
+        || byte(in bytes.as_slice(), 7) != 0
+    {
         return 2;
     }
     let dom = byte(in bytes.as_slice(), 8);
@@ -3292,7 +3293,8 @@ fn transfer_decode_tree(
         || byte(in bytes, 0) != 86
         || byte(in bytes, 1) != 76
         || byte(in bytes, 2) != 84
-        || byte(in bytes, 3) != 82 {
+        || byte(in bytes, 3) != 82
+    {
         fail_pack(inout r, N_TREE_HEADER);
     }
     if read_u32_at(in bytes, 4) != 1 {

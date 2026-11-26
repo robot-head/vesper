@@ -39,6 +39,8 @@ vesper_crate(
     compile_data = [
         "assets/fonts/**",
         "examples/*.ves",
+        # The checker's preludes (src/strings.rs and the rest embed them).
+        "packages/vesper-preludes/preludes/*.ves",
         "src/**/*.ves",
         "tests/fixtures/source_macros/keep.ves",
         "lean/StylusAndLintSafety.lean",
@@ -937,6 +939,9 @@ vesper_crate(
         "test/closure_modes_collections": [":files"],
         # Milestone 7: the verified backend over the self-hosted front end.
         "test/verified_codegen_fail_front_end": glob(["packages/**/*.ves"]),
+        "test/verified_codegen_front_end": glob(["packages/**"]) + [
+            "docs/parallel-results/verified-codegen-front-end-inventory.txt",
+        ],
         "test/self_host_front_end": glob([
             "packages/**/*.ves",
             "examples/**/*.ves",
@@ -1662,6 +1667,7 @@ vesper_package(
     visibility = ["//visibility:public"],
     deps = [
         ":check_data_package",
+        ":std_bytes_package",
     ],
 )
 
@@ -2140,7 +2146,10 @@ vesper_package(
     srcs = glob(["packages/vesper-codegen-export/src/**/*.ves"]),
     manifest = "packages/vesper-codegen-export/Loom.toml",
     visibility = ["//visibility:public"],
-    deps = [":check_data_package"],
+    deps = [
+        ":check_data_package",
+        ":std_bytes_package",
+    ],
 )
 
 vesper_package(
@@ -2151,6 +2160,7 @@ vesper_package(
     deps = [
         ":check_data_package",
         ":codegen_export_package",
+        ":std_bytes_package",
         "//packages/vesper-cranelift:cranelift_package",
     ],
 )

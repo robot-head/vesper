@@ -155,7 +155,8 @@ pub fn validate(l: Plimits) -> Unit eff [Fail[Perr]] {
         || l.max_json_index_bytes > h.max_json_index_bytes
         || l.max_json_work > h.max_json_work
         || l.max_id_bytes > h.max_id_bytes
-        || l.max_method_bytes > h.max_method_bytes {
+        || l.max_method_bytes > h.max_method_bytes
+    {
         Fail::raise(Perr::PInvalidLimits);
     }
 }

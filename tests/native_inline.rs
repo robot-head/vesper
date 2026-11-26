@@ -312,3 +312,29 @@ fn literal_constants_fold_to_their_literal() {
     assert_eq!(off.constants, 0, "the inliner is off: {off:?}");
     assert_eq!(calls(&program, "clamp", "const$LIMIT"), 2);
 }
+
+/// Functions `main` never reaches don't spend the inliner's budgets: a
+/// dependency's unused code once kept `@vesper/verify`'s small helpers
+/// from being inlined into discovery (twice as slow, #2167).
+#[test]
+fn unreached_functions_leave_the_entry_unchanged() {
+    let used = "fn step(x: i64) -> i64 { wrapping_add(wrapping_mul(x, 3), 1) }\n\
+                fn main() -> i64 {\n\
+                    let mut s = 0;\n\
+                    for i in 0..100 { s = step(wrapping_add(s, i)); }\n\
+                    s\n\
+                }\n";
+    let mut unused = String::from(used);
+    for n in 0..1500 {
+        unused.push_str(&format!(
+            "fn a_waste_{n}(x: i64) -> i64 {{ step(step(step(step(wrapping_add(x, {n}))))) }}\n"
+        ));
+    }
+    for target in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] {
+        let (_, plain) =
+            native::object_with_options(&world(used), "main", Some(target), true).unwrap();
+        let (_, padded) =
+            native::object_with_options(&world(&unused), "main", Some(target), true).unwrap();
+        assert_eq!(plain, padded, "{target}");
+    }
+}

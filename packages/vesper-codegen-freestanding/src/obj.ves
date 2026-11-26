@@ -189,13 +189,15 @@ pub fn parse_object(
         || rd8(in req, base) != Ident::Mag0
         || rd8(in req, add(base, 1)) != Ident::Mag1
         || rd8(in req, add(base, 2)) != Ident::Mag2
-        || rd8(in req, add(base, 3)) != Ident::Mag3 {
+        || rd8(in req, add(base, 3)) != Ident::Mag3
+    {
         why.extend(in "not an ELF file".as_bytes());
         return obj;
     }
     if rd8(in req, add(base, Ehdr::Class)) != Ident::Class64
         || rd8(in req, add(base, Ehdr::Data)) != Ident::Data2Lsb
-        || rd8(in req, add(base, Ehdr::Version)) != Ident::Current {
+        || rd8(in req, add(base, Ehdr::Version)) != Ident::Current
+    {
         why.extend(in "not a little-endian ELF64 file".as_bytes());
         return obj;
     }
@@ -223,7 +225,8 @@ pub fn parse_object(
     if shnum == Absent::Row
         || shstrndx == Absent::Row
         || shnum > obj.len / Shdr::Bytes
-        || !inside(obj, shoff, wrapping_mul(shnum, Shdr::Bytes)) {
+        || !inside(obj, shoff, wrapping_mul(shnum, Shdr::Bytes))
+    {
         why.extend(in "invalid section header table".as_bytes());
         return obj;
     }
@@ -336,7 +339,8 @@ pub fn parse_object(
         let section = sec(in secs, obj, i);
         if section.sh_type == Sht::Rel
             || section.sh_type == Sht::Rela
-            || section.sh_type == Sht::Crel {
+            || section.sh_type == Sht::Crel
+        {
             let info = widen_u64(section.info);
             if widen_u64(section.link) == obj.symtab && info != 0 {
                 if info >= shnum {
@@ -346,7 +350,8 @@ pub fn parse_object(
                 let mut target_sec = sec(in secs, obj, info);
                 if target_sec.sh_type == Sht::Rel
                     || target_sec.sh_type == Sht::Rela
-                    || target_sec.sh_type == Sht::Crel {
+                    || target_sec.sh_type == Sht::Crel
+                {
                     why.extend(in "unsupported ELF sh_info for relocation section".as_bytes());
                     return obj;
                 }
@@ -496,7 +501,8 @@ pub fn string_table(
         let start = at64(in starts, id);
         let len = at64(in lens, id);
         if prev != Absent::Row
-            && ends_with(in strs, at64(in starts, prev), at64(in lens, prev), start, len) {
+            && ends_with(in strs, at64(in starts, prev), at64(in lens, prev), start, len)
+        {
             let ok = offsets.try_set(id, wrapping_sub(wrapping_sub(offset, len), 1));
         } else {
             let ok = offsets.try_set(id, offset);

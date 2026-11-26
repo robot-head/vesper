@@ -412,10 +412,8 @@ fn has_tail_name(in text: ChunkSeq[u8], in toks: Toks) -> bool {
     kind(in toks, dollar) == k_dollar()
         && kind(in toks, inc(dollar)) == k_dot_dot()
         && kind(in toks, add(dollar, 3)) == k_colon()
-        && (
-            text_is(in text, in toks, add(dollar, 4), in "stmts".as_bytes())
-                || text_is(in text, in toks, add(dollar, 4), in "scope".as_bytes())
-        )
+        && (text_is(in text, in toks, add(dollar, 4), in "stmts".as_bytes())
+            || text_is(in text, in toks, add(dollar, 4), in "scope".as_bytes()))
 }
 
 // `captures_tail(pattern)`.
@@ -529,7 +527,8 @@ fn compile(in pattern: ChunkSeq[u8], in pattern_toks: Toks, inout matcher: Mx) -
             group_ends.truncate(sub(group_ends.len(), 1));
             tok = inc(tok);
             let sep = if kind(in pattern_toks, tok) == k_star()
-                || kind(in pattern_toks, tok) == k_plus() {
+                || kind(in pattern_toks, tok) == k_plus()
+            {
                 NONE
             } else {
                 let sep_tok = tok;
@@ -563,10 +562,9 @@ fn compile(in pattern: ChunkSeq[u8], in pattern_toks: Toks, inout matcher: Mx) -
                 if tok > 0
                     && last_literal
                     && head_kind(kind(in pattern_toks, sub(tok, 1)))
-                    && (
-                        kind(in pattern_toks, tok) == k_l_brace()
-                            || kind(in pattern_toks, tok) == k_string()
-                    ) {
+                    && (kind(in pattern_toks, tok) == k_l_brace()
+                        || kind(in pattern_toks, tok) == k_string())
+                {
                     if joined(in pattern_toks, tok) { 1 } else { 2 }
                 } else {
                     0
@@ -595,7 +593,8 @@ fn compile(in pattern: ChunkSeq[u8], in pattern_toks: Toks, inout matcher: Mx) -
         }
         if !(kind(in pattern_toks, tok) == k_lower() || kind(in pattern_toks, tok) == k_upper())
             || kind(in pattern_toks, inc(tok)) != k_colon()
-            || kind(in pattern_toks, add(tok, 2)) != k_lower() {
+            || kind(in pattern_toks, add(tok, 2)) != k_lower()
+        {
             fail(inout matcher, in "malformed sugar capture".as_bytes());
             return false;
         }
@@ -673,26 +672,23 @@ fn valid_fragment(
     if sort == S_IDENT {
         let tok_kind = kind(in invocation_toks, range_start);
         let ok = sub(range_end, range_start) == 1
-            && (
-                tok_kind == k_lower()
-                    || tok_kind == k_upper()
-                    || tok_kind == k_state()
-                    || tok_kind == k_with()
-                    || tok_kind == k_linear()
-                    || tok_kind == k_eff()
-            );
+            && (tok_kind == k_lower()
+                || tok_kind == k_upper()
+                || tok_kind == k_state()
+                || tok_kind == k_with()
+                || tok_kind == k_linear()
+                || tok_kind == k_eff());
         return if ok { 1 } else { 0 };
     }
     if sort == S_PLACE {
         let tok_kind = kind(in invocation_toks, range_start);
-        if !(
-            tok_kind == k_lower()
-                || tok_kind == k_self_kw()
-                || tok_kind == k_state()
-                || tok_kind == k_with()
-                || tok_kind == k_linear()
-                || tok_kind == k_eff()
-        ) {
+        if !(tok_kind == k_lower()
+            || tok_kind == k_self_kw()
+            || tok_kind == k_state()
+            || tok_kind == k_with()
+            || tok_kind == k_linear()
+            || tok_kind == k_eff())
+        {
             return 0;
         }
         let mut tok = inc(range_start);
@@ -705,7 +701,8 @@ fn valid_fragment(
                 tok = add(tok, 2);
             } else if tok_kind == k_l_bracket()
                 && tree_end(in invocation_toks, tok) <= range_end
-                && tree_end(in invocation_toks, tok) > add(tok, 2) {
+                && tree_end(in invocation_toks, tok) > add(tok, 2)
+            {
                 tok = tree_end(in invocation_toks, tok);
             } else {
                 return 0;
@@ -716,7 +713,8 @@ fn valid_fragment(
         }
     } else if (sort == S_BLOCK || sort == S_SCOPE)
         && !sequence
-        && (!one_tree || kind(in invocation_toks, range_start) != k_l_brace()) {
+        && (!one_tree || kind(in invocation_toks, range_start) != k_l_brace())
+    {
         return 0;
     }
     let mut wrapped = ChunkSeq::new[u8]();
@@ -915,7 +913,8 @@ fn collect(
             let begin = rec_at(in matcher, event, 4);
             for j in 0..(matcher.rep_names.len() >> 1) {
                 if w64(in matcher.rep_names, j << 1) == begin
-                    && !spend(inout matcher, inc(index_len)) {
+                    && !spend(inout matcher, inc(index_len))
+                {
                     return false;
                 }
             }
@@ -1008,7 +1007,8 @@ fn collect(
             let mut named = false;
             for j in 0..(matcher.rep_names.len() >> 1) {
                 if w64(in matcher.rep_names, j << 1) == begin
-                    && w64(in matcher.rep_names, inc(j << 1)) == cap {
+                    && w64(in matcher.rep_names, inc(j << 1)) == cap
+                {
                     named = true;
                 }
             }
@@ -1023,7 +1023,8 @@ fn collect(
                 let other_first = rec_at(in matcher, other, 1);
                 let other_len = rec_at(in matcher, other, 2);
                 if !ext_less(in matcher, idx_first, idx_len, other_first, other_len)
-                    && !ext_less(in matcher, other_first, other_len, idx_first, idx_len) {
+                    && !ext_less(in matcher, other_first, other_len, idx_first, idx_len)
+                {
                     seen = true;
                 }
             }
@@ -1131,7 +1132,8 @@ pub fn match_rule_encoded(
     if limit >= 2
         && kind(in invocation_toks, sub(limit, 1)) == k_semi()
         && kind(in invocation_toks, sub(limit, 2)) == k_r_brace()
-        && !last_semi {
+        && !last_semi
+    {
         limit = sub(limit, 1);
     }
     let mut frames = ChunkSeq::new[u64]();
@@ -1240,7 +1242,8 @@ pub fn match_rule_encoded(
                         in invocation,
                         in invocation_toks,
                         pos
-                    ) {
+                    )
+                {
                     break;
                 }
                 if b != 0 && (pos == 0 || joined(in invocation_toks, pos) != (b == 1)) {
@@ -1317,17 +1320,15 @@ pub fn match_rule_encoded(
                         break;
                     }
                     if !sequence
-                        && (
-                            kind(in invocation_toks, end) == k_comma()
-                                || kind(in invocation_toks, end) == k_semi()
-                        ) {
+                        && (kind(in invocation_toks, end) == k_comma()
+                            || kind(in invocation_toks, end) == k_semi())
+                    {
                         break;
                     }
                     if end > start
-                        && (
-                            scalar == S_IDENT
-                                || (!sequence && (scalar == S_BLOCK || scalar == S_SCOPE))
-                        ) {
+                        && (scalar == S_IDENT
+                            || (!sequence && (scalar == S_BLOCK || scalar == S_SCOPE)))
+                    {
                         break;
                     }
                     end = tree_end(in invocation_toks, end);
@@ -1394,7 +1395,8 @@ pub fn match_rule_encoded(
                             in invocation,
                             in invocation_toks,
                             pos
-                        ) {
+                        )
+                    {
                         break;
                     }
                     pos = inc(pos);

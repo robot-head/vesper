@@ -248,18 +248,18 @@ impl L {
                 let block = self.wide_block(zero, zero);
                 self.set_value(dest_val, block);
             }
-        } else if (
-            self.is_op(op_sym, "widen_u128")
-                || self.is_op(op_sym, "widen_i128")
-                || self.is_op(op_sym, "wrapping_u128")
-                || self.is_op(op_sym, "wrapping_i128")
-        )
-            && from_wide {
+        } else if (self.is_op(op_sym, "widen_u128")
+            || self.is_op(op_sym, "widen_i128")
+            || self.is_op(op_sym, "wrapping_u128")
+            || self.is_op(op_sym, "wrapping_i128"))
+            && from_wide
+        {
             self.set_value(dest_val, operand);
         } else if self.is_op(op_sym, "widen_u128")
             || self.is_op(op_sym, "widen_i128")
             || self.is_op(op_sym, "wrapping_u128")
-            || self.is_op(op_sym, "wrapping_i128") {
+            || self.is_op(op_sym, "wrapping_i128")
+        {
             let scalar = self.scalar_of(from);
             let hi = if sc_signed(scalar) {
                 let sign_word = self.local();
@@ -275,19 +275,19 @@ impl L {
             self.set_value(dest_val, block);
         } else if (self.is_op(op_sym, "wrapping_u64") || self.is_op(op_sym, "wrapping_i64"))
             && from_wide
-            && !to_wide {
+            && !to_wide
+        {
             let lo = self.word_of(operand, 0);
             self.set_value(dest_val, lo);
-        } else if (
-            self.is_op(op_sym, "wrapping_u32")
-                || self.is_op(op_sym, "wrapping_u16")
-                || self.is_op(op_sym, "wrapping_u8")
-                || self.is_op(op_sym, "wrapping_i32")
-                || self.is_op(op_sym, "wrapping_i16")
-                || self.is_op(op_sym, "wrapping_i8")
-        )
+        } else if (self.is_op(op_sym, "wrapping_u32")
+            || self.is_op(op_sym, "wrapping_u16")
+            || self.is_op(op_sym, "wrapping_u8")
+            || self.is_op(op_sym, "wrapping_i32")
+            || self.is_op(op_sym, "wrapping_i16")
+            || self.is_op(op_sym, "wrapping_i8"))
             && from_wide
-            && !to_wide {
+            && !to_wide
+        {
             let lo = self.word_of(operand, 0);
             let dest = self.dest(dest_val);
             let scalar = self.scalar_of(to);
@@ -590,7 +590,8 @@ impl L {
         } else if self.is_op(op_sym, "<")
             || self.is_op(op_sym, ">")
             || self.is_op(op_sym, "<=")
-            || self.is_op(op_sym, ">=") {
+            || self.is_op(op_sym, ">=")
+        {
             // a < b, with the operands swapped for > and <=, negated for
             // <= and >=
             let swap = self.is_op(op_sym, ">") || self.is_op(op_sym, "<=");

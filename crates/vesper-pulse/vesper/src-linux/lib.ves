@@ -693,7 +693,8 @@ pub fn driver_kind_from_name(in name: Slice[u8]) -> Option[DriverKind] {
     }
     if eq_trimmed_lower(in name, a, b, in "io_uring".as_bytes())
         || eq_trimmed_lower(in name, a, b, in "io-uring".as_bytes())
-        || eq_trimmed_lower(in name, a, b, in "uring".as_bytes()) {
+        || eq_trimmed_lower(in name, a, b, in "uring".as_bytes())
+    {
         return Option::Some(DriverKind::IoUring);
     }
     if eq_trimmed_lower(in name, a, b, in "epoll".as_bytes()) {
@@ -2836,7 +2837,8 @@ pub fn uring_driver_cancel(
     id: RequestId
 ) -> Result[bool, u32] eff [Ffi[PulseSys]] {
     if uring_request_index(in d, id.bits) >= d.requests.len()
-        || uring_u64_index(in d.cancellations, id.bits) < d.cancellations.len() {
+        || uring_u64_index(in d.cancellations, id.bits) < d.cancellations.len()
+    {
         return Result::Ok(false);
     }
     let sqe = uring_sqe(

@@ -157,7 +157,8 @@ fn only_access_receivers(
         }
         if !has_receiver(u.sub)
             || !(any_receiver || keeps_length(u.sub) || is_hoisted(u.sub))
-            || u.gn == 0 {
+            || u.gn == 0
+        {
             return false;
         }
         let first = f.arg(w(u.g0));
@@ -263,7 +264,8 @@ fn stable_views(in f: Fun, in us: Users, inout out: Hoists) {
                     false,
                     in none,
                     (q.flags & TY_SLICE) != 0
-                ) {
+                )
+            {
                 out.reads.push(wrapping_shl_u64(k, 32) | w(i.dest));
                 any = true;
             }
@@ -299,7 +301,8 @@ fn stable_views(in f: Fun, in us: Users, inout out: Hoists) {
             if i.op != OP_READ
                 || f.depth(i.place) <= 1
                 || f.root_of(i.place) != q.name
-                || i.sub != 0 {
+                || i.sub != 0
+            {
                 continue;
             }
             if (i.flags & TY_SEQ) == 0 || (i.flags & TY_TEXT) != 0 {
@@ -501,7 +504,8 @@ fn header_hoists(in f: Fun, in us: Users, inout out: Hoists) {
                     continue;
                 }
                 if !only_access_receivers(in f, in us, i.dest, pass, i.place, true, in both, false)
-                    || !stable_place(in f, in both, i.place) {
+                    || !stable_place(in f, in both, i.place)
+                {
                     continue;
                 }
                 buf.clear();

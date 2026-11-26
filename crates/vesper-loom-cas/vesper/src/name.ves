@@ -47,7 +47,8 @@ pub fn seq_len(in s: Slice[u8], i: u64) -> u64 {
         let b1 = byte(in s, wrapping_add(i, 1));
         if !cont(in s, wrapping_add(i, 1))
             || !cont(in s, wrapping_add(i, 2))
-            || !cont(in s, wrapping_add(i, 3)) {
+            || !cont(in s, wrapping_add(i, 3))
+        {
             return 0;
         }
         if b0 == 240 && b1 < 144 {

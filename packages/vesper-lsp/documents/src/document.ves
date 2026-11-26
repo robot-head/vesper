@@ -145,7 +145,8 @@ fn validate(l: StoreLimits) -> Unit eff [Fail[StoreError]] {
         || l.max_total_bytes > Hard::TotalBytes
         || l.max_uri_bytes > Hard::UriBytes
         || l.max_changes > Hard::Changes
-        || l.max_work > Hard::Work {
+        || l.max_work > Hard::Work
+    {
         Fail::raise(StoreError::SInvalidLimits);
     }
 }

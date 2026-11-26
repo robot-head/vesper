@@ -1717,7 +1717,8 @@ fn pat(inout b: B, in t: Types, in y: Y, inout g: G, p: u64, inout rs: ChunkSeq[
                     let mut found = NONE64;
                     for i in 0..n {
                         if found == NONE64
-                            && y.a.sym(y.a.px(p, add(3, wrapping_mul(i, 2)))) == fname {
+                            && y.a.sym(y.a.px(p, add(3, wrapping_mul(i, 2)))) == fname
+                        {
                             found = y.a.px(p, add(4, wrapping_mul(i, 2)));
                         }
                     }

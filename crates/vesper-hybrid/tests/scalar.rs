@@ -2,7 +2,9 @@
 //! #1280): scalar operators, locals, control flow and the raising arms
 //! compile to the same objects with the hybrid compiler as with the
 //! default one, and the hybrid's scalar requests really are answered from
-//! Vesper.
+//! Vesper. Plain scalar functions are emitted whole through the `body`
+//! hook (native walk part 6a, #2094), and those bodies come from Vesper
+//! too.
 //!
 //! tests/differential.rs compares the whole corpus's objects; this test
 //! checks that the scalar hook is the one answering. The full per-request
@@ -119,6 +121,52 @@ fn main() -> i64 {
 }
 ";
 
+/// Plain scalar functions (no effects, so plain frames): a narrow local
+/// written in one branch, a loop carrying a `bool`, a float local and a
+/// chain of `if`s.
+const BODIES: &str = "\
+fn pick(c: bool, x: u8) -> u8 {
+    let mut y: u8 = x;
+    if c {
+        y = x & 15;
+    }
+    y
+}
+fn flip(a: u32, b: u32) -> u32 {
+    let mut s: u32 = a;
+    let mut go: bool = true;
+    loop {
+        if !go {
+            break;
+        }
+        s = s ^ b;
+        go = s != a;
+    }
+    s | (a & 3)
+}
+fn choose(c: bool, x: f64) -> f64 {
+    let mut y: f64 = 0.5;
+    if c {
+        y = x;
+    }
+    y
+}
+fn sign(x: i16) -> i16 {
+    if x < 0 {
+        -1
+    } else if x == 0 {
+        0
+    } else {
+        1
+    }
+}
+fn main() -> i64 {
+    let f: i64 = if choose(true, 2.0) > 1.0 { 64 } else { 0 };
+    widen_i64(pick(true, 200)) ^ widen_i64(pick(false, 7)) ^ widen_i64(flip(5, 9))
+        ^ widen_i64(sign(-4)) ^ f
+}
+";
+
 /// Runs `compiler` on `file`, returning the object and stderr.
 fn object(compiler: &Path, file: &Path, out: &Path, optimize: bool) -> (Vec<u8>, String) {
     let _ = std::fs::remove_file(out);
@@ -136,15 +184,20 @@ fn object(compiler: &Path, file: &Path, out: &Path, optimize: bool) -> (Vec<u8>,
     (std::fs::read(out).expect("an object"), stderr)
 }
 
-/// The count of the hybrid's `codegen emitted N scalar requests` line.
-fn scalar_requests(stderr: &str) -> u64 {
+/// The count of the hybrid's `codegen emitted N <what>` line.
+fn emitted(stderr: &str, what: &str) -> u64 {
     stderr
         .lines()
         .filter_map(|l| l.strip_prefix("vesper-hybrid: codegen emitted "))
-        .find(|l| l.contains(" scalar requests"))
+        .find(|l| l.contains(what))
         .and_then(|l| l.split(' ').next())
         .and_then(|n| n.parse().ok())
-        .unwrap_or_else(|| panic!("no scalar report in {stderr:?}"))
+        .unwrap_or_else(|| panic!("no {what} report in {stderr:?}"))
+}
+
+/// The count of the hybrid's `codegen emitted N scalar requests` line.
+fn scalar_requests(stderr: &str) -> u64 {
+    emitted(stderr, " scalar requests")
 }
 
 #[test]
@@ -181,6 +234,30 @@ fn scalar_programs_match_the_default_compiler() {
                 "{name} (optimize {optimize}): {n} scalar requests from Vesper, objects equal"
             );
         }
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+#[test]
+fn scalar_bodies_match_the_default_compiler() {
+    let scratch = std::env::temp_dir().join(format!("vesper-hybrid-bodies-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let file = scratch.join("bodies.ves");
+    std::fs::write(&file, BODIES).unwrap();
+    let default = default_compiler();
+    // The walk lends whole bodies on the optimize path only.
+    for optimize in [false, true] {
+        let (d, _) = object(&default, &file, &scratch.join("default.o"), optimize);
+        let (h, stderr) = object(&hybrid(), &file, &scratch.join("hybrid.o"), optimize);
+        assert!(
+            d == h,
+            "bodies (optimize {optimize}): the hybrid object differs from the default compiler's"
+        );
+        let n = emitted(&stderr, " function bodies");
+        if optimize {
+            assert!(n >= 4, "only {n} function bodies from Vesper");
+        }
+        eprintln!("bodies (optimize {optimize}): {n} function bodies from Vesper, objects equal");
     }
     let _ = std::fs::remove_dir_all(&scratch);
 }

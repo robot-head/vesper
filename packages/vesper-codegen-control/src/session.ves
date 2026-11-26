@@ -126,10 +126,7 @@ fn quoted(inout o: ChunkSeq[u8], in names: Names, s: u32) {
 }
 
 fn bool_at(in s: ChunkSeq[bool], i: u64) -> bool {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => false,
-    }
+    s.try_get(i).unwrap_or(false)
 }
 
 fn contains32(in s: ChunkSeq[u32], x: u32) -> bool {
@@ -884,7 +881,8 @@ impl Planner {
                 }
                 let sig = tb.op(w(si));
                 if !self
-                    .validate_op(inout ls, inout t, inout names, in wd, in tb, d.name, sig, ob) {
+                    .validate_op(inout ls, inout t, inout names, in wd, in tb, d.name, sig, ob)
+                {
                     return false;
                 }
                 // `ops.insert` after validation: a second binding of the
@@ -974,7 +972,8 @@ impl Planner {
             || add(failure_offset, failure_size) > MAX_U32
             || add(staging_offset, staging_size) > MAX_U32
             || wrapping_add(add(failure_offset, failure_size), 7) > MAX_U32
-            || wrapping_add(add(staging_offset, staging_size), 7) > MAX_U32 {
+            || wrapping_add(add(staging_offset, staging_size), 7) > MAX_U32
+        {
             return self.fail_text("session data frame is too large");
         }
         if bytes < 8 {
@@ -1040,7 +1039,8 @@ impl Planner {
                             in names,
                             bound_at(in self.bound, add(w(e.a), q)).op,
                             bound_at(in self.bound, add(w(e.a), best)).op
-                        ) {
+                        )
+                    {
                         best = q;
                     }
                 }

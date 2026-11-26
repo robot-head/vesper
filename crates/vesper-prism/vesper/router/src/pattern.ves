@@ -116,7 +116,8 @@ pub fn parse_pattern(in p: Slice[u8], max_segments: u64) -> Result[Pattern, Rout
                     || b == Ascii::Percent
                     || b == Ascii::Question
                     || b == Ascii::Hash
-                    || control_at(in p, i, end) {
+                    || control_at(in p, i, end)
+                {
                     return Result::Err(RouteFault::InvalidPattern);
                 }
             }

@@ -50,12 +50,14 @@ test {
         let mut rolled_back: u64 = 0;
         if observe(inout published, inout rolled_back, 20) != Result::Ok(20)
             || published != 20
-            || rolled_back != 0 {
+            || rolled_back != 0
+        {
             return 1;
         }
         if observe(inout published, inout rolled_back, 77) != Result::Err(77)
             || published != 20
-            || rolled_back != 77 {
+            || rolled_back != 77
+        {
             return 2;
         }
         0

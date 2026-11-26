@@ -1060,7 +1060,8 @@ fn state_includes(
         || gw(in ows, 5) != gw(in cws, 5)
         || gw(in ows, 2) != gw(in cws, 2)
         || gw(in ows, 3) != gw(in cws, 3)
-        || gw(in ows, 7) != gw(in cws, 7) {
+        || gw(in ows, 7) != gw(in cws, 7)
+    {
         return false;
     }
     if s_range(in ows, 0) > s_range(in cws, 0) {
@@ -1074,7 +1075,8 @@ fn state_includes(
     for f in 0..nf {
         let m = s_meta(f);
         if gw(in ows, m) != gw(in cws, m)
-            || gw(in ows, wrapping_add(m, 1)) != gw(in cws, wrapping_add(m, 1)) {
+            || gw(in ows, wrapping_add(m, 1)) != gw(in cws, wrapping_add(m, 1))
+        {
             return false;
         }
         let ho = gw(in ows, wrapping_add(m, 2));
@@ -1102,7 +1104,8 @@ fn state_includes(
                 let ci = gw(in cws, link_at(f, i));
                 for j in wrapping_add(i, 1)..eleven {
                     if li == gw(in ows, link_at(f, j))
-                        && (ci == 0 || ci != gw(in cws, link_at(f, j))) {
+                        && (ci == 0 || ci != gw(in cws, link_at(f, j)))
+                    {
                         return false;
                     }
                 }
@@ -1232,7 +1235,8 @@ fn widen_scalars(in prs: Slice[R], in pws: Slice[u64], inout cur: St) -> bool {
             if a.tag == T_SCALAR
                 && b.tag == T_SCALAR
                 && !scalar_eq(a.var, b.var)
-                && !is_unknown(b.var) {
+                && !is_unknown(b.var)
+            {
                 setr(inout cur, s_reg(f, i), r_unknown());
                 setw(inout cur, link_at(f, i), 0);
                 let w = ww(in cur, wide_regs_at(f));
@@ -1248,7 +1252,8 @@ fn widen_scalars(in prs: Slice[R], in pws: Slice[u64], inout cur: St) -> bool {
             if a.tag == T_SCALAR
                 && b.tag == T_SCALAR
                 && !scalar_eq(a.var, b.var)
-                && !is_unknown(b.var) {
+                && !is_unknown(b.var)
+            {
                 setr(inout cur, s_slot(f, k), r_unknown());
                 let w = ww(in cur, wide_slots_at(f));
                 setw(inout cur, wide_slots_at(f), w | bit(k));
@@ -2742,7 +2747,8 @@ fn kfunc_slot(
     if wrapping_add(a.x, 1) != nframes(in st)
         || bits(off) & 7 != 0
         || off < NEG_STACK_BYTES
-        || off > -8 {
+        || off > -8
+    {
         begin(inout v, "kfunc.arg_type");
         lit(inout v.msg, what);
         lit(inout v.msg, ": arg #0 must be an aligned 8-byte slot of the current frame, got fp");
@@ -3470,7 +3476,8 @@ fn cond(
         return Step::Jump(target);
     }
     if (a.tag == T_PACKET && b.tag == T_PACKET_END)
-        || (a.tag == T_PACKET_END && b.tag == T_PACKET) {
+        || (a.tag == T_PACKET_END && b.tag == T_PACKET)
+    {
         if !wide {
             fail(inout v, pc, "jmp.pointer_compare", "32-bit packet pointer comparison");
         }
@@ -3809,13 +3816,12 @@ fn bounded_iteration(in v: V, pc: u64, rid: u64, in st: St) -> bool {
     }
     // only an active iterator, the same instance the earlier visit used
     let r1 = reg(in st, 1);
-    if !(
-        r1.tag == 6
-            && wrapping_add(r1.x, 1) == nframes(in st)
-            && bits(r1.off) & 7 == 0
-            && r1.off >= NEG_STACK_BYTES
-            && r1.off < 0
-    ) {
+    if !(r1.tag == 6
+        && wrapping_add(r1.x, 1) == nframes(in st)
+        && bits(r1.off) & 7 == 0
+        && r1.off >= NEG_STACK_BYTES
+        && r1.off < 0)
+    {
         return false;
     }
     let at = shr(bits(wrapping_add(r1.off, STACK_BYTES_I)), 3);
@@ -3886,7 +3892,8 @@ fn checkpoint(inout v: V, inout st: St, pc: u64, parent: u64) -> (bool, u64) eff
         } else if v.widen
             && br > 0
             && is_ancestor(in v, rid, parent)
-            && bounded_iteration(in v, pc, rid, in st) {
+            && bounded_iteration(in v, pc, rid, in st)
+        {
             widen_from = rid;
         }
         rid = sq(in v.rec_next, rid);
@@ -3904,7 +3911,8 @@ fn checkpoint(inout v: V, inout st: St, pc: u64, parent: u64) -> (bool, u64) eff
             }
             if sq(in v.rec_branches, r) > 0
                 && is_ancestor(in v, r, parent)
-                && rec_includes(inout v, r, in st) {
+                && rec_includes(inout v, r, in st)
+            {
                 return (true, parent);
             }
             r = sq(in v.rec_next, r);
@@ -4488,7 +4496,8 @@ pub fn verify_program(
     }
     if second.rule.eq(in "complexity.limit".as_bytes())
         && sq(in first.words, 0) == 1
-        && !first.rule.eq(in "loop.widened_precise".as_bytes()) {
+        && !first.rule.eq(in "loop.widened_precise".as_bytes())
+    {
         return first;
     }
     second

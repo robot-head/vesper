@@ -393,7 +393,8 @@ fn direct_or_option_handle(in ctx: Ctx, ty: u32, in handles: ChunkSeq[u32]) -> u
         let inner_node = ctx.types.node(inner);
         if inner_node.kind == TyKind::Named
             && inner_node.n == 0
-            && list_has_u32(in handles, inner_node.name) {
+            && list_has_u32(in handles, inner_node.name)
+        {
             return inner_node.name;
         }
     }
@@ -571,17 +572,17 @@ fn borrowed_scrutinees(in ctx: Ctx, in program: Program, fi: u64) -> ChunkSeq[u3
                     let root = n32(program.op(inst.a));
                     if list_has_u32(in matched, inst.dest)
                         && list_has_u32(in bound_names, root)
-                        && !list_has_u32(in out, inst.dest) {
+                        && !list_has_u32(in out, inst.dest)
+                    {
                         out.push(inst.dest);
                     }
                 } else if inst.op == Op::Seq {
                     let row = program.pool_row(program.op(inst.a));
-                    if (
-                        sym_eq_str(in ctx.names, row.label, in "TryGet")
-                            || sym_eq_str(in ctx.names, row.label, in "Hoisted(TryGet)")
-                    )
+                    if (sym_eq_str(in ctx.names, row.label, in "TryGet")
+                        || sym_eq_str(in ctx.names, row.label, in "Hoisted(TryGet)"))
                         && list_has_u32(in matched, inst.dest)
-                        && !list_has_u32(in out, inst.dest) {
+                        && !list_has_u32(in out, inst.dest)
+                    {
                         out.push(inst.dest);
                     }
                 } else if inst.op == Op::Bind {
@@ -1039,7 +1040,8 @@ fn apply_plan(
     if plan.before_inst.len() == 0
         && plan.after_inst.len() == 0
         && plan.before_term.len() == 0
-        && plan.splits.len() == 0 {
+        && plan.splits.len() == 0
+    {
         return true;
     }
     for si in 0..plan.splits.len() {
@@ -1185,7 +1187,8 @@ fn is_state_action(in ctx: Ctx, in program: Program, in inst: InstRow) -> bool {
         || inst.op == Op::Tiled
         || inst.op == Op::Seq
         || inst.op == Op::Fip
-        || inst.op == Op::Exit {
+        || inst.op == Op::Exit
+    {
         return true;
     }
     if inst.op == Op::Binary {
@@ -1338,7 +1341,8 @@ fn check_rows(
         let mut dup = false;
         for di in 0..seen_graphs.len() {
             if u32_at(in seen_graphs, di) == site.graph
-                && u32_at(in seen_effects, di) == site.effect {
+                && u32_at(in seen_effects, di) == site.effect
+            {
                 dup = true;
                 break;
             }
@@ -1440,7 +1444,8 @@ fn drop_callees_of(
             for ii in block.i0..add(block.i0, block.ic) {
                 let inst = program.inst(ii);
                 if inst.op == Op::Call
-                    && sym_starts_with(in ctx.names, n32(program.op(inst.a)), in DROP_PREFIX) {
+                    && sym_starts_with(in ctx.names, n32(program.op(inst.a)), in DROP_PREFIX)
+                {
                     has_drop = true;
                     break;
                 }
@@ -1485,7 +1490,8 @@ fn drop_callees_of(
                     && end_ok
                     && graph_start >= span_start
                     && graph_start <= span_end
-                    && graph_end <= span_end {
+                    && graph_end <= span_end
+                {
                     if !list_has_u32(in graphs, func.name) {
                         graphs.push(func.name);
                     }
@@ -1507,7 +1513,8 @@ fn drop_callees_of(
             let right_start = ctx.names.start(right);
             let right_end = ctx.names.end(right);
             if ctx.names.text[left_start..left_end].cmp(in ctx.names.text[right_start..right_end])
-                > 0 {
+                > 0
+            {
                 let _ = graphs.try_set(wrapping_sub(j, 1), right);
                 let _ = graphs.try_set(j, left);
                 j = wrapping_sub(j, 1);
@@ -1530,7 +1537,8 @@ fn drop_callees_of(
                 if inst.op == Op::Call {
                     let callee = n32(program.op(inst.a));
                     if sym_starts_with(in ctx.names, callee, in DROP_PREFIX)
-                        && !list_has_u32(in callees, callee) {
+                        && !list_has_u32(in callees, callee)
+                    {
                         callees.push(callee);
                     }
                 }
@@ -1692,7 +1700,8 @@ pub fn ffi_drops_entry(in input: Str) -> ChunkSeq[u64] {
         for fi in 0..program.fn_count() {
             let func = program.function(fi);
             if sym_starts_with(in ctx.names, func.name, in DROP_PREFIX)
-                || list_has_u32(in fip_fns, func.name) {
+                || list_has_u32(in fip_fns, func.name)
+            {
                 continue;
             }
             release_wildcards(inout ctx, inout program, fi, in handles, in effects, inout sites);
