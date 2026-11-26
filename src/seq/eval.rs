@@ -89,34 +89,23 @@ impl Runtime<'_> {
             let len = u128::from(view(arg(2)?)?.2 as u64);
             let (plus, minus) = (usize::from(form.plus), usize::from(form.minus));
             let terms = args
-                .get(3..3 + form.operands())
+                .get(3..3 + plus + minus)
                 .ok_or("bounds guard lacks an index term")?;
-            let ok = match args.get(3 + form.operands()) {
+            let ok = match args.get(3 + plus + minus) {
                 Some(Value::Bool(ok)) => *ok,
                 Some(_) => return Err("bounds guard needs a bool".into()),
                 None => true,
             };
-            let (inner, outer) = terms.split_at(plus + minus);
-            let (plus, minus) = inner.split_at(plus);
+            let (plus, minus) = terms.split_at(plus);
             let sum = |vs: &[Value]| -> Result<u128, String> {
                 vs.iter()
                     .try_fold(0u128, |acc, v| Ok(acc + u128::from(index(v)?)))
             };
             let (plus, minus) = (sum(plus)?, sum(minus)?);
-            // `c * x + Σouter_plus - Σouter_minus` when scaled (#2022).
-            let (scale, outer_plus, outer_minus) = match outer.split_first() {
-                Some((c, rest)) if form.scaled => {
-                    let (p, m) = rest.split_at(usize::from(form.outer_plus));
-                    (u128::from(index(c)?), sum(p)?, sum(m)?)
-                }
-                _ => (1, 0, 0),
-            };
             let empty = if inclusive { lo > hi } else { lo >= hi };
             let last = if inclusive { hi } else { hi.saturating_sub(1) };
-            let max = u128::from(u64::MAX);
-            let width = u128::from(form.width.max(1));
-            // The index at both ends of the range, exactly; a value that
-            // does not fit 64 bits fails the guard, as the native guard's
+            // The index at both ends of the range, exactly; a sum that does
+            // not fit 64 bits fails the guard, as the native guard's
             // overflow tests do.
             let fits = |i: u128| {
                 let (p, n) = if form.negated {
@@ -124,8 +113,7 @@ impl Runtime<'_> {
                 } else {
                     (plus + i, minus)
                 };
-                let (p, n) = (p * scale + outer_plus, n * scale + outer_minus);
-                p <= max && n <= max && p >= n && p - n + (width - 1) < len
+                p <= u128::from(u64::MAX) && n <= u128::from(u64::MAX) && p >= n && p - n < len
             };
             return Ok(V(Value::Bool(ok && (empty || (fits(lo) && fits(last))))));
         }

@@ -1469,9 +1469,6 @@ pub fn emit_byte_op(call: u64, inout b: Builder, in m: Module) eff [Ffi[Cranelif
         } else {
             seq_view_cached(inout b, receiver, is_seq, invariant, c0, c1, c2)
         };
-        // A total access a loop guard proved in bounds (#2022) skips its
-        // check; an unchecked checked access comes without a check request.
-        let unchecked = !has_view && call_arg(call, 21) != 0;
         let int_ty = if wbytes == 2 {
             ty_i16()
         } else if wbytes == 4 {
@@ -1479,18 +1476,7 @@ pub fn emit_byte_op(call: u64, inout b: Builder, in m: Module) eff [Ffi[Cranelif
         } else {
             ty_i64()
         };
-        if write && unchecked {
-            let addr = seq_elem_addr(inout b, h, start, at, 1, h_invariant, cdata);
-            let mut v = val;
-            if wbytes != 8 {
-                v = ins_ireduce(inout b, int_ty, v);
-            }
-            if big {
-                v = ins_bswap(inout b, v);
-            }
-            ins_store(inout b, PLAIN, v, addr, 0);
-            call_result_value(call, ins_iconst(inout b, ty_i64(), 1));
-        } else if write {
+        if write {
             if total {
                 let width = ins_iconst(inout b, ty_i64(), wrapping_i64(wbytes));
                 let valid = seq_fits(inout b, len, at, width);
@@ -1522,14 +1508,9 @@ pub fn emit_byte_op(call: u64, inout b: Builder, in m: Module) eff [Ffi[Cranelif
                 call_result_value(call, zero(inout b));
             }
         } else if total {
-            let (valid, addr) = if unchecked {
-                let addr = seq_elem_addr(inout b, h, start, at, 1, h_invariant, cdata);
-                (ins_iconst(inout b, ty_i8(), 1), addr)
-            } else {
-                let width = ins_iconst(inout b, ty_i64(), wrapping_i64(wbytes));
-                let valid = seq_fits(inout b, len, at, width);
-                (valid, seq_elem_addr(inout b, h, start, at, 1, h_invariant, cdata))
-            };
+            let width = ins_iconst(inout b, ty_i64(), wrapping_i64(wbytes));
+            let valid = seq_fits(inout b, len, at, width);
+            let addr = seq_elem_addr(inout b, h, start, at, 1, h_invariant, cdata);
             let (out, _some, done) = seq_option_begin(
                 inout b,
                 in m,
