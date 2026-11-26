@@ -20,7 +20,7 @@ use vesper::{
     runtime::{Runtime, Value},
     test_attrs::{self, AttrValue},
     test_discovery::{self, CaseRow, CaseRows, location},
-    test_mutants,
+    test_mutants, test_report,
     tooling::doc::sources::{SourceLimits, discover},
 };
 #[path = "test_engines.rs"]
@@ -102,6 +102,55 @@ pub enum MutantStatus {
     Killed,
     Survived,
     IllTyped,
+}
+
+fn engine_name(engine: TestEngine) -> &'static str {
+    match engine {
+        TestEngine::Jit => "jit",
+        TestEngine::Evaluator => "evaluator",
+        TestEngine::Checker => "checker",
+        TestEngine::Crucible => "crucible",
+        TestEngine::SimPulse => "simpulse",
+        TestEngine::Cache => "cache",
+    }
+}
+
+/// The text-report view of each file's tests.
+fn report_cases(files: &[FileUnitTests]) -> Vec<Vec<test_report::UnitCase<'_>>> {
+    files
+        .iter()
+        .map(|f| {
+            f.report
+                .tests
+                .iter()
+                .map(|t| test_report::UnitCase {
+                    name: &t.name,
+                    line: t.line,
+                    column: t.column,
+                    passed: t.passed,
+                    message: &t.message,
+                    engine: engine_name(t.engine),
+                    pin: t.test_case_pin.as_deref(),
+                    capsule: t.vchrono_capsule.as_deref(),
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn report_files<'a>(
+    files: &'a [FileUnitTests],
+    cases: &'a [Vec<test_report::UnitCase<'a>>],
+) -> Vec<test_report::UnitFile<'a>> {
+    files
+        .iter()
+        .zip(cases)
+        .map(|(f, tests)| test_report::UnitFile {
+            display: &f.display,
+            error: f.report.error.as_deref(),
+            tests,
+        })
+        .collect()
 }
 
 struct Options {
@@ -1722,19 +1771,11 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
         if opts.json {
             println!("{summary}");
         } else {
-            for f in &files {
-                if let Some(error) = &f.report.error {
-                    println!("{}: FAIL: {error}", f.display);
-                }
-                for t in &f.report.tests {
-                    if !t.passed {
-                        println!(
-                            "{}:{}:{}: FAIL {}: {}",
-                            f.display, t.line, t.column, t.name, t.message
-                        );
-                    }
-                }
-            }
+            let cases = report_cases(&files);
+            print!(
+                "{}",
+                test_report::baseline_text(&report_files(&files, &cases))
+            );
         }
         return Err("baseline unit tests failed before mutation testing".into());
     }
@@ -1962,27 +2003,36 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
             })
         );
     } else {
-        for m in &reports {
-            match m.status {
-                MutantStatus::Killed => println!(
-                    "{}:{}:{}: KILLED {} ({} -> {}) by {}",
-                    m.file,
-                    m.line,
-                    m.column,
-                    m.function,
-                    m.original,
-                    m.replacement,
-                    m.killed_by.as_deref().unwrap_or("test")
-                ),
-                MutantStatus::Survived => println!(
-                    "{}:{}:{}: SURVIVED {} ({} -> {})",
-                    m.file, m.line, m.column, m.function, m.original, m.replacement
-                ),
-                MutantStatus::IllTyped => {}
-            }
-        }
-        println!(
-            "mutation gate: {killed} killed, {survived} survived, {ill_typed} ill-typed (of {limit}/{total_candidates} candidate(s))"
+        let mutants: Vec<_> = reports
+            .iter()
+            .map(|m| test_report::Mutant {
+                file: &m.file,
+                line: m.line,
+                column: m.column,
+                function: &m.function,
+                original: &m.original,
+                replacement: &m.replacement,
+                outcome: match m.status {
+                    MutantStatus::Killed => {
+                        test_report::MutantOutcome::Killed(m.killed_by.as_deref())
+                    }
+                    MutantStatus::Survived => test_report::MutantOutcome::Survived,
+                    MutantStatus::IllTyped => test_report::MutantOutcome::IllTyped,
+                },
+            })
+            .collect();
+        print!(
+            "{}",
+            test_report::mutants_text(
+                &mutants,
+                test_report::MutantCounts {
+                    killed,
+                    survived,
+                    ill_typed,
+                    tested: limit,
+                    total: total_candidates,
+                },
+            )
         );
     }
 
@@ -2056,44 +2106,8 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
             })
         );
     } else {
-        for f in &files {
-            if let Some(err) = &f.report.error {
-                println!("{}: FAIL: {err}", f.display);
-                continue;
-            }
-            for t in &f.report.tests {
-                let engine = match t.engine {
-                    TestEngine::Jit => "jit",
-                    TestEngine::Evaluator => "evaluator",
-                    TestEngine::Checker => "checker",
-                    TestEngine::Crucible => "crucible",
-                    TestEngine::SimPulse => "simpulse",
-                    TestEngine::Cache => "cache",
-                };
-                println!(
-                    "{}:{}:{}: {} {} ({}) [{}]",
-                    f.display,
-                    t.line,
-                    t.column,
-                    if t.passed { "PASS" } else { "FAIL" },
-                    t.name,
-                    t.message,
-                    engine
-                );
-                if let Some(pin) = &t.test_case_pin {
-                    println!("  pin regression: {pin}");
-                }
-                if let Some(capsule) = &t.vchrono_capsule {
-                    println!("  replay capsule: {capsule}");
-                }
-            }
-        }
-        println!(
-            "tests: {} passed, {} failed ({} file error(s))",
-            total_tests.saturating_sub(failed_tests),
-            failed_tests,
-            file_errors
-        );
+        let cases = report_cases(&files);
+        print!("{}", test_report::unit_text(&report_files(&files, &cases)));
     }
 
     if all_passed {
