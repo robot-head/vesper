@@ -77,19 +77,21 @@ pub sugar all: tag {
 // iteration binding's scope. Use ordinary += rather than silent wrapping.
 pub sugar sum: tag emits eff [Fail] {
     // A tagged source avoids shadowing an ordinary function named zip.
+    // Restrict sources to names and fields: lengths and views must not
+    // re-evaluate an effectful index.
     rule (
         sum{
             $projection:block | $pair:pat in zip{
-                $left:place,
-                $right:place
+                $left:ident $(.$left_field:ident)*,
+                $right:ident $(.$right_field:ident)*
             }
         }
     ) => {
         {
-            let nl = $left.len();
-            let nr = $right.len();
-            let lhs = $left[0..nl];
-            let rhs = $right[0..nr];
+            let nl = $left $(.$left_field)*.len();
+            let nr = $right $(.$right_field)*.len();
+            let lhs = $left $(.$left_field)* [0..nl];
+            let rhs = $right $(.$right_field)* [0..nr];
             let limit = if nl < nr {
                 nl
             } else {
