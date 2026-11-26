@@ -1,0 +1,605 @@
+//! Self-hosting SH1 lane 14 (#1157) part 4a: `@vesper/sugar`'s rule
+//! matcher (packages/vesper-sugar/src/matcher.ves) against
+//! `vesper_syntax::sugar_expand`'s (`matcher::match_rule`, through the
+//! `match_rule_words` test hook): the same captures, values, extents,
+//! refusals and remaining work budget on a rule corpus drawn from the
+//! sugar test suites, and on a fuzzed corpus.
+use std::path::PathBuf;
+use std::sync::OnceLock;
+use vesper::{check, native, packages};
+use vesper_syntax::{parser, sugar_expand};
+
+const PACKAGE: &str = "packages/vesper-sugar";
+
+fn root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+struct Sugar {
+    matcher: native::WordFunction,
+    batch: native::WordFunction,
+}
+
+fn sugar() -> &'static Sugar {
+    static F: OnceLock<Sugar> = OnceLock::new();
+    F.get_or_init(|| {
+        let assembled = packages::load(&root().join(PACKAGE)).unwrap();
+        assert!(
+            assembled.ok(),
+            "{:?} {:?}",
+            assembled.diagnostics,
+            assembled.manifest_errors
+        );
+        let checked = check::check(&assembled.module);
+        let shown: Vec<_> = checked
+            .diagnostics
+            .iter()
+            .map(|d| assembled.sources.localize(d))
+            .collect();
+        assert!(checked.diagnostics.is_empty(), "{shown:?}");
+        let compile = |entry| {
+            native::WordFunction::compile(&checked.world, entry, true)
+                .unwrap_or_else(|e| panic!("{entry}: {e}"))
+        };
+        Sugar {
+            matcher: compile("match_rule_words"),
+            batch: compile("match_rule_batch"),
+        }
+    })
+}
+
+const JIT_RUNTIME: vesper_port_abi::SeqRuntime = {
+    extern "C" fn new(cap: i64, stride: i64) -> i64 {
+        vesper::seq::native_runtime::vesper_seq_new(cap as u64, stride as u64) as i64
+    }
+    extern "C" fn free(handle: i64) -> i64 {
+        vesper::seq::native_runtime::vesper_seq_free(handle as u64) as i64
+    }
+    vesper_port_abi::SeqRuntime { new, free }
+};
+
+fn vesper_match(pattern: &str, invocation: &str, tail: Option<&str>, work: usize) -> Vec<u64> {
+    // Native word functions take at most three words: the texts share one
+    // string, their lengths one word.
+    let text = format!("{pattern}{invocation}{}", tail.unwrap_or(""));
+    let lens =
+        pattern.len() as u64 | (invocation.len() as u64) << 32 | u64::from(tail.is_some()) << 63;
+    let call = vesper_port_abi::HostCall::new()
+        .str(&text)
+        .word(lens)
+        .word(work as u64);
+    // SAFETY: the entry takes an `in Str` (passed as the address of its
+    // three words) and two `u64` words, and returns a live sequence of the
+    // JIT runtime holding `u64`s, which `HostCall` copies and frees.
+    unsafe { call.seq(JIT_RUNTIME, |w| sugar().matcher.call(w).unwrap()) }
+}
+
+struct Case {
+    pattern: String,
+    invocation: String,
+    tail: Option<String>,
+    work: usize,
+}
+
+fn compare(c: &Case) -> Option<String> {
+    let tail = c.tail.as_deref();
+    let rust = sugar_expand::match_rule_words(&c.pattern, &c.invocation, tail, c.work);
+    let vesper = vesper_match(&c.pattern, &c.invocation, tail, c.work);
+    (rust != vesper).then(|| {
+        format!(
+            "pattern {:?} invocation {:?} tail {:?} work {}:\n  rust   {:?}\n  vesper {:?}",
+            c.pattern, c.invocation, c.tail, c.work, rust, vesper
+        )
+    })
+}
+
+fn check_all(cases: &[Case]) {
+    let failures: Vec<_> = cases.iter().filter_map(compare).collect();
+    assert!(
+        failures.is_empty(),
+        "{} of {} cases differ:\n{}",
+        failures.len(),
+        cases.len(),
+        failures
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+fn rust_string_literals(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut out = vec![];
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'/' && bytes.get(i + 1) == Some(&b'/') {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == b'\'' {
+            // A char literal or a lifetime: skip `'x'` and `'\x'` forms.
+            if bytes.get(i + 2) == Some(&b'\'') {
+                i += 3;
+                continue;
+            }
+            if bytes.get(i + 1) == Some(&b'\\')
+                && let Some(end) = text[i + 2..].find('\'')
+            {
+                i += end + 3;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'r'
+            && matches!(bytes.get(i + 1), Some(b'#' | b'"'))
+            && !bytes[i.saturating_sub(1)].is_ascii_alphanumeric()
+        {
+            let mut j = i + 1;
+            let mut hashes = 0;
+            while bytes.get(j) == Some(&b'#') {
+                hashes += 1;
+                j += 1;
+            }
+            if bytes.get(j) == Some(&b'"') {
+                let close = format!("\"{}", "#".repeat(hashes));
+                if let Some(end) = text[j + 1..].find(&close) {
+                    out.push(text[j + 1..j + 1 + end].to_owned());
+                    i = j + 1 + end + close.len();
+                    continue;
+                }
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'"' {
+            let mut j = i + 1;
+            let mut s = String::new();
+            let mut ok = true;
+            while j < bytes.len() && bytes[j] != b'"' {
+                if bytes[j] == b'\\' {
+                    let e = bytes.get(j + 1).copied().unwrap_or(b' ');
+                    j += 2;
+                    match e {
+                        b'n' => s.push('\n'),
+                        b't' => s.push('\t'),
+                        b'r' => s.push('\r'),
+                        b'0' => s.push('\0'),
+                        b'\\' => s.push('\\'),
+                        b'"' => s.push('"'),
+                        b'\'' => s.push('\''),
+                        b'\n' => {
+                            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                                j += 1;
+                            }
+                        }
+                        b'u' => {
+                            let end = text[j..].find('}').map(|e| j + e);
+                            match end.and_then(|e| {
+                                u32::from_str_radix(&text[j + 1..e], 16)
+                                    .ok()
+                                    .map(|v| (e, v))
+                            }) {
+                                Some((e, v)) => {
+                                    match char::from_u32(v) {
+                                        Some(ch) => s.push(ch),
+                                        None => ok = false,
+                                    }
+                                    j = e + 1;
+                                }
+                                None => ok = false,
+                            }
+                        }
+                        b'x' => {
+                            match u8::from_str_radix(&text[j..(j + 2).min(text.len())], 16) {
+                                Ok(v) if v < 128 => s.push(v as char),
+                                _ => ok = false,
+                            }
+                            j += 2;
+                        }
+                        _ => ok = false,
+                    }
+                } else {
+                    let ch = text[j..].chars().next().unwrap();
+                    s.push(ch);
+                    j += ch.len_utf8();
+                }
+            }
+            if ok {
+                out.push(s);
+            }
+            i = j + 1;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Files whose string literals hold sugar declarations and uses.
+const SUGAR_FILES: &[&str] = &[
+    "crates/vesper-syntax/tests/sugar_expand.rs",
+    "crates/vesper-syntax/tests/sugar_surface.rs",
+    "crates/vesper-syntax/src/sugar_expand.rs",
+    "src/forge_frontend/sugar.rs",
+    "src/packages/sugar.rs",
+    "tests/forge_cli.rs",
+    "tests/package_paths.rs",
+    "tests/self_host_front_v2.rs",
+];
+
+fn significant_start(node: &parser::SyntaxNode) -> usize {
+    node.descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        // Kinds 0-2 are whitespace and comments.
+        .find(|t| t.kind().0 > 2)
+        .map_or(usize::from(node.text_range().start()), |t| {
+            usize::from(t.text_range().start())
+        })
+}
+
+/// Rule patterns and sugar uses of the sugar sources of the test suites:
+/// every pattern against every use of its own source and against a
+/// spread of uses from the others, with the rest of the use's source as
+/// the block tail.
+fn corpus_cases() -> Vec<Case> {
+    let mut patterns = vec![];
+    let mut uses = vec![];
+    for (id, source) in SUGAR_FILES
+        .iter()
+        .filter_map(|file| std::fs::read_to_string(root().join(file)).ok())
+        .flat_map(|text| rust_string_literals(&text))
+        .filter(|s| s.contains("rule"))
+        .enumerate()
+    {
+        let Ok(parse) = parser::parse_surface_cst(&source, Default::default(), true) else {
+            continue;
+        };
+        for node in parse.syntax().descendants() {
+            let r = node.text_range();
+            let (s, e) = (usize::from(r.start()), usize::from(r.end()));
+            if node.kind() == parser::SUGAR_PATTERN && e >= s + 2 {
+                patterns.push((id, source[s + 1..e - 1].to_owned()));
+            } else if matches!(
+                node.kind(),
+                parser::SUGAR_ITEM
+                    | parser::SUGAR_PAT
+                    | parser::SUGAR_STMT
+                    | parser::SUGAR_EXPR
+                    | parser::DOTTED_EXPR
+                    | parser::PIPE_EXPR
+                    | parser::TAGGED_LITERAL
+            ) {
+                let s = significant_start(&node);
+                uses.push((id, source[s..e].to_owned(), source[e..].to_owned()));
+            }
+        }
+    }
+    let mut cases = vec![];
+    for (n, (id, p)) in patterns.iter().enumerate() {
+        let own = uses.iter().filter(|u| u.0 == *id);
+        let spread = (0..8).map(|k| &uses[(n * 7 + k * 13) % uses.len().max(1)]);
+        for (_, u, rest) in own.chain(spread.filter(|_| !uses.is_empty())) {
+            let tail = p.contains("$..").then(|| rest.clone());
+            cases.push(Case {
+                pattern: p.clone(),
+                invocation: u.clone(),
+                tail,
+                work: 1 << 20,
+            });
+        }
+    }
+    cases
+}
+
+/// The matcher's own examples (sugar_expand/matcher.rs tests) and the
+/// sorts, repetitions, passing modes, adjacency and refusals around them.
+const CASES: &[(&str, &str)] = &[
+    (
+        "while $cond:expr invariant $ok:expr $b:block",
+        "while a < n invariant a <= n { step(); }",
+    ),
+    (
+        "swap inout $a:place with inout $b:place ;",
+        "swap inout a[i] with inout s.y;",
+    ),
+    ("swap inout $x:place ;", "swap inout get();"),
+    (
+        "swap in $x:place out $y:place sink $z:expr ;",
+        "swap in a.b out c[d] sink 3;",
+    ),
+    (
+        "rows { $( [ $( $v:expr ),* ] );* }",
+        "rows { []; [f(1,2), 3] }",
+    ),
+    (
+        "rows { $( [ $( $v:expr ),+ ] );+ }",
+        "rows { [1]; [2, 3]; [4] }",
+    ),
+    (
+        "$lhs:expr |?> $callee:ident ( $..args:args )",
+        "frame |?> decode(x, in s)",
+    ),
+    ("tag{ x }", "tag { x }"),
+    ("tag{ x }", "tag{x}"),
+    ("tag\"x\"", "tag\"x\""),
+    ("x .+ y", "x . + y"),
+    ("x .+ y", "x .+ y"),
+    ("$a:expr .<=> $b:expr", "p .<=> q"),
+    ("unless $c:expr $body:block", "unless x { g(); }"),
+    ("unless $c:expr $body:block", "unless x { g(); };"),
+    ("unless $c:expr $body:block ;", "unless x { g(); };"),
+    ("ghost twice $e:expr", "ghost twice 3"),
+    ("twice $e:expr", "twice f(a, b) + 1"),
+    ("n $x:ident", "n y"),
+    ("n $x:ident", "n y z"),
+    ("n $x:ident", "n 3"),
+    ("let2 $p:pat = $e:expr", "let2 (a, b) = pair()"),
+    ("let2 $( $p:pat ),* = $e:expr", "let2 a, Some(b), _ = x"),
+    ("cast $e:expr as $t:ty", "cast x as Vec[u8]"),
+    ("call $f:ident ( $..a:args )", "call f(1, in x, inout y)"),
+    ("call $f:ident ( $..a:args )", "call f()"),
+    ("pats ( $..ps:pats )", "pats (a, b, _)"),
+    ("block $b:block", "block { 1 }"),
+    ("block $b:block", "block (1)"),
+    ("scoped $s:scope", "scoped { x(); y }"),
+    ("defer $b:block $..rest:scope", "defer { tidy(); };"),
+    ("each $..body:stmts", "each a(); b();"),
+    ("items { $..i:items }", "items { fn a() {} struct B {} }"),
+    ("odd $x:wat", "odd 1"),
+    ("odd $..x:block", "odd { 1 }"),
+    ("odd $..x:place", "odd a.b"),
+    ("odd $..x:ident", "odd a"),
+    ("bad $x", "bad 1"),
+    ("bad $x:", "bad 1"),
+    ("bad $x:expr $x:expr", "bad 1 2"),
+    ("bad $( $x:expr )", "bad 1"),
+    ("bad $( $x:expr ) ,", "bad 1"),
+    ("bad $( $x:expr ) , ?", "bad 1"),
+    ("bad ( $x:expr", "bad (1"),
+    ("bad $x:expr )", "bad 1)"),
+    ("bad [ $x:expr )", "bad [1)"),
+    ("bad $x:expr", "bad `"),
+    ("bad $x:expr", "bad /* open"),
+    ("$( $x:expr )* z", "a a a a a a a a a a a a a z"),
+    ("$( $( $x:expr ),* );*", "1, 2; ; 3"),
+    ("sum $( $x:expr )++", "sum 1 + 2 + 3"),
+    ("place $p:place", "place self.a[i].b"),
+    ("place $p:place", "place a[]"),
+    ("place $p:place", "place a.3"),
+    ("e $x:expr ;", "e { a; b };"),
+    ("e $x:expr", "e a, b"),
+    ("e $x:expr", "e a; b"),
+    ("e $..x:stmts", "e a; b"),
+    ("pipe $x:expr |> $f:ident", "pipe a |> f"),
+    ("$x:expr |> $f:ident ( $..a:args )", "a |> f(_, 2)"),
+    ("with $x:expr", "with 1"),
+    ("eff $x:expr", "eff 1"),
+];
+
+fn work_budgets() -> [usize; 4] {
+    [1 << 20, 64, 300, 1500]
+}
+
+#[test]
+fn matcher_matches_on_the_rule_examples() {
+    let mut cases = vec![];
+    for &(pattern, invocation) in CASES {
+        for work in work_budgets() {
+            for tail in [None, Some(" next(); value")] {
+                cases.push(Case {
+                    pattern: pattern.into(),
+                    invocation: invocation.into(),
+                    tail: tail.map(str::to_owned),
+                    work,
+                });
+            }
+        }
+    }
+    check_all(&cases);
+}
+
+#[test]
+fn matcher_matches_on_the_sugar_test_suites() {
+    let cases = corpus_cases();
+    assert!(cases.len() > 200, "{} corpus cases", cases.len());
+    check_all(&cases);
+}
+
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n.max(1) as u64) as usize
+    }
+}
+
+/// Fragments the fuzzer splices into patterns and invocations.
+const FRAGMENTS: &[&str] = &[
+    "$x:expr",
+    "$y:ident",
+    "$p:place",
+    "$b:block",
+    "$s:scope",
+    "$t:ty",
+    "$q:pat",
+    "$..a:args",
+    "$..ps:pats",
+    "$..st:stmts",
+    "$..sc:scope",
+    "$..it:items",
+    "$(",
+    ")*",
+    ")+",
+    "),*",
+    ");+",
+    "(",
+    ")",
+    "[",
+    "]",
+    "{",
+    "}",
+    ";",
+    ",",
+    ".",
+    "..",
+    ".+",
+    "|>",
+    "|?>",
+    "in",
+    "inout",
+    "out",
+    "sink",
+    "ghost",
+    "a",
+    "b",
+    "f",
+    "1",
+    "\"s\"",
+    "x.y",
+    "a[i]",
+    "self",
+    "{ }",
+    "{ a; }",
+    "_",
+    "+",
+    "<",
+    "=>",
+    "`",
+    "/*",
+    "é",
+];
+
+fn mutate(rng: &mut Rng, base: &str) -> String {
+    let mut words: Vec<String> = base.split(' ').map(str::to_owned).collect();
+    for _ in 0..=rng.below(3) {
+        let at = rng.below(words.len() + 1);
+        match rng.below(4) {
+            0 if !words.is_empty() => {
+                words.remove(at.min(words.len() - 1));
+            }
+            1 if !words.is_empty() => {
+                let i = at.min(words.len() - 1);
+                words[i] = FRAGMENTS[rng.below(FRAGMENTS.len())].to_owned();
+            }
+            _ => words.insert(at, FRAGMENTS[rng.below(FRAGMENTS.len())].to_owned()),
+        }
+    }
+    let sep = if rng.below(4) == 0 { "" } else { " " };
+    words.join(sep)
+}
+
+#[test]
+fn matcher_matches_on_the_fuzzed_corpus() {
+    let rounds: usize = std::env::var("VESPER_SUGAR_FUZZ")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4000);
+    let mut rng = Rng(0x5eed_1157);
+    let mut cases = vec![];
+    for _ in 0..rounds {
+        let (p, i) = CASES[rng.below(CASES.len())];
+        let pattern = if rng.below(2) == 0 {
+            mutate(&mut rng, p)
+        } else {
+            p.to_owned()
+        };
+        let invocation = if rng.below(2) == 0 {
+            mutate(&mut rng, i)
+        } else {
+            i.to_owned()
+        };
+        let tail = (rng.below(3) == 0).then(|| " rest(); x".to_owned());
+        let work = work_budgets()[rng.below(4)];
+        cases.push(Case {
+            pattern,
+            invocation,
+            tail,
+            work,
+        });
+    }
+    check_all(&cases);
+}
+
+#[test]
+#[ignore = "speed measurement; run with --ignored --nocapture in release"]
+fn matcher_speed() {
+    let mut cases = corpus_cases();
+    for &(p, i) in CASES {
+        cases.push(Case {
+            pattern: p.into(),
+            invocation: i.into(),
+            tail: Some(" next(); value".into()),
+            work: 1 << 20,
+        });
+    }
+    // One host call over all cases (`match_rule_batch`), so the time is
+    // the matcher's and not the call boundary's.
+    let mut text = String::new();
+    let number = |text: &mut String, n: usize| {
+        for k in 0..4 {
+            text.push(char::from((n >> (7 * k)) as u8 & 127));
+        }
+    };
+    for c in &cases {
+        number(&mut text, c.pattern.len());
+        number(&mut text, c.invocation.len());
+        number(&mut text, c.tail.as_ref().map_or(0, |t| t.len() + 1));
+        text.push_str(&c.pattern);
+        text.push_str(&c.invocation);
+    }
+    let batch = || -> Vec<u64> {
+        let call = vesper_port_abi::HostCall::new()
+            .str(&text)
+            .word(cases.len() as u64)
+            .word(1 << 20);
+        // SAFETY: as `vesper_match`.
+        unsafe { call.seq(JIT_RUNTIME, |w| sugar().batch.call(w).unwrap()) }
+    };
+    let rust_words = || {
+        let mut out: Vec<u64> = vec![];
+        for c in &cases {
+            out.extend(sugar_expand::match_rule_words(
+                &c.pattern,
+                &c.invocation,
+                c.tail.as_deref(),
+                c.work,
+            ));
+        }
+        out
+    };
+    assert_eq!(batch(), rust_words(), "batch words");
+    let time = |f: &dyn Fn()| {
+        let mut best = std::time::Duration::MAX;
+        for _ in 0..7 {
+            let t = std::time::Instant::now();
+            for _ in 0..20 {
+                f();
+            }
+            best = best.min(t.elapsed());
+        }
+        best
+    };
+    let rust = time(&|| {
+        std::hint::black_box(rust_words());
+    });
+    let vesper = time(&|| {
+        std::hint::black_box(batch());
+    });
+    println!(
+        "{} cases: rust {rust:?} vesper {vesper:?} ratio {:.2}x",
+        cases.len(),
+        vesper.as_secs_f64() / rust.as_secs_f64()
+    );
+}
