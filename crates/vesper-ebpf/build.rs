@@ -75,8 +75,8 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // 7 wire.rs: the decoder reads the source address from the destination.
     (
-        "        src_ipv4: wrapping_u32(shr(w3, 16)),\n",
-        "        src_ipv4: wrapping_u32(shl(w3, 16) | shr(w4, 48)),\n",
+        "        src_ipv4: wrapping_u32(shr(w3, SRC_IPV4_AT)),\n",
+        "        src_ipv4: wrapping_u32(shl(w3, DST_IPV4_LOW_BITS) | shr(w4, opens_at(DST_IPV4_LOW_BITS))),\n",
     ),
     // 8 verifier.rs (the exploration): a packet access may end one byte
     // past the range established against data_end (unsound).
