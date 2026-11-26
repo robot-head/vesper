@@ -1,0 +1,92 @@
+"""Check generator command lines and independent asset bytes."""
+
+load("@std//hash.axl", "sha256")
+load("./lib/binary-fixture.axl", "read_le")
+load("./lib/process.axl", "check", "command", "exit_code", "scratch_dir")
+
+def _equal(actual, expected):
+    if actual != expected:
+        fail("Expected %r, got %r" % (expected, actual))
+
+def _contains(needle, haystack):
+    if needle not in haystack:
+        fail("Missing %r in %r" % (needle, haystack))
+
+def _digest(data):
+    hash = sha256()
+    hash.update(data)
+    return hash.hexdigest()
+
+def _test(ctx):
+    source = ctx.std.env.aspect_root_dir()
+    workspace = scratch_dir(ctx, "vesper-generated-assets-test-")
+    nested = workspace + "/nested directory"
+    ctx.std.fs.create_dir_all(nested)
+    check(ctx, "cp", ["-R", source + "/.aspect", workspace + "/.aspect"], workspace)
+
+    def run(argv, expected = 0, env = {}, tool = ctx.std.env.current_exe()):
+        result = command(ctx, tool, argv, nested, dict({"CI": "true"}, **env)).stdout("piped").stderr("piped").spawn().wait_with_output()
+        if exit_code(result.status) != expected:
+            fail("Unexpected status for %r: %s%s" % (argv, result.stdout, result.stderr))
+        return result
+
+    blake = ["maintenance", "gen-blake3", "--"]
+    run(blake + ["rounds output.ves"])
+    rounds = ctx.std.fs.open(nested + "/rounds output.ves").read()
+    _equal(rounds, ctx.std.fs.open(source + "/packages/vesper-std/hash/src/compress.ves").read())
+    straight = nested + "/straight output.ves"
+    run(blake + [straight, "--straight-line"])
+    _equal(_digest(ctx.std.fs.open(straight).read()), "f476483c6221f76bc39a7cb07084800277c0a3205c4231af8b4d58d4a66c005c")
+    run(blake, 2)
+    run(blake + [straight, "--unsupported"], 2)
+
+    lean = run(["crate", "serde", "gen-lean-quotes"])
+    _equal(bytes(lean.stdout), ctx.std.fs.open(source + "/crates/vesper-serde/lean/SimdJsonQuotes.lean").read())
+
+    pcap = "/crates/vesper-warp-tcp/fixtures/tcp_fixtures.pcap"
+    ctx.std.fs.create_dir_all((workspace + pcap).rpartition("/")[0])
+    data = run(["crate", "warp-tcp", "gen-fixtures"]).stdout.splitlines()
+    _equal(data[0], workspace + pcap + " 8 packets")
+    _equal(len(data), 9)
+    actual = ctx.std.fs.open(workspace + pcap).read()
+    _equal(actual, ctx.std.fs.open(source + pcap).read())
+    cursor = 24
+    hex_digits = "0123456789abcdef"
+    for index, reported in enumerate(data[1:]):
+        captured = read_le(actual, cursor + 8, 4)
+        _equal([read_le(actual, cursor + col, 4) for col in [0, 4, 12]], [1700000000 + index, 0, captured])
+        cursor += 16
+        packet = [actual[cursor + index] for index in range(captured)]
+        _equal("".join([hex_digits[octet >> 4] + hex_digits[octet & 15] for octet in packet]), reported)
+        cursor += captured
+    _equal(cursor, len(actual))
+
+    def bazel(tool, argv, windows):
+        key = "fixture-api-key"
+        baseline = "common --config=ci\n"
+        if windows:
+            baseline += "startup --output_user_root=C:/_bzl\ncommon --repo_env=BAZEL_MSVC_RUNTIME_VISUAL_STUDIO_EULA=1\n"
+        enabled = run(argv, env = {"BUILDBUDDY_API_KEY": key}, tool = tool)
+        _contains("BuildBuddy: enabled", enabled.stdout)
+        _equal(key in enabled.stdout + enabled.stderr, False)
+        enabled_contents = baseline + "common --config=buildbuddy\ncommon --remote_header=x-buildbuddy-api-key=" + key + "\ncommon --build_metadata=ROLE=CI\n"
+        _equal(ctx.std.fs.open(workspace + "/user.bazelrc").read(), bytes(enabled_contents))
+        disabled = run(argv, env = {"BUILDBUDDY_API_KEY": ""}, tool = tool)
+        _contains("using the GitHub Actions disk cache", disabled.stdout)
+        _equal(ctx.std.fs.open(workspace + "/user.bazelrc").read(), bytes(baseline))
+
+    bazel(ctx.std.env.current_exe(), ["ci", "configure-bazel"], False)
+    pwsh = ctx.std.process.which("pwsh")
+    if pwsh:
+        directory = workspace + "/scripts/windows"
+        ctx.std.fs.create_dir_all(directory)
+        script = directory + "/configure-bazel.ps1"
+        ctx.std.fs.copy(source + "/scripts/windows/configure-bazel.ps1", script)
+        bazel(pwsh, ["-NoProfile", "-File", script], True)
+    return 0
+
+test_generated_assets = task(
+    kind = "generated-assets", group = ["ci", "tests"],
+    summary = "Check generator outputs and Bazel cache configuration on supported platforms",
+    implementation = _test,
+)

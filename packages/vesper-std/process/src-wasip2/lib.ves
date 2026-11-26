@@ -223,6 +223,17 @@ pub fn stdio(inout c: ProcCommand, stream: u32, mode: u32) eff [Ffi[StdProcess]]
     }
 }
 
+// A process group of its own for the child: nothing to set on WASI,
+// where no child starts.
+pub fn process_group(inout c: ProcCommand) eff [Ffi[StdProcess]] {
+    let _ = c.nul;
+}
+
+// A cap on each captured stream: nothing to set on WASI.
+pub fn capture_limit(inout c: ProcCommand, bytes: u64) eff [Ffi[StdProcess]] {
+    let _ = bytes;
+}
+
 // Throw a command away without running it.
 pub fn discard(sink c: ProcCommand) eff [Ffi[StdProcess]] {
     let ProcCommand {
@@ -261,6 +272,28 @@ pub fn wait(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProc
         return Result::Err(io_kind(invalid_input()));
     }
     Result::Err(io_kind(unsupported()))
+}
+
+pub fn wait_timeout(inout ch: ProcChild, millis: u64)
+    -> Result[Option[ExitStatus], IoError] eff [Ffi[StdProcess]] {
+    let _ = millis;
+    if ch.pid <= 0 {
+        return Result::Err(io_kind(invalid_input()));
+    }
+    Result::Err(io_kind(unsupported()))
+}
+
+pub fn kill_tree(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProcess]] {
+    if ch.pid <= 0 {
+        return Result::Err(io_kind(invalid_input()));
+    }
+    Result::Err(io_kind(unsupported()))
+}
+
+// Whether a captured stream went past the `capture_limit`: never here.
+pub fn truncated(in ch: ProcChild) -> bool eff [Ffi[StdProcess]] {
+    let _ = ch.pid;
+    false
 }
 
 // What a waited child wrote to a captured stdout (empty before `wait`, or

@@ -8,10 +8,10 @@ extraction fixtures in `tests/fixtures/lean_extract` (extracted module plus its
 proof script), so that no audited model rests on Lean's own kernel alone.
 
 ```sh
-# after aspect ci prepare-logos42 -- ROOT (or tools/logos42/setup.py)
+# after aspect ci prepare-logos42 -- ROOT
 VESPER_LEAN="$(elan which lean)" aspect ci logos-sweep -- ROOT report.json
 # or directly
-python3 tools/logos-sweep/sweep.py --root ROOT --driver target/debug/logos42 \
+aspect maintenance logos-sweep sweep -- --root ROOT --driver target/debug/logos42 \
   --vesper target/debug/vesper --lean "$(elan which lean)" --report report.json
 ```
 

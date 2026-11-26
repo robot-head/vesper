@@ -61,8 +61,15 @@ pub struct ProcCommand {
     stdin_mode: u32,
     stdout_mode: u32,
     stderr_mode: u32,
+    // `process_group`: the child runs in a job object of its own.
+    group: bool,
+    // `capture_limit`: bytes kept of each captured stream (0: all).
+    limit: u64,
 }
 
+// A spawned child. `job` is its job object (0 without `process_group`, or
+// when Windows refused one); `cut` is set once a captured stream went past
+// `limit` bytes.
 pub struct ProcChild {
     h_process: u64,
     stdout_h: u64,
@@ -70,6 +77,9 @@ pub struct ProcChild {
     stdout_buf: ChunkSeq[u8],
     stderr_buf: ChunkSeq[u8],
     waited: bool,
+    job: u64,
+    limit: u64,
+    cut: bool,
 }
 
 fn byte(in s: Slice[u8], i: u64) -> u8 {
@@ -417,6 +427,8 @@ pub fn command_path(in program: Slice[u8]) -> ProcCommand {
         stdin_mode: inherit(),
         stdout_mode: inherit(),
         stderr_mode: inherit(),
+        group: false,
+        limit: 0,
     }
 }
 
@@ -471,6 +483,19 @@ pub fn stdio(inout c: ProcCommand, stream: u32, mode: u32) {
     } else if stream == stderr_stream() {
         c.stderr_mode = mode;
     }
+}
+
+// Start the child in a job object of its own, so `kill_tree` also stops
+// every process it starts.
+pub fn process_group(inout c: ProcCommand) {
+    c.group = true;
+}
+
+// Keep at most `bytes` of each captured stream (0: no limit). The rest is
+// still read, so the child never blocks on a full pipe, and dropped;
+// `truncated` reports it.
+pub fn capture_limit(inout c: ProcCommand, bytes: u64) {
+    c.limit = bytes;
 }
 
 pub fn discard(sink c: ProcCommand) {}
@@ -982,6 +1007,11 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
     } else {
         0
     };
+    let flags = if c.group {
+        flags | StdProcess::CREATE_SUSPENDED
+    } else {
+        flags
+    };
     let app_ptr = alloc_utf16_bytes(in app.as_slice(), false);
     let res = StdProcess::CreateProcessW(
         app_ptr,
@@ -1022,6 +1052,22 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
             );
         },
     }
+    // A suspended child joins its job before it can start anything; if
+    // Windows refuses the job, it runs without one (`kill_tree` then
+    // stops the child alone).
+    let mut job: u64 = 0;
+    if c.group {
+        let (j, _) = StdProcess::CreateJobObjectW(0, 0);
+        job = j;
+        if job != 0 {
+            let (joined, _) = StdProcess::AssignProcessToJobObject(job, pi.h_process);
+            if joined == 0 {
+                close_handle_if(job);
+                job = 0;
+            }
+        }
+        let _ = StdProcess::ResumeThread(pi.h_thread);
+    }
     close_handle_if(pi.h_thread);
     Result::Ok(
         ProcChild {
@@ -1031,11 +1077,35 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
             stdout_buf: ChunkSeq::new[u8](),
             stderr_buf: ChunkSeq::new[u8](),
             waited: false,
+            job: job,
+            limit: c.limit,
+            cut: false,
         }
     )
 }
 
-fn drain_pipe(h: u64, inout dst: ChunkSeq[u8]) eff [Ffi[StdProcess]] {
+// Append `src[0..n]` to `dst`, keeping at most `limit` bytes (0: all);
+// `cut` is set when bytes are dropped.
+fn keep(inout dst: ChunkSeq[u8], in src: Slice[u8], n: u64, limit: u64, inout cut: bool) {
+    let room = if limit == 0 {
+        n
+    } else if dst.len() >= limit {
+        0
+    } else {
+        wrapping_sub(limit, dst.len())
+    };
+    let take = if n < room {
+        n
+    } else {
+        room
+    };
+    if take < n {
+        cut = true;
+    }
+    dst.extend(in src[0..take]);
+}
+
+fn drain_pipe(h: u64, inout dst: ChunkSeq[u8], limit: u64, inout cut: bool) eff [Ffi[StdProcess]] {
     if h == 0 {
         return;
     }
@@ -1051,31 +1121,61 @@ fn drain_pipe(h: u64, inout dst: ChunkSeq[u8]) eff [Ffi[StdProcess]] {
             break;
         }
         let cnt = widen_u64(n.v);
-        dst.extend(in tmp[0..cnt]);
+        keep(inout dst, in tmp.as_slice(), cnt, limit, inout cut);
     }
     close_handle_if(h);
 }
 
-pub fn wait(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProcess]] {
-    if ch.waited {
-        return Result::Err(
-            IoError {
-                kind: invalid_input(),
-                os: 0
-            }
-        );
+// Read what is waiting in pipe `h` now, without blocking: the new handle
+// (0 once the pipe has ended and is closed) and whether bytes came.
+fn pump_pipe(h: u64, inout dst: ChunkSeq[u8], limit: u64, inout cut: bool)
+    -> (u64, bool) eff [Ffi[StdProcess]] {
+    if h == 0 {
+        return (0, false);
     }
-    drain_pipe(ch.stdout_h, inout ch.stdout_buf);
-    ch.stdout_h = 0;
-    drain_pipe(ch.stderr_h, inout ch.stderr_buf);
-    ch.stderr_h = 0;
-    let _ = StdProcess::WaitForSingleObject(ch.h_process, StdProcess::INFINITE);
+    let mut avail = DwordBox {
+        v: 0
+    };
+    let (ok, _) = StdProcess::PeekNamedPipe(h, 0, 0, 0, inout avail, 0);
+    if ok == 0 {
+        // The writers are gone (`ERROR_BROKEN_PIPE`) or the pipe failed:
+        // either way nothing more comes.
+        close_handle_if(h);
+        return (0, false);
+    }
+    if avail.v == 0 {
+        return (h, false);
+    }
+    let want = if avail.v > 65536 {
+        65536
+    } else {
+        avail.v
+    };
+    let mut tmp: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    tmp.resize(widen_u64(want), 0);
+    let mut n = DwordBox {
+        v: 0
+    };
+    let (rok, _) = StdProcess::ReadFile(h, inout tmp.as_slice_mut(), inout n, 0);
+    if rok == 0 || n.v == 0 {
+        close_handle_if(h);
+        return (0, false);
+    }
+    keep(inout dst, in tmp.as_slice(), widen_u64(n.v), limit, inout cut);
+    (h, true)
+}
+
+// The exit status of an ended child; its handles (and job) are closed
+// and it counts as waited for.
+fn finish(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProcess]] {
     let mut code = DwordBox {
         v: 0
     };
     let (ok, err) = StdProcess::GetExitCodeProcess(ch.h_process, inout code);
     close_handle_if(ch.h_process);
     ch.h_process = 0;
+    close_handle_if(ch.job);
+    ch.job = 0;
     ch.waited = true;
     if ok == 0 {
         return Result::Err(error_of(widen_u64(err)));
@@ -1087,6 +1187,103 @@ pub fn wait(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProc
             exited: true,
         }
     )
+}
+
+pub fn wait(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProcess]] {
+    if ch.waited {
+        return Result::Err(
+            IoError {
+                kind: invalid_input(),
+                os: 0
+            }
+        );
+    }
+    drain_pipe(ch.stdout_h, inout ch.stdout_buf, ch.limit, inout ch.cut);
+    ch.stdout_h = 0;
+    drain_pipe(ch.stderr_h, inout ch.stderr_buf, ch.limit, inout ch.cut);
+    ch.stderr_h = 0;
+    let _ = StdProcess::WaitForSingleObject(ch.h_process, StdProcess::INFINITE);
+    finish(inout ch)
+}
+
+// Wait at most `millis` milliseconds for the child to end, collecting
+// captured output meanwhile: `Some(status)` once it has ended and its
+// captured streams are drained, as `wait` returns it (the child is then
+// waited for), or `None` when the time runs out first (the child, and
+// what it wrote so far, stay; wait again, or `kill_tree`). 0 milliseconds
+// only checks. Waiting for a waited child is an `invalid_input()` error.
+pub fn wait_timeout(inout ch: ProcChild, millis: u64)
+    -> Result[Option[ExitStatus], IoError] eff [Ffi[StdProcess]] {
+    if ch.waited {
+        return Result::Err(
+            IoError {
+                kind: invalid_input(),
+                os: 0
+            }
+        );
+    }
+    let start = StdProcess::GetTickCount64();
+    loop {
+        let (oh, ogot) = pump_pipe(ch.stdout_h, inout ch.stdout_buf, ch.limit, inout ch.cut);
+        ch.stdout_h = oh;
+        let (eh, egot) = pump_pipe(ch.stderr_h, inout ch.stderr_buf, ch.limit, inout ch.cut);
+        ch.stderr_h = eh;
+        let ended = StdProcess::WaitForSingleObject(ch.h_process, 0) == StdProcess::WAIT_OBJECT_0;
+        if ended && ch.stdout_h == 0 && ch.stderr_h == 0 {
+            return match finish(inout ch) {
+                Result::Ok(s) => Result::Ok(Option::Some(s)),
+                Result::Err(e) => Result::Err(e),
+            };
+        }
+        let spent = wrapping_sub(StdProcess::GetTickCount64(), start);
+        if spent >= millis {
+            return Result::Ok(Option::None);
+        }
+        if !ogot && !egot {
+            let left = wrapping_sub(millis, spent);
+            let slice = if left < 5 {
+                left
+            } else {
+                5
+            };
+            if ended {
+                StdProcess::Sleep(wrapping_u32(slice));
+            } else {
+                let _ = StdProcess::WaitForSingleObject(ch.h_process, wrapping_u32(slice));
+            }
+        }
+    }
+}
+
+// Kill the child and, under `process_group`, every process in its job,
+// then wait for it. The captured streams are closed without reading on;
+// what they carried so far stays. The child's status (exit code 1 when
+// killed), or `invalid_input()` for a child already waited for.
+pub fn kill_tree(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProcess]] {
+    if ch.waited {
+        return Result::Err(
+            IoError {
+                kind: invalid_input(),
+                os: 0
+            }
+        );
+    }
+    if ch.job != 0 {
+        let _ = StdProcess::TerminateJobObject(ch.job, 1);
+    }
+    let _ = StdProcess::TerminateProcess(ch.h_process, 1);
+    close_handle_if(ch.stdout_h);
+    ch.stdout_h = 0;
+    close_handle_if(ch.stderr_h);
+    ch.stderr_h = 0;
+    let _ = StdProcess::WaitForSingleObject(ch.h_process, StdProcess::INFINITE);
+    finish(inout ch)
+}
+
+// Whether a captured stream went past the `capture_limit` (its first
+// bytes were kept, the rest dropped).
+pub fn truncated(in ch: ProcChild) -> bool {
+    ch.cut
 }
 
 pub fn stdout(in ch: ProcChild) -> ChunkSeq[u8] {
@@ -1113,10 +1310,14 @@ pub fn release(sink ch: ProcChild) eff [Ffi[StdProcess]] {
     close_handle_if(ch.stdout_h);
     close_handle_if(ch.stderr_h);
     if !ch.waited && ch.h_process != 0 {
+        if ch.job != 0 {
+            let _ = StdProcess::TerminateJobObject(ch.job, 1);
+        }
         let _ = StdProcess::TerminateProcess(ch.h_process, 1);
         let _ = StdProcess::WaitForSingleObject(ch.h_process, StdProcess::INFINITE);
         close_handle_if(ch.h_process);
     }
+    close_handle_if(ch.job);
 }
 
 pub fn output(sink c: ProcCommand) -> Output eff [Ffi[StdProcess], Fail[IoError]] {

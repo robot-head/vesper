@@ -1,0 +1,57 @@
+"""Decode JSON reports that must have unique keys in every object."""
+
+def _check_unique_keys(text: str):
+    # The JSON decoder has already validated the syntax. Track object keys
+    # separately because the decoder keeps only the last value of each key.
+    containers = []
+    start = -1
+    end = -1
+    key_start = -1
+    escaped = False
+    for index, char in enumerate(text.elems()):
+        if start >= 0:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                end = index + 1
+                key_start = start
+                start = -1
+        elif char in " \t\r\n":
+            continue
+        elif char == '"':
+            start = index
+            end = -1
+        elif char == "{":
+            containers.append({})
+            end = -1
+        elif char == "[":
+            containers.append(None)
+            end = -1
+        elif char in "}]":
+            containers.pop()
+            end = -1
+        elif char == ":" and end >= 0:
+            key = json.decode(text[key_start:end])
+            keys = containers[-1]
+            if key in keys:
+                fail("Duplicate JSON key: " + key)
+            keys[key] = True
+            end = -1
+        else:
+            end = -1
+
+def decode_object(text: str) -> dict:
+    report = json.try_decode(text)
+    if type(report) != "dict":
+        fail("Expected a JSON object")
+    _check_unique_keys(text)
+    return report
+
+def decode_list(text: str) -> list:
+    report = json.try_decode(text)
+    if type(report) != "list":
+        fail("Expected a JSON array")
+    _check_unique_keys(text)
+    return report

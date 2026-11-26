@@ -1,26 +1,26 @@
 """Publish the port shard matrix for the selected checkout."""
 
-def _shard_count(ctx: TaskContext, root: str) -> int:
-    plan = ctx.std.fs.try_read_to_string(root + "/scripts/port-harness-plan.json")
-    if plan:
-        shards = json.decode(plan)
-        if type(shards) != "list":
-            ctx.std.process.exit(1, "Expected a list of port harness shards")
-        return len(shards)
-    historical = ctx.std.fs.try_read_to_string(root + "/scripts/test-port-harness.sh") or ""
-    for line in historical.splitlines():
-        if line.startswith("shards="):
-            value = line.removeprefix("shards=").strip()
-            if value.isdigit():
-                return int(value)
-    ctx.std.process.exit(1, "Could not determine the port harness shard count")
+def load_port_harness_plan(ctx: TaskContext, root: str):
+    relative = "/scripts/port-harness-plan.json"
+    path = root + relative
+    own_plan = ctx.std.fs.exists(path)
+    if not own_plan:
+        path = ctx.std.env.aspect_root_dir() + relative
+    contents = ctx.std.fs.try_read_to_string(path)
+    if contents == None:
+        ctx.std.process.exit(1, "Could not determine the port harness shard count")
+    shards = json.decode(contents)
+    if type(shards) != "list":
+        ctx.std.process.exit(1, "Expected a list of port harness shards")
+    return shards, own_plan
 
 def _publish_matrix(ctx: TaskContext) -> int:
     root = ctx.std.env.var("PORT_HARNESS_ROOT") or ctx.std.env.aspect_root_dir()
     output = ctx.std.env.var("GITHUB_OUTPUT")
     if not output:
         ctx.std.process.exit(2, "GITHUB_OUTPUT is required")
-    count = _shard_count(ctx, root)
+    plan, _ = load_port_harness_plan(ctx, root)
+    count = len(plan)
     if count < 1 or count > 256:
         ctx.std.process.exit(1, "The port harness needs between 1 and 256 shards")
     matrix = json.encode(list(range(1, count + 1)))
