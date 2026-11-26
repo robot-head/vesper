@@ -95,14 +95,14 @@ pub copy struct Ops {
     wmul: u32
 }
 
-pub fn ops_new(inout t: Tree) -> Ops {
+pub fn ops_new(inout tree: Tree) -> Ops {
     Ops {
-        add: t.ast.names.intern(in "+").id(),
-        sub: t.ast.names.intern(in "-").id(),
-        mul: t.ast.names.intern(in "*").id(),
-        wadd: t.ast.names.intern(in "wrapping_add").id(),
-        wsub: t.ast.names.intern(in "wrapping_sub").id(),
-        wmul: t.ast.names.intern(in "wrapping_mul").id()
+        add: tree.ast.names.intern(in "+").id(),
+        sub: tree.ast.names.intern(in "-").id(),
+        mul: tree.ast.names.intern(in "*").id(),
+        wadd: tree.ast.names.intern(in "wrapping_add").id(),
+        wsub: tree.ast.names.intern(in "wrapping_sub").id(),
+        wmul: tree.ast.names.intern(in "wrapping_mul").id()
     }
 }
 
@@ -159,7 +159,7 @@ pub copy struct Pair {
 
 // A `compare_output` stack entry: an expression, a term and its depth.
 pub copy struct OutFrame {
-    e: u32,
+    expr: u32,
     id: u32,
     depth: u64
 }
@@ -173,8 +173,8 @@ pub copy struct Shape {
 
 // ---------------------------------------------------------------- helpers
 
-fn sym_len(in t: Tree, sym: u32) -> u64 {
-    t.ast.names.symbol_len(symbol_from_id(sym))
+fn sym_len(in tree: Tree, sym: u32) -> u64 {
+    tree.ast.names.symbol_len(symbol_from_id(sym))
 }
 
 fn closed_kind(code: u8) -> u8 {
@@ -185,24 +185,24 @@ fn closed_kind(code: u8) -> u8 {
     }
 }
 
-fn checked_op(in o: Ops, sym: u32) -> u8 {
-    if sym == o.add {
+fn checked_op(in ops: Ops, sym: u32) -> u8 {
+    if sym == ops.add {
         OP_ADD
-    } else if sym == o.sub {
+    } else if sym == ops.sub {
         OP_SUB
-    } else if sym == o.mul {
+    } else if sym == ops.mul {
         OP_MUL
     } else {
         255
     }
 }
 
-fn wrapping_op(in o: Ops, sym: u32) -> u8 {
-    if sym == o.wadd {
+fn wrapping_op(in ops: Ops, sym: u32) -> u8 {
+    if sym == ops.wadd {
         OP_ADD
-    } else if sym == o.wsub {
+    } else if sym == ops.wsub {
         OP_SUB
-    } else if sym == o.wmul {
+    } else if sym == ops.wmul {
         OP_MUL
     } else {
         255
@@ -215,44 +215,48 @@ fn op_name_len(wrapping: bool) -> u64 {
 }
 
 // `IntegerKind::fits` for the four closed kinds.
-pub fn fits(kind: u8, n: i128) -> bool {
+pub fn fits(kind: u8, value: i128) -> bool {
     let u64_max: i128 = 18446744073709551615;
     let i64_min: i128 = -9223372036854775808;
     if kind == K_U8 {
-        n >= 0 && n <= 255
+        value >= 0 && value <= 255
     } else if kind == K_U32 {
-        n >= 0 && n <= 4294967295
+        value >= 0 && value <= 4294967295
     } else if kind == K_U64 {
-        n >= 0 && n <= u64_max
+        value >= 0 && value <= u64_max
     } else if kind == K_I64 {
-        n >= i64_min && n <= 9223372036854775807
+        value >= i64_min && value <= 9223372036854775807
     } else {
         false
     }
 }
 
 // `IntegerKind::wrap` for the four closed kinds.
-pub fn wrap(kind: u8, n: i128) -> i128 {
+pub fn wrap(kind: u8, value: i128) -> i128 {
     if kind == K_U8 {
-        widen_i128(wrapping_u64(n) & 255)
+        widen_i128(wrapping_u64(value) & 255)
     } else if kind == K_U32 {
-        widen_i128(wrapping_u64(n) & 4294967295)
+        widen_i128(wrapping_u64(value) & 4294967295)
     } else if kind == K_U64 {
-        widen_i128(wrapping_u64(n))
+        widen_i128(wrapping_u64(value))
     } else {
-        widen_i128(wrapping_i64(n))
+        widen_i128(wrapping_i64(value))
     }
 }
 
-fn int_value(in t: Tree, e: ExprNode) -> i128 {
-    let l = lit_at(in t.ast, e.a);
+fn int_value(in tree: Tree, expr: ExprNode) -> i128 {
+    let lit = lit_at(in tree.ast, expr.a);
     // The 128-bit magnitude `hi`:`bits` (2^127 wraps to `i128::MIN`).
-    let m = wrapping_shl_i128(widen_i128(wrapping_i64(l.hi)), 64) | widen_i128(l.bits);
-    if l.neg { wrapping_neg_i128(m) } else { m }
+    let magnitude = wrapping_shl_i128(widen_i128(wrapping_i64(lit.hi)), 64) | widen_i128(lit.bits);
+    if lit.neg {
+        wrapping_neg_i128(magnitude)
+    } else {
+        magnitude
+    }
 }
 
-fn is_int_literal(in t: Tree, e: ExprNode) -> bool {
-    e.kind == X_LITERAL && lit_at(in t.ast, e.a).kind == 1
+fn is_int_literal(in tree: Tree, expr: ExprNode) -> bool {
+    expr.kind == X_LITERAL && lit_at(in tree.ast, expr.a).kind == 1
 }
 
 fn term_at(in terms: ChunkSeq[TermRow], id: u32) -> TermRow {
@@ -266,8 +270,8 @@ fn in_range(in terms: ChunkSeq[TermRow], id: u32) -> bool {
     widen_u64(id) < terms.len()
 }
 
-fn is_binary(t: TermRow) -> bool {
-    t.tag == T_CHECKED || t.tag == T_WRAPPING
+fn is_binary(term: TermRow) -> bool {
+    term.tag == T_CHECKED || term.tag == T_WRAPPING
 }
 
 fn same_node(x: TermRow, y: TermRow) -> bool {
@@ -287,46 +291,52 @@ fn same_term(x: TermRow, y: TermRow) -> bool {
     x.kind == y.kind && same_node(x, y)
 }
 
-fn arg_at(in t: Tree, list: u32, i: u64) -> ArgNode {
-    t.ast.args.get_or(
-        idx_from_raw[ArgNode](list_at(in t.ast, list, i)),
+fn arg_at(in tree: Tree, list: u32, i: u64) -> ArgNode {
+    tree.ast.args.get_or(
+        idx_from_raw[ArgNode](list_at(in tree.ast, list, i)),
         ArgNode { pass: 255, explicit: false, expr: none() }
     )
 }
 
 // `call_parts`: the operation, the callee and the two argument
 // expressions of a `wrapping_*` call.
-fn call_parts(in t: Tree, in o: Ops, e: ExprNode, inout op: u8, inout args: (u32, u32)) -> u8 {
-    if e.kind != X_CALL {
+fn call_parts(
+    in tree: Tree,
+    in ops: Ops,
+    expr: ExprNode,
+    inout op: u8,
+    inout args: (u32, u32)
+) -> u8 {
+    if expr.kind != X_CALL {
         return E_UNSUPPORTED_AST;
     }
-    let callee = expr_at(in t.ast, e.a);
+    let callee = expr_at(in tree.ast, expr.a);
     if callee.kind != X_NAME {
         return E_INVALID_INTRINSIC_ORIGIN;
     }
-    let w = wrapping_op(in o, callee.a);
-    if w == 255 {
+    let wrap_op = wrapping_op(in ops, callee.a);
+    if wrap_op == 255 {
         return E_UNSUPPORTED_AST;
     }
-    if list_len(in t.ast, e.b) != 0 || list_len(in t.ast, e.c) != 2 {
+    if list_len(in tree.ast, expr.b) != 0 || list_len(in tree.ast, expr.c) != 2 {
         return E_UNSUPPORTED_AST;
     }
-    let x = arg_at(in t, e.c, 0);
-    let y = arg_at(in t, e.c, 1);
-    if x.pass != 0 || x.explicit || y.pass != 0 || y.explicit {
+    let first_arg = arg_at(in tree, expr.c, 0);
+    let second_arg = arg_at(in tree, expr.c, 1);
+    if first_arg.pass != 0 || first_arg.explicit || second_arg.pass != 0 || second_arg.explicit {
         return E_UNSUPPORTED_AST;
     }
-    op = w;
-    args = (x.expr, y.expr);
+    op = wrap_op;
+    args = (first_arg.expr, second_arg.expr);
     0
 }
 
-fn source_type(in t: Tree, in types: ChunkSeq[TypeRow], e: ExprNode, kind: u8) -> u8 {
-    let code = type_code(in types, e.start, e.end);
+fn source_type(in tree: Tree, in types: ChunkSeq[TypeRow], expr: ExprNode, kind: u8) -> u8 {
+    let code = type_code(in types, expr.start, expr.end);
     if code == 0 {
         return E_MISSING_TYPE;
     }
-    if closed_kind(code) == kind || (is_int_literal(in t, e) && code == C_INT_LITERAL) {
+    if closed_kind(code) == kind || (is_int_literal(in tree, expr) && code == C_INT_LITERAL) {
         0
     } else {
         E_TYPE_MISMATCH
@@ -351,21 +361,21 @@ fn const_at(in consts: ChunkSeq[i128], i: u64) -> i128 {
 // search runs over the `keys` column, and the units are charged at once
 // (`work_units`), which spends and refuses exactly as one charge per
 // compared term does.
-fn intern_term(inout bound: Bound, term: TermRow, inout b: Budget, inout id: u32) -> u8 {
+fn intern_term(inout bound: Bound, term: TermRow, inout budget: Budget, inout id: u32) -> u8 {
     let key = term_key(term);
     let constant = term.tag == T_CONST;
     let n = bound.keys.len();
     let mut found = n;
     let mut i: u64 = 0;
-    for k in bound.keys {
-        if k == key && (!constant || const_at(in bound.consts, i) == term.value) {
+    for stored_key in bound.keys {
+        if stored_key == key && (!constant || const_at(in bound.consts, i) == term.value) {
             found = i;
             break;
         }
         i = wrapping_add(i, 1);
     }
     let compared = if found < n { wrapping_add(found, 1) } else { n };
-    let e = work_units(inout b, compared);
+    let e = work_units(inout budget, compared);
     if e != 0 {
         return e;
     }
@@ -373,11 +383,11 @@ fn intern_term(inout bound: Bound, term: TermRow, inout b: Budget, inout id: u32
         id = wrapping_u32(found);
         return 0;
     }
-    let e = limit(wrapping_add(n, 1), b.max_terms);
+    let e = limit(wrapping_add(n, 1), budget.max_terms);
     if e != 0 {
         return e;
     }
-    let e = reserve(inout b, n, inout bound.terms_cap, 1, S_TERM);
+    let e = reserve(inout budget, n, inout bound.terms_cap, 1, S_TERM);
     if e != 0 {
         return e;
     }
@@ -403,32 +413,32 @@ fn binary_term(kind: u8, wrapping: bool, op: u8, left: u32, right: u32) -> TermR
 // `Finish(op, wrapping)`.
 pub copy struct Frame {
     finish: bool,
-    e: u32,
+    expr: u32,
     depth: u64,
     op: u8,
     wrapping: bool
 }
 
-fn enter(e: u32, depth: u64) -> Frame {
-    Frame { finish: false, e: e, depth: depth, op: 0, wrapping: false }
+fn enter(expr: u32, depth: u64) -> Frame {
+    Frame { finish: false, expr: expr, depth: depth, op: 0, wrapping: false }
 }
 
 fn finish(op: u8, wrapping: bool) -> Frame {
-    Frame { finish: true, e: 0, depth: 0, op: op, wrapping: wrapping }
+    Frame { finish: true, expr: 0, depth: 0, op: op, wrapping: wrapping }
 }
 
 // ---------------------------------------------------------------- bind
 
 // `bind_source`: the source expression `root` as shallow terms.
 pub fn bind_source(
-    in t: Tree,
-    in o: Ops,
+    in tree: Tree,
+    in ops: Ops,
     in types: ChunkSeq[TypeRow],
     root: u32,
-    inout b: Budget,
+    inout budget: Budget,
     inout bound: Bound
 ) -> u8 {
-    let source = expr_at(in t.ast, root);
+    let source = expr_at(in tree.ast, root);
     let code = type_code(in types, source.start, source.end);
     if code == 0 {
         return E_MISSING_TYPE;
@@ -453,7 +463,7 @@ pub fn bind_source(
     bound.end = source.end;
     let mut stack_cap: u64 = 0;
     let mut values_cap: u64 = 0;
-    let e = reserve(inout b, 0, inout stack_cap, 1, S_SOURCE_FRAME);
+    let e = reserve(inout budget, 0, inout stack_cap, 1, S_SOURCE_FRAME);
     if e != 0 {
         return e;
     }
@@ -464,7 +474,7 @@ pub fn bind_source(
             Option::Some(f) => f,
             Option::None => break,
         };
-        let e = work(inout b, 1);
+        let e = work(inout budget, 1);
         if e != 0 {
             return e;
         }
@@ -480,30 +490,30 @@ pub fn bind_source(
             };
             term = binary_term(kind, frame.wrapping, frame.op, left, right);
         } else {
-            let x = expr_at(in t.ast, frame.e);
+            let expr = expr_at(in tree.ast, frame.expr);
             nodes = wrapping_add(nodes, 1);
-            let e = limit(nodes, b.max_input_nodes);
+            let e = limit(nodes, budget.max_input_nodes);
             if e != 0 {
                 return e;
             }
-            let e = limit(frame.depth, b.max_depth);
+            let e = limit(frame.depth, budget.max_depth);
             if e != 0 {
                 return e;
             }
-            let e = source_type(in t, in types, x, kind);
+            let e = source_type(in tree, in types, expr, kind);
             if e != 0 {
                 return e;
             }
             let deeper = wrapping_add(frame.depth, 1);
-            if is_int_literal(in t, x) {
-                let value = int_value(in t, x);
+            if is_int_literal(in tree, expr) {
+                let value = int_value(in tree, expr);
                 if !fits(kind, value) {
                     return E_CONSTANT_OUT_OF_RANGE;
                 }
                 term.value = value;
-            } else if x.kind == X_NAME {
-                let len = sym_len(in t, x.a);
-                let e = names(inout b, len);
+            } else if expr.kind == X_NAME {
+                let len = sym_len(in tree, expr.a);
+                let e = names(inout budget, len);
                 if e != 0 {
                     return e;
                 }
@@ -513,22 +523,22 @@ pub fn bind_source(
                         Option::Some(v) => v,
                         Option::None => none(),
                     };
-                    let e = work(inout b, wrapping_add(sym_len(in t, previous), len));
+                    let e = work(inout budget, wrapping_add(sym_len(in tree, previous), len));
                     if e != 0 {
                         return e;
                     }
-                    if previous == x.a {
+                    if previous == expr.a {
                         found = wrapping_u32(i);
                         break;
                     }
                 }
                 if found == none() {
-                    let e = limit(wrapping_add(bound.names.len(), 1), b.max_variables);
+                    let e = limit(wrapping_add(bound.names.len(), 1), budget.max_variables);
                     if e != 0 {
                         return e;
                     }
                     let e = reserve(
-                        inout b,
+                        inout budget,
                         bound.names.len(),
                         inout bound.names_cap,
                         1,
@@ -538,53 +548,71 @@ pub fn bind_source(
                         return e;
                     }
                     found = wrapping_u32(bound.names.len());
-                    bound.names.push(x.a);
+                    bound.names.push(expr.a);
                 }
                 term.tag = T_INPUT;
                 term.a = found;
-            } else if x.kind == X_BINARY {
-                let op = checked_op(in o, x.a);
+            } else if expr.kind == X_BINARY {
+                let op = checked_op(in ops, expr.a);
                 if op == 255 {
                     return E_UNSUPPORTED_AST;
                 }
-                let e = reserve(inout b, bound.stack.len(), inout stack_cap, 3, S_SOURCE_FRAME);
+                let e = reserve(
+                    inout budget,
+                    bound.stack.len(),
+                    inout stack_cap,
+                    3,
+                    S_SOURCE_FRAME
+                );
                 if e != 0 {
                     return e;
                 }
                 bound.stack.push(finish(op, false));
-                bound.stack.push(enter(x.c, deeper));
-                bound.stack.push(enter(x.b, deeper));
+                bound.stack.push(enter(expr.c, deeper));
+                bound.stack.push(enter(expr.b, deeper));
                 continue;
-            } else if x.kind == X_CALL {
+            } else if expr.kind == X_CALL {
                 let mut op: u8 = 0;
                 let mut args: (u32, u32) = (0, 0);
-                let e = call_parts(in t, in o, x, inout op, inout args);
+                let e = call_parts(in tree, in ops, expr, inout op, inout args);
                 if e != 0 {
                     return e;
                 }
-                let callee = expr_at(in t.ast, x.a);
+                let callee = expr_at(in tree.ast, expr.a);
                 if type_code(in types, callee.start, callee.end) != 0 {
                     return E_INVALID_INTRINSIC_ORIGIN;
                 }
                 nodes = wrapping_add(nodes, 1);
-                let e = limit(nodes, b.max_input_nodes);
+                let e = limit(nodes, budget.max_input_nodes);
                 if e != 0 {
                     return e;
                 }
-                let e = limit(deeper, b.max_depth);
+                let e = limit(deeper, budget.max_depth);
                 if e != 0 {
                     return e;
                 }
-                let e = names(inout b, WRAPPING_NAME_LEN);
+                let e = names(inout budget, WRAPPING_NAME_LEN);
                 if e != 0 {
                     return e;
                 }
-                let e = reserve(inout b, bound.origins.len(), inout bound.origins_cap, 1, S_ORIGIN);
+                let e = reserve(
+                    inout budget,
+                    bound.origins.len(),
+                    inout bound.origins_cap,
+                    1,
+                    S_ORIGIN
+                );
                 if e != 0 {
                     return e;
                 }
-                bound.origins.push(Origin { op: op, callee: x.a });
-                let e = reserve(inout b, bound.stack.len(), inout stack_cap, 3, S_SOURCE_FRAME);
+                bound.origins.push(Origin { op: op, callee: expr.a });
+                let e = reserve(
+                    inout budget,
+                    bound.stack.len(),
+                    inout stack_cap,
+                    3,
+                    S_SOURCE_FRAME
+                );
                 if e != 0 {
                     return e;
                 }
@@ -598,11 +626,11 @@ pub fn bind_source(
             }
         }
         let mut id: u32 = 0;
-        let e = intern_term(inout bound, term, inout b, inout id);
+        let e = intern_term(inout bound, term, inout budget, inout id);
         if e != 0 {
             return e;
         }
-        let e = reserve(inout b, bound.values.len(), inout values_cap, 1, S_TERM_ID);
+        let e = reserve(inout budget, bound.values.len(), inout values_cap, 1, S_TERM_ID);
         if e != 0 {
             return e;
         }
@@ -646,31 +674,31 @@ fn saturating_add(a: u64, b: u64) -> u64 {
     }
 }
 
-// `n * size` for one of the `S_*` sizes (even, below 2^16), or `OVERFLOW`,
+// `count * size` for one of the `S_*` sizes (even, below 2^16), or `OVERFLOW`,
 // which no such product equals (it is odd).
 const OVERFLOW: u64 = 18446744073709551615;
 
-fn bytes_of(n: u64, size: u64) -> u64 {
-    if n < 281474976710656 {
-        wrapping_mul(n, size)
+fn bytes_of(count: u64, size: u64) -> u64 {
+    if count < 281474976710656 {
+        wrapping_mul(count, size)
     } else {
-        checked_mul_u64(n, size).unwrap_or(OVERFLOW)
+        checked_mul_u64(count, size).unwrap_or(OVERFLOW)
     }
 }
 
 fn capped_sum(a: u64, b: u64, cap: u64) -> u64 {
-    let s = saturating_add(a, b);
-    let c = saturating_add(cap, 1);
-    if s < c { s } else { c }
+    let sum = saturating_add(a, b);
+    let ceiling = saturating_add(cap, 1);
+    if sum < ceiling { sum } else { ceiling }
 }
 
 // `validate_terms`: every term of the source's kind, in range and
 // topological, with the shape of its expanded expression.
 pub fn validate_terms(
-    in t: Tree,
+    in tree: Tree,
     in bound: Bound,
     in terms: ChunkSeq[TermRow],
-    inout b: Budget,
+    inout budget: Budget,
     inout shapes: ChunkSeq[Shape]
 ) -> u8 {
     shapes.clear();
@@ -678,7 +706,7 @@ pub fn validate_terms(
     if n == 0 {
         return E_INVALID_TERM_INDEX;
     }
-    let e = limit(n, b.max_terms);
+    let e = limit(n, budget.max_terms);
     if e != 0 {
         return e;
     }
@@ -686,18 +714,18 @@ pub fn validate_terms(
     if bytes == OVERFLOW {
         return E_LIMIT;
     }
-    let e = metadata(inout b, bytes);
+    let e = metadata(inout budget, bytes);
     if e != 0 {
         return e;
     }
     let mut shapes_cap: u64 = 0;
-    let e = reserve(inout b, 0, inout shapes_cap, n, S_SHAPE);
+    let e = reserve(inout budget, 0, inout shapes_cap, n, S_SHAPE);
     if e != 0 {
         return e;
     }
     let mut id: u64 = 0;
     for current in terms {
-        let e = work(inout b, 8);
+        let e = work(inout budget, 8);
         if e != 0 {
             return e;
         }
@@ -714,7 +742,7 @@ pub fn validate_terms(
             if name == none() {
                 return E_UNKNOWN_VARIABLE;
             }
-            let len = sym_len(in t, name);
+            let len = sym_len(in tree, name);
             Shape { depth: 1, nodes: 1, names: len, bytes: len }
         } else if is_binary(current) {
             let wrapping = current.tag == T_WRAPPING;
@@ -730,27 +758,27 @@ pub fn validate_terms(
             if widen_u64(current.b) >= id {
                 return E_NON_TOPOLOGICAL_TERM;
             }
-            let x = shape_at(in shapes, current.a);
-            let y = shape_at(in shapes, current.b);
-            let mut depth = x.depth;
-            if y.depth > depth {
-                depth = y.depth;
+            let left_shape = shape_at(in shapes, current.a);
+            let right_shape = shape_at(in shapes, current.b);
+            let mut depth = left_shape.depth;
+            if right_shape.depth > depth {
+                depth = right_shape.depth;
             }
             depth = wrapping_add(depth, 1);
-            let e = limit(depth, b.max_depth);
+            let e = limit(depth, budget.max_depth);
             if e != 0 {
                 return e;
             }
-            let w: u64 = if wrapping { 1 } else { 0 };
+            let wrap_count: u64 = if wrapping { 1 } else { 0 };
             let nodes = capped_sum(
-                wrapping_add(w, 1),
-                capped_sum(x.nodes, y.nodes, b.max_output_nodes),
-                b.max_output_nodes
+                wrapping_add(wrap_count, 1),
+                capped_sum(left_shape.nodes, right_shape.nodes, budget.max_output_nodes),
+                budget.max_output_nodes
             );
             let names = capped_sum(
-                wrapping_mul(w, WRAPPING_NAME_LEN),
-                capped_sum(x.names, y.names, b.max_name_bytes),
-                b.max_name_bytes
+                wrapping_mul(wrap_count, WRAPPING_NAME_LEN),
+                capped_sum(left_shape.names, right_shape.names, budget.max_name_bytes),
+                budget.max_name_bytes
             );
             let overhead = wrapping_add(
                 wrapping_add(wrapping_mul(8, S_EXPR), wrapping_mul(2, S_ARG)),
@@ -758,8 +786,8 @@ pub fn validate_terms(
             );
             let bytes = capped_sum(
                 overhead,
-                capped_sum(x.bytes, y.bytes, b.max_metadata_bytes),
-                b.max_metadata_bytes
+                capped_sum(left_shape.bytes, right_shape.bytes, budget.max_metadata_bytes),
+                budget.max_metadata_bytes
             );
             Shape { depth: depth, nodes: nodes, names: names, bytes: bytes }
         } else {
@@ -783,12 +811,12 @@ pub fn compare_input(
     in bound: Bound,
     in terms: ChunkSeq[TermRow],
     input: u32,
-    inout b: Budget,
+    inout budget: Budget,
     inout stack: ChunkSeq[Pair]
 ) -> u8 {
     stack.clear();
     let mut cap: u64 = 0;
-    let e = reserve(inout b, 0, inout cap, 1, S_INPUT_PAIR);
+    let e = reserve(inout budget, 0, inout cap, 1, S_INPUT_PAIR);
     if e != 0 {
         return e;
     }
@@ -796,39 +824,39 @@ pub fn compare_input(
     let mut nodes: u64 = 0;
     loop {
         let (left, right) = match stack.pop() {
-            Option::Some(p) => (p.left, p.right),
+            Option::Some(pair) => (pair.left, pair.right),
             Option::None => break,
         };
-        let e = work(inout b, 1);
+        let e = work(inout budget, 1);
         if e != 0 {
             return e;
         }
         if !in_range(in bound.terms, left) || !in_range(in terms, right) {
             return E_INVALID_TERM_INDEX;
         }
-        let x = term_at(in bound.terms, left);
-        let y = term_at(in terms, right);
-        if x.kind != y.kind {
+        let source_term = term_at(in bound.terms, left);
+        let cert_term = term_at(in terms, right);
+        if source_term.kind != cert_term.kind {
             return E_INPUT_MISMATCH;
         }
         nodes = wrapping_add(nodes, 1);
-        if is_binary(x) && is_binary(y) {
-            if x.tag != y.tag || x.op != y.op {
+        if is_binary(source_term) && is_binary(cert_term) {
+            if source_term.tag != cert_term.tag || source_term.op != cert_term.op {
                 return E_INPUT_MISMATCH;
             }
-            if x.tag == T_WRAPPING {
+            if source_term.tag == T_WRAPPING {
                 nodes = wrapping_add(nodes, 1);
             }
-            let e = reserve(inout b, stack.len(), inout cap, 2, S_INPUT_PAIR);
+            let e = reserve(inout budget, stack.len(), inout cap, 2, S_INPUT_PAIR);
             if e != 0 {
                 return e;
             }
-            stack.push(Pair { left: x.b, right: y.b });
-            stack.push(Pair { left: x.a, right: y.a });
-        } else if !same_node(x, y) {
+            stack.push(Pair { left: source_term.b, right: cert_term.b });
+            stack.push(Pair { left: source_term.a, right: cert_term.a });
+        } else if !same_node(source_term, cert_term) {
             return E_INPUT_MISMATCH;
         }
-        let e = limit(nodes, b.max_input_nodes);
+        let e = limit(nodes, budget.max_input_nodes);
         if e != 0 {
             return e;
         }
@@ -836,61 +864,64 @@ pub fn compare_input(
     0
 }
 
-fn out_frame(e: u32, id: u32, depth: u64) -> OutFrame {
-    OutFrame { e: e, id: id, depth: depth }
+fn out_frame(expr: u32, id: u32, depth: u64) -> OutFrame {
+    OutFrame { expr: expr, id: id, depth: depth }
 }
 
 // `Expr == Expr` for a callee: both `Name`s here (`call_parts` passed).
-fn same_callee(in t: Tree, x: u32, y: u32) -> bool {
-    let a = expr_at(in t.ast, x);
-    let c = expr_at(in t.ast, y);
-    a.kind == c.kind && a.start == c.start && a.end == c.end && a.a == c.a
+fn same_callee(in tree: Tree, left_id: u32, right_id: u32) -> bool {
+    let left = expr_at(in tree.ast, left_id);
+    let right = expr_at(in tree.ast, right_id);
+    left.kind == right.kind
+        && left.start == right.start
+        && left.end == right.end
+        && left.a == right.a
 }
 
 // `compare_output`: the candidate is exactly the certificate's output
 // expanded, every value at the source span, every intrinsic callee one of
 // the source's.
 pub fn compare_output(
-    in t: Tree,
-    in o: Ops,
+    in tree: Tree,
+    in ops: Ops,
     in bound: Bound,
     candidate: u32,
     in terms: ChunkSeq[TermRow],
     output: u32,
-    inout b: Budget,
+    inout budget: Budget,
     inout stack: ChunkSeq[OutFrame]
 ) -> u8 {
-    let root = expr_at(in t.ast, candidate);
+    let root = expr_at(in tree.ast, candidate);
     if root.start != bound.start || root.end != bound.end {
         return E_OUTPUT_MISMATCH;
     }
     stack.clear();
     let mut cap: u64 = 0;
-    let e = reserve(inout b, 0, inout cap, 1, S_OUTPUT_FRAME);
+    let e = reserve(inout budget, 0, inout cap, 1, S_OUTPUT_FRAME);
     if e != 0 {
         return e;
     }
     stack.push(out_frame(candidate, output, 1));
     let mut nodes: u64 = 0;
     loop {
-        let (ei, id, depth) = match stack.pop() {
-            Option::Some(f) => (f.e, f.id, f.depth),
+        let (expr_id, id, depth) = match stack.pop() {
+            Option::Some(f) => (f.expr, f.id, f.depth),
             Option::None => break,
         };
-        let e = work(inout b, 1);
+        let e = work(inout budget, 1);
         if e != 0 {
             return e;
         }
         nodes = wrapping_add(nodes, 1);
-        let e = limit(depth, b.max_depth);
+        let e = limit(depth, budget.max_depth);
         if e != 0 {
             return e;
         }
-        let x = expr_at(in t.ast, ei);
-        if x.start != bound.start || x.end != bound.end {
+        let expr = expr_at(in tree.ast, expr_id);
+        if expr.start != bound.start || expr.end != bound.end {
             return E_OUTPUT_MISMATCH;
         }
-        let e = metadata(inout b, S_EXPR);
+        let e = metadata(inout budget, S_EXPR);
         if e != 0 {
             return e;
         }
@@ -899,11 +930,11 @@ pub fn compare_output(
         }
         let current = term_at(in terms, id);
         let deeper = wrapping_add(depth, 1);
-        if is_int_literal(in t, x)
+        if is_int_literal(in tree, expr)
             && current.tag == T_CONST
-            && int_value(in t, x) == current.value
-        {} else if x.kind == X_NAME && current.tag == T_INPUT {
-            let e = metadata(inout b, cap_at(in t.cap1, ei));
+            && int_value(in tree, expr) == current.value
+        {} else if expr.kind == X_NAME && current.tag == T_INPUT {
+            let e = metadata(inout budget, cap_at(in tree.primary_cap, expr_id));
             if e != 0 {
                 return e;
             }
@@ -911,85 +942,85 @@ pub fn compare_output(
             if expected == none() {
                 return E_UNKNOWN_VARIABLE;
             }
-            let e = names(inout b, sym_len(in t, x.a));
+            let e = names(inout budget, sym_len(in tree, expr.a));
             if e != 0 {
                 return e;
             }
-            let e = work(inout b, sym_len(in t, expected));
+            let e = work(inout budget, sym_len(in tree, expected));
             if e != 0 {
                 return e;
             }
-            if x.a != expected {
+            if expr.a != expected {
                 return E_OUTPUT_MISMATCH;
             }
-        } else if x.kind == X_BINARY && current.tag == T_CHECKED {
-            let e = metadata(inout b, cap_at(in t.cap1, ei));
+        } else if expr.kind == X_BINARY && current.tag == T_CHECKED {
+            let e = metadata(inout budget, cap_at(in tree.primary_cap, expr_id));
             if e != 0 {
                 return e;
             }
-            if checked_op(in o, x.a) != current.op {
+            if checked_op(in ops, expr.a) != current.op {
                 return E_OUTPUT_MISMATCH;
             }
-            let e = reserve(inout b, stack.len(), inout cap, 2, S_OUTPUT_FRAME);
+            let e = reserve(inout budget, stack.len(), inout cap, 2, S_OUTPUT_FRAME);
             if e != 0 {
                 return e;
             }
-            stack.push(out_frame(x.c, current.b, deeper));
-            stack.push(out_frame(x.b, current.a, deeper));
-        } else if x.kind == X_CALL && current.tag == T_WRAPPING {
-            let e = metadata(inout b, S_EXPR);
+            stack.push(out_frame(expr.c, current.b, deeper));
+            stack.push(out_frame(expr.b, current.a, deeper));
+        } else if expr.kind == X_CALL && current.tag == T_WRAPPING {
+            let e = metadata(inout budget, S_EXPR);
             if e != 0 {
                 return e;
             }
-            let tbytes = bytes_of(cap_at(in t.cap1, ei), S_TYPE);
-            if tbytes == OVERFLOW {
+            let types_bytes = bytes_of(cap_at(in tree.primary_cap, expr_id), S_TYPE);
+            if types_bytes == OVERFLOW {
                 return E_LIMIT;
             }
-            let e = metadata(inout b, tbytes);
+            let e = metadata(inout budget, types_bytes);
             if e != 0 {
                 return e;
             }
-            let abytes = bytes_of(cap_at(in t.cap2, ei), S_ARG);
-            if abytes == OVERFLOW {
+            let args_bytes = bytes_of(cap_at(in tree.args_cap, expr_id), S_ARG);
+            if args_bytes == OVERFLOW {
                 return E_LIMIT;
             }
-            let e = metadata(inout b, abytes);
+            let e = metadata(inout budget, args_bytes);
             if e != 0 {
                 return e;
             }
-            let callee = expr_at(in t.ast, x.a);
+            let callee = expr_at(in tree.ast, expr.a);
             if callee.kind == X_NAME {
-                let e = metadata(inout b, cap_at(in t.cap1, x.a));
+                let e = metadata(inout budget, cap_at(in tree.primary_cap, expr.a));
                 if e != 0 {
                     return e;
                 }
             }
             let mut op: u8 = 0;
             let mut args: (u32, u32) = (0, 0);
-            if call_parts(in t, in o, x, inout op, inout args) != 0 {
+            if call_parts(in tree, in ops, expr, inout op, inout args) != 0 {
                 return E_OUTPUT_MISMATCH;
             }
             if op != current.op {
                 return E_OUTPUT_MISMATCH;
             }
             nodes = wrapping_add(nodes, 1);
-            let e = limit(deeper, b.max_depth);
+            let e = limit(deeper, budget.max_depth);
             if e != 0 {
                 return e;
             }
-            let e = names(inout b, WRAPPING_NAME_LEN);
+            let e = names(inout budget, WRAPPING_NAME_LEN);
             if e != 0 {
                 return e;
             }
             let mut found = false;
             for i in 0..bound.origins.len() {
-                let e = work(inout b, wrapping_add(1, WRAPPING_NAME_LEN));
+                let e = work(inout budget, wrapping_add(1, WRAPPING_NAME_LEN));
                 if e != 0 {
                     return e;
                 }
                 match bound.origins.try_get(i) {
                     Option::Some(origin) => {
-                        if origin.op == op && same_callee(in t, origin.callee, x.a) {
+                        if origin.op == op && same_callee(in tree, origin.callee, expr.a) {
                             found = true;
                             break;
                         }
@@ -1000,7 +1031,7 @@ pub fn compare_output(
             if !found {
                 return E_INVALID_INTRINSIC_ORIGIN;
             }
-            let e = reserve(inout b, stack.len(), inout cap, 2, S_OUTPUT_FRAME);
+            let e = reserve(inout budget, stack.len(), inout cap, 2, S_OUTPUT_FRAME);
             if e != 0 {
                 return e;
             }
@@ -1010,7 +1041,7 @@ pub fn compare_output(
         } else {
             return E_OUTPUT_MISMATCH;
         }
-        let e = limit(nodes, b.max_output_nodes);
+        let e = limit(nodes, budget.max_output_nodes);
         if e != 0 {
             return e;
         }
@@ -1021,53 +1052,53 @@ pub fn compare_output(
 // ---------------------------------------------------------------- build
 
 fn build_expr(
-    inout t: Tree,
-    in o: Ops,
+    inout tree: Tree,
+    in ops: Ops,
     in bound: Bound,
     in terms: ChunkSeq[TermRow],
     id: u32
 ) -> u32 {
     let current = term_at(in terms, id);
     if current.tag == T_CONST {
-        return add_int(inout t, current.value, bound.start, bound.end);
+        return add_int(inout tree, current.value, bound.start, bound.end);
     }
     if current.tag == T_INPUT {
         let name = bound_name(in bound, current.a);
-        let len = sym_len(in t, name);
-        return add_name(inout t, name, len, bound.start, bound.end);
+        let len = sym_len(in tree, name);
+        return add_name(inout tree, name, len, bound.start, bound.end);
     }
-    let left = build_expr(inout t, in o, in bound, in terms, current.a);
-    let right = build_expr(inout t, in o, in bound, in terms, current.b);
+    let left = build_expr(inout tree, in ops, in bound, in terms, current.a);
+    let right = build_expr(inout tree, in ops, in bound, in terms, current.b);
     if current.tag == T_WRAPPING {
-        let original = expr_at(in t.ast, bound_origin(in bound, current.op));
-        let len = sym_len(in t, original.a);
-        let callee = add_name(inout t, original.a, len, original.start, original.end);
-        add_call2(inout t, callee, left, right, bound.start, bound.end)
+        let original = expr_at(in tree.ast, bound_origin(in bound, current.op));
+        let len = sym_len(in tree, original.a);
+        let callee = add_name(inout tree, original.a, len, original.start, original.end);
+        add_call2(inout tree, callee, left, right, bound.start, bound.end)
     } else {
         let op = if current.op == OP_ADD {
-            o.add
+            ops.add
         } else if current.op == OP_SUB {
-            o.sub
+            ops.sub
         } else {
-            o.mul
+            ops.mul
         };
-        add_binary(inout t, op, 1, left, right, bound.start, bound.end)
+        add_binary(inout tree, op, 1, left, right, bound.start, bound.end)
     }
 }
 
 // `build_candidate`: the expression of term `root`, at the source span,
 // with every intrinsic callee copied from the source. `out` is its index.
 pub fn build_candidate(
-    inout t: Tree,
-    in o: Ops,
+    inout tree: Tree,
+    in ops: Ops,
     in bound: Bound,
     in terms: ChunkSeq[TermRow],
     root: u32,
-    inout b: Budget,
+    inout budget: Budget,
     inout out: u32
 ) -> u8 {
     let mut shapes = ChunkSeq::new[Shape]();
-    let e = validate_terms(in t, in bound, in terms, inout b, inout shapes);
+    let e = validate_terms(in tree, in bound, in terms, inout budget, inout shapes);
     if e != 0 {
         return e;
     }
@@ -1075,29 +1106,29 @@ pub fn build_candidate(
         return E_INVALID_TERM_INDEX;
     }
     let shape = shape_at(in shapes, root);
-    let e = limit(shape.nodes, b.max_output_nodes);
+    let e = limit(shape.nodes, budget.max_output_nodes);
     if e != 0 {
         return e;
     }
-    let e = limit(shape.names, b.max_name_bytes);
+    let e = limit(shape.names, budget.max_name_bytes);
     if e != 0 {
         return e;
     }
-    let e = names(inout b, shape.names);
+    let e = names(inout budget, shape.names);
     if e != 0 {
         return e;
     }
-    let e = metadata(inout b, shape.bytes);
+    let e = metadata(inout budget, shape.bytes);
     if e != 0 {
         return e;
     }
-    let e = work(inout b, wrapping_mul(shape.nodes, 8));
+    let e = work(inout budget, wrapping_mul(shape.nodes, 8));
     if e != 0 {
         return e;
     }
     let n = terms.len();
     let mut origins_cap: u64 = 0;
-    let e = reserve(inout b, 0, inout origins_cap, n, S_BOOL);
+    let e = reserve(inout budget, 0, inout origins_cap, n, S_BOOL);
     if e != 0 {
         return e;
     }
@@ -1110,7 +1141,7 @@ pub fn build_candidate(
             break;
         }
         id = wrapping_sub(id, 1);
-        let e = work(inout b, 1);
+        let e = work(inout budget, 1);
         if e != 0 {
             return e;
         }
@@ -1122,7 +1153,7 @@ pub fn build_candidate(
         if is_binary(current) {
             let wrapping = current.tag == T_WRAPPING;
             if wrapping {
-                let e = work(inout b, bound.origins.len());
+                let e = work(inout budget, bound.origins.len());
                 if e != 0 {
                     return e;
                 }
@@ -1138,13 +1169,13 @@ pub fn build_candidate(
         Option::Some(v) => v,
         Option::None => return E_LIMIT,
     };
-    let e = work(inout b, scans);
+    let e = work(inout budget, scans);
     if e != 0 {
         return e;
     }
     let mut stack_cap: u64 = 0;
     let e = reserve(
-        inout b,
+        inout budget,
         0,
         inout stack_cap,
         wrapping_add(wrapping_mul(shape.nodes, 2), 1),
@@ -1154,11 +1185,11 @@ pub fn build_candidate(
         return e;
     }
     let mut values_cap: u64 = 0;
-    let e = reserve(inout b, 0, inout values_cap, shape.nodes, S_EXPR);
+    let e = reserve(inout budget, 0, inout values_cap, shape.nodes, S_EXPR);
     if e != 0 {
         return e;
     }
-    out = build_expr(inout t, in o, in bound, in terms, root);
+    out = build_expr(inout tree, in ops, in bound, in terms, root);
     0
 }
 
@@ -1196,8 +1227,8 @@ fn prior(in proofs: ChunkSeq[ProofRow], id: u32, current: u64) -> u8 {
 }
 
 fn constant(in terms: ChunkSeq[TermRow], id: u32, value: i128) -> bool {
-    let x = term_at(in terms, id);
-    x.tag == T_CONST && x.value == value
+    let term = term_at(in terms, id);
+    term.tag == T_CONST && term.value == value
 }
 
 fn application(
@@ -1205,17 +1236,17 @@ fn application(
     id: u32,
     wrapping: bool,
     op: u8,
-    a: u32,
-    c: u32
+    left: u32,
+    right: u32
 ) -> bool {
-    let x = term_at(in terms, id);
+    let term = term_at(in terms, id);
     let tag = if wrapping { T_WRAPPING } else { T_CHECKED };
-    x.tag == tag && x.op == op && x.a == a && x.b == c
+    term.tag == tag && term.op == op && term.a == left && term.b == right
 }
 
 fn total_leaf(in terms: ChunkSeq[TermRow], id: u32) -> bool {
-    let x = term_at(in terms, id);
-    x.tag == T_CONST || x.tag == T_INPUT
+    let term = term_at(in terms, id);
+    term.tag == T_CONST || term.tag == T_INPUT
 }
 
 fn rule_arity(rule: u32) -> u32 {
@@ -1345,41 +1376,41 @@ fn check_rule(
             && application(in terms, source.a, true, OP_ADD, x, y)
             && to == x
     } else {
-        let k = wrapping_sub(rule, 19) % 3;
-        let op = if k == 0 {
+        let op_index = wrapping_sub(rule, 19) % 3;
+        let op = if op_index == 0 {
             OP_ADD
-        } else if k == 1 {
+        } else if op_index == 1 {
             OP_SUB
         } else {
             OP_MUL
         };
-        let tx = term_at(in terms, x);
-        let ty = term_at(in terms, y);
-        if tx.tag != T_CONST || ty.tag != T_CONST || target.tag != T_CONST {
+        let x_term = term_at(in terms, x);
+        let y_term = term_at(in terms, y);
+        if x_term.tag != T_CONST || y_term.tag != T_CONST || target.tag != T_CONST {
             return E_INVALID_RULE_INSTANCE;
         }
-        let a = tx.value;
-        let c = ty.value;
+        let x_value = x_term.value;
+        let y_value = y_term.value;
         let wrapping = rule >= 22;
         let mut ok = false;
         let mut expected: i128 = 0;
         if wrapping {
             let raw = if op == OP_ADD {
-                wrapping_add(a, c)
+                wrapping_add(x_value, y_value)
             } else if op == OP_SUB {
-                wrapping_sub(a, c)
+                wrapping_sub(x_value, y_value)
             } else {
-                wrapping_mul(a, c)
+                wrapping_mul(x_value, y_value)
             };
             expected = wrap(source.kind, raw);
             ok = true;
         } else {
             let exact = if op == OP_ADD {
-                checked_add_i128(a, c)
+                checked_add_i128(x_value, y_value)
             } else if op == OP_SUB {
-                checked_sub_i128(a, c)
+                checked_sub_i128(x_value, y_value)
             } else {
-                checked_mul_i128(a, c)
+                checked_mul_i128(x_value, y_value)
             };
             match exact {
                 Option::Some(v) => {
@@ -1418,76 +1449,88 @@ pub fn scratch_new() -> Scratch {
 }
 
 // `verify_with_budget`: the certificate proves the source equal to the
-// candidate, under the budget `b` (continued from the producer).
+// candidate, under `budget` (continued from the producer).
 pub fn verify(
-    inout t: Tree,
-    in o: Ops,
+    inout tree: Tree,
+    in ops: Ops,
     in types: ChunkSeq[TypeRow],
     source: u32,
     candidate: u32,
-    in c: Cert,
-    inout b: Budget,
-    inout s: Scratch
+    in cert: Cert,
+    inout budget: Budget,
+    inout scratch: Scratch
 ) -> u8 {
-    if c.schema_version != 1 || c.arithmetic_version != 1 {
+    if cert.schema_version != 1 || cert.arithmetic_version != 1 {
         return E_UNSUPPORTED_VERSION;
     }
-    let e = limit(c.terms.len(), b.max_terms);
+    let e = limit(cert.terms.len(), budget.max_terms);
     if e != 0 {
         return e;
     }
-    let e = limit(c.proofs.len(), b.max_proofs);
+    let e = limit(cert.proofs.len(), budget.max_proofs);
     if e != 0 {
         return e;
     }
-    let pbytes = bytes_of(c.proofs_cap, S_EQUALITY);
-    if pbytes == OVERFLOW {
+    let proofs_bytes = bytes_of(cert.proofs_cap, S_EQUALITY);
+    if proofs_bytes == OVERFLOW {
         return E_LIMIT;
     }
-    let e = metadata(inout b, pbytes);
+    let e = metadata(inout budget, proofs_bytes);
     if e != 0 {
         return e;
     }
-    let tbytes = bytes_of(c.terms_cap, S_TERM);
-    if tbytes == OVERFLOW {
+    let terms_bytes = bytes_of(cert.terms_cap, S_TERM);
+    if terms_bytes == OVERFLOW {
         return E_LIMIT;
     }
-    let e = metadata(inout b, tbytes);
+    let e = metadata(inout budget, terms_bytes);
     if e != 0 {
         return e;
     }
-    let e = bind_source(in t, in o, in types, source, inout b, inout s.bound);
+    let e = bind_source(in tree, in ops, in types, source, inout budget, inout scratch.bound);
     if e != 0 {
         return e;
     }
-    let e = validate_terms(in t, in s.bound, in c.terms, inout b, inout s.shapes);
+    let e = validate_terms(
+        in tree,
+        in scratch.bound,
+        in cert.terms,
+        inout budget,
+        inout scratch.shapes
+    );
     if e != 0 {
         return e;
     }
-    if !in_range(in c.terms, c.input) || !in_range(in c.terms, c.output) {
+    if !in_range(in cert.terms, cert.input) || !in_range(in cert.terms, cert.output) {
         return E_INVALID_TERM_INDEX;
     }
-    let e = compare_input(in s.bound, in c.terms, c.input, inout b, inout s.pairs);
+    let e = compare_input(
+        in scratch.bound,
+        in cert.terms,
+        cert.input,
+        inout budget,
+        inout scratch.pairs
+    );
     if e != 0 {
         return e;
     }
-    for index in 0..c.proofs.len() {
-        let e = work(inout b, 64);
+    for index in 0..cert.proofs.len() {
+        let e = work(inout budget, 64);
         if e != 0 {
             return e;
         }
-        let step = proof_at(in c.proofs, wrapping_u32(index));
-        if !in_range(in c.terms, step.from) || !in_range(in c.terms, step.to) {
+        let step = proof_at(in cert.proofs, wrapping_u32(index));
+        if !in_range(in cert.terms, step.from) || !in_range(in cert.terms, step.to) {
             return E_INVALID_TERM_INDEX;
         }
-        let from = term_at(in c.terms, step.from);
-        let to = term_at(in c.terms, step.to);
+        let from = term_at(in cert.terms, step.from);
+        let to = term_at(in cert.terms, step.to);
         if step.tag == 0 {
             if !same_term(from, to) {
                 return E_INVALID_EQUALITY;
             }
         } else if step.tag == 1 {
-            let e = check_rule(in c.terms, in c.proofs, index, step);
+            let e = check_rule(in cert.terms, in cert.proofs, index, step);
             if e != 0 {
                 return e;
             }
@@ -1498,78 +1541,87 @@ pub fn verify(
             if from.tag != to.tag || from.op != to.op {
                 return E_INVALID_EQUALITY;
             }
-            let e = prior(in c.proofs, step.p0, index);
+            let e = prior(in cert.proofs, step.p0, index);
             if e != 0 {
                 return e;
             }
-            let p = proof_at(in c.proofs, step.p0);
-            if p.from != from.a || p.to != to.a {
+            let first = proof_at(in cert.proofs, step.p0);
+            if first.from != from.a || first.to != to.a {
                 return E_INVALID_EQUALITY;
             }
-            let e = prior(in c.proofs, step.p1, index);
+            let e = prior(in cert.proofs, step.p1, index);
             if e != 0 {
                 return e;
             }
-            let q = proof_at(in c.proofs, step.p1);
-            if q.from != from.b || q.to != to.b {
+            let second = proof_at(in cert.proofs, step.p1);
+            if second.from != from.b || second.to != to.b {
                 return E_INVALID_EQUALITY;
             }
         } else if step.tag == 3 {
-            let e = prior(in c.proofs, step.p0, index);
+            let e = prior(in cert.proofs, step.p0, index);
             if e != 0 {
                 return e;
             }
-            let p = proof_at(in c.proofs, step.p0);
-            if p.from != step.to || p.to != step.from {
+            let first = proof_at(in cert.proofs, step.p0);
+            if first.from != step.to || first.to != step.from {
                 return E_INVALID_EQUALITY;
             }
         } else {
-            let e = prior(in c.proofs, step.p0, index);
+            let e = prior(in cert.proofs, step.p0, index);
             if e != 0 {
                 return e;
             }
-            let e = prior(in c.proofs, step.p1, index);
+            let e = prior(in cert.proofs, step.p1, index);
             if e != 0 {
                 return e;
             }
-            let p = proof_at(in c.proofs, step.p0);
-            let q = proof_at(in c.proofs, step.p1);
-            if p.from != step.from || q.to != step.to || p.to != q.from {
+            let first = proof_at(in cert.proofs, step.p0);
+            let second = proof_at(in cert.proofs, step.p1);
+            if first.from != step.from || second.to != step.to || first.to != second.from {
                 return E_INVALID_EQUALITY;
             }
         }
     }
-    if widen_u64(c.conclusion) >= c.proofs.len() {
+    if widen_u64(cert.conclusion) >= cert.proofs.len() {
         return E_INVALID_PROOF_INDEX;
     }
-    let conclusion = proof_at(in c.proofs, c.conclusion);
-    if conclusion.from != c.input || conclusion.to != c.output {
+    let conclusion = proof_at(in cert.proofs, cert.conclusion);
+    if conclusion.from != cert.input || conclusion.to != cert.output {
         return E_INVALID_EQUALITY;
     }
-    let shape = shape_at(in s.shapes, c.output);
-    let e = limit(shape.nodes, b.max_output_nodes);
+    let shape = shape_at(in scratch.shapes, cert.output);
+    let e = limit(shape.nodes, budget.max_output_nodes);
     if e != 0 {
         return e;
     }
-    let e = limit(shape.names, b.max_name_bytes);
+    let e = limit(shape.names, budget.max_name_bytes);
     if e != 0 {
         return e;
     }
-    let e = metadata(inout b, saturating_add(shape.bytes, S_EXPR));
+    let e = metadata(inout budget, saturating_add(shape.bytes, S_EXPR));
     if e != 0 {
         return e;
     }
-    compare_output(in t, in o, in s.bound, candidate, in c.terms, c.output, inout b, inout s.frames)
+    compare_output(
+        in tree,
+        in ops,
+        in scratch.bound,
+        candidate,
+        in cert.terms,
+        cert.output,
+        inout budget,
+        inout scratch.frames
+    )
 }
 
 // The `size_of` constants the differential compares with Rust's: `Term`,
 // `Equality`, `Expr`, `Arg` and `Type`.
 pub fn rust_sizes() -> ChunkSeq[u64] {
-    let mut s = ChunkSeq::new[u64]();
-    s.push(S_TERM);
-    s.push(S_EQUALITY);
-    s.push(S_EXPR);
-    s.push(S_ARG);
-    s.push(S_TYPE);
-    s
+    let mut sizes = ChunkSeq::new[u64]();
+    sizes.push(S_TERM);
+    sizes.push(S_EQUALITY);
+    sizes.push(S_EXPR);
+    sizes.push(S_ARG);
+    sizes.push(S_TYPE);
+    sizes
 }

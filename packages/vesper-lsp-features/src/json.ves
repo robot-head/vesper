@@ -4,120 +4,120 @@
 
 use @vesper/span::{Position, Range};
 
-// Byte `i` of `b`, or 0 past its end.
-pub fn byte(in b: Slice[u8], i: u64) -> u8 {
-    b.try_get(i).unwrap_or(0)
+// Byte `i` of `bytes`, or 0 past its end.
+pub fn byte(in bytes: Slice[u8], i: u64) -> u8 {
+    bytes.try_get(i).unwrap_or(0)
 }
 
 // Appends the bytes of `s`.
-pub fn put(inout o: ChunkSeq[u8], in s: Str) {
-    put_bytes(inout o, in s.as_bytes());
+pub fn put(inout out: ChunkSeq[u8], in s: Str) {
+    put_bytes(inout out, in s.as_bytes());
 }
 
-pub fn put_bytes(inout o: ChunkSeq[u8], in b: Slice[u8]) {
-    for i in 0..b.len() {
-        o.push(byte(in b, i));
+pub fn put_bytes(inout out: ChunkSeq[u8], in bytes: Slice[u8]) {
+    for i in 0..bytes.len() {
+        out.push(byte(in bytes, i));
     }
 }
 
 // The decimal digits of `n`.
-pub fn put_u64(inout o: ChunkSeq[u8], n: u64) {
+pub fn put_u64(inout out: ChunkSeq[u8], n: u64) {
     if n < 10 {
-        o.push(wrapping_u8(wrapping_add(n, 48)));
+        out.push(wrapping_u8(wrapping_add(n, 48)));
         return;
     }
-    put_u64(inout o, n / 10);
-    o.push(wrapping_u8(wrapping_add(n % 10, 48)));
+    put_u64(inout out, n / 10);
+    out.push(wrapping_u8(wrapping_add(n % 10, 48)));
 }
 
-pub fn put_i64(inout o: ChunkSeq[u8], n: i64) {
+pub fn put_i64(inout out: ChunkSeq[u8], n: i64) {
     if n < 0 {
-        o.push(45);
-        put_u64(inout o, wrapping_sub(0, wrapping_u64(n)));
+        out.push(45);
+        put_u64(inout out, wrapping_sub(0, wrapping_u64(n)));
     } else {
-        put_u64(inout o, wrapping_u64(n));
+        put_u64(inout out, wrapping_u64(n));
     }
 }
 
-fn hex(d: u8) -> u8 {
-    if d < 10 {
-        wrapping_add(d, 48)
+fn hex(nibble: u8) -> u8 {
+    if nibble < 10 {
+        wrapping_add(nibble, 48)
     } else {
-        wrapping_add(d, 87)
+        wrapping_add(nibble, 87)
     }
 }
 
 // A JSON string with serde_json's escapes: `\"`, `\\`, the five short
 // control escapes, `\u00xx` (lowercase) for the other control bytes, and
 // every other byte (DEL and UTF-8 included) as is.
-pub fn put_string(inout o: ChunkSeq[u8], in b: Slice[u8]) {
-    o.push(34);
-    for i in 0..b.len() {
-        let c = byte(in b, i);
-        if c == 34 || c == 92 {
-            o.push(92);
-            o.push(c);
-        } else if c < 32 {
-            o.push(92);
-            if c == 8 {
-                o.push(98);
-            } else if c == 12 {
-                o.push(102);
-            } else if c == 10 {
-                o.push(110);
-            } else if c == 13 {
-                o.push(114);
-            } else if c == 9 {
-                o.push(116);
+pub fn put_string(inout out: ChunkSeq[u8], in bytes: Slice[u8]) {
+    out.push(34);
+    for i in 0..bytes.len() {
+        let ch = byte(in bytes, i);
+        if ch == 34 || ch == 92 {
+            out.push(92);
+            out.push(ch);
+        } else if ch < 32 {
+            out.push(92);
+            if ch == 8 {
+                out.push(98);
+            } else if ch == 12 {
+                out.push(102);
+            } else if ch == 10 {
+                out.push(110);
+            } else if ch == 13 {
+                out.push(114);
+            } else if ch == 9 {
+                out.push(116);
             } else {
-                put(inout o, in "u00");
-                o.push(hex(c >> 4));
-                o.push(hex(c & 15));
+                put(inout out, in "u00");
+                out.push(hex(ch >> 4));
+                out.push(hex(ch & 15));
             }
         } else {
-            o.push(c);
+            out.push(ch);
         }
     }
-    o.push(34);
+    out.push(34);
 }
 
 // `{"character":c,"line":l}`.
-pub fn put_position(inout o: ChunkSeq[u8], p: Position) {
-    put(inout o, in "{\"character\":");
-    put_u64(inout o, widen_u64(p.character));
-    put(inout o, in ",\"line\":");
-    put_u64(inout o, widen_u64(p.line));
-    o.push(125);
+pub fn put_position(inout out: ChunkSeq[u8], position: Position) {
+    put(inout out, in "{\"character\":");
+    put_u64(inout out, widen_u64(position.character));
+    put(inout out, in ",\"line\":");
+    put_u64(inout out, widen_u64(position.line));
+    out.push(125);
 }
 
 // `{"end":..,"start":..}`.
-pub fn put_range(inout o: ChunkSeq[u8], r: Range) {
-    put(inout o, in "{\"end\":");
-    put_position(inout o, r.end);
-    put(inout o, in ",\"start\":");
-    put_position(inout o, r.start);
-    o.push(125);
+pub fn put_range(inout out: ChunkSeq[u8], range: Range) {
+    put(inout out, in "{\"end\":");
+    put_position(inout out, range.end);
+    put(inout out, in ",\"start\":");
+    put_position(inout out, range.start);
+    out.push(125);
 }
 
 // The packing the harness reads (`unpack_text`): the byte length, then the
 // bytes eight per word, little-endian.
-pub fn pack(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let n = b.len();
+pub fn pack(in bytes: Slice[u8]) -> ChunkSeq[u64] {
+    let n = bytes.len();
     let mut out = ChunkSeq::with_capacity[u64](wrapping_add(n >> 3, 2));
     out.push(n);
-    let mut w: u64 = 0;
-    let mut k: u32 = 0;
+    let mut word: u64 = 0;
+    let mut byte_count: u32 = 0;
     for i in 0..n {
-        w = w | wrapping_shl_u64(widen_u64(byte(in b, i)), wrapping_mul(k, 8));
-        k = wrapping_add(k, 1);
-        if k == 8 {
-            out.push(w);
-            w = 0;
-            k = 0;
+        word = word | wrapping_shl_u64(widen_u64(byte(in bytes, i)), wrapping_mul(byte_count, 8));
+        byte_count = wrapping_add(byte_count, 1);
+        if byte_count == 8 {
+            out.push(word);
+            word = 0;
+            byte_count = 0;
         }
     }
-    if k != 0 {
-        out.push(w);
+    if byte_count != 0 {
+        out.push(word);
     }
     out
 }
@@ -128,14 +128,14 @@ test {
     // @case newline(in "a\nb", in "\"a\\nb\"")
     // @case tab(in "a\tb", in "\"a\\tb\"")
     fn test_string_escapes(in s: Str, in want: Str) -> bool {
-        let mut o = ChunkSeq::new[u8]();
-        put_string(inout o, in s.as_bytes());
-        let w = want.as_bytes();
-        if o.len() != w.len() {
+        let mut out = ChunkSeq::new[u8]();
+        put_string(inout out, in s.as_bytes());
+        let want_bytes = want.as_bytes();
+        if out.len() != want_bytes.len() {
             return false;
         }
-        for i in 0..w.len() {
-            if o.try_get(i) != w.try_get(i) {
+        for i in 0..want_bytes.len() {
+            if out.try_get(i) != want_bytes.try_get(i) {
                 return false;
             }
         }
@@ -145,8 +145,8 @@ test {
     // @case zero(0, 1)
     // @case big(18446744073709551615, 20)
     fn test_decimal_length(n: u64, len: u64) -> bool {
-        let mut o = ChunkSeq::new[u8]();
-        put_u64(inout o, n);
-        o.len() == len
+        let mut out = ChunkSeq::new[u8]();
+        put_u64(inout out, n);
+        out.len() == len
     }
 }

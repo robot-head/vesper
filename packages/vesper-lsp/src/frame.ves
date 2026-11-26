@@ -28,39 +28,41 @@ copy struct Line {
 
 // `header_line`: `None` on a clean end of the stream at a frame boundary.
 fn header_line(
-    in s: Slice[u8],
-    inout c: Cursor,
+    in stream: Slice[u8],
+    inout cursor: Cursor,
     inout total: u64,
-    l: Plimits
+    limits: Plimits
 ) -> Option[Line] eff [Fail[Perr]] {
-    let n = s.len();
-    let start = c.pos;
+    let stream_len = stream.len();
+    let start = cursor.pos;
     let mut len: u64 = 0;
     loop {
-        if c.pos >= n {
+        if cursor.pos >= stream_len {
             if len == 0 && total == 0 {
                 return Option::None;
             }
             Fail::raise(Perr::PTruncated);
         }
         let remaining = min64(
-            sat_sub(l.max_header_line_bytes, len),
-            sat_sub(l.max_header_bytes, total)
+            sat_sub(limits.max_header_line_bytes, len),
+            sat_sub(limits.max_header_bytes, total)
         );
-        let scan = min64(wrapping_sub(n, c.pos), sat_add(remaining, 1));
-        let count = match s[c.pos..wrapping_add(c.pos, scan)].find_byte(Ascii::Lf) {
-            Option::Some(k) => wrapping_add(k, 1),
+        let scan = min64(wrapping_sub(stream_len, cursor.pos), sat_add(remaining, 1));
+        let count = match stream[cursor.pos..wrapping_add(cursor.pos, scan)].find_byte(Ascii::Lf) {
+            Option::Some(lf_at) => wrapping_add(lf_at, 1),
             Option::None => scan,
         };
-        let next = add(len, count);
-        let all = add(total, count);
-        bound(next, l.max_header_line_bytes, Perr::PHeaderLimit);
-        bound(all, l.max_header_bytes, Perr::PHeaderLimit);
-        len = next;
-        c.pos = wrapping_add(c.pos, count);
-        total = all;
-        if byte(in s, wrapping_sub(c.pos, 1)) == Ascii::Lf {
-            if len < Crlf::Len || byte(in s, wrapping_sub(c.pos, Crlf::Len)) != Ascii::Cr {
+        let new_len = add(len, count);
+        let new_total = add(total, count);
+        bound(new_len, limits.max_header_line_bytes, Perr::PHeaderLimit);
+        bound(new_total, limits.max_header_bytes, Perr::PHeaderLimit);
+        len = new_len;
+        cursor.pos = wrapping_add(cursor.pos, count);
+        total = new_total;
+        if byte(in stream, wrapping_sub(cursor.pos, 1)) == Ascii::Lf {
+            if len < Crlf::Len
+                || byte(in stream, wrapping_sub(cursor.pos, Crlf::Len)) != Ascii::Cr
+            {
                 Fail::raise(Perr::PInvalidHeader);
             }
             return Option::Some(Line { start: start, len: len });
@@ -68,107 +70,111 @@ fn header_line(
     }
 }
 
-fn lower(b: u8) -> u8 {
-    if b >= Ascii::UpperA && b <= Ascii::UpperZ {
-        wrapping_add(b, CASE_BIT)
+fn lower(ch: u8) -> u8 {
+    if ch >= Ascii::UpperA && ch <= Ascii::UpperZ {
+        wrapping_add(ch, CASE_BIT)
     } else {
-        b
+        ch
     }
 }
 
-// `eq_ignore_ascii_case` of `s[a..b]` and `t`.
-fn eq_ic(in s: Slice[u8], a: u64, b: u64, in t: Str) -> bool {
-    let tb = t.as_bytes();
-    if wrapping_sub(b, a) != tb.len() {
+// `eq_ignore_ascii_case` of `stream[start..end]` and `expected`.
+fn eq_ic(in stream: Slice[u8], start: u64, end: u64, in expected: Str) -> bool {
+    let expected_bytes = expected.as_bytes();
+    if wrapping_sub(end, start) != expected_bytes.len() {
         return false;
     }
-    for i in 0..tb.len() {
-        if lower(byte(in s, wrapping_add(a, i))) != lower(byte(in tb, i)) {
+    for i in 0..expected_bytes.len() {
+        if lower(byte(in stream, wrapping_add(start, i))) != lower(byte(in expected_bytes, i)) {
             return false;
         }
     }
     true
 }
 
-// `str::trim` on header bytes, which hold only printable ASCII and tabs:
-// the bounds of `s[a..b]` without leading and trailing spaces and tabs.
-fn trim(in s: Slice[u8], a: u64, b: u64) -> (u64, u64) {
-    let mut x = a;
-    let mut y = b;
+// `str::trim` on header bytes, which hold only printable ASCII and tabs: the
+// bounds of `stream[start..end]` without leading and trailing spaces and tabs.
+fn trim(in stream: Slice[u8], start: u64, end: u64) -> (u64, u64) {
+    let mut lo = start;
+    let mut hi = end;
     loop {
-        if x >= y {
+        if lo >= hi {
             break;
         }
-        let c = byte(in s, x);
+        let c = byte(in stream, lo);
         if c != Ascii::Space && c != Ascii::Tab {
             break;
         }
-        x = wrapping_add(x, 1);
+        lo = wrapping_add(lo, 1);
     }
     loop {
-        if y <= x {
+        if hi <= lo {
             break;
         }
-        let c = byte(in s, wrapping_sub(y, 1));
+        let c = byte(in stream, wrapping_sub(hi, 1));
         if c != Ascii::Space && c != Ascii::Tab {
             break;
         }
-        y = wrapping_sub(y, 1);
+        hi = wrapping_sub(hi, 1);
     }
-    (x, y)
+    (lo, hi)
 }
 
-// The first `c` in `s[a..b]`, or `b`.
-fn find(in s: Slice[u8], a: u64, b: u64, c: u8) -> u64 {
-    let mut i = a;
+// The first `needle` in `stream[start..end]`, or `end`.
+fn find(in stream: Slice[u8], start: u64, end: u64, needle: u8) -> u64 {
+    let mut pos = start;
     loop {
-        if i >= b || byte(in s, i) == c {
-            return i;
+        if pos >= end || byte(in stream, pos) == needle {
+            return pos;
         }
-        i = wrapping_add(i, 1);
+        pos = wrapping_add(pos, 1);
     }
 }
 
 // `content_type`.
-fn content_type(in s: Slice[u8], a: u64, b: u64) -> Unit eff [Fail[Perr]] {
-    let first = find(in s, a, b, Ascii::Semicolon);
-    let (ma, mb) = trim(in s, a, first);
-    if !eq_ic(in s, ma, mb, "application/vscode-jsonrpc")
-        && !eq_ic(in s, ma, mb, "application/json")
+fn content_type(in stream: Slice[u8], start: u64, end: u64) -> Unit eff [Fail[Perr]] {
+    let first_semi = find(in stream, start, end, Ascii::Semicolon);
+    let (media_start, media_end) = trim(in stream, start, first_semi);
+    if !eq_ic(in stream, media_start, media_end, "application/vscode-jsonrpc")
+        && !eq_ic(in stream, media_start, media_end, "application/json")
     {
         Fail::raise(Perr::PUnsupportedEncoding);
     }
-    let mut charset = false;
-    let mut at = first;
+    let mut seen_charset = false;
+    let mut at = first_semi;
     loop {
-        if at >= b {
+        if at >= end {
             break;
         }
-        let pa = wrapping_add(at, 1);
-        let pb = find(in s, pa, b, Ascii::Semicolon);
-        at = pb;
-        let (ta, tb) = trim(in s, pa, pb);
-        let eq = find(in s, ta, tb, Ascii::Equals);
-        if eq >= tb {
+        let param_start = wrapping_add(at, 1);
+        let param_end = find(in stream, param_start, end, Ascii::Semicolon);
+        at = param_end;
+        let (pair_start, pair_end) = trim(in stream, param_start, param_end);
+        let equals_at = find(in stream, pair_start, pair_end, Ascii::Equals);
+        if equals_at >= pair_end {
             Fail::raise(Perr::PInvalidHeader);
         }
-        let (ka, kb) = trim(in s, ta, eq);
-        if !eq_ic(in s, ka, kb, "charset") || charset {
+        let (key_start, key_end) = trim(in stream, pair_start, equals_at);
+        if !eq_ic(in stream, key_start, key_end, "charset") || seen_charset {
             Fail::raise(Perr::PInvalidHeader);
         }
-        charset = true;
-        let (ra, rb) = trim(in s, wrapping_add(eq, 1), tb);
-        let mut va = ra;
-        let mut vb = rb;
-        if ra < rb && byte(in s, ra) == Ascii::Quote {
+        seen_charset = true;
+        let (raw_start, raw_end) = trim(in stream, wrapping_add(equals_at, 1), pair_end);
+        let mut value_start = raw_start;
+        let mut value_end = raw_end;
+        if raw_start < raw_end && byte(in stream, raw_start) == Ascii::Quote {
             // `strip_prefix('"')` then `strip_suffix('"')`.
-            va = wrapping_add(ra, 1);
-            if vb <= va || byte(in s, wrapping_sub(vb, 1)) != Ascii::Quote {
+            value_start = wrapping_add(raw_start, 1);
+            if value_end <= value_start
+                || byte(in stream, wrapping_sub(value_end, 1)) != Ascii::Quote
+            {
                 Fail::raise(Perr::PInvalidHeader);
             }
-            vb = wrapping_sub(vb, 1);
+            value_end = wrapping_sub(value_end, 1);
         }
-        if !eq_ic(in s, va, vb, "utf-8") && !eq_ic(in s, va, vb, "utf8") {
+        if !eq_ic(in stream, value_start, value_end, "utf-8")
+            && !eq_ic(in stream, value_start, value_end, "utf8")
+        {
             Fail::raise(Perr::PUnsupportedEncoding);
         }
     }
@@ -182,83 +188,89 @@ fn is_name_byte(c: u8) -> bool {
 }
 
 // `read_frame`: the next body, or `None` at a clean end of the stream.
-pub fn read_frame(in s: Slice[u8], inout c: Cursor, l: Plimits) -> Option[Body] eff [Fail[Perr]] {
-    validate(l);
+pub fn read_frame(
+    in stream: Slice[u8],
+    inout cursor: Cursor,
+    limits: Plimits
+) -> Option[Body] eff [Fail[Perr]] {
+    validate(limits);
     let mut total: u64 = 0;
-    let mut count: u64 = 0;
+    let mut header_count: u64 = 0;
     let mut length: u64 = 0;
     let mut has_length = false;
-    let mut typed = false;
+    let mut has_type = false;
     loop {
-        let line = match header_line(in s, inout c, inout total, l) {
+        let line = match header_line(in stream, inout cursor, inout total, limits) {
             Option::Some(x) => x,
             Option::None => return Option::None,
         };
         if line.len == Crlf::Len {
             break;
         }
-        count = wrapping_add(count, 1);
-        bound(count, l.max_headers, Perr::PHeaderLimit);
-        let a = line.start;
-        let b = wrapping_add(line.start, wrapping_sub(line.len, Crlf::Len));
-        for i in a..b {
-            let x = byte(in s, i);
-            if !((x >= Ascii::Space && x <= Ascii::Tilde) || x == Ascii::Tab) {
+        header_count = wrapping_add(header_count, 1);
+        bound(header_count, limits.max_headers, Perr::PHeaderLimit);
+        let line_start = line.start;
+        let content_end = wrapping_add(line.start, wrapping_sub(line.len, Crlf::Len));
+        for i in line_start..content_end {
+            let ch = byte(in stream, i);
+            if !((ch >= Ascii::Space && ch <= Ascii::Tilde) || ch == Ascii::Tab) {
                 Fail::raise(Perr::PInvalidHeader);
             }
         }
-        let colon = find(in s, a, b, Ascii::Colon);
-        if colon >= b || colon == a {
+        let colon = find(in stream, line_start, content_end, Ascii::Colon);
+        if colon >= content_end || colon == line_start {
             Fail::raise(Perr::PInvalidHeader);
         }
-        for i in a..colon {
-            if !is_name_byte(byte(in s, i)) {
+        for i in line_start..colon {
+            if !is_name_byte(byte(in stream, i)) {
                 Fail::raise(Perr::PInvalidHeader);
             }
         }
         // `trim_matches([' ', '\t'])`.
-        let (va, vb) = trim(in s, wrapping_add(colon, 1), b);
-        if eq_ic(in s, a, colon, "content-length") {
+        let (value_start, value_end) = trim(in stream, wrapping_add(colon, 1), content_end);
+        if eq_ic(in stream, line_start, colon, "content-length") {
             if has_length {
                 Fail::raise(Perr::PDuplicateLength);
             }
-            if va == vb {
+            if value_start == value_end {
                 Fail::raise(Perr::PInvalidLength);
             }
-            for i in va..vb {
-                let x = byte(in s, i);
-                if x < Ascii::Zero || x > Ascii::Nine {
+            for i in value_start..value_end {
+                let ch = byte(in stream, i);
+                if ch < Ascii::Zero || ch > Ascii::Nine {
                     Fail::raise(Perr::PInvalidLength);
                 }
             }
-            let mut v: u64 = 0;
-            for i in va..vb {
-                let d = widen_u64(wrapping_sub(byte(in s, i), Ascii::Zero));
-                // `max_body_bytes <= 8 MiB` keeps `v * 10 + d` far from
-                // overflow: each digit is bounded before the next.
-                v = wrapping_add(wrapping_mul(v, 10), d);
-                bound(v, l.max_body_bytes, Perr::PBodyLimit);
+            let mut parsed_len: u64 = 0;
+            for i in value_start..value_end {
+                let digit = widen_u64(wrapping_sub(byte(in stream, i), Ascii::Zero));
+                // `max_body_bytes <= 8 MiB` keeps `parsed_len * 10 + digit`
+                // far from overflow: each digit is bounded before the next.
+                parsed_len = wrapping_add(wrapping_mul(parsed_len, 10), digit);
+                bound(parsed_len, limits.max_body_bytes, Perr::PBodyLimit);
             }
-            length = v;
+            length = parsed_len;
             has_length = true;
-        } else if eq_ic(in s, a, colon, "content-type") {
-            if typed {
+        } else if eq_ic(in stream, line_start, colon, "content-type") {
+            if has_type {
                 Fail::raise(Perr::PInvalidHeader);
             }
-            content_type(in s, va, vb);
-            typed = true;
-        } else if eq_ic(in s, a, colon, "content-encoding") && !eq_ic(in s, va, vb, "identity") {
+            content_type(in stream, value_start, value_end);
+            has_type = true;
+        } else if eq_ic(in stream, line_start, colon, "content-encoding")
+            && !eq_ic(in stream, value_start, value_end, "identity")
+        {
             Fail::raise(Perr::PUnsupportedEncoding);
         }
     }
     if !has_length {
         Fail::raise(Perr::PMissingLength);
     }
-    if wrapping_sub(s.len(), c.pos) < length {
-        c.pos = s.len();
+    if wrapping_sub(stream.len(), cursor.pos) < length {
+        cursor.pos = stream.len();
         Fail::raise(Perr::PTruncated);
     }
-    let body = Body { start: c.pos, len: length };
-    c.pos = wrapping_add(c.pos, length);
+    let body = Body { start: cursor.pos, len: length };
+    cursor.pos = wrapping_add(cursor.pos, length);
     Option::Some(body)
 }

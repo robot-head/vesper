@@ -14,16 +14,16 @@ fn padded_len(n: u64) -> u64 {
     wrapping_mul(add(n, 7) / 8, 8)
 }
 
-fn read_bytes_chunk(inout r: Reader, in b: Slice[u8]) -> (u64, u64) {
-    let n = r.word(in b);
-    let start = r.pos;
-    r.pos = add(start, padded_len(n));
+fn read_bytes_chunk(inout reader: Reader, in bytes: Slice[u8]) -> (u64, u64) {
+    let n = reader.word(in bytes);
+    let start = reader.pos;
+    reader.pos = add(start, padded_len(n));
     (start, add(start, n))
 }
 
-fn contains_u32(in seq: ChunkSeq[u32], val: u32) -> bool {
+fn contains_u32(in seq: ChunkSeq[u32], value: u32) -> bool {
     for i in 0..seq.len() {
-        if u32_at(in seq, i) == val {
+        if u32_at(in seq, i) == value {
             return true;
         }
     }
@@ -38,123 +38,128 @@ fn prefix_dep_diags(in dep_out: ChunkSeq[u8], in id_bytes: Slice[u8], inout out:
             break;
         }
         // Each line is `CODE START END MESSAGE\n`.
-        let mut sp1 = i;
+        let mut first_space = i;
         loop {
-            if sp1 >= n || u8_at(in dep_out, sp1) == 32 {
+            if first_space >= n || u8_at(in dep_out, first_space) == 32 {
                 break;
             }
-            sp1 = add(sp1, 1);
+            first_space = add(first_space, 1);
         }
-        let mut sp2 = add(sp1, 1);
+        let mut second_space = add(first_space, 1);
         loop {
-            if sp2 >= n || u8_at(in dep_out, sp2) == 32 {
+            if second_space >= n || u8_at(in dep_out, second_space) == 32 {
                 break;
             }
-            sp2 = add(sp2, 1);
+            second_space = add(second_space, 1);
         }
-        let mut sp3 = add(sp2, 1);
+        let mut third_space = add(second_space, 1);
         loop {
-            if sp3 >= n || u8_at(in dep_out, sp3) == 32 {
+            if third_space >= n || u8_at(in dep_out, third_space) == 32 {
                 break;
             }
-            sp3 = add(sp3, 1);
+            third_space = add(third_space, 1);
         }
-        let mut nl = add(sp3, 1);
+        let mut line_end = add(third_space, 1);
         loop {
-            if nl >= n || u8_at(in dep_out, nl) == 10 {
+            if line_end >= n || u8_at(in dep_out, line_end) == 10 {
                 break;
             }
-            nl = add(nl, 1);
+            line_end = add(line_end, 1);
         }
-        for k in i..sp1 {
+        for k in i..first_space {
             out.push(u8_at(in dep_out, k));
         }
         put_str(inout out, " 0 0 in dependency ");
         put_bytes(inout out, in id_bytes);
         put_str(inout out, ": ");
-        let msg_start = add(sp3, 1);
-        if msg_start < nl {
-            for k in msg_start..nl {
+        let msg_start = add(third_space, 1);
+        if msg_start < line_end {
+            for k in msg_start..line_end {
                 out.push(u8_at(in dep_out, k));
             }
         }
         out.push(10);
-        i = add(nl, 1);
+        i = add(line_end, 1);
     }
 }
 
 // Entrypoint for `check_pact_deps`:
 // `[local_decl_input][n_deps, (pkg_name_bytes, id_bytes, dep_decl_input, dep_traits_input)...]`
-pub fn deps_words(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
-    let (ls, le) = read_bytes_chunk(inout r, in b);
-    let local_b = b[ls..le];
-    let mut lr = Reader { pos: 0 };
-    let mut c = read_ctx(inout lr, in local_b);
-    let mut d = read_decls(inout lr, in local_b, in c.nmap, in c.tmap);
-    let sy = sy_new(inout c.names);
-    let mut fe = fe_new(sy);
-    fe.local_traits = d.traits.len();
-    let mut o = ChunkSeq::new[u8]();
+pub fn deps_words(in bytes: Slice[u8]) -> ChunkSeq[u64] {
+    let mut reader = Reader { pos: 0 };
+    let (local_start, local_end) = read_bytes_chunk(inout reader, in bytes);
+    let local_bytes = bytes[local_start..local_end];
+    let mut local_reader = Reader { pos: 0 };
+    let mut ctx = read_ctx(inout local_reader, in local_bytes);
+    let mut decls = read_decls(inout local_reader, in local_bytes, in ctx.nmap, in ctx.tmap);
+    let syms = sy_new(inout ctx.names);
+    let mut fe = fe_new(syms);
+    fe.local_traits = decls.traits.len();
+    let mut out = ChunkSeq::new[u8]();
 
-    let n_deps = r.word(in b);
-    for di in 0..n_deps {
-        let (ps, pe) = read_bytes_chunk(inout r, in b);
-        let (is, ie) = read_bytes_chunk(inout r, in b);
-        let (ds, de) = read_bytes_chunk(inout r, in b);
-        let (ts, te) = read_bytes_chunk(inout r, in b);
-        let pkg_bytes = b[ps..pe];
-        let id_bytes = b[is..ie];
-        let pkg_sym = c.names.intern(in pkg_bytes);
-        let id_sym = c.names.intern(in id_bytes);
-        if id_sym == d.identity || contains_u32(in fe.dep_pkg_names, pkg_sym) {
-            put_str(inout o, "E0600 0 0 dependency ");
-            put_bytes(inout o, in id_bytes);
-            put_str(inout o, " is declared twice");
-            o.push(10);
-            return pack_text(in o);
+    let n_deps = reader.word(in bytes);
+    for dep_index in 0..n_deps {
+        let (pkg_start, pkg_end) = read_bytes_chunk(inout reader, in bytes);
+        let (id_start, id_end) = read_bytes_chunk(inout reader, in bytes);
+        let (decl_start, decl_end) = read_bytes_chunk(inout reader, in bytes);
+        let (traits_start, traits_end) = read_bytes_chunk(inout reader, in bytes);
+        let pkg_bytes = bytes[pkg_start..pkg_end];
+        let id_bytes = bytes[id_start..id_end];
+        let pkg_sym = ctx.names.intern(in pkg_bytes);
+        let id_sym = ctx.names.intern(in id_bytes);
+        if id_sym == decls.identity || contains_u32(in fe.dep_pkg_names, pkg_sym) {
+            put_str(inout out, "E0600 0 0 dependency ");
+            put_bytes(inout out, in id_bytes);
+            put_str(inout out, " is declared twice");
+            out.push(10);
+            return pack_text(in out);
         }
 
-        let dep_b = b[ds..de];
-        let mut dr = Reader { pos: 0 };
-        let mut dc = read_ctx(inout dr, in dep_b);
-        let dd = read_decls(inout dr, in dep_b, in dc.nmap, in dc.tmap);
-        let dsy = sy_new(inout dc.names);
-        let mut dfe = fe_new(dsy);
-        let mut dep_o = ChunkSeq::new[u8]();
-        declaration_pass(inout dc, in dd, inout dfe, inout dep_o);
-        if dep_o.len() > 0 {
-            prefix_dep_diags(in dep_o, in id_bytes, inout o);
-            return pack_text(in o);
+        let dep_bytes = bytes[decl_start..decl_end];
+        let mut dep_reader = Reader { pos: 0 };
+        let mut dep_ctx = read_ctx(inout dep_reader, in dep_bytes);
+        let dep_decls = read_decls(
+            inout dep_reader,
+            in dep_bytes,
+            in dep_ctx.nmap,
+            in dep_ctx.tmap
+        );
+        let dep_syms = sy_new(inout dep_ctx.names);
+        let mut dep_fe = fe_new(dep_syms);
+        let mut dep_out = ChunkSeq::new[u8]();
+        declaration_pass(inout dep_ctx, in dep_decls, inout dep_fe, inout dep_out);
+        if dep_out.len() > 0 {
+            prefix_dep_diags(in dep_out, in id_bytes, inout out);
+            return pack_text(in out);
         }
 
         fe.dep_pkg_names.push(pkg_sym);
-        fe.dep_adt_a.push(n32(fe.dep_adt_names.len()));
-        let mut adt_cnt: u64 = 0;
-        for ai in 0..dc.world.adts.len() {
-            let a = dc.world.adt(n32(ai));
-            let mut ab = ChunkSeq::new[u8]();
-            dc.names.write(a.name, inout ab);
-            let local_asym = c.names.intern(in ab.as_slice());
-            fe.dep_adt_names.push(local_asym);
-            adt_cnt = add(adt_cnt, 1);
+        fe.dep_adt_start.push(n32(fe.dep_adt_names.len()));
+        let mut adt_count: u64 = 0;
+        for ai in 0..dep_ctx.world.adts.len() {
+            let adt = dep_ctx.world.adt(n32(ai));
+            let mut name_bytes = ChunkSeq::new[u8]();
+            dep_ctx.names.write(adt.name, inout name_bytes);
+            let local_adt_sym = ctx.names.intern(in name_bytes.as_slice());
+            fe.dep_adt_names.push(local_adt_sym);
+            adt_count = add(adt_count, 1);
         }
-        fe.dep_adt_n.push(n32(adt_cnt));
+        fe.dep_adt_count.push(n32(adt_count));
 
-        let tr_b = b[ts..te];
-        let mut tr_r = Reader { pos: 0 };
+        let traits_bytes = bytes[traits_start..traits_end];
+        let mut traits_reader = Reader { pos: 0 };
         let mut dep_nmap = ChunkSeq::new[u32]();
-        read_q_names(inout tr_r, in tr_b, inout c.names, inout dep_nmap);
+        read_q_names(inout traits_reader, in traits_bytes, inout ctx.names, inout dep_nmap);
         let mut dep_tmap = ChunkSeq::new[u32]();
-        read_q_types(inout tr_r, in tr_b, inout c, in dep_nmap, inout dep_tmap);
-        let before_traits = d.traits.len();
-        read_traits(inout tr_r, in tr_b, inout d, in dep_nmap, in dep_tmap);
-        let after_traits = d.traits.len();
+        read_q_types(inout traits_reader, in traits_bytes, inout ctx, in dep_nmap, inout dep_tmap);
+        let before_traits = decls.traits.len();
+        read_traits(inout traits_reader, in traits_bytes, inout decls, in dep_nmap, in dep_tmap);
+        let after_traits = decls.traits.len();
         for _ in before_traits..after_traits {
-            fe.dep_trait_pkg.push(n32(di));
+            fe.dep_trait_pkg.push(n32(dep_index));
         }
     }
 
-    declaration_pass(inout c, in d, inout fe, inout o);
-    pack_text(in o)
+    declaration_pass(inout ctx, in decls, inout fe, inout out);
+    pack_text(in out)
 }
