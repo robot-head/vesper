@@ -8,6 +8,7 @@ use @vesper/sugar::driver::{
     plan_bootstrap_sugars
 };
 
+use @vesper/check-data::util::{stage2_heap_mark, stage2_heap_reset, stage2_heap_swap};
 use @vesper-std/fs::{IoError, kind_dir, kind_file, kind_symlink, read_path};
 use @vesper-std/fs::walk::{Entries, entry_count, entry_join, entry_kind, entry_path, list_dir_path};
 
@@ -2198,7 +2199,74 @@ fn copy_bootstrap_mappings(
     }
 }
 
+// Head room for the expanded graph's envelope (package names, paths,
+// file and segment rows) on top of twice the module text.
+const SUGAR_GRAPH_RESERVE_SLACK_BYTES: u64 = 16777216;
+
+// Plain package graphs take their existing path. The byte prefilter
+// cannot recognize a declaration; only the surface CST does that.
+fn graph_mentions_sugar(in mods: ChunkSeq[ModEntry]) -> bool {
+    for module in 0..mods.len() {
+        match mods.try_get(module) {
+            Option::Some(source) => {
+                if contains_word(in source.text.as_slice(), in "sugar") {
+                    return true;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    false
+}
+
+// Stage 2's heap is a bump region: the surface CSTs, the import resolver
+// and the expansions of a sugar pass would stay live under every later
+// stage. Run the pass above a block reserved for its one result, the
+// encoded graph, then copy the result into the block and drop the rest.
 fn prepare_sugar_graph(
+    in pkgs: ChunkSeq[PkgNode],
+    inout files: ChunkSeq[FileEntry],
+    inout mods: ChunkSeq[ModEntry]
+) -> Option[ChunkSeq[u8]] {
+    let has_heap = stage2_heap_mark() != 0;
+    if !has_heap || !graph_mentions_sugar(in mods) {
+        return prepare_sugar_graph_in_scratch(in pkgs, inout files, inout mods);
+    }
+    let mut source_bytes: u64 = 0;
+    for module in 0..mods.len() {
+        match mods.try_get(module) {
+            Option::Some(source) => source_bytes = wrapping_add(source_bytes, source.text.len()),
+            Option::None => {},
+        }
+    }
+    let reserve = wrapping_add(wrapping_mul(source_bytes, 2), SUGAR_GRAPH_RESERVE_SLACK_BYTES);
+    let mut kept_buf = ChunkSeq::new[u8]();
+    kept_buf.reserve(reserve);
+    let kept_end = stage2_heap_mark();
+    let encoded = match prepare_sugar_graph_in_scratch(in pkgs, inout files, inout mods) {
+        Option::Some(encoded) => encoded,
+        Option::None => {
+            stage2_heap_reset(kept_end);
+            return Option::None;
+        },
+    };
+    // The copy must fit in the block: past its end lies the scratch it
+    // reads from. A graph that outgrew the block keeps its scratch.
+    if wrapping_add(encoded.len(), SUGAR_GRAPH_RESERVE_SLACK_BYTES) > reserve {
+        return Option::Some(encoded);
+    }
+    let scratch_top = stage2_heap_swap(wrapping_sub(kept_end, reserve));
+    let mut kept = ChunkSeq::new[u8]();
+    kept.reserve(encoded.len());
+    kept.extend(in encoded.as_slice());
+    let _ = stage2_heap_swap(scratch_top);
+    // `files` and `mods` may now hold expanded texts in the dropped
+    // scratch; the caller only returns the encoded graph.
+    stage2_heap_reset(kept_end);
+    Option::Some(kept)
+}
+
+fn prepare_sugar_graph_in_scratch(
     in pkgs: ChunkSeq[PkgNode],
     inout files: ChunkSeq[FileEntry],
     inout mods: ChunkSeq[ModEntry]
@@ -2210,21 +2278,7 @@ fn prepare_sugar_graph(
     let mut shadowed_modules = ChunkSeq::new[bool]();
     let mut declaration_spans = ChunkSeq::new[BootstrapDeclarationRange]();
     let mut source_segments = ChunkSeq::new[BootstrapSourceSegment]();
-    // Plain package graphs take their existing path. The byte prefilter
-    // cannot recognize a declaration; only the surface CST does that.
-    let mut possible_sugar = false;
-    for module in 0..mods.len() {
-        match mods.try_get(module) {
-            Option::Some(source) => {
-                if contains_word(in source.text.as_slice(), in "sugar") {
-                    possible_sugar = true;
-                    break;
-                }
-            },
-            Option::None => {},
-        }
-    }
-    if possible_sugar {
+    if graph_mentions_sugar(in mods) {
         for module in 0..mods.len() {
             let mut import_text = ChunkSeq::new[u8]();
             let mut has_surface_sugar = false;
