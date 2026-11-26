@@ -596,7 +596,7 @@ Rust lines deleted: 0.
 # Part 8 (#1828): the proof-lens Lean runner
 
 The runner of `src/lsp/proof_lens.rs` is ported to the new package
-`@vesper/lsp-proof-run` with 0 diffs, at 0.87x Rust's time end to end. It
+`@vesper/lsp-proof-run` with 0 diffs, at 0.28x Rust's time end to end. It
 takes a prepared job and does what `proof_lens::run` does:
 
 - finds Lean through the launcher and requires Lean 4.35.0
@@ -631,14 +631,16 @@ server's `CancelToken` is not ported yet; the wiring adds it.
   on `@vesper/lsp` puts `@vesper/serde`'s `Kind::String` in the scope of
   `String::` paths, a resolver bug worth its own issue).
 - `tests/self_host_proof_lens.rs` adds `proof_runs_match_rust` and the
-  ignored `proof_run_speed`.
+  ignored `proof_run_speed`, over the fake toolchain in
+  `tests/fixtures/proof-lens-toolchain`.
 
 ## Differential
 
-Both sides run the same job against a fake toolchain of shell scripts: a
-launcher, a `lean` whose compiles succeed, fail, stall or report a
-`bv_decide` counterexample per module, and an auditor that builds a report
-from its `--theorem` arguments or replays a fixed one. The test compares
+Both sides run the same job against a fake toolchain: one native Vesper
+program (`tests/fixtures/proof-lens-toolchain`, built by `vesper build`)
+that acts as the launcher, as a `lean` whose compiles succeed, fail, stall
+or report a `bv_decide` counterexample per module, and as an auditor that
+builds a report from its `--theorem` arguments or replays a fixed one. The test compares
 the outcome rows, a log of every Lean and auditor call (arguments,
 directory, `LEAN_PATH`, environment), and the cache tree with permission
 bits. Cached scenarios run twice on each side's own cache, then once on
@@ -664,11 +666,14 @@ runs the 19 toolchain scenarios and the first 4 fixed reports.
 ## Numbers
 
 One all-proved job (2 obligations, 3 models: 5 Lean compiles and one
-audit), JIT, mean of 20 runs. Both sides are dominated by starting the
-child processes.
+audit, 8 child processes with the launcher and `--version`), JIT, mean of
+20 runs, against the native fake toolchain. Rust polls each child every
+5 ms (`try_wait`, then `thread::sleep`) and reads both pipes on two
+threads per child; `wait_timeout` in `@vesper-std/process` waits for the
+child, so most of the gap is Rust's polling.
 
 | | Rust | Vesper | Ratio |
 |---|--:|--:|--:|
-| Proof run, all proved | 128.7 ms | 111.4 ms | **0.87x** |
+| Proof run, all proved | 45.3 ms | 12.5 ms | **0.28x** |
 
 Rust lines deleted: 0.

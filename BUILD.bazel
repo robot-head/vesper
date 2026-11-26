@@ -845,6 +845,7 @@ vesper_crate(
         "test/self_host_proof_lens": [":files"] + glob([
             "packages/vesper-lsp-proof-run/**",
             "packages/vesper-std/**",
+            "tests/fixtures/proof-lens-toolchain/**",
         ]),
         "test/bench_pmu_port": [
             ":files",

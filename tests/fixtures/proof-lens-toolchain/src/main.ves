@@ -1,0 +1,466 @@
+// The fake Lean toolchain of tests/self_host_proof_lens.rs. Run as
+// `launcher`, `prefix/bin/lean` or `auditor` inside a toolchain directory
+// TC, it reads its scenario from files there and appends every call to
+// TC/log, with staging directory names replaced by STAGE:
+//
+// - launcher: `--print-prefix` prints TC/prefix (TC/launcher_mode `fails`
+//   makes it fail);
+// - lean: `--version` prints TC/version; `-o M.olean M.lean` compiles by
+//   copying, and `M_bv.lean` is a bv_decide search. The tokens after
+//   `M ` on a TC/plan line pick the outcome: compile_fail, omega_fail,
+//   slow, bv_ok, bv_cex (prints TC/cex), bv_sleep, bv_quiet;
+// - auditor: TC/audit_mode `fail`, `fixed` (prints TC/report), `slow`, or
+//   a generated report of its `--theorem` arguments with the axioms of
+//   TC/axioms (`theorem json`) or `[]`.
+
+use @vesper-std/env::{
+    arg_count,
+    arg_bytes,
+    var_bytes,
+    current_dir_bytes
+};
+use @vesper-std/fs::{
+    IoError,
+    read,
+    append,
+    copy
+};
+use @vesper-std/process::{
+    command,
+    arg,
+    output
+};
+
+const NONE: u64 = 18446744073709551615;
+
+fn byte(in b: Slice[u8], i: u64) -> u8 {
+    match b.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn put_bytes(inout o: ChunkSeq[u8], in b: Slice[u8]) {
+    o.extend(in b);
+}
+
+fn str_of(in b: Slice[u8]) -> String {
+    match String::from_utf8(in b) {
+        Option::Some(s) => s,
+        Option::None => String::new(),
+    }
+}
+
+fn argument(i: u64) -> ChunkSeq[u8] eff [Ffi[StdEnv]] {
+    match arg_bytes(i) {
+        Option::Some(a) => a,
+        Option::None => ChunkSeq::new[u8](),
+    }
+}
+
+fn is(in b: ChunkSeq[u8], in s: Str) -> bool {
+    let t = s.as_bytes();
+    if b.len() != t.len() {
+        return false;
+    }
+    for i in 0..t.len() {
+        if byte(in b.as_slice(), i) != byte(in t, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// The first index of `needle` in `hay` at or after `from`, or NONE.
+fn find(in hay: Slice[u8], from: u64, in needle: Slice[u8]) -> u64 {
+    if hay.len() < needle.len() {
+        return NONE;
+    }
+    let last = wrapping_sub(hay.len(), needle.len());
+    let mut i = from;
+    loop {
+        if i > last {
+            return NONE;
+        }
+        let mut k: u64 = 0;
+        loop {
+            if k >= needle.len() || byte(in hay, wrapping_add(i, k)) != byte(in needle, k) {
+                break;
+            }
+            k = wrapping_add(k, 1);
+        }
+        if k == needle.len() {
+            return i;
+        }
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn has(in hay: ChunkSeq[u8], in needle: Str) -> bool {
+    find(in hay.as_slice(), 0, in needle.as_bytes()) != NONE
+}
+
+fn range(in b: Slice[u8], s: u64, e: u64) -> ChunkSeq[u8] {
+    let mut o = ChunkSeq::new[u8]();
+    for i in s..e {
+        o.push(byte(in b, i));
+    }
+    o
+}
+
+// Everything before the last `/`, or "".
+fn dirname(in p: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let mut cut: u64 = 0;
+    for i in 0..p.len() {
+        if byte(in p.as_slice(), i) == 47 {
+            cut = i;
+        }
+    }
+    range(in p.as_slice(), 0, cut)
+}
+
+fn basename(in p: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let mut from: u64 = 0;
+    for i in 0..p.len() {
+        if byte(in p.as_slice(), i) == 47 {
+            from = wrapping_add(i, 1);
+        }
+    }
+    range(in p.as_slice(), from, p.len())
+}
+
+fn strip_suffix(in p: ChunkSeq[u8], in s: Str) -> ChunkSeq[u8] {
+    let t = s.as_bytes();
+    if p.len() >= t.len() {
+        let at = wrapping_sub(p.len(), t.len());
+        if find(in p.as_slice(), at, in t) == at {
+            return range(in p.as_slice(), 0, at);
+        }
+    }
+    range(in p.as_slice(), 0, p.len())
+}
+
+// `/vesper-lens-proof-<digits and dashes>` becomes `/STAGE`.
+fn normalized(in b: Slice[u8]) -> ChunkSeq[u8] {
+    let mut o = ChunkSeq::new[u8]();
+    let needle = "/vesper-lens-proof-".as_bytes();
+    let mut i: u64 = 0;
+    loop {
+        let at = find(in b, i, in needle);
+        if at == NONE {
+            break;
+        }
+        for k in i..at {
+            o.push(byte(in b, k));
+        }
+        put(inout o, in "/STAGE");
+        let mut j = wrapping_add(at, needle.len());
+        loop {
+            let c = byte(in b, j);
+            if j >= b.len() || !((c >= 48 && c <= 57) || c == 45) {
+                break;
+            }
+            j = wrapping_add(j, 1);
+        }
+        i = j;
+    }
+    for k in i..b.len() {
+        o.push(byte(in b, k));
+    }
+    o
+}
+
+fn file(in tc: ChunkSeq[u8], in name: Str) -> String {
+    let mut p = ChunkSeq::new[u8]();
+    put_bytes(inout p, in tc.as_slice());
+    p.push(47);
+    put(inout p, in name);
+    str_of(in p.as_slice())
+}
+
+fn slurp(in path: String) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        read(in path)
+    } with {
+        return v => v,
+        raise(e, resume) => ChunkSeq::new[u8](),
+    }
+}
+
+fn emit(in path: Str, in data: Slice[u8]) eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        append(in path, in data);
+        0
+    } with {
+        return v => v,
+        raise(e, resume) => 1,
+    };
+}
+
+fn out(in data: Slice[u8]) eff [Ffi[StdFs]] {
+    emit(in "/dev/stdout", in data);
+}
+
+fn err(in data: Slice[u8]) eff [Ffi[StdFs]] {
+    emit(in "/dev/stderr", in data);
+}
+
+fn log(in tc: ChunkSeq[u8], in line: ChunkSeq[u8]) eff [Ffi[StdFs]] {
+    let p = file(in tc, in "log");
+    emit(in p, in line.as_slice());
+}
+
+fn sleep_long() eff [Ffi[StdProcess]] {
+    let mut c = command(in "/bin/sleep");
+    arg(inout c, in "30");
+    handle Fail[IoError] in {
+        let o = output(c);
+        0
+    } with {
+        return v => v,
+        raise(e, resume) => 1,
+    };
+}
+
+// The rest of the first line of `table` that starts with `key` and a
+// space, or nothing.
+fn lookup(in table: ChunkSeq[u8], in key: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let t = table.as_slice();
+    let mut s: u64 = 0;
+    loop {
+        if s >= t.len() {
+            break;
+        }
+        let mut e = s;
+        loop {
+            if e >= t.len() || byte(in t, e) == 10 {
+                break;
+            }
+            e = wrapping_add(e, 1);
+        }
+        let k = wrapping_add(s, key.len());
+        if k < e && byte(in t, k) == 32 && find(in t, s, in key.as_slice()) == s {
+            return range(in t, wrapping_add(k, 1), e);
+        }
+        s = wrapping_add(e, 1);
+    }
+    ChunkSeq::new[u8]()
+}
+
+fn launcher(in tc: ChunkSeq[u8]) -> i64 eff [Ffi[StdFs], Ffi[StdEnv]] {
+    let mode = slurp(file(in tc, in "launcher_mode"));
+    if has(in mode, in "fails") {
+        out(in "note: elan is updating\n".as_bytes());
+        err(in "error: toolchain not installed\n".as_bytes());
+        return 1;
+    }
+    let a = argument(1);
+    if !is(in a, in "--print-prefix") {
+        return 2;
+    }
+    let mut o = ChunkSeq::new[u8]();
+    put(inout o, in "  ");
+    put_bytes(inout o, in tc.as_slice());
+    put(inout o, in "/prefix\n");
+    out(in o.as_slice());
+    0
+}
+
+fn env_or(in key: Str, in fallback: Str) -> ChunkSeq[u8] eff [Ffi[StdEnv]] {
+    match var_bytes(in key) {
+        Option::Some(v) => v,
+        Option::None => {
+            let mut o = ChunkSeq::new[u8]();
+            put(inout o, in fallback);
+            o
+        },
+    }
+}
+
+fn lean(in tc: ChunkSeq[u8]) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess]] {
+    let a1 = argument(1);
+    if is(in a1, in "--version") {
+        let v = slurp(file(in tc, in "version"));
+        out(in v.as_slice());
+        return 0;
+    }
+    let a2 = argument(2);
+    let a3 = argument(3);
+    let compiling = is(in a3, in "-o");
+    let target = if compiling {
+        argument(4)
+    } else {
+        ChunkSeq::new[u8]()
+    };
+    let src = if compiling {
+        argument(5)
+    } else {
+        argument(3)
+    };
+    let module = strip_suffix(in basename(in src), in ".lean");
+    let base = strip_suffix(in module, in "_bv");
+    let plan = slurp(file(in tc, in "plan"));
+    let tokens = lookup(in plan, in base);
+    let mut line = ChunkSeq::new[u8]();
+    put(inout line, in "lean ");
+    put_bytes(inout line, in a1.as_slice());
+    line.push(32);
+    put_bytes(inout line, in a2.as_slice());
+    line.push(32);
+    put_bytes(inout line, in module.as_slice());
+    put(inout line, in " cwd=");
+    let here = handle Fail[IoError] in {
+        current_dir_bytes()
+    } with {
+        return v => v,
+        raise(e, resume) => ChunkSeq::new[u8](),
+    };
+    let h = normalized(in here.as_slice());
+    put_bytes(inout line, in h.as_slice());
+    put(inout line, in " path=");
+    let lp = env_or(in "LEAN_PATH", in "");
+    let n = normalized(in lp.as_slice());
+    put_bytes(inout line, in n.as_slice());
+    put(inout line, in " abort=");
+    let ab = env_or(in "LEAN_ABORT_ON_PANIC", in "");
+    put_bytes(inout line, in ab.as_slice());
+    put(inout line, in " home=");
+    let home = env_or(in "HOME", in "unset");
+    put_bytes(inout line, in home.as_slice());
+    line.push(10);
+    log(in tc, in line);
+    if !compiling {
+        if has(in tokens, in "bv_ok") {
+            return 0;
+        }
+        if has(in tokens, in "bv_cex") {
+            let c = slurp(file(in tc, in "cex"));
+            out(in c.as_slice());
+            return 1;
+        }
+        if has(in tokens, in "bv_sleep") {
+            sleep_long();
+            return 0;
+        }
+        if has(in tokens, in "bv_quiet") {
+            return 1;
+        }
+        out(in "info: bv_decide is searching\n".as_bytes());
+        let mut m = ChunkSeq::new[u8]();
+        put_bytes(inout m, in src.as_slice());
+        put(inout m, in ":4:2: error: bv_decide could not decide the goal\n");
+        err(in m.as_slice());
+        return 1;
+    }
+    if has(in tokens, in "compile_fail") {
+        let mut m = ChunkSeq::new[u8]();
+        put_bytes(inout m, in src.as_slice());
+        put(inout m, in ":1:0: error: unknown identifier 'x'\n");
+        out(in m.as_slice());
+        return 1;
+    }
+    if has(in tokens, in "omega_fail") {
+        let mut m = ChunkSeq::new[u8]();
+        put(inout m, in "warning: unused variable\n");
+        put_bytes(inout m, in src.as_slice());
+        put(inout m, in ":3:2: error: omega could not prove the goal\n");
+        out(in m.as_slice());
+        return 1;
+    }
+    if has(in tokens, in "slow") {
+        sleep_long();
+    }
+    let from = str_of(in src.as_slice());
+    let to = str_of(in target.as_slice());
+    handle Fail[IoError] in {
+        let _ = copy(in from, in to);
+        0
+    } with {
+        return v => v,
+        raise(e, resume) => 1,
+    }
+}
+
+fn auditor(in tc: ChunkSeq[u8]) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess]] {
+    let n = arg_count();
+    let mut line = ChunkSeq::new[u8]();
+    put(inout line, in "audit");
+    for i in 1..n {
+        line.push(32);
+        let a = argument(i);
+        let m = normalized(in a.as_slice());
+        put_bytes(inout line, in m.as_slice());
+    }
+    line.push(10);
+    log(in tc, in line);
+    let mode = slurp(file(in tc, in "audit_mode"));
+    if has(in mode, in "fail") {
+        out(in "info: replaying\n".as_bytes());
+        err(in "error: the kernel rejected VesperLensRun\n".as_bytes());
+        return 2;
+    }
+    if has(in mode, in "fixed") {
+        let r = slurp(file(in tc, in "report"));
+        out(in r.as_slice());
+        return 0;
+    }
+    if has(in mode, in "slow") {
+        sleep_long();
+    }
+    let axioms = slurp(file(in tc, in "axioms"));
+    let mut o = ChunkSeq::new[u8]();
+    put(inout o, in "{\"kernel_replayed\":true,\"checked_constants\":1234,\"theorems\":[");
+    let mut first = true;
+    let mut i: u64 = 1;
+    loop {
+        if i >= n {
+            break;
+        }
+        let a = argument(i);
+        if is(in a, in "--theorem") {
+            i = wrapping_add(i, 1);
+            let t = argument(i);
+            let mut ax = lookup(in axioms, in t);
+            if ax.len() == 0 {
+                put(inout ax, in "[]");
+            }
+            if !first {
+                o.push(44);
+            }
+            first = false;
+            put(inout o, in "{\"name\":\"");
+            put_bytes(inout o, in t.as_slice());
+            put(inout o, in "\",\"axioms\":");
+            put_bytes(inout o, in ax.as_slice());
+            o.push(125);
+        }
+        i = wrapping_add(i, 1);
+    }
+    put(inout o, in "]}\n");
+    out(in o.as_slice());
+    0
+}
+
+fn main() -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess]] {
+    let me = argument(0);
+    let name = basename(in me);
+    if is(in name, in "lean") {
+        // TC/prefix/bin/lean
+        let bin = dirname(in me);
+        let prefix = dirname(in bin);
+        let tc = dirname(in prefix);
+        return lean(in tc);
+    }
+    let tc = dirname(in me);
+    if is(in name, in "launcher") {
+        return launcher(in tc);
+    }
+    if is(in name, in "auditor") {
+        return auditor(in tc);
+    }
+    3
+}

@@ -2,10 +2,11 @@
 //! (packages/vesper-lsp-proof-run) against the proof-lens runner of
 //! `src/lsp/proof_lens.rs` (`run`, `run_stages`, `ensure_olean`,
 //! `bitvec_check`, `child_output`, `Cache`, `Stage`). Both run the same
-//! prepared job (`proof_job_for_port`) against a fake Lean toolchain of
-//! shell scripts: a launcher, a `lean` binary whose compiles succeed, fail,
-//! stall or find a `bv_decide` counterexample per module, and a proof
-//! auditor that generates or replays a JSON report. The outcome rows, the
+//! prepared job (`proof_job_for_port`) against a fake Lean toolchain, a
+//! native Vesper program (tests/fixtures/proof-lens-toolchain) that is a
+//! launcher, a `lean` binary whose compiles succeed, fail, stall or find a
+//! `bv_decide` counterexample per module, and a proof auditor that
+//! generates or replays a JSON report. The outcome rows, the
 //! normalized log of every Lean and auditor invocation, and the cache each
 //! side leaves for the other must agree, in the JIT (optimize on and off)
 //! and the evaluator.
@@ -16,6 +17,8 @@ mod std_io_support;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use std_io_support::{MODES, Mode, Temp, jit_host, lit, run, std_dir, word};
@@ -74,76 +77,6 @@ pub fn run_job() -> u64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv]] {
 
 const VERSION_OK: &str =
     "Lean (version 4.35.0, x86_64-unknown-linux-gnu, commit 0123abcd, Release)\n";
-
-const LEAN: &str = r#"#!/bin/sh
-PATH=/usr/bin:/bin
-export PATH
-TC='@TC@'
-if [ "$1" = "--version" ]; then
-    cat "$TC/version"
-    exit 0
-fi
-if [ "$3" = "-o" ]; then
-    out="$4"
-    src="$5"
-else
-    out=""
-    src="$3"
-fi
-mod=$(basename "$src" .lean)
-base=${mod%_bv}
-line=$(grep "^$base " "$TC/plan" 2>/dev/null)
-here=$(pwd | sed 's#/vesper-lens-proof-[0-9-]*#/STAGE#')
-lp=$(printf '%s' "$LEAN_PATH" | sed 's#/vesper-lens-proof-[0-9-]*#/STAGE#')
-printf 'lean %s %s %s cwd=%s path=%s abort=%s home=%s\n' "$1" "$2" "$mod" "$here" "$lp" "$LEAN_ABORT_ON_PANIC" "${HOME:-unset}" >> "$TC/log"
-if [ -z "$out" ]; then
-    case "$line" in
-        *bv_ok*) exit 0 ;;
-        *bv_cex*) cat "$TC/cex"; exit 1 ;;
-        *bv_sleep*) sleep 30; exit 0 ;;
-        *bv_quiet*) exit 1 ;;
-    esac
-    echo "info: bv_decide is searching"
-    echo "$src:4:2: error: bv_decide could not decide the goal" >&2
-    exit 1
-fi
-case "$line" in
-    *compile_fail*) echo "$src:1:0: error: unknown identifier 'x'"; exit 1 ;;
-    *omega_fail*) printf 'warning: unused variable\n%s:3:2: error: omega could not prove the goal\n' "$src"; exit 1 ;;
-    *slow*) sleep 30 ;;
-esac
-cp "$src" "$out"
-"#;
-
-const AUDITOR: &str = r#"#!/bin/sh
-TC='@TC@'
-printf 'audit' >> "$TC/log"
-for a in "$@"; do
-    printf ' %s' "$a" | sed 's#/vesper-lens-proof-[0-9-]*#/STAGE#' >> "$TC/log"
-done
-printf '\n' >> "$TC/log"
-mode=$(cat "$TC/audit_mode")
-case "$mode" in
-    fail) echo "info: replaying" ; echo "error: the kernel rejected VesperLensRun" >&2; exit 2 ;;
-    fixed) cat "$TC/report"; exit 0 ;;
-    slow) sleep 30 ;;
-esac
-printf '{"kernel_replayed":true,"checked_constants":1234,"theorems":['
-first=1
-while [ $# -gt 0 ]; do
-    if [ "$1" = "--theorem" ]; then
-        t="$2"
-        shift
-        ax=$(grep "^$t " "$TC/axioms" 2>/dev/null | cut -d' ' -f2-)
-        [ -z "$ax" ] && ax='[]'
-        [ $first = 1 ] || printf ','
-        first=0
-        printf '{"name":"%s","axioms":%s}' "$t" "$ax"
-    fi
-    shift
-done
-printf ']}\n'
-"#;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Launcher {
@@ -385,9 +318,26 @@ fn deep(n: usize) -> Vec<u8> {
     v
 }
 
-fn write_exec(path: &Path, text: &str) {
-    fs::write(path, text).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+/// The fake toolchain (tests/fixtures/proof-lens-toolchain), built once
+/// as a native executable by `vesper build`. Copied in as the launcher,
+/// `prefix/bin/lean` and the auditor, it acts by the name it runs under.
+fn fake_toolchain() -> &'static Path {
+    static BUILT: OnceLock<(Temp, PathBuf)> = OnceLock::new();
+    &BUILT
+        .get_or_init(|| {
+            let dir = Temp::new("proof-lens-fake");
+            let exe = dir.path().join("fake-toolchain");
+            let status = Command::new(env!("CARGO_BIN_EXE_vesper"))
+                .arg("build")
+                .arg("tests/fixtures/proof-lens-toolchain")
+                .arg("-o")
+                .arg(&exe)
+                .status()
+                .expect("run vesper build");
+            assert!(status.success(), "vesper build of the fake toolchain");
+            (dir, exe)
+        })
+        .1
 }
 
 /// A fake toolchain for `s` in `tc`: the launcher, `prefix/bin/lean`, the
@@ -401,25 +351,24 @@ fn toolchain(
     let prefix = tc.join("prefix");
     fs::create_dir_all(prefix.join("bin")).unwrap();
     fs::create_dir_all(prefix.join("lib/lean")).unwrap();
-    let tcs = tc.display().to_string();
-    write_exec(&prefix.join("bin/lean"), &LEAN.replace("@TC@", &tcs));
+    let fake = fake_toolchain();
+    let install = |to: &Path| {
+        fs::copy(fake, to).unwrap();
+        fs::set_permissions(to, fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    install(&prefix.join("bin/lean"));
     let launcher = tc.join("launcher");
-    match s.launcher {
-        Launcher::Ok => write_exec(
-            &launcher,
-            &format!(
-                "#!/bin/sh\n[ \"$1\" = --print-prefix ] && printf '  %s\\n' '{}' && exit 0\nexit 2\n",
-                prefix.display()
-            ),
-        ),
-        Launcher::Fails => write_exec(
-            &launcher,
-            "#!/bin/sh\necho 'note: elan is updating'\necho 'error: toolchain not installed' >&2\nexit 1\n",
-        ),
-        Launcher::Missing => {}
+    if s.launcher != Launcher::Missing {
+        install(&launcher);
     }
+    let launcher_mode = if s.launcher == Launcher::Fails {
+        "fails"
+    } else {
+        "ok"
+    };
+    fs::write(tc.join("launcher_mode"), launcher_mode).unwrap();
     let auditor = tc.join("auditor");
-    write_exec(&auditor, &AUDITOR.replace("@TC@", &tcs));
+    install(&auditor);
     fs::write(tc.join("version"), s.version).unwrap();
     let module_of = |f: &str| -> String {
         match f {
