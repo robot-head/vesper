@@ -470,7 +470,7 @@ function takes about 2 s per world.
 
 - Optional: compare the per-arch `encoding_listing` text.
 - The flip gate passed (`scripts/ci/flip-gate/verified-codegen.json`: 0 of
-  4,724 differ, compile 0.88x [0.84x, 0.90x] n=12), so the hybrid's gated
+  4,724 differ, compile 1.02x [0.97x, 1.05x] n=12), so the hybrid's gated
   set runs the port (docs/parallel-results/rust-exit-stage2-retirement.md,
   part 5a).
 - The Rust deleted at the retirement. Stage 1 can already run the native

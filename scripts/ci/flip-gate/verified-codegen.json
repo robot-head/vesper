@@ -11,8 +11,9 @@
     "lowering) and end to end on five targets (status, stdout, stderr and",
     "the artifact's bytes). The hybrid's CLI differential",
     "(crates/vesper-hybrid/tests/verified_codegen.rs) runs in Test all targets.",
-    "The `compile` workload times Rust's `build` from the checked world",
-    "against the input encoding, `compile_words` and the decoding, over every",
+    "The `compile` workload times the swap's whole path from the checked",
+    "world (the optimized program, `compile_input`'s encoding, `compile_words`",
+    "and the decoding) against Rust's `build` from the same world, over every",
     "corpus world the port builds, for the host target."
   ],
   "name": "verified-codegen",

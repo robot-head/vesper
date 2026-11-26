@@ -306,4 +306,4 @@ the Rust lines deleted.
 | `vesper-aether` virtqueue walks (PASS) | SH6-14 | 0 differences; tests 2/2 pass | virtqueue 1.44x [1.36x, 1.47x] n=30 | 331 (now the tests' reference) | #1494 |
 | `native-walk` (PASS; compiler module, the walk's planning in `src/native.rs` and `src/native_export.rs` goes at the retirement) | G1-11 | 0 differences on 978 cases; tests 1/1 pass | entries 1.00x [0.98x, 1.03x] n=12; exports 0.99x [0.93x, 1.03x] n=12 | 0 | #2056 |
 | `sugar` (PASS; compiler module, `crates/vesper-syntax/src/sugar_expand*.rs` goes at the retirement) | SH1-14 | 0 differences on 3,872 cases; tests 1/1 pass | expand 1.33x [1.28x, 1.36x] n=12 | 0 (3,282 at the retirement) | #1157 part 7 |
-| `verified-codegen` (PASS; compiler module, `src/verified_codegen` goes at the retirement) | SH6-2 | 0 differences on 4,724 cases; tests 1/1 pass | compile 0.88x [0.84x, 0.90x] n=12 | 0 (9,760 at the retirement) | #1886 |
+| `verified-codegen` (PASS; compiler module, `src/verified_codegen` goes at the retirement) | SH6-2 | 0 differences on 4,724 cases; tests 1/1 pass | compile 1.02x [0.97x, 1.05x] n=12 | 0 (9,760 at the retirement) | #1886 |

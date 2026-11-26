@@ -138,8 +138,9 @@ Stage 1 guard: no guarded path changed; the change is inside
 - **`scripts/ci/flip-gate/verified-codegen.json`**: the verified code
   generator's gate. The differential is every corpus world through
   monomorphization, the front half, the lowering and the whole compile on
-  five targets; the `compile` workload times Rust's `build` against the
-  encoding, `compile_words` and the decoding.
+  five targets; the `compile` workload times the swap's whole path from the
+  checked world (optimized program, `compile_input`'s encoding,
+  `compile_words`, decoding) against Rust's `build` from the same world.
   `compile_flip_gate` (tests/self_host_verified_codegen.rs) now prints one
   pair per epoch for the gate. The `verified_codegen` row is
   `pass("verified_codegen", "verified-codegen", "#1886")`, so the gated
@@ -149,7 +150,7 @@ Stage 1 guard: no guarded path changed; the change is inside
 
 | Check | Result |
 |---|---|
-| `aspect ci flip-gate -- verified-codegen` | **PASS**: 0 differences on 4,724 cases, tests 1/1, compile **0.88x** [0.84x, 0.90x] n=12 |
+| `aspect ci flip-gate -- verified-codegen` | **PASS**: 0 differences on 4,724 cases, tests 1/1, compile **1.02x** [0.97x, 1.05x] n=12 |
 
 **Rust lines deleted:** 0. `src/verified_codegen` (9,760 lines) goes at
 the retirement.

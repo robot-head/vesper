@@ -185,13 +185,37 @@ fn gated_alias_is_the_same_set() {
 
 #[test]
 fn all_is_the_default() {
-    let output = emit(&[]);
+    // A `gated-default` build defaults to `gated` instead (below).
+    let default = if cfg!(feature = "gated-default") {
+        "gated"
+    } else {
+        "all"
+    };
+    assert_eq!(swaps(&emit(&[])).0, default);
+    assert_eq!(swaps(&emit(&[("VESPER_HYBRID_SWAPS", "")])).0, default);
+    let output = emit(&[("VESPER_HYBRID_SWAPS", "all")]);
     let (set, lines) = swaps(&output);
     assert_eq!(set, "all");
     let off: Vec<_> = lines.iter().filter(|l| !l.on).map(|l| &l.name).collect();
     assert!(off.is_empty(), "all: off {off:?}");
     assert!(count(&output, "vesper-hybrid: parse answered ") > 0);
     assert!(count(&output, "vesper-hybrid: check-layout answered ") > 0);
+}
+
+/// The build the default `vesper` switches to runs the gated set with no
+/// variable, and `all` still names every swap.
+#[test]
+fn gated_default_builds_run_the_gated_set() {
+    if !cfg!(feature = "gated-default") {
+        return;
+    }
+    let output = emit(&[]);
+    let (set, lines) = swaps(&output);
+    assert_eq!(set, "gated");
+    for line in &lines {
+        assert_eq!(line.on, line.config.is_some(), "swap {}", line.name);
+    }
+    assert_eq!(count(&output, "vesper-hybrid: parse answered "), 0);
 }
 
 #[test]
