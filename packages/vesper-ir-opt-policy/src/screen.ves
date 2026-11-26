@@ -171,10 +171,7 @@ fn step_kind(in sc: Screen, t: u64) -> u32 {
 }
 
 fn step_from(in sc: Screen, t: u64) -> u64 {
-    match sc.from.try_get(t) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    sc.from.try_get(t).unwrap_or(0)
 }
 
 // The walk of one scalar sink read of place `pi` from state `input`:
@@ -221,10 +218,7 @@ fn walk(
 
 fn reset(inout sc: Screen, in places: ChunkSeq[u32]) {
     for k in 0..sc.touched.len() {
-        let t = match sc.touched.try_get(k) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let t = sc.touched.try_get(k).unwrap_or(0);
         sc.kind.try_set(t, NONE);
         sc.used.try_set(t, 0);
         sc.head.try_set(t, NONE);
@@ -285,10 +279,7 @@ fn can_improve(
                     break;
                 }
                 for j in 0..states.len() {
-                    let t = match states.try_get(j) {
-                        Option::Some(x) => x,
-                        Option::None => 0,
-                    };
+                    let t = states.try_get(j).unwrap_or(0);
                     reach(inout sc, t, pi);
                 }
             }
