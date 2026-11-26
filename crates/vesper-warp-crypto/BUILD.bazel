@@ -54,7 +54,7 @@ vesper_crate(
     for area, old, new in [
         ("schedule", "in \"quic ku\".as_bytes()", "in \"quic k\".as_bytes()"),
         ("nonce", "let m = if i < 4 {", "let m = if i < 5 {"),
-        ("header", "        15\n    } else {\n        31", "        31\n    } else {\n        31"),
+        ("header", "{ 15 } else { 31 }", "{ 31 } else { 31 }"),
         ("sealer", "if wrapping_add(pn, 1) == s.next_pn {", "if pn == s.next_pn {"),
         ("update", "wrapping_add(now_ns, k.retire_window_ns)", "wrapping_add(now_ns, 0)"),
         ("retry", "461599d35d632bf2239825bb", "461599d35d632bf2239825bc"),
