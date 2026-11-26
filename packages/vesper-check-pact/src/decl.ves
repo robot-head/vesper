@@ -10,13 +10,8 @@
 // The harness writes them after the common sections, in module order
 // (tests/self_host_check_pact.rs, `encode_declarations`).
 
-use @vesper/check-data::input::{
-    Reader
-};
-use @vesper/check-data::util::{
-    n32,
-    u32_at
-};
+use @vesper/check-data::input::{Reader};
+use @vesper/check-data::util::{n32, u32_at};
 
 // One generic parameter (`ast::Generic`).
 pub copy struct Gen {

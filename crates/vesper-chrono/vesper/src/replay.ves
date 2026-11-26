@@ -10,10 +10,7 @@ use super::lineage::{
     record as record_lineage,
 };
 use super::redact::RedactionEntry;
-use super::ring::{
-    FlightEvent,
-    SnapshotImage
-};
+use super::ring::{FlightEvent, SnapshotImage};
 use super::timeline::{
     ChronoTimelineIndex,
     InOutWriteEvent,

@@ -12,12 +12,8 @@
 // k_damping, gain), and the pan weights two (left, right). A parameter-ramp
 // bank is one slice of three ramps (`RampBase`: gain, g, k), each the
 // `RampSlice`s current, target, step and remaining, LANES words each.
-use self::{
-    PidFault
-};
-use self::util::{
-    is_finite
-};
+use self::{PidFault};
+use self::util::{is_finite};
 
 // Voices per tile.
 const LANES: u64 = 16;

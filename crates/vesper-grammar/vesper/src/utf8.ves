@@ -1,8 +1,6 @@
 // Module utf8 of @vesper/grammar (see lib.ves): the UTF-8 check of Rust's
 // `core::str::from_utf8`, with the same `valid_up_to`.
-use self::common::{
-    sb
-};
+use self::common::{sb};
 
 // Well-formed UTF-8 byte sequences (Unicode Standard Table 3-7): ASCII,
 // continuation bytes, the lead byte ranges of two-, three- and four-byte

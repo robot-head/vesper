@@ -2,12 +2,7 @@
 // words (`hi`, `lo`), with `parse_int` and `i128::to_string` of
 // crates/vesper-syntax/src/test_attrs.rs and src/test_discovery.rs.
 
-use self::util::{
-    add,
-    byte,
-    inc,
-    sub
-};
+use self::util::{add, byte, inc, sub};
 
 // A signed 128-bit integer: zero is never negative.
 pub copy struct Big {

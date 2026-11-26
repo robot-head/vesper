@@ -11,30 +11,10 @@
 // before the node that holds it (an updated place's new value) is written
 // first and moved into place (`B::cut`, `B::paste`).
 
-use @vesper/check-data::types::{
-    Types,
-    substitute,
-    TyKind,
-    TyPass
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    w
-};
-use @vesper/check-data::world::{
-    Adt,
-    Variant,
-    World,
-    constructor
-};
-use @vesper/place-ir::{
-    InstRow,
-    Program
-};
+use @vesper/check-data::types::{Types, substitute, TyKind, TyPass};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, w};
+use @vesper/check-data::world::{Adt, Variant, World, constructor};
+use @vesper/place-ir::{InstRow, Program};
 use self::build::{
     B,
     B_EXPLICIT,
@@ -81,16 +61,8 @@ use self::build::{
     U_NEG,
     put_decimal
 };
-use self::ty::{
-    emit_ty,
-    spells,
-    ty_check
-};
-use self::fn_input::{
-    Fns,
-    Sig,
-    SigParam
-};
+use self::ty::{emit_ty, spells, ty_check};
+use self::fn_input::{Fns, Sig, SigParam};
 use self::cfg::{
     ARG_WORDS,
     Fun,
@@ -106,12 +78,7 @@ use self::cfg::{
     set_next,
     takes
 };
-use @vesper/place-ir::codes::{
-    Lit,
-    Op,
-    Pat,
-    Term
-};
+use @vesper/place-ir::codes::{Lit, Op, Pat, Term};
 
 pub const LOOP_REFUSAL: Str = "Lean extraction does not model loop, for, break or return yet; write the iteration as a tail-recursive function";
 

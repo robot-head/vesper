@@ -10,9 +10,7 @@
 
 // @export abi 4
 
-use @vesper/check-loops-atomics::{
-    stack_bound_words
-};
+use @vesper/check-loops-atomics::{stack_bound_words};
 
 // The layout version of `report_words`; the hybrid's tests check it.
 pub fn format() -> u64 {

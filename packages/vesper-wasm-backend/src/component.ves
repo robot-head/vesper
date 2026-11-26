@@ -5,39 +5,13 @@
 // wit-parser) stays in Rust: the harness wraps this port's core module and
 // WIT text with it.
 
-use @vesper/check-data::types::{
-    TyKind,
-    TyPass
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    w
-};
-use self::enc::{
-    Code,
-    ValTy,
-    code_new,
-    function_bytes,
-    vt
-};
-use self::err::{
-    WErr,
-    werr
-};
-use self::lower::{
-    L,
-    body_each,
-    body_n,
-    get32
-};
-use self::host::{
-    active,
-    wit_imports
-};
-use self::plan::{
-    Shape
-};
+use @vesper/check-data::types::{TyKind, TyPass};
+use @vesper/check-data::util::{add, inc, w};
+use self::enc::{Code, ValTy, code_new, function_bytes, vt};
+use self::err::{WErr, werr};
+use self::lower::{L, body_each, body_n, get32};
+use self::host::{active, wit_imports};
+use self::plan::{Shape};
 
 const NONE32: u32 = 4294967295;
 const K_UNSUPPORTED: u8 = 0;

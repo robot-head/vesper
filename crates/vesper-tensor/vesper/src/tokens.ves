@@ -11,12 +11,8 @@
 // `encode` keeps the Rust build's merge order: a max-heap of candidate pairs
 // keyed by (score in `f32::total_cmp` order, leftmost first), with lazy
 // invalidation by node versions.
-use self::{
-    Fault
-};
-use self::num::{
-    u64_zero
-};
+use self::{Fault};
+use self::num::{u64_zero};
 
 // 64-bit FNV-1a for the piece table.
 const FNV_OFFSET: u64 = 14695981039346656037;

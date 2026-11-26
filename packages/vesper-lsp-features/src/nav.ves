@@ -27,42 +27,16 @@ use @vesper/ast::{
     expr_at,
     pat_at
 };
-use @vesper/ast::lower::{
-    lower_source
-};
+use @vesper/ast::lower::{lower_source};
 use @vesper/front::Tokens;
-use @vesper/front::lex::{
-    lex_with_limits,
-    token_end
-};
-use @vesper/front::diag::{
-    diags_new
-};
-use @vesper/span::{
-    ByteSpan,
-    Limits,
-    Position,
-    Range,
-    line_table,
-    offset,
-    range
-};
+use @vesper/front::lex::{lex_with_limits, token_end};
+use @vesper/front::diag::{diags_new};
+use @vesper/span::{ByteSpan, Limits, Position, Range, line_table, offset, range};
 use @vesper/span::Error as SpanError;
 use @vesper/span::Resource as SpanResource;
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
-use self::json::{
-    byte,
-    put,
-    put_bytes,
-    put_u64,
-    put_string,
-    put_range
-};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
+use self::json::{byte, put, put_bytes, put_u64, put_string, put_range};
 
 const NONE: u32 = 4294967295;
 

@@ -6,43 +6,14 @@
 // out the family's executable definitions and makes the companions
 // `noncomputable`.
 
-use @vesper/check-data::types::{
-    Types
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    u32_at,
-    u64_at,
-    w
-};
-use @vesper/check-data::world::{
-    set_by_symbol
-};
-use @vesper/lean-syntax::{
-    binders_end,
-    free_references_at,
-    references,
-    term_end
-};
-use self::build::{
-    B,
-    D_DEF,
-    K_DEF,
-    K_PARTIAL
-};
-use self::emit::{
-    extract
-};
-use self::gen::{
-    G,
-    Y,
-    function
-};
-use self::head::{
-    Graph,
-    scc
-};
+use @vesper/check-data::types::{Types};
+use @vesper/check-data::util::{add, inc, u32_at, u64_at, w};
+use @vesper/check-data::world::{set_by_symbol};
+use @vesper/lean-syntax::{binders_end, free_references_at, references, term_end};
+use self::build::{B, D_DEF, K_DEF, K_PARTIAL};
+use self::emit::{extract};
+use self::gen::{G, Y, function};
+use self::head::{Graph, scc};
 
 const D_MUTUAL_DEFS: u64 = 4;
 pub const K_NONCOMPUTABLE: u64 = 1;

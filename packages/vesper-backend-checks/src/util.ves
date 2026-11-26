@@ -1,13 +1,8 @@
 // Module util of @vesper/backend-checks (see lib.ves): total sequence
 // access and text output.
 
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::util::{
-    n32,
-    push_decimal
-};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::util::{n32, push_decimal};
 
 // `u64::MAX`: an absent index in every table.
 pub const NONE: u64 = 18446744073709551615;

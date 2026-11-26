@@ -1,10 +1,7 @@
 // Module cose of @vesper/aegis (see lib.ves): COSE_Sign1 parsing and
 // header validation (matching coset 0.3.8 / RFC 8152), Sig_structure TBS
 // construction, and COSE_Key EC2 P-384 decoding for Arm CCA RAKs.
-use self::{
-    AErr,
-    AtErr
-};
+use self::{AErr, AtErr};
 use self::cbor::{
     CBOR_MAJOR_SHIFT,
     CborAdditional,

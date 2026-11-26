@@ -17,15 +17,9 @@ use @vesper/front::lex::{
     token_end,
     trivia_kind
 };
-use @vesper/front::diag::{
-    diags_new
-};
-use @vesper/front::parse::{
-    core_operator_kind
-};
-use @vesper/front::{
-    surface_fragment_status
-};
+use @vesper/front::diag::{diags_new};
+use @vesper/front::parse::{core_operator_kind};
+use @vesper/front::{surface_fragment_status};
 use @vesper/front::kinds::{
     k_amp,
     k_amp_eq,

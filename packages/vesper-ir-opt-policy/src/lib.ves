@@ -13,28 +13,12 @@
 // @vesper/ir-opt already works per block, so a mask over the block rows
 // replaces them.
 
-use @vesper/check-data::input::{
-    Reader,
-    read_ctx
-};
-use @vesper/place-ir::{
-    put_program,
-    read_program
-};
-use @vesper/ir-opt::view::{
-    type_classes
-};
-use @vesper/ir-opt::forward::{
-    forward_program_kept
-};
-use @vesper/ir-opt::reuse::{
-    read_facts,
-    reuse_new,
-    reuse_program
-};
-use self::screen::{
-    screen_program
-};
+use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/place-ir::{put_program, read_program};
+use @vesper/ir-opt::view::{type_classes};
+use @vesper/ir-opt::forward::{forward_program_kept};
+use @vesper/ir-opt::reuse::{read_facts, reuse_new, reuse_program};
+use self::screen::{screen_program};
 
 // Constants are copied, not imported: the Vesper package assembler
 // (@vesper/check-names-packages) does not resolve an imported constant

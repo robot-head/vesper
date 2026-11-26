@@ -31,15 +31,7 @@ use self::wire::{
     wt_pad,
     wt_struct
 };
-use self::encode::{
-    Encoder,
-    new_encoder,
-    put_bytes,
-    put_count,
-    put_decimal_const,
-    put_str,
-    put_u16
-};
+use self::encode::{Encoder, new_encoder, put_bytes, put_count, put_decimal_const, put_str, put_u16};
 
 // ---------------------------------------------------------------------------
 // Slice / arena helpers.

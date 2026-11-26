@@ -28,33 +28,11 @@ use self::lex::{
     max_tokens,
     max_diagnostics
 };
-use self::diag::{
-    diags_new,
-    diag_push,
-    limit_message_observed
-};
-use self::parse::{
-    parse_tokens,
-    parse_surface_tokens,
-    parse_template_tokens,
-    hard_depth
-};
-use self::recover::{
-    editor_limits,
-    parse_recovery_tables
-};
-use self::tree::{
-    tree_new,
-    build_tree,
-    report
-};
-use self::util::{
-    byte,
-    inc,
-    shl,
-    u8_at,
-    w32
-};
+use self::diag::{diags_new, diag_push, limit_message_observed};
+use self::parse::{parse_tokens, parse_surface_tokens, parse_template_tokens, hard_depth};
+use self::recover::{editor_limits, parse_recovery_tables};
+use self::tree::{tree_new, build_tree, report};
+use self::util::{byte, inc, shl, u8_at, w32};
 
 // The token table of one source: parallel rows.
 pub struct Tokens {
@@ -478,17 +456,9 @@ pub fn lex_raw_count(in source: Str) -> u64 {
 }
 
 test {
-    use self::lex::{
-        token_end,
-        token_sym,
-        token_word
-    };
+    use self::lex::{token_end, token_sym, token_word};
     use self::util::u64_at;
-    use self::words::{
-        w_TiledSeq,
-        w_test_case,
-        w_underscore
-    };
+    use self::words::{w_TiledSeq, w_test_case, w_underscore};
 
     // @case empty(0, 0, false)
     // @case exact_limit(9, 9, false)

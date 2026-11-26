@@ -2,20 +2,9 @@
 // greedy constraint colouring of src/coloring.rs (`Colorer::color` and
 // `MultiColorer::color`). The Rust wrapper owns every buffer and lends it
 // here sized for the call, so colouring allocates nothing.
-use self::{
-    ColoringError
-};
-use self::util::{
-    g32,
-    g64,
-    g8,
-    inc,
-    shl_u64,
-    shr_u64
-};
-use @vesper-std/sort::keyed::{
-    sort_by_key
-};
+use self::{ColoringError};
+use self::util::{g32, g64, g8, inc, shl_u64, shr_u64};
+use @vesper-std/sort::keyed::{sort_by_key};
 
 // Bodies, constraints and colours are u32 indices.
 const U32_MAX: u64 = 0xffffffff;

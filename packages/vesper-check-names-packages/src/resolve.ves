@@ -6,9 +6,7 @@
 // leaves the diagnostic pending in `St.err_*`; the caller emits it with
 // `emit` or drops it.
 
-use @vesper-std/intern::{
-    symbol_from_id
-};
+use @vesper-std/intern::{symbol_from_id};
 use self::state::{
     St,
     at32,

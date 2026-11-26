@@ -26,9 +26,7 @@
 // `package kinds trait_ref n goal* n ty*`. An environment is
 // `n (kind bound)* n goal* n (n model*)*`, bound none() when absent; a
 // query is `major minor env kinds goal`.
-use self::{
-    S
-};
+use self::{S};
 use self::term::{
     add,
     b_canon,
@@ -81,21 +79,8 @@ use self::term::{
     vkind,
     word_at
 };
-use self::render::{
-    byte,
-    d_label_key,
-    lit,
-    num,
-    r_arg,
-    r_id,
-    r_kind_debug,
-    r_row,
-    r_var
-};
-use self::diag::{
-    emit,
-    sort_diags
-};
+use self::render::{byte, d_label_key, lit, num, r_arg, r_id, r_kind_debug, r_row, r_var};
+use self::diag::{emit, sort_diags};
 
 // ASCII bytes.
 const DOT: u8 = 46;

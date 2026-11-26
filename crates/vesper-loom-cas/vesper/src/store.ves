@@ -15,28 +15,14 @@
 // 0, or an error's fields (`rep_*`) and then its code (the last byte);
 // src/port.rs rebuilds the `CasError` from them. An object id is its 34
 // bytes (domain tag, kind tag, digest).
-use self::id::{
-    context,
-    hex_into
-};
-use self::tree::{
-    tree_scan,
-    tree_encode_into
-};
+use self::id::{context, hex_into};
+use self::tree::{tree_scan, tree_encode_into};
 use self::drv::drv_scan;
-use self::name::{
-    is_utf8,
-    name_code
-};
+use self::name::{is_utf8, name_code};
 use self::fold::fold_into;
 use self::DrvErr;
 use self::derivation_hash;
-use @vesper-std/hash-sys::{
-    hasher_new_derive_key,
-    update,
-    finalize_xof,
-    hasher_free
-};
+use @vesper-std/hash-sys::{hasher_new_derive_key, update, finalize_xof, hasher_free};
 
 pub copy enum StoreErr {
     Raised

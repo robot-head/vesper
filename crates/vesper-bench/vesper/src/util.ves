@@ -2,15 +2,8 @@
 // sorting. Every helper is total (no `Fail` row): reads past the end give
 // 0, which no caller reaches, so the exported functions raise only their
 // crate's own errors.
-use self::{
-    Sample,
-    W
-};
-use self::wide::{
-    w_slt,
-    w_ult,
-    w_zero
-};
+use self::{Sample, W};
+use self::wide::{w_slt, w_ult, w_zero};
 
 // `gb`'s past-the-end value: above every byte.
 pub const NO_BYTE: u64 = 256;

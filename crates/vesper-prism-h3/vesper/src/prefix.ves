@@ -2,26 +2,9 @@
 // §5.2, RFC 9204 §4.1.1 and §4.1.2). Offsets are absolute positions in the
 // buffer, so callers never re-slice.
 
-use self::{
-    PrefixError,
-    HuffmanError,
-    Huff
-};
-use self::int::{
-    inc,
-    byte,
-    bit,
-    max64,
-    sat_mul,
-    div_ceil,
-    shl,
-    shr
-};
-use self::huffman::{
-    huff_encoded_len,
-    huff_encode,
-    huff_decode
-};
+use self::{PrefixError, HuffmanError, Huff};
+use self::int::{inc, byte, bit, max64, sat_mul, div_ceil, shl, shr};
+use self::huffman::{huff_encoded_len, huff_encode, huff_decode};
 
 // RFC 7541 §5.1: each byte after the prefix carries 7 bits and a
 // continuation flag; past a 56-bit shift the value cannot fit.

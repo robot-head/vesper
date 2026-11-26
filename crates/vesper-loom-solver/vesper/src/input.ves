@@ -1,35 +1,11 @@
 // Module input of @vesper/loom-solver (see lib.ves): the request words
 // (documented in src/port.rs) and `inputs`: catalog normalization and
 // validation.
-use @vesper/loom-calculus::{
-    SysSel
-};
-use @vesper/loom-calculus::decode::{
-    decode_manifest,
-    decode_tables,
-    rd,
-    rd_bool,
-    rd_set,
-    rd_str
-};
-use @vesper/loom-calculus::check::{
-    check_manifest,
-    system_name_valid
-};
-use @vesper/loom-calculus::util::{
-    add,
-    inc,
-    man,
-    none,
-    ssel,
-    sw,
-    ver
-};
-use self::{
-    Meta,
-    Mx,
-    S
-};
+use @vesper/loom-calculus::{SysSel};
+use @vesper/loom-calculus::decode::{decode_manifest, decode_tables, rd, rd_bool, rd_set, rd_str};
+use @vesper/loom-calculus::check::{check_manifest, system_name_valid};
+use @vesper/loom-calculus::util::{add, inc, man, none, ssel, sw, ver};
+use self::{Meta, Mx, S};
 use self::diag::{
     SolverCode,
     SolverSort,

@@ -10,10 +10,7 @@
 // words.ves), and `sym`, an interned symbol number (0 for other kinds), so
 // the parser never compares text.
 
-use self::{
-    Tokens,
-    Diags
-};
+use self::{Tokens, Diags};
 use self::kinds::{
     k_whitespace,
     k_comment,
@@ -31,29 +28,9 @@ use self::kinds::{
     k_linear,
     k_with
 };
-use self::util::{
-    inc,
-    add,
-    byte,
-    u8_at,
-    u32_at,
-    u64_at,
-    w32,
-    word_at,
-    narrow,
-    shl
-};
-use self::words::{
-    keyword,
-    lower_word,
-    upper_word
-};
-use self::diag::{
-    diag_push,
-    diag_push_limit,
-    limit_message,
-    limit_message_observed
-};
+use self::util::{inc, add, byte, u8_at, u32_at, u64_at, w32, word_at, narrow, shl};
+use self::words::{keyword, lower_word, upper_word};
+use self::diag::{diag_push, diag_push_limit, limit_message, limit_message_observed};
 
 fn is_digit(c: u8) -> bool {
     c >= 48 && c <= 57

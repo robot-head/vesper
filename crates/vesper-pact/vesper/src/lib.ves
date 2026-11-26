@@ -13,10 +13,7 @@
 // (Display and Debug text), diag (diagnostics), program (decoding and
 // validation), solver (resolution), query (`Solver::solve`), coherence,
 // deriv (`check_derivation`) and out (result words).
-use self::term::{
-    inc,
-    new_arena
-};
+use self::term::{inc, new_arena};
 use self::program::{
     index_impls,
     rd_conformance,
@@ -27,35 +24,12 @@ use self::program::{
     validate_program,
     validate_query
 };
-use self::diag::{
-    sort_diags,
-    truncate_diags
-};
-use self::query::{
-    reset_solver,
-    solve_query
-};
-use self::coherence::{
-    check_coherence,
-    conformance_env,
-    orphan
-};
-use self::canon::{
-    binders_slist,
-    canon_free,
-    canon_placeholders
-};
-use self::deriv::{
-    check_derivation
-};
-use self::out::{
-    w,
-    w_diags,
-    w_env,
-    w_outcome,
-    w_slist,
-    w_term
-};
+use self::diag::{sort_diags, truncate_diags};
+use self::query::{reset_solver, solve_query};
+use self::coherence::{check_coherence, conformance_env, orphan};
+use self::canon::{binders_slist, canon_free, canon_placeholders};
+use self::deriv::{check_derivation};
+use self::out::{w, w_diags, w_env, w_outcome, w_slist, w_term};
 
 // Default solver limits, as in the Rust `SolverConfig::default()`. The
 // depth bound keeps recursion within a 2 MiB thread stack.

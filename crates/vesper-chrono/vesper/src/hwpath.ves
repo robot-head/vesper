@@ -1,19 +1,8 @@
 // Mapping hardware branch traces onto Chrono's effect-boundary timeline.
 
-use self::ete::{
-    EteElement,
-    EteElementAt,
-    InstructionSet
-};
-use self::ete_flow::{
-    Branch,
-    BranchKind,
-    FlowTrace
-};
-use self::replay::{
-    ReplaySession,
-    reverse_watch_inout
-};
+use self::ete::{EteElement, EteElementAt, InstructionSet};
+use self::ete_flow::{Branch, BranchKind, FlowTrace};
+use self::replay::{ReplaySession, reverse_watch_inout};
 use self::ring::FlightEvent;
 use self::wire::TraceCursor;
 

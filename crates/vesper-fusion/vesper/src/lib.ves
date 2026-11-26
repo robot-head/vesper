@@ -4,17 +4,8 @@
 // rewrites, `let` bindings), saturated and extracted the way egglog does,
 // with a rewrite explanation in place of egglog's proof (see engine.ves).
 
-use self::util::{
-    at64,
-    n32,
-    w
-};
-use self::engine::{
-    Code,
-    Eng,
-    NONE,
-    eng_new
-};
+use self::util::{at64, n32, w};
+use self::engine::{Code, Eng, NONE, eng_new};
 
 // `fusion_run`'s mode: bit 0 saturates, bit 1 explains, and the iteration
 // limit starts at bit `LimitShift`.

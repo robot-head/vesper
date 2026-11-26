@@ -30,19 +30,8 @@ use @vesper/ast::{
     pat_at,
     type_at
 };
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper/check-data::util::{
-    push_decimal,
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper/check-data::util::{push_decimal, add, inc, n32, u32_at, u64_at, u8_at, w};
 use self::state::{
     St,
     put,

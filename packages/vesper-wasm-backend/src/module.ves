@@ -3,21 +3,8 @@
 // sections in the order the binary format requires, written byte for
 // byte as wasm-encoder writes them.
 
-use self::enc::{
-    Code,
-    ValTy,
-    append,
-    put_bytes,
-    put_valtype,
-    sleb,
-    uleb,
-    uleb_size,
-    vt
-};
-use self::err::{
-    WErr,
-    werr
-};
+use self::enc::{Code, ValTy, append, put_bytes, put_valtype, sleb, uleb, uleb_size, vt};
+use self::err::{WErr, werr};
 
 // `err::K_INVALID` (constants cannot be imported yet).
 const K_INVALID: u8 = 3;

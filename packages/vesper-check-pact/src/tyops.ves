@@ -4,27 +4,10 @@
 // signature instantiated at one conformance), `check::compatible`, the
 // impl-key encoding (`key_segment`) and `row_arg`.
 
-use @vesper/check-data::types::{
-    EffNode,
-    Types,
-    Vars,
-    substitute_row,
-    TyKind
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::util::{
-    add,
-    n32,
-    u32_at,
-    w
-};
-use self::decl::{
-    Conf,
-    Decls,
-    TraitRow
-};
+use @vesper/check-data::types::{EffNode, Types, Vars, substitute_row, TyKind};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::util::{add, n32, u32_at, w};
+use self::decl::{Conf, Decls, TraitRow};
 
 const NONE32: u32 = 4294967295;
 

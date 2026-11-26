@@ -10,21 +10,10 @@
 //     relative to the raw root, decoded string bytes
 //
 // Preflight (`Check`) and writing (`Writer`) both walk the stream.
-use self::{
-    EncodeLimits,
-    Error,
-    ErrorKind,
-    Kind
-};
-use self::dragon::{
-    put_shortest,
-    shortest,
-    shortest_len
-};
+use self::{EncodeLimits, Error, ErrorKind, Kind};
+use self::dragon::{put_shortest, shortest, shortest_len};
 use self::index::raise;
-use self::ascii::{
-    Ascii
-};
+use self::ascii::{Ascii};
 
 // Word-stream value tags (the layout above).
 const TAG_NULL: u64 = 0;

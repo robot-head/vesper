@@ -3,23 +3,8 @@
 // CountLimit 10, Descriptor 13, Alignment 14, Range 15, Bitmap 16,
 // NullCount 17, Aliasing 18. Alignment profiles: ByteCopy 0, Relative8 1,
 // Relative64 2, HostAddress64 3.
-use self::{
-    ArCol,
-    ArReq,
-    GErr,
-    P2
-};
-use self::common::{
-    add_or,
-    bound,
-    charge_or,
-    fail,
-    le64,
-    mul_or,
-    pair,
-    sb,
-    shr
-};
+use self::{ArCol, ArReq, GErr, P2};
+use self::common::{add_or, bound, charge_or, fail, le64, mul_or, pair, sb, shr};
 
 // Arrow `Message.fbs` `FieldNode`/`Buffer` descriptors are two little-endian
 // i64 words; values are i64s.

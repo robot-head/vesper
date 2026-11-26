@@ -1,13 +1,7 @@
 // `Diagnostic` (code, message, span, related labels, help) as rows of one
 // text buffer: every text field is a range of `text`.
 
-use self::util::{
-    fold,
-    n32,
-    u8_at,
-    w,
-    add
-};
+use self::util::{fold, n32, u8_at, w, add};
 
 pub copy struct DiagRow {
     code_a: u64,

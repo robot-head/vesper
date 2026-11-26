@@ -26,12 +26,7 @@ use self::document::{
     store_set_revision,
     store_total
 };
-use @vesper/span::{
-    Limits,
-    Position,
-    Range,
-    Resource
-};
+use @vesper/span::{Limits, Position, Range, Resource};
 use @vesper/span::Error as SpanError;
 
 // An op's tag.

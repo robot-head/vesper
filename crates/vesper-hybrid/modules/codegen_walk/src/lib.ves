@@ -5,10 +5,7 @@
 
 // @export abi 4
 
-use @vesper/native-walk::{
-    native_walk_frames_bytes,
-    native_walk_register_locals_bytes
-};
+use @vesper/native-walk::{native_walk_frames_bytes, native_walk_register_locals_bytes};
 
 pub fn register_locals_words(in input: Slice[u8]) -> ChunkSeq[u64] {
     native_walk_register_locals_bytes(in input)

@@ -72,74 +72,17 @@ use self::machine::{
     T_REGION,
     T_UNREACHABLE
 };
-use self::certificate::{
-    put_debug
-};
-use self::evidence::{
-    Sites,
-    sites_new
-};
-use self::exprs::{
-    Cl,
-    Ex,
-    Hx,
-    P_BIND,
-    P_OTHER,
-    X_HANDLE,
-    nested_instance,
-    nested_name,
-    read_exprs
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    push_decimal,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    TyKind,
-    Types,
-    Vars,
-    default_type,
-    display,
-    substitute,
-    vars_new
-};
-use @vesper/check-data::world::{
-    Adt,
-    Field,
-    Variant,
-    World,
-    constructor
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    read_ctx
-};
-use @vesper/check-layout::{
-    Layouts,
-    layout_of,
-    layouts_new
-};
-use @vesper/place-ir::{
-    InstRow,
-    Program,
-    read_program
-};
-use @vesper/place-ir::codes::{
-    Lit,
-    Op,
-    Pat,
-    Term
-};
+use self::certificate::{put_debug};
+use self::evidence::{Sites, sites_new};
+use self::exprs::{Cl, Ex, Hx, P_BIND, P_OTHER, X_HANDLE, nested_instance, nested_name, read_exprs};
+use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{TyKind, Types, Vars, default_type, display, substitute, vars_new};
+use @vesper/check-data::world::{Adt, Field, Variant, World, constructor};
+use @vesper/check-data::input::{Ctx, Reader, read_ctx};
+use @vesper/check-layout::{Layouts, layout_of, layouts_new};
+use @vesper/place-ir::{InstRow, Program, read_program};
+use @vesper/place-ir::codes::{Lit, Op, Pat, Term};
 
 const NONE32: u32 = 4294967295;
 const NONE: u64 = 18446744073709551615;

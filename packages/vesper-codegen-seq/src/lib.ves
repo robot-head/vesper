@@ -23,52 +23,14 @@
 // types, world, program) followed by one `fip` flag per function.
 
 use @vesper/check-data::pack_text;
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    push_decimal,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    Types,
-    debug_type,
-    default_type,
-    substitute,
-    TyKind,
-    TyPass
-};
-use @vesper/check-data::world::{
-    World,
-    vector_words
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    read_ctx
-};
-use @vesper/check-layout::{
-    Layouts,
-    layout_of,
-    layouts_new
-};
-use @vesper/place-ir::{
-    FnRow,
-    InstRow,
-    Program,
-    read_program
-};
-use @vesper/place-ir::codes::{
-    Op,
-    Pat,
-    Term
-};
+use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{Types, debug_type, default_type, substitute, TyKind, TyPass};
+use @vesper/check-data::world::{World, vector_words};
+use @vesper/check-data::input::{Ctx, Reader, read_ctx};
+use @vesper/check-layout::{Layouts, layout_of, layouts_new};
+use @vesper/place-ir::{FnRow, InstRow, Program, read_program};
+use @vesper/place-ir::codes::{Op, Pat, Term};
 
 const NONE32: u32 = 4294967295;
 
