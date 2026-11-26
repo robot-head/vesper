@@ -36,6 +36,9 @@ use vesper::ir::Program;
 use vesper::native::WordFunction;
 use vesper_codegen_swap_test::*;
 
+/// `body_hook`'s answer when it emitted the body (`HANDLED` in
+/// @vesper/codegen-scalar-emit).
+const HANDLED: u64 = 1;
 /// `body_hook`'s answer to words that are not a body plan.
 const BODY_ERROR: u64 = 2;
 
@@ -167,7 +170,7 @@ fn body(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
         return Err(format!("body hook ({function}) kept a lent handle"));
     }
     match answer {
-        1 => {
+        HANDLED => {
             EMITTED.fetch_add(1, Ordering::Relaxed);
             Ok(true)
         }
