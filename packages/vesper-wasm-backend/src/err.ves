@@ -62,56 +62,56 @@ pub fn werr_syms(kind: u8, construct: u8, site: u64, fn_sym: u32, detail_sym: u3
     }
 }
 
-pub fn werr_kind_name(k: u8) -> Str {
-    if k == K_UNSUPPORTED {
+pub fn werr_kind_name(kind: u8) -> Str {
+    if kind == K_UNSUPPORTED {
         "Unsupported"
-    } else if k == K_ENTRY {
+    } else if kind == K_ENTRY {
         "Entry"
-    } else if k == K_LIMIT {
+    } else if kind == K_LIMIT {
         "Limit"
-    } else if k == K_INVALID {
+    } else if kind == K_INVALID {
         "Invalid"
-    } else if k == K_ENCODE {
+    } else if kind == K_ENCODE {
         "Encode"
-    } else if k == K_NOT_PORTED {
+    } else if kind == K_NOT_PORTED {
         "NotPorted"
     } else {
         "UnknownKind"
     }
 }
 
-pub fn werr_construct_name(u: u8) -> Str {
-    if u == U_FUNCTION_VALUE {
+pub fn werr_construct_name(construct: u8) -> Str {
+    if construct == U_FUNCTION_VALUE {
         "FunctionValue"
-    } else if u == U_STRING {
+    } else if construct == U_STRING {
         "String"
-    } else if u == U_FLOAT_REMAINDER {
+    } else if construct == U_FLOAT_REMAINDER {
         "FloatRemainder"
-    } else if u == U_INDEX {
+    } else if construct == U_INDEX {
         "Index"
-    } else if u == U_PROJECTION {
+    } else if construct == U_PROJECTION {
         "Projection"
-    } else if u == U_GENERIC_OPERATION {
+    } else if construct == U_GENERIC_OPERATION {
         "GenericOperation"
-    } else if u == U_GENERIC_EFFECT_INSTANCE {
+    } else if construct == U_GENERIC_EFFECT_INSTANCE {
         "GenericEffectInstance"
-    } else if u == U_LABELLED_EFFECT_ROW {
+    } else if construct == U_LABELLED_EFFECT_ROW {
         "LabelledEffectRow"
-    } else if u == U_INOUT_EFFECT_ARGUMENT {
+    } else if construct == U_INOUT_EFFECT_ARGUMENT {
         "InoutEffectArgument"
-    } else if u == U_FIRST_CLASS_CONTINUATION {
+    } else if construct == U_FIRST_CLASS_CONTINUATION {
         "FirstClassContinuation"
-    } else if u == U_NON_TAIL_RESUMPTIVE_HANDLER {
+    } else if construct == U_NON_TAIL_RESUMPTIVE_HANDLER {
         "NonTailResumptiveHandler"
-    } else if u == U_EXTERNAL_FUNCTION {
+    } else if construct == U_EXTERNAL_FUNCTION {
         "ExternalFunction"
-    } else if u == U_EXPORT_TYPE {
+    } else if construct == U_EXPORT_TYPE {
         "ExportType"
-    } else if u == U_OPERATION {
+    } else if construct == U_OPERATION {
         "Operation"
-    } else if u == U_INTEGER_WIDTH {
+    } else if construct == U_INTEGER_WIDTH {
         "IntegerWidth"
-    } else if u == U_FLOAT32 {
+    } else if construct == U_FLOAT32 {
         "Float32"
     } else {
         "UnknownConstruct"
@@ -133,17 +133,17 @@ pub fn format_werr(in err: WErr, in names: Names, fallback_fn: u32, inout out: C
     }
     out.extend(in ", site=".as_bytes());
     push_decimal(inout out, err.site);
-    let f = if err.fn_sym != 0 {
+    let fn_sym = if err.fn_sym != 0 {
         err.fn_sym
     } else {
         fallback_fn
     };
-    if f != 0 {
+    if fn_sym != 0 {
         out.extend(in ", fn=".as_bytes());
-        if w(f) < names.len() {
-            names.write(f, inout out);
+        if w(fn_sym) < names.len() {
+            names.write(fn_sym, inout out);
         } else {
-            push_decimal(inout out, w(f));
+            push_decimal(inout out, w(fn_sym));
         }
     }
     if err.detail_sym != 0 {

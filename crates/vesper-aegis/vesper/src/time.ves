@@ -124,12 +124,10 @@ pub fn iso8601_utc_to_unix(in s: Slice[u8]) -> Option[u64] {
         return Option::None;
     }
     let days = days_from_civil(year, month, day);
-    Option::Some(
-        wrapping_add(
-            wrapping_add(wrapping_mul(days, SECONDS_PER_DAY), wrapping_mul(hour, SECONDS_PER_HOUR)),
-            wrapping_add(wrapping_mul(minute, SECONDS_PER_MINUTE), second)
-        )
-    )
+    Option::Some(wrapping_add(
+        wrapping_add(wrapping_mul(days, SECONDS_PER_DAY), wrapping_mul(hour, SECONDS_PER_HOUR)),
+        wrapping_add(wrapping_mul(minute, SECONDS_PER_MINUTE), second)
+    ))
 }
 
 // Whether `s[start..end]` is all ASCII digits (any length).

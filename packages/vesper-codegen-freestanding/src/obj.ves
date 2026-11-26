@@ -38,7 +38,7 @@ pub copy struct Sec {
     entsize: u64,
     // For a section: its first relocation section; for a relocation
     // section: the next one with the same target. 0 for none.
-    rel: u64,
+    rel_chain: u64,
     // The data range is inside the object (`object`'s `data()` succeeds).
     data_ok: bool,
     name_ok: bool,
@@ -55,9 +55,9 @@ pub copy struct Sym {
     size: u64,
 }
 
-// One parsed input object: its rows are `secs[sec0..sec0 + nsec]` (index 0,
-// the null section, included) and `syms[sym0..sym0 + nsym]` (index 0
-// included).
+// One parsed input object: its rows are
+// `secs[sec_start..sec_start + sec_count]` (index 0, the null section,
+// included) and `syms[sym_start..sym_start + sym_count]` (index 0 included).
 pub copy struct Obj {
     name: Span,
     base: u64,
@@ -65,94 +65,94 @@ pub copy struct Obj {
     e_type: u16,
     machine: u16,
     e_flags: u32,
-    sec0: u64,
-    nsec: u64,
-    sym0: u64,
-    nsym: u64,
+    sec_start: u64,
+    sec_count: u64,
+    sym_start: u64,
+    sym_count: u64,
     // Index of the symbol table section, 0 for none.
     symtab: u64,
 }
 
-fn o16(in b: Slice[u8], o: Obj, at: u64) -> Option[u16] {
-    if add(at, 2) < at || add(at, 2) > o.len {
+fn o16(in req: Slice[u8], obj: Obj, at: u64) -> Option[u16] {
+    if add(at, 2) < at || add(at, 2) > obj.len {
         return Option::None;
     }
-    rd16(in b, add(o.base, at))
+    rd16(in req, add(obj.base, at))
 }
 
-fn o32(in b: Slice[u8], o: Obj, at: u64) -> Option[u32] {
-    if add(at, 4) < at || add(at, 4) > o.len {
+fn o32(in req: Slice[u8], obj: Obj, at: u64) -> Option[u32] {
+    if add(at, 4) < at || add(at, 4) > obj.len {
         return Option::None;
     }
-    rd32(in b, add(o.base, at))
+    rd32(in req, add(obj.base, at))
 }
 
-fn o64(in b: Slice[u8], o: Obj, at: u64) -> Option[u64] {
-    if add(at, 8) < at || add(at, 8) > o.len {
+fn o64(in req: Slice[u8], obj: Obj, at: u64) -> Option[u64] {
+    if add(at, 8) < at || add(at, 8) > obj.len {
         return Option::None;
     }
-    rd64(in b, add(o.base, at))
+    rd64(in req, add(obj.base, at))
 }
 
-fn w16(x: Option[u16]) -> u64 {
-    match x {
+fn w16(value: Option[u16]) -> u64 {
+    match value {
         Option::Some(v) => widen_u64(v),
         Option::None => Absent::Row,
     }
 }
 
-fn w32(x: Option[u32]) -> u64 {
-    match x {
+fn w32(value: Option[u32]) -> u64 {
+    match value {
         Option::Some(v) => widen_u64(v),
         Option::None => Absent::Row,
     }
 }
 
-fn w64(x: Option[u64]) -> u64 {
-    x.unwrap_or(Absent::Row)
+fn w64(value: Option[u64]) -> u64 {
+    value.unwrap_or(Absent::Row)
 }
 
 // `start..start + size` lies inside the object.
-fn inside(o: Obj, start: u64, size: u64) -> bool {
-    add(start, size) >= start && add(start, size) <= o.len
+fn inside(obj: Obj, start: u64, size: u64) -> bool {
+    add(start, size) >= start && add(start, size) <= obj.len
 }
 
-// The NUL-terminated string at `at` of the table `t` (absolute range
-// `t_at..t_at + t_len`): `(absolute start, length)`, or `None` when `at` is
+// The NUL-terminated string at `at` of the string table (absolute range
+// `table_at..table_at + table_len`): `(absolute start, length)`, or `None` when `at` is
 // outside the table or no NUL ends it.
-fn c_string(in b: Slice[u8], t_at: u64, t_len: u64, at: u64) -> Option[Span] {
-    if at >= t_len {
+fn c_string(in req: Slice[u8], table_at: u64, table_len: u64, at: u64) -> Option[Span] {
+    if at >= table_len {
         return Option::None;
     }
-    let start = add(t_at, at);
-    let end = add(t_at, t_len);
-    if end < start || end > b.len() {
+    let start = add(table_at, at);
+    let end = add(table_at, table_len);
+    if end < start || end > req.len() {
         return Option::None;
     }
-    match b[start..end].find_byte(0) {
+    match req[start..end].find_byte(0) {
         Option::Some(n) => Option::Some(Span { start: start, len: n }),
         Option::None => Option::None,
     }
 }
 
-fn sec_kind(s: Sec) -> u8 {
-    if s.sh_type == Sht::Progbits {
-        if s.flags & Shf::Alloc != 0 {
-            if s.flags & Shf::Execinstr != 0 {
+fn sec_kind(section: Sec) -> u8 {
+    if section.sh_type == Sht::Progbits {
+        if section.flags & Shf::Alloc != 0 {
+            if section.flags & Shf::Execinstr != 0 {
                 return Kind::Text;
             }
-            if s.flags & Shf::Tls != 0 {
+            if section.flags & Shf::Tls != 0 {
                 return Kind::Other;
             }
-            if s.flags & Shf::Write != 0 {
+            if section.flags & Shf::Write != 0 {
                 return Kind::Data;
             }
             return Kind::Rodata;
         }
         return Kind::Other;
     }
-    if s.sh_type == Sht::Nobits {
-        if s.flags & Shf::Tls != 0 {
+    if section.sh_type == Sht::Nobits {
+        if section.flags & Shf::Tls != 0 {
             return Kind::Other;
         }
         return Kind::Bss;
@@ -160,11 +160,11 @@ fn sec_kind(s: Sec) -> u8 {
     Kind::Other
 }
 
-// Parses the object at `b[base..base + len]`, appending its rows. Returns
+// Parses the object at `req[base..base + len]`, appending its rows. Returns
 // false (with `err` set by the caller from `why`) on malformed input; `why`
 // gets a short reason.
 pub fn parse_object(
-    in b: Slice[u8],
+    in req: Slice[u8],
     name: Span,
     base: u64,
     len: u64,
@@ -172,136 +172,134 @@ pub fn parse_object(
     inout syms: ChunkSeq[Sym],
     inout why: ChunkSeq[u8]
 ) -> Obj {
-    let mut o = Obj {
+    let mut obj = Obj {
         name: name,
         base: base,
         len: len,
         e_type: 0,
         machine: 0,
         e_flags: 0,
-        sec0: secs.len(),
-        nsec: 0,
-        sym0: syms.len(),
-        nsym: 0,
+        sec_start: secs.len(),
+        sec_count: 0,
+        sym_start: syms.len(),
+        sym_count: 0,
         symtab: 0
     };
     if len < Ehdr::Bytes
-        || rd8(in b, base) != Ident::Mag0
-        || rd8(in b, add(base, 1)) != Ident::Mag1
-        || rd8(in b, add(base, 2)) != Ident::Mag2
-        || rd8(in b, add(base, 3)) != Ident::Mag3 {
+        || rd8(in req, base) != Ident::Mag0
+        || rd8(in req, add(base, 1)) != Ident::Mag1
+        || rd8(in req, add(base, 2)) != Ident::Mag2
+        || rd8(in req, add(base, 3)) != Ident::Mag3 {
         why.extend(in "not an ELF file".as_bytes());
-        return o;
+        return obj;
     }
-    if rd8(in b, add(base, Ehdr::Class)) != Ident::Class64
-        || rd8(in b, add(base, Ehdr::Data)) != Ident::Data2Lsb
-        || rd8(in b, add(base, Ehdr::Version)) != Ident::Current {
+    if rd8(in req, add(base, Ehdr::Class)) != Ident::Class64
+        || rd8(in req, add(base, Ehdr::Data)) != Ident::Data2Lsb
+        || rd8(in req, add(base, Ehdr::Version)) != Ident::Current {
         why.extend(in "not a little-endian ELF64 file".as_bytes());
-        return o;
+        return obj;
     }
-    o.e_type = wrapping_u16(w16(o16(in b, o, Ehdr::Kind)));
-    o.machine = wrapping_u16(w16(o16(in b, o, Ehdr::Machine)));
-    o.e_flags = wrapping_u32(w32(o32(in b, o, Ehdr::Flags)));
-    let shoff = w64(o64(in b, o, Ehdr::Shoff));
-    let shentsize = w16(o16(in b, o, Ehdr::Shentsize));
-    let mut shnum = w16(o16(in b, o, Ehdr::Shnum));
-    let mut shstrndx = w16(o16(in b, o, Ehdr::Shstrndx));
+    obj.e_type = wrapping_u16(w16(o16(in req, obj, Ehdr::Kind)));
+    obj.machine = wrapping_u16(w16(o16(in req, obj, Ehdr::Machine)));
+    obj.e_flags = wrapping_u32(w32(o32(in req, obj, Ehdr::Flags)));
+    let shoff = w64(o64(in req, obj, Ehdr::Shoff));
+    let shentsize = w16(o16(in req, obj, Ehdr::Shentsize));
+    let mut shnum = w16(o16(in req, obj, Ehdr::Shnum));
+    let mut shstrndx = w16(o16(in req, obj, Ehdr::Shstrndx));
     if shoff == 0 {
         // No section headers: no sections and no symbols.
-        return o;
+        return obj;
     }
     if shentsize != Shdr::Bytes {
         why.extend(in "invalid section header size".as_bytes());
-        return o;
+        return obj;
     }
     if shnum == 0 {
-        shnum = w64(o64(in b, o, add(shoff, Shdr::Size)));
+        shnum = w64(o64(in req, obj, add(shoff, Shdr::Size)));
     }
     if shstrndx == Shn::Xindex {
-        shstrndx = w32(o32(in b, o, add(shoff, Shdr::Link)));
+        shstrndx = w32(o32(in req, obj, add(shoff, Shdr::Link)));
     }
     if shnum == Absent::Row
         || shstrndx == Absent::Row
-        || shnum > o.len / Shdr::Bytes
-        || !inside(o, shoff, wrapping_mul(shnum, Shdr::Bytes)) {
+        || shnum > obj.len / Shdr::Bytes
+        || !inside(obj, shoff, wrapping_mul(shnum, Shdr::Bytes)) {
         why.extend(in "invalid section header table".as_bytes());
-        return o;
+        return obj;
     }
     for i in 0..shnum {
-        let h = add(shoff, wrapping_mul(i, Shdr::Bytes));
-        let sh_type = wrapping_u32(w32(o32(in b, o, add(h, Shdr::Kind))));
-        let offset = w64(o64(in b, o, add(h, Shdr::Offset)));
-        let size = w64(o64(in b, o, add(h, Shdr::Size)));
-        let data_ok = sh_type == Sht::Nobits || inside(o, offset, size);
-        secs.push(
-            Sec {
-                name_at: widen_u64(wrapping_u32(w32(o32(in b, o, h)))),
-                name_len: 0,
-                sh_type: sh_type,
-                flags: w64(o64(in b, o, add(h, Shdr::Flags))),
-                data_at: add(base, offset),
-                size: size,
-                link: wrapping_u32(w32(o32(in b, o, add(h, Shdr::Link)))),
-                info: wrapping_u32(w32(o32(in b, o, add(h, Shdr::Info)))),
-                align: w64(o64(in b, o, add(h, Shdr::Addralign))),
-                entsize: w64(o64(in b, o, add(h, Shdr::Entsize))),
-                rel: 0,
-                data_ok: data_ok,
-                name_ok: false
-            }
-        );
+        let header_at = add(shoff, wrapping_mul(i, Shdr::Bytes));
+        let sh_type = wrapping_u32(w32(o32(in req, obj, add(header_at, Shdr::Kind))));
+        let offset = w64(o64(in req, obj, add(header_at, Shdr::Offset)));
+        let size = w64(o64(in req, obj, add(header_at, Shdr::Size)));
+        let data_ok = sh_type == Sht::Nobits || inside(obj, offset, size);
+        secs.push(Sec {
+            name_at: widen_u64(wrapping_u32(w32(o32(in req, obj, header_at)))),
+            name_len: 0,
+            sh_type: sh_type,
+            flags: w64(o64(in req, obj, add(header_at, Shdr::Flags))),
+            data_at: add(base, offset),
+            size: size,
+            link: wrapping_u32(w32(o32(in req, obj, add(header_at, Shdr::Link)))),
+            info: wrapping_u32(w32(o32(in req, obj, add(header_at, Shdr::Info)))),
+            align: w64(o64(in req, obj, add(header_at, Shdr::Addralign))),
+            entsize: w64(o64(in req, obj, add(header_at, Shdr::Entsize))),
+            rel_chain: 0,
+            data_ok: data_ok,
+            name_ok: false
+        });
     }
-    o.nsec = shnum;
+    obj.sec_count = shnum;
     // Section names.
     let mut str_at: u64 = 0;
     let mut str_len: u64 = 0;
     if shstrndx != 0 && shstrndx < shnum {
-        let st = sec(in secs, o, shstrndx);
-        if st.sh_type != Sht::Nobits && st.data_ok {
-            str_at = st.data_at;
-            str_len = st.size;
+        let names_sec = sec(in secs, obj, shstrndx);
+        if names_sec.sh_type != Sht::Nobits && names_sec.data_ok {
+            str_at = names_sec.data_at;
+            str_len = names_sec.size;
         }
     }
     for i in 0..shnum {
-        let mut s = sec(in secs, o, i);
-        match c_string(in b, str_at, str_len, s.name_at) {
-            Option::Some(n) => {
-                s.name_at = n.start;
-                s.name_len = n.len;
-                s.name_ok = true;
+        let mut section = sec(in secs, obj, i);
+        match c_string(in req, str_at, str_len, section.name_at) {
+            Option::Some(name_span) => {
+                section.name_at = name_span.start;
+                section.name_len = name_span.len;
+                section.name_ok = true;
             }
             Option::None => {
-                s.name_ok = false;
+                section.name_ok = false;
             }
         }
-        let ok = secs.try_set(add(o.sec0, i), s);
+        let ok = secs.try_set(add(obj.sec_start, i), section);
     }
     // The symbol table: the first SHT_SYMTAB section.
     for i in 1..shnum {
-        if o.symtab == 0 && sec(in secs, o, i).sh_type == Sht::Symtab {
-            o.symtab = i;
+        if obj.symtab == 0 && sec(in secs, obj, i).sh_type == Sht::Symtab {
+            obj.symtab = i;
         }
     }
-    if o.symtab != 0 {
-        let st = sec(in secs, o, o.symtab);
-        if !st.data_ok || st.size % SymEnt::Bytes != 0 {
+    if obj.symtab != 0 {
+        let symtab_sec = sec(in secs, obj, obj.symtab);
+        if !symtab_sec.data_ok || symtab_sec.size % SymEnt::Bytes != 0 {
             why.extend(in "invalid ELF symbol table data".as_bytes());
-            return o;
+            return obj;
         }
-        let link = widen_u64(st.link);
+        let link = widen_u64(symtab_sec.link);
         if link >= shnum {
             why.extend(in "invalid ELF string section index".as_bytes());
-            return o;
+            return obj;
         }
-        let strs = sec(in secs, o, link);
-        if !strs.data_ok {
+        let strtab = sec(in secs, obj, link);
+        if !strtab.data_ok {
             why.extend(in "invalid ELF string table data".as_bytes());
-            return o;
+            return obj;
         }
-        let count = st.size / SymEnt::Bytes;
+        let count = symtab_sec.size / SymEnt::Bytes;
         for k in 0..count {
-            let at = add(st.data_at, wrapping_mul(k, SymEnt::Bytes));
-            let name_off = match rd32(in b, at) {
+            let entry_at = add(symtab_sec.data_at, wrapping_mul(k, SymEnt::Bytes));
+            let name_off = match rd32(in req, entry_at) {
                 Option::Some(v) => widen_u64(v),
                 Option::None => 0,
             };
@@ -309,15 +307,15 @@ pub fn parse_object(
                 name_at: 0,
                 name_len: 0,
                 name_ok: true,
-                info: rd8(in b, add(at, SymEnt::Info)),
-                shndx: rd16(in b, add(at, SymEnt::Shndx)).unwrap_or(0),
-                value: rd64(in b, add(at, SymEnt::Value)).unwrap_or(0),
-                size: rd64(in b, add(at, SymEnt::Size)).unwrap_or(0)
+                info: rd8(in req, add(entry_at, SymEnt::Info)),
+                shndx: rd16(in req, add(entry_at, SymEnt::Shndx)).unwrap_or(0),
+                value: rd64(in req, add(entry_at, SymEnt::Value)).unwrap_or(0),
+                size: rd64(in req, add(entry_at, SymEnt::Size)).unwrap_or(0)
             };
-            match c_string(in b, strs.data_at, strs.size, name_off) {
-                Option::Some(n) => {
-                    sym.name_at = n.start;
-                    sym.name_len = n.len;
+            match c_string(in req, strtab.data_at, strtab.size, name_off) {
+                Option::Some(name_span) => {
+                    sym.name_at = name_span.start;
+                    sym.name_len = name_span.len;
                 }
                 Option::None => {
                     sym.name_ok = false;
@@ -325,7 +323,7 @@ pub fn parse_object(
             }
             syms.push(sym);
         }
-        o.nsym = count;
+        obj.sym_count = count;
     }
     // Relocation chains (object's `RelocationSections::parse`), built from
     // the last section down so each chain runs in index order.
@@ -335,34 +333,38 @@ pub fn parse_object(
             break;
         }
         i = wrapping_sub(i, 1);
-        let s = sec(in secs, o, i);
-        if s.sh_type == Sht::Rel || s.sh_type == Sht::Rela || s.sh_type == Sht::Crel {
-            let info = widen_u64(s.info);
-            if widen_u64(s.link) == o.symtab && info != 0 {
+        let section = sec(in secs, obj, i);
+        if section.sh_type == Sht::Rel
+            || section.sh_type == Sht::Rela
+            || section.sh_type == Sht::Crel {
+            let info = widen_u64(section.info);
+            if widen_u64(section.link) == obj.symtab && info != 0 {
                 if info >= shnum {
                     why.extend(in "invalid ELF sh_info for relocation section".as_bytes());
-                    return o;
+                    return obj;
                 }
-                let mut t = sec(in secs, o, info);
-                if t.sh_type == Sht::Rel || t.sh_type == Sht::Rela || t.sh_type == Sht::Crel {
+                let mut target_sec = sec(in secs, obj, info);
+                if target_sec.sh_type == Sht::Rel
+                    || target_sec.sh_type == Sht::Rela
+                    || target_sec.sh_type == Sht::Crel {
                     why.extend(in "unsupported ELF sh_info for relocation section".as_bytes());
-                    return o;
+                    return obj;
                 }
-                let next = t.rel;
-                t.rel = i;
-                let ok1 = secs.try_set(add(o.sec0, info), t);
-                let mut r = sec(in secs, o, i);
-                r.rel = next;
-                let ok2 = secs.try_set(add(o.sec0, i), r);
+                let next = target_sec.rel_chain;
+                target_sec.rel_chain = i;
+                let ok1 = secs.try_set(add(obj.sec_start, info), target_sec);
+                let mut rel_sec = sec(in secs, obj, i);
+                rel_sec.rel_chain = next;
+                let ok2 = secs.try_set(add(obj.sec_start, i), rel_sec);
             }
         }
     }
-    o
+    obj
 }
 
-// Section `i` of `o`.
-pub fn sec(in secs: ChunkSeq[Sec], o: Obj, i: u64) -> Sec {
-    match secs.try_get(add(o.sec0, i)) {
+// Section `i` of `obj`.
+pub fn sec(in secs: ChunkSeq[Sec], obj: Obj, i: u64) -> Sec {
+    match secs.try_get(add(obj.sec_start, i)) {
         Option::Some(s) => s,
         Option::None => Sec {
             name_at: 0,
@@ -375,16 +377,16 @@ pub fn sec(in secs: ChunkSeq[Sec], o: Obj, i: u64) -> Sec {
             info: 0,
             align: 0,
             entsize: 0,
-            rel: 0,
+            rel_chain: 0,
             data_ok: false,
             name_ok: false
         },
     }
 }
 
-// Symbol `i` of `o`.
-pub fn sym(in syms: ChunkSeq[Sym], o: Obj, i: u64) -> Sym {
-    match syms.try_get(add(o.sym0, i)) {
+// Symbol `i` of `obj`.
+pub fn sym(in syms: ChunkSeq[Sym], obj: Obj, i: u64) -> Sym {
+    match syms.try_get(add(obj.sym_start, i)) {
         Option::Some(s) => s,
         Option::None => Sym {
             name_at: 0,
@@ -398,49 +400,49 @@ pub fn sym(in syms: ChunkSeq[Sym], o: Obj, i: u64) -> Sym {
     }
 }
 
-pub fn is_relocatable(o: Obj) -> bool {
-    o.e_type == Et::Rel
+pub fn is_relocatable(obj: Obj) -> bool {
+    obj.e_type == Et::Rel
 }
 
 // One relocation: `r_offset`, the symbol index, the type and the addend.
 pub copy struct Rel {
     offset: u64,
-    sym: u64,
+    sym_index: u64,
     r_type: u32,
     addend: u64,
 }
 
-// The relocations of section `s` of the chain's relocation section `rs`:
-// entry `k` (bounds-checked; `None` past the end).
-pub fn rel_count(r: Sec) -> u64 {
-    if !r.data_ok {
+// The relocations of the chain's relocation section `rel_sec`: their count,
+// and entry `index` (bounds-checked).
+pub fn rel_count(rel_sec: Sec) -> u64 {
+    if !rel_sec.data_ok {
         return 0;
     }
-    if r.sh_type == Sht::Rela {
-        return r.size / RelEnt::RelaBytes;
+    if rel_sec.sh_type == Sht::Rela {
+        return rel_sec.size / RelEnt::RelaBytes;
     }
-    if r.sh_type == Sht::Rel {
-        return r.size / RelEnt::RelBytes;
+    if rel_sec.sh_type == Sht::Rel {
+        return rel_sec.size / RelEnt::RelBytes;
     }
     0
 }
 
-pub fn rel_at(in b: Slice[u8], r: Sec, k: u64) -> Rel {
-    let size = if r.sh_type == Sht::Rela {
+pub fn rel_at(in req: Slice[u8], rel_sec: Sec, index: u64) -> Rel {
+    let size = if rel_sec.sh_type == Sht::Rela {
         RelEnt::RelaBytes
     } else {
         RelEnt::RelBytes
     };
-    let at = add(r.data_at, wrapping_mul(k, size));
-    let info = rd64(in b, add(at, RelEnt::Info)).unwrap_or(0);
-    let addend = if r.sh_type == Sht::Rela {
-        rd64(in b, add(at, RelEnt::Addend)).unwrap_or(0)
+    let at = add(rel_sec.data_at, wrapping_mul(index, size));
+    let info = rd64(in req, add(at, RelEnt::Info)).unwrap_or(0);
+    let addend = if rel_sec.sh_type == Sht::Rela {
+        rd64(in req, add(at, RelEnt::Addend)).unwrap_or(0)
     } else {
         0
     };
     Rel {
-        offset: rd64(in b, at).unwrap_or(0),
-        sym: info >> 32,
+        offset: rd64(in req, at).unwrap_or(0),
+        sym_index: info >> 32,
         r_type: wrapping_u32(info & 4294967295),
         addend: addend
     }
@@ -474,14 +476,14 @@ pub fn string_table(
             }
         }
         order.push(0);
-        let mut k = order.len();
+        let mut slot = order.len();
         loop {
-            if k <= add(pos, 1) {
+            if slot <= add(pos, 1) {
                 break;
             }
-            k = wrapping_sub(k, 1);
-            let prev = order.try_get(wrapping_sub(k, 1)).unwrap_or(0);
-            let ok = order.try_set(k, prev);
+            slot = wrapping_sub(slot, 1);
+            let prev = order.try_get(wrapping_sub(slot, 1)).unwrap_or(0);
+            let ok = order.try_set(slot, prev);
         }
         let ok = order.try_set(pos, i);
     }
@@ -491,25 +493,25 @@ pub fn string_table(
     let mut prev: u64 = Absent::Row;
     for k in 0..order.len() {
         let id = order.try_get(k).unwrap_or(0);
-        let s = at64(in starts, id);
-        let l = at64(in lens, id);
+        let start = at64(in starts, id);
+        let len = at64(in lens, id);
         if prev != Absent::Row
-            && ends_with(in strs, at64(in starts, prev), at64(in lens, prev), s, l) {
-            let ok = offsets.try_set(id, wrapping_sub(wrapping_sub(offset, l), 1));
+            && ends_with(in strs, at64(in starts, prev), at64(in lens, prev), start, len) {
+            let ok = offsets.try_set(id, wrapping_sub(wrapping_sub(offset, len), 1));
         } else {
             let ok = offsets.try_set(id, offset);
-            for c in 0..l {
-                data.push(strs.try_get(add(s, c)).unwrap_or(0));
+            for byte_index in 0..len {
+                data.push(strs.try_get(add(start, byte_index)).unwrap_or(0));
             }
             data.push(0);
-            offset = add(offset, add(l, 1));
+            offset = add(offset, add(len, 1));
             prev = id;
         }
     }
 }
 
-fn at64(in s: ChunkSeq[u64], i: u64) -> u64 {
-    s.try_get(i).unwrap_or(0)
+fn at64(in values: ChunkSeq[u64], i: u64) -> u64 {
+    values.try_get(i).unwrap_or(0)
 }
 
 // Byte `pos` (1-based from the end) of string `id`, 0 past its start.
@@ -520,11 +522,11 @@ fn rev_byte(
     id: u64,
     pos: u64
 ) -> u8 {
-    let l = at64(in lens, id);
-    if pos > l {
+    let len = at64(in lens, id);
+    if pos > len {
         return 0;
     }
-    strs.try_get(add(at64(in starts, id), wrapping_sub(l, pos))).unwrap_or(0)
+    strs.try_get(add(at64(in starts, id), wrapping_sub(len, pos))).unwrap_or(0)
 }
 
 // String `a` sorts before string `b`.
@@ -537,26 +539,33 @@ fn rev_greater(
 ) -> bool {
     let mut pos: u64 = 1;
     loop {
-        let x = rev_byte(in strs, in starts, in lens, a, pos);
-        let y = rev_byte(in strs, in starts, in lens, b, pos);
-        if x != y {
-            return x > y;
+        let a_byte = rev_byte(in strs, in starts, in lens, a, pos);
+        let b_byte = rev_byte(in strs, in starts, in lens, b, pos);
+        if a_byte != b_byte {
+            return a_byte > b_byte;
         }
-        if x == 0 {
+        if a_byte == 0 {
             return false;
         }
         pos = add(pos, 1);
     }
 }
 
-// `strs[ps..ps + pl]` ends with `strs[s..s + l]`.
-fn ends_with(in strs: ChunkSeq[u8], ps: u64, pl: u64, s: u64, l: u64) -> bool {
-    if l > pl {
+// `strs[whole_start..whole_start + whole_len]` ends with
+// `strs[suffix_start..suffix_start + suffix_len]`.
+fn ends_with(
+    in strs: ChunkSeq[u8],
+    whole_start: u64,
+    whole_len: u64,
+    suffix_start: u64,
+    suffix_len: u64
+) -> bool {
+    if suffix_len > whole_len {
         return false;
     }
-    let off = add(ps, wrapping_sub(pl, l));
-    for i in 0..l {
-        if strs.try_get(add(off, i)) != strs.try_get(add(s, i)) {
+    let tail_at = add(whole_start, wrapping_sub(whole_len, suffix_len));
+    for i in 0..suffix_len {
+        if strs.try_get(add(tail_at, i)) != strs.try_get(add(suffix_start, i)) {
             return false;
         }
     }
@@ -566,17 +575,17 @@ fn ends_with(in strs: ChunkSeq[u8], ps: u64, pl: u64, s: u64, l: u64) -> bool {
 fn pad_to(inout out: ChunkSeq[u8], align: u64) {
     if align > 1 {
         let len = out.len();
-        let r = len % align;
-        if r != 0 {
-            let at = grow(inout out, wrapping_sub(align, r));
+        let remainder = len % align;
+        if remainder != 0 {
+            let at = grow(inout out, wrapping_sub(align, remainder));
         }
     }
 }
 
 // The stub as `object::write` lays out a relocatable ELF64 object with one
 // `.text.boot` section of `code` (aligned to `align`), its RELA relocations
-// and global hidden symbols: the defined ones first (`defined[i]` names
-// `names[def_starts[i]..]` at `def_values[i]`), then the undefined ones in
+// and global hidden symbols: the defined ones first (symbol `i < defined`
+// names `names[starts[i]..]` at `values[i]`), then the undefined ones in
 // the order the relocations first name them. Section indices: 1
 // `.text.boot`, 2 `.rela.text.boot`, 3 `.symtab`, 4 `.strtab`,
 // 5 `.shstrtab`.
@@ -594,19 +603,19 @@ pub fn write_stub_object(
     in rel_syms: ChunkSeq[u64],
     in rel_types: ChunkSeq[u32]
 ) -> ChunkSeq[u8] {
-    let nsym = starts.len();
-    let nrel = rel_offsets.len();
+    let sym_count = starts.len();
+    let reloc_count = rel_offsets.len();
     // Offsets, as the writer reserves them.
     let text_off = align_to(Ehdr::Bytes, align);
     let symtab_off = align_to(add(text_off, code.len()), ELF_ALIGN);
-    let symtab_size = wrapping_mul(add(nsym, 1), SymEnt::Bytes);
+    let symtab_size = wrapping_mul(add(sym_count, 1), SymEnt::Bytes);
     let mut strtab: ChunkSeq[u8] = ChunkSeq::new[u8]();
     strtab.push(0);
     let mut str_offsets: ChunkSeq[u64] = ChunkSeq::new[u64]();
     string_table(in names, in starts, in lens, 1, inout strtab, inout str_offsets);
     let strtab_off = add(symtab_off, symtab_size);
     let rela_off = align_to(add(strtab_off, strtab.len()), ELF_ALIGN);
-    let rela_size = wrapping_mul(nrel, RelEnt::RelaBytes);
+    let rela_size = wrapping_mul(reloc_count, RelEnt::RelaBytes);
     // Section names, in the order the writer adds them.
     let mut sh_names: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut sh_starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -653,8 +662,8 @@ pub fn write_stub_object(
     out.extend(in code.as_slice());
     // Symbols: the null symbol, then every symbol (all global).
     pad_to(inout out, ELF_ALIGN);
-    let z = grow(inout out, SymEnt::Bytes);
-    for i in 0..nsym {
+    let null_sym = grow(inout out, SymEnt::Bytes);
+    for i in 0..sym_count {
         push32(inout out, wrapping_u32(at64(in str_offsets, i)));
         if i < defined {
             // STB_GLOBAL, STT_FUNC; STV_HIDDEN; in `.text.boot`.
@@ -673,7 +682,7 @@ pub fn write_stub_object(
     }
     out.extend(in strtab.as_slice());
     pad_to(inout out, ELF_ALIGN);
-    for k in 0..nrel {
+    for k in 0..reloc_count {
         push64(inout out, at64(in rel_offsets, k));
         let r_type = match rel_types.try_get(k) {
             Option::Some(v) => widen_u64(v),
@@ -686,7 +695,7 @@ pub fn write_stub_object(
     out.extend(in shstrtab.as_slice());
     pad_to(inout out, ELF_ALIGN);
     // Section headers.
-    let n = grow(inout out, Shdr::Bytes);
+    let null_header = grow(inout out, Shdr::Bytes);
     section_header(
         inout out,
         at64(in sh_offsets, 0),
@@ -757,20 +766,20 @@ fn add_name(
     in name: Str
 ) {
     starts.push(strs.len());
-    let n = name.as_bytes();
-    lens.push(n.len());
-    strs.extend(in n);
+    let bytes = name.as_bytes();
+    lens.push(bytes.len());
+    strs.extend(in bytes);
 }
 
-fn align_to(v: u64, a: u64) -> u64 {
-    if a <= 1 {
-        return v;
+fn align_to(value: u64, align: u64) -> u64 {
+    if align <= 1 {
+        return value;
     }
-    let r = v % a;
-    if r == 0 {
-        v
+    let remainder = value % align;
+    if remainder == 0 {
+        value
     } else {
-        add(v, wrapping_sub(a, r))
+        add(value, wrapping_sub(align, remainder))
     }
 }
 
@@ -779,7 +788,7 @@ pub fn section_header(
     name: u64,
     kind: u64,
     flags: u64,
-    off: u64,
+    offset: u64,
     size: u64,
     link: u64,
     info: u64,
@@ -790,7 +799,7 @@ pub fn section_header(
     push32(inout out, wrapping_u32(kind));
     push64(inout out, flags);
     push64(inout out, 0);
-    push64(inout out, off);
+    push64(inout out, offset);
     push64(inout out, size);
     push32(inout out, wrapping_u32(link));
     push32(inout out, wrapping_u32(info));
@@ -801,48 +810,48 @@ pub fn section_header(
 // Output section of an input section in `link::link` (`classify`):
 // OUT_TEXT..OUT_BSS (link.ves order), 4 to skip it, 5 for an allocated
 // section the linker cannot place.
-pub fn classify(s: Sec) -> u8 {
-    if s.flags & Shf::Alloc == 0 {
+pub fn classify(section: Sec) -> u8 {
+    if section.flags & Shf::Alloc == 0 {
         return 4;
     }
-    let k = sec_kind(s);
-    if k == Kind::Text {
+    let kind = sec_kind(section);
+    if kind == Kind::Text {
         0
-    } else if k == Kind::Rodata {
+    } else if kind == Kind::Rodata {
         1
-    } else if k == Kind::Data {
+    } else if kind == Kind::Data {
         2
-    } else if k == Kind::Bss {
+    } else if kind == Kind::Bss {
         3
-    } else if s.size == 0 {
+    } else if section.size == 0 {
         4
     } else {
         5
     }
 }
 
-pub fn is_nobits(s: Sec) -> bool {
-    s.sh_type == Sht::Nobits
+pub fn is_nobits(section: Sec) -> bool {
+    section.sh_type == Sht::Nobits
 }
 
 // `SymbolSection::Section(_)`.
-pub fn sym_in_section(s: Sym) -> bool {
-    s.shndx != Shn::Undef && s.shndx < Shn::Loreserve
+pub fn sym_in_section(symbol: Sym) -> bool {
+    symbol.shndx != Shn::Undef && symbol.shndx < Shn::Loreserve
 }
 
-pub fn sym_undefined(s: Sym) -> bool {
-    s.shndx == Shn::Undef
+pub fn sym_undefined(symbol: Sym) -> bool {
+    symbol.shndx == Shn::Undef
 }
 
 // `SymbolSection::Absolute` (a file symbol is `None`).
-pub fn sym_absolute(s: Sym) -> bool {
-    s.shndx == Shn::Abs && (s.info & Stt::Mask) != Stt::File
+pub fn sym_absolute(symbol: Sym) -> bool {
+    symbol.shndx == Shn::Abs && (symbol.info & Stt::Mask) != Stt::File
 }
 
-pub fn sym_is_section(s: Sym) -> bool {
-    (s.info & Stt::Mask) == Stt::Section
+pub fn sym_is_section(symbol: Sym) -> bool {
+    (symbol.info & Stt::Mask) == Stt::Section
 }
 
-pub fn sym_global(s: Sym) -> bool {
-    (s.info >> Stb::Shift) != Stb::Local
+pub fn sym_global(symbol: Sym) -> bool {
+    (symbol.info >> Stb::Shift) != Stb::Local
 }

@@ -15,9 +15,14 @@ use @vesper/front::kinds::{
     k_whitespace
 };
 use @vesper/front::util::{w32};
+use @vesper-std/bytes::ascii::{
+    APOSTROPHE, BACKTICK, CLOSE_PAREN, COMMA, DIGIT_ZERO, LOWER_A, LOWER_F, LOWER_X, LOWER_Z,
+    OPEN_PAREN, PLUS, SPACE, TILDE, UNDERSCORE, UPPER_A, UPPER_E, UPPER_F, UPPER_Z
+};
 use self::util::{
-    Reader, add, bit, byte, char_at, inc, is_digit, is_space_char, is_text, push_range, put_buf,
-    put_text, starts_with, sub, trim_end, trim_start, u8_at, u64_at
+    HEX_LETTER_BASE, HEX_PREFIX_BYTES, HEX_UPPER_LETTER_BASE, NOT_A_DIGIT, PAIR_WORDS, Reader,
+    STATUS_ERROR, STATUS_OK, add, bit, byte, char_at, inc, is_digit, is_space_char, is_text,
+    push_range, put_buf, put_text, starts_with, sub, trim_end, trim_start, u8_at, u64_at
 };
 
 // The device bits of a `sim(...)` spec (`Device` of vesper-doc).
@@ -33,9 +38,31 @@ pub fn device_disk() -> u64 {
     4
 }
 
+// The preflight's group stack: three words per open group, the completed
+// statement peak two words back from its end.
+const GROUP_WORDS: u64 = 3;
+const GROUP_PEAK_BACK: u64 = 2;
+
+// The bytes of the `seed=`, `compile_fail(`, `entry=` and `sim(` prefixes,
+// of the shortest `sim(..)` attribute, of a diagnostic code (`E0123`), of
+// `///` or `//!` and of the `vesper` language tag.
+const SEED_PREFIX_BYTES: u64 = 5;
+const COMPILE_FAIL_PREFIX_BYTES: u64 = 13;
+const ENTRY_PREFIX_BYTES: u64 = 6;
+const SIM_PREFIX_BYTES: u64 = 4;
+const MIN_SIM_BYTES: u64 = 5;
+const DIAGNOSTIC_CODE_BYTES: u64 = 5;
+const DOC_COMMENT_PREFIX_BYTES: u64 = 3;
+const VESPER_TAG_BYTES: u64 = 6;
+// The fewest fence bytes, and the longest `entry=` name.
+const MIN_FENCE_WIDTH: u64 = 3;
+const MAX_ENTRY_BYTES: u64 = 128;
+// The example count's word of the `extract` result, after the status.
+const EXAMPLE_COUNT_WORD: u64 = 1;
+
 fn put_error(in msg: ChunkSeq[u8]) -> ChunkSeq[u64] {
     let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    out.push(1);
+    out.push(STATUS_ERROR);
     put_buf(inout out, in msg);
     out
 }
@@ -120,11 +147,11 @@ pub fn preflight(in b: Slice[u8]) -> ChunkSeq[u64] {
             let mut peak: u64 = 0;
             let mut opener = widen_u64(k);
             let depth = stack.len();
-            if depth >= 3 {
-                outer = u64_at(in stack, sub(depth, 3));
-                peak = u64_at(in stack, sub(depth, 2));
+            if depth >= GROUP_WORDS {
+                outer = u64_at(in stack, sub(depth, GROUP_WORDS));
+                peak = u64_at(in stack, sub(depth, GROUP_PEAK_BACK));
                 opener = u64_at(in stack, sub(depth, 1));
-                stack.truncate(sub(depth, 3));
+                stack.truncate(sub(depth, GROUP_WORDS));
                 outer_sum = sub(outer_sum, outer);
             }
             let mut inner = segment;
@@ -138,8 +165,8 @@ pub fn preflight(in b: Slice[u8]) -> ChunkSeq[u64] {
                 && k == k_r_brace();
         } else if k == k_semi() {
             let depth = stack.len();
-            if depth >= 3 {
-                let at = sub(depth, 2);
+            if depth >= GROUP_WORDS {
+                let at = sub(depth, GROUP_PEAK_BACK);
                 if segment > u64_at(in stack, at) {
                     let ok = stack.try_set(at, segment);
                 }
@@ -152,7 +179,7 @@ pub fn preflight(in b: Slice[u8]) -> ChunkSeq[u64] {
             segment = inc(segment);
         }
         let weighted = add(segment, outer_sum);
-        if stack.len() / 3 > max_nesting || weighted > max_segment {
+        if stack.len() / GROUP_WORDS > max_nesting || weighted > max_segment {
             return error_of(in "doctest nesting/expression-segment limit");
         }
         if completed_item {
@@ -161,7 +188,7 @@ pub fn preflight(in b: Slice[u8]) -> ChunkSeq[u64] {
         }
     }
     let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    out.push(0);
+    out.push(STATUS_OK);
     out
 }
 
@@ -172,7 +199,7 @@ pub fn preflight(in b: Slice[u8]) -> ChunkSeq[u64] {
 fn parse_u64(in digits: ChunkSeq[u8], s: u64, radix: u64) -> (bool, u64) {
     let n = digits.len();
     let mut i = s;
-    if i < n && u8_at(in digits, i) == 43 {
+    if i < n && u8_at(in digits, i) == PLUS {
         i = inc(i);
     }
     if i >= n {
@@ -184,13 +211,13 @@ fn parse_u64(in digits: ChunkSeq[u8], s: u64, radix: u64) -> (bool, u64) {
             break;
         }
         let c = u8_at(in digits, i);
-        let mut dv: u64 = 99;
+        let mut dv: u64 = NOT_A_DIGIT;
         if is_digit(c) {
-            dv = sub(widen_u64(c), 48);
-        } else if radix == 16 && c >= 97 && c <= 102 {
-            dv = sub(widen_u64(c), 87);
-        } else if radix == 16 && c >= 65 && c <= 70 {
-            dv = sub(widen_u64(c), 55);
+            dv = sub(widen_u64(c), widen_u64(DIGIT_ZERO));
+        } else if radix == 16 && c >= LOWER_A && c <= LOWER_F {
+            dv = sub(widen_u64(c), widen_u64(HEX_LETTER_BASE));
+        } else if radix == 16 && c >= UPPER_A && c <= UPPER_F {
+            dv = sub(widen_u64(c), widen_u64(HEX_UPPER_LETTER_BASE));
         }
         if dv >= radix {
             return (false, 0);
@@ -247,7 +274,7 @@ fn parse_sim(in src: Slice[u8], s: u64, e: u64, inout msg: ChunkSeq[u8]) -> (boo
         // The next part: up to the next comma.
         let mut pe = ps;
         loop {
-            if pe >= e || byte(in src, pe) == 44 {
+            if pe >= e || byte(in src, pe) == COMMA {
                 break;
             }
             pe = inc(pe);
@@ -255,7 +282,7 @@ fn parse_sim(in src: Slice[u8], s: u64, e: u64, inout msg: ChunkSeq[u8]) -> (boo
         let a = trim_start(in src, ps, pe);
         let z = trim_end(in src, a, pe);
         if starts_with(in src, a, z, in "seed=") {
-            let vs = add(a, 5);
+            let vs = add(a, SEED_PREFIX_BYTES);
             if has_seed {
                 sim_error(inout msg, in "duplicate seed");
                 return (false, 0, 0);
@@ -263,13 +290,15 @@ fn parse_sim(in src: Slice[u8], s: u64, e: u64, inout msg: ChunkSeq[u8]) -> (boo
             digits.clear();
             for i in vs..z {
                 let c = byte(in src, i);
-                if c != 95 {
+                if c != UNDERSCORE {
                     digits.push(c);
                 }
             }
-            let hex = digits.len() >= 2 && u8_at(in digits, 0) == 48 && u8_at(in digits, 1) == 120;
+            let hex = digits.len() >= HEX_PREFIX_BYTES
+                && u8_at(in digits, 0) == DIGIT_ZERO
+                && u8_at(in digits, 1) == LOWER_X;
             let (ok, v) = if hex {
-                parse_u64(in digits, 2, 16)
+                parse_u64(in digits, HEX_PREFIX_BYTES, 16)
             } else {
                 parse_u64(in digits, 0, 10)
             };
@@ -331,7 +360,7 @@ fn fence(in src: Slice[u8], s: u64, e: u64) -> (bool, u8, u64, u64, u64) {
         return (false, 0, 0, 0, 0);
     }
     let first = byte(in src, a);
-    if first != 96 && first != 126 {
+    if first != BACKTICK && first != TILDE {
         return (false, 0, 0, 0, 0);
     }
     let mut i = a;
@@ -342,7 +371,7 @@ fn fence(in src: Slice[u8], s: u64, e: u64) -> (bool, u8, u64, u64, u64) {
         i = inc(i);
     }
     let count = sub(i, a);
-    if count < 3 {
+    if count < MIN_FENCE_WIDTH {
         return (false, 0, 0, 0, 0);
     }
     let is = trim_start(in src, i, z);
@@ -378,7 +407,10 @@ fn attrs_none() -> Attrs {
 }
 
 fn is_entry_byte(c: u8) -> bool {
-    is_digit(c) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95
+    is_digit(c)
+        || (c >= UPPER_A && c <= UPPER_Z)
+        || (c >= LOWER_A && c <= LOWER_Z)
+        || c == UNDERSCORE
 }
 
 // `attributes(src[s..e])` (with `attribute_parts`): false and the message
@@ -388,9 +420,9 @@ fn attributes(in src: Slice[u8], s: u64, e: u64, inout a: Attrs, inout msg: Chun
     let mut depth: u64 = 0;
     for i in s..e {
         let c = byte(in src, i);
-        if c == 40 {
+        if c == OPEN_PAREN {
             depth = inc(depth);
-        } else if c == 41 {
+        } else if c == CLOSE_PAREN {
             if depth == 0 {
                 msg.clear();
                 msg.extend(in "unbalanced doctest fence attribute".as_bytes());
@@ -414,11 +446,11 @@ fn attributes(in src: Slice[u8], s: u64, e: u64, inout a: Attrs, inout msg: Chun
                 break;
             }
             let c = byte(in src, pe);
-            if c == 40 {
+            if c == OPEN_PAREN {
                 depth = inc(depth);
-            } else if c == 41 {
+            } else if c == CLOSE_PAREN {
                 depth = sub(depth, 1);
-            } else if c == 44 && depth == 0 {
+            } else if c == COMMA && depth == 0 {
                 break;
             }
             pe = inc(pe);
@@ -452,15 +484,17 @@ fn attributes(in src: Slice[u8], s: u64, e: u64, inout a: Attrs, inout msg: Chun
 // Whether `src[s..e]` is `prefix` + something + `)`.
 fn wrapped(in src: Slice[u8], s: u64, e: u64, in prefix: Str) -> bool {
     let n = prefix.as_bytes().len();
-    sub(e, s) > n && starts_with(in src, s, e, in prefix) && byte(in src, sub(e, 1)) == 41
+    sub(e, s) > n && starts_with(in src, s, e, in prefix) && byte(in src, sub(e, 1)) == CLOSE_PAREN
 }
 
 // One attribute of `attributes`.
 fn part(in src: Slice[u8], s: u64, e: u64, inout a: Attrs, inout msg: ChunkSeq[u8]) -> bool {
     if wrapped(in src, s, e, in "compile_fail(") {
-        let cs = add(s, 13);
+        let cs = add(s, COMPILE_FAIL_PREFIX_BYTES);
         let ce = sub(e, 1);
-        let mut good = !a.has_expected && sub(ce, cs) == 5 && byte(in src, cs) == 69;
+        let mut good = !a.has_expected
+            && sub(ce, cs) == DIAGNOSTIC_CODE_BYTES
+            && byte(in src, cs) == UPPER_E;
         if good {
             for i in inc(cs)..ce {
                 if !is_digit(byte(in src, i)) {
@@ -479,9 +513,12 @@ fn part(in src: Slice[u8], s: u64, e: u64, inout a: Attrs, inout msg: ChunkSeq[u
         return true;
     }
     if starts_with(in src, s, e, in "entry=") {
-        let ns = add(s, 6);
+        let ns = add(s, ENTRY_PREFIX_BYTES);
         let len = sub(e, ns);
-        let mut good = !a.has_entry && len > 0 && len <= 128 && !is_digit(byte(in src, ns));
+        let mut good = !a.has_entry
+            && len > 0
+            && len <= MAX_ENTRY_BYTES
+            && !is_digit(byte(in src, ns));
         if good {
             for i in ns..e {
                 if !is_entry_byte(byte(in src, i)) {
@@ -499,13 +536,15 @@ fn part(in src: Slice[u8], s: u64, e: u64, inout a: Attrs, inout msg: ChunkSeq[u
         a.entry_end = e;
         return true;
     }
-    if sub(e, s) >= 5 && starts_with(in src, s, e, in "sim(") && byte(in src, sub(e, 1)) == 41 {
+    if sub(e, s) >= MIN_SIM_BYTES
+        && starts_with(in src, s, e, in "sim(")
+        && byte(in src, sub(e, 1)) == CLOSE_PAREN {
         if a.has_sim {
             msg.clear();
             msg.extend(in "duplicate sim doctest attribute".as_bytes());
             return false;
         }
-        let (ok, seed, devices) = parse_sim(in src, add(s, 4), sub(e, 1), inout msg);
+        let (ok, seed, devices) = parse_sim(in src, add(s, SIM_PREFIX_BYTES), sub(e, 1), inout msg);
         if !ok {
             return false;
         }
@@ -517,7 +556,7 @@ fn part(in src: Slice[u8], s: u64, e: u64, inout a: Attrs, inout msg: ChunkSeq[u
     msg.clear();
     msg.extend(in "unsupported Vesper doctest fence attribute '".as_bytes());
     push_range(inout msg, in src, s, e);
-    msg.push(39);
+    msg.push(APOSTROPHE);
     false
 }
 
@@ -551,9 +590,9 @@ fn put_example(
     out.push(bit(a.has_sim));
     out.push(a.seed);
     out.push(a.devices);
-    let n = lines.len() / 2;
+    let n = lines.len() / PAIR_WORDS;
     out.push(n);
-    for i in 0..wrapping_mul(n, 2) {
+    for i in 0..wrapping_mul(n, PAIR_WORDS) {
         out.push(u64_at(in lines, i));
     }
 }
@@ -571,7 +610,7 @@ pub fn extract(in b: Slice[u8]) -> ChunkSeq[u64] {
     let t = lex_raw(in src, inout d);
     let n = t.kind.len();
     let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    out.push(0);
+    out.push(STATUS_OK);
     out.push(0);
     let mut examples: u64 = 0;
     let mut msg: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -597,8 +636,8 @@ pub fn extract(in b: Slice[u8]) -> ChunkSeq[u64] {
             in_block = false;
             continue;
         }
-        let mut ls = add(s, 3);
-        if ls < e && byte(in src, ls) == 32 {
+        let mut ls = add(s, DOC_COMMENT_PREFIX_BYTES);
+        if ls < e && byte(in src, ls) == SPACE {
             ls = inc(ls);
         }
         if !in_block || !all_space(in src, previous, s) {
@@ -635,7 +674,7 @@ pub fn extract(in b: Slice[u8]) -> ChunkSeq[u64] {
             // The language: the info up to its first comma, trimmed.
             let mut ce = is;
             loop {
-                if ce >= ie || byte(in src, ce) == 44 {
+                if ce >= ie || byte(in src, ce) == COMMA {
                     break;
                 }
                 ce = inc(ce);
@@ -644,7 +683,7 @@ pub fn extract(in b: Slice[u8]) -> ChunkSeq[u64] {
             let lz = trim_end(in src, la, ce);
             let vesper = is_text(in src, la, lz, in "vesper");
             if !vesper && starts_with(in src, la, lz, in "vesper") {
-                let (c, cn) = char_at(in src, add(la, 6));
+                let (c, cn) = char_at(in src, add(la, VESPER_TAG_BYTES));
                 if is_space_char(c) {
                     return error_of(
                         in "unsupported Vesper doctest fence metadata (use comma-separated attributes)"
@@ -669,6 +708,6 @@ pub fn extract(in b: Slice[u8]) -> ChunkSeq[u64] {
     if active && has_example {
         return error_of(in "unterminated Vesper doctest fence");
     }
-    let ok = out.try_set(1, examples);
+    let ok = out.try_set(EXAMPLE_COUNT_WORD, examples);
     out
 }

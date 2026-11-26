@@ -55,23 +55,19 @@ pub fn unsupported() -> u32 {
 }
 
 fn raise[T](kind: u32, detail: u32, code: i64) -> T eff [Fail[GpuErr]] {
-    Fail::raise(
-        GpuErr {
-            kind: kind,
-            detail: detail,
-            code: code,
-        }
-    )
+    Fail::raise(GpuErr {
+        kind: kind,
+        detail: detail,
+        code: code,
+    })
 }
 
 fn fail(kind: u32, detail: u32, code: i64) eff [Fail[GpuErr]] {
-    Fail::raise(
-        GpuErr {
-            kind: kind,
-            detail: detail,
-            code: code,
-        }
-    )
+    Fail::raise(GpuErr {
+        kind: kind,
+        detail: detail,
+        code: code,
+    })
 }
 
 // A VkResult below zero is an error of call `call`.
@@ -1199,9 +1195,10 @@ fn put_bytes(inout s: Scratch, at: u64, in bytes: Slice[u8]) eff [
 }
 
 fn get32(in s: Scratch, at: u64) -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
-    widen_u32(s.image[at]) | (widen_u32(s.image[at + 1]) << 8) | (
-        widen_u32(s.image[at + 2]) << 16
-    ) | (widen_u32(s.image[at + 3]) << 24)
+    widen_u32(s.image[at])
+        | (widen_u32(s.image[at + 1]) << 8)
+        | (widen_u32(s.image[at + 2]) << 16)
+        | (widen_u32(s.image[at + 3]) << 24)
 }
 
 fn get64(in s: Scratch, at: u64) -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
@@ -1473,23 +1470,22 @@ fn open_on(
         if fits {
             match compute_family(library, physical) {
                 Option::Some(family) => {
-                    chosen = Option::Some(
-                        Dev {
-                            instance: instance,
-                            physical: physical,
-                            device: 0,
-                            queue: 0,
-                            family: family,
-                            timeline: 0,
-                            api_version: widen_u64(api),
-                            device_type: widen_u64(get32(in p, Properties2::DeviceType)),
-                            max_invocations: widen_u64(
-                                get32(in p, Properties2::MaxComputeWorkGroupInvocations)
-                            ),
-                            max_range: widen_u64(get32(in p, Properties2::MaxStorageBufferRange)),
-                            library: library,
-                        }
-                    );
+                    chosen = Option::Some(Dev {
+                        instance: instance,
+                        physical: physical,
+                        device: 0,
+                        queue: 0,
+                        family: family,
+                        timeline: 0,
+                        api_version: widen_u64(api),
+                        device_type: widen_u64(get32(in p, Properties2::DeviceType)),
+                        max_invocations: widen_u64(get32(
+                            in p,
+                            Properties2::MaxComputeWorkGroupInvocations
+                        )),
+                        max_range: widen_u64(get32(in p, Properties2::MaxStorageBufferRange)),
+                        library: library,
+                    });
                 }
                 Option::None => {}
             }
@@ -2591,9 +2587,10 @@ const F32_SIGN: u32 = 2147483648;
 
 fn word_at(in words: Slice[u8], i: u64) -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
     let at = i * 4;
-    widen_u32(words[at]) | (widen_u32(words[at + 1]) << 8) | (widen_u32(words[at + 2]) << 16) | (
-        widen_u32(words[at + 3]) << 24
-    )
+    widen_u32(words[at])
+        | (widen_u32(words[at + 1]) << 8)
+        | (widen_u32(words[at + 2]) << 16)
+        | (widen_u32(words[at + 3]) << 24)
 }
 
 // The order-preserving encoding of a finite f32's bits (-0 as +0), the one

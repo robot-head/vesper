@@ -84,10 +84,7 @@ pub struct Db {
 
 // Word `i` of `s`, or 0 past its end.
 fn word_at(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 // Sets word `i` of `s` when it exists.

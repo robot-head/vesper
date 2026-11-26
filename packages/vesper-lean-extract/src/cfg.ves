@@ -666,9 +666,8 @@ pub fn liveness(
                 clear(inout defs);
                 uses_defs(in p, inout names, in fx, in f, ins, inout uses, inout defs);
                 for j in 0..nw {
-                    let x = (
-                        u64_at(in required, j) & (u64_at(in defs, j) ^ 18446744073709551615)
-                    ) | u64_at(in uses, j);
+                    let x = (u64_at(in required, j) & (u64_at(in defs, j) ^ 18446744073709551615))
+                        | u64_at(in uses, j);
                     let ok = required.try_set(j, x);
                 }
             }

@@ -85,8 +85,8 @@ fn swap_registry() {
 /// takes two words, so every enum layout moves (mirrored in BUILD.bazel).
 #[cfg(feature = "divergent")]
 const DIVERGENT_EDIT: (&str, &str) = (
-    "        8\n    } else {\n        0\n",
-    "        16\n    } else {\n        0\n",
+    "    if is_enum { 8 } else { 0 }\n",
+    "    if is_enum { 16 } else { 0 }\n",
 );
 
 /// With the whole layout swapped (#1177) the pilot's word arithmetic runs
@@ -142,6 +142,14 @@ const DIVERGENT_LEAN_EXTRACT_EDIT: (&str, &str) = (
 /// back empty, so every build fails (mirrored in BUILD.bazel).
 #[cfg(feature = "divergent-verified-codegen")]
 const DIVERGENT_VERIFIED_CODEGEN_EDIT: (&str, &str) = (
+    "(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    words\n",
+    "(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = words;\n    let _ = t.try_set(0, 0);\n    t\n",
+);
+
+/// The sugar expansion module's divergence check: every source reads back
+/// as having no sugar (mirrored in BUILD.bazel).
+#[cfg(feature = "divergent-sugar")]
+const DIVERGENT_SUGAR_EDIT: (&str, &str) = (
     "(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    words\n",
     "(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = words;\n    let _ = t.try_set(0, 0);\n    t\n",
 );
@@ -343,6 +351,12 @@ fn main() {
                 DIVERGENT_VERIFIED_CODEGEN_EDIT.0,
                 DIVERGENT_VERIFIED_CODEGEN_EDIT.1,
             )
+        } else {
+            port
+        };
+        #[cfg(feature = "divergent-sugar")]
+        let port = if library == "hybrid_sugar" {
+            port.edit(DIVERGENT_SUGAR_EDIT.0, DIVERGENT_SUGAR_EDIT.1)
         } else {
             port
         };

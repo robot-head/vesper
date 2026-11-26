@@ -13,8 +13,8 @@ pub fn run_lint(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail
         if i >= n {
             break;
         }
-        let a_buf = arg(in args, i);
-        if eq(in a_buf.as_slice(), in "--json") {
+        let arg_buf = arg(in args, i);
+        if eq(in arg_buf.as_slice(), in "--json") {
             json = true;
             break;
         }
@@ -31,20 +31,20 @@ pub fn run_lint(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail
         if i >= n {
             break;
         }
-        let a_buf = arg(in args, i);
-        let a = a_buf.as_slice();
-        if eq(in a, in "--help") || eq(in a, in "-h") {
+        let arg_buf = arg(in args, i);
+        let arg_text = arg_buf.as_slice();
+        if eq(in arg_text, in "--help") || eq(in arg_text, in "-h") {
             print(
                 stdout_stream(),
                 in "Usage: vesper lint [FILE|DIR] [--json] [--fix] [--semver-safe] [--config PATH]\n\nCheck actual resolved effects and supported inout field accesses.\nUnused effects (L0102) may be removed only after complete candidate reparse/recheck.\nProjection narrowing (L0101) is diagnostic-only: caller/signature changes need review.\nWith no path (or a directory), lint every .ves source of the package: the nearest\nLoom.toml at or above the directory (else the directory itself); hidden, target/, bazel-*\nand nested-package directories are skipped, symlinks are not followed and any failed file fails.\n--semver-safe requires --fix and validates exported supported interface compatibility.\nHandlers, closures, indirect/open-row/recursive calls remain conservative.\nInputs: regular UTF-8 files <=256 KiB; token/nesting/work budgets also apply.\nThe nearest package Loom.toml supplies policy; --config overrides discovery.\nAllow suppresses diagnostics and fixes; warn succeeds; remaining deny exits nonzero.\nFuture warn/allow lints are reported unavailable; future deny/plugins fail closed.\nNo arena escape, mode-relaxation, FIP, secret/Cancel or plugin-pack analysis.\n"
                     .as_bytes()
             );
             return 0;
-        } else if eq(in a, in "--json") {} else if eq(in a, in "--fix") {
+        } else if eq(in arg_text, in "--json") {} else if eq(in arg_text, in "--fix") {
             fix = true;
-        } else if eq(in a, in "--semver-safe") {
+        } else if eq(in arg_text, in "--semver-safe") {
             semver_safe = true;
-        } else if eq(in a, in "--config") {
+        } else if eq(in arg_text, in "--config") {
             if has_config {
                 return emit_invalid(
                     json,
@@ -62,9 +62,9 @@ pub fn run_lint(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail
                     in config.as_slice()
                 );
             }
-            let v_buf = arg(in args, i);
-            let v = v_buf.as_slice();
-            if v.len() > 4096 {
+            let value_buf = arg(in args, i);
+            let value = value_buf.as_slice();
+            if value.len() > 4096 {
                 return emit_invalid(
                     json,
                     in "lint config path exceeds 4096 bytes".as_bytes(),
@@ -72,7 +72,7 @@ pub fn run_lint(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail
                     in config.as_slice()
                 );
             }
-            if v.len() != 0 && byte_at(in v, 0) == 45 {
+            if value.len() != 0 && byte_at(in value, 0) == 45 {
                 return emit_invalid(
                     json,
                     in "--config requires a path".as_bytes(),
@@ -81,11 +81,11 @@ pub fn run_lint(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail
                 );
             }
             has_config = true;
-            config.extend(in v);
-        } else if a.len() != 0 && byte_at(in a, 0) == 45 {
+            config.extend(in value);
+        } else if arg_text.len() != 0 && byte_at(in arg_text, 0) == 45 {
             let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
             err.extend(in "unknown lint option '".as_bytes());
-            err.extend(in a);
+            err.extend(in arg_text);
             err.push(39);
             return emit_invalid(json, in err.as_slice(), has_config, in config.as_slice());
         } else {
@@ -98,7 +98,7 @@ pub fn run_lint(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail
                 );
             }
             has_path = true;
-            path.extend(in a);
+            path.extend(in arg_text);
         }
         i = wrapping_add(i, 1);
     }
@@ -148,41 +148,41 @@ fn emit_invalid(
     fail(in error)
 }
 
-fn push_json_str(inout out: ChunkSeq[u8], in s: Slice[u8]) {
+fn push_json_str(inout out: ChunkSeq[u8], in text: Slice[u8]) {
     out.push(34);
-    for i in 0..s.len() {
-        let b = byte_at(in s, i);
-        if b == 34 {
+    for i in 0..text.len() {
+        let byte = byte_at(in text, i);
+        if byte == 34 {
             out.extend(in "\\\"".as_bytes());
-        } else if b == 92 {
+        } else if byte == 92 {
             out.extend(in "\\\\".as_bytes());
-        } else if b == 8 {
+        } else if byte == 8 {
             out.extend(in "\\b".as_bytes());
-        } else if b == 12 {
+        } else if byte == 12 {
             out.extend(in "\\f".as_bytes());
-        } else if b == 10 {
+        } else if byte == 10 {
             out.extend(in "\\n".as_bytes());
-        } else if b == 13 {
+        } else if byte == 13 {
             out.extend(in "\\r".as_bytes());
-        } else if b == 9 {
+        } else if byte == 9 {
             out.extend(in "\\t".as_bytes());
-        } else if b < 32 {
+        } else if byte < 32 {
             out.extend(in "\\u00".as_bytes());
-            let hi = b >> 4;
-            let lo = b & 15;
-            out.push(hex_digit(hi));
-            out.push(hex_digit(lo));
+            let high_nibble = byte >> 4;
+            let low_nibble = byte & 15;
+            out.push(hex_digit(high_nibble));
+            out.push(hex_digit(low_nibble));
         } else {
-            out.push(b);
+            out.push(byte);
         }
     }
     out.push(34);
 }
 
-fn hex_digit(d: u8) -> u8 {
-    if d < 10 {
-        wrapping_add(48, d)
+fn hex_digit(nibble: u8) -> u8 {
+    if nibble < 10 {
+        wrapping_add(48, nibble)
     } else {
-        wrapping_add(97, wrapping_sub(d, 10))
+        wrapping_add(97, wrapping_sub(nibble, 10))
     }
 }

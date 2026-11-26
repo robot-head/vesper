@@ -139,34 +139,32 @@ pub fn color_pairs(
 ) -> u64 eff [Fail[ColoringError]] {
     let n = a.len();
     if n > capacity || n > U32_MAX {
-        return raise_coloring(
-            ColoringError::CapacityExceeded {
-                constraints: wrapping_usize(n),
-                capacity: wrapping_usize(capacity)
-            }
-        );
+        return raise_coloring(ColoringError::CapacityExceeded {
+            constraints: wrapping_usize(n),
+            capacity: wrapping_usize(capacity)
+        });
     }
     let bodies = masks.len();
     for c in 0..n {
         let ca = g32(in a, c);
         let cb = g64(in b, c);
         if widen_u64(ca) >= bodies {
-            return raise_coloring(
-                ColoringError::BodyOutOfRange { constraint: wrapping_usize(c), body: ca }
-            );
+            return raise_coloring(ColoringError::BodyOutOfRange {
+                constraint: wrapping_usize(c),
+                body: ca
+            });
         }
         if cb <= U32_MAX && cb >= bodies {
-            return raise_coloring(
-                ColoringError::BodyOutOfRange {
-                    constraint: wrapping_usize(c),
-                    body: wrapping_u32(cb)
-                }
-            );
+            return raise_coloring(ColoringError::BodyOutOfRange {
+                constraint: wrapping_usize(c),
+                body: wrapping_u32(cb)
+            });
         }
         if cb == widen_u64(ca) {
-            return raise_coloring(
-                ColoringError::SelfConstraint { constraint: wrapping_usize(c), body: ca }
-            );
+            return raise_coloring(ColoringError::SelfConstraint {
+                constraint: wrapping_usize(c),
+                body: ca
+            });
         }
         // key(): (min, max) of the pair, or (a, a) against static geometry.
         let wa = widen_u64(ca);
@@ -233,12 +231,10 @@ pub fn color_sets(
         count = wrapping_sub(offs.len(), 1);
     }
     if count > capacity || count > U32_MAX {
-        return raise_coloring(
-            ColoringError::CapacityExceeded {
-                constraints: wrapping_usize(count),
-                capacity: wrapping_usize(capacity)
-            }
-        );
+        return raise_coloring(ColoringError::CapacityExceeded {
+            constraints: wrapping_usize(count),
+            capacity: wrapping_usize(capacity)
+        });
     }
     if offs.len() > 0 && g32(in offs, 0) != 0 {
         return raise_coloring(ColoringError::BadArity { constraint: 0 });
@@ -257,15 +253,17 @@ pub fn color_sets(
             let body = g32(in bodies, k);
             let wb = widen_u64(body);
             if wb >= n {
-                return raise_coloring(
-                    ColoringError::BodyOutOfRange { constraint: wrapping_usize(i), body: body }
-                );
+                return raise_coloring(ColoringError::BodyOutOfRange {
+                    constraint: wrapping_usize(i),
+                    body: body
+                });
             }
             for e in lo..k {
                 if g32(in bodies, e) == body {
-                    return raise_coloring(
-                        ColoringError::SelfConstraint { constraint: wrapping_usize(i), body: body }
-                    );
+                    return raise_coloring(ColoringError::SelfConstraint {
+                        constraint: wrapping_usize(i),
+                        body: body
+                    });
                 }
             }
             if wb < min {

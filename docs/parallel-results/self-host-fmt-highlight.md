@@ -68,11 +68,30 @@ the work budget refuses at the same unit as Rust.
 
 What the port hands back to the Rust code:
 
-- **Macro sources:** sources in the macro profile (`m!` after a name, or a
-  quotation keyword) have a different token cap and an opaque-region rule,
-  so the port returns code 10 and the Rust code formats them. 64 of the
-  repository's 900 `.ves` files are macro sources. The differential test
-  checks that every source handed back is one.
+- **Macro sources (#1996 part 3c-2):** sources in the macro profile (`m!`
+  after a name, or a quotation keyword) now format in the port too. The
+  strict macro parser `macro_source::parse` and the surface profile's macro
+  check `validate_surface` are ported to @vesper/front
+  (`src/source_macro.ves`, budgets included). A source without sugar is
+  laid out over its recovery CST (`recover`), and one with sugar over the
+  surface CST. tests/self_host_front_v2.rs compares the macro parser and the
+  surface check with Rust on the macro test strings, the repository's macro
+  sources (five limit sets) and 2,000 fuzzed sources, with 0 diffs. All 118
+  repository files that spell `quote` or a macro call format the same as
+  the seed. Before this, the port returned code 10 for them and the Rust
+  code formatted them.
+- **Recovery formatting (#1996 part 3c-3):** `format_recovery_source`
+  (`vesper fmt --recovery`, the LSP's partial formatting) runs in the port
+  as `format_recovery`. It formats each complete top-level function of a
+  damaged buffer through the same formatter, over @vesper/front's editor
+  syntax (`recover`), charges the same work, and copies every other byte.
+  `parse_complete_items` is not run again, because `recover` already parsed
+  each complete declaration alone with the same parser and limits. Its
+  prepaid work is still charged. tests/recovery_differential.rs compares
+  output, edits, counts, digest and errors with the seed. It covers every
+  repository file, 1,500 damaged copies and sweeps of every limit, with
+  0 diffs. On 1,806 damaged, non-canonical sources (766 with edits) the
+  port takes 0.54x the seed's time (5 ABBA rounds).
 - **Large sources stay in the port:** the gate lexes with lane 10's
   `lex_with_limits` at the hard ceilings and one diagnostic, as
   `guarded_lex` does, so sources past the front end's defaults (65,536
@@ -148,8 +167,9 @@ Linux, in the cloud container.
   between runs of N batches and 1 batch, divided by N - 1.
 - **Workloads:** "largest" is the largest `.ves` file in the repository,
   `crates/vesper-ebpf/vesper/src/verifier.ves`. "corpus" is every
-  repository `.ves` file. For fmt, the corpus leaves out the 64 macro
-  sources, which the port hands to Rust.
+  repository `.ves` file. Before #1996 part 3c-2, the fmt corpus left out
+  the 64 macro sources, which the port then handed to Rust. With them, an
+  8-epoch ABBA of the corpus is 0.55x (3,716 ms vs 6,887 ms).
 
 | Workload | Vesper/Rust time | Rust Ir | Vesper Ir | Ir ratio |
 | --- | --- | --- | --- | --- |

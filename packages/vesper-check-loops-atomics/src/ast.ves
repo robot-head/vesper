@@ -40,10 +40,10 @@ pub const P_LIT: u8 = 2;
 pub const P_TUPLE: u8 = 3;
 pub const P_CTOR: u8 = 4;
 
-// One expression. Children are `kids[a..a+n]` in the order the Rust walks
-// visit them (a block's statement values then its tail; a call's callee
-// then its arguments; a handle's state, body, return clause and operation
-// clauses; a `for`'s iterable then its body).
+// One expression. Children are `kids[kid_start..kid_start+kid_count]` in
+// the order the Rust walks visit them (a block's statement values then its
+// tail; a call's callee then its arguments; a handle's state, body, return
+// clause and operation clauses; a `for`'s iterable then its body).
 pub copy struct ExprRow {
     kind: u8,
     // Range: inclusive. Handle: 1 = has state, 2 = region block.
@@ -55,7 +55,7 @@ pub copy struct ExprRow {
     is_let: bool,
     // Whether this expression is a match arm's body (its `pat` is the
     // arm's pattern).
-    arm: bool,
+    is_arm_body: bool,
     start: u64,
     end: u64,
     // Name, Struct, Field, Call (none): the name symbol.
@@ -73,12 +73,12 @@ pub copy struct ExprRow {
     // Let value: the `let` pattern. Match arm body: the arm pattern.
     // For: the loop pattern.
     pat: u32,
-    a: u32,
-    n: u32,
+    kid_start: u32,
+    kid_count: u32,
     // Call: its explicit type arguments; Closure: its parameter types
-    // (`tys[ta..ta+tn]`).
-    ta: u32,
-    tn: u32,
+    // (`tys[ty_start..ty_start+ty_count]`).
+    ty_start: u32,
+    ty_count: u32,
 }
 
 pub copy struct PatRow {
@@ -86,8 +86,8 @@ pub copy struct PatRow {
     start: u64,
     end: u64,
     name: u32,
-    a: u32,
-    n: u32,
+    kid_start: u32,
+    kid_count: u32,
 }
 
 // A function's signature and body (`ast::Function`).
@@ -96,9 +96,9 @@ pub copy struct FnRow {
     generics: u32,
     // `atomics::worker_row`: the row holds only stateless capabilities
     worker_row: bool,
-    // params: passes[pa..pa+pn] and types tys[pa'..]
-    pa: u32,
-    pn: u32,
+    // params: param_passes and param_types[param_start..param_start+param_count]
+    param_start: u32,
+    param_count: u32,
     result: u32,
     // NONE32 without a body.
     body: u32,
@@ -133,11 +133,8 @@ pub fn exprs_new() -> Exprs {
     }
 }
 
-fn at32(in s: ChunkSeq[u32], i: u64) -> u32 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => NONE32,
-    }
+fn at32(in seq: ChunkSeq[u32], i: u64) -> u32 {
+    seq.try_get(i).unwrap_or(NONE32)
 }
 
 fn empty_row() -> ExprRow {
@@ -146,7 +143,7 @@ fn empty_row() -> ExprRow {
         flag: 0,
         pass: 0,
         is_let: false,
-        arm: false,
+        is_arm_body: false,
         start: 0,
         end: 0,
         name: NONE32,
@@ -155,67 +152,74 @@ fn empty_row() -> ExprRow {
         unchecked: false,
         let_ty: NONE32,
         pat: NONE32,
-        a: 0,
-        n: 0,
-        ta: 0,
-        tn: 0
+        kid_start: 0,
+        kid_count: 0,
+        ty_start: 0,
+        ty_count: 0
     }
 }
 
 impl Exprs {
-    pub fn row(in self, e: u32) -> ExprRow {
-        match self.rows.try_get(widen_u64(e)) {
+    pub fn row(in self, expr: u32) -> ExprRow {
+        match self.rows.try_get(widen_u64(expr)) {
             Option::Some(r) => r,
             Option::None => empty_row(),
         }
     }
 
-    pub fn kind(in self, e: u32) -> u8 {
-        self.row(e).kind
+    pub fn kind(in self, expr: u32) -> u8 {
+        self.row(expr).kind
     }
 
-    // Child `i` of `e` (NONE32 past the end).
-    pub fn kid(in self, e: u32, i: u64) -> u32 {
-        let r = self.row(e);
-        if i >= widen_u64(r.n) {
+    // Child `i` of `expr` (NONE32 past the end).
+    pub fn kid(in self, expr: u32, i: u64) -> u32 {
+        let row = self.row(expr);
+        if i >= widen_u64(row.kid_count) {
             return NONE32;
         }
-        at32(in self.kids, wrapping_add(widen_u64(r.a), i))
+        at32(in self.kids, wrapping_add(widen_u64(row.kid_start), i))
     }
 
-    // One past the last row of `e`'s subtree: rows are written in
+    // One past the last row of `expr`'s subtree: rows are written in
     // pre-order and nothing else writes rows while a subtree is read, so
-    // the subtree is the run `e..subtree_end(e)`.
-    pub fn subtree_end(in self, e: u32) -> u32 {
-        let mut at = e;
+    // the subtree is the run `expr..subtree_end(expr)`.
+    pub fn subtree_end(in self, expr: u32) -> u32 {
+        let mut at = expr;
         loop {
-            let r = self.row(at);
-            if r.n == 0 {
+            let row = self.row(at);
+            if row.kid_count == 0 {
                 return wrapping_add(at, 1);
             }
-            at = self.kid(at, wrapping_sub(widen_u64(r.n), 1));
+            at = self.kid(at, wrapping_sub(widen_u64(row.kid_count), 1));
         }
     }
 
-    pub fn kid_count(in self, e: u32) -> u64 {
-        widen_u64(self.row(e).n)
+    pub fn kid_count(in self, expr: u32) -> u64 {
+        widen_u64(self.row(expr).kid_count)
     }
 
-    pub fn ty_at(in self, e: u32, i: u64) -> u32 {
-        let r = self.row(e);
-        at32(in self.tys, wrapping_add(widen_u64(r.ta), i))
+    pub fn ty_at(in self, expr: u32, i: u64) -> u32 {
+        let row = self.row(expr);
+        at32(in self.tys, wrapping_add(widen_u64(row.ty_start), i))
     }
 
-    pub fn pat(in self, p: u32) -> PatRow {
-        match self.pats.try_get(widen_u64(p)) {
+    pub fn pat(in self, pattern: u32) -> PatRow {
+        match self.pats.try_get(widen_u64(pattern)) {
             Option::Some(r) => r,
-            Option::None => PatRow { kind: P_WILD, start: 0, end: 0, name: NONE32, a: 0, n: 0 },
+            Option::None => PatRow {
+                kind: P_WILD,
+                start: 0,
+                end: 0,
+                name: NONE32,
+                kid_start: 0,
+                kid_count: 0
+            },
         }
     }
 
-    pub fn pat_kid(in self, p: u32, i: u64) -> u32 {
-        let r = self.pat(p);
-        at32(in self.pat_kids, wrapping_add(widen_u64(r.a), i))
+    pub fn pat_kid(in self, pattern: u32, i: u64) -> u32 {
+        let row = self.pat(pattern);
+        at32(in self.pat_kids, wrapping_add(widen_u64(row.kid_start), i))
     }
 
     pub fn fn_count(in self) -> u64 {
@@ -229,100 +233,111 @@ impl Exprs {
                 name: NONE32,
                 generics: 0,
                 worker_row: true,
-                pa: 0,
-                pn: 0,
+                param_start: 0,
+                param_count: 0,
                 result: NONE32,
                 body: NONE32
             },
         }
     }
 
-    pub fn param_pass(in self, f: FnRow, i: u64) -> u8 {
-        match self.param_passes.try_get(wrapping_add(widen_u64(f.pa), i)) {
-            Option::Some(p) => p,
-            Option::None => 0,
-        }
+    pub fn param_pass(in self, func: FnRow, i: u64) -> u8 {
+        self.param_passes.try_get(wrapping_add(widen_u64(func.param_start), i)).unwrap_or(0)
     }
 
-    pub fn param_type(in self, f: FnRow, i: u64) -> u32 {
-        at32(in self.param_types, wrapping_add(widen_u64(f.pa), i))
+    pub fn param_type(in self, func: FnRow, i: u64) -> u32 {
+        at32(in self.param_types, wrapping_add(widen_u64(func.param_start), i))
     }
 
-    fn set(inout self, e: u32, r: ExprRow) {
-        let ok = self.rows.try_set(widen_u64(e), r);
+    fn set(inout self, expr: u32, row: ExprRow) {
+        let ok = self.rows.try_set(widen_u64(expr), row);
     }
 
     // Moves the children `stack[mark..]` of a pattern to `pat_kids`;
     // returns where they start.
     fn finish_pat_kids(inout self, mark: u64) -> u32 {
-        let a = wrapping_u32(self.pat_kids.len());
+        let start = wrapping_u32(self.pat_kids.len());
         let end = self.stack.len();
         for i in mark..end {
             self.pat_kids.push(at32(in self.stack, i));
         }
         self.stack.truncate(mark);
-        a
+        start
     }
 }
 
-fn sym(in nmap: ChunkSeq[u32], x: u64) -> u32 {
-    at32(in nmap, x)
+fn sym(in nmap: ChunkSeq[u32], name_id: u64) -> u32 {
+    at32(in nmap, name_id)
 }
 
 // One pattern, in pre-order: kind, start, end, then Bind: name; Tuple: n,
 // patterns; Constructor: name, n, (field name, pattern) pairs.
 pub fn read_pat(
-    inout r: Reader,
-    in b: Slice[u8],
-    inout x: Exprs,
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout exprs: Exprs,
     in nmap: ChunkSeq[u32],
     in tmap: ChunkSeq[u32]
 ) -> u32 {
-    let kind = wrapping_u8(r.word(in b));
-    let start = r.word(in b);
-    let end = r.word(in b);
-    let id = wrapping_u32(x.pats.len());
-    x.pats.push(PatRow { kind: kind, start: start, end: end, name: NONE32, a: 0, n: 0 });
+    let kind = wrapping_u8(reader.word(in bytes));
+    let start = reader.word(in bytes);
+    let end = reader.word(in bytes);
+    let id = wrapping_u32(exprs.pats.len());
+    exprs.pats.push(PatRow {
+        kind: kind,
+        start: start,
+        end: end,
+        name: NONE32,
+        kid_start: 0,
+        kid_count: 0
+    });
     let mut name = NONE32;
-    let mark = x.stack.len();
+    let mark = exprs.stack.len();
     if kind == P_BIND {
-        name = sym(in nmap, r.word(in b));
+        name = sym(in nmap, reader.word(in bytes));
     } else if kind == P_TUPLE {
-        let n = r.word(in b);
+        let n = reader.word(in bytes);
         for i in 0..n {
-            let k = read_pat(inout r, in b, inout x, in nmap, in tmap);
-            x.stack.push(k);
+            let kid = read_pat(inout reader, in bytes, inout exprs, in nmap, in tmap);
+            exprs.stack.push(kid);
         }
     } else if kind == P_CTOR {
-        name = sym(in nmap, r.word(in b));
-        let n = r.word(in b);
+        name = sym(in nmap, reader.word(in bytes));
+        let n = reader.word(in bytes);
         for i in 0..n {
-            let field = r.word(in b);
-            let k = read_pat(inout r, in b, inout x, in nmap, in tmap);
-            x.stack.push(k);
+            let field = reader.word(in bytes);
+            let kid = read_pat(inout reader, in bytes, inout exprs, in nmap, in tmap);
+            exprs.stack.push(kid);
         }
     }
-    let n = wrapping_u32(wrapping_sub(x.stack.len(), mark));
-    let a = x.finish_pat_kids(mark);
-    let ok = x.pats.try_set(
+    let kid_count = wrapping_u32(wrapping_sub(exprs.stack.len(), mark));
+    let kid_start = exprs.finish_pat_kids(mark);
+    let ok = exprs.pats.try_set(
         widen_u64(id),
-        PatRow { kind: kind, start: start, end: end, name: name, a: a, n: n }
+        PatRow {
+            kind: kind,
+            start: start,
+            end: end,
+            name: name,
+            kid_start: kid_start,
+            kid_count: kid_count
+        }
     );
     id
 }
 
 fn read_types_into(
-    inout r: Reader,
-    in b: Slice[u8],
-    inout x: Exprs,
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout exprs: Exprs,
     in tmap: ChunkSeq[u32],
     n: u64
 ) -> u32 {
-    let a = wrapping_u32(x.tys.len());
+    let start = wrapping_u32(exprs.tys.len());
     for i in 0..n {
-        x.tys.push(at32(in tmap, r.word(in b)));
+        exprs.tys.push(at32(in tmap, reader.word(in bytes)));
     }
-    a
+    start
 }
 
 // What a parent knows of a child expression before reading it: the
@@ -331,212 +346,226 @@ fn read_types_into(
 pub copy struct Up {
     pass: u8,
     is_let: bool,
-    arm: bool,
+    is_arm_body: bool,
     unchecked: bool,
     let_ty: u32,
     pat: u32,
 }
 
 pub fn up_none() -> Up {
-    Up { pass: 0, is_let: false, arm: false, unchecked: false, let_ty: NONE32, pat: NONE32 }
+    Up { pass: 0, is_let: false, is_arm_body: false, unchecked: false, let_ty: NONE32, pat: NONE32 }
 }
 
 // One expression in pre-order: kind, start, end, then the kind's words
 // (see `AstEnc::expr` in the harness).
 pub fn read_expr(
-    inout r: Reader,
-    in b: Slice[u8],
-    inout x: Exprs,
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout exprs: Exprs,
     in nmap: ChunkSeq[u32],
     in tmap: ChunkSeq[u32],
     up: Up
 ) -> u32 {
-    let kind = wrapping_u8(r.word(in b));
-    let start = r.word(in b);
-    let end = r.word(in b);
-    let id = wrapping_u32(x.rows.len());
+    let kind = wrapping_u8(reader.word(in bytes));
+    let start = reader.word(in bytes);
+    let end = reader.word(in bytes);
+    let id = wrapping_u32(exprs.rows.len());
     let mut row = empty_row();
     row.kind = kind;
     row.start = start;
     row.end = end;
     row.pass = up.pass;
     row.is_let = up.is_let;
-    row.arm = up.arm;
+    row.is_arm_body = up.is_arm_body;
     row.unchecked = up.unchecked;
     row.let_ty = up.let_ty;
     row.pat = up.pat;
-    x.rows.push(row);
-    let mark = x.stack.len();
+    exprs.rows.push(row);
+    let mark = exprs.stack.len();
     if kind == E_NAME {
-        row.name = sym(in nmap, r.word(in b));
+        row.name = sym(in nmap, reader.word(in bytes));
     } else if kind == E_TUPLE {
-        let n = r.word(in b);
+        let n = reader.word(in bytes);
         for i in 0..n {
-            let k = read_expr(inout r, in b, inout x, in nmap, in tmap, up_none());
-            x.stack.push(k);
+            let kid = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, up_none());
+            exprs.stack.push(kid);
         }
     } else if kind == E_STRUCT {
-        row.name = sym(in nmap, r.word(in b));
-        let n = r.word(in b);
+        row.name = sym(in nmap, reader.word(in bytes));
+        let n = reader.word(in bytes);
         for i in 0..n {
-            let k = read_expr(inout r, in b, inout x, in nmap, in tmap, up_none());
-            x.stack.push(k);
+            let kid = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, up_none());
+            exprs.stack.push(kid);
         }
     } else if kind == E_BLOCK {
-        let n = r.word(in b);
+        let n = reader.word(in bytes);
         for i in 0..n {
-            let tag = r.word(in b);
+            let tag = reader.word(in bytes);
             if tag == 0 {
-                let p = read_pat(inout r, in b, inout x, in nmap, in tmap);
-                let t = at32(in tmap, r.word(in b));
-                let mut u = up_none();
-                u.is_let = true;
-                u.pat = p;
-                u.let_ty = t;
-                let v = read_expr(inout r, in b, inout x, in nmap, in tmap, u);
-                x.stack.push(v);
+                let pattern = read_pat(inout reader, in bytes, inout exprs, in nmap, in tmap);
+                let let_ty = at32(in tmap, reader.word(in bytes));
+                let mut kid_up = up_none();
+                kid_up.is_let = true;
+                kid_up.pat = pattern;
+                kid_up.let_ty = let_ty;
+                let let_value = read_expr(
+                    inout reader,
+                    in bytes,
+                    inout exprs,
+                    in nmap,
+                    in tmap,
+                    kid_up
+                );
+                exprs.stack.push(let_value);
             } else {
-                let k = read_expr(inout r, in b, inout x, in nmap, in tmap, up_none());
-                x.stack.push(k);
+                let kid = read_expr(
+                    inout reader,
+                    in bytes,
+                    inout exprs,
+                    in nmap,
+                    in tmap,
+                    up_none()
+                );
+                exprs.stack.push(kid);
             }
         }
-        if r.word(in b) != 0 {
+        if reader.word(in bytes) != 0 {
             row.flag = 1;
-            let k = read_expr(inout r, in b, inout x, in nmap, in tmap, up_none());
-            x.stack.push(k);
+            let kid = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, up_none());
+            exprs.stack.push(kid);
         }
     } else if kind == E_CALL {
-        let k = read_expr(inout r, in b, inout x, in nmap, in tmap, up_none());
-        x.stack.push(k);
-        let nt = r.word(in b);
-        row.ta = read_types_into(inout r, in b, inout x, in tmap, nt);
-        row.tn = wrapping_u32(nt);
-        let n = r.word(in b);
+        let kid = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, up_none());
+        exprs.stack.push(kid);
+        let ty_count = reader.word(in bytes);
+        row.ty_start = read_types_into(inout reader, in bytes, inout exprs, in tmap, ty_count);
+        row.ty_count = wrapping_u32(ty_count);
+        let n = reader.word(in bytes);
         for i in 0..n {
-            let mut u = up_none();
-            u.pass = wrapping_u8(r.word(in b));
-            let v = read_expr(inout r, in b, inout x, in nmap, in tmap, u);
-            x.stack.push(v);
+            let mut kid_up = up_none();
+            kid_up.pass = wrapping_u8(reader.word(in bytes));
+            let arg = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, kid_up);
+            exprs.stack.push(arg);
         }
     } else if kind == E_FIELD {
-        let k = read_expr(inout r, in b, inout x, in nmap, in tmap, up_none());
-        x.stack.push(k);
-        row.name = sym(in nmap, r.word(in b));
+        let kid = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, up_none());
+        exprs.stack.push(kid);
+        row.name = sym(in nmap, reader.word(in bytes));
     } else if kind == E_TRY || kind == E_UNARY || kind == E_LOOP {
-        let k = read_expr(inout r, in b, inout x, in nmap, in tmap, up_none());
-        x.stack.push(k);
+        let kid = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, up_none());
+        exprs.stack.push(kid);
     } else if kind == E_INDEX || kind == E_BINARY || kind == E_ASSIGN {
-        let k = read_expr(inout r, in b, inout x, in nmap, in tmap, up_none());
-        x.stack.push(k);
-        let k = read_expr(inout r, in b, inout x, in nmap, in tmap, up_none());
-        x.stack.push(k);
+        let kid = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, up_none());
+        exprs.stack.push(kid);
+        let kid = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, up_none());
+        exprs.stack.push(kid);
     } else if kind == E_IF {
-        let k = read_expr(inout r, in b, inout x, in nmap, in tmap, up_none());
-        x.stack.push(k);
-        let k = read_expr(inout r, in b, inout x, in nmap, in tmap, up_none());
-        x.stack.push(k);
-        if r.word(in b) != 0 {
+        let kid = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, up_none());
+        exprs.stack.push(kid);
+        let kid = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, up_none());
+        exprs.stack.push(kid);
+        if reader.word(in bytes) != 0 {
             row.flag = 1;
-            let k = read_expr(inout r, in b, inout x, in nmap, in tmap, up_none());
-            x.stack.push(k);
+            let kid = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, up_none());
+            exprs.stack.push(kid);
         }
     } else if kind == E_MATCH {
-        let k = read_expr(inout r, in b, inout x, in nmap, in tmap, up_none());
-        x.stack.push(k);
-        let n = r.word(in b);
+        let kid = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, up_none());
+        exprs.stack.push(kid);
+        let n = reader.word(in bytes);
         for i in 0..n {
-            let mut u = up_none();
-            u.pat = read_pat(inout r, in b, inout x, in nmap, in tmap);
-            u.arm = true;
-            let v = read_expr(inout r, in b, inout x, in nmap, in tmap, u);
-            x.stack.push(v);
+            let mut kid_up = up_none();
+            kid_up.pat = read_pat(inout reader, in bytes, inout exprs, in nmap, in tmap);
+            kid_up.is_arm_body = true;
+            let arm_body = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, kid_up);
+            exprs.stack.push(arm_body);
         }
     } else if kind == E_CLOSURE {
-        let n = r.word(in b);
-        row.ta = read_types_into(inout r, in b, inout x, in tmap, n);
-        row.tn = wrapping_u32(n);
-        row.ty = at32(in tmap, r.word(in b));
-        row.expected = at32(in tmap, r.word(in b));
-        let k = read_expr(inout r, in b, inout x, in nmap, in tmap, up_none());
-        x.stack.push(k);
+        let n = reader.word(in bytes);
+        row.ty_start = read_types_into(inout reader, in bytes, inout exprs, in tmap, n);
+        row.ty_count = wrapping_u32(n);
+        row.ty = at32(in tmap, reader.word(in bytes));
+        row.expected = at32(in tmap, reader.word(in bytes));
+        let kid = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, up_none());
+        exprs.stack.push(kid);
     } else if kind == E_HANDLE {
-        let flags = r.word(in b);
+        let flags = reader.word(in bytes);
         row.flag = wrapping_u8(flags & 3);
         row.unchecked = up.unchecked || (flags & 4) != 0;
         if (row.flag & 1) != 0 {
-            let k = read_expr(inout r, in b, inout x, in nmap, in tmap, up_none());
-            x.stack.push(k);
+            let kid = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, up_none());
+            exprs.stack.push(kid);
         }
-        let k = read_expr(inout r, in b, inout x, in nmap, in tmap, up_none());
-        x.stack.push(k);
-        let k = read_expr(inout r, in b, inout x, in nmap, in tmap, up_none());
-        x.stack.push(k);
-        let n = r.word(in b);
+        let kid = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, up_none());
+        exprs.stack.push(kid);
+        let kid = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, up_none());
+        exprs.stack.push(kid);
+        let n = reader.word(in bytes);
         for i in 0..n {
-            let mut u = up_none();
-            u.unchecked = r.word(in b) == 0;
-            let v = read_expr(inout r, in b, inout x, in nmap, in tmap, u);
-            x.stack.push(v);
+            let mut kid_up = up_none();
+            kid_up.unchecked = reader.word(in bytes) == 0;
+            let clause = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, kid_up);
+            exprs.stack.push(clause);
         }
     } else if kind == E_FOR {
         // A `let` or arm pattern from the parent wins over the loop's
         // own (the parent wrote its pattern last).
-        let p = read_pat(inout r, in b, inout x, in nmap, in tmap);
+        let pattern = read_pat(inout reader, in bytes, inout exprs, in nmap, in tmap);
         if up.pat == NONE32 {
-            row.pat = p;
+            row.pat = pattern;
         }
-        let k = read_expr(inout r, in b, inout x, in nmap, in tmap, up_none());
-        x.stack.push(k);
-        let k = read_expr(inout r, in b, inout x, in nmap, in tmap, up_none());
-        x.stack.push(k);
+        let kid = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, up_none());
+        exprs.stack.push(kid);
+        let kid = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, up_none());
+        exprs.stack.push(kid);
     } else if kind == E_RANGE {
-        row.flag = wrapping_u8(r.word(in b));
-        let k = read_expr(inout r, in b, inout x, in nmap, in tmap, up_none());
-        x.stack.push(k);
-        let k = read_expr(inout r, in b, inout x, in nmap, in tmap, up_none());
-        x.stack.push(k);
+        row.flag = wrapping_u8(reader.word(in bytes));
+        let kid = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, up_none());
+        exprs.stack.push(kid);
+        let kid = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, up_none());
+        exprs.stack.push(kid);
     } else if kind == E_BREAK || kind == E_RETURN {
-        if r.word(in b) != 0 {
+        if reader.word(in bytes) != 0 {
             row.flag = 1;
-            let k = read_expr(inout r, in b, inout x, in nmap, in tmap, up_none());
-            x.stack.push(k);
+            let kid = read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, up_none());
+            exprs.stack.push(kid);
         }
     }
     // Nothing else writes this node's row (the fields a parent knows come
     // in `up`), so the local row, with its children, is the whole row.
-    let end_kids = x.stack.len();
-    row.a = wrapping_u32(x.kids.len());
-    row.n = wrapping_u32(wrapping_sub(end_kids, mark));
+    let end_kids = exprs.stack.len();
+    row.kid_start = wrapping_u32(exprs.kids.len());
+    row.kid_count = wrapping_u32(wrapping_sub(end_kids, mark));
     for i in mark..end_kids {
-        let k = at32(in x.stack, i);
-        x.kids.push(k);
+        let kid = at32(in exprs.stack, i);
+        exprs.kids.push(kid);
     }
-    x.stack.truncate(mark);
-    x.set(id, row);
+    exprs.stack.truncate(mark);
+    exprs.set(id, row);
     id
 }
 
 // A function record: name, generics, pure row, n, n (pass, type) pairs,
 // result, has body, body.
 pub fn read_fn(
-    inout r: Reader,
-    in b: Slice[u8],
-    inout x: Exprs,
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout exprs: Exprs,
     in nmap: ChunkSeq[u32],
     in tmap: ChunkSeq[u32]
 ) -> FnRow {
-    let name = sym(in nmap, r.word(in b));
-    let generics = wrapping_u32(r.word(in b));
-    let worker_row = r.word(in b) != 0;
-    let pn = r.word(in b);
-    let pa = wrapping_u32(x.param_passes.len());
-    for i in 0..pn {
-        x.param_passes.push(wrapping_u8(r.word(in b)));
-        x.param_types.push(at32(in tmap, r.word(in b)));
+    let name = sym(in nmap, reader.word(in bytes));
+    let generics = wrapping_u32(reader.word(in bytes));
+    let worker_row = reader.word(in bytes) != 0;
+    let param_count = reader.word(in bytes);
+    let param_start = wrapping_u32(exprs.param_passes.len());
+    for i in 0..param_count {
+        exprs.param_passes.push(wrapping_u8(reader.word(in bytes)));
+        exprs.param_types.push(at32(in tmap, reader.word(in bytes)));
     }
-    let result = at32(in tmap, r.word(in b));
-    let body = if r.word(in b) != 0 {
-        read_expr(inout r, in b, inout x, in nmap, in tmap, up_none())
+    let result = at32(in tmap, reader.word(in bytes));
+    let body = if reader.word(in bytes) != 0 {
+        read_expr(inout reader, in bytes, inout exprs, in nmap, in tmap, up_none())
     } else {
         NONE32
     };
@@ -544,34 +573,34 @@ pub fn read_fn(
         name: name,
         generics: generics,
         worker_row: worker_row,
-        pa: pa,
-        pn: wrapping_u32(pn),
+        param_start: param_start,
+        param_count: wrapping_u32(param_count),
         result: result,
         body: body
     }
 }
 
-// `n` function records, kept in `x.fns`.
+// `n` function records, kept in `exprs.fns`.
 pub fn read_fns(
-    inout r: Reader,
-    in b: Slice[u8],
-    inout x: Exprs,
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout exprs: Exprs,
     in nmap: ChunkSeq[u32],
     in tmap: ChunkSeq[u32]
 ) {
-    let n = r.word(in b);
+    let n = reader.word(in bytes);
     // An expression takes at least three words (kind, start, end), so a
     // ninth of the words left is a fair first size for the tables.
-    let left = if r.pos < b.len() {
-        wrapping_sub(b.len(), r.pos) >> 3
+    let left = if reader.pos < bytes.len() {
+        wrapping_sub(bytes.len(), reader.pos) >> 3
     } else {
         0
     };
-    x.rows.reserve(left / 9);
-    x.kids.reserve(left / 9);
-    x.fns.reserve(n);
+    exprs.rows.reserve(left / 9);
+    exprs.kids.reserve(left / 9);
+    exprs.fns.reserve(n);
     for i in 0..n {
-        let f = read_fn(inout r, in b, inout x, in nmap, in tmap);
-        x.fns.push(f);
+        let func = read_fn(inout reader, in bytes, inout exprs, in nmap, in tmap);
+        exprs.fns.push(func);
     }
 }

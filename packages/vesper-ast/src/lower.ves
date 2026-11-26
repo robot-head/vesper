@@ -449,25 +449,30 @@ fn negatable(v: Lit) -> bool {
 }
 
 fn mk(inout l: L, kind: u8, start: u64, end: u64, a: u32, b: u32, c: u32) -> u32 {
-    let i = l.ast.exprs.alloc(
-        ExprNode {
-            kind: kind,
-            start: n32(start),
-            end: n32(end),
-            a: a,
-            b: b,
-            c: c,
-            d: none(),
-            e: none()
-        }
-    );
+    let i = l.ast.exprs.alloc(ExprNode {
+        kind: kind,
+        start: n32(start),
+        end: n32(end),
+        a: a,
+        b: b,
+        c: c,
+        d: none(),
+        e: none()
+    });
     i.raw()
 }
 
 fn mk5(inout l: L, kind: u8, start: u64, end: u64, a: u32, b: u32, c: u32, d: u32, e: u32) -> u32 {
-    let i = l.ast.exprs.alloc(
-        ExprNode { kind: kind, start: n32(start), end: n32(end), a: a, b: b, c: c, d: d, e: e }
-    );
+    let i = l.ast.exprs.alloc(ExprNode {
+        kind: kind,
+        start: n32(start),
+        end: n32(end),
+        a: a,
+        b: b,
+        c: c,
+        d: d,
+        e: e
+    });
     i.raw()
 }
 
@@ -531,9 +536,13 @@ fn set_owner(inout l: L, b: u32, owner: u32) {
 }
 
 fn push_bound(inout l: L, param: u32, tr: u32, start: u64, end: u64, owner: u32) {
-    let i = l.ast.bounds.alloc(
-        BoundNode { param: param, trait_ref: tr, start: n32(start), end: n32(end), owner: owner }
-    );
+    let i = l.ast.bounds.alloc(BoundNode {
+        param: param,
+        trait_ref: tr,
+        start: n32(start),
+        end: n32(end),
+        owner: owner
+    });
     l.ast.m_bounds.push(i.raw());
 }
 
@@ -947,15 +956,13 @@ fn generics(inout l: L) -> u32 {
                         let start = cur_start(in l);
                         let tr = trait_ref(inout l);
                         let end = l.last;
-                        let b = l.ast.bounds.alloc(
-                            BoundNode {
-                                param: name,
-                                trait_ref: tr,
-                                start: n32(start),
-                                end: n32(end),
-                                owner: l.s.empty
-                            }
-                        );
+                        let b = l.ast.bounds.alloc(BoundNode {
+                            param: name,
+                            trait_ref: tr,
+                            start: n32(start),
+                            end: n32(end),
+                            owner: l.s.empty
+                        });
                         l.pending.push(b.raw());
                     } else {
                         expect(inout l, k_mod());
@@ -1291,19 +1298,17 @@ fn declaration(inout l: L) -> u32 {
         push(inout l, v.raw());
         let vs = list_from(inout l, m);
         let end = l.last;
-        let a = l.ast.adts.alloc(
-            AdtNode {
-                name: name,
-                mode: md,
-                generics: gs,
-                variants: vs,
-                is_enum: false,
-                tiled: tiled,
-                tile_width: tile,
-                start: n32(start),
-                end: n32(end)
-            }
-        );
+        let a = l.ast.adts.alloc(AdtNode {
+            name: name,
+            mode: md,
+            generics: gs,
+            variants: vs,
+            is_enum: false,
+            tiled: tiled,
+            tile_width: tile,
+            start: n32(start),
+            end: n32(end)
+        });
         item_node(inout l, 1, a.raw())
     } else if k == k_enum() {
         bump(inout l);
@@ -1355,19 +1360,17 @@ fn declaration(inout l: L) -> u32 {
         expect(inout l, k_r_brace());
         let vs = list_from(inout l, m);
         let end = l.last;
-        let a = l.ast.adts.alloc(
-            AdtNode {
-                name: name,
-                mode: md,
-                generics: gs,
-                variants: vs,
-                is_enum: true,
-                tiled: false,
-                tile_width: 0,
-                start: n32(start),
-                end: n32(end)
-            }
-        );
+        let a = l.ast.adts.alloc(AdtNode {
+            name: name,
+            mode: md,
+            generics: gs,
+            variants: vs,
+            is_enum: true,
+            tiled: false,
+            tile_width: 0,
+            start: n32(start),
+            end: n32(end)
+        });
         item_node(inout l, 1, a.raw())
     } else if k == k_effect() {
         bump(inout l);
@@ -1387,16 +1390,14 @@ fn declaration(inout l: L) -> u32 {
         expect(inout l, k_r_brace());
         let ops = list_from(inout l, m);
         let end = l.last;
-        let e = l.ast.effect_decls.alloc(
-            EffectDeclNode {
-                name: name,
-                linear: md == 2,
-                generics: gs,
-                ops: ops,
-                start: n32(start),
-                end: n32(end)
-            }
-        );
+        let e = l.ast.effect_decls.alloc(EffectDeclNode {
+            name: name,
+            linear: md == 2,
+            generics: gs,
+            ops: ops,
+            start: n32(start),
+            end: n32(end)
+        });
         item_node(inout l, 3, e.raw())
     } else if k == k_fn() {
         let f = function(inout l, false, fip);
@@ -1491,9 +1492,13 @@ fn impl_decl(inout l: L, start: u64) -> u32 {
 }
 
 fn trait_ref_node(inout l: L, package: u32, name: u32, args: u32, start: u64, end: u64) -> u32 {
-    let i = l.ast.trait_refs.alloc(
-        TraitRefNode { package: package, name: name, args: args, start: n32(start), end: n32(end) }
-    );
+    let i = l.ast.trait_refs.alloc(TraitRefNode {
+        package: package,
+        name: name,
+        args: args,
+        start: n32(start),
+        end: n32(end)
+    });
     i.raw()
 }
 
@@ -1546,19 +1551,17 @@ fn function(inout l: L, op: bool, fip: bool) -> u32 {
     };
     vals_restore(inout l, old_values);
     let end = l.last;
-    let f = l.ast.fns.alloc(
-        FnNode {
-            name: name,
-            fip: fip,
-            generics: gs,
-            params: ps,
-            result: result,
-            effects: effs,
-            body: body,
-            start: n32(start),
-            end: n32(end)
-        }
-    );
+    let f = l.ast.fns.alloc(FnNode {
+        name: name,
+        fip: fip,
+        generics: gs,
+        params: ps,
+        result: result,
+        effects: effs,
+        body: body,
+        start: n32(start),
+        end: n32(end)
+    });
     f.raw()
 }
 
@@ -1613,19 +1616,17 @@ fn const_item(inout l: L, start: u64) -> u32 {
     let ve = espan_end(in l, value);
     let body = mk(inout l, 5, vs, ve, 0, value, none());
     let effs = effects_node(inout l, 0, none());
-    let f = l.ast.fns.alloc(
-        FnNode {
-            name: fname,
-            fip: false,
-            generics: 0,
-            params: 0,
-            result: result,
-            effects: effs,
-            body: body,
-            start: n32(start),
-            end: n32(end)
-        }
-    );
+    let f = l.ast.fns.alloc(FnNode {
+        name: fname,
+        fip: false,
+        generics: 0,
+        params: 0,
+        result: result,
+        effects: effs,
+        body: body,
+        start: n32(start),
+        end: n32(end)
+    });
     f.raw()
 }
 
@@ -1871,19 +1872,17 @@ fn value_enum(inout l: L, name: u32) -> u32 {
         let ve = espan_end(in l, value);
         let body = mk(inout l, 5, vs, ve, 0, value, none());
         let effs = effects_node(inout l, 0, none());
-        let f = l.ast.fns.alloc(
-            FnNode {
-                name: fname,
-                fip: false,
-                generics: 0,
-                params: 0,
-                result: repr,
-                effects: effs,
-                body: body,
-                start: n32(start),
-                end: n32(end)
-            }
-        );
+        let f = l.ast.fns.alloc(FnNode {
+            name: fname,
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: repr,
+            effects: effs,
+            body: body,
+            start: n32(start),
+            end: n32(end)
+        });
         let it = item_node(inout l, 2, f.raw());
         if first == none() {
             first = it;
@@ -1918,16 +1917,14 @@ fn params(inout l: L, end: u8) -> u32 {
             infer(inout l)
         };
         let last = l.last;
-        let p = l.ast.params.alloc(
-            ParamNode {
-                name: name,
-                pass: ps,
-                projections: projections,
-                ty: t,
-                start: n32(start),
-                end: n32(last)
-            }
-        );
+        let p = l.ast.params.alloc(ParamNode {
+            name: name,
+            pass: ps,
+            projections: projections,
+            ty: t,
+            start: n32(start),
+            end: n32(last)
+        });
         push(inout l, p.raw());
         if !eat(inout l, k_comma()) {
             break;
@@ -2410,17 +2407,15 @@ fn use_item(inout l: L, public: bool) {
     names_list = list_from(inout l, wrapping_add(pm, segs));
     path_list = list_from(inout l, pm);
     let end = l.last;
-    let u = l.ast.uses.alloc(
-        UseNode {
-            package: package,
-            supers: supers,
-            path: path_list,
-            names: names_list,
-            public: public,
-            start: n32(start),
-            end: n32(end)
-        }
-    );
+    let u = l.ast.uses.alloc(UseNode {
+        package: package,
+        supers: supers,
+        path: path_list,
+        names: names_list,
+        public: public,
+        start: n32(start),
+        end: n32(end)
+    });
     l.ast.m_uses.push(u.raw());
 }
 
@@ -2498,15 +2493,13 @@ fn use_model(inout l: L, scope_start: u64, scope_end: u64) {
     let model = upper(inout l);
     expect(inout l, k_semi());
     let end = l.last;
-    let u = l.ast.model_uses.alloc(
-        ModelUseNode {
-            model: model,
-            start: n32(start),
-            end: n32(end),
-            scope_start: n32(scope_start),
-            scope_end: n32(scope_end)
-        }
-    );
+    let u = l.ast.model_uses.alloc(ModelUseNode {
+        model: model,
+        start: n32(start),
+        end: n32(end),
+        scope_start: n32(scope_start),
+        scope_end: n32(scope_end)
+    });
     l.ast.m_model_uses.push(u.raw());
 }
 
@@ -2561,17 +2554,15 @@ fn trait_decl(inout l: L, start: u64, public: bool) -> u32 {
     }
     let methods = list_from(inout l, mm);
     let end = l.last;
-    let t = l.ast.traits.alloc(
-        TraitNode {
-            name: name,
-            public: public,
-            generics: gs,
-            assoc: assoc,
-            methods: methods,
-            start: n32(start),
-            end: n32(end)
-        }
-    );
+    let t = l.ast.traits.alloc(TraitNode {
+        name: name,
+        public: public,
+        generics: gs,
+        assoc: assoc,
+        methods: methods,
+        start: n32(start),
+        end: n32(end)
+    });
     t.raw()
 }
 
@@ -2676,20 +2667,18 @@ fn conformance_rest(
     }
     let methods = list_from(inout l, mm);
     let end = l.last;
-    let c = l.ast.confs.alloc(
-        ConfNode {
-            model: model,
-            public: public,
-            generics: gs,
-            trait_ref: tr,
-            self_ty: self_ty,
-            wheres: wheres,
-            assoc: assoc,
-            methods: methods,
-            start: n32(start),
-            end: n32(end)
-        }
-    );
+    let c = l.ast.confs.alloc(ConfNode {
+        model: model,
+        public: public,
+        generics: gs,
+        trait_ref: tr,
+        self_ty: self_ty,
+        wheres: wheres,
+        assoc: assoc,
+        methods: methods,
+        start: n32(start),
+        end: n32(end)
+    });
     c.raw()
 }
 
@@ -3974,20 +3963,31 @@ fn lower_profile_source(
     include_tests: bool
 ) -> L {
     let b = source.as_bytes();
-    let mut a = ast_new();
-    let s = syms_new(inout a);
-    let mut text = String::new();
     let mut d = diags_new();
     let t = lex_sugar_with_limits(in b, inout d, max_bytes, max_tok, max_diagnostics());
-    let oversized = t.rejected;
-    if !oversized {
-        text.push_str(in source);
-    }
     let p = if template {
         parse_template_tokens(in b, t, d)
     } else {
         parse_surface_tokens(in b, t, d, max_diagnostics(), hard_depth(), include_tests)
     };
+    lower_parsed(in source, p, include_tests)
+}
+
+// `lower_surface_source_limits` over a surface parse the caller already
+// ran (the sugar driver's round parse of the same source under the same
+// limits), so the source is not lexed and parsed again.
+pub fn lower_surface_parsed(in source: Str, sink p: P, include_tests: bool) -> L {
+    lower_parsed(in source, p, include_tests)
+}
+
+fn lower_parsed(in source: Str, sink p: P, include_tests: bool) -> L {
+    let mut a = ast_new();
+    let s = syms_new(inout a);
+    let mut text = String::new();
+    let oversized = p.t.rejected;
+    if !oversized {
+        text.push_str(in source);
+    }
     let mut l = L {
         p: p,
         text: text,

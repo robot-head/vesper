@@ -113,10 +113,17 @@ fn vk_stage_bits_lossy(sync: u32) -> u64 {
         out = out | VK_STAGE_DRAW_INDIRECT;
     }
     if (bits & SYNC_ALL_SHADING) != 0 {
-        out = out | VK_STAGE_PRE_RASTERIZATION_SHADERS | VK_STAGE_VERTEX_ATTRIBUTE_INPUT | VK_STAGE_FRAGMENT_SHADER | VK_STAGE_COMPUTE_SHADER;
+        out = out
+            | VK_STAGE_PRE_RASTERIZATION_SHADERS
+            | VK_STAGE_VERTEX_ATTRIBUTE_INPUT
+            | VK_STAGE_FRAGMENT_SHADER
+            | VK_STAGE_COMPUTE_SHADER;
     }
     if (bits & SYNC_NON_PIXEL_SHADING) != 0 {
-        out = out | VK_STAGE_PRE_RASTERIZATION_SHADERS | VK_STAGE_VERTEX_ATTRIBUTE_INPUT | VK_STAGE_COMPUTE_SHADER;
+        out = out
+            | VK_STAGE_PRE_RASTERIZATION_SHADERS
+            | VK_STAGE_VERTEX_ATTRIBUTE_INPUT
+            | VK_STAGE_COMPUTE_SHADER;
     }
     if (bits & SYNC_CLEAR_UAV) != 0 {
         out = out | VK_STAGE_CLEAR;
@@ -126,7 +133,24 @@ fn vk_stage_bits_lossy(sync: u32) -> u64 {
 
 // Every sync bit the Vulkan mapping knows.
 fn mapped_sync() -> u32 {
-    SYNC_ALL | SYNC_DRAW | SYNC_INDEX_INPUT | SYNC_VERTEX_SHADING | SYNC_PIXEL_SHADING | SYNC_DEPTH_STENCIL | SYNC_RENDER_TARGET | SYNC_COMPUTE_SHADING | SYNC_RAYTRACING | SYNC_COPY | SYNC_RESOLVE | SYNC_EXECUTE_INDIRECT | SYNC_ALL_SHADING | SYNC_NON_PIXEL_SHADING | SYNC_EMIT_RTAS_POSTBUILD_INFO | SYNC_CLEAR_UAV | SYNC_BUILD_RTAS | SYNC_COPY_RTAS
+    SYNC_ALL
+        | SYNC_DRAW
+        | SYNC_INDEX_INPUT
+        | SYNC_VERTEX_SHADING
+        | SYNC_PIXEL_SHADING
+        | SYNC_DEPTH_STENCIL
+        | SYNC_RENDER_TARGET
+        | SYNC_COMPUTE_SHADING
+        | SYNC_RAYTRACING
+        | SYNC_COPY
+        | SYNC_RESOLVE
+        | SYNC_EXECUTE_INDIRECT
+        | SYNC_ALL_SHADING
+        | SYNC_NON_PIXEL_SHADING
+        | SYNC_EMIT_RTAS_POSTBUILD_INFO
+        | SYNC_CLEAR_UAV
+        | SYNC_BUILD_RTAS
+        | SYNC_COPY_RTAS
 }
 
 pub fn vk_stage_bits(sync: u32) -> u64 {
@@ -175,7 +199,9 @@ fn vk_access_bits_lossy(access: u32) -> u64 {
         out = out | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ;
     }
     if (access & ACCESS_DEPTH_STENCIL_WRITE) != 0 {
-        out = out | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE;
+        out = out
+            | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ
+            | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE;
     }
     if (access & ACCESS_STREAM_OUTPUT) != 0 {
         out = out | VK_ACCESS_TRANSFORM_FEEDBACK_WRITE;
@@ -225,7 +251,14 @@ pub fn vk_access_bits_for_sync(access: u32, sync: u32) -> u64 {
     if (sync_bits & (SYNC_EMIT_RTAS_POSTBUILD_INFO | SYNC_CLEAR_UAV)) == 0 {
         return base;
     }
-    let shader_or_all: u32 = SYNC_ALL | SYNC_DRAW | SYNC_VERTEX_SHADING | SYNC_PIXEL_SHADING | SYNC_COMPUTE_SHADING | SYNC_RAYTRACING | SYNC_ALL_SHADING | SYNC_NON_PIXEL_SHADING;
+    let shader_or_all: u32 = SYNC_ALL
+        | SYNC_DRAW
+        | SYNC_VERTEX_SHADING
+        | SYNC_PIXEL_SHADING
+        | SYNC_COMPUTE_SHADING
+        | SYNC_RAYTRACING
+        | SYNC_ALL_SHADING
+        | SYNC_NON_PIXEL_SHADING;
     let mut adjusted = base;
     if (sync_bits & shader_or_all) == 0 {
         let remaining = access & ~ACCESS_UNORDERED_ACCESS;
@@ -516,15 +549,13 @@ pub fn lower_plan(
                 Option::Some(cmd) => {
                     if cmd.queue == s32 {
                         if cmd.tag != 1 {
-                            out.cmds.push(
-                                LoweredRec {
-                                    stream: s32,
-                                    tag: cmd.tag,
-                                    source: c,
-                                    start: 0,
-                                    count: 0
-                                }
-                            );
+                            out.cmds.push(LoweredRec {
+                                stream: s32,
+                                tag: cmd.tag,
+                                source: c,
+                                start: 0,
+                                count: 0
+                            });
                         } else {
                             let start = out.natives.len();
                             for bi in cmd.a..wrapping_add(cmd.a, cmd.b) {
@@ -555,16 +586,14 @@ pub fn lower_plan(
                                                 }
                                             }
                                             if !replaced {
-                                                active.push(
-                                                    ActiveSplit {
-                                                        graph: kb.graph,
-                                                        texture: b.texture,
-                                                        resource: b.resource,
-                                                        range: b.subresources,
-                                                        event_id: event_id,
-                                                        producer_sync: b.sync_before
-                                                    }
-                                                );
+                                                active.push(ActiveSplit {
+                                                    graph: kb.graph,
+                                                    texture: b.texture,
+                                                    resource: b.resource,
+                                                    range: b.subresources,
+                                                    event_id: event_id,
+                                                    producer_sync: b.sync_before
+                                                });
                                             }
                                         } else if (b.sync_before & split_bit()) == split_bit() {
                                             let mut found = active.len();
@@ -612,15 +641,13 @@ pub fn lower_plan(
                             }
                             let count = wrapping_sub(out.natives.len(), start);
                             if count > 0 {
-                                out.cmds.push(
-                                    LoweredRec {
-                                        stream: s32,
-                                        tag: 1,
-                                        source: c,
-                                        start: start,
-                                        count: count
-                                    }
-                                );
+                                out.cmds.push(LoweredRec {
+                                    stream: s32,
+                                    tag: 1,
+                                    source: c,
+                                    start: start,
+                                    count: count
+                                });
                             }
                         }
                     }

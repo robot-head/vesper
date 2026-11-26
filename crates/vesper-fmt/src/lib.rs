@@ -37,13 +37,24 @@ pub fn port_live_allocations() -> i64 {
     port::live_allocations()
 }
 
-/// [`format_source`] through the port alone, for the differential tests:
-/// `None` when the source is one the Rust code formats (the macro
-/// profile).
+/// [`format_source`] through the port alone, for the differential tests.
+/// Since the macro profile moved to the port, it is `None` only for an
+/// error code the port does not define.
 #[cfg(vesper_port)]
 #[doc(hidden)]
 pub fn port_format_source(source: &str, limits: Limits) -> Option<Result<FormatResult, Error>> {
     port::format_source(source, limits)
+}
+/// [`recovery::format_recovery_source`] through the port alone, for the
+/// differential tests: `None` only for an error code the port does not
+/// define.
+#[cfg(vesper_port)]
+#[doc(hidden)]
+pub fn port_format_recovery_source(
+    source: &str,
+    limits: Limits,
+) -> Option<Result<recovery::RecoveryFormatResult, Error>> {
+    port::format_recovery_source(source, limits)
 }
 pub use doc::{DEFAULT_LINE_WIDTH, Doc, DocId, Document};
 pub use proof_model::{DocumentModel, ProofError, ProofLimits};
@@ -483,6 +494,7 @@ fn once(
         false,
         false,
         0,
+        0,
         &mut document,
     )?;
     let end = document.push(Doc::HardLine)?;
@@ -506,8 +518,8 @@ fn once(
 /// Width is a 100 Unicode-scalar ribbon with four-space nesting. Indivisible
 /// token/comment bytes are never wrapped, so those leaves may exceed the ribbon.
 pub fn format_source(source: &str, limits: Limits) -> Result<FormatResult, Error> {
-    // The native port handles executable grammar, sugar and test blocks
-    // (over @vesper/front's surface CST); the macro profile stays here.
+    // The native port handles executable grammar, sugar, test blocks and
+    // the expression macro profile (over @vesper/front's CSTs).
     if source.len() > limits.max_input_bytes {
         return Err(Error::InputLimit);
     }
@@ -734,6 +746,10 @@ enum Gap {
 fn is_binary_operator(kind: K) -> bool {
     infix_precedence(kind).is_some()
 }
+/// The break level of a bitwise `|`, between `<` and `^` as the parser
+/// ranks it. It is not in `infix_precedence`, since a `|` may also open a
+/// closure.
+const PIPE_PRECEDENCE: u8 = 6;
 fn infix_precedence(kind: K) -> Option<u8> {
     Some(match kind {
         K::Or => 2,
@@ -827,6 +843,11 @@ fn gap(previous: Piece<'_>, current: Piece<'_>, block: bool, after_block: bool) 
     {
         return Gap::Operator(precedence);
     }
+    // A bitwise `|` after an operand; `sequence` keeps a closure's closing
+    // `|` (`|x: T| e`) from breaking.
+    if current.kind == K::Pipe && ends_operand(previous.kind) {
+        return Gap::Operator(PIPE_PRECEDENCE);
+    }
     if matches!(
         current.kind,
         K::Comma
@@ -913,21 +934,7 @@ fn short_if_else(atoms: &[Piece<'_>], start: usize, end: Option<K>) -> Option<us
             return None;
         }
         if let Some(p) = previous {
-            let space = if matches!(p, K::LParen | K::LBracket)
-                || matches!(kind, K::RParen | K::RBracket)
-                || unary
-            {
-                false
-            } else if p == K::LBrace || kind == K::RBrace {
-                true
-            } else {
-                let previous = Piece { kind: p, ..*atom };
-                !matches!(
-                    gap(previous, *atom, false, p == K::RBrace),
-                    Gap::None | Gap::Empty
-                )
-            };
-            width = width.checked_add(usize::from(space))?;
+            width = width.checked_add(usize::from(spaced(p, *atom, unary)))?;
         }
         width = width.checked_add(atom.text.chars().count())?;
         if width > SHORT_IF_ELSE_WIDTH {
@@ -975,6 +982,199 @@ fn short_if_else(atoms: &[Piece<'_>], start: usize, end: Option<K>) -> Option<us
             )
     });
     ends.then_some(close)
+}
+/// A call's argument that, like rustfmt, stays on the call's line and breaks
+/// inside instead, with nothing after its last delimiter: a one argument
+/// that is a struct literal, a call or a `match` (`push(Row {`,
+/// `wrap(inner(`, `n32(match x {`), or a last argument that is a block or a
+/// closure with a block body, after arguments that stay on that line too
+/// (`fold(xs, 0, |a, x| {`). `open` is the call's `(`. Returns the width of
+/// the arguments up to and including the delimiter that breaks.
+fn overflow_argument(atoms: &[Piece<'_>], open: usize) -> Option<usize> {
+    let first = atoms.get(open + 1)?;
+    let mut i = open + 1;
+    let mut width = 0usize;
+    let delimiter = if let Some((brace, before)) = block_argument(atoms, open) {
+        width = before;
+        brace
+    } else if first.kind == K::Match {
+        // `match` and its scrutinee, up to the `{` of its arms.
+        let mut depth = 0usize;
+        let mut previous: Option<K> = None;
+        let mut unary = false;
+        loop {
+            let atom = atoms.get(i)?;
+            let kind = atom.kind;
+            if matches!(kind, K::Comment | K::BlockComment | K::Semi)
+                || depth == 0 && kind == K::Comma
+                || atom.sugar_gap.is_some()
+            {
+                return None;
+            }
+            if kind == K::LBrace && depth == 0 {
+                if i < open + 3 {
+                    return None;
+                }
+                width = width.checked_add(2)?;
+                break i;
+            }
+            if let Some(p) = previous {
+                width = width.checked_add(usize::from(spaced(p, *atom, unary)))?;
+            }
+            width = width.checked_add(atom.text.chars().count())?;
+            unary = matches!(kind, K::Minus | K::Bang | K::Tilde)
+                && !previous.is_some_and(ends_operand);
+            previous = Some(kind);
+            match kind {
+                K::LParen | K::LBracket => depth += 1,
+                K::RParen | K::RBracket => depth = depth.checked_sub(1)?,
+                K::LBrace | K::RBrace => return None,
+                _ => {}
+            }
+            i += 1;
+        }
+    } else {
+        // A path: `Row`, `ast::Node`, `wrap`, `Option::Some`.
+        let mut name = true;
+        loop {
+            let atom = atoms.get(i)?;
+            match atom.kind {
+                K::Lower | K::Upper if name => name = false,
+                K::ColonColon if !name => name = true,
+                K::LParen if !name && i > open + 1 => {
+                    width = width.checked_add(1)?;
+                    break i;
+                }
+                K::LBrace
+                    if !name
+                        && atoms[i - 1].kind == K::Upper
+                        && atom.expr
+                        && tagged_layout(atoms, i) == Tagged::No =>
+                {
+                    width = width.checked_add(2)?;
+                    break i;
+                }
+                _ => return None,
+            }
+            if atom.sugar_gap.is_some() {
+                return None;
+            }
+            width = width.checked_add(atom.text.chars().count())?;
+            i += 1;
+        }
+    };
+    // The delimiter holds something and closes right before the call's `)`.
+    let mut depth = 0usize;
+    let mut j = delimiter;
+    loop {
+        let atom = atoms.get(j)?;
+        if atom.sugar_gap.is_some() {
+            return None;
+        }
+        match atom.kind {
+            K::LParen | K::LBracket | K::LBrace => depth += 1,
+            K::RParen | K::RBracket | K::RBrace => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    (j > delimiter + 1 && atoms.get(j + 1)?.kind == K::RParen).then_some(width)
+}
+/// Where `block_argument` is relative to a closure's parameters.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Params {
+    Outside,
+    Inside,
+    After,
+}
+/// A call's last argument that is a block or a closure with a block body,
+/// after arguments with no braces, comments or other closures in them: the
+/// block's `{` and the width of the arguments up to and including it.
+fn block_argument(atoms: &[Piece<'_>], open: usize) -> Option<(usize, usize)> {
+    let mut i = open + 1;
+    let mut width = 0usize;
+    let mut depth = 0usize;
+    let mut previous: Option<K> = None;
+    let mut unary = false;
+    let mut params = Params::Outside;
+    loop {
+        let atom = atoms.get(i)?;
+        let kind = atom.kind;
+        if matches!(kind, K::Comment | K::BlockComment | K::Semi | K::RBrace)
+            || atom.sugar_gap.is_some()
+        {
+            return None;
+        }
+        // The first token of an argument.
+        let starts = depth == 0 && previous.is_none_or(|p| p == K::Comma);
+        if kind == K::LBrace {
+            if depth != 0
+                || atom.tagged
+                || !(params == Params::After || starts && params == Params::Outside)
+            {
+                return None;
+            }
+            return width
+                .checked_add(1 + usize::from(previous.is_some()))
+                .map(|w| (i, w));
+        }
+        if params == Params::After && depth == 0 && kind == K::Comma {
+            return None;
+        }
+        // Spaced as `sequence` spaces a closure's parameters: they hug their
+        // pipes.
+        let space = match previous {
+            None => false,
+            Some(K::Pipe) if params == Params::Inside => kind == K::Pipe,
+            Some(K::Comma) if params == Params::Inside => true,
+            Some(_) if params == Params::Inside && kind == K::Pipe => false,
+            Some(p) => spaced(p, *atom, unary),
+        };
+        if kind == K::Pipe {
+            params = match params {
+                Params::Outside if starts => Params::Inside,
+                Params::Inside => Params::After,
+                _ => return None,
+            };
+        }
+        width = width.checked_add(usize::from(space))?;
+        width = width.checked_add(atom.text.chars().count())?;
+        unary =
+            matches!(kind, K::Minus | K::Bang | K::Tilde) && !previous.is_some_and(ends_operand);
+        previous = Some(kind);
+        match kind {
+            K::LParen | K::LBracket => depth += 1,
+            K::RParen | K::RBracket => depth = depth.checked_sub(1)?,
+            _ => {}
+        }
+        i += 1;
+    }
+}
+/// Whether a space separates two tokens on one line, for the width
+/// estimates of `short_if_else` and `overflow_argument`.
+fn spaced(previous: K, atom: Piece<'_>, unary: bool) -> bool {
+    if matches!(previous, K::LParen | K::LBracket)
+        || matches!(atom.kind, K::RParen | K::RBracket)
+        || unary
+    {
+        false
+    } else if previous == K::LBrace || atom.kind == K::RBrace {
+        true
+    } else {
+        let previous_piece = Piece {
+            kind: previous,
+            ..atom
+        };
+        !matches!(
+            gap(previous_piece, atom, false, previous == K::RBrace),
+            Gap::None | Gap::Empty
+        )
+    }
 }
 /// How a tagged sugar call lays out its braces.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1024,6 +1224,10 @@ fn sequence<'a>(
     // delimiter or block it is nested in adds 4 once it breaks, and a line
     // break inside one means it broke.
     indent: usize,
+    // The column the sequence's first line starts at, when the lines before
+    // it are as estimated: `indent`, unless the sequence is a call's one
+    // argument kept on the call's line.
+    column: usize,
     document: &mut Document<'a>,
 ) -> Result<DocId, Error> {
     // A delimited, non-block list breaks at its comma separators: those soft
@@ -1058,6 +1262,15 @@ fn sequence<'a>(
     // A short `if c { a } else { b }` laid out on `line` as one group: the
     // index of its last `}`, and where its docs and breaks start on `line`.
     let mut short_if: Option<(usize, usize, usize)> = None;
+    // Inside a closure's parameters (`|x: T|`), after its opening `|`.
+    let mut closure_params = false;
+    // Right after a closure's opening `|`.
+    let mut closure_open = false;
+    // The column `line` starts at.
+    let mut line_start = column;
+    // A call's arguments kept on its line (`fold(xs, 0, |a, x| {`), which
+    // start past `indent`: their commas never break.
+    let inline = list && column != indent;
     while *pos < atoms.len() && Some(atoms[*pos].kind) != end {
         let current = atoms[*pos];
         // An `if` used as a value (`let x = if ..`, an argument, a match arm,
@@ -1134,6 +1347,42 @@ fn sequence<'a>(
             Gap::Return if previous_params => Gap::Soft,
             spacing => spacing,
         };
+        // A `|` that follows no operand opens a closure's parameters, and the
+        // next `|` closes them: only a bitwise `|` breaks like an operator.
+        // The parameters hug their pipes, as in `|x: T| e`.
+        let spacing = if current.kind == K::Pipe && current.sugar_gap.is_none() {
+            let operator = matches!(spacing, Gap::Operator(_));
+            if closure_params {
+                closure_params = false;
+                closure_open = false;
+                // A line comment keeps its line break, and the two pipes of
+                // an empty `| |` keep their space so they don't become `||`.
+                if previous.is_some_and(|p| p.kind == K::Pipe) {
+                    Gap::Space
+                } else if matches!(spacing, Gap::Hard) {
+                    spacing
+                } else {
+                    Gap::None
+                }
+            } else {
+                // A `|` after an operand that isn't spaced as an operator
+                // (a comprehension's `{ .. } | x in xs`) opens nothing.
+                closure_params = !operator && !previous.is_some_and(|p| ends_operand(p.kind));
+                closure_open = closure_params;
+                spacing
+            }
+        } else if closure_open {
+            closure_open = false;
+            if matches!(spacing, Gap::Hard) {
+                spacing
+            } else {
+                Gap::None
+            }
+        } else if closure_params && previous.is_some_and(|p| p.kind == K::Comma) {
+            Gap::Space
+        } else {
+            spacing
+        };
         // Anything but an attached token ends the operand and its chain.
         if is_block || !matches!(spacing, Gap::None | Gap::Empty) {
             chain.finish(&mut line, indent, document)?;
@@ -1145,6 +1394,7 @@ fn sequence<'a>(
         match spacing {
             Gap::Hard => {
                 line.flush(document, &mut output)?;
+                line_start = indent;
                 // Keep at most one blank line where the source had one or more
                 // between two items; the bare newline leaves no indentation.
                 if current.blank {
@@ -1152,8 +1402,9 @@ fn sequence<'a>(
                 }
                 output.push(document.push(Doc::HardLine)?);
             }
-            Gap::Soft if list && after_comma => {
+            Gap::Soft if list && after_comma && !inline => {
                 line.flush(document, &mut output)?;
+                line_start = indent;
                 separators.push(output.len());
                 output.push(document.push(Doc::SoftLineOrSpace)?);
             }
@@ -1165,6 +1416,7 @@ fn sequence<'a>(
             }
             Gap::Return => {
                 line.flush(document, &mut output)?;
+                line_start = indent;
                 let lead = document.push(Doc::SoftLineOrSpace)?;
                 line.push_break(lead, 1);
             }
@@ -1179,6 +1431,7 @@ fn sequence<'a>(
         }
         if is_block && !soft_block {
             line.flush(document, &mut output)?;
+            line_start = indent;
             if matches!(spacing, Gap::Soft | Gap::Space) {
                 output.push(document.push(Doc::Text(" "))?);
             }
@@ -1198,8 +1451,32 @@ fn sequence<'a>(
             let start = document.push(Doc::Text(current.text))?;
             let fill =
                 current.kind == K::LBrace && previous.is_some_and(|p| p.kind == K::ColonColon);
-            // A hugging call does not indent its contents.
-            let inner_indent = if tagged == Tagged::Hug {
+            // A call's one argument, or a closure after its others, stays on
+            // the call's line when its first line fits there, as in rustfmt
+            // (`push(Row {`, `fold(xs, 0, |a, x| {`), and breaks inside
+            // instead: the column the arguments would start at.
+            let overflow = if current.kind == K::LParen
+                && current.expr
+                && previous.is_some_and(|p| matches!(p.kind, K::Lower | K::Upper))
+            {
+                let mut width = Some(line_start);
+                for &doc in &line.docs {
+                    width = match (width, document.width(doc)?) {
+                        (Some(a), Some(b)) => a.checked_add(b),
+                        _ => None,
+                    };
+                }
+                width
+                    .and_then(|w| w.checked_add(1))
+                    .zip(overflow_argument(atoms, *pos - 1))
+                    .filter(|&(at, head)| at.saturating_add(head) <= DEFAULT_LINE_WIDTH)
+                    .map(|(at, _)| at)
+            } else {
+                None
+            };
+            // A hugging call does not indent its contents, nor does a call
+            // whose argument stays on its line.
+            let inner_indent = if tagged == Tagged::Hug || overflow.is_some() {
                 indent
             } else {
                 indent.checked_add(4).ok_or(Error::Overflow)?
@@ -1212,6 +1489,7 @@ fn sequence<'a>(
                 fill,
                 tagged == Tagged::Hug,
                 inner_indent,
+                overflow.unwrap_or(inner_indent),
                 document,
             )?;
             let last_is_line_comment = *pos > 0 && atoms[*pos - 1].kind == K::Comment;
@@ -1234,6 +1512,9 @@ fn sequence<'a>(
                 && atoms.get(*pos).is_some_and(|a| a.kind == K::Arrow);
             if empty {
                 document.push(Doc::Concat(vec![start, finish]))?
+            } else if overflow.is_some() {
+                let all = document.push(Doc::Concat(vec![start, inner, finish]))?;
+                document.push(Doc::Group(all))?
             } else {
                 let lead = document.push(if hugged || soft_block {
                     Doc::SoftLineOrSpace

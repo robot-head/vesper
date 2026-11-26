@@ -1,24 +1,15 @@
 // @vesper-std/hash::fast: non-cryptographic hashes for tables and caches.
 
 fn byte(in s: Slice[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 fn u64_at(in s: Slice[u8], i: u64) -> u64 {
-    match s.try_read_u64_le(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    s.try_read_u64_le(i).unwrap_or(0)
 }
 
 fn u32_at(in s: Slice[u8], i: u64) -> u32 {
-    match s.try_read_u32_le(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    s.try_read_u32_le(i).unwrap_or(0)
 }
 
 // FNV-1a, 64-bit.

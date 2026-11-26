@@ -5,17 +5,22 @@ use crate::{
     check::{Place, World},
     ir::{self, FunctionIr, Instruction, Op, PlaceGraph, Terminator, ValueId},
 };
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    rc::Rc,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SlotState {
-    ty: Type,
+    // Shared, because the dataflow copies whole states at every edge and
+    // join, and a deep copy of each type was most of that work.
+    ty: Rc<Type>,
     pass: Pass,
     moved: BTreeSet<Vec<String>>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ValueState {
-    ty: Type,
+    ty: Rc<Type>,
     owned: bool,
     consumed: bool,
     loan: Option<(Vec<Place>, Pass)>,
@@ -195,6 +200,8 @@ pub fn rust_validate(world: &World, program: &ir::Program) -> Vec<Diagnostic> {
             scrutinees: scrutinees(f),
             callees: callees(f),
             views: element_views(world, f),
+            param_types: BTreeMap::new(),
+            result_types: BTreeMap::new(),
         };
         checker.function(f);
         diagnostics.extend(checker.diagnostics);
@@ -319,6 +326,13 @@ struct Flow<'a> {
     callees: BTreeSet<ValueId>,
     /// The `try_get` values of element view matches ([`element_views`]).
     views: BTreeMap<ValueId, Pass>,
+    /// Block parameters' and instruction results' types, each made once:
+    /// the dataflow visits a block many times, and every visit puts the
+    /// same types in the state again. Results are keyed by the instruction's
+    /// address in the function being checked, so a value that two
+    /// instructions define keeps each one's type.
+    param_types: BTreeMap<ValueId, Rc<Type>>,
+    result_types: BTreeMap<usize, Rc<Type>>,
 }
 /// The `try_get`/`try_get_mut` values of `f` that element view matches
 /// (§13) inspect, with how their `Some(x)` binds the element: an `in` or
@@ -600,20 +614,20 @@ impl Flow<'_> {
             }
         }
     }
-    fn bind(&mut self, s: &mut State, p: &Pattern, t: &Type, origin: ValueId, pass: Pass) {
+    fn bind(&mut self, s: &mut State, p: &Pattern, t: Rc<Type>, origin: ValueId, pass: Pass) {
         match &p.kind {
             PatternKind::Bind(n) => {
                 s.slots.insert(
                     n.clone(),
                     SlotState {
-                        ty: t.clone(),
+                        ty: t,
                         pass,
                         moved: BTreeSet::new(),
                     },
                 );
             }
             PatternKind::Wild => {
-                if pass == Pass::Sink && self.mode(t) == Mode::Linear {
+                if pass == Pass::Sink && self.mode(&t) == Mode::Linear {
                     self.caused(
                         "IR wildcard discards a linear value",
                         p.span.clone(),
@@ -623,15 +637,15 @@ impl Flow<'_> {
                 }
             }
             PatternKind::Tuple(ps) => {
-                if let Type::Tuple(ts) = t {
+                if let Type::Tuple(ts) = &*t {
                     for (p, t) in ps.iter().zip(ts) {
-                        self.bind(s, p, t, origin, pass);
+                        self.bind(s, p, Rc::new(t.clone()), origin, pass);
                     }
                 }
             }
             PatternKind::Constructor { name, fields, .. } => {
                 if let Some((a, v)) = self.world.constructor(name) {
-                    let args = if let Type::Named(_, args) = t {
+                    let args = if let Type::Named(_, args) = &*t {
                         args.as_slice()
                     } else {
                         &[]
@@ -644,7 +658,7 @@ impl Flow<'_> {
                         .collect();
                     for (n, p) in fields {
                         if let Some(f) = v.fields.iter().find(|f| &f.name == n) {
-                            self.bind(s, p, &substitute(&f.ty, &vars), origin, pass);
+                            self.bind(s, p, Rc::new(substitute(&f.ty, &vars)), origin, pass);
                         }
                     }
                 }
@@ -780,7 +794,7 @@ impl Flow<'_> {
                     .values
                     .get(value)
                     .map(|v| v.ty.clone())
-                    .unwrap_or(Type::Infer);
+                    .unwrap_or_else(|| Rc::new(Type::Infer));
                 // A borrowed scrutinee binds borrows of its payloads.
                 let view = self.element_view(*value);
                 let pass = if let Some(pass) = view {
@@ -793,7 +807,7 @@ impl Flow<'_> {
                     self.consume(s, *value, &i.span);
                     Pass::Sink
                 };
-                self.bind(s, pattern, &t, *value, pass);
+                self.bind(s, pattern, t, *value, pass);
             }
             Op::Write { place, op, value } => {
                 self.consume(s, *value, &i.span);
@@ -933,7 +947,7 @@ impl Flow<'_> {
             }
             Op::Indirect { callee, args } => {
                 let row = s.values.get(callee).and_then(|v| {
-                    if let Type::Function { effects, .. } = &v.ty {
+                    if let Type::Function { effects, .. } = &*v.ty {
                         Some(effects.clone())
                     } else {
                         None
@@ -941,7 +955,7 @@ impl Flow<'_> {
                 });
                 if let Some(v) = s.values.get_mut(callee)
                     && !v.owned
-                    && matches!(&v.ty, Type::Function { mode, .. } if *mode != Mode::Copy)
+                    && matches!(&*v.ty, Type::Function { mode, .. } if *mode != Mode::Copy)
                 {
                     // A lent function parameter is read by its call (§4.2).
                     v.consumed = true;
@@ -1013,9 +1027,14 @@ impl Flow<'_> {
         }
         // Bind/Write have Unit results regardless of the expression used for their ranges.
         let ty = if matches!(i.op, Op::Bind { .. } | Op::Write { .. }) {
-            Type::unit()
+            Rc::new(Type::unit())
         } else {
-            i.ty.clone()
+            let at = std::ptr::from_ref(i) as usize;
+            Rc::clone(
+                self.result_types
+                    .entry(at)
+                    .or_insert_with(|| Rc::new(i.ty.clone())),
+            )
         };
         s.values.insert(
             i.dest,
@@ -1098,7 +1117,7 @@ impl Flow<'_> {
             initial.slots.insert(
                 p.name.clone(),
                 SlotState {
-                    ty: p.ty.clone(),
+                    ty: Rc::new(p.ty.clone()),
                     pass: if borrowed { Pass::In } else { p.pass },
                     moved: BTreeSet::new(),
                 },
@@ -1156,7 +1175,11 @@ impl Flow<'_> {
                     edge.values.insert(
                         *param,
                         ValueState {
-                            ty: f.values[param].clone(),
+                            ty: Rc::clone(
+                                self.param_types
+                                    .entry(*param)
+                                    .or_insert_with(|| Rc::new(f.values[param].clone())),
+                            ),
                             owned: true,
                             consumed: false,
                             loan: None,

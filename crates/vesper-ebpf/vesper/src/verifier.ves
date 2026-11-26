@@ -2132,9 +2132,10 @@ fn load(inout v: V, in st: St, pc: u64, p: R, off: i16, size: Size) -> R eff [Fa
     match access(inout v, in st, pc, p, off, size, false) {
         Target::CtxData => mk(T_PACKET, 0, 0, 0, 0, scalar_konst(0)),
         Target::CtxDataEnd => r_tag(5),
-        Target::Scalar(sz) => r_scalar(
-            scalar_unknown_bits(wrapping_u32(wrapping_mul(size_bytes(sz), 8)))
-        ),
+        Target::Scalar(sz) => r_scalar(scalar_unknown_bits(wrapping_u32(wrapping_mul(
+            size_bytes(sz),
+            8
+        )))),
         Target::Stack { frame, at } => {
             let slot = rr(in st, s_slot(frame, shr(at, 3)));
             let n = size_bytes(size);
@@ -3656,9 +3657,10 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
                         "sign-extending load of a spilled pointer"
                     );
                 }
-                val = r_scalar(
-                    scalar_sext(val.var, wrapping_u32(wrapping_mul(size_bytes(size), 8)))
-                );
+                val = r_scalar(scalar_sext(
+                    val.var,
+                    wrapping_u32(wrapping_mul(size_bytes(size), 8))
+                ));
             }
             set(inout st, d, val);
             if p.tag == T_STACK {
@@ -4181,14 +4183,12 @@ fn decode_code(e: DecodeError) -> u64 {
     match e {
         DecodeError::TruncatedProgram { len } => shl(widen_u64(len), 12),
         DecodeError::BadRegister { pc, reg } => 1 | shl(widen_u64(reg), 4) | shl(widen_u64(pc), 12),
-        DecodeError::InvalidOpcode { pc, code } => 2 | shl(widen_u64(code), 4) | shl(
-            widen_u64(pc),
-            12
-        ),
-        DecodeError::ReservedFieldSet { pc, field } => 3 | shl(widen_u64(field), 4) | shl(
-            widen_u64(pc),
-            12
-        ),
+        DecodeError::InvalidOpcode { pc, code } => 2
+            | shl(widen_u64(code), 4)
+            | shl(widen_u64(pc), 12),
+        DecodeError::ReservedFieldSet { pc, field } => 3
+            | shl(widen_u64(field), 4)
+            | shl(widen_u64(pc), 12),
         DecodeError::BrokenLdImm64 { pc } => 4 | shl(widen_u64(pc), 12),
     }
 }

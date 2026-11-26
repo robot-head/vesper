@@ -451,14 +451,8 @@ fn str_eq_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
         return false;
     }
     for i in 0..a.len() {
-        let ca = match a.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
-        let cb = match b.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let ca = a.try_get(i).unwrap_or(0);
+        let cb = b.try_get(i).unwrap_or(0);
         if ca != cb {
             return false;
         }
@@ -698,18 +692,16 @@ fn read_builtin_mod(in b: Slice[u8]) -> BuiltinMod {
             field_names.push(u32_at(in c.nmap, r.word(in b)));
             field_tys.push(u32_at(in c.tmap, r.word(in b)));
         }
-        structs.push(
-            StructInfo {
-                name: sname,
-                mode: smode,
-                is_enum: is_enum,
-                has_row_gen: has_row_gen,
-                ga: ga,
-                gn: n32(gn),
-                fa: fa,
-                fn_cnt: n32(fn_cnt)
-            }
-        );
+        structs.push(StructInfo {
+            name: sname,
+            mode: smode,
+            is_enum: is_enum,
+            has_row_gen: has_row_gen,
+            ga: ga,
+            gn: n32(gn),
+            fa: fa,
+            fn_cnt: n32(fn_cnt)
+        });
     }
 
     let nc = r.word(in b);
@@ -731,21 +723,19 @@ fn read_builtin_mod(in b: Slice[u8]) -> BuiltinMod {
         let empty_body = r.word(in b) != 0;
         let s = r.word(in b);
         let e = r.word(in b);
-        confs.push(
-            ConfInfo {
-                is_canonical: is_canonical,
-                pkg_none: pkg_none,
-                trait_name: trait_name,
-                targ_cnt: targ_cnt,
-                self_ty: self_ty,
-                ga: ga,
-                gn: n32(gn),
-                has_where: has_where,
-                empty_body: empty_body,
-                s: s,
-                e: e
-            }
-        );
+        confs.push(ConfInfo {
+            is_canonical: is_canonical,
+            pkg_none: pkg_none,
+            trait_name: trait_name,
+            targ_cnt: targ_cnt,
+            self_ty: self_ty,
+            ga: ga,
+            gn: n32(gn),
+            has_where: has_where,
+            empty_body: empty_body,
+            s: s,
+            e: e
+        });
     }
 
     let nb = r.word(in b);
@@ -760,15 +750,13 @@ fn read_builtin_mod(in b: Slice[u8]) -> BuiltinMod {
         for _ in 0..arg_n {
             bound_args.push(u32_at(in c.tmap, r.word(in b)));
         }
-        own_bounds.push(
-            OwnBound {
-                owner: owner,
-                param: param,
-                trait_name: trait_name,
-                arg_a: arg_a,
-                arg_n: n32(arg_n)
-            }
-        );
+        own_bounds.push(OwnBound {
+            owner: owner,
+            param: param,
+            trait_name: trait_name,
+            arg_a: arg_a,
+            arg_n: n32(arg_n)
+        });
     }
 
     BuiltinMod {
@@ -944,14 +932,8 @@ fn bytes_contains(in hay: Slice[u8], start: u64, end: u64, in needle: Str) -> bo
         let base = add(start, off);
         let mut eq = true;
         for j in 0..nl {
-            let hb = match hay.try_get(add(base, j)) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
-            let nbb = match nb.try_get(j) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
+            let hb = hay.try_get(add(base, j)).unwrap_or(0);
+            let nbb = nb.try_get(j).unwrap_or(0);
             if hb != nbb {
                 eq = false;
                 break;

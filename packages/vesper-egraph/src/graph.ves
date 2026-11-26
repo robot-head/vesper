@@ -6,7 +6,7 @@
 // egg's data structures and the order they are touched are kept wherever
 // they decide a result:
 //
-// - `r_*` is egg's `nodes`: the original (uncanonical) e-node of every id,
+// - `orig_*` is egg's `nodes`: the original (uncanonical) e-node of every id,
 //   append-only. An id is made only for a new e-class, so a class's e-nodes
 //   are exactly the original e-nodes of its ids, canonicalized.
 // - The union-find makes the class with more parents the root (egg's
@@ -29,165 +29,165 @@ const NONE: u32 = 4294967295;
 
 pub struct EGraph {
     // The language: the arity (0, 1 or 2) of each operator.
-    arity: ChunkSeq[u8],
+    op_arity: ChunkSeq[u8],
     // egg's `nodes`: the original e-node of each id.
-    r_op: ChunkSeq[u32],
-    r_data: ChunkSeq[i64],
-    r_c0: ChunkSeq[u32],
-    r_c1: ChunkSeq[u32],
+    orig_op: ChunkSeq[u32],
+    orig_data: ChunkSeq[i64],
+    orig_child0: ChunkSeq[u32],
+    orig_child1: ChunkSeq[u32],
     // Union-find parents.
     parent: ChunkSeq[u32],
     // Per class root: its parent list (length, first and last cell) and
     // whether it holds a leaf (an arity-0 e-node).
-    plen: ChunkSeq[u32],
-    phead: ChunkSeq[u32],
-    ptail: ChunkSeq[u32],
-    leaf: ChunkSeq[u8],
+    parent_len: ChunkSeq[u32],
+    parent_head: ChunkSeq[u32],
+    parent_tail: ChunkSeq[u32],
+    holds_leaf: ChunkSeq[u8],
     // Parent list cells.
-    cell_val: ChunkSeq[u32],
+    cell_parent: ChunkSeq[u32],
     cell_next: ChunkSeq[u32],
     // The hash-cons: canonical e-node keys and the id each maps to.
-    m_op: ChunkSeq[u32],
-    m_data: ChunkSeq[i64],
-    m_c0: ChunkSeq[u32],
-    m_c1: ChunkSeq[u32],
-    m_id: ChunkSeq[u32],
-    m_hash: ChunkSeq[u64],
+    memo_op: ChunkSeq[u32],
+    memo_data: ChunkSeq[i64],
+    memo_child0: ChunkSeq[u32],
+    memo_child1: ChunkSeq[u32],
+    memo_id: ChunkSeq[u32],
+    memo_hash: ChunkSeq[u64],
     // 0 is empty, otherwise key index + 1.
     slots: ChunkSeq[u32],
-    mask: u64,
+    slot_mask: u64,
     pending: ChunkSeq[u32],
     classes: u64,
     clean: bool,
     // The rebuilt view: class `c`'s sorted e-nodes are
-    // n_*[cstart[c] .. cstart[c] + clen[c]]; `live` is the class roots in
-    // ascending order.
-    cstart: ChunkSeq[u32],
-    clen: ChunkSeq[u32],
-    n_op: ChunkSeq[u32],
-    n_data: ChunkSeq[i64],
-    n_c0: ChunkSeq[u32],
-    n_c1: ChunkSeq[u32],
-    live: ChunkSeq[u32]
+    // sorted_*[class_starts[c] .. class_starts[c] + class_lens[c]]; `live_roots`
+    // is the class roots in ascending order.
+    class_starts: ChunkSeq[u32],
+    class_lens: ChunkSeq[u32],
+    sorted_op: ChunkSeq[u32],
+    sorted_data: ChunkSeq[i64],
+    sorted_child0: ChunkSeq[u32],
+    sorted_child1: ChunkSeq[u32],
+    live_roots: ChunkSeq[u32]
 }
 
 // An empty e-graph over operators with the given arities.
-pub fn egraph_new(in arity: ChunkSeq[u8]) -> EGraph {
-    let mut a: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](arity.len());
-    for i in 0..arity.len() {
-        a.push(u8_at(in arity, i));
+pub fn egraph_new(in arities: ChunkSeq[u8]) -> EGraph {
+    let mut op_arity: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](arities.len());
+    for i in 0..arities.len() {
+        op_arity.push(u8_at(in arities, i));
     }
     EGraph {
-        arity: a,
-        r_op: ChunkSeq::new[u32](),
-        r_data: ChunkSeq::new[i64](),
-        r_c0: ChunkSeq::new[u32](),
-        r_c1: ChunkSeq::new[u32](),
+        op_arity: op_arity,
+        orig_op: ChunkSeq::new[u32](),
+        orig_data: ChunkSeq::new[i64](),
+        orig_child0: ChunkSeq::new[u32](),
+        orig_child1: ChunkSeq::new[u32](),
         parent: ChunkSeq::new[u32](),
-        plen: ChunkSeq::new[u32](),
-        phead: ChunkSeq::new[u32](),
-        ptail: ChunkSeq::new[u32](),
-        leaf: ChunkSeq::new[u8](),
-        cell_val: ChunkSeq::new[u32](),
+        parent_len: ChunkSeq::new[u32](),
+        parent_head: ChunkSeq::new[u32](),
+        parent_tail: ChunkSeq::new[u32](),
+        holds_leaf: ChunkSeq::new[u8](),
+        cell_parent: ChunkSeq::new[u32](),
         cell_next: ChunkSeq::new[u32](),
-        m_op: ChunkSeq::new[u32](),
-        m_data: ChunkSeq::new[i64](),
-        m_c0: ChunkSeq::new[u32](),
-        m_c1: ChunkSeq::new[u32](),
-        m_id: ChunkSeq::new[u32](),
-        m_hash: ChunkSeq::new[u64](),
+        memo_op: ChunkSeq::new[u32](),
+        memo_data: ChunkSeq::new[i64](),
+        memo_child0: ChunkSeq::new[u32](),
+        memo_child1: ChunkSeq::new[u32](),
+        memo_id: ChunkSeq::new[u32](),
+        memo_hash: ChunkSeq::new[u64](),
         slots: filled_u32(64, 0),
-        mask: 63,
+        slot_mask: 63,
         pending: ChunkSeq::new[u32](),
         classes: 0,
         clean: true,
-        cstart: ChunkSeq::new[u32](),
-        clen: ChunkSeq::new[u32](),
-        n_op: ChunkSeq::new[u32](),
-        n_data: ChunkSeq::new[i64](),
-        n_c0: ChunkSeq::new[u32](),
-        n_c1: ChunkSeq::new[u32](),
-        live: ChunkSeq::new[u32]()
+        class_starts: ChunkSeq::new[u32](),
+        class_lens: ChunkSeq::new[u32](),
+        sorted_op: ChunkSeq::new[u32](),
+        sorted_data: ChunkSeq::new[i64](),
+        sorted_child0: ChunkSeq::new[u32](),
+        sorted_child1: ChunkSeq::new[u32](),
+        live_roots: ChunkSeq::new[u32]()
     }
 }
 
 // The sort keys of `rebuild_classes`: class root and operator, data, and
 // both children, for every id.
 struct Keys {
-    hi: ChunkSeq[u64],
+    root_op: ChunkSeq[u64],
     data: ChunkSeq[i64],
-    lo: ChunkSeq[u64]
+    children: ChunkSeq[u64]
 }
 
-fn key_less(in k: Keys, a: u32, b: u32) -> bool {
-    let x = u64_at(in k.hi, widen_u64(a));
-    let y = u64_at(in k.hi, widen_u64(b));
-    if x != y {
-        return x < y;
+fn key_less(in keys: Keys, id_a: u32, id_b: u32) -> bool {
+    let root_op_a = u64_at(in keys.root_op, widen_u64(id_a));
+    let root_op_b = u64_at(in keys.root_op, widen_u64(id_b));
+    if root_op_a != root_op_b {
+        return root_op_a < root_op_b;
     }
-    let p = i64_at(in k.data, widen_u64(a));
-    let q = i64_at(in k.data, widen_u64(b));
-    if p != q {
-        return p < q;
+    let data_a = i64_at(in keys.data, widen_u64(id_a));
+    let data_b = i64_at(in keys.data, widen_u64(id_b));
+    if data_a != data_b {
+        return data_a < data_b;
     }
-    u64_at(in k.lo, widen_u64(a)) < u64_at(in k.lo, widen_u64(b))
+    u64_at(in keys.children, widen_u64(id_a)) < u64_at(in keys.children, widen_u64(id_b))
 }
 
-fn key_same(in k: Keys, a: u32, b: u32) -> bool {
-    u64_at(in k.hi, widen_u64(a)) == u64_at(in k.hi, widen_u64(b))
-        && i64_at(in k.data, widen_u64(a)) == i64_at(in k.data, widen_u64(b))
-        && u64_at(in k.lo, widen_u64(a)) == u64_at(in k.lo, widen_u64(b))
+fn key_same(in keys: Keys, id_a: u32, id_b: u32) -> bool {
+    u64_at(in keys.root_op, widen_u64(id_a)) == u64_at(in keys.root_op, widen_u64(id_b))
+        && i64_at(in keys.data, widen_u64(id_a)) == i64_at(in keys.data, widen_u64(id_b))
+        && u64_at(in keys.children, widen_u64(id_a)) == u64_at(in keys.children, widen_u64(id_b))
 }
 
-// A stable bottom-up merge sort of `idx` by `k`.
-fn sort_ids(inout idx: ChunkSeq[u32], in k: Keys) {
-    let n = idx.len();
-    let mut tmp: ChunkSeq[u32] = filled_u32(n, 0);
+// A stable bottom-up merge sort of `ids` by `keys`.
+fn sort_ids(inout ids: ChunkSeq[u32], in keys: Keys) {
+    let len = ids.len();
+    let mut merged: ChunkSeq[u32] = filled_u32(len, 0);
     let mut width: u64 = 1;
     loop {
-        if width >= n {
+        if width >= len {
             break;
         }
         let mut lo: u64 = 0;
         loop {
-            if lo >= n {
+            if lo >= len {
                 break;
             }
             let mut mid = wrapping_add(lo, width);
-            if mid > n {
-                mid = n;
+            if mid > len {
+                mid = len;
             }
             let mut hi = wrapping_add(mid, width);
-            if hi > n {
-                hi = n;
+            if hi > len {
+                hi = len;
             }
-            let mut i = lo;
-            let mut j = mid;
-            let mut o = lo;
+            let mut left = lo;
+            let mut right = mid;
+            let mut out = lo;
             loop {
-                if o >= hi {
+                if out >= hi {
                     break;
                 }
-                let take_left = if i >= mid {
+                let take_left = if left >= mid {
                     false
-                } else if j >= hi {
+                } else if right >= hi {
                     true
                 } else {
-                    !key_less(in k, u32_at(in idx, j), u32_at(in idx, i))
+                    !key_less(in keys, u32_at(in ids, right), u32_at(in ids, left))
                 };
                 if take_left {
-                    tmp.try_set(o, u32_at(in idx, i));
-                    i = wrapping_add(i, 1);
+                    merged.try_set(out, u32_at(in ids, left));
+                    left = wrapping_add(left, 1);
                 } else {
-                    tmp.try_set(o, u32_at(in idx, j));
-                    j = wrapping_add(j, 1);
+                    merged.try_set(out, u32_at(in ids, right));
+                    right = wrapping_add(right, 1);
                 }
-                o = wrapping_add(o, 1);
+                out = wrapping_add(out, 1);
             }
             lo = hi;
         }
-        for x in 0..n {
-            idx.try_set(x, u32_at(in tmp, x));
+        for index in 0..len {
+            ids.try_set(index, u32_at(in merged, index));
         }
         width = wrapping_mul(width, 2);
     }
@@ -195,17 +195,17 @@ fn sort_ids(inout idx: ChunkSeq[u32], in k: Keys) {
 
 impl EGraph {
     pub fn arity_of(in self, op: u32) -> u8 {
-        u8_at(in self.arity, widen_u64(op))
+        u8_at(in self.op_arity, widen_u64(op))
     }
 
     // The number of ids (egg's `nodes().len()`).
     pub fn raw_len(in self) -> u64 {
-        self.r_op.len()
+        self.orig_op.len()
     }
 
     // egg's `total_size()`: hash-cons entries, stale ones included.
     pub fn memo_len(in self) -> u64 {
-        self.m_id.len()
+        self.memo_id.len()
     }
 
     // egg's `number_of_classes()`.
@@ -218,166 +218,175 @@ impl EGraph {
     }
 
     pub fn raw_op(in self, id: u32) -> u32 {
-        u32_at(in self.r_op, widen_u64(id))
+        u32_at(in self.orig_op, widen_u64(id))
     }
 
     pub fn raw_data(in self, id: u32) -> i64 {
-        i64_at(in self.r_data, widen_u64(id))
+        i64_at(in self.orig_data, widen_u64(id))
     }
 
-    pub fn raw_child(in self, id: u32, i: u64) -> u32 {
-        if i == 0 {
-            u32_at(in self.r_c0, widen_u64(id))
+    pub fn raw_child(in self, id: u32, child_index: u64) -> u32 {
+        if child_index == 0 {
+            u32_at(in self.orig_child0, widen_u64(id))
         } else {
-            u32_at(in self.r_c1, widen_u64(id))
+            u32_at(in self.orig_child1, widen_u64(id))
         }
     }
 
     pub fn find(in self, id: u32) -> u32 {
-        let mut x = id;
+        let mut node = id;
         loop {
-            let p = u32_at(in self.parent, widen_u64(x));
-            if p == x {
-                return x;
+            let parent = u32_at(in self.parent, widen_u64(node));
+            if parent == node {
+                return node;
             }
-            x = p;
+            node = parent;
         }
     }
 
     // `find` with path halving (egg's `find_mut`).
     pub fn find_mut(inout self, id: u32) -> u32 {
-        let mut x = id;
+        let mut node = id;
         loop {
-            let p = u32_at(in self.parent, widen_u64(x));
-            if p == x {
-                return x;
+            let parent = u32_at(in self.parent, widen_u64(node));
+            if parent == node {
+                return node;
             }
-            let g = u32_at(in self.parent, widen_u64(p));
-            self.parent.try_set(widen_u64(x), g);
-            x = g;
+            let grandparent = u32_at(in self.parent, widen_u64(parent));
+            self.parent.try_set(widen_u64(node), grandparent);
+            node = grandparent;
         }
     }
 
     // Whether the class of `id` holds a leaf. Valid in a dirty graph: a
     // union keeps the flag of both classes.
     pub fn has_leaf(in self, id: u32) -> bool {
-        let r = self.find(id);
-        u8_at(in self.leaf, widen_u64(r)) != 0
+        let root = self.find(id);
+        u8_at(in self.holds_leaf, widen_u64(root)) != 0
     }
 
-    fn slot_of(in self, h: u64, op: u32, data: i64, c0: u32, c1: u32) -> (u64, u32) {
-        let mut at = h & self.mask;
+    fn slot_of(in self, hash: u64, op: u32, data: i64, child0: u32, child1: u32) -> (u64, u32) {
+        let mut at = hash & self.slot_mask;
         loop {
-            let s = u32_at(in self.slots, at);
-            if s == 0 {
+            let slot = u32_at(in self.slots, at);
+            if slot == 0 {
                 return (at, NONE);
             }
-            let k = widen_u64(wrapping_sub(s, 1));
-            if u64_at(in self.m_hash, k) == h
-                && u32_at(in self.m_op, k) == op
-                && i64_at(in self.m_data, k) == data
-                && u32_at(in self.m_c0, k) == c0
-                && u32_at(in self.m_c1, k) == c1 {
-                return (at, wrapping_u32(k));
+            let key = widen_u64(wrapping_sub(slot, 1));
+            if u64_at(in self.memo_hash, key) == hash
+                && u32_at(in self.memo_op, key) == op
+                && i64_at(in self.memo_data, key) == data
+                && u32_at(in self.memo_child0, key) == child0
+                && u32_at(in self.memo_child1, key) == child1 {
+                return (at, wrapping_u32(key));
             }
-            at = wrapping_add(at, 1) & self.mask;
+            at = wrapping_add(at, 1) & self.slot_mask;
         }
     }
 
     fn memo_grow(inout self) {
-        let cap = wrapping_mul(wrapping_add(self.mask, 1), 2);
+        let cap = wrapping_mul(wrapping_add(self.slot_mask, 1), 2);
         let mask = wrapping_sub(cap, 1);
         let mut slots = filled_u32(cap, 0);
-        for k in 0..self.m_hash.len() {
-            let mut at = u64_at(in self.m_hash, k) & mask;
+        for key in 0..self.memo_hash.len() {
+            let mut at = u64_at(in self.memo_hash, key) & mask;
             loop {
                 if u32_at(in slots, at) == 0 {
                     break;
                 }
                 at = wrapping_add(at, 1) & mask;
             }
-            slots.try_set(at, wrapping_u32(wrapping_add(k, 1)));
+            slots.try_set(at, wrapping_u32(wrapping_add(key, 1)));
         }
         self.slots = slots;
-        self.mask = mask;
+        self.slot_mask = mask;
     }
 
     // The id the hash-cons maps a canonical e-node to, or NONE.
-    pub fn memo_get(in self, op: u32, data: i64, c0: u32, c1: u32) -> u32 {
-        let h = mix(op, data, c0, c1);
-        let (_at, k) = self.slot_of(h, op, data, c0, c1);
-        if k == NONE {
+    pub fn memo_get(in self, op: u32, data: i64, child0: u32, child1: u32) -> u32 {
+        let hash = mix(op, data, child0, child1);
+        let (_at, key) = self.slot_of(hash, op, data, child0, child1);
+        if key == NONE {
             NONE
         } else {
-            u32_at(in self.m_id, widen_u64(k))
+            u32_at(in self.memo_id, widen_u64(key))
         }
     }
 
     // egg's `memo.insert`: maps the key to `id` and returns the id it
     // mapped to before, or NONE.
-    fn memo_insert(inout self, op: u32, data: i64, c0: u32, c1: u32, id: u32) -> u32 {
-        let h = mix(op, data, c0, c1);
-        let (at, k) = self.slot_of(h, op, data, c0, c1);
-        if k != NONE {
-            let old = u32_at(in self.m_id, widen_u64(k));
-            self.m_id.try_set(widen_u64(k), id);
-            return old;
+    fn memo_insert(inout self, op: u32, data: i64, child0: u32, child1: u32, id: u32) -> u32 {
+        let hash = mix(op, data, child0, child1);
+        let (at, key) = self.slot_of(hash, op, data, child0, child1);
+        if key != NONE {
+            let old_id = u32_at(in self.memo_id, widen_u64(key));
+            self.memo_id.try_set(widen_u64(key), id);
+            return old_id;
         }
-        let next = self.m_id.len();
-        self.m_op.push(op);
-        self.m_data.push(data);
-        self.m_c0.push(c0);
-        self.m_c1.push(c1);
-        self.m_id.push(id);
-        self.m_hash.push(h);
-        self.slots.try_set(at, wrapping_u32(wrapping_add(next, 1)));
-        if wrapping_mul(wrapping_add(next, 1), 2) > self.mask {
+        let key_count = self.memo_id.len();
+        self.memo_op.push(op);
+        self.memo_data.push(data);
+        self.memo_child0.push(child0);
+        self.memo_child1.push(child1);
+        self.memo_id.push(id);
+        self.memo_hash.push(hash);
+        self.slots.try_set(at, wrapping_u32(wrapping_add(key_count, 1)));
+        if wrapping_mul(wrapping_add(key_count, 1), 2) > self.slot_mask {
             self.memo_grow();
         }
         NONE
     }
 
     fn push_parent(inout self, root: u32, id: u32) {
-        let cell = wrapping_u32(self.cell_val.len());
-        self.cell_val.push(id);
+        let cell = wrapping_u32(self.cell_parent.len());
+        self.cell_parent.push(id);
         self.cell_next.push(NONE);
-        let r = widen_u64(root);
-        let tail = u32_at(in self.ptail, r);
+        let root_index = widen_u64(root);
+        let tail = u32_at(in self.parent_tail, root_index);
         if tail == NONE {
-            self.phead.try_set(r, cell);
+            self.parent_head.try_set(root_index, cell);
         } else {
             self.cell_next.try_set(widen_u64(tail), cell);
         }
-        self.ptail.try_set(r, cell);
-        self.plen.try_set(r, wrapping_add(u32_at(in self.plen, r), 1));
+        self.parent_tail.try_set(root_index, cell);
+        self.parent_len
+            .try_set(root_index, wrapping_add(u32_at(in self.parent_len, root_index), 1));
     }
 
-    fn make_class(inout self, op: u32, data: i64, c0: u32, c1: u32, o0: u32, o1: u32) -> u32 {
-        let id = wrapping_u32(self.r_op.len());
+    fn make_class(
+        inout self,
+        op: u32,
+        data: i64,
+        child0: u32,
+        child1: u32,
+        orig_child0: u32,
+        orig_child1: u32
+    ) -> u32 {
+        let id = wrapping_u32(self.orig_op.len());
         self.parent.push(id);
-        self.r_op.push(op);
-        self.r_data.push(data);
-        self.r_c0.push(o0);
-        self.r_c1.push(o1);
-        self.plen.push(0);
-        self.phead.push(NONE);
-        self.ptail.push(NONE);
-        let a = self.arity_of(op);
-        if a == 0 {
-            self.leaf.push(1);
+        self.orig_op.push(op);
+        self.orig_data.push(data);
+        self.orig_child0.push(orig_child0);
+        self.orig_child1.push(orig_child1);
+        self.parent_len.push(0);
+        self.parent_head.push(NONE);
+        self.parent_tail.push(NONE);
+        let arity = self.arity_of(op);
+        if arity == 0 {
+            self.holds_leaf.push(1);
         } else {
-            self.leaf.push(0);
+            self.holds_leaf.push(0);
         }
-        self.cstart.push(0);
-        self.clen.push(0);
-        if a >= 1 {
-            self.push_parent(c0, id);
+        self.class_starts.push(0);
+        self.class_lens.push(0);
+        if arity >= 1 {
+            self.push_parent(child0, id);
         }
-        if a >= 2 {
-            self.push_parent(c1, id);
+        if arity >= 2 {
+            self.push_parent(child1, id);
         }
         self.pending.push(id);
-        self.memo_insert(op, data, c0, c1, id);
+        self.memo_insert(op, data, child0, child1, id);
         self.classes = wrapping_add(self.classes, 1);
         self.clean = false;
         id
@@ -385,212 +394,233 @@ impl EGraph {
 
     // egg's `add_uncanonical`: the existing id of an equal e-node (which
     // may not be canonical), or a new class.
-    pub fn add_uncanonical(inout self, op: u32, data: i64, o0: u32, o1: u32) -> u32 {
-        let a = self.arity_of(op);
-        let c0 = if a >= 1 { self.find(o0) } else { 0 };
-        let c1 = if a >= 2 { self.find(o1) } else { 0 };
-        let existing = self.memo_get(op, data, c0, c1);
+    pub fn add_uncanonical(
+        inout self,
+        op: u32,
+        data: i64,
+        orig_child0: u32,
+        orig_child1: u32
+    ) -> u32 {
+        let arity = self.arity_of(op);
+        let child0 = if arity >= 1 {
+            self.find(orig_child0)
+        } else {
+            0
+        };
+        let child1 = if arity >= 2 {
+            self.find(orig_child1)
+        } else {
+            0
+        };
+        let existing = self.memo_get(op, data, child0, child1);
         if existing != NONE {
             return existing;
         }
-        self.make_class(op, data, c0, c1, o0, o1)
+        self.make_class(op, data, child0, child1, orig_child0, orig_child1)
     }
 
     // egg's `add`: the canonical class of the e-node.
-    pub fn add(inout self, op: u32, data: i64, c0: u32, c1: u32) -> u32 {
-        let id = self.add_uncanonical(op, data, c0, c1);
+    pub fn add(inout self, op: u32, data: i64, child0: u32, child1: u32) -> u32 {
+        let id = self.add_uncanonical(op, data, child0, child1);
         self.find(id)
     }
 
     // The canonical class of an e-node already in the graph, or NONE (egg's
     // `lookup`).
-    pub fn lookup(in self, op: u32, data: i64, c0: u32, c1: u32) -> u32 {
-        let a = self.arity_of(op);
-        let k0 = if a >= 1 { self.find(c0) } else { 0 };
-        let k1 = if a >= 2 { self.find(c1) } else { 0 };
-        let id = self.memo_get(op, data, k0, k1);
+    pub fn lookup(in self, op: u32, data: i64, child0: u32, child1: u32) -> u32 {
+        let arity = self.arity_of(op);
+        let class0 = if arity >= 1 { self.find(child0) } else { 0 };
+        let class1 = if arity >= 2 { self.find(child1) } else { 0 };
+        let id = self.memo_get(op, data, class0, class1);
         if id == NONE { NONE } else { self.find(id) }
     }
 
     // egg's `union` (`perform_union`): whether two classes were merged.
-    pub fn union(inout self, a: u32, b: u32) -> bool {
+    pub fn union(inout self, first: u32, second: u32) -> bool {
         self.clean = false;
-        let mut x = self.find_mut(a);
-        let mut y = self.find_mut(b);
-        if x == y {
+        let mut kept = self.find_mut(first);
+        let mut absorbed = self.find_mut(second);
+        if kept == absorbed {
             return false;
         }
-        if u32_at(in self.plen, widen_u64(x)) < u32_at(in self.plen, widen_u64(y)) {
-            let t = x;
-            x = y;
-            y = t;
+        if u32_at(in self.parent_len, widen_u64(kept))
+            < u32_at(in self.parent_len, widen_u64(absorbed)) {
+            let swap = kept;
+            kept = absorbed;
+            absorbed = swap;
         }
-        self.parent.try_set(widen_u64(y), x);
+        self.parent.try_set(widen_u64(absorbed), kept);
         // pending.extend(class2.parents)
-        let mut c = u32_at(in self.phead, widen_u64(y));
+        let mut cell = u32_at(in self.parent_head, widen_u64(absorbed));
         loop {
-            if c == NONE {
+            if cell == NONE {
                 break;
             }
-            self.pending.push(u32_at(in self.cell_val, widen_u64(c)));
-            c = u32_at(in self.cell_next, widen_u64(c));
+            self.pending.push(u32_at(in self.cell_parent, widen_u64(cell)));
+            cell = u32_at(in self.cell_next, widen_u64(cell));
         }
         // concat_vecs(class1.parents, class2.parents): class 1 is the longer.
-        let h2 = u32_at(in self.phead, widen_u64(y));
-        if h2 != NONE {
-            let t1 = u32_at(in self.ptail, widen_u64(x));
-            if t1 == NONE {
-                self.phead.try_set(widen_u64(x), h2);
+        let absorbed_head = u32_at(in self.parent_head, widen_u64(absorbed));
+        if absorbed_head != NONE {
+            let kept_tail = u32_at(in self.parent_tail, widen_u64(kept));
+            if kept_tail == NONE {
+                self.parent_head.try_set(widen_u64(kept), absorbed_head);
             } else {
-                self.cell_next.try_set(widen_u64(t1), h2);
+                self.cell_next.try_set(widen_u64(kept_tail), absorbed_head);
             }
-            self.ptail.try_set(widen_u64(x), u32_at(in self.ptail, widen_u64(y)));
+            self.parent_tail
+                .try_set(widen_u64(kept), u32_at(in self.parent_tail, widen_u64(absorbed)));
         }
-        self.plen.try_set(
-            widen_u64(x),
-            wrapping_add(u32_at(in self.plen, widen_u64(x)), u32_at(in self.plen, widen_u64(y)))
+        self.parent_len.try_set(
+            widen_u64(kept),
+            wrapping_add(
+                u32_at(in self.parent_len, widen_u64(kept)),
+                u32_at(in self.parent_len, widen_u64(absorbed))
+            )
         );
-        if u8_at(in self.leaf, widen_u64(y)) != 0 {
-            self.leaf.try_set(widen_u64(x), 1);
+        if u8_at(in self.holds_leaf, widen_u64(absorbed)) != 0 {
+            self.holds_leaf.try_set(widen_u64(kept), 1);
         }
         self.classes = wrapping_sub(self.classes, 1);
         true
     }
 
     fn process_unions(inout self) -> u64 {
-        let mut n: u64 = 0;
+        let mut unions: u64 = 0;
         loop {
             let id = match self.pending.pop() {
-                Option::Some(x) => x,
+                Option::Some(pending_id) => pending_id,
                 Option::None => break,
             };
             let op = self.raw_op(id);
-            let a = self.arity_of(op);
-            let c0 = if a >= 1 {
-                let r = self.raw_child(id, 0);
-                self.find_mut(r)
+            let arity = self.arity_of(op);
+            let child0 = if arity >= 1 {
+                let raw = self.raw_child(id, 0);
+                self.find_mut(raw)
             } else {
                 0
             };
-            let c1 = if a >= 2 {
-                let r = self.raw_child(id, 1);
-                self.find_mut(r)
+            let child1 = if arity >= 2 {
+                let raw = self.raw_child(id, 1);
+                self.find_mut(raw)
             } else {
                 0
             };
-            let d = self.raw_data(id);
-            let old = self.memo_insert(op, d, c0, c1, id);
-            if old != NONE {
-                if self.union(old, id) {
-                    n = wrapping_add(n, 1);
+            let data = self.raw_data(id);
+            let old_id = self.memo_insert(op, data, child0, child1, id);
+            if old_id != NONE {
+                if self.union(old_id, id) {
+                    unions = wrapping_add(unions, 1);
                 }
             }
         }
-        n
+        unions
     }
 
     fn rebuild_classes(inout self) {
-        let n = self.raw_len();
+        let id_count = self.raw_len();
         let mut keys = Keys {
-            hi: ChunkSeq::with_capacity[u64](n),
-            data: ChunkSeq::with_capacity[i64](n),
-            lo: ChunkSeq::with_capacity[u64](n)
+            root_op: ChunkSeq::with_capacity[u64](id_count),
+            data: ChunkSeq::with_capacity[i64](id_count),
+            children: ChunkSeq::with_capacity[u64](id_count)
         };
-        let mut idx: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
-        for k in 0..n {
-            let id = wrapping_u32(k);
-            let r = self.find_mut(id);
+        let mut order: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](id_count);
+        for index in 0..id_count {
+            let id = wrapping_u32(index);
+            let class_root = self.find_mut(id);
             let op = self.raw_op(id);
-            let a = self.arity_of(op);
-            let c0 = if a >= 1 {
-                let x = self.raw_child(id, 0);
-                self.find_mut(x)
+            let arity = self.arity_of(op);
+            let child0 = if arity >= 1 {
+                let raw = self.raw_child(id, 0);
+                self.find_mut(raw)
             } else {
                 0
             };
-            let c1 = if a >= 2 {
-                let x = self.raw_child(id, 1);
-                self.find_mut(x)
+            let child1 = if arity >= 2 {
+                let raw = self.raw_child(id, 1);
+                self.find_mut(raw)
             } else {
                 0
             };
-            keys.hi.push(wrapping_shl_u64(widen_u64(r), 32) | widen_u64(op));
-            let d = self.raw_data(id);
-            keys.data.push(d);
-            keys.lo.push(wrapping_shl_u64(widen_u64(c0), 32) | widen_u64(c1));
-            idx.push(id);
+            keys.root_op.push(wrapping_shl_u64(widen_u64(class_root), 32) | widen_u64(op));
+            let data = self.raw_data(id);
+            keys.data.push(data);
+            keys.children.push(wrapping_shl_u64(widen_u64(child0), 32) | widen_u64(child1));
+            order.push(id);
         }
-        sort_ids(inout idx, in keys);
-        self.n_op.clear();
-        self.n_data.clear();
-        self.n_c0.clear();
-        self.n_c1.clear();
-        self.live.clear();
-        let mut prev: u32 = NONE;
+        sort_ids(inout order, in keys);
+        self.sorted_op.clear();
+        self.sorted_data.clear();
+        self.sorted_child0.clear();
+        self.sorted_child1.clear();
+        self.live_roots.clear();
+        let mut prev_id: u32 = NONE;
         let mut prev_root: u32 = NONE;
-        for i in 0..n {
-            let id = u32_at(in idx, i);
-            if prev != NONE && key_same(in keys, prev, id) {
+        for i in 0..id_count {
+            let id = u32_at(in order, i);
+            if prev_id != NONE && key_same(in keys, prev_id, id) {
                 continue;
             }
-            prev = id;
-            let hi = u64_at(in keys.hi, widen_u64(id));
-            let root = wrapping_u32(hi >> 32);
+            prev_id = id;
+            let root_op = u64_at(in keys.root_op, widen_u64(id));
+            let root = wrapping_u32(root_op >> 32);
             if root != prev_root {
                 prev_root = root;
-                self.live.push(root);
-                self.cstart.try_set(widen_u64(root), wrapping_u32(self.n_op.len()));
-                self.clen.try_set(widen_u64(root), 0);
+                self.live_roots.push(root);
+                self.class_starts.try_set(widen_u64(root), wrapping_u32(self.sorted_op.len()));
+                self.class_lens.try_set(widen_u64(root), 0);
             }
-            let lo = u64_at(in keys.lo, widen_u64(id));
-            self.n_op.push(wrapping_u32(hi & 4294967295));
-            self.n_data.push(i64_at(in keys.data, widen_u64(id)));
-            self.n_c0.push(wrapping_u32(lo >> 32));
-            self.n_c1.push(wrapping_u32(lo & 4294967295));
-            self.clen
-                .try_set(widen_u64(root), wrapping_add(u32_at(in self.clen, widen_u64(root)), 1));
+            let children = u64_at(in keys.children, widen_u64(id));
+            self.sorted_op.push(wrapping_u32(root_op & 4294967295));
+            self.sorted_data.push(i64_at(in keys.data, widen_u64(id)));
+            self.sorted_child0.push(wrapping_u32(children >> 32));
+            self.sorted_child1.push(wrapping_u32(children & 4294967295));
+            self.class_lens.try_set(
+                widen_u64(root),
+                wrapping_add(u32_at(in self.class_lens, widen_u64(root)), 1)
+            );
         }
     }
 
     // egg's `rebuild`: restores congruence and the sorted class view.
     // Returns the number of unions congruence made.
     pub fn rebuild(inout self) -> u64 {
-        let n = self.process_unions();
+        let unions = self.process_unions();
         self.rebuild_classes();
         self.clean = true;
-        n
+        unions
     }
 
     // The rebuilt view (valid when clean).
     pub fn live_count(in self) -> u64 {
-        self.live.len()
+        self.live_roots.len()
     }
 
-    pub fn live_at(in self, i: u64) -> u32 {
-        u32_at(in self.live, i)
+    pub fn live_at(in self, index: u64) -> u32 {
+        u32_at(in self.live_roots, index)
     }
 
     pub fn class_start(in self, root: u32) -> u64 {
-        widen_u64(u32_at(in self.cstart, widen_u64(root)))
+        widen_u64(u32_at(in self.class_starts, widen_u64(root)))
     }
 
     pub fn class_len(in self, root: u32) -> u64 {
-        widen_u64(u32_at(in self.clen, widen_u64(root)))
+        widen_u64(u32_at(in self.class_lens, widen_u64(root)))
     }
 
-    pub fn node_op(in self, k: u64) -> u32 {
-        u32_at(in self.n_op, k)
+    pub fn node_op(in self, node: u64) -> u32 {
+        u32_at(in self.sorted_op, node)
     }
 
-    pub fn node_data(in self, k: u64) -> i64 {
-        i64_at(in self.n_data, k)
+    pub fn node_data(in self, node: u64) -> i64 {
+        i64_at(in self.sorted_data, node)
     }
 
-    pub fn node_child(in self, k: u64, i: u64) -> u32 {
-        if i == 0 {
-            u32_at(in self.n_c0, k)
+    pub fn node_child(in self, node: u64, child_index: u64) -> u32 {
+        if child_index == 0 {
+            u32_at(in self.sorted_child0, node)
         } else {
-            u32_at(in self.n_c1, k)
+            u32_at(in self.sorted_child1, node)
         }
     }
 }

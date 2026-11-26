@@ -13,34 +13,34 @@ pub fn max64(a: u64, b: u64) -> u64 {
     if a > b { a } else { b }
 }
 
-// `v` rounded up to a multiple of `a` (`a = 0` counts as 1), as
-// `v.div_ceil(a) * a`.
-pub fn align_up(v: u64, a: u64) -> u64 {
-    if a <= 1 {
-        return v;
+// `value` rounded up to a multiple of `align` (`align = 0` counts as
+// 1), as `value.div_ceil(align) * align`.
+pub fn align_up(value: u64, align: u64) -> u64 {
+    if align <= 1 {
+        return value;
     }
-    let q = if v % a != 0 {
-        wrapping_add(v / a, 1)
+    let quotient = if value % align != 0 {
+        wrapping_add(value / align, 1)
     } else {
-        v / a
+        value / align
     };
-    wrapping_mul(q, a)
+    wrapping_mul(quotient, align)
 }
 
-pub fn rd8(in b: Slice[u8], at: u64) -> u8 {
-    b.try_get(at).unwrap_or(0)
+pub fn rd8(in bytes: Slice[u8], at: u64) -> u8 {
+    bytes.try_get(at).unwrap_or(0)
 }
 
-pub fn rd16(in b: Slice[u8], at: u64) -> Option[u16] {
-    b.try_read_u16_le(at)
+pub fn rd16(in bytes: Slice[u8], at: u64) -> Option[u16] {
+    bytes.try_read_u16_le(at)
 }
 
-pub fn rd32(in b: Slice[u8], at: u64) -> Option[u32] {
-    b.try_read_u32_le(at)
+pub fn rd32(in bytes: Slice[u8], at: u64) -> Option[u32] {
+    bytes.try_read_u32_le(at)
 }
 
-pub fn rd64(in b: Slice[u8], at: u64) -> Option[u64] {
-    b.try_read_u64_le(at)
+pub fn rd64(in bytes: Slice[u8], at: u64) -> Option[u64] {
+    bytes.try_read_u64_le(at)
 }
 
 // Appends `width` zero bytes and returns where they start.
@@ -50,76 +50,76 @@ pub fn grow(inout out: ChunkSeq[u8], width: u64) -> u64 {
     at
 }
 
-pub fn push16(inout out: ChunkSeq[u8], v: u16) {
+pub fn push16(inout out: ChunkSeq[u8], value: u16) {
     let at = grow(inout out, 2);
-    let ok = out.try_write_u16_le(at, v);
+    let ok = out.try_write_u16_le(at, value);
 }
 
-pub fn push32(inout out: ChunkSeq[u8], v: u32) {
+pub fn push32(inout out: ChunkSeq[u8], value: u32) {
     let at = grow(inout out, 4);
-    let ok = out.try_write_u32_le(at, v);
+    let ok = out.try_write_u32_le(at, value);
 }
 
-pub fn push64(inout out: ChunkSeq[u8], v: u64) {
+pub fn push64(inout out: ChunkSeq[u8], value: u64) {
     let at = grow(inout out, 8);
-    let ok = out.try_write_u64_le(at, v);
+    let ok = out.try_write_u64_le(at, value);
 }
 
-pub fn put32(inout out: ChunkSeq[u8], at: u64, v: u32) {
-    let ok = out.try_write_u32_le(at, v);
+pub fn put32(inout out: ChunkSeq[u8], at: u64, value: u32) {
+    let ok = out.try_write_u32_le(at, value);
 }
 
-pub fn put64(inout out: ChunkSeq[u8], at: u64, v: u64) {
-    let ok = out.try_write_u64_le(at, v);
+pub fn put64(inout out: ChunkSeq[u8], at: u64, value: u64) {
+    let ok = out.try_write_u64_le(at, value);
 }
 
 pub fn get32(in out: ChunkSeq[u8], at: u64) -> u32 {
     out.try_read_u32_le(at).unwrap_or(0)
 }
 
-pub fn push_bytes(inout out: ChunkSeq[u8], in s: Slice[u8]) {
-    out.extend(in s);
+pub fn push_bytes(inout out: ChunkSeq[u8], in bytes: Slice[u8]) {
+    out.extend(in bytes);
 }
 
-pub fn push_text(inout out: ChunkSeq[u8], in s: Str) {
-    out.extend(in s.as_bytes());
+pub fn push_text(inout out: ChunkSeq[u8], in text: Str) {
+    out.extend(in text.as_bytes());
 }
 
-// Appends `x` in decimal.
-pub fn push_dec(inout out: ChunkSeq[u8], x: u64) {
-    if x >= 10 {
-        push_dec(inout out, x / 10);
+// Appends `value` in decimal.
+pub fn push_dec(inout out: ChunkSeq[u8], value: u64) {
+    if value >= 10 {
+        push_dec(inout out, value / 10);
     }
-    out.push(wrapping_u8(wrapping_add(x % 10, 48)));
+    out.push(wrapping_u8(wrapping_add(value % 10, 48)));
 }
 
-fn push_hex_digits(inout out: ChunkSeq[u8], x: u64) {
-    if x >= 16 {
-        push_hex_digits(inout out, x >> 4);
+fn push_hex_digits(inout out: ChunkSeq[u8], value: u64) {
+    if value >= 16 {
+        push_hex_digits(inout out, value >> 4);
     }
-    let d = x & 15;
-    if d < 10 {
-        out.push(wrapping_u8(wrapping_add(d, 48)));
+    let digit = value & 15;
+    if digit < 10 {
+        out.push(wrapping_u8(wrapping_add(digit, 48)));
     } else {
-        out.push(wrapping_u8(wrapping_add(d, 87)));
+        out.push(wrapping_u8(wrapping_add(digit, 87)));
     }
 }
 
-// Appends `x` as Rust's `{:#x}` does: `0x` and lower-case digits.
-pub fn push_hex(inout out: ChunkSeq[u8], x: u64) {
+// Appends `value` as Rust's `{:#x}` does: `0x` and lower-case digits.
+pub fn push_hex(inout out: ChunkSeq[u8], value: u64) {
     out.push(48);
     out.push(120);
-    push_hex_digits(inout out, x);
+    push_hex_digits(inout out, value);
 }
 
 // A length-prefixed string of a result: the byte count, then the bytes.
-pub fn put_str(inout out: ChunkSeq[u8], in s: Slice[u8]) {
-    push64(inout out, s.len());
-    out.extend(in s);
+pub fn put_str(inout out: ChunkSeq[u8], in bytes: Slice[u8]) {
+    push64(inout out, bytes.len());
+    out.extend(in bytes);
 }
 
-pub fn put_text(inout out: ChunkSeq[u8], in s: Str) {
-    put_str(inout out, in s.as_bytes());
+pub fn put_text(inout out: ChunkSeq[u8], in text: Str) {
+    put_str(inout out, in text.as_bytes());
 }
 
 // Reads a request: little-endian words and length-prefixed strings. A read
@@ -134,8 +134,8 @@ pub fn reader() -> Reader {
 }
 
 impl Reader {
-    pub fn word(inout self, in b: Slice[u8]) -> u64 {
-        match b.try_read_u64_le(self.pos) {
+    pub fn word(inout self, in req: Slice[u8]) -> u64 {
+        match req.try_read_u64_le(self.pos) {
             Option::Some(v) => {
                 self.pos = wrapping_add(self.pos, 8);
                 v
@@ -147,13 +147,13 @@ impl Reader {
         }
     }
 
-    // A string's start; its length is in `self.last`. The bytes are
-    // `b[start..start + len]`.
-    pub fn span(inout self, in b: Slice[u8]) -> Span {
-        let len = self.word(in b);
+    // A string's start and length; the bytes are
+    // `req[start..start + len]`.
+    pub fn span(inout self, in req: Slice[u8]) -> Span {
+        let len = self.word(in req);
         let start = self.pos;
         let end = wrapping_add(start, len);
-        if end < start || end > b.len() {
+        if end < start || end > req.len() {
             self.bad = true;
             return Span { start: 0, len: 0 };
         }
@@ -168,36 +168,37 @@ pub copy struct Span {
     len: u64,
 }
 
-pub fn span_end(s: Span) -> u64 {
-    wrapping_add(s.start, s.len)
+pub fn span_end(span: Span) -> u64 {
+    wrapping_add(span.start, span.len)
 }
 
-// `a[ia..ia + n] == b[ib..ib + n]`, false when either runs past its end.
-pub fn bytes_eq(in a: Slice[u8], ia: u64, in b: Slice[u8], ib: u64, n: u64) -> bool {
-    if wrapping_add(ia, n) < ia || wrapping_add(ia, n) > a.len() {
+// `lhs[lhs_at..lhs_at + n] == rhs[rhs_at..rhs_at + n]`, false when either
+// runs past its end.
+pub fn bytes_eq(in lhs: Slice[u8], lhs_at: u64, in rhs: Slice[u8], rhs_at: u64, n: u64) -> bool {
+    if wrapping_add(lhs_at, n) < lhs_at || wrapping_add(lhs_at, n) > lhs.len() {
         return false;
     }
-    if wrapping_add(ib, n) < ib || wrapping_add(ib, n) > b.len() {
+    if wrapping_add(rhs_at, n) < rhs_at || wrapping_add(rhs_at, n) > rhs.len() {
         return false;
     }
-    a[ia..wrapping_add(ia, n)].eq(in b[ib..wrapping_add(ib, n)])
+    lhs[lhs_at..wrapping_add(lhs_at, n)].eq(in rhs[rhs_at..wrapping_add(rhs_at, n)])
 }
 
-// The bytes of `s` equal `b[at..at + n]`.
-pub fn text_eq(in b: Slice[u8], at: u64, n: u64, in s: Str) -> bool {
-    let t = s.as_bytes();
-    n == t.len() && bytes_eq(in b, at, in t, 0, n)
+// The bytes of `text` equal `bytes[at..at + n]`.
+pub fn text_eq(in bytes: Slice[u8], at: u64, n: u64, in text: Str) -> bool {
+    let text_bytes = text.as_bytes();
+    n == text_bytes.len() && bytes_eq(in bytes, at, in text_bytes, 0, n)
 }
 
-// FNV-1a over `b`: symbol-name hashes for the linker's lookups.
-pub fn fnv(in b: Slice[u8]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for i in 0..b.len() {
-        let c = match b.try_get(i) {
+// FNV-1a over `bytes`: symbol-name hashes for the linker's lookups.
+pub fn fnv(in bytes: Slice[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for i in 0..bytes.len() {
+        let byte = match bytes.try_get(i) {
             Option::Some(v) => widen_u64(v),
             Option::None => 0,
         };
-        h = wrapping_mul(h ^ c, 0x100000001b3);
+        hash = wrapping_mul(hash ^ byte, 0x100000001b3);
     }
-    h
+    hash
 }

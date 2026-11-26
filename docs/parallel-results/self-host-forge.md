@@ -450,3 +450,85 @@ itself (part 4b-4).
 |---|---|---|
 | `self_host_sugar` `driver_matches_on_the_import_examples` | the import examples of `crates/vesper-syntax/tests/sugar_expand.rs` and 6 refusals (missing scopes, invalid import, duplicate alias, unknown scope binding, broken and missing declarations) | 0 differences |
 | `self_host_sugar` `driver_matches_on_imported_sugar_test_suites` | the suite and scope programs with their declarations moved into imports: visible by name, under aliases, and behind a shared scope (1,035 programs, 2,070 expansions) | 0 differences, 4 macro-validation gaps |
+
+## Part 5: the hybrid swap of sugar expansion
+
+- **Swap-in point** (`crates/vesper-syntax/src/sugar_expand.rs`):
+  `SugarExpandTable`, `RUST_SUGAR_EXPAND`, `install_sugar_expand` and
+  `rust_expand_sugar`. Every caller (package sugar imports in
+  `src/packages/sugar.rs`, the forge front end in `src/forge_frontend`)
+  goes through `expand_sugar_with_scopes_for_execution`, so the one table
+  covers them all. The default compiler installs nothing.
+- **Module** (`crates/vesper-hybrid/modules/sugar`, `@vesper/hybrid-sugar`):
+  `expand_words` over `@vesper/sugar` `sugar_expand_scoped_words`.
+  `src/sugar_words.rs` writes its input text (scopes that the caller
+  passes as one slice become one scope, as the Rust driver binds them
+  once) and reads its words back into `ExpandedSugar` or the
+  `Diagnostic`. An `emits` row is read with the Rust parser, once per
+  distinct row in a call.
+- **Swap** (`src/swap/sugar.rs`, row `sugar`, open): a source or import
+  that contains `macro` stays on Rust until part 6 ports
+  `macro_source::validate_surface`, and so does a length that the
+  input's 28-bit numbers cannot hold. Both are counted in the
+  `VESPER_HYBRID_STATS` report. The `divergent-sugar` feature reads every
+  source back as having no sugar.
+
+| Test | Cases | Result |
+|---|---|---|
+| `vesper-hybrid` `sugar` `expansion_matches_rust` | every repository `.ves` file and the suite sources without `macro`, plain and with their declarations moved into imports (by name, aliased, behind one shared scope), with and without tests (1,831 programs, 3,662 expansions) | 0 differences |
+| `vesper-hybrid check` with `VESPER_HYBRID_STATS=time` (debug build) | `@vesper-std/core`, `@vesper-std/tests` and `@vesper-std/sort` (38 expansions) | 0 differences, 0 kept on Rust |
+
+The release driver measured 1.38x Rust in part 4c. The debug numbers
+above are not a speed measurement. The row stays open until a release
+ABBA run on a sugar-heavy package and the macro gap close.
+
+## Part 6: the macro check in the driver, and the first release gate
+
+- **Macro check** (`packages/vesper-sugar/src/driver.ves`): each round now
+  parses with `@vesper/front` `parse_macro_surface_tokens`, the port of
+  `macro_source::validate_surface`, under the limits that
+  `parser::parse_expansion_scopes` uses (1 MiB, 65,536 tokens, depth 48).
+  The swap no longer keeps sources or imports that contain `macro` on
+  Rust; only a length the input's numbers cannot hold stays there.
+- **One parse per round**: hygiene protection lowers the parse the round
+  already made (`@vesper/ast` `lower_surface_parsed`) instead of lexing,
+  parsing and lowering the text again. Range copies in the driver and the
+  template renderer copy in bulk.
+- **Flip gate** (`scripts/ci/flip-gate/sugar.json`): the differential is
+  `self_host_sugar driver_matches`, and the ABBA workload `expand` is
+  `self_host_sugar flip_gate` (Rust `rust_expand_sugar` against input,
+  JIT call and decode, R V V R over the repository and suite corpus,
+  plain and with imports). `tests/common/sugar_words.rs` (moved from the
+  hybrid crate) is shared by the swap, the hybrid test and the gate.
+
+| Test | Cases | Result |
+|---|---|---|
+| `self_host_sugar` `driver_matches_*` (6 tests, now with `macro` sources) | examples, suites, fuzz, scopes, imports | 0 differences |
+| flip gate differential | 3,872 cases | 0 differences; tests 1/1 pass |
+| flip gate ABBA `expand` (release, `target-cpu=native`, n=12) | the corpus above | 1.60x before this part; 1.49x [1.40x, 1.61x] and 1.53x [1.46x, 1.62x] after, INCONCLUSIVE |
+
+A profile of the driver showed the rest of the gap in calls to tiny
+helpers (`b8`, `add`, `inc`, `w64`) that the IR inliner leaves in place:
+`ir_inline::Budget::default()` stops inlining once a program has grown by
+40,000 instructions, and the sugar driver with the front end and the AST
+is past that before it reaches them. With that cap lifted the same run
+measured about 1.29x. The row stays open until the inliner change lands
+and the gate passes.
+
+## Part 7: the inliner budget scales with the program, and the flip
+
+- **Inliner** (`src/ir_inline.rs`): `Budget::for_program` is
+  `Budget::default()` with the program-wide cap raised to three times the
+  program's own cost (`PROGRAM_GROWTH_FACTOR`), never below 40,000. The
+  JIT, `--lib` exports, sessions and optimized executables use it. The
+  sugar driver program costs 46,076 and its inlining wants 107,000; the
+  per-caller (2,000), per-callee (4,000) and handle caps are unchanged.
+- **Flip**: row `pass("sugar", "sugar", "#1157")`, so `gated` expands sugar
+  in Vesper.
+
+| Gate | Result |
+|---|---|
+| differential (`driver_matches`) | 0 differences on 3,872 cases |
+| tests | 1/1 pass |
+| ABBA `expand` (release, `target-cpu=native`, n=12) | 1.33x [1.28x, 1.36x]; an ABBA-only run measured 1.25x [1.22x, 1.36x] |
+| verdict | PASS |

@@ -296,10 +296,7 @@ fn intern(inout names: Names, in lit: Str) -> u32 {
 }
 
 fn bool_at(in s: ChunkSeq[bool], i: u64) -> bool {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => false,
-    }
+    s.try_get(i).unwrap_or(false)
 }
 
 fn set8(inout s: ChunkSeq[u8], i: u64, v: u8) {
@@ -361,10 +358,7 @@ fn last_is(in names: Names, s: u32, in lit: Str) -> bool {
         return false;
     }
     for i in 0..b.len() {
-        let x = match b.try_get(i) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
+        let x = b.try_get(i).unwrap_or(0);
         if u8_at(in seg, i) != x {
             return false;
         }
@@ -1426,9 +1420,14 @@ fn map_effect(
     }
     let index = g.map_defs.len();
     let msym = c.names.intern(in map_name.as_slice());
-    g.map_defs.push(
-        MapRow { name: msym, kind: mkind, key: key_bytes, value: value_bytes, max: max, flags: 0 }
-    );
+    g.map_defs.push(MapRow {
+        name: msym,
+        kind: mkind,
+        key: key_bytes,
+        value: value_bytes,
+        max: max,
+        flags: 0
+    });
     g.map_effects.push(name);
     for k in 0..decl.on {
         let o = x.op(add(decl.oa, k));
@@ -1644,16 +1643,14 @@ fn read_params(inout g: G, in p: Program, f: FnRow) {
         let pass = wrapping_u8(p.op(inc(at)));
         let k = p.op(add(at, 2));
         let t = add(at, add(3, k));
-        g.params.push(
-            PInfo {
-                name: name,
-                pass: pass,
-                nproj: k,
-                ty: pos32(in p, t),
-                s0: p.op(inc(t)),
-                s1: p.op(add(t, 2))
-            }
-        );
+        g.params.push(PInfo {
+            name: name,
+            pass: pass,
+            nproj: k,
+            ty: pos32(in p, t),
+            s0: p.op(inc(t)),
+            s1: p.op(add(t, 2))
+        });
         at = add(t, 3);
     }
 }
@@ -1876,10 +1873,7 @@ pub fn lower(inout g: G, inout c: Ctx, in p: Program, in x: Extra) -> bool {
         // `Asm::map`: validated already; a second map with the same name
         // is an assembly error.
         for j in 0..i {
-            let e = match g.map_defs.try_get(j) {
-                Option::Some(e) => e,
-                Option::None => d,
-            };
+            let e = g.map_defs.try_get(j).unwrap_or(d);
             if e.name == d.name {
                 fail_asm(inout g);
                 txt(inout g.msg, "duplicate map ");
@@ -2009,17 +2003,11 @@ pub fn lower(inout g: G, inout c: Ctx, in p: Program, in x: Extra) -> bool {
 // ----- one function (`FnLower`) -----------------------------------------------------
 
 fn vrep(in g: G, v: u32) -> u8 {
-    match g.rep.try_get(w(v)) {
-        Option::Some(r) => r,
-        Option::None => REP_BAD,
-    }
+    g.rep.try_get(w(v)).unwrap_or(REP_BAD)
 }
 
 fn vty(in g: G, v: u32) -> u32 {
-    match g.vty.try_get(w(v)) {
-        Option::Some(t) => t,
-        Option::None => NONE32,
-    }
+    g.vty.try_get(w(v)).unwrap_or(NONE32)
 }
 
 fn grow_values(inout g: G, v: u32) {
@@ -2999,10 +2987,7 @@ fn bytes_are(in b: ChunkSeq[u8], in lit: Str) -> bool {
         return false;
     }
     for i in 0..l.len() {
-        let x = match l.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let x = l.try_get(i).unwrap_or(0);
         if u8_at(in b, i) != x {
             return false;
         }

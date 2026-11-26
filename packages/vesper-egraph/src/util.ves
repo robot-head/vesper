@@ -2,51 +2,39 @@
 // below 2^32, so index arithmetic uses wrapping_* (checked `+` is a Fail
 // effect). Each `<type>_at` read gives 0 past the end.
 
-pub fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+pub fn u32_at(in seq: ChunkSeq[u32], i: u64) -> u32 {
+    seq.try_get(i).unwrap_or(0)
 }
 
-pub fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+pub fn u64_at(in seq: ChunkSeq[u64], i: u64) -> u64 {
+    seq.try_get(i).unwrap_or(0)
 }
 
-pub fn i64_at(in s: ChunkSeq[i64], i: u64) -> i64 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+pub fn i64_at(in seq: ChunkSeq[i64], i: u64) -> i64 {
+    seq.try_get(i).unwrap_or(0)
 }
 
-pub fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+pub fn u8_at(in seq: ChunkSeq[u8], i: u64) -> u8 {
+    seq.try_get(i).unwrap_or(0)
 }
 
-pub fn filled_u32(n: u64, v: u32) -> ChunkSeq[u32] {
-    let mut s: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
-    s.resize(n, v);
-    s
+pub fn filled_u32(len: u64, fill: u32) -> ChunkSeq[u32] {
+    let mut seq: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](len);
+    seq.resize(len, fill);
+    seq
 }
 
 // FNV-1a over one word.
-pub fn fold(h: u64, x: u64) -> u64 {
-    wrapping_mul(h ^ x, 1099511628211)
+pub fn fold(hash: u64, word: u64) -> u64 {
+    wrapping_mul(hash ^ word, 1099511628211)
 }
 
 // A 64-bit mix of a node key, for the hash-cons table.
-pub fn mix(op: u32, data: i64, c0: u32, c1: u32) -> u64 {
-    let mut h = fold(14695981039346656037, widen_u64(op));
-    h = fold(h, wrapping_u64(data));
-    h = fold(h, widen_u64(c0));
-    h = fold(h, widen_u64(c1));
-    let a = wrapping_mul(h ^ (h >> 32), 13787848793156543929);
-    a ^ (a >> 29)
+pub fn mix(op: u32, data: i64, child0: u32, child1: u32) -> u64 {
+    let mut hash = fold(14695981039346656037, widen_u64(op));
+    hash = fold(hash, wrapping_u64(data));
+    hash = fold(hash, widen_u64(child0));
+    hash = fold(hash, widen_u64(child1));
+    let mixed = wrapping_mul(hash ^ (hash >> 32), 13787848793156543929);
+    mixed ^ (mixed >> 29)
 }

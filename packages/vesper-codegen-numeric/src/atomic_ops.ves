@@ -80,8 +80,8 @@ pub fn atomic_known(call: u64, op: u32) -> bool eff [Ffi[Cranelift]] {
         return false;
     }
     let code = call_arg(call, 0);
-    let t = call_arg(call, 1);
-    if t < TyCode::I8 || t > widen_u64(TyCode::I64) {
+    let ty_code = call_arg(call, 1);
+    if ty_code < TyCode::I8 || ty_code > widen_u64(TyCode::I64) {
         return false;
     }
     if code == AO_LOAD {
@@ -93,76 +93,86 @@ pub fn atomic_known(call: u64, op: u32) -> bool eff [Ffi[Cranelift]] {
     }
 }
 
-// The canonical 64-bit lane of the narrow `v` (`widen` in `atomic_call`).
-fn a_widen(inout b: Builder, v: Value, t: u32, signed: bool) -> Value eff [Ffi[Cranelift]] {
-    if t == TyCode::I64 {
-        v
+// The canonical 64-bit lane of the narrow `value` (`widen` in `atomic_call`).
+fn a_widen(
+    inout builder: Builder,
+    value: Value,
+    ty_code: u32,
+    signed: bool
+) -> Value eff [Ffi[Cranelift]] {
+    if ty_code == TyCode::I64 {
+        value
     } else if signed {
-        ins_convert(inout b, Cv::Sextend, aty(TyCode::I64), v)
+        ins_convert(inout builder, Cv::Sextend, aty(TyCode::I64), value)
     } else {
-        ins_convert(inout b, Cv::Uextend, aty(TyCode::I64), v)
+        ins_convert(inout builder, Cv::Uextend, aty(TyCode::I64), value)
     }
 }
 
 pub fn atomic_request(
     call: u64,
     op: u32,
-    inout b: Builder,
-    inout m: Module
+    inout builder: Builder,
+    inout module: Module
 ) -> Value eff [Ffi[Cranelift]] {
     let flags = mem_trusted();
     if op == NUM_ATOMIC_CELL {
         // `Atomic { cell }` -> sequence header `{len, cap, data}` -> element.
         let receiver = value_of_word(call_arg(call, 0));
-        let handle = ins_load(inout b, aty(TyCode::I64), flags, receiver, 0);
-        return ins_load(inout b, aty(TyCode::I64), flags, handle, 16);
+        let handle = ins_load(inout builder, aty(TyCode::I64), flags, receiver, 0);
+        return ins_load(inout builder, aty(TyCode::I64), flags, handle, 16);
     }
     if op == NUM_PARALLEL_FOR {
-        let fun = FuncRef { id: wrapping_u32(call_arg(call, 0)) };
-        let pointer = ins_func_addr(inout b, aty(TyCode::I64), fun);
-        let s = sig_new(inout m, call_conv_default());
+        let worker = FuncRef { id: wrapping_u32(call_arg(call, 0)) };
+        let pointer = ins_func_addr(inout builder, aty(TyCode::I64), worker);
+        let sig = sig_new(inout module, call_conv_default());
         for _ in 0..3 {
-            sig_param(inout m, s, aty(TyCode::I64));
+            sig_param(inout module, sig, aty(TyCode::I64));
         }
-        sig_return(inout m, s, aty(TyCode::I64));
-        let f = declare_function(inout m, in "vesper_parallel_for".as_bytes(), linkage_import(), s);
-        let r = import_function(inout b, inout m, f);
+        sig_return(inout module, sig, aty(TyCode::I64));
+        let func_id = declare_function(
+            inout module,
+            in "vesper_parallel_for".as_bytes(),
+            linkage_import(),
+            sig
+        );
+        let func_ref = import_function(inout builder, inout module, func_id);
         let mut args = ChunkSeq::with_capacity[u32](3);
         args.push(pointer.id);
         args.push(wrapping_u32(call_arg(call, 1)));
         args.push(wrapping_u32(call_arg(call, 2)));
-        let _r = ins_call(inout b, r, in args.as_slice());
-        return ins_iconst(inout b, aty(TyCode::I64), 0);
+        let _r = ins_call(inout builder, func_ref, in args.as_slice());
+        return ins_iconst(inout builder, aty(TyCode::I64), 0);
     }
     let code = call_arg(call, 0);
-    let t = wrapping_u32(call_arg(call, 1));
+    let ty_code = wrapping_u32(call_arg(call, 1));
     let signed = call_arg(call, 2) != 0;
     let data = value_of_word(call_arg(call, 3));
     if code == AO_LOAD {
-        let v = ins_atomic_load(inout b, aty(t), flags, data);
-        return a_widen(inout b, v, t, signed);
+        let loaded = ins_atomic_load(inout builder, aty(ty_code), flags, data);
+        return a_widen(inout builder, loaded, ty_code, signed);
     }
     if code == AO_CAS {
         let expected = value_of_word(call_arg(call, 4));
         let replacement = value_of_word(call_arg(call, 5));
         let ptr = value_of_word(call_arg(call, 6));
-        let ok = wrapping_i64(call_arg(call, 7));
-        let err = wrapping_i64(call_arg(call, 8));
+        let ok_tag = wrapping_i64(call_arg(call, 7));
+        let err_tag = wrapping_i64(call_arg(call, 8));
         let offset = wrapping_i32(call_arg(call, 9));
-        let old = ins_atomic_cas(inout b, flags, data, expected, replacement);
-        let same = ins_icmp(inout b, cc_eq(), old, expected);
-        let old_w = a_widen(inout b, old, t, signed);
-        let ok_v = ins_iconst(inout b, aty(TyCode::I64), ok);
-        let err_v = ins_iconst(inout b, aty(TyCode::I64), err);
-        let tag = ins_select(inout b, same, ok_v, err_v);
-        ins_store(inout b, 0, tag, ptr, 0);
-        ins_store(inout b, 0, old_w, ptr, offset);
+        let old = ins_atomic_cas(inout builder, flags, data, expected, replacement);
+        let same = ins_icmp(inout builder, cc_eq(), old, expected);
+        let old_wide = a_widen(inout builder, old, ty_code, signed);
+        let ok_value = ins_iconst(inout builder, aty(TyCode::I64), ok_tag);
+        let err_value = ins_iconst(inout builder, aty(TyCode::I64), err_tag);
+        let tag = ins_select(inout builder, same, ok_value, err_value);
+        ins_store(inout builder, 0, tag, ptr, 0);
+        ins_store(inout builder, 0, old_wide, ptr, offset);
         return ptr;
     }
-    let x = value_of_word(call_arg(call, 4));
+    let operand = value_of_word(call_arg(call, 4));
     if code == AO_STORE {
-        ins_atomic_store(inout b, flags, x, data);
-        return ins_iconst(inout b, aty(TyCode::I64), 0);
+        ins_atomic_store(inout builder, flags, operand, data);
+        return ins_iconst(inout builder, aty(TyCode::I64), 0);
     }
     let rmw = if code == AO_SWAP {
         AR_XCHG
@@ -177,6 +187,6 @@ pub fn atomic_request(
     } else {
         AR_XOR
     };
-    let old = ins_atomic_rmw(inout b, rmw, aty(t), flags, data, x);
-    a_widen(inout b, old, t, signed)
+    let old = ins_atomic_rmw(inout builder, rmw, aty(ty_code), flags, data, operand);
+    a_widen(inout builder, old, ty_code, signed)
 }

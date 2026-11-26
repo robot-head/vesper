@@ -9,8 +9,8 @@
 //!
 //! Workloads: `largest` (format the largest `.ves` file of the repository,
 //! crates/vesper-ebpf/vesper/src/verifier.ves) and `corpus` (format every
-//! repository `.ves` file outside the macro profile, which the port hands to
-//! Rust). Run from the repository root.
+//! repository `.ves` file the port formats, which is all of them since the
+//! macro profile moved to the port). Run from the repository root.
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
 

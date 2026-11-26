@@ -80,6 +80,12 @@ pub fn other() -> u32 {
     13
 }
 
+// `NotFound` from Rust's Windows `resolve_exe`, whose text is
+// `program not found` rather than the kind's own (#2147).
+pub fn program_not_found() -> u32 {
+    15
+}
+
 // The host's error word: the kind in the low 8 bits, the OS error in the
 // high 32.
 pub fn error_of(word: u64) -> IoError {
@@ -94,12 +100,10 @@ pub fn raise_io[T](word: u64) -> T eff [Fail[IoError]] {
 }
 
 pub fn raise_kind[T](kind: u32) -> T eff [Fail[IoError]] {
-    Fail::raise(
-        IoError {
-            kind: kind,
-            os: 0,
-        }
-    )
+    Fail::raise(IoError {
+        kind: kind,
+        os: 0,
+    })
 }
 
 // Open modes of `sys::open`.
@@ -697,6 +701,9 @@ fn os_error_suffix(inout out: ChunkSeq[u8], os: u32) {
 // (`io_error` in crates/vesper-hybrid/src/driver.rs): every other code is
 // `Other`.
 fn kind_text(kind: u32) -> Str {
+    if kind == program_not_found() {
+        return "program not found";
+    }
     match kind {
         1 => "entity not found",
         2 => "permission denied",

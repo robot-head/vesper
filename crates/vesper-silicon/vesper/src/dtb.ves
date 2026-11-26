@@ -486,9 +486,10 @@ pub fn m_parse(in b: Slice[u8]) -> Fdt eff [Fail[DtbFault]] {
             }
             break;
         } else {
-            Fail::raise(
-                DtbFault::BadToken { offset: wrapping_add(off_struct, tok_at), token: token }
-            );
+            Fail::raise(DtbFault::BadToken {
+                offset: wrapping_add(off_struct, tok_at),
+                token: token
+            });
         }
     }
     if count == 0 {

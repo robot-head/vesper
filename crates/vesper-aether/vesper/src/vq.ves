@@ -51,9 +51,10 @@ fn vq_locate(in regions: Slice[u64], gpa: u64, len: u64) -> Option[u64] {
         let r0 = word(in regions, base);
         let rl = word(in regions, wrapping_add(base, 2));
         if r0 <= gpa && end <= wrapping_add(r0, rl) {
-            return Option::Some(
-                wrapping_add(word(in regions, wrapping_add(base, 1)), wrapping_sub(gpa, r0))
-            );
+            return Option::Some(wrapping_add(
+                word(in regions, wrapping_add(base, 1)),
+                wrapping_sub(gpa, r0)
+            ));
         }
     }
     Option::None
@@ -467,7 +468,11 @@ pub fn vq_packed_walk(
             & (
                 65535
                     ^ (
-                        VQ_FLAG_NEXT | VQ_FLAG_WRITE | VQ_FLAG_INDIRECT | VQ_FLAG_AVAIL | VQ_FLAG_USED
+                        VQ_FLAG_NEXT
+                            | VQ_FLAG_WRITE
+                            | VQ_FLAG_INDIRECT
+                            | VQ_FLAG_AVAIL
+                            | VQ_FLAG_USED
                     )
             )
             != 0 {

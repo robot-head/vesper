@@ -1,3 +1,8 @@
+use @vesper-std/bytes::ascii::{BACKSLASH, SLASH};
+
+// Added to a nibble of 10 to 15 to give `a` to `f`: `'a' - 10`.
+pub const HEX_LETTER_BASE: u8 = 87;
+
 // Byte strings in one buffer: the `Vec<String>` and `BTreeSet<String>` of
 // src/proof_commands.rs. String order is byte order, as Rust's.
 pub struct Strs {
@@ -162,7 +167,7 @@ pub fn slashes(in s: Slice[u8]) -> ChunkSeq[u8] {
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     for i in 0..s.len() {
         let b = byte(in s, i);
-        out.push(if b == 92 { 47 } else { b });
+        out.push(if b == BACKSLASH { SLASH } else { b });
     }
     out
 }

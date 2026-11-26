@@ -14,13 +14,14 @@ use @vesper-std/process::{
     env_clear, kill_tree, process_group, release, spawn, stderr, stderr_stream, stdio, stdout,
     stdout_stream, success, truncated, wait_timeout
 };
+use @vesper-std/bytes::ascii::{BACKSLASH, DOT, HYPHEN, NEWLINE, SLASH};
 use self::auditor::AUDITOR;
 use self::json::{
     Json, begin_array, begin_object, end_array, end_object, field_bool, field_string, field_u64,
     json_new, key, put_string, put_u64, string
 };
 use self::provenance::{Gate, Theorems, blake3_hex, gate, gate_json, verify};
-use self::reader::{Raw, Rd, Table, raw_audit, rd_parse, table};
+use self::reader::{NONE, Raw, Rd, Table, raw_audit, rd_parse, table};
 use self::strs::{
     Strs, byte, count, end, equal, order, push, put_str, same, same_str, set_of, slashes, start,
     strs_new
@@ -38,6 +39,23 @@ const MAX_CAPTURE: u64 = 8388608;
 const MAX_PART: u64 = 2147483648;
 const MAX_IMPORTS: u64 = 4294967296;
 const MAX_MANIFEST: u64 = 8388608;
+// The Lean run bound when `--timeout` is not given, in seconds.
+const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
+// How long the Lean launcher may take to print its prefix, in seconds.
+const LEAN_PREFIX_TIMEOUT_SECONDS: u64 = 30;
+// How long `lean --version` may take, in seconds.
+const LEAN_VERSION_TIMEOUT_SECONDS: u64 = 10;
+const MILLIS_PER_SECOND: u64 = 1000;
+// How much of a failed audit's output the error message keeps, in chars.
+const MAX_FAILURE_DETAIL_CHARS: u64 = 4000;
+// How deep the artifact directory walk may go.
+const MAX_ARTIFACT_DEPTH: u64 = 64;
+// The most imported modules one audit may report.
+const MAX_IMPORTED_MODULES: u64 = 8192;
+// The most macro provenance markers one audit may report.
+const MAX_MACRO_MARKERS: u64 = 65536;
+// The private staging directory's mode: owner read, write and search (0o700).
+const PRIVATE_DIR_MODE: u32 = 448;
 
 // What the audit was asked: `Options` of src/proof_commands.rs.
 // `theorems` and `allowed` are sets (sorted, unique).
@@ -108,11 +126,11 @@ fn windows() -> bool {
 }
 
 fn is_sep(b: u8) -> bool {
-    b == 47 || (windows() && b == 92)
+    b == SLASH || (windows() && b == BACKSLASH)
 }
 
 fn sep() -> u8 {
-    if windows() { 92 } else { 47 }
+    if windows() { BACKSLASH } else { SLASH }
 }
 
 // `base.join(part)` for a relative `part`.
@@ -133,7 +151,7 @@ fn join_str(in base: Slice[u8], in part: Str) -> ChunkSeq[u8] {
 // prefix of it. Returns where the relative rest starts, or NONE.
 fn under(in p: Slice[u8], in base: Slice[u8]) -> u64 {
     if p.len() < base.len() || !same(in p[0..base.len()], in base) {
-        return 18446744073709551615;
+        return NONE;
     }
     if p.len() == base.len() {
         return p.len();
@@ -144,7 +162,7 @@ fn under(in p: Slice[u8], in base: Slice[u8]) -> u64 {
     if is_sep(byte(in p, base.len())) {
         return wrapping_add(base.len(), 1);
     }
-    18446744073709551615
+    NONE
 }
 
 // The file name of `p`: what follows its last separator.
@@ -173,13 +191,13 @@ fn with_extension(in p: Slice[u8], in ext: Str) -> ChunkSeq[u8] {
             break;
         }
         i = wrapping_sub(i, 1);
-        if byte(in p, i) == 46 {
+        if byte(in p, i) == DOT {
             cut = i;
             break;
         }
     }
     let mut out = seq(in p[0..cut]);
-    out.push(46);
+    out.push(DOT);
     put_str(inout out, in ext);
     out
 }
@@ -261,7 +279,7 @@ fn try_mkdir(in p: Slice[u8], private: bool) -> IoError eff [Ffi[StdFs]] {
     let t = utf8_string(in p);
     handle Fail[IoError] in {
         if private && !windows() {
-            create_dir_mode(in t.as_str(), 448);
+            create_dir_mode(in t.as_str(), PRIVATE_DIR_MODE);
         } else {
             create_dir(in t.as_str());
         }
@@ -308,8 +326,8 @@ fn temp_dir() -> ChunkSeq[u8] eff [Ffi[StdEnv]] {
                 },
             },
         };
-        if dir.len() == 0 || byte(in dir.as_slice(), wrapping_sub(dir.len(), 1)) != 92 {
-            dir.push(92);
+        if dir.len() == 0 || byte(in dir.as_slice(), wrapping_sub(dir.len(), 1)) != BACKSLASH {
+            dir.push(BACKSLASH);
         }
         return dir;
     }
@@ -366,7 +384,7 @@ pub fn execute(inout a: Au, sink c: ProcCommand, seconds: u64) -> Ran eff [Ffi[S
         },
     };
     let mut ended = false;
-    match wait_timeout(inout ch, wrapping_mul(seconds, 1000)) {
+    match wait_timeout(inout ch, wrapping_mul(seconds, MILLIS_PER_SECOND)) {
         Result::Ok(Option::Some(s)) => {
             ran.status = s;
             ended = true;
@@ -393,13 +411,13 @@ pub fn execute(inout a: Au, sink c: ProcCommand, seconds: u64) -> Ran eff [Ffi[S
     }
     if !success(ran.status) || has_panic(in out.as_slice(), in err.as_slice()) {
         let mut details = lossy(in out.as_slice());
-        details.push(10);
+        details.push(NEWLINE);
         let e = lossy(in err.as_slice());
         details.extend(in e.as_slice());
         let mut why = text_of(in "Lean audit failed (");
         put_status(inout why, ran.status);
         put_str(inout why, in "): ");
-        let shown = take_chars(in details.as_slice(), 4000);
+        let shown = take_chars(in details.as_slice(), MAX_FAILURE_DETAIL_CHARS);
         why.extend(in shown.as_slice());
         refuse_bytes(inout a, in why.as_slice());
         return ran;
@@ -437,7 +455,7 @@ pub fn lean_toolchain(
     };
     let mut c = command_path(in launcher);
     arg_bytes(inout c, in "--print-prefix".as_bytes());
-    let ran = execute(inout a, c, 30);
+    let ran = execute(inout a, c, LEAN_PREFIX_TIMEOUT_SECONDS);
     if a.failed || !utf8_or_fail(inout a, in ran.stdout.as_slice()) {
         return t;
     }
@@ -456,7 +474,7 @@ pub fn lean_toolchain(
     };
     let mut v = command_path(in t.binary.as_slice());
     arg_bytes(inout v, in "--version".as_bytes());
-    let version = execute(inout a, v, 10);
+    let version = execute(inout a, v, LEAN_VERSION_TIMEOUT_SECONDS);
     if a.failed || !utf8_or_fail(inout a, in version.stdout.as_slice()) {
         return t;
     }
@@ -477,7 +495,7 @@ pub fn stage_new(inout a: Au, pid: u64) -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[Std
     for n in 0..64 {
         let mut name = text_of(in "vesper-proof-audit-");
         put_u64(inout name, pid);
-        name.push(45);
+        name.push(HYPHEN);
         put_u64(inout name, n);
         let path = join(in tmp.as_slice(), in name.as_slice());
         let e = try_mkdir(in path.as_slice(), true);
@@ -589,7 +607,7 @@ pub fn copy_artifacts(
         pending.bytes.truncate(start(in pending, last));
         pending.ends.truncate(last);
         depths.truncate(last);
-        if depth > 64 {
+        if depth > MAX_ARTIFACT_DEPTH {
             refuse(inout a, in "artifact directory exceeds the depth limit");
             return files;
         }
@@ -738,7 +756,7 @@ pub fn forbidden_axiom(in name: Slice[u8]) -> bool {
     }
     let mut part: u64 = 0;
     for i in 0..wrapping_add(name.len(), 1) {
-        if i == name.len() || byte(in name, i) == 46 {
+        if i == name.len() || byte(in name, i) == DOT {
             if same_str(in name[part..i], in "_native") {
                 return true;
             }
@@ -937,7 +955,7 @@ fn audit_in(
     let mut part: u64 = 0;
     let m = o.module.as_slice();
     for i in 0..wrapping_add(m.len(), 1) {
-        if i == m.len() || byte(in m, i) == 46 {
+        if i == m.len() || byte(in m, i) == DOT {
             module_file = join(in module_file.as_slice(), in m[part..i]);
             part = wrapping_add(i, 1);
         }
@@ -988,7 +1006,11 @@ fn audit_in(
     arg_bytes(inout c, in "--run".as_bytes());
     arg_bytes(inout c, in helper.as_slice());
     arg_bytes(inout c, in request_path.as_slice());
-    let seconds = if o.timeout == 0 { 30 } else { o.timeout };
+    let seconds = if o.timeout == 0 {
+        DEFAULT_TIMEOUT_SECONDS
+    } else {
+        o.timeout
+    };
     let ran = execute(inout a, c, seconds);
     if a.failed || !utf8_or_fail(inout a, in ran.stdout.as_slice()) {
         return;
@@ -1034,7 +1056,7 @@ fn audit_in(
         refuse(inout a, in "Lean audit did not check every requested theorem exactly once");
         return;
     }
-    if count(in raw.mod_names) > 8192 {
+    if count(in raw.mod_names) > MAX_IMPORTED_MODULES {
         refuse(inout a, in "Lean audit exceeds the imported-module limit");
         return;
     }
@@ -1107,7 +1129,7 @@ fn audit_in(
     if a.failed {
         return;
     }
-    if count(in raw.marker_names) > 65536 {
+    if count(in raw.marker_names) > MAX_MACRO_MARKERS {
         refuse(inout a, in "Lean audit exceeds the macro provenance marker limit");
         return;
     }

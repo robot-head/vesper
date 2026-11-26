@@ -669,21 +669,19 @@ fn decode(
             let ty = n32(lw.op(add(at, inc(wrapping_mul(i, 2)))));
             lw.flocals.push(Loc { name: name, ty: ty });
         }
-        lw.fns.push(
-            Fn {
-                name: row.name,
-                p0: p0,
-                pn: np,
-                result: result,
-                effects: effects,
-                l0: l0,
-                ln: nl,
-                v0: v0,
-                vn: top,
-                b0: row.b0,
-                bc: row.bc
-            }
-        );
+        lw.fns.push(Fn {
+            name: row.name,
+            p0: p0,
+            pn: np,
+            result: result,
+            effects: effects,
+            l0: l0,
+            ln: nl,
+            v0: v0,
+            vn: top,
+            b0: row.b0,
+            bc: row.bc
+        });
         set_table32(inout lw.by_fn, w(row.name), n32(inc(fi)));
     }
     lw
@@ -817,9 +815,11 @@ fn flatten(
             return 1;
         }
         if n == lw.sy.watermark {
-            Fail::raise(
-                unsup(U_EFFECT, func, tx("region watermarks (checkpoint, rewind, commit)"))
-            );
+            Fail::raise(unsup(
+                U_EFFECT,
+                func,
+                tx("region watermarks (checkpoint, rewind, commit)")
+            ));
         }
         if n == lw.sy.f32_ {
             Fail::raise(unsup(U_FLOAT, func, type_detail(in lw, ty)));
@@ -1548,9 +1548,11 @@ fn fail_handler(inout lw: Lw, site: u32, ins: InstRow, x: Hx) -> Hd eff [Fail[VE
         Fail::raise(unsup(U_EFFECT, site, d));
     }
     if x.label != 0 || x.en != 1 {
-        Fail::raise(
-            unsup(U_EFFECT, site, tx("labeled or ill-formed Fail handler (only `handle Fail[E]`)"))
-        );
+        Fail::raise(unsup(
+            U_EFFECT,
+            site,
+            tx("labeled or ill-formed Fail handler (only `handle Fail[E]`)")
+        ));
     }
     if x.state || lw.op(ins.a) != 0 {
         Fail::raise(unsup(U_EFFECT, site, tx("stateful Fail handler")));
@@ -1955,22 +1957,20 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
             }
         }
         let local = local_of(inout lw, f, inout lpool);
-        found.push(
-            Found {
-                name: name,
-                fi: fi,
-                pa: pa,
-                pn: f.pn,
-                result: result,
-                local: local,
-                ca: ca,
-                cn: wrapping_sub(calls.len(), ca),
-                ha: ha,
-                hn: wrapping_sub(hds.len(), ha),
-                cpa: cpa,
-                cpn: cpn
-            }
-        );
+        found.push(Found {
+            name: name,
+            fi: fi,
+            pa: pa,
+            pn: f.pn,
+            result: result,
+            local: local,
+            ca: ca,
+            cn: wrapping_sub(calls.len(), ca),
+            ha: ha,
+            hn: wrapping_sub(hds.len(), ha),
+            cpa: cpa,
+            cpn: cpn
+        });
     }
     // `fail::codes`: every error type raised anywhere, in key order.
     let mut keys = ChunkSeq::new[u32]();
@@ -2119,12 +2119,8 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
                 let c = u32_at(in calls, add(fd.ca, j));
                 let k = w(u32_at(in index, w(c)));
                 if k != 0 {
-                    next = next | recode_mask(
-                        in site,
-                        nbase,
-                        c,
-                        u64_at(in raises, wrapping_sub(k, 1))
-                    );
+                    next = next
+                        | recode_mask(in site, nbase, c, u64_at(in raises, wrapping_sub(k, 1)));
                 }
             }
             for j in 0..fd.hn {
@@ -2163,13 +2159,11 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
             }
         }
         if called {
-            Fail::raise(
-                unsup(
-                    U_EFFECT,
-                    entry,
-                    tx("an entry that may fail and is also called inside the program")
-                )
-            );
+            Fail::raise(unsup(
+                U_EFFECT,
+                entry,
+                tx("an entry that may fail and is also called inside the program")
+            ));
         }
     }
     for c in 1..64 {
@@ -2199,21 +2193,19 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
         } else {
             fd.result.n
         };
-        fs.push(
-            Planned {
-                name: fd.name,
-                fi: fd.fi,
-                label: label,
-                pa: fd.pa,
-                pn: fd.pn,
-                result: fd.result,
-                raises: r,
-                status: status,
-                ret_words: ret_words,
-                cpa: fd.cpa,
-                cpn: fd.cpn
-            }
-        );
+        fs.push(Planned {
+            name: fd.name,
+            fi: fd.fi,
+            label: label,
+            pa: fd.pa,
+            pn: fd.pn,
+            result: fd.result,
+            raises: r,
+            status: status,
+            ret_words: ret_words,
+            cpa: fd.cpa,
+            cpn: fd.cpn
+        });
         label = add(label, 2);
     }
     Plan {

@@ -25,24 +25,24 @@ use self::template::{caps_read, skeleton_encoded, skeleton_run};
 // a tail (the rest of `text`). Native word functions take at most three
 // words.
 pub fn match_rule_words(in text: Str, lens: u64, work: u64) -> ChunkSeq[u64] {
-    let b = text.as_bytes();
-    let np = lens & 4294967295;
-    let ni = (lens >> 32) & 2147483647;
+    let bytes = text.as_bytes();
+    let pattern_len = lens & 4294967295;
+    let invocation_len = (lens >> 32) & 2147483647;
     let has_tail = (lens >> 63) == 1;
     let mut pattern = ChunkSeq::new[u8]();
     let mut invocation = ChunkSeq::new[u8]();
-    for i in 0..wrapping_add(np, ni) {
-        let c = match b.try_get(i) {
-            Option::Some(c) => c,
+    for i in 0..wrapping_add(pattern_len, invocation_len) {
+        let byte = match bytes.try_get(i) {
+            Option::Some(byte) => byte,
             Option::None => 0,
         };
-        if i < np {
-            pattern.push(c);
+        if i < pattern_len {
+            pattern.push(byte);
         } else {
-            invocation.push(c);
+            invocation.push(byte);
         }
     }
-    let tail_len = wrapping_sub(b.len(), wrapping_add(np, ni));
+    let tail_len = wrapping_sub(bytes.len(), wrapping_add(pattern_len, invocation_len));
     match_rule_encoded(in pattern, in invocation, has_tail, tail_len, work)
 }
 
@@ -54,38 +54,38 @@ pub fn match_rule_words(in text: Str, lens: u64, work: u64) -> ChunkSeq[u64] {
 // for no tail). The result is each record's words in turn. Test hook for
 // tests/self_host_sugar.rs (`matcher_speed`).
 pub fn match_rule_batch(in text: Str, count: u64, work: u64) -> ChunkSeq[u64] {
-    let b = text.as_bytes();
+    let bytes = text.as_bytes();
     let mut out = ChunkSeq::new[u64]();
     let mut at: u64 = 0;
-    for r in 0..count {
-        let np = base128(in b, at);
-        let ni = base128(in b, wrapping_add(at, 4));
-        let nt = base128(in b, wrapping_add(at, 8));
+    for record in 0..count {
+        let pattern_len = base128(in bytes, at);
+        let invocation_len = base128(in bytes, wrapping_add(at, 4));
+        let tail_len_plus_one = base128(in bytes, wrapping_add(at, 8));
         at = wrapping_add(at, 12);
         let mut pattern = ChunkSeq::new[u8]();
         let mut invocation = ChunkSeq::new[u8]();
-        for i in 0..wrapping_add(np, ni) {
-            let c = match b.try_get(wrapping_add(at, i)) {
-                Option::Some(c) => c,
+        for i in 0..wrapping_add(pattern_len, invocation_len) {
+            let byte = match bytes.try_get(wrapping_add(at, i)) {
+                Option::Some(byte) => byte,
                 Option::None => 0,
             };
-            if i < np {
-                pattern.push(c);
+            if i < pattern_len {
+                pattern.push(byte);
             } else {
-                invocation.push(c);
+                invocation.push(byte);
             }
         }
-        at = wrapping_add(at, wrapping_add(np, ni));
+        at = wrapping_add(at, wrapping_add(pattern_len, invocation_len));
         let words = match_rule_encoded(
             in pattern,
             in invocation,
-            nt != 0,
-            wrapping_sub(nt, 1),
+            tail_len_plus_one != 0,
+            wrapping_sub(tail_len_plus_one, 1),
             work
         );
         for j in 0..words.len() {
             match words.try_get(j) {
-                Option::Some(w) => out.push(w),
+                Option::Some(word) => out.push(word),
                 Option::None => {},
             }
         }
@@ -93,16 +93,16 @@ pub fn match_rule_batch(in text: Str, count: u64, work: u64) -> ChunkSeq[u64] {
     out
 }
 
-fn base128(in b: Slice[u8], at: u64) -> u64 {
-    let mut v: u64 = 0;
-    for k in 0..4 {
-        let d = match b.try_get(wrapping_add(at, wrapping_sub(3, k))) {
-            Option::Some(c) => widen_u64(c),
+fn base128(in bytes: Slice[u8], at: u64) -> u64 {
+    let mut value: u64 = 0;
+    for digit in 0..4 {
+        let digit_value = match bytes.try_get(wrapping_add(at, wrapping_sub(3, digit))) {
+            Option::Some(byte) => widen_u64(byte),
             Option::None => 0,
         };
-        v = wrapping_add(wrapping_mul(v, 128), d);
+        value = wrapping_add(wrapping_mul(value, 128), digit_value);
     }
-    v
+    value
 }
 
 // `template_skeleton_words(pattern, invocation, tail, template, mark,
@@ -112,26 +112,32 @@ fn base128(in b: Slice[u8], at: u64) -> u64 {
 // base-128 digits (the lengths of the pattern, the invocation, the tail
 // plus one or 0 for none, the template and the mark) and then those texts.
 pub fn template_skeleton_words(in text: Str, max_bytes: u64, work: u64) -> ChunkSeq[u64] {
-    let b = text.as_bytes();
-    let np = base128(in b, 0);
-    let ni = base128(in b, 4);
-    let nt = base128(in b, 8);
-    let nl = base128(in b, 12);
-    let nm = base128(in b, 16);
-    let tail_len = wrapping_sub(nt, if nt == 0 { 0 } else { 1 });
+    let bytes = text.as_bytes();
+    let pattern_len = base128(in bytes, 0);
+    let invocation_len = base128(in bytes, 4);
+    let tail_len_plus_one = base128(in bytes, 8);
+    let template_len = base128(in bytes, 12);
+    let mark_len = base128(in bytes, 16);
+    let tail_len = wrapping_sub(tail_len_plus_one, if tail_len_plus_one == 0 { 0 } else { 1 });
     let mut at: u64 = 20;
-    let pattern = copy_bytes(in b, at, np);
-    at = wrapping_add(at, np);
-    let invocation = copy_bytes(in b, at, ni);
-    at = wrapping_add(at, ni);
-    let tail = copy_bytes(in b, at, tail_len);
+    let pattern = copy_bytes(in bytes, at, pattern_len);
+    at = wrapping_add(at, pattern_len);
+    let invocation = copy_bytes(in bytes, at, invocation_len);
+    at = wrapping_add(at, invocation_len);
+    let tail = copy_bytes(in bytes, at, tail_len);
     at = wrapping_add(at, tail_len);
-    let template = copy_bytes(in b, at, nl);
-    at = wrapping_add(at, nl);
-    let mark = copy_bytes(in b, at, nm);
-    let words = match_rule_encoded(in pattern, in invocation, nt != 0, tail_len, work);
+    let template = copy_bytes(in bytes, at, template_len);
+    at = wrapping_add(at, template_len);
+    let mark = copy_bytes(in bytes, at, mark_len);
+    let words = match_rule_encoded(
+        in pattern,
+        in invocation,
+        tail_len_plus_one != 0,
+        tail_len,
+        work
+    );
     let matched = match words.try_get(0) {
-        Option::Some(w) => w == 1,
+        Option::Some(word) => word == 1,
         Option::None => false,
     };
     if !matched {
@@ -176,8 +182,8 @@ pub fn template_pattern_words(in text: Str, max_bytes: u64, work: u64) -> ChunkS
 // driver.ves `expand`) over `text` with no imports. `include_tests` is 0
 // or 1; the words are driver.ves `expand_words`.
 pub fn sugar_expand_words(in text: Str, include_tests: u64, work: u64) -> ChunkSeq[u64] {
-    let b = text.as_bytes();
-    let src = copy_bytes(in b, 0, b.len());
+    let bytes = text.as_bytes();
+    let src = copy_bytes(in bytes, 0, bytes.len());
     expand_words(in src, in imports_none(), include_tests != 0)
 }
 
@@ -192,68 +198,68 @@ pub fn sugar_expand_words(in text: Str, include_tests: u64, work: u64) -> ChunkS
 // the texts: the source, each import's alias and declaration, and the
 // names, in order. The words are driver.ves `expand_words`.
 pub fn sugar_expand_scoped_words(in text: Str, include_tests: u64, work: u64) -> ChunkSeq[u64] {
-    let b = text.as_bytes();
-    let ns = base128(in b, 0);
-    let ni = base128(in b, 4);
-    let nso = base128(in b, 8);
-    let nsc = base128(in b, 12);
-    let nn = base128(in b, 16);
-    let nv = base128(in b, 20);
+    let bytes = text.as_bytes();
+    let source_len = base128(in bytes, 0);
+    let import_count = base128(in bytes, 4);
+    let scoped_import_count = base128(in bytes, 8);
+    let scope_count = base128(in bytes, 12);
+    let name_count = base128(in bytes, 16);
+    let visible_count = base128(in bytes, 20);
     let mut at: u64 = 24;
-    let mut imp = imports_none();
-    let mut lens = ChunkSeq::new[u64]();
-    for i in 0..ni {
-        lens.push(base128(in b, at));
-        lens.push(base128(in b, wrapping_add(at, 4)));
+    let mut imports = imports_none();
+    let mut import_lens = ChunkSeq::new[u64]();
+    for i in 0..import_count {
+        import_lens.push(base128(in bytes, at));
+        import_lens.push(base128(in bytes, wrapping_add(at, 4)));
         at = wrapping_add(at, 8);
     }
-    for k in 0..nso {
-        imp.scope_of.push(base128(in b, at));
+    for k in 0..scoped_import_count {
+        imports.scope_of.push(base128(in bytes, at));
         at = wrapping_add(at, 4);
     }
     let mut first: u64 = 0;
-    for k in 0..nsc {
-        let count = base128(in b, at);
-        imp.scopes.push(first);
-        imp.scopes.push(count);
+    for k in 0..scope_count {
+        let count = base128(in bytes, at);
+        imports.scopes.push(first);
+        imports.scopes.push(count);
         first = wrapping_add(first, count);
         at = wrapping_add(at, 4);
     }
     let mut name_lens = ChunkSeq::new[u64]();
-    for k in 0..nn {
-        name_lens.push(base128(in b, at));
-        name_lens.push(base128(in b, wrapping_add(at, 4)));
+    for k in 0..name_count {
+        name_lens.push(base128(in bytes, at));
+        name_lens.push(base128(in bytes, wrapping_add(at, 4)));
         at = wrapping_add(at, 8);
     }
-    for k in 0..nv {
-        imp.visible.push(base128(in b, at));
+    for k in 0..visible_count {
+        imports.visible.push(base128(in bytes, at));
         at = wrapping_add(at, 4);
     }
-    let src = copy_bytes(in b, at, ns);
-    at = wrapping_add(at, ns);
-    imp.text = copy_bytes(in b, at, wrapping_sub(b.len(), at));
-    let mut off: u64 = 0;
-    for i in 0..ni {
-        let al = word_at(in lens, wrapping_mul(i, 2));
-        let dl = word_at(in lens, wrapping_add(wrapping_mul(i, 2), 1));
-        imp.rows.push(off);
-        imp.rows.push(al);
-        imp.rows.push(wrapping_add(off, al));
-        imp.rows.push(dl);
-        off = wrapping_add(off, wrapping_add(al, dl));
+    let src = copy_bytes(in bytes, at, source_len);
+    at = wrapping_add(at, source_len);
+    imports.text = copy_bytes(in bytes, at, wrapping_sub(bytes.len(), at));
+    let mut text_offset: u64 = 0;
+    for i in 0..import_count {
+        let alias_len = word_at(in import_lens, wrapping_mul(i, 2));
+        let decl_len = word_at(in import_lens, wrapping_add(wrapping_mul(i, 2), 1));
+        imports.rows.push(text_offset);
+        imports.rows.push(alias_len);
+        imports.rows.push(wrapping_add(text_offset, alias_len));
+        imports.rows.push(decl_len);
+        text_offset = wrapping_add(text_offset, wrapping_add(alias_len, decl_len));
     }
-    for k in 0..nn {
-        let l = word_at(in name_lens, wrapping_mul(k, 2));
-        imp.names.push(off);
-        imp.names.push(l);
-        imp.names.push(word_at(in name_lens, wrapping_add(wrapping_mul(k, 2), 1)));
-        off = wrapping_add(off, l);
+    for k in 0..name_count {
+        let name_len = word_at(in name_lens, wrapping_mul(k, 2));
+        imports.names.push(text_offset);
+        imports.names.push(name_len);
+        imports.names.push(word_at(in name_lens, wrapping_add(wrapping_mul(k, 2), 1)));
+        text_offset = wrapping_add(text_offset, name_len);
     }
-    expand_words(in src, in imp, include_tests != 0)
+    expand_words(in src, in imports, include_tests != 0)
 }
 
-fn word_at(in v: ChunkSeq[u64], i: u64) -> u64 {
-    match v.try_get(i) {
+fn word_at(in words: ChunkSeq[u64], i: u64) -> u64 {
+    match words.try_get(i) {
         Option::Some(w) => w,
         Option::None => 0,
     }
@@ -266,31 +272,37 @@ fn render_encoded(
     scoped: bool,
     patterned: bool
 ) -> ChunkSeq[u64] {
-    let b = text.as_bytes();
-    let np = base128(in b, 0);
-    let ni = base128(in b, 4);
-    let nt = base128(in b, 8);
-    let nl = base128(in b, 12);
-    let nm = base128(in b, 16);
-    let tail_len = wrapping_sub(nt, if nt == 0 { 0 } else { 1 });
+    let bytes = text.as_bytes();
+    let pattern_len = base128(in bytes, 0);
+    let invocation_len = base128(in bytes, 4);
+    let tail_len_plus_one = base128(in bytes, 8);
+    let template_len = base128(in bytes, 12);
+    let mark_len = base128(in bytes, 16);
+    let tail_len = wrapping_sub(tail_len_plus_one, if tail_len_plus_one == 0 { 0 } else { 1 });
     let mut at: u64 = if scoped { 32 } else { 20 };
-    let pattern = copy_bytes(in b, at, np);
-    at = wrapping_add(at, np);
-    let invocation = copy_bytes(in b, at, ni);
-    at = wrapping_add(at, ni);
-    let tail = copy_bytes(in b, at, tail_len);
+    let pattern = copy_bytes(in bytes, at, pattern_len);
+    at = wrapping_add(at, pattern_len);
+    let invocation = copy_bytes(in bytes, at, invocation_len);
+    at = wrapping_add(at, invocation_len);
+    let tail = copy_bytes(in bytes, at, tail_len);
     at = wrapping_add(at, tail_len);
-    let template = copy_bytes(in b, at, nl);
-    at = wrapping_add(at, nl);
-    let mark = copy_bytes(in b, at, nm);
-    at = wrapping_add(at, nm);
-    let ns = if scoped { base128(in b, 20) } else { 0 };
-    let call_s = base128(in b, 24);
-    let call_e = base128(in b, 28);
-    let source = copy_bytes(in b, at, ns);
-    let words = match_rule_encoded(in pattern, in invocation, nt != 0, tail_len, work);
+    let template = copy_bytes(in bytes, at, template_len);
+    at = wrapping_add(at, template_len);
+    let mark = copy_bytes(in bytes, at, mark_len);
+    at = wrapping_add(at, mark_len);
+    let source_len = if scoped { base128(in bytes, 20) } else { 0 };
+    let call_start = base128(in bytes, 24);
+    let call_end = base128(in bytes, 28);
+    let source = copy_bytes(in bytes, at, source_len);
+    let words = match_rule_encoded(
+        in pattern,
+        in invocation,
+        tail_len_plus_one != 0,
+        tail_len,
+        work
+    );
     let matched = match words.try_get(0) {
-        Option::Some(w) => w == 1,
+        Option::Some(word) => word == 1,
         Option::None => false,
     };
     let mut out = ChunkSeq::new[u64]();
@@ -298,86 +310,94 @@ fn render_encoded(
         out.push(0);
         return out;
     }
-    let c = caps_read(words);
-    let sk = skeleton_run(in template, in c, in invocation, in tail, in mark, max_bytes);
-    if sk.failed {
+    let caps = caps_read(words);
+    let skeleton = skeleton_run(in template, in caps, in invocation, in tail, in mark, max_bytes);
+    if skeleton.failed {
         out.push(2);
-        push_bytes(inout out, in sk.msg);
+        push_bytes(inout out, in skeleton.msg);
         return out;
     }
-    let mut r = render(in sk, in c, in invocation, in tail, in mark);
-    if r.failed {
+    let mut rendered = render(in skeleton, in caps, in invocation, in tail, in mark);
+    if rendered.failed {
         out.push(2);
-        push_bytes(inout out, in r.msg);
+        push_bytes(inout out, in rendered.msg);
         return out;
     }
     if patterned {
-        let ps = pattern_hygiene(inout r, in mark);
-        if ps.failed {
+        let pattern_result = pattern_hygiene(inout rendered, in mark);
+        if pattern_result.failed {
             out.push(2);
-            push_bytes(inout out, in ps.msg);
+            push_bytes(inout out, in pattern_result.msg);
             return out;
         }
     }
     let mut items = ChunkSeq::new[u8]();
     if scoped {
-        let sc = lower(inout r, in c, in source, call_s, call_e, in mark, max_bytes);
-        if sc.failed {
+        let scope_result = lower(
+            inout rendered,
+            in caps,
+            in source,
+            call_start,
+            call_end,
+            in mark,
+            max_bytes
+        );
+        if scope_result.failed {
             out.push(2);
-            push_bytes(inout out, in sc.msg);
+            push_bytes(inout out, in scope_result.msg);
             return out;
         }
-        items = sc.items;
+        items = scope_result.items;
     }
     out.push(1);
     if scoped {
         push_bytes(inout out, in items);
     }
-    push_bytes(inout out, in r.text);
-    push_rows(inout out, in r.holes, r.holes.len() >> 1);
-    push_rows(inout out, in r.origins, rows_of(r.origins.len(), 5));
-    push_rows(inout out, in r.places, rows_of(r.places.len(), 3));
+    push_bytes(inout out, in rendered.text);
+    push_rows(inout out, in rendered.holes, rendered.holes.len() >> 1);
+    push_rows(inout out, in rendered.origins, rows_of(rendered.origins.len(), 5));
+    push_rows(inout out, in rendered.places, rows_of(rendered.places.len(), 3));
     out
 }
 
-fn push_bytes(inout out: ChunkSeq[u64], in b: ChunkSeq[u8]) {
-    out.push(b.len());
-    for i in 0..b.len() {
-        match b.try_get(i) {
-            Option::Some(c) => out.push(widen_u64(c)),
+fn push_bytes(inout out: ChunkSeq[u64], in bytes: ChunkSeq[u8]) {
+    out.push(bytes.len());
+    for i in 0..bytes.len() {
+        match bytes.try_get(i) {
+            Option::Some(byte) => out.push(widen_u64(byte)),
             Option::None => out.push(0),
         }
     }
 }
 
-fn rows_of(n: u64, stride: u64) -> u64 {
-    let mut k: u64 = 0;
-    let mut m: u64 = 0;
+fn rows_of(len: u64, stride: u64) -> u64 {
+    let mut rows: u64 = 0;
+    let mut covered: u64 = 0;
     loop {
-        if m >= n {
+        if covered >= len {
             break;
         }
-        m = wrapping_add(m, stride);
-        k = wrapping_add(k, 1);
+        covered = wrapping_add(covered, stride);
+        rows = wrapping_add(rows, 1);
     }
-    k
+    rows
 }
 
 fn push_rows(inout out: ChunkSeq[u64], in rows: ChunkSeq[u64], count: u64) {
     out.push(count);
     for i in 0..rows.len() {
         match rows.try_get(i) {
-            Option::Some(w) => out.push(w),
+            Option::Some(word) => out.push(word),
             Option::None => out.push(0),
         }
     }
 }
 
-fn copy_bytes(in b: Slice[u8], at: u64, n: u64) -> ChunkSeq[u8] {
+fn copy_bytes(in bytes: Slice[u8], at: u64, n: u64) -> ChunkSeq[u8] {
     let mut out = ChunkSeq::new[u8]();
     for i in 0..n {
-        match b.try_get(wrapping_add(at, i)) {
-            Option::Some(c) => out.push(c),
+        match bytes.try_get(wrapping_add(at, i)) {
+            Option::Some(byte) => out.push(byte),
             Option::None => out.push(0),
         }
     }

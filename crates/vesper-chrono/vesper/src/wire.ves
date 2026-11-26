@@ -161,16 +161,14 @@ pub fn decode_event_header(in bytes: Slice[u8]) -> Option[EventHeader] {
     if bytes.len() < header_bytes() {
         return Option::None;
     }
-    Option::Some(
-        EventHeader {
-            lamport_seq: read_u64_le(in bytes, 0),
-            fiber_id: read_u64_le(in bytes, 8),
-            ipt_tsc_anchor: read_u64_le(in bytes, 16),
-            effect_id: read_u16_le(in bytes, 24),
-            op_tag: read_u16_le(in bytes, 26),
-            payload_byte_len: read_u32_le(in bytes, 28),
-        }
-    )
+    Option::Some(EventHeader {
+        lamport_seq: read_u64_le(in bytes, 0),
+        fiber_id: read_u64_le(in bytes, 8),
+        ipt_tsc_anchor: read_u64_le(in bytes, 16),
+        effect_id: read_u16_le(in bytes, 24),
+        op_tag: read_u16_le(in bytes, 26),
+        payload_byte_len: read_u32_le(in bytes, 28),
+    })
 }
 
 pub fn encode_trace_cursor(c: TraceCursor) -> ChunkSeq[u8] {
@@ -184,12 +182,10 @@ pub fn decode_trace_cursor(in bytes: Slice[u8]) -> Option[TraceCursor] {
     if bytes.len() < trace_cursor_bytes() {
         return Option::None;
     }
-    Option::Some(
-        TraceCursor {
-            epoch_id: read_u32_le(in bytes, 0),
-            lamport_seq: read_u64_le(in bytes, 4),
-        }
-    )
+    Option::Some(TraceCursor {
+        epoch_id: read_u32_le(in bytes, 0),
+        lamport_seq: read_u64_le(in bytes, 4),
+    })
 }
 
 pub fn encode_inout_write(r: InoutWriteRecord) -> ChunkSeq[u8] {
@@ -210,12 +206,10 @@ pub fn decode_inout_write(in bytes: Slice[u8]) -> Option[InoutWriteRecord] {
     if !zero_pad_ok(in bytes, 12, 4) {
         return Option::None;
     }
-    Option::Some(
-        InoutWriteRecord {
-            place_hash: read_u64_le(in bytes, 0),
-            source_span_id: read_u32_le(in bytes, 8),
-        }
-    )
+    Option::Some(InoutWriteRecord {
+        place_hash: read_u64_le(in bytes, 0),
+        source_span_id: read_u32_le(in bytes, 8),
+    })
 }
 
 pub fn encode_obligation_record(r: ObligationRecord) -> ChunkSeq[u8] {
@@ -237,14 +231,12 @@ pub fn decode_obligation_record(in bytes: Slice[u8]) -> Option[ObligationRecord]
     if !zero_pad_ok(in bytes, 21, 3) {
         return Option::None;
     }
-    Option::Some(
-        ObligationRecord {
-            obligation_id: read_u64_le(in bytes, 0),
-            aux: read_u64_le(in bytes, 8),
-            source_span_id: read_u32_le(in bytes, 16),
-            hop_kind_tag: byte(in bytes, 20),
-        }
-    )
+    Option::Some(ObligationRecord {
+        obligation_id: read_u64_le(in bytes, 0),
+        aux: read_u64_le(in bytes, 8),
+        source_span_id: read_u32_le(in bytes, 16),
+        hop_kind_tag: byte(in bytes, 20),
+    })
 }
 
 pub fn encode_obligation_hop(h: ObligationHopWire) -> ChunkSeq[u8] {
@@ -266,12 +258,10 @@ pub fn decode_obligation_hop(in bytes: Slice[u8]) -> Option[ObligationHopWire] {
     if !zero_pad_ok(in bytes, 21, 3) {
         return Option::None;
     }
-    Option::Some(
-        ObligationHopWire {
-            lamport_seq: read_u64_le(in bytes, 0),
-            fiber_id: read_u64_le(in bytes, 8),
-            source_span_id: read_u32_le(in bytes, 16),
-            hop_kind_tag: byte(in bytes, 20),
-        }
-    )
+    Option::Some(ObligationHopWire {
+        lamport_seq: read_u64_le(in bytes, 0),
+        fiber_id: read_u64_le(in bytes, 8),
+        source_span_id: read_u32_le(in bytes, 16),
+        hop_kind_tag: byte(in bytes, 20),
+    })
 }

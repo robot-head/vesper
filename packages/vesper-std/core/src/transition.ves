@@ -1,0 +1,75 @@
+// Typestate rebinding from manuscript §7.8. The block sees the source
+// type; the rest of its enclosing block sees the destination type.
+// Use sink because a type change consumes an owned binding, not an
+// inout loan. For non-copy values, ordinary ownership checking still
+// applies to both the old and the new binding.
+//
+// Example: transition sink channel from[Handshake] to[Open] {
+//     accept(sink channel)
+// }
+pub sugar transition: stmt {
+    rule (transition sink $target:ident from[$old:ty] to[$new:ty] $body:block $..rest:stmts) => {
+        {
+            let $target: $new = {
+                let $target: $old = $target;
+                $body
+            };
+            $..rest
+        }
+    }
+}
+
+test {
+    linear struct Draft {
+        payload: u64,
+    }
+
+    linear struct Checked {
+        payload: u64,
+    }
+
+    linear struct Published {
+        payload: u64,
+    }
+
+    fn check_draft(sink draft: Draft) -> Checked {
+        let Draft { payload } = draft;
+        Checked { payload: wrapping_add(payload, 5) }
+    }
+
+    fn publish(sink checked: Checked) -> Published {
+        let Checked { payload } = checked;
+        Published { payload: wrapping_add(payload, 7) }
+    }
+
+    fn finish(sink published: Published) -> u64 {
+        let Published { payload } = published;
+        payload
+    }
+
+    fn test_linear_rebinding_chain() -> bool {
+        let record = Draft { payload: 30 };
+        transition sink record from[Draft] to[Checked] {
+            check_draft(sink record)
+        }
+        transition sink record from[Checked] to[Published] {
+            publish(sink record)
+        }
+        finish(sink record) == 42
+    }
+
+    fn test_block_scope_and_single_evaluation() -> bool {
+        let mut calls: u64 = 0;
+        let record: u64 = 17;
+        let result = {
+            let record = Draft { payload: 30 };
+            transition sink record from[Draft] to[Checked] {
+                calls = wrapping_add(calls, 1);
+                check_draft(sink record)
+            }
+            let Checked { payload } = record;
+            payload
+        };
+        result == 35 && record == 17 && calls == 1
+    }
+}

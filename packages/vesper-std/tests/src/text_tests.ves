@@ -10,6 +10,7 @@ test {
         push_u64_be, push_i64_le, push_i64_be, put_u16_le, put_u16_be, put_u32_le, put_u32_be,
         put_u64_le, put_u64_be
     };
+    use @vesper-std/bytes::bits::bits;
     use @vesper-std/core::option::is_none;
     use self::support::{
         check, text, same_text, parsed_u64, parsed_i64, parse_error, parse_error_i64, some_u64
@@ -106,7 +107,12 @@ test {
     pub fn check_bytes() -> u64 {
         let mut r: u64 = 0;
         let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        let a16: u16 = 4660;
+        // Build the wire fixture 0x1234 from a version nibble and a 12-bit length.
+        let header: Option[u64] = bits{ version: 4 = 1, length: 12 = 0x234 };
+        let a16: u16 = match header {
+            Option::Some(word) => wrapping_u16(word),
+            Option::None => return 30,
+        };
         let a32: u32 = 305419896;
         push_u16_le(inout b, a16);
         push_u16_be(inout b, a16);

@@ -58,89 +58,89 @@ pub copy struct Syms {
     isa: u32,
 }
 
-pub fn syms_new(inout n: Names) -> Syms {
+pub fn syms_new(inout names: Names) -> Syms {
     Syms {
-        fail: n.intern(in "Fail".as_bytes()),
-        trace: n.intern(in "Trace".as_bytes()),
-        box_: n.intern(in "Box".as_bytes()),
-        box_new: n.intern(in "Box::new".as_bytes()),
-        dyn_: n.intern(in "dyn".as_bytes()),
-        chunk_seq: n.intern(in "ChunkSeq".as_bytes()),
-        tiled_seq: n.intern(in "TiledSeq".as_bytes()),
-        region_box: n.intern(in "RegionBox".as_bytes()),
-        watermark: n.intern(in "Watermark".as_bytes()),
-        f32_: n.intern(in "f32".as_bytes()),
-        f64_: n.intern(in "f64".as_bytes()),
-        i128_: n.intern(in "i128".as_bytes()),
-        u128_: n.intern(in "u128".as_bytes()),
-        bool_: n.intern(in "bool".as_bytes()),
-        unit: n.intern(in "Unit".as_bytes()),
-        never: n.intern(in "Never".as_bytes()),
-        u8_: n.intern(in "u8".as_bytes()),
-        u16_: n.intern(in "u16".as_bytes()),
-        u32_: n.intern(in "u32".as_bytes()),
-        u64_: n.intern(in "u64".as_bytes()),
-        usize_: n.intern(in "usize".as_bytes()),
-        i8_: n.intern(in "i8".as_bytes()),
-        i16_: n.intern(in "i16".as_bytes()),
-        i32_: n.intern(in "i32".as_bytes()),
-        i64_: n.intern(in "i64".as_bytes()),
-        isize_: n.intern(in "isize".as_bytes()),
-        const_time: n.intern(in "ConstTime".as_bytes()),
-        realtime: n.intern(in "Realtime".as_bytes()),
-        det_float: n.intern(in "DetFloat".as_bytes()),
-        const_denorm: n.intern(in "ConstDenorm".as_bytes()),
-        isa: n.intern(in "Isa".as_bytes()),
+        fail: names.intern(in "Fail".as_bytes()),
+        trace: names.intern(in "Trace".as_bytes()),
+        box_: names.intern(in "Box".as_bytes()),
+        box_new: names.intern(in "Box::new".as_bytes()),
+        dyn_: names.intern(in "dyn".as_bytes()),
+        chunk_seq: names.intern(in "ChunkSeq".as_bytes()),
+        tiled_seq: names.intern(in "TiledSeq".as_bytes()),
+        region_box: names.intern(in "RegionBox".as_bytes()),
+        watermark: names.intern(in "Watermark".as_bytes()),
+        f32_: names.intern(in "f32".as_bytes()),
+        f64_: names.intern(in "f64".as_bytes()),
+        i128_: names.intern(in "i128".as_bytes()),
+        u128_: names.intern(in "u128".as_bytes()),
+        bool_: names.intern(in "bool".as_bytes()),
+        unit: names.intern(in "Unit".as_bytes()),
+        never: names.intern(in "Never".as_bytes()),
+        u8_: names.intern(in "u8".as_bytes()),
+        u16_: names.intern(in "u16".as_bytes()),
+        u32_: names.intern(in "u32".as_bytes()),
+        u64_: names.intern(in "u64".as_bytes()),
+        usize_: names.intern(in "usize".as_bytes()),
+        i8_: names.intern(in "i8".as_bytes()),
+        i16_: names.intern(in "i16".as_bytes()),
+        i32_: names.intern(in "i32".as_bytes()),
+        i64_: names.intern(in "i64".as_bytes()),
+        isize_: names.intern(in "isize".as_bytes()),
+        const_time: names.intern(in "ConstTime".as_bytes()),
+        realtime: names.intern(in "Realtime".as_bytes()),
+        det_float: names.intern(in "DetFloat".as_bytes()),
+        const_denorm: names.intern(in "ConstDenorm".as_bytes()),
+        isa: names.intern(in "Isa".as_bytes()),
     }
 }
 
 impl Syms {
     // `numeric::is_wide_name`.
-    pub fn is_wide(self, s: u32) -> bool {
-        s == self.i128_ || s == self.u128_
+    pub fn is_wide(self, sym: u32) -> bool {
+        sym == self.i128_ || sym == self.u128_
     }
 
     // `numeric::is_integer_name`.
-    pub fn is_integer(self, s: u32) -> bool {
-        s == self.u8_
-            || s == self.u16_
-            || s == self.u32_
-            || s == self.u64_
-            || s == self.usize_
-            || s == self.i8_
-            || s == self.i16_
-            || s == self.i32_
-            || s == self.i64_
-            || s == self.isize_
-            || self.is_wide(s)
+    pub fn is_integer(self, sym: u32) -> bool {
+        sym == self.u8_
+            || sym == self.u16_
+            || sym == self.u32_
+            || sym == self.u64_
+            || sym == self.usize_
+            || sym == self.i8_
+            || sym == self.i16_
+            || sym == self.i32_
+            || sym == self.i64_
+            || sym == self.isize_
+            || self.is_wide(sym)
     }
 
-    pub fn is_float(self, s: u32) -> bool {
-        s == self.f32_ || s == self.f64_
+    pub fn is_float(self, sym: u32) -> bool {
+        sym == self.f32_ || sym == self.f64_
     }
 
     // `numeric::is_scalar_name`.
-    pub fn is_scalar(self, s: u32) -> bool {
-        self.is_integer(s)
-            || self.is_float(s)
-            || s == self.bool_
-            || s == self.unit
-            || s == self.never
+    pub fn is_scalar(self, sym: u32) -> bool {
+        self.is_integer(sym)
+            || self.is_float(sym)
+            || sym == self.bool_
+            || sym == self.unit
+            || sym == self.never
     }
 
     // `capability_effects::is_capability_effect`.
-    pub fn is_capability(self, s: u32) -> bool {
-        s == self.const_time
-            || s == self.realtime
-            || s == self.det_float
-            || s == self.const_denorm
-            || s == self.isa
+    pub fn is_capability(self, sym: u32) -> bool {
+        sym == self.const_time
+            || sym == self.realtime
+            || sym == self.det_float
+            || sym == self.const_denorm
+            || sym == self.isa
     }
 }
 
 // `ffi_lowering::is_foreign_effect`.
-pub fn is_foreign(in names: Names, s: u32) -> bool {
-    names.has_prefix(s, in "Ffi$".as_bytes())
+pub fn is_foreign(in names: Names, sym: u32) -> bool {
+    names.has_prefix(sym, in "Ffi$".as_bytes())
 }
 
 // ----- substitutions ----------------------------------------------------------
@@ -160,22 +160,22 @@ pub fn cmp_names(in names: Names, a: u32, b: u32) -> i32 {
     if a == b {
         return 0;
     }
-    let na = names.size(a);
-    let nb = names.size(b);
-    let n = if na < nb { na } else { nb };
+    let a_len = names.size(a);
+    let b_len = names.size(b);
+    let n = if a_len < b_len { a_len } else { b_len };
     for i in 0..n {
-        let x = names.byte(a, i);
-        let y = names.byte(b, i);
-        if x < y {
+        let a_byte = names.byte(a, i);
+        let b_byte = names.byte(b, i);
+        if a_byte < b_byte {
             return -1;
         }
-        if x > y {
+        if a_byte > b_byte {
             return 1;
         }
     }
-    if na < nb {
+    if a_len < b_len {
         -1
-    } else if na > nb {
+    } else if a_len > b_len {
         1
     } else {
         0
@@ -195,9 +195,9 @@ impl IVars {
         u32_at(in self.tys, i)
     }
 
-    pub fn get(in self, k: u32) -> u32 {
+    pub fn get(in self, key: u32) -> u32 {
         for i in 0..self.keys.len() {
-            if u32_at(in self.keys, i) == k {
+            if u32_at(in self.keys, i) == key {
                 return u32_at(in self.tys, i);
             }
         }
@@ -205,17 +205,17 @@ impl IVars {
     }
 
     // `BTreeMap::insert`.
-    pub fn insert(inout self, in names: Names, k: u32, t: u32) {
+    pub fn insert(inout self, in names: Names, key: u32, ty: u32) {
         let n = self.keys.len();
-        let mut at = n;
+        let mut pos = n;
         for i in 0..n {
-            let c = cmp_names(in names, u32_at(in self.keys, i), k);
-            if c == 0 {
-                let ok = self.tys.try_set(i, t);
+            let order = cmp_names(in names, u32_at(in self.keys, i), key);
+            if order == 0 {
+                let ok = self.tys.try_set(i, ty);
                 return;
             }
-            if c > 0 {
-                at = i;
+            if order > 0 {
+                pos = i;
                 break;
             }
         }
@@ -223,17 +223,17 @@ impl IVars {
         self.tys.push(0);
         let mut j = n;
         loop {
-            if j <= at {
+            if j <= pos {
                 break;
             }
-            let pk = u32_at(in self.keys, wrapping_sub(j, 1));
-            let pt = u32_at(in self.tys, wrapping_sub(j, 1));
-            let ok1 = self.keys.try_set(j, pk);
-            let ok2 = self.tys.try_set(j, pt);
+            let prev_key = u32_at(in self.keys, wrapping_sub(j, 1));
+            let prev_ty = u32_at(in self.tys, wrapping_sub(j, 1));
+            let ok1 = self.keys.try_set(j, prev_key);
+            let ok2 = self.tys.try_set(j, prev_ty);
             j = wrapping_sub(j, 1);
         }
-        let ok3 = self.keys.try_set(at, k);
-        let ok4 = self.tys.try_set(at, t);
+        let ok3 = self.keys.try_set(pos, key);
+        let ok4 = self.tys.try_set(pos, ty);
     }
 
     pub fn clear(inout self) {
@@ -252,37 +252,37 @@ impl IVars {
 
     // check-data's `Vars`, for `substitute`.
     pub fn vars(in self) -> Vars {
-        let mut v = vars_new();
+        let mut out = vars_new();
         for i in 0..self.keys.len() {
-            v.set(u32_at(in self.keys, i), u32_at(in self.tys, i));
+            out.set(u32_at(in self.keys, i), u32_at(in self.tys, i));
         }
-        v
+        out
     }
 }
 
 // The `$fn:` keys of an instance (`FN_ARG`): `$fn:<param>` binds a
 // function-value parameter to a top-level function.
-fn is_fn_arg(in names: Names, k: u32) -> bool {
-    names.has_prefix(k, in "$fn:".as_bytes())
+fn is_fn_arg(in names: Names, key: u32) -> bool {
+    names.has_prefix(key, in "$fn:".as_bytes())
 }
 
-fn push_name(in names: Names, s: u32, inout out: ChunkSeq[u8]) {
-    names.write(s, inout out);
+fn push_name(in names: Names, sym: u32, inout out: ChunkSeq[u8]) {
+    names.write(sym, inout out);
 }
 
 // The parameter name of a `$fn:<param>` key, interned.
-fn fn_arg_param(inout names: Names, k: u32) -> u32 {
+fn fn_arg_param(inout names: Names, key: u32) -> u32 {
     let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let a = names.start(k);
-    let e = names.end(k);
-    for i in add(a, 4)..e {
-        text.push(names.byte(k, wrapping_sub(i, a)));
+    let start = names.start(key);
+    let end = names.end(key);
+    for i in add(start, 4)..end {
+        text.push(names.byte(key, wrapping_sub(i, start)));
     }
     names.intern(in text.as_slice())
 }
 
 // `instance_key`, interned.
-pub fn instance_key(inout names: Names, in t: Types, name: u32, in vars: IVars) -> u32 {
+pub fn instance_key(inout names: Names, in types: Types, name: u32, in vars: IVars) -> u32 {
     if vars.len() == 0 {
         return name;
     }
@@ -301,14 +301,14 @@ pub fn instance_key(inout names: Names, in t: Types, name: u32, in vars: IVars) 
             if i > 0 {
                 out.push(44);
             }
-            let k = vars.key(i);
-            let a = names.start(k);
-            let e = names.end(k);
-            for j in add(a, 4)..e {
-                out.push(names.byte(k, wrapping_sub(j, a)));
+            let key = vars.key(i);
+            let start = names.start(key);
+            let end = names.end(key);
+            for j in add(start, 4)..end {
+                out.push(names.byte(key, wrapping_sub(j, start)));
             }
             out.push(61);
-            push_name(in names, t.name(vars.ty(i)), inout out);
+            push_name(in names, types.name(vars.ty(i)), inout out);
         }
         out.push(93);
     } else {
@@ -321,7 +321,7 @@ pub fn instance_key(inout names: Names, in t: Types, name: u32, in vars: IVars) 
             out.push(34);
             push_name(in names, vars.key(i), inout out);
             out.extend(in "\": ".as_bytes());
-            debug_type(in t, in names, vars.ty(i), inout out);
+            debug_type(in types, in names, vars.ty(i), inout out);
         }
         out.push(125);
     }
@@ -333,52 +333,52 @@ pub fn instance_key(inout names: Names, in t: Types, name: u32, in vars: IVars) 
 // `concrete(world, name, vars)`: the function with bound function-value
 // parameters removed and the substitution applied to its signature.
 pub struct Conc {
-    f: u32,
+    func_index: u32,
     params: ChunkSeq[ParamInfo],
     result: u32,
     row: u32,
 }
 
 pub fn concrete(
-    inout t: Types,
+    inout types: Types,
     inout names: Names,
-    in d: Calls,
+    in calls: Calls,
     name: u32,
     in vars: IVars
 ) -> Conc {
-    let fi = d.function(name);
-    let f = d.fn_info(fi);
-    let v = vars.vars();
+    let func_index = calls.function(name);
+    let info = calls.fn_info(func_index);
+    let subst = vars.vars();
     let mut bound: ChunkSeq[u32] = ChunkSeq::new[u32]();
     for i in 0..vars.len() {
-        let k = vars.key(i);
-        if is_fn_arg(in names, k) {
-            bound.push(fn_arg_param(inout names, k));
+        let key = vars.key(i);
+        if is_fn_arg(in names, key) {
+            bound.push(fn_arg_param(inout names, key));
         }
     }
     let mut params: ChunkSeq[ParamInfo] = ChunkSeq::new[ParamInfo]();
-    for i in 0..w(f.pn) {
-        let p = d.param(add(w(f.pa), i));
+    for i in 0..w(info.param_count) {
+        let param = calls.param(add(w(info.param_start), i));
         let mut keep = true;
         for j in 0..bound.len() {
-            if u32_at(in bound, j) == p.name {
+            if u32_at(in bound, j) == param.name {
                 keep = false;
             }
         }
         if keep {
-            let pt = substitute(inout t, p.ty, in v);
-            params.push(ParamInfo { name: p.name, pass: p.pass, ty: pt });
+            let param_ty = substitute(inout types, param.ty, in subst);
+            params.push(ParamInfo { name: param.name, pass: param.pass, ty: param_ty });
         }
     }
-    let result = substitute(inout t, f.result, in v);
-    let row = substitute_row(inout t, f.row, in v);
-    Conc { f: fi, params: params, result: result, row: row }
+    let result = substitute(inout types, info.result, in subst);
+    let row = substitute_row(inout types, info.row, in subst);
+    Conc { func_index: func_index, params: params, result: result, row: row }
 }
 
 impl Conc {
     pub fn param(in self, i: u64) -> ParamInfo {
         match self.params.try_get(i) {
-            Option::Some(p) => p,
+            Option::Some(param) => param,
             Option::None => ParamInfo { name: 0, pass: 0, ty: 0 },
         }
     }
@@ -387,52 +387,52 @@ impl Conc {
 // ----- predicates ---------------------------------------------------------------
 
 // `contains_function`.
-pub fn contains_function(inout t: Types, in wd: World, ty: u32) -> bool {
+pub fn contains_function(inout types: Types, in world: World, ty: u32) -> bool {
     let mut seen: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    contains_fn_in(inout t, in wd, ty, inout seen)
+    contains_fn_in(inout types, in world, ty, inout seen)
 }
 
-fn contains_fn_in(inout t: Types, in wd: World, ty: u32, inout seen: ChunkSeq[u32]) -> bool {
-    let n = t.node(ty);
-    if n.kind == TyKind::Fn {
+fn contains_fn_in(inout types: Types, in world: World, ty: u32, inout seen: ChunkSeq[u32]) -> bool {
+    let node = types.node(ty);
+    if node.kind == TyKind::Fn {
         return true;
     }
-    if n.kind == TyKind::Tuple {
-        for i in 0..w(n.n) {
-            let a = t.arg(ty, i);
-            if contains_fn_in(inout t, in wd, a, inout seen) {
+    if node.kind == TyKind::Tuple {
+        for i in 0..w(node.n) {
+            let arg_ty = types.arg(ty, i);
+            if contains_fn_in(inout types, in world, arg_ty, inout seen) {
                 return true;
             }
         }
         return false;
     }
-    if n.kind != TyKind::Named {
+    if node.kind != TyKind::Named {
         return false;
     }
     for i in 0..seen.len() {
-        if u32_at(in seen, i) == n.name {
-            for j in 0..w(n.n) {
-                if t.kind(t.arg(ty, j)) == TyKind::Fn {
+        if u32_at(in seen, i) == node.name {
+            for j in 0..w(node.n) {
+                if types.kind(types.arg(ty, j)) == TyKind::Fn {
                     return true;
                 }
             }
             return false;
         }
     }
-    let ai = wd.lookup(n.name);
-    if ai == NONE32 {
+    let adt_index = world.lookup(node.name);
+    if adt_index == NONE32 {
         return false;
     }
-    seen.push(n.name);
-    let a = wd.adt(ai);
-    let vars = wd.vars_of(in t, a, ty);
+    seen.push(node.name);
+    let adt = world.adt(adt_index);
+    let vars = world.vars_of(in types, adt, ty);
     let mut result = false;
-    for vi in 0..w(a.vn) {
-        let v = wd.variant(add(w(a.va), vi));
-        for fi in 0..w(v.fc) {
-            let field = wd.field(add(w(v.fa), fi));
-            let ft = substitute(inout t, field.ty, in vars);
-            if !result && contains_fn_in(inout t, in wd, ft, inout seen) {
+    for vi in 0..w(adt.vn) {
+        let variant = world.variant(add(w(adt.va), vi));
+        for fi in 0..w(variant.fc) {
+            let field = world.field(add(w(variant.fa), fi));
+            let field_ty = substitute(inout types, field.ty, in vars);
+            if !result && contains_fn_in(inout types, in world, field_ty, inout seen) {
                 result = true;
             }
         }
@@ -444,37 +444,43 @@ fn contains_fn_in(inout t: Types, in wd: World, ty: u32, inout seen: ChunkSeq[u3
 }
 
 // The built-in Beacon `Trace` effect, unlabelled and without arguments.
-pub fn bare_trace(k: Syms, e: EffNode) -> bool {
-    e.name == k.trace && e.label == 0 && e.n == 0
+pub fn bare_trace(syms: Syms, effect: EffNode) -> bool {
+    effect.name == syms.trace && effect.label == 0 && effect.n == 0
 }
 
 // `trace_host_direct` of src/native.rs: with Beacon active, an instance
 // whose row is closed, holds only capabilities and the bare `Trace`, and
 // exposes no function value takes the trace flag of a trace host.
-pub fn trace_host_direct(inout t: Types, in wd: World, in d: Calls, k: Syms, in f: Conc) -> bool {
-    if !d.trace_active {
+pub fn trace_host_direct(
+    inout types: Types,
+    in world: World,
+    in calls: Calls,
+    syms: Syms,
+    in func: Conc
+) -> bool {
+    if !calls.trace_active {
         return false;
     }
-    let r = t.row(f.row);
-    if r.tail != 0 {
+    let row = types.row(func.row);
+    if row.tail != 0 {
         return false;
     }
-    for i in 0..w(r.n) {
-        let e = t.effect_at(add(w(r.a), i));
-        if !k.is_capability(e.name) && !bare_trace(k, e) {
+    for i in 0..w(row.n) {
+        let effect = types.effect_at(add(w(row.a), i));
+        if !syms.is_capability(effect.name) && !bare_trace(syms, effect) {
             return false;
         }
     }
-    ! contains_function(inout t, in wd, f.result)
-        && !any_param_contains_function(inout t, in wd, in f.params)
+    ! contains_function(inout types, in world, func.result)
+        && !any_param_contains_function(inout types, in world, in func.params)
 }
 
 // `capability_only` of a row.
-pub fn capability_only(in t: Types, in names: Names, k: Syms, row: u32) -> bool {
-    let r = t.row(row);
-    for i in 0..w(r.n) {
-        let e = t.effect_at(add(w(r.a), i));
-        if !k.is_capability(e.name) && !is_foreign(in names, e.name) {
+pub fn capability_only(in types: Types, in names: Names, syms: Syms, row: u32) -> bool {
+    let effect_row = types.row(row);
+    for i in 0..w(effect_row.n) {
+        let effect = types.effect_at(add(w(effect_row.a), i));
+        if !syms.is_capability(effect.name) && !is_foreign(in names, effect.name) {
             return false;
         }
     }
@@ -482,16 +488,16 @@ pub fn capability_only(in t: Types, in names: Names, k: Syms, row: u32) -> bool 
 }
 
 fn any_param_contains_function(
-    inout t: Types,
-    in wd: World,
+    inout types: Types,
+    in world: World,
     in params: ChunkSeq[ParamInfo]
 ) -> bool {
     for i in 0..params.len() {
-        let p = match params.try_get(i) {
-            Option::Some(p) => p,
+        let param = match params.try_get(i) {
+            Option::Some(param) => param,
             Option::None => ParamInfo { name: 0, pass: 0, ty: 0 },
         };
-        if contains_function(inout t, in wd, p.ty) {
+        if contains_function(inout types, in world, param.ty) {
             return true;
         }
     }
@@ -499,40 +505,52 @@ fn any_param_contains_function(
 }
 
 // `fail_only` of a concrete function.
-pub fn fail_only(inout t: Types, in names: Names, in wd: World, k: Syms, in f: Conc) -> bool {
-    let r = t.row(f.row);
-    if r.tail != 0 {
+pub fn fail_only(
+    inout types: Types,
+    in names: Names,
+    in world: World,
+    syms: Syms,
+    in func: Conc
+) -> bool {
+    let row = types.row(func.row);
+    if row.tail != 0 {
         return false;
     }
     let mut any_fail = false;
-    for i in 0..w(r.n) {
-        let e = t.effect_at(add(w(r.a), i));
-        if e.name == k.fail {
+    for i in 0..w(row.n) {
+        let effect = types.effect_at(add(w(row.a), i));
+        if effect.name == syms.fail {
             any_fail = true;
         }
-        let ok = (e.name == k.fail && e.label == 0 && e.n == 1)
+        let ok = (effect.name == syms.fail && effect.label == 0 && effect.n == 1)
             || (
-                (k.is_capability(e.name) || is_foreign(in names, e.name))
-                    && e.label == 0
-                    && e.n == 0
+                (syms.is_capability(effect.name) || is_foreign(in names, effect.name))
+                    && effect.label == 0
+                    && effect.n == 0
             );
         if !ok {
             return false;
         }
     }
     any_fail
-        && !contains_function(inout t, in wd, f.result)
-        && !any_param_contains_function(inout t, in wd, in f.params)
+        && !contains_function(inout types, in world, func.result)
+        && !any_param_contains_function(inout types, in world, in func.params)
 }
 
 // `capability_abi`: a `fail_only` row that also names a capability effect.
-pub fn capability_abi(inout t: Types, in names: Names, in wd: World, k: Syms, in f: Conc) -> bool {
-    if !fail_only(inout t, in names, in wd, k, in f) {
+pub fn capability_abi(
+    inout types: Types,
+    in names: Names,
+    in world: World,
+    syms: Syms,
+    in func: Conc
+) -> bool {
+    if !fail_only(inout types, in names, in world, syms, in func) {
         return false;
     }
-    let r = t.row(f.row);
-    for i in 0..w(r.n) {
-        if k.is_capability(t.effect_at(add(w(r.a), i)).name) {
+    let row = types.row(func.row);
+    for i in 0..w(row.n) {
+        if syms.is_capability(types.effect_at(add(w(row.a), i)).name) {
             return true;
         }
     }
@@ -540,42 +558,51 @@ pub fn capability_abi(inout t: Types, in names: Names, in wd: World, k: Syms, in
 }
 
 // `specialized_function`.
-pub fn specialized(inout t: Types, in names: Names, in wd: World, k: Syms, in f: Conc) -> bool {
-    let r = t.row(f.row);
+pub fn specialized(
+    inout types: Types,
+    in names: Names,
+    in world: World,
+    syms: Syms,
+    in func: Conc
+) -> bool {
+    let row = types.row(func.row);
     (
-        !capability_only(in t, in names, k, f.row)
-            || r.tail != 0
-            || contains_function(inout t, in wd, f.result)
-            || any_param_contains_function(inout t, in wd, in f.params)
+        !capability_only(in types, in names, syms, func.row)
+            || row.tail != 0
+            || contains_function(inout types, in world, func.result)
+            || any_param_contains_function(inout types, in world, in func.params)
     )
-        && !fail_only(inout t, in names, in wd, k, in f)
+        && !fail_only(inout types, in names, in world, syms, in func)
 }
 
 // `function_value_instance` of a world function (unsubstituted).
 fn function_value_instance(
-    inout t: Types,
+    inout types: Types,
     in names: Names,
-    in wd: World,
-    in d: Calls,
-    k: Syms,
-    f: FnInfo
+    in world: World,
+    in calls: Calls,
+    syms: Syms,
+    info: FnInfo
 ) -> bool {
-    let r = t.row(f.row);
-    if r.n == 0 || r.tail != 0 || !capability_only(in t, in names, k, f.row) || f.gn != 0 {
+    let row = types.row(info.row);
+    if row.n == 0
+        || row.tail != 0
+        || !capability_only(in types, in names, syms, info.row)
+        || info.generic_count != 0 {
         return false;
     }
-    if contains_function(inout t, in wd, f.result) {
+    if contains_function(inout types, in world, info.result) {
         return false;
     }
     let mut any = false;
-    for i in 0..w(f.pn) {
-        let p = d.param(add(w(f.pa), i));
-        if t.kind(p.ty) == TyKind::Fn {
+    for i in 0..w(info.param_count) {
+        let param = calls.param(add(w(info.param_start), i));
+        if types.kind(param.ty) == TyKind::Fn {
             any = true;
-            if p.pass == TyPass::Inout {
+            if param.pass == TyPass::Inout {
                 return false;
             }
-        } else if contains_function(inout t, in wd, p.ty) {
+        } else if contains_function(inout types, in world, param.ty) {
             return false;
         }
     }
@@ -598,19 +625,19 @@ pub copy struct Ref {
 pub struct ProgramFacts {
     refs: ChunkSeq[Ref],
     // per program function: name, nested span (or none), drop callees
-    // drops[da..da+dn]
+    // drops[drop_starts[i]..drop_starts[i] + drop_counts[i]]
     fn_names: ChunkSeq[u32],
     nested: ChunkSeq[bool],
-    ns0: ChunkSeq[u64],
-    ns1: ChunkSeq[u64],
-    da: ChunkSeq[u32],
-    dn: ChunkSeq[u32],
+    nested_starts: ChunkSeq[u64],
+    nested_ends: ChunkSeq[u64],
+    drop_starts: ChunkSeq[u32],
+    drop_counts: ChunkSeq[u32],
     drops: ChunkSeq[u32],
 }
 
-fn ref_at(in rs: ChunkSeq[Ref], i: u64) -> Ref {
-    match rs.try_get(i) {
-        Option::Some(r) => r,
+fn ref_at(in refs: ChunkSeq[Ref], i: u64) -> Ref {
+    match refs.try_get(i) {
+        Option::Some(item) => item,
         Option::None => Ref { s0: 0, s1: 0, sym: 0 },
     }
 }
@@ -620,11 +647,11 @@ fn ref_less(a: Ref, b: Ref) -> bool {
 }
 
 // Bottom-up merge sort.
-fn sort_refs(inout rs: ChunkSeq[Ref]) {
-    let n = rs.len();
-    let mut tmp: ChunkSeq[Ref] = ChunkSeq::with_capacity[Ref](n);
+fn sort_refs(inout refs: ChunkSeq[Ref]) {
+    let n = refs.len();
+    let mut scratch: ChunkSeq[Ref] = ChunkSeq::with_capacity[Ref](n);
     for i in 0..n {
-        tmp.push(ref_at(in rs, i));
+        scratch.push(ref_at(in refs, i));
     }
     let mut width: u64 = 1;
     loop {
@@ -640,9 +667,9 @@ fn sort_refs(inout rs: ChunkSeq[Ref]) {
             let hi = min_u64(add(mid, width), n);
             let mut i = lo;
             let mut j = mid;
-            let mut o = lo;
+            let mut out_pos = lo;
             loop {
-                if o >= hi {
+                if out_pos >= hi {
                     break;
                 }
                 let take_left = if i >= mid {
@@ -650,21 +677,21 @@ fn sort_refs(inout rs: ChunkSeq[Ref]) {
                 } else if j >= hi {
                     true
                 } else {
-                    !ref_less(ref_at(in rs, j), ref_at(in rs, i))
+                    !ref_less(ref_at(in refs, j), ref_at(in refs, i))
                 };
                 if take_left {
-                    let ok = tmp.try_set(o, ref_at(in rs, i));
+                    let ok = scratch.try_set(out_pos, ref_at(in refs, i));
                     i = inc(i);
                 } else {
-                    let ok = tmp.try_set(o, ref_at(in rs, j));
+                    let ok = scratch.try_set(out_pos, ref_at(in refs, j));
                     j = inc(j);
                 }
-                o = inc(o);
+                out_pos = inc(out_pos);
             }
             lo = hi;
         }
         for x in 0..n {
-            let ok = rs.try_set(x, ref_at(in tmp, x));
+            let ok = refs.try_set(x, ref_at(in scratch, x));
         }
         width = wrapping_mul(width, 2);
     }
@@ -690,95 +717,95 @@ impl ProgramFacts {
                 hi = mid;
             }
         }
-        let r = ref_at(in self.refs, lo);
-        lo < self.refs.len() && r.s0 == s0 && r.s1 == s1 && r.sym == sym
+        let candidate = ref_at(in self.refs, lo);
+        lo < self.refs.len() && candidate.s0 == s0 && candidate.s1 == s1 && candidate.sym == sym
     }
 }
 
 // A decimal `usize` as Rust's `str::parse` reads it (an optional `+`),
-// from text[a..e]; NONE when it is not one.
-fn parse_usize(in text: ChunkSeq[u8], a: u64, e: u64) -> u64 {
-    let mut i = a;
-    if i < e && u8_at(in text, i) == 43 {
+// from text[start..end]; NONE when it is not one.
+fn parse_usize(in text: ChunkSeq[u8], start: u64, end: u64) -> u64 {
+    let mut i = start;
+    if i < end && u8_at(in text, i) == 43 {
         i = inc(i);
     }
-    if i >= e || wrapping_sub(e, i) > 19 {
+    if i >= end || wrapping_sub(end, i) > 19 {
         return 18446744073709551615;
     }
-    let mut v: u64 = 0;
+    let mut value: u64 = 0;
     loop {
-        if i >= e {
+        if i >= end {
             break;
         }
-        let c = u8_at(in text, i);
-        if c < 48 || c > 57 {
+        let digit = u8_at(in text, i);
+        if digit < 48 || digit > 57 {
             return 18446744073709551615;
         }
-        v = wrapping_add(wrapping_mul(v, 10), widen_u64(wrapping_sub(c, 48)));
+        value = wrapping_add(wrapping_mul(value, 10), widen_u64(wrapping_sub(digit, 48)));
         i = inc(i);
     }
-    v
+    value
 }
 
-// The words of a program function's header, at `ops[ha..]`: skips to the
+// The words of a program function's header, at `ops[header_start..]`: skips to the
 // locals and marks each local's symbol with `stamp` in `marks`.
-fn mark_locals(in p: Program, ha: u64, inout marks: ChunkSeq[u32], stamp: u32) {
-    let mut pos = ha;
-    let np = p.op(pos);
+fn mark_locals(in program: Program, header_start: u64, inout marks: ChunkSeq[u32], stamp: u32) {
+    let mut pos = header_start;
+    let param_count = program.op(pos);
     pos = inc(pos);
-    for i in 0..np {
+    for i in 0..param_count {
         // name, pass, k, k paths, type, start, end
-        let k = p.op(add(pos, 2));
-        pos = add(pos, add(6, k));
+        let path_count = program.op(add(pos, 2));
+        pos = add(pos, add(6, path_count));
     }
     // result, effects
     pos = add(pos, 2);
-    let nb = p.op(pos);
-    pos = add(inc(pos), wrapping_mul(nb, 2));
-    let nc = p.op(pos);
-    pos = add(inc(pos), nc);
-    let nv = p.op(pos);
-    pos = add(inc(pos), wrapping_mul(nv, 2));
-    let nl = p.op(pos);
+    let bound_count = program.op(pos);
+    pos = add(inc(pos), wrapping_mul(bound_count, 2));
+    let name_count = program.op(pos);
+    pos = add(inc(pos), name_count);
+    let value_count = program.op(pos);
+    pos = add(inc(pos), wrapping_mul(value_count, 2));
+    let local_count = program.op(pos);
     pos = inc(pos);
-    for i in 0..nl {
-        let s = n32(p.op(pos));
-        set_by_symbol(inout marks, s, stamp);
+    for i in 0..local_count {
+        let sym = n32(program.op(pos));
+        set_by_symbol(inout marks, sym, stamp);
         pos = add(pos, 2);
     }
 }
 
-pub fn program_facts(in names: Names, in d: Calls, in p: Program) -> ProgramFacts {
+pub fn program_facts(in names: Names, in calls: Calls, in program: Program) -> ProgramFacts {
     let mut facts = ProgramFacts {
         refs: ChunkSeq::new[Ref](),
         fn_names: ChunkSeq::new[u32](),
         nested: ChunkSeq::new[bool](),
-        ns0: ChunkSeq::new[u64](),
-        ns1: ChunkSeq::new[u64](),
-        da: ChunkSeq::new[u32](),
-        dn: ChunkSeq::new[u32](),
+        nested_starts: ChunkSeq::new[u64](),
+        nested_ends: ChunkSeq::new[u64](),
+        drop_starts: ChunkSeq::new[u32](),
+        drop_counts: ChunkSeq::new[u32](),
         drops: ChunkSeq::new[u32](),
     };
     let mut marks: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    for fi in 0..p.fn_count() {
-        let f = p.function(fi);
+    for fi in 0..program.fn_count() {
+        let func = program.function(fi);
         let stamp = inc32(n32(fi));
-        mark_locals(in p, f.ha, inout marks, stamp);
-        let da = n32(facts.drops.len());
-        for bi in 0..f.bc {
-            let blk = p.block(add(f.b0, bi));
-            for ii in 0..blk.ic {
-                let inst = p.inst(add(blk.i0, ii));
+        mark_locals(in program, func.ha, inout marks, stamp);
+        let drop_start = n32(facts.drops.len());
+        for bi in 0..func.bc {
+            let block = program.block(add(func.b0, bi));
+            for ii in 0..block.ic {
+                let inst = program.inst(add(block.i0, ii));
                 if inst.op == Op::Read {
-                    let root = n32(p.op(inst.a));
-                    if d.function(root) != NONE32 && u32_at(in marks, w(root)) != stamp {
+                    let root = n32(program.op(inst.a));
+                    if calls.function(root) != NONE32 && u32_at(in marks, w(root)) != stamp {
                         facts.refs.push(Ref { s0: inst.s0, s1: inst.s1, sym: root });
                     }
                 } else if inst.op == Op::Call {
-                    let callee = n32(p.op(inst.a));
+                    let callee = n32(program.op(inst.a));
                     if names.has_prefix(callee, in "$drop$".as_bytes()) {
                         let mut dup = false;
-                        for j in w(da)..facts.drops.len() {
+                        for j in w(drop_start)..facts.drops.len() {
                             if u32_at(in facts.drops, j) == callee {
                                 dup = true;
                             }
@@ -790,16 +817,16 @@ pub fn program_facts(in names: Names, in d: Calls, in p: Program) -> ProgramFact
                 }
             }
         }
-        facts.da.push(da);
-        facts.dn.push(n32(wrapping_sub(facts.drops.len(), w(da))));
-        facts.fn_names.push(f.name);
+        facts.drop_starts.push(drop_start);
+        facts.drop_counts.push(n32(wrapping_sub(facts.drops.len(), w(drop_start))));
+        facts.fn_names.push(func.name);
         // `nested` of `drop_callees`: `$<rest>` whose last two `_` parts
         // are a span.
         let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        names.write(f.name, inout text);
+        names.write(func.name, inout text);
         let mut is_nested = false;
-        let mut s: u64 = 0;
-        let mut e: u64 = 0;
+        let mut span_start: u64 = 0;
+        let mut span_end: u64 = 0;
         if text.len() > 0 && u8_at(in text, 0) == 36 {
             let n = text.len();
             let mut last = n;
@@ -828,14 +855,14 @@ pub fn program_facts(in names: Names, in d: Calls, in p: Program) -> ProgramFact
                     }
                 }
                 let start_at = if prev == 0 { 1 } else { inc(prev) };
-                e = parse_usize(in text, inc(last), n);
-                s = parse_usize(in text, start_at, last);
-                is_nested = e != 18446744073709551615 && s != 18446744073709551615;
+                span_end = parse_usize(in text, inc(last), n);
+                span_start = parse_usize(in text, start_at, last);
+                is_nested = span_end != 18446744073709551615 && span_start != 18446744073709551615;
             }
         }
         facts.nested.push(is_nested);
-        facts.ns0.push(s);
-        facts.ns1.push(e);
+        facts.nested_starts.push(span_start);
+        facts.nested_ends.push(span_end);
     }
     sort_refs(inout facts.refs);
     facts
@@ -843,34 +870,34 @@ pub fn program_facts(in names: Names, in d: Calls, in p: Program) -> ProgramFact
 
 // `ffi_lowering::drops::drop_callees(world, program, name)`, pushed onto
 // `out` (no repeats, in program order).
-fn drop_callees(in d: Calls, in facts: ProgramFacts, name: u32, inout out: ChunkSeq[u32]) {
-    let fi = d.function(name);
-    if fi == NONE32 {
+fn drop_callees(in calls: Calls, in facts: ProgramFacts, name: u32, inout out: ChunkSeq[u32]) {
+    let func_index = calls.function(name);
+    if func_index == NONE32 {
         return;
     }
-    let src = d.fn_info(fi);
+    let info = calls.fn_info(func_index);
     let start = out.len();
     for i in 0..facts.fn_names.len() {
-        let pn = u32_at(in facts.fn_names, i);
+        let fn_name = u32_at(in facts.fn_names, i);
         let nested = match facts.nested.try_get(i) {
             Option::Some(x) => x,
             Option::None => false,
         };
-        let s = match facts.ns0.try_get(i) {
+        let span_start = match facts.nested_starts.try_get(i) {
             Option::Some(x) => x,
             Option::None => 0,
         };
-        let e = match facts.ns1.try_get(i) {
+        let span_end = match facts.nested_ends.try_get(i) {
             Option::Some(x) => x,
             Option::None => 0,
         };
-        if pn != name && !(nested && s >= src.s0 && e <= src.s1) {
+        if fn_name != name && !(nested && span_start >= info.s0 && span_end <= info.s1) {
             continue;
         }
-        let da = w(u32_at(in facts.da, i));
-        let dn = w(u32_at(in facts.dn, i));
-        for j in 0..dn {
-            let callee = u32_at(in facts.drops, add(da, j));
+        let drop_start = w(u32_at(in facts.drop_starts, i));
+        let drop_count = w(u32_at(in facts.drop_counts, i));
+        for j in 0..drop_count {
+            let callee = u32_at(in facts.drops, add(drop_start, j));
             let mut dup = false;
             for x in start..out.len() {
                 if u32_at(in out, x) == callee {
@@ -887,12 +914,12 @@ fn drop_callees(in d: Calls, in facts: ProgramFacts, name: u32, inout out: Chunk
 // ----- discovery ----------------------------------------------------------------
 
 // One instance: its key, its function and its substitution
-// (pairs[a..a+n]).
+// (pairs[pair_start..pair_start + pair_count]).
 pub copy struct Inst {
     key: u32,
     name: u32,
-    a: u32,
-    n: u32,
+    pair_start: u32,
+    pair_count: u32,
 }
 
 pub struct Found {
@@ -907,100 +934,104 @@ pub struct Found {
 impl Found {
     pub fn inst(in self, i: u64) -> Inst {
         match self.insts.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => Inst { key: 0, name: 0, a: 0, n: 0 },
+            Option::Some(inst) => inst,
+            Option::None => Inst { key: 0, name: 0, pair_start: 0, pair_count: 0 },
         }
     }
 
-    pub fn vars_of(in self, x: Inst) -> IVars {
-        let mut v = ivars_new();
-        for i in 0..w(x.n) {
-            v.keys.push(u32_at(in self.keys, add(w(x.a), i)));
-            v.tys.push(u32_at(in self.tys, add(w(x.a), i)));
+    pub fn vars_of(in self, inst: Inst) -> IVars {
+        let mut vars = ivars_new();
+        for i in 0..w(inst.pair_count) {
+            vars.keys.push(u32_at(in self.keys, add(w(inst.pair_start), i)));
+            vars.tys.push(u32_at(in self.tys, add(w(inst.pair_start), i)));
         }
-        v
+        vars
     }
 }
 
 // The work list: (function name, substitution in the pair arena).
 struct Todo {
     names: ChunkSeq[u32],
-    va: ChunkSeq[u32],
-    vn: ChunkSeq[u32],
+    var_starts: ChunkSeq[u32],
+    var_counts: ChunkSeq[u32],
     keys: ChunkSeq[u32],
     tys: ChunkSeq[u32],
 }
 
 impl Todo {
-    fn push(inout self, name: u32, in v: IVars) {
+    fn push(inout self, name: u32, in vars: IVars) {
         self.names.push(name);
-        self.va.push(n32(self.keys.len()));
-        self.vn.push(n32(v.len()));
-        for i in 0..v.len() {
-            self.keys.push(v.key(i));
-            self.tys.push(v.ty(i));
+        self.var_starts.push(n32(self.keys.len()));
+        self.var_counts.push(n32(vars.len()));
+        for i in 0..vars.len() {
+            self.keys.push(vars.key(i));
+            self.tys.push(vars.ty(i));
         }
     }
 
     // Pushes a row of pairs (a vtable method's or a call's), substituted
     // as stored.
-    fn push_row(inout self, in names: Names, in d: Calls, r: VarsRow) {
-        let mut v = ivars_new();
-        for i in 0..w(r.n) {
-            v.insert(in names, d.pair_key(add(w(r.a), i)), d.pair_ty(add(w(r.a), i)));
+    fn push_row(inout self, in names: Names, in calls: Calls, row: VarsRow) {
+        let mut vars = ivars_new();
+        for i in 0..w(row.pair_count) {
+            vars.insert(
+                in names,
+                calls.pair_key(add(w(row.pair_start), i)),
+                calls.pair_ty(add(w(row.pair_start), i))
+            );
         }
-        self.push(r.name, in v);
+        self.push(row.name, in vars);
     }
 }
 
-fn expr_type(in wd: World, e: ExprNode) -> u32 {
-    wd.expr_type(e.s0, e.s1)
+fn expr_type(in world: World, node: ExprNode) -> u32 {
+    world.expr_type(node.s0, node.s1)
 }
 
 // `dyn_trait::boxed_object`: the object type of `Box[dyn T]`, or NONE32.
-fn boxed_object(in t: Types, k: Syms, ty: u32) -> u32 {
-    let n = t.node(ty);
-    if n.kind == TyKind::Named && n.name == k.box_ && n.n == 1 {
-        let a = t.arg(ty, 0);
-        if is_object(in t, k, a) {
-            return a;
+fn boxed_object(in types: Types, syms: Syms, ty: u32) -> u32 {
+    let node = types.node(ty);
+    if node.kind == TyKind::Named && node.name == syms.box_ && node.n == 1 {
+        let arg_ty = types.arg(ty, 0);
+        if is_object(in types, syms, arg_ty) {
+            return arg_ty;
         }
     }
     NONE32
 }
 
-fn is_object(in t: Types, k: Syms, ty: u32) -> bool {
-    let n = t.node(ty);
-    n.kind == TyKind::Named && n.name == k.dyn_ && n.n == 1
+fn is_object(in types: Types, syms: Syms, ty: u32) -> bool {
+    let node = types.node(ty);
+    node.kind == TyKind::Named && node.name == syms.dyn_ && node.n == 1
 }
 
 // `DynObjects::vtable(object, self_ty)`: a vtable row index, or NONE32.
-fn vtable(inout t: Types, in d: Calls, object: u32, self_ty: u32) -> u32 {
-    let o = default_type(inout t, object);
-    let s = default_type(inout t, self_ty);
-    for i in 0..d.vtables.len() {
-        let v = d.vtable_row(i);
-        if v.object == o && v.self_ty == s {
+fn vtable(inout types: Types, in calls: Calls, object: u32, self_ty: u32) -> u32 {
+    let default_object = default_type(inout types, object);
+    let default_self = default_type(inout types, self_ty);
+    for i in 0..calls.vtables.len() {
+        let row = calls.vtable_row(i);
+        if row.object == default_object && row.self_ty == default_self {
             return n32(i);
         }
     }
     NONE32
 }
 
-fn push_vtable_methods(in names: Names, in d: Calls, vt: u32, inout todo: Todo) {
-    if vt == NONE32 {
+fn push_vtable_methods(in names: Names, in calls: Calls, vtable_index: u32, inout todo: Todo) {
+    if vtable_index == NONE32 {
         return;
     }
-    let v = d.vtable_row(w(vt));
-    for i in 0..w(v.mn) {
-        todo.push_row(in names, in d, d.method(add(w(v.ma), i)));
+    let row = calls.vtable_row(w(vtable_index));
+    for i in 0..w(row.method_count) {
+        todo.push_row(in names, in calls, calls.method(add(w(row.method_start), i)));
     }
 }
 
 // `world.functions[n].generics.is_empty()`.
-fn non_generic(in d: Calls, s: u32) -> bool {
-    let fi = d.function(s);
-    fi != NONE32 && d.fn_info(fi).gn == 0
+fn non_generic(in calls: Calls, sym: u32) -> bool {
+    let func_index = calls.function(sym);
+    func_index != NONE32 && calls.fn_info(func_index).generic_count == 0
 }
 
 // The symbol spelling `<base>::<method>`, or NONE32 when no name does.
@@ -1014,61 +1045,61 @@ fn method_name(in names: Names, base: u32, method: u32) -> u32 {
 
 // The callback of `visit` in `instances_for_entry`, at expression `i`.
 fn visit_node(
-    inout t: Types,
+    inout types: Types,
     inout names: Names,
-    in wd: World,
-    in d: Calls,
+    in world: World,
+    in calls: Calls,
     in facts: ProgramFacts,
-    k: Syms,
+    syms: Syms,
     i: u64,
     in vars: IVars,
     inout todo: Todo
 ) {
-    let e = d.expr(i);
-    if e.kind == ExprKind::Name {
-        if facts.has_ref(e.s0, e.s1, e.sym) && non_generic(in d, e.sym) {
+    let expr = calls.expr(i);
+    if expr.kind == ExprKind::Name {
+        if facts.has_ref(expr.s0, expr.s1, expr.sym) && non_generic(in calls, expr.sym) {
             let none = ivars_new();
-            todo.push(e.sym, in none);
+            todo.push(expr.sym, in none);
         }
         return;
     }
-    if e.kind != ExprKind::Call {
+    if expr.kind != ExprKind::Call {
         return;
     }
-    let v = vars.vars();
-    let ci = inc(i);
-    let callee = d.expr(ci);
+    let subst = vars.vars();
+    let callee_at = inc(i);
+    let callee = calls.expr(callee_at);
     let mut target = NONE32;
     if callee.kind == ExprKind::Name {
-        if d.function(callee.sym) != NONE32 && expr_type(in wd, callee) == NONE32 {
+        if calls.function(callee.sym) != NONE32 && expr_type(in world, callee) == NONE32 {
             target = callee.sym;
         }
     } else if callee.kind == ExprKind::Field {
-        let base = d.expr(inc(ci));
-        let bt = expr_type(in wd, base);
-        if bt != NONE32 {
-            let s = substitute(inout t, bt, in v);
-            let m = method_name(in names, t.name(s), callee.sym);
-            if m != NONE32 && d.function(m) != NONE32 {
-                target = m;
+        let base = calls.expr(inc(callee_at));
+        let base_ty = expr_type(in world, base);
+        if base_ty != NONE32 {
+            let recv_ty = substitute(inout types, base_ty, in subst);
+            let method_sym = method_name(in names, types.name(recv_ty), callee.sym);
+            if method_sym != NONE32 && calls.function(method_sym) != NONE32 {
+                target = method_sym;
             }
         }
     }
     // The arguments: the children after the callee.
-    let nargs = wrapping_sub(w(e.children), 1);
-    let first_arg = add(ci, w(callee.size));
+    let arg_count = wrapping_sub(w(expr.children), 1);
+    let first_arg = add(callee_at, w(callee.size));
     // A boxed object (§7.3) needs its vtable's methods.
-    if callee.kind == ExprKind::Name && callee.sym == k.box_new && nargs > 0 {
-        let ty = expr_type(in wd, e);
+    if callee.kind == ExprKind::Name && callee.sym == syms.box_new && arg_count > 0 {
+        let ty = expr_type(in world, expr);
         if ty != NONE32 {
-            let s = substitute(inout t, ty, in v);
-            let object = boxed_object(in t, k, s);
+            let call_ty = substitute(inout types, ty, in subst);
+            let object = boxed_object(in types, syms, call_ty);
             if object != NONE32 {
-                let actual = expr_type(in wd, d.expr(first_arg));
+                let actual = expr_type(in world, calls.expr(first_arg));
                 if actual != NONE32 {
-                    let sa = substitute(inout t, actual, in v);
-                    let vt = vtable(inout t, in d, object, sa);
-                    push_vtable_methods(in names, in d, vt, inout todo);
+                    let actual_ty = substitute(inout types, actual, in subst);
+                    let vtable_index = vtable(inout types, in calls, object, actual_ty);
+                    push_vtable_methods(in names, in calls, vtable_index, inout todo);
                 }
             }
         }
@@ -1078,32 +1109,40 @@ fn visit_node(
     }
     // `call_vars`
     let mut instance = ivars_new();
-    let cr = d.call_row(e.s0, e.s1);
-    for j in 0..w(cr.n) {
-        let pt = substitute(inout t, d.pair_ty(add(w(cr.a), j)), in v);
-        instance.insert(in names, d.pair_key(add(w(cr.a), j)), pt);
+    let call_pairs = calls.call_row(expr.s0, expr.s1);
+    for j in 0..w(call_pairs.pair_count) {
+        let pair_ty = substitute(
+            inout types,
+            calls.pair_ty(add(w(call_pairs.pair_start), j)),
+            in subst
+        );
+        instance.insert(in names, calls.pair_key(add(w(call_pairs.pair_start), j)), pair_ty);
     }
-    let tf = d.fn_info(d.function(target));
-    if function_value_instance(inout t, in names, in wd, in d, k, tf) {
+    let target_info = calls.fn_info(calls.function(target));
+    if function_value_instance(inout types, in names, in world, in calls, syms, target_info) {
         let mut bound = ivars_new();
-        let mut arg = first_arg;
-        let n = if w(tf.pn) < nargs { w(tf.pn) } else { nargs };
+        let mut arg_at = first_arg;
+        let n = if w(target_info.param_count) < arg_count {
+            w(target_info.param_count)
+        } else {
+            arg_count
+        };
         for j in 0..n {
-            let p = d.param(add(w(tf.pa), j));
-            let a = d.expr(arg);
-            arg = add(arg, w(a.size));
-            if t.kind(p.ty) != TyKind::Fn {
+            let param = calls.param(add(w(target_info.param_start), j));
+            let arg_expr = calls.expr(arg_at);
+            arg_at = add(arg_at, w(arg_expr.size));
+            if types.kind(param.ty) != TyKind::Fn {
                 continue;
             }
-            if a.kind == ExprKind::Name
-                && facts.has_ref(a.s0, a.s1, a.sym)
-                && non_generic(in d, a.sym) {
+            if arg_expr.kind == ExprKind::Name
+                && facts.has_ref(arg_expr.s0, arg_expr.s1, arg_expr.sym)
+                && non_generic(in calls, arg_expr.sym) {
                 let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
                 text.extend(in "$fn:".as_bytes());
-                names.write(p.name, inout text);
+                names.write(param.name, inout text);
                 let key = names.intern(in text.as_slice());
-                let fty = t.named0(a.sym);
-                bound.insert(in names, key, fty);
+                let fn_ty = types.named0(arg_expr.sym);
+                bound.insert(in names, key, fn_ty);
             } else {
                 bound.clear();
                 break;
@@ -1115,27 +1154,27 @@ fn visit_node(
     }
     // A `dyn` argument needs its vtable's methods; the `dyn` function has
     // one instance, its `dyn` parameters erased to their object types.
-    let dr = d.dyn_row(target);
-    if dr.n > 0 {
-        let iv = instance.vars();
+    let dyn_pairs = calls.dyn_row(target);
+    if dyn_pairs.pair_count > 0 {
+        let inst_subst = instance.vars();
         let mut erased = instance.copy_of();
-        for j in 0..w(dr.n) {
-            let g = d.pair_key(add(w(dr.a), j));
-            let tr = d.pair_ty(add(w(dr.a), j));
-            let st = substitute(inout t, tr, in iv);
-            let mut oargs: ChunkSeq[u32] = ChunkSeq::new[u32]();
-            oargs.push(st);
-            let object = t.named(k.dyn_, in oargs);
-            let actual = instance.get(g);
-            if actual != NONE32 && !is_object(in t, k, actual) {
-                let vt = vtable(inout t, in d, object, actual);
-                push_vtable_methods(in names, in d, vt, inout todo);
+        for j in 0..w(dyn_pairs.pair_count) {
+            let generic = calls.pair_key(add(w(dyn_pairs.pair_start), j));
+            let trait_ty = calls.pair_ty(add(w(dyn_pairs.pair_start), j));
+            let trait_subst = substitute(inout types, trait_ty, in inst_subst);
+            let mut object_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            object_args.push(trait_subst);
+            let object = types.named(syms.dyn_, in object_args);
+            let actual = instance.get(generic);
+            if actual != NONE32 && !is_object(in types, syms, actual) {
+                let vtable_index = vtable(inout types, in calls, object, actual);
+                push_vtable_methods(in names, in calls, vtable_index, inout todo);
             }
-            erased.insert(in names, g, object);
+            erased.insert(in names, generic, object);
         }
         instance = erased;
     }
-    if d.is_stub(target) {
+    if calls.is_stub(target) {
         // A vtable stub is called through its slot.
         return;
     }
@@ -1144,33 +1183,42 @@ fn visit_node(
 
 // `instances_for_entry(world, entry, false)`.
 pub fn discover(
-    inout t: Types,
+    inout types: Types,
     inout names: Names,
-    in wd: World,
-    in d: Calls,
+    in world: World,
+    in calls: Calls,
     in facts: ProgramFacts,
-    k: Syms,
+    syms: Syms,
     entry: u32
 ) -> Found {
-    discover_traced(inout t, inout names, in wd, in d, in facts, k, entry, false)
+    discover_traced(inout types, inout names, in world, in calls, in facts, syms, entry, false)
 }
 
 // `instances_for_entry(world, entry, include_entry)`: with `include_entry`
 // (a trace host) the entry and every `trace_host_direct` instance are kept
 // even when they need no specialization.
 pub fn discover_traced(
-    inout t: Types,
+    inout types: Types,
     inout names: Names,
-    in wd: World,
-    in d: Calls,
+    in world: World,
+    in calls: Calls,
     in facts: ProgramFacts,
-    k: Syms,
+    syms: Syms,
     entry: u32,
     include_entry: bool
 ) -> Found {
     let mut roots: ChunkSeq[u32] = ChunkSeq::new[u32]();
     roots.push(entry);
-    discover_roots(inout t, inout names, in wd, in d, in facts, k, in roots, include_entry)
+    discover_roots(
+        inout types,
+        inout names,
+        in world,
+        in calls,
+        in facts,
+        syms,
+        in roots,
+        include_entry
+    )
 }
 
 // Whether `key` is one of `roots`.
@@ -1186,12 +1234,12 @@ pub fn is_root(in roots: ChunkSeq[u32], key: u32) -> bool {
 // `instances_for_roots`: the instances every root reaches, from one walk
 // (a library's exports, `native_export::compile_exports`).
 pub fn discover_roots(
-    inout t: Types,
+    inout types: Types,
     inout names: Names,
-    in wd: World,
-    in d: Calls,
+    in world: World,
+    in calls: Calls,
     in facts: ProgramFacts,
-    k: Syms,
+    syms: Syms,
     in roots: ChunkSeq[u32],
     include_entry: bool
 ) -> Found {
@@ -1203,20 +1251,20 @@ pub fn discover_roots(
     };
     let mut todo = Todo {
         names: ChunkSeq::new[u32](),
-        va: ChunkSeq::new[u32](),
-        vn: ChunkSeq::new[u32](),
+        var_starts: ChunkSeq::new[u32](),
+        var_counts: ChunkSeq::new[u32](),
         keys: ChunkSeq::new[u32](),
         tys: ChunkSeq::new[u32](),
     };
     let none = ivars_new();
     // `roots.iter().rev()`: the first root is walked first.
-    let mut ri = roots.len();
+    let mut root_index = roots.len();
     loop {
-        if ri == 0 {
+        if root_index == 0 {
             break;
         }
-        ri = wrapping_sub(ri, 1);
-        todo.push(u32_at(in roots, ri), in none);
+        root_index = wrapping_sub(root_index, 1);
+        todo.push(u32_at(in roots, root_index), in none);
     }
     let stamp: u32 = 1;
     let mut seen: ChunkSeq[u32] = ChunkSeq::new[u32]();
@@ -1227,21 +1275,21 @@ pub fn discover_roots(
         if top == 0 {
             break;
         }
-        let at = wrapping_sub(top, 1);
-        let name = u32_at(in todo.names, at);
-        let va = w(u32_at(in todo.va, at));
-        let vn = w(u32_at(in todo.vn, at));
+        let last = wrapping_sub(top, 1);
+        let name = u32_at(in todo.names, last);
+        let var_start = w(u32_at(in todo.var_starts, last));
+        let var_count = w(u32_at(in todo.var_counts, last));
         let mut vars = ivars_new();
-        for i in 0..vn {
-            vars.keys.push(u32_at(in todo.keys, add(va, i)));
-            vars.tys.push(u32_at(in todo.tys, add(va, i)));
+        for i in 0..var_count {
+            vars.keys.push(u32_at(in todo.keys, add(var_start, i)));
+            vars.tys.push(u32_at(in todo.tys, add(var_start, i)));
         }
-        todo.names.truncate(at);
-        todo.va.truncate(at);
-        todo.vn.truncate(at);
-        todo.keys.truncate(va);
-        todo.tys.truncate(va);
-        let key = instance_key(inout names, in t, name, in vars);
+        todo.names.truncate(last);
+        todo.var_starts.truncate(last);
+        todo.var_counts.truncate(last);
+        todo.keys.truncate(var_start);
+        todo.tys.truncate(var_start);
+        let key = instance_key(inout names, in types, name, in vars);
         if u32_at(in seen, w(key)) == stamp {
             continue;
         }
@@ -1253,14 +1301,14 @@ pub fn discover_roots(
                 .extend(in "native monomorphization exceeds 4096 function instances".as_bytes());
             return found;
         }
-        let fi = d.function(name);
-        if fi == NONE32 {
+        let func_index = calls.function(name);
+        if func_index == NONE32 {
             found.err.extend(in "unknown function '".as_bytes());
             names.write(name, inout found.err);
             found.err.push(39);
             return found;
         }
-        let f = concrete(inout t, inout names, in d, name, in vars);
+        let func = concrete(inout types, inout names, in calls, name, in vars);
         let mut bound_any = false;
         for i in 0..vars.len() {
             if is_fn_arg(in names, vars.key(i)) {
@@ -1268,11 +1316,17 @@ pub fn discover_roots(
             }
         }
         let kept = include_entry
-            && (is_root(in roots, key) || trace_host_direct(inout t, in wd, in d, k, in f));
-        if kept || !specialized(inout t, in names, in wd, k, in f) || bound_any {
-            found
-                .insts
-                .push(Inst { key: key, name: name, a: n32(found.keys.len()), n: n32(vars.len()) });
+            && (
+                is_root(in roots, key)
+                    || trace_host_direct(inout types, in world, in calls, syms, in func)
+            );
+        if kept || !specialized(inout types, in names, in world, syms, in func) || bound_any {
+            found.insts.push(Inst {
+                key: key,
+                name: name,
+                pair_start: n32(found.keys.len()),
+                pair_count: n32(vars.len())
+            });
             for i in 0..vars.len() {
                 found.keys.push(vars.key(i));
                 found.tys.push(vars.ty(i));
@@ -1280,16 +1334,26 @@ pub fn discover_roots(
         }
         // Handle drops (§16.3) are calls the source body never names.
         drops.clear();
-        drop_callees(in d, in facts, name, inout drops);
+        drop_callees(in calls, in facts, name, inout drops);
         for i in 0..drops.len() {
             todo.push(u32_at(in drops, i), in none);
         }
-        let info = d.fn_info(fi);
+        let info = calls.fn_info(func_index);
         if info.body != NONE32 {
             let root = w(info.body);
-            let size = w(d.expr(root).size);
+            let size = w(calls.expr(root).size);
             for i in root..add(root, size) {
-                visit_node(inout t, inout names, in wd, in d, in facts, k, i, in vars, inout todo);
+                visit_node(
+                    inout types,
+                    inout names,
+                    in world,
+                    in calls,
+                    in facts,
+                    syms,
+                    i,
+                    in vars,
+                    inout todo
+                );
             }
         }
     }
@@ -1297,19 +1361,19 @@ pub fn discover_roots(
     found
 }
 
-fn inst_at(in xs: ChunkSeq[Inst], i: u64) -> Inst {
-    match xs.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => Inst { key: 0, name: 0, a: 0, n: 0 },
+fn inst_at(in insts: ChunkSeq[Inst], i: u64) -> Inst {
+    match insts.try_get(i) {
+        Option::Some(inst) => inst,
+        Option::None => Inst { key: 0, name: 0, pair_start: 0, pair_count: 0 },
     }
 }
 
 // Sorts by key bytes (the `BTreeMap<String, _>` order); merge sort.
-fn sort_insts(in names: Names, inout xs: ChunkSeq[Inst]) {
-    let n = xs.len();
-    let mut tmp: ChunkSeq[Inst] = ChunkSeq::with_capacity[Inst](n);
+fn sort_insts(in names: Names, inout insts: ChunkSeq[Inst]) {
+    let n = insts.len();
+    let mut scratch: ChunkSeq[Inst] = ChunkSeq::with_capacity[Inst](n);
     for i in 0..n {
-        tmp.push(inst_at(in xs, i));
+        scratch.push(inst_at(in insts, i));
     }
     let mut width: u64 = 1;
     loop {
@@ -1325,9 +1389,9 @@ fn sort_insts(in names: Names, inout xs: ChunkSeq[Inst]) {
             let hi = min_u64(add(mid, width), n);
             let mut i = lo;
             let mut j = mid;
-            let mut o = lo;
+            let mut out_pos = lo;
             loop {
-                if o >= hi {
+                if out_pos >= hi {
                     break;
                 }
                 let take_left = if i >= mid {
@@ -1335,21 +1399,21 @@ fn sort_insts(in names: Names, inout xs: ChunkSeq[Inst]) {
                 } else if j >= hi {
                     true
                 } else {
-                    cmp_names(in names, inst_at(in xs, j).key, inst_at(in xs, i).key) >= 0
+                    cmp_names(in names, inst_at(in insts, j).key, inst_at(in insts, i).key) >= 0
                 };
                 if take_left {
-                    let ok = tmp.try_set(o, inst_at(in xs, i));
+                    let ok = scratch.try_set(out_pos, inst_at(in insts, i));
                     i = inc(i);
                 } else {
-                    let ok = tmp.try_set(o, inst_at(in xs, j));
+                    let ok = scratch.try_set(out_pos, inst_at(in insts, j));
                     j = inc(j);
                 }
-                o = inc(o);
+                out_pos = inc(out_pos);
             }
             lo = hi;
         }
         for x in 0..n {
-            let ok = xs.try_set(x, inst_at(in tmp, x));
+            let ok = insts.try_set(x, inst_at(in scratch, x));
         }
         width = wrapping_mul(width, 2);
     }

@@ -18,9 +18,10 @@ fn le16(in b: Slice[u8], at: u64) -> u64 {
 }
 
 fn le32(in b: Slice[u8], at: u64) -> u64 {
-    widen_u64(gb(in b, at)) | (widen_u64(gb(in b, wrapping_add(at, 1))) << 8) | (
-        widen_u64(gb(in b, wrapping_add(at, 2))) << 16
-    ) | (widen_u64(gb(in b, wrapping_add(at, 3))) << 24)
+    widen_u64(gb(in b, at))
+        | (widen_u64(gb(in b, wrapping_add(at, 1))) << 8)
+        | (widen_u64(gb(in b, wrapping_add(at, 2))) << 16)
+        | (widen_u64(gb(in b, wrapping_add(at, 3))) << 24)
 }
 
 fn le64(in b: Slice[u8], at: u64) -> u64 {

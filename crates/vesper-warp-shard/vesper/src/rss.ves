@@ -18,10 +18,10 @@ pub fn toeplitz_reference_hash(in key: Slice[u8], in input: Slice[u8]) -> u32 ef
     if n > MAX_RSS_INPUT {
         Fail::raise(n);
     }
-    let mut window = wrapping_shl_u64(key_byte(in key, 0), 24) | wrapping_shl_u64(
-        key_byte(in key, 1),
-        16
-    ) | wrapping_shl_u64(key_byte(in key, 2), 8) | key_byte(in key, 3);
+    let mut window = wrapping_shl_u64(key_byte(in key, 0), 24)
+        | wrapping_shl_u64(key_byte(in key, 1), 16)
+        | wrapping_shl_u64(key_byte(in key, 2), 8)
+        | key_byte(in key, 3);
     let mut result: u64 = 0;
     for i in 0..n {
         let byte = match input.try_get(i) {

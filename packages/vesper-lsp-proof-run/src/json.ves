@@ -9,7 +9,13 @@
 // offset and count of its key and value id pairs in `kids`; keys are
 // STRING nodes).
 
-use self::numbers::number_out_of_range;
+use @vesper-std/bytes::ascii::{
+    BACKSLASH, BACKSPACE, CARRIAGE_RETURN, CLOSE_BRACE, CLOSE_BRACKET, COLON, COMMA, DIGIT_NINE,
+    DIGIT_ONE, DIGIT_ZERO, DOT, FORM_FEED, HYPHEN, LOWER_A, LOWER_B, LOWER_E, LOWER_F, LOWER_N,
+    LOWER_R, LOWER_T, LOWER_U, NEWLINE, OPEN_BRACE, OPEN_BRACKET, PLUS, QUOTE, SLASH, SPACE, TAB,
+    UPPER_A, UPPER_E, UPPER_F
+};
+use self::numbers::{number_out_of_range, U64_MAX_TENTH, U64_MAX_LAST_DIGIT};
 
 pub const NULL: u8 = 0;
 pub const BOOL: u8 = 1;
@@ -18,7 +24,24 @@ pub const STRING: u8 = 3;
 pub const ARRAY: u8 = 4;
 pub const OBJECT: u8 = 5;
 
-const NONE: u64 = 18446744073709551615;
+pub const NONE: u64 = 18446744073709551615;
+
+// Added to a nibble of 10 to 15 to give `a` to `f` (`'a' - 10`), and to
+// give `A` to `F` (`'A' - 10`).
+pub const HEX_LETTER_BASE: u8 = 87;
+pub const HEX_UPPER_LETTER_BASE: u8 = 55;
+// The hex digits of a `\u` escape.
+const HEX_ESCAPE_DIGITS: u64 = 4;
+// UTF-16 surrogates: the leading (high) and trailing (low) ranges, the bits
+// each carries, and the first code point a pair encodes.
+const HIGH_SURROGATE_FIRST: u64 = 55296;
+const HIGH_SURROGATE_LAST: u64 = 56319;
+const LOW_SURROGATE_FIRST: u64 = 56320;
+const LOW_SURROGATE_LAST: u64 = 57343;
+const SURROGATE_BITS: u32 = 10;
+const SUPPLEMENTARY_FIRST: u64 = 65536;
+// serde_json's recursion limit (`remaining_depth`).
+const MAX_DEPTH: u64 = 128;
 
 // serde_json's error codes, in its `ErrorCode` order.
 const E_NONE: u8 = 0;
@@ -110,7 +133,7 @@ fn whitespace(in t: Slice[u8], inout p: P) -> bool {
             return false;
         }
         let c = byte(in t, p.i);
-        if c == 32 || c == 10 || c == 9 || c == 13 {
+        if c == SPACE || c == NEWLINE || c == TAB || c == CARRIAGE_RETURN {
             p.i = wrapping_add(p.i, 1);
         } else {
             return true;
@@ -136,7 +159,7 @@ fn ident(inout d: Doc, in t: Slice[u8], inout p: P, in rest: Str) -> bool {
 }
 
 fn is_digit(c: u8) -> bool {
-    c >= 48 && c <= 57
+    c >= DIGIT_ZERO && c <= DIGIT_NINE
 }
 
 // `parse_any_number` after an optional `-` (already eaten).
@@ -148,19 +171,19 @@ fn number(inout d: Doc, in t: Slice[u8], inout p: P, positive: bool, start: u64)
     p.i = wrapping_add(p.i, 1);
     let mut float = false;
     let mut sig: u64 = 0;
-    if c == 48 {
+    if c == DIGIT_ZERO {
         if is_digit(byte(in t, p.i)) {
             return peek_fail(inout d, in t, p, INVALID_NUMBER);
         }
-    } else if c >= 49 && c <= 57 {
-        sig = widen_u64(wrapping_sub(c, 48));
+    } else if c >= DIGIT_ONE && c <= DIGIT_NINE {
+        sig = widen_u64(wrapping_sub(c, DIGIT_ZERO));
         loop {
             let x = byte(in t, p.i);
             if !is_digit(x) {
                 break;
             }
-            let digit = widen_u64(wrapping_sub(x, 48));
-            if sig > 1844674407370955161 || (sig == 1844674407370955161 && digit > 5) {
+            let digit = widen_u64(wrapping_sub(x, DIGIT_ZERO));
+            if sig > U64_MAX_TENTH || (sig == U64_MAX_TENTH && digit > U64_MAX_LAST_DIGIT) {
                 float = true;
             } else {
                 sig = wrapping_add(wrapping_mul(sig, 10), digit);
@@ -170,7 +193,7 @@ fn number(inout d: Doc, in t: Slice[u8], inout p: P, positive: bool, start: u64)
     } else {
         return fail(inout d, INVALID_NUMBER, p.i);
     }
-    if byte(in t, p.i) == 46 {
+    if byte(in t, p.i) == DOT {
         float = true;
         p.i = wrapping_add(p.i, 1);
         let mut n: u64 = 0;
@@ -189,11 +212,11 @@ fn number(inout d: Doc, in t: Slice[u8], inout p: P, positive: bool, start: u64)
         }
     }
     let e = byte(in t, p.i);
-    if e == 101 || e == 69 {
+    if e == LOWER_E || e == UPPER_E {
         float = true;
         p.i = wrapping_add(p.i, 1);
         let s = byte(in t, p.i);
-        if s == 43 || s == 45 {
+        if s == PLUS || s == HYPHEN {
             p.i = wrapping_add(p.i, 1);
         }
         if p.i >= t.len() {
@@ -220,12 +243,12 @@ fn number(inout d: Doc, in t: Slice[u8], inout p: P, positive: bool, start: u64)
 }
 
 fn hex_digit(c: u8) -> u64 {
-    if c >= 48 && c <= 57 {
-        widen_u64(wrapping_sub(c, 48))
-    } else if c >= 97 && c <= 102 {
-        widen_u64(wrapping_sub(c, 87))
-    } else if c >= 65 && c <= 70 {
-        widen_u64(wrapping_sub(c, 55))
+    if c >= DIGIT_ZERO && c <= DIGIT_NINE {
+        widen_u64(wrapping_sub(c, DIGIT_ZERO))
+    } else if c >= LOWER_A && c <= LOWER_F {
+        widen_u64(wrapping_sub(c, HEX_LETTER_BASE))
+    } else if c >= UPPER_A && c <= UPPER_F {
+        widen_u64(wrapping_sub(c, HEX_UPPER_LETTER_BASE))
     } else {
         NONE
     }
@@ -233,20 +256,20 @@ fn hex_digit(c: u8) -> u64 {
 
 // `decode_hex_escape` of `SliceRead`: NONE on an error.
 fn hex4(inout d: Doc, in t: Slice[u8], inout p: P) -> u64 {
-    if wrapping_add(p.i, 4) > t.len() {
+    if wrapping_add(p.i, HEX_ESCAPE_DIGITS) > t.len() {
         p.i = t.len();
         return fail(inout d, EOF_STRING, p.i);
     }
     let mut n: u64 = 0;
     let mut bad = false;
-    for k in 0..4 {
+    for k in 0..HEX_ESCAPE_DIGITS {
         let h = hex_digit(byte(in t, wrapping_add(p.i, k)));
         if h == NONE {
             bad = true;
         }
         n = wrapping_add(wrapping_mul(n, 16), h);
     }
-    p.i = wrapping_add(p.i, 4);
+    p.i = wrapping_add(p.i, HEX_ESCAPE_DIGITS);
     if bad {
         return fail(inout d, INVALID_ESCAPE, p.i);
     }
@@ -280,13 +303,13 @@ fn string(inout d: Doc, in t: Slice[u8], inout p: P) -> u64 {
         }
         let c = byte(in t, p.i);
         p.i = wrapping_add(p.i, 1);
-        if c == 34 {
+        if c == QUOTE {
             break;
         }
-        if c < 32 {
+        if c < SPACE {
             return fail(inout d, CONTROL, p.i);
         }
-        if c != 92 {
+        if c != BACKSLASH {
             d.pool.push(c);
             continue;
         }
@@ -295,27 +318,27 @@ fn string(inout d: Doc, in t: Slice[u8], inout p: P) -> u64 {
         }
         let e = byte(in t, p.i);
         p.i = wrapping_add(p.i, 1);
-        if e == 34 || e == 92 || e == 47 {
+        if e == QUOTE || e == BACKSLASH || e == SLASH {
             d.pool.push(e);
-        } else if e == 98 {
-            d.pool.push(8);
-        } else if e == 102 {
-            d.pool.push(12);
-        } else if e == 110 {
-            d.pool.push(10);
-        } else if e == 114 {
-            d.pool.push(13);
-        } else if e == 116 {
-            d.pool.push(9);
-        } else if e == 117 {
+        } else if e == LOWER_B {
+            d.pool.push(BACKSPACE);
+        } else if e == LOWER_F {
+            d.pool.push(FORM_FEED);
+        } else if e == LOWER_N {
+            d.pool.push(NEWLINE);
+        } else if e == LOWER_R {
+            d.pool.push(CARRIAGE_RETURN);
+        } else if e == LOWER_T {
+            d.pool.push(TAB);
+        } else if e == LOWER_U {
             let n = hex4(inout d, in t, inout p);
             if n == NONE {
                 return NONE;
             }
-            if n >= 56320 && n <= 57343 {
+            if n >= LOW_SURROGATE_FIRST && n <= LOW_SURROGATE_LAST {
                 return fail(inout d, LONE_SURROGATE, p.i);
             }
-            if n < 55296 || n > 56319 {
+            if n < HIGH_SURROGATE_FIRST || n > HIGH_SURROGATE_LAST {
                 push_code(inout d.pool, n);
                 continue;
             }
@@ -323,7 +346,7 @@ fn string(inout d: Doc, in t: Slice[u8], inout p: P) -> u64 {
             if p.i >= t.len() {
                 return fail(inout d, EOF_STRING, p.i);
             }
-            if byte(in t, p.i) != 92 {
+            if byte(in t, p.i) != BACKSLASH {
                 p.i = wrapping_add(p.i, 1);
                 return fail(inout d, END_OF_HEX, p.i);
             }
@@ -331,7 +354,7 @@ fn string(inout d: Doc, in t: Slice[u8], inout p: P) -> u64 {
             if p.i >= t.len() {
                 return fail(inout d, EOF_STRING, p.i);
             }
-            if byte(in t, p.i) != 117 {
+            if byte(in t, p.i) != LOWER_U {
                 p.i = wrapping_add(p.i, 1);
                 return fail(inout d, END_OF_HEX, p.i);
             }
@@ -340,12 +363,13 @@ fn string(inout d: Doc, in t: Slice[u8], inout p: P) -> u64 {
             if n2 == NONE {
                 return NONE;
             }
-            if n2 < 56320 || n2 > 57343 {
+            if n2 < LOW_SURROGATE_FIRST || n2 > LOW_SURROGATE_LAST {
                 return fail(inout d, LONE_SURROGATE, p.i);
             }
             let cp = wrapping_add(
-                wrapping_shl_u64(wrapping_sub(n, 55296), 10) | wrapping_sub(n2, 56320),
-                65536
+                wrapping_shl_u64(wrapping_sub(n, HIGH_SURROGATE_FIRST), SURROGATE_BITS)
+                    | wrapping_sub(n2, LOW_SURROGATE_FIRST),
+                SUPPLEMENTARY_FIRST
             );
             push_code(inout d.pool, cp);
         } else {
@@ -361,28 +385,28 @@ fn value(inout d: Doc, in t: Slice[u8], inout p: P) -> u64 {
         return peek_fail(inout d, in t, p, EOF_VALUE);
     }
     let c = byte(in t, p.i);
-    if c == 110 {
+    if c == LOWER_N {
         p.i = wrapping_add(p.i, 1);
         if !ident(inout d, in t, inout p, in "ull") {
             return NONE;
         }
         return node(inout d, NULL, 0, 0);
     }
-    if c == 116 {
+    if c == LOWER_T {
         p.i = wrapping_add(p.i, 1);
         if !ident(inout d, in t, inout p, in "rue") {
             return NONE;
         }
         return node(inout d, BOOL, 1, 0);
     }
-    if c == 102 {
+    if c == LOWER_F {
         p.i = wrapping_add(p.i, 1);
         if !ident(inout d, in t, inout p, in "alse") {
             return NONE;
         }
         return node(inout d, BOOL, 0, 0);
     }
-    if c == 45 {
+    if c == HYPHEN {
         let start = p.i;
         p.i = wrapping_add(p.i, 1);
         return number(inout d, in t, inout p, false, start);
@@ -390,17 +414,17 @@ fn value(inout d: Doc, in t: Slice[u8], inout p: P) -> u64 {
     if is_digit(c) {
         return number(inout d, in t, inout p, true, p.i);
     }
-    if c == 34 {
+    if c == QUOTE {
         p.i = wrapping_add(p.i, 1);
         return string(inout d, in t, inout p);
     }
-    if c == 91 || c == 123 {
-        if wrapping_add(p.depth, 1) >= 128 {
+    if c == OPEN_BRACKET || c == OPEN_BRACE {
+        if wrapping_add(p.depth, 1) >= MAX_DEPTH {
             return peek_fail(inout d, in t, p, RECURSION);
         }
         p.depth = wrapping_add(p.depth, 1);
         p.i = wrapping_add(p.i, 1);
-        let x = if c == 91 {
+        let x = if c == OPEN_BRACKET {
             array(inout d, in t, inout p)
         } else {
             object(inout d, in t, inout p)
@@ -420,17 +444,17 @@ fn array(inout d: Doc, in t: Slice[u8], inout p: P) -> u64 {
             return peek_fail(inout d, in t, p, EOF_LIST);
         }
         let c = byte(in t, p.i);
-        if c == 93 {
+        if c == CLOSE_BRACKET {
             break;
         }
         if first {
             first = false;
-        } else if c == 44 {
+        } else if c == COMMA {
             p.i = wrapping_add(p.i, 1);
             if !whitespace(in t, inout p) {
                 return peek_fail(inout d, in t, p, EOF_VALUE);
             }
-            if byte(in t, p.i) == 93 {
+            if byte(in t, p.i) == CLOSE_BRACKET {
                 return peek_fail(inout d, in t, p, TRAILING_COMMA);
             }
         } else {
@@ -459,24 +483,24 @@ fn object(inout d: Doc, in t: Slice[u8], inout p: P) -> u64 {
             return peek_fail(inout d, in t, p, EOF_OBJECT);
         }
         let c = byte(in t, p.i);
-        if c == 125 {
+        if c == CLOSE_BRACE {
             break;
         }
         if first {
             first = false;
-            if c != 34 {
+            if c != QUOTE {
                 return peek_fail(inout d, in t, p, KEY_STRING);
             }
-        } else if c == 44 {
+        } else if c == COMMA {
             p.i = wrapping_add(p.i, 1);
             if !whitespace(in t, inout p) {
                 return peek_fail(inout d, in t, p, EOF_VALUE);
             }
             let c2 = byte(in t, p.i);
-            if c2 == 125 {
+            if c2 == CLOSE_BRACE {
                 return peek_fail(inout d, in t, p, TRAILING_COMMA);
             }
-            if c2 != 34 {
+            if c2 != QUOTE {
                 return peek_fail(inout d, in t, p, KEY_STRING);
             }
         } else {
@@ -490,7 +514,7 @@ fn object(inout d: Doc, in t: Slice[u8], inout p: P) -> u64 {
         if !whitespace(in t, inout p) {
             return peek_fail(inout d, in t, p, EOF_OBJECT);
         }
-        if byte(in t, p.i) != 58 {
+        if byte(in t, p.i) != COLON {
             return peek_fail(inout d, in t, p, EXPECTED_COLON);
         }
         p.i = wrapping_add(p.i, 1);
@@ -626,7 +650,7 @@ pub fn put_u64(inout o: ChunkSeq[u8], n: u64) {
     if n >= 10 {
         put_u64(inout o, n / 10);
     }
-    o.push(wrapping_u8(wrapping_add(48, n % 10)));
+    o.push(wrapping_u8(wrapping_add(widen_u64(DIGIT_ZERO), n % 10)));
 }
 
 // The error as serde_json's `Display` writes it: the message, then
@@ -677,7 +701,7 @@ pub fn put_error(inout o: ChunkSeq[u8], in d: Doc, in t: Slice[u8]) {
     let mut line: u64 = 1;
     let mut start: u64 = 0;
     for k in 0..i {
-        if byte(in t, k) == 10 {
+        if byte(in t, k) == NEWLINE {
             line = inc(line);
             start = inc(k);
         }
@@ -690,32 +714,32 @@ pub fn put_error(inout o: ChunkSeq[u8], in d: Doc, in t: Slice[u8]) {
 
 fn hex(c: u8) -> u8 {
     if c < 10 {
-        wrapping_add(48, c)
+        wrapping_add(DIGIT_ZERO, c)
     } else {
-        wrapping_add(87, c)
+        wrapping_add(HEX_LETTER_BASE, c)
     }
 }
 
 // A JSON string with serde_json's escapes.
 pub fn put_string(inout o: ChunkSeq[u8], in b: Slice[u8]) {
-    o.push(34);
+    o.push(QUOTE);
     for i in 0..b.len() {
         let c = byte(in b, i);
-        if c == 34 || c == 92 {
-            o.push(92);
+        if c == QUOTE || c == BACKSLASH {
+            o.push(BACKSLASH);
             o.push(c);
-        } else if c < 32 {
-            o.push(92);
-            if c == 8 {
-                o.push(98);
-            } else if c == 12 {
-                o.push(102);
-            } else if c == 10 {
-                o.push(110);
-            } else if c == 13 {
-                o.push(114);
-            } else if c == 9 {
-                o.push(116);
+        } else if c < SPACE {
+            o.push(BACKSLASH);
+            if c == BACKSPACE {
+                o.push(LOWER_B);
+            } else if c == FORM_FEED {
+                o.push(LOWER_F);
+            } else if c == NEWLINE {
+                o.push(LOWER_N);
+            } else if c == CARRIAGE_RETURN {
+                o.push(LOWER_R);
+            } else if c == TAB {
+                o.push(LOWER_T);
             } else {
                 put(inout o, in "u00");
                 o.push(hex(c >> 4));
@@ -725,5 +749,5 @@ pub fn put_string(inout o: ChunkSeq[u8], in b: Slice[u8]) {
             o.push(c);
         }
     }
-    o.push(34);
+    o.push(QUOTE);
 }

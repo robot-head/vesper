@@ -11,12 +11,31 @@ use vesper_ffi::sys::{
 };
 use vesper_ffi::{Endian, FieldKind, WireLayout};
 
-/// `xor ecx, ecx; rdpkru; ret` — returns PKRU in eax (System V).
-const RDPKRU: [u8; 6] = [0x31, 0xc9, 0x0f, 0x01, 0xee, 0xc3];
-/// `mov eax, edi; xor ecx, ecx; xor edx, edx; wrpkru; ret`.
-const WRPKRU: [u8; 10] = [0x89, 0xf8, 0x31, 0xc9, 0x31, 0xd2, 0x0f, 0x01, 0xef, 0xc3];
+use crate::ffi_lowering::cpu::{RDPKRU, WRPKRU};
 const RDPKRU_SYMBOL: &str = "vesper_bridge_rdpkru";
 const WRPKRU_SYMBOL: &str = "vesper_bridge_wrpkru";
+
+/// Byte offsets of a sequence header's words ([`crate::seq::HEADER_BYTES`]
+/// in all): length, capacity and data pointer.
+const SEQ_LEN: i32 = 0;
+const SEQ_CAP: i32 = 8;
+const SEQ_DATA: i32 = 16;
+/// Byte offsets of a `Slice` view's words: sequence header, start, length.
+const VIEW_HANDLE: i32 = 0;
+const VIEW_START: i32 = 8;
+const VIEW_LEN: i32 = 16;
+/// Byte offsets of a node of the foreign range registry's list (the
+/// registered range's start and end, the next node) and its size.
+const RANGE_START: i32 = 0;
+const RANGE_END: i32 = 8;
+const RANGE_NEXT: i32 = 16;
+const RANGE_NODE_BYTES: i64 = 24;
+/// Bytes of one pointer slot of a `CStrList` argument's array.
+const POINTER_BYTES: i64 = 8;
+/// Bytes of a UTF-16 code unit (a `CWStr` element and its terminator).
+const UTF16_UNIT_BYTES: i64 = 2;
+/// Code alignment of a generated local leaf function.
+const HELPER_CODE_ALIGN: u64 = 16;
 
 /// The `Ok` payload type of a `Result`.
 fn result_ok(ty: &Type) -> Result<Type, String> {
@@ -630,13 +649,22 @@ impl<M: Module> Codegen<'_, '_, M> {
         stride: usize,
     ) -> Result<(ir::Value, ir::Value), String> {
         let view = self.expr(expr)?;
-        let handle = self.b.ins().load(types::I64, ir::MemFlags::new(), view, 0);
-        let start = self.b.ins().load(types::I64, ir::MemFlags::new(), view, 8);
-        let len = self.b.ins().load(types::I64, ir::MemFlags::new(), view, 16);
+        let handle = self
+            .b
+            .ins()
+            .load(types::I64, ir::MemFlags::new(), view, VIEW_HANDLE);
+        let start = self
+            .b
+            .ins()
+            .load(types::I64, ir::MemFlags::new(), view, VIEW_START);
+        let len = self
+            .b
+            .ins()
+            .load(types::I64, ir::MemFlags::new(), view, VIEW_LEN);
         let data = self
             .b
             .ins()
-            .load(types::I64, ir::MemFlags::new(), handle, 16);
+            .load(types::I64, ir::MemFlags::new(), handle, SEQ_DATA);
         let offset = self.b.ins().imul_imm(start, stride as i64);
         let lent = self.b.ins().iadd(data, offset);
         let dummy = self.alloc(8);
@@ -648,8 +676,8 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// in elements.
     fn foreign_buffer(&mut self, header: ir::Value) -> (ir::Value, ir::Value) {
         let flags = ir::MemFlags::new();
-        let data = self.b.ins().load(types::I64, flags, header, 16);
-        let len = self.b.ins().load(types::I64, flags, header, 0);
+        let data = self.b.ins().load(types::I64, flags, header, SEQ_DATA);
+        let len = self.b.ins().load(types::I64, flags, header, SEQ_LEN);
         (data, len)
     }
     /// The handle word of a mapping result at `address` of `len` elements:
@@ -679,16 +707,16 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.b.seal_block(make);
         self.foreign_range_register(address, len, elem_bytes, elem_bytes)?;
         let malloc = self.foreign_libc("malloc", 1, true)?;
-        let size = self.b.ins().iconst(types::I64, 24);
+        let size = self.b.ins().iconst(types::I64, crate::seq::HEADER_BYTES);
         let call = self.b.ins().call(malloc, &[size]);
         let header = self.b.inst_results(call)[0];
         self.b
             .ins()
             .trapz(header, ir::TrapCode::unwrap_user(ffi::MAPPING_ALLOC_TRAP));
         let flags = ir::MemFlags::new();
-        self.b.ins().store(flags, len, header, 0);
-        self.b.ins().store(flags, len, header, 8);
-        self.b.ins().store(flags, address, header, 16);
+        self.b.ins().store(flags, len, header, SEQ_LEN);
+        self.b.ins().store(flags, len, header, SEQ_CAP);
+        self.b.ins().store(flags, address, header, SEQ_DATA);
         self.jump(join, &[ir::BlockArg::Value(header)]);
         self.b.switch_to_block(join);
         self.b.seal_block(join);
@@ -860,8 +888,8 @@ impl<M: Module> Codegen<'_, '_, M> {
 
             b.switch_to_block(check_node);
             b.seal_block(check_node);
-            let na = b.ins().load(types::I64, flags, cur, 0);
-            let ne = b.ins().load(types::I64, flags, cur, 8);
+            let na = b.ins().load(types::I64, flags, cur, RANGE_START);
+            let ne = b.ins().load(types::I64, flags, cur, RANGE_END);
             let c1 = b.ins().icmp(IntCC::UnsignedLessThan, addr, ne);
             let c2 = b.ins().icmp(IntCC::UnsignedLessThan, na, end);
             let hit = b.ins().band(c1, c2);
@@ -875,14 +903,14 @@ impl<M: Module> Codegen<'_, '_, M> {
 
             b.switch_to_block(next_node);
             b.seal_block(next_node);
-            let nxt = b.ins().load(types::I64, flags, cur, 16);
+            let nxt = b.ins().load(types::I64, flags, cur, RANGE_NEXT);
             b.ins().jump(walk, &[ir::BlockArg::Value(nxt)]);
 
             b.switch_to_block(insert);
             b.seal_block(walk);
             b.seal_block(insert);
             let malloc_fn = self.m.declare_func_in_func(malloc_id, b.func);
-            let sz = b.ins().iconst(types::I64, 24);
+            let sz = b.ins().iconst(types::I64, RANGE_NODE_BYTES);
             let call = b.ins().call(malloc_fn, &[sz]);
             let node = b.inst_results(call)[0];
             let node_zero = b.ins().icmp_imm(IntCC::Equal, node, 0);
@@ -899,9 +927,9 @@ impl<M: Module> Codegen<'_, '_, M> {
             b.switch_to_block(alloc_ok);
             b.seal_block(alloc_ok);
             let cur_head = b.ins().load(types::I64, flags, head_ptr, 0);
-            b.ins().store(flags, addr, node, 0);
-            b.ins().store(flags, end, node, 8);
-            b.ins().store(flags, cur_head, node, 16);
+            b.ins().store(flags, addr, node, RANGE_START);
+            b.ins().store(flags, end, node, RANGE_END);
+            b.ins().store(flags, cur_head, node, RANGE_NEXT);
             b.ins().store(flags, node, head_ptr, 0);
             let zero = b.ins().iconst(types::I64, 0);
             b.ins().atomic_store(flags, zero, lock_ptr);
@@ -986,9 +1014,9 @@ impl<M: Module> Codegen<'_, '_, M> {
 
             b.switch_to_block(check_node);
             b.seal_block(check_node);
-            let na = b.ins().load(types::I64, flags, cur, 0);
-            let ne = b.ins().load(types::I64, flags, cur, 8);
-            let nxt = b.ins().load(types::I64, flags, cur, 16);
+            let na = b.ins().load(types::I64, flags, cur, RANGE_START);
+            let ne = b.ins().load(types::I64, flags, cur, RANGE_END);
+            let nxt = b.ins().load(types::I64, flags, cur, RANGE_NEXT);
             let eq_a = b.ins().icmp(IntCC::Equal, na, addr);
             let eq_e = b.ins().icmp(IntCC::Equal, ne, end);
             let same = b.ins().band(eq_a, eq_e);
@@ -1005,7 +1033,7 @@ impl<M: Module> Codegen<'_, '_, M> {
 
             b.switch_to_block(next_node);
             b.seal_block(next_node);
-            let prev_next = b.ins().iadd_imm(cur, 16);
+            let prev_next = b.ins().iadd_imm(cur, i64::from(RANGE_NEXT));
             b.ins().jump(
                 walk,
                 &[ir::BlockArg::Value(prev_next), ir::BlockArg::Value(nxt)],
@@ -1056,9 +1084,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         let stride = self.b.ins().iconst(types::I64, 1);
         let header = self.seq_make(cap, stride)?;
         let flags = ir::MemFlags::new();
-        let data = self.b.ins().load(types::I64, flags, header, 16);
+        let data = self.b.ins().load(types::I64, flags, header, SEQ_DATA);
         self.b.ins().call(memcpy, &[data, address, len]);
-        self.b.ins().store(flags, len, header, 0);
+        self.b.ins().store(flags, len, header, SEQ_LEN);
         self.jump(join, &[ir::BlockArg::Value(header)]);
         self.b.switch_to_block(join);
         self.b.seal_block(join);
@@ -1100,14 +1128,14 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.b.seal_block(scan);
         self.b.seal_block(copy);
         let cap = self.b.ins().iadd_imm(len, 1);
-        let stride = self.b.ins().iconst(types::I64, 2);
+        let stride = self.b.ins().iconst(types::I64, UTF16_UNIT_BYTES);
         let header = self.seq_make(cap, stride)?;
         let flags = ir::MemFlags::new();
-        let data = self.b.ins().load(types::I64, flags, header, 16);
+        let data = self.b.ins().load(types::I64, flags, header, SEQ_DATA);
         let bytes = self.b.ins().ishl_imm(len, 1);
         let memcpy = self.foreign_libc("memcpy", 3, true)?;
         self.b.ins().call(memcpy, &[data, address, bytes]);
-        self.b.ins().store(flags, len, header, 0);
+        self.b.ins().store(flags, len, header, SEQ_LEN);
         self.jump(join, &[ir::BlockArg::Value(header)]);
 
         self.b.switch_to_block(join);
@@ -1139,14 +1167,14 @@ impl<M: Module> Codegen<'_, '_, M> {
         // Count the strings first, so the array holds just them and the NULL.
         let count = self.cstr_list_walk(buffer, len, None)?;
         let slots = self.b.ins().iadd_imm(count, 1);
-        let bytes = self.b.ins().imul_imm(slots, 8);
+        let bytes = self.b.ins().imul_imm(slots, POINTER_BYTES);
         let call = self.b.ins().call(malloc, &[bytes]);
         let array = self.b.inst_results(call)[0];
         self.b
             .ins()
             .trapz(array, ir::TrapCode::unwrap_user(ffi::CSTR_ALLOC_TRAP));
         let count = self.cstr_list_walk(buffer, len, Some(array))?;
-        let slot = self.b.ins().imul_imm(count, 8);
+        let slot = self.b.ins().imul_imm(count, POINTER_BYTES);
         let slot = self.b.ins().iadd(array, slot);
         let zero = self.b.ins().iconst(types::I64, 0);
         self.b.ins().store(flags, zero, slot, 0);
@@ -1188,7 +1216,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         };
         let here = self.b.ins().iadd(buffer, start);
         if let Some(array) = array {
-            let slot = self.b.ins().imul_imm(k, 8);
+            let slot = self.b.ins().imul_imm(k, POINTER_BYTES);
             let slot = self.b.ins().iadd(array, slot);
             self.b.ins().store(ir::MemFlags::new(), here, slot, 0);
         }
@@ -1244,7 +1272,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         let malloc = self.foreign_libc("malloc", 1, true)?;
         let memcpy = self.foreign_libc("memcpy", 3, true)?;
         let bytes = self.b.ins().ishl_imm(len, 1);
-        let size = self.b.ins().iadd_imm(bytes, 2);
+        let size = self.b.ins().iadd_imm(bytes, UTF16_UNIT_BYTES);
         let call = self.b.ins().call(malloc, &[size]);
         let buffer = self.b.inst_results(call)[0];
         self.b
@@ -1878,7 +1906,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             .map_err(|e| e.to_string())?;
         if !defined {
             self.m
-                .define_function_bytes(id, 16, code, &[])
+                .define_function_bytes(id, HELPER_CODE_ALIGN, code, &[])
                 .map_err(|e| e.to_string())?;
         }
         Ok(self.m.declare_func_in_func(id, self.b.func))
@@ -1907,7 +1935,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             .map_err(|e| e.to_string())?;
         if !defined {
             self.m
-                .define_function_bytes(id, 16, code, &[])
+                .define_function_bytes(id, HELPER_CODE_ALIGN, code, &[])
                 .map_err(|e| e.to_string())?;
         }
         Ok(self.m.declare_func_in_func(id, self.b.func))
@@ -2031,7 +2059,10 @@ impl<M: Module> Codegen<'_, '_, M> {
             .ins()
             .load(types::I32, ir::MemFlags::new(), address, 0);
         let unset = self.b.ins().icmp_imm(IntCC::Equal, mask, 0);
-        let host = self.b.ins().band_imm(mask, 0b11);
+        let host = self
+            .b
+            .ins()
+            .band_imm(mask, i64::from(ffi::PKRU_KEY_DISABLE_BITS));
         let host = self.b.ins().icmp_imm(IntCC::NotEqual, host, 0);
         let bad = self.b.ins().bor(unset, host);
         self.b
@@ -2055,40 +2086,102 @@ impl<M: Module> Codegen<'_, '_, M> {
 
 use crate::codegen_swap::{NO_VALUE, ffi as swap, word};
 
+/// `BEGIN`'s handler word.
+const HANDLER_DIRECT: u64 = 0;
+const HANDLER_ISOLATED_MPK: u64 = 1;
+/// `ARG`'s source kinds: a scalar value, the address of the source value,
+/// a slice view's value.
+const SOURCE_SCALAR: u64 = 0;
+const SOURCE_MEMORY: u64 = 1;
+const SOURCE_VIEW: u64 = 2;
+/// `ARG`'s argument kinds.
+const ARG_VALUE: u64 = 0;
+const ARG_HANDLE: u64 = 1;
+const ARG_CSTR: u64 = 2;
+const ARG_POINTER: u64 = 3;
+const ARG_COPIED_SLICE: u64 = 4;
+const ARG_LENT_SLICE: u64 = 5;
+/// A pinned buffer or a mapping handle: its sequence's `(data, len)`.
+const ARG_BUFFER: u64 = 6;
+const ARG_CSTR_LIST: u64 = 7;
+const ARG_CWSTR: u64 = 8;
+/// What the words after the `s` of an `ARG` answer hold: a released
+/// mapping's header, or a C string's (or `CStrList`'s) buffer words.
+const ARG_ANSWER_RELEASED: usize = 1;
+const ARG_ANSWER_STRING: usize = 2;
+/// `CALL`'s errno word: none, `__errno_location`, `__error`,
+/// `GetLastError`.
+const ERRNO_NONE: u64 = 0;
+const ERRNO_LOCATION: u64 = 1;
+const ERRNO_ERROR: u64 = 2;
+const ERRNO_LAST_ERROR: u64 = 3;
+/// The bit of a `len_i64` word above its flag: the mapping's element size.
+const MAPPING_ELEM_BYTES_SHIFT: u32 = 1;
+/// The bit of a scalar or integer word above its width: whether it is
+/// signed.
+const SIGNED_SHIFT: u32 = 8;
+/// Value type tags (`V`).
+const VALUE_UNIT: u64 = 0;
+const VALUE_SCALAR: u64 = 1;
+const VALUE_BOOL: u64 = 2;
+const VALUE_ENUM: u64 = 3;
+const VALUE_ADDRESS: u64 = 4;
+const VALUE_HANDLE: u64 = 5;
+const VALUE_NON_NULL_HANDLE: u64 = 6;
+const VALUE_FLOAT: u64 = 7;
+const VALUE_CSTR: u64 = 8;
+const VALUE_CWSTR: u64 = 9;
+/// Wire struct field tags (`W`).
+const FIELD_INTEGER: u64 = 0;
+const FIELD_BYTES: u64 = 1;
+const FIELD_PADDING: u64 = 2;
+const FIELD_STRUCT: u64 = 3;
+/// Pointee tags (`P`).
+const POINTEE_SCALAR: u64 = 0;
+const POINTEE_STRUCT: u64 = 1;
+/// Byte order words.
+const ENDIAN_NATIVE: u64 = 0;
+const ENDIAN_LITTLE: u64 = 1;
+const ENDIAN_BIG: u64 = 2;
+
 fn scalar_word(s: Scalar) -> u64 {
-    u64::from(s.bits()) | u64::from(s.signed()) << 8
+    u64::from(s.bits()) | u64::from(s.signed()) << SIGNED_SHIFT
 }
 fn value_words(v: &ValueType, out: &mut Vec<u64>) {
     match v {
-        ValueType::Unit => out.push(0),
-        ValueType::Scalar(s) => out.extend([1, scalar_word(*s)]),
-        ValueType::Bool => out.push(2),
+        ValueType::Unit => out.push(VALUE_UNIT),
+        ValueType::Scalar(s) => out.extend([VALUE_SCALAR, scalar_word(*s)]),
+        ValueType::Bool => out.push(VALUE_BOOL),
         ValueType::Enum(e) => {
-            out.extend([3, scalar_word(e.scalar()), e.variants().len() as u64]);
+            out.extend([
+                VALUE_ENUM,
+                scalar_word(e.scalar()),
+                e.variants().len() as u64,
+            ]);
             out.extend(e.variants().iter().map(|(_, raw)| *raw));
         }
-        ValueType::Address { .. } => out.push(4),
-        ValueType::Handle { nullable, .. } => out.extend([5, u64::from(*nullable)]),
-        ValueType::NonNullHandle { .. } => out.push(6),
+        ValueType::Address { .. } => out.push(VALUE_ADDRESS),
+        ValueType::Handle { nullable, .. } => out.extend([VALUE_HANDLE, u64::from(*nullable)]),
+        ValueType::NonNullHandle { .. } => out.push(VALUE_NON_NULL_HANDLE),
         ValueType::Float(f) => out.extend([
-            7,
+            VALUE_FLOAT,
             match f {
                 Float::F32 => 32,
                 Float::F64 => 64,
             },
         ]),
-        ValueType::CStr => out.push(8),
-        ValueType::CWStr => out.push(9),
+        ValueType::CStr => out.push(VALUE_CSTR),
+        ValueType::CWStr => out.push(VALUE_CWSTR),
     }
 }
 fn integer_word(int: &vesper_ffi::Integer) -> u64 {
-    u64::from(int.bits) | u64::from(int.signed) << 8
+    u64::from(int.bits) | u64::from(int.signed) << SIGNED_SHIFT
 }
 fn endian_word(e: Endian) -> u64 {
     match e {
-        Endian::Native => 0,
-        Endian::Little => 1,
-        Endian::Big => 2,
+        Endian::Native => ENDIAN_NATIVE,
+        Endian::Little => ENDIAN_LITTLE,
+        Endian::Big => ENDIAN_BIG,
     }
 }
 /// `W` with the source offsets of `native` (`foreign_write_struct`'s
@@ -2106,7 +2199,7 @@ fn wire_words(wire: &WireLayout, native: &Layout, out: &mut Vec<u64>) -> Result<
                 let nf = field()?;
                 u8::try_from(int.bits).map_err(|_| "wire integer too wide")?;
                 out.extend([
-                    0,
+                    FIELD_INTEGER,
                     f.offset() as u64,
                     integer_word(int),
                     endian_word(int.endian),
@@ -2119,7 +2212,7 @@ fn wire_words(wire: &WireLayout, native: &Layout, out: &mut Vec<u64>) -> Result<
                     return Err("ByteArray field is not a tuple".into());
                 };
                 let n = bytes.len().min(f.size());
-                out.extend([1, f.offset() as u64, n as u64]);
+                out.extend([FIELD_BYTES, f.offset() as u64, n as u64]);
                 out.extend(
                     bytes
                         .iter()
@@ -2127,10 +2220,10 @@ fn wire_words(wire: &WireLayout, native: &Layout, out: &mut Vec<u64>) -> Result<
                         .map(|b| (nf.offset + b.offset) as i64 as u64),
                 );
             }
-            FieldKind::Padding => out.extend([2, f.offset() as u64]),
+            FieldKind::Padding => out.extend([FIELD_PADDING, f.offset() as u64]),
             FieldKind::Struct(inner) => {
                 let nf = field()?;
-                out.extend([3, f.offset() as u64, nf.offset as i64 as u64]);
+                out.extend([FIELD_STRUCT, f.offset() as u64, nf.offset as i64 as u64]);
                 wire_words(inner, &nf.layout, out)?;
             }
         }
@@ -2146,9 +2239,9 @@ fn pointee_words(
     out: &mut Vec<u64>,
 ) -> Result<(), String> {
     match p {
-        Pointee::Scalar(s) => out.extend([0, scalar_word(*s)]),
+        Pointee::Scalar(s) => out.extend([POINTEE_SCALAR, scalar_word(*s)]),
         Pointee::Struct(w) => {
-            out.push(1);
+            out.push(POINTEE_STRUCT);
             match native {
                 Some(n) if !identical(p, little) => wire_words(w.layout(), n, out)?,
                 _ => wire_shape_words(w.layout(), out),
@@ -2163,16 +2256,16 @@ fn wire_shape_words(wire: &WireLayout, out: &mut Vec<u64>) {
     for f in wire.fields() {
         match f.kind() {
             FieldKind::Integer(int) => out.extend([
-                0,
+                FIELD_INTEGER,
                 f.offset() as u64,
                 integer_word(int),
                 endian_word(int.endian),
                 0,
             ]),
-            FieldKind::Bytes => out.extend([1, f.offset() as u64, 0]),
-            FieldKind::Padding => out.extend([2, f.offset() as u64]),
+            FieldKind::Bytes => out.extend([FIELD_BYTES, f.offset() as u64, 0]),
+            FieldKind::Padding => out.extend([FIELD_PADDING, f.offset() as u64]),
             FieldKind::Struct(inner) => {
-                out.extend([3, f.offset() as u64, 0]);
+                out.extend([FIELD_STRUCT, f.offset() as u64, 0]);
                 wire_shape_words(inner, out);
             }
         }
@@ -2180,8 +2273,8 @@ fn wire_shape_words(wire: &WireLayout, out: &mut Vec<u64>) {
 }
 fn source_words(source: Source) -> [u64; 2] {
     match source {
-        Source::Scalar(v) => [0, word(v)],
-        Source::Memory(p) => [1, word(p)],
+        Source::Scalar(v) => [SOURCE_SCALAR, word(v)],
+        Source::Memory(p) => [SOURCE_MEMORY, word(p)],
     }
 }
 fn value_of_word(w: u64) -> Result<ir::Value, String> {
@@ -2254,8 +2347,8 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
         let descriptors = plan.function.parameters();
         let handler = match plan.handler {
-            Handler::Direct => 0,
-            Handler::IsolatedMpk => 1,
+            Handler::Direct => HANDLER_DIRECT,
+            Handler::IsolatedMpk => HANDLER_ISOLATED_MPK,
         };
         if crate::codegen_swap::request(
             crate::codegen_swap::Family::Ffi,
@@ -2299,19 +2392,25 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
                 ParameterType::CStr => {
                     let view = self.expr(&arg.expr)?;
-                    words.extend([2, word(view), little, 2]);
+                    words.extend([SOURCE_VIEW, word(view), little, ARG_CSTR]);
                 }
                 ParameterType::CWStr => {
                     let view = self.expr(&arg.expr)?;
-                    words.extend([2, word(view), little, 8]);
+                    words.extend([SOURCE_VIEW, word(view), little, ARG_CWSTR]);
                 }
                 ParameterType::CStrList => {
                     let view = self.expr(&arg.expr)?;
-                    words.extend([2, word(view), little, 7]);
+                    words.extend([SOURCE_VIEW, word(view), little, ARG_CSTR_LIST]);
                 }
                 ParameterType::Slice { element, .. } if crate::seq::is_slice_type(&param.ty) => {
                     let view = self.expr(&arg.expr)?;
-                    words.extend([2, word(view), little, 5, element.size() as u64]);
+                    words.extend([
+                        SOURCE_VIEW,
+                        word(view),
+                        little,
+                        ARG_LENT_SLICE,
+                        element.size() as u64,
+                    ]);
                 }
                 ty => {
                     let value = self.expr(&arg.expr)?;
@@ -2349,18 +2448,18 @@ impl<M: Module> Codegen<'_, '_, M> {
                                 }
                                 _ => {}
                             }
-                            words.push(0);
+                            words.push(ARG_VALUE);
                             value_words(v, &mut words);
                         }
                         ParameterType::Handle { handle, access } if handle.mapping().is_some() => {
                             words.extend([
-                                6,
+                                ARG_BUFFER,
                                 u64::from(*access == vesper_ffi::sys::HandleAccess::Sink),
                             ]);
                         }
-                        ParameterType::Handle { .. } => words.push(1),
+                        ParameterType::Handle { .. } => words.push(ARG_HANDLE),
                         ParameterType::Pinned { .. } => {
-                            words.extend([6, 0]);
+                            words.extend([ARG_BUFFER, 0]);
                         }
                         ParameterType::CStr | ParameterType::CWStr | ParameterType::CStrList => {
                             unreachable!("C strings are lowered above")
@@ -2397,7 +2496,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                                 }
                             };
                             words.extend([
-                                3,
+                                ARG_POINTER,
                                 u64::from(writes),
                                 u64::from(*nullable),
                                 some,
@@ -2440,7 +2539,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                                 }
                             }
                             words.extend([
-                                4,
+                                ARG_COPIED_SLICE,
                                 u64::from(writes),
                                 u64::from(*nullable),
                                 some,
@@ -2467,7 +2566,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 copies.push(copy.to_vec());
             }
             let s = *r.get(2 + k + m).ok_or_else(bad)? as usize;
-            if s == 1 {
+            if s == ARG_ANSWER_RELEASED {
                 let stride = match descriptor.ty() {
                     ParameterType::Handle { handle, .. } => {
                         handle.mapping().map_or(1, |e| u64::from(e.bits()) / 8)
@@ -2477,7 +2576,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let data = word(c_args[c_args.len() - 2]);
                 let len = word(c_args[c_args.len() - 1]);
                 released.push((r[3 + k + m], data, len, stride));
-            } else if s == 2 {
+            } else if s == ARG_ANSWER_STRING {
                 if matches!(descriptor.ty(), ParameterType::CStrList) {
                     lists.push(r[3 + k + m]);
                     lists.push(r[4 + k + m]);
@@ -2541,12 +2640,12 @@ impl<M: Module> Codegen<'_, '_, M> {
         };
         let errno = if plan.function.reads_errno() {
             match ffi::os_error_symbol(self.m.isa().triple())? {
-                ("__errno_location", _) => 1,
-                ("__error", _) => 2,
-                _ => 3,
+                (ffi::ERRNO_LOCATION_SYMBOL, _) => ERRNO_LOCATION,
+                (ffi::ERROR_SYMBOL, _) => ERRNO_ERROR,
+                _ => ERRNO_LAST_ERROR,
             }
         } else {
-            0
+            ERRNO_NONE
         };
         let (len_word, len_i64, reg_id) = match length {
             Some(v) => {
@@ -2560,7 +2659,8 @@ impl<M: Module> Codegen<'_, '_, M> {
                 };
                 (
                     word(v),
-                    u64::from(self.b.func.dfg.value_type(v) == types::I64) | (elem_bytes << 1),
+                    u64::from(self.b.func.dfg.value_type(v) == types::I64)
+                        | (elem_bytes << MAPPING_ELEM_BYTES_SHIFT),
                     u64::from(reg_id.as_u32()),
                 )
             }

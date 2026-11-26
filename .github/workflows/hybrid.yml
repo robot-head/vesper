@@ -12,9 +12,9 @@ name: Hybrid compiler
 # and stack bound, which the differential harness must catch, and with wrong
 # doc pages, which the doc differential (tests/doc.rs, #1338) must catch.
 # Those divergent rebuilds check the harnesses, which are the same code on
-# every host, so they run on Linux only: each rebuilds the hybrid, and on
-# macOS and Windows the nine of them would hold one of the account's 5 macOS
-# runners (and a Windows runner) for most of the job's 75 minutes. It
+# every host, so they run on Linux only, in a job of their own (#2147): the
+# crate's own tests now take about two hours on each host, and the twelve
+# rebuilds after them would push one Linux job past its time limit. It
 # runs on pushes to main, nightly and manual dispatch only, not on pull
 # requests (#1479): it is not a required check, and Bazel (Test all targets)
 # builds the crate and runs the same tests on Linux for every pull request.
@@ -77,6 +77,10 @@ jobs:
           - name: Linux x86_64
             os: ubuntu-latest
             compiler: vesper
+          - name: Linux x86_64, divergent rebuilds
+            os: ubuntu-latest
+            compiler: vesper
+            divergent: true
           - name: macOS AArch64
             os: macos-latest
             compiler: vesper
@@ -84,7 +88,8 @@ jobs:
             os: windows-latest
             compiler: vesper.exe
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 75
+    # The crate tests alone take about two hours on each host (#2147).
+    timeout-minutes: 240
     env:
       VESPER_PORT_COMPILER: ${{ github.workspace }}/target/debug/${{ matrix.compiler }}
       VESPER_DEFAULT_COMPILER: ${{ github.workspace }}/target/debug/${{ matrix.compiler }}
@@ -98,52 +103,56 @@ jobs:
       - name: Build the default compiler
         run: cargo build --locked --bin vesper
       - name: Build and test the hybrid compiler
+        if: ${{ !matrix.divergent }}
         run: cargo test --locked -p vesper-hybrid -- --nocapture
       - name: The CLI suites on the hybrid (its main is the Vesper driver)
         # SH5 lane 12 (#1335): every tests/*cli*.rs suite of the root package
         # with the hybrid binary in place of target/debug/vesper. It builds
         # every CLI suite, so pull requests skip it (#1321).
-        if: github.event_name != 'pull_request' && runner.os != 'Windows'
+        if: ${{ !matrix.divergent && github.event_name != 'pull_request' && runner.os != 'Windows' }}
         run: aspect crate hybrid cli-suites
       - name: The CLI suites on the hybrid (Windows)
-        if: github.event_name != 'pull_request' && runner.os == 'Windows'
+        if: ${{ !matrix.divergent && github.event_name != 'pull_request' && runner.os == 'Windows' }}
         shell: pwsh
         run: ./scripts/windows/test-hybrid-cli.ps1
       - name: The differential harness catches a divergent layout
-        if: runner.os == 'Linux'
+        if: ${{ matrix.divergent }}
         # The pilot's word arithmetic and the whole layout (#1177) are both
         # wrong; a wrong layout cannot compile the pilot test's program, so
         # only the harness runs here.
         run: cargo test --locked -p vesper-hybrid --features divergent --test differential hybrid_matches_the_default_compiler -- --nocapture
       - name: The differential harness catches a divergent IR check
-        if: runner.os == 'Linux'
+        if: ${{ matrix.divergent }}
         run: cargo test --locked -p vesper-hybrid --features divergent-ir-check --test differential hybrid_matches_the_default_compiler -- --nocapture
       - name: The differential harness catches a divergent inliner
-        if: runner.os == 'Linux'
+        if: ${{ matrix.divergent }}
         run: cargo test --locked -p vesper-hybrid --features divergent-ir-inline --test differential hybrid_matches_the_default_compiler -- --nocapture
       - name: The differential harness catches a divergent AST optimizer
-        if: runner.os == 'Linux'
+        if: ${{ matrix.divergent }}
         run: cargo test --locked -p vesper-hybrid --features divergent-optimize --test differential hybrid_matches_the_default_compiler -- --nocapture
       - name: The differential harness catches a divergent IR optimizer
-        if: runner.os == 'Linux'
+        if: ${{ matrix.divergent }}
         run: cargo test --locked -p vesper-hybrid --features divergent-ir-opt --test differential hybrid_matches_the_default_compiler -- --nocapture
       - name: The differential harness catches a divergent trait declaration pass
-        if: runner.os == 'Linux'
+        if: ${{ matrix.divergent }}
         run: cargo test --locked -p vesper-hybrid --features divergent-pact --test differential hybrid_matches_the_default_compiler -- --nocapture
       - name: The differential harness catches a divergent parse module
-        if: runner.os == 'Linux'
+        if: ${{ matrix.divergent }}
         # A wrong parse cannot compile the pilot test's program, so only the
         # harness runs here.
         run: cargo test --locked -p vesper-hybrid --features divergent-parse --test differential hybrid_matches_the_default_compiler -- --nocapture
       - name: The doc differential catches a divergent doc module
-        if: runner.os == 'Linux'
+        if: ${{ matrix.divergent }}
         run: cargo test --locked -p vesper-hybrid --features divergent-doc --test doc hybrid_docs_match_the_default_compiler -- --nocapture
       - name: The Lean differential catches a divergent Lean extraction module
-        if: runner.os == 'Linux'
+        if: ${{ matrix.divergent }}
         run: cargo test --locked -p vesper-hybrid --features divergent-lean-extract --test lean_extract hybrid_lean_matches_the_default_compiler -- --nocapture
       - name: The verified codegen differential catches a divergent verified code generator
-        if: runner.os == 'Linux'
+        if: ${{ matrix.divergent }}
         run: cargo test --locked -p vesper-hybrid --features divergent-verified-codegen --test verified_codegen hybrid_verified_builds_match_rust -- --nocapture
+      - name: The sugar differential catches a divergent sugar expansion module
+        if: ${{ matrix.divergent }}
+        run: cargo test --locked -p vesper-hybrid --features divergent-sugar --test sugar expansion_matches_rust -- --nocapture
       - name: The stack-bound check catches a divergent stack bound
-        if: runner.os == 'Linux'
+        if: ${{ matrix.divergent }}
         run: cargo test --locked -p vesper-hybrid --features divergent-stack-bound --test stack_bound -- --nocapture

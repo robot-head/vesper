@@ -3,12 +3,15 @@
 // provenance admission rule of `vesper proof-audit --macro-provenance`.
 use @vesper-std/hash::blake3::{Digest, digest_bytes};
 use @vesper-std/hash-sys::hash;
+use @vesper-std/bytes::ascii::{DIGIT_NINE, DIGIT_ZERO, DOLLAR, DOT, UNDERSCORE};
 use self::json::{
     Json, begin_array, begin_object, end_array, end_object, json_new, key, null, number, put_u64,
     string
 };
 use self::reader::Table;
-use self::strs::{Strs, byte, count, end, push, put_str, same, same_str, set_of, start, strs_new};
+use self::strs::{
+    HEX_LETTER_BASE, Strs, byte, count, end, push, put_str, same, same_str, set_of, start, strs_new
+};
 
 pub const SCHEMA: Str = "vesper.forge.provenance/1";
 pub const MARKER_SUFFIX: Str = "$macro_provenance";
@@ -41,9 +44,9 @@ pub fn hex(d: Digest) -> ChunkSeq[u8] {
 
 fn digit(n: u8) -> u8 {
     if n < 10 {
-        wrapping_add(n, 48)
+        wrapping_add(n, DIGIT_ZERO)
     } else {
-        wrapping_add(n, 87)
+        wrapping_add(n, HEX_LETTER_BASE)
     }
 }
 
@@ -322,7 +325,7 @@ fn split_last(in s: Slice[u8]) -> (u64, u64) {
             return (0, 0);
         }
         i = wrapping_sub(i, 1);
-        if byte(in s, i) == 46 {
+        if byte(in s, i) == DOT {
             return (i, wrapping_add(i, 1));
         }
     }
@@ -418,7 +421,7 @@ fn lean_owner(in t: Table, in d: Slice[u8]) -> u64 {
                 break;
             }
             u = wrapping_sub(u, 1);
-            if byte(in rest, u) == 95 {
+            if byte(in rest, u) == UNDERSCORE {
                 found = true;
                 break;
             }
@@ -432,7 +435,7 @@ fn lean_owner(in t: Table, in d: Slice[u8]) -> u64 {
         }
         for k in 0..index.len() {
             let b = byte(in index, k);
-            if b < 48 || b > 57 {
+            if b < DIGIT_ZERO || b > DIGIT_NINE {
                 return nf;
             }
         }
@@ -440,7 +443,7 @@ fn lean_owner(in t: Table, in d: Slice[u8]) -> u64 {
     } else {
         let mut cut = d.len();
         for k in 0..d.len() {
-            if cut == d.len() && byte(in d, k) == 36 {
+            if cut == d.len() && byte(in d, k) == DOLLAR {
                 cut = k;
             }
         }

@@ -26,5 +26,7 @@ vesper_crate(
         "test/self_host_codegen_numeric_swap": "long",
         # SH4 lane 6 (#1280): scalar emission from @vesper/codegen-scalar.
         "test/self_host_codegen_scalar_emit": "long",
+        # Native walk part 6a (#2094): whole scalar bodies from Vesper.
+        "test/self_host_native_walk_body": "long",
     },
 )

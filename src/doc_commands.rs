@@ -22,6 +22,22 @@ use vesper_doc::{
 };
 pub const HELP: &str = "Usage: vesper doc FILE [--json] [-o OUTPUT | --bundle DIR] [--query QUERY.json] [--search TEXT]\n                [--wire LAYOUTS.json] [--wcsd-stack [--target TRIPLE]] [--proof-audit REPORT.json ...] [--olean-store DIR|default [--olean-root DIR]]\n       vesper doc PACKAGE_DIR (--json | --bundle DIR) [--search TEXT] [--wcsd-stack [--target TRIPLE]] [--proof-audit REPORT.json ...] [--olean-store ...]\n       vesper doc store-olean --proof-audit REPORT.json --root LEAN_BUILD_DIR --store DIR|default [--json]\n\nCheck source and generate deterministic local API documentation.\nDefault: escaped static HTML on stdout. --json: typed JSON metadata and search results.\n-o creates a new local output file; existing files are preserved. --bundle creates a new directory holding index.html,\nsearch.html (a self-contained signature search page), search-index.json and linked .olean certificates.\n--query reads a full structural JSON query (no wildcard/generic inference). --search takes a text query, e.g.\n'inout Tx.{total}, u64 -> ()', 'sink linear Tx -> u64 eff []' or a name; `_` matches any type and omitted passes,\nmodes and eff [...] are unconstrained (needs --json; the search page runs the same matcher).\nSource is limited to 128 KiB and bounded tokens/nesting/items/types; query to 32 KiB; output to 2 MiB.\nLocal intra-doc references such as [Type::method] resolve against documented checked declarations; unknown, ambiguous or unsupported references fail generation.\nGenerated private Pact helpers are excluded. Struct byte rulers describe the native eight-byte ABI, not wire formats.\nFieldTree heatmaps show each parameter's checked footprint (inout write, in read, sink consume, free siblings); a may-use\nanalysis of each body marks declared leaves it never reaches and infers the effects it may perform. Mode-crossing tables\ngive the [K-Adt] mode of each generic type per parameter mode; capability badges (Pure, Zero-Alloc, Uncancellable\nLinear I/O, Abortable Checkpoint, Constant-Time, Hard-Realtime, Deterministic Float) come from checked effect rows.\nWith --wcsd-stack (and optional --target TRIPLE, e.g. x86_64-unknown-linux-gnu or aarch64-unknown-linux-gnu),\nevery closed-row `eff [Realtime]` function is compiled standalone to Cranelift machine code, its emitted prologues are\ndecoded, and its exact worst-case stack depth (WCSD) in bytes and worst call path (or unavailability reason) are\nattached to the Hard-Realtime capability badge.\nA PACKAGE_DIR documents every .ves file of the package (Loom.toml discovery as for path-less lint) with one page per\nfile, an overview with package capabilities against the manifest's capability_ceiling, and ONE package-wide search\nindex over file-qualified functions and impl/model methods; generic functions match by instantiation.\n--wire compiles vesper-wire-layouts JSON declarations with the Bridge layout checker (explicit endianness, no implicit\npadding) into 16-byte field-span records and SVG cache-line rulers. Linear typestate graphs are rendered as SVG.\n--proof-audit (repeatable, up to 16) reads `vesper proof-audit --json` reports. An item is proved/audited only when\nevery @proof(Name) anchor in its docs names a theorem in an accepted kernel-replayed audit; otherwise unverified.\n--olean-store links each audited .olean from a Loom content-addressed store (`default` is ~/.vesper/store), bound to\nthe exact audit report and rehashed on read; store-olean records them there, or add --olean-root LEAN_BUILD_DIR to\npublish them from the proof-audit output in the same run (the bytes must match the audited size and BLAKE3). A link is content identity, not provenance.\nBadges describe Lean theorems about models, not the Rust or Vesper implementation. No network, JIT or doctest execution.\n";
 
+/// The largest `vesper proof-audit --json` report read, in bytes.
+const MAX_AUDIT_REPORT_BYTES: usize = 8 * 1024 * 1024;
+/// The most `--proof-audit` reports one run reads.
+const MAX_AUDIT_REPORTS: usize = 16;
+/// The largest `--wire` layouts file read, in bytes.
+const MAX_WIRE_INPUT_BYTES: usize = 64 * 1024;
+/// The largest `--query` JSON file read, in bytes.
+const MAX_QUERY_BYTES: usize = 32 * 1024;
+/// The largest package `Loom.toml` read, in bytes.
+const MAX_MANIFEST_BYTES: usize = 64 * 1024;
+/// How much of an error message is printed before it is truncated, in bytes.
+const MAX_ERROR_MESSAGE_BYTES: usize = 4096;
+/// Windows `FILE_FLAG_OPEN_REPARSE_POINT`: open a link itself, not its target.
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
 fn read_file(path: &str, limit: usize) -> Result<String, String> {
     if !fs::symlink_metadata(path)
         .map_err(|e| e.to_string())?
@@ -39,7 +55,7 @@ fn read_file(path: &str, limit: usize) -> Result<String, String> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(0x0020_0000);
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
     let file = options.open(path).map_err(|e| e.to_string())?;
     let metadata = file.metadata().map_err(|e| e.to_string())?;
@@ -229,7 +245,7 @@ fn options(args: Vec<String>) -> Result<Option<Options>, String> {
                 )?);
             }
             "--proof-audit" => {
-                if audits.len() == 16 {
+                if audits.len() == MAX_AUDIT_REPORTS {
                     return Err("at most 16 --proof-audit reports".into());
                 }
                 audits.push(value(
@@ -293,7 +309,7 @@ fn audits_and_certificates(
 ) -> Result<(ParsedAudits, Vec<CertificateLink>, BundleFiles), String> {
     let mut parsed = Vec::new();
     for path in &opts.audits {
-        let text = read_file(path, 8 * 1024 * 1024)?;
+        let text = read_file(path, MAX_AUDIT_REPORT_BYTES)?;
         let audit = badges::parse_audit(&text).map_err(|e| format!("{path}: {e}"))?;
         parsed.push((text.into_bytes(), audit));
     }
@@ -410,7 +426,7 @@ fn generate(args: Vec<String>) -> Result<Option<Rendered>, String> {
     let limits = Limits::default();
     let source = read_file(&opts.input, limits.max_source_bytes)?;
     let wire = match &opts.wire {
-        Some(path) => visual::compile_wire_input(&read_file(path, 64 * 1024)?)
+        Some(path) => visual::compile_wire_input(&read_file(path, MAX_WIRE_INPUT_BYTES)?)
             .map_err(|e| format!("{path}: {e}"))?,
         None => Vec::new(),
     };
@@ -418,7 +434,7 @@ fn generate(args: Vec<String>) -> Result<Option<Rendered>, String> {
     let wcsd_target = opts.wcsd_stack.then_some(opts.target.as_deref());
     let parts = file_parts(&source, &wire, &parsed, &certificates, limits, wcsd_target)?;
     let search = if let Some(path) = &opts.query {
-        let text = read_file(path, 32 * 1024)?;
+        let text = read_file(path, MAX_QUERY_BYTES)?;
         let query = vesper_doc::parse_query_json(&text, limits)
             .map_err(|e| format!("invalid structural query: {e}"))?;
         Some(vesper_doc::search(
@@ -504,7 +520,7 @@ fn generate_package(opts: Options) -> Result<Rendered, String> {
     let package = sources::discover(Path::new(&opts.input), sources::SourceLimits::default())?;
     let manifest = match &package.manifest {
         Some(path) => {
-            let text = read_file(&path.display().to_string(), 64 * 1024)?;
+            let text = read_file(&path.display().to_string(), MAX_MANIFEST_BYTES)?;
             Some(vesper_loom_calculus::parse_manifest(&text).map_err(|d| {
                 format!(
                     "Loom.toml: {}",
@@ -735,7 +751,7 @@ fn store_olean(args: Vec<String>) -> Result<(), String> {
     let (Some(audit), Some(root), Some(store)) = (audit, root, store) else {
         return Err("store-olean needs --proof-audit, --root and --store".into());
     };
-    let report = read_file(&audit, 8 * 1024 * 1024)?;
+    let report = read_file(&audit, MAX_AUDIT_REPORT_BYTES)?;
     let store = vesper_loom_cas::Store::open(store_root(&store)?).map_err(|e| e.to_string())?;
     let stored = certs::store_certificates(&store, report.as_bytes(), Path::new(&root))?;
     if json {
@@ -784,8 +800,8 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         Ok(())
     })()
     .map_err(|mut message: String| {
-        if message.len() > 4096 {
-            let mut end = 4096;
+        if message.len() > MAX_ERROR_MESSAGE_BYTES {
+            let mut end = MAX_ERROR_MESSAGE_BYTES;
             while !message.is_char_boundary(end) {
                 end -= 1;
             }

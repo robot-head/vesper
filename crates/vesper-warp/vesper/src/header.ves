@@ -357,9 +357,10 @@ pub fn hdr_write_short_to_peer(
 fn w_bytes(inout out: Slice[u8], at: u64, in bytes: Slice[u8]) -> u64 eff [Fail[HdrErr]] {
     let end = wrapping_add(at, bytes.len());
     if end > out.len() {
-        Fail::raise(
-            HdrErr::BufferTooSmall { needed: bytes.len(), available: wrapping_sub(out.len(), at) }
-        );
+        Fail::raise(HdrErr::BufferTooSmall {
+            needed: bytes.len(),
+            available: wrapping_sub(out.len(), at)
+        });
     }
     let _c = out.try_copy_from(at, in bytes);
     end
@@ -420,8 +421,10 @@ pub fn hdr_write_long(
     if ty != LT_INITIAL && token.len() != 0 {
         Fail::raise(HdrErr::FieldOverflow);
     }
-    let first = header_form() | fixed_bit() | ty
-        << LONG_TYPE_SHIFT | wrapping_u8(wrapping_sub(pn_len, 1));
+    let first = header_form()
+        | fixed_bit()
+        | ty << LONG_TYPE_SHIFT
+        | wrapping_u8(wrapping_sub(pn_len, 1));
     let mut at = w_u8(inout out, 0, first);
     at = w_u32(inout out, at, quic_v1());
     at = w_u8(inout out, at, cid_len(in dcid));
@@ -439,9 +442,10 @@ pub fn hdr_write_long(
     at = w_varint(inout out, at, length);
     let pn_offset = at;
     if wrapping_add(at, pn_len) > out.len() {
-        Fail::raise(
-            HdrErr::BufferTooSmall { needed: pn_len, available: wrapping_sub(out.len(), at) }
-        );
+        Fail::raise(HdrErr::BufferTooSmall {
+            needed: pn_len,
+            available: wrapping_sub(out.len(), at)
+        });
     }
     let _p = pn_put(full_pn, pn_len, inout out, at);
     let header_len = wrapping_add(at, pn_len);

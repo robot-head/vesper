@@ -29,114 +29,114 @@ pub const TY_I64: u32 = 4;
 const TY_F32: u32 = 6;
 const TY_F64: u32 = 7;
 
-pub fn elem_name(e: u32) -> Str {
-    if e == E_U8 {
+pub fn elem_name(elem: u32) -> Str {
+    if elem == E_U8 {
         "u8"
-    } else if e == E_U32 {
+    } else if elem == E_U32 {
         "u32"
-    } else if e == E_U64 {
+    } else if elem == E_U64 {
         "u64"
-    } else if e == E_I64 {
+    } else if elem == E_I64 {
         "i64"
-    } else if e == E_F32 {
+    } else if elem == E_F32 {
         "f32"
     } else {
         "f64"
     }
 }
-pub fn elem_bits(e: u32) -> u32 {
-    if e == E_U8 {
+pub fn elem_bits(elem: u32) -> u32 {
+    if elem == E_U8 {
         8
-    } else if e == E_U32 || e == E_F32 {
+    } else if elem == E_U32 || elem == E_F32 {
         32
     } else {
         64
     }
 }
-pub fn elem_is_float(e: u32) -> bool {
-    e == E_F32 || e == E_F64
+pub fn elem_is_float(elem: u32) -> bool {
+    elem == E_F32 || elem == E_F64
 }
 // The unsigned lane of the same width (`to_bits`/`from_bits`).
-pub fn elem_bits_elem(e: u32) -> u32 {
-    if e == E_F32 {
+pub fn elem_bits_elem(elem: u32) -> u32 {
+    if elem == E_F32 {
         E_U32
-    } else if e == E_F64 {
+    } else if elem == E_F64 {
         E_U64
     } else {
-        e
+        elem
     }
 }
-pub fn elem_is_signed(e: u32) -> bool {
-    e == E_I64
+pub fn elem_is_signed(elem: u32) -> bool {
+    elem == E_I64
 }
 // All-ones value of one lane, as raw bits.
-pub fn elem_mask(e: u32) -> u64 {
-    if elem_bits(e) == 64 {
+pub fn elem_mask(elem: u32) -> u64 {
+    if elem_bits(elem) == 64 {
         18446744073709551615
     } else {
-        wrapping_sub(wrapping_shl_u64(1, elem_bits(e)), 1)
+        wrapping_sub(wrapping_shl_u64(1, elem_bits(elem)), 1)
     }
 }
 
 // `lane_type`: the scalar type of one lane.
-pub fn lane_ty(e: u32) -> u32 {
-    if e == E_U8 {
+pub fn lane_ty(elem: u32) -> u32 {
+    if elem == E_U8 {
         TY_I8
-    } else if e == E_U32 {
+    } else if elem == E_U32 {
         TY_I32
-    } else if e == E_F32 {
+    } else if elem == E_F32 {
         TY_F32
-    } else if e == E_F64 {
+    } else if elem == E_F64 {
         TY_F64
     } else {
         TY_I64
     }
 }
-fn log2_lanes(e: u32) -> u32 {
+fn log2_lanes(elem: u32) -> u32 {
     // 128 / bits lanes: 16, 4 or 2.
-    if e == E_U8 {
+    if elem == E_U8 {
         4
-    } else if elem_bits(e) == 32 {
+    } else if elem_bits(elem) == 32 {
         2
     } else {
         1
     }
 }
 // `chunk_type`: `i8x16`, `i32x4`, `i64x2`, `f32x4` or `f64x2`.
-pub fn chunk_ty(e: u32) -> u32 {
-    lane_ty(e) | wrapping_shl_u32(log2_lanes(e), 8)
+pub fn chunk_ty(elem: u32) -> u32 {
+    lane_ty(elem) | wrapping_shl_u32(log2_lanes(elem), 8)
 }
-// `mask_type`: the integer chunk masks of `e` use.
-pub fn mask_chunk_ty(e: u32) -> u32 {
-    if e == E_F32 {
+// `mask_type`: the integer chunk masks of `elem` use.
+pub fn mask_chunk_ty(elem: u32) -> u32 {
+    if elem == E_F32 {
         chunk_ty(E_U32)
-    } else if e == E_F64 {
+    } else if elem == E_F64 {
         chunk_ty(E_U64)
     } else {
-        chunk_ty(e)
+        chunk_ty(elem)
     }
 }
 
 // `Shape::new`: a shape of 128, 256 or 512 bits.
-pub fn shape_valid(e: u32, lanes: u32) -> bool {
-    let bits = wrapping_mul(elem_bits(e), lanes);
+pub fn shape_valid(elem: u32, lanes: u32) -> bool {
+    let bits = wrapping_mul(elem_bits(elem), lanes);
     bits == 128 || bits == 256 || bits == 512
 }
-pub fn shape_bits(e: u32, lanes: u32) -> u32 {
-    wrapping_mul(elem_bits(e), lanes)
+pub fn shape_bits(elem: u32, lanes: u32) -> u32 {
+    wrapping_mul(elem_bits(elem), lanes)
 }
-pub fn shape_bytes(e: u32, lanes: u32) -> u32 {
-    shape_bits(e, lanes) >> 3
+pub fn shape_bytes(elem: u32, lanes: u32) -> u32 {
+    shape_bits(elem, lanes) >> 3
 }
-pub fn shape_chunks(e: u32, lanes: u32) -> u32 {
-    shape_bits(e, lanes) >> 7
+pub fn shape_chunks(elem: u32, lanes: u32) -> u32 {
+    shape_bits(elem, lanes) >> 7
 }
-pub fn lanes_per_chunk(e: u32) -> u32 {
-    wrapping_shl_u32(1, log2_lanes(e))
+pub fn lanes_per_chunk(elem: u32) -> u32 {
+    wrapping_shl_u32(1, log2_lanes(elem))
 }
 // `layout_words`: the packed lane bytes as eight-byte words.
-pub fn shape_layout_words(e: u32, lanes: u32) -> u32 {
-    shape_bytes(e, lanes) >> 3
+pub fn shape_layout_words(elem: u32, lanes: u32) -> u32 {
+    shape_bytes(elem, lanes) >> 3
 }
 
 // Profile, in `Profile::ALL` order.
@@ -147,22 +147,22 @@ const P_SVE2: u32 = 3;
 const P_RVV1: u32 = 4;
 const PROFILES: u32 = 5;
 
-pub fn profile_name(p: u32) -> Str {
-    if p == P_BASELINE128 {
+pub fn profile_name(profile: u32) -> Str {
+    if profile == P_BASELINE128 {
         "Baseline128"
-    } else if p == P_AVX2 {
+    } else if profile == P_AVX2 {
         "Avx2"
-    } else if p == P_AVX512 {
+    } else if profile == P_AVX512 {
         "Avx512"
-    } else if p == P_SVE2 {
+    } else if profile == P_SVE2 {
         "Sve2"
     } else {
         "Rvv1"
     }
 }
 // `required_profile`: the narrowest profile whose registers hold a shape.
-pub fn shape_required_profile(e: u32, lanes: u32) -> u32 {
-    let bits = shape_bits(e, lanes);
+pub fn shape_required_profile(elem: u32, lanes: u32) -> u32 {
+    let bits = shape_bits(elem, lanes);
     if bits == 128 {
         P_BASELINE128
     } else if bits == 256 {
@@ -175,10 +175,10 @@ pub fn shape_required_profile(e: u32, lanes: u32) -> u32 {
 pub fn profile_le(p: u32, q: u32) -> bool {
     p == q || p == P_BASELINE128 || (p == P_AVX2 && q == P_AVX512)
 }
-pub fn profile_fixed_bits(p: u32) -> u32 {
-    if p == P_AVX2 {
+pub fn profile_fixed_bits(profile: u32) -> u32 {
+    if profile == P_AVX2 {
         256
-    } else if p == P_AVX512 {
+    } else if profile == P_AVX512 {
         512
     } else {
         128
@@ -186,15 +186,15 @@ pub fn profile_fixed_bits(p: u32) -> u32 {
 }
 // `cranelift_requirements`, written as `arch flag,flag`, or `-` when
 // Cranelift 0.125 cannot target the profile.
-fn put_requirements(inout o: ChunkSeq[u8], p: u32) {
-    if p == P_BASELINE128 {
-        put(inout o, "any");
-    } else if p == P_AVX2 {
-        put(inout o, "x86_64 has_avx2,has_fma");
-    } else if p == P_AVX512 {
-        put(inout o, "x86_64 has_avx512f,has_avx512vl");
+fn put_requirements(inout out: ChunkSeq[u8], profile: u32) {
+    if profile == P_BASELINE128 {
+        put(inout out, "any");
+    } else if profile == P_AVX2 {
+        put(inout out, "x86_64 has_avx2,has_fma");
+    } else if profile == P_AVX512 {
+        put(inout out, "x86_64 has_avx512f,has_avx512vl");
     } else {
-        put(inout o, "-");
+        put(inout out, "-");
     }
 }
 
@@ -204,32 +204,32 @@ const C_FROM_BITS: u32 = 1;
 pub const C_WIDEN: u32 = 2;
 pub const C_NARROW: u32 = 3;
 
-fn conv_name(c: u32) -> Str {
-    if c == C_TO_BITS {
+fn conv_name(conv: u32) -> Str {
+    if conv == C_TO_BITS {
         "ToBits"
-    } else if c == C_FROM_BITS {
+    } else if conv == C_FROM_BITS {
         "FromBits"
-    } else if c == C_WIDEN {
+    } else if conv == C_WIDEN {
         "Widen"
     } else {
         "Narrow"
     }
 }
-pub fn conv_accepts(c: u32, e: u32) -> bool {
-    if c == C_TO_BITS {
-        elem_is_float(e)
-    } else if c == C_FROM_BITS {
-        e == E_U32 || e == E_U64
-    } else if c == C_WIDEN {
-        e == E_F32
+pub fn conv_accepts(conv: u32, elem: u32) -> bool {
+    if conv == C_TO_BITS {
+        elem_is_float(elem)
+    } else if conv == C_FROM_BITS {
+        elem == E_U32 || elem == E_U64
+    } else if conv == C_WIDEN {
+        elem == E_F32
     } else {
-        e == E_F64
+        elem == E_F64
     }
 }
-pub fn conv_target(c: u32, e: u32) -> u32 {
-    if c == C_TO_BITS {
-        elem_bits_elem(e)
-    } else if (c == C_FROM_BITS && e == E_U32) || c == C_NARROW {
+pub fn conv_target(conv: u32, elem: u32) -> u32 {
+    if conv == C_TO_BITS {
+        elem_bits_elem(elem)
+    } else if (conv == C_FROM_BITS && elem == E_U32) || conv == C_NARROW {
         E_F32
     } else {
         E_F64
@@ -290,28 +290,28 @@ pub const RD_AND: u32 = 3;
 fn intr(family: u32, op: u32) -> u32 {
     wrapping_shl_u32(family, 8) | op
 }
-pub fn family_of(i: u32) -> u32 {
-    i >> 8
+pub fn family_of(intrinsic: u32) -> u32 {
+    intrinsic >> 8
 }
-pub fn op_of(i: u32) -> u32 {
-    i & 255
+pub fn op_of(intrinsic: u32) -> u32 {
+    intrinsic & 255
 }
 
-fn bytes_eq(in a: Slice[u8], in b: Str) -> bool {
-    let bb = b.as_bytes();
-    if a.len() != bb.len() {
+fn bytes_eq(in bytes: Slice[u8], in text: Str) -> bool {
+    let text_bytes = text.as_bytes();
+    if bytes.len() != text_bytes.len() {
         return false;
     }
-    for i in 0..a.len() {
-        let x = match a.try_get(i) {
+    for i in 0..bytes.len() {
+        let left = match bytes.try_get(i) {
             Some(v) => v,
             None => return false,
         };
-        let y = match bb.try_get(i) {
+        let right = match text_bytes.try_get(i) {
             Some(v) => v,
             None => return false,
         };
-        if x != y {
+        if left != right {
             return false;
         }
     }
@@ -321,167 +321,167 @@ fn bytes_eq(in a: Slice[u8], in b: Str) -> bool {
 // The operations of each namespace, in `Intrinsic::lookup` order: the
 // path's last segment and the intrinsic.
 const VEC_OPS: u32 = 44;
-fn vec_op(k: u32) -> Str {
-    if k == 0 {
+fn vec_op(op_index: u32) -> Str {
+    if op_index == 0 {
         "splat"
-    } else if k == 1 {
+    } else if op_index == 1 {
         "from"
-    } else if k == 2 {
+    } else if op_index == 2 {
         "add"
-    } else if k == 3 {
+    } else if op_index == 3 {
         "sub"
-    } else if k == 4 {
+    } else if op_index == 4 {
         "mul"
-    } else if k == 5 {
+    } else if op_index == 5 {
         "div"
-    } else if k == 6 {
+    } else if op_index == 6 {
         "min"
-    } else if k == 7 {
+    } else if op_index == 7 {
         "max"
-    } else if k == 8 {
+    } else if op_index == 8 {
         "and"
-    } else if k == 9 {
+    } else if op_index == 9 {
         "or"
-    } else if k == 10 {
+    } else if op_index == 10 {
         "xor"
-    } else if k == 11 {
+    } else if op_index == 11 {
         "saturating_add"
-    } else if k == 12 {
+    } else if op_index == 12 {
         "saturating_sub"
-    } else if k == 13 {
+    } else if op_index == 13 {
         "not"
-    } else if k == 14 {
+    } else if op_index == 14 {
         "sqrt"
-    } else if k == 15 {
+    } else if op_index == 15 {
         "abs"
-    } else if k == 16 {
+    } else if op_index == 16 {
         "neg"
-    } else if k == 17 {
+    } else if op_index == 17 {
         "mul_add"
-    } else if k == 18 {
+    } else if op_index == 18 {
         "to_bits"
-    } else if k == 19 {
+    } else if op_index == 19 {
         "from_bits"
-    } else if k == 20 {
+    } else if op_index == 20 {
         "widen_f64"
-    } else if k == 21 {
+    } else if op_index == 21 {
         "nearest_f32"
-    } else if k == 22 {
+    } else if op_index == 22 {
         "load"
-    } else if k == 23 {
+    } else if op_index == 23 {
         "store"
-    } else if k == 24 {
+    } else if op_index == 24 {
         "store_masked"
-    } else if k == 25 {
+    } else if op_index == 25 {
         "shl"
-    } else if k == 26 {
+    } else if op_index == 26 {
         "shr"
-    } else if k == 27 {
+    } else if op_index == 27 {
         "eq"
-    } else if k == 28 {
+    } else if op_index == 28 {
         "ne"
-    } else if k == 29 {
+    } else if op_index == 29 {
         "lt"
-    } else if k == 30 {
+    } else if op_index == 30 {
         "le"
-    } else if k == 31 {
+    } else if op_index == 31 {
         "gt"
-    } else if k == 32 {
+    } else if op_index == 32 {
         "ge"
-    } else if k == 33 {
+    } else if op_index == 33 {
         "select"
-    } else if k == 34 {
+    } else if op_index == 34 {
         "reduce_add"
-    } else if k == 35 {
+    } else if op_index == 35 {
         "reduce_xor"
-    } else if k == 36 {
+    } else if op_index == 36 {
         "reduce_or"
-    } else if k == 37 {
+    } else if op_index == 37 {
         "reduce_and"
-    } else if k == 38 {
+    } else if op_index == 38 {
         "reduce_min"
-    } else if k == 39 {
+    } else if op_index == 39 {
         "reduce_max"
-    } else if k == 40 {
+    } else if op_index == 40 {
         "extract"
-    } else if k == 41 {
+    } else if op_index == 41 {
         "replace"
-    } else if k == 42 {
+    } else if op_index == 42 {
         "shuffle"
     } else {
         "load_masked"
     }
 }
-fn vec_intrinsic(k: u32) -> u32 {
-    if k == 0 {
+fn vec_intrinsic(op_index: u32) -> u32 {
+    if op_index == 0 {
         intr(I_SPLAT, 0)
-    } else if k == 1 {
+    } else if op_index == 1 {
         intr(I_FROM, 0)
-    } else if k <= 12 {
-        intr(I_BINARY, wrapping_sub(k, 2))
-    } else if k == 13 {
+    } else if op_index <= 12 {
+        intr(I_BINARY, wrapping_sub(op_index, 2))
+    } else if op_index == 13 {
         intr(I_NOT, 0)
-    } else if k <= 16 {
-        intr(I_UNARY, wrapping_sub(k, 14))
-    } else if k == 17 {
+    } else if op_index <= 16 {
+        intr(I_UNARY, wrapping_sub(op_index, 14))
+    } else if op_index == 17 {
         intr(I_MUL_ADD, 0)
-    } else if k <= 21 {
-        intr(I_CONVERT, wrapping_sub(k, 18))
-    } else if k == 22 {
+    } else if op_index <= 21 {
+        intr(I_CONVERT, wrapping_sub(op_index, 18))
+    } else if op_index == 22 {
         intr(I_LOAD, 0)
-    } else if k == 23 {
+    } else if op_index == 23 {
         intr(I_STORE, 0)
-    } else if k == 24 {
+    } else if op_index == 24 {
         intr(I_STORE_MASKED, 0)
-    } else if k <= 26 {
-        intr(I_SHIFT, wrapping_sub(k, 25))
-    } else if k <= 32 {
-        intr(I_COMPARE, wrapping_sub(k, 27))
-    } else if k == 33 {
+    } else if op_index <= 26 {
+        intr(I_SHIFT, wrapping_sub(op_index, 25))
+    } else if op_index <= 32 {
+        intr(I_COMPARE, wrapping_sub(op_index, 27))
+    } else if op_index == 33 {
         intr(I_SELECT, 0)
-    } else if k <= 39 {
-        intr(I_REDUCE, wrapping_sub(k, 34))
-    } else if k == 40 {
+    } else if op_index <= 39 {
+        intr(I_REDUCE, wrapping_sub(op_index, 34))
+    } else if op_index == 40 {
         intr(I_EXTRACT, 0)
-    } else if k == 41 {
+    } else if op_index == 41 {
         intr(I_REPLACE, 0)
-    } else if k == 42 {
+    } else if op_index == 42 {
         intr(I_SHUFFLE, 0)
     } else {
         intr(I_LOAD_MASKED, 0)
     }
 }
 const MASK_OPS: u32 = 10;
-fn mask_op(k: u32) -> Str {
-    if k == 0 {
+fn mask_op(op_index: u32) -> Str {
+    if op_index == 0 {
         "and"
-    } else if k == 1 {
+    } else if op_index == 1 {
         "or"
-    } else if k == 2 {
+    } else if op_index == 2 {
         "xor"
-    } else if k == 3 {
+    } else if op_index == 3 {
         "not"
-    } else if k == 4 {
+    } else if op_index == 4 {
         "count"
-    } else if k == 5 {
+    } else if op_index == 5 {
         "bitmask"
-    } else if k == 6 {
+    } else if op_index == 6 {
         "any"
-    } else if k == 7 {
+    } else if op_index == 7 {
         "all"
-    } else if k == 8 {
+    } else if op_index == 8 {
         "in_bounds"
     } else {
         "active"
     }
 }
-fn mask_intrinsic(k: u32) -> u32 {
-    if k <= 2 {
-        intr(I_MASK_BINARY, k)
-    } else if k <= 7 {
+fn mask_intrinsic(op_index: u32) -> u32 {
+    if op_index <= 2 {
+        intr(I_MASK_BINARY, op_index)
+    } else if op_index <= 7 {
         // not, count, bitmask, any, all
-        intr(wrapping_add(I_MASK_NOT, wrapping_sub(k, 3)), 0)
-    } else if k == 8 {
+        intr(wrapping_add(I_MASK_NOT, wrapping_sub(op_index, 3)), 0)
+    } else if op_index == 8 {
         intr(I_IN_BOUNDS, 0)
     } else {
         intr(I_ACTIVE, 0)
@@ -497,15 +497,15 @@ pub fn intrinsic_lookup(in name: Slice[u8]) -> u32 {
     if n >= 2 {
         for i in 0..wrapping_sub(n, 1) {
             if cut == n {
-                let a = match name.try_get(i) {
+                let first_byte = match name.try_get(i) {
                     Some(v) => v,
                     None => 0,
                 };
-                let c = match name.try_get(wrapping_add(i, 1)) {
+                let second_byte = match name.try_get(wrapping_add(i, 1)) {
                     Some(v) => v,
                     None => 0,
                 };
-                if a == 58 && c == 58 {
+                if first_byte == 58 && second_byte == 58 {
                     cut = i;
                 }
             }
@@ -598,23 +598,23 @@ fn reduce_name(op: u32) -> Str {
 }
 
 // The intrinsic as Rust's `{:?}` writes it (`Binary(Add)`).
-fn put_intrinsic(inout o: ChunkSeq[u8], i: u32) {
-    let f = family_of(i);
-    let op = op_of(i);
-    if f == I_SPLAT {
-        put(inout o, "Splat");
-    } else if f == I_FROM {
-        put(inout o, "From");
-    } else if f == I_BINARY {
-        put(inout o, "Binary(");
-        put(inout o, binop_name(op));
-        put(inout o, ")");
-    } else if f == I_NOT {
-        put(inout o, "Not");
-    } else if f == I_UNARY {
-        put(inout o, "Unary(");
+fn put_intrinsic(inout out: ChunkSeq[u8], intrinsic: u32) {
+    let family = family_of(intrinsic);
+    let op = op_of(intrinsic);
+    if family == I_SPLAT {
+        put(inout out, "Splat");
+    } else if family == I_FROM {
+        put(inout out, "From");
+    } else if family == I_BINARY {
+        put(inout out, "Binary(");
+        put(inout out, binop_name(op));
+        put(inout out, ")");
+    } else if family == I_NOT {
+        put(inout out, "Not");
+    } else if family == I_UNARY {
+        put(inout out, "Unary(");
         put(
-            inout o,
+            inout out,
             if op == 0 {
                 "Sqrt"
             } else if op == 1 {
@@ -623,24 +623,24 @@ fn put_intrinsic(inout o: ChunkSeq[u8], i: u32) {
                 "Neg"
             }
         );
-        put(inout o, ")");
-    } else if f == I_MUL_ADD {
-        put(inout o, "MulAdd");
-    } else if f == I_CONVERT {
-        put(inout o, "Convert(");
-        put(inout o, conv_name(op));
-        put(inout o, ")");
-    } else if f == I_SHIFT {
-        put(inout o, if op == 0 { "Shift(Shl)" } else { "Shift(Shr)" });
-    } else if f == I_COMPARE {
-        put(inout o, "Compare(");
-        put(inout o, cmp_name(op));
-        put(inout o, ")");
-    } else if f == I_SELECT {
-        put(inout o, "Select");
-    } else if f == I_MASK_BINARY {
+        put(inout out, ")");
+    } else if family == I_MUL_ADD {
+        put(inout out, "MulAdd");
+    } else if family == I_CONVERT {
+        put(inout out, "Convert(");
+        put(inout out, conv_name(op));
+        put(inout out, ")");
+    } else if family == I_SHIFT {
+        put(inout out, if op == 0 { "Shift(Shl)" } else { "Shift(Shr)" });
+    } else if family == I_COMPARE {
+        put(inout out, "Compare(");
+        put(inout out, cmp_name(op));
+        put(inout out, ")");
+    } else if family == I_SELECT {
+        put(inout out, "Select");
+    } else if family == I_MASK_BINARY {
         put(
-            inout o,
+            inout out,
             if op == 0 {
                 "MaskBinary(And)"
             } else if op == 1 {
@@ -649,80 +649,84 @@ fn put_intrinsic(inout o: ChunkSeq[u8], i: u32) {
                 "MaskBinary(Xor)"
             }
         );
-    } else if f == I_MASK_NOT {
-        put(inout o, "MaskNot");
-    } else if f == I_MASK_COUNT {
-        put(inout o, "MaskCount");
-    } else if f == I_MASK_BITMASK {
-        put(inout o, "MaskBitmask");
-    } else if f == I_MASK_ANY {
-        put(inout o, "MaskAny");
-    } else if f == I_MASK_ALL {
-        put(inout o, "MaskAll");
-    } else if f == I_REDUCE {
-        put(inout o, "Reduce(");
-        put(inout o, reduce_name(op));
-        put(inout o, ")");
-    } else if f == I_EXTRACT {
-        put(inout o, "Extract");
-    } else if f == I_REPLACE {
-        put(inout o, "Replace");
-    } else if f == I_SHUFFLE {
-        put(inout o, "Shuffle");
-    } else if f == I_LOAD_MASKED {
-        put(inout o, "LoadMasked");
-    } else if f == I_LOAD {
-        put(inout o, "Load");
-    } else if f == I_STORE {
-        put(inout o, "Store");
-    } else if f == I_STORE_MASKED {
-        put(inout o, "StoreMasked");
-    } else if f == I_IN_BOUNDS {
-        put(inout o, "InBounds");
-    } else if f == I_ACTIVE {
-        put(inout o, "Active");
+    } else if family == I_MASK_NOT {
+        put(inout out, "MaskNot");
+    } else if family == I_MASK_COUNT {
+        put(inout out, "MaskCount");
+    } else if family == I_MASK_BITMASK {
+        put(inout out, "MaskBitmask");
+    } else if family == I_MASK_ANY {
+        put(inout out, "MaskAny");
+    } else if family == I_MASK_ALL {
+        put(inout out, "MaskAll");
+    } else if family == I_REDUCE {
+        put(inout out, "Reduce(");
+        put(inout out, reduce_name(op));
+        put(inout out, ")");
+    } else if family == I_EXTRACT {
+        put(inout out, "Extract");
+    } else if family == I_REPLACE {
+        put(inout out, "Replace");
+    } else if family == I_SHUFFLE {
+        put(inout out, "Shuffle");
+    } else if family == I_LOAD_MASKED {
+        put(inout out, "LoadMasked");
+    } else if family == I_LOAD {
+        put(inout out, "Load");
+    } else if family == I_STORE {
+        put(inout out, "Store");
+    } else if family == I_STORE_MASKED {
+        put(inout out, "StoreMasked");
+    } else if family == I_IN_BOUNDS {
+        put(inout out, "InBounds");
+    } else if family == I_ACTIVE {
+        put(inout out, "Active");
     } else {
-        put(inout o, "IsaSupported");
+        put(inout out, "IsaSupported");
     }
 }
 
-pub fn takes_shape_arguments(i: u32) -> bool {
-    let f = family_of(i);
-    f == I_SPLAT
-        || f == I_FROM
-        || f == I_LOAD_MASKED
-        || f == I_LOAD
-        || f == I_IN_BOUNDS
-        || f == I_ACTIVE
+pub fn takes_shape_arguments(intrinsic: u32) -> bool {
+    let family = family_of(intrinsic);
+    family == I_SPLAT
+        || family == I_FROM
+        || family == I_LOAD_MASKED
+        || family == I_LOAD
+        || family == I_IN_BOUNDS
+        || family == I_ACTIVE
 }
-pub fn mask_result(i: u32) -> bool {
-    let f = family_of(i);
-    f == I_COMPARE || f == I_MASK_BINARY || f == I_MASK_NOT || f == I_IN_BOUNDS || f == I_ACTIVE
+pub fn mask_result(intrinsic: u32) -> bool {
+    let family = family_of(intrinsic);
+    family == I_COMPARE
+        || family == I_MASK_BINARY
+        || family == I_MASK_NOT
+        || family == I_IN_BOUNDS
+        || family == I_ACTIVE
 }
-pub fn mask_operand(i: u32) -> bool {
-    let f = family_of(i);
-    f == I_SELECT
-        || f == I_MASK_BINARY
-        || f == I_MASK_NOT
-        || f == I_MASK_COUNT
-        || f == I_MASK_BITMASK
-        || f == I_MASK_ANY
-        || f == I_MASK_ALL
+pub fn mask_operand(intrinsic: u32) -> bool {
+    let family = family_of(intrinsic);
+    family == I_SELECT
+        || family == I_MASK_BINARY
+        || family == I_MASK_NOT
+        || family == I_MASK_COUNT
+        || family == I_MASK_BITMASK
+        || family == I_MASK_ANY
+        || family == I_MASK_ALL
 }
 // `constant_positions(args)` as `start..end`.
-pub fn constants_start(i: u32) -> u64 {
-    let f = family_of(i);
-    if f == I_EXTRACT || f == I_REPLACE || f == I_SHUFFLE {
+pub fn constants_start(intrinsic: u32) -> u64 {
+    let family = family_of(intrinsic);
+    if family == I_EXTRACT || family == I_REPLACE || family == I_SHUFFLE {
         1
     } else {
         0
     }
 }
-pub fn constants_end(i: u32, args: u64) -> u64 {
-    let f = family_of(i);
-    if f == I_EXTRACT || f == I_REPLACE {
+pub fn constants_end(intrinsic: u32, args: u64) -> u64 {
+    let family = family_of(intrinsic);
+    if family == I_EXTRACT || family == I_REPLACE {
         2
-    } else if f == I_SHUFFLE {
+    } else if family == I_SHUFFLE {
         if args > 1 { args } else { 1 }
     } else {
         0
@@ -730,16 +734,16 @@ pub fn constants_end(i: u32, args: u64) -> u64 {
 }
 
 // `lane_error`, or the empty string.
-pub fn lane_error(i: u32, e: u32) -> Str {
-    let f = family_of(i);
-    let op = op_of(i);
-    if f == I_BINARY && op == B_MUL && e == E_U8 {
+pub fn lane_error(intrinsic: u32, elem: u32) -> Str {
+    let family = family_of(intrinsic);
+    let op = op_of(intrinsic);
+    if family == I_BINARY && op == B_MUL && elem == E_U8 {
         "Vec::mul is not defined for u8 lanes"
-    } else if f == I_BINARY && op == B_DIV && !elem_is_float(e) {
+    } else if family == I_BINARY && op == B_DIV && !elem_is_float(elem) {
         "Vec::div is defined for f32 and f64 lanes only"
-    } else if (f == I_UNARY || f == I_MUL_ADD) && !elem_is_float(e) {
+    } else if (family == I_UNARY || family == I_MUL_ADD) && !elem_is_float(elem) {
         "Vec::sqrt, Vec::abs, Vec::neg and Vec::mul_add are defined for f32 and f64 lanes only"
-    } else if f == I_CONVERT && !conv_accepts(op, e) {
+    } else if family == I_CONVERT && !conv_accepts(op, elem) {
         if op == C_TO_BITS {
             "Vec::to_bits takes f32 or f64 lanes"
         } else if op == C_FROM_BITS {
@@ -749,17 +753,19 @@ pub fn lane_error(i: u32, e: u32) -> Str {
         } else {
             "Vec::nearest_f32 takes f64 lanes"
         }
-    } else if f == I_BINARY && (op == B_SATURATING_ADD || op == B_SATURATING_SUB) && e != E_U8 {
+    } else if family == I_BINARY
+        && (op == B_SATURATING_ADD || op == B_SATURATING_SUB)
+        && elem != E_U8 {
         "saturating lane arithmetic is defined for u8 lanes only"
-    } else if elem_is_float(e)
+    } else if elem_is_float(elem)
         && (
-            (f == I_BINARY && (op == B_AND || op == B_OR || op == B_XOR))
-                || f == I_NOT
-                || f == I_SHIFT
-                || (f == I_REDUCE && (op == RD_AND || op == RD_OR || op == RD_XOR))
+            (family == I_BINARY && (op == B_AND || op == B_OR || op == B_XOR))
+                || family == I_NOT
+                || family == I_SHIFT
+                || (family == I_REDUCE && (op == RD_AND || op == RD_OR || op == RD_XOR))
         ) {
         "bitwise lane operations are not defined for float lanes"
-    } else if (f == I_LOAD_MASKED || f == I_IN_BOUNDS) && e != E_U8 {
+    } else if (family == I_LOAD_MASKED || family == I_IN_BOUNDS) && elem != E_U8 {
         "string loads produce u8 lanes"
     } else {
         ""
@@ -771,94 +777,94 @@ pub fn lane_error(i: u32, e: u32) -> Str {
 // the profiles, the conversions of every valid shape and, for each line of
 // `input` (an intrinsic path), its lookup and properties.
 
-fn put(inout o: ChunkSeq[u8], in s: Str) {
-    o.extend(in s.as_bytes());
+fn put(inout out: ChunkSeq[u8], in text: Str) {
+    out.extend(in text.as_bytes());
 }
-fn put_u64(inout o: ChunkSeq[u8], v: u64) {
-    if v >= 10 {
-        put_u64(inout o, v / 10);
+fn put_u64(inout out: ChunkSeq[u8], value: u64) {
+    if value >= 10 {
+        put_u64(inout out, value / 10);
     }
-    o.push(wrapping_add(48, wrapping_u8(v % 10)));
+    out.push(wrapping_add(48, wrapping_u8(value % 10)));
 }
-fn put_bool(inout o: ChunkSeq[u8], b: bool) {
-    put(inout o, if b { "1" } else { "0" });
+fn put_bool(inout out: ChunkSeq[u8], flag: bool) {
+    put(inout out, if flag { "1" } else { "0" });
 }
-fn sp(inout o: ChunkSeq[u8]) {
-    o.push(32);
+fn sp(inout out: ChunkSeq[u8]) {
+    out.push(32);
 }
-fn nl(inout o: ChunkSeq[u8]) {
-    o.push(10);
+fn nl(inout out: ChunkSeq[u8]) {
+    out.push(10);
 }
 
 pub fn vector_decisions(in input: Str) -> ChunkSeq[u64] {
-    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    for e in 0..ELEMS {
-        put(inout o, "elem ");
-        put(inout o, elem_name(e));
-        sp(inout o);
-        put_u64(inout o, widen_u64(elem_bits(e)));
-        sp(inout o);
-        put_bool(inout o, elem_is_float(e));
-        put_bool(inout o, elem_is_signed(e));
-        sp(inout o);
-        put(inout o, elem_name(elem_bits_elem(e)));
-        sp(inout o);
-        put_u64(inout o, elem_mask(e));
-        put(inout o, " lane ");
-        put_u64(inout o, widen_u64(lane_ty(e)));
-        put(inout o, " chunk ");
-        put_u64(inout o, widen_u64(chunk_ty(e)));
-        put(inout o, " mask ");
-        put_u64(inout o, widen_u64(mask_chunk_ty(e)));
-        put(inout o, " per ");
-        put_u64(inout o, widen_u64(lanes_per_chunk(e)));
-        nl(inout o);
-        for n in 0..65 {
-            if shape_valid(e, n) {
-                put(inout o, "shape [");
-                put(inout o, elem_name(e));
-                put(inout o, ", ");
-                put_u64(inout o, widen_u64(n));
-                put(inout o, "] ");
-                put_u64(inout o, widen_u64(shape_bits(e, n)));
-                sp(inout o);
-                put_u64(inout o, widen_u64(shape_bytes(e, n)));
-                sp(inout o);
-                put_u64(inout o, widen_u64(shape_chunks(e, n)));
-                sp(inout o);
-                put_u64(inout o, widen_u64(shape_layout_words(e, n)));
-                sp(inout o);
-                put(inout o, profile_name(shape_required_profile(e, n)));
-                for c in 0..4 {
-                    sp(inout o);
-                    put(inout o, conv_name(c));
-                    put(inout o, "=");
-                    let t = conv_target(c, e);
-                    if shape_valid(t, n) {
-                        put(inout o, elem_name(t));
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for elem in 0..ELEMS {
+        put(inout out, "elem ");
+        put(inout out, elem_name(elem));
+        sp(inout out);
+        put_u64(inout out, widen_u64(elem_bits(elem)));
+        sp(inout out);
+        put_bool(inout out, elem_is_float(elem));
+        put_bool(inout out, elem_is_signed(elem));
+        sp(inout out);
+        put(inout out, elem_name(elem_bits_elem(elem)));
+        sp(inout out);
+        put_u64(inout out, elem_mask(elem));
+        put(inout out, " lane ");
+        put_u64(inout out, widen_u64(lane_ty(elem)));
+        put(inout out, " chunk ");
+        put_u64(inout out, widen_u64(chunk_ty(elem)));
+        put(inout out, " mask ");
+        put_u64(inout out, widen_u64(mask_chunk_ty(elem)));
+        put(inout out, " per ");
+        put_u64(inout out, widen_u64(lanes_per_chunk(elem)));
+        nl(inout out);
+        for lanes in 0..65 {
+            if shape_valid(elem, lanes) {
+                put(inout out, "shape [");
+                put(inout out, elem_name(elem));
+                put(inout out, ", ");
+                put_u64(inout out, widen_u64(lanes));
+                put(inout out, "] ");
+                put_u64(inout out, widen_u64(shape_bits(elem, lanes)));
+                sp(inout out);
+                put_u64(inout out, widen_u64(shape_bytes(elem, lanes)));
+                sp(inout out);
+                put_u64(inout out, widen_u64(shape_chunks(elem, lanes)));
+                sp(inout out);
+                put_u64(inout out, widen_u64(shape_layout_words(elem, lanes)));
+                sp(inout out);
+                put(inout out, profile_name(shape_required_profile(elem, lanes)));
+                for conv in 0..4 {
+                    sp(inout out);
+                    put(inout out, conv_name(conv));
+                    put(inout out, "=");
+                    let target = conv_target(conv, elem);
+                    if shape_valid(target, lanes) {
+                        put(inout out, elem_name(target));
                     } else {
-                        put(inout o, "-");
+                        put(inout out, "-");
                     }
-                    if conv_accepts(c, e) {
-                        put(inout o, "+");
+                    if conv_accepts(conv, elem) {
+                        put(inout out, "+");
                     }
                 }
-                nl(inout o);
+                nl(inout out);
             }
         }
     }
-    for p in 0..PROFILES {
-        put(inout o, "profile ");
-        put(inout o, profile_name(p));
-        sp(inout o);
-        put_u64(inout o, widen_u64(profile_fixed_bits(p)));
-        sp(inout o);
-        for q in 0..PROFILES {
-            put_bool(inout o, profile_le(p, q));
+    for profile in 0..PROFILES {
+        put(inout out, "profile ");
+        put(inout out, profile_name(profile));
+        sp(inout out);
+        put_u64(inout out, widen_u64(profile_fixed_bits(profile)));
+        sp(inout out);
+        for other_profile in 0..PROFILES {
+            put_bool(inout out, profile_le(profile, other_profile));
         }
-        sp(inout o);
-        put_requirements(inout o, p);
-        nl(inout o);
+        sp(inout out);
+        put_requirements(inout out, profile);
+        nl(inout out);
     }
     // One intrinsic path per input line.
     let bytes = input.as_bytes();
@@ -866,7 +872,7 @@ pub fn vector_decisions(in input: Str) -> ChunkSeq[u64] {
     let mut start: u64 = 0;
     for i in 0..wrapping_add(n, 1) {
         let at_end = i == n;
-        let c = if at_end {
+        let byte = if at_end {
             10
         } else {
             match bytes.try_get(i) {
@@ -874,48 +880,48 @@ pub fn vector_decisions(in input: Str) -> ChunkSeq[u64] {
                 None => 10,
             }
         };
-        if c == 10 {
+        if byte == 10 {
             if i > start {
-                put_lookup(inout o, in bytes[start..i]);
+                put_lookup(inout out, in bytes[start..i]);
             }
             start = wrapping_add(i, 1);
         }
     }
-    pack(in o)
+    pack(in out)
 }
 
-fn put_lookup(inout o: ChunkSeq[u8], in name: Slice[u8]) {
-    put(inout o, "intrinsic ");
-    o.extend(in name);
-    sp(inout o);
-    let i = intrinsic_lookup(in name);
-    if i == I_NONE {
-        put(inout o, "none");
-    } else if i == I_UNKNOWN {
-        put(inout o, "unknown");
+fn put_lookup(inout out: ChunkSeq[u8], in name: Slice[u8]) {
+    put(inout out, "intrinsic ");
+    out.extend(in name);
+    sp(inout out);
+    let intrinsic = intrinsic_lookup(in name);
+    if intrinsic == I_NONE {
+        put(inout out, "none");
+    } else if intrinsic == I_UNKNOWN {
+        put(inout out, "unknown");
     } else {
-        put_intrinsic(inout o, i);
-        sp(inout o);
-        put_bool(inout o, takes_shape_arguments(i));
-        put_bool(inout o, mask_result(i));
-        put_bool(inout o, mask_operand(i));
+        put_intrinsic(inout out, intrinsic);
+        sp(inout out);
+        put_bool(inout out, takes_shape_arguments(intrinsic));
+        put_bool(inout out, mask_result(intrinsic));
+        put_bool(inout out, mask_operand(intrinsic));
         for args in 0..4 {
-            sp(inout o);
-            put_u64(inout o, constants_start(i));
-            put(inout o, "..");
-            put_u64(inout o, constants_end(i, args));
+            sp(inout out);
+            put_u64(inout out, constants_start(intrinsic));
+            put(inout out, "..");
+            put_u64(inout out, constants_end(intrinsic, args));
         }
-        for e in 0..ELEMS {
-            let err = lane_error(i, e);
+        for elem in 0..ELEMS {
+            let err = lane_error(intrinsic, elem);
             if err.len() != 0 {
-                put(inout o, " | ");
-                put(inout o, elem_name(e));
-                put(inout o, ": ");
-                put(inout o, err);
+                put(inout out, " | ");
+                put(inout out, elem_name(elem));
+                put(inout out, ": ");
+                put(inout out, err);
             }
         }
     }
-    nl(inout o);
+    nl(inout out);
 }
 
 // `[len, little-endian words...]`.
@@ -923,23 +929,23 @@ fn pack(in text: ChunkSeq[u8]) -> ChunkSeq[u64] {
     let n = text.len();
     let mut out = ChunkSeq::with_capacity[u64](wrapping_add(n >> 3, 2));
     out.push(n);
-    let mut x: u64 = 0;
-    let mut k: u32 = 0;
+    let mut word: u64 = 0;
+    let mut byte_count: u32 = 0;
     for i in 0..n {
-        let b = match text.try_get(i) {
+        let byte = match text.try_get(i) {
             Some(v) => widen_u64(v),
             None => 0,
         };
-        x = x | wrapping_shl_u64(b, wrapping_mul(k, 8));
-        k = wrapping_add(k, 1);
-        if k == 8 {
-            out.push(x);
-            x = 0;
-            k = 0;
+        word = word | wrapping_shl_u64(byte, wrapping_mul(byte_count, 8));
+        byte_count = wrapping_add(byte_count, 1);
+        if byte_count == 8 {
+            out.push(word);
+            word = 0;
+            byte_count = 0;
         }
     }
-    if k != 0 {
-        out.push(x);
+    if byte_count != 0 {
+        out.push(word);
     }
     out
 }

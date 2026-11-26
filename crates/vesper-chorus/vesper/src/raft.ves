@@ -659,12 +659,13 @@ fn node_replication_targets(in rc: RaftCluster, i: u64) -> u64 {
     let at = node_config_index(in rc, i);
     let mut targets = node_members(in rc, i);
     if at > sw(in rc.nd_commit, i) {
-        targets = targets | raft_config_of_arena(
-            in rc.log_pool.as_slice(),
-            sw(in rc.nd_log_off, i),
-            wrapping_sub(at, 1),
-            rc.nd_initial_members
-        );
+        targets = targets
+            | raft_config_of_arena(
+                in rc.log_pool.as_slice(),
+                sw(in rc.nd_log_off, i),
+                wrapping_sub(at, 1),
+                rc.nd_initial_members
+            );
     }
     targets
 }
@@ -1250,9 +1251,12 @@ fn handle_request(inout rc: RaftCluster, i: u64, p: u64, now: u64) {
             return;
         }
         let h_opt = handle Fail[WireErr] in {
-            Option::Some(
-                batch_decode_range(in rc.pkt_bytes.as_slice(), boff, blen, inout rc.tmp_entries)
-            )
+            Option::Some(batch_decode_range(
+                in rc.pkt_bytes.as_slice(),
+                boff,
+                blen,
+                inout rc.tmp_entries
+            ))
         } with {
             return v => v,
             raise(_e, _k) => Option::None,
@@ -1353,9 +1357,12 @@ fn handle_request(inout rc: RaftCluster, i: u64, p: u64, now: u64) {
             return;
         }
         let h_opt = handle Fail[WireErr] in {
-            Option::Some(
-                batch_decode_range(in rc.pkt_bytes.as_slice(), boff, blen, inout rc.tmp_entries)
-            )
+            Option::Some(batch_decode_range(
+                in rc.pkt_bytes.as_slice(),
+                boff,
+                blen,
+                inout rc.tmp_entries
+            ))
         } with {
             return v => v,
             raise(_e, _k) => Option::None,

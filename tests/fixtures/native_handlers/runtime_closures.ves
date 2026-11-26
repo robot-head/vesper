@@ -12,9 +12,9 @@ fn apply(
 
 fn pick(sink n: i64) -> fn @copy (i64) -> i64 eff [Fail[ArithOverflow], Ask] {
     if n > 0 {
-        | v | v + Ask::ask()
+        |v| v + Ask::ask()
     } else {
-        | v | v * Ask::ask()
+        |v| v * Ask::ask()
     }
 }
 

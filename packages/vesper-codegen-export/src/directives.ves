@@ -81,10 +81,7 @@ fn starts_with(in s: ChunkSeq[u8], in p: Str) -> bool {
         return false;
     }
     for i in 0..b.len() {
-        let c = match b.try_get(i) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
+        let c = b.try_get(i).unwrap_or(0);
         if u8_at(in s, i) != c {
             return false;
         }
@@ -524,17 +521,11 @@ pub fn parse_instance(
 // the error `vsys_target` gives (empty when it succeeds), each a byte
 // length word and the bytes padded to a word.
 fn read_bytes(in b: Slice[u8], inout pos: u64) -> ChunkSeq[u8] {
-    let len = match b.try_read_u64_le(pos) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    };
+    let len = b.try_read_u64_le(pos).unwrap_or(0);
     let start = wrapping_add(pos, 8);
     let mut o = ChunkSeq::with_capacity[u8](len);
     for i in 0..len {
-        let c = match b.try_get(wrapping_add(start, i)) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
+        let c = b.try_get(wrapping_add(start, i)).unwrap_or(0);
         o.push(c);
     }
     pos = wrapping_add(start, wrapping_mul(wrapping_add(len, 7) / 8, 8));
@@ -554,10 +545,7 @@ fn replace(in s: ChunkSeq[u8], in from: Str, in to: ChunkSeq[u8]) -> ChunkSeq[u8
         let mut hit = wrapping_add(i, n) <= s.len();
         if hit {
             for k in 0..n {
-                let c = match f.try_get(k) {
-                    Option::Some(c) => c,
-                    Option::None => 0,
-                };
+                let c = f.try_get(k).unwrap_or(0);
                 if u8_at(in s, wrapping_add(i, k)) != c {
                     hit = false;
                     break;

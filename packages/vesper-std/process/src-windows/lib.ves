@@ -1,5 +1,5 @@
 // @vesper-std/process (Windows): child processes directly over kernel32.
-use @vesper-std/fs::{IoError, error_of, invalid_input, not_found};
+use @vesper-std/fs::{IoError, error_of, invalid_input, program_not_found};
 
 pub copy struct ExitStatus {
     pub code: i64,
@@ -859,7 +859,7 @@ fn resolve_exe(in c: ProcCommand) -> Result[ChunkSeq[u16], IoError] eff [Ffi[Std
         },
         Option::None => {},
     }
-    Result::Err(io_err(not_found()))
+    Result::Err(io_err(program_not_found()))
 }
 
 pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProcess]] {
@@ -1032,19 +1032,17 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
         let _ = StdProcess::ResumeThread(pi.h_thread);
     }
     close_handle_if(pi.h_thread);
-    Result::Ok(
-        ProcChild {
-            h_process: pi.h_process,
-            stdout_h: out_r,
-            stderr_h: err_r,
-            stdout_buf: ChunkSeq::new[u8](),
-            stderr_buf: ChunkSeq::new[u8](),
-            waited: false,
-            job: job,
-            limit: c.limit,
-            cut: false,
-        }
-    )
+    Result::Ok(ProcChild {
+        h_process: pi.h_process,
+        stdout_h: out_r,
+        stderr_h: err_r,
+        stdout_buf: ChunkSeq::new[u8](),
+        stderr_buf: ChunkSeq::new[u8](),
+        waited: false,
+        job: job,
+        limit: c.limit,
+        cut: false,
+    })
 }
 
 // Append `src[0..n]` to `dst`, keeping at most `limit` bytes (0: all);
@@ -1131,13 +1129,11 @@ fn finish(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProces
     if ok == 0 {
         return Result::Err(error_of(widen_u64(err)));
     }
-    Result::Ok(
-        ExitStatus {
-            code: widen_i64(code.v),
-            signal: 0,
-            exited: true,
-        }
-    )
+    Result::Ok(ExitStatus {
+        code: widen_i64(code.v),
+        signal: 0,
+        exited: true,
+    })
 }
 
 pub fn wait(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProcess]] {

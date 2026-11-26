@@ -65,10 +65,11 @@ pub sugar sum: tag emits eff [Fail] {
     // re-evaluate an effectful index.
     rule (
         sum{
-            $projection:block | $pair:pat in zip{
-                $left:ident $(.$left_field:ident)*,
-                $right:ident $(.$right_field:ident)*
-            }
+            $projection:block
+                | $pair:pat in zip{
+                    $left:ident $(.$left_field:ident)*,
+                    $right:ident $(.$right_field:ident)*
+                }
         }
     ) => {
         {

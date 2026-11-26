@@ -22,6 +22,7 @@ use self::doc_links::{DocFacts, WordReader, doc_facts_new, doc_target, read_doc_
 use self::proof::{proof_models};
 use self::ownership::{lens_facts, lens_requests, lens_view};
 use self::repair::{lens_repair};
+use self::proof_lenses::{proof_lenses};
 use self::hover::{Facts, facts_new, fact_function, fact_param, hover_answer};
 use self::nav::{
     Ix, MAX_DOCUMENTS, MAX_OUTPUT_BYTES, MAX_QUERY_BYTES, MAX_SYMBOLS, MAX_URI_BYTES, ERR_NONE,
@@ -36,10 +37,7 @@ copy struct Reader {
 }
 
 fn word(in b: Slice[u8], inout r: Reader) -> u64 {
-    let x = match b.try_read_u64_le(r.pos) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    };
+    let x = b.try_read_u64_le(r.pos).unwrap_or(0);
     r.pos = wrapping_add(r.pos, 8);
     x
 }
@@ -390,14 +388,8 @@ pub fn lsp_workspace_symbols(in input: Str) -> ChunkSeq[u64] {
     out.push(82);
     out.push(91);
     for d in 0..docs {
-        let uri_len = match lens.try_get(wrapping_add(d, d)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
-        let src_len = match lens.try_get(wrapping_add(wrapping_add(d, d), 1)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let uri_len = lens.try_get(wrapping_add(d, d)).unwrap_or(0);
+        let src_len = lens.try_get(wrapping_add(wrapping_add(d, d), 1)).unwrap_or(0);
         let uri = text_at(in b, at, uri_len);
         let src = text_at(in b, wrapping_add(at, uri_len), src_len);
         at = wrapping_add(wrapping_add(at, uri_len), src_len);
@@ -519,17 +511,11 @@ pub fn lsp_hovers(in input: Str) -> ChunkSeq[u64] {
 }
 
 fn map_name(in f: Facts, i: u64) -> u32 {
-    match f.c.nmap.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 4294967295,
-    }
+    f.c.nmap.try_get(i).unwrap_or(4294967295)
 }
 
 fn map_type(in f: Facts, i: u64) -> u32 {
-    match f.c.tmap.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 4294967295,
-    }
+    f.c.tmap.try_get(i).unwrap_or(4294967295)
 }
 
 // `proof_model::all` (src/lsp/proof_model.rs): the proof-lens model of
@@ -566,4 +552,12 @@ pub fn lsp_lens_view(in input: Str) -> ChunkSeq[u64] {
 // ownership.ves).
 pub fn lsp_lens_requests(in input: Str) -> ChunkSeq[u64] {
     lens_requests(in input)
+}
+
+// Proof code lenses, `vesper.proofAudit` command results and background
+// `vesper/proofStatus` notifications over the bounded proof ledgers
+// (src/lsp/session/lens_requests.rs `code_lenses_of`, `record_of`,
+// `proof_result_of`, `proof_status_of`; proof_lenses.ves).
+pub fn lsp_proof_lenses(in input: Str) -> ChunkSeq[u64] {
+    proof_lenses(in input)
 }

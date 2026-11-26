@@ -43,75 +43,75 @@ pub const G_REL: u8 = 2;
 pub struct Rules {
     // Pattern nodes of every side of every rule; children are absolute
     // node indices.
-    p_kind: ChunkSeq[u8],
-    p_a: ChunkSeq[u32],
-    p_dmode: ChunkSeq[u8],
-    p_dval: ChunkSeq[i64],
-    p_c0: ChunkSeq[u32],
-    p_c1: ChunkSeq[u32],
+    pattern_kind: ChunkSeq[u8],
+    pattern_operand: ChunkSeq[u32],
+    pattern_data_mode: ChunkSeq[u8],
+    pattern_data: ChunkSeq[i64],
+    pattern_child0: ChunkSeq[u32],
+    pattern_child1: ChunkSeq[u32],
     // Operator arities (the e-graph's language).
-    arity: ChunkSeq[u8],
+    op_arity: ChunkSeq[u8],
     // Per rule.
     lhs_start: ChunkSeq[u32],
     lhs_len: ChunkSeq[u32],
     rhs_start: ChunkSeq[u32],
     rhs_len: ChunkSeq[u32],
     guard: ChunkSeq[u8],
-    g0: ChunkSeq[u32],
-    g1: ChunkSeq[u32],
-    nvars: ChunkSeq[u32],
-    ndvars: ChunkSeq[u32],
+    guard_arg0: ChunkSeq[u32],
+    guard_arg1: ChunkSeq[u32],
+    var_count: ChunkSeq[u32],
+    data_var_count: ChunkSeq[u32],
     // Compiled left sides: code[prog_start[r] ..] (six words per
     // instruction), the register of each class variable
-    // (vreg[vreg_start[r] + v]) and the registers each program uses.
+    // (var_regs[var_reg_start[r] + v]) and the registers each program uses.
     prog_start: ChunkSeq[u32],
     prog_len: ChunkSeq[u32],
     code: ChunkSeq[u32],
     code_data: ChunkSeq[i64],
-    vreg_start: ChunkSeq[u32],
-    vreg: ChunkSeq[u32],
-    nregs: ChunkSeq[u32],
+    var_reg_start: ChunkSeq[u32],
+    var_regs: ChunkSeq[u32],
+    reg_count: ChunkSeq[u32],
     // The side being built starts here.
-    side: u32,
+    side_start: u32,
     // The relation: pairs of data values, hashed.
-    rel_a: ChunkSeq[i64],
-    rel_b: ChunkSeq[i64],
+    rel_first: ChunkSeq[i64],
+    rel_second: ChunkSeq[i64],
     rel_slots: ChunkSeq[u32],
     rel_mask: u64
 }
 
-pub fn rules_new(in arity: ChunkSeq[u8]) -> Rules {
-    let mut a: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](arity.len());
-    for i in 0..arity.len() {
-        a.push(u8_at(in arity, i));
+pub fn rules_new(in arities: ChunkSeq[u8]) -> Rules {
+    let mut op_arity: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](arities.len());
+    for i in 0..arities.len() {
+        op_arity.push(u8_at(in arities, i));
     }
     Rules {
-        p_kind: ChunkSeq::new[u8](),
-        p_a: ChunkSeq::new[u32](),
-        p_dmode: ChunkSeq::new[u8](),
-        p_dval: ChunkSeq::new[i64](),
-        p_c0: ChunkSeq::new[u32](),
-        p_c1: ChunkSeq::new[u32](),
-        arity: a,
+        pattern_kind: ChunkSeq::new[u8](),
+        pattern_operand: ChunkSeq::new[u32](),
+        pattern_data_mode: ChunkSeq::new[u8](),
+        pattern_data: ChunkSeq::new[i64](),
+        pattern_child0: ChunkSeq::new[u32](),
+        pattern_child1: ChunkSeq::new[u32](),
+        op_arity: op_arity,
         lhs_start: ChunkSeq::new[u32](),
         lhs_len: ChunkSeq::new[u32](),
         rhs_start: ChunkSeq::new[u32](),
         rhs_len: ChunkSeq::new[u32](),
         guard: ChunkSeq::new[u8](),
-        g0: ChunkSeq::new[u32](),
-        g1: ChunkSeq::new[u32](),
-        nvars: ChunkSeq::new[u32](),
-        ndvars: ChunkSeq::new[u32](),
+        guard_arg0: ChunkSeq::new[u32](),
+        guard_arg1: ChunkSeq::new[u32](),
+        var_count: ChunkSeq::new[u32](),
+        data_var_count: ChunkSeq::new[u32](),
         prog_start: ChunkSeq::new[u32](),
         prog_len: ChunkSeq::new[u32](),
         code: ChunkSeq::new[u32](),
         code_data: ChunkSeq::new[i64](),
-        vreg_start: ChunkSeq::new[u32](),
-        vreg: ChunkSeq::new[u32](),
-        nregs: ChunkSeq::new[u32](),
-        side: 0,
-        rel_a: ChunkSeq::new[i64](),
-        rel_b: ChunkSeq::new[i64](),
+        var_reg_start: ChunkSeq::new[u32](),
+        var_regs: ChunkSeq::new[u32](),
+        reg_count: ChunkSeq::new[u32](),
+        side_start: 0,
+        rel_first: ChunkSeq::new[i64](),
+        rel_second: ChunkSeq::new[i64](),
         rel_slots: filled_u32(64, 0),
         rel_mask: 63
     }
@@ -124,129 +124,150 @@ impl Rules {
 
     // ------------------------------------------------------------ building
 
-    fn push_node(inout self, kind: u8, a: u32, dmode: u8, dval: i64, c0: u32, c1: u32) -> u32 {
-        let id = wrapping_u32(self.p_kind.len());
-        self.p_kind.push(kind);
-        self.p_a.push(a);
-        self.p_dmode.push(dmode);
-        self.p_dval.push(dval);
-        self.p_c0.push(c0);
-        self.p_c1.push(c1);
+    fn push_node(
+        inout self,
+        kind: u8,
+        operand: u32,
+        data_mode: u8,
+        data: i64,
+        child0: u32,
+        child1: u32
+    ) -> u32 {
+        let id = wrapping_u32(self.pattern_kind.len());
+        self.pattern_kind.push(kind);
+        self.pattern_operand.push(operand);
+        self.pattern_data_mode.push(data_mode);
+        self.pattern_data.push(data);
+        self.pattern_child0.push(child0);
+        self.pattern_child1.push(child1);
         id
     }
 
     // Starts a pattern (a rule's left or right side).
     pub fn begin(inout self) {
-        self.side = wrapping_u32(self.p_kind.len());
+        self.side_start = wrapping_u32(self.pattern_kind.len());
     }
 
     // Ends the pattern begun last; returns its (start, length).
     pub fn end(inout self) -> (u32, u32) {
-        let s = self.side;
-        (s, wrapping_sub(wrapping_u32(self.p_kind.len()), s))
+        let start = self.side_start;
+        (start, wrapping_sub(wrapping_u32(self.pattern_kind.len()), start))
     }
 
-    // Class variable `v` (0 is `?x`, 1 `?y`, ...).
-    pub fn var(inout self, v: u32) -> u32 {
-        self.push_node(P_VAR, v, D_CONST, 0, 0, 0)
+    // Class variable `var_index` (0 is `?x`, 1 `?y`, ...).
+    pub fn var(inout self, var_index: u32) -> u32 {
+        self.push_node(P_VAR, var_index, D_CONST, 0, 0, 0)
     }
 
     // An e-node with constant data.
-    pub fn node(inout self, op: u32, data: i64, c0: u32, c1: u32) -> u32 {
-        self.push_node(P_NODE, op, D_CONST, data, c0, c1)
+    pub fn node(inout self, op: u32, data: i64, child0: u32, child1: u32) -> u32 {
+        self.push_node(P_NODE, op, D_CONST, data, child0, child1)
     }
 
-    // An e-node whose data is data variable `d`.
-    pub fn dnode(inout self, op: u32, d: u32, c0: u32, c1: u32) -> u32 {
-        self.push_node(P_NODE, op, D_VAR, widen_i64(d), c0, c1)
+    // An e-node whose data is data variable `data_var`.
+    pub fn dnode(inout self, op: u32, data_var: u32, child0: u32, child1: u32) -> u32 {
+        self.push_node(P_NODE, op, D_VAR, widen_i64(data_var), child0, child1)
     }
 
-    // Adds rule `lhs => rhs if guard(g0, g1)` and compiles its left side.
-    pub fn rule(inout self, lhs: (u32, u32), rhs: (u32, u32), guard: u8, g0: u32, g1: u32) {
-        let (ls, ll) = lhs;
-        let (rs, rl) = rhs;
-        self.lhs_start.push(ls);
-        self.lhs_len.push(ll);
-        self.rhs_start.push(rs);
-        self.rhs_len.push(rl);
+    // Adds rule `lhs => rhs if guard(guard_arg0, guard_arg1)` and compiles its left side.
+    pub fn rule(
+        inout self,
+        lhs: (u32, u32),
+        rhs: (u32, u32),
+        guard: u8,
+        guard_arg0: u32,
+        guard_arg1: u32
+    ) {
+        let (lhs_first, lhs_count) = lhs;
+        let (rhs_first, rhs_count) = rhs;
+        self.lhs_start.push(lhs_first);
+        self.lhs_len.push(lhs_count);
+        self.rhs_start.push(rhs_first);
+        self.rhs_len.push(rhs_count);
         self.guard.push(guard);
-        self.g0.push(g0);
-        self.g1.push(g1);
-        let mut nv: u32 = 0;
-        let mut nd: u32 = 0;
-        for i in 0..widen_u64(ll) {
-            let k = wrapping_add(widen_u64(ls), i);
-            let a = u32_at(in self.p_a, k);
-            if u8_at(in self.p_kind, k) == P_VAR {
-                if a >= nv {
-                    nv = wrapping_add(a, 1);
+        self.guard_arg0.push(guard_arg0);
+        self.guard_arg1.push(guard_arg1);
+        let mut var_count: u32 = 0;
+        let mut data_var_count: u32 = 0;
+        for offset in 0..widen_u64(lhs_count) {
+            let node = wrapping_add(widen_u64(lhs_first), offset);
+            let operand = u32_at(in self.pattern_operand, node);
+            if u8_at(in self.pattern_kind, node) == P_VAR {
+                if operand >= var_count {
+                    var_count = wrapping_add(operand, 1);
                 }
-            } else if u8_at(in self.p_dmode, k) == D_VAR {
-                let d = wrapping_u32(i64_at(in self.p_dval, k));
-                if d >= nd {
-                    nd = wrapping_add(d, 1);
+            } else if u8_at(in self.pattern_data_mode, node) == D_VAR {
+                let data_var = wrapping_u32(i64_at(in self.pattern_data, node));
+                if data_var >= data_var_count {
+                    data_var_count = wrapping_add(data_var, 1);
                 }
             }
         }
-        self.nvars.push(nv);
-        self.ndvars.push(nd);
-        self.compile(ls, ll, nv, nd);
+        self.var_count.push(var_count);
+        self.data_var_count.push(data_var_count);
+        self.compile(lhs_first, lhs_count, var_count, data_var_count);
     }
 
     // ------------------------------------------------------------ relation
 
-    fn rel_find(in self, a: i64, b: i64) -> (u64, bool) {
-        let h = mix(0, a, wrapping_u32(wrapping_u64(b)), wrapping_u32(wrapping_u64(b) >> 32));
-        let mut at = h & self.rel_mask;
+    fn rel_find(in self, first: i64, second: i64) -> (u64, bool) {
+        let hash = mix(
+            0,
+            first,
+            wrapping_u32(wrapping_u64(second)),
+            wrapping_u32(wrapping_u64(second) >> 32)
+        );
+        let mut at = hash & self.rel_mask;
         loop {
-            let s = u32_at(in self.rel_slots, at);
-            if s == 0 {
+            let slot = u32_at(in self.rel_slots, at);
+            if slot == 0 {
                 return (at, false);
             }
-            let k = widen_u64(wrapping_sub(s, 1));
-            if i64_at(in self.rel_a, k) == a && i64_at(in self.rel_b, k) == b {
+            let key = widen_u64(wrapping_sub(slot, 1));
+            if i64_at(in self.rel_first, key) == first
+                && i64_at(in self.rel_second, key) == second {
                 return (at, true);
             }
             at = wrapping_add(at, 1) & self.rel_mask;
         }
     }
 
-    pub fn rel_has(in self, a: i64, b: i64) -> bool {
-        let (_at, found) = self.rel_find(a, b);
+    pub fn rel_has(in self, first: i64, second: i64) -> bool {
+        let (_at, found) = self.rel_find(first, second);
         found
     }
 
     // Adds (a, b) to the relation.
-    pub fn rel_add(inout self, a: i64, b: i64) {
-        let (at, found) = self.rel_find(a, b);
+    pub fn rel_add(inout self, first: i64, second: i64) {
+        let (at, found) = self.rel_find(first, second);
         if found {
             return;
         }
-        let k = self.rel_a.len();
-        self.rel_a.push(a);
-        self.rel_b.push(b);
-        self.rel_slots.try_set(at, wrapping_u32(wrapping_add(k, 1)));
-        if wrapping_mul(wrapping_add(k, 1), 2) > self.rel_mask {
+        let key = self.rel_first.len();
+        self.rel_first.push(first);
+        self.rel_second.push(second);
+        self.rel_slots.try_set(at, wrapping_u32(wrapping_add(key, 1)));
+        if wrapping_mul(wrapping_add(key, 1), 2) > self.rel_mask {
             let cap = wrapping_mul(wrapping_add(self.rel_mask, 1), 2);
             let mask = wrapping_sub(cap, 1);
             let mut slots = filled_u32(cap, 0);
-            for j in 0..self.rel_a.len() {
-                let x = i64_at(in self.rel_a, j);
-                let y = i64_at(in self.rel_b, j);
-                let h = mix(
+            for entry in 0..self.rel_first.len() {
+                let entry_first = i64_at(in self.rel_first, entry);
+                let entry_second = i64_at(in self.rel_second, entry);
+                let hash = mix(
                     0,
-                    x,
-                    wrapping_u32(wrapping_u64(y)),
-                    wrapping_u32(wrapping_u64(y) >> 32)
+                    entry_first,
+                    wrapping_u32(wrapping_u64(entry_second)),
+                    wrapping_u32(wrapping_u64(entry_second) >> 32)
                 );
-                let mut p = h & mask;
+                let mut probe = hash & mask;
                 loop {
-                    if u32_at(in slots, p) == 0 {
+                    if u32_at(in slots, probe) == 0 {
                         break;
                     }
-                    p = wrapping_add(p, 1) & mask;
+                    probe = wrapping_add(probe, 1) & mask;
                 }
-                slots.try_set(p, wrapping_u32(wrapping_add(j, 1)));
+                slots.try_set(probe, wrapping_u32(wrapping_add(entry, 1)));
             }
             self.rel_slots = slots;
             self.rel_mask = mask;
@@ -255,57 +276,69 @@ impl Rules {
 
     // ------------------------------------------------------------ compiler
 
-    // The number of distinct class variables under pattern node `k` not yet
+    // The number of distinct class variables under pattern node `node` not yet
     // bound, and the subtree's e-node count (egg's `free_vars` and
     // `subtree_size`).
     fn free_and_size(
         in self,
-        k: u32,
+        node: u32,
         in bound: ChunkSeq[u32],
         inout seen: ChunkSeq[u8]
     ) -> (u64, u64) {
-        if u8_at(in self.p_kind, widen_u64(k)) == P_VAR {
-            let v = widen_u64(u32_at(in self.p_a, widen_u64(k)));
-            if u8_at(in seen, v) != 0 {
+        if u8_at(in self.pattern_kind, widen_u64(node)) == P_VAR {
+            let var = widen_u64(u32_at(in self.pattern_operand, widen_u64(node)));
+            if u8_at(in seen, var) != 0 {
                 return (0, 0);
             }
-            seen.try_set(v, 1);
-            if u32_at(in bound, v) == NONE {
+            seen.try_set(var, 1);
+            if u32_at(in bound, var) == NONE {
                 return (1, 0);
             }
             return (0, 0);
         }
-        let a = u8_at(in self.arity, widen_u64(u32_at(in self.p_a, widen_u64(k))));
+        let arity = u8_at(
+            in self.op_arity,
+            widen_u64(u32_at(in self.pattern_operand, widen_u64(node)))
+        );
         let mut free: u64 = 0;
         let mut size: u64 = 1;
-        if a >= 1 {
-            let (f, s) = self.free_and_size(
-                u32_at(in self.p_c0, widen_u64(k)),
+        if arity >= 1 {
+            let (child_free, child_size) = self.free_and_size(
+                u32_at(in self.pattern_child0, widen_u64(node)),
                 in bound,
                 inout seen
             );
-            free = wrapping_add(free, f);
-            size = wrapping_add(size, s);
+            free = wrapping_add(free, child_free);
+            size = wrapping_add(size, child_size);
         }
-        if a >= 2 {
-            let (f, s) = self.free_and_size(
-                u32_at(in self.p_c1, widen_u64(k)),
+        if arity >= 2 {
+            let (child_free, child_size) = self.free_and_size(
+                u32_at(in self.pattern_child1, widen_u64(node)),
                 in bound,
                 inout seen
             );
-            free = wrapping_add(free, f);
-            size = wrapping_add(size, s);
+            free = wrapping_add(free, child_free);
+            size = wrapping_add(size, child_size);
         }
         (free, size)
     }
 
-    fn emit(inout self, kind: u32, i: u32, out: u32, op: u32, dmode: u32, dix: u32, data: i64) {
+    fn emit(
+        inout self,
+        kind: u32,
+        reg: u32,
+        out: u32,
+        op: u32,
+        data_mode: u32,
+        data_index: u32,
+        data: i64
+    ) {
         self.code.push(kind);
-        self.code.push(i);
+        self.code.push(reg);
         self.code.push(out);
         self.code.push(op);
-        self.code.push(dmode);
-        self.code.push(dix);
+        self.code.push(data_mode);
+        self.code.push(data_index);
         self.code_data.push(data);
     }
 
@@ -314,25 +347,25 @@ impl Rules {
     // variables bound first, then fewest free variables, then largest);
     // egg breaks ties by hash order, here the last added wins. No rule of
     // either optimizer has two pending nodes at once.
-    fn compile(inout self, start: u32, len: u32, nv: u32, nd: u32) {
-        let first = wrapping_u32(self.code.len() / 6);
-        let mut bound = filled_u32(widen_u64(nv), NONE);
-        let mut dbound: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](widen_u64(nd));
-        dbound.resize(widen_u64(nd), 0);
+    fn compile(inout self, start: u32, node_count: u32, var_count: u32, data_var_count: u32) {
+        let first_instr = wrapping_u32(self.code.len() / 6);
+        let mut bound = filled_u32(widen_u64(var_count), NONE);
+        let mut data_bound: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](widen_u64(data_var_count));
+        data_bound.resize(widen_u64(data_var_count), 0);
         let mut todo_node: ChunkSeq[u32] = ChunkSeq::new[u32]();
         let mut todo_reg: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        let root = wrapping_sub(wrapping_add(start, len), 1);
+        let root = wrapping_sub(wrapping_add(start, node_count), 1);
         let mut next_out: u32 = 1;
         // add_todo(root, reg 0)
-        if u8_at(in self.p_kind, widen_u64(root)) == P_VAR {
-            bound.try_set(widen_u64(u32_at(in self.p_a, widen_u64(root))), 0);
+        if u8_at(in self.pattern_kind, widen_u64(root)) == P_VAR {
+            bound.try_set(widen_u64(u32_at(in self.pattern_operand, widen_u64(root))), 0);
         } else {
             todo_node.push(root);
             todo_reg.push(0);
         }
         loop {
-            let n = todo_node.len();
-            if n == 0 {
+            let pending = todo_node.len();
+            if pending == 0 {
                 break;
             }
             // pick max (ground, n_free, -size)
@@ -340,128 +373,139 @@ impl Rules {
             let mut best_ground = false;
             let mut best_free: u64 = 0;
             let mut best_size: u64 = 0;
-            for t in 0..n {
-                let mut seen: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](widen_u64(nv));
-                seen.resize(widen_u64(nv), 0);
-                let (f, s) = self.free_and_size(u32_at(in todo_node, t), in bound, inout seen);
-                let g = f == 0;
-                let better = if t == 0 {
+            for candidate in 0..pending {
+                let mut seen: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](widen_u64(var_count));
+                seen.resize(widen_u64(var_count), 0);
+                let (free, size) = self.free_and_size(
+                    u32_at(in todo_node, candidate),
+                    in bound,
+                    inout seen
+                );
+                let ground = free == 0;
+                let better = if candidate == 0 {
                     true
-                } else if g != best_ground {
-                    g
-                } else if f != best_free {
-                    f > best_free
+                } else if ground != best_ground {
+                    ground
+                } else if free != best_free {
+                    free > best_free
                 } else {
-                    s <= best_size
+                    size <= best_size
                 };
                 if better {
-                    best = t;
-                    best_ground = g;
-                    best_free = f;
-                    best_size = s;
+                    best = candidate;
+                    best_ground = ground;
+                    best_free = free;
+                    best_size = size;
                 }
             }
-            let k = u32_at(in todo_node, best);
+            let node = u32_at(in todo_node, best);
             let reg = u32_at(in todo_reg, best);
-            let last = wrapping_sub(n, 1);
+            let last = wrapping_sub(pending, 1);
             todo_node.try_set(best, u32_at(in todo_node, last));
             todo_reg.try_set(best, u32_at(in todo_reg, last));
             todo_node.truncate(last);
             todo_reg.truncate(last);
-            let op = u32_at(in self.p_a, widen_u64(k));
-            let a = u8_at(in self.arity, widen_u64(op));
+            let op = u32_at(in self.pattern_operand, widen_u64(node));
+            let arity = u8_at(in self.op_arity, widen_u64(op));
             let out = next_out;
-            next_out = wrapping_add(next_out, widen_u32(a));
-            let mut dmode = B_CONST;
-            let mut dix: u32 = 0;
-            let data = i64_at(in self.p_dval, widen_u64(k));
-            if u8_at(in self.p_dmode, widen_u64(k)) == D_VAR {
-                dix = wrapping_u32(data);
-                if u8_at(in dbound, widen_u64(dix)) == 0 {
-                    dmode = B_BIND;
-                    dbound.try_set(widen_u64(dix), 1);
+            next_out = wrapping_add(next_out, widen_u32(arity));
+            let mut data_mode = B_CONST;
+            let mut data_index: u32 = 0;
+            let data = i64_at(in self.pattern_data, widen_u64(node));
+            if u8_at(in self.pattern_data_mode, widen_u64(node)) == D_VAR {
+                data_index = wrapping_u32(data);
+                if u8_at(in data_bound, widen_u64(data_index)) == 0 {
+                    data_mode = B_BIND;
+                    data_bound.try_set(widen_u64(data_index), 1);
                 } else {
-                    dmode = B_SAME;
+                    data_mode = B_SAME;
                 }
             }
-            self.emit(I_BIND, reg, out, op, dmode, dix, data);
-            for c in 0..widen_u64(a) {
-                let child = if c == 0 {
-                    u32_at(in self.p_c0, widen_u64(k))
+            self.emit(I_BIND, reg, out, op, data_mode, data_index, data);
+            for child_slot in 0..widen_u64(arity) {
+                let child = if child_slot == 0 {
+                    u32_at(in self.pattern_child0, widen_u64(node))
                 } else {
-                    u32_at(in self.p_c1, widen_u64(k))
+                    u32_at(in self.pattern_child1, widen_u64(node))
                 };
-                let creg = wrapping_add(out, wrapping_u32(c));
-                if u8_at(in self.p_kind, widen_u64(child)) == P_VAR {
-                    let v = widen_u64(u32_at(in self.p_a, widen_u64(child)));
-                    let j = u32_at(in bound, v);
-                    if j == NONE {
-                        bound.try_set(v, creg);
+                let child_reg = wrapping_add(out, wrapping_u32(child_slot));
+                if u8_at(in self.pattern_kind, widen_u64(child)) == P_VAR {
+                    let var = widen_u64(u32_at(in self.pattern_operand, widen_u64(child)));
+                    let bound_reg = u32_at(in bound, var);
+                    if bound_reg == NONE {
+                        bound.try_set(var, child_reg);
                     } else {
-                        self.emit(I_COMPARE, creg, j, 0, 0, 0, 0);
+                        self.emit(I_COMPARE, child_reg, bound_reg, 0, 0, 0, 0);
                     }
                 } else {
                     todo_node.push(child);
-                    todo_reg.push(creg);
+                    todo_reg.push(child_reg);
                 }
             }
         }
-        let count = wrapping_sub(wrapping_u32(self.code.len() / 6), first);
-        self.prog_start.push(first);
-        self.prog_len.push(count);
-        self.vreg_start.push(wrapping_u32(self.vreg.len()));
-        for v in 0..widen_u64(nv) {
-            self.vreg.push(u32_at(in bound, v));
+        let instr_count = wrapping_sub(wrapping_u32(self.code.len() / 6), first_instr);
+        self.prog_start.push(first_instr);
+        self.prog_len.push(instr_count);
+        self.var_reg_start.push(wrapping_u32(self.var_regs.len()));
+        for var in 0..widen_u64(var_count) {
+            self.var_regs.push(u32_at(in bound, var));
         }
-        self.nregs.push(next_out);
+        self.reg_count.push(next_out);
     }
 
     // ------------------------------------------------------------ reads
 
-    pub fn nvars_of(in self, r: u64) -> u64 {
-        widen_u64(u32_at(in self.nvars, r))
+    pub fn nvars_of(in self, rule: u64) -> u64 {
+        widen_u64(u32_at(in self.var_count, rule))
     }
 
-    pub fn ndvars_of(in self, r: u64) -> u64 {
-        widen_u64(u32_at(in self.ndvars, r))
+    pub fn ndvars_of(in self, rule: u64) -> u64 {
+        widen_u64(u32_at(in self.data_var_count, rule))
     }
 
-    pub fn nregs_of(in self, r: u64) -> u64 {
-        widen_u64(u32_at(in self.nregs, r))
+    pub fn nregs_of(in self, rule: u64) -> u64 {
+        widen_u64(u32_at(in self.reg_count, rule))
     }
 
-    pub fn var_reg(in self, r: u64, v: u64) -> u64 {
-        widen_u64(u32_at(in self.vreg, wrapping_add(widen_u64(u32_at(in self.vreg_start, r)), v)))
+    pub fn var_reg(in self, rule: u64, var: u64) -> u64 {
+        widen_u64(u32_at(
+            in self.var_regs,
+            wrapping_add(widen_u64(u32_at(in self.var_reg_start, rule)), var)
+        ))
     }
 
-    pub fn prog(in self, r: u64) -> (u64, u64) {
-        (widen_u64(u32_at(in self.prog_start, r)), widen_u64(u32_at(in self.prog_len, r)))
+    pub fn prog(in self, rule: u64) -> (u64, u64) {
+        (widen_u64(u32_at(in self.prog_start, rule)), widen_u64(u32_at(in self.prog_len, rule)))
     }
 
-    pub fn instr(in self, pc: u64, f: u64) -> u32 {
-        u32_at(in self.code, wrapping_add(wrapping_mul(pc, 6), f))
+    pub fn instr(in self, pc: u64, field: u64) -> u32 {
+        u32_at(in self.code, wrapping_add(wrapping_mul(pc, 6), field))
     }
 
     pub fn instr_data(in self, pc: u64) -> i64 {
         i64_at(in self.code_data, pc)
     }
 
-    pub fn rhs(in self, r: u64) -> (u64, u64) {
-        (widen_u64(u32_at(in self.rhs_start, r)), widen_u64(u32_at(in self.rhs_len, r)))
+    pub fn rhs(in self, rule: u64) -> (u64, u64) {
+        (widen_u64(u32_at(in self.rhs_start, rule)), widen_u64(u32_at(in self.rhs_len, rule)))
     }
 
-    pub fn guard_of(in self, r: u64) -> (u8, u32, u32) {
-        (u8_at(in self.guard, r), u32_at(in self.g0, r), u32_at(in self.g1, r))
-    }
-
-    pub fn pnode(in self, k: u64) -> (u8, u32, u8, i64, u32, u32) {
+    pub fn guard_of(in self, rule: u64) -> (u8, u32, u32) {
         (
-            u8_at(in self.p_kind, k),
-            u32_at(in self.p_a, k),
-            u8_at(in self.p_dmode, k),
-            i64_at(in self.p_dval, k),
-            u32_at(in self.p_c0, k),
-            u32_at(in self.p_c1, k)
+            u8_at(in self.guard, rule),
+            u32_at(in self.guard_arg0, rule),
+            u32_at(in self.guard_arg1, rule)
+        )
+    }
+
+    pub fn pnode(in self, node: u64) -> (u8, u32, u8, i64, u32, u32) {
+        (
+            u8_at(in self.pattern_kind, node),
+            u32_at(in self.pattern_operand, node),
+            u8_at(in self.pattern_data_mode, node),
+            i64_at(in self.pattern_data, node),
+            u32_at(in self.pattern_child0, node),
+            u32_at(in self.pattern_child1, node)
         )
     }
 }

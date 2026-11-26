@@ -398,6 +398,8 @@ vesper_crate(
             "//packages/vesper-crypto:files",
             "//bootstrap:files",
             "//crates/vesper-ebpf:files",
+            # @vesper/driver-commands formats through @vesper/fmt (#1996).
+            "//crates/vesper-fmt:files",
             "//crates/vesper-lean-syntax:files",
             "//crates/vesper-pact:files",
             "//crates/vesper-resonance:files",
@@ -428,6 +430,13 @@ vesper_crate(
         # Rust-exit gap wave 1 lane 11 (#1509): @vesper/native-walk's
         # function plans against the native walk over the same corpus.
         "test/self_host_native_walk": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # Part 6a (#2094): @vesper/native-walk's block plans against
+        # `native::block_plan` over the corpus compiles.
+        "test/self_host_native_walk_blocks": glob([
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
@@ -659,6 +668,16 @@ vesper_crate(
             # come from the small examples and fixtures.
             "examples/**/*.ves",
             "tests/fixtures/**/*.ves",
+        ]) + [
+            "//crates/vesper-fmt:files",
+            "//crates/vesper-lean-syntax:files",
+            "//crates/vesper-serde:files",
+        ],
+        # #1341: `vesper verify SOURCE --format` built from @vesper/verify,
+        # beside Rust's; lean/** holds the pinned model it checks.
+        "test/self_host_verify_format": glob([
+            "packages/**",
+            "lean/**",
         ]) + [
             "//crates/vesper-fmt:files",
             "//crates/vesper-lean-syntax:files",
@@ -1042,53 +1061,63 @@ vesper_crate(
             "resources:memory:9216",
             "resources:cpu:1",
         ],
+        # Rust's two Lean compiles and audit, then the port's.
+        "test/self_host_verify_format": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
         "test/verify_extract_cli": [
             "resources:memory:9216",
             "resources:cpu:1",
         ],
-        # Lean 4.35 full-library audits allow 8 GiB, plus wrapper overhead.
+        # Lean 4.35 full-library audits run under -M8192, but measured peaks
+        # (Nov 2026, process tree) are 6.0 GB anonymous memory plus 1.5 GB of
+        # Lean's memory-mapped library, which concurrent tests share. 6 GiB
+        # lets three of these run at once under ci_tests' 18 GiB.
         "test/lean4lean_foundations42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
         "test/lean4lean_construction42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
         "test/lean4lean_order42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
         "test/lean4lean_map42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
         "test/lean4lean_normalize42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
         "test/lean4lean_normalization42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
         "test/lean4lean_comparison42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
+        # Measured peak: 2.3 GB anonymous memory.
         "test/resource_model42": [
-            "resources:memory:9216",
+            "resources:memory:3072",
             "resources:cpu:1",
             "lean_replay",
         ],
+        # Measured peak: 1.5 GB anonymous memory.
         "test/replay42_kernel": [
-            "resources:memory:9216",
+            "resources:memory:2048",
             "resources:cpu:1",
             "lean_replay",
         ],
@@ -1102,33 +1131,34 @@ vesper_crate(
             "resources:memory:5120",
             "resources:cpu:4",
         ],
+        # Full-library audits, measured as above.
         "test/lean4lean_shape42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
         "test/lean4lean_addability42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
         "test/lean4lean_completion42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
         "test/lean4lean_reconstruction42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
         "test/lean4lean_normalized_completion42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
         "test/lean4lean_map_tree42": [
-            "resources:memory:9216",
+            "resources:memory:6144",
             "resources:cpu:1",
             "lean_replay",
         ],
@@ -1156,6 +1186,11 @@ vesper_crate(
         }),
         # proof_audit_cli's replays twice over (Rust and the Vesper port).
         "test/self_host_proof_audit": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # format_proof_cli's kernel checks twice over (Rust and the port).
+        "test/self_host_verify_format": select({
             "@platforms//os:macos": ["@platforms//:incompatible"],
             "//conditions:default": [],
         }),
@@ -1308,6 +1343,10 @@ vesper_crate(
         # (optimize off and on); about 600 s of Rust compiles at step 1 in a
         # release build, so it gets the same headroom.
         "test/self_host_native_walk_frame": "eternal",
+        # The block plan twin (#2094) compiles every 4th corpus main three
+        # times (Rust, Vesper plans, a perturbed plan) for each of optimize
+        # off and on; 80 s in a release build.
+        "test/self_host_native_walk_blocks": "eternal",
         "test/self_host_check_harness": "long",
         # The trait declaration differential (#1185) checks every corpus world.
         "test/self_host_check_pact": "eternal",
@@ -1368,6 +1407,7 @@ vesper_crate(
         "test/self_host_lean_extract": "long",
         # 76 proof-audit cases, 38 kernel replays each way: ~7 min locally.
         "test/self_host_proof_audit": "long",
+        "test/self_host_verify_format": "long",
         # The optimizer differential (#1249) checks every corpus world.
         "test/self_host_optimize": "eternal",
         "test/self_host_optimize_search": "eternal",
@@ -1469,6 +1509,15 @@ vesper_package(
     visibility = ["//visibility:public"],
 )
 
+# @vesper-std/bytes, for its `ascii` byte names in the test-runner and
+# proof-audit ports.
+vesper_package(
+    name = "std_bytes_package",
+    srcs = glob(["packages/vesper-std/bytes/src/**/*.ves"]),
+    manifest = "packages/vesper-std/bytes/Loom.toml",
+    visibility = ["//visibility:public"],
+)
+
 # @vesper-std/toml, the TOML reader of @vesper/loom-calculus (Rust exit SH6
 # lane 12, #1407; #965).
 vesper_package(
@@ -1506,7 +1555,23 @@ vesper_package(
         ":ast_package",
         ":front_package",
         ":std_arena_package",
+        ":std_bytes_package",
         ":std_hash_package",
+        ":std_intern_package",
+    ],
+)
+
+# @vesper/sugar for the hybrid compiler's sugar expansion swap (SH1 lane
+# 14, #1157).
+vesper_package(
+    name = "sugar_package",
+    srcs = glob(["packages/vesper-sugar/src/**/*.ves"]),
+    manifest = "packages/vesper-sugar/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ast_package",
+        ":front_package",
+        ":std_arena_package",
         ":std_intern_package",
     ],
 )
@@ -1649,12 +1714,31 @@ vesper_package(
     manifest = "packages/vesper-proof-audit/Loom.toml",
     visibility = ["//visibility:public"],
     deps = [
+        ":std_bytes_package",
         ":std_env_package",
         ":std_fs_package",
         ":std_hash_package",
         ":std_hash_sys_package",
         ":std_process_package",
         "//crates/vesper-serde:port_package",
+    ],
+)
+
+# @vesper/verify, `vesper verify SOURCE --format` in Vesper (SH5 lane 18,
+# #1341), for the hybrid's `verify` swap.
+vesper_package(
+    name = "verify_package",
+    srcs = glob(["packages/vesper-verify/src/**/*.ves"]),
+    manifest = "packages/vesper-verify/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":proof_audit_package",
+        ":std_env_package",
+        ":std_fs_package",
+        ":std_hash_sys_package",
+        ":std_process_package",
+        "//crates/vesper-fmt:port_package",
+        "//crates/vesper-lean-syntax:port_package",
     ],
 )
 
@@ -2047,6 +2131,7 @@ vesper_package(
         ":std_env_package",
         ":std_fs_package",
         ":std_process_package",
+        "//crates/vesper-fmt:port_package",
     ],
 )
 

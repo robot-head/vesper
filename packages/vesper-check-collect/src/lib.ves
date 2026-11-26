@@ -15,7 +15,9 @@
 //
 // tests/self_host_check_collect.rs compares the canonical dump (`dump`)
 // with the same dump of Rust's `World::collect` over the repository's
-// `.ves` corpus.
+// `.ves` corpus, and `decls_words` (the hybrid driver's `WorldDecls`
+// stream, with nominal modes) with the driver's encoding of the checked
+// world.
 
 use @vesper/ast::{
     Ast, AdtNode, EffectDeclNode, EffectNode, EffectsNode, FieldNode, FnNode, GenericNode, ImplNode,
@@ -1112,9 +1114,15 @@ fn max32(a: u32, b: u32) -> u32 {
     if a > b { a } else { b }
 }
 
+// A collected world: its tables and the sources their entries index.
+struct Collected {
+    c: Collect,
+    s: Srcs
+}
+
 // `World::collect` over `source`: the builtins, the module, then the
 // preludes it brings in.
-fn world_of(in source: Str, inout o: ChunkSeq[u8]) {
+fn collected(in source: Str) -> Collected {
     let module = lower_source(in source).ast;
     let uses = uses_of(in module);
     let with_region = needs_region(in module);
@@ -1199,12 +1207,1016 @@ fn world_of(in source: Str, inout o: ChunkSeq[u8]) {
     collect_all(inout c, in s.strings, 2, s_shift, true, in defined);
     collect_all(inout c, in s.atomics, 6, a_shift, false, in none_defined);
     collect_all(inout c, in s.option, 3, o_shift, true, in defined);
-    dump(in c, in s, inout o);
+    Collected { c: c, s: s }
 }
 
 // The harness entry: the dump of `World::collect` over `source`'s parse.
 pub fn collect_text(in source: Str) -> ChunkSeq[u64] {
     let mut o = ChunkSeq::new[u8]();
-    world_of(in source, inout o);
+    let w = collected(in source);
+    dump(in w.c, in w.s, inout o);
+    pack_text(in o)
+}
+
+// ---------------------------------------------------------------- the declarations
+
+// The checked world's declarations as the hybrid driver's `WorldDecls`
+// step encodes them (`world_words` of crates/vesper-hybrid/src/driver/
+// world.rs): LEB128 numbers, texts as their length and bytes, in the
+// world's key order. A module the checker elaborates before collecting
+// (traits, builtin traits, function objects, projections, tensor types,
+// trace beacons, untyped enum members) is declined.
+
+fn w_n(inout o: ChunkSeq[u8], v: u64) {
+    let mut x = v;
+    loop {
+        let b = wrapping_u8(x % 128);
+        x = x / 128;
+        if x == 0 {
+            o.push(b);
+            return;
+        }
+        o.push(wrapping_add(b, 128));
+    }
+}
+
+fn w_b(inout o: ChunkSeq[u8], b: bool) {
+    if b {
+        o.push(1);
+    } else {
+        o.push(0);
+    }
+}
+
+fn w_lit(inout o: ChunkSeq[u8], in t: Str) {
+    w_n(inout o, t.len());
+    o.extend(in t.as_bytes());
+}
+
+fn w_name(inout o: ChunkSeq[u8], in a: Ast, sym: u32) {
+    if sym == none() {
+        w_n(inout o, 0);
+        return;
+    }
+    let (s, e) = a.names.span(symbol_from_id(sym));
+    w_n(inout o, wrapping_sub(e, s));
+    put_name(inout o, in a, sym);
+}
+
+fn w_key(inout o: ChunkSeq[u8], in t: Table, id: u32) {
+    let (s, e) = t.keys.span(symbol_from_id(id));
+    w_n(inout o, wrapping_sub(e, s));
+    put_key(inout o, in t, id);
+}
+
+fn w_effects(inout o: ChunkSeq[u8], in a: Ast, e: u32) {
+    if e == none() {
+        w_n(inout o, 0);
+        w_b(inout o, false);
+        w_n(inout o, 0);
+        return;
+    }
+    let n = effects_node(in a, e);
+    let k = list_len(in a, n.instances);
+    w_n(inout o, k);
+    for i in 0..k {
+        let x = effect_node(in a, list_at(in a, n.instances, i));
+        w_b(inout o, x.label != none());
+        w_name(inout o, in a, x.name);
+        let m = list_len(in a, x.args);
+        w_n(inout o, m);
+        for j in 0..m {
+            w_ty(inout o, in a, list_at(in a, x.args, j), in norm_off());
+        }
+    }
+    w_b(inout o, n.tail != none());
+    w_name(inout o, in a, n.tail);
+}
+
+// `t` (normalized by `nm` as `put_norm` prints it: a normalized region
+// label is a row).
+fn w_ty(inout o: ChunkSeq[u8], in a: Ast, t: u32, in nm: Norm) {
+    if t == none() {
+        w_n(inout o, 4);
+        return;
+    }
+    let n = type_at(in a, t);
+    if n.kind == 1 {
+        w_n(inout o, 0);
+        w_name(inout o, in a, n.a);
+        let count = list_len(in a, n.b);
+        w_n(inout o, count);
+        let at = if !nm.active {
+            count
+        } else if name_is(in a, n.a, "RegionBox") || name_is(in a, n.a, "Watermark") {
+            0
+        } else if name_is(in a, n.a, "TiledSeq") && count == 2 {
+            1
+        } else {
+            count
+        };
+        for i in 0..count {
+            let arg = list_at(in a, n.b, i);
+            let idx = if i == at {
+                label_index(in a, in nm, source_name(in a, arg))
+            } else {
+                none()
+            };
+            if idx != none() {
+                w_n(inout o, 3);
+            } else {
+                w_ty(inout o, in a, arg, in nm);
+            }
+        }
+    } else if n.kind == 2 {
+        w_n(inout o, 1);
+        let count = list_len(in a, n.a);
+        w_n(inout o, count);
+        for i in 0..count {
+            w_ty(inout o, in a, list_at(in a, n.a, i), in nm);
+        }
+    } else if n.kind == 3 {
+        w_n(inout o, 2);
+        let pairs = list_len(in a, n.a) / 2;
+        w_n(inout o, pairs);
+        for i in 0..pairs {
+            w_n(inout o, widen_u64(list_at(in a, n.a, wrapping_mul(i, 2))));
+            w_ty(inout o, in a, list_at(in a, n.a, wrapping_add(wrapping_mul(i, 2), 1)), in nm);
+        }
+        w_ty(inout o, in a, n.b, in nm);
+        w_effects(inout o, in a, n.c);
+        w_n(inout o, widen_u64(n.d));
+    } else if n.kind == 4 {
+        w_n(inout o, 3);
+    } else {
+        w_n(inout o, 4);
+    }
+}
+
+fn w_generic_items(inout o: ChunkSeq[u8], in a: Ast, list: u32) {
+    for i in 0..list_len(in a, list) {
+        let g = generic_node(in a, list_at(in a, list, i));
+        w_name(inout o, in a, g.name);
+        w_b(inout o, g.row);
+        w_n(inout o, widen_u64(g.bound));
+    }
+}
+
+// A signature's parameters, result and effects (`Out::function`).
+fn w_function(inout o: ChunkSeq[u8], in a: Ast, f: u32, imp: u32, in nm: Norm) {
+    let n = fn_node(in a, f);
+    let mut self_ty = none();
+    if imp != none() {
+        self_ty = impl_node(in a, imp).ty;
+    }
+    let k = list_len(in a, n.params);
+    w_n(inout o, k);
+    for i in 0..k {
+        let p = param_node(in a, list_at(in a, n.params, i));
+        w_n(inout o, widen_u64(p.pass));
+        let pk = list_len(in a, p.projections);
+        w_n(inout o, pk);
+        for j in 0..pk {
+            let path = list_at(in a, p.projections, j);
+            let pl = list_len(in a, path);
+            w_n(inout o, pl);
+            for q in 0..pl {
+                w_name(inout o, in a, list_at(in a, path, q));
+            }
+        }
+        let infer = p.ty == none() || type_at(in a, p.ty).kind == 5;
+        if self_ty != none() && infer && name_is(in a, p.name, "self") {
+            w_ty(inout o, in a, self_ty, in nm);
+        } else {
+            w_ty(inout o, in a, p.ty, in nm);
+        }
+    }
+    w_ty(inout o, in a, n.result, in nm);
+    w_effects(inout o, in a, n.effects);
+}
+
+// A function table entry: its generics (an `impl` block's first), then
+// its signature.
+fn w_fn_in(inout o: ChunkSeq[u8], in a: Ast, e: Entry, in key: String, active: bool) {
+    let n = fn_node(in a, e.node);
+    let mut count = list_len(in a, n.generics);
+    if e.imp != none() {
+        count = wrapping_add(count, list_len(in a, impl_node(in a, e.imp).generics));
+    }
+    w_n(inout o, count);
+    if e.imp != none() {
+        w_generic_items(inout o, in a, impl_node(in a, e.imp).generics);
+    }
+    w_generic_items(inout o, in a, n.generics);
+    w_function(inout o, in a, e.node, e.imp, in norm_of(in a, e.node, in key, active));
+}
+
+fn w_adt_in(inout o: ChunkSeq[u8], in a: Ast, x: u32) {
+    let n = adt_node(in a, x);
+    w_n(inout o, list_len(in a, n.generics));
+    w_generic_items(inout o, in a, n.generics);
+    w_b(inout o, n.is_enum);
+    let vn = list_len(in a, n.variants);
+    w_n(inout o, vn);
+    for i in 0..vn {
+        let v = variant_node(in a, list_at(in a, n.variants, i));
+        w_name(inout o, in a, v.name);
+        w_b(inout o, v.named);
+        let fc = list_len(in a, v.fields);
+        w_n(inout o, fc);
+        for j in 0..fc {
+            let f = field_node(in a, list_at(in a, v.fields, j));
+            w_name(inout o, in a, f.name);
+            w_ty(inout o, in a, f.ty, in norm_off());
+        }
+    }
+}
+
+// The hand-built `Box[T]` of `fip::box_adt` (`box_dump`).
+fn w_box(inout o: ChunkSeq[u8]) {
+    w_n(inout o, 1);
+    w_lit(inout o, "T");
+    w_b(inout o, false);
+    w_n(inout o, 2);
+    w_b(inout o, false);
+    w_n(inout o, 1);
+    w_lit(inout o, "Box");
+    w_b(inout o, false);
+    w_n(inout o, 1);
+    w_lit(inout o, "0");
+    w_n(inout o, 0);
+    w_lit(inout o, "T");
+    w_n(inout o, 0);
+}
+
+fn w_effect_in(inout o: ChunkSeq[u8], in a: Ast, x: u32) {
+    let n = effect_decl_node(in a, x);
+    w_b(inout o, n.linear);
+    w_n(inout o, list_len(in a, n.generics));
+    w_generic_items(inout o, in a, n.generics);
+    let k = list_len(in a, n.ops);
+    w_n(inout o, k);
+    for i in 0..k {
+        let f = list_at(in a, n.ops, i);
+        let op = fn_node(in a, f);
+        w_name(inout o, in a, op.name);
+        let mut local = list_len(in a, op.generics) > 0 || op.body != none();
+        if op.effects != none() {
+            let e = effects_node(in a, op.effects);
+            local = local || list_len(in a, e.instances) > 0 || e.tail != none();
+        }
+        w_b(inout o, local);
+        w_function(inout o, in a, f, none(), in norm_off());
+    }
+}
+
+// ---------------------------------------------------------------- modes
+
+// A `BTreeMap<String, Mode>` of generic bounds (the last set wins).
+struct Bounds {
+    keys: Interner,
+    modes: ChunkSeq[u8]
+}
+
+fn bounds_none() -> Bounds {
+    Bounds { keys: interner_new(), modes: ChunkSeq::new[u8]() }
+}
+
+fn bound_set(inout b: Bounds, in name: Str, m: u8) {
+    let id = widen_u64(b.keys.intern(in name).id);
+    loop {
+        if b.modes.len() > id {
+            break;
+        }
+        b.modes.push(255);
+    }
+    let ok = b.modes.try_set(id, m);
+}
+
+// The bound of `name`, or 255.
+fn bound_get(in b: Bounds, in name: Str) -> u8 {
+    match b.keys.lookup(in name) {
+        Option::Some(sym) => match b.modes.try_get(widen_u64(sym.id())) {
+            Option::Some(m) => m,
+            Option::None => 255,
+        },
+        Option::None => 255,
+    }
+}
+
+// The ADT expansions in progress (`seen` of `world_mode::reference`).
+struct Seen {
+    names: Interner,
+    ids: ChunkSeq[u32],
+    // Each expansion's argument modes: `modes[starts[i]..starts[i + 1]]`.
+    starts: ChunkSeq[u64],
+    modes: ChunkSeq[u8]
+}
+
+fn seen_new() -> Seen {
+    Seen {
+        names: interner_new(),
+        ids: ChunkSeq::new[u32](),
+        starts: ChunkSeq::new[u64](),
+        modes: ChunkSeq::new[u8]()
+    }
+}
+
+fn mode_at(in ms: ChunkSeq[u8], i: u64) -> u8 {
+    match ms.try_get(i) {
+        Option::Some(m) => m,
+        Option::None => 255,
+    }
+}
+
+fn start_at(in seen: Seen, i: u64) -> u64 {
+    match seen.starts.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => seen.modes.len(),
+    }
+}
+
+fn join_mode(a: u8, b: u8) -> u8 {
+    if a > b { a } else { b }
+}
+
+fn is_scalar_text(in n: Str) -> bool {
+    n == "u8"
+        || n == "u16"
+        || n == "u32"
+        || n == "u64"
+        || n == "usize"
+        || n == "i8"
+        || n == "i16"
+        || n == "i32"
+        || n == "i64"
+        || n == "isize"
+        || n == "i128"
+        || n == "u128"
+        || n == "f32"
+        || n == "f64"
+        || n == "bool"
+        || n == "Unit"
+        || n == "Never"
+}
+
+// Bits of a vector element (`vector::Elem::from_type`), or 0.
+fn elem_bits(in a: Ast, t: u32) -> u64 {
+    let n = type_at(in a, t);
+    if n.kind != 1 || list_len(in a, n.b) != 0 {
+        return 0;
+    }
+    if name_is(in a, n.a, "u8") {
+        8
+    } else if name_is(in a, n.a, "u32") || name_is(in a, n.a, "f32") {
+        32
+    } else if name_is(in a, n.a, "u64") || name_is(in a, n.a, "i64") || name_is(in a, n.a, "f64") {
+        64
+    } else {
+        0
+    }
+}
+
+// `vector::shape_of(t).is_some()` for a Named `Vec`/`Mask` type.
+fn is_vector(in a: Ast, t: u32) -> bool {
+    let n = type_at(in a, t);
+    if !(name_is(in a, n.a, "Vec") || name_is(in a, n.a, "Mask")) || list_len(in a, n.b) != 2 {
+        return false;
+    }
+    let c = type_at(in a, list_at(in a, n.b, 1));
+    if c.kind != 1 || list_len(in a, c.b) != 0 || c.a == none() {
+        return false;
+    }
+    let (s, e) = a.names.span(symbol_from_id(c.a));
+    if s == e {
+        return false;
+    }
+    let mut lanes: u64 = 0;
+    for i in s..e {
+        let d = name_byte(in a, i);
+        if d < 48 || d > 57 {
+            return false;
+        }
+        lanes = wrapping_add(wrapping_mul(lanes, 10), widen_u64(wrapping_sub(d, 48)));
+        if lanes > 65535 {
+            return false;
+        }
+    }
+    let bits = wrapping_mul(elem_bits(in a, list_at(in a, n.b, 0)), lanes);
+    bits == 128 || bits == 256 || bits == 512
+}
+
+// The mode of a name with `nargs` arguments that needs no ADT or argument
+// (`world_mode::reference` before its ADT case), or 255.
+fn name_mode(in name: Str, nargs: u64, in b: Bounds) -> u8 {
+    let m = bound_get(in b, in name);
+    if m != 255 {
+        return m;
+    }
+    if is_scalar_text(in name) {
+        return 0;
+    }
+    if name == "String" || name == "Str" || name == "dyn" {
+        return 1;
+    }
+    if name == "RegionBox" && nargs < 2 {
+        return 2;
+    }
+    if (name == "ChunkSeq" || name == "Slice" || name == "TiledSeq") && nargs == 0 {
+        return 1;
+    }
+    255
+}
+
+// `world_mode::reference` of type `t` of `a`.
+fn mode_visit(in w: Collected, in a: Ast, t: u32, in b: Bounds, inout seen: Seen) -> u8 {
+    if t == none() {
+        return 0;
+    }
+    let n = type_at(in a, t);
+    if n.kind == 2 {
+        let mut m: u8 = 0;
+        for i in 0..list_len(in a, n.a) {
+            m = join_mode(m, mode_visit(in w, in a, list_at(in a, n.a, i), in b, inout seen));
+        }
+        return m;
+    }
+    if n.kind == 3 {
+        return wrapping_u8(widen_u64(n.d));
+    }
+    if n.kind != 1 {
+        return 0;
+    }
+    let name = name_text(in a, n.a);
+    let nargs = list_len(in a, n.b);
+    let bound = bound_get(in b, in name.as_str());
+    if bound != 255 {
+        return bound;
+    }
+    if is_vector(in a, t) {
+        return 0;
+    }
+    let simple = name_mode(in name.as_str(), nargs, in b);
+    if simple != 255 {
+        return simple;
+    }
+    if name_is(in a, n.a, "RegionBox") {
+        return mode_visit(in w, in a, list_at(in a, n.b, 1), in b, inout seen);
+    }
+    if name_is(in a, n.a, "ChunkSeq")
+        || name_is(in a, n.a, "Slice")
+        || name_is(in a, n.a, "TiledSeq") {
+        return join_mode(mode_visit(in w, in a, list_at(in a, n.b, 0), in b, inout seen), 1);
+    }
+    let mut args = ChunkSeq::new[u8]();
+    for i in 0..nargs {
+        args.push(mode_visit(in w, in a, list_at(in a, n.b, i), in b, inout seen));
+    }
+    adt_mode(in w, in name.as_str(), in args, inout seen)
+}
+
+// The mode of ADT `name` applied to argument modes `args`.
+fn adt_mode(in w: Collected, in name: Str, in args: ChunkSeq[u8], inout seen: Seen) -> u8 {
+    let sym = match w.c.adts.keys.lookup(in name) {
+        Option::Some(sym) => sym,
+        Option::None => return 2,
+    };
+    let e = entry_at(in w.c.adts, sym.id());
+    if e.src == 5 {
+        return box_mode(in w, in args, inout seen);
+    }
+    if e.src == 0 {
+        adt_mode_in(in w, in w.s.base, e.node, in name, in args, inout seen)
+    } else if e.src == 1 {
+        adt_mode_in(in w, in w.s.module, e.node, in name, in args, inout seen)
+    } else if e.src == 2 {
+        adt_mode_in(in w, in w.s.strings, e.node, in name, in args, inout seen)
+    } else if e.src == 4 {
+        adt_mode_in(in w, in w.s.width, e.node, in name, in args, inout seen)
+    } else if e.src == 6 {
+        adt_mode_in(in w, in w.s.atomics, e.node, in name, in args, inout seen)
+    } else if e.src == 7 {
+        adt_mode_in(in w, in w.s.floats, e.node, in name, in args, inout seen)
+    } else if e.src == 8 {
+        adt_mode_in(in w, in w.s.secret, e.node, in name, in args, inout seen)
+    } else if e.src == 9 {
+        adt_mode_in(in w, in w.s.region, e.node, in name, in args, inout seen)
+    } else {
+        adt_mode_in(in w, in w.s.option, e.node, in name, in args, inout seen)
+    }
+}
+
+// Whether (`name`, `args`) is being expanded; else marks it.
+fn seen_enter(inout seen: Seen, in name: Str, in args: ChunkSeq[u8]) -> bool {
+    let id = seen.names.intern(in name).id;
+    for i in 0..seen.ids.len() {
+        if word32(in seen.ids, i) == id {
+            let from = start_at(in seen, i);
+            let to = start_at(in seen, wrapping_add(i, 1));
+            if wrapping_sub(to, from) == args.len() {
+                let mut same = true;
+                for k in 0..args.len() {
+                    if mode_at(in seen.modes, wrapping_add(from, k)) != mode_at(in args, k) {
+                        same = false;
+                        break;
+                    }
+                }
+                if same {
+                    return true;
+                }
+            }
+        }
+    }
+    seen.ids.push(id);
+    seen.starts.push(seen.modes.len());
+    for k in 0..args.len() {
+        seen.modes.push(mode_at(in args, k));
+    }
+    false
+}
+
+fn seen_leave(inout seen: Seen) {
+    let last = wrapping_sub(seen.ids.len(), 1);
+    let from = start_at(in seen, last);
+    seen.ids.truncate(last);
+    seen.starts.truncate(last);
+    seen.modes.truncate(from);
+}
+
+fn adt_mode_in(
+    in w: Collected,
+    in a: Ast,
+    x: u32,
+    in name: Str,
+    in args: ChunkSeq[u8],
+    inout seen: Seen
+) -> u8 {
+    let n = adt_node(in a, x);
+    if seen_enter(inout seen, in name, in args) {
+        return n.mode;
+    }
+    let mut component = bounds_none();
+    let gn = list_len(in a, n.generics);
+    for i in 0..gn {
+        if i >= args.len() {
+            break;
+        }
+        let g = generic_node(in a, list_at(in a, n.generics, i));
+        let m = match args.try_get(i) {
+            Option::Some(m) => m,
+            Option::None => 0,
+        };
+        bound_set(inout component, in name_text(in a, g.name).as_str(), m);
+    }
+    let mut m = n.mode;
+    for vi in 0..list_len(in a, n.variants) {
+        let v = variant_node(in a, list_at(in a, n.variants, vi));
+        for fi in 0..list_len(in a, v.fields) {
+            let f = field_node(in a, list_at(in a, v.fields, fi));
+            if f.modality == 3 {
+                m = join_mode(m, mode_visit(in w, in a, f.ty, in component, inout seen));
+            } else {
+                m = join_mode(m, f.modality);
+            }
+        }
+    }
+    seen_leave(inout seen);
+    m
+}
+
+// `Box[T]`: affine, its field `T`.
+fn box_mode(in w: Collected, in args: ChunkSeq[u8], inout seen: Seen) -> u8 {
+    if seen_enter(inout seen, "Box", in args) {
+        return 1;
+    }
+    let mut component = bounds_none();
+    let first = match args.try_get(0) {
+        Option::Some(m) => m,
+        Option::None => 255,
+    };
+    if first != 255 {
+        bound_set(inout component, "T", first);
+    }
+    let mut f = name_mode("T", 0, in component);
+    if f == 255 {
+        let none_args = ChunkSeq::new[u8]();
+        f = adt_mode(in w, "T", in none_args, inout seen);
+    }
+    seen_leave(inout seen);
+    join_mode(1, f)
+}
+
+// `Exporter::nominal_mode`: the ADT applied to its own generics, each
+// bounded `copy`.
+fn nominal_mode(in w: Collected, in a: Ast, x: u32, in key: Str) -> u8 {
+    let n = adt_node(in a, x);
+    let mut b = bounds_none();
+    let gn = list_len(in a, n.generics);
+    for i in 0..gn {
+        let g = generic_node(in a, list_at(in a, n.generics, i));
+        bound_set(inout b, in name_text(in a, g.name).as_str(), 0);
+    }
+    let simple = name_mode(in key, gn, in b);
+    if simple != 255 {
+        return simple;
+    }
+    if key == "RegionBox" || key == "ChunkSeq" || key == "Slice" || key == "TiledSeq" {
+        // Each argument is a generic bounded `copy`.
+        return if key == "RegionBox" { 0 } else { 1 };
+    }
+    let mut args = ChunkSeq::new[u8]();
+    for _ in 0..gn {
+        args.push(0);
+    }
+    let mut seen = seen_new();
+    adt_mode(in w, in key, in args, inout seen)
+}
+
+// ---------------------------------------------------------------- declines
+
+// Whether `sym` is `lit` or a path headed by it (`lit::...`).
+fn head_is(in a: Ast, sym: u32, in lit: Str) -> bool {
+    let (s, e) = a.names.span(symbol_from_id(sym));
+    let t = lit.as_bytes();
+    let n = wrapping_sub(e, s);
+    if n < t.len() {
+        return false;
+    }
+    for i in 0..t.len() {
+        let c = match t.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if name_byte(in a, wrapping_add(s, i)) != c {
+            return false;
+        }
+    }
+    n == t.len()
+        || (
+            n > wrapping_add(t.len(), 1)
+                && name_byte(in a, wrapping_add(s, t.len())) == 58
+                && name_byte(in a, wrapping_add(wrapping_add(s, t.len()), 1)) == 58
+        )
+}
+
+// A name that makes the checker elaborate the module before collecting
+// it: the builtin traits (`builtin_traits::wanted`), the trace prelude
+// (`trace_effects::with_prelude`) and the tensor prelude
+// (`tensor_types::active`).
+fn gated_name(in a: Ast, sym: u32) -> bool {
+    head_is(in a, sym, "Eq")
+        || head_is(in a, sym, "Ord")
+        || head_is(in a, sym, "Hash")
+        || head_is(in a, sym, "Ordering")
+        || head_is(in a, sym, "Trace")
+        || head_is(in a, sym, "ActiveSpan")
+        || head_is(in a, sym, "SpanContext")
+        || head_is(in a, sym, "TelemetryAttr")
+        || head_is(in a, sym, "Telemetrable")
+        || head_is(in a, sym, "Tensor")
+        || head_is(in a, sym, "KvCachePool")
+        || head_is(in a, sym, "KvPageLease")
+        || head_is(in a, sym, "ActiveKvSeq")
+        || head_is(in a, sym, "KvOomError")
+        || head_is(in a, sym, "Dims")
+        || head_is(in a, sym, "F32")
+        || head_is(in a, sym, "Bf16")
+        || head_is(in a, sym, "ByteArray")
+        || head_is(in a, sym, "ZeroPad")
+        || head_is(in a, sym, "u16le")
+        || head_is(in a, sym, "u32le")
+        || head_is(in a, sym, "u64le")
+        || head_is(in a, sym, "i16le")
+        || head_is(in a, sym, "i32le")
+        || head_is(in a, sym, "i64le")
+        || head_is(in a, sym, "u16be")
+        || head_is(in a, sym, "u32be")
+        || head_is(in a, sym, "u64be")
+        || head_is(in a, sym, "i16be")
+        || head_is(in a, sym, "i32be")
+        || head_is(in a, sym, "i64be")
+}
+
+fn has_text(in hay: Slice[u8], in needle: Str) -> bool {
+    let t = needle.as_bytes();
+    if hay.len() < t.len() {
+        return false;
+    }
+    for i in 0..wrapping_add(wrapping_sub(hay.len(), t.len()), 1) {
+        let mut ok = true;
+        for j in 0..t.len() {
+            let x = match hay.try_get(wrapping_add(i, j)) {
+                Option::Some(c) => c,
+                Option::None => 0,
+            };
+            let y = match t.try_get(j) {
+                Option::Some(c) => c,
+                Option::None => 1,
+            };
+            if x != y {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            return true;
+        }
+    }
+    false
+}
+
+// Whether `check::check` elaborates `a` (of `source`) before collecting
+// it, so that its world is not `World::collect`'s. Conservative: any name,
+// type or item that could start an elaboration declines.
+fn declined(in source: Str, in a: Ast) -> bool {
+    // Trait bounds and `use model` scopes (`has_frontend_syntax`).
+    if a.m_model_uses.len() > 0 || a.m_bounds.len() > 0 {
+        return true;
+    }
+    for i in 0..a.m_items.len() {
+        let it = item_node(in a, word32(in a.m_items, i));
+        // Traits and conformances.
+        if it.kind == 5 || it.kind == 6 {
+            return true;
+        }
+        // Untyped value enum members (`arrays::untyped_members`).
+        if it.kind == 2 {
+            let f = fn_node(in a, it.node);
+            if head_const(in a, f.name)
+                && (f.result == none() || type_at(in a, f.result).kind == 5) {
+                return true;
+            }
+        }
+    }
+    // Function objects and `dyn` types, projections and tensor shapes.
+    for t in 0..a.types.len() {
+        let n = type_at(in a, wrapping_u32(t));
+        if n.kind == 1
+            && (
+                name_is(in a, n.a, "dyn")
+                    || name_is(in a, n.a, "$projection")
+                    || name_is(in a, n.a, "[]")
+            ) {
+            return true;
+        }
+    }
+    for i in 0..a.names.len() {
+        if gated_name(in a, wrapping_u32(i)) {
+            return true;
+        }
+    }
+    // String literals reach `builtin_traits::wanted`'s needles too, and an
+    // escape can spell them in a decoded one.
+    let b = source.as_bytes();
+    has_text(in b, "Ordering")
+        || has_text(in b, "Eq::")
+        || has_text(in b, "Ord::")
+        || has_text(in b, "Hash::")
+        || has_text(in b, "\\u")
+        || has_text(in b, "\\x")
+}
+
+fn head_const(in a: Ast, sym: u32) -> bool {
+    if sym == none() {
+        return false;
+    }
+    let (s, e) = a.names.span(symbol_from_id(sym));
+    let t = "const$".as_bytes();
+    if wrapping_sub(e, s) < t.len() {
+        return false;
+    }
+    for i in 0..t.len() {
+        let c = match t.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if name_byte(in a, wrapping_add(s, i)) != c {
+            return false;
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------------- the stream
+
+fn w_adt_head(inout o: ChunkSeq[u8], in w: Collected, e: Entry, in key: String) {
+    if e.src == 5 {
+        w_n(inout o, 1);
+        w_n(inout o, widen_u64(nominal_box(in w)));
+        return;
+    }
+    if e.src == 0 {
+        w_adt_index(inout o, in w, in w.s.base, e.node, in key);
+    } else if e.src == 1 {
+        w_adt_index(inout o, in w, in w.s.module, e.node, in key);
+    } else if e.src == 2 {
+        w_adt_index(inout o, in w, in w.s.strings, e.node, in key);
+    } else if e.src == 4 {
+        w_adt_index(inout o, in w, in w.s.width, e.node, in key);
+    } else if e.src == 6 {
+        w_adt_index(inout o, in w, in w.s.atomics, e.node, in key);
+    } else if e.src == 7 {
+        w_adt_index(inout o, in w, in w.s.floats, e.node, in key);
+    } else if e.src == 8 {
+        w_adt_index(inout o, in w, in w.s.secret, e.node, in key);
+    } else if e.src == 9 {
+        w_adt_index(inout o, in w, in w.s.region, e.node, in key);
+    } else {
+        w_adt_index(inout o, in w, in w.s.option, e.node, in key);
+    }
+}
+
+fn nominal_box(in w: Collected) -> u8 {
+    let mut args = ChunkSeq::new[u8]();
+    args.push(0);
+    let mut seen = seen_new();
+    box_mode(in w, in args, inout seen)
+}
+
+fn w_adt_index(inout o: ChunkSeq[u8], in w: Collected, in a: Ast, x: u32, in key: String) {
+    w_n(inout o, list_len(in a, adt_node(in a, x).generics));
+    w_n(inout o, widen_u64(nominal_mode(in w, in a, x, in key.as_str())));
+}
+
+fn w_adt_entry(inout o: ChunkSeq[u8], in s: Srcs, e: Entry) {
+    if e.src == 5 {
+        w_box(inout o);
+    } else if e.src == 0 {
+        w_adt_in(inout o, in s.base, e.node);
+    } else if e.src == 1 {
+        w_adt_in(inout o, in s.module, e.node);
+    } else if e.src == 2 {
+        w_adt_in(inout o, in s.strings, e.node);
+    } else if e.src == 4 {
+        w_adt_in(inout o, in s.width, e.node);
+    } else if e.src == 6 {
+        w_adt_in(inout o, in s.atomics, e.node);
+    } else if e.src == 7 {
+        w_adt_in(inout o, in s.floats, e.node);
+    } else if e.src == 8 {
+        w_adt_in(inout o, in s.secret, e.node);
+    } else if e.src == 9 {
+        w_adt_in(inout o, in s.region, e.node);
+    } else {
+        w_adt_in(inout o, in s.option, e.node);
+    }
+}
+
+fn effect_head(in s: Srcs, e: Entry) -> EffectDeclNode {
+    if e.src == 0 {
+        effect_decl_node(in s.base, e.node)
+    } else if e.src == 1 {
+        effect_decl_node(in s.module, e.node)
+    } else if e.src == 2 {
+        effect_decl_node(in s.strings, e.node)
+    } else if e.src == 4 {
+        effect_decl_node(in s.width, e.node)
+    } else if e.src == 6 {
+        effect_decl_node(in s.atomics, e.node)
+    } else if e.src == 7 {
+        effect_decl_node(in s.floats, e.node)
+    } else if e.src == 8 {
+        effect_decl_node(in s.secret, e.node)
+    } else if e.src == 9 {
+        effect_decl_node(in s.region, e.node)
+    } else {
+        effect_decl_node(in s.option, e.node)
+    }
+}
+
+fn effect_generic_count(in s: Srcs, e: Entry) -> u64 {
+    let n = effect_head(in s, e);
+    if e.src == 0 {
+        list_len(in s.base, n.generics)
+    } else if e.src == 1 {
+        list_len(in s.module, n.generics)
+    } else if e.src == 2 {
+        list_len(in s.strings, n.generics)
+    } else if e.src == 4 {
+        list_len(in s.width, n.generics)
+    } else if e.src == 6 {
+        list_len(in s.atomics, n.generics)
+    } else if e.src == 7 {
+        list_len(in s.floats, n.generics)
+    } else if e.src == 8 {
+        list_len(in s.secret, n.generics)
+    } else if e.src == 9 {
+        list_len(in s.region, n.generics)
+    } else {
+        list_len(in s.option, n.generics)
+    }
+}
+
+fn w_effect_entry(inout o: ChunkSeq[u8], in s: Srcs, e: Entry) {
+    if e.src == 0 {
+        w_effect_in(inout o, in s.base, e.node);
+    } else if e.src == 1 {
+        w_effect_in(inout o, in s.module, e.node);
+    } else if e.src == 2 {
+        w_effect_in(inout o, in s.strings, e.node);
+    } else if e.src == 4 {
+        w_effect_in(inout o, in s.width, e.node);
+    } else if e.src == 6 {
+        w_effect_in(inout o, in s.atomics, e.node);
+    } else if e.src == 7 {
+        w_effect_in(inout o, in s.floats, e.node);
+    } else if e.src == 8 {
+        w_effect_in(inout o, in s.secret, e.node);
+    } else if e.src == 9 {
+        w_effect_in(inout o, in s.region, e.node);
+    } else {
+        w_effect_in(inout o, in s.option, e.node);
+    }
+}
+
+fn w_fn_entry(inout o: ChunkSeq[u8], in s: Srcs, e: Entry, in key: String, active: bool) {
+    if e.src == 0 {
+        w_fn_in(inout o, in s.base, e, in key, active);
+    } else if e.src == 1 {
+        w_fn_in(inout o, in s.module, e, in key, active);
+    } else if e.src == 2 {
+        w_fn_in(inout o, in s.strings, e, in key, active);
+    } else if e.src == 4 {
+        w_fn_in(inout o, in s.width, e, in key, active);
+    } else if e.src == 6 {
+        w_fn_in(inout o, in s.atomics, e, in key, active);
+    } else if e.src == 7 {
+        w_fn_in(inout o, in s.floats, e, in key, active);
+    } else if e.src == 8 {
+        w_fn_in(inout o, in s.secret, e, in key, active);
+    } else if e.src == 9 {
+        w_fn_in(inout o, in s.region, e, in key, active);
+    } else {
+        w_fn_in(inout o, in s.option, e, in key, active);
+    }
+}
+
+fn key_text(in t: Table, id: u32) -> String {
+    let mut k = String::new();
+    let ok = t.keys.resolve_into(symbol_from_id(id), inout k);
+    k
+}
+
+// The `WorldDecls` stream of a collected world without elaboration.
+fn world_words(in w: Collected, inout o: ChunkSeq[u8]) {
+    let adts = sorted_keys(in w.c.adts);
+    let effects = sorted_keys(in w.c.effects);
+    let functions = sorted_keys(in w.c.functions);
+    w_n(inout o, adts.len());
+    for i in 0..adts.len() {
+        let id = word32(in adts, i);
+        w_key(inout o, in w.c.adts, id);
+        w_adt_head(inout o, in w, entry_at(in w.c.adts, id), in key_text(in w.c.adts, id));
+    }
+    w_n(inout o, effects.len());
+    for i in 0..effects.len() {
+        let id = word32(in effects, i);
+        let e = entry_at(in w.c.effects, id);
+        w_key(inout o, in w.c.effects, id);
+        w_n(inout o, effect_generic_count(in w.s, e));
+        w_b(inout o, effect_head(in w.s, e).linear);
+    }
+    for i in 0..adts.len() {
+        let id = word32(in adts, i);
+        w_key(inout o, in w.c.adts, id);
+        w_adt_entry(inout o, in w.s, entry_at(in w.c.adts, id));
+    }
+    for i in 0..effects.len() {
+        let id = word32(in effects, i);
+        w_key(inout o, in w.c.effects, id);
+        w_effect_entry(inout o, in w.s, entry_at(in w.c.effects, id));
+    }
+    // No traits or conformances without elaboration.
+    w_n(inout o, 0);
+    w_n(inout o, 0);
+    let active = region_active(in w.c, in w.s);
+    w_n(inout o, functions.len());
+    for i in 0..functions.len() {
+        let id = word32(in functions, i);
+        w_key(inout o, in w.c.functions, id);
+        w_b(inout o, false);
+        w_fn_entry(
+            inout o,
+            in w.s,
+            entry_at(in w.c.functions, id),
+            in key_text(in w.c.functions, id),
+            active
+        );
+    }
+}
+
+// The harness and driver entry: 1 then the `WorldDecls` stream of
+// `source`'s checked world, or 0 when the checker elaborates the module
+// first (Rust encodes it).
+pub fn decls_words(in source: Str) -> ChunkSeq[u64] {
+    let mut o = ChunkSeq::new[u8]();
+    let probe = lower_source(in source).ast;
+    if declined(in source, in probe) {
+        o.push(0);
+        return pack_text(in o);
+    }
+    o.push(1);
+    let w = collected(in source);
+    world_words(in w, inout o);
     pack_text(in o)
 }

@@ -436,9 +436,11 @@ pub fn fr_wire_next(in pairs: Slice[u8], at: u64, prev_smallest: u64) -> Option[
                 if len > largest {
                     return Option::None;
                 }
-                Option::Some(
-                    WireStep { smallest: wrapping_sub(largest, len), largest: largest, next: q2 }
-                )
+                Option::Some(WireStep {
+                    smallest: wrapping_sub(largest, len),
+                    largest: largest,
+                    next: q2
+                })
             },
         },
     }
@@ -562,10 +564,9 @@ fn kind_of(f: FrameW) -> (u64, u64) {
         FrameW::Crypto { offset, data } => (K_CRYPTO, 0),
         FrameW::Stream { stream_id, offset, data, fin, has_length } => (
             K_STREAM,
-            flag(fin, stream_fin()) | flag(has_length, stream_len()) | flag(
-                offset != 0,
-                stream_off()
-            )
+            flag(fin, stream_fin())
+                | flag(has_length, stream_len())
+                | flag(offset != 0, stream_off())
         ),
         FrameW::MaxData { max } => (K_MAX_DATA, 0),
         FrameW::MaxStreamData { stream_id, max } => (K_MAX_STREAM_DATA, 0),

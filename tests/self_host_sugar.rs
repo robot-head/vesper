@@ -131,117 +131,9 @@ fn check_all(cases: &[Case]) {
     );
 }
 
-fn rust_string_literals(text: &str) -> Vec<String> {
-    let bytes = text.as_bytes();
-    let mut out = vec![];
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if c == b'/' && bytes.get(i + 1) == Some(&b'/') {
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-        if c == b'\'' {
-            // A char literal or a lifetime: skip `'x'` and `'\x'` forms.
-            if bytes.get(i + 2) == Some(&b'\'') {
-                i += 3;
-                continue;
-            }
-            if bytes.get(i + 1) == Some(&b'\\')
-                && let Some(end) = text[i + 2..].find('\'')
-            {
-                i += end + 3;
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-        if c == b'r'
-            && matches!(bytes.get(i + 1), Some(b'#' | b'"'))
-            && !bytes[i.saturating_sub(1)].is_ascii_alphanumeric()
-        {
-            let mut j = i + 1;
-            let mut hashes = 0;
-            while bytes.get(j) == Some(&b'#') {
-                hashes += 1;
-                j += 1;
-            }
-            if bytes.get(j) == Some(&b'"') {
-                let close = format!("\"{}", "#".repeat(hashes));
-                if let Some(end) = text[j + 1..].find(&close) {
-                    out.push(text[j + 1..j + 1 + end].to_owned());
-                    i = j + 1 + end + close.len();
-                    continue;
-                }
-            }
-            i += 1;
-            continue;
-        }
-        if c == b'"' {
-            let mut j = i + 1;
-            let mut s = String::new();
-            let mut ok = true;
-            while j < bytes.len() && bytes[j] != b'"' {
-                if bytes[j] == b'\\' {
-                    let e = bytes.get(j + 1).copied().unwrap_or(b' ');
-                    j += 2;
-                    match e {
-                        b'n' => s.push('\n'),
-                        b't' => s.push('\t'),
-                        b'r' => s.push('\r'),
-                        b'0' => s.push('\0'),
-                        b'\\' => s.push('\\'),
-                        b'"' => s.push('"'),
-                        b'\'' => s.push('\''),
-                        b'\n' => {
-                            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                                j += 1;
-                            }
-                        }
-                        b'u' => {
-                            let end = text[j..].find('}').map(|e| j + e);
-                            match end.and_then(|e| {
-                                u32::from_str_radix(&text[j + 1..e], 16)
-                                    .ok()
-                                    .map(|v| (e, v))
-                            }) {
-                                Some((e, v)) => {
-                                    match char::from_u32(v) {
-                                        Some(ch) => s.push(ch),
-                                        None => ok = false,
-                                    }
-                                    j = e + 1;
-                                }
-                                None => ok = false,
-                            }
-                        }
-                        b'x' => {
-                            match u8::from_str_radix(&text[j..(j + 2).min(text.len())], 16) {
-                                Ok(v) if v < 128 => s.push(v as char),
-                                _ => ok = false,
-                            }
-                            j += 2;
-                        }
-                        _ => ok = false,
-                    }
-                } else {
-                    let ch = text[j..].chars().next().unwrap();
-                    s.push(ch);
-                    j += ch.len_utf8();
-                }
-            }
-            if ok {
-                out.push(s);
-            }
-            i = j + 1;
-            continue;
-        }
-        i += 1;
-    }
-    out
-}
+#[path = "common/rust_literals.rs"]
+mod rust_literals;
+use rust_literals::rust_string_literals;
 
 /// Files whose string literals hold sugar declarations and uses.
 const SUGAR_FILES: &[&str] = &[
@@ -1682,7 +1574,6 @@ fn check_programs(programs: &[Program]) -> (usize, usize) {
     let mut failures = vec![];
     let mut outcomes = std::collections::BTreeMap::<String, usize>::new();
     let mut differ = std::collections::BTreeMap::<String, usize>::new();
-    let mut gaps = 0;
     let mut expanded = 0;
     for program in programs {
         for include_tests in [true, false] {
@@ -1697,16 +1588,7 @@ fn check_programs(programs: &[Program]) -> (usize, usize) {
                 }
             };
             *outcomes.entry(key).or_default() += 1;
-            // Known gap (part 6): the surface profile does not yet run
-            // the expression macro validation (`macro_source::
-            // validate_surface`), so a source whose macro use Rust's
-            // reparse refuses expands in Vesper. Counted, not hidden.
-            let macro_gap = matches!(&rust, Expansion::Diagnostic { code, .. } if code == "E0002")
-                && program.source.contains("macro")
-                && !matches!(&vesper, Expansion::Diagnostic { .. });
-            if rust != vesper && macro_gap {
-                gaps += 1;
-            } else if rust != vesper {
+            if rust != vesper {
                 let short = |e: &Expansion| match e {
                     Expansion::Diagnostic { message, .. } => message.clone(),
                     Expansion::Unchanged => "unchanged".into(),
@@ -1722,7 +1604,12 @@ fn check_programs(programs: &[Program]) -> (usize, usize) {
         }
     }
     eprintln!("{} programs, outcomes {outcomes:?}", programs.len());
-    eprintln!("differences (rust / vesper) {differ:#?}, macro validation gaps {gaps}");
+    eprintln!("differences (rust / vesper) {differ:#?}");
+    println!(
+        "flip-gate differential differences={} cases={}",
+        failures.len(),
+        programs.len() * 2
+    );
     assert!(
         failures.is_empty(),
         "{} of {} expansions differ:\n{}",
@@ -2056,4 +1943,132 @@ fn driver_matches_on_imported_sugar_test_suites() {
         programs > 100 && expanded > 50,
         "{programs} programs, {expanded} expanded"
     );
+}
+
+// The hybrid swap's own input writer and word reader (tests/common/sugar_words.rs),
+// so the flip gate times the path the hybrid runs.
+#[path = "common/sugar_words.rs"]
+mod sugar_words;
+
+/// One gate call: the program, its imports and its scopes.
+type GateCall<'a> = (
+    &'a Program,
+    Vec<(&'a str, &'a str)>,
+    Vec<&'a [(String, usize)]>,
+);
+
+/// One side of the gate: Rust or the module, on one call.
+type GateExpand<'a> = dyn Fn(&Program, &[(&str, &str)], &[&[(String, usize)]], bool) + 'a;
+
+/// The flip gate (scripts/ci/flip-gate/sugar.json) for the hybrid's `sugar`
+/// swap, with `CHECK_HARNESS_SPEED` set: ABBA epochs (`SUGAR_GATE_EPOCHS`,
+/// default 12) over the suite and scope programs, plain and with their
+/// declarations moved into imports, with and without tests. The `expand`
+/// workload times `rust_expand_sugar` against the swap's path: the input
+/// text, the Vesper driver and the words read back into `ExpandedSugar`.
+#[test]
+fn flip_gate() {
+    if std::env::var_os("CHECK_HARNESS_SPEED").is_none() {
+        return;
+    }
+    let epochs: usize = std::env::var("SUGAR_GATE_EPOCHS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(12);
+    let set = std::env::var("SUGAR_GATE_SET").unwrap_or_default();
+    let mut sources = if set == "scopes" {
+        vec![]
+    } else {
+        suite_programs()
+    };
+    if set != "suites" {
+        for program in SCOPE_PROGRAMS {
+            scope_programs(program, &mut sources);
+        }
+    }
+    let mut programs: Vec<Program> = vec![];
+    if set != "imported" {
+        programs.extend(sources.iter().map(|s| Program::plain(s)));
+    }
+    if !matches!(set.as_str(), "plain" | "suites" | "scopes") {
+        programs.extend(imported_programs(&sources));
+    }
+    let calls: Vec<GateCall> = programs
+        .iter()
+        .map(|p| {
+            let imports = p
+                .imports
+                .iter()
+                .map(|(a, d)| (a.as_str(), d.as_str()))
+                .collect();
+            let scopes = p.scope_of.iter().map(|&g| p.groups[g].as_slice()).collect();
+            (p, imports, scopes)
+        })
+        .collect();
+    let time = |f: &GateExpand| {
+        let start = std::time::Instant::now();
+        for (p, imports, scopes) in &calls {
+            for include_tests in [true, false] {
+                f(p, imports, scopes, include_tests);
+            }
+        }
+        start.elapsed().as_nanos()
+    };
+    let rust = || {
+        time(&|p, imports, scopes, tests| {
+            std::hint::black_box(sugar_expand::rust_expand_sugar(
+                &p.source, imports, scopes, &p.visible, tests,
+            ))
+            .ok();
+        })
+    };
+    let vesper = || {
+        time(&|p, imports, scopes, tests| {
+            let input = sugar_words::input(&p.source, imports, scopes, &p.visible).unwrap();
+            let call = vesper_port_abi::HostCall::new()
+                .str(&input)
+                .word(u64::from(tests))
+                .word(0);
+            // SAFETY: as `vesper_match`.
+            let words =
+                unsafe { call.seq(JIT_RUNTIME, |w| sugar().expand_scoped.call(w).unwrap()) };
+            std::hint::black_box(sugar_words::decode(&words)).ok();
+        })
+    };
+    // Warm-up, untimed.
+    rust();
+    vesper();
+    if std::env::var_os("SUGAR_GATE_PHASES").is_some() {
+        let (mut encode, mut call, mut decode) = (0u128, 0u128, 0u128);
+        for (p, imports, scopes) in &calls {
+            for tests in [true, false] {
+                let t = std::time::Instant::now();
+                let input = sugar_words::input(&p.source, imports, scopes, &p.visible).unwrap();
+                encode += t.elapsed().as_nanos();
+                let t = std::time::Instant::now();
+                let host = vesper_port_abi::HostCall::new()
+                    .str(&input)
+                    .word(u64::from(tests))
+                    .word(0);
+                // SAFETY: as `vesper_match`.
+                let words =
+                    unsafe { host.seq(JIT_RUNTIME, |w| sugar().expand_scoped.call(w).unwrap()) };
+                call += t.elapsed().as_nanos();
+                let t = std::time::Instant::now();
+                std::hint::black_box(sugar_words::decode(&words)).ok();
+                decode += t.elapsed().as_nanos();
+            }
+        }
+        eprintln!(
+            "phases: encode {encode} ns, vesper {call} ns, decode {decode} ns, rust {} ns",
+            rust()
+        );
+    }
+    let mut pairs = String::new();
+    for _ in 0..epochs {
+        let (r1, v1, v2, r2) = (rust(), vesper(), vesper(), rust());
+        pairs += &format!(" {}:{}", r1 + r2, v1 + v2);
+    }
+    eprintln!("expand workload: {} programs", programs.len());
+    println!("flip-gate pairs expand{pairs}");
 }

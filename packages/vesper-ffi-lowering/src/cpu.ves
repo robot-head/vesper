@@ -47,68 +47,68 @@ const CSET_W0_NE: u64 = 0x1a9f07e0;
 // defines (`cpu::PREFIX`).
 const PREFIX_LEN: u64 = 9;
 
-fn at(in b: Slice[u8], i: u64) -> u8 {
-    b.try_get(i).unwrap_or(0)
+fn at(in bytes: Slice[u8], i: u64) -> u8 {
+    bytes.try_get(i).unwrap_or(0)
 }
 
-// Whether `b[a..]` is `text`.
-fn rest_is(in b: Slice[u8], a: u64, in text: Str) -> bool {
-    let t = text.as_bytes();
-    if wrapping_sub(b.len(), a) != t.len() || a > b.len() {
+// Whether `bytes[from..]` is `text`.
+fn rest_is(in bytes: Slice[u8], from: u64, in text: Str) -> bool {
+    let want = text.as_bytes();
+    if wrapping_sub(bytes.len(), from) != want.len() || from > bytes.len() {
         return false;
     }
-    for i in 0..t.len() {
-        if at(in b, wrapping_add(a, i)) != at(in t, i) {
+    for i in 0..want.len() {
+        if at(in bytes, wrapping_add(from, i)) != at(in want, i) {
             return false;
         }
     }
     true
 }
 
-// Whether `b` starts with `vstd_cpu_`.
-pub fn has_prefix(in b: Slice[u8]) -> bool {
+// Whether `bytes` starts with `vstd_cpu_`.
+pub fn has_prefix(in bytes: Slice[u8]) -> bool {
     let text = "vstd_cpu_";
-    let p = text.as_bytes();
-    if b.len() < p.len() {
+    let prefix = text.as_bytes();
+    if bytes.len() < prefix.len() {
         return false;
     }
-    for i in 0..p.len() {
-        if at(in b, i) != at(in p, i) {
+    for i in 0..prefix.len() {
+        if at(in bytes, i) != at(in prefix, i) {
             return false;
         }
     }
     true
 }
 
-fn hex_digit(c: u8) -> u8 {
-    if c >= 97 {
-        wrapping_u8(wrapping_add(wrapping_sub(widen_u64(c), 97), 10))
+fn hex_digit(ascii: u8) -> u8 {
+    if ascii >= 97 {
+        wrapping_u8(wrapping_add(wrapping_sub(widen_u64(ascii), 97), 10))
     } else {
-        wrapping_u8(wrapping_sub(widen_u64(c), 48))
+        wrapping_u8(wrapping_sub(widen_u64(ascii), 48))
     }
 }
 
 // The bytes written as hex pairs in `text`.
-fn hex(inout o: ChunkSeq[u8], in text: Str) {
-    let t = text.as_bytes();
+fn hex(inout out: ChunkSeq[u8], in text: Str) {
+    let digits = text.as_bytes();
     let mut i: u64 = 0;
     loop {
-        if wrapping_add(i, 1) >= t.len() {
+        if wrapping_add(i, 1) >= digits.len() {
             break;
         }
-        let hi = hex_digit(at(in t, i));
-        let lo = hex_digit(at(in t, wrapping_add(i, 1)));
-        o.push(wrapping_u8(wrapping_add(widen_u64(hi) << 4, widen_u64(lo))));
+        let hi = hex_digit(at(in digits, i));
+        let lo = hex_digit(at(in digits, wrapping_add(i, 1)));
+        out.push(wrapping_u8(wrapping_add(widen_u64(hi) << 4, widen_u64(lo))));
         i = wrapping_add(i, 2);
     }
 }
 
 // An AArch64 instruction word, little-endian.
-fn word(inout o: ChunkSeq[u8], x: u64) {
-    o.push(wrapping_u8(x & 255));
-    o.push(wrapping_u8((x >> 8) & 255));
-    o.push(wrapping_u8((x >> 16) & 255));
-    o.push(wrapping_u8((x >> 24) & 255));
+fn word(inout out: ChunkSeq[u8], instr: u64) {
+    out.push(wrapping_u8(instr & 255));
+    out.push(wrapping_u8((instr >> 8) & 255));
+    out.push(wrapping_u8((instr >> 16) & 255));
+    out.push(wrapping_u8((instr >> 24) & 255));
 }
 
 // The architecture and machine code of `symbol` (`cpu::function`): the
@@ -118,8 +118,8 @@ pub fn cpu_function(in symbol: Slice[u8], inout code: ChunkSeq[u8]) -> u64 {
     if !has_prefix(in symbol) {
         return ARCH_NONE;
     }
-    let a = PREFIX_LEN;
-    if rest_is(in symbol, a, "cpuid") {
+    let name_start = PREFIX_LEN;
+    if rest_is(in symbol, name_start, "cpuid") {
         // mov r8, rdx; mov r9, rbx; mov eax, edi; mov ecx, esi; cpuid;
         // mov [r8], eax; mov [r8+4], ebx; mov [r8+8], ecx;
         // mov [r8+12], edx; mov rbx, r9; ret. `cpuid` clobbers the
@@ -127,68 +127,68 @@ pub fn cpu_function(in symbol: Slice[u8], inout code: ChunkSeq[u8]) -> u64 {
         hex(inout code, "4989d04989d989f889f10fa241890041895804418948084189500c4c89cbc3");
         return ARCH_X86_64;
     }
-    if rest_is(in symbol, a, "rdtsc") {
+    if rest_is(in symbol, name_start, "rdtsc") {
         // lfence; rdtsc; shl rdx, 32; or rax, rdx; ret
         hex(inout code, "0faee80f3148c1e2204809d0c3");
         return ARCH_X86_64;
     }
-    if rest_is(in symbol, a, "rdpmc") {
+    if rest_is(in symbol, name_start, "rdpmc") {
         // mov ecx, edi; lfence; rdpmc; lfence; shl rdx, 32; or rax, rdx; ret
         hex(inout code, "89f90faee80f330faee848c1e2204809d0c3");
         return ARCH_X86_64;
     }
-    if rest_is(in symbol, a, "rdrand64") {
+    if rest_is(in symbol, name_start, "rdrand64") {
         // rdrand rax; setc cl; mov [rdi], rax; movzx eax, cl; ret
         hex(inout code, "480fc7f00f92c14889070fb6c1c3");
         return ARCH_X86_64;
     }
-    if rest_is(in symbol, a, "rdpkru") {
+    if rest_is(in symbol, name_start, "rdpkru") {
         // xor ecx, ecx; rdpkru; ret
         hex(inout code, "31c90f01eec3");
         return ARCH_X86_64;
     }
-    if rest_is(in symbol, a, "wrpkru") {
+    if rest_is(in symbol, name_start, "wrpkru") {
         // mov eax, edi; xor ecx, ecx; xor edx, edx; wrpkru; ret
         hex(inout code, "89f831c931d20f01efc3");
         return ARCH_X86_64;
     }
-    if rest_is(in symbol, a, "lfence") {
+    if rest_is(in symbol, name_start, "lfence") {
         hex(inout code, "0faee8c3");
         return ARCH_X86_64;
     }
-    if rest_is(in symbol, a, "mfence") {
+    if rest_is(in symbol, name_start, "mfence") {
         hex(inout code, "0faef0c3");
         return ARCH_X86_64;
     }
-    if rest_is(in symbol, a, "sfence") {
+    if rest_is(in symbol, name_start, "sfence") {
         hex(inout code, "0faef8c3");
         return ARCH_X86_64;
     }
-    if rest_is(in symbol, a, "isb") {
+    if rest_is(in symbol, name_start, "isb") {
         word(inout code, ISB);
-    } else if rest_is(in symbol, a, "dmb_ish") {
+    } else if rest_is(in symbol, name_start, "dmb_ish") {
         word(inout code, DMB_ISH);
-    } else if rest_is(in symbol, a, "dsb_sy") {
+    } else if rest_is(in symbol, name_start, "dsb_sy") {
         word(inout code, DSB_SY);
-    } else if rest_is(in symbol, a, "rdpor") {
+    } else if rest_is(in symbol, name_start, "rdpor") {
         word(inout code, MRS_POR);
-    } else if rest_is(in symbol, a, "wrpor") {
+    } else if rest_is(in symbol, name_start, "wrpor") {
         word(inout code, MSR_POR);
         word(inout code, ISB);
-    } else if rest_is(in symbol, a, "cntvct") {
+    } else if rest_is(in symbol, name_start, "cntvct") {
         word(inout code, ISB);
         word(inout code, MRS_CNTVCT);
-    } else if rest_is(in symbol, a, "pmccntr") {
+    } else if rest_is(in symbol, name_start, "pmccntr") {
         word(inout code, ISB);
         word(inout code, MRS_PMCCNTR);
         word(inout code, ISB);
-    } else if rest_is(in symbol, a, "pmevcntr") {
+    } else if rest_is(in symbol, name_start, "pmevcntr") {
         word(inout code, MOV_W0_W0);
         word(inout code, MSR_PMSELR);
         word(inout code, ISB);
         word(inout code, MRS_PMXEVCNTR);
         word(inout code, ISB);
-    } else if rest_is(in symbol, a, "rndr") {
+    } else if rest_is(in symbol, name_start, "rndr") {
         word(inout code, MRS_RNDR_X1);
         word(inout code, STR_X1_X0);
         word(inout code, CSET_W0_NE);
@@ -199,9 +199,9 @@ pub fn cpu_function(in symbol: Slice[u8], inout code: ChunkSeq[u8]) -> u64 {
     ARCH_AARCH64
 }
 
-fn put(inout o: ChunkSeq[u8], in s: Slice[u8]) {
-    for i in 0..s.len() {
-        o.push(at(in s, i));
+fn put(inout out: ChunkSeq[u8], in bytes: Slice[u8]) {
+    for i in 0..bytes.len() {
+        out.push(at(in bytes, i));
     }
 }
 
