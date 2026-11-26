@@ -231,8 +231,7 @@ impl Checker<'_> {
                 self.place(&col_place, env, usage, base.span.clone());
                 let base_ty = self.peek_type(base, env);
                 self.types
-                    .entry((base.span.start, base.span.end))
-                    .or_insert(base_ty);
+                    .insert_if_absent((base.span.start, base.span.end), base_ty);
                 return;
             }
             // Read-only metadata (`len`, `tile_count`) is allowed on any
@@ -250,8 +249,7 @@ impl Checker<'_> {
                 }
                 let base_ty = self.peek_type(base, env);
                 self.types
-                    .entry((base.span.start, base.span.end))
-                    .or_insert(base_ty);
+                    .insert_if_absent((base.span.start, base.span.end), base_ty);
                 return;
             }
         }
