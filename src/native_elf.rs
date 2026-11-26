@@ -1,4 +1,5 @@
 //! ELF serializer swap for Linux x86-64 code and read-only data.
+use super::machine::{DATA_NAMESPACE, FUNCTION_NAMESPACE};
 use cranelift_codegen::{
     Context, binemit::Reloc, control::ControlPlane, entity::SecondaryMap, ir, isa::TargetIsa,
 };
@@ -59,8 +60,6 @@ impl RelocationType {
 }
 
 const SYMBOL_COUNT_WORD: usize = 2;
-const FUNCTION_NAMESPACE: u32 = 0;
-const DATA_NAMESPACE: u32 = 1;
 
 enum Target {
     Function(FuncId),

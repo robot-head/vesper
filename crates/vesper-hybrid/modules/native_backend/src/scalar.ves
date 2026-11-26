@@ -2,8 +2,8 @@ use self::x86_64::{
     ADD_RM_R64, AND_RM_R64, ARGUMENTS, BYTE_BITS, DWORD_BITS, QWORD_BITS, WORD_BITS, CC_A, CC_AE,
     CC_B, CC_BE, CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, Instruction, NEG_EXTENSION, NOT_EXTENSION,
     OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION, SHL_EXTENSION, SHR_EXTENSION, SUB_RM_R64,
-    UNASSIGNED, XOR_RM_R64, REGISTER_CODES, arg_register, emit, emit_direct_call, find_register,
-    patch_forward_branch, register_bit
+    UNASSIGNED, XOR_RM_R64, REGISTER_CODES, arg_register, emit, emit_direct_call,
+    emit_symbol_address, find_register, patch_forward_branch, register_bit
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -50,6 +50,13 @@ const CALL_ARGUMENT: u64 = 39;
 const CALL_VOID: u64 = 40;
 const CALL_PAIR: u64 = 41;
 const CALL_HIGH: u64 = 42;
+const SYMBOL_RELATIVE: u64 = 43;
+const SYMBOL_GOT: u64 = 44;
+
+// Relocation kinds shared with src/native_machine.rs.
+const PLT_CALL: u64 = 0;
+const RELATIVE_DATA: u64 = 1;
+const GOT_DATA: u64 = 2;
 
 const EQUAL: u64 = 0;
 const NOT_EQUAL: u64 = 1;
@@ -246,6 +253,10 @@ fn is_call(op: u64) -> bool {
     op == CALL || op == CALL_VOID || op == CALL_PAIR
 }
 
+fn is_symbol(op: u64) -> bool {
+    op == SYMBOL_RELATIVE || op == SYMBOL_GOT
+}
+
 fn store_width(op: u64) -> u64 {
     match op {
         STORE_BYTE | STACK_STORE_BYTE => BYTE_BITS,
@@ -289,6 +300,7 @@ fn reads_left(in record: Record) -> bool {
         && op != STACK_LOAD
         && op != RETURN_PAIR
         && !is_call(op)
+        && !is_symbol(op)
         && op != CALL_ARGUMENT
         && op != CALL_HIGH
         && (op != EARLY_RETURN || record.left != NO_VALUE)
@@ -331,7 +343,7 @@ fn find_last_reads(
     count: u64,
     result: u64,
     second: u64,
-    allow_calls: bool,
+    allow_relocations: bool,
     inout frame: FrameLayout
 ) -> Option[ChunkSeq[u64]] {
     let values = wrapping_add(arguments, count);
@@ -353,13 +365,16 @@ fn find_last_reads(
         let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
-        if record.op > CALL_HIGH
+        if record.op > SYMBOL_GOT
             || (record.op == STACK_SLOT && index >= frame.slots.len())
             || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
         {
             return Option::None;
         }
         let last = last_read(in reads, value);
+        if is_symbol(record.op) && (!allow_relocations || record.left > DISP32_MASK) {
+            return Option::None;
+        }
         if record.op == CALL_HIGH
             && (index == 0 || read_record(in words, wrapping_sub(index, 1)).op != CALL_PAIR)
         {
@@ -434,7 +449,7 @@ fn find_last_reads(
             return Option::None;
         }
         if is_call(record.op) {
-            if !allow_calls
+            if !allow_relocations
                 || record.right > MAX_ARGUMENTS
                 || record.right > index
                 || record.left > DISP32_MASK
@@ -877,7 +892,7 @@ fn emit_call(
 
 pub fn encode_block(
     in words: Slice[u64],
-    allow_calls: bool,
+    allow_relocations: bool,
     inout relocations: ChunkSeq[u64]
 ) -> ChunkSeq[u8] {
     if words.len() < HEADER_WORDS {
@@ -917,7 +932,7 @@ pub fn encode_block(
         count,
         result,
         second,
-        allow_calls,
+        allow_relocations,
         inout frame
     ) {
         Option::Some(last) => last,
@@ -976,6 +991,7 @@ pub fn encode_block(
                 in high
             );
             relocations.push(offset);
+            relocations.push(PLT_CALL);
             relocations.push(record.left);
             call_index = wrapping_add(call_index, 1);
             continue;
@@ -1043,6 +1059,12 @@ pub fn encode_block(
             );
         } else if record.op == CONSTANT {
             emit(inout output, in Instruction::Immediate(destination, record.left));
+        } else if is_symbol(record.op) {
+            let got = record.op == SYMBOL_GOT;
+            let offset = emit_symbol_address(inout output, destination, got);
+            relocations.push(offset);
+            relocations.push(if got { GOT_DATA } else { RELATIVE_DATA });
+            relocations.push(record.left);
         } else if is_stack_operation(record.op) {
             let offset = match stack_displacement(in frame, in record) {
                 Option::Some(offset) => wrapping_u32(wrapping_add(

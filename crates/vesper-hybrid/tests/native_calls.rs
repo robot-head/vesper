@@ -79,17 +79,23 @@ fn checked(source: &str) -> check::Checked {
 fn call_records_require_relocations_and_keep_discarded_calls() {
     let call = [0, 0, 38, 1, 0, 0];
     assert!(binding::x86_64_integer_block(&call).is_empty());
-    assert!(!binding::x86_64_callable_block(&call).is_empty());
+    assert!(!binding::x86_64_relocatable_block(&call).is_empty());
     // One argument was promised with no preceding argument record.
-    assert!(binding::x86_64_callable_block(&[0, 0, 38, 1, 1, 0]).is_empty());
+    assert!(binding::x86_64_relocatable_block(&[0, 0, 38, 1, 1, 0]).is_empty());
     // The call argument refers to its own metadata slot.
-    assert!(binding::x86_64_callable_block(&[1, 2, 39, 1, 0, 0, 38, 1, 1, 0]).is_empty());
+    assert!(binding::x86_64_relocatable_block(&[1, 2, 39, 1, 0, 0, 38, 1, 1, 0]).is_empty());
     // A retained input supplies the return value. The call still gets a relocation.
-    assert!(!binding::x86_64_callable_block(&[1, 0, 38, 1, 0, 0]).is_empty());
+    assert!(!binding::x86_64_relocatable_block(&[1, 0, 38, 1, 0, 0]).is_empty());
     // A two-result call owns the next slot, which cannot appear on its own.
-    assert!(binding::x86_64_callable_block(&[0, 0, 41, 1, 0, 0]).is_empty());
-    assert!(binding::x86_64_callable_block(&[0, 1, 38, 1, 0, 0, 42, 0, 0, 0]).is_empty());
-    assert!(!binding::x86_64_callable_block(&[0, 1, 41, 1, 0, 0, 42, 0, 0, 0]).is_empty());
+    assert!(binding::x86_64_relocatable_block(&[0, 0, 41, 1, 0, 0]).is_empty());
+    assert!(binding::x86_64_relocatable_block(&[0, 1, 38, 1, 0, 0, 42, 0, 0, 0]).is_empty());
+    assert!(!binding::x86_64_relocatable_block(&[0, 1, 41, 1, 0, 0, 42, 0, 0, 0]).is_empty());
+    // Both data-address forms require a relocation.
+    for address in [43, 44] {
+        let request = [0, 0, address, 1, 0, 0];
+        assert!(binding::x86_64_integer_block(&request).is_empty());
+        assert!(!binding::x86_64_relocatable_block(&request).is_empty());
+    }
 }
 
 fn jit_module() -> JITModule {
@@ -114,18 +120,22 @@ fn define_callable(
 ) {
     const WORD_BYTES: usize = size_of::<u64>();
     const REL32_BYTES: i64 = size_of::<i32>() as i64;
+    const PLT_CALL: u64 = 0;
     let words = native::machine::integer_block_words(function).unwrap();
-    let packet = binding::x86_64_callable_block(&words);
+    let packet = binding::x86_64_relocatable_block(&words);
     let (length, packet) = packet.split_first_chunk::<WORD_BYTES>().unwrap();
     let (code, targets) = packet.split_at(u64::from_le_bytes(*length) as usize);
-    let (targets, rest) = targets.as_chunks::<{ 2 * WORD_BYTES }>();
+    let (targets, rest) = targets.as_chunks::<{ 3 * WORD_BYTES }>();
     assert_eq!(targets.len(), expected_relocations);
     assert!(rest.is_empty());
     let relocations: Vec<_> = targets
         .iter()
         .map(|target| {
-            let (offset, id) = target.split_first_chunk::<WORD_BYTES>().unwrap();
-            let id = u64::from_le_bytes(id.try_into().unwrap()) as u32;
+            let ([offset, kind, id], _) = target.as_chunks::<WORD_BYTES>() else {
+                unreachable!();
+            };
+            assert_eq!(u64::from_le_bytes(*kind), PLT_CALL);
+            let id = u64::from_le_bytes(*id) as u32;
             assert_eq!(id, callee.as_u32());
             ModuleReloc {
                 offset: u64::from_le_bytes(*offset) as u32,
@@ -148,7 +158,7 @@ fn void_calls_and_conditional_returns_preserve_side_effects() {
     let code = binding::x86_64_integer_block(&[0, NO_VALUE]);
     assert!(!code.is_empty(), "an empty procedure still needs a return");
     // The value-less call's record must never be used as a result.
-    assert!(binding::x86_64_callable_block(&[0, 0, 40, 1, 0, 0]).is_empty());
+    assert!(binding::x86_64_relocatable_block(&[0, 0, 40, 1, 0, 0]).is_empty());
 
     let mut module = jit_module();
     let mut signature = module.make_signature();
@@ -377,8 +387,8 @@ fn direct_calls_preserve_the_abi_across_object_writers() {
         .is_ok()
     );
     assert!(
-        native::machine::install_call_encoder(|words| {
-            let packet = binding::x86_64_callable_block(words);
+        native::machine::install_relocation_encoder(|words| {
+            let packet = binding::x86_64_relocatable_block(words);
             if packet.is_empty() {
                 return None;
             }

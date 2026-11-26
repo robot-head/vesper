@@ -3,13 +3,13 @@ use cranelift_codegen::{
     binemit::Reloc,
     entity::SecondaryMap,
     ir::{
-        AbiParam, Block, BlockCall, Endianness, ExternalName, Function, Inst, InstructionData,
-        MemFlags, Opcode, StackSlot, StackSlotKind, TrapCode, Type, Value, ValueDef,
-        condcodes::IntCC, immediates::Offset32, types,
+        AbiParam, Block, BlockCall, Endianness, ExternalName, Function, GlobalValue,
+        GlobalValueData, Inst, InstructionData, MemFlags, Opcode, StackSlot, StackSlotKind,
+        TrapCode, Type, Value, ValueDef, condcodes::IntCC, immediates::Offset32, types,
     },
     isa::CallConv,
 };
-use cranelift_module::{ModuleReloc, ModuleRelocTarget};
+use cranelift_module::{DataId, Linkage, ModuleDeclarations, ModuleReloc, ModuleRelocTarget};
 use std::sync::OnceLock;
 
 /// Opcodes in the architecture-independent integer block format.
@@ -59,20 +59,22 @@ enum IntegerOp {
     CallVoid = 40,
     CallPair = 41,
     CallHigh = 42,
+    SymbolRelative = 43,
+    SymbolGot = 44,
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
 static ENCODER: OnceLock<Encoder> = OnceLock::new();
-static CALL_ENCODER: OnceLock<Encoder> = OnceLock::new();
+static RELOCATION_ENCODER: OnceLock<Encoder> = OnceLock::new();
 
 /// Install the x86-64 integer encoder. A declined request uses Cranelift.
 pub fn install_integer_encoder(encode: Encoder) -> Result<(), Encoder> {
     ENCODER.set(encode)
 }
 
-/// Installs the encoder for functions that need direct-call relocations.
-pub fn install_call_encoder(encode: Encoder) -> Result<(), Encoder> {
-    CALL_ENCODER.set(encode)
+/// Installs the encoder for functions that can reference external symbols.
+pub fn install_relocation_encoder(encode: Encoder) -> Result<(), Encoder> {
+    RELOCATION_ENCODER.set(encode)
 }
 
 const ARGUMENT_COUNT: usize = 0;
@@ -86,8 +88,12 @@ const MAX_GP_ARGUMENTS: usize = GP_REGISTER_ARGUMENTS + STACK_PROBE_INTERVAL / s
 const GP_RESULTS: usize = 2;
 // Limit code duplication when several paths share a suffix.
 const MAX_LINEARIZED_BRANCHES: usize = 32;
-const FUNCTION_NAMESPACE: u32 = 0;
-const CALL_DISPLACEMENT_BYTES: i64 = size_of::<i32>() as i64;
+pub(super) const FUNCTION_NAMESPACE: u32 = 0;
+pub(super) const DATA_NAMESPACE: u32 = 1;
+const REL32_BYTES: i64 = size_of::<i32>() as i64;
+const PLT_CALL: u64 = 0;
+const RELATIVE_DATA: u64 = 1;
+const GOT_DATA: u64 = 2;
 
 fn binary_op(opcode: Opcode) -> Option<IntegerOp> {
     Some(match opcode {
@@ -174,9 +180,10 @@ struct IntegerBlocks<'a> {
     function: &'a Function,
     arity: usize,
     words: Vec<u64>,
-    calls: bool,
+    relocations: bool,
     branches: usize,
     allow_hardware_faults: bool,
+    declarations: Option<&'a ModuleDeclarations>,
 }
 
 impl IntegerBlocks<'_> {
@@ -258,7 +265,7 @@ impl IntegerBlocks<'_> {
         let ExternalName::User(name) = callee.name else {
             return None;
         };
-        let name = &self.function.params.user_named_funcs()[name];
+        let name = self.function.params.user_named_funcs().get(name)?;
         let signature = &dfg.signatures[callee.signature];
         let args = dfg.inst_args(inst);
         if name.namespace != FUNCTION_NAMESPACE
@@ -297,7 +304,7 @@ impl IntegerBlocks<'_> {
             }
             self.append(IntegerOp::CallArgument, [values[arg]?, 0, 0]);
         }
-        self.calls = true;
+        self.relocations = true;
         let id = self.append(op, [u64::from(name.index), args.len() as u64, 0]);
         if let Some(&value) = results.first() {
             values[value] = Some(id);
@@ -306,6 +313,44 @@ impl IntegerBlocks<'_> {
             values[high] = Some(self.append(IntegerOp::CallHigh, [0; 3]));
         }
         Some(())
+    }
+
+    fn symbol_address(&mut self, global: GlobalValue, width: u64) -> Option<u64> {
+        let GlobalValueData::Symbol {
+            name: ExternalName::User(name),
+            offset,
+            colocated,
+            tls: false,
+        } = self.function.global_values[global]
+        else {
+            return None;
+        };
+        let name = self.function.params.user_named_funcs().get(name)?;
+        if name.namespace != DATA_NAMESPACE {
+            return None;
+        }
+        let local = if let Some(declarations) = self.declarations {
+            if name.index as usize >= declarations.get_data_objects().size_hint().0 {
+                return None;
+            }
+            let data = declarations.get_data_decl(DataId::from_u32(name.index));
+            matches!(data.linkage, Linkage::Local | Linkage::Hidden)
+        } else {
+            false
+        };
+        // Exported ELF data may be interposed when used in a shared object.
+        let op = if colocated && local {
+            IntegerOp::SymbolRelative
+        } else {
+            IntegerOp::SymbolGot
+        };
+        self.relocations = true;
+        let address = self.append(op, [u64::from(name.index), 0, 0]);
+        if offset.bits() == 0 {
+            return Some(address);
+        }
+        let offset = self.append(IntegerOp::Constant, [offset.bits() as u64, 0, 0]);
+        Some(self.append(IntegerOp::Add, [address, offset, width]))
     }
 
     // A block's arguments are already mapped by its incoming edge.
@@ -372,6 +417,13 @@ impl IntegerBlocks<'_> {
             let output = function.dfg.value_type(value);
             let width = integer_width(output)?;
             let (op, operands) = match function.dfg.insts[inst] {
+                InstructionData::UnaryGlobalValue {
+                    opcode: Opcode::GlobalValue | Opcode::SymbolValue,
+                    global_value,
+                } if output == types::I64 => {
+                    values[value] = Some(self.symbol_address(global_value, width)?);
+                    continue;
+                }
                 InstructionData::UnaryImm {
                     opcode: Opcode::Iconst,
                     imm,
@@ -621,11 +673,16 @@ impl IntegerBlocks<'_> {
 /// argument count. Argument records leave unreferenced slots.
 /// CallPair writes its low result and the immediately following CallHigh's
 /// slot holds its high result.
+/// SymbolRelative and SymbolGot read the data symbol ID from the left operand.
 pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
-    integer_program(function, false).map(|(words, _)| words)
+    integer_program(function, false, None).map(|(words, _)| words)
 }
 
-fn integer_program(function: &Function, allow_hardware_faults: bool) -> Option<(Vec<u64>, bool)> {
+fn integer_program(
+    function: &Function,
+    allow_hardware_faults: bool,
+    declarations: Option<&ModuleDeclarations>,
+) -> Option<(Vec<u64>, bool)> {
     let signature = &function.signature;
     let arity = signature.params.len();
     if signature.call_conv != CallConv::SystemV
@@ -660,9 +717,10 @@ fn integer_program(function: &Function, allow_hardware_faults: bool) -> Option<(
         function,
         arity,
         words: vec![0; HEADER_WORDS],
-        calls: false,
+        relocations: false,
         branches: 0,
         allow_hardware_faults,
+        declarations,
     };
     for slot in function.sized_stack_slots.values() {
         if slot.kind != StackSlotKind::ExplicitSlot {
@@ -677,7 +735,7 @@ fn integer_program(function: &Function, allow_hardware_faults: bool) -> Option<(
     if let Some(high) = high {
         blocks.append(IntegerOp::ReturnPair, [high, 0, 0]);
     }
-    Some((blocks.words, blocks.calls))
+    Some((blocks.words, blocks.relocations))
 }
 
 struct MachineCode {
@@ -685,27 +743,35 @@ struct MachineCode {
     relocations: Vec<ModuleReloc>,
 }
 
-fn decode_callable(packet: &[u8]) -> Option<MachineCode> {
+fn decode_relocatable(packet: &[u8]) -> Option<MachineCode> {
     let (length, body) = packet.split_first_chunk::<{ size_of::<u64>() }>()?;
     let length = usize::try_from(u64::from_le_bytes(*length)).ok()?;
     let (bytes, records) = body.split_at_checked(length)?;
-    let (records, remainder) = records.as_chunks::<{ 2 * size_of::<u64>() }>();
-    if bytes.is_empty() || records.is_empty() || !remainder.is_empty() {
+    let (records, remainder) = records.as_chunks::<{ 3 * size_of::<u64>() }>();
+    if bytes.is_empty() || !remainder.is_empty() {
         return None;
     }
     let mut relocations = Vec::with_capacity(records.len());
     for record in records {
-        let (offset, target) = record.split_first_chunk::<{ size_of::<u64>() }>()?;
+        let ([offset, kind, target], _) = record.as_chunks::<{ size_of::<u64>() }>() else {
+            return None;
+        };
         let offset = u32::try_from(u64::from_le_bytes(*offset)).ok()?;
-        let target = u32::try_from(u64::from_le_bytes(target.try_into().ok()?)).ok()?;
-        if (offset as usize).checked_add(CALL_DISPLACEMENT_BYTES as usize)? > bytes.len() {
+        let target = u32::try_from(u64::from_le_bytes(*target)).ok()?;
+        let (kind, namespace) = match u64::from_le_bytes(*kind) {
+            PLT_CALL => (Reloc::X86CallPLTRel4, FUNCTION_NAMESPACE),
+            RELATIVE_DATA => (Reloc::X86PCRel4, DATA_NAMESPACE),
+            GOT_DATA => (Reloc::X86GOTPCRel4, DATA_NAMESPACE),
+            _ => return None,
+        };
+        if (offset as usize).checked_add(REL32_BYTES as usize)? > bytes.len() {
             return None;
         }
         relocations.push(ModuleReloc {
             offset,
-            kind: Reloc::X86CallPLTRel4,
-            name: ModuleRelocTarget::user(FUNCTION_NAMESPACE, target),
-            addend: -CALL_DISPLACEMENT_BYTES,
+            kind,
+            name: ModuleRelocTarget::user(namespace, target),
+            addend: -REL32_BYTES,
         });
     }
     Some(MachineCode {
@@ -717,6 +783,7 @@ fn decode_callable(packet: &[u8]) -> Option<MachineCode> {
 fn encode_integer_block(
     isa: &dyn cranelift_codegen::isa::TargetIsa,
     function: &Function,
+    declarations: Option<&ModuleDeclarations>,
 ) -> Option<MachineCode> {
     let encode = ENCODER.get()?;
     let triple = isa.triple();
@@ -728,10 +795,10 @@ fn encode_integer_block(
     }
     // Ordinary native ELF objects use CPU memory faults directly. They carry
     // no Cranelift trap table, unlike JIT and freestanding emission.
-    let (words, calls) = integer_program(function, true)?;
-    if calls {
-        let packet = CALL_ENCODER.get()?(&words)?;
-        decode_callable(&packet)
+    let (words, relocations) = integer_program(function, true, declarations)?;
+    if relocations {
+        let packet = RELOCATION_ENCODER.get()?(&words)?;
+        decode_relocatable(&packet)
     } else {
         Some(MachineCode {
             bytes: encode(&words)?,
@@ -748,12 +815,14 @@ pub(super) fn define(
     context: &mut cranelift_codegen::Context,
     try_machine: bool,
 ) -> Result<(), String> {
-    let definition =
-        if try_machine && let Some(code) = encode_integer_block(module.isa(), &context.func) {
-            let alignment = u64::from(module.isa().function_alignment().minimum);
-            module.define_function_bytes(id, alignment, &code.bytes, &code.relocations)
-        } else {
-            module.define_function(id, context)
-        };
+    let definition = if try_machine
+        && let Some(code) =
+            encode_integer_block(module.isa(), &context.func, Some(module.declarations()))
+    {
+        let alignment = u64::from(module.isa().function_alignment().minimum);
+        module.define_function_bytes(id, alignment, &code.bytes, &code.relocations)
+    } else {
+        module.define_function(id, context)
+    };
     definition.map_err(|error| error.to_string())
 }

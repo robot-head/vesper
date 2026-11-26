@@ -10,13 +10,13 @@ pub fn x86_64_integer_block(in words: Slice[u64]) -> ChunkSeq[u8] {
     encode_block(in words, false, inout relocations)
 }
 
-// Length-prefixed code followed by (displacement offset, function ID)
-// pairs, all fields encoded as little-endian u64s.
-pub fn x86_64_callable_block(in words: Slice[u64]) -> ChunkSeq[u8] {
+// Length-prefixed code followed by (displacement offset, relocation kind,
+// symbol ID) records, all fields encoded as little-endian u64s.
+pub fn x86_64_relocatable_block(in words: Slice[u64]) -> ChunkSeq[u8] {
     let mut relocations = ChunkSeq::new[u64]();
     let code = encode_block(in words, true, inout relocations);
     let mut packet = ChunkSeq::new[u8]();
-    if code.len() != 0 && relocations.len() != 0 {
+    if code.len() != 0 {
         push64(inout packet, code.len());
         packet.extend(in code.as_slice());
         for index in 0..relocations.len() {

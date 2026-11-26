@@ -36,8 +36,8 @@ pub(super) fn register(_r: &mut Registry) {
             ENCODED.fetch_add(1, Relaxed);
             Some(bytes)
         }));
-        must(machine::install_call_encoder(|words| {
-            let packet = binding::x86_64_callable_block(words);
+        must(machine::install_relocation_encoder(|words| {
+            let packet = binding::x86_64_relocatable_block(words);
             if packet.is_empty() {
                 return None;
             }

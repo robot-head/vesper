@@ -1,6 +1,7 @@
 use super::binding;
-use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget};
+use object::{Object, ObjectSection, ObjectSymbol, RelocationFlags, RelocationTarget, elf};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::{fs, process::Command};
 use vesper::{check, native, parser};
 
 fn checked(source: &str) -> check::Checked {
@@ -94,4 +95,45 @@ fn ordinary_native_objects_use_opt_in_elf_with_read_only_data() {
         native::object_with_observer(&code.world, "main", None, false, Some(&mut |_| {})).unwrap();
     assert_eq!(observed, baseline_code);
     assert_eq!(EMITTED.load(Relaxed), 2);
+
+    assert!(native::machine::install_integer_encoder(|_| None).is_ok());
+    assert!(
+        native::machine::install_relocation_encoder(|words| {
+            let packet = binding::x86_64_relocatable_block(words);
+            (!packet.is_empty()).then_some(packet)
+        })
+        .is_ok()
+    );
+    let candidate_data = object(&data);
+    assert_eq!(EMITTED.load(Relaxed), 3);
+    let actual = object::File::parse(candidate_data.as_slice()).unwrap();
+    let pc32 = RelocationFlags::Elf {
+        r_type: elf::R_X86_64_PC32,
+    };
+    assert!(
+        relocations(&actual).iter().any(|(_, _, flags, addend)| {
+            *flags == pc32 && *addend == -(size_of::<i32>() as i64)
+        })
+    );
+    if Command::new("cc").arg("--version").output().is_err() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("vesper-sh7-data-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    let obj = dir.join("rodata.o");
+    let exe = dir.join("rodata");
+    fs::write(&obj, candidate_data).unwrap();
+    let link = Command::new("cc")
+        .arg(&obj)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .unwrap();
+    assert!(
+        link.status.success(),
+        "{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    assert_eq!(Command::new(&exe).status().unwrap().code(), Some(9));
+    fs::remove_dir_all(dir).unwrap();
 }
