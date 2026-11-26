@@ -579,7 +579,7 @@ pub const INCLUDE_STR: &str = "include_str";
 /// file stays inside the package. The literal escapes every newline, so
 /// the lines after a call keep their numbers.
 ///
-/// A call is the name (not after `.` or `:`), `(`, a string literal and
+/// A call is the name (not after `.` or `::`), `(`, a string literal and
 /// `)`, with any whitespace between; comments and string literals are not
 /// searched. `packages/vesper-stage2/src/loader.ves` expands the same way.
 pub fn expand_includes(text: &str, package_dir: &Path) -> Result<String, String> {
@@ -617,8 +617,13 @@ pub fn expand_includes(text: &str, package_dir: &Path) -> Result<String, String>
                 while i < b.len() && ident(b[i]) {
                     i += 1;
                 }
-                let before = b[..start].iter().rposition(|&c| !space(c)).map(|k| b[k]);
-                if &text[start..i] != INCLUDE_STR || matches!(before, Some(b'.' | b':')) {
+                // A method (`x.include_str`) or a path (`a::include_str`) is
+                // not a call; a field value (`text: include_str(..)`) is.
+                let method_or_path = b[..start]
+                    .iter()
+                    .rposition(|&c| !space(c))
+                    .is_some_and(|k| b[k] == b'.' || (b[k] == b':' && k > 0 && b[k - 1] == b':'));
+                if &text[start..i] != INCLUDE_STR || method_or_path {
                     continue;
                 }
                 let mut j = i;
@@ -650,6 +655,10 @@ pub fn expand_includes(text: &str, package_dir: &Path) -> Result<String, String>
                     .map_err(|error| fail(format!("{}: {error}", file.display())))?;
                 out.push_str(&text[copied..start]);
                 out.push_str(&serde_json::to_string(&contents).expect("a string serializes"));
+                // A call over several lines keeps its line breaks after the
+                // literal, so the lines after it keep their numbers.
+                let breaks = b[start..j].iter().filter(|&&c| c == b'\n').count();
+                out.extend(std::iter::repeat_n('\n', breaks));
                 i = j + 1;
                 copied = i;
             }
@@ -3125,6 +3134,21 @@ mod tests {
         assert_eq!(
             t.kind,
             ExprKind::Literal(Literal::String(files[0].1.into()))
+        );
+    }
+
+    #[test]
+    fn include_str_works_as_a_field_value_and_over_several_lines() {
+        let files = [("a.txt", "x")];
+        let out = included(
+            "fn f() -> C { C { text: include_str(\"a.txt\") } }\n\
+             fn g() -> Str { include_str(\n    \"a.txt\"\n) }\nfn h() {}\n",
+            &files,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "fn f() -> C { C { text: \"x\" } }\nfn g() -> Str { \"x\"\n\n }\nfn h() {}\n"
         );
     }
 

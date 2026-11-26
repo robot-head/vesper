@@ -667,6 +667,13 @@ fn expand_includes(
                     Option::Some(literal) => {
                         out.extend(in s[copied..start]);
                         out.extend(in literal.as_slice());
+                        // A call over several lines keeps its line breaks
+                        // after the literal, so later lines keep their numbers.
+                        for k in start..end {
+                            if byte_at(in s, k) == 10 {
+                                out.push(10);
+                            }
+                        }
                         i = end;
                         copied = end;
                     },
@@ -698,8 +705,9 @@ fn skip_spaces(in s: Slice[u8], from: u64) -> u64 {
     }
 }
 
-// Whether the last byte before `at` that is not whitespace is `.` or `:`,
-// a method or path whose last name is `include_str`.
+// Whether the last bytes before `at` that are not whitespace are `.` or
+// `::`, a method or path whose last name is `include_str` (a field value's
+// single `:` is not).
 fn after_dot_or_colon(in s: Slice[u8], at: u64) -> bool {
     let mut i = at;
     loop {
@@ -709,7 +717,7 @@ fn after_dot_or_colon(in s: Slice[u8], at: u64) -> bool {
         i = wrapping_sub(i, 1);
         let b = byte_at(in s, i);
         if !is_space_byte(b) {
-            return b == 46 || b == 58;
+            return b == 46 || (b == 58 && i > 0 && byte_at(in s, wrapping_sub(i, 1)) == 58);
         }
     }
 }
