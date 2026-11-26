@@ -311,9 +311,7 @@ pub struct TomlRead {
 
 pub fn read_toml(in text: Slice[u8]) -> TomlRead {
     let d = parse(in text);
-    TomlRead {
-        pool: dump(in d, in text)
-    }
+    TomlRead { pool: dump(in d, in text) }
 }
 
 // Whether the TOML reader accepts `text`, for the reader's benchmark.
@@ -373,9 +371,7 @@ pub fn semver_text(in text: Slice[u8], kind: u64) -> TomlRead {
             }
         }
     }
-    TomlRead {
-        pool: out
-    }
+    TomlRead { pool: out }
 }
 
 fn put_dec(inout out: ChunkSeq[u8], v: u64) {
@@ -394,7 +390,5 @@ pub fn manifest_toml(in text: Slice[u8]) -> TomlRead {
         out.push(33);
     }
     out.extend(in body.as_slice());
-    TomlRead {
-        pool: out
-    }
+    TomlRead { pool: out }
 }

@@ -283,12 +283,7 @@ pub fn number_decode(in text: Slice[u8], in pow5: Slice[u64]) -> Decoded {
 }
 
 pub fn doc_new() -> Doc {
-    Doc {
-        tokens: ChunkSeq::new(),
-        capacity: 0,
-        work: 0,
-        entries: 0
-    }
+    Doc { tokens: ChunkSeq::new(), capacity: 0, work: 0, entries: 0 }
 }
 
 // `IndexedJson::parse`: validate `input` into `doc`, reusing its storage.
@@ -387,10 +382,7 @@ pub copy struct Escaped {
 
 pub fn escape_mask(backslashes: u64, carry_in: bool) -> Escaped {
     let (mask, carry) = escaped_mask(backslashes, carry_in);
-    Escaped {
-        mask: mask,
-        carry: carry
-    }
+    Escaped { mask: mask, carry: carry }
 }
 
 // `JsonSizeBound::string`.

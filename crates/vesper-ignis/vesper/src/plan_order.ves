@@ -317,11 +317,7 @@ struct PlanOut {
 fn get_pass(in g: Graph, p: u64) -> PassInfo {
     match g.passes.try_get(p) {
         Option::Some(x) => x,
-        Option::None => PassInfo {
-            queue: 0,
-            first_use: 0,
-            use_count: 0
-        },
+        Option::None => PassInfo { queue: 0, first_use: 0, use_count: 0 },
     }
 }
 
@@ -602,13 +598,7 @@ fn hazard_edges(in g: Graph) -> ChunkSeq[Edge] {
         match g.explicit.try_get(e) {
             Option::Some(x) => explicit
                 .push(
-                    Edge {
-                        before: x.before,
-                        after: x.after,
-                        kind: 4,
-                        has_resource: 0,
-                        resource: 0
-                    }
+                    Edge { before: x.before, after: x.after, kind: 4, has_resource: 0, resource: 0 }
                 ),
             Option::None => (),
         }
@@ -688,27 +678,14 @@ fn pairs_by(in edges: ChunkSeq[Edge], by_after: bool, n: u64) -> ChunkSeq[Edge2]
             at.try_set(k, c);
         }
         for i in 0..m {
-            out
-                .push(
-                    Edge2 {
-                        before: 0,
-                        after: 0
-                    }
-                );
+            out.push(Edge2 { before: 0, after: 0 });
         }
         for i in 0..m {
             match edges.try_get(i) {
                 Option::Some(e) => {
                     let k = widen_u64(e.after);
                     let w = get64(in at, k);
-                    out
-                        .try_set(
-                            w,
-                            Edge2 {
-                                before: e.after,
-                                after: e.before
-                            }
-                        );
+                    out.try_set(w, Edge2 { before: e.after, after: e.before });
                     at.try_set(k, wrapping_add(w, 1));
                 },
                 Option::None => (),
@@ -717,13 +694,7 @@ fn pairs_by(in edges: ChunkSeq[Edge], by_after: bool, n: u64) -> ChunkSeq[Edge2]
     } else {
         for i in 0..m {
             match edges.try_get(i) {
-                Option::Some(e) => out
-                    .push(
-                        Edge2 {
-                            before: e.before,
-                            after: e.after
-                        }
-                    ),
+                Option::Some(e) => out.push(Edge2 { before: e.before, after: e.after }),
                 Option::None => (),
             }
         }
@@ -970,12 +941,7 @@ copy struct SubPos {
 }
 
 fn no_sub() -> SubPos {
-    SubPos {
-        flat: 0,
-        mip: 0,
-        slice: 0,
-        plane: 0
-    }
+    SubPos { flat: 0, mip: 0, slice: 0, plane: 0 }
 }
 
 impl Eq for TexEntry {}
@@ -1039,12 +1005,7 @@ struct Planner {
 }
 
 fn empty_rec() -> Rec {
-    Rec {
-        pass: none32(),
-        queue: none32(),
-        sync: 0,
-        access: no_access()
-    }
+    Rec { pass: none32(), queue: none32(), sync: 0, access: no_access() }
 }
 
 fn new_state(has_layout: bool, layout: Layout) -> SubState {
@@ -1069,11 +1030,6 @@ fn state_at(in pl: Planner, s: u32) -> SubState {
 fn seg_at(in pl: Planner, s: u32) -> Seg {
     match pl.segs.try_get(widen_u64(s)) {
         Option::Some(x) => x,
-        Option::None => Seg {
-            start: 0,
-            end: 0,
-            sid: none32(),
-            next: none32()
-        },
+        Option::None => Seg { start: 0, end: 0, sid: none32(), next: none32() },
     }
 }

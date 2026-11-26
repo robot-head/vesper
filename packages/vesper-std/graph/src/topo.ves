@@ -48,10 +48,7 @@ pub fn toposort(in g: Graph) -> Topo {
     } else {
         ChunkSeq::new[u32]()
     };
-    Topo {
-        order: order,
-        cycle: cycle
-    }
+    Topo { order: order, cycle: cycle }
 }
 
 // The nodes Kahn's algorithm can order, in the order it takes them.

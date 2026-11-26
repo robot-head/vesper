@@ -102,12 +102,7 @@ pub struct Scratch {
 pub fn scratch_new(names_len: u64) -> Scratch {
     let mut lmark: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](names_len);
     lmark.resize(names_len, 0);
-    Scratch {
-        pn: names_new(),
-        buf: ChunkSeq::new[u8](),
-        pidx: ChunkSeq::new[u32](),
-        lmark: lmark
-    }
+    Scratch { pn: names_new(), buf: ChunkSeq::new[u8](), pidx: ChunkSeq::new[u32](), lmark: lmark }
 }
 
 fn is_local(in sc: Scratch, s: u32) -> bool {

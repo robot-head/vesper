@@ -656,13 +656,7 @@ fn release_wildcards(
             fn_set_value_type(inout p, fi, inst.dest, target_res);
             let hidx = list_find_u32(in handles, handle);
             sites
-                .push(
-                    DropSite {
-                        graph: f.name,
-                        handle: handle,
-                        effect: u32_at(in effects, hidx)
-                    }
-                );
+                .push(DropSite { graph: f.name, handle: handle, effect: u32_at(in effects, hidx) });
         }
     }
 }
@@ -865,19 +859,7 @@ fn split_edge(inout p: Program, fi: u64, from_rel: u64, to_rel: u64) {
         }
         f.b0 = new_b0;
     }
-    p
-        .blocks
-        .push(
-            BlockRow {
-                ha: ha,
-                hn: hn,
-                i0: 0,
-                ic: 0,
-                term: Term::Jump,
-                ta: ta,
-                tn: tn
-            }
-        );
+    p.blocks.push(BlockRow { ha: ha, hn: hn, i0: 0, ic: 0, term: Term::Jump, ta: ta, tn: tn });
     f.bc = inc(f.bc);
     let _ = p.fns.try_set(fi, f);
     // Rewrite `from_blk`'s terminator target `to_rel -> at_rel`.
@@ -1011,14 +993,7 @@ fn emit_drop(
             }
         );
     let hidx = list_find_u32(in handles, handle);
-    sites
-        .push(
-            DropSite {
-                graph: f.name,
-                handle: handle,
-                effect: u32_at(in effects, hidx)
-            }
-        );
+    sites.push(DropSite { graph: f.name, handle: handle, effect: u32_at(in effects, hidx) });
     true
 }
 
@@ -1533,16 +1508,7 @@ fn read_drop_item(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program,
     if kind == 0 {
         let v = n32(r.word(in b));
         let ty = u32_at(in c.tmap, r.word(in b));
-        return DropItem {
-            blk: blk,
-            at: at,
-            kind: 0,
-            v: v,
-            root: 0,
-            path: 0,
-            ty: ty,
-            keep: 0
-        };
+        return DropItem { blk: blk, at: at, kind: 0, v: v, root: 0, path: 0, ty: ty, keep: 0 };
     }
     if kind == 1 {
         let root = u32_at(in c.nmap, r.word(in b));
@@ -1566,23 +1532,12 @@ fn read_drop_item(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program,
     }
     let ty = u32_at(in c.tmap, r.word(in b));
     let keep = u32_at(in c.nmap, r.word(in b));
-    DropItem {
-        blk: blk,
-        at: at,
-        kind: 2,
-        v: 0,
-        root: 0,
-        path: 0,
-        ty: ty,
-        keep: keep
-    }
+    DropItem { blk: blk, at: at, kind: 2, v: 0, root: 0, path: 0, ty: ty, keep: keep }
 }
 
 pub fn ffi_drops_entry(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let mut p = read_program(inout r, in b, in c);
     let nf = r.word(in b);
@@ -1593,15 +1548,7 @@ pub fn ffi_drops_entry(in input: Str) -> ChunkSeq[u64] {
         let fip = r.word(in b) != 0;
         let s0 = r.word(in b);
         let s1 = r.word(in b);
-        metas
-            .push(
-                FnMeta {
-                    name: name,
-                    fip: fip,
-                    s0: s0,
-                    s1: s1
-                }
-            );
+        metas.push(FnMeta { name: name, fip: fip, s0: s0, s1: s1 });
         if fip {
             fip_fns.push(name);
         }
@@ -1633,13 +1580,7 @@ pub fn ffi_drops_entry(in input: Str) -> ChunkSeq[u64] {
             for k in 0..ns {
                 let from = r.word(in b);
                 let to = r.word(in b);
-                splits
-                    .push(
-                        EdgeSplit {
-                            from: from,
-                            to: to
-                        }
-                    );
+                splits.push(EdgeSplit { from: from, to: to });
             }
             let nbi = r.word(in b);
             for k in 0..nbi {

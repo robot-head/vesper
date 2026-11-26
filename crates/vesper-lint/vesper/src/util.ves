@@ -10,11 +10,7 @@ const U64_MAX: u64 = 18446744073709551615;
 const EOF: u64 = 256;
 
 pub fn fail(code: u64) eff [Fail[LintFail]] {
-    Fail::raise(
-        LintFail {
-            code: code
-        }
-    );
+    Fail::raise(LintFail { code: code });
 }
 
 pub fn at(in s: Slice[u8], i: u64) -> u64 {

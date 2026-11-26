@@ -24,9 +24,7 @@ use self::policies::{build_policies_bin};
 // task words of `encode_task`; the result is one text line per diagnostic.
 pub fn check_effects(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let p = read_prog(inout r, in b, in c);
     let k = syms_new(inout c);
@@ -40,9 +38,7 @@ pub fn check_effects(in input: Str) -> ChunkSeq[u64] {
 // Binary entrypoint for `vesper-hybrid`: takes the encoded world+task bytes
 // directly and returns packed binary diagnostics (`write_bin`).
 pub fn check_effects_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let p = read_prog(inout r, in b, in c);
     let k = syms_new(inout c);
@@ -56,9 +52,7 @@ pub fn check_effects_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
 // Binary entrypoint for `capability_policies`: takes the encoded world+task
 // bytes and returns packed binary `CapabilityPolicies` (`build_policies_bin`).
 pub fn check_policies_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let p = read_prog(inout r, in b, in c);
     let k = syms_new(inout c);

@@ -48,10 +48,7 @@ pub fn empty() -> ChunkSeq[T] {
 fn t_at(in ts: ChunkSeq[T], i: u64) -> T {
     match ts.try_get(i) {
         Option::Some(t) => t,
-        Option::None => T {
-            a: 0,
-            n: 0
-        },
+        Option::None => T { a: 0, n: 0 },
     }
 }
 

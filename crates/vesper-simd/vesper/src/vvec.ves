@@ -343,8 +343,5 @@ pub fn scan(in data: Slice[u8], delim: u8) -> ScanCounts {
         }
         xor = xor ^ b;
     }
-    ScanCounts {
-        matches: matches,
-        xor: xor
-    }
+    ScanCounts { matches: matches, xor: xor }
 }

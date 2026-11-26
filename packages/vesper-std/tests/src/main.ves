@@ -129,9 +129,7 @@ test {
 
     fn mark(inout log: u64, digit: u64) -> SecU64 eff [ConstTime] {
         log = wrapping_add(wrapping_mul(log, 10), digit);
-        SecU64 {
-            value: digit
-        }
+        SecU64 { value: digit }
     }
 
     fn mask(inout log: u64, enabled: bool) -> SecMask64 eff [ConstTime] {
@@ -159,13 +157,7 @@ test {
     fn eager_arms_once_and_select(enabled: bool, expected: u64) -> bool {
         let mut log: u64 = 0;
         let got = select_with_log(inout log, enabled);
-        let matches = got
-            .ct_eq(
-                SecU64 {
-                    value: expected
-                }
-            )
-            .declassify_bool();
+        let matches = got.ct_eq(SecU64 { value: expected }).declassify_bool();
         matches && log == 123
     }
 }

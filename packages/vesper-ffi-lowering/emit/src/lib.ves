@@ -561,13 +561,7 @@ fn foreign_mapping(
     } else {
         len
     };
-    let reg_fn = import_function(
-        inout b,
-        inout m,
-        FuncId {
-            id: wrapping_u32(reg_id)
-        }
-    );
+    let reg_fn = import_function(inout b, inout m, FuncId { id: wrapping_u32(reg_id) });
     let align = ins_iconst(inout b, ty_i64(), imm(stride));
     call3(inout b, reg_fn, address, bytes, align);
     let malloc = libc(inout b, inout m, MALLOC, 1, true);
@@ -1378,15 +1372,11 @@ fn the_call(call: u64, inout b: Builder, inout m: Module, indirect: bool) eff [F
         args.push(wrapping_u32(at(in r, wrapping_add(args_start, i))));
     }
     if indirect {
-        let sig = SigRef {
-            id: wrapping_u32(at(in r, 0))
-        };
+        let sig = SigRef { id: wrapping_u32(at(in r, 0)) };
         let pointer = val(at(in r, 1));
         ins_call_indirect(inout b, sig, pointer, in args.as_slice());
     } else {
-        let callee = FuncRef {
-            id: wrapping_u32(at(in r, 0))
-        };
+        let callee = FuncRef { id: wrapping_u32(at(in r, 0)) };
         ins_call(inout b, callee, in args.as_slice());
     }
     let mut raw = if returns {

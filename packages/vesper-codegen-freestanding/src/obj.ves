@@ -133,12 +133,7 @@ fn c_string(in b: Slice[u8], t_at: u64, t_len: u64, at: u64) -> Option[Span] {
         return Option::None;
     }
     match b[start..end].find_byte(0) {
-        Option::Some(n) => Option::Some(
-            Span {
-                start: start,
-                len: n
-            }
-        ),
+        Option::Some(n) => Option::Some(Span { start: start, len: n }),
         Option::None => Option::None,
     }
 }

@@ -224,15 +224,7 @@ pub fn begin_module(inout s: St) {
 }
 
 pub fn item_at(in a: Ast, i: u32) -> ItemNode {
-    a
-        .items
-        .get_or(
-            idx_from_raw[ItemNode](i),
-            ItemNode {
-                kind: 0,
-                node: 0
-            }
-        )
+    a.items.get_or(idx_from_raw[ItemNode](i), ItemNode { kind: 0, node: 0 })
 }
 
 pub fn adt_at(in a: Ast, i: u32) -> AdtNode {
@@ -311,12 +303,7 @@ fn use_name_at(in a: Ast, i: u32) -> UseNameNode {
         .use_names
         .get_or(
             idx_from_raw[UseNameNode](i),
-            UseNameNode {
-                name: ast_none(),
-                alias: ast_none(),
-                start: 0,
-                end: 0
-            }
+            UseNameNode { name: ast_none(), alias: ast_none(), start: 0, end: 0 }
         )
 }
 
@@ -532,6 +519,7 @@ pub fn collect_all_bytes(inout s: St, in input: Slice[u8]) {
             Option::Some(src) => lower_source_perm(in src.as_str(), inout ast_perm, ast_perm_end),
             Option::None => lower_source_perm(in "", inout ast_perm, ast_perm_end),
         };
+        s.parse_errors = wrapping_add(s.parse_errors, l.p.d.code.len());
         begin_module(inout s);
         collect(inout s, in l.ast, n32(m));
         constants(inout s, in l, n32(m));

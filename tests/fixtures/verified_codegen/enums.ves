@@ -20,21 +20,9 @@ fn area(in s: Shape) -> i64 eff [Fail[ArithOverflow]] {
         Shape::Empty => 0,
         Shape::Square(n) => n * n,
         Shape::Rect(w, h) => w * h,
-        Shape::Labeled {
-            id: _,
-            wide: true,
-            side
-        } => side * 2,
-        Shape::Labeled {
-            id: 4,
-            wide: false,
-            side
-        } => side + 4,
-        Shape::Labeled {
-            id: _,
-            wide: false,
-            side
-        } => side,
+        Shape::Labeled { id: _, wide: true, side } => side * 2,
+        Shape::Labeled { id: 4, wide: false, side } => side + 4,
+        Shape::Labeled { id: _, wide: false, side } => side,
     }
 }
 
@@ -46,34 +34,16 @@ fn pick(n: i64) -> Shape {
     } else if n == 2 {
         Shape::Rect(3, 5)
     } else if n == 3 {
-        Shape::Labeled {
-            id: 9,
-            wide: true,
-            side: 11
-        }
+        Shape::Labeled { id: 9, wide: true, side: 11 }
     } else {
-        Shape::Labeled {
-            id: 4,
-            wide: false,
-            side: 20
-        }
+        Shape::Labeled { id: 4, wide: false, side: 20 }
     }
 }
 
 fn first(o: Option[Pair]) -> i64 {
     match o {
-        Some(
-            Pair {
-                a,
-                b: 0
-            }
-        ) => a,
-        Some(
-            Pair {
-                a: _,
-                b
-            }
-        ) => b,
+        Some(Pair { a, b: 0 }) => a,
+        Some(Pair { a: _, b }) => b,
         None => -1,
     }
 }
@@ -91,22 +61,8 @@ fn main() -> (i64, i64, i64, i64, Option[u32], Shape) eff [Fail[ArithOverflow]] 
     let small: Option[u32] = Some(42);
     (
         total(4, 0),
-        first(
-            Some(
-                Pair {
-                    a: 5,
-                    b: 0
-                }
-            )
-        ),
-        first(
-            Some(
-                Pair {
-                    a: 5,
-                    b: 6
-                }
-            )
-        ),
+        first(Some(Pair { a: 5, b: 0 })),
+        first(Some(Pair { a: 5, b: 6 })),
         first(none),
         small,
         pick(2)

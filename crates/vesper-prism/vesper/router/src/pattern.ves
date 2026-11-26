@@ -64,12 +64,7 @@ pub fn parse_pattern(in p: Slice[u8], max_segments: u64) -> Result[Pattern, Rout
     }
     let mut pieces: ChunkSeq[Piece] = ChunkSeq::new[Piece]();
     if hi == 1 {
-        return Result::Ok(
-            Pattern {
-                pieces: pieces,
-                trailing: false
-            }
-        );
+        return Result::Ok(Pattern { pieces: pieces, trailing: false });
     }
     let mut segments: u64 = 1;
     for i in 1..hi {
@@ -103,14 +98,7 @@ pub fn parse_pattern(in p: Slice[u8], max_segments: u64) -> Result[Pattern, Rout
                     Option::None => (),
                 }
             }
-            pieces
-                .push(
-                    Piece {
-                        param: true,
-                        lo: name_lo,
-                        hi: end
-                    }
-                );
+            pieces.push(Piece { param: true, lo: name_lo, hi: end });
         } else {
             // Literals are decoded text, so they obey the target policy: no
             // separators, Ascii::Nul, dot segments or percent (no second decode).
@@ -132,24 +120,12 @@ pub fn parse_pattern(in p: Slice[u8], max_segments: u64) -> Result[Pattern, Rout
                     return Result::Err(RouteFault::InvalidPattern);
                 }
             }
-            pieces
-                .push(
-                    Piece {
-                        param: false,
-                        lo: at,
-                        hi: end
-                    }
-                );
+            pieces.push(Piece { param: false, lo: at, hi: end });
         }
         if end >= hi {
             break;
         }
         at = wrapping_add(end, 1);
     }
-    Result::Ok(
-        Pattern {
-            pieces: pieces,
-            trailing: trailing
-        }
-    )
+    Result::Ok(Pattern { pieces: pieces, trailing: trailing })
 }

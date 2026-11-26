@@ -75,10 +75,7 @@ pub fn bank_new(base: u64, n: u64) -> Bank {
     for i in 0..n {
         regs.push(wrapping_add(base, i));
     }
-    Bank {
-        base: base,
-        regs: regs
-    }
+    Bank { base: base, regs: regs }
 }
 
 impl Bank {
@@ -202,20 +199,11 @@ fn zeros(n: u64) -> ChunkSeq[i64] {
 }
 
 fn gain(k: i64) -> Box[dyn Proc] {
-    Box::new(
-        Gain {
-            k: k
-        }
-    )
+    Box::new(Gain { k: k })
 }
 
 fn delay(n: u64) -> Box[dyn Proc] {
-    Box::new(
-        Delay {
-            line: zeros(n),
-            at: 0
-        }
-    )
+    Box::new(Delay { line: zeros(n), at: 0 })
 }
 
 // gain(k) -> delay(n) -> gain(3), then an optional delay(1) tail.
@@ -229,11 +217,7 @@ pub fn graph_new(k: i64, n: u64, tail: bool) -> Graph {
     } else {
         Option::None
     };
-    Graph {
-        procs: procs,
-        tail: t,
-        runs: 0
-    }
+    Graph { procs: procs, tail: t, runs: 0 }
 }
 
 // Recursion, not a loop: native code does not reclaim boxes in an

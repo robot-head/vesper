@@ -37,12 +37,7 @@ fn lex_step(s: Lexer) -> Lexer eff [Fail[Diag], Fail[ArithOverflow]] {
         if t.kind != 70 && s.count >= max_tokens() {
             fail_lexer(Diag::Limit(s.pos))
         } else {
-            Lexer {
-                pos: t.end,
-                h: mix_token(s.h, t),
-                count: s.count + 1,
-                done: t.kind == 70
-            }
+            Lexer { pos: t.end, h: mix_token(s.h, t), count: s.count + 1, done: t.kind == 70 }
         }
     }
 }
@@ -67,15 +62,7 @@ fn lex_until_eof(k: i64, s: Lexer) -> Lexer eff [Fail[Diag], Fail[ArithOverflow]
 }
 
 fn lex_digest() -> i64 eff [Fail[Diag], Fail[ArithOverflow]] {
-    let s = lex_until_eof(
-        1,
-        Lexer {
-            pos: 0,
-            h: offset_basis(),
-            count: 0,
-            done: false
-        }
-    );
+    let s = lex_until_eof(1, Lexer { pos: 0, h: offset_basis(), count: 0, done: false });
     digest(mix(s.h, s.count))
 }
 

@@ -86,9 +86,7 @@ fn push_str(inout out: ChunkSeq[u8], in s: Str) {
 
 // `rust_generate` over the input words.
 pub fn generate(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let (bs, be) = r.text(in b);
     let nlines = r.word(in b);
     // The lines' ranges in `b`.

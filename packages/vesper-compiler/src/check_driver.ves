@@ -74,18 +74,7 @@ fn c_bind_params(at: i64, env: CEnv, row: i64)
         } else {
             p.next
         };
-        c_bind_params(
-            next,
-            c_push(
-                env,
-                CBinding {
-                    name: p.name,
-                    ty: p.ty,
-                    pass: p.pass
-                }
-            ),
-            row
-        )
+        c_bind_params(next, c_push(env, CBinding { name: p.name, ty: p.ty, pass: p.pass }), row)
     }
 }
 fn c_valid_row(row: i64, start: i64, end: i64)
@@ -128,20 +117,8 @@ fn c_check() -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     } else {
         let budget = c_budget(0, 0, 0, 0);
         let declarations = c_validate_decls(0);
-        let adts = c_validate_adts(
-            Tok {
-                kind: 70,
-                start: 0,
-                end: 0
-            }
-        );
-        let functions = c_functions(
-            Tok {
-                kind: 70,
-                start: 0,
-                end: 0
-            }
-        );
+        let adts = c_validate_adts(Tok { kind: 70, start: 0, end: 0 });
+        let functions = c_functions(Tok { kind: 70, start: 0, end: 0 });
         let syntax = parse_digest();
         0
     }

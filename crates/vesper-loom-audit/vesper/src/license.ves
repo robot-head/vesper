@@ -221,11 +221,7 @@ fn take(inout s: A, in t: Str) -> bool {
 }
 
 fn bad() -> Val {
-    Val {
-        ok: false,
-        single: false,
-        grant: 0
-    }
+    Val { ok: false, single: false, grant: 0 }
 }
 
 fn expression(inout s: A, depth: u64) -> Val {
@@ -241,11 +237,7 @@ fn expression(inout s: A, depth: u64) -> Val {
         if s.lf != LicenseFail::None {
             return bad();
         }
-        left = Val {
-            ok: left.ok || right.ok,
-            single: false,
-            grant: 0
-        };
+        left = Val { ok: left.ok || right.ok, single: false, grant: 0 };
     }
     left
 }
@@ -263,11 +255,7 @@ fn conjunction(inout s: A, depth: u64) -> Val {
         if s.lf != LicenseFail::None {
             return bad();
         }
-        left = Val {
-            ok: left.ok && right.ok,
-            single: false,
-            grant: 0
-        };
+        left = Val { ok: left.ok && right.ok, single: false, grant: 0 };
     }
     left
 }
@@ -314,11 +302,7 @@ fn atom(inout s: A, depth: u64) -> Val {
         s.tpos = wrapping_add(q, 1);
         grant = wrapping_add(grant, wrapping_add(ei, 1));
     }
-    Val {
-        ok: sbool(in s.grants, grant),
-        single: true,
-        grant: grant
-    }
+    Val { ok: sbool(in s.grants, grant), single: true, grant: grant }
 }
 
 // `parse` of the expression with string id `id`; on failure s.lf is set.

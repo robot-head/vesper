@@ -862,9 +862,7 @@ fn section(
             dec.sec.fields.clear();
             dec.sec.bytes.clear();
             match crate_err {
-                QpackError::FieldSectionTooLarge {
-                    stream_id: _sid
-                } => {
+                QpackError::FieldSectionTooLarge { stream_id: _sid } => {
                     malformed(inout s, inout dec, id, CODE_EXCESSIVE_LOAD);
                     Result::Ok(())
                 }
@@ -969,12 +967,7 @@ fn request_frames(inout s: ServerCore, inout dec: DecoderCore, in h: Huff, id: u
             has_wt,
         ) {
             Result::Ok(st) => st,
-            Result::Err(
-                FrameError::TooLarge {
-                    frame_type: _ft,
-                    len: _len
-                }
-            ) => {
+            Result::Err(FrameError::TooLarge { frame_type: _ft, len: _len }) => {
                 malformed(inout s, inout dec, id, CODE_EXCESSIVE_LOAD);
                 return Result::Ok(());
             }
@@ -1265,24 +1258,15 @@ pub fn server_drain_unblocked(inout s: ServerCore, inout dec: DecoderCore, in h:
 pub fn server_read_plan(in s: ServerCore, id: u64, scratch_len: u64) -> ServerReadPlan {
     let f = bsearch_u64(in s.r_id.as_slice(), id);
     if !f.found {
-        return ServerReadPlan {
-            skip: true,
-            allowance: 0
-        };
+        return ServerReadPlan { skip: true, allowance: 0 };
     }
     let phase = word(in s.r_phase.as_slice(), f.idx);
     let flags = word(in s.r_flags.as_slice(), f.idx);
     if phase_is_blocked(phase) || (flags & RF_FIN) != 0 {
-        return ServerReadPlan {
-            skip: true,
-            allowance: 0
-        };
+        return ServerReadPlan { skip: true, allowance: 0 };
     }
     if phase == PHASE_DELIVERED || phase == PHASE_TUNNEL {
-        return ServerReadPlan {
-            skip: false,
-            allowance: scratch_len
-        };
+        return ServerReadPlan { skip: false, allowance: scratch_len };
     }
     let conn_room = sat_sub(s.conn.cfg.max_connection_buffer, server_buffered_request_bytes(in s));
     let mut n = min64(scratch_len, conn_room);
@@ -1290,10 +1274,7 @@ pub fn server_read_plan(in s: ServerCore, id: u64, scratch_len: u64) -> ServerRe
         let blen = q_len(in s.conn.pool, word(in s.r_body_q.as_slice(), f.idx));
         n = min64(n, sat_sub(s.conn.cfg.stream_body_window, blen));
     }
-    ServerReadPlan {
-        skip: false,
-        allowance: n
-    }
+    ServerReadPlan { skip: false, allowance: n }
 }
 
 pub fn server_on_read_data(

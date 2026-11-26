@@ -224,6 +224,10 @@ struct SwapFile {
 // order (build.rs `swap_registry`).
 include!(concat!(env!("OUT_DIR"), "/swap_registry.rs"));
 
+/// The Vesper driver's package assembly (#1986).
+pub(crate) use assemble::{
+    driver_assembled, driver_assembles, driver_assembly_input, driver_load_timer,
+};
 /// The Vesper driver's own parse (#1893) reads back through the parse swap.
 pub(crate) use parse::{driver_parse, driver_parse_begin};
 
@@ -279,8 +283,8 @@ extern "C" fn report() {
         crate::driver::PASSES.load(Relaxed)
     );
     eprintln!(
-        "vesper-hybrid: the command layers printed {} times from Vesper",
-        crate::commands::PRINTS.load(Relaxed)
+        "vesper-hybrid: the command layers answered {} commands from Vesper",
+        crate::commands::ANSWERS.load(Relaxed)
     );
     swaps::report();
 }

@@ -26,11 +26,7 @@ fn main() -> u64 {
     for i in 0..n {
         xs.push(i);
     }
-    let job = Job {
-        xs: xs,
-        chunk: 1000,
-        total: Atomic::new(0)
-    };
+    let job = Job { xs: xs, chunk: 1000, total: Atomic::new(0) };
     parallel_for(in job, 4, sum_chunk);
     job.total.load(MemoryOrder::SeqCst)
 }

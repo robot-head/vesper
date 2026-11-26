@@ -81,12 +81,7 @@ fn drain(inout c: Counter) -> i64 {
 }
 
 fn main() -> i64 {
-    let p = Point {
-        x: 3,
-        y: 4
-    };
-    let mut c = Counter {
-        n: 5
-    };
+    let p = Point { x: 3, y: 4 };
+    let mut c = Counter { n: 5 };
     wrapping_add(total(p), wrapping_mul(drain(inout c), 100000000))
 }

@@ -5,38 +5,18 @@ struct Counter {
     n: i64
 }
 fn main() -> i64 {
-    let mut c: Box[Counter] = Box::new(
-        Counter {
-            n: 0
-        }
-    );
+    let mut c: Box[Counter] = Box::new(Counter { n: 0 });
     let mut s = 0;
     for i in 0..20 {
-        let b: Box[Counter] = Box::new(
-            Counter {
-                n: i
-            }
-        );
+        let b: Box[Counter] = Box::new(Counter { n: i });
         if i % 3 == 0 {
             continue;
         }
-        c = Box::new(
-            Counter {
-                n: i
-            }
-        );
-        let Box(
-            Counter {
-                n
-            }
-        ) = b;
+        c = Box::new(Counter { n: i });
+        let Box(Counter { n }) = b;
         s = wrapping_add(s, n);
     }
-    let Box(
-        Counter {
-            n
-        }
-    ) = c;
+    let Box(Counter { n }) = c;
     wrapping_add(wrapping_mul(s, 100), n)
 }
 

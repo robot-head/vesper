@@ -98,9 +98,7 @@ fn diags(inout out: ChunkSeq[u8], inout r: Reader, in b: Slice[u8], fs: u64, fe:
 
 // `rust_doc_text` over the input words.
 pub fn doc_text(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     out.reserve(b.len());
     let (fs, fe) = r.text(in b);
@@ -144,9 +142,7 @@ fn optional(inout r: Reader, in b: Slice[u8]) -> (bool, u64, u64) {
 
 // `rust_unit_text` over the input words.
 pub fn unit_text(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     out.reserve(b.len());
     let mut total: u64 = 0;
@@ -215,9 +211,7 @@ pub fn unit_text(in b: Slice[u8]) -> ChunkSeq[u64] {
 
 // `rust_baseline_text` over the input words.
 pub fn baseline_text(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     out.reserve(b.len());
     let nf = r.word(in b);
@@ -255,9 +249,7 @@ pub fn baseline_text(in b: Slice[u8]) -> ChunkSeq[u64] {
 
 // `rust_mutants_text` over the input words.
 pub fn mutants_text(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     out.reserve(b.len());
     let n = r.word(in b);

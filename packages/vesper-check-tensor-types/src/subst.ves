@@ -71,12 +71,7 @@ pub fn subst_new() -> Subst {
 }
 
 pub fn mark(in s: Subst) -> Mark {
-    Mark {
-        d: s.dk.len(),
-        e: s.ek.len(),
-        y: s.yk.len(),
-        p: s.pa.len()
-    }
+    Mark { d: s.dk.len(), e: s.ek.len(), y: s.yk.len(), p: s.pa.len() }
 }
 
 pub fn undo(inout s: Subst, m: Mark) {

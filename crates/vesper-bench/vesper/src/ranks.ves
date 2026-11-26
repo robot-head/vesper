@@ -98,11 +98,7 @@ copy struct Obs {
 fn co(in s: ChunkSeq[Obs], i: u64) -> Obs {
     match s.try_get(i) {
         Option::Some(x) => x,
-        Option::None => Obs {
-            mag: 0,
-            den: 1,
-            positive: false
-        },
+        Option::None => Obs { mag: 0, den: 1, positive: false },
     }
 }
 
@@ -199,14 +195,7 @@ pub fn do_signed_rank_exact(in differences: Slice[i64])
     for i in 0..len {
         let d = gi(in differences, i);
         if d != 0 {
-            obs
-                .push(
-                    Obs {
-                        mag: uabs(d),
-                        den: 1,
-                        positive: d > 0
-                    }
-                );
+            obs.push(Obs { mag: uabs(d), den: 1, positive: d > 0 });
         }
     }
     rank_observations(inout obs, len)
@@ -225,14 +214,7 @@ pub fn do_signed_rank_exact_paired_samples(in samples: Slice[Sample])
             } else {
                 sub(s.baseline, s.candidate)
             };
-            obs
-                .push(
-                    Obs {
-                        mag: mag,
-                        den: s.operations,
-                        positive: s.candidate > s.baseline
-                    }
-                );
+            obs.push(Obs { mag: mag, den: s.operations, positive: s.candidate > s.baseline });
         }
     }
     rank_observations(inout obs, len)
@@ -250,10 +232,7 @@ copy struct CObs {
 fn cco(in s: ChunkSeq[CObs], i: u64) -> CObs {
     match s.try_get(i) {
         Option::Some(x) => x,
-        Option::None => CObs {
-            mag: widen_u128(0),
-            positive: false
-        },
+        Option::None => CObs { mag: widen_u128(0), positive: false },
     }
 }
 
@@ -313,13 +292,7 @@ fn accepts(
             } else {
                 wrapping_u128(centered)
             };
-            obs
-                .push(
-                    CObs {
-                        mag: mag,
-                        positive: !negative
-                    }
-                );
+            obs.push(CObs { mag: mag, positive: !negative });
         }
     }
     let n = obs.len();
@@ -512,30 +485,18 @@ pub fn do_paired_samples_confidence_set(in samples: Slice[Sample])
     for i in 0..n {
         let s = gs(in samples, i);
         if s.operations != operations {
-            Fail::raise(
-                PairedConfError::OperationsMismatch {
-                    index: widen_usize(i)
-                }
-            );
+            Fail::raise(PairedConfError::OperationsMismatch { index: widen_usize(i) });
         }
         if s.candidate >= s.baseline {
             let d = sub(s.candidate, s.baseline);
             if d > I64_MAX {
-                Fail::raise(
-                    PairedConfError::DifferenceOutOfRange {
-                        index: widen_usize(i)
-                    }
-                );
+                Fail::raise(PairedConfError::DifferenceOutOfRange { index: widen_usize(i) });
             }
             differences.push(wrapping_i64(d));
         } else {
             let d = sub(s.baseline, s.candidate);
             if d > I64_MIN_MAGNITUDE {
-                Fail::raise(
-                    PairedConfError::DifferenceOutOfRange {
-                        index: widen_usize(i)
-                    }
-                );
+                Fail::raise(PairedConfError::DifferenceOutOfRange { index: widen_usize(i) });
             }
             differences.push(wrapping_i64(sub(0, d)));
         }
@@ -749,10 +710,7 @@ pub fn do_gate_paired_difference(in differences: Slice[i64], max_difference: i64
     } else {
         Outcome::CrossesThreshold
     };
-    HlGate {
-        outcome: outcome,
-        estimate: estimate
-    }
+    HlGate { outcome: outcome, estimate: estimate }
 }
 
 // ---------------------------------------------------------------------------
@@ -797,18 +755,10 @@ pub fn do_exact_paired_differences(in samples: Slice[Sample])
     for i in 0..n {
         let (code, d) = per_op_difference(gs(in samples, i));
         if code == Exactness::Fractional {
-            Fail::raise(
-                PairedDifferenceError::NonIntegral {
-                    index: widen_usize(i)
-                }
-            );
+            Fail::raise(PairedDifferenceError::NonIntegral { index: widen_usize(i) });
         }
         if code == Exactness::OutOfRange {
-            Fail::raise(
-                PairedDifferenceError::OutOfRange {
-                    index: widen_usize(i)
-                }
-            );
+            Fail::raise(PairedDifferenceError::OutOfRange { index: widen_usize(i) });
         }
         result.push(d);
     }

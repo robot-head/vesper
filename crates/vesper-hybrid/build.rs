@@ -8,7 +8,7 @@
 //! `VESPER_HYBRID_BINDING_<MODULE>`), tools/bazel/vesper_hybrid.bzl. The
 //! harness takes one prebuilt object per build script, so each module's is
 //! handed to it in turn.
-use vesper_port_harness::{GENERATED_BINDING_ENV, OBJECT_ENV, Port};
+use vesper_port_harness::{GENERATED_BINDING_ENV, OBJECT_ENV, OBJECT_PACKAGES_ENV, Port};
 
 /// This package's directory.
 fn manifest_dir() -> std::path::PathBuf {
@@ -222,8 +222,12 @@ fn main() {
         let key = library.to_ascii_uppercase();
         let object = format!("VESPER_HYBRID_OBJECT_{key}");
         let generated = format!("VESPER_HYBRID_BINDING_{key}");
+        // The `[package] objects` packages of this module only (Bazel; in
+        // Cargo the harness finds them through the path dependencies).
+        let objects = format!("VESPER_HYBRID_OBJECT_PACKAGES_{key}");
         println!("cargo:rerun-if-env-changed={object}");
         println!("cargo:rerun-if-env-changed={generated}");
+        println!("cargo:rerun-if-env-changed={objects}");
         // SAFETY: build scripts are single-threaded; the harness reads
         // these right after.
         unsafe {
@@ -234,6 +238,10 @@ fn main() {
             match std::env::var_os(&generated) {
                 Some(path) => std::env::set_var(GENERATED_BINDING_ENV, path),
                 None => std::env::remove_var(GENERATED_BINDING_ENV),
+            }
+            match std::env::var_os(&objects) {
+                Some(paths) => std::env::set_var(OBJECT_PACKAGES_ENV, paths),
+                None => std::env::remove_var(OBJECT_PACKAGES_ENV),
             }
         }
         let port = Port::new(library, package).binding(binding);

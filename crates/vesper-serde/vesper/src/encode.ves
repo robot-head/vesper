@@ -376,13 +376,7 @@ fn value(inout c: Check, in w: Slice[u64], in pool: Slice[u8], depth: u64)
 // `encoded_size`.
 pub fn encode_size(in w: Slice[u64], in pool: Slice[u8], lim: EncodeLimits)
     -> u64 eff [Fail[Error]] {
-    let mut c = Check {
-        lim: lim,
-        work: 0,
-        tokens: 0,
-        strings: 0,
-        at: 0
-    };
+    let mut c = Check { lim: lim, work: 0, tokens: 0, strings: 0, at: 0 };
     let size = value(inout c, in w, in pool, 0);
     // One additional unit per byte covers the write pass.
     charge(inout c, size);
@@ -590,10 +584,7 @@ pub fn encode_write(in w: Slice[u64], in pool: Slice[u8], inout out: Slice[u8], 
     if out.len() < size {
         fail(ErrorKind::OutputTooSmall);
     }
-    let mut wr = W {
-        at: 0,
-        pos: 0
-    };
+    let mut wr = W { at: 0, pos: 0 };
     write_value(inout out, inout wr, in w, in pool);
     size
 }

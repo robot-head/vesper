@@ -64,9 +64,7 @@ const RW_FIRST: u64 = 2;
 const RF_PLAIN: u32 = 0;
 
 fn rty(code: u32) -> Ty {
-    Ty {
-        code: code
-    }
+    Ty { code: code }
 }
 
 fn r_iconst(inout b: Builder, v: u64) -> Value eff [Ffi[Cranelift]] {
@@ -216,9 +214,7 @@ fn r_store_payload(
     }
     for i in 0..words.len() {
         let w = match words.try_get(i) {
-            Some(x) => Value {
-                id: x
-            },
+            Some(x) => Value { id: x },
             None => value,
         };
         let index = r_iconst(inout b, i);

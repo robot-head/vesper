@@ -177,22 +177,11 @@ fn c_group_tail(at: i64, close: i64, depth: i64)
 }
 fn c_empty() -> CEnv eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let b = CBinding {
-        name: Tok {
-            kind: 70,
-            start: 0,
-            end: 0
-        },
-        ty: CType {
-            tag: 0,
-            at: 0
-        },
+        name: Tok { kind: 70, start: 0, end: 0 },
+        ty: CType { tag: 0, at: 0 },
         pass: 2
     };
-    CEnv {
-        slots: (b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b),
-        count: 0,
-        moved: 0
-    }
+    CEnv { slots: (b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b), count: 0, moved: 0 }
 }
 fn c_slot(env: CEnv, i: i64) -> CBinding eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     handle Fail[RuntimeError] in {
@@ -201,14 +190,7 @@ fn c_slot(env: CEnv, i: i64) -> CBinding eff [Fail[CheckError], Fail[Diag], Fail
         return b => b,
         raise(e, resume) => {
             let limit = c_limit(0);
-            CBinding {
-                name: c_token(0),
-                ty: CType {
-                    tag: 0,
-                    at: 0
-                },
-                pass: 2
-            }
+            CBinding { name: c_token(0), ty: CType { tag: 0, at: 0 }, pass: 2 }
         },
     }
 }

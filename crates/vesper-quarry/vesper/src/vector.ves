@@ -126,11 +126,7 @@ fn new_v() -> V {
 }
 
 fn new_rel(mask: u64) -> Rel {
-    Rel {
-        t: ChunkSeq::new[u64](),
-        n: 0,
-        mask: mask
-    }
+    Rel { t: ChunkSeq::new[u64](), n: 0, mask: mask }
 }
 
 fn new_g() -> G {
@@ -159,12 +155,7 @@ fn scalar(v: Val) -> Opd {
 }
 
 fn tri_opd(off: u64) -> Opd {
-    Opd {
-        k: 2,
-        v: null_val(),
-        s: off,
-        ty: TY_BOOL
-    }
+    Opd { k: 2, v: null_val(), s: off, ty: TY_BOOL }
 }
 
 fn tri_of(b: bool) -> u8 {
@@ -200,11 +191,7 @@ fn val_in(in prog: Slice[u64], at: u64) -> Val {
     if at == none() {
         return null_val();
     }
-    Val {
-        t: sw(in prog, at),
-        a: sw(in prog, inc(at)),
-        b: sw(in prog, wrapping_add(at, 2))
-    }
+    Val { t: sw(in prog, at), a: sw(in prog, inc(at)), b: sw(in prog, wrapping_add(at, 2)) }
 }
 
 fn cell(in v: V, in prog: Slice[u64], in t: ChunkSeq[u64], ti: u64, s: u64) -> Val {
@@ -399,12 +386,7 @@ pub fn eval(
             fail(inout q, 10, "column of another binding");
             return scalar(null_val());
         }
-        Opd {
-            k: 1,
-            v: null_val(),
-            s: slot,
-            ty: cw(in v.sty, slot)
-        }
+        Opd { k: 1, v: null_val(), s: slot, ty: cw(in v.sty, slot) }
     } else if tag == 1 {
         scalar(bind_val(in ds, in q, ex(in q, wrapping_add(p, 3)), ex(in q, wrapping_add(p, 4))))
     } else if tag == 2 {
@@ -858,11 +840,7 @@ fn acc_push(inout q: Q, a: Acc, has: bool, x: Val) -> Acc {
 fn acc_finish(inout q: Q, a: Acc) {
     let mut out = null_val();
     if a.kind == 0 {
-        out = Val {
-            t: 1,
-            a: a.n,
-            b: 0
-        };
+        out = Val { t: 1, a: a.n, b: 0 };
     } else if a.kind == 1 {
         if a.seen {
             if a.unsigned {
@@ -870,11 +848,7 @@ fn acc_finish(inout q: Q, a: Acc) {
                     fail(inout q, 9, "SUM overflow");
                     return;
                 }
-                out = Val {
-                    t: 1,
-                    a: a.lo,
-                    b: 0
-                };
+                out = Val { t: 1, a: a.lo, b: 0 };
             } else {
                 let fits = (a.hi == 0 && (a.lo >> 63) == 0)
                     || (a.hi == ALL_ONES && (a.lo >> 63) == 1);
@@ -882,20 +856,12 @@ fn acc_finish(inout q: Q, a: Acc) {
                     fail(inout q, 9, "SUM overflow");
                     return;
                 }
-                out = Val {
-                    t: 2,
-                    a: a.lo,
-                    b: 0
-                };
+                out = Val { t: 2, a: a.lo, b: 0 };
             }
         }
     } else if a.kind == 2 {
         if a.seen {
-            out = Val {
-                t: 3,
-                a: a.fbits,
-                b: 0
-            };
+            out = Val { t: 3, a: a.fbits, b: 0 };
         }
     } else if a.has {
         out = a.best;
@@ -1024,11 +990,7 @@ fn acc_column(
                     fs = fs + from_bits_f64(x);
                     seen = true;
                 } else {
-                    let y = Val {
-                        t: tag,
-                        a: x,
-                        b: sw(in prog, wrapping_add(at, 2))
-                    };
+                    let y = Val { t: tag, a: x, b: sw(in prog, wrapping_add(at, 2)) };
                     let replace = if !has {
                         true
                     } else {

@@ -283,12 +283,7 @@ pub fn c_verify(
     }
     let (start, succ) = rows(in edges, EDGE_WORDS, edges.len() / EDGE_WORDS, n);
     let (ustart, usites) = rows(in unresolved, PAIR_WORDS, unresolved.len() / PAIR_WORDS, n);
-    let adj = Adj {
-        start: start,
-        succ: succ,
-        ustart: ustart,
-        usites: usites
-    };
+    let adj = Adj { start: start, succ: succ, ustart: ustart, usites: usites };
     let mut ok = filled(1, Status::Ok);
     ok.push(0);
     for r in 0..nroots {

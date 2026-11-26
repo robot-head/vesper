@@ -26,18 +26,12 @@ fn release(sink lease: Lease) -> u64 eff [Pulse] {
         TickFailed(c) => 20,
         TickCancelled => 30,
     };
-    let Lease {
-        slot
-    } = lease;
+    let Lease { slot } = lease;
     wrapping_add(slot, flushed)
 }
 fn main() -> u64 eff [Pulse] {
-    let lease = Lease {
-        slot: 1000
-    };
-    let mut buf = Word {
-        v: 0
-    };
+    let lease = Lease { slot: 1000 };
+    let mut buf = Word { v: 0 };
     match Pulse::read(inout buf) {
         Got(n) => wrapping_add(release(lease), wrapping_add(n, buf.v)),
         IoFailed(code) => wrapping_add(release(lease), wrapping_mul(code, 100)),

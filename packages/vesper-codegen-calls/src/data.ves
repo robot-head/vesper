@@ -18,7 +18,7 @@
 //   ns, ns stub names
 //   nv, nv x (object type, self type, m, m x (method, k, k x (name, type)))
 //   nk, nk caller-slot function names
-//   nt, nt x (entry name, optimize)
+//   nt, nt x (entry name, flags: 1 optimize | 2 trace host | 4 library | 8 more roots)
 //
 // Expressions are pre-order rows: a node's children follow it, `size` is
 // the row count of its subtree, so a pre-order walk is a range walk.
@@ -93,9 +93,16 @@ pub copy struct VTableRow {
     mn: u32,
 }
 
+// The task's flags word: bit 0 optimizes, bit 1 asks for a Beacon trace
+// host (`EntryEffects::TraceHost`), bit 2 starts a library whose entry is
+// its first export root (`native_export::compile_exports`) and bit 3 adds
+// the entry as another root of the library before it.
 pub copy struct Task {
     entry: u32,
     optimize: bool,
+    trace: bool,
+    library: bool,
+    more: bool,
 }
 
 pub struct Calls {
@@ -156,11 +163,7 @@ impl Calls {
     pub fn param(in self, i: u64) -> ParamInfo {
         match self.params.try_get(i) {
             Option::Some(p) => p,
-            Option::None => ParamInfo {
-                name: 0,
-                pass: 0,
-                ty: 0
-            },
+            Option::None => ParamInfo { name: 0, pass: 0, ty: 0 },
         }
     }
 
@@ -201,12 +204,7 @@ impl Calls {
     pub fn vtable_row(in self, i: u64) -> VTableRow {
         match self.vtables.try_get(i) {
             Option::Some(v) => v,
-            Option::None => VTableRow {
-                object: 0,
-                self_ty: 0,
-                ma: 0,
-                mn: 0
-            },
+            Option::None => VTableRow { object: 0, self_ty: 0, ma: 0, mn: 0 },
         }
     }
 
@@ -219,13 +217,7 @@ impl Calls {
     pub fn dyn_row(in self, s: u32) -> VarsRow {
         let x = u32_at(in self.dyn_by_name, w(s));
         if x == 0 {
-            return VarsRow {
-                s0: 0,
-                s1: 0,
-                name: s,
-                a: 0,
-                n: 0
-            };
+            return VarsRow { s0: 0, s1: 0, name: s, a: 0, n: 0 };
         }
         vars_row(in self.dyn_params, w(wrapping_sub(x, 1)))
     }
@@ -250,13 +242,7 @@ impl Calls {
         if lo < self.calls.len() && r.s0 == s0 && r.s1 == s1 {
             r
         } else {
-            VarsRow {
-                s0: s0,
-                s1: s1,
-                name: 0,
-                a: 0,
-                n: 0
-            }
+            VarsRow { s0: s0, s1: s1, name: 0, a: 0, n: 0 }
         }
     }
 
@@ -265,7 +251,10 @@ impl Calls {
             Option::Some(t) => t,
             Option::None => Task {
                 entry: 0,
-                optimize: false
+                optimize: false,
+                trace: false,
+                library: false,
+                more: false
             },
         }
     }
@@ -274,13 +263,7 @@ impl Calls {
 fn vars_row(in rows: ChunkSeq[VarsRow], i: u64) -> VarsRow {
     match rows.try_get(i) {
         Option::Some(r) => r,
-        Option::None => VarsRow {
-            s0: 0,
-            s1: 0,
-            name: 0,
-            a: 0,
-            n: 0
-        },
+        Option::None => VarsRow { s0: 0, s1: 0, name: 0, a: 0, n: 0 },
     }
 }
 
@@ -350,15 +333,7 @@ pub fn read_calls(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Calls {
             let pname = sym(in c, r.word(in b));
             let pass = wrapping_u8(r.word(in b));
             let pty = ty(in c, r.word(in b));
-            d
-                .params
-                .push(
-                    ParamInfo {
-                        name: pname,
-                        pass: pass,
-                        ty: pty
-                    }
-                );
+            d.params.push(ParamInfo { name: pname, pass: pass, ty: pty });
         }
         let result = ty(in c, r.word(in b));
         let row_ty = ty(in c, r.word(in b));
@@ -403,16 +378,7 @@ pub fn read_calls(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Calls {
         let size = n32(r.word(in b));
         d
             .exprs
-            .push(
-                ExprNode {
-                    kind: kind,
-                    s0: s0,
-                    s1: s1,
-                    sym: s,
-                    children: children,
-                    size: size
-                }
-            );
+            .push(ExprNode { kind: kind, s0: s0, s1: s1, sym: s, children: children, size: size });
     }
     let nc = r.word(in b);
     for i in 0..nc {
@@ -420,17 +386,7 @@ pub fn read_calls(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Calls {
         let s1 = r.word(in b);
         let k = r.word(in b);
         let a = read_pairs(inout r, in b, in c, inout d, k);
-        d
-            .calls
-            .push(
-                VarsRow {
-                    s0: s0,
-                    s1: s1,
-                    name: 0,
-                    a: a,
-                    n: n32(k)
-                }
-            );
+        d.calls.push(VarsRow { s0: s0, s1: s1, name: 0, a: a, n: n32(k) });
     }
     let nd = r.word(in b);
     for i in 0..nd {
@@ -438,17 +394,7 @@ pub fn read_calls(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Calls {
         let k = r.word(in b);
         let a = read_pairs(inout r, in b, in c, inout d, k);
         set_by_symbol(inout d.dyn_by_name, f, inc32(n32(d.dyn_params.len())));
-        d
-            .dyn_params
-            .push(
-                VarsRow {
-                    s0: 0,
-                    s1: 0,
-                    name: f,
-                    a: a,
-                    n: n32(k)
-                }
-            );
+        d.dyn_params.push(VarsRow { s0: 0, s1: 0, name: f, a: a, n: n32(k) });
     }
     read_names_into(inout r, in b, in c, inout d.stubs);
     let nv = r.word(in b);
@@ -461,40 +407,24 @@ pub fn read_calls(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Calls {
             let method = sym(in c, r.word(in b));
             let k = r.word(in b);
             let a = read_pairs(inout r, in b, in c, inout d, k);
-            d
-                .methods
-                .push(
-                    VarsRow {
-                        s0: 0,
-                        s1: 0,
-                        name: method,
-                        a: a,
-                        n: n32(k)
-                    }
-                );
+            d.methods.push(VarsRow { s0: 0, s1: 0, name: method, a: a, n: n32(k) });
         }
-        d
-            .vtables
-            .push(
-                VTableRow {
-                    object: object,
-                    self_ty: self_ty,
-                    ma: ma,
-                    mn: n32(m)
-                }
-            );
+        d.vtables.push(VTableRow { object: object, self_ty: self_ty, ma: ma, mn: n32(m) });
     }
     read_names_into(inout r, in b, in c, inout d.caller_slot);
     let nt = r.word(in b);
     for i in 0..nt {
         let entry = sym(in c, r.word(in b));
-        let optimize = r.word(in b) != 0;
+        let flags = r.word(in b);
         d
             .tasks
             .push(
                 Task {
                     entry: entry,
-                    optimize: optimize
+                    optimize: flags & 1 != 0,
+                    trace: flags & 2 != 0,
+                    library: flags & 4 != 0,
+                    more: flags & 8 != 0
                 }
             );
     }

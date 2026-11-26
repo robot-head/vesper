@@ -2,7 +2,5 @@ linear struct Receipt {
     id: u64
 }
 fn receipt(id: u64) -> Receipt {
-    Receipt {
-        id
-    }
+    Receipt { id }
 }

@@ -37,12 +37,7 @@ pub fn edt_core_next_wake_hint_ns(in q: EdtCore) -> Option[u64] {
 
 fn edt_submit(inout q: EdtCore, now_ns: u64, edt_ns: u64) -> Result[u64, SubmitErrorKind] {
     match q.wheel.advance(now_ns) {
-        Option::Some(
-            AdvanceError::Backwards {
-                now_ns: _,
-                requested_ns: _
-            }
-        ) => {
+        Option::Some(AdvanceError::Backwards { now_ns: _, requested_ns: _ }) => {
             return Result::Err(SubmitErrorKind::ClockBackwards);
         },
         Option::Some(AdvanceError::OutOfRange) => {

@@ -558,15 +558,7 @@ fn list_from(inout l: L, m: u64) -> u32 {
         l.ast.pool.push(v);
     }
     l.stk.truncate(m);
-    let r = l
-        .ast
-        .lists
-        .alloc(
-            ListRef {
-                first: first,
-                len: n32(n)
-            }
-        );
+    let r = l.ast.lists.alloc(ListRef { first: first, len: n32(n) });
     r.raw()
 }
 
@@ -576,17 +568,7 @@ fn lit(inout l: L, kind: u8, neg: bool, bits: u64) -> u32 {
 
 // A literal whose 128-bit magnitude is `hi`:`bits` (Int and WideInt).
 fn lit_wide(inout l: L, kind: u8, neg: bool, bits: u64, hi: u64) -> u32 {
-    let i = l
-        .ast
-        .lits
-        .alloc(
-            Lit {
-                kind: kind,
-                neg: neg,
-                bits: bits,
-                hi: hi
-            }
-        );
+    let i = l.ast.lits.alloc(Lit { kind: kind, neg: neg, bits: bits, hi: hi });
     i.raw()
 }
 
@@ -624,16 +606,7 @@ fn mk5(inout l: L, kind: u8, start: u64, end: u64, a: u32, b: u32, c: u32, d: u3
         .ast
         .exprs
         .alloc(
-            ExprNode {
-                kind: kind,
-                start: n32(start),
-                end: n32(end),
-                a: a,
-                b: b,
-                c: c,
-                d: d,
-                e: e
-            }
+            ExprNode { kind: kind, start: n32(start), end: n32(end), a: a, b: b, c: c, d: d, e: e }
         );
     i.raw()
 }
@@ -642,32 +615,12 @@ fn mkp(inout l: L, kind: u8, start: u64, end: u64, a: u32, b: u32, c: u32) -> u3
     let i = l
         .ast
         .pats
-        .alloc(
-            PatNode {
-                kind: kind,
-                start: n32(start),
-                end: n32(end),
-                a: a,
-                b: b,
-                c: c
-            }
-        );
+        .alloc(PatNode { kind: kind, start: n32(start), end: n32(end), a: a, b: b, c: c });
     i.raw()
 }
 
 fn mkt(inout l: L, kind: u8, a: u32, b: u32, c: u32, d: u32) -> u32 {
-    let i = l
-        .ast
-        .types
-        .alloc(
-            TypeNode {
-                kind: kind,
-                a: a,
-                b: b,
-                c: c,
-                d: d
-            }
-        );
+    let i = l.ast.types.alloc(TypeNode { kind: kind, a: a, b: b, c: c, d: d });
     i.raw()
 }
 
@@ -684,29 +637,12 @@ fn unit(inout l: L) -> u32 {
 }
 
 fn effects_node(inout l: L, instances: u32, tail: u32) -> u32 {
-    let i = l
-        .ast
-        .effects
-        .alloc(
-            EffectsNode {
-                instances: instances,
-                tail: tail
-            }
-        );
+    let i = l.ast.effects.alloc(EffectsNode { instances: instances, tail: tail });
     i.raw()
 }
 
 fn effect_node(inout l: L, label: u32, name: u32, args: u32) -> u32 {
-    let i = l
-        .ast
-        .effect_nodes
-        .alloc(
-            EffectNode {
-                label: label,
-                name: name,
-                args: args
-            }
-        );
+    let i = l.ast.effect_nodes.alloc(EffectNode { label: label, name: name, args: args });
     i.raw()
 }
 
@@ -728,13 +664,7 @@ fn bound_at(in l: L, b: u32) -> BoundNode {
         .bounds
         .get_or(
             idx_from_raw[BoundNode](b),
-            BoundNode {
-                param: none(),
-                trait_ref: none(),
-                start: 0,
-                end: 0,
-                owner: none()
-            }
+            BoundNode { param: none(), trait_ref: none(), start: 0, end: 0, owner: none() }
         )
 }
 
@@ -781,15 +711,7 @@ fn fn_at(in l: L, f: u32) -> FnNode {
 }
 
 fn item_node(inout l: L, kind: u8, node: u32) -> u32 {
-    let i = l
-        .ast
-        .items
-        .alloc(
-            ItemNode {
-                kind: kind,
-                node: node
-            }
-        );
+    let i = l.ast.items.alloc(ItemNode { kind: kind, node: node });
     i.raw()
 }
 
@@ -1221,16 +1143,7 @@ fn generics(inout l: L) -> u32 {
                 }
             }
         }
-        let g = l
-            .ast
-            .generics
-            .alloc(
-                GenericNode {
-                    name: name,
-                    bound: bound,
-                    row: row
-                }
-            );
+        let g = l.ast.generics.alloc(GenericNode { name: name, bound: bound, row: row });
         push(inout l, g.raw());
         if !eat(inout l, k_comma()) || l.pos == before {
             break;
@@ -1281,14 +1194,7 @@ fn fields(inout l: L) -> u32 {
         let f = l
             .ast
             .fields
-            .alloc(
-                FieldNode {
-                    name: name,
-                    ty: t,
-                    modality: modality,
-                    temperature: temperature
-                }
-            );
+            .alloc(FieldNode { name: name, ty: t, modality: modality, temperature: temperature });
         push(inout l, f.raw());
         if !eat(inout l, k_comma()) {
             break;
@@ -1399,16 +1305,7 @@ fn import_root(in l: L, n: u64) -> bool {
 
 // The item's name for `public_items`, or NONE.
 fn item_name(in l: L, it: u32) -> u32 {
-    let node = l
-        .ast
-        .items
-        .get_or(
-            idx_from_raw[ItemNode](it),
-            ItemNode {
-                kind: 0,
-                node: 0
-            }
-        );
+    let node = l.ast.items.get_or(idx_from_raw[ItemNode](it), ItemNode { kind: 0, node: 0 });
     if node.kind == 1 {
         match l.ast.adts.get(idx_from_raw[AdtNode](node.node)) {
             Option::Some(a) => a.name,
@@ -1573,16 +1470,7 @@ fn declaration(inout l: L) -> u32 {
         let gs = generics(inout l);
         own_type_bounds(inout l, name);
         let fs = fields(inout l);
-        let v = l
-            .ast
-            .variants
-            .alloc(
-                VariantNode {
-                    name: name,
-                    fields: fs,
-                    named: true
-                }
-            );
+        let v = l.ast.variants.alloc(VariantNode { name: name, fields: fs, named: true });
         let m = mark(in l);
         push(inout l, v.raw());
         let vs = list_from(inout l, m);
@@ -1634,14 +1522,7 @@ fn declaration(inout l: L) -> u32 {
                     let f = l
                         .ast
                         .fields
-                        .alloc(
-                            FieldNode {
-                                name: fname,
-                                ty: t,
-                                modality: 3,
-                                temperature: 0
-                            }
-                        );
+                        .alloc(FieldNode { name: fname, ty: t, modality: 3, temperature: 0 });
                     push(inout l, f.raw());
                     n = inc(n);
                     if !eat(inout l, k_comma()) {
@@ -1653,16 +1534,7 @@ fn declaration(inout l: L) -> u32 {
             } else {
                 0
             };
-            let v = l
-                .ast
-                .variants
-                .alloc(
-                    VariantNode {
-                        name: vname,
-                        fields: fs,
-                        named: named
-                    }
-                );
+            let v = l.ast.variants.alloc(VariantNode { name: vname, fields: fs, named: named });
             push(inout l, v.raw());
             if !eat(inout l, k_comma()) {
                 break;
@@ -1812,16 +1684,7 @@ fn impl_decl(inout l: L, start: u64) -> u32 {
             push_bound(inout l, b.param, b.trait_ref, w(b.start), w(b.end), o);
         }
     }
-    let im = l
-        .ast
-        .impls
-        .alloc(
-            ImplNode {
-                ty: t,
-                generics: gs,
-                methods: methods
-            }
-        );
+    let im = l.ast.impls.alloc(ImplNode { ty: t, generics: gs, methods: methods });
     item_node(inout l, 4, im.raw())
 }
 
@@ -1878,12 +1741,7 @@ fn function(inout l: L, op: bool, fip: bool) -> u32 {
                 .wheres
                 .get_or(
                     idx_from_raw[WhereNode](list_at(in l.ast, wl, i)),
-                    WhereNode {
-                        ty: none(),
-                        trait_ref: none(),
-                        start: 0,
-                        end: 0
-                    }
+                    WhereNode { ty: none(), trait_ref: none(), start: 0, end: 0 }
                 );
             let tn = type_name(in l.ast, wn.ty);
             let param = if tn == none() {
@@ -2871,14 +2729,7 @@ fn use_name(inout l: L) -> u32 {
     let u = l
         .ast
         .use_names
-        .alloc(
-            UseNameNode {
-                name: name,
-                alias: alias,
-                start: n32(start),
-                end: n32(end)
-            }
-        );
+        .alloc(UseNameNode { name: name, alias: alias, start: n32(start), end: n32(end) });
     u.raw()
 }
 
@@ -2910,14 +2761,7 @@ fn where_clauses(inout l: L) -> u32 {
         let wn = l
             .ast
             .wheres
-            .alloc(
-                WhereNode {
-                    ty: t,
-                    trait_ref: tr,
-                    start: n32(start),
-                    end: n32(end)
-                }
-            );
+            .alloc(WhereNode { ty: t, trait_ref: tr, start: n32(start), end: n32(end) });
         push(inout l, wn.raw());
         if !eat(inout l, k_comma()) || at(in l, k_l_brace()) || at(in l, k_semi()) {
             break;
@@ -2983,14 +2827,7 @@ fn trait_decl(inout l: L, start: u64, public: bool) -> u32 {
             let a = l
                 .ast
                 .assoc_decls
-                .alloc(
-                    AssocDeclNode {
-                        name: an,
-                        bound: bound,
-                        start: n32(s),
-                        end: n32(end)
-                    }
-                );
+                .alloc(AssocDeclNode { name: an, bound: bound, start: n32(s), end: n32(end) });
             push(inout l, a.raw());
         } else if at(in l, k_fn()) {
             let bm = l.ast.m_bounds.len();
@@ -3073,14 +2910,7 @@ fn conformance_rest(inout l: L, start: u64, model: u32, public: bool, gs: u32, b
         let wn = l
             .ast
             .wheres
-            .alloc(
-                WhereNode {
-                    ty: t,
-                    trait_ref: b.trait_ref,
-                    start: b.start,
-                    end: b.end
-                }
-            );
+            .alloc(WhereNode { ty: t, trait_ref: b.trait_ref, start: b.start, end: b.end });
         push(inout l, wn.raw());
     }
     if at_word(in l, 0, w_where()) {
@@ -3110,14 +2940,7 @@ fn conformance_rest(inout l: L, start: u64, model: u32, public: bool, gs: u32, b
             let a = l
                 .ast
                 .assoc_binds
-                .alloc(
-                    AssocBindNode {
-                        name: an,
-                        ty: t,
-                        start: n32(s),
-                        end: n32(end)
-                    }
-                );
+                .alloc(AssocBindNode { name: an, ty: t, start: n32(s), end: n32(end) });
             push(inout l, a.raw());
         } else if at_method(in l) {
             let bm = l.ast.m_bounds.len();
@@ -3204,15 +3027,7 @@ fn block(inout l: L) -> u32 {
             let s = l
                 .ast
                 .stmts
-                .alloc(
-                    StmtNode {
-                        kind: 1,
-                        pat: pat,
-                        ty: t,
-                        value: value,
-                        mutable: mutable
-                    }
-                );
+                .alloc(StmtNode { kind: 1, pat: pat, ty: t, value: value, mutable: mutable });
             push(inout l, s.raw());
         } else {
             let e = expr(inout l);
@@ -3263,15 +3078,7 @@ fn push_stmt(inout l: L, e: u32) {
     let s = l
         .ast
         .stmts
-        .alloc(
-            StmtNode {
-                kind: 2,
-                pat: none(),
-                ty: none(),
-                value: e,
-                mutable: false
-            }
-        );
+        .alloc(StmtNode { kind: 2, pat: none(), ty: none(), value: e, mutable: false });
     push(inout l, s.raw());
 }
 
@@ -3555,16 +3362,7 @@ fn closure(inout l: L) -> u32 {
 }
 
 fn clause(inout l: L, name: u32, pats: u32, body: u32) -> u32 {
-    let c = l
-        .ast
-        .clauses
-        .alloc(
-            ClauseNode {
-                name: name,
-                pats: pats,
-                body: body
-            }
-        );
+    let c = l.ast.clauses.alloc(ClauseNode { name: name, pats: pats, body: body });
     c.raw()
 }
 
@@ -3873,16 +3671,7 @@ fn args(inout l: L) -> u32 {
         }
         let ps = pass_in(inout l, 2);
         let value = dexpr(inout l);
-        let a = l
-            .ast
-            .args
-            .alloc(
-                ArgNode {
-                    pass: ps & 3,
-                    explicit: ps >= 4,
-                    expr: value
-                }
-            );
+        let a = l.ast.args.alloc(ArgNode { pass: ps & 3, explicit: ps >= 4, expr: value });
         push(inout l, a.raw());
         if !eat(inout l, k_comma()) {
             break;
@@ -4061,18 +3850,7 @@ fn splat(inout l: L, value: u32, n: u64, start: u64, end: u64) -> u32 {
     let name = mk(inout l, 2, vs, ve, sp, none(), none());
     let pat = mkp(inout l, 2, vs, ve, sp, none(), none());
     let t = infer(inout l);
-    let st = l
-        .ast
-        .stmts
-        .alloc(
-            StmtNode {
-                kind: 1,
-                pat: pat,
-                ty: t,
-                value: value,
-                mutable: false
-            }
-        );
+    let st = l.ast.stmts.alloc(StmtNode { kind: 1, pat: pat, ty: t, value: value, mutable: false });
     let sm = mark(in l);
     push(inout l, st.raw());
     let stmts = list_from(inout l, sm);
@@ -4827,18 +4605,7 @@ fn phrase_body(inout l: L) {
 
 fn push_let(inout l: L, pat: u32, value: u32) {
     let t = infer(inout l);
-    let s = l
-        .ast
-        .stmts
-        .alloc(
-            StmtNode {
-                kind: 1,
-                pat: pat,
-                ty: t,
-                value: value,
-                mutable: false
-            }
-        );
+    let s = l.ast.stmts.alloc(StmtNode { kind: 1, pat: pat, ty: t, value: value, mutable: false });
     push(inout l, s.raw());
 }
 

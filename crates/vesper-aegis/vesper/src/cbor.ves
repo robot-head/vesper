@@ -125,15 +125,7 @@ pub const R_MALFORMED: u64 = 0;
 pub const R_TRAILING: u64 = 1;
 
 pub fn cbor_err(field: u64, reason: u64) -> Never eff [Fail[AErr]] {
-    Fail::raise(
-        AErr {
-            kind: K_CBOR_ERROR,
-            format: 0,
-            field: field,
-            a: reason,
-            b: 0
-        }
-    )
+    Fail::raise(AErr { kind: K_CBOR_ERROR, format: 0, field: field, a: reason, b: 0 })
 }
 
 // A failed decode: every CBOR error is one error to the caller.
@@ -187,12 +179,7 @@ fn head(in b: Slice[u8], p: u64, field: u64) -> Head eff [Fail[AErr]] {
     } else if ai > CborAdditional::EightBytes && ai < CborAdditional::Indefinite {
         bad(field);
     }
-    Head {
-        major: first >> CBOR_MAJOR_SHIFT,
-        ai: ai,
-        arg: arg,
-        end: end
-    }
+    Head { major: first >> CBOR_MAJOR_SHIFT, ai: ai, arg: arg, end: end }
 }
 
 // The end of `n` bytes at `p`, failing past the input.
@@ -625,15 +612,7 @@ pub fn set_len(inout n: Slice[u64], v: u64) {
 }
 
 pub fn need_scratch(need: u64) -> Never eff [Fail[AErr]] {
-    Fail::raise(
-        AErr {
-            kind: K_NEED_SCRATCH,
-            format: 0,
-            field: 0,
-            a: need,
-            b: 0
-        }
-    )
+    Fail::raise(AErr { kind: K_NEED_SCRATCH, format: 0, field: 0, a: need, b: 0 })
 }
 
 // The node kind at `i`.
@@ -810,12 +789,7 @@ pub fn materialize_bytes(
 ) -> BytesSpan eff [Fail[AErr]] {
     let k = arg(in n, node);
     if k == 0 {
-        return BytesSpan {
-            in_scratch: false,
-            off: 0,
-            len: 0,
-            base: 0
-        };
+        return BytesSpan { in_scratch: false, off: 0, len: 0, base: 0 };
     }
     if k == 1 {
         let slot = wrapping_add(node, 2);
@@ -829,21 +803,11 @@ pub fn materialize_bytes(
                 base: off
             };
         }
-        return BytesSpan {
-            in_scratch: false,
-            off: off,
-            len: len,
-            base: off
-        };
+        return BytesSpan { in_scratch: false, off: off, len: len, base: off };
     }
     let total = str_len(in n, node);
     if total == 0 {
-        return BytesSpan {
-            in_scratch: false,
-            off: 0,
-            len: 0,
-            base: 0
-        };
+        return BytesSpan { in_scratch: false, off: 0, len: 0, base: 0 };
     }
     if total > s.len() || sc.pos > wrapping_sub(s.len(), total) {
         need_scratch(wrapping_add(sc.pos, total));
@@ -881,12 +845,7 @@ pub fn materialize_bytes(
         c = wrapping_add(c, 1);
     }
     sc.pos = dst;
-    BytesSpan {
-        in_scratch: true,
-        off: start,
-        len: total,
-        base: wrapping_add(SCRATCH_BIT, start)
-    }
+    BytesSpan { in_scratch: true, off: start, len: total, base: wrapping_add(SCRATCH_BIT, start) }
 }
 
 // Decode a contiguous `BytesSpan` whole into `n` (appending after `cur_len`),

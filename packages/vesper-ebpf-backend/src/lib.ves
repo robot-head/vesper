@@ -159,9 +159,7 @@ fn put_err(inout o: ChunkSeq[u64], in g: G, in names: Names) {
 
 // The harness entry: input bytes to result words.
 pub fn ebpf_backend_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
     let x = read_extra(inout r, in b, inout c.types, inout c.names);
@@ -187,9 +185,7 @@ pub fn ebpf_backend_words(in input: Str) -> ChunkSeq[u64] {
 // Rust pass reports in its own words).
 pub fn ebpf_backend_build(in b: Slice[u8], inout object: ChunkSeq[u8], inout tail: ChunkSeq[u8])
     -> u64 {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
     let x = read_extra(inout r, in b, inout c.types, inout c.names);

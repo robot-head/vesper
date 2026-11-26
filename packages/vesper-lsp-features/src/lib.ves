@@ -202,9 +202,7 @@ fn symbols_answer(inout out: ChunkSeq[u8], inout x: Ix, in uri: Str, hierarchica
 // then the URI and the source. `textDocument/documentSymbol`.
 pub fn lsp_document_symbols(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let l = read_index(in b, inout r);
     let hierarchical = word(in b, inout r) == 1;
     let uri_len = word(in b, inout r);
@@ -223,9 +221,7 @@ pub fn lsp_document_symbols(in input: Str) -> ChunkSeq[u64] {
 // index per request, as Rust does); the answers are joined by newlines.
 pub fn lsp_document_symbols_kept(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let l = read_index(in b, inout r);
     let hierarchical = word(in b, inout r) == 1;
     let n = word(in b, inout r);
@@ -316,9 +312,7 @@ fn put_error_answer(inout out: ChunkSeq[u8], code: u64, e: SpanError) {
 // URI and the source. `textDocument/definition`.
 pub fn lsp_definition(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let l = read_index(in b, inout r);
     let line = wrapping_u32(word(in b, inout r));
     let character = wrapping_u32(word(in b, inout r));
@@ -347,9 +341,7 @@ pub fn lsp_definition(in input: Str) -> ChunkSeq[u64] {
 // newlines.
 pub fn lsp_definitions(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let l = read_index(in b, inout r);
     let uri_len = word(in b, inout r);
     let src_len = word(in b, inout r);
@@ -360,9 +352,7 @@ pub fn lsp_definitions(in input: Str) -> ChunkSeq[u64] {
     }
     // 1 when the documentation-link facts follow (doc_links.ves).
     let has_facts = word(in b, inout r) == 1;
-    let mut fr = WordReader {
-        pos: r.pos
-    };
+    let mut fr = WordReader { pos: r.pos };
     let facts = if has_facts {
         read_doc_facts(in b, inout fr)
     } else {
@@ -405,9 +395,7 @@ pub fn lsp_definitions(in input: Str) -> ChunkSeq[u64] {
 // order. `workspace/symbol`.
 pub fn lsp_workspace_symbols(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let l = read_index(in b, inout r);
     let query_len = word(in b, inout r);
     let docs = word(in b, inout r);
@@ -499,13 +487,9 @@ pub fn lsp_workspace_symbols(in input: Str) -> ChunkSeq[u64] {
 // answers (`R<json>`, `Rnull` or `E<error>`) are joined by newlines.
 pub fn lsp_hovers(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut cr = CtxReader {
-        pos: 0
-    };
+    let mut cr = CtxReader { pos: 0 };
     let ctx = read_ctx(inout cr, in b);
-    let mut r = Reader {
-        pos: cr.pos
-    };
+    let mut r = Reader { pos: cr.pos };
     let l = read_index(in b, inout r);
     let mut f = facts_new(ctx);
     let nf = word(in b, inout r);

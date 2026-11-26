@@ -65,10 +65,7 @@ pub struct ResolveOutcome {
 }
 
 fn none_outcome() -> ResolveOutcome {
-    ResolveOutcome {
-        status: ST_NONE,
-        text: ChunkSeq::new[u8]()
-    }
+    ResolveOutcome { status: ST_NONE, text: ChunkSeq::new[u8]() }
 }
 
 pub fn err_diag(in code: Str, s: u64, e: u64, in msg: ChunkSeq[u8]) -> ResolveOutcome {
@@ -88,10 +85,7 @@ pub fn err_diag(in code: Str, s: u64, e: u64, in msg: ChunkSeq[u8]) -> ResolveOu
         }
     }
     out.push(10);
-    ResolveOutcome {
-        status: ST_ERR,
-        text: out
-    }
+    ResolveOutcome { status: ST_ERR, text: out }
 }
 
 fn err_str(in code: Str, s: u64, e: u64, in msg: Str) -> ResolveOutcome {
@@ -109,17 +103,7 @@ fn push_packed_outcome(inout out: ChunkSeq[u64], in r: ResolveOutcome) {
 pub fn trait_at(in d: Decls, i: u64) -> TraitRow {
     match d.traits.try_get(i) {
         Option::Some(v) => v,
-        Option::None => TraitRow {
-            name: 0,
-            s: 0,
-            e: 0,
-            ga: 0,
-            gn: 0,
-            aa: 0,
-            an: 0,
-            ma: 0,
-            mn: 0
-        },
+        Option::None => TraitRow { name: 0, s: 0, e: 0, ga: 0, gn: 0, aa: 0, an: 0, ma: 0, mn: 0 },
     }
 }
 
@@ -148,95 +132,49 @@ pub fn conf_at(in d: Decls, i: u64) -> Conf {
 fn sig_at(in d: Decls, i: u64) -> Sig {
     match d.sigs.try_get(i) {
         Option::Some(v) => v,
-        Option::None => Sig {
-            name: 0,
-            s: 0,
-            e: 0,
-            ga: 0,
-            gn: 0,
-            pa: 0,
-            pn: 0,
-            result: 0,
-            row: 0
-        },
+        Option::None => Sig { name: 0, s: 0, e: 0, ga: 0, gn: 0, pa: 0, pn: 0, result: 0, row: 0 },
     }
 }
 
 fn par_at(in d: Decls, i: u64) -> Par {
     match d.pars.try_get(i) {
         Option::Some(v) => v,
-        Option::None => Par {
-            name: 0,
-            pass: 0,
-            ja: 0,
-            jn: 0,
-            ty: 0,
-            s: 0,
-            e: 0
-        },
+        Option::None => Par { name: 0, pass: 0, ja: 0, jn: 0, ty: 0, s: 0, e: 0 },
     }
 }
 
 pub fn gen_at(in gs: ChunkSeq[Gen], i: u64) -> Gen {
     match gs.try_get(i) {
         Option::Some(v) => v,
-        Option::None => Gen {
-            name: 0,
-            bound: 0,
-            row: false
-        },
+        Option::None => Gen { name: 0, bound: 0, row: false },
     }
 }
 
 pub fn tref_at(in d: Decls, i: u64) -> TRef {
     match d.trefs.try_get(i) {
         Option::Some(v) => v,
-        Option::None => TRef {
-            pkg: 0,
-            name: 0,
-            xa: 0,
-            xn: 0,
-            s: 0,
-            e: 0
-        },
+        Option::None => TRef { pkg: 0, name: 0, xa: 0, xn: 0, s: 0, e: 0 },
     }
 }
 
 fn where_at(in d: Decls, i: u64) -> Where {
     match d.wheres.try_get(i) {
         Option::Some(v) => v,
-        Option::None => Where {
-            ty: 0,
-            tref: 0
-        },
+        Option::None => Where { ty: 0, tref: 0 },
     }
 }
 
 fn bind_at(in d: Decls, i: u64) -> Bind {
     match d.binds.try_get(i) {
         Option::Some(v) => v,
-        Option::None => Bind {
-            name: 0,
-            ty: 0,
-            s: 0,
-            e: 0
-        },
+        Option::None => Bind { name: 0, ty: 0, s: 0, e: 0 },
     }
 }
 
 fn node_at(in t: Types, ty: u32) -> TypeNode {
     match t.nodes.try_get(w(ty)) {
         Option::Some(v) => v,
-        Option::None => TypeNode {
-            kind: 0,
-            mode: 0,
-            name: 0,
-            a: 0,
-            n: 0,
-            r: 0,
-            r2: 0,
-            lit: 0
-        },
+        Option::None => TypeNode { kind: 0, mode: 0, name: 0, a: 0, n: 0, r: 0, r2: 0, lit: 0 },
     }
 }
 
@@ -663,17 +601,7 @@ fn bound_stub(in sess: PactSession, tr_idx: u64, method: u32, s: u64, e: u64, dy
     -> ResolveOutcome {
     let tr = trait_at(in sess.d, tr_idx);
     let mut found_sig = false;
-    let mut sig = Sig {
-        name: 0,
-        s: 0,
-        e: 0,
-        ga: 0,
-        gn: 0,
-        pa: 0,
-        pn: 0,
-        result: 0,
-        row: 0
-    };
+    let mut sig = Sig { name: 0, s: 0, e: 0, ga: 0, gn: 0, pa: 0, pn: 0, result: 0, row: 0 };
     for i in 0..w(tr.mn) {
         let m = sig_at(in sess.d, add(w(tr.ma), i));
         if m.name == method {
@@ -712,10 +640,7 @@ fn bound_stub(in sess: PactSession, tr_idx: u64, method: u32, s: u64, e: u64, dy
     put_sym(inout out, in sess.c.names, tr.name);
     out.push(36);
     put_sym(inout out, in sess.c.names, method);
-    ResolveOutcome {
-        status: ST_OK,
-        text: out
-    }
+    ResolveOutcome { status: ST_OK, text: out }
 }
 
 pub struct CxHeader {
@@ -770,13 +695,7 @@ fn add_gen_bounds(
             } else {
                 raw_ty
             };
-            args
-                .push(
-                    QArg {
-                        is_row: tg.row,
-                        ty: arg_ty
-                    }
-                );
+            args.push(QArg { is_row: tg.row, ty: arg_ty });
         }
         assumptions
             .push(
@@ -813,14 +732,7 @@ pub fn read_cx_header(
         let gname = sym(in nmap, r.word(in b));
         let gbound = wrapping_u8(r.word(in b));
         let grow = r.word(in b) != 0;
-        env_params
-            .push(
-                Gen {
-                    name: gname,
-                    bound: gbound,
-                    row: grow
-                }
-            );
+        env_params.push(Gen { name: gname, bound: gbound, row: grow });
         gen_names.push(gname);
         gen_rows.push(grow);
         let nb = r.word(in b);
@@ -860,13 +772,7 @@ pub fn read_cx_header(
                             } else {
                                 raw_ty
                             };
-                            args
-                                .push(
-                                    QArg {
-                                        is_row: tg.row,
-                                        ty: arg_ty
-                                    }
-                                );
+                            args.push(QArg { is_row: tg.row, ty: arg_ty });
                         }
                         assumptions
                             .push(
@@ -907,13 +813,7 @@ pub fn read_cx_header(
                     } else {
                         raw_ty
                     };
-                    args
-                        .push(
-                            QArg {
-                                is_row: tg.row,
-                                ty: arg_ty
-                            }
-                        );
+                    args.push(QArg { is_row: tg.row, ty: arg_ty });
                 }
             }
             if ok {
@@ -987,13 +887,7 @@ pub fn select_in_cx(
             Option::Some(v) => v,
             Option::None => 0,
         };
-        args
-            .push(
-                QArg {
-                    is_row: false,
-                    ty: ty
-                }
-            );
+        args.push(QArg { is_row: false, ty: ty });
     }
     let mut env_params = ChunkSeq::with_capacity[Gen](cx.env_params.len());
     env_params.extend(in cx.env_params.as_slice());
@@ -1209,10 +1103,7 @@ fn resolve_call_one(
         }
         let mut out = ChunkSeq::new[u8]();
         generated_name_for_conf(in sess.c.types, in sess.c.names, in sess.d, c, method, inout out);
-        return ResolveOutcome {
-            status: ST_OK,
-            text: out
-        };
+        return ResolveOutcome { status: ST_OK, text: out };
     }
 
     if found_ti.len() == 0 {
@@ -1641,15 +1532,7 @@ fn conform_row_vars(
                     )
                 );
         }
-        effs
-            .push(
-                EffNode {
-                    label: en.label,
-                    name: en.name,
-                    a: ea,
-                    n: en.n
-                }
-            );
+        effs.push(EffNode { label: en.label, name: en.name, a: ea, n: en.n });
     }
     t.mk_row(in effs, in eargs, rn.tail)
 }
@@ -1995,24 +1878,14 @@ fn normalize_row_rec(
             }
             eargs.push(na);
         }
-        effs
-            .push(
-                EffNode {
-                    label: en.label,
-                    name: en.name,
-                    a: ea,
-                    n: en.n
-                }
-            );
+        effs.push(EffNode { label: en.label, name: en.name, a: ea, n: en.n });
     }
     (true, sess.c.types.mk_row(in effs, in eargs, rn.tail), none_outcome())
 }
 
 // Entrypoint for `check_pact_resolve` (`[session_input][n_queries, queries...]`).
 pub fn resolve_words(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut sess = session_open_reader(inout r, in b);
     let mut out = ChunkSeq::new[u64]();
     let p_out = pack_text(in sess.out);
@@ -2030,9 +1903,7 @@ pub fn resolve_words(in b: Slice[u8]) -> ChunkSeq[u64] {
         let padded = wrapping_mul(wrapping_add(qlen, 7) / 8, 8);
         r.pos = wrapping_add(qstart, padded);
         let qb = b[qstart..add(qstart, qlen)];
-        let mut qr = Reader {
-            pos: 0
-        };
+        let mut qr = Reader { pos: 0 };
         let mut nmap = ChunkSeq::new[u32]();
         read_q_names(inout qr, in qb, inout sess.c.names, inout nmap);
         let mut tmap = ChunkSeq::new[u32]();
@@ -2052,9 +1923,7 @@ pub fn resolve_words(in b: Slice[u8]) -> ChunkSeq[u64] {
 
 // Entrypoint for `check_pact_normalize` (`[session_input][n_queries, queries...]`).
 pub fn normalize_words(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut sess = session_open_reader(inout r, in b);
     let mut out = ChunkSeq::new[u64]();
     let p_out = pack_text(in sess.out);
@@ -2073,9 +1942,7 @@ pub fn normalize_words(in b: Slice[u8]) -> ChunkSeq[u64] {
         let padded = wrapping_mul(wrapping_add(qlen, 7) / 8, 8);
         r.pos = wrapping_add(qstart, padded);
         let qb = b[qstart..add(qstart, qlen)];
-        let mut qr = Reader {
-            pos: 0
-        };
+        let mut qr = Reader { pos: 0 };
         let mut nmap = ChunkSeq::new[u32]();
         read_q_names(inout qr, in qb, inout sess.c.names, inout nmap);
         let mut tmap = ChunkSeq::new[u32]();
@@ -2090,10 +1957,7 @@ pub fn normalize_words(in b: Slice[u8]) -> ChunkSeq[u64] {
         if ok {
             let mut text = ChunkSeq::new[u8]();
             display(in sess.c.types, in sess.c.names, res_ty, inout text);
-            let res = ResolveOutcome {
-                status: ST_OK,
-                text: text
-            };
+            let res = ResolveOutcome { status: ST_OK, text: text };
             push_packed_outcome(inout out, in res);
         } else {
             push_packed_outcome(inout out, in err);

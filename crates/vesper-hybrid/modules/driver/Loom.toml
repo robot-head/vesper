@@ -26,3 +26,6 @@ capability_ceiling = ["Fail", "Alloc", "Ffi[StdFs]", "Ffi[StdProcess]", "Ffi[Std
 "@vesper/ast" = { version = "^0.1", path = "../../../../packages/vesper-ast" }
 "@vesper/front" = { version = "^0.1", path = "../../../../packages/vesper-front" }
 "@vesper-std/toml" = { version = "^0.1", path = "../../../../packages/vesper-std/toml" }
+# The package assembly of the package load (#1986).
+"@vesper/check-names-packages" = { version = "^0.1", path = "../../../../packages/vesper-check-names-packages" }
+"@vesper-std/intern" = { version = "^0.1", path = "../../../../packages/vesper-std/intern" }

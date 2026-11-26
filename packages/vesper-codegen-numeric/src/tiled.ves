@@ -321,9 +321,7 @@ fn tl_fault(inout b: Builder, inout m: Module, in im: TiledImports, code: Value)
     for i in 0..TILED_FAULTS {
         let at = widen_u64(i);
         let data = match im.messages.try_get(at) {
-            Some(x) => DataId {
-                id: x
-            },
+            Some(x) => DataId { id: x },
             None => return,
         };
         let len = match im.lengths.try_get(at) {

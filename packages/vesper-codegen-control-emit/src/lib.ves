@@ -844,9 +844,7 @@ fn session_park_prep(call: u64, inout b: Builder) eff [Ffi[Cranelift]] {
 
 fn session_park_emit(call: u64, inout b: Builder) eff [Ffi[Cranelift]] {
     let ptr = ty_of_word(call_arg(call, 0));
-    let park_fn = FuncRef {
-        id: wrapping_u32(call_arg(call, 1))
-    };
+    let park_fn = FuncRef { id: wrapping_u32(call_arg(call, 1)) };
     let ctx = arg_value(call, 2);
     let evidence = arg_value(call, 3);
     let op_tag = arg_i64(call, 4);

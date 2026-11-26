@@ -215,10 +215,7 @@ pub fn ty_check(inout b: B, in t: Types, ty: u32, erase_box: bool) {
 
 // Writes `typed(ty, None, erase_box)`.
 pub fn emit_ty(inout b: B, in t: Types, ty: u32, erase_box: bool) {
-    let none = T {
-        a: 0,
-        n: 0
-    };
+    let none = T { a: 0, n: 0 };
     emit_ty_m(inout b, in t, ty, erase_box, false, none);
 }
 
