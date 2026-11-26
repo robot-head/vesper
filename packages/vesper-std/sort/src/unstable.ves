@@ -67,10 +67,7 @@ pub fn insertion[T: mod copy + Ord](inout s: Slice[T], lo: u64, hi: u64) {
                         break;
                     }
                     let k = wrapping_sub(j, 1);
-                    let y = match s.try_get(k) {
-                        Option::Some(y) => y,
-                        Option::None => x,
-                    };
+                    let y = s.try_get(k).unwrap_or(x);
                     if !lt(x, y) {
                         break;
                     }
@@ -158,20 +155,14 @@ fn partition_at[T: mod copy + Ord](inout s: Slice[T], lo: u64, hi: u64, p: T) ->
             if i >= last {
                 break;
             }
-            xi = match s.try_get(i) {
-                Option::Some(x) => x,
-                Option::None => p,
-            };
+            xi = s.try_get(i).unwrap_or(p);
             if !lt(xi, p) {
                 break;
             }
         }
         loop {
             j = wrapping_sub(j, 1);
-            xj = match s.try_get(j) {
-                Option::Some(x) => x,
-                Option::None => p,
-            };
+            xj = s.try_get(j).unwrap_or(p);
             if !lt(p, xj) {
                 break;
             }
