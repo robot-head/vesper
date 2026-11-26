@@ -2,13 +2,17 @@
 // crates/vesper-syntax/src/sugar_expand.rs in Vesper (SH1 lane 14, #1157,
 // part 4). It reads the surface profile of @vesper/front.
 //
-// Part 4a is the rule matcher (sugar_expand/matcher.rs, matcher.ves).
-// tests/self_host_sugar.rs checks `match_rule_words` against Rust's
-// `vesper_syntax::sugar_expand::match_rule_words` on a rule corpus and a
-// fuzzed corpus.
+// Part 4a is the rule matcher (sugar_expand/matcher.rs, matcher.ves),
+// part 4b-1 the template skeleton (sugar_expand/template.rs, template.ves).
+// tests/self_host_sugar.rs checks `match_rule_words` and
+// `template_skeleton_words` against Rust's test hooks of the same names in
+// `vesper_syntax::sugar_expand` on a rule corpus and a fuzzed corpus.
 
 use self::matcher::{
     match_rule_encoded
+};
+use self::template::{
+    skeleton_encoded
 };
 
 // `match_rule(pattern, invocation, tail, work)` as words (see
@@ -96,4 +100,59 @@ fn base128(in b: Slice[u8], at: u64) -> u64 {
         v = wrapping_add(wrapping_mul(v, 128), d);
     }
     v
+}
+
+// `template_skeleton_words(pattern, invocation, tail, template, mark,
+// max_bytes, work)` of `vesper_syntax::sugar_expand`: the skeleton of the
+// template (template.ves `skeleton_encoded`) for the rule's match, or [0]
+// when the rule refuses or does not match. `text` is five numbers of four
+// base-128 digits (the lengths of the pattern, the invocation, the tail
+// plus one or 0 for none, the template and the mark) and then those texts.
+pub fn template_skeleton_words(in text: Str, max_bytes: u64, work: u64) -> ChunkSeq[u64] {
+    let b = text.as_bytes();
+    let np = base128(in b, 0);
+    let ni = base128(in b, 4);
+    let nt = base128(in b, 8);
+    let nl = base128(in b, 12);
+    let nm = base128(in b, 16);
+    let tail_len = wrapping_sub(
+        nt,
+        if nt == 0 {
+            0
+        } else {
+            1
+        }
+    );
+    let mut at: u64 = 20;
+    let pattern = copy_bytes(in b, at, np);
+    at = wrapping_add(at, np);
+    let invocation = copy_bytes(in b, at, ni);
+    at = wrapping_add(at, ni);
+    let tail = copy_bytes(in b, at, tail_len);
+    at = wrapping_add(at, tail_len);
+    let template = copy_bytes(in b, at, nl);
+    at = wrapping_add(at, nl);
+    let mark = copy_bytes(in b, at, nm);
+    let words = match_rule_encoded(in pattern, in invocation, nt != 0, tail_len, work);
+    let matched = match words.try_get(0) {
+        Option::Some(w) => w == 1,
+        Option::None => false,
+    };
+    if !matched {
+        let mut out = ChunkSeq::new[u64]();
+        out.push(0);
+        return out;
+    }
+    skeleton_encoded(in template, words, in invocation, in tail, in mark, max_bytes)
+}
+
+fn copy_bytes(in b: Slice[u8], at: u64, n: u64) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    for i in 0..n {
+        match b.try_get(wrapping_add(at, i)) {
+            Option::Some(c) => out.push(c),
+            Option::None => out.push(0),
+        }
+    }
+    out
 }

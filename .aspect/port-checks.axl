@@ -211,6 +211,8 @@ flux_check = port_checks(
             ("spine", ["--lib"], "circuit::checkpoint::differential::durable_codecs_match_the_rust_codecs", "circuit::checkpoint::differential::checkpoint_codec_matches_the_rust_codec"),
             ("kafka_wire", ["--lib"], "circuit::wire::tests::batches_round_trip_in_every_codec", "circuit::checkpoint::differential::checkpoint_codec_matches_the_rust_codec"),
             ("kafka_encode", ["--lib"], "circuit::wire::tests::record_encoder_matches_the_rust_encoder", "circuit::wire::tests::batches_round_trip_in_every_codec"),
+            ("kafka_api", ["--lib"], "circuit::codec::tests::response_decoders_match_the_rust_decoders", "circuit::codec::tests::request_encoders_match_the_rust_encoders"),
+            ("kafka_request", ["--lib"], "circuit::codec::tests::request_encoders_match_the_rust_encoders", "circuit::codec::tests::response_decoders_match_the_rust_decoders"),
         ]
     ],
 )
@@ -304,6 +306,7 @@ kinetic_check = port_checks(
             ("diff", ["diff"], "adjoint_matches_central_finite_differences", "malformed_scenes_are_typed_errors", "11"),
             ("solve", ["joint_drives"], "hinge_motor_reaches_its_target_rate", "hinge_servo_holds_the_target_angle_against_gravity", "12"),
             ("world", ["contacts"], "restitution_bounces_to_e_squared_of_the_drop", "static_friction_holds_below_the_coulomb_limit", "13"),
+            ("soft", ["soft"], "a_jelly_cube_lands_and_keeps_its_volume", "a_rope_hangs_straight_at_its_length", "14"),
         ]
     ],
 )
@@ -764,6 +767,7 @@ quarry_check = port_checks(
             ("ddl_atomic_deterministic_and_stale_revision_or_content_rejected", "sql", "ddl_atomic_deterministic_and_stale_revision_or_content_rejected", "real_where_aliases_literals_and_typed_bindings"),
             ("front_end_transcript_matches_golden", "planner_spec", "front_end_transcript_matches_golden", "golden_results_equal_filtered_index_lookups"),
             ("planner_chooses_the_golden_access_paths", "planner_spec", "planner_chooses_the_golden_access_paths", "golden_results_equal_filtered_index_lookups"),
+            ("vectorized_equals_row_executor_for_every_predicate_projection_and_batch", "vector", "vectorized_equals_row_executor_for_every_predicate_projection_and_batch", "simd_mask_count_matches_portable_count"),
         ]
     ],
 )

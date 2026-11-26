@@ -80,4 +80,6 @@ const EDITS: &[(&str, &str)] = &[
         "    let wanted: f32 = if vn_prev < 0.0 {",
         "    let wanted: f32 = if vn_prev > 0.0 {",
     ),
+    // soft.rs (substeps): the volume constraint keeps 6 V at 6 V0.
+    ("e3z) - 6.0 * rest_volume;", "e3z) - 5.0 * rest_volume;"),
 ];

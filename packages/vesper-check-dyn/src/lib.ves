@@ -23,8 +23,17 @@ use @vesper/ast::lower::{
 use @vesper/ast::dump::{
     dump_ast
 };
+use @vesper/ast::words::{
+    WordReader,
+    word_reader,
+    read_ast_words,
+    put_ast_words
+};
 use @vesper/check-data::{
     pack_text
+};
+use @vesper/check-data::util::{
+    put_text_words
 };
 use self::core::{
     D,
@@ -287,4 +296,147 @@ pub fn check_dyn_count(in source: Str, base: u64, flags: u64) -> u64 {
         let ok = lower_dyn(inout d);
     }
     wrapping_add(wrapping_add(d.diags.len(), d.ast.exprs.len()), d.origins.len())
+}
+
+// ------------------------------------------------- the hybrid swap (#1976)
+//
+// The hybrid's `dyn_fn::lower` and `dyn_trait::lower` swaps send the
+// module the Rust checker holds as the `ast` section of the `parse_words`
+// stream (tests/common/ast_words.rs) and read back the outcome:
+//
+//   ok                     1 when the pass lowered the module, else 0
+//   diagnostics            count, then per diagnostic its code, message,
+//                          span start and end, help and related labels
+//                          (count, then start, end and message each), the
+//                          texts as `put_text_words` (check_words.rs
+//                          `decode_diagnostics` reads this)
+//   when ok:
+//     ast                  the lowered module's `ast` section
+//     dyn_fn               end of the synthetic spans, the origin count,
+//                          then (first synthetic start, origin start,
+//                          origin end) per origin
+//     dyn_trait            the live `params` rows (owner symbol, hidden
+//                          generic symbol), the forwards (ten words each,
+//                          `push_forward`), then the boxed trait symbols
+//                          sorted and deduplicated, each a count first
+//
+// Symbols index the names of the lowered `ast` section.
+
+fn put_diag_words(inout o: ChunkSeq[u64], in d: D, from: u64) {
+    o.push(wrapping_sub(d.diags.len(), from));
+    for i in from..d.diags.len() {
+        let r = d.diags.row(i);
+        put_text_words(inout o, in d.diags.text[r.code_a..r.msg_a]);
+        put_text_words(inout o, in d.diags.text[r.msg_a..r.msg_b]);
+        o.push(r.start);
+        o.push(r.stop);
+        put_text_words(inout o, in d.diags.text[r.help_a..r.end]);
+        o.push(widen_u64(r.rn));
+        for k in 0..widen_u64(r.rn) {
+            match d.diags.rel.try_get(wrapping_add(widen_u64(r.ra), k)) {
+                Option::Some(l) => {
+                    o.push(l.start);
+                    o.push(l.stop);
+                    put_text_words(inout o, in d.diags.text[l.a..l.b]);
+                },
+                Option::None => {
+                    o.push(0);
+                    o.push(0);
+                    o.push(0);
+                },
+            }
+        }
+    }
+}
+
+fn read_input(in input: Slice[u8], base: u64) -> D {
+    let mut r = word_reader();
+    let a = read_ast_words(inout r, in input);
+    d_new(a, base)
+}
+
+// `dyn_fn::lower` of the module in `input` with span base `base`.
+pub fn dyn_fn_bytes(in input: Slice[u8], base: u64) -> ChunkSeq[u64] {
+    let mut d = read_input(in input, base);
+    let ok = lower_fn_objects(inout d);
+    let mut o = ChunkSeq::new[u64]();
+    o
+        .push(
+            if ok {
+                1
+            } else {
+                0
+            }
+        );
+    put_diag_words(inout o, in d, 0);
+    if !ok {
+        return o;
+    }
+    o.reserve(wrapping_add(wrapping_mul(d.ast.exprs.len(), 8), 1024));
+    put_ast_words(inout o, in d.ast);
+    o.push(d.next_span);
+    let n = d.origins.len() / 3;
+    o.push(n);
+    for i in 0..d.origins.len() {
+        o.push(u64_at(in d.origins, i));
+    }
+    o
+}
+
+// `dyn_trait::lower` of the module in `input`.
+pub fn dyn_trait_bytes(in input: Slice[u8]) -> ChunkSeq[u64] {
+    let mut d = read_input(in input, 0);
+    let ok = lower_dyn(inout d);
+    let mut o = ChunkSeq::new[u64]();
+    o
+        .push(
+            if ok {
+                1
+            } else {
+                0
+            }
+        );
+    put_diag_words(inout o, in d, 0);
+    if !ok {
+        return o;
+    }
+    o.reserve(wrapping_add(wrapping_mul(d.ast.exprs.len(), 8), 1024));
+    put_ast_words(inout o, in d.ast);
+    let mut live: u64 = 0;
+    for i in 0..d.p_owner.len() {
+        if u8_at(in d.p_live, i) == 1 {
+            live = inc(live);
+        }
+    }
+    o.push(live);
+    for i in 0..d.p_owner.len() {
+        if u8_at(in d.p_live, i) == 1 {
+            o.push(w(u32_at(in d.p_owner, i)));
+            o.push(w(u32_at(in d.p_g, i)));
+        }
+    }
+    o.push(d.fwd.len() / 10);
+    for i in 0..d.fwd.len() {
+        o.push(u64_at(in d.fwd, i));
+    }
+    let mut b = ChunkSeq::with_capacity[u32](d.boxed.len());
+    for i in 0..d.boxed.len() {
+        b.push(u32_at(in d.boxed, i));
+    }
+    // `sort_syms` also drops repeats.
+    sort_syms(in d.ast, inout b);
+    o.push(b.len());
+    for i in 0..b.len() {
+        o.push(w(u32_at(in b, i)));
+    }
+    o
+}
+
+// The harness entries: the same, with the words as a string's bytes.
+pub fn dyn_fn_words(in input: Str, base: u64) -> ChunkSeq[u64] {
+    dyn_fn_bytes(in input.as_bytes(), base)
+}
+
+pub fn dyn_trait_words(in input: Str) -> ChunkSeq[u64] {
+    dyn_trait_bytes(in input.as_bytes())
 }

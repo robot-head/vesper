@@ -94,8 +94,7 @@ fn child_runs_corpus_mains() {
     let text = std::thread::Builder::new()
         .stack_size(1 << 30)
         .spawn(|| {
-            let quiet = std::panic::take_hook();
-            std::panic::set_hook(Box::new(|_| {}));
+            let quiet = quiet_panics();
             let mut text = String::new();
             for c in mains() {
                 for optimize in [true, false] {
@@ -111,7 +110,7 @@ fn child_runs_corpus_mains() {
                     text.push_str(&format!("{} opt={optimize}: {shown}\n", c.name));
                 }
             }
-            std::panic::set_hook(quiet);
+            drop(quiet);
             text
         })
         .unwrap()

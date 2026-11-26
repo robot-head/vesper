@@ -55,6 +55,9 @@ sys library StdFs (
     fn chmod(nocapture in path: CStr, mode: u32) -> ForeignVal[i32] errno;
     fn fchmod(fd: i32, mode: u32) -> ForeignVal[i32] errno;
     fn getpid() -> ForeignVal[i32];
+    // `realpath(path, NULL)`: the canonical path in memory `free` releases.
+    fn realpath(nocapture in path: CStr, resolved: u64) -> ForeignVal[u64] errno;
+    fn free(address: u64) -> ForeignVal[Unit];
     fn opendir(nocapture in path: CStr) -> ForeignVal[Option[Dir]] errno;
     fn readdir(inout d: Dir) -> ForeignVal[u64] errno;
     fn closedir(sink d: Dir) -> ForeignVal[i32];
@@ -77,4 +80,8 @@ sys library StdFs (
     // Copy `buf.len()` bytes from `address` into `buf`.
     #[link_name = "bcopy"]
     fn copy_from(address: u64, nocapture inout buf: CSlice[u8]) -> ForeignVal[Unit];
+    // `std`'s OS error message (POSIX `strerror_r`, which glibc names
+    // `__xpg_strerror_r`).
+    #[link_name = "__xpg_strerror_r"]
+    fn strerror_r(errnum: i32, nocapture inout buf: CSlice[u8]) -> ForeignVal[i32];
 }

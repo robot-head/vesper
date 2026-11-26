@@ -1,0 +1,29 @@
+// @vesper/hybrid-lean-extract: `vesper::lean::extract` served from Vesper
+// in the hybrid Stage 2 build (self-hosting SH5 lane 18, #1341).
+//
+// `extract_text_words` takes one world as little-endian words (written by
+// `cfg_input_full` in tests/common/lean_words.rs: check-data's names,
+// types and world, the lowered program with its lifted closures, the
+// function, AST, effect and contract sections) and returns the module's
+// text, or `error: <message>`, packed by `pack_text`.
+
+// @export abi 4
+
+use @vesper/lean-extract::{
+    extract_text
+};
+
+// The layout version of `extract_text_words`.
+pub fn format() -> u64 {
+    1
+}
+
+pub fn extract_text_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    divergent(extract_text(in input))
+}
+
+// The divergent build (build.rs `divergent-lean-extract`) swaps this body
+// for one that empties every text.
+fn divergent(sink text: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    text
+}

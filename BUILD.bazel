@@ -1348,7 +1348,18 @@ vesper_package(
     srcs = glob(["packages/vesper-std/sort/src/**/*.ves"]),
     manifest = "packages/vesper-std/sort/Loom.toml",
     visibility = ["//visibility:public"],
-    deps = [":std_sugar_package"],
+    deps = [
+        ":std_core_package",
+        ":std_sugar_package",
+    ],
+)
+
+# @vesper-std/core, for the `Option` methods @vesper-std/sort reads with.
+vesper_package(
+    name = "std_core_package",
+    srcs = glob(["packages/vesper-std/core/src/**/*.ves"]),
+    manifest = "packages/vesper-std/core/Loom.toml",
+    visibility = ["//visibility:public"],
 )
 
 # @vesper-std/sugar, the `guard` and `when` sugars, as a path dependency of
@@ -1518,12 +1529,41 @@ vesper_package(
     deps = ["//crates/vesper-serde:port_package"],
 )
 
+# Self-hosting SH5 lane 18 (#1341): Lean extraction, for the hybrid's
+# `lean_extract` swap.
+vesper_package(
+    name = "lean_extract_package",
+    srcs = glob(["packages/vesper-lean-extract/src/**/*.ves"]),
+    manifest = "packages/vesper-lean-extract/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":place_ir_package",
+        "//crates/vesper-lean-syntax:port_package",
+    ],
+)
+
 vesper_package(
     name = "check_loops_atomics_package",
     srcs = glob(["packages/vesper-check-loops-atomics/src/**/*.ves"]),
     manifest = "packages/vesper-check-loops-atomics/Loom.toml",
     visibility = ["//visibility:public"],
     deps = [":check_data_package"],
+)
+
+# The dyn lowering as a dependency of the hybrid compiler's check_dyn
+# module (front-end wiring slice 4, #1976).
+vesper_package(
+    name = "check_dyn_package",
+    srcs = glob(["packages/vesper-check-dyn/src/**/*.ves"]),
+    manifest = "packages/vesper-check-dyn/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ast_package",
+        ":check_data_package",
+        ":std_arena_package",
+        ":std_intern_package",
+    ],
 )
 
 vesper_package(

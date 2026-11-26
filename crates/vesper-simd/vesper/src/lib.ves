@@ -51,6 +51,17 @@ use @vesper/cranelift::{
     ty_vector,
     vals3
 };
+use self::vvec::{
+    binary as v_binary,
+    compare as v_compare,
+    load_masked as v_load_masked,
+    mask_zip as v_mask_zip,
+    prefix_bits as v_prefix_bits,
+    reduce_xor as v_reduce_xor,
+    scan as v_scan,
+    splat as v_splat,
+    store_masked as v_store_masked
+};
 
 // `check_features` and `profile_support` answers (the crate's `Error`).
 const SUPPORTED: u64 = 0;
@@ -279,4 +290,55 @@ fn for_each_param3(inout b: Builder, blk: Block, acc: Ty) eff [Ffi[Cranelift]] {
     append_block_param(inout b, blk, ty_i64());
     append_block_param(inout b, blk, ty_i64());
     append_block_param(inout b, blk, acc);
+}
+
+// ---------------------------------------------------------------------------
+// src/vvec: the scalar profile's arm of each operation (module vvec).
+
+// The answer of `vvec_scan`: delimiter count and XOR of every byte.
+pub copy struct ScanCounts {
+    matches: u64,
+    xor: u8
+}
+
+pub fn vvec_prefix_bits(n: u64, inout bits: Slice[u64]) {
+    v_prefix_bits(n, inout bits);
+}
+
+pub fn vvec_mask_zip(op: u64, lanes: u64, inout a: Slice[u64], in b: Slice[u64]) {
+    v_mask_zip(op, lanes, inout a, in b);
+}
+
+pub fn vvec_splat(value: u8, n: u64, inout lanes: Slice[u8]) {
+    v_splat(value, n, inout lanes);
+}
+
+pub fn vvec_load_masked(
+    in src: Slice[u8],
+    in bits: Slice[u64],
+    passthru: u8,
+    n: u64,
+    inout lanes: Slice[u8]
+) {
+    v_load_masked(in src, in bits, passthru, n, inout lanes);
+}
+
+pub fn vvec_store_masked(inout dst: Slice[u8], in bits: Slice[u64], n: u64, in lanes: Slice[u8]) {
+    v_store_masked(inout dst, in bits, n, in lanes);
+}
+
+pub fn vvec_compare(op: u64, n: u64, in a: Slice[u8], in b: Slice[u8], inout bits: Slice[u64]) {
+    v_compare(op, n, in a, in b, inout bits);
+}
+
+pub fn vvec_binary(op: u64, n: u64, in a: Slice[u8], in b: Slice[u8], inout out: Slice[u8]) {
+    v_binary(op, n, in a, in b, inout out);
+}
+
+pub fn vvec_reduce_xor(n: u64, in a: Slice[u8]) -> u8 {
+    v_reduce_xor(n, in a)
+}
+
+pub fn vvec_scan(in data: Slice[u8], delim: u8) -> ScanCounts {
+    v_scan(in data, delim)
 }
