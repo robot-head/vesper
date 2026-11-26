@@ -23,7 +23,7 @@ use @vesper-std/fs::walk::{walk_path, entry_count, entry_start, entry_end, entry
 use @vesper-std/process::{command_path, arg, output};
 use @vesper-std/env::var_bytes;
 use @vesper-std/fmt::{write_u64, write_i64, write_hex_u64, write_str};
-use @vesper-std/fmt::sequence::fmt;
+use @vesper-std/fmt::fmt;
 
 fn fnv(in s: Slice[u8]) -> u64 {
     let mut h: u64 = 14695981039346656037;

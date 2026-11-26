@@ -241,9 +241,23 @@ pub fn fnv1a64(in s: Slice[u8]) -> u64 {
     h
 }
 
-test {
-    use self::sequence::fmt;
+// Append a sequence of typed writer calls to one destination. Each named
+// writer receives inout destination first, then its original arguments.
+// The calls run left to right, once each, with no intermediate buffer.
+pub sugar fmt: tag {
+    rule (
+        fmt{
+            inout $destination:ident;
+            $($writer:ident($..arguments:args)),*
+        }
+    ) => {
+        {
+            $($writer(inout $destination, $..arguments);)*
+        }
+    }
+}
 
+test {
     fn next(inout trace: u64, n: u64) -> u64 {
         trace = wrapping_add(wrapping_mul(trace, 10), n);
         n
