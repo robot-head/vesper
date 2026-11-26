@@ -100,6 +100,8 @@ fn kind_text(kind: u32) -> Str {
         10 => "write zero",
         11 => "unsupported",
         12 => "out of memory",
+        // A Windows program that `CreateProcessW` would not find.
+        14 => "program not found",
         _ => "other error",
     }
 }

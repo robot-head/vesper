@@ -406,6 +406,8 @@ pub fn put_io_error(inout o: ChunkSeq[u8], e: IoError) {
         put(inout o, in "unsupported");
     } else if k == 12 {
         put(inout o, in "out of memory");
+    } else if k == 14 {
+        put(inout o, in "program not found");
     } else {
         put(inout o, in "other error");
     }

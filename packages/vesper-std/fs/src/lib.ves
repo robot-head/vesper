@@ -708,6 +708,8 @@ fn kind_text(kind: u32) -> Str {
         10 => "write zero",
         11 => "unsupported",
         12 => "out of memory",
+        // `NotFound` with Rust's Windows `resolve_exe` message.
+        14 => "program not found",
         _ => "other error",
     }
 }

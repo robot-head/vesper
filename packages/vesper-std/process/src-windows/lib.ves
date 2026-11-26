@@ -1,5 +1,5 @@
 // @vesper-std/process (Windows): child processes directly over kernel32.
-use @vesper-std/fs::{IoError, error_of, invalid_input, not_found};
+use @vesper-std/fs::{IoError, error_of, invalid_input, program_not_found};
 
 pub copy struct ExitStatus {
     pub code: i64,
@@ -859,7 +859,7 @@ fn resolve_exe(in c: ProcCommand) -> Result[ChunkSeq[u16], IoError] eff [Ffi[Std
         },
         Option::None => {},
     }
-    Result::Err(io_err(not_found()))
+    Result::Err(io_err(program_not_found()))
 }
 
 pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProcess]] {

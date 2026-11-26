@@ -61,6 +61,12 @@ pub fn other() -> u32 {
     13
 }
 
+// `NotFound` from Rust's Windows `resolve_exe`, whose text is
+// `program not found` rather than the kind's own.
+pub fn program_not_found() -> u32 {
+    14
+}
+
 fn errno_kind(os: u32) -> u32 {
     match os {
         2 => not_found(),
@@ -1288,6 +1294,8 @@ fn kind_text(kind: u32) -> Str {
         10 => "write zero",
         11 => "unsupported",
         12 => "out of memory",
+        // `NotFound` with Rust's Windows `resolve_exe` message.
+        14 => "program not found",
         _ => "other error",
     }
 }
