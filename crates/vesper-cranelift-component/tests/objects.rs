@@ -516,3 +516,17 @@ fn the_wasm_backend_import_table_is_the_generated_one() {
         path.display()
     );
 }
+#[test]
+fn the_stage2_declaration_table_is_the_generated_one() {
+    let path = repo().join("packages/vesper-stage2/src/vcl_decls.ves");
+    let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
+    if std::env::var_os("VESPER_BLESS").is_some() {
+        std::fs::write(&path, vesper_cranelift_component::VCL_DECLS_VES).unwrap();
+        return;
+    }
+    assert!(
+        on_disk == vesper_cranelift_component::VCL_DECLS_VES,
+        "{} is stale: rerun with VESPER_BLESS=1",
+        path.display()
+    );
+}

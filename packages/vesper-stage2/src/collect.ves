@@ -8,15 +8,27 @@ use @vesper/ast::{
 };
 use @vesper/check-data::names::{Names, names_new};
 use @vesper/check-data::types::{EffNode, TyKind, Types, types_new};
-use @vesper/check-data::util::{inc32, n32, u32_at, w};
+use @vesper/check-data::util::{inc32, n32, u32_at, u64_at, u8_at, w};
 
 const NONE32: u32 = 4294967295;
+// A `vcl_decls.ves` row: words split by a space; a parameter word starts
+// with its pass letter.
+const ROW_SEPARATOR: u8 = 32;
+const ROW_PASS_INOUT: u8 = 111;
+const ROW_PASS_SINK: u8 = 115;
+// `ParamInfo.pass` (`TyPass`): in or plain, inout, sink.
+const PASS_IN: u8 = 0;
+const PASS_INOUT: u8 = 1;
+const PASS_SINK: u8 = 2;
+// `]`, closing a `CSlice[..]` or `Option[..]` type argument.
+const TY_ARG_CLOSE_BYTES: u64 = 1;
 use @vesper/check-data::world::{
     Adt, EffectRow, Field, Generic, Known, Variant, World, known_new, set_by_symbol, world_new
 };
 use @vesper/check-names-packages::{AssembledModule};
 use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{symbol_from_id};
+use self::vcl_decls::{vcl_decl, vcl_decl_count};
 
 pub copy struct FnInfo {
     name: u32,
@@ -473,6 +485,166 @@ fn add_ffi_op(
         pn: pn,
         result: result_ty
     });
+}
+
+fn row_byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+fn row_is(in a: Slice[u8], in b: Str) -> bool {
+    let bb = b.as_bytes();
+    if a.len() != bb.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if row_byte(in a, i) != row_byte(in bb, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn row_starts(in a: Slice[u8], in p: Str) -> bool {
+    let pb = p.as_bytes();
+    if a.len() < pb.len() {
+        return false;
+    }
+    row_is(in a[0..pb.len()], in p)
+}
+
+// The type of a `cranelift.vsys` type text: a scalar, `Unit`,
+// `CSlice[T]` (a `Slice[T]`), `Option[T]` or a handle type.
+fn vcl_decl_ty(
+    inout names: Names,
+    inout types: Types,
+    k: Known,
+    opt_sym: u32,
+    in t: Slice[u8]
+) -> u32 {
+    if row_is(in t, in "u8") {
+        return types.named0(k.u8_);
+    }
+    if row_is(in t, in "u32") {
+        return types.named0(k.u32_);
+    }
+    if row_is(in t, in "u64") {
+        return types.named0(k.u64_);
+    }
+    if row_is(in t, in "i32") {
+        return types.named0(k.i32_);
+    }
+    if row_is(in t, in "i64") {
+        return types.named0(k.i64_);
+    }
+    if row_is(in t, in "bool") {
+        return types.named0(k.bool_);
+    }
+    if row_is(in t, in "Unit") {
+        return types.unit;
+    }
+    let slice_open = "CSlice[";
+    let option_open = "Option[";
+    let close = wrapping_sub(t.len(), TY_ARG_CLOSE_BYTES);
+    if row_starts(in t, in slice_open) {
+        let elem = vcl_decl_ty(
+            inout names,
+            inout types,
+            k,
+            opt_sym,
+            in t[slice_open.as_bytes().len()..close]
+        );
+        let mut args = ChunkSeq::new[u32]();
+        args.push(elem);
+        return types.named(names.intern(in "Slice".as_bytes()), in args);
+    }
+    if row_starts(in t, in option_open) {
+        let inner = vcl_decl_ty(
+            inout names,
+            inout types,
+            k,
+            opt_sym,
+            in t[option_open.as_bytes().len()..close]
+        );
+        let mut args = ChunkSeq::new[u32]();
+        args.push(inner);
+        return types.named(opt_sym, in args);
+    }
+    types.named0(names.intern(in t))
+}
+
+// The `Ffi$Cranelift` operations of `cranelift.vsys`, one per
+// `vcl_decls.ves` row, from `eff_ops.len()` on.
+fn add_vcl_ops(
+    inout names: Names,
+    inout types: Types,
+    inout params: ChunkSeq[ParamInfo],
+    inout eff_ops: ChunkSeq[EffOpInfo],
+    k: Known,
+    opt_sym: u32
+) {
+    for i in 0..vcl_decl_count() {
+        let row_text = vcl_decl(i);
+        let row = row_text.as_bytes();
+        let mut starts = ChunkSeq::new[u64]();
+        let mut ends = ChunkSeq::new[u64]();
+        let mut a: u64 = 0;
+        for j in 0..row.len() {
+            if row_byte(in row, j) == ROW_SEPARATOR {
+                starts.push(a);
+                ends.push(j);
+                a = wrapping_add(j, 1);
+            }
+        }
+        starts.push(a);
+        ends.push(row.len());
+        let last = wrapping_sub(starts.len(), 1);
+        let mut passes = ChunkSeq::new[u8]();
+        let mut tys = ChunkSeq::new[u32]();
+        for wi in 1..last {
+            let ws = u64_at(in starts, wi);
+            let p = row_byte(in row, ws);
+            passes.push(
+                if p == ROW_PASS_INOUT {
+                    PASS_INOUT
+                } else if p == ROW_PASS_SINK {
+                    PASS_SINK
+                } else {
+                    PASS_IN
+                }
+            );
+            tys.push(vcl_decl_ty(
+                inout names,
+                inout types,
+                k,
+                opt_sym,
+                in row[wrapping_add(ws, 1)..u64_at(in ends, wi)]
+            ));
+        }
+        let result = vcl_decl_ty(
+            inout names,
+            inout types,
+            k,
+            opt_sym,
+            in row[u64_at(in starts, last)..row.len()]
+        );
+        let pa = n32(params.len());
+        for pi in 0..tys.len() {
+            params.push(ParamInfo {
+                name: names.intern(in "a".as_bytes()),
+                pass: u8_at(in passes, pi),
+                ty: u32_at(in tys, pi)
+            });
+        }
+        eff_ops.push(EffOpInfo {
+            name: names.intern(in row[0..u64_at(in ends, 0)]),
+            pa: pa,
+            pn: n32(tys.len()),
+            result: result
+        });
+    }
 }
 
 pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
@@ -1227,6 +1399,22 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
         unit_t
     );
     eff_decls.push(EffDeclInfo { name: fs_sym, linear: false, ga: 0, gn: 0, oa: fs_oa, on: 17 });
+
+    // Only a program that names the library declares it, so every other
+    // program collects as before.
+    if mod_asts_mention(in mods, in "Cranelift") {
+        let vcl_sym = names.intern(in "Ffi$Cranelift".as_bytes());
+        let vcl_oa = n32(eff_ops.len());
+        add_vcl_ops(inout names, inout types, inout params, inout eff_ops, world.k, opt_sym);
+        eff_decls.push(EffDeclInfo {
+            name: vcl_sym,
+            linear: false,
+            ga: 0,
+            gn: 0,
+            oa: vcl_oa,
+            on: n32(vcl_decl_count())
+        });
+    }
     CollectedProgram {
         names: names,
         types: types,

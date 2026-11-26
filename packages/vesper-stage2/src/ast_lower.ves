@@ -393,6 +393,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
         let nm0 = sym(inout lc, in ast, mod_idx, e.a);
         let nm = if lc.names.has_prefix(nm0, in "StdEnv::".as_bytes())
             || lc.names.has_prefix(nm0, in "StdFs::".as_bytes())
+            || lc.names.has_prefix(nm0, in "Cranelift::".as_bytes())
         {
             let mut fbuf = ChunkSeq::new[u8]();
             fbuf.push(70);
