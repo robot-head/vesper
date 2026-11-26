@@ -15,15 +15,68 @@ use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, w};
 use @vesper/check-data::input::{Ctx};
 use @vesper/check-data::types::{EffNode, Vars, display, substitute, vars_new, TyKind, TyPass};
 use @vesper/check-data::world::{constructor, field_step};
-use self::keys::{Keys, Sums, keys_new, pair, sums_new};
-use self::prog::{ExprNode, Fun, PatNode, Prog};
+use @vesper-std/bytes::ascii::{
+    COLON, DIGIT_NINE, DIGIT_ONE, DIGIT_ZERO, EQUALS, LOWER_E, LOWER_F, LOWER_U, LOWER_Z,
+    OPEN_BRACKET, PLUS, UNDERSCORE
+};
+use self::codes::{
+    CODE_LEN, E_CALLEE_LACKS_CAPS, E_DF_DENORM, E_DF_HOST_OP, E_DF_REMAINDER, E_RTBUS_OUTSIDE_RT,
+    E_RT_FORBIDDEN_EFFECT, E_RT_OPEN_ROW, E_RT_RESUMABLE_HANDLER, E_SECRET_BRANCH, E_SECRET_INDEX,
+    E_SECRET_LATENCY, E_SECRET_PAYLOAD, E_SECRET_RESULT, E_SECRET_TO_PUBLIC, E_UNCHECKED_FN_VALUE,
+    E_UNRESOLVED_CALLEE
+};
+use self::keys::{HIGH_UNIT, Keys, Sums, keys_new, pair, sums_new};
+use self::kinds::{
+    ClauseWord, EXPR_ASSIGN, EXPR_BINARY, EXPR_BLOCK, EXPR_BREAK, EXPR_CALL, EXPR_CLOSURE,
+    EXPR_CONTINUE, EXPR_FIELD, EXPR_FOR, EXPR_HANDLE, EXPR_IF, EXPR_INDEX, EXPR_LITERAL, EXPR_LOOP,
+    EXPR_MATCH, EXPR_NAME, EXPR_RANGE, EXPR_RETURN, EXPR_STRUCT, EXPR_TRY, EXPR_TUPLE, EXPR_UNARY,
+    PAIR_WORDS, PAT_BIND, PAT_CONSTRUCTOR, PAT_LITERAL, PAT_TUPLE, PAT_WILD, ParamWord,
+    STATE_PAIR_LEN, STMT_LET, StmtWord
+};
+use self::prog::{ExprNode, Fun, NONE32, PatNode, Prog};
 
-const NONE32: u32 = 4294967295;
+pub const CT: u8 = 1;
+pub const RT: u8 = 2;
+pub const DF: u8 = 4;
+pub const CD: u8 = 8;
+pub const ALL_CAPS: u8 = CT | RT | DF | CD;
 
-const CT: u8 = 1;
-const RT: u8 = 2;
-const DF: u8 = 4;
-const CD: u8 = 8;
+// `coerce`: the capabilities of a value with no function type.
+const CAPS_NONE: u8 = 16;
+
+// `secret_type` answers by type id.
+const MEMO_UNKNOWN: u8 = 0;
+const MEMO_PUBLIC: u8 = 1;
+const MEMO_SECRET: u8 = 2;
+
+// `World::constructor`: no constructor of that name.
+pub const NO_CTOR: u64 = 18446744073709551615;
+
+// The `::` between path segments.
+const PATH_SEP_LEN: u64 = 2;
+
+// The bytes of the integer and float kind names that are not in
+// @vesper-std/bytes::ascii (`isize`, `u16`, `i32`, `u64`, `f32`, ...).
+const LOWER_I: u8 = 105;
+const LOWER_S: u8 = 115;
+const DIGIT_TWO: u8 = 50;
+const DIGIT_THREE: u8 = 51;
+const DIGIT_FOUR: u8 = 52;
+const DIGIT_SIX: u8 = 54;
+const DIGIT_EIGHT: u8 = 56;
+
+// The lengths of a kind name after its `u`, `i` or `f`, plus that letter:
+// `size`, `8`, `16`/`32`/`64` and `128`.
+const SIZE_KIND_LEN: u64 = 5;
+const BYTE_KIND_LEN: u64 = 2;
+const WORD_KIND_LEN: u64 = 3;
+const WIDE_KIND_LEN: u64 = 4;
+
+// The length of `declassify`.
+const DECLASSIFY_LEN: u64 = 10;
+
+// `Walker::handler`: the rounds of its taint fixpoint, as in Rust.
+const HANDLER_ROUNDS: u64 = 4;
 
 // The callee kinds of `Walker::resolve`.
 const C_CONSTRUCTOR: u8 = 1;
@@ -354,10 +407,10 @@ pub fn secret_type(in ctx: Ctx, inout walk: Walk, ty: u32) -> bool {
     }
     let memo = match walk.secret_memo.try_get(w(ty)) {
         Option::Some(cached) => cached,
-        Option::None => 0,
+        Option::None => MEMO_UNKNOWN,
     };
-    if memo != 0 {
-        return memo == 2;
+    if memo != MEMO_UNKNOWN {
+        return memo == MEMO_SECRET;
     }
     walk.seen.clear();
     let is_secret = secret_visit(in ctx, walk.syms, ty, inout walk.seen);
@@ -365,9 +418,9 @@ pub fn secret_type(in ctx: Ctx, inout walk: Walk, ty: u32) -> bool {
         if walk.secret_memo.len() > w(ty) {
             break;
         }
-        walk.secret_memo.push(0);
+        walk.secret_memo.push(MEMO_UNKNOWN);
     }
-    let ok = walk.secret_memo.try_set(w(ty), if is_secret { 2 } else { 1 });
+    let ok = walk.secret_memo.try_set(w(ty), if is_secret { MEMO_SECRET } else { MEMO_PUBLIC });
     is_secret
 }
 
@@ -429,7 +482,7 @@ fn find_colons(in ctx: Ctx, name: u32, from: u64) -> u64 {
         if inc(i) >= n {
             return n;
         }
-        if ctx.names.byte(name, i) == 58 && ctx.names.byte(name, inc(i)) == 58 {
+        if ctx.names.byte(name, i) == COLON && ctx.names.byte(name, inc(i)) == COLON {
             return i;
         }
         i = inc(i);
@@ -447,17 +500,17 @@ fn sub_sym(in ctx: Ctx, inout walk: Walk, name: u32, lo: u64, hi: u64) -> u32 {
 
 // `World::constructor(name)`, packed as world.ves `constructor` returns it.
 pub fn ctor(in ctx: Ctx, inout walk: Walk, name: u32) -> u64 {
-    let none: u64 = 18446744073709551615;
+    let none: u64 = NO_CTOR;
     let n = ctx.names.size(name);
     let first_sep = find_colons(in ctx, name, 0);
     if first_sep >= n {
         return constructor(in ctx.world, NONE32, name);
     }
-    if find_colons(in ctx, name, add(first_sep, 2)) < n {
+    if find_colons(in ctx, name, add(first_sep, PATH_SEP_LEN)) < n {
         return none;
     }
     let qualifier = sub_sym(in ctx, inout walk, name, 0, first_sep);
-    let short = sub_sym(in ctx, inout walk, name, add(first_sep, 2), n);
+    let short = sub_sym(in ctx, inout walk, name, add(first_sep, PATH_SEP_LEN), n);
     if qualifier == NONE32 || short == NONE32 {
         return none;
     }
@@ -473,44 +526,44 @@ fn int_kind_after(in ctx: Ctx, name: u32, skip: u64) -> bool {
     let n = ctx.names.size(name);
     let rest = wrapping_sub(n, skip);
     let first_byte = ctx.names.byte(name, skip);
-    if rest == 5 {
+    if rest == SIZE_KIND_LEN {
         // usize, isize
-        return (first_byte == 117 || first_byte == 105)
-            && ctx.names.byte(name, add(skip, 1)) == 115
-            && ctx.names.byte(name, add(skip, 2)) == 105
-            && ctx.names.byte(name, add(skip, 3)) == 122
-            && ctx.names.byte(name, add(skip, 4)) == 101;
+        return (first_byte == LOWER_U || first_byte == LOWER_I)
+            && ctx.names.byte(name, add(skip, 1)) == LOWER_S
+            && ctx.names.byte(name, add(skip, 2)) == LOWER_I
+            && ctx.names.byte(name, add(skip, 3)) == LOWER_Z
+            && ctx.names.byte(name, add(skip, 4)) == LOWER_E;
     }
-    if first_byte != 117 && first_byte != 105 {
+    if first_byte != LOWER_U && first_byte != LOWER_I {
         return false;
     }
-    if rest == 2 {
-        return ctx.names.byte(name, add(skip, 1)) == 56;
+    if rest == BYTE_KIND_LEN {
+        return ctx.names.byte(name, add(skip, 1)) == DIGIT_EIGHT;
     }
-    if rest == 3 {
+    if rest == WORD_KIND_LEN {
         let digit1 = ctx.names.byte(name, add(skip, 1));
         let digit2 = ctx.names.byte(name, add(skip, 2));
-        return (digit1 == 49 && digit2 == 54)
-            || (digit1 == 51 && digit2 == 50)
-            || (digit1 == 54 && digit2 == 52);
+        return (digit1 == DIGIT_ONE && digit2 == DIGIT_SIX)
+            || (digit1 == DIGIT_THREE && digit2 == DIGIT_TWO)
+            || (digit1 == DIGIT_SIX && digit2 == DIGIT_FOUR);
     }
-    if rest == 4 {
+    if rest == WIDE_KIND_LEN {
         // i128, u128
-        return ctx.names.byte(name, add(skip, 1)) == 49
-            && ctx.names.byte(name, add(skip, 2)) == 50
-            && ctx.names.byte(name, add(skip, 3)) == 56;
+        return ctx.names.byte(name, add(skip, 1)) == DIGIT_ONE
+            && ctx.names.byte(name, add(skip, 2)) == DIGIT_TWO
+            && ctx.names.byte(name, add(skip, 3)) == DIGIT_EIGHT;
     }
     false
 }
 
 fn float_kind_after(in ctx: Ctx, name: u32, skip: u64) -> bool {
     let n = ctx.names.size(name);
-    if wrapping_sub(n, skip) != 3 || ctx.names.byte(name, skip) != 102 {
+    if wrapping_sub(n, skip) != WORD_KIND_LEN || ctx.names.byte(name, skip) != LOWER_F {
         return false;
     }
     let digit1 = ctx.names.byte(name, add(skip, 1));
     let digit2 = ctx.names.byte(name, add(skip, 2));
-    (digit1 == 51 && digit2 == 50) || (digit1 == 54 && digit2 == 52)
+    (digit1 == DIGIT_THREE && digit2 == DIGIT_TWO) || (digit1 == DIGIT_SIX && digit2 == DIGIT_FOUR)
 }
 
 fn prefixed_int(in ctx: Ctx, name: u32, in prefix: Str) -> bool {
@@ -576,19 +629,19 @@ pub fn is_declassify_gate(in ctx: Ctx, name: u32) -> bool {
         if inc(i) >= n {
             break;
         }
-        if ctx.names.byte(name, i) == 58 && ctx.names.byte(name, inc(i)) == 58 {
-            seg_start = add(i, 2);
-            i = add(i, 2);
+        if ctx.names.byte(name, i) == COLON && ctx.names.byte(name, inc(i)) == COLON {
+            seg_start = add(i, PATH_SEP_LEN);
+            i = add(i, PATH_SEP_LEN);
         } else {
             i = inc(i);
         }
     }
     let word = "declassify".as_bytes();
     let len = wrapping_sub(n, seg_start);
-    if len < 10 {
+    if len < DECLASSIFY_LEN {
         return false;
     }
-    for j in 0..10 {
+    for j in 0..DECLASSIFY_LEN {
         let expected = match word.try_get(j) {
             Option::Some(byte) => byte,
             Option::None => 0,
@@ -597,7 +650,7 @@ pub fn is_declassify_gate(in ctx: Ctx, name: u32) -> bool {
             return false;
         }
     }
-    len == 10 || ctx.names.byte(name, add(seg_start, 10)) == 95
+    len == DECLASSIFY_LEN || ctx.names.byte(name, add(seg_start, DECLASSIFY_LEN)) == UNDERSCORE
 }
 
 // ------------------------------------------------------------ text
@@ -661,7 +714,7 @@ fn finish(inout walk: Walk, code_start: u64, in help: Str, start: u64, end: u64)
         start: start,
         end: end,
         code_start: code_start,
-        message_start: add(code_start, 5),
+        message_start: add(code_start, CODE_LEN),
         help_start: help_start,
         help_end: walk.text.len()
     });
@@ -803,7 +856,7 @@ fn denorm_conflict(in ctx: Ctx, inout walk: Walk, closure: bool, name: u32, star
     if !walk.emit {
         return;
     }
-    let code_start = begin(inout walk, "E0732");
+    let code_start = begin(inout walk, E_DF_DENORM);
     if closure {
         put(inout walk, "closure");
     } else {
@@ -835,7 +888,7 @@ fn function_rules(in ctx: Ctx, in prog: Prog, inout walk: Walk, func: Fun) {
     for i in 0..row_len(in ctx, func.row) {
         let effect = row_effect(in ctx, func.row, i);
         if forbidden(in ctx, effect.name) {
-            let code_start = begin(inout walk, "E0720");
+            let code_start = begin(inout walk, E_RT_FORBIDDEN_EFFECT);
             put(inout walk, "eff [Realtime] function '");
             put_name(in ctx, inout walk, func.name);
             put(inout walk, "' carries '");
@@ -852,7 +905,7 @@ fn function_rules(in ctx: Ctx, in prog: Prog, inout walk: Walk, func: Fun) {
     }
     let tail = row_tail(in ctx, func.row);
     if tail != 0 {
-        let code_start = begin(inout walk, "E0721");
+        let code_start = begin(inout walk, E_RT_OPEN_ROW);
         put(inout walk, "eff [Realtime] function '");
         put_name(in ctx, inout walk, func.name);
         put(inout walk, "' has an open effect row '");
@@ -900,19 +953,19 @@ pub fn ty_of(inout ctx: Ctx, in prog: Prog, in walk: Walk, expr_id: u32) -> u32 
     if checked != NONE32 && checked != ctx.types.infer {
         return checked;
     }
-    if node.kind == 2 {
+    if node.kind == EXPR_NAME {
         let local_index = local(in walk, node.a);
         if local_index == NONE32 {
             return NONE32;
         }
         return local_at(in walk, local_index).ty;
     }
-    if node.kind == 7 {
+    if node.kind == EXPR_FIELD {
         let base_ty = ty_of(inout ctx, in prog, in walk, node.a);
         if base_ty == NONE32 {
             return NONE32;
         }
-        let is_index_step = ctx.names.size(node.b) > 0 && ctx.names.byte(node.b, 0) == 91;
+        let is_index_step = ctx.names.size(node.b) > 0 && ctx.names.byte(node.b, 0) == OPEN_BRACKET;
         return field_one(inout ctx, base_ty, node.b, is_index_step);
     }
     NONE32
@@ -987,18 +1040,18 @@ fn loop_body(
 
 fn bind_names(inout walk: Walk, in prog: Prog, pat: u32, tainted: bool, ty: u32) {
     let pat_node = prog.pat(pat);
-    if pat_node.kind == 2 {
+    if pat_node.kind == PAT_BIND {
         bind(inout walk, plain(pat_node.a, tainted, ty));
-    } else if pat_node.kind == 4 {
+    } else if pat_node.kind == PAT_TUPLE {
         for i in 0..w(pat_node.b) {
             bind_names(inout walk, in prog, prog.at(add(w(pat_node.a), i)), tainted, ty);
         }
-    } else if pat_node.kind == 5 {
+    } else if pat_node.kind == PAT_CONSTRUCTOR {
         for i in 0..w(pat_node.c) {
             bind_names(
                 inout walk,
                 in prog,
-                prog.at(add(w(pat_node.b), inc(wrapping_mul(i, 2)))),
+                prog.at(add(w(pat_node.b), inc(wrapping_mul(i, PAIR_WORDS)))),
                 tainted,
                 ty
             );
@@ -1018,7 +1071,7 @@ pub fn bind_pattern(
     if scrutinee_ty != NONE32 {
         secret_access_pattern(inout ctx, in prog, inout walk, pat, scrutinee_ty);
     }
-    let whole = prog.pat(pat).kind == 2;
+    let whole = prog.pat(pat).kind == PAT_BIND;
     bind_names(inout walk, in prog, pat, tainted, if whole { scrutinee_ty } else { NONE32 });
 }
 
@@ -1029,7 +1082,7 @@ fn is_index(in ctx: Ctx, name: u32) -> bool {
         return false;
     }
     let mut digits_start: u64 = 0;
-    if ctx.names.byte(name, 0) == 43 {
+    if ctx.names.byte(name, 0) == PLUS {
         digits_start = 1;
         if n == 1 {
             return false;
@@ -1037,7 +1090,7 @@ fn is_index(in ctx: Ctx, name: u32) -> bool {
     }
     for i in digits_start..n {
         let byte = ctx.names.byte(name, i);
-        if byte < 48 || byte > 57 {
+        if byte < DIGIT_ZERO || byte > DIGIT_NINE {
             return false;
         }
     }
@@ -1052,7 +1105,7 @@ fn secret_access_pattern(inout ctx: Ctx, in prog: Prog, inout walk: Walk, pat: u
     }
     let pat_node = prog.pat(pat);
     let ty_node = ctx.types.node(ty);
-    if pat_node.kind == 4 && ty_node.kind == TyKind::Tuple {
+    if pat_node.kind == PAT_TUPLE && ty_node.kind == TyKind::Tuple {
         for i in 0..w(pat_node.b) {
             if i >= w(ty_node.n) {
                 break;
@@ -1061,15 +1114,15 @@ fn secret_access_pattern(inout ctx: Ctx, in prog: Prog, inout walk: Walk, pat: u
             let sub_ty = ctx.types.arg(ty, i);
             secret_access_pattern(inout ctx, in prog, inout walk, sub_pat, sub_ty);
         }
-    } else if pat_node.kind == 5 && ty_node.kind == TyKind::Named {
+    } else if pat_node.kind == PAT_CONSTRUCTOR && ty_node.kind == TyKind::Named {
         let ctor_key = ctor(in ctx, inout walk, pat_node.a);
-        if ctor_key != 18446744073709551615 {
-            let adt = ctx.world.adt(n32(ctor_key / 4294967296));
-            let variant = ctx.world.variant(ctor_key % 4294967296);
+        if ctor_key != NO_CTOR {
+            let adt = ctx.world.adt(n32(ctor_key / HIGH_UNIT));
+            let variant = ctx.world.variant(ctor_key % HIGH_UNIT);
             let vars = ctx.world.vars_of(in ctx.types, adt, ty);
             for i in 0..w(pat_node.c) {
-                let field = prog.at(add(w(pat_node.b), wrapping_mul(i, 2)));
-                let sub_pat = prog.at(add(w(pat_node.b), inc(wrapping_mul(i, 2))));
+                let field = prog.at(add(w(pat_node.b), wrapping_mul(i, PAIR_WORDS)));
+                let sub_pat = prog.at(add(w(pat_node.b), inc(wrapping_mul(i, PAIR_WORDS))));
                 let mut field_index = ctx.world.find_field(variant, field);
                 if field_index == NONE32 && i < w(variant.fc) && is_index(in ctx, field) {
                     field_index = n32(add(w(variant.fa), i));
@@ -1085,12 +1138,12 @@ fn secret_access_pattern(inout ctx: Ctx, in prog: Prog, inout walk: Walk, pat: u
             }
         }
     }
-    if pat_node.kind == 5 {
+    if pat_node.kind == PAT_CONSTRUCTOR {
         let ctor_key = ctor(in ctx, inout walk, pat_node.a);
-        if ctor_key != 18446744073709551615 {
-            let adt = ctx.world.adt(n32(ctor_key / 4294967296));
+        if ctor_key != NO_CTOR {
+            let adt = ctx.world.adt(n32(ctor_key / HIGH_UNIT));
             if is_secret_name(walk.syms, adt.name) && walk.emit {
-                let code_start = begin(inout walk, "E0707");
+                let code_start = begin(inout walk, E_SECRET_PAYLOAD);
                 put(inout walk, "the payload of secret '");
                 put_ty(in ctx, inout walk, ty);
                 put(inout walk, "' can only be read inside eff [ConstTime]");
@@ -1109,13 +1162,13 @@ fn secret_access_pattern(inout ctx: Ctx, in prog: Prog, inout walk: Walk, pat: u
 
 fn refutable_pat(in ctx: Ctx, in prog: Prog, inout walk: Walk, pat: u32) -> bool {
     let pat_node = prog.pat(pat);
-    if pat_node.kind == 1 || pat_node.kind == 2 {
+    if pat_node.kind == PAT_WILD || pat_node.kind == PAT_BIND {
         return false;
     }
-    if pat_node.kind == 3 {
+    if pat_node.kind == PAT_LITERAL {
         return true;
     }
-    if pat_node.kind == 4 {
+    if pat_node.kind == PAT_TUPLE {
         for i in 0..w(pat_node.b) {
             if refutable_pat(in ctx, in prog, inout walk, prog.at(add(w(pat_node.a), i))) {
                 return true;
@@ -1124,10 +1177,10 @@ fn refutable_pat(in ctx: Ctx, in prog: Prog, inout walk: Walk, pat: u32) -> bool
         return false;
     }
     let ctor_key = ctor(in ctx, inout walk, pat_node.a);
-    if ctor_key == 18446744073709551615 {
+    if ctor_key == NO_CTOR {
         return true;
     }
-    if ctx.world.adt(n32(ctor_key / 4294967296)).vn != 1 {
+    if ctx.world.adt(n32(ctor_key / HIGH_UNIT)).vn != 1 {
         return true;
     }
     for i in 0..w(pat_node.c) {
@@ -1135,7 +1188,7 @@ fn refutable_pat(in ctx: Ctx, in prog: Prog, inout walk: Walk, pat: u32) -> bool
             in ctx,
             in prog,
             inout walk,
-            prog.at(add(w(pat_node.b), inc(wrapping_mul(i, 2))))
+            prog.at(add(w(pat_node.b), inc(wrapping_mul(i, PAIR_WORDS))))
         ) {
             return true;
         }
@@ -1163,7 +1216,7 @@ fn branch_on_secret(
     if !walk.emit {
         return;
     }
-    let code_start = begin(inout walk, "E0702");
+    let code_start = begin(inout walk, E_SECRET_BRANCH);
     put(inout walk, "eff [ConstTime] ");
     put(inout walk, what);
     put(inout walk, " depends on a secret value");
@@ -1179,7 +1232,7 @@ fn branch_on_secret(
 
 fn tail_span(in prog: Prog, expr_id: u32) -> ExprNode {
     let node = prog.expr(expr_id);
-    if node.kind == 5 && node.c != NONE32 {
+    if node.kind == EXPR_BLOCK && node.c != NONE32 {
         return tail_span(in prog, node.c);
     }
     node
@@ -1187,10 +1240,10 @@ fn tail_span(in prog: Prog, expr_id: u32) -> ExprNode {
 
 fn place_root(in prog: Prog, expr_id: u32) -> u32 {
     let node = prog.expr(expr_id);
-    if node.kind == 2 {
+    if node.kind == EXPR_NAME {
         return node.a;
     }
-    if node.kind == 7 {
+    if node.kind == EXPR_FIELD {
         return place_root(in prog, node.a);
     }
     NONE32
@@ -1202,7 +1255,7 @@ fn adt_vars(in ctx: Ctx, ctor_key: u64, ty: u32) -> Vars {
     if ty == NONE32 || ctx.types.kind(ty) != TyKind::Named {
         return vars_new();
     }
-    let adt = ctx.world.adt(n32(ctor_key / 4294967296));
+    let adt = ctx.world.adt(n32(ctor_key / HIGH_UNIT));
     ctx.world.vars_of(in ctx.types, adt, ty)
 }
 
@@ -1214,7 +1267,7 @@ fn call_vars(in prog: Prog, start: u64, end: u64, inout vars: Vars) {
     }
     let row = prog.call_row(w(call_index));
     for i in 0..w(row.var_count) {
-        let at = add(w(row.var_start), wrapping_mul(i, 2));
+        let at = add(w(row.var_start), wrapping_mul(i, PAIR_WORDS));
         vars.set(u32_at(in prog.call_vars, at), u32_at(in prog.call_vars, inc(at)));
     }
 }
@@ -1226,9 +1279,9 @@ pub fn expr(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32) -> bo
     let typed_secret = expr_ty != NONE32 && secret_type(in ctx, inout walk, expr_ty);
     let node = prog.expr(expr_id);
     let kind = node.kind;
-    let tainted = if kind == 1 || kind == 22 {
+    let tainted = if kind == EXPR_LITERAL || kind == EXPR_CONTINUE {
         false
-    } else if kind == 2 {
+    } else if kind == EXPR_NAME {
         let local_index = local(in walk, node.a);
         if local_index == NONE32 {
             let fun_index = prog.lookup(node.a);
@@ -1242,27 +1295,27 @@ pub fn expr(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32) -> bo
         } else {
             local_at(in walk, local_index).tainted
         }
-    } else if kind == 3 {
+    } else if kind == EXPR_TUPLE {
         let mut taint = false;
         for i in 0..w(node.b) {
             let item_taint = expr(inout ctx, in prog, inout walk, prog.at(add(w(node.a), i)));
             taint = item_taint || taint;
         }
         taint
-    } else if kind == 4 {
+    } else if kind == EXPR_STRUCT {
         struct_literal(inout ctx, in prog, inout walk, expr_id, node)
-    } else if kind == 5 {
+    } else if kind == EXPR_BLOCK {
         block(inout ctx, in prog, inout walk, node)
-    } else if kind == 6 {
+    } else if kind == EXPR_CALL {
         call(inout ctx, in prog, inout walk, expr_id, node)
-    } else if kind == 7 {
+    } else if kind == EXPR_FIELD {
         let taint = expr(inout ctx, in prog, inout walk, node.a);
         if !const_time && walk.emit {
             let base_ty = ty_of(inout ctx, in prog, in walk, node.a);
             if base_ty != NONE32 && ctx.types.kind(base_ty) == TyKind::Named {
                 let ty_name = ctx.types.name(base_ty);
                 if is_secret_name(walk.syms, ty_name) && ctx.world.lookup(ty_name) != NONE32 {
-                    let code_start = begin(inout walk, "E0707");
+                    let code_start = begin(inout walk, E_SECRET_PAYLOAD);
                     put(inout walk, "the payload of secret '");
                     put_ty(in ctx, inout walk, base_ty);
                     put(inout walk, "' can only be read inside eff [ConstTime]");
@@ -1278,12 +1331,12 @@ pub fn expr(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32) -> bo
             }
         }
         taint
-    } else if kind == 8 {
+    } else if kind == EXPR_INDEX {
         let base_taint = expr(inout ctx, in prog, inout walk, node.a);
         let index_taint = expr(inout ctx, in prog, inout walk, node.b);
         if const_time && index_taint && walk.emit {
             let index_node = prog.expr(node.b);
-            let code_start = begin(inout walk, "E0704");
+            let code_start = begin(inout walk, E_SECRET_INDEX);
             put(inout walk, "eff [ConstTime] index depends on a secret value");
             put_in_fn(in ctx, in prog, inout walk);
             finish(
@@ -1295,16 +1348,16 @@ pub fn expr(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32) -> bo
             );
         }
         base_taint || index_taint
-    } else if kind == 9 {
+    } else if kind == EXPR_TRY {
         let taint = expr(inout ctx, in prog, inout walk, node.a);
         if const_time && taint {
             branch_on_secret(in ctx, in prog, inout walk, "'?' propagation", node.start, node.end);
         }
         taint
-    } else if kind == 10 {
+    } else if kind == EXPR_UNARY {
         let taint = expr(inout ctx, in prog, inout walk, node.b);
         if const_time && taint && ctx.world.may_overflow(node.start, node.end) && walk.emit {
-            let code_start = begin(inout walk, "E0703");
+            let code_start = begin(inout walk, E_SECRET_LATENCY);
             put(inout walk, "eff [ConstTime] checked '");
             put_name(in ctx, inout walk, node.a);
             put(inout walk, "' on a secret value may abort depending on the secret");
@@ -1318,15 +1371,15 @@ pub fn expr(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32) -> bo
             );
         }
         taint
-    } else if kind == 11 {
+    } else if kind == EXPR_BINARY {
         let left_taint = expr(inout ctx, in prog, inout walk, node.b);
         let right_taint = expr(inout ctx, in prog, inout walk, node.c);
         let taint = left_taint || right_taint;
         binary(inout ctx, in prog, inout walk, node, node.a, node.b, node.c, left_taint, taint);
         taint
-    } else if kind == 12 {
+    } else if kind == EXPR_ASSIGN {
         assign(inout ctx, in prog, inout walk, node)
-    } else if kind == 13 {
+    } else if kind == EXPR_IF {
         let cond = expr(inout ctx, in prog, inout walk, node.a);
         if const_time && cond {
             let cond_node = prog.expr(node.a);
@@ -1349,7 +1402,7 @@ pub fn expr(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32) -> bo
             close_scope(inout walk);
         }
         cond || then_taint || else_taint
-    } else if kind == 14 {
+    } else if kind == EXPR_MATCH {
         let scrutinee_taint = expr(inout ctx, in prog, inout walk, node.a);
         if const_time && scrutinee_taint && refutable(in ctx, in prog, inout walk, node.b, node.c) {
             let scrutinee_node = prog.expr(node.a);
@@ -1365,7 +1418,7 @@ pub fn expr(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32) -> bo
         let scrutinee_ty = ty_of(inout ctx, in prog, in walk, node.a);
         let mut taint = scrutinee_taint;
         for i in 0..w(node.c) {
-            let at = add(w(node.b), wrapping_mul(i, 2));
+            let at = add(w(node.b), wrapping_mul(i, PAIR_WORDS));
             open_scope(inout walk);
             bind_pattern(
                 inout ctx,
@@ -1380,13 +1433,13 @@ pub fn expr(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32) -> bo
             taint = taint || arm_taint;
         }
         taint
-    } else if kind == 15 {
+    } else if kind == EXPR_CLOSURE {
         closure(inout ctx, in prog, inout walk, expr_id, node)
-    } else if kind == 16 {
+    } else if kind == EXPR_HANDLE {
         handler(inout ctx, in prog, inout walk, node)
-    } else if kind == 17 {
+    } else if kind == EXPR_LOOP {
         loop_body(inout ctx, in prog, inout walk, node.a, NONE32, false, NONE32)
-    } else if kind == 18 {
+    } else if kind == EXPR_FOR {
         let bound = expr(inout ctx, in prog, inout walk, node.b);
         if const_time && bound {
             let iter_node = prog.expr(node.b);
@@ -1400,18 +1453,18 @@ pub fn expr(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32) -> bo
             );
         }
         let iter_node = prog.expr(node.b);
-        let element = if iter_node.kind == 19 {
+        let element = if iter_node.kind == EXPR_RANGE {
             ty_of(inout ctx, in prog, in walk, iter_node.a)
         } else {
             NONE32
         };
         let broke = loop_body(inout ctx, in prog, inout walk, node.c, node.a, bound, element);
         false
-    } else if kind == 19 {
+    } else if kind == EXPR_RANGE {
         let start_taint = expr(inout ctx, in prog, inout walk, node.a);
         let end_taint = expr(inout ctx, in prog, inout walk, node.b);
         start_taint || end_taint
-    } else if kind == 20 {
+    } else if kind == EXPR_BREAK {
         let taint = node.a != NONE32 && expr(inout ctx, in prog, inout walk, node.a);
         let n = walk.breaks.len();
         if n > 0 {
@@ -1419,7 +1472,7 @@ pub fn expr(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32) -> bo
             let ok = walk.breaks.try_set(last, bool_at(in walk.breaks, last) || taint);
         }
         false
-    } else if kind == 21 {
+    } else if kind == EXPR_RETURN {
         if node.a != NONE32 {
             let taint = expr(inout ctx, in prog, inout walk, node.a);
             let n = walk.returns.len();
@@ -1451,12 +1504,12 @@ fn struct_literal(
     let ctor_key = ctor(in ctx, inout walk, node.a);
     let mut taint = false;
     for i in 0..w(node.c) {
-        let field = prog.at(add(w(node.b), wrapping_mul(i, 2)));
-        let value = prog.at(add(w(node.b), inc(wrapping_mul(i, 2))));
+        let field = prog.at(add(w(node.b), wrapping_mul(i, PAIR_WORDS)));
+        let value = prog.at(add(w(node.b), inc(wrapping_mul(i, PAIR_WORDS))));
         let value_taint = expr(inout ctx, in prog, inout walk, value);
         taint = taint || value_taint;
-        if ctor_key != 18446744073709551615 {
-            let variant = ctx.world.variant(ctor_key % 4294967296);
+        if ctor_key != NO_CTOR {
+            let variant = ctx.world.variant(ctor_key % HIGH_UNIT);
             let field_index = ctx.world.find_field(variant, field);
             if field_index != NONE32 {
                 let expr_ty = ty_of(inout ctx, in prog, in walk, expr_id);
@@ -1476,18 +1529,18 @@ fn struct_literal(
 fn block(inout ctx: Ctx, in prog: Prog, inout walk: Walk, node: ExprNode) -> bool {
     open_scope(inout walk);
     for i in 0..w(node.b) {
-        let stmt_at = add(w(node.a), wrapping_mul(i, 4));
+        let stmt_at = add(w(node.a), wrapping_mul(i, StmtWord::Words));
         let kind = prog.at(stmt_at);
-        let value = prog.at(add(stmt_at, 3));
-        if kind == 1 {
+        let value = prog.at(add(stmt_at, StmtWord::Value));
+        if kind == STMT_LET {
             let pat = prog.at(inc(stmt_at));
-            let ty = prog.at(add(stmt_at, 2));
+            let ty = prog.at(add(stmt_at, StmtWord::Type));
             let taint = expr(inout ctx, in prog, inout walk, value);
             let declared = ty != ctx.types.infer;
             if declared {
                 coerce(inout ctx, in prog, inout walk, value, ty);
             }
-            let lexical = prog.expr(value).kind == 15;
+            let lexical = prog.expr(value).kind == EXPR_CLOSURE;
             let scrutinee_ty = if declared {
                 ty
             } else {
@@ -1495,7 +1548,7 @@ fn block(inout ctx: Ctx, in prog: Prog, inout walk: Walk, node: ExprNode) -> boo
             };
             bind_pattern(inout ctx, in prog, inout walk, pat, taint, scrutinee_ty);
             let pat_node = prog.pat(pat);
-            if lexical && pat_node.kind == 2 {
+            if lexical && pat_node.kind == PAT_BIND {
                 bind(
                     inout walk,
                     Local {
@@ -1528,7 +1581,7 @@ fn assign(inout ctx: Ctx, in prog: Prog, inout walk: Walk, node: ExprNode) -> bo
         coerce(inout ctx, in prog, inout walk, node.c, target);
     }
     let place_node = prog.expr(node.b);
-    if place_node.kind == 2 && prog.expr(node.c).kind != 15 {
+    if place_node.kind == EXPR_NAME && prog.expr(node.c).kind != EXPR_CLOSURE {
         let local_index = local(in walk, place_node.a);
         if local_index != NONE32 {
             let mut binding = local_at(in walk, local_index);
@@ -1541,7 +1594,7 @@ fn assign(inout ctx: Ctx, in prog: Prog, inout walk: Walk, node: ExprNode) -> bo
         let n = ctx.names.size(node.a);
         let mut end = n;
         loop {
-            if end == 0 || ctx.names.byte(node.a, wrapping_sub(end, 1)) != 61 {
+            if end == 0 || ctx.names.byte(node.a, wrapping_sub(end, 1)) != EQUALS {
                 break;
             }
             end = wrapping_sub(end, 1);
@@ -1599,7 +1652,7 @@ fn binary(
     }
     if const_time && tainted && (op == syms.div || op == syms.rem) {
         if walk.emit {
-            let code_start = begin(inout walk, "E0703");
+            let code_start = begin(inout walk, E_SECRET_LATENCY);
             put(inout walk, "eff [ConstTime] '");
             put_name(in ctx, inout walk, op);
             put(inout walk, "' on a secret value has data-dependent latency");
@@ -1614,13 +1667,11 @@ fn binary(
         }
     } else if const_time
         && tainted
-        && (
-            ctx.world.may_overflow(node.start, node.end)
-                || ctx.world.is_partial(node.start, node.end)
-        )
+        && (ctx.world.may_overflow(node.start, node.end)
+            || ctx.world.is_partial(node.start, node.end))
     {
         if walk.emit {
-            let code_start = begin(inout walk, "E0703");
+            let code_start = begin(inout walk, E_SECRET_LATENCY);
             put(inout walk, "eff [ConstTime] checked '");
             put_name(in ctx, inout walk, op);
             put(inout walk, "' on a secret value may abort depending on the secret");
@@ -1648,7 +1699,7 @@ fn binary(
             secret_operand = rhs_ty != NONE32 && secret_type(in ctx, inout walk, rhs_ty);
         }
         if secret_operand {
-            let code_start = begin(inout walk, "E0707");
+            let code_start = begin(inout walk, E_SECRET_PAYLOAD);
             put(inout walk, "secret values cannot be compared with '");
             put_name(in ctx, inout walk, op);
             put(inout walk, "'");
@@ -1666,7 +1717,7 @@ fn binary(
         let lhs_ty = ty_of(inout ctx, in prog, in walk, lhs);
         let rhs_ty = ty_of(inout ctx, in prog, in walk, rhs);
         if is_float_type(in ctx, syms, lhs_ty) || is_float_type(in ctx, syms, rhs_ty) {
-            let code_start = begin(inout walk, "E0730");
+            let code_start = begin(inout walk, E_DF_REMAINDER);
             put(
                 inout walk,
                 "eff [DetFloat] float remainder is not a correctly rounded basic operation"
@@ -1694,7 +1745,7 @@ fn closure(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32, node: 
     if has(in walk, RT) && walk.emit {
         let tail = row_tail(in ctx, node.d);
         if tail != 0 {
-            let code_start = begin(inout walk, "E0721");
+            let code_start = begin(inout walk, E_RT_OPEN_ROW);
             put(inout walk, "eff [Realtime] closure has an open effect row '");
             put_name(in ctx, inout walk, wrapping_sub(tail, 1));
             put(inout walk, "', which may admit blocking effects");
@@ -1709,7 +1760,7 @@ fn closure(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32, node: 
         for i in 0..row_len(in ctx, node.d) {
             let effect = row_effect(in ctx, node.d, i);
             if forbidden(in ctx, effect.name) {
-                let code_start = begin(inout walk, "E0720");
+                let code_start = begin(inout walk, E_RT_FORBIDDEN_EFFECT);
                 put(inout walk, "eff [Realtime] closure carries '");
                 put_name(in ctx, inout walk, effect.name);
                 put(inout walk, "', which may allocate, block or suspend");
@@ -1737,9 +1788,9 @@ fn closure(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32, node: 
     walk.returns.push(Ret { ty: node.c, tainted: false });
     open_scope(inout walk);
     for i in 0..w(node.b) {
-        let at = add(w(node.a), wrapping_mul(i, 3));
+        let at = add(w(node.a), wrapping_mul(i, ParamWord::Words));
         let name = prog.at(at);
-        let ty = prog.at(add(at, 2));
+        let ty = prog.at(add(at, ParamWord::Type));
         let secret = secret_type(in ctx, inout walk, ty);
         bind(inout walk, plain(name, secret, ty));
     }
@@ -1757,13 +1808,11 @@ fn closure(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32, node: 
             NONE32
         };
         if declared_ty == NONE32
-            || (
-                !secret_type(in ctx, inout walk, declared_ty)
-                    && !carries_no_information(in ctx, walk.syms, declared_ty)
-            )
+            || (!secret_type(in ctx, inout walk, declared_ty)
+                && !carries_no_information(in ctx, walk.syms, declared_ty))
         {
             let tail_node = tail_span(in prog, node.e);
-            let code_start = begin(inout walk, "E0706");
+            let code_start = begin(inout walk, E_SECRET_RESULT);
             put(inout walk, "eff [ConstTime] closure returns a secret-derived value as non-secret");
             finish(
                 inout walk,
@@ -1782,14 +1831,14 @@ fn closure(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32, node: 
 // The clause j of the handler whose clauses start at pool[at]: (name,
 // pats first, pats len, body).
 fn clause_at(in prog: Prog, at: u32, j: u64) -> u64 {
-    add(inc(w(at)), wrapping_mul(j, 4))
+    add(inc(w(at)), wrapping_mul(j, ClauseWord::Words))
 }
 
 fn handler(inout ctx: Ctx, in prog: Prog, inout walk: Walk, node: ExprNode) -> bool {
     let effect_name = node.a;
     if has(in walk, RT) && walk.emit {
         if forbidden(in ctx, effect_name) {
-            let code_start = begin(inout walk, "E0720");
+            let code_start = begin(inout walk, E_RT_FORBIDDEN_EFFECT);
             put(inout walk, "eff [Realtime] body handles '");
             put_name(in ctx, inout walk, effect_name);
             put(inout walk, "', which may allocate, block or suspend");
@@ -1803,7 +1852,7 @@ fn handler(inout ctx: Ctx, in prog: Prog, inout walk: Walk, node: ExprNode) -> b
         } else {
             let decl_index = prog.decl_of(effect_name);
             if decl_index != NONE32 && prog.decl(decl_index).linear {
-                let code_start = begin(inout walk, "E0723");
+                let code_start = begin(inout walk, E_RT_RESUMABLE_HANDLER);
                 put(inout walk, "eff [Realtime] body installs a resumable handler for '");
                 put_name(in ctx, inout walk, effect_name);
                 put(inout walk, "'; its continuation may need a suspended fiber stack");
@@ -1825,11 +1874,11 @@ fn handler(inout ctx: Ctx, in prog: Prog, inout walk: Walk, node: ExprNode) -> b
     let clauses = w(prog.at(w(node.e)));
     let ret_clause = clause_at(in prog, node.e, 0);
     let ret_first = prog.at(inc(ret_clause));
-    let ret_len = prog.at(add(ret_clause, 2));
-    let ret_body = prog.at(add(ret_clause, 3));
+    let ret_len = prog.at(add(ret_clause, ClauseWord::PatsLen));
+    let ret_body = prog.at(add(ret_clause, ClauseWord::Body));
     let mut resume_result = false;
     let mut taint = body_taint;
-    for round in 0..4 {
+    for round in 0..HANDLER_ROUNDS {
         let ops_taint = op_clauses(
             inout ctx,
             in prog,
@@ -1846,7 +1895,7 @@ fn handler(inout ctx: Ctx, in prog: Prog, inout walk: Walk, node: ExprNode) -> b
         let final_state = has_state && state_taint;
         open_scope(inout walk);
         let mut pair_bound = false;
-        if has_state && ret_len == 2 {
+        if has_state && ret_len == STATE_PAIR_LEN {
             bind_pattern(inout ctx, in prog, inout walk, prog.at(w(ret_first)), body_taint, NONE32);
             bind_pattern(
                 inout ctx,
@@ -1859,7 +1908,7 @@ fn handler(inout ctx: Ctx, in prog: Prog, inout walk: Walk, node: ExprNode) -> b
             pair_bound = true;
         } else if has_state && ret_len == 1 {
             let pat_node = prog.pat(prog.at(w(ret_first)));
-            if pat_node.kind == 4 && pat_node.b == 2 {
+            if pat_node.kind == PAT_TUPLE && pat_node.b == STATE_PAIR_LEN {
                 bind_pattern(
                     inout ctx,
                     in prog,
@@ -1928,14 +1977,14 @@ fn op_clauses(
         let clause = clause_at(in prog, node.e, j);
         let op_name = prog.at(clause);
         let pats_at = prog.at(inc(clause));
-        let pat_count = w(prog.at(add(clause, 2)));
-        let body = prog.at(add(clause, 3));
+        let pat_count = w(prog.at(add(clause, ClauseWord::PatsLen)));
+        let body = prog.at(add(clause, ClauseWord::Body));
         open_scope(inout walk);
         for i in 0..pat_count {
             let pat = prog.at(add(w(pats_at), i));
             if inc(i) == pat_count {
                 let pat_node = prog.pat(pat);
-                if pat_node.kind == 2 {
+                if pat_node.kind == PAT_BIND {
                     bind(
                         inout walk,
                         Local {
@@ -1992,14 +2041,14 @@ fn callee(kind: u8, index: u32, decl: u32, ty: u32, lexical: bool) -> Callee {
 // `Walker::resolve`.
 fn resolve(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32) -> Callee {
     let node = prog.expr(expr_id);
-    if node.kind == 2 {
+    if node.kind == EXPR_NAME {
         let name = node.a;
         let local_index = local(in walk, name);
         if local_index != NONE32 {
             let ty = ty_of(inout ctx, in prog, in walk, expr_id);
             return callee(C_VALUE, NONE32, NONE32, ty, local_at(in walk, local_index).lexical);
         }
-        if ctor(in ctx, inout walk, name) != 18446744073709551615 {
+        if ctor(in ctx, inout walk, name) != NO_CTOR {
             return callee(C_CONSTRUCTOR, NONE32, NONE32, NONE32, false);
         }
         if wrapping_intrinsic(in ctx, name) {
@@ -2016,7 +2065,7 @@ fn resolve(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32) -> Cal
         let colons = find_colons(in ctx, name, 0);
         if colons < size {
             let effect_name = sub_sym(in ctx, inout walk, name, 0, colons);
-            let op_name = sub_sym(in ctx, inout walk, name, add(colons, 2), size);
+            let op_name = sub_sym(in ctx, inout walk, name, add(colons, PATH_SEP_LEN), size);
             let decl_index = prog.decl_of(effect_name);
             let op_index = prog.find_op(decl_index, op_name);
             if op_index != NONE32 {
@@ -2025,9 +2074,9 @@ fn resolve(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32) -> Cal
         }
         return callee(C_UNKNOWN, NONE32, NONE32, NONE32, false);
     }
-    if node.kind == 7 {
+    if node.kind == EXPR_FIELD {
         let base_node = prog.expr(node.a);
-        if base_node.kind == 2 && local(in walk, base_node.a) == NONE32 {
+        if base_node.kind == EXPR_NAME && local(in walk, base_node.a) == NONE32 {
             let func = prog.fun(walk.fun_index);
             for i in 0..row_len(in ctx, func.row) {
                 let effect = row_effect(in ctx, func.row, i);
@@ -2045,8 +2094,8 @@ fn resolve(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32) -> Cal
         if base_ty != NONE32 && ctx.types.kind(base_ty) == TyKind::Named {
             walk.scratch.clear();
             ctx.names.write(ctx.types.name(base_ty), inout walk.scratch);
-            walk.scratch.push(58);
-            walk.scratch.push(58);
+            walk.scratch.push(COLON);
+            walk.scratch.push(COLON);
             ctx.names.write(node.b, inout walk.scratch);
             let key = ctx.names.lookup(in walk.scratch.as_slice());
             let fun_index = prog.lookup(key);
@@ -2095,7 +2144,7 @@ fn secret_into_place(
     if const_time && public && param_inout && named && param_index != NONE32 {
         walk.found.outputs.insert(pair(func.name, param_index));
     } else if const_time && public && param_inout && walk.emit {
-        let code_start = begin(inout walk, "E0705");
+        let code_start = begin(inout walk, E_SECRET_TO_PUBLIC);
         put(
             inout walk,
             "eff [ConstTime] writes a secret-derived value into public inout parameter '"
@@ -2120,16 +2169,16 @@ fn secret_into_place(
 // `Walker::call` at call node `node` (expression `expr_id`).
 fn call(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32, node: ExprNode) -> bool {
     let callee_node = prog.expr(node.a);
-    let callee_taint = if callee_node.kind == 7 {
+    let callee_taint = if callee_node.kind == EXPR_FIELD {
         expr(inout ctx, in prog, inout walk, callee_node.a)
-    } else if callee_node.kind == 2 {
+    } else if callee_node.kind == EXPR_NAME {
         let local_index = local(in walk, callee_node.a);
         local_index != NONE32 && local_at(in walk, local_index).tainted
     } else {
         expr(inout ctx, in prog, inout walk, node.a)
     };
     let resolved = resolve(inout ctx, in prog, inout walk, node.a);
-    let receiver = callee_node.kind == 7 && resolved.kind == C_FUNCTION;
+    let receiver = callee_node.kind == EXPR_FIELD && resolved.kind == C_FUNCTION;
     let arg_count = w(node.c);
     let mut taints: ChunkSeq[bool] = ChunkSeq::with_capacity[bool](arg_count);
     let mut any_arg = false;
@@ -2144,7 +2193,7 @@ fn call(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32, node: Exp
     }
     if resolved.kind == C_INTRINSIC {
         if any && has(in walk, CT) && ctx.world.may_overflow(node.start, node.end) && walk.emit {
-            let code_start = begin(inout walk, "E0703");
+            let code_start = begin(inout walk, E_SECRET_LATENCY);
             put(
                 inout walk,
                 "eff [ConstTime] checked conversion of a secret value may abort depending on the secret"
@@ -2194,7 +2243,7 @@ fn call(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32, node: Exp
         );
     }
     if walk.caps != 0 && walk.emit {
-        let code_start = begin(inout walk, "E0709");
+        let code_start = begin(inout walk, E_UNRESOLVED_CALLEE);
         put(inout walk, "eff [");
         put_caps(inout walk, walk.caps);
         put(inout walk, "] body calls a callee that cannot be resolved statically");
@@ -2210,7 +2259,7 @@ fn call(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32, node: Exp
 }
 
 fn arg_expr(in prog: Prog, node: ExprNode, i: u64) -> u32 {
-    prog.at(add(w(node.b), inc(wrapping_mul(i, 2))))
+    prog.at(add(w(node.b), inc(wrapping_mul(i, PAIR_WORDS))))
 }
 
 fn call_function(
@@ -2257,7 +2306,7 @@ fn call_function(
                 walk.found.inferred.insert(pair(func.name, n32(param_index)));
             } else if walk.emit {
                 let arg_node = prog.expr(arg);
-                let code_start = begin(inout walk, "E0705");
+                let code_start = begin(inout walk, E_SECRET_TO_PUBLIC);
                 put(
                     inout walk,
                     "eff [ConstTime] passes a secret-derived value to public parameter '"
@@ -2280,7 +2329,7 @@ fn call_function(
     let lo = walk.summaries.outputs.lower(pair(func.name, 0));
     let hi = walk.summaries.outputs.lower(pair(inc32_(func.name), 0));
     for key_index in lo..hi {
-        let param_index = walk.summaries.outputs.get(key_index) % 4294967296;
+        let param_index = walk.summaries.outputs.get(key_index) % HIGH_UNIT;
         if param_index < flows {
             let arg = if receiver && param_index == 0 {
                 callee_node.a
@@ -2324,7 +2373,7 @@ fn call_value(
     any: bool
 ) -> bool {
     let is_fn = ty != NONE32 && ctx.types.kind(ty) == TyKind::Fn;
-    if callee_node.kind == 2 {
+    if callee_node.kind == EXPR_NAME {
         let local_index = local(in walk, callee_node.a);
         if local_index != NONE32 {
             let binding = local_at(in walk, local_index);
@@ -2366,14 +2415,14 @@ fn call_value(
     if walk.caps != 0 && !lexical {
         if is_fn {
             let row = ctx.types.node(ty).r2;
-            let name = if callee_node.kind == 2 {
+            let name = if callee_node.kind == EXPR_NAME {
                 callee_node.a
             } else {
                 NONE32
             };
             require_carried_row(in ctx, in prog, inout walk, name, row, node.start, node.end);
             if has(in walk, RT) && ctx.types.row(row).tail != 0 && walk.emit {
-                let code_start = begin(inout walk, "E0721");
+                let code_start = begin(inout walk, E_RT_OPEN_ROW);
                 put(inout walk, "eff [Realtime] calls '");
                 put_callee_name(in ctx, inout walk, name);
                 put(inout walk, "' through an open effect row");
@@ -2386,7 +2435,7 @@ fn call_value(
                 );
             }
         } else if walk.emit {
-            let code_start = begin(inout walk, "E0709");
+            let code_start = begin(inout walk, E_UNRESOLVED_CALLEE);
             put(inout walk, "eff [");
             put_caps(inout walk, walk.caps);
             put(inout walk, "] body calls a value whose capabilities cannot be determined");
@@ -2414,7 +2463,7 @@ fn call_value(
                 && walk.emit
             {
                 let arg_node = prog.expr(arg);
-                let code_start = begin(inout walk, "E0705");
+                let code_start = begin(inout walk, E_SECRET_TO_PUBLIC);
                 put(
                     inout walk,
                     "eff [ConstTime] passes a secret-derived value to public parameter '"
@@ -2456,7 +2505,7 @@ fn effect_op(
     let decl = prog.decl(decl_index);
     let op = prog.op(w(op_index));
     if decl.name == walk.syms.rtbus && !has(in walk, RT) && walk.emit {
-        let code_start = begin(inout walk, "E0725");
+        let code_start = begin(inout walk, E_RTBUS_OUTSIDE_RT);
         put(inout walk, "'RtBus::");
         put_name(in ctx, inout walk, op.name);
         put(inout walk, "' is performed outside eff [Realtime] code");
@@ -2470,7 +2519,7 @@ fn effect_op(
         );
     }
     if has(in walk, RT) && forbidden(in ctx, decl.name) && walk.emit {
-        let code_start = begin(inout walk, "E0720");
+        let code_start = begin(inout walk, E_RT_FORBIDDEN_EFFECT);
         put(inout walk, "eff [Realtime] body performs '");
         put_name(in ctx, inout walk, decl.name);
         put(inout walk, "::");
@@ -2492,7 +2541,7 @@ fn effect_op(
             }
         }
         if has_float {
-            let code_start = begin(inout walk, "E0731");
+            let code_start = begin(inout walk, E_DF_HOST_OP);
             put(inout walk, "eff [DetFloat] calls host-implemented float operation '");
             put_name(in ctx, inout walk, decl.name);
             put(inout walk, "::");
@@ -2534,7 +2583,7 @@ fn effect_op(
                 );
                 if !secret_type(in ctx, inout walk, param_ty) {
                     let arg_node = prog.expr(arg_expr(in prog, node, i));
-                    let code_start = begin(inout walk, "E0705");
+                    let code_start = begin(inout walk, E_SECRET_TO_PUBLIC);
                     put(
                         inout walk,
                         "eff [ConstTime] passes a secret-derived value to effect operation '"
@@ -2605,9 +2654,9 @@ fn require_caps(
     start: u64,
     end: u64
 ) {
-    let missing = walk.caps & (carried ^ 15);
+    let missing = walk.caps & (carried ^ ALL_CAPS);
     if missing != 0 && walk.emit {
-        let code_start = begin(inout walk, "E0700");
+        let code_start = begin(inout walk, E_CALLEE_LACKS_CAPS);
         put(inout walk, "eff [");
         put_caps(inout walk, walk.caps);
         put(inout walk, "] body calls '");
@@ -2652,46 +2701,46 @@ pub fn coerce(inout ctx: Ctx, in prog: Prog, inout walk: Walk, value: u32, targe
         return;
     }
     let value_node = prog.expr(value);
-    if value_node.kind == 5 && value_node.c != NONE32 {
+    if value_node.kind == EXPR_BLOCK && value_node.c != NONE32 {
         coerce(inout ctx, in prog, inout walk, value_node.c, target);
         return;
     }
-    if value_node.kind == 13 {
+    if value_node.kind == EXPR_IF {
         coerce(inout ctx, in prog, inout walk, value_node.b, target);
         if value_node.c != NONE32 {
             coerce(inout ctx, in prog, inout walk, value_node.c, target);
         }
         return;
     }
-    if value_node.kind == 14 {
+    if value_node.kind == EXPR_MATCH {
         for i in 0..w(value_node.c) {
             coerce(
                 inout ctx,
                 in prog,
                 inout walk,
-                prog.at(add(w(value_node.b), inc(wrapping_mul(i, 2)))),
+                prog.at(add(w(value_node.b), inc(wrapping_mul(i, PAIR_WORDS)))),
                 target
             );
         }
         return;
     }
-    if value_node.kind == 15 {
+    if value_node.kind == EXPR_CLOSURE {
         let own_caps = caps_of(in ctx, walk.syms, value_node.d);
-        let missing = required & (own_caps ^ 15) & (walk.caps ^ 15);
+        let missing = required & (own_caps ^ ALL_CAPS) & (walk.caps ^ ALL_CAPS);
         if missing != 0 {
             coerce_error(inout walk, missing, value_node.start, value_node.end);
         }
         return;
     }
     // `actual`: 16 marks none.
-    let mut actual: u8 = 16;
+    let mut actual: u8 = CAPS_NONE;
     let mut lexical = false;
-    let local_index = if value_node.kind == 2 {
+    let local_index = if value_node.kind == EXPR_NAME {
         local(in walk, value_node.a)
     } else {
         NONE32
     };
-    if value_node.kind == 2 && local_index == NONE32 {
+    if value_node.kind == EXPR_NAME && local_index == NONE32 {
         let fun_index = prog.lookup(value_node.a);
         if fun_index != NONE32 {
             actual = caps_of(in ctx, walk.syms, prog.fun(fun_index).row);
@@ -2703,10 +2752,10 @@ pub fn coerce(inout ctx: Ctx, in prog: Prog, inout walk: Walk, value: u32, targe
         }
         lexical = local_index != NONE32 && local_at(in walk, local_index).lexical;
     }
-    let have = if actual == 16 { 0 } else { actual };
-    let mut missing = required & (have ^ 15);
+    let have = if actual == CAPS_NONE { 0 } else { actual };
+    let mut missing = required & (have ^ ALL_CAPS);
     if lexical {
-        missing = missing & (walk.caps ^ 15);
+        missing = missing & (walk.caps ^ ALL_CAPS);
     }
     if missing != 0 {
         coerce_error(inout walk, missing, value_node.start, value_node.end);
@@ -2717,7 +2766,7 @@ fn coerce_error(inout walk: Walk, missing: u8, start: u64, end: u64) {
     if !walk.emit {
         return;
     }
-    let code_start = begin(inout walk, "E0708");
+    let code_start = begin(inout walk, E_UNCHECKED_FN_VALUE);
     put(inout walk, "this function value is not checked under ");
     put_caps(inout walk, missing);
     put(inout walk, ", which its expected type requires");

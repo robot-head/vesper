@@ -1054,13 +1054,12 @@ fn simple_key(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
         let mut n: u64 = 0;
         loop {
             let d = cur(in s, in t);
-            if !(
-                (d >= Ascii::UpperA && d <= Ascii::UpperZ)
-                    || (d >= Ascii::LowerA && d <= Ascii::LowerZ)
-                    || is_digit(d)
-                    || d == Ascii::Minus
-                    || d == Ascii::Underscore
-            ) {
+            if !((d >= Ascii::UpperA && d <= Ascii::UpperZ)
+                || (d >= Ascii::LowerA && d <= Ascii::LowerZ)
+                || is_digit(d)
+                || d == Ascii::Minus
+                || d == Ascii::Underscore)
+            {
                 break;
             }
             t.text.push(wrapping_u8(d));

@@ -15,8 +15,11 @@ wave SH5 lane 16, #1339). Rust stays the default: the language server runs
 - `src/encode.ves`: `encode_frame`: the output budget, serde_json's compact
   writer write by write (the output limit is checked per write, as Rust's
   `Output` does) and ryu's float text.
+- `src/commands.ves`: the session's parameter checks over the tape:
+  `validate_input`, `cancel_params` and the `vesper.proofAudit` arguments
+  (#1828 part 10b; see docs/parallel-results/self-host-lsp-features.md).
 - `src/lib.ves`: the JIT entries the differential calls (`lsp_frames`,
-  `lsp_envelope`, `lsp_encode`, `lsp_serve`).
+  `lsp_envelope`, `lsp_encode`, `lsp_serve`, `lsp_commands`).
 
 The document store is the sibling package [`documents/`](documents/): a
 world that contains `@vesper/serde` cannot name the builtin `String`

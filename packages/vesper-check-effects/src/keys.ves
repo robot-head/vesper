@@ -4,6 +4,10 @@
 
 use @vesper/check-data::util::{inc, u64_at};
 
+// 2^32: a pair key is high * HIGH_UNIT + low (`pair`), as is a packed
+// constructor (adt, variant) (check-data's world.ves `constructor`).
+pub const HIGH_UNIT: u64 = 4294967296;
+
 pub struct Keys {
     sorted: ChunkSeq[u64],
 }
@@ -13,7 +17,7 @@ pub fn keys_new() -> Keys {
 }
 
 pub fn pair(high: u32, low: u32) -> u64 {
-    wrapping_add(wrapping_mul(widen_u64(high), 4294967296), widen_u64(low))
+    wrapping_add(wrapping_mul(widen_u64(high), HIGH_UNIT), widen_u64(low))
 }
 
 impl Keys {

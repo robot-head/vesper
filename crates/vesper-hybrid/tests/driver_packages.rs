@@ -1,10 +1,12 @@
-//! The Vesper driver's package load (#1986): the Rust loader reads the
-//! package graph and the driver assembles it with
-//! `@vesper/check-names-packages` (modules/driver/src/assemble.ves). For
-//! every Loom package of the corpus (the loader's accept and reject
+//! The Vesper driver's package load (#1986): the driver reads the package
+//! graph itself (modules/driver/src/load.ves, slice 2) and assembles it
+//! with `@vesper/check-names-packages` (modules/driver/src/assemble.ves).
+//! For every Loom package of the corpus (the loader's accept and reject
 //! fixtures included), `vesper check` must print what the default compiler
-//! prints, and at `VESPER_HYBRID_STATS=2` the assembled package must equal
-//! `packages::load_for_target`'s (module, qualified names, diagnostics).
+//! prints, and at `VESPER_HYBRID_STATS=time` the loaded package must equal
+//! `packages::load_for_target`'s (module, qualified names, diagnostics, and
+//! for a graph the driver read, its sources, `.vsys` libraries and
+//! objects).
 //!
 //! `VESPER_DRIVER_PACKAGES_STRIDE=n` checks every nth package (Bazel);
 //! Cargo checks them all. `DRIVER_PACKAGES_SPEED=1` runs the ignored ABBA
@@ -138,6 +140,24 @@ fn answered(report: &str) -> (u64, u64) {
     (n.unwrap_or(0), m.unwrap_or(0))
 }
 
+/// `load read <n> package graphs in Vesper (<m> handed back to Rust)`:
+/// `(n, m)`.
+fn read(report: &str) -> (u64, u64) {
+    let Some(tail) = report
+        .lines()
+        .find_map(|l| l.strip_prefix("vesper-hybrid: load read "))
+    else {
+        return (0, 0);
+    };
+    let n = tail.split(' ').next().and_then(|n| n.parse().ok());
+    let m = tail
+        .split('(')
+        .nth(1)
+        .and_then(|t| t.split(' ').next())
+        .and_then(|n| n.parse().ok());
+    (n.unwrap_or(0), m.unwrap_or(0))
+}
+
 /// `cost assemble`'s `<n> differ` field, when the assembly ran.
 fn differ(report: &str) -> Option<u64> {
     let line = report
@@ -173,6 +193,7 @@ fn package_load_matches_the_default_compiler() {
     let packages: Vec<PathBuf> = corpus_packages(&root).into_iter().step_by(stride).collect();
     let mut mismatches = vec![];
     let (mut vesper, mut rust) = (0, 0);
+    let (mut read_vesper, mut read_back) = (0, 0);
     let (mut d_time, mut h_time) = (Duration::ZERO, Duration::ZERO);
     for package in &packages {
         let shown = package.strip_prefix(&root).unwrap_or(package);
@@ -218,6 +239,9 @@ fn package_load_matches_the_default_compiler() {
             let (assembled, fallback) = answered(&report);
             vesper += assembled;
             rust += fallback;
+            let (r, back) = read(&report);
+            read_vesper += r;
+            read_back += back;
             match differ(&report) {
                 Some(0) => {}
                 Some(n) => mismatches.push(format!(
@@ -231,8 +255,9 @@ fn package_load_matches_the_default_compiler() {
         }
     }
     eprintln!(
-        "driver package load: {} packages ({vesper} assembled in Vesper, {rust} in Rust); \
-         check default {:.2} s, hybrid {:.2} s ({:.3}x); {} differ",
+        "driver package load: {} packages ({read_vesper} read in Vesper, {read_back} handed back; \
+         {vesper} assembled in Vesper, {rust} in Rust); check default {:.2} s, hybrid {:.2} s \
+         ({:.3}x); {} differ",
         packages.len(),
         d_time.as_secs_f64(),
         h_time.as_secs_f64(),
@@ -244,6 +269,10 @@ fn package_load_matches_the_default_compiler() {
         "no package was assembled in Vesper (stride {stride})"
     );
     assert!(
+        read_vesper > 0,
+        "no package graph was read in Vesper (stride {stride})"
+    );
+    assert!(
         mismatches.is_empty(),
         "the Vesper package load differs on {} runs:\n{}",
         mismatches.len(),
@@ -252,11 +281,13 @@ fn package_load_matches_the_default_compiler() {
 }
 
 /// ABBA timing of the driver's package load (the hybrid's
-/// `assemble: package load` stats line: the Rust read plus the Vesper
-/// assembly and read-back, or plus the Rust assembler) with the Vesper
-/// assembly on and off (`VESPER_HYBRID_ASSEMBLE=0`), over every package the
-/// Vesper driver assembles (or every nth), through `vesper check`: rounds of
+/// `assemble: package load` stats line: the Vesper read, assembly and
+/// read-back, or the whole Rust load) with the Vesper load on and off
+/// (`VESPER_HYBRID_ASSEMBLE=0`), over every package the Vesper driver
+/// reads and assembles (or every nth), through `vesper check`: rounds of
 /// on/off/off/on, the ratio's mean and 95% confidence interval.
+/// `DRIVER_PACKAGES_SPEED_OFF=VESPER_HYBRID_LOAD` times the read alone
+/// (off: the Rust read with the Vesper assembly).
 #[test]
 #[ignore = "timing; DRIVER_PACKAGES_SPEED=1"]
 fn package_load_speed() {
@@ -288,9 +319,12 @@ fn package_load_speed() {
         })
         .filter(|p| {
             let h = run(&hybrid, &root, &["check", p], Some("1"));
-            answered(&split_report(&h.stderr).0).0 == 1
+            let report = split_report(&h.stderr).0;
+            answered(&report).0 == 1 && read(&report).0 == 1
         })
         .collect();
+    let off_var = std::env::var("DRIVER_PACKAGES_SPEED_OFF")
+        .unwrap_or_else(|_| "VESPER_HYBRID_ASSEMBLE".into());
     let time = |on: bool| -> f64 {
         let mut ms = 0.0;
         for p in &packages {
@@ -299,7 +333,7 @@ fn package_load_speed() {
                 .args(["check", p])
                 .env("VESPER_HYBRID_STATS", "1");
             if !on {
-                c.env("VESPER_HYBRID_ASSEMBLE", "0");
+                c.env(&off_var, "0");
             }
             let h = c.output().expect("run the hybrid");
             ms += load_ms(&split_report(&h.stderr).0);

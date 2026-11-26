@@ -1087,10 +1087,8 @@ fn packet_effect(inout g: G, inout c: Ctx, in x: Extra, function: u32, decl: XEf
             0
         };
         let result_ok = inner != NONE32
-            && (
-                (want_u8 && is(in c.names, inner_name, "u8"))
-                    || (!want_u8 && is(in c.names, inner_name, "u32"))
-            );
+            && ((want_u8 && is(in c.names, inner_name, "u8"))
+                || (!want_u8 && is(in c.names, inner_name, "u32")));
         if !one_u32 || !result_ok {
             bad_signature(inout g, in c, function, decl, o.name);
             if pk == PK_U8 {

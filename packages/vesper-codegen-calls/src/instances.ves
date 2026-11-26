@@ -523,11 +523,9 @@ pub fn fail_only(
             any_fail = true;
         }
         let ok = (effect.name == syms.fail && effect.label == 0 && effect.n == 1)
-            || (
-                (syms.is_capability(effect.name) || is_foreign(in names, effect.name))
-                    && effect.label == 0
-                    && effect.n == 0
-            );
+            || ((syms.is_capability(effect.name) || is_foreign(in names, effect.name))
+                && effect.label == 0
+                && effect.n == 0);
         if !ok {
             return false;
         }
@@ -566,12 +564,10 @@ pub fn specialized(
     in func: Conc
 ) -> bool {
     let row = types.row(func.row);
-    (
-        !capability_only(in types, in names, syms, func.row)
-            || row.tail != 0
-            || contains_function(inout types, in world, func.result)
-            || any_param_contains_function(inout types, in world, in func.params)
-    )
+    (!capability_only(in types, in names, syms, func.row)
+        || row.tail != 0
+        || contains_function(inout types, in world, func.result)
+        || any_param_contains_function(inout types, in world, in func.params))
         && !fail_only(inout types, in names, in world, syms, in func)
 }
 
@@ -880,18 +876,9 @@ fn drop_callees(in calls: Calls, in facts: ProgramFacts, name: u32, inout out: C
     let start = out.len();
     for i in 0..facts.fn_names.len() {
         let fn_name = u32_at(in facts.fn_names, i);
-        let nested = match facts.nested.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => false,
-        };
-        let span_start = match facts.nested_starts.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
-        let span_end = match facts.nested_ends.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let nested = facts.nested.try_get(i).unwrap_or(false);
+        let span_start = facts.nested_starts.try_get(i).unwrap_or(0);
+        let span_end = facts.nested_ends.try_get(i).unwrap_or(0);
         if fn_name != name && !(nested && span_start >= info.s0 && span_end <= info.s1) {
             continue;
         }
@@ -1318,10 +1305,8 @@ pub fn discover_roots(
             }
         }
         let kept = include_entry
-            && (
-                is_root(in roots, key)
-                    || trace_host_direct(inout types, in world, in calls, syms, in func)
-            );
+            && (is_root(in roots, key)
+                || trace_host_direct(inout types, in world, in calls, syms, in func));
         if kept || !specialized(inout types, in names, in world, syms, in func) || bound_any {
             found.insts.push(Inst {
                 key: key,

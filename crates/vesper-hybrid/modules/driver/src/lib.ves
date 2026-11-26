@@ -59,6 +59,8 @@ use @vesper/driver-commands::{
 use @vesper/driver::triple::{is_windows as triple_is_windows};
 // The package assembly of the package load (#1986).
 use self::assemble::{assembled_words};
+// The package graph read of the package load (#1986 slice 2).
+use self::load::{read_graph};
 // `vesper proof-audit` (SH5 lane 18, #1341; moved here from its own
 // module by #2091).
 use @vesper/proof-audit::{run as proof_audit_command};
@@ -376,7 +378,7 @@ fn load_input(
         if err.len() != 0 {
             return error(in err.as_slice());
         }
-        load_package(inout s)
+        load_package(inout s, in input.as_slice())
     } else {
         let failed = handle Fail[IoError] in {
             source = read_path(in input.as_slice());
@@ -403,10 +405,18 @@ fn load_input(
     0
 }
 
-// `packages::load_for_target`: the Rust loader reads the package graph,
-// and when it hands the graph over (as the session's text) the driver
-// assembles it (assemble.ves, #1986).
-fn load_package(inout s: Session) -> i64 eff [Ffi[HybridDriver]] {
+// `packages::load_for_target`: the driver reads the package graph itself
+// (load.ves, #1986 slice 2), or else the Rust loader reads it and, when it
+// hands the graph over (as the session's text), the driver assembles it
+// (assemble.ves, #1986).
+fn load_package(inout s: Session, in input: Slice[u8]) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+    match read_graph(inout s, in input, os() == os_windows()) {
+        Option::Some(graph) => {
+            let words = assembled_words(in graph.as_slice());
+            return HybridDriver::hd_assembled(inout s, in words.as_slice());
+        },
+        Option::None => {},
+    }
     let r = step(inout s, step_load_package());
     if r != 0 {
         return r;
@@ -753,9 +763,8 @@ fn wasm_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[Hybri
     if failed != 0 {
         return pass(inout s, step_wasm_build());
     }
-    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    fmt{
-        inout line;
+    let line = fmt{
+        new;
         write_str(in "built "),
         write_bytes(in path.as_slice()),
         write_str(in " (wasm32-wasip2 component)\n")
@@ -786,6 +795,57 @@ fn unpack(in words: ChunkSeq[u64], at: u64, inout out: ChunkSeq[u8]) -> u64 {
     wrapping_add(wrapping_add(at, 1), n)
 }
 
+// Whether `text` starts with `prefix`.
+fn starts_with(in text: Slice[u8], in prefix: Slice[u8]) -> bool {
+    if text.len() < prefix.len() {
+        return false;
+    }
+    for i in 0..prefix.len() {
+        let a = match text.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => return false,
+        };
+        let b = match prefix.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => return false,
+        };
+        if a != b {
+            return false;
+        }
+    }
+    true
+}
+
+// Whether the code generator's summary is an `error: <display>` line whose
+// display Rust's `VerifiedError::from_display` reads back to the same text.
+fn verified_error_text(in summary: Slice[u8]) -> bool {
+    let n = summary.len();
+    if n < 8 {
+        return false;
+    }
+    let last = match summary.try_get(wrapping_sub(n, 1)) {
+        Option::Some(c) => c,
+        Option::None => 0,
+    };
+    if last != 10 {
+        return false;
+    }
+    for i in 0..wrapping_sub(n, 1) {
+        let c = match summary.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if c == 10 {
+            return false;
+        }
+    }
+    starts_with(in summary, in "error: verified codegen: unsupported ".as_bytes())
+        || starts_with(in summary, in "error: verified codegen: entry: ".as_bytes())
+        || starts_with(in summary, in "error: verified codegen: target: ".as_bytes())
+        || starts_with(in summary, in "error: verified codegen: limit: ".as_bytes())
+        || starts_with(in summary, in "error: verified codegen: invalid input: ".as_bytes())
+}
+
 // `--codegen verified`: the session encodes the optimized program (the
 // `verified_codegen` swap's input) for a target whose artifact is a Linux
 // ELF executable, and @vesper/verified-codegen builds it here; the
@@ -809,6 +869,13 @@ fn verified_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[H
     let words = compile_bytes(in b[start..b.len()]);
     let mut summary: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let at = unpack(in words, 0, inout summary);
+    // A code generator error is reported here: the Rust pass would build
+    // the same input again and print the same text (each prefix below is
+    // one `VerifiedError::from_display` reads back exactly).
+    if verified_error_text(in summary.as_slice()) {
+        let line = summary.as_slice();
+        return error(in line[7..wrapping_sub(line.len(), 1)]);
+    }
     let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let rest = unpack(in words, at, inout bytes);
     // `code <bytes>` is the summary's first line.
@@ -860,9 +927,8 @@ fn verified_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[H
     if failed != 0 {
         return pass(inout s, step_verified_build());
     }
-    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    fmt{
-        inout line;
+    let line = fmt{
+        new;
         write_str(in "built "),
         write_bytes(in path.as_slice()),
         write_str(in " (verified codegen, "),
@@ -1109,9 +1175,8 @@ fn native_code(
     if accepted == 0 {
         return count_error(wrapping_i64(findings), in "native verifier finding(s)");
     }
-    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    fmt{
-        inout line;
+    let line = fmt{
+        new;
         write_str(in "verified "),
         write_u64(functions),
         write_str(in " emitted function(s): "),

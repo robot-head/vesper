@@ -1394,13 +1394,11 @@ fn struct_value(inout d: D, in src: Slice[u8], id: u32, k: u64) -> bool {
 }
 
 fn has_default_json(t: u64) -> bool {
-    !(
-        t == T_NAME
-            || t == T_VERSION
-            || t == T_REQ
-            || t == T_STRING
-            || (t >= T_STRUCT && t < T_OPT_STRUCT)
-    )
+    !(t == T_NAME
+        || t == T_VERSION
+        || t == T_REQ
+        || t == T_STRING
+        || (t >= T_STRUCT && t < T_OPT_STRUCT))
 }
 
 fn skippable(k: u64, i: u64) -> bool {

@@ -123,14 +123,10 @@ fn check_regular(in b: Slice[u8], l: Line) -> Option[MessageError] {
     }
     if (wrapping_sub(l.mid, l.lo) == 10 && is(in b, l.lo, l.mid, in "connection".as_bytes()))
         || (wrapping_sub(l.mid, l.lo) == 10 && is(in b, l.lo, l.mid, in "keep-alive".as_bytes()))
-        || (
-            wrapping_sub(l.mid, l.lo) == 16
-                && is(in b, l.lo, l.mid, in "proxy-connection".as_bytes())
-        )
-        || (
-            wrapping_sub(l.mid, l.lo) == 17
-                && is(in b, l.lo, l.mid, in "transfer-encoding".as_bytes())
-        )
+        || (wrapping_sub(l.mid, l.lo) == 16
+            && is(in b, l.lo, l.mid, in "proxy-connection".as_bytes()))
+        || (wrapping_sub(l.mid, l.lo) == 17
+            && is(in b, l.lo, l.mid, in "transfer-encoding".as_bytes()))
         || (wrapping_sub(l.mid, l.lo) == 7 && is(in b, l.lo, l.mid, in "upgrade".as_bytes()))
     {
         return Option::Some(MessageError::ConnectionSpecificField);
@@ -180,9 +176,9 @@ fn content_length(
     let mut found: Option[u64] = Option::None;
     for i in first..count(in meta) {
         let l = line(in meta, i);
-        if (
-            wrapping_sub(l.mid, l.lo) == 14 && is(in b, l.lo, l.mid, in "content-length".as_bytes())
-        ) {
+        if (wrapping_sub(l.mid, l.lo) == 14
+            && is(in b, l.lo, l.mid, in "content-length".as_bytes()))
+        {
             let len = wrapping_sub(l.hi, l.mid);
             if len == 0 || len > MAX_CONTENT_LENGTH_DIGITS {
                 return Result::Err(MessageError::InvalidContentLength);
@@ -235,23 +231,22 @@ pub fn message_parse_request(
     for i in 0..pseudo {
         let l = line(in meta, i);
         let v = Option::Some(Span { lo: l.mid, hi: l.hi });
-        let which: u64 = if (
-            wrapping_sub(l.mid, l.lo) == 7 && is(in b, l.lo, l.mid, in ":method".as_bytes())
-        ) {
+        let which: u64 = if (wrapping_sub(l.mid, l.lo) == 7
+            && is(in b, l.lo, l.mid, in ":method".as_bytes()))
+        {
             PSEUDO_METHOD
-        } else if (
-            wrapping_sub(l.mid, l.lo) == 7 && is(in b, l.lo, l.mid, in ":scheme".as_bytes())
-        ) {
+        } else if (wrapping_sub(l.mid, l.lo) == 7 && is(in b, l.lo, l.mid, in ":scheme".as_bytes()))
+        {
             PSEUDO_SCHEME
-        } else if (
-            wrapping_sub(l.mid, l.lo) == 10 && is(in b, l.lo, l.mid, in ":authority".as_bytes())
-        ) {
+        } else if (wrapping_sub(l.mid, l.lo) == 10
+            && is(in b, l.lo, l.mid, in ":authority".as_bytes()))
+        {
             PSEUDO_AUTHORITY
         } else if (wrapping_sub(l.mid, l.lo) == 5 && is(in b, l.lo, l.mid, in ":path".as_bytes())) {
             PSEUDO_PATH
-        } else if (
-            wrapping_sub(l.mid, l.lo) == 9 && is(in b, l.lo, l.mid, in ":protocol".as_bytes())
-        ) {
+        } else if (wrapping_sub(l.mid, l.lo) == 9
+            && is(in b, l.lo, l.mid, in ":protocol".as_bytes()))
+        {
             PSEUDO_PROTOCOL
         } else {
             return Result::Err(MessageError::UnknownPseudoHeader);
@@ -345,10 +340,8 @@ pub fn message_parse_request(
             Option::None => Option::None,
         },
     };
-    if (
-        (wrapping_sub(s.hi, s.lo) == 4 && is(in b, s.lo, s.hi, in "http".as_bytes()))
-            || (wrapping_sub(s.hi, s.lo) == 5 && is(in b, s.lo, s.hi, in "https".as_bytes()))
-    )
+    if ((wrapping_sub(s.hi, s.lo) == 4 && is(in b, s.lo, s.hi, in "http".as_bytes()))
+        || (wrapping_sub(s.hi, s.lo) == 5 && is(in b, s.lo, s.hi, in "https".as_bytes())))
         && empty_or_none(auth)
     {
         return Result::Err(MessageError::MissingPseudoHeader);

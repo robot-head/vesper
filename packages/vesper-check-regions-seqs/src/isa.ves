@@ -76,31 +76,19 @@ const I_SHUFFLE: u8 = 10;
 const I_UNKNOWN: u8 = 255;
 
 fn u32_at(in seq: ChunkSeq[u32], i: u64) -> u32 {
-    match seq.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => NONE,
-    }
+    seq.try_get(i).unwrap_or(NONE)
 }
 
 fn u64_at(in seq: ChunkSeq[u64], i: u64) -> u64 {
-    match seq.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    seq.try_get(i).unwrap_or(0)
 }
 
 fn u8_at(in seq: ChunkSeq[u8], i: u64) -> u8 {
-    match seq.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    seq.try_get(i).unwrap_or(0)
 }
 
 fn byte_at(in bytes: Slice[u8], i: u64) -> u8 {
-    match bytes.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    bytes.try_get(i).unwrap_or(0)
 }
 
 fn w64(value: u32) -> u64 {
@@ -380,10 +368,7 @@ struct Rd {
 
 impl Rd {
     fn word(inout self, in bytes: Slice[u8]) -> u64 {
-        let value = match bytes.try_read_u64_le(self.pos) {
-            Option::Some(value) => value,
-            Option::None => 0,
-        };
+        let value = bytes.try_read_u64_le(self.pos).unwrap_or(0);
         self.pos = wrapping_add(self.pos, 8);
         value
     }
@@ -824,11 +809,9 @@ fn op_shape(
     let applies = intrinsic_class == I_LOAD
         || intrinsic_class == I_STORE
         || intrinsic_class == I_STORE_MASKED
-        || (
-            intrinsic_class == I_LOAD_MASKED
-                && first_ty != NO_TY
-                && is_seq_or_slice(in walk, first_ty)
-        );
+        || (intrinsic_class == I_LOAD_MASKED
+            && first_ty != NO_TY
+            && is_seq_or_slice(in walk, first_ty));
     if applies {
         let store = intrinsic_class == I_STORE || intrinsic_class == I_STORE_MASKED;
         let io_shape = if store {

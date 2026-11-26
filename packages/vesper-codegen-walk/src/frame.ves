@@ -190,17 +190,11 @@ fn caps_new() -> Caps {
 }
 
 fn at64(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 fn at8(in s: ChunkSeq[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 impl Caps {
@@ -666,10 +660,8 @@ pub fn frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
                 c.names.write(x.key, inout o);
                 o.push(10);
                 let pass_trace = trace_ok
-                    && (
-                        x.key == task.entry
-                            || trace_host_direct(inout c.types, in c.world, in d, k, in f)
-                    );
+                    && (x.key == task.entry
+                        || trace_host_direct(inout c.types, in c.world, in d, k, in f));
                 if !frame_plan(
                     inout ls,
                     inout c.types,

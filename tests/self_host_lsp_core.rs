@@ -28,6 +28,10 @@
 //!   with crates/vesper-lsp's functions on every session and framing case;
 //!   each refusal it writes is a frame the live server wrote.
 //!
+//! - `commands_match_rust`: the session's parameter checks
+//!   (`validate_input`, `cancel_params`, the `vesper.proofAudit` arguments)
+//!   against `lsp_commands`, row for row (#1828 part 10b).
+//!
 //! The recorded sessions are the stdio sessions of tests/lsp_cli.rs, run
 //! through the actual `vesper lsp` server (`sessions`).
 
@@ -2887,5 +2891,519 @@ fn lsp_core_speed() {
     eprintln!(
         "memo: {fetches} fetches, per fetch {:?} (replay including oracle decoding)",
         per(best, fetches)
+    );
+}
+
+// ---------------------------------------------------------------- commands
+
+/// The open documents of every `PortCheck::Proof` case: URI and version.
+fn command_documents() -> Vec<(String, i32)> {
+    [
+        ("file:///work/a.ves", 3),
+        ("file:///work/b%20c.ves", -7),
+        ("file:///work/\u{fc}ber.ves", i32::MAX),
+        ("file:///work/min.ves", i32::MIN),
+        ("untitled:Untitled-1", 0),
+        ("file:///work/minus-one.ves", -1),
+    ]
+    .into_iter()
+    .map(|(u, v)| (u.to_owned(), v))
+    .collect()
+}
+
+/// `.0` nested `depth` times around `inner` (arrays when `array`).
+fn nested(depth: usize, array: bool, inner: &str) -> String {
+    let (open, close) = if array { ("[", "]") } else { ("{\"k\":", "}") };
+    format!("{}{inner}{}", open.repeat(depth), close.repeat(depth))
+}
+
+fn zeros(n: usize) -> String {
+    format!("[{}]", vec!["0"; n].join(","))
+}
+
+/// A `vesper.proofAudit` call with these argument members (raw JSON).
+fn proof_call(members: &str) -> String {
+    format!("{{\"command\":\"vesper.proofAudit\",\"arguments\":[{{{members}}}]}}")
+}
+
+/// Every check of `commands_match_rust`: kind, method, parameter text.
+fn command_cases() -> Vec<(vesper::lsp::PortCheck, String, Option<String>)> {
+    use vesper::lsp::PortCheck::{Cancel, Input, Proof};
+    let mut cases: Vec<(vesper::lsp::PortCheck, String, Option<String>)> = vec![];
+    let input = |cases: &mut Vec<_>, method: &str, params: Option<String>| {
+        cases.push((Input, method.to_owned(), params));
+    };
+    // Method labels.
+    for method in [
+        "",
+        "initialize",
+        "textDocument/hover",
+        "$/cancelRequest",
+        "tab\there",
+        "del\u{7f}",
+        "c1\u{85}",
+        "c1\u{9f}end",
+        "not c1 \u{a0}",
+        "\u{fc}ber",
+        "\u{2028}",
+    ] {
+        input(&mut cases, method, Some("{}".into()));
+    }
+    for n in [255, 256, 257] {
+        input(&mut cases, &"m".repeat(n), None);
+    }
+    input(&mut cases, &format!("{}\u{fc}", "m".repeat(255)), None);
+    // Depth, node and string bounds, alone and against each other in the
+    // order a `BTreeMap` walk meets them.
+    for depth in [0, 1, 63, 64, 65, 66, 100] {
+        input(&mut cases, "m", Some(nested(depth, true, "1")));
+        input(&mut cases, "m", Some(nested(depth, false, "\"s\"")));
+        input(&mut cases, "m", Some(nested(depth, true, "[]")));
+    }
+    for n in [65_534, 65_535, 65_536, 65_537] {
+        input(&mut cases, "m", Some(zeros(n)));
+    }
+    let big = 2 * 1024 * 1024;
+    for n in [big - 1, big, big + 1] {
+        input(&mut cases, "m", Some(format!("[\"{}\"]", "x".repeat(n))));
+        input(
+            &mut cases,
+            "m",
+            Some(format!("{{\"{}\":0}}", "k".repeat(n))),
+        );
+    }
+    input(
+        &mut cases,
+        "m",
+        Some(format!(
+            "[\"{}\",\"{}\"]",
+            "x".repeat(big / 2),
+            "y".repeat(big / 2 + 1)
+        )),
+    );
+    input(
+        &mut cases,
+        "m",
+        Some(format!("[\"{}\"]", "\\u00e9".repeat(big / 2 + 1))),
+    );
+    let deep = nested(70, true, "0");
+    let wide = zeros(65_536);
+    for (a, b) in [
+        ("a", "b"),
+        ("b", "a"),
+        ("\\u0062", "a"),
+        ("aa", "a"),
+        ("A", "a"),
+    ] {
+        input(
+            &mut cases,
+            "m",
+            Some(format!("{{\"{a}\":{deep},\"{b}\":{wide}}}")),
+        );
+        input(
+            &mut cases,
+            "m",
+            Some(format!("{{\"{a}\":{wide},\"{b}\":{deep}}}")),
+        );
+    }
+    for n in [1_000, 4_000] {
+        let members: Vec<String> = (0..n).rev().map(|k| format!("\"k{k:06}\":{k}")).collect();
+        input(&mut cases, "m", Some(format!("{{{}}}", members.join(","))));
+        input(
+            &mut cases,
+            "m",
+            Some(format!("{{{},\"z\":{deep}}}", members.join(","))),
+        );
+    }
+    input(&mut cases, "m", Some(format!("[{deep},{wide}]")));
+    input(&mut cases, "m", Some(format!("[{wide},{deep}]")));
+    input(
+        &mut cases,
+        "m",
+        Some(format!(
+            "{{\"z\":\"{}\",\"a\":{deep}}}",
+            "x".repeat(big + 1)
+        )),
+    );
+    input(
+        &mut cases,
+        "m",
+        Some(format!("[{deep},\"{}\"]", "x".repeat(big + 1))),
+    );
+    input(
+        &mut cases,
+        "m",
+        Some(format!("[\"{}\",{deep}]", "x".repeat(big + 1))),
+    );
+    // Seeded small values: every shape walks without breaking a bound.
+    let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    fn value(next: &mut dyn FnMut() -> u64, depth: u32) -> String {
+        let pick = if depth > 5 { next() % 4 } else { next() % 7 };
+        match pick {
+            0 => "null".into(),
+            1 => ["true", "false", "0", "-0", "1.5e3", "-12"][(next() % 6) as usize].into(),
+            2 => format!(
+                "\"{}\"",
+                ["", "a", "\\n\\u00e9", "\\ud83d\\ude00", "\u{fc}"][(next() % 5) as usize]
+            ),
+            3 => "[]".into(),
+            4 | 5 => {
+                let n = next() % 5;
+                let items: Vec<String> = (0..n).map(|_| value(next, depth + 1)).collect();
+                format!("[{}]", items.join(","))
+            }
+            _ => {
+                let n = next() % 5;
+                let keys = ["b", "a", "\\u0061a", "", "Z", "\u{e9}", "ab"];
+                let mut used = std::collections::BTreeSet::new();
+                let mut members = vec![];
+                for _ in 0..n {
+                    let k = keys[(next() % keys.len() as u64) as usize];
+                    let decoded = k.replace("\\u0061", "a");
+                    if used.insert(decoded) {
+                        members.push(format!("\"{k}\":{}", value(next, depth + 1)));
+                    }
+                }
+                format!("{{{}}}", members.join(","))
+            }
+        }
+    }
+    for _ in 0..400 {
+        let v = value(&mut next, 0);
+        input(&mut cases, "workspace/symbol", Some(v));
+    }
+    input(&mut cases, "m", None);
+    // `$/cancelRequest` parameters.
+    for p in [
+        None,
+        Some("{\"id\":5}".to_owned()),
+        Some("{\"id\":0}".into()),
+        Some("{\"id\":-0}".into()),
+        Some("{\"id\":-1}".into()),
+        Some("{\"id\":2147483647}".into()),
+        Some("{\"id\":2147483648}".into()),
+        Some("{\"id\":-2147483648}".into()),
+        Some("{\"id\":-2147483649}".into()),
+        Some("{\"id\":18446744073709551615}".into()),
+        Some("{\"id\":1.0}".into()),
+        Some("{\"id\":1e2}".into()),
+        Some("{\"id\":\"\"}".into()),
+        Some("{\"id\":\"req-1\"}".into()),
+        Some("{\"id\":\"\\u00e9\\n\"}".into()),
+        Some(format!("{{\"id\":\"{}\"}}", "x".repeat(1024))),
+        Some(format!("{{\"id\":\"{}\"}}", "x".repeat(1025))),
+        Some(format!("{{\"id\":\"{}\\u00e9\"}}", "x".repeat(1022))),
+        Some(format!("{{\"id\":\"{}\\u00e9\"}}", "x".repeat(1023))),
+        Some("{\"id\":null}".into()),
+        Some("{\"id\":true}".into()),
+        Some("{\"id\":[1]}".into()),
+        Some("{\"id\":{}}".into()),
+        Some("{\"ID\":1}".into()),
+        Some("{\"\\u0069d\":7}".into()),
+        Some("{}".into()),
+        Some("[1]".into()),
+        Some("[{\"id\":1}]".into()),
+        Some("\"id\"".into()),
+        Some("{\"id\":3,\"extra\":true}".into()),
+    ] {
+        cases.push((Cancel, "$/cancelRequest".into(), p));
+    }
+    // `vesper.proofAudit` arguments.
+    let uri = "\"uri\":\"file:///work/a.ves\"";
+    let f = "\"function\":\"prove_me\"";
+    let mut proof = |p: Option<String>| {
+        cases.push((Proof, "workspace/executeCommand".into(), p));
+    };
+    proof(None);
+    for p in [
+        "[]".to_owned(),
+        "\"x\"".into(),
+        "{}".into(),
+        "{\"command\":1}".into(),
+        "{\"command\":null,\"arguments\":[]}".into(),
+        "{\"command\":\"vesper.other\",\"arguments\":[]}".into(),
+        "{\"command\":\"vesper.proofaudit\"}".into(),
+        "{\"command\":\"vesper.proofAudit\"}".into(),
+        "{\"command\":\"vesper.proof\\u0041udit\",\"arguments\":[{}]}".into(),
+        "{\"command\":\"vesper.proofAudit\",\"arguments\":{}}".into(),
+        "{\"command\":\"vesper.proofAudit\",\"arguments\":[]}".into(),
+        "{\"command\":\"vesper.proofAudit\",\"arguments\":[{},{}]}".into(),
+        "{\"command\":\"vesper.proofAudit\",\"arguments\":[1]}".into(),
+        "{\"command\":\"vesper.proofAudit\",\"arguments\":[[]]}".into(),
+        "{\"command\":\"vesper.proofAudit\",\"arguments\":null}".into(),
+        format!("{{\"arguments\":[{{{uri},{f}}}],\"command\":\"vesper.proofAudit\"}}"),
+        format!("{{\"command\":\"vesper.proofAudit\",\"arguments\":[{{{uri},{f}}}],\"x\":1}}"),
+        format!(
+            "{{\"command\":\"vesper.proofAudit\",\"arguments\":[{}]}}",
+            nested(70, true, "0")
+        ),
+        format!(
+            "{{\"command\":\"vesper.proofAudit\",\"arguments\":[{{{uri},{f},\"version\":{}}}]}}",
+            nested(70, true, "0")
+        ),
+    ] {
+        proof(Some(p));
+    }
+    let mut members: Vec<String> = vec![
+        String::new(),
+        f.to_owned(),
+        uri.to_owned(),
+        format!("{uri},{f}"),
+        format!("{f},{uri}"),
+        format!("{uri},{f},\"extra\":1"),
+        format!("\"Uri\":\"x\",{uri},{f}"),
+        format!("\"\\u0075ri\":\"file:///work/a.ves\",{f}"),
+        format!("\"uri\":1,{f}"),
+        format!("\"uri\":null,{f}"),
+        format!("{uri},\"function\":7"),
+        format!("{uri},\"function\":[]"),
+        "\"uri\":1,\"function\":2".to_owned(),
+        format!("{uri},\"function\":\"\""),
+        format!("{uri},\"function\":\"{}\"", "f".repeat(1024)),
+        format!("{uri},\"function\":\"{}\"", "f".repeat(1025)),
+        format!("{uri},\"function\":\"{}\\u00e9\"", "f".repeat(1022)),
+        format!("{uri},\"function\":\"{}\\u00e9\"", "f".repeat(1023)),
+        format!("{uri},\"function\":\"a\\u0000b\""),
+        format!("\"uri\":\"file:///work/missing.ves\",{f}"),
+        format!("\"uri\":\"file:///work/A.ves\",{f}"),
+        format!("\"uri\":\"file:///work/a.ves\\u0000\",{f}"),
+        format!("\"uri\":\"file:///work/b%20c.ves\",{f}"),
+        format!("\"uri\":\"file:///work/\\u00fcber.ves\",{f}"),
+        format!("\"uri\":\"untitled:Untitled-1\",{f}"),
+        format!("\"uri\":\"\",{f}"),
+        format!("\"uri\":\"file:///work/missing.ves\",{f},\"version\":\"x\""),
+        format!("\"uri\":\"file:///work/missing.ves\",{f},\"obligation\":\"no\""),
+    ];
+    for o in [
+        "\"extraction\"",
+        "\"semantic\"",
+        "\"Semantic\"",
+        "\"sem\\u0061ntic\"",
+        "\"\"",
+        "null",
+        "1",
+        "[\"semantic\"]",
+    ] {
+        members.push(format!("{uri},{f},\"obligation\":{o}"));
+        members.push(format!("\"obligation\":{o},{uri},\"function\":3"));
+    }
+    for (u, current) in [("file:///work/a.ves", 3), ("file:///work/b%20c.ves", -7)] {
+        for v in [
+            current.to_string(),
+            (current + 1).to_string(),
+            "-0".into(),
+            "0".into(),
+            format!("{current}.0"),
+            "1e2".into(),
+            "2147483648".into(),
+            "-2147483649".into(),
+            "null".into(),
+            format!("\"{current}\""),
+            "true".into(),
+        ] {
+            members.push(format!("\"uri\":\"{u}\",{f},\"version\":{v}"));
+            members.push(format!(
+                "\"version\":{v},\"uri\":\"{u}\",{f},\"obligation\":\"semantic\""
+            ));
+            members.push(format!(
+                "\"uri\":\"{u}\",{f},\"version\":{v},\"obligation\":\"x\""
+            ));
+        }
+    }
+    for (u, v) in [
+        ("file:///work/\\u00fcber.ves", i32::MAX.to_string()),
+        ("file:///work/min.ves", i32::MIN.to_string()),
+        (
+            "file:///work/min.ves",
+            (i64::from(i32::MIN) + 1).to_string(),
+        ),
+        ("untitled:Untitled-1", "0".into()),
+        ("untitled:Untitled-1", "-0".into()),
+        ("file:///work/minus-one.ves", "-1".into()),
+        ("file:///work/minus-one.ves", "1".into()),
+    ] {
+        members.push(format!("\"uri\":\"{u}\",{f},\"version\":{v}"));
+    }
+    for m in members {
+        proof(Some(proof_call(&m)));
+    }
+    cases
+}
+
+/// `lsp_commands`' input: the word count W, the rounds, the document and
+/// check counts, three words per document (URI start and length, version)
+/// and five per check (kind, method start and length, parameter start and
+/// length, start `u64::MAX` for none), then the blob at byte W * 8.
+fn command_checks_input(
+    cases: &[(vesper::lsp::PortCheck, String, Option<String>)],
+    open: &[(String, i32)],
+    rounds: u64,
+) -> Vec<u8> {
+    use vesper::lsp::PortCheck;
+    let mut blob: Vec<u8> = vec![];
+    let mut words: Vec<u64> = vec![0, rounds, open.len() as u64, cases.len() as u64];
+    let put = |blob: &mut Vec<u8>, s: &str| {
+        let at = blob.len() as u64;
+        blob.extend_from_slice(s.as_bytes());
+        (at, s.len() as u64)
+    };
+    for (uri, version) in open {
+        let (at, len) = put(&mut blob, uri);
+        words.extend([at, len, i64::from(*version) as u64]);
+    }
+    for (check, method, params) in cases {
+        let kind = match check {
+            PortCheck::Input => 1,
+            PortCheck::Cancel => 2,
+            PortCheck::Proof => 3,
+        };
+        let (m_at, m_len) = put(&mut blob, method);
+        let (p_at, p_len) = match params {
+            Some(p) => put(&mut blob, p),
+            None => (u64::MAX, 0),
+        };
+        words.extend([kind, m_at, m_len, p_at, p_len]);
+    }
+    words[0] = words.len() as u64;
+    let mut input: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    input.extend_from_slice(&blob);
+    input
+}
+
+type CommandValues = Vec<(vesper::lsp::PortCheck, String, Option<Value>)>;
+
+fn command_values(cases: &[(vesper::lsp::PortCheck, String, Option<String>)]) -> CommandValues {
+    cases
+        .iter()
+        .map(|(check, method, params)| {
+            let value = params.as_ref().map(|p| {
+                serde_json::from_str::<Value>(p).unwrap_or_else(|e| panic!("{e}: {p:.80}"))
+            });
+            (*check, method.clone(), value)
+        })
+        .collect()
+}
+
+/// `validate_input`, `cancel_params` and the `vesper.proofAudit` checks
+/// of the session against `lsp_commands`, row for row.
+#[test]
+fn commands_match_rust() {
+    let cases = command_cases();
+    let open = command_documents();
+    let rust = vesper::lsp::command_checks_for_port(&command_values(&cases), &open, 1);
+    let entry = lsp().entry("lsp_commands", optimize());
+    let vesper = unpack_text(&entry.words(&command_checks_input(&cases, &open, 1)));
+    let rows: Vec<&str> = rust.lines().collect();
+    let refused = rows.iter().filter(|r| r.starts_with("E ")).count();
+    let mut kinds = std::collections::BTreeMap::<String, usize>::new();
+    for r in &rows {
+        let key: String = if let Some(m) = r.strip_prefix("E ") {
+            m.split_once(' ')
+                .map_or(m, |(_, m)| m)
+                .chars()
+                .take(40)
+                .collect()
+        } else {
+            r.chars().take(1).collect()
+        };
+        *kinds.entry(key).or_default() += 1;
+    }
+    eprintln!(
+        "commands: {} checks, {refused} refused, outcomes {kinds:?}",
+        cases.len()
+    );
+    let differ: Vec<String> = rust
+        .lines()
+        .zip(vesper.lines())
+        .enumerate()
+        .filter(|(_, (r, v))| r != v)
+        .map(|(i, (r, v))| format!("check {i}: rust {r:.120} vesper {v:.120}"))
+        .take(20)
+        .collect();
+    assert!(differ.is_empty(), "{differ:#?}");
+    assert!(rust == vesper, "the texts differ in length");
+}
+
+/// Rust (parameters already `serde_json::Value`s) against Vesper (one
+/// tape parse per check) over `rounds` checks of each case, best of five
+/// ABBA pairs, without the 2 MiB and 65,536-node cases (both sides walk
+/// them in time linear in their size, which would swamp the rest).
+#[test]
+#[ignore]
+fn commands_speed() {
+    let rounds = 64;
+    let cases: Vec<_> = command_cases()
+        .into_iter()
+        .filter(|(_, _, p)| p.as_ref().is_none_or(|p| p.len() < 4096))
+        .collect();
+    let open = command_documents();
+    let values = command_values(&cases);
+    let input = command_checks_input(&cases, &open, rounds);
+    let entry = lsp().entry("lsp_commands", true);
+    let time = |f: &dyn Fn()| {
+        let t = std::time::Instant::now();
+        f();
+        t.elapsed()
+    };
+    let rust = || {
+        std::hint::black_box(vesper::lsp::command_checks_for_port(&values, &open, rounds));
+    };
+    let vesper = || {
+        std::hint::black_box(entry.words(&input));
+    };
+    let (mut r, mut v) = (std::time::Duration::MAX, std::time::Duration::MAX);
+    for _ in 0..5 {
+        r = r.min(time(&rust));
+        v = v.min(time(&vesper));
+        v = v.min(time(&vesper));
+        r = r.min(time(&rust));
+    }
+    let input1 = command_checks_input(&cases, &open, 1);
+    let mut v1 = std::time::Duration::MAX;
+    for _ in 0..5 {
+        v1 = v1.min(time(&|| {
+            std::hint::black_box(entry.words(&input1));
+        }));
+    }
+    use vesper::lsp::PortCheck;
+    for kind in [PortCheck::Input, PortCheck::Cancel, PortCheck::Proof] {
+        let sub: Vec<_> = cases.iter().filter(|c| c.0 == kind).cloned().collect();
+        let sub_values = command_values(&sub);
+        let sub_input = command_checks_input(&sub, &open, rounds);
+        let (mut a, mut b) = (std::time::Duration::MAX, std::time::Duration::MAX);
+        for _ in 0..5 {
+            a = a.min(time(&|| {
+                std::hint::black_box(vesper::lsp::command_checks_for_port(
+                    &sub_values,
+                    &open,
+                    rounds,
+                ));
+            }));
+            b = b.min(time(&|| {
+                std::hint::black_box(entry.words(&sub_input));
+            }));
+        }
+        let per = (sub.len() as u32) * (rounds as u32);
+        eprintln!(
+            "commands {kind:?} ({} checks): rust {:?} vesper {:?} per check, ratio {:.2}",
+            sub.len(),
+            a / per,
+            b / per,
+            b.as_secs_f64() / a.as_secs_f64()
+        );
+    }
+    let per = (cases.len() as u32) * (rounds as u32);
+    eprintln!(
+        "commands ({} checks x {rounds}): rust {:?} vesper {:?} per check, ratio {:.2}",
+        cases.len(),
+        r / per,
+        v / per,
+        v.as_secs_f64() / r.as_secs_f64()
     );
 }

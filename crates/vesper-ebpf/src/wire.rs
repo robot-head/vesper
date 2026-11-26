@@ -219,7 +219,9 @@ impl WireFrame for SynDropAlertWire {
 
     #[cfg(feature = "vesper-port")]
     fn encode(&self) -> Vec<u8> {
-        crate::port::ffi::wire_alert_encode(*self)
+        let mut out = [0; Self::SIZE];
+        crate::port::ffi::wire_alert_encode_into(*self, &mut out);
+        out.to_vec()
     }
 
     #[cfg(not(feature = "vesper-port"))]

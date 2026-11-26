@@ -313,11 +313,9 @@ fn macro_start(in b: Slice[u8], in t: Tokens, at: u64) -> u64 {
     }
     if k == k_lower()
         && kind_at(in t, n) == k_l_brace()
-        && (
-            spelled(in b, in t, at, in "quote".as_bytes())
-                || spelled(in b, in t, at, in "quasiquote".as_bytes())
-                || spelled(in b, in t, at, in "syntax_quote".as_bytes())
-        )
+        && (spelled(in b, in t, at, in "quote".as_bytes())
+            || spelled(in b, in t, at, in "quasiquote".as_bytes())
+            || spelled(in b, in t, at, in "syntax_quote".as_bytes()))
     {
         return n;
     }

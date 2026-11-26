@@ -1169,3 +1169,50 @@ fn a_long_control_flow_head_puts_its_brace_on_its_own_line_like_rustfmt() {
 "
     );
 }
+#[test]
+fn a_parenthesized_operand_hugs_its_parentheses_like_rustfmt() {
+    // A parenthesized operand that breaks keeps its first operand after the
+    // `(` and its `)` after its last, its operators nested one level; one
+    // that is a whole `if` head puts the `{` on a line of its own.
+    assert_eq!(
+        verify(
+            "fn f()->bool{let same=first_long_condition_value==second_value&&(!third_long_condition_value||(fourth_long_value==fifth_value&&sixth_long_value_name));if !(first_long_condition_value&&second_long_condition_value&&third_long_condition_value_x&&fourth_long_condition_value){go();}let short=a&&(b||c);same}"
+        ),
+        "fn f() -> bool {
+    let same = first_long_condition_value == second_value
+        && (!third_long_condition_value
+            || (fourth_long_value == fifth_value && sixth_long_value_name));
+    if !(first_long_condition_value
+        && second_long_condition_value
+        && third_long_condition_value_x
+        && fourth_long_condition_value)
+    {
+        go();
+    }
+    let short = a && (b || c);
+    same
+}
+"
+    );
+    // A tuple, and parentheses holding a comment, break as before.
+    assert_eq!(
+        verify(
+            "fn f()->u64{let pair=(first_long_tuple_element_value_here,second_long_tuple_element_value_here_abcdefghij);let c=a&&(b// keep\n\
+||c);pair}"
+        ),
+        "fn f() -> u64 {
+    let pair = (
+        first_long_tuple_element_value_here,
+        second_long_tuple_element_value_here_abcdefghij
+    );
+    let c = a
+        && (
+            b
+            // keep
+            || c
+        );
+    pair
+}
+"
+    );
+}

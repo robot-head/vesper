@@ -160,12 +160,11 @@ fn process_fin(inout t: Tcb, now: u64, seg: Seg) -> bool {
         return false;
     }
     let s = t.st;
-    if !(
-        s == State::Established
-            || s == State::FinWait1
-            || s == State::FinWait2
-            || s == State::SynReceived
-    ) {
+    if !(s == State::Established
+        || s == State::FinWait1
+        || s == State::FinWait2
+        || s == State::SynReceived)
+    {
         // CLOSE-WAIT, CLOSING, LAST-ACK: remain; TIME-WAIT: restart.
         if s == State::TimeWait {
             t.time_wait_deadline = Option::Some(sat_add64(now, t.cfg.time_wait_ns));

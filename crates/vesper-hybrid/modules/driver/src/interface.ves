@@ -179,15 +179,11 @@ fn put_id(inout out: ChunkSeq[u8], in b: Slice[u8], in x: X, in kind: Str, s: u6
     let k = kind.as_bytes();
     let ty = cmp_bytes(in k, 0, k.len(), in "type".as_bytes(), 0, 4) == 0;
     let effect = cmp_bytes(in k, 0, k.len(), in "effect".as_bytes(), 0, 6) == 0;
-    let builtin = (
-        ty
-            && (
-                is_name(in b, s, l, "Option")
-                    || is_name(in b, s, l, "Result")
-                    || is_name(in b, s, l, "RuntimeError")
-                    || is_name(in b, s, l, "ArithOverflow")
-            )
-    )
+    let builtin = (ty
+        && (is_name(in b, s, l, "Option")
+            || is_name(in b, s, l, "Result")
+            || is_name(in b, s, l, "RuntimeError")
+            || is_name(in b, s, l, "ArithOverflow")))
         || (effect && is_name(in b, s, l, "Fail"));
     if builtin {
         out.extend(in "std/core".as_bytes());

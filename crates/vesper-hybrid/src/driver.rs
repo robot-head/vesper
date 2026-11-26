@@ -32,6 +32,8 @@ mod binding;
 mod backends;
 #[path = "driver/front.rs"]
 mod front;
+#[path = "driver/load.rs"]
+mod load;
 #[path = "driver/native.rs"]
 mod native_steps;
 #[path = "driver/world.rs"]
@@ -293,6 +295,15 @@ pub struct Session {
     /// The package graph `LoadPackage` read for the Vesper driver to
     /// assemble (`hd_assembled`, #1986).
     loading: Option<packages::Loading<'static>>,
+    /// The manifests the Vesper driver's own read of the package graph
+    /// decoded so far (`Manifest`, #1986 slice 2), by index.
+    manifests: Vec<packages::driver_host::DriverManifest>,
+    /// The package graph the Vesper driver read itself (`Graph`), for
+    /// `hd_assembled`.
+    graph: Option<crate::vesper_hybrid::DriverGraph>,
+    /// The Vesper driver is reading the package graph (`LoadBegin` said
+    /// so); a `LoadPackage` now is its fallback to the Rust loader.
+    reading: bool,
     /// The input as read (`original` in `cli()`).
     original: String,
     /// The compiled text: `original`, or its sugar expansion (`source`).
@@ -373,11 +384,18 @@ enum Step {
     VerifiedInput = 62,
     /// Load the package the Vesper driver found at the input (#1896).
     LoadPackage = 70,
+    // The Vesper driver's own read of the package graph (#1986 slice 2,
+    // driver/load.rs).
+    LoadBegin = 71,
+    Manifest = 72,
+    VersionMatches = 73,
+    VsysNames = 74,
+    Graph = 75,
     /// The checked world's declarations, for the Vesper driver to hold.
     WorldDecls = 80,
 }
 
-const STEPS: [Step; 33] = [
+const STEPS: [Step; 38] = [
     Step::Load,
     Step::EbpfBuild,
     Step::Parse,
@@ -410,6 +428,11 @@ const STEPS: [Step; 33] = [
     Step::EbpfInput,
     Step::VerifiedInput,
     Step::LoadPackage,
+    Step::LoadBegin,
+    Step::Manifest,
+    Step::VersionMatches,
+    Step::VsysNames,
+    Step::Graph,
     Step::WorldDecls,
 ];
 
@@ -456,6 +479,12 @@ impl Session {
             // session's text; else the Rust loader loads it here and the
             // text is empty.
             Step::LoadPackage => {
+                if self.reading {
+                    // The Vesper driver's read handed the graph back.
+                    self.reading = false;
+                    self.manifests.clear();
+                    crate::vesper_hybrid::driver_read_fallback();
+                }
                 let timer = crate::vesper_hybrid::driver_load_timer();
                 let path = Path::new(o.input());
                 self.text.clear();
@@ -531,6 +560,11 @@ impl Session {
             | Step::WasmInput
             | Step::EbpfInput
             | Step::VerifiedInput => self.backends_step(step, arg),
+            Step::LoadBegin
+            | Step::Manifest
+            | Step::VersionMatches
+            | Step::VsysNames
+            | Step::Graph => self.load_step(step, arg),
             Step::WorldDecls => self.world_step(step),
         }
     }
@@ -612,6 +646,9 @@ pub mod host {
                     o,
                     loaded: None,
                     loading: None,
+                    manifests: Vec::new(),
+                    graph: None,
+                    reading: false,
                     original: String::new(),
                     source: String::new(),
                     source_map: Vec::new(),
@@ -720,14 +757,17 @@ pub mod host {
         // cost's Vesper time; the stats' load time adds it.
         let timer = crate::vesper_hybrid::driver_load_timer();
         match panic::catch_unwind(AssertUnwindSafe(|| {
-            let Some(loading) = s.loading.take() else {
+            let o = &s.o;
+            let rust =
+                || packages::load_for_target(Path::new(o.input()), o.target(), o.include_tests);
+            let assembled = if let Some(graph) = s.graph.take() {
+                crate::vesper_hybrid::driver_graph_assembled(graph, words, rust)
+            } else if let Some(loading) = s.loading.take() {
+                crate::vesper_hybrid::driver_assembled(loading, words, rust)
+            } else {
                 s.text = b"driver: no package graph".to_vec();
                 return FAIL;
             };
-            let o = &s.o;
-            let assembled = crate::vesper_hybrid::driver_assembled(loading, words, || {
-                packages::load_for_target(Path::new(o.input()), o.target(), o.include_tests)
-            });
             let n = match assembled {
                 Ok(assembled) => s.package_loaded(assembled),
                 Err(message) => {

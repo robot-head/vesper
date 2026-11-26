@@ -1211,9 +1211,9 @@ unsafe extern "C" {
     fn vesper_ebpf_verifier_sext_imm(imm: i64, width: i64) -> i64;
     fn vesper_ebpf_verifier_verify(result: *mut u64, slots: *mut u64, ptype: *mut u64, pt_regs: i64, gpl: i64, maps: *mut u64, kfuncs: *mut u64, text: *mut u64, max_insns: i64, max_states: i64, widen_loops: i64, pools: *mut u64) -> i64;
     fn vesper_ebpf_wire_alert_decode(result: *mut u64, s: *mut u64, fail: *mut u64) -> i64;
-    fn vesper_ebpf_wire_alert_encode(w: *mut u64) -> i64;
+    fn vesper_ebpf_wire_alert_encode_into(w: *mut u64, out: *mut u64) -> i64;
     fn vesper_ebpf_wire_eth_decode(result: *mut u64, s: *mut u64, fail: *mut u64) -> i64;
-    fn vesper_ebpf_wire_eth_encode(w: *mut u64) -> i64;
+    fn vesper_ebpf_wire_eth_encode_into(w: *mut u64, out: *mut u64) -> i64;
 }
 
 /// The sequence runtime of the Vesper library `ebpf`.
@@ -2103,15 +2103,15 @@ pub fn wire_alert_decode(s: &[u8]) -> Result<crate::port::vesper__ebpf__wire__Sy
     }
 }
 
-/// Calls `wire_alert_encode` of the Vesper library `ebpf` (`vesper_ebpf_wire_alert_encode`).
-pub fn wire_alert_encode(w: crate::port::vesper__ebpf__wire__SynDropAlertWire) -> Vec<u8> {
+/// Calls `wire_alert_encode_into` of the Vesper library `ebpf` (`vesper_ebpf_wire_alert_encode_into`).
+pub fn wire_alert_encode_into(w: crate::port::vesper__ebpf__wire__SynDropAlertWire, out: &mut [u8]) -> () {
     let mut arg_w = [0u64; <crate::port::vesper__ebpf__wire__SynDropAlertWire as Abi>::WORDS];
     Abi::put(&w, &mut arg_w);
-    // SAFETY: `vesper_ebpf_wire_alert_encode` has exactly this signature in the export ABI; every
+    // SAFETY: `vesper_ebpf_wire_alert_encode_into` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_ebpf_wire_alert_encode(arg_w.as_mut_ptr()) };
-    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
+    let raw = vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_ebpf_wire_alert_encode_into(arg_w.as_mut_ptr(), view_out) });
+    { let _ = raw; }
 }
 
 /// Calls `wire_eth_decode` of the Vesper library `ebpf` (`vesper_ebpf_wire_eth_decode`).
@@ -2129,13 +2129,13 @@ pub fn wire_eth_decode(s: &[u8]) -> Result<crate::port::vesper__ebpf__wire__EthI
     }
 }
 
-/// Calls `wire_eth_encode` of the Vesper library `ebpf` (`vesper_ebpf_wire_eth_encode`).
-pub fn wire_eth_encode(w: crate::port::vesper__ebpf__wire__EthIpv4TcpWire) -> Vec<u8> {
+/// Calls `wire_eth_encode_into` of the Vesper library `ebpf` (`vesper_ebpf_wire_eth_encode_into`).
+pub fn wire_eth_encode_into(w: crate::port::vesper__ebpf__wire__EthIpv4TcpWire, out: &mut [u8]) -> () {
     let mut arg_w = [0u64; <crate::port::vesper__ebpf__wire__EthIpv4TcpWire as Abi>::WORDS];
     Abi::put(&w, &mut arg_w);
-    // SAFETY: `vesper_ebpf_wire_eth_encode` has exactly this signature in the export ABI; every
+    // SAFETY: `vesper_ebpf_wire_eth_encode_into` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_ebpf_wire_eth_encode(arg_w.as_mut_ptr()) };
-    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
+    let raw = vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_ebpf_wire_eth_encode_into(arg_w.as_mut_ptr(), view_out) });
+    { let _ = raw; }
 }
