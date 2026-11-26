@@ -8,9 +8,5 @@ fn wrap_phase(phase: f64, period: f64) -> f64 eff [Realtime] {
 
 fn main() -> u64 {
     let p = wrap_phase(7.5, 2.0);
-    if p > 1.0 {
-        1
-    } else {
-        0
-    }
+    if p > 1.0 { 1 } else { 0 }
 }

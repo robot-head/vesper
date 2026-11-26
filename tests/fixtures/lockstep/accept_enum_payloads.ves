@@ -8,10 +8,6 @@ fn main() -> i64 {
     match e {
         A => 1,
         B(x) => x,
-        C(y, b) => if b {
-            y
-        } else {
-            0
-        },
+        C(y, b) => if b { y } else { 0 },
     }
 }

@@ -576,11 +576,7 @@ fn mode_work(
 }
 
 fn join(a: u8, b: u8) -> u8 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn seen_has(in seen: ChunkSeq[u32], name: u32, in modes: ChunkSeq[u8]) -> bool {

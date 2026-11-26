@@ -76,11 +76,7 @@ fn abs32(x: f32) -> f32 {
 }
 
 fn fmax(a: f32, b: f32) -> f32 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn eps() -> f32 {
@@ -94,11 +90,7 @@ fn friction_k(lt: f32, corr: f32, mu_s: f32, mu_d: f32) -> f32 {
         return 1.0;
     }
     let r = (mu_d * corr) / lt;
-    if r < 1.0 {
-        r
-    } else {
-        1.0
-    }
+    if r < 1.0 { r } else { 1.0 }
 }
 
 // A distance joint or a body-body contact (`contact`: an inequality with
@@ -152,11 +144,7 @@ fn project_pair(
     }
     let denom = fmax(w + alpha_tilde, epsv);
     let d_lambda = -c / denom;
-    let inv_len: f32 = if len == 0.0 {
-        1.0
-    } else {
-        1.0 / len
-    };
+    let inv_len: f32 = if len == 0.0 { 1.0 } else { 1.0 / len };
     let nx = dx * inv_len;
     let ny = dy * inv_len;
     let nz = dz * inv_len;
@@ -331,11 +319,7 @@ fn restitute(
     let pz = lo(gw(in prev, wrapping_add(qa, 3))) - pbz;
     let vn = (rx * nx + ry * ny) + rz * nz;
     let vn_prev = (px * nx + py * ny) + pz * nz;
-    let e_here: f32 = if abs32(vn_prev) <= threshold {
-        0.0
-    } else {
-        e
-    };
+    let e_here: f32 = if abs32(vn_prev) <= threshold { 0.0 } else { e };
     let wanted: f32 = if vn_prev < 0.0 {
         -(e_here * vn_prev)
     } else {

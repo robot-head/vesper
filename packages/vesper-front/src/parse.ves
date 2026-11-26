@@ -432,11 +432,7 @@ fn ex(k: u8, start: u64, end: u64, children: u32) -> Ex {
 }
 
 fn hmax(a: u32, b: u32) -> u32 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // ---------------------------------------------------------------- scopes
@@ -539,11 +535,7 @@ fn int_value(in p: P, i: u64) -> (bool, u64) {
     let src = p.src.as_slice();
     let x = byte(in src, inc(s));
     let hex = wrapping_sub(e, s) >= 2 && byte(in src, s) == 48 && (x == 120 || x == 88);
-    let from = if hex {
-        add(s, 2)
-    } else {
-        s
-    };
+    let from = if hex { add(s, 2) } else { s };
     let mut v: u64 = 0;
     let mut digits: u64 = 0;
     for j in from..e {
@@ -675,16 +667,8 @@ fn int_class(in p: P, i: u64) -> u8 {
     let src = p.src.as_slice();
     let x = byte(in src, inc(s));
     let hex = wrapping_sub(e, s) >= 2 && byte(in src, s) == 48 && (x == 120 || x == 88);
-    let from = if hex {
-        add(s, 2)
-    } else {
-        s
-    };
-    let base: u128 = if hex {
-        16
-    } else {
-        10
-    };
+    let from = if hex { add(s, 2) } else { s };
+    let base: u128 = if hex { 16 } else { 10 };
     let mut v: u128 = 0;
     let mut digits: u64 = 0;
     for j in from..e {
@@ -1492,20 +1476,8 @@ fn function(inout p: P, op: bool) {
 fn header_note(inout p: P, start: u64, clean: bool, nongeneric: bool) {
     p.hdr.push(start);
     p.hdr.push(cur_start(in p));
-    p.hdr.push(
-        if clean {
-            1
-        } else {
-            0
-        }
-    );
-    p.hdr.push(
-        if nongeneric {
-            1
-        } else {
-            0
-        }
-    );
+    p.hdr.push(if clean { 1 } else { 0 });
+    p.hdr.push(if nongeneric { 1 } else { 0 });
     for s in 0..p.rows.len() {
         if u32_at(in p.rows, s) != 0 {
             p.hdr_syms.push(narrow(s));
@@ -2282,11 +2254,7 @@ fn expr_inner(inout p: P) -> Ex {
     start_node(inout p, NodeKind::Expr);
     let cur = idx(in p, 0);
     let k = tk(in p, cur);
-    let w = if k == k_lower() {
-        tword(in p, cur)
-    } else {
-        0
-    };
+    let w = if k == k_lower() { tword(in p, cur) } else { 0 };
     let e = if k == k_handle() && handle_starts(in p) {
         handle_expr(inout p)
     } else if w == w_region()
@@ -2376,16 +2344,7 @@ fn jump_expr(inout p: P, ret: bool) -> Ex {
         let v = expr(inout p);
         v.h
     };
-    ex(
-        if ret {
-            x_return()
-        } else {
-            x_break()
-        },
-        start,
-        last_end(in p),
-        h
-    )
+    ex(if ret { x_return() } else { x_break() }, start, last_end(in p), h)
 }
 
 fn restricted(inout p: P) -> Ex {
@@ -2786,11 +2745,7 @@ fn binary_inner(inout p: P, min: u64, pipe: bool) -> Ex {
             binary_operand(inout p, inc(prec), custom == 3)
         };
         let mut e = ex(
-            if right {
-                x_assign()
-            } else {
-                x_binary()
-            },
+            if right { x_assign() } else { x_binary() },
             widen_u64(lhs.start),
             widen_u64(rhs.end),
             hmax(lhs.h, rhs.h)
@@ -2980,11 +2935,7 @@ fn open_interval(inout p: P, base: Ex, has_lo: bool, lo: Ex) -> Ex {
         let hi = dexpr(inout p);
         (widen_u64(hi.end), hi.h)
     };
-    let start = if lo_start < dots {
-        lo_start
-    } else {
-        dots
-    };
+    let start = if lo_start < dots { lo_start } else { dots };
     let b = ex(x_binary(), start, max64(hi_end, dots_end), hmax(lo_h, hi_h));
     record(inout p, b)
 }
@@ -3028,11 +2979,7 @@ fn primary_inner(inout p: P) -> Ex {
     let (lit, _) = literal(inout p);
     if lit != 0 {
         let mut l = ex(
-            if lit == l_int() {
-                x_int()
-            } else {
-                x_literal()
-            },
+            if lit == l_int() { x_int() } else { x_literal() },
             start,
             last_end(in p),
             0
@@ -3206,16 +3153,7 @@ fn array_literal(inout p: P, start: u64) -> Ex {
             }
             let end = last_end(in p);
             if v.pure {
-                let mut t = ex(
-                    x_tuple(),
-                    start,
-                    end,
-                    if n == 0 {
-                        0
-                    } else {
-                        v.h
-                    }
-                );
+                let mut t = ex(x_tuple(), start, end, if n == 0 { 0 } else { v.h });
                 t.leaves = max64(wrapping_mul(v.leaves, n), 1);
                 return t;
             }

@@ -211,25 +211,9 @@ pub fn client_register_request(
     if fin {
         out_queue_fin(inout c.conn.out, id);
     }
-    let flags = (
-        if is_head {
-            CF_HEAD_REQ
-        } else {
-            0
-        }
-    ) | (
-        if is_connect {
-            CF_CONNECT
-        } else {
-            0
-        }
-    ) | (
-        if !fin {
-            CF_SENDING
-        } else {
-            0
-        }
-    );
+    let flags = (if is_head { CF_HEAD_REQ } else { 0 }) | (
+        if is_connect { CF_CONNECT } else { 0 }
+    ) | (if !fin { CF_SENDING } else { 0 });
     let f = bsearch_u64(in c.c_id.as_slice(), id);
     if !f.found {
         insert_word(inout c.c_id, f.idx, id);

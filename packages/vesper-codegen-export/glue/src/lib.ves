@@ -529,11 +529,7 @@ fn drop_at(
             for index in 0..n.n {
                 let arg = i.kid(t, index);
                 // Option: tag 1 is Some(args[0]); Result: tag 0 is Ok, 1 Err.
-                let tag_value: i64 = if is_option {
-                    1
-                } else {
-                    wrapping_i64(index)
-                };
+                let tag_value: i64 = if is_option { 1 } else { wrapping_i64(index) };
                 if !i.owning(arg) {
                     continue;
                 }

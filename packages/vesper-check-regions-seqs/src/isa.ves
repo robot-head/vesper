@@ -843,14 +843,7 @@ fn op_shape(in a: Ast, inout x: I, intr: u8, types: u32, args: u32, result: u32)
     let (lo, hi): (u64, u64) = if intr == I_EXTRACT || intr == I_REPLACE {
         (1, 2)
     } else if intr == I_SHUFFLE {
-        (
-            1,
-            if nargs > 1 {
-                nargs
-            } else {
-                1
-            }
-        )
+        (1, if nargs > 1 { nargs } else { 1 })
     } else {
         (0, 0)
     };

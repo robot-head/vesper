@@ -1000,11 +1000,7 @@ fn access_code(in b: Slice[u8], a: u64, e: u64) -> u8 {
 }
 
 fn scalar_code(x: u32) -> u8 {
-    if x < SC_COUNT {
-        wrapping_u8(x)
-    } else {
-        SC_U64
-    }
+    if x < SC_COUNT { wrapping_u8(x) } else { SC_U64 }
 }
 
 fn read_value(inout r: Reader, in b: Slice[u8], inout s: S) -> Vt {
@@ -1200,11 +1196,7 @@ fn parse_const_int(in b: Slice[u8], a: u64, e: u64) -> (bool, u64) {
         Option::None => 0,
     };
     let neg = a < e && first == Ascii::Hyphen;
-    let mut i = if neg {
-        inc(a)
-    } else {
-        a
-    };
+    let mut i = if neg { inc(a) } else { a };
     let mut mag: u64 = 0;
     loop {
         if i >= e {
@@ -2970,11 +2962,7 @@ pub fn dump_abi(inout s: S) {
         put_convention(inout s, l.triple);
         s.put(in " params=");
         // A callback's call leaves the pointer out of its C signature.
-        let first: u64 = if f.indirect {
-            1
-        } else {
-            0
-        };
+        let first: u64 = if f.indirect { 1 } else { 0 };
         let darwin = triple_os(in s, l.triple) == TargetOs::Darwin;
         let mut integers: u64 = 0;
         let mut emitted = false;
@@ -3056,11 +3044,7 @@ fn read_type(inout r: Reader, in b: Slice[u8], inout s: S, depth: u64) -> u32 {
 
 fn opt_sym(inout r: Reader, in b: Slice[u8], inout s: S) -> u32 {
     let (a, e) = r.text(in b);
-    if a == e {
-        NONE
-    } else {
-        s.intern(in b[a..e])
-    }
+    if a == e { NONE } else { s.intern(in b[a..e]) }
 }
 
 fn run(in b: Slice[u8], inout s: S) {

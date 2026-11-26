@@ -30,11 +30,7 @@ fn over(x: i64) -> i64 eff [Fail[Limit]] {
 
 fn bounded(x: i64) -> i64 eff [Fail[Limit], Fail[Bad], Fail[ArithOverflow]] {
     let y = sum(x, 1);
-    if y > 100 {
-        over(x)
-    } else {
-        y
-    }
+    if y > 100 { over(x) } else { y }
 }
 
 fn code(x: i64) -> i64 eff [Fail[Limit], Fail[ArithOverflow]] {

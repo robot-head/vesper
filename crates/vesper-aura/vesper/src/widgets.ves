@@ -36,21 +36,7 @@ pub fn patch_set_root(
     }
     s.has_root = has;
     s.root = root;
-    record(
-        inout s,
-        lim,
-        op(
-            0,
-            if has {
-                1
-            } else {
-                0
-            },
-            root,
-            0,
-            0
-        )
-    )
+    record(inout s, lim, op(0, if has { 1 } else { 0 }, root, 0, 0))
 }
 
 pub fn patch_create(

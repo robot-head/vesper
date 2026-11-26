@@ -206,11 +206,7 @@ fn fn_at(in a: Ast, i: u32) -> FnNode {
 // word `at`) in reverse order.
 fn push_rev(inout stack: ChunkSeq[u32], in a: Ast, list: u32, stride: u64, at: u64) {
     let len = list_len(in a, list);
-    let n = if stride == 2 {
-        len / 2
-    } else {
-        len
-    };
+    let n = if stride == 2 { len / 2 } else { len };
     let mut k = n;
     loop {
         if k == 0 {

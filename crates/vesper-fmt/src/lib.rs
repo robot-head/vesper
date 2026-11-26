@@ -884,6 +884,98 @@ fn word_used_as_name(previous: Option<K>, current: K, next: Option<K>) -> bool {
                 && next.is_some_and(|n| matches!(n, K::LParen | K::LBracket))
                 && !matches!(previous, Some(K::At | K::AtAt))))
 }
+/// The widest short `if` expression that stays on one line, as rustfmt's
+/// `single_line_if_else_max_width`.
+const SHORT_IF_ELSE_WIDTH: usize = 50;
+/// Where a short `if c { a } else { b }` starting at `start` ends: the index
+/// of its last `}`, when each branch holds one expression and no comment, its
+/// one-line width is at most `SHORT_IF_ELSE_WIDTH`, and it ends the
+/// expression it is in. rustfmt keeps such an `if` on one line.
+fn short_if_else(atoms: &[Piece<'_>], start: usize, end: Option<K>) -> Option<usize> {
+    // 0: condition, 1: first branch, 2: `else`, 3: its `{`, 4: second branch.
+    let mut state = 0;
+    let mut depth = 0usize;
+    let mut tokens = 0usize;
+    let mut width = 0usize;
+    let mut previous: Option<K> = None;
+    let mut unary = false;
+    let mut i = start;
+    let close = loop {
+        let atom = atoms.get(i)?;
+        let kind = atom.kind;
+        // A comment, a statement, a separator or a sugar boundary (`else` on
+        // its own line in a template) can break the line, so the `if` cannot
+        // be one group.
+        if matches!(kind, K::Comment | K::BlockComment | K::Semi)
+            || i > start && atom.sugar_gap.is_some()
+            || depth == 0 && matches!(kind, K::Comma | K::Arrow)
+        {
+            return None;
+        }
+        if let Some(p) = previous {
+            let space = if matches!(p, K::LParen | K::LBracket)
+                || matches!(kind, K::RParen | K::RBracket)
+                || unary
+            {
+                false
+            } else if p == K::LBrace || kind == K::RBrace {
+                true
+            } else {
+                let previous = Piece { kind: p, ..*atom };
+                !matches!(
+                    gap(previous, *atom, false, p == K::RBrace),
+                    Gap::None | Gap::Empty
+                )
+            };
+            width = width.checked_add(usize::from(space))?;
+        }
+        width = width.checked_add(atom.text.chars().count())?;
+        if width > SHORT_IF_ELSE_WIDTH {
+            return None;
+        }
+        unary =
+            matches!(kind, K::Minus | K::Bang | K::Tilde) && !previous.is_some_and(ends_operand);
+        previous = Some(kind);
+        match kind {
+            K::LBrace if depth == 0 && (state == 0 && tokens > 1 || state == 3) => {
+                state += 1;
+                tokens = 0;
+                depth += 1;
+            }
+            K::LBrace => return None,
+            K::RBrace if depth == 1 && matches!(state, 1 | 4) => {
+                if tokens == 0 {
+                    return None;
+                }
+                if state == 4 {
+                    break i;
+                }
+                state = 2;
+                depth = 0;
+            }
+            K::Else if depth == 0 && state == 2 => state = 3,
+            _ if depth == 0 && state != 0 => return None,
+            K::LParen | K::LBracket => {
+                depth += 1;
+                tokens += 1;
+            }
+            K::RParen | K::RBracket | K::RBrace => {
+                depth = depth.checked_sub(1)?;
+                tokens += 1;
+            }
+            _ => tokens += 1,
+        }
+        i += 1;
+    };
+    let ends = atoms.get(close + 1).is_none_or(|a| {
+        Some(a.kind) == end
+            || matches!(
+                a.kind,
+                K::Semi | K::Comma | K::RParen | K::RBracket | K::RBrace
+            )
+    });
+    ends.then_some(close)
+}
 /// How a tagged sugar call lays out its braces.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tagged {
@@ -963,8 +1055,29 @@ fn sequence<'a>(
     let mut previous_hugged = false;
     // The member chain being built on `line` (`out.rows.push(..)`).
     let mut chain = Chain::default();
+    // A short `if c { a } else { b }` laid out on `line` as one group: the
+    // index of its last `}`, and where its docs and breaks start on `line`.
+    let mut short_if: Option<(usize, usize, usize)> = None;
     while *pos < atoms.len() && Some(atoms[*pos].kind) != end {
         let current = atoms[*pos];
+        // An `if` used as a value (`let x = if ..`, an argument, a match arm,
+        // a block's last expression), as rustfmt decides.
+        let starts_short_if = short_if.is_none()
+            && current.kind == K::If
+            && !previous.is_some_and(|p| p.kind == K::Else);
+        // An `if` that starts a statement is a value only as its block's last
+        // expression.
+        let starts_statement = block
+            && previous.is_none_or(|p| {
+                previous_block || matches!(p.kind, K::Semi | K::Comment | K::BlockComment)
+            });
+        let short_if_close = if starts_short_if {
+            short_if_else(atoms, *pos, end).filter(|&close| {
+                !starts_statement || atoms.get(close + 1).is_none_or(|a| Some(a.kind) == end)
+            })
+        } else {
+            None
+        };
         // `{` after `.` or `::` opens a list, not a block: a tagged literal or
         // a `use` group (`use a::{b, c};`), which stays on one line when it fits.
         let is_block = current.kind == K::LBrace
@@ -981,6 +1094,8 @@ fn sequence<'a>(
         let is_block = is_block && !is_record && tagged == Tagged::No;
         // The block a hugging tagged call opens with.
         let hugged = hug && is_block && previous.is_none();
+        // A branch of a short `if` breaks only with the whole `if`.
+        let soft_block = is_block && short_if.is_some();
         if matches!(current.kind, K::If | K::Match)
             || current.kind == K::Lower && matches!(current.text, "for" | "while")
         {
@@ -998,8 +1113,12 @@ fn sequence<'a>(
         } else if let Some(gap) = current.sugar_gap {
             gap
         } else if hug && previous_hugged {
-            // The clause after a hugged block follows its `}`.
-            Gap::Space
+            // The clause after a hugged block follows its `}`, and a `:` or
+            // `,` stays glued to it.
+            match previous.map(|p| gap(p, current, block, false)) {
+                Some(Gap::None) => Gap::None,
+                _ => Gap::Space,
+            }
         } else if previous_unary || package {
             Gap::None
         } else if list && previous.is_some_and(|p| p.kind == K::Semi) {
@@ -1041,7 +1160,9 @@ fn sequence<'a>(
             Gap::Soft if !is_block && near_comment => {
                 line.push(document.push(Doc::SoftLineOrSpace)?)
             }
-            Gap::Space | Gap::Soft if !is_block => line.push(document.push(Doc::Text(" "))?),
+            Gap::Space | Gap::Soft if !is_block || soft_block => {
+                line.push(document.push(Doc::Text(" "))?)
+            }
             Gap::Return => {
                 line.flush(document, &mut output)?;
                 let lead = document.push(Doc::SoftLineOrSpace)?;
@@ -1056,11 +1177,14 @@ fn sequence<'a>(
             }
             _ => {}
         }
-        if is_block {
+        if is_block && !soft_block {
             line.flush(document, &mut output)?;
             if matches!(spacing, Gap::Soft | Gap::Space) {
                 output.push(document.push(Doc::Text(" "))?);
             }
+        }
+        if let Some(close) = short_if_close {
+            short_if = Some((close, line.docs.len(), line.breaks.len()));
         }
         *pos += 1;
         let mut params = false;
@@ -1111,7 +1235,7 @@ fn sequence<'a>(
             if empty {
                 document.push(Doc::Concat(vec![start, finish]))?
             } else {
-                let lead = document.push(if hugged {
+                let lead = document.push(if hugged || soft_block {
                     Doc::SoftLineOrSpace
                 } else if tagged == Tagged::Hug {
                     Doc::Text(" ")
@@ -1129,7 +1253,7 @@ fn sequence<'a>(
                 } else {
                     document.push(Doc::Nest(4, content))?
                 };
-                let trail = document.push(if hugged && !last_is_line_comment {
+                let trail = document.push(if soft_block || hugged && !last_is_line_comment {
                     Doc::SoftLineOrSpace
                 } else if tagged == Tagged::Hug {
                     Doc::Text(" ")
@@ -1143,9 +1267,10 @@ fn sequence<'a>(
                 let all = document.push(Doc::Concat(vec![start, nest, trail, finish]))?;
                 // A parameter list before `->` shares its line's group, so it
                 // breaks whenever the signature with its return type cannot
-                // fit on one line. A hugged block shares the group of its
-                // call, so it breaks before the clause after it does.
-                if params || hugged {
+                // fit on one line; a short `if`'s branch shares the `if`'s. A
+                // hugged block shares the group of its call, so it breaks
+                // before the clause after it does.
+                if params || soft_block || hugged {
                     all
                 } else {
                     document.push(Doc::Group(all))?
@@ -1158,7 +1283,7 @@ fn sequence<'a>(
                 Doc::Text(current.text)
             })?
         };
-        if is_block {
+        if is_block && !soft_block {
             output.push(node);
         } else {
             line.push(node);
@@ -1167,6 +1292,26 @@ fn sequence<'a>(
                 current.kind == K::LParen,
                 current.kind,
             )?;
+        }
+        // The short `if` ends: it becomes one group that breaks like any
+        // other `if`, with the breaks in its condition kept on one line.
+        if let Some((close, docs, breaks)) = short_if.filter(|&(close, _, _)| *pos > close) {
+            let _ = close;
+            short_if = None;
+            // Unless the line broke inside the `if`, which `short_if_else`
+            // rules out, leaving nothing to group.
+            if docs <= line.docs.len() && breaks <= line.breaks.len() {
+                for &(offset, level) in &line.breaks[breaks..] {
+                    line.docs[offset] = document.push(if level == 12 {
+                        Doc::Nil
+                    } else {
+                        Doc::Text(" ")
+                    })?;
+                }
+                line.breaks.truncate(breaks);
+                let inner = document.push(Doc::Concat(line.docs.split_off(docs)))?;
+                line.push(document.push(Doc::Group(inner))?);
+            }
         }
         previous_block = is_block;
         previous_params = params;

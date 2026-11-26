@@ -278,14 +278,7 @@ fn clone_loop(
         // the pool word, then the arguments
         let a = p.ops.len();
         p.put(e, Tag::Pool);
-        let nargs = add(
-            add(3, tv.len()),
-            if previous == NONE64 {
-                0
-            } else {
-                1
-            }
-        );
+        let nargs = add(add(3, tv.len()), if previous == NONE64 { 0 } else { 1 });
         p.put(nargs, Tag::Raw);
         sink_value(inout p, lo);
         sink_value(inout p, hi);
@@ -302,11 +295,7 @@ fn clone_loop(
         let last = inc(k) == n;
         let guard = fresh.value(cx.bool_ty);
         let input = token;
-        token = if last {
-            guard_token
-        } else {
-            fresh.token()
-        };
+        token = if last { guard_token } else { fresh.token() };
         guards.push(
             guard_inst(guard, cx.bool_ty, s0, s1, input, token, a, wrapping_sub(p.ops.len(), a))
         );
@@ -404,11 +393,7 @@ fn guard_and_copy(
         let e = pool_entry(inout p, POOL_GUARD, 0);
         let a = p.ops.len();
         p.put(e, Tag::Pool);
-        let nargs: u64 = if previous == NONE64 {
-            3
-        } else {
-            4
-        };
+        let nargs: u64 = if previous == NONE64 { 3 } else { 4 };
         p.put(nargs, Tag::Raw);
         sink_value(inout p, lo);
         sink_value(inout p, hi);

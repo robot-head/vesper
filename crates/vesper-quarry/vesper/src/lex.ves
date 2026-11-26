@@ -117,11 +117,7 @@ pub fn lex(inout q: Q, in sql: Slice[u8]) {
                 };
                 q.toks.push(
                     Tok {
-                        kind: if is_param {
-                            tk_param()
-                        } else {
-                            tk_word()
-                        },
+                        kind: if is_param { tk_param() } else { tk_word() },
                         a: off,
                         b: len,
                         kw: kw
@@ -137,11 +133,7 @@ pub fn lex(inout q: Q, in sql: Slice[u8]) {
                 }
                 // Parse sql[start..i] as an i64.
                 let neg = c == MINUS;
-                let first = if neg {
-                    wrapping_add(start, 1)
-                } else {
-                    start
-                };
+                let first = if neg { wrapping_add(start, 1) } else { start };
                 let mut ok = first < i;
                 let mut m: u64 = 0;
                 let mut j = first;
@@ -169,11 +161,7 @@ pub fn lex(inout q: Q, in sql: Slice[u8]) {
                     fail(inout q, 1, "invalid or overflowing i64 literal");
                     return;
                 }
-                let v = if neg {
-                    wrapping_sub(0, m)
-                } else {
-                    m
-                };
+                let v = if neg { wrapping_sub(0, m) } else { m };
                 q.toks.push(Tok { kind: tk_int(), a: v, b: 0, kw: 0 });
             } else if c == QUOTE {
                 i = wrapping_add(i, 1);
@@ -208,11 +196,7 @@ pub fn lex(inout q: Q, in sql: Slice[u8]) {
                 q.toks.push(Tok { kind: tk_op(), a: 0, b: 0, kw: 0 });
             } else if c == LT || c == GT || c == BANG {
                 i = wrapping_add(i, 1);
-                let second = if i < n {
-                    byte(in sql, i)
-                } else {
-                    0
-                };
+                let second = if i < n { byte(in sql, i) } else { 0 };
                 let mut op: u64 = 0;
                 if c == LT && second == EQUALS {
                     i = wrapping_add(i, 1);

@@ -241,11 +241,7 @@ pub fn mount_next(
         let tn = tnode(in p.tree.nodes, ti);
         let found = seq_u64(in old_of, ti);
         let retained = found != NONE_ID && mnode(in old.nodes, found).kind == tn.kind;
-        let prev = if retained {
-            found
-        } else {
-            NONE_ID
-        };
+        let prev = if retained { found } else { NONE_ID };
         let pn = mnode(in old.nodes, prev);
         let id = if retained {
             pn.id
@@ -288,11 +284,7 @@ pub fn mount_next(
                     tag: tp.tag,
                     payload: tp.payload,
                     tstart: tstart,
-                    tlen: if tp.tag == ValueTag::Text {
-                        tp.tlen
-                    } else {
-                        0
-                    }
+                    tlen: if tp.tag == ValueTag::Text { tp.tlen } else { 0 }
                 }
             );
         }
@@ -576,13 +568,7 @@ pub fn plan(in old: Mounted, inout p: Prepared, has_tree: bool, in text: Slice[u
         };
         found.push(nj);
         let same = nj != NONE_ID && mnode(in p.m.nodes, nj).kind == node.kind;
-        p.succ.push(
-            if same {
-                nj
-            } else {
-                NONE_ID
-            }
-        );
+        p.succ.push(if same { nj } else { NONE_ID });
     }
     let old_root = mnode(in old.nodes, 0).id;
     let new_root = mnode(in p.m.nodes, 0).id;

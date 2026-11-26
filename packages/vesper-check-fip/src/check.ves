@@ -207,11 +207,7 @@ impl Fip {
 
     fn expr_type(in self, e: ExprRow) -> u32 {
         let t = self.c.world.expr_type(e.start, e.end);
-        if t == NONE32 {
-            self.c.types.infer
-        } else {
-            t
-        }
+        if t == NONE32 { self.c.types.infer } else { t }
     }
 
     // Whether the world has a type for the span (`world.types.get(..)`).
@@ -391,14 +387,7 @@ impl Fip {
         if at >= self.box_memo.len() {
             self.box_memo.resize(inc(at), 0);
         }
-        let ok = self.box_memo.try_set(
-            at,
-            if found {
-                2
-            } else {
-                1
-            }
-        );
+        let ok = self.box_memo.try_set(at, if found { 2 } else { 1 });
         found
     }
 

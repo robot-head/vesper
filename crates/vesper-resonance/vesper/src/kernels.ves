@@ -285,19 +285,11 @@ fn group_frames(
 }
 
 fn min_u64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 fn max_u32(a: u32, b: u32) -> u32 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // `SvfBank::render_reference`: the fused scalar loop, advancing each voice's

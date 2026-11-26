@@ -299,11 +299,7 @@ fn fn_max_value_id(in p: Program, fi: u64, nv_op: u64) -> u32 {
             }
         }
     }
-    if has {
-        wrapping_add(m, 1)
-    } else {
-        0
-    }
+    if has { wrapping_add(m, 1) } else { 0 }
 }
 
 fn find_fn_by_name(in p: Program, name: u32) -> u64 {

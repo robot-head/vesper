@@ -259,22 +259,14 @@ pub fn do_parse_attribute(in input: Slice[u8]) -> ContractOut eff [Fail[ParseErr
             }
             let (q, v) = boolean(in input, p);
             p = q;
-            r.zero_alloc = if v {
-                Flag::True
-            } else {
-                Flag::False
-            };
+            r.zero_alloc = if v { Flag::True } else { Flag::False };
         } else if id == Field::ExpectVectorized {
             if r.expect_vectorized != Flag::Unset {
                 duplicate(start);
             }
             let (q, v) = boolean(in input, p);
             p = q;
-            r.expect_vectorized = if v {
-                Flag::True
-            } else {
-                Flag::False
-            };
+            r.expect_vectorized = if v { Flag::True } else { Flag::False };
         } else if id == Field::InstructionsPerByte {
             if r.has_instructions_per_byte {
                 duplicate(start);

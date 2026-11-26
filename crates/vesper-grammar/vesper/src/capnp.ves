@@ -68,11 +68,7 @@ pub fn parse_prefix(in input: Slice[u8], in lim: Slice[u64]) -> P4 eff [Fail[GEr
     bound(count, sw(in lim, 1), 10);
     bound(add_or(1, count, 2, 0), sw(in lim, 3), 8);
     let table_end = add_or(TABLE_ENTRY_BYTES, mul_or(count, TABLE_ENTRY_BYTES, 2, 0), 2, 0);
-    let pad: u64 = if count & 1 == 0 {
-        TABLE_ENTRY_BYTES
-    } else {
-        0
-    };
+    let pad: u64 = if count & 1 == 0 { TABLE_ENTRY_BYTES } else { 0 };
     let header_end = add_or(table_end, pad, 2, 0);
     if header_end > n {
         fail(0, n);
@@ -176,23 +172,9 @@ pub fn list_pointer(in segment: Slice[u8], pointer_word: u64) -> P4 eff [Fail[GE
     };
     let count = shr(p.a, ELEMENT_COUNT_SHIFT);
     let bit_count = wrapping_mul(count, bits);
-    let logical = wrapping_add(
-        bit_count >> 3,
-        if bit_count & 7 != 0 {
-            1
-        } else {
-            0
-        }
-    );
+    let logical = wrapping_add(bit_count >> 3, if bit_count & 7 != 0 { 1 } else { 0 });
     let padded = wrapping_mul(
-        wrapping_add(
-            bit_count >> 6,
-            if bit_count & 63 != 0 {
-                1
-            } else {
-                0
-            }
-        ),
+        wrapping_add(bit_count >> 6, if bit_count & 63 != 0 { 1 } else { 0 }),
         WORD_BYTES
     );
     let padded_end = add_or(p.b, padded, 1, 0);

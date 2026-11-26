@@ -72,11 +72,7 @@ fn rel(inout a: Asm, opcode: u8, l: u64) {
 }
 
 fn signed_cc(s: u8, signed: u8, unsigned: u8) -> u8 {
-    if s == S_S {
-        signed
-    } else {
-        unsigned
-    }
+    if s == S_S { signed } else { unsigned }
 }
 
 // `emit`: the bytes of one instruction.
@@ -214,16 +210,8 @@ pub fn emit(inout a: Asm, in m: M) {
         let c = m.a;
         if c == C_EQ || c == C_NE {
             // ucomisd xmm0, xmm1; mov eax, 0|1; jp +3; sete/setne al
-            let init: u8 = if c == C_EQ {
-                0
-            } else {
-                1
-            };
-            let cc: u8 = if c == C_EQ {
-                148
-            } else {
-                149
-            };
+            let init: u8 = if c == C_EQ { 0 } else { 1 };
+            let cc: u8 = if c == C_EQ { 148 } else { 149 };
             bytes4(inout a, 102, 15, 46, 193);
             bytes2(inout a, 184, init);
             bytes3(inout a, 0, 0, 0);
@@ -231,16 +219,8 @@ pub fn emit(inout a: Asm, in m: M) {
             bytes3(inout a, 15, cc, 192);
         } else {
             // a > b: seta; a >= b: setae. a < b and a <= b swap operands.
-            let modrm: u8 = if c == C_GT || c == C_GE {
-                193
-            } else {
-                200
-            };
-            let cc: u8 = if c == C_GT || c == C_LT {
-                151
-            } else {
-                147
-            };
+            let modrm: u8 = if c == C_GT || c == C_GE { 193 } else { 200 };
+            let cc: u8 = if c == C_GT || c == C_LT { 151 } else { 147 };
             bytes4(inout a, 102, 15, 46, modrm);
             bytes3(inout a, 15, cc, 192);
             bytes3(inout a, 15, 182, 192);
@@ -249,11 +229,7 @@ pub fn emit(inout a: Asm, in m: M) {
         // mov r11d, HEAP_BASE; mov rax, [r11 + rcx*8 + 8*off] (or the store)
         bytes2(inout a, 65, 187);
         put_u32(inout a, wrapping_u32(HEAP_BASE));
-        let opcode: u8 = if o == M_LDH {
-            139
-        } else {
-            137
-        };
+        let opcode: u8 = if o == M_LDH { 139 } else { 137 };
         bytes4(inout a, 73, opcode, 132, 203);
         put_u32(inout a, wrapping_u32(wrapping_mul(m.n, 8)));
     } else if o == M_LABEL {
@@ -344,11 +320,7 @@ fn call_external(inout a: Asm, name: u8) {
 // offset of `main` in the code.
 pub fn start_windows(inout a: Asm, protocol: u8, result_words: u32, entry: u64) -> u64 {
     let main = here(in a);
-    let words: u32 = if result_words == 0 {
-        1
-    } else {
-        result_words
-    };
+    let words: u32 = if result_words == 0 { 1 } else { result_words };
     let area = wrapping_mul(wrapping_add(words, 1) & 4294967294, 8);
     prologue(inout a, area);
     rel(inout a, 232, entry);
@@ -419,11 +391,7 @@ pub fn start_windows(inout a: Asm, protocol: u8, result_words: u32, entry: u64) 
 // `_start` on Linux: reserve the entry's result area, call it, optionally
 // write the result words to stdout, and exit; then the abort exits.
 pub fn start(inout a: Asm, protocol: u8, result_words: u32, entry: u64) {
-    let words: u32 = if result_words == 0 {
-        1
-    } else {
-        result_words
-    };
+    let words: u32 = if result_words == 0 { 1 } else { result_words };
     let area = wrapping_add(words, 1) & 4294967294;
     // sub rsp, imm32; call entry
     bytes3(inout a, 72, 129, 236);

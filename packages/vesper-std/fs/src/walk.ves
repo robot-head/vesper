@@ -111,11 +111,7 @@ fn before(in bytes: Slice[u8], in ends: Slice[u64], x: u64, y: u64) -> bool {
     let yb = get64(in ends, y);
     let xl = wrapping_sub(xb, xa);
     let yl = wrapping_sub(yb, ya);
-    let n = if xl < yl {
-        xl
-    } else {
-        yl
-    };
+    let n = if xl < yl { xl } else { yl };
     let mut i: u64 = 0;
     loop {
         if i >= n {
@@ -146,17 +142,9 @@ fn merge_pass(
             break;
         }
         let mid0 = wrapping_add(lo, width);
-        let mid = if mid0 < n {
-            mid0
-        } else {
-            n
-        };
+        let mid = if mid0 < n { mid0 } else { n };
         let hi0 = wrapping_add(mid, width);
-        let hi = if hi0 < n {
-            hi0
-        } else {
-            n
-        };
+        let hi = if hi0 < n { hi0 } else { n };
         let mut i = lo;
         let mut j = mid;
         let mut k = lo;

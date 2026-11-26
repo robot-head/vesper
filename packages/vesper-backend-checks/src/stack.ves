@@ -44,11 +44,7 @@ const U32_MAX: u64 = 4294967295;
 
 fn sat32(a: u64, b: u64) -> u64 {
     let s = wrapping_add(a, b);
-    if s > U32_MAX {
-        U32_MAX
-    } else {
-        s
-    }
+    if s > U32_MAX { U32_MAX } else { s }
 }
 
 // Byte `i` of function `f`'s code (0 past the end).
@@ -143,11 +139,7 @@ pub fn measure_x86_64(in c: Cx, at: u64, len: u64) -> Measured {
         let b1 = byte(in c, at, len, wrapping_add(i, 1));
         let b2 = byte(in c, at, len, wrapping_add(i, 2));
         let b3 = byte(in c, at, len, wrapping_add(i, 3));
-        let rest = if i < len {
-            wrapping_sub(len, i)
-        } else {
-            0
-        };
+        let rest = if i < len { wrapping_sub(len, i) } else { 0 };
         if b0 == 243 && b1 == 15 && b2 == 30 && b3 == 250 {
             i = wrapping_add(i, 4);
         } else if b0 == 85 {

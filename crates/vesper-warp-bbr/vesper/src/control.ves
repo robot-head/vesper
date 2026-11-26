@@ -107,11 +107,7 @@ pub fn inflight_at_loss(size: u64, tx_in_flight: u64, lost: u64) -> u64 {
     let (l2, h2) = mul_wide(lost_prev, Gain::Unit);
     let positive = h1 > h2 || (h1 == h2 && l1 > l2);
     let lost_prefix = if positive {
-        let borrow: u64 = if l1 < l2 {
-            1
-        } else {
-            0
-        };
+        let borrow: u64 = if l1 < l2 { 1 } else { 0 };
         let lo = wrapping_sub(l1, l2);
         let hi = wrapping_sub(wrapping_sub(h1, h2), borrow);
         div_wide_sat(hi, lo, Gain::UnitMinusLossThresh)

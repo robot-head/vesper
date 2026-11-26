@@ -412,11 +412,7 @@ fn check_workers(inout o: ChunkSeq[u8], in names: Names, in x: Exprs, in a: Atom
         }
     }
     if shared_inout || body_inout {
-        let at = if shared_inout {
-            data
-        } else {
-            body
-        };
+        let at = if shared_inout { data } else { body };
         open(inout o, "E0824", at.start, at.end);
         put(inout o, "workers of 'parallel_for' share their data only by 'in'");
         help(

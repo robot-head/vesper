@@ -139,11 +139,7 @@ pub fn load_query(
             validate_rows_in(inout q, in prog, t);
         }
         let mut at = t.start;
-        let nticks = if tick_rows {
-            t.n
-        } else {
-            0
-        };
+        let nticks = if tick_rows { t.n } else { 0 };
         for r in 0..nticks {
             if q.err != 0 {
                 return root;

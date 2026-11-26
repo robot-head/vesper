@@ -113,13 +113,7 @@ pub fn parse_ddl(inout q: Q) -> u64 {
                 q.words.push(col.off);
                 q.words.push(col.len);
                 q.words.push(ty);
-                q.words.push(
-                    if nullable {
-                        1
-                    } else {
-                        0
-                    }
-                );
+                q.words.push(if nullable { 1 } else { 0 });
                 ncols = wrapping_add(ncols, 1);
                 if !sym(inout q, COMMA) {
                     break;

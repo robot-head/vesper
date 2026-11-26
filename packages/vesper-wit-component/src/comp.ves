@@ -578,11 +578,7 @@ fn flat(in w: Wit, t: u32, depth: u64) -> u64 {
             }
         }
     }
-    if d.kind == D_RECORD {
-        n
-    } else {
-        inc(n)
-    }
+    if d.kind == D_RECORD { n } else { inc(n) }
 }
 
 fn has_string(in w: Wit, t: u32, depth: u64) -> bool {
@@ -639,11 +635,7 @@ fn iface_name(kind: u8, inout out: ChunkSeq[u8]) {
 }
 
 fn defs_of(in w: Wit, kind: u8) -> u64 {
-    if kind == I_RUN {
-        0
-    } else {
-        w.defs.len()
-    }
+    if kind == I_RUN { 0 } else { w.defs.len() }
 }
 
 fn takes_string(in w: Wit, fu: Func) -> bool {

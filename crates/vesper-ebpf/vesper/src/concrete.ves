@@ -128,26 +128,10 @@ pub fn alu_concrete(op: AluOp, wide: bool, a: u64, b: u64) -> u64 {
 
 // Concrete conditional-jump semantics.
 pub fn cmp_concrete(op: JmpOp, wide: bool, a0: u64, b0: u64) -> bool {
-    let a = if wide {
-        a0
-    } else {
-        low32(a0)
-    };
-    let b = if wide {
-        b0
-    } else {
-        low32(b0)
-    };
-    let sa = if wide {
-        signed(a)
-    } else {
-        s32(a)
-    };
-    let sb = if wide {
-        signed(b)
-    } else {
-        s32(b)
-    };
+    let a = if wide { a0 } else { low32(a0) };
+    let b = if wide { b0 } else { low32(b0) };
+    let sa = if wide { signed(a) } else { s32(a) };
+    let sb = if wide { signed(b) } else { s32(b) };
     match op {
         JmpOp::Eq => a == b,
         JmpOp::Ne => a != b,

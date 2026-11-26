@@ -404,11 +404,7 @@ fn process(
             match first_auto_layout(kind, req.access) {
                 Option::Some(l) => l,
                 Option::None => {
-                    let s = if has_sub {
-                        sub.flat
-                    } else {
-                        0
-                    };
+                    let s = if has_sub { sub.flat } else { 0 };
                     return StepOutcome::Failed(
                         PlanFault::NoLayoutForAccess {
                             pass: p,
@@ -421,11 +417,7 @@ fn process(
             }
         };
         if cur != target && !queue_can_transition(kind, cur, target) {
-            let s = if has_sub {
-                sub
-            } else {
-                no_sub()
-            };
+            let s = if has_sub { sub } else { no_sub() };
             match handoff(inout pl, in g, p, queue, resource, s, st, cur, target) {
                 StepOutcome::Done(next) => {
                     st = next;

@@ -233,7 +233,35 @@ fn tagged_calls_stay_on_one_line_and_hug_their_block() {
         "fn f() -> bool {\n    let found = any{ {\n        mark(inout visited, x) == 2\n    \
          } | x in mark(inout visited, 1)..mark(inout visited, 4) };\n    found\n}\n"
     );
+    // A `:` after the block stays glued to its `}`.
+    assert_eq!(
+        formatted("fn f(){max{{x}:i64|x in xs}}"),
+        "fn f() {\n    max{ { x }: i64 | x in xs }\n}\n"
+    );
     // A comment or a top-level `;` keeps the block layout.
     let commented = formatted("fn f(){sum{ { n } // why\n| n in data }}");
     assert!(commented.contains("// why\n"), "{commented}");
+}
+
+#[test]
+fn a_sugar_template_else_on_its_own_line_keeps_the_if_vertical() {
+    // The template keeps `else` on its own line, so the `if` is not one
+    // group (this used to panic).
+    assert_eq!(
+        formatted("sugar choose:expr{rule(choose $b:block)=>{{let x=if true{1}\nelse{2};x}}}"),
+        "sugar choose: expr {
+    rule (choose $b:block) => {
+        {
+            let x = if true {
+                1
+            }
+            else {
+                2
+            };
+            x
+        }
+    }
+}
+"
+    );
 }

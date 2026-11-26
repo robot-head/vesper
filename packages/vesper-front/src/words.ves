@@ -145,11 +145,7 @@ pub fn is_primitive_word(w: u8) -> bool {
 // The kind of the lower-case identifier `b[s..s + n]` whose first bytes
 // are the word `w` (`word_at`): a keyword or Lower (4).
 pub fn keyword(n: u64, w: u64) -> u8 {
-    if n <= 6 {
-        keyword_word(w)
-    } else {
-        4
-    }
+    if n <= 6 { keyword_word(w) } else { 4 }
 }
 
 // The contextual word of the Lower token `b[s..s + n]` whose first bytes
@@ -169,11 +165,7 @@ pub fn lower_word(in b: Slice[u8], s: u64, n: u64, w: u64) -> u8 {
 // The contextual word of the Upper token `b[s..s + n]` whose first bytes
 // are the word `w`.
 pub fn upper_word(n: u64, w: u64) -> u8 {
-    if n == 8 {
-        upper_word_of(w)
-    } else {
-        0
-    }
+    if n == 8 { upper_word_of(w) } else { 0 }
 }
 
 // Keywords by a perfect hash of their word: slot `(w * 16476191191221802671) >> 59` holds

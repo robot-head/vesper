@@ -243,22 +243,14 @@ impl Func {
     // The type of value `v`, or NONE32.
     fn value_type(in self, v: u64) -> u32 {
         let t = u32_at(in self.value_types, v);
-        if t == 0 {
-            NONE32
-        } else {
-            wrapping_sub(t, 1)
-        }
+        if t == 0 { NONE32 } else { wrapping_sub(t, 1) }
     }
 
     // The defining instruction of value `v` (an index into `insts`), or
     // NONE32.
     fn def(in self, v: u64) -> u32 {
         let d = u32_at(in self.defs, v);
-        if d == 0 {
-            NONE32
-        } else {
-            wrapping_sub(d, 1)
-        }
+        if d == 0 { NONE32 } else { wrapping_sub(d, 1) }
     }
 }
 
@@ -809,11 +801,7 @@ impl Dec {
                 } else if inst.op == Op::Closure || inst.op == Op::Handle {
                     let is_handle = inst.op == Op::Handle;
                     // handle: has, state value; then the pool entry
-                    let mut k = if is_handle {
-                        add(a, 3)
-                    } else {
-                        inc(a)
-                    };
+                    let mut k = if is_handle { add(a, 3) } else { inc(a) };
                     let na = p.op(k);
                     k = inc(k);
                     for j in 0..na {

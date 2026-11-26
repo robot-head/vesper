@@ -157,11 +157,7 @@ fn seg(in c: C, s: u64, k: u64, key: u64) -> (u64, bool) {
 
 fn qlen(in c: C, s: u64, k: u64, key: u64) -> u64 {
     let (at, found) = seg(in c, s, k, key);
-    if found {
-        xword(in c, s, inc(at))
-    } else {
-        0
-    }
+    if found { xword(in c, s, inc(at)) } else { 0 }
 }
 
 // Writes the successor of `s` with role `i` at `t` into `sb`: `op` (`Op`)
@@ -169,11 +165,7 @@ fn qlen(in c: C, s: u64, k: u64, key: u64) -> u64 {
 fn build(inout c: C, s: u64, k: u64, i: u64, t: u64, op: u64, key: u64, l: u64, p: u64) {
     c.sb.clear();
     for j in 0..k {
-        let w = if j == i {
-            t
-        } else {
-            xword(in c, s, j)
-        };
+        let w = if j == i { t } else { xword(in c, s, j) };
         c.sb.push(w);
     }
     let len = sw(in c.xlen, s);
@@ -431,13 +423,7 @@ pub fn explore_run(inout c: C, in locals: ChunkSeq[u64], max_states: u64, max_qu
     c.out.push(Out::Ok);
     c.out.push(states);
     c.out.push(completed);
-    c.out.push(
-        if bound_hit {
-            1
-        } else {
-            0
-        }
-    );
+    c.out.push(if bound_hit { 1 } else { 0 });
 }
 
 fn orphans(inout c: C, s: u64, k: u64) {

@@ -59,20 +59,12 @@ pub fn text(in b: Slice[u8], inout p: u64) -> (u64, u64) {
 }
 
 pub fn cmp_bytes(in a: Slice[u8], sa: u64, la: u64, in c: Slice[u8], sc: u64, lc: u64) -> i64 {
-    let n = if la < lc {
-        la
-    } else {
-        lc
-    };
+    let n = if la < lc { la } else { lc };
     for i in 0..n {
         let x = byte_at(in a, wrapping_add(sa, i));
         let y = byte_at(in c, wrapping_add(sc, i));
         if x != y {
-            return if x < y {
-                -1
-            } else {
-                1
-            };
+            return if x < y { -1 } else { 1 };
         }
     }
     if la < lc {

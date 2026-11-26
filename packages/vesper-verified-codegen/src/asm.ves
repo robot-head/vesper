@@ -292,16 +292,8 @@ pub fn finish(inout a: Asm) {
         } else {
             // Imm26 and Imm19: a word offset.
             let words = wrapping_u64(wrapping_i64(wrapping_sub(target, f.at)) / 4);
-            let bits: u32 = if f.kind == FIX_IMM26 {
-                26
-            } else {
-                19
-            };
-            let shift: u32 = if f.kind == FIX_IMM26 {
-                0
-            } else {
-                5
-            };
+            let bits: u32 = if f.kind == FIX_IMM26 { 26 } else { 19 };
+            let shift: u32 = if f.kind == FIX_IMM26 { 0 } else { 5 };
             if !fits(words, bits) {
                 fail(inout a, ERR_LIMIT, WHY_AARCH64_RANGE, 0);
                 return;

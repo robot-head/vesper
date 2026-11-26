@@ -304,11 +304,7 @@ pub fn read_path_limit(
     } else {
         4096
     };
-    let hint = if wanted < limit {
-        wanted
-    } else {
-        limit
-    };
+    let hint = if wanted < limit { wanted } else { limit };
     let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
     buf.resize(hint, 0);
     let mut total: u64 = 0;
@@ -324,11 +320,7 @@ pub fn read_path_limit(
             } else {
                 wrapping_mul(cap, 2)
             };
-            let next_cap = if grown < limit {
-                grown
-            } else {
-                limit
-            };
+            let next_cap = if grown < limit { grown } else { limit };
             buf.resize(next_cap, 0);
         }
         let end = buf.len();
@@ -595,11 +587,7 @@ pub fn read_nofollow_limit(
                 break;
             }
             let room = wrapping_sub(limit, total);
-            let step: u64 = if room < 65536 {
-                room
-            } else {
-                65536
-            };
+            let step: u64 = if room < 65536 { room } else { 65536 };
             buf.resize(wrapping_add(total, step), 0);
             let end = buf.len();
             let mut got: u32 = 0;

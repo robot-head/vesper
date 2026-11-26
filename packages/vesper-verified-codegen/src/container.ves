@@ -60,14 +60,7 @@ pub fn elf_executable(machine: u16, in code: ChunkSeq[u8], heap: bool, inout out
     put32(inout out, 0);
     put16(inout out, 64);
     put16(inout out, 56);
-    put16(
-        inout out,
-        if heap {
-            2
-        } else {
-            1
-        }
-    );
+    put16(inout out, if heap { 2 } else { 1 });
     put16(inout out, 64);
     put16(inout out, 0);
     put16(inout out, 0);
@@ -281,14 +274,7 @@ fn section(
     put32(inout out, 0);
     put32(inout out, size);
     put32(inout out, at);
-    put32(
-        inout out,
-        if relocs > 0 {
-            relocs_at
-        } else {
-            0
-        }
-    );
+    put32(inout out, if relocs > 0 { relocs_at } else { 0 });
     put32(inout out, 0);
     put16(inout out, relocs);
     put16(inout out, 0);

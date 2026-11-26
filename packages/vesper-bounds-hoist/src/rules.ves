@@ -82,11 +82,7 @@ pub fn changes_len(in f: Fun, i: Ins, place: u32) -> bool {
     if i.op == OP_SEQ {
         let recv = has_receiver(i.sub);
         let receiver = recv && i.gn > 0 && lent_place(in f, f.arg(w(i.g0)), place);
-        let first: u64 = if recv && i.gn > 0 {
-            1
-        } else {
-            0
-        };
+        let first: u64 = if recv && i.gn > 0 { 1 } else { 0 };
         if receiver && !keeps_length(i.sub) && !is_hoisted(i.sub) {
             return true;
         }
@@ -150,11 +146,7 @@ pub fn stable_root(in f: Fun, in blocks: ChunkSeq[u32], root: u32) -> bool {
             } else if i.op == OP_SEQ {
                 let recv = has_receiver(i.sub);
                 let receiver = i.gn > 0 && rooted(in f, f.arg(w(i.g0)), root) && recv;
-                let first: u64 = if recv && i.gn > 0 {
-                    1
-                } else {
-                    0
-                };
+                let first: u64 = if recv && i.gn > 0 { 1 } else { 0 };
                 let mut others = true;
                 for jj in first..w(i.gn) {
                     let a = f.arg(add(w(i.g0), jj));

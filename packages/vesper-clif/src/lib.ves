@@ -355,11 +355,7 @@ impl Func {
     // when it is not an instruction result.
     pub fn def_inst(in self, v: u32) -> u32 {
         let x = self.val(w(self.resolve(v)));
-        if x.kind == V_RESULT {
-            x.a
-        } else {
-            NONE
-        }
+        if x.kind == V_RESULT { x.a } else { NONE }
     }
 
     pub fn def_num(in self, v: u32) -> u32 {

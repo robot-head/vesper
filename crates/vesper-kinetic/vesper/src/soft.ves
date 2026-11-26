@@ -71,11 +71,7 @@ fn sqrt32(x: f32) -> f32 {
 }
 
 fn fmax(a: f32, b: f32) -> f32 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // Particle `i`'s position words `w0`, `w1` (as read) moved by (dx, dy, dz).

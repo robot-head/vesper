@@ -177,11 +177,7 @@ impl Fns {
     // `world.functions.get(name)`: the signature index, or NONE32.
     pub fn find(in self, name: u32) -> u32 {
         let x = u32_at(in self.by_name, w(name));
-        if x == 0 {
-            NONE32
-        } else {
-            wrapping_sub(x, 1)
-        }
+        if x == 0 { NONE32 } else { wrapping_sub(x, 1) }
     }
 
     pub fn sig(in self, i: u64) -> Sig {

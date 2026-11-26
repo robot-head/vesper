@@ -41,19 +41,11 @@ fn delta(in codes: Slice[u64], n: u64, i: u64, a: u64, j: i64) -> i64 {
 }
 
 fn min_i64(a: i64, b: i64) -> i64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 fn max_i64(a: i64, b: i64) -> i64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // Karras 2012, algorithm 3, for internal node `i`: its (left, right)
@@ -293,66 +285,12 @@ pub fn build(
             r4 = gf(in node_box, wrapping_add(br, 4));
             r5 = gf(in node_box, wrapping_add(br, 5));
         }
-        node_box.try_set(
-            at,
-            to_bits_f32(
-                if r0 < l0 {
-                    r0
-                } else {
-                    l0
-                }
-            )
-        );
-        node_box.try_set(
-            inc(at),
-            to_bits_f32(
-                if r1 < l1 {
-                    r1
-                } else {
-                    l1
-                }
-            )
-        );
-        node_box.try_set(
-            wrapping_add(at, 2),
-            to_bits_f32(
-                if r2 < l2 {
-                    r2
-                } else {
-                    l2
-                }
-            )
-        );
-        node_box.try_set(
-            wrapping_add(at, 3),
-            to_bits_f32(
-                if r3 > l3 {
-                    r3
-                } else {
-                    l3
-                }
-            )
-        );
-        node_box.try_set(
-            wrapping_add(at, 4),
-            to_bits_f32(
-                if r4 > l4 {
-                    r4
-                } else {
-                    l4
-                }
-            )
-        );
-        node_box.try_set(
-            wrapping_add(at, 5),
-            to_bits_f32(
-                if r5 > l5 {
-                    r5
-                } else {
-                    l5
-                }
-            )
-        );
+        node_box.try_set(at, to_bits_f32(if r0 < l0 { r0 } else { l0 }));
+        node_box.try_set(inc(at), to_bits_f32(if r1 < l1 { r1 } else { l1 }));
+        node_box.try_set(wrapping_add(at, 2), to_bits_f32(if r2 < l2 { r2 } else { l2 }));
+        node_box.try_set(wrapping_add(at, 3), to_bits_f32(if r3 > l3 { r3 } else { l3 }));
+        node_box.try_set(wrapping_add(at, 4), to_bits_f32(if r4 > l4 { r4 } else { l4 }));
+        node_box.try_set(wrapping_add(at, 5), to_bits_f32(if r5 > l5 { r5 } else { l5 }));
     }
 }
 

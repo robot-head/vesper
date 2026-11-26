@@ -190,11 +190,7 @@ impl Prog {
             return NONE32;
         }
         let x = u32_at(in self.fun_by_key, w(key));
-        if x == 0 {
-            NONE32
-        } else {
-            wrapping_sub(x, 1)
-        }
+        if x == 0 { NONE32 } else { wrapping_sub(x, 1) }
     }
 
     pub fn decl(in self, i: u32) -> EffDecl {
@@ -219,11 +215,7 @@ impl Prog {
             return NONE32;
         }
         let x = u32_at(in self.eff_by_name, w(name));
-        if x == 0 {
-            NONE32
-        } else {
-            wrapping_sub(x, 1)
-        }
+        if x == 0 { NONE32 } else { wrapping_sub(x, 1) }
     }
 
     // The operation `op` of declaration `d` (`d.ops.iter().find(..)`), as

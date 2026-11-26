@@ -33,11 +33,7 @@ fn eq_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
 }
 
 fn lt_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
-    let n = if a.len() < b.len() {
-        a.len()
-    } else {
-        b.len()
-    };
+    let n = if a.len() < b.len() { a.len() } else { b.len() };
     for i in 0..n {
         let xa = u8_at(in a, i);
         let xb = u8_at(in b, i);
@@ -134,11 +130,7 @@ fn parse_float(in s: Slice[u8]) -> u8 {
 }
 
 fn float_name(fl: u8) -> Str {
-    if fl == 1 {
-        "f32"
-    } else {
-        "f64"
-    }
+    if fl == 1 { "f32" } else { "f64" }
 }
 
 fn is_reserved_type(in s: Slice[u8]) -> bool {
@@ -430,11 +422,7 @@ fn parse_raw_val_type(inout p: P) -> ValTy eff [Fail[VsysError]] {
         }
         expect_punct(inout p, 93);
         return ValTy {
-            tag: if nullable {
-                7
-            } else {
-                6
-            },
+            tag: if nullable { 7 } else { 6 },
             sc: sc,
             na: 0,
             nb: 0,
@@ -502,11 +490,7 @@ fn parse_wire_field_type(
         return WireField {
             name_a: name_a,
             name_b: name_b,
-            kind: if is_pad {
-                wt_pad()
-            } else {
-                wt_bytes()
-            },
+            kind: if is_pad { wt_pad() } else { wt_bytes() },
             signed: false,
             bits: 0,
             endian: 0,
@@ -948,11 +932,7 @@ fn encode_fun(inout enc: Encoder, in f: FunDef, in pars: Slice[ParDef], in arena
             put_str(inout enc, in "value");
             encode_val_ty(inout enc, in par.vt, in arena);
         } else if par.kind == 2 {
-            let acc = if par.access == 1 {
-                "in"
-            } else {
-                "inout"
-            };
+            let acc = if par.access == 1 { "in" } else { "inout" };
             if !par.is_struct && !par.flag {
                 put_str(inout enc, in "nocapture-slice");
                 put_str(inout enc, in acc);
@@ -960,14 +940,7 @@ fn encode_fun(inout enc: Encoder, in f: FunDef, in pars: Slice[ParDef], in arena
             } else {
                 put_str(inout enc, in "nocapture-slice/2");
                 put_str(inout enc, in acc);
-                put_str(
-                    inout enc,
-                    in if par.flag {
-                        "option"
-                    } else {
-                        "nonnull"
-                    }
-                );
+                put_str(inout enc, in if par.flag { "option" } else { "nonnull" });
                 if !par.is_struct {
                     put_str(inout enc, in "scalar");
                     put_str(inout enc, in scalar_name(par.p_sc));
@@ -986,14 +959,7 @@ fn encode_fun(inout enc: Encoder, in f: FunDef, in pars: Slice[ParDef], in arena
                 "out"
             };
             put_str(inout enc, in acc);
-            put_str(
-                inout enc,
-                in if par.flag {
-                    "option"
-                } else {
-                    "nonnull"
-                }
-            );
+            put_str(inout enc, in if par.flag { "option" } else { "nonnull" });
             if !par.is_struct {
                 put_str(inout enc, in "scalar");
                 put_str(inout enc, in scalar_name(par.p_sc));
@@ -1022,25 +988,11 @@ fn encode_fun(inout enc: Encoder, in f: FunDef, in pars: Slice[ParDef], in arena
             put_str(inout enc, in "nocapture-cstr-list");
         } else if par.kind == 8 {
             put_str(inout enc, in "callback-function");
-            put_str(
-                inout enc,
-                in if par.flag {
-                    "retain"
-                } else {
-                    "nocapture"
-                }
-            );
+            put_str(inout enc, in if par.flag { "retain" } else { "nocapture" });
             put_bytes(inout enc, in arena[par.p_na..par.p_nb]);
         } else {
             put_str(inout enc, in "pinned-buffer");
-            put_str(
-                inout enc,
-                in if par.access == 1 {
-                    "in"
-                } else {
-                    "inout"
-                }
-            );
+            put_str(inout enc, in if par.access == 1 { "in" } else { "inout" });
             put_str(inout enc, in scalar_name(par.p_sc));
         }
     }
@@ -1316,11 +1268,7 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
             );
         } else if (is_word(in p, in "linear") || is_word(in p, in "affine"))
             && peek_is_word(in p, 1, in "extern") {
-            let lin: u8 = if is_word(in p, in "linear") {
-                1
-            } else {
-                2
-            };
+            let lin: u8 = if is_word(in p, in "linear") { 1 } else { 2 };
             let _ = bump(inout p);
             let _ = bump(inout p);
             if is_word(in p, in "mapping") {
@@ -1958,14 +1906,7 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                 put_bytes(inout enc, in p.arena[wf.name_a..wf.name_b]);
                 if wf.kind == wt_int() {
                     put_str(inout enc, in "integer");
-                    put_str(
-                        inout enc,
-                        in if wf.signed {
-                            "i"
-                        } else {
-                            "u"
-                        }
-                    );
+                    put_str(inout enc, in if wf.signed { "i" } else { "u" });
                     put_u16(inout enc, widen_u16(wf.bits));
                     let es = if wf.endian == endian_native() {
                         "native"
@@ -2016,14 +1957,7 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
             };
             if x.linearity != 3 {
                 put_bytes(inout enc, in p.arena[x.na..x.nb]);
-                put_str(
-                    inout enc,
-                    in if x.linearity == 1 {
-                        "linear"
-                    } else {
-                        "affine"
-                    }
-                );
+                put_str(inout enc, in if x.linearity == 1 { "linear" } else { "affine" });
             }
         }
         if any_drop {

@@ -378,11 +378,7 @@ fn push_write(
     b: u64
 ) -> u64 eff [Fail[GErr]] {
     if cx.writes == cx.capacity {
-        let base = if cx.capacity < 2 {
-            2
-        } else {
-            cx.capacity
-        };
+        let base = if cx.capacity < 2 { 2 } else { cx.capacity };
         let capacity = mul_or(base, 2, 2, 0);
         let reserved = mul_or(capacity, cx.write_size, 2, 0);
         metadata(inout cx, reserved);

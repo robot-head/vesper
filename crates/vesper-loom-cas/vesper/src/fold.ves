@@ -69,11 +69,7 @@ fn back(in s: Slice[u8], i: u64) -> u64 {
 
 fn char_len(in s: Slice[u8], i: u64) -> u64 {
     let n = seq_len(in s, i);
-    if n == 0 {
-        1
-    } else {
-        n
-    }
+    if n == 0 { 1 } else { n }
 }
 
 // Whether the first char before `i` that is not case-ignorable is cased.

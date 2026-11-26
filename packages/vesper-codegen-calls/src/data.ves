@@ -153,11 +153,7 @@ impl Calls {
     // The function named `s` as an index, or NONE32.
     pub fn function(in self, s: u32) -> u32 {
         let x = u32_at(in self.fn_by_name, w(s));
-        if x == 0 {
-            NONE32
-        } else {
-            wrapping_sub(x, 1)
-        }
+        if x == 0 { NONE32 } else { wrapping_sub(x, 1) }
     }
 
     pub fn param(in self, i: u64) -> ParamInfo {
