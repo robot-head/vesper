@@ -16,14 +16,10 @@
 // rebuilds; it stops early when a round changes nothing.
 
 use self::util::{
-    at32,
-    at8,
-    ati,
-    at64,
-    filled32,
-    inc,
-    n32,
-    w
+    filled_u32,
+    i64_at,
+    u32_at,
+    u64_at
 };
 use self::graph::{
     EGraph
@@ -103,12 +99,12 @@ impl Matches {
 
     // The matches of rule `r`, after `mark` was called for it and the next.
     pub fn range(in self, r: u64) -> (u64, u64) {
-        (at64(in self.rule_start, r), at64(in self.rule_start, inc(r)))
+        (u64_at(in self.rule_start, r), u64_at(in self.rule_start, wrapping_add(r, 1)))
     }
 
     // Class variable `v` of match `mi`.
     pub fn val(in self, mi: u64, v: u64) -> u32 {
-        at32(in self.vals, wrapping_add(at64(in self.val_start, mi), v))
+        u32_at(in self.vals, wrapping_add(u64_at(in self.val_start, mi), v))
     }
 }
 
@@ -136,7 +132,7 @@ impl Records {
     }
 
     pub fn word(in self, i: u64) -> u32 {
-        at32(in self.words, i)
+        u32_at(in self.words, i)
     }
 }
 
@@ -160,27 +156,27 @@ fn run_from(
 ) -> bool {
     if pc >= end {
         // yield: one substitution
-        out.eclass.push(at32(in m.regs, 0));
+        out.eclass.push(u32_at(in m.regs, 0));
         out.val_start.push(out.vals.len());
         out.dval_start.push(out.dvals.len());
         for v in 0..rules.nvars_of(r) {
-            out.vals.push(at32(in m.regs, rules.var_reg(r, v)));
+            out.vals.push(u32_at(in m.regs, rules.var_reg(r, v)));
         }
         for d in 0..rules.ndvars_of(r) {
-            out.dvals.push(ati(in m.dregs, d));
+            out.dvals.push(i64_at(in m.dregs, d));
         }
         m.left = wrapping_sub(m.left, 1);
         return m.left != 0;
     }
     let kind = rules.instr(pc, 0);
-    let i = w(rules.instr(pc, 1));
-    let o = w(rules.instr(pc, 2));
+    let i = widen_u64(rules.instr(pc, 1));
+    let o = widen_u64(rules.instr(pc, 2));
     if kind == I_BIND {
         let op = rules.instr(pc, 3);
         let dmode = rules.instr(pc, 4);
-        let dix = w(rules.instr(pc, 5));
+        let dix = widen_u64(rules.instr(pc, 5));
         let data = rules.instr_data(pc);
-        let c = g.find(at32(in m.regs, i));
+        let c = g.find(u32_at(in m.regs, i));
         let s = g.class_start(c);
         let n = g.class_len(c);
         let a = widen_u64(g.arity_of(op));
@@ -195,23 +191,23 @@ fn run_from(
                 }
             } else if dmode == B_BIND {
                 m.dregs.try_set(dix, d);
-            } else if ati(in m.dregs, dix) != d {
+            } else if i64_at(in m.dregs, dix) != d {
                 continue;
             }
             for j in 0..a {
                 m.regs.try_set(wrapping_add(o, j), g.node_child(k, j));
             }
-            if !run_from(in g, in rules, r, inc(pc), end, inout m, inout out) {
+            if !run_from(in g, in rules, r, wrapping_add(pc, 1), end, inout m, inout out) {
                 return false;
             }
         }
         return true;
     }
     // Compare
-    if g.find(at32(in m.regs, i)) != g.find(at32(in m.regs, o)) {
+    if g.find(u32_at(in m.regs, i)) != g.find(u32_at(in m.regs, o)) {
         return true;
     }
-    run_from(in g, in rules, r, inc(pc), end, inout m, inout out)
+    run_from(in g, in rules, r, wrapping_add(pc, 1), end, inout m, inout out)
 }
 
 // Searches rule `r` over every class in ascending id order, appending at
@@ -220,7 +216,7 @@ pub fn search_rule(in g: EGraph, in rules: Rules, r: u64, limit: u64, inout out:
     let (start, len) = rules.prog(r);
     let end = wrapping_add(start, len);
     let mut m = Machine {
-        regs: filled32(rules.nregs_of(r), 0),
+        regs: filled_u32(rules.nregs_of(r), 0),
         dregs: ChunkSeq::with_capacity[i64](rules.ndvars_of(r)),
         left: limit
     };
@@ -263,29 +259,29 @@ pub fn apply_one(
     mi: u64,
     inout ids: ChunkSeq[u32]
 ) -> bool {
-    let vs = at64(in ms.val_start, mi);
-    let ds = at64(in ms.dval_start, mi);
+    let vs = u64_at(in ms.val_start, mi);
+    let ds = u64_at(in ms.dval_start, mi);
     let (start, len) = rules.rhs(r);
     ids.clear();
     let mut last: u32 = 0;
     for k in start..wrapping_add(start, len) {
         let (kind, a, dmode, dval, c0, c1) = rules.pnode(k);
         let id = if kind == P_VAR {
-            at32(in ms.vals, wrapping_add(vs, w(a)))
+            u32_at(in ms.vals, wrapping_add(vs, widen_u64(a)))
         } else {
             let data = if dmode == D_VAR {
-                ati(in ms.dvals, wrapping_add(ds, wrapping_u64(dval)))
+                i64_at(in ms.dvals, wrapping_add(ds, wrapping_u64(dval)))
             } else {
                 dval
             };
             let ar = g.arity_of(a);
             let x0 = if ar >= 1 {
-                at32(in ids, wrapping_sub(w(c0), start))
+                u32_at(in ids, wrapping_sub(widen_u64(c0), start))
             } else {
                 0
             };
             let x1 = if ar >= 2 {
-                at32(in ids, wrapping_sub(w(c1), start))
+                u32_at(in ids, wrapping_sub(widen_u64(c1), start))
             } else {
                 0
             };
@@ -294,20 +290,20 @@ pub fn apply_one(
         ids.push(id);
         last = id;
     }
-    let class = at32(in ms.eclass, mi);
+    let class = u32_at(in ms.eclass, mi);
     g.union(class, last)
 }
 
 pub fn guard_holds(in g: EGraph, in rules: Rules, r: u64, in ms: Matches, mi: u64) -> bool {
     let (kind, g0, g1) = rules.guard_of(r);
     if kind == G_TOTAL {
-        let v = at32(in ms.vals, wrapping_add(at64(in ms.val_start, mi), w(g0)));
+        let v = u32_at(in ms.vals, wrapping_add(u64_at(in ms.val_start, mi), widen_u64(g0)));
         return g.has_leaf(v);
     }
     if kind == G_REL {
-        let ds = at64(in ms.dval_start, mi);
-        let a = ati(in ms.dvals, wrapping_add(ds, w(g0)));
-        let b = ati(in ms.dvals, wrapping_add(ds, w(g1)));
+        let ds = u64_at(in ms.dval_start, mi);
+        let a = i64_at(in ms.dvals, wrapping_add(ds, widen_u64(g0)));
+        let b = i64_at(in ms.dvals, wrapping_add(ds, widen_u64(g1)));
         return rules.rel_has(a, b);
     }
     true
@@ -351,8 +347,8 @@ fn run_one(inout g: EGraph, in rules: Rules, c: Config, root: u32, done: u64, in
     let mut stop: u8 = 0;
     let mut ids: ChunkSeq[u32] = ChunkSeq::new[u32]();
     for r in 0..rules.count() {
-        let a = at64(in ms.rule_start, r);
-        let b = at64(in ms.rule_start, inc(r));
+        let a = u64_at(in ms.rule_start, r);
+        let b = u64_at(in ms.rule_start, wrapping_add(r, 1));
         for mi in a..b {
             // The RecordingApplier's caps come before the rule's condition.
             if wrapping_add(g.raw_len(), c.reserve) > c.raw_cap || rec.count >= c.record_cap {
@@ -362,15 +358,15 @@ fn run_one(inout g: EGraph, in rules: Rules, c: Config, root: u32, done: u64, in
                 continue;
             }
             if apply_one(inout g, in rules, r, in ms, mi, inout ids) {
-                applied = inc(applied);
-                rec.words.push(n32(r));
+                applied = wrapping_add(applied, 1);
+                rec.words.push(wrapping_u32(r));
                 let nv = rules.nvars_of(r);
-                rec.words.push(n32(nv));
-                let vs = at64(in ms.val_start, mi);
+                rec.words.push(wrapping_u32(nv));
+                let vs = u64_at(in ms.val_start, mi);
                 for v in 0..nv {
-                    rec.words.push(at32(in ms.vals, wrapping_add(vs, v)));
+                    rec.words.push(u32_at(in ms.vals, wrapping_add(vs, v)));
                 }
-                rec.count = inc(rec.count);
+                rec.count = wrapping_add(rec.count, 1);
             }
         }
         if g.memo_len() > c.node_limit {
@@ -396,7 +392,7 @@ pub fn run_egg(inout g: EGraph, in rules: Rules, c: Config, root: u32, inout rec
     let mut iters: u64 = 0;
     loop {
         let stop = run_one(inout g, in rules, c, root, iters, inout rec);
-        iters = inc(iters);
+        iters = wrapping_add(iters, 1);
         if stop != 0 {
             return (stop, iters);
         }
@@ -421,14 +417,14 @@ pub fn run_rounds(inout g: EGraph, in rules: Rules, rounds: u64) -> u64 {
         search_all(in g, in rules, 18446744073709551615, inout ms);
         let mut unions: u64 = 0;
         for r in 0..rules.count() {
-            let a = at64(in ms.rule_start, r);
-            let b = at64(in ms.rule_start, inc(r));
+            let a = u64_at(in ms.rule_start, r);
+            let b = u64_at(in ms.rule_start, wrapping_add(r, 1));
             for mi in a..b {
                 if !guard_holds(in g, in rules, r, in ms, mi) {
                     continue;
                 }
                 if apply_one(inout g, in rules, r, in ms, mi, inout ids) {
-                    unions = inc(unions);
+                    unions = wrapping_add(unions, 1);
                 }
             }
         }
@@ -436,7 +432,7 @@ pub fn run_rounds(inout g: EGraph, in rules: Rules, rounds: u64) -> u64 {
         if unions == 0 && g.raw_len() == nodes0 {
             break;
         }
-        changed = inc(changed);
+        changed = wrapping_add(changed, 1);
     }
     changed
 }

@@ -120,26 +120,19 @@ pub const O_UNCHANGED: u8 = 2;
 
 // ---------------------------------------------------------------- helpers
 
-fn at32(in s: ChunkSeq[u32], i: u64) -> u32 {
+// Entry `i` of an id table, or NONE past its end.
+fn id_at(in s: ChunkSeq[u32], i: u64) -> u32 {
     match s.try_get(i) {
         Option::Some(v) => v,
         Option::None => NONE,
     }
 }
 
-fn at8(in s: ChunkSeq[u8], i: u64) -> u8 {
+fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
     match s.try_get(i) {
         Option::Some(v) => v,
         Option::None => 0,
     }
-}
-
-fn w(x: u32) -> u64 {
-    widen_u64(x)
-}
-
-fn n32(x: u64) -> u32 {
-    wrapping_u32(x)
 }
 
 fn no_term() -> TermRow {
@@ -171,14 +164,14 @@ fn no_proof() -> ProofRow {
 }
 
 fn term_get(in s: ChunkSeq[TermRow], i: u32) -> TermRow {
-    match s.try_get(w(i)) {
+    match s.try_get(widen_u64(i)) {
         Option::Some(v) => v,
         Option::None => no_term(),
     }
 }
 
 fn proof_get(in s: ChunkSeq[ProofRow], i: u32) -> ProofRow {
-    match s.try_get(w(i)) {
+    match s.try_get(widen_u64(i)) {
         Option::Some(v) => v,
         Option::None => no_proof(),
     }
@@ -421,15 +414,15 @@ fn intern(inout d: Builder, node: TermRow, inout b: Budget, inout id: u32) -> u8
         return e;
     }
     for i in 0..n {
-        if same_term(term_get(in d.terms, n32(i)), node) {
-            id = n32(i);
+        if same_term(term_get(in d.terms, wrapping_u32(i)), node) {
+            id = wrapping_u32(i);
             return 0;
         }
     }
     if n >= d.max_terms {
         return E_LIMIT;
     }
-    if is_binary(node) && (w(node.a) >= n || w(node.b) >= n) {
+    if is_binary(node) && (widen_u64(node.a) >= n || widen_u64(node.b) >= n) {
         return E_NON_TOPOLOGICAL_TERM;
     }
     let most = d.max_terms;
@@ -453,7 +446,7 @@ fn intern(inout d: Builder, node: TermRow, inout b: Budget, inout id: u32) -> u8
     if e != 0 {
         return e;
     }
-    id = n32(n);
+    id = wrapping_u32(n);
     d.terms.push(node);
     d.parent.push(id);
     d.edge.push(NONE);
@@ -480,7 +473,7 @@ fn proof(inout d: Builder, p: ProofRow, inout b: Budget, inout id: u32) -> u8 {
     if e != 0 {
         return e;
     }
-    id = n32(n);
+    id = wrapping_u32(n);
     d.proofs.push(p);
     0
 }
@@ -510,10 +503,10 @@ fn root(in d: Builder, start: u32, inout b: Budget, inout out: u32) -> u8 {
         if e != 0 {
             return e;
         }
-        if w(id) >= d.parent.len() {
+        if widen_u64(id) >= d.parent.len() {
             return E_INVALID_TERM_INDEX;
         }
-        let next = at32(in d.parent, w(id));
+        let next = id_at(in d.parent, widen_u64(id));
         if next == id {
             out = id;
             return 0;
@@ -533,12 +526,12 @@ fn path(inout d: Builder, start: u32, inout b: Budget, inout out: u32) -> u8 {
         if e != 0 {
             return e;
         }
-        let next = at32(in d.parent, w(id));
+        let next = id_at(in d.parent, widen_u64(id));
         if next == id {
             out = p;
             return 0;
         }
-        let edge = at32(in d.edge, w(id));
+        let edge = id_at(in d.edge, widen_u64(id));
         if edge == NONE {
             return E_INVALID_EQUALITY;
         }
@@ -647,8 +640,8 @@ fn join(inout d: Builder, p: u32, inout b: Budget, inout changed: bool) -> u8 {
         }
         edge = t;
     }
-    let ka = at8(in d.rank, w(ra));
-    let kb = at8(in d.rank, w(rb));
+    let ka = u8_at(in d.rank, widen_u64(ra));
+    let kb = u8_at(in d.rank, widen_u64(rb));
     let mut child = ra;
     let mut parent = rb;
     if ka <= kb {
@@ -656,7 +649,7 @@ fn join(inout d: Builder, p: u32, inout b: Budget, inout changed: bool) -> u8 {
             if kb == 255 {
                 return E_LIMIT;
             }
-            d.rank.try_set(w(rb), wrapping_add(kb, 1));
+            d.rank.try_set(widen_u64(rb), wrapping_add(kb, 1));
         }
     } else {
         child = rb;
@@ -668,11 +661,11 @@ fn join(inout d: Builder, p: u32, inout b: Budget, inout changed: bool) -> u8 {
         }
         edge = r;
     }
-    d.parent.try_set(w(child), parent);
-    d.edge.try_set(w(child), edge);
-    if at32(in d.leaf, w(parent)) == NONE {
-        let l = at32(in d.leaf, w(child));
-        d.leaf.try_set(w(parent), l);
+    d.parent.try_set(widen_u64(child), parent);
+    d.edge.try_set(widen_u64(child), edge);
+    if id_at(in d.leaf, widen_u64(parent)) == NONE {
+        let l = id_at(in d.leaf, widen_u64(child));
+        d.leaf.try_set(widen_u64(parent), l);
     }
     changed = true;
     0
@@ -690,7 +683,7 @@ fn guard(inout d: Builder, term: u32, inout b: Budget, inout kind: u8, inout out
     if e != 0 {
         return e;
     }
-    let l = at32(in d.leaf, w(r));
+    let l = id_at(in d.leaf, widen_u64(r));
     if l == NONE {
         kind = 0;
         return 0;
@@ -714,22 +707,22 @@ fn congruence(inout d: Builder, inout b: Budget, inout any: bool) -> u8 {
         }
         let mut changed = false;
         for a in 0..count {
-            let ta = term_get(in d.terms, n32(a));
+            let ta = term_get(in d.terms, wrapping_u32(a));
             if !is_binary(ta) {
                 continue;
             }
             for c in 0..a {
-                let tc = term_get(in d.terms, n32(c));
+                let tc = term_get(in d.terms, wrapping_u32(c));
                 if !same_operator(ta, tc) {
                     continue;
                 }
                 let mut r1: u32 = 0;
-                let e = root(in d, n32(a), inout b, inout r1);
+                let e = root(in d, wrapping_u32(a), inout b, inout r1);
                 if e != 0 {
                     return e;
                 }
                 let mut r2: u32 = 0;
-                let e = root(in d, n32(c), inout b, inout r2);
+                let e = root(in d, wrapping_u32(c), inout b, inout r2);
                 if e != 0 {
                     return e;
                 }
@@ -771,7 +764,7 @@ fn congruence(inout d: Builder, inout b: Budget, inout any: bool) -> u8 {
                 let mut p: u32 = 0;
                 let e = proof(
                     inout d,
-                    proof_row(n32(a), n32(c), P_CONGRUENCE, first, second),
+                    proof_row(wrapping_u32(a), wrapping_u32(c), P_CONGRUENCE, first, second),
                     inout b,
                     inout p
                 );
@@ -842,13 +835,13 @@ fn fold_prefix(inout d: Builder, count: u64, top: u32, inout b: Budget, inout ou
         if e != 0 {
             return e;
         }
-        let original = term_get(in d.terms, n32(index));
+        let original = term_get(in d.terms, wrapping_u32(index));
         if !is_binary(original) {
-            mapped.try_set(index, n32(index));
+            mapped.try_set(index, wrapping_u32(index));
             continue;
         }
-        let n0 = at32(in mapped, w(original.a));
-        let n1 = at32(in mapped, w(original.b));
+        let n0 = id_at(in mapped, widen_u64(original.a));
+        let n1 = id_at(in mapped, widen_u64(original.b));
         let mut rebuilt: u32 = 0;
         let e = intern(
             inout d,
@@ -859,7 +852,7 @@ fn fold_prefix(inout d: Builder, count: u64, top: u32, inout b: Budget, inout ou
         if e != 0 {
             return e;
         }
-        if w(rebuilt) != index {
+        if widen_u64(rebuilt) != index {
             let mut first: u32 = 0;
             let e = equality(inout d, original.a, n0, inout b, inout first);
             if e != 0 {
@@ -873,7 +866,7 @@ fn fold_prefix(inout d: Builder, count: u64, top: u32, inout b: Budget, inout ou
             let mut p: u32 = 0;
             let e = proof(
                 inout d,
-                proof_row(n32(index), rebuilt, P_CONGRUENCE, first, second),
+                proof_row(wrapping_u32(index), rebuilt, P_CONGRUENCE, first, second),
                 inout b,
                 inout p
             );
@@ -925,7 +918,7 @@ fn fold_prefix(inout d: Builder, count: u64, top: u32, inout b: Budget, inout ou
             mapped.try_set(index, rebuilt);
         }
     }
-    out = at32(in mapped, w(top));
+    out = id_at(in mapped, widen_u64(top));
     0
 }
 
@@ -1221,7 +1214,7 @@ fn lhs_of(r: u64) -> Lhs {
 fn count_matching(in g: EGraph, op: u32, c: i64) -> u64 {
     let mut n: u64 = 0;
     for k in 0..g.raw_len() {
-        let id = n32(k);
+        let id = wrapping_u32(k);
         if g.raw_op(id) == op && (op != M_NUM || g.raw_data(id) == c) {
             n = wrapping_add(n, 1);
         }
@@ -1350,7 +1343,7 @@ fn apply(
         return 0;
     }
     if apply_one(inout g, in rules, r, in ms, mi, inout ids) {
-        let rule = n32(wrapping_add(r, 1));
+        let rule = wrapping_u32(wrapping_add(r, 1));
         let arity = rule_arity(rule);
         let b1 = if arity >= 2 {
             ms.val(mi, 1)
@@ -1516,7 +1509,7 @@ fn encode_graph(
     }
     let mut reachable: ChunkSeq[bool] = ChunkSeq::with_capacity[bool](n);
     reachable.resize(n, false);
-    reachable.try_set(w(top), true);
+    reachable.try_set(widen_u64(top), true);
     let i64_min: i128 = -9223372036854775808;
     let i64_max: i128 = 9223372036854775807;
     for j in 0..n {
@@ -1532,17 +1525,17 @@ fn encode_graph(
         if !live {
             continue;
         }
-        let t = term_get(in terms, n32(index));
+        let t = term_get(in terms, wrapping_u32(index));
         if t.tag == T_CONST && (t.value < i64_min || t.value > i64_max) {
             ok = false;
             return 0;
         }
         if is_binary(t) {
-            if w(t.a) >= index || w(t.b) >= index {
+            if widen_u64(t.a) >= index || widen_u64(t.b) >= index {
                 return E_NON_TOPOLOGICAL_TERM;
             }
-            reachable.try_set(w(t.a), true);
-            reachable.try_set(w(t.b), true);
+            reachable.try_set(widen_u64(t.a), true);
+            reachable.try_set(widen_u64(t.b), true);
         }
     }
     let e = initialized(inout b, n, S_OPTION_ID);
@@ -1568,7 +1561,7 @@ fn encode_graph(
         if nodes.len() >= RAW_NODES {
             return E_LIMIT;
         }
-        let t = term_get(in terms, n32(i));
+        let t = term_get(in terms, wrapping_u32(i));
         let mut node = MathNode {
             op: M_NUM,
             data: 0,
@@ -1581,8 +1574,8 @@ fn encode_graph(
             node.op = M_INPUT;
             node.data = widen_i64(t.a);
         } else {
-            let x = at32(in map, w(t.a));
-            let y = at32(in map, w(t.b));
+            let x = id_at(in map, widen_u64(t.a));
+            let y = id_at(in map, widen_u64(t.b));
             if x == NONE || y == NONE {
                 return E_INVALID_TERM_INDEX;
             }
@@ -1594,7 +1587,7 @@ fn encode_graph(
         if e != 0 {
             return e;
         }
-        map.try_set(i, n32(nodes.len()));
+        map.try_set(i, wrapping_u32(nodes.len()));
         nodes.push(node);
     }
     ok = true;
@@ -1627,7 +1620,7 @@ fn translate(
             Option::None => return E_INVALID_TERM_INDEX,
         };
         let binary = node.op != M_NUM && node.op != M_INPUT;
-        if binary && (w(node.c0) >= i || w(node.c1) >= i) {
+        if binary && (widen_u64(node.c0) >= i || widen_u64(node.c1) >= i) {
             return E_NON_TOPOLOGICAL_TERM;
         }
         let term = if node.op == M_NUM {
@@ -1638,8 +1631,8 @@ fn translate(
             }
             input_term(k, wrapping_u32(node.data))
         } else {
-            let x = at32(in map, w(node.c0));
-            let y = at32(in map, w(node.c1));
+            let x = id_at(in map, widen_u64(node.c0));
+            let y = id_at(in map, widen_u64(node.c1));
             let tag = if node.op >= 4 {
                 T_WRAPPING
             } else {
@@ -1720,22 +1713,22 @@ fn explain_records(
             let mut y: u32 = 0;
             let mut z: u32 = 0;
             if rec.len >= 1 {
-                if w(rec.b0) >= raw.len() {
+                if widen_u64(rec.b0) >= raw.len() {
                     return E_INVALID_SUBSTITUTION;
                 }
-                x = at32(in raw, w(rec.b0));
+                x = id_at(in raw, widen_u64(rec.b0));
             }
             if rec.len >= 2 {
-                if w(rec.b1) >= raw.len() {
+                if widen_u64(rec.b1) >= raw.len() {
                     return E_INVALID_SUBSTITUTION;
                 }
-                y = at32(in raw, w(rec.b1));
+                y = id_at(in raw, widen_u64(rec.b1));
             }
             if rec.len >= 3 {
-                if w(rec.b2) >= raw.len() {
+                if widen_u64(rec.b2) >= raw.len() {
                     return E_INVALID_SUBSTITUTION;
                 }
-                z = at32(in raw, w(rec.b2));
+                z = id_at(in raw, widen_u64(rec.b2));
             }
             let before = d.terms.len();
             let mut left: u32 = 0;
@@ -1854,12 +1847,12 @@ fn search(
         };
         let a = g.arity_of(node.op);
         let x0 = if a >= 1 {
-            at32(in ids, w(node.c0))
+            id_at(in ids, widen_u64(node.c0))
         } else {
             0
         };
         let x1 = if a >= 2 {
-            at32(in ids, w(node.c1))
+            id_at(in ids, widen_u64(node.c1))
         } else {
             0
         };
@@ -1932,11 +1925,11 @@ fn search(
     if best_map.len() == 0 {
         return E_INVALID_TERM_INDEX;
     }
-    best = at32(in best_map, wrapping_sub(best_map.len(), 1));
+    best = id_at(in best_map, wrapping_sub(best_map.len(), 1));
     if best != folded {
         let mut graph_nodes: ChunkSeq[MathNode] = ChunkSeq::with_capacity[MathNode](raw);
         for k in 0..raw {
-            let id = n32(k);
+            let id = wrapping_u32(k);
             graph_nodes
                 .push(
                     MathNode {
@@ -2029,13 +2022,13 @@ pub fn propose(
         if e != 0 {
             return e;
         }
-        let mut term = term_get(in bound.terms, n32(i));
+        let mut term = term_get(in bound.terms, wrapping_u32(i));
         if is_binary(term) {
-            if w(term.a) >= i || w(term.b) >= i {
+            if widen_u64(term.a) >= i || widen_u64(term.b) >= i {
                 return E_NON_TOPOLOGICAL_TERM;
             }
-            term.a = at32(in source_map, w(term.a));
-            term.b = at32(in source_map, w(term.b));
+            term.a = id_at(in source_map, widen_u64(term.a));
+            term.b = id_at(in source_map, widen_u64(term.b));
         }
         let mut id: u32 = 0;
         let e = intern(inout d, term, inout b, inout id);
@@ -2044,10 +2037,10 @@ pub fn propose(
         }
         source_map.push(id);
     }
-    if w(bound.root) >= source_map.len() {
+    if widen_u64(bound.root) >= source_map.len() {
         return E_INVALID_TERM_INDEX;
     }
-    let input = at32(in source_map, w(bound.root));
+    let input = id_at(in source_map, widen_u64(bound.root));
     let count = d.terms.len();
     let mut folded: u32 = 0;
     let e = fold_prefix(inout d, count, input, inout b, inout folded);
