@@ -49,15 +49,7 @@ fn base_source() -> Str {
 // ---------------------------------------------------------------- nodes
 
 fn item_node(in a: Ast, i: u32) -> ItemNode {
-    a
-        .items
-        .get_or(
-            idx_from_raw[ItemNode](i),
-            ItemNode {
-                kind: 0,
-                node: none()
-            }
-        )
+    a.items.get_or(idx_from_raw[ItemNode](i), ItemNode { kind: 0, node: none() })
 }
 
 fn adt_node(in a: Ast, i: u32) -> AdtNode {
@@ -103,28 +95,12 @@ fn effect_decl_node(in a: Ast, i: u32) -> EffectDeclNode {
         .effect_decls
         .get_or(
             idx_from_raw[EffectDeclNode](i),
-            EffectDeclNode {
-                name: none(),
-                linear: false,
-                generics: 0,
-                ops: 0,
-                start: 0,
-                end: 0
-            }
+            EffectDeclNode { name: none(), linear: false, generics: 0, ops: 0, start: 0, end: 0 }
         )
 }
 
 fn impl_node(in a: Ast, i: u32) -> ImplNode {
-    a
-        .impls
-        .get_or(
-            idx_from_raw[ImplNode](i),
-            ImplNode {
-                ty: none(),
-                generics: 0,
-                methods: 0
-            }
-        )
+    a.impls.get_or(idx_from_raw[ImplNode](i), ImplNode { ty: none(), generics: 0, methods: 0 })
 }
 
 fn param_node(in a: Ast, i: u32) -> ParamNode {
@@ -132,41 +108,20 @@ fn param_node(in a: Ast, i: u32) -> ParamNode {
         .params
         .get_or(
             idx_from_raw[ParamNode](i),
-            ParamNode {
-                name: none(),
-                pass: 0,
-                projections: 0,
-                ty: none(),
-                start: 0,
-                end: 0
-            }
+            ParamNode { name: none(), pass: 0, projections: 0, ty: none(), start: 0, end: 0 }
         )
 }
 
 fn generic_node(in a: Ast, i: u32) -> GenericNode {
     a
         .generics
-        .get_or(
-            idx_from_raw[GenericNode](i),
-            GenericNode {
-                name: none(),
-                bound: 0,
-                row: false
-            }
-        )
+        .get_or(idx_from_raw[GenericNode](i), GenericNode { name: none(), bound: 0, row: false })
 }
 
 fn variant_node(in a: Ast, i: u32) -> VariantNode {
     a
         .variants
-        .get_or(
-            idx_from_raw[VariantNode](i),
-            VariantNode {
-                name: none(),
-                fields: 0,
-                named: false
-            }
-        )
+        .get_or(idx_from_raw[VariantNode](i), VariantNode { name: none(), fields: 0, named: false })
 }
 
 fn field_node(in a: Ast, i: u32) -> FieldNode {
@@ -174,38 +129,18 @@ fn field_node(in a: Ast, i: u32) -> FieldNode {
         .fields
         .get_or(
             idx_from_raw[FieldNode](i),
-            FieldNode {
-                name: none(),
-                ty: none(),
-                modality: 3,
-                temperature: 0
-            }
+            FieldNode { name: none(), ty: none(), modality: 3, temperature: 0 }
         )
 }
 
 fn effects_node(in a: Ast, i: u32) -> EffectsNode {
-    a
-        .effects
-        .get_or(
-            idx_from_raw[EffectsNode](i),
-            EffectsNode {
-                instances: 0,
-                tail: none()
-            }
-        )
+    a.effects.get_or(idx_from_raw[EffectsNode](i), EffectsNode { instances: 0, tail: none() })
 }
 
 fn effect_node(in a: Ast, i: u32) -> EffectNode {
     a
         .effect_nodes
-        .get_or(
-            idx_from_raw[EffectNode](i),
-            EffectNode {
-                label: none(),
-                name: none(),
-                args: 0
-            }
-        )
+        .get_or(idx_from_raw[EffectNode](i), EffectNode { label: none(), name: none(), args: 0 })
 }
 
 // ---------------------------------------------------------------- names
@@ -380,11 +315,7 @@ struct Table {
 }
 
 fn table_new() -> Table {
-    Table {
-        keys: interner_new(),
-        entries: ChunkSeq::new[Entry](),
-        present: ChunkSeq::new[bool]()
-    }
+    Table { keys: interner_new(), entries: ChunkSeq::new[Entry](), present: ChunkSeq::new[bool]() }
 }
 
 // Inserts `e` under `key`; whether the key was already present.
@@ -395,15 +326,7 @@ fn insert(inout t: Table, in key: String, e: Entry) -> bool {
         if t.entries.len() > id {
             break;
         }
-        t
-            .entries
-            .push(
-                Entry {
-                    src: 0,
-                    node: none(),
-                    imp: none()
-                }
-            );
+        t.entries.push(Entry { src: 0, node: none(), imp: none() });
         t.present.push(false);
     }
     let was = match t.present.try_get(id) {
@@ -558,11 +481,7 @@ fn collect_item(inout c: Collect, in a: Ast, src: u8, it: ItemNode) {
             diag(inout c, "E0100", in m, n.start, n.end, "-");
         }
         let key = name_text(in a, n.name);
-        let entry = Entry {
-            src: src,
-            node: it.node,
-            imp: none()
-        };
+        let entry = Entry { src: src, node: it.node, imp: none() };
         if insert(inout c.adts, in key, entry) {
             let m = prefixed("duplicate type ", in a, n.name);
             diag(inout c, "E0100", in m, n.start, n.end, "-");
@@ -582,11 +501,7 @@ fn collect_item(inout c: Collect, in a: Ast, src: u8, it: ItemNode) {
             return;
         }
         let key = name_text(in a, n.name);
-        let entry = Entry {
-            src: src,
-            node: it.node,
-            imp: none()
-        };
+        let entry = Entry { src: src, node: it.node, imp: none() };
         if insert(inout c.effects, in key, entry) {
             let m = prefixed("duplicate effect ", in a, n.name);
             diag(inout c, "E0100", in m, n.start, n.end, "-");
@@ -598,11 +513,7 @@ fn collect_item(inout c: Collect, in a: Ast, src: u8, it: ItemNode) {
             diag(inout c, "E0100", in m, n.start, n.end, "-");
         }
         let key = name_text(in a, n.name);
-        let entry = Entry {
-            src: src,
-            node: it.node,
-            imp: none()
-        };
+        let entry = Entry { src: src, node: it.node, imp: none() };
         if insert(inout c.functions, in key, entry) {
             let m = prefixed("duplicate function ", in a, n.name);
             diag(inout c, "E0100", in m, n.start, n.end, "-");
@@ -619,11 +530,7 @@ fn collect_item(inout c: Collect, in a: Ast, src: u8, it: ItemNode) {
             }
             key.push_str(in "::");
             let ok = a.names.resolve_into(symbol_from_id(n.name), inout key);
-            let entry = Entry {
-                src: src,
-                node: f,
-                imp: it.node
-            };
+            let entry = Entry { src: src, node: f, imp: it.node };
             if insert(inout c.functions, in key, entry) {
                 let mut m = ChunkSeq::new[u8]();
                 m.extend(in "duplicate method '".as_bytes());
@@ -891,11 +798,7 @@ fn put_effect(inout o: ChunkSeq[u8], in a: Ast, x: u32) {
 fn entry_at(in t: Table, id: u32) -> Entry {
     match t.entries.try_get(widen_u64(id)) {
         Option::Some(e) => e,
-        Option::None => Entry {
-            src: 0,
-            node: none(),
-            imp: none()
-        },
+        Option::None => Entry { src: 0, node: none(), imp: none() },
     }
 }
 
