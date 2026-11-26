@@ -1,0 +1,54 @@
+// Exercise the public scratch form across a package boundary.
+use @vesper-std/core::scratch::scratch;
+
+test {
+    copy struct WordPair {
+        left: u64,
+        right: u64,
+    }
+
+    fn fold_pair(a: u64, b: u64) -> u64 eff [inner: Region, Fail[u64]] {
+        let words = WordPair { left: a, right: b };
+        let pair = inner.box(words);
+        if b == 0 {
+            Fail::raise(a)
+        } else {
+            let stored = inner.get(pair);
+            wrapping_add(stored.left, stored.right)
+        }
+    }
+
+    fn check_attempt(a: u64, b: u64) -> Result[u64, u64] {
+        handle Fail[u64] in {
+            scratch inner[64] {
+                fold_pair(a, b)
+            }
+        } with {
+            return value => Result::Ok(value),
+            raise(payload, _) => Result::Err(payload),
+        }
+    }
+
+    pub fn check_core_scratch() -> u64 {
+        scratch outer[64] {
+            let original = outer.box(9);
+            let before = outer.used();
+            if check_attempt(17, 0) != Result::Err(17) {
+                1
+            } else if check_attempt(18, 24) != Result::Ok(42) {
+                2
+            } else if outer.get(original) != 9 || outer.used() != before {
+                3
+            } else {
+                scratch nested[32] {
+                    let value = nested.box(outer.get(original));
+                    if nested.get(value) == 9 {
+                        0
+                    } else {
+                        4
+                    }
+                }
+            }
+        }
+    }
+}
