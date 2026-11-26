@@ -256,6 +256,23 @@ pub fn permissions() -> u64 eff [Ffi[StdFs]] {
     }
 }
 
+// A private file larger than the copy buffer: the copy has its bits
+// and all its bytes.
+pub fn copy_private() -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        let data = pattern(70000);
+        write(in "@DIR@/s.bin", in data.as_slice());
+        set_permissions(in "@DIR@/s.bin", 384);
+        let n = copy(in "@DIR@/s.bin", in "@DIR@/t.bin");
+        let m = metadata(in "@DIR@/t.bin");
+        let t = read(in "@DIR@/t.bin");
+        mix(mix(n, widen_u64(m.mode)), hash(in t.as_slice()))
+    } with {
+        return v => v,
+        raise(e, _) => code(e),
+    }
+}
+
 // Copying a directory or a missing file.
 pub fn copy_errors() -> u64 eff [Ffi[StdFs]] {
     let a = handle Fail[IoError] in {
@@ -667,6 +684,11 @@ fn permissions_and_copies_match_std() {
     h = mix(mix(h, rw), mix(n, rw));
     let want = mix(mix(h, hash(text)), ro);
     assert_eq!(agree(&checked, "permissions", &MODES), want);
+    let private = if cfg!(unix) { 0o600 } else { 0o666 };
+    assert_eq!(
+        agree(&checked, "copy_private", &MODES),
+        mix(mix(70000, private), hash(&pattern(70000)))
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};

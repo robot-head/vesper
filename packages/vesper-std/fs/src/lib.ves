@@ -25,6 +25,7 @@ use self::sys::{
     os_create_dir,
     os_create_dir_mode,
     os_set_permissions,
+    os_copy,
     os_sync_dir,
     os_parent_len,
     os_unique,
@@ -387,19 +388,23 @@ pub fn set_permissions(in path: Str, mode: u32) eff [Ffi[StdFs], Fail[IoError]] 
     check(os_set_permissions(in path.as_bytes(), mode, inout err), err);
 }
 
-// Copy the file `from` to `to`, creating or truncating `to`, and give it
-// the permission bits of `from`, as `std::fs::copy`: the number of bytes
-// copied. A source that is not a regular file (after following symbolic
-// links) is an `invalid_input()` error.
+// Copy the file `from` to `to`, creating or truncating `to`, with the
+// permission bits of `from`, as `std::fs::copy`: the number of bytes
+// copied. `to` has those bits before any byte lands in it, and the copy
+// streams, so a file of any size copies in bounded memory. A source that
+// is not a regular file (after following symbolic links) is an
+// `invalid_input()` error.
 pub fn copy(in from: Str, in to: Str) -> u64 eff [Ffi[StdFs], Fail[IoError]] {
     let m = metadata(in from);
     if m.kind != kind_file() {
         return raise_kind(invalid_input());
     }
-    let data = read_path(in from.as_bytes());
-    write_path(in to.as_bytes(), in data.as_slice());
-    set_permissions(in to, m.mode);
-    data.len()
+    let mut err: u64 = 0;
+    let n = os_copy(in from.as_bytes(), in to.as_bytes(), m.mode, inout err);
+    if err != 0 {
+        return raise_io(err);
+    }
+    n
 }
 
 // Create a directory and any missing parents; an existing directory is

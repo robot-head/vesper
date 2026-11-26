@@ -639,8 +639,9 @@ pub fn set_permissions(in path: Str, mode: u32) eff [Ffi[StdFs], Fail[IoError]] 
 }
 
 // Copy the file `from` to `to` (`CopyFileW`, replacing `to`), as
-// `std::fs::copy`: the number of bytes copied. A source that is not a
-// regular file is an `invalid_input()` error.
+// `std::fs::copy`: the number of bytes copied, read from the copy (a
+// symbolic link's own attributes would give the link's size). A source
+// that is not a regular file is an `invalid_input()` error.
 pub fn copy(in from: Str, in to: Str) -> u64 eff [Ffi[StdFs], Fail[IoError]] {
     let m = metadata(in from);
     if m.kind != kind_file() {
@@ -649,7 +650,7 @@ pub fn copy(in from: Str, in to: Str) -> u64 eff [Ffi[StdFs], Fail[IoError]] {
     let wf = utf8_to_utf16(in from.as_bytes());
     let wt = utf8_to_utf16(in to.as_bytes());
     check_win32(StdFs::CopyFileW(in wf.as_slice(), in wt.as_slice(), 0));
-    m.size
+    metadata(in to).size
 }
 
 pub fn create_dir_all(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {

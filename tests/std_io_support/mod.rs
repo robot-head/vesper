@@ -228,6 +228,7 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn rmdir(path: *const c_char) -> i32;
         fn mkdir(path: *const c_char, mode: u32) -> i32;
         fn chmod(path: *const c_char, mode: u32) -> i32;
+        fn fchmod(fd: i32, mode: u32) -> i32;
         fn getpid() -> i32;
         fn opendir(path: *const c_char) -> *mut c_void;
         fn readdir(dir: *mut c_void) -> *mut c_void;
@@ -330,6 +331,7 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("rmdir", rmdir as *const u8),
         ("mkdir", mkdir as *const u8),
         ("chmod", chmod as *const u8),
+        ("fchmod", fchmod as *const u8),
         ("getpid", getpid as *const u8),
         ("opendir", opendir as *const u8),
         ("readdir", readdir as *const u8),
