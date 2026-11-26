@@ -1,0 +1,313 @@
+// `sugar_expand::hygiene::pattern`: a transliteration of `pattern` in
+// crates/vesper-syntax/src/sugar_expand/hygiene.rs. A binder a pattern
+// template introduces literally is renamed to a fresh name, so it cannot
+// bind a caller identifier in the arm that follows; a binder spliced from
+// a pattern hole keeps its name. (`protect`, the caller-side renaming,
+// runs in the expansion driver.)
+
+use @vesper/ast::{
+    expr_at,
+    list_at,
+    list_len,
+    none,
+    pat_at
+};
+use @vesper/ast::lower::{
+    lower_surface_source
+};
+use self::flow::{
+    Rd,
+    fn_of,
+    name_byte,
+    name_is,
+    name_len
+};
+use self::scope::{
+    Sc,
+    push_name,
+    refusal,
+    sc_err,
+    sc_err_seq,
+    sc_ok
+};
+use self::template::{
+    add,
+    b8,
+    inc,
+    push_decimal,
+    sub,
+    w32,
+    w64
+};
+
+const PREFIX: Str = "fn __pattern() {match 0 { ";
+// `PREFIX.len() + 1`: the rendered text starts after a space.
+const OFF: u64 = 27;
+
+// The renamed spelling of symbol `sym`, by first appearance.
+fn fresh_id(inout names: ChunkSeq[u32], sym: u32) -> u64 {
+    for i in 0..names.len() {
+        if match names.try_get(i) {
+            Option::Some(v) => v == sym,
+            Option::None => false,
+        }
+        {
+            return i;
+        }
+    }
+    names.push(sym);
+    sub(names.len(), 1)
+}
+
+fn is_space(c: u8) -> bool {
+    c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12
+}
+
+// `rendered.text[..at].trim_end().ends_with(':')`.
+fn after_colon(in text: ChunkSeq[u8], at: u64) -> bool {
+    let mut i = at;
+    loop {
+        if i == 0 {
+            return false;
+        }
+        let c = b8(in text, sub(i, 1));
+        if !is_space(c) {
+            return c == 58;
+        }
+        i = sub(i, 1);
+    }
+}
+
+fn shift(p: u64, s: u64, old_len: u64, new_len: u64) -> u64 {
+    if p <= s {
+        p
+    } else {
+        add(sub(p, old_len), new_len)
+    }
+}
+
+// `pattern(rendered, mark)`.
+pub fn pattern_hygiene(inout r: Rd, in mark: ChunkSeq[u8]) -> Sc {
+    let mut sb = ChunkSeq::new[u8]();
+    sb.extend(in PREFIX.as_bytes());
+    sb.push(32);
+    sb.extend(in r.text.as_slice());
+    sb.extend(in " => 0 } }".as_bytes());
+    let source = match String::from_utf8(in sb.as_slice()) {
+        Option::Some(t) => t,
+        Option::None => String::new(),
+    };
+    let l = lower_surface_source(in source.as_str());
+    if l.p.t.rejected {
+        return refusal(in l.p.d);
+    }
+    if l.p.d.code.len() != 0 {
+        let d = l.p.d;
+        let end = if d.at.len() > 1 {
+            w32(in d.at, 1)
+        } else {
+            d.text.len()
+        };
+        let mut m = ChunkSeq::new[u8]();
+        m.extend(in "invalid expanded sugar pattern: ".as_bytes());
+        for j in w32(in d.at, 0)..end {
+            m.push(b8(in d.text, j));
+        }
+        return sc_err_seq(in m);
+    }
+    let a = l.ast;
+    let it = match a.m_items.try_get(0) {
+        Option::Some(i) => a
+            .items
+            .get_or(
+                @vesper-std/arena::idx_from_raw[@vesper/ast::ItemNode](i),
+                @vesper/ast::ItemNode {
+                    kind: 0,
+                    node: 0
+                }
+            ),
+        Option::None => @vesper/ast::ItemNode {
+            kind: 0,
+            node: 0
+        },
+    };
+    if it.kind != 2 {
+        return sc_err(in "missing pattern template wrapper".as_bytes());
+    }
+    let f = fn_of(in a, it.node);
+    if f.body == none() {
+        return sc_err(in "missing pattern template".as_bytes());
+    }
+    let body = expr_at(in a, f.body);
+    if body.kind != 5 || body.b == none() {
+        return sc_err(in "missing match pattern".as_bytes());
+    }
+    let tail = expr_at(in a, body.b);
+    if tail.kind != 14 {
+        return sc_err(in "expected a match pattern".as_bytes());
+    }
+    // The stack of (pattern, field name or NONE).
+    let mut stack = ChunkSeq::new[u32]();
+    for i in 0..(list_len(in a, tail.b) >> 1) {
+        stack.push(list_at(in a, tail.b, i << 1));
+        stack.push(none());
+    }
+    let mut names = ChunkSeq::new[u32]();
+    // Replacements as rows (start, end, pool first, pool length), one per
+    // start, the last insert winning.
+    let mut reps = ChunkSeq::new[u64]();
+    let mut pool = ChunkSeq::new[u8]();
+    loop {
+        if stack.len() == 0 {
+            break;
+        }
+        let n = stack.len();
+        let field = match stack.try_get(sub(n, 1)) {
+            Option::Some(v) => v,
+            Option::None => none(),
+        };
+        let pi = match stack.try_get(sub(n, 2)) {
+            Option::Some(v) => v,
+            Option::None => none(),
+        };
+        stack.truncate(sub(n, 2));
+        let p = pat_at(in a, pi);
+        if p.kind == 4 {
+            for i in 0..list_len(in a, p.a) {
+                stack.push(list_at(in a, p.a, i));
+                stack.push(none());
+            }
+        } else if p.kind == 5 {
+            for i in 0..(list_len(in a, p.b) >> 1) {
+                stack.push(list_at(in a, p.b, inc(i << 1)));
+                stack
+                    .push(
+                        if p.c != 0 {
+                            list_at(in a, p.b, i << 1)
+                        } else {
+                            none()
+                        }
+                    );
+            }
+        } else if p.kind == 2 {
+            let rs = sub(widen_u64(p.start), OFF);
+            let re = sub(widen_u64(p.end), OFF);
+            let mut in_hole = false;
+            for h in 0..(r.holes.len() >> 1) {
+                if w64(in r.holes, h << 1) <= rs && re <= w64(in r.holes, inc(h << 1)) {
+                    in_hole = true;
+                    break;
+                }
+            }
+            if in_hole {
+                continue;
+            }
+            let id = fresh_id(inout names, p.a);
+            let mut fresh = ChunkSeq::new[u8]();
+            fresh.extend(in mark.as_slice());
+            fresh.extend(in "pattern_".as_bytes());
+            push_decimal(inout fresh, id);
+            let shorthand = field != none()
+                && same_name(in a, field, p.a)
+                && !after_colon(in r.text, rs);
+            let first = pool.len();
+            if shorthand {
+                push_name(inout pool, in a, p.a);
+                pool.extend(in ": ".as_bytes());
+            }
+            pool.extend(in fresh.as_slice());
+            let len = sub(pool.len(), first);
+            // A BTreeMap keyed by start.
+            let mut at = reps.len() >> 2;
+            let mut k: u64 = 0;
+            let mut replaced = false;
+            loop {
+                if k >= (reps.len() >> 2) {
+                    break;
+                }
+                let ks = w64(in reps, k << 2);
+                if ks == rs {
+                    reps.try_set(inc(k << 2), re);
+                    reps.try_set(add(k << 2, 2), first);
+                    reps.try_set(add(k << 2, 3), len);
+                    replaced = true;
+                    break;
+                }
+                if ks > rs {
+                    at = k;
+                    break;
+                }
+                k = inc(k);
+            }
+            if !replaced {
+                for j in 0..4 {
+                    reps.push(0);
+                }
+                let mut q = sub(reps.len() >> 2, 1);
+                loop {
+                    if q <= at {
+                        break;
+                    }
+                    for j in 0..4 {
+                        reps.try_set(add(q << 2, j), w64(in reps, add(sub(q, 1) << 2, j)));
+                    }
+                    q = sub(q, 1);
+                }
+                reps.try_set(at << 2, rs);
+                reps.try_set(inc(at << 2), re);
+                reps.try_set(add(at << 2, 2), first);
+                reps.try_set(add(at << 2, 3), len);
+            }
+        }
+    }
+    // Apply from the last start back.
+    let mut k = reps.len() >> 2;
+    loop {
+        if k == 0 {
+            break;
+        }
+        k = sub(k, 1);
+        let s = w64(in reps, k << 2);
+        let e = w64(in reps, inc(k << 2));
+        let first = w64(in reps, add(k << 2, 2));
+        let len = w64(in reps, add(k << 2, 3));
+        let old_len = sub(e, s);
+        for h in 0..r.holes.len() {
+            r.holes.try_set(h, shift(w64(in r.holes, h), s, old_len, len));
+        }
+        for q in 0..(r.places.len() / 3) {
+            let row = wrapping_mul(q, 3);
+            r.places.try_set(row, shift(w64(in r.places, row), s, old_len, len));
+            r.places.try_set(inc(row), shift(w64(in r.places, inc(row)), s, old_len, len));
+        }
+        for o in 0..(r.origins.len() / 5) {
+            let row = wrapping_mul(o, 5);
+            r.origins.try_set(row, shift(w64(in r.origins, row), s, old_len, len));
+            r.origins.try_set(inc(row), shift(w64(in r.origins, inc(row)), s, old_len, len));
+        }
+        let mut text = ChunkSeq::new[u8]();
+        for j in 0..s {
+            text.push(b8(in r.text, j));
+        }
+        for j in 0..len {
+            text.push(b8(in pool, add(first, j)));
+        }
+        for j in e..r.text.len() {
+            text.push(b8(in r.text, j));
+        }
+        r.text = text;
+    }
+    sc_ok()
+}
+
+fn same_name(in a: @vesper/ast::Ast, x: u32, y: u32) -> bool {
+    if name_len(in a, x) != name_len(in a, y) {
+        return false;
+    }
+    for j in 0..name_len(in a, x) {
+        if name_byte(in a, x, j) != name_byte(in a, y, j) {
+            return false;
+        }
+    }
+    true
+}

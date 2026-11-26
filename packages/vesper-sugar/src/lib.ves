@@ -5,7 +5,8 @@
 // Part 4a is the rule matcher (sugar_expand/matcher.rs, matcher.ves),
 // part 4b-1 the template skeleton (sugar_expand/template.rs, template.ves),
 // part 4b-4 its scope and flow analysis (template/flow.rs, flow.ves),
-// part 4b-5 exit-aware scope captures (sugar_expand/scope.rs, scope.ves).
+// part 4b-5 exit-aware scope captures (sugar_expand/scope.rs, scope.ves)
+// and the pattern template hygiene (hygiene.rs `pattern`, hygiene.ves).
 // tests/self_host_sugar.rs checks `match_rule_words` and
 // `template_skeleton_words` against Rust's test hooks of the same names in
 // `vesper_syntax::sugar_expand` on a rule corpus and a fuzzed corpus.
@@ -16,6 +17,9 @@ use self::matcher::{
 use self::flow::{
     Rd,
     render
+};
+use self::hygiene::{
+    pattern_hygiene
 };
 use self::scope::{
     lower
@@ -165,7 +169,7 @@ pub fn template_skeleton_words(in text: Str, max_bytes: u64, work: u64) -> Chunk
 // value start, value end, from tail)*, places, (start, end, pass)*] with
 // pass 1 In, 2 Inout, 3 Out, 4 Sink.
 pub fn template_render_words(in text: Str, max_bytes: u64, work: u64) -> ChunkSeq[u64] {
-    render_encoded(in text, max_bytes, work, false)
+    render_encoded(in text, max_bytes, work, false, false)
 }
 
 // `template_scope_words(pattern, invocation, tail, template, mark, source,
@@ -176,10 +180,18 @@ pub fn template_render_words(in text: Str, max_bytes: u64, work: u64) -> ChunkSe
 // mark. The words are as in `template_render_words` with the items the
 // scope adds (length, bytes) after the leading 1.
 pub fn template_scope_words(in text: Str, max_bytes: u64, work: u64) -> ChunkSeq[u64] {
-    render_encoded(in text, max_bytes, work, true)
+    render_encoded(in text, max_bytes, work, true, false)
 }
 
-fn render_encoded(in text: Str, max_bytes: u64, work: u64, scoped: bool) -> ChunkSeq[u64] {
+// `template_pattern_words`: `template_render_words` followed by
+// `hygiene::pattern` (hygiene.ves `pattern`), with `text` and the words
+// as in `template_render_words`.
+pub fn template_pattern_words(in text: Str, max_bytes: u64, work: u64) -> ChunkSeq[u64] {
+    render_encoded(in text, max_bytes, work, false, true)
+}
+
+fn render_encoded(in text: Str, max_bytes: u64, work: u64, scoped: bool, patterned: bool)
+    -> ChunkSeq[u64] {
     let b = text.as_bytes();
     let np = base128(in b, 0);
     let ni = base128(in b, 4);
@@ -239,6 +251,14 @@ fn render_encoded(in text: Str, max_bytes: u64, work: u64, scoped: bool) -> Chun
         out.push(2);
         push_bytes(inout out, in r.msg);
         return out;
+    }
+    if patterned {
+        let ps = pattern_hygiene(inout r, in mark);
+        if ps.failed {
+            out.push(2);
+            push_bytes(inout out, in ps.msg);
+            return out;
+        }
     }
     let mut items = ChunkSeq::new[u8]();
     if scoped {

@@ -370,7 +370,7 @@ itself (part 4b-4).
 | `self_host_ast` `template_scopes_*` | 899 template sources, every repository `.ves` file, and 60,000 fuzzed sources locally (CI 3,000) | 0 differences |
 | core AST and front end differentials | after the changes | pass |
 
-## Part 4b-4 and 4b-5: template flow analysis and scope captures
+## Part 4b-4 to 4b-6: template flow analysis, scope captures, pattern hygiene
 
 - **4b-4, flow analysis** (`packages/vesper-sugar/src/flow.ves`): ports
   `template/flow.rs` and `Rendered::hole`. It parses the skeleton as
@@ -389,7 +389,14 @@ itself (part 4b-4).
   then wraps the body in the exit loop and handlers, dispatches at the
   resume, and remaps holes, origins and places through the edits. The
   Rust test hook is `sugar_expand::template_scope_words`.
-  - Gap: the surface profile does not yet run Rust's expression macro
+- **4b-6, pattern hygiene** (`packages/vesper-sugar/src/hygiene.ves`):
+  ports `hygiene::pattern`. A binder that a pattern template introduces
+  literally gets a fresh name, written `field: fresh` for a shorthand
+  field. Binders spliced from holes keep their names, and holes, origins
+  and places shift with each edit. The Rust test hook is
+  `sugar_expand::template_pattern_words`. `protect`, the caller-side
+  renaming, comes with the driver (part 4c).
+  - Gap (4b-5 and 4b-6): the surface profile does not yet run Rust's expression macro
     validation (`macro_source::validate_surface`, part 6). A source with
     an invalid expression macro is refused by Rust's scope capture but
     not by the Vesper one.
@@ -401,4 +408,5 @@ itself (part 4b-4).
 | `self_host_sugar` `render_matches_on_the_fuzzed_corpus` | 4,000 fuzzed templates | 0 differences |
 | `self_host_sugar` `scope_matches_on_the_scope_examples` | 7 scope rules over 37 callers (315 cases: lowered, lowered with a return effect, and 15 kinds of refusal, under 3 byte budgets) | 0 differences |
 | `self_host_sugar` `scope_matches_on_the_fuzzed_corpus` | 500 edited callers (2,123 cases, 1,117 matching) | 0 differences |
+| `self_host_sugar` `pattern_hygiene_*` | 15 pattern rules plus every render corpus above (examples, suites, 4,000 fuzzed) | 0 differences |
 | `self_host_ast` `template_scopes_*` | now also the surface-profile AST of every case | 0 differences |

@@ -11,7 +11,9 @@
 //! `template_render_words`) on the same corpora. Part 4b-5: exit-aware
 //! scope captures (scope.ves, `scope::lower`, through
 //! `template_scope_words`) on scope rules over a corpus of callers and a
-//! fuzzed corpus.
+//! fuzzed corpus. The pattern template hygiene (hygiene.ves,
+//! `hygiene::pattern`, through `template_pattern_words`) on pattern rules
+//! and on every template corpus above.
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use vesper::{check, native, packages};
@@ -29,6 +31,7 @@ struct Sugar {
     skeleton: native::WordFunction,
     render: native::WordFunction,
     scope: native::WordFunction,
+    pattern: native::WordFunction,
 }
 
 fn sugar() -> &'static Sugar {
@@ -58,6 +61,7 @@ fn sugar() -> &'static Sugar {
             skeleton: compile("template_skeleton_words"),
             render: compile("template_render_words"),
             scope: compile("template_scope_words"),
+            pattern: compile("template_pattern_words"),
         }
     })
 }
@@ -633,6 +637,7 @@ const MARK: &str = "__sugar7_3_";
 enum Stage {
     Skeleton,
     Render,
+    Pattern,
 }
 
 fn vesper_template(stage: Stage, r: &Render) -> Vec<u64> {
@@ -664,6 +669,7 @@ fn vesper_template(stage: Stage, r: &Render) -> Vec<u64> {
     let f = match stage {
         Stage::Skeleton => &sugar().skeleton,
         Stage::Render => &sugar().render,
+        Stage::Pattern => &sugar().pattern,
     };
     unsafe { call.seq(JIT_RUNTIME, |w| f.call(w).unwrap()) }
 }
@@ -676,6 +682,7 @@ fn check_renders(stage: Stage, renders: &[Render]) -> (usize, usize) {
         let rust_words = match stage {
             Stage::Skeleton => sugar_expand::template_skeleton_words,
             Stage::Render => sugar_expand::template_render_words,
+            Stage::Pattern => sugar_expand::template_pattern_words,
         };
         let rust = rust_words(
             &r.pattern,
@@ -1301,4 +1308,64 @@ fn scope_matches_on_the_fuzzed_corpus() {
         scope_cases(&parts.join(" "), &mut cases);
     }
     check_scopes(&cases);
+}
+
+/// Pattern rules: literal binders, shorthand fields, binders spliced from
+/// holes, repeated names and refusals.
+const PATTERN_TEMPLATES: &[(&str, &str, &str)] = &[
+    ("present $p:pat", "present value", "Option::Some($p)"),
+    ("present $p:pat", "present (a, _)", "Option::Some($p)"),
+    (
+        "pair $a:pat $b:pat",
+        "pair x y",
+        "(x, $a, Point { x, y: $b })",
+    ),
+    ("pt $a:pat", "pt q", "Point { x, y: $a }"),
+    ("pt $a:pat", "pt q", "Point { x: x, y }"),
+    ("pt $a:pat", "pt q", "Point { x:\n  x, y: (y, y) }"),
+    ("both $a:pat", "both z", "(w, w, Wrap { w }, $a)"),
+    (
+        "many $( $p:pat ),*",
+        "many a, b, c",
+        "($( Some($p) ),*, rest)",
+    ),
+    ("many $( $p:pat ),*", "many a, b", "[$( $p ),*]"),
+    ("lit $e:expr", "lit 3", "Option::Some(x) | y"),
+    ("lit $e:expr", "lit 3", "Num($e)"),
+    ("ign {}", "ign {}", "shadow"),
+    ("ign {}", "ign {}", "_"),
+    ("ign {}", "ign {}", "(a, b) => b"),
+    ("ign {}", "ign {}", "Ctor { a: Inner { b, c: d }, e }"),
+];
+
+fn pattern_renders() -> Vec<Render> {
+    let mut renders = example_renders();
+    for &(pattern, invocation, template) in PATTERN_TEMPLATES {
+        for max in max_bytes() {
+            renders.push(Render {
+                pattern: pattern.into(),
+                invocation: invocation.into(),
+                tail: None,
+                template: template.into(),
+                max,
+            });
+        }
+    }
+    renders
+}
+
+#[test]
+fn pattern_hygiene_matches_on_the_template_examples() {
+    let (matched, ok) = check_renders(Stage::Pattern, &pattern_renders());
+    assert!(matched > 100 && ok > 30, "{matched} matched, {ok} ok");
+}
+
+#[test]
+fn pattern_hygiene_matches_on_the_sugar_test_suites() {
+    check_renders(Stage::Pattern, &corpus_renders());
+}
+
+#[test]
+fn pattern_hygiene_matches_on_the_fuzzed_corpus() {
+    check_renders(Stage::Pattern, &fuzzed_renders(0x5eed_4b06));
 }
