@@ -2620,6 +2620,13 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         CompilerExecCheck::CompileOnly,
     ),
     (
+        "preludes",
+        "@vesper/preludes",
+        "packages/vesper-preludes",
+        "strings_source().as_bytes().len()",
+        CompilerExecCheck::NonZero,
+    ),
+    (
         "check-data",
         "@vesper/check-data",
         "packages/vesper-check-data",

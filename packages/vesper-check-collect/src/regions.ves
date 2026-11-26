@@ -10,11 +10,6 @@ use @vesper/ast::{
 use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{symbol_from_id};
 
-// `regions::PRELUDE`, byte for byte.
-pub fn region_source() -> Str {
-    "// The region prelude (src/regions.rs): the built-in `Region` effect.\nlinear effect Region {\n    fn box(sink value: Unit) -> Unit;\n    fn get(in boxed: Unit) -> Unit;\n    fn set(in boxed: Unit, sink value: Unit) -> Unit;\n    fn take(sink boxed: Unit) -> Unit;\n    fn checkpoint() -> Unit;\n    fn rewind(sink mark: Unit) -> Unit;\n    fn commit(sink mark: Unit) -> Unit;\n    fn used() -> u64;\n}\n"
-}
-
 fn r_item(in a: Ast, i: u32) -> ItemNode {
     a.items.get_or(idx_from_raw[ItemNode](i), ItemNode { kind: 0, node: none() })
 }
