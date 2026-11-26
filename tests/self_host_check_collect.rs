@@ -296,6 +296,12 @@ const CASES: &[&str] = &[
     "fn checked_mul_u64(a: u64, b: u64) -> Option[u64] { Option::None } fn f() -> u64 { checked_mul_u64(1, 2); 0 }",
     "fn leading_zeros_u32(x: u32) -> u32 { x } fn f() -> u32 { 0 }",
     "fn to_le_bytes_u8(x: u8) -> u8 { x } fn f() -> u8 { to_le_bytes_u8(1) }",
+    // The `Box` prelude.
+    "fn f(b: Box[i64]) -> i64 { 1 }",
+    "fn f() -> i64 { let b = Box::new(1); 1 }",
+    "fn f(o: Option[i64]) -> i64 { match o { Option::Some(Box::Box(x)) => x, _ => 0 } }",
+    "struct Box { x: i64 } fn f(b: Box) -> i64 { 1 }",
+    "struct S { b: Box[u8] }",
 ];
 
 /// Every byte-order, bit and checked builtin, named once.

@@ -1,0 +1,414 @@
+// The built-in `Box[T]` prelude (`fip::needs_prelude`, `fip::prelude`): a
+// module that uses `@fip` or `Box` without declaring its own `Box` gets
+// the affine `Box[T: mod linear]` ADT, built by hand in the checker (so
+// its spans are 0..0).
+
+use @vesper/ast::{
+    Ast, AdtNode, ArgNode, ClauseNode, ConfNode, EffectDeclNode, EffectsNode, EffectNode, FieldNode,
+    FnNode, ImplNode, ItemNode, ParamNode, StmtNode, TraitNode, VariantNode, expr_at, list_at,
+    list_len, none, pat_at, type_at
+};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
+
+// The prelude's ADT as the collector dumps it.
+pub fn box_dump() -> Str {
+    "adt Box mode=1 enum=false tile=- span=0..0\n generic T bound=2 row=false\n variant Box named=false\n  field 0 mod=- temp=0 : T\n"
+}
+
+fn b_item(in a: Ast, i: u32) -> ItemNode {
+    a.items.get_or(idx_from_raw[ItemNode](i), ItemNode { kind: 0, node: none() })
+}
+
+fn b_fn(in a: Ast, i: u32) -> FnNode {
+    a
+        .fns
+        .get_or(
+            idx_from_raw[FnNode](i),
+            FnNode {
+                name: none(),
+                fip: false,
+                generics: 0,
+                params: 0,
+                result: none(),
+                effects: none(),
+                body: none(),
+                start: 0,
+                end: 0
+            }
+        )
+}
+
+fn b_adt(in a: Ast, i: u32) -> AdtNode {
+    a
+        .adts
+        .get_or(
+            idx_from_raw[AdtNode](i),
+            AdtNode {
+                name: none(),
+                mode: 0,
+                generics: 0,
+                variants: 0,
+                is_enum: false,
+                tiled: false,
+                tile_width: 0,
+                start: 0,
+                end: 0
+            }
+        )
+}
+
+fn b_effect_decl(in a: Ast, i: u32) -> EffectDeclNode {
+    a
+        .effect_decls
+        .get_or(
+            idx_from_raw[EffectDeclNode](i),
+            EffectDeclNode { name: none(), linear: false, generics: 0, ops: 0, start: 0, end: 0 }
+        )
+}
+
+fn b_methods(in a: Ast, it: ItemNode) -> u32 {
+    if it.kind == 4 {
+        a
+            .impls
+            .get_or(
+                idx_from_raw[ImplNode](it.node),
+                ImplNode { ty: none(), generics: 0, methods: 0 }
+            )
+            .methods
+    } else if it.kind == 5 {
+        a
+            .traits
+            .get_or(
+                idx_from_raw[TraitNode](it.node),
+                TraitNode {
+                    name: none(),
+                    public: false,
+                    generics: 0,
+                    assoc: 0,
+                    methods: 0,
+                    start: 0,
+                    end: 0
+                }
+            )
+            .methods
+    } else {
+        a
+            .confs
+            .get_or(
+                idx_from_raw[ConfNode](it.node),
+                ConfNode {
+                    model: none(),
+                    public: false,
+                    generics: 0,
+                    trait_ref: none(),
+                    self_ty: none(),
+                    wheres: 0,
+                    assoc: 0,
+                    methods: 0,
+                    start: 0,
+                    end: 0
+                }
+            )
+            .methods
+    }
+}
+
+fn is(in a: Ast, sym: u32, in lit: Str) -> bool {
+    sym != none() && a.names.symbol_eq(symbol_from_id(sym), in lit)
+}
+
+fn effects_mention(in a: Ast, e: u32) -> bool {
+    if e == none() {
+        return false;
+    }
+    let n = a
+        .effects
+        .get_or(idx_from_raw[EffectsNode](e), EffectsNode { instances: 0, tail: none() });
+    for i in 0..list_len(in a, n.instances) {
+        let x = a
+            .effect_nodes
+            .get_or(
+                idx_from_raw[EffectNode](list_at(in a, n.instances, i)),
+                EffectNode { label: none(), name: none(), args: 0 }
+            );
+        if types_mention(in a, x.args) {
+            return true;
+        }
+    }
+    false
+}
+
+fn types_mention(in a: Ast, list: u32) -> bool {
+    for i in 0..list_len(in a, list) {
+        if type_mentions(in a, list_at(in a, list, i)) {
+            return true;
+        }
+    }
+    false
+}
+
+// `fip::type_mentions_box`.
+fn type_mentions(in a: Ast, t: u32) -> bool {
+    if t == none() {
+        return false;
+    }
+    let n = type_at(in a, t);
+    if n.kind == 1 {
+        is(in a, n.a, "Box") || types_mention(in a, n.b)
+    } else if n.kind == 2 {
+        types_mention(in a, n.a)
+    } else if n.kind == 3 {
+        let pairs = list_len(in a, n.a) / 2;
+        for i in 0..pairs {
+            if type_mentions(in a, list_at(in a, n.a, wrapping_add(wrapping_mul(i, 2), 1))) {
+                return true;
+            }
+        }
+        type_mentions(in a, n.b) || effects_mention(in a, n.c)
+    } else if n.kind == 4 {
+        effects_mention(in a, n.a)
+    } else {
+        false
+    }
+}
+
+// `fip::pattern_mentions_box`.
+fn pattern_mentions(in a: Ast, p: u32) -> bool {
+    if p == none() {
+        return false;
+    }
+    let n = pat_at(in a, p);
+    if n.kind == 4 {
+        for i in 0..list_len(in a, n.a) {
+            if pattern_mentions(in a, list_at(in a, n.a, i)) {
+                return true;
+            }
+        }
+        false
+    } else if n.kind == 5 {
+        if is(in a, n.a, "Box") || is(in a, n.a, "Box::Box") {
+            return true;
+        }
+        let pairs = list_len(in a, n.b) / 2;
+        for i in 0..pairs {
+            if pattern_mentions(in a, list_at(in a, n.b, wrapping_add(wrapping_mul(i, 2), 1))) {
+                return true;
+            }
+        }
+        false
+    } else {
+        false
+    }
+}
+
+fn param_type(in a: Ast, p: u32) -> u32 {
+    a
+        .params
+        .get_or(
+            idx_from_raw[ParamNode](p),
+            ParamNode { name: none(), pass: 0, projections: 0, ty: none(), start: 0, end: 0 }
+        )
+        .ty
+}
+
+fn params_mention(in a: Ast, list: u32) -> bool {
+    for i in 0..list_len(in a, list) {
+        if type_mentions(in a, param_type(in a, list_at(in a, list, i))) {
+            return true;
+        }
+    }
+    false
+}
+
+fn clause_uses(in a: Ast, c: u32) -> bool {
+    let n = a
+        .clauses
+        .get_or(idx_from_raw[ClauseNode](c), ClauseNode { name: none(), pats: 0, body: none() });
+    for i in 0..list_len(in a, n.pats) {
+        if pattern_mentions(in a, list_at(in a, n.pats, i)) {
+            return true;
+        }
+    }
+    expr_uses(in a, n.body)
+}
+
+fn exprs_use(in a: Ast, list: u32) -> bool {
+    for i in 0..list_len(in a, list) {
+        if expr_uses(in a, list_at(in a, list, i)) {
+            return true;
+        }
+    }
+    false
+}
+
+// `fip::expr_uses_box`.
+fn expr_uses(in a: Ast, e: u32) -> bool {
+    if e == none() {
+        return false;
+    }
+    let x = expr_at(in a, e);
+    let k = x.kind;
+    if k == 2 {
+        is(in a, x.a, "Box") || is(in a, x.a, "Box::new") || is(in a, x.a, "Box::new_in_caller")
+    } else if k == 3 {
+        exprs_use(in a, x.a)
+    } else if k == 4 {
+        if is(in a, x.a, "Box") {
+            return true;
+        }
+        let pairs = list_len(in a, x.b) / 2;
+        for i in 0..pairs {
+            if expr_uses(in a, list_at(in a, x.b, wrapping_add(wrapping_mul(i, 2), 1))) {
+                return true;
+            }
+        }
+        false
+    } else if k == 7 || k == 9 || k == 17 {
+        expr_uses(in a, x.a)
+    } else if k == 10 {
+        expr_uses(in a, x.b)
+    } else if k == 8 || k == 19 {
+        expr_uses(in a, x.a) || expr_uses(in a, x.b)
+    } else if k == 11 || k == 12 || k == 18 {
+        expr_uses(in a, x.b) || expr_uses(in a, x.c)
+    } else if k == 5 {
+        for i in 0..list_len(in a, x.a) {
+            let s = a
+                .stmts
+                .get_or(
+                    idx_from_raw[StmtNode](list_at(in a, x.a, i)),
+                    StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
+                );
+            if s.kind == 1 {
+                if pattern_mentions(in a, s.pat)
+                    || type_mentions(in a, s.ty)
+                    || expr_uses(in a, s.value) {
+                    return true;
+                }
+            } else if expr_uses(in a, s.value) {
+                return true;
+            }
+        }
+        expr_uses(in a, x.b)
+    } else if k == 6 {
+        if expr_uses(in a, x.a) || types_mention(in a, x.b) {
+            return true;
+        }
+        for i in 0..list_len(in a, x.c) {
+            let arg = a
+                .args
+                .get_or(
+                    idx_from_raw[ArgNode](list_at(in a, x.c, i)),
+                    ArgNode { pass: 0, explicit: false, expr: none() }
+                );
+            if expr_uses(in a, arg.expr) {
+                return true;
+            }
+        }
+        false
+    } else if k == 13 {
+        expr_uses(in a, x.a) || expr_uses(in a, x.b) || expr_uses(in a, x.c)
+    } else if k == 14 {
+        if expr_uses(in a, x.a) {
+            return true;
+        }
+        let pairs = list_len(in a, x.b) / 2;
+        for i in 0..pairs {
+            let p = list_at(in a, x.b, wrapping_mul(i, 2));
+            let b = list_at(in a, x.b, wrapping_add(wrapping_mul(i, 2), 1));
+            if pattern_mentions(in a, p) || expr_uses(in a, b) {
+                return true;
+            }
+        }
+        false
+    } else if k == 15 {
+        params_mention(in a, x.a) || type_mentions(in a, x.c) || expr_uses(in a, x.e)
+    } else if k == 16 {
+        if x.b != none() && (pattern_mentions(in a, x.b) || expr_uses(in a, x.c)) {
+            return true;
+        }
+        if expr_uses(in a, x.d) {
+            return true;
+        }
+        for i in 0..list_len(in a, x.e) {
+            if clause_uses(in a, list_at(in a, x.e, i)) {
+                return true;
+            }
+        }
+        false
+    } else if k == 20 || k == 21 {
+        expr_uses(in a, x.a)
+    } else {
+        false
+    }
+}
+
+// `fip::function_uses_box`.
+fn function_uses(in a: Ast, f: u32) -> bool {
+    let n = b_fn(in a, f);
+    type_mentions(in a, n.result) || params_mention(in a, n.params) || expr_uses(in a, n.body)
+}
+
+fn methods_need(in a: Ast, list: u32, fip: bool) -> bool {
+    for i in 0..list_len(in a, list) {
+        let f = list_at(in a, list, i);
+        if (fip && b_fn(in a, f).fip) || function_uses(in a, f) {
+            return true;
+        }
+    }
+    false
+}
+
+// `fip::needs_prelude`.
+pub fn needs_box(in a: Ast) -> bool {
+    for i in 0..a.m_items.len() {
+        let it = match a.m_items.try_get(i) {
+            Option::Some(v) => b_item(in a, v),
+            Option::None => ItemNode { kind: 0, node: none() },
+        };
+        if it.kind == 1 && is(in a, b_adt(in a, it.node).name, "Box") {
+            return false;
+        }
+    }
+    for i in 0..a.m_items.len() {
+        let it = match a.m_items.try_get(i) {
+            Option::Some(v) => b_item(in a, v),
+            Option::None => ItemNode { kind: 0, node: none() },
+        };
+        let need = if it.kind == 1 {
+            let n = b_adt(in a, it.node);
+            let mut found = false;
+            for j in 0..list_len(in a, n.variants) {
+                let v = a
+                    .variants
+                    .get_or(
+                        idx_from_raw[VariantNode](list_at(in a, n.variants, j)),
+                        VariantNode { name: none(), fields: 0, named: false }
+                    );
+                for k in 0..list_len(in a, v.fields) {
+                    let f = a
+                        .fields
+                        .get_or(
+                            idx_from_raw[FieldNode](list_at(in a, v.fields, k)),
+                            FieldNode { name: none(), ty: none(), modality: 3, temperature: 0 }
+                        );
+                    if type_mentions(in a, f.ty) {
+                        found = true;
+                    }
+                }
+            }
+            found
+        } else if it.kind == 2 {
+            b_fn(in a, it.node).fip || function_uses(in a, it.node)
+        } else if it.kind == 3 {
+            methods_need(in a, b_effect_decl(in a, it.node).ops, false)
+        } else {
+            methods_need(in a, b_methods(in a, it), true)
+        };
+        if need {
+            return true;
+        }
+    }
+    false
+}

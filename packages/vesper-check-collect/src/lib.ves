@@ -29,6 +29,7 @@ use self::prelude::{
     defined_methods, module_end, needs_option, needs_strings, option_source, replaced,
     sorted_symbols, strings_source, used, uses_of, Uses
 };
+use self::boxes::{box_dump, needs_box};
 use self::widths::{reserved_width_name, width_source};
 
 // The builtin declarations every world starts from (`World::collect`'s
@@ -206,18 +207,6 @@ pub fn needs_prelude(in a: Ast, in u: Uses) -> bool {
             }
         },
         Option::None => {},
-    }
-    // `Box`: the type or its constructors, or an `@fip` function.
-    if has_name(in a, "Box")
-        || has_name(in a, "Box::new")
-        || has_name(in a, "Box::new_in_caller")
-        || has_name(in a, "Box::Box") {
-        return true;
-    }
-    for i in 0..a.fns.len() {
-        if fn_node(in a, wrapping_u32(i)).fip {
-            return true;
-        }
     }
     // Atomics and workers.
     if has_name(in a, "Atomic") || has_name(in a, "MemoryOrder") || has_name(in a, "parallel_for") {
@@ -801,6 +790,10 @@ fn shift_of(in s: Srcs, src: u8) -> u32 {
 }
 
 fn dump_adt(inout o: ChunkSeq[u8], in s: Srcs, e: Entry) {
+    if e.src == 5 {
+        o.extend(in box_dump().as_bytes());
+        return;
+    }
     let sh = shift_of(in s, e.src);
     if e.src == 0 {
         put_adt(inout o, in s.base, e.node, sh);
@@ -950,6 +943,11 @@ fn world_of(in source: Str, inout o: ChunkSeq[u8]) {
     };
     let none_defined = interner_new();
     collect_all(inout c, in s.base, 0, 0, false, in none_defined);
+    if needs_box(in s.module) {
+        let mut key = String::new();
+        key.push_str(in "Box");
+        let was = insert(inout c.adts, in key, Entry { src: 5, node: none(), imp: none() });
+    }
     collect_all(inout c, in s.module, 1, 0, false, in none_defined);
     collect_all(inout c, in s.width, 4, w_shift, false, in none_defined);
     collect_all(inout c, in s.strings, 2, s_shift, true, in defined);
