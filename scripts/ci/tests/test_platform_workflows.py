@@ -424,6 +424,13 @@ class PlatformWorkflowTests(unittest.TestCase):
             self.assertEqual(actions[name]["timeout"], "60m")
             # Per-target times, to balance the split on.
             self.assertIn("--test_summary=short", command(name))
+            # Optimized corpus differentials, with Cargo's debug checks kept.
+            self.assertIn("--config=ci_opt", command(name))
+        self.assertNotIn("--config=ci_opt", everything)
+        bazelrc = (ROOT / ".bazelrc").read_text()
+        for flag in ("--compilation_mode=opt", "extra_rustc_flag=-Cdebug-assertions=on",
+                     "extra_rustc_flag=-Coverflow-checks=on"):
+            self.assertIn(f"common:ci_opt {flag}" if flag.startswith("--") else flag, bazelrc)
         defs = (ROOT / "tools/bazel/defs.bzl").read_text()
         self.assertIn('startswith("self_host_")', defs)
         self.assertIn('"self_host_codegen"', defs)
