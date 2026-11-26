@@ -91,21 +91,10 @@ pub const OPERATIONS: [&str; 6] = [
 ];
 
 /// The built-in Beacon declarations.
-pub const PRELUDE: &str = "copy struct SpanContext { trace_id_hi: u64, trace_id_lo: u64, span_id: u64, flags: u8 }
-linear struct ActiveSpan { ctx: SpanContext, parent_span_id: u64, start_mono_ns: u64, schema_id: u32 }
-copy enum TelemetryAttr { NoAttr, Count(u64), Bytes(u64), Redacted }
-linear effect Trace {
-    fn current_ctx() -> SpanContext;
-    fn start_span(schema_id: u32, name: String) -> ActiveSpan;
-    fn start_child(parent: SpanContext, schema_id: u32, name: String) -> ActiveSpan;
-    fn emit_ok(sink span: ActiveSpan, attr_u64: u64) -> Unit;
-    fn emit_err(sink span: ActiveSpan, err_code: u32, msg: String) -> Unit;
-    fn emit_attr(sink span: ActiveSpan, attr: TelemetryAttr) -> Unit;
-}";
+pub const PRELUDE: &str = include_str!("preludes/trace.ves");
 
 /// The `Telemetrable` trait, added only when the module names it.
-pub const TELEMETRABLE_PRELUDE: &str =
-    "trait Telemetrable { fn telemetry_attr(in self) -> TelemetryAttr; }";
+pub const TELEMETRABLE_PRELUDE: &str = include_str!("preludes/telemetrable.ves");
 
 /// A module together with whether it runs under the built-in Beacon prelude.
 pub struct BeaconModule<'a> {

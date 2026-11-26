@@ -140,6 +140,49 @@ pub sugar sum: tag emits eff [Fail] {
     }
 }
 
+// The largest projected value under Ord. Empty sources yield None; equal
+// values keep the first item. The explicit type fixes the Option accumulator
+// even when no element runs the braced projection.
+pub sugar max: tag {
+    rule (
+        max{
+            $projection:block: $t:ty | $element:pat in $lo:expr.. $hi:expr
+        }
+    ) => {
+        {
+            let mut largest: Option[$t] = Option::None;
+            for $element in $lo.. $hi {
+                largest = keep_max(largest, $projection);
+            }
+            largest
+        }
+    }
+
+    rule (
+        max{
+            $projection:block: $t:ty | $element:pat in $source:expr
+        }
+    ) => {
+        {
+            let mut largest: Option[$t] = Option::None;
+            for $element in $source {
+                largest = keep_max(largest, $projection);
+            }
+            largest
+        }
+    }
+}
+
+fn keep_max[T: mod copy + Ord](previous: Option[T], candidate: T) -> Option[T] {
+    match previous {
+        Option::None => Option::Some(candidate),
+        Option::Some(best) => match best.cmp(candidate) {
+            Less => Option::Some(candidate),
+            _ => previous,
+        },
+    }
+}
+
 test {
     fn mark(inout log: u64, digit: u64) -> u64 {
         log = wrapping_add(wrapping_mul(log, 10), digit);
@@ -459,6 +502,88 @@ test {
         } with {
             return value => value,
             raise(_, _) => false,
+        }
+    }
+}
+
+test {
+    fn max_slice(in xs: Slice[i64]) -> Option[i64] {
+        max{
+            {
+                x
+            }
+            : i64 | x in xs
+        }
+    }
+
+    // @case only_negatives(-19, -3, -27, -3)
+    // @case first_is_max(42, 10, 3, 42)
+    // @case last_is_max(10, 3, 42, 42)
+    fn max_does_not_need_a_sentinel(a: i64, b: i64, c: i64, expected: i64) -> bool {
+        let mut xs = ChunkSeq::new[i64]();
+        xs.push(a);
+        xs.push(b);
+        xs.push(c);
+        let empty = ChunkSeq::new[i64]();
+        max_slice(in xs.as_slice()) == Option::Some(expected)
+            && max_slice(in empty.as_slice()) == Option::None
+    }
+
+    fn max_mark(inout log: u64, digit: u64) -> u64 {
+        log = wrapping_add(wrapping_mul(log, 10), digit);
+        digit
+    }
+
+    // @case visits_each(1, 4, 14123)
+    // @case empty(2, 2, 22)
+    fn max_range_runs_bounds_and_projection_in_order(lo: u64, hi: u64, trace: u64) -> bool {
+        let mut log: u64 = 0;
+        let actual = max{
+            {
+                max_mark(inout log, x)
+            }
+            : u64 | x in max_mark(inout log, lo)..max_mark(inout log, hi)
+        };
+        let expected = if lo < hi {
+            Option::Some(wrapping_sub(hi, 1))
+        } else {
+            Option::None
+        };
+        actual == expected && log == trace
+    }
+
+    copy struct Rank {
+        score: i64,
+        original: i64,
+    }
+
+    impl Eq for Rank {
+        fn eq(in self, in other: Rank) -> bool {
+            self.score == other.score
+        }
+    }
+
+    impl Ord for Rank {
+        fn cmp(in self, in other: Rank) -> Ordering {
+            self.score.cmp(other.score)
+        }
+    }
+
+    // @case equal_comparison_retains_first()
+    fn max_equal_scores_keep_first_record() -> bool {
+        let mut ranks = ChunkSeq::new[Rank]();
+        ranks.push(Rank { score: -2, original: 1 });
+        ranks.push(Rank { score: 7, original: 2 });
+        ranks.push(Rank { score: 7, original: 3 });
+        let winner = max{
+            {
+                x
+            }
+            : Rank | x in ranks.as_slice()
+        };
+        match winner {
+            Option::Some(x) => x.original == 2,
+            Option::None => false,
         }
     }
 }

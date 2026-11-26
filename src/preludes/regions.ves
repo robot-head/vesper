@@ -1,0 +1,11 @@
+// The region prelude (src/regions.rs): the built-in `Region` effect.
+linear effect Region {
+    fn box(sink value: Unit) -> Unit;
+    fn get(in boxed: Unit) -> Unit;
+    fn set(in boxed: Unit, sink value: Unit) -> Unit;
+    fn take(sink boxed: Unit) -> Unit;
+    fn checkpoint() -> Unit;
+    fn rewind(sink mark: Unit) -> Unit;
+    fn commit(sink mark: Unit) -> Unit;
+    fn used() -> u64;
+}

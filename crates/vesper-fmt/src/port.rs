@@ -28,6 +28,27 @@ pub struct Hash32 {
     pub w3: u64,
 }
 
+/// `ProofError` of the port's `format_for_verification` (#1341): `code` is
+/// 0 for none, else the variant (1 `InvalidLimits` to 7 `LeanSyntax`),
+/// `resource` names a `Resource` limit and `fmt` is a `Formatter` error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProofFail {
+    pub code: u64,
+    pub resource: u64,
+    pub fmt: FmtFail,
+}
+
+/// [`crate::ProofLimits`] in the port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProofLimits {
+    pub max_nodes: u64,
+    pub max_text_bytes: u64,
+    pub max_depth: u64,
+    pub max_metadata_bytes: u64,
+    pub max_lean_bytes: u64,
+    pub max_work: u64,
+}
+
 /// `blake3::hash(data)` through `@vesper-std/hash-sys`.
 pub(crate) fn blake3_bytes(data: &str) -> [u8; 32] {
     let h = blake3(data);

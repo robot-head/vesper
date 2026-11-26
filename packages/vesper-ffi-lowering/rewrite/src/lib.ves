@@ -133,17 +133,11 @@ pub struct R {
 }
 
 fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 fn w(x: u32) -> u64 {
@@ -353,10 +347,7 @@ fn handle_misuse(inout r: R, name: u32, in what: Str, start: u32, end: u32) {
 
 fn module(inout r: R) {
     for i in 0..r.ast.m_items.len() {
-        let it = match r.ast.m_items.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => NONE,
-        };
+        let it = r.ast.m_items.try_get(i).unwrap_or(NONE);
         let item = match r.ast.items.get(idx_from_raw[ItemNode](it)) {
             Option::Some(x) => x,
             Option::None => ItemNode { kind: 0, node: NONE },
