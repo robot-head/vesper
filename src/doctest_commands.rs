@@ -5,6 +5,7 @@ use std::{
 };
 use vesper::{
     doctest::{self, DocTestLimits, DocTestReport},
+    test_report,
     tooling::doc::sources::{SourceLimits, discover},
 };
 
@@ -51,29 +52,43 @@ fn read_source(file: &Path, limits: DocTestLimits) -> Result<String, String> {
     Ok(source.to_string())
 }
 
+fn diags(ds: &[doctest::LocatedDiagnostic]) -> Vec<test_report::Diag<'_>> {
+    ds.iter()
+        .map(|d| test_report::Diag {
+            line: d.line,
+            column: d.column,
+            code: &d.code,
+            message: &d.message,
+        })
+        .collect()
+}
+
 fn print_report(file: &str, report: &DocTestReport) {
-    for d in &report.base_diagnostics {
-        println!("{file}:{}:{}: {}: {}", d.line, d.column, d.code, d.message);
-    }
-    for example in &report.examples {
-        let engine = match example.engine {
-            Some(doctest::Engine::Jit) => " [jit]",
-            Some(doctest::Engine::Evaluator) => " [evaluator]",
-            Some(doctest::Engine::SimpulseEvaluator) => " [simpulse]",
-            None => "",
-        };
-        println!(
-            "{file}:{}:{}: {} doctest {}: {}{engine}",
-            example.line,
-            example.column,
-            if example.passed { "PASS" } else { "FAIL" },
-            example.index,
-            example.message
-        );
-        for d in &example.diagnostics {
-            println!("{file}:{}:{}: {}: {}", d.line, d.column, d.code, d.message);
-        }
-    }
+    let base = diags(&report.base_diagnostics);
+    let example_diags: Vec<_> = report
+        .examples
+        .iter()
+        .map(|e| diags(&e.diagnostics))
+        .collect();
+    let examples: Vec<_> = report
+        .examples
+        .iter()
+        .zip(&example_diags)
+        .map(|(e, ds)| test_report::DocExample {
+            index: e.index,
+            line: e.line,
+            column: e.column,
+            passed: e.passed,
+            message: &e.message,
+            engine: e.engine.map(|engine| match engine {
+                doctest::Engine::Jit => "jit",
+                doctest::Engine::Evaluator => "evaluator",
+                doctest::Engine::SimpulseEvaluator => "simpulse",
+            }),
+            diagnostics: ds,
+        })
+        .collect();
+    print!("{}", test_report::doc_text(file, &base, &examples));
 }
 
 fn parse(args: Vec<String>) -> Result<(Option<String>, bool), String> {
