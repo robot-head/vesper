@@ -1889,8 +1889,12 @@ pub fn free_references(in s: Slice[u64], in pool: Str) -> ChunkSeq[u64] {
 // `Term::free_references` of a definition whose binders start at
 // `binders_at` and whose body starts at `body_at` (its result type, between
 // them, is not walked).
-pub fn free_references_at(in s: Slice[u64], in pool: Str, binders_at: u64, body_at: u64)
-    -> ChunkSeq[u64] {
+pub fn free_references_at(
+    in s: Slice[u64],
+    in pool: Str,
+    binders_at: u64,
+    body_at: u64
+) -> ChunkSeq[u64] {
     let mut r = R { found: ChunkSeq::new(), scope: ChunkSeq::new(), all: false };
     let mut at = binders_at;
     ref_binders(inout r, in s, in pool, inout at);

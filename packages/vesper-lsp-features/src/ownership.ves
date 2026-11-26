@@ -451,24 +451,20 @@ fn bind(
     o.b_os.push(os);
     o.b_oe.push(oe);
     o.b_ty.push(ty);
-    o
-        .b_lin
-        .push(
-            if linear {
-                1
-            } else {
-                0
-            }
-        );
-    o
-        .b_own
-        .push(
-            if owned {
-                1
-            } else {
-                0
-            }
-        );
+    o.b_lin.push(
+        if linear {
+            1
+        } else {
+            0
+        }
+    );
+    o.b_own.push(
+        if owned {
+            1
+        } else {
+            0
+        }
+    );
     o.b_ss.push(ss);
     o.b_se.push(se);
     o.b_head.push(0);
@@ -1180,8 +1176,15 @@ fn expr(inout o: Ow, inout c: Ctx, in a: Ast, in k: Callees, e: u32, consume: bo
 }
 
 // One function (`visit`): its parameters, then its body.
-fn visit(inout o: Ow, inout c: Ctx, in a: Ast, in k: Callees, f: FnNode, owner: u32, self_sym: u32)
-    -> bool {
+fn visit(
+    inout o: Ow,
+    inout c: Ctx,
+    in a: Ast,
+    in k: Callees,
+    f: FnNode,
+    owner: u32,
+    self_sym: u32
+) -> bool {
     if f.body == NONE {
         return true;
     }
@@ -1948,8 +1951,12 @@ fn same_bytes(in x: Slice[u8], in bytes: Slice[u8], at: u64, len: u64) -> bool {
 
 // `ceiling_grants`: by the effect's name, or by its exact rendering
 // (compared without white space).
-fn grants(in ceil: ChunkSeq[u64], in bytes: Slice[u8], names_at: u64, in rendered: Slice[u8])
-    -> bool {
+fn grants(
+    in ceil: ChunkSeq[u64],
+    in bytes: Slice[u8],
+    names_at: u64,
+    in rendered: Slice[u8]
+) -> bool {
     let mut canonical = ChunkSeq::new[u8]();
     let mut bracket = NONE64;
     for i in 0..rendered.len() {
@@ -2168,15 +2175,13 @@ fn rank_members(
         rk.l_len.push(wrapping_sub(len, pl));
         rk.t_at.push(start);
         rk.d_len.push(dl);
-        rk
-            .g_len
-            .push(
-                if badged {
-                    wrapping_sub(wrapping_sub(rk.pool.len(), start), dl)
-                } else {
-                    NONE64
-                }
-            );
+        rk.g_len.push(
+            if badged {
+                wrapping_sub(wrapping_sub(rk.pool.len(), start), dl)
+            } else {
+                NONE64
+            }
+        );
     }
     // Stable order by tier, then label.
     for i in 0..rk.tier.len() {

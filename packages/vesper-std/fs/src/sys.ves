@@ -7,7 +7,7 @@
 // from `errno` to an error kind. Errors come back through `err` as the
 // error word of src/lib.ves (the kind in the low 8 bits, the OS error in
 // the high 32).
-use self::{Metadata, kind_file, kind_dir, kind_symlink, kind_other};
+use self::{FileId, Metadata, kind_file, kind_dir, kind_symlink, kind_other};
 
 const EINTR: u32 = 4;
 const ENOENT: u32 = 2;
@@ -141,7 +141,63 @@ pub fn os_open(in path: Slice[u8], mode: u32, inout err: u64) -> i32 eff [Ffi[St
 
 // `os_open` creating a file with permission bits `perm` (less the umask).
 fn open_perm(in path: Slice[u8], mode: u32, perm: u32, inout err: u64) -> i32 eff [Ffi[StdFs]] {
-    let flags = open_flags(mode);
+    open_raw(in path, open_flags(mode), perm, inout err)
+}
+
+// Open `path` for reading without following a final symbolic link or
+// blocking on a FIFO (`O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`): its
+// descriptor, or -1 with `err` set.
+pub fn os_open_nofollow(in path: Slice[u8], inout err: u64) -> i32 eff [Ffi[StdFs]] {
+    open_raw(in path, StdFs::O_NOFOLLOW | StdFs::O_NONBLOCK | StdFs::O_CLOEXEC, 0, inout err)
+}
+
+// Create a new file at `path` (`O_EXCL`) whose permission bits are 0o600
+// (less the umask): its descriptor, or -1 with `err` set.
+pub fn os_create_private(in path: Slice[u8], inout err: u64) -> i32 eff [Ffi[StdFs]] {
+    open_perm(in path, 2, 384, inout err)
+}
+
+// Set the open file's permission word (`fchmod`): 0, or 1 with `err` set.
+pub fn os_set_file_perm(fd: i32, perm: u32, inout err: u64) -> u32 eff [Ffi[StdFs]] {
+    let (r, e) = StdFs::fchmod(fd, perm & 4095);
+    status(r, e, inout err)
+}
+
+// What identifies the open file `fd` (`fstat`), with `err` set on failure.
+// `std`'s Unix `MetadataExt` reads `dev` and `ino` from the same fields
+// (`st_dev` is 32 bits on Apple).
+pub fn os_file_id(fd: i32, inout err: u64) -> FileId eff [Ffi[StdFs]] {
+    let mut st = new_stat();
+    let (r, e) = StdFs::fstat(fd, inout st);
+    if status(r, e, inout err) != 0 {
+        return FileId {
+            regular: false,
+            size: 0,
+            mtime_s: 0,
+            mtime_ns: 0,
+            dev: 0,
+            ino: 0,
+            perm: 0,
+        };
+    }
+    let m = metadata_of(in st);
+    let dev = if StdFs::OS == 2 {
+        stat_word(in st, 0) & 4294967295
+    } else {
+        stat_word(in st, 0)
+    };
+    FileId {
+        regular: m.kind == kind_file(),
+        size: m.size,
+        mtime_s: m.mtime_s,
+        mtime_ns: m.mtime_ns,
+        dev: dev,
+        ino: stat_word(in st, 1),
+        perm: m.mode,
+    }
+}
+
+fn open_raw(in path: Slice[u8], flags: i32, perm: u32, inout err: u64) -> i32 eff [Ffi[StdFs]] {
     loop {
         match StdFs::open(in path, flags, widen_i64(perm)) {
             Result::Ok((fd, e)) => {
@@ -168,8 +224,12 @@ fn open_perm(in path: Slice[u8], mode: u32, perm: u32, inout err: u64) -> i32 ef
 // a private file is never readable by others on its way; the contents
 // then go through a 64 KiB buffer. The bytes copied, with `err` set on
 // failure.
-pub fn os_copy(in from: Slice[u8], in to: Slice[u8], perm: u32, inout err: u64)
-    -> u64 eff [Ffi[StdFs]] {
+pub fn os_copy(
+    in from: Slice[u8],
+    in to: Slice[u8],
+    perm: u32,
+    inout err: u64
+) -> u64 eff [Ffi[StdFs]] {
     let src = os_open(in from, 0, inout err);
     if src < 0 {
         return 0;
@@ -616,8 +676,12 @@ fn unlink_at(dirfd: i32, in name: Slice[u8], flags: i32, inout err: u64) -> u32 
 // Remove the directory `name` under `dirfd` and everything in it; a
 // `child` that turns out not to be a directory is unlinked, and one that
 // is already gone is not an error.
-fn remove_tree(dirfd: i32, in name: Slice[u8], child: bool, inout err: u64)
-    -> u32 eff [Ffi[StdFs]] {
+fn remove_tree(
+    dirfd: i32,
+    in name: Slice[u8],
+    child: bool,
+    inout err: u64
+) -> u32 eff [Ffi[StdFs]] {
     let flags = StdFs::O_CLOEXEC | StdFs::O_NOFOLLOW | StdFs::O_DIRECTORY;
     let fd = loop {
         match StdFs::openat(dirfd, in name, flags, 0) {

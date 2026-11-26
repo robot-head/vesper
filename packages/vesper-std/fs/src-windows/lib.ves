@@ -292,8 +292,10 @@ pub fn read_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoErr
 
 // At most the first `limit` bytes of the file at `path` (`Read::take`):
 // no more is read, however long the file is.
-pub fn read_path_limit(in path: Slice[u8], limit: u64)
-    -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+pub fn read_path_limit(
+    in path: Slice[u8],
+    limit: u64
+) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
     let h = open_handle(in path, StdFs::GENERIC_READ, StdFs::OPEN_EXISTING);
     let mut fsize: i64 = 0;
     let (sok, _) = StdFs::GetFileSizeEx(h, inout fsize);
@@ -506,6 +508,197 @@ pub fn replace_path(in path: Slice[u8], in data: Slice[u8]) eff [Ffi[StdFs], Fai
 }
 
 // ---------------------------------------------------------------------------
+// Checked replacement (see src/lib.ves).
+
+pub copy struct FileId {
+    pub regular: bool,
+    pub size: u64,
+    pub mtime_s: i64,
+    pub mtime_ns: u32,
+    pub dev: u64,
+    pub ino: u64,
+    pub perm: u32,
+}
+
+pub struct Opened {
+    pub bytes: ChunkSeq[u8],
+    pub id: FileId,
+}
+
+// `OpenOptions::read` with `FILE_FLAG_OPEN_REPARSE_POINT` (and
+// `FILE_FLAG_BACKUP_SEMANTICS`, which `std` sets so a directory opens and
+// reports itself as one), then
+// `File::metadata` (`GetFileInformationByHandle`): a reparse point or a
+// directory is not a regular file. `std` compares no device or inode on
+// Windows, so both are 0; `perm` is the file attributes, which
+// `create_staged` copies as `File::set_permissions` does.
+pub fn read_nofollow_limit(
+    in path: Slice[u8],
+    limit: u64
+) -> Opened eff [Ffi[StdFs], Fail[IoError]] {
+    let wpath = utf8_to_utf16(in path);
+    let h = match StdFs::CreateFileW(
+        in wpath.as_slice(),
+        StdFs::GENERIC_READ,
+        StdFs::FILE_SHARE_ALL,
+        0,
+        StdFs::OPEN_EXISTING,
+        StdFs::FILE_FLAG_OPEN_REPARSE_POINT | StdFs::FILE_FLAG_BACKUP_SEMANTICS,
+        0
+    ) {
+        Result::Ok((h, err)) => {
+            if h == StdFs::INVALID_HANDLE_VALUE {
+                return raise_io(widen_u64(err));
+            }
+            h
+        }
+        Result::Err(_) => return raise_kind(invalid_input()),
+    };
+    let mut info = Win32HandleInfo {
+        dwFileAttributes: 0,
+        ftCreationTimeLow: 0,
+        ftCreationTimeHigh: 0,
+        ftLastAccessTimeLow: 0,
+        ftLastAccessTimeHigh: 0,
+        ftLastWriteTimeLow: 0,
+        ftLastWriteTimeHigh: 0,
+        dwVolumeSerialNumber: 0,
+        nFileSizeHigh: 0,
+        nFileSizeLow: 0,
+        nNumberOfLinks: 0,
+        nFileIndexHigh: 0,
+        nFileIndexLow: 0,
+    };
+    let (iok, ierr) = StdFs::GetFileInformationByHandle(h, inout info);
+    if iok == 0 {
+        let _ = StdFs::CloseHandle(h);
+        return raise_io(widen_u64(ierr));
+    }
+    let attrs = info.dwFileAttributes;
+    let (ms, mns) = filetime_to_unix(info.ftLastWriteTimeLow, info.ftLastWriteTimeHigh);
+    let id = FileId {
+        regular: (attrs & (StdFs::FILE_ATTRIBUTE_DIRECTORY | StdFs::FILE_ATTRIBUTE_REPARSE_POINT))
+            == 0,
+        size: wrapping_shl_u64(widen_u64(info.nFileSizeHigh), 32) | widen_u64(info.nFileSizeLow),
+        mtime_s: ms,
+        mtime_ns: mns,
+        dev: 0,
+        ino: 0,
+        perm: attrs,
+    };
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut total: u64 = 0;
+    let mut err: u32 = 0;
+    if id.regular && id.size < limit {
+        loop {
+            if total >= limit {
+                break;
+            }
+            let room = wrapping_sub(limit, total);
+            let step: u64 = if room < 65536 {
+                room
+            } else {
+                65536
+            };
+            buf.resize(wrapping_add(total, step), 0);
+            let end = buf.len();
+            let mut got: u32 = 0;
+            let (ok, rerr) = StdFs::ReadFile(h, inout buf[total..end], inout got, 0);
+            if ok == 0 {
+                if rerr != StdFs::ERROR_HANDLE_EOF && rerr != StdFs::ERROR_BROKEN_PIPE {
+                    err = rerr;
+                }
+                break;
+            }
+            if got == 0 {
+                break;
+            }
+            total = wrapping_add(total, widen_u64(got));
+        }
+    }
+    let _ = StdFs::CloseHandle(h);
+    if err != 0 {
+        return raise_io(widen_u64(err));
+    }
+    buf.truncate(total);
+    Opened {
+        bytes: buf,
+        id: id,
+    }
+}
+
+pub fn same_file(a: FileId, b: FileId) -> bool {
+    a.dev == b.dev
+        && a.ino == b.ino
+        && a.size == b.size
+        && a.mtime_s == b.mtime_s
+        && a.mtime_ns == b.mtime_ns
+}
+
+// `create_new`, `write_all`, the attributes `perm` (`set_permissions`),
+// `sync_all` (`FlushFileBuffers`).
+pub fn create_staged(in path: Slice[u8], in data: Slice[u8], perm: u32) eff [
+    Ffi[StdFs],
+    Fail[IoError]
+] {
+    let h = open_handle(in path, StdFs::GENERIC_WRITE, StdFs::CREATE_NEW);
+    let mut err = write_all_handle(h, in data);
+    if err == 0 {
+        let wp = utf8_to_utf16(in path);
+        match StdFs::SetFileAttributesW(in wp.as_slice(), perm) {
+            Result::Ok((ok, e)) => {
+                if ok == 0 {
+                    err = e;
+                }
+            }
+            Result::Err(_) => {
+                err = 87;
+            }
+        }
+    }
+    if err == 0 {
+        let (fok, ferr) = StdFs::FlushFileBuffers(h);
+        if fok == 0 {
+            err = ferr;
+        }
+    }
+    let _ = StdFs::CloseHandle(h);
+    if err != 0 {
+        remove_staged(in path);
+        return raise_io(widen_u64(err));
+    }
+}
+
+// Windows refuses to delete a read-only file: clear that attribute on the
+// staged file first.
+pub fn remove_staged(in path: Slice[u8]) eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        remove_staged_w(in path);
+    } with {
+        return v => v,
+        raise(_, _) => {},
+    }
+}
+
+fn remove_staged_w(in path: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    let wp = utf8_to_utf16(in path);
+    match StdFs::GetFileAttributesW(in wp.as_slice()) {
+        Result::Ok((a, _)) => {
+            let ro = StdFs::FILE_ATTRIBUTE_READONLY;
+            if a != 4294967295 && (a & ro) != 0 {
+                let _ = StdFs::SetFileAttributesW(in wp.as_slice(), a & (4294967295 ^ ro));
+            }
+        }
+        Result::Err(_) => {}
+    }
+    let _ = StdFs::DeleteFileW(in wp.as_slice());
+}
+
+pub fn process_id() -> u32 eff [Ffi[StdFs]] {
+    StdFs::GetCurrentProcessId()
+}
+
+// ---------------------------------------------------------------------------
 // Paths.
 
 fn check_win32(res: Result[(i32, u32), ForeignInvalid]) eff [Fail[IoError]] {
@@ -522,6 +715,14 @@ fn check_win32(res: Result[(i32, u32), ForeignInvalid]) eff [Fail[IoError]] {
 pub fn rename(in from: Str, in to: Str) eff [Ffi[StdFs], Fail[IoError]] {
     let wf = utf8_to_utf16(in from.as_bytes());
     let wt = utf8_to_utf16(in to.as_bytes());
+    check_win32(
+        StdFs::MoveFileExW(in wf.as_slice(), in wt.as_slice(), StdFs::MOVEFILE_REPLACE_EXISTING)
+    );
+}
+
+pub fn rename_path(in from: Slice[u8], in to: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    let wf = utf8_to_utf16(in from);
+    let wt = utf8_to_utf16(in to);
     check_win32(
         StdFs::MoveFileExW(in wf.as_slice(), in wt.as_slice(), StdFs::MOVEFILE_REPLACE_EXISTING)
     );
@@ -867,6 +1068,10 @@ pub fn metadata_path(in path: Slice[u8]) -> Metadata eff [Ffi[StdFs], Fail[IoErr
 
 pub fn symlink_metadata(in path: Str) -> Metadata eff [Ffi[StdFs], Fail[IoError]] {
     meta_path(in path.as_bytes(), false)
+}
+
+pub fn symlink_metadata_path(in path: Slice[u8]) -> Metadata eff [Ffi[StdFs], Fail[IoError]] {
+    meta_path(in path, false)
 }
 
 // `std::fs::canonicalize`: open `path` (a directory too, with backup

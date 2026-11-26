@@ -435,6 +435,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Stage 2 retirement (#2053): @vesper/run against `Runtime::run`
+        # over the same corpus.
+        "test/self_host_run": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # SH3 lane 13 (#1252): @vesper/place-ir-lower against
         # `ir::lower_world` over the same corpus.
         "test/self_host_ir_lower": glob([
@@ -637,6 +644,15 @@ vesper_crate(
         # SH5 lane 18 (#1341): `vesper proof-audit` built from
         # @vesper/proof-audit and its @vesper-std dependencies, beside Rust's.
         "test/self_host_proof_audit": glob(["packages/**"]) + ["//crates/vesper-serde:files"],
+        # #1341: @vesper/verify (theorem discovery, contract bindings) against
+        # src/verify_commands.rs over every Lean file in the repository.
+        "test/self_host_verify": glob([
+            "packages/**",
+            "lean/**",
+            "tools/**/*.lean",
+            "tests/fixtures/**/*.lean",
+            "docs/rfcs/**/*.lean",
+        ]) + ["//crates/vesper-serde:files"],
         # Self-hosting SH5 lane 18 (#1341): @vesper/lean-extract against
         # lean::extract on the same corpus; it imports @vesper/lean-syntax.
         "test/self_host_lean_extract": glob([
@@ -957,6 +973,9 @@ vesper_crate(
         "test/self_host_place_ir_jit": 4,
         "test/self_host_swap_inputs": 4,
         "test/wasm_seed_breadth": 4,
+        # Its stage2 builds, split three ways, so no shard waits for one big
+        # memory reservation at the end of "Test all targets".
+        "test/wasm_seed_package_io": 3,
     },
     # Reservations include subprocess overhead; they do not enforce RSS limits.
     # `lean_replay` marks the Lean/Logos suite run by "Native and acceptance
@@ -979,11 +998,13 @@ vesper_crate(
             "resources:memory:5120",
             "resources:cpu:4",
         ],
-        # At most two stage2 compiler builds at once (STAGE2_SLOTS in the test),
-        # each under Wasmtime with up to 4 GiB of linear memory, plus the
-        # in-process compile. Unreserved, it ran the 22GB VM out of memory.
+        # Per shard (test_shards): one stage2 compiler build at a time
+        # (stage2_slots() in the test), under Wasmtime with up to 4 GiB of
+        # linear memory, plus the in-process compile. Locally each of the
+        # three shards peaked at 3.4-4.6 GiB with its subprocesses. Unsharded
+        # and unreserved, it ran the 22GB VM out of memory.
         "test/wasm_seed_package_io": [
-            "resources:memory:12288",
+            "resources:memory:6144",
             "resources:cpu:2",
         ],
         # Peaks near 6.8 GiB locally. Unreserved, it ran alongside the other
@@ -1253,6 +1274,8 @@ vesper_crate(
         "test/self_host_codegen_export": "long",
         "test/self_host_place_ir_jit": "long",
         "test/self_host_ir_lower": "long",
+        # Every runnable corpus world under six fuel and optimizer settings.
+        "test/self_host_run": "long",
         # The eBPF backend differential (#1290) loads every corpus world.
         "test/self_host_ebpf_backend": "long",
         "test/self_host_codegen_calls": "long",
@@ -1590,6 +1613,21 @@ vesper_package(
     deps = ["//crates/vesper-serde:port_package"],
 )
 
+# The verified code generator (#1886, part 4d-2), for the hybrid's
+# `verified_codegen` swap.
+vesper_package(
+    name = "verified_codegen_package",
+    srcs = glob(["packages/vesper-verified-codegen/src/**/*.ves"]),
+    manifest = "packages/vesper-verified-codegen/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":check_layout_package",
+        ":place_ir_package",
+        ":std_collections_package",
+    ],
+)
+
 # Self-hosting SH5 lane 18 (#1341): Lean extraction, for the hybrid's
 # `lean_extract` swap.
 # @vesper/proof-audit, `vesper proof-audit` in Vesper (SH5 lane 18, #1341),
@@ -1660,6 +1698,19 @@ vesper_package(
     manifest = "packages/vesper-place-ir/Loom.toml",
     visibility = ["//visibility:public"],
     deps = [":check_data_package"],
+)
+
+# The `vesper run` evaluator for the hybrid compiler's run module (Stage 2
+# retirement, #2053).
+vesper_package(
+    name = "run_package",
+    srcs = glob(["packages/vesper-run/src/**/*.ves"]),
+    manifest = "packages/vesper-run/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":place_ir_package",
+    ],
 )
 
 # The scalar lowering's plan and emission for the hybrid compiler's

@@ -544,8 +544,13 @@ fn known_zero_bits(c: u64) -> Scalar {
 
 // Refine `(a, b)` assuming `a op b` holds (`holds`) or does not; None when
 // that outcome is impossible.
-pub fn refine_jmp(op: JmpOp, wide: bool, a: Scalar, b: Scalar, holds: bool)
-    -> Option[(Scalar, Scalar)] {
+pub fn refine_jmp(
+    op: JmpOp,
+    wide: bool,
+    a: Scalar,
+    b: Scalar,
+    holds: bool
+) -> Option[(Scalar, Scalar)] {
     if !wide {
         if is_const(a) && is_const(b) {
             let r = cmp_concrete(op, false, a.umin, b.umin);

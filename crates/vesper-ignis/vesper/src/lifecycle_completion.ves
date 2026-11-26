@@ -1,7 +1,11 @@
 // `validate_completion`: the reported point must be new, reserved, and an
 // original signal whose earlier waits on its stream were all observed.
-pub fn lifecycle_check_completion(in l: Lifecycle, runtime: u64, index: u64, value: u64)
-    -> LifeError {
+pub fn lifecycle_check_completion(
+    in l: Lifecycle,
+    runtime: u64,
+    index: u64,
+    value: u64
+) -> LifeError {
     if !owns(in l, runtime, index) {
         return LifeError::ForeignTimeline;
     }

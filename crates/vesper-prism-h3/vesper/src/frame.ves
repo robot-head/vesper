@@ -304,8 +304,11 @@ pub fn buffered_type(ty: u64) -> bool {
         || ty == priority_update_push()
 }
 
-pub fn parse_payload(ty: u64, in p: Slice[u8], inout out: ChunkSeq[u8])
-    -> Result[FrameOut, FrameError] {
+pub fn parse_payload(
+    ty: u64,
+    in p: Slice[u8],
+    inout out: ChunkSeq[u8]
+) -> Result[FrameOut, FrameError] {
     if ty == headers_type() {
         out.extend(in p);
         return Result::Ok(FrameOut::Headers);

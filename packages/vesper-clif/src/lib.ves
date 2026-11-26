@@ -863,8 +863,14 @@ impl Func {
     pub fn stub_trap(inout self, b: u32, code: u64) {
         let a = ChunkSeq::new[u32]();
         let none = ChunkSeq::new[u64]();
-        let i = self
-            .stub_inst(b, OP_TRAP, F_TERMINATOR | F_TRAP | F_TRAP_CODE, code, in a, in none);
+        let i = self.stub_inst(
+            b,
+            OP_TRAP,
+            F_TERMINATOR | F_TRAP | F_TRAP_CODE,
+            code,
+            in a,
+            in none
+        );
     }
 
     fn result_of(inout self, i: u32, k: u32, ty: u64) {

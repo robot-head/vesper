@@ -218,8 +218,12 @@ fn try_open(inout s: Store, in uri: Str, version: i64, in text: Str) -> Result[u
     }
 }
 
-fn try_change(inout s: Store, in uri: Str, version: i64, in changes: ChunkSeq[Change])
-    -> Result[u64, StoreError] {
+fn try_change(
+    inout s: Store,
+    in uri: Str,
+    version: i64,
+    in changes: ChunkSeq[Change]
+) -> Result[u64, StoreError] {
     handle Fail[StoreError] in {
         count_ok(store_change(inout s, in uri, version, in changes))
     } with {
@@ -300,19 +304,18 @@ pub fn lsp_documents(in input: Str) -> ChunkSeq[u64] {
                 let len = word(in b, inout r);
                 let t_off = word(in b, inout r);
                 let t_len = word(in b, inout r);
-                changes
-                    .push(
-                        Change {
-                            has_range: has_range,
-                            range: Range {
-                                start: Position { line: sl, character: sc },
-                                end: Position { line: el, character: ec }
-                            },
-                            has_len: has_len,
-                            len: len,
-                            text: text_at(in pool, t_off, t_len)
-                        }
-                    );
+                changes.push(
+                    Change {
+                        has_range: has_range,
+                        range: Range {
+                            start: Position { line: sl, character: sc },
+                            end: Position { line: el, character: ec }
+                        },
+                        has_len: has_len,
+                        len: len,
+                        text: text_at(in pool, t_off, t_len)
+                    }
+                );
             }
             let got = try_change(inout s, in uri, version, in changes);
             after(inout out, in s, got);

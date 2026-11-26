@@ -107,8 +107,10 @@ pub fn charge(inout budget: u64, n: u64) eff [Fail[CpErr]] {
 
 // The identity digest of these words (`checkpoint::identity`, which
 // charges one unit of work per word).
-pub fn identity(in words: Slice[u64], inout budget: u64)
-    -> ChunkSeq[u8] eff [Ffi[Blake3], Fail[CpErr]] {
+pub fn identity(
+    in words: Slice[u64],
+    inout budget: u64
+) -> ChunkSeq[u8] eff [Ffi[Blake3], Fail[CpErr]] {
     let n = words.len();
     let mut msg = ChunkSeq::with_capacity[u8](wrapping_add(68, wrapping_mul(n, 8)));
     // "vesper.flux.execution-identity/1\0vesper.arith.checked/1\0row.i64.le/1"
@@ -210,8 +212,12 @@ pub fn image_check(in image: Slice[u8]) eff [Ffi[Blake3], Fail[CpErr]] {
 }
 
 // `Reader::take`: one unit of work, then `n` bytes at the cursor.
-pub fn take(in body: Slice[u8], inout cursor: u64, n: u64, inout budget: u64)
-    -> u64 eff [Fail[CpErr]] {
+pub fn take(
+    in body: Slice[u8],
+    inout cursor: u64,
+    n: u64,
+    inout budget: u64
+) -> u64 eff [Fail[CpErr]] {
     charge(inout budget, 1);
     take_prepaid(in body, inout cursor, n)
 }
@@ -227,8 +233,12 @@ pub fn take_prepaid(in body: Slice[u8], inout cursor: u64, n: u64) -> u64 eff [F
     at
 }
 
-pub fn read_int(in body: Slice[u8], inout cursor: u64, n: u64, inout budget: u64)
-    -> u64 eff [Fail[CpErr]] {
+pub fn read_int(
+    in body: Slice[u8],
+    inout cursor: u64,
+    n: u64,
+    inout budget: u64
+) -> u64 eff [Fail[CpErr]] {
     let at = take(in body, inout cursor, n, inout budget);
     let mut v: u64 = 0;
     let mut k = n;

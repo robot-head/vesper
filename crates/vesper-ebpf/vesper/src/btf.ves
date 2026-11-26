@@ -359,14 +359,13 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
                 || kind == BtfKind::FuncProto
         );
         out.push(kind);
-        out
-            .push(
-                if named {
-                    name
-                } else {
-                    0
-                }
-            );
+        out.push(
+            if named {
+                name
+            } else {
+                0
+            }
+        );
         out.push(a);
         out.push(b);
         out.push(c);
@@ -388,22 +387,20 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
             } else if kind == BtfKind::Enum {
                 out.push(le32(in types, at));
                 let v = le32(in types, wrapping_add(at, 4));
-                out
-                    .push(
-                        if kflag {
-                            sext32(v)
-                        } else {
-                            v
-                        }
-                    );
+                out.push(
+                    if kflag {
+                        sext32(v)
+                    } else {
+                        v
+                    }
+                );
             } else if kind == BtfKind::Enum64 {
                 out.push(le32(in types, at));
-                out
-                    .push(
-                        le32(in types, wrapping_add(at, 4)) | (
-                            le32(in types, wrapping_add(at, 8)) << 32
-                        )
-                    );
+                out.push(
+                    le32(in types, wrapping_add(at, 4)) | (
+                        le32(in types, wrapping_add(at, 8)) << 32
+                    )
+                );
             } else if kind == BtfKind::FuncProto {
                 out.push(le32(in types, at));
                 out.push(le32(in types, wrapping_add(at, 4)));
@@ -559,8 +556,12 @@ fn parse_sections(
 
 // `Btf::parse_with`: `split` with the base's type count (including void)
 // and string section, or a standalone blob (`base_types` 1, no strings).
-pub fn parse_btf(in btf: Slice[u8], split: bool, base_types: u64, in base_strings: Slice[u8])
-    -> ChunkSeq[u64] {
+pub fn parse_btf(
+    in btf: Slice[u8],
+    split: bool,
+    base_types: u64,
+    in base_strings: Slice[u8]
+) -> ChunkSeq[u64] {
     let len = btf.len();
     if len < BTF_HDR_LEN || (byte(in btf, 0) | (byte(in btf, 1) << 8)) != BtfHeader::Magic {
         return failed(0, 0);

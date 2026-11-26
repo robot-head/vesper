@@ -63,8 +63,11 @@ pub fn put(inout s: Slice[u32], i: u64, v: f32) eff [Fail[RuntimeError], Fail[Ar
 }
 
 // `RampTile::advance_lane_scalar` for lane `lane` of the ramp at word `base`.
-pub fn ramp_lane(inout ramps: Slice[u32], base: u64, lane: u64)
-    -> f32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+pub fn ramp_lane(
+    inout ramps: Slice[u32],
+    base: u64,
+    lane: u64
+) -> f32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
     let cur = base + lane;
     let rem = ramps[base + RampSlice::Remaining + lane];
     if rem > 0 {
@@ -378,8 +381,12 @@ pub fn k_pid_check(in gains: Slice[u32]) eff [
 // `PidController::step`. `state` is the integral, whether there is a
 // previous measurement (0 or 1) and that measurement, as words; it changes
 // only when the step succeeds.
-pub fn k_pid_step(in gains: Slice[u32], inout st: Slice[u32], setpoint: u32, measurement: u32)
-    -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[PidFault]] {
+pub fn k_pid_step(
+    in gains: Slice[u32],
+    inout st: Slice[u32],
+    setpoint: u32,
+    measurement: u32
+) -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[PidFault]] {
     let sp = from_bits_f32(setpoint);
     let m = from_bits_f32(measurement);
     if !is_finite(sp) || !is_finite(m) {

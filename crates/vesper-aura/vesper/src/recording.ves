@@ -335,19 +335,17 @@ pub fn copy_state(in src: RState, inout dst: RState) {
             if fits(v.tstart, v.tlen, src.text.len()) {
                 dst.text.extend(in src.text[v.tstart..add(v.tstart, v.tlen)]);
             }
-            dst
-                .slots
-                .push(
-                    RSlot {
-                        serial: v.serial,
-                        widget: v.widget,
-                        property: v.property,
-                        tag: v.tag,
-                        payload: v.payload,
-                        tstart: tstart,
-                        tlen: v.tlen
-                    }
-                );
+            dst.slots.push(
+                RSlot {
+                    serial: v.serial,
+                    widget: v.widget,
+                    property: v.property,
+                    tag: v.tag,
+                    payload: v.payload,
+                    tstart: tstart,
+                    tlen: v.tlen
+                }
+            );
             dst.slive.push(true);
         }
     }
@@ -423,8 +421,12 @@ pub fn session_ok(in s: RState, session: u64) -> bool {
 }
 
 // RecordingBackend::set_user_state after the thread check.
-pub fn do_recorder_set_user_state(inout rec: Recorder, session: u64, serial: u64, user: u64)
-    -> Option[BackendFault] {
+pub fn do_recorder_set_user_state(
+    inout rec: Recorder,
+    session: u64,
+    serial: u64,
+    user: u64
+) -> Option[BackendFault] {
     if !session_ok(in rec.st, session) {
         return Option::Some(BackendFault::ForeignSession);
     }
@@ -448,8 +450,11 @@ pub fn do_recorder_set_user_state(inout rec: Recorder, session: u64, serial: u64
 }
 
 // The checks of RecordingBackend::widget: foreign session or stale widget.
-pub fn do_recorder_check_widget(in rec: Recorder, session: u64, serial: u64)
-    -> Option[BackendFault] {
+pub fn do_recorder_check_widget(
+    in rec: Recorder,
+    session: u64,
+    serial: u64
+) -> Option[BackendFault] {
     if !session_ok(in rec.st, session) {
         Option::Some(BackendFault::ForeignSession)
     } else if widget_index(in rec.st, serial) == NONE_ID {
@@ -470,8 +475,11 @@ pub fn do_recorder_check_slot(in rec: Recorder, session: u64, serial: u64) -> Op
 }
 
 // RecordingBackend::dispatch: the handler of a live registration.
-pub fn do_recorder_dispatch(in rec: Recorder, session: u64, serial: u64)
-    -> Result[u64, BackendFault] {
+pub fn do_recorder_dispatch(
+    in rec: Recorder,
+    session: u64,
+    serial: u64
+) -> Result[u64, BackendFault] {
     if !session_ok(in rec.st, session) {
         Result::Err(BackendFault::ForeignSession)
     } else {

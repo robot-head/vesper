@@ -281,8 +281,12 @@ fn insert_departure(inout l: LinkState, departure: u64) {
 // `now_ns` is the virtual clock (never later than `at_ns`); queue entries
 // that departed by then are discarded. Fixed draw order: GE step, GE loss,
 // independent loss, reorder.
-pub fn link_state_transmit(inout l: LinkState, now_ns: u64, at_ns: u64, bytes: u32)
-    -> TransmitOutcome {
+pub fn link_state_transmit(
+    inout l: LinkState,
+    now_ns: u64,
+    at_ns: u64,
+    bytes: u32
+) -> TransmitOutcome {
     discard_served(inout l, now_ns);
     let p = l.params;
     let mut ge_lost = false;

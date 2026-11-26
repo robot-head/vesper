@@ -370,7 +370,12 @@ pub fn build_words(in input: Str) -> ChunkSeq[u64] {
 // entry result words) and the certificate as `check_input` writes it;
 // then the artifact's bytes (none on an error).
 pub fn compile_words(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
+    compile_bytes(in input.as_bytes())
+}
+
+// `compile_words` of the input's bytes (the hybrid's `verified_codegen`
+// swap).
+pub fn compile_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
     let arch = word_at(in b, 0);
     let os = word_at(in b, 1);
     let protocol = wrapping_u8(word_at(in b, 2));

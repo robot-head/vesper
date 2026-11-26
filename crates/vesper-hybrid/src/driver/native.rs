@@ -47,6 +47,13 @@ impl Session {
                 // it holds (`run` in modules/driver/src/lib.ves, #2024).
                 let world = &self.checked()?.world;
                 let entry = o.entry();
+                // The Vesper evaluator (#2053), unless it declines the program.
+                if let Some(answer) =
+                    crate::vesper_hybrid::driver_run(world, entry, o.fuel, o.optimize)
+                {
+                    println!("{}", answer?);
+                    return Ok(0);
+                }
                 let mut runtime = Runtime::new(world);
                 runtime.fuel = o.fuel;
                 runtime.optimize = o.optimize;

@@ -79,8 +79,14 @@ fn build_sum(inout m: Module, f: FuncId, sig: SigId) -> bool eff [Ffi[Cranelift]
 
 // pilot_call(x) = pilot_arith(x, x + 1) + pilot_sum(x) + table[x & 3], with
 // a variable and a data object.
-fn build_call(inout m: Module, f: FuncId, sig: SigId, arith: FuncId, sum: FuncId, table: DataId)
-    -> bool eff [Ffi[Cranelift]] {
+fn build_call(
+    inout m: Module,
+    f: FuncId,
+    sig: SigId,
+    arith: FuncId,
+    sum: FuncId,
+    table: DataId
+) -> bool eff [Ffi[Cranelift]] {
     let mut b = match builder_new(in m, sig) {
         Some(b) => b,
         None => return false,

@@ -153,8 +153,10 @@ pub fn read_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoErr
 
 // At most the first `limit` bytes of the file at `path` (`Read::take`):
 // no more is read, however long the file is.
-pub fn read_path_limit(in path: Slice[u8], limit: u64)
-    -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+pub fn read_path_limit(
+    in path: Slice[u8],
+    limit: u64
+) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
     let mut err: u64 = 0;
     let mut f = match StdFs::vstd_fs_open(in path, mode_read(), inout err) {
         Option::Some(f) => f,
@@ -348,6 +350,95 @@ fn check(status: u32, err: u64) eff [Fail[IoError]] {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Checked replacement (see src/lib.ves). WASI 0.2 has no no-follow open,
+// device or inode, permission bits or process id: the file is opened as
+// `OpenOptions::read` opens it there, identified by its size and
+// modification time, and staged without a permission copy.
+
+pub copy struct FileId {
+    pub regular: bool,
+    pub size: u64,
+    pub mtime_s: i64,
+    pub mtime_ns: u32,
+    pub dev: u64,
+    pub ino: u64,
+    pub perm: u32,
+}
+
+pub struct Opened {
+    pub bytes: ChunkSeq[u8],
+    pub id: FileId,
+}
+
+pub fn read_nofollow_limit(
+    in path: Slice[u8],
+    limit: u64
+) -> Opened eff [Ffi[StdFs], Fail[IoError]] {
+    let m = meta_path(in path, true);
+    let id = FileId {
+        regular: m.kind == kind_file(),
+        size: m.size,
+        mtime_s: m.mtime_s,
+        mtime_ns: m.mtime_ns,
+        dev: 0,
+        ino: 0,
+        perm: 0,
+    };
+    let bytes = if id.regular && id.size < limit {
+        read_path_limit(in path, limit)
+    } else {
+        ChunkSeq::new[u8]()
+    };
+    Opened {
+        bytes: bytes,
+        id: id,
+    }
+}
+
+pub fn same_file(a: FileId, b: FileId) -> bool {
+    a.dev == b.dev
+        && a.ino == b.ino
+        && a.size == b.size
+        && a.mtime_s == b.mtime_s
+        && a.mtime_ns == b.mtime_ns
+}
+
+pub fn create_staged(in path: Slice[u8], in data: Slice[u8], perm: u32) eff [
+    Ffi[StdFs],
+    Fail[IoError]
+] {
+    let _ = perm;
+    let mut err: u64 = 0;
+    let mut f = match StdFs::vstd_fs_open(in path, mode_create_new(), inout err) {
+        Option::Some(f) => f,
+        Option::None => return raise_io(err),
+    };
+    let mut failed = StdFs::vstd_fs_write(inout f, in data, inout err);
+    if failed == 0 {
+        failed = StdFs::vstd_fs_sync(inout f, inout err);
+    }
+    StdFs::vstd_fs_close(f);
+    if failed != 0 {
+        remove_staged(in path);
+        return raise_io(err);
+    }
+}
+
+pub fn remove_staged(in path: Slice[u8]) eff [Ffi[StdFs]] {
+    let mut err: u64 = 0;
+    let _ = StdFs::vstd_fs_remove_file(in path, inout err);
+}
+
+pub fn process_id() -> u32 eff [Ffi[StdFs]] {
+    0
+}
+
+pub fn rename_path(in from: Slice[u8], in to: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    let mut err: u64 = 0;
+    check(StdFs::vstd_fs_rename(in from, in to, inout err), err);
+}
+
 pub fn rename(in from: Str, in to: Str) eff [Ffi[StdFs], Fail[IoError]] {
     let mut err: u64 = 0;
     check(StdFs::vstd_fs_rename(in from.as_bytes(), in to.as_bytes(), inout err), err);
@@ -471,6 +562,10 @@ pub fn metadata_path(in path: Slice[u8]) -> Metadata eff [Ffi[StdFs], Fail[IoErr
 // The metadata of `path` itself: a symbolic link reports `kind_symlink()`.
 pub fn symlink_metadata(in path: Str) -> Metadata eff [Ffi[StdFs], Fail[IoError]] {
     meta_path(in path.as_bytes(), false)
+}
+
+pub fn symlink_metadata_path(in path: Slice[u8]) -> Metadata eff [Ffi[StdFs], Fail[IoError]] {
+    meta_path(in path, false)
 }
 
 // `std::fs::canonicalize`: WASI 0.2 has no call for it (`std` returns

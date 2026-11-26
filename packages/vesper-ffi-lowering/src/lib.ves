@@ -1159,21 +1159,19 @@ fn read_function(inout r: Reader, in b: Slice[u8], inout s: S, lib: u64, indirec
         let marker = r.field(in b);
         let link = r.field(in b);
     }
-    s
-        .funs
-        .push(
-            Fun {
-                sym: sym,
-                p0: p0,
-                pn: np,
-                result: result,
-                errno: errno,
-                has_variadic: has_variadic,
-                variadic_first: variadic_first,
-                lib: lib,
-                indirect: indirect
-            }
-        );
+    s.funs.push(
+        Fun {
+            sym: sym,
+            p0: p0,
+            pn: np,
+            result: result,
+            errno: errno,
+            has_variadic: has_variadic,
+            variadic_first: variadic_first,
+            lib: lib,
+            indirect: indirect
+        }
+    );
 }
 
 // Function rows funs[f0..f0+n] in symbol order (insertion sort, stable).
@@ -1354,17 +1352,15 @@ pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
         for i in 0..nx {
             let xn = field_sym(inout r, in b, inout s);
             let (c, d) = r.field(in b);
-            s
-                .xts
-                .push(
-                    Xt {
-                        name: xn,
-                        linear: field_is(in b, c, d, in "linear"),
-                        copy: false,
-                        drop: NONE,
-                        mapping: NONE
-                    }
-                );
+            s.xts.push(
+                Xt {
+                    name: xn,
+                    linear: field_is(in b, c, d, in "linear"),
+                    copy: false,
+                    drop: NONE,
+                    mapping: NONE
+                }
+            );
         }
         if peek_is(in r, in b, in "drop-imports") {
             let marker2 = r.field(in b);
@@ -1427,25 +1423,23 @@ pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
             s.consts.push(ConstRow { name: cname, scalar: csc, neg: neg, value: value });
         }
     }
-    s
-        .libs
-        .push(
-            Lib {
-                name: name,
-                handler: handler,
-                triple: triple,
-                e0: e0,
-                en: ne,
-                f0: f0,
-                fc: nf,
-                w0: w0,
-                wn: wn,
-                x0: x0,
-                xn: wrapping_sub(s.xts.len(), x0),
-                c0: c0,
-                cn: wrapping_sub(s.consts.len(), c0)
-            }
-        );
+    s.libs.push(
+        Lib {
+            name: name,
+            handler: handler,
+            triple: triple,
+            e0: e0,
+            en: ne,
+            f0: f0,
+            fc: nf,
+            w0: w0,
+            wn: wn,
+            x0: x0,
+            xn: wrapping_sub(s.xts.len(), x0),
+            c0: c0,
+            cn: wrapping_sub(s.consts.len(), c0)
+        }
+    );
 }
 
 // ----- the type mapping (types.rs) --------------------------------------------
@@ -1775,10 +1769,9 @@ fn callback_type(inout s: S, lib: u64, name: u32) -> u32 {
     if !ok || f.errno {
         s.put(in "C calls a Vesper function of callback type ");
         s.put_name(name);
-        s
-            .put(
-                in " only with integer or float parameters and an integer, float or Unit result, without errno, for now"
-            );
+        s.put(
+            in " only with integer or float parameters and an integer, float or Unit result, without errno, for now"
+        );
         return NONE;
     }
     let passes = s.fpass.len();
@@ -1827,10 +1820,9 @@ pub fn compute_shape(inout s: S, fi: u64) -> Sh {
                 s.put(in "a handle parameter needs a mode");
                 return shape_err(inout s, mark);
             } else {
-                s
-                    .put(
-                        in "address parameters have no source carrier (source code has no raw pointers)"
-                    );
+                s.put(
+                    in "address parameters have no source carrier (source code has no raw pointers)"
+                );
                 return shape_err(inout s, mark);
             }
         } else if p.tag == P_POINTER {
@@ -1906,10 +1898,9 @@ pub fn compute_shape(inout s: S, fi: u64) -> Sh {
         let i = s.ty_name(S_INVALID);
         result = s.ty_app2(S_RESULT, t, i);
     } else if v.tag == VT_ADDRESS {
-        s
-            .put(
-                in "ForeignVal[Ptr[..]] results have no source carrier (source code has no raw pointers)"
-            );
+        s.put(
+            in "ForeignVal[Ptr[..]] results have no source carrier (source code has no raw pointers)"
+        );
         return shape_err(inout s, mark);
     } else if v.tag == VT_CSTR {
         let byte = s.ty_name(sym8(SC_U8));

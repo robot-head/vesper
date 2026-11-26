@@ -302,8 +302,10 @@ fn push_unique_name(inout out: ChunkSeq[ChunkSeq[u8]], in slice: Slice[u8]) {
     out.push(sink name);
 }
 
-fn scan_mods(in src: Slice[u8], include_super: bool)
-    -> (ChunkSeq[ChunkSeq[u8]], ChunkSeq[ChunkSeq[u8]]) {
+fn scan_mods(
+    in src: Slice[u8],
+    include_super: bool
+) -> (ChunkSeq[ChunkSeq[u8]], ChunkSeq[ChunkSeq[u8]]) {
     let mut self_out = ChunkSeq::new[ChunkSeq[u8]]();
     let mut super_out = ChunkSeq::new[ChunkSeq[u8]]();
     let mut pos: u64 = 0;
@@ -498,8 +500,10 @@ fn find_pkg_by_dir(in pkgs: ChunkSeq[PkgNode], in dir: Slice[u8]) -> Option[u64]
     Option::None
 }
 
-fn load_pkg_graph(in root_dir: Slice[u8], inout pkgs: ChunkSeq[PkgNode])
-    -> Option[u64] eff [Ffi[StdFs]] {
+fn load_pkg_graph(
+    in root_dir: Slice[u8],
+    inout pkgs: ChunkSeq[PkgNode]
+) -> Option[u64] eff [Ffi[StdFs]] {
     let norm = normalize_dir(in ".".as_bytes(), in root_dir);
     match find_pkg_by_dir(in pkgs, in norm.as_slice()) {
         Option::Some(idx) => {
@@ -534,16 +538,15 @@ fn load_pkg_graph(in root_dir: Slice[u8], inout pkgs: ChunkSeq[PkgNode])
     let mut dir_copy = ChunkSeq::new[u8]();
     dir_copy.extend(in norm.as_slice());
     let idx = pkgs.len();
-    pkgs
-        .push(
-            sink PkgNode {
-                name: manifest.name,
-                dir: norm,
-                dep_names: ChunkSeq::new[ChunkSeq[u8]](),
-                dep_indices: ChunkSeq::new[u64](),
-                vsys_types: ChunkSeq::new[ChunkSeq[u8]]()
-            }
-        );
+    pkgs.push(
+        sink PkgNode {
+            name: manifest.name,
+            dir: norm,
+            dep_names: ChunkSeq::new[ChunkSeq[u8]](),
+            dep_indices: ChunkSeq::new[u64](),
+            vsys_types: ChunkSeq::new[ChunkSeq[u8]]()
+        }
+    );
     let mut dep_names = ChunkSeq::new[ChunkSeq[u8]]();
     let mut dep_indices = ChunkSeq::new[u64]();
     for i in 0..manifest.deps.len() {
@@ -563,17 +566,16 @@ fn load_pkg_graph(in root_dir: Slice[u8], inout pkgs: ChunkSeq[PkgNode])
             Option::None => {},
         }
     }
-    let _ = pkgs
-        .try_set(
-            idx,
-            sink PkgNode {
-                name: name_copy,
-                dir: dir_copy,
-                dep_names: dep_names,
-                dep_indices: dep_indices,
-                vsys_types: vsys_types
-            }
-        );
+    let _ = pkgs.try_set(
+        idx,
+        sink PkgNode {
+            name: name_copy,
+            dir: dir_copy,
+            dep_names: dep_names,
+            dep_indices: dep_indices,
+            vsys_types: vsys_types
+        }
+    );
     Option::Some(idx)
 }
 
@@ -1329,33 +1331,29 @@ fn emit_checked_intrinsic(inout out: ChunkSeq[u8], fam: u64, ki: u64) {
     if fam == 6 && !signed {
         out.extend(in "let s: ".as_bytes());
         out.extend(in k.as_bytes());
-        out
-            .extend(
-                in " = wrapping_add(a, b); if s < a { Option::None } else { Option::Some(s) }"
-                    .as_bytes()
-            );
+        out.extend(
+            in " = wrapping_add(a, b); if s < a { Option::None } else { Option::Some(s) }"
+                .as_bytes()
+        );
     } else if fam == 7 && !signed {
-        out
-            .extend(
-                in "if b > a { Option::None } else { Option::Some(wrapping_sub(a, b)) }".as_bytes()
-            );
+        out.extend(
+            in "if b > a { Option::None } else { Option::Some(wrapping_sub(a, b)) }".as_bytes()
+        );
     } else if (fam == 6 || fam == 7) && signed {
         out.extend(in "let zero: ".as_bytes());
         out.extend(in k.as_bytes());
         out.extend(in " = 0; let s: ".as_bytes());
         out.extend(in k.as_bytes());
         if fam == 6 {
-            out
-                .extend(
-                    in " = wrapping_add(a, b); if (a < zero) == (b < zero) && (s < zero) != (a < zero) { Option::None } else { Option::Some(s) }"
-                        .as_bytes()
-                );
+            out.extend(
+                in " = wrapping_add(a, b); if (a < zero) == (b < zero) && (s < zero) != (a < zero) { Option::None } else { Option::Some(s) }"
+                    .as_bytes()
+            );
         } else {
-            out
-                .extend(
-                    in " = wrapping_sub(a, b); if (a < zero) != (b < zero) && (s < zero) != (a < zero) { Option::None } else { Option::Some(s) }"
-                        .as_bytes()
-                );
+            out.extend(
+                in " = wrapping_sub(a, b); if (a < zero) != (b < zero) && (s < zero) != (a < zero) { Option::None } else { Option::Some(s) }"
+                    .as_bytes()
+            );
         }
     } else if !signed && bits <= 32 {
         out.extend(in "let p: u64 = wrapping_mul(widen_u64(a), widen_u64(b)); if p > ".as_bytes());
@@ -1376,39 +1374,34 @@ fn emit_checked_intrinsic(inout out: ChunkSeq[u8], fam: u64, ki: u64) {
         out.extend(in k.as_bytes());
         out.extend(in " = 0; if a == zero { Option::Some(zero) } else { let p: ".as_bytes());
         out.extend(in k.as_bytes());
-        out
-            .extend(
-                in " = wrapping_mul(a, b); if p / a != b { Option::None } else { Option::Some(p) } }"
-                    .as_bytes()
-            );
+        out.extend(
+            in " = wrapping_mul(a, b); if p / a != b { Option::None } else { Option::Some(p) } }"
+                .as_bytes()
+        );
     } else if signed && bits == 128 {
-        out
-            .extend(
-                in "let zero: i128 = 0; let uzero: u128 = 0; let ua: u128 = if a < zero { wrapping_u128(wrapping_sub(zero, a)) } else { wrapping_u128(a) }; let ub: u128 = if b < zero { wrapping_u128(wrapping_sub(zero, b)) } else { wrapping_u128(b) }; if ua == uzero { Option::Some(zero) } else { let p: u128 = wrapping_mul(ua, ub); let one: u128 = 1; let limit: u128 = rotate_right(one, 1); if p / ua != ub { Option::None } else if (a < zero) != (b < zero) { if p > limit { Option::None } else { Option::Some(wrapping_i128(wrapping_sub(uzero, p))) } } else if p >= limit { Option::None } else { Option::Some(wrapping_i128(p)) } }"
-                    .as_bytes()
-            );
+        out.extend(
+            in "let zero: i128 = 0; let uzero: u128 = 0; let ua: u128 = if a < zero { wrapping_u128(wrapping_sub(zero, a)) } else { wrapping_u128(a) }; let ub: u128 = if b < zero { wrapping_u128(wrapping_sub(zero, b)) } else { wrapping_u128(b) }; if ua == uzero { Option::Some(zero) } else { let p: u128 = wrapping_mul(ua, ub); let one: u128 = 1; let limit: u128 = rotate_right(one, 1); if p / ua != ub { Option::None } else if (a < zero) != (b < zero) { if p > limit { Option::None } else { Option::Some(wrapping_i128(wrapping_sub(uzero, p))) } } else if p >= limit { Option::None } else { Option::Some(wrapping_i128(p)) } }"
+                .as_bytes()
+        );
     } else if !signed {
-        out
-            .extend(
-                in "let (lo, hi) = mul_wide(wrapping_u64(a), wrapping_u64(b)); if hi != 0 { Option::None } else { Option::Some(wrapping_"
-                    .as_bytes()
-            );
+        out.extend(
+            in "let (lo, hi) = mul_wide(wrapping_u64(a), wrapping_u64(b)); if hi != 0 { Option::None } else { Option::Some(wrapping_"
+                .as_bytes()
+        );
         out.extend(in k.as_bytes());
         out.extend(in "(lo)) }".as_bytes());
     } else {
         out.extend(in "let zero: ".as_bytes());
         out.extend(in k.as_bytes());
-        out
-            .extend(
-                in " = 0; let ua: u64 = if a < zero { wrapping_u64(wrapping_sub(zero, a)) } else { wrapping_u64(a) }; let ub: u64 = if b < zero { wrapping_u64(wrapping_sub(zero, b)) } else { wrapping_u64(b) }; let (lo, hi) = mul_wide(ua, ub); let limit: u64 = 9223372036854775807; if hi != 0 { Option::None } else if (a < zero) != (b < zero) { if lo > wrapping_add(limit, 1) { Option::None } else { Option::Some(wrapping_"
-                    .as_bytes()
-            );
+        out.extend(
+            in " = 0; let ua: u64 = if a < zero { wrapping_u64(wrapping_sub(zero, a)) } else { wrapping_u64(a) }; let ub: u64 = if b < zero { wrapping_u64(wrapping_sub(zero, b)) } else { wrapping_u64(b) }; let (lo, hi) = mul_wide(ua, ub); let limit: u64 = 9223372036854775807; if hi != 0 { Option::None } else if (a < zero) != (b < zero) { if lo > wrapping_add(limit, 1) { Option::None } else { Option::Some(wrapping_"
+                .as_bytes()
+        );
         out.extend(in k.as_bytes());
-        out
-            .extend(
-                in "(wrapping_sub(0, lo))) } } else if lo > limit { Option::None } else { Option::Some(wrapping_"
-                    .as_bytes()
-            );
+        out.extend(
+            in "(wrapping_sub(0, lo))) } } else if lo > limit { Option::None } else { Option::Some(wrapping_"
+                .as_bytes()
+        );
         out.extend(in k.as_bytes());
         out.extend(in "(lo)) }".as_bytes());
     }
@@ -1512,11 +1505,10 @@ fn append_extra_intrinsics(in mods: ChunkSeq[ModEntry], inout out: ChunkSeq[u8])
         Option::None => false,
     };
     if need_mw && !skip_mw {
-        out
-            .extend(
-                in "pub fn mul_wide(a: u64, b: u64) -> (u64, u64) { let m: u64 = 4294967295; let a0 = a & m; let a1 = a >> 32; let b0 = b & m; let b1 = b >> 32; let p00 = wrapping_mul(a0, b0); let p01 = wrapping_mul(a0, b1); let p10 = wrapping_mul(a1, b0); let p11 = wrapping_mul(a1, b1); let mid = wrapping_add(wrapping_add(p00 >> 32, p01 & m), p10 & m); let hi = wrapping_add(wrapping_add(wrapping_add(p11, p01 >> 32), p10 >> 32), mid >> 32); (wrapping_mul(a, b), hi) } "
-                    .as_bytes()
-            );
+        out.extend(
+            in "pub fn mul_wide(a: u64, b: u64) -> (u64, u64) { let m: u64 = 4294967295; let a0 = a & m; let a1 = a >> 32; let b0 = b & m; let b1 = b >> 32; let p00 = wrapping_mul(a0, b0); let p01 = wrapping_mul(a0, b1); let p10 = wrapping_mul(a1, b0); let p11 = wrapping_mul(a1, b1); let mid = wrapping_add(wrapping_add(p00 >> 32, p01 & m), p10 & m); let hi = wrapping_add(wrapping_add(wrapping_add(p11, p01 >> 32), p10 >> 32), mid >> 32); (wrapping_mul(a, b), hi) } "
+                .as_bytes()
+        );
     }
     for slot in 0..108 {
         let want = match need.try_get(slot) {
@@ -1539,51 +1531,211 @@ fn append_extra_intrinsics(in mods: ChunkSeq[ModEntry], inout out: ChunkSeq[u8])
     }
 }
 
-fn contains_bytes(in s: Slice[u8], in p: Slice[u8]) -> bool {
-    let n = s.len();
-    let m = p.len();
-    if m > n {
-        return false;
+// Which of the option prelude's methods `tok` names: 0 `is_some`, 1
+// `is_none`, 2 `unwrap_or`, 3 `or`, or 4 for none of them.
+fn option_method_slot(in tok: Slice[u8]) -> u64 {
+    if eq_bytes(in tok, in "is_some".as_bytes()) {
+        return 0;
     }
-    for i in 0..wrapping_add(wrapping_sub(n, m), 1) {
-        if starts_with(in s[i..n], in p) {
-            return true;
+    if eq_bytes(in tok, in "is_none".as_bytes()) {
+        return 1;
+    }
+    if eq_bytes(in tok, in "unwrap_or".as_bytes()) {
+        return 2;
+    }
+    if eq_bytes(in tok, in "or".as_bytes()) {
+        return 3;
+    }
+    4
+}
+
+// Where `/*` at `pos` ends, past the `*/` that closes it (or at the end
+// of `src`). Block comments nest, as in the lexer.
+fn block_comment_end(in src: Slice[u8], pos: u64) -> u64 {
+    let n = src.len();
+    let mut depth: u64 = 1;
+    let mut p = wrapping_add(pos, 2);
+    loop {
+        if wrapping_add(p, 1) >= n {
+            return n;
+        }
+        let c = byte_at(in src, p);
+        let d = byte_at(in src, wrapping_add(p, 1));
+        if c == 47 && d == 42 {
+            depth = wrapping_add(depth, 1);
+            p = wrapping_add(p, 2);
+        } else if c == 42 && d == 47 {
+            depth = wrapping_sub(depth, 1);
+            p = wrapping_add(p, 2);
+            if depth == 0 {
+                return p;
+            }
+        } else {
+            p = wrapping_add(p, 1);
         }
     }
-    false
 }
 
-// Whether `src` calls one of `Option`'s prelude methods.
-fn calls_option_method(in src: Slice[u8]) -> bool {
-    contains_bytes(in src, in ".unwrap_or(".as_bytes())
-        || contains_bytes(in src, in ".or(".as_bytes())
-        || contains_bytes(in src, in ".is_some(".as_bytes())
-        || contains_bytes(in src, in ".is_none(".as_bytes())
+// Scans the code of `src`, not its comments or string literals, for the
+// option prelude's methods: `used[k]` when a `.` and the method's name
+// follow each other, `defined[k]` when `src` has an `impl` block for
+// `Option` that defines it.
+fn scan_option_methods(
+    in src: Slice[u8],
+    inout used: ChunkSeq[bool],
+    inout defined: ChunkSeq[bool]
+) {
+    let n = src.len();
+    let mut pos: u64 = 0;
+    let mut after_dot = false;
+    let mut after_fn = false;
+    // 0: no `impl` header; 1: in one, before its type; 2: its type is
+    // `Option`; 3: its type is another.
+    let mut header: u64 = 0;
+    let mut brackets: u64 = 0;
+    let mut depth: u64 = 0;
+    // The brace depth of the `Option` impl body being scanned, or 0.
+    let mut option_body: u64 = 0;
+    loop {
+        if pos >= n {
+            break;
+        }
+        let (next_p, skipped) = next_code_byte(in src, pos);
+        if skipped != 0 {
+            // A string literal ends a `.` or `fn` run; a line comment is
+            // trivia between tokens, like whitespace.
+            if byte_at(in src, pos) == 34 {
+                after_dot = false;
+                after_fn = false;
+            }
+            pos = next_p;
+            continue;
+        }
+        let b = byte_at(in src, pos);
+        if b == 47 && wrapping_add(pos, 1) < n && byte_at(in src, wrapping_add(pos, 1)) == 42 {
+            pos = block_comment_end(in src, pos);
+            continue;
+        }
+        if is_ident_byte(b) {
+            let start = pos;
+            loop {
+                if pos >= n || !is_ident_byte(byte_at(in src, pos)) {
+                    break;
+                }
+                pos = wrapping_add(pos, 1);
+            }
+            let tok = src[start..pos];
+            let slot = option_method_slot(in tok);
+            if slot < 4 && after_dot {
+                let _ = used.try_set(slot, true);
+            }
+            if slot < 4 && after_fn && option_body != 0 && depth == option_body {
+                let _ = defined.try_set(slot, true);
+            }
+            if eq_bytes(in tok, in "impl".as_bytes()) {
+                header = 1;
+                brackets = 0;
+            } else if header == 1 && brackets == 0 {
+                header = if eq_bytes(in tok, in "Option".as_bytes()) {
+                    2
+                } else {
+                    3
+                };
+            }
+            after_fn = eq_bytes(in tok, in "fn".as_bytes());
+            after_dot = false;
+            continue;
+        }
+        pos = wrapping_add(pos, 1);
+        if b == 32 || b == 9 || b == 10 || b == 13 {
+            continue;
+        }
+        after_dot = b == 46;
+        after_fn = false;
+        if b == 91 {
+            brackets = wrapping_add(brackets, 1);
+        } else if b == 93 && brackets > 0 {
+            brackets = wrapping_sub(brackets, 1);
+        } else if b == 123 {
+            depth = wrapping_add(depth, 1);
+            if header == 2 {
+                option_body = depth;
+            }
+            header = 0;
+        } else if b == 125 && depth > 0 {
+            if depth == option_body {
+                option_body = 0;
+            }
+            depth = wrapping_sub(depth, 1);
+        } else if b == 59 {
+            header = 0;
+        }
+    }
 }
 
-// The Rust checker's option prelude (src/option_methods.rs): `Option`'s
-// methods, added when a module calls one of them and no module defines
-// its own `impl Option[T]`.
+// The Rust checker's option prelude (src/option_methods.rs): an
+// `impl Option[T]` block with the methods no module defines itself, added
+// when a module calls one of those.
 fn append_option_methods(in mods: ChunkSeq[ModEntry], inout out: ChunkSeq[u8]) {
-    let mut used = false;
-    let mut defined = false;
+    let mut used = ChunkSeq::new[bool]();
+    let mut defined = ChunkSeq::new[bool]();
+    for _k in 0..4 {
+        used.push(false);
+        defined.push(false);
+    }
     for mi in 0..mods.len() {
         match mods.try_get(mi) {
-            Option::Some(m) => {
-                used = used || calls_option_method(in m.text.as_slice());
-                defined = defined
-                    || contains_bytes(in m.text.as_slice(), in "] Option[T] {".as_bytes());
-            },
+            Option::Some(m) => scan_option_methods(in m.text.as_slice(), inout used, inout defined),
             Option::None => {},
         }
     }
-    if used && !defined {
-        out
-            .extend(
-                in "impl [T: mod copy] Option[T] { fn is_some(self) -> bool { match self { Option::Some(_) => true, Option::None => false } } fn is_none(self) -> bool { match self { Option::Some(_) => false, Option::None => true } } fn unwrap_or(self, fallback: T) -> T { match self { Option::Some(x) => x, Option::None => fallback } } fn or(self, other: Option[T]) -> Option[T] { match self { Option::Some(x) => Option::Some(x), Option::None => other } } } "
+    let mut wanted = false;
+    for k in 0..4 {
+        let u = match used.try_get(k) {
+            Option::Some(v) => v,
+            Option::None => false,
+        };
+        let d = match defined.try_get(k) {
+            Option::Some(v) => v,
+            Option::None => false,
+        };
+        wanted = wanted || (u && !d);
+    }
+    if !wanted {
+        return;
+    }
+    out.extend(in "impl [T: mod copy] Option[T] { ".as_bytes());
+    for k in 0..4 {
+        let d = match defined.try_get(k) {
+            Option::Some(v) => v,
+            Option::None => true,
+        };
+        if d {
+            continue;
+        }
+        if k == 0 {
+            out.extend(
+                in "fn is_some(self) -> bool { match self { Option::Some(_) => true, Option::None => false } } "
                     .as_bytes()
             );
+        } else if k == 1 {
+            out.extend(
+                in "fn is_none(self) -> bool { match self { Option::Some(_) => false, Option::None => true } } "
+                    .as_bytes()
+            );
+        } else if k == 2 {
+            out.extend(
+                in "fn unwrap_or(self, fallback: T) -> T { match self { Option::Some(x) => x, Option::None => fallback } } "
+                    .as_bytes()
+            );
+        } else {
+            out.extend(
+                in "fn or(self, other: Option[T]) -> Option[T] { match self { Option::Some(x) => Option::Some(x), Option::None => other } } "
+                    .as_bytes()
+            );
+        }
     }
+    out.extend(in "} ".as_bytes());
 }
 
 fn scan_dir_mods(
@@ -1785,77 +1937,62 @@ pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] 
     let mut sp_src = ChunkSeq::new[u8]();
     if !has_enum_variant(in mods, in "String".as_bytes()) {
         sp_src.extend(in "impl String { fn new() -> String { \"\" } ".as_bytes());
-        sp_src
-            .extend(
-                in "fn with_capacity(n: u64) -> String { let mut s = String::new(); s.reserve(n); s } "
-                    .as_bytes()
-            );
-        sp_src
-            .extend(
-                in "fn utf8_byte(in bytes: Slice[u8], i: u64) -> u32 { match bytes.try_get(i) { Option::Some(b) => widen_u32(b), Option::None => 0 } } "
-                    .as_bytes()
-            );
-        sp_src
-            .extend(
-                in "fn utf8_width(in bytes: Slice[u8], i: u64) -> u64 { let b0 = String::utf8_byte(in bytes, i); let b1 = String::utf8_byte(in bytes, wrapping_add(i, 1)); let c2 = (String::utf8_byte(in bytes, wrapping_add(i, 2)) & 192) == 128; let c3 = (String::utf8_byte(in bytes, wrapping_add(i, 3)) & 192) == 128; if b0 < 128 { 1 } else if b0 < 194 { 0 } else if b0 < 224 { if (b1 & 192) == 128 { 2 } else { 0 } } else if b0 < 240 { let lo: u32 = if b0 == 224 { 160 } else { 128 }; let hi: u32 = if b0 == 237 { 159 } else { 191 }; if b1 >= lo && b1 <= hi && c2 { 3 } else { 0 } } else if b0 < 245 { let lo: u32 = if b0 == 240 { 144 } else { 128 }; let hi: u32 = if b0 == 244 { 143 } else { 191 }; if b1 >= lo && b1 <= hi && c2 && c3 { 4 } else { 0 } } else { 0 } } "
-                    .as_bytes()
-            );
-        sp_src
-            .extend(
-                in "fn utf8_decode(in bytes: Slice[u8], i: u64, w: u64) -> u32 { let b0 = String::utf8_byte(in bytes, i); let c1 = String::utf8_byte(in bytes, wrapping_add(i, 1)) & 63; let c2 = String::utf8_byte(in bytes, wrapping_add(i, 2)) & 63; let c3 = String::utf8_byte(in bytes, wrapping_add(i, 3)) & 63; if w == 1 { b0 } else if w == 2 { wrapping_mul(b0 & 31, 64) | c1 } else if w == 3 { wrapping_mul(b0 & 15, 4096) | wrapping_mul(c1, 64) | c2 } else { wrapping_mul(b0 & 7, 262144) | wrapping_mul(c1, 4096) | wrapping_mul(c2, 64) | c3 } } "
-                    .as_bytes()
-            );
-        sp_src
-            .extend(
-                in "fn from_utf8(in bytes: Slice[u8]) -> Option[String] { let n = bytes.len(); let mut out = String::with_capacity(n); let mut i: u64 = 0; let mut valid = true; loop { if i >= n { break; } let w = String::utf8_width(in bytes, i); if w == 0 || w > wrapping_sub(n, i) { valid = false; break; } out.push_char(String::utf8_decode(in bytes, i, w)); i = wrapping_add(i, w); } if valid { Option::Some(out) } else { Option::None } } } "
-                    .as_bytes()
-            );
+        sp_src.extend(
+            in "fn with_capacity(n: u64) -> String { let mut s = String::new(); s.reserve(n); s } "
+                .as_bytes()
+        );
+        sp_src.extend(
+            in "fn utf8_byte(in bytes: Slice[u8], i: u64) -> u32 { match bytes.try_get(i) { Option::Some(b) => widen_u32(b), Option::None => 0 } } "
+                .as_bytes()
+        );
+        sp_src.extend(
+            in "fn utf8_width(in bytes: Slice[u8], i: u64) -> u64 { let b0 = String::utf8_byte(in bytes, i); let b1 = String::utf8_byte(in bytes, wrapping_add(i, 1)); let c2 = (String::utf8_byte(in bytes, wrapping_add(i, 2)) & 192) == 128; let c3 = (String::utf8_byte(in bytes, wrapping_add(i, 3)) & 192) == 128; if b0 < 128 { 1 } else if b0 < 194 { 0 } else if b0 < 224 { if (b1 & 192) == 128 { 2 } else { 0 } } else if b0 < 240 { let lo: u32 = if b0 == 224 { 160 } else { 128 }; let hi: u32 = if b0 == 237 { 159 } else { 191 }; if b1 >= lo && b1 <= hi && c2 { 3 } else { 0 } } else if b0 < 245 { let lo: u32 = if b0 == 240 { 144 } else { 128 }; let hi: u32 = if b0 == 244 { 143 } else { 191 }; if b1 >= lo && b1 <= hi && c2 && c3 { 4 } else { 0 } } else { 0 } } "
+                .as_bytes()
+        );
+        sp_src.extend(
+            in "fn utf8_decode(in bytes: Slice[u8], i: u64, w: u64) -> u32 { let b0 = String::utf8_byte(in bytes, i); let c1 = String::utf8_byte(in bytes, wrapping_add(i, 1)) & 63; let c2 = String::utf8_byte(in bytes, wrapping_add(i, 2)) & 63; let c3 = String::utf8_byte(in bytes, wrapping_add(i, 3)) & 63; if w == 1 { b0 } else if w == 2 { wrapping_mul(b0 & 31, 64) | c1 } else if w == 3 { wrapping_mul(b0 & 15, 4096) | wrapping_mul(c1, 64) | c2 } else { wrapping_mul(b0 & 7, 262144) | wrapping_mul(c1, 4096) | wrapping_mul(c2, 64) | c3 } } "
+                .as_bytes()
+        );
+        sp_src.extend(
+            in "fn from_utf8(in bytes: Slice[u8]) -> Option[String] { let n = bytes.len(); let mut out = String::with_capacity(n); let mut i: u64 = 0; let mut valid = true; loop { if i >= n { break; } let w = String::utf8_width(in bytes, i); if w == 0 || w > wrapping_sub(n, i) { valid = false; break; } out.push_char(String::utf8_decode(in bytes, i, w)); i = wrapping_add(i, w); } if valid { Option::Some(out) } else { Option::None } } } "
+                .as_bytes()
+        );
     }
-    sp_src
-        .extend(
-            in "pub fn checked_add_u64(a: u64, b: u64) -> Option[u64] { if b > wrapping_sub(18446744073709551615, a) { Option::None } else { Option::Some(wrapping_add(a, b)) } } "
-                .as_bytes()
-        );
-    sp_src
-        .extend(
-            in "pub fn checked_sub_u64(a: u64, b: u64) -> Option[u64] { if b > a { Option::None } else { Option::Some(wrapping_sub(a, b)) } } "
-                .as_bytes()
-        );
-    sp_src
-        .extend(
-            in "pub fn checked_mul_u64(a: u64, b: u64) -> Option[u64] { if a == 0 || b == 0 { Option::Some(0) } else if a > 18446744073709551615 / b { Option::None } else { Option::Some(wrapping_mul(a, b)) } } "
-                .as_bytes()
-        );
-    sp_src
-        .extend(
-            in "pub fn checked_add_u128(a: u128, b: u128) -> Option[u128] { let s = wrapping_add(a, b); if s < a { Option::None } else { Option::Some(s) } } "
-                .as_bytes()
-        );
-    sp_src
-        .extend(
-            in "pub fn checked_mul_u128(a: u128, b: u128) -> Option[u128] { if a == 0 || b == 0 { Option::Some(0) } else { let p = wrapping_mul(a, b); if p / a != b { Option::None } else { Option::Some(p) } } } "
-                .as_bytes()
-        );
+    sp_src.extend(
+        in "pub fn checked_add_u64(a: u64, b: u64) -> Option[u64] { if b > wrapping_sub(18446744073709551615, a) { Option::None } else { Option::Some(wrapping_add(a, b)) } } "
+            .as_bytes()
+    );
+    sp_src.extend(
+        in "pub fn checked_sub_u64(a: u64, b: u64) -> Option[u64] { if b > a { Option::None } else { Option::Some(wrapping_sub(a, b)) } } "
+            .as_bytes()
+    );
+    sp_src.extend(
+        in "pub fn checked_mul_u64(a: u64, b: u64) -> Option[u64] { if a == 0 || b == 0 { Option::Some(0) } else if a > 18446744073709551615 / b { Option::None } else { Option::Some(wrapping_mul(a, b)) } } "
+            .as_bytes()
+    );
+    sp_src.extend(
+        in "pub fn checked_add_u128(a: u128, b: u128) -> Option[u128] { let s = wrapping_add(a, b); if s < a { Option::None } else { Option::Some(s) } } "
+            .as_bytes()
+    );
+    sp_src.extend(
+        in "pub fn checked_mul_u128(a: u128, b: u128) -> Option[u128] { if a == 0 || b == 0 { Option::Some(0) } else { let p = wrapping_mul(a, b); if p / a != b { Option::None } else { Option::Some(p) } } } "
+            .as_bytes()
+    );
     sp_src.extend(in "pub fn wrapping_neg_i64(x: i64) -> i64 { wrapping_sub(0, x) } ".as_bytes());
-    sp_src
-        .extend(
-            in "pub fn wrapping_shl_u64(x: u64, n: u32) -> u64 { x << widen_u64(n & 63) } "
-                .as_bytes()
-        );
-    sp_src
-        .extend(
-            in "pub fn wrapping_shr_u64(x: u64, n: u32) -> u64 { x >> widen_u64(n & 63) } "
-                .as_bytes()
-        );
+    sp_src.extend(
+        in "pub fn wrapping_shl_u64(x: u64, n: u32) -> u64 { x << widen_u64(n & 63) } ".as_bytes()
+    );
+    sp_src.extend(
+        in "pub fn wrapping_shr_u64(x: u64, n: u32) -> u64 { x >> widen_u64(n & 63) } ".as_bytes()
+    );
     sp_src
         .extend(in "pub fn wrapping_shl_u32(x: u32, n: u32) -> u32 { x << (n & 31) } ".as_bytes());
     sp_src
         .extend(in "pub fn wrapping_shr_u32(x: u32, n: u32) -> u32 { x >> (n & 31) } ".as_bytes());
-    sp_src
-        .extend(
-            in "pub fn trailing_zeros_u64(x: u64) -> u32 { if x == 0 { 64 } else { let mut v = x; let mut c: u32 = 0; loop { if (v & 1) != 0 { break; } v = wrapping_shr_u64(v, 1); c = wrapping_add(c, 1); } c } } "
-                .as_bytes()
-        );
+    sp_src.extend(
+        in "pub fn trailing_zeros_u64(x: u64) -> u32 { if x == 0 { 64 } else { let mut v = x; let mut c: u32 = 0; loop { if (v & 1) != 0 { break; } v = wrapping_shr_u64(v, 1); c = wrapping_add(c, 1); } c } } "
+            .as_bytes()
+    );
     append_option_methods(in mods, inout sp_src);
     append_extra_intrinsics(in mods, inout sp_src);
     collect_mod_files(
@@ -1946,4 +2083,62 @@ pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] 
         }
     }
     Option::Some(out)
+}
+
+test {
+    // Which of `is_some`, `is_none`, `unwrap_or` and `or` `src` calls and
+    // which it defines, each as four decimal digits, 1 for yes.
+    fn option_scan(in src: Slice[u8]) -> (u64, u64) {
+        let mut used = ChunkSeq::new[bool]();
+        let mut defined = ChunkSeq::new[bool]();
+        for _k in 0..4 {
+            used.push(false);
+            defined.push(false);
+        }
+        scan_option_methods(in src, inout used, inout defined);
+        let mut u: u64 = 0;
+        let mut d: u64 = 0;
+        for k in 0..4 {
+            u = wrapping_mul(u, 10);
+            d = wrapping_mul(d, 10);
+            if used.try_get(k).unwrap_or(false) {
+                u = wrapping_add(u, 1);
+            }
+            if defined.try_get(k).unwrap_or(false) {
+                d = wrapping_add(d, 1);
+            }
+        }
+        (u, d)
+    }
+
+    fn test_option_calls_with_trivia_count() -> bool {
+        let (a, _) = option_scan(in "x.unwrap_or(0)".as_bytes());
+        let (b, _) = option_scan(in "x.unwrap_or (0) + y\n    .is_some()".as_bytes());
+        let (c, _) = option_scan(in "x.or/* fallback */(y)".as_bytes());
+        a == 10 && b == 1010 && c == 1
+    }
+
+    fn test_option_names_in_strings_and_comments_do_not() -> bool {
+        let (a, _) = option_scan(in "let s = \"x.unwrap_or(0)\"; // y.is_some()\n".as_bytes());
+        let (b, _) = option_scan(in "/* x.or(y) */ or(x)".as_bytes());
+        a == 0 && b == 0
+    }
+
+    fn test_only_an_option_impl_defines() -> bool {
+        let (u, d) = option_scan(
+            in "impl [T: mod copy] Option[T] { fn unwrap_or(self, d: T) -> T { d } } fn f() { o.or(p) }"
+                .as_bytes()
+        );
+        let (_, other) = option_scan(in "impl Foo { fn or(self) -> bool { true } }".as_bytes());
+        u == 1 && d == 10 && other == 0
+    }
+
+    fn test_comments_between_tokens_are_trivia() -> bool {
+        let (u, d) = option_scan(
+            in "impl [T: mod copy] Option[T] { fn // c\n unwrap_or(self, d: T) -> T { d } } fn f() { o.unwrap_or(0) }"
+                .as_bytes()
+        );
+        let (nested, _) = option_scan(in "/* a /* b */ \" */ fn f() { o.unwrap_or(0) }".as_bytes());
+        u == 10 && d == 10 && nested == 10
+    }
 }

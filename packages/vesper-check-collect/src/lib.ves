@@ -5,11 +5,13 @@
 // generics first and an untyped `self` given the block's type) and reports
 // the E0100 duplicate and reserved-name diagnostics.
 //
-// Part 1 covers modules that need none of the checker's preludes (regions,
-// `Box`, secret operations, byte order and the bit and checked builtins,
-// transcendentals, strings, atomics and workers, `Option` methods): a module
-// whose names could bring one in is declined (`needs_prelude`), and the
-// Rust collector stays its source of truth until the prelude's part lands.
+// The preludes a module brings in follow it as the checker adds them:
+// the byte-order, bit and checked builtins (widths.ves), then strings and
+// `Option` methods (prelude.ves), each lowered on its own with its spans
+// shifted to where the checker parses it. A module that could need a
+// prelude not ported yet (regions, `Box`, secret operations,
+// transcendentals, atomics and workers) is declined (`needs_prelude`), and
+// the Rust collector stays its source of truth until that part lands.
 //
 // tests/self_host_check_collect.rs compares the canonical dump (`dump`)
 // with the same dump of Rust's `World::collect` over the repository's
@@ -23,6 +25,11 @@ use @vesper/ast::lower::{lower_source};
 use @vesper/check-data::{pack_text};
 use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{Interner, interner_new, symbol_from_id};
+use self::prelude::{
+    defined_methods, module_end, needs_option, needs_strings, option_source, replaced,
+    sorted_symbols, strings_source, used, uses_of, Uses
+};
+use self::widths::{reserved_width_name, width_source};
 
 // The builtin declarations every world starts from (`World::collect`'s
 // `builtins`, with `numeric::OVERFLOW_DECLARATION`).
@@ -37,50 +44,44 @@ fn item_node(in a: Ast, i: u32) -> ItemNode {
 }
 
 fn adt_node(in a: Ast, i: u32) -> AdtNode {
-    a
-        .adts
-        .get_or(
-            idx_from_raw[AdtNode](i),
-            AdtNode {
-                name: none(),
-                mode: 0,
-                generics: 0,
-                variants: 0,
-                is_enum: false,
-                tiled: false,
-                tile_width: 0,
-                start: 0,
-                end: 0
-            }
-        )
+    a.adts.get_or(
+        idx_from_raw[AdtNode](i),
+        AdtNode {
+            name: none(),
+            mode: 0,
+            generics: 0,
+            variants: 0,
+            is_enum: false,
+            tiled: false,
+            tile_width: 0,
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 fn fn_node(in a: Ast, i: u32) -> FnNode {
-    a
-        .fns
-        .get_or(
-            idx_from_raw[FnNode](i),
-            FnNode {
-                name: none(),
-                fip: false,
-                generics: 0,
-                params: 0,
-                result: none(),
-                effects: none(),
-                body: none(),
-                start: 0,
-                end: 0
-            }
-        )
+    a.fns.get_or(
+        idx_from_raw[FnNode](i),
+        FnNode {
+            name: none(),
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: none(),
+            effects: none(),
+            body: none(),
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 fn effect_decl_node(in a: Ast, i: u32) -> EffectDeclNode {
-    a
-        .effect_decls
-        .get_or(
-            idx_from_raw[EffectDeclNode](i),
-            EffectDeclNode { name: none(), linear: false, generics: 0, ops: 0, start: 0, end: 0 }
-        )
+    a.effect_decls.get_or(
+        idx_from_raw[EffectDeclNode](i),
+        EffectDeclNode { name: none(), linear: false, generics: 0, ops: 0, start: 0, end: 0 }
+    )
 }
 
 fn impl_node(in a: Ast, i: u32) -> ImplNode {
@@ -88,33 +89,29 @@ fn impl_node(in a: Ast, i: u32) -> ImplNode {
 }
 
 fn param_node(in a: Ast, i: u32) -> ParamNode {
-    a
-        .params
-        .get_or(
-            idx_from_raw[ParamNode](i),
-            ParamNode { name: none(), pass: 0, projections: 0, ty: none(), start: 0, end: 0 }
-        )
+    a.params.get_or(
+        idx_from_raw[ParamNode](i),
+        ParamNode { name: none(), pass: 0, projections: 0, ty: none(), start: 0, end: 0 }
+    )
 }
 
 fn generic_node(in a: Ast, i: u32) -> GenericNode {
-    a
-        .generics
+    a.generics
         .get_or(idx_from_raw[GenericNode](i), GenericNode { name: none(), bound: 0, row: false })
 }
 
 fn variant_node(in a: Ast, i: u32) -> VariantNode {
-    a
-        .variants
-        .get_or(idx_from_raw[VariantNode](i), VariantNode { name: none(), fields: 0, named: false })
+    a.variants.get_or(
+        idx_from_raw[VariantNode](i),
+        VariantNode { name: none(), fields: 0, named: false }
+    )
 }
 
 fn field_node(in a: Ast, i: u32) -> FieldNode {
-    a
-        .fields
-        .get_or(
-            idx_from_raw[FieldNode](i),
-            FieldNode { name: none(), ty: none(), modality: 3, temperature: 0 }
-        )
+    a.fields.get_or(
+        idx_from_raw[FieldNode](i),
+        FieldNode { name: none(), ty: none(), modality: 3, temperature: 0 }
+    )
 }
 
 fn effects_node(in a: Ast, i: u32) -> EffectsNode {
@@ -122,8 +119,7 @@ fn effects_node(in a: Ast, i: u32) -> EffectsNode {
 }
 
 fn effect_node(in a: Ast, i: u32) -> EffectNode {
-    a
-        .effect_nodes
+    a.effect_nodes
         .get_or(idx_from_raw[EffectNode](i), EffectNode { label: none(), name: none(), args: 0 })
 }
 
@@ -168,116 +164,85 @@ fn name_is(in a: Ast, sym: u32, in lit: Str) -> bool {
     true
 }
 
-// Whether `sym` starts with `lit`.
-fn name_starts(in a: Ast, sym: u32, in lit: Str) -> bool {
-    let (s, e) = a.names.span(symbol_from_id(sym));
-    let t = lit.as_bytes();
-    if wrapping_sub(e, s) < t.len() {
-        return false;
-    }
-    for i in 0..t.len() {
-        let c = match t.try_get(i) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
-        if name_byte(in a, wrapping_add(s, i)) != c {
-            return false;
-        }
-    }
-    true
-}
-
 // ---------------------------------------------------------------- preludes
 
-// The names that can bring a prelude into the world (part 1 declines
-// them): the prelude types and methods, the byte-order, bit, checked and
-// transcendental families, and `Str` (a `Str` parameter brings in strings).
-fn prelude_name(in a: Ast, sym: u32) -> bool {
-    name_is(in a, sym, "mul_wide")
-        || name_is(in a, sym, "is_char_boundary")
-        || name_is(in a, sym, "next_char")
-        || name_is(in a, sym, "char_at")
-        || name_is(in a, sym, "char_count")
-        || name_is(in a, sym, "concat")
-        || name_is(in a, sym, "from_utf8")
-        || name_is(in a, sym, "String::new")
-        || name_is(in a, sym, "String::with_capacity")
-        || name_is(in a, sym, "String::from_utf8")
-        || name_is(in a, sym, "Str")
-        || name_is(in a, sym, "is_some")
-        || name_is(in a, sym, "is_none")
-        || name_is(in a, sym, "unwrap_or")
-        || name_is(in a, sym, "or")
-        || name_is(in a, sym, "Atomic")
-        || name_is(in a, sym, "MemoryOrder")
-        || name_is(in a, sym, "parallel_for")
-        || name_is(in a, sym, "Secret")
-        || name_is(in a, sym, "SecU8")
-        || name_is(in a, sym, "SecU32")
-        || name_is(in a, sym, "SecU64")
-        || name_is(in a, sym, "SecMask64")
-        || name_is(in a, sym, "Watermark")
-        || name_is(in a, sym, "Box")
-        || name_starts(in a, sym, "checked_add_")
-        || name_starts(in a, sym, "checked_sub_")
-        || name_starts(in a, sym, "checked_mul_")
-        || name_starts(in a, sym, "leading_zeros_")
-        || name_starts(in a, sym, "trailing_zeros_")
-        || name_starts(in a, sym, "count_ones_")
-        || name_starts(in a, sym, "wrapping_shl_")
-        || name_starts(in a, sym, "wrapping_shr_")
-        || name_starts(in a, sym, "wrapping_neg_")
-        || name_starts(in a, sym, "to_le_bytes_")
-        || name_starts(in a, sym, "to_be_bytes_")
-        || name_starts(in a, sym, "from_le_bytes_")
-        || name_starts(in a, sym, "from_be_bytes_")
-        || name_starts(in a, sym, "exp_")
-        || name_starts(in a, sym, "ln_")
-        || name_starts(in a, sym, "sin_")
-        || name_starts(in a, sym, "cos_")
+// Whether the module names `lit` anywhere (its interner holds it).
+fn has_name(in a: Ast, in lit: Str) -> bool {
+    match a.names.lookup(in lit) {
+        Option::Some(s) => true,
+        Option::None => false,
+    }
 }
 
-// Whether `text` contains `lit`.
-fn contains(in text: Slice[u8], in lit: Str) -> bool {
-    let t = lit.as_bytes();
-    if text.len() < t.len() {
-        return false;
-    }
-    for i in 0..wrapping_add(wrapping_sub(text.len(), t.len()), 1) {
-        let mut all = true;
-        for j in 0..t.len() {
-            if text.try_get(wrapping_add(i, j)) != t.try_get(j) {
-                all = false;
-                break;
-            }
-        }
-        if all {
-            return true;
-        }
-    }
-    false
-}
-
-// Whether the module could need a prelude part 1 does not build: it
-// mentions one of `prelude_name`'s names, has an `@fip` function, or its
-// text mentions regions (the lowering interns `Region` for every module,
-// so the source text decides).
-pub fn needs_prelude(in a: Ast, in source: Str) -> bool {
-    if contains(in source.as_bytes(), "egion") {
+// Whether the module could need a prelude this part does not build: each
+// test is a superset of the checker's (`regions::needs_prelude`,
+// `fip::needs_prelude`, `capability_effects::secret_prelude`,
+// `float_math::prelude`, `atomics::needs_prelude` and `needs_workers`),
+// so a declined module may need none, but an accepted one needs no other.
+pub fn needs_prelude(in a: Ast, in u: Uses) -> bool {
+    // Regions: a handle type, a tiled sequence, or a `Region` effect
+    // instance (the lowering interns `Region` for every module, so the
+    // effect nodes decide).
+    if has_name(in a, "RegionBox") || has_name(in a, "Watermark") || has_name(in a, "TiledSeq") {
         return true;
     }
-    let n = a.names.len();
-    for i in 0..n {
-        if prelude_name(in a, wrapping_u32(i)) {
-            return true;
-        }
+    match a.names.lookup(in "Region") {
+        Option::Some(r) => {
+            for i in 0..a.effect_nodes.len() {
+                if effect_node(in a, wrapping_u32(i)).name == r.id() {
+                    return true;
+                }
+            }
+        },
+        Option::None => {},
+    }
+    // `Box`: the type or its constructors, or an `@fip` function.
+    if has_name(in a, "Box")
+        || has_name(in a, "Box::new")
+        || has_name(in a, "Box::new_in_caller")
+        || has_name(in a, "Box::Box") {
+        return true;
     }
     for i in 0..a.fns.len() {
         if fn_node(in a, wrapping_u32(i)).fip {
             return true;
         }
     }
-    false
+    // Atomics and workers.
+    if has_name(in a, "Atomic") || has_name(in a, "MemoryOrder") || has_name(in a, "parallel_for") {
+        return true;
+    }
+    // Transcendentals.
+    if used(in u, "exp_f32")
+        || used(in u, "exp_f64")
+        || used(in u, "ln_f32")
+        || used(in u, "ln_f64")
+        || used(in u, "sin_f32")
+        || used(in u, "sin_f64")
+        || used(in u, "cos_f32")
+        || used(in u, "cos_f64") {
+        return true;
+    }
+    // Secret operations over a declared secret scalar.
+    let scalar = has_name(in a, "SecU8")
+        || has_name(in a, "SecU32")
+        || has_name(in a, "SecU64")
+        || has_name(in a, "SecMask64");
+    scalar
+        && (
+            used(in u, "bit_and")
+                || used(in u, "bit_or")
+                || used(in u, "bit_xor")
+                || used(in u, "wrapping_add")
+                || used(in u, "wrapping_sub")
+                || used(in u, "wrapping_mul")
+                || used(in u, "ct_eq")
+                || used(in u, "ct_is_zero")
+                || used(in u, "ct_not")
+                || used(in u, "ct_select")
+                || used(in u, "declassify_bool")
+                || used(in u, "load_sec_u64le")
+        )
 }
 
 // ---------------------------------------------------------------- the world
@@ -324,64 +289,7 @@ fn insert(inout t: Table, in key: String, e: Entry) -> bool {
 
 // The key symbols of `t` in byte order of their names.
 fn sorted_keys(in t: Table) -> ChunkSeq[u32] {
-    let mut out = ChunkSeq::new[u32]();
-    for i in 0..t.entries.len() {
-        let id = wrapping_u32(i);
-        let mut j = out.len();
-        out.push(id);
-        loop {
-            if j == 0 {
-                break;
-            }
-            let prev = match out.try_get(wrapping_sub(j, 1)) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
-            if cmp_keys(in t.keys, prev, id) <= 0 {
-                break;
-            }
-            let ok = out.try_set(j, prev);
-            j = wrapping_sub(j, 1);
-        }
-        let ok = out.try_set(j, id);
-    }
-    out
-}
-
-fn cmp_keys(in k: Interner, x: u32, y: u32) -> i64 {
-    let (xs, xe) = k.span(symbol_from_id(x));
-    let (ys, ye) = k.span(symbol_from_id(y));
-    let xl = wrapping_sub(xe, xs);
-    let yl = wrapping_sub(ye, ys);
-    let n = if xl < yl {
-        xl
-    } else {
-        yl
-    };
-    for i in 0..n {
-        let a = match k.text_byte(wrapping_add(xs, i)) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
-        let b = match k.text_byte(wrapping_add(ys, i)) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
-        if a != b {
-            return if a < b {
-                -1
-            } else {
-                1
-            };
-        }
-    }
-    if xl < yl {
-        -1
-    } else if xl > yl {
-        1
-    } else {
-        0
-    }
+    sorted_symbols(in t.keys)
 }
 
 // The world's tables while collecting.
@@ -454,7 +362,18 @@ fn is_wrapping_intrinsic(in a: Ast, sym: u32) -> bool {
 }
 
 // One item of `World::collect`'s loop.
-fn collect_item(inout c: Collect, in a: Ast, src: u8, it: ItemNode) {
+// `shift` moves a prelude's spans to where the checker parses it; with
+// `skip`, an `impl` method the module defines itself (`defined`) is left
+// out (the string and option preludes).
+fn collect_item(
+    inout c: Collect,
+    in a: Ast,
+    src: u8,
+    it: ItemNode,
+    shift: u32,
+    skip: bool,
+    in defined: Interner
+) {
     if it.kind == 1 {
         let n = adt_node(in a, it.node);
         if name_is(in a, n.name, "Unit")
@@ -462,13 +381,27 @@ fn collect_item(inout c: Collect, in a: Ast, src: u8, it: ItemNode) {
             || name_is(in a, n.name, "String")
             || name_is(in a, n.name, "Str") {
             let m = quoted(in a, n.name, " is a reserved builtin type");
-            diag(inout c, "E0100", in m, n.start, n.end, "-");
+            diag(
+                inout c,
+                "E0100",
+                in m,
+                wrapping_add(n.start, shift),
+                wrapping_add(n.end, shift),
+                "-"
+            );
         }
         let key = name_text(in a, n.name);
         let entry = Entry { src: src, node: it.node, imp: none() };
         if insert(inout c.adts, in key, entry) {
             let m = prefixed("duplicate type ", in a, n.name);
-            diag(inout c, "E0100", in m, n.start, n.end, "-");
+            diag(
+                inout c,
+                "E0100",
+                in m,
+                wrapping_add(n.start, shift),
+                wrapping_add(n.end, shift),
+                "-"
+            );
         }
     } else if it.kind == 3 {
         let n = effect_decl_node(in a, it.node);
@@ -488,19 +421,42 @@ fn collect_item(inout c: Collect, in a: Ast, src: u8, it: ItemNode) {
         let entry = Entry { src: src, node: it.node, imp: none() };
         if insert(inout c.effects, in key, entry) {
             let m = prefixed("duplicate effect ", in a, n.name);
-            diag(inout c, "E0100", in m, n.start, n.end, "-");
+            diag(
+                inout c,
+                "E0100",
+                in m,
+                wrapping_add(n.start, shift),
+                wrapping_add(n.end, shift),
+                "-"
+            );
         }
     } else if it.kind == 2 {
         let n = fn_node(in a, it.node);
-        if is_wrapping_intrinsic(in a, n.name) {
-            let m = quoted(in a, n.name, " is a reserved arithmetic intrinsic");
-            diag(inout c, "E0100", in m, n.start, n.end, "-");
-        }
         let key = name_text(in a, n.name);
+        if is_wrapping_intrinsic(in a, n.name)
+            || (src == 1 && reserved_width_name(in key.as_str())) {
+            let m = quoted(in a, n.name, " is a reserved arithmetic intrinsic");
+            diag(
+                inout c,
+                "E0100",
+                in m,
+                wrapping_add(n.start, shift),
+                wrapping_add(n.end, shift),
+                "-"
+            );
+        }
+
         let entry = Entry { src: src, node: it.node, imp: none() };
         if insert(inout c.functions, in key, entry) {
             let m = prefixed("duplicate function ", in a, n.name);
-            diag(inout c, "E0100", in m, n.start, n.end, "-");
+            diag(
+                inout c,
+                "E0100",
+                in m,
+                wrapping_add(n.start, shift),
+                wrapping_add(n.end, shift),
+                "-"
+            );
         }
     } else if it.kind == 4 {
         let b = impl_node(in a, it.node);
@@ -508,6 +464,9 @@ fn collect_item(inout c: Collect, in a: Ast, src: u8, it: ItemNode) {
         for i in 0..list_len(in a, b.methods) {
             let f = list_at(in a, b.methods, i);
             let n = fn_node(in a, f);
+            if skip && replaced(in a, b.ty, n.name, in defined) {
+                continue;
+            }
             let mut key = String::new();
             if ty != none() {
                 let ok = a.names.resolve_into(symbol_from_id(ty), inout key);
@@ -522,7 +481,14 @@ fn collect_item(inout c: Collect, in a: Ast, src: u8, it: ItemNode) {
                 m.extend(in "::".as_bytes());
                 put_name(inout m, in a, n.name);
                 m.push(39);
-                diag(inout c, "E0100", in m, n.start, n.end, "-");
+                diag(
+                    inout c,
+                    "E0100",
+                    in m,
+                    wrapping_add(n.start, shift),
+                    wrapping_add(n.end, shift),
+                    "-"
+                );
             }
         }
     }
@@ -665,13 +631,13 @@ fn put_generics(inout o: ChunkSeq[u8], in a: Ast, list: u32, depth: u64) {
 // A function's signature: `head` names it (the table key, or an effect
 // operation's name); an `impl` method (`imp`) takes its block's generics
 // first and gives an untyped `self` the block's type.
-fn put_function(inout o: ChunkSeq[u8], in a: Ast, f: u32, imp: u32, depth: u64) {
+fn put_function(inout o: ChunkSeq[u8], in a: Ast, f: u32, imp: u32, depth: u64, shift: u32) {
     let n = fn_node(in a, f);
     o.extend(in " fip=".as_bytes());
     put_bool(inout o, n.fip);
     o.extend(in " body=".as_bytes());
     put_bool(inout o, n.body != none());
-    put_span(inout o, n.start, n.end);
+    put_span(inout o, wrapping_add(n.start, shift), wrapping_add(n.end, shift));
     o.push(10);
     let mut self_ty = none();
     if imp != none() {
@@ -719,7 +685,7 @@ fn put_function(inout o: ChunkSeq[u8], in a: Ast, f: u32, imp: u32, depth: u64) 
     o.push(10);
 }
 
-fn put_adt(inout o: ChunkSeq[u8], in a: Ast, x: u32) {
+fn put_adt(inout o: ChunkSeq[u8], in a: Ast, x: u32, shift: u32) {
     let n = adt_node(in a, x);
     o.extend(in "adt ".as_bytes());
     put_name(inout o, in a, n.name);
@@ -733,7 +699,7 @@ fn put_adt(inout o: ChunkSeq[u8], in a: Ast, x: u32) {
     } else {
         o.push(45);
     }
-    put_span(inout o, n.start, n.end);
+    put_span(inout o, wrapping_add(n.start, shift), wrapping_add(n.end, shift));
     o.push(10);
     put_generics(inout o, in a, n.generics, 1);
     for i in 0..list_len(in a, n.variants) {
@@ -762,20 +728,20 @@ fn put_adt(inout o: ChunkSeq[u8], in a: Ast, x: u32) {
     }
 }
 
-fn put_effect(inout o: ChunkSeq[u8], in a: Ast, x: u32) {
+fn put_effect(inout o: ChunkSeq[u8], in a: Ast, x: u32, shift: u32) {
     let n = effect_decl_node(in a, x);
     o.extend(in "effect ".as_bytes());
     put_name(inout o, in a, n.name);
     o.extend(in " linear=".as_bytes());
     put_bool(inout o, n.linear);
-    put_span(inout o, n.start, n.end);
+    put_span(inout o, wrapping_add(n.start, shift), wrapping_add(n.end, shift));
     o.push(10);
     put_generics(inout o, in a, n.generics, 1);
     for i in 0..list_len(in a, n.ops) {
         let f = list_at(in a, n.ops, i);
         o.extend(in " op ".as_bytes());
         put_name(inout o, in a, fn_node(in a, f).name);
-        put_function(inout o, in a, f, none(), 2);
+        put_function(inout o, in a, f, none(), 2, shift);
     }
 }
 
@@ -797,38 +763,94 @@ fn put_key(inout o: ChunkSeq[u8], in t: Table, id: u32) {
     }
 }
 
+// The sources of a world: the builtins (`src` 0), the module (1) and the
+// preludes after it, strings (2) and options (3), each with the shift of
+// its spans (an absent prelude is the empty module).
+struct Srcs {
+    base: Ast,
+    module: Ast,
+    strings: Ast,
+    option: Ast,
+    width: Ast,
+    w_shift: u32,
+    s_shift: u32,
+    o_shift: u32
+}
+
+fn shift_of(in s: Srcs, src: u8) -> u32 {
+    if src == 2 {
+        s.s_shift
+    } else if src == 3 {
+        s.o_shift
+    } else if src == 4 {
+        s.w_shift
+    } else {
+        0
+    }
+}
+
+fn dump_adt(inout o: ChunkSeq[u8], in s: Srcs, e: Entry) {
+    let sh = shift_of(in s, e.src);
+    if e.src == 0 {
+        put_adt(inout o, in s.base, e.node, sh);
+    } else if e.src == 1 {
+        put_adt(inout o, in s.module, e.node, sh);
+    } else if e.src == 2 {
+        put_adt(inout o, in s.strings, e.node, sh);
+    } else if e.src == 4 {
+        put_adt(inout o, in s.width, e.node, sh);
+    } else {
+        put_adt(inout o, in s.option, e.node, sh);
+    }
+}
+
+fn dump_effect(inout o: ChunkSeq[u8], in s: Srcs, e: Entry) {
+    let sh = shift_of(in s, e.src);
+    if e.src == 0 {
+        put_effect(inout o, in s.base, e.node, sh);
+    } else if e.src == 1 {
+        put_effect(inout o, in s.module, e.node, sh);
+    } else if e.src == 2 {
+        put_effect(inout o, in s.strings, e.node, sh);
+    } else if e.src == 4 {
+        put_effect(inout o, in s.width, e.node, sh);
+    } else {
+        put_effect(inout o, in s.option, e.node, sh);
+    }
+}
+
+fn dump_function(inout o: ChunkSeq[u8], in s: Srcs, e: Entry) {
+    let sh = shift_of(in s, e.src);
+    if e.src == 0 {
+        put_function(inout o, in s.base, e.node, e.imp, 1, sh);
+    } else if e.src == 1 {
+        put_function(inout o, in s.module, e.node, e.imp, 1, sh);
+    } else if e.src == 2 {
+        put_function(inout o, in s.strings, e.node, e.imp, 1, sh);
+    } else if e.src == 4 {
+        put_function(inout o, in s.width, e.node, e.imp, 1, sh);
+    } else {
+        put_function(inout o, in s.option, e.node, e.imp, 1, sh);
+    }
+}
+
 // The canonical dump of the collected world: the ADTs, effects and
 // functions in key order, then the diagnostics in order.
-fn dump(in c: Collect, in base: Ast, in module: Ast, inout o: ChunkSeq[u8]) {
+fn dump(in c: Collect, in s: Srcs, inout o: ChunkSeq[u8]) {
     let adts = sorted_keys(in c.adts);
     for i in 0..adts.len() {
-        let e = entry_at(in c.adts, word32(in adts, i));
-        if e.src == 0 {
-            put_adt(inout o, in base, e.node);
-        } else {
-            put_adt(inout o, in module, e.node);
-        }
+        dump_adt(inout o, in s, entry_at(in c.adts, word32(in adts, i)));
     }
     let effects = sorted_keys(in c.effects);
     for i in 0..effects.len() {
-        let e = entry_at(in c.effects, word32(in effects, i));
-        if e.src == 0 {
-            put_effect(inout o, in base, e.node);
-        } else {
-            put_effect(inout o, in module, e.node);
-        }
+        dump_effect(inout o, in s, entry_at(in c.effects, word32(in effects, i)));
     }
     let functions = sorted_keys(in c.functions);
     for i in 0..functions.len() {
         let id = word32(in functions, i);
-        let e = entry_at(in c.functions, id);
         o.extend(in "fn ".as_bytes());
         put_key(inout o, in c.functions, id);
-        if e.src == 0 {
-            put_function(inout o, in base, e.node, e.imp, 1);
-        } else {
-            put_function(inout o, in module, e.node, e.imp, 1);
-        }
+        dump_function(inout o, in s, entry_at(in c.functions, id));
     }
     o.extend(in c.diags.as_slice());
 }
@@ -842,34 +864,98 @@ fn word32(in s: ChunkSeq[u32], i: u64) -> u32 {
 
 // ---------------------------------------------------------------- entries
 
-// Collects `module` (parsed) over the builtins (`base`).
-fn collect(in base: Ast, in module: Ast) -> Collect {
+fn collect_all(inout c: Collect, in a: Ast, src: u8, shift: u32, skip: bool, in defined: Interner) {
+    for i in 0..a.m_items.len() {
+        collect_item(
+            inout c,
+            in a,
+            src,
+            item_node(in a, word32(in a.m_items, i)),
+            shift,
+            skip,
+            in defined
+        );
+    }
+}
+
+// The end of a prelude in the checker's coordinates: its largest span end
+// shifted, or 0 for an empty one (`integer_widths::module_end`).
+fn prelude_end(in a: Ast, shift: u32, in defined: Interner) -> u32 {
+    let e = module_end(in a, true, in defined);
+    if e == 0 {
+        0
+    } else {
+        wrapping_add(e, shift)
+    }
+}
+
+fn max32(a: u32, b: u32) -> u32 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+// `World::collect` over `source`: the builtins, the module, then the
+// preludes it brings in.
+fn world_of(in source: Str, inout o: ChunkSeq[u8]) {
+    let module = lower_source(in source).ast;
+    let uses = uses_of(in module);
+    let defined = defined_methods(in module);
+    let module_last = module_end(in module, false, in defined);
+    let w_shift = wrapping_add(module_last, 1);
+    let wsrc = width_source(in uses, in module);
+    let width = lower_source(in wsrc.as_str()).ast;
+    let w_end = prelude_end(in width, w_shift, in defined);
+    let s_shift = wrapping_add(max32(w_end, module_last), 1);
+    let strings = if needs_strings(in uses) {
+        lower_source(in strings_source()).ast
+    } else {
+        lower_source(in "").ast
+    };
+    let after = max32(w_end, prelude_end(in strings, s_shift, in defined));
+    let o_shift = wrapping_add(max32(after, module_last), 1);
+    let option = if needs_option(in uses, in defined) {
+        lower_source(in option_source()).ast
+    } else {
+        lower_source(in "").ast
+    };
+    let s = Srcs {
+        base: lower_source(in base_source()).ast,
+        module: module,
+        strings: strings,
+        option: option,
+        width: width,
+        w_shift: w_shift,
+        s_shift: s_shift,
+        o_shift: o_shift
+    };
     let mut c = Collect {
         adts: table_new(),
         effects: table_new(),
         functions: table_new(),
         diags: ChunkSeq::new[u8]()
     };
-    for i in 0..base.m_items.len() {
-        collect_item(inout c, in base, 0, item_node(in base, word32(in base.m_items, i)));
-    }
-    for i in 0..module.m_items.len() {
-        collect_item(inout c, in module, 1, item_node(in module, word32(in module.m_items, i)));
-    }
-    c
+    let none_defined = interner_new();
+    collect_all(inout c, in s.base, 0, 0, false, in none_defined);
+    collect_all(inout c, in s.module, 1, 0, false, in none_defined);
+    collect_all(inout c, in s.width, 4, w_shift, false, in none_defined);
+    collect_all(inout c, in s.strings, 2, s_shift, true, in defined);
+    collect_all(inout c, in s.option, 3, o_shift, true, in defined);
+    dump(in c, in s, inout o);
 }
 
 // The harness entry: the dump of `World::collect` over `source`'s parse,
-// or `declined` when the module could need a prelude (`needs_prelude`).
+// or `declined` when the module could need a prelude this part does not
+// build (`needs_prelude`).
 pub fn collect_text(in source: Str) -> ChunkSeq[u64] {
-    let module = lower_source(in source).ast;
     let mut o = ChunkSeq::new[u8]();
-    if needs_prelude(in module, in source) {
+    let module = lower_source(in source).ast;
+    if needs_prelude(in module, in uses_of(in module)) {
         o.extend(in "declined\n".as_bytes());
         return pack_text(in o);
     }
-    let base = lower_source(in base_source()).ast;
-    let c = collect(in base, in module);
-    dump(in c, in base, in module, inout o);
+    world_of(in source, inout o);
     pack_text(in o)
 }

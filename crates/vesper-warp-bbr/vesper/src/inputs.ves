@@ -4,8 +4,12 @@
 
 // `OnTransmit()` + `OnPacketSent(P)`. With `guard`, the send is refused
 // while the send guard is closed (probe packets pass `false`).
-pub fn bbrv3_record_send(inout b: Bbrv3, now_ns: u64, packet: SentPacket, guard: bool)
-    -> PacketDeliveryState eff [Fail[BbrFault]] {
+pub fn bbrv3_record_send(
+    inout b: Bbrv3,
+    now_ns: u64,
+    packet: SentPacket,
+    guard: bool
+) -> PacketDeliveryState eff [Fail[BbrFault]] {
     check_time(b.last_now_ns, now_ns);
     match pn_fault(packet.pn) {
         Option::Some(e) => {
@@ -55,8 +59,12 @@ pub fn bbrv3_record_send(inout b: Bbrv3, now_ns: u64, packet: SentPacket, guard:
 // It takes the two fields it reads, `next_edt` (updated in place) and the
 // pacing rate, rather than the whole controller: it runs once per packet,
 // and the export ABI copies an `inout` aggregate in and out on every call.
-pub fn schedule_edt_ns(inout next_edt_ns: u64, pacing_rate: u64, pkt_bytes: u32, now_ns: u64)
-    -> u64 {
+pub fn schedule_edt_ns(
+    inout next_edt_ns: u64,
+    pacing_rate: u64,
+    pkt_bytes: u32,
+    now_ns: u64
+) -> u64 {
     let delay = pacing_delay_ns(pkt_bytes, pacing_rate);
     let (launch, next) = edt_step(next_edt_ns, now_ns, delay);
     next_edt_ns = next;

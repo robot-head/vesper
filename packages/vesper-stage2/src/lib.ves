@@ -213,13 +213,20 @@ fn move_front_to_perm(
 
 /// Compile a Loom package from `root_dir` to a core Wasm module at `out_wasm`
 /// with no Rust compiler calls. Returns `(ok_flag_or_code, core_len_or_site)`.
-pub fn stage2_compile_dir(in root_dir: Str, in out_wasm: Str, in entry_name: Str)
-    -> (u64, u64) eff [Ffi[StdFs]] {
+pub fn stage2_compile_dir(
+    in root_dir: Str,
+    in out_wasm: Str,
+    in entry_name: Str
+) -> (u64, u64) eff [Ffi[StdFs]] {
     stage2_compile_dir_impl(in root_dir, in out_wasm, in entry_name, false)
 }
 
-fn stage2_compile_dir_impl(in root_dir: Str, in out_wasm: Str, in entry_name: Str, want_syms: bool)
-    -> (u64, u64) eff [Ffi[StdFs]] {
+fn stage2_compile_dir_impl(
+    in root_dir: Str,
+    in out_wasm: Str,
+    in entry_name: Str,
+    want_syms: bool
+) -> (u64, u64) eff [Ffi[StdFs]] {
     let mut stage_log = ChunkSeq::new[u8]();
     stage_log.reserve(4096);
     write_stage(want_syms, in out_wasm, in "load_package_graph", inout stage_log);

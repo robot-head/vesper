@@ -1,0 +1,9 @@
+// Open a bounded lexical Region (§7.6). Its capability can be used inside the
+// block, but neither a handle nor a closure carrying it can leave the region.
+// The capacity must be a positive integer literal in bytes. Capturing it as
+// a pattern preserves the literal token for the Region parser.
+pub sugar scratch: expr {
+    rule (scratch $arena:ident[$bytes:pat] $body:block) => {
+        region $arena($bytes) $body
+    }
+}

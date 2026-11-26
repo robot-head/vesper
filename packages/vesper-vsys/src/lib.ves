@@ -484,8 +484,13 @@ fn parse_raw_val_type(inout p: P) -> ValTy eff [Fail[VsysError]] {
     }
 }
 
-fn parse_wire_field_type(inout p: P, name_a: u64, name_b: u64, s0: u64, s1: u64)
-    -> WireField eff [Fail[VsysError]] {
+fn parse_wire_field_type(
+    inout p: P,
+    name_a: u64,
+    name_b: u64,
+    s0: u64,
+    s1: u64
+) -> WireField eff [Fail[VsysError]] {
     let (ta, tb) = take_word(inout p);
     let is_ba = eq_bytes(in p.arena[ta..tb], in "ByteArray".as_bytes());
     let is_zp = eq_bytes(in p.arena[ta..tb], in "ZeroPad".as_bytes());
@@ -562,8 +567,12 @@ fn parse_wire_field_type(inout p: P, name_a: u64, name_b: u64, s0: u64, s1: u64)
     }
 }
 
-fn parse_borrowed_param(inout p: P, name_a: u64, name_b: u64, access: u8)
-    -> ParDef eff [Fail[VsysError]] {
+fn parse_borrowed_param(
+    inout p: P,
+    name_a: u64,
+    name_b: u64,
+    access: u8
+) -> ParDef eff [Fail[VsysError]] {
     let mut nullable = false;
     if is_word(in p, in "Option") {
         let _ = bump(inout p);
@@ -860,8 +869,12 @@ fn find_wire(in ws: Slice[WireStructDef], in arena: Slice[u8], a: u64, b: u64) -
     Option::None
 }
 
-fn resolve_val_ty(in vt: ValTy, in es: Slice[EnumDef], in xs: Slice[ExternDef], in arena: Slice[u8])
-    -> ValTy eff [Fail[VsysError]] {
+fn resolve_val_ty(
+    in vt: ValTy,
+    in es: Slice[EnumDef],
+    in xs: Slice[ExternDef],
+    in arena: Slice[u8]
+) -> ValTy eff [Fail[VsysError]] {
     if vt.tag != 5 {
         return vt;
     }
@@ -1228,16 +1241,15 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                 }
             }
             expect_punct(inout p, 59);
-            consts
-                .push(
-                    ConstDef {
-                        na: ca,
-                        nb: cb,
-                        scalar: sc,
-                        neg: neg,
-                        mag: mag,
-                    }
-                );
+            consts.push(
+                ConstDef {
+                    na: ca,
+                    nb: cb,
+                    scalar: sc,
+                    neg: neg,
+                    mag: mag,
+                }
+            );
         } else if is_word(in p, in "enum") {
             let _ = bump(inout p);
             let (ea, eb) = take_word(inout p);
@@ -1276,14 +1288,13 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                         return err_at(in p, err_duplicate(), 524);
                     }
                 }
-                enum_vars
-                    .push(
-                        EnumVar {
-                            na: va,
-                            nb: vb,
-                            val: val,
-                        }
-                    );
+                enum_vars.push(
+                    EnumVar {
+                        na: va,
+                        nb: vb,
+                        val: val,
+                    }
+                );
                 vn = wrapping_add(vn, 1);
                 if !eat_punct(inout p, 44) {
                     expect_punct(inout p, 125);
@@ -1294,16 +1305,15 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                 return err_at(in p, err_type(), 525);
             }
             sort_vars(inout enum_vars, v0, vn, in p.arena.as_slice());
-            enums
-                .push(
-                    EnumDef {
-                        na: ea,
-                        nb: eb,
-                        scalar: sc,
-                        v0: v0,
-                        vn: vn,
-                    }
-                );
+            enums.push(
+                EnumDef {
+                    na: ea,
+                    nb: eb,
+                    scalar: sc,
+                    v0: v0,
+                    vn: vn,
+                }
+            );
         } else if (is_word(in p, in "linear") || is_word(in p, in "affine"))
             && peek_is_word(in p, 1, in "extern") {
             let lin: u8 = if is_word(in p, in "linear") {
@@ -1330,18 +1340,17 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                 }
                 expect_punct(inout p, 93);
                 expect_punct(inout p, 59);
-                externs
-                    .push(
-                        ExternDef {
-                            na: xa,
-                            nb: xb,
-                            linearity: 1,
-                            has_drop: false,
-                            drop_a: 0,
-                            drop_b: 0,
-                            mapping: msc,
-                        }
-                    );
+                externs.push(
+                    ExternDef {
+                        na: xa,
+                        nb: xb,
+                        linearity: 1,
+                        has_drop: false,
+                        drop_a: 0,
+                        drop_b: 0,
+                        mapping: msc,
+                    }
+                );
             } else {
                 expect_word(inout p, in "type");
                 let (xa, xb) = take_word(inout p);
@@ -1362,18 +1371,17 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                     db = d1;
                 }
                 expect_punct(inout p, 59);
-                externs
-                    .push(
-                        ExternDef {
-                            na: xa,
-                            nb: xb,
-                            linearity: lin,
-                            has_drop: has_drop,
-                            drop_a: da,
-                            drop_b: db,
-                            mapping: 0,
-                        }
-                    );
+                externs.push(
+                    ExternDef {
+                        na: xa,
+                        nb: xb,
+                        linearity: lin,
+                        has_drop: has_drop,
+                        drop_a: da,
+                        drop_b: db,
+                        mapping: 0,
+                    }
+                );
             }
         } else if is_word(in p, in "wire") {
             let wt = cur(in p);
@@ -1401,19 +1409,18 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                     break;
                 }
             }
-            wires
-                .push(
-                    WireStructDef {
-                        name_a: wa,
-                        name_b: wb,
-                        f0: f0,
-                        fn_count: fn_count,
-                        size: 0,
-                        alignment: 0,
-                        s0: wt.s0,
-                        s1: wt.s1,
-                    }
-                );
+            wires.push(
+                WireStructDef {
+                    name_a: wa,
+                    name_b: wb,
+                    f0: f0,
+                    fn_count: fn_count,
+                    size: 0,
+                    alignment: 0,
+                    s0: wt.s0,
+                    s1: wt.s1,
+                }
+            );
         } else if is_word(in p, in "fn")
             || is_word(in p, in "callback")
             || peek_is_punct(in p, 0, 35) {
@@ -1442,26 +1449,25 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
             let mut pn: u64 = 0;
             if is_cb {
                 let (ha, hb) = push_str_arena(inout p.arena, in "callee");
-                pars
-                    .push(
-                        ParDef {
-                            na: ha,
-                            nb: hb,
-                            kind: 4,
-                            access: 1,
-                            flag: false,
-                            vt: ValTy {
-                                tag: 1,
-                                sc: 0,
-                                na: 0,
-                                nb: 0,
-                            },
-                            p_sc: 0,
-                            p_na: sym_a,
-                            p_nb: sym_b,
-                            is_struct: false,
-                        }
-                    );
+                pars.push(
+                    ParDef {
+                        na: ha,
+                        nb: hb,
+                        kind: 4,
+                        access: 1,
+                        flag: false,
+                        vt: ValTy {
+                            tag: 1,
+                            sc: 0,
+                            na: 0,
+                            nb: 0,
+                        },
+                        p_sc: 0,
+                        p_na: sym_a,
+                        p_nb: sym_b,
+                        is_struct: false,
+                    }
+                );
                 pn = 1;
             }
             let mut has_variadic = false;
@@ -1492,26 +1498,25 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                     let (pa, pb) = take_word(inout p);
                     expect_punct(inout p, 58);
                     let (ca, cb) = take_word(inout p);
-                    pars
-                        .push(
-                            ParDef {
-                                na: pa,
-                                nb: pb,
-                                kind: 8,
-                                access: 1,
-                                flag: retain,
-                                vt: ValTy {
-                                    tag: 1,
-                                    sc: 0,
-                                    na: 0,
-                                    nb: 0,
-                                },
-                                p_sc: 0,
-                                p_na: ca,
-                                p_nb: cb,
-                                is_struct: false,
-                            }
-                        );
+                    pars.push(
+                        ParDef {
+                            na: pa,
+                            nb: pb,
+                            kind: 8,
+                            access: 1,
+                            flag: retain,
+                            vt: ValTy {
+                                tag: 1,
+                                sc: 0,
+                                na: 0,
+                                nb: 0,
+                            },
+                            p_sc: 0,
+                            p_na: ca,
+                            p_nb: cb,
+                            is_struct: false,
+                        }
+                    );
                     pn = wrapping_add(pn, 1);
                     if !eat_punct(inout p, 44) {
                         expect_punct(inout p, 41);
@@ -1528,26 +1533,25 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                     let (pa, pb) = take_word(inout p);
                     expect_punct(inout p, 58);
                     let (ha, hb) = take_word(inout p);
-                    pars
-                        .push(
-                            ParDef {
-                                na: pa,
-                                nb: pb,
-                                kind: 4,
-                                access: 4,
-                                flag: false,
-                                vt: ValTy {
-                                    tag: 1,
-                                    sc: 0,
-                                    na: 0,
-                                    nb: 0,
-                                },
-                                p_sc: 0,
-                                p_na: ha,
-                                p_nb: hb,
-                                is_struct: false,
-                            }
-                        );
+                    pars.push(
+                        ParDef {
+                            na: pa,
+                            nb: pb,
+                            kind: 4,
+                            access: 4,
+                            flag: false,
+                            vt: ValTy {
+                                tag: 1,
+                                sc: 0,
+                                na: 0,
+                                nb: 0,
+                            },
+                            p_sc: 0,
+                            p_na: ha,
+                            p_nb: hb,
+                            is_struct: false,
+                        }
+                    );
                     pn = wrapping_add(pn, 1);
                     if !eat_punct(inout p, 44) {
                         expect_punct(inout p, 41);
@@ -1581,50 +1585,48 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                             return err_at(in p, err_unsupported(), 553);
                         }
                         expect_punct(inout p, 93);
-                        pars
-                            .push(
-                                ParDef {
-                                    na: pa,
-                                    nb: pb,
-                                    kind: 9,
-                                    access: acc,
-                                    flag: false,
-                                    vt: ValTy {
-                                        tag: 1,
-                                        sc: 0,
-                                        na: 0,
-                                        nb: 0,
-                                    },
-                                    p_sc: sc,
-                                    p_na: 0,
-                                    p_nb: 0,
-                                    is_struct: false,
-                                }
-                            );
+                        pars.push(
+                            ParDef {
+                                na: pa,
+                                nb: pb,
+                                kind: 9,
+                                access: acc,
+                                flag: false,
+                                vt: ValTy {
+                                    tag: 1,
+                                    sc: 0,
+                                    na: 0,
+                                    nb: 0,
+                                },
+                                p_sc: sc,
+                                p_na: 0,
+                                p_nb: 0,
+                                is_struct: false,
+                            }
+                        );
                     } else if nocap {
                         pars.push(parse_borrowed_param(inout p, pa, pb, acc));
                     } else {
                         let (ha, hb) = take_word(inout p);
-                        pars
-                            .push(
-                                ParDef {
-                                    na: pa,
-                                    nb: pb,
-                                    kind: 4,
-                                    access: acc,
-                                    flag: false,
-                                    vt: ValTy {
-                                        tag: 1,
-                                        sc: 0,
-                                        na: 0,
-                                        nb: 0,
-                                    },
-                                    p_sc: 0,
-                                    p_na: ha,
-                                    p_nb: hb,
-                                    is_struct: false,
-                                }
-                            );
+                        pars.push(
+                            ParDef {
+                                na: pa,
+                                nb: pb,
+                                kind: 4,
+                                access: acc,
+                                flag: false,
+                                vt: ValTy {
+                                    tag: 1,
+                                    sc: 0,
+                                    na: 0,
+                                    nb: 0,
+                                },
+                                p_sc: 0,
+                                p_na: ha,
+                                p_nb: hb,
+                                is_struct: false,
+                            }
+                        );
                     }
                 } else {
                     if nocap {
@@ -1633,21 +1635,20 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                     let (pa, pb) = take_word(inout p);
                     expect_punct(inout p, 58);
                     let vt = parse_raw_val_type(inout p);
-                    pars
-                        .push(
-                            ParDef {
-                                na: pa,
-                                nb: pb,
-                                kind: 1,
-                                access: 0,
-                                flag: false,
-                                vt: vt,
-                                p_sc: 0,
-                                p_na: 0,
-                                p_nb: 0,
-                                is_struct: false,
-                            }
-                        );
+                    pars.push(
+                        ParDef {
+                            na: pa,
+                            nb: pb,
+                            kind: 1,
+                            access: 0,
+                            flag: false,
+                            vt: vt,
+                            p_sc: 0,
+                            p_na: 0,
+                            p_nb: 0,
+                            is_struct: false,
+                        }
+                    );
                 }
                 pn = wrapping_add(pn, 1);
                 if !eat_punct(inout p, 44) {
@@ -1715,41 +1716,39 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
             }
             expect_punct(inout p, 59);
             if is_cb {
-                externs
-                    .push(
-                        ExternDef {
-                            na: sym_a,
-                            nb: sym_b,
-                            linearity: 3,
-                            has_drop: false,
-                            drop_a: 0,
-                            drop_b: 0,
-                            mapping: 0,
-                        }
-                    );
-            }
-            funs
-                .push(
-                    FunDef {
-                        sym_a: sym_a,
-                        sym_b: sym_b,
-                        p0: p0,
-                        pn: pn,
-                        result: res,
-                        has_len: has_len,
-                        len_a: len_a,
-                        len_b: len_b,
-                        mapping_len: 0,
-                        has_mapping_len: false,
-                        errno: errno,
-                        has_variadic: has_variadic,
-                        variadic: variadic,
-                        has_link: has_link_attr,
-                        link_a: la,
-                        link_b: lb,
-                        indirect: is_cb,
+                externs.push(
+                    ExternDef {
+                        na: sym_a,
+                        nb: sym_b,
+                        linearity: 3,
+                        has_drop: false,
+                        drop_a: 0,
+                        drop_b: 0,
+                        mapping: 0,
                     }
                 );
+            }
+            funs.push(
+                FunDef {
+                    sym_a: sym_a,
+                    sym_b: sym_b,
+                    p0: p0,
+                    pn: pn,
+                    result: res,
+                    has_len: has_len,
+                    len_a: len_a,
+                    len_b: len_b,
+                    mapping_len: 0,
+                    has_mapping_len: false,
+                    errno: errno,
+                    has_variadic: has_variadic,
+                    variadic: variadic,
+                    has_link: has_link_attr,
+                    link_a: la,
+                    link_b: lb,
+                    indirect: is_cb,
+                }
+            );
         } else {
             return err_at(in p, err_syntax(), 570);
         }
@@ -1778,13 +1777,12 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                 Option::None => continue,
             };
             if par.kind == 1 {
-                par
-                    .vt = resolve_val_ty(
-                        in par.vt,
-                        in enums.as_slice(),
-                        in externs.as_slice(),
-                        in p.arena.as_slice()
-                    );
+                par.vt = resolve_val_ty(
+                    in par.vt,
+                    in enums.as_slice(),
+                    in externs.as_slice(),
+                    in p.arena.as_slice()
+                );
             } else if par.kind == 2 && par.is_struct {
                 match find_wire(in wires.as_slice(), in p.arena.as_slice(), par.p_na, par.p_nb) {
                     Option::Some(_) => (),
@@ -1835,13 +1833,12 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                 Option::None => return fail_vsys(err_type(), 0, 0, 603),
             }
         } else {
-            f
-                .result = resolve_val_ty(
-                    in f.result,
-                    in enums.as_slice(),
-                    in externs.as_slice(),
-                    in p.arena.as_slice()
-                );
+            f.result = resolve_val_ty(
+                in f.result,
+                in enums.as_slice(),
+                in externs.as_slice(),
+                in p.arena.as_slice()
+            );
         }
         if f.has_len {
             let mut found = false;

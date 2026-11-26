@@ -12,7 +12,7 @@
 // `vesper_syntax::sugar_expand` on a rule corpus and a fuzzed corpus.
 
 use self::matcher::{match_rule_encoded};
-use self::driver::{expand_words};
+use self::driver::{expand_words, imports_none};
 use self::flow::{Rd, render};
 use self::hygiene::{pattern_hygiene};
 use self::scope::{lower};
@@ -178,19 +178,101 @@ pub fn template_pattern_words(in text: Str, max_bytes: u64, work: u64) -> ChunkS
     render_encoded(in text, max_bytes, work, false, true)
 }
 
-// `sugar_expand_words(source, include_tests)` of
-// `vesper_syntax::sugar_expand`: one bounded expansion round of the
-// sugar driver (sugar_expand.rs `expand`, driver.ves) over `text` with no
-// imports. `include_tests` is 0 or 1; the words are driver.ves
-// `expand_words`.
+// `sugar_expand_words(source, include_tests)`: one bounded expansion of
+// the sugar driver (sugar_expand.rs `expand_sugar_for_execution`,
+// driver.ves `expand`) over `text` with no imports. `include_tests` is 0
+// or 1; the words are driver.ves `expand_words`.
 pub fn sugar_expand_words(in text: Str, include_tests: u64, work: u64) -> ChunkSeq[u64] {
     let b = text.as_bytes();
     let src = copy_bytes(in b, 0, b.len());
-    expand_words(in src, include_tests != 0)
+    expand_words(in src, in imports_none(), include_tests != 0)
 }
 
-fn render_encoded(in text: Str, max_bytes: u64, work: u64, scoped: bool, patterned: bool)
-    -> ChunkSeq[u64] {
+// `sugar_expand_scoped_words`: the same for
+// `expand_sugar_with_scopes_for_execution(source, imports, scopes,
+// visible, include_tests)`. `text` starts with base-128 numbers of four
+// bytes: the source's length, the imports, the imports' scopes (0 for
+// none), the distinct scopes, their names, the visible imports; then per
+// import its alias's length and its declaration's length; each import's
+// scope; per scope its
+// name count; per name its length and import; the visible imports; then
+// the texts: the source, each import's alias and declaration, and the
+// names, in order. The words are driver.ves `expand_words`.
+pub fn sugar_expand_scoped_words(in text: Str, include_tests: u64, work: u64) -> ChunkSeq[u64] {
+    let b = text.as_bytes();
+    let ns = base128(in b, 0);
+    let ni = base128(in b, 4);
+    let nso = base128(in b, 8);
+    let nsc = base128(in b, 12);
+    let nn = base128(in b, 16);
+    let nv = base128(in b, 20);
+    let mut at: u64 = 24;
+    let mut imp = imports_none();
+    let mut lens = ChunkSeq::new[u64]();
+    for i in 0..ni {
+        lens.push(base128(in b, at));
+        lens.push(base128(in b, wrapping_add(at, 4)));
+        at = wrapping_add(at, 8);
+    }
+    for k in 0..nso {
+        imp.scope_of.push(base128(in b, at));
+        at = wrapping_add(at, 4);
+    }
+    let mut first: u64 = 0;
+    for k in 0..nsc {
+        let count = base128(in b, at);
+        imp.scopes.push(first);
+        imp.scopes.push(count);
+        first = wrapping_add(first, count);
+        at = wrapping_add(at, 4);
+    }
+    let mut name_lens = ChunkSeq::new[u64]();
+    for k in 0..nn {
+        name_lens.push(base128(in b, at));
+        name_lens.push(base128(in b, wrapping_add(at, 4)));
+        at = wrapping_add(at, 8);
+    }
+    for k in 0..nv {
+        imp.visible.push(base128(in b, at));
+        at = wrapping_add(at, 4);
+    }
+    let src = copy_bytes(in b, at, ns);
+    at = wrapping_add(at, ns);
+    imp.text = copy_bytes(in b, at, wrapping_sub(b.len(), at));
+    let mut off: u64 = 0;
+    for i in 0..ni {
+        let al = word_at(in lens, wrapping_mul(i, 2));
+        let dl = word_at(in lens, wrapping_add(wrapping_mul(i, 2), 1));
+        imp.rows.push(off);
+        imp.rows.push(al);
+        imp.rows.push(wrapping_add(off, al));
+        imp.rows.push(dl);
+        off = wrapping_add(off, wrapping_add(al, dl));
+    }
+    for k in 0..nn {
+        let l = word_at(in name_lens, wrapping_mul(k, 2));
+        imp.names.push(off);
+        imp.names.push(l);
+        imp.names.push(word_at(in name_lens, wrapping_add(wrapping_mul(k, 2), 1)));
+        off = wrapping_add(off, l);
+    }
+    expand_words(in src, in imp, include_tests != 0)
+}
+
+fn word_at(in v: ChunkSeq[u64], i: u64) -> u64 {
+    match v.try_get(i) {
+        Option::Some(w) => w,
+        Option::None => 0,
+    }
+}
+
+fn render_encoded(
+    in text: Str,
+    max_bytes: u64,
+    work: u64,
+    scoped: bool,
+    patterned: bool
+) -> ChunkSeq[u64] {
     let b = text.as_bytes();
     let np = base128(in b, 0);
     let ni = base128(in b, 4);

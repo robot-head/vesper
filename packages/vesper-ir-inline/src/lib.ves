@@ -668,8 +668,12 @@ fn read_literal(inout r: Reader, in b: Slice[u8], inout out: ChunkSeq[u64]) {
 // A pattern node: kind, start, stop, then Bind: name; Tuple: n, children;
 // Constructor: name, named, n, (field, child)*; Literal: kind, lo, hi,
 // opaque. Children are pool offsets.
-fn read_pattern(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], inout pats: ChunkSeq[u64])
-    -> u64 {
+fn read_pattern(
+    inout r: Reader,
+    in b: Slice[u8],
+    in nmap: ChunkSeq[u32],
+    inout pats: ChunkSeq[u64]
+) -> u64 {
     let kind = r.word(in b);
     let mut body: ChunkSeq[u64] = ChunkSeq::new[u64]();
     if kind == PK_BIND {
@@ -878,20 +882,9 @@ fn read_function(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], inout
             let a = n32(p.ops.len());
             read_op(inout r, in b, in nmap, inout p, op);
             list.push(n32(p.insts.len()));
-            p
-                .insts
-                .push(
-                    Inst {
-                        dest: dest,
-                        ty: ty,
-                        s0: s0,
-                        s1: s1,
-                        flags: iflags,
-                        opq: opq,
-                        op: op,
-                        a: a
-                    }
-                );
+            p.insts.push(
+                Inst { dest: dest, ty: ty, s0: s0, s1: s1, flags: iflags, opq: opq, op: op, a: a }
+            );
         }
         let ia = n32(p.ids.len());
         p.ids.extend(in list.as_slice());
@@ -902,26 +895,24 @@ fn read_function(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], inout
         p.blks.push(Blk { pa: bpa, pn: n32(bpn), ia: ia, ic: n32(ic), term: term, ta: ta });
     }
     let index = n32(p.funs.len());
-    p
-        .funs
-        .push(
-            Fun {
-                name: name,
-                flags: flags,
-                result: result,
-                row: row,
-                pa: pa,
-                pn: n32(pn),
-                ba: ba,
-                bn: n32(bn),
-                la: la,
-                ln: n32(ln),
-                va: n32(va),
-                vn: n32(vn),
-                fa: fa,
-                fc: n32(nb)
-            }
-        );
+    p.funs.push(
+        Fun {
+            name: name,
+            flags: flags,
+            result: result,
+            row: row,
+            pa: pa,
+            pn: n32(pn),
+            ba: ba,
+            bn: n32(bn),
+            la: la,
+            ln: n32(ln),
+            va: n32(va),
+            vn: n32(vn),
+            fa: fa,
+            fc: n32(nb)
+        }
+    );
     if w(name) >= p.fun_of.len() {
         p.fun_of.resize(inc(w(name)), NONE32);
     }
@@ -1048,11 +1039,9 @@ pub fn read_input(in b: Slice[u8]) -> Prog {
             }
             row = n32(r.word(in b));
         }
-        p
-            .instances
-            .push(
-                Instance { callee: callee, s0: s0, s1: s1, has: has, pa: pa, pn: n32(pn), row: row }
-            );
+        p.instances.push(
+            Instance { callee: callee, s0: s0, s1: s1, has: has, pa: pa, pn: n32(pn), row: row }
+        );
     }
     p
 }
@@ -1290,8 +1279,15 @@ fn mentions_names(in p: Prog, t: u32, in names: ChunkSeq[u32]) -> bool {
 }
 
 // The types of a target: parameters, values, locals and result.
-fn any_type(in p: Prog, g: Tgt, fact: u64, values: bool, locals: bool, params: bool, result: bool)
-    -> bool {
+fn any_type(
+    in p: Prog,
+    g: Tgt,
+    fact: u64,
+    values: bool,
+    locals: bool,
+    params: bool,
+    result: bool
+) -> bool {
     let f = p.fun(g.f);
     if values {
         for v in 0..w(f.vn) {
@@ -1676,21 +1672,19 @@ fn fold_literal_constants(inout p: Prog) -> u64 {
                     continue;
                 }
                 let l = p.inst(lit);
-                let ok = p
-                    .insts
-                    .try_set(
-                        w(id),
-                        Inst {
-                            dest: i.dest,
-                            ty: i.ty,
-                            s0: i.s0,
-                            s1: i.s1,
-                            flags: i.flags & I_GENERIC_CALL,
-                            opq: l.opq,
-                            op: O_CONST,
-                            a: l.a
-                        }
-                    );
+                let ok = p.insts.try_set(
+                    w(id),
+                    Inst {
+                        dest: i.dest,
+                        ty: i.ty,
+                        s0: i.s0,
+                        s1: i.s1,
+                        flags: i.flags & I_GENERIC_CALL,
+                        opq: l.opq,
+                        op: O_CONST,
+                        a: l.a
+                    }
+                );
                 folded = inc(folded);
             }
         }
@@ -1895,15 +1889,13 @@ fn bindings_new() -> Bindings {
 
 impl Bindings {
     fn push(inout self, place: bool, value: u32, at: u64) {
-        self
-            .place
-            .push(
-                if place {
-                    1
-                } else {
-                    0
-                }
-            );
+        self.place.push(
+            if place {
+                1
+            } else {
+                0
+            }
+        );
         self.value.push(value);
         self.at.push(at);
     }
@@ -3046,14 +3038,13 @@ fn copy_pattern(inout p: Prog, in rn: Rename, at: u64) -> u64 {
     if kind == PK_BIND {
         let name = p.pat(add(at, 3));
         let r = rn.names.get(name);
-        body
-            .push(
-                if r != NONE32 {
-                    w(r)
-                } else {
-                    name
-                }
-            );
+        body.push(
+            if r != NONE32 {
+                w(r)
+            } else {
+                name
+            }
+        );
     } else if kind == PK_TUPLE {
         let n = p.pat(add(at, 3));
         body.push(n);
@@ -3158,15 +3149,13 @@ fn copy_op(inout p: Prog, in rn: Rename, i: Inst) -> u32 {
     } else if op == O_HANDLE {
         let has = p.op(a);
         p.ops.push(has);
-        p
-            .ops
-            .push(
-                if has != 0 {
-                    add(p.op(inc(a)), vb)
-                } else {
-                    p.op(inc(a))
-                }
-            );
+        p.ops.push(
+            if has != 0 {
+                add(p.op(inc(a)), vb)
+            } else {
+                p.op(inc(a))
+            }
+        );
         let na = p.op(add(a, 2));
         p.ops.push(na);
         let mut at = add(a, 3);
@@ -3191,18 +3180,21 @@ fn copy_op(inout p: Prog, in rn: Rename, i: Inst) -> u32 {
     out
 }
 
-fn new_block(inout p: Prog, in params: ChunkSeq[u32], in list: ChunkSeq[u32], term: u8, ta: u32)
-    -> u32 {
+fn new_block(
+    inout p: Prog,
+    in params: ChunkSeq[u32],
+    in list: ChunkSeq[u32],
+    term: u8,
+    ta: u32
+) -> u32 {
     let pa = n32(p.ids.len());
     p.ids.extend(in params.as_slice());
     let ia = n32(p.ids.len());
     p.ids.extend(in list.as_slice());
     let id = n32(p.blks.len());
-    p
-        .blks
-        .push(
-            Blk { pa: pa, pn: n32(params.len()), ia: ia, ic: n32(list.len()), term: term, ta: ta }
-        );
+    p.blks.push(
+        Blk { pa: pa, pn: n32(params.len()), ia: ia, ic: n32(list.len()), term: term, ta: ta }
+    );
     id
 }
 
@@ -3415,16 +3407,15 @@ fn splice(
                             p.op(add(add(sa, 2), wrapping_mul(j, 2)))
                         );
                         words.push(pat);
-                        words
-                            .push(
-                                target(
-                                    in s,
-                                    k,
-                                    p.op(add(add(sa, 3), wrapping_mul(j, 2))),
-                                    first,
-                                    cold_block
-                                )
-                            );
+                        words.push(
+                            target(
+                                in s,
+                                k,
+                                p.op(add(add(sa, 3), wrapping_mul(j, 2))),
+                                first,
+                                cold_block
+                            )
+                        );
                     }
                     ta = n32(p.ops.len());
                     p.ops.extend(in words.as_slice());

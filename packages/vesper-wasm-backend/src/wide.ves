@@ -87,14 +87,13 @@ fn i64s(n: u64) -> ChunkSeq[ValTy] {
 fn word(inout c: Code, p: u32, k: u64) {
     c.get(p);
     c.op(OP_I32_WRAP_I64);
-    c
-        .load(
-            if k == 0 {
-                0
-            } else {
-                8
-            }
-        );
+    c.load(
+        if k == 0 {
+            0
+        } else {
+            8
+        }
+    );
 }
 
 impl L {
@@ -184,8 +183,14 @@ impl L {
 
     // A unary operation with a `u128` operand or result; false when
     // neither is one.
-    pub fn wide_unary(inout self, dv: u64, opn: u32, x: u32, from: u32, to: u32)
-        -> bool eff [Fail[WErr]] {
+    pub fn wide_unary(
+        inout self,
+        dv: u64,
+        opn: u32,
+        x: u32,
+        from: u32,
+        to: u32
+    ) -> bool eff [Fail[WErr]] {
         let wf = self.is_u128(from);
         let wt = self.is_u128(to);
         if self.is_op(opn, "~") && !wf {
@@ -340,8 +345,15 @@ impl L {
 
     // A binary operation with a `u128`/`i128` left operand; false otherwise.
     // `==` and `!=` stay the tuple's.
-    pub fn wide_binary(inout self, dv: u64, opn: u32, x: u32, y: u32, sa: u32, sb: u32)
-        -> bool eff [Fail[WErr]] {
+    pub fn wide_binary(
+        inout self,
+        dv: u64,
+        opn: u32,
+        x: u32,
+        y: u32,
+        sa: u32,
+        sb: u32
+    ) -> bool eff [Fail[WErr]] {
         if !self.is_u128(sa) || self.is_op(opn, "==") || self.is_op(opn, "!=") {
             return false;
         }
@@ -559,16 +571,13 @@ impl L {
             self.e.code.get(b);
             self.e.code.get(ax);
             self.e.code.get(ay);
-            self
-                .e
-                .code
-                .i64_const(
-                    if is_rem {
-                        1
-                    } else {
-                        0
-                    }
-                );
+            self.e.code.i64_const(
+                if is_rem {
+                    1
+                } else {
+                    0
+                }
+            );
             self.e.code.call(f);
             if signed {
                 if is_rem {
@@ -609,16 +618,13 @@ impl L {
             let d = self.local();
             self.e.code.get(p1);
             self.e.code.get(q1);
-            self
-                .e
-                .code
-                .op(
-                    if signed {
-                        OP_I64_LT_S
-                    } else {
-                        OP_I64_LT_U
-                    }
-                );
+            self.e.code.op(
+                if signed {
+                    OP_I64_LT_S
+                } else {
+                    OP_I64_LT_U
+                }
+            );
             self.e.code.get(p1);
             self.e.code.get(q1);
             self.e.code.op(OP_I64_EQ);
@@ -877,16 +883,13 @@ impl L {
         self.e.code.get(second);
         self.e.code.get(second);
         self.e.code.get(k);
-        self
-            .e
-            .code
-            .op(
-                if right {
-                    OP_I64_SHR_U
-                } else {
-                    OP_I64_SHL
-                }
-            );
+        self.e.code.op(
+            if right {
+                OP_I64_SHR_U
+            } else {
+                OP_I64_SHL
+            }
+        );
         self.e.code.get(first);
         self.e.code.i64_const(64);
         self.e.code.get(k);

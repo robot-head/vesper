@@ -288,8 +288,15 @@ pub fn use_module(inout s: St, cur: u32, u: u32, inout shown: String) -> u32 {
 // `Resolver::lookup`: item `name` of module `tm`, declared there (and
 // `pub`, unless the lookup comes from that module) or one of its `pub use`
 // names. Returns the item key (or `no_key()`) and its kind.
-pub fn lookup(inout s: St, tm: u32, name: u32, same: bool, in shown: String, start: u32, end: u32)
-    -> (u64, u8) {
+pub fn lookup(
+    inout s: St,
+    tm: u32,
+    name: u32,
+    same: bool,
+    in shown: String,
+    start: u32,
+    end: u32
+) -> (u64, u8) {
     // A constant `NAME` (or a value enum member `E::M`) is the function
     // `const$NAME`.
     let mut item = name;
@@ -342,11 +349,9 @@ pub fn lookup(inout s: St, tm: u32, name: u32, same: bool, in shown: String, sta
     s.err_msg.push_str(in msg);
     let c = sym_byte(in s, name, 0);
     if sym_len(in s, name) > 0 && c >= 65 && c <= 90 && mod_path_len(in s, tm) == 0 {
-        s
-            .err_help
-            .push_str(
-                in "a `.vsys` library is not an item: every module names it directly, as `Lib::f(..)` and `eff [Ffi[Lib]]`, with no import"
-            );
+        s.err_help.push_str(
+            in "a `.vsys` library is not an item: every module names it directly, as `Lib::f(..)` and `eff [Ffi[Lib]]`, with no import"
+        );
         s.err_has_help = true;
     }
     (no_key(), 0)
@@ -390,8 +395,15 @@ fn grp_insert(inout s: St, member: u32, key: u64) {
 // re-exported by it, into `s.grp_m` (member names, in byte order) and
 // `s.grp_k` (their constants' item keys). Returns 0 when the module has no
 // value enum of that name, 1 with the members, 2 with a pending error.
-pub fn group(inout s: St, tm: u32, name: u32, same: bool, in shown: String, start: u32, end: u32)
-    -> u8 {
+pub fn group(
+    inout s: St,
+    tm: u32,
+    name: u32,
+    same: bool,
+    in shown: String,
+    start: u32,
+    end: u32
+) -> u8 {
     s.grp_m.clear();
     s.grp_k.clear();
     match s.grp_head.get(pair(tm, name)) {

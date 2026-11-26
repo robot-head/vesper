@@ -1188,8 +1188,12 @@ fn state_includes(
 }
 
 // Whether some iterator present in both states advanced between them.
-fn iter_depths_differ(in ors: Slice[R], in ows: Slice[u64], in crs: Slice[R], in cws: Slice[u64])
-    -> bool {
+fn iter_depths_differ(
+    in ors: Slice[R],
+    in ows: Slice[u64],
+    in crs: Slice[R],
+    in cws: Slice[u64]
+) -> bool {
     let a = gw(in ows, 0);
     let b = gw(in cws, 0);
     let nf = if a < b {
@@ -1970,8 +1974,14 @@ fn frame_subprog(in st: St, f: u64) -> u64 {
     ww(in st, subprog_at(f))
 }
 
-fn null_name_fail(inout v: V, pc: u64, rule: Str, pre: Str, p: R, post: Str)
-    -> Never eff [Fail[VErr]] {
+fn null_name_fail(
+    inout v: V,
+    pc: u64,
+    rule: Str,
+    pre: Str,
+    p: R,
+    post: Str
+) -> Never eff [Fail[VErr]] {
     begin(inout v, rule);
     lit(inout v.msg, pre);
     type_name(inout v.msg, p.tag);
@@ -1990,8 +2000,15 @@ fn bad_xdp(inout v: V, pc: u64, o: i64, n: u64) -> Never eff [Fail[VErr]] {
 
 // Validate an access of `size` bytes at `p + off`; returns the kind of
 // target for loads and stores.
-fn access(inout v: V, in st: St, pc: u64, p: R, off: i16, size: Size, write: bool)
-    -> Target eff [Fail[VErr]] {
+fn access(
+    inout v: V,
+    in st: St,
+    pc: u64,
+    p: R,
+    off: i16,
+    size: Size,
+    write: bool
+) -> Target eff [Fail[VErr]] {
     let n = size_bytes(size);
     let ni = signed(n);
     let o16 = widen_i64(off);
@@ -2738,8 +2755,13 @@ fn bpf_loop(inout v: V, inout st: St, inout alt: St, pc: u64, next: u64) -> Step
     Step::Fork(next, entry)
 }
 
-fn kfunc_slot(inout v: V, in st: St, pc: u64, what: Str, creates: bool)
-    -> (u64, u64) eff [Fail[VErr]] {
+fn kfunc_slot(
+    inout v: V,
+    in st: St,
+    pc: u64,
+    what: Str,
+    creates: bool
+) -> (u64, u64) eff [Fail[VErr]] {
     let a = arg(inout v, in st, pc, 1);
     if a.tag != T_STACK {
         begin(inout v, "kfunc.arg_type");

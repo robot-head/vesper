@@ -408,8 +408,12 @@ pub fn sap_build(
     )
 }
 
-pub fn sap_pair_total(in smin: Slice[u32], in smax: Slice[u32], axis: u64, inout counts: Slice[u32])
-    -> u64 {
+pub fn sap_pair_total(
+    in smin: Slice[u32],
+    in smax: Slice[u32],
+    axis: u64,
+    inout counts: Slice[u32]
+) -> u64 {
     s_pair_total(in smin, in smax, axis, inout counts)
 }
 

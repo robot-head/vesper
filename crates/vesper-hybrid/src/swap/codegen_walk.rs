@@ -21,7 +21,7 @@ mod native_walk_words;
 mod codegen_calls_words;
 
 // The word encoders read the shared ones through `super::`.
-use super::{Registry, Swap, check_words, env_off, ir_words, on, open};
+use super::{Registry, Swap, check_words, env_off, ir_words, on, open, pass};
 
 /// `register_locals` plans answered by Vesper (`@vesper/native-walk`), and declined.
 static WALK_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -105,8 +105,8 @@ fn library_tasks(roots: &[&str], optimize: bool) -> Vec<(String, u64)> {
 /// The flip-gate rows of this file's swaps (`swaps::on`).
 pub(super) const SWAPS: &[Swap] = &[
     open("register_locals", "0 diffs; no flip-gate configuration"),
-    open("entry_plans", "0 diffs; no flip-gate configuration"),
-    open("export_plans", "0 diffs; no flip-gate configuration"),
+    pass("entry_plans", "native-walk", "#2056"),
+    pass("export_plans", "native-walk", "#2056"),
 ];
 
 pub(super) fn register(r: &mut Registry) {

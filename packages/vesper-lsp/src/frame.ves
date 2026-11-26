@@ -27,8 +27,12 @@ copy struct Line {
 }
 
 // `header_line`: `None` on a clean end of the stream at a frame boundary.
-fn header_line(in s: Slice[u8], inout c: Cursor, inout total: u64, l: Plimits)
-    -> Option[Line] eff [Fail[Perr]] {
+fn header_line(
+    in s: Slice[u8],
+    inout c: Cursor,
+    inout total: u64,
+    l: Plimits
+) -> Option[Line] eff [Fail[Perr]] {
     let n = s.len();
     let start = c.pos;
     let mut len: u64 = 0;

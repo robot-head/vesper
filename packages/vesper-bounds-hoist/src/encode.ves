@@ -501,8 +501,13 @@ fn inst_drops(in p: Program, at: u64, inout drops: ChunkSeq[u64]) -> u64 {
 }
 
 // Function `fi` of `p` as the input words of words.rs (step words zero).
-pub fn encode_fun(in p: Program, inout t: Types, in names: Names, inout tc: TypeCache, fi: u64)
-    -> ChunkSeq[u8] {
+pub fn encode_fun(
+    in p: Program,
+    inout t: Types,
+    in names: Names,
+    inout tc: TypeCache,
+    fi: u64
+) -> ChunkSeq[u8] {
     let mut e = Enc {
         out: ChunkSeq::new[u64](),
         loc: names_new(),

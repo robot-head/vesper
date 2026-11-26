@@ -133,8 +133,12 @@ pub fn blk_validate_discard_or_zero(
     (BLK_S_OK, seg_count)
 }
 
-pub fn blk_config_space(disk_bytes: u64, read_only: bool, queues: u16, inout out: Slice[u8])
-    -> u64 {
+pub fn blk_config_space(
+    disk_bytes: u64,
+    read_only: bool,
+    queues: u16,
+    inout out: Slice[u8]
+) -> u64 {
     if out.len() < BLK_CONFIG_BYTES {
         return 0;
     }

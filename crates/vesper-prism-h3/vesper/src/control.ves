@@ -36,8 +36,12 @@ const KIND_IGNORED: u64 = 4;
 // Bytes a pending stream holds at most: its type and a session ID.
 const HELD_MAX: u64 = 16;
 
-pub fn uni_new(server: bool, webtransport: bool, max_frame_payload: u64, max_streams: u64)
-    -> UniCore {
+pub fn uni_new(
+    server: bool,
+    webtransport: bool,
+    max_frame_payload: u64,
+    max_streams: u64
+) -> UniCore {
     UniCore {
         server: server,
         webtransport: webtransport,
@@ -182,8 +186,12 @@ pub fn uni_bytes(inout c: UniCore, id: u64, in bytes: Slice[u8]) -> Result[bool,
     typed_bytes(inout c, id, kind, in bytes)
 }
 
-fn typed_bytes(inout c: UniCore, id: u64, kind: u64, in bytes: Slice[u8])
-    -> Result[bool, ConnectionError] {
+fn typed_bytes(
+    inout c: UniCore,
+    id: u64,
+    kind: u64,
+    in bytes: Slice[u8]
+) -> Result[bool, ConnectionError] {
     if kind == KIND_CONTROL {
         reader_push(inout c.reader, in bytes);
         return control_frames(inout c, id);
@@ -201,8 +209,12 @@ fn typed_bytes(inout c: UniCore, id: u64, kind: u64, in bytes: Slice[u8])
     Result::Ok(true)
 }
 
-fn pending_bytes(inout c: UniCore, i: u64, id: u64, in bytes: Slice[u8])
-    -> Result[bool, ConnectionError] {
+fn pending_bytes(
+    inout c: UniCore,
+    i: u64,
+    id: u64,
+    in bytes: Slice[u8]
+) -> Result[bool, ConnectionError] {
     let mut buf = ChunkSeq::new[u8]();
     let lo = wrapping_mul(i, HELD_MAX);
     let had = word(in c.held_len.as_slice(), i);
@@ -223,16 +235,14 @@ fn pending_bytes(inout c: UniCore, i: u64, id: u64, in bytes: Slice[u8])
         remove_at(inout c, i);
         let start = wrapping_add(n, s.used);
         let at = put_out(inout c, in buf[start..len]);
-        c
-            .cmds
-            .push(
-                UniCmd::WebTransportStream {
-                    stream_id: id,
-                    session: s.value,
-                    at: at,
-                    len: wrapping_sub(len, start)
-                }
-            );
+        c.cmds.push(
+            UniCmd::WebTransportStream {
+                stream_id: id,
+                session: s.value,
+                at: at,
+                len: wrapping_sub(len, start)
+            }
+        );
         return Result::Ok(true);
     }
     let kind = if ty == STREAM_CONTROL {

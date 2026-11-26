@@ -188,13 +188,12 @@ fn accumulate2(
         }
     } else if scaled {
         for k in 0..s.len() {
-            s
-                .set(
-                    k,
-                    to_bits_f32(
-                        (from_bits_f32(s[k]) + from_bits_f32(x[k]) + from_bits_f32(y[k])) * gain
-                    )
-                );
+            s.set(
+                k,
+                to_bits_f32(
+                    (from_bits_f32(s[k]) + from_bits_f32(x[k]) + from_bits_f32(y[k])) * gain
+                )
+            );
         }
     } else {
         for k in 0..s.len() {
@@ -345,8 +344,11 @@ enum Step: _ {
 const STEP_WORDS: u64 = 4;
 
 // The plan of the schedule `sched` for blocks of `block` frames.
-fn plan(in sched: ChunkSeq[u64], block: u64, nlines: u64)
-    -> ChunkSeq[u64] eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+fn plan(
+    in sched: ChunkSeq[u64],
+    block: u64,
+    nlines: u64
+) -> ChunkSeq[u64] eff [Fail[RuntimeError], Fail[ArithOverflow]] {
     let mut p: ChunkSeq[u64] = ChunkSeq::new();
     let nops = get(in sched, Header::OpCount);
     let mut k: u64 = Words::Header;

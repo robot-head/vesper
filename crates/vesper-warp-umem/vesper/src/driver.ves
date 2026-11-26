@@ -273,8 +273,11 @@ pub fn device_pending_faults(in d: Device) -> u64 {
     d.nic.pending_faults()
 }
 
-pub fn device_deliver(inout d: Device, inout mem: Slice[u8], in packet: Slice[u8])
-    -> DeliverOutcome {
+pub fn device_deliver(
+    inout d: Device,
+    inout mem: Slice[u8],
+    in packet: Slice[u8]
+) -> DeliverOutcome {
     nic_deliver(inout d.nic, inout mem, in packet)
 }
 
@@ -467,8 +470,11 @@ pub fn xsk_replenish_fill(inout d: Device, max: u32) -> u32 {
 
 // A fresh transmit frame of `len` bytes at the headroom, zeroed:
 // `(chunk, data_offset)`.
-pub fn xsk_alloc_tx(inout d: Device, inout mem: Slice[u8], len: u32)
-    -> Result[(u32, u32), PortError] {
+pub fn xsk_alloc_tx(
+    inout d: Device,
+    inout mem: Slice[u8],
+    len: u32
+) -> Result[(u32, u32), PortError] {
     let headroom = d.nic.config.headroom;
     match d.check_window(headroom, len) {
         Option::Some(e) => return Result::Err(e),
@@ -496,8 +502,12 @@ pub fn xsk_abandon_tx(inout d: Device, chunk: u32) -> Option[PortError] {
 
 // The UMEM offset of an application-held frame's data, after checking that
 // the driver places `chunk` at `expected` (2 AppRx, 3 AppTx).
-pub fn xsk_frame_addr(in d: Device, chunk: u32, offset: u32, expected: u64)
-    -> Result[u64, PortError] {
+pub fn xsk_frame_addr(
+    in d: Device,
+    chunk: u32,
+    offset: u32,
+    expected: u64
+) -> Result[u64, PortError] {
     match d.check_loc(chunk, expected) {
         Option::Some(e) => Result::Err(e),
         Option::None => Result::Ok(wrapping_add(d.base(chunk), widen_u64(offset))),
@@ -588,8 +598,13 @@ pub fn xsk_recycle(inout d: Device, chunk: u32) -> Option[PortError] {
 }
 
 // `submit_paced_tx`: publishes the frame's descriptor.
-pub fn xsk_submit(inout d: Device, chunk: u32, offset: u32, len: u32, pkt_num_full: u64)
-    -> Option[PortError] {
+pub fn xsk_submit(
+    inout d: Device,
+    chunk: u32,
+    offset: u32,
+    len: u32,
+    pkt_num_full: u64
+) -> Option[PortError] {
     match d.check_loc(chunk, L_APP_TX) {
         Option::Some(e) => return Option::Some(e),
         Option::None => (),

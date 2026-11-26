@@ -1027,8 +1027,13 @@ impl Flow<'_> {
             },
         );
     }
-    fn merge(&mut self, a: &State, b: &State, span: &Span) -> State {
-        let mut out = a.clone();
+    /// Joins `b` into `out` at a CFG join, and says whether `out` changed.
+    /// It works in place because the dataflow in [`Self::function`] calls
+    /// it on every edge: copying a large function's whole state to build
+    /// the join, then comparing it with the old one, was most of checking
+    /// its package.
+    fn merge(&mut self, out: &mut State, b: &State, span: &Span) -> bool {
+        let mut changed = false;
         for (n, slot) in &b.slots {
             if let Some(old) = out.slots.get_mut(n) {
                 // The cheap tests come first: `mode` is pure, so the order
@@ -1042,7 +1047,12 @@ impl Flow<'_> {
                 if x != y {
                     self.caused(format!("linear place '{n}' has inconsistent ownership at a CFG join"), span.clone(), self.origins.slot(n), "Ownership of a linear place must agree on the incoming control-flow edges.");
                 }
-                old.moved.extend(slot.moved.clone());
+                for path in &slot.moved {
+                    if !old.moved.contains(path) {
+                        old.moved.insert(path.clone());
+                        changed = true;
+                    }
+                }
             } else {
                 if slot.pass == Pass::Sink
                     && !slot.moved.contains(&vec![])
@@ -1051,6 +1061,7 @@ impl Flow<'_> {
                     self.caused(format!("linear place '{n}' survives only one CFG edge"), span.clone(), self.origins.slot(n), "An owned linear place cannot disappear on another incoming control-flow edge.");
                 }
                 out.slots.insert(n.clone(), slot.clone());
+                changed = true;
             }
         }
         for (id, value) in &b.values {
@@ -1059,15 +1070,20 @@ impl Flow<'_> {
                 {
                     self.caused(format!("linear temporary %{id} has inconsistent ownership at a CFG join"), span.clone(), self.origins.value(*id), "Ownership of a linear temporary must agree on incoming control-flow edges.");
                 }
-                old.consumed |= value.consumed;
-                if old.consumed {
+                if value.consumed && !old.consumed {
+                    old.consumed = true;
+                    changed = true;
+                }
+                if old.consumed && old.loan.is_some() {
                     old.loan = None;
+                    changed = true;
                 }
             } else {
                 out.values.insert(*id, value.clone());
+                changed = true;
             }
         }
-        out
+        changed
     }
     fn function(&mut self, f: &FunctionIr) {
         if f.blocks.is_empty() {
@@ -1127,8 +1143,14 @@ impl Flow<'_> {
                 Terminator::Match { arms, .. } => arms.iter().map(|(_, b)| (*b, vec![])).collect(),
                 Terminator::Unreachable => vec![],
             };
-            for (target, args) in edges {
-                let mut edge = state.clone();
+            let last = edges.len().saturating_sub(1);
+            for (k, (target, args)) in edges.into_iter().enumerate() {
+                // The last edge takes the block's state instead of a copy.
+                let mut edge = if k == last {
+                    std::mem::take(&mut state)
+                } else {
+                    state.clone()
+                };
                 for (arg, param) in args.iter().zip(&f.blocks[target].params) {
                     self.consume(&mut edge, *arg, &span);
                     edge.values.insert(
@@ -1141,16 +1163,15 @@ impl Flow<'_> {
                         },
                     );
                 }
-                let next = if let Some(old) = incoming.get(&target) {
-                    self.merge(old, &edge, &span)
-                } else {
-                    edge
-                };
-                if incoming.get(&target) != Some(&next) {
-                    incoming.insert(target, next);
-                    if !queue.contains(&target) {
-                        queue.push_back(target);
+                let changed = match incoming.get_mut(&target) {
+                    Some(old) => self.merge(old, &edge, &span),
+                    None => {
+                        incoming.insert(target, edge);
+                        true
                     }
+                };
+                if changed && !queue.contains(&target) {
+                    queue.push_back(target);
                 }
             }
         }

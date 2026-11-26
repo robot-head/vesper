@@ -338,8 +338,12 @@ pub fn first_not_visible(in s: Slice[u8]) -> Option[u64] {
 // `tchar` without uppercase), given as `lo_mask` and `hi_mask`. The word
 // test covers lowercase letters, DIGIT and `-`. With `upper`, the class is a
 // method token, which also allows uppercase.
-pub fn first_not_lower_token(in s: Slice[u8], upper: bool, lo_mask: u64, hi_mask: u64)
-    -> Option[u64] {
+pub fn first_not_lower_token(
+    in s: Slice[u8],
+    upper: bool,
+    lo_mask: u64,
+    hi_mask: u64
+) -> Option[u64] {
     let n = s.len();
     if n < WORD {
         if token_word(short_word(in s), upper) {

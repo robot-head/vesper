@@ -592,15 +592,13 @@ pub fn solve_key(inout s: S, env: u64, goal: u64, binders: u64) -> u64 {
     let ind = intern1(inout s, q_nosol(), fl);
     s.sk_env.push(env);
     s.sk_goal.push(goal);
-    s
-        .sk_co
-        .push(
-            if coinductive {
-                1
-            } else {
-                0
-            }
-        );
+    s.sk_co.push(
+        if coinductive {
+            1
+        } else {
+            0
+        }
+    );
     s.sk_pco.push(identity);
     s.sk_pind.push(ind);
     s.sk_uco.push(0);
@@ -1322,8 +1320,15 @@ fn try_proj_conformance(
     make_response(inout s, in cx, vars, d)
 }
 
-fn mode_bound(inout s: S, env: u64, in cx: ChunkSeq[u64], goal: u64, ty: u64, bound: u64, vars: u64)
-    -> u64 {
+fn mode_bound(
+    inout s: S,
+    env: u64,
+    in cx: ChunkSeq[u64],
+    goal: u64,
+    ty: u64,
+    bound: u64,
+    vars: u64
+) -> u64 {
     let t = resolve(inout s, in cx, ty);
     if t == 0 {
         return dup_err(inout s);

@@ -441,8 +441,12 @@ pub fn recorder_reject_next_at(inout rec: Recorder, patch: u64) {
 }
 
 // RecordingBackend::set_user_state after the thread check.
-pub fn recorder_set_user_state(inout rec: Recorder, session: u64, serial: u64, user: u64)
-    -> Option[BackendFault] {
+pub fn recorder_set_user_state(
+    inout rec: Recorder,
+    session: u64,
+    serial: u64,
+    user: u64
+) -> Option[BackendFault] {
     do_recorder_set_user_state(inout rec, session, serial, user)
 }
 

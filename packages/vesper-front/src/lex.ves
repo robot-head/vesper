@@ -714,8 +714,16 @@ fn same_symbol(in t: Tokens, in b: Slice[u8], tag: u64, s: u64, n: u64) -> bool 
 
 // Interns `b[s..e]` (first bytes `w`, hash `h`) as a new symbol in the free
 // slot at word `j` and returns its tag.
-fn intern_new(inout t: Tokens, in b: Slice[u8], s: u64, e: u64, kind: u8, w: u64, h: u64, j: u64)
-    -> u64 {
+fn intern_new(
+    inout t: Tokens,
+    in b: Slice[u8],
+    s: u64,
+    e: u64,
+    kind: u8,
+    w: u64,
+    h: u64,
+    j: u64
+) -> u64 {
     let n = wrapping_sub(e, s);
     let fresh = inc(t.sym_start.len());
     t.sym_start.push(narrow(s));
@@ -742,15 +750,14 @@ pub fn tokens_new(len: u64) -> Tokens {
     // fragment); `slots_grow` doubles them as symbols arrive.
     let small = len < 1024;
     let mut slots = ChunkSeq::new[u64]();
-    slots
-        .resize(
-            if small {
-                64
-            } else {
-                512
-            },
-            0
-        );
+    slots.resize(
+        if small {
+            64
+        } else {
+            512
+        },
+        0
+    );
     let cap = inc(len >> 2);
     Tokens {
         kind: ChunkSeq::with_capacity[u8](cap),

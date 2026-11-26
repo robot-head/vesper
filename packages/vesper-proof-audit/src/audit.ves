@@ -430,8 +430,10 @@ pub struct Toolchain {
     pub version: ChunkSeq[u8],
 }
 
-pub fn lean_toolchain(inout a: Au, in launcher: Slice[u8])
-    -> Toolchain eff [Ffi[StdProcess], Ffi[StdFs]] {
+pub fn lean_toolchain(
+    inout a: Au,
+    in launcher: Slice[u8]
+) -> Toolchain eff [Ffi[StdProcess], Ffi[StdFs]] {
     let mut t = Toolchain {
         prefix: ChunkSeq::new[u8](),
         binary: ChunkSeq::new[u8](),
@@ -567,8 +569,11 @@ fn artifact_file(in name: Slice[u8]) -> bool {
 
 // `copy_artifacts`: every artifact file under `root` copied to `output`,
 // fingerprinted.
-pub fn copy_artifacts(inout a: Au, in root: Slice[u8], in output: Slice[u8])
-    -> Files eff [Ffi[StdFs], Ffi[Blake3]] {
+pub fn copy_artifacts(
+    inout a: Au,
+    in root: Slice[u8],
+    in output: Slice[u8]
+) -> Files eff [Ffi[StdFs], Ffi[Blake3]] {
     let mut files = files_new();
     // The pending directories, a stack: paths and depths.
     let mut pending = strs_new();
@@ -661,8 +666,12 @@ pub fn copy_artifacts(inout a: Au, in root: Slice[u8], in output: Slice[u8])
 }
 
 // `digest_file`: the size and BLAKE3 of `path`, recorded as `relative`.
-fn digest_file(inout a: Au, in path: Slice[u8], in relative: Slice[u8], inout f: Files)
-    -> u64 eff [Ffi[StdFs], Ffi[Blake3]] {
+fn digest_file(
+    inout a: Au,
+    in path: Slice[u8],
+    in relative: Slice[u8],
+    inout f: Files
+) -> u64 eff [Ffi[StdFs], Ffi[Blake3]] {
     let (size, me) = try_size(in path);
     let (data, e) = if me.kind != 0 {
         (ChunkSeq::new[u8](), me)
@@ -877,8 +886,11 @@ fn copy_strs(in s: Strs) -> Strs {
     out
 }
 
-pub fn audit(inout a: Au, in o: Options, pid: u64)
-    -> Report eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3]] {
+pub fn audit(
+    inout a: Au,
+    in o: Options,
+    pid: u64
+) -> Report eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3]] {
     let mut report = report_new();
     let launcher = if o.has_lean {
         seq(in o.lean.as_slice())
@@ -1070,14 +1082,13 @@ fn audit_in(
             refuse(inout a, in "imported module escaped the artifact/toolchain roots");
             return;
         }
-        import_artifact
-            .push(
-                if in_snapshot {
-                    1
-                } else {
-                    0
-                }
-            );
+        import_artifact.push(
+            if in_snapshot {
+                1
+            } else {
+                0
+            }
+        );
         if in_snapshot {
             file_parts(
                 inout a,

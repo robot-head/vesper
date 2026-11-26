@@ -299,8 +299,12 @@ pub fn insert(inout b: Slice[u8], in record: Slice[u8]) -> u64 {
 }
 
 // Returns 0 on Ok, or err_code on error. `scratch` must have length `PAGE_SIZE`.
-pub fn update(inout b: Slice[u8], slot: u64, in record: Slice[u8], inout scratch: Slice[u8])
-    -> u64 {
+pub fn update(
+    inout b: Slice[u8],
+    slot: u64,
+    in record: Slice[u8],
+    inout scratch: Slice[u8]
+) -> u64 {
     let rlen = record.len();
     if rlen == 0 || rlen > MAX_RECORD_SIZE {
         return ERR_RECORD_SIZE;

@@ -37,10 +37,15 @@ linear effect XdpNic {
     fn harvest_rx_single() -> Option[UmemFrame[RxHarvested]];
     fn view_frame_bytes(in frame: UmemFrame[RxHarvested]) -> ByteSlice;
     fn recycle_to_fill_ring(sink frame: UmemFrame[RxHarvested]) -> Unit;
-    fn turn_around_tx_in_place(sink rx_frame: UmemFrame[RxHarvested], tx_len: u32)
-        -> UmemFrame[TxStaged];
-    fn submit_paced_tx(sink tx_frame: UmemFrame[TxStaged], pkt_num_full: u64, edt_launch_ns: u64)
-        -> InFlightQuicPkt;
+    fn turn_around_tx_in_place(
+        sink rx_frame: UmemFrame[RxHarvested],
+        tx_len: u32
+    ) -> UmemFrame[TxStaged];
+    fn submit_paced_tx(
+        sink tx_frame: UmemFrame[TxStaged],
+        pkt_num_full: u64,
+        edt_launch_ns: u64
+    ) -> InFlightQuicPkt;
     fn park_for_ack_or_pto(sink inflight: InFlightQuicPkt) -> Unit;
 }
 // Header splitting is a helper operation, not new syntax.
@@ -161,8 +166,10 @@ fn pn_space_left(conns: Conns) -> Result[u64, QuicError] {
 // live; every later failure recycles the frame explicitly ([T-Let]).
 // Connections are passed by value and returned: the §35.3 `inout conns`
 // form is rejected by today's checker together with Fail (E0402).
-fn poll_and_step(conns: Conns, now_ns: u64)
-    -> Result[Stepped, QuicError] eff [XdpNic, Wire, Fail[QuicError]] {
+fn poll_and_step(
+    conns: Conns,
+    now_ns: u64
+) -> Result[Stepped, QuicError] eff [XdpNic, Wire, Fail[QuicError]] {
     let headroom = pn_space_left(conns)?;
     match XdpNic::harvest_rx_single() {
         None => Ok(Stepped { conns: conns, kind: Idle, rebound: false }),
@@ -327,8 +334,12 @@ fn drain(budget: u64, conns: Conns, stats: Stats) -> Drained eff [XdpNic, Wire, 
 
 // Busy-poll loop: drain, then wait for the next arrival; stop after an idle
 // timeout (the traffic is over) or after `rounds` waits.
-fn serve(rounds: u64, idle_timeout_ns: u64, conns: Conns, stats: Stats)
-    -> Stats eff [XdpNic, Wire, RxWait, Clock] {
+fn serve(
+    rounds: u64,
+    idle_timeout_ns: u64,
+    conns: Conns,
+    stats: Stats
+) -> Stats eff [XdpNic, Wire, RxWait, Clock] {
     let d = drain(64, conns, stats);
     if d.failed {
         finish(d.stats, d.conns, true)
@@ -391,8 +402,10 @@ fn seen(conn: Conn, full_pn: u64, hdr: QuicShortHdr) -> Conn {
     }
 }
 
-fn poll_and_step_acked(conns: Conns, now_ns: u64)
-    -> Result[AckStepped, QuicError] eff [XdpNic, Wire, AckPath, Fail[QuicError]] {
+fn poll_and_step_acked(
+    conns: Conns,
+    now_ns: u64
+) -> Result[AckStepped, QuicError] eff [XdpNic, Wire, AckPath, Fail[QuicError]] {
     let headroom = pn_space_left(conns)?;
     match XdpNic::harvest_rx_single() {
         None => Ok(AckStepped { conns: conns, kind: AIdle, retired: 0, largest: 0, cid: 0 }),
@@ -573,8 +586,11 @@ copy struct AckDrained {
     failed: bool
 }
 
-fn drain_acked(budget: u64, conns: Conns, stats: AckStats)
-    -> AckDrained eff [XdpNic, Wire, AckPath, Clock] {
+fn drain_acked(
+    budget: u64,
+    conns: Conns,
+    stats: AckStats
+) -> AckDrained eff [XdpNic, Wire, AckPath, Clock] {
     if budget == 0 {
         AckDrained { conns: conns, stats: stats, failed: false }
     } else {
@@ -614,8 +630,12 @@ fn drain_acked(budget: u64, conns: Conns, stats: AckStats)
     }
 }
 
-fn serve_acked(rounds: u64, idle_timeout_ns: u64, conns: Conns, stats: AckStats)
-    -> AckStats eff [XdpNic, Wire, AckPath, RxWait, Clock] {
+fn serve_acked(
+    rounds: u64,
+    idle_timeout_ns: u64,
+    conns: Conns,
+    stats: AckStats
+) -> AckStats eff [XdpNic, Wire, AckPath, RxWait, Clock] {
     let d = drain_acked(64, conns, stats);
     if d.failed {
         failed_acked(d.stats)

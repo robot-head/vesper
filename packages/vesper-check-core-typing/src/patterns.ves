@@ -78,8 +78,13 @@ impl Pats {
     }
 
     // A pattern with sub-patterns `kids` named `knames` (constructors).
-    pub fn add(inout self, kind: u8, name: u32, in kids: ChunkSeq[u32], in knames: ChunkSeq[u32])
-        -> u32 {
+    pub fn add(
+        inout self,
+        kind: u8,
+        name: u32,
+        in kids: ChunkSeq[u32],
+        in knames: ChunkSeq[u32]
+    ) -> u32 {
         let a = n32(self.kids.len());
         for i in 0..kids.len() {
             self.kids.push(u32_at(in kids, i));

@@ -664,8 +664,15 @@ impl Facts {
 
     // `length_kept`: whether the length of `place` is the same at the two
     // points.
-    pub fn length_kept(inout self, in f: Fun, place: u32, pb: u32, pk: u64, qb: u32, qk: u64)
-        -> bool {
+    pub fn length_kept(
+        inout self,
+        in f: Fun,
+        place: u32,
+        pb: u32,
+        pk: u64,
+        qb: u32,
+        qk: u64
+    ) -> bool {
         self.is_stable(in f, place) || self.unchanged_by(in f, pb, pk, qb, qk, 1, place)
     }
 
