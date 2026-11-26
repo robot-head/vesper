@@ -26,7 +26,9 @@ use self::sys::{
     os_sync_dir,
     os_parent_len,
     os_unique,
-    os_word_kind
+    os_word_kind,
+    os_is_executable,
+    os_error_string
 };
 
 // Why an operation failed. `kind` is one of the codes below
@@ -225,6 +227,28 @@ fn write_mode(in path: Slice[u8], in data: Slice[u8], mode: u32, sync: bool) eff
     }
 }
 
+// ---------------------------------------------------------------------------
+// Standard output and standard error.
+
+// Write all of `data` to standard output, unbuffered: one `write` loop on
+// descriptor 1 (retrying `EINTR`), so it never reorders with other writers
+// of the descriptor that flush before returning.
+pub fn write_stdout(in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    write_stream(1, in data);
+}
+
+// Write all of `data` to standard error (descriptor 2), as `write_stdout`.
+pub fn write_stderr(in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    write_stream(2, in data);
+}
+
+fn write_stream(fd: i32, in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    let mut err: u64 = 0;
+    if os_write(fd, in data, inout err) != 0 {
+        raise_io(err)
+    }
+}
+
 // Write `data` as the whole file at `path`, creating it or truncating it.
 pub fn write(in path: Str, in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
     write_mode(in path.as_bytes(), in data, mode_truncate(), false);
@@ -399,9 +423,64 @@ pub fn symlink_metadata(in path: Str) -> Metadata eff [Ffi[StdFs], Fail[IoError]
     meta_path(in path.as_bytes(), false)
 }
 
+// Whether `path` (following symbolic links) is a regular file with an
+// execute bit: the check a shell makes before running it. Never fails.
+pub fn is_executable(in path: Str) -> bool eff [Ffi[StdFs]] {
+    os_is_executable(in path.as_bytes())
+}
+
+pub fn is_executable_path(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    os_is_executable(in path)
+}
+
 // Whether `path` names anything (following symbolic links). Never fails.
 pub fn exists(in path: Str) -> bool eff [Ffi[StdFs]] {
     let mut err: u64 = 0;
     let m = os_metadata(in path.as_bytes(), true, inout err);
     err == 0
+}
+
+// ---------------------------------------------------------------------------
+// Error text.
+
+// `std::io::Error`'s `Display`: for an OS error, the system's message and
+// ` (os error N)`; otherwise the kind's text (`ErrorKind::as_str`).
+pub fn error_text(e: IoError) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if e.os != 0 {
+        let msg = os_error_string(e.os);
+        out.extend(in msg.as_slice());
+        out.extend(in " (os error ".as_bytes());
+        push_dec(inout out, widen_u64(e.os));
+        out.push(41);
+        return out;
+    }
+    out.extend(in kind_text(e.kind).as_bytes());
+    out
+}
+
+fn push_dec(inout out: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        push_dec(inout out, v / 10);
+    }
+    out.push(wrapping_u8(wrapping_add(48, v % 10)));
+}
+
+// `ErrorKind::as_str` of each kind code.
+fn kind_text(kind: u32) -> Str {
+    match kind {
+        1 => "entity not found",
+        2 => "permission denied",
+        3 => "entity already exists",
+        4 => "not a directory",
+        5 => "is a directory",
+        6 => "directory not empty",
+        7 => "invalid input parameter",
+        8 => "operation interrupted",
+        9 => "unexpected end of file",
+        10 => "write zero",
+        11 => "unsupported",
+        12 => "out of memory",
+        _ => "other error",
+    }
 }

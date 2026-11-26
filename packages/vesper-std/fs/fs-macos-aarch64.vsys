@@ -51,6 +51,7 @@ sys library StdFs (
     fn rmdir(nocapture in path: CStr) -> ForeignVal[i32] errno;
     fn mkdir(nocapture in path: CStr, mode: u32) -> ForeignVal[i32] errno;
     fn getpid() -> ForeignVal[i32];
+    fn strerror_r(errnum: i32, nocapture inout buf: CSlice[u8]) -> ForeignVal[i32];
     fn opendir(nocapture in path: CStr) -> ForeignVal[Option[Dir]] errno;
     fn readdir(inout d: Dir) -> ForeignVal[u64] errno;
     fn closedir(sink d: Dir) -> ForeignVal[i32];

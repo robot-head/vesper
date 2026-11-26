@@ -308,6 +308,8 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
         fn kill(pid: i32, sig: i32) -> i32;
         fn exit(code: i32) -> !;
+        #[cfg_attr(target_os = "linux", link_name = "__xpg_strerror_r")]
+        fn strerror_r(errnum: i32, buf: *mut c_char, n: usize) -> i32;
         #[cfg_attr(target_os = "macos", link_name = "__error")]
         #[cfg_attr(not(target_os = "macos"), link_name = "__errno_location")]
         fn errno_address() -> *mut i32;
@@ -388,6 +390,14 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("waitpid", waitpid as *const u8),
         ("kill", kill as *const u8),
         ("exit", exit as *const u8),
+        (
+            if cfg!(target_os = "linux") {
+                "__xpg_strerror_r"
+            } else {
+                "strerror_r"
+            },
+            strerror_r as *const u8,
+        ),
         (
             if cfg!(target_os = "macos") {
                 "__error"
@@ -514,6 +524,15 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ) -> i32;
         fn SetHandleInformation(h_object: *mut c_void, dw_mask: u32, dw_flags: u32) -> i32;
         fn GetStdHandle(n_std_handle: i32) -> *mut c_void;
+        fn FormatMessageW(
+            flags: u32,
+            source: *const c_void,
+            message_id: u32,
+            language_id: u32,
+            buffer: *mut u16,
+            size: u32,
+            arguments: *const c_void,
+        ) -> u32;
         fn CreateProcessW(
             lp_application_name: *const u16,
             lp_command_line: *mut u16,
@@ -588,6 +607,7 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("CreatePipe", CreatePipe as *const u8),
         ("SetHandleInformation", SetHandleInformation as *const u8),
         ("GetStdHandle", GetStdHandle as *const u8),
+        ("FormatMessageW", FormatMessageW as *const u8),
         ("CreateProcessW", CreateProcessW as *const u8),
         ("WaitForSingleObject", WaitForSingleObject as *const u8),
         ("GetExitCodeProcess", GetExitCodeProcess as *const u8),

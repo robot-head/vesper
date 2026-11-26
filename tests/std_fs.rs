@@ -12,7 +12,8 @@ use std_io_support::{MODES, Temp, agree, check_driver, lit};
 const DRIVER: &str = r#"use @vesper-std/fs::{
     IoError, Metadata, read, read_path, read_string, write, append, create_new, replace, rename,
     remove_file, remove_dir, remove_dir_all, create_dir, create_dir_all, metadata,
-    symlink_metadata, exists, kind_file, kind_dir
+    symlink_metadata, exists, kind_file, kind_dir, error_text, is_executable, write_stdout,
+    write_stderr
 };
 use @vesper-std/fs::walk::{
     Entries, walk, list_dir, entry_count, entry_start, entry_end, entry_kind, entry_join
@@ -46,6 +47,58 @@ fn pattern(n: u64) -> ChunkSeq[u8] {
         b.push(wrapping_u8(wrapping_mul(i, 31)));
     }
     b
+}
+
+// The hash of `std::io::Error`'s text for `kind` (an OS error `os` when
+// it is not 0), for every kind 0..=14 and the OS errors 1..@MAXOS@.
+pub fn error_texts() -> u64 eff [Ffi[StdFs]] {
+    let mut h: u64 = 0;
+    for k in 0..15 {
+        let t = error_text(IoError { kind: wrapping_u32(k), os: 0 });
+        h = mix(h, hash(in t.as_slice()));
+    }
+    for os in 1..@MAXOS@ {
+        let t = error_text(IoError { kind: 0, os: wrapping_u32(os) });
+        h = mix(h, hash(in t.as_slice()));
+    }
+    h
+}
+
+// Write a line to standard output and one to standard error: 0, or the
+// failed write's OS error code.
+pub fn stdio() -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        write_stdout(in "@@vesper-stdout@@\n".as_bytes());
+        write_stderr(in "@@vesper-stderr@@\n".as_bytes());
+        0
+    } with {
+        return v => v,
+        raise(e, _) => widen_u64(e.os),
+    }
+}
+
+// Bit i is set when the i-th path is executable.
+pub fn executables() -> u64 eff [Ffi[StdFs]] {
+    let mut bits: u64 = 0;
+    if is_executable(in "@DIR@/x/run") {
+        bits = bits | 1;
+    }
+    if is_executable(in "@DIR@/x/plain") {
+        bits = bits | 2;
+    }
+    if is_executable(in "@DIR@/x") {
+        bits = bits | 4;
+    }
+    if is_executable(in "@DIR@/x/missing") {
+        bits = bits | 8;
+    }
+    if is_executable(in "@DIR@/x/link") {
+        bits = bits | 16;
+    }
+    if is_executable(in "@DIR@/x/dangling") {
+        bits = bits | 32;
+    }
+    bits
 }
 
 pub fn read_back() -> u64 eff [Ffi[StdFs]] {
@@ -370,6 +423,31 @@ fn source(dir: &Temp) -> String {
         .replace("@ROOT@", &root)
         .replace("@LONG@", &long_name())
         .replace("@ODD@", if cfg!(unix) { "a\\\\b.txt" } else { "odd.txt" })
+        .replace("@MAXOS@", &MAX_OS.to_string())
+}
+
+/// `error_texts` covers the OS errors `1..MAX_OS`.
+const MAX_OS: i32 = 160;
+
+/// The `io::ErrorKind` of each `IoError` kind code (`commands::io_error` in
+/// vesper-hybrid), `Other` outside 1..=12.
+fn kind_of(code: u64) -> std::io::ErrorKind {
+    use std::io::ErrorKind as K;
+    match code {
+        1 => K::NotFound,
+        2 => K::PermissionDenied,
+        3 => K::AlreadyExists,
+        4 => K::NotADirectory,
+        5 => K::IsADirectory,
+        6 => K::DirectoryNotEmpty,
+        7 => K::InvalidInput,
+        8 => K::Interrupted,
+        9 => K::UnexpectedEof,
+        10 => K::WriteZero,
+        11 => K::Unsupported,
+        12 => K::OutOfMemory,
+        _ => K::Other,
+    }
 }
 
 /// A 240-byte file name for `replace_atomic`.
@@ -657,4 +735,135 @@ fn handles_do_not_leak_across_many_files() {
         assert_eq!(agree(&checked, "churn", &[mode]), want, "{mode:?}");
     }
     let _ = lit;
+}
+
+/// `error_text` is `std::io::Error`'s `Display`: each kind's text, and
+/// the system message with ` (os error N)` for every OS error code.
+#[test]
+fn error_text_matches_std_display() {
+    let dir = Temp::new("std-fs");
+    let checked = check_driver(&source(&dir));
+    let mut want = 0;
+    for k in 0..15 {
+        let t = std::io::Error::from(kind_of(k)).to_string();
+        want = mix(want, hash(t.as_bytes()));
+    }
+    for os in 1..MAX_OS {
+        let t = std::io::Error::from_raw_os_error(os).to_string();
+        want = mix(want, hash(t.as_bytes()));
+    }
+    assert_eq!(agree(&checked, "error_texts", &MODES), want);
+}
+
+/// `is_executable` is the check `vesper <tool>` makes before running a
+/// tool: a regular file (following links) with an execute bit on Unix.
+#[test]
+fn is_executable_matches_std_permissions() {
+    let dir = Temp::new("std-fs");
+    let x = dir.path().join("x");
+    fs::create_dir_all(&x).unwrap();
+    fs::write(x.join("run"), b"#!/bin/sh\n").unwrap();
+    fs::write(x.join("plain"), b"text").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(x.join("run"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(x.join("plain"), fs::Permissions::from_mode(0o644)).unwrap();
+        std::os::unix::fs::symlink(x.join("run"), x.join("link")).unwrap();
+        std::os::unix::fs::symlink(x.join("gone"), x.join("dangling")).unwrap();
+    }
+    let rust = |p: &Path| -> bool {
+        let Ok(meta) = p.metadata() else {
+            return false;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            meta.is_file() && meta.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        meta.is_file()
+    };
+    let mut want = 0;
+    for (i, name) in ["run", "plain", "", "missing", "link", "dangling"]
+        .iter()
+        .enumerate()
+    {
+        let p = if name.is_empty() {
+            x.clone()
+        } else {
+            x.join(name)
+        };
+        if rust(&p) {
+            want |= 1 << i;
+        }
+    }
+    let checked = check_driver(&source(&dir));
+    assert_eq!(agree(&checked, "executables", &MODES), want);
+}
+
+/// The child of `stdout_and_stderr_are_written_unbuffered`: run `stdio`
+/// and exit with its answer.
+#[test]
+#[ignore = "run by stdout_and_stderr_are_written_unbuffered"]
+fn stdio_child() {
+    let Ok(mode) = std::env::var("VESPER_STD_STDIO_CHILD") else {
+        return;
+    };
+    let dir = Temp::new("std-fs");
+    let checked = check_driver(&source(&dir));
+    let mode = match mode.as_str() {
+        "jit" => std_io_support::Mode::Jit,
+        "nojit" => std_io_support::Mode::JitNoOpt,
+        _ => std_io_support::Mode::Evaluator,
+    };
+    // libtest has printed its own lines by now; point descriptor 1 at the
+    // full device only for the Vesper write.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("VESPER_STD_STDIO_FULL").is_some() {
+        use std::os::fd::AsRawFd;
+        let full = fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap();
+        // SAFETY: both descriptors are open; fd 1 is replaced in place.
+        assert!(unsafe { libc::dup2(full.as_raw_fd(), 1) } == 1);
+    }
+    let got = agree(&checked, "stdio", &[mode]);
+    std::process::exit(got as i32);
+}
+
+/// `write_stdout` and `write_stderr` reach the process's own streams
+/// (descriptors 1 and 2, or the standard handles), and a failed write
+/// raises the OS error (on Linux, a full device: ENOSPC).
+#[test]
+fn stdout_and_stderr_are_written_unbuffered() {
+    for mode in ["jit", "nojit", "eval"] {
+        if mode != "eval" && !std_io_support::jit_host() {
+            continue;
+        }
+        let child = || {
+            let mut c = std::process::Command::new(std::env::current_exe().unwrap());
+            c.args(["--ignored", "--exact", "stdio_child", "--test-threads=1"])
+                .env("VESPER_STD_STDIO_CHILD", mode);
+            c
+        };
+        let out = child().output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{mode}: {out:?}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stdout.contains("@@vesper-stdout@@\n"), "{mode}: {stdout}");
+        assert!(!stdout.contains("@@vesper-stderr@@"), "{mode}: {stdout}");
+        assert!(stderr.contains("@@vesper-stderr@@\n"), "{mode}: {stderr}");
+        #[cfg(target_os = "linux")]
+        {
+            let status = child()
+                .env("VESPER_STD_STDIO_FULL", "1")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(28), "{mode}");
+        }
+    }
 }
