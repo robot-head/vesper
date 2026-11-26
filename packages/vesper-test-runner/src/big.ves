@@ -2,7 +2,20 @@
 // words (`hi`, `lo`), with `parse_int` and `i128::to_string` of
 // crates/vesper-syntax/src/test_attrs.rs and src/test_discovery.rs.
 
-use self::util::{add, byte, inc, sub};
+use @vesper-std/bytes::ascii::{
+    DIGIT_NINE, DIGIT_ZERO, HYPHEN, LOWER_A, LOWER_F, LOWER_X, UNDERSCORE, UPPER_A, UPPER_F, UPPER_X
+};
+use self::util::{
+    HEX_LETTER_BASE, HEX_PREFIX_BYTES, HEX_UPPER_LETTER_BASE, NOT_A_DIGIT, U32_MASK, add, byte, inc,
+    sub
+};
+
+// A magnitude in 32-bit limbs: a limb's bits, the limbs of 128 bits, and
+// the top bit of the high word's upper limb (a magnitude with it set is past
+// `i128::MAX`).
+const LIMB_BITS: u32 = 32;
+const LIMBS: u64 = 4;
+const HIGH_LIMB_SIGN: u64 = 2147483648;
 
 // A signed 128-bit integer: zero is never negative.
 pub copy struct Big {
@@ -19,30 +32,30 @@ fn none() -> Big {
 // `x * m + a` for a magnitude below 2^127, `m` at most 16 and `a` below
 // `m`; `ok` is false past `i128::MAX`.
 fn mul_add(x: Big, m: u64, a: u64) -> Big {
-    let mask: u64 = 4294967295;
+    let mask: u64 = U32_MASK;
     let p0 = wrapping_add(wrapping_mul(x.lo & mask, m), a);
-    let p1 = wrapping_add(wrapping_mul(x.lo >> 32, m), p0 >> 32);
-    let lo = (p0 & mask) | wrapping_shl_u64(p1, 32);
-    let carry = p1 >> 32;
+    let p1 = wrapping_add(wrapping_mul(x.lo >> LIMB_BITS, m), p0 >> LIMB_BITS);
+    let lo = (p0 & mask) | wrapping_shl_u64(p1, LIMB_BITS);
+    let carry = p1 >> LIMB_BITS;
     // x.hi < 2^63 and m <= 16, so the product stays below 2^67: check it
     // in halves.
     let h0 = wrapping_add(wrapping_mul(x.hi & mask, m), carry);
-    let h1 = wrapping_add(wrapping_mul(x.hi >> 32, m), h0 >> 32);
-    if h1 >= 2147483648 {
+    let h1 = wrapping_add(wrapping_mul(x.hi >> LIMB_BITS, m), h0 >> LIMB_BITS);
+    if h1 >= HIGH_LIMB_SIGN {
         return none();
     }
-    Big { ok: true, neg: false, hi: (h0 & mask) | wrapping_shl_u64(h1, 32), lo: lo }
+    Big { ok: true, neg: false, hi: (h0 & mask) | wrapping_shl_u64(h1, LIMB_BITS), lo: lo }
 }
 
 fn digit(c: u8, hex: bool) -> u64 {
-    if c >= 48 && c <= 57 {
-        widen_u64(wrapping_sub(c, 48))
-    } else if hex && c >= 97 && c <= 102 {
-        widen_u64(wrapping_sub(c, 87))
-    } else if hex && c >= 65 && c <= 70 {
-        widen_u64(wrapping_sub(c, 55))
+    if c >= DIGIT_ZERO && c <= DIGIT_NINE {
+        widen_u64(wrapping_sub(c, DIGIT_ZERO))
+    } else if hex && c >= LOWER_A && c <= LOWER_F {
+        widen_u64(wrapping_sub(c, HEX_LETTER_BASE))
+    } else if hex && c >= UPPER_A && c <= UPPER_F {
+        widen_u64(wrapping_sub(c, HEX_UPPER_LETTER_BASE))
     } else {
-        99
+        NOT_A_DIGIT
     }
 }
 
@@ -57,14 +70,14 @@ pub fn parse_int(in b: Slice[u8], s: u64, e: u64, negative: bool) -> Big {
     let mut hex = false;
     let mut start = s;
     loop {
-        if i >= e || seen >= 2 {
+        if i >= e || seen >= HEX_PREFIX_BYTES {
             break;
         }
         let c = byte(in b, i);
-        if c != 95 {
+        if c != UNDERSCORE {
             if seen == 0 {
                 c0 = c;
-            } else if c0 == 48 && (c == 120 || c == 88) {
+            } else if c0 == DIGIT_ZERO && (c == LOWER_X || c == UPPER_X) {
                 hex = true;
                 start = inc(i);
             }
@@ -82,7 +95,7 @@ pub fn parse_int(in b: Slice[u8], s: u64, e: u64, negative: bool) -> Big {
         }
         let c = byte(in b, j);
         j = inc(j);
-        if c == 95 {
+        if c == UNDERSCORE {
             continue;
         }
         let d = digit(c, hex);
@@ -114,21 +127,21 @@ pub fn as_u64(x: Big) -> (bool, u64) {
 // Appends the decimal spelling of `x` (`i128::to_string`).
 pub fn push_big(inout out: ChunkSeq[u8], x: Big) {
     if x.neg {
-        out.push(45);
+        out.push(HYPHEN);
     }
-    let mask: u64 = 4294967295;
+    let mask: u64 = U32_MASK;
     let mut limbs: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    limbs.push(x.hi >> 32);
+    limbs.push(x.hi >> LIMB_BITS);
     limbs.push(x.hi & mask);
-    limbs.push(x.lo >> 32);
+    limbs.push(x.lo >> LIMB_BITS);
     limbs.push(x.lo & mask);
     let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
     loop {
         let mut r: u64 = 0;
         let mut nonzero = false;
-        for k in 0..4 {
+        for k in 0..LIMBS {
             let limb = limbs.try_get(k).unwrap_or(0);
-            let cur = wrapping_shl_u64(r, 32) | limb;
+            let cur = wrapping_shl_u64(r, LIMB_BITS) | limb;
             let q = cur / 10;
             r = cur % 10;
             let ok = limbs.try_set(k, q);
@@ -136,14 +149,14 @@ pub fn push_big(inout out: ChunkSeq[u8], x: Big) {
                 nonzero = true;
             }
         }
-        digits.push(wrapping_u8(add(r, 48)));
+        digits.push(wrapping_u8(add(r, widen_u64(DIGIT_ZERO))));
         if !nonzero {
             break;
         }
     }
     let n = digits.len();
     for k in 0..n {
-        let c = digits.try_get(sub(sub(n, 1), k)).unwrap_or(48);
+        let c = digits.try_get(sub(sub(n, 1), k)).unwrap_or(DIGIT_ZERO);
         out.push(c);
     }
 }

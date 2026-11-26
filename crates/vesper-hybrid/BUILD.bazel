@@ -271,6 +271,7 @@ vesper_hybrid(
         # `vesper proof-audit` (#1341) is @vesper/proof-audit.
         "hybrid_proof_audit": [
             "//:proof_audit_package",
+            "//:std_bytes_package",
             "//:std_env_package",
             "//:std_fs_package",
             "//:std_hash_package",
@@ -361,6 +362,7 @@ vesper_hybrid(
             "//:check_data_package",
             "//:front_package",
             "//:std_arena_package",
+            "//:std_bytes_package",
             "//:std_hash_package",
             "//:std_intern_package",
             "//:test_runner_package",
