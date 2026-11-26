@@ -68,6 +68,14 @@ const P_LIT: u8 = 4;
 const P_TUPLE: u8 = 5;
 const P_CTOR: u8 = 6;
 
+// Literal pattern kinds (`PatX::lit_kind`; the harness encoder's `LIT_*`).
+const LIT_INT: u8 = 0;
+const LIT_FLOAT: u8 = 1;
+const LIT_BOOL: u8 = 2;
+const LIT_WIDE_INT: u8 = 3;
+const LIT_TYPED_INT: u8 = 4;
+const LIT_STRING: u8 = 5;
+
 // Binary operator codes.
 const B_ADD: u32 = 1;
 const B_SUB: u32 = 2;
@@ -135,8 +143,7 @@ pub copy struct PatX {
     name: u32,
     // constructor qualifier (symbol + 1, 0 none, NONE32 refused)
     qualifier: u32,
-    // Literal: 0 contextual int, 1 float, 2 bool, 3 wide int, 4 typed int,
-    // 5 string.
+    // Literal: a `LIT_*` kind.
     lit_kind: u8,
     neg: bool,
     mag: u64,
@@ -409,10 +416,10 @@ fn read_xpat(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) -> u32 {
         extra.name = sym(in ck.ctx, reader.word(in bytes));
     } else if kind == P_LIT {
         extra.lit_kind = wrapping_u8(reader.word(in bytes));
-        if extra.lit_kind == 0 {
+        if extra.lit_kind == LIT_INT {
             extra.neg = reader.word(in bytes) != 0;
             extra.mag = reader.word(in bytes);
-        } else if extra.lit_kind == 4 {
+        } else if extra.lit_kind == LIT_TYPED_INT {
             extra.name = sym(in ck.ctx, reader.word(in bytes));
         }
     } else if kind == P_TUPLE {
@@ -1239,20 +1246,20 @@ fn bind_mode(inout ck: Ck, pat_id: u32, ty: u32, pass: u8) {
         return;
     }
     if pat.kind == P_TRUE || pat.kind == P_FALSE || pat.kind == P_LIT {
-        let lit_ty = if pat.kind == P_LIT && extra.lit_kind == 4 {
+        let lit_ty = if pat.kind == P_LIT && extra.lit_kind == LIT_TYPED_INT {
             named(inout ck, extra.name)
-        } else if pat.kind == P_LIT && extra.lit_kind == 0 {
+        } else if pat.kind == P_LIT && extra.lit_kind == LIT_INT {
             mk_lit(inout ck.ctx.types, Lit { neg: extra.neg, mag: extra.mag })
-        } else if pat.kind == P_LIT && extra.lit_kind == 1 {
+        } else if pat.kind == P_LIT && extra.lit_kind == LIT_FLOAT {
             if is_named(in ck, ty, known.f32_) {
                 ck.skip = true;
             }
             named(inout ck, known.f64_)
-        } else if pat.kind == P_LIT && extra.lit_kind == 3 {
+        } else if pat.kind == P_LIT && extra.lit_kind == LIT_WIDE_INT {
             // An integer past `u64::MAX` in magnitude: not ported yet.
             ck.skip = true;
             named(inout ck, known.u128_)
-        } else if pat.kind == P_LIT && extra.lit_kind == 5 {
+        } else if pat.kind == P_LIT && extra.lit_kind == LIT_STRING {
             named(inout ck, known.string)
         } else {
             named(inout ck, known.bool_)

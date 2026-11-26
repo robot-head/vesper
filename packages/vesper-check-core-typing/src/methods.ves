@@ -81,6 +81,15 @@ const SEQ_ATOMIC: u8 = 50;
 const WIDE_U16: u8 = 2;
 const WIDE_U32: u8 = 4;
 const WIDE_U64: u8 = 8;
+// `WIDE_NAMES` order: byte order varies fastest, then width, direction and
+// the total form.
+const WIDE_ORDERS: u64 = 2;
+const WIDE_WIDTHS: u64 = 3;
+const WIDE_DIRECTIONS: u64 = 2;
+// WIDE_ORDERS * WIDE_WIDTHS, then times WIDE_DIRECTIONS, then times the two
+// forms (plain and `try_`).
+const WIDE_NAMES_PER_DIRECTION: u64 = 6;
+const WIDE_NAMES_PER_FORM: u64 = 12;
 const WIDE_NAME_COUNT: u64 = 24;
 
 // What a method call arm did: not this arm's call, or typed with a type.
@@ -501,9 +510,9 @@ fn seq_op(code: u8, total: bool) -> SeqOp {
 // method with each of the 24 names in `WIDE_NAMES` order.
 fn wide_op(in ck: Ck, method: u32) -> SeqOp {
     for k in 0..WIDE_NAME_COUNT {
-        let total = k >= WIDE_NAME_COUNT / 2;
-        let write = (k / 6) % 2 == 1;
-        let width = (k / 2) % 3;
+        let total = k >= WIDE_NAMES_PER_FORM;
+        let write = (k / WIDE_NAMES_PER_DIRECTION) % WIDE_DIRECTIONS == 1;
+        let width = (k / WIDE_ORDERS) % WIDE_WIDTHS;
         let mut name = ChunkSeq::new[u8]();
         if total {
             name.extend(in "try_".as_bytes());
@@ -523,7 +532,7 @@ fn wide_op(in ck: Ck, method: u32) -> SeqOp {
             name.extend(in "64".as_bytes());
             WIDE_U64
         };
-        if k % 2 == 1 {
+        if k % WIDE_ORDERS == 1 {
             name.extend(in "_be".as_bytes());
         } else {
             name.extend(in "_le".as_bytes());
