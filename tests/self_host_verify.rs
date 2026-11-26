@@ -473,9 +473,11 @@ fn vesper_port_matches_rust_verify_pieces() {
     let mut paths = vec![];
     let mut expected = String::new();
     for (i, text) in inputs.iter().enumerate() {
-        let path = dir.0.join("in").join(format!("{i}.lean"));
-        fs::write(&path, text).unwrap();
-        paths.push(path);
+        // Names relative to `in/`: 1600 absolute paths would pass Windows'
+        // 32,767-character command line limit.
+        let name = format!("{i}.lean");
+        fs::write(dir.0.join("in").join(&name), text).unwrap();
+        paths.push(name);
     }
     // Rust in this test's process; the port as one process that reads
     // every file itself.
@@ -486,6 +488,7 @@ fn vesper_port_matches_rust_verify_pieces() {
     let rust = started.elapsed();
     let started = Instant::now();
     let output = Command::new(&binary)
+        .current_dir(dir.0.join("in"))
         .arg("discover")
         .args(&paths)
         .output()
@@ -499,6 +502,7 @@ fn vesper_port_matches_rust_verify_pieces() {
         let mut shown = 0;
         for (path, text) in paths.iter().zip(&inputs) {
             let one = Command::new(&binary)
+                .current_dir(dir.0.join("in"))
                 .arg("discover")
                 .arg(path)
                 .output()
@@ -508,10 +512,7 @@ fn vesper_port_matches_rust_verify_pieces() {
             if one != want {
                 shown += 1;
                 let head: String = text.chars().take(300).collect();
-                eprintln!(
-                    "input {}:\n{head:?}\nrust {want:?}\nport {one:?}\n",
-                    path.display()
-                );
+                eprintln!("input {path}:\n{head:?}\nrust {want:?}\nport {one:?}\n");
                 if shown == 6 {
                     break;
                 }

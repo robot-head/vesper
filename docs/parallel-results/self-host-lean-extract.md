@@ -520,8 +520,9 @@ every `.lean` file in the repository up to 128 KiB, seven char-boundary
 prefixes of each, about 70 hand-written edge cases and generated inputs
 (long names, more than 128 theorems): 1612 inputs, 1295 of them with
 theorems, 0 diffs; 11 binding cases, 0 diffs.
-Release build: Rust 127 ms over the 1612 inputs, the port 97 ms as one
-process that also reads every file (0.76x).
+Release build, median of six runs: Rust 99 ms over the 1612 inputs, the
+port 106 ms as one process that also reads every file (1.07x; single
+runs range 0.6x to 1.5x beside the test's other threads).
 
 **Found on the way.** A slice of a slice is not a value (E1521), so
 the scanner keeps the next token as offsets into the source.
