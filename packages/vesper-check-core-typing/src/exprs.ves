@@ -1587,8 +1587,11 @@ fn constrain_literals(inout ck: Ck, e: u32, target: u32) {
 fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     let hole = ck.ctx.types.infer;
     let callee = ck.ex(ex.x);
+    if callee.kind == E_FIELD {
+        return method_call(inout ck, ex, callee, expected);
+    }
     if callee.kind != E_NAME || lookup(in ck, callee.x) != NONE32 || ex.y != 0 {
-        // Closures, method calls and intrinsics: not ported yet.
+        // Closures, function values and intrinsics: not ported yet.
         ck.skip = true;
         return hole;
     }
@@ -1645,7 +1648,57 @@ fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
         ck.skip = true;
         return hole;
     }
-    apply(inout ck, sig, ex, expected)
+    apply(inout ck, sig, ex, NONE32, expected)
+}
+
+// The inherent-method arm of `Checker::call`: `receiver.method(args)` on a
+// place whose type has a `Type::method` function in the world, checked as
+// that function with the receiver as its first argument. Region and
+// capability operations, the builtin string, sequence, tiled and array
+// methods, literal and call receivers and trait methods are not ported
+// yet and skip the function.
+fn method_call(inout ck: Ck, ex: Ex, callee: Ex, expected: u32) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let root = place_of(in ck, callee.x, inout path);
+    if root == NONE32 {
+        ck.skip = true;
+        return hole;
+    }
+    let bind_index = lookup(in ck, root);
+    if bind_index == NONE32 {
+        ck.skip = true;
+        return hole;
+    }
+    // `peek_type(base)`.
+    let receiver_ty = field_path(inout ck, binding(in ck, bind_index).ty, in path);
+    if receiver_ty == NONE32
+        || foreign(in ck, receiver_ty)
+        || ck.ctx.types.kind(receiver_ty) != TyKind::Named
+    {
+        ck.skip = true;
+        return hole;
+    }
+    let mut inherent = ChunkSeq::new[u8]();
+    ck.ctx.names.write(ck.ctx.types.node(receiver_ty).name, inout inherent);
+    put(inout inherent, "::");
+    ck.ctx.names.write(callee.y, inout inherent);
+    let method_sym = ck.ctx.names.lookup(in inherent.as_slice());
+    let method_index = if method_sym == NONE32 {
+        NONE32
+    } else {
+        fn_index(in ck, method_sym)
+    };
+    if method_index == NONE32 {
+        ck.skip = true;
+        return hole;
+    }
+    let sig = ck.fsig(method_index);
+    if sig.effectful {
+        ck.skip = true;
+        return hole;
+    }
+    apply(inout ck, sig, ex, callee.x, expected)
 }
 
 fn fn_generics(in ck: Ck, sig: FnSig) -> ChunkSeq[u32] {
@@ -1656,8 +1709,9 @@ fn fn_generics(in ck: Ck, sig: FnSig) -> ChunkSeq[u32] {
     generics
 }
 
-// `Checker::apply` for an effect-free function.
-fn apply(inout ck: Ck, sig: FnSig, ex: Ex, expected: u32) -> u32 {
+// `Checker::apply` for an effect-free function; `receiver` is the method
+// receiver's expression, or NONE32.
+fn apply(inout ck: Ck, sig: FnSig, ex: Ex, receiver: u32, expected: u32) -> u32 {
     let hole = ck.ctx.types.infer;
     let known = ck.ctx.world.k;
     let generics = fn_generics(in ck, sig);
@@ -1665,7 +1719,7 @@ fn apply(inout ck: Ck, sig: FnSig, ex: Ex, expected: u32) -> u32 {
     if expected != hole {
         infer(inout ck.ctx.types, known, sig.result, expected, in generics, inout vars);
     }
-    let result_ty = apply_args(inout ck, sig, ex, inout vars);
+    let result_ty = apply_args(inout ck, sig, ex, receiver, inout vars);
     if ck.skip {
         return hole;
     }
@@ -1680,8 +1734,28 @@ fn copy_vars(in vars: Vars) -> Vars {
     copied
 }
 
+// The call's actual arguments: the receiver (passed without an explicit
+// mode), then the written arguments.
+fn actuals_of(in ck: Ck, ex: Ex, receiver: u32) -> ChunkSeq[Arg] {
+    let mut actuals: ChunkSeq[Arg] = ChunkSeq::new[Arg]();
+    if receiver != NONE32 {
+        actuals.push(Arg { pass: 0, explicit: false, expr: receiver });
+    }
+    for i in 0..w(ex.n) {
+        actuals.push(ck.arg(add(w(ex.a), i)));
+    }
+    actuals
+}
+
+fn actual_at(in actuals: ChunkSeq[Arg], i: u64) -> Arg {
+    match actuals.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => Arg { pass: 0, explicit: false, expr: NONE32 },
+    }
+}
+
 // `Checker::apply_args` for an effect-free function without projections.
-fn apply_args(inout ck: Ck, sig: FnSig, ex: Ex, inout vars: Vars) -> u32 {
+fn apply_args(inout ck: Ck, sig: FnSig, ex: Ex, receiver: u32, inout vars: Vars) -> u32 {
     let hole = ck.ctx.types.infer;
     let known = ck.ctx.world.k;
     let generics = fn_generics(in ck, sig);
@@ -1703,16 +1777,17 @@ fn apply_args(inout ck: Ck, sig: FnSig, ex: Ex, inout vars: Vars) -> u32 {
     if explicit < w(ex.m) {
         error(inout ck, "E0205", ex.start, ex.end);
     }
-    if ex.n != sig.param_count {
+    let call_args = actuals_of(in ck, ex, receiver);
+    if call_args.len() != w(sig.param_count) {
         error(inout ck, "E0207", ex.start, ex.end);
     }
-    let mut zip_len = w(ex.n);
+    let mut zip_len = call_args.len();
     if w(sig.param_count) < zip_len {
         zip_len = w(sig.param_count);
     }
     let mut actuals: ChunkSeq[u32] = ChunkSeq::new[u32]();
     for i in 0..zip_len {
-        let arg = ck.arg(add(w(ex.a), i));
+        let arg = actual_at(in call_args, i);
         let param = ck.param(add(w(sig.param_start), i));
         let arg_ex = ck.ex(arg.expr);
         if param.projections != 0 {
@@ -1754,7 +1829,7 @@ fn apply_args(inout ck: Ck, sig: FnSig, ex: Ex, inout vars: Vars) -> u32 {
         let ok = vars.vals.try_set(i, defaulted);
     }
     for i in 0..zip_len {
-        let arg = ck.arg(add(w(ex.a), i));
+        let arg = actual_at(in call_args, i);
         let param = ck.param(add(w(sig.param_start), i));
         let arg_ex = ck.ex(arg.expr);
         let target = substitute(inout ck.ctx.types, param.ty, in vars);
