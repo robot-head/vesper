@@ -207,16 +207,14 @@ pub fn frame_stack_push(inout stack: FrameStack, length: u32) -> FrameId eff [Fa
     }
     let _ok_u = stack.seg_used.try_set(seg_idx, wrapping_add(start, aligned));
     let id = FrameId { bits: id_bits };
-    stack
-        .frames
-        .push(
-            Frame {
-                id: id,
-                segment: seg_idx,
-                start: start,
-                length: len_u64,
-            }
-        );
+    stack.frames.push(
+        Frame {
+            id: id,
+            segment: seg_idx,
+            start: start,
+            length: len_u64,
+        }
+    );
     stack.next_id = next;
     id
 }
@@ -784,19 +782,17 @@ pub fn readiness_queue_submit(
     }
     let id = RequestId { bits: q.next_id };
     q.next_id = wrapping_add(q.next_id, 1);
-    q
-        .waiting
-        .push(
-            RequestSlot {
-                id: id,
-                fd: fd,
-                op: op,
-                offset: offset,
-                len: len,
-                token: token,
-                cancelled: false,
-            }
-        );
+    q.waiting.push(
+        RequestSlot {
+            id: id,
+            fd: fd,
+            op: op,
+            offset: offset,
+            len: len,
+            token: token,
+            cancelled: false,
+        }
+    );
     id
 }
 
@@ -852,17 +848,15 @@ pub fn readiness_queue_complete(
         let _ok = q.waiting.try_set(j, next_slot);
     }
     let _popped = q.waiting.pop();
-    q
-        .ready
-        .push(
-            CompletionSlot {
-                id: id,
-                ok: ok,
-                bytes: bytes,
-                errno: errno,
-                cancelled: was_cancelled,
-            }
-        );
+    q.ready.push(
+        CompletionSlot {
+            id: id,
+            ok: ok,
+            bytes: bytes,
+            errno: errno,
+            cancelled: was_cancelled,
+        }
+    );
 }
 
 pub fn readiness_queue_take_ready(inout q: ReadinessQueue) -> ChunkSeq[CompletionSlot] {
@@ -922,14 +916,12 @@ pub fn scheduler_new() -> SchedulerState {
 }
 
 pub fn scheduler_spawn(inout s: SchedulerState, fiber_id: u64) -> () {
-    s
-        .ready
-        .push(
-            ReadyEntry {
-                fiber_id: fiber_id,
-                event: FiberEvent::Start,
-            }
-        );
+    s.ready.push(
+        ReadyEntry {
+            fiber_id: fiber_id,
+            event: FiberEvent::Start,
+        }
+    );
 }
 
 pub fn scheduler_ready_count(in s: SchedulerState) -> u64 {
@@ -978,14 +970,12 @@ pub fn scheduler_apply_step(inout s: SchedulerState, step: StepKind) -> () {
         StepKind::Complete(val) => s.completed.push(val),
         StepKind::Failed(code) => s.failures.push(code),
         StepKind::Yield(fiber_id) => {
-            s
-                .ready
-                .push(
-                    ReadyEntry {
-                        fiber_id: fiber_id,
-                        event: FiberEvent::Yield,
-                    }
-                );
+            s.ready.push(
+                ReadyEntry {
+                    fiber_id: fiber_id,
+                    event: FiberEvent::Yield,
+                }
+            );
         }
         StepKind::Io(_req_id) => {
             s.in_flight = wrapping_add(s.in_flight, 1);
@@ -1008,14 +998,12 @@ pub fn scheduler_enqueue_io(
     } else {
         FiberEvent::IoErr(errno)
     };
-    s
-        .ready
-        .push(
-            ReadyEntry {
-                fiber_id: fiber_id,
-                event: ev,
-            }
-        );
+    s.ready.push(
+        ReadyEntry {
+            fiber_id: fiber_id,
+            event: ev,
+        }
+    );
 }
 
 pub fn scheduler_take_completed(inout s: SchedulerState) -> Option[u64] {
@@ -1295,18 +1283,17 @@ pub fn new_seeded_pool(config: PoolConfig) -> Result[SeededPool, PoolError] {
         if i >= config.workers {
             break;
         }
-        workers
-            .push(
-                WorkerState {
-                    local: ChunkSeq::new(),
-                    pinned: ChunkSeq::new(),
-                    lifo: Option::None,
-                    rng: rng_new(config.seed, wrapping_add(i, 1)),
-                    ticks: 0,
-                    lifo_streak: 0,
-                    stats: empty_stats(),
-                }
-            );
+        workers.push(
+            WorkerState {
+                local: ChunkSeq::new(),
+                pinned: ChunkSeq::new(),
+                lifo: Option::None,
+                rng: rng_new(config.seed, wrapping_add(i, 1)),
+                ticks: 0,
+                lifo_streak: 0,
+                stats: empty_stats(),
+            }
+        );
         i = wrapping_add(i, 1);
     }
     Result::Ok(
@@ -1362,19 +1349,17 @@ pub fn spawn_fiber(
     } else {
         TraceEvent::TraceStart
     };
-    pool
-        .injector
-        .push(
-            FiberTask {
-                id: id,
-                home: Option::None,
-                remaining_yields: yields,
-                fail_on_complete: fail_on_complete,
-                result_tag: result_tag,
-                spawn_child_yields: spawn_child_yields,
-                event: ev,
-            }
-        );
+    pool.injector.push(
+        FiberTask {
+            id: id,
+            home: Option::None,
+            remaining_yields: yields,
+            fail_on_complete: fail_on_complete,
+            result_tag: result_tag,
+            spawn_child_yields: spawn_child_yields,
+            event: ev,
+        }
+    );
     Result::Ok(id)
 }
 
@@ -1533,8 +1518,7 @@ fn try_steal_from(inout pool: SeededPool, thief: u64, victim: u64) -> PickedJob 
     }
     let total_stolen = wrapping_add(1, extra);
     let _ = handle Fail[RuntimeError] in {
-        pool
-            .workers[thief]
+        pool.workers[thief]
             .stats
             .stolen = wrapping_add(pool.workers[thief].stats.stolen, total_stolen);
         0
@@ -1693,8 +1677,7 @@ fn next_job(inout pool: SeededPool, w: u64) -> PickedJob {
         };
     }
     let start = handle Fail[RuntimeError] in {
-        pool
-            .workers[w]
+        pool.workers[w]
             .stats
             .steal_attempts = wrapping_add(pool.workers[w].stats.steal_attempts, 1);
         rng_below(inout pool.workers[w].rng, n)
@@ -1780,17 +1763,15 @@ fn worker_step(inout pool: SeededPool, w: u64) -> bool {
     };
     let step_idx = pool.trace_step;
     pool.trace_step = wrapping_add(pool.trace_step, 1);
-    pool
-        .trace
-        .push(
-            TraceEntry {
-                step: step_idx,
-                worker: w,
-                fiber: t.id,
-                event: ev,
-                stolen_from: job.stolen_from,
-            }
-        );
+    pool.trace.push(
+        TraceEntry {
+            step: step_idx,
+            worker: w,
+            fiber: t.id,
+            event: ev,
+            stolen_from: job.stolen_from,
+        }
+    );
     let _ = handle Fail[RuntimeError] in {
         pool.workers[w].stats.resumed = wrapping_add(pool.workers[w].stats.resumed, 1);
         0
@@ -2894,19 +2875,17 @@ pub fn uring_driver_submit(
         let _ = PulseSys::free(buf);
         return Result::Err(io_error_queue_full());
     }
-    d
-        .requests
-        .push(
-            UringRequest {
-                id: id,
-                fd: fd,
-                op: op,
-                offset: offset,
-                token: token,
-                buf: buf,
-                len: len,
-            }
-        );
+    d.requests.push(
+        UringRequest {
+            id: id,
+            fd: fd,
+            op: op,
+            offset: offset,
+            token: token,
+            buf: buf,
+            len: len,
+        }
+    );
     uring_flush_for_outside_loop(in d);
     Result::Ok(id)
 }
@@ -3042,20 +3021,18 @@ fn uring_complete(
         let _ = PulseSys::get_bytes(r.buf, inout out.data[at..wrapping_add(at, keep)]);
     }
     let _ = PulseSys::free(r.buf);
-    out
-        .completions
-        .push(
-            IoCompletion {
-                id: r.id,
-                token: r.token,
-                op: r.op,
-                ok: ok,
-                bytes: bytes,
-                errno: errno,
-                start: at,
-                len: keep,
-            }
-        );
+    out.completions.push(
+        IoCompletion {
+            id: r.id,
+            token: r.token,
+            op: r.op,
+            ok: ok,
+            bytes: bytes,
+            errno: errno,
+            start: at,
+            len: keep,
+        }
+    );
     0
 }
 

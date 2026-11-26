@@ -1845,13 +1845,12 @@ impl Eng {
             for j in 0..self.klen(top) {
                 kids.push(at32(in self.t_slot, w(self.kid_of(top, j))));
             }
-            self
-                .write_node(
-                    false,
-                    at32(in self.n_op, w(top)),
-                    ati(in self.n_data, w(top)),
-                    in kids
-                );
+            self.write_node(
+                false,
+                at32(in self.n_op, w(top)),
+                ati(in self.n_data, w(top)),
+                in kids
+            );
             let slot = n32(self.t_count);
             self.t_count = inc(self.t_count);
             self.t_slot.try_set(w(top), slot);
@@ -1877,15 +1876,13 @@ impl Eng {
             slots.push(s);
         }
         self.st_words.push(w(r));
-        self
-            .st_words
-            .push(
-                if forward {
-                    0
-                } else {
-                    1
-                }
-            );
+        self.st_words.push(
+            if forward {
+                0
+            } else {
+                1
+            }
+        );
         self.st_words.push(self.path.len());
         for i in 0..self.path.len() {
             self.st_words.push(w(at32(in self.path, i)));
@@ -1993,15 +1990,13 @@ impl Eng {
                     ok = false;
                 }
             }
-            self
-                .settled
-                .push(
-                    if ok {
-                        1
-                    } else {
-                        0
-                    }
-                );
+            self.settled.push(
+                if ok {
+                    1
+                } else {
+                    0
+                }
+            );
         }
     }
 

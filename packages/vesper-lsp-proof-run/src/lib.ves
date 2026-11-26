@@ -199,24 +199,23 @@ fn read_job(in b: Slice[u8]) -> Job {
             params.push(wrapping_sub(pool.len(), at));
             kinds.push(word(in b, inout r));
         }
-        models
-            .push(
-                Model {
-                    function: function,
-                    function_n: wrapping_sub(module, function),
-                    module: module,
-                    module_n: wrapping_sub(theorem, module),
-                    theorem: theorem,
-                    theorem_n: wrapping_sub(exact, theorem),
-                    exact: exact,
-                    exact_n: wrapping_sub(bitvec, exact),
-                    bitvec: bitvec,
-                    bitvec_n: wrapping_sub(key, bitvec),
-                    key: key,
-                    p0: p0,
-                    pn: np
-                }
-            );
+        models.push(
+            Model {
+                function: function,
+                function_n: wrapping_sub(module, function),
+                module: module,
+                module_n: wrapping_sub(theorem, module),
+                theorem: theorem,
+                theorem_n: wrapping_sub(exact, theorem),
+                exact: exact,
+                exact_n: wrapping_sub(bitvec, exact),
+                bitvec: bitvec,
+                bitvec_n: wrapping_sub(key, bitvec),
+                key: key,
+                p0: p0,
+                pn: np
+            }
+        );
     }
     Job {
         launcher: launcher,
@@ -647,14 +646,13 @@ fn lean_command(in st: St, in dir: ChunkSeq[u8]) -> ProcCommand eff [Ffi[StdProc
     env_clear(inout c);
     let mut search = ChunkSeq::new[u8]();
     put_bytes(inout search, in dir.as_slice());
-    search
-        .push(
-            if os() == os_windows() {
-                59
-            } else {
-                58
-            }
-        );
+    search.push(
+        if os() == os_windows() {
+            59
+        } else {
+            58
+        }
+    );
     let lib = join(in st.prefix, in "lib/lean");
     put_bytes(inout search, in lib.as_slice());
     let s = str_of(in search.as_slice());

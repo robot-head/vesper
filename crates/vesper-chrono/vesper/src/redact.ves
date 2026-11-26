@@ -81,14 +81,12 @@ pub fn add_secret_value(
         p.secret_buf.push(b);
         i = wrapping_add(i, 1);
     }
-    p
-        .secret_spans
-        .push(
-            SecretSpan {
-                offset: off,
-                len: bytes.len(),
-            }
-        );
+    p.secret_spans.push(
+        SecretSpan {
+            offset: off,
+            len: bytes.len(),
+        }
+    );
     0
 }
 
@@ -196,15 +194,14 @@ fn zero_range(
         let _ = bytes.try_set(i, 0);
         i = wrapping_add(i, 1);
     }
-    log
-        .push(
-            RedactionEntry {
-                target_tag: target_tag,
-                target_val: target_val,
-                offset: wrapping_u32(offset),
-                len: wrapping_u32(clipped),
-            }
-        );
+    log.push(
+        RedactionEntry {
+            target_tag: target_tag,
+            target_val: target_val,
+            offset: wrapping_u32(offset),
+            len: wrapping_u32(clipped),
+        }
+    );
 }
 
 fn scrub_secrets(

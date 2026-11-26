@@ -649,14 +649,13 @@ fn put_json_string(inout out: ChunkSeq[u8], in b: Slice[u8]) {
                 let hi = wrapping_shr_u64(widen_u64(x), 4);
                 let lo = widen_u64(x) & 15;
                 out.push(wrapping_u8(wrapping_add(hi, 48)));
-                out
-                    .push(
-                        if lo < 10 {
-                            wrapping_u8(wrapping_add(lo, 48))
-                        } else {
-                            wrapping_u8(wrapping_add(lo, 87))
-                        }
-                    );
+                out.push(
+                    if lo < 10 {
+                        wrapping_u8(wrapping_add(lo, 48))
+                    } else {
+                        wrapping_u8(wrapping_add(lo, 87))
+                    }
+                );
             }
         }
     }
@@ -735,11 +734,10 @@ fn signing_message(in s: Statement) -> ChunkSeq[u8] {
     p.push(125);
     let n = wrapping_sub(p.len(), start);
     for i in 0..8 {
-        let _ok = p
-            .try_set(
-                wrapping_add(wrapping_add(domain.len(), 1), i),
-                wrapping_u8(wrapping_shr_u64(n, wrapping_u32(wrapping_mul(i, 8))))
-            );
+        let _ok = p.try_set(
+            wrapping_add(wrapping_add(domain.len(), 1), i),
+            wrapping_u8(wrapping_shr_u64(n, wrapping_u32(wrapping_mul(i, 8))))
+        );
     }
     p
 }
@@ -850,15 +848,14 @@ fn diagnostics(
                 Option::None => Option::None,
             }
         };
-        made
-            .push(
-                Diagnostic {
-                    code: copy_text(in code_text(d.code)),
-                    key_id: key,
-                    field: copy_text(in field_text(d.field)),
-                    message: copy_text(in message_text(d.message))
-                }
-            );
+        made.push(
+            Diagnostic {
+                code: copy_text(in code_text(d.code)),
+                key_id: key,
+                field: copy_text(in field_text(d.field)),
+                message: copy_text(in message_text(d.message))
+            }
+        );
     }
     // Insertion sort of the positions (at most a few hundred).
     let mut order: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -1037,16 +1034,9 @@ pub fn verify(
             2
         };
         if status != 0 && status != 5 {
-            ds
-                .push(
-                    keyed(
-                        Code::InvalidPublicKey,
-                        bi,
-                        false,
-                        Field::PublicKey,
-                        Msg::InvalidPublicKey
-                    )
-                );
+            ds.push(
+                keyed(Code::InvalidPublicKey, bi, false, Field::PublicKey, Msg::InvalidPublicKey)
+            );
             continue;
         }
         for k in 0..32 {
@@ -1069,16 +1059,15 @@ pub fn verify(
             }
         }
         if dup_key {
-            ds
-                .push(
-                    keyed(
-                        Code::DuplicatePublicKey,
-                        bi,
-                        false,
-                        Field::PublicKey,
-                        Msg::DuplicatePublicKey
-                    )
-                );
+            ds.push(
+                keyed(
+                    Code::DuplicatePublicKey,
+                    bi,
+                    false,
+                    Field::PublicKey,
+                    Msg::DuplicatePublicKey
+                )
+            );
         }
         if dup_id {
             ds.push(keyed(Code::DuplicateKeyId, bi, false, Field::KeyId, Msg::DuplicateKeyId));
@@ -1111,16 +1100,9 @@ pub fn verify(
             }
         }
         if repeated {
-            ds
-                .push(
-                    keyed(
-                        Code::DuplicateAttestation,
-                        si,
-                        true,
-                        Field::KeyId,
-                        Msg::DuplicateAttestation
-                    )
-                );
+            ds.push(
+                keyed(Code::DuplicateAttestation, si, true, Field::KeyId, Msg::DuplicateAttestation)
+            );
             continue;
         }
         seen.push(si);
@@ -1137,10 +1119,9 @@ pub fn verify(
         let message = signing_message(in env.statement);
         let before = ds.len();
         if !identity_eq(in env.statement.identity, in expected) {
-            ds
-                .push(
-                    keyed(Code::IdentityMismatch, si, true, Field::Identity, Msg::IdentityMismatch)
-                );
+            ds.push(
+                keyed(Code::IdentityMismatch, si, true, Field::Identity, Msg::IdentityMismatch)
+            );
         }
         match policy.builders.try_get(bi) {
             Option::Some(b) => {
@@ -1157,24 +1138,22 @@ pub fn verify(
                     ds.push(keyed(Code::KeyExpired, si, true, Field::Validity, Msg::KeyValidity));
                 }
                 if env.statement.issued_at > now || now >= env.statement.expires_at {
-                    ds
-                        .push(
-                            keyed(
-                                Code::StatementExpired,
-                                si,
-                                true,
-                                Field::Validity,
-                                Msg::StatementValidity
-                            )
-                        );
+                    ds.push(
+                        keyed(
+                            Code::StatementExpired,
+                            si,
+                            true,
+                            Field::Validity,
+                            Msg::StatementValidity
+                        )
+                    );
                 }
                 if env.statement.expires_at < env.statement.issued_at
                     || wrapping_sub(env.statement.expires_at, env.statement.issued_at)
                         > policy.max_statement_ttl {
-                    ds
-                        .push(
-                            keyed(Code::StatementTtl, si, true, Field::Validity, Msg::StatementTtl)
-                        );
+                    ds.push(
+                        keyed(Code::StatementTtl, si, true, Field::Validity, Msg::StatementTtl)
+                    );
                 }
                 let mut sig: ChunkSeq[u8] = ChunkSeq::new[u8]();
                 let o = wrapping_mul(bi, 32);
@@ -1185,16 +1164,15 @@ pub fn verify(
                         in sig.as_slice()
                     );
                 if !good {
-                    ds
-                        .push(
-                            keyed(
-                                Code::InvalidSignature,
-                                si,
-                                true,
-                                Field::Signature,
-                                Msg::InvalidSignature
-                            )
-                        );
+                    ds.push(
+                        keyed(
+                            Code::InvalidSignature,
+                            si,
+                            true,
+                            Field::Signature,
+                            Msg::InvalidSignature
+                        )
+                    );
                 }
                 if ds.len() == before {
                     keys.push(Name { text: copy_text(in env.statement.key_id) });

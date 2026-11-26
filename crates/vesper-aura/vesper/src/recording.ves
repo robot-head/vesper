@@ -335,19 +335,17 @@ pub fn copy_state(in src: RState, inout dst: RState) {
             if fits(v.tstart, v.tlen, src.text.len()) {
                 dst.text.extend(in src.text[v.tstart..add(v.tstart, v.tlen)]);
             }
-            dst
-                .slots
-                .push(
-                    RSlot {
-                        serial: v.serial,
-                        widget: v.widget,
-                        property: v.property,
-                        tag: v.tag,
-                        payload: v.payload,
-                        tstart: tstart,
-                        tlen: v.tlen
-                    }
-                );
+            dst.slots.push(
+                RSlot {
+                    serial: v.serial,
+                    widget: v.widget,
+                    property: v.property,
+                    tag: v.tag,
+                    payload: v.payload,
+                    tstart: tstart,
+                    tlen: v.tlen
+                }
+            );
             dst.slive.push(true);
         }
     }

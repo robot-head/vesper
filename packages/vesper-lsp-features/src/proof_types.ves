@@ -99,12 +99,10 @@ pub fn syms(in a: Ast) -> Syms {
 // ------------------------------------------------------------ trees
 
 pub fn ty_at(in a: Ast, i: u32) -> TypeNode {
-    a
-        .types
-        .get_or(
-            idx_from_raw[TypeNode](i),
-            TypeNode { kind: AT_INFER, a: NONE, b: NONE, c: NONE, d: NONE }
-        )
+    a.types.get_or(
+        idx_from_raw[TypeNode](i),
+        TypeNode { kind: AT_INFER, a: NONE, b: NONE, c: NONE, d: NONE }
+    )
 }
 
 pub fn effects_at(in a: Ast, i: u32) -> EffectsNode {
@@ -112,8 +110,7 @@ pub fn effects_at(in a: Ast, i: u32) -> EffectsNode {
 }
 
 pub fn effect_at(in a: Ast, i: u32) -> EffectNode {
-    a
-        .effect_nodes
+    a.effect_nodes
         .get_or(idx_from_raw[EffectNode](i), EffectNode { label: NONE, name: NONE, args: NONE })
 }
 

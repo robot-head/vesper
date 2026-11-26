@@ -154,15 +154,14 @@ pub fn write_executable(
             }
             mem_end = max64(mem_end, add(s.address, s.mem_bytes));
         }
-        placements
-            .push(
-                Placement {
-                    vaddr: seg_base,
-                    offset: off,
-                    file_bytes: sub(file_end, off),
-                    mem_bytes: sub(mem_end, seg_base)
-                }
-            );
+        placements.push(
+            Placement {
+                vaddr: seg_base,
+                offset: off,
+                file_bytes: sub(file_end, off),
+                mem_bytes: sub(mem_end, seg_base)
+            }
+        );
     }
     // String tables and symbols.
     let mut shstrtab: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -346,8 +345,10 @@ pub fn write_executable(
         push64(inout ph, p.file_bytes);
         push64(inout ph, p.mem_bytes);
         push64(inout ph, Page::Bytes);
-        let ok2 = out
-            .try_copy_from(add(Ehdr::Bytes, wrapping_mul(k, Phdr::Bytes)), in ph.as_slice());
+        let ok2 = out.try_copy_from(
+            add(Ehdr::Bytes, wrapping_mul(k, Phdr::Bytes)),
+            in ph.as_slice()
+        );
     }
     out
 }

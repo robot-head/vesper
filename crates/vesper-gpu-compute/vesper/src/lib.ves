@@ -3011,14 +3011,13 @@ pub fn tk_matmul(
     imm.push(u32_of(m, TensorLimit::M));
     imm.push(u32_of(n, TensorLimit::N));
     imm.push(u32_of(k, TensorLimit::K));
-    imm
-        .push(
-            if accumulate {
-                1
-            } else {
-                0
-            }
-        );
+    imm.push(
+        if accumulate {
+            1
+        } else {
+            0
+        }
+    );
     let gx = groups_for(n, 64);
     let gy = u32_of(m, TensorLimit::MatmulRows);
     let bufs = handles3(in a, in w, in out);

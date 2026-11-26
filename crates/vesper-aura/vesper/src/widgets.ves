@@ -70,17 +70,15 @@ pub fn patch_create(
     if s.nwidgets >= lim.nodes {
         return budget(Budget::Nodes);
     }
-    s
-        .widgets
-        .push(
-            RWidget {
-                serial: serial,
-                kind: word(in w, base, 3),
-                has_parent: false,
-                parent: 0,
-                user_state: 0
-            }
-        );
+    s.widgets.push(
+        RWidget {
+            serial: serial,
+            kind: word(in w, base, 3),
+            has_parent: false,
+            parent: 0,
+            user_state: 0
+        }
+    );
     s.wlive.push(true);
     s.nwidgets = inc(s.nwidgets);
     record(inout s, lim, op(EV_CREATED, serial, 0, 0, 0))

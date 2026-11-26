@@ -171,12 +171,10 @@ fn find_operator(
 }
 
 fn stmt_at(in a: Ast, i: u32) -> StmtNode {
-    a
-        .stmts
-        .get_or(
-            idx_from_raw[StmtNode](i),
-            StmtNode { kind: 0, pat: 0, ty: 0, value: 0, mutable: false }
-        )
+    a.stmts.get_or(
+        idx_from_raw[StmtNode](i),
+        StmtNode { kind: 0, pat: 0, ty: 0, value: 0, mutable: false }
+    )
 }
 
 fn arg_at(in a: Ast, i: u32) -> ArgNode {
@@ -188,22 +186,20 @@ fn clause_at(in a: Ast, i: u32) -> ClauseNode {
 }
 
 fn fn_at(in a: Ast, i: u32) -> FnNode {
-    a
-        .fns
-        .get_or(
-            idx_from_raw[FnNode](i),
-            FnNode {
-                name: 0,
-                fip: false,
-                generics: 0,
-                params: 0,
-                result: 0,
-                effects: 0,
-                body: none(),
-                start: 0,
-                end: 0
-            }
-        )
+    a.fns.get_or(
+        idx_from_raw[FnNode](i),
+        FnNode {
+            name: 0,
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: 0,
+            effects: 0,
+            body: none(),
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 // Pushes the elements of `list` (`stride` words each, the expression at
@@ -512,37 +508,31 @@ pub fn collect(in b: Slice[u8]) -> ChunkSeq[u64] {
                 collect_in_fn(in src, in t, in l.ast, in o, in f, inout stack, inout out);
             }
         } else if item.kind == 4 {
-            let im = l
-                .ast
-                .impls
-                .get_or(
-                    idx_from_raw[ImplNode](item.node),
-                    ImplNode { ty: 0, generics: 0, methods: 0 }
-                );
+            let im = l.ast.impls.get_or(
+                idx_from_raw[ImplNode](item.node),
+                ImplNode { ty: 0, generics: 0, methods: 0 }
+            );
             let m = list_len(in l.ast, im.methods);
             for q in 0..m {
                 let f = fn_at(in l.ast, list_at(in l.ast, im.methods, q));
                 collect_in_fn(in src, in t, in l.ast, in o, in f, inout stack, inout out);
             }
         } else if item.kind == 6 {
-            let c = l
-                .ast
-                .confs
-                .get_or(
-                    idx_from_raw[ConfNode](item.node),
-                    ConfNode {
-                        model: 0,
-                        public: false,
-                        generics: 0,
-                        trait_ref: 0,
-                        self_ty: 0,
-                        wheres: 0,
-                        assoc: 0,
-                        methods: 0,
-                        start: 0,
-                        end: 0
-                    }
-                );
+            let c = l.ast.confs.get_or(
+                idx_from_raw[ConfNode](item.node),
+                ConfNode {
+                    model: 0,
+                    public: false,
+                    generics: 0,
+                    trait_ref: 0,
+                    self_ty: 0,
+                    wheres: 0,
+                    assoc: 0,
+                    methods: 0,
+                    start: 0,
+                    end: 0
+                }
+            );
             let m = list_len(in l.ast, c.methods);
             for q in 0..m {
                 let f = fn_at(in l.ast, list_at(in l.ast, c.methods, q));
@@ -577,8 +567,7 @@ pub fn collect(in b: Slice[u8]) -> ChunkSeq[u64] {
     for i in 0..n {
         let x = u64_at(in order, i);
         name.clear();
-        let ok = l
-            .ast
+        let ok = l.ast
             .names
             .resolve_into(symbol_from_id(wrapping_u32(sw(in out, x, 0))), inout name);
         let nb = name.as_bytes();
