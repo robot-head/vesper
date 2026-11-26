@@ -376,6 +376,8 @@ const PAT_OTHER: u64 = 18446744073709551615;
 const HO_ALIAS_COUNT: u64 = 3;
 // A call argument's pass word for `inout` (`Pass::Inout`).
 const PASS_INOUT: u64 = 1;
+// Words per call argument: pass, value, root + 1, path.
+const ARG_WORDS: u64 = 4;
 
 fn site_word(in machine: M, at: u64) -> u64 {
     u64_at(in machine.sites, at)
@@ -2343,7 +2345,7 @@ fn collect_args(inout machine: M, args_at: u64) -> u64 {
     machine.arg_roots.clear();
     machine.arg_paths.clear();
     for i in 0..n {
-        let arg_at = add(inc(args_at), wrapping_mul(i, 4));
+        let arg_at = add(inc(args_at), wrapping_mul(i, ARG_WORDS));
         let value = get(inout machine, machine.program.op(inc(arg_at)));
         machine.arg_vals.push(value);
         machine.arg_roots.push(machine.program.op(add(arg_at, 2)));
@@ -2893,7 +2895,7 @@ pub fn drive(inout machine: M) {
 // root + 1, path each) pass a place `inout`.
 fn has_inout_arg(in machine: M, args_at: u64) -> bool {
     for i in 0..machine.program.op(args_at) {
-        if machine.program.op(add(inc(args_at), wrapping_mul(i, 4))) == PASS_INOUT {
+        if machine.program.op(add(inc(args_at), wrapping_mul(i, ARG_WORDS))) == PASS_INOUT {
             return true;
         }
     }
