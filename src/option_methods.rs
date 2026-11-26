@@ -131,7 +131,7 @@ mod tests {
     fn a_method_the_module_defines_replaces_the_preludes() {
         let source =
             "impl[T: mod copy] Option[T] { fn unwrap_or(self, fallback: T) -> T { fallback } }
-            fn f(o: Option[u64]) -> u64 { o.unwrap_or(0) }";
+            fn f(o: Option[u64]) -> u64 { o.or(Option::None).unwrap_or(0) }";
         assert_eq!(methods(source), ["is_some", "is_none", "or"]);
     }
 }
