@@ -124,6 +124,15 @@ impl World {
                 .max(crate::integer_widths::module_end(&float_prelude))
                 .max(crate::integer_widths::module_end(&string_prelude)),
         );
+        // `Option` methods used by the module (`x.unwrap_or(0)`).
+        let option_prelude = crate::option_methods::prelude(
+            module,
+            crate::integer_widths::module_end(&secret_prelude)
+                .max(crate::integer_widths::module_end(&width_prelude))
+                .max(crate::integer_widths::module_end(&float_prelude))
+                .max(crate::integer_widths::module_end(&string_prelude))
+                .max(crate::integer_widths::module_end(&atomic_prelude)),
+        );
         w.atomic_prelude = atomic_prelude
             .items
             .iter()
@@ -150,6 +159,7 @@ impl World {
             .chain(float_prelude.items.iter())
             .chain(string_prelude.items.iter())
             .chain(atomic_prelude.items.iter())
+            .chain(option_prelude.items.iter())
             .enumerate()
         {
             match item {
