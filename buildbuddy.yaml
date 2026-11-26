@@ -140,11 +140,15 @@ actions:
       - *build_tools
       - run: ./.git/vesper-aspect/aspect ci bazel-tests -- --config=ci --config=rbe_build --config=ci_tests --config=ci_opt --remote_download_outputs=minimal --build_tests_only --test_summary=short --test_tag_filters=self_host_codegen,-lean_replay //...
 
+  # 25GB like the self-host checks: since #2129 three Lean replay audits
+  # (about 6 GB each plus 1.5 GB of shared mapped library) run at once under
+  # ci_tests' 18GiB budget, and at 22GB the kernel killed the Bazel server
+  # (exit 37) during test-lean-replay on main after #2160 and on #2185.
   - name: "Native and acceptance scripts"
     container_image: "ubuntu-24.04"
     resource_requests:
       cpu: 8
-      memory: 22GB
+      memory: 25GB
       disk: 60GB
     timeout: 60m
     triggers:
