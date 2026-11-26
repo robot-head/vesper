@@ -401,6 +401,21 @@ pub struct FailEntry {
 /// First user trap code the runtime uses for unhandled-failure aborts
 /// (the backend uses 1-4).
 pub const ABORT_TRAP_BASE: u8 = 16;
+/// Highest user trap code: Cranelift reserves 251..=255.
+const MAX_USER_TRAP_CODE: u8 = 250;
+
+/// The effect an entry may leave unhandled.
+const FAIL_EFFECT: &str = "Fail";
+/// The failure record is whole 8-byte words: the tag, then the largest
+/// payload (at least one word).
+const RECORD_WORD_BYTES: u32 = 8;
+
+/// Names of the linked objects, in link order.
+const STUB_OBJECT: &str = "stub.o";
+const USER_OBJECT: &str = "vesper.o";
+const RUNTIME_OBJECT: &str = "runtime.o";
+/// The `object` named when a trap-table symbol is unresolved.
+const TRAP_TABLE_OBJECT: &str = "trap table";
 
 fn result_kind(
     world: &World,
@@ -425,7 +440,7 @@ fn result_kind(
         && f.effects
             .instances
             .iter()
-            .all(|e| e.name == "Fail" && e.label.is_none() && e.args.len() == 1);
+            .all(|e| e.name == FAIL_EFFECT && e.label.is_none() && e.args.len() == 1);
     if !fail_only {
         return Err(FreestandingError::UnsupportedEntry(format!(
             "'{entry}' has unhandled effects other than Fail; a freestanding entry handles them"
@@ -434,22 +449,23 @@ fn result_kind(
     let fail = if f.effects.instances.is_empty() {
         None
     } else {
-        if f.effects.instances.len() > usize::from(250 - ABORT_TRAP_BASE) {
+        if f.effects.instances.len() > usize::from(MAX_USER_TRAP_CODE - ABORT_TRAP_BASE) {
             return Err(FreestandingError::UnsupportedEntry(
                 "too many Fail instances".into(),
             ));
         }
-        let mut payload = 8u32;
+        let mut payload = RECORD_WORD_BYTES;
         let mut instances = Vec::new();
         for e in &f.effects.instances {
             let layout = crate::layout::Layout::of(world, &e.args[0])
                 .map_err(FreestandingError::UnsupportedEntry)?;
             payload = payload.max(layout.size);
-            instances.push(format!("Fail[{}]", e.args[0]));
+            instances.push(format!("{FAIL_EFFECT}[{}]", e.args[0]));
         }
         Some(FailEntry {
             instances,
-            record_bytes: 8 + payload.div_ceil(8) * 8,
+            record_bytes: RECORD_WORD_BYTES
+                + payload.div_ceil(RECORD_WORD_BYTES) * RECORD_WORD_BYTES,
         })
     };
     let kind = match &f.result {
@@ -550,7 +566,7 @@ pub fn build_image(
                         .map(|sym| sym.address + offset)
                         .ok_or_else(|| FreestandingError::UnresolvedSymbol {
                             symbol: function.clone(),
-                            object: "trap table".into(),
+                            object: TRAP_TABLE_OBJECT.into(),
                         })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -651,7 +667,7 @@ fn build_image_with_rust_patch(
             }
         };
         trap_entries.push(TrapEntry {
-            object: "vesper.o",
+            object: USER_OBJECT,
             function: function.clone(),
             offset: *offset,
             code: *code,
@@ -665,7 +681,7 @@ fn build_image_with_rust_patch(
         for (i, name) in fail
             .instances
             .iter()
-            .chain(["Fail".to_string()].iter())
+            .chain([FAIL_EFFECT.to_string()].iter())
             .enumerate()
         {
             messages.push(format!("unhandled {name}"));
@@ -700,7 +716,7 @@ fn build_image_with_rust_patch(
                 FreestandingError::Codegen("runtime abort trap was not emitted".into())
             })?;
         trap_entries.push(TrapEntry {
-            object: "runtime.o",
+            object: RUNTIME_OBJECT,
             function: runtime::MAIN_SYMBOL.into(),
             offset,
             code,
@@ -721,9 +737,9 @@ fn build_image_with_rust_patch(
     )?;
 
     let objects = vec![
-        ("stub.o".to_string(), stub.clone()),
-        ("vesper.o".to_string(), user_object),
-        ("runtime.o".to_string(), runtime.object.clone()),
+        (STUB_OBJECT.to_string(), stub.clone()),
+        (USER_OBJECT.to_string(), user_object),
+        (RUNTIME_OBJECT.to_string(), runtime.object.clone()),
     ];
     let link_options = link::LinkOptions {
         machine: target,
@@ -795,7 +811,7 @@ fn patch_trap_table(
         .find(|s| s.name == runtime::TRAP_TABLE)
         .ok_or_else(|| FreestandingError::UnresolvedSymbol {
             symbol: runtime::TRAP_TABLE.into(),
-            object: "trap table".into(),
+            object: TRAP_TABLE_OBJECT.into(),
         })?;
     let mut ranges = Vec::new();
     for seg in &layout.segments {

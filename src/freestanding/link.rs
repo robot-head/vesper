@@ -24,6 +24,10 @@ use object::{
 };
 
 use super::elf::{self, OutSection, OutSegment, OutSymbol};
+use super::stub::{
+    A64_IMM26_MASK, RV_I_IMM_SHIFT, RV_IMM12_MASK, RV_IMM20_MASK, RV_OPCODE_AUIPC, RV_OPCODE_JALR,
+    RV_OPCODE_MASK, RV_U_IMM_SHIFT,
+};
 use super::{FreestandingError, FreestandingTarget};
 
 pub const R_RISCV_64: u32 = 2;
@@ -33,6 +37,30 @@ pub const R_RISCV_RELAX: u32 = 51;
 pub const R_AARCH64_ABS64: u32 = 257;
 pub const R_AARCH64_JUMP26: u32 = 282;
 pub const R_AARCH64_CALL26: u32 = 283;
+
+/// The entry stub's section, placed first in `.text`.
+pub const BOOT_SECTION: &str = ".text.boot";
+/// The image's entry point.
+pub const ENTRY_SYMBOL: &str = "_start";
+/// The `object` of a [`LinkedSymbol`] the linker defines.
+const LINKER_OBJECT: &str = "linker";
+
+/// Alignment of every output section and of the stack.
+pub const SECTION_ALIGN: u64 = 16;
+/// The stub clears `.bss` this many bytes at a time.
+const BSS_CLEAR_BYTES: u64 = 8;
+
+/// Reach of `auipc` + `jalr`: `[-RV_CALL_RANGE, RV_CALL_RANGE - RV_LO12_ROUND)`.
+const RV_CALL_RANGE: i64 = 1 << 31;
+/// Added before splitting an offset into `hi20`/`lo12`, so the sign-extended
+/// `lo12` lands back on it.
+const RV_LO12_ROUND: i64 = 0x800;
+/// The bits of `auipc` and `jalr` below their immediates (opcode, `rd`, and
+/// for `jalr` also `funct3` and `rs1`).
+const RV_BELOW_U_IMM: u32 = 0xfff;
+const RV_BELOW_I_IMM: u32 = 0x000f_ffff;
+/// Reach (exclusive, either way) of AArch64 `b`/`bl`.
+const A64_BRANCH26_RANGE: i64 = 1 << 27;
 
 /// Symbols the linker (or the linker script) defines.
 pub const LINKER_SYMBOLS: [&str; 6] = [
@@ -202,7 +230,7 @@ pub fn link(
                 object: oi,
                 section: section.index(),
                 out,
-                boot: name == ".text.boot",
+                boot: name == BOOT_SECTION,
                 align: section.align().max(1),
                 data,
                 size: section.size(),
@@ -219,9 +247,16 @@ pub fn link(
     let mut order: Vec<usize> = (0..pieces.len()).collect();
     order.sort_by_key(|&i| (pieces[i].out, !pieces[i].boot, i));
     let mut cursor = options.image_base;
-    let mut out_ranges = [(0u64, 0u64); 4];
+    let mut out_ranges = [(0u64, 0u64); OUT_NAMES.len()];
     for (k, range) in out_ranges.iter_mut().enumerate() {
-        cursor = align_up(cursor, if k == Out::Data as usize { 0x1000 } else { 16 });
+        cursor = align_up(
+            cursor,
+            if k == Out::Data as usize {
+                elf::PAGE_BYTES
+            } else {
+                SECTION_ALIGN
+            },
+        );
         let start = cursor;
         let members: Vec<usize> = order
             .iter()
@@ -236,13 +271,13 @@ pub fn link(
         }
         if k == Out::Bss as usize {
             // The stub clears .bss eight bytes at a time.
-            cursor = align_up(cursor, 8);
+            cursor = align_up(cursor, BSS_CLEAR_BYTES);
         }
         *range = (start, cursor);
     }
     let bss = out_ranges[Out::Bss as usize];
-    let stack_bottom = align_up(bss.1.max(out_ranges[Out::Data as usize].1), 16);
-    let stack_top = stack_bottom + align_up(options.stack_bytes, 16);
+    let stack_bottom = align_up(bss.1.max(out_ranges[Out::Data as usize].1), SECTION_ALIGN);
+    let stack_top = stack_bottom + align_up(options.stack_bytes, SECTION_ALIGN);
     let ram_end = options.ram_base + options.ram_bytes;
     if options.image_base < options.ram_base || stack_top > ram_end {
         return Err(FreestandingError::ImageTooLarge {
@@ -295,10 +330,10 @@ pub fn link(
         }
     }
     let entry = *globals
-        .get("_start")
+        .get(ENTRY_SYMBOL)
         .ok_or_else(|| FreestandingError::UnresolvedSymbol {
-            symbol: "_start".into(),
-            object: "linker".into(),
+            symbol: ENTRY_SYMBOL.into(),
+            object: LINKER_OBJECT.into(),
         })?;
     // Relocations.
     for (oi, file) in files.iter().enumerate() {
@@ -447,7 +482,7 @@ pub fn link(
             section: None,
         });
         symbols.push(LinkedSymbol {
-            object: "linker".into(),
+            object: LINKER_OBJECT.into(),
             name: (*name).into(),
             address: *value,
             size: 0,
@@ -521,30 +556,32 @@ fn apply(
         (FreestandingTarget::Riscv64Imac, R_RISCV_CALL | R_RISCV_CALL_PLT) => {
             // auipc rX, hi ; jalr rY, lo(rX)
             let off = s_plus_a.wrapping_sub(place) as i64;
-            if !(-(1i64 << 31)..(1i64 << 31) - 0x800).contains(&off) {
+            if !(-RV_CALL_RANGE..RV_CALL_RANGE - RV_LO12_ROUND).contains(&off) {
                 return Err(range_err());
             }
-            let hi = (off + 0x800) >> 12;
-            let lo = off - (hi << 12);
+            let hi = (off + RV_LO12_ROUND) >> RV_U_IMM_SHIFT;
+            let lo = off - (hi << RV_U_IMM_SHIFT);
             let auipc = read32(data, at).ok_or_else(short)?;
             let jalr = read32(data, at + 4).ok_or_else(short)?;
-            if auipc & 0x7f != 0x17 || jalr & 0x7f != 0x67 {
+            if auipc & RV_OPCODE_MASK != RV_OPCODE_AUIPC || jalr & RV_OPCODE_MASK != RV_OPCODE_JALR
+            {
                 return Err(FreestandingError::Object(format!(
                     "{object}: R_RISCV_CALL does not point at auipc+jalr"
                 )));
             }
-            let auipc = (auipc & 0xfff) | (((hi as u32) & 0xfffff) << 12);
-            let jalr = (jalr & 0x000f_ffff) | (((lo as u32) & 0xfff) << 20);
+            let auipc =
+                (auipc & RV_BELOW_U_IMM) | (((hi as u32) & RV_IMM20_MASK) << RV_U_IMM_SHIFT);
+            let jalr = (jalr & RV_BELOW_I_IMM) | (((lo as u32) & RV_IMM12_MASK) << RV_I_IMM_SHIFT);
             data[at..at + 4].copy_from_slice(&auipc.to_le_bytes());
             data[at + 4..at + 8].copy_from_slice(&jalr.to_le_bytes());
         }
         (FreestandingTarget::Aarch64, R_AARCH64_CALL26 | R_AARCH64_JUMP26) => {
             let off = s_plus_a.wrapping_sub(place) as i64;
-            if off % 4 != 0 || !(-(1i64 << 27)..(1i64 << 27)).contains(&off) {
+            if off % 4 != 0 || !(-A64_BRANCH26_RANGE..A64_BRANCH26_RANGE).contains(&off) {
                 return Err(range_err());
             }
             let word = read32(data, at).ok_or_else(short)?;
-            let word = (word & !0x03ff_ffff) | (((off >> 2) as u32) & 0x03ff_ffff);
+            let word = (word & !A64_IMM26_MASK) | (((off >> 2) as u32) & A64_IMM26_MASK);
             data[at..at + 4].copy_from_slice(&word.to_le_bytes());
         }
         _ => {
