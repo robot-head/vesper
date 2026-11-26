@@ -482,6 +482,18 @@ impl Abi for crate::port::vesper__ebpf__insn__Size {
     }
 }
 
+impl Abi for crate::port::vesper__ebpf__mitigator__Decision {
+    const WORDS: usize = 3;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.action, &mut out[0..]);
+        Abi::put(&self.counted, &mut out[1..]);
+        Abi::put(&self.count, &mut out[2..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        crate::port::vesper__ebpf__mitigator__Decision { action: Abi::get(&words[0..]), counted: Abi::get(&words[1..]), count: Abi::get(&words[2..]) }
+    }
+}
+
 impl Abi for crate::port::vesper__ebpf__program__MapKind {
     const WORDS: usize = 1;
     fn put(&self, out: &mut [u64]) {
@@ -1117,6 +1129,7 @@ const _: () = assert!(<crate::port::vesper__ebpf__insn__JmpOp as Abi>::WORDS == 
 const _: () = assert!(<crate::port::vesper__ebpf__insn__Operand as Abi>::WORDS == 2);
 const _: () = assert!(<crate::port::vesper__ebpf__insn__RawInsn as Abi>::WORDS == 5);
 const _: () = assert!(<crate::port::vesper__ebpf__insn__Size as Abi>::WORDS == 1);
+const _: () = assert!(<crate::port::vesper__ebpf__mitigator__Decision as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port::vesper__ebpf__program__MapKind as Abi>::WORDS == 1);
 const _: () = assert!(<crate::port::vesper__ebpf__program__ProgramType as Abi>::WORDS == 1);
 const _: () = assert!(<crate::port::vesper__ebpf__scalar__Scalar as Abi>::WORDS == 6);
@@ -1163,6 +1176,7 @@ unsafe extern "C" {
     fn vesper_ebpf_interp_map_value(m: *mut u64, map: i64, key: *mut u64) -> i64;
     fn vesper_ebpf_interp_new_env(result: *mut u64, maps: *mut u64) -> i64;
     fn vesper_ebpf_interp_run(slots: *mut u64, kf: *mut u64, ptype: i64, input: i64, pkt: *mut u64, ctx: *mut u64, cfg: *mut u64, maps: *mut u64, nmain: i64, tails: *mut u64, tslots: *mut u64, taux: *mut u64, reuse: i64, m: *mut u64) -> i64;
+    fn vesper_ebpf_mitigator_reference_decision(result: *mut u64, packet: *mut u64, prior_count: *mut u64, threshold: i64) -> i64;
     fn vesper_ebpf_program_has_packet(p: *mut u64) -> i64;
     fn vesper_ebpf_program_is_tracing(p: *mut u64) -> i64;
     fn vesper_ebpf_program_map_from_kernel_type(result: *mut u64, t: i64) -> i64;
@@ -1512,6 +1526,18 @@ pub fn interp_run(slots: &[crate::port::vesper__ebpf__insn__RawInsn], kf: &[u64]
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(slots, |view_slots| vesper_port_abi::with_slice(kf, |view_kf| vesper_port_abi::with_slice(pkt, |view_pkt| vesper_port_abi::with_slice(ctx, |view_ctx| vesper_port_abi::with_slice(cfg, |view_cfg| vesper_port_abi::with_slice(maps, |view_maps| vesper_port_abi::with_slice(tails, |view_tails| vesper_port_abi::with_slice(tslots, |view_tslots| vesper_port_abi::with_slice(taux, |view_taux| unsafe { vesper_ebpf_interp_run(view_slots, view_kf, ptype as i64, input as i64, view_pkt, view_ctx, view_cfg, view_maps, nmain as i64, view_tails, view_tslots, view_taux, reuse as i64, m.words.as_mut_ptr()) })))))))));
     { let _ = raw; }
+}
+
+/// Calls `mitigator_reference_decision` of the Vesper library `ebpf` (`vesper_ebpf_mitigator_reference_decision`).
+pub fn mitigator_reference_decision(packet: &[u8], prior_count: Option<u64>, threshold: u64) -> crate::port::vesper__ebpf__mitigator__Decision {
+    let mut result = [0u64; 3];
+    let mut arg_prior_count = [0u64; <Option<u64> as Abi>::WORDS];
+    Abi::put(&prior_count, &mut arg_prior_count);
+    // SAFETY: `vesper_ebpf_mitigator_reference_decision` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(packet, |view_packet| unsafe { vesper_ebpf_mitigator_reference_decision(result.as_mut_ptr(), view_packet, arg_prior_count.as_mut_ptr(), threshold as i64) });
+    <crate::port::vesper__ebpf__mitigator__Decision as Abi>::get(&result[0..])
 }
 
 /// Calls `program_has_packet` of the Vesper library `ebpf` (`vesper_ebpf_program_has_packet`).
