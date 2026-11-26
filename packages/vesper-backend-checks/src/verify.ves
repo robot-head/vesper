@@ -12,23 +12,8 @@ use self::report::{dnote, note};
 use self::stack::{measure_emitted};
 use self::stack_bound::{StackPol, analyze_stack, pol_new};
 use self::util::{
-    contains,
-    dup,
-    filled,
-    find_row,
-    g,
-    has,
-    insert_row,
-    intern_str,
-    put,
-    put_at,
-    putn,
-    puts,
-    set_insert,
-    sorted_slot,
-    spells,
-    st,
-    starts
+    contains, dup, filled, find_row, g, has, insert_row, intern_str, put, put_at, putn, puts,
+    set_insert, sorted_slot, spells, st, starts
 };
 
 const CAP_CT: u64 = 1;

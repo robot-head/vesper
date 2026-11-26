@@ -3,18 +3,7 @@
 // code 1 (SgxQuoteV3).
 use self::{AErr, Rd};
 use self::reader::{
-    arr,
-    finish,
-    k_over_budget,
-    raise,
-    rd,
-    reserved,
-    tail,
-    take,
-    rd_u16,
-    rd_u32,
-    unsupported,
-    put
+    arr, finish, k_over_budget, raise, rd, reserved, tail, take, rd_u16, rd_u32, unsupported, put
 };
 use self::tdx::{blob, max_sig_data, qe_report};
 

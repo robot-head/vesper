@@ -21,14 +21,7 @@ use @vesper/check-data::pack_text;
 use @vesper/check-data::util::{add, fold, inc, inc32, n32, push_decimal, u32_at, u64_at, u8_at, w};
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{
-    Types,
-    default_type,
-    substitute,
-    vars_new,
-    zero_slots,
-    TyKind,
-    TyMode,
-    TyPass
+    Types, default_type, substitute, vars_new, zero_slots, TyKind, TyMode, TyPass
 };
 use @vesper/check-data::world::{Bounds, Known, World, bounds_new, constructor, field_step, mode_of};
 use @vesper/check-data::diag::{DiagRow, Diags, RelRow, diags_new};

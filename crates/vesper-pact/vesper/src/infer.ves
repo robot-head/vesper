@@ -9,36 +9,9 @@
 // s.dkey).
 use self::{S};
 use self::term::{
-    add,
-    dec,
-    field_a,
-    field_b,
-    flags,
-    g_row,
-    inc,
-    intern,
-    intern_with_kids,
-    is_inf,
-    k_list,
-    kd_brand,
-    kd_mode,
-    kd_row,
-    kd_type,
-    kid,
-    kid_count,
-    kind_of,
-    l_eff,
-    label_key,
-    none,
-    set_word,
-    t_ctor,
-    t_proj,
-    t_var,
-    tag_of,
-    var_arg,
-    vidx,
-    vinf,
-    word_at
+    add, dec, field_a, field_b, flags, g_row, inc, intern, intern_with_kids, is_inf, k_list,
+    kd_brand, kd_mode, kd_row, kd_type, kid, kid_count, kind_of, l_eff, label_key, none, set_word,
+    t_ctor, t_proj, t_var, tag_of, var_arg, vidx, vinf, word_at
 };
 use self::fold::{cx_val, occurs, resolve};
 

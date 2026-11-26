@@ -4,90 +4,29 @@
 // fingerprints of every imported module, the macro provenance gate and the
 // report.
 use @vesper-std/fs::{
-    IoError,
-    already_exists,
-    canonicalize_path,
-    create_dir,
-    create_dir_all_path,
-    create_dir_mode,
-    kind_dir,
-    kind_file,
-    kind_symlink,
-    metadata_path,
-    read_path_limit,
-    remove_dir_all,
-    write_path
+    IoError, already_exists, canonicalize_path, create_dir, create_dir_all_path, create_dir_mode,
+    kind_dir, kind_file, kind_symlink, metadata_path, read_path_limit, remove_dir_all, write_path
 };
 use @vesper-std/fs::walk::{Entries, entry_count, entry_end, entry_kind, entry_start, list_dir_path};
 use @vesper-std/env::{os, os_windows, var, var_bytes};
 use @vesper-std/process::{
-    ExitStatus,
-    ProcChild,
-    ProcCommand,
-    arg_bytes,
-    capture,
-    capture_limit,
-    command_path,
-    cwd,
-    env,
-    env_clear,
-    kill_tree,
-    process_group,
-    release,
-    spawn,
-    stderr,
-    stderr_stream,
-    stdio,
-    stdout,
-    stdout_stream,
-    success,
-    truncated,
-    wait_timeout
+    ExitStatus, ProcChild, ProcCommand, arg_bytes, capture, capture_limit, command_path, cwd, env,
+    env_clear, kill_tree, process_group, release, spawn, stderr, stderr_stream, stdio, stdout,
+    stdout_stream, success, truncated, wait_timeout
 };
 use self::auditor::AUDITOR;
 use self::json::{
-    Json,
-    begin_array,
-    begin_object,
-    end_array,
-    end_object,
-    field_bool,
-    field_string,
-    field_u64,
-    json_new,
-    key,
-    put_string,
-    put_u64,
-    string
+    Json, begin_array, begin_object, end_array, end_object, field_bool, field_string, field_u64,
+    json_new, key, put_string, put_u64, string
 };
 use self::provenance::{Gate, Theorems, blake3_hex, gate, gate_json, verify};
 use self::reader::{Raw, Rd, Table, raw_audit, rd_parse, table};
 use self::strs::{
-    Strs,
-    byte,
-    count,
-    end,
-    equal,
-    order,
-    push,
-    put_str,
-    same,
-    same_str,
-    set_of,
-    slashes,
-    start,
+    Strs, byte, count, end, equal, order, push, put_str, same, same_str, set_of, slashes, start,
     strs_new
 };
 use self::text::{
-    holds,
-    line_at,
-    lossy,
-    put_io,
-    put_status,
-    put_utf8_error,
-    starts_at,
-    take_chars,
-    trim,
+    holds, line_at, lossy, put_io, put_status, put_utf8_error, starts_at, take_chars, trim,
     utf8_valid
 };
 

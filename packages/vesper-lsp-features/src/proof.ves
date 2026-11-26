@@ -11,24 +11,8 @@
 // up where the checker recorded them.
 
 use @vesper/ast::{
-    Ast,
-    ExprNode,
-    PatNode,
-    StmtNode,
-    ArgNode,
-    ParamNode,
-    FnNode,
-    ImplNode,
-    ItemNode,
-    TypeNode,
-    EffectsNode,
-    EffectNode,
-    Lit,
-    list_len,
-    list_at,
-    expr_at,
-    pat_at,
-    lit_at
+    Ast, ExprNode, PatNode, StmtNode, ArgNode, ParamNode, FnNode, ImplNode, ItemNode, TypeNode,
+    EffectsNode, EffectNode, Lit, list_len, list_at, expr_at, pat_at, lit_at
 };
 use @vesper/ast::lower::{lower_source};
 use @vesper/check-data::input::{Ctx, Reader as CtxReader, read_ctx};
@@ -38,57 +22,13 @@ use @vesper-std/hash::blake3::{blake3, digest_bytes};
 use self::json::{pack};
 use self::nav::{arg_at, fn_at, impl_at, item_at, param_at, put_name, put_u, stmt_at, w};
 use self::proof_types::{
-    Syms,
-    syms,
-    ty_at,
-    effects_at,
-    effect_at,
-    kind_of_type,
-    is_infer,
-    display,
-    param_type
+    Syms, syms, ty_at, effects_at, effect_at, kind_of_type, is_infer, display, param_type
 };
 use self::lean::{
-    Tm,
-    tm_new,
-    tm_clear,
-    term,
-    int_term,
-    kind_of,
-    integer,
-    kind_name,
-    exact,
-    bitvec,
-    s,
-    sb,
-    K_U8,
-    K_U32,
-    K_U64,
-    K_I64,
-    K_BOOL,
-    K_UNIT,
-    K_NONE,
-    TM_VAR,
-    TM_BOOL,
-    TM_UNIT,
-    TM_ARITH,
-    TM_DIV,
-    TM_NEG,
-    TM_NOT,
-    TM_CMP,
-    TM_AND,
-    TM_OR,
-    TM_ITE,
-    TM_LET,
-    OP_ADD,
-    OP_SUB,
-    OP_MUL,
-    CMP_EQ,
-    CMP_NE,
-    CMP_LT,
-    CMP_LE,
-    CMP_GT,
-    CMP_GE
+    Tm, tm_new, tm_clear, term, int_term, kind_of, integer, kind_name, exact, bitvec, s, sb, K_U8,
+    K_U32, K_U64, K_I64, K_BOOL, K_UNIT, K_NONE, TM_VAR, TM_BOOL, TM_UNIT, TM_ARITH, TM_DIV, TM_NEG,
+    TM_NOT, TM_CMP, TM_AND, TM_OR, TM_ITE, TM_LET, OP_ADD, OP_SUB, OP_MUL, CMP_EQ, CMP_NE, CMP_LT,
+    CMP_LE, CMP_GT, CMP_GE
 };
 
 const NONE: u32 = 4294967295;

@@ -5,17 +5,7 @@
 // are encoded by the @vesper/ebpf port (`insn::encode`).
 
 use @vesper/ebpf::insn::{
-    AluOp,
-    AtomicOp,
-    CallTarget,
-    Endian,
-    Imm64,
-    Insn,
-    JmpOp,
-    Operand,
-    RawInsn,
-    Size,
-    encode
+    AluOp, AtomicOp, CallTarget, Endian, Imm64, Insn, JmpOp, Operand, RawInsn, Size, encode
 };
 
 // A label that is not bound yet.

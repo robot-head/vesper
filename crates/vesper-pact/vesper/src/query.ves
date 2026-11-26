@@ -3,30 +3,9 @@
 // placeholders (`restore_placeholders`).
 use self::{S};
 use self::term::{
-    am_stalled,
-    c_nested,
-    cf_node,
-    f_node,
-    field_a,
-    field_b,
-    field_c,
-    inc,
-    intern,
-    intern1,
-    intern2,
-    intern_with_kids,
-    k_list,
-    kid,
-    kid_count,
-    q_ambig,
-    q_nosol,
-    q_proven,
-    q_unsup,
-    r_cands,
-    r_mode,
-    tag_of,
-    un_dup,
-    un_mixed
+    am_stalled, c_nested, cf_node, f_node, field_a, field_b, field_c, inc, intern, intern1, intern2,
+    intern_with_kids, k_list, kid, kid_count, q_ambig, q_nosol, q_proven, q_unsup, r_cands, r_mode,
+    tag_of, un_dup, un_mixed
 };
 use self::fold::{run};
 use self::infer::{fresh_args};

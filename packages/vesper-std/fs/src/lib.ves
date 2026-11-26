@@ -12,26 +12,9 @@
 // - `walk`: sorted directory listings and recursive walks (`Entries`).
 // - `sys`: the operations over the C library.
 use self::sys::{
-    os_open,
-    os_close,
-    os_read,
-    os_write,
-    os_sync,
-    os_metadata,
-    os_file_len,
-    os_rename,
-    os_remove_file,
-    os_remove_dir,
-    os_create_dir,
-    os_create_dir_mode,
-    os_set_permissions,
-    os_copy,
-    os_sync_dir,
-    os_parent_len,
-    os_unique,
-    os_word_kind,
-    os_error_message,
-    os_is_executable,
+    os_open, os_close, os_read, os_write, os_sync, os_metadata, os_file_len, os_rename,
+    os_remove_file, os_remove_dir, os_create_dir, os_create_dir_mode, os_set_permissions, os_copy,
+    os_sync_dir, os_parent_len, os_unique, os_word_kind, os_error_message, os_is_executable,
     os_canonicalize
 };
 

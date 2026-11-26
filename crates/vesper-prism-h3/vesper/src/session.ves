@@ -2,56 +2,19 @@
 // WebTransport over HTTP/3 (`src/session.rs`), shared by server and client.
 
 use self::{
-    Settings,
-    ConnectionError,
-    CapsuleError,
-    SessionKind,
-    SessionError,
-    SessionStats,
-    SessionTable,
-    DatagramPath,
-    WtReadPre,
-    DgramSendPlan
+    Settings, ConnectionError, CapsuleError, SessionKind, SessionError, SessionStats, SessionTable,
+    DatagramPath, WtReadPre, DgramSendPlan
 };
 use self::int::{inc, min64, word, remove_word};
 use self::varint::{vdec, vput, put_record};
 use self::frame::{data_type, webtransport_stream_type};
 use self::capsule::{datagram_type, valid_utf8, max_close_reason, capsule_write_close};
 use self::pool::{
-    BytePool,
-    OutMap,
-    CmdBuf,
-    SevBuf,
-    MODE_HEADER,
-    CAPSULE_NONE,
-    CAPSULE_DATAGRAM,
-    CAPSULE_CLOSE,
-    CAPSULE_DRAIN,
-    CMD_STOP_SENDING,
-    CMD_RESET,
-    SEV_STREAM,
-    SEV_DATAGRAM,
-    SEV_DRAINING,
-    SEV_CLOSED,
-    q_len,
-    q_push,
-    q_consume,
-    q_clear,
-    q_transfer,
-    q_drain_to,
-    q_drain_all_to,
-    pooled_capsule_at_boundary,
-    pooled_capsule_next,
-    bsearch_u64,
-    insert_word,
-    set_u64_contains,
-    set_u64_remove,
-    out_queued,
-    out_queue,
-    out_queue_fin,
-    out_discard,
-    push_cmd,
-    push_sev
+    BytePool, OutMap, CmdBuf, SevBuf, MODE_HEADER, CAPSULE_NONE, CAPSULE_DATAGRAM, CAPSULE_CLOSE,
+    CAPSULE_DRAIN, CMD_STOP_SENDING, CMD_RESET, SEV_STREAM, SEV_DATAGRAM, SEV_DRAINING, SEV_CLOSED,
+    q_len, q_push, q_consume, q_clear, q_transfer, q_drain_to, q_drain_all_to,
+    pooled_capsule_at_boundary, pooled_capsule_next, bsearch_u64, insert_word, set_u64_contains,
+    set_u64_remove, out_queued, out_queue, out_queue_fin, out_discard, push_cmd, push_sev
 };
 
 const STREAM_WEBTRANSPORT: u64 = 0x54;

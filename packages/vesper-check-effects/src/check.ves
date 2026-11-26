@@ -9,14 +9,7 @@ use @vesper/check-data::types::{display};
 use self::keys::{Keys, Sums, keys_new, pair, sums_new};
 use self::prog::{Prog};
 use self::walker::{
-    DRow,
-    Edge,
-    Walk,
-    caps_of,
-    function_body,
-    is_declassify_gate,
-    secret_type,
-    start
+    DRow, Edge, Walk, caps_of, function_body, is_declassify_gate, secret_type, start
 };
 
 const NONE32: u32 = 4294967295;

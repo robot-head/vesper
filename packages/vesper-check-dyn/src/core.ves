@@ -12,35 +12,10 @@
 // allocates new nodes (copy on write) and repoints the owner.
 
 use @vesper/ast::{
-    Ast,
-    ListRef,
-    ExprNode,
-    PatNode,
-    TypeNode,
-    StmtNode,
-    ArgNode,
-    ClauseNode,
-    ParamNode,
-    EffectsNode,
-    EffectNode,
-    GenericNode,
-    FieldNode,
-    VariantNode,
-    AdtNode,
-    FnNode,
-    EffectDeclNode,
-    ImplNode,
-    TraitNode,
-    AssocDeclNode,
-    TraitRefNode,
-    ConfNode,
-    ItemNode,
-    BoundNode,
-    list_len,
-    list_at,
-    expr_at,
-    pat_at,
-    type_at
+    Ast, ListRef, ExprNode, PatNode, TypeNode, StmtNode, ArgNode, ClauseNode, ParamNode,
+    EffectsNode, EffectNode, GenericNode, FieldNode, VariantNode, AdtNode, FnNode, EffectDeclNode,
+    ImplNode, TraitNode, AssocDeclNode, TraitRefNode, ConfNode, ItemNode, BoundNode, list_len,
+    list_at, expr_at, pat_at, type_at
 };
 use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{symbol_from_id};

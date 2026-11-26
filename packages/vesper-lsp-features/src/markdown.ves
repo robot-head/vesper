@@ -7,25 +7,9 @@ use @vesper/front::diag::{diags_new};
 use self::json::{byte};
 use self::nav::{Ix, MAX_SOURCE_BYTES, u32_at, u8_at, w};
 use self::links::{
-    L_MAX_METADATA,
-    L_MAX_REFERENCES,
-    Link,
-    NOT_FOUND,
-    SIZE_DIAGNOSTIC,
-    SIZE_LINE,
-    SIZE_REFERENCE,
-    SIZE_TOKEN,
-    TK_COMMENT,
-    TK_WHITESPACE,
-    check_path,
-    has_self_segment,
-    link_fail,
-    link_inventory,
-    lmeta,
-    local_path,
-    lpush,
-    lwork,
-    u64_at
+    L_MAX_METADATA, L_MAX_REFERENCES, Link, NOT_FOUND, SIZE_DIAGNOSTIC, SIZE_LINE, SIZE_REFERENCE,
+    SIZE_TOKEN, TK_COMMENT, TK_WHITESPACE, check_path, has_self_segment, link_fail, link_inventory,
+    lmeta, local_path, lpush, lwork, u64_at
 };
 
 fn line_len(in k: Link, i: u64) -> u64 {

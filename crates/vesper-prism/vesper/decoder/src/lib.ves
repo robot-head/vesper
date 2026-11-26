@@ -6,22 +6,8 @@
 // ASCII bytes this module compares against (constants are per module).
 
 use self::syntax::{
-    inc,
-    dec,
-    byte,
-    queued,
-    all_token,
-    eq_lit,
-    named,
-    trim_ows,
-    find,
-    valid_target,
-    valid_host,
-    decimal,
-    push_range,
-    push_token_lower,
-    connection_options,
-    value_ok
+    inc, dec, byte, queued, all_token, eq_lit, named, trim_ows, find, valid_target, valid_host,
+    decimal, push_range, push_token_lower, connection_options, value_ok
 };
 use self::ascii::{Ascii};
 

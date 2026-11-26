@@ -5,15 +5,7 @@
 // mapping each error through that parser's work frontier.
 use self::{Doc, Error, ErrorKind, Kind, Limits, Token};
 use self::index::{
-    at,
-    check_duplicate,
-    doc_reserve,
-    escape_body,
-    hard_depth,
-    index_plan,
-    raise,
-    tok,
-    utf8_len
+    at, check_duplicate, doc_reserve, escape_body, hard_depth, index_plan, raise, tok, utf8_len
 };
 use self::ascii::{Ascii};
 

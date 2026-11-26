@@ -7,37 +7,10 @@
 // The words arrive as little-endian bytes, as every harness input does.
 
 use self::{
-    Ast,
-    ast_new,
-    Lit,
-    ExprNode,
-    PatNode,
-    TypeNode,
-    StmtNode,
-    ArgNode,
-    ClauseNode,
-    ParamNode,
-    EffectsNode,
-    EffectNode,
-    GenericNode,
-    FieldNode,
-    VariantNode,
-    AdtNode,
-    FnNode,
-    EffectDeclNode,
-    ImplNode,
-    TraitNode,
-    AssocDeclNode,
-    TraitRefNode,
-    WhereNode,
-    AssocBindNode,
-    ConfNode,
-    ItemNode,
-    ModelUseNode,
-    BoundNode,
-    UseNode,
-    UseNameNode,
-    ListRef
+    Ast, ast_new, Lit, ExprNode, PatNode, TypeNode, StmtNode, ArgNode, ClauseNode, ParamNode,
+    EffectsNode, EffectNode, GenericNode, FieldNode, VariantNode, AdtNode, FnNode, EffectDeclNode,
+    ImplNode, TraitNode, AssocDeclNode, TraitRefNode, WhereNode, AssocBindNode, ConfNode, ItemNode,
+    ModelUseNode, BoundNode, UseNode, UseNameNode, ListRef
 };
 use self::dump::{dump_ast};
 

@@ -4,16 +4,7 @@
 //
 // - memo.ves: inputs, memo rows, deep verification, backdating.
 use self::memo::{
-    Db,
-    Oracle,
-    db_log,
-    db_new,
-    fetch,
-    input_new,
-    input_set,
-    oracle_new,
-    oracle_push,
-    oracle_read
+    Db, Oracle, db_log, db_new, fetch, input_new, input_set, oracle_new, oracle_push, oracle_read
 };
 
 // A script op's tag.

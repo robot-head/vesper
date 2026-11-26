@@ -8,24 +8,8 @@
 // first one and every step returns `false` once it is set.
 
 use @vesper/ast::{
-    Ast,
-    ExprNode,
-    PatNode,
-    StmtNode,
-    ArgNode,
-    ClauseNode,
-    ParamNode,
-    AdtNode,
-    FnNode,
-    EffectDeclNode,
-    ImplNode,
-    TraitNode,
-    ConfNode,
-    ItemNode,
-    list_len,
-    list_at,
-    expr_at,
-    pat_at
+    Ast, ExprNode, PatNode, StmtNode, ArgNode, ClauseNode, ParamNode, AdtNode, FnNode,
+    EffectDeclNode, ImplNode, TraitNode, ConfNode, ItemNode, list_len, list_at, expr_at, pat_at
 };
 use @vesper/ast::lower::{lower_source};
 use @vesper/front::Tokens;

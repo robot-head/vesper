@@ -23,30 +23,9 @@
 // (Rust's `None`).
 
 use @vesper/ast::{
-    Ast,
-    ExprNode,
-    PatNode,
-    TypeNode,
-    StmtNode,
-    ArgNode,
-    ClauseNode,
-    ParamNode,
-    EffectsNode,
-    EffectNode,
-    GenericNode,
-    FieldNode,
-    VariantNode,
-    AdtNode,
-    FnNode,
-    EffectDeclNode,
-    ImplNode,
-    ConfNode,
-    ItemNode,
-    list_len,
-    list_at,
-    expr_at,
-    pat_at,
-    type_at
+    Ast, ExprNode, PatNode, TypeNode, StmtNode, ArgNode, ClauseNode, ParamNode, EffectsNode,
+    EffectNode, GenericNode, FieldNode, VariantNode, AdtNode, FnNode, EffectDeclNode, ImplNode,
+    ConfNode, ItemNode, list_len, list_at, expr_at, pat_at, type_at
 };
 use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{symbol_from_id};

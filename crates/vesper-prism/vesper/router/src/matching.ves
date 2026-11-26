@@ -1,16 +1,7 @@
 // Request matching: the backtracking path search and the 405/404 outcomes.
 use self::{
-    RouterCore,
-    Resolved,
-    none,
-    work_exhausted,
-    byte,
-    byte_of,
-    word,
-    param_child_of,
-    terms_at,
-    term_at,
-    static_child
+    RouterCore, Resolved, none, work_exhausted, byte, byte_of, word, param_child_of, terms_at,
+    term_at, static_child
 };
 
 fn segment_lo(in ends: Slice[u64], k: u64) -> u64 {

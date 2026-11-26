@@ -25,15 +25,7 @@ use @vesper/egraph::graph::{EGraph, egraph_new};
 use @vesper/egraph::run::{run_rounds};
 use @vesper/egraph::{memory_arity, memory_rules};
 use self::view::{
-    FnView,
-    at32,
-    block_entry,
-    block_params_at,
-    class_of,
-    fn_view,
-    overlaps,
-    place_text,
-    resolve
+    FnView, at32, block_entry, block_params_at, class_of, fn_view, overlaps, place_text, resolve
 };
 
 // Constants are copied, not imported: the Vesper package assembler

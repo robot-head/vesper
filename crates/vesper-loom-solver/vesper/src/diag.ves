@@ -2,23 +2,7 @@
 // `dp`, the diagnostic list `ds`, its deduplication and the merge sort.
 use @vesper/loom-calculus::{Diag};
 use @vesper/loom-calculus::util::{
-    Ascii,
-    Order,
-    add,
-    diag,
-    gb,
-    inc,
-    min,
-    mul,
-    none,
-    okey,
-    ord,
-    req,
-    slen,
-    soff,
-    sw,
-    ver,
-    ver_ord
+    Ascii, Order, add, diag, gb, inc, min, mul, none, okey, ord, req, slen, soff, sw, ver, ver_ord
 };
 use self::{Node, S};
 
