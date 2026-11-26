@@ -1711,6 +1711,28 @@ fn proof_audit_matches_the_default_compiler() {
         &["proof-audit", "Lean.Init", "--root", "r", "--theorem", "t"],
         &["proof-audit", "ModA", "--root", "r"],
         &["proof-audit", "ModA", "--theorem", "t"],
+        // Past the command layer, in modules/proof_audit (#1341): a missing
+        // root, in text and JSON, and a Lean that is not there.
+        &["proof-audit", "ModA", "--root", "missing", "--theorem", "t"],
+        &[
+            "proof-audit",
+            "ModA",
+            "--root",
+            "missing",
+            "--theorem",
+            "t",
+            "--json",
+        ],
+        &[
+            "proof-audit",
+            "ModA",
+            "--root",
+            ".",
+            "--theorem",
+            "t",
+            "--lean",
+            "no-such-lean",
+        ],
     ];
     let mut diffs = vec![];
     for argv in cases {
@@ -1772,6 +1794,27 @@ fn proof_audit_runs_in_vesper() {
         })
         .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"));
     assert_eq!(prints, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An audit past the command layer runs in `modules/proof_audit` (#1341).
+#[test]
+fn proof_audit_audits_in_vesper() {
+    let hybrid = hybrid();
+    let dir = scratch("vesper-cli-proof-audit-audits");
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = Command::new(&hybrid)
+        .current_dir(&dir)
+        .env("VESPER_HYBRID_STATS", "1")
+        .args(["proof-audit", "ModA", "--root", "missing", "--theorem", "t"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("vesper-hybrid: proof_audit answered 1 calls from Vesper"),
+        "{stderr}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
