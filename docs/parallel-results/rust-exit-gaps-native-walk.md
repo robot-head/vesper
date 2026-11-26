@@ -441,3 +441,43 @@ not ABBA CIs.
 - With those covered, `instances_for_roots`, `NativeAbi::plan` and
   `frame_plan` can go behind a flip gate. The emission (`Codegen`, the
   graph walk) is still Rust, under the family hooks.
+
+## Part 5: trace hosts and library exports (#2056)
+
+The last two kinds of native compile that still planned in Rust now ask
+the package too.
+
+- **Trace hosts.** `compile_entry` asks the `entry_plans` hook for every
+  compile, and passes `trace_ok`. The calls task carries a flags word
+  (bit 0 optimize, bit 1 trace host). The package checks `trace_ok`
+  itself (`trace_entry_ok`). It keeps the entry and every
+  `trace_host_direct` instance in discovery (`discover_traced`), gives
+  them the trace flag (`trace=1`), and seeds each bare `Trace` with the
+  `native-trace-host` identity.
+- **Library exports.** `native_export::compile_exports` asks a new
+  `export_plans` hook with the export roots. One library task holds the
+  first export with flag 4 and the others with flag 8. The package walks
+  from all roots at once (`discover_roots`). Every export is a boundary
+  of the conventions (`declare_roots`), and the package refuses an export
+  that is not a standalone instance, as Rust does.
+
+### Results (Linux x86_64, release)
+
+| Test | Builds | Differ | Rust | Hooked |
+|---|--:|--:|--:|--:|
+| `the_entry_plans_swap_matches_rust_on_trace_hosts` (trace fixtures, three inline shapes, Beacon corpus worlds, up to 4 entries, opt off and on) | 42 objects, 76 plans with the trace flag | **0** | 145 ms | 140 ms |
+| `the_export_plans_swap_matches_rust` (default step, 4 exports per world, opt off and on) | 318 libraries, 292 of 320 asks answered | **0** | 7.68 s | 7.84 s (1.02x) |
+
+Divergence check (local, not committed): the identity `native-trace-hosx`
+makes 40 of 42 trace-host objects differ. Planning conventions with only
+the first export as the boundary makes 5 libraries differ. So both paths
+use the Vesper plans. The ratios are single-run sums, not ABBA CIs.
+
+**Rust lines deleted:** 0. The fallbacks stay for declined compiles until
+the flip gate.
+
+### What is left
+
+- The flip gate for `entry_plans` and `export_plans`. After that,
+  `instances_for_roots`, `NativeAbi::plan` and `frame_plan` go, except
+  for the callers outside the walk (`capability_abi_functions`).
