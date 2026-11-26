@@ -10,7 +10,10 @@ unsafe extern "C" {
     fn vesper_fusion_seq_new(capacity: i64, stride: i64) -> i64;
     fn vesper_fusion_seq_free(seq: i64) -> i64;
     fn vesper_fusion_live_allocations() -> i64;
+    fn vesper_fusion_fusion_check_witness(words: *mut u64) -> i64;
+    fn vesper_fusion_fusion_parse_rewrites(text: *mut u64, mode: i64) -> i64;
     fn vesper_fusion_fusion_run(program: *mut u64, root: *mut u64, mode: i64) -> i64;
+    fn vesper_fusion_fusion_source_term(bindings: *mut u64, root: *mut u64) -> i64;
 }
 
 /// The sequence runtime of the Vesper library `fusion`.
@@ -25,11 +28,38 @@ pub fn live_allocations() -> i64 {
     unsafe { vesper_fusion_live_allocations() }
 }
 
+/// Calls `fusion_check_witness` of the Vesper library `fusion` (`vesper_fusion_fusion_check_witness`).
+pub fn fusion_check_witness(words: &[u64]) -> Vec<u64> {
+    // SAFETY: `vesper_fusion_fusion_check_witness` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(words, |view_words| unsafe { vesper_fusion_fusion_check_witness(view_words) });
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `fusion_parse_rewrites` of the Vesper library `fusion` (`vesper_fusion_fusion_parse_rewrites`).
+pub fn fusion_parse_rewrites(text: &str, mode: u64) -> Vec<u64> {
+    // SAFETY: `vesper_fusion_fusion_parse_rewrites` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_str(text, |view_text| unsafe { vesper_fusion_fusion_parse_rewrites(view_text, mode as i64) });
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
 /// Calls `fusion_run` of the Vesper library `fusion` (`vesper_fusion_fusion_run`).
 pub fn fusion_run(program: &str, root: &str, mode: u64) -> Vec<u64> {
     // SAFETY: `vesper_fusion_fusion_run` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_str(program, |view_program| vesper_port_abi::with_str(root, |view_root| unsafe { vesper_fusion_fusion_run(view_program, view_root, mode as i64) }));
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `fusion_source_term` of the Vesper library `fusion` (`vesper_fusion_fusion_source_term`).
+pub fn fusion_source_term(bindings: &str, root: &str) -> Vec<u64> {
+    // SAFETY: `vesper_fusion_fusion_source_term` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_str(bindings, |view_bindings| vesper_port_abi::with_str(root, |view_root| unsafe { vesper_fusion_fusion_source_term(view_bindings, view_root) }));
     unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
 }

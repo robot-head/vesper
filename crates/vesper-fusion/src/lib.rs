@@ -32,8 +32,14 @@
 //! This is a host library, not the compiler's Stage 4 optimizer (`src/ir_opt`
 //! is separate): nothing here reads Vesper source, and Rust ownership in this
 //! crate is not evidence that Vesper's source typing rules are implemented.
-// The only unsafe code is the generated binding to the Vesper engine.
+// The only unsafe code is the generated binding to the Vesper engine and
+// witness checker.
 #![deny(unsafe_code)]
+
+#[rustfmt::skip]
+#[allow(unsafe_code)]
+#[path = "../port/binding.rs"]
+pub(crate) mod binding;
 
 pub mod dsp;
 pub mod engine;

@@ -259,12 +259,13 @@ fusion_test_port = port_checks(
     [
         ["-p", "vesper-fusion"],
     ],
-    [divergence(
-        "combined checks",
-        _FEATURE + ["--no-fail-fast", "--test", "witness"] + _SERIAL,
-        ["every_shipped_rule_appears_in_a_checked_witness"],
-        ["rule_sets_name_every_rewrite_with_a_lemma"],
-    )],
+    [
+        divergence(name, _FEATURE + ["--no-fail-fast", "--test", "witness"] + _SERIAL, [failed], [passed], env = {"VESPER_FUSION_DIVERGE": name})
+        for name, failed, passed in [
+            ("engine", "every_shipped_rule_appears_in_a_checked_witness", "rule_sets_name_every_rewrite_with_a_lemma"),
+            ("witness", "checking_against_the_wrong_source_or_target_is_refused", "rule_sets_name_every_rewrite_with_a_lemma"),
+        ]
+    ],
 )
 
 highlight_test_port = port_checks(
