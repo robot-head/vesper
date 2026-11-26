@@ -14,7 +14,7 @@ The published manuscript is [vesper-lang.org/vesper-specification.pdf](https://v
 - `content.typ`: the complete native Typst specification monograph across Parts I–VIII, including inference-rule layouts, tables, code listings, mathematics, and internal anchors.
 - `source-manifest.json`: source provenance, taxonomy metadata, transformation summary, and SHA-256 content digests.
 - `supplements/continuation-fission.typ`: the uploaded Chapter 6 source retained as provenance; edit the integrated chapter in `content.typ`.
-- `verify.py`: checks the compiled document's part/chapter/appendix inventory, bookmarks, code preservation, cited Lean theorem names, embedded fonts, and body-page geometry.
+- [Manuscript Aspect tasks](../../.aspect/manuscript.axl) check the compiled document's part, chapter and appendix inventory, bookmarks, code preservation, cited Lean theorem names, embedded fonts, and page geometry.
 
 Regular builds require only Typst 0.15.1; no package downloads, external credentials, Pandoc, or system fonts are needed.
 
@@ -37,10 +37,12 @@ The current manuscript edition is 16 November 2026. Its editorial revision clari
 
 ## Verify
 
-Optional publication QA requires Python and PyMuPDF:
+Publication verification requires Aspect, Typst 0.15.1, Poppler utilities,
+QPDF and ICU's `uconv`. Run the fixture tests and verify the compiled PDF.
 
 ```sh
-python -X utf8 docs/manuscript/verify.py --typst /path/to/typst
+aspect manuscript test
+aspect manuscript verify -- --typst /path/to/typst
 ```
 
 The verification covers document structure (Parts I–VIII, Chapters 1–42, and Appendices A–B), source-code preservation, font embedding, and page geometry. Implementation workflows are documented in [the documentation index](../README.md).

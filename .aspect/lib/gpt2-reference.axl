@@ -1,0 +1,96 @@
+"""Independently recreate the GPT-2 byte-level BPE fixture cases."""
+
+load("./process.axl", "command")
+load("./binary-fixture.axl", "le", "unicode_scalar")
+
+_PATTERN = "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+"
+_SPECIAL = "<|endoftext|>"
+
+def _alphabet():
+    output, extra = [], 0
+    for value in range(256):
+        if value in range(33, 127) or value in range(161, 173) or value in range(174, 256):
+            output.append(unicode_scalar(value))
+        else:
+            output.append(unicode_scalar(256 + extra))
+            extra += 1
+    return output
+
+def _tokens(ctx, root, work, text):
+    if not text:
+        return []
+    path = work + "/pretokenize.txt"
+    ctx.std.fs.write(path, text)
+    argv = ["--no-config", "--pcre2", "--multiline", "--json", "--only-matching", "--", _PATTERN, path]
+    result = command(ctx, "rg", argv, root).stdout("piped").stderr("piped").spawn().wait_with_output()
+    if not result.status.success:
+        fail("GPT-2 pretokenization failed: " + result.stderr)
+    pieces = []
+    for line in result.stdout.splitlines():
+        record = json.decode(line)
+        if record["type"] == "match":
+            pieces.extend([entry["match"]["text"] for entry in record["data"]["submatches"]])
+    if "".join(pieces) != text:
+        fail("GPT-2 pretokenization changed the input bytes")
+    return pieces
+
+def _bpe(alphabet, ranks, vocab, piece):
+    raw = bytes(piece)
+    nodes = [alphabet[raw[index]] for index in range(len(raw))]
+    initial = "".join(nodes)
+    for _ in range(len(nodes)):
+        best, rank = None, len(ranks)
+        for index in range(len(nodes) - 1):
+            pair = (nodes[index], nodes[index + 1])
+            candidate = ranks.get(pair)
+            if candidate != None and candidate < rank:
+                best, rank = pair, candidate
+        if best == None:
+            break
+        next_nodes = []
+        cursor = 0
+        for index in range(len(nodes)):
+            if index < cursor:
+                continue
+            if index + 1 < len(nodes) and nodes[index] == best[0] and nodes[index + 1] == best[1]:
+                next_nodes.append(nodes[index] + nodes[index + 1])
+                cursor = index + 2
+            else:
+                next_nodes.append(nodes[index])
+        nodes = next_nodes
+    if "".join(nodes) != initial:
+        fail("GPT-2 merges changed the byte alphabet")
+    return [vocab[token] for token in nodes]
+
+def _encode(ctx, root, work, tokenizer, text, special):
+    pieces = text.split(_SPECIAL) if special else [text]
+    ids = []
+    for index, piece in enumerate(pieces):
+        if index:
+            ids.append(tokenizer.special)
+        for part in _tokens(ctx, root, work, piece):
+            ids.extend(_bpe(tokenizer.alphabet, tokenizer.ranks, tokenizer.vocab, part))
+    return ids
+
+def gpt2_fixtures(ctx, root, source, work):
+    data = json.decode(ctx.std.fs.read_to_string(source + "/gpt2-tokenizer.json"))
+    model = data["model"]
+    rank = {}
+    for index, merge in enumerate(model["merges"]):
+        parts = merge.split(" ", 1) if type(merge) == "string" else merge
+        rank[tuple(parts)] = index
+    specials = [item["id"] for item in data["added_tokens"] if item["content"] == _SPECIAL and item["special"]]
+    if len(specials) != 1:
+        fail("Expected the pinned GPT-2 special token")
+    tokenizer = struct(alphabet = _alphabet(), ranks = rank, vocab = model["vocab"], special = specials[0])
+    text = ctx.std.fs.read_to_string(source + "/corpus.txt").replace("\r\n", "\n").replace("\r", "\n")
+    texts = text.split("\n") + [text, ctx.std.fs.read_to_string(source + "/corpus-whitespace.txt")]
+    cases = []
+    wire = le(len(texts), 4)
+    for item in texts:
+        ordinary = _encode(ctx, root, work, tokenizer, item, False)
+        ids = _encode(ctx, root, work, tokenizer, item, True) if _SPECIAL in item else ordinary
+        raw = bytes(item)
+        wire += le(len(raw), 4) + raw + le(len(ids), 4) + bytes([(value >> (8 * index)) & 255 for value in ids for index in range(4)])
+        cases.append({"text": item, "ids": ids, "ordinary_ids": ordinary})
+    return cases, wire

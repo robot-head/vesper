@@ -7,7 +7,7 @@
 Branch `diagnostics41/acceptance`, base
 `b4d1df8846d29afac7133774d00e39362b66deff`. This lane owns only
 `tests/diagnostics_cli.rs`, `aspect acceptance test-diagnostics`,
-`scripts/check-diagnostics.py`, `.github/workflows/diagnostics.yml` and this
+`aspect acceptance check-diagnostics`, `.github/workflows/diagnostics.yml` and this
 report. No production source, manifest, lockfile, server or renderer edits.
 The causal model/producers/guard/renderer and host routing belong to #87–#91/#93.
 
@@ -85,19 +85,18 @@ The scripts still request no automatic application of edits or fixes.
 
 ## Scripts and native workflow
 
-`scripts/check-diagnostics.py --binary PATH [--work DIR]` uses only Python's
-standard library. It creates and cleans an owned temporary child directory;
-caller-provided work directories are not removed. CLI commands and stdio
+`aspect acceptance check-diagnostics -- --binary PATH [--work DIR]` creates
+and cleans a temporary child directory. The caller retains the work directory.
+CLI commands and stdio
 sessions have 45-second subprocess timeouts and bounded captured-output checks.
 The frame reader checks exact byte lengths, bounded headers/replies, unique
 decoded output keys, UTF-8, and complete framing. Unicode/newline conversions
 are independent from the production LineIndex.
 
-`aspect acceptance test-diagnostics` builds the real locked binary, runs the disposable
-Python acceptance, then executes the actual renderer's self-checking
-`causal_diagnostics` example. Shell, Python and Rust binary selection all prefer
-an existing `.exe` candidate before relying on an extensionless alias, including
-MSYS/native-Python Windows behavior. Rust tests normally use Cargo's actual
+`aspect acceptance test-diagnostics` builds the real locked binary, runs the
+native acceptance checks and executes the renderer's self-checking
+`causal_diagnostics` example. Binary selection prefers an existing `.exe`
+candidate before relying on an extensionless alias. Rust tests normally use Cargo's actual
 binary; optional `VESPER_DIAGNOSTICS_BINARY` selects a read-only integrated
 binary for isolated acceptance without copying production into this worktree.
 
@@ -130,8 +129,7 @@ Static checks passed:
 cargo test -p vesper --test diagnostics_cli --no-run
 cargo clippy -p vesper --test diagnostics_cli -- -D warnings
 rustfmt --edition 2024 --check tests/diagnostics_cli.rs
-bash -n aspect acceptance test-diagnostics
-Python source compilation; native workflow YAML parsing
+aspect ci tests diagnostics
 git diff --check
 ```
 
@@ -141,7 +139,7 @@ causal captions (`30dcf4b...`), IR producers (`4d6059a...`), the actual shared
 renderer and the final publication-capability presentation filter. No root target writes or production copies were used:
 
 ```text
-python3 scripts/check-diagnostics.py --binary ROOT_READONLY_BINARY
+aspect acceptance check-diagnostics -- --binary ROOT_READONLY_BINARY
   passed: 17 actual CLI checks, 16 actual framed stdio sessions
 VESPER_DIAGNOSTICS_BINARY=ROOT_READONLY_BINARY cargo test -p vesper --test diagnostics_cli
   all 8 tests passed

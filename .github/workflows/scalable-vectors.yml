@@ -16,6 +16,7 @@ on:
       - 'crates/vesper-simd/**'
       - 'crates/vesper-serde/**'
       - '.github/workflows/scalable-vectors.yml'
+      - '.aspect/hardware-ci.axl'
       - 'Cargo.lock'
   pull_request:
     # Cargo.toml/Cargo.lock are left out here on purpose (#1321): nearly every
@@ -25,6 +26,7 @@ on:
       - 'crates/vesper-simd/**'
       - 'crates/vesper-serde/**'
       - '.github/workflows/scalable-vectors.yml'
+      - '.aspect/hardware-ci.axl'
 
 permissions:
   contents: read
@@ -91,7 +93,15 @@ jobs:
           fetch-depth: 0
           sparse-checkout: |
             .github/actions
-            scripts/ci
+            .aspect
+      - name: Set up Aspect for the merge gate
+        if: github.event_name == 'pull_request'
+        uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
+        with:
+          launcher-version: '2026.47.12'
+          bazelrc-generate: 'false'
+          bazelisk-cache: 'false'
+          disk-cache: 'false'
       - name: Merge gate
         if: github.event_name == 'pull_request'
         uses: ./.gate/.github/actions/merge-gate
@@ -100,6 +110,7 @@ jobs:
           base-ref: ${{ github.event.pull_request.base.ref }}
           head-sha: ${{ github.event.pull_request.head.sha }}
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/aspect
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -107,42 +118,20 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - name: Install QEMU user mode and the cross linker
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-user ${{ matrix.packages }}
-          qemu-aarch64 --version | head -n1
-          qemu-riscv64 --version | head -n1
+        env:
+          PACKAGES: ${{ matrix.packages }}
+        run: aspect ci install-scalable-qemu
       - name: Build the tests
         env:
+          TARGET: ${{ matrix.target }}
           LINKER: ${{ matrix.linker }}
-        run: |
-          var="CARGO_TARGET_$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')_LINKER"
-          export "$var=$LINKER"
-          cargo test --locked --release --target ${{ matrix.target }} -p vesper-simd --test vvec --no-run
-          cargo test --locked --release --target ${{ matrix.target }} -p vesper-serde-seed --test simd_scalable --no-run
+        run: aspect ci build-scalable-vectors
       - name: Run at every vector length
         env:
+          TARGET: ${{ matrix.target }}
           LINKER: ${{ matrix.linker }}
           QEMU: ${{ matrix.qemu }}
           CPUS: ${{ matrix.cpus }}
           WITHOUT: ${{ matrix.without }}
           REQUIRE: ${{ matrix.require }}
-        run: |
-          prefix="CARGO_TARGET_$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')"
-          export "${prefix}_LINKER=$LINKER"
-          run() {
-            export "${prefix}_RUNNER=$QEMU -cpu $1"
-            cargo test --locked --release --target ${{ matrix.target }} -p vesper-simd --test vvec -- --nocapture
-            cargo test --locked --release --target ${{ matrix.target }} -p vesper-serde-seed --test simd_scalable -- --nocapture
-          }
-          export "$REQUIRE=1"
-          for cpu in $CPUS; do
-            echo "::group::-cpu $cpu"
-            run "$cpu"
-            echo "::endgroup::"
-          done
-          # Without the vector unit the paths must refuse with typed errors.
-          unset "$REQUIRE"
-          echo "::group::-cpu $WITHOUT (vector unit absent)"
-          run "$WITHOUT"
-          echo "::endgroup::"
+        run: aspect ci test-scalable-vectors

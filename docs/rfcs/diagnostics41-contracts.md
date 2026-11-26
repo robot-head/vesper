@@ -18,7 +18,7 @@ remains 2026-11-12T09:18:30.204Z (41 sections/Appendix A). This batch addresses
 | [#89](https://github.com/robot-head/vesper/issues/89) | diagnostics41/ir | src/ir_check.rs; new tests/ir_diagnostic_causes.rs |
 | [#90](https://github.com/robot-head/vesper/issues/90) | diagnostics41/render | New crates/vesper-diagnostics/** |
 | [#91](https://github.com/robot-head/vesper/issues/91) | diagnostics41/bounds | src/tooling/frontend.rs and matching diagnostic-bound tests |
-| [#92](https://github.com/robot-head/vesper/issues/92) | diagnostics41/acceptance | New tests/diagnostics_cli.rs, aspect acceptance test-diagnostics, scripts/check-diagnostics.py, .github/workflows/diagnostics.yml |
+| [#92](https://github.com/robot-head/vesper/issues/92) | diagnostics41/acceptance | New tests/diagnostics_cli.rs, aspect acceptance test-diagnostics, aspect acceptance check-diagnostics, .github/workflows/diagnostics.yml |
 | [#93](https://github.com/robot-head/vesper/issues/93) | diagnostics41/integration | src/main.rs diagnostic dispatcher/imports; src/lsp/session.rs diagnostic conversion/publication capability recording; global Cargo/lock and editor workflow dependency filter; this contract and integration report |
 
 Every lane additionally owns its `docs/parallel-results/diagnostics41-<lane>.md`.

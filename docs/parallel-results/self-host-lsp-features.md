@@ -526,3 +526,72 @@ Rust lines deleted: 0.
 
 Nothing in the presentation analysis. The proof lens requests
 (`src/lsp/proof_lens.rs`) and the session's use of these views are next.
+
+# Part 7 (#1828): the Lens request layer
+
+The Lens request layer of the server (`src/lsp/session/lens_requests.rs`)
+is ported with 0 diffs, at 0.85x Rust's time. It answers on a document and
+its Lens view:
+
+- the poison notices (`VESPER_POISONED_RECOVERY`) and the Lens metadata
+  that ride on `publishDiagnostics`
+- `textDocument/completion`: the `receiver.` scan, then the ranked member
+  completions as LSP items (sort text, tier data, badge, deprecated tags)
+- the obligation text that hovers append, with the consuming calls
+- `textDocument/inlayHint`: one hint per owned linear binding in the range
+  (consumed on line N, outstanding, or poisoned)
+
+Rust stays the default until the hybrid wiring part.
+
+## What changed
+
+- `src/lsp/session/lens_requests.rs`: the request bodies moved out of
+  `Session` into `poison_of`, `completion_of`, `obligation_text_of` and
+  `inlay_hints_of`, which take the text, line index and view. The session
+  methods call them, so the server's answers are unchanged.
+  `requests_dump` writes their answers as JSON rows, and `src/lsp.rs`
+  adds the hidden hook `lens_requests_for_port`.
+- `packages/vesper-lsp-features/src/ownership.ves` adds the entry
+  `lsp_lens_requests`. It reads a view's input as `lsp_lens_view` does
+  (status 5 is a checked snapshot's view, scope `checked`), then the
+  document, its line-index limits, the regions' names, depths and damage,
+  and the requests. Positions go through `@vesper/span`.
+  `complete_member` is split into `rank_members` and its row writer, so
+  completion reuses the ranking. `lens_view` now reads its input with the
+  shared `view_setup`.
+- `tests/self_host_lsp_features.rs` adds `lens_requests_match_rust` and a
+  speed row.
+
+## Differential
+
+`lens_requests_match_rust` ran on 1,137 documents (212 checked corpus
+documents, 255 semantic-error sources and 670 damaged sources answered on
+their repaired prefixes), each with and without a capability ceiling. The
+requests per document are completion just after each `.` and one
+character later, hovers at 48 evenly spaced characters, inlay hints over
+the whole document, each half, and a range past the end, plus a position
+past the last line in each list.
+
+155,498 answers matched with 0 diffs: 108 poison notices, 4,528
+completion items, 8,820 obligation hovers, 3,812 inlay hints and 8,084
+error answers (position errors and unavailable views).
+
+## Numbers
+
+Each row is one round of every request on one view per document. On both
+sides the view is built once and taken off.
+
+| | Rust | Vesper | Ratio |
+|---|--:|--:|--:|
+| Lens requests, per document | 33.6 µs | 28.5 µs | **0.85x** |
+
+Rust lines deleted: 0.
+
+## Left in the Lens
+
+- `proof_lens.rs`: the extraction text and the audit report are pure and
+  portable. Its Lean runner needs `@vesper-std/process` support that is
+  missing today: a non-blocking wait or timeout, process groups and a
+  kill-tree (and their Windows forms).
+- The code lenses and `vesper.proofAudit` command, which wait on the
+  proof runner.

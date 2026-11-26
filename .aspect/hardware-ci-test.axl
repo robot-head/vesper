@@ -1,0 +1,108 @@
+"""Verify command plans and failure paths for CI hardware tasks."""
+
+load("./hardware-ci.axl", "gpu_validation_result", "prepare_kafka", "run_scalable_suite", "setup_udmabuf")
+
+def _equal(actual, expected):
+    if actual != expected:
+        fail("Expected %r, got %r" % (expected, actual))
+
+def _vectors(target, require):
+    calls = []
+
+    def run(tool, args, env):
+        calls.append((tool, args, env))
+
+    run_scalable_suite(run, target, "test-linker")
+    run_scalable_suite(run, target, "test-linker", "qemu -L /toolchain", "cpu,vector=on", require)
+    run_scalable_suite(run, target, "test-linker", "qemu -L /toolchain", "cpu,vector=off", require, absent = True)
+    prefix = "CARGO_TARGET_" + target.replace("-", "_").upper()
+    base = ["test", "--locked", "--release", "--target", target]
+    tests = [["-p", "vesper-simd", "--test", "vvec"], ["-p", "vesper-serde-seed", "--test", "simd_scalable"]]
+    _equal(calls[:2], [("cargo", base + args + ["--no-run"], {prefix + "_LINKER": "test-linker"}) for args in tests])
+    _equal(calls[2:4], [
+        ("cargo", base + args + ["--", "--nocapture"], {
+            prefix + "_LINKER": "test-linker",
+            prefix + "_RUNNER": "qemu -L /toolchain -cpu cpu,vector=on",
+            require: "1",
+        })
+        for args in tests
+    ])
+    _equal(calls[4:], [
+        ("env", ["-u", require, "cargo"] + base + args + ["--", "--nocapture"], {
+            prefix + "_LINKER": "test-linker",
+            prefix + "_RUNNER": "qemu -L /toolchain -cpu cpu,vector=off",
+        })
+        for args in tests
+    ])
+
+def _device(initial, statuses, discovered, expected, status, message = []):
+    calls = []
+    read = []
+    notes = []
+
+    def exists(path):
+        _equal(path, "/dev/udmabuf")
+        read.append(path)
+        return initial if len(read) == 1 else discovered
+
+    def run(tool, args):
+        calls.append([tool] + args)
+        return statuses[len(calls) - 1]
+
+    def capture(tool, args):
+        _equal([tool] + args, ["uname", "-r"])
+        return "test-kernel\n"
+
+    _equal(setup_udmabuf(exists, run, capture, lambda text: notes.append(text)), status)
+    _equal(calls, expected)
+    _equal(notes, message)
+
+def _kafka(expected, checksum):
+    calls = []
+    archive = "/work path/kafka.tgz"
+
+    def run(tool, args):
+        calls.append((tool, args))
+
+    def hash_file(file):
+        _equal(file, archive)
+        return "a" * 128
+
+    def append(value):
+        calls.append(("publish", value))
+
+    _equal(prepare_kafka(run, hash_file, append, archive, "/runner temp", "4.3.2", "2.13", checksum), expected)
+    plan = [("curl", ["-sSfL", "-o", archive, "https://archive.apache.org/dist/kafka/4.3.2/kafka_2.13-4.3.2.tgz"])]
+    if expected:
+        plan.extend([("tar", ["xzf", archive, "-C", "/runner temp"]), ("publish", "VESPER_KAFKA_HOME=/runner temp/kafka_2.13-4.3.2\n")])
+    _equal(calls, plan)
+
+def _test(ctx: TaskContext) -> int:
+    _vectors("aarch64-unknown-linux-gnu", "VESPER_REQUIRE_SVE")
+    _vectors("riscv64gc-unknown-linux-gnu", "VESPER_REQUIRE_RVV")
+    modprobe = ["sudo", "modprobe", "udmabuf"]
+    install = ["sudo", "apt-get", "install", "-y", "--no-install-recommends", "linux-modules-extra-test-kernel"]
+    chmod = ["sudo", "chmod", "a+rw", "/dev/udmabuf"]
+    listing = ["ls", "-l", "/dev/udmabuf"]
+    _device(True, [0, 0], True, [chmod, listing], 0)
+    _device(False, [0, 0, 0], True, [modprobe, chmod, listing], 0)
+    _device(False, [1, 0, 0, 0, 0], True, [modprobe, install, modprobe, chmod, listing], 0)
+    _device(False, [1, 1], False, [modprobe, install], 0, ["udmabuf unavailable\n"])
+    _device(False, [1, 0, 1], False, [modprobe, install, modprobe], 0, ["udmabuf unavailable\n"])
+    _device(True, [4], True, [chmod], 4)
+    _kafka(True, "A" * 128)
+    _kafka(False, "b" * 128)
+    for output, status, expected in [("ok\n", 0, 0), ("Validation Error from layer\n", 0, 1), ("Validation Error before cargo failed\n", 22, 22)]:
+        logs = []
+        _equal(gpu_validation_result(output, status, lambda text: logs.append(text)), expected)
+        _equal(logs[0], output)
+        _equal(len(logs), 2 if expected == 1 else 1)
+    ctx.std.io.stdout.write("Passed scalable vector, Vulkan and Kafka workflow cases\n")
+    return 0
+
+test_hardware_ci = task(
+    kind = "hardware-ci",
+    group = ["ci", "tests"],
+    summary = "Check hardware and interop CI command plans and failure handling",
+    implementation = _test,
+)

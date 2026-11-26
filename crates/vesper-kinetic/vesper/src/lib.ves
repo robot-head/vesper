@@ -59,6 +59,7 @@ use self::fastmath::{
 };
 use self::ccd::pair_toi as c_pair_toi;
 use self::solve::solve as r_solve;
+use self::world::substeps as w_substeps;
 
 // ---------------------------------------------------------------------------
 // morton.rs
@@ -710,5 +711,35 @@ pub fn rigid_solve(
         in layer_off,
         in layer_idx,
         inout scratch
+    )
+}
+
+// ---------------------------------------------------------------------------
+// world.rs `World::advance`: the particle world's substeps (world.ves has
+// the lane layouts).
+
+pub fn world_substeps(
+    substeps: u32,
+    inout bodies: Slice[u64],
+    in jf: Slice[u64],
+    in ju: Slice[u64],
+    in contacts: Slice[u64],
+    in layer_off: Slice[u32],
+    in layer_idx: Slice[u32],
+    in params: Slice[u32],
+    inout state: Slice[u64],
+    inout prev: Slice[u64]
+) {
+    w_substeps(
+        substeps,
+        inout bodies,
+        in jf,
+        in ju,
+        in contacts,
+        in layer_off,
+        in layer_idx,
+        in params,
+        inout state,
+        inout prev
     )
 }

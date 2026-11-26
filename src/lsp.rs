@@ -87,6 +87,50 @@ pub fn lens_view_for_port(
         },
     )
 }
+/// The Lens request layer (poison notices, member completion, obligation
+/// hovers, inlay hints) on `document` at `uri`, against the view of
+/// `view_text`: its checked snapshot when `checked`, else its semantic or
+/// repaired view (regions as for `lens_view_for_port`), answered `rounds`
+/// times on one view, as text, for the Vesper port's differential test.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn lens_requests_for_port(
+    uri: &str,
+    document: &str,
+    view_text: &str,
+    regions: &str,
+    checked: bool,
+    limits: crate::tooling::frontend::AnalysisLimits,
+    index_limits: vesper_span::Limits,
+    completions: &[vesper_span::Position],
+    hovers: &[vesper_span::Position],
+    inlays: &[vesper_span::Range],
+    ceiling: Option<&std::collections::BTreeSet<String>>,
+    rounds: u64,
+) -> String {
+    let view = if checked {
+        match crate::tooling::frontend::check_source(view_text, limits) {
+            Ok(snapshot) => lens::View::checked(std::sync::Arc::new(snapshot)),
+            Err(_) => Err(lens::Unavailable::Guard),
+        }
+    } else {
+        lens::Prepared::new(view_text, lens::regions_from_dump(regions), limits)
+            .and_then(|prepared| lens::View::from_prepared(&prepared))
+    };
+    session::requests_dump(
+        uri,
+        document,
+        index_limits,
+        view.map(std::sync::Arc::new),
+        &session::PortRequests {
+            completions,
+            hovers,
+            inlays,
+            ceiling,
+        },
+        rounds,
+    )
+}
 /// `lens_view_for_port` with the guards, parse and check done once and
 /// the view and its answers built `rounds` times (the last answer, or ""
 /// for no rounds), for the Vesper port's speed comparison.

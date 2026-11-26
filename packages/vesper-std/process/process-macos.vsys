@@ -24,6 +24,12 @@ sys library StdProcess (
     const SIGPIPE: i32 = 13;
     const POSIX_SPAWN_SETSIGDEF: i32 = 4;
     const POSIX_SPAWN_SETSIGMASK: i32 = 8;
+    // `process_group`: the child leads a new process group, so
+    // `kill_tree` reaches everything it starts.
+    const POSIX_SPAWN_SETPGROUP: i32 = 2;
+    const WNOHANG: i32 = 1;
+    // The clock `wait_timeout` measures its deadline on.
+    const CLOCK_MONOTONIC: i32 = 6;
     // `errno` values src/sys.ves tests.
     const ENOENT: u32 = 2;
     const EINTR: u32 = 4;
@@ -48,6 +54,10 @@ sys library StdProcess (
     wire struct SigSet {
         w0: u64, w1: u64, w2: u64, w3: u64, w4: u64, w5: u64, w6: u64, w7: u64, w8: u64, w9: u64, w10: u64, w11: u64, w12: u64, w13: u64, w14: u64, w15: u64
     }
+    // A `struct timespec`: seconds, then nanoseconds.
+    wire struct TimeSpec {
+        sec: u64, nsec: u64
+    }
     fn posix_spawn_file_actions_init(fa: u64) -> ForeignVal[i32];
     fn posix_spawn_file_actions_destroy(fa: u64) -> ForeignVal[i32];
     fn posix_spawn_file_actions_adddup2(fa: u64, fd: i32, to: i32) -> ForeignVal[i32];
@@ -55,6 +65,7 @@ sys library StdProcess (
     fn posix_spawnattr_init(nocapture inout attr: SpawnAttr) -> ForeignVal[i32];
     fn posix_spawnattr_destroy(nocapture inout attr: SpawnAttr) -> ForeignVal[i32];
     fn posix_spawnattr_setflags(nocapture inout attr: SpawnAttr, flags: i32) -> ForeignVal[i32];
+    fn posix_spawnattr_setpgroup(nocapture inout attr: SpawnAttr, pgroup: i32) -> ForeignVal[i32];
     fn posix_spawnattr_setsigmask(nocapture inout attr: SpawnAttr, nocapture in set: SigSet) -> ForeignVal[i32];
     fn posix_spawnattr_setsigdefault(nocapture inout attr: SpawnAttr, nocapture in set: SigSet) -> ForeignVal[i32];
     fn sigemptyset(nocapture inout set: SigSet) -> ForeignVal[i32];
@@ -88,6 +99,7 @@ sys library StdProcess (
     fn poll(nocapture inout fds: CSlice[u64], timeout: i32) -> ForeignVal[i32] errno;
     fn waitpid(pid: i32, nocapture inout status: i32, options: i32) -> ForeignVal[i32] errno;
     fn kill(pid: i32, sig: i32) -> ForeignVal[i32];
+    fn clock_gettime(clock: i32, nocapture inout ts: TimeSpec) -> ForeignVal[i32];
     fn exit(code: i32) -> ForeignVal[Unit];
     fn getpid() -> ForeignVal[i32];
     // The environment table (`environ`, or Apple's `_NSGetEnviron`), read

@@ -304,6 +304,7 @@ kinetic_check = port_checks(
             ("sleep", ["sleep_ccd"], "a_resting_stack_falls_asleep_and_a_falling_ball_wakes_it", "ccd_bullets_do_not_cross_a_thin_wall_or_the_ground", "10"),
             ("diff", ["diff"], "adjoint_matches_central_finite_differences", "malformed_scenes_are_typed_errors", "11"),
             ("solve", ["joint_drives"], "hinge_motor_reaches_its_target_rate", "hinge_servo_holds_the_target_angle_against_gravity", "12"),
+            ("world", ["contacts"], "restitution_bounces_to_e_squared_of_the_drop", "static_friction_holds_below_the_coulomb_limit", "13"),
         ]
     ],
 )
@@ -822,6 +823,21 @@ grammar_check = port_checks(
             ("protobuf", "protobuf", "signed_twos_complement_varints_are_canonical_in_singular_and_packed_fields", "singular_presence_and_defaults_are_actual_distinct_logical_values"),
             ("der", "der", "typed_set_of_sorts_complete_encodings_retains_duplicates_and_rejects_untyped_set", "utf8_string_is_strict_borrowed_and_transactional"),
             ("ipc", "ipc", "independent_arrow_values_and_versions", "hostile_schema_and_union_discriminants"),
+        ]
+    ],
+)
+
+simd_test_port = port_checks(
+    "simd",
+    "test-port",
+    [
+        ["-p", "vesper-simd"],
+        ["-p", "vesper-simd", "--features", "vesper-port"],
+    ],
+    [
+        divergence(name, _FEATURE + args + _SERIAL, [failed], [passed])
+        for name, args, failed, passed in [
+            ("scanner", ["--lib"], "tests::native_all_byte_values_and_delimiters", "tests::vesper_port_profile_decisions_match_rust"),
         ]
     ],
 )

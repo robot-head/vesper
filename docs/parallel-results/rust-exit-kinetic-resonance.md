@@ -661,6 +661,58 @@ bytes per `f32` field, even when the helper that returns it is inlined, and
 every `Slice[f32]` element read is its own bounds check and branch. Scalar
 code avoids the first; the second is what is left of the 1.22x.
 
+## Part 10: the particle world substeps flipped (2026-11-25)
+
+The substep loop of `World::advance` (src/world.rs) moves to
+`@vesper/kinetic` (vesper/src/world.ves): integration, the colour-layer
+projection of distance joints, body-body and ground contacts with Coulomb
+friction, velocities from positions and the restitution pass. The port runs
+the serial solvers (Scalar, and Batched16 when the tick is too small to
+split across threads); the parallel Batched16 path stays Rust. The tick's
+state is packed once per tick; the Rust loop stays under
+`cfg(not(vesper_port))` for the seed.
+
+### Measurements
+
+`examples/abba.rs world-substeps` (a 1024-sphere pile on the LBVH
+broadphase with friction 0.5/0.3, restitution 0.4 and 16 four-link joint
+chains: 2 ticks, then 16 more substep runs), release,
+`RUSTFLAGS="-C target-cpu=native"`, Linux x86_64: `abba compare 30 10`
+port/Rust **1.42x**; flip gate (30 pairs) mean 1.41x, 95% CI upper
+**1.445x**.
+
+### What changed
+
+- The first port read one `u32` bit lane per checked slice access and ran
+  at 1.70x. The state now crosses as `u64` words of two f32 lanes (position
+  x/y, z with the inverse mass, radius with compliance, velocity), so one
+  checked read fetches two lanes; the constraint dispatch and the
+  restitution early-out moved into the colour loop, and the friction
+  correction no longer returns a `copy struct`.
+- f32 slices are copied by the port ABI (8-byte cells), so lanes cross as
+  bit patterns; the World allocation test stays green.
+- `World::bench_substeps` (doc-hidden) runs the substeps again for the ABBA
+  workload.
+
+### Checks
+
+- `world_substeps_match_the_rust_build` (tests/port_differential.rs): 64
+  random jittered lattices with joint chains, materials and both serial
+  solvers, 60 ticks each: body positions and velocities equal over more
+  than 2,000 cases and 100,000 contacts.
+- Every vesper-kinetic test passes on the port, golden hashes included.
+- Divergence 13 (`world`): restitution on separating contacts;
+  `contacts::restitution_bounces_to_e_squared_of_the_drop` fails and
+  `static_friction_holds_below_the_coulomb_limit` passes.
+
+### Compiler gap found
+
+Each checked slice read costs about 8 instructions (the slice's base and
+length reloaded from the stack, a compare, a branch and a zero path), and
+the bounds facts prove `s[i + j]` only from a comparison on `i + j`
+itself, not from `i + k < len` with `k >= j`. Fixing either would bring
+this loop close to 1.0x.
+
 ## What is left
 
 - **Resonance:** slab (1.89x) and events (8.00x) stay above the bar until codegen removes their hot-path overhead (gap 7). The Rust
@@ -669,8 +721,9 @@ code avoids the first; the second is what is left of the 1.22x.
   plan), the `rtrb` rings (`spsc.rs`) and the denormal registers are not
   ported yet. The SIMD paths are ported (part 3), but they run at 8-48x and
   are bound by gaps 2 and 6.
-- **Kinetic:** every isolated module and the rigid substep solver are
-  flipped (parts 8 and 9). Next, port `world`/`tile`, the rest of `rigid`
+- **Kinetic:** every isolated module, the rigid substep solver and the
+  particle world substeps are flipped (parts 8-10). Next, port the
+  `world`/`tile` drivers (detection, parallel substeps), the rest of `rigid`
   (step driver, narrowphase driver, queries), `soft`,
   `articulation`, `couple`, `diff`, `rigid_diff`, `rollback`, `snapshot`,
   `detfloat`, `simd` (see `port-p3b-kinetic.md`, "Not ported yet"), then the
