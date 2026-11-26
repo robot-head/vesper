@@ -3,9 +3,24 @@
 // src/lsp/proof_lens.rs, and the `Display` of `io::Error` and
 // `ExitStatus` on Unix.
 
-use @vesper-std/fs::IoError;
+use @vesper-std/fs::{IoError, program_not_found};
 use @vesper-std/process::ExitStatus;
-use self::json::{put, put_u64};
+use @vesper-std/bytes::ascii::{
+    BACKSLASH, CARRIAGE_RETURN, CLOSE_PAREN, DIGIT_ZERO, HYPHEN, NEWLINE, TAB
+};
+use self::json::{put, put_u64, NONE, HEX_LETTER_BASE};
+
+// U+FFFD REPLACEMENT CHARACTER in UTF-8.
+const REPLACEMENT_FIRST: u8 = 239;
+const REPLACEMENT_SECOND: u8 = 191;
+const REPLACEMENT_THIRD: u8 = 189;
+// A UTF-8 continuation byte is `0b10xx_xxxx`: these top two bits, `0b10`.
+const UTF8_CONTINUATION_MASK: u8 = 192;
+const UTF8_CONTINUATION: u8 = 128;
+// `first_error` keeps at most this many scalars of its line.
+const MAX_ERROR_CHARS: u64 = 400;
+// `bounded` keeps at most this many bytes.
+const MAX_BOUNDED_BYTES: u64 = 2048;
 
 pub fn byte(in bytes: Slice[u8], i: u64) -> u8 {
     match bytes.try_get(i) {
@@ -94,9 +109,9 @@ pub fn lossy(in bytes: Slice[u8]) -> ChunkSeq[u8] {
 }
 
 fn put_replacement(inout out: ChunkSeq[u8]) {
-    out.push(239);
-    out.push(191);
-    out.push(189);
+    out.push(REPLACEMENT_FIRST);
+    out.push(REPLACEMENT_SECOND);
+    out.push(REPLACEMENT_THIRD);
 }
 
 // The scalar value starting at `i` of valid UTF-8 and its length.
@@ -158,7 +173,8 @@ pub fn trim(in bytes: Slice[u8], inout start: u64, inout end: u64) {
         // The start of the last scalar before `end`.
         let mut last_start = wrapping_sub(end, 1);
         loop {
-            if last_start <= start || (byte(in bytes, last_start) & 192) != 128 {
+            if last_start <= start
+                || (byte(in bytes, last_start) & UTF8_CONTINUATION_MASK) != UTF8_CONTINUATION {
                 break;
             }
             last_start = wrapping_sub(last_start, 1);
@@ -184,7 +200,7 @@ pub fn trimmed(in bytes: Slice[u8]) -> ChunkSeq[u8] {
 }
 
 pub fn contains(in hay: Slice[u8], start: u64, end: u64, in needle: Slice[u8]) -> bool {
-    find(in hay, start, end, in needle) != 18446744073709551615
+    find(in hay, start, end, in needle) != NONE
 }
 
 // The first index of `needle` in `hay[start..end]`, or `u64::MAX`.
@@ -193,13 +209,13 @@ pub fn find(in hay: Slice[u8], start: u64, end: u64, in needle: Slice[u8]) -> u6
         return start;
     }
     if end < start || wrapping_sub(end, start) < needle.len() {
-        return 18446744073709551615;
+        return NONE;
     }
     let last = wrapping_sub(end, needle.len());
     let mut i = start;
     loop {
         if i > last {
-            return 18446744073709551615;
+            return NONE;
         }
         let mut k: u64 = 0;
         loop {
@@ -232,14 +248,15 @@ pub fn first_error(in bytes: Slice[u8]) -> ChunkSeq[u8] {
         // One `lines()` line: up to the next `\n`, without a final `\r`.
         let mut line_end = line_start;
         loop {
-            if line_end >= bytes.len() || byte(in bytes, line_end) == 10 {
+            if line_end >= bytes.len() || byte(in bytes, line_end) == NEWLINE {
                 break;
             }
             line_end = inc(line_end);
         }
         let next_line = inc(line_end);
         let mut content_end = line_end;
-        if content_end > line_start && byte(in bytes, wrapping_sub(content_end, 1)) == 13 {
+        if content_end > line_start
+            && byte(in bytes, wrapping_sub(content_end, 1)) == CARRIAGE_RETURN {
             content_end = wrapping_sub(content_end, 1);
         }
         if contains(in bytes, line_start, content_end, in "error".as_bytes()) {
@@ -268,8 +285,8 @@ pub fn first_error(in bytes: Slice[u8]) -> ChunkSeq[u8] {
     let mut scalar_count: u64 = 0;
     for k in pick_start..pick_end {
         let c = byte(in bytes, k);
-        if (c & 192) != 128 {
-            if scalar_count >= 400 {
+        if (c & UTF8_CONTINUATION_MASK) != UTF8_CONTINUATION {
+            if scalar_count >= MAX_ERROR_CHARS {
                 break;
             }
             scalar_count = inc(scalar_count);
@@ -282,10 +299,10 @@ pub fn first_error(in bytes: Slice[u8]) -> ChunkSeq[u8] {
 // `bounded`: at most 2048 bytes, cut at a char boundary.
 pub fn bounded(in bytes: Slice[u8]) -> ChunkSeq[u8] {
     let mut end = bytes.len();
-    if end > 2048 {
-        end = 2048;
+    if end > MAX_BOUNDED_BYTES {
+        end = MAX_BOUNDED_BYTES;
         loop {
-            if end == 0 || (byte(in bytes, end) & 192) != 128 {
+            if end == 0 || (byte(in bytes, end) & UTF8_CONTINUATION_MASK) != UTF8_CONTINUATION {
                 break;
             }
             end = wrapping_sub(end, 1);
@@ -302,13 +319,13 @@ pub fn bounded(in bytes: Slice[u8]) -> ChunkSeq[u8] {
 pub fn put_escaped(inout out: ChunkSeq[u8], in bytes: Slice[u8]) {
     for i in 0..bytes.len() {
         let c = byte(in bytes, i);
-        if c == 92 {
+        if c == BACKSLASH {
             put(inout out, in "\\\\");
-        } else if c == 9 {
+        } else if c == TAB {
             put(inout out, in "\\t");
-        } else if c == 13 {
+        } else if c == CARRIAGE_RETURN {
             put(inout out, in "\\r");
-        } else if c == 10 {
+        } else if c == NEWLINE {
             put(inout out, in "\\n");
         } else {
             out.push(c);
@@ -326,9 +343,9 @@ pub fn put_hex(inout out: ChunkSeq[u8], in bytes: Slice[u8]) {
 
 fn hex_digit(c: u8) -> u8 {
     if c < 10 {
-        wrapping_add(48, c)
+        wrapping_add(DIGIT_ZERO, c)
     } else {
-        wrapping_add(87, c)
+        wrapping_add(HEX_LETTER_BASE, c)
     }
 }
 
@@ -379,7 +396,7 @@ pub fn put_io_error(inout out: ChunkSeq[u8], error: IoError) {
         }
         put(inout out, in " (os error ");
         put_u64(inout out, widen_u64(error.os));
-        out.push(41);
+        out.push(CLOSE_PAREN);
         return;
     }
     let kind = error.kind;
@@ -407,6 +424,8 @@ pub fn put_io_error(inout out: ChunkSeq[u8], error: IoError) {
         put(inout out, in "unsupported");
     } else if kind == 12 {
         put(inout out, in "out of memory");
+    } else if kind == program_not_found() {
+        put(inout out, in "program not found");
     } else {
         put(inout out, in "other error");
     }
@@ -486,7 +505,7 @@ pub fn put_status(inout out: ChunkSeq[u8], status: ExitStatus) {
     if status.exited {
         put(inout out, in "exit status: ");
         if status.code < 0 {
-            out.push(45);
+            out.push(HYPHEN);
             put_u64(inout out, wrapping_u64(wrapping_sub(0, status.code)));
         } else {
             put_u64(inout out, wrapping_u64(status.code));
@@ -499,6 +518,6 @@ pub fn put_status(inout out: ChunkSeq[u8], status: ExitStatus) {
     if signal_name(inout name, status.signal) {
         put(inout out, in " (");
         put_bytes(inout out, in name.as_slice());
-        out.push(41);
+        out.push(CLOSE_PAREN);
     }
 }

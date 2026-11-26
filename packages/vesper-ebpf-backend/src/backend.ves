@@ -296,10 +296,7 @@ fn intern(inout names: Names, in lit: Str) -> u32 {
 }
 
 fn bool_at(in seq: ChunkSeq[bool], i: u64) -> bool {
-    match seq.try_get(i) {
-        Option::Some(value) => value,
-        Option::None => false,
-    }
+    seq.try_get(i).unwrap_or(false)
 }
 
 fn set8(inout seq: ChunkSeq[u8], i: u64, value: u8) {
@@ -361,10 +358,7 @@ fn last_is(in names: Names, symbol: u32, in lit: Str) -> bool {
         return false;
     }
     for i in 0..want.len() {
-        let want_byte = match want.try_get(i) {
-            Option::Some(byte) => byte,
-            Option::None => 0,
-        };
+        let want_byte = want.try_get(i).unwrap_or(0);
         if u8_at(in seg, i) != want_byte {
             return false;
         }
@@ -1935,10 +1929,7 @@ pub fn lower(inout backend: G, inout ctx: Ctx, in program: Program, in extra: Ex
         // `Asm::map`: validated already; a second map with the same name
         // is an assembly error.
         for j in 0..i {
-            let other = match backend.map_defs.try_get(j) {
-                Option::Some(other) => other,
-                Option::None => map_def,
-            };
+            let other = backend.map_defs.try_get(j).unwrap_or(map_def);
             if other.name == map_def.name {
                 fail_asm(inout backend);
                 txt(inout backend.message, "duplicate map ");
@@ -2068,17 +2059,11 @@ pub fn lower(inout backend: G, inout ctx: Ctx, in program: Program, in extra: Ex
 // ----- one function (`FnLower`) -----------------------------------------------------
 
 fn vrep(in backend: G, v: u32) -> u8 {
-    match backend.reprs.try_get(w(v)) {
-        Option::Some(rep) => rep,
-        Option::None => REP_BAD,
-    }
+    backend.reprs.try_get(w(v)).unwrap_or(REP_BAD)
 }
 
 fn vty(in backend: G, v: u32) -> u32 {
-    match backend.value_types.try_get(w(v)) {
-        Option::Some(t) => t,
-        Option::None => NONE32,
-    }
+    backend.value_types.try_get(w(v)).unwrap_or(NONE32)
 }
 
 fn grow_values(inout backend: G, v: u32) {
@@ -3150,10 +3135,7 @@ fn bytes_are(in bytes: ChunkSeq[u8], in lit: Str) -> bool {
         return false;
     }
     for i in 0..want.len() {
-        let want_byte = match want.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let want_byte = want.try_get(i).unwrap_or(0);
         if u8_at(in bytes, i) != want_byte {
             return false;
         }

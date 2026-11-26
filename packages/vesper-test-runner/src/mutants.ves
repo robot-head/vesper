@@ -16,9 +16,19 @@ use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{symbol_from_id};
 use @vesper/front::kinds::{k_block_comment, k_comment, k_whitespace};
 use self::discover::{Toks, case_marker, is_test_marker, preceding_comments, toks};
-use self::util::{
-    Reader, add, inc, is_text, put_text, same, sub, trim_end, trim_start, u8_at, u64_at
+use self::ast_kinds::{
+    EXPR_ASSIGN, EXPR_BINARY, EXPR_BLOCK, EXPR_BREAK, EXPR_CALL, EXPR_CLOSURE, EXPR_FIELD, EXPR_FOR,
+    EXPR_HANDLE, EXPR_IF, EXPR_INDEX, EXPR_LITERAL, EXPR_LOOP, EXPR_MATCH, EXPR_RANGE, EXPR_RETURN,
+    EXPR_STRUCT, EXPR_TRY, EXPR_TUPLE, EXPR_UNARY, ITEM_CONFORMANCE, ITEM_FUNCTION, ITEM_IMPL,
+    LIT_BOOL
 };
+use self::util::{
+    PAIR_WORDS, Reader, STATUS_OK, add, inc, is_text, put_text, same, sub, trim_end, trim_start,
+    u8_at, u64_at
+};
+
+// The most expressions one function's walk visits.
+const MAX_VISITED: u64 = 16384;
 
 // The interned operators a site can replace.
 struct Ops {
@@ -63,25 +73,55 @@ struct Sites {
     words: ChunkSeq[u64]
 }
 
+// The words of a site.
+enum SiteWord: u64 {
+    Name = 0,
+    Start = 1,
+    End = 2,
+    Original = 3,
+    Replacement = 4,
+    Words = 5,
+}
+
+// The `code` numbers of the site texts (0 for none).
+const SITE_NONE: u64 = 0;
+const SITE_PLUS: u64 = 1;
+const SITE_MINUS: u64 = 2;
+const SITE_STAR: u64 = 3;
+const SITE_EQ_EQ: u64 = 4;
+const SITE_NE: u64 = 5;
+const SITE_LT: u64 = 6;
+const SITE_LE: u64 = 7;
+const SITE_GT: u64 = 8;
+const SITE_GE: u64 = 9;
+const SITE_AND: u64 = 10;
+const SITE_OR: u64 = 11;
+const SITE_NOT: u64 = 12;
+const SITE_PLUS_EQ: u64 = 13;
+const SITE_MINUS_EQ: u64 = 14;
+const SITE_TRUE: u64 = 15;
+const SITE_FALSE: u64 = 16;
+const SITE_DROPPED_NOT: u64 = 17;
+
 // Site texts: 1-14 operators, 15 "true", 16 "false", 17 " " (a dropped `!`).
 fn code_text(code: u64) -> Str {
     match code {
-        1 => "+",
-        2 => "-",
-        3 => "*",
-        4 => "==",
-        5 => "!=",
-        6 => "<",
-        7 => "<=",
-        8 => ">",
-        9 => ">=",
-        10 => "&&",
-        11 => "||",
-        12 => "!",
-        13 => "+=",
-        14 => "-=",
-        15 => "true",
-        16 => "false",
+        SITE_PLUS => "+",
+        SITE_MINUS => "-",
+        SITE_STAR => "*",
+        SITE_EQ_EQ => "==",
+        SITE_NE => "!=",
+        SITE_LT => "<",
+        SITE_LE => "<=",
+        SITE_GT => ">",
+        SITE_GE => ">=",
+        SITE_AND => "&&",
+        SITE_OR => "||",
+        SITE_NOT => "!",
+        SITE_PLUS_EQ => "+=",
+        SITE_MINUS_EQ => "-=",
+        SITE_TRUE => "true",
+        SITE_FALSE => "false",
         _ => " ",
     }
 }
@@ -98,29 +138,29 @@ fn site(inout sites: Sites, name: u32, start: u64, end: u64, original: u64, repl
 // (0 when none): `collect_mutants_in_fn`'s table.
 fn binary_codes(in ops: Ops, op: u32) -> (u64, u64, u64) {
     if op == ops.plus {
-        (1, 2, 0)
+        (SITE_PLUS, SITE_MINUS, SITE_NONE)
     } else if op == ops.minus {
-        (2, 1, 0)
+        (SITE_MINUS, SITE_PLUS, SITE_NONE)
     } else if op == ops.star {
-        (3, 1, 0)
+        (SITE_STAR, SITE_PLUS, SITE_NONE)
     } else if op == ops.eq_eq {
-        (4, 5, 0)
+        (SITE_EQ_EQ, SITE_NE, SITE_NONE)
     } else if op == ops.ne {
-        (5, 4, 0)
+        (SITE_NE, SITE_EQ_EQ, SITE_NONE)
     } else if op == ops.lt {
-        (6, 7, 9)
+        (SITE_LT, SITE_LE, SITE_GE)
     } else if op == ops.le {
-        (7, 6, 8)
+        (SITE_LE, SITE_LT, SITE_GT)
     } else if op == ops.gt {
-        (8, 9, 7)
+        (SITE_GT, SITE_GE, SITE_LE)
     } else if op == ops.ge {
-        (9, 8, 6)
+        (SITE_GE, SITE_GT, SITE_LT)
     } else if op == ops.and {
-        (10, 11, 0)
+        (SITE_AND, SITE_OR, SITE_NONE)
     } else if op == ops.or {
-        (11, 10, 0)
+        (SITE_OR, SITE_AND, SITE_NONE)
     } else {
-        (0, 0, 0)
+        (SITE_NONE, SITE_NONE, SITE_NONE)
     }
 }
 
@@ -206,7 +246,11 @@ fn fn_at(in ast: Ast, i: u32) -> FnNode {
 // word `at`) in reverse order.
 fn push_rev(inout stack: ChunkSeq[u32], in ast: Ast, list: u32, stride: u64, at: u64) {
     let len = list_len(in ast, list);
-    let n = if stride == 2 { len / 2 } else { len };
+    let n = if stride == PAIR_WORDS {
+        len / PAIR_WORDS
+    } else {
+        len
+    };
     let mut k = n;
     loop {
         if k == 0 {
@@ -241,14 +285,14 @@ fn collect_in_fn(
         let expr_id = stack.try_get(sub(stack_len, 1)).unwrap_or(0);
         stack.truncate(sub(stack_len, 1));
         visited = inc(visited);
-        if visited > 16384 {
+        if visited > MAX_VISITED {
             break;
         }
         let expr = expr_at(in ast, expr_id);
         let kind = expr.kind;
-        if kind == 1 {
+        if kind == EXPR_LITERAL {
             let lit = lit_at(in ast, expr.a);
-            if lit.kind == 3 {
+            if lit.kind == LIT_BOOL {
                 let lit_start = widen_u64(expr.start);
                 let lit_end = widen_u64(expr.end);
                 if lit_end <= src.len() && lit_start <= lit_end {
@@ -256,13 +300,13 @@ fn collect_in_fn(
                     let text_end = trim_end(in src, text_start, lit_end);
                     let value = lit.bits != 0;
                     if value && is_text(in src, text_start, text_end, in "true") {
-                        site(inout out, func.name, text_start, text_end, 15, 16);
+                        site(inout out, func.name, text_start, text_end, SITE_TRUE, SITE_FALSE);
                     } else if !value && is_text(in src, text_start, text_end, in "false") {
-                        site(inout out, func.name, text_start, text_end, 16, 15);
+                        site(inout out, func.name, text_start, text_end, SITE_FALSE, SITE_TRUE);
                     }
                 }
             }
-        } else if kind == 10 {
+        } else if kind == EXPR_UNARY {
             if expr.a == ops.not {
                 let inner = expr_at(in ast, expr.b);
                 let (found, op_start, op_end) = find_operator(
@@ -273,13 +317,13 @@ fn collect_in_fn(
                     in "!"
                 );
                 if found {
-                    site(inout out, func.name, op_start, op_end, 12, 17);
+                    site(inout out, func.name, op_start, op_end, SITE_NOT, SITE_DROPPED_NOT);
                 }
             }
             stack.push(expr.b);
-        } else if kind == 11 {
+        } else if kind == EXPR_BINARY {
             let (code, first_rep, second_rep) = binary_codes(in ops, expr.a);
-            if code != 0 {
+            if code != SITE_NONE {
                 let lhs = expr_at(in ast, expr.b);
                 let rhs = expr_at(in ast, expr.c);
                 let (found, op_start, op_end) = find_operator(
@@ -291,24 +335,24 @@ fn collect_in_fn(
                 );
                 if found {
                     site(inout out, func.name, op_start, op_end, code, first_rep);
-                    if second_rep != 0 {
+                    if second_rep != SITE_NONE {
                         site(inout out, func.name, op_start, op_end, code, second_rep);
                     }
                 }
             }
             stack.push(expr.c);
             stack.push(expr.b);
-        } else if kind == 12 {
-            let mut code: u64 = 0;
-            let mut replacement: u64 = 0;
+        } else if kind == EXPR_ASSIGN {
+            let mut code: u64 = SITE_NONE;
+            let mut replacement: u64 = SITE_NONE;
             if expr.a == ops.plus_eq {
-                code = 13;
-                replacement = 14;
+                code = SITE_PLUS_EQ;
+                replacement = SITE_MINUS_EQ;
             } else if expr.a == ops.minus_eq {
-                code = 14;
-                replacement = 13;
+                code = SITE_MINUS_EQ;
+                replacement = SITE_PLUS_EQ;
             }
-            if code != 0 {
+            if code != SITE_NONE {
                 let lhs = expr_at(in ast, expr.b);
                 let rhs = expr_at(in ast, expr.c);
                 let (found, op_start, op_end) = find_operator(
@@ -324,11 +368,11 @@ fn collect_in_fn(
             }
             stack.push(expr.c);
             stack.push(expr.b);
-        } else if kind == 3 {
+        } else if kind == EXPR_TUPLE {
             push_rev(inout stack, in ast, expr.a, 1, 0);
-        } else if kind == 4 {
-            push_rev(inout stack, in ast, expr.b, 2, 1);
-        } else if kind == 5 {
+        } else if kind == EXPR_STRUCT {
+            push_rev(inout stack, in ast, expr.b, PAIR_WORDS, 1);
+        } else if kind == EXPR_BLOCK {
             if expr.b != none() {
                 stack.push(expr.b);
             }
@@ -342,7 +386,7 @@ fn collect_in_fn(
                 let stmt = stmt_at(in ast, list_at(in ast, expr.a, q));
                 stack.push(stmt.value);
             }
-        } else if kind == 6 {
+        } else if kind == EXPR_CALL {
             let count = list_len(in ast, expr.c);
             let mut q = count;
             loop {
@@ -353,36 +397,36 @@ fn collect_in_fn(
                 stack.push(arg_at(in ast, list_at(in ast, expr.c, q)).expr);
             }
             stack.push(expr.a);
-        } else if kind == 7 || kind == 9 {
+        } else if kind == EXPR_FIELD || kind == EXPR_TRY {
             stack.push(expr.a);
-        } else if kind == 8 {
+        } else if kind == EXPR_INDEX {
             stack.push(expr.b);
             stack.push(expr.a);
-        } else if kind == 13 {
+        } else if kind == EXPR_IF {
             if expr.c != none() {
                 stack.push(expr.c);
             }
             stack.push(expr.b);
             stack.push(expr.a);
-        } else if kind == 14 {
-            push_rev(inout stack, in ast, expr.b, 2, 1);
+        } else if kind == EXPR_MATCH {
+            push_rev(inout stack, in ast, expr.b, PAIR_WORDS, 1);
             stack.push(expr.a);
-        } else if kind == 15 {
+        } else if kind == EXPR_CLOSURE {
             stack.push(expr.e);
-        } else if kind == 17 {
+        } else if kind == EXPR_LOOP {
             stack.push(expr.a);
-        } else if kind == 18 {
+        } else if kind == EXPR_FOR {
             // control_children [iter, body], reversed onto the stack.
             stack.push(expr.c);
             stack.push(expr.b);
-        } else if kind == 19 {
+        } else if kind == EXPR_RANGE {
             stack.push(expr.b);
             stack.push(expr.a);
-        } else if kind == 20 || kind == 21 {
+        } else if kind == EXPR_BREAK || kind == EXPR_RETURN {
             if expr.a != none() {
                 stack.push(expr.a);
             }
-        } else if kind == 16 {
+        } else if kind == EXPR_HANDLE {
             // The clauses: the return clause, then the operations.
             let count = list_len(in ast, expr.e);
             let mut q = count;
@@ -406,10 +450,10 @@ fn collect_in_fn(
 
 // Whether `name` is one of the test names in `input`.
 fn is_test_name(in input: Slice[u8], in names: ChunkSeq[u64], in name: Slice[u8]) -> bool {
-    let n = names.len() / 2;
+    let n = names.len() / PAIR_WORDS;
     for i in 0..n {
-        let name_start = u64_at(in names, wrapping_mul(i, 2));
-        let name_end = u64_at(in names, inc(wrapping_mul(i, 2)));
+        let name_start = u64_at(in names, wrapping_mul(i, PAIR_WORDS));
+        let name_end = u64_at(in names, inc(wrapping_mul(i, PAIR_WORDS)));
         if same(in input, name_start, name_end, in name, 0, name.len()) {
             return true;
         }
@@ -419,21 +463,24 @@ fn is_test_name(in input: Slice[u8], in names: ChunkSeq[u64], in name: Slice[u8]
 
 // Site `site_index`'s word `word` of `sites`.
 fn sw(in sites: Sites, site_index: u64, word: u64) -> u64 {
-    u64_at(in sites.words, add(wrapping_mul(site_index, 5), word))
+    u64_at(in sites.words, add(wrapping_mul(site_index, SiteWord::Words), word))
 }
 
 // Whether site `lhs` sorts before site `rhs`: (start, end, replacement text).
 fn site_less(in sites: Sites, lhs: u64, rhs: u64) -> bool {
-    let (lhs_start, rhs_start) = (sw(in sites, lhs, 1), sw(in sites, rhs, 1));
+    let (lhs_start, rhs_start) = (
+        sw(in sites, lhs, SiteWord::Start),
+        sw(in sites, rhs, SiteWord::Start)
+    );
     if lhs_start != rhs_start {
         return lhs_start < rhs_start;
     }
-    let (lhs_end, rhs_end) = (sw(in sites, lhs, 2), sw(in sites, rhs, 2));
+    let (lhs_end, rhs_end) = (sw(in sites, lhs, SiteWord::End), sw(in sites, rhs, SiteWord::End));
     if lhs_end != rhs_end {
         return lhs_end < rhs_end;
     }
-    let lhs_text = code_text(sw(in sites, lhs, 4)).as_bytes();
-    let rhs_text = code_text(sw(in sites, rhs, 4)).as_bytes();
+    let lhs_text = code_text(sw(in sites, lhs, SiteWord::Replacement)).as_bytes();
+    let rhs_text = code_text(sw(in sites, rhs, SiteWord::Replacement)).as_bytes();
     let lhs_len = lhs_text.len();
     let rhs_len = rhs_text.len();
     let mut i: u64 = 0;
@@ -484,7 +531,7 @@ pub fn collect(in input: Slice[u8]) -> ChunkSeq[u64] {
             .ast
             .items
             .get_or(idx_from_raw[ItemNode](item_id), ItemNode { kind: 0, node: 0 });
-        if item.kind == 2 {
+        if item.kind == ITEM_FUNCTION {
             let func = fn_at(in lowered.ast, item.node);
             name.clear();
             let ok = lowered.ast.names.resolve_into(symbol_from_id(func.name), inout name);
@@ -493,10 +540,10 @@ pub fn collect(in input: Slice[u8]) -> ChunkSeq[u64] {
                 || starts_with_bytes(in name_bytes, in "test_");
             if !test {
                 preceding_comments(in tokens, widen_u64(func.start), inout comments);
-                let comment_count = comments.len() / 2;
+                let comment_count = comments.len() / PAIR_WORDS;
                 for q in 0..comment_count {
-                    let comment_start = u64_at(in comments, wrapping_mul(q, 2));
-                    let comment_end = u64_at(in comments, inc(wrapping_mul(q, 2)));
+                    let comment_start = u64_at(in comments, wrapping_mul(q, PAIR_WORDS));
+                    let comment_end = u64_at(in comments, inc(wrapping_mul(q, PAIR_WORDS)));
                     let (is_row, row_start, row_end) = case_marker(
                         in src,
                         comment_start,
@@ -518,7 +565,7 @@ pub fn collect(in input: Slice[u8]) -> ChunkSeq[u64] {
                     inout out
                 );
             }
-        } else if item.kind == 4 {
+        } else if item.kind == ITEM_IMPL {
             let impl_node = lowered.ast.impls.get_or(
                 idx_from_raw[ImplNode](item.node),
                 ImplNode { ty: 0, generics: 0, methods: 0 }
@@ -536,7 +583,7 @@ pub fn collect(in input: Slice[u8]) -> ChunkSeq[u64] {
                     inout out
                 );
             }
-        } else if item.kind == 6 {
+        } else if item.kind == ITEM_CONFORMANCE {
             let conf = lowered.ast.confs.get_or(
                 idx_from_raw[ConfNode](item.node),
                 ConfNode {
@@ -569,7 +616,7 @@ pub fn collect(in input: Slice[u8]) -> ChunkSeq[u64] {
     }
     // A stable insertion sort of the site indices (the walk is close to
     // source order already).
-    let site_count = out.words.len() / 5;
+    let site_count = out.words.len() / SiteWord::Words;
     let mut order: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](site_count);
     for i in 0..site_count {
         order.push(i);
@@ -589,22 +636,22 @@ pub fn collect(in input: Slice[u8]) -> ChunkSeq[u64] {
         }
     }
     let mut res: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    res.push(0);
+    res.push(STATUS_OK);
     res.push(site_count);
     for i in 0..site_count {
         let site_index = u64_at(in order, i);
         name.clear();
-        let ok = lowered
-            .ast
-            .names
-            .resolve_into(symbol_from_id(wrapping_u32(sw(in out, site_index, 0))), inout name);
+        let ok = lowered.ast.names.resolve_into(
+            symbol_from_id(wrapping_u32(sw(in out, site_index, SiteWord::Name))),
+            inout name
+        );
         let name_bytes = name.as_bytes();
         put_text(inout res, in name_bytes, 0, name_bytes.len());
-        res.push(sw(in out, site_index, 1));
-        res.push(sw(in out, site_index, 2));
-        let orig = code_text(sw(in out, site_index, 3)).as_bytes();
+        res.push(sw(in out, site_index, SiteWord::Start));
+        res.push(sw(in out, site_index, SiteWord::End));
+        let orig = code_text(sw(in out, site_index, SiteWord::Original)).as_bytes();
         put_text(inout res, in orig, 0, orig.len());
-        let rep = code_text(sw(in out, site_index, 4)).as_bytes();
+        let rep = code_text(sw(in out, site_index, SiteWord::Replacement)).as_bytes();
         put_text(inout res, in rep, 0, rep.len());
     }
     res

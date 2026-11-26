@@ -19,7 +19,14 @@ use @vesper/ast::{
 use @vesper/ast::lower::{lower_source};
 use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{symbol_from_id};
-use self::util::{Reader, put_text, sub};
+use @vesper-std/bytes::ascii::COLON;
+use self::ast_kinds::{
+    EXPR_ASSIGN, EXPR_BINARY, EXPR_BLOCK, EXPR_CALL, EXPR_CLOSURE, EXPR_FIELD, EXPR_HANDLE, EXPR_IF,
+    EXPR_INDEX, EXPR_MATCH, EXPR_NAME, EXPR_STRUCT, EXPR_TRY, EXPR_TUPLE, EXPR_UNARY, ITEM_ADT,
+    ITEM_EFFECT, ITEM_FUNCTION, ITEM_IMPL, PAT_CONSTRUCTOR, PAT_TUPLE, STMT_LET, TYPE_FUNCTION,
+    TYPE_INFER, TYPE_NAMED, TYPE_ROW, TYPE_TUPLE
+};
+use self::util::{PAIR_WORDS, Reader, STATUS_ERROR, STATUS_OK, put_text, sub};
 
 // ------------------------------------------------------------ node access
 
@@ -119,28 +126,50 @@ fn arg_at(in ast: Ast, i: u32) -> ArgNode {
 
 // ---------------------------------------------------------------- errors
 
+// The error codes (0 is ok).
+const E_ITEM_LIMIT: u64 = 1;
+const E_GENERIC_NOMINAL: u64 = 2;
+const E_GENERIC_EFFECT: u64 = 3;
+const E_GENERIC_IMPL: u64 = 4;
+const E_TRAIT_MODEL: u64 = 5;
+const E_VOLUME_LIMIT: u64 = 6;
+const E_GENERIC_FUNCTION: u64 = 7;
+const E_DEPTH_LIMIT: u64 = 8;
+const E_TUPLE_TYPE: u64 = 9;
+const E_TYPE_APPLICATION: u64 = 10;
+const E_INFERRED_SIGNATURE: u64 = 11;
+const E_TUPLE_PATTERN: u64 = 12;
+const E_BUILTIN_GROWTH: u64 = 13;
+const E_TUPLE: u64 = 14;
+const E_CLOSURE_HANDLER: u64 = 15;
+const E_BUILTIN_CONSTRUCTOR: u64 = 16;
+const E_GENERIC_CALL: u64 = 17;
+const E_NOMINAL_LIMIT: u64 = 18;
+const E_NOMINAL_DEPTH: u64 = 19;
+const E_RECURSIVE_NOMINAL: u64 = 20;
+
 // The messages, by code (0 is ok).
 fn message(code: u64) -> Str {
     match code {
-        1 => "doctest parsed module item limit",
-        2 => "doctest inferred composite growth: generic nominal types unsupported before checking",
-        3 => "doctest generic effect declarations unsupported before checking",
-        4 => "doctest generic implementations unsupported before checking",
-        5 => "doctest trait/model inference unsupported before checking",
-        6 => "doctest parsed AST volume limit",
-        7 => "doctest inferred composite growth: generic functions unsupported before checking",
-        8 => "doctest parsed AST depth limit",
-        9 => "doctest inferred composite growth: nonempty tuple types unsupported before checking",
-        10 => "doctest inferred composite growth: generic type applications unsupported before checking",
-        11 => "doctest inferred function/field signatures unsupported before checking",
-        12 => "doctest inferred composite growth: tuple patterns unsupported before checking",
-        13 => "doctest inferred composite growth: builtin generic constructors unsupported before checking",
-        14 => "doctest inferred composite growth: nonempty tuples unsupported before checking",
-        15 => "doctest inferred composite growth: closures/handlers unsupported before checking",
-        16 => "doctest builtin generic constructors unsupported before checking",
-        17 => "doctest inferred composite growth: generic calls unsupported before checking",
-        18 => "doctest nominal expansion limit",
-        19 => "doctest nominal expansion depth limit",
+        E_ITEM_LIMIT => "doctest parsed module item limit",
+        E_GENERIC_NOMINAL => "doctest inferred composite growth: generic nominal types unsupported before checking",
+        E_GENERIC_EFFECT => "doctest generic effect declarations unsupported before checking",
+        E_GENERIC_IMPL => "doctest generic implementations unsupported before checking",
+        E_TRAIT_MODEL => "doctest trait/model inference unsupported before checking",
+        E_VOLUME_LIMIT => "doctest parsed AST volume limit",
+        E_GENERIC_FUNCTION => "doctest inferred composite growth: generic functions unsupported before checking",
+        E_DEPTH_LIMIT => "doctest parsed AST depth limit",
+        E_TUPLE_TYPE => "doctest inferred composite growth: nonempty tuple types unsupported before checking",
+        E_TYPE_APPLICATION => "doctest inferred composite growth: generic type applications unsupported before checking",
+        E_INFERRED_SIGNATURE => "doctest inferred function/field signatures unsupported before checking",
+        E_TUPLE_PATTERN => "doctest inferred composite growth: tuple patterns unsupported before checking",
+        E_BUILTIN_GROWTH => "doctest inferred composite growth: builtin generic constructors unsupported before checking",
+        E_TUPLE => "doctest inferred composite growth: nonempty tuples unsupported before checking",
+        E_CLOSURE_HANDLER => "doctest inferred composite growth: closures/handlers unsupported before checking",
+        E_BUILTIN_CONSTRUCTOR => "doctest builtin generic constructors unsupported before checking",
+        E_GENERIC_CALL => "doctest inferred composite growth: generic calls unsupported before checking",
+        E_NOMINAL_LIMIT => "doctest nominal expansion limit",
+        E_NOMINAL_DEPTH => "doctest nominal expansion depth limit",
         _ => "recursive nominal doctest types are unsupported before checking",
     }
 }
@@ -151,6 +180,24 @@ fn message(code: u64) -> Str {
 // 2 Type or 3 Pattern, plus 256 when a type may be inferred; the node;
 // its depth) and the builtin-constructor answer per symbol (0 not yet
 // known, 1 no, 2 yes).
+const NODE_WORDS: u64 = 3;
+// How far a node's word sits from the end of the stack's last record.
+const NODE_WORD_BACK: u64 = 2;
+const TAG_EXPR: u64 = 1;
+const TAG_TYPE: u64 = 2;
+const TAG_PATTERN: u64 = 3;
+const TAG_MAY_INFER: u64 = 256;
+const TAG_KIND_MASK: u64 = 255;
+const BUILTIN_UNKNOWN: u8 = 0;
+const BUILTIN_NO: u8 = 1;
+const BUILTIN_YES: u8 = 2;
+
+// The AST volume and depth limits, and the depth limit of nominal
+// expansion.
+const MAX_NODES: u64 = 16384;
+const MAX_DEPTH: u64 = 64;
+const MAX_NOMINAL_DEPTH: u64 = 48;
+
 struct Walk {
     todo: ChunkSeq[u64],
     builtin: ChunkSeq[u8],
@@ -167,7 +214,7 @@ fn push_node(inout walker: Walk, tag: u64, node: u32, depth: u64) {
 }
 
 fn nodes(in walker: Walk) -> u64 {
-    walker.todo.len() / 3
+    walker.todo.len() / NODE_WORDS
 }
 
 // Whether the last `::` segment of the name is Some, None, Ok, Err,
@@ -175,15 +222,18 @@ fn nodes(in walker: Walk) -> u64 {
 fn builtin(in ast: Ast, inout walker: Walk, name: u32) -> bool {
     let slot = widen_u64(name);
     let known = walker.builtin.try_get(slot).unwrap_or(0);
-    if known != 0 {
-        return known == 2;
+    if known != BUILTIN_UNKNOWN {
+        return known == BUILTIN_YES;
     }
     walker.scratch.clear();
     let ok = ast.names.resolve_into(symbol_from_id(name), inout walker.scratch);
     let yes = builtin_text(in walker.scratch);
-    let set = walker.builtin.try_set(slot, if yes { 2 } else { 1 });
+    let set = walker.builtin.try_set(slot, if yes { BUILTIN_YES } else { BUILTIN_NO });
     yes
 }
+
+// The length of `::`.
+const PATH_SEPARATOR_BYTES: u64 = 2;
 
 fn builtin_text(in text: String) -> bool {
     let bytes = text.as_bytes();
@@ -192,12 +242,12 @@ fn builtin_text(in text: String) -> bool {
     let mut start: u64 = 0;
     let mut i = n;
     loop {
-        if i < 2 {
+        if i < PATH_SEPARATOR_BYTES {
             break;
         }
-        let first_byte = bytes.try_get(sub(i, 2)).unwrap_or(0);
+        let first_byte = bytes.try_get(sub(i, PATH_SEPARATOR_BYTES)).unwrap_or(0);
         let second_byte = bytes.try_get(sub(i, 1)).unwrap_or(0);
-        if first_byte == 58 && second_byte == 58 {
+        if first_byte == COLON && second_byte == COLON {
             start = i;
             break;
         }
@@ -238,7 +288,7 @@ fn push_effect_args(in ast: Ast, inout walker: Walk, effects: u32, depth: u64) {
         let instance = effect_at(in ast, list_at(in ast, node.instances, i));
         let arg_count = list_len(in ast, instance.args);
         for j in 0..arg_count {
-            push_node(inout walker, 2, list_at(in ast, instance.args, j), depth);
+            push_node(inout walker, TAG_TYPE, list_at(in ast, instance.args, j), depth);
         }
     }
 }
@@ -247,53 +297,55 @@ fn push_effect_args(in ast: Ast, inout walker: Walk, effects: u32, depth: u64) {
 fn function(in ast: Ast, inout walker: Walk, fn_id: u32, implicit_self: bool) -> u64 {
     let func = fn_at(in ast, fn_id);
     if list_len(in ast, func.generics) != 0 {
-        return 7;
+        return E_GENERIC_FUNCTION;
     }
-    push_node(inout walker, 2, func.result, 1);
+    push_node(inout walker, TAG_TYPE, func.result, 1);
     let param_count = list_len(in ast, func.params);
     for i in 0..param_count {
         let param = param_at(in ast, list_at(in ast, func.params, i));
-        if implicit_self && param.name == walker.self_sym && type_at(in ast, param.ty).kind == 5 {
+        if implicit_self
+            && param.name == walker.self_sym
+            && type_at(in ast, param.ty).kind == TYPE_INFER {
             continue;
         }
-        push_node(inout walker, 2, param.ty, 1);
+        push_node(inout walker, TAG_TYPE, param.ty, 1);
     }
     push_effect_args(in ast, inout walker, func.effects, 1);
     if func.body != none() {
-        push_node(inout walker, 1, func.body, 1);
+        push_node(inout walker, TAG_EXPR, func.body, 1);
     }
     0
 }
 
 fn visit_type(in ast: Ast, inout walker: Walk, type_id: u32, allow_infer: bool, next: u64) -> u64 {
     let node = type_at(in ast, type_id);
-    if node.kind == 2 {
+    if node.kind == TYPE_TUPLE {
         if list_len(in ast, node.a) != 0 {
-            return 9;
+            return E_TUPLE_TYPE;
         }
-    } else if node.kind == 1 {
+    } else if node.kind == TYPE_NAMED {
         if list_len(in ast, node.b) != 0
             || node.a == walker.option_sym
             || node.a == walker.result_sym {
-            return 10;
+            return E_TYPE_APPLICATION;
         }
-    } else if node.kind == 5 {
+    } else if node.kind == TYPE_INFER {
         if !allow_infer {
-            return 11;
+            return E_INFERRED_SIGNATURE;
         }
-    } else if node.kind == 3 {
-        let count = list_len(in ast, node.a) / 2;
+    } else if node.kind == TYPE_FUNCTION {
+        let count = list_len(in ast, node.a) / PAIR_WORDS;
         for i in 0..count {
             push_node(
                 inout walker,
-                2,
-                list_at(in ast, node.a, wrapping_add(wrapping_mul(i, 2), 1)),
+                TAG_TYPE,
+                list_at(in ast, node.a, wrapping_add(wrapping_mul(i, PAIR_WORDS), 1)),
                 next
             );
         }
-        push_node(inout walker, 2, node.b, next);
+        push_node(inout walker, TAG_TYPE, node.b, next);
         push_effect_args(in ast, inout walker, node.c, next);
-    } else if node.kind == 4 {
+    } else if node.kind == TYPE_ROW {
         push_effect_args(in ast, inout walker, node.a, next);
     }
     0
@@ -301,20 +353,20 @@ fn visit_type(in ast: Ast, inout walker: Walk, type_id: u32, allow_infer: bool, 
 
 fn visit_pat(in ast: Ast, inout walker: Walk, pat_id: u32, next: u64) -> u64 {
     let node = pat_at(in ast, pat_id);
-    if node.kind == 4 {
+    if node.kind == PAT_TUPLE {
         if list_len(in ast, node.a) != 0 {
-            return 12;
+            return E_TUPLE_PATTERN;
         }
-    } else if node.kind == 5 {
+    } else if node.kind == PAT_CONSTRUCTOR {
         if builtin(in ast, inout walker, node.a) {
-            return 13;
+            return E_BUILTIN_GROWTH;
         }
-        let count = list_len(in ast, node.b) / 2;
+        let count = list_len(in ast, node.b) / PAIR_WORDS;
         for i in 0..count {
             push_node(
                 inout walker,
-                3,
-                list_at(in ast, node.b, wrapping_add(wrapping_mul(i, 2), 1)),
+                TAG_PATTERN,
+                list_at(in ast, node.b, wrapping_add(wrapping_mul(i, PAIR_WORDS), 1)),
                 next
             );
         }
@@ -325,81 +377,91 @@ fn visit_pat(in ast: Ast, inout walker: Walk, pat_id: u32, next: u64) -> u64 {
 fn visit_expr(in ast: Ast, inout walker: Walk, expr_id: u32, next: u64) -> u64 {
     let expr = expr_at(in ast, expr_id);
     let kind = expr.kind;
-    if kind == 3 {
+    if kind == EXPR_TUPLE {
         if list_len(in ast, expr.a) != 0 {
-            return 14;
+            return E_TUPLE;
         }
-    } else if kind == 15 || kind == 16 {
-        return 15;
-    } else if kind == 2 {
+    } else if kind == EXPR_CLOSURE || kind == EXPR_HANDLE {
+        return E_CLOSURE_HANDLER;
+    } else if kind == EXPR_NAME {
         if builtin(in ast, inout walker, expr.a) {
-            return 13;
+            return E_BUILTIN_GROWTH;
         }
-    } else if kind == 4 {
+    } else if kind == EXPR_STRUCT {
         if builtin(in ast, inout walker, expr.a) {
-            return 16;
+            return E_BUILTIN_CONSTRUCTOR;
         }
-        let count = list_len(in ast, expr.b) / 2;
+        let count = list_len(in ast, expr.b) / PAIR_WORDS;
         for i in 0..count {
             push_node(
                 inout walker,
-                1,
-                list_at(in ast, expr.b, wrapping_add(wrapping_mul(i, 2), 1)),
+                TAG_EXPR,
+                list_at(in ast, expr.b, wrapping_add(wrapping_mul(i, PAIR_WORDS), 1)),
                 next
             );
         }
-    } else if kind == 5 {
+    } else if kind == EXPR_BLOCK {
         let count = list_len(in ast, expr.a);
         for i in 0..count {
             let stmt = stmt_at(in ast, list_at(in ast, expr.a, i));
-            if stmt.kind == 1 {
-                push_node(inout walker, 3, stmt.pat, next);
-                push_node(inout walker, 2 + 256, stmt.ty, next);
-                push_node(inout walker, 1, stmt.value, next);
+            if stmt.kind == STMT_LET {
+                push_node(inout walker, TAG_PATTERN, stmt.pat, next);
+                push_node(inout walker, TAG_TYPE | TAG_MAY_INFER, stmt.ty, next);
+                push_node(inout walker, TAG_EXPR, stmt.value, next);
             } else {
-                push_node(inout walker, 1, stmt.value, next);
+                push_node(inout walker, TAG_EXPR, stmt.value, next);
             }
         }
         if expr.b != none() {
-            push_node(inout walker, 1, expr.b, next);
+            push_node(inout walker, TAG_EXPR, expr.b, next);
         }
-    } else if kind == 6 {
+    } else if kind == EXPR_CALL {
         if list_len(in ast, expr.b) != 0 {
-            return 17;
+            return E_GENERIC_CALL;
         }
-        push_node(inout walker, 1, expr.a, next);
+        push_node(inout walker, TAG_EXPR, expr.a, next);
         let count = list_len(in ast, expr.c);
         for i in 0..count {
-            push_node(inout walker, 1, arg_at(in ast, list_at(in ast, expr.c, i)).expr, next);
+            push_node(
+                inout walker,
+                TAG_EXPR,
+                arg_at(in ast, list_at(in ast, expr.c, i)).expr,
+                next
+            );
         }
-    } else if kind == 7 {
+    } else if kind == EXPR_FIELD {
         if builtin(in ast, inout walker, expr.b) {
-            return 13;
+            return E_BUILTIN_GROWTH;
         }
-        push_node(inout walker, 1, expr.a, next);
-    } else if kind == 9 {
-        push_node(inout walker, 1, expr.a, next);
-    } else if kind == 10 {
-        push_node(inout walker, 1, expr.b, next);
-    } else if kind == 11 || kind == 12 {
-        push_node(inout walker, 1, expr.b, next);
-        push_node(inout walker, 1, expr.c, next);
-    } else if kind == 8 {
-        push_node(inout walker, 1, expr.a, next);
-        push_node(inout walker, 1, expr.b, next);
-    } else if kind == 13 {
-        push_node(inout walker, 1, expr.a, next);
-        push_node(inout walker, 1, expr.b, next);
+        push_node(inout walker, TAG_EXPR, expr.a, next);
+    } else if kind == EXPR_TRY {
+        push_node(inout walker, TAG_EXPR, expr.a, next);
+    } else if kind == EXPR_UNARY {
+        push_node(inout walker, TAG_EXPR, expr.b, next);
+    } else if kind == EXPR_BINARY || kind == EXPR_ASSIGN {
+        push_node(inout walker, TAG_EXPR, expr.b, next);
+        push_node(inout walker, TAG_EXPR, expr.c, next);
+    } else if kind == EXPR_INDEX {
+        push_node(inout walker, TAG_EXPR, expr.a, next);
+        push_node(inout walker, TAG_EXPR, expr.b, next);
+    } else if kind == EXPR_IF {
+        push_node(inout walker, TAG_EXPR, expr.a, next);
+        push_node(inout walker, TAG_EXPR, expr.b, next);
         if expr.c != none() {
-            push_node(inout walker, 1, expr.c, next);
+            push_node(inout walker, TAG_EXPR, expr.c, next);
         }
-    } else if kind == 14 {
-        push_node(inout walker, 1, expr.a, next);
-        let count = list_len(in ast, expr.b) / 2;
+    } else if kind == EXPR_MATCH {
+        push_node(inout walker, TAG_EXPR, expr.a, next);
+        let count = list_len(in ast, expr.b) / PAIR_WORDS;
         for i in 0..count {
-            let pair_at = wrapping_mul(i, 2);
-            push_node(inout walker, 3, list_at(in ast, expr.b, pair_at), next);
-            push_node(inout walker, 1, list_at(in ast, expr.b, wrapping_add(pair_at, 1)), next);
+            let pair_at = wrapping_mul(i, PAIR_WORDS);
+            push_node(inout walker, TAG_PATTERN, list_at(in ast, expr.b, pair_at), next);
+            push_node(
+                inout walker,
+                TAG_EXPR,
+                list_at(in ast, expr.b, wrapping_add(pair_at, 1)),
+                next
+            );
         }
     }
     0
@@ -410,20 +472,20 @@ fn visit_expr(in ast: Ast, inout walker: Walk, expr_id: u32, next: u64) -> u64 {
 fn walk(in ast: Ast, inout walker: Walk, max_declarations: u64) -> u64 {
     let items = ast.m_items.len();
     if items > max_declarations {
-        return 1;
+        return E_ITEM_LIMIT;
     }
     for i in 0..items {
         let item_id = ast.m_items.try_get(i).unwrap_or(0);
         let item = item_at(in ast, item_id);
-        if item.kind == 2 {
+        if item.kind == ITEM_FUNCTION {
             let code = function(in ast, inout walker, item.node, false);
             if code != 0 {
                 return code;
             }
-        } else if item.kind == 1 {
+        } else if item.kind == ITEM_ADT {
             let adt = adt_at(in ast, item.node);
             if list_len(in ast, adt.generics) != 0 {
-                return 2;
+                return E_GENERIC_NOMINAL;
             }
             let variant_count = list_len(in ast, adt.variants);
             for v in 0..variant_count {
@@ -432,16 +494,16 @@ fn walk(in ast: Ast, inout walker: Walk, max_declarations: u64) -> u64 {
                 for f in 0..field_count {
                     push_node(
                         inout walker,
-                        2,
+                        TAG_TYPE,
                         field_at(in ast, list_at(in ast, variant.fields, f)).ty,
                         1
                     );
                 }
             }
-        } else if item.kind == 3 {
+        } else if item.kind == ITEM_EFFECT {
             let effect_decl = effect_decl_at(in ast, item.node);
             if list_len(in ast, effect_decl.generics) != 0 {
-                return 3;
+                return E_GENERIC_EFFECT;
             }
             let member_count = list_len(in ast, effect_decl.ops);
             for q in 0..member_count {
@@ -455,12 +517,12 @@ fn walk(in ast: Ast, inout walker: Walk, max_declarations: u64) -> u64 {
                     return code;
                 }
             }
-        } else if item.kind == 4 {
+        } else if item.kind == ITEM_IMPL {
             let impl_node = impl_at(in ast, item.node);
             if list_len(in ast, impl_node.generics) != 0 {
-                return 4;
+                return E_GENERIC_IMPL;
             }
-            push_node(inout walker, 2, impl_node.ty, 1);
+            push_node(inout walker, TAG_TYPE, impl_node.ty, 1);
             let member_count = list_len(in ast, impl_node.methods);
             for q in 0..member_count {
                 let code = function(
@@ -474,44 +536,44 @@ fn walk(in ast: Ast, inout walker: Walk, max_declarations: u64) -> u64 {
                 }
             }
         } else {
-            return 5;
+            return E_TRAIT_MODEL;
         }
-        if nodes(in walker) > 16384 {
-            return 6;
+        if nodes(in walker) > MAX_NODES {
+            return E_VOLUME_LIMIT;
         }
     }
     let mut count: u64 = 0;
     loop {
         let stack_len = walker.todo.len();
-        if stack_len < 3 {
+        if stack_len < NODE_WORDS {
             break;
         }
-        let tag = walker.todo.try_get(sub(stack_len, 3)).unwrap_or(0);
-        let node = walker.todo.try_get(sub(stack_len, 2)).unwrap_or(0);
+        let tag = walker.todo.try_get(sub(stack_len, NODE_WORDS)).unwrap_or(0);
+        let node = walker.todo.try_get(sub(stack_len, NODE_WORD_BACK)).unwrap_or(0);
         let depth = walker.todo.try_get(sub(stack_len, 1)).unwrap_or(0);
-        walker.todo.truncate(sub(stack_len, 3));
+        walker.todo.truncate(sub(stack_len, NODE_WORDS));
         count = wrapping_add(count, 1);
-        if count > 16384 {
-            return 6;
+        if count > MAX_NODES {
+            return E_VOLUME_LIMIT;
         }
-        if depth > 64 {
-            return 8;
+        if depth > MAX_DEPTH {
+            return E_DEPTH_LIMIT;
         }
         let next = wrapping_add(depth, 1);
         let id = wrapping_u32(node);
-        let kind = tag & 255;
-        let code = if kind == 1 {
+        let kind = tag & TAG_KIND_MASK;
+        let code = if kind == TAG_EXPR {
             visit_expr(in ast, inout walker, id, next)
-        } else if kind == 2 {
-            visit_type(in ast, inout walker, id, tag >= 256, next)
+        } else if kind == TAG_TYPE {
+            visit_type(in ast, inout walker, id, tag >= TAG_MAY_INFER, next)
         } else {
             visit_pat(in ast, inout walker, id, next)
         };
         if code != 0 {
             return code;
         }
-        if wrapping_add(count, nodes(in walker)) > 16384 {
-            return 6;
+        if wrapping_add(count, nodes(in walker)) > MAX_NODES {
+            return E_VOLUME_LIMIT;
         }
     }
     0
@@ -559,7 +621,7 @@ fn visit_named(in ast: Ast, inout nominal: Nominal, name: u32, args: u32, depth:
         return 0;
     }
     if on_path(in nominal, name) {
-        return 20;
+        return E_RECURSIVE_NOMINAL;
     }
     nominal.path.push(name);
     let adt_node = adt_at(in ast, adt);
@@ -583,11 +645,11 @@ fn visit_named(in ast: Ast, inout nominal: Nominal, name: u32, args: u32, depth:
 // The budget and depth step of `visit`.
 fn step(inout nominal: Nominal, depth: u64) -> u64 {
     if nominal.remaining == 0 {
-        return 18;
+        return E_NOMINAL_LIMIT;
     }
     nominal.remaining = sub(nominal.remaining, 1);
-    if depth > 48 {
-        return 19;
+    if depth > MAX_NOMINAL_DEPTH {
+        return E_NOMINAL_DEPTH;
     }
     0
 }
@@ -599,9 +661,9 @@ fn visit_nominal(in ast: Ast, inout nominal: Nominal, type_id: u32, depth: u64) 
     }
     let node = type_at(in ast, type_id);
     let next = wrapping_add(depth, 1);
-    if node.kind == 1 {
+    if node.kind == TYPE_NAMED {
         return visit_named(in ast, inout nominal, node.a, node.b, depth);
-    } else if node.kind == 2 {
+    } else if node.kind == TYPE_TUPLE {
         let count = list_len(in ast, node.a);
         for i in 0..count {
             let elem_code = visit_nominal(in ast, inout nominal, list_at(in ast, node.a, i), next);
@@ -609,10 +671,10 @@ fn visit_nominal(in ast: Ast, inout nominal: Nominal, type_id: u32, depth: u64) 
                 return elem_code;
             }
         }
-    } else if node.kind == 3 {
-        let count = list_len(in ast, node.a) / 2;
+    } else if node.kind == TYPE_FUNCTION {
+        let count = list_len(in ast, node.a) / PAIR_WORDS;
         for i in 0..count {
-            let ty = list_at(in ast, node.a, wrapping_add(wrapping_mul(i, 2), 1));
+            let ty = list_at(in ast, node.a, wrapping_add(wrapping_mul(i, PAIR_WORDS), 1));
             let elem_code = visit_nominal(in ast, inout nominal, ty, next);
             if elem_code != 0 {
                 return elem_code;
@@ -668,7 +730,7 @@ fn nominal_expansion(in ast: Ast, limit: u64, sym_count: u64) -> u64 {
     for i in 0..items {
         let item_id = ast.m_items.try_get(i).unwrap_or(0);
         let item = item_at(in ast, item_id);
-        if item.kind == 1 {
+        if item.kind == ITEM_ADT {
             let name = adt_at(in ast, item.node).name;
             let slot = widen_u64(name);
             let had = match nominal.adt_of.try_get(slot) {
@@ -745,7 +807,7 @@ pub fn guard(in input: Slice[u8]) -> ChunkSeq[u64] {
         if walker.builtin.len() >= sym_count {
             break;
         }
-        walker.builtin.push(0);
+        walker.builtin.push(BUILTIN_UNKNOWN);
     }
     let mut code = walk(in lowered.ast, inout walker, max_declarations);
     if code == 0 {
@@ -753,9 +815,9 @@ pub fn guard(in input: Slice[u8]) -> ChunkSeq[u64] {
     }
     let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
     if code == 0 {
-        out.push(0);
+        out.push(STATUS_OK);
     } else {
-        out.push(1);
+        out.push(STATUS_ERROR);
         let message_text = message(code).as_bytes();
         put_text(inout out, in message_text, 0, message_text.len());
     }

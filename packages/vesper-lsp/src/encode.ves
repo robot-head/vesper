@@ -120,10 +120,7 @@ const PLAIN_EXPONENT: i64 = 16;
 const SMALL_EXPONENT: i64 = -5;
 
 fn word(in words: Slice[u64], index: u64) -> u64 {
-    match words.try_get(index) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    words.try_get(index).unwrap_or(0)
 }
 
 // `JsonBudget`.
@@ -204,14 +201,8 @@ fn value(
         if stack.len() == 0 {
             break;
         }
-        let depth = match stack.pop() {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
-        let pos = match stack.pop() {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let depth = stack.pop().unwrap_or(0);
+        let pos = stack.pop().unwrap_or(0);
         node(inout budget);
         let tag = word(in words, pos);
         if tag == Tag::Array || tag == Tag::Object {

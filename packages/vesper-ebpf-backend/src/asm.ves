@@ -92,10 +92,7 @@ impl Asm {
 
     // `Asm::bind`; false when `label` is already bound.
     pub fn bind(inout self, label: u64) -> bool {
-        let bound_slot = match self.labels.try_get(label) {
-            Option::Some(slot) => slot,
-            Option::None => 0,
-        };
+        let bound_slot = self.labels.try_get(label).unwrap_or(0);
         if bound_slot != UNBOUND {
             return false;
         }
@@ -232,10 +229,7 @@ impl Asm {
     }
 
     pub fn resolve(in self, label: u64) -> u64 {
-        match self.labels.try_get(label) {
-            Option::Some(slot) => slot,
-            Option::None => UNBOUND,
-        }
+        self.labels.try_get(label).unwrap_or(UNBOUND)
     }
 
     // `Asm::finish`'s fixups: 0 when every fixup resolves, else 1 for an

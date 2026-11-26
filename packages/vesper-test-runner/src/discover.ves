@@ -10,15 +10,19 @@
 use @vesper/front::lex::{lex, token_end};
 use @vesper/front::diag::{diags_new};
 use @vesper/front::kinds::{k_comment, k_whitespace};
+use @vesper-std/bytes::ascii::{
+    APOSTROPHE, AT_SIGN, BACKSLASH, CARRIAGE_RETURN, CLOSE_BRACE, CLOSE_PAREN, COLON, DELETE,
+    DIGIT_ZERO, NEWLINE, NUL, OPEN_BRACKET, OPEN_PAREN, QUOTE, SLASH, SPACE, TAB, UNDERSCORE
+};
 use self::attrs::{
     Arg, Attrs, CaseAttr, FnAttrs, OptNum, OptText, TestAttr, V_BOOL, V_FLOAT, V_IDENT, V_INT,
     V_RAW, V_STRING, Val, extract_test_attrs, test_attr_new
 };
 use self::big::{push_big};
 use self::util::{
-    Reader, add, bit, byte, char_at, inc, is_alnum, is_alpha, is_text, location, push_decimal,
-    push_range, put_buf, put_text, same, starts_with, starts_with_space, sub, trim_end, trim_start,
-    u8_at, u64_at
+    HEX_LETTER_BASE, PAIR_WORDS, Reader, STATUS_ERROR, STATUS_OK, U32_MASK, add, bit, byte, char_at,
+    inc, is_alnum, is_alpha, is_text, location, push_decimal, push_range, put_buf, put_text, same,
+    starts_with, starts_with_space, sub, trim_end, trim_start, u8_at, u64_at
 };
 
 // A case row stores the payload and the full source comment's span.
@@ -29,6 +33,9 @@ enum CaseRow: u64 {
     SpanEnd = 3,
     Words = 4,
 }
+
+// The bytes of `@case`.
+const CASE_MARKER_BYTES: u64 = 5;
 
 // ------------------------------------------------------------ source tokens
 
@@ -94,7 +101,7 @@ pub fn preceding_comments(in tokens: Toks, fn_start: u64, inout out: ChunkSeq[u6
 fn after_slashes(in src: Slice[u8], start: u64, end: u64) -> u64 {
     let mut i = start;
     loop {
-        if i >= end || byte(in src, i) != 47 {
+        if i >= end || byte(in src, i) != SLASH {
             break;
         }
         i = inc(i);
@@ -117,7 +124,7 @@ pub fn case_marker(in src: Slice[u8], start: u64, end: u64) -> (bool, u64, u64) 
     if !starts_with(in src, body_start, end, in "@case") {
         return (false, 0, 0);
     }
-    let rest = add(body_start, 5);
+    let rest = add(body_start, CASE_MARKER_BYTES);
     if rest < end && !starts_with_space(in src, rest, end) {
         return (false, 0, 0);
     }
@@ -127,10 +134,10 @@ pub fn case_marker(in src: Slice[u8], start: u64, end: u64) -> (bool, u64, u64) 
 }
 
 fn has_test_marker(in src: Slice[u8], in comments: ChunkSeq[u64]) -> bool {
-    let n = comments.len() / 2;
+    let n = comments.len() / PAIR_WORDS;
     for k in 0..n {
-        let comment_start = u64_at(in comments, wrapping_mul(k, 2));
-        let comment_end = u64_at(in comments, inc(wrapping_mul(k, 2)));
+        let comment_start = u64_at(in comments, wrapping_mul(k, PAIR_WORDS));
+        let comment_end = u64_at(in comments, inc(wrapping_mul(k, PAIR_WORDS)));
         if is_test_marker(in src, comment_start, comment_end) {
             return true;
         }
@@ -140,7 +147,7 @@ fn has_test_marker(in src: Slice[u8], in comments: ChunkSeq[u64]) -> bool {
 
 fn put_error(in msg: ChunkSeq[u8]) -> ChunkSeq[u64] {
     let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    out.push(1);
+    out.push(STATUS_ERROR);
     put_buf(inout out, in msg);
     out
 }
@@ -148,7 +155,7 @@ fn put_error(in msg: ChunkSeq[u8]) -> ChunkSeq[u64] {
 fn push_location(inout msg: ChunkSeq[u8], in src: Slice[u8], offset: u64) {
     let (line, column) = location(in src, offset);
     push_decimal(inout msg, line);
-    msg.push(58);
+    msg.push(COLON);
     push_decimal(inout msg, column);
     msg.extend(in ": ".as_bytes());
 }
@@ -171,7 +178,7 @@ pub fn case_rows(in input: Slice[u8]) -> ChunkSeq[u64] {
     }
     let tokens = toks(in src);
     let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    out.push(0);
+    out.push(STATUS_OK);
     let count_at = out.len();
     out.push(0);
     let mut rows: u64 = 0;
@@ -191,10 +198,10 @@ pub fn case_rows(in input: Slice[u8]) -> ChunkSeq[u64] {
         let (fn_name_start, fn_name_end) = reader.text(in input);
         preceding_comments(in tokens, fn_start, inout comments);
         row_list.clear();
-        let comment_count = comments.len() / 2;
+        let comment_count = comments.len() / PAIR_WORDS;
         for k in 0..comment_count {
-            let comment_start = u64_at(in comments, wrapping_mul(k, 2));
-            let comment_end = u64_at(in comments, inc(wrapping_mul(k, 2)));
+            let comment_start = u64_at(in comments, wrapping_mul(k, PAIR_WORDS));
+            let comment_end = u64_at(in comments, inc(wrapping_mul(k, PAIR_WORDS)));
             let (is_row, row_start, row_end) = case_marker(in src, comment_start, comment_end);
             if is_row {
                 row_list.push(row_start);
@@ -235,7 +242,7 @@ pub fn case_rows(in input: Slice[u8]) -> ChunkSeq[u64] {
                 if open >= row_end {
                     break;
                 }
-                if byte(in src, open) == 40 {
+                if byte(in src, open) == OPEN_PAREN {
                     found = true;
                     break;
                 }
@@ -247,12 +254,14 @@ pub fn case_rows(in input: Slice[u8]) -> ChunkSeq[u64] {
                 (row_start, row_start, row_start, row_start)
             };
             let first = byte(in src, label_start);
-            let closed = args_end > args_start && byte(in src, sub(args_end, 1)) == 41;
-            let mut valid = label_end > label_start && (is_alpha(first) || first == 95) && closed;
+            let closed = args_end > args_start && byte(in src, sub(args_end, 1)) == CLOSE_PAREN;
+            let mut valid = label_end > label_start
+                && (is_alpha(first) || first == UNDERSCORE)
+                && closed;
             if valid {
                 for i in inc(label_start)..label_end {
                     let cur_byte = byte(in src, i);
-                    if !is_alnum(cur_byte) && cur_byte != 95 {
+                    if !is_alnum(cur_byte) && cur_byte != UNDERSCORE {
                         valid = false;
                     }
                 }
@@ -262,13 +271,13 @@ pub fn case_rows(in input: Slice[u8]) -> ChunkSeq[u64] {
                 push_location(inout msg, in src, span_start);
                 msg.extend(in "expected @case name(arguments) for '".as_bytes());
                 push_range(inout msg, in input, fn_name_start, fn_name_end);
-                msg.push(39);
+                msg.push(APOSTROPHE);
                 return put_error(in msg);
             }
-            let label_count = labels.len() / 2;
+            let label_count = labels.len() / PAIR_WORDS;
             for j in 0..label_count {
-                let prev_start = u64_at(in labels, wrapping_mul(j, 2));
-                let prev_end = u64_at(in labels, inc(wrapping_mul(j, 2)));
+                let prev_start = u64_at(in labels, wrapping_mul(j, PAIR_WORDS));
+                let prev_end = u64_at(in labels, inc(wrapping_mul(j, PAIR_WORDS)));
                 if same(in src, prev_start, prev_end, in src, label_start, label_end) {
                     msg.clear();
                     push_location(inout msg, in src, span_start);
@@ -276,7 +285,7 @@ pub fn case_rows(in input: Slice[u8]) -> ChunkSeq[u64] {
                     push_range(inout msg, in input, fn_name_start, fn_name_end);
                     msg.extend(in "::".as_bytes());
                     push_range(inout msg, in src, label_start, label_end);
-                    msg.push(39);
+                    msg.push(APOSTROPHE);
                     return put_error(in msg);
                 }
             }
@@ -290,8 +299,8 @@ pub fn case_rows(in input: Slice[u8]) -> ChunkSeq[u64] {
                 next_entry = inc(next_entry);
                 let mut taken = false;
                 for j in 0..name_count {
-                    let name_start = u64_at(in names, wrapping_mul(j, 2));
-                    let name_end = u64_at(in names, inc(wrapping_mul(j, 2)));
+                    let name_start = u64_at(in names, wrapping_mul(j, PAIR_WORDS));
+                    let name_end = u64_at(in names, inc(wrapping_mul(j, PAIR_WORDS)));
                     if same(in input, name_start, name_end, in entry.as_slice(), 0, entry.len()) {
                         taken = true;
                     }
@@ -306,7 +315,7 @@ pub fn case_rows(in input: Slice[u8]) -> ChunkSeq[u64] {
             suffix.extend(in entry.as_slice());
             suffix.extend(in "() { ".as_bytes());
             push_range(inout suffix, in input, fn_name_start, fn_name_end);
-            suffix.push(40);
+            suffix.push(OPEN_PAREN);
             push_range(inout suffix, in src, args_start, args_end);
             suffix.extend(in " }".as_bytes());
             let gen_end = add(src.len(), suffix.len());
@@ -380,6 +389,34 @@ const DEFAULT_PROPERTY_CASES: u64 = 64;
 const DEFAULT_SIM_SCHEDULES: u64 = 16;
 const DEFAULT_SEED: u64 = 0;
 
+// The plan's fault profile word: none, the three named profiles, or a
+// custom one and its text.
+const FAULT_NONE: u64 = 0;
+const FAULT_TORN_WAL_SECTOR: u64 = 1;
+const FAULT_NET_PARTITION: u64 = 2;
+const FAULT_CLOCK_SKEW: u64 = 3;
+const FAULT_CUSTOM: u64 = 4;
+
+// A test's sort entry: span start, offset and length of its words.
+const ORDER_WORDS: u64 = 3;
+const ORDER_LEN: u64 = 2;
+
+// `char::escape_unicode`'s `\u{..}`: at most six hex digits (the last at
+// index 5), four bits each.
+const UNICODE_ESCAPE_DIGITS: u64 = 6;
+const LAST_UNICODE_ESCAPE_DIGIT: u64 = 5;
+const NIBBLE_BITS: u64 = 4;
+const NIBBLE_MASK: u64 = 15;
+
+// The non-ASCII characters `push_debug_str` escapes: the C1 controls, the
+// soft hyphen and the combining diacritical marks (each range end
+// exclusive).
+const C1_FIRST: u64 = 128;
+const C1_END: u64 = 160;
+const SOFT_HYPHEN: u64 = 173;
+const COMBINING_FIRST: u64 = 768;
+const COMBINING_END: u64 = 880;
+
 // `effect_head(eff) == name`.
 fn effect_is(in input: Slice[u8], start: u64, end: u64, in name: Str) -> bool {
     let eff_start = trim_start(in input, start, end);
@@ -390,7 +427,7 @@ fn effect_is(in input: Slice[u8], start: u64, end: u64, in name: Str) -> bool {
             break;
         }
         let cur_byte = byte(in input, head_end);
-        if cur_byte == 91 || cur_byte == 32 || cur_byte == 9 || cur_byte == 64 {
+        if cur_byte == OPEN_BRACKET || cur_byte == SPACE || cur_byte == TAB || cur_byte == AT_SIGN {
             break;
         }
         head_end = inc(head_end);
@@ -400,7 +437,7 @@ fn effect_is(in input: Slice[u8], start: u64, end: u64, in name: Str) -> bool {
 
 fn has_effect(in input: Slice[u8], in effects: ChunkSeq[u64], item: Item, in name: Str) -> bool {
     for k in 0..item.effect_count {
-        let pair_at = wrapping_mul(add(item.effect_start, k), 2);
+        let pair_at = wrapping_mul(add(item.effect_start, k), PAIR_WORDS);
         if effect_is(
             in input,
             u64_at(in effects, pair_at),
@@ -425,7 +462,7 @@ fn has_any(in input: Slice[u8], in effects: ChunkSeq[u64], item: Item, in names:
     let name_bytes = names.as_bytes();
     let mut name_start: u64 = 0;
     for i in 0..inc(name_bytes.len()) {
-        if i == name_bytes.len() || byte(in name_bytes, i) == 32 {
+        if i == name_bytes.len() || byte(in name_bytes, i) == SPACE {
             let name = names[name_start..i];
             if has_effect(in input, in effects, item, in name) {
                 return true;
@@ -438,32 +475,35 @@ fn has_any(in input: Slice[u8], in effects: ChunkSeq[u64], item: Item, in names:
 
 fn hex_digit(nibble: u64) -> u8 {
     if nibble < 10 {
-        wrapping_u8(add(nibble, 48))
+        wrapping_u8(add(nibble, widen_u64(DIGIT_ZERO)))
     } else {
-        wrapping_u8(add(nibble, 87))
+        wrapping_u8(add(nibble, widen_u64(HEX_LETTER_BASE)))
     }
 }
 
 fn push_unicode_escape(inout out: ChunkSeq[u8], code_point: u64) {
     out.extend(in "\\u{".as_bytes());
     let mut started = false;
-    for k in 0..6 {
-        let shift = wrapping_u32(wrapping_mul(sub(5, k), 4));
-        let nibble = wrapping_shr_u64(code_point, shift) & 15;
-        if nibble != 0 || started || k == 5 {
+    for k in 0..UNICODE_ESCAPE_DIGITS {
+        let shift = wrapping_u32(wrapping_mul(sub(LAST_UNICODE_ESCAPE_DIGIT, k), NIBBLE_BITS));
+        let nibble = wrapping_shr_u64(code_point, shift) & NIBBLE_MASK;
+        if nibble != 0 || started || k == LAST_UNICODE_ESCAPE_DIGIT {
             out.push(hex_digit(nibble));
             started = true;
         }
     }
-    out.push(125);
+    out.push(CLOSE_BRACE);
 }
 
 // The characters `push_debug_str` escapes as `\u{..}`.
 fn not_printable(code_point: u64) -> bool {
-    if code_point < 32 || code_point == 127 || code_point == 173 {
+    if code_point < widen_u64(SPACE)
+        || code_point == widen_u64(DELETE)
+        || code_point == SOFT_HYPHEN {
         return true;
     }
-    (code_point >= 128 && code_point < 160) || (code_point >= 768 && code_point < 880)
+    (code_point >= C1_FIRST && code_point < C1_END)
+        || (code_point >= COMBINING_FIRST && code_point < COMBINING_END)
 }
 
 // `format!("{s:?}")`: quoted, with `char::escape_debug` escapes. Of the
@@ -471,24 +511,24 @@ fn not_printable(code_point: u64) -> bool {
 // the soft hyphen and combining diacritical marks are recognised here
 // (see the report's compiler gaps).
 fn push_debug_str(inout out: ChunkSeq[u8], in text: Slice[u8], start: u64, end: u64) {
-    out.push(34);
+    out.push(QUOTE);
     let mut i = start;
     loop {
         if i >= end {
             break;
         }
         let (code_point, char_len) = char_at(in text, i);
-        if code_point == 0 {
+        if code_point == widen_u64(NUL) {
             out.extend(in "\\0".as_bytes());
-        } else if code_point == 9 {
+        } else if code_point == widen_u64(TAB) {
             out.extend(in "\\t".as_bytes());
-        } else if code_point == 10 {
+        } else if code_point == widen_u64(NEWLINE) {
             out.extend(in "\\n".as_bytes());
-        } else if code_point == 13 {
+        } else if code_point == widen_u64(CARRIAGE_RETURN) {
             out.extend(in "\\r".as_bytes());
-        } else if code_point == 34 {
+        } else if code_point == widen_u64(QUOTE) {
             out.extend(in "\\\"".as_bytes());
-        } else if code_point == 92 {
+        } else if code_point == widen_u64(BACKSLASH) {
             out.extend(in "\\\\".as_bytes());
         } else if not_printable(code_point) {
             push_unicode_escape(inout out, code_point);
@@ -497,7 +537,7 @@ fn push_debug_str(inout out: ChunkSeq[u8], in text: Slice[u8], start: u64, end: 
         }
         i = add(i, char_len);
     }
-    out.push(34);
+    out.push(QUOTE);
 }
 
 // `attr_value_to_string`.
@@ -649,14 +689,14 @@ fn put_test(
     let property_cases = if !effective_property {
         0
     } else if attr_cases {
-        test_attr.cases.value & 4294967295
+        test_attr.cases.value & U32_MASK
     } else {
         DEFAULT_PROPERTY_CASES
     };
     let sim_schedules = if !uses_simpulse {
         0
     } else if attr_sims {
-        test_attr.sim_schedules.value & 4294967295
+        test_attr.sim_schedules.value & U32_MASK
     } else {
         DEFAULT_SIM_SCHEDULES
     };
@@ -666,17 +706,17 @@ fn put_test(
         let fault_start = test_attr.fault_profile.text_start;
         let fault_end = test_attr.fault_profile.text_end;
         if is_text(in text, fault_start, fault_end, in "TornWalSector") {
-            out.push(1);
+            out.push(FAULT_TORN_WAL_SECTOR);
         } else if is_text(in text, fault_start, fault_end, in "NetPartition") {
-            out.push(2);
+            out.push(FAULT_NET_PARTITION);
         } else if is_text(in text, fault_start, fault_end, in "ClockSkew") {
-            out.push(3);
+            out.push(FAULT_CLOCK_SKEW);
         } else {
-            out.push(4);
+            out.push(FAULT_CUSTOM);
             put_text(inout out, in text, fault_start, fault_end);
         }
     } else {
-        out.push(0);
+        out.push(FAULT_NONE);
     }
     out.push(DEFAULT_SEED);
     // The pinned cases as source spellings.
@@ -802,7 +842,7 @@ pub fn discover(in input: Slice[u8]) -> ChunkSeq[u64] {
                 type_end: type_end
             });
         }
-        let effect_start = effects.len() / 2;
+        let effect_start = effects.len() / PAIR_WORDS;
         let effect_count = reader.word(in input);
         for k in 0..effect_count {
             let (eff_name_start, eff_name_end) = reader.text(in input);
@@ -974,10 +1014,10 @@ pub fn discover(in input: Slice[u8]) -> ChunkSeq[u64] {
         order.push(sub(words.len(), offset));
     }
     // A stable insertion sort by span start.
-    let test_count = order.len() / 3;
+    let test_count = order.len() / ORDER_WORDS;
     let mut sorted: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](test_count);
     for k in 0..test_count {
-        let key = u64_at(in order, wrapping_mul(k, 3));
+        let key = u64_at(in order, wrapping_mul(k, ORDER_WORDS));
         let mut j = sorted.len();
         sorted.push(k);
         loop {
@@ -985,7 +1025,7 @@ pub fn discover(in input: Slice[u8]) -> ChunkSeq[u64] {
                 break;
             }
             let prev = u64_at(in sorted, sub(j, 1));
-            if u64_at(in order, wrapping_mul(prev, 3)) <= key {
+            if u64_at(in order, wrapping_mul(prev, ORDER_WORDS)) <= key {
                 break;
             }
             let ok = sorted.try_set(j, prev);
@@ -993,12 +1033,12 @@ pub fn discover(in input: Slice[u8]) -> ChunkSeq[u64] {
         }
         let ok = sorted.try_set(j, k);
     }
-    out.push(0);
+    out.push(STATUS_OK);
     out.push(test_count);
     for k in 0..test_count {
         let which = u64_at(in sorted, k);
-        let offset = u64_at(in order, inc(wrapping_mul(which, 3)));
-        let len = u64_at(in order, add(wrapping_mul(which, 3), 2));
+        let offset = u64_at(in order, inc(wrapping_mul(which, ORDER_WORDS)));
+        let len = u64_at(in order, add(wrapping_mul(which, ORDER_WORDS), ORDER_LEN));
         out.extend(in words[offset..add(offset, len)]);
     }
     out

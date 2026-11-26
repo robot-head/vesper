@@ -17,16 +17,31 @@
 //   killed, survived, ill-typed, tested and total counts.
 // Result words: 0 and the text.
 
-use self::util::{Reader, push_decimal, push_range, put_buf, sub};
+use @vesper-std/bytes::ascii::{CLOSE_BRACKET, CLOSE_PAREN, COLON, DIGIT_ZERO, NEWLINE, SLASH};
+use self::util::{
+    BYTE_BITS, Reader, STATUS_OK, TOP_BYTE_SHIFT, WORD_BYTES, push_decimal, push_range, put_buf, sub
+};
+
+// The values whose digits `decimal` packs into two words (below 10^16).
+const PACKED_DIGITS_LIMIT: u64 = 10000000000000000;
+// The low byte of a word.
+const BYTE_MASK: u64 = 255;
+// The words of a result besides its text's packed bytes: the status, the
+// length and a last partial word.
+const RESULT_EXTRA_WORDS: u64 = 3;
+// A mutant's outcome.
+const OUTCOME_KILLED: u64 = 0;
+const OUTCOME_SURVIVED: u64 = 1;
+const OUTCOME_ILL_TYPED: u64 = 2;
 
 // `value` in decimal. Below 10^16 the digits are packed into two words, most
 // significant in the lowest byte, and pushed in order.
 fn decimal(inout out: ChunkSeq[u8], value: u64) {
     if value < 10 {
-        out.push(wrapping_u8(wrapping_add(value, 48)));
+        out.push(wrapping_u8(wrapping_add(value, widen_u64(DIGIT_ZERO))));
         return;
     }
-    if value >= 10000000000000000 {
+    if value >= PACKED_DIGITS_LIMIT {
         push_decimal(inout out, value);
         return;
     }
@@ -35,9 +50,9 @@ fn decimal(inout out: ChunkSeq[u8], value: u64) {
     let mut n: u64 = 0;
     let mut rest = value;
     loop {
-        let digit_char = wrapping_add(rest % 10, 48);
-        hi = wrapping_shl_u64(hi, 8) | wrapping_shr_u64(lo, 56);
-        lo = wrapping_shl_u64(lo, 8) | digit_char;
+        let digit_char = wrapping_add(rest % 10, widen_u64(DIGIT_ZERO));
+        hi = wrapping_shl_u64(hi, BYTE_BITS) | wrapping_shr_u64(lo, TOP_BYTE_SHIFT);
+        lo = wrapping_shl_u64(lo, BYTE_BITS) | digit_char;
         n = wrapping_add(n, 1);
         rest = rest / 10;
         if rest == 0 {
@@ -45,12 +60,15 @@ fn decimal(inout out: ChunkSeq[u8], value: u64) {
         }
     }
     for i in 0..n {
-        let out_char = if i >= 8 {
-            wrapping_shr_u64(hi, wrapping_u32(wrapping_mul(wrapping_sub(i, 8), 8)))
+        let out_char = if i >= WORD_BYTES {
+            wrapping_shr_u64(
+                hi,
+                wrapping_u32(wrapping_mul(wrapping_sub(i, WORD_BYTES), widen_u64(BYTE_BITS)))
+            )
         } else {
-            wrapping_shr_u64(lo, wrapping_u32(wrapping_mul(i, 8)))
+            wrapping_shr_u64(lo, wrapping_u32(wrapping_mul(i, widen_u64(BYTE_BITS))))
         };
-        out.push(wrapping_u8(out_char & 255));
+        out.push(wrapping_u8(out_char & BYTE_MASK));
     }
 }
 
@@ -66,8 +84,8 @@ fn copy_text(inout out: ChunkSeq[u8], inout reader: Reader, in input: Slice[u8])
 
 fn result(in out: ChunkSeq[u8]) -> ChunkSeq[u64] {
     let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    words.reserve(wrapping_add(out.len() / 8, 3));
-    words.push(0);
+    words.reserve(wrapping_add(out.len() / WORD_BYTES, RESULT_EXTRA_WORDS));
+    words.push(STATUS_OK);
     put_buf(inout words, in out);
     words
 }
@@ -82,9 +100,9 @@ fn push_place(
     column: u64
 ) {
     push_range(inout out, in input, file_start, file_end);
-    out.push(58);
+    out.push(COLON);
     decimal(inout out, line);
-    out.push(58);
+    out.push(COLON);
     decimal(inout out, column);
     push_str(inout out, in ": ");
 }
@@ -105,7 +123,7 @@ fn diags(
         copy_text(inout out, inout reader, in input);
         push_str(inout out, in ": ");
         copy_text(inout out, inout reader, in input);
-        out.push(10);
+        out.push(NEWLINE);
     }
 }
 
@@ -134,9 +152,9 @@ pub fn doc_text(in input: Slice[u8]) -> ChunkSeq[u64] {
         if reader.word(in input) != 0 {
             push_str(inout out, in " [");
             copy_text(inout out, inout reader, in input);
-            out.push(93);
+            out.push(CLOSE_BRACKET);
         }
-        out.push(10);
+        out.push(NEWLINE);
         diags(inout out, inout reader, in input, file_start, file_end);
     }
     result(in out)
@@ -170,7 +188,7 @@ pub fn unit_text(in input: Slice[u8]) -> ChunkSeq[u64] {
             push_range(inout out, in input, display_start, display_end);
             push_str(inout out, in ": FAIL: ");
             push_range(inout out, in input, error_start, error_end);
-            out.push(10);
+            out.push(NEWLINE);
         }
         let test_count = reader.word(in input);
         total = wrapping_add(total, test_count);
@@ -202,12 +220,12 @@ pub fn unit_text(in input: Slice[u8]) -> ChunkSeq[u64] {
                 if has_pin {
                     push_str(inout out, in "  pin regression: ");
                     push_range(inout out, in input, pin_start, pin_end);
-                    out.push(10);
+                    out.push(NEWLINE);
                 }
                 if has_capsule {
                     push_str(inout out, in "  replay capsule: ");
                     push_range(inout out, in input, capsule_start, capsule_end);
-                    out.push(10);
+                    out.push(NEWLINE);
                 }
             }
         }
@@ -235,7 +253,7 @@ pub fn baseline_text(in input: Slice[u8]) -> ChunkSeq[u64] {
             push_range(inout out, in input, display_start, display_end);
             push_str(inout out, in ": FAIL: ");
             push_range(inout out, in input, error_start, error_end);
-            out.push(10);
+            out.push(NEWLINE);
         }
         let test_count = reader.word(in input);
         for t in 0..test_count {
@@ -253,7 +271,7 @@ pub fn baseline_text(in input: Slice[u8]) -> ChunkSeq[u64] {
                 push_range(inout out, in input, name_start, name_end);
                 push_str(inout out, in ": ");
                 push_range(inout out, in input, msg_start, msg_end);
-                out.push(10);
+                out.push(NEWLINE);
             }
         }
     }
@@ -274,20 +292,20 @@ pub fn mutants_text(in input: Slice[u8]) -> ChunkSeq[u64] {
         let (orig_start, orig_end) = reader.text(in input);
         let (rep_start, rep_end) = reader.text(in input);
         let outcome = reader.word(in input);
-        if outcome == 2 {
+        if outcome == OUTCOME_ILL_TYPED {
             continue;
         }
         let mut has_killer: bool = false;
         let mut killer_start: u64 = 0;
         let mut killer_end: u64 = 0;
-        if outcome == 0 {
+        if outcome == OUTCOME_KILLED {
             let (found, start, end) = optional(inout reader, in input);
             has_killer = found;
             killer_start = start;
             killer_end = end;
         }
         push_place(inout out, in input, file_start, file_end, line, column);
-        if outcome == 0 {
+        if outcome == OUTCOME_KILLED {
             push_str(inout out, in "KILLED ");
         } else {
             push_str(inout out, in "SURVIVED ");
@@ -297,8 +315,8 @@ pub fn mutants_text(in input: Slice[u8]) -> ChunkSeq[u64] {
         push_range(inout out, in input, orig_start, orig_end);
         push_str(inout out, in " -> ");
         push_range(inout out, in input, rep_start, rep_end);
-        out.push(41);
-        if outcome == 0 {
+        out.push(CLOSE_PAREN);
+        if outcome == OUTCOME_KILLED {
             push_str(inout out, in " by ");
             if has_killer {
                 push_range(inout out, in input, killer_start, killer_end);
@@ -306,7 +324,7 @@ pub fn mutants_text(in input: Slice[u8]) -> ChunkSeq[u64] {
                 push_str(inout out, in "test");
             }
         }
-        out.push(10);
+        out.push(NEWLINE);
     }
     let killed = reader.word(in input);
     let survived = reader.word(in input);
@@ -321,7 +339,7 @@ pub fn mutants_text(in input: Slice[u8]) -> ChunkSeq[u64] {
     decimal(inout out, ill_typed);
     push_str(inout out, in " ill-typed (of ");
     decimal(inout out, tested);
-    out.push(47);
+    out.push(SLASH);
     decimal(inout out, total);
     push_str(inout out, in " candidate(s))\n");
     result(in out)

@@ -21,10 +21,30 @@
 
 use @vesper-std/intern::{Interner, interner_new};
 use @vesper/front::kinds::{k_lower, k_upper};
+use @vesper-std/bytes::ascii::{NEWLINE, UNDERSCORE};
 use self::discover::{toks};
 use self::util::{
-    Reader, add, inc, push_decimal, push_range, put_buf, put_text, same, sub, u8_at, u64_at
+    PAIR_WORDS, Reader, STATUS_ERROR, STATUS_OK, TOP_BYTE_SHIFT, WORD_BYTES, add, inc, push_decimal,
+    push_range, put_buf, put_text, same, sub, u8_at, u64_at
 };
+
+// The longest private wrapper name.
+const MAX_WRAPPER_BYTES: u64 = 128;
+// `newlines`: a word with every bit set, and the shift that moves each
+// byte's high bit to its low bit.
+const ALL_ONES: u64 = 0xffffffffffffffff;
+const BYTE_HIGH_BIT: u32 = 7;
+
+// An error of the input: the code's and message's ranges, then its span.
+enum ErrorRow: u64 {
+    CodeStart = 0,
+    CodeEnd = 1,
+    MessageStart = 2,
+    MessageEnd = 3,
+    Start = 4,
+    End = 5,
+    Words = 6,
+}
 
 // `reserved.insert(text)`: whether `text` was new.
 fn reserve(inout names: Interner, in text: Slice[u8]) -> bool {
@@ -47,7 +67,7 @@ fn reserve_range(inout names: Interner, in bytes: Slice[u8], start: u64, end: u6
 
 fn error_text(in text: Str) -> ChunkSeq[u64] {
     let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    out.push(1);
+    out.push(STATUS_ERROR);
     let message_bytes = text.as_bytes();
     put_text(inout out, in message_bytes, 0, message_bytes.len());
     out
@@ -74,7 +94,7 @@ pub fn wrappers(in input: Slice[u8]) -> ChunkSeq[u64] {
         for i in 0..line_count {
             let (start, end) = reader.text(in input);
             push_range(inout raw, in input, start, end);
-            raw.push(10);
+            raw.push(NEWLINE);
         }
         let tokens = toks(in raw.as_slice());
         let n = tokens.kind.len();
@@ -91,7 +111,7 @@ pub fn wrappers(in input: Slice[u8]) -> ChunkSeq[u64] {
         }
     }
     let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    out.push(0);
+    out.push(STATUS_OK);
     out.push(example_count);
     let mut wrapper: ChunkSeq[u8] = ChunkSeq::new[u8]();
     for example in 0..example_count {
@@ -102,8 +122,8 @@ pub fn wrappers(in input: Slice[u8]) -> ChunkSeq[u64] {
             if reserve(inout names, in wrapper.as_slice()) {
                 break;
             }
-            wrapper.push(95);
-            if wrapper.len() > 128 {
+            wrapper.push(UNDERSCORE);
+            if wrapper.len() > MAX_WRAPPER_BYTES {
                 return error_text(in "doctest private wrapper name limit");
             }
         }
@@ -121,28 +141,31 @@ fn newlines(in bytes: Slice[u8], from: u64, end: u64) -> u64 {
     let mut count: u64 = 0;
     let mut i = from;
     loop {
-        if add(i, 8) > end {
+        if add(i, WORD_BYTES) > end {
             break;
         }
         let chunk = bytes.try_read_u64_le(i).unwrap_or(0);
         let masked = chunk ^ newline_bytes;
         // A byte of `masked` is zero exactly where `chunk` holds `\n`.
-        let zero_test = (wrapping_add(masked & low, low) | masked) ^ 0xffffffffffffffff;
+        let zero_test = (wrapping_add(masked & low, low) | masked) ^ ALL_ONES;
         let zero_bits = zero_test & high;
         if zero_bits != 0 {
             count = add(
                 count,
-                wrapping_shr_u64(wrapping_mul(wrapping_shr_u64(zero_bits, 7), ones), 56)
+                wrapping_shr_u64(
+                    wrapping_mul(wrapping_shr_u64(zero_bits, BYTE_HIGH_BIT), ones),
+                    TOP_BYTE_SHIFT
+                )
             );
         }
-        i = add(i, 8);
+        i = add(i, WORD_BYTES);
     }
     loop {
         if i >= end {
             break;
         }
         let cur_byte = bytes.try_get(i).unwrap_or(0);
-        if cur_byte == 10 {
+        if cur_byte == NEWLINE {
             count = inc(count);
         }
         i = inc(i);
@@ -175,7 +198,7 @@ fn line_start(in bytes: Slice[u8], offset: u64) -> (u64, u64) {
             break;
         }
         let cur_byte = bytes.try_get(sub(begin, 1)).unwrap_or(0);
-        if cur_byte == 10 {
+        if cur_byte == NEWLINE {
             break;
         }
         if cur_byte < 128 || cur_byte >= 192 {
@@ -222,7 +245,7 @@ fn place_all(in bytes: Slice[u8], in queries: ChunkSeq[u64]) -> ChunkSeq[u64] {
         let begin = u64_at(in starts, i);
         lines = add(lines, newlines(in bytes, last_begin, begin));
         last_begin = begin;
-        let set = out.try_set(wrapping_mul(i, 2), lines);
+        let set = out.try_set(wrapping_mul(i, PAIR_WORDS), lines);
     }
     out
 }
@@ -235,22 +258,22 @@ fn map_offset(
     code_start: u64,
     gen_offset: u64
 ) -> u64 {
-    let n = segs.len() / 2;
+    let n = segs.len() / PAIR_WORDS;
     for i in 0..n {
-        let seg_start = u64_at(in segs, wrapping_mul(i, 2));
-        let seg_end = u64_at(in segs, inc(wrapping_mul(i, 2)));
+        let seg_start = u64_at(in segs, wrapping_mul(i, PAIR_WORDS));
+        let seg_end = u64_at(in segs, inc(wrapping_mul(i, PAIR_WORDS)));
         if gen_offset >= seg_start && gen_offset <= seg_end {
-            return add(u64_at(in lines, wrapping_mul(i, 2)), sub(gen_offset, seg_start));
+            return add(u64_at(in lines, wrapping_mul(i, PAIR_WORDS)), sub(gen_offset, seg_start));
         }
     }
-    let line_count = lines.len() / 2;
+    let line_count = lines.len() / PAIR_WORDS;
     if line_count == 0 {
         return offset;
     }
     if gen_offset < code_start {
         u64_at(in lines, 0)
     } else {
-        let last_at = wrapping_mul(sub(line_count, 1), 2);
+        let last_at = wrapping_mul(sub(line_count, 1), PAIR_WORDS);
         add(u64_at(in lines, last_at), u64_at(in lines, inc(last_at)))
     }
 }
@@ -302,9 +325,9 @@ pub fn verdict(in input: Slice[u8]) -> ChunkSeq[u64] {
     queries.push(offset);
     let mut placed: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for i in 0..err_count {
-        let err_at = wrapping_mul(i, 6);
-        let start = u64_at(in errs, add(err_at, 4));
-        let end = u64_at(in errs, add(err_at, 5));
+        let err_at = wrapping_mul(i, ErrorRow::Words);
+        let start = u64_at(in errs, add(err_at, ErrorRow::Start));
+        let end = u64_at(in errs, add(err_at, ErrorRow::End));
         let (placed_start, placed_end) = if start < snippet_start {
             (start, end)
         } else {
@@ -324,17 +347,17 @@ pub fn verdict(in input: Slice[u8]) -> ChunkSeq[u64] {
     let mut local_only = true;
     let mut all_expected = true;
     for i in 0..err_count {
-        let err_at = wrapping_mul(i, 6);
+        let err_at = wrapping_mul(i, ErrorRow::Words);
         let err_code_start = u64_at(in errs, err_at);
-        let err_code_end = u64_at(in errs, add(err_at, 1));
-        let msg_start = u64_at(in errs, add(err_at, 2));
-        let msg_end = u64_at(in errs, add(err_at, 3));
-        let start = u64_at(in errs, add(err_at, 4));
-        let end = u64_at(in errs, add(err_at, 5));
+        let err_code_end = u64_at(in errs, add(err_at, ErrorRow::CodeEnd));
+        let msg_start = u64_at(in errs, add(err_at, ErrorRow::MessageStart));
+        let msg_end = u64_at(in errs, add(err_at, ErrorRow::MessageEnd));
+        let start = u64_at(in errs, add(err_at, ErrorRow::Start));
+        let end = u64_at(in errs, add(err_at, ErrorRow::End));
         let mut inside = false;
         for k in 0..seg_count {
-            let seg_start = u64_at(in segs, wrapping_mul(k, 2));
-            let seg_end = u64_at(in segs, inc(wrapping_mul(k, 2)));
+            let seg_start = u64_at(in segs, wrapping_mul(k, PAIR_WORDS));
+            let seg_end = u64_at(in segs, inc(wrapping_mul(k, PAIR_WORDS)));
             if start >= seg_start && start <= seg_end {
                 inside = true;
                 break;
@@ -354,10 +377,10 @@ pub fn verdict(in input: Slice[u8]) -> ChunkSeq[u64] {
             ) {
             all_expected = false;
         }
-        let placed_start = u64_at(in placed, wrapping_mul(i, 2));
-        let placed_end = u64_at(in placed, inc(wrapping_mul(i, 2)));
-        let placed_line = u64_at(in line_cols, wrapping_mul(inc(i), 2));
-        let placed_column = u64_at(in line_cols, inc(wrapping_mul(inc(i), 2)));
+        let placed_start = u64_at(in placed, wrapping_mul(i, PAIR_WORDS));
+        let placed_end = u64_at(in placed, inc(wrapping_mul(i, PAIR_WORDS)));
+        let placed_line = u64_at(in line_cols, wrapping_mul(inc(i), PAIR_WORDS));
+        let placed_column = u64_at(in line_cols, inc(wrapping_mul(inc(i), PAIR_WORDS)));
         put_text(inout out, in input, err_code_start, err_code_end);
         put_text(inout out, in input, msg_start, msg_end);
         out.push(placed_start);

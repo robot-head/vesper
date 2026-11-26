@@ -44,10 +44,7 @@ fn read_bytes(inout reader: Reader, in bytes: Slice[u8], inout out: ChunkSeq[u8]
     let n = reader.word(in bytes);
     let start = reader.pos;
     for i in 0..n {
-        let byte = match bytes.try_get(wrapping_add(start, i)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let byte = bytes.try_get(wrapping_add(start, i)).unwrap_or(0);
         out.push(byte);
     }
     reader.pos = wrapping_add(start, wrapping_mul(wrapping_add(n, 7) / 8, 8));

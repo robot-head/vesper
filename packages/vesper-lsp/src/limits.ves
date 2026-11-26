@@ -263,15 +263,9 @@ pub fn read_limits(in bytes: Slice[u8], at: u64) -> Plimits {
 
 // The little-endian word `word_index` after byte `at` (0 past the end).
 pub fn le(in bytes: Slice[u8], at: u64, word_index: u64) -> u64 {
-    match bytes.try_read_u64_le(wrapping_add(at, wrapping_mul(word_index, Le::WordBytes))) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    bytes.try_read_u64_le(wrapping_add(at, wrapping_mul(word_index, Le::WordBytes))).unwrap_or(0)
 }
 
 pub fn byte(in bytes: Slice[u8], i: u64) -> u8 {
-    match bytes.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    bytes.try_get(i).unwrap_or(0)
 }

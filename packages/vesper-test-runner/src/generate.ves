@@ -17,8 +17,9 @@ use @vesper/front::kinds::{
     k_affine, k_block_comment, k_comment, k_copy, k_effect, k_enum, k_eof, k_fn, k_impl, k_linear,
     k_lower, k_struct, k_whitespace
 };
+use @vesper-std/bytes::ascii::NEWLINE;
 use self::discover::{toks};
-use self::util::{Reader, inc, is_text, push_range, put_buf, u8_at, u64_at};
+use self::util::{PAIR_WORDS, Reader, STATUS_OK, inc, is_text, push_range, put_buf, u8_at, u64_at};
 
 // Whether the first non-trivia token of `raw` starts a declaration.
 fn declaration_token(in raw: Slice[u8]) -> bool {
@@ -90,7 +91,7 @@ pub fn generate(in input: Slice[u8]) -> ChunkSeq[u64] {
         line_ranges.push(start);
         line_ranges.push(end);
         push_range(inout raw, in input, start, end);
-        raw.push(10);
+        raw.push(NEWLINE);
     }
     let (wrapper_start, wrapper_end) = reader.text(in input);
     let has_entry = reader.word(in input) != 0;
@@ -115,7 +116,7 @@ pub fn generate(in input: Slice[u8]) -> ChunkSeq[u64] {
     }
     let mut src: ChunkSeq[u8] = ChunkSeq::new[u8]();
     push_range(inout src, in input, base_start, base_end);
-    src.push(10);
+    src.push(NEWLINE);
     let snippet_start = src.len();
     let declares = declaration(in raw);
     // The entry: (present, from `input` or "main").
@@ -140,13 +141,13 @@ pub fn generate(in input: Slice[u8]) -> ChunkSeq[u64] {
         push_str(inout src, in "()");
         if has_sim {
             push_str(inout src, in " eff [");
-            let n = sims.len() / 2;
+            let n = sims.len() / PAIR_WORDS;
             for i in 0..n {
                 if i != 0 {
                     push_str(inout src, in ", ");
                 }
-                let start = u64_at(in sims, wrapping_mul(i, 2));
-                let end = u64_at(in sims, inc(wrapping_mul(i, 2)));
+                let start = u64_at(in sims, wrapping_mul(i, PAIR_WORDS));
+                let end = u64_at(in sims, inc(wrapping_mul(i, PAIR_WORDS)));
                 push_range(inout src, in input, start, end);
             }
             push_str(inout src, in "]");
@@ -156,18 +157,18 @@ pub fn generate(in input: Slice[u8]) -> ChunkSeq[u64] {
     let code_start = src.len();
     let mut segs: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for i in 0..line_count {
-        let start = u64_at(in line_ranges, wrapping_mul(i, 2));
-        let end = u64_at(in line_ranges, inc(wrapping_mul(i, 2)));
+        let start = u64_at(in line_ranges, wrapping_mul(i, PAIR_WORDS));
+        let end = u64_at(in line_ranges, inc(wrapping_mul(i, PAIR_WORDS)));
         segs.push(src.len());
         push_range(inout src, in input, start, end);
         segs.push(src.len());
-        src.push(10);
+        src.push(NEWLINE);
     }
     if !declares {
         push_str(inout src, in "}\n");
     }
     let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    out.push(0);
+    out.push(STATUS_OK);
     put_buf(inout out, in src);
     out.push(snippet_start);
     out.push(code_start);

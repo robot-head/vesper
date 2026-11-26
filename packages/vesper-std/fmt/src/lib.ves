@@ -31,10 +31,7 @@ const ASCII_LOWER_Z: u8 = 122;
 
 // `s[i]`, or 0 out of range.
 fn byte_or_zero(in s: Slice[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(b) => b,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 // The ASCII digit for `d` (0..=35): `0`-`9`, then `a`-`z`.

@@ -103,10 +103,7 @@ fn helper_name(in c: Ctx, ty: u32) -> ChunkSeq[u8] {
     display(in c.types, in c.names, ty, inout text);
     let mut h = FNV_OFFSET;
     for i in 0..text.len() {
-        let byte = match text.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let byte = text.try_get(i).unwrap_or(0);
         h = wrapping_mul(h ^ widen_u64(byte), FNV_PRIME);
     }
     // The hex digits, lowest first.
@@ -505,10 +502,7 @@ fn drop_inline(
     let mut check = create_block(inout b);
     ins_jump0(inout b, check);
     for k in 0..boxed.len() {
-        let v = match boxed.try_get(k) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let v = boxed.try_get(k).unwrap_or(0);
         switch_to_block(inout b, check);
         let is_var = ins_icmp_imm(inout b, cc_eq(), tag, wrapping_i64(v));
         let this_var = create_block(inout b);

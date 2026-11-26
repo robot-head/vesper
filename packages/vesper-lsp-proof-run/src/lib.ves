@@ -25,9 +25,13 @@ use @vesper-std/process::{
 };
 use @vesper-std/env::{var_bytes, os, os_windows};
 use @vesper-std/hash::blake3::{blake3, digest_bytes};
+use @vesper-std/bytes::ascii::{
+    BACKSLASH, CARRIAGE_RETURN, COLON, DIGIT_NINE, DIGIT_ZERO, HASH, HYPHEN, LOWER_A, LOWER_F,
+    LOWER_X, NEWLINE, PLUS, QUOTE, SEMICOLON, SLASH, TAB, UPPER_A, UPPER_F
+};
 use self::json::{
     Doc, parse, failed, root, field, str_is, put_str_of, is_true, u64_or_zero, items, item, kind,
-    put, put_u64, put_error, put_string, STRING, ARRAY
+    put, put_u64, put_error, put_string, STRING, ARRAY, NONE, HEX_LETTER_BASE, HEX_UPPER_LETTER_BASE
 };
 use self::text::{
     byte, put_bytes, lossy, trimmed, contains, find, trim, first_error, bounded, put_escaped,
@@ -35,7 +39,35 @@ use self::text::{
 };
 
 const MAX_CAPTURE: u64 = 8388608;
-const NONE: u64 = 18446744073709551615;
+// A job word, a little-endian u64.
+const WORD_BYTES: u64 = 8;
+// A model's cache key (a BLAKE3 digest).
+const KEY_BYTES: u64 = 32;
+// `0o700`, and the group and other bits `0o077` that make a directory
+// reachable by others.
+const PRIVATE_DIR_MODE: u32 = 448;
+const GROUP_OTHER_BITS: u32 = 63;
+const MILLIS_PER_SECOND: u64 = 1000;
+// The `--print-prefix` timeout, and the slack the auditor gets past the
+// job's timeout.
+const PREFIX_TIMEOUT_SECONDS: u64 = 30;
+const AUDIT_TIMEOUT_SLACK_SECONDS: u64 = 5;
+// `Stage::new`'s tries at a fresh directory name.
+const MAX_STAGE_ATTEMPTS: u64 = 64;
+// A counterexample: the ` = ` between a name and its value, and at most
+// `MAX_PARAMS` values (proof_model.rs).
+const VALUE_SEPARATOR_BYTES: u64 = 3;
+const MAX_PARAMS: u64 = 16;
+// `Kind::code` of a parameter (proof_model.rs): i64 and bool.
+const KIND_I64: u64 = 3;
+const KIND_BOOL: u64 = 4;
+// `0x`, and the sign bit of an i64 parameter's low 64 bits.
+const HEX_PREFIX_BYTES: u64 = 2;
+const I64_SIGN_BIT: u64 = 9223372036854775808;
+// `proof_run`'s result.
+const RUN_DONE: u64 = 0;
+const RUN_BAD_JOB: u64 = 1;
+const RUN_WRITE_FAILED: u64 = 2;
 
 fn inc(x: u64) -> u64 {
     wrapping_add(x, 1)
@@ -59,7 +91,7 @@ fn word(in bytes: Slice[u8], inout reader: Rd) -> u64 {
         Option::Some(value) => value,
         Option::None => 0,
     };
-    reader.pos = wrapping_add(reader.pos, 8);
+    reader.pos = wrapping_add(reader.pos, WORD_BYTES);
     value
 }
 
@@ -187,10 +219,10 @@ fn read_job(in bytes: Slice[u8]) -> Job {
         let exact = pooled(in bytes, inout reader, inout pool);
         let bitvec = pooled(in bytes, inout reader, inout pool);
         let key = pool.len();
-        for k in reader.pos..wrapping_add(reader.pos, 32) {
+        for k in reader.pos..wrapping_add(reader.pos, KEY_BYTES) {
             pool.push(byte(in bytes, k));
         }
-        reader.pos = wrapping_add(reader.pos, 32);
+        reader.pos = wrapping_add(reader.pos, KEY_BYTES);
         let param_start = kinds.len();
         let param_count = word(in bytes, inout reader);
         for j in 0..param_count {
@@ -352,7 +384,7 @@ fn f_create_all(in path: ChunkSeq[u8]) -> bool eff [Ffi[StdFs]] {
 fn private_dir(in path: ChunkSeq[u8]) -> Result[bool, IoError] eff [Ffi[StdFs]] {
     let path_str = str_of(in path.as_slice());
     handle Fail[IoError] in {
-        create_dir_mode(in path_str, 448);
+        create_dir_mode(in path_str, PRIVATE_DIR_MODE);
         ok_unit()
     } with {
         return value => value,
@@ -369,8 +401,8 @@ fn make_private(in path: ChunkSeq[u8]) -> bool eff [Ffi[StdFs]] {
     let path_str = str_of(in path.as_slice());
     let result = handle Fail[IoError] in {
         let file_meta = metadata(in path_str);
-        if (file_meta.mode & 63) != 0 {
-            set_permissions(in path_str, 448);
+        if (file_meta.mode & GROUP_OTHER_BITS) != 0 {
+            set_permissions(in path_str, PRIVATE_DIR_MODE);
         }
         ok_unit()
     } with {
@@ -423,11 +455,15 @@ fn f_copy(in from: ChunkSeq[u8], in to: ChunkSeq[u8]) -> bool eff [Ffi[StdFs]] {
 fn join(in base: ChunkSeq[u8], in name: Str) -> ChunkSeq[u8] {
     let mut out = ChunkSeq::new[u8]();
     put_bytes(inout out, in base.as_slice());
-    let sep: u8 = if os() == os_windows() { 92 } else { 47 };
+    let sep: u8 = if os() == os_windows() {
+        BACKSLASH
+    } else {
+        SLASH
+    };
     let len = out.len();
     if len > 0 {
         let last = byte(in out.as_slice(), wrapping_sub(len, 1));
-        if last != 47 && !(last == 92 && sep == 92) {
+        if last != SLASH && !(last == BACKSLASH && sep == BACKSLASH) {
             out.push(sep);
         }
     }
@@ -449,9 +485,13 @@ fn with_ext(in name: ChunkSeq[u8], in ext: Str) -> ChunkSeq[u8] {
 
 // ------------------------------------------------------------ children
 
-// A child's outcome: 0 success (`text` is its stdout), 1 failure (stdout, then
-// stderr after a newline, or the exit status), 2 an error (`text` is the
-// message).
+// A child's end: END_SUCCESS (`text` is its stdout), END_FAILURE (stdout,
+// then stderr after a newline, or the exit status) or END_ERROR (`text` is
+// the message).
+const END_SUCCESS: u8 = 0;
+const END_FAILURE: u8 = 1;
+const END_ERROR: u8 = 2;
+
 struct Ran {
     outcome: u8,
     text: ChunkSeq[u8]
@@ -476,10 +516,10 @@ fn child_output(sink command: ProcCommand, seconds: u64) -> Ran eff [Ffi[StdProc
             let mut message = ChunkSeq::new[u8]();
             put(inout message, in "start process: ");
             put_io_error(inout message, e);
-            return ran(2, message);
+            return ran(END_ERROR, message);
         }
     };
-    let status = match wait_timeout(inout process, wrapping_mul(seconds, 1000)) {
+    let status = match wait_timeout(inout process, wrapping_mul(seconds, MILLIS_PER_SECOND)) {
         Result::Ok(Option::Some(s)) => s,
         Result::Ok(Option::None) => {
             let _ = kill_tree(inout process);
@@ -488,24 +528,24 @@ fn child_output(sink command: ProcCommand, seconds: u64) -> Ran eff [Ffi[StdProc
             put(inout message, in "process exceeded ");
             put_u64(inout message, seconds);
             put(inout message, in " seconds");
-            return ran(2, message);
+            return ran(END_ERROR, message);
         }
         Result::Err(e) => {
             release(process);
             let mut message = ChunkSeq::new[u8]();
             put_io_error(inout message, e);
-            return ran(2, message);
+            return ran(END_ERROR, message);
         }
     };
     let stdout_bytes = stdout(in process);
     let stderr_bytes = stderr(in process);
     release(process);
     if success(status) {
-        return ran(0, lossy(in stdout_bytes.as_slice()));
+        return ran(END_SUCCESS, lossy(in stdout_bytes.as_slice()));
     }
     let mut text = lossy(in stdout_bytes.as_slice());
     if stderr_bytes.len() > 0 {
-        text.push(10);
+        text.push(NEWLINE);
         let stderr_text = lossy(in stderr_bytes.as_slice());
         put_bytes(inout text, in stderr_text.as_slice());
     }
@@ -514,14 +554,14 @@ fn child_output(sink command: ProcCommand, seconds: u64) -> Ran eff [Ffi[StdProc
         text.clear();
         put_status(inout text, status);
     }
-    ran(1, text)
+    ran(END_FAILURE, text)
 }
 
 // `child`: success's output, or the error (a failure's first error line).
 fn child(sink command: ProcCommand, seconds: u64) -> Ran eff [Ffi[StdProcess]] {
     let output = child_output(command, seconds);
-    if output.outcome == 1 {
-        return ran(1, first_error(in output.text.as_slice()));
+    if output.outcome == END_FAILURE {
+        return ran(END_FAILURE, first_error(in output.text.as_slice()));
     }
     output
 }
@@ -566,7 +606,7 @@ fn put_status_row(inout out: ChunkSeq[u8], in status: Status) {
     } else {
         put(inout out, in "failed\t");
         put_bytes(inout out, in status.detail.as_slice());
-        out.push(9);
+        out.push(TAB);
         put_escaped(inout out, in status.reason.as_slice());
         return;
     }
@@ -597,21 +637,21 @@ struct St {
 fn ext_row(inout runner: St, in function: Slice[u8], in status: Status) {
     put(inout runner.ext_rows, in "E\t");
     put_bytes(inout runner.ext_rows, in function);
-    runner.ext_rows.push(9);
+    runner.ext_rows.push(TAB);
     put_status_row(inout runner.ext_rows, in status);
-    runner.ext_rows.push(10);
+    runner.ext_rows.push(NEWLINE);
 }
 
 fn sem_row(inout runner: St, in job: Job, model: Model, in status: Status) {
     put(inout runner.sem_rows, in "S\t");
     let function = part(in job, model.function, model.function_len);
     put_bytes(inout runner.sem_rows, in function.as_slice());
-    runner.sem_rows.push(9);
-    let key = part(in job, model.key, 32);
+    runner.sem_rows.push(TAB);
+    let key = part(in job, model.key, KEY_BYTES);
     put_hex(inout runner.sem_rows, in key.as_slice());
-    runner.sem_rows.push(9);
+    runner.sem_rows.push(TAB);
     put_status_row(inout runner.sem_rows, in status);
-    runner.sem_rows.push(10);
+    runner.sem_rows.push(NEWLINE);
 }
 
 fn stop(inout runner: St, in stage: Str, in reason: Slice[u8]) -> bool {
@@ -640,7 +680,13 @@ fn lean_command(in runner: St, in dir: ChunkSeq[u8]) -> ProcCommand eff [Ffi[Std
     env_clear(inout command);
     let mut search = ChunkSeq::new[u8]();
     put_bytes(inout search, in dir.as_slice());
-    search.push(if os() == os_windows() { 59 } else { 58 });
+    search.push(
+        if os() == os_windows() {
+            SEMICOLON
+        } else {
+            COLON
+        }
+    );
     let lib = join(in runner.prefix, in "lib/lean");
     put_bytes(inout search, in lib.as_slice());
     let search_str = str_of(in search.as_slice());
@@ -668,7 +714,7 @@ fn compile(inout runner: St, in module: ChunkSeq[u8], timeout: u64) -> bool eff 
     let lean = with_ext(in module, in ".lean");
     arg_bytes(inout command, in lean.as_slice());
     let output = child(command, timeout);
-    if output.outcome == 0 {
+    if output.outcome == END_SUCCESS {
         return true;
     }
     runner.reason.clear();
@@ -765,9 +811,9 @@ fn cache_store(
     let mut temp_name = ChunkSeq::new[u8]();
     put(inout temp_name, in ".tmp-");
     put_bytes(inout temp_name, in key.as_slice());
-    temp_name.push(45);
+    temp_name.push(HYPHEN);
     put_u64(inout temp_name, runner.pid);
-    temp_name.push(45);
+    temp_name.push(HYPHEN);
     put_u64(inout temp_name, runner.next_serial);
     runner.next_serial = inc(runner.next_serial);
     let temp = join_bytes(in runner.cache, in temp_name);
@@ -876,7 +922,7 @@ fn cache_record(inout runner: St, in key: ChunkSeq[u8], in status: Status) eff [
 
 // `env::join_paths` refuses a segment holding the separator.
 fn bad_search(in runner: St, in dir: ChunkSeq[u8]) -> bool {
-    let sep: u8 = if os() == os_windows() { 34 } else { 58 };
+    let sep: u8 = if os() == os_windows() { QUOTE } else { COLON };
     let lib = join(in runner.prefix, in "lib/lean");
     has(in dir.as_slice(), sep) || has(in lib.as_slice(), sep)
 }
@@ -930,13 +976,13 @@ fn bitvec_check(
     arg(inout command, in "-M1024");
     arg_bytes(inout command, in lean_name.as_slice());
     let output = child_output(command, timeout);
-    if output.outcome == 0 {
+    if output.outcome == END_SUCCESS {
         return status1(
             CHECKED_NATIVE,
             in "bv_decide found no counterexample (native LRAT check through Lean.ofReduceBool; not replayed by the kernel auditor); omega did not prove it"
         );
     }
-    if output.outcome == 1 {
+    if output.outcome == END_FAILURE {
         let mut cex = ChunkSeq::new[u8]();
         if counterexample(in job, model, in output.text.as_slice(), inout cex) {
             return Status { code: REFUTED, detail: cex, reason: ChunkSeq::new[u8]() };
@@ -995,7 +1041,7 @@ fn counterexample(in job: Job, model: Model, in text: Slice[u8], inout out: Chun
         // One `lines()` line.
         let mut line_end = line_start;
         loop {
-            if line_end >= text.len() || byte(in text, line_end) == 10 {
+            if line_end >= text.len() || byte(in text, line_end) == NEWLINE {
                 break;
             }
             line_end = inc(line_end);
@@ -1004,7 +1050,7 @@ fn counterexample(in job: Job, model: Model, in text: Slice[u8], inout out: Chun
         let mut content_end = line_end;
         if line_end < text.len()
             && content_end > line_start
-            && byte(in text, wrapping_sub(content_end, 1)) == 13 {
+            && byte(in text, wrapping_sub(content_end, 1)) == CARRIAGE_RETURN {
             content_end = wrapping_sub(content_end, 1);
         }
         if first {
@@ -1025,7 +1071,7 @@ fn counterexample(in job: Job, model: Model, in text: Slice[u8], inout out: Chun
         trim(in text, inout name_start, inout name_end);
         let param_index = param_of(in job, model, in text, name_start, name_end);
         if param_index != NONE {
-            let mut value_start = wrapping_add(eq_at, 3);
+            let mut value_start = wrapping_add(eq_at, VALUE_SEPARATOR_BYTES);
             let mut value_end = content_end;
             trim(in text, inout value_start, inout value_end);
             if count > 0 {
@@ -1043,7 +1089,7 @@ fn counterexample(in job: Job, model: Model, in text: Slice[u8], inout out: Chun
                 g64(in job.kinds, param_index)
             );
             count = inc(count);
-            if count >= 16 {
+            if count >= MAX_PARAMS {
                 break;
             }
         }
@@ -1053,14 +1099,14 @@ fn counterexample(in job: Job, model: Model, in text: Slice[u8], inout out: Chun
 }
 
 fn digit_of(c: u8, hex: bool) -> u64 {
-    if c >= 48 && c <= 57 {
-        return widen_u64(wrapping_sub(c, 48));
+    if c >= DIGIT_ZERO && c <= DIGIT_NINE {
+        return widen_u64(wrapping_sub(c, DIGIT_ZERO));
     }
-    if hex && c >= 97 && c <= 102 {
-        return widen_u64(wrapping_sub(c, 87));
+    if hex && c >= LOWER_A && c <= LOWER_F {
+        return widen_u64(wrapping_sub(c, HEX_LETTER_BASE));
     }
-    if hex && c >= 65 && c <= 70 {
-        return widen_u64(wrapping_sub(c, 55));
+    if hex && c >= UPPER_A && c <= UPPER_F {
+        return widen_u64(wrapping_sub(c, HEX_UPPER_LETTER_BASE));
     }
     NONE
 }
@@ -1069,29 +1115,29 @@ fn put_u128(inout out: ChunkSeq[u8], value: u128) {
     if value >= 10 {
         put_u128(inout out, value / 10);
     }
-    out.push(wrapping_u8(wrapping_add(value % 10, 48)));
+    out.push(wrapping_u8(wrapping_add(value % 10, widen_u128(DIGIT_ZERO))));
 }
 
 // `render_value`: a bool as written; else the digits before `#` (hex
 // after `0x`) as a u128, an i64 parameter as its low 64 bits signed; the
 // text itself when it does not parse.
 fn render_value(inout out: ChunkSeq[u8], in text: Slice[u8], start: u64, end: u64, kind_code: u64) {
-    if kind_code != 4 {
+    if kind_code != KIND_BOOL {
         let mut digits_end = start;
         loop {
-            if digits_end >= end || byte(in text, digits_end) == 35 {
+            if digits_end >= end || byte(in text, digits_end) == HASH {
                 break;
             }
             digits_end = inc(digits_end);
         }
         let mut i = start;
-        let hex = wrapping_sub(digits_end, start) >= 2
-            && byte(in text, start) == 48
-            && byte(in text, inc(start)) == 120;
+        let hex = wrapping_sub(digits_end, start) >= HEX_PREFIX_BYTES
+            && byte(in text, start) == DIGIT_ZERO
+            && byte(in text, inc(start)) == LOWER_X;
         if hex {
-            i = wrapping_add(start, 2);
+            i = wrapping_add(start, HEX_PREFIX_BYTES);
         }
-        if i < digits_end && byte(in text, i) == 43 {
+        if i < digits_end && byte(in text, i) == PLUS {
             i = inc(i);
         }
         let base: u128 = if hex { 16 } else { 10 };
@@ -1120,10 +1166,10 @@ fn render_value(inout out: ChunkSeq[u8], in text: Slice[u8], start: u64, end: u6
             }
         }
         if ok {
-            if kind_code == 3 {
+            if kind_code == KIND_I64 {
                 let bits = wrapping_u64(value);
-                if bits >= 9223372036854775808 {
-                    out.push(45);
+                if bits >= I64_SIGN_BIT {
+                    out.push(HYPHEN);
                     put_u64(inout out, wrapping_sub(0, bits));
                 } else {
                     put_u64(inout out, bits);
@@ -1160,7 +1206,7 @@ fn temp_dir() -> ChunkSeq[u8] eff [Ffi[StdEnv]] {
             match var_value {
                 Option::Some(dir) => {
                     put_bytes(inout out, in dir.as_slice());
-                    out.push(92);
+                    out.push(BACKSLASH);
                     return out;
                 },
                 Option::None => {},
@@ -1183,11 +1229,11 @@ fn temp_dir() -> ChunkSeq[u8] eff [Ffi[StdEnv]] {
 // `Stage::new`: a private staging directory.
 fn make_stage(inout runner: St) -> bool eff [Ffi[StdFs], Ffi[StdEnv]] {
     let base = temp_dir();
-    for attempt in 0..64 {
+    for attempt in 0..MAX_STAGE_ATTEMPTS {
         let mut name = ChunkSeq::new[u8]();
         put(inout name, in "vesper-lens-proof-");
         put_u64(inout name, runner.pid);
-        name.push(45);
+        name.push(HYPHEN);
         put_u64(inout name, runner.next_serial);
         runner.next_serial = inc(runner.next_serial);
         let path = join_bytes(in base, in name);
@@ -1304,8 +1350,8 @@ fn run_stages(
     }
     let mut command = command_path(in job.launcher.as_slice());
     arg(inout command, in "--print-prefix");
-    let output = child(command, 30);
-    if output.outcome != 0 {
+    let output = child(command, PREFIX_TIMEOUT_SECONDS);
+    if output.outcome != END_SUCCESS {
         return stop(inout runner, in "toolchain", in output.text.as_slice());
     }
     runner.prefix = trimmed(in output.text.as_slice());
@@ -1318,7 +1364,7 @@ fn run_stages(
     let mut command = command_path(in runner.lean_binary.as_slice());
     arg(inout command, in "--version");
     let output = child(command, timeout);
-    if output.outcome != 0 {
+    if output.outcome != END_SUCCESS {
         return stop(inout runner, in "toolchain", in output.text.as_slice());
     }
     runner.lean_version = trimmed(in output.text.as_slice());
@@ -1432,8 +1478,8 @@ fn run_stages(
     arg_bytes(inout command, in timeout_arg.as_slice());
     arg(inout command, in "--lean");
     arg_bytes(inout command, in runner.lean_binary.as_slice());
-    let output = child(command, wrapping_add(timeout, 5));
-    if output.outcome != 0 {
+    let output = child(command, wrapping_add(timeout, AUDIT_TIMEOUT_SLACK_SECONDS));
+    if output.outcome != END_SUCCESS {
         return stop(inout runner, in "kernel", in output.text.as_slice());
     }
     let doc = parse(in output.text.as_slice());
@@ -1563,7 +1609,7 @@ pub fn proof_run(
     put(inout job_file, in job_path);
     let data = match f_read(in job_file) {
         Result::Ok(bytes) => bytes,
-        Result::Err(_) => return 1,
+        Result::Err(_) => return RUN_BAD_JOB,
     };
     let job = read_job(in data.as_slice());
     let mut runner = new_st(id());
@@ -1579,14 +1625,14 @@ pub fn proof_run(
     put_bytes(inout out, in runner.sem_rows.as_slice());
     put(inout out, in "R\t");
     put_u64(inout out, runner.reused);
-    out.push(9);
+    out.push(TAB);
     put_u64(inout out, runner.compiled);
-    out.push(10);
+    out.push(NEWLINE);
     let mut out_file = ChunkSeq::new[u8]();
     put(inout out_file, in out_path);
     match f_write(in out_file, in out.as_slice()) {
-        Result::Ok(_) => 0,
-        Result::Err(_) => 2,
+        Result::Ok(_) => RUN_DONE,
+        Result::Err(_) => RUN_WRITE_FAILED,
     }
 }
 

@@ -514,3 +514,21 @@ helpers (`b8`, `add`, `inc`, `w64`) that the IR inliner leaves in place:
 is past that before it reaches them. With that cap lifted the same run
 measured about 1.29x. The row stays open until the inliner change lands
 and the gate passes.
+
+## Part 7: the inliner budget scales with the program, and the flip
+
+- **Inliner** (`src/ir_inline.rs`): `Budget::for_program` is
+  `Budget::default()` with the program-wide cap raised to three times the
+  program's own cost (`PROGRAM_GROWTH_FACTOR`), never below 40,000. The
+  JIT, `--lib` exports, sessions and optimized executables use it. The
+  sugar driver program costs 46,076 and its inlining wants 107,000; the
+  per-caller (2,000), per-callee (4,000) and handle caps are unchanged.
+- **Flip**: row `pass("sugar", "sugar", "#1157")`, so `gated` expands sugar
+  in Vesper.
+
+| Gate | Result |
+|---|---|
+| differential (`driver_matches`) | 0 differences on 3,872 cases |
+| tests | 1/1 pass |
+| ABBA `expand` (release, `target-cpu=native`, n=12) | 1.33x [1.28x, 1.36x]; an ABBA-only run measured 1.25x [1.22x, 1.36x] |
+| verdict | PASS |

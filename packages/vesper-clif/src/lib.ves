@@ -95,10 +95,7 @@ pub struct Reader {
 
 impl Reader {
     pub fn word(inout self, in b: Slice[u8]) -> u64 {
-        let x = match b.try_read_u64_le(self.pos) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let x = b.try_read_u64_le(self.pos).unwrap_or(0);
         self.pos = wrapping_add(self.pos, 8);
         x
     }
@@ -117,17 +114,11 @@ pub fn inc(x: u64) -> u64 {
 }
 
 pub fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => NONE,
-    }
+    s.try_get(i).unwrap_or(NONE)
 }
 
 pub fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 pub fn set_u32(inout s: ChunkSeq[u32], i: u64, x: u32) {
