@@ -1259,6 +1259,101 @@ fn break_at(in breaks: ChunkSeq[LayoutBreak], i: u64) -> LayoutBreak {
     }
 }
 
+// `Chain`: the member chain of the operand at the end of a line, its flat
+// width so far (NONE: it holds a line break) and each `.` break with the
+// width before it. A short receiver keeps its first step (`self.f`), and a
+// chain whose one method call ends it keeps its dots on one line when that
+// call could not fit on a line of its own anyway (`out.rows.push(Row {`).
+copy struct ChainDot {
+    at: u64,
+    before: u64
+}
+
+struct Chain {
+    width: u64,
+    dots: ChunkSeq[ChainDot],
+    calls: u64,
+    ends_with_call: bool
+}
+
+fn new_chain() -> Chain {
+    Chain { width: 0, dots: ChunkSeq::new[ChainDot](), calls: 0, ends_with_call: false }
+}
+
+fn chain_dot(inout chain: Chain, at: u64) {
+    chain.dots.push(ChainDot { at: at, before: chain.width });
+}
+
+fn chain_push(inout chain: Chain, width: u64, call: bool, kind: u8) eff [Fail[FmtFail]] {
+    chain.width = if chain.width == NONE || width == NONE {
+        NONE
+    } else {
+        cadd(chain.width, width)
+    };
+    if call && chain.dots.len() != 0 {
+        chain.calls = wrapping_add(chain.calls, 1);
+        chain.ends_with_call = true;
+    } else if kind != K_QUESTION && kind != K_SEMI && kind != K_COMMA {
+        chain.ends_with_call = false;
+    }
+}
+
+fn dot_at(in dots: ChunkSeq[ChainDot], i: u64) -> ChainDot {
+    match dots.try_get(i) {
+        Option::Some(dot) => dot,
+        Option::None => ChainDot { at: 0, before: NONE },
+    }
+}
+
+fn chain_finish(
+    inout chain: Chain,
+    inout line: ChunkSeq[u32],
+    inout breaks: ChunkSeq[LayoutBreak],
+    indent: u64,
+    inout d: Doc
+) eff [Fail[FmtFail]] {
+    let n = chain.dots.len();
+    if n == 0 {
+        chain = new_chain();
+        return;
+    }
+    let first = dot_at(in chain.dots, 0).at;
+    let before_last = dot_at(in chain.dots, wrapping_sub(n, 1)).before;
+    // The last step's flat width on a line of its own, or NONE when it holds
+    // a line break.
+    let alone = if chain.width == NONE || before_last == NONE {
+        NONE
+    } else {
+        cadd(cadd(indent, 5), wrapping_sub(chain.width, before_last))
+    };
+    let mut kept: u64 = 0;
+    if chain.calls == 1 && chain.ends_with_call && (alone == NONE || alone > LINE_WIDTH) {
+        kept = n;
+    } else {
+        loop {
+            if kept >= n {
+                break;
+            }
+            let root = dot_at(in chain.dots, kept).before;
+            if root == NONE || root > 4 {
+                break;
+            }
+            kept = wrapping_add(kept, 1);
+        }
+    }
+    for i in 0..kept {
+        let offset = break_at(in breaks, dot_at(in chain.dots, i).at).offset;
+        let _ = line.try_set(offset, wrapping_u32(push_leaf(inout d, D_NIL)));
+    }
+    // No other break follows the chain's dots: an operator ends it.
+    let total = breaks.len();
+    for i in wrapping_add(first, kept)..total {
+        let _ = breaks.try_set(wrapping_sub(i, kept), break_at(in breaks, i));
+    }
+    breaks.truncate(wrapping_sub(total, kept));
+    chain = new_chain();
+}
+
 fn nest_continuation(inout d: Doc, lead: u64, content: u64) -> u64 eff [Fail[FmtFail]] {
     if lead == NONE {
         content
@@ -1377,6 +1472,10 @@ fn sequence(
     end: u8,
     block: bool,
     fill: bool,
+    // The least column a line inside this sequence can start at: every
+    // delimiter or block it is nested in adds 4 once it breaks, and a line
+    // break inside one means it broke.
+    indent: u64,
     inout d: Doc,
     in src: Slice[u8]
 ) -> u64 eff [Fail[FmtFail]] {
@@ -1403,6 +1502,8 @@ fn sequence(
     let mut commented = false;
     // The previous atom was a non-empty parameter list before `->`.
     let mut previous_params = false;
+    // The member chain being built on `line` (`out.rows.push(..)`).
+    let mut chain = new_chain();
     loop {
         if pos >= n {
             break;
@@ -1465,6 +1566,10 @@ fn sequence(
         } else {
             G_NONE
         };
+        // Anything but an attached token ends the operand and its chain.
+        if is_block || spacing != G_NONE && spacing != G_EMPTY {
+            chain_finish(inout chain, inout line, inout breaks, indent, inout d);
+        }
         let after_comma = has_prev && prev == K_COMMA;
         let near_comment = c == K_COMMENT
             || c == K_BLOCK_COMMENT
@@ -1512,6 +1617,9 @@ fn sequence(
             };
             breaks.push(LayoutBreak { offset: line.len(), level: level });
             line.push(wrapping_u32(lead));
+            if spacing == G_EMPTY {
+                chain_dot(inout chain, wrapping_sub(breaks.len(), 1));
+            }
         }
         if is_block {
             concat_group(inout line, inout breaks, inout d, inout output);
@@ -1528,7 +1636,16 @@ fn sequence(
             let empty = pos < n && akind(in at, pos) == close;
             let start = push_text(inout d, in src, cs, ce, false);
             let fill = c == K_L_BRACE && has_prev && prev == K_COLON_COLON;
-            let inner = sequence(in at, inout pos, close, is_block, fill, inout d, in src);
+            let inner = sequence(
+                in at,
+                inout pos,
+                close,
+                is_block,
+                fill,
+                cadd(indent, 4),
+                inout d,
+                in src
+            );
             let last_is_line_comment = pos > 0 && akind(in at, wrapping_sub(pos, 1)) == K_COMMENT;
             let mut before_close = pos;
             loop {
@@ -1594,6 +1711,7 @@ fn sequence(
             output.push(wrapping_u32(node));
         } else {
             line.push(wrapping_u32(node));
+            chain_push(inout chain, width_at(in d, node), c == K_L_PAREN, c);
         }
         previous_block = is_block;
         previous_params = params;
@@ -1612,6 +1730,7 @@ fn sequence(
             previous_ends_operand = ends_operand(prev);
         }
     }
+    chain_finish(inout chain, inout line, inout breaks, indent, inout d);
     concat_group(inout line, inout breaks, inout d, inout output);
     if fill && !commented && has_prev && prev != K_COMMA && separators.len() != 0 {
         let mut filled = ChunkSeq::new[u32]();
@@ -2276,7 +2395,7 @@ fn render_atoms(
     dl.max_work = wrapping_sub(w.max, w.used);
     let mut d = doc_new(in dl, wrapping_add(wrapping_mul(at.kind.len(), 3), 8));
     let mut pos: u64 = 0;
-    let root = sequence(in at, inout pos, 255, false, false, inout d, in src);
+    let root = sequence(in at, inout pos, 255, false, false, 0, inout d, in src);
     let end = push_leaf(inout d, D_HARD);
     let root = push_concat2(inout d, root, end);
     let out = render(inout d, in src, root);

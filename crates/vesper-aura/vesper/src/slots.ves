@@ -67,23 +67,21 @@ pub fn patch_bind_slot(
     } else {
         0
     };
-    s
-        .slots
-        .push(
-            RSlot {
-                serial: slot,
-                widget: widget,
-                property: property,
-                tag: vtag,
-                payload: payload,
-                tstart: at,
-                tlen: if vtag == ValueTag::Text {
-                    tlen
-                } else {
-                    0
-                }
+    s.slots.push(
+        RSlot {
+            serial: slot,
+            widget: widget,
+            property: property,
+            tag: vtag,
+            payload: payload,
+            tstart: at,
+            tlen: if vtag == ValueTag::Text {
+                tlen
+            } else {
+                0
             }
-        );
+        }
+    );
     s.slive.push(true);
     s.nslots = inc(s.nslots);
     record(inout s, lim, op(EV_SLOT_BOUND, slot, 0, 0, 0))
@@ -134,24 +132,22 @@ pub fn patch_set_slot(
     } else {
         0
     };
-    s
-        .slots
-        .try_set(
-            k,
-            RSlot {
-                serial: old.serial,
-                widget: old.widget,
-                property: old.property,
-                tag: vtag,
-                payload: payload,
-                tstart: at,
-                tlen: if vtag == ValueTag::Text {
-                    tlen
-                } else {
-                    0
-                }
+    s.slots.try_set(
+        k,
+        RSlot {
+            serial: old.serial,
+            widget: old.widget,
+            property: old.property,
+            tag: vtag,
+            payload: payload,
+            tstart: at,
+            tlen: if vtag == ValueTag::Text {
+                tlen
+            } else {
+                0
             }
-        );
+        }
+    );
     record(inout s, lim, op(EV_SLOT_CHANGED, slot, 0, 0, 0))
 }
 

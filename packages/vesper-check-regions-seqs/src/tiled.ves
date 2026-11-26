@@ -133,21 +133,18 @@ pub fn check_world_adts(in t: Types, in names: Names, in wd: World, in sg: Sigs,
                             names.write(fd.name, inout d.text);
                             d.text.extend(in "' in tiled struct '".as_bytes());
                             tiled_name(in names, inout d, a.name);
-                            d
-                                .text
-                                .extend(
-                                    in "' must have a Copy scalar type (u8, u32, u64, i64, f64, bool), found "
-                                        .as_bytes()
-                                );
+                            d.text.extend(
+                                in "' must have a Copy scalar type (u8, u32, u64, i64, f64, bool), found "
+                                    .as_bytes()
+                            );
                             display(in t, in names, fd.ty, inout d.text);
-                            d
-                                .close(
-                                    c,
-                                    m,
-                                    "mark non-scalar or aggregate fields as 'cold'",
-                                    start,
-                                    stop
-                                );
+                            d.close(
+                                c,
+                                m,
+                                "mark non-scalar or aggregate fields as 'cold'",
+                                start,
+                                stop
+                            );
                         }
                     } else if temp != T_COLD {
                         let c = d.open("E1502");
@@ -157,14 +154,13 @@ pub fn check_world_adts(in t: Types, in names: Names, in wd: World, in sg: Sigs,
                         d.text.extend(in "' of tiled struct '".as_bytes());
                         tiled_name(in names, inout d, a.name);
                         d.text.extend(in "' must be annotated 'hot' or 'cold'".as_bytes());
-                        d
-                            .close(
-                                c,
-                                m,
-                                "prefix every field in a tiled(N) struct with 'hot' or 'cold'",
-                                start,
-                                stop
-                            );
+                        d.close(
+                            c,
+                            m,
+                            "prefix every field in a tiled(N) struct with 'hot' or 'cold'",
+                            start,
+                            stop
+                        );
                     }
                 }
             }

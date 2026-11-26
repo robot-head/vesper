@@ -490,8 +490,7 @@ fn mmio_status_write(inout st: MmioState, value: u32, offered: u64) -> u64 {
             MmioStatusFault::StatusRegression { from: _, to: _ } => MMIO_E_STATUS_REGRESSION,
             MmioStatusFault::DriverOkWithoutFeaturesOk { rejected_features: r } => {
                 if r {
-                    st
-                        .stats
+                    st.stats
                         .rejected_feature_sets = wrapping_add(st.stats.rejected_feature_sets, 1);
                 }
                 MMIO_E_DRIVER_OK_WITHOUT_FEATURES_OK

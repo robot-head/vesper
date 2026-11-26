@@ -20,24 +20,23 @@ fn plan_texture(
                         let slice = wrapping_add(r.first_slice, s_i);
                         let plane = wrapping_add(r.first_plane, pl_i);
                         let sub = flat_index(res, mip, slice, plane);
-                        entries
-                            .push(
-                                ReqEntry {
-                                    sub: sub,
-                                    seq: seq,
-                                    access: u.access,
-                                    sync: u.sync,
-                                    has_layout: if u.has_layout {
-                                        1
-                                    } else {
-                                        0
-                                    },
-                                    layout: layout_ord(u.layout),
-                                    mip: mip,
-                                    slice: slice,
-                                    plane: plane
-                                }
-                            );
+                        entries.push(
+                            ReqEntry {
+                                sub: sub,
+                                seq: seq,
+                                access: u.access,
+                                sync: u.sync,
+                                has_layout: if u.has_layout {
+                                    1
+                                } else {
+                                    0
+                                },
+                                layout: layout_ord(u.layout),
+                                mip: mip,
+                                slice: slice,
+                                plane: plane
+                            }
+                        );
                         seq = wrapping_add(seq, 1);
                     }
                 }
@@ -250,17 +249,16 @@ fn plan_final_layouts(inout pl: Planner, in g: Graph) -> PlanFault {
                             let mut recency: ChunkSeq[Recency] = ChunkSeq::new[Recency]();
                             for i in 0..recs.len() {
                                 match recs.try_get(i) {
-                                    Option::Some(x) => recency
-                                        .push(
-                                            Recency {
-                                                neg_gpos: wrapping_sub(
-                                                    max_u64(),
-                                                    widen_u64(get32(in pl.gpos, widen_u64(x.pass)))
-                                                ),
-                                                seq: i,
-                                                queue: x.queue
-                                            }
-                                        ),
+                                    Option::Some(x) => recency.push(
+                                        Recency {
+                                            neg_gpos: wrapping_sub(
+                                                max_u64(),
+                                                widen_u64(get32(in pl.gpos, widen_u64(x.pass)))
+                                            ),
+                                            seq: i,
+                                            queue: x.queue
+                                        }
+                                    ),
                                     Option::None => (),
                                 }
                             }
@@ -308,8 +306,7 @@ fn plan_final_layouts(inout pl: Planner, in g: Graph) -> PlanFault {
                                         if x.queue == chosen {
                                             same.push(x);
                                         } else {
-                                            pl
-                                                .final_waits
+                                            pl.final_waits
                                                 .push(Pair { key: chosen, value: x.pass });
                                         }
                                     },

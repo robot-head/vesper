@@ -452,15 +452,14 @@ fn bound(in p: P, sym: u32) -> bool {
 fn bump_count(inout counts: ChunkSeq[u32], sym: u32, up: bool) {
     let i = widen_u64(sym);
     let c = u32_at(in counts, i);
-    counts
-        .try_set(
-            i,
-            if up {
-                wrapping_add(c, 1)
-            } else {
-                wrapping_sub(c, 1)
-            }
-        );
+    counts.try_set(
+        i,
+        if up {
+            wrapping_add(c, 1)
+        } else {
+            wrapping_sub(c, 1)
+        }
+    );
 }
 
 fn val_insert(inout p: P, sym: u32) {
@@ -1497,24 +1496,20 @@ fn function(inout p: P, op: bool) {
 fn header_note(inout p: P, start: u64, clean: bool, nongeneric: bool) {
     p.hdr.push(start);
     p.hdr.push(cur_start(in p));
-    p
-        .hdr
-        .push(
-            if clean {
-                1
-            } else {
-                0
-            }
-        );
-    p
-        .hdr
-        .push(
-            if nongeneric {
-                1
-            } else {
-                0
-            }
-        );
+    p.hdr.push(
+        if clean {
+            1
+        } else {
+            0
+        }
+    );
+    p.hdr.push(
+        if nongeneric {
+            1
+        } else {
+            0
+        }
+    );
     for s in 0..p.rows.len() {
         if u32_at(in p.rows, s) != 0 {
             p.hdr_syms.push(narrow(s));
@@ -1938,12 +1933,9 @@ fn trait_decl(inout p: P) {
         let s = w32(in p.pending, b);
         let e = w32(in p.pending, inc(b));
         if diag_open(inout p, s, e) {
-            p
-                .d
-                .text
-                .extend(
-                    in "trait parameters take modal or row bounds, not trait bounds".as_bytes()
-                );
+            p.d.text.extend(
+                in "trait parameters take modal or row bounds, not trait bounds".as_bytes()
+            );
         }
         b = add(b, 2);
     }
@@ -2488,11 +2480,10 @@ fn match_expr(inout p: P) -> Ex {
             wrapping_sub(p.pos, body_start),
             wrapping_sub(p.expansion, expanded)
         );
-        p
-            .expansion = saturating_add_u64(
-                p.expansion,
-                saturating_mul_u64(weight, wrapping_sub(alternatives, 1))
-            );
+        p.expansion = saturating_add_u64(
+            p.expansion,
+            saturating_mul_u64(weight, wrapping_sub(alternatives, 1))
+        );
         if p.expansion > or_pattern_expansion() {
             err(inout p, in "or-pattern alternatives copy too much code; split the match");
         }

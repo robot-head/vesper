@@ -645,16 +645,14 @@ fn repair(
             continue;
         }
         tk.kind.push(k);
-        tk
-            .s
-            .push(
-                widen_u64(
-                    match t.start.try_get(i) {
-                        Option::Some(x) => x,
-                        Option::None => 0,
-                    }
-                )
-            );
+        tk.s.push(
+            widen_u64(
+                match t.start.try_get(i) {
+                    Option::Some(x) => x,
+                    Option::None => 0,
+                }
+            )
+        );
         tk.e.push(token_end(in t, i));
     }
     let nd = rs.d_kind.len();
@@ -676,13 +674,12 @@ fn repair(
     }
     let mut src = ChunkSeq::with_capacity[u8](b.len());
     for i in 0..b.len() {
-        src
-            .push(
-                match b.try_get(i) {
-                    Option::Some(x) => x,
-                    Option::None => 0,
-                }
-            );
+        src.push(
+            match b.try_get(i) {
+                Option::Some(x) => x,
+                Option::None => 0,
+            }
+        );
     }
     let mut base = copy_bytes(in src);
     for j in 0..damaged.len() {

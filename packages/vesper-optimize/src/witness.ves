@@ -296,13 +296,10 @@ fn same_term(x: TermRow, y: TermRow) -> bool {
 }
 
 fn arg_at(in t: Tree, list: u32, i: u64) -> ArgNode {
-    t
-        .ast
-        .args
-        .get_or(
-            idx_from_raw[ArgNode](list_at(in t.ast, list, i)),
-            ArgNode { pass: 255, explicit: false, expr: none() }
-        )
+    t.ast.args.get_or(
+        idx_from_raw[ArgNode](list_at(in t.ast, list, i)),
+        ArgNode { pass: 255, explicit: false, expr: none() }
+    )
 }
 
 // `call_parts`: the operation, the callee and the two argument

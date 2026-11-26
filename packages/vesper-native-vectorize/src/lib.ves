@@ -105,16 +105,14 @@ impl Kinds {
 
     fn set(inout self, v: u32, kind: u64, known: bool, step: i64) {
         let a = self.kind.try_set(w(v), wrapping_u8(kind));
-        let b = self
-            .known
-            .try_set(
-                w(v),
-                if known {
-                    1
-                } else {
-                    0
-                }
-            );
+        let b = self.known.try_set(
+            w(v),
+            if known {
+                1
+            } else {
+                0
+            }
+        );
         let c = self.step.try_set(w(v), step);
     }
 
@@ -490,15 +488,13 @@ impl ArgKinds {
     // Appends argument `v` of kind `kind`, with its step from `values`.
     fn push(inout self, in values: Kinds, v: u32, kind: u64) {
         self.kinds.push(kind);
-        self
-            .known
-            .push(
-                if values.known_step(v) {
-                    1
-                } else {
-                    0
-                }
-            );
+        self.known.push(
+            if values.known_step(v) {
+                1
+            } else {
+                0
+            }
+        );
         self.steps.push(values.step_of(v));
     }
 
@@ -1513,8 +1509,17 @@ fn emit_widen(inout f: Func, in p: WidenPlan) {
     let dst_v = u32_at(in sd, 1);
     let wv = load(inout f, lanes, TY_I64, 0, src_v);
     let v_i64x2 = un(inout f, lanes, OP_SCALAR_TO_VECTOR, TY_I64X2, wv);
-    let v_i8x16 = f
-        .ins(lanes, OP_BITCAST, TY_I8X16, 0, 0, 0, M_ENDIAN | M_LITTLE, in one(v_i64x2), in none);
+    let v_i8x16 = f.ins(
+        lanes,
+        OP_BITCAST,
+        TY_I8X16,
+        0,
+        0,
+        0,
+        M_ENDIAN | M_LITTLE,
+        in one(v_i64x2),
+        in none
+    );
     let v_i16x8 = un(inout f, lanes, OP_SWIDEN_LOW, TY_OTHER, f.result(v_i8x16, 0));
     let lo_i32x4 = un(inout f, lanes, OP_SWIDEN_LOW, TY_OTHER, v_i16x8);
     let hi_i32x4 = un(inout f, lanes, OP_SWIDEN_HIGH, TY_OTHER, v_i16x8);

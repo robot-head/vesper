@@ -473,13 +473,12 @@ fn report_oversized(retained: u64, in d: Diags) -> ChunkSeq[u64] {
     out.push(retained);
     out.push(d.text.len());
     for i in 0..d.text.len() {
-        out
-            .push(
-                match d.text.try_get(i) {
-                    Option::Some(c) => widen_u64(c),
-                    Option::None => 0,
-                }
-            );
+        out.push(
+            match d.text.try_get(i) {
+                Option::Some(c) => widen_u64(c),
+                Option::None => 0,
+            }
+        );
     }
     out
 }

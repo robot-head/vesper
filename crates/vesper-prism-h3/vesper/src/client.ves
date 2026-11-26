@@ -1171,13 +1171,12 @@ pub fn client_drain_unblocked(
                     ubytes.extend(in c.conn.unb_bytes[boff..wrapping_add(boff, total_bytes)]);
                     let mut umeta = ChunkSeq::with_capacity[u64](wrapping_mul(count, 3));
                     for k in 0..wrapping_mul(count, 3) {
-                        umeta
-                            .push(
-                                word(
-                                    in c.conn.unb_meta.as_slice(),
-                                    wrapping_add(wrapping_mul(moff, 3), k),
-                                ),
-                            );
+                        umeta.push(
+                            word(
+                                in c.conn.unb_meta.as_slice(),
+                                wrapping_add(wrapping_mul(moff, 3), k),
+                            ),
+                        );
                     }
                     fields(
                         inout c,
