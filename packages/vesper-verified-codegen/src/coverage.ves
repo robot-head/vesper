@@ -98,7 +98,8 @@ pub fn rf_is(in rf: Rf, i: u64, in e: VErr) -> bool {
     if u8_at(in rf.kind, i) != e.kind
         || u8_at(in rf.con, i) != e.construct
         || u32_at(in rf.func, i) != e.func
-        || u64_at(in rf.dn, i) != e.detail.len() {
+        || u64_at(in rf.dn, i) != e.detail.len()
+    {
         return false;
     }
     let a = u64_at(in rf.da, i);
@@ -413,7 +414,8 @@ pub fn cover_listing(
                     u64_at(in lw.rf.da, i),
                     u64_at(in lw.rf.dn, i),
                     "(only Fail handlers)"
-                ) {
+                )
+            {
                 rf_kill(inout lw.rf, i);
             }
         }
