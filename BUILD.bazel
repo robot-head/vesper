@@ -653,6 +653,10 @@ vesper_crate(
             "tools/**/*.lean",
             "tests/fixtures/**/*.lean",
             "docs/rfcs/**/*.lean",
+            # The formatter model's inputs beside packages/**: most witnesses
+            # come from the small examples and fixtures.
+            "examples/**/*.ves",
+            "tests/fixtures/**/*.ves",
         ]) + [
             "//crates/vesper-fmt:files",
             "//crates/vesper-lean-syntax:files",
