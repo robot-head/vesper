@@ -20,6 +20,7 @@
 // |     linear extern type Session;
 // |     fn hd_print(stream: u32, nocapture in text: CSlice[u8]) -> ForeignVal[Unit];
 // |     fn hd_help() -> ForeignVal[Unit];
+// |     fn hd_commands_answered() -> ForeignVal[Unit];
 // |     fn hd_session(nocapture in record: CSlice[u8]) -> ForeignVal[Option[Session]];
 // |     fn hd_free(sink s: Session) -> ForeignVal[Unit];
 // |     fn hd_step(inout s: Session, step: u32, nocapture in arg: CSlice[u8]) -> ForeignVal[i64];
@@ -324,6 +325,17 @@ fn value(in o: Options, k: u64) -> ChunkSeq[u8] {
     v
 }
 
+// A command off the compile path, in its Vesper layer; the hybrid counts
+// the ones it answers (`VESPER_HYBRID_STATS=1`).
+fn commands(in args: Args)
+    -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver], Ffi[HybridCommands]] {
+    let code = run_command(in args);
+    if code != delegate() {
+        HybridDriver::hd_commands_answered();
+    }
+    code
+}
+
 // The hybrid's `main` for the compile commands: the process exit code, or
 // `delegate()`.
 pub fn main_code()
@@ -333,7 +345,7 @@ pub fn main_code()
         Option::None => return delegate(),
     };
     if args.ends.len() == 0 {
-        return run_command(in args);
+        return commands(in args);
     }
     let first = match args.ends.try_get(0) {
         Option::Some(e) => e,
@@ -342,7 +354,7 @@ pub fn main_code()
     // Every other command: its Vesper layer (SH5 lane 13, #1336), which
     // hands back (`delegate()`) the commands it does not port yet.
     if command_code(in args.bytes[0..first]) == cmd_none() {
-        return run_command(in args);
+        return commands(in args);
     }
     let p = parse(in args);
     if p.status == parsed_help() {
