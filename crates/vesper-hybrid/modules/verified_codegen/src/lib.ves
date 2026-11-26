@@ -1,0 +1,30 @@
+// @vesper/hybrid-verified-codegen: `verified_codegen::build` (the
+// `compile` behind `vesper build --codegen verified` and the driver's
+// verified build step) served from Vesper in the hybrid Stage 2 build
+// (#1886, part 4d-2).
+//
+// `compile_input_words` takes the target words and the front-half input
+// (written by tests/common/verified_words.rs: check-data's names, types
+// and world, the optimized Place IR program, its expression rows, the
+// monomorphization and lowering extras) and returns two `pack_text`
+// packings: `error: <display>` or the build's summary and certificate,
+// then the artifact's bytes.
+
+// @export abi 4
+
+use @vesper/verified-codegen::{compile_bytes};
+
+// The layout version of `compile_input_words`.
+pub fn format() -> u64 {
+    1
+}
+
+pub fn compile_input_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    divergent(compile_bytes(in input))
+}
+
+// The divergent build (build.rs `divergent-verified-codegen`) swaps this
+// body for one that empties every summary, so every build fails.
+fn divergent(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    words
+}

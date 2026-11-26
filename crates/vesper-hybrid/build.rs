@@ -138,6 +138,14 @@ const DIVERGENT_LEAN_EXTRACT_EDIT: (&str, &str) = (
     "(sink text: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = text;\n    let _ = t.try_set(0, 0);\n    t\n",
 );
 
+/// The verified code generator's divergence check: every summary comes
+/// back empty, so every build fails (mirrored in BUILD.bazel).
+#[cfg(feature = "divergent-verified-codegen")]
+const DIVERGENT_VERIFIED_CODEGEN_EDIT: (&str, &str) = (
+    "(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    words\n",
+    "(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = words;\n    let _ = t.try_set(0, 0);\n    t\n",
+);
+
 /// The stack-bound divergence check: every graph is rejected as malformed
 /// (`divergent_words` in modules/stack_bound), so every report differs.
 #[cfg(feature = "divergent-stack-bound")]
@@ -318,6 +326,15 @@ fn main() {
         #[cfg(feature = "divergent-lean-extract")]
         let port = if library == "hybrid_lean_extract" {
             port.edit(DIVERGENT_LEAN_EXTRACT_EDIT.0, DIVERGENT_LEAN_EXTRACT_EDIT.1)
+        } else {
+            port
+        };
+        #[cfg(feature = "divergent-verified-codegen")]
+        let port = if library == "hybrid_verified_codegen" {
+            port.edit(
+                DIVERGENT_VERIFIED_CODEGEN_EDIT.0,
+                DIVERGENT_VERIFIED_CODEGEN_EDIT.1,
+            )
         } else {
             port
         };

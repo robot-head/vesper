@@ -48,6 +48,10 @@ vesper_hybrid(
             "edit_src": "modules/lean_extract/src/lib.ves",
             "edits": {"(sink text: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    text\n": "(sink text: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = text;\n    let _ = t.try_set(0, 0);\n    t\n"},
         },
+        "hybrid_verified_codegen": {
+            "edit_src": "modules/verified_codegen/src/lib.ves",
+            "edits": {"(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    words\n": "(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = words;\n    let _ = t.try_set(0, 0);\n    t\n"},
+        },
         "hybrid_layout": {
             "edit_src": "modules/layout/src/lib.ves",
             "edits": {"        8\n    } else {\n        0\n": "        16\n    } else {\n        0\n"},
@@ -237,6 +241,15 @@ vesper_hybrid(
             "//:place_ir_package",
             "//crates/vesper-lean-syntax:port_package",
         ],
+        # The verified code generator (#1886) builds on
+        # @vesper/verified-codegen.
+        "hybrid_verified_codegen": [
+            "//:check_data_package",
+            "//:check_layout_package",
+            "//:place_ir_package",
+            "//:std_collections_package",
+            "//:verified_codegen_package",
+        ],
         # The AST optimizer (#1249): its producer and checker.
         "hybrid_optimize": [
             "//:ast_package",
@@ -382,6 +395,8 @@ vesper_hybrid(
             ":bin/vesper-hybrid",
             "//:bin/vesper",
         ],
+        # The verified code generator (#1886) through the CLI.
+        "test/verified_codegen": [":bin/vesper-hybrid"],
         "test/driver": [
             ":bin/vesper-hybrid",
             "//:bin/vesper",
