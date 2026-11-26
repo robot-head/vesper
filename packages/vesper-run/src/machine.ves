@@ -708,7 +708,8 @@ fn perform(inout machine: M, effect: u32, op_name: u32, key: u64) {
         i = wrapping_sub(i, 1);
         let frame = stack_at(in machine, i);
         if frame.kind == FR_HANDLER
-            && site_word(in machine, add(frame.func_index, HS_EFFECT)) == w(effect) {
+            && site_word(in machine, add(frame.func_index, HS_EFFECT)) == w(effect)
+        {
             found = i;
         }
     }

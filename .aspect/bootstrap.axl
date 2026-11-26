@@ -2,8 +2,10 @@
 
 load("./lib/process.axl", "capture", "check", "command", "exit_code", "root_path")
 
-_USAGE = "usage: aspect bootstrap run -- [stage1 [--reproduce] [--record | --outcome] [--require-cross-backend]]"
+_USAGE = "usage: aspect bootstrap run -- [stage1 [--verified-port] [--reproduce] [--record | --outcome] [--require-cross-backend]]"
 _ARTIFACTS = ["*.rlib", "*.rmeta", "*.so", "*.dylib", "*.dll"]
+_STAGE1_CRATES = ["vesper", "vesper_codegen_verified"]
+_VERIFIED_PORT = "vesper_stage1_verified_port"
 
 def _parent(path: str) -> str:
     return path.rpartition("/")[0] or "/"
@@ -14,7 +16,7 @@ def _canonical(ctx: TaskContext, cwd: str, path: str) -> str:
 def _remove_tree(ctx: TaskContext, root: str, path: str):
     check(ctx, "rm", ["-rf", "--", path], root)
 
-def _compile_adapter(ctx: TaskContext, cwd: str, profile: str, source: str, output: str, flags: list[str]):
+def _compile(ctx: TaskContext, cwd: str, profile: str, source: str, output: str, crates: list[str], flags: list[str]):
     patterns = []
     for artifact in _ARTIFACTS:
         if patterns:
@@ -32,7 +34,7 @@ def _compile_adapter(ctx: TaskContext, cwd: str, profile: str, source: str, outp
     argv = ["--edition=2024", "-O", source, "-o", output,
             "--remap-path-prefix=" + source_root + "=/vesper",
             "--remap-path-prefix=" + target_root + "=/target"] + flags
-    for crate in ["vesper", "vesper_codegen_verified"]:
+    for crate in crates:
         argv.extend(["--extern", crate + "=" + profile + "/lib" + crate + ".rlib"])
     for directory in sorted(directories):
         argv.extend(["-L", "dependency=" + directory])
@@ -42,7 +44,7 @@ def _compile_stage1(ctx: TaskContext) -> int:
     values = ctx.args.tool_args
     if len(values) not in [3, 4] or (len(values) == 4 and values[3] != "--test"):
         ctx.std.process.exit(2, "usage: aspect bootstrap compile-stage1 -- PROFILE_DIR SOURCE OUTPUT [--test]")
-    _compile_adapter(ctx, ctx.std.env.current_dir(), values[0], values[1], values[2], values[3:])
+    _compile(ctx, ctx.std.env.current_dir(), values[0], values[1], values[2], _STAGE1_CRATES, values[3:])
     return 0
 
 compile_stage1 = task(
@@ -64,19 +66,39 @@ def _remap_flags(ctx: TaskContext, root: str) -> list[str]:
     return ["--remap-path-prefix=" + root + "=/vesper",
             "--remap-path-prefix=" + root_path(root, cargo_home) + "=/cargo"]
 
-def _build_runner(ctx: TaskContext, root: str, profile: str, profile_dir: str, target: str, runner: str, env: dict[str, str]):
+def _build_verified_port(ctx: TaskContext, root: str, artifacts: str, runner: str, host: str) -> list[str]:
+    directory = _parent(runner)
+    object_file = directory + "/verified-codegen.o"
+    binding = directory + "/verified-codegen.rs"
+    port = root + "/crates/vesper-hybrid/"
+    check(ctx, artifacts + "/vesper", ["build", "--lib", "--lib-name", "hybrid_verified_codegen",
+          "--target", host, port + "modules/verified_codegen", "-o", object_file,
+          "--rust-binding", binding], root)
+    check(ctx, "cmp", [binding, port + "port/verified_codegen.rs"], root)
+    library = directory + "/lib" + _VERIFIED_PORT + ".rlib"
+    _compile(ctx, root, artifacts, root + "/bootstrap/verified_port.rs", library,
+             ["vesper", "vesper_port_abi"], ["--crate-name", _VERIFIED_PORT, "--crate-type", "rlib"])
+    return ["--cfg", _VERIFIED_PORT, "--extern", _VERIFIED_PORT + "=" + library,
+            "-C", "link-arg=" + object_file]
+
+def _build_runner(ctx: TaskContext, root: str, profile: str, profile_dir: str, target: str, runner: str, env: dict[str, str], port_host: str = ""):
     flags = _remap_flags(ctx, root) + ["--remap-path-prefix=" + target + "=/target"]
-    check(ctx, "cargo", ["build", "--locked", "--profile", profile, "--target-dir", target,
-                         "--lib", "-p", "vesper", "-p", "vesper-codegen-verified"], root,
+    build = ["build", "--locked", "--profile", profile, "--target-dir", target,
+             "--lib", "-p", "vesper", "-p", "vesper-codegen-verified"]
+    if port_host:
+        build.extend(["--bin", "vesper", "-p", "vesper-port-abi"])
+    check(ctx, "cargo", build, root,
           dict(env, CARGO_ENCODED_RUSTFLAGS = "\x1f".join(flags)))
-    _compile_adapter(ctx, root, target + "/" + profile_dir, root + "/bootstrap/stage1.rs", runner, [])
+    artifacts = target + "/" + profile_dir
+    adapter_flags = _build_verified_port(ctx, root, artifacts, runner, port_host) if port_host else []
+    _compile(ctx, root, artifacts, root + "/bootstrap/stage1.rs", runner, _STAGE1_CRATES, adapter_flags)
 
 def _stage1(ctx: TaskContext, root: str, values: list[str]) -> int:
     forwarded = []
     for value in values:
         if value in ["--record", "--outcome", "--require-cross-backend"]:
             forwarded.append(value)
-        elif value != "--reproduce":
+        elif value not in ["--reproduce", "--verified-port"]:
             ctx.std.process.exit(2, _USAGE)
     profile, profile_dir = _profile(ctx)
     work = root_path(root, ctx.std.env.var("WORK") or "target/bootstrap-stage1")
@@ -96,6 +118,7 @@ def _stage1(ctx: TaskContext, root: str, values: list[str]) -> int:
     if not hosts or not hosts[0]:
         ctx.std.process.exit(1, "rustc did not report a host target")
     host = hosts[0]
+    port_host = host if "--verified-port" in values else ""
     if "--reproduce" in values:
         for side in ["a", "b"]:
             directory = work + "/repro-" + side
@@ -104,7 +127,7 @@ def _stage1(ctx: TaskContext, root: str, values: list[str]) -> int:
             ctx.std.io.stdout.write("== Stage 1 runner %s (%s) from a clean target directory\n" % (side, profile))
             _remove_tree(ctx, root, directory)
             ctx.std.fs.create_dir_all(directory)
-            _build_runner(ctx, root, profile, profile_dir, target, candidate, env)
+            _build_runner(ctx, root, profile, profile_dir, target, candidate, env, port_host)
             check(ctx, candidate, [root, directory + "/work", host, directory + "/stage1.lock", "--record"], root, env)
             _remove_tree(ctx, root, target)
         lock_a = work + "/repro-a/stage1.lock"
@@ -117,7 +140,7 @@ def _stage1(ctx: TaskContext, root: str, values: list[str]) -> int:
         ctx.std.fs.copy(work + "/repro-b/stage1-runner", runner)
     else:
         target = root_path(root, ctx.std.env.var("CARGO_TARGET_DIR") or work + "/target")
-        _build_runner(ctx, root, profile, profile_dir, target, runner, env)
+        _build_runner(ctx, root, profile, profile_dir, target, runner, env, port_host)
     return exit_code(command(ctx, runner, [root, work, host, out] + forwarded, root, env).status())
 
 def _build_seed(ctx: TaskContext, root: str, work: str, profile: str, profile_dir: str, side: str, env: dict[str, str]):
