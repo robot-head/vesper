@@ -272,11 +272,10 @@ pub fn finish(inout a: Asm) {
                 return;
             }
             let imm = wrapping_u32(rel);
-            let field = (wrapping_shr_u32(imm, 20) & 1)
-                << 31 | (wrapping_shr_u32(imm, 1) & 1023)
-                << 21 | (wrapping_shr_u32(imm, 11) & 1)
-                << 20 | (wrapping_shr_u32(imm, 12) & 255)
-                << 12;
+            let field = (wrapping_shr_u32(imm, 20) & 1) << 31
+                | (wrapping_shr_u32(imm, 1) & 1023) << 21
+                | (wrapping_shr_u32(imm, 11) & 1) << 20
+                | (wrapping_shr_u32(imm, 12) & 255) << 12;
             or32(inout a, f.at, field);
         } else if f.kind == FIX_AUIPC_JALR {
             let rel = wrapping_sub(target, f.at);
@@ -292,16 +291,8 @@ pub fn finish(inout a: Asm) {
         } else {
             // Imm26 and Imm19: a word offset.
             let words = wrapping_u64(wrapping_i64(wrapping_sub(target, f.at)) / 4);
-            let bits: u32 = if f.kind == FIX_IMM26 {
-                26
-            } else {
-                19
-            };
-            let shift: u32 = if f.kind == FIX_IMM26 {
-                0
-            } else {
-                5
-            };
+            let bits: u32 = if f.kind == FIX_IMM26 { 26 } else { 19 };
+            let shift: u32 = if f.kind == FIX_IMM26 { 0 } else { 5 };
             if !fits(words, bits) {
                 fail(inout a, ERR_LIMIT, WHY_AARCH64_RANGE, 0);
                 return;

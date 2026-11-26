@@ -13,6 +13,7 @@ test {
     use self::seq_tests::{check_sets, check_radix_seq, check_version};
     use self::string_tests::check_fmt_string;
     use self::control_tests::check_core_control;
+    use self::errdefer_tests::check_core_errdefer;
     use self::scratch_tests::check_core_scratch;
     use self::traces::{map_trace, seq_trace};
 
@@ -46,6 +47,7 @@ test {
         r = first_failure(14, check_fmt_string(), r);
         r = first_failure(15, check_core_control(), r);
         r = first_failure(16, check_core_scratch(), r);
+        r = first_failure(17, check_core_errdefer(), r);
         r
     }
 
@@ -133,13 +135,7 @@ test {
 
     fn mask(inout log: u64, enabled: bool) -> SecMask64 eff [ConstTime] {
         let three = mark(inout log, 3);
-        let other = SecU64 {
-            value: if enabled {
-                3
-            } else {
-                4
-            }
-        };
+        let other = SecU64 { value: if enabled { 3 } else { 4 } };
         three.ct_eq(other)
     }
 

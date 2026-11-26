@@ -19,11 +19,10 @@ fn set_pacing_rate(inout b: Bbrv3) {
 }
 
 fn set_send_quantum(inout b: Bbrv3) {
-    b
-        .send_quantum = max(
-            min(b.pacing_rate / MILLIS_PER_SEC, MAX_SEND_QUANTUM),
-            wrapping_mul(b.smss, 2)
-        );
+    b.send_quantum = max(
+        min(b.pacing_rate / MILLIS_PER_SEC, MAX_SEND_QUANTUM),
+        wrapping_mul(b.smss, 2)
+    );
 }
 
 fn bdp_multiple(inout b: Bbrv3, gain: u64) -> u64 {
@@ -108,11 +107,7 @@ pub fn inflight_at_loss(size: u64, tx_in_flight: u64, lost: u64) -> u64 {
     let (l2, h2) = mul_wide(lost_prev, Gain::Unit);
     let positive = h1 > h2 || (h1 == h2 && l1 > l2);
     let lost_prefix = if positive {
-        let borrow: u64 = if l1 < l2 {
-            1
-        } else {
-            0
-        };
+        let borrow: u64 = if l1 < l2 { 1 } else { 0 };
         let lo = wrapping_sub(l1, l2);
         let hi = wrapping_sub(wrapping_sub(h1, h2), borrow);
         div_wide_sat(hi, lo, Gain::UnitMinusLossThresh)

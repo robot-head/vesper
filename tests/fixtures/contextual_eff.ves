@@ -27,8 +27,8 @@ fn main() -> u64 {
     let eff = 40;
     let row = Row { eff };
     let Row { eff: inner } = row;
-    let g = | x: u64 | eff;
-    let h = | x: u64 | -> u64 eff [] {
+    let g = |x: u64| eff;
+    let h = |x: u64| -> u64 eff [] {
         wrapping_add(x, inner)
     };
     let total = match apply(h, row.eff()) {

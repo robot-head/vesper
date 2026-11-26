@@ -101,21 +101,9 @@ fn checksum() -> u64 eff [Fail[RuntimeError]] {
     };
     total = wrapping_add(wrapping_mul(total, 1000003), rejected);
     let mut scratch = "temporary";
-    let surrogate: u64 = if scratch.push_char(55296) {
-        1
-    } else {
-        0
-    };
-    let too_big: u64 = if scratch.push_char(1114112) {
-        1
-    } else {
-        0
-    };
-    let top: u64 = if scratch.push_char(1114111) {
-        1
-    } else {
-        0
-    };
+    let surrogate: u64 = if scratch.push_char(55296) { 1 } else { 0 };
+    let too_big: u64 = if scratch.push_char(1114112) { 1 } else { 0 };
+    let top: u64 = if scratch.push_char(1114111) { 1 } else { 0 };
     total = wrapping_add(
         wrapping_mul(total, 1000003),
         wrapping_add(wrapping_mul(surrogate, 4), wrapping_add(wrapping_mul(too_big, 2), top))

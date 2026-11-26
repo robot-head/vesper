@@ -1,6 +1,7 @@
 // Unit tests for @vesper-std/core.
 test {
     use @vesper-std/core::{min, max, clamp, ordering_sign, reverse, then_cmp};
+    use @vesper-std/core::iter::max as max_of;
     use @vesper-std/core::mem::swap as swap_places;
     use @vesper-std/core::option::{
         is_some, is_none, unwrap_or, unwrap_or_else, unwrap, map as option_map, map_or,
@@ -37,6 +38,8 @@ test {
         let mut fields = SwapFields { left: 7, right: 42 };
         swap_places inout fields.left with inout fields.right;
         r = check(fields.left == 42 && fields.right == 7, 12, r);
+        let largest = max_of{ { value }: u64 | value in [fields.left, fields.right] };
+        r = check(largest == Option::Some(max(fields.left, fields.right)), 13, r);
         r
     }
 
@@ -73,7 +76,7 @@ test {
             some_u64(
                 option_map(
                     some,
-                    | x: u64 | -> u64 {
+                    |x: u64| -> u64 {
                         wrapping_add(x, 1)
                     }
                 ),
@@ -86,7 +89,7 @@ test {
             is_none(
                 option_map(
                     none,
-                    | x: u64 | -> u64 {
+                    |x: u64| -> u64 {
                         x
                     }
                 )
@@ -98,7 +101,7 @@ test {
             map_or(
                 some,
                 0,
-                | x: u64 | -> u64 {
+                |x: u64| -> u64 {
                     wrapping_mul(x, 10)
                 }
             )
@@ -110,7 +113,7 @@ test {
             map_or(
                 none,
                 3,
-                | x: u64 | -> u64 {
+                |x: u64| -> u64 {
                     x
                 }
             )
@@ -120,7 +123,7 @@ test {
         );
         let half = option_and_then(
             some,
-            | x: u64 | -> Option[u64] {
+            |x: u64| -> Option[u64] {
                 if x % 2 == 0 {
                     Option::Some(x / 2)
                 } else {
@@ -134,7 +137,7 @@ test {
             is_none(
                 filter(
                     some,
-                    | x: u64 | -> bool {
+                    |x: u64| -> bool {
                         x > 10
                     }
                 )
@@ -146,7 +149,7 @@ test {
             some_u64(
                 filter(
                     some,
-                    | x: u64 | -> bool {
+                    |x: u64| -> bool {
                         x < 10
                     }
                 ),
@@ -189,7 +192,7 @@ test {
         r = check(
             result_unwrap_or_else(
                 bad,
-                | e: u64 | -> u64 {
+                |e: u64| -> u64 {
                     wrapping_mul(e, 2)
                 }
             )
@@ -200,7 +203,7 @@ test {
         r = check(
             result_unwrap_or_else(
                 good,
-                | e: u64 | -> u64 {
+                |e: u64| -> u64 {
                     e
                 }
             )
@@ -210,7 +213,7 @@ test {
         );
         let doubled = result_map(
             good,
-            | x: u64 | -> u64 {
+            |x: u64| -> u64 {
                 wrapping_mul(x, 2)
             }
         );
@@ -219,7 +222,7 @@ test {
             is_err(
                 result_map(
                     bad,
-                    | x: u64 | -> u64 {
+                    |x: u64| -> u64 {
                         x
                     }
                 )
@@ -229,7 +232,7 @@ test {
         );
         let relabeled = map_err(
             bad,
-            | e: u64 | -> u64 {
+            |e: u64| -> u64 {
                 wrapping_add(e, 100)
             }
         );
@@ -239,7 +242,7 @@ test {
                 ok(
                     map_err(
                         good,
-                        | e: u64 | -> u64 {
+                        |e: u64| -> u64 {
                             e
                         }
                     )
@@ -251,12 +254,8 @@ test {
         );
         let chained = result_and_then(
             good,
-            | x: u64 | -> Result[u64, u64] {
-                if x > 5 {
-                    Result::Err(x)
-                } else {
-                    Result::Ok(x)
-                }
+            |x: u64| -> Result[u64, u64] {
+                if x > 5 { Result::Err(x) } else { Result::Ok(x) }
             }
         );
         r = check(some_u64(err(chained), 6), 12, r);
@@ -264,7 +263,7 @@ test {
             is_err(
                 result_and_then(
                     bad,
-                    | x: u64 | -> Result[u64, u64] {
+                    |x: u64| -> Result[u64, u64] {
                         Result::Ok(x)
                     }
                 )

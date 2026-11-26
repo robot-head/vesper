@@ -79,11 +79,7 @@ struct LinkState {
 }
 
 fn max(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn at(in s: ChunkSeq[u64], i: u64) -> u64 {
@@ -480,11 +476,7 @@ fn remove_words(inout s: ChunkSeq[u64], start: u64, width: u64) {
 }
 
 fn min(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // The index of `endpoint` in `endpoints`, or its length when unknown.
@@ -1237,11 +1229,7 @@ pub fn wal_state_fail_flush(inout w: WalState) -> WalResult {
 // records reach the medium whole and, if a further record exists, `torn`
 // bytes of its frame (clamped below the full frame) follow.
 pub fn wal_state_crash(inout w: WalState, persisted: u64, torn: u64) -> WalCrash {
-    let in_flight = if w.flushing {
-        w.in_flight
-    } else {
-        0
-    };
+    let in_flight = if w.flushing { w.in_flight } else { 0 };
     let persisted = min(persisted, in_flight);
     let whole = pending_bytes(in w, persisted);
     persist(inout w, 0, whole);

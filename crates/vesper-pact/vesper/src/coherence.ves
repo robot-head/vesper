@@ -162,11 +162,7 @@ pub fn conformance_env(inout s: S, c: u64) -> u64 {
                 }
                 let m = field_a(in s, bd);
                 let old = word_at(in bounds, p);
-                let nb = if old == none() || m < old {
-                    m
-                } else {
-                    old
-                };
+                let nb = if old == none() || m < old { m } else { old };
                 let _ = bounds.try_set(p, nb);
             }
         } else {
@@ -299,11 +295,7 @@ fn well_formed(inout s: S, c: u64, sv: u64, sa: u64) {
     let nv = kid_count(in s, vals);
     let nas = word_at(in s.tr_as_n, t);
     let at = word_at(in s.tr_as_at, t);
-    let n = if nv < nas {
-        nv
-    } else {
-        nas
-    };
+    let n = if nv < nas { nv } else { nas };
     let mut ai: u64 = 0;
     loop {
         if ai >= n {

@@ -218,11 +218,7 @@ fn merge(inout c: C, a: u64, b: u64) -> u64 {
         let f = c.tmp.len();
         push_offer(inout c, a);
         let mut n = wrapping_sub(c.tmp.len(), f) / Br::Words;
-        let nbb = if tb == LTag::Recv {
-            1
-        } else {
-            lkn(in c, b)
-        };
+        let nbb = if tb == LTag::Recv { 1 } else { lkn(in c, b) };
         for k in 0..nbb {
             let (bl, bp, bn) = if tb == LTag::Recv {
                 (lb(in c, b), lc(in c, b), ld(in c, b))

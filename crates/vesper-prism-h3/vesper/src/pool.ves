@@ -231,11 +231,7 @@ pub fn q_push(inout p: BytePool, q: u64, in src: Slice[u8]) -> u64 {
     if total == 0 {
         return q;
     }
-    let cur_q = if q == 0 {
-        alloc_q(inout p)
-    } else {
-        q
-    };
+    let cur_q = if q == 0 { alloc_q(inout p) } else { q };
     let qi = wrapping_sub(cur_q, 1);
     let mut at: u64 = 0;
     let tail = word(in p.q_tail.as_slice(), qi);
@@ -372,11 +368,7 @@ pub fn q_transfer(inout p: BytePool, from_q: u64, to_q: u64, n: u64) -> PoolTran
             moved: 0,
         };
     }
-    let dst_q = if to_q == 0 {
-        alloc_q(inout p)
-    } else {
-        to_q
-    };
+    let dst_q = if to_q == 0 { alloc_q(inout p) } else { to_q };
     let dst_qi = wrapping_sub(dst_q, 1);
     let mut cur_from = from_q;
     let mut rem = total;
@@ -470,13 +462,14 @@ pub fn put_u64_le(inout out: ChunkSeq[u8], v: u64) {
 }
 
 pub fn get_u64_le(in s: Slice[u8], at: u64) -> u64 {
-    widen_u64(byte(in s, at)) | (widen_u64(byte(in s, wrapping_add(at, 1))) << 8) | (
-        widen_u64(byte(in s, wrapping_add(at, 2))) << 16
-    ) | (widen_u64(byte(in s, wrapping_add(at, 3))) << 24) | (
-        widen_u64(byte(in s, wrapping_add(at, 4))) << 32
-    ) | (widen_u64(byte(in s, wrapping_add(at, 5))) << 40) | (
-        widen_u64(byte(in s, wrapping_add(at, 6))) << 48
-    ) | (widen_u64(byte(in s, wrapping_add(at, 7))) << 56)
+    widen_u64(byte(in s, at))
+        | (widen_u64(byte(in s, wrapping_add(at, 1))) << 8)
+        | (widen_u64(byte(in s, wrapping_add(at, 2))) << 16)
+        | (widen_u64(byte(in s, wrapping_add(at, 3))) << 24)
+        | (widen_u64(byte(in s, wrapping_add(at, 4))) << 32)
+        | (widen_u64(byte(in s, wrapping_add(at, 5))) << 40)
+        | (widen_u64(byte(in s, wrapping_add(at, 6))) << 48)
+        | (widen_u64(byte(in s, wrapping_add(at, 7))) << 56)
 }
 
 pub fn q_drain_all_to(inout p: BytePool, q: u64, inout out: ChunkSeq[u8]) -> PoolRange {

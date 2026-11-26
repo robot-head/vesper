@@ -7,11 +7,7 @@ pub trait Score {
 pub fn best[T: mod copy + Score](a: T, b: T) -> i64 {
     let x = a.score();
     let y = b.score();
-    if x > y {
-        x
-    } else {
-        y
-    }
+    if x > y { x } else { y }
 }
 
 // A module-level type named like a generic parameter: the bound

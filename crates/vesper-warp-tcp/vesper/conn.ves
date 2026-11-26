@@ -286,11 +286,7 @@ fn seg_data_start(s: SentSeg) -> u64 {
 }
 
 fn seg_data_end(s: SentSeg) -> u64 {
-    let e = if s.fin {
-        wrapping_sub(s.end, 1)
-    } else {
-        s.end
-    };
+    let e = if s.fin { wrapping_sub(s.end, 1) } else { s.end };
     max64(e, seg_data_start(s))
 }
 
@@ -350,11 +346,7 @@ fn sq_pipe_part(s: SentSeg) -> u64 {
 
 // What an entry adds to `sent_lost`.
 fn sq_lost_part(s: SentSeg) -> u64 {
-    if s.lost && !s.sacked {
-        1
-    } else {
-        0
-    }
+    if s.lost && !s.sacked { 1 } else { 0 }
 }
 
 fn sq_count_in(inout t: Tcb, s: SentSeg) {

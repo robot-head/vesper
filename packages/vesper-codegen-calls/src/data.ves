@@ -153,11 +153,7 @@ impl Calls {
     // The function named `s` as an index, or NONE32.
     pub fn function(in self, s: u32) -> u32 {
         let x = u32_at(in self.fn_by_name, w(s));
-        if x == 0 {
-            NONE32
-        } else {
-            wrapping_sub(x, 1)
-        }
+        if x == 0 { NONE32 } else { wrapping_sub(x, 1) }
     }
 
     pub fn param(in self, i: u64) -> ParamInfo {
@@ -345,23 +341,21 @@ pub fn read_calls(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Calls {
             n32(wrapping_sub(body, 1))
         };
         set_by_symbol(inout d.fn_by_name, name, inc32(n32(d.fns.len())));
-        d
-            .fns
-            .push(
-                FnInfo {
-                    name: name,
-                    fip: fip,
-                    s0: s0,
-                    s1: s1,
-                    ga: ga,
-                    gn: n32(ng),
-                    pa: pa,
-                    pn: n32(np),
-                    result: result,
-                    row: row,
-                    body: root
-                }
-            );
+        d.fns.push(
+            FnInfo {
+                name: name,
+                fip: fip,
+                s0: s0,
+                s1: s1,
+                ga: ga,
+                gn: n32(ng),
+                pa: pa,
+                pn: n32(np),
+                result: result,
+                row: row,
+                body: root
+            }
+        );
     }
     let ne = r.word(in b);
     for i in 0..ne {
@@ -376,8 +370,7 @@ pub fn read_calls(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Calls {
         };
         let children = n32(r.word(in b));
         let size = n32(r.word(in b));
-        d
-            .exprs
+        d.exprs
             .push(ExprNode { kind: kind, s0: s0, s1: s1, sym: s, children: children, size: size });
     }
     let nc = r.word(in b);
@@ -416,17 +409,15 @@ pub fn read_calls(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Calls {
     for i in 0..nt {
         let entry = sym(in c, r.word(in b));
         let flags = r.word(in b);
-        d
-            .tasks
-            .push(
-                Task {
-                    entry: entry,
-                    optimize: flags & 1 != 0,
-                    trace: flags & 2 != 0,
-                    library: flags & 4 != 0,
-                    more: flags & 8 != 0
-                }
-            );
+        d.tasks.push(
+            Task {
+                entry: entry,
+                optimize: flags & 1 != 0,
+                trace: flags & 2 != 0,
+                library: flags & 4 != 0,
+                more: flags & 8 != 0
+            }
+        );
     }
     d
 }

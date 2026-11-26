@@ -54,11 +54,7 @@ pub fn combine(in t: Table, a: u64, b: u64) -> u64 eff [Ffi[Ops]] {
 
 // One pointer out of the table, as a value of its own.
 pub fn pick(t: Table, mul: bool) -> Binary {
-    if mul {
-        t.mul
-    } else {
-        t.add
-    }
+    if mul { t.mul } else { t.add }
 }
 
 // Calls a pointer Rust handed back.

@@ -126,11 +126,7 @@ fn c_name_primary(
     let t = c_token(at);
     let special = c_word(at, 0x726567696f6e)
         || (t.end - t.start >= 6 && word(t.start, t.start + 6) == 0x777261707069);
-    let valid = if special {
-        c_unsupported(4, at)
-    } else {
-        0
-    };
+    let valid = if special { c_unsupported(4, at) } else { 0 };
     let slot = c_lookup(env, t, env.count);
     if slot >= 0 {
         c_result(
@@ -165,23 +161,11 @@ fn c_nominal_primary(
         || c_word(at, 0x457272)
         || c_word(at, 0x536f6d65)
         || c_word(at, 0x4e6f6e65);
-    let valid = if special {
-        c_unsupported(8, at)
-    } else {
-        0
-    };
+    let valid = if special { c_unsupported(8, at) } else { 0 };
     let qualified = c_kind(t.end) == 41;
-    let variant = if qualified {
-        c_token(c_next(t.end))
-    } else {
-        t
-    };
+    let variant = if qualified { c_token(c_next(t.end)) } else { t };
     let ctor = c_ctor_find(t, variant, qualified, 0);
-    let next = if qualified {
-        variant.end
-    } else {
-        t.end
-    };
+    let next = if qualified { variant.end } else { t.end };
     let ty = CType { tag: 3, at: ctor.adt.name.start };
     if ctor.fields < 0 && c_kind(next) == 32 {
         let end = c_group(next, 0);
@@ -288,14 +272,7 @@ fn c_postfix(
 ) -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let k = c_kind(value.next);
     if k == 42 || k == 43 || k == 36 {
-        let unsupported = c_unsupported(
-            if k == 42 {
-                6
-            } else {
-                4
-            },
-            value.next
-        );
+        let unsupported = c_unsupported(if k == 42 { 6 } else { 4 }, value.next);
         value
     } else if k == 32 {
         let end = c_group(value.next, 0);

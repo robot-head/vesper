@@ -486,11 +486,7 @@ pub fn validate_program(inout s: S) {
         }
         let id = word_at(in s.cf_id, i);
         let is_impl = i < s.nimpl;
-        let pos = if is_impl {
-            i
-        } else {
-            sub(i, s.nimpl)
-        };
+        let pos = if is_impl { i } else { sub(i, s.nimpl) };
         if id != pos {
             if is_impl {
                 dense(inout s, "impl", pos, "impl", id);
@@ -498,11 +494,7 @@ pub fn validate_program(inout s: S) {
                 dense(inout s, "model", pos, "model", id);
             }
         }
-        let sv: u64 = if is_impl {
-            4
-        } else {
-            6
-        };
+        let sv: u64 = if is_impl { 4 } else { 6 };
         v_conformance(inout s, i, sv, id);
         i = inc(i);
     }

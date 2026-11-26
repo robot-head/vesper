@@ -145,11 +145,7 @@ fn node(inout b: Pb, depth: u64) -> Unit eff [Fail[GErr]] {
 fn reserve(inout b: Pb, len: u64, inout cap: u64) -> Unit eff [Fail[GErr]] {
     if len == cap {
         let old = cap;
-        let doubled = if old == 0 {
-            4
-        } else {
-            mul_or(old, 2, 10, 0)
-        };
+        let doubled = if old == 0 { 4 } else { mul_or(old, 2, 10, 0) };
         let next = min(doubled, b.max_nodes);
         if next <= old {
             fail(16, 0);
@@ -439,11 +435,7 @@ fn message(
         if number == previous && (!repeated || numeric(kind)) {
             fail(4, at);
         }
-        let expected = if packed {
-            2
-        } else {
-            wire(kind)
-        };
+        let expected = if packed { 2 } else { wire(kind) };
         if w != expected {
             fail(6, at);
         }
@@ -529,11 +521,7 @@ fn scalar(in input: Slice[u8], inout b: Pb, kind: u64, end: u64) -> u64 eff [Fai
                 Option::Some(v) => widen_u64(v),
                 Option::None => 0,
             };
-            return if kind == K_SFIXED32 {
-                sext32(v)
-            } else {
-                v
-            };
+            return if kind == K_SFIXED32 { sext32(v) } else { v };
         }
         return match input.try_read_u64_le(at) {
             Option::Some(v) => v,
@@ -559,11 +547,7 @@ fn scalar(in input: Slice[u8], inout b: Pb, kind: u64, end: u64) -> u64 eff [Fai
             fail(10, at);
         }
         let half = n >> 1;
-        let v = if n & 1 == 0 {
-            half
-        } else {
-            (~half) & U32_MAX
-        };
+        let v = if n & 1 == 0 { half } else { (~half) & U32_MAX };
         sext32(v)
     } else if kind == K_SINT64 {
         (n >> 1) ^ wrapping_sub(0, n & 1)
@@ -584,18 +568,10 @@ fn scalar(in input: Slice[u8], inout b: Pb, kind: u64, end: u64) -> u64 eff [Fai
 fn var_bits(tag: u64, x: u64) -> u64 {
     if tag == K_SINT32 {
         let n = x & U32_MAX;
-        let neg: u64 = if n >= I32_SIGN {
-            U32_MAX
-        } else {
-            0
-        };
+        let neg: u64 = if n >= I32_SIGN { U32_MAX } else { 0 };
         ((n << 1) & U32_MAX) ^ neg
     } else if tag == K_SINT64 {
-        let neg: u64 = if x >= I64_SIGN {
-            ALL_ONES
-        } else {
-            0
-        };
+        let neg: u64 = if x >= I64_SIGN { ALL_ONES } else { 0 };
         ((x & LOW_63_BITS) << 1) ^ neg
     } else {
         x

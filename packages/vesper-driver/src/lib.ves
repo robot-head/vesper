@@ -541,10 +541,9 @@ fn verifier_list(in list: Slice[u8], inout err: ChunkSeq[u8]) -> u64 {
             if v == 0 {
                 err.extend(in "unknown verifier '".as_bytes());
                 err.extend(in item);
-                err
-                    .extend(
-                        in "'; expected const-time, stack, realtime, detfloat or all".as_bytes()
-                    );
+                err.extend(
+                    in "'; expected const-time, stack, realtime, detfloat or all".as_bytes()
+                );
                 return 0;
             }
             bits = bits | v;
@@ -880,19 +879,17 @@ pub fn package_checks(in o: Options, inout err: ChunkSeq[u8]) {
 // parsed by the Rust pass). Appends the message to `err` when one fails.
 pub fn lib_job_checks(in o: Options, inout err: ChunkSeq[u8]) {
     if o.command != cmd_build() || !o.lib {
-        err
-            .extend(
-                in "--lib-name, --interface, --rust-binding and --instance require build --lib"
-                    .as_bytes()
-            );
+        err.extend(
+            in "--lib-name, --interface, --rust-binding and --instance require build --lib"
+                .as_bytes()
+        );
         return;
     }
     if exclusive(in o) {
-        err
-            .extend(
-                in "--verify, --verify-policy, --tee and --codegen do not apply to build --lib yet"
-                    .as_bytes()
-            );
+        err.extend(
+            in "--verify, --verify-policy, --tee and --codegen do not apply to build --lib yet"
+                .as_bytes()
+        );
         return;
     }
     if has(in o, slot_rust_types()) && !has(in o, slot_rust_binding()) {

@@ -24,14 +24,14 @@ fn decode(in s: Slice[u8], i: u64, n: u64) -> u64 {
         return ((b0 & 31) << 6) | low6(in s, wrapping_add(i, 1));
     }
     if n == 3 {
-        return ((b0 & 15) << 12) | (low6(in s, wrapping_add(i, 1)) << 6) | low6(
-            in s,
-            wrapping_add(i, 2)
-        );
+        return ((b0 & 15) << 12)
+            | (low6(in s, wrapping_add(i, 1)) << 6)
+            | low6(in s, wrapping_add(i, 2));
     }
-    ((b0 & 7) << 18) | (low6(in s, wrapping_add(i, 1)) << 12) | (
-        low6(in s, wrapping_add(i, 2)) << 6
-    ) | low6(in s, wrapping_add(i, 3))
+    ((b0 & 7) << 18)
+        | (low6(in s, wrapping_add(i, 1)) << 12)
+        | (low6(in s, wrapping_add(i, 2)) << 6)
+        | low6(in s, wrapping_add(i, 3))
 }
 
 fn encode(inout out: ChunkSeq[u8], c: u64) {
@@ -69,11 +69,7 @@ fn back(in s: Slice[u8], i: u64) -> u64 {
 
 fn char_len(in s: Slice[u8], i: u64) -> u64 {
     let n = seq_len(in s, i);
-    if n == 0 {
-        1
-    } else {
-        n
-    }
+    if n == 0 { 1 } else { n }
 }
 
 // Whether the first char before `i` that is not case-ignorable is cased.

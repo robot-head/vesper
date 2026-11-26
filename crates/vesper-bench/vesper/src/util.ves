@@ -99,11 +99,7 @@ pub fn mul(a: u64, b: u64) -> u64 {
 }
 
 pub fn min_u64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // `a / b` and `a % b` for b > 0 (0 for b = 0, which no caller passes).
@@ -234,11 +230,7 @@ pub fn sort_w(inout s: ChunkSeq[W], n: u64, unsigned: bool) {
 }
 
 fn w_less(a: W, b: W, unsigned: bool) -> bool {
-    if unsigned {
-        w_ult(a, b)
-    } else {
-        w_slt(a, b)
-    }
+    if unsigned { w_ult(a, b) } else { w_slt(a, b) }
 }
 
 fn sift_w(inout s: ChunkSeq[W], start: u64, n: u64, unsigned: bool) {

@@ -207,7 +207,7 @@ test {
     fn test_map_and_map_or(input: Option[u8], mapped: Option[u16], resolved: u16) -> bool {
         let actual = map(
             input,
-            | x: u8 | -> u16 {
+            |x: u8| -> u16 {
                 wrapping_add(wrapping_u16(x), 1)
             }
         );
@@ -215,7 +215,7 @@ test {
             && map_or(
                 input,
                 99,
-                | x: u8 | -> u16 {
+                |x: u8| -> u16 {
                     wrapping_add(wrapping_u16(x), 1)
                 }
             )
@@ -228,7 +228,7 @@ test {
     fn test_and_then(input: Option[u64], expected: Option[u64]) -> bool {
         and_then(
             input,
-            | x: u64 | -> Option[u64] {
+            |x: u64| -> Option[u64] {
                 if (x & 1) == 0 {
                     Option::Some(x >> 1)
                 } else {
@@ -253,7 +253,7 @@ test {
     fn test_filter(input: Option[u64], expected: Option[u64]) -> bool {
         filter(
             input,
-            | x: u64 | -> bool {
+            |x: u64| -> bool {
                 x > 8
             }
         )

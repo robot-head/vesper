@@ -11,11 +11,7 @@ pub fn add(a: u64, b: u64) -> u64 {
 }
 
 pub fn max64(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 pub fn narrow(x: u64) -> u32 {
@@ -96,11 +92,7 @@ fn word_slow(in b: Slice[u8], at: u64, len: u64) -> u64 {
 // Saturating u64 arithmetic (the or-pattern expansion budget).
 pub fn saturating_add_u64(a: u64, b: u64) -> u64 {
     let s = wrapping_add(a, b);
-    if s < a {
-        18446744073709551615
-    } else {
-        s
-    }
+    if s < a { 18446744073709551615 } else { s }
 }
 
 pub fn saturating_mul_u64(a: u64, b: u64) -> u64 {
@@ -108,27 +100,15 @@ pub fn saturating_mul_u64(a: u64, b: u64) -> u64 {
     if (a >> 32) != 0 && (b >> 32) != 0 {
         return max;
     }
-    let big = if a > b {
-        a
-    } else {
-        b
-    };
-    let small = if a > b {
-        b
-    } else {
-        a
-    };
+    let big = if a > b { a } else { b };
+    let small = if a > b { b } else { a };
     let hi = wrapping_mul(big >> 32, small);
     if (hi >> 32) != 0 {
         return max;
     }
     let lo = wrapping_mul(big & 4294967295, small);
     let sum = wrapping_add(lo, wrapping_shl_u64(hi, 32));
-    if sum < lo {
-        max
-    } else {
-        sum
-    }
+    if sum < lo { max } else { sum }
 }
 
 test {

@@ -1,0 +1,1349 @@
+// Source expression macros: crates/vesper-syntax/src/macro_source.rs
+// (`macro_source::parse`, the strict Tier 1 expression macro profile) and
+// macro_source/mixed.rs (`validate_surface`, the macro check of the
+// surface profile). Syntax only: no checking, expansion or execution.
+//
+// `parse` keeps what the Rust `MacroSource` records about the source as
+// rows (`MacroSource` below): the definitions and their parameters, the
+// functions with their invocations and header parameter names, and the
+// invocations with their arguments. The support items (the Rust parser's
+// AST of the non-macro declarations) are not kept: they are parsed (and
+// their errors reported) but nothing here reads them.
+//
+// Budgets are the Rust ones word for word, including the metadata budget,
+// which charges the sizes of the Rust records (`size_of`, checked by
+// tests/self_host_front_v2.rs).
+
+use self::{Tokens, Diags, P};
+use self::kinds::{
+    k_upper, k_lower, k_int, k_string, k_struct, k_enum, k_effect, k_fn, k_let, k_copy, k_affine,
+    k_linear, k_in, k_inout, k_sink, k_self_kw, k_true, k_false, k_l_paren, k_r_paren, k_l_brace,
+    k_r_brace, k_l_bracket, k_r_bracket, k_comma, k_semi, k_colon, k_colon_colon, k_arrow, k_eq,
+    k_bang, k_eof, k_dollar, k_dot_dot
+};
+use self::util::{
+    inc, add, narrow, byte, u8_at, u32_at, u64_at, w32, saturating_add_u64, saturating_mul_u64
+};
+use self::diag::{diags_new, diag_push};
+use self::lex::{lex_with_limits, trivia_kind, token_end};
+use self::parse::{ranged_parser, ranged_reset, source_header, source_item, parse_surface_tokens};
+use self::recover::{ranged_tokens};
+use self::tree::{tree_new, build_events};
+
+fn none() -> u64 {
+    18446744073709551615
+}
+
+// ---------------------------------------------------------------- limits
+
+// `macro_source::Limits`.
+pub copy struct MacroLimits {
+    pub max_source_bytes: u64,
+    pub max_tokens: u64,
+    pub max_macros: u64,
+    pub max_functions: u64,
+    pub max_invocations: u64,
+    pub max_parameters: u64,
+    pub max_depth: u64,
+    pub max_metadata_bytes: u64,
+    pub max_work: u64
+}
+
+// `Limits::default()`.
+pub fn macro_limits_default() -> MacroLimits {
+    MacroLimits {
+        max_source_bytes: 131072,
+        max_tokens: 16384,
+        max_macros: 32,
+        max_functions: 128,
+        max_invocations: 256,
+        max_parameters: 8,
+        max_depth: 48,
+        max_metadata_bytes: 1048576,
+        max_work: 16777216
+    }
+}
+
+// `Limits::HARD`.
+pub fn macro_limits_hard() -> MacroLimits {
+    MacroLimits {
+        max_source_bytes: 1048576,
+        max_tokens: 65536,
+        max_macros: 128,
+        max_functions: 1024,
+        max_invocations: 4096,
+        max_parameters: 32,
+        max_depth: 128,
+        max_metadata_bytes: 16777216,
+        max_work: 134217728
+    }
+}
+
+// ---------------------------------------------------------------- errors
+
+// `macro_source::Error`: `code` is 0 for none, then the `ErrorKind` in
+// order (1 InvalidLimits, 2 Lexical, 3 Syntax, 4 Unsupported, 5
+// UnknownMacro, 6 Arity, 7 DuplicateName, 8 ForeignId, 9 Allocation) and
+// 10 plus the `Resource` for `Budget` (0 Source, 1 Tokens, 2 Macros, 3
+// Functions, 4 Invocations, 5 Parameters, 6 Depth, 7 Metadata, 8 Work);
+// `start` is u64::MAX when the error has no span.
+pub copy struct MacroError {
+    pub code: u64,
+    pub start: u64,
+    pub end: u64
+}
+
+pub const ME_INVALID_LIMITS: u64 = 1;
+pub const ME_LEXICAL: u64 = 2;
+pub const ME_SYNTAX: u64 = 3;
+pub const ME_UNSUPPORTED: u64 = 4;
+pub const ME_UNKNOWN_MACRO: u64 = 5;
+pub const ME_ARITY: u64 = 6;
+pub const ME_DUPLICATE_NAME: u64 = 7;
+pub const ME_BUDGET: u64 = 10;
+
+const R_SOURCE: u64 = 0;
+const R_TOKENS: u64 = 1;
+const R_MACROS: u64 = 2;
+const R_FUNCTIONS: u64 = 3;
+const R_INVOCATIONS: u64 = 4;
+const R_PARAMETERS: u64 = 5;
+const R_DEPTH: u64 = 6;
+const R_METADATA: u64 = 7;
+const R_WORK: u64 = 8;
+
+// `size_of` of the Rust records the metadata budget charges.
+const SIZE_DEFINITION: u64 = 112;
+const SIZE_PARAMETER: u64 = 32;
+const SIZE_FUNCTION: u64 = 352;
+const SIZE_SPAN_VEC: u64 = 24;
+const SIZE_INVOCATION_ID: u64 = 40;
+const SIZE_INVOCATION: u64 = 176;
+const SIZE_SPAN: u64 = 16;
+const SIZE_KIND: u64 = 2;
+const SIZE_TOKEN: u64 = 24;
+const SIZE_USIZE: u64 = 8;
+
+// The `Display` text of an error.
+pub fn macro_error_text(code: u64) -> String {
+    if code == ME_INVALID_LIMITS {
+        "invalid source macro limits"
+    } else if code >= ME_BUDGET {
+        "source macro budget exceeded"
+    } else if code == ME_LEXICAL {
+        "invalid source macro lexical syntax"
+    } else if code == ME_SYNTAX {
+        "invalid source macro syntax"
+    } else if code == ME_UNSUPPORTED {
+        "unsupported source macro category or context"
+    } else if code == ME_UNKNOWN_MACRO {
+        "unknown source macro"
+    } else if code == ME_ARITY {
+        "source macro arity mismatch"
+    } else if code == ME_DUPLICATE_NAME {
+        "duplicate source macro name or parameter"
+    } else if code == 8 {
+        "foreign source macro identity"
+    } else {
+        "source macro allocation failed"
+    }
+}
+
+fn raise(code: u64, start: u64, end: u64) eff [Fail[MacroError]] {
+    Fail::raise(MacroError { code: code, start: start, end: end });
+}
+
+fn budget_err(r: u64) eff [Fail[MacroError]] {
+    raise(add(ME_BUDGET, r), none(), none());
+}
+
+// `bound`.
+fn bound(n: u64, cap: u64, r: u64) eff [Fail[MacroError]] {
+    if n > cap {
+        budget_err(r);
+    }
+}
+
+// `Limits::validate` and `Limits::preflight`.
+fn preflight(in lim: MacroLimits, n: u64) eff [Fail[MacroError]] {
+    let h = macro_limits_hard();
+    if lim.max_tokens == 0
+        || lim.max_depth == 0
+        || lim.max_source_bytes > h.max_source_bytes
+        || lim.max_tokens > h.max_tokens
+        || lim.max_macros > h.max_macros
+        || lim.max_functions > h.max_functions
+        || lim.max_invocations > h.max_invocations
+        || lim.max_parameters > h.max_parameters
+        || lim.max_depth > h.max_depth
+        || lim.max_metadata_bytes > h.max_metadata_bytes
+        || lim.max_work > h.max_work {
+        raise(ME_INVALID_LIMITS, none(), none());
+    }
+    bound(n, lim.max_source_bytes, R_SOURCE);
+    bound(n, lim.max_work, R_WORK);
+}
+
+// ---------------------------------------------------------------- parser
+
+// `SourceParser`: the cursor over the significant tokens and what the
+// parse has recorded so far, as rows.
+struct Mp {
+    // Indices of the non-trivia tokens (the Eof included).
+    sig: ChunkSeq[u32],
+    pos: u64,
+    // Definitions, 8 words each: name, quote span and span as start/end
+    // pairs, the first parameter and the parameter count.
+    defs: ChunkSeq[u64],
+    // Parameters, 4 words each: name and span as start/end pairs.
+    params: ChunkSeq[u64],
+    // Functions, 8 words each: span, body span, first invocation and
+    // invocation count, first parameter name and their count.
+    funs: ChunkSeq[u64],
+    // Each function's header parameter names as start/end pairs.
+    names: ChunkSeq[u64],
+    // Invocations, 8 words each: definition (u64::MAX until resolved),
+    // function, name and span as start/end pairs, first argument and
+    // argument count.
+    invs: ChunkSeq[u64],
+    // Arguments as start/end pairs.
+    args: ChunkSeq[u64],
+    work: u64,
+    meta: u64,
+    lim: MacroLimits
+}
+
+fn mp_new(in t: Tokens, lim: MacroLimits) -> Mp {
+    let mut sig = ChunkSeq::with_capacity[u32](t.kind.len());
+    for i in 0..t.kind.len() {
+        if !trivia_kind(u8_at(in t.kind, i)) {
+            sig.push(narrow(i));
+        }
+    }
+    Mp {
+        sig: sig,
+        pos: 0,
+        defs: ChunkSeq::new[u64](),
+        params: ChunkSeq::new[u64](),
+        funs: ChunkSeq::new[u64](),
+        names: ChunkSeq::new[u64](),
+        invs: ChunkSeq::new[u64](),
+        args: ChunkSeq::new[u64](),
+        work: 0,
+        meta: 0,
+        lim: lim
+    }
+}
+
+// `Budget::work`.
+fn work(inout m: Mp, n: u64) eff [Fail[MacroError]] {
+    m.work = saturating_add_u64(m.work, n);
+    bound(m.work, m.lim.max_work, R_WORK);
+}
+
+// `Budget::metadata`.
+fn metadata(inout m: Mp, n: u64) eff [Fail[MacroError]] {
+    m.meta = saturating_add_u64(m.meta, n);
+    bound(m.meta, m.lim.max_metadata_bytes, R_METADATA);
+}
+
+// `Budget::stage`: a parser stage over `tokens` tokens and `bytes` bytes.
+fn stage(inout m: Mp, tokens: u64, bytes: u64) eff [Fail[MacroError]] {
+    let depth = m.lim.max_depth;
+    let per_token = saturating_mul_u64(saturating_mul_u64(tokens, 64), depth);
+    metadata(
+        inout m,
+        saturating_add_u64(per_token, saturating_mul_u64(saturating_mul_u64(bytes, 2), depth))
+    );
+    work(inout m, saturating_add_u64(per_token, saturating_mul_u64(bytes, 8)));
+}
+
+// The token index of significant token `j` (the Eof past the end).
+fn raw(in m: Mp, j: u64) -> u64 {
+    if j < m.sig.len() {
+        w32(in m.sig, j)
+    } else {
+        w32(in m.sig, wrapping_sub(m.sig.len(), 1))
+    }
+}
+
+fn sk(in m: Mp, in t: Tokens, j: u64) -> u8 {
+    u8_at(in t.kind, raw(in m, j))
+}
+
+fn ss(in m: Mp, in t: Tokens, j: u64) -> u64 {
+    w32(in t.start, raw(in m, j))
+}
+
+fn se(in m: Mp, in t: Tokens, j: u64) -> u64 {
+    token_end(in t, raw(in m, j))
+}
+
+fn kind(in m: Mp, in t: Tokens) -> u8 {
+    sk(in m, in t, m.pos)
+}
+
+// `fail`: `code` at the current token.
+fn fail_here(in m: Mp, in t: Tokens, code: u64) eff [Fail[MacroError]] {
+    raise(code, ss(in m, in t, m.pos), se(in m, in t, m.pos));
+}
+
+fn same_text(in src: Slice[u8], a: u64, ae: u64, b: u64, be: u64) -> bool {
+    if wrapping_sub(ae, a) != wrapping_sub(be, b) {
+        return false;
+    }
+    for i in 0..wrapping_sub(ae, a) {
+        if byte(in src, add(a, i)) != byte(in src, add(b, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn text_is(in src: Slice[u8], s: u64, e: u64, in w: Slice[u8]) -> bool {
+    if wrapping_sub(e, s) != w.len() {
+        return false;
+    }
+    for i in 0..w.len() {
+        if byte(in src, add(s, i)) != byte(in w, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// `word`: the current token is the lower-case word `w`.
+fn word(in m: Mp, in t: Tokens, in src: Slice[u8], in w: Slice[u8]) -> bool {
+    kind(in m, in t) == k_lower()
+        && text_is(in src, ss(in m, in t, m.pos), se(in m, in t, m.pos), in w)
+}
+
+// `bump`: the span of the current token, which is consumed unless it is
+// the Eof.
+fn bump(inout m: Mp, in t: Tokens) -> (u64, u64) eff [Fail[MacroError]] {
+    work(inout m, 1);
+    let s = ss(in m, in t, m.pos);
+    let e = se(in m, in t, m.pos);
+    if kind(in m, in t) != k_eof() {
+        m.pos = inc(m.pos);
+    }
+    (s, e)
+}
+
+fn expect(inout m: Mp, in t: Tokens, k: u8) -> (u64, u64) eff [Fail[MacroError]] {
+    if kind(in m, in t) != k {
+        fail_here(in m, in t, ME_SYNTAX);
+    }
+    bump(inout m, in t)
+}
+
+fn word_expect(
+    inout m: Mp,
+    in t: Tokens,
+    in src: Slice[u8],
+    in w: Slice[u8]
+) -> (u64, u64) eff [Fail[MacroError]] {
+    if !word(in m, in t, in src, in w) {
+        fail_here(in m, in t, ME_SYNTAX);
+    }
+    bump(inout m, in t)
+}
+
+// `end`: the end of the last consumed token.
+fn prev_end(in m: Mp, in t: Tokens) -> u64 {
+    let j = if m.pos == 0 {
+        0
+    } else {
+        wrapping_sub(m.pos, 1)
+    };
+    se(in m, in t, j)
+}
+
+fn defs_len(in m: Mp) -> u64 {
+    m.defs.len() >> 3
+}
+
+fn def_word(in m: Mp, d: u64, f: u64) -> u64 {
+    u64_at(in m.defs, add(wrapping_mul(d, 8), f))
+}
+
+fn set_def_word(inout m: Mp, d: u64, f: u64, v: u64) {
+    m.defs.try_set(add(wrapping_mul(d, 8), f), v);
+}
+
+fn param_word(in m: Mp, i: u64, f: u64) -> u64 {
+    u64_at(in m.params, add(wrapping_mul(i, 4), f))
+}
+
+// `push_def`: `macro name($x: expr, ..) -> expr { quote { e } }`.
+fn push_def(inout m: Mp, in t: Tokens, in src: Slice[u8]) eff [Fail[MacroError]] {
+    bound(inc(defs_len(in m)), m.lim.max_macros, R_MACROS);
+    metadata(inout m, SIZE_DEFINITION);
+    let (start, _) = word_expect(inout m, in t, in src, in "macro".as_bytes());
+    let (ns, ne) = expect(inout m, in t, k_lower());
+    for d in 0..defs_len(in m) {
+        let ds = def_word(in m, d, 0);
+        let de = def_word(in m, d, 1);
+        work(inout m, add(wrapping_sub(de, ds), wrapping_sub(ne, ns)));
+        if same_text(in src, ds, de, ns, ne) {
+            raise(ME_DUPLICATE_NAME, ns, ne);
+        }
+    }
+    expect(inout m, in t, k_l_paren());
+    let first = m.params.len() >> 2;
+    let mut count: u64 = 0;
+    loop {
+        if kind(in m, in t) == k_r_paren() {
+            break;
+        }
+        bound(inc(count), m.lim.max_parameters, R_PARAMETERS);
+        metadata(inout m, SIZE_PARAMETER);
+        let (ps, _) = expect(inout m, in t, k_dollar());
+        let (pn, pne) = expect(inout m, in t, k_lower());
+        expect(inout m, in t, k_colon());
+        let (_, pe) = word_expect(inout m, in t, in src, in "expr".as_bytes());
+        for j in 0..count {
+            let q = add(first, j);
+            let qs = param_word(in m, q, 0);
+            let qe = param_word(in m, q, 1);
+            work(inout m, add(wrapping_sub(qe, qs), wrapping_sub(pne, pn)));
+            if same_text(in src, qs, qe, pn, pne) {
+                raise(ME_DUPLICATE_NAME, pn, pne);
+            }
+        }
+        m.params.push(pn);
+        m.params.push(pne);
+        m.params.push(ps);
+        m.params.push(pe);
+        count = inc(count);
+        if kind(in m, in t) != k_comma() {
+            break;
+        }
+        bump(inout m, in t);
+        if kind(in m, in t) == k_r_paren() {
+            fail_here(in m, in t, ME_SYNTAX);
+        }
+    }
+    expect(inout m, in t, k_r_paren());
+    expect(inout m, in t, k_arrow());
+    word_expect(inout m, in t, in src, in "expr".as_bytes());
+    expect(inout m, in t, k_l_brace());
+    word_expect(inout m, in t, in src, in "quote".as_bytes());
+    let (_, inner) = expect(inout m, in t, k_l_brace());
+    let index = defs_len(in m);
+    m.defs.push(ns);
+    m.defs.push(ne);
+    m.defs.push(inner);
+    m.defs.push(inner);
+    m.defs.push(start);
+    m.defs.push(start);
+    m.defs.push(first);
+    m.defs.push(count);
+    expr(inout m, in t, in src, MODE_QUOTE, index, 1);
+    let (close, _) = expect(inout m, in t, k_r_brace());
+    set_def_word(inout m, index, 3, close);
+    let (_, end) = expect(inout m, in t, k_r_brace());
+    set_def_word(inout m, index, 5, end);
+}
+
+fn is_open(k: u8) -> bool {
+    k == k_l_paren() || k == k_l_brace() || k == k_l_bracket()
+}
+
+fn is_close(k: u8) -> bool {
+    k == k_r_paren() || k == k_r_brace() || k == k_r_bracket()
+}
+
+fn closes(open: u8, k: u8) -> bool {
+    (open == k_l_paren() && k == k_r_paren())
+        || (open == k_l_brace() && k == k_r_brace())
+        || (open == k_l_bracket() && k == k_r_bracket())
+}
+
+// `matching`: the significant index of the delimiter that closes the one
+// at `start`.
+fn matching(inout m: Mp, in t: Tokens, start: u64) -> u64 eff [Fail[MacroError]] {
+    metadata(inout m, saturating_mul_u64(m.lim.max_depth, SIZE_KIND));
+    let mut stack = ChunkSeq::new[u8]();
+    for at in start..m.sig.len() {
+        work(inout m, 1);
+        let k = sk(in m, in t, at);
+        if is_open(k) {
+            bound(inc(stack.len()), m.lim.max_depth, R_DEPTH);
+            stack.push(k);
+        } else if is_close(k) {
+            if stack.len() == 0 {
+                fail_here(in m, in t, ME_SYNTAX);
+            }
+            let top = wrapping_sub(stack.len(), 1);
+            let open = u8_at(in stack, top);
+            stack.truncate(top);
+            if !closes(open, k) {
+                fail_here(in m, in t, ME_SYNTAX);
+            }
+            if stack.len() == 0 {
+                return at;
+            }
+        } else if k == k_eof() {
+            break;
+        }
+    }
+    fail_here(in m, in t, ME_SYNTAX);
+    0
+}
+
+// The parse of one ranged declaration failed: `status` from
+// `source_header` or `source_item` (1 halted, 2 a diagnostic or a missing
+// brace, 3 tokens after the body's brace at `at..at_end`).
+fn ranged_failure(in p: P, status: u64, at: u64, at_end: u64) eff [Fail[MacroError]] {
+    if status == 3 {
+        raise(ME_SYNTAX, at, at_end);
+    }
+    let code = if status == 1 {
+        add(ME_BUDGET, R_DEPTH)
+    } else {
+        ME_SYNTAX
+    };
+    if p.d.code.len() == 0 {
+        raise(code, none(), none());
+    }
+    raise(code, w32(in p.d.start, 0), w32(in p.d.end, 0));
+}
+
+// `parse_source_item` over the tokens `first..last`.
+fn source_item_at(inout rp: P, in t: Tokens, first: u64, last: u64) eff [Fail[MacroError]] {
+    let eof = token_end(in t, wrapping_sub(last, 1));
+    ranged_reset(inout rp, ranged_tokens(in t, first, last, eof));
+    let status = source_item(inout rp);
+    if status != 0 {
+        ranged_failure(in rp, status, 0, 0);
+    }
+}
+
+// `function`: a function declaration at the cursor. One that invokes a
+// macro has its body parsed as a macro caller; any other is a support
+// item.
+fn function(inout m: Mp, inout rp: P, in t: Tokens, in src: Slice[u8]) eff [Fail[MacroError]] {
+    bound(inc(m.funs.len() >> 3), m.lim.max_functions, R_FUNCTIONS);
+    metadata(inout m, add(SIZE_FUNCTION, SIZE_SPAN_VEC));
+    let begin = m.pos;
+    let mut body = inc(m.pos);
+    loop {
+        if body >= m.sig.len() {
+            break;
+        }
+        work(inout m, 1);
+        let k = sk(in m, in t, body);
+        if k == k_l_paren() || k == k_l_bracket() {
+            body = inc(matching(inout m, in t, body));
+        } else if k == k_l_brace() {
+            break;
+        } else if k == k_eof() || k == k_semi() {
+            fail_here(in m, in t, ME_SYNTAX);
+        } else {
+            body = inc(body);
+        }
+    }
+    if body >= m.sig.len() {
+        fail_here(in m, in t, ME_SYNTAX);
+    }
+    let close = matching(inout m, in t, body);
+    let start_byte = ss(in m, in t, begin);
+    let body_start = ss(in m, in t, body);
+    let end = se(in m, in t, close);
+    let first = raw(in m, begin);
+    let header_end = inc(raw(in m, body));
+    stage(inout m, wrapping_sub(header_end, first), wrapping_sub(body_start, start_byte));
+    // `parse_source_header`.
+    let eof = token_end(in t, wrapping_sub(header_end, 1));
+    ranged_reset(inout rp, ranged_tokens(in t, first, header_end, eof));
+    let mut generic = false;
+    let status = source_header(inout rp, inout generic);
+    if status != 0 {
+        ranged_failure(in rp, status, body_start, se(in m, in t, body));
+    }
+    let notes = rp.param_notes.len() >> 2;
+    let mut has_macro = false;
+    for i in body..close {
+        if i > body
+            && sk(in m, in t, i) == k_bang()
+            && sk(in m, in t, wrapping_sub(i, 1)) == k_lower() {
+            has_macro = true;
+            break;
+        }
+    }
+    let fi = m.funs.len() >> 3;
+    let inv_start = m.invs.len() >> 3;
+    if has_macro {
+        work(inout m, notes);
+        let mut projected = false;
+        for i in 0..notes {
+            if u64_at(in rp.param_notes, add(wrapping_mul(i, 4), 3)) != 0 {
+                projected = true;
+            }
+        }
+        if generic || projected {
+            fail_here(in m, in t, ME_UNSUPPORTED);
+        }
+        bound(notes, m.lim.max_parameters, R_PARAMETERS);
+        // Reject original duplicate names before any later alpha-renaming
+        // could turn an invalid header into distinct valid bindings.
+        for i in 0..notes {
+            let a = u64_at(in rp.param_notes, add(wrapping_mul(i, 4), 2));
+            let a_s = w32(in t.start, add(a, first));
+            let a_e = token_end(in t, add(a, first));
+            for j in 0..i {
+                let b = u64_at(in rp.param_notes, add(wrapping_mul(j, 4), 2));
+                let b_s = w32(in t.start, add(b, first));
+                let b_e = token_end(in t, add(b, first));
+                work(inout m, add(wrapping_sub(a_e, a_s), wrapping_sub(b_e, b_s)));
+                if same_text(in src, a_s, a_e, b_s, b_e) {
+                    raise(
+                        ME_DUPLICATE_NAME,
+                        u64_at(in rp.param_notes, wrapping_mul(i, 4)),
+                        u64_at(in rp.param_notes, inc(wrapping_mul(i, 4)))
+                    );
+                }
+            }
+        }
+    }
+    let names_first = m.names.len() >> 1;
+    parameter_names(inout m, in rp, in t, in src, first, begin, body, start_byte, body_start);
+    if has_macro {
+        m.pos = body;
+        expr(inout m, in t, in src, MODE_CALLER, fi, 1);
+        if m.pos != inc(close) {
+            fail_here(in m, in t, ME_SYNTAX);
+        }
+    } else {
+        let last = inc(raw(in m, close));
+        stage(inout m, wrapping_sub(last, first), wrapping_sub(end, start_byte));
+        source_item_at(inout rp, in t, first, last);
+        m.pos = inc(close);
+    }
+    let count = wrapping_sub(m.invs.len() >> 3, inv_start);
+    metadata(inout m, saturating_mul_u64(count, SIZE_INVOCATION_ID));
+    work(inout m, saturating_mul_u64(inc(fi), SIZE_SPAN_VEC));
+    m.funs.push(start_byte);
+    m.funs.push(end);
+    m.funs.push(body_start);
+    m.funs.push(end);
+    m.funs.push(inv_start);
+    m.funs.push(count);
+    m.funs.push(names_first);
+    m.funs.push(wrapping_sub(m.names.len() >> 1, names_first));
+}
+
+// `parameter_names`: the actual name token of each header parameter, in
+// order, from the significant header tokens `begin..body` (the header
+// span is `hs..he`). `first` is the token index the ranged parse started
+// at.
+fn parameter_names(
+    inout m: Mp,
+    in rp: P,
+    in t: Tokens,
+    in src: Slice[u8],
+    first: u64,
+    begin: u64,
+    body: u64,
+    hs: u64,
+    he: u64
+) eff [Fail[MacroError]] {
+    let n = rp.param_notes.len() >> 2;
+    work(inout m, add(wrapping_sub(body, begin), saturating_mul_u64(n, 4)));
+    metadata(inout m, saturating_mul_u64(n, SIZE_SPAN));
+    let mut cursor = begin;
+    let mut previous_end = hs;
+    for i in 0..n {
+        let at = wrapping_mul(i, 4);
+        let ps = u64_at(in rp.param_notes, at);
+        let pe = u64_at(in rp.param_notes, inc(at));
+        let name = add(u64_at(in rp.param_notes, add(at, 2)), first);
+        if ps < previous_end || pe > he {
+            raise(ME_SYNTAX, ps, pe);
+        }
+        previous_end = pe;
+        loop {
+            if cursor >= body || ss(in m, in t, cursor) >= ps {
+                break;
+            }
+            cursor = inc(cursor);
+        }
+        if cursor < body {
+            let k = sk(in m, in t, cursor);
+            if k == k_in() || k == k_inout() || k == k_sink() {
+                cursor = inc(cursor);
+            }
+        }
+        if cursor >= body {
+            raise(ME_SYNTAX, ps, pe);
+        }
+        let ts = ss(in m, in t, cursor);
+        let te = se(in m, in t, cursor);
+        let ns = w32(in t.start, name);
+        let ne = token_end(in t, name);
+        work(inout m, add(wrapping_sub(te, ts), wrapping_sub(ne, ns)));
+        let k = sk(in m, in t, cursor);
+        if (k != k_lower() && k != k_self_kw())
+            || ts < ps
+            || te > pe
+            || !same_text(in src, ts, te, ns, ne) {
+            raise(ME_SYNTAX, ps, pe);
+        }
+        m.names.push(ts);
+        m.names.push(te);
+        cursor = inc(cursor);
+    }
+}
+
+// `support`: a struct, enum or effect declaration (optionally `copy`,
+// `affine` or `linear`), parsed as an ordinary item.
+fn support(inout m: Mp, inout rp: P, in t: Tokens) eff [Fail[MacroError]] {
+    let k = kind(in m, in t);
+    if k == k_copy() || k == k_affine() || k == k_linear() {
+        let n = sk(in m, in t, inc(m.pos));
+        if n != k_struct() && n != k_enum() && n != k_effect() {
+            fail_here(in m, in t, ME_UNSUPPORTED);
+        }
+    }
+    let begin = m.pos;
+    let mut at = m.pos;
+    loop {
+        if at >= m.sig.len() {
+            break;
+        }
+        work(inout m, 1);
+        let k = sk(in m, in t, at);
+        if k == k_l_paren() || k == k_l_bracket() {
+            at = inc(matching(inout m, in t, at));
+        } else if k == k_l_brace() {
+            let end = matching(inout m, in t, at);
+            let first = raw(in m, begin);
+            let last = inc(raw(in m, end));
+            let bytes = wrapping_sub(
+                token_end(in t, wrapping_sub(last, 1)),
+                w32(in t.start, first)
+            );
+            stage(inout m, wrapping_sub(last, first), bytes);
+            source_item_at(inout rp, in t, first, last);
+            m.pos = inc(end);
+            return;
+        } else if k == k_eof() || k == k_semi() {
+            fail_here(in m, in t, ME_UNSUPPORTED);
+        } else {
+            at = inc(at);
+        }
+    }
+    fail_here(in m, in t, ME_SYNTAX);
+}
+
+// `ExprMode`: the quote of definition `arg`, the body of function `arg`,
+// or a macro argument.
+const MODE_QUOTE: u64 = 0;
+const MODE_CALLER: u64 = 1;
+const MODE_ARGUMENT: u64 = 2;
+
+fn is_name(k: u8) -> bool {
+    k == k_lower() || k == k_upper() || k == k_self_kw()
+}
+
+// `expr`: one expression of the macro profile.
+fn expr(inout m: Mp, in t: Tokens, in src: Slice[u8], mode: u64, arg: u64, depth: u64) eff [
+    Fail[MacroError]
+] {
+    bound(depth, m.lim.max_depth, R_DEPTH);
+    work(inout m, 1);
+    let name_start = m.pos;
+    let mut simple_name = false;
+    let k = kind(in m, in t);
+    if is_name(k) {
+        bump(inout m, in t);
+        simple_name = true;
+        loop {
+            if kind(in m, in t) != k_colon_colon() {
+                break;
+            }
+            simple_name = false;
+            bump(inout m, in t);
+            if !is_name(kind(in m, in t)) {
+                fail_here(in m, in t, ME_SYNTAX);
+            }
+            bump(inout m, in t);
+        }
+    } else if k == k_int() || k == k_string() || k == k_true() || k == k_false() {
+        bump(inout m, in t);
+    } else if k == k_dollar() {
+        if mode != MODE_QUOTE {
+            fail_here(in m, in t, ME_UNSUPPORTED);
+        }
+        bump(inout m, in t);
+        let (ns, ne) = expect(inout m, in t, k_lower());
+        let pf = def_word(in m, arg, 6);
+        let pc = def_word(in m, arg, 7);
+        let mut found = false;
+        for j in 0..pc {
+            let q = add(pf, j);
+            let qs = param_word(in m, q, 0);
+            let qe = param_word(in m, q, 1);
+            work(inout m, add(wrapping_sub(qe, qs), wrapping_sub(ne, ns)));
+            if same_text(in src, qs, qe, ns, ne) {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            raise(ME_SYNTAX, ns, ne);
+        }
+    } else if k == k_l_paren() {
+        bump(inout m, in t);
+        // An empty list is unit; one value without a comma is grouping.
+        if kind(in m, in t) != k_r_paren() {
+            expr(inout m, in t, in src, mode, arg, inc(depth));
+            loop {
+                if kind(in m, in t) != k_comma() {
+                    break;
+                }
+                bump(inout m, in t);
+                if kind(in m, in t) == k_r_paren() {
+                    break;
+                }
+                expr(inout m, in t, in src, mode, arg, inc(depth));
+            }
+        }
+        expect(inout m, in t, k_r_paren());
+    } else if k == k_l_brace() {
+        bump(inout m, in t);
+        loop {
+            if kind(in m, in t) == k_r_brace() {
+                break;
+            }
+            if kind(in m, in t) == k_let() {
+                bump(inout m, in t);
+                expect(inout m, in t, k_lower());
+                expect(inout m, in t, k_eq());
+                expr(inout m, in t, in src, mode, arg, inc(depth));
+                expect(inout m, in t, k_semi());
+            } else {
+                expr(inout m, in t, in src, mode, arg, inc(depth));
+                if kind(in m, in t) == k_semi() {
+                    bump(inout m, in t);
+                } else {
+                    break;
+                }
+            }
+        }
+        expect(inout m, in t, k_r_brace());
+    } else {
+        fail_here(in m, in t, ME_UNSUPPORTED);
+    }
+    if kind(in m, in t) == k_bang() {
+        if mode != MODE_CALLER || !simple_name {
+            fail_here(in m, in t, ME_UNSUPPORTED);
+        }
+        bound(inc(m.invs.len() >> 3), m.lim.max_invocations, R_INVOCATIONS);
+        metadata(inout m, SIZE_INVOCATION);
+        let ns = ss(in m, in t, name_start);
+        let ne = se(in m, in t, name_start);
+        bump(inout m, in t);
+        expect(inout m, in t, k_l_paren());
+        let arg_first = m.args.len() >> 1;
+        let mut count: u64 = 0;
+        loop {
+            if kind(in m, in t) == k_r_paren() {
+                break;
+            }
+            bound(inc(count), m.lim.max_parameters, R_PARAMETERS);
+            metadata(inout m, SIZE_SPAN);
+            let start = ss(in m, in t, m.pos);
+            expr(inout m, in t, in src, MODE_ARGUMENT, 0, inc(depth));
+            let end = prev_end(in m, in t);
+            m.args.push(start);
+            m.args.push(end);
+            count = inc(count);
+            if kind(in m, in t) != k_comma() {
+                break;
+            }
+            bump(inout m, in t);
+            if kind(in m, in t) == k_r_paren() {
+                fail_here(in m, in t, ME_SYNTAX);
+            }
+        }
+        let (_, end) = expect(inout m, in t, k_r_paren());
+        m.invs.push(none());
+        m.invs.push(arg);
+        m.invs.push(ns);
+        m.invs.push(ne);
+        m.invs.push(ns);
+        m.invs.push(end);
+        m.invs.push(arg_first);
+        m.invs.push(count);
+    }
+    loop {
+        if kind(in m, in t) != k_l_paren() {
+            break;
+        }
+        bump(inout m, in t);
+        let mut count: u64 = 0;
+        loop {
+            if kind(in m, in t) == k_r_paren() {
+                break;
+            }
+            count = inc(count);
+            bound(count, m.lim.max_parameters, R_PARAMETERS);
+            expr(inout m, in t, in src, mode, arg, inc(depth));
+            if kind(in m, in t) != k_comma() {
+                break;
+            }
+            bump(inout m, in t);
+            if kind(in m, in t) == k_r_paren() {
+                fail_here(in m, in t, ME_SYNTAX);
+            }
+        }
+        expect(inout m, in t, k_r_paren());
+    }
+}
+
+// ---------------------------------------------------------------- parse
+
+// What `macro_source::parse` accepted: the rows of `Mp` (see there) and
+// the token table, lexed with `lex_with_limits`.
+pub struct MacroSource {
+    pub defs: ChunkSeq[u64],
+    pub params: ChunkSeq[u64],
+    pub funs: ChunkSeq[u64],
+    pub names: ChunkSeq[u64],
+    pub invs: ChunkSeq[u64],
+    pub args: ChunkSeq[u64],
+    pub t: Tokens
+}
+
+// `macro_source::parse(source, limits)`.
+pub fn parse_macro_source(
+    in src: Slice[u8],
+    lim: MacroLimits
+) -> MacroSource eff [Fail[MacroError]] {
+    let n = src.len();
+    preflight(in lim, n);
+    let mut d = diags_new();
+    let t = lex_with_limits(in src, inout d, lim.max_source_bytes, lim.max_tokens, 64);
+    let mut m = mp_new(in t, lim);
+    work(inout m, saturating_mul_u64(n, 4));
+    let potential = if lim.max_tokens < inc(n) {
+        lim.max_tokens
+    } else {
+        inc(n)
+    };
+    metadata(
+        inout m,
+        saturating_add_u64(n, saturating_mul_u64(potential, add(SIZE_TOKEN, SIZE_USIZE)))
+    );
+    if t.rejected {
+        raise(ME_LEXICAL, none(), none());
+    }
+    if t.limited {
+        budget_err(R_TOKENS);
+    }
+    if d.code.len() != 0 {
+        raise(ME_LEXICAL, w32(in d.start, 0), w32(in d.end, 0));
+    }
+    let mut rp = ranged_parser(in src, inc(t.sym_start.len()), lim.max_depth);
+    loop {
+        let k = kind(in m, in t);
+        if k == k_eof() {
+            break;
+        }
+        if word(in m, in t, in src, in "macro".as_bytes()) {
+            push_def(inout m, in t, in src);
+        } else if word(in m, in t, in src, in "test".as_bytes())
+            && sk(in m, in t, inc(m.pos)) == k_l_brace() {
+            // Test blocks are inactive during ordinary macro expansion.
+            m.pos = inc(matching(inout m, in t, inc(m.pos)));
+        } else if k == k_fn() {
+            function(inout m, inout rp, in t, in src);
+        } else if k == k_copy()
+            || k == k_affine()
+            || k == k_linear()
+            || k == k_struct()
+            || k == k_enum()
+            || k == k_effect() {
+            support(inout m, inout rp, in t);
+        } else {
+            fail_here(in m, in t, ME_UNSUPPORTED);
+        }
+    }
+    let ninv = m.invs.len() >> 3;
+    for i in 0..ninv {
+        let at = wrapping_mul(i, 8);
+        let ns = u64_at(in m.invs, add(at, 2));
+        let ne = u64_at(in m.invs, add(at, 3));
+        let mut found = none();
+        let mut arity: u64 = 0;
+        for d in 0..defs_len(in m) {
+            let ds = def_word(in m, d, 0);
+            let de = def_word(in m, d, 1);
+            work(inout m, add(wrapping_sub(de, ds), wrapping_sub(ne, ns)));
+            if same_text(in src, ds, de, ns, ne) {
+                found = d;
+                arity = def_word(in m, d, 7);
+                break;
+            }
+        }
+        if found == none() {
+            raise(ME_UNKNOWN_MACRO, ns, ne);
+        }
+        if u64_at(in m.invs, add(at, 7)) != arity {
+            raise(ME_ARITY, u64_at(in m.invs, add(at, 4)), u64_at(in m.invs, add(at, 5)));
+        }
+        m.invs.try_set(at, found);
+    }
+    MacroSource {
+        defs: m.defs,
+        params: m.params,
+        funs: m.funs,
+        names: m.names,
+        invs: m.invs,
+        args: m.args,
+        t: t
+    }
+}
+
+// ---------------------------------------------------------------- surface
+
+// The node kinds the surface check reads (tree.ves `NodeKind`).
+const N_SUGAR_TEMPLATE: u8 = 215;
+const N_SURFACE_MACRO_DECL: u8 = 224;
+const N_SURFACE_MACRO_CALL: u8 = 225;
+const N_SURFACE_MACRO_ARG: u8 = 226;
+
+// `parser::is_sugar_node`.
+fn is_sugar(k: u8) -> bool {
+    (k >= 208 && k <= 218) || (k >= 220 && k <= 223)
+}
+
+// `significant_range`: the significant tokens starting in `s..e`, as a
+// range of significant indices (packed: start in the low, end in the high
+// 32 bits).
+fn sig_at(in m: Mp, in t: Tokens, offset: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = m.sig.len();
+    loop {
+        if lo >= hi {
+            return lo;
+        }
+        let mid = add(lo, hi) >> 1;
+        if ss(in m, in t, mid) < offset {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+}
+
+// `contains_call`: a name followed by `!` among the significant tokens
+// `a..b`.
+fn contains_call(in m: Mp, in t: Tokens, a: u64, b: u64) -> bool {
+    if wrapping_sub(b, a) < 2 || b < a {
+        return false;
+    }
+    for i in a..wrapping_sub(b, 1) {
+        let k = sk(in m, in t, i);
+        if (k == k_lower() || k == k_upper()) && sk(in m, in t, inc(i)) == k_bang() {
+            return true;
+        }
+    }
+    false
+}
+
+// `check_arity`: the macro named `s..e` exists and, unless `arity` is
+// u64::MAX, takes `arity` arguments.
+fn check_arity(inout m: Mp, in src: Slice[u8], s: u64, e: u64, arity: u64) eff [Fail[MacroError]] {
+    for d in 0..defs_len(in m) {
+        let ds = def_word(in m, d, 0);
+        let de = def_word(in m, d, 1);
+        work(inout m, add(wrapping_sub(e, s), wrapping_sub(de, ds)));
+        if same_text(in src, s, e, ds, de) {
+            if arity != none() && arity != def_word(in m, d, 7) {
+                raise(ME_ARITY, s, e);
+            }
+            return;
+        }
+    }
+    raise(ME_UNKNOWN_MACRO, s, e);
+}
+
+// `template_calls`: the macro calls spelled in a sugar template (the
+// significant tokens `a..b`), with their statically known arities.
+fn template_calls(
+    inout m: Mp,
+    in t: Tokens,
+    in src: Slice[u8],
+    a: u64,
+    b: u64,
+    inout count: u64
+) eff [Fail[MacroError]] {
+    m.pos = a;
+    loop {
+        if inc(m.pos) >= b {
+            break;
+        }
+        if kind(in m, in t) != k_lower()
+            || sk(in m, in t, inc(m.pos)) != k_bang()
+            || (m.pos > a && sk(in m, in t, wrapping_sub(m.pos, 1)) == k_dollar()) {
+            bump(inout m, in t);
+            continue;
+        }
+        count = inc(count);
+        bound(count, m.lim.max_invocations, R_INVOCATIONS);
+        let (ns, ne) = bump(inout m, in t);
+        expect(inout m, in t, k_bang());
+        expect(inout m, in t, k_l_paren());
+        let mut arity: u64 = 0;
+        let mut splice = false;
+        loop {
+            if kind(in m, in t) == k_r_paren() {
+                break;
+            }
+            let start = m.pos;
+            loop {
+                let k = kind(in m, in t);
+                if m.pos >= b || k == k_comma() || k == k_r_paren() {
+                    break;
+                }
+                if k == k_dollar() {
+                    let n = sk(in m, in t, inc(m.pos));
+                    if n == k_dot_dot() || n == k_l_paren() {
+                        splice = true;
+                    }
+                }
+                if is_open(k) {
+                    m.pos = inc(matching(inout m, in t, m.pos));
+                } else {
+                    bump(inout m, in t);
+                }
+            }
+            if m.pos == start || m.pos >= b || contains_call(in m, in t, start, m.pos) {
+                fail_here(in m, in t, ME_UNSUPPORTED);
+            }
+            arity = inc(arity);
+            bound(arity, m.lim.max_parameters, R_PARAMETERS);
+            if kind(in m, in t) != k_comma() {
+                break;
+            }
+            bump(inout m, in t);
+            if kind(in m, in t) == k_r_paren() {
+                fail_here(in m, in t, ME_SYNTAX);
+            }
+        }
+        expect(inout m, in t, k_r_paren());
+        check_arity(inout m, in src, ns, ne, if splice { none() } else { arity });
+    }
+}
+
+// The node tables `validate_surface` walks: kind, parent, byte range and
+// the end of each node's subtree in preorder.
+struct Nodes {
+    kind: ChunkSeq[u8],
+    parent: ChunkSeq[u32],
+    start: ChunkSeq[u32],
+    end: ChunkSeq[u32],
+    sub_end: ChunkSeq[u64]
+}
+
+fn nodes_of(in t: Tokens, in ev: ChunkSeq[u32]) -> Nodes {
+    let mut tree = tree_new();
+    build_events(inout tree, in t, in ev);
+    let n = tree.node_kind.len();
+    let mut sub_end = ChunkSeq::with_capacity[u64](n);
+    sub_end.resize(n, n);
+    // Open ancestors of the current node.
+    let mut open = ChunkSeq::new[u64]();
+    for j in 0..n {
+        let parent = w32(in tree.node_parent, j);
+        loop {
+            if open.len() == 0 {
+                break;
+            }
+            let top = u64_at(in open, wrapping_sub(open.len(), 1));
+            if top == parent {
+                break;
+            }
+            sub_end.try_set(top, j);
+            open.truncate(wrapping_sub(open.len(), 1));
+        }
+        open.push(j);
+    }
+    Nodes {
+        kind: tree.node_kind,
+        parent: tree.node_parent,
+        start: tree.node_start,
+        end: tree.node_end,
+        sub_end: sub_end
+    }
+}
+
+fn subtree_has_sugar(in nodes: Nodes, i: u64) -> bool {
+    for j in inc(i)..u64_at(in nodes.sub_end, i) {
+        if is_sugar(u8_at(in nodes.kind, j)) {
+            return true;
+        }
+    }
+    false
+}
+
+// `surface_call`: a `name!(..)` call of the surface CST.
+fn surface_call(inout m: Mp, in t: Tokens, in src: Slice[u8], in nodes: Nodes, node: u64) eff [
+    Fail[MacroError]
+] {
+    let start = sig_at(in m, in t, w32(in nodes.start, node));
+    let ns = ss(in m, in t, start);
+    let ne = se(in m, in t, start);
+    let mut arity: u64 = 0;
+    for j in inc(node)..u64_at(in nodes.sub_end, node) {
+        if w32(in nodes.parent, j) != node || u8_at(in nodes.kind, j) != N_SURFACE_MACRO_ARG {
+            continue;
+        }
+        arity = inc(arity);
+        bound(arity, m.lim.max_parameters, R_PARAMETERS);
+        let bs = w32(in nodes.start, j);
+        let be = w32(in nodes.end, j);
+        let a = sig_at(in m, in t, bs);
+        let b = sig_at(in m, in t, be);
+        work(inout m, wrapping_sub(b, a));
+        if contains_call(in m, in t, a, b) {
+            raise(ME_UNSUPPORTED, bs, be);
+        }
+        if !subtree_has_sugar(in nodes, j) {
+            m.pos = a;
+            expr(inout m, in t, in src, MODE_ARGUMENT, 0, 1);
+            if m.pos != b {
+                raise(ME_UNSUPPORTED, bs, be);
+            }
+        }
+    }
+    check_arity(inout m, in src, ns, ne, arity);
+}
+
+fn has_macro_node(in nodes: Nodes) -> bool {
+    for j in 0..nodes.kind.len() {
+        let k = u8_at(in nodes.kind, j);
+        if k == N_SURFACE_MACRO_DECL || k == N_SURFACE_MACRO_CALL {
+            return true;
+        }
+    }
+    false
+}
+
+// `macro_source::validate_surface` over a surface parse (its tokens and
+// builder events): code 0 when the module's macros check.
+pub fn validate_surface(
+    in src: Slice[u8],
+    in t: Tokens,
+    in ev: ChunkSeq[u32],
+    lim: MacroLimits
+) -> MacroError {
+    let nodes = nodes_of(in t, in ev);
+    if !has_macro_node(in nodes) {
+        return MacroError { code: 0, start: none(), end: none() };
+    }
+    handle Fail[MacroError] in {
+        validate_nodes(in src, in t, in nodes, lim);
+        MacroError { code: 0, start: none(), end: none() }
+    } with {
+        return v => v,
+        raise(e, _) => e,
+    }
+}
+
+fn validate_nodes(in src: Slice[u8], in t: Tokens, in nodes: Nodes, lim: MacroLimits) eff [
+    Fail[MacroError]
+] {
+    preflight(in lim, src.len());
+    bound(t.kind.len(), lim.max_tokens, R_TOKENS);
+    let mut m = mp_new(in t, lim);
+    work(inout m, src.len());
+    metadata(inout m, saturating_mul_u64(t.kind.len(), SIZE_USIZE));
+    // A forward invocation resolves just like one after its declaration.
+    for j in 0..nodes.kind.len() {
+        if u8_at(in nodes.kind, j) != N_SURFACE_MACRO_DECL {
+            continue;
+        }
+        let a = sig_at(in m, in t, w32(in nodes.start, j));
+        let b = sig_at(in m, in t, w32(in nodes.end, j));
+        m.pos = a;
+        push_def(inout m, in t, in src);
+        if m.pos != b {
+            fail_here(in m, in t, ME_SYNTAX);
+        }
+    }
+    let mut count: u64 = 0;
+    for j in 0..nodes.kind.len() {
+        let k = u8_at(in nodes.kind, j);
+        if k == N_SURFACE_MACRO_CALL {
+            count = inc(count);
+            bound(count, lim.max_invocations, R_INVOCATIONS);
+            surface_call(inout m, in t, in src, in nodes, j);
+        } else if k == N_SUGAR_TEMPLATE && defs_len(in m) != 0 {
+            let a = sig_at(in m, in t, w32(in nodes.start, j));
+            let b = sig_at(in m, in t, w32(in nodes.end, j));
+            template_calls(inout m, in t, in src, a, b, inout count);
+        }
+    }
+}
+
+fn contains_byte(in b: Slice[u8], c: u8) -> bool {
+    for i in 0..b.len() {
+        if byte(in b, i) == c {
+            return true;
+        }
+    }
+    false
+}
+
+fn contains_word(in b: Slice[u8], in w: Slice[u8]) -> bool {
+    if b.len() < w.len() {
+        return false;
+    }
+    for i in 0..inc(wrapping_sub(b.len(), w.len())) {
+        let mut same = true;
+        for j in 0..w.len() {
+            if byte(in b, add(i, j)) != byte(in w, j) {
+                same = false;
+                break;
+            }
+        }
+        if same {
+            return true;
+        }
+    }
+    false
+}
+
+// `parse_module_profile` with macro limits after lexing: the surface
+// profile (with test blocks parsed when `include_tests`), then, when it has no diagnostics and
+// the source spells `!` or `macro`, the expression macro check, whose
+// error becomes an E0002 (at 0..0 when it has no span).
+pub fn parse_macro_surface_tokens(
+    in source: Slice[u8],
+    sink t: Tokens,
+    sink d: Diags,
+    max_diag: u64,
+    max_depth: u64,
+    include_tests: bool,
+    lim: MacroLimits
+) -> P {
+    let mut p = parse_surface_tokens(in source, t, d, max_diag, max_depth, include_tests);
+    if p.d.code.len() == 0
+        && (contains_byte(in source, 33) || contains_word(in source, in "macro".as_bytes())) {
+        let e = validate_surface(in source, in p.t, in p.ev, lim);
+        if e.code != 0 {
+            let (s, en) = if e.start == none() {
+                (0, 0)
+            } else {
+                (e.start, e.end)
+            };
+            let text = macro_error_text(e.code);
+            diag_push(inout p.d, 2, s, en, in text.as_bytes());
+        }
+    }
+    p
+}

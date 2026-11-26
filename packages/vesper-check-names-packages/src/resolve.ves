@@ -58,11 +58,7 @@ fn push_escaped(inout s: St, sym: u32, from: u64, to: u64) {
         }
         i = inc(i);
     }
-    let stop = if end < z {
-        end
-    } else {
-        z
-    };
+    let stop = if end < z { end } else { z };
     if run < stop {
         s.buf.push_str(in s.g.text[run..stop]);
     }
@@ -349,11 +345,9 @@ pub fn lookup(
     s.err_msg.push_str(in msg);
     let c = sym_byte(in s, name, 0);
     if sym_len(in s, name) > 0 && c >= 65 && c <= 90 && mod_path_len(in s, tm) == 0 {
-        s
-            .err_help
-            .push_str(
-                in "a `.vsys` library is not an item: every module names it directly, as `Lib::f(..)` and `eff [Ffi[Lib]]`, with no import"
-            );
+        s.err_help.push_str(
+            in "a `.vsys` library is not an item: every module names it directly, as `Lib::f(..)` and `eff [Ffi[Lib]]`, with no import"
+        );
         s.err_has_help = true;
     }
     (no_key(), 0)
@@ -457,11 +451,7 @@ pub fn group(
         grp_insert(inout s, member, key);
         r = at32(in s.rx_next, w(r));
     }
-    if s.grp_m.len() == 0 {
-        0
-    } else {
-        1
-    }
+    if s.grp_m.len() == 0 { 0 } else { 1 }
 }
 
 // Records the re-export of `local` by module `m`.

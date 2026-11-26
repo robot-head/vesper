@@ -72,11 +72,7 @@ pub fn parse_int(in b: Slice[u8], s: u64, e: u64, negative: bool) -> Big {
         }
         i = inc(i);
     }
-    let base: u64 = if hex {
-        16
-    } else {
-        10
-    };
+    let base: u64 = if hex { 16 } else { 10 };
     let mut x = Big { ok: true, neg: false, hi: 0, lo: 0 };
     let mut digits: u64 = 0;
     let mut j = start;
@@ -131,10 +127,7 @@ pub fn push_big(inout out: ChunkSeq[u8], x: Big) {
         let mut r: u64 = 0;
         let mut nonzero = false;
         for k in 0..4 {
-            let limb = match limbs.try_get(k) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
+            let limb = limbs.try_get(k).unwrap_or(0);
             let cur = wrapping_shl_u64(r, 32) | limb;
             let q = cur / 10;
             r = cur % 10;
@@ -150,10 +143,7 @@ pub fn push_big(inout out: ChunkSeq[u8], x: Big) {
     }
     let n = digits.len();
     for k in 0..n {
-        let c = match digits.try_get(sub(sub(n, 1), k)) {
-            Option::Some(v) => v,
-            Option::None => 48,
-        };
+        let c = digits.try_get(sub(sub(n, 1), k)).unwrap_or(48);
         out.push(c);
     }
 }

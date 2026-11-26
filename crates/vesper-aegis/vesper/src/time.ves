@@ -51,11 +51,7 @@ pub fn num(in s: Slice[u8], start: u64, end: u64) -> u64 {
 pub fn month_days(year: u64, month: u64) -> u64 {
     if month == 2 {
         let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-        if leap {
-            29
-        } else {
-            28
-        }
+        if leap { 29 } else { 28 }
     } else if month == 4 || month == 6 || month == 9 || month == 11 {
         30
     } else {

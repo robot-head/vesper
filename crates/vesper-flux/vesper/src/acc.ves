@@ -26,13 +26,12 @@ pub fn acc_new(in widths: Slice[u64], max_rows: u64, k0: u64, k1: u64) -> ZAcc {
     let mut w = ChunkSeq::with_capacity[u64](widths.len());
     let mut counts = ChunkSeq::with_capacity[u64](widths.len());
     for i in 0..widths.len() {
-        w
-            .push(
-                match widths.try_get(i) {
-                    Option::Some(v) => v,
-                    Option::None => 0,
-                }
-            );
+        w.push(
+            match widths.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            }
+        );
         counts.push(0);
     }
     let mut table = ChunkSeq::with_capacity[u64](START_SLOTS);
@@ -186,11 +185,7 @@ pub fn acc_insert(
         };
         let lo = word(in a.los, d);
         let nlo = wrapping_add(lo, wlo);
-        let carry: i64 = if nlo < lo {
-            1
-        } else {
-            0
-        };
+        let carry: i64 = if nlo < lo { 1 } else { 0 };
         let nhi = wrapping_add(wrapping_add(hi, whi), carry);
         // i128 overflow: both addends of one sign, the sum of the other.
         if (hi < 0) == (whi < 0) && (nhi < 0) != (hi < 0) {

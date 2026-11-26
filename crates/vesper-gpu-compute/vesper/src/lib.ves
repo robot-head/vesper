@@ -1199,9 +1199,10 @@ fn put_bytes(inout s: Scratch, at: u64, in bytes: Slice[u8]) eff [
 }
 
 fn get32(in s: Scratch, at: u64) -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
-    widen_u32(s.image[at]) | (widen_u32(s.image[at + 1]) << 8) | (
-        widen_u32(s.image[at + 2]) << 16
-    ) | (widen_u32(s.image[at + 3]) << 24)
+    widen_u32(s.image[at])
+        | (widen_u32(s.image[at + 1]) << 8)
+        | (widen_u32(s.image[at + 2]) << 16)
+        | (widen_u32(s.image[at + 3]) << 24)
 }
 
 fn get64(in s: Scratch, at: u64) -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
@@ -2591,19 +2592,16 @@ const F32_SIGN: u32 = 2147483648;
 
 fn word_at(in words: Slice[u8], i: u64) -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
     let at = i * 4;
-    widen_u32(words[at]) | (widen_u32(words[at + 1]) << 8) | (widen_u32(words[at + 2]) << 16) | (
-        widen_u32(words[at + 3]) << 24
-    )
+    widen_u32(words[at])
+        | (widen_u32(words[at + 1]) << 8)
+        | (widen_u32(words[at + 2]) << 16)
+        | (widen_u32(words[at + 3]) << 24)
 }
 
 // The order-preserving encoding of a finite f32's bits (-0 as +0), the one
 // the kernels compare (`order_key` in src/broadphase.rs).
 pub fn order_key(bits: u32) -> u32 {
-    let b = if bits == F32_SIGN {
-        0
-    } else {
-        bits
-    };
+    let b = if bits == F32_SIGN { 0 } else { bits };
     if b & F32_SIGN != 0 {
         b ^ 4294967295
     } else {
@@ -2927,11 +2925,7 @@ fn need(in b: Buf, floats: u64, what: u32) eff [Fail[GpuErr], Fail[ArithOverflow
 }
 
 fn groups_for(n: u64, per: u64) -> u32 eff [Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
-    let g = n / per + if n % per == 0 {
-        0
-    } else {
-        1
-    };
+    let g = n / per + if n % per == 0 { 0 } else { 1 };
     u32_of(g, OverLimit::Groups)
 }
 
@@ -3011,14 +3005,7 @@ pub fn tk_matmul(
     imm.push(u32_of(m, TensorLimit::M));
     imm.push(u32_of(n, TensorLimit::N));
     imm.push(u32_of(k, TensorLimit::K));
-    imm
-        .push(
-            if accumulate {
-                1
-            } else {
-                0
-            }
-        );
+    imm.push(if accumulate { 1 } else { 0 });
     let gx = groups_for(n, 64);
     let gy = u32_of(m, TensorLimit::MatmulRows);
     let bufs = handles3(in a, in w, in out);
@@ -3162,11 +3149,7 @@ pub fn tk_attention(
     let width = mul_or(query_heads, head_dim, TensorLimit::AttWidth);
     need(in q, width, TensorShape::AttQ);
     need(in out, width, TensorShape::AttOut);
-    let pages = tokens / TOKENS_PER_PAGE + if tokens % TOKENS_PER_PAGE == 0 {
-        0
-    } else {
-        1
-    };
+    let pages = tokens / TOKENS_PER_PAGE + if tokens % TOKENS_PER_PAGE == 0 { 0 } else { 1 };
     if pages * 4 > table.len {
         fail(Kind::Shape, TensorShape::AttTable, 0);
     }

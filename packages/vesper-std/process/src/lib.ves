@@ -692,11 +692,7 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
         flags = flags | StdProcess::POSIX_SPAWN_SETPGROUP;
     }
     let _ = StdProcess::posix_spawnattr_setflags(inout attr, flags);
-    let mut failed: u32 = if fa == 0 {
-        12
-    } else {
-        0
-    };
+    let mut failed: u32 = if fa == 0 { 12 } else { 0 };
     let (_, _) = if failed != 0 {
         (-1, -1)
     } else {
@@ -1084,21 +1080,9 @@ pub fn wait_timeout(
         last = spent >= millis;
         // An ended child is only waited on for end of file, which `poll`
         // reports at once; a running one is checked every 10 ms.
-        let left = if last {
-            0
-        } else {
-            wrapping_sub(millis, spent)
-        };
-        let slice = if ch.reaped || left < 10 {
-            left
-        } else {
-            10
-        };
-        let slice = if slice > 1000000 {
-            1000000
-        } else {
-            slice
-        };
+        let left = if last { 0 } else { wrapping_sub(millis, spent) };
+        let slice = if ch.reaped || left < 10 { left } else { 10 };
+        let slice = if slice > 1000000 { 1000000 } else { slice };
         if pump(inout ch, slice, inout err) != 0 {
             return Result::Err(io_word(err));
         }

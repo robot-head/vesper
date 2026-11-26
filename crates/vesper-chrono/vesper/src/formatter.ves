@@ -91,11 +91,7 @@ fn is_fsync_prefix(in s: Slice[u8], at: u64) -> bool {
         if i >= rem {
             break;
         }
-        let want: u8 = if i < 3 {
-            255
-        } else {
-            127
-        };
+        let want: u8 = if i < 3 { 255 } else { 127 };
         if byte_at(in s, wrapping_add(at, i)) != want {
             return false;
         }

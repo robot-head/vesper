@@ -40,13 +40,16 @@ use @vesper/driver::{
 use @vesper-std/env::{arg_count, arg_bytes, os, os_windows};
 use @vesper-std/process::{command_path, arg_bytes as proc_arg, spawn, wait, release, success};
 use @vesper-std/fs::{
-    IoError, is_dir_path, is_file_path, read_path, write_path, replace_path, remove_file
+    IoError, is_dir_path, is_file_path, read_path, write_path, replace_path, remove_file,
+    set_permissions
 };
 // `vesper build --target wasm32-wasip2` in Vesper (#1895).
 use @vesper/wasm-backend::{wasm_backend_module};
 use @vesper/wit-component::{wit_component_command};
 // `vesper build --target bpf` in Vesper (#1895).
 use @vesper/ebpf-backend::{ebpf_backend_build};
+// `vesper build --codegen verified` in Vesper (#1886).
+use @vesper/verified-codegen::{compile_bytes};
 use @vesper-std/fmt::{write_u64};
 // SH5 lane 13 (#1336): the layers of the commands off the compile path.
 use @vesper/driver-commands::{
@@ -176,6 +179,10 @@ fn step_wasm_input() -> u32 {
 
 fn step_ebpf_input() -> u32 {
     61
+}
+
+fn step_verified_input() -> u32 {
+    62
 }
 
 // Group 1's range (70-79, #1896).
@@ -605,7 +612,7 @@ fn build(
         if o.verifiers != 0 || has(in o, slot_policy()) || o.tee {
             return error(in "--verify and --tee do not apply to --codegen verified".as_bytes());
         }
-        return pass(inout s, step_verified_build());
+        return verified_build(inout s, in o);
     }
     // Wave-seven lane 25: `--target wasm32-wasip2` builds a component.
     if is(in o, slot_target(), in "wasm32-wasip2") {
@@ -695,11 +702,7 @@ fn link(
     release(ch);
     match waited {
         Result::Ok(st) => {
-            if success(st) {
-                0
-            } else {
-                1
-            }
+            if success(st) { 0 } else { 1 }
         },
         Result::Err(e) => error_word(e),
     }
@@ -750,6 +753,115 @@ fn wasm_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[Hybri
     line.extend(in "built ".as_bytes());
     line.extend(in path.as_slice());
     line.extend(in " (wasm32-wasip2 component)".as_bytes());
+    line.push(10);
+    print(stdout_stream(), in line.as_slice());
+    0
+}
+
+// `pack_text`'s packing at word `at` of `words`: its bytes, and the word
+// after it.
+fn unpack(in words: ChunkSeq[u64], at: u64, inout out: ChunkSeq[u8]) -> u64 {
+    let len = match words.try_get(at) {
+        Option::Some(n) => n,
+        Option::None => 0,
+    };
+    let n = wrapping_add(len, 7) / 8;
+    for i in 0..n {
+        let w = match words.try_get(wrapping_add(wrapping_add(at, 1), i)) {
+            Option::Some(w) => w,
+            Option::None => 0,
+        };
+        for k in 0..8 {
+            if wrapping_add(wrapping_mul(i, 8), k) < len {
+                out.push(wrapping_u8(wrapping_shr_u64(w, wrapping_u32(wrapping_mul(k, 8))) & 255));
+            }
+        }
+    }
+    wrapping_add(wrapping_add(at, 1), n)
+}
+
+// `--codegen verified`: the session encodes the optimized program (the
+// `verified_codegen` swap's input) for a target whose artifact is a Linux
+// ELF executable, and @vesper/verified-codegen builds it here; the
+// executable is written and made executable. Anything else (the swap off,
+// a Mach-O or COFF object, a program that does not encode, a code
+// generator error, a failed write) goes to the Rust pass, so its messages
+// stay Rust's.
+fn verified_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+    let r = step(inout s, step_verified_input());
+    if is_failure(r) {
+        return pass_failed(in s, r);
+    }
+    if r == 0 {
+        return pass(inout s, step_verified_build());
+    }
+    let input = text(in s);
+    let b = input.as_slice();
+    // The summary's target text, then the code generator's input.
+    let ll = word_at(in b, 0);
+    let start = wrapping_add(8, wrapping_mul(wrapping_add(ll, 7) / 8, 8));
+    let words = compile_bytes(in b[start..b.len()]);
+    let mut summary: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let at = unpack(in words, 0, inout summary);
+    let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let rest = unpack(in words, at, inout bytes);
+    // `code <bytes>` is the summary's first line.
+    let prefix = "code ".as_bytes();
+    let mut ok = summary.len() > prefix.len();
+    for i in 0..prefix.len() {
+        let a = match summary.try_get(i) {
+            Option::Some(c) => widen_u64(c),
+            Option::None => 256,
+        };
+        let p = match prefix.try_get(i) {
+            Option::Some(c) => widen_u64(c),
+            Option::None => 257,
+        };
+        if a != p {
+            ok = false;
+        }
+    }
+    if !ok {
+        return pass(inout s, step_verified_build());
+    }
+    let mut code: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in prefix.len()..summary.len() {
+        let c = match summary.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 10,
+        };
+        if c == 10 {
+            break;
+        }
+        code.push(c);
+    }
+    let mut path = value(in o, slot_output());
+    if !has(in o, slot_output()) {
+        path.extend(in "a.out".as_bytes());
+    }
+    let name = match String::from_utf8(in path.as_slice()) {
+        Option::Some(p) => p,
+        Option::None => return pass(inout s, step_verified_build()),
+    };
+    let failed = handle Fail[IoError] in {
+        write_path(in path.as_slice(), in bytes.as_slice());
+        set_permissions(in name, 493);
+        0
+    } with {
+        return v => v,
+        raise(e, _) => error_word(e),
+    };
+    if failed != 0 {
+        return pass(inout s, step_verified_build());
+    }
+    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    line.extend(in "built ".as_bytes());
+    line.extend(in path.as_slice());
+    line.extend(in " (verified codegen, ".as_bytes());
+    line.extend(in b[8..wrapping_add(8, ll)]);
+    line.extend(in ", ".as_bytes());
+    line.extend(in code.as_slice());
+    line.extend(in " bytes of code)".as_bytes());
     line.push(10);
     print(stdout_stream(), in line.as_slice());
     0

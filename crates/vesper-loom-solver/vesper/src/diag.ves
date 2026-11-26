@@ -457,9 +457,5 @@ pub fn fillw(inout q: ChunkSeq[u64], n: u64, v: u64) {
 // Saturating addition.
 pub fn sat(a: u64, b: u64) -> u64 {
     let x = wrapping_add(a, b);
-    if x < a {
-        none()
-    } else {
-        x
-    }
+    if x < a { none() } else { x }
 }

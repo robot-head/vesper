@@ -2,11 +2,7 @@
 // predicate is evaluated in the iteration binding's scope, once per
 // visited element. Both forms evaluate the source once and allocate nothing.
 pub sugar any: tag {
-    rule (
-        any{
-            $predicate:block | $element:pat in $lo:expr.. $hi:expr
-        }
-    ) => {
+    rule (any{ $predicate:block | $element:pat in $lo:expr.. $hi:expr }) => {
         {
             let mut found = false;
             for $element in $lo.. $hi {
@@ -19,11 +15,7 @@ pub sugar any: tag {
         }
     }
 
-    rule (
-        any{
-            $predicate:block | $element:pat in $source:expr
-        }
-    ) => {
+    rule (any{ $predicate:block | $element:pat in $source:expr }) => {
         {
             let mut found = false;
             for $element in $source {
@@ -38,11 +30,7 @@ pub sugar any: tag {
 }
 
 pub sugar all: tag {
-    rule (
-        all{
-            $predicate:block | $element:pat in $lo:expr.. $hi:expr
-        }
-    ) => {
+    rule (all{ $predicate:block | $element:pat in $lo:expr.. $hi:expr }) => {
         {
             let mut accepted = true;
             for $element in $lo.. $hi {
@@ -55,11 +43,7 @@ pub sugar all: tag {
         }
     }
 
-    rule (
-        all{
-            $predicate:block | $element:pat in $source:expr
-        }
-    ) => {
+    rule (all{ $predicate:block | $element:pat in $source:expr }) => {
         {
             let mut accepted = true;
             for $element in $source {
@@ -76,11 +60,43 @@ pub sugar all: tag {
 // Checked numeric fold from §7.8. The braced projection runs in the
 // iteration binding's scope. Use ordinary += rather than silent wrapping.
 pub sugar sum: tag emits eff [Fail] {
+    // A tagged source avoids shadowing an ordinary function named zip.
+    // Restrict sources to names and fields: lengths and views must not
+    // re-evaluate an effectful index.
     rule (
         sum{
-            $projection:block | $element:pat in $lo:expr.. $hi:expr
+            $projection:block
+                | $pair:pat in zip{
+                    $left:ident $(.$left_field:ident)*,
+                    $right:ident $(.$right_field:ident)*
+                }
         }
     ) => {
+        {
+            let nl = $left $(.$left_field)*.len();
+            let nr = $right $(.$right_field)*.len();
+            let lhs = $left $(.$left_field)* [0..nl];
+            let rhs = $right $(.$right_field)* [0..nr];
+            let limit = if nl < nr {
+                nl
+            } else {
+                nr
+            };
+            let mut total = 0;
+            for i in 0..limit {
+                match (lhs.try_get(i), rhs.try_get(i)) {
+                    (Option::Some(a), Option::Some(b)) => {
+                        let $pair = (a, b);
+                        total += $projection;
+                    },
+                    _ => (),
+                }
+            }
+            total
+        }
+    }
+
+    rule (sum{ $projection:block | $element:pat in $lo:expr.. $hi:expr }) => {
         {
             let mut total = 0;
             for $element in $lo.. $hi {
@@ -90,11 +106,7 @@ pub sugar sum: tag emits eff [Fail] {
         }
     }
 
-    rule (
-        sum{
-            $projection:block | $element:pat in $source:expr
-        }
-    ) => {
+    rule (sum{ $projection:block | $element:pat in $source:expr }) => {
         {
             let mut total = 0;
             for $element in $source {
@@ -102,6 +114,41 @@ pub sugar sum: tag emits eff [Fail] {
             }
             total
         }
+    }
+}
+
+// The largest projected value under Ord. Empty sources yield None; equal
+// values keep the first item. The explicit type fixes the Option accumulator
+// even when no element runs the braced projection.
+pub sugar max: tag {
+    rule (max{ $projection:block: $t:ty | $element:pat in $lo:expr.. $hi:expr }) => {
+        {
+            let mut largest: Option[$t] = Option::None;
+            for $element in $lo.. $hi {
+                largest = keep_max(largest, $projection);
+            }
+            largest
+        }
+    }
+
+    rule (max{ $projection:block: $t:ty | $element:pat in $source:expr }) => {
+        {
+            let mut largest: Option[$t] = Option::None;
+            for $element in $source {
+                largest = keep_max(largest, $projection);
+            }
+            largest
+        }
+    }
+}
+
+fn keep_max[T: mod copy + Ord](previous: Option[T], candidate: T) -> Option[T] {
+    match previous {
+        Option::None => Option::Some(candidate),
+        Option::Some(best) => match best.cmp(candidate) {
+            Less => Option::Some(candidate),
+            _ => previous,
+        },
     }
 }
 
@@ -114,24 +161,18 @@ test {
     // @case any_stops_at_first_match()
     fn any_runs_bounds_once_and_stops() -> bool {
         let mut log: u64 = 0;
-        let found = any{
-            {
-                mark(inout log, x) == 2
-            }
-            | x in mark(inout log, 1)..mark(inout log, 4)
-        };
+        let found = any{ {
+            mark(inout log, x) == 2
+        } | x in mark(inout log, 1)..mark(inout log, 4) };
         found && log == 1412
     }
 
     // @case all_stops_at_first_miss()
     fn all_runs_bounds_once_and_stops() -> bool {
         let mut log: u64 = 0;
-        let accepted = all{
-            {
-                mark(inout log, x) < 2
-            }
-            | x in mark(inout log, 1)..mark(inout log, 4)
-        };
+        let accepted = all{ {
+            mark(inout log, x) < 2
+        } | x in mark(inout log, 1)..mark(inout log, 4) };
         !accepted && log == 1412
     }
 
@@ -140,18 +181,8 @@ test {
         let mut calls: u64 = 0;
         let lo: u64 = 2;
         let hi: u64 = 2;
-        let found = any{
-            {
-                mark(inout calls, x) != 0
-            }
-            | x in lo..hi
-        };
-        let accepted = all{
-            {
-                mark(inout calls, x) != 0
-            }
-            | x in lo..hi
-        };
+        let found = any{ { mark(inout calls, x) != 0 } | x in lo..hi };
+        let accepted = all{ { mark(inout calls, x) != 0 } | x in lo..hi };
         !found && accepted && calls == 0
     }
 
@@ -162,49 +193,25 @@ test {
         let mut pairs: ChunkSeq[(i64, i64)] = ChunkSeq::new();
         pairs.push((0, 3));
         pairs.push((9, 3));
-        let matches = any{
-            {
-                left == found && right == accepted
-            }
-            | (left, right) in pairs.as_slice()
-        };
-        matches && all{
-            {
-                x < found
-            }
-            | x in [1, 3, 8]
-        }
-        && found == 9 && accepted == 3
+        let matches = any{ {
+            left == found && right == accepted
+        } | (left, right) in pairs.as_slice() };
+        matches && all{ { x < found } | x in [1, 3, 8] } && found == 9 && accepted == 3
     }
 
     // @case borrows_existing_view(in "aba", true, false)
     // @case empty_view(in "", false, true)
     fn slice_is_iterated_without_copy(in text: Str, found: bool, accepted: bool) -> bool {
         let bytes = text.as_bytes();
-        let has_b = any{
-            {
-                byte == 98
-            }
-            | byte in bytes
-        };
-        let only_a = all{
-            {
-                byte == 97
-            }
-            | byte in bytes
-        };
+        let has_b = any{ { byte == 98 } | byte in bytes };
+        let only_a = all{ { byte == 97 } | byte in bytes };
         has_b == found && only_a == accepted
     }
 }
 
 test {
     fn sum_signed(in data: Slice[i64]) -> i64 eff [Fail[ArithOverflow]] {
-        sum{
-            {
-                n
-            }
-            | n in data
-        }
+        sum{ { n } | n in data }
     }
 
     fn handwritten(in data: Slice[i64]) -> i64 eff [Fail[ArithOverflow]] {
@@ -221,12 +228,9 @@ test {
     }
 
     fn sum_range(inout log: u64, start: u64, end: u64) -> u64 eff [Fail[ArithOverflow]] {
-        sum{
-            {
-                sum_mark(inout log, n)
-            }
-            | n in sum_mark(inout log, start)..sum_mark(inout log, end)
-        }
+        sum{ {
+            sum_mark(inout log, n)
+        } | n in sum_mark(inout log, start)..sum_mark(inout log, end) }
     }
 
     fn sum_numbers(inout log: u64) -> ChunkSeq[u64] {
@@ -238,12 +242,7 @@ test {
     }
 
     fn sum_sourced(inout log: u64) -> u64 eff [Fail[ArithOverflow]] {
-        sum{
-            {
-                sum_mark(inout log, n)
-            }
-            | n in sum_numbers(inout log)
-        }
+        sum{ { sum_mark(inout log, n) } | n in sum_numbers(inout log) }
     }
 
     fn sum_with_overflow(inout visits: u64, first: u64) -> u64 eff [Fail[ArithOverflow]] {
@@ -251,13 +250,10 @@ test {
         xs.push(first);
         xs.push(1);
         xs.push(3);
-        sum{
-            {
-                visits = wrapping_add(visits, 1);
-                n
-            }
-            | n in xs.as_slice()
-        }
+        sum{ {
+            visits = wrapping_add(visits, 1);
+            n
+        } | n in xs.as_slice() }
     }
 
     // @case signed_empty()
@@ -330,5 +326,150 @@ test {
             raise(_, _) => fails,
         };
         ok && visits == count
+    }
+}
+
+test {
+    struct ZipInputs {
+        coefficients: ChunkSeq[i64],
+        weights: ChunkSeq[u64],
+    }
+
+    fn zip_dot(in inputs: ZipInputs, inout visits: u64) -> i64 eff [Fail[ArithOverflow]] {
+        sum{ {
+            visits = wrapping_add(visits, 1);
+            x * narrow_i64(weight)
+        } | (x, weight) in zip{ inputs.coefficients, inputs.weights } }
+    }
+
+    // @case right_shorter(1, 3, 3, 1)
+    // @case left_shorter(3, 2, 7, 2)
+    // @case equal(3, 3, 12, 3)
+    // @case left_empty(3, 0, 0, 0)
+    // @case right_empty(0, 3, 0, 0)
+    fn zip_stops_at_shorter_input(weights: u64, coefficients: u64, total: i64, count: u64) -> bool {
+        let mut data = ZipInputs {
+            coefficients: ChunkSeq::new[i64](),
+            weights: ChunkSeq::new[u64](),
+        };
+        for i in 0..coefficients {
+            data.coefficients.push(wrapping_i64(wrapping_add(3, i)));
+        }
+        for _ in 0..weights {
+            data.weights.push(1);
+        }
+        let mut visits: u64 = 0;
+        let ok = handle Fail[ArithOverflow] in {
+            zip_dot(in data, inout visits) == total
+        } with {
+            return value => value,
+            raise(_, _) => false,
+        };
+        ok && visits == count
+    }
+
+    fn zip(a: i64, b: i64) -> ChunkSeq[i64] {
+        let mut values = ChunkSeq::new[i64]();
+        values.push(a);
+        values.push(b);
+        values
+    }
+
+    fn zip_calls_still_resolve_to_functions() -> i64 eff [Fail[ArithOverflow]] {
+        sum{ { x } | x in zip(40, 2) }
+    }
+
+    // @case independent_zip_name()
+    fn tagged_source_keeps_ordinary_zip_functions() -> bool {
+        handle Fail[ArithOverflow] in {
+            zip_calls_still_resolve_to_functions() == 42
+        } with {
+            return value => value,
+            raise(_, _) => false,
+        }
+    }
+
+    fn paired_with_self(in input: Slice[i64]) -> i64 eff [Fail[ArithOverflow]] {
+        sum{ { x * y } | (x, y) in zip{ input, input } }
+    }
+
+    // @case shared_borrow_alias()
+    fn one_slice_can_supply_both_views() -> bool {
+        let input = zip(3, 4);
+        handle Fail[ArithOverflow] in {
+            paired_with_self(in input.as_slice()) == 25
+        } with {
+            return value => value,
+            raise(_, _) => false,
+        }
+    }
+}
+
+test {
+    fn max_slice(in xs: Slice[i64]) -> Option[i64] {
+        max{ { x }: i64 | x in xs }
+    }
+
+    // @case only_negatives(-19, -3, -27, -3)
+    // @case first_is_max(42, 10, 3, 42)
+    // @case last_is_max(10, 3, 42, 42)
+    fn max_does_not_need_a_sentinel(a: i64, b: i64, c: i64, expected: i64) -> bool {
+        let mut xs = ChunkSeq::new[i64]();
+        xs.push(a);
+        xs.push(b);
+        xs.push(c);
+        let empty = ChunkSeq::new[i64]();
+        max_slice(in xs.as_slice()) == Option::Some(expected)
+            && max_slice(in empty.as_slice()) == Option::None
+    }
+
+    fn max_mark(inout log: u64, digit: u64) -> u64 {
+        log = wrapping_add(wrapping_mul(log, 10), digit);
+        digit
+    }
+
+    // @case visits_each(1, 4, 14123)
+    // @case empty(2, 2, 22)
+    fn max_range_runs_bounds_and_projection_in_order(lo: u64, hi: u64, trace: u64) -> bool {
+        let mut log: u64 = 0;
+        let actual = max{ {
+            max_mark(inout log, x)
+        }: u64 | x in max_mark(inout log, lo)..max_mark(inout log, hi) };
+        let expected = if lo < hi {
+            Option::Some(wrapping_sub(hi, 1))
+        } else {
+            Option::None
+        };
+        actual == expected && log == trace
+    }
+
+    copy struct Rank {
+        score: i64,
+        original: i64,
+    }
+
+    impl Eq for Rank {
+        fn eq(in self, in other: Rank) -> bool {
+            self.score == other.score
+        }
+    }
+
+    impl Ord for Rank {
+        fn cmp(in self, in other: Rank) -> Ordering {
+            self.score.cmp(other.score)
+        }
+    }
+
+    // @case equal_comparison_retains_first()
+    fn max_equal_scores_keep_first_record() -> bool {
+        let mut ranks = ChunkSeq::new[Rank]();
+        ranks.push(Rank { score: -2, original: 1 });
+        ranks.push(Rank { score: 7, original: 2 });
+        ranks.push(Rank { score: 7, original: 3 });
+        let winner = max{ { x }: Rank | x in ranks.as_slice() };
+        match winner {
+            Option::Some(x) => x.original == 2,
+            Option::None => false,
+        }
     }
 }

@@ -17,11 +17,7 @@ fn run(s: Secret[u64]) -> Secret[u64] eff [ConstTime] {
         return v => v,
         tick(resume) => {
             let after = resume(1);
-            if after == 0 {
-                0
-            } else {
-                after
-            }
+            if after == 0 { 0 } else { after }
         },
     };
     s

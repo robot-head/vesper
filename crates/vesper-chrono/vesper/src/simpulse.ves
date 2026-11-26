@@ -25,11 +25,7 @@ pub fn new_tap() -> SimPulseTap {
 }
 
 pub fn event_task(in ev: SimPulseEvent) -> u64 {
-    if ev.kind == 9 {
-        0
-    } else {
-        ev.task
-    }
+    if ev.kind == 9 { 0 } else { ev.task }
 }
 
 pub fn event_time_ns(in ev: SimPulseEvent, last_time_ns: u64) -> u64 {
@@ -100,12 +96,11 @@ pub fn seed_metadata(seed: u64) -> ChunkSeq[u8] {
         if k >= 8 {
             break;
         }
-        out
-            .push(
-                wrapping_u8(
-                    wrapping_shr_u64(seed, wrapping_u32(wrapping_mul(k, 8))) & 255,
-                )
-            );
+        out.push(
+            wrapping_u8(
+                wrapping_shr_u64(seed, wrapping_u32(wrapping_mul(k, 8))) & 255,
+            )
+        );
         k = wrapping_add(k, 1);
     }
     out

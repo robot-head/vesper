@@ -1143,11 +1143,7 @@ impl Gen {
             if receiver == 0 && !self.names_decl(f.result, d.name) {
                 continue;
             }
-            let skip: u64 = if receiver == 0 {
-                0
-            } else {
-                1
-            };
+            let skip: u64 = if receiver == 0 { 0 } else { 1 };
             if any {
                 put(inout lines, "\n\n");
             }
