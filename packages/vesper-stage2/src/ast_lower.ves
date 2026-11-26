@@ -15,55 +15,15 @@ use @vesper/ast::{
     list_len,
     none as ast_none
 };
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    EffNode,
-    Types
-};
-use @vesper/check-data::util::{
-    inc32,
-    n32,
-    u32_at,
-    w
-};
-use @vesper/check-data::world::{
-    Generic,
-    World,
-    set_by_symbol
-};
-use @vesper/check-names-packages::{
-    AssembledModule
-};
-use @vesper/place-ir::codes::{
-    Lit,
-    Pat
-};
-use @vesper/place-ir-lower::ast::{
-    Ast as IrAst,
-    Cl,
-    Ef,
-    Eop,
-    Ex,
-    FnR,
-    Gn,
-    Hd,
-    PathR,
-    Pm,
-    Pt
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use self::collect::{
-    CollectedProgram,
-    FnInfo,
-    ParamInfo,
-    lower_effects,
-    lower_ty,
-    translate_sym
-};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{EffNode, Types};
+use @vesper/check-data::util::{inc32, n32, u32_at, w};
+use @vesper/check-data::world::{Generic, World, set_by_symbol};
+use @vesper/check-names-packages::{AssembledModule};
+use @vesper/place-ir::codes::{Lit, Pat};
+use @vesper/place-ir-lower::ast::{Ast as IrAst, Cl, Ef, Eop, Ex, FnR, Gn, Hd, PathR, Pm, Pt};
+use @vesper-std/arena::{idx_from_raw};
+use self::collect::{CollectedProgram, FnInfo, ParamInfo, lower_effects, lower_ty, translate_sym};
 
 const NONE64: u64 = 18446744073709551615;
 const NONE32: u32 = 4294967295;

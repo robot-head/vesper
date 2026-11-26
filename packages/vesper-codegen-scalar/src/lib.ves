@@ -20,50 +20,15 @@
 // 0 I64, 1 F32, 2 F64, 3 I128.
 
 use @vesper/check-data::pack_text;
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    push_decimal,
-    u32_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    Types,
-    default_type,
-    TyKind
-};
-use @vesper/check-data::world::{
-    set_by_symbol
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    read_ctx
-};
-use @vesper/check-layout::{
-    Layouts,
-    layout_of,
-    layouts_new
-};
-use @vesper/place-ir::{
-    FnRow,
-    InstRow,
-    Program,
-    read_program
-};
-use self::blocks::{
-    block_layout
-};
-use @vesper/place-ir::codes::{
-    Lit,
-    Op,
-    Tag,
-    Term
-};
+use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{Types, default_type, TyKind};
+use @vesper/check-data::world::{set_by_symbol};
+use @vesper/check-data::input::{Ctx, Reader, read_ctx};
+use @vesper/check-layout::{Layouts, layout_of, layouts_new};
+use @vesper/place-ir::{FnRow, InstRow, Program, read_program};
+use self::blocks::{block_layout};
+use @vesper/place-ir::codes::{Lit, Op, Tag, Term};
 
 const NONE32: u32 = 4294967295;
 

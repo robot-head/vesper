@@ -1,9 +1,6 @@
 // Module common of @vesper/grammar (see lib.ves): the failure record and
 // the checked helpers every module shares.
-use self::{
-    GErr,
-    P2
-};
+use self::{GErr, P2};
 
 // The largest u64, also the "absent" marker in result streams.
 // Unsigned LEB128 (src/framing.rs `LEB128_*`): seven payload bits per byte

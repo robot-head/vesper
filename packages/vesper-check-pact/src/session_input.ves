@@ -1,31 +1,13 @@
 // Input/output codecs and ASCII validation helpers for `@vesper/check-pact`'s
 // trait session (`session.ves`).
 
-use @vesper/check-data::input::{
-    Ctx,
-    Reader
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    EffNode,
-    TyKind
-};
+use @vesper/check-data::input::{Ctx, Reader};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{EffNode, TyKind};
 
 const K_FN: u8 = TyKind::Fn;
-use @vesper/check-data::util::{
-    add,
-    inc,
-    inc32,
-    n32,
-    push_decimal,
-    u32_at,
-    w
-};
-use self::decl::{
-    Gen
-};
+use @vesper/check-data::util::{add, inc, inc32, n32, push_decimal, u32_at, w};
+use self::decl::{Gen};
 
 const NONE32: u32 = 4294967295;
 

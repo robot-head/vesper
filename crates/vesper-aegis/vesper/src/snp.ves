@@ -1,10 +1,7 @@
 // Module snp of @vesper/aegis (see lib.ves): SnpReport::parse and
 // SnpEtcb::parse of src/snp.rs (AMD SEV-SNP ATTESTATION_REPORT versions 2
 // to 6). Format code 2 (SnpReport).
-use self::{
-    AErr,
-    Rd
-};
+use self::{AErr, Rd};
 use self::reader::{
     arr,
     byte,

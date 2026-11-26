@@ -1,9 +1,7 @@
 // Module query of @vesper/pact (see lib.ves): `Solver::solve`, one
 // top-level query, and mapping its outcome back to the caller's
 // placeholders (`restore_placeholders`).
-use self::{
-    S
-};
+use self::{S};
 use self::term::{
     am_stalled,
     c_nested,
@@ -30,22 +28,11 @@ use self::term::{
     un_dup,
     un_mixed
 };
-use self::fold::{
-    run
-};
-use self::infer::{
-    fresh_args
-};
-use self::canon::{
-    canon_placeholders
-};
-use self::program::{
-    validate_query
-};
-use self::solver::{
-    drive,
-    make_response
-};
+use self::fold::{run};
+use self::infer::{fresh_args};
+use self::canon::{canon_placeholders};
+use self::program::{validate_query};
+use self::solver::{drive, make_response};
 
 // Resets the table, the stack and the statistics (a new `Solver`).
 pub fn reset_solver(inout s: S) {

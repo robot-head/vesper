@@ -18,18 +18,8 @@ use self::{
     TilePoint,
     Token
 };
-use self::index::{
-    at,
-    min64,
-    next_decoded,
-    raise,
-    strings_equal,
-    tok
-};
-use self::ascii::{
-    Ascii,
-    Utf8
-};
+use self::index::{at, min64, next_decoded, raise, strings_equal, tok};
+use self::ascii::{Ascii, Utf8};
 
 // `BatchLimits::HARD` and the per-record `Limits` ceilings it enforces
 // (src/ndjson.rs).

@@ -13,27 +13,10 @@ use self::{
     WtReadPre,
     DgramSendPlan
 };
-use self::int::{
-    inc,
-    min64,
-    word,
-    remove_word
-};
-use self::varint::{
-    vdec,
-    vput,
-    put_record
-};
-use self::frame::{
-    data_type,
-    webtransport_stream_type
-};
-use self::capsule::{
-    datagram_type,
-    valid_utf8,
-    max_close_reason,
-    capsule_write_close
-};
+use self::int::{inc, min64, word, remove_word};
+use self::varint::{vdec, vput, put_record};
+use self::frame::{data_type, webtransport_stream_type};
+use self::capsule::{datagram_type, valid_utf8, max_close_reason, capsule_write_close};
 use self::pool::{
     BytePool,
     OutMap,

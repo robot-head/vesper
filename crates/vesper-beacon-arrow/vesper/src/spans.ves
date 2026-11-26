@@ -3,11 +3,7 @@
 // out byte for byte as `arrow-ipc` 56's `StreamWriter` writes it with
 // 64-byte alignment and metadata V5 (an all-valid bitmap per column, every
 // buffer padded to 64 bytes).
-use self::fb::{
-    Fb,
-    fb_new,
-    padding
-};
+use self::fb::{Fb, fb_new, padding};
 use self::ipc::{
     batch_message,
     framed_len,

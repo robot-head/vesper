@@ -69,55 +69,14 @@ use self::kafka_api::{
     resp_sync_group,
     subscription
 };
-use self::util::{
-    affordable,
-    cell,
-    cmp_rows,
-    contains,
-    push_row,
-    word
-};
-use self::sort::{
-    sort_rows,
-    sort_by_column,
-    sort_u64
-};
-use self::acc::{
-    ROWS_FULL,
-    SUM_OVERFLOW,
-    acc_finish,
-    acc_insert,
-    acc_new
-};
+use self::util::{affordable, cell, cmp_rows, contains, push_row, word};
+use self::sort::{sort_rows, sort_by_column, sort_u64};
+use self::acc::{ROWS_FULL, SUM_OVERFLOW, acc_finish, acc_insert, acc_new};
 use self::cdc::cdc_decode;
-use self::log::{
-    frame_bytes,
-    frame_decode,
-    frame_ok,
-    header_bytes
-};
-use self::image::{
-    identity,
-    image_bytes,
-    image_check,
-    image_head,
-    image_sets
-};
-use self::spine::{
-    batch_bytes,
-    batch_read,
-    manifest_bytes,
-    manifest_nodes
-};
-use self::wide::{
-    Acc,
-    acc_add,
-    acc_fits,
-    acc_is_zero,
-    acc_value,
-    acc_zero,
-    mul_fits
-};
+use self::log::{frame_bytes, frame_decode, frame_ok, header_bytes};
+use self::image::{identity, image_bytes, image_check, image_head, image_sets};
+use self::spine::{batch_bytes, batch_read, manifest_bytes, manifest_nodes};
+use self::wide::{Acc, acc_add, acc_fits, acc_is_zero, acc_value, acc_zero, mul_fits};
 
 pub copy enum ZErr {
     Work,

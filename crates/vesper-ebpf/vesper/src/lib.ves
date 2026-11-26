@@ -65,18 +65,9 @@ use self::scalar::{
     tnum_truncate,
     tnum_xor
 };
-use self::common::{
-    sext_const
-};
-use self::concrete::{
-    alu_concrete,
-    cmp_concrete,
-    endian
-};
-use self::helpers::{
-    allowed,
-    gpl_compatible
-};
+use self::common::{sext_const};
+use self::concrete::{alu_concrete, cmp_concrete, endian};
+use self::helpers::{allowed, gpl_compatible};
 use self::program::{
     MapKind,
     ProgramType,
@@ -90,37 +81,11 @@ use self::program::{
     prog_kernel_type
 };
 use self::btf::parse_btf;
-use self::btf_ext::{
-    local_type_words,
-    maps_from_btf,
-    parse_ext
-};
-use self::interp::{
-    Mach,
-    clone_mach,
-    map_has,
-    map_key_spans,
-    map_value,
-    new_env,
-    run_program
-};
-use self::core::{
-    combine,
-    filter_candidates,
-    local_value,
-    patch_insn,
-    target_value,
-    values_over
-};
-use self::callgraph::{
-    check_stack
-};
-use self::verifier::{
-    new_pools,
-    Outcome,
-    Pools,
-    verify_program
-};
+use self::btf_ext::{local_type_words, maps_from_btf, parse_ext};
+use self::interp::{Mach, clone_mach, map_has, map_key_spans, map_value, new_env, run_program};
+use self::core::{combine, filter_candidates, local_value, patch_insn, target_value, values_over};
+use self::callgraph::{check_stack};
+use self::verifier::{new_pools, Outcome, Pools, verify_program};
 use self::wire::{
     EthIpv4TcpWire,
     SynDropAlertWire,

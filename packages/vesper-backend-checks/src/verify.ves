@@ -4,37 +4,13 @@
 // `derive_policy` (`policy_from_capabilities`), and the verification half
 // of `verify_native_with_capabilities`.
 
-use self::consttime::{
-    verify_constant_time
-};
-use self::detfloat::{
-    DetPolicy,
-    audit
-};
-use self::input::{
-    Cx,
-    ent_row,
-    fw,
-    iw,
-    pw,
-    wfw,
-    world_fn
-};
-use self::realtime::{
-    verify
-};
-use self::report::{
-    dnote,
-    note
-};
-use self::stack::{
-    measure_emitted
-};
-use self::stack_bound::{
-    StackPol,
-    analyze_stack,
-    pol_new
-};
+use self::consttime::{verify_constant_time};
+use self::detfloat::{DetPolicy, audit};
+use self::input::{Cx, ent_row, fw, iw, pw, wfw, world_fn};
+use self::realtime::{verify};
+use self::report::{dnote, note};
+use self::stack::{measure_emitted};
+use self::stack_bound::{StackPol, analyze_stack, pol_new};
 use self::util::{
     contains,
     dup,

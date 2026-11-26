@@ -8,12 +8,8 @@
 // b]`. crates/vesper-hybrid installs `scalar` as the `scalar` hook of
 // `vesper::codegen_swap`; it emits one planned instruction or one typed
 // request of `codegen_swap::scalar`, and returns 0 to leave it to Rust.
-use @vesper/codegen-scalar::{
-    codegen_scalar_plan_bytes
-};
-use @vesper/codegen-scalar-emit::{
-    scalar_hook
-};
+use @vesper/codegen-scalar::{codegen_scalar_plan_bytes};
+use @vesper/codegen-scalar-emit::{scalar_hook};
 
 pub fn plan(in input: Slice[u8]) -> ChunkSeq[u64] {
     codegen_scalar_plan_bytes(in input)

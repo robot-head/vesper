@@ -3,20 +3,7 @@
 // graph or with some blocks' out-edges cut (the bounds facts' graph, where a
 // block that calls a function returning `Never` falls through nowhere).
 
-use self::fun::{
-    Blk,
-    Fun,
-    add,
-    has,
-    inc,
-    insert,
-    n32,
-    set_u32,
-    set_u8,
-    u32_at,
-    u8_at,
-    w
-};
+use self::fun::{Blk, Fun, add, has, inc, insert, n32, set_u32, set_u8, u32_at, u8_at, w};
 
 const NONE32: u32 = 4294967295;
 const T_JUMP: u8 = 1;

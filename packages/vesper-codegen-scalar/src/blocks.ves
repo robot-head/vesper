@@ -12,21 +12,9 @@
 // Removing the unreached blocks reorders the lists of the blocks they jump
 // to, and so the order `toposort` visits successors in.
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    push_decimal,
-    u64_at,
-    u8_at
-};
-use @vesper/place-ir::{
-    BlockRow,
-    FnRow,
-    Program
-};
-use @vesper/place-ir::codes::{
-    Tag
-};
+use @vesper/check-data::util::{add, inc, push_decimal, u64_at, u8_at};
+use @vesper/place-ir::{BlockRow, FnRow, Program};
+use @vesper/place-ir::codes::{Tag};
 
 const OUT: u8 = 0;
 const IN: u8 = 1;

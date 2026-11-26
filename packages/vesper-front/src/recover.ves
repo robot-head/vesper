@@ -17,11 +17,7 @@
 // Diagnostics, 3 Depth, 4 Sites, 5 Declarations, 6 Metadata, 7 Work, 8
 // Identifier) for `Budget`.
 
-use self::{
-    Tokens,
-    Diags,
-    Tree
-};
+use self::{Tokens, Diags, Tree};
 use self::kinds::{
     TokenSentinel,
     k_upper,
@@ -49,48 +45,12 @@ use self::kinds::{
     k_eof,
     k_error
 };
-use self::words::{
-    w_use,
-    w_model,
-    w_pub,
-    w_fip,
-    w_trait,
-    w_test,
-    w_tiled
-};
-use self::util::{
-    inc,
-    add,
-    narrow,
-    byte,
-    u8_at,
-    u32_at,
-    u64_at,
-    w32,
-    shl
-};
-use self::diag::{
-    diags_new,
-    diag_push
-};
-use self::lex::{
-    lex_with_limits,
-    tokens_new,
-    trivia_kind,
-    token_end
-};
-use self::parse::{
-    editor_parser,
-    editor_reset,
-    parse_item
-};
-use self::tree::{
-    tree_new,
-    build_events,
-    report_into,
-    Event,
-    NodeKind
-};
+use self::words::{w_use, w_model, w_pub, w_fip, w_trait, w_test, w_tiled};
+use self::util::{inc, add, narrow, byte, u8_at, u32_at, u64_at, w32, shl};
+use self::diag::{diags_new, diag_push};
+use self::lex::{lex_with_limits, tokens_new, trivia_kind, token_end};
+use self::parse::{editor_parser, editor_reset, parse_item};
+use self::tree::{tree_new, build_events, report_into, Event, NodeKind};
 
 fn none() -> u64 {
     18446744073709551615

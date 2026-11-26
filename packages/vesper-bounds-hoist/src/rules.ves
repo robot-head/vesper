@@ -19,9 +19,7 @@ use self::fun::{
     u32_at,
     w
 };
-use @vesper/check-data::types::{
-    TyPass
-};
+use @vesper/check-data::types::{TyPass};
 
 const OP_READ: u8 = 3;
 const OP_BIND: u8 = 4;

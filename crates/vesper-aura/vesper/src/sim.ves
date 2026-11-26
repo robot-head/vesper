@@ -1,12 +1,5 @@
 // sim_aura.rs: focus order, dispatch, audits and the topology encoding.
-use self::codes::{
-    Budget,
-    Event,
-    Prop,
-    ValueTag,
-    WidgetKind,
-    NONE_ID
-};
+use self::codes::{Budget, Event, Prop, ValueTag, WidgetKind, NONE_ID};
 use self::recording::{
     child_count,
     child_edge,
@@ -19,14 +12,7 @@ use self::recording::{
     widget_sub,
     widget_sub_count
 };
-use self::{
-    Query,
-    RState,
-    Recorder,
-    TNode,
-    Tree,
-    ViewFault
-};
+use self::{Query, RState, Recorder, TNode, Tree, ViewFault};
 use self::util::{
     add,
     blank_seq,
@@ -41,13 +27,7 @@ use self::util::{
     tprop,
     tsub
 };
-use self::view::{
-    decode,
-    decode_cap,
-    tree_new,
-    tree_sized,
-    validate
-};
+use self::view::{decode, decode_cap, tree_new, tree_sized, validate};
 
 // encode_view_tree's ceilings: slot bases and handlers are u32, child
 // counts u16.

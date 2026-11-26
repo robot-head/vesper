@@ -1,9 +1,6 @@
 // @vesper-std/collections::btree_cursor: ordered traversal of
 // `CacheBTree[K, V]` (the layout is described in `btree.ves`).
-use self::btree::{
-    CacheBTree,
-    BTreeCursor
-};
+use self::btree::{CacheBTree, BTreeCursor};
 
 fn none_id() -> u64 {
     18446744073709551615

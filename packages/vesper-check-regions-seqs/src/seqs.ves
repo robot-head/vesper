@@ -8,29 +8,11 @@
 // An operation is a `u32` code: `SeqOp` variants 1-41 (0 = none), `Wide`
 // accesses 64 + `Wide::index`, `StrOp` variants 100 + their order.
 
-use @vesper/check-data::util::{
-    add,
-    n32,
-    u32_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    Types,
-    display,
-    TyKind,
-    TyPass
-};
-use @vesper/check-data::world::{
-    Known,
-    World
-};
-use @vesper/check-data::diag::{
-    Diags
-};
+use @vesper/check-data::util::{add, n32, u32_at, u8_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{Types, display, TyKind, TyPass};
+use @vesper/check-data::world::{Known, World};
+use @vesper/check-data::diag::{Diags};
 
 const NONE32: u32 = 4294967295;
 

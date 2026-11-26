@@ -1,29 +1,10 @@
 // Module rows of @vesper/tensor (see lib.ves): GGML Q8_0 / Q4_0 and OCP
 // MXFP4 blocks (src/quant.rs, src/formats.rs), FP8 matrices, and the row
 // decoder behind `Matrix::row_chunks`.
-use self::{
-    Fault
-};
-use self::num::{
-    decode_bf16,
-    decode_fp16,
-    encode_fp16,
-    finite_bits,
-    half_at,
-    is_finite,
-    u64_zero
-};
-use self::ocp::{
-    e8m0_half,
-    floor_log2,
-    fp8_decode,
-    fp8_encode,
-    max_finite
-};
-use self::qk::{
-    check_block,
-    dequantize_block
-};
+use self::{Fault};
+use self::num::{decode_bf16, decode_fp16, encode_fp16, finite_bits, half_at, is_finite, u64_zero};
+use self::ocp::{e8m0_half, floor_log2, fp8_decode, fp8_encode, max_finite};
+use self::qk::{check_block, dequantize_block};
 
 // Block geometry (src/quant.rs, src/formats.rs): Q8_0, Q4_0 and MXFP4 blocks
 // hold `BLOCK` elements, Q4_K super-blocks `QK_K`.

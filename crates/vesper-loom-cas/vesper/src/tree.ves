@@ -2,10 +2,7 @@
 //
 //   "VLTR" | u32 LE version=1 | u64 LE count |
 //     count x ( u16 LE name_len | name | u8 kind | 32-byte digest | u64 LE size )
-use self::name::{
-    is_utf8,
-    name_code
-};
+use self::name::{is_utf8, name_code};
 
 // TreeError positions plus one, as `tree_decode` reports them.
 const BAD_MAGIC: u64 = 1;

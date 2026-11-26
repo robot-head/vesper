@@ -20,22 +20,9 @@ use @vesper/ast::{
     list_len,
     none as ast_none
 };
-use @vesper/check-data::names::{
-    Names,
-    names_new
-};
-use @vesper/check-data::types::{
-    EffNode,
-    TyKind,
-    Types,
-    types_new
-};
-use @vesper/check-data::util::{
-    inc32,
-    n32,
-    u32_at,
-    w
-};
+use @vesper/check-data::names::{Names, names_new};
+use @vesper/check-data::types::{EffNode, TyKind, Types, types_new};
+use @vesper/check-data::util::{inc32, n32, u32_at, w};
 
 const NONE32: u32 = 4294967295;
 use @vesper/check-data::world::{
@@ -50,15 +37,9 @@ use @vesper/check-data::world::{
     set_by_symbol,
     world_new
 };
-use @vesper/check-names-packages::{
-    AssembledModule
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
+use @vesper/check-names-packages::{AssembledModule};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
 
 pub copy struct FnInfo {
     name: u32,

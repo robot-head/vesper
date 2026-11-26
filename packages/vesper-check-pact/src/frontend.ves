@@ -9,42 +9,12 @@
 // symbol: `kinds` (the name kinds `collect_local` reserves), `trait_of`
 // (the accepted local traits) and `fn_of` (the base world's functions).
 
-use @vesper/check-data::input::{
-    Ctx
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    Types,
-    Vars,
-    display,
-    vars_new,
-    TyKind
-};
-use @vesper/check-data::world::{
-    Bounds,
-    bounds_new,
-    mode_of,
-    set_by_symbol
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    push_decimal,
-    u32_at,
-    w
-};
-use self::decl::{
-    Conf,
-    Decls,
-    Gen,
-    Par,
-    Sig,
-    TRef,
-    TraitRow
-};
+use @vesper/check-data::input::{Ctx};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{Types, Vars, display, vars_new, TyKind};
+use @vesper/check-data::world::{Bounds, bounds_new, mode_of, set_by_symbol};
+use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, w};
+use self::decl::{Conf, Decls, Gen, Par, Sig, TRef, TraitRow};
 use self::tyops::{
     Sy,
     binding_of,

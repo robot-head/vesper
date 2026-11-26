@@ -12,13 +12,8 @@
 // computes (aliases, whether an opcode touches memory, whether a call is
 // `park`) is input, the check is not.
 
-use @vesper/check-data::util::{
-    push_decimal,
-    u64_at
-};
-use @vesper/check-data::input::{
-    Reader
-};
+use @vesper/check-data::util::{push_decimal, u64_at};
+use @vesper/check-data::input::{Reader};
 
 // `vesper_fiber_abi::abi::offsets::CTX_DATA_BASE` and `RESUME_DATA_BASE`.
 const CTX_DATA_BASE: u64 = 56;

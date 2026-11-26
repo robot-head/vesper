@@ -1,8 +1,5 @@
 // Module lex of @vesper/quarry (see lib.ves).
-use self::{
-    Q,
-    Tok
-};
+use self::{Q, Tok};
 use self::util::{
     bound,
     fail,
@@ -20,9 +17,7 @@ use self::util::{
     tk_text,
     tk_word
 };
-use self::parse::{
-    keyword
-};
+use self::parse::{keyword};
 
 // ASCII bytes.
 const TAB: u64 = 9;

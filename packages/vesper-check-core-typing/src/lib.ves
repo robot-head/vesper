@@ -11,45 +11,14 @@
 //
 // The entries below are the differential's tasks.
 
-use @vesper/check-data::util::{
-    u32_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    Types,
-    Vars,
-    debug_type,
-    vars_new
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    read_ctx
-};
-use @vesper/check-data::{
-    pack_text
-};
-use self::relations::{
-    compatible,
-    infer,
-    join_types,
-    refine_annotation,
-    unresolved
-};
-use self::exprs::{
-    check_exprs,
-    ck_new
-};
-use self::patterns::{
-    Pats,
-    arms_cover,
-    irrefutable,
-    is_uninhabited,
-    pats_new
-};
+use @vesper/check-data::util::{u32_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{Types, Vars, debug_type, vars_new};
+use @vesper/check-data::input::{Ctx, Reader, read_ctx};
+use @vesper/check-data::{pack_text};
+use self::relations::{compatible, infer, join_types, refine_annotation, unresolved};
+use self::exprs::{check_exprs, ck_new};
+use self::patterns::{Pats, arms_cover, irrefutable, is_uninhabited, pats_new};
 
 // Pattern kinds (constants cannot be imported yet; keep equal to
 // patterns.ves).

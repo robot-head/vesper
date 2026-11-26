@@ -4,11 +4,7 @@
 // means success. The Rust half is `decode_error` in
 // tests/self_host_freestanding.rs.
 
-use self::util::{
-    push64,
-    put_str,
-    put_text
-};
+use self::util::{push64, put_str, put_text};
 
 enum Code: _ {
     UnsupportedTarget = 1,

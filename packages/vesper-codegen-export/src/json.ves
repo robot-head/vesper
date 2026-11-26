@@ -3,16 +3,8 @@
 // newline. Fields come in the Rust structs' order, and the optional ones
 // are left out as their `skip_serializing_if` says.
 
-use @vesper/check-data::util::{
-    inc,
-    u32_at,
-    u8_at,
-    w
-};
-use self::iface::{
-    Iface,
-    TyNode
-};
+use @vesper/check-data::util::{inc, u32_at, u8_at, w};
+use self::iface::{Iface, TyNode};
 
 const K_SCALAR: u8 = 0;
 const K_TUPLE: u8 = 1;

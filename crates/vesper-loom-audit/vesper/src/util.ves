@@ -1,8 +1,6 @@
 // Module util of @vesper/loom-audit (see lib.ves): errors and their text,
 // the logical work budget, saturating arithmetic and stamped marks.
-use @vesper/loom-calculus::{
-    L
-};
+use @vesper/loom-calculus::{L};
 use @vesper/loom-calculus::util::{
     Ascii,
     Order,
@@ -17,12 +15,7 @@ use @vesper/loom-calculus::util::{
     ver,
     ver_ord
 };
-use self::{
-    A,
-    Adv,
-    Nat,
-    Rng
-};
+use self::{A, Adv, Nat, Rng};
 
 // Error kinds, in the order of the Rust `Error` variants.
 pub enum ErrorKind: _ {

@@ -4,15 +4,8 @@
 // schema u16, flags u16) and `width` i64 cells; every record is checked
 // against its partition's binding and added to the accumulator, in the
 // Rust loop's order of charges and checks.
-use self::{
-    CdcErr,
-    ZAcc
-};
-use self::acc::{
-    ROWS_FULL,
-    SUM_OVERFLOW,
-    acc_insert
-};
+use self::{CdcErr, ZAcc};
+use self::acc::{ROWS_FULL, SUM_OVERFLOW, acc_insert};
 use self::util::word;
 
 const HEADER: u64 = 32;

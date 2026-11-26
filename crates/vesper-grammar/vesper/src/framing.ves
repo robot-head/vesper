@@ -3,22 +3,8 @@
 // Overflow 2, OutputTooSmall 4, InputLimit 5, OutputLimit 6, PayloadLimit 7,
 // WorkLimit 8. Limits: max_input_bytes, max_payload_bytes,
 // max_output_bytes, max_work.
-use self::{
-    GErr,
-    P2
-};
-use self::common::{
-    add_or,
-    bound,
-    charge_or,
-    fail,
-    leb_len,
-    pair,
-    put_leb,
-    sb,
-    shl,
-    sw
-};
+use self::{GErr, P2};
+use self::common::{add_or, bound, charge_or, fail, leb_len, pair, put_leb, sb, shl, sw};
 
 // Unsigned LEB128 (src/framing.rs `LEB128_*`): at most ten bytes for a
 // `u64`, whose last may only hold bit 63; seven payload bits per byte and a

@@ -1,10 +1,5 @@
 // @vesper-std/process (Windows): child processes directly over kernel32.
-use @vesper-std/fs::{
-    IoError,
-    error_of,
-    invalid_input,
-    not_found
-};
+use @vesper-std/fs::{IoError, error_of, invalid_input, not_found};
 
 pub copy struct ExitStatus {
     pub code: i64,

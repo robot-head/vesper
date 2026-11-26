@@ -2,20 +2,8 @@
 // `Stage::Config` JSON rejection in Vesper, delegating bounded file I/O,
 // policy loading, checked macro expansion, and Lean provenance extraction
 // (`src/forge_commands.rs`) to `HybridCommands::hc_forge_run`.
-use @vesper/driver::{
-    Args,
-    args_count,
-    arg_start,
-    arg_end,
-    eq
-};
-use super::{
-    arg,
-    byte_at,
-    print,
-    fail,
-    stdout_stream
-};
+use @vesper/driver::{Args, args_count, arg_start, arg_end, eq};
+use super::{arg, byte_at, print, fail, stdout_stream};
 
 const ACTION_CHECK: u32 = 0;
 const ACTION_EXPAND: u32 = 1;

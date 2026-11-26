@@ -27,60 +27,15 @@
 // Tables are dense and indexed by value id, block, local or symbol; a
 // Rust map of the decision functions is one of these tables here.
 
-use @vesper/place-ir::codes::{
-    Lit,
-    Op,
-    Pat,
-    Tag,
-    Term
-};
+use @vesper/place-ir::codes::{Lit, Op, Pat, Tag, Term};
 use @vesper/check-data::pack_text;
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    push_decimal,
-    push_signed,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    Types,
-    default_type,
-    substitute,
-    TyKind,
-    TyPass
-};
-use @vesper/check-data::world::{
-    SpanRow,
-    World,
-    find_span,
-    set_by_symbol,
-    vector_words
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    read_ctx
-};
-use @vesper/check-layout::{
-    Layouts,
-    layout_of,
-    layouts_new
-};
-use @vesper/place-ir::{
-    BlockRow,
-    FnRow,
-    InstRow,
-    Program,
-    put_program,
-    read_program
-};
+use @vesper/check-data::util::{add, inc, n32, push_decimal, push_signed, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{Types, default_type, substitute, TyKind, TyPass};
+use @vesper/check-data::world::{SpanRow, World, find_span, set_by_symbol, vector_words};
+use @vesper/check-data::input::{Ctx, Reader, read_ctx};
+use @vesper/check-layout::{Layouts, layout_of, layouts_new};
+use @vesper/place-ir::{BlockRow, FnRow, InstRow, Program, put_program, read_program};
 
 const NONE32: u32 = 4294967295;
 const NONE32_64: u64 = 4294967295;

@@ -31,6 +31,30 @@ fn canonical_simple_program_and_empty() {
     assert_eq!(verify(""), "\n");
 }
 #[test]
+fn use_groups_stay_on_one_line_when_they_fit() {
+    assert_eq!(
+        verify("use @vesper/front::{\n    P\n};\nuse self::text::{parse_float,decode_string};"),
+        "use @vesper/front::{P};\nuse self::text::{parse_float, decode_string};\n"
+    );
+    // Too long for the ribbon: one name per line, as any delimited list.
+    let long = format!(
+        "use @vesper/front::kinds::{{{}}};",
+        ["k_upper_case_kind"; 6].join(",")
+    );
+    assert_eq!(
+        verify(&long),
+        format!(
+            "use @vesper/front::kinds::{{\n{}\n}};\n",
+            ["    k_upper_case_kind"; 6].join(",\n")
+        )
+    );
+    // A source trailing comma still keeps the group vertical.
+    assert_eq!(
+        verify("use self::text::{parse_float,decode_string,};"),
+        "use self::text::{\n    parse_float,\n    decode_string,\n};\n"
+    );
+}
+#[test]
 fn parser_sugar_keeps_its_surface_syntax() {
     assert_eq!(
         verify(

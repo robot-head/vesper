@@ -9,18 +9,9 @@
 //
 // Integers are u64 here where the Rust code uses usize; the binding
 // converts them through the crate's own types (`crate::port_types`).
-use self::index::{
-    decode_into,
-    doc_clear,
-    field_lookup,
-    parse_document,
-    strings_equal
-};
+use self::index::{decode_into, doc_clear, field_lookup, parse_document, strings_equal};
 use self::lemire::decode_bits;
-use self::stage2::{
-    stage2_admit,
-    stage2_build
-};
+use self::stage2::{stage2_admit, stage2_build};
 use self::pow5::pow5_table;
 use self::records::{
     event_check,
@@ -32,10 +23,7 @@ use self::records::{
     node_u64,
     tile_decode
 };
-use self::encode::{
-    encode_size,
-    encode_write
-};
+use self::encode::{encode_size, encode_write};
 use self::helpers::{
     bound_field,
     bound_string,

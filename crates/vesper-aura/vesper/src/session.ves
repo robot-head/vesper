@@ -1,8 +1,5 @@
 // session.rs: the reconciler a Session wraps.
-use self::codes::{
-    MAX_U64,
-    NONE_ID
-};
+use self::codes::{MAX_U64, NONE_ID};
 use self::plan::{
     copy_mounted,
     mounted_find,
@@ -13,26 +10,9 @@ use self::plan::{
     prepared_empty,
     prepared_for
 };
-use self::{
-    CloseRequest,
-    Op,
-    Prepared,
-    Reconciler,
-    ViewFault
-};
-use self::util::{
-    inc,
-    limits_from,
-    mnode,
-    mprop,
-    msub
-};
-use self::view::{
-    decode,
-    decode_cap,
-    tree_sized,
-    validate
-};
+use self::{CloseRequest, Op, Prepared, Reconciler, ViewFault};
+use self::util::{inc, limits_from, mnode, mprop, msub};
+use self::view::{decode, decode_cap, tree_sized, validate};
 
 // A session's close state (Reconciler.close, read by close_state in
 // src/ported/session.rs).

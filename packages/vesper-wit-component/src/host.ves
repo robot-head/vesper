@@ -12,10 +12,7 @@
 // compares every component with host imports against Rust's, byte for
 // byte.
 
-use @vesper/check-data::util::{
-    add,
-    inc
-};
+use @vesper/check-data::util::{add, inc};
 
 const NONE32: u32 = 4294967295;
 

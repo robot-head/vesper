@@ -14,23 +14,11 @@
 // linear bindings a jump drops E0302, merges E0309, inout loans and linear
 // handler state E0402) stay with the core typing port (SH2 lane 7).
 
-use @vesper/check-data::types::{
-    Types,
-    TyKind
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::world::{
-    World
-};
-use self::ast::{
-    Exprs,
-    ExprRow
-};
-use self::out::{
-    line
-};
+use @vesper/check-data::types::{Types, TyKind};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::world::{World};
+use self::ast::{Exprs, ExprRow};
+use self::out::{line};
 
 const NONE32: u32 = 4294967295;
 

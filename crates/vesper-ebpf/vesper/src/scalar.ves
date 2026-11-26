@@ -18,13 +18,8 @@ use self::common::{
     smin_i64,
     umax
 };
-use self::insn::{
-    AluOp,
-    JmpOp
-};
-use self::concrete::{
-    cmp_concrete
-};
+use self::insn::{AluOp, JmpOp};
+use self::concrete::{cmp_concrete};
 
 // Bit `i` is unknown when `mask` bit `i` is set, otherwise it is `value`
 // bit `i`. Invariant: `value & mask == 0`.

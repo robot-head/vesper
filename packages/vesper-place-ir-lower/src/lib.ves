@@ -8,21 +8,10 @@
 //   effect operation signatures, bodies as expression and pattern rows).
 // - lower.ves: the lowering, token threading and the program rows.
 
-use @vesper/check-data::input::{
-    Reader,
-    read_ctx
-};
-use @vesper/place-ir::{
-    put_program
-};
-use self::ast::{
-    read_ast
-};
-use self::lower::{
-    L,
-    l_new,
-    lower_all
-};
+use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/place-ir::{put_program};
+use self::ast::{read_ast};
+use self::lower::{L, l_new, lower_all};
 
 // The lowered program as `put_program` words (names, types, the program
 // section), then two words: functions lowered and functions skipped.
