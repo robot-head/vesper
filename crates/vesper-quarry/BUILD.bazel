@@ -145,7 +145,7 @@ PORT_TEST_DATA = glob(["tests/fixtures/planner/**"])
             ("stats", "planner_spec"),
             ("page", "pages"),
             ("wal", "durable"),
-            ("internal", "store_ssi"),
+            ("internal", "store"),
             ("store_log", "store"),
             ("leaf", "store_ssi"),
             ("vector", "vector"),

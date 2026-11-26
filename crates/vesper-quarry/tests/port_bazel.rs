@@ -99,11 +99,13 @@ fn divergent_wal_fails_reopen_recovery_test() {
 }
 
 #[test]
-fn divergent_internal_fails_store_ssi_test() {
+fn divergent_internal_fails_store_test() {
+    // A single-threaded split test: the threaded store_ssi test only
+    // reaches an internal node on some schedules, so it sometimes passed.
     run(
         "VESPER_QUARRY_DIVERGENT_INTERNAL",
-        &["threads_keep_an_invariant_that_write_skew_breaks"],
-        "read_only_anomaly_is_rejected",
+        &["btree_splits_reuses_freed_pages_and_survives_reopen"],
+        "snapshot_isolation_anomalies",
     );
 }
 
