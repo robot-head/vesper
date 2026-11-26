@@ -36,6 +36,7 @@ use self::interp::{Mach, clone_mach, map_has, map_key_spans, map_value, new_env,
 use self::core::{combine, filter_candidates, local_value, patch_insn, target_value, values_over};
 use self::callgraph::{check_stack};
 use self::verifier::{new_pools, Outcome, Pools, verify_program};
+use self::mitigator::{Decision, reference_decision};
 use self::wire::{
     EthIpv4TcpWire, SynDropAlertWire, WireError, alert_decode, alert_encode_into, eth_decode,
     eth_encode_into
@@ -357,6 +358,16 @@ pub fn wire_alert_encode_into(w: SynDropAlertWire, inout out: Slice[u8]) {
 
 pub fn wire_alert_decode(in s: Slice[u8]) -> SynDropAlertWire eff [Fail[WireError]] {
     alert_decode(in s)
+}
+
+// mitigator.rs: the reference model, with the frame decoded in Vesper.
+
+pub fn mitigator_reference_decision(
+    in packet: Slice[u8],
+    prior_count: Option[u64],
+    threshold: u64
+) -> Decision {
+    reference_decision(in packet, prior_count, threshold)
 }
 
 // btf.rs

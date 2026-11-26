@@ -91,6 +91,7 @@ filegroup(
         ("core", "core", "        if slen(in strs, mname) == 0 {\n", "        if slen(in strs, mname) == 99 {\n"),
         ("btf_ext", "btf_ext", "        out.push(lc & LINE_COL_MASK);\n", "        out.push(lc & (LINE_COL_MASK >> 1));\n"),
         ("interp_run", "interp", "    if kind == Region::Packet && at < i.data_off {\n", "    if kind == Region::Packet && wrapping_add(at, 1) < i.data_off {\n"),
+        ("mitigator", "mitigator", "    let action = if count <= threshold {\n", "    let action = if count < threshold {\n"),
     ]
 ]
 
