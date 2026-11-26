@@ -323,6 +323,8 @@ const CASES: &[&str] = &[
     "struct C { s: ChunkSeq[u8] } struct D { f: fn(u64) -> u64 } fn f() -> u64 { 0 }",
     "linear struct Q { x: u64 } struct R { q: Q } enum E { A(R), B } fn f() -> u64 { 0 }",
     "struct N { n: Option[N] } struct M[T] { m: Option[M[T]], t: T } fn f() -> u64 { 0 }",
+    r#"fn f() -> u64 { let s = "x\u0022Eq\u003a:"; 0 }"#,
+    "enum T[A, B] { Leaf(A), Node(B, Box[T[B, A]]) } linear struct K { x: u64 } struct U { t: T[u64, K] } fn f() -> u64 { 0 }",
     // The float prelude.
     "fn f(x: f64) -> f64 { exp_f64(x) }",
     "fn f(x: f32) -> f32 { cos_f32(sin_f32(x)) + ln_f32(x) }",

@@ -1506,23 +1506,36 @@ fn bound_get(in b: Bounds, in name: Str) -> u8 {
 struct Seen {
     names: Interner,
     ids: ChunkSeq[u32],
-    keys: ChunkSeq[u64]
+    // Each expansion's argument modes: `modes[starts[i]..starts[i + 1]]`.
+    starts: ChunkSeq[u64],
+    modes: ChunkSeq[u8]
+}
+
+fn seen_new() -> Seen {
+    Seen {
+        names: interner_new(),
+        ids: ChunkSeq::new[u32](),
+        starts: ChunkSeq::new[u64](),
+        modes: ChunkSeq::new[u8]()
+    }
+}
+
+fn mode_at(in ms: ChunkSeq[u8], i: u64) -> u8 {
+    match ms.try_get(i) {
+        Option::Some(m) => m,
+        Option::None => 255,
+    }
+}
+
+fn start_at(in seen: Seen, i: u64) -> u64 {
+    match seen.starts.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => seen.modes.len(),
+    }
 }
 
 fn join_mode(a: u8, b: u8) -> u8 {
     if a > b { a } else { b }
-}
-
-fn modes_key(in ms: ChunkSeq[u8]) -> u64 {
-    let mut k: u64 = 1;
-    for i in 0..ms.len() {
-        let m = match ms.try_get(i) {
-            Option::Some(m) => m,
-            Option::None => 0,
-        };
-        k = wrapping_add(wrapping_mul(k, 4), widen_u64(wrapping_add(m, 1)));
-    }
-    k
 }
 
 fn is_scalar_text(in n: Str) -> bool {
@@ -1694,27 +1707,38 @@ fn adt_mode(in w: Collected, in name: Str, in args: ChunkSeq[u8], inout seen: Se
 // Whether (`name`, `args`) is being expanded; else marks it.
 fn seen_enter(inout seen: Seen, in name: Str, in args: ChunkSeq[u8]) -> bool {
     let id = seen.names.intern(in name).id;
-    let key = modes_key(in args);
     for i in 0..seen.ids.len() {
         if word32(in seen.ids, i) == id {
-            let k = match seen.keys.try_get(i) {
-                Option::Some(k) => k,
-                Option::None => 0,
-            };
-            if k == key {
-                return true;
+            let from = start_at(in seen, i);
+            let to = start_at(in seen, wrapping_add(i, 1));
+            if wrapping_sub(to, from) == args.len() {
+                let mut same = true;
+                for k in 0..args.len() {
+                    if mode_at(in seen.modes, wrapping_add(from, k)) != mode_at(in args, k) {
+                        same = false;
+                        break;
+                    }
+                }
+                if same {
+                    return true;
+                }
             }
         }
     }
     seen.ids.push(id);
-    seen.keys.push(key);
+    seen.starts.push(seen.modes.len());
+    for k in 0..args.len() {
+        seen.modes.push(mode_at(in args, k));
+    }
     false
 }
 
 fn seen_leave(inout seen: Seen) {
     let last = wrapping_sub(seen.ids.len(), 1);
+    let from = start_at(in seen, last);
     seen.ids.truncate(last);
-    seen.keys.truncate(last);
+    seen.starts.truncate(last);
+    seen.modes.truncate(from);
 }
 
 fn adt_mode_in(
@@ -1802,11 +1826,7 @@ fn nominal_mode(in w: Collected, in a: Ast, x: u32, in key: Str) -> u8 {
     for _ in 0..gn {
         args.push(0);
     }
-    let mut seen = Seen {
-        names: interner_new(),
-        ids: ChunkSeq::new[u32](),
-        keys: ChunkSeq::new[u64]()
-    };
+    let mut seen = seen_new();
     adt_mode(in w, in key, in args, inout seen)
 }
 
@@ -1943,12 +1963,15 @@ fn declined(in source: Str, in a: Ast) -> bool {
             return true;
         }
     }
-    // String literals reach `builtin_traits::wanted`'s needles too.
+    // String literals reach `builtin_traits::wanted`'s needles too, and an
+    // escape can spell them in a decoded one.
     let b = source.as_bytes();
     has_text(in b, "Ordering")
         || has_text(in b, "Eq::")
         || has_text(in b, "Ord::")
         || has_text(in b, "Hash::")
+        || has_text(in b, "\\u")
+        || has_text(in b, "\\x")
 }
 
 fn head_const(in a: Ast, sym: u32) -> bool {
@@ -2004,11 +2027,7 @@ fn w_adt_head(inout o: ChunkSeq[u8], in w: Collected, e: Entry, in key: String) 
 fn nominal_box(in w: Collected) -> u8 {
     let mut args = ChunkSeq::new[u8]();
     args.push(0);
-    let mut seen = Seen {
-        names: interner_new(),
-        ids: ChunkSeq::new[u32](),
-        keys: ChunkSeq::new[u64]()
-    };
+    let mut seen = seen_new();
     box_mode(in w, in args, inout seen)
 }
 
