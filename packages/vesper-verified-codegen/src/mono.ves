@@ -25,10 +25,7 @@
 // Output words: 0 and then `put_program`'s words, or 1 and the error text
 // packed by `pack_text`.
 
-use self::machine::{
-    Lowered,
-    lowered_new
-};
+use self::machine::{Lowered, lowered_new};
 use self::lower::{
     E_LIMIT,
     lower_rows,
@@ -42,29 +39,11 @@ use self::lower::{
     tx,
     unsup
 };
-use self::evidence::{
-    evidence,
-    sites_new
-};
-use self::exprs::{
-    Ex,
-    X_HANDLE,
-    nested_name,
-    read_exprs
-};
+use self::evidence::{evidence, sites_new};
+use self::exprs::{Ex, X_HANDLE, nested_name, read_exprs};
 use @vesper/check-data::pack_text;
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{
     EffNode,
     TyKind,
@@ -75,23 +54,9 @@ use @vesper/check-data::types::{
     substitute,
     vars_new
 };
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    read_ctx
-};
-use @vesper/place-ir::{
-    BlockRow,
-    FnRow,
-    InstRow,
-    Program,
-    put_program,
-    read_program
-};
-use @vesper/place-ir::codes::{
-    Op,
-    Tag
-};
+use @vesper/check-data::input::{Ctx, Reader, read_ctx};
+use @vesper/place-ir::{BlockRow, FnRow, InstRow, Program, put_program, read_program};
+use @vesper/place-ir::codes::{Op, Tag};
 
 const NONE32: u32 = 4294967295;
 const NO_ADT: u32 = 4294967295;

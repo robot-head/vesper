@@ -19,12 +19,7 @@
 // that did not halt, only which tokens the recovery consumes, and those
 // paths are transliterated.
 
-use @vesper/check-data::util::{
-    copy_seq,
-    stage2_heap_mark,
-    stage2_heap_reset,
-    stage2_heap_swap
-};
+use @vesper/check-data::util::{copy_seq, stage2_heap_mark, stage2_heap_reset, stage2_heap_swap};
 use self::{
     Ast,
     ast_clone_in_heap,
@@ -67,19 +62,10 @@ use self::{
     lit_at,
     type_name
 };
-use self::text::{
-    parse_float,
-    decode_string
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
-use @vesper/front::{
-    P
-};
+use self::text::{parse_float, decode_string};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
+use @vesper/front::{P};
 use @vesper/front::lex::{
     lex,
     max_diagnostics,
@@ -90,19 +76,16 @@ use @vesper/front::lex::{
     token_word,
     trivia_kind
 };
-use @vesper/front::diag::{
-    diags_new
-};
+use @vesper/front::diag::{diags_new};
 use @vesper/front::parse::{
     hard_depth,
     head_word,
+    parse_surface_tokens,
     parse_template_tokens,
     parse_tokens,
     sugar_operator_at
 };
-use @vesper/front::lex::{
-    lex_sugar_with_limits
-};
+use @vesper/front::lex::{lex_sugar_with_limits};
 use @vesper/front::kinds::{
     k_upper,
     k_lower,
@@ -4549,6 +4532,17 @@ pub fn lower_source(in source: Str) -> L {
 // tagged literal the tuple of its payload block, a pattern phrase a
 // wildcard, and a sugar operator a binary expression.
 pub fn lower_template_source(in source: Str) -> L {
+    lower_profile_source(in source, true)
+}
+
+// The same for the surface profile itself (`parser::parse_expansion_scopes`
+// without its expression macro validation): phrases lower as above except
+// that an expression or statement phrase is the empty tuple.
+pub fn lower_surface_source(in source: Str) -> L {
+    lower_profile_source(in source, false)
+}
+
+fn lower_profile_source(in source: Str, template: bool) -> L {
     let b = source.as_bytes();
     let mut a = ast_new();
     let s = syms_new(inout a);
@@ -4565,7 +4559,11 @@ pub fn lower_template_source(in source: Str) -> L {
     if !oversized {
         text.push_str(in source);
     }
-    let p = parse_template_tokens(in b, t, d);
+    let p = if template {
+        parse_template_tokens(in b, t, d)
+    } else {
+        parse_surface_tokens(in b, t, d, max_diagnostics(), hard_depth(), true)
+    };
     let mut l = L {
         p: p,
         text: text,

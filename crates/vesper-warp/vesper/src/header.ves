@@ -1,29 +1,9 @@
 // Module header of @vesper/warp (see lib.ves): RFC 9000 §17 long and short
 // headers up to the header-protection boundary (header.rs). Offsets are
 // relative to the datagram; byte fields are spans of it.
-use self::{
-    HdrErr,
-    Parsed,
-    PktType,
-    Prot,
-    Sp,
-    Unprot,
-    VarIntErr,
-    WrittenLong
-};
-use self::pn::{
-    pn_put,
-    pn_read_at
-};
-use self::varint::{
-    b8,
-    sat_add,
-    vi_len_or_zero,
-    vi_max,
-    vi_prefix_len,
-    vi_put,
-    vi_value_at
-};
+use self::{HdrErr, Parsed, PktType, Prot, Sp, Unprot, VarIntErr, WrittenLong};
+use self::pn::{pn_put, pn_read_at};
+use self::varint::{b8, sat_add, vi_len_or_zero, vi_max, vi_prefix_len, vi_put, vi_value_at};
 
 // Long header packet types (RFC 9000 Table 5), bits 4-5 of the first byte.
 const LT_INITIAL: u8 = 0;

@@ -1,18 +1,9 @@
 // The QPACK static table (RFC 9204 Appendix A) and the dynamic table
 // (qpack/mod.rs `Table`, RFC 9204 §3.2).
 
-use self::int::{
-    inc,
-    word,
-    byte
-};
-use self::static_table::{
-    static_bytes,
-    static_ends
-};
-use self::wire::{
-    ENTRY_OVERHEAD
-};
+use self::int::{inc, word, byte};
+use self::static_table::{static_bytes, static_ends};
+use self::wire::{ENTRY_OVERHEAD};
 
 // `name_hash`: the name's first and last bytes (up to eight each) and its
 // length, multiplied by odd 64-bit constants, mixed and folded to one of

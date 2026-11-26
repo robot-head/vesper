@@ -1,10 +1,6 @@
 // Module check of @vesper/loom-calculus (see lib.ves): names, capability
 // spellings, diagnostics and `validate_manifest`.
-use self::{
-    Diag,
-    L,
-    Man
-};
+use self::{Diag, L, Man};
 use self::util::{
     Ascii,
     Code,

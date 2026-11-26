@@ -10,15 +10,7 @@
 //
 // Source modes are their `sourcecfg.SM` codes: 0 Inactive, 1 Detached,
 // 4 EdgeRising, 5 EdgeFalling, 6 LevelHigh, 7 LevelLow.
-use self::{
-    AiaFault,
-    Aplic,
-    AplicHdr,
-    Imsic,
-    ImsicHdr,
-    Msi,
-    MsiCfg
-};
+use self::{AiaFault, Aplic, AplicHdr, Imsic, ImsicHdr, Msi, MsiCfg};
 
 // The constants of src/aia.rs and src/aia/rust.rs, grouped by register
 // (RISC-V AIA 1.0 section numbers).

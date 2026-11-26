@@ -1,10 +1,6 @@
 // AArch64 control-flow reconstruction from ETE / ETMv4 atoms over a code image.
 
-use self::ete::{
-    EteElement,
-    EteElementAt,
-    InstructionSet
-};
+use self::ete::{EteElement, EteElementAt, InstructionSet};
 
 pub struct CodeSegment {
     pub base: u64,

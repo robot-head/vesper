@@ -14,29 +14,11 @@
 // The entries below are the differential's tasks
 // (tests/self_host_egraph.rs).
 
-use self::util::{
-    fold,
-    u32_at
-};
-use self::graph::{
-    EGraph,
-    egraph_new
-};
-use self::rules::{
-    Rules,
-    rules_new
-};
-use self::run::{
-    Config,
-    Records,
-    records_new,
-    run_egg,
-    run_rounds
-};
-use self::extract::{
-    Extracted,
-    extractor
-};
+use self::util::{fold, u32_at};
+use self::graph::{EGraph, egraph_new};
+use self::rules::{Rules, rules_new};
+use self::run::{Config, Records, records_new, run_egg, run_rounds};
+use self::extract::{Extracted, extractor};
 
 const NONE: u32 = 4294967295;
 const G_NONE: u8 = 0;

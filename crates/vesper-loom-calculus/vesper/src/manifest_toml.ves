@@ -38,20 +38,10 @@ use @vesper-std/toml::{
     render_error,
     parse
 };
-use @vesper/serde::dragon::{
-    shortest,
-    shortest_len,
-    put_shortest
-};
-use @vesper/serde::lemire::{
-    decode_bits
-};
-use @vesper/serde::pow5::{
-    pow5_table
-};
-use @vesper-std/toml::debug::{
-    put_debug_str
-};
+use @vesper/serde::dragon::{shortest, shortest_len, put_shortest};
+use @vesper/serde::lemire::{decode_bits};
+use @vesper/serde::pow5::{pow5_table};
+use @vesper-std/toml::debug::{put_debug_str};
 use self::semver_text::{
     SCmp,
     SVer,

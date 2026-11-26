@@ -15,14 +15,8 @@
 //   an unreachable block, so an unreachable block "dominates" another
 //   unreachable one and no reachable block dominates an unreachable one.
 
-use @vesper/clif::{
-    Func,
-    u32_at,
-    w
-};
-use @vesper/clif::codes::{
-    NONE
-};
+use @vesper/clif::{Func, u32_at, w};
+use @vesper/clif::codes::{NONE};
 
 pub struct Graph {
     // per block: its successors, succ[succ_start .. succ_start + succ_count]

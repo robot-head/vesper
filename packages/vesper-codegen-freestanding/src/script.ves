@@ -1,12 +1,7 @@
 // The GNU ld / ld.lld linker script (src/freestanding/script.rs).
 
-use self::util::{
-    push_hex,
-    push_text
-};
-use self::stub::{
-    is_riscv
-};
+use self::util::{push_hex, push_text};
+use self::stub::{is_riscv};
 
 pub fn schema() -> Str {
     "vesper.native.freestanding/1"

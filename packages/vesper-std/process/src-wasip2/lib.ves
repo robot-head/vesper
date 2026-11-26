@@ -11,11 +11,7 @@
 //
 // ProcCommand and ProcChild are the linear values of src/: a command is
 // spawned or discarded, a child (which cannot exist here) is released.
-use @vesper-std/fs::{
-    IoError,
-    invalid_input,
-    unsupported
-};
+use @vesper-std/fs::{IoError, invalid_input, unsupported};
 
 // How a child ended: `exited` with `code`, or (Unix) killed by `signal`.
 pub copy struct ExitStatus {

@@ -17,25 +17,9 @@
 // | 7 Object count, then per field the key (a String) and the value. An
 // object's fields come in its map order, which is the order serde_json
 // writes them in.
-use @vesper/serde::dragon::{
-    Shortest,
-    shortest
-};
-use self::limits::{
-    Ascii,
-    Crlf,
-    F64,
-    Perr,
-    Plimits,
-    add,
-    bound,
-    byte,
-    validate
-};
-use self::envelope::{
-    Envelope,
-    Id
-};
+use @vesper/serde::dragon::{Shortest, shortest};
+use self::limits::{Ascii, Crlf, F64, Perr, Plimits, add, bound, byte, validate};
+use self::envelope::{Envelope, Id};
 
 // A `Value`'s tag.
 enum Tag: _ {

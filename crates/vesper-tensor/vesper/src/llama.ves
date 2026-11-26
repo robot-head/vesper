@@ -16,10 +16,7 @@
 // - 37 Malformed("max_token_length"), 38 Limit("max_token_length"), 39
 //   Malformed("token length"), 40 Limit("token length"), 41
 //   Malformed("trailing bytes after tokenizer").
-use self::num::{
-    finite_bits,
-    u64_zero
-};
+use self::num::{finite_bits, u64_zero};
 
 // Ceilings (src/llama.rs `MAX_DIM`, `MAX_LAYERS`, `MAX_VOCAB`, `MAX_SEQ_LEN`,
 // `MAX_CHECKPOINT_BYTES`, `MAX_TOKEN_LENGTH`).

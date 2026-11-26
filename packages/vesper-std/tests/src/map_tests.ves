@@ -1,23 +1,10 @@
 // Unit tests for the maps of @vesper-std/collections.
 test {
-    use @vesper-std/collections::btree::{
-        CacheBTree,
-        BTreeCursor,
-        btree_new
-    };
-    use @vesper-std/collections::flat_table::{
-        FlatTable,
-        flat_table_new
-    };
+    use @vesper-std/collections::btree::{CacheBTree, BTreeCursor, btree_new};
+    use @vesper-std/collections::flat_table::{FlatTable, flat_table_new};
     use @vesper-std/core::config::update;
     use @vesper-std/core::option::is_none;
-    use self::support::{
-        check,
-        count,
-        rem,
-        some_u64,
-        some_pair
-    };
+    use self::support::{check, count, rem, some_u64, some_pair};
 
     // `n` keys (`n` not a multiple of 7919, at least 20): several levels of
     // splits once `n` passes 16 * 17.

@@ -1,30 +1,11 @@
 // Constructor mode-scheme derivation (`vesper-pact-binding/src/modes.rs`)
 // over `@vesper/check-data`'s `World::mode_of`.
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    push_decimal,
-    u32_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    TyMode,
-    Types
-};
+use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, u8_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{TyMode, Types};
 
 const M_COPY: u8 = TyMode::Copy;
-use @vesper/check-data::world::{
-    Adt,
-    Bounds,
-    World,
-    bounds_new,
-    mode_of
-};
+use @vesper/check-data::world::{Adt, Bounds, World, bounds_new, mode_of};
 
 // Maximum well-formed argument-mode combinations verified per ADT
 // (`vesper-pact-binding/src/modes.rs`).

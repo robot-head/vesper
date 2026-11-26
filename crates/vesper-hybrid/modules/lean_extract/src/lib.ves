@@ -9,9 +9,7 @@
 
 // @export abi 4
 
-use @vesper/lean-extract::{
-    extract_text
-};
+use @vesper/lean-extract::{extract_text};
 
 // The layout version of `extract_text_words`.
 pub fn format() -> u64 {

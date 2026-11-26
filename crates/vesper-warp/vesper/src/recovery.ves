@@ -19,15 +19,9 @@ use self::{
     Rtt,
     TimeoutOut
 };
-use self::frame::{
-    fr_wire_next
-};
-use self::pn::{
-    pn_limit
-};
-use self::varint::{
-    sat_add
-};
+use self::frame::{fr_wire_next};
+use self::pn::{pn_limit};
+use self::varint::{sat_add};
 
 // RFC 9002 §6.1.1 kPacketThreshold; RFC 9000 §18.2: ACK delay exponents
 // above 20 are invalid.

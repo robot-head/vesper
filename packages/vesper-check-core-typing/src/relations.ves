@@ -3,32 +3,10 @@
 // `infer`. Types are ids of the check-data arena, so the clones Rust makes
 // are copies and `==` on types and rows is one compare.
 
-use @vesper/check-data::util::{
-    add,
-    n32,
-    u32_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::types::{
-    EffNode,
-    RowNode,
-    TypeNode,
-    Types,
-    Vars,
-    TyKind
-};
-use @vesper/check-data::world::{
-    Known
-};
-use self::ints::{
-    Lit,
-    above_i64,
-    default_fits,
-    fits,
-    lit_max,
-    lit_min
-};
+use @vesper/check-data::util::{add, n32, u32_at, u8_at, w};
+use @vesper/check-data::types::{EffNode, RowNode, TypeNode, Types, Vars, TyKind};
+use @vesper/check-data::world::{Known};
+use self::ints::{Lit, above_i64, default_fits, fits, lit_max, lit_min};
 
 const NONE32: u32 = 4294967295;
 

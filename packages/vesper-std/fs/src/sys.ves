@@ -7,13 +7,7 @@
 // from `errno` to an error kind. Errors come back through `err` as the
 // error word of src/lib.ves (the kind in the low 8 bits, the OS error in
 // the high 32).
-use self::{
-    Metadata,
-    kind_file,
-    kind_dir,
-    kind_symlink,
-    kind_other
-};
+use self::{Metadata, kind_file, kind_dir, kind_symlink, kind_other};
 
 const EINTR: u32 = 4;
 const ENOENT: u32 = 2;

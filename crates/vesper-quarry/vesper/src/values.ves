@@ -1,27 +1,7 @@
 // Module values of @vesper/quarry (see lib.ves).
-use self::{
-    CTab,
-    D,
-    Q,
-    Val
-};
-use self::util::{
-    bool_val,
-    bound,
-    cw,
-    ex,
-    fail,
-    lim,
-    none,
-    null_val,
-    order,
-    param,
-    same,
-    vat
-};
-use self::check::{
-    ex_end
-};
+use self::{CTab, D, Q, Val};
+use self::util::{bool_val, bound, cw, ex, fail, lim, none, null_val, order, param, same, vat};
+use self::check::{ex_end};
 
 // Values and the row executor (src/execute.rs).
 

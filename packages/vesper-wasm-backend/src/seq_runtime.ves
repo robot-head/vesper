@@ -1,16 +1,8 @@
 // Emit shared core Wasm helpers for sequence growth, byte equality and UTF-8.
 
-use @vesper/check-data::util::{
-    inc
-};
-use self::enc::{
-    code_new
-};
-use self::lower::{
-    L,
-    body_n,
-    i64s
-};
+use @vesper/check-data::util::{inc};
+use self::enc::{code_new};
+use self::lower::{L, body_n, i64s};
 
 // Consts do not cross modules. See src/lower.ves.
 const OP_UNREACHABLE: u8 = 0;

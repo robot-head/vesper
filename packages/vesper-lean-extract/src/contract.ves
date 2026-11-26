@@ -6,40 +6,12 @@
 // (name order), `f`, `requires_f` (or NONE) and `ensures_f`, each with its
 // generics (name, mode bound, row flag); the rest is the AST section.
 
-use @vesper/check-data::input::{
-    Reader
-};
-use @vesper/check-data::types::{
-    Types,
-    TyPass,
-    substitute,
-    vars_new
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    u32_at,
-    u64_at,
-    w
-};
-use self::ast::{
-    SrcFn
-};
-use self::build::{
-    B,
-    B_EXPLICIT,
-    D_DEF,
-    K_DEF,
-    OP_EQ,
-    T,
-    T_ARROW,
-    T_BOOL,
-    T_FORALL
-};
-use self::gen::{
-    Y,
-    inferred
-};
+use @vesper/check-data::input::{Reader};
+use @vesper/check-data::types::{Types, TyPass, substitute, vars_new};
+use @vesper/check-data::util::{add, inc, u32_at, u64_at, w};
+use self::ast::{SrcFn};
+use self::build::{B, B_EXPLICIT, D_DEF, K_DEF, OP_EQ, T, T_ARROW, T_BOOL, T_FORALL};
+use self::gen::{Y, inferred};
 use self::tm::{
     app,
     app1,
@@ -62,11 +34,7 @@ use self::tm::{
     sref,
     tuple_get
 };
-use self::ty::{
-    emit_ty,
-    spells,
-    ty_check
-};
+use self::ty::{emit_ty, spells, ty_check};
 
 const NONE: u64 = 18446744073709551615;
 const NONE32: u32 = 4294967295;

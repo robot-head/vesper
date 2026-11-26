@@ -3,25 +3,9 @@
 // first, in Rust's evaluation order; `ty` writes the term and assumes the
 // caller checked (`emit_ty`).
 
-use @vesper/check-data::types::{
-    Types,
-    TyKind,
-    TyPass
-};
-use @vesper/check-data::util::{
-    add,
-    u32_at,
-    u8_at,
-    w
-};
-use self::build::{
-    B,
-    T,
-    T_APP,
-    T_ARROW,
-    T_INFER,
-    T_PRODUCT
-};
+use @vesper/check-data::types::{Types, TyKind, TyPass};
+use @vesper/check-data::util::{add, u32_at, u8_at, w};
+use self::build::{B, T, T_APP, T_ARROW, T_INFER, T_PRODUCT};
 
 // Error codes of `ty_error`.
 pub const E_NONE: u64 = 0;

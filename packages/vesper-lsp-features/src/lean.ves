@@ -2,9 +2,7 @@
 // src/lsp/proof_model.rs), byte for byte, over the model terms proof.ves
 // builds.
 
-use self::nav::{
-    put_u
-};
+use self::nav::{put_u};
 
 // Model kinds (`proof_model::Kind`).
 pub const K_U8: u8 = 0;

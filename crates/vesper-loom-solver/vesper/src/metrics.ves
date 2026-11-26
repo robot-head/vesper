@@ -3,48 +3,14 @@
 //
 // met: total_cves, capability_surface, duplicate_majors,
 // total_staleness_secs, total_trust_cost, unknown_metadata_candidates.
-use @vesper/loom-calculus::decode::{
-    decode_solution,
-    decode_tables,
-    rd_str
-};
-use @vesper/loom-calculus::solve::{
-    solve
-};
-use @vesper/loom-calculus::util::{
-    add,
-    feat,
-    find_feat,
-    id_at,
-    inc,
-    man,
-    none,
-    sw,
-    ver
-};
-use self::{
-    S
-};
-use self::closure::{
-    assigned
-};
-use self::diag::{
-    Metric,
-    Objective,
-    SolverSort,
-    msort,
-    sat,
-    setw
-};
-use self::input::{
-    alloc_tables,
-    decode_metadata,
-    find_meta
-};
-use self::snap::{
-    collect_caps,
-    last_snap
-};
+use @vesper/loom-calculus::decode::{decode_solution, decode_tables, rd_str};
+use @vesper/loom-calculus::solve::{solve};
+use @vesper/loom-calculus::util::{add, feat, find_feat, id_at, inc, man, none, sw, ver};
+use self::{S};
+use self::closure::{assigned};
+use self::diag::{Metric, Objective, SolverSort, msort, sat, setw};
+use self::input::{alloc_tables, decode_metadata, find_meta};
+use self::snap::{collect_caps, last_snap};
 
 // The metrics of the selections (pa: name, pb: version) with the
 // capabilities in caps, into met.

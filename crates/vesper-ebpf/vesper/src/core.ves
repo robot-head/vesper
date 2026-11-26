@@ -23,10 +23,7 @@
 // disagree.
 
 use self::btf::BtfKind;
-use self::insn::{
-    BpfClass,
-    BpfSrc
-};
+use self::insn::{BpfClass, BpfSrc};
 
 // Local type tree tags (see above).
 enum LocalTag: u64 {

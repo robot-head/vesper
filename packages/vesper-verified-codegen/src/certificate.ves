@@ -26,10 +26,7 @@
 // worklist, successors in the same order), so the certificates are equal
 // word for word, not just equally valid.
 
-use @vesper-std/collections::flat_table::{
-    FlatTable,
-    flat_table_new
-};
+use @vesper-std/collections::flat_table::{FlatTable, flat_table_new};
 use self::machine::{
     K_BOOL,
     K_F64,

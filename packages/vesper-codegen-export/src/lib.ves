@@ -16,28 +16,12 @@
 // whose words.rs is the Rust half of the input).
 
 use @vesper/check-data::pack_text;
-use self::iface::{
-    Iface,
-    read_iface
-};
-use self::binding::{
-    Gen,
-    binding_v1,
-    gen_new
-};
-use self::binding_v2::{
-    binding_v2
-};
-use self::directives::{
-    parse_directives
-};
-use self::json::{
-    interface_json
-};
-use self::plan::{
-    plan_bytes,
-    plan_words
-};
+use self::iface::{Iface, read_iface};
+use self::binding::{Gen, binding_v1, gen_new};
+use self::binding_v2::{binding_v2};
+use self::directives::{parse_directives};
+use self::json::{interface_json};
+use self::plan::{plan_bytes, plan_words};
 
 // `rust_binding(interface, options)`.
 pub fn rust_binding(sink i: Iface) -> ChunkSeq[u8] {

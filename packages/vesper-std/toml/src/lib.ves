@@ -25,9 +25,7 @@
 // linked list of `Ent`s in insertion order; `unlink` is IndexMap's
 // `shift_remove`.
 
-use self::grammar::{
-    parse_document
-};
+use self::grammar::{parse_document};
 
 pub const NONE: u32 = 4294967295;
 // End of input for `byte_at`.

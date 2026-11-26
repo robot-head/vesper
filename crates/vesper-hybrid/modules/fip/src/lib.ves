@@ -3,9 +3,7 @@
 
 // @export abi 4
 
-use @vesper/check-fip::{
-    check_fip_bytes
-};
+use @vesper/check-fip::{check_fip_bytes};
 
 pub fn fip_diags(in b: Slice[u8]) -> ChunkSeq[u64] {
     check_fip_bytes(in b)

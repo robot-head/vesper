@@ -24,9 +24,7 @@
 //
 // Candidate sources are `variant << 32 | x`: 0 impl, 1 model, 2
 // assumption, 3 alias bound, 4 rigid (the `CandidateSource` order).
-use self::{
-    S
-};
+use self::{S};
 use self::term::{
     add,
     am_mode,
@@ -104,12 +102,7 @@ use self::term::{
     vkind,
     word_at
 };
-use self::fold::{
-    cn_begin,
-    inst,
-    resolve,
-    run
-};
+use self::fold::{cn_begin, inst, resolve, run};
 use self::infer::{
     clone_cx,
     fresh_args,
@@ -120,10 +113,7 @@ use self::infer::{
     unify_trait_ref,
     unify_ty
 };
-use self::mode::{
-    decide,
-    mode_atoms
-};
+use self::mode::{decide, mode_atoms};
 
 // Fibonacci hashing: 2^64 / φ, rounded to odd.
 const GOLDEN_GAMMA: u64 = 11400714819323198485;

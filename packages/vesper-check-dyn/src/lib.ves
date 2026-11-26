@@ -17,24 +17,11 @@
 // @vesper/check-data's `Types`. Rust stays the default; nothing here
 // replaces Rust code.
 
-use @vesper/ast::lower::{
-    lower_source
-};
-use @vesper/ast::dump::{
-    dump_ast
-};
-use @vesper/ast::words::{
-    WordReader,
-    word_reader,
-    read_ast_words,
-    put_ast_words
-};
-use @vesper/check-data::{
-    pack_text
-};
-use @vesper/check-data::util::{
-    put_text_words
-};
+use @vesper/ast::lower::{lower_source};
+use @vesper/ast::dump::{dump_ast};
+use @vesper/ast::words::{WordReader, word_reader, read_ast_words, put_ast_words};
+use @vesper/check-data::{pack_text};
+use @vesper/check-data::util::{put_text_words};
 use self::core::{
     D,
     d_new,
@@ -50,15 +37,8 @@ use self::core::{
     sort_syms,
     display_into
 };
-use self::fnobj::{
-    uses_fn_objects,
-    lower_fn_objects,
-    relocate
-};
-use self::dyntrait::{
-    uses_dyn,
-    lower_dyn
-};
+use self::fnobj::{uses_fn_objects, lower_fn_objects, relocate};
+use self::dyntrait::{uses_dyn, lower_dyn};
 
 const NONE: u32 = 4294967295;
 

@@ -3,31 +3,9 @@
 // identifiers, type spellings, the copy types' `Abi` impls, C types and
 // scalar conversions. Text is byte for byte the Rust generator's.
 
-use @vesper/check-data::util::{
-    inc,
-    u32_at,
-    u8_at,
-    w
-};
-use self::iface::{
-    FieldRow,
-    FnRow,
-    Iface,
-    ParamRow,
-    VarRow
-};
-use self::text::{
-    StrSet,
-    copy_of,
-    nl,
-    put,
-    put_hex,
-    put_seq,
-    put_u64,
-    same_str,
-    str_set,
-    text
-};
+use @vesper/check-data::util::{inc, u32_at, u8_at, w};
+use self::iface::{FieldRow, FnRow, Iface, ParamRow, VarRow};
+use self::text::{StrSet, copy_of, nl, put, put_hex, put_seq, put_u64, same_str, str_set, text};
 
 // `AbiType` kinds, passing modes and mirrors (iface.ves).
 const K_SCALAR: u8 = 0;

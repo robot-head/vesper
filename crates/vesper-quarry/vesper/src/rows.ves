@@ -1,25 +1,6 @@
 // Module rows of @vesper/quarry (see lib.ves).
-use self::{
-    CCol,
-    CTab,
-    D,
-    Q,
-    Val
-};
-use self::util::{
-    ccol,
-    ctab,
-    cw,
-    ex,
-    fail_name,
-    find_table,
-    link,
-    node,
-    none,
-    put,
-    put_range,
-    sw
-};
+use self::{CCol, CTab, D, Q, Val};
+use self::util::{ccol, ctab, cw, ex, fail_name, find_table, link, node, none, put, put_range, sw};
 use self::values::{
     charge_row,
     dtab,

@@ -9,9 +9,7 @@
 // Nodes are interned, so two local types are equal exactly when their ids
 // are equal: `==` on `LocalType` and the explorer's state set compare
 // words.
-use self::{
-    C
-};
+use self::{C};
 use self::util::{
     add,
     inc,

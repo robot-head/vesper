@@ -4,31 +4,11 @@
 // on top. Patterns are rows of a flat table; pattern 0 is the wildcard the
 // specialization fills missing payloads with.
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    Types,
-    Vars,
-    substitute,
-    TyKind
-};
-use @vesper/check-data::world::{
-    Adt,
-    Field,
-    Variant,
-    World
-};
-use self::relations::{
-    item
-};
+use @vesper/check-data::util::{add, inc, n32, u32_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{Types, Vars, substitute, TyKind};
+use @vesper/check-data::world::{Adt, Field, Variant, World};
+use self::relations::{item};
 
 const NONE32: u32 = 4294967295;
 

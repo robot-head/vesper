@@ -25,35 +25,12 @@
 //   `checks::compare_code`.
 // - script.ves: `script::linker_script`.
 
-use self::util::{
-    Reader,
-    Span,
-    add,
-    push64,
-    put_str,
-    reader,
-    span_end
-};
-use self::error::{
-    error_object,
-    error_target
-};
-use self::stub::{
-    packed_constants,
-    stub_object
-};
-use self::script::{
-    linker_script
-};
-use self::link::{
-    LinkOptions,
-    TrapEntry,
-    compare_code,
-    linker_new
-};
-use self::elf::{
-    read_executable
-};
+use self::util::{Reader, Span, add, push64, put_str, reader, span_end};
+use self::error::{error_object, error_target};
+use self::stub::{packed_constants, stub_object};
+use self::script::{linker_script};
+use self::link::{LinkOptions, TrapEntry, compare_code, linker_new};
+use self::elf::{read_executable};
 
 fn bad_request() -> ChunkSeq[u8] {
     error_object(in "bad request")

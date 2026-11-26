@@ -21,37 +21,13 @@ use self::{
     BodyReadStep,
     UnpackedFields
 };
-use self::int::{
-    inc,
-    min64,
-    max64,
-    sat_sub,
-    word,
-    byte,
-    remove_word
-};
-use self::varint::{
-    put_record
-};
-use self::frame::{
-    data_type,
-    headers_type
-};
-use self::capsule::{
-    valid_utf8,
-    max_close_reason
-};
-use self::encoder::{
-    enc_encode
-};
-use self::decoder::{
-    dec_decode_section
-};
-use self::message::{
-    HttpStatus,
-    message_parse_request,
-    message_check_trailers
-};
+use self::int::{inc, min64, max64, sat_sub, word, byte, remove_word};
+use self::varint::{put_record};
+use self::frame::{data_type, headers_type};
+use self::capsule::{valid_utf8, max_close_reason};
+use self::encoder::{enc_encode};
+use self::decoder::{dec_decode_section};
+use self::message::{HttpStatus, message_parse_request, message_check_trailers};
 use self::pool::{
     PoolRange,
     MODE_HEADER,

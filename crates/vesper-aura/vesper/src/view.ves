@@ -1,22 +1,7 @@
 // view.rs: decoding and validating an input tree.
-use self::codes::{
-    Budget,
-    ValueTag,
-    WidgetKind,
-    MAX_U64,
-    NONE_ID
-};
-use self::plan::{
-    teardown
-};
-use self::{
-    Lim,
-    TNode,
-    TProp,
-    TSub,
-    Tree,
-    ViewFault
-};
+use self::codes::{Budget, ValueTag, WidgetKind, MAX_U64, NONE_ID};
+use self::plan::{teardown};
+use self::{Lim, TNode, TProp, TSub, Tree, ViewFault};
 use self::util::{
     add,
     dec,

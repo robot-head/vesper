@@ -3,22 +3,9 @@
 // words in one `Str`, which any JIT entry can take. This decoder rebuilds
 // the tables; `r` is left at the task's own words.
 
-use self::util::{
-    inc32,
-    n32,
-    u32_at
-};
-use self::names::{
-    names_sized,
-    Names,
-    names_new
-};
-use self::types::{
-    EffNode,
-    Types,
-    types_new,
-    TyKind
-};
+use self::util::{inc32, n32, u32_at};
+use self::names::{names_sized, Names, names_new};
+use self::types::{EffNode, Types, types_new, TyKind};
 use self::world::{
     Adt,
     EffectRow,

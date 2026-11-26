@@ -3,34 +3,11 @@
 // After the request comes the snapshot in the calculus solution encoding,
 // then nsel, (manifest JSON)*: each selection's manifest alone, for the
 // metadata comparison.
-use @vesper/loom-calculus::decode::{
-    decode_solution,
-    rd,
-    rd_str
-};
-use @vesper/loom-calculus::solve::{
-    solve
-};
-use @vesper/loom-calculus::util::{
-    add,
-    id_at,
-    inc,
-    man,
-    none,
-    req,
-    root,
-    ssel,
-    sw,
-    ver
-};
-use self::{
-    S
-};
-use self::closure::{
-    closure,
-    has_entry,
-    mark_features
-};
+use @vesper/loom-calculus::decode::{decode_solution, rd, rd_str};
+use @vesper/loom-calculus::solve::{solve};
+use @vesper/loom-calculus::util::{add, id_at, inc, man, none, req, root, ssel, sw, ver};
+use self::{S};
+use self::closure::{closure, has_entry, mark_features};
 use self::diag::{
     ErrorKind,
     ResultTag,
@@ -43,22 +20,10 @@ use self::diag::{
     subj_id,
     subj_lit
 };
-use self::input::{
-    mxv,
-    sysv
-};
-use self::output::{
-    out_error,
-    table,
-    w
-};
-use self::search::{
-    emit_unsupported,
-    unsupported
-};
-use self::snap::{
-    last_snap
-};
+use self::input::{mxv, sysv};
+use self::output::{out_error, table, w};
+use self::search::{emit_unsupported, unsupported};
+use self::snap::{last_snap};
 
 // The root or catalog manifest named x at version text vt, or none().
 fn expected(in s: S, x: u64, vt: u64) -> u64 {
