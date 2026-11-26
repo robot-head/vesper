@@ -1054,6 +1054,9 @@ pub fn wait_timeout(inout ch: ProcChild, millis: u64)
     }
     let start = now_ms();
     let mut err: u64 = 0;
+    // Past the deadline, one last round reads what is ready without
+    // waiting, so a 0 ms check still collects output and sees the end.
+    let mut last = false;
     loop {
         if !ch.reaped {
             match try_reap(ch.pid) {
@@ -1070,13 +1073,18 @@ pub fn wait_timeout(inout ch: ProcChild, millis: u64)
             ch.pid = 0;
             return Result::Ok(Option::Some(decode(ch.status)));
         }
-        let spent = wrapping_sub(now_ms(), start);
-        if spent >= millis {
+        if last {
             return Result::Ok(Option::None);
         }
+        let spent = wrapping_sub(now_ms(), start);
+        last = spent >= millis;
         // An ended child is only waited on for end of file, which `poll`
         // reports at once; a running one is checked every 10 ms.
-        let left = wrapping_sub(millis, spent);
+        let left = if last {
+            0
+        } else {
+            wrapping_sub(millis, spent)
+        };
         let slice = if ch.reaped || left < 10 {
             left
         } else {

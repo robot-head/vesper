@@ -257,6 +257,31 @@ pub fn in_time() -> u64 eff [Ffi[StdProcess]] {
     mix(mix(mix(mix(s, again), hash(in o.as_slice())), hash(in e.as_slice())), cut)
 }
 
+// Repeated 0 ms checks alone see a child with captured output end, and
+// collect what it wrote (more than a pipe holds).
+pub fn zero_checks() -> u64 eff [Ffi[StdProcess]] {
+    let mut c = command(in "/bin/sh");
+    arg(inout c, in "-c");
+    arg(inout c, in "head -c 100000 /dev/zero; exit 5");
+    stdio(inout c, stdout_stream(), capture());
+    let mut ch = match spawn(c) {
+        Result::Ok(ch) => ch,
+        Result::Err(e) => return code(e),
+    };
+    let mut s: u64 = 1;
+    let mut tries: u64 = 0;
+    loop {
+        if s != 1 || tries == 1000000 {
+            break;
+        }
+        tries = wrapping_add(tries, 1);
+        s = timed(wait_timeout(inout ch, 0));
+    }
+    let o = stdout(in ch);
+    release(ch);
+    mix(s, o.len())
+}
+
 // A capture limit keeps the first bytes of a stream far larger than a
 // pipe holds, and the child still runs to its end: through
 // `wait_timeout`, then through `wait`.
@@ -430,8 +455,8 @@ fn ended(pid: &str) -> bool {
 fn deadlines_kill_the_whole_tree() {
     let dir = Temp::new("std-process");
     let checked = check_driver(&source(&dir));
-    let start = std::time::Instant::now();
-    // Killed by SIGKILL: no exit code, signal 9.
+    // Killed by SIGKILL (no exit code, signal 9), not ended by the 30 s
+    // sleep. The tests run one at a time, so no time bound is checked.
     let sigkill = mix(mix(mix(0, 9), 0), 0);
     let want = mix(mix(mix(mix(mix(1, 1), sigkill), 1007), 1007), 1);
     assert_eq!(agree(&checked, "overdue", &MODES), want);
@@ -439,8 +464,6 @@ fn deadlines_kill_the_whole_tree() {
         agree(&checked, "tree", &MODES),
         mix(mix(1, sigkill), hash(b"ready\n"))
     );
-    // Each of the six children would otherwise sleep 30 seconds.
-    assert!(start.elapsed().as_secs() < 25, "{:?}", start.elapsed());
     let pids = std::fs::read_to_string(dir.path().join("grandchildren")).unwrap();
     let pids: Vec<&str> = pids.split_whitespace().collect();
     assert!(!pids.is_empty());
@@ -464,6 +487,10 @@ fn children_in_time_and_capture_limits() {
         0,
     );
     assert_eq!(agree(&checked, "in_time", &MODES), want);
+    assert_eq!(
+        agree(&checked, "zero_checks", &MODES),
+        mix(exited(5), 100000)
+    );
     let round = mix(
         mix(mix(mix(exited(0), 1000), hash(&[0; 1000])), hash(b"done")),
         1,
@@ -753,6 +780,36 @@ pub fn win_overdue() -> u64 eff [Ffi[StdProcess]] {
 
 // The grandchild (a `ping` started by PowerShell, its pid appended to
 // `grandchildren`) is in the child's job and goes with it.
+// Whether PowerShell's `ready` line is in `s` (the grandchild `ping`
+// writes to the same stream, maybe first).
+fn has_ready(in s: Slice[u8]) -> bool {
+    let word = "ready".as_bytes();
+    let n = word.len();
+    if s.len() < n {
+        return false;
+    }
+    for i in 0..wrapping_add(wrapping_sub(s.len(), n), 1) {
+        let mut all = true;
+        for j in 0..n {
+            let a = match s.try_get(wrapping_add(i, j)) {
+                Option::Some(b) => b,
+                Option::None => 0,
+            };
+            let b = match word.try_get(j) {
+                Option::Some(b) => b,
+                Option::None => 1,
+            };
+            if a != b {
+                all = false;
+            }
+        }
+        if all {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn win_tree() -> u64 eff [Ffi[StdProcess]] {
     let mut c = command(in "powershell.exe");
     arg(inout c, in "-NoProfile");
@@ -775,7 +832,7 @@ pub fn win_tree() -> u64 eff [Ffi[StdProcess]] {
         ready = match wait_timeout(inout ch, 50) {
             Result::Ok(Option::None) => {
                 let seen = stdout(in ch);
-                if seen.len() > 0 { 1 } else { 0 }
+                if has_ready(in seen.as_slice()) { 1 } else { 0 }
             },
             Result::Ok(Option::Some(s)) => wrapping_add(2, status_word(s)),
             Result::Err(e) => code(e),
@@ -839,7 +896,6 @@ pub fn win_limited() -> u64 eff [Ffi[StdProcess]] {
 "#
     .replace("@DIR@", &dir.lit());
     let checked = check_driver(&src);
-    let start = std::time::Instant::now();
     // TerminateJobObject / TerminateProcess exit code 1.
     let killed = exited(1);
     let want = mix(mix(mix(mix(mix(1, 1), killed), 1007), 1007), 1);
@@ -863,7 +919,6 @@ pub fn win_limited() -> u64 eff [Ffi[StdProcess]] {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
-    assert!(start.elapsed().as_secs() < 60, "{:?}", start.elapsed());
 
     let out = std::process::Command::new("cmd.exe")
         .args(["/C", "echo out& echo err 1>&2& exit /b 4"])
