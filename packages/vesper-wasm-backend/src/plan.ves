@@ -159,80 +159,80 @@ pub struct Cx {
     s: Syms,
 }
 
-pub fn cx_new(sink c: Ctx, sink f: Facts, sink ir: Ir) -> Cx {
-    let Ctx { names, types, world, tmap, nmap } = c;
+pub fn cx_new(sink ctx: Ctx, sink f: Facts, sink ir: Ir) -> Cx {
+    let Ctx { names, types, world, tmap, nmap } = ctx;
     let mut names = names;
-    let s = syms_new(inout names);
-    let k = world.k;
+    let syms = syms_new(inout names);
+    let known = world.k;
     Cx {
         names: names,
         types: types,
         world: world,
-        k: k,
+        k: known,
         f: f,
         ir: ir,
-        s: s,
+        s: syms,
     }
 }
 
 // Byte order of two names (`String`'s `Ord`): -1, 0 or 1.
-pub fn cmp_syms(in names: Names, a: u32, b: u32) -> i64 {
-    if a == b {
+pub fn cmp_syms(in names: Names, lhs: u32, rhs: u32) -> i64 {
+    if lhs == rhs {
         return 0;
     }
-    let (a0, a1) = (names.start(a), names.end(a));
-    let (b0, b1) = (names.start(b), names.end(b));
-    let la = wrapping_sub(a1, a0);
-    let lb = wrapping_sub(b1, b0);
-    let n = if la < lb { la } else { lb };
+    let (lhs_start, lhs_end) = (names.start(lhs), names.end(lhs));
+    let (rhs_start, rhs_end) = (names.start(rhs), names.end(rhs));
+    let lhs_len = wrapping_sub(lhs_end, lhs_start);
+    let rhs_len = wrapping_sub(rhs_end, rhs_start);
+    let n = if lhs_len < rhs_len { lhs_len } else { rhs_len };
     for i in 0..n {
-        let x = names.byte(a, i);
-        let y = names.byte(b, i);
-        if x < y {
+        let lhs_byte = names.byte(lhs, i);
+        let rhs_byte = names.byte(rhs, i);
+        if lhs_byte < rhs_byte {
             return -1;
         }
-        if x > y {
+        if lhs_byte > rhs_byte {
             return 1;
         }
     }
-    if la < lb {
+    if lhs_len < rhs_len {
         -1
-    } else if la > lb {
+    } else if lhs_len > rhs_len {
         1
     } else {
         0
     }
 }
 
-// Inserts symbol `x` into the byte-sorted set `set` (no duplicates).
-pub fn sorted_insert(in names: Names, inout set: ChunkSeq[u32], x: u32) {
-    let mut at = set.len();
+// Inserts symbol `sym_id` into the byte-sorted set `set` (no duplicates).
+pub fn sorted_insert(in names: Names, inout set: ChunkSeq[u32], sym_id: u32) {
+    let mut pos = set.len();
     for i in 0..set.len() {
-        let c = cmp_syms(in names, u32_at(in set, i), x);
-        if c == 0 {
+        let order = cmp_syms(in names, u32_at(in set, i), sym_id);
+        if order == 0 {
             return;
         }
-        if c > 0 {
-            at = i;
+        if order > 0 {
+            pos = i;
             break;
         }
     }
-    set.push(x);
+    set.push(sym_id);
     let mut i = wrapping_sub(set.len(), 1);
     loop {
-        if i <= at {
+        if i <= pos {
             break;
         }
         let prev = u32_at(in set, wrapping_sub(i, 1));
         let ok = set.try_set(i, prev);
         i = wrapping_sub(i, 1);
     }
-    let ok = set.try_set(at, x);
+    let ok = set.try_set(pos, sym_id);
 }
 
-pub fn contains32(in set: ChunkSeq[u32], x: u32) -> bool {
+pub fn contains32(in set: ChunkSeq[u32], value: u32) -> bool {
     for i in 0..set.len() {
-        if u32_at(in set, i) == x {
+        if u32_at(in set, i) == value {
             return true;
         }
     }
@@ -256,12 +256,12 @@ fn shape_of(kind: u8, scalar: u8, adt: u32, ty: u32) -> Shape {
 }
 
 impl Cx {
-    pub fn default_ty(inout self, t: u32) -> u32 {
-        default_type(inout self.types, t)
+    pub fn default_ty(inout self, ty: u32) -> u32 {
+        default_type(inout self.types, ty)
     }
 
-    pub fn subst(inout self, t: u32, in vars: Vars) -> u32 {
-        substitute(inout self.types, t, in vars)
+    pub fn subst(inout self, ty: u32, in vars: Vars) -> u32 {
+        substitute(inout self.types, ty, in vars)
     }
 
     // `numeric::is_integer_name`.
@@ -273,75 +273,75 @@ impl Cx {
         self.k.is_scalar(n) || n == self.s.i128_ || n == self.s.u128_
     }
 
-    pub fn shape(inout self, t: u32) -> Shape eff [Fail[WErr]] {
-        let ty = default_type(inout self.types, t);
+    pub fn shape(inout self, raw_ty: u32) -> Shape eff [Fail[WErr]] {
+        let ty = default_type(inout self.types, raw_ty);
         let node = self.types.node(ty);
         if node.kind == TyKind::Named {
-            let n = node.name;
-            let s = self.s;
-            if n == s.i64_ || n == self.k.isize_ {
+            let name = node.name;
+            let syms = self.s;
+            if name == syms.i64_ || name == self.k.isize_ {
                 return shape_of(SH_SCALAR, SC_I64, NO_ADT, ty);
             }
-            if n == s.u64_ || n == self.k.usize_ {
+            if name == syms.u64_ || name == self.k.usize_ {
                 return shape_of(SH_SCALAR, SC_U64, NO_ADT, ty);
             }
-            if n == s.u32_ {
+            if name == syms.u32_ {
                 return shape_of(SH_SCALAR, SC_U32, NO_ADT, ty);
             }
-            if n == s.u8_ {
+            if name == syms.u8_ {
                 return shape_of(SH_SCALAR, SC_U8, NO_ADT, ty);
             }
-            if n == self.k.u16_ {
+            if name == self.k.u16_ {
                 return shape_of(SH_SCALAR, SC_U16, NO_ADT, ty);
             }
-            if n == self.k.i32_ {
+            if name == self.k.i32_ {
                 return shape_of(SH_SCALAR, SC_I32, NO_ADT, ty);
             }
-            if n == self.k.i16_ {
+            if name == self.k.i16_ {
                 return shape_of(SH_SCALAR, SC_I16, NO_ADT, ty);
             }
-            if n == self.k.i8_ {
+            if name == self.k.i8_ {
                 return shape_of(SH_SCALAR, SC_I8, NO_ADT, ty);
             }
-            if n == s.bool_ {
+            if name == syms.bool_ {
                 return shape_of(SH_SCALAR, SC_BOOL, NO_ADT, ty);
             }
-            if n == s.f64_ {
+            if name == syms.f64_ {
                 return shape_of(SH_SCALAR, SC_F64, NO_ADT, ty);
             }
-            if n == s.unit {
+            if name == syms.unit {
                 return shape_of(SH_SCALAR, SC_UNIT, NO_ADT, ty);
             }
-            if n == s.never {
+            if name == syms.never {
                 return shape_of(SH_SCALAR, SC_NEVER, NO_ADT, ty);
             }
-            if n == s.string {
+            if name == syms.string {
                 return shape_of(SH_STR, 0, NO_ADT, ty);
             }
-            if n == s.f32_ {
+            if name == syms.f32_ {
                 Fail::raise(werr(K_UNSUPPORTED, U_FLOAT32, 10));
             }
-            if n == s.u128_ || n == s.i128_ {
+            if name == syms.u128_ || name == syms.i128_ {
                 // the tuple (low word, high word): src/wide.ves
-                let u = self.types.named0(s.u64_);
-                let mut e = ChunkSeq::new[u32]();
-                e.push(u);
-                e.push(u);
-                let tt = self.types.tuple(in e);
-                return shape_of(SH_TUPLE, 0, NO_ADT, tt);
+                let u64_ty = self.types.named0(syms.u64_);
+                let mut elems = ChunkSeq::new[u32]();
+                elems.push(u64_ty);
+                elems.push(u64_ty);
+                let pair_ty = self.types.tuple(in elems);
+                return shape_of(SH_TUPLE, 0, NO_ADT, pair_ty);
             }
-            if self.is_integer_name(n) {
-                Fail::raise(werr_syms(K_UNSUPPORTED, U_INTEGER_WIDTH, 11, 0, n));
+            if self.is_integer_name(name) {
+                Fail::raise(werr_syms(K_UNSUPPORTED, U_INTEGER_WIDTH, 11, 0, name));
             }
-            let a = self.world.lookup(n);
-            if a == NO_ADT {
+            let adt_index = self.world.lookup(name);
+            if adt_index == NO_ADT {
                 return shape_of(SH_OPAQUE, 0, NO_ADT, ty);
             }
-            let adt = self.world.adt(a);
+            let adt = self.world.adt(adt_index);
             if adt.is_enum {
-                return shape_of(SH_ENUM, 0, a, ty);
+                return shape_of(SH_ENUM, 0, adt_index, ty);
             }
-            return shape_of(SH_STRUCT, 0, a, ty);
+            return shape_of(SH_STRUCT, 0, adt_index, ty);
         }
         if node.kind == TyKind::Tuple {
             if node.n == 0 {
@@ -360,34 +360,34 @@ impl Cx {
 
     // The number of variants of an ADT shape (a struct has its one, or
     // none).
-    pub fn variant_count(in self, sh: Shape) -> u64 {
-        w(self.world.adt(sh.adt).vn)
+    pub fn variant_count(in self, shape: Shape) -> u64 {
+        w(self.world.adt(shape.adt).vn)
     }
 
-    pub fn variant(in self, sh: Shape, v: u64) -> Variant {
-        let a = self.world.adt(sh.adt);
-        self.world.variant(add(w(a.va), v))
+    pub fn variant(in self, shape: Shape, variant_index: u64) -> Variant {
+        let adt = self.world.adt(shape.adt);
+        self.world.variant(add(w(adt.va), variant_index))
     }
 
-    // Field `i` of variant `v` of ADT shape `sh`: its name and its type
+    // Field `i` of variant `variant_index` of ADT shape `shape`: its name and its type
     // under the shape's arguments (substituted, not defaulted).
-    pub fn variant_field(inout self, sh: Shape, v: u64, i: u64) -> (u32, u32) {
-        let a = self.world.adt(sh.adt);
-        let var = self.world.variant(add(w(a.va), v));
-        let f = self.world.field(add(w(var.fa), i));
-        let vars = self.world.vars_of(in self.types, a, sh.ty);
-        let t = substitute(inout self.types, f.ty, in vars);
-        (f.name, t)
+    pub fn variant_field(inout self, shape: Shape, variant_index: u64, i: u64) -> (u32, u32) {
+        let adt = self.world.adt(shape.adt);
+        let variant = self.world.variant(add(w(adt.va), variant_index));
+        let field = self.world.field(add(w(variant.fa), i));
+        let vars = self.world.vars_of(in self.types, adt, shape.ty);
+        let field_ty = substitute(inout self.types, field.ty, in vars);
+        (field.name, field_ty)
     }
 
-    // The number of fields of variant `v` (a struct's only variant is 0;
+    // The number of fields of variant `variant_index` (a struct's only variant is 0;
     // a struct without variants has none).
-    pub fn field_count(in self, sh: Shape, v: u64) -> u64 {
-        let a = self.world.adt(sh.adt);
-        if v >= w(a.vn) {
+    pub fn field_count(in self, shape: Shape, variant_index: u64) -> u64 {
+        let adt = self.world.adt(shape.adt);
+        if variant_index >= w(adt.vn) {
             return 0;
         }
-        w(self.world.variant(add(w(a.va), v)).fc)
+        w(self.world.variant(add(w(adt.va), variant_index)).fc)
     }
 
     // Element `i` of a tuple type.
@@ -402,21 +402,21 @@ impl Cx {
     // `layout::field`: the byte offset and type of field `name` of a tuple
     // or struct value.
     pub fn field(inout self, ty: u32, name: u32) -> (u64, u32) eff [Fail[WErr]] {
-        let sh = self.shape(ty);
-        if sh.kind == SH_TUPLE {
+        let shape = self.shape(ty);
+        if shape.kind == SH_TUPLE {
             let i = self.decimal(name);
             if i == 18446744073709551615 {
                 Fail::raise(werr(K_INVALID, 0, 20));
             }
-            if i >= self.types.arity(sh.ty) {
+            if i >= self.types.arity(shape.ty) {
                 Fail::raise(werr(K_INVALID, 0, 21));
             }
-            return (wrapping_mul(8, i), self.types.arg(sh.ty, i));
+            return (wrapping_mul(8, i), self.types.arg(shape.ty, i));
         }
-        if sh.kind == SH_STRUCT {
-            let n = self.field_count(sh, 0);
+        if shape.kind == SH_STRUCT {
+            let n = self.field_count(shape, 0);
             for i in 0..n {
-                let (fname, fty) = self.variant_field(sh, 0, i);
+                let (fname, fty) = self.variant_field(shape, 0, i);
                 if fname == name {
                     return (wrapping_mul(8, i), fty);
                 }
@@ -427,31 +427,31 @@ impl Cx {
         (0, 0)
     }
 
-    // The value of decimal name `s` (`str::parse::<usize>`), or u64::MAX.
-    pub fn decimal(in self, s: u32) -> u64 {
-        let n = self.names.size(s);
+    // The value of decimal name `sym_id` (`str::parse::<usize>`), or u64::MAX.
+    pub fn decimal(in self, sym_id: u32) -> u64 {
+        let n = self.names.size(sym_id);
         if n == 0 {
             return 18446744073709551615;
         }
-        let mut v: u64 = 0;
+        let mut value: u64 = 0;
         for i in 0..n {
-            let c = self.names.byte(s, i);
-            if c < 48 || c > 57 {
+            let digit = self.names.byte(sym_id, i);
+            if digit < 48 || digit > 57 {
                 return 18446744073709551615;
             }
-            v = wrapping_add(wrapping_mul(v, 10), widen_u64(wrapping_sub(c, 48)));
+            value = wrapping_add(wrapping_mul(value, 10), widen_u64(wrapping_sub(digit, 48)));
         }
-        v
+        value
     }
 
     // `layout::slots`: the slot count of a struct or tuple block.
     pub fn slots(inout self, ty: u32) -> u64 eff [Fail[WErr]] {
-        let sh = self.shape(ty);
-        if sh.kind == SH_TUPLE {
-            return self.types.arity(sh.ty);
+        let shape = self.shape(ty);
+        if shape.kind == SH_TUPLE {
+            return self.types.arity(shape.ty);
         }
-        if sh.kind == SH_STRUCT {
-            return self.field_count(sh, 0);
+        if shape.kind == SH_STRUCT {
+            return self.field_count(shape, 0);
         }
         Fail::raise(werr(K_INVALID, 0, 24));
         0
@@ -465,26 +465,26 @@ impl Cx {
         constructor: u32
     ) -> (u64, bool, Shape) eff [Fail[WErr]] {
         let short = self.short_name(constructor);
-        let sh = self.shape(ty);
-        if sh.kind == SH_ENUM {
-            let n = self.variant_count(sh);
+        let shape = self.shape(ty);
+        if shape.kind == SH_ENUM {
+            let n = self.variant_count(shape);
             for i in 0..n {
-                let v = self.variant(sh, i);
-                if self.names_equal(v.name, short) {
-                    return (i, true, sh);
+                let variant = self.variant(shape, i);
+                if self.names_equal(variant.name, short) {
+                    return (i, true, shape);
                 }
             }
             Fail::raise(werr(K_INVALID, 0, 25));
         }
-        if sh.kind == SH_STRUCT {
-            return (0, false, sh);
+        if shape.kind == SH_STRUCT {
+            return (0, false, shape);
         }
         Fail::raise(werr(K_INVALID, 0, 26));
-        (0, false, sh)
+        (0, false, shape)
     }
 
-    pub fn names_equal(in self, a: u32, b: u32) -> bool {
-        cmp_syms(in self.names, a, b) == 0
+    pub fn names_equal(in self, lhs: u32, rhs: u32) -> bool {
+        cmp_syms(in self.names, lhs, rhs) == 0
     }
 
     // The part of `name` after its last `::` (`rsplit("::").next()`).
@@ -505,20 +505,20 @@ impl Cx {
             return name;
         }
         let mut text = ChunkSeq::new[u8]();
-        for k in cut..n {
-            text.push(self.names.byte(name, k));
+        for pos in cut..n {
+            text.push(self.names.byte(name, pos));
         }
         self.intern(in text)
     }
 
-    // The index of field `name` in variant `v` of shape `sh`, or NONE.
-    pub fn field_index(inout self, sh: Shape, v: u64, name: u32) -> u64 {
-        let n = self.field_count(sh, v);
-        let a = self.world.adt(sh.adt);
-        let var = self.world.variant(add(w(a.va), v));
+    // The index of field `name` in variant `variant_index` of shape `shape`, or NONE.
+    pub fn field_index(inout self, shape: Shape, variant_index: u64, name: u32) -> u64 {
+        let n = self.field_count(shape, variant_index);
+        let adt = self.world.adt(shape.adt);
+        let variant = self.world.variant(add(w(adt.va), variant_index));
         for i in 0..n {
-            let f = self.world.field(add(w(var.fa), i));
-            if f.name == name {
+            let field = self.world.field(add(w(variant.fa), i));
+            if field.name == name {
                 return i;
             }
         }
@@ -531,20 +531,20 @@ impl Cx {
     }
 
     pub fn sig(in self, name: u32) -> Sig {
-        let s = self.f.fn_sig_of(name);
-        if s == 0 {
+        let sig_ref = self.f.fn_sig_of(name);
+        if sig_ref == 0 {
             return self.f.sig(18446744073709551615);
         }
-        self.f.sig(wrapping_sub(s, 1))
+        self.f.sig(wrapping_sub(sig_ref, 1))
     }
 
-    // Appends the `Display` of type `t` to `out`.
-    pub fn show(in self, t: u32, inout out: ChunkSeq[u8]) {
-        display(in self.types, in self.names, t, inout out);
+    // Appends the `Display` of type `ty` to `out`.
+    pub fn show(in self, ty: u32, inout out: ChunkSeq[u8]) {
+        display(in self.types, in self.names, ty, inout out);
     }
 
-    pub fn write_name(in self, s: u32, inout out: ChunkSeq[u8]) {
-        self.names.write(s, inout out);
+    pub fn write_name(in self, sym_id: u32, inout out: ChunkSeq[u8]) {
+        self.names.write(sym_id, inout out);
     }
 
     pub fn intern(inout self, in text: ChunkSeq[u8]) -> u32 {
@@ -556,31 +556,31 @@ impl Cx {
     }
 
     // `mentions_generic` of analysis.rs.
-    pub fn mentions_generic(in self, t: u32) -> bool {
-        let n = self.types.node(t);
-        if n.kind == TyKind::Named {
-            if n.n == 0
-                && self.world.lookup(n.name) == NO_ADT
-                && !self.is_scalar_name(n.name)
-                && n.name != self.s.string {
+    pub fn mentions_generic(in self, ty: u32) -> bool {
+        let node = self.types.node(ty);
+        if node.kind == TyKind::Named {
+            if node.n == 0
+                && self.world.lookup(node.name) == NO_ADT
+                && !self.is_scalar_name(node.name)
+                && node.name != self.s.string {
                 return true;
             }
-            for i in 0..w(n.n) {
-                if self.mentions_generic(self.types.arg(t, i)) {
+            for i in 0..w(node.n) {
+                if self.mentions_generic(self.types.arg(ty, i)) {
                     return true;
                 }
             }
             return false;
         }
-        if n.kind == TyKind::Tuple {
-            for i in 0..w(n.n) {
-                if self.mentions_generic(self.types.arg(t, i)) {
+        if node.kind == TyKind::Tuple {
+            for i in 0..w(node.n) {
+                if self.mentions_generic(self.types.arg(ty, i)) {
                     return true;
                 }
             }
             return false;
         }
-        n.kind != TyKind::Lit
+        node.kind != TyKind::Lit
     }
 }
 
@@ -610,9 +610,9 @@ impl TVars {
         u32_at(in self.vals, i)
     }
 
-    pub fn get(in self, k: u32) -> u32 {
+    pub fn get(in self, key: u32) -> u32 {
         for i in 0..self.keys.len() {
-            if u32_at(in self.keys, i) == k {
+            if u32_at(in self.keys, i) == key {
                 return u32_at(in self.vals, i);
             }
         }
@@ -620,44 +620,44 @@ impl TVars {
     }
 
     // `insert`, keeping name order.
-    pub fn set(inout self, in names: Names, k: u32, v: u32) {
+    pub fn set(inout self, in names: Names, key: u32, value: u32) {
         for i in 0..self.keys.len() {
-            if u32_at(in self.keys, i) == k {
-                let ok = self.vals.try_set(i, v);
+            if u32_at(in self.keys, i) == key {
+                let ok = self.vals.try_set(i, value);
                 return;
             }
         }
-        let mut at = self.keys.len();
+        let mut pos = self.keys.len();
         for i in 0..self.keys.len() {
-            if cmp_syms(in names, u32_at(in self.keys, i), k) > 0 {
-                at = i;
+            if cmp_syms(in names, u32_at(in self.keys, i), key) > 0 {
+                pos = i;
                 break;
             }
         }
-        self.keys.push(k);
-        self.vals.push(v);
+        self.keys.push(key);
+        self.vals.push(value);
         let mut i = wrapping_sub(self.keys.len(), 1);
         loop {
-            if i <= at {
+            if i <= pos {
                 break;
             }
-            let pk = u32_at(in self.keys, wrapping_sub(i, 1));
-            let pv = u32_at(in self.vals, wrapping_sub(i, 1));
-            let ok = self.keys.try_set(i, pk);
-            let ok2 = self.vals.try_set(i, pv);
+            let prev_key = u32_at(in self.keys, wrapping_sub(i, 1));
+            let prev_val = u32_at(in self.vals, wrapping_sub(i, 1));
+            let ok = self.keys.try_set(i, prev_key);
+            let ok2 = self.vals.try_set(i, prev_val);
             i = wrapping_sub(i, 1);
         }
-        let ok = self.keys.try_set(at, k);
-        let ok2 = self.vals.try_set(at, v);
+        let ok = self.keys.try_set(pos, key);
+        let ok2 = self.vals.try_set(pos, value);
     }
 
     // check-data's `Vars` for `substitute`.
     pub fn vars(in self) -> Vars {
-        let mut v = vars_new();
+        let mut out = vars_new();
         for i in 0..self.keys.len() {
-            v.set(u32_at(in self.keys, i), u32_at(in self.vals, i));
+            out.set(u32_at(in self.keys, i), u32_at(in self.vals, i));
         }
-        v
+        out
     }
 
     pub fn dup(in self) -> TVars {
@@ -752,27 +752,27 @@ impl Plan {
         }
     }
 
-    // The instance of key `k`: an index + 1, or 0.
-    pub fn find(in self, k: u32) -> u64 {
-        w(u32_at(in self.by_key, w(k)))
+    // The instance of key `key`: an index + 1, or 0.
+    pub fn find(in self, key: u32) -> u64 {
+        w(u32_at(in self.by_key, w(key)))
     }
 
-    pub fn vars(in self, i: Inst) -> TVars {
+    pub fn vars(in self, inst: Inst) -> TVars {
         let mut out = tvars_new();
-        for k in 0..i.vn {
-            out.keys.push(u32_at(in self.vkeys, add(i.v0, k)));
-            out.vals.push(u32_at(in self.vvals, add(i.v0, k)));
+        for k in 0..inst.vn {
+            out.keys.push(u32_at(in self.vkeys, add(inst.v0, k)));
+            out.vals.push(u32_at(in self.vvals, add(inst.v0, k)));
         }
         out
     }
 
-    // The callee key of call `dest` in instance `i`, or NONE32.
-    pub fn callee(in self, i: Inst, dest: u64) -> u32 {
-        for k in 0..i.cn {
-            match self.calls.try_get(add(i.c0, k)) {
-                Option::Some(c) => {
-                    if c.dest == dest {
-                        return c.callee;
+    // The callee key of call `dest` in instance `inst`, or NONE32.
+    pub fn callee(in self, inst: Inst, dest: u64) -> u32 {
+        for k in 0..inst.cn {
+            match self.calls.try_get(add(inst.c0, k)) {
+                Option::Some(call) => {
+                    if call.dest == dest {
+                        return call.callee;
                     }
                 },
                 Option::None => {},
@@ -781,9 +781,9 @@ impl Plan {
         NONE32
     }
 
-    pub fn has_label(in self, i: Inst, l: u32) -> bool {
-        for k in 0..i.ln {
-            if u32_at(in self.labels, add(i.l0, k)) == l {
+    pub fn has_label(in self, inst: Inst, label: u32) -> bool {
+        for k in 0..inst.ln {
+            if u32_at(in self.labels, add(inst.l0, k)) == label {
                 return true;
             }
         }
@@ -823,29 +823,29 @@ fn call_vars(
     in outer: TVars
 ) -> TVars {
     let mut out = tvars_new();
-    let fs = cx.fn_sig(callee);
-    if fs == 0 {
+    let sig_ref = cx.fn_sig(callee);
+    if sig_ref == 0 {
         return out;
     }
-    let sig = cx.f.sig(wrapping_sub(fs, 1));
+    let sig = cx.f.sig(wrapping_sub(sig_ref, 1));
     let mut all_rows = true;
-    for g in 0..sig.gn {
-        if !cx.f.gen(add(sig.g0, g)).row {
+    for gen_index in 0..sig.gn {
+        if !cx.f.gen(add(sig.g0, gen_index)).row {
             all_rows = false;
         }
     }
     if all_rows {
         return out;
     }
-    let ov = outer.vars();
+    let outer_vars = outer.vars();
     let mut vars = tvars_new();
-    let ci = cx.f.call_at(s0, s1);
-    if ci < cx.f.calls.len() {
-        let c = cx.f.call(ci);
-        for k in 0..c.vn {
-            let p = cx.f.pair(add(c.v0, k));
-            let t = cx.subst(p.ty, in ov);
-            vars.set(in cx.names, p.name, t);
+    let call_index = cx.f.call_at(s0, s1);
+    if call_index < cx.f.calls.len() {
+        let call = cx.f.call(call_index);
+        for pair_index in 0..call.vn {
+            let pair = cx.f.pair(add(call.v0, pair_index));
+            let ty = cx.subst(pair.ty, in outer_vars);
+            vars.set(in cx.names, pair.name, ty);
         }
     }
     let n = if sig.gn < explicit.len() {
@@ -853,74 +853,76 @@ fn call_vars(
     } else {
         explicit.len()
     };
-    for g in 0..n {
-        let gr = cx.f.gen(add(sig.g0, g));
-        if !gr.row && vars.get(gr.name) == NONE32 {
-            let t = cx.subst(u32_at(in explicit, g), in ov);
-            vars.set(in cx.names, gr.name, t);
+    for gen_index in 0..n {
+        let generic = cx.f.gen(add(sig.g0, gen_index));
+        if !generic.row && vars.get(generic.name) == NONE32 {
+            let ty = cx.subst(u32_at(in explicit, gen_index), in outer_vars);
+            vars.set(in cx.names, generic.name, ty);
         }
     }
-    for g in 0..sig.gn {
-        let gr = cx.f.gen(add(sig.g0, g));
-        if gr.row {
+    for gen_index in 0..sig.gn {
+        let generic = cx.f.gen(add(sig.g0, gen_index));
+        if generic.row {
             continue;
         }
-        let t = vars.get(gr.name);
-        if t == NONE32 || cx.mentions_generic(t) {
+        let ty = vars.get(generic.name);
+        if ty == NONE32 || cx.mentions_generic(ty) {
             return tvars_new();
         }
-        let d = cx.default_ty(t);
-        out.set(in cx.names, gr.name, d);
+        let resolved = cx.default_ty(ty);
+        out.set(in cx.names, generic.name, resolved);
     }
     out
 }
 
 // The labels a function's own effect row binds (`eff [l: E]`).
 fn row_labels(in cx: Cx, inout out: ChunkSeq[u32], base: u32) {
-    let fs = cx.fn_sig(base);
-    if fs == 0 {
+    let sig_ref = cx.fn_sig(base);
+    if sig_ref == 0 {
         return;
     }
-    let sig = cx.f.sig(wrapping_sub(fs, 1));
+    let sig = cx.f.sig(wrapping_sub(sig_ref, 1));
     for i in 0..sig.en {
-        let e = cx.f.eff(add(sig.e0, i));
-        if e.label != NONE32 && cx.names.byte(e.label, 0) != 36 {
-            sorted_insert(in cx.names, inout out, e.label);
+        let effect = cx.f.eff(add(sig.e0, i));
+        if effect.label != NONE32 && cx.names.byte(effect.label, 0) != 36 {
+            sorted_insert(in cx.names, inout out, effect.label);
         }
     }
 }
 
 // `host::capabilities`: the host capabilities the entry declares.
 fn capabilities(inout cx: Cx, inout out: ChunkSeq[u8], entry: u32) eff [Fail[WErr]] {
-    let fs = cx.fn_sig(entry);
-    if fs == 0 {
+    let sig_ref = cx.fn_sig(entry);
+    if sig_ref == 0 {
         Fail::raise(werr(K_ENTRY, 0, 30));
     }
-    let sig = cx.f.sig(wrapping_sub(fs, 1));
+    let sig = cx.f.sig(wrapping_sub(sig_ref, 1));
     if sig.tail != NONE32 {
         Fail::raise(werr(K_ENTRY, 0, 31));
     }
     for i in 0..sig.en {
-        let e = cx.f.eff(add(sig.e0, i));
-        if cx.f.is_capability(e.name) {
+        let effect = cx.f.eff(add(sig.e0, i));
+        if cx.f.is_capability(effect.name) {
             continue;
         }
         // The standard I/O libraries become WASI calls (src/host.ves).
         // StdProcess has no functions on WASI (@vesper-std/process's
         // src-wasip2 refuses every start itself), so it imports nothing.
-        if e.name == cx.s.ffi_env || e.name == cx.s.ffi_fs || e.name == cx.s.ffi_proc {
-            let code: u8 = if e.name == cx.s.ffi_env {
+        if effect.name == cx.s.ffi_env
+            || effect.name == cx.s.ffi_fs
+            || effect.name == cx.s.ffi_proc {
+            let code: u8 = if effect.name == cx.s.ffi_env {
                 3
-            } else if e.name == cx.s.ffi_fs {
+            } else if effect.name == cx.s.ffi_fs {
                 4
             } else {
                 5
             };
             let mut seen = false;
-            for k in 0..out.len() {
-                match out.try_get(k) {
-                    Option::Some(x) => {
-                        if x == code {
+            for j in 0..out.len() {
+                match out.try_get(j) {
+                    Option::Some(host_code) => {
+                        if host_code == code {
                             seen = true;
                         }
                     },
@@ -932,7 +934,7 @@ fn capabilities(inout cx: Cx, inout out: ChunkSeq[u8], entry: u32) eff [Fail[WEr
             }
             continue;
         }
-        if e.name == cx.s.stdout || e.name == cx.s.clock || e.name == cx.s.trace {
+        if effect.name == cx.s.stdout || effect.name == cx.s.clock || effect.name == cx.s.trace {
             // The WASI host frames are lowered in part 2 of the port.
             Fail::raise(werr(K_NOT_PORTED, 0, 32));
         }
@@ -940,15 +942,15 @@ fn capabilities(inout cx: Cx, inout out: ChunkSeq[u8], entry: u32) eff [Fail[WEr
     }
 }
 
-// The names of `ir` function `fi`'s first `n` parameters equal
+// The names of `ir` function `fn_index`'s first `n` parameters equal
 // `caps[c0..c0+n]` (`check_prefix`).
-fn check_prefix(in cx: Cx, fi: u64, in caps: ChunkSeq[u32]) eff [Fail[WErr]] {
-    let f = cx.ir.info(fi);
-    if f.pn < caps.len() {
+fn check_prefix(in cx: Cx, fn_index: u64, in caps: ChunkSeq[u32]) eff [Fail[WErr]] {
+    let info = cx.ir.info(fn_index);
+    if info.pn < caps.len() {
         Fail::raise(werr(K_INVALID, 0, 34));
     }
     for i in 0..caps.len() {
-        if cx.ir.param(add(f.p0, i)).name != u32_at(in caps, i) {
+        if cx.ir.param(add(info.p0, i)).name != u32_at(in caps, i) {
             Fail::raise(werr(K_INVALID, 0, 35));
         }
     }
@@ -956,11 +958,11 @@ fn check_prefix(in cx: Cx, fi: u64, in caps: ChunkSeq[u32]) eff [Fail[WErr]] {
 
 // The alias of `name` in an instruction's alias pairs `ops[a..a+2n]`
 // (closure and handler `aliases`), or NONE32.
-pub fn alias_of(in cx: Cx, a: u64, n: u64, name: u32) -> u32 {
+pub fn alias_of(in cx: Cx, pairs_at: u64, n: u64, name: u32) -> u32 {
     for i in 0..n {
-        let at = add(a, wrapping_mul(i, 2));
-        if n32(cx.ir.word(at)) == name {
-            return n32(cx.ir.word(inc(at)));
+        let pair_at = add(pairs_at, wrapping_mul(i, 2));
+        if n32(cx.ir.word(pair_at)) == name {
+            return n32(cx.ir.word(inc(pair_at)));
         }
     }
     NONE32
@@ -968,12 +970,19 @@ pub fn alias_of(in cx: Cx, a: u64, n: u64, name: u32) -> u32 {
 
 // `analysis::captures`: the free names (`free[f0..f0+fc]`, sorted) that
 // alias a visible local of the enclosing function.
-pub fn captures(in cx: Cx, f0: u64, fc: u64, a: u64, n: u64, outer: FnInfo) -> ChunkSeq[u32] {
+pub fn captures(
+    in cx: Cx,
+    f0: u64,
+    fc: u64,
+    pairs_at: u64,
+    n: u64,
+    outer: FnInfo
+) -> ChunkSeq[u32] {
     let mut out = ChunkSeq::new[u32]();
     for i in 0..fc {
         let name = cx.f.free_at(add(f0, i));
-        let s = alias_of(in cx, a, n, name);
-        if s != NONE32 && cx.ir.has_local(outer, s) {
+        let alias = alias_of(in cx, pairs_at, n, name);
+        if alias != NONE32 && cx.ir.has_local(outer, alias) {
             out.push(name);
         }
     }
@@ -1022,10 +1031,10 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
     let mut p_hw = ChunkSeq::new[u32]();
     capabilities(inout cx, inout p_host, entry);
     let mut arity: u64 = 0;
-    for d in 0..cx.f.decls.len() {
-        let decl = cx.f.decl(d);
-        for o in 0..decl.on {
-            let sig = cx.f.sig(cx.f.op(add(decl.o0, o)).sig);
+    for decl_index in 0..cx.f.decls.len() {
+        let decl = cx.f.decl(decl_index);
+        for op_idx in 0..decl.on {
+            let sig = cx.f.sig(cx.f.op(add(decl.o0, op_idx)).sig);
             if sig.pn > arity {
                 arity = sig.pn;
             }
@@ -1040,11 +1049,11 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
     let mut qkeys = ChunkSeq::new[u32]();
     let mut qvals = ChunkSeq::new[u32]();
     let mut qlabels = ChunkSeq::new[u32]();
-    let mut l = ChunkSeq::new[u32]();
-    row_labels(in cx, inout l, entry);
+    let mut entry_labels = ChunkSeq::new[u32]();
+    row_labels(in cx, inout entry_labels, entry);
     let l0 = qlabels.len();
-    for i in 0..l.len() {
-        qlabels.push(u32_at(in l, i));
+    for i in 0..entry_labels.len() {
+        qlabels.push(u32_at(in entry_labels, i));
     }
     queue.push(
         Queued {
@@ -1056,7 +1065,7 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
             handler: 0,
             op: 0,
             l0: l0,
-            ln: l.len()
+            ln: entry_labels.len()
         }
     );
     let mut seen = ChunkSeq::new[u32]();
@@ -1095,8 +1104,8 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
         if head >= queue.len() {
             break;
         }
-        let q = match queue.try_get(head) {
-            Option::Some(x) => x,
+        let queued = match queue.try_get(head) {
+            Option::Some(item) => item,
             Option::None => Queued {
                 key: 0,
                 base: 0,
@@ -1110,27 +1119,27 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
             },
         };
         head = inc(head);
-        if u32_at(in seen, w(q.key)) != 0 {
+        if u32_at(in seen, w(queued.key)) != 0 {
             continue;
         }
         // m moved down for bisect2
         let n_mask = cx.names.mask_val();
         let n_tmask = cx.types.t_mask();
         let n_rmask = cx.types.r_mask();
-        set_by_symbol(inout seen, q.key, 1);
+        set_by_symbol(inout seen, queued.key, 1);
         if p_insts.len() >= cx.f.max_functions {
             Fail::raise(werr(K_LIMIT, 0, 40));
         }
-        let found = cx.ir.find(q.base);
+        let found = cx.ir.find(queued.base);
         if found == 0 {
-            Fail::raise(werr_syms(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 41, 0, q.base));
+            Fail::raise(werr_syms(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 41, 0, queued.base));
         }
-        let fi = wrapping_sub(found, 1);
-        let info = cx.ir.info(fi);
+        let fn_index = wrapping_sub(found, 1);
+        let info = cx.ir.info(fn_index);
         let mut vars = tvars_new();
-        for k in 0..q.vn {
-            vars.keys.push(u32_at(in qkeys, add(q.v0, k)));
-            vars.vals.push(u32_at(in qvals, add(q.v0, k)));
+        for k in 0..queued.vn {
+            vars.keys.push(u32_at(in qkeys, add(queued.v0, k)));
+            vars.vals.push(u32_at(in qvals, add(queued.v0, k)));
         }
         let v0 = p_vkeys.len();
         for k in 0..vars.len() {
@@ -1138,43 +1147,50 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
             p_vvals.push(vars.val(k));
         }
         let pl0 = p_labels.len();
-        for k in 0..q.ln {
-            p_labels.push(u32_at(in qlabels, add(q.l0, k)));
+        for k in 0..queued.ln {
+            p_labels.push(u32_at(in qlabels, add(queued.l0, k)));
         }
         let c0 = p_calls.len();
-        let row = cx.ir.p.function(fi);
-        for bi in 0..row.bc {
-            let blk = cx.ir.p.block(add(row.b0, bi));
-            for ii in 0..blk.ic {
-                let ins = cx.ir.p.inst(add(blk.i0, ii));
+        let row = cx.ir.p.function(fn_index);
+        for block_index in 0..row.bc {
+            let blk = cx.ir.p.block(add(row.b0, block_index));
+            for inst_index in 0..blk.ic {
+                let ins = cx.ir.p.inst(add(blk.i0, inst_index));
                 if ins.op == Op::Call {
                     let callee = n32(cx.ir.word(ins.a));
                     if cx.ir.find(callee) == 0 {
                         continue;
                     }
                     // callee, args (n, n x 4), types (n, ...), capability
-                    let na = cx.ir.word(inc(ins.a));
-                    let tat = add(add(ins.a, 2), wrapping_mul(na, 4));
-                    let nt = cx.ir.word(tat);
+                    let n_args = cx.ir.word(inc(ins.a));
+                    let types_at = add(add(ins.a, 2), wrapping_mul(n_args, 4));
+                    let n_types = cx.ir.word(types_at);
                     let mut explicit = ChunkSeq::new[u32]();
-                    for k in 0..nt {
-                        explicit.push(n32(cx.ir.word(add(inc(tat), k))));
+                    for k in 0..n_types {
+                        explicit.push(n32(cx.ir.word(add(inc(types_at), k))));
                     }
-                    let cv = call_vars(inout cx, callee, ins.s0, ins.s1, in explicit, in vars);
-                    let key = instance_name(inout cx, callee, in cv);
+                    let callee_vars = call_vars(
+                        inout cx,
+                        callee,
+                        ins.s0,
+                        ins.s1,
+                        in explicit,
+                        in vars
+                    );
+                    let key = instance_name(inout cx, callee, in callee_vars);
                     let s_pc = stage2_heap_swap(perm);
                     p_calls.push(CallTarget { dest: widen_u64(ins.dest), callee: key });
                     perm = stage2_heap_swap(s_pc);
-                    let mut ls = ChunkSeq::new[u32]();
-                    row_labels(in cx, inout ls, callee);
+                    let mut labels = ChunkSeq::new[u32]();
+                    row_labels(in cx, inout labels, callee);
                     let qv0 = qkeys.len();
-                    for k in 0..cv.len() {
-                        qkeys.push(cv.key(k));
-                        qvals.push(cv.val(k));
+                    for k in 0..callee_vars.len() {
+                        qkeys.push(callee_vars.key(k));
+                        qvals.push(callee_vars.val(k));
                     }
                     let ql0 = qlabels.len();
-                    for k in 0..ls.len() {
-                        qlabels.push(u32_at(in ls, k));
+                    for k in 0..labels.len() {
+                        qlabels.push(u32_at(in labels, k));
                     }
                     let s_q = stage2_heap_swap(perm);
                     queue.push(
@@ -1182,27 +1198,27 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                             key: key,
                             base: callee,
                             v0: qv0,
-                            vn: cv.len(),
+                            vn: callee_vars.len(),
                             role: R_ORDINARY,
                             handler: 0,
                             op: 0,
                             l0: ql0,
-                            ln: ls.len()
+                            ln: labels.len()
                         }
                     );
                     perm = stage2_heap_swap(s_q);
                 } else if ins.op == Op::Closure {
-                    let (pool, aa, an) = closure_operands(in cx, ins.a);
+                    let (pool, aliases_at, n_aliases) = closure_operands(in cx, ins.a);
                     let fact = cx.f.expr(pool);
                     if fact.kind != ExprFactKind::Closure {
                         Fail::raise(werr(K_INVALID, 0, 42));
                     }
-                    let caps = captures(in cx, fact.f0, fact.fc, aa, an, info);
-                    let nf = cx.ir.find(fact.fn_);
-                    if nf == 0 {
+                    let caps = captures(in cx, fact.f0, fact.fc, aliases_at, n_aliases, info);
+                    let nested_fn = cx.ir.find(fact.fn_);
+                    if nested_fn == 0 {
                         Fail::raise(werr(K_INVALID, 0, 43));
                     }
-                    check_prefix(in cx, wrapping_sub(nf, 1), in caps);
+                    check_prefix(in cx, wrapping_sub(nested_fn, 1), in caps);
                     let key = instance_name(inout cx, fact.fn_, in vars);
                     let qv0 = qkeys.len();
                     for k in 0..vars.len() {
@@ -1210,8 +1226,8 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                         qvals.push(vars.val(k));
                     }
                     let ql0 = qlabels.len();
-                    for k in 0..q.ln {
-                        qlabels.push(u32_at(in qlabels, add(q.l0, k)));
+                    for k in 0..queued.ln {
+                        qlabels.push(u32_at(in qlabels, add(queued.l0, k)));
                     }
                     let s_q = stage2_heap_swap(perm);
                     queue.push(
@@ -1224,7 +1240,7 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                             handler: 0,
                             op: 0,
                             l0: ql0,
-                            ln: q.ln
+                            ln: queued.ln
                         }
                     );
                     perm = stage2_heap_swap(s_q);
@@ -1232,11 +1248,11 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                     let root = n32(cx.ir.word(ins.a));
                     let path = cx.ir.word(inc(ins.a));
                     if path == 0 && !cx.ir.has_local(info, root) && cx.ir.find(root) != 0 {
-                        let mut ls = ChunkSeq::new[u32]();
-                        row_labels(in cx, inout ls, root);
+                        let mut labels = ChunkSeq::new[u32]();
+                        row_labels(in cx, inout labels, root);
                         let ql0 = qlabels.len();
-                        for k in 0..ls.len() {
-                            qlabels.push(u32_at(in ls, k));
+                        for k in 0..labels.len() {
+                            qlabels.push(u32_at(in labels, k));
                         }
                         let s_q = stage2_heap_swap(perm);
                         queue.push(
@@ -1249,7 +1265,7 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                                 handler: 0,
                                 op: 0,
                                 l0: ql0,
-                                ln: ls.len()
+                                ln: labels.len()
                             }
                         );
                         perm = stage2_heap_swap(s_q);
@@ -1257,27 +1273,28 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                 } else if ins.op == Op::Handle {
                     let id = p_handlers.len();
                     let s_h = stage2_heap_swap(perm);
-                    let h = handler(
+                    let handler_row = handler(
                         inout cx,
                         inout p_clauses,
                         inout p_hw,
-                        q.key,
+                        queued.key,
                         info,
                         in vars,
                         widen_u64(ins.dest),
                         ins.a
                     );
-                    for r in 0..wrapping_add(2, h.cn) {
-                        let (key, base, role, op) = if r == 0 {
-                            (h.body, h.body_base, R_HANDLER_BODY, 0)
-                        } else if r == 1 {
-                            (h.ret, h.ret_base, R_RETURN_CLAUSE, 0)
+                    for part in 0..wrapping_add(2, handler_row.cn) {
+                        let (key, base, role, op) = if part == 0 {
+                            (handler_row.body, handler_row.body_base, R_HANDLER_BODY, 0)
+                        } else if part == 1 {
+                            (handler_row.ret, handler_row.ret_base, R_RETURN_CLAUSE, 0)
                         } else {
-                            let c = match p_clauses.try_get(add(h.c0, wrapping_sub(r, 2))) {
-                                Option::Some(cc) => cc,
+                            let clause = match p_clauses
+                                .try_get(add(handler_row.c0, wrapping_sub(part, 2))) {
+                                Option::Some(hit) => hit,
                                 Option::None => clause0(),
                             };
-                            (c.function, c.base, R_OP_CLAUSE, c.op)
+                            (clause.function, clause.base, R_OP_CLAUSE, clause.op)
                         };
                         let qv0 = qkeys.len();
                         for k in 0..vars.len() {
@@ -1285,18 +1302,18 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                             qvals.push(vars.val(k));
                         }
                         let ql0 = qlabels.len();
-                        for k in 0..q.ln {
-                            qlabels.push(u32_at(in qlabels, add(q.l0, k)));
+                        for k in 0..queued.ln {
+                            qlabels.push(u32_at(in qlabels, add(queued.l0, k)));
                         }
-                        if r == 0 && h.label != NONE32 {
+                        if part == 0 && handler_row.label != NONE32 {
                             let mut seen_label = false;
                             for k in ql0..qlabels.len() {
-                                if u32_at(in qlabels, k) == h.label {
+                                if u32_at(in qlabels, k) == handler_row.label {
                                     seen_label = true;
                                 }
                             }
                             if !seen_label {
-                                qlabels.push(h.label);
+                                qlabels.push(handler_row.label);
                             }
                         }
                         queue.push(
@@ -1313,10 +1330,14 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                             }
                         );
                     }
-                    for k in 0..h.en {
-                        sorted_insert(in cx.names, inout p_keys, u32_at(in p_hw, add(h.e0, k)));
+                    for k in 0..handler_row.en {
+                        sorted_insert(
+                            in cx.names,
+                            inout p_keys,
+                            u32_at(in p_hw, add(handler_row.e0, k))
+                        );
                     }
-                    p_handlers.push(h);
+                    p_handlers.push(handler_row);
                     perm = stage2_heap_swap(s_h);
                 }
             }
@@ -1325,22 +1346,22 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
         let s_pi = stage2_heap_swap(perm);
         p_insts.push(
             Inst {
-                key: q.key,
-                base: q.base,
-                fi: fi,
+                key: queued.key,
+                base: queued.base,
+                fi: fn_index,
                 v0: v0,
                 vn: vars.len(),
-                role: q.role,
-                handler: q.handler,
-                op: q.op,
+                role: queued.role,
+                handler: queued.handler,
+                op: queued.op,
                 c0: c0,
                 cn: wrapping_sub(p_calls.len(), c0),
                 l0: pl0,
-                ln: q.ln
+                ln: queued.ln
             }
         );
         perm = stage2_heap_swap(s_pi);
-        set_by_symbol(inout p_by_key, q.key, n32(inc(i)));
+        set_by_symbol(inout p_by_key, queued.key, n32(inc(i)));
         if scratch_end != 0 && stage2_heap_mark() >= scratch_end {
             Fail::raise(werr(K_LIMIT, 96, stage2_heap_mark()));
         }
@@ -1369,12 +1390,12 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
             && qvals.len() <= 130000
             && qlabels.len() <= 130000
             && seen.len() <= 260000 {
-            let mut dcx = dummy_cx(cx.k, cx.s);
-            swap(inout cx, inout dcx);
-            let (fcx0, next_perm) = rebuild_cx(sink dcx, scratch_mark, perm);
-            let mut fcx = fcx0;
+            let mut old_cx = dummy_cx(cx.k, cx.s);
+            swap(inout cx, inout old_cx);
+            let (rebuilt, next_perm) = rebuild_cx(sink old_cx, scratch_mark, perm);
+            let mut new_cx = rebuilt;
             perm = next_perm;
-            swap(inout cx, inout fcx);
+            swap(inout cx, inout new_cx);
         } else {
             scratch_mark = stage2_heap_mark();
         }
@@ -1396,24 +1417,24 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
     }
 }
 
-fn dummy_cx(k: Known, s: Syms) -> Cx {
-    let mut dn = names_new();
-    let dt = types_new(inout dn);
-    let dw = world_new(k);
-    let df = empty_facts(0, 1, 1, 1);
-    let di = ir_new(program_new());
+fn dummy_cx(known: Known, syms: Syms) -> Cx {
+    let mut names = names_new();
+    let types = types_new(inout names);
+    let world = world_new(known);
+    let facts = empty_facts(0, 1, 1, 1);
+    let ir = ir_new(program_new());
     Cx {
-        names: dn,
-        types: dt,
-        world: dw,
-        k: k,
-        f: df,
-        ir: di,
-        s: s,
+        names: names,
+        types: types,
+        world: world,
+        k: known,
+        f: facts,
+        ir: ir,
+        s: syms,
     }
 }
 
-fn rebuild_cx(sink dcx: Cx, d_mark: u64, d_perm: u64) -> (Cx, u64) {
+fn rebuild_cx(sink old_cx: Cx, d_mark: u64, d_perm: u64) -> (Cx, u64) {
     let Cx {
         names,
         types,
@@ -1422,7 +1443,7 @@ fn rebuild_cx(sink dcx: Cx, d_mark: u64, d_perm: u64) -> (Cx, u64) {
         f,
         ir,
         s,
-    } = dcx;
+    } = old_cx;
     stage2_heap_reset(d_mark);
     let s_rb = stage2_heap_swap(d_perm);
     let fresh = Cx {
@@ -1551,21 +1572,21 @@ impl Plan {
     // (`handler_at`), or NONE64.
     pub fn handler_at(in self, site: u32, dest: u64) -> u64 {
         for i in 0..self.handlers.len() {
-            let h = self.handler(i);
-            if h.site == site && h.dest == dest {
+            let handler_row = self.handler(i);
+            if handler_row.site == site && handler_row.dest == dest {
                 return i;
             }
         }
         NONE64
     }
 
-    // The clause of operation `op` in handler `h`.
-    pub fn clause_of(in self, h: u64, op: u64) -> HClause {
-        let hd = self.handler(h);
-        for k in 0..hd.cn {
-            let c = self.clause(add(hd.c0, k));
-            if c.op == op {
-                return c;
+    // The clause of operation `op` in handler `handler_index`.
+    pub fn clause_of(in self, handler_index: u64, op: u64) -> HClause {
+        let handler_row = self.handler(handler_index);
+        for i in 0..handler_row.cn {
+            let clause = self.clause(add(handler_row.c0, i));
+            if clause.op == op {
+                return clause;
             }
         }
         clause0()
@@ -1581,28 +1602,35 @@ fn hop(in cx: Cx, i: u64) -> u64 {
 }
 
 // `analysis::captures` of the names `hops[at..at+n]`.
-fn captures_h(in cx: Cx, at: u64, n: u64, aa: u64, an: u64, outer: FnInfo) -> ChunkSeq[u32] {
+fn captures_h(
+    in cx: Cx,
+    names_at: u64,
+    n: u64,
+    aliases_at: u64,
+    n_aliases: u64,
+    outer: FnInfo
+) -> ChunkSeq[u32] {
     let mut out = ChunkSeq::new[u32]();
     for i in 0..n {
-        let name = n32(hop(in cx, add(at, i)));
-        let s = alias_of(in cx, aa, an, name);
-        if s != NONE32 && cx.ir.has_local(outer, s) {
+        let name = n32(hop(in cx, add(names_at, i)));
+        let alias = alias_of(in cx, aliases_at, n_aliases, name);
+        if alias != NONE32 && cx.ir.has_local(outer, alias) {
             out.push(name);
         }
     }
     out
 }
 
-// Whether `t` is open (`numeric::open`): an inferred part, a row or a
+// Whether `ty` is open (`numeric::open`): an inferred part, a row or a
 // function type.
-fn open_type(in cx: Cx, t: u32) -> bool {
-    let n = cx.types.node(t);
-    if n.kind == TyKind::Infer || n.kind == TyKind::Row || n.kind == TyKind::Fn {
+fn open_type(in cx: Cx, ty: u32) -> bool {
+    let node = cx.types.node(ty);
+    if node.kind == TyKind::Infer || node.kind == TyKind::Row || node.kind == TyKind::Fn {
         return true;
     }
-    if n.kind == TyKind::Named || n.kind == TyKind::Tuple {
-        for i in 0..w(n.n) {
-            if open_type(in cx, cx.types.arg(t, i)) {
+    if node.kind == TyKind::Named || node.kind == TyKind::Tuple {
+        for i in 0..w(node.n) {
+            if open_type(in cx, cx.types.arg(ty, i)) {
                 return true;
             }
         }
@@ -1630,8 +1658,8 @@ pub fn instance_key(inout cx: Cx, name: u32, in args: ChunkSeq[u32]) -> u32 {
             text.push(44);
             text.push(32);
         }
-        let d = cx.default_ty(u32_at(in args, i));
-        cx.show(d, inout text);
+        let resolved = cx.default_ty(u32_at(in args, i));
+        cx.show(resolved, inout text);
     }
     text.push(93);
     cx.intern(in text)
@@ -1649,18 +1677,18 @@ pub fn prefixed_key(inout cx: Cx, label: bool, name: u32) -> u32 {
     cx.intern(in text)
 }
 
-fn append_ascii(inout out: ChunkSeq[u8], in s: Str) {
-    let b = s.as_bytes();
-    for i in 0..b.len() {
-        match b.try_get(i) {
-            Option::Some(x) => out.push(x),
+fn append_ascii(inout out: ChunkSeq[u8], in ascii: Str) {
+    let bytes = ascii.as_bytes();
+    for i in 0..bytes.len() {
+        match bytes.try_get(i) {
+            Option::Some(byte_val) => out.push(byte_val),
             Option::None => {},
         }
     }
 }
 
 // `analysis::handler`: the handler of the `handle` instruction with
-// operands at ir word `a` and value `dest`, in instance `site` (IR
+// operands at ir word `operands_at` and value `dest`, in instance `site` (IR
 // function `outer` under `vars`). Pushes its clauses and side words.
 fn handler(
     inout cx: Cx,
@@ -1670,124 +1698,124 @@ fn handler(
     outer: FnInfo,
     in vars: TVars,
     dest: u64,
-    a: u64
+    operands_at: u64
 ) -> Handler eff [Fail[WErr]] {
     if cx.f.stack_switching {
         // WasmFX handlers are lowered in a later part of the port.
         Fail::raise(werr(K_NOT_PORTED, 0, 44));
     }
     // has state, state value, pool, aliases (n, pairs), moves
-    let has_state = cx.ir.word(a);
-    let sv = cx.ir.word(inc(a));
-    let pool = cx.ir.word(add(a, 2));
-    let an = cx.ir.word(add(a, 3));
-    let aa = add(a, 4);
+    let has_state = cx.ir.word(operands_at);
+    let state_val = cx.ir.word(inc(operands_at));
+    let pool = cx.ir.word(add(operands_at, 2));
+    let n_aliases = cx.ir.word(add(operands_at, 3));
+    let aliases_at = add(operands_at, 4);
     let fact = cx.f.expr(pool);
     if fact.kind != ExprFactKind::Handler {
         Fail::raise(werr(K_INVALID, 0, 45));
     }
-    let ov = vars.vars();
-    let mut h = fact.h0;
-    let lw = hop(in cx, h);
-    let label = if lw == 0 {
+    let outer_vars = vars.vars();
+    let mut hop_pos = fact.h0;
+    let label_word = hop(in cx, hop_pos);
+    let label = if label_word == 0 {
         NONE32
     } else {
-        n32(wrapping_sub(lw, 1))
+        n32(wrapping_sub(label_word, 1))
     };
-    let ename = n32(hop(in cx, inc(h)));
-    let na = hop(in cx, add(h, 2));
+    let ename = n32(hop(in cx, inc(hop_pos)));
+    let n_args = hop(in cx, add(hop_pos, 2));
     let mut args = ChunkSeq::new[u32]();
     let mut generic = false;
-    for i in 0..na {
-        let t = cx.subst(n32(hop(in cx, add(add(h, 3), i))), in ov);
-        if cx.mentions_generic(t) {
+    for i in 0..n_args {
+        let ty = cx.subst(n32(hop(in cx, add(add(hop_pos, 3), i))), in outer_vars);
+        if cx.mentions_generic(ty) {
             generic = true;
         }
-        args.push(t);
+        args.push(ty);
     }
-    h = add(add(h, 3), na);
+    hop_pos = add(add(hop_pos, 3), n_args);
     if generic {
         Fail::raise(werr(K_UNSUPPORTED, U_GENERIC_EFFECT_INSTANCE, 46));
     }
-    let di = cx.f.decl_of(ename);
-    if di == 0 {
+    let decl_ref = cx.f.decl_of(ename);
+    if decl_ref == 0 {
         Fail::raise(werr(K_INVALID, 0, 47));
     }
-    let decl = cx.f.decl(wrapping_sub(di, 1));
+    let decl = cx.f.decl(wrapping_sub(decl_ref, 1));
     let mut dvars = tvars_new();
     for i in 0..decl.gn {
         if i < args.len() {
             dvars.set(in cx.names, u32_at(in cx.f.gsyms, add(decl.g0, i)), u32_at(in args, i));
         }
     }
-    let dv = dvars.vars();
-    let stateful = hop(in cx, h) != 0;
-    let body_fn = n32(hop(in cx, inc(h)));
-    let ret_fn = n32(hop(in cx, add(h, 2)));
-    h = add(h, 3);
-    let bf = cx.ir.find(body_fn);
-    let rf = cx.ir.find(ret_fn);
-    if bf == 0 || rf == 0 {
+    let decl_vars = dvars.vars();
+    let stateful = hop(in cx, hop_pos) != 0;
+    let body_fn = n32(hop(in cx, inc(hop_pos)));
+    let ret_fn = n32(hop(in cx, add(hop_pos, 2)));
+    hop_pos = add(hop_pos, 3);
+    let body_found = cx.ir.find(body_fn);
+    let ret_found = cx.ir.find(ret_fn);
+    if body_found == 0 || ret_found == 0 {
         Fail::raise(werr(K_INVALID, 0, 48));
     }
     let state = if stateful {
         if has_state == 0 {
             Fail::raise(werr(K_INVALID, 0, 49));
         }
-        let t = cx.ir.value_type(outer, sv);
-        if t == NONE32 {
+        let ty = cx.ir.value_type(outer, state_val);
+        if ty == NONE32 {
             Fail::raise(werr(K_INVALID, 0, 50));
         }
-        cx.subst(t, in ov)
+        cx.subst(ty, in outer_vars)
     } else {
         NONE32
     };
     // the return clause: patterns, then free names
-    let np = hop(in cx, h);
-    let ret_pat = inc(h);
-    let mut q = inc(h);
-    for i in 0..np {
-        q = pattern_end(in cx.f.hops, q, 0);
+    let n_ret_pats = hop(in cx, hop_pos);
+    let ret_pat = inc(hop_pos);
+    let mut clause_pos = inc(hop_pos);
+    for i in 0..n_ret_pats {
+        clause_pos = pattern_end(in cx.f.hops, clause_pos, 0);
     }
-    let nfree = hop(in cx, q);
-    let rcaps = captures_h(in cx, inc(q), nfree, aa, an, outer);
-    q = add(inc(q), nfree);
-    check_prefix(in cx, wrapping_sub(rf, 1), in rcaps);
+    let nfree = hop(in cx, clause_pos);
+    let rcaps = captures_h(in cx, inc(clause_pos), nfree, aliases_at, n_aliases, outer);
+    clause_pos = add(inc(clause_pos), nfree);
+    check_prefix(in cx, wrapping_sub(ret_found, 1), in rcaps);
     let rk0 = p_hw.len();
     for i in 0..rcaps.len() {
         p_hw.push(u32_at(in rcaps, i));
     }
-    let nc = hop(in cx, q);
-    q = inc(q);
+    let n_clauses = hop(in cx, clause_pos);
+    clause_pos = inc(clause_pos);
     let c0 = p_clauses.len();
-    for k in 0..nc {
-        let cname = n32(hop(in cx, q));
-        let cfn = n32(hop(in cx, inc(q)));
-        let npats = hop(in cx, add(q, 2));
-        let pats = add(q, 3);
-        let mut e = pats;
+    for clause_index in 0..n_clauses {
+        let cname = n32(hop(in cx, clause_pos));
+        let cfn = n32(hop(in cx, inc(clause_pos)));
+        let npats = hop(in cx, add(clause_pos, 2));
+        let pats = add(clause_pos, 3);
+        let mut pat_pos = pats;
         let mut pat_at = ChunkSeq::new[u64]();
         for i in 0..npats {
-            pat_at.push(e);
-            e = pattern_end(in cx.f.hops, e, 0);
+            pat_at.push(pat_pos);
+            pat_pos = pattern_end(in cx.f.hops, pat_pos, 0);
         }
-        let cfree = hop(in cx, e);
-        let free_at = inc(e);
-        q = add(inc(e), cfree);
+        let cfree = hop(in cx, pat_pos);
+        let free_at = inc(pat_pos);
+        clause_pos = add(inc(pat_pos), cfree);
         let mut op = NONE64;
-        for o in 0..decl.on {
-            if cx.f.op(add(decl.o0, o)).name == cname {
-                op = o;
+        for candidate in 0..decl.on {
+            if cx.f.op(add(decl.o0, candidate)).name == cname {
+                op = candidate;
                 break;
             }
         }
         if op == NONE64 {
             Fail::raise(werr(K_INVALID, 0, 51));
         }
-        let od = cx.f.op(add(decl.o0, op));
-        let sig = cx.f.sig(od.sig);
-        let cf = cx.ir.find(cfn);
-        if cf == 0 {
+        let op_decl = cx.f.op(add(decl.o0, op));
+        let sig = cx.f.sig(op_decl.sig);
+        let clause_found = cx.ir.find(cfn);
+        if clause_found == 0 {
             Fail::raise(werr(K_INVALID, 0, 52));
         }
         let n = sig.pn;
@@ -1799,9 +1827,9 @@ fn handler(
                 resume = n32(hop(in cx, add(at, 3)));
             }
         }
-        let caps = captures_h(in cx, free_at, cfree, aa, an, outer);
-        check_prefix(in cx, wrapping_sub(cf, 1), in caps);
-        let mode = clause_mode(in cx, wrapping_sub(cf, 1), resume);
+        let caps = captures_h(in cx, free_at, cfree, aliases_at, n_aliases, outer);
+        check_prefix(in cx, wrapping_sub(clause_found, 1), in caps);
+        let mode = clause_mode(in cx, wrapping_sub(clause_found, 1), resume);
         // An `inout` operation argument is a cell copied back when the
         // operation returns: only a clause that resumes in tail position
         // makes all its writes before that.
@@ -1829,14 +1857,14 @@ fn handler(
         }
         let t0 = p_hw.len();
         for i in 0..n {
-            let t = cx.subst(cx.f.param(add(sig.p0, i)).ty, in dv);
-            p_hw.push(t);
+            let ty = cx.subst(cx.f.param(add(sig.p0, i)).ty, in decl_vars);
+            p_hw.push(ty);
         }
         let function = instance_name(inout cx, cfn, in vars);
         p_clauses.push(
             HClause {
                 op: op,
-                sig: od.sig,
+                sig: op_decl.sig,
                 function: function,
                 base: cfn,
                 mode: mode,
@@ -1849,7 +1877,7 @@ fn handler(
             }
         );
     }
-    if np == 0 {
+    if n_ret_pats == 0 {
         Fail::raise(werr(K_INVALID, 0, 55));
     }
     // `handler_keys`
@@ -1861,11 +1889,11 @@ fn handler(
         p_hw.push(exact);
     }
     if label != NONE32 {
-        let lk = prefixed_key(inout cx, true, label);
-        p_hw.push(lk);
+        let label_key = prefixed_key(inout cx, true, label);
+        p_hw.push(label_key);
     }
     let en = wrapping_sub(p_hw.len(), e0);
-    let body_type = cx.subst(cx.ir.info(wrapping_sub(bf, 1)).result, in ov);
+    let body_type = cx.subst(cx.ir.info(wrapping_sub(body_found, 1)).result, in outer_vars);
     let body = instance_name(inout cx, body_fn, in vars);
     let ret = instance_name(inout cx, ret_fn, in vars);
     Handler {
@@ -1886,36 +1914,40 @@ fn handler(
         rkn: rcaps.len(),
         c0: c0,
         cn: wrapping_sub(p_clauses.len(), c0),
-        alias_at: aa,
-        alias_n: an
+        alias_at: aliases_at,
+        alias_n: n_aliases
     }
 }
 
 // The values instruction `ins` reads (`analysis::operands`).
-pub fn inst_operands(in cx: Cx, op: u8, a: u64) -> ChunkSeq[u64] {
+pub fn inst_operands(in cx: Cx, op: u8, args_at: u64) -> ChunkSeq[u64] {
     let mut out = ChunkSeq::new[u64]();
     if op == Op::Bind || op == Op::Exit || op == Op::Project || op == Op::Try {
-        out.push(cx.ir.word(a));
+        out.push(cx.ir.word(args_at));
     } else if op == Op::Write {
-        out.push(cx.ir.word(add(a, 2)));
+        out.push(cx.ir.word(add(args_at, 2)));
     } else if op == Op::Unary {
-        out.push(cx.ir.word(inc(a)));
+        out.push(cx.ir.word(inc(args_at)));
     } else if op == Op::Binary {
-        out.push(cx.ir.word(inc(a)));
-        out.push(cx.ir.word(add(a, 2)));
+        out.push(cx.ir.word(inc(args_at)));
+        out.push(cx.ir.word(add(args_at, 2)));
     } else if op == Op::Index {
-        out.push(cx.ir.word(a));
-        out.push(cx.ir.word(inc(a)));
+        out.push(cx.ir.word(args_at));
+        out.push(cx.ir.word(inc(args_at)));
     } else if op == Op::Tuple || op == Op::Vector {
-        let at = if op == Op::Vector { inc(a) } else { a };
-        let n = cx.ir.word(at);
-        for k in 0..n {
-            out.push(cx.ir.word(add(inc(at), k)));
+        let list_at = if op == Op::Vector {
+            inc(args_at)
+        } else {
+            args_at
+        };
+        let n = cx.ir.word(list_at);
+        for i in 0..n {
+            out.push(cx.ir.word(add(inc(list_at), i)));
         }
     } else if op == Op::Data {
-        let n = cx.ir.word(inc(a));
-        for k in 0..n {
-            out.push(cx.ir.word(add(add(a, 3), wrapping_mul(2, k))));
+        let n = cx.ir.word(inc(args_at));
+        for i in 0..n {
+            out.push(cx.ir.word(add(add(args_at, 3), wrapping_mul(2, i))));
         }
     } else if op == Op::Call
         || op == Op::Tiled
@@ -1923,52 +1955,52 @@ pub fn inst_operands(in cx: Cx, op: u8, a: u64) -> ChunkSeq[u64] {
         || op == Op::Fip
         || op == Op::Indirect {
         if op == Op::Indirect {
-            out.push(cx.ir.word(a));
+            out.push(cx.ir.word(args_at));
         }
         // callee/pool, then args: n, n x (pass, value, root, path)
-        let n = cx.ir.word(inc(a));
-        for k in 0..n {
-            out.push(cx.ir.word(add(add(a, 3), wrapping_mul(4, k))));
+        let n = cx.ir.word(inc(args_at));
+        for i in 0..n {
+            out.push(cx.ir.word(add(add(args_at, 3), wrapping_mul(4, i))));
         }
     } else if op == Op::Handle {
-        if cx.ir.word(a) != 0 {
-            out.push(cx.ir.word(inc(a)));
+        if cx.ir.word(args_at) != 0 {
+            out.push(cx.ir.word(inc(args_at)));
         }
     }
     out
 }
 
-fn contains64(in set: ChunkSeq[u64], x: u64) -> bool {
+fn contains64(in set: ChunkSeq[u64], value: u64) -> bool {
     for i in 0..set.len() {
-        if u64_at(in set, i) == x {
+        if u64_at(in set, i) == value {
             return true;
         }
     }
     false
 }
 
-// `flows_to_return`: whether `value`, defined last in block `b` of IR
-// function `fi`, reaches a `Return` unchanged.
-pub fn flows_to_return(in cx: Cx, fi: u64, b: u64, value: u64, depth: u64) -> bool {
+// `flows_to_return`: whether `value`, defined last in block `block_index` of IR
+// function `fn_index`, reaches a `Return` unchanged.
+pub fn flows_to_return(in cx: Cx, fn_index: u64, block_index: u64, value: u64, depth: u64) -> bool {
     if depth > 64 {
         return false;
     }
-    let row = cx.ir.p.function(fi);
-    let blk = cx.ir.p.block(add(row.b0, b));
+    let row = cx.ir.p.function(fn_index);
+    let blk = cx.ir.p.block(add(row.b0, block_index));
     if blk.term == Term::Return {
         return cx.ir.word(blk.ta) == value;
     }
     if blk.term != Term::Jump {
         return false;
     }
-    let t = cx.ir.word(blk.ta);
+    let target_index = cx.ir.word(blk.ta);
     let n = cx.ir.word(inc(blk.ta));
     let mut pos = NONE64;
     let mut count: u64 = 0;
-    for k in 0..n {
-        if cx.ir.word(add(add(blk.ta, 2), k)) == value {
+    for i in 0..n {
+        if cx.ir.word(add(add(blk.ta, 2), i)) == value {
             if pos == NONE64 {
-                pos = k;
+                pos = i;
             }
             count = inc(count);
         }
@@ -1976,43 +2008,44 @@ pub fn flows_to_return(in cx: Cx, fi: u64, b: u64, value: u64, depth: u64) -> bo
     if pos == NONE64 || count != 1 {
         return false;
     }
-    let target = cx.ir.p.block(add(row.b0, t));
+    let target = cx.ir.p.block(add(row.b0, target_index));
     if target.ic != 0 {
         return false;
     }
-    let (p0, pn) = cx.ir.block_params(fi, t);
+    let (p0, pn) = cx.ir.block_params(fn_index, target_index);
     if pos >= pn {
         return false;
     }
-    flows_to_return(in cx, fi, t, cx.ir.word(add(p0, pos)), inc(depth))
+    flows_to_return(in cx, fn_index, target_index, cx.ir.word(add(p0, pos)), inc(depth))
 }
 
 // The blocks a terminator can branch to other than by a jump (a branch's
-// or a match's targets) include `b`.
-fn branches_to(in cx: Cx, blk_term: u8, ta: u64, b: u64) -> bool {
+// or a match's targets) include `block_index`.
+fn branches_to(in cx: Cx, blk_term: u8, term_args: u64, block_index: u64) -> bool {
     if blk_term == Term::Branch {
-        return cx.ir.word(inc(ta)) == b || cx.ir.word(add(ta, 2)) == b;
+        return cx.ir.word(inc(term_args)) == block_index
+            || cx.ir.word(add(term_args, 2)) == block_index;
     }
     if blk_term == Term::Match {
-        let n = cx.ir.word(inc(ta));
-        let mut at = add(ta, 2);
-        for k in 0..n {
-            at = pattern_end(in cx.ir.p.ops, at, 0);
-            if cx.ir.word(at) == b {
+        let n = cx.ir.word(inc(term_args));
+        let mut pos = add(term_args, 2);
+        for i in 0..n {
+            pos = pattern_end(in cx.ir.p.ops, pos, 0);
+            if cx.ir.word(pos) == block_index {
                 return true;
             }
-            at = inc(at);
+            pos = inc(pos);
         }
     }
     false
 }
 
-// `resumed_value`: whether `value` returned from block `b` is (through
+// `resumed_value`: whether `value` returned from block `block_index` is (through
 // join parameters fed only by jumps) a tail resumption result.
 fn resumed_value(
     in cx: Cx,
-    fi: u64,
-    b: u64,
+    fn_index: u64,
+    block_index: u64,
     value: u64,
     in tail: ChunkSeq[u64],
     depth: u64
@@ -2023,47 +2056,47 @@ fn resumed_value(
     if depth > 64 {
         return false;
     }
-    let (p0, pn) = cx.ir.block_params(fi, b);
+    let (p0, pn) = cx.ir.block_params(fn_index, block_index);
     let mut pos = NONE64;
-    for k in 0..pn {
-        if cx.ir.word(add(p0, k)) == value {
-            pos = k;
+    for i in 0..pn {
+        if cx.ir.word(add(p0, i)) == value {
+            pos = i;
             break;
         }
     }
     if pos == NONE64 {
         return false;
     }
-    let row = cx.ir.p.function(fi);
+    let row = cx.ir.p.function(fn_index);
     let mut any = false;
-    for pi in 0..row.bc {
-        let pred = cx.ir.p.block(add(row.b0, pi));
-        if pred.term == Term::Jump && cx.ir.word(pred.ta) == b {
+    for pred_index in 0..row.bc {
+        let pred = cx.ir.p.block(add(row.b0, pred_index));
+        if pred.term == Term::Jump && cx.ir.word(pred.ta) == block_index {
             any = true;
             let arg = cx.ir.word(add(add(pred.ta, 2), pos));
-            if !resumed_value(in cx, fi, pi, arg, in tail, inc(depth)) {
+            if !resumed_value(in cx, fn_index, pred_index, arg, in tail, inc(depth)) {
                 return false;
             }
         }
-        if branches_to(in cx, pred.term, pred.ta, b) {
+        if branches_to(in cx, pred.term, pred.ta, block_index) {
             return false;
         }
     }
     any
 }
 
-// `analysis::clause_mode` of the clause in IR function `fi` whose
+// `analysis::clause_mode` of the clause in IR function `fn_index` whose
 // continuation is `resume` (NONE32: none).
-fn clause_mode(in cx: Cx, fi: u64, resume: u32) -> u8 eff [Fail[WErr]] {
+fn clause_mode(in cx: Cx, fn_index: u64, resume: u32) -> u8 eff [Fail[WErr]] {
     if resume == NONE32 {
         return M_ABORT;
     }
-    let row = cx.ir.p.function(fi);
+    let row = cx.ir.p.function(fn_index);
     let mut reads = ChunkSeq::new[u64]();
-    for bi in 0..row.bc {
-        let blk = cx.ir.p.block(add(row.b0, bi));
-        for ii in 0..blk.ic {
-            let ins = cx.ir.p.inst(add(blk.i0, ii));
+    for block_index in 0..row.bc {
+        let blk = cx.ir.p.block(add(row.b0, block_index));
+        for inst_index in 0..blk.ic {
+            let ins = cx.ir.p.inst(add(blk.i0, inst_index));
             if ins.op == Op::Read && n32(cx.ir.word(ins.a)) == resume {
                 if cx.ir.word(inc(ins.a)) != 0 {
                     Fail::raise(werr(K_UNSUPPORTED, U_FIRST_CLASS_CONTINUATION, 56));
@@ -2074,15 +2107,15 @@ fn clause_mode(in cx: Cx, fi: u64, resume: u32) -> u8 eff [Fail[WErr]] {
     }
     // Every read of the continuation must be the callee of an `Indirect`.
     let mut calls = ChunkSeq::new[u64]();
-    for bi in 0..row.bc {
-        let blk = cx.ir.p.block(add(row.b0, bi));
-        for ii in 0..blk.ic {
-            let ins = cx.ir.p.inst(add(blk.i0, ii));
-            let a = ins.a;
-            if ins.op == Op::Indirect && contains64(in reads, cx.ir.word(a)) {
-                let n = cx.ir.word(inc(a));
+    for block_index in 0..row.bc {
+        let blk = cx.ir.p.block(add(row.b0, block_index));
+        for inst_index in 0..blk.ic {
+            let ins = cx.ir.p.inst(add(blk.i0, inst_index));
+            let args_at = ins.a;
+            if ins.op == Op::Indirect && contains64(in reads, cx.ir.word(args_at)) {
+                let n = cx.ir.word(inc(args_at));
                 for k in 0..n {
-                    if contains64(in reads, cx.ir.word(add(add(a, 3), wrapping_mul(4, k)))) {
+                    if contains64(in reads, cx.ir.word(add(add(args_at, 3), wrapping_mul(4, k)))) {
                         Fail::raise(werr(K_UNSUPPORTED, U_FIRST_CLASS_CONTINUATION, 57));
                     }
                 }
@@ -2090,20 +2123,20 @@ fn clause_mode(in cx: Cx, fi: u64, resume: u32) -> u8 eff [Fail[WErr]] {
             } else if ins.op == Op::Closure || ins.op == Op::Handle {
                 // A closure or nested handler that names the continuation
                 // captures it as a value.
-                let (pool, pa, pn) = if ins.op == Op::Closure {
-                    (cx.ir.word(a), add(a, 2), cx.ir.word(inc(a)))
+                let (pool, aliases_at, n_aliases) = if ins.op == Op::Closure {
+                    (cx.ir.word(args_at), add(args_at, 2), cx.ir.word(inc(args_at)))
                 } else {
-                    (cx.ir.word(add(a, 2)), add(a, 4), cx.ir.word(add(a, 3)))
+                    (cx.ir.word(add(args_at, 2)), add(args_at, 4), cx.ir.word(add(args_at, 3)))
                 };
                 let fact = cx.f.expr(pool);
                 for i in 0..fact.fc {
                     let name = cx.f.free_at(add(fact.f0, i));
-                    if name == resume || alias_of(in cx, pa, pn, name) == resume {
+                    if name == resume || alias_of(in cx, aliases_at, n_aliases, name) == resume {
                         Fail::raise(werr(K_UNSUPPORTED, U_FIRST_CLASS_CONTINUATION, 58));
                     }
                 }
             } else {
-                let used = inst_operands(in cx, ins.op, a);
+                let used = inst_operands(in cx, ins.op, args_at);
                 for k in 0..used.len() {
                     if contains64(in reads, u64_at(in used, k)) {
                         Fail::raise(werr(K_UNSUPPORTED, U_FIRST_CLASS_CONTINUATION, 59));
@@ -2111,9 +2144,9 @@ fn clause_mode(in cx: Cx, fi: u64, resume: u32) -> u8 eff [Fail[WErr]] {
                 }
             }
         }
-        let tv = term_operands(in cx, blk.term, blk.ta);
-        for k in 0..tv.len() {
-            if contains64(in reads, u64_at(in tv, k)) {
+        let term_vals = term_operands(in cx, blk.term, blk.ta);
+        for k in 0..term_vals.len() {
+            if contains64(in reads, u64_at(in term_vals, k)) {
                 Fail::raise(werr(K_UNSUPPORTED, U_FIRST_CLASS_CONTINUATION, 60));
             }
         }
@@ -2124,25 +2157,25 @@ fn clause_mode(in cx: Cx, fi: u64, resume: u32) -> u8 eff [Fail[WErr]] {
     // Tail-resumptive: each resumption result flows unchanged to a return,
     // and every return returns a resumption result.
     let mut tail = ChunkSeq::new[u64]();
-    for bi in 0..row.bc {
-        let blk = cx.ir.p.block(add(row.b0, bi));
+    for block_index in 0..row.bc {
+        let blk = cx.ir.p.block(add(row.b0, block_index));
         if blk.ic == 0 {
             continue;
         }
         let last = cx.ir.p.inst(add(blk.i0, wrapping_sub(blk.ic, 1)));
-        let d = widen_u64(last.dest);
-        if contains64(in calls, d)
-            && flows_to_return(in cx, fi, bi, d, 0)
-            && !contains64(in tail, d) {
-            tail.push(d);
+        let dest = widen_u64(last.dest);
+        if contains64(in calls, dest)
+            && flows_to_return(in cx, fn_index, block_index, dest, 0)
+            && !contains64(in tail, dest) {
+            tail.push(dest);
         }
     }
     let mut used_elsewhere = false;
     let mut returns_resumed = true;
-    for bi in 0..row.bc {
-        let blk = cx.ir.p.block(add(row.b0, bi));
-        for ii in 0..blk.ic {
-            let ins = cx.ir.p.inst(add(blk.i0, ii));
+    for block_index in 0..row.bc {
+        let blk = cx.ir.p.block(add(row.b0, block_index));
+        for inst_index in 0..blk.ic {
+            let ins = cx.ir.p.inst(add(blk.i0, inst_index));
             let used = inst_operands(in cx, ins.op, ins.a);
             for k in 0..used.len() {
                 if contains64(in calls, u64_at(in used, k)) {
@@ -2151,7 +2184,7 @@ fn clause_mode(in cx: Cx, fi: u64, resume: u32) -> u8 eff [Fail[WErr]] {
             }
         }
         if blk.term == Term::Return {
-            if !resumed_value(in cx, fi, bi, cx.ir.word(blk.ta), in tail, 0) {
+            if !resumed_value(in cx, fn_index, block_index, cx.ir.word(blk.ta), in tail, 0) {
                 returns_resumed = false;
             }
         }
@@ -2164,14 +2197,14 @@ fn clause_mode(in cx: Cx, fi: u64, resume: u32) -> u8 eff [Fail[WErr]] {
 }
 
 // `terminator_operands`.
-fn term_operands(in cx: Cx, term: u8, ta: u64) -> ChunkSeq[u64] {
+fn term_operands(in cx: Cx, term: u8, term_args: u64) -> ChunkSeq[u64] {
     let mut out = ChunkSeq::new[u64]();
     if term == Term::Return || term == Term::Branch || term == Term::Match {
-        out.push(cx.ir.word(ta));
+        out.push(cx.ir.word(term_args));
     } else if term == Term::Jump {
-        let n = cx.ir.word(inc(ta));
-        for k in 0..n {
-            out.push(cx.ir.word(add(add(ta, 2), k)));
+        let n = cx.ir.word(inc(term_args));
+        for i in 0..n {
+            out.push(cx.ir.word(add(add(term_args, 2), i)));
         }
     }
     out

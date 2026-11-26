@@ -126,52 +126,52 @@ const N_FNS: u64 = 33;
 // The operation's `.vsys` name, its parameter count and the passing mode
 // of each parameter (0 in, 1 inout, 2 sink: `P_*` of plan.ves), as the
 // Bridge declares them; `op_index` checks a call against it.
-fn op_name(k: u64) -> Str {
-    if k == ENV_ARG_COUNT {
+fn op_name(op_code: u64) -> Str {
+    if op_code == ENV_ARG_COUNT {
         "vstd_env_arg_count"
-    } else if k == ENV_ARG {
+    } else if op_code == ENV_ARG {
         "vstd_env_arg"
-    } else if k == ENV_VAR {
+    } else if op_code == ENV_VAR {
         "vstd_env_var"
-    } else if k == ENV_VAR_COUNT {
+    } else if op_code == ENV_VAR_COUNT {
         "vstd_env_var_count"
-    } else if k == ENV_VAR_AT {
+    } else if op_code == ENV_VAR_AT {
         "vstd_env_var_at"
-    } else if k == ENV_CURRENT_DIR {
+    } else if op_code == ENV_CURRENT_DIR {
         "vstd_env_current_dir"
-    } else if k == ENV_OS {
+    } else if op_code == ENV_OS {
         "vstd_env_os"
-    } else if k == FS_OPEN {
+    } else if op_code == FS_OPEN {
         "vstd_fs_open"
-    } else if k == FS_FILE_LEN {
+    } else if op_code == FS_FILE_LEN {
         "vstd_fs_file_len"
-    } else if k == FS_READ {
+    } else if op_code == FS_READ {
         "vstd_fs_read"
-    } else if k == FS_WRITE {
+    } else if op_code == FS_WRITE {
         "vstd_fs_write"
-    } else if k == FS_SYNC {
+    } else if op_code == FS_SYNC {
         "vstd_fs_sync"
-    } else if k == FS_CLOSE {
+    } else if op_code == FS_CLOSE {
         "vstd_fs_close"
-    } else if k == FS_RENAME {
+    } else if op_code == FS_RENAME {
         "vstd_fs_rename"
-    } else if k == FS_REMOVE_FILE {
+    } else if op_code == FS_REMOVE_FILE {
         "vstd_fs_remove_file"
-    } else if k == FS_REMOVE_DIR {
+    } else if op_code == FS_REMOVE_DIR {
         "vstd_fs_remove_dir"
-    } else if k == FS_CREATE_DIR {
+    } else if op_code == FS_CREATE_DIR {
         "vstd_fs_create_dir"
-    } else if k == FS_METADATA {
+    } else if op_code == FS_METADATA {
         "vstd_fs_metadata"
-    } else if k == FS_SYNC_DIR {
+    } else if op_code == FS_SYNC_DIR {
         "vstd_fs_sync_dir"
-    } else if k == FS_PARENT_LEN {
+    } else if op_code == FS_PARENT_LEN {
         "vstd_fs_parent_len"
-    } else if k == FS_UNIQUE {
+    } else if op_code == FS_UNIQUE {
         "vstd_fs_unique"
-    } else if k == FS_READ_DIR {
+    } else if op_code == FS_READ_DIR {
         "vstd_fs_read_dir"
-    } else if k == FS_DIR_NEXT {
+    } else if op_code == FS_DIR_NEXT {
         "vstd_fs_dir_next"
     } else {
         "vstd_fs_dir_close"
@@ -179,28 +179,31 @@ fn op_name(k: u64) -> Str {
 }
 
 // Passing modes, one character per parameter: `i` in, `o` inout, `s` sink.
-fn op_passes(k: u64) -> Str {
-    if k == ENV_ARG_COUNT || k == ENV_VAR_COUNT || k == ENV_OS || k == FS_UNIQUE {
+fn op_passes(op_code: u64) -> Str {
+    if op_code == ENV_ARG_COUNT
+        || op_code == ENV_VAR_COUNT
+        || op_code == ENV_OS
+        || op_code == FS_UNIQUE {
         ""
-    } else if k == ENV_ARG || k == ENV_VAR || k == ENV_VAR_AT {
+    } else if op_code == ENV_ARG || op_code == ENV_VAR || op_code == ENV_VAR_AT {
         "io"
-    } else if k == ENV_CURRENT_DIR {
+    } else if op_code == ENV_CURRENT_DIR {
         "oo"
-    } else if k == FS_OPEN || k == FS_REMOVE_DIR || k == FS_CREATE_DIR {
+    } else if op_code == FS_OPEN || op_code == FS_REMOVE_DIR || op_code == FS_CREATE_DIR {
         "iio"
-    } else if k == FS_FILE_LEN || k == FS_PARENT_LEN {
+    } else if op_code == FS_FILE_LEN || op_code == FS_PARENT_LEN {
         "i"
-    } else if k == FS_READ || k == FS_DIR_NEXT {
+    } else if op_code == FS_READ || op_code == FS_DIR_NEXT {
         "ooo"
-    } else if k == FS_WRITE {
+    } else if op_code == FS_WRITE {
         "oio"
-    } else if k == FS_SYNC {
+    } else if op_code == FS_SYNC {
         "oo"
-    } else if k == FS_CLOSE || k == FS_DIR_CLOSE {
+    } else if op_code == FS_CLOSE || op_code == FS_DIR_CLOSE {
         "s"
-    } else if k == FS_RENAME {
+    } else if op_code == FS_RENAME {
         "iio"
-    } else if k == FS_REMOVE_FILE || k == FS_SYNC_DIR || k == FS_READ_DIR {
+    } else if op_code == FS_REMOVE_FILE || op_code == FS_SYNC_DIR || op_code == FS_READ_DIR {
         "io"
     } else {
         // FS_METADATA
@@ -209,31 +212,31 @@ fn op_passes(k: u64) -> Str {
 }
 
 // Whether parameter 0 is a handle (`FsFile` or `FsDir`).
-pub fn takes_handle(k: u64) -> bool {
-    k == FS_FILE_LEN
-        || k == FS_READ
-        || k == FS_WRITE
-        || k == FS_SYNC
-        || k == FS_CLOSE
-        || k == FS_DIR_NEXT
-        || k == FS_DIR_CLOSE
+pub fn takes_handle(op_code: u64) -> bool {
+    op_code == FS_FILE_LEN
+        || op_code == FS_READ
+        || op_code == FS_WRITE
+        || op_code == FS_SYNC
+        || op_code == FS_CLOSE
+        || op_code == FS_DIR_NEXT
+        || op_code == FS_DIR_CLOSE
 }
 
 // Whether the result is `Option[FsFile]` or `Option[FsDir]` (the shim
 // returns the handle, 0 for `None`).
-pub fn returns_handle(k: u64) -> bool {
-    k == FS_OPEN || k == FS_READ_DIR
+pub fn returns_handle(op_code: u64) -> bool {
+    op_code == FS_OPEN || op_code == FS_READ_DIR
 }
 
-// Whether operation `k` takes an `inout FsMeta` (parameter 2, which the
+// Whether operation `op_code` takes an `inout FsMeta` (parameter 2, which the
 // shim fills in place: the call site passes a fresh copy).
-pub fn takes_meta(k: u64) -> bool {
-    k == FS_METADATA
+pub fn takes_meta(op_code: u64) -> bool {
+    op_code == FS_METADATA
 }
 
-fn byte(in s: Slice[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(b) => b,
+fn byte(in bytes: Slice[u8], i: u64) -> u8 {
+    match bytes.try_get(i) {
+        Option::Some(value) => value,
         Option::None => 0,
     }
 }
@@ -245,8 +248,8 @@ pub fn op_index(in name: Slice[u8], lib: u8, in passes: ChunkSeq[u8]) -> u64 eff
     let mut n = name.len();
     for i in 0..name.len() {
         match name.try_get(i) {
-            Option::Some(b) => {
-                if b == 36 {
+            Option::Some(ch) => {
+                if ch == 36 {
                     n = i;
                     break;
                 }
@@ -259,8 +262,8 @@ pub fn op_index(in name: Slice[u8], lib: u8, in passes: ChunkSeq[u8]) -> u64 eff
     } else {
         (FS_OPEN, N_OPS)
     };
-    for k in lo..hi {
-        let want = op_name(k).as_bytes();
+    for op_code in lo..hi {
+        let want = op_name(op_code).as_bytes();
         if want.len() != n {
             continue;
         }
@@ -274,15 +277,15 @@ pub fn op_index(in name: Slice[u8], lib: u8, in passes: ChunkSeq[u8]) -> u64 eff
         if !same {
             continue;
         }
-        let ps = op_passes(k).as_bytes();
-        if ps.len() != passes.len() {
+        let want_passes = op_passes(op_code).as_bytes();
+        if want_passes.len() != passes.len() {
             Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 240));
         }
-        for i in 0..ps.len() {
-            let want = match ps.try_get(i) {
-                Option::Some(c) => if c == 105 {
+        for i in 0..want_passes.len() {
+            let want = match want_passes.try_get(i) {
+                Option::Some(pass_char) => if pass_char == 105 {
                     0
-                } else if c == 111 {
+                } else if pass_char == 111 {
                     1
                 } else {
                     2
@@ -290,7 +293,7 @@ pub fn op_index(in name: Slice[u8], lib: u8, in passes: ChunkSeq[u8]) -> u64 eff
                 Option::None => 0,
             };
             let have = match passes.try_get(i) {
-                Option::Some(p) => p,
+                Option::Some(pass) => pass,
                 Option::None => 9,
             };
             // A sink handle is passed like an in one.
@@ -299,7 +302,7 @@ pub fn op_index(in name: Slice[u8], lib: u8, in passes: ChunkSeq[u8]) -> u64 eff
                 Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 241));
             }
         }
-        return k;
+        return op_code;
     }
     Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 242))
 }
@@ -384,11 +387,11 @@ pub fn host_none() -> Host {
 }
 
 fn i32s(n: u64) -> ChunkSeq[ValTy] {
-    let mut v = ChunkSeq::new[ValTy]();
+    let mut tys = ChunkSeq::new[ValTy]();
     for _i in 0..n {
-        v.push(vt(VT_I32));
+        tys.push(vt(VT_I32));
     }
-    v
+    tys
 }
 
 fn no_vals() -> ChunkSeq[ValTy] {
@@ -402,27 +405,27 @@ fn imp(
     in name: Str,
     in params: ChunkSeq[ValTy]
 ) -> u32 eff [Fail[WErr]] {
-    let m = if module == 0 {
+    let module_name = if module == 0 {
         "wasi:cli/environment@0.2.0"
     } else if module == 1 {
         "wasi:filesystem/types@0.2.0"
     } else {
         "wasi:filesystem/preopens@0.2.0"
     };
-    b.import(in m.as_bytes(), in name.as_bytes(), in params, in no_vals())
+    b.import(in module_name.as_bytes(), in name.as_bytes(), in params, in no_vals())
 }
 
 // (i32 x n) with an `i64` at each position in `wide`.
-fn sig(n: u64, w1: u64, w2: u64) -> ChunkSeq[ValTy] {
-    let mut v = ChunkSeq::new[ValTy]();
+fn sig(n: u64, wide_a: u64, wide_b: u64) -> ChunkSeq[ValTy] {
+    let mut tys = ChunkSeq::new[ValTy]();
     for i in 0..n {
-        if i == w1 || i == w2 {
-            v.push(vt(VT_I64));
+        if i == wide_a || i == wide_b {
+            tys.push(vt(VT_I64));
         } else {
-            v.push(vt(VT_I32));
+            tys.push(vt(VT_I32));
         }
     }
-    v
+    tys
 }
 
 // The WASI kinds and errnos of `error-code` 0..36 (`access` .. `cross-device`).
@@ -520,64 +523,64 @@ fn zeros(n: u64) -> ChunkSeq[u8] {
 // Import what the libraries in `host` (`Plan.host` codes) need, before any
 // function is declared, and reserve their static memory.
 pub fn host_new(inout b: Builder, in codes: ChunkSeq[u8]) -> Host eff [Fail[WErr]] {
-    let mut h = host_none();
+    let mut host = host_none();
     for i in 0..codes.len() {
         match codes.try_get(i) {
-            Option::Some(c) => {
-                if c == HOST_ENV {
-                    h.env = true;
+            Option::Some(code) => {
+                if code == HOST_ENV {
+                    host.env = true;
                 }
-                if c == HOST_FS {
-                    h.fs = true;
+                if code == HOST_FS {
+                    host.fs = true;
                 }
             },
             Option::None => {},
         }
     }
-    if !h.env && !h.fs {
-        return h;
+    if !host.env && !host.fs {
+        return host;
     }
-    if h.env {
-        h.i_args = imp(inout b, 0, "get-arguments", in i32s(1));
-        h.i_environ = imp(inout b, 0, "get-environment", in i32s(1));
-        h.i_cwd = imp(inout b, 0, "initial-cwd", in i32s(1));
+    if host.env {
+        host.i_args = imp(inout b, 0, "get-arguments", in i32s(1));
+        host.i_environ = imp(inout b, 0, "get-environment", in i32s(1));
+        host.i_cwd = imp(inout b, 0, "initial-cwd", in i32s(1));
     }
-    if h.fs {
-        h.i_preopens = imp(inout b, 2, "get-directories", in i32s(1));
-        h.i_open_at = imp(inout b, 1, "[method]descriptor.open-at", in i32s(7));
-        h.i_read = imp(inout b, 1, "[method]descriptor.read", in sig(4, 1, 2));
-        h.i_write = imp(inout b, 1, "[method]descriptor.write", in sig(5, 3, 9));
-        h.i_stat = imp(inout b, 1, "[method]descriptor.stat", in i32s(2));
-        h.i_stat_at = imp(inout b, 1, "[method]descriptor.stat-at", in i32s(5));
-        h.i_sync = imp(inout b, 1, "[method]descriptor.sync", in i32s(2));
-        h.i_mkdir = imp(inout b, 1, "[method]descriptor.create-directory-at", in i32s(4));
-        h.i_rmdir = imp(inout b, 1, "[method]descriptor.remove-directory-at", in i32s(4));
-        h.i_unlink = imp(inout b, 1, "[method]descriptor.unlink-file-at", in i32s(4));
-        h.i_rename = imp(inout b, 1, "[method]descriptor.rename-at", in i32s(7));
-        h.i_readdir = imp(inout b, 1, "[method]descriptor.read-directory", in i32s(2));
-        h.i_read_entry = imp(
+    if host.fs {
+        host.i_preopens = imp(inout b, 2, "get-directories", in i32s(1));
+        host.i_open_at = imp(inout b, 1, "[method]descriptor.open-at", in i32s(7));
+        host.i_read = imp(inout b, 1, "[method]descriptor.read", in sig(4, 1, 2));
+        host.i_write = imp(inout b, 1, "[method]descriptor.write", in sig(5, 3, 9));
+        host.i_stat = imp(inout b, 1, "[method]descriptor.stat", in i32s(2));
+        host.i_stat_at = imp(inout b, 1, "[method]descriptor.stat-at", in i32s(5));
+        host.i_sync = imp(inout b, 1, "[method]descriptor.sync", in i32s(2));
+        host.i_mkdir = imp(inout b, 1, "[method]descriptor.create-directory-at", in i32s(4));
+        host.i_rmdir = imp(inout b, 1, "[method]descriptor.remove-directory-at", in i32s(4));
+        host.i_unlink = imp(inout b, 1, "[method]descriptor.unlink-file-at", in i32s(4));
+        host.i_rename = imp(inout b, 1, "[method]descriptor.rename-at", in i32s(7));
+        host.i_readdir = imp(inout b, 1, "[method]descriptor.read-directory", in i32s(2));
+        host.i_read_entry = imp(
             inout b,
             1,
             "[method]directory-entry-stream.read-directory-entry",
             in i32s(2)
         );
-        h.i_drop_desc = imp(inout b, 1, "[resource-drop]descriptor", in i32s(1));
-        h.i_drop_stream = imp(inout b, 1, "[resource-drop]directory-entry-stream", in i32s(1));
+        host.i_drop_desc = imp(inout b, 1, "[resource-drop]descriptor", in i32s(1));
+        host.i_drop_stream = imp(inout b, 1, "[resource-drop]directory-entry-stream", in i32s(1));
     }
-    h.scr = b.data(in zeros(112));
-    if h.fs {
+    host.scr = b.data(in zeros(112));
+    if host.fs {
         let mut misc = zeros(32);
         let ok = misc.try_set(24, 46);
-        h.misc = b.data(in misc);
-        h.errs = b.data(in error_table());
-        h.pre = b.data(in zeros(add(8, wrapping_mul(NPRE, 24))));
-        h.names = b.data(in zeros(NAMES));
-        h.slots = b.data(in zeros(wrapping_mul(NSLOT, SLOT)));
+        host.misc = b.data(in misc);
+        host.errs = b.data(in error_table());
+        host.pre = b.data(in zeros(add(8, wrapping_mul(NPRE, 24))));
+        host.names = b.data(in zeros(NAMES));
+        host.slots = b.data(in zeros(wrapping_mul(NSLOT, SLOT)));
     }
     for _i in 0..N_FNS {
-        h.fns.push(0);
+        host.fns.push(0);
     }
-    h
+    host
 }
 
 // The WIT world lines for the imported interfaces.
@@ -611,45 +614,45 @@ fn asm(params: u64) -> A {
 
 impl A {
     fn loc(inout self) -> u32 {
-        let x = self.next;
+        let local = self.next;
         self.next = wrapping_add(self.next, 1);
-        x
+        local
     }
 
-    fn get(inout self, x: u32) {
-        self.c.get(x);
+    fn get(inout self, local: u32) {
+        self.c.get(local);
     }
 
-    fn set(inout self, x: u32) {
-        self.c.set(x);
+    fn set(inout self, local: u32) {
+        self.c.set(local);
     }
 
-    fn k(inout self, v: i64) {
-        self.c.i64_const(v);
+    fn k(inout self, value: i64) {
+        self.c.i64_const(value);
     }
 
-    fn ku(inout self, v: u64) {
-        self.c.u64_const(v);
+    fn ku(inout self, value: u64) {
+        self.c.u64_const(value);
     }
 
-    fn op(inout self, o: u8) {
-        self.c.op(o);
+    fn op(inout self, opcode: u8) {
+        self.c.op(opcode);
     }
 
-    // local `x` = constant `v`
-    fn setk(inout self, x: u32, v: i64) {
-        self.c.i64_const(v);
-        self.c.set(x);
+    // local `local` = constant `value`
+    fn setk(inout self, local: u32, value: i64) {
+        self.c.i64_const(value);
+        self.c.set(local);
     }
 
-    // local `x` as an `i32` operand
-    fn w32(inout self, x: u32) {
-        self.c.get(x);
+    // local `local` as an `i32` operand
+    fn w32(inout self, local: u32) {
+        self.c.get(local);
         self.c.op(OP_I32_WRAP_I64);
     }
 
-    fn i32k(inout self, v: u64) {
-        self.c.i32_const(wrapping_i64(v));
+    fn i32k(inout self, value: u64) {
+        self.c.i32_const(wrapping_i64(value));
     }
 
     // an `i64` load of width `op` at `base + off` (a local base)
@@ -696,10 +699,10 @@ impl A {
         );
     }
 
-    // store local `v` at `base + off`
-    fn st(inout self, base: u32, off: u64, v: u32) {
+    // store local `value` at `base + off`
+    fn st(inout self, base: u32, off: u64, value: u32) {
         self.w32(base);
-        self.c.get(v);
+        self.c.get(value);
         self.c.mem(OP_I64_STORE, 3, off);
     }
 
@@ -721,65 +724,65 @@ impl A {
         self.c.i32_const(0);
     }
 
-    // store constant `v` at `base + off`
-    fn stk(inout self, base: u32, off: u64, v: i64) {
+    // store constant `value` at `base + off`
+    fn stk(inout self, base: u32, off: u64, value: i64) {
         self.w32(base);
-        self.c.i64_const(v);
+        self.c.i64_const(value);
         self.c.mem(OP_I64_STORE, 3, off);
     }
 
-    fn call(inout self, f: u32) {
-        self.c.call(f);
+    fn call(inout self, func: u32) {
+        self.c.call(func);
     }
 
-    fn open(inout self, o: u8) {
-        self.c.open(o);
+    fn open(inout self, opcode: u8) {
+        self.c.open(opcode);
     }
 
     fn end(inout self) {
         self.c.op(OP_END);
     }
 
-    fn br(inout self, d: u32) {
-        self.c.br(d);
+    fn br(inout self, depth: u32) {
+        self.c.br(depth);
     }
 
-    fn br_if(inout self, d: u32) {
-        self.c.br_if(d);
+    fn br_if(inout self, depth: u32) {
+        self.c.br_if(depth);
     }
 
     // `return local x`
-    fn ret(inout self, x: u32) {
-        self.c.get(x);
+    fn ret(inout self, local: u32) {
+        self.c.get(local);
         self.c.op(OP_RETURN);
     }
 
-    fn retk(inout self, v: i64) {
-        self.c.i64_const(v);
+    fn retk(inout self, value: i64) {
+        self.c.i64_const(value);
         self.c.op(OP_RETURN);
     }
 
     // x = x + local y / + constant
-    fn addk(inout self, x: u32, v: i64) {
-        self.c.get(x);
-        self.c.i64_const(v);
+    fn addk(inout self, local: u32, delta: i64) {
+        self.c.get(local);
+        self.c.i64_const(delta);
         self.c.op(OP_I64_ADD);
-        self.c.set(x);
+        self.c.set(local);
     }
 
     // local x = view's address / length
-    fn view_addr(inout self, view: u32, x: u32) {
+    fn view_addr(inout self, view: u32, dest: u32) {
         self.c.get(view);
         self.c.u64_const(MASK32);
         self.c.op(OP_I64_AND);
-        self.c.set(x);
+        self.c.set(dest);
     }
 
-    fn view_len(inout self, view: u32, x: u32) {
+    fn view_len(inout self, view: u32, dest: u32) {
         self.c.get(view);
         self.c.i64_const(32);
         self.c.op(OP_I64_SHR_U);
-        self.c.set(x);
+        self.c.set(dest);
     }
 
     // memory.copy(dst, src, n) of locals
@@ -798,49 +801,49 @@ impl A {
             counts.push(n);
             types.push(vt(VT_I64));
         }
-        let mut c = code_new();
-        c.extend(in self.c);
-        c.op(OP_END);
-        function_bytes(in counts, in types, in c)
+        let mut code = code_new();
+        code.extend(in self.c);
+        code.op(OP_END);
+        function_bytes(in counts, in types, in code)
     }
 }
 
 fn i64s(n: u64) -> ChunkSeq[ValTy] {
-    let mut v = ChunkSeq::new[ValTy]();
+    let mut tys = ChunkSeq::new[ValTy]();
     for _i in 0..n {
-        v.push(vt(VT_I64));
+        tys.push(vt(VT_I64));
     }
-    v
+    tys
 }
 
-fn params_of(k: u64) -> u64 {
-    if k == H_ERR || k == H_RESOLVE || k == H_KIND {
+fn params_of(op_code: u64) -> u64 {
+    if op_code == H_ERR || op_code == H_RESOLVE || op_code == H_KIND {
         1
-    } else if k == H_PREOPENS || k == H_SLOT {
+    } else if op_code == H_PREOPENS || op_code == H_SLOT {
         0
-    } else if k == H_COPYOUT {
+    } else if op_code == H_COPYOUT {
         3
-    } else if k >= H_PATH_OP {
+    } else if op_code >= H_PATH_OP {
         2
     } else {
-        op_passes(k).len()
+        op_passes(op_code).len()
     }
 }
 
-// The function of shim or helper `k`, declared and defined on first use.
-pub fn host_fn(inout b: Builder, inout h: Host, k: u64) -> u32 eff [Fail[WErr]] {
-    let cached = match h.fns.try_get(k) {
-        Option::Some(x) => x,
+// The function of shim or helper `op_code`, declared and defined on first use.
+pub fn host_fn(inout b: Builder, inout h: Host, op_code: u64) -> u32 eff [Fail[WErr]] {
+    let cached = match h.fns.try_get(op_code) {
+        Option::Some(entry) => entry,
         Option::None => 0,
     };
     if cached != 0 {
         return wrapping_sub(cached, 1);
     }
-    let np = params_of(k);
-    let idx = b.declare(in i64s(np), in i64s(1));
-    let ok = h.fns.try_set(k, inc32(idx));
-    let mut a = asm(np);
-    emit(inout b, inout h, inout a, k);
+    let n_params = params_of(op_code);
+    let idx = b.declare(in i64s(n_params), in i64s(1));
+    let ok = h.fns.try_set(op_code, inc32(idx));
+    let mut a = asm(n_params);
+    emit(inout b, inout h, inout a, op_code);
     b.define(idx, in a.body());
     idx
 }
@@ -849,27 +852,27 @@ fn inc32(x: u32) -> u32 {
     wrapping_add(x, 1)
 }
 
-// The body of `k`; it leaves the result on the stack (or returns).
-fn emit(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]] {
-    if k == H_ERR {
+// The body of `op_code`; it leaves the result on the stack (or returns).
+fn emit(inout b: Builder, inout h: Host, inout a: A, op_code: u64) eff [Fail[WErr]] {
+    if op_code == H_ERR {
         emit_err(inout a, in h);
-    } else if k == H_PREOPENS {
+    } else if op_code == H_PREOPENS {
         emit_preopens(inout a, in h);
-    } else if k == H_RESOLVE {
+    } else if op_code == H_RESOLVE {
         let pre = host_fn(inout b, inout h, H_PREOPENS);
         emit_resolve(inout a, in h, pre);
-    } else if k == H_SLOT {
+    } else if op_code == H_SLOT {
         emit_slot(inout a, in h);
-    } else if k == H_COPYOUT {
+    } else if op_code == H_COPYOUT {
         emit_copyout(inout a);
-    } else if k == H_KIND {
+    } else if op_code == H_KIND {
         emit_kind(inout a);
-    } else if k >= H_PATH_OP {
-        emit_path_op(inout b, inout h, inout a, k);
-    } else if k < FS_OPEN {
-        emit_env(inout b, inout h, inout a, k);
+    } else if op_code >= H_PATH_OP {
+        emit_path_op(inout b, inout h, inout a, op_code);
+    } else if op_code < FS_OPEN {
+        emit_env(inout b, inout h, inout a, op_code);
     } else {
-        emit_fs(inout b, inout h, inout a, k);
+        emit_fs(inout b, inout h, inout a, op_code);
     }
 }
 
@@ -1181,7 +1184,7 @@ fn absolute(
     a.set(pn);
 }
 
-fn relative(inout a: A, in h: Host, i: u32, cnt: u32, best: u32, s: u32, na: u32) {
+fn relative(inout a: A, in h: Host, i: u32, cnt: u32, best: u32, slot: u32, na: u32) {
     // relative: the preopen named ".", else the first
     a.setk(i, 0);
     a.open(OP_BLOCK);
@@ -1195,18 +1198,18 @@ fn relative(inout a: A, in h: Host, i: u32, cnt: u32, best: u32, s: u32, na: u32
     a.op(OP_I64_MUL);
     a.ku(add(h.pre, 8));
     a.op(OP_I64_ADD);
-    a.set(s);
-    a.ld(s, 16);
+    a.set(slot);
+    a.ld(slot, 16);
     a.k(1);
     a.op(OP_I64_EQ);
     a.open(OP_IF);
-    a.ld(s, 8);
+    a.ld(slot, 8);
     a.set(na);
     a.ld8(na, 0);
     a.k(46);
     a.op(OP_I64_EQ);
     a.open(OP_IF);
-    a.ld(s, 0);
+    a.ld(slot, 0);
     a.set(best);
     a.br(3);
     a.end();
@@ -1283,8 +1286,8 @@ fn strip(inout a: A, in h: Host, pa: u32, pn: u32, best: u32) {
 // eq = 1 when bytes x[0..n] == y[0..n] (locals), else 0.
 fn prefix_eq(inout a: A, x: u32, y: u32, n: u32, eq: u32) {
     let j = a.loc();
-    let p = a.loc();
-    let q = a.loc();
+    let lhs_at = a.loc();
+    let rhs_at = a.loc();
     a.setk(eq, 1);
     a.setk(j, 0);
     a.open(OP_BLOCK);
@@ -1296,13 +1299,13 @@ fn prefix_eq(inout a: A, x: u32, y: u32, n: u32, eq: u32) {
     a.get(x);
     a.get(j);
     a.op(OP_I64_ADD);
-    a.set(p);
+    a.set(lhs_at);
     a.get(y);
     a.get(j);
     a.op(OP_I64_ADD);
-    a.set(q);
-    a.ld8(p, 0);
-    a.ld8(q, 0);
+    a.set(rhs_at);
+    a.ld8(lhs_at, 0);
+    a.ld8(rhs_at, 0);
     a.op(OP_I64_NE);
     a.open(OP_IF);
     a.setk(eq, 0);
@@ -1323,7 +1326,7 @@ impl A {
 
 // H_SLOT() -> a free slot's address, or 0.
 fn emit_slot(inout a: A, in h: Host) {
-    let s = a.loc();
+    let slot = a.loc();
     let i = a.loc();
     a.setk(i, 0);
     a.open(OP_BLOCK);
@@ -1337,11 +1340,11 @@ fn emit_slot(inout a: A, in h: Host) {
     a.op(OP_I64_MUL);
     a.ku(h.slots);
     a.op(OP_I64_ADD);
-    a.set(s);
-    a.ld(s, 0);
+    a.set(slot);
+    a.ld(slot, 0);
     a.op(OP_I64_EQZ);
     a.open(OP_IF);
-    a.ret(s);
+    a.ret(slot);
     a.end();
     a.addk(i, 1);
     a.br(0);
@@ -1352,15 +1355,15 @@ fn emit_slot(inout a: A, in h: Host) {
 
 // H_COPYOUT(src, n, view) -> n: copy when it fits (the shim's `copy_out`).
 fn emit_copyout(inout a: A) {
-    let d = a.loc();
+    let dest_addr = a.loc();
     a.get(1);
     a.get(2);
     a.k(32);
     a.op(OP_I64_SHR_U);
     a.op(OP_I64_LE_U);
     a.open(OP_IF);
-    a.view_addr(2, d);
-    a.copy(d, 0, 1);
+    a.view_addr(2, dest_addr);
+    a.copy(dest_addr, 0, 1);
     a.end();
     a.get(1);
 }
@@ -1386,22 +1389,22 @@ fn emit_kind(inout a: A) {
     a.op(OP_SELECT);
 }
 
-// Store error word `v` (a local) through the `inout u64` cell `err`.
-fn put_err(inout a: A, err: u32, v: u32) {
-    a.st(err, 0, v);
+// Store error word `word_val` (a local) through the `inout u64` cell `err`.
+fn put_err(inout a: A, err: u32, word_val: u32) {
+    a.st(err, 0, word_val);
 }
 
-fn put_errk(inout a: A, err: u32, v: i64) {
-    a.stk(err, 0, v);
+fn put_errk(inout a: A, err: u32, word_val: i64) {
+    a.stk(err, 0, word_val);
 }
 
 // Raise-free failure: store the error word on the stack top... the word
 // of WASI code at static `addr` (one byte) through `err`.
 fn put_wasi_err(inout b: Builder, inout h: Host, inout a: A, err: u32, addr: u64) eff [Fail[WErr]] {
-    let f = host_fn(inout b, inout h, H_ERR);
+    let err_fn = host_fn(inout b, inout h, H_ERR);
     a.st_begin(err);
     a.lda(addr, OP_I64_LOAD8_U);
-    a.call(f);
+    a.call(err_fn);
     a.st_end(0);
 }
 
@@ -1426,9 +1429,9 @@ fn resolve(
     ra: u32,
     rn: u32
 ) eff [Fail[WErr]] {
-    let f = host_fn(inout b, inout h, H_RESOLVE);
+    let resolve_fn = host_fn(inout b, inout h, H_RESOLVE);
     a.get(path);
-    a.call(f);
+    a.call(resolve_fn);
     a.set(desc);
     a.get(desc);
     a.k(-2);
@@ -1452,11 +1455,11 @@ fn resolve(
     put_errk(inout a, err, 1 | (2 << 32));
     a.retk(fail);
     a.end();
-    let v = a.loc();
+    let rel_view = a.loc();
     a.lda(add(h.misc, 8), OP_I64_LOAD);
-    a.set(v);
-    a.view_addr(v, ra);
-    a.view_len(v, rn);
+    a.set(rel_view);
+    a.view_addr(rel_view, ra);
+    a.view_len(rel_view, rn);
 }
 
 // path ops `create-directory-at`, `remove-directory-at`, `unlink-file-at`
@@ -1465,7 +1468,7 @@ const P_MKDIR: u64 = 30;
 const P_RMDIR: u64 = 31;
 const P_UNLINK: u64 = 32;
 
-fn emit_path_op(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]] {
+fn emit_path_op(inout b: Builder, inout h: Host, inout a: A, op_code: u64) eff [Fail[WErr]] {
     let desc = a.loc();
     let ra = a.loc();
     let rn = a.loc();
@@ -1475,9 +1478,9 @@ fn emit_path_op(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[W
     a.w32(rn);
     a.i32k(h.scr);
     a.call(
-        if k == P_MKDIR {
+        if op_code == P_MKDIR {
             h.i_mkdir
-        } else if k == P_RMDIR {
+        } else if op_code == P_RMDIR {
             h.i_rmdir
         } else {
             h.i_unlink
@@ -1492,16 +1495,16 @@ fn emit_path_op(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[W
     a.k(0);
 }
 
-fn emit_env(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]] {
-    if k == ENV_OS {
+fn emit_env(inout b: Builder, inout h: Host, inout a: A, op_code: u64) eff [Fail[WErr]] {
+    if op_code == ENV_OS {
         a.k(0);
         return;
     }
     let lp = a.loc();
     let ln = a.loc();
-    let e = a.loc();
+    let entry = a.loc();
     let copy = host_fn(inout b, inout h, H_COPYOUT);
-    if k == ENV_CURRENT_DIR {
+    if op_code == ENV_CURRENT_DIR {
         // (buf cell, err cell)
         a.i32k(h.scr);
         a.call(h.i_cwd);
@@ -1518,18 +1521,18 @@ fn emit_env(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]
         a.call(copy);
         return;
     }
-    let args = k == ENV_ARG_COUNT || k == ENV_ARG;
+    let args = op_code == ENV_ARG_COUNT || op_code == ENV_ARG;
     a.i32k(h.scr);
     a.call(if args { h.i_args } else { h.i_environ });
     a.lda(h.scr, OP_I64_LOAD32_U);
     a.set(lp);
     a.lda(add(h.scr, 4), OP_I64_LOAD32_U);
     a.set(ln);
-    if k == ENV_ARG_COUNT || k == ENV_VAR_COUNT {
+    if op_code == ENV_ARG_COUNT || op_code == ENV_VAR_COUNT {
         a.get(ln);
         return;
     }
-    if k == ENV_ARG || k == ENV_VAR_AT {
+    if op_code == ENV_ARG || op_code == ENV_VAR_AT {
         // (index, buf cell)
         a.get(0);
         a.get(ln);
@@ -1542,10 +1545,10 @@ fn emit_env(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]
         a.k(if args { 8 } else { 16 });
         a.op(OP_I64_MUL);
         a.op(OP_I64_ADD);
-        a.set(e);
+        a.set(entry);
         if args {
-            a.ld32(e, 0);
-            a.ld32(e, 4);
+            a.ld32(entry, 0);
+            a.ld32(entry, 4);
             a.ld(1, 0);
             a.call(copy);
             return;
@@ -1553,13 +1556,13 @@ fn emit_env(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]
         // "key=value"
         let total = a.loc();
         let view = a.loc();
-        let d = a.loc();
-        let x = a.loc();
+        let dest = a.loc();
+        let src = a.loc();
         let n = a.loc();
-        a.ld32(e, 4);
+        a.ld32(entry, 4);
         a.k(1);
         a.op(OP_I64_ADD);
-        a.ld32(e, 12);
+        a.ld32(entry, 12);
         a.op(OP_I64_ADD);
         a.set(total);
         a.ld(1, 0);
@@ -1570,25 +1573,25 @@ fn emit_env(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]
         a.op(OP_I64_SHR_U);
         a.op(OP_I64_LE_U);
         a.open(OP_IF);
-        a.view_addr(view, d);
-        a.ld32(e, 0);
-        a.set(x);
-        a.ld32(e, 4);
+        a.view_addr(view, dest);
+        a.ld32(entry, 0);
+        a.set(src);
+        a.ld32(entry, 4);
         a.set(n);
-        a.copy(d, x, n);
-        a.get(d);
+        a.copy(dest, src, n);
+        a.get(dest);
         a.get(n);
         a.op(OP_I64_ADD);
-        a.set(d);
-        a.st_begin(d);
+        a.set(dest);
+        a.st_begin(dest);
         a.k(61);
         a.st8_end(0);
-        a.addk(d, 1);
-        a.ld32(e, 8);
-        a.set(x);
-        a.ld32(e, 12);
+        a.addk(dest, 1);
+        a.ld32(entry, 8);
+        a.set(src);
+        a.ld32(entry, 12);
         a.set(n);
-        a.copy(d, x, n);
+        a.copy(dest, src, n);
         a.end();
         a.get(total);
         return;
@@ -1597,9 +1600,9 @@ fn emit_env(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]
     let ka = a.loc();
     let kn = a.loc();
     let i = a.loc();
-    let s = a.loc();
+    let key_byte_at = a.loc();
     let eq = a.loc();
-    let x = a.loc();
+    let src = a.loc();
     a.view_addr(0, ka);
     a.view_len(0, kn);
     a.get(kn);
@@ -1617,11 +1620,11 @@ fn emit_env(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]
     a.get(ka);
     a.get(i);
     a.op(OP_I64_ADD);
-    a.set(s);
-    a.ld8(s, 0);
+    a.set(key_byte_at);
+    a.ld8(key_byte_at, 0);
     a.k(61);
     a.op(OP_I64_EQ);
-    a.ld8(s, 0);
+    a.ld8(key_byte_at, 0);
     a.op(OP_I64_EQZ);
     a.op(OP_I32_OR);
     a.open(OP_IF);
@@ -1643,20 +1646,20 @@ fn emit_env(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]
     a.k(16);
     a.op(OP_I64_MUL);
     a.op(OP_I64_ADD);
-    a.set(e);
-    a.ld32(e, 4);
+    a.set(entry);
+    a.ld32(entry, 4);
     a.get(kn);
     a.op(OP_I64_EQ);
     a.open(OP_IF);
-    a.ld32(e, 0);
-    a.set(x);
-    prefix_eq(inout a, x, ka, kn, eq);
+    a.ld32(entry, 0);
+    a.set(src);
+    prefix_eq(inout a, src, ka, kn, eq);
     a.get(eq);
     a.op(OP_I64_EQZ);
     a.op(OP_I32_EQZ);
     a.open(OP_IF);
-    a.ld32(e, 8);
-    a.ld32(e, 12);
+    a.ld32(entry, 8);
+    a.ld32(entry, 12);
     a.ld(1, 0);
     a.call(copy);
     a.op(OP_RETURN);
@@ -1669,20 +1672,20 @@ fn emit_env(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]
     a.k(-1);
 }
 
-// The descriptor of handle (slot) `s` into local `d`.
-fn slot_desc(inout a: A, s: u32, off: u64, d: u32) {
-    a.ld(s, off);
+// The descriptor of handle (slot) `slot` into local `desc`.
+fn slot_desc(inout a: A, slot: u32, off: u64, desc: u32) {
+    a.ld(slot, off);
     a.k(1);
     a.op(OP_I64_SUB);
-    a.set(d);
+    a.set(desc);
 }
 
-fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]] {
-    if k == FS_REMOVE_FILE || k == FS_REMOVE_DIR || k == FS_CREATE_DIR {
+fn emit_fs(inout b: Builder, inout h: Host, inout a: A, op_code: u64) eff [Fail[WErr]] {
+    if op_code == FS_REMOVE_FILE || op_code == FS_REMOVE_DIR || op_code == FS_CREATE_DIR {
         let path: u32 = 0;
         let flag: u32 = 1;
-        let err: u32 = if k == FS_REMOVE_FILE { 1 } else { 2 };
-        if k == FS_REMOVE_DIR {
+        let err: u32 = if op_code == FS_REMOVE_FILE { 1 } else { 2 };
+        if op_code == FS_REMOVE_DIR {
             a.get(flag);
             a.op(OP_I64_EQZ);
             a.op(OP_I32_EQZ);
@@ -1691,7 +1694,7 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
             a.retk(1);
             a.end();
         }
-        if k == FS_CREATE_DIR {
+        if op_code == FS_CREATE_DIR {
             a.get(flag);
             a.op(OP_I64_EQZ);
             a.op(OP_I32_EQZ);
@@ -1699,12 +1702,12 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
             create_dir_all(inout b, inout h, inout a);
             a.end();
         }
-        let f = host_fn(
+        let path_op_fn = host_fn(
             inout b,
             inout h,
-            if k == FS_REMOVE_FILE {
+            if op_code == FS_REMOVE_FILE {
                 P_UNLINK
-            } else if k == FS_REMOVE_DIR {
+            } else if op_code == FS_REMOVE_DIR {
                 P_RMDIR
             } else {
                 P_MKDIR
@@ -1712,13 +1715,13 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
         );
         a.get(path);
         a.get(err);
-        a.call(f);
+        a.call(path_op_fn);
         return;
     }
-    if k == FS_PARENT_LEN {
+    if op_code == FS_PARENT_LEN {
         let pa = a.loc();
         let i = a.loc();
-        let s = a.loc();
+        let byte_ptr = a.loc();
         a.view_addr(0, pa);
         a.view_len(0, i);
         a.open(OP_BLOCK);
@@ -1731,8 +1734,8 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
         a.op(OP_I64_ADD);
         a.k(1);
         a.op(OP_I64_SUB);
-        a.set(s);
-        a.ld8(s, 0);
+        a.set(byte_ptr);
+        a.ld8(byte_ptr, 0);
         a.k(47);
         a.op(OP_I64_EQ);
         a.open(OP_IF);
@@ -1745,16 +1748,16 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
         a.k(0);
         return;
     }
-    if k == FS_UNIQUE {
-        let v = a.loc();
+    if op_code == FS_UNIQUE {
+        let counter = a.loc();
         a.lda(add(h.misc, 16), OP_I64_LOAD);
-        a.set(v);
+        a.set(counter);
         a.sta_begin();
-        a.get(v);
+        a.get(counter);
         a.k(1);
         a.op(OP_I64_ADD);
         a.st_end(add(h.misc, 16));
-        a.get(v);
+        a.get(counter);
         a.ku(MASK32);
         a.op(OP_I64_AND);
         return;
@@ -1762,16 +1765,16 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
     let desc = a.loc();
     let ra = a.loc();
     let rn = a.loc();
-    if k == FS_OPEN || k == FS_READ_DIR || k == FS_SYNC_DIR {
+    if op_code == FS_OPEN || op_code == FS_READ_DIR || op_code == FS_SYNC_DIR {
         // (path, mode, err) / (path, err)
-        let err: u32 = if k == FS_OPEN { 2 } else { 1 };
-        let o = a.loc();
-        let d = a.loc();
-        let ap = a.loc();
-        a.setk(ap, 0);
-        a.setk(o, 2);
-        a.setk(d, 1);
-        if k == FS_OPEN {
+        let err: u32 = if op_code == FS_OPEN { 2 } else { 1 };
+        let open_flags = a.loc();
+        let desc_flags = a.loc();
+        let append_mode = a.loc();
+        a.setk(append_mode, 0);
+        a.setk(open_flags, 2);
+        a.setk(desc_flags, 1);
+        if op_code == FS_OPEN {
             // modes: 0 read, 1 truncate, 2 create new, 3 append
             a.get(1);
             a.k(3);
@@ -1780,12 +1783,12 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
             put_errk(inout a, err, 7);
             a.retk(0);
             a.end();
-            a.setk(o, 0);
+            a.setk(open_flags, 0);
             a.get(1);
             a.op(OP_I64_EQZ);
             a.op(OP_I32_EQZ);
             a.open(OP_IF);
-            a.setk(d, 2);
+            a.setk(desc_flags, 2);
             a.k(9);
             a.k(5);
             a.k(1);
@@ -1797,22 +1800,22 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
             a.k(1);
             a.op(OP_I64_EQ);
             a.op(OP_SELECT);
-            a.set(o);
+            a.set(open_flags);
             a.get(1);
             a.k(3);
             a.op(OP_I64_EQ);
             a.op(OP_I64_EXTEND_I32_U);
-            a.set(ap);
+            a.set(append_mode);
             a.end();
         }
-        let fail: i64 = if k == FS_SYNC_DIR { 1 } else { 0 };
+        let fail: i64 = if op_code == FS_SYNC_DIR { 1 } else { 0 };
         resolve(inout b, inout h, inout a, 0, err, fail, desc, ra, rn);
         a.w32(desc);
         a.i32k(1);
         a.w32(ra);
         a.w32(rn);
-        a.w32(o);
-        a.w32(d);
+        a.w32(open_flags);
+        a.w32(desc_flags);
         a.i32k(h.scr);
         a.call(h.i_open_at);
         failed(inout a, in h);
@@ -1820,16 +1823,16 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
         put_wasi_err(inout b, inout h, inout a, err, add(h.scr, 4));
         a.retk(fail);
         a.end();
-        let nd = a.loc();
+        let new_desc = a.loc();
         a.lda(add(h.scr, 4), OP_I64_LOAD32_U);
-        a.set(nd);
-        if k == FS_SYNC_DIR {
+        a.set(new_desc);
+        if op_code == FS_SYNC_DIR {
             // Flush the directory entries (a rename into it), then release
             // the descriptor on both paths.
-            a.w32(nd);
+            a.w32(new_desc);
             a.i32k(h.scr);
             a.call(h.i_sync);
-            a.w32(nd);
+            a.w32(new_desc);
             a.call(h.i_drop_desc);
             failed(inout a, in h);
             a.open(OP_IF);
@@ -1840,63 +1843,63 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
             a.k(0);
             return;
         }
-        let st = a.loc();
-        if k == FS_READ_DIR {
-            a.w32(nd);
+        let stream = a.loc();
+        if op_code == FS_READ_DIR {
+            a.w32(new_desc);
             a.i32k(h.scr);
             a.call(h.i_readdir);
             failed(inout a, in h);
             a.open(OP_IF);
             put_wasi_err(inout b, inout h, inout a, err, add(h.scr, 4));
-            a.w32(nd);
+            a.w32(new_desc);
             a.call(h.i_drop_desc);
             a.retk(0);
             a.end();
             a.lda(add(h.scr, 4), OP_I64_LOAD32_U);
-            a.set(st);
+            a.set(stream);
         }
-        let s = a.loc();
+        let slot_addr = a.loc();
         let slot = host_fn(inout b, inout h, H_SLOT);
         a.call(slot);
-        a.set(s);
-        a.get(s);
+        a.set(slot_addr);
+        a.get(slot_addr);
         a.op(OP_I64_EQZ);
         a.open(OP_IF);
-        if k == FS_READ_DIR {
-            a.w32(st);
+        if op_code == FS_READ_DIR {
+            a.w32(stream);
             a.call(h.i_drop_stream);
         }
-        a.w32(nd);
+        a.w32(new_desc);
         a.call(h.i_drop_desc);
         put_errk(inout a, err, 13 | (24 << 32));
         a.retk(0);
         a.end();
-        if k == FS_OPEN {
-            a.st_begin(s);
-            a.get(nd);
+        if op_code == FS_OPEN {
+            a.st_begin(slot_addr);
+            a.get(new_desc);
             a.k(1);
             a.op(OP_I64_ADD);
             a.st_end(0);
-            a.stk(s, 8, 0);
-            a.st(s, 16, ap);
+            a.stk(slot_addr, 8, 0);
+            a.st(slot_addr, 16, append_mode);
         } else {
-            a.st_begin(s);
-            a.get(st);
+            a.st_begin(slot_addr);
+            a.get(stream);
             a.k(1);
             a.op(OP_I64_ADD);
             a.st_end(0);
-            a.stk(s, 8, 0);
-            a.st_begin(s);
-            a.get(nd);
+            a.stk(slot_addr, 8, 0);
+            a.st_begin(slot_addr);
+            a.get(new_desc);
             a.k(1);
             a.op(OP_I64_ADD);
             a.st_end(32);
         }
         put_errk(inout a, err, 0);
-        a.get(s);
+        a.get(slot_addr);
         return;
     }
-    if k == FS_FILE_LEN {
+    if op_code == FS_FILE_LEN {
         slot_desc(inout a, 0, 0, desc);
         a.w32(desc);
         a.i32k(h.scr);
@@ -1908,17 +1911,17 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
         a.lda(add(h.scr, 24), OP_I64_LOAD);
         return;
     }
-    if k == FS_CLOSE || k == FS_DIR_CLOSE {
+    if op_code == FS_CLOSE || op_code == FS_DIR_CLOSE {
         slot_desc(inout a, 0, 0, desc);
         a.w32(desc);
         a.call(
-            if k == FS_CLOSE {
+            if op_code == FS_CLOSE {
                 h.i_drop_desc
             } else {
                 h.i_drop_stream
             }
         );
-        if k == FS_DIR_CLOSE {
+        if op_code == FS_DIR_CLOSE {
             slot_desc(inout a, 0, 32, desc);
             a.w32(desc);
             a.call(h.i_drop_desc);
@@ -1927,7 +1930,7 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
         a.k(0);
         return;
     }
-    if k == FS_SYNC {
+    if op_code == FS_SYNC {
         slot_desc(inout a, 0, 0, desc);
         a.w32(desc);
         a.i32k(h.scr);
@@ -1941,19 +1944,19 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
         a.k(0);
         return;
     }
-    if k == FS_READ {
+    if op_code == FS_READ {
         // (file, buf cell, err cell)
         let va = a.loc();
         let vn = a.loc();
         let done = a.loc();
         let lp = a.loc();
         let ll = a.loc();
-        let t = a.loc();
+        let scratch = a.loc();
         slot_desc(inout a, 0, 0, desc);
         a.ld(1, 0);
-        a.set(t);
-        a.view_addr(t, va);
-        a.view_len(t, vn);
+        a.set(scratch);
+        a.view_addr(scratch, va);
+        a.view_len(scratch, vn);
         a.setk(done, 0);
         a.open(OP_BLOCK);
         a.open(OP_LOOP);
@@ -1985,18 +1988,18 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
         a.get(vn);
         a.get(done);
         a.op(OP_I64_SUB);
-        a.set(t);
-        a.get(t);
+        a.set(scratch);
+        a.get(scratch);
         a.get(ll);
-        a.get(t);
+        a.get(scratch);
         a.op(OP_I64_LT_U);
         a.op(OP_SELECT);
         a.set(ll);
         a.get(va);
         a.get(done);
         a.op(OP_I64_ADD);
-        a.set(t);
-        a.copy(t, lp, ll);
+        a.set(scratch);
+        a.copy(scratch, lp, ll);
         a.get(done);
         a.get(ll);
         a.op(OP_I64_ADD);
@@ -2013,7 +2016,7 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
         a.get(done);
         return;
     }
-    if k == FS_WRITE {
+    if op_code == FS_WRITE {
         // (file, buf view, err cell)
         let va = a.loc();
         let vn = a.loc();
@@ -2092,7 +2095,7 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
         a.k(0);
         return;
     }
-    if k == FS_RENAME {
+    if op_code == FS_RENAME {
         // (from, to, err)
         let d2 = a.loc();
         let ra2 = a.loc();
@@ -2116,7 +2119,7 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
         a.k(0);
         return;
     }
-    if k == FS_METADATA {
+    if op_code == FS_METADATA {
         // (path, follow, meta block, err cell)
         let kind = host_fn(inout b, inout h, H_KIND);
         resolve(inout b, inout h, inout a, 0, 3, 1, desc, ra, rn);
@@ -2161,7 +2164,7 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
     let kind = host_fn(inout b, inout h, H_KIND);
     let nl = a.loc();
     let np = a.loc();
-    let t = a.loc();
+    let name_dst = a.loc();
     let view = a.loc();
     a.ld(0, 8);
     a.op(OP_I64_EQZ);
@@ -2192,8 +2195,8 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
     a.get(0);
     a.k(48);
     a.op(OP_I64_ADD);
-    a.set(t);
-    a.copy(t, np, nl);
+    a.set(name_dst);
+    a.copy(name_dst, np, nl);
     a.st(0, 16, nl);
     a.st_begin(0);
     a.lda(add(h.scr, 8), OP_I64_LOAD8_U);
@@ -2211,12 +2214,12 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
     a.op(OP_I64_SHR_U);
     a.op(OP_I64_LE_U);
     a.open(OP_IF);
-    a.view_addr(view, t);
+    a.view_addr(view, name_dst);
     a.get(0);
     a.k(48);
     a.op(OP_I64_ADD);
     a.set(np);
-    a.copy(t, np, nl);
+    a.copy(name_dst, np, nl);
     a.stk(0, 8, 0);
     a.st_begin(2);
     a.ld(0, 24);
@@ -2243,7 +2246,7 @@ fn create_dir_all(inout b: Builder, inout h: Host, inout a: A) eff [Fail[WErr]] 
     let ra = a.loc();
     let rn = a.loc();
     let j = a.loc();
-    let s = a.loc();
+    let byte_ptr = a.loc();
     resolve(inout b, inout h, inout a, 0, 2, 1, desc, ra, rn);
     a.setk(j, 1);
     a.open(OP_BLOCK);
@@ -2255,7 +2258,7 @@ fn create_dir_all(inout b: Builder, inout h: Host, inout a: A) eff [Fail[WErr]] 
     a.get(ra);
     a.get(j);
     a.op(OP_I64_ADD);
-    a.set(s);
+    a.set(byte_ptr);
     // j == rn || ra[j] == '/'
     a.get(j);
     a.get(rn);
@@ -2263,7 +2266,7 @@ fn create_dir_all(inout b: Builder, inout h: Host, inout a: A) eff [Fail[WErr]] 
     a.open_i32();
     a.c.i32_const(1);
     a.op(OP_ELSE);
-    a.ld8(s, 0);
+    a.ld8(byte_ptr, 0);
     a.k(47);
     a.op(OP_I64_EQ);
     a.end();

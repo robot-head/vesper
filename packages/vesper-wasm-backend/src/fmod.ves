@@ -45,26 +45,26 @@ fn fmod_zero_times_x(inout c: Code) {
     c.op(OP_RETURN);
 }
 
-fn fmod_exp(inout c: Code, v: u32, e: u32) {
-    c.get(v);
+fn fmod_exp(inout c: Code, bits_local: u32, exp_local: u32) {
+    c.get(bits_local);
     c.i64_const(52);
     c.op(OP_I64_SHR_U);
     c.i64_const(2047);
     c.op(OP_I64_AND);
-    c.set(e);
+    c.set(exp_local);
 }
 
-fn fmod_shl1(inout c: Code, v: u32) {
-    c.get(v);
+fn fmod_shl1(inout c: Code, bits_local: u32) {
+    c.get(bits_local);
     c.i64_const(1);
     c.op(OP_I64_SHL);
 }
 
-fn fmod_normalize(inout c: Code, v: u32, e: u32) {
-    c.get(e);
+fn fmod_normalize(inout c: Code, bits_local: u32, exp_local: u32) {
+    c.get(exp_local);
     c.op(OP_I64_EQZ);
     c.open(OP_IF);
-    c.get(v);
+    c.get(bits_local);
     c.i64_const(12);
     c.op(OP_I64_SHL);
     c.op(OP_I64_CLZ);
@@ -72,20 +72,20 @@ fn fmod_normalize(inout c: Code, v: u32, e: u32) {
     c.i64_const(0);
     c.get(6);
     c.op(OP_I64_SUB);
-    c.set(e);
-    c.get(v);
+    c.set(exp_local);
+    c.get(bits_local);
     c.get(6);
     c.i64_const(1);
     c.op(OP_I64_ADD);
     c.op(OP_I64_SHL);
-    c.set(v);
+    c.set(bits_local);
     c.op(OP_ELSE);
-    c.get(v);
+    c.get(bits_local);
     c.i64_const(FM_MANT);
     c.op(OP_I64_AND);
     c.i64_const(FM_HIDDEN);
     c.op(OP_I64_OR);
-    c.set(v);
+    c.set(bits_local);
     c.op(OP_END);
 }
 
