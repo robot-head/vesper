@@ -29,15 +29,213 @@ impl Abi for crate::port::Hash32 {
     }
 }
 
+impl Abi for crate::port::ProofFail {
+    const WORDS: usize = 4;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.code, &mut out[0..]);
+        Abi::put(&self.resource, &mut out[1..]);
+        Abi::put(&self.fmt, &mut out[2..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        crate::port::ProofFail { code: Abi::get(&words[0..]), resource: Abi::get(&words[1..]), fmt: Abi::get(&words[2..]) }
+    }
+}
+
+impl Abi for crate::port::ProofLimits {
+    const WORDS: usize = 6;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.max_nodes, &mut out[0..]);
+        Abi::put(&self.max_text_bytes, &mut out[1..]);
+        Abi::put(&self.max_depth, &mut out[2..]);
+        Abi::put(&self.max_metadata_bytes, &mut out[3..]);
+        Abi::put(&self.max_lean_bytes, &mut out[4..]);
+        Abi::put(&self.max_work, &mut out[5..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        crate::port::ProofLimits { max_nodes: Abi::get(&words[0..]), max_text_bytes: Abi::get(&words[1..]), max_depth: Abi::get(&words[2..]), max_metadata_bytes: Abi::get(&words[3..]), max_lean_bytes: Abi::get(&words[4..]), max_work: Abi::get(&words[5..]) }
+    }
+}
+
+/// Owned handle of a Vesper `Model` value: its words, which own the Vesper
+/// allocations they point to. Dropping it calls `vesper_fmt_Model_drop`.
+pub struct Model {
+    words: [u64; 9],
+}
+
+impl Model {
+    /// # Safety
+    /// `words` must hold a `Model` value of this library that the caller owns.
+    unsafe fn from_words(words: &[u64]) -> Self {
+        let mut owned = [0u64; 9];
+        owned.copy_from_slice(&words[..9]);
+        Self { words: owned }
+    }
+
+    /// A borrowed view of the value.
+    pub fn as_ref(&self) -> ModelRef<'_> {
+        ModelRef { words: &self.words }
+    }
+}
+
+impl Drop for Model {
+    fn drop(&mut self) {
+        // SAFETY: the handle owns its words and is dropped once.
+        unsafe { vesper_fmt_Model_drop(self.words.as_mut_ptr()) };
+    }
+}
+
+impl core::fmt::Debug for Model {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Model { .. }")
+    }
+}
+
+// SAFETY: the handle owns its Vesper allocations exclusively (no Vesper
+// code keeps a reference to them), and they are plain heap memory.
+unsafe impl Send for Model {}
+// SAFETY: shared access only reads the words and the memory they own.
+unsafe impl Sync for Model {}
+
+/// A borrowed view of a Vesper `Model` value, read in place.
+#[derive(Clone, Copy)]
+pub struct ModelRef<'a> {
+    words: &'a [u64],
+}
+
+impl<'a> ModelRef<'a> {
+    pub fn kind(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[0]) }
+    }
+    pub fn arg(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[1]) }
+    }
+    pub fn text(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[2]) }
+    }
+    pub fn text_ends(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[3]) }
+    }
+    pub fn comment_text(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[4]) }
+    }
+    pub fn node_count(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[5..])
+    }
+    pub fn text_bytes(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[6..])
+    }
+    pub fn depth(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[7..])
+    }
+    pub fn comments(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[8..])
+    }
+}
+
+/// Owned handle of a Vesper `Verified` value: its words, which own the Vesper
+/// allocations they point to. Dropping it calls `vesper_fmt_Verified_drop`.
+pub struct Verified {
+    words: [u64; 23],
+}
+
+impl Verified {
+    /// # Safety
+    /// `words` must hold a `Verified` value of this library that the caller owns.
+    unsafe fn from_words(words: &[u64]) -> Self {
+        let mut owned = [0u64; 23];
+        owned.copy_from_slice(&words[..23]);
+        Self { words: owned }
+    }
+
+    /// A borrowed view of the value.
+    pub fn as_ref(&self) -> VerifiedRef<'_> {
+        VerifiedRef { words: &self.words }
+    }
+}
+
+impl Drop for Verified {
+    fn drop(&mut self) {
+        // SAFETY: the handle owns its words and is dropped once.
+        unsafe { vesper_fmt_Verified_drop(self.words.as_mut_ptr()) };
+    }
+}
+
+impl core::fmt::Debug for Verified {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Verified { .. }")
+    }
+}
+
+// SAFETY: the handle owns its Vesper allocations exclusively (no Vesper
+// code keeps a reference to them), and they are plain heap memory.
+unsafe impl Send for Verified {}
+// SAFETY: shared access only reads the words and the memory they own.
+unsafe impl Sync for Verified {}
+
+/// A borrowed view of a Vesper `Verified` value, read in place.
+#[derive(Clone, Copy)]
+pub struct VerifiedRef<'a> {
+    words: &'a [u64],
+}
+
+impl<'a> VerifiedRef<'a> {
+    pub fn fail(&self) -> crate::port::ProofFail {
+        let w: &'a [u64] = self.words;
+        <crate::port::ProofFail as Abi>::get(&w[0..])
+    }
+    pub fn output(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[4]) }
+    }
+    pub fn changed(&self) -> bool {
+        let w: &'a [u64] = self.words;
+        <bool as Abi>::get(&w[5..])
+    }
+    pub fn source_hash(&self) -> crate::port::Hash32 {
+        let w: &'a [u64] = self.words;
+        <crate::port::Hash32 as Abi>::get(&w[6..])
+    }
+    pub fn output_hash(&self) -> crate::port::Hash32 {
+        let w: &'a [u64] = self.words;
+        <crate::port::Hash32 as Abi>::get(&w[10..])
+    }
+    pub fn model(&self) -> ModelRef<'a> {
+        let w: &'a [u64] = self.words;
+        ModelRef { words: &w[14..23] }
+    }
+}
+
+const _: () = assert!(<bool as Abi>::WORDS == 1);
 const _: () = assert!(<crate::port::FmtFail as Abi>::WORDS == 2);
 const _: () = assert!(<crate::port::Hash32 as Abi>::WORDS == 4);
+const _: () = assert!(<crate::port::ProofFail as Abi>::WORDS == 4);
+const _: () = assert!(<crate::port::ProofLimits as Abi>::WORDS == 6);
+const _: () = assert!(<u64 as Abi>::WORDS == 1);
 
 unsafe extern "C" {
     fn vesper_fmt_seq_new(capacity: i64, stride: i64) -> i64;
     fn vesper_fmt_seq_free(seq: i64) -> i64;
     fn vesper_fmt_live_allocations() -> i64;
+    fn vesper_fmt_Model_drop(value: *mut u64) -> i64;
+    fn vesper_fmt_Verified_drop(value: *mut u64) -> i64;
     fn vesper_fmt_blake3(result: *mut u64, data: *mut u64) -> i64;
+    fn vesper_fmt_fail_code(f: *mut u64) -> i64;
+    fn vesper_fmt_fail_offset(f: *mut u64) -> i64;
     fn vesper_fmt_format(source: *mut u64, max_input_bytes: i64, max_output_bytes: i64, max_tokens: i64, max_doc_nodes: i64, max_depth: i64, max_work: i64, fail: *mut u64) -> i64;
+    fn vesper_fmt_format_for_verification(result: *mut u64, source: *mut u64) -> i64;
+    fn vesper_fmt_hash_hex(h: *mut u64) -> i64;
+    fn vesper_fmt_no_proof_fail(result: *mut u64) -> i64;
+    fn vesper_fmt_proof_limits_default(result: *mut u64) -> i64;
+    fn vesper_fmt_proof_limits_valid(l: *mut u64) -> i64;
 }
 
 /// The sequence runtime of the Vesper library `fmt`.
@@ -62,6 +260,28 @@ pub fn blake3(data: &str) -> crate::port::Hash32 {
     <crate::port::Hash32 as Abi>::get(&result[0..])
 }
 
+/// Calls `fail_code` of the Vesper library `fmt` (`vesper_fmt_fail_code`).
+pub fn fail_code(f: crate::port::FmtFail) -> u64 {
+    let mut arg_f = [0u64; <crate::port::FmtFail as Abi>::WORDS];
+    Abi::put(&f, &mut arg_f);
+    // SAFETY: `vesper_fmt_fail_code` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_fmt_fail_code(arg_f.as_mut_ptr()) };
+    raw as u64
+}
+
+/// Calls `fail_offset` of the Vesper library `fmt` (`vesper_fmt_fail_offset`).
+pub fn fail_offset(f: crate::port::FmtFail) -> u64 {
+    let mut arg_f = [0u64; <crate::port::FmtFail as Abi>::WORDS];
+    Abi::put(&f, &mut arg_f);
+    // SAFETY: `vesper_fmt_fail_offset` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_fmt_fail_offset(arg_f.as_mut_ptr()) };
+    raw as u64
+}
+
 /// Calls `format` of the Vesper library `fmt` (`vesper_fmt_format`).
 pub fn format(source: &str, max_input_bytes: u64, max_output_bytes: u64, max_tokens: u64, max_doc_nodes: u64, max_depth: u64, max_work: u64) -> Result<Vec<u8>, crate::port::FmtFail> {
     let mut fail = [0u64; 3];
@@ -74,4 +294,56 @@ pub fn format(source: &str, max_input_bytes: u64, max_output_bytes: u64, max_tok
         1 => Err(<crate::port::FmtFail as Abi>::get(&fail[1..])),
         status => panic!("invalid failure status {status} from vesper_fmt_format"),
     }
+}
+
+/// Calls `format_for_verification` of the Vesper library `fmt` (`vesper_fmt_format_for_verification`).
+pub fn format_for_verification(source: &str) -> Verified {
+    let mut result = [0u64; 23];
+    // SAFETY: `vesper_fmt_format_for_verification` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_str(source, |view_source| unsafe { vesper_fmt_format_for_verification(result.as_mut_ptr(), view_source) });
+    unsafe { Verified::from_words(&result[0..]) }
+}
+
+/// Calls `hash_hex` of the Vesper library `fmt` (`vesper_fmt_hash_hex`).
+pub fn hash_hex(h: crate::port::Hash32) -> Vec<u8> {
+    let mut arg_h = [0u64; <crate::port::Hash32 as Abi>::WORDS];
+    Abi::put(&h, &mut arg_h);
+    // SAFETY: `vesper_fmt_hash_hex` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_fmt_hash_hex(arg_h.as_mut_ptr()) };
+    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
+}
+
+/// Calls `no_proof_fail` of the Vesper library `fmt` (`vesper_fmt_no_proof_fail`).
+pub fn no_proof_fail() -> crate::port::ProofFail {
+    let mut result = [0u64; 4];
+    // SAFETY: `vesper_fmt_no_proof_fail` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_fmt_no_proof_fail(result.as_mut_ptr()) };
+    <crate::port::ProofFail as Abi>::get(&result[0..])
+}
+
+/// Calls `proof_limits_default` of the Vesper library `fmt` (`vesper_fmt_proof_limits_default`).
+pub fn proof_limits_default() -> crate::port::ProofLimits {
+    let mut result = [0u64; 6];
+    // SAFETY: `vesper_fmt_proof_limits_default` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_fmt_proof_limits_default(result.as_mut_ptr()) };
+    <crate::port::ProofLimits as Abi>::get(&result[0..])
+}
+
+/// Calls `proof_limits_valid` of the Vesper library `fmt` (`vesper_fmt_proof_limits_valid`).
+pub fn proof_limits_valid(l: crate::port::ProofLimits) -> bool {
+    let mut arg_l = [0u64; <crate::port::ProofLimits as Abi>::WORDS];
+    Abi::put(&l, &mut arg_l);
+    // SAFETY: `vesper_fmt_proof_limits_valid` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_fmt_proof_limits_valid(arg_l.as_mut_ptr()) };
+    raw != 0
 }

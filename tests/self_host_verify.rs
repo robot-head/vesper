@@ -7,6 +7,7 @@
 //! Rust's byte for byte.
 use std::{
     collections::BTreeMap,
+    fmt::Write as _,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -24,7 +25,8 @@ fn repo() -> PathBuf {
     fs::canonicalize(env!("CARGO_MANIFEST_DIR")).unwrap()
 }
 
-const DRIVER: &str = r#"use @vesper/verify::{bindings, discover};
+const DRIVER: &str = r#"use @vesper/verify::{bindings, discover, emit, message};
+use @vesper/fmt::{format_for_verification, hash_hex, proof_limits_default};
 use @vesper/proof-audit::strs::{Strs, byte, count, end, push, put_str, start, strs_new};
 use @vesper-std/env::{arg_bytes, arg_count};
 use @vesper-std/fs::{IoError, read_path, write_stdout};
@@ -93,12 +95,63 @@ fn bind_case(inout out: ChunkSeq[u8], in text: Slice[u8]) {
     }
 }
 
-pub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv]] {
-    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let bind = match arg_bytes(1) {
-        Option::Some(m) => m.len() == 4,
-        Option::None => false,
+// One `format` record: `ok OUT CHANGED SOURCE_HASH OUTPUT_HASH LEAN`, then
+// the output and the Lean witness; or `err STAGE LEN` and the message.
+fn format_case(inout out: ChunkSeq[u8], in text: Slice[u8]) eff [Ffi[Blake3]] {
+    let source = match String::from_utf8(in text) {
+        Option::Some(s) => s,
+        Option::None => String::new(),
     };
+    let v = format_for_verification(in source.as_str());
+    if v.fail.code != 0 {
+        let m = message(v.fail);
+        put_str(inout out, in "err format_model ");
+        put_u64(inout out, m.len());
+        out.push(10);
+        out.extend(in m.as_slice());
+        out.push(10);
+        return;
+    }
+    let e = emit(in v, in proof_limits_default());
+    if e.fail.code != 0 {
+        let m = message(e.fail);
+        put_str(inout out, in "err emit ");
+        put_u64(inout out, m.len());
+        out.push(10);
+        out.extend(in m.as_slice());
+        out.push(10);
+        return;
+    }
+    put_str(inout out, in "ok ");
+    put_u64(inout out, v.output.len());
+    put_str(
+        inout out,
+        in if v.changed {
+            " 1 "
+        } else {
+            " 0 "
+        }
+    );
+    let sh = hash_hex(v.source_hash);
+    out.extend(in sh.as_slice());
+    out.push(32);
+    let oh = hash_hex(v.output_hash);
+    out.extend(in oh.as_slice());
+    out.push(32);
+    put_u64(inout out, e.lean.len());
+    out.push(10);
+    out.extend(in v.output.as_slice());
+    out.extend(in e.lean.as_slice());
+}
+
+pub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[Blake3]] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mode = match arg_bytes(1) {
+        Option::Some(m) => m.len(),
+        Option::None => 0,
+    };
+    let bind = mode == 4;
+    let format = mode == 6;
     for i in 2..arg_count() {
         let path = match arg_bytes(i) {
             Option::Some(a) => a,
@@ -110,7 +163,9 @@ pub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv]] {
             return v => v,
             raise(_e, _k) => ChunkSeq::new[u8](),
         };
-        if bind {
+        if format {
+            format_case(inout out, in text.as_slice());
+        } else if bind {
             bind_case(inout out, in text.as_slice());
         } else {
             let f = discover(in text.as_slice());
@@ -134,6 +189,40 @@ pub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv]] {
 }
 "#;
 
+fn rust_format(text: &str) -> String {
+    use vesper_fmt::{Limits, ProofLimits, format_for_verification};
+    let mut out = String::new();
+    let verification =
+        match format_for_verification(text, Limits::default(), ProofLimits::default()) {
+            Ok(v) => v,
+            Err(e) => {
+                let m = e.to_string();
+                let _ = write!(out, "err format_model {}\n{m}\n", m.len());
+                return out;
+            }
+        };
+    let lean = match verification.emit_lean(ProofLimits::default()) {
+        Ok(lean) => lean,
+        Err(e) => {
+            let m = e.to_string();
+            let _ = write!(out, "err emit {}\n{m}\n", m.len());
+            return out;
+        }
+    };
+    let hex = |h: [u8; 32]| h.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let _ = write!(
+        out,
+        "ok {} {} {} {} {}\n{}{lean}",
+        verification.output().len(),
+        u8::from(verification.changed()),
+        hex(verification.source_hash()),
+        hex(verification.output_hash()),
+        lean.len(),
+        verification.output(),
+    );
+    out
+}
+
 struct Dir(PathBuf);
 impl Drop for Dir {
     fn drop(&mut self) {
@@ -153,10 +242,12 @@ fn build_driver(dir: &Path) -> PathBuf {
              [dependencies]\n\
              \"@vesper/verify\" = {{ version = \"^0.1\", path = {} }}\n\
              \"@vesper/proof-audit\" = {{ version = \"^0.1\", path = {} }}\n\
+             \"@vesper/fmt\" = {{ version = \"^0.1\", path = {} }}\n\
              \"@vesper-std/env\" = {{ version = \"^0.1\", path = {} }}\n\
              \"@vesper-std/fs\" = {{ version = \"^0.1\", path = {} }}\n",
             dep("packages/vesper-verify"),
             dep("packages/vesper-proof-audit"),
+            dep("crates/vesper-fmt/vesper"),
             dep("packages/vesper-std/env"),
             dep("packages/vesper-std/fs"),
         ),
@@ -256,7 +347,12 @@ fn bind_text(case: &Bind) -> String {
 
 /// Every `.lean` file of the repository (outside build output), sorted.
 fn lean_files() -> Vec<PathBuf> {
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+    files_with(&repo(), "lean")
+}
+
+/// Every `.EXT` file under `root`, sorted.
+fn files_with(root: &Path, ext: &str) -> Vec<PathBuf> {
+    fn walk(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) {
         let Ok(entries) = fs::read_dir(dir) else {
             return;
         };
@@ -267,14 +363,14 @@ fn lean_files() -> Vec<PathBuf> {
                 continue;
             }
             if path.is_dir() {
-                walk(&path, out);
-            } else if path.extension().is_some_and(|e| e == "lean") {
+                walk(&path, ext, out);
+            } else if path.extension().is_some_and(|e| e == ext) {
                 out.push(path);
             }
         }
     }
     let mut out = vec![];
-    walk(&repo(), &mut out);
+    walk(root, ext, &mut out);
     out.sort();
     out
 }
@@ -545,4 +641,104 @@ fn vesper_port_matches_rust_verify_pieces() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
     eprintln!("bindings: {} cases, 0 diffs", cases.len());
+
+    // The formatter model and its Lean witness (`verify --format` up to the
+    // Lean run): every .ves file of the repository that `read_source` would
+    // take, and edges for the comment and escape paths.
+    let mut inputs: Vec<(String, String)> = vec![];
+    for path in files_with(&repo(), "ves") {
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if text.len() <= 128 * 1024 {
+            inputs.push((path.display().to_string(), text));
+        }
+    }
+    for (i, edge) in FORMAT_EDGES.iter().enumerate() {
+        inputs.push((format!("edge {i}"), edge.to_string()));
+    }
+    let mut names = vec![];
+    for (i, (_, text)) in inputs.iter().enumerate() {
+        let name = format!("{i}.ves");
+        fs::write(dir.0.join("in").join(&name), text).unwrap();
+        names.push(name);
+    }
+    let started = Instant::now();
+    let expected: Vec<String> = inputs.iter().map(|(_, t)| rust_format(t)).collect();
+    let rust = started.elapsed();
+    let started = Instant::now();
+    let output = Command::new(&binary)
+        .current_dir(dir.0.join("in"))
+        .arg("format")
+        .args(&names)
+        .output()
+        .unwrap();
+    let port = started.elapsed();
+    assert!(output.status.success(), "{output:?}");
+    let actual = String::from_utf8(output.stdout).unwrap();
+    let records = split_records(&actual);
+    assert_eq!(records.len(), inputs.len(), "one record per input");
+    let (mut ok, mut macros, mut diffs) = (0, 0, 0);
+    for (((path, text), want), got) in inputs.iter().zip(&expected).zip(&records) {
+        // The port formats the macro profile from #1996 part 3c-2 on.
+        if got.starts_with("err format_model ")
+            && got.ends_with("formatter unavailable: OpaqueMacro\n")
+        {
+            macros += 1;
+            continue;
+        }
+        if want != got {
+            diffs += 1;
+            if diffs <= 6 {
+                let head: String = text.chars().take(200).collect();
+                let w: String = want.chars().take(600).collect();
+                let g: String = got.chars().take(600).collect();
+                eprintln!("input {path}:\n{head:?}\nrust {w:?}\nport {g:?}\n");
+            }
+        } else if want.starts_with("ok ") {
+            ok += 1;
+        }
+    }
+    eprintln!(
+        "format model: {} inputs ({ok} witnesses, {macros} macro-profile skipped), {diffs} diffs; Rust {rust:?}, port {port:?} (one process)",
+        inputs.len()
+    );
+    assert_eq!(diffs, 0, "the port differs from Rust");
+    assert!(ok >= 50, "only {ok} inputs gave a witness");
 }
+
+/// Split the `format` driver's output into records: `ok` heads give the
+/// output and Lean lengths, `err` heads the message length.
+fn split_records(text: &str) -> Vec<String> {
+    let mut out = vec![];
+    let mut rest = text;
+    while !rest.is_empty() {
+        let line = rest.find('\n').unwrap() + 1;
+        let head = &rest[..line];
+        let words: Vec<&str> = head.trim_end().split(' ').collect();
+        let body = if words[0] == "ok" {
+            words[1].parse::<usize>().unwrap() + words[5].parse::<usize>().unwrap()
+        } else {
+            words[2].parse::<usize>().unwrap() + 1
+        };
+        out.push(rest[..line + body].to_owned());
+        rest = &rest[line + body..];
+    }
+    out
+}
+
+/// Formatter-model edges: empty and comment-only sources, comments the
+/// witness escapes, and nesting.
+const FORMAT_EDGES: &[&str] = &[
+    "",
+    "\n",
+    "// only a comment\n",
+    "/* block */\n",
+    "fn f() {}\n",
+    "/* a */ fn f() {} // b\n",
+    "// quote \" backslash \\ tab \t end\n",
+    "// controls \u{1} \u{7f} \u{85} \u{9f} \u{a0} \u{2028} \u{2029} é 😀\n",
+    "fn f() -> u64 {\n    // inside\n    let x = 1; /* after */\n    x\n}\n",
+    "fn f(a: u64, b: u64) -> u64 {\n    if a > b {\n        match a {\n            0 => b, // zero\n            _ => a,\n        }\n    } else {\n        b\n    }\n}\n",
+    "fn broken( {\n",
+];

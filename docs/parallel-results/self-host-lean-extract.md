@@ -527,6 +527,30 @@ runs range 0.6x to 1.5x beside the test's other threads).
 **Found on the way.** A slice of a slice is not a value (E1521), so
 the scanner keeps the next token as offsets into the source.
 
+## Part 6b: `verify --format`'s model and witness in Vesper
+
+`format_for_verification` (crates/vesper-fmt/src/proof_source.rs) and
+its arena projection (`proof_model::project`) are the proof section at the
+end of `crates/vesper-fmt/vesper/src/lib.ves`: the source-proof limits,
+the first pass's `Doc` read back as a prefix-order model with the same
+work, metadata, node, depth and text charges (Rust's `size_of` values
+written out), the comment-token check and both BLAKE3 digests. The Lean
+witness (`proof_lean::emit`: the `Preflight::check` bounds, then the fixed
+module through @vesper/lean-syntax's printer) and the `ProofError`
+messages are packages/vesper-verify/src/format.ves.
+
+tests/self_host_verify.rs (`format` mode) compares output, `changed`, the
+digests and the witness, or the `format_model`/`emit` error message, with
+Rust's over every .ves file of the repository up to 128 KiB plus edges:
+1461 inputs, 0 diffs (228 give a witness; most larger files stop at the
+4096-node or metadata bounds, the same way in both). 64 macro-profile
+sources are skipped until the port formats that profile (#1996 3c-2).
+Release, one process: Rust 1.53 s, the port 1.00 s (0.65x).
+
+**Found on the way.** A file module cannot `use super::` a private item
+(E0112), so the proof code sits in the formatter's own file instead of
+making its internals public.
+
 ## What is left
 
 - **Verify command** (`src/verify_commands.rs`): `--format` needs the
