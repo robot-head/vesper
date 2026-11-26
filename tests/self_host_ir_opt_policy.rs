@@ -69,42 +69,46 @@ struct Input {
     program: Program,
 }
 
-/// Every input: the screen is cheap.
-fn all_inputs() -> &'static [Input] {
-    static I: OnceLock<Vec<Input>> = OnceLock::new();
-    I.get_or_init(|| {
-        let mut out = vec![];
-        for c in corpus() {
+/// The native input of every corpus world `keep` accepts, then their
+/// mutants. Lowering the whole corpus and its mutants took over 13 GiB, and
+/// the kernel killed a Bazel shard that held it all, so each test lowers only
+/// the worlds it checks (as `ir_cases_where`, #1913).
+fn inputs_where(keep: &dyn Fn(usize) -> bool) -> Vec<Input> {
+    let mut out = vec![];
+    for (i, c) in corpus().iter().enumerate() {
+        if keep(i) {
             out.push(Input {
                 name: c.name.clone(),
                 world: &c.world,
                 program: vesper::ir_opt_policy::native_input(&c.world),
             });
         }
-        for c in ir_cases(1) {
-            if c.name.contains("#m") {
-                out.push(Input {
-                    name: c.name,
-                    world: c.world,
-                    program: c.program,
-                });
-            }
+    }
+    for c in ir_cases_where(1, |i| keep(i)) {
+        if c.name.contains("#m") {
+            out.push(Input {
+                name: c.name,
+                world: c.world,
+                program: c.program,
+            });
         }
-        out
-    })
+    }
+    out
 }
 
-/// Every `step()`-th input, for the passes that run egglog.
-fn inputs() -> Vec<&'static Input> {
-    all_inputs().iter().step_by(step()).collect()
+/// The inputs of every `step()`-th world, for the passes that run egglog.
+fn inputs() -> Vec<Input> {
+    let step = step();
+    inputs_where(&|i| i % step == 0)
 }
 
 #[test]
 fn screen_matches_rust() {
     screen();
     let (mut done, mut bad, mut blocks, mut kept) = (0, 0, 0, 0);
-    // Bazel shards the inputs (BUILD.bazel `test_shards`).
-    for c in corpus_shard::Shard::from_environment().keep(all_inputs()) {
+    // Bazel shards the corpus worlds (BUILD.bazel `test_shards`).
+    let shard = corpus_shard::Shard::from_environment();
+    for c in &inputs_where(&|i| shard.contains(i)) {
         let Some(prep) = prepare(c.world, &c.program, MODE_OPTIMIZE) else {
             continue;
         };
@@ -160,7 +164,8 @@ fn policy_matches_rust() {
     policy();
     let quiet = quiet_panics();
     let (mut done, mut bad, mut skipped) = (0, 0, 0);
-    for c in corpus_shard::Shard::from_environment().keep(inputs()) {
+    let all = inputs();
+    for c in corpus_shard::Shard::from_environment().keep(&all) {
         let rust = std::panic::catch_unwind(|| {
             let mut p = c.program.clone();
             let r = vesper::ir_opt_policy::optimize(c.world, &mut p);
@@ -195,7 +200,8 @@ fn policy_matches_rust() {
     }
     drop(quiet);
     eprintln!("policy: {bad} of {done} inputs differ ({skipped} skipped)");
-    // The slice has 28 inputs; shards take four-input blocks (8, 8, 8, 4).
+    // The slice is every `step()`-th world and its mutants; shards take
+    // four-input blocks of it.
     let least = corpus_shard::Shard::from_environment().share(12);
     assert!(done > least, "only {done} inputs");
     assert_eq!(bad, 0);
@@ -242,8 +248,9 @@ fn policy_cost() {
     if !speed() {
         return;
     }
-    let cases: Vec<(&Input, Prepared)> = inputs()
-        .into_iter()
+    let all = inputs();
+    let cases: Vec<(&Input, Prepared)> = all
+        .iter()
         .filter(|c| !c.name.contains("#m"))
         .filter(|c| vesper::ir_opt_policy::optimize(c.world, &mut c.program.clone()).is_ok())
         .filter_map(|c| prepare(c.world, &c.program, MODE_OPTIMIZE).map(|p| (c, p)))
