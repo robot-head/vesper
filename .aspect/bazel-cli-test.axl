@@ -38,7 +38,7 @@ def mock_bazel_cli(ctx, cwd, tool, argv):
         if verb == "query":
             ctx.std.io.stdout.write("//crates/example:example/test\n")
         elif verb == "build":
-            equal(argv[3], "//crates/example:example/test")
+            equal(argv[-1], "//crates/example:example/test")
             return 8 if mode == "prebuild-fail" else 0
         else:
             equal(verb, "cquery")

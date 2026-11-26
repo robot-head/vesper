@@ -2740,30 +2740,38 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
     ),
 ];
 
-/// Compiler packages Stage 2 cannot build yet: (stem, package, path, probe
-/// `src/lib.ves`, reason). `stage2_self_compilation_fixed_point` checks that
-/// each one still fails, so a gap that closes moves into [`COMPILER_PACKAGES`].
-const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[
+/// Compiler packages over `Ffi[Cranelift]` (native Cranelift glue over
+/// vesper-cranelift-sys): (stem, package, path, probe `src/lib.ves`). Stage 2
+/// declares the `Ffi$Cranelift` operations from cranelift.vsys
+/// (packages/vesper-stage2/src/vcl_decls.ves), and the Wasm backend lowers
+/// them to imports of `vesper:cranelift/vcl@0.1.0` (#2210). The fixed point
+/// only builds them: running one needs the Cranelift component composed in
+/// (crates/vesper-cranelift-component/tests/wasm_imports.rs).
+const STAGE2_CRANELIFT_PACKAGES: &[(&str, &str, &str, &str)] = &[
     (
         "codegen-base",
         "@vesper/codegen-base",
         "packages/vesper-codegen-base",
         "use @vesper/codegen-base::word_of;\nuse @vesper/codegen-base::arg_value;\npub fn main() -> u64 eff [Ffi[Cranelift]] { word_of(arg_value(0, 0)) }\n",
-        "native Cranelift glue over vesper-cranelift-sys: the Wasm backend lowers Ffi[Cranelift] to imports of the Cranelift component (#2210), but Stage 2 declares no Ffi$Cranelift operations from cranelift.vsys (only the StdEnv and StdFs ones in packages/vesper-stage2/src/collect.ves), so the calls stay unresolved (WErr ExternalFunction, Cranelift::vcl_call_arg)",
     ),
     (
         "codegen-control-emit",
         "@vesper/codegen-control-emit",
         "packages/vesper-codegen-control-emit",
         "use @vesper/codegen-control-emit::control_hook;\npub fn main() -> u64 eff [Ffi[Cranelift]] { control_hook(0) }\n",
-        "native Cranelift glue over vesper-cranelift-sys: the Wasm backend lowers Ffi[Cranelift] to imports of the Cranelift component (#2210), but Stage 2 declares no Ffi$Cranelift operations from cranelift.vsys (only the StdEnv and StdFs ones in packages/vesper-stage2/src/collect.ves), so the calls stay unresolved (WErr ExternalFunction, Cranelift::vcl_call_arg)",
     ),
+];
+
+/// Compiler packages Stage 2 cannot build yet: (stem, package, path, probe
+/// `src/lib.ves`, reason). `stage2_self_compilation_fixed_point` checks that
+/// each one still fails, so a gap that closes moves into [`COMPILER_PACKAGES`].
+const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[
     (
         "codegen-numeric",
         "@vesper/codegen-numeric",
         "packages/vesper-codegen-numeric",
         "use @vesper/codegen-numeric::numeric_hook;\npub fn main() -> u64 eff [Ffi[Cranelift]] { numeric_hook(0) }\n",
-        "native Cranelift glue over vesper-cranelift-sys: the Wasm backend lowers Ffi[Cranelift] to imports of the Cranelift component (#2210), but Stage 2 declares no Ffi$Cranelift operations from cranelift.vsys (only the StdEnv and StdFs ones in packages/vesper-stage2/src/collect.ves), so the calls stay unresolved (WErr ExternalFunction, Cranelift::vcl_call_arg)",
+        "its float constants call the `from_bits_f64` intrinsic (src/floats.ves `float_const_of`), which the Wasm backend does not lower (WErr ExternalFunction, site 221); its Ffi[Cranelift] calls resolve (#2210)",
     ),
     (
         "driver-commands",
@@ -2781,12 +2789,17 @@ const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[
     ),
 ];
 
-/// Directories under `packages/` that are neither in [`COMPILER_PACKAGES`]
-/// nor in [`STAGE2_PACKAGE_GAPS`], with where they are covered instead.
+/// Directories under `packages/` that are in none of [`COMPILER_PACKAGES`],
+/// [`STAGE2_CRANELIFT_PACKAGES`] and [`STAGE2_PACKAGE_GAPS`], with where they
+/// are covered instead.
 const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
     (
         "vesper-compiler",
         "Stage 1 front end, checked as one unit; bootstrap/stage1.lock (tests/stage2_seed_runner.rs)",
+    ),
+    (
+        "vesper-lsp-format",
+        "the formatting action of `vesper lsp` (#1828 part 11a) in the JIT beside Rust's (tests/self_host_lsp_features.rs); it calls @vesper/fmt, which hashes with C BLAKE3 (@vesper-std/hash-sys), which a Wasm entry does not have",
     ),
     (
         "vesper-proof-audit",
@@ -2815,6 +2828,7 @@ fn stage2_fixed_point_lists_every_package() {
         .iter()
         .map(|(_, _, rel, _, _)| *rel)
         .chain(STAGE2_PACKAGE_GAPS.iter().map(|(_, _, rel, _, _)| *rel))
+        .chain(STAGE2_CRANELIFT_PACKAGES.iter().map(|(_, _, rel, _)| *rel))
         .map(|rel| rel.trim_start_matches("packages/").to_string())
         .chain(
             STAGE2_PACKAGES_COVERED_ELSEWHERE
@@ -2838,7 +2852,7 @@ fn stage2_fixed_point_lists_every_package() {
     on_disk.sort();
     assert_eq!(
         listed, on_disk,
-        "every directory under packages/ must be in COMPILER_PACKAGES, STAGE2_PACKAGE_GAPS or STAGE2_PACKAGES_COVERED_ELSEWHERE"
+        "every directory under packages/ must be in COMPILER_PACKAGES, STAGE2_CRANELIFT_PACKAGES, STAGE2_PACKAGE_GAPS or STAGE2_PACKAGES_COVERED_ELSEWHERE"
     );
 }
 
@@ -2941,6 +2955,24 @@ fn build_compiler_package_probe(
     Ok(bytes)
 }
 
+/// The manifest of a probe given as a whole `src/lib.ves`: the package
+/// itself, and each other compiler package the probe `use`s to reach the
+/// code it builds.
+fn source_probe_manifest(stem: &str, pkg_name: &str, pkg_rel: &str, lib_src: &str) -> String {
+    let (mut manifest, _) = compiler_package_probe(stem, pkg_name, pkg_rel, "");
+    for other in lib_src
+        .split("use @vesper/")
+        .skip(1)
+        .filter_map(|rest| rest.split("::").next())
+        .filter(|other| format!("@vesper/{other}") != *pkg_name)
+    {
+        manifest.push_str(&format!(
+            "\"@vesper/{other}\" = {{ version = \"^0.1\", path = \"/repo/packages/vesper-{other}\" }}\n"
+        ));
+    }
+    manifest
+}
+
 fn write_probe(wrap_dir: &Path, manifest: &str, lib_src: &str) {
     let _ = std::fs::remove_dir_all(wrap_dir);
     std::fs::create_dir_all(wrap_dir.join("src")).unwrap();
@@ -2961,9 +2993,9 @@ fn write_probe(wrap_dir: &Path, manifest: &str, lib_src: &str) {
 /// pinned wasmtime CLI (always present under Bazel), the precompiled
 /// `stage2.cwasm` rebuilds every package again and must match too.
 ///
-/// Each package in [`STAGE2_PACKAGE_GAPS`] must still fail to build, so a
-/// gap that closes is moved into [`COMPILER_PACKAGES`] instead of going
-/// unnoticed.
+/// Each package in [`STAGE2_CRANELIFT_PACKAGES`] is built the same way. Each
+/// package in [`STAGE2_PACKAGE_GAPS`] must still fail to build, so a gap that
+/// closes is moved into [`COMPILER_PACKAGES`] instead of going unnoticed.
 fn check_compiler_packages_fixed_point(
     dir: &Path,
     boot: &PreparedComponent,
@@ -3006,21 +3038,46 @@ fn check_compiler_packages_fixed_point(
             }
         }
     }
-    for (stem, pkg_name, pkg_rel, lib_src, why) in STAGE2_PACKAGE_GAPS.iter() {
-        let (mut manifest, _) = compiler_package_probe(stem, pkg_name, pkg_rel, "");
-        // A gap probe may `use` other compiler packages to reach the code
-        // that needs the missing support; each becomes a dependency.
-        for other in lib_src
-            .split("use @vesper/")
-            .skip(1)
-            .filter_map(|rest| rest.split("::").next())
-            .filter(|other| format!("@vesper/{other}") != *pkg_name)
-        {
-            manifest.push_str(&format!(
-                "\"@vesper/{other}\" = {{ version = \"^0.1\", path = \"/repo/packages/vesper-{other}\" }}\n"
-            ));
+    for (stem, pkg_name, pkg_rel, lib_src) in STAGE2_CRANELIFT_PACKAGES.iter() {
+        write_probe(
+            &wrap_dir,
+            &source_probe_manifest(stem, pkg_name, pkg_rel, lib_src),
+            lib_src,
+        );
+        let by_boot = match build_compiler_package_probe(boot, boot_syms, dir, "boot stage2") {
+            Ok(b) => b,
+            Err(e) => {
+                failures.push(format!("{pkg_name}: {e}"));
+                continue;
+            }
+        };
+        match build_compiler_package_probe(stage2, stage2_syms, dir, "stage2.wasm") {
+            Ok(b) if b == by_boot => {}
+            Ok(b) => failures.push(format!(
+                "{pkg_name}: boot stage2 built {} bytes, stage2.wasm built {} different bytes",
+                by_boot.len(),
+                b.len()
+            )),
+            Err(e) => failures.push(format!("{pkg_name}: {e}")),
         }
-        write_probe(&wrap_dir, &manifest, lib_src);
+        if let Some((cli, stage2_cwasm)) = cli {
+            run_stage2_probe_wasmtime_cli(cli, stage2_cwasm, dir, &out_wasm);
+            let by_cli = std::fs::read(&out_wasm).unwrap_or_default();
+            if by_cli != by_boot {
+                failures.push(format!(
+                    "{pkg_name}: boot stage2 built {} bytes, stage2.cwasm under the wasmtime CLI built {} different bytes",
+                    by_boot.len(),
+                    by_cli.len()
+                ));
+            }
+        }
+    }
+    for (stem, pkg_name, pkg_rel, lib_src, why) in STAGE2_PACKAGE_GAPS.iter() {
+        write_probe(
+            &wrap_dir,
+            &source_probe_manifest(stem, pkg_name, pkg_rel, lib_src),
+            lib_src,
+        );
         match build_compiler_package_probe(stage2, stage2_syms, dir, "stage2.wasm") {
             Ok(_) => failures.push(format!(
                 "{pkg_name}: Stage 2 now builds it (listed as a gap: {why}); move it from STAGE2_PACKAGE_GAPS into COMPILER_PACKAGES"
@@ -3082,7 +3139,7 @@ fn check_compiler_packages_fixed_point(
         failures.is_empty(),
         "Stage 2 package fixed point broken for {} of {} packages:\n{}",
         failures.len(),
-        COMPILER_PACKAGES.len() + STAGE2_PACKAGE_GAPS.len(),
+        COMPILER_PACKAGES.len() + STAGE2_CRANELIFT_PACKAGES.len() + STAGE2_PACKAGE_GAPS.len(),
         failures.join("\n")
     );
 }

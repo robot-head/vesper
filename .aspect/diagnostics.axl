@@ -1,7 +1,7 @@
 """Check real compiler and LSP causal diagnostics without applying edits."""
 
 load("./bounded-stdio.axl", "bounded_run", "utf8")
-load("./lib/bazel_exec.axl", "executable", "run_target")
+load("./lib/bazel_exec.axl", "executable", "run_target", "VESPER")
 load("./lib/lsp-fixture.axl", "changed", "file_uri", "notice", "opened", "request", "result", "session")
 load("./lib/process.axl", "root_path", "scratch_dir")
 load("./lib/strict-json.axl", "decode_list")
@@ -302,7 +302,7 @@ check_diagnostics = task(
 
 def _suite(ctx: TaskContext) -> int:
     root = ctx.std.env.aspect_root_dir()
-    _run(ctx, root, executable(ctx, root, "//:bin/vesper"))
+    _run(ctx, root, executable(ctx, root, VESPER))
     run_target(ctx, root, "//crates/vesper-diagnostics:example/causal_diagnostics")
     return 0
 

@@ -4,7 +4,7 @@
 //! `VESPER_HYBRID_SWAPS` picks the set:
 //!
 //! - `all` (the default): every swap below, as the hybrid has always run.
-//!   A hybrid started as `vesper` (Bazel's `//crates/vesper-hybrid:vesper`)
+//!   A hybrid started as `vesper` (Bazel's `//:vesper_shipped`)
 //!   or built with the `gated-default` feature defaults to `gated`
 //!   instead: that build is the one the default `vesper` switches to, and
 //!   it needs no environment variable (docs/maintenance/rust-exit-plan.md,
@@ -90,7 +90,7 @@ const SHIPPED_NAME: &str = "vesper";
 
 /// The set when neither variable names one: `gated` for the build the
 /// default `vesper` switches to, that is a hybrid started as `vesper`
-/// (Bazel's `//crates/vesper-hybrid:vesper`) or built with the
+/// (Bazel's `//:vesper_shipped`) or built with the
 /// `gated-default` feature; else `all`.
 fn default_set() -> Set {
     let shipped = std::env::args_os().next().is_some_and(|arg0| {
