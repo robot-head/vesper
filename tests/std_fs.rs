@@ -10,11 +10,11 @@ use std::path::Path;
 use std_io_support::{MODES, Temp, agree, check_driver, lit};
 
 const DRIVER: &str = r#"use @vesper-std/fs::{
-    IoError, Metadata, read, read_path, read_string, write, append, create_new, replace, rename,
+    IoError, Metadata, read, read_path, read_path_limit, read_string, write, append, create_new, replace, rename,
     remove_file, remove_dir, remove_dir_all, create_dir, create_dir_all, metadata,
     symlink_metadata, exists, kind_file, kind_dir, error_text, is_dir_path, is_file_path,
     is_executable, canonicalize, write_stdout, write_stderr, create_dir_mode, set_permissions,
-    copy
+    copy, arch
 };
 use @vesper-std/fs::walk::{
     Entries, walk, list_dir, entry_count, entry_start, entry_end, entry_kind, entry_join
@@ -117,6 +117,25 @@ pub fn read_back() -> u64 eff [Ffi[StdFs]] {
         write(in "@DIR@/empty.bin", in empty.as_slice());
         let none = read(in "@DIR@/empty.bin");
         mix(hash(in got.as_slice()), none.len())
+    } with {
+        return v => v,
+        raise(e, _) => code(e),
+    }
+}
+
+// The first `limit` bytes for limits around the 4096-byte read steps and
+// the file's own length (10000).
+pub fn read_limited() -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        let data = pattern(10000);
+        write(in "@DIR@/l.bin", in data.as_slice());
+        let mut h: u64 = 0;
+        let limits: [u64; 9] = [0, 1, 4095, 4096, 4097, 9999, 10000, 10001, 20000];
+        for i in 0..9 {
+            let got = read_path_limit(in "@DIR@/l.bin".as_bytes(), limits[i]);
+            h = mix(h, hash(in got.as_slice()));
+        }
+        h
     } with {
         return v => v,
         raise(e, _) => code(e),
@@ -493,6 +512,10 @@ fn kind_bits(in p: Str, shift: u32) -> u64 eff [Ffi[StdFs]] {
     wrapping_shl_u64(bits, shift)
 }
 
+pub fn arch_code() -> u64 {
+    widen_u64(arch())
+}
+
 pub fn path_kinds() -> u64 eff [Ffi[StdFs]] {
     kind_bits(in "@DIR@", 0) | kind_bits(in "@DIR@/kinds.txt", 2) | kind_bits(in "@DIR@/missing", 4)
 }
@@ -664,6 +687,11 @@ fn whole_files_round_trip_in_every_mode() {
     let want = mix(hash(&pattern(3000)), 0);
     assert_eq!(agree(&checked, "read_back", &MODES), want);
     assert_eq!(fs::read(dir.path().join("a.bin")).unwrap(), pattern(3000));
+    let file = pattern(10000);
+    let limited = [0, 1, 4095, 4096, 4097, 9999, 10000, 10001, 20000]
+        .iter()
+        .fold(0, |h, &n| mix(h, hash(&file[..n.min(file.len())])));
+    assert_eq!(agree(&checked, "read_limited", &MODES), limited);
 
     let s = "héllo, wörld\n";
     let both = format!("{s}{s}");
@@ -1067,4 +1095,18 @@ fn canonicalize_matches_std() {
     }
     let checked = check_driver(&source(&dir));
     assert_eq!(agree(&checked, "canonical_paths", &MODES), want);
+}
+
+/// `arch` is the architecture of `std::env::consts::ARCH`.
+#[test]
+fn arch_matches_std_consts() {
+    let dir = Temp::new("std-fs");
+    let checked = check_driver(&source(&dir));
+    let want = match std::env::consts::ARCH {
+        "x86_64" => 1,
+        "aarch64" => 2,
+        "wasm32" => 3,
+        other => panic!("no ARCH code for {other}"),
+    };
+    assert_eq!(agree(&checked, "arch_code", &MODES), want);
 }

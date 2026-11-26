@@ -283,8 +283,8 @@ extern "C" fn report() {
         crate::driver::PASSES.load(Relaxed)
     );
     eprintln!(
-        "vesper-hybrid: the command layers printed {} times from Vesper",
-        crate::commands::PRINTS.load(Relaxed)
+        "vesper-hybrid: the command layers answered {} commands from Vesper",
+        crate::commands::ANSWERS.load(Relaxed)
     );
     swaps::report();
 }
