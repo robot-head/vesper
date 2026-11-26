@@ -68,11 +68,12 @@ pub fn fail_vsys[T](kind: u8, start: u64, end: u64, code: u32) -> T eff [Fail[Vs
 
 pub copy struct Tok {
     pub kind: u8,
-    pub a: u64,
-    pub b: u64,
+    // Arena range of a word or text token; a punct token keeps its byte in `text_start`.
+    pub text_start: u64,
+    pub text_end: u64,
     pub num: u64,
-    pub s0: u64,
-    pub s1: u64,
+    pub span_start: u64,
+    pub span_end: u64,
 }
 
 pub struct Lexed {
@@ -80,8 +81,8 @@ pub struct Lexed {
     pub arena: ChunkSeq[u8],
 }
 
-fn byte_at(in b: Slice[u8], i: u64) -> u8 {
-    b.try_get(i).unwrap_or(0)
+fn byte_at(in bytes: Slice[u8], i: u64) -> u8 {
+    bytes.try_get(i).unwrap_or(0)
 }
 
 fn is_ws(c: u8) -> bool {
@@ -128,14 +129,14 @@ fn lex_number(in bytes: Slice[u8], start: u64) -> (u64, u64) eff [Fail[VsysError
     let mut at = start;
     let mut radix: u64 = 10;
     if byte_at(in bytes, at) == 48 {
-        let next = byte_at(in bytes, wrapping_add(at, 1));
-        if next == 120 || next == 88 {
+        let next_byte = byte_at(in bytes, wrapping_add(at, 1));
+        if next_byte == 120 || next_byte == 88 {
             at = wrapping_add(at, 2);
             radix = 16;
-        } else if next == 111 || next == 79 {
+        } else if next_byte == 111 || next_byte == 79 {
             at = wrapping_add(at, 2);
             radix = 8;
-        } else if next == 98 || next == 66 {
+        } else if next_byte == 98 || next_byte == 66 {
             at = wrapping_add(at, 2);
             radix = 2;
         }
@@ -147,29 +148,29 @@ fn lex_number(in bytes: Slice[u8], start: u64) -> (u64, u64) eff [Fail[VsysError
         if at >= n {
             break;
         }
-        let b = byte_at(in bytes, at);
-        if b == 95 {
+        let byte = byte_at(in bytes, at);
+        if byte == 95 {
             at = wrapping_add(at, 1);
             continue;
         }
         let mut valid = false;
         let mut digit: u64 = 0;
-        if radix == 2 && (b == 48 || b == 49) {
+        if radix == 2 && (byte == 48 || byte == 49) {
             valid = true;
-            digit = widen_u64(wrapping_sub(b, 48));
-        } else if radix == 8 && b >= 48 && b <= 55 {
+            digit = widen_u64(wrapping_sub(byte, 48));
+        } else if radix == 8 && byte >= 48 && byte <= 55 {
             valid = true;
-            digit = widen_u64(wrapping_sub(b, 48));
-        } else if (radix == 10 || radix == 16) && b >= 48 && b <= 57 {
+            digit = widen_u64(wrapping_sub(byte, 48));
+        } else if (radix == 10 || radix == 16) && byte >= 48 && byte <= 57 {
             valid = true;
-            digit = widen_u64(wrapping_sub(b, 48));
-        } else if radix == 16 && b >= 97 && b <= 102 {
+            digit = widen_u64(wrapping_sub(byte, 48));
+        } else if radix == 16 && byte >= 97 && byte <= 102 {
             valid = true;
-            digit = widen_u64(wrapping_add(wrapping_sub(b, 97), 10));
-        } else if radix == 16 && b >= 65 && b <= 70 {
+            digit = widen_u64(wrapping_add(wrapping_sub(byte, 97), 10));
+        } else if radix == 16 && byte >= 65 && byte <= 70 {
             valid = true;
-            digit = widen_u64(wrapping_add(wrapping_sub(b, 65), 10));
-        } else if is_alnum(b) {
+            digit = widen_u64(wrapping_add(wrapping_sub(byte, 65), 10));
+        } else if is_alnum(byte) {
             return fail_vsys(err_syntax(), start, wrapping_add(at, 1), 1);
         } else {
             break;
@@ -178,7 +179,7 @@ fn lex_number(in bytes: Slice[u8], start: u64) -> (u64, u64) eff [Fail[VsysError
             break;
         }
         digits = wrapping_add(digits, 1);
-        let max_q: u64 = if radix == 16 {
+        let max_before: u64 = if radix == 16 {
             1152921504606846975
         } else if radix == 10 {
             1844674407370955161
@@ -187,7 +188,7 @@ fn lex_number(in bytes: Slice[u8], start: u64) -> (u64, u64) eff [Fail[VsysError
         } else {
             9223372036854775807
         };
-        let max_r: u64 = if radix == 16 {
+        let max_last_digit: u64 = if radix == 16 {
             15
         } else if radix == 10 {
             5
@@ -196,7 +197,7 @@ fn lex_number(in bytes: Slice[u8], start: u64) -> (u64, u64) eff [Fail[VsysError
         } else {
             1
         };
-        if value > max_q || (value == max_q && digit > max_r) {
+        if value > max_before || (value == max_before && digit > max_last_digit) {
             return fail_vsys(err_type(), start, wrapping_add(at, 1), 2);
         }
         value = wrapping_add(wrapping_mul(value, radix), digit);
@@ -220,12 +221,12 @@ pub fn lex(in bytes: Slice[u8]) -> Lexed eff [Fail[VsysError]] {
         if at >= n {
             break;
         }
-        let b = byte_at(in bytes, at);
-        if is_ws(b) {
+        let byte = byte_at(in bytes, at);
+        if is_ws(byte) {
             at = wrapping_add(at, 1);
             continue;
         }
-        if b == 47 && wrapping_add(at, 1) < n && byte_at(in bytes, wrapping_add(at, 1)) == 47 {
+        if byte == 47 && wrapping_add(at, 1) < n && byte_at(in bytes, wrapping_add(at, 1)) == 47 {
             loop {
                 if at >= n || byte_at(in bytes, at) == 10 {
                     break;
@@ -238,7 +239,7 @@ pub fn lex(in bytes: Slice[u8]) -> Lexed eff [Fail[VsysError]] {
             return fail_vsys(err_limit(), at, at, 11);
         }
         let start = at;
-        if is_ident_start(b) {
+        if is_ident_start(byte) {
             at = wrapping_add(at, 1);
             loop {
                 if at >= n || !is_ident_cont(byte_at(in bytes, at)) {
@@ -249,97 +250,97 @@ pub fn lex(in bytes: Slice[u8]) -> Lexed eff [Fail[VsysError]] {
             if wrapping_sub(at, start) > 128 {
                 return fail_vsys(err_limit(), start, at, 12);
             }
-            let a0 = arena.len();
+            let text_start = arena.len();
             arena.extend(in bytes[start..at]);
-            let a1 = arena.len();
+            let text_end = arena.len();
             toks.push(
                 Tok {
                     kind: tok_word(),
-                    a: a0,
-                    b: a1,
+                    text_start: text_start,
+                    text_end: text_end,
                     num: 0,
-                    s0: start,
-                    s1: at,
+                    span_start: start,
+                    span_end: at,
                 }
             );
-        } else if is_digit(b) {
+        } else if is_digit(byte) {
             let (num, next) = lex_number(in bytes, start);
             at = next;
             toks.push(
                 Tok {
                     kind: tok_num(),
-                    a: 0,
-                    b: 0,
+                    text_start: 0,
+                    text_end: 0,
                     num: num,
-                    s0: start,
-                    s1: at,
+                    span_start: start,
+                    span_end: at,
                 }
             );
-        } else if b == 34 {
+        } else if byte == 34 {
             at = wrapping_add(at, 1);
-            let a0 = arena.len();
+            let text_start = arena.len();
             let mut closed = false;
             loop {
                 if at >= n {
                     break;
                 }
-                let cur = byte_at(in bytes, at);
-                if cur == 34 {
+                let raw_byte = byte_at(in bytes, at);
+                if raw_byte == 34 {
                     at = wrapping_add(at, 1);
                     closed = true;
                     break;
                 }
-                let mut c = cur;
-                if cur == 92 {
+                let mut text_byte = raw_byte;
+                if raw_byte == 92 {
                     at = wrapping_add(at, 1);
                     if at >= n {
                         return fail_vsys(err_syntax(), start, at, 4);
                     }
-                    let esc = byte_at(in bytes, at);
-                    if esc == 34 || esc == 92 {
-                        c = esc;
+                    let escaped = byte_at(in bytes, at);
+                    if escaped == 34 || escaped == 92 {
+                        text_byte = escaped;
                     } else {
                         return fail_vsys(err_syntax(), start, at, 4);
                     }
                 }
-                if c < 32 || c > 126 {
+                if text_byte < 32 || text_byte > 126 {
                     return fail_vsys(err_syntax(), start, wrapping_add(at, 1), 5);
                 }
-                if wrapping_sub(arena.len(), a0) >= 4096 {
+                if wrapping_sub(arena.len(), text_start) >= 4096 {
                     return fail_vsys(err_limit(), start, at, 13);
                 }
-                arena.push(c);
+                arena.push(text_byte);
                 at = wrapping_add(at, 1);
             }
             if !closed {
                 return fail_vsys(err_syntax(), start, at, 6);
             }
-            let a1 = arena.len();
+            let text_end = arena.len();
             toks.push(
                 Tok {
                     kind: tok_text(),
-                    a: a0,
-                    b: a1,
+                    text_start: text_start,
+                    text_end: text_end,
                     num: 0,
-                    s0: start,
-                    s1: at,
+                    span_start: start,
+                    span_end: at,
                 }
             );
-        } else if b == 45
+        } else if byte == 45
             && wrapping_add(at, 1) < n
             && byte_at(in bytes, wrapping_add(at, 1)) == 62 {
             at = wrapping_add(at, 2);
             toks.push(
                 Tok {
                     kind: tok_arrow(),
-                    a: 0,
-                    b: 0,
+                    text_start: 0,
+                    text_end: 0,
                     num: 0,
-                    s0: start,
-                    s1: at,
+                    span_start: start,
+                    span_end: at,
                 }
             );
-        } else if b == 46
+        } else if byte == 46
             && wrapping_add(at, 2) < n
             && byte_at(in bytes, wrapping_add(at, 1)) == 46
             && byte_at(in bytes, wrapping_add(at, 2)) == 46 {
@@ -347,23 +348,23 @@ pub fn lex(in bytes: Slice[u8]) -> Lexed eff [Fail[VsysError]] {
             toks.push(
                 Tok {
                     kind: tok_ellipsis(),
-                    a: 0,
-                    b: 0,
+                    text_start: 0,
+                    text_end: 0,
                     num: 0,
-                    s0: start,
-                    s1: at,
+                    span_start: start,
+                    span_end: at,
                 }
             );
-        } else if is_punct_byte(b) {
+        } else if is_punct_byte(byte) {
             at = wrapping_add(at, 1);
             toks.push(
                 Tok {
                     kind: tok_punct(),
-                    a: widen_u64(b),
-                    b: 0,
+                    text_start: widen_u64(byte),
+                    text_end: 0,
                     num: 0,
-                    s0: start,
-                    s1: at,
+                    span_start: start,
+                    span_end: at,
                 }
             );
         } else {
@@ -373,11 +374,11 @@ pub fn lex(in bytes: Slice[u8]) -> Lexed eff [Fail[VsysError]] {
     toks.push(
         Tok {
             kind: tok_eof(),
-            a: 0,
-            b: 0,
+            text_start: 0,
+            text_end: 0,
             num: 0,
-            s0: at,
-            s1: at,
+            span_start: at,
+            span_end: at,
         }
     );
     Lexed {

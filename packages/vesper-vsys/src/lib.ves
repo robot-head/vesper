@@ -13,175 +13,179 @@ use self::encode::{Encoder, new_encoder, put_bytes, put_count, put_decimal_const
 // ---------------------------------------------------------------------------
 // Slice / arena helpers.
 
-fn u8_at(in s: Slice[u8], i: u64) -> u8 {
-    s.try_get(i).unwrap_or(0)
+fn u8_at(in bytes: Slice[u8], i: u64) -> u8 {
+    bytes.try_get(i).unwrap_or(0)
 }
 
-fn eq_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
-    if a.len() != b.len() {
+fn eq_bytes(in lhs: Slice[u8], in rhs: Slice[u8]) -> bool {
+    if lhs.len() != rhs.len() {
         return false;
     }
-    for i in 0..a.len() {
-        if u8_at(in a, i) != u8_at(in b, i) {
+    for i in 0..lhs.len() {
+        if u8_at(in lhs, i) != u8_at(in rhs, i) {
             return false;
         }
     }
     true
 }
 
-fn lt_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
-    let n = if a.len() < b.len() { a.len() } else { b.len() };
-    for i in 0..n {
-        let xa = u8_at(in a, i);
-        let xb = u8_at(in b, i);
-        if xa != xb {
-            return xa < xb;
+fn lt_bytes(in lhs: Slice[u8], in rhs: Slice[u8]) -> bool {
+    let common_len = if lhs.len() < rhs.len() {
+        lhs.len()
+    } else {
+        rhs.len()
+    };
+    for i in 0..common_len {
+        let lhs_byte = u8_at(in lhs, i);
+        let rhs_byte = u8_at(in rhs, i);
+        if lhs_byte != rhs_byte {
+            return lhs_byte < rhs_byte;
         }
     }
-    a.len() < b.len()
+    lhs.len() < rhs.len()
 }
 
-fn eq_str(in arena: Slice[u8], a: u64, b: u64, in lit: Str) -> bool {
-    eq_bytes(in arena[a..b], in lit.as_bytes())
+fn eq_str(in arena: Slice[u8], start: u64, end: u64, in text: Str) -> bool {
+    eq_bytes(in arena[start..end], in text.as_bytes())
 }
 
-fn push_str_arena(inout arena: ChunkSeq[u8], in s: Str) -> (u64, u64) {
-    let a = arena.len();
-    arena.extend(in s.as_bytes());
-    (a, arena.len())
+fn push_str_arena(inout arena: ChunkSeq[u8], in text: Str) -> (u64, u64) {
+    let start = arena.len();
+    arena.extend(in text.as_bytes());
+    (start, arena.len())
 }
 
 // ---------------------------------------------------------------------------
 // Scalar / float / integer descriptors.
 
-fn scalar_name(sc: u8) -> Str {
-    if sc == 1 {
+fn scalar_name(scalar: u8) -> Str {
+    if scalar == 1 {
         "u8"
-    } else if sc == 2 {
+    } else if scalar == 2 {
         "i8"
-    } else if sc == 3 {
+    } else if scalar == 3 {
         "u16"
-    } else if sc == 4 {
+    } else if scalar == 4 {
         "i16"
-    } else if sc == 5 {
+    } else if scalar == 5 {
         "u32"
-    } else if sc == 6 {
+    } else if scalar == 6 {
         "i32"
-    } else if sc == 7 {
+    } else if scalar == 7 {
         "u64"
-    } else if sc == 8 {
+    } else if scalar == 8 {
         "i64"
     } else {
         "usize"
     }
 }
 
-fn parse_scalar(in s: Slice[u8]) -> u8 {
-    if eq_bytes(in s, in "u8".as_bytes()) {
+fn parse_scalar(in name: Slice[u8]) -> u8 {
+    if eq_bytes(in name, in "u8".as_bytes()) {
         1
-    } else if eq_bytes(in s, in "i8".as_bytes()) {
+    } else if eq_bytes(in name, in "i8".as_bytes()) {
         2
-    } else if eq_bytes(in s, in "u16".as_bytes()) {
+    } else if eq_bytes(in name, in "u16".as_bytes()) {
         3
-    } else if eq_bytes(in s, in "i16".as_bytes()) {
+    } else if eq_bytes(in name, in "i16".as_bytes()) {
         4
-    } else if eq_bytes(in s, in "u32".as_bytes()) {
+    } else if eq_bytes(in name, in "u32".as_bytes()) {
         5
-    } else if eq_bytes(in s, in "i32".as_bytes()) {
+    } else if eq_bytes(in name, in "i32".as_bytes()) {
         6
-    } else if eq_bytes(in s, in "u64".as_bytes()) {
+    } else if eq_bytes(in name, in "u64".as_bytes()) {
         7
-    } else if eq_bytes(in s, in "i64".as_bytes()) {
+    } else if eq_bytes(in name, in "i64".as_bytes()) {
         8
-    } else if eq_bytes(in s, in "usize".as_bytes()) {
+    } else if eq_bytes(in name, in "usize".as_bytes()) {
         9
     } else {
         0
     }
 }
 
-fn scalar_signed(sc: u8) -> bool {
-    sc == 2 || sc == 4 || sc == 6 || sc == 8
+fn scalar_signed(scalar: u8) -> bool {
+    scalar == 2 || scalar == 4 || scalar == 6 || scalar == 8
 }
 
-fn scalar_bits(sc: u8) -> u8 {
-    if sc == 1 || sc == 2 {
+fn scalar_bits(scalar: u8) -> u8 {
+    if scalar == 1 || scalar == 2 {
         8
-    } else if sc == 3 || sc == 4 {
+    } else if scalar == 3 || scalar == 4 {
         16
-    } else if sc == 5 || sc == 6 {
+    } else if scalar == 5 || scalar == 6 {
         32
     } else {
         64
     }
 }
 
-fn parse_float(in s: Slice[u8]) -> u8 {
-    if eq_bytes(in s, in "f32".as_bytes()) {
+fn parse_float(in name: Slice[u8]) -> u8 {
+    if eq_bytes(in name, in "f32".as_bytes()) {
         1
-    } else if eq_bytes(in s, in "f64".as_bytes()) {
+    } else if eq_bytes(in name, in "f64".as_bytes()) {
         2
     } else {
         0
     }
 }
 
-fn float_name(fl: u8) -> Str {
-    if fl == 1 { "f32" } else { "f64" }
+fn float_name(float_kind: u8) -> Str {
+    if float_kind == 1 { "f32" } else { "f64" }
 }
 
-fn is_reserved_type(in s: Slice[u8]) -> bool {
-    parse_scalar(in s) != 0
-        || parse_float(in s) != 0
-        || eq_bytes(in s, in "bool".as_bytes())
-        || eq_bytes(in s, in "Unit".as_bytes())
-        || eq_bytes(in s, in "Ptr".as_bytes())
-        || eq_bytes(in s, in "NullablePtr".as_bytes())
-        || eq_bytes(in s, in "Option".as_bytes())
-        || eq_bytes(in s, in "NonNull".as_bytes())
-        || eq_bytes(in s, in "ForeignVal".as_bytes())
-        || eq_bytes(in s, in "CStr".as_bytes())
-        || eq_bytes(in s, in "CWStr".as_bytes())
-        || eq_bytes(in s, in "CStrList".as_bytes())
-        || eq_bytes(in s, in "CSlice".as_bytes())
-        || eq_bytes(in s, in "Pinned".as_bytes())
-        || eq_bytes(in s, in "ByteArray".as_bytes())
-        || eq_bytes(in s, in "ZeroPad".as_bytes())
+fn is_reserved_type(in name: Slice[u8]) -> bool {
+    parse_scalar(in name) != 0
+        || parse_float(in name) != 0
+        || eq_bytes(in name, in "bool".as_bytes())
+        || eq_bytes(in name, in "Unit".as_bytes())
+        || eq_bytes(in name, in "Ptr".as_bytes())
+        || eq_bytes(in name, in "NullablePtr".as_bytes())
+        || eq_bytes(in name, in "Option".as_bytes())
+        || eq_bytes(in name, in "NonNull".as_bytes())
+        || eq_bytes(in name, in "ForeignVal".as_bytes())
+        || eq_bytes(in name, in "CStr".as_bytes())
+        || eq_bytes(in name, in "CWStr".as_bytes())
+        || eq_bytes(in name, in "CStrList".as_bytes())
+        || eq_bytes(in name, in "CSlice".as_bytes())
+        || eq_bytes(in name, in "Pinned".as_bytes())
+        || eq_bytes(in name, in "ByteArray".as_bytes())
+        || eq_bytes(in name, in "ZeroPad".as_bytes())
 }
 
 // ---------------------------------------------------------------------------
 // IR records.
 
 copy struct EnumVar {
-    na: u64,
-    nb: u64,
-    val: u64,
+    name_start: u64,
+    name_end: u64,
+    value: u64,
 }
 
 copy struct EnumDef {
-    na: u64,
-    nb: u64,
+    name_start: u64,
+    name_end: u64,
     scalar: u8,
-    v0: u64,
-    vn: u64,
+    variant_start: u64,
+    variant_count: u64,
 }
 
 copy struct ConstDef {
-    na: u64,
-    nb: u64,
+    name_start: u64,
+    name_end: u64,
     scalar: u8,
-    neg: bool,
-    mag: u64,
+    negative: bool,
+    magnitude: u64,
 }
 
 copy struct ExternDef {
-    na: u64,
-    nb: u64,
+    name_start: u64,
+    name_end: u64,
     // 1 = linear, 2 = affine, 3 = callback
     linearity: u8,
     has_drop: bool,
-    drop_a: u64,
-    drop_b: u64,
+    drop_start: u64,
+    drop_end: u64,
     mapping: u8,
 }
 
@@ -192,43 +196,44 @@ copy struct ExternDef {
 // 8=Handle, 9=NullableHandle, 10=NonNullHandle, 11=OptionCStr, 12=OptionCWStr
 copy struct ValTy {
     tag: u8,
-    sc: u8,
-    na: u64,
-    nb: u64,
+    // scalar code (as in `parse_scalar`), or the float code for tag 3
+    num_kind: u8,
+    name_start: u64,
+    name_end: u64,
 }
 
 copy struct ParDef {
-    na: u64,
-    nb: u64,
+    name_start: u64,
+    name_end: u64,
     kind: u8,
     // access: 1=in, 2=inout, 3=out, 4=sink
     access: u8,
     flag: bool,
-    vt: ValTy,
+    val_ty: ValTy,
     // pointee / handle / callback name
-    p_sc: u8,
-    p_na: u64,
-    p_nb: u64,
+    pointee_scalar: u8,
+    pointee_start: u64,
+    pointee_end: u64,
     is_struct: bool,
 }
 
 copy struct FunDef {
-    sym_a: u64,
-    sym_b: u64,
-    p0: u64,
-    pn: u64,
+    sym_start: u64,
+    sym_end: u64,
+    param_start: u64,
+    param_count: u64,
     result: ValTy,
     has_len: bool,
-    len_a: u64,
-    len_b: u64,
+    len_name_start: u64,
+    len_name_end: u64,
     mapping_len: u64,
     has_mapping_len: bool,
     errno: bool,
     has_variadic: bool,
-    variadic: u64,
+    variadic_from: u64,
     has_link: bool,
-    link_a: u64,
-    link_b: u64,
+    link_name_start: u64,
+    link_name_end: u64,
     indirect: bool,
 }
 
@@ -241,127 +246,129 @@ struct P {
     at: u64,
 }
 
-fn cur(in p: P) -> Tok {
-    match p.toks.try_get(p.at) {
-        Option::Some(t) => t,
+fn cur(in parser: P) -> Tok {
+    match parser.toks.try_get(parser.at) {
+        Option::Some(tok) => tok,
         Option::None => Tok {
             kind: tok_eof(),
-            a: 0,
-            b: 0,
+            text_start: 0,
+            text_end: 0,
             num: 0,
-            s0: 0,
-            s1: 0,
+            span_start: 0,
+            span_end: 0,
         },
     }
 }
 
-fn peek_tok(in p: P, off: u64) -> Tok {
-    match p.toks.try_get(wrapping_add(p.at, off)) {
-        Option::Some(t) => t,
+fn peek_tok(in parser: P, offset: u64) -> Tok {
+    match parser.toks.try_get(wrapping_add(parser.at, offset)) {
+        Option::Some(tok) => tok,
         Option::None => Tok {
             kind: tok_eof(),
-            a: 0,
-            b: 0,
+            text_start: 0,
+            text_end: 0,
             num: 0,
-            s0: 0,
-            s1: 0,
+            span_start: 0,
+            span_end: 0,
         },
     }
 }
 
-fn err_at[T](in p: P, kind: u8, code: u32) -> T eff [Fail[VsysError]] {
-    let t = cur(in p);
-    fail_vsys(kind, t.s0, t.s1, code)
+fn err_at[T](in parser: P, kind: u8, code: u32) -> T eff [Fail[VsysError]] {
+    let tok = cur(in parser);
+    fail_vsys(kind, tok.span_start, tok.span_end, code)
 }
 
-fn bump(inout p: P) -> Tok {
-    let t = cur(in p);
-    if t.kind != tok_eof() {
-        p.at = wrapping_add(p.at, 1);
+fn bump(inout parser: P) -> Tok {
+    let tok = cur(in parser);
+    if tok.kind != tok_eof() {
+        parser.at = wrapping_add(parser.at, 1);
     }
-    t
+    tok
 }
 
-fn eat_punct(inout p: P, ch: u8) -> bool {
-    let t = cur(in p);
-    if t.kind == tok_punct() && t.a == widen_u64(ch) {
-        p.at = wrapping_add(p.at, 1);
+fn eat_punct(inout parser: P, punct: u8) -> bool {
+    let tok = cur(in parser);
+    if tok.kind == tok_punct() && tok.text_start == widen_u64(punct) {
+        parser.at = wrapping_add(parser.at, 1);
         true
     } else {
         false
     }
 }
 
-fn expect_punct(inout p: P, ch: u8) eff [Fail[VsysError]] {
-    if !eat_punct(inout p, ch) {
-        err_at(in p, err_syntax(), 300)
+fn expect_punct(inout parser: P, punct: u8) eff [Fail[VsysError]] {
+    if !eat_punct(inout parser, punct) {
+        err_at(in parser, err_syntax(), 300)
     }
 }
 
-fn is_word(in p: P, in s: Str) -> bool {
-    let t = cur(in p);
-    t.kind == tok_word() && eq_str(in p.arena.as_slice(), t.a, t.b, in s)
+fn is_word(in parser: P, in word: Str) -> bool {
+    let tok = cur(in parser);
+    tok.kind == tok_word()
+        && eq_str(in parser.arena.as_slice(), tok.text_start, tok.text_end, in word)
 }
 
-fn peek_is_word(in p: P, off: u64, in s: Str) -> bool {
-    let t = peek_tok(in p, off);
-    t.kind == tok_word() && eq_str(in p.arena.as_slice(), t.a, t.b, in s)
+fn peek_is_word(in parser: P, offset: u64, in word: Str) -> bool {
+    let tok = peek_tok(in parser, offset);
+    tok.kind == tok_word()
+        && eq_str(in parser.arena.as_slice(), tok.text_start, tok.text_end, in word)
 }
 
-fn peek_is_punct(in p: P, off: u64, ch: u8) -> bool {
-    let t = peek_tok(in p, off);
-    t.kind == tok_punct() && t.a == widen_u64(ch)
+fn peek_is_punct(in parser: P, offset: u64, punct: u8) -> bool {
+    let tok = peek_tok(in parser, offset);
+    tok.kind == tok_punct() && tok.text_start == widen_u64(punct)
 }
 
-fn expect_word(inout p: P, in s: Str) eff [Fail[VsysError]] {
-    if is_word(in p, in s) {
-        let _ = bump(inout p);
+fn expect_word(inout parser: P, in word: Str) eff [Fail[VsysError]] {
+    if is_word(in parser, in word) {
+        let _ = bump(inout parser);
     } else {
-        err_at(in p, err_syntax(), 301)
+        err_at(in parser, err_syntax(), 301)
     }
 }
 
-fn take_word(inout p: P) -> (u64, u64) eff [Fail[VsysError]] {
-    let t = cur(in p);
-    if t.kind != tok_word() {
-        return err_at(in p, err_syntax(), 302);
+fn take_word(inout parser: P) -> (u64, u64) eff [Fail[VsysError]] {
+    let tok = cur(in parser);
+    if tok.kind != tok_word() {
+        return err_at(in parser, err_syntax(), 302);
     }
-    let _ = bump(inout p);
-    (t.a, t.b)
+    let _ = bump(inout parser);
+    (tok.text_start, tok.text_end)
 }
 
-fn take_text(inout p: P) -> (u64, u64) eff [Fail[VsysError]] {
-    let t = cur(in p);
-    if t.kind != tok_text() {
-        return err_at(in p, err_syntax(), 303);
+fn take_text(inout parser: P) -> (u64, u64) eff [Fail[VsysError]] {
+    let tok = cur(in parser);
+    if tok.kind != tok_text() {
+        return err_at(in parser, err_syntax(), 303);
     }
-    let _ = bump(inout p);
-    (t.a, t.b)
+    let _ = bump(inout parser);
+    (tok.text_start, tok.text_end)
 }
 
-fn take_num(inout p: P) -> u64 eff [Fail[VsysError]] {
-    let t = cur(in p);
-    if t.kind != tok_num() {
-        return err_at(in p, err_syntax(), 304);
+fn take_num(inout parser: P) -> u64 eff [Fail[VsysError]] {
+    let tok = cur(in parser);
+    if tok.kind != tok_num() {
+        return err_at(in parser, err_syntax(), 304);
     }
-    let _ = bump(inout p);
-    t.num
+    let _ = bump(inout parser);
+    tok.num
 }
 
 // ---------------------------------------------------------------------------
 // Header option validation.
 
-fn is_bare_link_name(in s: Slice[u8]) -> bool {
-    let n = s.len();
+fn is_bare_link_name(in name: Slice[u8]) -> bool {
+    let n = name.len();
     if n == 0 || n > 128 {
         return false;
     }
-    let first = u8_at(in s, 0);
+    let first = u8_at(in name, 0);
     if first == 45 {
         return false;
     }
     for i in 0..n {
-        let c = u8_at(in s, i);
+        let c = u8_at(in name, i);
         let ok = (c >= 97 && c <= 122)
             || (c >= 65 && c <= 90)
             || (c >= 48 && c <= 57)
@@ -385,17 +392,21 @@ fn parse_hex_nibble(c: u8) -> u8 {
     }
 }
 
-fn parse_artifact_blake3(in p: P, a: u64, b: u64) -> ChunkSeq[u8] eff [Fail[VsysError]] {
-    let s = p.arena[a..b];
-    if s.len() != 71 || !eq_bytes(in s[0..7], in "blake3:".as_bytes()) {
-        return err_at(in p, err_syntax(), 310);
+fn parse_artifact_blake3(
+    in parser: P,
+    text_start: u64,
+    text_end: u64
+) -> ChunkSeq[u8] eff [Fail[VsysError]] {
+    let text = parser.arena[text_start..text_end];
+    if text.len() != 71 || !eq_bytes(in text[0..7], in "blake3:".as_bytes()) {
+        return err_at(in parser, err_syntax(), 310);
     }
     let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](32);
     for i in 0..32 {
-        let hi = parse_hex_nibble(u8_at(in s, wrapping_add(7, wrapping_mul(i, 2))));
-        let lo = parse_hex_nibble(u8_at(in s, wrapping_add(8, wrapping_mul(i, 2))));
+        let hi = parse_hex_nibble(u8_at(in text, wrapping_add(7, wrapping_mul(i, 2))));
+        let lo = parse_hex_nibble(u8_at(in text, wrapping_add(8, wrapping_mul(i, 2))));
         if hi > 15 || lo > 15 {
-            return err_at(in p, err_syntax(), 311);
+            return err_at(in parser, err_syntax(), 311);
         }
         out.push(wrapping_shl_u8(hi, 4) | lo);
     }
@@ -405,240 +416,243 @@ fn parse_artifact_blake3(in p: P, a: u64, b: u64) -> ChunkSeq[u8] eff [Fail[Vsys
 // ---------------------------------------------------------------------------
 // Type parsing (value types, wire types, parameters).
 
-fn parse_raw_val_type(inout p: P) -> ValTy eff [Fail[VsysError]] {
-    let (na, nb) = take_word(inout p);
-    let is_ptr = eq_bytes(in p.arena[na..nb], in "Ptr".as_bytes());
-    let is_nptr = eq_bytes(in p.arena[na..nb], in "NullablePtr".as_bytes());
-    if is_ptr || is_nptr {
-        let nullable = is_nptr;
-        expect_punct(inout p, 91);
-        let (pa, pb) = take_word(inout p);
-        let sc = parse_scalar(in p.arena[pa..pb]);
-        if sc == 0 {
-            return err_at(in p, err_unsupported(), 320);
+fn parse_raw_val_type(inout parser: P) -> ValTy eff [Fail[VsysError]] {
+    let (name_start, name_end) = take_word(inout parser);
+    let is_ptr = eq_bytes(in parser.arena[name_start..name_end], in "Ptr".as_bytes());
+    let is_nullable_ptr = eq_bytes(
+        in parser.arena[name_start..name_end],
+        in "NullablePtr".as_bytes()
+    );
+    if is_ptr || is_nullable_ptr {
+        let nullable = is_nullable_ptr;
+        expect_punct(inout parser, 91);
+        let (pointee_start, pointee_end) = take_word(inout parser);
+        let scalar = parse_scalar(in parser.arena[pointee_start..pointee_end]);
+        if scalar == 0 {
+            return err_at(in parser, err_unsupported(), 320);
         }
-        expect_punct(inout p, 93);
+        expect_punct(inout parser, 93);
         return ValTy {
             tag: if nullable { 7 } else { 6 },
-            sc: sc,
-            na: 0,
-            nb: 0,
+            num_kind: scalar,
+            name_start: 0,
+            name_end: 0,
         };
     }
-    let s = p.arena[na..nb];
-    if eq_bytes(in s, in "Unit".as_bytes()) {
+    let name = parser.arena[name_start..name_end];
+    if eq_bytes(in name, in "Unit".as_bytes()) {
         return ValTy {
             tag: 1,
-            sc: 0,
-            na: 0,
-            nb: 0,
+            num_kind: 0,
+            name_start: 0,
+            name_end: 0,
         };
     }
-    if eq_bytes(in s, in "bool".as_bytes()) {
+    if eq_bytes(in name, in "bool".as_bytes()) {
         return ValTy {
             tag: 4,
-            sc: 0,
-            na: 0,
-            nb: 0,
+            num_kind: 0,
+            name_start: 0,
+            name_end: 0,
         };
     }
-    let sc = parse_scalar(in s);
-    if sc != 0 {
+    let scalar = parse_scalar(in name);
+    if scalar != 0 {
         return ValTy {
             tag: 2,
-            sc: sc,
-            na: 0,
-            nb: 0,
+            num_kind: scalar,
+            name_start: 0,
+            name_end: 0,
         };
     }
-    let fl = parse_float(in s);
-    if fl != 0 {
+    let float_kind = parse_float(in name);
+    if float_kind != 0 {
         return ValTy {
             tag: 3,
-            sc: fl,
-            na: 0,
-            nb: 0,
+            num_kind: float_kind,
+            name_start: 0,
+            name_end: 0,
         };
     }
     // Named enum or handle (resolved later).
     ValTy {
         tag: 5,
-        sc: 0,
-        na: na,
-        nb: nb,
+        num_kind: 0,
+        name_start: name_start,
+        name_end: name_end,
     }
 }
 
 fn parse_wire_field_type(
-    inout p: P,
-    name_a: u64,
-    name_b: u64,
-    s0: u64,
-    s1: u64
+    inout parser: P,
+    name_start: u64,
+    name_end: u64,
+    span_start: u64,
+    span_end: u64
 ) -> WireField eff [Fail[VsysError]] {
-    let (ta, tb) = take_word(inout p);
-    let is_ba = eq_bytes(in p.arena[ta..tb], in "ByteArray".as_bytes());
-    let is_zp = eq_bytes(in p.arena[ta..tb], in "ZeroPad".as_bytes());
-    if is_ba || is_zp {
-        let is_pad = is_zp;
-        expect_punct(inout p, 91);
-        let n = take_num(inout p);
-        expect_punct(inout p, 93);
+    let (type_start, type_end) = take_word(inout parser);
+    let is_byte_array = eq_bytes(in parser.arena[type_start..type_end], in "ByteArray".as_bytes());
+    let is_zero_pad = eq_bytes(in parser.arena[type_start..type_end], in "ZeroPad".as_bytes());
+    if is_byte_array || is_zero_pad {
+        let is_pad = is_zero_pad;
+        expect_punct(inout parser, 91);
+        let count = take_num(inout parser);
+        expect_punct(inout parser, 93);
         return WireField {
-            name_a: name_a,
-            name_b: name_b,
+            name_start: name_start,
+            name_end: name_end,
             kind: if is_pad { wt_pad() } else { wt_bytes() },
             signed: false,
             bits: 0,
             endian: 0,
-            count: n,
-            struct_a: 0,
-            struct_b: 0,
-            s0: s0,
-            s1: s1,
+            count: count,
+            struct_name_start: 0,
+            struct_name_end: 0,
+            span_start: span_start,
+            span_end: span_end,
         };
     }
-    let ts = p.arena[ta..tb];
+    let type_name = parser.arena[type_start..type_end];
     let mut endian = endian_native();
-    let mut base_len = ts.len();
+    let mut base_len = type_name.len();
     if base_len > 2 {
-        let e0 = u8_at(in ts, wrapping_sub(base_len, 2));
-        let e1 = u8_at(in ts, wrapping_sub(base_len, 1));
-        if e0 == 108 && e1 == 101 {
+        let second_last = u8_at(in type_name, wrapping_sub(base_len, 2));
+        let last = u8_at(in type_name, wrapping_sub(base_len, 1));
+        if second_last == 108 && last == 101 {
             endian = endian_le();
             base_len = wrapping_sub(base_len, 2);
-        } else if e0 == 98 && e1 == 101 {
+        } else if second_last == 98 && last == 101 {
             endian = endian_be();
             base_len = wrapping_sub(base_len, 2);
         }
     }
-    let base = p.arena[ta..wrapping_add(ta, base_len)];
-    let sc = parse_scalar(in base);
-    if sc != 0 && sc != 9 {
-        let bits = scalar_bits(sc);
+    let base_name = parser.arena[type_start..wrapping_add(type_start, base_len)];
+    let scalar = parse_scalar(in base_name);
+    if scalar != 0 && scalar != 9 {
+        let bits = scalar_bits(scalar);
         if bits == 8 && endian != endian_native() {
-            return err_at(in p, err_type(), 330);
+            return err_at(in parser, err_type(), 330);
         }
         return WireField {
-            name_a: name_a,
-            name_b: name_b,
+            name_start: name_start,
+            name_end: name_end,
             kind: wt_int(),
-            signed: scalar_signed(sc),
+            signed: scalar_signed(scalar),
             bits: bits,
             endian: endian,
             count: 0,
-            struct_a: 0,
-            struct_b: 0,
-            s0: s0,
-            s1: s1,
+            struct_name_start: 0,
+            struct_name_end: 0,
+            span_start: span_start,
+            span_end: span_end,
         };
     }
     WireField {
-        name_a: name_a,
-        name_b: name_b,
+        name_start: name_start,
+        name_end: name_end,
         kind: wt_struct(),
         signed: false,
         bits: 0,
         endian: 0,
         count: 0,
-        struct_a: ta,
-        struct_b: tb,
-        s0: s0,
-        s1: s1,
+        struct_name_start: type_start,
+        struct_name_end: type_end,
+        span_start: span_start,
+        span_end: span_end,
     }
 }
 
 fn parse_borrowed_param(
-    inout p: P,
-    name_a: u64,
-    name_b: u64,
+    inout parser: P,
+    name_start: u64,
+    name_end: u64,
     access: u8
 ) -> ParDef eff [Fail[VsysError]] {
     let mut nullable = false;
-    if is_word(in p, in "Option") {
-        let _ = bump(inout p);
-        expect_punct(inout p, 91);
+    if is_word(in parser, in "Option") {
+        let _ = bump(inout parser);
+        expect_punct(inout parser, 91);
         nullable = true;
     }
-    let mut par = ParDef {
-        na: name_a,
-        nb: name_b,
+    let mut param = ParDef {
+        name_start: name_start,
+        name_end: name_end,
         kind: 3,
         access: access,
         flag: nullable,
-        vt: ValTy {
+        val_ty: ValTy {
             tag: 1,
-            sc: 0,
-            na: 0,
-            nb: 0,
+            num_kind: 0,
+            name_start: 0,
+            name_end: 0,
         },
-        p_sc: 0,
-        p_na: 0,
-        p_nb: 0,
+        pointee_scalar: 0,
+        pointee_start: 0,
+        pointee_end: 0,
         is_struct: false,
     };
-    if is_word(in p, in "CStr") {
+    if is_word(in parser, in "CStr") {
         if access != 1 || nullable {
-            return err_at(in p, err_unsupported(), 340);
+            return err_at(in parser, err_unsupported(), 340);
         }
-        let _ = bump(inout p);
-        par.kind = 5;
-        return par;
+        let _ = bump(inout parser);
+        param.kind = 5;
+        return param;
     }
-    if is_word(in p, in "CStrList") {
+    if is_word(in parser, in "CStrList") {
         if access != 1 || nullable {
-            return err_at(in p, err_unsupported(), 341);
+            return err_at(in parser, err_unsupported(), 341);
         }
-        let _ = bump(inout p);
-        par.kind = 7;
-        return par;
+        let _ = bump(inout parser);
+        param.kind = 7;
+        return param;
     }
-    if is_word(in p, in "CWStr") {
+    if is_word(in parser, in "CWStr") {
         if access != 1 || nullable {
-            return err_at(in p, err_unsupported(), 342);
+            return err_at(in parser, err_unsupported(), 342);
         }
-        let _ = bump(inout p);
-        par.kind = 6;
-        return par;
+        let _ = bump(inout parser);
+        param.kind = 6;
+        return param;
     }
-    if is_word(in p, in "CSlice") {
+    if is_word(in parser, in "CSlice") {
         if access == 3 {
-            return err_at(in p, err_unsupported(), 343);
+            return err_at(in parser, err_unsupported(), 343);
         }
-        let _ = bump(inout p);
-        expect_punct(inout p, 91);
-        let (ea, eb) = take_word(inout p);
-        let sc = parse_scalar(in p.arena[ea..eb]);
-        par.kind = 2;
-        if sc != 0 {
-            par.p_sc = sc;
+        let _ = bump(inout parser);
+        expect_punct(inout parser, 91);
+        let (elem_start, elem_end) = take_word(inout parser);
+        let scalar = parse_scalar(in parser.arena[elem_start..elem_end]);
+        param.kind = 2;
+        if scalar != 0 {
+            param.pointee_scalar = scalar;
         } else {
-            par.is_struct = true;
-            par.p_na = ea;
-            par.p_nb = eb;
+            param.is_struct = true;
+            param.pointee_start = elem_start;
+            param.pointee_end = elem_end;
         }
-        expect_punct(inout p, 93);
+        expect_punct(inout parser, 93);
         if nullable {
-            expect_punct(inout p, 93);
+            expect_punct(inout parser, 93);
         }
-        return par;
+        return param;
     }
-    let (ea, eb) = take_word(inout p);
-    let sc = parse_scalar(in p.arena[ea..eb]);
-    if sc != 0 {
-        par.kind = 3;
-        par.p_sc = sc;
+    let (pointee_start, pointee_end) = take_word(inout parser);
+    let scalar = parse_scalar(in parser.arena[pointee_start..pointee_end]);
+    if scalar != 0 {
+        param.kind = 3;
+        param.pointee_scalar = scalar;
     } else {
         // Could be WireStruct (Pointer) or Handle (resolved later).
-        par.kind = 3;
-        par.is_struct = true;
-        par.p_na = ea;
-        par.p_nb = eb;
+        param.kind = 3;
+        param.is_struct = true;
+        param.pointee_start = pointee_start;
+        param.pointee_end = pointee_end;
     }
     if nullable {
-        expect_punct(inout p, 93);
+        expect_punct(inout parser, 93);
     }
-    par
+    param
 }
 
 // ---------------------------------------------------------------------------
@@ -651,158 +665,179 @@ fn sort_vars(inout vars: ChunkSeq[EnumVar], start: u64, n: u64, in arena: Slice[
             if j == 0 {
                 break;
             }
-            let idx_a = wrapping_add(start, wrapping_sub(j, 1));
-            let idx_b = wrapping_add(start, j);
-            let a = match vars.try_get(idx_a) {
+            let left_index = wrapping_add(start, wrapping_sub(j, 1));
+            let right_index = wrapping_add(start, j);
+            let left = match vars.try_get(left_index) {
                 Option::Some(v) => v,
                 Option::None => break,
             };
-            let b = match vars.try_get(idx_b) {
+            let right = match vars.try_get(right_index) {
                 Option::Some(v) => v,
                 Option::None => break,
             };
-            let swap = if lt_bytes(in arena[b.na..b.nb], in arena[a.na..a.nb]) {
+            let swap = if lt_bytes(
+                in arena[right.name_start..right.name_end],
+                in arena[left.name_start..left.name_end]
+            ) {
                 true
-            } else if eq_bytes(in arena[a.na..a.nb], in arena[b.na..b.nb]) {
-                b.val < a.val
+            } else if eq_bytes(
+                in arena[left.name_start..left.name_end],
+                in arena[right.name_start..right.name_end]
+            ) {
+                right.value < left.value
             } else {
                 false
             };
             if !swap {
                 break;
             }
-            vars.try_set(idx_a, b);
-            vars.try_set(idx_b, a);
+            vars.try_set(left_index, right);
+            vars.try_set(right_index, left);
             j = wrapping_sub(j, 1);
         }
     }
 }
 
-fn sort_consts(inout cs: ChunkSeq[ConstDef], in arena: Slice[u8]) {
-    let n = cs.len();
+fn sort_consts(inout consts: ChunkSeq[ConstDef], in arena: Slice[u8]) {
+    let n = consts.len();
     for i in 1..n {
         let mut j = i;
         loop {
             if j == 0 {
                 break;
             }
-            let a = match cs.try_get(wrapping_sub(j, 1)) {
+            let left = match consts.try_get(wrapping_sub(j, 1)) {
                 Option::Some(v) => v,
                 Option::None => break,
             };
-            let b = match cs.try_get(j) {
+            let right = match consts.try_get(j) {
                 Option::Some(v) => v,
                 Option::None => break,
             };
-            if !lt_bytes(in arena[b.na..b.nb], in arena[a.na..a.nb]) {
+            if !lt_bytes(
+                in arena[right.name_start..right.name_end],
+                in arena[left.name_start..left.name_end]
+            ) {
                 break;
             }
-            cs.try_set(wrapping_sub(j, 1), b);
-            cs.try_set(j, a);
+            consts.try_set(wrapping_sub(j, 1), right);
+            consts.try_set(j, left);
             j = wrapping_sub(j, 1);
         }
     }
 }
 
-fn sort_enums(inout es: ChunkSeq[EnumDef], in arena: Slice[u8]) {
-    let n = es.len();
+fn sort_enums(inout enums: ChunkSeq[EnumDef], in arena: Slice[u8]) {
+    let n = enums.len();
     for i in 1..n {
         let mut j = i;
         loop {
             if j == 0 {
                 break;
             }
-            let a = match es.try_get(wrapping_sub(j, 1)) {
+            let left = match enums.try_get(wrapping_sub(j, 1)) {
                 Option::Some(v) => v,
                 Option::None => break,
             };
-            let b = match es.try_get(j) {
+            let right = match enums.try_get(j) {
                 Option::Some(v) => v,
                 Option::None => break,
             };
-            if !lt_bytes(in arena[b.na..b.nb], in arena[a.na..a.nb]) {
+            if !lt_bytes(
+                in arena[right.name_start..right.name_end],
+                in arena[left.name_start..left.name_end]
+            ) {
                 break;
             }
-            es.try_set(wrapping_sub(j, 1), b);
-            es.try_set(j, a);
+            enums.try_set(wrapping_sub(j, 1), right);
+            enums.try_set(j, left);
             j = wrapping_sub(j, 1);
         }
     }
 }
 
-fn sort_externs(inout xs: ChunkSeq[ExternDef], in arena: Slice[u8]) {
-    let n = xs.len();
+fn sort_externs(inout externs: ChunkSeq[ExternDef], in arena: Slice[u8]) {
+    let n = externs.len();
     for i in 1..n {
         let mut j = i;
         loop {
             if j == 0 {
                 break;
             }
-            let a = match xs.try_get(wrapping_sub(j, 1)) {
+            let left = match externs.try_get(wrapping_sub(j, 1)) {
                 Option::Some(v) => v,
                 Option::None => break,
             };
-            let b = match xs.try_get(j) {
+            let right = match externs.try_get(j) {
                 Option::Some(v) => v,
                 Option::None => break,
             };
-            if !lt_bytes(in arena[b.na..b.nb], in arena[a.na..a.nb]) {
+            if !lt_bytes(
+                in arena[right.name_start..right.name_end],
+                in arena[left.name_start..left.name_end]
+            ) {
                 break;
             }
-            xs.try_set(wrapping_sub(j, 1), b);
-            xs.try_set(j, a);
+            externs.try_set(wrapping_sub(j, 1), right);
+            externs.try_set(j, left);
             j = wrapping_sub(j, 1);
         }
     }
 }
 
-fn sort_wires(inout ws: ChunkSeq[WireStructDef], in arena: Slice[u8]) {
-    let n = ws.len();
+fn sort_wires(inout wires: ChunkSeq[WireStructDef], in arena: Slice[u8]) {
+    let n = wires.len();
     for i in 1..n {
         let mut j = i;
         loop {
             if j == 0 {
                 break;
             }
-            let a = match ws.try_get(wrapping_sub(j, 1)) {
+            let left = match wires.try_get(wrapping_sub(j, 1)) {
                 Option::Some(v) => v,
                 Option::None => break,
             };
-            let b = match ws.try_get(j) {
+            let right = match wires.try_get(j) {
                 Option::Some(v) => v,
                 Option::None => break,
             };
-            if !lt_bytes(in arena[b.name_a..b.name_b], in arena[a.name_a..a.name_b]) {
+            if !lt_bytes(
+                in arena[right.name_start..right.name_end],
+                in arena[left.name_start..left.name_end]
+            ) {
                 break;
             }
-            ws.try_set(wrapping_sub(j, 1), b);
-            ws.try_set(j, a);
+            wires.try_set(wrapping_sub(j, 1), right);
+            wires.try_set(j, left);
             j = wrapping_sub(j, 1);
         }
     }
 }
 
-fn sort_funs(inout fs: ChunkSeq[FunDef], in arena: Slice[u8]) {
-    let n = fs.len();
+fn sort_funs(inout funs: ChunkSeq[FunDef], in arena: Slice[u8]) {
+    let n = funs.len();
     for i in 1..n {
         let mut j = i;
         loop {
             if j == 0 {
                 break;
             }
-            let a = match fs.try_get(wrapping_sub(j, 1)) {
+            let left = match funs.try_get(wrapping_sub(j, 1)) {
                 Option::Some(v) => v,
                 Option::None => break,
             };
-            let b = match fs.try_get(j) {
+            let right = match funs.try_get(j) {
                 Option::Some(v) => v,
                 Option::None => break,
             };
-            if !lt_bytes(in arena[b.sym_a..b.sym_b], in arena[a.sym_a..a.sym_b]) {
+            if !lt_bytes(
+                in arena[right.sym_start..right.sym_end],
+                in arena[left.sym_start..left.sym_end]
+            ) {
                 break;
             }
-            fs.try_set(wrapping_sub(j, 1), b);
-            fs.try_set(j, a);
+            funs.try_set(wrapping_sub(j, 1), right);
+            funs.try_set(j, left);
             j = wrapping_sub(j, 1);
         }
     }
@@ -811,39 +846,60 @@ fn sort_funs(inout fs: ChunkSeq[FunDef], in arena: Slice[u8]) {
 // ---------------------------------------------------------------------------
 // Name resolution helpers.
 
-fn find_enum(in es: Slice[EnumDef], in arena: Slice[u8], a: u64, b: u64) -> Option[u64] {
-    for i in 0..es.len() {
-        let e = match es.try_get(i) {
+fn find_enum(
+    in enums: Slice[EnumDef],
+    in arena: Slice[u8],
+    name_start: u64,
+    name_end: u64
+) -> Option[u64] {
+    for i in 0..enums.len() {
+        let enum_def = match enums.try_get(i) {
             Option::Some(v) => v,
             Option::None => continue,
         };
-        if eq_bytes(in arena[e.na..e.nb], in arena[a..b]) {
+        if eq_bytes(
+            in arena[enum_def.name_start..enum_def.name_end],
+            in arena[name_start..name_end]
+        ) {
             return Option::Some(i);
         }
     }
     Option::None
 }
 
-fn find_extern(in xs: Slice[ExternDef], in arena: Slice[u8], a: u64, b: u64) -> Option[u64] {
-    for i in 0..xs.len() {
-        let x = match xs.try_get(i) {
+fn find_extern(
+    in externs: Slice[ExternDef],
+    in arena: Slice[u8],
+    name_start: u64,
+    name_end: u64
+) -> Option[u64] {
+    for i in 0..externs.len() {
+        let extern_def = match externs.try_get(i) {
             Option::Some(v) => v,
             Option::None => continue,
         };
-        if eq_bytes(in arena[x.na..x.nb], in arena[a..b]) {
+        if eq_bytes(
+            in arena[extern_def.name_start..extern_def.name_end],
+            in arena[name_start..name_end]
+        ) {
             return Option::Some(i);
         }
     }
     Option::None
 }
 
-fn find_wire(in ws: Slice[WireStructDef], in arena: Slice[u8], a: u64, b: u64) -> Option[u64] {
-    for i in 0..ws.len() {
-        let w = match ws.try_get(i) {
+fn find_wire(
+    in wires: Slice[WireStructDef],
+    in arena: Slice[u8],
+    name_start: u64,
+    name_end: u64
+) -> Option[u64] {
+    for i in 0..wires.len() {
+        let wire = match wires.try_get(i) {
             Option::Some(v) => v,
             Option::None => continue,
         };
-        if eq_bytes(in arena[w.name_a..w.name_b], in arena[a..b]) {
+        if eq_bytes(in arena[wire.name_start..wire.name_end], in arena[name_start..name_end]) {
             return Option::Some(i);
         }
     }
@@ -851,163 +907,173 @@ fn find_wire(in ws: Slice[WireStructDef], in arena: Slice[u8], a: u64, b: u64) -
 }
 
 fn resolve_val_ty(
-    in vt: ValTy,
-    in es: Slice[EnumDef],
-    in xs: Slice[ExternDef],
+    in val_ty: ValTy,
+    in enums: Slice[EnumDef],
+    in externs: Slice[ExternDef],
     in arena: Slice[u8]
 ) -> ValTy eff [Fail[VsysError]] {
-    if vt.tag != 5 {
-        return vt;
+    if val_ty.tag != 5 {
+        return val_ty;
     }
-    match find_enum(in es, in arena, vt.na, vt.nb) {
+    match find_enum(in enums, in arena, val_ty.name_start, val_ty.name_end) {
         Option::Some(_) => ValTy {
             tag: 5,
-            sc: 0,
-            na: vt.na,
-            nb: vt.nb,
+            num_kind: 0,
+            name_start: val_ty.name_start,
+            name_end: val_ty.name_end,
         },
-        Option::None => match find_extern(in xs, in arena, vt.na, vt.nb) {
+        Option::None => match find_extern(
+            in externs,
+            in arena,
+            val_ty.name_start,
+            val_ty.name_end
+        ) {
             Option::Some(_) => ValTy {
                 tag: 8,
-                sc: 0,
-                na: vt.na,
-                nb: vt.nb,
+                num_kind: 0,
+                name_start: val_ty.name_start,
+                name_end: val_ty.name_end,
             },
             Option::None => fail_vsys(err_type(), 0, 0, 401),
         },
     }
 }
 
-fn encode_val_ty(inout enc: Encoder, in vt: ValTy, in arena: Slice[u8]) eff [Fail[VsysError]] {
-    if vt.tag == 1 {
-        put_str(inout enc, in "unit");
-    } else if vt.tag == 2 {
-        put_str(inout enc, in "scalar");
-        put_str(inout enc, in scalar_name(vt.sc));
-    } else if vt.tag == 3 {
-        put_str(inout enc, in "float");
-        put_str(inout enc, in float_name(vt.sc));
-    } else if vt.tag == 4 {
-        put_str(inout enc, in "bool-u8");
-    } else if vt.tag == 5 {
-        put_str(inout enc, in "enum");
-        put_bytes(inout enc, in arena[vt.na..vt.nb]);
-    } else if vt.tag == 6 {
-        put_str(inout enc, in "address");
-        put_str(inout enc, in scalar_name(vt.sc));
-    } else if vt.tag == 7 {
-        put_str(inout enc, in "nullable-address");
-        put_str(inout enc, in scalar_name(vt.sc));
-    } else if vt.tag == 8 {
-        put_str(inout enc, in "handle");
-        put_bytes(inout enc, in arena[vt.na..vt.nb]);
-    } else if vt.tag == 9 {
-        put_str(inout enc, in "nullable-handle");
-        put_bytes(inout enc, in arena[vt.na..vt.nb]);
-    } else if vt.tag == 10 {
-        put_str(inout enc, in "nonnull-handle");
-        put_bytes(inout enc, in arena[vt.na..vt.nb]);
-    } else if vt.tag == 11 {
-        put_str(inout enc, in "nullable-cstr-copy");
+fn encode_val_ty(inout encoder: Encoder, in val_ty: ValTy, in arena: Slice[u8]) eff [
+    Fail[VsysError]
+] {
+    if val_ty.tag == 1 {
+        put_str(inout encoder, in "unit");
+    } else if val_ty.tag == 2 {
+        put_str(inout encoder, in "scalar");
+        put_str(inout encoder, in scalar_name(val_ty.num_kind));
+    } else if val_ty.tag == 3 {
+        put_str(inout encoder, in "float");
+        put_str(inout encoder, in float_name(val_ty.num_kind));
+    } else if val_ty.tag == 4 {
+        put_str(inout encoder, in "bool-u8");
+    } else if val_ty.tag == 5 {
+        put_str(inout encoder, in "enum");
+        put_bytes(inout encoder, in arena[val_ty.name_start..val_ty.name_end]);
+    } else if val_ty.tag == 6 {
+        put_str(inout encoder, in "address");
+        put_str(inout encoder, in scalar_name(val_ty.num_kind));
+    } else if val_ty.tag == 7 {
+        put_str(inout encoder, in "nullable-address");
+        put_str(inout encoder, in scalar_name(val_ty.num_kind));
+    } else if val_ty.tag == 8 {
+        put_str(inout encoder, in "handle");
+        put_bytes(inout encoder, in arena[val_ty.name_start..val_ty.name_end]);
+    } else if val_ty.tag == 9 {
+        put_str(inout encoder, in "nullable-handle");
+        put_bytes(inout encoder, in arena[val_ty.name_start..val_ty.name_end]);
+    } else if val_ty.tag == 10 {
+        put_str(inout encoder, in "nonnull-handle");
+        put_bytes(inout encoder, in arena[val_ty.name_start..val_ty.name_end]);
+    } else if val_ty.tag == 11 {
+        put_str(inout encoder, in "nullable-cstr-copy");
     } else {
-        put_str(inout enc, in "nullable-cwstr-copy");
+        put_str(inout encoder, in "nullable-cwstr-copy");
     }
 }
 
-fn encode_fun(inout enc: Encoder, in f: FunDef, in pars: Slice[ParDef], in arena: Slice[u8]) eff [
-    Fail[VsysError]
-] {
-    put_bytes(inout enc, in arena[f.sym_a..f.sym_b]);
-    put_count(inout enc, f.pn);
-    for pi in 0..f.pn {
-        let par = match pars.try_get(wrapping_add(f.p0, pi)) {
+fn encode_fun(
+    inout encoder: Encoder,
+    in func: FunDef,
+    in params: Slice[ParDef],
+    in arena: Slice[u8]
+) eff [Fail[VsysError]] {
+    put_bytes(inout encoder, in arena[func.sym_start..func.sym_end]);
+    put_count(inout encoder, func.param_count);
+    for param_pos in 0..func.param_count {
+        let param = match params.try_get(wrapping_add(func.param_start, param_pos)) {
             Option::Some(v) => v,
             Option::None => continue,
         };
-        put_bytes(inout enc, in arena[par.na..par.nb]);
-        if par.kind == 1 {
-            put_str(inout enc, in "value");
-            encode_val_ty(inout enc, in par.vt, in arena);
-        } else if par.kind == 2 {
-            let acc = if par.access == 1 { "in" } else { "inout" };
-            if !par.is_struct && !par.flag {
-                put_str(inout enc, in "nocapture-slice");
-                put_str(inout enc, in acc);
-                put_str(inout enc, in scalar_name(par.p_sc));
+        put_bytes(inout encoder, in arena[param.name_start..param.name_end]);
+        if param.kind == 1 {
+            put_str(inout encoder, in "value");
+            encode_val_ty(inout encoder, in param.val_ty, in arena);
+        } else if param.kind == 2 {
+            let access_name = if param.access == 1 { "in" } else { "inout" };
+            if !param.is_struct && !param.flag {
+                put_str(inout encoder, in "nocapture-slice");
+                put_str(inout encoder, in access_name);
+                put_str(inout encoder, in scalar_name(param.pointee_scalar));
             } else {
-                put_str(inout enc, in "nocapture-slice/2");
-                put_str(inout enc, in acc);
-                put_str(inout enc, in if par.flag { "option" } else { "nonnull" });
-                if !par.is_struct {
-                    put_str(inout enc, in "scalar");
-                    put_str(inout enc, in scalar_name(par.p_sc));
+                put_str(inout encoder, in "nocapture-slice/2");
+                put_str(inout encoder, in access_name);
+                put_str(inout encoder, in if param.flag { "option" } else { "nonnull" });
+                if !param.is_struct {
+                    put_str(inout encoder, in "scalar");
+                    put_str(inout encoder, in scalar_name(param.pointee_scalar));
                 } else {
-                    put_str(inout enc, in "wire-struct");
-                    put_bytes(inout enc, in arena[par.p_na..par.p_nb]);
+                    put_str(inout encoder, in "wire-struct");
+                    put_bytes(inout encoder, in arena[param.pointee_start..param.pointee_end]);
                 }
             }
-        } else if par.kind == 3 {
-            put_str(inout enc, in "nocapture-pointer");
-            let acc = if par.access == 1 {
+        } else if param.kind == 3 {
+            put_str(inout encoder, in "nocapture-pointer");
+            let access_name = if param.access == 1 {
                 "in"
-            } else if par.access == 2 {
+            } else if param.access == 2 {
                 "inout"
             } else {
                 "out"
             };
-            put_str(inout enc, in acc);
-            put_str(inout enc, in if par.flag { "option" } else { "nonnull" });
-            if !par.is_struct {
-                put_str(inout enc, in "scalar");
-                put_str(inout enc, in scalar_name(par.p_sc));
+            put_str(inout encoder, in access_name);
+            put_str(inout encoder, in if param.flag { "option" } else { "nonnull" });
+            if !param.is_struct {
+                put_str(inout encoder, in "scalar");
+                put_str(inout encoder, in scalar_name(param.pointee_scalar));
             } else {
-                put_str(inout enc, in "wire-struct");
-                put_bytes(inout enc, in arena[par.p_na..par.p_nb]);
+                put_str(inout encoder, in "wire-struct");
+                put_bytes(inout encoder, in arena[param.pointee_start..param.pointee_end]);
             }
-        } else if par.kind == 4 {
-            put_str(inout enc, in "extern-handle");
-            let acc = if par.access == 1 {
+        } else if param.kind == 4 {
+            put_str(inout encoder, in "extern-handle");
+            let access_name = if param.access == 1 {
                 "in"
-            } else if par.access == 2 {
+            } else if param.access == 2 {
                 "inout"
-            } else if par.access == 3 {
+            } else if param.access == 3 {
                 "out"
             } else {
                 "sink"
             };
-            put_str(inout enc, in acc);
-            put_bytes(inout enc, in arena[par.p_na..par.p_nb]);
-        } else if par.kind == 5 {
-            put_str(inout enc, in "nocapture-cstr");
-        } else if par.kind == 6 {
-            put_str(inout enc, in "nocapture-cwstr");
-        } else if par.kind == 7 {
-            put_str(inout enc, in "nocapture-cstr-list");
-        } else if par.kind == 8 {
-            put_str(inout enc, in "callback-function");
-            put_str(inout enc, in if par.flag { "retain" } else { "nocapture" });
-            put_bytes(inout enc, in arena[par.p_na..par.p_nb]);
+            put_str(inout encoder, in access_name);
+            put_bytes(inout encoder, in arena[param.pointee_start..param.pointee_end]);
+        } else if param.kind == 5 {
+            put_str(inout encoder, in "nocapture-cstr");
+        } else if param.kind == 6 {
+            put_str(inout encoder, in "nocapture-cwstr");
+        } else if param.kind == 7 {
+            put_str(inout encoder, in "nocapture-cstr-list");
+        } else if param.kind == 8 {
+            put_str(inout encoder, in "callback-function");
+            put_str(inout encoder, in if param.flag { "retain" } else { "nocapture" });
+            put_bytes(inout encoder, in arena[param.pointee_start..param.pointee_end]);
         } else {
-            put_str(inout enc, in "pinned-buffer");
-            put_str(inout enc, in if par.access == 1 { "in" } else { "inout" });
-            put_str(inout enc, in scalar_name(par.p_sc));
+            put_str(inout encoder, in "pinned-buffer");
+            put_str(inout encoder, in if param.access == 1 { "in" } else { "inout" });
+            put_str(inout encoder, in scalar_name(param.pointee_scalar));
         }
     }
-    encode_val_ty(inout enc, in f.result, in arena);
-    if f.has_mapping_len {
-        put_str(inout enc, in "mapping/length-from");
-        put_count(inout enc, f.mapping_len);
+    encode_val_ty(inout encoder, in func.result, in arena);
+    if func.has_mapping_len {
+        put_str(inout encoder, in "mapping/length-from");
+        put_count(inout encoder, func.mapping_len);
     }
-    if f.errno {
-        put_str(inout enc, in "errno/after-call");
+    if func.errno {
+        put_str(inout encoder, in "errno/after-call");
     }
-    if f.has_variadic {
-        put_str(inout enc, in "variadic/from");
-        put_count(inout enc, f.variadic);
+    if func.has_variadic {
+        put_str(inout encoder, in "variadic/from");
+        put_count(inout encoder, func.variadic_from);
     }
-    if f.has_link {
-        put_str(inout enc, in "link-name");
-        put_bytes(inout enc, in arena[f.link_a..f.link_b]);
+    if func.has_link {
+        put_str(inout encoder, in "link-name");
+        put_bytes(inout encoder, in arena[func.link_name_start..func.link_name_end]);
     }
 }
 
@@ -1016,127 +1082,142 @@ fn encode_fun(inout enc: Encoder, in f: FunDef, in pars: Slice[ParDef], in arena
 
 pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysError]] {
     let lexed = lex(in source);
-    let mut p = P {
+    let mut parser = P {
         toks: lexed.toks,
         arena: lexed.arena,
         at: 0,
     };
-    expect_word(inout p, in "sys");
-    expect_word(inout p, in "library");
-    let (lib_a, lib_b) = take_word(inout p);
-    expect_punct(inout p, 40);
+    expect_word(inout parser, in "sys");
+    expect_word(inout parser, in "library");
+    let (lib_start, lib_end) = take_word(inout parser);
+    expect_punct(inout parser, 40);
     let mut has_target = false;
-    let mut target_a: u64 = 0;
-    let mut target_b: u64 = 0;
+    let mut target_start: u64 = 0;
+    let mut target_end: u64 = 0;
     let mut has_abi = false;
-    let mut abi_a: u64 = 0;
-    let mut abi_b: u64 = 0;
+    let mut abi_start: u64 = 0;
+    let mut abi_end: u64 = 0;
     let mut has_link = false;
-    let mut link_a: u64 = 0;
-    let mut link_b: u64 = 0;
+    let mut link_start: u64 = 0;
+    let mut link_end: u64 = 0;
     let mut has_name = false;
-    let mut name_a: u64 = 0;
-    let mut name_b: u64 = 0;
-    let mut has_art = false;
-    let mut art_a: u64 = 0;
-    let mut art_b: u64 = 0;
-    let mut has_hdr = false;
-    let mut hdr_a: u64 = 0;
-    let mut hdr_b: u64 = 0;
-    let mut has_pkg = false;
-    let mut pkg_a: u64 = 0;
-    let mut pkg_b: u64 = 0;
+    let mut name_start: u64 = 0;
+    let mut name_end: u64 = 0;
+    let mut has_artifact = false;
+    let mut artifact_start: u64 = 0;
+    let mut artifact_end: u64 = 0;
+    let mut has_header = false;
+    let mut header_start: u64 = 0;
+    let mut header_end: u64 = 0;
+    let mut has_pkg_config = false;
+    let mut pkg_config_start: u64 = 0;
+    let mut pkg_config_end: u64 = 0;
     loop {
-        if eat_punct(inout p, 41) {
+        if eat_punct(inout parser, 41) {
             break;
         }
-        let (ka, kb) = take_word(inout p);
-        expect_punct(inout p, 61);
-        let (va, vb) = take_text(inout p);
-        if eq_str(in p.arena.as_slice(), ka, kb, in "target") {
+        let (key_start, key_end) = take_word(inout parser);
+        expect_punct(inout parser, 61);
+        let (value_start, value_end) = take_text(inout parser);
+        if eq_str(in parser.arena.as_slice(), key_start, key_end, in "target") {
             if has_target {
-                return err_at(in p, err_duplicate(), 500);
+                return err_at(in parser, err_duplicate(), 500);
             }
             has_target = true;
-            target_a = va;
-            target_b = vb;
-        } else if eq_str(in p.arena.as_slice(), ka, kb, in "abi") {
+            target_start = value_start;
+            target_end = value_end;
+        } else if eq_str(in parser.arena.as_slice(), key_start, key_end, in "abi") {
             if has_abi {
-                return err_at(in p, err_duplicate(), 500);
+                return err_at(in parser, err_duplicate(), 500);
             }
             has_abi = true;
-            abi_a = va;
-            abi_b = vb;
-        } else if eq_str(in p.arena.as_slice(), ka, kb, in "link") {
+            abi_start = value_start;
+            abi_end = value_end;
+        } else if eq_str(in parser.arena.as_slice(), key_start, key_end, in "link") {
             if has_link {
-                return err_at(in p, err_duplicate(), 500);
+                return err_at(in parser, err_duplicate(), 500);
             }
             has_link = true;
-            link_a = va;
-            link_b = vb;
-        } else if eq_str(in p.arena.as_slice(), ka, kb, in "name") {
+            link_start = value_start;
+            link_end = value_end;
+        } else if eq_str(in parser.arena.as_slice(), key_start, key_end, in "name") {
             if has_name {
-                return err_at(in p, err_duplicate(), 500);
+                return err_at(in parser, err_duplicate(), 500);
             }
             has_name = true;
-            name_a = va;
-            name_b = vb;
-        } else if eq_str(in p.arena.as_slice(), ka, kb, in "artifact") {
-            if has_art {
-                return err_at(in p, err_duplicate(), 500);
+            name_start = value_start;
+            name_end = value_end;
+        } else if eq_str(in parser.arena.as_slice(), key_start, key_end, in "artifact") {
+            if has_artifact {
+                return err_at(in parser, err_duplicate(), 500);
             }
-            has_art = true;
-            art_a = va;
-            art_b = vb;
-        } else if eq_str(in p.arena.as_slice(), ka, kb, in "header") {
-            if has_hdr {
-                return err_at(in p, err_duplicate(), 500);
+            has_artifact = true;
+            artifact_start = value_start;
+            artifact_end = value_end;
+        } else if eq_str(in parser.arena.as_slice(), key_start, key_end, in "header") {
+            if has_header {
+                return err_at(in parser, err_duplicate(), 500);
             }
-            has_hdr = true;
-            hdr_a = va;
-            hdr_b = vb;
-        } else if eq_str(in p.arena.as_slice(), ka, kb, in "pkg_config") {
-            if has_pkg {
-                return err_at(in p, err_duplicate(), 500);
+            has_header = true;
+            header_start = value_start;
+            header_end = value_end;
+        } else if eq_str(in parser.arena.as_slice(), key_start, key_end, in "pkg_config") {
+            if has_pkg_config {
+                return err_at(in parser, err_duplicate(), 500);
             }
-            has_pkg = true;
-            pkg_a = va;
-            pkg_b = vb;
+            has_pkg_config = true;
+            pkg_config_start = value_start;
+            pkg_config_end = value_end;
         } else {
-            return err_at(in p, err_unsupported(), 501);
+            return err_at(in parser, err_unsupported(), 501);
         }
-        if !eat_punct(inout p, 44) {
-            expect_punct(inout p, 41);
+        if !eat_punct(inout parser, 44) {
+            expect_punct(inout parser, 41);
             break;
         }
     }
-    if !has_target || !has_abi || !has_link || !has_name || !has_art {
-        return err_at(in p, err_syntax(), 502);
+    if !has_target || !has_abi || !has_link || !has_name || !has_artifact {
+        return err_at(in parser, err_syntax(), 502);
     }
     let mut expected_abi = "sysv64";
-    if eq_str(in p.arena.as_slice(), target_a, target_b, in "x86_64-unknown-linux-gnu") {
+    if eq_str(in parser.arena.as_slice(), target_start, target_end, in "x86_64-unknown-linux-gnu") {
         expected_abi = "sysv64";
-    } else if eq_str(in p.arena.as_slice(), target_a, target_b, in "aarch64-unknown-linux-gnu") {
+    } else if eq_str(
+        in parser.arena.as_slice(),
+        target_start,
+        target_end,
+        in "aarch64-unknown-linux-gnu"
+    ) {
         expected_abi = "aapcs64";
-    } else if eq_str(in p.arena.as_slice(), target_a, target_b, in "aarch64-apple-darwin") {
+    } else if eq_str(
+        in parser.arena.as_slice(),
+        target_start,
+        target_end,
+        in "aarch64-apple-darwin"
+    ) {
         expected_abi = "darwin64";
-    } else if eq_str(in p.arena.as_slice(), target_a, target_b, in "x86_64-pc-windows-msvc") {
+    } else if eq_str(
+        in parser.arena.as_slice(),
+        target_start,
+        target_end,
+        in "x86_64-pc-windows-msvc"
+    ) {
         expected_abi = "win64";
     } else {
-        return err_at(in p, err_type(), 503);
+        return err_at(in parser, err_type(), 503);
     }
-    if !eq_str(in p.arena.as_slice(), abi_a, abi_b, in expected_abi) {
-        return err_at(in p, err_type(), 504);
+    if !eq_str(in parser.arena.as_slice(), abi_start, abi_end, in expected_abi) {
+        return err_at(in parser, err_type(), 504);
     }
-    if !eq_str(in p.arena.as_slice(), link_a, link_b, in "static")
-        && !eq_str(in p.arena.as_slice(), link_a, link_b, in "dynamic") {
-        return err_at(in p, err_type(), 505);
+    if !eq_str(in parser.arena.as_slice(), link_start, link_end, in "static")
+        && !eq_str(in parser.arena.as_slice(), link_start, link_end, in "dynamic") {
+        return err_at(in parser, err_type(), 505);
     }
-    if !is_bare_link_name(in p.arena[name_a..name_b]) {
-        return err_at(in p, err_type(), 506);
+    if !is_bare_link_name(in parser.arena[name_start..name_end]) {
+        return err_at(in parser, err_type(), 506);
     }
-    let blake3_bytes = parse_artifact_blake3(in p, art_a, art_b);
-    expect_punct(inout p, 123);
+    let blake3_bytes = parse_artifact_blake3(in parser, artifact_start, artifact_end);
+    expect_punct(inout parser, 123);
 
     let mut enums: ChunkSeq[EnumDef] = ChunkSeq::new[EnumDef]();
     let mut enum_vars: ChunkSeq[EnumVar] = ChunkSeq::new[EnumVar]();
@@ -1148,616 +1229,657 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
     let mut pars: ChunkSeq[ParDef] = ChunkSeq::new[ParDef]();
 
     loop {
-        if eat_punct(inout p, 125) {
+        if eat_punct(inout parser, 125) {
             break;
         }
-        if is_word(in p, in "const") {
-            let _ = bump(inout p);
-            let (ca, cb) = take_word(inout p);
-            if is_reserved_type(in p.arena[ca..cb])
-                || eq_str(in p.arena.as_slice(), ca, cb, in "true")
-                || eq_str(in p.arena.as_slice(), ca, cb, in "false") {
-                return err_at(in p, err_type(), 510);
+        if is_word(in parser, in "const") {
+            let _ = bump(inout parser);
+            let (const_start, const_end) = take_word(inout parser);
+            if is_reserved_type(in parser.arena[const_start..const_end])
+                || eq_str(in parser.arena.as_slice(), const_start, const_end, in "true")
+                || eq_str(in parser.arena.as_slice(), const_start, const_end, in "false") {
+                return err_at(in parser, err_type(), 510);
             }
-            expect_punct(inout p, 58);
-            let (sa, sb) = take_word(inout p);
-            let sc = parse_scalar(in p.arena[sa..sb]);
-            if sc == 0 {
-                return err_at(in p, err_unsupported(), 511);
+            expect_punct(inout parser, 58);
+            let (scalar_start, scalar_end) = take_word(inout parser);
+            let scalar = parse_scalar(in parser.arena[scalar_start..scalar_end]);
+            if scalar == 0 {
+                return err_at(in parser, err_unsupported(), 511);
             }
-            expect_punct(inout p, 61);
-            let neg = eat_punct(inout p, 45);
-            let mag = take_num(inout p);
-            if neg && !scalar_signed(sc) {
-                return err_at(in p, err_type(), 512);
+            expect_punct(inout parser, 61);
+            let negative = eat_punct(inout parser, 45);
+            let magnitude = take_num(inout parser);
+            if negative && !scalar_signed(scalar) {
+                return err_at(in parser, err_type(), 512);
             }
-            let bits = scalar_bits(sc);
-            if neg {
+            let bits = scalar_bits(scalar);
+            if negative {
                 let max_neg = wrapping_shl_u64(1, wrapping_sub(widen_u32(bits), 1));
-                if mag > max_neg {
-                    return err_at(in p, err_type(), 513);
+                if magnitude > max_neg {
+                    return err_at(in parser, err_type(), 513);
                 }
             } else {
-                let max_pos: u64 = if scalar_signed(sc) {
+                let max_pos: u64 = if scalar_signed(scalar) {
                     wrapping_sub(wrapping_shl_u64(1, wrapping_sub(widen_u32(bits), 1)), 1)
                 } else if bits == 64 {
                     18446744073709551615
                 } else {
                     wrapping_sub(wrapping_shl_u64(1, widen_u32(bits)), 1)
                 };
-                if mag > max_pos {
-                    return err_at(in p, err_type(), 514);
+                if magnitude > max_pos {
+                    return err_at(in parser, err_type(), 514);
                 }
             }
-            expect_punct(inout p, 59);
+            expect_punct(inout parser, 59);
             consts.push(
                 ConstDef {
-                    na: ca,
-                    nb: cb,
-                    scalar: sc,
-                    neg: neg,
-                    mag: mag,
+                    name_start: const_start,
+                    name_end: const_end,
+                    scalar: scalar,
+                    negative: negative,
+                    magnitude: magnitude,
                 }
             );
-        } else if is_word(in p, in "enum") {
-            let _ = bump(inout p);
-            let (ea, eb) = take_word(inout p);
-            if is_reserved_type(in p.arena[ea..eb]) {
-                return err_at(in p, err_type(), 520);
+        } else if is_word(in parser, in "enum") {
+            let _ = bump(inout parser);
+            let (enum_start, enum_end) = take_word(inout parser);
+            if is_reserved_type(in parser.arena[enum_start..enum_end]) {
+                return err_at(in parser, err_type(), 520);
             }
-            expect_punct(inout p, 58);
-            let (sa, sb) = take_word(inout p);
-            let sc = parse_scalar(in p.arena[sa..sb]);
-            if sc == 0 || scalar_signed(sc) || sc == 9 {
-                return err_at(in p, err_unsupported(), 521);
+            expect_punct(inout parser, 58);
+            let (scalar_start, scalar_end) = take_word(inout parser);
+            let scalar = parse_scalar(in parser.arena[scalar_start..scalar_end]);
+            if scalar == 0 || scalar_signed(scalar) || scalar == 9 {
+                return err_at(in parser, err_unsupported(), 521);
             }
-            expect_punct(inout p, 123);
-            let v0 = enum_vars.len();
-            let mut vn: u64 = 0;
+            expect_punct(inout parser, 123);
+            let variant_start = enum_vars.len();
+            let mut variant_count: u64 = 0;
             loop {
-                if eat_punct(inout p, 125) {
+                if eat_punct(inout parser, 125) {
                     break;
                 }
-                let (va, vb) = take_word(inout p);
-                expect_punct(inout p, 61);
-                let val = take_num(inout p);
-                let bits = scalar_bits(sc);
-                if bits < 64 && val >= wrapping_shl_u64(1, widen_u32(bits)) {
-                    return err_at(in p, err_type(), 522);
+                let (variant_name_start, variant_name_end) = take_word(inout parser);
+                expect_punct(inout parser, 61);
+                let value = take_num(inout parser);
+                let bits = scalar_bits(scalar);
+                if bits < 64 && value >= wrapping_shl_u64(1, widen_u32(bits)) {
+                    return err_at(in parser, err_type(), 522);
                 }
-                for k in 0..vn {
-                    let prev = match enum_vars.try_get(wrapping_add(v0, k)) {
+                for k in 0..variant_count {
+                    let prev = match enum_vars.try_get(wrapping_add(variant_start, k)) {
                         Option::Some(v) => v,
                         Option::None => continue,
                     };
-                    if prev.val == val {
-                        return err_at(in p, err_duplicate(), 523);
+                    if prev.value == value {
+                        return err_at(in parser, err_duplicate(), 523);
                     }
-                    if eq_bytes(in p.arena[prev.na..prev.nb], in p.arena[va..vb]) {
-                        return err_at(in p, err_duplicate(), 524);
+                    if eq_bytes(
+                        in parser.arena[prev.name_start..prev.name_end],
+                        in parser.arena[variant_name_start..variant_name_end]
+                    ) {
+                        return err_at(in parser, err_duplicate(), 524);
                     }
                 }
                 enum_vars.push(
                     EnumVar {
-                        na: va,
-                        nb: vb,
-                        val: val,
+                        name_start: variant_name_start,
+                        name_end: variant_name_end,
+                        value: value,
                     }
                 );
-                vn = wrapping_add(vn, 1);
-                if !eat_punct(inout p, 44) {
-                    expect_punct(inout p, 125);
+                variant_count = wrapping_add(variant_count, 1);
+                if !eat_punct(inout parser, 44) {
+                    expect_punct(inout parser, 125);
                     break;
                 }
             }
-            if vn == 0 {
-                return err_at(in p, err_type(), 525);
+            if variant_count == 0 {
+                return err_at(in parser, err_type(), 525);
             }
-            sort_vars(inout enum_vars, v0, vn, in p.arena.as_slice());
+            sort_vars(inout enum_vars, variant_start, variant_count, in parser.arena.as_slice());
             enums.push(
                 EnumDef {
-                    na: ea,
-                    nb: eb,
-                    scalar: sc,
-                    v0: v0,
-                    vn: vn,
+                    name_start: enum_start,
+                    name_end: enum_end,
+                    scalar: scalar,
+                    variant_start: variant_start,
+                    variant_count: variant_count,
                 }
             );
-        } else if (is_word(in p, in "linear") || is_word(in p, in "affine"))
-            && peek_is_word(in p, 1, in "extern") {
-            let lin: u8 = if is_word(in p, in "linear") { 1 } else { 2 };
-            let _ = bump(inout p);
-            let _ = bump(inout p);
-            if is_word(in p, in "mapping") {
-                if lin != 1 {
-                    return err_at(in p, err_type(), 530);
+        } else if (is_word(in parser, in "linear") || is_word(in parser, in "affine"))
+            && peek_is_word(in parser, 1, in "extern") {
+            let linearity: u8 = if is_word(in parser, in "linear") {
+                1
+            } else {
+                2
+            };
+            let _ = bump(inout parser);
+            let _ = bump(inout parser);
+            if is_word(in parser, in "mapping") {
+                if linearity != 1 {
+                    return err_at(in parser, err_type(), 530);
                 }
-                let _ = bump(inout p);
-                let (xa, xb) = take_word(inout p);
-                if is_reserved_type(in p.arena[xa..xb]) {
-                    return err_at(in p, err_type(), 531);
+                let _ = bump(inout parser);
+                let (extern_start, extern_end) = take_word(inout parser);
+                if is_reserved_type(in parser.arena[extern_start..extern_end]) {
+                    return err_at(in parser, err_type(), 531);
                 }
-                expect_punct(inout p, 91);
-                let (ma, mb) = take_word(inout p);
-                let msc = parse_scalar(in p.arena[ma..mb]);
-                if msc != 1 && msc != 5 && msc != 7 && msc != 8 && msc != 9 {
-                    return err_at(in p, err_unsupported(), 532);
+                expect_punct(inout parser, 91);
+                let (mapping_start, mapping_end) = take_word(inout parser);
+                let mapping_scalar = parse_scalar(in parser.arena[mapping_start..mapping_end]);
+                if mapping_scalar != 1
+                    && mapping_scalar != 5
+                    && mapping_scalar != 7
+                    && mapping_scalar != 8
+                    && mapping_scalar != 9 {
+                    return err_at(in parser, err_unsupported(), 532);
                 }
-                expect_punct(inout p, 93);
-                expect_punct(inout p, 59);
+                expect_punct(inout parser, 93);
+                expect_punct(inout parser, 59);
                 externs.push(
                     ExternDef {
-                        na: xa,
-                        nb: xb,
+                        name_start: extern_start,
+                        name_end: extern_end,
                         linearity: 1,
                         has_drop: false,
-                        drop_a: 0,
-                        drop_b: 0,
-                        mapping: msc,
+                        drop_start: 0,
+                        drop_end: 0,
+                        mapping: mapping_scalar,
                     }
                 );
             } else {
-                expect_word(inout p, in "type");
-                let (xa, xb) = take_word(inout p);
-                if is_reserved_type(in p.arena[xa..xb]) {
-                    return err_at(in p, err_type(), 533);
+                expect_word(inout parser, in "type");
+                let (extern_start, extern_end) = take_word(inout parser);
+                if is_reserved_type(in parser.arena[extern_start..extern_end]) {
+                    return err_at(in parser, err_type(), 533);
                 }
                 let mut has_drop = false;
-                let mut da: u64 = 0;
-                let mut db: u64 = 0;
-                if is_word(in p, in "drop") {
-                    if lin == 1 {
-                        return err_at(in p, err_type(), 534);
+                let mut drop_start: u64 = 0;
+                let mut drop_end: u64 = 0;
+                if is_word(in parser, in "drop") {
+                    if linearity == 1 {
+                        return err_at(in parser, err_type(), 534);
                     }
-                    let _ = bump(inout p);
-                    let (d0, d1) = take_word(inout p);
+                    let _ = bump(inout parser);
+                    let (word_start, word_end) = take_word(inout parser);
                     has_drop = true;
-                    da = d0;
-                    db = d1;
+                    drop_start = word_start;
+                    drop_end = word_end;
                 }
-                expect_punct(inout p, 59);
+                expect_punct(inout parser, 59);
                 externs.push(
                     ExternDef {
-                        na: xa,
-                        nb: xb,
-                        linearity: lin,
+                        name_start: extern_start,
+                        name_end: extern_end,
+                        linearity: linearity,
                         has_drop: has_drop,
-                        drop_a: da,
-                        drop_b: db,
+                        drop_start: drop_start,
+                        drop_end: drop_end,
                         mapping: 0,
                     }
                 );
             }
-        } else if is_word(in p, in "wire") {
-            let wt = cur(in p);
-            let _ = bump(inout p);
-            expect_word(inout p, in "struct");
-            let (wa, wb) = take_word(inout p);
-            if is_reserved_type(in p.arena[wa..wb]) {
-                return err_at(in p, err_type(), 540);
+        } else if is_word(in parser, in "wire") {
+            let wire_tok = cur(in parser);
+            let _ = bump(inout parser);
+            expect_word(inout parser, in "struct");
+            let (wire_start, wire_end) = take_word(inout parser);
+            if is_reserved_type(in parser.arena[wire_start..wire_end]) {
+                return err_at(in parser, err_type(), 540);
             }
-            expect_punct(inout p, 123);
-            let f0 = wire_fields.len();
-            let mut fn_count: u64 = 0;
+            expect_punct(inout parser, 123);
+            let field_start = wire_fields.len();
+            let mut field_count: u64 = 0;
             loop {
-                if eat_punct(inout p, 125) {
+                if eat_punct(inout parser, 125) {
                     break;
                 }
-                let ft = cur(in p);
-                let (fa, fb) = take_word(inout p);
-                expect_punct(inout p, 58);
-                let wf = parse_wire_field_type(inout p, fa, fb, ft.s0, ft.s1);
-                wire_fields.push(wf);
-                fn_count = wrapping_add(fn_count, 1);
-                if !eat_punct(inout p, 44) {
-                    expect_punct(inout p, 125);
+                let field_tok = cur(in parser);
+                let (field_name_start, field_name_end) = take_word(inout parser);
+                expect_punct(inout parser, 58);
+                let wire_field = parse_wire_field_type(
+                    inout parser,
+                    field_name_start,
+                    field_name_end,
+                    field_tok.span_start,
+                    field_tok.span_end
+                );
+                wire_fields.push(wire_field);
+                field_count = wrapping_add(field_count, 1);
+                if !eat_punct(inout parser, 44) {
+                    expect_punct(inout parser, 125);
                     break;
                 }
             }
             wires.push(
                 WireStructDef {
-                    name_a: wa,
-                    name_b: wb,
-                    f0: f0,
-                    fn_count: fn_count,
+                    name_start: wire_start,
+                    name_end: wire_end,
+                    field_start: field_start,
+                    field_count: field_count,
                     size: 0,
                     alignment: 0,
-                    s0: wt.s0,
-                    s1: wt.s1,
+                    span_start: wire_tok.span_start,
+                    span_end: wire_tok.span_end,
                 }
             );
-        } else if is_word(in p, in "fn")
-            || is_word(in p, in "callback")
-            || peek_is_punct(in p, 0, 35) {
+        } else if is_word(in parser, in "fn")
+            || is_word(in parser, in "callback")
+            || peek_is_punct(in parser, 0, 35) {
             let mut has_link_attr = false;
-            let mut la: u64 = 0;
-            let mut lb: u64 = 0;
-            if eat_punct(inout p, 35) {
-                expect_punct(inout p, 91);
-                expect_word(inout p, in "link_name");
-                expect_punct(inout p, 61);
-                let (t0, t1) = take_text(inout p);
-                expect_punct(inout p, 93);
+            let mut link_name_start: u64 = 0;
+            let mut link_name_end: u64 = 0;
+            if eat_punct(inout parser, 35) {
+                expect_punct(inout parser, 91);
+                expect_word(inout parser, in "link_name");
+                expect_punct(inout parser, 61);
+                let (text_start, text_end) = take_text(inout parser);
+                expect_punct(inout parser, 93);
                 has_link_attr = true;
-                la = t0;
-                lb = t1;
+                link_name_start = text_start;
+                link_name_end = text_end;
             }
-            let is_cb = !has_link_attr && is_word(in p, in "callback");
-            if is_cb {
-                let _ = bump(inout p);
+            let is_callback = !has_link_attr && is_word(in parser, in "callback");
+            if is_callback {
+                let _ = bump(inout parser);
             } else {
-                expect_word(inout p, in "fn");
+                expect_word(inout parser, in "fn");
             }
-            let (sym_a, sym_b) = take_word(inout p);
-            expect_punct(inout p, 40);
-            let p0 = pars.len();
-            let mut pn: u64 = 0;
-            if is_cb {
-                let (ha, hb) = push_str_arena(inout p.arena, in "callee");
+            let (sym_start, sym_end) = take_word(inout parser);
+            expect_punct(inout parser, 40);
+            let param_start = pars.len();
+            let mut param_count: u64 = 0;
+            if is_callback {
+                let (callee_start, callee_end) = push_str_arena(inout parser.arena, in "callee");
                 pars.push(
                     ParDef {
-                        na: ha,
-                        nb: hb,
+                        name_start: callee_start,
+                        name_end: callee_end,
                         kind: 4,
                         access: 1,
                         flag: false,
-                        vt: ValTy {
+                        val_ty: ValTy {
                             tag: 1,
-                            sc: 0,
-                            na: 0,
-                            nb: 0,
+                            num_kind: 0,
+                            name_start: 0,
+                            name_end: 0,
                         },
-                        p_sc: 0,
-                        p_na: sym_a,
-                        p_nb: sym_b,
+                        pointee_scalar: 0,
+                        pointee_start: sym_start,
+                        pointee_end: sym_end,
                         is_struct: false,
                     }
                 );
-                pn = 1;
+                param_count = 1;
             }
             let mut has_variadic = false;
-            let mut variadic: u64 = 0;
+            let mut variadic_from: u64 = 0;
             loop {
-                if eat_punct(inout p, 41) {
+                if eat_punct(inout parser, 41) {
                     break;
                 }
-                if cur(in p).kind == tok_ellipsis() {
-                    if has_variadic || pn == 0 {
-                        return err_at(in p, err_syntax(), 550);
+                if cur(in parser).kind == tok_ellipsis() {
+                    if has_variadic || param_count == 0 {
+                        return err_at(in parser, err_syntax(), 550);
                     }
-                    let _ = bump(inout p);
-                    if !eat_punct(inout p, 44) || peek_is_punct(in p, 0, 41) {
-                        return err_at(in p, err_syntax(), 551);
+                    let _ = bump(inout parser);
+                    if !eat_punct(inout parser, 44) || peek_is_punct(in parser, 0, 41) {
+                        return err_at(in parser, err_syntax(), 551);
                     }
                     has_variadic = true;
-                    variadic = pn;
+                    variadic_from = param_count;
                     continue;
                 }
-                if (is_word(in p, in "nocapture") || is_word(in p, in "retain"))
-                    && peek_is_punct(in p, 2, 58)
-                    && !peek_is_word(in p, 1, in "in")
-                    && !peek_is_word(in p, 1, in "out")
-                    && !peek_is_word(in p, 1, in "inout") {
-                    let retain = is_word(in p, in "retain");
-                    let _ = bump(inout p);
-                    let (pa, pb) = take_word(inout p);
-                    expect_punct(inout p, 58);
-                    let (ca, cb) = take_word(inout p);
+                if (is_word(in parser, in "nocapture") || is_word(in parser, in "retain"))
+                    && peek_is_punct(in parser, 2, 58)
+                    && !peek_is_word(in parser, 1, in "in")
+                    && !peek_is_word(in parser, 1, in "out")
+                    && !peek_is_word(in parser, 1, in "inout") {
+                    let retain = is_word(in parser, in "retain");
+                    let _ = bump(inout parser);
+                    let (param_name_start, param_name_end) = take_word(inout parser);
+                    expect_punct(inout parser, 58);
+                    let (callback_start, callback_end) = take_word(inout parser);
                     pars.push(
                         ParDef {
-                            na: pa,
-                            nb: pb,
+                            name_start: param_name_start,
+                            name_end: param_name_end,
                             kind: 8,
                             access: 1,
                             flag: retain,
-                            vt: ValTy {
+                            val_ty: ValTy {
                                 tag: 1,
-                                sc: 0,
-                                na: 0,
-                                nb: 0,
+                                num_kind: 0,
+                                name_start: 0,
+                                name_end: 0,
                             },
-                            p_sc: 0,
-                            p_na: ca,
-                            p_nb: cb,
+                            pointee_scalar: 0,
+                            pointee_start: callback_start,
+                            pointee_end: callback_end,
                             is_struct: false,
                         }
                     );
-                    pn = wrapping_add(pn, 1);
-                    if !eat_punct(inout p, 44) {
-                        expect_punct(inout p, 41);
+                    param_count = wrapping_add(param_count, 1);
+                    if !eat_punct(inout parser, 44) {
+                        expect_punct(inout parser, 41);
                         break;
                     }
                     continue;
                 }
-                let nocap = is_word(in p, in "nocapture");
-                if nocap {
-                    let _ = bump(inout p);
+                let is_nocapture = is_word(in parser, in "nocapture");
+                if is_nocapture {
+                    let _ = bump(inout parser);
                 }
-                if !nocap && is_word(in p, in "sink") && peek_tok(in p, 1).kind == tok_word() {
-                    let _ = bump(inout p);
-                    let (pa, pb) = take_word(inout p);
-                    expect_punct(inout p, 58);
-                    let (ha, hb) = take_word(inout p);
+                if !is_nocapture
+                    && is_word(in parser, in "sink")
+                    && peek_tok(in parser, 1).kind == tok_word() {
+                    let _ = bump(inout parser);
+                    let (param_name_start, param_name_end) = take_word(inout parser);
+                    expect_punct(inout parser, 58);
+                    let (handle_start, handle_end) = take_word(inout parser);
                     pars.push(
                         ParDef {
-                            na: pa,
-                            nb: pb,
+                            name_start: param_name_start,
+                            name_end: param_name_end,
                             kind: 4,
                             access: 4,
                             flag: false,
-                            vt: ValTy {
+                            val_ty: ValTy {
                                 tag: 1,
-                                sc: 0,
-                                na: 0,
-                                nb: 0,
+                                num_kind: 0,
+                                name_start: 0,
+                                name_end: 0,
                             },
-                            p_sc: 0,
-                            p_na: ha,
-                            p_nb: hb,
+                            pointee_scalar: 0,
+                            pointee_start: handle_start,
+                            pointee_end: handle_end,
                             is_struct: false,
                         }
                     );
-                    pn = wrapping_add(pn, 1);
-                    if !eat_punct(inout p, 44) {
-                        expect_punct(inout p, 41);
+                    param_count = wrapping_add(param_count, 1);
+                    if !eat_punct(inout parser, 44) {
+                        expect_punct(inout parser, 41);
                         break;
                     }
                     continue;
                 }
-                let mut acc: u8 = 0;
-                if peek_tok(in p, 1).kind == tok_word() {
-                    if is_word(in p, in "in") {
-                        acc = 1;
-                    } else if is_word(in p, in "inout") {
-                        acc = 2;
-                    } else if is_word(in p, in "out") {
-                        acc = 3;
+                let mut access: u8 = 0;
+                if peek_tok(in parser, 1).kind == tok_word() {
+                    if is_word(in parser, in "in") {
+                        access = 1;
+                    } else if is_word(in parser, in "inout") {
+                        access = 2;
+                    } else if is_word(in parser, in "out") {
+                        access = 3;
                     }
                 }
-                if acc != 0 {
-                    let _ = bump(inout p);
-                    let (pa, pb) = take_word(inout p);
-                    expect_punct(inout p, 58);
-                    if !nocap && is_word(in p, in "Pinned") && peek_is_punct(in p, 1, 91) {
-                        if acc == 3 {
-                            return err_at(in p, err_unsupported(), 552);
+                if access != 0 {
+                    let _ = bump(inout parser);
+                    let (param_name_start, param_name_end) = take_word(inout parser);
+                    expect_punct(inout parser, 58);
+                    if !is_nocapture
+                        && is_word(in parser, in "Pinned")
+                        && peek_is_punct(in parser, 1, 91) {
+                        if access == 3 {
+                            return err_at(in parser, err_unsupported(), 552);
                         }
-                        let _ = bump(inout p);
-                        expect_punct(inout p, 91);
-                        let (ea, eb) = take_word(inout p);
-                        let sc = parse_scalar(in p.arena[ea..eb]);
-                        if sc == 0 {
-                            return err_at(in p, err_unsupported(), 553);
+                        let _ = bump(inout parser);
+                        expect_punct(inout parser, 91);
+                        let (elem_start, elem_end) = take_word(inout parser);
+                        let scalar = parse_scalar(in parser.arena[elem_start..elem_end]);
+                        if scalar == 0 {
+                            return err_at(in parser, err_unsupported(), 553);
                         }
-                        expect_punct(inout p, 93);
+                        expect_punct(inout parser, 93);
                         pars.push(
                             ParDef {
-                                na: pa,
-                                nb: pb,
+                                name_start: param_name_start,
+                                name_end: param_name_end,
                                 kind: 9,
-                                access: acc,
+                                access: access,
                                 flag: false,
-                                vt: ValTy {
+                                val_ty: ValTy {
                                     tag: 1,
-                                    sc: 0,
-                                    na: 0,
-                                    nb: 0,
+                                    num_kind: 0,
+                                    name_start: 0,
+                                    name_end: 0,
                                 },
-                                p_sc: sc,
-                                p_na: 0,
-                                p_nb: 0,
+                                pointee_scalar: scalar,
+                                pointee_start: 0,
+                                pointee_end: 0,
                                 is_struct: false,
                             }
                         );
-                    } else if nocap {
-                        pars.push(parse_borrowed_param(inout p, pa, pb, acc));
+                    } else if is_nocapture {
+                        pars.push(
+                            parse_borrowed_param(
+                                inout parser,
+                                param_name_start,
+                                param_name_end,
+                                access
+                            )
+                        );
                     } else {
-                        let (ha, hb) = take_word(inout p);
+                        let (handle_start, handle_end) = take_word(inout parser);
                         pars.push(
                             ParDef {
-                                na: pa,
-                                nb: pb,
+                                name_start: param_name_start,
+                                name_end: param_name_end,
                                 kind: 4,
-                                access: acc,
+                                access: access,
                                 flag: false,
-                                vt: ValTy {
+                                val_ty: ValTy {
                                     tag: 1,
-                                    sc: 0,
-                                    na: 0,
-                                    nb: 0,
+                                    num_kind: 0,
+                                    name_start: 0,
+                                    name_end: 0,
                                 },
-                                p_sc: 0,
-                                p_na: ha,
-                                p_nb: hb,
+                                pointee_scalar: 0,
+                                pointee_start: handle_start,
+                                pointee_end: handle_end,
                                 is_struct: false,
                             }
                         );
                     }
                 } else {
-                    if nocap {
-                        return err_at(in p, err_unsupported(), 554);
+                    if is_nocapture {
+                        return err_at(in parser, err_unsupported(), 554);
                     }
-                    let (pa, pb) = take_word(inout p);
-                    expect_punct(inout p, 58);
-                    let vt = parse_raw_val_type(inout p);
+                    let (param_name_start, param_name_end) = take_word(inout parser);
+                    expect_punct(inout parser, 58);
+                    let val_ty = parse_raw_val_type(inout parser);
                     pars.push(
                         ParDef {
-                            na: pa,
-                            nb: pb,
+                            name_start: param_name_start,
+                            name_end: param_name_end,
                             kind: 1,
                             access: 0,
                             flag: false,
-                            vt: vt,
-                            p_sc: 0,
-                            p_na: 0,
-                            p_nb: 0,
+                            val_ty: val_ty,
+                            pointee_scalar: 0,
+                            pointee_start: 0,
+                            pointee_end: 0,
                             is_struct: false,
                         }
                     );
                 }
-                pn = wrapping_add(pn, 1);
-                if !eat_punct(inout p, 44) {
-                    expect_punct(inout p, 41);
+                param_count = wrapping_add(param_count, 1);
+                if !eat_punct(inout parser, 44) {
+                    expect_punct(inout parser, 41);
                     break;
                 }
             }
-            if cur(in p).kind != tok_arrow() {
-                return err_at(in p, err_syntax(), 560);
+            if cur(in parser).kind != tok_arrow() {
+                return err_at(in parser, err_syntax(), 560);
             }
-            let _ = bump(inout p);
-            expect_word(inout p, in "ForeignVal");
-            expect_punct(inout p, 91);
+            let _ = bump(inout parser);
+            expect_word(inout parser, in "ForeignVal");
+            expect_punct(inout parser, 91);
             let mut has_len = false;
-            let mut len_a: u64 = 0;
-            let mut len_b: u64 = 0;
-            let mut res = ValTy {
+            let mut len_name_start: u64 = 0;
+            let mut len_name_end: u64 = 0;
+            let mut result = ValTy {
                 tag: 1,
-                sc: 0,
-                na: 0,
-                nb: 0,
+                num_kind: 0,
+                name_start: 0,
+                name_end: 0,
             };
-            if is_word(in p, in "Option") && peek_is_punct(in p, 1, 91) {
-                let _ = bump(inout p);
-                expect_punct(inout p, 91);
-                let (ra, rb) = take_word(inout p);
-                if eat_punct(inout p, 91) {
-                    let (la0, lb0) = take_word(inout p);
+            if is_word(in parser, in "Option") && peek_is_punct(in parser, 1, 91) {
+                let _ = bump(inout parser);
+                expect_punct(inout parser, 91);
+                let (result_start, result_end) = take_word(inout parser);
+                if eat_punct(inout parser, 91) {
+                    let (word_start, word_end) = take_word(inout parser);
                     has_len = true;
-                    len_a = la0;
-                    len_b = lb0;
-                    expect_punct(inout p, 93);
+                    len_name_start = word_start;
+                    len_name_end = word_end;
+                    expect_punct(inout parser, 93);
                 }
-                expect_punct(inout p, 93);
-                if !has_len && eq_str(in p.arena.as_slice(), ra, rb, in "CStr") {
-                    if is_cb {
-                        return err_at(in p, err_unsupported(), 561);
+                expect_punct(inout parser, 93);
+                if !has_len
+                    && eq_str(in parser.arena.as_slice(), result_start, result_end, in "CStr") {
+                    if is_callback {
+                        return err_at(in parser, err_unsupported(), 561);
                     }
-                    res.tag = 11;
-                } else if !has_len && eq_str(in p.arena.as_slice(), ra, rb, in "CWStr") {
-                    if is_cb {
-                        return err_at(in p, err_unsupported(), 562);
+                    result.tag = 11;
+                } else if !has_len
+                    && eq_str(in parser.arena.as_slice(), result_start, result_end, in "CWStr") {
+                    if is_callback {
+                        return err_at(in parser, err_unsupported(), 562);
                     }
-                    res.tag = 12;
+                    result.tag = 12;
                 } else {
-                    res.tag = 9;
-                    res.na = ra;
-                    res.nb = rb;
+                    result.tag = 9;
+                    result.name_start = result_start;
+                    result.name_end = result_end;
                 }
-            } else if is_word(in p, in "NonNull") && peek_is_punct(in p, 1, 91) {
-                let _ = bump(inout p);
-                expect_punct(inout p, 91);
-                let (ra, rb) = take_word(inout p);
-                expect_punct(inout p, 93);
-                res.tag = 10;
-                res.na = ra;
-                res.nb = rb;
+            } else if is_word(in parser, in "NonNull") && peek_is_punct(in parser, 1, 91) {
+                let _ = bump(inout parser);
+                expect_punct(inout parser, 91);
+                let (result_start, result_end) = take_word(inout parser);
+                expect_punct(inout parser, 93);
+                result.tag = 10;
+                result.name_start = result_start;
+                result.name_end = result_end;
             } else {
-                res = parse_raw_val_type(inout p);
+                result = parse_raw_val_type(inout parser);
             }
-            expect_punct(inout p, 93);
-            let errno = is_word(in p, in "errno");
+            expect_punct(inout parser, 93);
+            let errno = is_word(in parser, in "errno");
             if errno {
-                let _ = bump(inout p);
+                let _ = bump(inout parser);
             }
-            expect_punct(inout p, 59);
-            if is_cb {
+            expect_punct(inout parser, 59);
+            if is_callback {
                 externs.push(
                     ExternDef {
-                        na: sym_a,
-                        nb: sym_b,
+                        name_start: sym_start,
+                        name_end: sym_end,
                         linearity: 3,
                         has_drop: false,
-                        drop_a: 0,
-                        drop_b: 0,
+                        drop_start: 0,
+                        drop_end: 0,
                         mapping: 0,
                     }
                 );
             }
             funs.push(
                 FunDef {
-                    sym_a: sym_a,
-                    sym_b: sym_b,
-                    p0: p0,
-                    pn: pn,
-                    result: res,
+                    sym_start: sym_start,
+                    sym_end: sym_end,
+                    param_start: param_start,
+                    param_count: param_count,
+                    result: result,
                     has_len: has_len,
-                    len_a: len_a,
-                    len_b: len_b,
+                    len_name_start: len_name_start,
+                    len_name_end: len_name_end,
                     mapping_len: 0,
                     has_mapping_len: false,
                     errno: errno,
                     has_variadic: has_variadic,
-                    variadic: variadic,
+                    variadic_from: variadic_from,
                     has_link: has_link_attr,
-                    link_a: la,
-                    link_b: lb,
-                    indirect: is_cb,
+                    link_name_start: link_name_start,
+                    link_name_end: link_name_end,
+                    indirect: is_callback,
                 }
             );
         } else {
-            return err_at(in p, err_syntax(), 570);
+            return err_at(in parser, err_syntax(), 570);
         }
     }
-    if cur(in p).kind != tok_eof() {
-        return err_at(in p, err_syntax(), 571);
+    if cur(in parser).kind != tok_eof() {
+        return err_at(in parser, err_syntax(), 571);
     }
 
     // Compile wire structs & sort declarations.
-    compile_all(inout wires, in wire_fields.as_slice(), in p.arena.as_slice());
-    sort_consts(inout consts, in p.arena.as_slice());
-    sort_enums(inout enums, in p.arena.as_slice());
-    sort_externs(inout externs, in p.arena.as_slice());
-    sort_wires(inout wires, in p.arena.as_slice());
+    compile_all(inout wires, in wire_fields.as_slice(), in parser.arena.as_slice());
+    sort_consts(inout consts, in parser.arena.as_slice());
+    sort_enums(inout enums, in parser.arena.as_slice());
+    sort_externs(inout externs, in parser.arena.as_slice());
+    sort_wires(inout wires, in parser.arena.as_slice());
 
     // Resolve parameter & return types.
-    for fi in 0..funs.len() {
-        let mut f = match funs.try_get(fi) {
+    for fun_index in 0..funs.len() {
+        let mut func = match funs.try_get(fun_index) {
             Option::Some(v) => v,
             Option::None => continue,
         };
-        for pi in 0..f.pn {
-            let pidx = wrapping_add(f.p0, pi);
-            let mut par = match pars.try_get(pidx) {
+        for param_pos in 0..func.param_count {
+            let param_index = wrapping_add(func.param_start, param_pos);
+            let mut param = match pars.try_get(param_index) {
                 Option::Some(v) => v,
                 Option::None => continue,
             };
-            if par.kind == 1 {
-                par.vt = resolve_val_ty(
-                    in par.vt,
-                    in enums.as_slice(),
-                    in externs.as_slice(),
-                    in p.arena.as_slice()
-                );
-            } else if par.kind == 2 && par.is_struct {
-                match find_wire(in wires.as_slice(), in p.arena.as_slice(), par.p_na, par.p_nb) {
+            if param.kind == 1 {
+                param
+                    .val_ty = resolve_val_ty(
+                        in param.val_ty,
+                        in enums.as_slice(),
+                        in externs.as_slice(),
+                        in parser.arena.as_slice()
+                    );
+            } else if param.kind == 2 && param.is_struct {
+                match find_wire(
+                    in wires.as_slice(),
+                    in parser.arena.as_slice(),
+                    param.pointee_start,
+                    param.pointee_end
+                ) {
                     Option::Some(_) => (),
                     Option::None => return fail_vsys(err_type(), 0, 0, 600),
                 }
-            } else if par.kind == 3 && par.is_struct {
-                match find_wire(in wires.as_slice(), in p.arena.as_slice(), par.p_na, par.p_nb) {
+            } else if param.kind == 3 && param.is_struct {
+                match find_wire(
+                    in wires.as_slice(),
+                    in parser.arena.as_slice(),
+                    param.pointee_start,
+                    param.pointee_end
+                ) {
                     Option::Some(_) => (),
                     Option::None => {
                         match find_extern(
                             in externs.as_slice(),
-                            in p.arena.as_slice(),
-                            par.p_na,
-                            par.p_nb
+                            in parser.arena.as_slice(),
+                            param.pointee_start,
+                            param.pointee_end
                         ) {
                             Option::Some(_) => {
-                                if par.flag {
+                                if param.flag {
                                     return fail_vsys(err_type(), 0, 0, 601);
                                 }
-                                par.kind = 4;
-                                par.is_struct = false;
+                                param.kind = 4;
+                                param.is_struct = false;
                             }
                             Option::None => return fail_vsys(err_type(), 0, 0, 602),
                         }
                     }
                 }
             }
-            if f.has_variadic && pi >= f.variadic {
-                let word_ok = if par.kind == 1 {
-                    par.vt.tag == 2 && scalar_bits(par.vt.sc) == 64
+            if func.has_variadic && param_pos >= func.variadic_from {
+                let word_ok = if param.kind == 1 {
+                    param.val_ty.tag == 2 && scalar_bits(param.val_ty.num_kind) == 64
                 } else {
                     true
                 };
@@ -1765,36 +1887,39 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                     return fail_vsys(err_unsupported(), 0, 0, 605);
                 }
             }
-            pars.try_set(pidx, par);
+            pars.try_set(param_index, param);
         }
-        if f.result.tag == 9 || f.result.tag == 10 {
+        if func.result.tag == 9 || func.result.tag == 10 {
             match find_extern(
                 in externs.as_slice(),
-                in p.arena.as_slice(),
-                f.result.na,
-                f.result.nb
+                in parser.arena.as_slice(),
+                func.result.name_start,
+                func.result.name_end
             ) {
                 Option::Some(_) => (),
                 Option::None => return fail_vsys(err_type(), 0, 0, 603),
             }
         } else {
-            f.result = resolve_val_ty(
-                in f.result,
+            func.result = resolve_val_ty(
+                in func.result,
                 in enums.as_slice(),
                 in externs.as_slice(),
-                in p.arena.as_slice()
+                in parser.arena.as_slice()
             );
         }
-        if f.has_len {
+        if func.has_len {
             let mut found = false;
-            for pi in 0..f.pn {
-                let par = match pars.try_get(wrapping_add(f.p0, pi)) {
+            for param_pos in 0..func.param_count {
+                let param = match pars.try_get(wrapping_add(func.param_start, param_pos)) {
                     Option::Some(v) => v,
                     Option::None => continue,
                 };
-                if eq_bytes(in p.arena[par.na..par.nb], in p.arena[f.len_a..f.len_b]) {
-                    f.mapping_len = pi;
-                    f.has_mapping_len = true;
+                if eq_bytes(
+                    in parser.arena[param.name_start..param.name_end],
+                    in parser.arena[func.len_name_start..func.len_name_end]
+                ) {
+                    func.mapping_len = param_pos;
+                    func.has_mapping_len = true;
                     found = true;
                     break;
                 }
@@ -1803,205 +1928,226 @@ pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysErro
                 return fail_vsys(err_type(), 0, 0, 604);
             }
         }
-        funs.try_set(fi, f);
+        funs.try_set(fun_index, func);
     }
-    sort_funs(inout funs, in p.arena.as_slice());
+    sort_funs(inout funs, in parser.arena.as_slice());
 
     // Canonicalize!
-    let mut enc = new_encoder(1048576);
-    put_str(inout enc, in "vesper.vsys/1");
-    put_bytes(inout enc, in p.arena[lib_a..lib_b]);
-    put_bytes(inout enc, in p.arena[target_a..target_b]);
-    put_bytes(inout enc, in p.arena[abi_a..abi_b]);
-    put_str(inout enc, in "pointer64-little-endian");
-    put_bytes(inout enc, in p.arena[link_a..link_b]);
-    put_bytes(inout enc, in p.arena[name_a..name_b]);
-    put_bytes(inout enc, in blake3_bytes.as_slice());
-    if has_hdr {
-        put_str(inout enc, in "some");
-        put_bytes(inout enc, in p.arena[hdr_a..hdr_b]);
+    let mut encoder = new_encoder(1048576);
+    put_str(inout encoder, in "vesper.vsys/1");
+    put_bytes(inout encoder, in parser.arena[lib_start..lib_end]);
+    put_bytes(inout encoder, in parser.arena[target_start..target_end]);
+    put_bytes(inout encoder, in parser.arena[abi_start..abi_end]);
+    put_str(inout encoder, in "pointer64-little-endian");
+    put_bytes(inout encoder, in parser.arena[link_start..link_end]);
+    put_bytes(inout encoder, in parser.arena[name_start..name_end]);
+    put_bytes(inout encoder, in blake3_bytes.as_slice());
+    if has_header {
+        put_str(inout encoder, in "some");
+        put_bytes(inout encoder, in parser.arena[header_start..header_end]);
     } else {
-        put_str(inout enc, in "none");
+        put_str(inout encoder, in "none");
     }
-    if has_pkg {
-        put_str(inout enc, in "some");
-        put_bytes(inout enc, in p.arena[pkg_a..pkg_b]);
+    if has_pkg_config {
+        put_str(inout encoder, in "some");
+        put_bytes(inout encoder, in parser.arena[pkg_config_start..pkg_config_end]);
     } else {
-        put_str(inout enc, in "none");
+        put_str(inout encoder, in "none");
     }
-    put_count(inout enc, enums.len());
-    for ei in 0..enums.len() {
-        let e = match enums.try_get(ei) {
+    put_count(inout encoder, enums.len());
+    for enum_index in 0..enums.len() {
+        let enum_def = match enums.try_get(enum_index) {
             Option::Some(v) => v,
             Option::None => continue,
         };
-        put_bytes(inout enc, in p.arena[e.na..e.nb]);
-        put_str(inout enc, in scalar_name(e.scalar));
-        put_count(inout enc, e.vn);
-        for vi in 0..e.vn {
-            let v = match enum_vars.try_get(wrapping_add(e.v0, vi)) {
+        put_bytes(inout encoder, in parser.arena[enum_def.name_start..enum_def.name_end]);
+        put_str(inout encoder, in scalar_name(enum_def.scalar));
+        put_count(inout encoder, enum_def.variant_count);
+        for variant_index in 0..enum_def.variant_count {
+            let variant = match enum_vars
+                .try_get(wrapping_add(enum_def.variant_start, variant_index)) {
                 Option::Some(x) => x,
                 Option::None => continue,
             };
-            put_bytes(inout enc, in p.arena[v.na..v.nb]);
-            put_count(inout enc, v.val);
+            put_bytes(inout encoder, in parser.arena[variant.name_start..variant.name_end]);
+            put_count(inout encoder, variant.value);
         }
     }
-    let mut n_direct: u64 = 0;
-    let mut n_cb: u64 = 0;
-    for fi in 0..funs.len() {
-        let f = match funs.try_get(fi) {
+    let mut direct_count: u64 = 0;
+    let mut callback_count: u64 = 0;
+    for fun_index in 0..funs.len() {
+        let func = match funs.try_get(fun_index) {
             Option::Some(v) => v,
             Option::None => continue,
         };
-        if f.indirect {
-            n_cb = wrapping_add(n_cb, 1);
+        if func.indirect {
+            callback_count = wrapping_add(callback_count, 1);
         } else {
-            n_direct = wrapping_add(n_direct, 1);
+            direct_count = wrapping_add(direct_count, 1);
         }
     }
-    put_count(inout enc, n_direct);
-    for fi in 0..funs.len() {
-        let f = match funs.try_get(fi) {
+    put_count(inout encoder, direct_count);
+    for fun_index in 0..funs.len() {
+        let func = match funs.try_get(fun_index) {
             Option::Some(v) => v,
             Option::None => continue,
         };
-        if !f.indirect {
-            encode_fun(inout enc, in f, in pars.as_slice(), in p.arena.as_slice());
+        if !func.indirect {
+            encode_fun(inout encoder, in func, in pars.as_slice(), in parser.arena.as_slice());
         }
     }
-    if n_cb > 0 {
-        put_str(inout enc, in "callbacks");
-        put_count(inout enc, n_cb);
-        for fi in 0..funs.len() {
-            let f = match funs.try_get(fi) {
+    if callback_count > 0 {
+        put_str(inout encoder, in "callbacks");
+        put_count(inout encoder, callback_count);
+        for fun_index in 0..funs.len() {
+            let func = match funs.try_get(fun_index) {
                 Option::Some(v) => v,
                 Option::None => continue,
             };
-            if f.indirect {
-                encode_fun(inout enc, in f, in pars.as_slice(), in p.arena.as_slice());
+            if func.indirect {
+                encode_fun(inout encoder, in func, in pars.as_slice(), in parser.arena.as_slice());
             }
         }
     }
     if wires.len() > 0 {
-        put_str(inout enc, in "wire-structs");
-        put_count(inout enc, wires.len());
-        for wi in 0..wires.len() {
-            let w = match wires.try_get(wi) {
+        put_str(inout encoder, in "wire-structs");
+        put_count(inout encoder, wires.len());
+        for wire_index in 0..wires.len() {
+            let wire = match wires.try_get(wire_index) {
                 Option::Some(v) => v,
                 Option::None => continue,
             };
-            put_bytes(inout enc, in p.arena[w.name_a..w.name_b]);
-            put_count(inout enc, w.size);
-            put_count(inout enc, w.alignment);
-            put_count(inout enc, w.fn_count);
-            for fi in 0..w.fn_count {
-                let wf = match wire_fields.try_get(wrapping_add(w.f0, fi)) {
+            put_bytes(inout encoder, in parser.arena[wire.name_start..wire.name_end]);
+            put_count(inout encoder, wire.size);
+            put_count(inout encoder, wire.alignment);
+            put_count(inout encoder, wire.field_count);
+            for field_index in 0..wire.field_count {
+                let wire_field = match wire_fields
+                    .try_get(wrapping_add(wire.field_start, field_index)) {
                     Option::Some(v) => v,
                     Option::None => continue,
                 };
-                put_bytes(inout enc, in p.arena[wf.name_a..wf.name_b]);
-                if wf.kind == wt_int() {
-                    put_str(inout enc, in "integer");
-                    put_str(inout enc, in if wf.signed { "i" } else { "u" });
-                    put_u16(inout enc, widen_u16(wf.bits));
-                    let es = if wf.endian == endian_native() {
+                put_bytes(
+                    inout encoder,
+                    in parser.arena[wire_field.name_start..wire_field.name_end]
+                );
+                if wire_field.kind == wt_int() {
+                    put_str(inout encoder, in "integer");
+                    put_str(inout encoder, in if wire_field.signed { "i" } else { "u" });
+                    put_u16(inout encoder, widen_u16(wire_field.bits));
+                    let endian_name = if wire_field.endian == endian_native() {
                         "native"
-                    } else if wf.endian == endian_le() {
+                    } else if wire_field.endian == endian_le() {
                         "le"
                     } else {
                         "be"
                     };
-                    put_str(inout enc, in es);
-                } else if wf.kind == wt_bytes() {
-                    put_str(inout enc, in "bytes");
-                    put_count(inout enc, wf.count);
-                } else if wf.kind == wt_pad() {
-                    put_str(inout enc, in "zero-pad");
-                    put_count(inout enc, wf.count);
+                    put_str(inout encoder, in endian_name);
+                } else if wire_field.kind == wt_bytes() {
+                    put_str(inout encoder, in "bytes");
+                    put_count(inout encoder, wire_field.count);
+                } else if wire_field.kind == wt_pad() {
+                    put_str(inout encoder, in "zero-pad");
+                    put_count(inout encoder, wire_field.count);
                 } else {
-                    put_str(inout enc, in "struct");
-                    put_bytes(inout enc, in p.arena[wf.struct_a..wf.struct_b]);
+                    put_str(inout encoder, in "struct");
+                    put_bytes(
+                        inout encoder,
+                        in parser.arena[wire_field.struct_name_start..wire_field.struct_name_end]
+                    );
                 }
             }
         }
     }
-    let mut n_ext: u64 = 0;
+    let mut extern_count: u64 = 0;
     let mut any_drop = false;
-    let mut any_map = false;
-    for xi in 0..externs.len() {
-        let x = match externs.try_get(xi) {
+    let mut any_mapping = false;
+    for extern_index in 0..externs.len() {
+        let extern_def = match externs.try_get(extern_index) {
             Option::Some(v) => v,
             Option::None => continue,
         };
-        if x.mapping != 0 {
-            any_map = true;
+        if extern_def.mapping != 0 {
+            any_mapping = true;
         }
-        if x.linearity != 3 {
-            n_ext = wrapping_add(n_ext, 1);
-            if x.has_drop {
+        if extern_def.linearity != 3 {
+            extern_count = wrapping_add(extern_count, 1);
+            if extern_def.has_drop {
                 any_drop = true;
             }
         }
     }
-    if n_ext > 0 {
-        put_str(inout enc, in "extern-types");
-        put_count(inout enc, n_ext);
-        for xi in 0..externs.len() {
-            let x = match externs.try_get(xi) {
+    if extern_count > 0 {
+        put_str(inout encoder, in "extern-types");
+        put_count(inout encoder, extern_count);
+        for extern_index in 0..externs.len() {
+            let extern_def = match externs.try_get(extern_index) {
                 Option::Some(v) => v,
                 Option::None => continue,
             };
-            if x.linearity != 3 {
-                put_bytes(inout enc, in p.arena[x.na..x.nb]);
-                put_str(inout enc, in if x.linearity == 1 { "linear" } else { "affine" });
+            if extern_def.linearity != 3 {
+                put_bytes(
+                    inout encoder,
+                    in parser.arena[extern_def.name_start..extern_def.name_end]
+                );
+                put_str(
+                    inout encoder,
+                    in if extern_def.linearity == 1 {
+                        "linear"
+                    } else {
+                        "affine"
+                    }
+                );
             }
         }
         if any_drop {
-            put_str(inout enc, in "drop-imports");
-            for xi in 0..externs.len() {
-                let x = match externs.try_get(xi) {
+            put_str(inout encoder, in "drop-imports");
+            for extern_index in 0..externs.len() {
+                let extern_def = match externs.try_get(extern_index) {
                     Option::Some(v) => v,
                     Option::None => continue,
                 };
-                if x.linearity != 3 {
-                    if x.has_drop {
-                        put_bytes(inout enc, in p.arena[x.drop_a..x.drop_b]);
+                if extern_def.linearity != 3 {
+                    if extern_def.has_drop {
+                        put_bytes(
+                            inout encoder,
+                            in parser.arena[extern_def.drop_start..extern_def.drop_end]
+                        );
                     } else {
-                        put_str(inout enc, in "");
+                        put_str(inout encoder, in "");
                     }
                 }
             }
         }
-        if any_map {
-            put_str(inout enc, in "mappings");
-            for xi in 0..externs.len() {
-                let x = match externs.try_get(xi) {
+        if any_mapping {
+            put_str(inout encoder, in "mappings");
+            for extern_index in 0..externs.len() {
+                let extern_def = match externs.try_get(extern_index) {
                     Option::Some(v) => v,
                     Option::None => continue,
                 };
-                if x.mapping != 0 {
-                    put_str(inout enc, in scalar_name(x.mapping));
+                if extern_def.mapping != 0 {
+                    put_str(inout encoder, in scalar_name(extern_def.mapping));
                 } else {
-                    put_str(inout enc, in "");
+                    put_str(inout encoder, in "");
                 }
             }
         }
     }
     if consts.len() > 0 {
-        put_str(inout enc, in "consts");
-        put_count(inout enc, consts.len());
-        for ci in 0..consts.len() {
-            let c = match consts.try_get(ci) {
+        put_str(inout encoder, in "consts");
+        put_count(inout encoder, consts.len());
+        for const_index in 0..consts.len() {
+            let const_def = match consts.try_get(const_index) {
                 Option::Some(v) => v,
                 Option::None => continue,
             };
-            put_bytes(inout enc, in p.arena[c.na..c.nb]);
-            put_str(inout enc, in scalar_name(c.scalar));
-            put_decimal_const(inout enc, c.neg, c.mag);
+            put_bytes(inout encoder, in parser.arena[const_def.name_start..const_def.name_end]);
+            put_str(inout encoder, in scalar_name(const_def.scalar));
+            put_decimal_const(inout encoder, const_def.negative, const_def.magnitude);
         }
     }
-    enc.out
+    encoder.out
 }
 
 fn pack_bytes(in bytes: Slice[u8]) -> ChunkSeq[u64] {
@@ -2014,15 +2160,15 @@ fn pack_bytes(in bytes: Slice[u8]) -> ChunkSeq[u64] {
         if i >= n {
             break;
         }
-        let mut w: u64 = 0;
+        let mut word: u64 = 0;
         for k in 0..8 {
-            let idx = wrapping_add(i, k);
-            if idx < n {
-                let b = widen_u64(u8_at(in bytes, idx));
-                w = w | wrapping_shl_u64(b, wrapping_mul(wrapping_u32(k), 8));
+            let byte_index = wrapping_add(i, k);
+            if byte_index < n {
+                let byte = widen_u64(u8_at(in bytes, byte_index));
+                word = word | wrapping_shl_u64(byte, wrapping_mul(wrapping_u32(k), 8));
             }
         }
-        words.push(w);
+        words.push(word);
         i = wrapping_add(i, 8);
     }
     words
@@ -2037,10 +2183,10 @@ pub fn run_vsys_check(in source: Str) -> ChunkSeq[u64] {
         out
     } with {
         return v => v,
-        raise(e, _) => {
+        raise(err, _) => {
             let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
             out.push(1);
-            out.push(e.kind);
+            out.push(err.kind);
             out
         }
     };
