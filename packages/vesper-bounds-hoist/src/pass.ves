@@ -262,13 +262,33 @@ fn clone_loop(
             Option::Some(x) => x,
             Option::None => fail_lin(),
         };
-        // the terms' values, in form order
+        // a scaled form's scale (#2022), before the terms
+        let mut scale = NONE64;
+        if form.scale != 0 {
+            scale = fresh.value(cx.u64_ty);
+            let sr = const_row(inout p, scale, cx.u64_ty, s0, s1, form.scale, 0);
+            g.rows.push(sr);
+        }
+        // the terms' values, in form order: plus, minus, then (scaled) the
+        // scale, outer plus and outer minus
         let mut tv: ChunkSeq[u64] = ChunkSeq::new[u64]();
-        for side in 0..2 {
+        let sides: u64 = if form.scale != 0 {
+            4
+        } else {
+            2
+        };
+        for side in 0..sides {
+            if side == 2 {
+                tv.push(scale);
+            }
             let (a0, an) = if side == 0 {
                 (form.p0, form.pn)
-            } else {
+            } else if side == 1 {
                 (form.m0, form.mn)
+            } else if side == 2 {
+                (form.q0, form.qn)
+            } else {
+                (form.r0, form.rn)
             };
             for q in 0..w(an) {
                 let x = u64_at(in plan.c.offs, add(w(a0), q));
@@ -306,7 +326,14 @@ fn clone_loop(
         if form.sign < 0 {
             label = label | 2;
         }
-        label = label | wrapping_shl_u32(form.pn, 8) | wrapping_shl_u32(form.mn, 16);
+        label = label | wrapping_shl_u32(form.pn, 8) | wrapping_shl_u32(form.mn, 12);
+        if form.scale != 0 {
+            label = label | 4 | wrapping_shl_u32(form.qn, 16) | wrapping_shl_u32(form.rn, 20);
+        }
+        let width = n32(u64_at(in plan.rwidth, k));
+        if width != 1 {
+            label = label | wrapping_shl_u32(width, 24);
+        }
         let e = pool_entry(inout p, POOL_GUARD, label);
         // the pool word, then the arguments
         let a = p.ops.len();

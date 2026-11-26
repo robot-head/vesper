@@ -42,6 +42,9 @@ const B_WADD: u32 = 6;
 const B_SUB: u32 = 7;
 const B_WSUB: u32 = 8;
 const B_EQ: u32 = 9;
+const B_MUL: u32 = 10;
+const B_WMUL: u32 = 11;
+const B_SHL: u32 = 12;
 
 // Callee classes: a path (`E::op`), `Fail::raise`.
 const C_PATH: u32 = 1;
@@ -591,8 +594,39 @@ pub fn hoistable(s: u64) -> u64 {
     4
 }
 
+// `counted_access`: `hoistable`, and the fixed-width reads and writes of a
+// byte sequence (`SeqWord::Wide + Wide::code`, #2022), whose guard covers
+// all their bytes; 4 for none.
+pub fn counted_access(s: u64) -> u64 {
+    if is_wide(s) {
+        return s;
+    }
+    hoistable(s)
+}
+
+// A fixed-width access's class (`seq_class`).
+pub fn is_wide(s: u64) -> bool {
+    s >= SeqWord::Wide && s < add(SeqWord::Wide, 24)
+}
+
+// `access_width`: the elements an access touches from its index.
+pub fn access_width(a: u64) -> u64 {
+    if !is_wide(a) {
+        return 1;
+    }
+    let width = (wrapping_sub(a, SeqWord::Wide) / 2) % 3;
+    if width == 0 {
+        2
+    } else if width == 1 {
+        4
+    } else {
+        8
+    }
+}
+
 pub fn keeps_length(s: u64) -> bool {
-    hoistable(s) < 4
+    counted_access(s) < 4
+        || is_wide(s)
         || s == SeqWord::Len
         || s == SeqWord::SliceLen
         || s == SeqWord::AsSlice
@@ -604,7 +638,8 @@ pub fn has_receiver(s: u64) -> bool {
 }
 
 pub fn is_hoisted(s: u64) -> bool {
-    s >= SeqWord::Hoisted && s < SeqWord::Guard
+    (s >= SeqWord::Hoisted && s < SeqWord::Guard)
+        || (s >= SeqWord::HoistedWide && s < add(SeqWord::HoistedWide, 24))
 }
 
 // `calls_out`: whether the operation may call out of the function.
@@ -790,6 +825,15 @@ fn binary_class(in f: Fun, s: u32) -> u64 {
     }
     if f.name_is(s, "==") {
         return w(B_EQ);
+    }
+    if f.name_is(s, "*") {
+        return w(B_MUL);
+    }
+    if f.name_is(s, "wrapping_mul") {
+        return w(B_WMUL);
+    }
+    if f.name_is(s, "<<") {
+        return w(B_SHL);
     }
     w(B_OTHER)
 }
