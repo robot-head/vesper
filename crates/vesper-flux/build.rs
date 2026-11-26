@@ -34,8 +34,8 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
     // filter: `AtLeast` becomes strictly greater.
     (
         "filter",
-        "            x >= value\n",
-        "            x > value\n",
+        "                key >= value\n",
+        "                key > value\n",
     ),
     // consolidate: zero sums are kept.
     (
