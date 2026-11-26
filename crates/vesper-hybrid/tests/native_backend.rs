@@ -10,6 +10,8 @@ mod binding;
 mod elf;
 #[path = "native_backend/elf_host.rs"]
 mod elf_host;
+#[path = "native_backend/floating.rs"]
+mod floating;
 #[path = "native_backend/wide.rs"]
 mod wide;
 

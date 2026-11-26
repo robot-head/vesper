@@ -52,8 +52,8 @@ fn forward(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64, i: u6
 fn main() -> u64 { forward(1, 2, 3, 4, 5, 6, 7, 8, 9) }
 ";
 const UNSUPPORTED_SIGNATURE: &str = "
-fn narrow(x: f64) -> f64 { x }
-fn main() -> u64 { if narrow(1.0) > 0.0 { 1 } else { 0 } }
+fn ninth(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64, i: f64) -> f64 { i }
+fn main() -> u64 { if ninth(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0) > 0.0 { 1 } else { 0 } }
 ";
 const INOUT_MEMORY: &str = "
 fn bump(inout n: u64) -> u64 {

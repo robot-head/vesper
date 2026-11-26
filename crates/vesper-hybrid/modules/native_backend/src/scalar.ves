@@ -1,12 +1,14 @@
 use self::x86_64::{
-    ADC_RM_R64, ADD_RM_R64, ALU_ADD_EXTENSION, ALU_AND_EXTENSION, ALU_OR_EXTENSION,
-    ALU_SUB_EXTENSION, ALU_XOR_EXTENSION, AND_RM_R64, ARGUMENTS, BYTE_BITS, DWORD_BITS, QWORD_BITS,
-    WORD_BITS, CC_A, CC_AE, CC_B, CC_BE, CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, CC_O,
-    FixedArithmetic, Instruction, NEG_EXTENSION, NOT_EXTENSION, OR_RM_R64, R10, R11, RAX, RDX, RSP,
-    SAR_EXTENSION, SHL_EXTENSION, SHR_EXTENSION, SBB_RM_R64, SUB_RM_R64, UNASSIGNED, XOR_RM_R64,
-    REGISTER_CODES, arg_register, emit, emit_direct_call, emit_jump_table, emit_jump_table_entry,
-    emit_symbol_address, find_register, fits_signed_byte, patch_forward_branch,
-    patch_relative_branch, patch_relative_offset, register_bit, home_register, HOME_REGISTERS
+    XMM0, XMM_LEFT_SCRATCH, XMM_RIGHT_SCRATCH, SSE_ADD, SSE_SUB, SSE_MUL, SSE_DIV, SSE_SQRT,
+    FLOAT_UNORDERED_OR_GREATER_EQUAL, is_xmm, find_float_register, ADC_RM_R64, ADD_RM_R64,
+    ALU_ADD_EXTENSION, ALU_AND_EXTENSION, ALU_OR_EXTENSION, ALU_SUB_EXTENSION, ALU_XOR_EXTENSION,
+    AND_RM_R64, ARGUMENTS, BYTE_BITS, DWORD_BITS, QWORD_BITS, WORD_BITS, CC_A, CC_AE, CC_B, CC_BE,
+    CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, CC_O, FixedArithmetic, Instruction, NEG_EXTENSION,
+    NOT_EXTENSION, OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION, SHL_EXTENSION, SHR_EXTENSION,
+    SBB_RM_R64, SUB_RM_R64, UNASSIGNED, XOR_RM_R64, REGISTER_CODES, arg_register, emit,
+    emit_direct_call, emit_jump_table, emit_jump_table_entry, emit_symbol_address, find_register,
+    fits_signed_byte, patch_forward_branch, patch_relative_branch, patch_relative_offset,
+    register_bit, home_register, HOME_REGISTERS
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -89,6 +91,25 @@ const BRANCH_TABLE: u64 = 75;
 const BRANCH_TABLE_TARGET: u64 = 76;
 const ADD_CARRY: u64 = 77;
 const SUB_BORROW: u64 = 78;
+const FLOAT_ARGUMENT: u64 = 79;
+const FLOAT_CONSTANT: u64 = 80;
+const FLOAT_ADD: u64 = 81;
+const FLOAT_SUB: u64 = 82;
+const FLOAT_MUL: u64 = 83;
+const FLOAT_DIV: u64 = 84;
+const FLOAT_SQRT: u64 = 85;
+const FLOAT_NEG: u64 = 86;
+const FLOAT_ABS: u64 = 87;
+const FLOAT_COMPARE32: u64 = 88;
+const FLOAT_COMPARE64: u64 = 89;
+const FLOAT_LOAD: u64 = 90;
+const FLOAT_STORE32: u64 = 91;
+const FLOAT_STORE64: u64 = 92;
+const BITS_TO_FLOAT: u64 = 93;
+const FLOAT_TO_BITS: u64 = 94;
+const FLOAT_SELECT: u64 = 95;
+const FLOAT_RETURN: u64 = 96;
+const XMM_ARGUMENTS: u64 = 8;
 const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 
 // Relocation kinds shared with src/native_machine.rs.
@@ -181,6 +202,7 @@ struct FrameLayout {
     used: bool,
     outgoing: u64,
     fixed: bool,
+    floating: bool,
     home_slot: u64,
     promoted: u64,
 }
@@ -271,6 +293,7 @@ fn frame_layout(in words: Slice[u64], count: u64) -> Option[FrameLayout] {
         used: false,
         outgoing: 0,
         fixed: false,
+        floating: false,
         home_slot: NO_VALUE,
         promoted: 0
     })
@@ -323,7 +346,7 @@ fn is_register_shift(op: u64) -> bool {
 }
 
 fn is_store(op: u64) -> bool {
-    op >= STORE_BYTE && op <= STORE_QWORD
+    (op >= STORE_BYTE && op <= STORE_QWORD) || op == FLOAT_STORE32 || op == FLOAT_STORE64
 }
 
 fn is_stack_store(op: u64) -> bool {
@@ -361,6 +384,9 @@ fn has_no_result(op: u64) -> bool {
         || op == CALL_ARGUMENT
         || op == CALL_VOID
         || op == TRAP
+        || op == FLOAT_RETURN
+        || op == FLOAT_STORE32
+        || op == FLOAT_STORE64
         || is_cfg_record(op)
 }
 
@@ -418,7 +444,7 @@ fn store_width(op: u64) -> u64 {
     match op {
         STORE_BYTE | STACK_STORE_BYTE => BYTE_BITS,
         STORE_WORD | STACK_STORE_WORD => WORD_BITS,
-        STORE_DWORD | STACK_STORE_DWORD => DWORD_BITS,
+        STORE_DWORD | STACK_STORE_DWORD | FLOAT_STORE32 => DWORD_BITS,
         _ => QWORD_BITS,
     }
 }
@@ -466,6 +492,9 @@ fn reads_left(in record: Record) -> bool {
         && op != EDGE_LABEL
         && op != JUMP_LABEL
         && op != BRANCH_TABLE_TARGET
+        && op != FLOAT_ARGUMENT
+        && op != FLOAT_CONSTANT
+        && op != FLOAT_RETURN
         && (!is_branch_return(op) || (record.left != NO_VALUE && record.left != TRAP_VALUE))
 }
 
@@ -474,12 +503,68 @@ fn reads_right(in record: Record, paired: bool) -> bool {
     (op >= ADD && op <= XOR)
         || (is_comparison(op) && !is_immediate_comparison(op))
         || op == SELECT
+        || op == FLOAT_SELECT
+        || is_float_binary(op)
+        || is_float_compare(op)
         || is_register_shift(op)
         || is_fixed_arithmetic(op)
         || is_checked_arithmetic(op)
         || consumes_carry(op)
         || is_store(op)
         || (is_branch_return(op) && paired && record.left != TRAP_VALUE)
+}
+
+fn is_float_binary(op: u64) -> bool {
+    op >= FLOAT_ADD && op <= FLOAT_DIV
+}
+
+fn is_float_compare(op: u64) -> bool {
+    op == FLOAT_COMPARE32 || op == FLOAT_COMPARE64
+}
+
+fn is_float_result(op: u64) -> bool {
+    (op >= FLOAT_ARGUMENT && op <= FLOAT_ABS)
+        || op == FLOAT_LOAD
+        || op == BITS_TO_FLOAT
+        || op == FLOAT_SELECT
+}
+
+fn float_value(in words: Slice[u64], arguments: u64, value: u64) -> bool {
+    value >= arguments && is_float_result(read_record(in words, wrapping_sub(value, arguments)).op)
+}
+
+fn float_left(op: u64) -> bool {
+    (op >= FLOAT_ADD && op <= FLOAT_COMPARE64) || op == FLOAT_TO_BITS
+}
+
+fn float_right(op: u64) -> bool {
+    is_float_binary(op)
+        || is_float_compare(op)
+        || op == FLOAT_SELECT
+        || op == FLOAT_STORE32
+        || op == FLOAT_STORE64
+}
+
+fn valid_float_operands(
+    in words: Slice[u64],
+    arguments: u64,
+    count: u64,
+    paired: bool,
+    float_return: bool
+) -> bool {
+    for index in 0..count {
+        let record = read_record(in words, index);
+        let left_is_float = float_left(record.op) || (is_branch_return(record.op) && float_return);
+        if (reads_left(in record) && float_value(in words, arguments, record.left) != left_is_float)
+            || (reads_right(in record, paired)
+                && float_value(in words, arguments, record.right) != float_right(record.op))
+            || ((record.op == SELECT || record.op == FLOAT_SELECT || consumes_carry(record.op))
+                && float_value(in words, arguments, record.extra) != (record.op == FLOAT_SELECT))
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn is_branch_return(op: u64) -> bool {
@@ -580,6 +665,8 @@ fn can_reuse_right(op: u64) -> bool {
         && op != SUB_BORROW
         && op != SIGNED_SUB_OVERFLOW
         && op != UNSIGNED_SUB_OVERFLOW
+        && op != FLOAT_SUB
+        && op != FLOAT_DIV
         && !is_register_shift(op)
 }
 
@@ -636,19 +723,44 @@ fn find_last_reads(
     let mut arms = ChunkSeq::new[BranchArm]();
     let mut depth: u64 = 0;
     let mut pending_arguments: u64 = 0;
+    let mut has_calls = false;
     let mut block_end = values;
     let mut entry_end = values;
     for reverse_index in 0..count {
         let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
-        if record.op > SUB_BORROW
+        if record.op > FLOAT_RETURN
             || (!labeled && is_cfg_record(record.op))
             || (record.op == STACK_SLOT && index >= frame.slots.len())
             || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
             || (record.op == TRAP && (reverse_index != 0 || result != NO_VALUE))
+            || (record.op == FLOAT_RETURN && (reverse_index != 0 || result == NO_VALUE))
         {
             return Option::None;
+        }
+        if record.op >= FLOAT_ARGUMENT {
+            frame.floating = true;
+            if record.op == FLOAT_ARGUMENT
+                && (record.left >= XMM_ARGUMENTS
+                    || index != wrapping_add(frame.slots.len(), record.left))
+            {
+                return Option::None;
+            }
+            if ((record.op >= FLOAT_ARGUMENT && record.op <= FLOAT_ABS)
+                || record.op == FLOAT_LOAD
+                || record.op == BITS_TO_FLOAT
+                || record.op == FLOAT_TO_BITS)
+                && record.extra != DWORD_BITS
+                && record.extra != QWORD_BITS
+            {
+                return Option::None;
+            }
+            if (is_float_compare(record.op) && record.extra > FLOAT_UNORDERED_OR_GREATER_EQUAL)
+                || (record.op == FLOAT_LOAD && record.right > DISP32_MASK)
+            {
+                return Option::None;
+            }
         }
         let last = last_read(in reads, value);
         let live = last != NEVER_READ || live_overflow_flag(in reads, value, record.op);
@@ -796,6 +908,7 @@ fn find_last_reads(
             return Option::None;
         }
         if is_call(record.op) {
+            has_calls = true;
             if !allow_relocations
                 || record.right > MAX_ARGUMENTS
                 || record.right > index
@@ -830,7 +943,7 @@ fn find_last_reads(
         }
         let has_left = reads_left(in record);
         let has_right = reads_right(in record, paired);
-        let has_third = record.op == SELECT || carry;
+        let has_third = record.op == SELECT || record.op == FLOAT_SELECT || carry;
         if (has_left && record.left >= value)
             || (has_right && record.right >= value)
             || (has_third && record.extra >= value)
@@ -840,6 +953,7 @@ fn find_last_reads(
         }
         if live
             || record.op == LOAD
+            || record.op == FLOAT_LOAD
             || record.op == STACK_LOAD
             || is_integer_division(record.op)
             || no_result
@@ -855,7 +969,7 @@ fn find_last_reads(
             }
         }
     }
-    if depth != 0 {
+    if depth != 0 || (frame.floating && (labeled || has_calls)) {
         return Option::None;
     }
     if labeled {
@@ -883,12 +997,22 @@ fn emits_instruction(op: u64, result_live: bool) -> bool {
     op != STACK_SLOT
         && op != RETURN_PAIR
         && op != CALL_ARGUMENT
+        && op != FLOAT_RETURN
         && (result_live
             || op == LOAD
+            || op == FLOAT_LOAD
             || op == STACK_LOAD
             || is_call(op)
             || is_integer_division(op)
             || has_no_result(op))
+}
+
+fn compatible_register(reg: u8, floating: bool) -> u8 {
+    if is_xmm(reg) == floating {
+        reg
+    } else {
+        UNASSIGNED
+    }
 }
 
 fn dying_register(
@@ -919,12 +1043,17 @@ fn allocate(
     spills: bool
 ) -> Option[Allocation] {
     let mut locations = ChunkSeq::with_capacity[Location](wrapping_add(arguments, count));
-    let reserved = if spills {
+    let gp_reserved = if spills {
         register_bit(LEFT_SCRATCH) | register_bit(RIGHT_SCRATCH) | register_bit(THIRD_SCRATCH)
-    } else if frame.outgoing != 0 || frame.fixed {
+    } else if frame.outgoing != 0 || frame.fixed || frame.floating {
         register_bit(THIRD_SCRATCH)
     } else {
         0
+    };
+    let reserved = if frame.floating {
+        gp_reserved | register_bit(XMM_LEFT_SCRATCH) | register_bit(XMM_RIGHT_SCRATCH)
+    } else {
+        gp_reserved
     };
     let mut used = reserved;
     let mut stack_end = wrapping_add(frame.outgoing, if frame.used { frame.size } else { 0 });
@@ -978,7 +1107,10 @@ fn allocate(
         } else {
             UNASSIGNED
         };
-        let third = if record.op == SELECT || consumes_carry(record.op) {
+        let third = if record.op == SELECT
+            || record.op == FLOAT_SELECT
+            || consumes_carry(record.op)
+        {
             dying_register(in reads, in locations, record.extra, value)
         } else {
             UNASSIGNED
@@ -1006,9 +1138,15 @@ fn allocate(
             saved_masks.push(saved);
         }
         let implicit_result = fixed_result(record.op);
-        let register = if fixed && (survivors & register_bit(implicit_result)) == 0 {
+        let floating = is_float_result(record.op);
+        let left = compatible_register(left, floating);
+        let right = compatible_register(right, floating);
+        let third = compatible_register(third, floating);
+        let register = if record.op == FLOAT_ARGUMENT {
+            wrapping_add(XMM0, wrapping_u8(record.left))
+        } else if fixed && (survivors & register_bit(implicit_result)) == 0 {
             implicit_result
-        } else if record.op == SELECT && right != UNASSIGNED {
+        } else if (record.op == SELECT || record.op == FLOAT_SELECT) && right != UNASSIGNED {
             right
         } else if third != UNASSIGNED {
             third
@@ -1016,6 +1154,8 @@ fn allocate(
             left
         } else if right != UNASSIGNED && can_reuse_right(record.op) {
             right
+        } else if floating {
+            find_float_register(used)
         } else {
             find_register(used)
         };
@@ -1031,7 +1171,13 @@ fn allocate(
             return Option::None;
         } else if !result_live {
             // A retained load can finish in a scratch register.
-            Location::Register(LEFT_SCRATCH)
+            Location::Register(
+                if floating {
+                    XMM_LEFT_SCRATCH
+                } else {
+                    LEFT_SCRATCH
+                }
+            )
         } else {
             let offset = stack_end;
             stack_end = wrapping_add(stack_end, SPILL_SLOT_BYTES);
@@ -1181,10 +1327,18 @@ fn move_return(inout output: ChunkSeq[u8], in location: Location, destination: u
     }
 }
 
-fn emit_return(inout output: ChunkSeq[u8], in low: Location, in high: Location, frame_size: u32) {
+fn emit_return(
+    inout output: ChunkSeq[u8],
+    in low: Location,
+    in high: Location,
+    frame_size: u32,
+    floating: bool
+) {
     // Treat the ABI return registers as a parallel copy. Moving the high
     // result first preserves RAX when it holds that result.
-    if in_register(in high, RAX) {
+    if floating {
+        move_return(inout output, in low, XMM0);
+    } else if in_register(in high, RAX) {
         if in_register(in low, RDX) {
             emit(inout output, in Instruction::Exchange(RAX, RDX));
         } else {
@@ -1426,6 +1580,7 @@ pub fn encode_block(
         0
     };
     let paired = return_arity == PAIRED_RESULTS;
+    let float_return = tail.op == FLOAT_RETURN;
     if return_arity > PAIRED_RESULTS
         || (second != NO_VALUE && result == NO_VALUE)
         || (labeled
@@ -1448,6 +1603,13 @@ pub fn encode_block(
         Option::Some(last) => last,
         Option::None => return ChunkSeq::new[u8](),
     };
+    if frame.floating
+        && ((result != NO_VALUE && float_value(in words, arguments, result) != float_return)
+            || (second != NO_VALUE && float_value(in words, arguments, second))
+            || !valid_float_operands(in words, arguments, count, paired, float_return))
+    {
+        return ChunkSeq::new[u8]();
+    }
     let allocation = match allocate(in words, in reads, arguments, count, in frame, paired, false) {
         Option::Some(result) => result,
         Option::None => match allocate(
@@ -1491,6 +1653,7 @@ pub fn encode_block(
         let record = read_record(in words, index);
         let result_live = last_read(in reads, value) != NEVER_READ;
         if record.op == CALL_HIGH
+            || record.op == FLOAT_ARGUMENT
             || record.op == BRANCH_TABLE_TARGET
             || !emits_instruction(
                 record.op,
@@ -1671,7 +1834,7 @@ pub fn encode_block(
                 if home_mask != 0 {
                     preserve_registers(inout output, home_mask, allocation.home_save_frame, true);
                 }
-                emit_return(inout output, in low, in high, frame_size);
+                emit_return(inout output, in low, in high, frame_size, float_return);
             }
             if record.op == BLOCK_RETURN {
                 continue;
@@ -1686,27 +1849,54 @@ pub fn encode_block(
         let has_right = reads_right(in record, paired);
         let left = if reads_left(in record) {
             let location = assigned(in allocation.locations, record.left);
-            materialize(inout output, in location, LEFT_SCRATCH)
+            materialize(
+                inout output,
+                in location,
+                if float_left(record.op) {
+                    XMM_LEFT_SCRATCH
+                } else {
+                    LEFT_SCRATCH
+                }
+            )
         } else {
             UNASSIGNED
         };
         let right = if has_right {
             let location = assigned(in allocation.locations, record.right);
-            materialize(inout output, in location, RIGHT_SCRATCH)
+            let scratch = if record.op == FLOAT_SELECT {
+                XMM_LEFT_SCRATCH
+            } else if float_right(record.op) {
+                XMM_RIGHT_SCRATCH
+            } else {
+                RIGHT_SCRATCH
+            };
+            materialize(inout output, in location, scratch)
         } else {
             UNASSIGNED
         };
-        let conditional = record.op == SELECT;
+        let conditional = record.op == SELECT || record.op == FLOAT_SELECT;
         let third = if conditional {
             let location = assigned(in allocation.locations, record.extra);
-            materialize(inout output, in location, THIRD_SCRATCH)
+            materialize(
+                inout output,
+                in location,
+                if record.op == FLOAT_SELECT {
+                    XMM_RIGHT_SCRATCH
+                } else {
+                    THIRD_SCRATCH
+                }
+            )
         } else {
             UNASSIGNED
         };
         let home = assigned(in allocation.locations, value);
         let destination = match home {
             Location::Register(reg) => reg,
-            Location::Spill(_) => LEFT_SCRATCH,
+            Location::Spill(_) => if is_float_result(record.op) {
+                XMM_LEFT_SCRATCH
+            } else {
+                LEFT_SCRATCH
+            },
             Location::Absent => UNASSIGNED,
         };
         if is_store(record.op) {
@@ -1721,6 +1911,11 @@ pub fn encode_block(
             );
         } else if record.op == CONSTANT {
             emit(inout output, in Instruction::Immediate(destination, record.left));
+        } else if record.op == FLOAT_CONSTANT {
+            emit(
+                inout output,
+                in Instruction::FloatImmediate(destination, record.left, record.extra)
+            );
         } else if is_symbol(record.op) {
             let got = record.op == SYMBOL_GOT;
             let offset = emit_symbol_address(inout output, destination, got);
@@ -1751,7 +1946,7 @@ pub fn encode_block(
                 Instruction::StackAddress(destination, offset)
             };
             emit(inout output, in instruction);
-        } else if record.op == LOAD {
+        } else if record.op == LOAD || record.op == FLOAT_LOAD {
             emit(
                 inout output,
                 in Instruction::Load(destination, left, wrapping_u32(record.right), record.extra)
@@ -1762,6 +1957,41 @@ pub fn encode_block(
             } else {
                 emit(inout output, in Instruction::Select(destination, left, third, right, CC_NE));
             }
+        } else if is_float_compare(record.op) {
+            let width = if record.op == FLOAT_COMPARE32 {
+                DWORD_BITS
+            } else {
+                QWORD_BITS
+            };
+            emit(
+                inout output,
+                in Instruction::FloatCompare(destination, left, right, record.extra, width)
+            );
+        } else if is_float_binary(record.op) {
+            let reuse_right = destination == right && can_reuse_right(record.op);
+            let first = if reuse_right { right } else { left };
+            let second = if reuse_right { left } else { right };
+            let op = match record.op {
+                FLOAT_ADD => SSE_ADD,
+                FLOAT_SUB => SSE_SUB,
+                FLOAT_MUL => SSE_MUL,
+                _ => SSE_DIV,
+            };
+            emit(inout output, in Instruction::Move(destination, first));
+            emit(inout output, in Instruction::FloatBinary(op, destination, second, record.extra));
+        } else if record.op == FLOAT_SQRT {
+            emit(
+                inout output,
+                in Instruction::FloatBinary(SSE_SQRT, destination, left, record.extra)
+            );
+        } else if record.op == FLOAT_NEG || record.op == FLOAT_ABS {
+            emit(inout output, in Instruction::Move(destination, left));
+            emit(
+                inout output,
+                in Instruction::FloatSign(destination, record.op == FLOAT_ABS, record.extra)
+            );
+        } else if record.op == BITS_TO_FLOAT || record.op == FLOAT_TO_BITS {
+            emit(inout output, in Instruction::FloatBits(destination, left, record.extra));
         } else if is_comparison(record.op) {
             let cc = condition_code(record.extra);
             let width = comparison_width(record.op);
@@ -1847,6 +2077,6 @@ pub fn encode_block(
     } else {
         Location::Absent
     };
-    emit_return(inout output, in low, in high, frame_size);
+    emit_return(inout output, in low, in high, frame_size, float_return);
     output
 }

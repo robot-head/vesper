@@ -5,7 +5,10 @@ use cranelift_codegen::{
     ir::{
         AbiParam, Block, BlockCall, Endianness, ExternalName, Function, GlobalValue,
         GlobalValueData, Inst, InstructionData, MemFlags, Opcode, StackSlot, StackSlotKind,
-        TrapCode, Type, Value, ValueDef, condcodes::IntCC, immediates::Offset32, types,
+        TrapCode, Type, Value, ValueDef,
+        condcodes::{FloatCC, IntCC},
+        immediates::Offset32,
+        types,
     },
     isa::CallConv,
 };
@@ -95,6 +98,24 @@ enum IntegerOp {
     BranchTableTarget = 76,
     AddCarry = 77,
     SubBorrow = 78,
+    FloatArgument = 79,
+    FloatConstant = 80,
+    FloatAdd = 81,
+    FloatSub = 82,
+    FloatMul = 83,
+    FloatDiv = 84,
+    FloatSqrt = 85,
+    FloatNeg = 86,
+    FloatAbs = 87,
+    FloatCompare32 = 88,
+    FloatCompare64 = 89,
+    FloatLoad = 90,
+    FloatStore32 = 91,
+    FloatStore64 = 92,
+    BitsToFloat = 93,
+    FloatToBits = 94,
+    FloatSelect = 95,
+    FloatReturn = 96,
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
@@ -118,6 +139,7 @@ const INSTRUCTION_WORDS: usize = 4;
 const NO_VALUE: u64 = u64::MAX;
 const TRAP_VALUE: u64 = NO_VALUE - 1;
 const GP_REGISTER_ARGUMENTS: usize = 6;
+const XMM_REGISTER_ARGUMENTS: usize = 8;
 const STACK_PROBE_INTERVAL: usize = 4096;
 const CFG_HOME_BYTES: u64 = size_of::<u64>() as u64;
 const MAX_GP_ARGUMENTS: usize = GP_REGISTER_ARGUMENTS + STACK_PROBE_INTERVAL / size_of::<u64>() - 1;
@@ -162,8 +184,32 @@ fn integer_width(ty: Type) -> Option<u64> {
     matches!(ty, types::I8 | types::I16 | types::I32 | types::I64).then(|| u64::from(ty.bits()))
 }
 
-fn integer_argument_cells(params: &[AbiParam]) -> Option<usize> {
+fn float_width(ty: Type) -> Option<u64> {
+    matches!(ty, types::F32 | types::F64).then(|| u64::from(ty.bits()))
+}
+
+fn float_condition(cond: FloatCC) -> u64 {
+    match cond {
+        FloatCC::Ordered => 0,
+        FloatCC::Unordered => 1,
+        FloatCC::Equal => 2,
+        FloatCC::NotEqual => 3,
+        FloatCC::OrderedNotEqual => 4,
+        FloatCC::UnorderedOrEqual => 5,
+        FloatCC::LessThan => 6,
+        FloatCC::LessThanOrEqual => 7,
+        FloatCC::GreaterThan => 8,
+        FloatCC::GreaterThanOrEqual => 9,
+        FloatCC::UnorderedOrLessThan => 10,
+        FloatCC::UnorderedOrLessThanOrEqual => 11,
+        FloatCC::UnorderedOrGreaterThan => 12,
+        FloatCC::UnorderedOrGreaterThanOrEqual => 13,
+    }
+}
+
+fn integer_argument_cells(params: &[AbiParam], allow_float: bool) -> Option<usize> {
     let mut cells = 0;
+    let mut floats = 0;
     for param in params {
         if *param == AbiParam::new(types::I64) {
             cells += 1;
@@ -173,11 +219,16 @@ fn integer_argument_cells(params: &[AbiParam]) -> Option<usize> {
             // SysV passes a wide argument on the stack if both registers
             // are unavailable. That layout requires aligned stack slots.
             cells += WIDE_INTEGER_CELLS;
+        } else if allow_float
+            && float_width(param.value_type).is_some()
+            && *param == AbiParam::new(param.value_type)
+        {
+            floats += 1;
         } else {
             return None;
         }
     }
-    (cells <= MAX_GP_ARGUMENTS).then_some(cells)
+    (cells <= MAX_GP_ARGUMENTS && floats <= XMM_REGISTER_ARGUMENTS).then_some(cells)
 }
 
 fn integer_return_cells(returns: &[AbiParam]) -> Option<usize> {
@@ -259,17 +310,24 @@ struct Values {
     high: SecondaryMap<Value, Option<u64>>,
 }
 
-fn entry_values(function: &Function, block: Block) -> Option<Values> {
+fn entry_values(blocks: &mut IntegerBlocks<'_>, block: Block) -> Option<Values> {
+    let function = blocks.function;
     let params = function.dfg.block_params(block);
     if params.len() != function.signature.params.len() {
         return None;
     }
     let mut values = Values::default();
     let mut next = 0;
+    let mut xmm = 0;
     for (&value, param) in params.iter().zip(&function.signature.params) {
         let ty = function.dfg.value_type(value);
         if ty != param.value_type {
             return None;
+        }
+        if let Some(width) = float_width(ty) {
+            values.low[value] = Some(blocks.append(IntegerOp::FloatArgument, [xmm, 0, width]));
+            xmm += 1;
+            continue;
         }
         values.low[value] = Some(next);
         next += 1;
@@ -314,10 +372,19 @@ fn stack_store_op(ty: Type) -> Option<IntegerOp> {
     }
 }
 
+fn float_store_op(ty: Type) -> Option<IntegerOp> {
+    match ty {
+        types::F32 => Some(IntegerOp::FloatStore32),
+        types::F64 => Some(IntegerOp::FloatStore64),
+        _ => None,
+    }
+}
+
 struct IntegerBlocks<'a> {
     function: &'a Function,
     arity: usize,
     return_cells: usize,
+    float_return: bool,
     words: Vec<u64>,
     relocations: bool,
     branches: usize,
@@ -399,7 +466,7 @@ impl IntegerBlocks<'_> {
             .map(|(&param, arg)| {
                 let arg = arg.as_value()?;
                 let ty = self.value_type(arg);
-                if (ty != types::I128 && integer_width(ty).is_none())
+                if (ty != types::I128 && integer_width(ty).is_none() && float_width(ty).is_none())
                     || self.value_type(param) != ty
                 {
                     return None;
@@ -441,7 +508,7 @@ impl IntegerBlocks<'_> {
         {
             return None;
         }
-        let argument_cells = integer_argument_cells(&signature.params)?;
+        let argument_cells = integer_argument_cells(&signature.params, false)?;
         let return_cells = integer_return_cells(&signature.returns)?;
         let results = dfg.inst_results(inst);
         if signature.returns.len() != results.len()
@@ -693,6 +760,132 @@ impl IntegerBlocks<'_> {
         Some(())
     }
 
+    fn float_instruction(&mut self, inst: Inst, value: Value, values: &Values) -> Option<u64> {
+        let dfg = &self.function.dfg;
+        let input = |value| values.low[dfg.resolve_aliases(value)];
+        let ty = |value| self.value_type(value);
+        let output = ty(value);
+        let (op, operands) = match dfg.insts[inst] {
+            InstructionData::UnaryIeee32 {
+                opcode: Opcode::F32const,
+                imm,
+            } if output == types::F32 => (
+                IntegerOp::FloatConstant,
+                [u64::from(imm.bits()), 0, float_width(output)?],
+            ),
+            InstructionData::UnaryIeee64 {
+                opcode: Opcode::F64const,
+                imm,
+            } if output == types::F64 => (
+                IntegerOp::FloatConstant,
+                [imm.bits(), 0, float_width(output)?],
+            ),
+            InstructionData::Binary {
+                opcode,
+                args: [left, right],
+            } if ty(left) == output && ty(right) == output => {
+                let op = match opcode {
+                    Opcode::Fadd => IntegerOp::FloatAdd,
+                    Opcode::Fsub => IntegerOp::FloatSub,
+                    Opcode::Fmul => IntegerOp::FloatMul,
+                    Opcode::Fdiv => IntegerOp::FloatDiv,
+                    _ => return None,
+                };
+                (op, [input(left)?, input(right)?, float_width(output)?])
+            }
+            InstructionData::Unary { opcode, arg } if ty(arg) == output => {
+                let op = match opcode {
+                    Opcode::Sqrt => IntegerOp::FloatSqrt,
+                    Opcode::Fneg => IntegerOp::FloatNeg,
+                    Opcode::Fabs => IntegerOp::FloatAbs,
+                    _ => return None,
+                };
+                (op, [input(arg)?, 0, float_width(output)?])
+            }
+            InstructionData::FloatCompare {
+                opcode: Opcode::Fcmp,
+                cond,
+                args: [left, right],
+            } if output == types::I8 && ty(left) == ty(right) => {
+                let op = match ty(left) {
+                    types::F32 => IntegerOp::FloatCompare32,
+                    types::F64 => IntegerOp::FloatCompare64,
+                    _ => return None,
+                };
+                (op, [input(left)?, input(right)?, float_condition(cond)])
+            }
+            InstructionData::Ternary {
+                opcode: Opcode::Select,
+                args: [test, yes, no],
+            } if float_width(output).is_some()
+                && ty(yes) == output
+                && ty(no) == output
+                && integer_width(ty(test)).is_some() =>
+            {
+                (
+                    IntegerOp::FloatSelect,
+                    [input(test)?, input(yes)?, input(no)?],
+                )
+            }
+            InstructionData::LoadNoOffset {
+                opcode: Opcode::Bitcast,
+                arg,
+                ..
+            } => match (ty(arg), output) {
+                (types::F32, types::I32) | (types::F64, types::I64) => (
+                    IntegerOp::FloatToBits,
+                    [input(arg)?, 0, float_width(ty(arg))?],
+                ),
+                (types::I32, types::F32) | (types::I64, types::F64) => (
+                    IntegerOp::BitsToFloat,
+                    [input(arg)?, 0, float_width(output)?],
+                ),
+                _ => return None,
+            },
+            InstructionData::StackLoad {
+                opcode: Opcode::StackLoad,
+                stack_slot,
+                offset,
+            } => {
+                let [slot, offset] = self.stack_location(stack_slot, offset, output.bytes())?;
+                let address = self.append(IntegerOp::StackAddress, [slot, offset, 0]);
+                (IntegerOp::FloatLoad, [address, 0, float_width(output)?])
+            }
+            InstructionData::Load {
+                opcode: Opcode::Load,
+                flags,
+                arg,
+                offset,
+            } if ty(arg) == types::I64 && supports_memory_format(flags) => {
+                let width = float_width(output)?;
+                if let Some([slot, offset]) = self.stack_operand(arg, offset, output.bytes()) {
+                    let address = self.append(IntegerOp::StackAddress, [slot, offset, 0]);
+                    (IntegerOp::FloatLoad, [address, 0, width])
+                } else {
+                    if !self.supports_memory_access(flags) {
+                        return None;
+                    }
+                    (
+                        IntegerOp::FloatLoad,
+                        [input(arg)?, u64::from(i32::from(offset) as u32), width],
+                    )
+                }
+            }
+            _ => return None,
+        };
+        Some(self.append(op, operands))
+    }
+
+    fn stack_store(&mut self, ty: Type, source: u64, slot: u64, offset: u64) -> Option<()> {
+        if let Some(op) = float_store_op(ty) {
+            let address = self.append(IntegerOp::StackAddress, [slot, offset, 0]);
+            self.append(op, [address, source, 0]);
+        } else {
+            self.append(stack_store_op(ty)?, [source, slot, offset]);
+        }
+        Some(())
+    }
+
     // A block's arguments are already mapped by its incoming edge.
     fn emit_block(&mut self, block: Block, values: &mut Values) -> Option<Inst> {
         let function = self.function;
@@ -709,9 +902,8 @@ impl IntegerBlocks<'_> {
             } = function.dfg.insts[inst]
             {
                 let source = ty(arg);
-                let op = stack_store_op(source)?;
                 let [slot, offset] = self.stack_location(stack_slot, offset, source.bytes())?;
-                self.append(op, [input(arg)?, slot, offset]);
+                self.stack_store(source, input(arg)?, slot, offset)?;
                 continue;
             }
             if let InstructionData::Store {
@@ -729,13 +921,17 @@ impl IntegerBlocks<'_> {
                     && let Some([slot, offset]) =
                         self.stack_operand(base, offset, ty(source).bytes())
                 {
-                    self.append(stack_store_op(ty(source))?, [input(source)?, slot, offset]);
+                    self.stack_store(ty(source), input(source)?, slot, offset)?;
                     continue;
                 }
                 if !self.supports_memory_access(flags) {
                     return None;
                 }
-                let op = store_op(opcode, ty(source))?;
+                let op = if opcode == Opcode::Store && float_width(ty(source)).is_some() {
+                    float_store_op(ty(source))?
+                } else {
+                    store_op(opcode, ty(source))?
+                };
                 self.append(
                     op,
                     [address, input(source)?, u64::from(i32::from(offset) as u32)],
@@ -786,6 +982,16 @@ impl IntegerBlocks<'_> {
             let [value] = *function.dfg.inst_results(inst) else {
                 return None;
             };
+            if float_width(ty(value)).is_some()
+                || function
+                    .dfg
+                    .inst_args(inst)
+                    .iter()
+                    .any(|&value| float_width(ty(value)).is_some())
+            {
+                values.low[value] = Some(self.float_instruction(inst, value, values)?);
+                continue;
+            }
             let output = function.dfg.value_type(value);
             let width = integer_width(output)?;
             let (op, operands) = match function.dfg.insts[inst] {
@@ -1162,6 +1368,15 @@ impl IntegerBlocks<'_> {
 
     fn labeled_cfg(&mut self, entry: Block) -> Option<()> {
         let function = self.function;
+        if self.float_return
+            || function
+                .signature
+                .params
+                .iter()
+                .any(|p| float_width(p.value_type).is_some())
+        {
+            return None;
+        }
         let dfg = &function.dfg;
         let layout = &function.layout;
         let mut labels = SecondaryMap::new();
@@ -1249,7 +1464,7 @@ impl IntegerBlocks<'_> {
             };
             self.append(IntegerOp::BlockLabel, [labels[block]?, home_slot, results]);
             let mut values = if block == entry {
-                entry_values(function, block)?
+                entry_values(self, block)?
             } else {
                 Values::default()
             };
@@ -1379,6 +1594,9 @@ impl IntegerBlocks<'_> {
 /// for the boolean result of the same instruction.
 /// AddCarry and SubBorrow consume the immediately preceding flag as their
 /// third operand, with two i64 inputs and an i64 result.
+/// After the stack declarations, FloatArgument binds successive SysV XMM
+/// arguments. These use their own register bank and occupy normal value IDs.
+/// A trailing FloatReturn selects XMM0 for the single return value.
 /// SymbolRelative and SymbolGot read the data symbol ID from the left operand.
 /// A labeled function starts with BlockLabel after the stack declarations
 /// and returns through BlockReturn records. BranchLabel skips the taken edge
@@ -1406,15 +1624,20 @@ fn integer_program(
     if signature.call_conv != CallConv::SystemV || !function.dynamic_stack_slots.is_empty() {
         return None;
     }
-    let arity = integer_argument_cells(&signature.params)?;
-    let return_cells = integer_return_cells(&signature.returns)?;
+    let arity = integer_argument_cells(&signature.params, true)?;
+    let float_return = matches!(signature.returns.as_slice(), [param] if float_width(param.value_type).is_some() && *param == AbiParam::new(param.value_type));
+    let return_cells = if float_return {
+        1
+    } else {
+        integer_return_cells(&signature.returns)?
+    };
     let block = function.layout.blocks().next()?;
-    let values = entry_values(function, block)?;
 
     let mut blocks = IntegerBlocks {
         function,
         arity,
         return_cells,
+        float_return,
         words: vec![0; HEADER_WORDS],
         relocations: false,
         branches: 0,
@@ -1433,14 +1656,20 @@ fn integer_program(
     }
     blocks.words[ARGUMENT_COUNT] = arity as u64;
     let prefix = blocks.words.len();
+    let values = entry_values(&mut blocks, block)?;
     match blocks.path_exit(block, values, SecondaryMap::new()) {
         Some(PathExit::Return(low, high)) => {
             blocks.words[RETURN_VALUE] = low;
             if let Some(high) = high {
                 blocks.append(IntegerOp::ReturnPair, [high, 0, 0]);
+            } else if float_return {
+                blocks.append(IntegerOp::FloatReturn, [0; 3]);
             }
         }
         Some(PathExit::Trap) => {
+            if float_return {
+                return None;
+            }
             blocks.words[RETURN_VALUE] = NO_VALUE;
             blocks.append(IntegerOp::Trap, [return_cells as u64, 0, 0]);
         }

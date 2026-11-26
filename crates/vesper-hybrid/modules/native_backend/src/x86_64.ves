@@ -17,6 +17,9 @@ const R15: u8 = 15;
 
 pub const ARGUMENTS: u64 = 6;
 pub const REGISTER_CODES: u64 = 16;
+pub const XMM0: u8 = 16;
+pub const XMM_LEFT_SCRATCH: u8 = 30;
+pub const XMM_RIGHT_SCRATCH: u8 = 31;
 pub const HOME_REGISTERS: u64 = 5;
 pub const UNASSIGNED: u8 = 255;
 pub const BYTE_BITS: u64 = 8;
@@ -62,6 +65,23 @@ const IMUL_R64_RM64_IMM32: u8 = 0x69;
 const UNARY_GROUP: u8 = 0xf7;
 const SHIFT_BYTE_GROUP_IMM8: u8 = 0xc0;
 const OPERAND_SIZE_OVERRIDE: u8 = 0x66;
+const SCALAR_SINGLE: u8 = 0xf3;
+const SCALAR_DOUBLE: u8 = 0xf2;
+const MOV_SCALAR_LOAD: u8 = 0x10;
+const MOV_SCALAR_STORE: u8 = 0x11;
+const MOVAPS_LOAD: u8 = 0x28;
+const GPR_TO_XMM: u8 = 0x6e;
+const XMM_TO_GPR: u8 = 0x7e;
+const UCOMIS: u8 = 0x2e;
+const ANDPS: u8 = 0x54;
+const XORPS: u8 = 0x57;
+const F32_SIGN: u64 = 0x80000000;
+const F64_SIGN: u64 = 0x8000000000000000;
+pub const SSE_ADD: u8 = 0x58;
+pub const SSE_SUB: u8 = 0x5c;
+pub const SSE_MUL: u8 = 0x59;
+pub const SSE_DIV: u8 = 0x5e;
+pub const SSE_SQRT: u8 = 0x51;
 const SHIFT_GROUP_IMM8: u8 = 0xc1;
 const SHIFT_GROUP_CL: u8 = 0xd3;
 const XCHG_RM_R64: u8 = 0x87;
@@ -121,6 +141,23 @@ pub const CC_E: u8 = 4;
 pub const CC_NE: u8 = 5;
 pub const CC_BE: u8 = 6;
 pub const CC_A: u8 = 7;
+const CC_P: u8 = 10;
+const CC_NP: u8 = 11;
+const INVERT_CC: u8 = 1;
+const FLOAT_ORDERED: u64 = 0;
+const FLOAT_UNORDERED: u64 = 1;
+const FLOAT_EQUAL: u64 = 2;
+const FLOAT_NOT_EQUAL: u64 = 3;
+const FLOAT_ORDERED_NOT_EQUAL: u64 = 4;
+const FLOAT_UNORDERED_OR_EQUAL: u64 = 5;
+const FLOAT_LESS: u64 = 6;
+const FLOAT_LESS_EQUAL: u64 = 7;
+const FLOAT_GREATER: u64 = 8;
+const FLOAT_GREATER_EQUAL: u64 = 9;
+const FLOAT_UNORDERED_OR_LESS: u64 = 10;
+const FLOAT_UNORDERED_OR_LESS_EQUAL: u64 = 11;
+const FLOAT_UNORDERED_OR_GREATER: u64 = 12;
+pub const FLOAT_UNORDERED_OR_GREATER_EQUAL: u64 = 13;
 pub const CC_L: u8 = 12;
 pub const CC_GE: u8 = 13;
 pub const CC_LE: u8 = 14;
@@ -137,6 +174,11 @@ pub copy enum FixedArithmetic {
 
 pub copy enum Instruction {
     Immediate(u8, u64),
+    FloatImmediate(u8, u64, u64),
+    FloatBinary(u8, u8, u8, u64),
+    FloatSign(u8, bool, u64),
+    FloatBits(u8, u8, u64),
+    FloatCompare(u8, u8, u8, u64, u64),
     Move(u8, u8),
     Exchange(u8, u8),
     Binary(u8, u8, u8, u64),
@@ -167,6 +209,20 @@ pub copy enum Instruction {
     Return,
 }
 
+pub fn is_xmm(register: u8) -> bool {
+    register >= XMM0 && register <= XMM_RIGHT_SCRATCH
+}
+
+pub fn find_float_register(used: u32) -> u8 {
+    for index in 0..REGISTER_CODES {
+        let reg = wrapping_add(XMM0, wrapping_u8(index));
+        if (used & register_bit(reg)) == 0 {
+            return reg;
+        }
+    }
+    UNASSIGNED
+}
+
 pub fn arg_register(argument: u64) -> u8 {
     match argument {
         0 => RDI,
@@ -191,7 +247,11 @@ pub fn home_register(index: u64) -> u8 {
 }
 
 pub fn register_bit(reg: u8) -> u32 {
-    wrapping_shl_u32(1, widen_u32(reg))
+    if reg == UNASSIGNED {
+        0
+    } else {
+        wrapping_shl_u32(1, widen_u32(reg))
+    }
 }
 
 // Use caller-saved GPRs exclusively. Prefer rax, the result register.
@@ -578,6 +638,115 @@ fn conditional_jump(inout out: ChunkSeq[u8], cc: u8) {
     immediate(inout out, 0, IMM32_BYTES);
 }
 
+fn float_prefix(width: u64) -> u8 {
+    if width == DWORD_BITS {
+        SCALAR_SINGLE
+    } else {
+        SCALAR_DOUBLE
+    }
+}
+
+fn xmm_code(reg: u8) -> u8 {
+    wrapping_sub(reg, XMM0)
+}
+
+fn float_rex(inout out: ChunkSeq[u8], reg: u8, rm: u8, wide: bool) {
+    let prefix = rex(reg, rm, wide);
+    if prefix != REX {
+        out.push(prefix);
+    }
+}
+
+fn xmm_binary(inout out: ChunkSeq[u8], opcode: u8, destination: u8, source: u8) {
+    let dst = xmm_code(destination);
+    let src = xmm_code(source);
+    float_rex(inout out, dst, src, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(opcode);
+    out.push(modrm(dst, src));
+}
+
+fn float_move(inout out: ChunkSeq[u8], destination: u8, source: u8) {
+    if destination != source {
+        xmm_binary(inout out, MOVAPS_LOAD, destination, source);
+    }
+}
+
+fn float_bits(inout out: ChunkSeq[u8], destination: u8, source: u8, width: u64) {
+    let to_xmm = is_xmm(destination);
+    let xmm = xmm_code(if to_xmm { destination } else { source });
+    let gp = if to_xmm { source } else { destination };
+    out.push(OPERAND_SIZE_OVERRIDE);
+    float_rex(inout out, xmm, gp, width == QWORD_BITS);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(if to_xmm { GPR_TO_XMM } else { XMM_TO_GPR });
+    out.push(modrm(xmm, gp));
+}
+
+fn float_memory(
+    inout out: ChunkSeq[u8],
+    register: u8,
+    base: u8,
+    displacement: u32,
+    width: u64,
+    load: bool
+) {
+    let register = xmm_code(register);
+    out.push(float_prefix(width));
+    float_rex(inout out, register, base, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(
+        if load {
+            MOV_SCALAR_LOAD
+        } else {
+            MOV_SCALAR_STORE
+        }
+    );
+    memory_operand(inout out, register, base, displacement);
+}
+
+fn float_compare(
+    inout out: ChunkSeq[u8],
+    destination: u8,
+    left: u8,
+    right: u8,
+    predicate: u64,
+    width: u64
+) {
+    // UCOMIS reports an unordered pair with ZF, PF and CF all set.
+    let swap = predicate == FLOAT_LESS
+        || predicate == FLOAT_LESS_EQUAL
+        || predicate == FLOAT_UNORDERED_OR_GREATER
+        || predicate == FLOAT_UNORDERED_OR_GREATER_EQUAL;
+    if width == QWORD_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+    }
+    if swap {
+        xmm_binary(inout out, UCOMIS, right, left);
+    } else {
+        xmm_binary(inout out, UCOMIS, left, right);
+    }
+    let cc = match predicate {
+        FLOAT_ORDERED => CC_NP,
+        FLOAT_UNORDERED => CC_P,
+        FLOAT_EQUAL | FLOAT_UNORDERED_OR_EQUAL => CC_E,
+        FLOAT_NOT_EQUAL | FLOAT_ORDERED_NOT_EQUAL => CC_NE,
+        FLOAT_LESS | FLOAT_GREATER => CC_A,
+        FLOAT_LESS_EQUAL | FLOAT_GREATER_EQUAL => CC_AE,
+        FLOAT_UNORDERED_OR_LESS | FLOAT_UNORDERED_OR_GREATER => CC_B,
+        FLOAT_UNORDERED_OR_LESS_EQUAL | FLOAT_UNORDERED_OR_GREATER_EQUAL => CC_BE,
+        _ => CC_NP,
+    };
+    set_condition(inout out, destination, cc);
+    if predicate == FLOAT_EQUAL {
+        set_condition(inout out, R11, CC_NP);
+        binary(inout out, AND_RM_R64, destination, R11, false);
+    } else if predicate == FLOAT_NOT_EQUAL {
+        set_condition(inout out, R11, CC_P);
+        binary(inout out, OR_RM_R64, destination, R11, false);
+    }
+}
+
 pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
     match instruction {
         Instruction::Fixed(op, rhs, width) => fixed_arithmetic(
@@ -587,8 +756,59 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             width == QWORD_BITS
         ),
         Instruction::Immediate(destination, bits) => load_constant(inout out, destination, bits),
+        Instruction::FloatImmediate(destination, bits, width) => {
+            if bits == 0 {
+                xmm_binary(inout out, XORPS, destination, destination);
+            } else {
+                load_constant(inout out, R11, bits);
+                float_bits(inout out, destination, R11, width);
+            }
+        },
+        Instruction::FloatBinary(op, destination, source, width) => {
+            out.push(float_prefix(width));
+            xmm_binary(inout out, op, destination, source);
+        },
+        Instruction::FloatSign(destination, absolute, width) => {
+            let sign = if width == DWORD_BITS {
+                F32_SIGN
+            } else {
+                F64_SIGN
+            };
+            load_constant(
+                inout out,
+                R11,
+                if absolute {
+                    wrapping_sub(sign, 1)
+                } else {
+                    sign
+                }
+            );
+            float_bits(inout out, XMM_RIGHT_SCRATCH, R11, width);
+            xmm_binary(
+                inout out,
+                if absolute { ANDPS } else { XORPS },
+                destination,
+                XMM_RIGHT_SCRATCH
+            );
+        },
+        Instruction::FloatBits(destination, source, width) => float_bits(
+            inout out,
+            destination,
+            source,
+            width
+        ),
+        Instruction::FloatCompare(destination, left, right, predicate, width) => float_compare(
+            inout out,
+            destination,
+            left,
+            right,
+            predicate,
+            width
+        ),
         Instruction::Move(destination, source) => {
-            if destination != source {
+            if is_xmm(destination) {
+                float_move(inout out, destination, source);
+            } else if destination != source {
                 binary(inout out, MOV_RM_R64, destination, source, true);
             }
         },
@@ -670,20 +890,20 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
                 binary(inout out, XCHG_RM_R64, RCX, count, true);
             }
         },
-        Instruction::Load(destination, base, displacement, width) => load_memory(
-            inout out,
-            destination,
-            base,
-            displacement,
-            width
-        ),
-        Instruction::Store(source, base, displacement, width) => store_memory(
-            inout out,
-            source,
-            base,
-            displacement,
-            width
-        ),
+        Instruction::Load(destination, base, displacement, width) => {
+            if is_xmm(destination) {
+                float_memory(inout out, destination, base, displacement, width, true);
+            } else {
+                load_memory(inout out, destination, base, displacement, width);
+            }
+        },
+        Instruction::Store(source, base, displacement, width) => {
+            if is_xmm(source) {
+                float_memory(inout out, source, base, displacement, width, false);
+            } else {
+                store_memory(inout out, source, base, displacement, width);
+            }
+        },
         Instruction::Compare(destination, left, right, cc, width) => {
             compare_registers(inout out, left, right, width);
             set_condition(inout out, destination, cc);
@@ -694,6 +914,17 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
         },
         Instruction::SetCondition(destination, cc) => set_condition(inout out, destination, cc),
         Instruction::Select(destination, condition, first, alternative, cc) => {
+            if is_xmm(destination) {
+                float_move(inout out, destination, first);
+                if destination != alternative {
+                    binary(inout out, TEST_RM_R64, condition, condition, true);
+                    conditional_jump(inout out, cc ^ INVERT_CC);
+                    let end = out.len();
+                    float_move(inout out, destination, alternative);
+                    let _ = patch_forward_branch(inout out, end);
+                }
+                return;
+            }
             // Test before copying. The destination may share the condition register.
             binary(inout out, TEST_RM_R64, condition, condition, true);
             if destination != first {
