@@ -19,6 +19,8 @@ sys library StdEnv (
     const ERANGE: u32 = 34;
     // A C function of no arguments returning an address (`_NSGetArgv`).
     callback AddressFn() -> ForeignVal[u64];
+    // `_NSGetExecutablePath(buf, &size)` (Apple), found through `dlsym`.
+    callback ExePathFn(buf: u64, size: u64) -> ForeignVal[i32];
     fn getenv(nocapture in name: CStr) -> ForeignVal[Option[CStr]];
     fn getcwd(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64] errno;
     fn dlsym(handle: u64, nocapture in name: CStr) -> ForeignVal[u64];
@@ -30,4 +32,11 @@ sys library StdEnv (
     fn find_byte(address: u64, byte: i32) -> ForeignVal[u64];
     #[link_name = "strstr"]
     fn cstr_at(address: u64, nocapture in empty: CStr) -> ForeignVal[Option[CStr]];
+    #[link_name = "dlsym"]
+    fn dlsym_exe_path(handle: u64, nocapture in name: CStr) -> ForeignVal[Option[ExePathFn]];
+    #[link_name = "memcpy"]
+    fn write_word(address: u64, nocapture inout word: u64, size: u64) -> ForeignVal[u64];
+    fn malloc(size: u64) -> ForeignVal[u64];
+    fn free(address: u64) -> ForeignVal[Unit];
+    fn readlink(nocapture in path: CStr, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64] errno;
 }

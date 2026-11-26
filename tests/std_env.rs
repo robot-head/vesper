@@ -7,7 +7,8 @@ use std_io_support::{MODES, agree, check_driver};
 
 const DRIVER: &str = r#"use @vesper-std/fs::IoError;
 use @vesper-std/env::{
-    arg_count, arg, arg_bytes, var, var_bytes, var_count, var_at_bytes, current_dir, os
+    arg_count, arg, arg_bytes, var, var_bytes, var_count, var_at_bytes, current_dir, os,
+    current_exe_bytes
 };
 
 fn mix(h: u64, b: u64) -> u64 {
@@ -70,6 +71,16 @@ pub fn directory() -> u64 eff [Ffi[StdEnv]] {
     handle Fail[IoError] in {
         let d = current_dir();
         mix(hash(in d.as_bytes()), widen_u64(os()))
+    } with {
+        return v => v,
+        raise(e, _) => wrapping_add(1000, widen_u64(e.kind)),
+    }
+}
+
+pub fn executable() -> u64 eff [Ffi[StdEnv]] {
+    handle Fail[IoError] in {
+        let p = current_exe_bytes();
+        hash(in p.as_slice())
     } with {
         return v => v,
         raise(e, _) => wrapping_add(1000, widen_u64(e.kind)),
@@ -150,4 +161,14 @@ fn current_directory_matches_std_env() {
         0
     };
     assert_eq!(agree(&checked, "directory", &MODES), mix(hash(&dir), os));
+}
+
+/// `current_exe_bytes` is `std::env::current_exe` of the process running
+/// the entry (this test binary, in the JIT and the evaluator alike).
+#[test]
+fn current_executable_matches_std_env() {
+    set_vars();
+    let checked = check_driver(DRIVER);
+    let exe = bytes(std::env::current_exe().unwrap().as_os_str());
+    assert_eq!(agree(&checked, "executable", &MODES), hash(&exe));
 }

@@ -8,11 +8,13 @@ sys library StdEnv (
     const OS: u32 = 3;
     const CP_UTF8: u32 = 65001;
     const ERROR_ENVVAR_NOT_FOUND: u32 = 203;
+    const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 
     fn GetCommandLineW() -> ForeignVal[Option[CWStr]];
     fn GetCurrentDirectoryW(nBufferLength: u32, nocapture inout lpBuffer: CSlice[u32]) -> ForeignVal[u32] errno;
     fn GetEnvironmentVariableW(nocapture in lpName: CWStr, nocapture inout lpBuffer: CSlice[u32]) -> ForeignVal[u32] errno;
     fn GetEnvironmentStringsW() -> ForeignVal[u64];
+    fn GetModuleFileNameW(hModule: u64, nocapture inout lpFilename: CSlice[u32]) -> ForeignVal[u32] errno;
     fn FreeEnvironmentStringsW(lpszEnvironmentBlock: u64) -> ForeignVal[i32];
     fn lstrlenW(lpString: u64) -> ForeignVal[i32];
     fn WideCharToMultiByte(
