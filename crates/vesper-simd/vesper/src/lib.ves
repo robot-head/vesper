@@ -45,8 +45,14 @@ const SCANNER: Str = "vesper_simd_scan_baseline128_v1";
 // Whether a host of `arch` with these CPU features runs Baseline128 code:
 // x86_64 needs SSE3, SSSE3, SSE4.1 and SSE4.2; AArch64 needs NEON. Any
 // other `arch` is an unsupported host.
-pub fn check_features(arch: u64, sse3: bool, ssse3: bool, sse41: bool, sse42: bool, neon: bool)
-    -> u64 {
+pub fn check_features(
+    arch: u64,
+    sse3: bool,
+    ssse3: bool,
+    sse41: bool,
+    sse42: bool,
+    neon: bool
+) -> u64 {
     let supported = if arch == ARCH_X86_64 {
         sse3 && ssse3 && sse41 && sse42
     } else if arch == ARCH_AARCH64 {

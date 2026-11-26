@@ -143,8 +143,11 @@ fn push_digit(value: u64, digit: u64) -> Option[u64] {
 }
 
 // A decimal; returns (position, coefficient, scale).
-fn number(in input: Slice[u8], pos: u64, fractional: bool)
-    -> (u64, u64, u64) eff [Fail[ParseError]] {
+fn number(
+    in input: Slice[u8],
+    pos: u64,
+    fractional: bool
+) -> (u64, u64, u64) eff [Fail[ParseError]] {
     let start = space(in input, pos);
     let mut p = start;
     let mut value: u64 = 0;

@@ -15,8 +15,11 @@ pub fn pn_limit() -> u64 {
     4611686018427387904
 }
 
-pub fn pn_decode_with_largest(largest: Option[u64], truncated: u64, nbits: u32)
-    -> u64 eff [Fail[PnErr]] {
+pub fn pn_decode_with_largest(
+    largest: Option[u64],
+    truncated: u64,
+    nbits: u32
+) -> u64 eff [Fail[PnErr]] {
     if nbits != 8 && nbits != 16 && nbits != 24 && nbits != 32 {
         Fail::raise(PnErr::InvalidBits { bits: nbits });
     }

@@ -1021,8 +1021,13 @@ fn try_rename_token(
     0
 }
 
-fn write_id_name(in tb: Tables, in names: Names, kind: u64, id: u64, inout out: ChunkSeq[u8])
-    -> bool {
+fn write_id_name(
+    in tb: Tables,
+    in names: Names,
+    kind: u64,
+    id: u64,
+    inout out: ChunkSeq[u8]
+) -> bool {
     if kind == 0 {
         if id < 2 {
             put_sym(inout out, in names, tb.pkg_str(id));

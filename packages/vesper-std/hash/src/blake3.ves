@@ -446,8 +446,12 @@ test {
     // @case no_words(in "abcd", 0, Option::None, Option::None)
     // @case exact_words(in "abcdWXYZ", 2, Option::Some(0x64636261), Option::Some(0x5a595857))
     // @case incomplete_word(in "abcdW", 2, Option::Some(0x64636261), Option::Some(0))
-    fn test_little_endian_words(in bytes: Str, count: u64, first: Option[u32], second: Option[u32])
-        -> bool {
+    fn test_little_endian_words(
+        in bytes: Str,
+        count: u64,
+        first: Option[u32],
+        second: Option[u32]
+    ) -> bool {
         let words = le_words(in bytes.as_bytes(), count);
         words.len() == count && words.try_get(0) == first && words.try_get(1) == second
     }

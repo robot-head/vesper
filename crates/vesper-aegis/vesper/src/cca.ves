@@ -134,8 +134,12 @@ const SHA384: u64 = 1;
 const SHA512: u64 = 2;
 
 // Decode `b` whole into `n`; the root node is at 1.
-fn decode_whole(in b: Slice[u8], field: u64, inout n: Slice[u64], inout st: Slice[u64])
-    -> Unit eff [Fail[AErr]] {
+fn decode_whole(
+    in b: Slice[u8],
+    field: u64,
+    inout n: Slice[u64],
+    inout st: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
     let used = decode(in b, inout n, inout st);
     if used != b.len() {
         cbor_err(field, R_TRAILING);
@@ -248,8 +252,13 @@ fn bytes(in n: Slice[u64], i: u64, field: u64) -> u64 eff [Fail[AErr]] {
 }
 
 // parse_algo: a hash algorithm name.
-fn algo(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], i: u64, field: u64)
-    -> u64 eff [Fail[AErr]] {
+fn algo(
+    in b: Slice[u8],
+    in s: Slice[u8],
+    in n: Slice[u64],
+    i: u64,
+    field: u64
+) -> u64 eff [Fail[AErr]] {
     if kind(in n, i) != K_TEXT {
         cbor_err(field, R_EXPECTED_TEXT);
     }
@@ -351,15 +360,24 @@ fn realm_claims_node(
 
 // CcaRealmClaims::from_cbor: hash algorithm, RIM, the four REMs,
 // challenge, personalization value, RAK and its hash algorithm.
-pub fn realm_claims(in b: Slice[u8], inout n: Slice[u64], inout st: Slice[u64], inout w: Slice[u64])
-    -> Unit eff [Fail[AErr]] {
+pub fn realm_claims(
+    in b: Slice[u8],
+    inout n: Slice[u64],
+    inout st: Slice[u64],
+    inout w: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
     decode_whole(in b, F_REALM_CLAIMS, inout n, inout st);
     realm_claims_node(in b, in b, in n, 1, inout w);
 }
 
 // An optional text claim of a software component: presence, then chunks.
-fn opt_text(in n: Slice[u64], m: u64, key: u64, field: u64, inout w: Slice[u64])
-    -> Unit eff [Fail[AErr]] {
+fn opt_text(
+    in n: Slice[u64],
+    m: u64,
+    key: u64,
+    field: u64,
+    inout w: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
     let v = find(in n, m, key);
     if v == NONE {
         put(inout w, 0);
@@ -414,8 +432,13 @@ fn sw_component(in n: Slice[u64], c: u64, inout w: Slice[u64]) -> Unit eff [Fail
 }
 
 // CcaTbbRotpk::from_value: name, index and hash.
-fn tbb_rotpk(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], r: u64, inout w: Slice[u64])
-    -> Unit eff [Fail[AErr]] {
+fn tbb_rotpk(
+    in b: Slice[u8],
+    in s: Slice[u8],
+    in n: Slice[u64],
+    r: u64,
+    inout w: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
     claim_map(in n, r, F_TBB_ROTPK);
     if arg(in n, r) != ROTPK_ENTRIES {
         cbor_err(F_TBB_ROTPK, R_ROTPK_SHAPE);
@@ -443,8 +466,14 @@ fn tbb_rotpk(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], r: u64, inout w
 
 // An optional array claim of the platform map: its count (0 when absent)
 // and its entries.
-fn opt_array(in n: Slice[u64], m: u64, key: u64, field: u64, max: u64, too_many: u64)
-    -> u64 eff [Fail[AErr]] {
+fn opt_array(
+    in n: Slice[u64],
+    m: u64,
+    key: u64,
+    field: u64,
+    max: u64,
+    too_many: u64
+) -> u64 eff [Fail[AErr]] {
     let v = find(in n, m, key);
     if v == NONE {
         return NONE;
@@ -459,8 +488,13 @@ fn opt_array(in n: Slice[u64], m: u64, key: u64, field: u64, max: u64, too_many:
 }
 
 // An optional byte-string claim: presence, then chunks.
-fn opt_bytes(in n: Slice[u64], m: u64, key: u64, field: u64, inout w: Slice[u64])
-    -> Unit eff [Fail[AErr]] {
+fn opt_bytes(
+    in n: Slice[u64],
+    m: u64,
+    key: u64,
+    field: u64,
+    inout w: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
     let v = find(in n, m, key);
     if v == NONE {
         put(inout w, 0);
@@ -569,8 +603,12 @@ pub fn platform_claims(
     platform_claims_node(in b, in b, in n, 1, inout w);
 }
 
-fn platform_profile_at(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], m: u64)
-    -> u64 eff [Fail[AErr]] {
+fn platform_profile_at(
+    in b: Slice[u8],
+    in s: Slice[u8],
+    in n: Slice[u64],
+    m: u64
+) -> u64 eff [Fail[AErr]] {
     let p = get(in n, m, PROFILE, F_PLATFORM_PROFILE);
     if kind(in n, p) != K_TEXT {
         cbor_err(F_PLATFORM_PROFILE, R_EXPECTED_TEXT);
@@ -587,15 +625,22 @@ fn platform_profile_at(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], m: u6
 }
 
 // platform_profile: CcaPlatformProfile index (CCA-SSD 1.0.0, 2023, 2024).
-pub fn platform_profile(in b: Slice[u8], inout n: Slice[u64], inout st: Slice[u64])
-    -> u64 eff [Fail[AErr]] {
+pub fn platform_profile(
+    in b: Slice[u8],
+    inout n: Slice[u64],
+    inout st: Slice[u64]
+) -> u64 eff [Fail[AErr]] {
     decode_whole(in b, F_PLATFORM_CLAIMS, inout n, inout st);
     claim_map(in n, 1, F_PLATFORM_CLAIMS);
     platform_profile_at(in b, in b, in n, 1)
 }
 
-fn realm_profile_at(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], m: u64)
-    -> u64 eff [Fail[AErr]] {
+fn realm_profile_at(
+    in b: Slice[u8],
+    in s: Slice[u8],
+    in n: Slice[u64],
+    m: u64
+) -> u64 eff [Fail[AErr]] {
     let p = find(in n, m, PROFILE);
     if p == NONE {
         return 0;
@@ -613,8 +658,11 @@ fn realm_profile_at(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], m: u64)
 }
 
 // realm_profile: CcaRealmProfile index (unspecified, 2023, 2024).
-pub fn realm_profile(in b: Slice[u8], inout n: Slice[u64], inout st: Slice[u64])
-    -> u64 eff [Fail[AErr]] {
+pub fn realm_profile(
+    in b: Slice[u8],
+    inout n: Slice[u64],
+    inout st: Slice[u64]
+) -> u64 eff [Fail[AErr]] {
     decode_whole(in b, F_REALM_CLAIMS, inout n, inout st);
     claim_map(in n, 1, F_REALM_CLAIMS);
     realm_profile_at(in b, in b, in n, 1)
@@ -640,8 +688,13 @@ fn cmw_record_node(in n: Slice[u64], v: u64, field: u64) -> u64 eff [Fail[AErr]]
     bnode
 }
 
-fn collection_member(in n: Slice[u64], inner: u64, collection: u64, key: u64, field: u64)
-    -> u64 eff [Fail[AErr]] {
+fn collection_member(
+    in n: Slice[u64],
+    inner: u64,
+    collection: u64,
+    key: u64,
+    field: u64
+) -> u64 eff [Fail[AErr]] {
     let v = get(in n, inner, key, field);
     if collection == 0 {
         bytes(in n, v, field);
@@ -651,8 +704,12 @@ fn collection_member(in n: Slice[u64], inner: u64, collection: u64, key: u64, fi
     }
 }
 
-fn try_plat_profile(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], pm: u64)
-    -> (u64, u64, u64) {
+fn try_plat_profile(
+    in b: Slice[u8],
+    in s: Slice[u8],
+    in n: Slice[u64],
+    pm: u64
+) -> (u64, u64, u64) {
     handle Fail[AErr] in {
         let p = platform_profile_at(in b, in s, in n, pm);
         (0, p, 0)

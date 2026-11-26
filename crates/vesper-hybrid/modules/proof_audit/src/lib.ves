@@ -11,8 +11,9 @@ use @vesper/proof-audit::run;
 use @vesper/proof-audit::strs::{byte, push, strs_new};
 
 // `proof_commands::run`.
-pub fn proof_audit_run(in packed: Slice[u8])
-    -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3]] {
+pub fn proof_audit_run(
+    in packed: Slice[u8]
+) -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3]] {
     let mut args = strs_new();
     let mut from: u64 = 0;
     for i in 0..packed.len() {

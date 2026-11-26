@@ -1021,8 +1021,12 @@ pub fn collect_row_kinds(in st: St, inout cx: Cx, in a: Ast, r: u32) {
 // `resolve_kinds` of the generics `names` (in order) from `cx.us_*`: the
 // kinds, or NONE in the first slot's place with `err` set (the returned
 // list is then empty).
-pub fn resolve_kinds(inout st: St, in cx: Cx, in names: ChunkSeq[u32], inout out: ChunkSeq[u8])
-    -> bool {
+pub fn resolve_kinds(
+    inout st: St,
+    in cx: Cx,
+    in names: ChunkSeq[u32],
+    inout out: ChunkSeq[u8]
+) -> bool {
     out.clear();
     for i in 0..names.len() {
         let g = u32_at(in names, i);

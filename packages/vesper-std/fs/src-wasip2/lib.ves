@@ -153,8 +153,10 @@ pub fn read_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoErr
 
 // At most the first `limit` bytes of the file at `path` (`Read::take`):
 // no more is read, however long the file is.
-pub fn read_path_limit(in path: Slice[u8], limit: u64)
-    -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+pub fn read_path_limit(
+    in path: Slice[u8],
+    limit: u64
+) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
     let mut err: u64 = 0;
     let mut f = match StdFs::vstd_fs_open(in path, mode_read(), inout err) {
         Option::Some(f) => f,
@@ -369,8 +371,10 @@ pub struct Opened {
     pub id: FileId,
 }
 
-pub fn read_nofollow_limit(in path: Slice[u8], limit: u64)
-    -> Opened eff [Ffi[StdFs], Fail[IoError]] {
+pub fn read_nofollow_limit(
+    in path: Slice[u8],
+    limit: u64
+) -> Opened eff [Ffi[StdFs], Fail[IoError]] {
     let m = meta_path(in path, true);
     let id = FileId {
         regular: m.kind == kind_file(),

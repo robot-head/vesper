@@ -258,8 +258,12 @@ impl Rules {
     // The number of distinct class variables under pattern node `k` not yet
     // bound, and the subtree's e-node count (egg's `free_vars` and
     // `subtree_size`).
-    fn free_and_size(in self, k: u32, in bound: ChunkSeq[u32], inout seen: ChunkSeq[u8])
-        -> (u64, u64) {
+    fn free_and_size(
+        in self,
+        k: u32,
+        in bound: ChunkSeq[u32],
+        inout seen: ChunkSeq[u8]
+    ) -> (u64, u64) {
         if u8_at(in self.p_kind, widen_u64(k)) == P_VAR {
             let v = widen_u64(u32_at(in self.p_a, widen_u64(k)));
             if u8_at(in seen, v) != 0 {

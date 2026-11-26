@@ -972,8 +972,13 @@ pub fn book_alloc(
 }
 
 // An untracked raw bump allocation (no slot, no finalizer).
-pub fn book_alloc_raw(inout b: Book, size: u64, align: u64, fresh_base: u64, fresh_cap: u64)
-    -> Placed {
+pub fn book_alloc_raw(
+    inout b: Book,
+    size: u64,
+    align: u64,
+    fresh_base: u64,
+    fresh_cap: u64
+) -> Placed {
     match place(inout b, size, align, fresh_base, fresh_cap) {
         Place::At { chunk, prior, start } => Placed::Done {
             slot: MAX_U64,
@@ -1042,8 +1047,14 @@ pub fn book_alloc_elems(
 
 // Appends `add` bytes to a byte allocation: in place at the unprotected tip,
 // otherwise by relocation (the old slot is released).
-pub fn book_extend(inout b: Book, slot: u64, serial: u64, add: u64, fresh_base: u64, fresh_cap: u64)
-    -> Extended {
+pub fn book_extend(
+    inout b: Book,
+    slot: u64,
+    serial: u64,
+    add: u64,
+    fresh_base: u64,
+    fresh_cap: u64
+) -> Extended {
     let index = match resolve(in b, slot, serial, Kind::Bytes) {
         Result::Ok(i) => i,
         Result::Err(f) => {

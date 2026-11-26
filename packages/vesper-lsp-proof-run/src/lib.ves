@@ -692,8 +692,12 @@ fn compile(inout st: St, in module: ChunkSeq[u8], timeout: u64) -> bool eff [Ffi
 
 // `ensure_olean`: `<module>.olean` for `text` in the stage, from the cache
 // or compiled. On a failure the reason is in `st.reason`.
-fn ensure_olean(inout st: St, in module: ChunkSeq[u8], in text: ChunkSeq[u8], timeout: u64)
-    -> bool eff [Ffi[StdProcess], Ffi[StdFs]] {
+fn ensure_olean(
+    inout st: St,
+    in module: ChunkSeq[u8],
+    in text: ChunkSeq[u8],
+    timeout: u64
+) -> bool eff [Ffi[StdProcess], Ffi[StdFs]] {
     let mut keyed = ChunkSeq::new[u8]();
     put_bytes(inout keyed, in st.version.as_slice());
     keyed.push(0);
@@ -914,8 +918,13 @@ fn put_join_paths_error(inout o: ChunkSeq[u8]) {
 
 // `bitvec_check`: the `bv_decide` rendering of a model `omega` did not
 // prove.
-fn bitvec_check(inout st: St, in job: Job, m: Model, in omega: ChunkSeq[u8], timeout: u64)
-    -> Status eff [Ffi[StdProcess], Ffi[StdFs]] {
+fn bitvec_check(
+    inout st: St,
+    in job: Job,
+    m: Model,
+    in omega: ChunkSeq[u8],
+    timeout: u64
+) -> Status eff [Ffi[StdProcess], Ffi[StdFs]] {
     let name = part(in job, m.module, m.module_n);
     let module = with_ext(in name, in "_bv");
     let lname = with_ext(in module, in ".lean");
@@ -1533,8 +1542,10 @@ fn fail_all(inout st: St, in job: Job) {
 // Run the job in the file `job_path` (`proof_lens::job_words`) and write
 // its outcome rows (`proof_lens::outcome_rows`) to `out_path`: 0, or 1 when
 // the job cannot be read, 2 when the rows cannot be written.
-pub fn proof_run(in job_path: Str, in out_path: Str)
-    -> u64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv]] {
+pub fn proof_run(
+    in job_path: Str,
+    in out_path: Str
+) -> u64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv]] {
     let mut jp = ChunkSeq::new[u8]();
     put(inout jp, in job_path);
     let data = match f_read(in jp) {

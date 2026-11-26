@@ -303,8 +303,17 @@ fn part_at(in x: Tx, p: u64, k: u64) -> u64 {
     w64(in x.parts, add(wrapping_mul(p, PW), k))
 }
 
-fn push_part(inout x: Tx, kind: u64, a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64)
-    -> u64 {
+fn push_part(
+    inout x: Tx,
+    kind: u64,
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+    e: u64,
+    f: u64,
+    g: u64
+) -> u64 {
     let id = x.parts.len() / PW;
     x.parts.push(kind);
     x.parts.push(a);

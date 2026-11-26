@@ -197,8 +197,13 @@ fn max_u32(a: u32, b: u32) -> u32 {
 }
 
 // `Layout::of`: the layout id, or NONE32 with the message in `ls.err`.
-pub fn layout_of(inout ls: Layouts, inout t: Types, inout names: Names, in wd: World, ty: u32)
-    -> u32 {
+pub fn layout_of(
+    inout ls: Layouts,
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    ty: u32
+) -> u32 {
     let d = default_type(inout t, ty);
     ls.seen.clear();
     build(inout ls, inout t, inout names, in wd, d, 0)
@@ -219,8 +224,14 @@ fn retag(inout ls: Layouts, l: u32, ty: u32) -> u32 {
     l
 }
 
-fn build(inout ls: Layouts, inout t: Types, inout names: Names, in wd: World, ty: u32, depth: u64)
-    -> u32 {
+fn build(
+    inout ls: Layouts,
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    ty: u32,
+    depth: u64
+) -> u32 {
     let k = wd.k;
     if depth > 128 {
         return ls

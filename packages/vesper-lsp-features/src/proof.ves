@@ -504,8 +504,16 @@ fn unit(inout b: B) -> u32 {
     term(inout b.m, TM_UNIT, 0, 0, 0, K_UNIT, 0, 0)
 }
 
-fn expr(inout b: B, inout sc: Sc, in a: Ast, in c: Ctx, in y: Syms, in wt: Wt, e: u32, want: u8)
-    -> u32 {
+fn expr(
+    inout b: B,
+    inout sc: Sc,
+    in a: Ast,
+    in c: Ctx,
+    in y: Syms,
+    in wt: Wt,
+    e: u32,
+    want: u8
+) -> u32 {
     if !charge(inout b) {
         return NONE;
     }

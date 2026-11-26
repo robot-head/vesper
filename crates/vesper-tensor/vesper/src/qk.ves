@@ -43,8 +43,10 @@ fn clamp_i32(v: i32, lo: i32, hi: i32) -> i32 {
 }
 
 // GGML `get_scale_min_k4`: the 6-bit scale and minimum of sub-block `j`.
-pub fn scale_min(j: u64, in scales: Slice[u8])
-    -> (u8, u8) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn scale_min(
+    j: u64,
+    in scales: Slice[u8]
+) -> (u8, u8) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     if j < 4 {
         (scales[j] & K_SCALE_MASK, scales[j + 4] & K_SCALE_MASK)
     } else {
@@ -297,8 +299,12 @@ fn min_u8(a: u8, b: u8) -> u8 {
 // `make_qkx2_quants(15, sub, weights, l[lo..lo + 32], laux, -1, 0.1, 20,
 // false)` with the weights in `w[0..32]`, `l` at `s[lo..]` and `laux` at
 // `s[S_LAUX..S_PACKED]`.
-fn make_qkx2_quants_split(in sub: Slice[u32], inout w: Slice[u32], inout s: Slice[u8], lo: u64)
-    -> (u32, u32) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+fn make_qkx2_quants_split(
+    in sub: Slice[u32],
+    inout w: Slice[u32],
+    inout s: Slice[u8],
+    lo: u64
+) -> (u32, u32) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     make_qkx2(
         Q4_MAX,
         in sub,

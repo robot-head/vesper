@@ -36,8 +36,13 @@ pub fn max_sig_data() -> u64 {
 }
 
 // A length-prefixed byte string: its length goes to `w`, its bytes to `d`.
-pub fn blob(in b: Slice[u8], inout r: Rd, n: u64, field: u64, inout w: Slice[u64])
-    -> Unit eff [Fail[AErr]] {
+pub fn blob(
+    in b: Slice[u8],
+    inout r: Rd,
+    n: u64,
+    field: u64,
+    inout w: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
     put(inout w, n);
     arr(in b, inout r, n, field, inout w);
 }

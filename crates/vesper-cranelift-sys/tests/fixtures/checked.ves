@@ -93,8 +93,13 @@ fn add_sub_mul(inout b: Builder, op: u32, a: Value, c: Value) -> Value eff [Ffi[
 }
 
 // `binary` for the four operators.
-fn binary(inout b: Builder, op: u32, a: Value, c: Value, unsigned: bool)
-    -> Value eff [Ffi[Cranelift]] {
+fn binary(
+    inout b: Builder,
+    op: u32,
+    a: Value,
+    c: Value,
+    unsigned: bool
+) -> Value eff [Ffi[Cranelift]] {
     if op <= 2 {
         return add_sub_mul(inout b, op, a, c);
     }
@@ -122,8 +127,13 @@ fn binary(inout b: Builder, op: u32, a: Value, c: Value, unsigned: bool)
 
 // `checked_arithmetic`: the overflow test of each (operator, kind) pair,
 // then the operation.
-fn checked_arithmetic(inout b: Builder, op: u32, k: u32, a: Value, c: Value)
-    -> Value eff [Ffi[Cranelift]] {
+fn checked_arithmetic(
+    inout b: Builder,
+    op: u32,
+    k: u32,
+    a: Value,
+    c: Value
+) -> Value eff [Ffi[Cranelift]] {
     let unsigned = kind_unsigned(k);
     let narrow = kind_bits(k) < 64;
     if !unsigned && narrow && op <= 2 {

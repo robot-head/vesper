@@ -835,8 +835,14 @@ pub fn kernel_park_io(inout k: Kernel, task: u64, own: bool) -> Ret {
     k.park(task, own, false, false, 0, 0, 0)
 }
 
-pub fn kernel_schedule_io(inout k: Kernel, task: u64, own: bool, delay_ns: u64, rk: u64, rv: u64)
-    -> Ret {
+pub fn kernel_schedule_io(
+    inout k: Kernel,
+    task: u64,
+    own: bool,
+    delay_ns: u64,
+    rk: u64,
+    rv: u64
+) -> Ret {
     k.begin();
     let deadline = wrapping_add(k.now, delay_ns);
     if deadline < k.now {

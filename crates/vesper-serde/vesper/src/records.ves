@@ -416,8 +416,13 @@ fn name_is(in input: Slice[u8], name: Token, in key: Slice[u8]) -> bool {
     strings_equal(in input[s..e], in key)
 }
 
-pub fn event_check(in doc: Doc, in input: Slice[u8], root: u64, inout remaining: u64, passes: u64)
-    -> EventRow eff [Fail[Fault]] {
+pub fn event_check(
+    in doc: Doc,
+    in input: Slice[u8],
+    root: u64,
+    inout remaining: u64,
+    passes: u64
+) -> EventRow eff [Fail[Fault]] {
     charge(inout remaining, 1, passes);
     let r = tok(in doc.tokens, root);
     if r.kind != Kind::Object {
@@ -538,8 +543,11 @@ fn find_newline(in s: Slice[u8]) -> Option[u64] {
 
 // Batch admission before any record: the record count, EOF line, record
 // metadata bytes (`record_size` per record) and the work charged so far.
-pub fn ndjson_admit(in input: Slice[u8], b: BatchLimits, record_size: u64)
-    -> NdPlan eff [Fail[Fault]] {
+pub fn ndjson_admit(
+    in input: Slice[u8],
+    b: BatchLimits,
+    record_size: u64
+) -> NdPlan eff [Fail[Fault]] {
     let len = input.len();
     if len > b.max_input_bytes {
         initial(1);
@@ -596,8 +604,12 @@ fn blank(b: u64) -> bool {
 
 // The frame at `c.start`: its end, payload end and the record's limits
 // (`c.max_*`), with the checks before its parse.
-pub fn ndjson_frame(in input: Slice[u8], inout c: NdCursor, b: BatchLimits, r: Limits)
-    -> Unit eff [Fail[Fault]] {
+pub fn ndjson_frame(
+    in input: Slice[u8],
+    inout c: NdCursor,
+    b: BatchLimits,
+    r: Limits
+) -> Unit eff [Fail[Fault]] {
     let len = input.len();
     let start = c.start;
     let (end, body_end) = match find_newline(in input[start..len]) {
@@ -667,8 +679,12 @@ pub fn ndjson_frame(in input: Slice[u8], inout c: NdCursor, b: BatchLimits, r: L
 
 // After the record parsed: its totals against the batch, then the cursor
 // moves to the next frame.
-pub fn ndjson_account(inout c: NdCursor, tokens: u64, index: u64, work: u64)
-    -> Unit eff [Fail[Fault]] {
+pub fn ndjson_account(
+    inout c: NdCursor,
+    tokens: u64,
+    index: u64,
+    work: u64
+) -> Unit eff [Fail[Fault]] {
     if tokens > c.remaining_tokens {
         here(in c, 3);
     }

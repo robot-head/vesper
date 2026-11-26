@@ -261,8 +261,12 @@ fn same_bytes(in pool: Slice[u8], a: u64, b: u64, n: u64) -> bool {
 }
 
 // `Check::value`: the encoded size of the value at the cursor.
-fn value(inout c: Check, in w: Slice[u64], in pool: Slice[u8], depth: u64)
-    -> u64 eff [Fail[Error]] {
+fn value(
+    inout c: Check,
+    in w: Slice[u64],
+    in pool: Slice[u8],
+    depth: u64
+) -> u64 eff [Fail[Error]] {
     let tag = next(inout c, in w);
     if tag == TAG_RAW {
         let _off = next(inout c, in w);
@@ -374,8 +378,11 @@ fn value(inout c: Check, in w: Slice[u64], in pool: Slice[u8], depth: u64)
 }
 
 // `encoded_size`.
-pub fn encode_size(in w: Slice[u64], in pool: Slice[u8], lim: EncodeLimits)
-    -> u64 eff [Fail[Error]] {
+pub fn encode_size(
+    in w: Slice[u64],
+    in pool: Slice[u8],
+    lim: EncodeLimits
+) -> u64 eff [Fail[Error]] {
     let mut c = Check { lim: lim, work: 0, tokens: 0, strings: 0, at: 0 };
     let size = value(inout c, in w, in pool, 0);
     // One additional unit per byte covers the write pass.
@@ -578,8 +585,12 @@ fn write_value(inout out: Slice[u8], inout wr: W, in w: Slice[u64], in pool: Sli
 }
 
 // `encode_into`: complete preflight, one capacity check, then the writes.
-pub fn encode_write(in w: Slice[u64], in pool: Slice[u8], inout out: Slice[u8], lim: EncodeLimits)
-    -> u64 eff [Fail[Error]] {
+pub fn encode_write(
+    in w: Slice[u64],
+    in pool: Slice[u8],
+    inout out: Slice[u8],
+    lim: EncodeLimits
+) -> u64 eff [Fail[Error]] {
     let size = encode_size(in w, in pool, lim);
     if out.len() < size {
         fail(ErrorKind::OutputTooSmall);

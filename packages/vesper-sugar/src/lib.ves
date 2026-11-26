@@ -189,8 +189,13 @@ pub fn sugar_expand_words(in text: Str, include_tests: u64, work: u64) -> ChunkS
     expand_words(in src, include_tests != 0)
 }
 
-fn render_encoded(in text: Str, max_bytes: u64, work: u64, scoped: bool, patterned: bool)
-    -> ChunkSeq[u64] {
+fn render_encoded(
+    in text: Str,
+    max_bytes: u64,
+    work: u64,
+    scoped: bool,
+    patterned: bool
+) -> ChunkSeq[u64] {
     let b = text.as_bytes();
     let np = base128(in b, 0);
     let ni = base128(in b, 4);

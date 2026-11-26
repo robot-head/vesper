@@ -326,8 +326,10 @@ pub fn frame_stack_read_address(
     addr
 }
 
-pub fn frame_stack_pop(inout stack: FrameStack, id: FrameId)
-    -> ChunkSeq[u8] eff [Fail[FrameError]] {
+pub fn frame_stack_pop(
+    inout stack: FrameStack,
+    id: FrameId
+) -> ChunkSeq[u8] eff [Fail[FrameError]] {
     let n = stack.frames.len();
     if n == 0 {
         return Fail::raise(FrameError::StaleFrame);
@@ -642,8 +644,10 @@ fn slot_at(in seq: ChunkSeq[RequestSlot], idx: u64) -> RequestSlot {
     }
 }
 
-pub fn readiness_queue_new(kind: DriverKind, capacity: u64)
-    -> ReadinessQueue eff [Fail[DriverError]] {
+pub fn readiness_queue_new(
+    kind: DriverKind,
+    capacity: u64
+) -> ReadinessQueue eff [Fail[DriverError]] {
     if capacity == 0 {
         return Fail::raise(DriverError::InvalidCapacity);
     }

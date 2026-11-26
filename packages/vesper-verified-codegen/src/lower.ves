@@ -2426,8 +2426,12 @@ fn copy_words(inout fl: Fl, dst: u64, src: u64, words: u64) eff [Fail[VErr]] {
 }
 
 // `place`: the slot range of `root.path`.
-fn place(inout lw: Lw, inout fl: Fl, root: u32, in comps: ChunkSeq[u32])
-    -> (u64, Sh) eff [Fail[VErr]] {
+fn place(
+    inout lw: Lw,
+    inout fl: Fl,
+    root: u32,
+    in comps: ChunkSeq[u32]
+) -> (u64, Sh) eff [Fail[VErr]] {
     let (slot, sh) = local(inout lw, inout fl, root);
     let (start, len) = range(in lw, sh, in comps);
     (add(slot, start), sub(sh, start, len))
@@ -2604,8 +2608,13 @@ pub copy struct Part {
 
 // `parts`: the sub-values a non-leaf pattern destructures, and the enum
 // tag the value must carry (NONE for none).
-fn parts(inout lw: Lw, in fl: Fl, at: u64, ty0: u32, inout out: ChunkSeq[Part])
-    -> u64 eff [Fail[VErr]] {
+fn parts(
+    inout lw: Lw,
+    in fl: Fl,
+    at: u64,
+    ty0: u32,
+    inout out: ChunkSeq[Part]
+) -> u64 eff [Fail[VErr]] {
     let ty = lw.dflt(ty0);
     let kind = lw.op(at);
     let func = fl.f.name;

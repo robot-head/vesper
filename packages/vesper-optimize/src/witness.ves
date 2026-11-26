@@ -1055,8 +1055,13 @@ pub fn compare_output(
 
 // ---------------------------------------------------------------- build
 
-fn build_expr(inout t: Tree, in o: Ops, in bound: Bound, in terms: ChunkSeq[TermRow], id: u32)
-    -> u32 {
+fn build_expr(
+    inout t: Tree,
+    in o: Ops,
+    in bound: Bound,
+    in terms: ChunkSeq[TermRow],
+    id: u32
+) -> u32 {
     let current = term_at(in terms, id);
     if current.tag == T_CONST {
         return add_int(inout t, current.value, bound.start, bound.end);
@@ -1233,8 +1238,14 @@ fn constant(in terms: ChunkSeq[TermRow], id: u32, value: i128) -> bool {
     x.tag == T_CONST && x.value == value
 }
 
-fn application(in terms: ChunkSeq[TermRow], id: u32, wrapping: bool, op: u8, a: u32, c: u32)
-    -> bool {
+fn application(
+    in terms: ChunkSeq[TermRow],
+    id: u32,
+    wrapping: bool,
+    op: u8,
+    a: u32,
+    c: u32
+) -> bool {
     let x = term_at(in terms, id);
     let tag = if wrapping {
         T_WRAPPING

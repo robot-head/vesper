@@ -1555,8 +1555,14 @@ fn assign(
 }
 
 // `place_term(place)`.
-fn place_term(inout b: B, inout t: Types, in y: Y, in g: G, root: u32, in path: ChunkSeq[u32])
-    -> T {
+fn place_term(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    in g: G,
+    root: u32,
+    in path: ChunkSeq[u32]
+) -> T {
     let i = g.find(root);
     if i == NONE64 {
         b.fail(in "unknown Lean place");
@@ -2012,8 +2018,14 @@ fn checked(
     lref(inout b, tmp)
 }
 
-fn expr_inner(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T])
-    -> T {
+fn expr_inner(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    inout g: G,
+    e: u64,
+    inout out: ChunkSeq[T]
+) -> T {
     let k = y.a.kind(e);
     if k == X_LITERAL {
         let ty_e = type_of(in y, e);
@@ -2219,8 +2231,14 @@ fn name_expr(inout b: B, inout t: Types, in y: Y, inout g: G, n: u32) -> T {
     sref(inout b, n)
 }
 
-fn struct_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T])
-    -> T {
+fn struct_expr(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    inout g: G,
+    e: u64,
+    inout out: ChunkSeq[T]
+) -> T {
     let n = y.a.xs(e, 0);
     let nf = y.a.x(e, 1);
     let mut es: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -2272,8 +2290,14 @@ fn struct_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout ou
     ascribe(inout b, rec, r)
 }
 
-fn unary_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T])
-    -> T {
+fn unary_expr(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    inout g: G,
+    e: u64,
+    inout out: ChunkSeq[T]
+) -> T {
     let op = y.a.xs(e, 0);
     let v = y.a.x(e, 1);
     let value = expr(inout b, inout t, in y, inout g, v, inout out);
@@ -2313,8 +2337,14 @@ fn unary_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out
     value
 }
 
-fn binary_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T])
-    -> T {
+fn binary_expr(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    inout g: G,
+    e: u64,
+    inout out: ChunkSeq[T]
+) -> T {
     let op = y.a.xs(e, 0);
     let l = y.a.x(e, 1);
     let r = y.a.x(e, 2);
@@ -2413,8 +2443,14 @@ fn assign_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout ou
     assign(inout b, inout t, in y, inout g, root, in path, new, inout out);
 }
 
-fn block_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T])
-    -> T {
+fn block_expr(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    inout g: G,
+    e: u64,
+    inout out: ChunkSeq[T]
+) -> T {
     let ns = g.scope.len();
     let n = y.a.x(e, 0);
     let mut at: u64 = 1;
@@ -2472,8 +2508,14 @@ fn block_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out
     result
 }
 
-fn match_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T])
-    -> T {
+fn match_expr(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    inout g: G,
+    e: u64,
+    inout out: ChunkSeq[T]
+) -> T {
     let value = y.a.x(e, 0);
     let mut st = type_of(in y, value);
     if st == NONE32 {
@@ -2510,8 +2552,14 @@ fn match_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out
     lref(inout b, tmp)
 }
 
-fn index_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T])
-    -> T {
+fn index_expr(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    inout g: G,
+    e: u64,
+    inout out: ChunkSeq[T]
+) -> T {
     let base = y.a.x(e, 0);
     let index = y.a.x(e, 1);
     let route = y.a.x(e, 2);

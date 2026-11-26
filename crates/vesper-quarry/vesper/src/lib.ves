@@ -363,8 +363,12 @@ pub fn page_insert(inout b: Slice[u8], in record: Slice[u8]) -> u64 {
     page_insert_impl(inout b, in record)
 }
 
-pub fn page_update(inout b: Slice[u8], slot: u64, in record: Slice[u8], inout scratch: Slice[u8])
-    -> u64 {
+pub fn page_update(
+    inout b: Slice[u8],
+    slot: u64,
+    in record: Slice[u8],
+    inout scratch: Slice[u8]
+) -> u64 {
     page_update_impl(inout b, slot, in record, inout scratch)
 }
 

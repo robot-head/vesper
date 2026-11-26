@@ -98,14 +98,22 @@ fn void_sig(inout m: Module, params: u64) -> SigId eff [Ffi[Cranelift]] {
     s
 }
 
-fn declare(inout m: Module, in name: ChunkSeq[u8], linkage: u32, params: u64)
-    -> FuncId eff [Ffi[Cranelift]] {
+fn declare(
+    inout m: Module,
+    in name: ChunkSeq[u8],
+    linkage: u32,
+    params: u64
+) -> FuncId eff [Ffi[Cranelift]] {
     let s = word_sig(inout m, params);
     declare_function(inout m, in name.as_slice(), linkage, s)
 }
 
-fn declare_str(inout m: Module, in name: Str, linkage: u32, params: u64)
-    -> FuncId eff [Ffi[Cranelift]] {
+fn declare_str(
+    inout m: Module,
+    in name: Str,
+    linkage: u32,
+    params: u64
+) -> FuncId eff [Ffi[Cranelift]] {
     let n = bytes_of(in name);
     declare(inout m, in n, linkage, params)
 }
@@ -117,8 +125,13 @@ fn call1(inout b: Builder, inout m: Module, f: FuncId, x: Value) -> u32 eff [Ffi
     ins_call(inout b, r, in a.as_slice())
 }
 
-fn call2(inout b: Builder, inout m: Module, f: FuncId, x: Value, y: Value)
-    -> u32 eff [Ffi[Cranelift]] {
+fn call2(
+    inout b: Builder,
+    inout m: Module,
+    f: FuncId,
+    x: Value,
+    y: Value
+) -> u32 eff [Ffi[Cranelift]] {
     let r = import_function(inout b, inout m, f);
     let a = vals2(x, y);
     ins_call(inout b, r, in a.as_slice())

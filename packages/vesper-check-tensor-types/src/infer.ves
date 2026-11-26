@@ -1285,8 +1285,15 @@ fn function_value(inout st: St, in cx: Cx, n: u32, start: u64, end: u64) -> u32 
 }
 
 // `Body::indirect`.
-fn indirect(inout st: St, inout cx: Cx, in a: Ast, e: u32, f: u32, args: u32, expected: u32)
-    -> u32 {
+fn indirect(
+    inout st: St,
+    inout cx: Cx,
+    in a: Ast,
+    e: u32,
+    f: u32,
+    args: u32,
+    expected: u32
+) -> u32 {
     let x = ty_node(in st, f);
     let argc = list_len(in a, args);
     if x.k == T_FN && widen_u64(x.n) == argc {
@@ -2317,8 +2324,15 @@ fn result_of(inout st: St, t: u32) -> u32 {
 }
 
 // `Body::pool_op`.
-fn pool_op(inout st: St, inout cx: Cx, in a: Ast, e: u32, op: u32, args: u32, expected: u32)
-    -> u32 {
+fn pool_op(
+    inout st: St,
+    inout cx: Cx,
+    in a: Ast,
+    e: u32,
+    op: u32,
+    args: u32,
+    expected: u32
+) -> u32 {
     let start = widen_u64(expr_at(in a, e).start);
     let end = widen_u64(expr_at(in a, e).end);
     let n = pool_arity(in st, op);

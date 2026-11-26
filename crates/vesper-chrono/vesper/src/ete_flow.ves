@@ -201,8 +201,11 @@ fn seg_overlaps(in s: CodeSegment, base: u64, end: u64) -> bool {
     base < s_end && s.base < end
 }
 
-pub fn add_segment(inout img: CodeImage, base: u64, inout bytes: ChunkSeq[u8])
-    -> Result[u64, EteFlowError] {
+pub fn add_segment(
+    inout img: CodeImage,
+    base: u64,
+    inout bytes: ChunkSeq[u8]
+) -> Result[u64, EteFlowError] {
     let len = bytes.len();
     if wrapping_sub(0xffff_ffff_ffff_ffff, base) < len {
         return Result::Err(EteFlowError::BadSegment { base: base });
@@ -493,8 +496,11 @@ fn is_sequential(in f: A64Flow) -> bool {
     }
 }
 
-fn walk_to_branch(inout w: Walker, in img: CodeImage, element_index: u64)
-    -> Result[WalkOut, EteFlowError] {
+fn walk_to_branch(
+    inout w: Walker,
+    in img: CodeImage,
+    element_index: u64
+) -> Result[WalkOut, EteFlowError] {
     let mut ip = match w.pc {
         Option::Some(v) => v,
         Option::None => return Result::Err(
@@ -524,8 +530,12 @@ fn walk_to_branch(inout w: Walker, in img: CodeImage, element_index: u64)
     }
 }
 
-fn walker_atom(inout w: Walker, in img: CodeImage, executed: bool, i: u64)
-    -> Result[u64, EteFlowError] {
+fn walker_atom(
+    inout w: Walker,
+    in img: CodeImage,
+    executed: bool,
+    i: u64
+) -> Result[u64, EteFlowError] {
     let wo = match walk_to_branch(inout w, in img, i) {
         Result::Ok(v) => v,
         Result::Err(e) => return Result::Err(e),

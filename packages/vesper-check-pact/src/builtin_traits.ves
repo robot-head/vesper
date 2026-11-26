@@ -287,8 +287,12 @@ fn user_impl_covers(in m: BuiltinMod, tname: u32, ty: u32) -> bool {
     false
 }
 
-fn has_request(in req_trait: ChunkSeq[u32], in req_struct: ChunkSeq[u32], tname: u32, sname: u32)
-    -> bool {
+fn has_request(
+    in req_trait: ChunkSeq[u32],
+    in req_struct: ChunkSeq[u32],
+    tname: u32,
+    sname: u32
+) -> bool {
     for i in 0..req_trait.len() {
         if u32_at(in req_trait, i) == tname && u32_at(in req_struct, i) == sname {
             return true;

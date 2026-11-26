@@ -262,8 +262,13 @@ fn push_pending(
 
 // Split or single placement for a barrier ordering earlier work on the same
 // queue before pass `p`.
-fn placement(in pl: Planner, p: u32, queue: u32, resource: u32, has_same_queue_prior: bool)
-    -> Placement {
+fn placement(
+    in pl: Planner,
+    p: u32,
+    queue: u32,
+    resource: u32,
+    has_same_queue_prior: bool
+) -> Placement {
     if pl.split && has_same_queue_prior {
         let t = touch_at(in pl, resource, queue);
         if t != none32() && t != p {

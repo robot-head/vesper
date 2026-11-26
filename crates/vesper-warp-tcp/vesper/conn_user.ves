@@ -78,8 +78,13 @@ pub fn tcb_listen(inout t: Tcb, iss_base: u32) -> Result[Unit, TcpFail] {
     Result::Ok(())
 }
 
-pub fn tcb_connect(inout t: Tcb, now: u64, ips: Ips, remote_port: u16, iss_base: u32)
-    -> Result[Unit, TcpFail] {
+pub fn tcb_connect(
+    inout t: Tcb,
+    now: u64,
+    ips: Ips,
+    remote_port: u16,
+    iss_base: u32
+) -> Result[Unit, TcpFail] {
     if t.st != State::Closed {
         return Result::Err(TcpFail::InvalidState(t.st));
     }

@@ -237,8 +237,13 @@ fn place_all(in b: Slice[u8], in qs: ChunkSeq[u64]) -> ChunkSeq[u64] {
 }
 
 // `map_offset`: generated offset `o` in the documented file.
-fn map_offset(in segs: ChunkSeq[u64], in lines: ChunkSeq[u64], offset: u64, code_start: u64, o: u64)
-    -> u64 {
+fn map_offset(
+    in segs: ChunkSeq[u64],
+    in lines: ChunkSeq[u64],
+    offset: u64,
+    code_start: u64,
+    o: u64
+) -> u64 {
     let n = segs.len() / 2;
     for i in 0..n {
         let s = u64_at(in segs, wrapping_mul(i, 2));

@@ -668,8 +668,12 @@ fn read_literal(inout r: Reader, in b: Slice[u8], inout out: ChunkSeq[u64]) {
 // A pattern node: kind, start, stop, then Bind: name; Tuple: n, children;
 // Constructor: name, named, n, (field, child)*; Literal: kind, lo, hi,
 // opaque. Children are pool offsets.
-fn read_pattern(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], inout pats: ChunkSeq[u64])
-    -> u64 {
+fn read_pattern(
+    inout r: Reader,
+    in b: Slice[u8],
+    in nmap: ChunkSeq[u32],
+    inout pats: ChunkSeq[u64]
+) -> u64 {
     let kind = r.word(in b);
     let mut body: ChunkSeq[u64] = ChunkSeq::new[u64]();
     if kind == PK_BIND {
@@ -1290,8 +1294,15 @@ fn mentions_names(in p: Prog, t: u32, in names: ChunkSeq[u32]) -> bool {
 }
 
 // The types of a target: parameters, values, locals and result.
-fn any_type(in p: Prog, g: Tgt, fact: u64, values: bool, locals: bool, params: bool, result: bool)
-    -> bool {
+fn any_type(
+    in p: Prog,
+    g: Tgt,
+    fact: u64,
+    values: bool,
+    locals: bool,
+    params: bool,
+    result: bool
+) -> bool {
     let f = p.fun(g.f);
     if values {
         for v in 0..w(f.vn) {
@@ -3191,8 +3202,13 @@ fn copy_op(inout p: Prog, in rn: Rename, i: Inst) -> u32 {
     out
 }
 
-fn new_block(inout p: Prog, in params: ChunkSeq[u32], in list: ChunkSeq[u32], term: u8, ta: u32)
-    -> u32 {
+fn new_block(
+    inout p: Prog,
+    in params: ChunkSeq[u32],
+    in list: ChunkSeq[u32],
+    term: u8,
+    ta: u32
+) -> u32 {
     let pa = n32(p.ids.len());
     p.ids.extend(in params.as_slice());
     let ia = n32(p.ids.len());

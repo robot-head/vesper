@@ -100,8 +100,12 @@ impl LeaseCore {
         removed
     }
 
-    fn park(inout self, space: PacketNumberSpace, pn: u64, deadline_ns: u64)
-        -> Result[u64, ParkErrorKind] {
+    fn park(
+        inout self,
+        space: PacketNumberSpace,
+        pn: u64,
+        deadline_ns: u64
+    ) -> Result[u64, ParkErrorKind] {
         if pn >= max_packet_number() {
             return Result::Err(ParkErrorKind::PacketNumberOutOfRange);
         }
@@ -149,8 +153,12 @@ impl LeaseCore {
     }
 
     // Returns the entry's old and new wheel index.
-    fn rearm(inout self, space: PacketNumberSpace, pn: u64, deadline_ns: u64)
-        -> Result[(u64, u64), LeaseError] {
+    fn rearm(
+        inout self,
+        space: PacketNumberSpace,
+        pn: u64,
+        deadline_ns: u64
+    ) -> Result[(u64, u64), LeaseError] {
         if deadline_ns > max_time_ns() {
             return Result::Err(LeaseError::DeadlineOutOfRange);
         }
@@ -285,26 +293,39 @@ pub fn lease_core_contains(in l: LeaseCore, space: PacketNumberSpace, pn: u64) -
 }
 
 // Park a lease; its wheel index.
-pub fn lease_core_park(inout l: LeaseCore, space: PacketNumberSpace, pn: u64, pto_deadline_ns: u64)
-    -> Result[u64, ParkErrorKind] {
+pub fn lease_core_park(
+    inout l: LeaseCore,
+    space: PacketNumberSpace,
+    pn: u64,
+    pto_deadline_ns: u64
+) -> Result[u64, ParkErrorKind] {
     l.park(space, pn, pto_deadline_ns)
 }
 
 // An ACK: the acknowledged lease's wheel index.
-pub fn lease_core_on_ack(inout l: LeaseCore, space: PacketNumberSpace, pn: u64)
-    -> Result[u64, LeaseError] {
+pub fn lease_core_on_ack(
+    inout l: LeaseCore,
+    space: PacketNumberSpace,
+    pn: u64
+) -> Result[u64, LeaseError] {
     l.on_ack(space, pn)
 }
 
 // Move a lease's deadline: its old and new wheel index.
-pub fn lease_core_rearm(inout l: LeaseCore, space: PacketNumberSpace, pn: u64, pto_deadline_ns: u64)
-    -> Result[(u64, u64), LeaseError] {
+pub fn lease_core_rearm(
+    inout l: LeaseCore,
+    space: PacketNumberSpace,
+    pn: u64,
+    pto_deadline_ns: u64
+) -> Result[(u64, u64), LeaseError] {
     l.rearm(space, pn, pto_deadline_ns)
 }
 
 // Advance, then the earliest expired lease as `(deadline, index)`.
-pub fn lease_core_poll_pto(inout l: LeaseCore, now_ns: u64)
-    -> Result[Option[(u64, u64)], AdvanceError] {
+pub fn lease_core_poll_pto(
+    inout l: LeaseCore,
+    now_ns: u64
+) -> Result[Option[(u64, u64)], AdvanceError] {
     match l.wheel.advance(now_ns) {
         Option::Some(e) => Result::Err(e),
         Option::None => match l.wheel.pop_due() {

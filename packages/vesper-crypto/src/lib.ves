@@ -231,8 +231,11 @@ pub fn hkdf_expand(alg: u32, in prk: Slice[u8], in info: Slice[u8], inout out: S
 // `u16 len || u8 (6 + label) || "tls13 " || label || u8 context ||
 // context`. Raises `Length` when the label or context does not fit its
 // length byte, or `len` its two bytes.
-pub fn tls13_label(len: u64, in label: Slice[u8], in context: Slice[u8])
-    -> ChunkSeq[u8] eff [Fail[CryptoError]] {
+pub fn tls13_label(
+    len: u64,
+    in label: Slice[u8],
+    in context: Slice[u8]
+) -> ChunkSeq[u8] eff [Fail[CryptoError]] {
     let full = wrapping_add(6, label.len());
     if len > 65535 || full > 255 || context.len() > 255 {
         check(Status::Length);
@@ -366,8 +369,11 @@ pub fn ed25519_sign(in seed: Slice[u8], in msg: Slice[u8], inout out: Slice[u8])
 
 // Whether `sig` is a valid Ed25519 signature of `msg` under `public`
 // (strict verification).
-pub fn ed25519_verify(in public: Slice[u8], in msg: Slice[u8], in sig: Slice[u8])
-    -> bool eff [Ffi[Crypto]] {
+pub fn ed25519_verify(
+    in public: Slice[u8],
+    in msg: Slice[u8],
+    in sig: Slice[u8]
+) -> bool eff [Ffi[Crypto]] {
     Crypto::vcr_ed25519_verify(in public, in msg, in sig) == 0
 }
 
@@ -435,14 +441,22 @@ pub fn mlkem768_decaps(isa: u32, in dk: Slice[u8], in ct: Slice[u8], inout ss: S
 
 // Whether `sig` is a valid ECDSA signature of `msg` under the uncompressed
 // SEC1 point `public`, for an `EcdsaAlg` code.
-pub fn ecdsa_verify(alg: u32, in public: Slice[u8], in msg: Slice[u8], in sig: Slice[u8])
-    -> bool eff [Ffi[Crypto]] {
+pub fn ecdsa_verify(
+    alg: u32,
+    in public: Slice[u8],
+    in msg: Slice[u8],
+    in sig: Slice[u8]
+) -> bool eff [Ffi[Crypto]] {
     Crypto::vcr_ecdsa_verify(alg, in public, in msg, in sig) == 0
 }
 
 // Whether `sig` is a valid RSA signature of `msg` under the DER
 // `RSAPublicKey` (PKCS #1) `public`, for an `RsaAlg` code.
-pub fn rsa_verify(alg: u32, in public: Slice[u8], in msg: Slice[u8], in sig: Slice[u8])
-    -> bool eff [Ffi[Crypto]] {
+pub fn rsa_verify(
+    alg: u32,
+    in public: Slice[u8],
+    in msg: Slice[u8],
+    in sig: Slice[u8]
+) -> bool eff [Ffi[Crypto]] {
     Crypto::vcr_rsa_verify(alg, in public, in msg, in sig) == 0
 }

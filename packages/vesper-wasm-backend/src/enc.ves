@@ -383,8 +383,11 @@ impl Code {
 
 // A finished function body: `Function::new(locals)` then the code (the
 // locals as `(count, type)` runs, each as given).
-pub fn function_bytes(in locals: ChunkSeq[u32], in types: ChunkSeq[ValTy], in code: Code)
-    -> ChunkSeq[u8] {
+pub fn function_bytes(
+    in locals: ChunkSeq[u32],
+    in types: ChunkSeq[ValTy],
+    in code: Code
+) -> ChunkSeq[u8] {
     let mut out = ChunkSeq::new[u8]();
     out.reserve(wrapping_add(wrapping_mul(locals.len(), 4), wrapping_add(code.bytes.len(), 16)));
     uleb(inout out, locals.len());

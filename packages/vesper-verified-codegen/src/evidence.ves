@@ -1285,8 +1285,14 @@ fn read_argument(
 
 // A call instruction `dest: ty = callee(args)` where the argument words
 // are `ops[aa..aa+4n]`.
-fn call_row(inout p: Program, callee: u32, in argw: ChunkSeq[u64], dest: u32, ty: u32, i: InstRow)
-    -> InstRow {
+fn call_row(
+    inout p: Program,
+    callee: u32,
+    in argw: ChunkSeq[u64],
+    dest: u32,
+    ty: u32,
+    i: InstRow
+) -> InstRow {
     let a = p.ops.len();
     p.put(w(callee), Tag::Name);
     p.put(argw.len(), Tag::Raw);
@@ -2400,8 +2406,13 @@ fn sorted_names(in names: Names, in p: Program) -> ChunkSeq[u32] {
 
 // `evidence::rewrite` on the monomorphized program `p` (entry `entry`):
 // the failure-code rewriting the lowering applies around calls.
-pub fn evidence(inout c: Ctx, inout p: Program, in ex: Ex, entry: u32, regions_active: bool)
-    -> Sites eff [Fail[VErr]] {
+pub fn evidence(
+    inout c: Ctx,
+    inout p: Program,
+    in ex: Ex,
+    entry: u32,
+    regions_active: bool
+) -> Sites eff [Fail[VErr]] {
     let mut idx = ChunkSeq::new[u32]();
     for i in 0..p.fns.len() {
         set32(inout idx, w(fn_at(in p.fns, i).name), n32(inc(i)));

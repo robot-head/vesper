@@ -1322,8 +1322,15 @@ fn try_proj_conformance(
     make_response(inout s, in cx, vars, d)
 }
 
-fn mode_bound(inout s: S, env: u64, in cx: ChunkSeq[u64], goal: u64, ty: u64, bound: u64, vars: u64)
-    -> u64 {
+fn mode_bound(
+    inout s: S,
+    env: u64,
+    in cx: ChunkSeq[u64],
+    goal: u64,
+    ty: u64,
+    bound: u64,
+    vars: u64
+) -> u64 {
     let t = resolve(inout s, in cx, ty);
     if t == 0 {
         return dup_err(inout s);

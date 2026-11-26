@@ -131,8 +131,13 @@ fn ascii(in name: Str) -> bool {
 // wrapper formats the message): 1 name, 2 ringbuf key/value size, 3 ringbuf
 // size, 4 zero max_entries or value_size, 5 array key size, 6 program array
 // value size, 7 key size, 8 value size.
-pub fn map_validate(in name: Str, kind: MapKind, key_size: u32, value_size: u32, max_entries: u32)
-    -> u64 {
+pub fn map_validate(
+    in name: Str,
+    kind: MapKind,
+    key_size: u32,
+    value_size: u32,
+    max_entries: u32
+) -> u64 {
     if name.len() == 0 || name.len() >= BPF_OBJ_NAME_LEN || !ascii(in name) {
         return 1;
     }

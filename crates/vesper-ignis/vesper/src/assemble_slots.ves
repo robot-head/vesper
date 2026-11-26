@@ -51,8 +51,11 @@ fn box_has(
 
 // Greedy deterministic cover of a subresource set by boxes: extend along
 // mips, then slices, then planes, from the lowest uncovered index (`boxes`).
-fn boxes(r: Resource, in members: ChunkSeq[u32], in coords: ChunkSeq[SubPos])
-    -> ChunkSeq[SubresourceRange] {
+fn boxes(
+    r: Resource,
+    in members: ChunkSeq[u32],
+    in coords: ChunkSeq[SubPos]
+) -> ChunkSeq[SubresourceRange] {
     let mut out: ChunkSeq[SubresourceRange] = ChunkSeq::new[SubresourceRange]();
     let mut removed: ChunkSeq[bool] = ChunkSeq::new[bool]();
     for i in 0..members.len() {

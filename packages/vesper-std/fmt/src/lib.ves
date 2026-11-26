@@ -335,8 +335,10 @@ test {
         }
     }
 
-    fn unsigned_matches(actual: Result[u64, ParseIntError], expected: Result[u64, ParseIntError])
-        -> bool {
+    fn unsigned_matches(
+        actual: Result[u64, ParseIntError],
+        expected: Result[u64, ParseIntError]
+    ) -> bool {
         match (actual, expected) {
             (Result::Ok(a), Result::Ok(b)) => a == b,
             (Result::Err(a), Result::Err(b)) => parse_error_matches(a, b),

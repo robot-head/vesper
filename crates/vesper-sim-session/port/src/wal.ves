@@ -114,8 +114,13 @@ fn valid_utf8(in bytes: Slice[u8], at: u64, len: u64) -> bool {
     }
 }
 
-fn stop(sink records: ChunkSeq[u64], offset: u64, damage: u8, expected: u64, found: u64)
-    -> ScanResult {
+fn stop(
+    sink records: ChunkSeq[u64],
+    offset: u64,
+    damage: u8,
+    expected: u64,
+    found: u64
+) -> ScanResult {
     ScanResult {
         records: records,
         valid_bytes: offset,

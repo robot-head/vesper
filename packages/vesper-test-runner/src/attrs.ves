@@ -339,8 +339,15 @@ impl Stream {
         (v, start, end)
     }
 
-    fn int_val(inout self, in b: Slice[u8], s: u64, e: u64, neg: bool, start: u64, end: u64)
-        -> Val {
+    fn int_val(
+        inout self,
+        in b: Slice[u8],
+        s: u64,
+        e: u64,
+        neg: bool,
+        start: u64,
+        end: u64
+    ) -> Val {
         let x = parse_int(in b, s, e, neg);
         if x.ok {
             Val { tag: V_INT, a: 0, b: 0, int: x, flag: false }

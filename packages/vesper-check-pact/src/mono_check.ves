@@ -288,8 +288,12 @@ pub fn get_call_cx(in cp: CxPool, in m: MonoTables, fi: u64, cidx: u64) -> CxHea
     }
 }
 
-pub fn close_bounded(in t: Types, in names: Names, in m: MonoTables, inout errors: MonoDiags)
-    -> ChunkSeq[u8] {
+pub fn close_bounded(
+    in t: Types,
+    in names: Names,
+    in m: MonoTables,
+    inout errors: MonoDiags
+) -> ChunkSeq[u8] {
     let nf = m.fn_names.len();
     let mut bounded = ChunkSeq::with_capacity[u8](nf);
     for fi in 0..nf {

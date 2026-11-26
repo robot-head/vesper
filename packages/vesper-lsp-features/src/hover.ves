@@ -820,8 +820,13 @@ fn declaration_at_target(in x: Ix, s: u64, e: u64) -> u64 {
 
 // The answer to one hover request on `x` with facts `f`, appended to
 // `out` as `R<json>`, `Rnull` or `E<error>` (`put_error` codes).
-pub fn hover_answer(inout out: ChunkSeq[u8], inout x: Ix, inout f: Facts, line: u32, character: u32)
-    -> u64 {
+pub fn hover_answer(
+    inout out: ChunkSeq[u8],
+    inout x: Ix,
+    inout f: Facts,
+    line: u32,
+    character: u32
+) -> u64 {
     if x.err != ERR_NONE {
         return x.err;
     }
