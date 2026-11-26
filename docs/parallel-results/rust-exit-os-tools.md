@@ -623,7 +623,7 @@ flag-carrying bytes, and two 8-byte stores.
   from the Rust deformatter.
 - Divergence: `formatter` (the trigger ID counted as a trace source) fails
   `coresight_flow::hand_built_frame_exercises_every_slot_rule`.
-- ABBA (`flip-gate.toml`, release, `RUSTFLAGS="-C target-cpu=native"`, 30
+- ABBA (`flip-gate.json`, release, `RUSTFLAGS="-C target-cpu=native"`, 30
   epochs): a 64 KiB ETR buffer of two interleaved sources with padding and
   a source switch every four frames or so, **1.03x [1.02, 1.04]**. With an
   ID change on one flag-carrying byte in eight (about one per frame, so the

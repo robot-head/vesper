@@ -1,6 +1,6 @@
 //! The Vesper port against the Rust code it backs (kept for the seed copy):
 //! differentials on generated inputs, and ABBA timings that print the flip
-//! gate's `flip-gate pairs` line (crates/vesper-chrono/flip-gate.toml).
+//! gate's `flip-gate pairs` line (crates/vesper-chrono/flip-gate.json).
 use std::hint::black_box;
 use vesper_bench::{BenchCase, Invocation, RunConfig, analyze_pairs, run_abba};
 
