@@ -471,6 +471,10 @@ interface wall-clock {
   }
 }
 "#;
+/// The Cranelift component's interface (crates/vesper-cranelift-component,
+/// #2210), which a program calling `Ffi[Cranelift]` imports.
+const CRANELIFT_WIT: &str = include_str!("../../crates/vesper-cranelift-component/wit/vcl.wit");
+
 const FILESYSTEM_WIT: &str = r#"package wasi:filesystem@0.2.0;
 
 interface types {
@@ -588,6 +592,10 @@ pub fn wrap(mut core: Vec<u8>, wit: &str, world: WasmWorld) -> Vec<u8> {
     resolve.push_source("wasi-clocks.wit", CLOCKS_WIT).unwrap();
     resolve
         .push_source("wasi-filesystem.wit", FILESYSTEM_WIT)
+        .unwrap();
+    // `Ffi[Cranelift]` imports (#2210).
+    resolve
+        .push_source("vesper-cranelift.wit", CRANELIFT_WIT)
         .unwrap();
     let pkg = resolve.push_source("vesper-program.wit", wit).unwrap();
     let name = match world {

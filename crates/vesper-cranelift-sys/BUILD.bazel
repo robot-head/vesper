@@ -15,5 +15,8 @@ exports_files(
 filegroup(
     name = "test_fixtures",
     srcs = glob(["tests/fixtures/**"]),
-    visibility = ["//crates/vesper-cranelift-component:__pkg__"],
+    visibility = [
+        "//:__pkg__",
+        "//crates/vesper-cranelift-component:__pkg__",
+    ],
 )

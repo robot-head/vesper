@@ -23,7 +23,7 @@ pub const WIT: &str = include_str!(concat!(env!("OUT_DIR"), "/vcl.wit"));
 pub const VCL_VES: &str = include_str!(concat!(env!("OUT_DIR"), "/vcl.ves"));
 
 #[cfg(target_family = "wasm")]
-// The generated exports of the lend calls ignore their crossing argument.
+// The generated exports of the lend calls replace their crossing argument.
 #[allow(
     unused_unsafe,
     unused_variables,
@@ -74,11 +74,12 @@ mod component {
         }
     }
 
-    /// The return area of functions whose result goes through memory. A
-    /// component instance runs one call at a time.
+    /// The return area of functions whose result goes through memory
+    /// (`RET_AREA_BYTES` comes from build.rs). A component instance runs one
+    /// call at a time.
     #[repr(align(8))]
-    struct RetArea(#[allow(dead_code)] [u8; 32]);
-    static mut RET: RetArea = RetArea([0; 32]);
+    struct RetArea(#[allow(dead_code)] [u8; RET_AREA_BYTES]);
+    static mut RET: RetArea = RetArea([0; RET_AREA_BYTES]);
     fn ret_area() -> *mut u8 {
         (&raw mut RET).cast()
     }
