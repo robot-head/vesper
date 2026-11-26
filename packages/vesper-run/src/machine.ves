@@ -190,6 +190,9 @@ pub struct M {
     // Handlers' captured environments (`handler_environment`).
     hcap_names: ChunkSeq[u32],
     hcap_vals: ChunkSeq[Val],
+    // Per function: the continuation parameter's name + 1 of an operation
+    // clause (whose type `scan` lets through), or 0.
+    cont_names: ChunkSeq[u32],
     fail_sym: u32,
     raise_sym: u32,
     overflow_sym: u32,
@@ -265,6 +268,7 @@ pub fn machine_new(sink ctx: Ctx, sink program: Program, fuel: u64) -> M {
         pending: 0,
         hcap_names: ChunkSeq::new[u32](),
         hcap_vals: ChunkSeq::new[Val](),
+        cont_names: ChunkSeq::new[u32](),
         fail_sym: 0,
         raise_sym: 0,
         overflow_sym: 0,
@@ -370,6 +374,8 @@ const PAT_OTHER: u64 = 18446744073709551615;
 // `Op::Handle` operands: state flag, state value, pool index, then the
 // alias count and (name, slot) pairs.
 const HO_ALIAS_COUNT: u64 = 3;
+// A call argument's pass word for `inout` (`Pass::Inout`).
+const PASS_INOUT: u64 = 1;
 
 fn site_word(in machine: M, at: u64) -> u64 {
     u64_at(in machine.sites, at)
@@ -518,7 +524,21 @@ fn scan_handle(inout machine: M, at: u64, inout work: ChunkSeq[u64]) {
             return;
         }
         reach(inout machine, clause, inout work);
-        for j in 0..site_word(in machine, add(clause_at, CL_PAT_COUNT)) {
+        // The last pattern binds the continuation.
+        let pat_count = site_word(in machine, add(clause_at, CL_PAT_COUNT));
+        if pat_count != 0 {
+            let cont = site_word(
+                in machine,
+                add(add(clause_at, CL_PATS), wrapping_sub(pat_count, 1))
+            );
+            if cont != PAT_WILD && cont != PAT_OTHER {
+                if clause >= machine.cont_names.len() {
+                    machine.cont_names.resize(inc(clause), 0);
+                }
+                let ok = machine.cont_names.try_set(clause, n32(cont));
+            }
+        }
+        for j in 0..pat_count {
             if site_word(in machine, add(add(clause_at, CL_PATS), j)) == PAT_OTHER {
                 decline(inout machine, "a handler clause pattern", NONE32);
                 return;
@@ -998,9 +1018,13 @@ fn type_ok(in machine: M, ty: u32, depth: u64) -> bool {
         }
     }
     if node.kind == TyKind::Fn {
-        // A function value with effects is a function the program names or
-        // a handler clause's continuation: its evidence is the caller's, as
-        // in `invoke_scoped`.
+        // A function value with effects may carry bound evidence
+        // (`bind_callable_evidence`), which the machine does not keep; only
+        // a clause's continuation is let through (`cont_names`).
+        let row = machine.ctx.types.row(node.r2);
+        if row.n != 0 || row.tail != 0 {
+            return false;
+        }
         if !type_ok(in machine, node.r, inc(depth)) {
             return false;
         }
@@ -1397,10 +1421,16 @@ pub fn scan(inout machine: M) {
         let mut cursor = fn_row.ha;
         let param_count = machine.program.op(cursor);
         cursor = inc(cursor);
+        let cont_name = u32_at(in machine.cont_names, func_index);
+        let mut cont_type: u32 = 0;
         for i in 0..param_count {
+            let param_name = n32(machine.program.op(cursor));
             let path_count = machine.program.op(add(cursor, 2));
             cursor = add(cursor, add(3, path_count));
-            if !type_ok(in machine, n32(machine.program.op(cursor)), 0) {
+            let param_type = n32(machine.program.op(cursor));
+            if cont_name != 0 && param_name == wrapping_sub(cont_name, 1) {
+                cont_type = wrapping_add(param_type, 1);
+            } else if !type_ok(in machine, param_type, 0) {
                 decline(inout machine, "a parameter type of ", fn_info.name);
             }
             cursor = add(cursor, 3);
@@ -1414,7 +1444,8 @@ pub fn scan(inout machine: M) {
             for inst_index in 0..block.ic {
                 let inst_id = add(block.i0, inst_index);
                 let inst = machine.program.inst(inst_id);
-                if !type_ok(in machine, inst.ty, 0) {
+                if !(cont_type != 0 && inst.ty == wrapping_sub(cont_type, 1))
+                    && !type_ok(in machine, inst.ty, 0) {
                     decline(inout machine, "a value type in ", fn_info.name);
                 }
                 let operand_at = inst.a;
@@ -1479,6 +1510,13 @@ pub fn scan(inout machine: M) {
                     if callee_index == NONE64 {
                         if site(in machine, inst_id, SITE_EFFECT_CALL) == NONE64 {
                             decline(inout machine, "a call of ", callee);
+                        } else if has_inout_arg(in machine, inc(operand_at)) {
+                            // A clause would bind the caller's place, not a copy.
+                            decline(
+                                inout machine,
+                                "an effect operation with an inout argument",
+                                NONE32
+                            );
                         } else {
                             let ok = machine.aux.try_set(inst_id, NONE64);
                         }
@@ -2330,7 +2368,7 @@ fn invoke(inout machine: M, func_index: u64) {
     let mut slots: ChunkSeq[En] = ChunkSeq::new[En]();
     for i in 0..fn_info.param_count {
         let param_row = param(in machine, add(fn_info.param_start, i));
-        if param_row.pass == 1 {
+        if param_row.pass == PASS_INOUT {
             let root = u64_at(in machine.arg_roots, i);
             let mut found = false;
             if root != 0 {
@@ -2849,4 +2887,15 @@ pub fn drive(inout machine: M) {
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     display(in machine, value, inout out, 0);
     machine.message = out;
+}
+
+// Whether the call arguments at operand `args_at` (`n`, then pass, value,
+// root + 1, path each) pass a place `inout`.
+fn has_inout_arg(in machine: M, args_at: u64) -> bool {
+    for i in 0..machine.program.op(args_at) {
+        if machine.program.op(add(inc(args_at), wrapping_mul(i, 4))) == PASS_INOUT {
+            return true;
+        }
+    }
+    false
 }
