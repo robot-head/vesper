@@ -4,6 +4,7 @@ use self::unstable::{
     is_sorted
 };
 use self::stable::stable_sort;
+use @vesper-std/core::pact::using;
 use @vesper-std/sugar::{
     guard,
     when
@@ -34,20 +35,23 @@ pub fn total_key_f64(x: f64) -> i64 {
 
 // Sorts `s` ascending under the total order; equal values may change order.
 pub fn sort_f64(inout s: Slice[f64]) {
-    use model TotalOrderF64;
-    sort(inout s);
+    using model TotalOrderF64 {
+        sort(inout s)
+    }
 }
 
 // Sorts `s` ascending under the total order, keeping equal values in order.
 pub fn stable_sort_f64(inout s: Slice[f64]) {
-    use model TotalOrderF64;
-    stable_sort(inout s);
+    using model TotalOrderF64 {
+        stable_sort(inout s)
+    }
 }
 
 // Whether `s` is ascending under the total order.
 pub fn is_sorted_f64(in s: Slice[f64]) -> bool {
-    use model TotalOrderF64;
-    is_sorted(in s)
+    using model TotalOrderF64 {
+        is_sorted(in s)
+    }
 }
 
 // The `u32` whose unsigned order is the total order of the `f32` with bit
