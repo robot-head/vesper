@@ -465,8 +465,6 @@ impl Session {
                 })?;
                 Ok(0)
             }
-                Ok(0)
-            }
             Step::Parse
             | Step::EmitCst
             | Step::ReportSyntax
