@@ -9,7 +9,7 @@
 use self::evidence::{Sites};
 use self::exprs::{Ex};
 use self::lower::{
-    E_ENTRY, E_INVALID, E_LIMIT, E_TARGET, E_UNSUPPORTED, FIRST_FREE_LABEL, Lw, NONE, Plan,
+    E_ENTRY, E_INVALID, E_LIMIT, E_NONE, E_TARGET, E_UNSUPPORTED, FIRST_FREE_LABEL, Lw, NONE, Plan,
     U_EFFECT, U_EXTERNAL_FUNCTION, VErr, ap, apn, cmp_sym, err, construct_name, cover_function,
     decode, hd_at, is_wrapping, plan, plan_empty, planned, put_error, set_table8, tx, unsup
 };
@@ -18,6 +18,21 @@ use @vesper/check-data::names::{Names};
 use @vesper/check-data::input::{Ctx, Reader};
 use @vesper/place-ir::{Program};
 use @vesper/place-ir::codes::{Op};
+
+// A UTF-8 continuation byte is `10xxxxxx`: `byte & UTF8_TAG_MASK` is
+// `UTF8_CONTINUATION`. Counting the other bytes counts characters.
+const UTF8_TAG_MASK: u8 = 192;
+const UTF8_CONTINUATION: u8 = 128;
+// `Coverage::listing` cuts an `Unsupported` detail longer than
+// `DETAIL_MAX_CHARS` characters to `DETAIL_KEPT_CHARS` and `DETAIL_ELLIPSIS`.
+const DETAIL_MAX_CHARS: u64 = 120;
+const DETAIL_KEPT_CHARS: u64 = 117;
+const DETAIL_ELLIPSIS: Str = "...";
+// Width the listing right-aligns counts to, and its padding byte.
+const COUNT_WIDTH: u64 = 4;
+const SPACE: u8 = 32;
+// Opens a generic instance's name, as in `f<i64>`.
+const INSTANCE_OPEN: u8 = 60;
 
 // Recorded refusals (coverage mode), each under the function it belongs to,
 // in the order they were recorded. `live` is 0 for one taken back.
@@ -279,30 +294,30 @@ fn cover_construct(in rf: Rf, i: u64) -> Str {
     }
 }
 
-// `detail` of refusal `i`: an `Unsupported` detail over 120 characters is
-// cut to 117 and `...`.
+// `detail` of refusal `i`: an `Unsupported` detail over `DETAIL_MAX_CHARS`
+// characters is cut to `DETAIL_KEPT_CHARS` and `DETAIL_ELLIPSIS`.
 fn cover_detail(in rf: Rf, i: u64, inout out: ChunkSeq[u8]) {
     let a = u64_at(in rf.da, i);
     let n = u64_at(in rf.dn, i);
     let mut chars: u64 = 0;
     for j in 0..n {
-        if (u8_at(in rf.d, add(a, j)) & 192) != 128 {
+        if (u8_at(in rf.d, add(a, j)) & UTF8_TAG_MASK) != UTF8_CONTINUATION {
             chars = inc(chars);
         }
     }
-    if u8_at(in rf.kind, i) == E_UNSUPPORTED && chars > 120 {
+    if u8_at(in rf.kind, i) == E_UNSUPPORTED && chars > DETAIL_MAX_CHARS {
         let mut seen: u64 = 0;
         for j in 0..n {
             let c = u8_at(in rf.d, add(a, j));
-            if (c & 192) != 128 {
-                if seen == 117 {
+            if (c & UTF8_TAG_MASK) != UTF8_CONTINUATION {
+                if seen == DETAIL_KEPT_CHARS {
                     break;
                 }
                 seen = inc(seen);
             }
             out.push(c);
         }
-        ap(inout out, "...");
+        ap(inout out, DETAIL_ELLIPSIS);
         return;
     }
     for j in 0..n {
@@ -336,10 +351,10 @@ fn pad4(inout out: ChunkSeq[u8], n: u64) {
     apn(inout d, n);
     let mut k = d.len();
     loop {
-        if k >= 4 {
+        if k >= COUNT_WIDTH {
             break;
         }
-        out.push(32);
+        out.push(SPACE);
         k = inc(k);
     }
     out.extend(in d.as_slice());
@@ -376,12 +391,12 @@ pub fn cover_listing(
     if entries.len() > 0 {
         let e = handle Fail[VErr] in {
             pl = plan(inout lw);
-            err(255, ChunkSeq::new[u8]())
+            err(E_NONE, ChunkSeq::new[u8]())
         } with {
             return v => v,
             raise(e, k) => e,
         };
-        if e.kind != 255 {
+        if e.kind != E_NONE {
             let mut t = tx("error: ");
             put_error(in lw.c.names, in e, inout t);
             ap(inout t, "\n");
@@ -430,7 +445,7 @@ pub fn cover_listing(
         let root = u32_at(in poly, i);
         let mut prefix = ChunkSeq::new[u8]();
         lw.c.names.write(root, inout prefix);
-        prefix.push(60);
+        prefix.push(INSTANCE_OPEN);
         let mut instanced = false;
         for fi in 0..lw.fns.len() {
             let mut t = ChunkSeq::new[u8]();

@@ -82,6 +82,8 @@ pub const E_LIMIT: u8 = 3;
 pub const E_INVALID: u8 = 4;
 // Not a Rust error: a construct part 4a does not lower yet.
 pub const E_NOT_PORTED: u8 = 5;
+// No error: what a `Fail[VErr]` handle returns when its body succeeded.
+pub const E_NONE: u8 = 255;
 
 // `Unsupported`, in declaration order.
 const U_FLOAT: u8 = 0;
@@ -1862,12 +1864,12 @@ pub fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
             if tolerant {
                 let se = handle Fail[VErr] in {
                     effects_supported(inout lw, f);
-                    err(255, ChunkSeq::new[u8]())
+                    err(E_NONE, ChunkSeq::new[u8]())
                 } with {
                     return v => v,
                     raise(e, k) => e,
                 };
-                if se.kind != 255 {
+                if se.kind != E_NONE {
                     rf_push(inout soft, name, in se);
                 }
             } else {
@@ -2015,18 +2017,18 @@ pub fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
                 cpa: cpa,
                 cpn: cpn
             });
-            err(255, ChunkSeq::new[u8]())
+            err(E_NONE, ChunkSeq::new[u8]())
         } with {
             return v => v,
             raise(e, k) => e,
         };
-        if pe.kind != 255 && !tolerant {
+        if pe.kind != E_NONE && !tolerant {
             Fail::raise(pe);
         }
         for i in 0..rf_len(in soft) {
             rf_copy(inout lw.rf, name, in soft, i);
         }
-        if pe.kind != 255 {
+        if pe.kind != E_NONE {
             rf_push(inout lw.rf, name, in pe);
         }
     }
@@ -4197,12 +4199,12 @@ fn define(inout lw: Lw, inout fl: Fl, v: u64, ty: u32) eff [Fail[VErr]] {
     }
     let e = handle Fail[VErr] in {
         let x = value_of(inout lw, inout fl, v, ty);
-        err(255, ChunkSeq::new[u8]())
+        err(E_NONE, ChunkSeq::new[u8]())
     } with {
         return v => v,
         raise(e, k) => e,
     };
-    if e.kind != 255 {
+    if e.kind != E_NONE {
         tolerate(inout fl, in e);
     }
 }
@@ -4215,12 +4217,12 @@ fn instruction_or_record(inout lw: Lw, inout fl: Fl, in plan: Plan, ins: InstRow
     }
     let e = handle Fail[VErr] in {
         instruction(inout lw, inout fl, in plan, ins);
-        err(255, ChunkSeq::new[u8]())
+        err(E_NONE, ChunkSeq::new[u8]())
     } with {
         return v => v,
         raise(e, k) => e,
     };
-    if e.kind != 255 {
+    if e.kind != E_NONE {
         tolerate(inout fl, in e);
     }
 }
@@ -4289,12 +4291,12 @@ fn lower_body(inout lw: Lw, inout fl: Fl, in plan: Plan) eff [Fail[VErr]] {
                 let (a, s) = local(inout lw, inout fl, name);
                 slot = a;
                 sn = s.n;
-                err(255, ChunkSeq::new[u8]())
+                err(E_NONE, ChunkSeq::new[u8]())
             } with {
                 return v => v,
                 raise(e, k) => e,
             };
-            if e.kind != 255 {
+            if e.kind != E_NONE {
                 tolerate(inout fl, in e);
             }
         } else {
@@ -4640,12 +4642,12 @@ pub fn lower_rows(
     let mut lw = decode(c, p, ex, sites, inout r, in b);
     let e = handle Fail[VErr] in {
         lower_all(inout lw, inout lo);
-        err(255, ChunkSeq::new[u8]())
+        err(E_NONE, ChunkSeq::new[u8]())
     } with {
         return v => v,
         raise(e, k) => e,
     };
-    if e.kind != 255 {
+    if e.kind != E_NONE {
         let mut o = tx("error: ");
         put_error(in lw.c.names, in e, inout o);
         ap(inout o, "\n");
@@ -4725,14 +4727,14 @@ pub fn cover_function(
     fl.tolerant = true;
     let e = handle Fail[VErr] in {
         lower_body(inout lw, inout fl, in plan);
-        err(255, ChunkSeq::new[u8]())
+        err(E_NONE, ChunkSeq::new[u8]())
     } with {
         return v => v,
         raise(e, k) => e,
     };
     fl_done(inout lw, inout fl, inout next_label, inout lidx);
     found = replace(inout fl.fr, rf_new());
-    if e.kind != 255 {
+    if e.kind != E_NONE {
         if !(e.kind == E_INVALID && rf_len(in found) != 0) && !rf_has(in found, 0, in e) {
             rf_push(inout found, 0, in e);
         }

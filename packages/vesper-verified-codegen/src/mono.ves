@@ -27,7 +27,7 @@
 
 use self::machine::{Lowered, lowered_new};
 use self::lower::{
-    E_LIMIT, lower_rows, put_lowered, U_GENERIC, VErr, ap, apn, err, put_error, tx, unsup
+    E_LIMIT, E_NONE, lower_rows, put_lowered, U_GENERIC, VErr, ap, apn, err, put_error, tx, unsup
 };
 use self::coverage::{Rf, cover_listing, rf_new, rf_push};
 use self::evidence::{evidence, evidence_from, sites_new};
@@ -840,13 +840,13 @@ pub fn mono_input(in b: Slice[u8]) -> ChunkSeq[u64] {
     let mut m = decode(c, p, ex, inout r, in b);
     let e = handle Fail[VErr] in {
         mono_all(inout m);
-        err(255, ChunkSeq::new[u8]())
+        err(E_NONE, ChunkSeq::new[u8]())
     } with {
         return v => v,
         raise(e, k) => e,
     };
     let mut o = ChunkSeq::new[u64]();
-    if e.kind != 255 {
+    if e.kind != E_NONE {
         let mut t = tx("error: ");
         put_error(in m.c.names, in e, inout t);
         ap(inout t, "\n");
@@ -947,12 +947,12 @@ pub fn front_rows(in b: Slice[u8], inout lo: Lowered) -> ChunkSeq[u8] {
     let mut m = decode(c, p, ex, inout r, in b);
     let e = handle Fail[VErr] in {
         mono_all(inout m);
-        err(255, ChunkSeq::new[u8]())
+        err(E_NONE, ChunkSeq::new[u8]())
     } with {
         return v => v,
         raise(e, k) => e,
     };
-    if e.kind != 255 {
+    if e.kind != E_NONE {
         let mut t = tx("error: ");
         put_error(in m.c.names, in e, inout t);
         ap(inout t, "\n");
@@ -974,12 +974,12 @@ pub fn front_rows(in b: Slice[u8], inout lo: Lowered) -> ChunkSeq[u8] {
     let mut sites = sites_new();
     let e2 = handle Fail[VErr] in {
         sites = evidence(inout m.c, inout m.p, in m.ex, entry0, active);
-        err(255, ChunkSeq::new[u8]())
+        err(E_NONE, ChunkSeq::new[u8]())
     } with {
         return v => v,
         raise(e, k) => e,
     };
-    if e2.kind != 255 {
+    if e2.kind != E_NONE {
         let mut t = tx("error: ");
         put_error(in m.c.names, in e2, inout t);
         ap(inout t, "\n");
@@ -1045,12 +1045,12 @@ fn mono_from(in b: Slice[u8], in roots: ChunkSeq[u32], inout m: Mo) -> VErr {
     m = m2;
     let e = handle Fail[VErr] in {
         mono_roots(inout m, in roots);
-        err(255, ChunkSeq::new[u8]())
+        err(E_NONE, ChunkSeq::new[u8]())
     } with {
         return v => v,
         raise(e, k) => e,
     };
-    if e.kind == 255 {
+    if e.kind == E_NONE {
         sort_fns(in m.c.names, inout m.p.fns);
     }
     e
@@ -1095,7 +1095,7 @@ pub fn coverage_input(in b: Slice[u8]) -> ChunkSeq[u8] {
     let mut rf = rf_new();
     let mut entries = ChunkSeq::new[u32]();
     let e = mono_from(in b, in roots, inout m);
-    if e.kind == 255 {
+    if e.kind == E_NONE {
         entries.extend(in roots.as_slice());
     } else {
         for i in 0..roots.len() {
@@ -1103,14 +1103,14 @@ pub fn coverage_input(in b: Slice[u8]) -> ChunkSeq[u8] {
             let mut one = ChunkSeq::new[u32]();
             one.push(root);
             let e1 = mono_from(in b, in one, inout m);
-            if e1.kind == 255 {
+            if e1.kind == E_NONE {
                 entries.push(root);
             } else {
                 rf_push(inout rf, root, in e1);
             }
         }
         let e2 = mono_from(in b, in entries, inout m);
-        if e2.kind != 255 {
+        if e2.kind != E_NONE {
             return error_text(in m, in e2);
         }
     }
@@ -1131,12 +1131,12 @@ pub fn coverage_input(in b: Slice[u8]) -> ChunkSeq[u8] {
                 in skip,
                 inout at
             );
-            err(255, ChunkSeq::new[u8]())
+            err(E_NONE, ChunkSeq::new[u8]())
         } with {
             return v => v,
             raise(e, k) => e,
         };
-        if e3.kind == 255 {
+        if e3.kind == E_NONE {
             break;
         }
         if at == NONE64 {
@@ -1145,7 +1145,7 @@ pub fn coverage_input(in b: Slice[u8]) -> ChunkSeq[u8] {
         rf_push(inout hrf, wrapping_u32(at >> 32), in e3);
         skip.push(at & 4294967295);
         let e4 = mono_from(in b, in entries, inout m);
-        if e4.kind != 255 {
+        if e4.kind != E_NONE {
             return error_text(in m, in e4);
         }
     }
