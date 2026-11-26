@@ -208,32 +208,15 @@ pub struct M {
 }
 
 fn fr_zero() -> Fr {
-    Fr {
-        f: 0,
-        blk: 0,
-        ip: 0,
-        vb: 0,
-        eb: 0,
-        cb: 0,
-        sb: 0,
-        dest: 0,
-        ty: 0,
-        kind: FR_IR
-    }
+    Fr { f: 0, blk: 0, ip: 0, vb: 0, eb: 0, cb: 0, sb: 0, dest: 0, ty: 0, kind: FR_IR }
 }
 
 fn undef() -> Val {
-    Val {
-        t: T_UNDEF,
-        x: 0
-    }
+    Val { t: T_UNDEF, x: 0 }
 }
 
 fn unit() -> Val {
-    Val {
-        t: T_TUPLE,
-        x: NONE64
-    }
+    Val { t: T_TUPLE, x: NONE64 }
 }
 
 pub fn machine_new(sink c: Ctx, sink p: Program, fuel: u64) -> M {
@@ -499,10 +482,7 @@ fn coerce(inout m: M, v: Val, ty: u32) -> Val {
     if k == TK_NONE {
         return v;
     }
-    Val {
-        t: k,
-        x: wrap(k, exact(v.t, v.x))
-    }
+    Val { t: k, x: wrap(k, exact(v.t, v.x)) }
 }
 
 // Whether the machine runs values of type `ty` (`scan`).
@@ -715,14 +695,7 @@ pub fn load(inout m: M, entry_index: u64) {
             q = add(q, add(3, k));
             // type, span start, end
             q = add(q, 3);
-            m
-                .prm
-                .push(
-                    Pm {
-                        name: name,
-                        pass: pass
-                    }
-                );
+            m.prm.push(Pm { name: name, pass: pass });
         }
         // result, effects
         q = add(q, 2);
@@ -761,18 +734,7 @@ pub fn load(inout m: M, entry_index: u64) {
                 }
             }
         }
-        m
-            .fns
-            .push(
-                Fi {
-                    name: f.name,
-                    pa: pa,
-                    pn: np,
-                    nv: most,
-                    b0: f.b0,
-                    reach: false
-                }
-            );
+        m.fns.push(Fi { name: f.name, pa: pa, pn: np, nv: most, b0: f.b0, reach: false });
         if w(f.name) >= m.fn_of.len() {
             m.fn_of.resize(inc(w(f.name)), 0);
         }
@@ -907,12 +869,7 @@ fn split_place(inout m: M, place: u32, code: u64) -> u64 {
     m
         .wr
         .push(
-            Wr {
-                root: u32_at(in parts, 0),
-                sa: sa,
-                sn: wrapping_sub(parts.len(), 1),
-                code: code
-            }
+            Wr { root: u32_at(in parts, 0), sa: sa, sn: wrapping_sub(parts.len(), 1), code: code }
         );
     row
 }
@@ -1063,19 +1020,11 @@ pub fn scan(inout m: M) {
 
 fn agg(in m: M, v: Val) -> Agg {
     if v.x == NONE64 {
-        return Agg {
-            ctor: 0,
-            a: 0,
-            n: 0
-        };
+        return Agg { ctor: 0, a: 0, n: 0 };
     }
     match m.heap.try_get(v.x) {
         Option::Some(a) => a,
-        Option::None => Agg {
-            ctor: 0,
-            a: 0,
-            n: 0
-        },
+        Option::None => Agg { ctor: 0, a: 0, n: 0 },
     }
 }
 
@@ -1093,19 +1042,8 @@ fn make(inout m: M, t: u8, ctor: u32, a: u64) -> Val {
         return unit();
     }
     let h = m.heap.len();
-    m
-        .heap
-        .push(
-            Agg {
-                ctor: ctor,
-                a: a,
-                n: n
-            }
-        );
-    Val {
-        t: t,
-        x: h
-    }
+    m.heap.push(Agg { ctor: ctor, a: a, n: n });
+    Val { t: t, x: h }
 }
 
 fn push_kid(inout m: M, name: u32, v: Val) {
@@ -1461,12 +1399,7 @@ fn binding(in m: M, name: u32) -> u64 {
 fn entry(in m: M, i: u64) -> En {
     match m.env.try_get(i) {
         Option::Some(e) => e,
-        Option::None => En {
-            name: 0,
-            cell: 0,
-            pa: 0,
-            pn: 0
-        },
+        Option::None => En { name: 0, cell: 0, pa: 0, pn: 0 },
     }
 }
 
@@ -1478,19 +1411,26 @@ fn slot_path(inout m: M, e: En) {
     }
 }
 
+// Binds `name` to `v`. The Rust evaluator's environment is a map, so a
+// rebinding (a loop body's pattern, each iteration) replaces the entry,
+// reusing the entry's own cell: nothing else refers to it once no call is
+// in flight. The environment stays as small as Rust's.
 fn bind_new(inout m: M, name: u32, v: Val) {
+    let b = binding(in m, name);
+    if b != NONE64 {
+        let e = entry(in m, b);
+        if e.pn == 0 && e.cell >= m.cur.cb {
+            let ok = m.cells.try_set(e.cell, v);
+            return;
+        }
+        let cell = m.cells.len();
+        m.cells.push(v);
+        let ok = m.env.try_set(b, En { name: name, cell: cell, pa: 0, pn: 0 });
+        return;
+    }
     let cell = m.cells.len();
     m.cells.push(v);
-    m
-        .env
-        .push(
-            En {
-                name: name,
-                cell: cell,
-                pa: 0,
-                pn: 0
-            }
-        );
+    m.env.push(En { name: name, cell: cell, pa: 0, pn: 0 });
 }
 
 // ----- patterns ----------------------------------------------------------------
@@ -1602,10 +1542,7 @@ fn pat_bind(inout m: M, at: u64, v: Val) {
 // ----- operators ---------------------------------------------------------------
 
 fn int_val(k: u8, n: i128) -> Val {
-    Val {
-        t: k,
-        x: wrap(k, n)
-    }
+    Val { t: k, x: wrap(k, n) }
 }
 
 fn bool_val(b: bool) -> Val {
@@ -1780,24 +1717,14 @@ fn get(inout m: M, id: u64) -> Val {
 fn func(in m: M, f: u64) -> Fi {
     match m.fns.try_get(f) {
         Option::Some(x) => x,
-        Option::None => Fi {
-            name: 0,
-            pa: 0,
-            pn: 0,
-            nv: 0,
-            b0: 0,
-            reach: false
-        },
+        Option::None => Fi { name: 0, pa: 0, pn: 0, nv: 0, b0: 0, reach: false },
     }
 }
 
 fn param(in m: M, i: u64) -> Pm {
     match m.prm.try_get(i) {
         Option::Some(x) => x,
-        Option::None => Pm {
-            name: 0,
-            pass: 0
-        },
+        Option::None => Pm { name: 0, pass: 0 },
     }
 }
 
@@ -1897,15 +1824,7 @@ fn invoke(inout m: M, f: u64) {
                         Option::None => undef(),
                     }
                 );
-            slots
-                .push(
-                    En {
-                        name: p.name,
-                        cell: cell,
-                        pa: 0,
-                        pn: 0
-                    }
-                );
+            slots.push(En { name: p.name, cell: cell, pa: 0, pn: 0 });
         }
     }
     for i in 0..slots.len() {
@@ -1915,18 +1834,19 @@ fn invoke(inout m: M, f: u64) {
         }
     }
     m.vals.resize(add(vb, fi.nv), undef());
-    m.cur = Fr {
-        f: f,
-        blk: fi.b0,
-        ip: 0,
-        vb: vb,
-        eb: eb,
-        cb: cb,
-        sb: sb,
-        dest: 0,
-        ty: 0,
-        kind: FR_IR
-    };
+    m
+        .cur = Fr {
+            f: f,
+            blk: fi.b0,
+            ip: 0,
+            vb: vb,
+            eb: eb,
+            cb: cb,
+            sb: sb,
+            dest: 0,
+            ty: 0,
+            kind: FR_IR
+        };
 }
 
 // Calls value `callee` (`Op::Indirect`).
@@ -1972,33 +1892,21 @@ fn step(inout m: M) {
         if kind == widen_u64(Lit::Int) {
             let hi = m.p.op(add(a, 2));
             r = if hi == 0 && (lo >> 63) == 1 {
-                Val {
-                    t: K_U64,
-                    x: lo
-                }
+                Val { t: K_U64, x: lo }
             } else {
-                Val {
-                    t: K_I64,
-                    x: lo
-                }
+                Val { t: K_I64, x: lo }
             };
         } else if kind == widen_u64(Lit::Bool) {
             r = bool_val(lo != 0);
         } else {
-            r = Val {
-                t: T_STR,
-                x: lo
-            };
+            r = Val { t: T_STR, x: lo };
         }
     } else if op == Op::Read {
         let root = n32(m.p.op(a));
         let path = m.p.op(inc(a));
         let bnd = binding(in m, root);
         if path == 0 && bnd == NONE64 && fn_index(in m, root) != NONE64 {
-            r = Val {
-                t: T_FN,
-                x: w(root)
-            };
+            r = Val { t: T_FN, x: w(root) };
         } else {
             if bnd == NONE64 {
                 fail_sym(inout m, "undefined IR place '", root, "'");
@@ -2030,12 +1938,7 @@ fn step(inout m: M) {
         }
         let wrow = match m.wr.try_get(u64_at(in m.aux, ix)) {
             Option::Some(x) => x,
-            Option::None => Wr {
-                root: 0,
-                sa: 0,
-                sn: 0,
-                code: 0
-            },
+            Option::None => Wr { root: 0, sa: 0, sn: 0, code: 0 },
         };
         let bnd = binding(in m, wrow.root);
         if bnd == NONE64 {

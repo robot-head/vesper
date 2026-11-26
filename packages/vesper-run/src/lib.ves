@@ -43,9 +43,7 @@ pub fn format() -> u64 {
 }
 
 pub fn run_words(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
     let fuel = r.word(in b);

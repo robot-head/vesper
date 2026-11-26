@@ -104,6 +104,13 @@ const PROGRAMS: &[(&str, &str)] = &[
          s = wrapping_add(s, i); if s > 2000 { break; } } s }",
     ),
     (
+        // A loop body's pattern rebinds each iteration (the environment
+        // must stay bounded, as Rust's map does).
+        "long_loop",
+        "fn main() -> i64 { let mut s = 0; for i in 0..200000 { let j = wrapping_mul(i, 3); \
+         s = wrapping_add(s, j); } s }",
+    ),
+    (
         "recursion",
         "fn fib(n: i64) -> i64 { if n < 2 { n } else { wrapping_add(fib(wrapping_sub(n, 1)), \
          fib(wrapping_sub(n, 2))) } } fn main() -> i64 { fib(20) }",
