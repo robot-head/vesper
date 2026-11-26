@@ -22,6 +22,10 @@ pub const WIT: &str = include_str!(concat!(env!("OUT_DIR"), "/vcl.wit"));
 /// (`packages/vesper-wasm-backend/src/vcl.ves`).
 pub const VCL_VES: &str = include_str!(concat!(env!("OUT_DIR"), "/vcl.ves"));
 
+/// The generated `Ffi$Cranelift` declarations of the Stage 2 front end
+/// (`packages/vesper-stage2/src/vcl_decls.ves`).
+pub const VCL_DECLS_VES: &str = include_str!(concat!(env!("OUT_DIR"), "/vcl_decls.ves"));
+
 #[cfg(target_family = "wasm")]
 // The generated exports of the lend calls replace their crossing argument.
 #[allow(

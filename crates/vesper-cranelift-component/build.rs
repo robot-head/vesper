@@ -97,6 +97,8 @@ mod interface {
         pub name: String,
         pub mode: Mode,
         pub ty: Ty,
+        /// The type as the `.vsys` writes it (`Module`, `CSlice[u8]`).
+        pub ty_text: String,
     }
 
     impl Param {
@@ -123,6 +125,8 @@ mod interface {
         pub name: String,
         pub params: Vec<Param>,
         pub ret: Ret,
+        /// The result inside `ForeignVal[..]` as the `.vsys` writes it.
+        pub ret_text: String,
     }
 
     /// The library's handle types, `linear extern type` names.
@@ -185,6 +189,7 @@ mod interface {
                 .and_then(|r| r.strip_prefix("ForeignVal["))
                 .and_then(|r| r.strip_suffix(']'))
                 .ok_or_else(|| err("result is not ForeignVal[..]".into()))?;
+            let ret_text = ret.to_string();
             let ret = if ret == "Unit" {
                 Ret::Unit
             } else if let Some(h) = ret
@@ -217,12 +222,14 @@ mod interface {
                     name: pname.trim().to_string(),
                     mode,
                     ty: ty(pty.trim(), &handles).map_err(err)?,
+                    ty_text: pty.trim().to_string(),
                 });
             }
             out.push(Func {
                 name: name.trim().to_string(),
                 params: ps,
                 ret,
+                ret_text,
             });
         }
         Ok(out)
@@ -414,6 +421,41 @@ mod interface {
         s.push_str("    \"\"\n}\n");
         s
     }
+
+    /// `packages/vesper-stage2/src/vcl_decls.ves`: the `Ffi$Cranelift`
+    /// operations the Stage 2 front end declares. Row `i` is
+    /// `name param.. result`, where a parameter is its pass (`i` in or
+    /// plain, `o` inout, `s` sink) followed by its `.vsys` type and the
+    /// result is the type inside `ForeignVal[..]`.
+    pub fn stage2_table(funcs: &[Func]) -> String {
+        let mut s = String::new();
+        s.push_str("// Generated from packages/vesper-cranelift/cranelift.vsys by\n");
+        s.push_str("// crates/vesper-cranelift-component (#2210). Do not edit: rerun its\n");
+        s.push_str("// tests with VESPER_BLESS=1.\n//\n");
+        s.push_str("// The `Ffi$Cranelift` operations (`stage2_table` in\n");
+        s.push_str("// crates/vesper-cranelift-component/build.rs says what a row\n");
+        s.push_str("// holds).\n\n");
+        s.push_str(&format!(
+            "pub fn vcl_decl_count() -> u64 {{\n    {}\n}}\n\n",
+            funcs.len()
+        ));
+        s.push_str("pub fn vcl_decl(i: u64) -> Str {\n");
+        for (i, f) in funcs.iter().enumerate() {
+            let mut row = f.name.clone();
+            for p in &f.params {
+                row.push(' ');
+                row.push(pass(p));
+                row.push_str(&p.ty_text);
+            }
+            row.push(' ');
+            row.push_str(&f.ret_text);
+            s.push_str(&format!(
+                "    if i == {i} {{\n        return \"{row}\";\n    }}\n"
+            ));
+        }
+        s.push_str("    \"\"\n}\n");
+        s
+    }
 }
 
 use interface::{Elem, Func, Mode, Ret, Ty};
@@ -436,6 +478,7 @@ fn main() {
     let wit = interface::wit(&funcs);
     std::fs::write(out.join("vcl.wit"), &wit).unwrap();
     std::fs::write(out.join("vcl.ves"), interface::vesper_table(&funcs)).unwrap();
+    std::fs::write(out.join("vcl_decls.ves"), interface::stage2_table(&funcs)).unwrap();
 
     let mut resolve = wit_parser::Resolve::default();
     let pkg = resolve
