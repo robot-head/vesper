@@ -27,6 +27,13 @@ const TWO_BYTE_OPCODE: u8 = 0x0f;
 const IMUL_R64_RM64: u8 = 0xaf;
 const UNARY_GROUP: u8 = 0xf7;
 const SHIFT_GROUP_IMM8: u8 = 0xc1;
+const CMP_RM_R8: u8 = 0x38;
+const CMP_RM_R64: u8 = 0x39;
+const SETCC: u8 = 0x90;
+const CMOVCC: u8 = 0x40;
+const TEST_RM_R64: u8 = 0x85;
+const MOVZX_R32_RM8: u8 = 0xb6;
+const MOVSX_R64_RM8: u8 = 0xbe;
 const RET_NEAR: u8 = 0xc3;
 const U32_MAX_BITS: u64 = 0xffffffff;
 const I32_MIN_BITS: u64 = 0xffffffff80000000;
@@ -45,6 +52,17 @@ pub const SHL_EXTENSION: u8 = 4;
 pub const SHR_EXTENSION: u8 = 5;
 pub const SAR_EXTENSION: u8 = 7;
 
+pub const CC_B: u8 = 2;
+pub const CC_AE: u8 = 3;
+pub const CC_E: u8 = 4;
+pub const CC_NE: u8 = 5;
+pub const CC_BE: u8 = 6;
+pub const CC_A: u8 = 7;
+pub const CC_L: u8 = 12;
+pub const CC_GE: u8 = 13;
+pub const CC_LE: u8 = 14;
+pub const CC_G: u8 = 15;
+
 pub copy enum Instruction {
     Immediate(u8, u64),
     Move(u8, u8),
@@ -52,6 +70,9 @@ pub copy enum Instruction {
     Multiply(u8, u8),
     Unary(u8, u8),
     Shift(u8, u8, u8),
+    Compare(u8, u8, u8, u8, bool),
+    Select(u8, u8, u8, u8, u8),
+    ExtendByte(u8, u8, bool),
     Return,
 }
 
@@ -143,6 +164,19 @@ fn load_constant(inout out: ChunkSeq[u8], destination: u8, bits: u64) {
     }
 }
 
+fn extend_byte(inout out: ChunkSeq[u8], destination: u8, source: u8, signed_extend: bool) {
+    out.push(rex(destination, source, signed_extend));
+    out.push(TWO_BYTE_OPCODE);
+    out.push(
+        if signed_extend {
+            MOVSX_R64_RM8
+        } else {
+            MOVZX_R32_RM8
+        }
+    );
+    out.push(modrm(destination, source));
+}
+
 pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
     match instruction {
         Instruction::Immediate(destination, bits) => load_constant(inout out, destination, bits),
@@ -174,6 +208,34 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             out.push(modrm(extension, destination));
             out.push(count);
         },
+        Instruction::Compare(destination, left, right, cc, wide) => {
+            // REX also selects the low byte of rsi/rdi for byte operations.
+            out.push(rex(right, left, wide));
+            out.push(if wide { CMP_RM_R64 } else { CMP_RM_R8 });
+            out.push(modrm(right, left));
+            out.push(rex(0, destination, false));
+            out.push(TWO_BYTE_OPCODE);
+            out.push(SETCC | cc);
+            out.push(modrm(0, destination));
+            extend_byte(inout out, destination, destination, false);
+        },
+        Instruction::Select(destination, condition, first, alternative, cc) => {
+            // Test before copying. The destination may share the condition register.
+            binary(inout out, TEST_RM_R64, condition, condition);
+            if destination != first {
+                binary(inout out, MOV_RM_R64, destination, first);
+            }
+            out.push(rex(destination, alternative, true));
+            out.push(TWO_BYTE_OPCODE);
+            out.push(CMOVCC | cc);
+            out.push(modrm(destination, alternative));
+        },
+        Instruction::ExtendByte(destination, source, signed_extend) => extend_byte(
+            inout out,
+            destination,
+            source,
+            signed_extend
+        ),
         Instruction::Return => out.push(RET_NEAR),
     };
 }

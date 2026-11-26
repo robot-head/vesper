@@ -1,6 +1,6 @@
 use super::binding;
 use super::machine::integer_block_words;
-use cranelift_codegen::ir::{AbiParam, InstBuilder, types};
+use cranelift_codegen::ir::{AbiParam, InstBuilder, condcodes::IntCC, types};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
@@ -16,6 +16,13 @@ enum Case {
     RepeatedOperands,
     DeadValues,
     HighRegisters,
+    Compare64(IntCC),
+    CompareByte(IntCC),
+    CompareImmediate,
+    Select,
+    SelectKeepingArms,
+    SelectKeepingTrue,
+    ByteExtensions,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -34,7 +41,7 @@ fn integer_backend_matches_cranelift_results() {
     assert!(binding::x86_64_integer_block(&[1]).is_empty());
     assert!(binding::x86_64_integer_block(&[1, 1]).is_empty());
     // The first instruction cannot reference its own result.
-    assert!(binding::x86_64_integer_block(&[1, 1, 1, 1, 0]).is_empty());
+    assert!(binding::x86_64_integer_block(&[1, 1, 1, 1, 0, 0]).is_empty());
 
     let isa = cranelift_native::builder()
         .unwrap()
@@ -69,7 +76,18 @@ fn integer_backend_matches_cranelift_results() {
         Case::RepeatedOperands,
         Case::DeadValues,
         Case::HighRegisters,
+        Case::CompareImmediate,
+        Case::Select,
+        Case::SelectKeepingArms,
+        Case::SelectKeepingTrue,
+        Case::ByteExtensions,
     ];
+    let cases: Vec<_> = cases
+        .into_iter()
+        .chain(IntCC::all().iter().copied().map(Case::Compare64))
+        .chain(IntCC::all().iter().copied().map(Case::CompareByte))
+        .collect();
+    let case_count = cases.len();
     let mut byte_differences = 0;
     for (index, case) in cases.into_iter().enumerate() {
         let baseline = module
@@ -134,6 +152,42 @@ fn integer_backend_matches_cranelift_results() {
                 let tail = builder.ins().bxor(middle, right);
                 builder.ins().isub(parts, tail)
             }
+            Case::Compare64(cc) => {
+                let predicate = builder.ins().icmp(cc, e, f);
+                builder.ins().uextend(types::I64, predicate)
+            }
+            Case::CompareByte(cc) => {
+                let left = builder.ins().ireduce(types::I8, a);
+                let right = builder.ins().ireduce(types::I8, b);
+                let predicate = builder.ins().icmp(cc, left, right);
+                builder.ins().uextend(types::I64, predicate)
+            }
+            Case::CompareImmediate => {
+                let byte = builder.ins().ireduce(types::I8, a);
+                let zero = builder.ins().icmp_imm(IntCC::Equal, byte, 0);
+                let low = builder.ins().icmp_imm(IntCC::SignedLessThan, b, -1);
+                let predicate = builder.ins().bor(zero, low);
+                builder.ins().uextend(types::I64, predicate)
+            }
+            Case::Select => builder.ins().select(a, e, f),
+            Case::SelectKeepingArms => {
+                let predicate = builder.ins().icmp(IntCC::UnsignedGreaterThan, a, b);
+                let selected = builder.ins().select(predicate, e, f);
+                let sum = builder.ins().iadd(e, f);
+                builder.ins().isub(sum, selected)
+            }
+            Case::SelectKeepingTrue => {
+                let selected = builder.ins().select(a, e, f);
+                builder.ins().iadd(selected, e)
+            }
+            Case::ByteExtensions => {
+                let left = builder.ins().ireduce(types::I8, e);
+                let right = builder.ins().ireduce(types::I8, f);
+                let selected = builder.ins().select(a, left, right);
+                let sign_extended = builder.ins().sextend(types::I64, selected);
+                let zero_extended = builder.ins().uextend(types::I64, selected);
+                builder.ins().isub(sign_extended, zero_extended)
+            }
         };
         builder.ins().return_(&[result]);
         builder.seal_all_blocks();
@@ -162,6 +216,8 @@ fn integer_backend_matches_cranelift_results() {
             [0, 0, 0, 0, 0, 0],
             [u64::MAX, 1, 0, 0, u64::MAX, 2],
             [1, 2, 3, 4, 1 << 63, u64::MAX],
+            [0x80, 0x7f, 0, 0, 0x80, 0xff],
+            [0x100, u64::MAX - 1, 0, 0, 0x100, 0x80],
         ] {
             assert_eq!(
                 unsafe { candidate(a, b, c, d, e, f) },
@@ -172,8 +228,7 @@ fn integer_backend_matches_cranelift_results() {
     }
     eprintln!(
         "{} of {} selected integer blocks differ in bytes from Cranelift",
-        byte_differences,
-        cases.len()
+        byte_differences, case_count
     );
     // All code pointers have gone out of scope.
     unsafe { module.free_memory() };
