@@ -134,10 +134,7 @@ pub fn exprs_new() -> Exprs {
 }
 
 fn at32(in s: ChunkSeq[u32], i: u64) -> u32 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => NONE32,
-    }
+    s.try_get(i).unwrap_or(NONE32)
 }
 
 fn empty_row() -> ExprRow {
@@ -238,10 +235,7 @@ impl Exprs {
     }
 
     pub fn param_pass(in self, f: FnRow, i: u64) -> u8 {
-        match self.param_passes.try_get(wrapping_add(widen_u64(f.pa), i)) {
-            Option::Some(p) => p,
-            Option::None => 0,
-        }
+        self.param_passes.try_get(wrapping_add(widen_u64(f.pa), i)).unwrap_or(0)
     }
 
     pub fn param_type(in self, f: FnRow, i: u64) -> u32 {

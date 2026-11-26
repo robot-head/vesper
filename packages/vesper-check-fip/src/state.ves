@@ -112,17 +112,11 @@ pub fn name_cmp(in names: Names, a: u32, b: u32) -> i32 {
 
 impl Binds {
     pub fn row(in self, i: u64) -> BindRow {
-        match self.rows.try_get(i) {
-            Option::Some(row) => row,
-            Option::None => NO_BIND,
-        }
+        self.rows.try_get(i).unwrap_or(NO_BIND)
     }
 
     pub fn mv(in self, i: u64) -> MoveRow {
-        match self.moves.try_get(i) {
-            Option::Some(move_row) => move_row,
-            Option::None => NO_MOVE,
-        }
+        self.moves.try_get(i).unwrap_or(NO_MOVE)
     }
 
     pub fn len(in self) -> u64 {
@@ -281,10 +275,7 @@ impl Binds {
 
 impl FipState {
     pub fn slot(in self, i: u64) -> SlotRow {
-        match self.slots.try_get(i) {
-            Option::Some(slot) => slot,
-            Option::None => NO_SLOT,
-        }
+        self.slots.try_get(i).unwrap_or(NO_SLOT)
     }
 
     pub fn remove_slot(inout self, at: u64) {

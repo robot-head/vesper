@@ -355,10 +355,7 @@ fn intern_buf(inout names: Names, in o: ChunkSeq[u8]) -> u32 {
 fn put(inout o: ChunkSeq[u8], in s: Str) {
     let b = s.as_bytes();
     for i in 0..b.len() {
-        let c = match b.try_get(i) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
+        let c = b.try_get(i).unwrap_or(0);
         o.push(c);
     }
 }

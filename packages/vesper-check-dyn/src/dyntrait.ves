@@ -94,10 +94,7 @@ fn display_hash(inout d: D, t: u32) -> u64 {
     display_into(inout d, t, inout o);
     let mut h: u64 = 14695981039346656037;
     for i in 0..o.len() {
-        let c = match o.try_get(i) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
+        let c = o.try_get(i).unwrap_or(0);
         h = wrapping_mul(h ^ widen_u64(c), 1099511628211);
     }
     h

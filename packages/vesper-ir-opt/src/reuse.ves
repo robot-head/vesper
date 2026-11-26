@@ -64,17 +64,11 @@ pub struct Facts {
 }
 
 fn u64_of(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 fn u8_of(in s: ChunkSeq[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 // active; if active: key count, then per function: fip; if fip: result key
@@ -296,10 +290,7 @@ fn bump_rank(inout ranks: ChunkSeq[i64], inout touched: ChunkSeq[u64], key: u64)
     if key >= ranks.len() {
         ranks.resize(inc(key), 0);
     }
-    let r = match ranks.try_get(key) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    };
+    let r = ranks.try_get(key).unwrap_or(0);
     if r == 0 {
         touched.push(key);
     }
@@ -521,10 +512,7 @@ fn reuse_function(
         for k in 0..n_inst {
             let row = add(bk.i0, k);
             let i = p.inst(row);
-            let src = match orig.try_get(row) {
-                Option::Some(o) => o,
-                Option::None => row,
-            };
+            let src = orig.try_get(row).unwrap_or(row);
             let kind = u8_of(in facts.kind, src);
             let fa = u64_of(in facts.a, src);
             if i.op == Op::Bind {

@@ -210,24 +210,15 @@ pub fn inc(x: u64) -> u64 {
 }
 
 pub fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => NONE,
-    }
+    s.try_get(i).unwrap_or(NONE)
 }
 
 pub fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 pub fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 // A symbol-indexed table entry (0 = absent).
@@ -235,10 +226,7 @@ pub fn table_get(in t: ChunkSeq[u32], s: u32) -> u32 {
     if s == NONE {
         return 0;
     }
-    match t.try_get(w(s)) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    t.try_get(w(s)).unwrap_or(0)
 }
 
 pub fn table_set(inout t: ChunkSeq[u32], s: u32, v: u32) {
@@ -574,10 +562,7 @@ pub fn sym_len(in a: Ast, s: u32) -> u64 {
 
 pub fn sym_byte(in a: Ast, s: u32, i: u64) -> u8 {
     let (x, y) = a.names.span(symbol_from_id(s));
-    match a.names.text_byte(wrapping_add(x, i)) {
-        Option::Some(c) => c,
-        Option::None => 0,
-    }
+    a.names.text_byte(wrapping_add(x, i)).unwrap_or(0)
 }
 
 // Byte order of two symbols' texts (`String`'s `Ord`): -1, 0 or 1.
@@ -591,14 +576,8 @@ pub fn sym_cmp(in a: Ast, x: u32, y: u32) -> i64 {
     let yn = wrapping_sub(ye, ys);
     let n = if xn < yn { xn } else { yn };
     for i in 0..n {
-        let p = match a.names.text_byte(wrapping_add(xs, i)) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
-        let q = match a.names.text_byte(wrapping_add(ys, i)) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
+        let p = a.names.text_byte(wrapping_add(xs, i)).unwrap_or(0);
+        let q = a.names.text_byte(wrapping_add(ys, i)).unwrap_or(0);
         if p < q {
             return -1;
         }
@@ -654,10 +633,7 @@ pub fn sym_ends_with(in a: Ast, s: u32, in suffix: Str) -> bool {
     }
     let at = wrapping_sub(n, b.len());
     for i in 0..b.len() {
-        let c = match b.try_get(i) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
+        let c = b.try_get(i).unwrap_or(0);
         if sym_byte(in a, s, wrapping_add(at, i)) != c {
             return false;
         }

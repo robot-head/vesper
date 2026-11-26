@@ -108,10 +108,7 @@ pub fn syms_new(inout names: Names) -> Syms {
 
 fn contains(in s: ChunkSeq[u32], x: u32) -> bool {
     for i in 0..s.len() {
-        let y = match s.try_get(i) {
-            Option::Some(y) => y,
-            Option::None => NONE32,
-        };
+        let y = s.try_get(i).unwrap_or(NONE32);
         if y == x {
             return true;
         }
@@ -122,10 +119,7 @@ fn contains(in s: ChunkSeq[u32], x: u32) -> bool {
 // The position of `name` in `s`, NONE32 when absent.
 fn of_symbol(in s: ChunkSeq[u32], name: u32) -> u32 {
     for i in 0..s.len() {
-        let y = match s.try_get(i) {
-            Option::Some(y) => y,
-            Option::None => NONE32,
-        };
+        let y = s.try_get(i).unwrap_or(NONE32);
         if y == name {
             return wrapping_u32(i);
         }
@@ -633,10 +627,7 @@ pub struct Items {
 }
 
 fn at32(in s: ChunkSeq[u32], i: u64) -> u32 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => NONE32,
-    }
+    s.try_get(i).unwrap_or(NONE32)
 }
 
 // The module items: n, then per item its tag and words (Adt: name, n
@@ -970,10 +961,7 @@ fn writes_cell(in names: Names, in t: Types, in ir: Ir, in sy: Syms, f: IrFn, pl
         return false;
     }
     for i in 0..cell.len() {
-        let c = match cell.try_get(i) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
+        let c = cell.try_get(i).unwrap_or(0);
         if names.byte(place, wrapping_add(wrapping_add(dot, 1), i)) != c {
             return false;
         }

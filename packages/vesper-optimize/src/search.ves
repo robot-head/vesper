@@ -85,17 +85,11 @@ pub const O_UNCHANGED: u8 = 2;
 
 // Entry `i` of an id table, or NONE past its end.
 fn id_at(in s: ChunkSeq[u32], i: u64) -> u32 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => NONE,
-    }
+    s.try_get(i).unwrap_or(NONE)
 }
 
 fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 fn no_term() -> TermRow {
@@ -1392,10 +1386,7 @@ fn encode_graph(
         if e != 0 {
             return e;
         }
-        let live = match reachable.try_get(index) {
-            Option::Some(v) => v,
-            Option::None => false,
-        };
+        let live = reachable.try_get(index).unwrap_or(false);
         if !live {
             continue;
         }
@@ -1421,10 +1412,7 @@ fn encode_graph(
     let mut cap: u64 = 0;
     nodes.clear();
     for i in 0..n {
-        let live = match reachable.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => false,
-        };
+        let live = reachable.try_get(i).unwrap_or(false);
         if !live {
             continue;
         }
@@ -1556,10 +1544,7 @@ fn explain_records(
             if e != 0 {
                 return e;
             }
-            let done = match processed.try_get(i) {
-                Option::Some(v) => v,
-                Option::None => true,
-            };
+            let done = processed.try_get(i).unwrap_or(true);
             if done {
                 continue;
             }

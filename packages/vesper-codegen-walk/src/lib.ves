@@ -27,6 +27,7 @@ use @vesper/check-layout::{Layouts, layout_of, layouts_new};
 use @vesper/codegen-calls::data::{ParamInfo};
 use @vesper/codegen-calls::instances::{Conc, Syms, specialized, syms_new};
 use @vesper/place-ir::{FnRow, InstRow, Program, read_program};
+use self::blocks::{block_plan_bytes};
 use self::frame::{frames_bytes, frames_text};
 use @vesper/place-ir::codes::{Op, Pat, Tag};
 
@@ -877,4 +878,16 @@ pub fn native_walk_frames(in input: Str) -> ChunkSeq[u64] {
 // `frame_plans` swap hook.
 pub fn native_walk_frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
     frames_bytes(in b)
+}
+
+// Part 6a (#2094): one graph's block plan (blocks.ves, `native::block_plan`)
+// for the `block_plan` swap hook.
+pub fn native_walk_block_plan_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
+    block_plan_bytes(in b)
+}
+
+// `native_walk_block_plan_bytes` over a `Str`, for the test harness's
+// word entries.
+pub fn native_walk_block_plan(in input: Str) -> ChunkSeq[u64] {
+    block_plan_bytes(in input.as_bytes())
 }
