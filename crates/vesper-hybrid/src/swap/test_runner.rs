@@ -34,6 +34,10 @@ mod doctest_generate_words;
 // with the root package's tests/self_host_doctest_verdict.rs.
 #[path = "../../../../tests/common/doctest_verdict_words.rs"]
 mod doctest_verdict_words;
+// The test report words (SH5 lane 14 part 8), shared with the root
+// package's tests/self_host_test_report.rs.
+#[path = "../../../../tests/common/test_report_words.rs"]
+mod test_report_words;
 
 use super::{Registry, Swap, must, on, open};
 
@@ -130,6 +134,29 @@ const VESPER_DOCTEST_VERDICT: vesper::doctest_verdict::DocTestVerdictTable =
         },
     };
 
+/// `vesper::test_report::TestReportTable` from `modules/test_runner`: the
+/// text reports of `vesper test` and `vesper test --doc` from
+/// `@vesper/test-runner`.
+const VESPER_TEST_REPORT: vesper::test_report::TestReportTable =
+    vesper::test_report::TestReportTable {
+        doc_text: |file, base, examples| {
+            let input = test_report_words::doc_input(file, base, examples);
+            test_report_words::decode_text(&test_runner_binding::report_doc_text_words(&input))
+        },
+        unit_text: |files| {
+            let input = test_report_words::unit_input(files);
+            test_report_words::decode_text(&test_runner_binding::report_unit_text_words(&input))
+        },
+        baseline_text: |files| {
+            let input = test_report_words::unit_input(files);
+            test_report_words::decode_text(&test_runner_binding::report_baseline_text_words(&input))
+        },
+        mutants_text: |mutants, counts| {
+            let input = test_report_words::mutants_input(mutants, counts);
+            test_report_words::decode_text(&test_runner_binding::report_mutants_text_words(&input))
+        },
+    };
+
 /// The flip-gate rows of this file's swaps (`swaps::on`).
 pub(super) const SWAPS: &[Swap] = &[
     open("test_discovery", "no flip-gate configuration"),
@@ -149,6 +176,10 @@ pub(super) const SWAPS: &[Swap] = &[
     open(
         "doctest_verdict",
         "0 diffs, 1.07x; no flip-gate configuration",
+    ),
+    open(
+        "test_report",
+        "0 diffs, 1.8x end to end (word boundary), 1.1x rendering alone; no flip-gate configuration",
     ),
 ];
 
@@ -182,6 +213,9 @@ pub(super) fn register(_r: &mut Registry) {
         must(vesper::doctest_verdict::install_doctest_verdict(
             VESPER_DOCTEST_VERDICT,
         ));
+    }
+    if on("test_report") {
+        must(vesper::test_report::install_test_report(VESPER_TEST_REPORT));
     }
 }
 

@@ -25,6 +25,8 @@
 //   (src/doctest_generate.rs), over @vesper/ast and @vesper/front.
 // - verdict.ves: the doctest wrapper names and per-example verdicts
 //   before execution (src/doctest_verdict.rs).
+// - report.ves: the text reports of `vesper test` and `vesper test --doc`
+//   (src/test_report.rs).
 // - guard.ves: the fail-closed source profile a doctest module passes
 //   before checking (src/doctest_guard.rs), over @vesper/ast.
 
@@ -44,6 +46,12 @@ use self::generate::{
 };
 use self::guard::{
     guard
+};
+use self::report::{
+    baseline_text,
+    doc_text,
+    mutants_text,
+    unit_text
 };
 use self::verdict::{
     verdict,
@@ -148,4 +156,40 @@ pub fn doctest_verdict_words(in input: Slice[u8]) -> ChunkSeq[u64] {
 
 pub fn doctest_verdict_str(in input: Str) -> ChunkSeq[u64] {
     verdict(in input.as_bytes())
+}
+
+// `test_report::rust_doc_text`: the lines of one file's doctests.
+pub fn report_doc_text_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    doc_text(in input)
+}
+
+pub fn report_doc_text_str(in input: Str) -> ChunkSeq[u64] {
+    doc_text(in input.as_bytes())
+}
+
+// `test_report::rust_unit_text`: the unit-test lines and summary.
+pub fn report_unit_text_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    unit_text(in input)
+}
+
+pub fn report_unit_text_str(in input: Str) -> ChunkSeq[u64] {
+    unit_text(in input.as_bytes())
+}
+
+// `test_report::rust_baseline_text`: the failing baseline lines of the mutation gate.
+pub fn report_baseline_text_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    baseline_text(in input)
+}
+
+pub fn report_baseline_text_str(in input: Str) -> ChunkSeq[u64] {
+    baseline_text(in input.as_bytes())
+}
+
+// `test_report::rust_mutants_text`: the mutant lines and summary.
+pub fn report_mutants_text_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    mutants_text(in input)
+}
+
+pub fn report_mutants_text_str(in input: Str) -> ChunkSeq[u64] {
+    mutants_text(in input.as_bytes())
 }
