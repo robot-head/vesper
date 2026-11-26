@@ -79,6 +79,12 @@ pub fn run_input(world: &World, program: &Program, entry: &str, fuel: u64) -> Op
 const SITE_HANDLE: u64 = 1;
 const SITE_EFFECT_CALL: u64 = 2;
 const SITE_TRY: u64 = 3;
+// Handle flags: the expression has a type (a `Frame::Coerce`); a state.
+const FLAG_COERCE: u64 = 1;
+const FLAG_STATE: u64 = 2;
+// Pattern words besides `name + 1`: `_`, and any other pattern.
+const PAT_WILD: u64 = 0;
+const PAT_OTHER: u64 = u64::MAX;
 
 /// The effect table after the entry: what `Runtime` reads from the AST and
 /// the world at a handler, an effect operation call or a `?`, which the
@@ -138,7 +144,14 @@ fn sites(world: &World, program: &Program, t: &mut Tables) -> Vec<u64> {
                         // expression has a type (one more step); a state
                         // handler also evaluates its initializer.
                         let coerce = world.types.contains_key(&(expr.span.start, expr.span.end));
-                        row.push(coerce as u64 | if state.is_some() { 2 } else { 0 });
+                        let mut flags = 0;
+                        if coerce {
+                            flags |= FLAG_COERCE;
+                        }
+                        if state.is_some() {
+                            flags |= FLAG_STATE;
+                        }
+                        row.push(flags);
                         row.push(t.enc.name(&format!("$static:$cap{}", expr.span.start)));
                         let mut free = vesper::check::clause_free_names(ret);
                         for op in ops {
@@ -163,11 +176,11 @@ fn sites(world: &World, program: &Program, t: &mut Tables) -> Vec<u64> {
                             clause_fns.push(lowered("handler_clause", &op.body));
                         }
                         let pattern = |t: &mut Tables, p: &vesper::ast::Pattern| match &p.kind {
-                            PatternKind::Wild => 0,
+                            PatternKind::Wild => PAT_WILD,
                             PatternKind::Bind(n) => t.enc.name(n) + 1,
-                            _ => u64::MAX,
+                            _ => PAT_OTHER,
                         };
-                        row.push(ret.pats.first().map_or(u64::MAX, |p| pattern(t, p)));
+                        row.push(ret.pats.first().map_or(PAT_OTHER, |p| pattern(t, p)));
                         row.push(ops.len() as u64);
                         for (op, f) in ops.iter().zip(clause_fns) {
                             let name = t.enc.name(&op.name);
