@@ -500,6 +500,32 @@ one of them renamed.
 harness's `VESPER_PORT_OBJECT_PACKAGES` for that module only); Cargo
 finds them through the path dependencies.
 
+## Part 6a: `verify`'s pure pieces in Vesper
+
+`packages/vesper-verify` (`@vesper/verify`) ports the two parts of
+`src/verify_commands.rs` that need neither the formatter nor the checked
+world:
+
+- `discover` is `discover_theorems` with its tokenizer
+  (`tokenize_lean_proofs`): line and nested block comments, strings and
+  char literals, `«»` names, namespaces, named and anonymous sections,
+  `mutual`, `private`/`protected` modifiers and the 4096-byte error
+  truncation on a char boundary.
+- `bindings` is `contract_bindings`: the emitted-contract,
+  proof-binding and precondition-witness checks and the generated Lean
+  source, keys in byte order like the `BTreeMap`s.
+
+tests/self_host_verify.rs runs both against the Rust (now `pub(crate)`):
+every `.lean` file in the repository up to 128 KiB, seven char-boundary
+prefixes of each, about 70 hand-written edge cases and generated inputs
+(long names, more than 128 theorems): 1612 inputs, 1295 of them with
+theorems, 0 diffs; 11 binding cases, 0 diffs.
+Release build: Rust 127 ms over the 1612 inputs, the port 97 ms as one
+process that also reads every file (0.76x).
+
+**Found on the way.** A slice of a slice is not a value (E1521), so
+the scanner keeps the next token as offsets into the source.
+
 ## What is left
 
 - **Verify command** (`src/verify_commands.rs`): `--format` needs the

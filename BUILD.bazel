@@ -637,6 +637,15 @@ vesper_crate(
         # SH5 lane 18 (#1341): `vesper proof-audit` built from
         # @vesper/proof-audit and its @vesper-std dependencies, beside Rust's.
         "test/self_host_proof_audit": glob(["packages/**"]) + ["//crates/vesper-serde:files"],
+        # #1341: @vesper/verify (theorem discovery, contract bindings) against
+        # src/verify_commands.rs over every Lean file in the repository.
+        "test/self_host_verify": glob([
+            "packages/**",
+            "lean/**",
+            "tools/**/*.lean",
+            "tests/fixtures/**/*.lean",
+            "docs/rfcs/**/*.lean",
+        ]) + ["//crates/vesper-serde:files"],
         # Self-hosting SH5 lane 18 (#1341): @vesper/lean-extract against
         # lean::extract on the same corpus; it imports @vesper/lean-syntax.
         "test/self_host_lean_extract": glob([

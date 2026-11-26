@@ -1,0 +1,156 @@
+// `contract_bindings` of src/verify_commands.rs: the Lean source binding
+// each emitted contract to the theorem `--contract-proof` names and its
+// precondition to the `--contract-witness` theorem, and the theorem names.
+use @vesper/proof-audit::strs::{
+    Strs,
+    byte,
+    contains,
+    count,
+    end,
+    order,
+    put_str,
+    push,
+    start,
+    strs_new
+};
+
+// What `bindings` wrote: the Lean source and the theorem names, or
+// `failed` and the message.
+pub struct Bound {
+    pub source: ChunkSeq[u8],
+    pub names: Strs,
+    pub failed: bool,
+    pub err: ChunkSeq[u8],
+}
+
+fn bound_err(in lead: Str, in what: Slice[u8], in tail: Str) -> Bound {
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout m, in lead);
+    m.extend(in what);
+    put_str(inout m, in tail);
+    Bound { source: ChunkSeq::new[u8](), names: strs_new(), failed: true, err: m }
+}
+
+// Each dot-separated component of `name` in guillemets.
+fn quoted(inout out: ChunkSeq[u8], in name: Slice[u8]) {
+    let mut from: u64 = 0;
+    for i in 0..wrapping_add(name.len(), 1) {
+        if i == name.len() || byte(in name, i) == 46 {
+            if from > 0 {
+                out.push(46);
+            }
+            put_str(inout out, in "«");
+            out.extend(in name[from..i]);
+            put_str(inout out, in "»");
+            from = wrapping_add(i, 1);
+        }
+    }
+}
+
+fn put_index(inout out: ChunkSeq[u8], n: u64) {
+    if n >= 10 {
+        put_index(inout out, n / 10);
+    }
+    out.push(wrapping_add(48, wrapping_u8(n % 10)));
+}
+
+// The value of `key` in the map whose keys are `keys` and values
+// `values` (parallel lists).
+fn lookup(in keys: Strs, in values: Strs, in key: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..count(in keys) {
+        if @vesper/proof-audit::strs::same(
+            in keys.bytes[start(in keys, i)..end(in keys, i)],
+            in key
+        ) {
+            out.extend(in values.bytes[start(in values, i)..end(in values, i)]);
+            return out;
+        }
+    }
+    out
+}
+
+// `contract_bindings(contracts, requested, witnesses)`: the two maps are
+// parallel key/value lists (BTreeMaps in Rust: unique keys, iterated in
+// byte order here as there).
+pub fn bindings(
+    in contracts: Strs,
+    in proof_keys: Strs,
+    in proof_values: Strs,
+    in witness_keys: Strs,
+    in witness_values: Strs
+) -> Bound {
+    let mut b = Bound {
+        source: ChunkSeq::new[u8](),
+        names: strs_new(),
+        failed: false,
+        err: ChunkSeq::new[u8]()
+    };
+    if count(in proof_keys) == 0 && count(in witness_keys) == 0 {
+        return b;
+    }
+    let po = order(in proof_keys);
+    let wo = order(in witness_keys);
+    for k in 0..wrapping_add(po.len(), wo.len()) {
+        let f = if k < po.len() {
+            let i = match po.try_get(k) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            @vesper/proof-audit::strs::get(in proof_keys, i)
+        } else {
+            let i = match wo.try_get(wrapping_sub(k, po.len())) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            @vesper/proof-audit::strs::get(in witness_keys, i)
+        };
+        if !contains(in contracts, in f.as_slice()) {
+            return bound_err(in "no emitted contract for '", in f.as_slice(), in "'");
+        }
+    }
+    for c in 0..count(in contracts) {
+        let f = contracts.bytes[start(in contracts, c)..end(in contracts, c)];
+        if !contains(in proof_keys, in f) {
+            return bound_err(in "missing proof binding for contract '", in f, in "'");
+        }
+    }
+    for c in 0..count(in contracts) {
+        let f = contracts.bytes[start(in contracts, c)..end(in contracts, c)];
+        if !contains(in witness_keys, in f) {
+            return bound_err(in "missing precondition witness for contract '", in f, in "'");
+        }
+    }
+    for index in 0..po.len() {
+        let i = match po.try_get(index) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let function = proof_keys.bytes[start(in proof_keys, i)..end(in proof_keys, i)];
+        let theorem = proof_values.bytes[start(in proof_values, i)..end(in proof_values, i)];
+        let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put_str(inout name, in "VesperVerify.contract_");
+        put_index(inout name, index);
+        put_str(inout b.source, in "\ntheorem _root_.");
+        b.source.extend(in name.as_slice());
+        put_str(inout b.source, in " : _root_.Vesper.«");
+        b.source.extend(in function);
+        put_str(inout b.source, in "$contract» := _root_.");
+        quoted(inout b.source, in theorem);
+        b.source.push(10);
+        push(inout b.names, in name.as_slice());
+        let witness = lookup(in witness_keys, in witness_values, in function);
+        let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put_str(inout name, in "VesperVerify.precondition_");
+        put_index(inout name, index);
+        put_str(inout b.source, in "\ntheorem _root_.");
+        b.source.extend(in name.as_slice());
+        put_str(inout b.source, in " : _root_.Vesper.«");
+        b.source.extend(in function);
+        put_str(inout b.source, in "$admissible» := _root_.");
+        quoted(inout b.source, in witness.as_slice());
+        b.source.push(10);
+        push(inout b.names, in name.as_slice());
+    }
+    b
+}
