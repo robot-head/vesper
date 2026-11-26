@@ -16,12 +16,12 @@
 // expression macro parser (`macro_source::syntax`) and are laid out over its
 // recovery CST, or over the surface CST when they also use sugar.
 
-use @vesper/front::{Tokens, P};
+use @vesper/front::{Tokens, P, Diags};
 use @vesper/front::source_macro::{
     MacroLimits, MacroError, MacroSource, macro_limits_default, parse_macro_source,
     parse_macro_surface_tokens
 };
-use @vesper/front::recover::{editor_limits, recover};
+use @vesper/front::recover::{Recovered, editor_limits, recover};
 use @vesper/front::util::{saturating_mul_u64};
 use @vesper-std/hash::blake3::{Digest};
 use @vesper-std/hash-sys::{hash};
@@ -3200,6 +3200,19 @@ pub fn format(
         max_work: max_work
     };
     let mut w = Work { used: 0, max: max_work };
+    format_work(in src, in lim, inout w)
+}
+
+// `format_with_work`: `format` charging `w`, which the recovery formatter
+// shares across its declarations.
+fn format_work(
+    in src: Slice[u8],
+    in lim: Limits,
+    inout w: Work
+) -> ChunkSeq[u8] eff [Fail[FmtFail]] {
+    if src.len() > lim.max_input_bytes {
+        fail(E_INPUT);
+    }
     let g = gate_once(in src, in lim, inout w);
     let first = once_tokens(in src, g.t, in lim, inout w, g.opaque);
     let first_nodes = first.nodes;
@@ -3840,4 +3853,600 @@ fn hex_digit(n: u64) -> u8 {
     } else {
         wrapping_u8(wrapping_add(87, n))
     }
+}
+
+// ---------------------------------------------------------------- recovery
+
+// `recovery::format_recovery_source` (crates/vesper-fmt/src/recovery.rs):
+// format only the syntax-complete top-level functions of a damaged buffer
+// and copy every other byte. The editor syntax is @vesper/front's
+// `recover` (`parse_recovery`); each eligible function is formatted alone
+// by `format_work`, charging the same shared work.
+//
+// `parse_complete_items` is not run again: `recover` parsed every complete
+// declaration alone with the same parser and limits, so the reparse of the
+// selected ones cannot fail. Its prepaid work is still charged.
+
+// Each parser call's prepaid allowance (`PARSER_WORK`), and the token and
+// declaration ceilings of `parser_limits`.
+const PARSER_WORK: u64 = 8388608;
+const RECOVERY_MAX_TOKENS: u64 = 8192;
+const RECOVERY_MAX_DECLS: u64 = 256;
+// `syntax::Limits::HARD.parse.max_source_bytes`.
+const RECOVERY_HARD_SOURCE: u64 = 1048576;
+// `size_of::<usize>()` and `size_of::<RecoveryEdit>()`.
+const SIZE_USIZE: u64 = 8;
+const SIZE_EDIT: u64 = 40;
+
+// The rows of `Recovered::decls` (12 words) and `sites` (5 words), and the
+// declaration kind and status values of recover.ves.
+const DECL_WORDS: u64 = 12;
+const SITE_WORDS: u64 = 5;
+const D_KIND: u64 = 0;
+const D_NAME_START: u64 = 1;
+const D_NAME_END: u64 = 2;
+const D_START: u64 = 3;
+const D_END: u64 = 4;
+const D_BODY_START: u64 = 7;
+const D_STATUS: u64 = 11;
+const DECL_FUNCTION: u64 = 0;
+const DECL_COMPLETE: u64 = 0;
+
+// What `format_recovery` returns: the error, or the output, its edits
+// (`start`, `end` and replacement length per edit, over the source) and
+// the count of formatted declarations.
+pub struct RecoveryFormat {
+    ok: bool,
+    fail: FmtFail,
+    output: ChunkSeq[u8],
+    changed: bool,
+    edits: ChunkSeq[u64],
+    formatted: u64
+}
+
+// One pass of `once`.
+struct RecoveryPass {
+    output: ChunkSeq[u8],
+    edits: ChunkSeq[u64],
+    formatted: u64
+}
+
+fn first_diag_or(in d: Diags, n: u64) -> u64 {
+    match d.start.try_get(0) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => n,
+    }
+}
+
+// `recovery::lex`: the bounded token table, refusing any lexer diagnostic.
+fn recovery_lex(in src: Slice[u8], in lim: Limits, inout w: Work) -> Tokens eff [Fail[FmtFail]] {
+    let n = src.len();
+    let max_src = min64(lim.max_input_bytes, RECOVERY_HARD_SOURCE);
+    if n > max_src {
+        fail(E_INPUT);
+    }
+    if lim.max_tokens == 0 {
+        fail(E_TOKEN);
+    }
+    let max_tok = min64(lim.max_tokens, RECOVERY_MAX_TOKENS);
+    charge(inout w, cmul(n, 4));
+    charge(inout w, cmul(cadd(min64(n, max_tok), 1), SIZE_TOKEN));
+    let mut d = diags_new();
+    let t = lex_with_limits(in src, inout d, max_src, max_tok, 1);
+    if t.rejected {
+        fail(E_INPUT);
+    }
+    if t.limited {
+        if t.limit_kind == 1 {
+            fail(E_TOKEN);
+        }
+        fail_at(first_diag_or(in d, n));
+    }
+    if d.code.len() != 0 {
+        fail_at(first_diag_or(in d, n));
+    }
+    t
+}
+
+// `recovery::snapshot`: `parse_recovery` with `parser_limits`.
+fn recovery_snapshot(
+    in src: Slice[u8],
+    in lim: Limits,
+    inout w: Work
+) -> Recovered eff [Fail[FmtFail]] {
+    if lim.max_depth == 0 {
+        fail(E_DEPTH);
+    }
+    if lim.max_doc_nodes == 0 {
+        fail(E_NODE);
+    }
+    charge(inout w, PARSER_WORK);
+    let mut rl = editor_limits(0, 0);
+    rl.try_set(0, min64(lim.max_input_bytes, RECOVERY_HARD_SOURCE));
+    rl.try_set(1, min64(lim.max_tokens, RECOVERY_MAX_TOKENS));
+    rl.try_set(2, 64);
+    rl.try_set(3, min64(lim.max_depth, 24));
+    rl.try_set(4, 256);
+    rl.try_set(5, min64(lim.max_doc_nodes, RECOVERY_MAX_DECLS));
+    rl.try_set(6, PARSER_WORK);
+    rl.try_set(7, 256);
+    let r = recover(in src, in rl);
+    if r.code != 0 {
+        // `map_error`.
+        let c = r.code;
+        if c == 1 || c == 17 {
+            fail(E_WORK);
+        } else if c == 10 {
+            fail(E_INPUT);
+        } else if c == 11 {
+            fail(E_TOKEN);
+        } else if c == 13 {
+            fail(E_DEPTH);
+        } else if c >= 10 {
+            fail(E_NODE);
+        }
+        fail(E_CONSERVATION);
+    }
+    r
+}
+
+// `top_level_starts`: the start of every significant token outside all
+// delimiters, in order. A mismatched closer is `Syntax`.
+fn top_level_starts(
+    in t: Tokens,
+    in lim: Limits,
+    inout w: Work
+) -> ChunkSeq[u64] eff [Fail[FmtFail]] {
+    let ntok = t.kind.len();
+    let max_depth = min64(lim.max_depth, 24);
+    charge(inout w, cmul(ntok, SIZE_USIZE));
+    // `reserve::<TokenKind>`: two bytes a kind.
+    charge(inout w, cmul(max_depth, 2));
+    let mut starts: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](ntok);
+    let mut stack: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..ntok {
+        charge(inout w, 1);
+        let k = tok_kind(in t, i);
+        if trivia(k) || k == K_EOF {
+            continue;
+        }
+        if stack.len() == 0 {
+            starts.push(tok_start(in t, i));
+        }
+        if k == K_L_PAREN || k == K_L_BRACKET || k == K_L_BRACE {
+            if stack.len() >= max_depth {
+                fail(E_DEPTH);
+            }
+            stack.push(k);
+        } else if k == K_R_PAREN || k == K_R_BRACKET || k == K_R_BRACE {
+            let expected = if k == K_R_PAREN {
+                K_L_PAREN
+            } else if k == K_R_BRACKET {
+                K_L_BRACKET
+            } else {
+                K_L_BRACE
+            };
+            let n = stack.len();
+            let open = if n == 0 {
+                K_EOF
+            } else {
+                match stack.try_get(wrapping_sub(n, 1)) {
+                    Option::Some(o) => o,
+                    Option::None => K_EOF,
+                }
+            };
+            if open != expected {
+                fail_at(tok_start(in t, i));
+            }
+            stack.truncate(wrapping_sub(n, 1));
+        }
+    }
+    starts
+}
+
+// Whether the sorted `starts` holds `x` (`binary_search`).
+fn holds(in starts: ChunkSeq[u64], x: u64) -> bool {
+    let mut lo: u64 = 0;
+    let mut hi = starts.len();
+    loop {
+        if lo >= hi {
+            return false;
+        }
+        let mid = wrapping_add(lo, (wrapping_sub(hi, lo)) >> 1);
+        let v = word(in starts, mid);
+        if v == x {
+            return true;
+        }
+        if v < x {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+}
+
+// `format_with_work` of one declaration: its canonical text, or none
+// (`ok` false) for `Syntax` or `OpaqueMacro`, which leave it as it is.
+struct Formatted {
+    ok: bool,
+    out: ChunkSeq[u8]
+}
+
+fn format_declaration(
+    in piece: Slice[u8],
+    in lim: Limits,
+    inout w: Work
+) -> Formatted eff [Fail[FmtFail]] {
+    handle Fail[FmtFail] in {
+        Formatted { ok: true, out: format_work(in piece, in lim, inout w) }
+    } with {
+        return v => v,
+        raise(e, _) => if e.code == E_SYNTAX || e.code == E_MACRO {
+            Formatted { ok: false, out: ChunkSeq::new[u8]() }
+        } else {
+            Fail::raise(e)
+        },
+    }
+}
+
+// `once`: format the eligible declarations of `r` and splice them into
+// its source.
+fn recovery_once(
+    in src: Slice[u8],
+    in r: Recovered,
+    in t: Tokens,
+    in lim: Limits,
+    inout w: Work
+) -> RecoveryPass eff [Fail[FmtFail]] {
+    let top = top_level_starts(in t, in lim, inout w);
+    let ndecl = r.decls.len() / DECL_WORDS;
+    charge(inout w, cmul(ndecl, SIZE_USIZE));
+    let mut picked: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for j in 0..ndecl {
+        charge(inout w, 1);
+        let at = wrapping_mul(j, DECL_WORDS);
+        if word(in r.decls, wrapping_add(at, D_KIND)) == DECL_FUNCTION
+            && word(in r.decls, wrapping_add(at, D_STATUS)) == DECL_COMPLETE
+            && word(in r.decls, wrapping_add(at, D_BODY_START)) != U64_MAX
+            && holds(in top, word(in r.decls, wrapping_add(at, D_START))) {
+            picked.push(j);
+        }
+    }
+    charge(inout w, cmul(picked.len(), SIZE_EDIT));
+    // Edits: start, end and the replacement's range in `texts`.
+    let mut edits: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut texts: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut formatted: u64 = 0;
+    if picked.len() != 0 {
+        // `parse_complete_items`' prepaid allowance.
+        charge(inout w, PARSER_WORK);
+        for q in 0..picked.len() {
+            let at = wrapping_mul(word(in picked, q), DECL_WORDS);
+            let s = word(in r.decls, wrapping_add(at, D_START));
+            let e = word(in r.decls, wrapping_add(at, D_END));
+            if s > e || e > src.len() {
+                fail(E_CONSERVATION);
+            }
+            let mut piece: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](wrapping_sub(e, s));
+            for i in s..e {
+                piece.push(byte(in src, i));
+            }
+            let f = format_declaration(in piece.as_slice(), in lim, inout w);
+            if !f.ok {
+                continue;
+            }
+            let out = f.out;
+            let n = out.len();
+            if n == 0 || byte(in out.as_slice(), wrapping_sub(n, 1)) != 10 {
+                fail(E_CONSERVATION);
+            }
+            // The declaration ends before its outside trivia: drop the
+            // formatter's terminal LF.
+            let m = wrapping_sub(n, 1);
+            formatted = cadd(formatted, 1);
+            let len = wrapping_sub(e, s);
+            charge(inout w, if len > m { len } else { m });
+            let mut same = m == len;
+            if same {
+                for i in 0..m {
+                    if byte(in out.as_slice(), i) != byte(in piece.as_slice(), i) {
+                        same = false;
+                        break;
+                    }
+                }
+            }
+            if !same {
+                edits.push(s);
+                edits.push(e);
+                edits.push(texts.len());
+                for i in 0..m {
+                    texts.push(byte(in out.as_slice(), i));
+                }
+                edits.push(texts.len());
+            }
+        }
+    }
+    let nedit = edits.len() >> 2;
+    let mut size = src.len();
+    let mut end: u64 = 0;
+    for k in 0..nedit {
+        charge(inout w, 1);
+        let s = word(in edits, wrapping_mul(k, 4));
+        let e = word(in edits, wrapping_add(wrapping_mul(k, 4), 1));
+        if s < end || e > src.len() || s > e {
+            fail(E_CONSERVATION);
+        }
+        end = e;
+        let a = word(in edits, wrapping_add(wrapping_mul(k, 4), 2));
+        let b = word(in edits, wrapping_add(wrapping_mul(k, 4), 3));
+        size = cadd(wrapping_sub(size, wrapping_sub(e, s)), wrapping_sub(b, a));
+    }
+    if size > lim.max_output_bytes || size > RECOVERY_HARD_SOURCE {
+        fail(E_OUTPUT);
+    }
+    charge(inout w, size);
+    let mut output: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](size);
+    let mut cursor: u64 = 0;
+    let mut rows: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](wrapping_mul(nedit, 3));
+    for k in 0..nedit {
+        let s = word(in edits, wrapping_mul(k, 4));
+        let e = word(in edits, wrapping_add(wrapping_mul(k, 4), 1));
+        let a = word(in edits, wrapping_add(wrapping_mul(k, 4), 2));
+        let b = word(in edits, wrapping_add(wrapping_mul(k, 4), 3));
+        for i in cursor..s {
+            output.push(byte(in src, i));
+        }
+        for i in a..b {
+            output.push(byte(in texts.as_slice(), i));
+        }
+        cursor = e;
+        rows.push(s);
+        rows.push(e);
+        rows.push(wrapping_sub(b, a));
+    }
+    for i in cursor..src.len() {
+        output.push(byte(in src, i));
+    }
+    if output.len() != size {
+        fail(E_CONSERVATION);
+    }
+    RecoveryPass { output: output, edits: rows, formatted: formatted }
+}
+
+// Whether bytes `a..b` of `x` equal bytes `c..d` of `y`.
+fn same_text(in x: Slice[u8], a: u64, b: u64, in y: Slice[u8], c: u64, d: u64) -> bool {
+    if wrapping_sub(b, a) != wrapping_sub(d, c) {
+        return false;
+    }
+    for i in 0..wrapping_sub(b, a) {
+        if byte(in x, wrapping_add(a, i)) != byte(in y, wrapping_add(c, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// `inventory_equal`: the same declarations (kind, status, body, name) and
+// recovery sites (kind, owner).
+fn inventory_equal(
+    in a_src: Slice[u8],
+    in a: Recovered,
+    in b_src: Slice[u8],
+    in b: Recovered,
+    inout w: Work
+) -> bool eff [Fail[FmtFail]] {
+    let na = a.decls.len() / DECL_WORDS;
+    let nb = b.decls.len() / DECL_WORDS;
+    charge(inout w, cadd(na, nb));
+    charge(inout w, cadd(a_src.len(), b_src.len()));
+    if na != nb || a.sites.len() != b.sites.len() {
+        return false;
+    }
+    for j in 0..na {
+        let at = wrapping_mul(j, DECL_WORDS);
+        if word(in a.decls, wrapping_add(at, D_KIND)) != word(in b.decls, wrapping_add(at, D_KIND))
+            || word(in a.decls, wrapping_add(at, D_STATUS))
+                != word(in b.decls, wrapping_add(at, D_STATUS))
+            || (word(in a.decls, wrapping_add(at, D_BODY_START)) == U64_MAX)
+                != (word(in b.decls, wrapping_add(at, D_BODY_START)) == U64_MAX) {
+            return false;
+        }
+        let an = word(in a.decls, wrapping_add(at, D_NAME_START));
+        let bn = word(in b.decls, wrapping_add(at, D_NAME_START));
+        if (an == U64_MAX) != (bn == U64_MAX) {
+            return false;
+        }
+        if an != U64_MAX
+            && !same_text(
+                in a_src,
+                an,
+                word(in a.decls, wrapping_add(at, D_NAME_END)),
+                in b_src,
+                bn,
+                word(in b.decls, wrapping_add(at, D_NAME_END))
+            ) {
+            return false;
+        }
+    }
+    let ns = a.sites.len() / SITE_WORDS;
+    charge(inout w, cadd(ns, ns));
+    for j in 0..ns {
+        let at = wrapping_mul(j, SITE_WORDS);
+        if word(in a.sites, wrapping_add(at, 2)) != word(in b.sites, wrapping_add(at, 2))
+            || word(in a.sites, wrapping_add(at, 3)) != word(in b.sites, wrapping_add(at, 3)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn recovery_run(
+    in src: Slice[u8],
+    in lim: Limits,
+    inout w: Work
+) -> RecoveryFormat eff [Fail[FmtFail]] {
+    let before_tokens = recovery_lex(in src, in lim, inout w);
+    let before = recovery_snapshot(in src, in lim, inout w);
+    let first = recovery_once(in src, in before, in before_tokens, in lim, inout w);
+    let output = first.output;
+    let changed = recovery_check(
+        in src,
+        in before,
+        in before_tokens,
+        in output.as_slice(),
+        in lim,
+        inout w
+    );
+    RecoveryFormat {
+        ok: true,
+        fail: FmtFail { code: 0, offset: 0 },
+        output: output,
+        changed: changed,
+        edits: first.edits,
+        formatted: first.formatted
+    }
+}
+
+// The checks of `format_recovery_source` after its first pass over `src`
+// (`out`): conservation, the same inventory and idempotence. Whether the
+// text changed.
+fn recovery_check(
+    in src: Slice[u8],
+    in before: Recovered,
+    in before_tokens: Tokens,
+    in out: Slice[u8],
+    in lim: Limits,
+    inout w: Work
+) -> bool eff [Fail[FmtFail]] {
+    let mut after_lim = lim;
+    after_lim.max_input_bytes = lim.max_output_bytes;
+    let after_tokens = recovery_lex(in out, in after_lim, inout w);
+    let after = recovery_snapshot(in out, in after_lim, inout w);
+    charge(inout w, cadd(before_tokens.kind.len(), after_tokens.kind.len()));
+    charge(inout w, cadd(src.len(), out.len()));
+    // The same tokens apart from whitespace, spelled the same.
+    let mut i: u64 = 0;
+    let mut j: u64 = 0;
+    let na = before_tokens.kind.len();
+    let nb = after_tokens.kind.len();
+    loop {
+        loop {
+            if i >= na {
+                break;
+            }
+            let k = tok_kind(in before_tokens, i);
+            if k != K_WHITESPACE && k != K_EOF {
+                break;
+            }
+            i = wrapping_add(i, 1);
+        }
+        loop {
+            if j >= nb {
+                break;
+            }
+            let k = tok_kind(in after_tokens, j);
+            if k != K_WHITESPACE && k != K_EOF {
+                break;
+            }
+            j = wrapping_add(j, 1);
+        }
+        if i >= na && j >= nb {
+            break;
+        }
+        if i >= na || j >= nb {
+            fail(E_CONSERVATION);
+        }
+        if tok_kind(in before_tokens, i) != tok_kind(in after_tokens, j)
+            || !same_text(
+                in src,
+                tok_start(in before_tokens, i),
+                tok_end(in before_tokens, i),
+                in out,
+                tok_start(in after_tokens, j),
+                tok_end(in after_tokens, j)
+            ) {
+            fail(E_CONSERVATION);
+        }
+        i = wrapping_add(i, 1);
+        j = wrapping_add(j, 1);
+    }
+    if !inventory_equal(in src, in before, in out, in after, inout w) {
+        fail(E_CONSERVATION);
+    }
+    let second = recovery_once(in out, in after, in after_tokens, in after_lim, inout w);
+    let again = second.output;
+    charge(
+        inout w,
+        if out.len() > again.len() {
+            out.len()
+        } else {
+            again.len()
+        }
+    );
+    if second.edits.len() != 0
+        || !same_text(in out, 0, out.len(), in again.as_slice(), 0, again.len()) {
+        fail(E_IDEMPOTENT);
+    }
+    ! same_text(in src, 0, src.len(), in out, 0, out.len())
+}
+
+// `format_recovery_source(source, limits)`: the proposal, or the error in
+// the result (`recovery_error`).
+pub fn format_recovery(
+    in source: Str,
+    max_input_bytes: u64,
+    max_output_bytes: u64,
+    max_tokens: u64,
+    max_doc_nodes: u64,
+    max_depth: u64,
+    max_work: u64
+) -> RecoveryFormat {
+    let lim = Limits {
+        max_input_bytes: max_input_bytes,
+        max_output_bytes: max_output_bytes,
+        max_tokens: max_tokens,
+        max_doc_nodes: max_doc_nodes,
+        max_depth: max_depth,
+        max_work: max_work
+    };
+    let mut w = Work { used: 0, max: max_work };
+    handle Fail[FmtFail] in {
+        recovery_run(in source.as_bytes(), in lim, inout w)
+    } with {
+        return v => v,
+        raise(e, _) => RecoveryFormat {
+            ok: false,
+            fail: e,
+            output: ChunkSeq::new[u8](),
+            changed: false,
+            edits: ChunkSeq::new[u64](),
+            formatted: 0
+        },
+    }
+}
+
+// Read-only views of a `RecoveryFormat`.
+pub fn recovery_ok(in r: RecoveryFormat) -> bool {
+    r.ok
+}
+
+pub fn recovery_error(in r: RecoveryFormat) -> FmtFail {
+    r.fail
+}
+
+pub fn recovery_output(in r: RecoveryFormat) -> ChunkSeq[u8] {
+    copy_bytes(in r.output)
+}
+
+pub fn recovery_changed(in r: RecoveryFormat) -> bool {
+    r.changed
+}
+
+// Per edit: the replaced source range and the replacement's length.
+pub fn recovery_edits(in r: RecoveryFormat) -> ChunkSeq[u64] {
+    copy_words(in r.edits)
+}
+
+pub fn recovery_formatted(in r: RecoveryFormat) -> u64 {
+    r.formatted
 }
