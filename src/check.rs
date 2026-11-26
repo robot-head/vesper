@@ -21,6 +21,8 @@ mod array_rules;
 mod call_facts;
 #[path = "loops/for_sequences.rs"]
 mod for_sequences;
+#[path = "check/layered.rs"]
+mod layered;
 #[path = "integer_widths/literal_typing.rs"]
 mod literal_typing;
 #[path = "loops/check.rs"]
@@ -417,8 +419,8 @@ impl World {
                 sugar: &sugar::Ceilings::default(),
                 world: &world,
                 diagnostics: vec![],
-                types: BTreeMap::new(),
-                calls: BTreeMap::new(),
+                types: Default::default(),
+                calls: Default::default(),
                 moves: BTreeMap::new(),
                 results: world.function_results.clone(),
                 handler_effects: world.handler_effects.clone(),
@@ -472,7 +474,7 @@ impl World {
             } = c;
             integer_nots = nots;
             option_tries = tries;
-            types = checked_types;
+            types = checked_types.into_map();
             for_plans = plans;
             let changed =
                 world.function_results != results || world.handler_effects != handler_effects;
@@ -831,8 +833,8 @@ pub(crate) fn check_core(
             sugar: &ceilings,
             world: &world,
             diagnostics: collection_errors.clone(),
-            types: BTreeMap::new(),
-            calls: BTreeMap::new(),
+            types: Default::default(),
+            calls: Default::default(),
             moves: BTreeMap::new(),
             results: BTreeMap::new(),
             handler_effects: BTreeMap::new(),
@@ -900,8 +902,8 @@ pub(crate) fn check_core(
         for_plans = plans;
         resolved = trait_calls;
         let changed = world.function_results != results || world.handler_effects != handler_effects;
-        world.types = types;
-        world.calls = calls;
+        world.types = types.into_map();
+        world.calls = calls.into_map();
         world.moves = moves;
         world.function_results = results;
         world.handler_effects = handler_effects;
@@ -1017,8 +1019,8 @@ struct Checker<'a> {
     sugar: &'a sugar::Ceilings<'a>,
     world: &'a World,
     diagnostics: Vec<Diagnostic>,
-    types: TypeMap,
-    calls: BTreeMap<(usize, usize), BTreeMap<String, Type>>,
+    types: layered::Layered<Type>,
+    calls: layered::Layered<BTreeMap<String, Type>>,
     moves: BTreeMap<(usize, usize), Vec<Place>>,
     results: BTreeMap<String, Type>,
     handler_effects: BTreeMap<(usize, usize), Effects>,

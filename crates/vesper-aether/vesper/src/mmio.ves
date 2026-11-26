@@ -37,27 +37,23 @@ fn mmio_write_status(
     offered: u64
 ) -> Result[MmioStatusOutcome, MmioStatusFault] {
     if new_val == 0 {
-        return Result::Ok(
-            MmioStatusOutcome {
-                reset: true,
-                next_status: 0,
-                accepted_features: false,
-                rejected_features: false,
-                activate: false,
-            }
-        );
+        return Result::Ok(MmioStatusOutcome {
+            reset: true,
+            next_status: 0,
+            accepted_features: false,
+            rejected_features: false,
+            activate: false,
+        });
     }
     let added = new_val & ~old;
     if (added & MMIO_STATUS_DEVICE_NEEDS_RESET) != 0 {
         return Result::Err(MmioStatusFault::DriverSetNeedsReset);
     }
     if (old & ~new_val & ~MMIO_STATUS_DEVICE_NEEDS_RESET) != 0 {
-        return Result::Err(
-            MmioStatusFault::StatusRegression {
-                from: old,
-                to: new_val,
-            }
-        );
+        return Result::Err(MmioStatusFault::StatusRegression {
+            from: old,
+            to: new_val,
+        });
     }
     let mut next = new_val | (old & MMIO_STATUS_DEVICE_NEEDS_RESET);
     let mut accepted_features = false;
@@ -75,23 +71,19 @@ fn mmio_write_status(
     }
     if (added & MMIO_STATUS_DRIVER_OK) != 0 {
         if (next & MMIO_STATUS_FEATURES_OK) == 0 {
-            return Result::Err(
-                MmioStatusFault::DriverOkWithoutFeaturesOk {
-                    rejected_features: rejected_features,
-                }
-            );
+            return Result::Err(MmioStatusFault::DriverOkWithoutFeaturesOk {
+                rejected_features: rejected_features,
+            });
         }
         activate = true;
     }
-    Result::Ok(
-        MmioStatusOutcome {
-            reset: false,
-            next_status: next,
-            accepted_features: accepted_features,
-            rejected_features: rejected_features,
-            activate: activate,
-        }
-    )
+    Result::Ok(MmioStatusOutcome {
+        reset: false,
+        next_status: next,
+        accepted_features: accepted_features,
+        rejected_features: rejected_features,
+        activate: activate,
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -232,31 +232,27 @@ pub fn check_table(inout q: Q, b: Bind) -> u64 {
         let c = ccol(in q, wrapping_add(tab.start, k));
         let slot = q.bcols.len();
         q.ex.push(slot);
-        q.bcols.push(
-            BCol {
-                aoff: b.aoff,
-                alen: b.alen,
-                coff: c.noff,
-                clen: c.nlen,
-                binding: binding,
-                slot: slot,
-                ty: c.ty,
-                nullable: c.nullable
-            }
-        );
+        q.bcols.push(BCol {
+            aoff: b.aoff,
+            alen: b.alen,
+            coff: c.noff,
+            clen: c.nlen,
+            binding: binding,
+            slot: slot,
+            ty: c.ty,
+            nullable: c.nullable
+        });
     }
-    q.plan.push(
-        Node {
-            kind: 0,
-            a: b.noff,
-            b: b.nlen,
-            c: binding,
-            d: slots_at,
-            e: tab.n,
-            f: none(),
-            g: none()
-        }
-    );
+    q.plan.push(Node {
+        kind: 0,
+        a: b.noff,
+        b: b.nlen,
+        c: binding,
+        d: slots_at,
+        e: tab.n,
+        f: none(),
+        g: none()
+    });
     wrapping_sub(q.plan.len(), 1)
 }
 

@@ -229,9 +229,16 @@ pub fn read_ast(
             a = sym(in nmap, w(a));
         }
         let mapped_b = if kind == 7 { sym(in nmap, w(bb)) } else { bb };
-        exprs.push(
-            ExprRow { kind: kind, start: start, end: end, a: a, b: mapped_b, c: c, d: d, e: e }
-        );
+        exprs.push(ExprRow {
+            kind: kind,
+            start: start,
+            end: end,
+            a: a,
+            b: mapped_b,
+            c: c,
+            d: d,
+            e: e
+        });
     }
     let pat_count = reader.word(in bytes);
     let mut pats: ChunkSeq[PatRow] = ChunkSeq::with_capacity[PatRow](pat_count);
@@ -272,35 +279,31 @@ pub fn read_ast(
             let param_ty = ty(in tmap, reader.word(in bytes));
             let param_span_start = reader.word(in bytes);
             let param_span_end = reader.word(in bytes);
-            params.push(
-                ParamRow {
-                    name: param_name,
-                    pass: pass,
-                    ty: param_ty,
-                    start: param_span_start,
-                    end: param_span_end
-                }
-            );
+            params.push(ParamRow {
+                name: param_name,
+                pass: pass,
+                ty: param_ty,
+                start: param_span_start,
+                end: param_span_end
+            });
         }
         let result = ty(in tmap, reader.word(in bytes));
         let effects = ty(in tmap, reader.word(in bytes));
         let body = opt(reader.word(in bytes));
         set_index(inout fn_by_name, name, wrapping_add(n32(i), 1));
-        fns.push(
-            FnRow {
-                name: name,
-                fip: fip,
-                start: start,
-                end: end,
-                generic_start: generic_start,
-                generic_count: n32(generic_count),
-                param_start: param_start,
-                param_count: n32(param_count),
-                result: result,
-                effects: effects,
-                body: body
-            }
-        );
+        fns.push(FnRow {
+            name: name,
+            fip: fip,
+            start: start,
+            end: end,
+            generic_start: generic_start,
+            generic_count: n32(generic_count),
+            param_start: param_start,
+            param_count: n32(param_count),
+            result: result,
+            effects: effects,
+            body: body
+        });
     }
     Ast {
         pool: pool,

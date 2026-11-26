@@ -56,14 +56,12 @@ pub copy struct VsysError {
 }
 
 pub fn fail_vsys[T](kind: u8, start: u64, end: u64, code: u32) -> T eff [Fail[VsysError]] {
-    Fail::raise(
-        VsysError {
-            kind: kind,
-            start: start,
-            end: end,
-            code: code,
-        }
-    )
+    Fail::raise(VsysError {
+        kind: kind,
+        start: start,
+        end: end,
+        code: code,
+    })
 }
 
 pub copy struct Tok {
@@ -252,29 +250,25 @@ pub fn lex(in bytes: Slice[u8]) -> Lexed eff [Fail[VsysError]] {
             let a0 = arena.len();
             arena.extend(in bytes[start..at]);
             let a1 = arena.len();
-            toks.push(
-                Tok {
-                    kind: tok_word(),
-                    a: a0,
-                    b: a1,
-                    num: 0,
-                    s0: start,
-                    s1: at,
-                }
-            );
+            toks.push(Tok {
+                kind: tok_word(),
+                a: a0,
+                b: a1,
+                num: 0,
+                s0: start,
+                s1: at,
+            });
         } else if is_digit(b) {
             let (num, next) = lex_number(in bytes, start);
             at = next;
-            toks.push(
-                Tok {
-                    kind: tok_num(),
-                    a: 0,
-                    b: 0,
-                    num: num,
-                    s0: start,
-                    s1: at,
-                }
-            );
+            toks.push(Tok {
+                kind: tok_num(),
+                a: 0,
+                b: 0,
+                num: num,
+                s0: start,
+                s1: at,
+            });
         } else if b == 34 {
             at = wrapping_add(at, 1);
             let a0 = arena.len();
@@ -315,71 +309,61 @@ pub fn lex(in bytes: Slice[u8]) -> Lexed eff [Fail[VsysError]] {
                 return fail_vsys(err_syntax(), start, at, 6);
             }
             let a1 = arena.len();
-            toks.push(
-                Tok {
-                    kind: tok_text(),
-                    a: a0,
-                    b: a1,
-                    num: 0,
-                    s0: start,
-                    s1: at,
-                }
-            );
+            toks.push(Tok {
+                kind: tok_text(),
+                a: a0,
+                b: a1,
+                num: 0,
+                s0: start,
+                s1: at,
+            });
         } else if b == 45
             && wrapping_add(at, 1) < n
             && byte_at(in bytes, wrapping_add(at, 1)) == 62 {
             at = wrapping_add(at, 2);
-            toks.push(
-                Tok {
-                    kind: tok_arrow(),
-                    a: 0,
-                    b: 0,
-                    num: 0,
-                    s0: start,
-                    s1: at,
-                }
-            );
+            toks.push(Tok {
+                kind: tok_arrow(),
+                a: 0,
+                b: 0,
+                num: 0,
+                s0: start,
+                s1: at,
+            });
         } else if b == 46
             && wrapping_add(at, 2) < n
             && byte_at(in bytes, wrapping_add(at, 1)) == 46
             && byte_at(in bytes, wrapping_add(at, 2)) == 46 {
             at = wrapping_add(at, 3);
-            toks.push(
-                Tok {
-                    kind: tok_ellipsis(),
-                    a: 0,
-                    b: 0,
-                    num: 0,
-                    s0: start,
-                    s1: at,
-                }
-            );
+            toks.push(Tok {
+                kind: tok_ellipsis(),
+                a: 0,
+                b: 0,
+                num: 0,
+                s0: start,
+                s1: at,
+            });
         } else if is_punct_byte(b) {
             at = wrapping_add(at, 1);
-            toks.push(
-                Tok {
-                    kind: tok_punct(),
-                    a: widen_u64(b),
-                    b: 0,
-                    num: 0,
-                    s0: start,
-                    s1: at,
-                }
-            );
+            toks.push(Tok {
+                kind: tok_punct(),
+                a: widen_u64(b),
+                b: 0,
+                num: 0,
+                s0: start,
+                s1: at,
+            });
         } else {
             return fail_vsys(err_unsupported(), start, wrapping_add(start, 1), 20);
         }
     }
-    toks.push(
-        Tok {
-            kind: tok_eof(),
-            a: 0,
-            b: 0,
-            num: 0,
-            s0: at,
-            s1: at,
-        }
-    );
+    toks.push(Tok {
+        kind: tok_eof(),
+        a: 0,
+        b: 0,
+        num: 0,
+        s0: at,
+        s1: at,
+    });
     Lexed {
         toks: toks,
         arena: arena,

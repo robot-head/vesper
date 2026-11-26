@@ -108,32 +108,30 @@ fn nic_make(c: UmemConfig, mode: SoftNicMode) -> Result[Nic, PortError] {
         Result::Err(e) => return Result::Err(PortError::Ring(e)),
     };
     let frames = widen_u64(c.frame_count);
-    Result::Ok(
-        Nic {
-            config: c,
-            umem_len: chunk_base(c, c.frame_count),
-            shift: frame_shift(c),
-            fill: fill,
-            rx: rx,
-            tx: tx,
-            completion: completion,
-            mode: mode,
-            rx_pool: ChunkSeq::with_capacity[u64](frames),
-            nic_tx: ChunkSeq::with_capacity[u64](frames),
-            nic_tx_head: 0,
-            ingress: ChunkSeq::new[u8](),
-            ingress_start: ChunkSeq::new[u64](),
-            ingress_len: ChunkSeq::new[u64](),
-            ingress_head: 0,
-            faults: ChunkSeq::with_capacity[u64](16),
-            faults_head: 0,
-            stall_tx: 0,
-            stall_completion: 0,
-            stats: no_soft_stats(),
-            tracing: false,
-            trace: ChunkSeq::new[u64]()
-        }
-    )
+    Result::Ok(Nic {
+        config: c,
+        umem_len: chunk_base(c, c.frame_count),
+        shift: frame_shift(c),
+        fill: fill,
+        rx: rx,
+        tx: tx,
+        completion: completion,
+        mode: mode,
+        rx_pool: ChunkSeq::with_capacity[u64](frames),
+        nic_tx: ChunkSeq::with_capacity[u64](frames),
+        nic_tx_head: 0,
+        ingress: ChunkSeq::new[u8](),
+        ingress_start: ChunkSeq::new[u64](),
+        ingress_len: ChunkSeq::new[u64](),
+        ingress_head: 0,
+        faults: ChunkSeq::with_capacity[u64](16),
+        faults_head: 0,
+        stall_tx: 0,
+        stall_completion: 0,
+        stats: no_soft_stats(),
+        tracing: false,
+        trace: ChunkSeq::new[u64]()
+    })
 }
 
 impl Nic {

@@ -64,9 +64,10 @@ fn base_options(in t: Tcb, now: u64, syn: bool) -> Opts {
         o.sack_permitted = if active_syn { t.cfg.sack } else { t.sack_ok };
     }
     if (syn && active_syn && t.cfg.timestamps) || t.ts_ok {
-        o.timestamps = Option::Some(
-            Timestamps { val: ts_now(now), ecr: if t.ts_ok { t.ts_recent } else { 0 } }
-        );
+        o.timestamps = Option::Some(Timestamps {
+            val: ts_now(now),
+            ecr: if t.ts_ok { t.ts_recent } else { 0 }
+        });
     }
     o
 }

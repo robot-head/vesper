@@ -576,16 +576,14 @@ impl Stream {
                                 Option::None => {},
                             }
                         }
-                        self.out.fns.push(
-                            FnAttrs {
-                                na: ns,
-                                nb: ne,
-                                has_test: has_test,
-                                test: test,
-                                ca: ca,
-                                cn: cn
-                            }
-                        );
+                        self.out.fns.push(FnAttrs {
+                            na: ns,
+                            nb: ne,
+                            has_test: has_test,
+                            test: test,
+                            ca: ca,
+                            cn: cn
+                        });
                     }
                 }
                 has_test = false;

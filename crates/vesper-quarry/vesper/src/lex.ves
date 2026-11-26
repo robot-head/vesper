@@ -115,14 +115,12 @@ pub fn lex(inout q: Q, in sql: Slice[u8]) {
                 } else {
                     keyword(in q.pool, off, len)
                 };
-                q.toks.push(
-                    Tok {
-                        kind: if is_param { tk_param() } else { tk_word() },
-                        a: off,
-                        b: len,
-                        kw: kw
-                    }
-                );
+                q.toks.push(Tok {
+                    kind: if is_param { tk_param() } else { tk_word() },
+                    a: off,
+                    b: len,
+                    kw: kw
+                });
             } else if is_digit(c) || c == MINUS {
                 i = wrapping_add(i, 1);
                 loop {
@@ -188,9 +186,12 @@ pub fn lex(inout q: Q, in sql: Slice[u8]) {
                         i = wrapping_add(i, 1);
                     }
                 }
-                q.toks.push(
-                    Tok { kind: tk_text(), a: off, b: wrapping_sub(q.pool.len(), off), kw: 0 }
-                );
+                q.toks.push(Tok {
+                    kind: tk_text(),
+                    a: off,
+                    b: wrapping_sub(q.pool.len(), off),
+                    kw: 0
+                });
             } else if c == EQUALS {
                 i = wrapping_add(i, 1);
                 q.toks.push(Tok { kind: tk_op(), a: 0, b: 0, kw: 0 });

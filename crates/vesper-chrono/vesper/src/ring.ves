@@ -160,14 +160,12 @@ pub fn new_recorder(config: RecorderConfig) -> Result[FlightRecorder, u32] {
         if k >= config.snapshot_slots {
             break;
         }
-        snaps.push(
-            SnapshotSlot {
-                epoch_id: 0,
-                start_seq: 0,
-                time_ns: 0,
-                len: 0,
-            }
-        );
+        snaps.push(SnapshotSlot {
+            epoch_id: 0,
+            start_seq: 0,
+            time_ns: 0,
+            len: 0,
+        });
         k = wrapping_add(k, 1);
     }
     let total_snap_bytes = wrapping_mul(config.snapshot_slots, config.snapshot_image_bytes);
@@ -180,25 +178,23 @@ pub fn new_recorder(config: RecorderConfig) -> Result[FlightRecorder, u32] {
         snap_buf.push(0);
         b = wrapping_add(b, 1);
     }
-    Result::Ok(
-        FlightRecorder {
-            config: config,
-            buf: buf,
-            head: 0,
-            tail: 0,
-            slots: slots,
-            slot_head: 0,
-            slot_len: 0,
-            next_seq: 1,
-            last_time_ns: 0,
-            evicted_records: 0,
-            next_obligation: 1,
-            snapshots: snaps,
-            snapshot_buf: snap_buf,
-            next_snapshot_slot: 0,
-            next_epoch: 1,
-        }
-    )
+    Result::Ok(FlightRecorder {
+        config: config,
+        buf: buf,
+        head: 0,
+        tail: 0,
+        slots: slots,
+        slot_head: 0,
+        slot_len: 0,
+        next_seq: 1,
+        last_time_ns: 0,
+        evicted_records: 0,
+        next_obligation: 1,
+        snapshots: snaps,
+        snapshot_buf: snap_buf,
+        next_snapshot_slot: 0,
+        next_epoch: 1,
+    })
 }
 
 pub fn retained_len(in r: FlightRecorder) -> u64 {
@@ -367,12 +363,10 @@ pub fn record_inout_write(
     place_hash: u64,
     source_span_id: u32,
 ) -> Result[u64, u32] {
-    let payload = encode_inout_write(
-        InoutWriteRecord {
-            place_hash: place_hash,
-            source_span_id: source_span_id,
-        }
-    );
+    let payload = encode_inout_write(InoutWriteRecord {
+        place_hash: place_hash,
+        source_span_id: source_span_id,
+    });
     append_record(
         inout r,
         fiber_id,
@@ -399,14 +393,12 @@ pub fn mint_obligation(
         return Result::Err(1);
     }
     let (tag, aux): (u8, u64) = if has_parent { (1, parent) } else { (0, 0) };
-    let payload = encode_obligation_record(
-        ObligationRecord {
-            obligation_id: id,
-            aux: aux,
-            source_span_id: source_span_id,
-            hop_kind_tag: tag,
-        }
-    );
+    let payload = encode_obligation_record(ObligationRecord {
+        obligation_id: id,
+        aux: aux,
+        source_span_id: source_span_id,
+        hop_kind_tag: tag,
+    });
     match append_record(
         inout r,
         fiber_id,
@@ -512,17 +504,15 @@ pub fn events(in r: FlightRecorder) -> ChunkSeq[FlightEvent] {
                     i = wrapping_add(i, 1);
                 }
                 let digest_bit = op_tag_digest();
-                out.push(
-                    FlightEvent {
-                        lamport_seq: h.lamport_seq,
-                        fiber_id: h.fiber_id,
-                        time_ns: h.ipt_tsc_anchor,
-                        effect_id: h.effect_id,
-                        op_tag: h.op_tag & wrapping_u16(wrapping_sub(65535, widen_u64(digest_bit))),
-                        digest: (h.op_tag & digest_bit) != 0,
-                        payload: payload,
-                    }
-                );
+                out.push(FlightEvent {
+                    lamport_seq: h.lamport_seq,
+                    fiber_id: h.fiber_id,
+                    time_ns: h.ipt_tsc_anchor,
+                    effect_id: h.effect_id,
+                    op_tag: h.op_tag & wrapping_u16(wrapping_sub(65535, widen_u64(digest_bit))),
+                    digest: (h.op_tag & digest_bit) != 0,
+                    payload: payload,
+                });
             }
             Option::None => {}
         }
@@ -595,14 +585,12 @@ pub fn snapshots(in r: FlightRecorder) -> ChunkSeq[SnapshotImage] {
             img.push(byte_at(in r.snapshot_buf.as_slice(), wrapping_add(base, j)));
             j = wrapping_add(j, 1);
         }
-        out.push(
-            SnapshotImage {
-                epoch_id: s.epoch_id,
-                start_lamport_seq: s.start_seq,
-                time_ns: s.time_ns,
-                image: img,
-            }
-        );
+        out.push(SnapshotImage {
+            epoch_id: s.epoch_id,
+            start_lamport_seq: s.start_seq,
+            time_ns: s.time_ns,
+            image: img,
+        });
         k = wrapping_add(k, 1);
     }
     out

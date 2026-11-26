@@ -129,9 +129,10 @@ fn region_error(r: PlannedRegion, limits: KvmHostLimits) -> Option[SlotError] {
     if bits < 64 {
         let end = wrapping_add(r.guest_phys_addr, r.memory_size);
         if end > wrapping_shl_u64(1, wrapping_u32(bits)) {
-            return Option::Some(
-                SlotError::GuestAddressTooWide { slot: slot, bits: limits.guest_phys_bits }
-            );
+            return Option::Some(SlotError::GuestAddressTooWide {
+                slot: slot,
+                bits: limits.guest_phys_bits
+            });
         }
     }
     Option::None
@@ -199,9 +200,10 @@ pub fn slot_plan_verify(
     }
     let n = regions.len();
     if n > widen_u64(limits.max_slots) {
-        return Option::Some(
-            SlotError::TooManyRegions { count: n, max: widen_u64(limits.max_slots) }
-        );
+        return Option::Some(SlotError::TooManyRegions {
+            count: n,
+            max: widen_u64(limits.max_slots)
+        });
     }
     for i in 0..n {
         match region_error(region_at(in regions, i), limits) {
@@ -293,14 +295,12 @@ pub fn slot_plan_verify_cross_vm(
                     Option::Some(v) => v,
                     Option::None => 0,
                 };
-                return Option::Some(
-                    SlotError::CrossVmHostOverlap {
-                        vm_a: vm_a,
-                        slot_a: a.slot,
-                        vm_b: vm_b,
-                        slot_b: b.slot
-                    }
-                );
+                return Option::Some(SlotError::CrossVmHostOverlap {
+                    vm_a: vm_a,
+                    slot_a: a.slot,
+                    vm_b: vm_b,
+                    slot_b: b.slot
+                });
             }
             continue;
         }

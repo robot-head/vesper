@@ -554,9 +554,10 @@ pub fn hp_remove(inout buf: Slice[u8], pn_offset: u64, mask: u64) -> Unprot eff 
     // pn_offset + 4 <= the sample start < buf.len(): the field is in bounds.
     apply_mask(inout buf, pn_offset, pn_len, mask);
     let truncated = match buf.try_read_u32_be(pn_offset) {
-        Option::Some(field) => widen_u64(
-            wrapping_shr_u32(field, wrapping_u32(wrapping_mul(wrapping_sub(4, pn_len), 8)))
-        ),
+        Option::Some(field) => widen_u64(wrapping_shr_u32(
+            field,
+            wrapping_u32(wrapping_mul(wrapping_sub(4, pn_len), 8))
+        )),
         Option::None => 0,
     };
     Unprot {

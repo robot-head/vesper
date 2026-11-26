@@ -122,7 +122,7 @@ impl HostCapability {
             }
             Self::Trace => {
                 if !crate::trace_effects::active(world)
-                    || decl.ops.len() != 6
+                    || decl.ops.len() != crate::trace_effects::OPERATIONS.len()
                     || decl
                         .ops
                         .iter()

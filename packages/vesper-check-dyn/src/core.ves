@@ -520,9 +520,13 @@ pub fn new_item(inout d: D, kind: u8, node: u32) -> u32 {
 pub fn new_bound(inout d: D, param: u32, trait_ref: u32, start: u32, end: u32, owner: u32) -> u32 {
     d.ast
         .bounds
-        .alloc(
-            BoundNode { param: param, trait_ref: trait_ref, start: start, end: end, owner: owner }
-        )
+        .alloc(BoundNode {
+            param: param,
+            trait_ref: trait_ref,
+            start: start,
+            end: end,
+            owner: owner
+        })
         .raw()
 }
 
