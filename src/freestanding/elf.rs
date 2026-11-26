@@ -19,6 +19,69 @@ const SHF_WRITE: u64 = 1;
 const SHF_ALLOC: u64 = 2;
 const SHF_EXECINSTR: u64 = 4;
 
+/// `e_ident`: magic, class, data encoding and version.
+const ELFMAG: &[u8; 4] = b"\x7fELF";
+const EI_CLASS: usize = 4;
+const EI_DATA: usize = 5;
+const ELFCLASS64: u8 = 2;
+const ELFDATA2LSB: u8 = 1;
+const EV_CURRENT: u8 = 1;
+const ELFOSABI_NONE: u8 = 0;
+const ET_EXEC: u16 = 2;
+
+/// `Elf64_Ehdr` field offsets.
+const E_TYPE: usize = 16;
+const E_MACHINE: usize = 18;
+const E_ENTRY: usize = 24;
+const E_PHOFF: usize = 32;
+const E_SHOFF: usize = 40;
+const E_FLAGS: usize = 48;
+const E_PHENTSIZE: usize = 54;
+const E_PHNUM: usize = 56;
+const E_SHENTSIZE: usize = 58;
+const E_SHNUM: usize = 60;
+
+/// `Elf64_Phdr` field offsets.
+const P_FLAGS: usize = 4;
+const P_OFFSET: usize = 8;
+const P_VADDR: usize = 16;
+const P_FILESZ: usize = 32;
+const P_MEMSZ: usize = 40;
+
+/// `Elf64_Shdr` field offsets.
+const SH_TYPE: usize = 4;
+const SH_OFFSET: usize = 24;
+const SH_SIZE: usize = 32;
+const SH_LINK: usize = 40;
+const SH_ENTSIZE: usize = 56;
+
+/// `Elf64_Sym` field offset of `st_value`.
+const ST_VALUE: usize = 8;
+
+/// Sizes of `Elf64_Ehdr`, `Elf64_Phdr`, `Elf64_Shdr` and `Elf64_Sym`.
+const EHDR_BYTES: u16 = 64;
+const PHDR_BYTES: u16 = 56;
+const SHDR_BYTES: u16 = 64;
+const SYM_BYTES: u16 = 24;
+
+/// `st_info` binding and type, and `st_other` visibility.
+const STB_LOCAL: u8 = 0;
+const STB_GLOBAL: u8 = 1;
+const STT_NOTYPE: u8 = 0;
+const STT_FUNC: u8 = 2;
+const ST_BIND_SHIFT: u8 = 4;
+const STV_DEFAULT: u8 = 0;
+/// `st_shndx` of an absolute symbol.
+const SHN_ABS: u16 = 0xfff1;
+
+/// Page size: `p_align` of every `PT_LOAD`, and the granule a segment's file
+/// offset is congruent to its address modulo.
+pub const PAGE_BYTES: u64 = 0x1000;
+/// Alignment of `.symtab` and the section header table (8-byte fields).
+const ELF64_TABLE_ALIGN: u64 = 8;
+/// `sh_addralign` written for every output section.
+const OUT_SECTION_ALIGN: u64 = 8;
+
 fn u16_at(b: &[u8], at: usize) -> Result<u16, String> {
     b.get(at..at + 2)
         .map(|s| u16::from_le_bytes([s[0], s[1]]))
@@ -39,10 +102,10 @@ fn usize_of(v: u64) -> Result<usize, String> {
 }
 
 fn check_header(b: &[u8]) -> Result<(), String> {
-    if b.len() < 64 || &b[..4] != b"\x7fELF" {
+    if b.len() < usize::from(EHDR_BYTES) || &b[..ELFMAG.len()] != ELFMAG {
         return Err("not an ELF file".into());
     }
-    if b[4] != 2 || b[5] != 1 {
+    if b[EI_CLASS] != ELFCLASS64 || b[EI_DATA] != ELFDATA2LSB {
         return Err("not a little-endian ELF64 file".into());
     }
     Ok(())
@@ -51,13 +114,13 @@ fn check_header(b: &[u8]) -> Result<(), String> {
 /// `e_flags` of an ELF64 file.
 pub fn e_flags(b: &[u8]) -> Result<u32, String> {
     check_header(b)?;
-    u32_at(b, 48)
+    u32_at(b, E_FLAGS)
 }
 
 /// `e_machine` of an ELF64 file.
 pub fn e_machine(b: &[u8]) -> Result<u16, String> {
     check_header(b)?;
-    u16_at(b, 18)
+    u16_at(b, E_MACHINE)
 }
 
 /// What [`read_executable`] returns.
@@ -78,18 +141,18 @@ pub struct ExecutableInfo {
 pub fn read_executable(b: &[u8]) -> Result<ExecutableInfo, String> {
     check_header(b)?;
     let mut info = ExecutableInfo {
-        e_type: u16_at(b, 16)?,
-        machine: u16_at(b, 18)?,
-        entry: u64_at(b, 24)?,
+        e_type: u16_at(b, E_TYPE)?,
+        machine: u16_at(b, E_MACHINE)?,
+        entry: u64_at(b, E_ENTRY)?,
         ..Default::default()
     };
-    let phoff = usize_of(u64_at(b, 32)?)?;
-    let shoff = usize_of(u64_at(b, 40)?)?;
-    let phentsize = usize::from(u16_at(b, 54)?);
-    let phnum = usize::from(u16_at(b, 56)?);
-    let shentsize = usize::from(u16_at(b, 58)?);
-    let shnum = usize::from(u16_at(b, 60)?);
-    if phnum > 0 && phentsize < 56 {
+    let phoff = usize_of(u64_at(b, E_PHOFF)?)?;
+    let shoff = usize_of(u64_at(b, E_SHOFF)?)?;
+    let phentsize = usize::from(u16_at(b, E_PHENTSIZE)?);
+    let phnum = usize::from(u16_at(b, E_PHNUM)?);
+    let shentsize = usize::from(u16_at(b, E_SHENTSIZE)?);
+    let shnum = usize::from(u16_at(b, E_SHNUM)?);
+    if phnum > 0 && phentsize < usize::from(PHDR_BYTES) {
         return Err("bad program header size".into());
     }
     for i in 0..phnum {
@@ -97,16 +160,16 @@ pub fn read_executable(b: &[u8]) -> Result<ExecutableInfo, String> {
             .checked_add(i.checked_mul(phentsize).ok_or("overflow")?)
             .ok_or("overflow")?;
         if u32_at(b, p)? == PT_LOAD {
-            let flags = u32_at(b, p + 4)?;
-            let offset = u64_at(b, p + 8)?;
-            let vaddr = u64_at(b, p + 16)?;
-            let filesz = u64_at(b, p + 32)?;
-            let memsz = u64_at(b, p + 40)?;
+            let flags = u32_at(b, p + P_FLAGS)?;
+            let offset = u64_at(b, p + P_OFFSET)?;
+            let vaddr = u64_at(b, p + P_VADDR)?;
+            let filesz = u64_at(b, p + P_FILESZ)?;
+            let memsz = u64_at(b, p + P_MEMSZ)?;
             info.segments.push((vaddr, offset, filesz));
             info.segment_memory.push((vaddr, memsz, flags));
         }
     }
-    if shnum > 0 && shentsize < 64 {
+    if shnum > 0 && shentsize < usize::from(SHDR_BYTES) {
         return Err("bad section header size".into());
     }
     let section = |i: usize| -> Result<(u32, u64, u64, u32, u64), String> {
@@ -114,11 +177,11 @@ pub fn read_executable(b: &[u8]) -> Result<ExecutableInfo, String> {
             .checked_add(i.checked_mul(shentsize).ok_or("overflow")?)
             .ok_or("overflow")?;
         Ok((
-            u32_at(b, s + 4)?,  // type
-            u64_at(b, s + 24)?, // offset
-            u64_at(b, s + 32)?, // size
-            u32_at(b, s + 40)?, // link
-            u64_at(b, s + 56)?, // entsize
+            u32_at(b, s + SH_TYPE)?,
+            u64_at(b, s + SH_OFFSET)?,
+            u64_at(b, s + SH_SIZE)?,
+            u32_at(b, s + SH_LINK)?,
+            u64_at(b, s + SH_ENTSIZE)?,
         ))
     };
     for i in 0..shnum {
@@ -126,7 +189,7 @@ pub fn read_executable(b: &[u8]) -> Result<ExecutableInfo, String> {
         if kind != SHT_SYMTAB {
             continue;
         }
-        if entsize < 24 {
+        if entsize < u64::from(SYM_BYTES) {
             return Err("bad symbol size".into());
         }
         let (_, str_off, str_size, _, _) = section(link as usize)?;
@@ -137,7 +200,7 @@ pub fn read_executable(b: &[u8]) -> Result<ExecutableInfo, String> {
         for k in 0..count {
             let at = usize_of(offset + k * entsize)?;
             let name_off = u32_at(b, at)? as usize;
-            let value = u64_at(b, at + 8)?;
+            let value = u64_at(b, at + ST_VALUE)?;
             let name = strtab
                 .get(name_off..)
                 .and_then(|s| s.split(|c| *c == 0).next())
@@ -195,19 +258,18 @@ pub fn write_executable(
     segments: &[OutSegment],
     symbols: &[OutSymbol],
 ) -> Result<(Vec<u8>, Vec<SegmentPlacement>), String> {
-    const PAGE: u64 = 0x1000;
-    let ehsize = 64u64;
+    let ehsize = u64::from(EHDR_BYTES);
     let phnum = segments.len() as u64;
-    let mut out = vec![0u8; (ehsize + phnum * 56) as usize];
+    let mut out = vec![0u8; (ehsize + phnum * u64::from(PHDR_BYTES)) as usize];
     // Section file offsets: congruent to the address modulo the page size.
     let mut file_offsets = vec![0u64; sections.len()];
     let mut seg_info = Vec::new();
     for seg in segments {
         let first = &sections[seg.sections.start];
         let mut off = out.len() as u64;
-        let want = first.address % PAGE;
-        if off % PAGE != want {
-            off += (want + PAGE - off % PAGE) % PAGE;
+        let want = first.address % PAGE_BYTES;
+        if off % PAGE_BYTES != want {
+            off += (want + PAGE_BYTES - off % PAGE_BYTES) % PAGE_BYTES;
         }
         out.resize(off as usize, 0);
         let seg_base = first.address;
@@ -242,20 +304,20 @@ pub fn write_executable(
     let strtab_name = name_of(".strtab", &mut shstrtab);
     let shstrtab_name = name_of(".shstrtab", &mut shstrtab);
     let mut strtab = vec![0u8];
-    let mut symtab = vec![0u8; 24];
+    let mut symtab = vec![0u8; usize::from(SYM_BYTES)];
     let mut ordered: Vec<&OutSymbol> = symbols.iter().filter(|s| !s.global).collect();
     let first_global = 1 + ordered.len();
     ordered.extend(symbols.iter().filter(|s| s.global));
     for s in ordered {
         let name = name_of(&s.name, &mut strtab);
         symtab.extend_from_slice(&name.to_le_bytes());
-        let bind = if s.global { 1u8 } else { 0 };
-        let kind = if s.function { 2u8 } else { 0 };
-        symtab.push(bind << 4 | kind);
-        symtab.push(0);
+        let bind = if s.global { STB_GLOBAL } else { STB_LOCAL };
+        let kind = if s.function { STT_FUNC } else { STT_NOTYPE };
+        symtab.push(bind << ST_BIND_SHIFT | kind);
+        symtab.push(STV_DEFAULT);
         let shndx: u16 = match s.section {
             Some(i) => u16::try_from(i + 1).map_err(|_| "too many sections")?,
-            None => 0xfff1,
+            None => SHN_ABS,
         };
         symtab.extend_from_slice(&shndx.to_le_bytes());
         symtab.extend_from_slice(&s.value.to_le_bytes());
@@ -267,10 +329,10 @@ pub fn write_executable(
         out.extend_from_slice(data);
         at
     };
-    let symtab_off = place(&symtab, 8, &mut out);
+    let symtab_off = place(&symtab, ELF64_TABLE_ALIGN, &mut out);
     let strtab_off = place(&strtab, 1, &mut out);
     let shstrtab_off = place(&shstrtab, 1, &mut out);
-    let shoff = (out.len() as u64).div_ceil(8) * 8;
+    let shoff = (out.len() as u64).div_ceil(ELF64_TABLE_ALIGN) * ELF64_TABLE_ALIGN;
     out.resize(shoff as usize, 0);
     let shnum = sections.len() + 4;
     let section_header = |out: &mut Vec<u8>,
@@ -315,7 +377,7 @@ pub fn write_executable(
             s.mem_bytes,
             0,
             0,
-            8,
+            OUT_SECTION_ALIGN,
             0,
         );
     }
@@ -330,8 +392,8 @@ pub fn write_executable(
         symtab.len() as u64,
         strtab_index,
         first_global as u32,
-        8,
-        24,
+        ELF64_TABLE_ALIGN,
+        u64::from(SYM_BYTES),
     );
     section_header(
         &mut out,
@@ -360,27 +422,29 @@ pub fn write_executable(
         0,
     );
     // ELF header.
-    let mut h = Vec::with_capacity(64);
-    h.extend_from_slice(b"\x7fELF");
-    h.extend_from_slice(&[2, 1, 1, 0]);
+    let ehdr_bytes = usize::from(EHDR_BYTES);
+    let phdr_bytes = usize::from(PHDR_BYTES);
+    let mut h = Vec::with_capacity(ehdr_bytes);
+    h.extend_from_slice(ELFMAG);
+    h.extend_from_slice(&[ELFCLASS64, ELFDATA2LSB, EV_CURRENT, ELFOSABI_NONE]);
     h.extend_from_slice(&[0; 8]);
-    h.extend_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+    h.extend_from_slice(&ET_EXEC.to_le_bytes());
     h.extend_from_slice(&machine.to_le_bytes());
-    h.extend_from_slice(&1u32.to_le_bytes());
+    h.extend_from_slice(&u32::from(EV_CURRENT).to_le_bytes());
     h.extend_from_slice(&entry.to_le_bytes());
     h.extend_from_slice(&ehsize.to_le_bytes()); // phoff
     h.extend_from_slice(&shoff.to_le_bytes());
     h.extend_from_slice(&e_flags.to_le_bytes());
-    h.extend_from_slice(&64u16.to_le_bytes());
-    h.extend_from_slice(&56u16.to_le_bytes());
+    h.extend_from_slice(&EHDR_BYTES.to_le_bytes());
+    h.extend_from_slice(&PHDR_BYTES.to_le_bytes());
     h.extend_from_slice(&(phnum as u16).to_le_bytes());
-    h.extend_from_slice(&64u16.to_le_bytes());
+    h.extend_from_slice(&SHDR_BYTES.to_le_bytes());
     h.extend_from_slice(&(shnum as u16).to_le_bytes());
     h.extend_from_slice(&((shnum - 1) as u16).to_le_bytes());
-    out[..64].copy_from_slice(&h);
+    out[..ehdr_bytes].copy_from_slice(&h);
     for (i, (seg, (vaddr, off, filesz, memsz))) in segments.iter().zip(&seg_info).enumerate() {
-        let p = 64 + i * 56;
-        let mut ph = Vec::with_capacity(56);
+        let p = ehdr_bytes + i * phdr_bytes;
+        let mut ph = Vec::with_capacity(phdr_bytes);
         ph.extend_from_slice(&PT_LOAD.to_le_bytes());
         ph.extend_from_slice(&seg.flags.to_le_bytes());
         ph.extend_from_slice(&off.to_le_bytes());
@@ -388,8 +452,8 @@ pub fn write_executable(
         ph.extend_from_slice(&vaddr.to_le_bytes());
         ph.extend_from_slice(&filesz.to_le_bytes());
         ph.extend_from_slice(&memsz.to_le_bytes());
-        ph.extend_from_slice(&PAGE.to_le_bytes());
-        out[p..p + 56].copy_from_slice(&ph);
+        ph.extend_from_slice(&PAGE_BYTES.to_le_bytes());
+        out[p..p + phdr_bytes].copy_from_slice(&ph);
     }
     Ok((out, seg_info))
 }

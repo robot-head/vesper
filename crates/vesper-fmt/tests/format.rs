@@ -1047,3 +1047,63 @@ fn g() -> u64 {
 "
     );
 }
+#[test]
+fn a_closure_or_block_after_a_calls_other_arguments_stays_on_its_line_like_rustfmt() {
+    // A closure with a block body, or a block, as the last argument keeps the
+    // call's line with the arguments before it, up to the full width.
+    assert_eq!(
+        verify(
+            "fn f(){let half=option_and_then(some,|x:u64|->Option[u64]{let y=x/2;Option::Some(y)});\
+             each(|item|{put(item);});keep(a,{let v=1;v});\
+             fold_all_the_values(first_long_argument_value,second_long_argument_value,|acc,next_item_ab|{acc+next_item_ab});}"
+        ),
+        "fn f() {
+    let half = option_and_then(some, |x: u64| -> Option[u64] {
+        let y = x / 2;
+        Option::Some(y)
+    });
+    each(|item| {
+        put(item);
+    });
+    keep(a, {
+        let v = 1;
+        v
+    });
+    fold_all_the_values(first_long_argument_value, second_long_argument_value, |acc, next_item_ab| {
+        acc + next_item_ab
+    });
+}
+"
+    );
+    // A first line past the width, a closure before another argument, and a
+    // trailing comma break as before; a closure without a block fits.
+    assert_eq!(
+        verify(
+            "fn f(){fold_all_the_values(first_long_argument_value,second_long_argument_value,|acc,next_item_abc|{acc+next_item_abc});\
+             apply(|x|{x},y);apply(a,|x|{x},);apply(a,|x|x+1);}"
+        ),
+        "fn f() {
+    fold_all_the_values(
+        first_long_argument_value,
+        second_long_argument_value,
+        |acc, next_item_abc| {
+            acc + next_item_abc
+        }
+    );
+    apply(
+        |x| {
+            x
+        },
+        y
+    );
+    apply(
+        a,
+        |x| {
+            x
+        },
+    );
+    apply(a, |x| x + 1);
+}
+"
+    );
+}

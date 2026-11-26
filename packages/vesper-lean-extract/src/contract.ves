@@ -148,10 +148,7 @@ fn signature_error(
                 break;
             }
             k = wrapping_sub(k, 1);
-            err.push(match digits.try_get(k) {
-                Option::Some(c) => c,
-                Option::None => 48,
-            });
+            err.push(digits.try_get(k).unwrap_or(48));
         }
         put(inout err, in " parameter(s) of the function's types");
         put(inout err, in tail);
@@ -485,10 +482,7 @@ pub fn contracts(
             unsupported_prefix(inout b, inout err, c.f);
             put(inout err, in "it has no total form: ");
             for q in u64_at(in ra, fi)..u64_at(in rz, fi) {
-                err.push(match reasons.try_get(q) {
-                    Option::Some(ch) => ch,
-                    Option::None => 0,
-                });
+                err.push(reasons.try_get(q).unwrap_or(0));
             }
             return false;
         }

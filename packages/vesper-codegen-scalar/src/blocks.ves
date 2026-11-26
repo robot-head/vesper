@@ -251,15 +251,32 @@ fn dfs_from(
     }
 }
 
+// One function's block layout: the order its blocks are lowered in, the
+// blocks on a cycle, and the blocks the walk seals as it lowers them (in
+// lowering order).
+pub struct Layout {
+    order: ChunkSeq[u64],
+    cyclic: ChunkSeq[u64],
+    sealed: ChunkSeq[u64],
+}
+
 // Prints the `order`, `cyclic` and `sealed` lines of one function.
 pub fn block_layout(in program: Program, func: FnRow, inout out: ChunkSeq[u8]) {
+    let blocks = layout(in program, func);
+    list(inout out, in "order", in blocks.order);
+    list(inout out, in "cyclic", in blocks.cyclic);
+    list(inout out, in "sealed", in blocks.sealed);
+}
+
+// The block layout of `func`.
+pub fn layout(in program: Program, func: FnRow) -> Layout {
     let n = func.bc;
-    let empty: ChunkSeq[u64] = ChunkSeq::new[u64]();
     if n == 0 {
-        list(inout out, in "order", in empty);
-        list(inout out, in "cyclic", in empty);
-        list(inout out, in "sealed", in empty);
-        return;
+        return Layout {
+            order: ChunkSeq::new[u64](),
+            cyclic: ChunkSeq::new[u64](),
+            sealed: ChunkSeq::new[u64]()
+        };
     }
     let edges = targets(in program, func);
     let mut graph = build(in edges, n);
@@ -379,7 +396,5 @@ pub fn block_layout(in program: Program, func: FnRow, inout out: ChunkSeq[u8]) {
             set64(inout pending, target, wrapping_sub(u64_at(in pending, target), 1));
         }
     }
-    list(inout out, in "order", in order);
-    list(inout out, in "cyclic", in cyclic_list);
-    list(inout out, in "sealed", in sealed);
+    Layout { order: order, cyclic: cyclic_list, sealed: sealed }
 }

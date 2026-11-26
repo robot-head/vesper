@@ -527,7 +527,8 @@ fn calls_out(in p: Program, in names: Names, inst: InstRow) -> bool {
     )
 }
 
-// `bounds_hoist::keeps_length` of a `SeqOp`'s `Debug` text.
+// `bounds_hoist::keeps_length` of a `SeqOp`'s `Debug` text, fixed-width
+// reads and writes included (#2022).
 fn keeps_length(in names: Names, s: u32) -> bool {
     names.spells(s, in "Get".as_bytes())
         || names.spells(s, in "SliceGet".as_bytes())
@@ -539,6 +540,7 @@ fn keeps_length(in names: Names, s: u32) -> bool {
         || names.spells(s, in "SliceLen".as_bytes())
         || names.spells(s, in "AsSlice".as_bytes())
         || names.spells(s, in "SubSlice".as_bytes())
+        || names.has_prefix(s, in "Wide(".as_bytes())
 }
 
 // `keeps_in_home` (#1330).

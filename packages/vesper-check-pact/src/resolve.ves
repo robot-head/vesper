@@ -390,10 +390,7 @@ fn trim_end_len(in b: Slice[u8]) -> u64 {
         if len == 0 {
             break;
         }
-        let c = match b.try_get(wrapping_sub(len, 1)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let c = b.try_get(wrapping_sub(len, 1)).unwrap_or(0);
         if c == 32 || c == 9 || c == 10 || c == 13 {
             len = wrapping_sub(len, 1);
         } else {
@@ -437,10 +434,7 @@ fn unique_assoc_trait(in d: Decls, in names: Names, assoc: u32) -> (bool, u64, C
 
 pub fn put_bytes(inout out: ChunkSeq[u8], in b: Slice[u8]) {
     for i in 0..b.len() {
-        let c = match b.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let c = b.try_get(i).unwrap_or(0);
         out.push(c);
     }
 }
@@ -647,10 +641,7 @@ fn add_gen_bounds(
     for bi in 0..b_trait.len() {
         let gi = w(u32_at(in b_gen_idx, bi));
         let gname = u32_at(in gen_names, gi);
-        let grow = match gen_rows.try_get(gi) {
-            Option::Some(v) => v,
-            Option::None => false,
-        };
+        let grow = gen_rows.try_get(gi).unwrap_or(false);
         if grow {
             continue;
         }
@@ -854,10 +845,7 @@ pub fn select_in_cx(
     args.extend(in cx.args.as_slice());
     let arg_a = n32(args.len());
     for i in 0..targs.len() {
-        let ty = match targs.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let ty = targs.try_get(i).unwrap_or(0);
         args.push(QArg { is_row: false, ty: ty });
     }
     let mut env_params = ChunkSeq::with_capacity[Gen](cx.env_params.len());
@@ -1319,14 +1307,8 @@ fn eq_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
         return false;
     }
     for i in 0..a.len() {
-        let ca = match a.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
-        let cb = match b.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let ca = a.try_get(i).unwrap_or(0);
+        let cb = b.try_get(i).unwrap_or(0);
         if ca != cb {
             return false;
         }

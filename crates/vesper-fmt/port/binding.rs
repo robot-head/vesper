@@ -141,6 +141,79 @@ impl<'a> ModelRef<'a> {
     }
 }
 
+/// Owned handle of a Vesper `RecoveryFormat` value: its words, which own the Vesper
+/// allocations they point to. Dropping it calls `vesper_fmt_RecoveryFormat_drop`.
+pub struct RecoveryFormat {
+    words: [u64; 7],
+}
+
+impl RecoveryFormat {
+    /// # Safety
+    /// `words` must hold a `RecoveryFormat` value of this library that the caller owns.
+    unsafe fn from_words(words: &[u64]) -> Self {
+        let mut owned = [0u64; 7];
+        owned.copy_from_slice(&words[..7]);
+        Self { words: owned }
+    }
+
+    /// A borrowed view of the value.
+    pub fn as_ref(&self) -> RecoveryFormatRef<'_> {
+        RecoveryFormatRef { words: &self.words }
+    }
+}
+
+impl Drop for RecoveryFormat {
+    fn drop(&mut self) {
+        // SAFETY: the handle owns its words and is dropped once.
+        unsafe { vesper_fmt_RecoveryFormat_drop(self.words.as_mut_ptr()) };
+    }
+}
+
+impl core::fmt::Debug for RecoveryFormat {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("RecoveryFormat { .. }")
+    }
+}
+
+// SAFETY: the handle owns its Vesper allocations exclusively (no Vesper
+// code keeps a reference to them), and they are plain heap memory.
+unsafe impl Send for RecoveryFormat {}
+// SAFETY: shared access only reads the words and the memory they own.
+unsafe impl Sync for RecoveryFormat {}
+
+/// A borrowed view of a Vesper `RecoveryFormat` value, read in place.
+#[derive(Clone, Copy)]
+pub struct RecoveryFormatRef<'a> {
+    words: &'a [u64],
+}
+
+impl<'a> RecoveryFormatRef<'a> {
+    pub fn ok(&self) -> bool {
+        let w: &'a [u64] = self.words;
+        <bool as Abi>::get(&w[0..])
+    }
+    pub fn fail(&self) -> crate::port::FmtFail {
+        let w: &'a [u64] = self.words;
+        <crate::port::FmtFail as Abi>::get(&w[1..])
+    }
+    pub fn output(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[3]) }
+    }
+    pub fn changed(&self) -> bool {
+        let w: &'a [u64] = self.words;
+        <bool as Abi>::get(&w[4..])
+    }
+    pub fn edits(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[5]) }
+    }
+    pub fn formatted(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[6..])
+    }
+}
+
 /// Owned handle of a Vesper `Verified` value: its words, which own the Vesper
 /// allocations they point to. Dropping it calls `vesper_fmt_Verified_drop`.
 pub struct Verified {
@@ -226,12 +299,14 @@ unsafe extern "C" {
     fn vesper_fmt_seq_free(seq: i64) -> i64;
     fn vesper_fmt_live_allocations() -> i64;
     fn vesper_fmt_Model_drop(value: *mut u64) -> i64;
+    fn vesper_fmt_RecoveryFormat_drop(value: *mut u64) -> i64;
     fn vesper_fmt_Verified_drop(value: *mut u64) -> i64;
     fn vesper_fmt_blake3(result: *mut u64, data: *mut u64) -> i64;
     fn vesper_fmt_fail_code(f: *mut u64) -> i64;
     fn vesper_fmt_fail_offset(f: *mut u64) -> i64;
     fn vesper_fmt_format(source: *mut u64, max_input_bytes: i64, max_output_bytes: i64, max_tokens: i64, max_doc_nodes: i64, max_depth: i64, max_work: i64, fail: *mut u64) -> i64;
     fn vesper_fmt_format_for_verification(result: *mut u64, source: *mut u64) -> i64;
+    fn vesper_fmt_format_recovery(result: *mut u64, source: *mut u64, max_input_bytes: i64, max_output_bytes: i64, max_tokens: i64, max_doc_nodes: i64, max_depth: i64, max_work: i64) -> i64;
     fn vesper_fmt_hash_hex(h: *mut u64) -> i64;
     fn vesper_fmt_model_args(v: *mut u64) -> i64;
     fn vesper_fmt_model_comments(v: *mut u64) -> i64;
@@ -244,6 +319,12 @@ unsafe extern "C" {
     fn vesper_fmt_no_proof_fail(result: *mut u64) -> i64;
     fn vesper_fmt_proof_limits_default(result: *mut u64) -> i64;
     fn vesper_fmt_proof_limits_valid(l: *mut u64) -> i64;
+    fn vesper_fmt_recovery_changed(r: *mut u64) -> i64;
+    fn vesper_fmt_recovery_edits(r: *mut u64) -> i64;
+    fn vesper_fmt_recovery_error(result: *mut u64, r: *mut u64) -> i64;
+    fn vesper_fmt_recovery_formatted(r: *mut u64) -> i64;
+    fn vesper_fmt_recovery_ok(r: *mut u64) -> i64;
+    fn vesper_fmt_recovery_output(r: *mut u64) -> i64;
     fn vesper_fmt_verified_changed(v: *mut u64) -> i64;
     fn vesper_fmt_verified_error(result: *mut u64, v: *mut u64) -> i64;
     fn vesper_fmt_verified_output(v: *mut u64) -> i64;
@@ -317,6 +398,16 @@ pub fn format_for_verification(source: &str) -> Verified {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_str(source, |view_source| unsafe { vesper_fmt_format_for_verification(result.as_mut_ptr(), view_source) });
     unsafe { Verified::from_words(&result[0..]) }
+}
+
+/// Calls `format_recovery` of the Vesper library `fmt` (`vesper_fmt_format_recovery`).
+pub fn format_recovery(source: &str, max_input_bytes: u64, max_output_bytes: u64, max_tokens: u64, max_doc_nodes: u64, max_depth: u64, max_work: u64) -> RecoveryFormat {
+    let mut result = [0u64; 7];
+    // SAFETY: `vesper_fmt_format_recovery` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_str(source, |view_source| unsafe { vesper_fmt_format_recovery(result.as_mut_ptr(), view_source, max_input_bytes as i64, max_output_bytes as i64, max_tokens as i64, max_doc_nodes as i64, max_depth as i64, max_work as i64) });
+    unsafe { RecoveryFormat::from_words(&result[0..]) }
 }
 
 /// Calls `hash_hex` of the Vesper library `fmt` (`vesper_fmt_hash_hex`).
@@ -439,6 +530,67 @@ pub fn proof_limits_valid(l: crate::port::ProofLimits) -> bool {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_fmt_proof_limits_valid(arg_l.as_mut_ptr()) };
     raw != 0
+}
+
+/// Calls `recovery_changed` of the Vesper library `fmt` (`vesper_fmt_recovery_changed`).
+pub fn recovery_changed(r: &RecoveryFormat) -> bool {
+    let mut arg_r = r.words;
+    // SAFETY: `vesper_fmt_recovery_changed` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_fmt_recovery_changed(arg_r.as_mut_ptr()) };
+    raw != 0
+}
+
+/// Calls `recovery_edits` of the Vesper library `fmt` (`vesper_fmt_recovery_edits`).
+pub fn recovery_edits(r: &RecoveryFormat) -> Vec<u64> {
+    let mut arg_r = r.words;
+    // SAFETY: `vesper_fmt_recovery_edits` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_fmt_recovery_edits(arg_r.as_mut_ptr()) };
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `recovery_error` of the Vesper library `fmt` (`vesper_fmt_recovery_error`).
+pub fn recovery_error(r: &RecoveryFormat) -> crate::port::FmtFail {
+    let mut result = [0u64; 2];
+    let mut arg_r = r.words;
+    // SAFETY: `vesper_fmt_recovery_error` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_fmt_recovery_error(result.as_mut_ptr(), arg_r.as_mut_ptr()) };
+    <crate::port::FmtFail as Abi>::get(&result[0..])
+}
+
+/// Calls `recovery_formatted` of the Vesper library `fmt` (`vesper_fmt_recovery_formatted`).
+pub fn recovery_formatted(r: &RecoveryFormat) -> u64 {
+    let mut arg_r = r.words;
+    // SAFETY: `vesper_fmt_recovery_formatted` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_fmt_recovery_formatted(arg_r.as_mut_ptr()) };
+    raw as u64
+}
+
+/// Calls `recovery_ok` of the Vesper library `fmt` (`vesper_fmt_recovery_ok`).
+pub fn recovery_ok(r: &RecoveryFormat) -> bool {
+    let mut arg_r = r.words;
+    // SAFETY: `vesper_fmt_recovery_ok` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_fmt_recovery_ok(arg_r.as_mut_ptr()) };
+    raw != 0
+}
+
+/// Calls `recovery_output` of the Vesper library `fmt` (`vesper_fmt_recovery_output`).
+pub fn recovery_output(r: &RecoveryFormat) -> Vec<u8> {
+    let mut arg_r = r.words;
+    // SAFETY: `vesper_fmt_recovery_output` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_fmt_recovery_output(arg_r.as_mut_ptr()) };
+    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
 }
 
 /// Calls `verified_changed` of the Vesper library `fmt` (`vesper_fmt_verified_changed`).
