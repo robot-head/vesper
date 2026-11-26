@@ -29,6 +29,24 @@ const SUM_BLOCK_STEPS: i64 = 256;
 /// The shortest run [`Codegen::seq_copy_run`] copies with `memmove`.
 pub(super) const SHORT_COPY: i64 = 16;
 
+/// The `vhigh_bits` of a 16-lane compare that holds in every lane.
+const ALL_LANES: i64 = 0xffff;
+/// The letters `A..=Z`.
+const ALPHABET_LETTERS: u8 = 26;
+/// The bit that makes an ASCII upper-case letter lower case.
+const ASCII_CASE_BIT: u8 = 0x20;
+/// The position of [`ASCII_CASE_BIT`].
+const ASCII_CASE_SHIFT: i64 = 5;
+/// The top bit of a byte, clear in every ASCII byte.
+const ASCII_HIGH_BIT: u8 = 0x80;
+/// The low seven bits of a byte.
+const ASCII_LOW_BITS: u8 = 0x7f;
+/// The shift that moves [`ASCII_HIGH_BIT`] down to [`ASCII_CASE_BIT`].
+const HIGH_TO_CASE_SHIFT: i64 = 2;
+/// Bits of each of the two words of a `find_not_in` class (`lo` for bytes
+/// below 64, `hi` for 64..128).
+const CLASS_WORD_BITS: i64 = 64;
+
 fn little() -> MemFlags {
     MemFlags::new().with_endianness(ir::Endianness::Little)
 }
@@ -1072,8 +1090,8 @@ impl<M: Module> Codegen<'_, '_, M> {
         };
         Lower {
             a: splat(self, b'A'),
-            span: splat(self, 26),
-            case_bit: splat(self, 0x20),
+            span: splat(self, ALPHABET_LETTERS),
+            case_bit: splat(self, ASCII_CASE_BIT),
         }
     }
 
@@ -1319,7 +1337,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
             let same = self.b.ins().icmp(IntCC::Equal, a, b);
             let bits = self.b.ins().vhigh_bits(types::I32, same);
-            let all = self.b.ins().icmp_imm(IntCC::Equal, bits, 0xffff);
+            let all = self.b.ins().icmp_imm(IntCC::Equal, bits, ALL_LANES);
             let k2 = self.b.ins().iadd_imm(k, LANES);
             let mut back: Vec<ir::BlockArg> = vec![k2.into()];
             back.extend(self.carried(&carried));
@@ -1428,14 +1446,14 @@ impl<M: Module> Codegen<'_, '_, M> {
             let b = self.b.ins().load(types::I8X16, little(), b, 0);
             let same = self.b.ins().icmp(IntCC::Equal, a, b);
             let bits = self.b.ins().vhigh_bits(types::I32, same);
-            let all = self.b.ins().icmp_imm(IntCC::Equal, bits, 0xffff);
+            let all = self.b.ins().icmp_imm(IntCC::Equal, bits, ALL_LANES);
             let k2 = self.b.ins().iadd_imm(k, LANES);
             let mut back: Vec<ir::BlockArg> = vec![k2.into()];
             back.extend(self.carried(&carried));
             // The final step may overlap bytes the loop already found
             // equal, so its lowest differing lane is still the first.
             let ones = self.b.ins().bnot(bits);
-            let diff = self.b.ins().band_imm(ones, 0xffff);
+            let diff = self.b.ins().band_imm(ones, ALL_LANES);
             self.branch(all, head, &back, lane, &[k.into(), diff.into()]);
         } else {
             self.jump(scalar, &[zero.into()]);
@@ -1672,7 +1690,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         let v = self.b.ins().load(types::I8X16, little(), at, 0);
         let same = self.b.ins().icmp(IntCC::Equal, v, splat);
         let bits = self.b.ins().vhigh_bits(types::I32, same);
-        let all = self.b.ins().icmp_imm(IntCC::Equal, bits, 0xffff);
+        let all = self.b.ins().icmp_imm(IntCC::Equal, bits, ALL_LANES);
         self.branch(all, next, &[], miss, &[]);
 
         self.b.switch_to_block(next);
@@ -1686,7 +1704,7 @@ impl<M: Module> Codegen<'_, '_, M> {
 
         // The first byte of the step that differs from `b`.
         self.b.switch_to_block(miss);
-        let differ = self.b.ins().bxor_imm(bits, 0xffff);
+        let differ = self.b.ins().bxor_imm(bits, ALL_LANES);
         let first = self.b.ins().ctz(differ);
         let first = self.b.ins().uextend(types::I64, first);
         let j3 = self.b.ins().iadd(j, first);
@@ -1721,12 +1739,18 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
             Needle::NotIn { lo, hi, high } => {
                 // Bit `b & 63` of `lo` (b < 64) or `hi` (b < 128), else `high`.
-                let low_half = self.b.ins().icmp_imm(IntCC::UnsignedLessThan, b, 64);
+                let low_half = self
+                    .b
+                    .ins()
+                    .icmp_imm(IntCC::UnsignedLessThan, b, CLASS_WORD_BITS);
                 let word = self.b.ins().select(low_half, lo, hi);
-                let shift = self.b.ins().band_imm(b, 63);
+                let shift = self.b.ins().band_imm(b, CLASS_WORD_BITS - 1);
                 let bit = self.b.ins().ushr(word, shift);
                 let bit = self.b.ins().band_imm(bit, 1);
-                let ascii = self.b.ins().icmp_imm(IntCC::UnsignedLessThan, b, 128);
+                let ascii =
+                    self.b
+                        .ins()
+                        .icmp_imm(IntCC::UnsignedLessThan, b, i64::from(ASCII_HIGH_BIT));
                 let member = self.b.ins().select(ascii, bit, high);
                 self.b.ins().icmp_imm(IntCC::Equal, member, 0)
             }
@@ -1812,9 +1836,12 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// `a..=z`.
     fn lower_scalar(&mut self, b: ir::Value) -> ir::Value {
         let from_a = self.b.ins().iadd_imm(b, -i64::from(b'A'));
-        let upper = self.b.ins().icmp_imm(IntCC::UnsignedLessThan, from_a, 26);
+        let upper =
+            self.b
+                .ins()
+                .icmp_imm(IntCC::UnsignedLessThan, from_a, i64::from(ALPHABET_LETTERS));
         let upper = self.b.ins().uextend(types::I64, upper);
-        let case_bit = self.b.ins().ishl_imm(upper, 5);
+        let case_bit = self.b.ins().ishl_imm(upper, ASCII_CASE_SHIFT);
         self.b.ins().bor(b, case_bit)
     }
 
@@ -1883,13 +1910,13 @@ impl<M: Module> Codegen<'_, '_, M> {
             let r = u64::from_le_bytes([byte; 8]);
             (if ty == types::I64 { r } else { r & 0xffff_ffff }) as i64
         };
-        let low7 = self.b.ins().band_imm(w, rep(0x7f));
-        let at_least_a = self.b.ins().iadd_imm(low7, rep(0x80 - b'A'));
-        let past_z = self.b.ins().iadd_imm(low7, rep(0x80 - b'Z' - 1));
+        let low7 = self.b.ins().band_imm(w, rep(ASCII_LOW_BITS));
+        let at_least_a = self.b.ins().iadd_imm(low7, rep(ASCII_HIGH_BIT - b'A'));
+        let past_z = self.b.ins().iadd_imm(low7, rep(ASCII_HIGH_BIT - b'Z' - 1));
         let upper = self.b.ins().band_not(at_least_a, past_z);
         let upper = self.b.ins().band_not(upper, w);
-        let upper = self.b.ins().band_imm(upper, rep(0x80));
-        let case_bit = self.b.ins().ushr_imm(upper, 2);
+        let upper = self.b.ins().band_imm(upper, rep(ASCII_HIGH_BIT));
+        let case_bit = self.b.ins().ushr_imm(upper, HIGH_TO_CASE_SHIFT);
         self.b.ins().bor(w, case_bit)
     }
 
