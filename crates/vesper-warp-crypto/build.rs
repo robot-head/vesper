@@ -32,11 +32,7 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
     // nonce: the packet number skips the fifth IV byte.
     ("nonce", "let m = if i < 4 {", "let m = if i < 5 {"),
     // header: long headers protect five first-byte bits.
-    (
-        "header",
-        "        15\n    } else {\n        31",
-        "        31\n    } else {\n        31",
-    ),
+    ("header", "{ 15 } else { 31 }", "{ 31 } else { 31 }"),
     // sealer: a reused packet number reports a regression.
     (
         "sealer",
