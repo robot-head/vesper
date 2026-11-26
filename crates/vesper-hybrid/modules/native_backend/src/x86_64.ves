@@ -102,6 +102,8 @@ const IMM32_BYTES: u64 = 4;
 const IMM64_BYTES: u64 = 8;
 
 pub const ADD_RM_R64: u8 = 0x01;
+pub const ADC_RM_R64: u8 = 0x11;
+pub const SBB_RM_R64: u8 = 0x19;
 pub const SUB_RM_R64: u8 = 0x29;
 pub const AND_RM_R64: u8 = 0x21;
 pub const OR_RM_R64: u8 = 0x09;

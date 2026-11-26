@@ -10,6 +10,8 @@ mod binding;
 mod elf;
 #[path = "native_backend/elf_host.rs"]
 mod elf_host;
+#[path = "native_backend/wide.rs"]
+mod wide;
 
 use cranelift_codegen::ir::{
     AbiParam, Block, BlockArg, BlockCall, Endianness, InstBuilder, JumpTableData, MemFlags, Opcode,

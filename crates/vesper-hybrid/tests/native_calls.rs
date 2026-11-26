@@ -10,6 +10,7 @@ mod binding;
 use cranelift_codegen::{
     binemit::Reloc,
     ir::{AbiParam, Function, InstBuilder, MemFlags, StackSlotData, StackSlotKind, types},
+    settings::{self, Configurable},
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -99,11 +100,11 @@ fn call_records_require_relocations_and_keep_discarded_calls() {
 }
 
 fn jit_module() -> JITModule {
+    let mut flags = settings::builder();
+    flags.set("enable_llvm_abi_extensions", "true").unwrap();
     let isa = cranelift_native::builder()
         .unwrap()
-        .finish(cranelift_codegen::settings::Flags::new(
-            cranelift_codegen::settings::builder(),
-        ))
+        .finish(settings::Flags::new(flags))
         .unwrap();
     JITModule::new(JITBuilder::with_isa(
         isa,
@@ -359,6 +360,83 @@ fn paired_call_results_survive_live_registers_and_spills() {
             );
         }
     }
+}
+
+#[test]
+fn wide_direct_calls_use_consecutive_integer_registers() {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[repr(C)]
+    struct Pair(u64, u64);
+    type Entry = unsafe extern "C" fn(u64, u64, u64, u64) -> Pair;
+
+    let mut module = jit_module();
+    let scalar = AbiParam::new(types::I64);
+    let wide = AbiParam::new(types::I128);
+    let mut signature = module.make_signature();
+    signature.params.extend([scalar, wide, scalar]);
+    signature.returns.push(wide);
+    let callee = module
+        .declare_function("wide", Linkage::Local, &signature)
+        .unwrap();
+    let mut context = module.make_context();
+    let mut builder_context = FunctionBuilderContext::new();
+    context.func.signature = signature.clone();
+    {
+        let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let [lo, input, hi] = *builder.block_params(entry) else {
+            unreachable!()
+        };
+        let addend = builder.ins().iconcat(lo, hi);
+        let sum = builder.ins().iadd(input, addend);
+        builder.ins().return_(&[sum]);
+        builder.seal_all_blocks();
+        builder.finalize();
+    }
+    module.define_function(callee, &mut context).unwrap();
+    module.clear_context(&mut context);
+    context.func.signature = signature.clone();
+    let callee_ref = module.declare_func_in_func(callee, &mut context.func);
+    {
+        let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let [lo, input, hi] = *builder.block_params(entry) else {
+            unreachable!()
+        };
+        let call = builder.ins().call(callee_ref, &[hi, input, lo]);
+        let called = builder.inst_results(call)[0];
+        let output = builder.ins().iadd(input, called);
+        builder.ins().return_(&[output]);
+        builder.seal_all_blocks();
+        builder.finalize();
+    }
+    let reference = module
+        .declare_function("reference_wide", Linkage::Local, &signature)
+        .unwrap();
+    let candidate = module
+        .declare_function("candidate_wide", Linkage::Local, &signature)
+        .unwrap();
+    define_callable(&mut module, candidate, callee, &context.func, 1);
+    module.define_function(reference, &mut context).unwrap();
+    module.finalize_definitions().unwrap();
+    let entry =
+        |id| unsafe { std::mem::transmute::<*const u8, Entry>(module.get_finalized_function(id)) };
+    let reference = entry(reference);
+    let candidate = entry(candidate);
+    for [a, lo, hi, b] in [
+        [1, 2, 3, 4],
+        [9, u64::MAX, u64::MAX, 2],
+        [11, 0, u64::MAX, 31],
+    ] {
+        assert_eq!(unsafe { candidate(a, lo, hi, b) }, unsafe {
+            reference(a, lo, hi, b)
+        });
+    }
+    unsafe { module.free_memory() };
 }
 
 #[test]
