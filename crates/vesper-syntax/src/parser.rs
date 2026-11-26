@@ -379,6 +379,14 @@ pub(crate) fn parse_template_scopes(source: &str) -> Result<Parse, lexer::LexLim
     parse_module_profile(source, ParseLimits::default(), true, true, None, true)
 }
 
+/// [`parse_template_scopes`], the parse of sugar template scopes, for
+/// tests/self_host_front_v2.rs (`@vesper/front`'s
+/// `parse_template_tables`); nothing else calls it.
+#[doc(hidden)]
+pub fn parse_template_cst(source: &str) -> Result<Parse, lexer::LexLimit> {
+    parse_template_scopes(source)
+}
+
 fn parse_module_profile(
     source: &str,
     limits: ParseLimits,

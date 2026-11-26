@@ -47,6 +47,9 @@ divergent-ir-opt = []
 # The same check for the trait declaration pass (#1185): every package with
 # trait declarations gets one made-up E0600.
 divergent-pact = []
+# The same check for the Lean extraction module (#1341): every module text
+# comes back empty.
+divergent-lean-extract = []
 
 [dependencies]
 vesper = { path = "../.." }

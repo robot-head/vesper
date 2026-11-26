@@ -111,6 +111,7 @@ struct Front {
     lex: native::WordFunction,
     editor: native::WordFunction,
     surface: native::WordFunction,
+    template: native::WordFunction,
 }
 
 fn front() -> &'static Front {
@@ -141,6 +142,7 @@ fn front() -> &'static Front {
             lex: compile("lex_count"),
             editor: compile("parse_editor_tables"),
             surface: compile("parse_surface_tables"),
+            template: compile("parse_template_tables"),
         }
     })
 }
@@ -1650,6 +1652,32 @@ fn compare_surface(
     (rust != vesper).then(|| first_difference(source, &rust, &vesper))
 }
 
+/// `parser::parse_template_cst` (sugar template scopes) against
+/// `@vesper/front`'s `parse_template_tables`: for the source itself and
+/// for it as the body of `flow::render`'s wrapper function.
+fn compare_template(source: &str) -> Option<String> {
+    for text in [
+        source.to_owned(),
+        format!("fn template_body() {{{source}\n}}"),
+    ] {
+        let rust = match parser::parse_template_cst(&text) {
+            Ok(parse) => parse_rows(&parse),
+            Err(limit) => Tables {
+                diagnostics: vec![(3, 0, 0, limit.to_string())],
+                ..Tables::default()
+            },
+        };
+        let vesper = tables_from_words(&call_words(&front().template, &text, &[]));
+        if rust != vesper {
+            return Some(format!(
+                "template scopes: {}",
+                first_difference(&text, &rust, &vesper)
+            ));
+        }
+    }
+    None
+}
+
 /// Sources that exercise the surface grammar: sugar declarations with
 /// every sort, hole and repetition form, phrases with heads,
 /// continuations and `ghost`, pattern phrases, pipelines with
@@ -1805,6 +1833,10 @@ fn surface_profile_matches_on_the_sugar_corpus() {
                 failures.push(format!("case {i} (tests: {include_tests}) {shown:?}: {d}"));
             }
         }
+        if let Some(d) = compare_template(source) {
+            let shown: String = source.chars().take(160).collect();
+            failures.push(format!("case {i} {shown:?}: {d}"));
+        }
     }
     if !under_bazel() {
         assert!(cases.len() >= 300, "{} surface sources", cases.len());
@@ -1930,7 +1962,9 @@ fn surface_profile_matches_on_the_fuzzed_corpus() {
             }
         };
         let include_tests = round % 3 == 0;
-        if let Some(d) = compare_surface(&source, sugar_limits(), include_tests) {
+        if let Some(d) = compare_surface(&source, sugar_limits(), include_tests)
+            .or_else(|| compare_template(&source))
+        {
             let shown: String = source.chars().take(200).collect();
             failures.push(format!(
                 "round {round} (tests: {include_tests}) {shown:?}: {d}"
@@ -1978,6 +2012,17 @@ fn surface_profile_matches_under_explicit_limits() {
                 let shown: String = source.chars().take(80).collect();
                 failures.push(format!("{shown:?} {bytes}/{tokens}/{diagnostics}: {d}"));
             }
+        }
+    }
+    // Template scopes at the depth limit: nested phrase bodies, tagged
+    // payloads and phrase operands are blocks there.
+    let phrases = format!("fn f() {{ {} }}", "with_lock m { ".repeat(70));
+    let tagged = format!("fn f() {{ {} }}", "json{ ".repeat(70));
+    let heads = format!("fn f() {{ {} }}", "retry (g(".repeat(45));
+    for source in [deep.as_str(), &phrases, &tagged, &heads, &many] {
+        if let Some(d) = compare_template(source) {
+            let shown: String = source.chars().take(80).collect();
+            failures.push(format!("{shown:?}: {d}"));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

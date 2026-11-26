@@ -16,8 +16,12 @@ pub use cluster::{
 };
 #[path = "kafka_client.rs"]
 mod client;
+#[path = "kafka_codec.rs"]
+mod codec;
 #[path = "kafka.rs"]
 mod kafka;
+#[path = "kafka_bench.rs"]
+mod kafka_bench;
 pub use kafka::{
     GroupOffsetSource, GroupOffsets, HeldProduce, KafkaBinding, KafkaCompression, KafkaConfig,
     KafkaConnection, KafkaPosition, KafkaProducer, KafkaRecord, KafkaSasl, KafkaSecurity,
@@ -42,6 +46,13 @@ pub fn kafka_encode_batch(records: &[KafkaRecord]) -> Result<Vec<u8>, Error> {
             _ => Error::Kafka("encode"),
         }
     })
+}
+/// `rounds` rounds of a consumer group member's Kafka wire traffic, every
+/// request framed and every response decoded (the ABBA benchmark's
+/// `kafka_wire` workload); a digest of the results.
+#[doc(hidden)]
+pub fn kafka_wire_rounds(rounds: u64) -> u64 {
+    kafka_bench::kafka_wire_rounds(rounds)
 }
 pub use log::{InputLog, LogLimits, LogRecovery};
 #[path = "sink.rs"]

@@ -8,8 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 #[path = "../../port/parse.rs"]
 mod parse_binding;
 
+// `pub(super)`: the dyn swap reads its lowered modules back with it too.
 #[path = "../parse_words.rs"]
-mod parse_words;
+pub(super) mod parse_words;
 
 use super::{Registry, Swap, must, on, open, stats};
 

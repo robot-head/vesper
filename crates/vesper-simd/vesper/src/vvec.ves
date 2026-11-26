@@ -1,0 +1,350 @@
+// @vesper/simd::vvec: the portable scalar profile of src/vvec (design
+// §14.3 `VVec`/`VMask` for `u8` lanes). The Rust crate keeps the profile
+// tokens, the bounds checks and the hand-written SVE and RVV `asm!` arms;
+// it lends its lane and mask buffers here in place (`Slice[u8]`,
+// `Slice[u64]`) for the scalar arm of each operation, and the data slice
+// for the whole-loop scan.
+
+use super::ScanCounts;
+
+// The mask words of a profile: 256 lanes, one bit each.
+const MASK_WORDS: u64 = 4;
+const ALL_ONES: u64 = 0xffffffffffffffff;
+
+// `CmpOp` of src/vvec/mod.rs.
+const CMP_EQ: u64 = 0;
+
+// `BinOp` of src/vvec/mod.rs.
+const BIN_XOR: u64 = 0;
+const BIN_AND: u64 = 1;
+const BIN_OR: u64 = 2;
+
+// `MaskOp` of src/vvec/mod.rs.
+const MASK_AND: u64 = 0;
+const MASK_OR: u64 = 1;
+const MASK_XOR: u64 = 2;
+
+// SWAR constants for eight bytes in one word.
+const BYTE_ONES: u64 = 0x0101010101010101;
+const LOW_SEVEN: u64 = 0x7f7f7f7f7f7f7f7f;
+const HIGH_BITS: u64 = 0x8080808080808080;
+const LOW_BYTES: u64 = 0x00ff00ff00ff00ff;
+const PAIR_ONES: u64 = 0x0001000100010001;
+// Moves bit 8i to bit 56 + i (distinct partial products, so no carries).
+const GATHER: u64 = 0x0102040810204080;
+
+fn byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn word(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// Word `i` of the mask whose lanes `0..n` are active.
+fn prefix_word(n: u64, i: u64) -> u64 {
+    let lo = wrapping_mul(i, 64);
+    if n >= wrapping_add(lo, 64) {
+        ALL_ONES
+    } else if n > lo {
+        wrapping_sub(wrapping_shl_u64(1, wrapping_u32(wrapping_sub(n, lo))), 1)
+    } else {
+        0
+    }
+}
+
+// The governing predicate of a strip with `n` active lanes.
+pub fn prefix_bits(n: u64, inout bits: Slice[u64]) {
+    for i in 0..MASK_WORDS {
+        bits.try_set(i, prefix_word(n, i));
+    }
+}
+
+// `a = op(a, b)` lane-wise, clipped to the first `lanes` lanes (the
+// left operand's profile).
+pub fn mask_zip(op: u64, lanes: u64, inout a: Slice[u64], in b: Slice[u64]) {
+    for i in 0..MASK_WORDS {
+        let x = word(in a, i);
+        let y = word(in b, i);
+        let r = if op == MASK_AND {
+            x & y
+        } else if op == MASK_OR {
+            x | y
+        } else if op == MASK_XOR {
+            x ^ y
+        } else {
+            x & (y ^ ALL_ONES)
+        };
+        a.try_set(i, r & prefix_word(lanes, i));
+    }
+}
+
+// Lanes `0..n` set to `value`.
+pub fn splat(value: u8, n: u64, inout lanes: Slice[u8]) {
+    lanes.try_fill(0, n, value);
+}
+
+// Lane `i < n` is `src[i]` where `bits` is active and `passthru`
+// elsewhere; inactive lanes of `src` are never read.
+pub fn load_masked(
+    in src: Slice[u8],
+    in bits: Slice[u64],
+    passthru: u8,
+    n: u64,
+    inout lanes: Slice[u8]
+) {
+    for w in 0..MASK_WORDS {
+        let lo = wrapping_mul(w, 64);
+        if lo < n {
+            let m = word(in bits, w);
+            let end = if wrapping_sub(n, lo) < 64 {
+                wrapping_sub(n, lo)
+            } else {
+                64
+            };
+            if m == ALL_ONES && end == 64 {
+                // A full word of active lanes: eight bytes at a time.
+                for k in 0..8 {
+                    let at = wrapping_add(lo, wrapping_u64(k) << 3);
+                    match src.try_read_u64_le(at) {
+                        Option::Some(v) => {
+                            lanes.try_write_u64_le(at, v);
+                        },
+                        Option::None => (),
+                    }
+                }
+            } else {
+                for j in 0..end {
+                    let i = wrapping_add(lo, j);
+                    let v = if wrapping_shr_u64(m, wrapping_u32(j)) & 1 != 0 {
+                        byte(in src, i)
+                    } else {
+                        passthru
+                    };
+                    lanes.try_set(i, v);
+                }
+            }
+        }
+    }
+}
+
+fn rd(in s: Slice[u8], at: u64) -> u64 {
+    match s.try_read_u64_le(at) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// Lanes `lo..lo + k` of a word, `k` at most 64.
+fn low_lanes(k: u64) -> u64 {
+    if k >= 64 {
+        ALL_ONES
+    } else {
+        wrapping_sub(wrapping_shl_u64(1, wrapping_u32(k)), 1)
+    }
+}
+
+// `dst[i] = lanes[i]` for the active lanes `i < n`; other bytes stay.
+pub fn store_masked(inout dst: Slice[u8], in bits: Slice[u64], n: u64, in lanes: Slice[u8]) {
+    for w in 0..MASK_WORDS {
+        let lo = wrapping_mul(w, 64);
+        if lo < n {
+            let end = if wrapping_sub(n, lo) < 64 {
+                wrapping_sub(n, lo)
+            } else {
+                64
+            };
+            let m = word(in bits, w) & low_lanes(end);
+            if m == ALL_ONES {
+                for k in 0..8 {
+                    let at = wrapping_add(lo, wrapping_u64(k) << 3);
+                    dst.try_write_u64_le(at, rd(in lanes, at));
+                }
+            } else if m != 0 {
+                for j in 0..end {
+                    if wrapping_shr_u64(m, wrapping_u32(j)) & 1 != 0 {
+                        let i = wrapping_add(lo, j);
+                        dst.try_set(i, byte(in lanes, i));
+                    }
+                }
+            }
+        }
+    }
+}
+
+// One bit per byte of `z` whose high bit is set, byte `i` at bit `i`.
+fn gather_high_bits(z: u64) -> u64 {
+    wrapping_mul(z >> 7, GATHER) >> 56
+}
+
+// The mask of lanes `i < n` where `a[i] op b[i]` (equal, or unsigned
+// less-than). Equality runs eight lanes per word.
+pub fn compare(op: u64, n: u64, in a: Slice[u8], in b: Slice[u8], inout bits: Slice[u64]) {
+    for w in 0..MASK_WORDS {
+        let lo = wrapping_mul(w, 64);
+        let mut acc: u64 = 0;
+        if lo < n {
+            let end = if wrapping_sub(n, lo) < 64 {
+                wrapping_sub(n, lo)
+            } else {
+                64
+            };
+            let mut j: u64 = 0;
+            if op == CMP_EQ {
+                for k in 0..(end >> 3) {
+                    let at = wrapping_add(lo, k << 3);
+                    let eq = gather_high_bits(zero_bytes(rd(in a, at) ^ rd(in b, at)));
+                    acc = acc | wrapping_shl_u64(eq, wrapping_u32(k << 3));
+                }
+                j = (end >> 3) << 3;
+            }
+            for t in j..end {
+                let i = wrapping_add(lo, t);
+                let x = byte(in a, i);
+                let y = byte(in b, i);
+                let hit = if op == CMP_EQ {
+                    x == y
+                } else {
+                    x < y
+                };
+                if hit {
+                    acc = acc | wrapping_shl_u64(1, wrapping_u32(t));
+                }
+            }
+        }
+        bits.try_set(w, acc);
+    }
+}
+
+fn binary_word(op: u64, x: u64, y: u64) -> u64 {
+    if op == BIN_XOR {
+        x ^ y
+    } else if op == BIN_AND {
+        x & y
+    } else if op == BIN_OR {
+        x | y
+    } else {
+        // Bytewise wrapping add: the low seven bits carry within a byte,
+        // the high bit is their sum's high bit XOR both high bits.
+        wrapping_add(x & LOW_SEVEN, y & LOW_SEVEN) ^ ((x ^ y) & HIGH_BITS)
+    }
+}
+
+// `out[i] = a[i] op b[i]` for lanes `i < n` (xor, and, or, wrapping add),
+// eight lanes per word.
+pub fn binary(op: u64, n: u64, in a: Slice[u8], in b: Slice[u8], inout out: Slice[u8]) {
+    let words = n >> 3;
+    for k in 0..words {
+        let at = k << 3;
+        out.try_write_u64_le(at, binary_word(op, rd(in a, at), rd(in b, at)));
+    }
+    for i in (words << 3)..n {
+        let x = widen_u64(byte(in a, i));
+        let y = widen_u64(byte(in b, i));
+        out.try_set(i, wrapping_u8(binary_word(op, x, y)));
+    }
+}
+
+// XOR of lanes `0..n`.
+pub fn reduce_xor(n: u64, in a: Slice[u8]) -> u8 {
+    let words = n >> 3;
+    let mut acc: u64 = 0;
+    for k in 0..words {
+        acc = acc ^ rd(in a, k << 3);
+    }
+    let mut x = fold_word(acc);
+    for i in (words << 3)..n {
+        x = x ^ byte(in a, i);
+    }
+    x
+}
+
+// The XOR of the eight bytes of `w`.
+fn fold_word(w: u64) -> u8 {
+    let x = w ^ (w >> 32);
+    let x = x ^ (x >> 16);
+    let x = x ^ (x >> 8);
+    wrapping_u8(x)
+}
+
+// The bytes of `w` equal to zero, one high bit each (exact: no borrow
+// crosses a byte).
+fn zero_bytes(w: u64) -> u64 {
+    let y = wrapping_add(w & LOW_SEVEN, LOW_SEVEN) | w | LOW_SEVEN;
+    y ^ ALL_ONES
+}
+
+// 1 in each byte of `w` that is not zero (exact: no carry crosses a
+// byte).
+fn nonzero_bytes(w: u64) -> u64 {
+    ((wrapping_add(w & LOW_SEVEN, LOW_SEVEN) | w) & HIGH_BITS) >> 7
+}
+
+// The sum of the eight byte lanes of `w`.
+fn add_lanes(w: u64) -> u64 {
+    let pairs = wrapping_add(w & LOW_BYTES, (w >> 8) & LOW_BYTES);
+    wrapping_mul(pairs, PAIR_ONES) >> 48
+}
+
+// Delimiter count and XOR of `data` (the scalar arm of the whole-loop
+// scan kernel): eight bytes per word, then the bytes after the last word.
+pub fn scan(in data: Slice[u8], delim: u8) -> ScanCounts {
+    let len = data.len();
+    let pattern = wrapping_mul(widen_u64(delim), BYTE_ONES);
+    let words = len >> 3;
+    let mut acc: u64 = 0;
+    // Per-byte counts of the bytes that differ from `delim` in `sums`
+    // (one per lane, at most 252 words between flushes), added up with
+    // one multiply; four words per step.
+    let quads = words >> 2;
+    let mut nonzero: u64 = 0;
+    let mut k: u64 = 0;
+    loop {
+        if k >= quads {
+            break;
+        }
+        let block = if wrapping_sub(quads, k) < 63 {
+            wrapping_sub(quads, k)
+        } else {
+            63
+        };
+        let mut sums: u64 = 0;
+        for t in 0..block {
+            let at = wrapping_add(k, t) << 5;
+            let w0 = rd(in data, at);
+            let w1 = rd(in data, wrapping_add(at, 8));
+            let w2 = rd(in data, wrapping_add(at, 16));
+            let w3 = rd(in data, wrapping_add(at, 24));
+            acc = acc ^ (w0 ^ w1) ^ (w2 ^ w3);
+            let s01 = wrapping_add(nonzero_bytes(w0 ^ pattern), nonzero_bytes(w1 ^ pattern));
+            let s23 = wrapping_add(nonzero_bytes(w2 ^ pattern), nonzero_bytes(w3 ^ pattern));
+            sums = wrapping_add(sums, wrapping_add(s01, s23));
+        }
+        nonzero = wrapping_add(nonzero, add_lanes(sums));
+        k = wrapping_add(k, block);
+    }
+    let mut matches = wrapping_sub(quads << 5, nonzero);
+    for k in (quads << 2)..words {
+        let w = rd(in data, k << 3);
+        acc = acc ^ w;
+        matches = wrapping_add(matches, wrapping_sub(8, add_lanes(nonzero_bytes(w ^ pattern))));
+    }
+    let mut xor = fold_word(acc);
+    for i in (words << 3)..len {
+        let b = byte(in data, i);
+        if b == delim {
+            matches = wrapping_add(matches, 1);
+        }
+        xor = xor ^ b;
+    }
+    ScanCounts {
+        matches: matches,
+        xor: xor
+    }
+}

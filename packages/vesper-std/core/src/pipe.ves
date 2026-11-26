@@ -1,0 +1,49 @@
+// Unwrap a Result with `?` and pass its value to a named function.
+// The later arguments run only if the result succeeds.
+pub sugar pipe_try: infix(`|?>`, pipeline, left) emits eff [Fail] {
+    rule ($result:expr |?> $callee:ident($..args:args)) => {
+        $callee($result?, $..args)
+    }
+}
+
+test {
+    fn record(inout log: i64, step: i64) -> i64 {
+        log = wrapping_add(wrapping_mul(log, 10), step);
+        step
+    }
+
+    fn source(inout log: i64, ok: bool) -> Result[i64, i64] {
+        let value = record(inout log, 1);
+        if ok {
+            Result::Ok(value)
+        } else {
+            Result::Err(90)
+        }
+    }
+
+    fn step(first: i64, second: i64, inout log: i64) -> Result[i64, i64] {
+        let third = record(inout log, 3);
+        Result::Ok(wrapping_add(wrapping_add(first, second), third))
+    }
+
+    fn identity(value: i64) -> i64 {
+        value
+    }
+
+    fn run(inout log: i64, ok: bool) -> i64 eff [Fail[i64]] {
+        source(inout log, ok) |?> step(record(inout log, 2), inout log) |?> identity()
+    }
+
+    // @case success(true, 6, 123)
+    // @case failure(false, 90, 1)
+    fn test_pipe(ok: bool, expected: i64, expected_log: i64) -> bool {
+        let mut log: i64 = 0;
+        let result = handle Fail[i64] in {
+            run(inout log, ok)
+        } with {
+            return value => value,
+            raise(error, _) => error,
+        };
+        result == expected && log == expected_log
+    }
+}

@@ -400,10 +400,37 @@ pub struct Lowered {
     pub boxed: BTreeSet<String>,
 }
 
+/// Swap-in point for [`lower`] (front-end wiring slice 4, `#1976`): the
+/// hybrid fills it from `@vesper/check-dyn`. `None` falls back to Rust.
+/// What [`lower`] returns.
+pub type LowerResult = Result<Lowered, Vec<Diagnostic>>;
+
+#[derive(Clone, Copy)]
+pub struct DynTraitTable {
+    pub lower: fn(&Module) -> Option<LowerResult>,
+}
+
+static DYN_TRAIT: std::sync::OnceLock<DynTraitTable> = std::sync::OnceLock::new();
+
+pub fn install_dyn_trait(table: DynTraitTable) -> Result<(), DynTraitTable> {
+    DYN_TRAIT.set(table)
+}
+
 /// Lowers `dyn` parameters to hidden bounded type parameters and checks
 /// that `dyn` appears nowhere else, that every object trait is object
 /// safe, and that no `dyn` value escapes syntactically.
 pub fn lower(module: &Module) -> Result<Lowered, Vec<Diagnostic>> {
+    if let Some(table) = DYN_TRAIT.get()
+        && let Some(lowered) = (table.lower)(module)
+    {
+        return lowered;
+    }
+    rust_lower(module)
+}
+
+/// The Rust [`lower`].
+#[doc(hidden)]
+pub fn rust_lower(module: &Module) -> Result<Lowered, Vec<Diagnostic>> {
     let mut out = module.clone();
     let mut errors = vec![];
     let mut params = BTreeMap::new();

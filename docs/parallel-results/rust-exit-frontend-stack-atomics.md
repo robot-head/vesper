@@ -204,12 +204,51 @@ differential, I found that the Rust dumper in `tests/self_host_ast.rs`
 left out a literal pattern's integer type, which `dump.ves` prints. It
 prints it now.
 
+## Slice 4: the dyn lowering swapped into the hybrid (#1976)
+
+`dyn_fn::lower` and `dyn_trait::lower` now run from `@vesper/check-dyn`
+in the hybrid, over the checker AST crossing of slice 3.
+
+- `src/dyn_fn.rs` and `src/dyn_trait.rs` each gain a swap-in point
+  (`DynFnTable`, `DynTraitTable`). The Rust code is `rust_lower`, the
+  default. `dyn_fn::span_base` is the span base, split out so the swap
+  computes it as Rust does.
+- The writer of the `ast` section moved from `modules/parse` into
+  `@vesper/ast` (`put_ast_words` in `words.ves`), so the parse module and
+  this swap share it.
+- `@vesper/check-dyn` gains `dyn_fn_bytes` and `dyn_trait_bytes` (and the
+  `_words` harness entries). Each reads the section, runs its pass and
+  writes back the outcome: the diagnostics; then, when the pass lowered
+  the module, the lowered `ast` section, then the side tables (origins
+  and end for `dyn_fn`; params, forwards and boxed traits for
+  `dyn_trait`).
+- `tests/common/dyn_words.rs` decodes the outcome, and
+  `crates/vesper-hybrid/src/parse_words.rs` gains `read_ast_section` to
+  read the lowered module. A hidden generic's trait comes from the bound
+  the pass adds for it.
+- `crates/vesper-hybrid/modules/check_dyn` and `src/swap/check_dyn.rs`
+  install both tables. The gate rows stay `open`, because there is no
+  flip-gate configuration yet.
+
+| Check (`crates/vesper-hybrid/tests/check_dyn.rs`, the linked AOT object) | Inputs | Differences |
+|---|--:|--:|
+| `dyn_swap_matches_rust_on_the_repository_sources` | 1,395 sources, both passes forced | 0 |
+| `dyn_swap_matches_rust_on_the_cases` | 8 cases: params, forwards, boxed and failing passes | 0 |
+
+| Timing (`dyn_swap_speed`, both passes, encode plus Vesper plus decode against `rust_lower`) | Ratio | 95% CI |
+|---|--:|--:|
+| The modules the checker sends (9 that use function objects or `dyn`) | **1.09x** | **1.07x..1.10x** (10 rounds) |
+| Every module, forced | 0.83x | 0.80x..0.85x |
+
+Rust lines deleted: 0. `src/dyn_fn.rs` and `src/dyn_trait.rs` go with
+`src/` in the Stage 2 retirement PR (#1397).
+
 ## What is left
 
 - Port the parts of `check::check` one at a time: the core spine
   (#1179), effects (#1180), regions (#1181), dyn (#1183) and Pact (#1185).
-- Swap dyn, atomics/control and regions into the hybrid over the
-  crossing (#1910).
+- Swap atomics/control and regions into the hybrid over the crossing
+  (#1910). Dyn is done (slice 4).
 - `read_expr` still costs about 360 instructions per node, mostly in
   generated code that moves 17-word rows (each `u8` and `bool` field
   takes a word). A packed row layout or narrower fields would cut it

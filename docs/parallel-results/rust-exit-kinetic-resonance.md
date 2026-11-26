@@ -713,6 +713,49 @@ the bounds facts prove `s[i + j]` only from a comparison on `i + j`
 itself, not from `i + k < len` with `k >= j`. Fixing either would bring
 this loop close to 1.0x.
 
+## Part 11: the soft-body substeps flipped (2026-11-26)
+
+`SoftWorld::step` (src/soft.rs) moves to `@vesper/kinetic`
+(vesper/src/soft.ves): integration, the colour-layer projection of distance
+and tetrahedral volume constraints, the ground contact with positional
+friction and the velocities from positions. Every thread count gives the
+one-thread pass's bits, so the port runs them all; `step_with` with a
+contact pass (soft-rigid coupling, `couple`) stays Rust, as does the seed.
+The constraints are packed once at construction (the topology is fixed),
+the particles once per tick, and they are written back only when every lane
+is finite, so a failed step still leaves the world unchanged without the
+Rust build's snapshot copy.
+
+### Measurements
+
+`examples/abba.rs soft-step` (a tetrahedral box of 8 x 4 x 8 cells, 16
+substeps, dropped on a frictional ground: 12 ticks), release,
+`RUSTFLAGS="-C target-cpu=native"`, Linux x86_64: `abba compare 30 5`
+port/Rust **1.25x**; flip gate (30 pairs) mean 1.23x, 95% CI upper
+**1.267x**.
+
+### What changed
+
+- Applying each correction right after computing it gives the Rust build's
+  compute-then-apply bits, because a colour's constraints touch disjoint
+  particles; the position words read for the correction are written back
+  without a second read.
+- Each constraint is projected once per substep right after the multipliers
+  are reset, so its lambda is always 0 when read and its update is never
+  read: the port keeps the `alpha * 0` term and no multiplier lane (1.40x
+  to 1.25x).
+
+### Checks
+
+- `soft_substeps_match_the_rust_build` (tests/port_differential.rs): 96
+  random tetrahedral boxes with pinned particles, long springs, zero and
+  positive compliance, ground on and off, friction and 1-3 solver threads,
+  90 ticks each: SHA-256 and BLAKE3 world hashes equal in all 8,640 ticks.
+- Every vesper-kinetic test passes on the port, golden hashes included.
+- Divergence 14 (`soft`): the volume constraint's `6 V0`;
+  `soft::a_jelly_cube_lands_and_keeps_its_volume` fails and
+  `a_rope_hangs_straight_at_its_length` passes.
+
 ## What is left
 
 - **Resonance:** slab (1.89x) and events (8.00x) stay above the bar until codegen removes their hot-path overhead (gap 7). The Rust
@@ -721,10 +764,11 @@ this loop close to 1.0x.
   plan), the `rtrb` rings (`spsc.rs`) and the denormal registers are not
   ported yet. The SIMD paths are ported (part 3), but they run at 8-48x and
   are bound by gaps 2 and 6.
-- **Kinetic:** every isolated module, the rigid substep solver and the
-  particle world substeps are flipped (parts 8-10). Next, port the
+- **Kinetic:** every isolated module, the rigid substep solver, the
+  particle world substeps and the soft-body substeps are flipped (parts
+  8-11). Next, port the
   `world`/`tile` drivers (detection, parallel substeps), the rest of `rigid`
-  (step driver, narrowphase driver, queries), `soft`,
+  (step driver, narrowphase driver, queries),
   `articulation`, `couple`, `diff`, `rigid_diff`, `rollback`, `snapshot`,
   `detfloat`, `simd` (see `port-p3b-kinetic.md`, "Not ported yet"), then the
   speed of the ported modules (1.3-2.8x in P3b).

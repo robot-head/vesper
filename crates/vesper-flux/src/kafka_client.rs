@@ -2,9 +2,10 @@
 //! leaders, coordinator lookup, retries, the data and admin APIs, an
 //! idempotent / transactional producer and classic consumer-group
 //! membership.
+use super::codec::{self, Head};
 use super::wire::{
-    Batch, Conn, ConnSettings, Fail, KResult, KafkaCompression, KafkaRecord, ProducerStamp, R, W,
-    api, committed_records, decode_batches, encode_batch,
+    Conn, ConnSettings, Fail, KResult, KafkaCompression, KafkaRecord, ProducerStamp, api,
+    encode_batch,
 };
 use crate::Error;
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,6 +16,7 @@ pub(crate) const GROUP: i8 = 0;
 pub(crate) const TXN: i8 = 1;
 
 /// One partition's fetch result.
+#[derive(Debug)]
 pub(crate) struct Fetched {
     pub(crate) high_watermark: i64,
     pub(crate) last_stable: i64,
@@ -127,9 +129,9 @@ impl Client {
         &mut self,
         node: i32,
         key: i16,
-        body: impl FnOnce(&mut W) -> KResult<()>,
+        encode: impl FnOnce(&Head) -> KResult<Vec<u8>>,
     ) -> KResult<Vec<u8>> {
-        let out = self.conn(node)?.call(key, body);
+        let out = self.conn(node)?.call(key, encode);
         if let Err(Fail::Io(_) | Fail::Proto(_)) = &out {
             self.conns.remove(&node);
         }
@@ -170,57 +172,14 @@ impl Client {
 
     fn refresh(&mut self, topic: &str) -> KResult<()> {
         let node = self.any()?;
-        let body = self.call(node, api::METADATA, |w| {
-            w.array(1)?.str(topic)?;
-            w.bool(false).bool(false).bool(false);
-            Ok(())
-        })?;
-        let mut r = R::new(&body, false);
-        r.i32()?;
-        let nb = r.array()?;
-        let mut brokers = BTreeMap::new();
-        for _ in 0..nb {
-            let id = r.i32()?;
-            let host = r.str()?;
-            let port = r.i32()?;
-            r.nstr()?;
-            let addr = if host.contains(':') {
-                format!("[{host}]:{port}")
-            } else {
-                format!("{host}:{port}")
-            };
-            brokers.insert(id, addr);
+        let body = self.call(node, api::METADATA, |h| codec::metadata_request(h, topic))?;
+        let m = codec::metadata(&body, topic);
+        // Leaders of the topic count as they are read, as before an error.
+        for (index, leader) in m.leaders {
+            self.leaders.insert((topic.to_string(), index), leader);
         }
-        r.nstr()?;
-        r.i32()?;
-        let nt = r.array()?;
-        for _ in 0..nt {
-            let code = r.i16()?;
-            let name = r.str()?;
-            r.bool()?;
-            let np = r.array()?;
-            let mut parts = Vec::new();
-            for _ in 0..np {
-                let pcode = r.i16()?;
-                let index = r.i32()?;
-                let leader = r.i32()?;
-                r.i32()?;
-                for _ in 0..3 {
-                    let n = r.array()?;
-                    r.take(n.checked_mul(4).ok_or(Fail::Proto("metadata"))?)?;
-                }
-                parts.push((pcode, index, leader));
-            }
-            r.i32()?;
-            if name == topic {
-                check_code(code, "metadata")?;
-                for (pcode, index, leader) in parts {
-                    if pcode == 0 && leader >= 0 {
-                        self.leaders.insert((name.clone(), index), leader);
-                    }
-                }
-            }
-        }
+        m.status?;
+        let brokers: BTreeMap<i32, String> = m.brokers.into_iter().collect();
         for (id, addr) in brokers {
             if self.brokers.get(&id) != Some(&addr) {
                 self.conns.remove(&id);
@@ -260,29 +219,10 @@ impl Client {
     pub(crate) fn create_topic(&mut self, topic: &str, partitions: i32) -> KResult<()> {
         let r = self.retry(|c| {
             let node = c.any()?;
-            let body = c.call(node, api::CREATE_TOPICS, |w| {
-                w.array(1)?.str(topic)?;
-                w.i32(partitions).i16(1);
-                w.array(0)?;
-                w.array(0)?;
-                w.i32(30_000).bool(false);
-                Ok(())
+            let body = c.call(node, api::CREATE_TOPICS, |h| {
+                codec::create_topic_request(h, topic, partitions)
             })?;
-            let mut r = R::new(&body, false);
-            r.i32()?;
-            let n = r.array()?;
-            for _ in 0..n {
-                r.str()?;
-                let code = r.i16()?;
-                let msg = r.nstr()?;
-                if code != 0 {
-                    return Err(Fail::Code(
-                        code,
-                        format!("create topic {topic}: {}", msg.unwrap_or_default()),
-                    ));
-                }
-            }
-            Ok(())
+            codec::create_topic(&body, topic)
         });
         r?;
         // Wait until every partition has a leader.
@@ -304,25 +244,10 @@ impl Client {
     ) -> KResult<()> {
         self.retry(|c| {
             let node = c.leader(topic, partition)?;
-            let body = c.call(node, api::DELETE_RECORDS, |w| {
-                w.array(1)?.str(topic)?;
-                w.array(1)?.i32(partition).i64(offset);
-                w.i32(30_000);
-                Ok(())
+            let body = c.call(node, api::DELETE_RECORDS, |h| {
+                codec::delete_records_request(h, topic, partition, offset)
             })?;
-            let mut r = R::new(&body, false);
-            r.i32()?;
-            let n = r.array()?;
-            for _ in 0..n {
-                r.str()?;
-                let np = r.array()?;
-                for _ in 0..np {
-                    r.i32()?;
-                    r.i64()?;
-                    check_code(r.i16()?, "delete records")?;
-                }
-            }
-            Ok(())
+            codec::delete_records(&body)
         })
     }
 
@@ -341,30 +266,10 @@ impl Client {
     ) -> KResult<i64> {
         self.retry(|c| {
             let node = c.leader(topic, partition)?;
-            let body = c.call(node, api::LIST_OFFSETS, |w| {
-                w.i32(-1).i8(i8::from(committed));
-                w.array(1)?.str(topic)?;
-                w.array(1)?.i32(partition).i32(-1).i64(ts);
-                Ok(())
+            let body = c.call(node, api::LIST_OFFSETS, |h| {
+                codec::list_offsets_request(h, topic, partition, ts, committed)
             })?;
-            let mut r = R::new(&body, false);
-            r.i32()?;
-            let mut out = None;
-            for _ in 0..r.array()? {
-                r.str()?;
-                for _ in 0..r.array()? {
-                    let p = r.i32()?;
-                    let code = r.i16()?;
-                    r.i64()?;
-                    let offset = r.i64()?;
-                    r.i32()?;
-                    check_code(code, "list offsets")?;
-                    if p == partition {
-                        out = Some(offset);
-                    }
-                }
-            }
-            out.ok_or(Fail::Proto("list offsets"))
+            codec::list_offsets(&body, partition)
         })
     }
 
@@ -379,60 +284,10 @@ impl Client {
         let max_decoded = self.settings.max_response;
         self.retry(|c| {
             let node = c.leader(topic, partition)?;
-            let body = c.call(node, api::FETCH, |w| {
-                w.i32(-1)
-                    .i32(50)
-                    .i32(1)
-                    .i32(max_bytes)
-                    .i8(i8::from(committed));
-                w.i32(0).i32(-1);
-                w.array(1)?.str(topic)?;
-                w.array(1)?
-                    .i32(partition)
-                    .i32(-1)
-                    .i64(offset)
-                    .i64(-1)
-                    .i32(max_bytes);
-                w.array(0)?;
-                w.str("")?;
-                Ok(())
+            let body = c.call(node, api::FETCH, |h| {
+                codec::fetch_request(h, topic, partition, offset, max_bytes, committed)
             })?;
-            let mut r = R::new(&body, false);
-            r.i32()?;
-            check_code(r.i16()?, "fetch")?;
-            r.i32()?;
-            let mut out = None;
-            for _ in 0..r.array()? {
-                r.str()?;
-                for _ in 0..r.array()? {
-                    let p = r.i32()?;
-                    let code = r.i16()?;
-                    let high_watermark = r.i64()?;
-                    let last_stable = r.i64()?;
-                    let log_start = r.i64()?;
-                    let na = r.array()?;
-                    let mut aborted = Vec::with_capacity(na.min(1024));
-                    for _ in 0..na {
-                        aborted.push((r.i64()?, r.i64()?));
-                    }
-                    r.i32()?;
-                    let records = r.nbytes()?.unwrap_or(&[]);
-                    check_code(code, "fetch")?;
-                    if p != partition {
-                        continue;
-                    }
-                    let batches: Vec<Batch> = decode_batches(records, max_decoded)?;
-                    let (records, end) = committed_records(batches, &aborted, committed);
-                    out = Some(Fetched {
-                        high_watermark,
-                        last_stable,
-                        log_start,
-                        records,
-                        end,
-                    });
-                }
-            }
-            out.ok_or(Fail::Proto("fetch response"))
+            codec::fetch(&body, partition, max_decoded, committed)
         })
     }
 
@@ -447,43 +302,10 @@ impl Client {
         batch: &[u8],
     ) -> KResult<i64> {
         let node = self.leader(topic, partition)?;
-        let body = self.call(node, api::PRODUCE, |w| {
-            w.nstr(txn)?;
-            w.i16(-1).i32(30_000);
-            w.array(1)?.str(topic)?;
-            w.array(1)?.i32(partition).bytes(batch)?;
-            Ok(())
+        let body = self.call(node, api::PRODUCE, |h| {
+            codec::produce_request(h, txn, topic, partition, batch)
         })?;
-        let mut r = R::new(&body, false);
-        let mut out = None;
-        for _ in 0..r.array()? {
-            r.str()?;
-            for _ in 0..r.array()? {
-                let p = r.i32()?;
-                let code = r.i16()?;
-                let base = r.i64()?;
-                r.i64()?;
-                r.i64()?;
-                for _ in 0..r.array()? {
-                    r.i32()?;
-                    r.nstr()?;
-                }
-                let msg = r.nstr()?;
-                if p != partition {
-                    continue;
-                }
-                out = Some(match code {
-                    0 => Ok(base),
-                    46 => Ok(-1),
-                    c => Err(Fail::Code(
-                        c,
-                        format!("produce {topic}/{p}: {}", msg.unwrap_or_default()),
-                    )),
-                });
-            }
-        }
-        r.i32()?;
-        out.ok_or(Fail::Proto("produce response"))?
+        codec::produce(&body, topic, partition)
     }
 
     // ------------------------------------------------------------------
@@ -495,28 +317,10 @@ impl Client {
             return Ok(n);
         }
         let node = self.any()?;
-        let body = self.call(node, api::FIND_COORDINATOR, |w| {
-            w.str(key)?.i8(kind);
-            Ok(())
+        let body = self.call(node, api::FIND_COORDINATOR, |h| {
+            codec::find_coordinator_request(h, key, kind)
         })?;
-        let mut r = R::new(&body, false);
-        r.i32()?;
-        let code = r.i16()?;
-        let msg = r.nstr()?;
-        let id = r.i32()?;
-        let host = r.str()?;
-        let port = r.i32()?;
-        if code != 0 {
-            return Err(Fail::Code(
-                code,
-                format!("find coordinator: {}", msg.unwrap_or_default()),
-            ));
-        }
-        let addr = if host.contains(':') {
-            format!("[{host}]:{port}")
-        } else {
-            format!("{host}:{port}")
-        };
+        let (id, addr) = codec::find_coordinator(&body)?;
         if self.brokers.get(&id) != Some(&addr) {
             self.conns.remove(&id);
             self.brokers.insert(id, addr);
@@ -532,10 +336,10 @@ impl Client {
         kind: i8,
         key: &str,
         api_key: i16,
-        body: impl FnOnce(&mut W) -> KResult<()>,
+        encode: impl FnOnce(&Head) -> KResult<Vec<u8>>,
     ) -> KResult<Vec<u8>> {
         let node = self.coordinator(kind, key)?;
-        let out = self.call(node, api_key, body);
+        let out = self.call(node, api_key, encode);
         if out.is_err() {
             self.coords.remove(&(kind, key.to_string()));
         }
@@ -560,43 +364,10 @@ impl Client {
         partitions: &[i32],
     ) -> KResult<BTreeMap<i32, Committed>> {
         self.retry(|c| {
-            let body = c.coord_call(GROUP, group, api::OFFSET_FETCH, |w| {
-                w.str(group)?;
-                w.array(1)?.str(topic)?;
-                w.array(partitions.len())?;
-                for p in partitions {
-                    w.i32(*p);
-                }
-                w.tags();
-                w.bool(true).tags();
-                Ok(())
+            let body = c.coord_call(GROUP, group, api::OFFSET_FETCH, |h| {
+                codec::offset_fetch_request(h, group, topic, partitions)
             })?;
-            let mut r = R::new(&body, true);
-            r.i32()?;
-            let mut out = BTreeMap::new();
-            let mut first_err = 0;
-            for _ in 0..r.array()? {
-                r.str()?;
-                for _ in 0..r.array()? {
-                    let p = r.i32()?;
-                    let offset = r.i64()?;
-                    r.i32()?;
-                    let metadata = r.nstr()?.unwrap_or_default();
-                    let code = r.i16()?;
-                    r.tags()?;
-                    if code != 0 && first_err == 0 {
-                        first_err = code;
-                    }
-                    if offset >= 0 {
-                        out.insert(p, Committed { offset, metadata });
-                    }
-                }
-                r.tags()?;
-            }
-            let code = r.i16()?;
-            check_code(code, "offset fetch")?;
-            check_code(first_err, "offset fetch")?;
-            Ok(out)
+            codec::offset_fetch(&body)
         })
     }
 
@@ -619,45 +390,10 @@ impl Client {
             |d: Duration| i32::try_from(d.as_millis()).map_err(|_| Fail::Local(Error::Overflow));
         let (st, rt) = (ms(session_timeout)?, ms(rebalance_timeout)?);
         self.set_read_timeout(GROUP, group, rebalance_timeout + Duration::from_secs(5))?;
-        let body = self.coord_call(GROUP, group, api::JOIN_GROUP, |w| {
-            w.str(group)?.i32(st).i32(rt).str(member_id)?;
-            w.nstr(instance_id)?;
-            w.str("consumer")?;
-            w.array(1)?.str(protocol)?.bytes(metadata)?;
-            Ok(())
+        let body = self.coord_call(GROUP, group, api::JOIN_GROUP, |h| {
+            codec::join_group_request(h, group, st, rt, member_id, instance_id, protocol, metadata)
         })?;
-        let mut r = R::new(&body, false);
-        r.i32()?;
-        let code = r.i16()?;
-        let generation = r.i32()?;
-        let protocol_name = r.str()?;
-        let leader = r.str()?;
-        let me = r.str()?;
-        let mut members = Vec::new();
-        for _ in 0..r.array()? {
-            let id = r.str()?;
-            r.nstr()?;
-            members.push((id, r.bytes()?.to_vec()));
-        }
-        if code == 79 {
-            return Ok(Joined {
-                generation: -1,
-                member_id: me,
-                leader: String::new(),
-                protocol: protocol_name,
-                members,
-                retry: true,
-            });
-        }
-        check_code(code, "join group")?;
-        Ok(Joined {
-            generation,
-            member_id: me,
-            leader,
-            protocol: protocol_name,
-            members,
-            retry: false,
-        })
+        codec::join_group(&body)
     }
 
     pub(crate) fn sync_group(
@@ -668,19 +404,10 @@ impl Client {
         instance_id: Option<&str>,
         assignments: &[(String, Vec<u8>)],
     ) -> KResult<Vec<u8>> {
-        let body = self.coord_call(GROUP, group, api::SYNC_GROUP, |w| {
-            w.str(group)?.i32(generation).str(member_id)?;
-            w.nstr(instance_id)?;
-            w.array(assignments.len())?;
-            for (m, a) in assignments {
-                w.str(m)?.bytes(a)?;
-            }
-            Ok(())
+        let body = self.coord_call(GROUP, group, api::SYNC_GROUP, |h| {
+            codec::sync_group_request(h, group, generation, member_id, instance_id, assignments)
         })?;
-        let mut r = R::new(&body, false);
-        r.i32()?;
-        check_code(r.i16()?, "sync group")?;
-        Ok(r.bytes()?.to_vec())
+        codec::sync_group(&body)
     }
 
     /// `Ok(())`, or the broker's code (27 rebalance in progress, 22, 25).
@@ -691,14 +418,10 @@ impl Client {
         member_id: &str,
         instance_id: Option<&str>,
     ) -> KResult<()> {
-        let body = self.coord_call(GROUP, group, api::HEARTBEAT, |w| {
-            w.str(group)?.i32(generation).str(member_id)?;
-            w.nstr(instance_id)?;
-            Ok(())
+        let body = self.coord_call(GROUP, group, api::HEARTBEAT, |h| {
+            codec::heartbeat_request(h, group, generation, member_id, instance_id)
         })?;
-        let mut r = R::new(&body, false);
-        r.i32()?;
-        check_code(r.i16()?, "heartbeat")
+        codec::code(&body, "heartbeat")
     }
 
     pub(crate) fn leave_group(
@@ -707,15 +430,10 @@ impl Client {
         member_id: &str,
         instance_id: Option<&str>,
     ) -> KResult<()> {
-        let body = self.coord_call(GROUP, group, api::LEAVE_GROUP, |w| {
-            w.str(group)?;
-            w.array(1)?.str(member_id)?;
-            w.nstr(instance_id)?;
-            Ok(())
+        let body = self.coord_call(GROUP, group, api::LEAVE_GROUP, |h| {
+            codec::leave_group_request(h, group, member_id, instance_id)
         })?;
-        let mut r = R::new(&body, false);
-        r.i32()?;
-        check_code(r.i16()?, "leave group")
+        codec::code(&body, "leave group")
     }
 
     // ------------------------------------------------------------------
@@ -733,25 +451,17 @@ impl Client {
         let ms = i32::try_from(timeout.as_millis()).map_err(|_| Fail::Local(Error::Overflow))?;
         self.retry(|c| {
             let body = match txn {
-                Some(t) => c.coord_call(TXN, t, api::INIT_PRODUCER_ID, |w| {
-                    w.nstr(Some(t))?.i32(ms);
-                    Ok(())
+                Some(t) => c.coord_call(TXN, t, api::INIT_PRODUCER_ID, |h| {
+                    codec::init_producer_request(h, Some(t), ms)
                 })?,
                 None => {
                     let node = c.any()?;
-                    c.call(node, api::INIT_PRODUCER_ID, |w| {
-                        w.nstr(None)?.i32(ms);
-                        Ok(())
+                    c.call(node, api::INIT_PRODUCER_ID, |h| {
+                        codec::init_producer_request(h, None, ms)
                     })?
                 }
             };
-            let mut r = R::new(&body, false);
-            r.i32()?;
-            let code = r.i16()?;
-            let id = r.i64()?;
-            let epoch = r.i16()?;
-            check_code(code, "init producer id")?;
-            Ok((id, epoch))
+            codec::init_producer(&body)
         })
     }
 
@@ -763,34 +473,19 @@ impl Client {
         partition: i32,
     ) -> KResult<()> {
         self.retry(|c| {
-            let body = c.coord_call(TXN, txn, api::ADD_PARTITIONS_TO_TXN, |w| {
-                w.str(txn)?.i64(pid.0).i16(pid.1);
-                w.array(1)?.str(topic)?;
-                w.array(1)?.i32(partition);
-                Ok(())
+            let body = c.coord_call(TXN, txn, api::ADD_PARTITIONS_TO_TXN, |h| {
+                codec::add_partitions_request(h, txn, pid, topic, partition)
             })?;
-            let mut r = R::new(&body, false);
-            r.i32()?;
-            for _ in 0..r.array()? {
-                r.str()?;
-                for _ in 0..r.array()? {
-                    r.i32()?;
-                    check_code(r.i16()?, "add partitions to txn")?;
-                }
-            }
-            Ok(())
+            codec::add_partitions(&body)
         })
     }
 
     pub(crate) fn add_offsets(&mut self, txn: &str, pid: (i64, i16), group: &str) -> KResult<()> {
         self.retry(|c| {
-            let body = c.coord_call(TXN, txn, api::ADD_OFFSETS_TO_TXN, |w| {
-                w.str(txn)?.i64(pid.0).i16(pid.1).str(group)?;
-                Ok(())
+            let body = c.coord_call(TXN, txn, api::ADD_OFFSETS_TO_TXN, |h| {
+                codec::add_offsets_request(h, txn, pid, group)
             })?;
-            let mut r = R::new(&body, false);
-            r.i32()?;
-            check_code(r.i16()?, "add offsets to txn")
+            codec::code(&body, "add offsets to txn")
         })
     }
 
@@ -801,32 +496,34 @@ impl Client {
         o: &GroupOffsets,
     ) -> KResult<()> {
         self.retry(|c| {
-            let body = c.coord_call(GROUP, &o.group, api::TXN_OFFSET_COMMIT, |w| {
-                w.str(txn)?.str(&o.group)?.i64(pid.0).i16(pid.1);
-                w.i32(o.generation).str(&o.member_id)?;
-                w.nstr(o.instance_id.as_deref())?;
-                write_offsets(w, &o.offsets, true)?;
-                w.tags();
-                Ok(())
+            let body = c.coord_call(GROUP, &o.group, api::TXN_OFFSET_COMMIT, |h| {
+                codec::txn_offset_commit_request(
+                    h,
+                    txn,
+                    &o.group,
+                    pid,
+                    o.generation,
+                    &o.member_id,
+                    o.instance_id.as_deref(),
+                    &o.offsets,
+                )
             })?;
-            read_offset_errors(&body, true, "txn offset commit")
+            codec::offset_errors(&body, true, "txn offset commit")
         })
     }
 
     pub(crate) fn end_txn(&mut self, txn: &str, pid: (i64, i16), commit: bool) -> KResult<()> {
         self.retry(|c| {
-            let body = c.coord_call(TXN, txn, api::END_TXN, |w| {
-                w.str(txn)?.i64(pid.0).i16(pid.1).bool(commit);
-                Ok(())
+            let body = c.coord_call(TXN, txn, api::END_TXN, |h| {
+                codec::end_txn_request(h, txn, pid, commit)
             })?;
-            let mut r = R::new(&body, false);
-            r.i32()?;
-            check_code(r.i16()?, "end txn")
+            codec::code(&body, "end txn")
         })
     }
 }
 
 /// A JoinGroup result.
+#[derive(Debug)]
 pub(crate) struct Joined {
     pub(crate) generation: i32,
     pub(crate) member_id: String,
@@ -835,51 +532,6 @@ pub(crate) struct Joined {
     pub(crate) members: Vec<(String, Vec<u8>)>,
     /// MEMBER_ID_REQUIRED: join again with `member_id`.
     pub(crate) retry: bool,
-}
-
-fn check_code(code: i16, what: &str) -> KResult<()> {
-    if code == 0 {
-        Ok(())
-    } else {
-        Err(Fail::Code(code, what.to_string()))
-    }
-}
-
-fn write_offsets(w: &mut W, offsets: &[(String, i32, i64, String)], flex: bool) -> KResult<()> {
-    let mut by_topic: BTreeMap<&str, Vec<(i32, i64, &str)>> = BTreeMap::new();
-    for (t, p, o, m) in offsets {
-        by_topic.entry(t).or_default().push((*p, *o, m));
-    }
-    w.array(by_topic.len())?;
-    for (t, parts) in by_topic {
-        w.str(t)?;
-        w.array(parts.len())?;
-        for (p, o, m) in parts {
-            w.i32(p).i64(o).i32(-1).nstr(Some(m))?;
-            if flex {
-                w.tags();
-            }
-        }
-        if flex {
-            w.tags();
-        }
-    }
-    Ok(())
-}
-
-fn read_offset_errors(body: &[u8], flex: bool, what: &str) -> KResult<()> {
-    let mut r = R::new(body, flex);
-    r.i32()?;
-    for _ in 0..r.array()? {
-        r.str()?;
-        for _ in 0..r.array()? {
-            r.i32()?;
-            check_code(r.i16()?, what)?;
-            r.tags()?;
-        }
-        r.tags()?;
-    }
-    r.tags()
 }
 
 // ----------------------------------------------------------------------
