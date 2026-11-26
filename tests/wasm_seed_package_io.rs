@@ -2763,7 +2763,7 @@ const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[
         "@vesper/driver-commands",
         "packages/vesper-driver-commands",
         "use @vesper/driver-commands::run;\nuse @vesper/driver::args_new;\npub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands]] { let a = args_new(); wrapping_u64(run(in a)) }\n",
-        "its printing, help and formatting go through the HybridCommands import, which only the hybrid compiler's Rust implements (crates/vesper-hybrid/src/commands.rs): the Wasm entry cannot carry Ffi[HybridCommands] (WErr Entry). @vesper-std/process builds for WASI (src-wasip2, #1928)",
+        "its printing and help go through the HybridCommands import, which only the hybrid compiler's Rust implements (crates/vesper-hybrid/src/commands.rs): the Wasm entry cannot carry Ffi[HybridCommands] (WErr Entry). Formatting calls @vesper/fmt (crates/vesper-fmt/vesper), which hashes with C BLAKE3 (@vesper-std/hash-sys). @vesper-std/process builds for WASI (src-wasip2, #1928)",
     ),
     (
         "run",
