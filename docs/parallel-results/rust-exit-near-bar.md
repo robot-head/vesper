@@ -83,3 +83,55 @@ Changes in `crates/vesper-warp-wheel/vesper/src/`:
 Remaining cost is codegen (#1426): seq header reloads after stores, the
 `try_get` bounds branch, callee-saved register saves, and `poll` returning its
 result through memory. Rust lines deleted: 0.
+
+## eBPF wire: bulk-bytes port interface (#2183)
+
+The wire structs (`EthIpv4TcpWire`, `SynDropAlertWire`) were 21.6x Rust:
+each byte was a `ChunkSeq` push on the Vesper side, and the sequence was then
+copied into a `Vec` across the port. The port interface now has the encoders
+write into a buffer the Rust caller lends (`inout Slice[u8]`,
+`wire_eth_encode_into`, `wire_alert_encode_into`), and both codecs move whole
+big-endian words (`try_read_u64_be` / `try_write_u64_be`): the frame is the
+seven words at 0, 8, .., 40 and 46, the alert one word plus the
+little-endian rate.
+
+New ABBA workload `wire` (`tests/abba.rs`: 256 frames and 256 alerts encoded
+and decoded per call), release, `-C target-cpu=native`, 30 epochs, this
+4-core cloud box:
+
+| Interface | Vesper/Rust | 95% interval of the median |
+| --- | --- | --- |
+| before (per-byte push, seq copy out) | 21.6x | 21.2..21.9 |
+| lent buffer, byte stores | 4.53x | 4.42..4.61 |
+| lent buffer, word reads/writes | 2.43x | 2.36..2.46 |
+
+0 diffs: `tests/wire_port.rs` compares both builds on 20,000 random frames
+and alerts (bytes and fields) and on every buffer length up to one past each
+size over 2,000 random byte strings (short buffers are the same typed
+error).
+
+Still above the bar, so `wire` stays behind `vesper-port` and Rust stays the
+default. Per frame (callgrind, encode + decode) the Vesper bodies are about
+355 instructions against Rust's 130, and the crossing adds about 270: what is
+left is codegen and the ABI, not the interface.
+
+- Each `try_read_u64_be`/`try_write_u64_be` keeps its own bounds check and
+  materialises the `Option` (about 13 instructions a read) after the one
+  length check that already covers all seven; the raising `read_u64_be`
+  inside `handle Fail[RuntimeError]` was slower still (the handler is not
+  folded away, and an effectful helper is not inlined).
+- The 21-field struct crosses as 21 words each way (`Abi::put`/`get`, about
+  75 instructions); passing the fields as 21 scalar arguments was slower (the
+  stack arguments spill). ABI v3 mirrors (#1087) would lend the struct in
+  place, but switching `@vesper/ebpf` to `// @export abi 3` changes every
+  binding of the crate.
+
+Tried and dropped: `vec![0; n]` for the lent buffer (calloc cost more than
+the stack array plus `to_vec`).
+
+The `decode` workload (the instruction codec, already the only build) is
+1.68x [1.66, 1.69] and unchanged here: per instruction the crossing costs
+`PortInsn` conversion, `Abi::put`, the 11-word `Encoded` result and the
+`Vec`, about 100 instructions per `encode` call against Rust's 43, and
+`decode_all` returns its instructions through a converted
+`ChunkSeq[Insn]`.

@@ -431,3 +431,15 @@ renderer with the hybrid's `all` swap set.
 - Part 4d-4: coverage refusal collection, then the swap into
   `bootstrap/stage1.rs` with `bootstrap/stage1.lock` reproduced, and the
   Rust deleted at the retirement.
+
+## The VerifiedBuild driver step reports code generator errors (#2197)
+
+Of the 1,608 corpus builds, 333 succeed. Most of the others fail in the code generator with "unsupported ..." errors. On such an error the driver step handed the whole build back to Rust's `VerifiedBuild` pass. That pass optimized and encoded the program again and ran the code generator a second time, through the `verified_codegen` swap, so a failing build cost about twice the Rust time (`tests/fixtures/loops/control.ves`: Rust 48 ms, driver 101 ms). Successful builds were already at 1.01x.
+
+The driver now prints the error itself when the summary is a one-line `error: verified codegen: <kind>: ...`. Only the five kinds that `VerifiedError::from_display` reads back to the same text count: `unsupported`, `entry`, `target`, `limit` and `invalid input`. That is the line the Rust pass would print.
+
+| Check (Linux x86_64, release, no `target-cpu=native`) | Result |
+|---|---|
+| CLI builds, driver step on vs both swaps off, 3 Linux targets | **0 of 1,608 differ** (333 built) |
+| Wall time of those builds, two runs | Rust 10.91 s / 11.00 s, Vesper 10.67 s / 10.85 s: **0.98x** (was 1.22x) |
+| `tests/fixtures/loops/control.ves` | Rust 54 ms, driver 44 ms |
