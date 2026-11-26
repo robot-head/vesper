@@ -10,7 +10,10 @@ use crate::{
     },
 };
 pub use lens_requests::LensConfig;
-pub(crate) use lens_requests::{CommandOutcome, PortRequests, TimerOutcome, requests_dump};
+pub(crate) use lens_requests::{
+    CommandOutcome, PortRequests, TimerOutcome, code_lenses_of, lens_functions, proof_result_of,
+    proof_status_of, record_of, requests_dump,
+};
 use salsa::Setter;
 use serde_json::{Value, json};
 use std::{cell::RefCell, collections::BTreeMap, sync::Arc};

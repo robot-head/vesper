@@ -2140,7 +2140,8 @@ pub fn encode_table(x: u16, y: u16, z: u16) -> u32 {
 
 pub fn decode_table(code: u32) -> u32 {
     let c = widen_u64(code);
-    MORTON_COMPACT_B0[c & 255] | MORTON_COMPACT_B1[(c >> 8) & 255] | MORTON_COMPACT_B2[
-        (c >> 16) & 255
-    ] | MORTON_COMPACT_B3[(c >> 24) & 255]
+    MORTON_COMPACT_B0[c & 255]
+        | MORTON_COMPACT_B1[(c >> 8) & 255]
+        | MORTON_COMPACT_B2[(c >> 16) & 255]
+        | MORTON_COMPACT_B3[(c >> 24) & 255]
 }

@@ -12,17 +12,25 @@
 // charges the same work units as Rust, so the same input and limits give the
 // same output or the same error. Sugar sources and test blocks are laid
 // out over @vesper/front's surface CST (`surface::syntax`, `sugar_layout`).
-// Sources in the macro profile (`m!`, `quote`) are `OpaqueMacro` here: the
-// Rust side formats them with its own macro-profile parser, which this
-// package does not port yet.
+// Sources in the macro profile (`m!`, `quote`) go through @vesper/front's
+// expression macro parser (`macro_source::syntax`) and are laid out over its
+// recovery CST, or over the surface CST when they also use sugar.
 
 use @vesper/front::{Tokens, P};
+use @vesper/front::source_macro::{
+    MacroLimits, MacroError, MacroSource, macro_limits_default, parse_macro_source,
+    parse_macro_surface_tokens
+};
+use @vesper/front::recover::{editor_limits, recover};
+use @vesper/front::util::{saturating_mul_u64};
 use @vesper-std/hash::blake3::{Digest};
 use @vesper-std/hash-sys::{hash};
 use @vesper/front::diag::{diags_new};
 use @vesper/front::parse::{parse_tokens, parse_surface_tokens, sugar_operator_at, hard_depth};
 use @vesper/front::{Tokens};
-use @vesper/front::lex::{lex_with_limits, lex_sugar_with_limits, max_diagnostics, token_end};
+use @vesper/front::lex::{
+    lex_with_limits, lex_sugar_with_limits, max_diagnostics, token_end, tokens_new
+};
 use @vesper/front::diag::{diags_new};
 
 // ---------------------------------------------------------------- kinds
@@ -49,6 +57,7 @@ const NODE_SUGAR_PAT: u64 = 218;
 const NODE_SUGAR_OPERATOR: u64 = 220;
 const NODE_TAGGED_LITERAL: u64 = 223;
 const NODE_SURFACE_MACRO_DECL: u64 = 224;
+const NODE_SURFACE_MACRO_CALL: u64 = 225;
 const NODE_SURFACE_MACRO_ARG: u64 = 226;
 
 const K_WHITESPACE: u8 = 0;
@@ -735,6 +744,11 @@ fn trivia(k: u8) -> bool {
     k <= K_BLOCK_COMMENT
 }
 
+// The break level of a bitwise `|`, between `<` and `^` as the parser
+// ranks it. It is not in `infix_precedence`, since a `|` may also open a
+// closure.
+const PIPE_PRECEDENCE: u8 = 6;
+
 // Weakest to strongest, matching the parser. A pipe can also open a closure.
 fn infix_precedence(k: u8) -> u8 {
     if k == K_OR {
@@ -877,10 +891,15 @@ fn lex_hard(in src: Slice[u8]) -> Tokens eff [Fail[FmtFail]] {
     t
 }
 
-// `guarded_lex` with `allow_macros = false` (the sugar surface lexer, so a
-// backtick is a token). Macro syntax is
-// `OpaqueMacro`, which the caller hands to the Rust build.
-fn gate(in src: Slice[u8], in lim: Limits, inout w: Work) -> Tokens eff [Fail[FmtFail]] {
+// `guarded_lex(source, limits, work, allow_macros)` (the sugar surface
+// lexer, so a backtick is a token). Without `allow_macros`, macro syntax
+// is `OpaqueMacro`.
+fn gate(
+    in src: Slice[u8],
+    in lim: Limits,
+    inout w: Work,
+    allow_macros: bool
+) -> Tokens eff [Fail[FmtFail]] {
     charge(inout w, src.len());
     if src.len() > HARD_SOURCE_BYTES {
         fail(E_INPUT);
@@ -913,10 +932,10 @@ fn gate(in src: Slice[u8], in lim: Limits, inout w: Work) -> Tokens eff [Fail[Fm
         }
         let s = tok_start(in t, i);
         let e = tok_end(in t, i);
-        if k == K_BANG && (previous == K_LOWER || previous == K_UPPER) {
+        if !allow_macros && k == K_BANG && (previous == K_LOWER || previous == K_UPPER) {
             fail(E_MACRO);
         }
-        if k == K_LOWER && opaque_word(in src, s, e) {
+        if !allow_macros && k == K_LOWER && opaque_word(in src, s, e) {
             fail(E_MACRO);
         }
         let top = wrapping_sub(counts.len(), 1);
@@ -1023,6 +1042,31 @@ fn gate(in src: Slice[u8], in lim: Limits, inout w: Work) -> Tokens eff [Fail[Fm
     }
     charge(inout w, wrapping_mul(ntok, PARSE_UNITS_PER_TOKEN));
     t
+}
+
+// The first lex of `once`: `guarded_lex` without macros, and on
+// `OpaqueMacro` again with them (`opaque`).
+struct Gated {
+    t: Tokens,
+    opaque: bool
+}
+
+fn gate_once(in src: Slice[u8], in lim: Limits, inout w: Work) -> Gated eff [Fail[FmtFail]] {
+    let g = handle Fail[FmtFail] in {
+        Gated { t: gate(in src, in lim, inout w, false), opaque: false }
+    } with {
+        return v => v,
+        raise(e, _) => if e.code == E_MACRO {
+            Gated { t: tokens_new(0), opaque: true }
+        } else {
+            Fail::raise(e)
+        },
+    };
+    if g.opaque {
+        Gated { t: gate(in src, in lim, inout w, true), opaque: true }
+    } else {
+        g
+    }
 }
 
 // The work units of a second `guarded_lex` of a source the gate accepted
@@ -1155,6 +1199,11 @@ fn gap(p: u8, c: u8, block: bool, after_block: bool) -> u8 {
         return G_RETURN;
     }
     if is_binary_operator(c) && ends_operand(p) {
+        return G_OPERATOR;
+    }
+    // A bitwise `|` after an operand; `sequence` keeps a closure's closing
+    // `|` (`|x: T| e`) from breaking.
+    if c == K_PIPE && ends_operand(p) {
         return G_OPERATOR;
     }
     if c == K_COMMA
@@ -1406,6 +1455,48 @@ fn word_used_as_name(has_prev: bool, prev: u8, c: u8, next: u8) -> bool {
         )
 }
 
+// `Tagged`: how a tagged sugar call lays out its braces. `TAG_NO`: not a
+// tagged call, or one whose contents hold a top-level `;` or a comment (an
+// ordinary block); `TAG_HUG`: contents that open with a block, which the
+// call hugs; `TAG_LIST`: other contents, spaced like a struct literal.
+const TAG_NO: u8 = 0;
+const TAG_HUG: u8 = 1;
+const TAG_LIST: u8 = 2;
+
+// `tagged_layout`: the layout of the tagged call whose `{` is atom `open`.
+fn tagged_layout(in at: Atoms, open: u64) -> u8 {
+    if aflags(in at, open) & 8 == 0 {
+        return TAG_NO;
+    }
+    let n = at.kind.len();
+    let mut depth: u64 = 0;
+    let mut i = wrapping_add(open, 1);
+    loop {
+        if i >= n {
+            break;
+        }
+        let k = akind(in at, i);
+        if k == K_L_PAREN || k == K_L_BRACKET || k == K_L_BRACE {
+            depth = wrapping_add(depth, 1);
+        } else if k == K_R_PAREN || k == K_R_BRACKET || k == K_R_BRACE {
+            if depth == 0 {
+                break;
+            }
+            depth = wrapping_sub(depth, 1);
+        } else if is_comment(k) {
+            return TAG_NO;
+        } else if k == K_SEMI && depth == 0 {
+            return TAG_NO;
+        }
+        i = wrapping_add(i, 1);
+    }
+    if akind(in at, wrapping_add(open, 1)) == K_L_BRACE {
+        TAG_HUG
+    } else {
+        TAG_LIST
+    }
+}
+
 // `sequence`: the atoms from `pos` up to the closing delimiter `end`.
 // The widest short `if` expression that stays on one line, as rustfmt's
 // `single_line_if_else_max_width`.
@@ -1531,6 +1622,7 @@ fn sequence(
     end: u8,
     block: bool,
     fill: bool,
+    hug: bool,
     // The least column a line inside this sequence can start at: every
     // delimiter or block it is nested in adds 4 once it breaks, and a line
     // break inside one means it broke.
@@ -1561,12 +1653,17 @@ fn sequence(
     let mut commented = false;
     // The previous atom was a non-empty parameter list before `->`.
     let mut previous_params = false;
+    let mut previous_hugged = false;
     // The member chain being built on `line` (`out.rows.push(..)`).
     let mut chain = new_chain();
     // A short `if c { a } else { b }` laid out on `line` as one group: the
     // index of its last `}` (NONE: none is open), and where its docs and
     // breaks start on `line`.
     let mut short_close = NONE;
+    // Inside a closure's parameters (`|x: T|`), after its opening `|`.
+    let mut closure_params = false;
+    // Right after a closure's opening `|`.
+    let mut closure_open = false;
     let mut short_docs: u64 = 0;
     let mut short_breaks: u64 = 0;
     loop {
@@ -1614,7 +1711,14 @@ fn sequence(
         // A struct literal or pattern (`Point { x: 1, y: 2 }`) is a list
         // too, spaced inside its braces.
         let is_record = opens_block && in_expr && !head && has_prev && prev == K_UPPER;
-        let is_block = opens_block && !is_record;
+        let tagged = if opens_block && !is_record {
+            tagged_layout(in at, pos)
+        } else {
+            TAG_NO
+        };
+        let is_block = opens_block && !is_record && tagged == TAG_NO;
+        // The block a hugging tagged call opens with.
+        let hugged = hug && is_block && !has_prev;
         // A branch of a short `if` breaks only with the whole `if`.
         let soft_block = is_block && short_close != NONE;
         let cs0 = w32(in at.start, pos);
@@ -1644,6 +1748,14 @@ fn sequence(
             G_NONE
         } else if sugar != SGAP_NONE {
             sugar
+        } else if hug && previous_hugged {
+            // The clause after a hugged block follows its `}`, and a `:` or
+            // `,` stays glued to it.
+            if gap(prev, c, block, false) == G_NONE {
+                G_NONE
+            } else {
+                G_SPACE
+            }
         } else if previous_unary || package {
             G_NONE
         } else if list && has_prev && prev == K_SEMI {
@@ -1659,6 +1771,38 @@ fn sequence(
             }
         } else {
             G_NONE
+        };
+        // A `|` that follows no operand opens a closure's parameters, and the
+        // next `|` closes them: only a bitwise `|` breaks like an operator.
+        // The parameters hug their pipes, as in `|x: T| e`.
+        let spacing = if c == K_PIPE && sugar == SGAP_NONE {
+            let operator = spacing == G_OPERATOR;
+            if closure_params {
+                closure_params = false;
+                closure_open = false;
+                // A line comment keeps its line break, and the two pipes of
+                // an empty `| |` keep their space so they don't become `||`.
+                if has_prev && prev == K_PIPE {
+                    G_SPACE
+                } else if spacing == G_HARD {
+                    spacing
+                } else {
+                    G_NONE
+                }
+            } else {
+                // A `|` after an operand that isn't spaced as an operator
+                // (a comprehension's `{ .. } | x in xs`) opens nothing.
+                closure_params = !operator && !(has_prev && ends_operand(prev));
+                closure_open = closure_params;
+                spacing
+            }
+        } else if closure_open {
+            closure_open = false;
+            if spacing == G_HARD { spacing } else { G_NONE }
+        } else if closure_params && has_prev && prev == K_COMMA {
+            G_SPACE
+        } else {
+            spacing
         };
         // Anything but an attached token ends the operand and its chain.
         if is_block || spacing != G_NONE && spacing != G_EMPTY {
@@ -1706,6 +1850,8 @@ fn sequence(
                     Option::Some(l) => l,
                     Option::None => 0,
                 }
+            } else if c == K_PIPE {
+                PIPE_PRECEDENCE
             } else {
                 infix_precedence(c)
             };
@@ -1741,7 +1887,13 @@ fn sequence(
                 close,
                 is_block,
                 fill,
-                cadd(indent, 4),
+                tagged == TAG_HUG,
+                // A hugging call does not indent its contents.
+                if tagged == TAG_HUG {
+                    indent
+                } else {
+                    cadd(indent, 4)
+                },
                 inout d,
                 in src
             );
@@ -1773,25 +1925,34 @@ fn sequence(
             } else {
                 let lead = push_leaf(
                     inout d,
-                    if soft_block {
+                    if hugged || soft_block {
                         D_SOFT_SPACE
+                    } else if tagged == TAG_HUG {
+                        D_SPACE
                     } else if is_block || trailing_comma {
                         D_HARD
-                    } else if is_record {
+                    } else if is_record || tagged == TAG_LIST {
                         D_SOFT_SPACE
                     } else {
                         D_SOFT_EMPTY
                     }
                 );
                 let content = concat4(inout d, lead, inner, 4294967295, 4294967295);
-                let nest = push_nest(inout d, 4, content);
+                // A hugging call does not indent: its block nests its own lines.
+                let nest = if tagged == TAG_HUG {
+                    content
+                } else {
+                    push_nest(inout d, 4, content)
+                };
                 let trail = push_leaf(
                     inout d,
-                    if soft_block {
+                    if soft_block || hugged && !last_is_line_comment {
                         D_SOFT_SPACE
+                    } else if tagged == TAG_HUG {
+                        D_SPACE
                     } else if is_block || last_is_line_comment || trailing_comma {
                         D_HARD
-                    } else if is_record {
+                    } else if is_record || tagged == TAG_LIST {
                         D_SOFT_SPACE
                     } else {
                         D_SOFT_EMPTY
@@ -1800,8 +1961,10 @@ fn sequence(
                 let all = concat4(inout d, start, nest, trail, finish);
                 // A parameter list before `->` shares its line's group, so it
                 // breaks whenever the signature with its return type cannot
-                // fit on one line; a short `if`'s branch shares the `if`'s.
-                if params || soft_block {
+                // fit on one line; a short `if`'s branch shares the `if`'s. A
+                // hugged block shares the group of its call, so it breaks
+                // before the clause after it does.
+                if params || soft_block || hugged {
                     all
                 } else {
                     push_group(inout d, all)
@@ -1836,6 +1999,7 @@ fn sequence(
         }
         previous_block = is_block;
         previous_params = params;
+        previous_hugged = hugged;
         previous_unary = (c == K_MINUS || c == K_BANG || c == K_TILDE) && !previous_ends_operand;
         let used_as_name = word_used_as_name(has_prev, prev, c, akind(in at, pos));
         has_prev = true;
@@ -2205,6 +2369,12 @@ fn set_gap(inout at: Atoms, i: u64, gap: u8, level: u8) {
     at.slevel.try_set(i, level);
 }
 
+// `Piece::tagged`: flags bit 3 marks the `{` of a tagged sugar call.
+fn mark_tagged(inout at: Atoms, i: u64) {
+    let f = aflags(in at, i);
+    at.flags.try_set(i, f | 8);
+}
+
 // `Layout::join`: a same-line boundary that never swallows a line comment.
 fn join(inout at: Atoms, i: u64, gap: u8) {
     if i > 0 && i < at.kind.len() && akind(in at, wrapping_sub(i, 1)) != K_COMMENT {
@@ -2347,6 +2517,10 @@ fn sugar_group(inout at: Atoms, in p: P, in src: Slice[u8], start: u64, end: u64
                     || prev == K_LINEAR
             ) {
             let gap = if aflags(in at, i) & 2 != 0 {
+                // A nested tagged call (`zip{ a, b }`).
+                if k == K_L_BRACE && prev == K_LOWER {
+                    mark_tagged(inout at, i);
+                }
                 G_NONE
             } else {
                 G_SPACE
@@ -2419,6 +2593,9 @@ fn annotate(inout at: Atoms, in p: P, in src: Slice[u8], in nodes: ChunkSeq[u64]
         }
         if kind == NODE_TAGGED_LITERAL {
             join(inout at, wrapping_add(start, 1), G_NONE);
+            if akind(in at, wrapping_add(start, 1)) == K_L_BRACE {
+                mark_tagged(inout at, wrapping_add(start, 1));
+            }
         } else if kind == NODE_SUGAR_OPERATOR {
             let _ = sugar_operator(inout at, in p, start);
         } else if kind == NODE_SUGAR_CONTINUATION {
@@ -2474,7 +2651,9 @@ struct Pass {
     out: ChunkSeq[u8],
     nodes: ChunkSeq[u64],
     doc: Doc,
-    root: u64
+    root: u64,
+    // The source is in the macro profile (`Profile::allow_macro_tokens`).
+    opaque: bool
 }
 
 // Lay out and render the parse `p` of `src`.
@@ -2483,23 +2662,36 @@ fn layout(
     in p: P,
     sink nodes: ChunkSeq[u64],
     in lim: Limits,
-    inout w: Work
+    inout w: Work,
+    opaque: bool
 ) -> Pass eff [Fail[FmtFail]] {
     let mut at = atoms(in src, in p.t, in p.ev);
     if nodes.len() != 0 {
         annotate(inout at, in p, in src, in nodes);
     }
+    render_atoms(in src, in at, nodes, in lim, inout w, opaque)
+}
+
+// Lay out and render the significant tokens `at` of `src`.
+fn render_atoms(
+    in src: Slice[u8],
+    in at: Atoms,
+    sink nodes: ChunkSeq[u64],
+    in lim: Limits,
+    inout w: Work,
+    opaque: bool
+) -> Pass eff [Fail[FmtFail]] {
     let mut dl = lim;
     dl.max_work = wrapping_sub(w.max, w.used);
     let mut d = doc_new(in dl, wrapping_add(wrapping_mul(at.kind.len(), 3), 8));
     let mut pos: u64 = 0;
-    let root = sequence(in at, inout pos, 255, false, false, 0, inout d, in src);
+    let root = sequence(in at, inout pos, 255, false, false, false, 0, inout d, in src);
     let end = push_leaf(inout d, D_HARD);
     let root = push_concat2(inout d, root, end);
     let out = render(inout d, in src, root);
     charge(inout w, d.w.used);
     charge(inout w, out.len());
-    Pass { out: out, nodes: nodes, doc: d, root: root }
+    Pass { out: out, nodes: nodes, doc: d, root: root, opaque: opaque }
 }
 
 fn first_diag(in p: P) -> u64 {
@@ -2516,8 +2708,12 @@ fn once_tokens(
     in src: Slice[u8],
     sink t: Tokens,
     in lim: Limits,
-    inout w: Work
+    inout w: Work,
+    opaque: bool
 ) -> Pass eff [Fail[FmtFail]] {
+    if opaque {
+        return once_macro(in src, t, in lim, inout w);
+    }
     let ntok = t.kind.len();
     // Ordinary modules use the compiler parser. Its batch mode skips the
     // contents of test blocks, so parse those in surface mode as well.
@@ -2544,7 +2740,7 @@ fn once_tokens(
             parse_tokens(in src, t, diags_new(), max_diagnostics(), hard_depth())
         };
         if p.d.code.len() == 0 {
-            return layout(in src, in p, ChunkSeq::new[u64](), in lim, inout w);
+            return layout(in src, in p, ChunkSeq::new[u64](), in lim, inout w, false);
         }
         core_error = first_diag(in p);
         charge(inout w, wrapping_mul(ntok, PARSE_UNITS_PER_TOKEN));
@@ -2571,7 +2767,240 @@ fn once_tokens(
     if nodes.len() == 0 && core_error != NONE {
         fail_at(core_error);
     }
-    layout(in src, in p, nodes, in lim, inout w)
+    layout(in src, in p, nodes, in lim, inout w, false)
+}
+
+// ---------------------------------------------------------------- macros
+
+// crates/vesper-fmt/src/macro_source.rs: the macro profile's syntax gate.
+
+// Work units the macro-profile parser may spend per token besides its
+// quadratic envelope (`STAGE_UNITS_PER_TOKEN`), and its token ceiling
+// (`MACRO_MAX_TOKENS`).
+const STAGE_UNITS_PER_TOKEN: u64 = 6144;
+const MACRO_MAX_TOKENS: u64 = 8192;
+
+// `allowance`: the work the macro-profile parser may spend.
+fn allowance(len: u64, ntok: u64) -> u64 eff [Fail[FmtFail]] {
+    let square = cmul(cmul(ntok, ntok), 4);
+    let n = cadd(cadd(cadd(square, cmul(ntok, STAGE_UNITS_PER_TOKEN)), cmul(len, 16)), 65536);
+    min64(n, 16777216)
+}
+
+// `a * b`, or `WorkLimit` (`checked_mul` in `allowance`).
+fn cmul(a: u64, b: u64) -> u64 eff [Fail[FmtFail]] {
+    let r = saturating_mul_u64(a, b);
+    if r == U64_MAX {
+        fail(E_WORK);
+    }
+    r
+}
+
+// `profile_limits`.
+fn profile_limits(len: u64, ntok: u64, in lim: Limits) -> MacroLimits eff [Fail[FmtFail]] {
+    let mut ml = macro_limits_default();
+    ml.max_source_bytes = min64(lim.max_input_bytes, 1048576);
+    ml.max_tokens = min64(lim.max_tokens, MACRO_MAX_TOKENS);
+    ml.max_depth = min64(lim.max_depth, 24);
+    ml.max_work = allowance(len, ntok);
+    ml
+}
+
+// `charge_profile`.
+fn charge_profile(ntok: u64, in ml: MacroLimits, inout w: Work) eff [Fail[FmtFail]] {
+    if ntok > ml.max_tokens {
+        fail(E_TOKEN);
+    }
+    charge(inout w, ml.max_work);
+}
+
+// `macro_error`: a budget is `WorkLimit`, an allocation failure
+// `Allocation`, anything else `OpaqueMacro`.
+fn macro_fail(code: u64) -> u64 {
+    if code >= 10 {
+        E_WORK
+    } else if code == 9 {
+        7
+    } else {
+        E_MACRO
+    }
+}
+
+// `parse_macro_source` with its error as the formatter's.
+fn macro_parse(in src: Slice[u8], ml: MacroLimits) -> MacroSource eff [Fail[FmtFail]] {
+    handle Fail[MacroError] in {
+        parse_macro_source(in src, ml)
+    } with {
+        return v => v,
+        raise(e, _) => Fail::raise(FmtFail { code: macro_fail(e.code), offset: 0 }),
+    }
+}
+
+// `macro_source::syntax`: the expression macro profile parsed by the
+// strict macro parser, then laid out over its recovery CST.
+fn macro_syntax(
+    in src: Slice[u8],
+    in t: Tokens,
+    in lim: Limits,
+    inout w: Work
+) -> Pass eff [Fail[FmtFail]] {
+    let ntok = t.kind.len();
+    let ml = profile_limits(src.len(), ntok, in lim);
+    charge_profile(ntok, in ml, inout w);
+    let stage = ml.max_work;
+    let ms = macro_parse(in src, ml);
+    // A bare quote-spelled ordinary identifier is not enough to opt into a
+    // profile that would otherwise permit formatting opaque payloads.
+    if ms.defs.len() == 0 {
+        fail(E_MACRO);
+    }
+    if ms.t.kind.len() != ntok {
+        fail(E_CONSERVATION);
+    }
+    for i in 0..ntok {
+        if tok_kind(in ms.t, i) != tok_kind(in t, i)
+            || tok_start(in ms.t, i) != tok_start(in t, i)
+            || tok_end(in ms.t, i) != tok_end(in t, i) {
+            fail(E_CONSERVATION);
+        }
+    }
+    charge(inout w, stage);
+    // `recovery::Limits`: the default limits with the formatter's parse
+    // limits and the stage's work.
+    let mut rl = editor_limits(0, 0);
+    rl.try_set(0, min64(lim.max_input_bytes, 1048576));
+    rl.try_set(1, min64(lim.max_tokens, MACRO_MAX_TOKENS));
+    rl.try_set(2, max_diagnostics());
+    rl.try_set(3, min64(lim.max_depth, 24));
+    rl.try_set(6, stage);
+    let r = recover(in src, in rl);
+    if r.code != 0 {
+        if r.code >= 10 {
+            fail(E_WORK);
+        }
+        fail(E_CONSERVATION);
+    }
+    let at = atoms(in src, in r.t, in r.ev);
+    render_atoms(in src, in at, ChunkSeq::new[u64](), in lim, inout w, true)
+}
+
+// `parser::{SUGAR_GROUP, SUGAR_TEMPLATE, SUGAR_PATTERN, SURFACE_MACRO_CALL,
+// SURFACE_MACRO_DECL}`: the nodes a macro token may sit in.
+fn macro_group(kind: u64) -> bool {
+    kind == NODE_SUGAR_GROUP
+        || kind == NODE_SUGAR_TEMPLATE
+        || kind == NODE_SUGAR_PATTERN
+        || kind == NODE_SURFACE_MACRO_DECL
+        || kind == NODE_SURFACE_MACRO_CALL
+}
+
+// `macro_tokens_in_groups`: every macro call `!` and quote word of the
+// surface CST lies inside a sugar group, template or pattern, or a surface
+// macro declaration or call.
+fn macro_tokens_in_groups(in src: Slice[u8], in p: P) -> bool {
+    // The open nodes, and how many of them are macro groups.
+    let mut open = ChunkSeq::new[u64]();
+    let mut groups: u64 = 0;
+    let mut previous: u8 = K_EOF;
+    for i in 0..p.ev.len() {
+        let e = u32_at(in p.ev, i);
+        if e == EV_FINISH {
+            let n = open.len();
+            if n > 0 {
+                let k = match open.try_get(wrapping_sub(n, 1)) {
+                    Option::Some(k) => k,
+                    Option::None => 0,
+                };
+                if macro_group(k) {
+                    groups = wrapping_sub(groups, 1);
+                }
+                open.truncate(wrapping_sub(n, 1));
+            }
+        } else if e >= EV_START_BASE {
+            let k = wrapping_sub(e, EV_START_BASE);
+            if macro_group(k) {
+                groups = wrapping_add(groups, 1);
+            }
+            open.push(k);
+        } else {
+            let k = tok_kind(in p.t, e);
+            if k == K_WHITESPACE || k == K_COMMENT || k == K_BLOCK_COMMENT {
+                continue;
+            }
+            let opaque = opaque_word(in src, tok_start(in p.t, e), tok_end(in p.t, e))
+                || (k == K_BANG && (previous == K_UPPER || previous == K_LOWER));
+            if opaque && groups == 0 {
+                return false;
+            }
+            previous = k;
+        }
+    }
+    true
+}
+
+fn has_macro_node(in nodes: ChunkSeq[u64]) -> bool {
+    let mut i: u64 = 0;
+    loop {
+        if i >= nodes.len() {
+            return false;
+        }
+        let k = match nodes.try_get(i) {
+            Option::Some(k) => k,
+            Option::None => 0,
+        };
+        if k == NODE_SURFACE_MACRO_DECL || k == NODE_SURFACE_MACRO_CALL {
+            return true;
+        }
+        i = wrapping_add(i, 3);
+    }
+}
+
+// `surface::syntax` with `opaque`: a source in the macro profile. Its
+// surface parse runs the expression macro check; without sugar it goes to
+// the strict macro parser instead.
+fn once_macro(
+    in src: Slice[u8],
+    sink t: Tokens,
+    in lim: Limits,
+    inout w: Work
+) -> Pass eff [Fail[FmtFail]] {
+    let ntok = t.kind.len();
+    let test_block = may_have_test_block(in src) && contains_test_block(in src, in t);
+    charge(inout w, wrapping_mul(ntok, PARSE_UNITS_PER_TOKEN));
+    let mut ml = profile_limits(src.len(), ntok, in lim);
+    ml.max_work = min64(ml.max_work, wrapping_sub(w.max, w.used));
+    let mut d = diags_new();
+    let st = lex_sugar_with_limits(
+        in src,
+        inout d,
+        HARD_SOURCE_BYTES,
+        HARD_TOKENS,
+        max_diagnostics()
+    );
+    if st.rejected {
+        fail(E_TOKEN);
+    }
+    let p = parse_macro_surface_tokens(in src, st, d, max_diagnostics(), hard_depth(), true, ml);
+    let nodes = surface_nodes(in p.ev, in p.t);
+    if has_macro_node(in nodes) {
+        charge_profile(ntok, in ml, inout w);
+    }
+    let sugar = has_sugar(in nodes);
+    if p.d.code.len() != 0 {
+        // The batch macro parser skips test-only items. A mixed-module
+        // error there must not be accepted through its recovery CST.
+        if !sugar && !test_block {
+            return macro_syntax(in src, in t, in lim, inout w);
+        }
+        fail_at(first_diag(in p));
+    }
+    if !sugar {
+        return macro_syntax(in src, in t, in lim, inout w);
+    }
+    if !macro_tokens_in_groups(in src, in p) {
+        fail(E_MACRO);
+    }
+    layout(in src, in p, nodes, in lim, inout w, true)
 }
 
 // `format_source(source, limits)`: the canonical text, or the error.
@@ -2597,19 +3026,22 @@ pub fn format(
         max_work: max_work
     };
     let mut w = Work { used: 0, max: max_work };
-    let t = gate(in src, in lim, inout w);
-    let first = once_tokens(in src, t, in lim, inout w);
+    let g = gate_once(in src, in lim, inout w);
+    let first = once_tokens(in src, g.t, in lim, inout w, g.opaque);
     let first_nodes = first.nodes;
     let output = first.out;
-    let ts = gate(in src, in lim, inout w);
-    let to = gate(in output.as_slice(), in lim, inout w);
+    let opaque = first.opaque;
+    let ts = gate(in src, in lim, inout w, opaque);
+    let to = gate(in output.as_slice(), in lim, inout w, opaque);
     if !same_pieces(in src, in ts, in output.as_slice(), in to) {
         fail(E_CONSERVATION);
     }
-    let to2 = gate(in output.as_slice(), in lim, inout w);
-    let again = once_tokens(in output.as_slice(), to2, in lim, inout w);
+    let g2 = gate_once(in output.as_slice(), in lim, inout w);
+    let again = once_tokens(in output.as_slice(), g2.t, in lim, inout w, g2.opaque);
     let second = again.out;
-    if second.len() != output.len() || !same_words(in first_nodes, in again.nodes) {
+    if second.len() != output.len()
+        || !same_words(in first_nodes, in again.nodes)
+        || again.opaque != opaque {
         fail(E_IDEMPOTENT);
     }
     for i in 0..output.len() {
@@ -2994,8 +3426,9 @@ fn capture(
     if src.len() > lim.max_input_bytes {
         fail(E_INPUT);
     }
-    let t = gate(in src, in lim, inout w);
-    let first = once_tokens(in src, t, in lim, inout w);
+    let g = gate_once(in src, in lim, inout w);
+    let first = once_tokens(in src, g.t, in lim, inout w, g.opaque);
+    let opaque = first.opaque;
     let mut m = model_new();
     let f = project(in first.doc, first.root, in src, in pl, inout m);
     if f.code != P_NONE {
@@ -3003,15 +3436,17 @@ fn capture(
     }
     let first_nodes = first.nodes;
     let output = first.out;
-    let ts = gate(in src, in lim, inout w);
-    let to = gate(in output.as_slice(), in lim, inout w);
+    let ts = gate(in src, in lim, inout w, opaque);
+    let to = gate(in output.as_slice(), in lim, inout w, opaque);
     if !same_pieces(in src, in ts, in output.as_slice(), in to) {
         fail(E_CONSERVATION);
     }
-    let to2 = gate(in output.as_slice(), in lim, inout w);
-    let again = once_tokens(in output.as_slice(), to2, in lim, inout w);
+    let g2 = gate_once(in output.as_slice(), in lim, inout w);
+    let again = once_tokens(in output.as_slice(), g2.t, in lim, inout w, g2.opaque);
     let second = again.out;
-    if second.len() != output.len() || !same_words(in first_nodes, in again.nodes) {
+    if second.len() != output.len()
+        || !same_words(in first_nodes, in again.nodes)
+        || again.opaque != opaque {
         fail(E_IDEMPOTENT);
     }
     for i in 0..output.len() {

@@ -9,7 +9,9 @@ use crate::{
     tooling::frontend::AnalysisLimits,
 };
 use std::time::{Duration, Instant};
-use vesper_lsp::lens::{CancelToken, CompletionTier, Debouncer, ProofStatus, TimerAction};
+use vesper_lsp::lens::{
+    CancelToken, CompletionTier, Debouncer, ProofLedger, ProofStatus, TimerAction,
+};
 
 pub(crate) const PROOF_COMMAND: &str = "vesper.proofAudit";
 
@@ -322,16 +324,6 @@ impl Session {
         models
     }
 
-    fn semantic_status(&self, model: &Result<proof_model::Model, String>) -> ProofStatus {
-        match model {
-            Ok(model) => self.model_proofs.status(model.key, &model.function),
-            Err(reason) => ProofStatus::Failed {
-                stage: "model".into(),
-                reason: reason.clone(),
-            },
-        }
-    }
-
     pub(super) fn code_lenses(
         &self,
         params: &serde_json::Map<String, Value>,
@@ -342,94 +334,22 @@ impl Session {
         let Ok(snapshot) = self.snapshot(uri) else {
             return Ok(Value::Array(Vec::new()));
         };
-        let functions = match proof_lens::candidates(&snapshot) {
-            Ok((_, functions)) => functions,
-            Err(_) => {
-                let mut all: Vec<_> = snapshot
-                    .world()
-                    .functions
-                    .values()
-                    .filter(|f| f.body.is_some())
-                    .map(|f| (f.name.clone(), f.span.clone()))
-                    .collect();
-                all.sort_by_key(|(_, span)| span.start);
-                all
-            }
-        };
+        let functions = lens_functions(&snapshot);
         let models = self.models(uri, &snapshot);
-        let hash = snapshot.source_hash();
-        let mut lenses = Vec::new();
-        for (name, span) in functions.iter().take(256) {
-            let status = self.proofs.status(hash, name);
-            let title = match &status {
-                ProofStatus::NotAttempted => "Lean: not attempted (run proof audit)".to_owned(),
-                ProofStatus::Proved { .. } => {
-                    "Lean: proved (extraction kernel-checked, no axioms)".to_owned()
-                }
-                ProofStatus::Failed { stage, .. } => format!("Lean: failed at {stage} (rerun)"),
-                ProofStatus::Checked { .. } | ProofStatus::Refuted { .. } => {
-                    format!("Lean: {}", status.as_str())
-                }
-            };
-            let at = document
-                .index()
-                .position(span.start)
-                .map_err(|_| ServerError::internal("function span is invalid"))?;
-            let position = json!({"line":at.line,"character":at.character});
-            lenses.push(json!({
-                "range": {"start": position, "end": position},
-                "command": {"title": title, "command": PROOF_COMMAND,
-                    "arguments": [{"uri": uri, "version": document.version(), "function": name}]},
-                "data": {"vesper": {"status": status.as_str(), "function": name,
-                    "scope": proof_lens::EXTRACTION_SCOPE}}
-            }));
-            let Some(model) = models.get(name) else {
-                continue;
-            };
-            let status = self.semantic_status(model);
-            let title = match (&status, model) {
-                (_, Err(reason)) => format!(
-                    "Lean model: unavailable ({})",
-                    reason.chars().take(80).collect::<String>()
-                ),
-                (ProofStatus::NotAttempted, _) => {
-                    "Lean model: not attempted (check arithmetic faults)".to_owned()
-                }
-                (ProofStatus::Proved { .. }, _) => {
-                    "Lean model: no arithmetic fault (proved, kernel-replayed)".to_owned()
-                }
-                (ProofStatus::Checked { .. }, _) => {
-                    "Lean model: no counterexample (bv_decide, not kernel-replayed)".to_owned()
-                }
-                (ProofStatus::Refuted { counterexample }, _) => {
-                    format!("Lean model: arithmetic fault when {counterexample}")
-                }
-                (ProofStatus::Failed { stage, .. }, _) => {
-                    format!("Lean model: failed at {stage} (rerun)")
-                }
-            };
-            let mut data = json!({"status": status.as_str(), "function": name,
-                "scope": proof_lens::SEMANTIC_SCOPE});
-            match (&status, model) {
-                (_, Err(reason)) => {
-                    data["status"] = json!("unavailable");
-                    data["reason"] = json!(reason);
-                }
-                (ProofStatus::Refuted { counterexample }, Ok(model)) => {
-                    data["counterexample"] = json!(counterexample);
-                    data["model_blake3"] = json!(proof_model::hex(&model.key));
-                }
-                (_, Ok(model)) => data["model_blake3"] = json!(proof_model::hex(&model.key)),
-            }
-            lenses.push(json!({
-                "range": {"start": position, "end": position},
-                "command": {"title": title, "command": PROOF_COMMAND,
-                    "arguments": [{"uri": uri, "version": document.version(), "function": name,
-                        "obligation": "semantic"}]},
-                "data": {"vesper": data}
-            }));
-        }
-        Ok(Value::Array(lenses))
+        code_lenses_of(
+            uri,
+            document.version(),
+            document.index(),
+            snapshot.source_hash(),
+            &functions,
+            |name| {
+                models
+                    .get(name)
+                    .map(|m| m.as_ref().map(|m| m.key).map_err(String::as_str))
+            },
+            &self.proofs,
+            &self.model_proofs,
+        )
     }
 
     /// Validate `workspace/executeCommand` and prepare the proof job.
@@ -523,17 +443,12 @@ impl Session {
     }
 
     fn record(&mut self, job: &proof_lens::Job, outcome: &proof_lens::Outcome) {
-        for (function, status) in &outcome.extraction {
-            self.proofs.record(job.source, function, status.clone());
-        }
-        for (function, key, status) in &outcome.semantic {
-            // Toolchain or I/O failures say nothing about the model.
-            if matches!(status, ProofStatus::Failed { stage, .. } if stage != "prove" && stage != "kernel")
-            {
-                continue;
-            }
-            self.model_proofs.record(*key, function, status.clone());
-        }
+        record_of(
+            &mut self.proofs,
+            &mut self.model_proofs,
+            job.source,
+            outcome,
+        );
     }
 
     /// Record a finished proof job and render its command result.
@@ -543,33 +458,7 @@ impl Session {
         outcome: proof_lens::Outcome,
     ) -> Value {
         self.record(job, &outcome);
-        let Some((function, semantic)) = &job.requested else {
-            return json!(null);
-        };
-        let mut value = if *semantic {
-            let found = outcome
-                .semantic
-                .iter()
-                .find(|(f, _, _)| f == function)
-                .map(|(_, key, status)| (key, status.clone()));
-            let (key, status) = match found {
-                Some((key, status)) => (Some(key), status),
-                None => (None, ProofStatus::NotAttempted),
-            };
-            semantic_value(function, key, &status)
-        } else {
-            let status = outcome
-                .extraction
-                .iter()
-                .find(|(f, _)| f == function)
-                .map(|(_, status)| status.clone())
-                .unwrap_or(ProofStatus::NotAttempted);
-            proof_value(job.source, function, &status)
-        };
-        value["olean_reused"] = json!(outcome.reused);
-        value["olean_compiled"] = json!(outcome.compiled);
-        value["elapsed_ms"] = json!(outcome.elapsed.as_millis() as u64);
-        value
+        proof_result_of(job.source, job.requested.as_ref(), &outcome)
     }
 
     /// Read the client's background-run choice and refresh support.
@@ -724,27 +613,9 @@ impl Session {
         if *blake3::hash(document.text().as_bytes()).as_bytes() != job.source {
             return Vec::new();
         }
-        let mut results: Vec<Value> = outcome
-            .extraction
-            .iter()
-            .map(|(f, status)| {
-                let mut v = proof_value(job.source, f, status);
-                v["obligation"] = json!("extraction");
-                v
-            })
-            .collect();
-        results.extend(outcome.semantic.iter().map(|(f, key, status)| {
-            let mut v = semantic_value(f, Some(key), status);
-            v["obligation"] = json!("semantic");
-            v
-        }));
         let mut messages = vec![notification(
             "vesper/proofStatus",
-            json!({"uri": uri, "version": document.version(), "generation": generation,
-                "source_blake3": blake3::Hash::from_bytes(job.source).to_hex().as_str(),
-                "results": results, "olean_reused": outcome.reused,
-                "olean_compiled": outcome.compiled,
-                "elapsed_ms": outcome.elapsed.as_millis() as u64}),
+            proof_status_of(uri, document.version(), generation, job.source, &outcome),
         )];
         self.continue_background(uri, job);
         if self.code_lens_refresh {
@@ -757,6 +628,206 @@ impl Session {
         }
         messages
     }
+}
+
+/// The proof-lens functions of a checked source: the extraction candidates,
+/// or (when there is no extraction) every function with a body, by start.
+pub(crate) fn lens_functions(snapshot: &CheckedSource) -> Vec<(String, usize)> {
+    match proof_lens::candidates(snapshot) {
+        Ok((_, functions)) => functions
+            .into_iter()
+            .map(|(name, span)| (name, span.start))
+            .collect(),
+        Err(_) => {
+            let mut all: Vec<_> = snapshot
+                .world()
+                .functions
+                .values()
+                .filter(|f| f.body.is_some())
+                .map(|f| (f.name.clone(), f.span.start))
+                .collect();
+            all.sort_by_key(|(_, start)| *start);
+            all
+        }
+    }
+}
+
+/// The `textDocument/codeLens` answer: an extraction lens per function (at
+/// most 256) and a semantic lens per function with a model (its key, or why
+/// there is none), from the outcomes the ledgers hold.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn code_lenses_of<'m>(
+    uri: &str,
+    version: i32,
+    index: &vesper_span::LineIndex,
+    source: [u8; 32],
+    functions: &[(String, usize)],
+    model: impl Fn(&str) -> Option<Result<[u8; 32], &'m str>>,
+    proofs: &ProofLedger,
+    model_proofs: &ProofLedger,
+) -> Result<Value, ServerError> {
+    let mut lenses = Vec::new();
+    for (name, start) in functions.iter().take(256) {
+        let status = proofs.status(source, name);
+        let title = match &status {
+            ProofStatus::NotAttempted => "Lean: not attempted (run proof audit)".to_owned(),
+            ProofStatus::Proved { .. } => {
+                "Lean: proved (extraction kernel-checked, no axioms)".to_owned()
+            }
+            ProofStatus::Failed { stage, .. } => format!("Lean: failed at {stage} (rerun)"),
+            ProofStatus::Checked { .. } | ProofStatus::Refuted { .. } => {
+                format!("Lean: {}", status.as_str())
+            }
+        };
+        let at = index
+            .position(*start)
+            .map_err(|_| ServerError::internal("function span is invalid"))?;
+        let position = json!({"line":at.line,"character":at.character});
+        lenses.push(json!({
+            "range": {"start": position, "end": position},
+            "command": {"title": title, "command": PROOF_COMMAND,
+                "arguments": [{"uri": uri, "version": version, "function": name}]},
+            "data": {"vesper": {"status": status.as_str(), "function": name,
+                "scope": proof_lens::EXTRACTION_SCOPE}}
+        }));
+        let Some(model) = model(name) else {
+            continue;
+        };
+        let status = match model {
+            Ok(key) => model_proofs.status(key, name),
+            Err(reason) => ProofStatus::Failed {
+                stage: "model".into(),
+                reason: reason.to_owned(),
+            },
+        };
+        let title = match (&status, model) {
+            (_, Err(reason)) => format!(
+                "Lean model: unavailable ({})",
+                reason.chars().take(80).collect::<String>()
+            ),
+            (ProofStatus::NotAttempted, _) => {
+                "Lean model: not attempted (check arithmetic faults)".to_owned()
+            }
+            (ProofStatus::Proved { .. }, _) => {
+                "Lean model: no arithmetic fault (proved, kernel-replayed)".to_owned()
+            }
+            (ProofStatus::Checked { .. }, _) => {
+                "Lean model: no counterexample (bv_decide, not kernel-replayed)".to_owned()
+            }
+            (ProofStatus::Refuted { counterexample }, _) => {
+                format!("Lean model: arithmetic fault when {counterexample}")
+            }
+            (ProofStatus::Failed { stage, .. }, _) => {
+                format!("Lean model: failed at {stage} (rerun)")
+            }
+        };
+        let mut data = json!({"status": status.as_str(), "function": name,
+            "scope": proof_lens::SEMANTIC_SCOPE});
+        match (&status, model) {
+            (_, Err(reason)) => {
+                data["status"] = json!("unavailable");
+                data["reason"] = json!(reason);
+            }
+            (ProofStatus::Refuted { counterexample }, Ok(key)) => {
+                data["counterexample"] = json!(counterexample);
+                data["model_blake3"] = json!(proof_model::hex(&key));
+            }
+            (_, Ok(key)) => data["model_blake3"] = json!(proof_model::hex(&key)),
+        }
+        lenses.push(json!({
+            "range": {"start": position, "end": position},
+            "command": {"title": title, "command": PROOF_COMMAND,
+                "arguments": [{"uri": uri, "version": version, "function": name,
+                    "obligation": "semantic"}]},
+            "data": {"vesper": data}
+        }));
+    }
+    Ok(Value::Array(lenses))
+}
+
+/// Record a finished job's outcomes. A semantic failure before the prover
+/// ran (toolchain or I/O) says nothing about the model and is not kept.
+pub(crate) fn record_of(
+    proofs: &mut ProofLedger,
+    model_proofs: &mut ProofLedger,
+    source: [u8; 32],
+    outcome: &proof_lens::Outcome,
+) {
+    for (function, status) in &outcome.extraction {
+        proofs.record(source, function, status.clone());
+    }
+    for (function, key, status) in &outcome.semantic {
+        if matches!(status, ProofStatus::Failed { stage, .. } if stage != "prove" && stage != "kernel")
+        {
+            continue;
+        }
+        model_proofs.record(*key, function, status.clone());
+    }
+}
+
+/// The `vesper.proofAudit` command result: the requested obligation's
+/// outcome with the cache counts and time, or null for an unrequested job.
+pub(crate) fn proof_result_of(
+    source: [u8; 32],
+    requested: Option<&(String, bool)>,
+    outcome: &proof_lens::Outcome,
+) -> Value {
+    let Some((function, semantic)) = requested else {
+        return json!(null);
+    };
+    let mut value = if *semantic {
+        let found = outcome
+            .semantic
+            .iter()
+            .find(|(f, _, _)| f == function)
+            .map(|(_, key, status)| (key, status.clone()));
+        let (key, status) = match found {
+            Some((key, status)) => (Some(key), status),
+            None => (None, ProofStatus::NotAttempted),
+        };
+        semantic_value(function, key, &status)
+    } else {
+        let status = outcome
+            .extraction
+            .iter()
+            .find(|(f, _)| f == function)
+            .map(|(_, status)| status.clone())
+            .unwrap_or(ProofStatus::NotAttempted);
+        proof_value(source, function, &status)
+    };
+    value["olean_reused"] = json!(outcome.reused);
+    value["olean_compiled"] = json!(outcome.compiled);
+    value["elapsed_ms"] = json!(outcome.elapsed.as_millis() as u64);
+    value
+}
+
+/// The `vesper/proofStatus` parameters of a finished background run.
+pub(crate) fn proof_status_of(
+    uri: &str,
+    version: i32,
+    generation: u64,
+    source: [u8; 32],
+    outcome: &proof_lens::Outcome,
+) -> Value {
+    let mut results: Vec<Value> = outcome
+        .extraction
+        .iter()
+        .map(|(f, status)| {
+            let mut v = proof_value(source, f, status);
+            v["obligation"] = json!("extraction");
+            v
+        })
+        .collect();
+    results.extend(outcome.semantic.iter().map(|(f, key, status)| {
+        let mut v = semantic_value(f, Some(key), status);
+        v["obligation"] = json!("semantic");
+        v
+    }));
+    json!({"uri": uri, "version": version, "generation": generation,
+        "source_blake3": blake3::Hash::from_bytes(source).to_hex().as_str(),
+        "results": results, "olean_reused": outcome.reused,
+        "olean_compiled": outcome.compiled,
+        "elapsed_ms": outcome.elapsed.as_millis() as u64})
 }
 
 fn status_fields(value: &mut Value, status: &ProofStatus) {

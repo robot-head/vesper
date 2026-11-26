@@ -4,6 +4,7 @@ use @vesper-std/core::iter::sum;
 use @vesper-std/core::pipe::pipe_try;
 use @vesper-std/core::pipeline::pipe_at;
 use @vesper-std/core::txn::transact;
+use @vesper-std/core::transition::transition;
 
 test {
     fn error_value() -> u64 eff [Fail[u64]] {
@@ -49,12 +50,7 @@ test {
     }
 
     fn sum_values(in values: Slice[u64]) -> u64 eff [Fail[ArithOverflow]] {
-        sum{
-            {
-                value
-            }
-            | value in values
-        }
+        sum{ { value } | value in values }
     }
 
     fn checked_total(in values: Slice[u64]) -> Option[u64] {
@@ -81,15 +77,7 @@ test {
         in totals: Slice[i64],
         in weights: Slice[i64]
     ) -> i64 eff [Fail[ArithOverflow]] {
-        sum{
-            {
-                value * weight
-            }
-            | (value, weight) in zip{
-                totals,
-                weights
-            }
-        }
+        sum{ { value * weight } | (value, weight) in zip{ totals, weights } }
     }
 
     fn check_weighted_sum() -> bool {
@@ -139,6 +127,40 @@ test {
             && window.length == 20
     }
 
+    linear struct PendingExtent {
+        start: u64,
+        length: u64,
+    }
+
+    linear struct CheckedExtent {
+        end: u64,
+    }
+
+    fn validate_extent(sink input: PendingExtent) -> CheckedExtent eff [Fail[u64]] {
+        let PendingExtent { start, length } = input;
+        ensure length <= 32 else length;
+        CheckedExtent { end: wrapping_add(start, length) }
+    }
+
+    fn after_transition(length: u64) -> u64 eff [Fail[u64]] {
+        let extent = PendingExtent { start: 22, length };
+        transition sink extent from[PendingExtent] to[CheckedExtent] {
+            validate_extent(sink extent)
+        }
+        let CheckedExtent { end } = extent;
+        end
+    }
+
+    fn observe_transition(length: u64) -> Result[u64, u64] {
+        let outcome: Result[u64, u64] = handle Fail[u64] in {
+            after_transition(length)
+        } with {
+            return end => Result::Ok(end),
+            raise(reason, _) => Result::Err(reason),
+        };
+        outcome
+    }
+
     pub fn check_core_control() -> u64 {
         // The failure expression never runs on success.
         if observed(10) != Result::Ok(11) {
@@ -162,6 +184,9 @@ test {
         }
         if !check_segment_rollback() {
             return 8;
+        }
+        if observe_transition(20) != Result::Ok(42) || observe_transition(77) != Result::Err(77) {
+            return 9;
         }
         // The condition runs once and the expansion stops at the inner block.
         handle Fail[u64] in {

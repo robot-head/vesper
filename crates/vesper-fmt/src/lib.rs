@@ -37,9 +37,9 @@ pub fn port_live_allocations() -> i64 {
     port::live_allocations()
 }
 
-/// [`format_source`] through the port alone, for the differential tests:
-/// `None` when the source is one the Rust code formats (the macro
-/// profile).
+/// [`format_source`] through the port alone, for the differential tests.
+/// Since the macro profile moved to the port, it is `None` only for an
+/// error code the port does not define.
 #[cfg(vesper_port)]
 #[doc(hidden)]
 pub fn port_format_source(source: &str, limits: Limits) -> Option<Result<FormatResult, Error>> {
@@ -147,6 +147,9 @@ struct Piece<'a> {
     /// The token's CST parent is an expression or pattern node, where a `{`
     /// right after a type name opens a struct literal or pattern.
     expr: bool,
+    /// The `{` of a tagged sugar call (`sum{ .. }`, `zip{ .. }`), from the
+    /// surface CST.
+    tagged: bool,
 }
 fn pieces<'a>(source: &'a str, tokens: &[Token]) -> Vec<Piece<'a>> {
     tokens
@@ -159,6 +162,7 @@ fn pieces<'a>(source: &'a str, tokens: &[Token]) -> Vec<Piece<'a>> {
             glued: false,
             sugar_gap: None,
             expr: false,
+            tagged: false,
         })
         .collect()
 }
@@ -447,6 +451,7 @@ fn once(
                     expr: token
                         .parent()
                         .is_some_and(|n| matches!(n.kind(), parser::EXPR | parser::PATTERN)),
+                    tagged: false,
                 });
             }
         }
@@ -470,7 +475,16 @@ fn once(
     doc_limits.max_work = work.max - work.used;
     let mut document = Document::new(doc_limits)?;
     let mut pos = 0;
-    let root = sequence(&atoms, &mut pos, None, false, false, 0, &mut document)?;
+    let root = sequence(
+        &atoms,
+        &mut pos,
+        None,
+        false,
+        false,
+        false,
+        0,
+        &mut document,
+    )?;
     let end = document.push(Doc::HardLine)?;
     let root = document.push(Doc::Concat(vec![root, end]))?;
     let output = document.render(root)?;
@@ -492,8 +506,8 @@ fn once(
 /// Width is a 100 Unicode-scalar ribbon with four-space nesting. Indivisible
 /// token/comment bytes are never wrapped, so those leaves may exceed the ribbon.
 pub fn format_source(source: &str, limits: Limits) -> Result<FormatResult, Error> {
-    // The native port handles executable grammar, sugar and test blocks
-    // (over @vesper/front's surface CST); the macro profile stays here.
+    // The native port handles executable grammar, sugar, test blocks and
+    // the expression macro profile (over @vesper/front's CSTs).
     if source.len() > limits.max_input_bytes {
         return Err(Error::InputLimit);
     }
@@ -720,6 +734,10 @@ enum Gap {
 fn is_binary_operator(kind: K) -> bool {
     infix_precedence(kind).is_some()
 }
+/// The break level of a bitwise `|`, between `<` and `^` as the parser
+/// ranks it. It is not in `infix_precedence`, since a `|` may also open a
+/// closure.
+const PIPE_PRECEDENCE: u8 = 6;
 fn infix_precedence(kind: K) -> Option<u8> {
     Some(match kind {
         K::Or => 2,
@@ -812,6 +830,11 @@ fn gap(previous: Piece<'_>, current: Piece<'_>, block: bool, after_block: bool) 
     if let Some(precedence) = infix_precedence(current.kind).filter(|_| ends_operand(previous.kind))
     {
         return Gap::Operator(precedence);
+    }
+    // A bitwise `|` after an operand; `sequence` keeps a closure's closing
+    // `|` (`|x: T| e`) from breaking.
+    if current.kind == K::Pipe && ends_operand(previous.kind) {
+        return Gap::Operator(PIPE_PRECEDENCE);
     }
     if matches!(
         current.kind,
@@ -962,12 +985,50 @@ fn short_if_else(atoms: &[Piece<'_>], start: usize, end: Option<K>) -> Option<us
     });
     ends.then_some(close)
 }
+/// How a tagged sugar call lays out its braces.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tagged {
+    /// Not a tagged call, or one whose contents hold a top-level `;` or a
+    /// comment: an ordinary block.
+    No,
+    /// Contents that open with a block (`sum{ { .. } | x in xs }`): the
+    /// call hugs the block, which stays on one line when it fits, and the
+    /// clause after it follows its `}`.
+    Hug,
+    /// Other contents (`zip{ a, b }`): spaced like a struct literal, on one
+    /// line when they fit.
+    List,
+}
+fn tagged_layout(atoms: &[Piece<'_>], open: usize) -> Tagged {
+    if !atoms[open].tagged {
+        return Tagged::No;
+    }
+    let mut depth = 0usize;
+    for atom in &atoms[open + 1..] {
+        match atom.kind {
+            K::LParen | K::LBracket | K::LBrace => depth += 1,
+            K::RParen | K::RBracket | K::RBrace if depth == 0 => break,
+            K::RParen | K::RBracket | K::RBrace => depth -= 1,
+            K::Comment | K::BlockComment => return Tagged::No,
+            K::Semi if depth == 0 => return Tagged::No,
+            _ => {}
+        }
+    }
+    if atoms.get(open + 1).is_some_and(|a| a.kind == K::LBrace) {
+        Tagged::Hug
+    } else {
+        Tagged::List
+    }
+}
+// One flag per enclosing layout, mirrored by the Vesper port's `sequence`.
+#[allow(clippy::too_many_arguments)]
 fn sequence<'a>(
     atoms: &[Piece<'a>],
     pos: &mut usize,
     end: Option<K>,
     block: bool,
     fill: bool,
+    hug: bool,
     // The least column a line inside this sequence can start at: every
     // delimiter or block it is nested in adds 4 once it breaks, and a line
     // break inside one means it broke.
@@ -1000,11 +1061,16 @@ fn sequence<'a>(
     let mut commented = false;
     // The previous atom was a non-empty parameter list before `->`.
     let mut previous_params = false;
+    let mut previous_hugged = false;
     // The member chain being built on `line` (`out.rows.push(..)`).
     let mut chain = Chain::default();
     // A short `if c { a } else { b }` laid out on `line` as one group: the
     // index of its last `}`, and where its docs and breaks start on `line`.
     let mut short_if: Option<(usize, usize, usize)> = None;
+    // Inside a closure's parameters (`|x: T|`), after its opening `|`.
+    let mut closure_params = false;
+    // Right after a closure's opening `|`.
+    let mut closure_open = false;
     while *pos < atoms.len() && Some(atoms[*pos].kind) != end {
         let current = atoms[*pos];
         // An `if` used as a value (`let x = if ..`, an argument, a match arm,
@@ -1033,7 +1099,14 @@ fn sequence<'a>(
         // too, spaced inside its braces.
         let is_record =
             is_block && current.expr && !head && previous.is_some_and(|p| p.kind == K::Upper);
-        let is_block = is_block && !is_record;
+        let tagged = if is_block {
+            tagged_layout(atoms, *pos)
+        } else {
+            Tagged::No
+        };
+        let is_block = is_block && !is_record && tagged == Tagged::No;
+        // The block a hugging tagged call opens with.
+        let hugged = hug && is_block && previous.is_none();
         // A branch of a short `if` breaks only with the whole `if`.
         let soft_block = is_block && short_if.is_some();
         if matches!(current.kind, K::If | K::Match)
@@ -1052,6 +1125,13 @@ fn sequence<'a>(
             Gap::None
         } else if let Some(gap) = current.sugar_gap {
             gap
+        } else if hug && previous_hugged {
+            // The clause after a hugged block follows its `}`, and a `:` or
+            // `,` stays glued to it.
+            match previous.map(|p| gap(p, current, block, false)) {
+                Some(Gap::None) => Gap::None,
+                _ => Gap::Space,
+            }
         } else if previous_unary || package {
             Gap::None
         } else if list && previous.is_some_and(|p| p.kind == K::Semi) {
@@ -1066,6 +1146,42 @@ fn sequence<'a>(
         let spacing = match spacing {
             Gap::Return if previous_params => Gap::Soft,
             spacing => spacing,
+        };
+        // A `|` that follows no operand opens a closure's parameters, and the
+        // next `|` closes them: only a bitwise `|` breaks like an operator.
+        // The parameters hug their pipes, as in `|x: T| e`.
+        let spacing = if current.kind == K::Pipe && current.sugar_gap.is_none() {
+            let operator = matches!(spacing, Gap::Operator(_));
+            if closure_params {
+                closure_params = false;
+                closure_open = false;
+                // A line comment keeps its line break, and the two pipes of
+                // an empty `| |` keep their space so they don't become `||`.
+                if previous.is_some_and(|p| p.kind == K::Pipe) {
+                    Gap::Space
+                } else if matches!(spacing, Gap::Hard) {
+                    spacing
+                } else {
+                    Gap::None
+                }
+            } else {
+                // A `|` after an operand that isn't spaced as an operator
+                // (a comprehension's `{ .. } | x in xs`) opens nothing.
+                closure_params = !operator && !previous.is_some_and(|p| ends_operand(p.kind));
+                closure_open = closure_params;
+                spacing
+            }
+        } else if closure_open {
+            closure_open = false;
+            if matches!(spacing, Gap::Hard) {
+                spacing
+            } else {
+                Gap::None
+            }
+        } else if closure_params && previous.is_some_and(|p| p.kind == K::Comma) {
+            Gap::Space
+        } else {
+            spacing
         };
         // Anything but an attached token ends the operand and its chain.
         if is_block || !matches!(spacing, Gap::None | Gap::Empty) {
@@ -1131,13 +1247,19 @@ fn sequence<'a>(
             let start = document.push(Doc::Text(current.text))?;
             let fill =
                 current.kind == K::LBrace && previous.is_some_and(|p| p.kind == K::ColonColon);
-            let inner_indent = indent.checked_add(4).ok_or(Error::Overflow)?;
+            // A hugging call does not indent its contents.
+            let inner_indent = if tagged == Tagged::Hug {
+                indent
+            } else {
+                indent.checked_add(4).ok_or(Error::Overflow)?
+            };
             let inner = sequence(
                 atoms,
                 pos,
                 Some(close),
                 is_block,
                 fill,
+                tagged == Tagged::Hug,
                 inner_indent,
                 document,
             )?;
@@ -1162,22 +1284,31 @@ fn sequence<'a>(
             if empty {
                 document.push(Doc::Concat(vec![start, finish]))?
             } else {
-                let lead = document.push(if soft_block {
+                let lead = document.push(if hugged || soft_block {
                     Doc::SoftLineOrSpace
+                } else if tagged == Tagged::Hug {
+                    Doc::Text(" ")
                 } else if is_block || trailing_comma {
                     Doc::HardLine
-                } else if is_record {
+                } else if is_record || tagged == Tagged::List {
                     Doc::SoftLineOrSpace
                 } else {
                     Doc::SoftLineOrEmpty
                 })?;
                 let content = document.push(Doc::Concat(vec![lead, inner]))?;
-                let nest = document.push(Doc::Nest(4, content))?;
-                let trail = document.push(if soft_block {
+                // A hugging call does not indent: its block nests its own lines.
+                let nest = if tagged == Tagged::Hug {
+                    content
+                } else {
+                    document.push(Doc::Nest(4, content))?
+                };
+                let trail = document.push(if soft_block || hugged && !last_is_line_comment {
                     Doc::SoftLineOrSpace
+                } else if tagged == Tagged::Hug {
+                    Doc::Text(" ")
                 } else if is_block || last_is_line_comment || trailing_comma {
                     Doc::HardLine
-                } else if is_record {
+                } else if is_record || tagged == Tagged::List {
                     Doc::SoftLineOrSpace
                 } else {
                     Doc::SoftLineOrEmpty
@@ -1185,8 +1316,10 @@ fn sequence<'a>(
                 let all = document.push(Doc::Concat(vec![start, nest, trail, finish]))?;
                 // A parameter list before `->` shares its line's group, so it
                 // breaks whenever the signature with its return type cannot
-                // fit on one line; a short `if`'s branch shares the `if`'s.
-                if params || soft_block {
+                // fit on one line; a short `if`'s branch shares the `if`'s. A
+                // hugged block shares the group of its call, so it breaks
+                // before the clause after it does.
+                if params || soft_block || hugged {
                     all
                 } else {
                     document.push(Doc::Group(all))?
@@ -1231,6 +1364,7 @@ fn sequence<'a>(
         }
         previous_block = is_block;
         previous_params = params;
+        previous_hugged = hugged;
         // A prefix `-`/`!` binds to its operand with no space.
         previous_unary =
             matches!(current.kind, K::Minus | K::Bang | K::Tilde) && !previous_ends_operand;
@@ -1257,6 +1391,7 @@ fn sequence<'a>(
             glued: current.glued,
             sugar_gap: None,
             expr: current.expr,
+            tagged: false,
         });
     }
     chain.finish(&mut line, indent, document)?;

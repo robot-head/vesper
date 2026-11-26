@@ -35,7 +35,12 @@ under the 1.5x bar, and part 2 adds hover and the documentation links:
 - the Lens request layer of the server (`lsp_lens_requests`,
   `ownership.ves`): poison notices and Lens metadata, completion items,
   obligation hover text and inlay hints of
-  `src/lsp/session/lens_requests.rs`, part 7 (#1828).
+  `src/lsp/session/lens_requests.rs`, part 7 (#1828);
+- the proof code lenses, proof ledgers, `vesper.proofAudit` results and
+  background `vesper/proofStatus` notices (`lsp_proof_lenses`,
+  `proof_lenses.ves`): `code_lenses_of`, `record_of`, `proof_result_of`
+  and `proof_status_of` of `src/lsp/session/lens_requests.rs` and
+  `ProofLedger` of `crates/vesper-lsp/src/lens.rs`, part 9 (#1828).
 
 The source is parsed with `@vesper/front` and `@vesper/ast`, positions use
 `@vesper/span`, and the JSON is written byte for byte as serde_json writes

@@ -2119,12 +2119,8 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
                 let c = u32_at(in calls, add(fd.ca, j));
                 let k = w(u32_at(in index, w(c)));
                 if k != 0 {
-                    next = next | recode_mask(
-                        in site,
-                        nbase,
-                        c,
-                        u64_at(in raises, wrapping_sub(k, 1))
-                    );
+                    next = next
+                        | recode_mask(in site, nbase, c, u64_at(in raises, wrapping_sub(k, 1)));
                 }
             }
             for j in 0..fd.hn {

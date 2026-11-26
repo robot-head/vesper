@@ -407,10 +407,9 @@ fn mmio_write_queue_reg(inout st: MmioState, offset: u64, value: u32) -> u64 {
     };
     if offset == 56 {
         if value == 0 || widen_u64(value) > widen_u64(q.max) {
-            return MMIO_E_INVALID_QUEUE_SIZE | mmio_value(value) | wrapping_shl_u64(
-                widen_u64(q.max),
-                40
-            );
+            return MMIO_E_INVALID_QUEUE_SIZE
+                | mmio_value(value)
+                | wrapping_shl_u64(widen_u64(q.max), 40);
         }
         q.num = wrapping_u16(widen_u64(value));
     } else if offset == 128 {

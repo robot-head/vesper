@@ -320,10 +320,8 @@ pub fn rotate(k: u8, left: bool, a: i128, amount: i128) -> i128 {
         p
     } else {
         (
-            wrapping_shl_u64(p, wrapping_u32(n)) | wrapping_shr_u64(
-                p,
-                wrapping_u32(wrapping_sub(width, n))
-            )
+            wrapping_shl_u64(p, wrapping_u32(n))
+                | wrapping_shr_u64(p, wrapping_u32(wrapping_sub(width, n)))
         )
             & mask(k)
     };

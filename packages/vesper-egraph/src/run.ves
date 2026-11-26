@@ -88,14 +88,14 @@ impl Matches {
         self.rule_start.push(self.eclass.len());
     }
 
-    // The matches of rule `r`, after `mark` was called for it and the next.
-    pub fn range(in self, r: u64) -> (u64, u64) {
-        (u64_at(in self.rule_start, r), u64_at(in self.rule_start, wrapping_add(r, 1)))
+    // The matches of rule `rule`, after `mark` was called for it and the next.
+    pub fn range(in self, rule: u64) -> (u64, u64) {
+        (u64_at(in self.rule_start, rule), u64_at(in self.rule_start, wrapping_add(rule, 1)))
     }
 
-    // Class variable `v` of match `mi`.
-    pub fn val(in self, mi: u64, v: u64) -> u32 {
-        u32_at(in self.vals, wrapping_add(u64_at(in self.val_start, mi), v))
+    // Class variable `var` of match `match_index`.
+    pub fn val(in self, match_index: u64, var: u64) -> u32 {
+        u32_at(in self.vals, wrapping_add(u64_at(in self.val_start, match_index), var))
     }
 }
 
@@ -131,91 +131,105 @@ struct Machine {
     left: u64
 }
 
-// egg's `Machine::run` from instruction `pc` of rule `r`'s program. Returns
+// egg's `Machine::run` from instruction `pc` of rule `rule`'s program. Returns
 // false once the match limit is reached.
 fn run_from(
-    in g: EGraph,
+    in graph: EGraph,
     in rules: Rules,
-    r: u64,
+    rule: u64,
     pc: u64,
     end: u64,
-    inout m: Machine,
+    inout machine: Machine,
     inout out: Matches
 ) -> bool {
     if pc >= end {
         // yield: one substitution
-        out.eclass.push(u32_at(in m.regs, 0));
+        out.eclass.push(u32_at(in machine.regs, 0));
         out.val_start.push(out.vals.len());
         out.dval_start.push(out.dvals.len());
-        for v in 0..rules.nvars_of(r) {
-            out.vals.push(u32_at(in m.regs, rules.var_reg(r, v)));
+        for var in 0..rules.nvars_of(rule) {
+            out.vals.push(u32_at(in machine.regs, rules.var_reg(rule, var)));
         }
-        for d in 0..rules.ndvars_of(r) {
-            out.dvals.push(i64_at(in m.dregs, d));
+        for data_var in 0..rules.ndvars_of(rule) {
+            out.dvals.push(i64_at(in machine.dregs, data_var));
         }
-        m.left = wrapping_sub(m.left, 1);
-        return m.left != 0;
+        machine.left = wrapping_sub(machine.left, 1);
+        return machine.left != 0;
     }
     let kind = rules.instr(pc, 0);
-    let i = widen_u64(rules.instr(pc, 1));
-    let o = widen_u64(rules.instr(pc, 2));
+    let in_reg = widen_u64(rules.instr(pc, 1));
+    let out_reg = widen_u64(rules.instr(pc, 2));
     if kind == I_BIND {
         let op = rules.instr(pc, 3);
         let dmode = rules.instr(pc, 4);
-        let dix = widen_u64(rules.instr(pc, 5));
+        let data_index = widen_u64(rules.instr(pc, 5));
         let data = rules.instr_data(pc);
-        let c = g.find(u32_at(in m.regs, i));
-        let s = g.class_start(c);
-        let n = g.class_len(c);
-        let a = widen_u64(g.arity_of(op));
-        for k in s..wrapping_add(s, n) {
-            if g.node_op(k) != op {
+        let class = graph.find(u32_at(in machine.regs, in_reg));
+        let start = graph.class_start(class);
+        let class_len = graph.class_len(class);
+        let arity = widen_u64(graph.arity_of(op));
+        for node in start..wrapping_add(start, class_len) {
+            if graph.node_op(node) != op {
                 continue;
             }
-            let d = g.node_data(k);
+            let node_data = graph.node_data(node);
             if dmode == B_CONST {
-                if d != data {
+                if node_data != data {
                     continue;
                 }
             } else if dmode == B_BIND {
-                m.dregs.try_set(dix, d);
-            } else if i64_at(in m.dregs, dix) != d {
+                machine.dregs.try_set(data_index, node_data);
+            } else if i64_at(in machine.dregs, data_index) != node_data {
                 continue;
             }
-            for j in 0..a {
-                m.regs.try_set(wrapping_add(o, j), g.node_child(k, j));
+            for child in 0..arity {
+                machine.regs.try_set(wrapping_add(out_reg, child), graph.node_child(node, child));
             }
-            if !run_from(in g, in rules, r, wrapping_add(pc, 1), end, inout m, inout out) {
+            if !run_from(
+                in graph,
+                in rules,
+                rule,
+                wrapping_add(pc, 1),
+                end,
+                inout machine,
+                inout out
+            ) {
                 return false;
             }
         }
         return true;
     }
     // Compare
-    if g.find(u32_at(in m.regs, i)) != g.find(u32_at(in m.regs, o)) {
+    if graph.find(u32_at(in machine.regs, in_reg)) != graph.find(u32_at(in machine.regs, out_reg)) {
         return true;
     }
-    run_from(in g, in rules, r, wrapping_add(pc, 1), end, inout m, inout out)
+    run_from(in graph, in rules, rule, wrapping_add(pc, 1), end, inout machine, inout out)
 }
 
-// Searches rule `r` over every class in ascending id order, appending at
+// Searches rule `rule` over every class in ascending id order, appending at
 // most `limit` matches. Returns the number found.
-pub fn search_rule(in g: EGraph, in rules: Rules, r: u64, limit: u64, inout out: Matches) -> u64 {
-    let (start, len) = rules.prog(r);
-    let end = wrapping_add(start, len);
-    let mut m = Machine {
-        regs: filled_u32(rules.nregs_of(r), 0),
-        dregs: ChunkSeq::with_capacity[i64](rules.ndvars_of(r)),
+pub fn search_rule(
+    in graph: EGraph,
+    in rules: Rules,
+    rule: u64,
+    limit: u64,
+    inout out: Matches
+) -> u64 {
+    let (start, prog_len) = rules.prog(rule);
+    let end = wrapping_add(start, prog_len);
+    let mut machine = Machine {
+        regs: filled_u32(rules.nregs_of(rule), 0),
+        dregs: ChunkSeq::with_capacity[i64](rules.ndvars_of(rule)),
         left: limit
     };
-    m.dregs.resize(rules.ndvars_of(r), 0);
+    machine.dregs.resize(rules.ndvars_of(rule), 0);
     let before = out.eclass.len();
     if limit == 0 {
         return 0;
     }
-    for x in 0..g.live_count() {
-        m.regs.try_set(0, g.live_at(x));
-        if !run_from(in g, in rules, r, start, end, inout m, inout out) {
+    for live_index in 0..graph.live_count() {
+        machine.regs.try_set(0, graph.live_at(live_index));
+        if !run_from(in graph, in rules, rule, start, end, inout machine, inout out) {
             break;
         }
     }
@@ -223,11 +237,11 @@ pub fn search_rule(in g: EGraph, in rules: Rules, r: u64, limit: u64, inout out:
 }
 
 // Searches every rule; false when one reached `limit` matches.
-fn search_all(in g: EGraph, in rules: Rules, limit: u64, inout out: Matches) -> bool {
+fn search_all(in graph: EGraph, in rules: Rules, limit: u64, inout out: Matches) -> bool {
     let mut ok = true;
-    for r in 0..rules.count() {
+    for rule in 0..rules.count() {
         out.rule_start.push(out.eclass.len());
-        let found = search_rule(in g, in rules, r, limit, inout out);
+        let found = search_rule(in graph, in rules, rule, limit, inout out);
         if found >= limit {
             ok = false;
         }
@@ -236,77 +250,86 @@ fn search_all(in g: EGraph, in rules: Rules, limit: u64, inout out: Matches) -> 
     ok
 }
 
-// Instantiates the right side of rule `r` for match `mi` (egg's
+// Instantiates the right side of rule `rule` for match `match_index` (egg's
 // `apply_pat`) and unions it with the matched class. Returns whether the
 // union merged two classes.
 pub fn apply_one(
-    inout g: EGraph,
+    inout graph: EGraph,
     in rules: Rules,
-    r: u64,
-    in ms: Matches,
-    mi: u64,
+    rule: u64,
+    in matches: Matches,
+    match_index: u64,
     inout ids: ChunkSeq[u32]
 ) -> bool {
-    let vs = u64_at(in ms.val_start, mi);
-    let ds = u64_at(in ms.dval_start, mi);
-    let (start, len) = rules.rhs(r);
+    let vals_start = u64_at(in matches.val_start, match_index);
+    let dvals_start = u64_at(in matches.dval_start, match_index);
+    let (start, rhs_len) = rules.rhs(rule);
     ids.clear();
     let mut last: u32 = 0;
-    for k in start..wrapping_add(start, len) {
-        let (kind, a, dmode, dval, c0, c1) = rules.pnode(k);
+    for node in start..wrapping_add(start, rhs_len) {
+        let (kind, operand, dmode, dval, c0, c1) = rules.pnode(node);
         let id = if kind == P_VAR {
-            u32_at(in ms.vals, wrapping_add(vs, widen_u64(a)))
+            u32_at(in matches.vals, wrapping_add(vals_start, widen_u64(operand)))
         } else {
             let data = if dmode == D_VAR {
-                i64_at(in ms.dvals, wrapping_add(ds, wrapping_u64(dval)))
+                i64_at(in matches.dvals, wrapping_add(dvals_start, wrapping_u64(dval)))
             } else {
                 dval
             };
-            let ar = g.arity_of(a);
-            let x0 = if ar >= 1 {
+            let arity = graph.arity_of(operand);
+            let child0 = if arity >= 1 {
                 u32_at(in ids, wrapping_sub(widen_u64(c0), start))
             } else {
                 0
             };
-            let x1 = if ar >= 2 {
+            let child1 = if arity >= 2 {
                 u32_at(in ids, wrapping_sub(widen_u64(c1), start))
             } else {
                 0
             };
-            g.add(a, data, x0, x1)
+            graph.add(operand, data, child0, child1)
         };
         ids.push(id);
         last = id;
     }
-    let class = u32_at(in ms.eclass, mi);
-    g.union(class, last)
+    let class = u32_at(in matches.eclass, match_index);
+    graph.union(class, last)
 }
 
-pub fn guard_holds(in g: EGraph, in rules: Rules, r: u64, in ms: Matches, mi: u64) -> bool {
-    let (kind, g0, g1) = rules.guard_of(r);
+pub fn guard_holds(
+    in graph: EGraph,
+    in rules: Rules,
+    rule: u64,
+    in matches: Matches,
+    match_index: u64
+) -> bool {
+    let (kind, g0, g1) = rules.guard_of(rule);
     if kind == G_TOTAL {
-        let v = u32_at(in ms.vals, wrapping_add(u64_at(in ms.val_start, mi), widen_u64(g0)));
-        return g.has_leaf(v);
+        let class = u32_at(
+            in matches.vals,
+            wrapping_add(u64_at(in matches.val_start, match_index), widen_u64(g0))
+        );
+        return graph.has_leaf(class);
     }
     if kind == G_REL {
-        let ds = u64_at(in ms.dval_start, mi);
-        let a = i64_at(in ms.dvals, wrapping_add(ds, widen_u64(g0)));
-        let b = i64_at(in ms.dvals, wrapping_add(ds, widen_u64(g1)));
-        return rules.rel_has(a, b);
+        let dvals_start = u64_at(in matches.dval_start, match_index);
+        let first = i64_at(in matches.dvals, wrapping_add(dvals_start, widen_u64(g0)));
+        let second = i64_at(in matches.dvals, wrapping_add(dvals_start, widen_u64(g1)));
+        return rules.rel_has(first, second);
     }
     true
 }
 
-fn root_has_leaf(in g: EGraph, root: u32, c: Config) -> bool {
-    let r = g.find(root);
-    let s = g.class_start(r);
-    for k in s..wrapping_add(s, g.class_len(r)) {
-        let op = g.node_op(k);
-        let d = g.node_data(k);
-        if op == c.const_op && d >= c.lo && d <= c.hi {
+fn root_has_leaf(in graph: EGraph, root: u32, config: Config) -> bool {
+    let root_class = graph.find(root);
+    let start = graph.class_start(root_class);
+    for k in start..wrapping_add(start, graph.class_len(root_class)) {
+        let op = graph.node_op(k);
+        let data = graph.node_data(k);
+        if op == config.const_op && data >= config.lo && data <= config.hi {
             return true;
         }
-        if op == c.input_op && d >= 0 && d < c.vars {
+        if op == config.input_op && data >= 0 && data < config.vars {
             return true;
         }
     }
@@ -315,64 +338,65 @@ fn root_has_leaf(in g: EGraph, root: u32, c: Config) -> bool {
 
 // One iteration of egg's `Runner::run_one`; 0 to go on, else a STOP_*.
 fn run_one(
-    inout g: EGraph,
+    inout graph: EGraph,
     in rules: Rules,
-    c: Config,
+    config: Config,
     root: u32,
     done: u64,
-    inout rec: Records
+    inout records: Records
 ) -> u8 {
-    if g.memo_len() > c.node_limit {
+    if graph.memo_len() > config.node_limit {
         return STOP_NODES;
     }
-    if done >= c.iter_limit {
+    if done >= config.iter_limit {
         return STOP_ITERATIONS;
     }
-    let nodes0 = g.memo_len();
-    let classes0 = g.class_count();
-    if c.hook && root_has_leaf(in g, root, c) {
+    let nodes_before = graph.memo_len();
+    let classes_before = graph.class_count();
+    if config.hook && root_has_leaf(in graph, root, config) {
         return STOP_HOOK;
     }
-    let mut ms = matches_new();
-    if !search_all(in g, in rules, c.match_limit, inout ms) {
+    let mut matches = matches_new();
+    if !search_all(in graph, in rules, config.match_limit, inout matches) {
         return STOP_FAILED;
     }
     let mut applied: u64 = 0;
     let mut stop: u8 = 0;
     let mut ids: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    for r in 0..rules.count() {
-        let a = u64_at(in ms.rule_start, r);
-        let b = u64_at(in ms.rule_start, wrapping_add(r, 1));
-        for mi in a..b {
+    for rule in 0..rules.count() {
+        let first_match = u64_at(in matches.rule_start, rule);
+        let end_match = u64_at(in matches.rule_start, wrapping_add(rule, 1));
+        for match_index in first_match..end_match {
             // The RecordingApplier's caps come before the rule's condition.
-            if wrapping_add(g.raw_len(), c.reserve) > c.raw_cap || rec.count >= c.record_cap {
+            if wrapping_add(graph.raw_len(), config.reserve) > config.raw_cap
+                || records.count >= config.record_cap {
                 return STOP_FAILED;
             }
-            if !guard_holds(in g, in rules, r, in ms, mi) {
+            if !guard_holds(in graph, in rules, rule, in matches, match_index) {
                 continue;
             }
-            if apply_one(inout g, in rules, r, in ms, mi, inout ids) {
+            if apply_one(inout graph, in rules, rule, in matches, match_index, inout ids) {
                 applied = wrapping_add(applied, 1);
-                rec.words.push(wrapping_u32(r));
-                let nv = rules.nvars_of(r);
-                rec.words.push(wrapping_u32(nv));
-                let vs = u64_at(in ms.val_start, mi);
-                for v in 0..nv {
-                    rec.words.push(u32_at(in ms.vals, wrapping_add(vs, v)));
+                records.words.push(wrapping_u32(rule));
+                let var_count = rules.nvars_of(rule);
+                records.words.push(wrapping_u32(var_count));
+                let vals_start = u64_at(in matches.val_start, match_index);
+                for var in 0..var_count {
+                    records.words.push(u32_at(in matches.vals, wrapping_add(vals_start, var)));
                 }
-                rec.count = wrapping_add(rec.count, 1);
+                records.count = wrapping_add(records.count, 1);
             }
         }
-        if g.memo_len() > c.node_limit {
+        if graph.memo_len() > config.node_limit {
             stop = STOP_NODES;
             break;
         }
     }
-    g.rebuild();
+    graph.rebuild();
     if stop != 0 {
         return stop;
     }
-    if applied == 0 && g.memo_len() == nodes0 && g.class_count() == classes0 {
+    if applied == 0 && graph.memo_len() == nodes_before && graph.class_count() == classes_before {
         return STOP_SATURATED;
     }
     0
@@ -381,24 +405,24 @@ fn run_one(
 // egg's `Runner::run` from a graph holding the root's expression. Returns
 // why it stopped and how many iterations ran (egg's `iterations.len()`).
 pub fn run_egg(
-    inout g: EGraph,
+    inout graph: EGraph,
     in rules: Rules,
-    c: Config,
+    config: Config,
     root: u32,
-    inout rec: Records
+    inout records: Records
 ) -> (u8, u64) {
-    g.rebuild();
+    graph.rebuild();
     let mut iters: u64 = 0;
     loop {
-        let stop = run_one(inout g, in rules, c, root, iters, inout rec);
+        let stop = run_one(inout graph, in rules, config, root, iters, inout records);
         iters = wrapping_add(iters, 1);
         if stop != 0 {
             return (stop, iters);
         }
-        if g.memo_len() > c.node_limit {
+        if graph.memo_len() > config.node_limit {
             return (STOP_NODES, iters);
         }
-        if iters >= c.iter_limit {
+        if iters >= config.iter_limit {
             return (STOP_ITERATIONS, iters);
         }
     }
@@ -406,29 +430,29 @@ pub fn run_egg(
 
 // egglog's `(run n)`: at most `rounds` rounds of search, apply and
 // rebuild. Returns the number of rounds that changed the graph.
-pub fn run_rounds(inout g: EGraph, in rules: Rules, rounds: u64) -> u64 {
-    g.rebuild();
+pub fn run_rounds(inout graph: EGraph, in rules: Rules, rounds: u64) -> u64 {
+    graph.rebuild();
     let mut ids: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut changed: u64 = 0;
-    for i in 0..rounds {
-        let nodes0 = g.raw_len();
-        let mut ms = matches_new();
-        search_all(in g, in rules, 18446744073709551615, inout ms);
+    for round in 0..rounds {
+        let nodes_before = graph.raw_len();
+        let mut matches = matches_new();
+        search_all(in graph, in rules, 18446744073709551615, inout matches);
         let mut unions: u64 = 0;
-        for r in 0..rules.count() {
-            let a = u64_at(in ms.rule_start, r);
-            let b = u64_at(in ms.rule_start, wrapping_add(r, 1));
-            for mi in a..b {
-                if !guard_holds(in g, in rules, r, in ms, mi) {
+        for rule in 0..rules.count() {
+            let first_match = u64_at(in matches.rule_start, rule);
+            let end_match = u64_at(in matches.rule_start, wrapping_add(rule, 1));
+            for match_index in first_match..end_match {
+                if !guard_holds(in graph, in rules, rule, in matches, match_index) {
                     continue;
                 }
-                if apply_one(inout g, in rules, r, in ms, mi, inout ids) {
+                if apply_one(inout graph, in rules, rule, in matches, match_index, inout ids) {
                     unions = wrapping_add(unions, 1);
                 }
             }
         }
-        unions = wrapping_add(unions, g.rebuild());
-        if unions == 0 && g.raw_len() == nodes0 {
+        unions = wrapping_add(unions, graph.rebuild());
+        if unions == 0 && graph.raw_len() == nodes_before {
             break;
         }
         changed = wrapping_add(changed, 1);

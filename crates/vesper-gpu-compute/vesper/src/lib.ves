@@ -1199,9 +1199,10 @@ fn put_bytes(inout s: Scratch, at: u64, in bytes: Slice[u8]) eff [
 }
 
 fn get32(in s: Scratch, at: u64) -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
-    widen_u32(s.image[at]) | (widen_u32(s.image[at + 1]) << 8) | (
-        widen_u32(s.image[at + 2]) << 16
-    ) | (widen_u32(s.image[at + 3]) << 24)
+    widen_u32(s.image[at])
+        | (widen_u32(s.image[at + 1]) << 8)
+        | (widen_u32(s.image[at + 2]) << 16)
+        | (widen_u32(s.image[at + 3]) << 24)
 }
 
 fn get64(in s: Scratch, at: u64) -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
@@ -2591,9 +2592,10 @@ const F32_SIGN: u32 = 2147483648;
 
 fn word_at(in words: Slice[u8], i: u64) -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
     let at = i * 4;
-    widen_u32(words[at]) | (widen_u32(words[at + 1]) << 8) | (widen_u32(words[at + 2]) << 16) | (
-        widen_u32(words[at + 3]) << 24
-    )
+    widen_u32(words[at])
+        | (widen_u32(words[at + 1]) << 8)
+        | (widen_u32(words[at + 2]) << 16)
+        | (widen_u32(words[at + 3]) << 24)
 }
 
 // The order-preserving encoding of a finite f32's bits (-0 as +0), the one
