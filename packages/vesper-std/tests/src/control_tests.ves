@@ -76,6 +76,35 @@ test {
         checked_total(in values.as_slice()) == Option::None
     }
 
+    fn weighted_total(
+        in totals: Slice[i64],
+        in weights: Slice[i64]
+    ) -> i64 eff [Fail[ArithOverflow]] {
+        sum{
+            {
+                value * weight
+            }
+            | (value, weight) in zip{
+                totals,
+                weights
+            }
+        }
+    }
+
+    fn check_weighted_sum() -> bool {
+        let mut totals = ChunkSeq::new[i64]();
+        totals.push(6);
+        totals.push(9223372036854775807);
+        let mut weights = ChunkSeq::new[i64]();
+        weights.push(7);
+        handle Fail[ArithOverflow] in {
+            weighted_total(in totals.as_slice(), in weights.as_slice()) == 42
+        } with {
+            return value => value,
+            raise(_, _) => false,
+        }
+    }
+
     pub fn check_core_control() -> u64 {
         // The failure expression never runs on success.
         if observed(10) != Result::Ok(11) {
@@ -93,6 +122,9 @@ test {
         }
         if !sum_through_public_import() {
             return 6;
+        }
+        if !check_weighted_sum() {
+            return 7;
         }
         // The condition runs once and the expansion stops at the inner block.
         handle Fail[u64] in {
