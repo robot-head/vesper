@@ -79,9 +79,9 @@ vesper_hybrid(
     },
     # The included CLI sources (src/main.rs and its command modules) and
     # what they embed.
-    # The driver module's proof-audit (#1341, #2091) links hash-sys's
-    # `[package] objects` (the BLAKE3 C library), which the harness
-    # compiles into its archive.
+    # The driver module's proof-audit (#1341, #2091) and the verify module
+    # link hash-sys's `[package] objects` (the BLAKE3 C library), which the
+    # harness compiles into its archive.
     build_script_data = [
         "//:std_hash_sys_manifest",
         "//:std_hash_sys_package",
