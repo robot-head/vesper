@@ -44,24 +44,21 @@ fn insertion_by[K: mod copy + Ord](in keys: Slice[K], inout order: Slice[u32], l
         if i >= hi {
             break;
         }
-        match order.try_get(i) {
-            Option::Some(x) => {
-                let mut j = i;
-                loop {
-                    if j <= lo {
-                        break;
-                    }
-                    let k = wrapping_sub(j, 1);
-                    let y = order.try_get(k).unwrap_or(x);
-                    if !before(in keys, x, y) {
-                        break;
-                    }
-                    order.try_set(j, y);
-                    j = k;
+        when let Option::Some(x) = order.try_get(i) {
+            let mut j = i;
+            loop {
+                if j <= lo {
+                    break;
                 }
-                order.try_set(j, x);
-            },
-            Option::None => {},
+                let k = wrapping_sub(j, 1);
+                let y = order.try_get(k).unwrap_or(x);
+                if !before(in keys, x, y) {
+                    break;
+                }
+                order.try_set(j, y);
+                j = k;
+            }
+            order.try_set(j, x);
         }
         i = wrapping_add(i, 1);
     }
@@ -432,6 +429,18 @@ test {
             && order.try_get(1) == Option::Some(1)
             && order.try_get(2) == Option::Some(2)
             && order.try_get(3) == Option::Some(0)
+    }
+
+    fn test_insertion_skips_missing_indices() -> bool {
+        let mut order = ChunkSeq::new[u32]();
+        order.push(2);
+        order.push(0);
+        order.push(1);
+        insertion_by(in "abc".as_bytes(), inout order.as_slice_mut(), 0, 5);
+        order.try_get(0) == Option::Some(0)
+            && order.try_get(1) == Option::Some(1)
+            && order.try_get(2) == Option::Some(2)
+            && order.try_get(3) == Option::None
     }
 
     fn test_heapsort_orders_pair() -> bool {
