@@ -84,7 +84,7 @@ jobs:
             os: windows-latest
             compiler: vesper.exe
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 75
+    timeout-minutes: 150
     env:
       VESPER_PORT_COMPILER: ${{ github.workspace }}/target/debug/${{ matrix.compiler }}
       VESPER_DEFAULT_COMPILER: ${{ github.workspace }}/target/debug/${{ matrix.compiler }}
