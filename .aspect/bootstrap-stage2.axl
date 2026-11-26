@@ -172,3 +172,36 @@ install_wasmtime = task(
     summary = "Install the verified Wasmtime CLI for the Linux Stage 2 workflow",
     implementation = _install_wasmtime,
 )
+
+# `wac plug` composes a component that imports vesper:cranelift/vcl with the
+# Cranelift component (#2210); tools/bazel/wac.bzl pins the same binary.
+_WAC_URL = "https://github.com/bytecodealliance/wac/releases/download/v0.8.1/wac-cli-x86_64-unknown-linux-musl"
+_WAC_SHA = "ce30f33c5bc40095cfb4e74ae5fb4ba515d4f4bef2d597831bc7afaaf0d55b6c"
+
+def _install_wac(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    runner = ctx.std.env.var("RUNNER_TEMP")
+    if not runner:
+        ctx.std.process.exit(2, "RUNNER_TEMP is required to install the CI wac binary")
+    work = scratch_dir(ctx, "vesper-wac-")
+    binary = work + "/wac"
+    check(ctx, "curl", ["-fsSL", _WAC_URL, "-o", binary], root)
+    digest = capture(ctx, "sha256sum", [binary], root).split()
+    if not digest or digest[0] != _WAC_SHA:
+        ctx.std.process.exit(1, "wac binary checksum mismatch")
+    check(ctx, "chmod", ["+x", binary], root)
+    destination = root_path(root, runner) + "/wac"
+    ctx.std.fs.create_dir_all(destination)
+    pending = ctx.std.fs.mkdtemp(parent = destination, prefix = ".install-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(pending))
+    ctx.std.fs.copy(binary, pending + "/wac")
+    check(ctx, "chmod", ["+x", pending + "/wac"], root)
+    ctx.std.fs.rename(pending + "/wac", destination + "/wac")
+    return 0
+
+install_wac = task(
+    kind = "install-wac",
+    group = ["ci"],
+    summary = "Install the verified wac CLI for the Linux Stage 2 workflow",
+    implementation = _install_wac,
+)

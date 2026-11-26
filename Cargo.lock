@@ -5600,6 +5600,7 @@ dependencies = [
  "vesper-bench-seed",
  "vesper-chrono",
  "vesper-core",
+ "vesper-cranelift-sys",
  "vesper-crucible-seed",
  "vesper-crypto-sys",
  "vesper-diagnostics-seed",

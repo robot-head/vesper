@@ -13,6 +13,7 @@
 // byte.
 
 use @vesper/check-data::util::{add, inc};
+use self::vcl::{vcl_func_count, vcl_func_name, vcl_instance_hex, vcl_lowers};
 
 const NONE32: u32 = 4294967295;
 
@@ -23,6 +24,7 @@ const H_TRACE: u8 = 2;
 const H_ENV: u8 = 3;
 const H_FS_TYPES: u8 = 4;
 const H_FS_PREOPENS: u8 = 5;
+const H_VCL: u8 = 6;
 
 // The instance types wit-component imports, in topological order within
 // each capability dependency chain.
@@ -35,7 +37,9 @@ const IF_ENV: u8 = 5;
 const IF_WALL_CLOCK: u8 = 6;
 const IF_FS_TYPES: u8 = 7;
 const IF_FS_PREOPENS: u8 = 8;
-const IF_COUNT: u64 = 9;
+// The Cranelift shim (vcl.ves, #2210).
+const IF_VCL: u8 = 9;
+const IF_COUNT: u64 = 10;
 
 // How a core import lowers (`LowerKind`).
 const L_NONE: u8 = 0;
@@ -237,6 +241,8 @@ pub fn import_ifaces(host: u8) -> (u8, u64) {
         (IF_ENV, 1)
     } else if host == H_FS_TYPES {
         (IF_WALL_CLOCK, 2)
+    } else if host == H_VCL {
+        (IF_VCL, 1)
     } else {
         (IF_WALL_CLOCK, 3)
     }
@@ -256,6 +262,8 @@ pub fn host_import(in name: Slice[u8]) -> u8 {
         H_FS_TYPES
     } else if eq(in name, in "wasi:filesystem/preopens@0.2.0".as_bytes()) {
         H_FS_PREOPENS
+    } else if eq(in name, in "vesper:cranelift/vcl@0.1.0".as_bytes()) {
+        H_VCL
     } else {
         255
     }
@@ -278,6 +286,8 @@ pub fn host_name(iface: u8, inout out: ChunkSeq[u8]) {
         out.extend(in "wasi:clocks/wall-clock@0.2.0".as_bytes());
     } else if iface == IF_FS_TYPES {
         out.extend(in "wasi:filesystem/types@0.2.0".as_bytes());
+    } else if iface == IF_VCL {
+        out.extend(in "vesper:cranelift/vcl@0.1.0".as_bytes());
     } else {
         out.extend(in "wasi:filesystem/preopens@0.2.0".as_bytes());
     }
@@ -356,6 +366,9 @@ pub fn instance_type(iface: u8, in alias_types: Slice[u32], inout out: ChunkSeq[
             in "0400086461746574696d6503000f016b1001720604747970650c0a6c696e6b2d636f756e740e0473697a650a15646174612d6163636573732d74696d657374616d70111b646174612d6d6f64696669636174696f6e2d74696d657374616d7011177374617475732d6368616e67652d74696d657374616d701104000f64657363726970746f722d737461740300120400166469726563746f72792d656e7472792d73747265616d030101720204747970650c046e616d657304000f6469726563746f72792d656e74727903001501680001707d016f02187f016a011901080140030473656c6617066c656e6774680a066f66667365740a001a0400175b6d6574686f645d64657363726970746f722e72656164011b016a010a01080140030473656c66170662756666657218066f66667365740a001c0400185b6d6574686f645d64657363726970746f722e7772697465011d016914016a011e01080140010473656c6617001f0400215b6d6574686f645d64657363726970746f722e726561642d6469726563746f72790120016a0001080140010473656c661700210400175b6d6574686f645d64657363726970746f722e73796e6301220140020473656c661704706174687300210400265b6d6574686f645d64657363726970746f722e6372656174652d6469726563746f72792d61740123016a011301080140010473656c661700240400175b6d6574686f645d64657363726970746f722e7374617401250140030473656c66170a706174682d666c61677302047061746873002404001a5b6d6574686f645d64657363726970746f722e737461742d61740126016900016a012701080140050473656c66170a706174682d666c616773020470617468730a6f70656e2d666c6167730405666c61677306002804001a5b6d6574686f645d64657363726970746f722e6f70656e2d617401290400265b6d6574686f645d64657363726970746f722e72656d6f76652d6469726563746f72792d617401230140040473656c6617086f6c642d70617468730e6e65772d64657363726970746f7217086e65772d7061746873002104001c5b6d6574686f645d64657363726970746f722e72656e616d652d6174012a0400215b6d6574686f645d64657363726970746f722e756e6c696e6b2d66696c652d61740123016814016b16016a012c01080140010473656c662b002d0400335b6d6574686f645d6469726563746f72792d656e7472792d73747265616d2e726561642d6469726563746f72792d656e747279012e"
                 .as_bytes()
         );
+    } else if iface == IF_VCL {
+        let hex = vcl_instance_hex();
+        unhex(inout out, in hex.as_bytes());
     } else {
         // descriptor (outer) and get-directories
         spliced_instance_type(
@@ -451,6 +464,43 @@ pub fn lower_kind(iface: u8, in func: Slice[u8]) -> u8 {
             || eq(in func, in "[resource-drop]directory-entry-stream".as_bytes())
         {
             return L_DROP;
+        }
+    } else if iface == IF_VCL {
+        return vcl_lower_kind(in func);
+    }
+    L_NONE
+}
+
+// How many functions a core module must import from interface `iface` for
+// its fixed instance type to be wit-component's (which keeps only the
+// imported functions); 0 when any subset is fine. The wasm backend imports
+// the whole vcl interface.
+pub fn iface_imports_needed(iface: u8) -> u64 {
+    if iface == IF_VCL {
+        return vcl_func_count();
+    }
+    0
+}
+
+// The digits of `vcl_lowers` (vcl.ves).
+const VCL_DIGIT_DIRECT: u8 = 49;
+const VCL_DIGIT_MEMORY: u8 = 50;
+
+// A vcl function's lowering (one digit per function in `vcl_lowers`).
+fn vcl_lower_kind(in func: Slice[u8]) -> u8 {
+    let lowers = vcl_lowers();
+    let digits = lowers.as_bytes();
+    for index in 0..vcl_func_count() {
+        let name = vcl_func_name(index);
+        if eq(in name.as_bytes(), in func) {
+            let digit = byte(in digits, index);
+            if digit == VCL_DIGIT_DIRECT {
+                return L_DIRECT;
+            }
+            if digit == VCL_DIGIT_MEMORY {
+                return L_MEMORY;
+            }
+            return L_MEMORY_REALLOC;
         }
     }
     L_NONE

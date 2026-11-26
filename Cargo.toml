@@ -360,6 +360,8 @@ wit-component = "=0.261.0"
 wit-parser = "=0.261.0"
 
 [dev-dependencies]
+# tests/wasm_cranelift_imports.rs: the native side of the comparison.
+vesper-cranelift-sys = { path = "crates/vesper-cranelift-sys" }
 # bench, grammar, json, audit, publish, resolve, sbom and `build --tee` run
 # as `vesper-<tool>` binaries (crates/vesper-tools, SH0 lane 2), so these
 # seed copies left the compiler's closure. The CLI tests still check results

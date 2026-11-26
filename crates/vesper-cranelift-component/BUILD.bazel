@@ -1,5 +1,11 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
 
+# The root crate's Wasm tests embed the WIT (tests/common/wasm_words.rs).
+exports_files(
+    ["wit/vcl.wit"],
+    visibility = ["//visibility:public"],
+)
+
 # vesper-cranelift-sys as a wasm component (#2210). Bazel builds the crate
 # for the host only: build.rs generates the WIT and the glue from
 # cranelift.vsys, and tests/objects.rs checks the checked-in WIT. The
