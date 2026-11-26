@@ -12,129 +12,54 @@ use self::huffman::{huff_tables, huff_encoded_len, huff_encode, huff_decode};
 use self::table::{Static, Table, static_new, table_new, table_len, table_first};
 use self::prefix::{Num, decode_int, encode_int, decode_string, encode_string};
 use self::encoder::{
-    enc_encode,
-    enc_on_decoder_stream,
-    enc_apply_peer_settings,
-    enc_blocking_streams
+    enc_encode, enc_on_decoder_stream, enc_apply_peer_settings, enc_blocking_streams
 };
 use self::frame::{
-    settings_parse,
-    settings_write,
-    reader_new,
-    reader_push,
-    reader_buffered,
-    reader_at_boundary,
-    reader_take_rest,
-    reader_next
+    settings_parse, settings_write, reader_new, reader_push, reader_buffered, reader_at_boundary,
+    reader_take_rest, reader_next
 };
 use self::priority::{
-    priority_parse_value,
-    priority_serialize_to,
-    priority_update_parse,
-    priority_update_write,
+    priority_parse_value, priority_serialize_to, priority_update_parse, priority_update_write,
     schedule_into
 };
 use self::capsule::{
-    capsule_reader_new,
-    capsule_push,
-    capsule_buffered,
-    capsule_at_boundary,
-    capsule_next,
+    capsule_reader_new, capsule_push, capsule_buffered, capsule_at_boundary, capsule_next,
     capsule_write_close
 };
 use self::message::{message_parse_request, message_parse_response, message_check_trailers};
 use self::varint::{vput, put_record};
 use self::decoder::{
-    dec_on_encoder_stream,
-    dec_decode_section,
-    dec_cancel_stream,
-    dec_take_decoder_stream
+    dec_on_encoder_stream, dec_decode_section, dec_cancel_stream, dec_take_decoder_stream
 };
 use self::wire::{ENTRY_OVERHEAD};
 use self::control::{uni_new, uni_clear, uni_accept, uni_ids, uni_contains, uni_closed, uni_bytes};
 use self::pool::{
-    BytePool,
-    OutMap,
-    CmdBuf,
-    SevBuf,
-    HevBuf,
-    cmd_clear,
-    sev_clear,
-    hev_clear,
-    out_queued
+    BytePool, OutMap, CmdBuf, SevBuf, HevBuf, cmd_clear, sev_clear, hev_clear, out_queued
 };
 use self::session::{
-    on_quic_datagram,
-    send_datagram_prepare,
-    wt_can_open,
-    wt_register_opened,
-    wt_session_of,
-    wt_can_write,
-    wt_on_write_reset,
-    wt_finish_prepare,
-    wt_read_pre,
-    wt_on_read_fin,
-    wt_reset,
+    on_quic_datagram, send_datagram_prepare, wt_can_open, wt_register_opened, wt_session_of,
+    wt_can_write, wt_on_write_reset, wt_finish_prepare, wt_read_pre, wt_on_read_fin, wt_reset,
     wt_stop_sending
 };
 use self::core::{
-    core_fail,
-    core_open_local_push,
-    core_accept_uni,
-    core_uni_closed,
-    core_uni_bytes,
-    core_flush_begin,
-    core_flush_step,
-    core_priority
+    core_fail, core_open_local_push, core_accept_uni, core_uni_closed, core_uni_bytes,
+    core_flush_begin, core_flush_step, core_priority
 };
 use self::server::{
-    server_core_new as srv_new,
-    server_buffered_request_bytes,
-    server_accept,
-    server_report_goaway,
-    server_drain_unblocked,
-    server_read_plan,
-    server_on_read_data,
-    server_on_zero_allowance,
-    server_on_peer_reset,
-    server_relieve_budget,
-    server_on_write_failures,
-    server_on_leaked,
-    server_retire,
-    server_shutdown,
-    server_read_body_pre,
-    server_read_body_post,
-    server_take_trailers,
-    server_check_responder,
-    server_send_interim,
-    server_send_headers,
-    server_send_data,
-    server_finish_response,
-    server_send_whole,
-    server_accept_session_send,
-    server_accept_session_establish,
-    server_close_session,
-    server_reset_request
+    server_core_new as srv_new, server_buffered_request_bytes, server_accept, server_report_goaway,
+    server_drain_unblocked, server_read_plan, server_on_read_data, server_on_zero_allowance,
+    server_on_peer_reset, server_relieve_budget, server_on_write_failures, server_on_leaked,
+    server_retire, server_shutdown, server_read_body_pre, server_read_body_post,
+    server_take_trailers, server_check_responder, server_send_interim, server_send_headers,
+    server_send_data, server_finish_response, server_send_whole, server_accept_session_send,
+    server_accept_session_establish, server_close_session, server_reset_request
 };
 use self::client::{
-    client_core_new as cli_new,
-    client_ready_check,
-    client_check_open_session,
-    client_register_request,
-    client_send_body,
-    client_finish_body,
-    client_close_session,
-    client_update_priority,
-    client_cancel,
-    client_accept_bidi_need_sniff,
-    client_accept_bidi_finish,
-    client_sniff_err,
-    client_sniff_data,
-    client_handle_goaway,
-    client_drain_unblocked,
-    client_can_read_stream,
-    client_stream_reset,
-    client_stream_data
+    client_core_new as cli_new, client_ready_check, client_check_open_session,
+    client_register_request, client_send_body, client_finish_body, client_close_session,
+    client_update_priority, client_cancel, client_accept_bidi_need_sniff, client_accept_bidi_finish,
+    client_sniff_err, client_sniff_data, client_handle_goaway, client_drain_unblocked,
+    client_can_read_stream, client_stream_reset, client_stream_data
 };
 
 // RFC 9204 §3.2.1: the per-entry overhead (MaxEntries is capacity / 32).

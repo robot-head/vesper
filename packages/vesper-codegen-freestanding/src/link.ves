@@ -9,50 +9,16 @@
 
 use self::codes::{Absent, Out, Page, RelType, RvOpcode};
 use self::util::{
-    Span,
-    add,
-    sub,
-    max64,
-    align_up,
-    bytes_eq,
-    fnv,
-    text_eq,
-    push64,
-    put_str,
-    push_hex,
-    push_dec,
+    Span, add, sub, max64, align_up, bytes_eq, fnv, text_eq, push64, put_str, push_hex, push_dec,
     rd32
 };
 use self::error::{
-    fail_duplicate,
-    fail_mismatch,
-    fail_object,
-    fail_object_in,
-    fail_object_text,
-    fail_range,
-    fail_relocation,
-    fail_section,
-    fail_too_large,
-    fail_unresolved
+    fail_duplicate, fail_mismatch, fail_object, fail_object_in, fail_object_text, fail_range,
+    fail_relocation, fail_section, fail_too_large, fail_unresolved
 };
 use self::obj::{
-    Obj,
-    Sec,
-    Sym,
-    Rel,
-    classify,
-    is_nobits,
-    parse_object,
-    is_relocatable,
-    sec,
-    sym,
-    sym_absolute,
-    sym_global,
-    sym_in_section,
-    sym_is_section,
-    sym_undefined,
-    rel_count,
-    rel_at
+    Obj, Sec, Sym, Rel, classify, is_nobits, parse_object, is_relocatable, sec, sym, sym_absolute,
+    sym_global, sym_in_section, sym_is_section, sym_undefined, rel_count, rel_at
 };
 use self::stub::{is_riscv, machine_of};
 use self::script::{triple};

@@ -1,6 +1,6 @@
 // The native walk's `register_locals` plan and entry plans (entry blocks
 // and internal conventions; gap lane 11, #1509), from
-// `modules/codegen_walk`, through the `register_locals` and `entry_plans`
+// `modules/codegen_walk`, through the `register_locals`, `entry_plans` and `export_plans`
 // hooks.
 
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -57,11 +57,16 @@ fn vesper_entry_plans(
     program: &vesper::ir::Program,
     entry: &str,
     optimize: bool,
+    trace: bool,
 ) -> Option<vesper::native::EntryPlans> {
-    let plans = codegen_calls_words::calls_input(world, program, &[(entry.to_string(), optimize)])
-        .and_then(|bytes| {
-            native_walk_words::decode_entry_plans(&codegen_walk_binding::frame_plans_words(&bytes))
-        });
+    let flags = optimize as u64 | (trace as u64) << 1;
+    let plans =
+        codegen_calls_words::calls_input_flags(world, program, &[(entry.to_string(), flags)])
+            .and_then(|bytes| {
+                native_walk_words::decode_entry_plans(&codegen_walk_binding::frame_plans_words(
+                    &bytes,
+                ))
+            });
     match plans {
         Some(_) => FRAME_CALLS.fetch_add(1, Relaxed),
         None => FRAME_DECLINED.fetch_add(1, Relaxed),
@@ -69,10 +74,39 @@ fn vesper_entry_plans(
     plans
 }
 
+/// The `export_plans` hook (#1509 part 5): one library task whose roots are
+/// the exports (flags 4 on the first, 8 on the rest).
+fn vesper_export_plans(
+    world: &vesper::check::World,
+    program: &vesper::ir::Program,
+    roots: &[&str],
+    optimize: bool,
+) -> Option<vesper::native::EntryPlans> {
+    let tasks = library_tasks(roots, optimize);
+    let plans = codegen_calls_words::calls_input_flags(world, program, &tasks).and_then(|bytes| {
+        native_walk_words::decode_entry_plans(&codegen_walk_binding::frame_plans_words(&bytes))
+    });
+    match plans {
+        Some(_) => FRAME_CALLS.fetch_add(1, Relaxed),
+        None => FRAME_DECLINED.fetch_add(1, Relaxed),
+    };
+    plans
+}
+
+/// The calls tasks of a library build over `roots`.
+fn library_tasks(roots: &[&str], optimize: bool) -> Vec<(String, u64)> {
+    roots
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.to_string(), optimize as u64 | if i == 0 { 4 } else { 8 }))
+        .collect()
+}
+
 /// The flip-gate rows of this file's swaps (`swaps::on`).
 pub(super) const SWAPS: &[Swap] = &[
     open("register_locals", "0 diffs; no flip-gate configuration"),
     open("entry_plans", "0 diffs; no flip-gate configuration"),
+    open("export_plans", "0 diffs; no flip-gate configuration"),
 ];
 
 pub(super) fn register(r: &mut Registry) {
@@ -81,6 +115,9 @@ pub(super) fn register(r: &mut Registry) {
     }
     if on("entry_plans") && !env_off("VESPER_HYBRID_WALK") {
         r.codegen.entry_plans = Some(vesper_entry_plans);
+    }
+    if on("export_plans") && !env_off("VESPER_HYBRID_WALK") {
+        r.codegen.export_plans = Some(vesper_export_plans);
     }
 }
 

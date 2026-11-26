@@ -36,69 +36,25 @@
 use self::packet::{pk_short_plain};
 use self::varint::{vi_decode, vi_encode, vi_encode_with_len, vi_encoded_len, vi_prefix_len};
 use self::ack::{
-    rx_ack_delay,
-    rx_check,
-    rx_new,
-    rx_on_ack_of_ack,
-    rx_on_ack_sent,
-    rx_on_packet_received
+    rx_ack_delay, rx_check, rx_new, rx_on_ack_of_ack, rx_on_ack_sent, rx_on_packet_received
 };
 use self::stream::{
-    rb_insert,
-    rb_new,
-    rb_read,
-    rb_reset_for_reuse,
-    sb_copy_out,
-    sb_discard,
-    sb_free_space,
-    sb_new,
-    sb_next_lost,
-    sb_on_ack,
-    sb_on_lost,
-    sb_reset_for_reuse,
-    sb_take_new,
-    sb_write
+    rb_insert, rb_new, rb_read, rb_reset_for_reuse, sb_copy_out, sb_discard, sb_free_space, sb_new,
+    sb_next_lost, sb_on_ack, sb_on_lost, sb_reset_for_reuse, sb_take_new, sb_write
 };
 use self::recovery::{
-    rec_ack_delay_ns,
-    rec_clear_space,
-    rec_new,
-    rec_on_ack_received,
-    rec_on_packet_sent,
-    rec_on_timeout,
-    rec_pc_duration_ns,
-    rec_pto_time_and_space,
-    rec_set_timer,
-    rec_space_new,
-    rtt_loss_delay_ns,
-    rtt_new,
-    rtt_pto_base_ns,
-    rtt_update
+    rec_ack_delay_ns, rec_clear_space, rec_new, rec_on_ack_received, rec_on_packet_sent,
+    rec_on_timeout, rec_pc_duration_ns, rec_pto_time_and_space, rec_set_timer, rec_space_new,
+    rtt_loss_delay_ns, rtt_new, rtt_pto_base_ns, rtt_update
 };
 use self::frame::{
-    fr_allowed,
-    fr_check_ranges,
-    fr_crypto_header_len,
-    fr_encode,
-    fr_encode_crypto_header,
-    fr_encode_stream_header,
-    fr_kind_is_ack_eliciting,
-    fr_kind_is_probing,
-    fr_kind_type,
-    fr_parse_at,
-    fr_stream_header_len,
-    fr_wire_next
+    fr_allowed, fr_check_ranges, fr_crypto_header_len, fr_encode, fr_encode_crypto_header,
+    fr_encode_stream_header, fr_kind_is_ack_eliciting, fr_kind_is_probing, fr_kind_type,
+    fr_parse_at, fr_stream_header_len, fr_wire_next
 };
 use self::header::{
-    hdr_check_reserved_bits,
-    hdr_first_byte_mask,
-    hdr_parse,
-    hdr_pn_field,
-    hdr_vn_version,
-    hdr_write_long,
-    hdr_write_retry,
-    hdr_write_short,
-    hdr_write_short_to_peer,
+    hdr_check_reserved_bits, hdr_first_byte_mask, hdr_parse, hdr_pn_field, hdr_vn_version,
+    hdr_write_long, hdr_write_retry, hdr_write_short, hdr_write_short_to_peer,
     hdr_write_version_negotiation
 };
 use self::pn::{pn_decode_with_largest, pn_encoded_len, pn_read_truncated, pn_write_truncated};

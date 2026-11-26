@@ -7,19 +7,7 @@ use self::{A, Rng};
 use self::license::{LicenseFail, parse};
 use self::paths::{ref_name, ref_ver};
 use self::util::{
-    ErrorKind,
-    Identity,
-    adv,
-    fail,
-    lit,
-    nat,
-    prec_ord,
-    rng,
-    sat_add,
-    setw,
-    spend,
-    str_len,
-    word
+    ErrorKind, Identity, adv, fail, lit, nat, prec_ord, rng, sat_add, setw, spend, str_len, word
 };
 
 // `AffectedRange::contains`.

@@ -21,10 +21,7 @@
 // A text is its byte length, then its bytes eight per word, little-endian.
 
 use @vesper/check-names-packages::{
-    assemble_next_bytes,
-    assembly_begin_bytes,
-    assembly_metadata,
-    assembly_parse_errors
+    assemble_next_bytes, assembly_begin_bytes, assembly_metadata, assembly_parse_errors
 };
 use @vesper/ast::words::{put_ast_words};
 use @vesper-std/intern::{Interner, symbol_from_id};

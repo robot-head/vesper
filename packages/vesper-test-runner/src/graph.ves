@@ -13,25 +13,8 @@
 // (tests/common/anvil_graph_words.rs).
 
 use @vesper/ast::{
-    ArgNode,
-    Ast,
-    ClauseNode,
-    EffectNode,
-    EffectsNode,
-    FnNode,
-    GenericNode,
-    ImplNode,
-    ItemNode,
-    ParamNode,
-    PatNode,
-    StmtNode,
-    expr_at,
-    list_at,
-    list_len,
-    lit_at,
-    none,
-    pat_at,
-    type_at
+    ArgNode, Ast, ClauseNode, EffectNode, EffectsNode, FnNode, GenericNode, ImplNode, ItemNode,
+    ParamNode, PatNode, StmtNode, expr_at, list_at, list_len, lit_at, none, pat_at, type_at
 };
 use @vesper/ast::lower::{lower_source};
 use @vesper-std/arena::{idx_from_raw};

@@ -4,20 +4,8 @@
 // extended CONNECT sessions.
 
 use self::{
-    ConnectionError,
-    ClientError,
-    QpackError,
-    FrameError,
-    Priority,
-    PriorityUpdate,
-    H3ConfigAbi,
-    SessionKind,
-    SessionError,
-    ResponseParts,
-    EncoderCore,
-    DecoderCore,
-    Huff,
-    ClientCore
+    ConnectionError, ClientError, QpackError, FrameError, Priority, PriorityUpdate, H3ConfigAbi,
+    SessionKind, SessionError, ResponseParts, EncoderCore, DecoderCore, Huff, ClientCore
 };
 use self::int::{inc, sat_sub, word, remove_word};
 use self::varint::{put_record};
@@ -27,61 +15,20 @@ use self::encoder::{enc_encode};
 use self::decoder::{dec_decode_section};
 use self::message::{HttpStatus, message_parse_response, message_check_trailers};
 use self::pool::{
-    MODE_HEADER,
-    FRAME_NONE,
-    FRAME_DATA,
-    FRAME_HEADERS,
-    FRAME_WT_STREAM,
-    FRAME_UNKNOWN,
-    CMD_STOP_SENDING,
-    CMD_RESET,
-    HEV_CLIENT_RESPONSE,
-    HEV_CLIENT_INTERIM,
-    HEV_CLIENT_SESSION_EST,
-    HEV_CLIENT_FAILED,
-    HEV_CLIENT_GOAWAY,
-    q_len,
-    q_push,
-    q_consume,
-    q_clear,
-    q_transfer,
-    q_drain_all_to,
-    put_u64_le,
-    get_u64_le,
-    pooled_frame_at_boundary,
-    pooled_frame_next,
-    bsearch_u64,
-    insert_word,
-    out_queued,
-    out_queue,
-    out_queue_fin,
-    out_discard,
-    push_cmd
+    MODE_HEADER, FRAME_NONE, FRAME_DATA, FRAME_HEADERS, FRAME_WT_STREAM, FRAME_UNKNOWN,
+    CMD_STOP_SENDING, CMD_RESET, HEV_CLIENT_RESPONSE, HEV_CLIENT_INTERIM, HEV_CLIENT_SESSION_EST,
+    HEV_CLIENT_FAILED, HEV_CLIENT_GOAWAY, q_len, q_push, q_consume, q_clear, q_transfer,
+    q_drain_all_to, put_u64_le, get_u64_le, pooled_frame_at_boundary, pooled_frame_next,
+    bsearch_u64, insert_word, out_queued, out_queue, out_queue_fin, out_discard, push_cmd
 };
 use self::session::{
-    CODE_EXCESSIVE_LOAD,
-    CODE_REQUEST_REJECTED,
-    CODE_REQUEST_CANCELLED,
-    CODE_REQUEST_INCOMPLETE,
-    CODE_MESSAGE_ERROR,
-    CODE_WT_BUFFERED_STREAM_REJECTED,
-    webtransport_negotiated,
-    session_known_gone,
-    add_session,
-    establish_session,
-    incoming_wt_stream_fin,
-    end_session,
-    forget_session,
-    session_data,
-    session_fin_ok,
-    queue_session_close
+    CODE_EXCESSIVE_LOAD, CODE_REQUEST_REJECTED, CODE_REQUEST_CANCELLED, CODE_REQUEST_INCOMPLETE,
+    CODE_MESSAGE_ERROR, CODE_WT_BUFFERED_STREAM_REJECTED, webtransport_negotiated,
+    session_known_gone, add_session, establish_session, incoming_wt_stream_fin, end_session,
+    forget_session, session_data, session_fin_ok, queue_session_close
 };
 use self::core::{
-    conn_core_new,
-    core_cancel_stream,
-    build_msg_meta,
-    sec_total_bytes,
-    pack_trailers_to_pool,
+    conn_core_new, core_cancel_stream, build_msg_meta, sec_total_bytes, pack_trailers_to_pool,
     unpack_fields_to_hev
 };
 

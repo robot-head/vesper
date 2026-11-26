@@ -223,14 +223,22 @@ pub type RegisterLocalsHook = fn(
 /// The native walk's entry plans (`#1509` parts 3b, 4a and 4b): the
 /// instances an entry compile defines (`instances_for_entry`), each one's
 /// entry block (`native::frame_plan`) and internal convention
-/// (`NativeAbi::plan`). Called once per entry compile without a trace host,
-/// with the world's first lowering, the entry and whether the compile
-/// optimizes. An instance the frames leave out keeps the Rust frame plan;
+/// (`NativeAbi::plan`). Called once per entry compile with the world's
+/// first lowering, the entry, whether the compile optimizes and whether it
+/// is a Beacon trace host (`trace_ok`, part 5 of #1509). An instance the frames leave out keeps the Rust frame plan;
 /// the conventions are used only when the frames cover exactly the
 /// instances the compile defines. `None`, or no instances, keeps every Rust
 /// plan.
 pub type EntryPlansHook =
-    fn(&World, &crate::ir::Program, &str, bool) -> Option<crate::native::EntryPlans>;
+    fn(&World, &crate::ir::Program, &str, bool, bool) -> Option<crate::native::EntryPlans>;
+
+/// [`EntryPlansHook`] for a library object (`native_export::object`, part
+/// 5 of #1509): the instances every export root reaches, their entry blocks
+/// and internal conventions, every export a boundary. Called with the
+/// world's first lowering, the export names in order and whether the build
+/// optimizes; the same fallbacks apply.
+pub type ExportPlansHook =
+    fn(&World, &crate::ir::Program, &[&str], bool) -> Option<crate::native::EntryPlans>;
 
 /// The SH4 families. Each port lane installs the hooks of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -316,6 +324,7 @@ pub struct CodegenHooks {
     pub verifiers: Option<VerifierHook>,
     pub register_locals: Option<RegisterLocalsHook>,
     pub entry_plans: Option<EntryPlansHook>,
+    pub export_plans: Option<ExportPlansHook>,
 }
 
 impl CodegenHooks {
@@ -344,6 +353,7 @@ impl CodegenHooks {
             || self.verifiers.is_some()
             || self.register_locals.is_some()
             || self.entry_plans.is_some()
+            || self.export_plans.is_some()
     }
 }
 

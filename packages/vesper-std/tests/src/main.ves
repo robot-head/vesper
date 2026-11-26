@@ -8,10 +8,7 @@ test {
     use self::core_tests::{check_core_ordering, check_core_option, check_core_result};
     use self::text_tests::{check_fmt_write, check_fmt_parse, check_bytes};
     use self::map_tests::{
-        check_btree,
-        check_struct_keys,
-        check_flat_table,
-        check_flat_table_differential
+        check_btree, check_struct_keys, check_flat_table, check_flat_table_differential
     };
     use self::seq_tests::{check_sets, check_radix_seq, check_version};
     use self::string_tests::check_fmt_string;

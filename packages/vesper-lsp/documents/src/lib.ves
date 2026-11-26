@@ -8,23 +8,9 @@
 //
 // - document.ves: the store.
 use self::document::{
-    Change,
-    Closed,
-    Store,
-    StoreError,
-    StoreLimits,
-    doc_revision,
-    doc_text,
-    doc_version,
-    store_change,
-    store_close,
-    store_get,
-    store_len,
-    store_new,
-    store_open,
-    store_revision,
-    store_set_revision,
-    store_total
+    Change, Closed, Store, StoreError, StoreLimits, doc_revision, doc_text, doc_version,
+    store_change, store_close, store_get, store_len, store_new, store_open, store_revision,
+    store_set_revision, store_total
 };
 use @vesper/span::{Limits, Position, Range, Resource};
 use @vesper/span::Error as SpanError;

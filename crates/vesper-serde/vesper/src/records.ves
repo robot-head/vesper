@@ -5,17 +5,7 @@
 // Failures are a `Fault` whose code the Rust adapter maps to the module's
 // own error type.
 use self::{
-    BatchLimits,
-    Doc,
-    Error,
-    ErrorKind,
-    EventRow,
-    Fault,
-    Kind,
-    Limits,
-    NdCursor,
-    NdPlan,
-    TilePoint,
+    BatchLimits, Doc, Error, ErrorKind, EventRow, Fault, Kind, Limits, NdCursor, NdPlan, TilePoint,
     Token
 };
 use self::index::{at, min64, next_decoded, raise, strings_equal, tok};

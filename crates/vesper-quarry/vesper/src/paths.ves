@@ -6,16 +6,8 @@ use self::plan::{decode_plan, has_binding};
 use self::values::{dtab, find_data, val_at};
 use self::rows::{load_catalog_ex, load_data};
 use self::stats::{
-    analyze,
-    bound_kind,
-    bounds_of,
-    column_of,
-    continue_none,
-    height,
-    index_column,
-    index_rows,
-    name_before,
-    pages
+    analyze, bound_kind, bounds_of, column_of, continue_none, height, index_column, index_rows,
+    name_before, pages
 };
 
 // Access path costs (spec/planner-ddl.md): scan `1000·pages(n) + 10·n`,

@@ -11,27 +11,11 @@
 use @vesper/place-ir::{program_new};
 use @vesper/place-ir::codes::{Op, Pat, Term};
 use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    stage2_heap_mark,
-    stage2_heap_reset,
-    stage2_heap_swap,
-    u32_at,
-    u64_at,
-    w
+    add, inc, n32, stage2_heap_mark, stage2_heap_reset, stage2_heap_swap, u32_at, u64_at, w
 };
 use @vesper/check-data::names::{Names, names_new};
 use @vesper/check-data::types::{
-    TyKind,
-    TyPass,
-    Types,
-    Vars,
-    default_type,
-    display,
-    substitute,
-    types_new,
-    vars_new
+    TyKind, TyPass, Types, Vars, default_type, display, substitute, types_new, vars_new
 };
 use @vesper/check-data::world::{Adt, Known, Variant, World, set_by_symbol, world_new};
 use @vesper/check-data::input::{Ctx};

@@ -1,48 +1,14 @@
 // Bounds hoisting and invariant header emission.
 
 use @vesper/cranelift::{
-    Value,
-    append_block_param,
-    block_param,
-    call_arg,
-    call_result_value,
-    cc_eq,
-    cc_ugt,
-    cc_uge,
-    cc_ule,
-    cc_ult,
-    create_block,
-    ins_band,
-    ins_bor,
-    ins_brif,
-    ins_iadd,
-    ins_iadd_imm,
-    ins_icmp,
-    ins_icmp_imm,
-    ins_iconst,
-    ins_isub,
-    ins_jump,
-    ins_overflow,
-    ins_uextend,
-    inst_result,
-    switch_to_block,
-    ty_i64,
-    ty_i8,
-    vals1,
-    value_of_word
+    Value, append_block_param, block_param, call_arg, call_result_value, cc_eq, cc_ugt, cc_uge,
+    cc_ule, cc_ult, create_block, ins_band, ins_bor, ins_brif, ins_iadd, ins_iadd_imm, ins_icmp,
+    ins_icmp_imm, ins_iconst, ins_isub, ins_jump, ins_overflow, ins_uextend, inst_result,
+    switch_to_block, ty_i64, ty_i8, vals1, value_of_word
 };
 use self::common::{
-    at_val,
-    elem_from_call,
-    invariant_word,
-    seq_elem_addr,
-    seq_load_elem,
-    seq_option_answer,
-    seq_option_begin,
-    seq_option_finish,
-    seq_store_elem,
-    seq_view_cached,
-    zero
+    at_val, elem_from_call, invariant_word, seq_elem_addr, seq_load_elem, seq_option_answer,
+    seq_option_begin, seq_option_finish, seq_store_elem, seq_view_cached, zero
 };
 
 const MIN_GUARDED_SPAN: i64 = 4;

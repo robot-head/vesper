@@ -12,31 +12,10 @@
 // - `walk`: sorted directory listings and recursive walks (`Entries`).
 // - `sys`: the operations over the C library.
 use self::sys::{
-    os_open,
-    os_open_nofollow,
-    os_create_private,
-    os_set_file_perm,
-    os_file_id,
-    os_close,
-    os_read,
-    os_write,
-    os_sync,
-    os_metadata,
-    os_file_len,
-    os_rename,
-    os_remove_file,
-    os_remove_dir,
-    os_create_dir,
-    os_create_dir_mode,
-    os_set_permissions,
-    os_copy,
-    os_sync_dir,
-    os_parent_len,
-    os_unique,
-    os_word_kind,
-    os_error_message,
-    os_is_executable,
-    os_canonicalize
+    os_open, os_open_nofollow, os_create_private, os_set_file_perm, os_file_id, os_close, os_read,
+    os_write, os_sync, os_metadata, os_file_len, os_rename, os_remove_file, os_remove_dir,
+    os_create_dir, os_create_dir_mode, os_set_permissions, os_copy, os_sync_dir, os_parent_len,
+    os_unique, os_word_kind, os_error_message, os_is_executable, os_canonicalize
 };
 
 // Why an operation failed. `kind` is one of the codes below

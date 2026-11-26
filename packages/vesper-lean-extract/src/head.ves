@@ -9,26 +9,8 @@ use @vesper/check-data::types::{Types, TyKind, TyPass};
 use @vesper/check-data::util::{add, n32, u32_at, u64_at, w};
 use @vesper/check-data::world::{Adt, World};
 use self::build::{
-    B,
-    B_EXPLICIT,
-    B_IMPLICIT,
-    D_DEF,
-    D_INSTANCE,
-    D_MUTUAL_TYPES,
-    D_TYPE,
-    K_ABBREV,
-    K_DEF,
-    P_BIND,
-    P_CTOR,
-    P_WILD,
-    S_BIND,
-    TD_CLASS,
-    TD_INDUCTIVE,
-    TD_STRUCTURE,
-    T_ARROW,
-    T_DO,
-    T_MATCH,
-    T_PRODUCT,
+    B, B_EXPLICIT, B_IMPLICIT, D_DEF, D_INSTANCE, D_MUTUAL_TYPES, D_TYPE, K_ABBREV, K_DEF, P_BIND,
+    P_CTOR, P_WILD, S_BIND, TD_CLASS, TD_INDUCTIVE, TD_STRUCTURE, T_ARROW, T_DO, T_MATCH, T_PRODUCT,
     T_RECORD
 };
 use self::input::{Effect, Effects, Op, Param};

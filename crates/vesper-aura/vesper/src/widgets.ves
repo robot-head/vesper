@@ -2,12 +2,7 @@
 use self::apply::{allocate, budget, foreign, invalid, record, stale_widget, word};
 use self::codes::{Budget, Invalid, NONE_ID};
 use self::recording::{
-    child_count,
-    rwidget,
-    session_ok,
-    widget_index,
-    widget_slot_count,
-    widget_sub_count
+    child_count, rwidget, session_ok, widget_index, widget_slot_count, widget_sub_count
 };
 use self::{BackendFault, Lim, RState, RWidget};
 use self::util::{dec, inc, op};

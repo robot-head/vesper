@@ -16,20 +16,8 @@
 // each effect's name and its argument when it has exactly one).
 
 use @vesper/ast::{
-    Ast,
-    ExprNode,
-    TypeNode,
-    StmtNode,
-    ArgNode,
-    ClauseNode,
-    EffectsNode,
-    EffectNode,
-    FnNode,
-    list_len,
-    list_at,
-    expr_at,
-    type_at,
-    lit_at
+    Ast, ExprNode, TypeNode, StmtNode, ArgNode, ClauseNode, EffectsNode, EffectNode, FnNode,
+    list_len, list_at, expr_at, type_at, lit_at
 };
 use @vesper/ast::lower::{lower_source};
 use @vesper-std/arena::{idx_from_raw};

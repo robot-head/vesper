@@ -11,47 +11,15 @@
 // 0xffffffff, which no request matches. Indices that are absent are
 // `none()`.
 use self::{
-    AiaFault,
-    Aplic,
-    Claim,
-    ClintHdr,
-    DomTopo,
-    Fabric,
-    Imsic,
-    ImsicBlk,
-    ImsicSlot,
-    IntcFault,
-    Located,
-    Msi,
-    MsiCfg,
-    PlicHdr
+    AiaFault, Aplic, Claim, ClintHdr, DomTopo, Fabric, Imsic, ImsicBlk, ImsicSlot, IntcFault,
+    Located, Msi, MsiCfg, PlicHdr
 };
 use self::aia::{
-    m_aplic_claimi,
-    m_aplic_contains,
-    m_aplic_delegated_to,
-    m_aplic_empty,
-    m_aplic_hdr,
-    m_aplic_idc_asserted,
-    m_aplic_inherit,
-    m_aplic_mode,
-    m_aplic_push,
-    m_aplic_read32,
-    m_aplic_set_active_here,
-    m_aplic_set_msi_cfg,
-    m_aplic_set_wire,
-    m_aplic_take_msis,
-    m_aplic_write32,
-    m_imsic_asserted,
-    m_imsic_bit_eip,
-    m_imsic_claim,
-    m_imsic_csr_read,
-    m_imsic_csr_write,
-    m_imsic_empty,
-    m_imsic_hdr,
-    m_imsic_mmio_write32,
-    m_imsic_push,
-    m_imsic_topei
+    m_aplic_claimi, m_aplic_contains, m_aplic_delegated_to, m_aplic_empty, m_aplic_hdr,
+    m_aplic_idc_asserted, m_aplic_inherit, m_aplic_mode, m_aplic_push, m_aplic_read32,
+    m_aplic_set_active_here, m_aplic_set_msi_cfg, m_aplic_set_wire, m_aplic_take_msis,
+    m_aplic_write32, m_imsic_asserted, m_imsic_bit_eip, m_imsic_claim, m_imsic_csr_read,
+    m_imsic_csr_write, m_imsic_empty, m_imsic_hdr, m_imsic_mmio_write32, m_imsic_push, m_imsic_topei
 };
 
 fn meip() -> u64 {

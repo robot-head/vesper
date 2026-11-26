@@ -15,35 +15,15 @@
 
 use self::aarch64::{emit as aarch64_emit, exits as aarch64_exits, start as aarch64_start};
 use self::asm::{
-    Asm,
-    ERR_INVALID,
-    ERR_LIMIT,
-    ERR_NONE,
-    WHY_AARCH64_RANGE,
-    WHY_BOUND_TWICE,
-    WHY_RISCV_CALL,
-    WHY_RISCV_JUMP,
-    WHY_UNBOUND,
-    WHY_X86_64_RANGE,
-    asm,
-    finish,
-    here,
-    last_exits
+    Asm, ERR_INVALID, ERR_LIMIT, ERR_NONE, WHY_AARCH64_RANGE, WHY_BOUND_TWICE, WHY_RISCV_CALL,
+    WHY_RISCV_JUMP, WHY_UNBOUND, WHY_X86_64_RANGE, asm, finish, here, last_exits
 };
 use self::certificate::{certify, check_input, validate_input};
 use self::lower::{lower_input};
 use self::mono::{front_input, front_rows, mono_input};
 use self::container::{EM_AARCH64, EM_RISCV, EM_X86_64, coff_object, elf_executable, macho_object};
 use self::machine::{
-    LIR_LOAD_PTR,
-    LIR_STORE_PTR,
-    Lir,
-    Lowered,
-    M,
-    lowered_new,
-    put_decimal,
-    put_selected,
-    select,
+    LIR_LOAD_PTR, LIR_STORE_PTR, Lir, Lowered, M, lowered_new, put_decimal, put_selected, select,
     table_listing
 };
 use self::riscv64::{emit as riscv64_emit, exits as riscv64_exits, start as riscv64_start};

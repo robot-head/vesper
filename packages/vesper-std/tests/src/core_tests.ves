@@ -3,30 +3,13 @@ test {
     use @vesper-std/core::{min, max, clamp, ordering_sign, reverse, then_cmp};
     use @vesper-std/core::mem::swap as swap_places;
     use @vesper-std/core::option::{
-        is_some,
-        is_none,
-        unwrap_or,
-        unwrap_or_else,
-        unwrap,
-        map as option_map,
-        map_or,
-        and_then as option_and_then,
-        or as option_or,
-        filter,
-        zip,
-        ok_or
+        is_some, is_none, unwrap_or, unwrap_or_else, unwrap, map as option_map, map_or,
+        and_then as option_and_then, or as option_or, filter, zip, ok_or
     };
     use @vesper-std/core::result::{
-        is_ok,
-        is_err,
-        ok,
-        err,
-        unwrap_or as result_unwrap_or,
-        unwrap_or_else as result_unwrap_or_else,
-        map as result_map,
-        map_err,
-        and_then as result_and_then,
-        or as result_or
+        is_ok, is_err, ok, err, unwrap_or as result_unwrap_or,
+        unwrap_or_else as result_unwrap_or_else, map as result_map, map_err,
+        and_then as result_and_then, or as result_or
     };
     use self::support::{check, some_u64, some_pair};
 

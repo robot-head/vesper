@@ -1297,7 +1297,23 @@ fn compile_exports<M: Module>(
     // One encode-once swap input per compilation (SH4 lane 2, #1276).
     let _inputs = crate::swap_input::open(world);
     let roots: Vec<&str> = exports.keys().map(String::as_str).collect();
-    let all = crate::native::instances_for_roots(world, &roots, false)?;
+    // The `export_plans` swap hook (#1509 part 5) answers, from the first
+    // lowering, the instances, their entry blocks and their conventions.
+    let (all, mut program, plans) = match crate::codegen_swap::installed().export_plans {
+        Some(hook) => {
+            let program = crate::ir_swap::lower(world);
+            let plans = hook(world, &program, &roots, optimize);
+            let all = match plans.as_ref().filter(|p| !p.instances.is_empty()) {
+                Some(p) => p.instances.clone(),
+                None => crate::native::instances_for_roots(world, &roots, false)?,
+            };
+            (all, program, plans)
+        }
+        None => {
+            let all = crate::native::instances_for_roots(world, &roots, false)?;
+            (all, crate::ir_swap::lower(world), None)
+        }
+    };
     for name in exports.keys() {
         if !all.contains_key(name) {
             return Err(format!(
@@ -1305,7 +1321,6 @@ fn compile_exports<M: Module>(
             ));
         }
     }
-    let mut program = crate::ir_swap::lower(world);
     crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
     super::wide_native::refine_wide_tuples(&mut program);
     if optimize {
@@ -1321,7 +1336,20 @@ fn compile_exports<M: Module>(
     }
     // Exported symbols keep the failure-record ABI that foreign callers and
     // the v2 glue use; internal calls use the register conventions of [`NativeAbi`] (#935).
-    let abi = NativeAbi::plan(world, &all, optimize, |key| exports.contains_key(key))?;
+    let abi = match &plans {
+        Some(p) if p.frames.keys().eq(all.keys()) => NativeAbi {
+            functions: p
+                .abi
+                .iter()
+                .filter(|(key, abi)| {
+                    optimize && !exports.contains_key(*key) && **abi != FnAbi::default()
+                })
+                .map(|(key, abi)| (key.clone(), *abi))
+                .collect(),
+            optimize,
+        },
+        _ => NativeAbi::plan(world, &all, optimize, |key| exports.contains_key(key))?,
+    };
     let mut ids = BTreeMap::new();
     // Exports with a by-value 128-bit parameter or result: the function is
     // local and a [`define_wide_entry`] adapter takes the export symbol.
@@ -1359,7 +1387,7 @@ fn compile_exports<M: Module>(
         None,
         optimize,
         &abi,
-        None,
+        plans.as_ref().map(|p| &p.frames),
     )?;
     for (export, inner, sig) in &wide_entries {
         define_wide_entry(m, export, *inner, sig)?;

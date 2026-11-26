@@ -9,29 +9,9 @@
 // CBOR_FIELDS and CBOR_REASONS of src/port.rs.
 use self::AErr;
 use self::cbor::{
-    K_ARRAY,
-    K_BYTES,
-    K_MAP,
-    K_NINT,
-    K_TAG,
-    K_TEXT,
-    K_UINT,
-    R_TRAILING,
-    Scratch,
-    WHAT,
-    arg,
-    cbor_err,
-    cur_len,
-    decode,
-    decode_span,
-    decode_whole_at,
-    kind,
-    materialize_bytes,
-    put_str,
-    set_len,
-    skip,
-    str_len,
-    text_eq_s
+    K_ARRAY, K_BYTES, K_MAP, K_NINT, K_TAG, K_TEXT, K_UINT, R_TRAILING, Scratch, WHAT, arg,
+    cbor_err, cur_len, decode, decode_span, decode_whole_at, kind, materialize_bytes, put_str,
+    set_len, skip, str_len, text_eq_s
 };
 use self::cose::{R_MALFORMED_COSE_SIGN1, parse_sign1_node};
 use self::reader::{k_over_budget, put, raise};

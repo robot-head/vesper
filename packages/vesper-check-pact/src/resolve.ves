@@ -6,15 +6,7 @@ use @vesper/check-data::input::{Reader};
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::{pack_text};
 use @vesper/check-data::types::{
-    EffNode,
-    RowNode,
-    TyKind,
-    TypeNode,
-    Types,
-    default_type,
-    display,
-    substitute,
-    vars_new
+    EffNode, RowNode, TyKind, TypeNode, Types, default_type, display, substitute, vars_new
 };
 
 const K_FN: u8 = TyKind::Fn;
@@ -27,29 +19,11 @@ use self::decl::{Bind, Conf, Decls, Gen, Par, Sig, TRef, TraitRow, Where};
 use self::frontend::{Fe, fe_new};
 use self::session::{PactSession, SolveOutcome, session_open_reader, solve_spec};
 use self::session_input::{
-    QArg,
-    QGoal,
-    QuerySpec,
-    put_num,
-    put_str,
-    put_sym,
-    read_q_names,
-    read_q_types,
-    sym
+    QArg, QGoal, QuerySpec, put_num, put_str, put_sym, read_q_names, read_q_types, sym
 };
 use self::tyops::{
-    Sy,
-    contains_projection,
-    is_projection,
-    key_segment,
-    mentions,
-    proj_assoc,
-    proj_self,
-    proj_trait,
-    proj_trait_ty,
-    row_arg,
-    same_type,
-    trait_has_assoc
+    Sy, contains_projection, is_projection, key_segment, mentions, proj_assoc, proj_self,
+    proj_trait, proj_trait_ty, row_arg, same_type, trait_has_assoc
 };
 
 const NONE32: u32 = 4294967295;

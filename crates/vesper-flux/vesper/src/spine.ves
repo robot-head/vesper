@@ -16,23 +16,8 @@ use self::{CpErr, ZAcc};
 use self::util::{cell, word};
 use self::acc::{acc_insert, acc_new};
 use self::image::{
-    add,
-    byte,
-    charge,
-    get,
-    le64,
-    mul,
-    put_source,
-    put_u16,
-    put_u32,
-    put_u64,
-    put_u8,
-    read_int,
-    read_rows,
-    sat_add,
-    sat_mul,
-    source_size,
-    take
+    add, byte, charge, get, le64, mul, put_source, put_u16, put_u32, put_u64, put_u8, read_int,
+    read_rows, sat_add, sat_mul, source_size, take
 };
 
 const SUM: u64 = 32;

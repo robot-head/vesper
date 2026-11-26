@@ -10,27 +10,11 @@ use @vesper/place-ir::{InstRow, Program, put_program, read_program};
 use self::fun::{Fun, add, inc, insert, n32, read_fun, u32_at, u64_at, u8_at, w};
 use self::encode::{POOL_GUARD, TypeCache, encode_fun, type_cache};
 use self::plans::{
-    BoundRow,
-    CountedPlan,
-    Lin,
-    LoopPlan,
-    compared_list,
-    counted_plan,
-    dominated_list,
-    fail_lin,
-    next_loop,
-    order_list
+    BoundRow, CountedPlan, Lin, LoopPlan, compared_list, counted_plan, dominated_list, fail_lin,
+    next_loop, order_list
 };
 use self::rewrite::{
-    Convert,
-    Fresh,
-    Guards,
-    convert_new,
-    copy_loop,
-    fresh_new,
-    make_unchecked,
-    pool_entry,
-    prog_inst
+    Convert, Fresh, Guards, convert_new, copy_loop, fresh_new, make_unchecked, pool_entry, prog_inst
 };
 use @vesper/place-ir::codes::{Op, Tag};
 

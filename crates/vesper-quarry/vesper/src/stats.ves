@@ -1,20 +1,7 @@
 // Module stats of @vesper/quarry (see lib.ves).
 use self::{Bound, D, Node, Q, Stat, Val};
 use self::util::{
-    ccol,
-    ceil_div,
-    ctab,
-    cw,
-    div_rem,
-    ex,
-    find_table,
-    link,
-    none,
-    null_val,
-    order,
-    param,
-    same,
-    vat
+    ccol, ceil_div, ctab, cw, div_rem, ex, find_table, link, none, null_val, order, param, same, vat
 };
 use self::check::{ex_end};
 use self::values::{compare_vals, dtab, val_at};
