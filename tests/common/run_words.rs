@@ -79,12 +79,17 @@ pub fn run_input(world: &World, program: &Program, entry: &str, fuel: u64) -> Op
 const SITE_HANDLE: u64 = 1;
 const SITE_EFFECT_CALL: u64 = 2;
 const SITE_TRY: u64 = 3;
-// Handle flags: the expression has a type (a `Frame::Coerce`); a state.
+// Handle flags: the expression has a type (a `Frame::Coerce`); a state;
+// the state initializer (a `$handler_init` name at span 0..0) has a type.
 const FLAG_COERCE: u64 = 1;
 const FLAG_STATE: u64 = 2;
+const FLAG_INIT_COERCE: u64 = 4;
 // Pattern words besides `name + 1`: `_`, and any other pattern.
 const PAT_WILD: u64 = 0;
 const PAT_OTHER: u64 = u64::MAX;
+// A return pattern word for a pair `(a, b)` of `_` or bindings, whose two
+// words follow (otherwise both 0).
+const PAT_PAIR: u64 = u64::MAX - 1;
 
 /// The effect table after the entry: what `Runtime` reads from the AST and
 /// the world at a handler, an effect operation call or a `?`, which the
@@ -95,14 +100,15 @@ const PAT_OTHER: u64 = u64::MAX;
 /// n, then per site: instruction (global index), kind, then
 ///   handle:  effect label+1 instance-key+1 coerce static-key
 ///            free-count free-name... body-fn+1
-///            ret-fn+1 ret-pattern
+///            ret-fn+1 ret-pattern ret-first ret-second
 ///            op-count (op clause-fn+1 pattern-count pattern...)...
 ///   effect call: effect op instance-key+1
 ///   try:     instance-key+1
 /// ```
 ///
 /// A pattern word is 0 for `_`, name + 1 for a binding, or `u64::MAX` for
-/// any other pattern (the machine declines it). A function word is 0 when
+/// any other pattern (the machine declines it); a return pattern may also be
+/// `u64::MAX - 1` for a pair. A function word is 0 when
 /// the body was not lowered (it would run as an AST expression).
 fn sites(world: &World, program: &Program, t: &mut Tables) -> Vec<u64> {
     use vesper::ast::{ExprKind, PatternKind};
@@ -151,6 +157,9 @@ fn sites(world: &World, program: &Program, t: &mut Tables) -> Vec<u64> {
                         if state.is_some() {
                             flags |= FLAG_STATE;
                         }
+                        if world.types.contains_key(&(0, 0)) {
+                            flags |= FLAG_INIT_COERCE;
+                        }
                         row.push(flags);
                         row.push(t.enc.name(&format!("$static:$cap{}", expr.span.start)));
                         let mut free = vesper::check::clause_free_names(ret);
@@ -180,7 +189,19 @@ fn sites(world: &World, program: &Program, t: &mut Tables) -> Vec<u64> {
                             PatternKind::Bind(n) => t.enc.name(n) + 1,
                             _ => PAT_OTHER,
                         };
-                        row.push(ret.pats.first().map_or(PAT_OTHER, |p| pattern(t, p)));
+                        match ret.pats.first().map(|p| &p.kind) {
+                            Some(PatternKind::Tuple(pair))
+                                if pair.len() == 2
+                                    && pair.iter().all(|p| pattern(t, p) != PAT_OTHER) =>
+                            {
+                                let (first, second) = (pattern(t, &pair[0]), pattern(t, &pair[1]));
+                                row.extend([PAT_PAIR, first, second]);
+                            }
+                            _ => {
+                                let first = ret.pats.first().map_or(PAT_OTHER, |p| pattern(t, p));
+                                row.extend([first, 0, 0]);
+                            }
+                        }
                         row.push(ops.len() as u64);
                         for (op, f) in ops.iter().zip(clause_fns) {
                             let name = t.enc.name(&op.name);
