@@ -10,15 +10,6 @@ sys library HybridCommands (
     link = "static", name = "vesper_hybrid",
     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
 ) {
-    fn hc_graph_run(
-        nocapture in input: CSlice[u8],
-        has_focus: bool,
-        nocapture in focus: CSlice[u8],
-        invert: bool,
-        json: bool,
-        dot: bool
-    ) -> ForeignVal[u64];
-    fn hc_graph_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
     fn hc_forge_run(
         action: u32,
         nocapture in input: CSlice[u8],

@@ -1245,6 +1245,64 @@ fn seed_graph_tree(dir: &Path) {
     )
     .unwrap();
     std::fs::write(dir.join("bad.lock"), "{not-json").unwrap();
+    // A snapshot in the `Solution` schema that validates, with a native
+    // dependency, an unused native selection and an unreachable package,
+    // and one that does not (a root the selections do not meet).
+    let valid = serde_json::json!({
+        "schema_version": 1,
+        "roots": [{ "name": "@acme/app", "version": "^1" }],
+        "packages": [
+            {
+                "manifest": {
+                    "package": {
+                        "name": "@acme/app",
+                        "version": "1.0.0",
+                        "edition": "2026",
+                        "capability_ceiling": ["Fail", "Net"]
+                    },
+                    "dependencies": {
+                        "@acme/lib": { "version": "^1.2", "effects": ["Fail", "Net"], "features": ["std"] }
+                    },
+                    "features": {
+                        "default": { "enables_effects": ["Fail"], "sys_deps": ["zlib ^1.2"] }
+                    }
+                },
+                "features": ["default"]
+            },
+            {
+                "manifest": {
+                    "package": {
+                        "name": "@acme/lib",
+                        "version": "1.2.0",
+                        "edition": "2026",
+                        "capability_ceiling": ["Fail", "Net"]
+                    },
+                    "features": { "std": { "enables_effects": ["Net"] } }
+                }
+            },
+            {
+                "manifest": {
+                    "package": { "name": "@acme/unused", "version": "0.1.0", "edition": "2026" }
+                }
+            }
+        ],
+        "system_packages": [
+            { "name": "zlib", "version": "1.2.13" },
+            { "name": "libc", "version": "0.2.0" }
+        ]
+    });
+    std::fs::write(
+        dir.join("valid.lock"),
+        serde_json::to_vec_pretty(&valid).unwrap(),
+    )
+    .unwrap();
+    let mut invalid = valid;
+    invalid["roots"][0]["version"] = serde_json::json!("^9");
+    std::fs::write(
+        dir.join("invalid.lock"),
+        serde_json::to_vec(&invalid).unwrap(),
+    )
+    .unwrap();
     std::fs::write(
         dir.join("empty.lock"),
         r#"{"schema_version":1,"roots":[],"packages":[],"system_packages":[]}"#,
@@ -1275,6 +1333,22 @@ fn graph_matches_the_default_compiler() {
         &["graph", "Loom.lock", "--dot"],
         &["graph", "--package", "@acme/lib", "--invert"],
         &["graph", "--package", "@acme/missing", "--json"],
+        &["graph", "valid.lock"],
+        &["graph", "valid.lock", "--json"],
+        &["graph", "valid.lock", "--dot"],
+        &[
+            "graph",
+            "valid.lock",
+            "--package",
+            "@acme/lib",
+            "--invert",
+            "--dot",
+        ],
+        &["graph", "valid.lock", "--package", "@acme/app", "--json"],
+        &["graph", "valid.lock", "--package", "@acme/lib"],
+        &["graph", "valid.lock", "--package", "@acme/unused", "--json"],
+        &["graph", "invalid.lock"],
+        &["graph", "invalid.lock", "--json"],
     ];
     let mut diffs = vec![];
     for argv in cases {

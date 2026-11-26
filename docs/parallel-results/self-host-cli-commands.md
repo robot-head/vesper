@@ -91,13 +91,22 @@ does not touch).
 | `forge` | `HybridCommands::hc_forge_run` | `vesper-forge` (port) | CLI option parsing, validation, and `--help` in Vesper (`forge.ves`, #1660) |
 | `ebpf` | `HybridCommands::hc_ebpf_check` | `vesper-ebpf` (port) / `vesper::stack_bound` | CLI option parsing, validation, and `--help` in Vesper (`ebpf.ves`, #1653) |
 | `verify --refute` | `run_tool` (`vesper-refute`) | `vesper-crucible` | Routed in Vesper (`lib.ves`, #1648) |
-| `graph` | `HybridCommands::hc_graph_run` | `package_graph` | CLI option parsing, validation, and `--help` in Vesper (`graph.ves`, #1669) |
 | `doc` | `HybridCommands::hc_doc_run` | `vesper-doc` (port) | CLI option parsing, validation, `store-olean`, and `--help` in Vesper (`doc.ves`, #1738) |
 | `test` (and `--doc`) | `HybridCommands::hc_test_run` | test runner, doctests | CLI option parsing, validation, and `--help` in Vesper (`test.ves`, #1745) |
 | `lsp` | `HybridCommands::hc_lsp_serve` | `vesper::lsp` (lanes 16 and 17: #1339, #1340) | CLI routing, option validation, and `--help` in Vesper (`lsp.ves`, #1790 / #1809) |
 | `proof-audit` | `HybridCommands::hc_proof_audit_run` | Lean | CLI option parsing, validation, and `--help` in Vesper (`proof_audit.ves`, #1764) |
 | `verify` | `HybridCommands::hc_verify_run` | Lean | CLI option parsing, validation, and `--help` in Vesper (`verify.ves`, #1784) |
 | top-level `--help` text | `HELP` in src/main.rs | | printed by the host (`hc_help`), shared with the driver's `hd_help`; the routing to it is Vesper |
+
+`graph` runs wholly in Vesper since #1996: `graph.ves` parses the options
+(#1669) and reads the file over `@vesper-std/fs`, and @vesper/loom-calculus
+(`lock_json.ves`, `lock_words.ves`, `lock_graph.ves`) reads the Loom.lock
+JSON with serde_json's exact errors, validates it with the ported solver,
+projects it and renders the text, JSON or DOT report of
+`src/package_graph.rs`. `hc_graph_run` and `hc_graph_err` are gone. The
+port's differentials (`tests/lock_json.rs`, 5,625 inputs, and
+`tests/lock_graph.rs`, 10,956 runs over every focus, direction and format)
+and the CLI cases of `graph_matches_the_default_compiler` show 0 diffs.
 
 The tool commands (`attest`, `audit`, `bench`, `cas`, `fuzz`, `grammar`,
 `highlight`, `json`, `migrate`, `publish`, `replay`, `resolve`, `sbom`,
@@ -124,7 +133,7 @@ each tool is SH6's Rust-exit work, not the compiler CLI's.
 ## What is left
 
 - Part 2 is done (below). Next, the layers that need the
-  checked world (`highlight`, `lint`, `forge`, `ebpf`, `shot`, `graph`),
+  checked world (`highlight`, `lint`, `forge`, `ebpf`, `shot`),
   and `verify --refute`'s spawn.
 
 ## Part 2: `vesper fmt`

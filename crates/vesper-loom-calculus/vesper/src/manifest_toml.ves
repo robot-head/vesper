@@ -29,33 +29,33 @@ use self::semver_text::{
 };
 
 // Structs.
-const S_MANIFEST: u64 = 0;
-const S_PACKAGE: u64 = 1;
-const S_DEPENDENCY: u64 = 2;
-const S_FEATURE: u64 = 3;
-const S_SANDBOX: u64 = 4;
-const S_POLICY: u64 = 5;
-const S_RESOLVER: u64 = 6;
-const S_VERIFICATION: u64 = 7;
+pub const S_MANIFEST: u64 = 0;
+pub const S_PACKAGE: u64 = 1;
+pub const S_DEPENDENCY: u64 = 2;
+pub const S_FEATURE: u64 = 3;
+pub const S_SANDBOX: u64 = 4;
+pub const S_POLICY: u64 = 5;
+pub const S_RESOLVER: u64 = 6;
+pub const S_VERIFICATION: u64 = 7;
 
 // Field types.
-const T_STRING: u64 = 0;
-const T_NAME: u64 = 1;
-const T_VERSION: u64 = 2;
-const T_REQ: u64 = 3;
-const T_OPT_STRING: u64 = 4;
-const T_STRING_SET: u64 = 5;
-const T_STRING_VEC: u64 = 6;
-const T_NAME_SET: u64 = 7;
-const T_BOOL: u64 = 8;
-const T_BOOL_TRUE: u64 = 9;
-const T_OPT_U64: u64 = 10;
-const T_OPT_U32: u64 = 11;
-const T_FEATURES: u64 = 12;
-const T_DEPENDENCIES: u64 = 13;
+pub const T_STRING: u64 = 0;
+pub const T_NAME: u64 = 1;
+pub const T_VERSION: u64 = 2;
+pub const T_REQ: u64 = 3;
+pub const T_OPT_STRING: u64 = 4;
+pub const T_STRING_SET: u64 = 5;
+pub const T_STRING_VEC: u64 = 6;
+pub const T_NAME_SET: u64 = 7;
+pub const T_BOOL: u64 = 8;
+pub const T_BOOL_TRUE: u64 = 9;
+pub const T_OPT_U64: u64 = 10;
+pub const T_OPT_U32: u64 = 11;
+pub const T_FEATURES: u64 = 12;
+pub const T_DEPENDENCIES: u64 = 13;
 // T_STRUCT + s is struct s; T_OPT_STRUCT + s is Option of it.
-const T_STRUCT: u64 = 100;
-const T_OPT_STRUCT: u64 = 200;
+pub const T_STRUCT: u64 = 100;
+pub const T_OPT_STRUCT: u64 = 200;
 
 const DATETIME_KEY: Str = "$__toml_private_datetime";
 const U32_MAX: u64 = 4294967295;
@@ -78,14 +78,14 @@ fn put(inout m: ChunkSeq[u8], in t: Str) {
     m.extend(in t.as_bytes());
 }
 
-fn put_dec(inout out: ChunkSeq[u8], v: u64) {
+pub fn put_dec(inout out: ChunkSeq[u8], v: u64) {
     if v >= 10 {
         put_dec(inout out, v / 10);
     }
     out.push(wrapping_u8(wrapping_add(v % 10, 48)));
 }
 
-fn put_i64(inout out: ChunkSeq[u8], v: u64) {
+pub fn put_i64(inout out: ChunkSeq[u8], v: u64) {
     if wrapping_shr_u64(v, 63) == 1 {
         out.push(45);
         put_dec(inout out, wrapping_sub(0, v));
@@ -110,7 +110,7 @@ fn sbyte(in s: Slice[u8], i: u64) -> u64 {
 
 // ---------------------------------------------------------- schema
 
-fn struct_name(k: u64) -> Str {
+pub fn struct_name(k: u64) -> Str {
     if k == S_MANIFEST {
         "Manifest"
     } else if k == S_PACKAGE {
@@ -130,7 +130,7 @@ fn struct_name(k: u64) -> Str {
     }
 }
 
-fn field_count(k: u64) -> u64 {
+pub fn field_count(k: u64) -> u64 {
     if k == S_MANIFEST {
         6
     } else if k == S_PACKAGE {
@@ -148,7 +148,7 @@ fn field_count(k: u64) -> u64 {
     }
 }
 
-fn field_name(k: u64, i: u64) -> Str {
+pub fn field_name(k: u64, i: u64) -> Str {
     if k == S_MANIFEST {
         if i == 0 {
             "package"
@@ -228,7 +228,7 @@ fn field_name(k: u64, i: u64) -> Str {
     }
 }
 
-fn field_type(k: u64, i: u64) -> u64 {
+pub fn field_type(k: u64, i: u64) -> u64 {
     if k == S_MANIFEST {
         if i == 0 {
             wrapping_add(T_STRUCT, S_PACKAGE)
@@ -300,7 +300,7 @@ fn field_type(k: u64, i: u64) -> u64 {
 
 // The JSON of a field that is not in its table (`#[serde(default)]` or
 // `None`), or false when the field is required.
-fn put_default(inout out: ChunkSeq[u8], t: u64) -> bool {
+pub fn put_default(inout out: ChunkSeq[u8], t: u64) -> bool {
     if t == T_OPT_STRING || t == T_OPT_U64 || t == T_OPT_U32 || t >= T_OPT_STRUCT {
         put(inout out, "null");
     } else if t == T_STRING_SET || t == T_STRING_VEC || t == T_NAME_SET {
@@ -319,7 +319,7 @@ fn put_default(inout out: ChunkSeq[u8], t: u64) -> bool {
 
 // `skip_serializing_if`: an empty `vsys` or `objects` and a `None`
 // dependency path.
-fn skipped(k: u64, i: u64, in json: Slice[u8]) -> bool {
+pub fn skipped(k: u64, i: u64, in json: Slice[u8]) -> bool {
     if k == S_PACKAGE && i >= 6 {
         return json.len() == 2;
     }
@@ -630,7 +630,7 @@ fn bits_parts(x: u64) -> (u64, i64) {
 }
 
 // A JSON number's correctly rounded double (round half to even).
-fn exact_bits(in text: Slice[u8]) -> u64 {
+pub fn exact_bits(in text: Slice[u8]) -> u64 {
     let mut i: u64 = 0;
     let n = text.len();
     let mut sign: u64 = 0;
@@ -803,7 +803,7 @@ fn put_datetime(inout m: ChunkSeq[u8], in src: Slice[u8], n: Node) {
 // ---------------------------------------------------------- JSON
 
 // serde_json's string escape: runs of plain bytes are copied whole.
-fn json_str(inout out: ChunkSeq[u8], in t: Slice[u8], a: u64, b: u64) {
+pub fn json_str(inout out: ChunkSeq[u8], in t: Slice[u8], a: u64, b: u64) {
     out.push(34);
     let mut run = a;
     let mut i = a;
@@ -873,7 +873,7 @@ fn text_less(in t: Slice[u8], a: u64, an: u64, b: u64, bn: u64) -> bool {
 
 // Sorts (offset, length, payload, payload2) quads of `q` by their text;
 // insertion sort, the lists are short. Stable.
-fn sort_quads(inout q: ChunkSeq[u64], in t: Slice[u8]) {
+pub fn sort_quads(inout q: ChunkSeq[u64], in t: Slice[u8]) {
     let n = wrapping_shr_u64(q.len(), 2);
     for i in 1..n {
         let mut j = i;
@@ -901,14 +901,14 @@ fn sort_quads(inout q: ChunkSeq[u64], in t: Slice[u8]) {
     }
 }
 
-fn qw(in q: ChunkSeq[u64], i: u64) -> u64 {
+pub fn qw(in q: ChunkSeq[u64], i: u64) -> u64 {
     match q.try_get(i) {
         Option::Some(v) => v,
         Option::None => 0,
     }
 }
 
-fn same_text(in t: Slice[u8], a: u64, an: u64, b: u64, bn: u64) -> bool {
+pub fn same_text(in t: Slice[u8], a: u64, an: u64, b: u64, bn: u64) -> bool {
     if an != bn {
         return false;
     }
@@ -1103,7 +1103,7 @@ fn semver_value(inout d: D, id: u32, req: bool) -> bool {
 }
 
 // `Comparator`'s Display.
-fn put_comparator(inout m: ChunkSeq[u8], in t: Slice[u8], c: SCmp) {
+pub fn put_comparator(inout m: ChunkSeq[u8], in t: Slice[u8], c: SCmp) {
     if c.op == OP_EXACT {
         m.push(61);
     } else if c.op == OP_GREATER {
@@ -1393,7 +1393,7 @@ fn struct_value(inout d: D, in src: Slice[u8], id: u32, k: u64) -> bool {
     true
 }
 
-fn has_default_json(t: u64) -> bool {
+pub fn has_default_json(t: u64) -> bool {
     !(t == T_NAME
         || t == T_VERSION
         || t == T_REQ
@@ -1401,13 +1401,13 @@ fn has_default_json(t: u64) -> bool {
         || (t >= T_STRUCT && t < T_OPT_STRUCT))
 }
 
-fn skippable(k: u64, i: u64) -> bool {
+pub fn skippable(k: u64, i: u64) -> bool {
     (k == S_PACKAGE && i >= 6) || (k == S_DEPENDENCY && i == 4)
 }
 
 // Whether field i has `#[serde(default)]` (an `Option` without it is
 // still required in a sequence).
-fn has_default(k: u64, i: u64) -> bool {
+pub fn has_default(k: u64, i: u64) -> bool {
     let t = field_type(k, i);
     if t == T_OPT_STRING {
         return k == S_DEPENDENCY;
