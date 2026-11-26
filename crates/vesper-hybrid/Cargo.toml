@@ -23,6 +23,10 @@ path = "src/main.rs"
 test = false
 
 [features]
+# The build the default `vesper` switches to (docs/maintenance/rust-exit-plan.md,
+# "The default switch"): with no VESPER_HYBRID_SWAPS or VESPER_HYBRID_GATED,
+# only the swaps whose flip gate passed run (`gated`), not every swap.
+gated-default = []
 # A deliberately wrong pilot module: the differential harness must fail
 # (tests/differential.rs, asserted by the Hybrid compiler workflow).
 divergent = []

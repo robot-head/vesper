@@ -4,6 +4,10 @@
 //! `VESPER_HYBRID_SWAPS` picks the set:
 //!
 //! - `all` (the default): every swap below, as the hybrid has always run.
+//!   A hybrid built with the `gated-default` feature defaults to `gated`
+//!   instead: that build is the one the default `vesper` switches to, and
+//!   it needs no environment variable (docs/maintenance/rust-exit-plan.md,
+//!   "The default switch"). The variables below still override it.
 //! - `gated`: only the swaps whose `scripts/ci/flip_gate.py` verdict is
 //!   PASS ([`Gate::Pass`]). Every other module stays on its Rust path until
 //!   its own gate passes. This is the set the default `vesper` switches to
@@ -78,12 +82,21 @@ impl Set {
     }
 }
 
+/// The set when neither variable names one: `gated` in the build the
+/// default `vesper` switches to (the `gated-default` feature), else `all`.
+pub(crate) const DEFAULT: Set = if cfg!(feature = "gated-default") {
+    Set::Gated
+} else {
+    Set::All
+};
+
 /// Reads the set from the environment, or explains a value it does not
 /// know.
 fn read() -> Result<Set, String> {
     match std::env::var("VESPER_HYBRID_SWAPS") {
         Ok(v) => match v.as_str() {
-            "" | "all" => Ok(Set::All),
+            "" => Ok(DEFAULT),
+            "all" => Ok(Set::All),
             "gated" => Ok(Set::Gated),
             "none" => Ok(Set::None),
             _ => Err(format!(
@@ -97,7 +110,7 @@ fn read() -> Result<Set, String> {
             if std::env::var_os("VESPER_HYBRID_GATED").is_some_and(|v| v == "1") {
                 Ok(Set::Gated)
             } else {
-                Ok(Set::All)
+                Ok(DEFAULT)
             }
         }
     }
