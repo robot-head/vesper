@@ -57,6 +57,8 @@ enum IntegerOp {
     Call = 38,
     CallArgument = 39,
     CallVoid = 40,
+    CallPair = 41,
+    CallHigh = 42,
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
@@ -263,13 +265,22 @@ impl IntegerBlocks<'_> {
         {
             return None;
         }
-        let (op, result) = match (signature.returns.as_slice(), dfg.inst_results(inst)) {
-            ([], []) => (IntegerOp::CallVoid, None),
-            ([param], [value])
-                if *param == AbiParam::new(types::I64) && dfg.value_type(*value) == types::I64 =>
-            {
-                (IntegerOp::Call, Some(*value))
-            }
+        let results = dfg.inst_results(inst);
+        if signature.returns.len() != results.len()
+            || signature
+                .returns
+                .iter()
+                .zip(results)
+                .any(|(param, &value)| {
+                    *param != AbiParam::new(types::I64) || dfg.value_type(value) != types::I64
+                })
+        {
+            return None;
+        }
+        let op = match results {
+            [] => IntegerOp::CallVoid,
+            [_] => IntegerOp::Call,
+            [_, _] => IntegerOp::CallPair,
             _ => return None,
         };
         for &arg in args {
@@ -281,8 +292,11 @@ impl IntegerBlocks<'_> {
         }
         self.calls = true;
         let id = self.append(op, [u64::from(name.index), args.len() as u64, 0]);
-        if let Some(value) = result {
+        if let Some(&value) = results.first() {
             values[value] = Some(id);
+        }
+        if let [_, high] = *results {
+            values[high] = Some(self.append(IntegerOp::CallHigh, [0; 3]));
         }
         Some(())
     }
@@ -595,9 +609,11 @@ impl IntegerBlocks<'_> {
 /// right operand a second result ID as well.
 /// Leading StackSlot records declare frame slots by size and alignment.
 /// Stack addresses and accesses use a slot ordinal and an offset within the slot.
-/// Each Call or CallVoid is preceded by its CallArgument records, in argument order.
+/// Each call is preceded by its CallArgument records, in argument order.
 /// The call's left operand is the function ID and its right operand is the
 /// argument count. Argument records leave unreferenced slots.
+/// CallPair writes its low result and the immediately following CallHigh's
+/// slot holds its high result.
 pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
     integer_program(function).map(|(words, _)| words)
 }

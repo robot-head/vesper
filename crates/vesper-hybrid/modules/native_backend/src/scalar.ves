@@ -48,6 +48,8 @@ const RETURN_PAIR: u64 = 37;
 const CALL: u64 = 38;
 const CALL_ARGUMENT: u64 = 39;
 const CALL_VOID: u64 = 40;
+const CALL_PAIR: u64 = 41;
+const CALL_HIGH: u64 = 42;
 
 const EQUAL: u64 = 0;
 const NOT_EQUAL: u64 = 1;
@@ -241,7 +243,7 @@ fn has_no_result(op: u64) -> bool {
 }
 
 fn is_call(op: u64) -> bool {
-    op == CALL || op == CALL_VOID
+    op == CALL || op == CALL_VOID || op == CALL_PAIR
 }
 
 fn store_width(op: u64) -> u64 {
@@ -288,6 +290,7 @@ fn reads_left(in record: Record) -> bool {
         && op != RETURN_PAIR
         && !is_call(op)
         && op != CALL_ARGUMENT
+        && op != CALL_HIGH
         && (op != EARLY_RETURN || record.left != NO_VALUE)
 }
 
@@ -350,13 +353,18 @@ fn find_last_reads(
         let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
-        if record.op > CALL_VOID
+        if record.op > CALL_HIGH
             || (record.op == STACK_SLOT && index >= frame.slots.len())
             || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
         {
             return Option::None;
         }
         let last = last_read(in reads, value);
+        if record.op == CALL_HIGH
+            && (index == 0 || read_record(in words, wrapping_sub(index, 1)).op != CALL_PAIR)
+        {
+            return Option::None;
+        }
         if record.op == CALL_ARGUMENT {
             if pending_arguments == 0 || last != NEVER_READ {
                 return Option::None;
@@ -433,6 +441,12 @@ fn find_last_reads(
             {
                 return Option::None;
             }
+            if record.op == CALL_PAIR
+                && (wrapping_add(index, 1) == count
+                    || read_record(in words, wrapping_add(index, 1)).op != CALL_HIGH)
+            {
+                return Option::None;
+            }
             if record.right > ARGUMENTS {
                 let slots = wrapping_sub(record.right, ARGUMENTS);
                 // Keep the explicit slots aligned after the outgoing area.
@@ -495,7 +509,7 @@ fn emits_instruction(op: u64, result_live: bool) -> bool {
     op != STACK_SLOT
         && op != RETURN_PAIR
         && op != CALL_ARGUMENT
-        && (result_live || op == LOAD || op == STACK_LOAD || op == CALL || has_no_result(op))
+        && (result_live || op == LOAD || op == STACK_LOAD || is_call(op) || has_no_result(op))
 }
 
 fn dying_register(
@@ -606,7 +620,7 @@ fn allocate(
             find_register(used)
         };
         used = without_register(without_register(without_register(used, left), right), third);
-        let location = if has_no_result(record.op) || (record.op == CALL && !result_live) {
+        let location = if has_no_result(record.op) || (is_call(record.op) && !result_live) {
             Location::Absent
         } else if register != UNASSIGNED {
             if result_live {
@@ -794,6 +808,17 @@ fn move_call_arguments(
     }
 }
 
+fn move_call_result(inout out: ChunkSeq[u8], in result: Location, source: u8) {
+    match result {
+        Location::Register(reg) => emit(inout out, in Instruction::Move(reg, source)),
+        Location::Spill(offset) => emit(
+            inout out,
+            in Instruction::Store(source, RSP, offset, QWORD_BITS)
+        ),
+        Location::Absent => {},
+    };
+}
+
 fn emit_call(
     inout out: ChunkSeq[u8],
     in words: Slice[u64],
@@ -801,7 +826,8 @@ fn emit_call(
     saved: u32,
     start: u64,
     arguments: u64,
-    in result: Location
+    in low: Location,
+    in high: Location
 ) -> u64 {
     let mut slot = allocation.call_frame;
     for code in 0..REGISTER_CODES {
@@ -826,15 +852,18 @@ fn emit_call(
     }
     move_call_arguments(inout out, in words, in allocation.locations, start, register_arguments);
     let reference = emit_direct_call(inout out);
-    // The new result's home is distinct from every saved value's home.
-    match result {
-        Location::Register(reg) => emit(inout out, in Instruction::Move(reg, RAX)),
-        Location::Spill(offset) => emit(
-            inout out,
-            in Instruction::Store(RAX, RSP, offset, QWORD_BITS)
-        ),
-        Location::Absent => {},
-    };
+    // Copy both return registers before restoring the live caller registers.
+    if in_register(in low, RDX) {
+        if in_register(in high, RAX) {
+            emit(inout out, in Instruction::Exchange(RAX, RDX));
+        } else {
+            move_call_result(inout out, in high, RDX);
+            move_call_result(inout out, in low, RAX);
+        }
+    } else {
+        move_call_result(inout out, in low, RAX);
+        move_call_result(inout out, in high, RDX);
+    }
     slot = allocation.call_frame;
     for code in 0..REGISTER_CODES {
         let reg = wrapping_u8(code);
@@ -921,7 +950,7 @@ pub fn encode_block(
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
         let result_live = last_read(in reads, value) != NEVER_READ;
-        if !emits_instruction(record.op, result_live) {
+        if record.op == CALL_HIGH || !emits_instruction(record.op, result_live) {
             continue;
         }
         if is_call(record.op) {
@@ -930,6 +959,11 @@ pub fn encode_block(
                 Option::None => return ChunkSeq::new[u8](),
             };
             let home = assigned(in allocation.locations, value);
+            let high = if record.op == CALL_PAIR {
+                assigned(in allocation.locations, wrapping_add(value, 1))
+            } else {
+                Location::Absent
+            };
             let start = wrapping_sub(index, record.right);
             let offset = emit_call(
                 inout output,
@@ -938,7 +972,8 @@ pub fn encode_block(
                 saved,
                 start,
                 record.right,
-                in home
+                in home,
+                in high
             );
             relocations.push(offset);
             relocations.push(record.left);

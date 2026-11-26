@@ -9,11 +9,11 @@ mod binding;
 
 use cranelift_codegen::{
     binemit::Reloc,
-    ir::{AbiParam, InstBuilder, MemFlags, types},
+    ir::{AbiParam, Function, InstBuilder, MemFlags, types},
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{Linkage, Module, ModuleReloc, ModuleRelocTarget};
+use cranelift_module::{FuncId, Linkage, Module, ModuleReloc, ModuleRelocTarget};
 use object::{Object, ObjectSection, RelocationFlags, elf};
 use std::{
     fs,
@@ -74,6 +74,59 @@ fn call_records_require_relocations_and_keep_discarded_calls() {
     assert!(binding::x86_64_callable_block(&[1, 2, 39, 1, 0, 0, 38, 1, 1, 0]).is_empty());
     // A retained input supplies the return value. The call still gets a relocation.
     assert!(!binding::x86_64_callable_block(&[1, 0, 38, 1, 0, 0]).is_empty());
+    // A two-result call owns the next slot, which cannot appear on its own.
+    assert!(binding::x86_64_callable_block(&[0, 0, 41, 1, 0, 0]).is_empty());
+    assert!(binding::x86_64_callable_block(&[0, 1, 38, 1, 0, 0, 42, 0, 0, 0]).is_empty());
+    assert!(!binding::x86_64_callable_block(&[0, 1, 41, 1, 0, 0, 42, 0, 0, 0]).is_empty());
+}
+
+fn jit_module() -> JITModule {
+    let isa = cranelift_native::builder()
+        .unwrap()
+        .finish(cranelift_codegen::settings::Flags::new(
+            cranelift_codegen::settings::builder(),
+        ))
+        .unwrap();
+    JITModule::new(JITBuilder::with_isa(
+        isa,
+        cranelift_module::default_libcall_names(),
+    ))
+}
+
+fn define_callable(
+    module: &mut JITModule,
+    entry: FuncId,
+    callee: FuncId,
+    function: &Function,
+    expected_relocations: usize,
+) {
+    const WORD_BYTES: usize = size_of::<u64>();
+    const REL32_BYTES: i64 = size_of::<i32>() as i64;
+    let words = native::machine::integer_block_words(function).unwrap();
+    let packet = binding::x86_64_callable_block(&words);
+    let (length, packet) = packet.split_first_chunk::<WORD_BYTES>().unwrap();
+    let (code, targets) = packet.split_at(u64::from_le_bytes(*length) as usize);
+    let (targets, rest) = targets.as_chunks::<{ 2 * WORD_BYTES }>();
+    assert_eq!(targets.len(), expected_relocations);
+    assert!(rest.is_empty());
+    let relocations: Vec<_> = targets
+        .iter()
+        .map(|target| {
+            let (offset, id) = target.split_first_chunk::<WORD_BYTES>().unwrap();
+            let id = u64::from_le_bytes(id.try_into().unwrap()) as u32;
+            assert_eq!(id, callee.as_u32());
+            ModuleReloc {
+                offset: u64::from_le_bytes(*offset) as u32,
+                kind: Reloc::X86CallPCRel4,
+                name: ModuleRelocTarget::user(0, id),
+                addend: -REL32_BYTES,
+            }
+        })
+        .collect();
+    let alignment = u64::from(module.isa().function_alignment().minimum);
+    module
+        .define_function_bytes(entry, alignment, code, &relocations)
+        .unwrap();
 }
 
 #[test]
@@ -85,16 +138,7 @@ fn void_calls_and_conditional_returns_preserve_side_effects() {
     // The value-less call's record must never be used as a result.
     assert!(binding::x86_64_callable_block(&[0, 0, 40, 1, 0, 0]).is_empty());
 
-    let isa = cranelift_native::builder()
-        .unwrap()
-        .finish(cranelift_codegen::settings::Flags::new(
-            cranelift_codegen::settings::builder(),
-        ))
-        .unwrap();
-    let mut module = JITModule::new(JITBuilder::with_isa(
-        isa,
-        cranelift_module::default_libcall_names(),
-    ));
+    let mut module = jit_module();
     let mut signature = module.make_signature();
     signature.params = vec![AbiParam::new(types::I64); 2];
     let mut declare = |name| {
@@ -164,30 +208,7 @@ fn void_calls_and_conditional_returns_preserve_side_effects() {
             module.define_function(entry, &mut context).unwrap();
             continue;
         }
-        let words = native::machine::integer_block_words(&context.func).unwrap();
-        let packet = binding::x86_64_callable_block(&words);
-        let (length, packet) = packet.split_first_chunk::<8>().unwrap();
-        let (code, targets) = packet.split_at(u64::from_le_bytes(*length) as usize);
-        let (targets, rest) = targets.as_chunks::<16>();
-        assert_eq!(targets.len(), 2);
-        assert!(rest.is_empty());
-        let relocations: Vec<_> = targets
-            .iter()
-            .map(|target| {
-                let (offset, id) = target.split_first_chunk::<8>().unwrap();
-                let id = u64::from_le_bytes(id.try_into().unwrap()) as u32;
-                assert_eq!(id, add.as_u32());
-                ModuleReloc {
-                    offset: u64::from_le_bytes(*offset) as u32,
-                    kind: Reloc::X86CallPCRel4,
-                    name: ModuleRelocTarget::user(0, id),
-                    addend: -4,
-                }
-            })
-            .collect();
-        module
-            .define_function_bytes(entry, alignment, code, &relocations)
-            .unwrap();
+        define_callable(&mut module, entry, add, &context.func, 2);
     }
     module.finalize_definitions().unwrap();
     for function in [reference, candidate] {
@@ -203,6 +224,97 @@ fn void_calls_and_conditional_returns_preserve_side_effects() {
                 7u64.wrapping_add(input).wrapping_add(11)
             };
             assert_eq!(result, expected);
+        }
+    }
+}
+
+#[test]
+fn paired_call_results_survive_live_registers_and_spills() {
+    type Entry = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64;
+    let mut module = jit_module();
+    let scalar = AbiParam::new(types::I64);
+    let mut pair_signature = module.make_signature();
+    pair_signature.params = vec![scalar; 2];
+    pair_signature.returns = vec![scalar; 2];
+    let callee = module
+        .declare_function("pair", Linkage::Local, &pair_signature)
+        .unwrap();
+    let mut context = module.make_context();
+    context.func.signature = pair_signature;
+    let mut builder_context = FunctionBuilderContext::new();
+    {
+        let mut b = FunctionBuilder::new(&mut context.func, &mut builder_context);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let a = b.block_params(entry)[0];
+        let b_arg = b.block_params(entry)[1];
+        let low = b.ins().isub(a, b_arg);
+        let product = b.ins().imul_imm(b_arg, 11);
+        let high = b.ins().iadd(product, a);
+        b.ins().return_(&[low, high]);
+        b.seal_all_blocks();
+        b.finalize();
+    }
+    module.define_function(callee, &mut context).unwrap();
+    let mut signature = module.make_signature();
+    signature.params = vec![scalar; 6];
+    signature.returns.push(scalar);
+    for (name, keep_low, keep_high, pressure) in [
+        ("low", true, false, false),
+        ("high", false, true, false),
+        ("pair", true, true, false),
+        ("spills", true, true, true),
+    ] {
+        let baseline = module
+            .declare_function(&format!("{name}_base"), Linkage::Local, &signature)
+            .unwrap();
+        let candidate = module
+            .declare_function(&format!("{name}_vesper"), Linkage::Local, &signature)
+            .unwrap();
+        module.clear_context(&mut context);
+        context.func.signature = signature.clone();
+        let target = module.declare_func_in_func(callee, &mut context.func);
+        let mut b = FunctionBuilder::new(&mut context.func, &mut builder_context);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let [a, b_arg, c, d, e, f] = *b.block_params(entry) else {
+            unreachable!();
+        };
+        let sum = b.ins().iadd(c, d);
+        let diff = b.ins().isub(e, f);
+        let call = b.ins().call(target, &[b_arg, a]);
+        let low = b.inst_results(call)[0];
+        let high = b.inst_results(call)[1];
+        let mut result = match (keep_low, keep_high) {
+            (true, true) => b.ins().isub(high, low),
+            (true, false) => low,
+            (false, true) => high,
+            _ => unreachable!(),
+        };
+        if pressure {
+            for value in [a, b_arg, c, d, e, f, sum, diff] {
+                result = b.ins().iadd(result, value);
+            }
+        }
+        b.ins().return_(&[result]);
+        b.seal_all_blocks();
+        b.finalize();
+        define_callable(&mut module, candidate, callee, &context.func, 1);
+        module.define_function(baseline, &mut context).unwrap();
+        module.finalize_definitions().unwrap();
+        let entry = |id| unsafe {
+            std::mem::transmute::<*const u8, Entry>(module.get_finalized_function(id))
+        };
+        let a = entry(baseline);
+        let b = entry(candidate);
+        for [i, j, k, l, m, n] in [[3, 5, 7, 11, 13, 17], [u64::MAX, 42, 1, 3, 0, 1]] {
+            assert_eq!(
+                unsafe { a(i, j, k, l, m, n) },
+                unsafe { b(i, j, k, l, m, n) },
+                "{name}"
+            );
         }
     }
 }
