@@ -610,6 +610,26 @@ fn read_layout(r: &mut Words, names: &[String], types: &[Type], depth: usize) ->
     Layout { ty: t, size, kind }
 }
 
+/// Reads the names and types of a check-layout `Out` stream (`1`, the
+/// names, the types; `Out::finish` of packages/vesper-check-layout) into
+/// its type table, or `None` when the stream is malformed.
+pub fn decode_type_table(words: &[u64]) -> Option<Vec<Type>> {
+    let mut r = Words::new(words);
+    if words.first() != Some(&1) {
+        return None;
+    }
+    r.next();
+    let n = r.count();
+    let names: Vec<String> = (0..n).map(|_| r.text()).collect();
+    let k = r.count();
+    let mut types = Vec::with_capacity(k);
+    for _ in 0..k {
+        let t = read_type(&mut r, &names, &types);
+        types.push(t);
+    }
+    r.done().then_some(types)
+}
+
 /// Reads the stream of `put_layout_words` back into `Layout::of`'s result.
 pub fn decode_layout(words: &[u64]) -> Result<Layout, String> {
     let mut r = Words::new(words);
