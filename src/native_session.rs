@@ -1035,7 +1035,8 @@ fn compile_session_with_linkage<M: Module>(
     super::wide_native::refine_wide_tuples(&mut program);
     if optimize {
         crate::ir_swap::optimize(world, &mut program)?;
-        crate::ir_swap::inline(world, &mut program, &crate::ir_inline::Budget::default());
+        let budget = crate::ir_inline::Budget::for_program(world, &program);
+        crate::ir_swap::inline(world, &mut program, &budget);
     } else {
         crate::ir_opt::fip_reuse_pass(world, &mut program)?;
     }
