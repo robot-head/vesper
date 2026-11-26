@@ -3,7 +3,11 @@ load("./lib/process.axl", "check", "root_path")
 
 def run_port_abi(ctx: TaskContext, root: str, env: dict[str, str]) -> int:
     selected = (ctx.std.env.var("VESPER_PORT_HARNESS_CRATES") or "all").split()
-    for group in json.decode(ctx.std.fs.read_to_string(root + "/scripts/port-abi-plan.json")):
+    relative = "/scripts/port-abi-plan.json"
+    plan = root + relative
+    if not ctx.std.fs.exists(plan):
+        plan = ctx.std.env.aspect_root_dir() + relative
+    for group in json.decode(ctx.std.fs.read_to_string(plan)):
         if "all" not in selected and not any([crate in selected for crate in group["crates"]]):
             continue
         for case in group["checks"]:
@@ -27,7 +31,7 @@ def port_compiler(ctx: TaskContext, root: str) -> str:
     return root_path(root, ctx.std.env.var("CARGO_TARGET_DIR") or "target") + "/debug/vesper"
 
 def _port_abi(ctx: TaskContext) -> int:
-    root = ctx.std.env.aspect_root_dir()
+    root = ctx.std.env.var("PLATFORM_WORKSPACE") or ctx.std.env.aspect_root_dir()
     return run_port_abi(ctx, root, {"VESPER_PORT_COMPILER": port_compiler(ctx, root)})
 
 test_port_abi = task(

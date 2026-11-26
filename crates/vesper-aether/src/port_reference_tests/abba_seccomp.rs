@@ -1,7 +1,7 @@
 //! The Vesper seccomp evaluator against the Rust reference on random
 //! syscalls under the VMM profile: a differential, and an ABBA timing that
 //! prints the flip gate's `flip-gate pairs` line
-//! (crates/vesper-aether/flip-gate.toml).
+//! (crates/vesper-aether/flip-gate.json).
 
 use std::hint::black_box;
 

@@ -63,7 +63,7 @@ Install the [Aspect CLI launcher](https://github.com/aspect-build/aspect-cli/rel
 as `aspect` on Linux or macOS. It selects the CLI version in
 [`.aspect/version.axl`](.aspect/version.axl). Use `aspect --help` to list task
 groups, and add `--help` after a group or task to see its commands and source
-script. Put script arguments after `--`.
+file. Put task arguments after `--`.
 
 ```sh
 aspect ci tests aspect-unit
@@ -74,10 +74,10 @@ aspect maintenance bazel sync-build-files -- --check
 aspect bootstrap stage2 -- which
 ```
 
-Benchmarks, selected acceptance checks, and table generators run directly in
-AXL. Tasks that still invoke scripts use the original interpreters and
-toolchain dependencies. Windows CI uses PowerShell for native executable,
-export ABI, and hybrid CLI checks.
+Repository automation runs in native Aspect tasks. Windows CI uses PowerShell
+for native executable, export ABI, and hybrid CLI checks. The full Aspect test
+suite uses Rust, Git, yq v4, LZ4, and ripgrep with PCRE2. With PowerShell
+available it also exercises the Windows entry points.
 
 ## Vesper unit tests
 

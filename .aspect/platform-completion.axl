@@ -1,0 +1,59 @@
+"""Publish the validation receipt only after the required jobs pass."""
+
+def validation_receipt(plan, native_results, native, ports_result, ports, sha, profile):
+    if plan != "success" or (native != "none" and any([result != "success" for result in native_results])):
+        return ""
+    if ports_result != "success" and not (ports_result == "skipped" and ports == "none"):
+        return ""
+    return "checked_sha=" + sha + "\nvalidation_profile=" + profile + "\n"
+
+def _complete(ctx: TaskContext) -> int:
+    env = ctx.std.env.var
+    receipt = validation_receipt(
+        env("PLAN_RESULT"),
+        [env("MAC_RESULT"), env("WINDOWS_RESULT"), env("SWAP_RESULT")],
+        env("NATIVE"),
+        env("PORTS_RESULT"),
+        env("PORTS"),
+        env("CHECKED_SHA") or "",
+        env("PROFILE") or "",
+    )
+    if not receipt:
+        ctx.std.process.exit(1, "Required platform validation jobs did not succeed")
+    if not env("GITHUB_OUTPUT") or not ctx.std.fs.try_append(env("GITHUB_OUTPUT"), receipt):
+        ctx.std.process.exit(1, "Cannot publish platform validation results")
+    return 0
+
+complete_platform_validation = task(
+    kind = "complete-platform-validation",
+    group = ["ci"],
+    summary = "Require successful platform jobs before publishing the validation receipt",
+    implementation = _complete,
+)
+
+def _test(ctx: TaskContext) -> int:
+    successful = ["success"] * 3
+    available = "checked_sha=commit\nvalidation_profile=full\n"
+    for plan, statuses, native, result, affected, expected in [
+        ("success", successful, "all", "success", "all", available),
+        ("success", successful, "all", "skipped", "none", available),
+        ("success", successful, "all", "skipped", "all", ""),
+        ("success", successful, "all", "failure", "none", ""),
+        ("failure", ["skipped"] * 3, "none", "skipped", "none", ""),
+        ("success", ["failure", "success", "success"], "all", "success", "all", ""),
+        ("success", ["success", "success", "cancelled"], "all", "success", "all", ""),
+        ("success", ["skipped"] * 3, "none", "skipped", "none", available),
+        ("success", ["skipped"] * 3, "", "skipped", "none", ""),
+        ("success", successful, "none", "skipped", "none", available),
+    ]:
+        if validation_receipt(plan, statuses, native, result, affected, "commit", "full") != expected:
+            fail("Unexpected validation receipt for %r" % ((plan, statuses, native, result, affected),))
+    ctx.std.io.stdout.write("Passed platform validation receipt cases\n")
+    return 0
+
+test_platform_completion = task(
+    kind = "platform-completion",
+    group = ["ci", "tests"],
+    summary = "Test success, failure and skipped port validation outcomes",
+    implementation = _test,
+)

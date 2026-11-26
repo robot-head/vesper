@@ -1,0 +1,178 @@
+"""Independent IEEE and GGML fixture arithmetic, with each binary32 operation rounded."""
+
+load("./binary-fixture.axl", "le", "read_le")
+load("./ieee-reference.axl", "F32", "add", "bit_length", "dyadic", "pack", "rounded")
+
+F16 = struct(fraction = 10, exponent = 5, bias = 15, sign = 32768)
+E4M3 = struct(fraction = 3, exponent = 4, bias = 7, maximum = 8, sign = 128)
+E5M2 = struct(fraction = 2, exponent = 5, bias = 15, sign = 128)
+SIGN32 = F32.sign
+MASK32 = SIGN32 - 1
+ONE = 1065353216
+_TWO23 = 8388608
+_MX = [0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12]
+
+def units(value):
+    return pack((value, 0), F32)
+
+def fadd(a, b):
+    if not (a & MASK32):
+        return b if b & MASK32 else a & b
+    if not (b & MASK32):
+        return a
+    return pack(add(dyadic(a, F32), dyadic(b, F32)), F32)
+
+def fsub(a, b):
+    return fadd(a, b ^ SIGN32)
+
+def fmul(a, b):
+    x, u = dyadic(a, F32)
+    y, v = dyadic(b, F32)
+    return rounded(x * y, 1, u + v, F32, negative_zero = not (x and y) and bool((a ^ b) & SIGN32))
+
+def fdiv(a, b):
+    x, u = dyadic(a, F32)
+    y, v = dyadic(b, F32)
+    return rounded(-x if y < 0 else x, abs(y), u - v, F32, negative_zero = not x and bool((a ^ b) & SIGN32))
+
+def _reshape(value, source, target):
+    n, power = dyadic(value, source)
+    return rounded(n, 1, power, target, negative_zero = not n and bool(value & source.sign))
+
+def as_half(value):
+    return _reshape(value, F32, F16)
+
+def half(value):
+    return _reshape(value, F16, F32)
+
+def integers(data, width):
+    return [read_le(data, index, width) for index in range(0, len(data), width)]
+
+def packed(values, width):
+    return bytes([(value >> (index * 8)) & 255 for value in values for index in range(width)])
+
+def _integer(bits, nearest = False, ties_even = False):
+    x, power = dyadic(bits, F32)
+    magnitude = abs(x)
+    if power >= 0:
+        value = magnitude << power
+    else:
+        shift = -power
+        value = magnitude >> shift
+        if nearest:
+            remainder = magnitude - (value << shift)
+            halfway = 1 << (shift - 1) if shift != 32 else 2147483648
+            if remainder > halfway or (remainder == halfway and (not ties_even or value & 1)):
+                value += 1
+    return -value if x < 0 else value
+
+def signed_byte(value):
+    return value - 256 if value >= 128 else value
+
+def max_component(block):
+    value = 0
+    for item in block:
+        if (item & MASK32) > (value & MASK32):
+            value = item
+    return value
+
+def q8_0(values):
+    scale = fdiv(max_component(values) & MASK32, 1123942400)  # 127.0
+    inv = fdiv(ONE, scale) if scale else 0
+    qs = [_integer(fmul(value, inv), nearest = True) for value in values]
+    return le(as_half(scale), 2) + packed(qs, 1)
+
+def q4_0(values):
+    scale = fdiv(max_component(values), 3238002688)  # -8.0
+    inv = fdiv(ONE, scale) if scale & MASK32 else 0
+    qs = [min(15, _integer(fadd(fmul(value, inv), 1091043328))) for value in values]  # 8.5
+    return le(as_half(scale), 2) + bytes([qs[index] | (qs[index + 16] << 4) for index in range(16)])
+
+def q8_k(values):
+    maximum = max_component(values)
+    if not maximum:
+        return struct(d = 0, qs = [0] * 256, sums = [0] * 16)
+    inv = fdiv(3271426048, maximum)  # -127.0
+    qs = [min(127, _integer(fmul(inv, value), nearest = True, ties_even = True)) for value in values]
+    sums = []
+    for index in range(0, 256, 16):
+        sub = 0
+        for value in qs[index:index + 16]:
+            sub += value
+        sums.append(sub)
+    return struct(d = fdiv(ONE, inv), qs = qs, sums = sums)
+
+def q4k_min_scale(scales, index):
+    if index < 4:
+        return scales[index] & 63, scales[index + 4] & 63
+    return (scales[index + 4] & 15) | ((scales[index - 4] >> 6) << 4), (scales[index + 4] >> 4) | ((scales[index] >> 6) << 4)
+
+def unpack_q4(data):
+    return [data[index] & 15 for index in range(len(data))] + [data[index] >> 4 for index in range(len(data))]
+
+def q4k_nibbles(data):
+    return [value for index in range(0, len(data), 32) for value in unpack_q4(data[index:index + 32])]
+
+def _log2(value):
+    n, exponent = dyadic(value, F32)
+    return bit_length(n) - 1 + exponent
+
+def _mx_scale(exp):
+    return 2097152 << exp if exp < 2 else (exp - 1) << 23
+
+def mxfp4(values):
+    amax = max_component(values) & MASK32
+    exponent = (_log2(amax) - 2 + 127) & 255 if amax else 0
+    scale = _mx_scale(exponent)
+    table = [fmul(scale, units(value)) for value in _MX]
+    codes = []
+    for value in values:
+        best, error = 0, None
+        for index, peer in enumerate(table):
+            candidate = fsub(peer, value) & MASK32
+            if error == None or candidate < error:
+                best, error = index, candidate
+        codes.append(best)
+    return bytes([exponent] + [codes[index] | (codes[index + 16] << 4) for index in range(16)])
+
+def dequantize(data, kind):
+    if kind == "q8_0":
+        d = half(read_le(data, 0, 2))
+        return [fmul(units(signed_byte(data[index])), d) for index in range(2, len(data))]
+    if kind == "q4_0":
+        d = half(read_le(data, 0, 2))
+        return [fmul(d, units(value - 8)) for value in unpack_q4(data[2:])]
+    if kind == "mxfp4":
+        d = _mx_scale(data[0])
+        return [fmul(d, units(_MX[value])) for value in unpack_q4(data[1:])]
+    if kind == "q4_k":
+        d = half(read_le(data, 0, 2))
+        dmin = half(read_le(data, 2, 2))
+        quant = q4k_nibbles(data[16:])
+        values = []
+        for index in range(8):
+            scale, minimum = q4k_min_scale(data[4:16], index)
+            ds, dm = fmul(d, units(scale)), fmul(dmin, units(minimum))
+            values.extend([fsub(fmul(ds, units(value)), dm) for value in quant[index * 32:index * 32 + 32]])
+        return values
+    fail("Unknown reference quantization " + kind)
+
+def fp8_decode(code, kind):
+    sign = SIGN32 if code & 128 else 0
+    low = code & 127
+    if (kind == "e4m3" and low == 127) or (kind == "e5m2" and low > 124):
+        return sign | 2143289344
+    if kind == "e5m2" and low == 124:
+        return sign | 2139095040
+    return _reshape(code, E4M3 if kind == "e4m3" else E5M2, F32)
+
+def fp8_encode(value, kind):
+    magnitude = min(value & MASK32, units(448 if kind == "e4m3" else 57344))
+    return _reshape(magnitude | (value & SIGN32), F32, E4M3 if kind == "e4m3" else E5M2)
+
+def mx_exponent(amax, elem):
+    return max(-127, min(127, _log2(amax) - elem)) if amax else -127
+
+def scale_power(value, exponent):
+    n, power = dyadic(value, F32)
+    return rounded(n, 1, power - exponent, F32, negative_zero = not n and bool(value & SIGN32))
