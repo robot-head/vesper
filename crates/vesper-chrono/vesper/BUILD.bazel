@@ -1,5 +1,20 @@
+load("//tools/bazel:vesper_port.bzl", "vesper_package")
+
 filegroup(
     name = "vesper_pkg",
     srcs = glob(["**"], exclude = ["BUILD.bazel"]),
     visibility = ["//visibility:public"],
 )
+
+# The Loom package @vesper/chrono, which the crate's build script links
+# (//crates/vesper-chrono:chrono_vesper, Rust-exit SH6 lane 14, #1409).
+vesper_package(
+    name = "port_package",
+    srcs = glob(["src/**/*.ves"]),
+    manifest = "Loom.toml",
+    visibility = ["//crates/vesper-chrono:__pkg__"],
+    deps = ["//:std_hash_package"],
+)
+
+# The divergent builds in //crates/vesper-chrono edit these.
+exports_files(glob(["src/**/*.ves"]))

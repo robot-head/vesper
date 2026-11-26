@@ -606,3 +606,51 @@ the vsock device since part 2g, and the net and block devices and the MMIO
 register file since part 2h, and the seccomp compiler since part 2i;
 slot plans and PVH parsing wait on G10, and the small device codecs on
 porting their callers.
+
+## Part 7a: Chrono links its Vesper package; the CoreSight formatter flips
+
+The paused agents had ported every Chrono module to `@vesper/chrono`
+(`crates/vesper-chrono/vesper/`, parts 1-6, #1728-#1766), checked only by
+the root interpreter test (`tests/chrono_port.rs`). Nothing linked it. This
+part does the hookup with the seed pattern, since the compiler links
+Chrono (`vesper top`, `vesper replay`, the anvil simulator):
+
+- `vesper-chrono` gets a build script (`vesper-port-harness`) that compiles
+  the package natively and checks `port/binding.rs`; Bazel builds the object
+  from `//crates/vesper-chrono/vesper:port_package`.
+- `crates/vesper-chrono/seed` (package `vesper-chrono-seed`, library
+  `vesper_chrono`) builds the same sources with `cfg(vesper_port)` off. The
+  root crate and `vesper-tools` depend on it; every other crate gets the
+  port-backed package.
+- Flipped modules forward to Vesper under `cfg(vesper_port)`. Their Rust
+  stays for the seed and as the in-crate differential reference
+  (`src/port_differential.rs`).
+
+The first flip is `formatter::deformat`. Its export is a new boundary
+function, `deformat_into`, which writes the trace bytes, one run word
+(`id | start << 8`) per run of one source, and the counters into
+caller buffers, so the Rust side appends whole runs instead of one byte at
+a time. A frame without ID changes under an open run takes a word-at-a-time
+path: it is two 8-byte loads, the auxiliary bits spread into the
+flag-carrying bytes, and two 8-byte stores.
+
+- Differential: 20,000 generated captures in both modes, with ID changes,
+  null, flush, trigger and reserved IDs, random auxiliary bits, truncated
+  and extended tails, bit flips and small output budgets. 0 differences
+  from the Rust deformatter.
+- Divergence: `formatter` (the trigger ID counted as a trace source) fails
+  `coresight_flow::hand_built_frame_exercises_every_slot_rule`.
+- ABBA (`flip-gate.json`, release, `RUSTFLAGS="-C target-cpu=native"`, 30
+  epochs): a 64 KiB ETR buffer of two interleaved sources with padding and
+  a source switch every four frames or so, **1.03x [1.02, 1.04]**. With an
+  ID change on one flag-carrying byte in eight (about one per frame, so the
+  word path rarely applies), it is 1.46x [1.44, 1.47]. The byte-at-a-time
+  path is slower than Rust's because of G10 (constants and locals spilled
+  to the stack).
+
+The other ported modules (the PT and ETE packet decoders, ring, timeline,
+lineage, redact, bundle, replay, arena, checkpoint) are next. Each needs an
+export-shaped entry point like `deformat_into`, because the existing
+functions return `ChunkSeq` trees written for the interpreter test. Capture
+(`perf_event_open`), the write-tracking arena (fiber-abi) and the x86 flow
+walk (iced-x86, G9) stay Rust.

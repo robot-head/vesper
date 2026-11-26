@@ -117,7 +117,8 @@ vesper-semver = { path = "../vesper-semver/seed", package = "vesper-semver-seed"
 vesper-loom-cas = { path = "../vesper-loom-cas/seed", package = "vesper-loom-cas-seed" }
 vesper-fmt = { path = "../vesper-fmt/seed", package = "vesper-fmt-seed" }
 vesper-ffi = { path = "../vesper-ffi" }
-vesper-chrono = { path = "../vesper-chrono" }
+# The compiler's build links the frozen Rust seed copy of vesper-chrono (#1409).
+vesper-chrono = { path = "../vesper-chrono/seed", package = "vesper-chrono-seed" }
 vesper-beacon = { path = "../vesper-beacon/seed", package = "vesper-beacon-seed" }
 vesper-crucible = { path = "../vesper-crucible/seed", package = "vesper-crucible-seed" }
 # Only the tools link these (SH6 lane 3, #1398): they left the compiler's

@@ -1,0 +1,40 @@
+# The frozen Rust seed copy of vesper-chrono (package vesper-chrono-seed,
+# library vesper_chrono) that the compiler and the crates of its build link:
+# the sources in ../src with cfg(vesper_port) off. The port-backed package
+# needs //:bin/vesper to build its object, so the compiler must not link it.
+# Written by hand because its sources live in the parent package; see
+# "Crates the compiler links" in docs/maintenance/porting-a-crate.md.
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs/private:all_crate_deps.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_clippy_test")
+load("@vesper_cargo//:packages.bzl", "PACKAGES")
+
+_CRATE = PACKAGES["crates/vesper-chrono/seed"].crate_data()
+
+_DEPS = all_crate_deps(_CRATE, normal = True, platforms = _CRATE["platforms"])
+
+rust_library(
+    name = "seed",
+    srcs = ["//crates/vesper-chrono:rust_srcs"],
+    aliases = _CRATE.get("aliases", {}),
+    compile_data = ["//crates/vesper-chrono:README.md"],
+    crate_name = "vesper_chrono",
+    crate_root = "//crates/vesper-chrono:src/lib.rs",
+    edition = "2024",
+    rustc_env = {
+        "CARGO_PKG_NAME": "vesper-chrono-seed",
+        "CARGO_PKG_VERSION": "0.1.0",
+    },
+    version = "0.1.0",
+    visibility = ["//visibility:public"],
+    deps = _DEPS,
+)
+
+rust_clippy_test(
+    name = "clippy",
+    targets = [":seed"],
+    tags = [
+        "clippy",
+        "lint",
+    ],
+)

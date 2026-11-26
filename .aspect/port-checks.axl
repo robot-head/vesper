@@ -33,6 +33,20 @@ aegis_check = port_checks(
     ],
 )
 
+chrono_check = port_checks(
+    "chrono",
+    "check",
+    [
+        ["-p", "vesper-chrono"],
+    ],
+    [
+        divergence(name, _FEATURE + ["--test"] + args + _SERIAL, [failed], [passed], env = {"VESPER_CHRONO_DIVERGE": name})
+        for name, args, failed, passed in [
+            ("formatter", ["coresight_flow"], "hand_built_frame_exercises_every_slot_rule", "malformed_frames_are_typed_errors"),
+        ]
+    ],
+)
+
 aether_test_port = port_checks(
     "aether",
     "test-port",

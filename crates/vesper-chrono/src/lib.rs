@@ -12,6 +12,13 @@ pub mod hwpath;
 pub mod ipt;
 pub mod ipt_flow;
 pub mod lineage;
+// The modules the Vesper port (vesper/, the Loom package @vesper/chrono)
+// backs forward to it through the generated binding (Rust-exit SH6 lane
+// 14 part 7a, #1409); the seed copy builds without cfg(vesper_port).
+#[cfg(vesper_port)]
+mod port;
+#[cfg(all(test, vesper_port))]
+mod port_differential;
 pub mod redact;
 pub mod replay;
 pub mod ring;

@@ -1,3 +1,21 @@
+// @vesper/chrono: the Vesper port of vesper-chrono (Rust-exit SH6 lane 14,
+// #1409). The modules are the whole crate's logic; the functions below are
+// the exports the Rust crate calls (the port-backed package; the compiler
+// links the Rust seed copy, crates/vesper-chrono/seed).
+use self::formatter::deformat_into as formatter_deformat_into;
+
 pub fn hello_chrono() -> u32 {
     0
+}
+
+// formatter::deformat (module formatter, `deformat_into`).
+pub fn deformat(
+    in bytes: Slice[u8],
+    mode: u64,
+    max_output: u64,
+    inout data: Slice[u8],
+    inout runs: Slice[u64],
+    inout w: Slice[u64]
+) -> u64 {
+    formatter_deformat_into(in bytes, mode, max_output, inout data, inout runs, inout w)
 }
