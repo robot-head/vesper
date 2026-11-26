@@ -2904,6 +2904,7 @@ fn command_documents() -> Vec<(String, i32)> {
         ("file:///work/\u{fc}ber.ves", i32::MAX),
         ("file:///work/min.ves", i32::MIN),
         ("untitled:Untitled-1", 0),
+        ("file:///work/minus-one.ves", -1),
     ]
     .into_iter()
     .map(|(u, v)| (u.to_owned(), v))
@@ -3003,6 +3004,15 @@ fn command_cases() -> Vec<(vesper::lsp::PortCheck, String, Option<String>)> {
             &mut cases,
             "m",
             Some(format!("{{\"{a}\":{wide},\"{b}\":{deep}}}")),
+        );
+    }
+    for n in [1_000, 4_000] {
+        let members: Vec<String> = (0..n).rev().map(|k| format!("\"k{k:06}\":{k}")).collect();
+        input(&mut cases, "m", Some(format!("{{{}}}", members.join(","))));
+        input(
+            &mut cases,
+            "m",
+            Some(format!("{{{},\"z\":{deep}}}", members.join(","))),
         );
     }
     input(&mut cases, "m", Some(format!("[{deep},{wide}]")));
@@ -3215,6 +3225,8 @@ fn command_cases() -> Vec<(vesper::lsp::PortCheck, String, Option<String>)> {
         ),
         ("untitled:Untitled-1", "0".into()),
         ("untitled:Untitled-1", "-0".into()),
+        ("file:///work/minus-one.ves", "-1".into()),
+        ("file:///work/minus-one.ves", "1".into()),
     ] {
         members.push(format!("\"uri\":\"{u}\",{f},\"version\":{v}"));
     }

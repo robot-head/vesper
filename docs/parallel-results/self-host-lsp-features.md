@@ -800,7 +800,7 @@ Rust lines deleted: 0.
 # Part 10b (#1828): parameter checks
 
 The session's parameter checks now run in `@vesper/lsp` over the
-`@vesper/serde` token tape, with 0 diffs, at 1.24x Rust's time:
+`@vesper/serde` token tape, with 0 diffs, at 1.28x Rust's time:
 
 - `validate_input` (src/lsp/session.rs): the method label (empty, over 256
   bytes, or holding a C0 or C1 control), then a walk of the parameters
@@ -809,7 +809,8 @@ The session's parameter checks now run in `@vesper/lsp` over the
   so the walk here visits members in key order too, and the first bound
   broken is the same one. A linear scan of the tape passes values that
   are within every bound however they are walked, which is nearly all of
-  them.
+  them. The walk counts an object's members before reading its keys, as
+  Rust does, and orders them with a merge sort.
 - `cancel_params` (crates/vesper-lsp/src/lens.rs): an `i32` id, or a
   string id of at most 1,024 bytes.
 - The `vesper.proofAudit` checks of `workspace/executeCommand`, in Rust's
@@ -834,20 +835,20 @@ The session's parameter checks now run in `@vesper/lsp` over the
 
 ## Differential
 
-629 checks: 437 `validate_input` cases, 30 cancel parameter cases and 162
+635 checks: 441 `validate_input` cases, 30 cancel parameter cases and 164
 `vesper.proofAudit` calls. They cover:
 
 - method labels at the 256-byte bound and with each kind of control
 - depths 63 to 66, and 65,535 to 65,537 nodes
 - strings and keys at 2 MiB
 - objects whose key order decides which bound breaks first, including
-  escaped keys
+  escaped keys and objects of 1,000 and 4,000 members in reverse order
 - 400 seeded random values
-- ids and versions at the i32 bounds, `-0`, floats and exponents
+- ids and versions at the i32 bounds, `-1`, `-0`, floats and exponents
 - escaped strings at the 1,024-byte bounds
 - every argument refusal
 
-168 refusals and 461 passes matched with 0 diffs.
+171 refusals and 464 passes matched with 0 diffs.
 
 ## Numbers
 
@@ -857,15 +858,15 @@ cases are left out of the timing.
 
 | Checks | Rust | Vesper | Ratio |
 |---|--:|--:|--:|
-| `validate_input` (437) | 52 ns | 60 ns | 1.16x |
-| `cancel_params` (30) | 49 ns | 138 ns | 2.78x |
-| `vesper.proofAudit` (135) | 210 ns | 247 ns | 1.17x |
-| All 602 | 86 ns | 106 ns | **1.24x** |
+| `validate_input` (437) | 52 ns | 64 ns | 1.24x |
+| `cancel_params` (30) | 49 ns | 154 ns | 3.12x |
+| `vesper.proofAudit` (137) | 216 ns | 261 ns | 1.21x |
+| All 604 | 88 ns | 112 ns | **1.28x** |
 
 The cancel cases are slow because of four 1 KiB string ids, two of them
 with escapes. serde's string decoder copies those a character at a time,
 where Rust clones the string. Without parameters over 200 bytes the cancel
-checks run at 0.76x and all checks at 1.05x.
+checks run at 0.64x and all checks at 1.08x.
 
 Rust lines deleted: 0. The checks are not wired: Rust stays the default
 until the hybrid wiring part.

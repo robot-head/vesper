@@ -58,6 +58,21 @@ const CHECK_PROOF: u64 = 3;
 const HEADER_WORDS: u64 = 4;
 const DOC_WORDS: u64 = 3;
 const CHECK_WORDS: u64 = 5;
+// Header word offsets.
+const H_WORDS: u64 = 0;
+const H_ROUNDS: u64 = 1;
+const H_DOCS: u64 = 2;
+const H_CHECKS: u64 = 3;
+// Document word offsets.
+const D_URI_AT: u64 = 0;
+const D_URI_LEN: u64 = 1;
+const D_VERSION: u64 = 2;
+// Check word offsets.
+const C_KIND: u64 = 0;
+const C_METHOD_AT: u64 = 1;
+const C_METHOD_LEN: u64 = 2;
+const C_PARAMS_AT: u64 = 3;
+const C_PARAMS_LEN: u64 = 4;
 
 // A refusal (`ServerError` or `LensError::InvalidCancel`), `RfNone` when
 // the check passes; the variants are prefixed `Rf` because variant names
@@ -130,11 +145,18 @@ fn message_of(r: Refusal) -> Str {
 struct Walk {
     stack: ChunkSeq[u64],
     depths: ChunkSeq[u64],
-    keys: ChunkSeq[u64],
-    key_at: ChunkSeq[u64],
-    key_len: ChunkSeq[u64],
-    key_src: ChunkSeq[u64],
-    values: ChunkSeq[u64],
+    keys: Keys,
+    order: ChunkSeq[u64],
+    merged: ChunkSeq[u64],
+    values: ChunkSeq[u64]
+}
+
+// One object's member keys: where each one's decoded bytes are (`src`
+// 0 for the body, 1 for the scratch) and how long it is.
+struct Keys {
+    at: ChunkSeq[u64],
+    len: ChunkSeq[u64],
+    src: ChunkSeq[u64],
     scratch: ChunkSeq[u8]
 }
 
@@ -174,28 +196,87 @@ fn children(in doc: Doc, i: u64, object: bool) -> u64 {
 
 // Byte `i` of member key `k`: in the body when it has no escapes, else
 // decoded in the scratch.
-fn key_byte(in body: Slice[u8], in w: Walk, k: u64, i: u64) -> u8 {
-    let at = wrapping_add(g64(in w.key_at, k), i);
-    if g64(in w.key_src, k) == 0 {
+fn key_byte(in body: Slice[u8], in keys: Keys, k: u64, i: u64) -> u8 {
+    let at = wrapping_add(g64(in keys.at, k), i);
+    if g64(in keys.src, k) == 0 {
         body.try_get(at).unwrap_or(0)
     } else {
-        w.scratch.try_get(at).unwrap_or(0)
+        keys.scratch.try_get(at).unwrap_or(0)
     }
 }
 
 // Key `x` sorts before key `y`, bytewise (`String`'s order).
-fn key_less(in body: Slice[u8], in w: Walk, x: u64, y: u64) -> bool {
-    let xn = g64(in w.key_len, x);
-    let yn = g64(in w.key_len, y);
+fn key_less(in body: Slice[u8], in keys: Keys, x: u64, y: u64) -> bool {
+    let xn = g64(in keys.len, x);
+    let yn = g64(in keys.len, y);
     let n = if xn < yn { xn } else { yn };
     for i in 0..n {
-        let p = key_byte(in body, in w, x, i);
-        let q = key_byte(in body, in w, y, i);
+        let p = key_byte(in body, in keys, x, i);
+        let q = key_byte(in body, in keys, y, i);
         if p != q {
             return p < q;
         }
     }
     xn < yn
+}
+
+fn min_u64(a: u64, b: u64) -> u64 {
+    if a < b { a } else { b }
+}
+
+// `order` (member numbers) in key order: a bottom-up merge sort through
+// `merged`, O(n log n) comparisons for any member order.
+fn sort_keys(
+    in body: Slice[u8],
+    in keys: Keys,
+    inout order: ChunkSeq[u64],
+    inout merged: ChunkSeq[u64]
+) {
+    let n = order.len();
+    merged.truncate(0);
+    merged.resize(n, 0);
+    let mut width: u64 = 1;
+    loop {
+        if width >= n {
+            break;
+        }
+        let mut lo: u64 = 0;
+        loop {
+            if lo >= n {
+                break;
+            }
+            let mid = min_u64(wrapping_add(lo, width), n);
+            let hi = min_u64(wrapping_add(mid, width), n);
+            let mut a = lo;
+            let mut b = mid;
+            let mut k = lo;
+            loop {
+                if k >= hi {
+                    break;
+                }
+                let take_b = if a >= mid {
+                    true
+                } else if b >= hi {
+                    false
+                } else {
+                    key_less(in body, in keys, g64(in order, b), g64(in order, a))
+                };
+                if take_b {
+                    let _ = merged.try_set(k, g64(in order, b));
+                    b = wrapping_add(b, 1);
+                } else {
+                    let _ = merged.try_set(k, g64(in order, a));
+                    a = wrapping_add(a, 1);
+                }
+                k = wrapping_add(k, 1);
+            }
+            lo = hi;
+        }
+        for k in 0..n {
+            let _ = order.try_set(k, g64(in merged, k));
+        }
+        width = wrapping_add(width, width);
+    }
 }
 
 fn refused(r: Refusal) -> bool {
@@ -216,12 +297,19 @@ fn walk_object(
     inout enqueued: u64,
     inout bytes: u64
 ) -> Refusal {
-    w.keys.truncate(0);
-    w.key_at.truncate(0);
-    w.key_len.truncate(0);
-    w.key_src.truncate(0);
+    // Rust counts the members first, so an object past the node bound
+    // refuses before its keys are read.
+    let members = children(in doc, i, true);
+    enqueued = wrapping_add(enqueued, members);
+    if enqueued > MAX_PARAM_NODES {
+        return Refusal::RfNodes;
+    }
+    w.keys.at.truncate(0);
+    w.keys.len.truncate(0);
+    w.keys.src.truncate(0);
+    w.keys.scratch.truncate(0);
+    w.order.truncate(0);
     w.values.truncate(0);
-    w.scratch.truncate(0);
     let end = token(in doc, i).next;
     let mut j = wrapping_add(i, 1);
     loop {
@@ -231,44 +319,26 @@ fn walk_object(
         let kt = token(in doc, j);
         bytes = wrapping_add(bytes, kt.decoded_len);
         if kt.escaped {
-            w.key_at.push(w.scratch.len());
-            w.key_src.push(1);
-            decoded(in doc, in body, j, inout w.scratch);
+            w.keys.at.push(w.keys.scratch.len());
+            w.keys.src.push(1);
+            decoded(in doc, in body, j, inout w.keys.scratch);
         } else {
-            w.key_at.push(wrapping_add(kt.start, 1));
-            w.key_src.push(0);
+            w.keys.at.push(wrapping_add(kt.start, 1));
+            w.keys.src.push(0);
         }
-        w.key_len.push(kt.decoded_len);
-        // Insertion by key: `keys` holds member numbers in key order.
-        let k = w.keys.len();
-        w.keys.push(k);
-        let mut p = k;
-        loop {
-            if p == 0 {
-                break;
-            }
-            let before = g64(in w.keys, wrapping_sub(p, 1));
-            if !key_less(in body, in w, k, before) {
-                break;
-            }
-            let _ = w.keys.try_set(p, before);
-            p = wrapping_sub(p, 1);
-        }
-        let _ = w.keys.try_set(p, k);
+        w.keys.len.push(kt.decoded_len);
+        w.order.push(w.order.len());
         w.values.push(wrapping_add(j, 1));
         j = token(in doc, wrapping_add(j, 1)).next;
     }
-    // Rust counts the members, then charges the keys: a byte total only
-    // grows, so the sum breaks the bound exactly when some key does.
-    enqueued = wrapping_add(enqueued, w.keys.len());
-    if enqueued > MAX_PARAM_NODES {
-        return Refusal::RfNodes;
-    }
+    // Rust charges the keys next: a byte total only grows, so the sum
+    // breaks the bound exactly when some key does.
     if bytes > MAX_PARAM_STRING_BYTES {
         return Refusal::RfStringBytes;
     }
-    for n in 0..w.keys.len() {
-        w.stack.push(g64(in w.values, g64(in w.keys, n)));
+    sort_keys(in body, in w.keys, inout w.order, inout w.merged);
+    for n in 0..w.order.len() {
+        w.stack.push(g64(in w.values, g64(in w.order, n)));
         w.depths.push(wrapping_add(depth, 1));
     }
     Refusal::RfNone
@@ -559,15 +629,16 @@ fn proof_command(
             return refuse(Refusal::RfObligation);
         }
     }
-    let mut current = NO_TOKEN;
+    // Versions are any i32, so presence is its own flag.
+    let mut found = false;
+    let mut current: u64 = 0;
     for d in 0..open.at.len() {
-        if current == NO_TOKEN
-            && same(in doc, in body, uri, in blob, g64(in open.at, d), g64(in open.len, d))
-        {
+        if !found && same(in doc, in body, uri, in blob, g64(in open.at, d), g64(in open.len, d)) {
+            found = true;
             current = g64(in open.version, d);
         }
     }
-    if current == NO_TOKEN {
+    if !found {
         return refuse(Refusal::RfNotOpen);
     }
     let version = field(in doc, in body, argument, "version");
@@ -719,45 +790,48 @@ fn check_row(
 // none), offsets from the blob, which starts at byte W * 8. Each check runs `rounds` times and
 // the result is its last rows' text.
 pub fn command_checks(in b: Slice[u8]) -> ChunkSeq[u8] {
-    let words = le(in b, 0, 0);
-    let rounds = le(in b, 0, 1);
-    let n_docs = le(in b, 0, 2);
-    let n_checks = le(in b, 0, 3);
+    let words = le(in b, 0, H_WORDS);
+    let rounds = le(in b, 0, H_ROUNDS);
+    let n_docs = le(in b, 0, H_DOCS);
+    let n_checks = le(in b, 0, H_CHECKS);
     let base = wrapping_mul(words, Le::WordBytes);
     let mut open = Open { at: ChunkSeq::new(), len: ChunkSeq::new(), version: ChunkSeq::new() };
     for d in 0..n_docs {
         let w0 = wrapping_add(HEADER_WORDS, wrapping_mul(d, DOC_WORDS));
-        open.at.push(wrapping_add(base, le(in b, 0, w0)));
-        open.len.push(le(in b, 0, wrapping_add(w0, 1)));
-        open.version.push(le(in b, 0, wrapping_add(w0, 2)));
+        open.at.push(wrapping_add(base, le(in b, 0, wrapping_add(w0, D_URI_AT))));
+        open.len.push(le(in b, 0, wrapping_add(w0, D_URI_LEN)));
+        open.version.push(le(in b, 0, wrapping_add(w0, D_VERSION)));
     }
     let checks_at = wrapping_add(HEADER_WORDS, wrapping_mul(n_docs, DOC_WORDS));
     let mut w = Walk {
         stack: ChunkSeq::new(),
         depths: ChunkSeq::new(),
-        keys: ChunkSeq::new(),
-        key_at: ChunkSeq::new(),
-        key_len: ChunkSeq::new(),
-        key_src: ChunkSeq::new(),
-        values: ChunkSeq::new(),
-        scratch: ChunkSeq::new()
+        keys: Keys {
+            at: ChunkSeq::new(),
+            len: ChunkSeq::new(),
+            src: ChunkSeq::new(),
+            scratch: ChunkSeq::new()
+        },
+        order: ChunkSeq::new(),
+        merged: ChunkSeq::new(),
+        values: ChunkSeq::new()
     };
     let mut doc = new_doc();
     let mut out: ChunkSeq[u8] = ChunkSeq::new();
     let mut row: ChunkSeq[u8] = ChunkSeq::new();
     for c in 0..n_checks {
         let w0 = wrapping_add(checks_at, wrapping_mul(c, CHECK_WORDS));
-        let kind = le(in b, 0, w0);
-        let m_at = wrapping_add(base, le(in b, 0, wrapping_add(w0, 1)));
-        let m_end = wrapping_add(m_at, le(in b, 0, wrapping_add(w0, 2)));
-        let p_at = le(in b, 0, wrapping_add(w0, 3));
+        let kind = le(in b, 0, wrapping_add(w0, C_KIND));
+        let m_at = wrapping_add(base, le(in b, 0, wrapping_add(w0, C_METHOD_AT)));
+        let m_end = wrapping_add(m_at, le(in b, 0, wrapping_add(w0, C_METHOD_LEN)));
+        let p_at = le(in b, 0, wrapping_add(w0, C_PARAMS_AT));
         let mut b_at: u64 = 0;
         let mut b_end: u64 = 0;
         let mut params = NO_TOKEN;
         let mut json = true;
         if p_at != NO_TOKEN {
             b_at = wrapping_add(base, p_at);
-            b_end = wrapping_add(b_at, le(in b, 0, wrapping_add(w0, 4)));
+            b_end = wrapping_add(b_at, le(in b, 0, wrapping_add(w0, C_PARAMS_LEN)));
             json = parse(inout doc, in b[b_at..b_end]);
             params = 0;
         }
