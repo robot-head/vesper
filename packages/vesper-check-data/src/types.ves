@@ -401,11 +401,7 @@ impl Types {
     // `Type::name`: the name of a `Named` type, else "" (symbol 0).
     pub fn name(in self, t: u32) -> u32 {
         let n = self.node(t);
-        if n.kind == TyKind::Named {
-            n.name
-        } else {
-            0
-        }
+        if n.kind == TyKind::Named { n.name } else { 0 }
     }
 
     pub fn arity(in self, t: u32) -> u64 {
@@ -589,19 +585,7 @@ impl Types {
     // integer, so the sample keeps a sign (in `mode`) and a u64 magnitude.
     pub fn literal(inout self, neg: bool, magnitude: u64) -> u32 {
         let no: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        self.mk(
-            TyKind::Lit,
-            if neg {
-                1
-            } else {
-                0
-            },
-            0,
-            in no,
-            0,
-            0,
-            wrapping_i64(magnitude)
-        )
+        self.mk(TyKind::Lit, if neg { 1 } else { 0 }, 0, in no, 0, 0, wrapping_i64(magnitude))
     }
 
     pub fn row_type(inout self, row: u32) -> u32 {

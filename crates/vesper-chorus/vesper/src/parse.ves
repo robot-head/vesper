@@ -210,11 +210,7 @@ fn lex(inout c: C, in t: Slice[u8]) {
         } else {
             p = add(p, w);
             col = sat32(col);
-            let nx = if p < n {
-                ib(in t, p)
-            } else {
-                0
-            };
+            let nx = if p < n { ib(in t, p) } else { 0 };
             let mut kind = none();
             if ch == Ascii::Minus && nx == Ascii::Greater {
                 p = inc(p);
@@ -784,11 +780,7 @@ fn build(inout c: C, blk: u64, cont0: u64, depth0: u64) -> u64 {
             // clones it; here the arms share it).
             let arms = sw(in c.s_d, s);
             let size = gsize(in c, cont);
-            let copies = if arms == 0 {
-                0
-            } else {
-                wrapping_sub(arms, 1)
-            };
+            let copies = if arms == 0 { 0 } else { wrapping_sub(arms, 1) };
             if !charge(inout c, sat_mul(size, copies), s) {
                 return none();
             }

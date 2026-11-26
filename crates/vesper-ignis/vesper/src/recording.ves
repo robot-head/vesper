@@ -173,11 +173,7 @@ pub fn recorder_submit(
         return RecorderVerdict::Stalled;
     }
     let keep: u64 = if mode == SubmitMode::AcceptFirstQueueUncertain {
-        if streams.len() > 0 {
-            1
-        } else {
-            0
-        }
+        if streams.len() > 0 { 1 } else { 0 }
     } else {
         streams.len()
     };

@@ -407,11 +407,7 @@ fn mentions_generic(in m: Mo, t: u32) -> bool {
 fn text_less(in names: Names, a: u32, b: u32) -> bool {
     let na = names.size(a);
     let nb = names.size(b);
-    let n = if na < nb {
-        na
-    } else {
-        nb
-    };
+    let n = if na < nb { na } else { nb };
     for i in 0..n {
         let x = names.byte(a, i);
         let y = names.byte(b, i);
@@ -911,11 +907,7 @@ fn sort_fns(in names: Names, inout fns: ChunkSeq[FnRow]) {
 }
 
 fn min_u64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // Monomorphization, evidence passing (evidence.ves) and then the lowering

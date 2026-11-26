@@ -238,11 +238,7 @@ fn push_address(inout st: EteState, address: u64, in isa: InstructionSet) {
 }
 
 fn latest_addr(in st: EteState) -> u64 {
-    if st.has_h0 {
-        st.h0_addr
-    } else {
-        0
-    }
+    if st.has_h0 { st.h0_addr } else { 0 }
 }
 
 fn is_addr_header(h: u8) -> bool {
@@ -287,17 +283,9 @@ fn decode_address(
         } else {
             0
         };
-        let len: u64 = if two {
-            2
-        } else {
-            1
-        };
+        let len: u64 = if two { 2 } else { 1 };
         if h == 0x95 {
-            let mask: u64 = if two {
-                0x1_fffc
-            } else {
-                0x1fc
-            };
+            let mask: u64 = if two { 0x1_fffc } else { 0x1fc };
             let low: u64 = if two {
                 (widen_u64(b1 & 0x7f) << 2) | (widen_u64(b2) << 9)
             } else {
@@ -313,11 +301,7 @@ fn decode_address(
                 }
             );
         } else {
-            let mask: u64 = if two {
-                0xfffe
-            } else {
-                0xfe
-            };
+            let mask: u64 = if two { 0xfffe } else { 0xfe };
             let low: u64 = if two {
                 (widen_u64(b1 & 0x7f) << 1) | (widen_u64(b2) << 8)
             } else {
@@ -336,11 +320,7 @@ fn decode_address(
     }
     if h == 0x9a || h == 0x82 || h == 0x9d || h == 0x85 {
         let wide = h == 0x9d || h == 0x85;
-        let n: u64 = if wide {
-            8
-        } else {
-            4
-        };
+        let n: u64 = if wide { 8 } else { 4 };
         match need_bytes(in bytes, at, n) {
             Result::Ok(_) => {}
             Result::Err(e) => return Result::Err(e),
@@ -372,11 +352,7 @@ fn decode_address(
     }
     if h == 0x9b || h == 0x83 || h == 0x9e || h == 0x86 {
         let wide = h == 0x9e || h == 0x86;
-        let n: u64 = if wide {
-            8
-        } else {
-            4
-        };
+        let n: u64 = if wide { 8 } else { 4 };
         match need_bytes(in bytes, at, n) {
             Result::Ok(_) => {}
             Result::Err(e) => return Result::Err(e),
@@ -870,13 +846,7 @@ fn decode_packet(
     if (h >= 0xc0 && h <= 0xd4) || (h >= 0xe0 && h <= 0xf4) {
         let count = wrapping_add(widen_u64(h & 0x1f), 3);
         let last_n = (h & 0x20) != 0;
-        let pattern = wrapping_sub(shl(1, count), 1) | (
-            if last_n {
-                0
-            } else {
-                shl(1, count)
-            }
-        );
+        let pattern = wrapping_sub(shl(1, count), 1) | (if last_n { 0 } else { shl(1, count) });
         emit_atoms(inout out, offset, pattern, wrapping_add(count, 1));
         return Result::Ok(1);
     }

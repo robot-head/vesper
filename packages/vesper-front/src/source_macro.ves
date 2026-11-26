@@ -1135,17 +1135,7 @@ fn template_calls(
             }
         }
         expect(inout m, in t, k_r_paren());
-        check_arity(
-            inout m,
-            in src,
-            ns,
-            ne,
-            if splice {
-                none()
-            } else {
-                arity
-            }
-        );
+        check_arity(inout m, in src, ns, ne, if splice { none() } else { arity });
     }
 }
 

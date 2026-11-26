@@ -58,11 +58,7 @@ pub fn token_bytes() -> u64 {
 }
 
 pub fn min64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // The byte at `p`, or 256 past the end.

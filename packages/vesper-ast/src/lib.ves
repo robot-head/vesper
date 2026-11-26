@@ -1014,11 +1014,7 @@ pub fn lit_at(in a: Ast, i: u32) -> Lit {
 // The name of a Named type, else `none()` (`Type::name`'s "").
 pub fn type_name(in a: Ast, t: u32) -> u32 {
     let n = type_at(in a, t);
-    if n.kind == 1 {
-        n.a
-    } else {
-        none()
-    }
+    if n.kind == 1 { n.a } else { none() }
 }
 
 // ---------------------------------------------------------------- entries

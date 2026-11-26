@@ -95,11 +95,7 @@ fn parse_u64(in t: Slice[u8], s: u64, e: u64) -> Option[u64] {
 // (negative, magnitude) of an `i64`.
 fn parse_i64(in t: Slice[u8], s: u64, e: u64) -> Option[(bool, u64)] {
     let neg = at(in t, s) == Ascii::Minus;
-    let from = if neg {
-        wrapping_add(s, 1)
-    } else {
-        s
-    };
+    let from = if neg { wrapping_add(s, 1) } else { s };
     match digits_u64(in t, from, e) {
         Option::Some(m) => {
             if neg {

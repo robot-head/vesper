@@ -52,11 +52,7 @@ pub fn cx_val(in cx: ChunkSeq[u64], v: u64) -> u64 {
         return none();
     }
     let w = word_at(in cx, vidx(v));
-    if (w >> 3) == 0 {
-        none()
-    } else {
-        dec(w >> 3)
-    }
+    if (w >> 3) == 0 { none() } else { dec(w >> 3) }
 }
 
 // ---------------------------------------------------------------------------

@@ -570,11 +570,7 @@ fn classify(
                     s,
                     e,
                     sym_at(in t, j),
-                    if linear {
-                        Linear::Yes
-                    } else {
-                        Linear::No
-                    }
+                    if linear { Linear::Yes } else { Linear::No }
                 );
             }
         } else if k == K_HANDLE {
@@ -656,11 +652,7 @@ fn classify(
         } else {
             k
         };
-        let mut flags: u64 = if k == K_ERROR {
-            F_RECOVERED
-        } else {
-            0
-        };
+        let mut flags: u64 = if k == K_ERROR { F_RECOVERED } else { 0 };
         let simple = simple_class(k);
         let class = if simple != NO_CLASS {
             simple

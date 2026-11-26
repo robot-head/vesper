@@ -154,11 +154,7 @@ fn r_args(a: Value, c: Value, d: Value, e: Value, n: u32) -> ChunkSeq[u32] {
 
 // `alloc`: a zeroed stack slot of `max(size, 8)` bytes.
 fn r_alloc(inout b: Builder, inout m: Module, size: u32) -> Value eff [Ffi[Cranelift]] {
-    let bytes = if size < 8 {
-        8
-    } else {
-        size
-    };
+    let bytes = if size < 8 { 8 } else { size };
     let slot = create_stack_slot(inout b, bytes, 3);
     let ptr = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
     for i in 0..(widen_u64(bytes) >> 3) {
@@ -302,11 +298,7 @@ pub fn region_request(call: u64, inout b: Builder, inout m: Module) -> Value eff
         return r_call(inout b, inout m, jit, in name, in args.as_slice());
     }
     // The payload words follow the operands.
-    let first = if kind == RK_SET {
-        3
-    } else {
-        2
-    };
+    let first = if kind == RK_SET { 3 } else { 2 };
     let size = r_word(call, first);
     let aggregate = r_word(call, wrapping_add(first, 1)) != 0;
     let t = wrapping_u32(r_word(call, wrapping_add(first, 2)));

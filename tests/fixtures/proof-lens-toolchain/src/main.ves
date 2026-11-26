@@ -282,11 +282,7 @@ fn lean(in tc: ChunkSeq[u8]) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess
     } else {
         ChunkSeq::new[u8]()
     };
-    let src = if compiling {
-        argument(5)
-    } else {
-        argument(3)
-    };
+    let src = if compiling { argument(5) } else { argument(3) };
     let module = strip_suffix(in basename(in src), in ".lean");
     let base = strip_suffix(in module, in "_bv");
     let plan = slurp(file(in tc, in "plan"));

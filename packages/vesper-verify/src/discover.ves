@@ -118,11 +118,7 @@ fn lx_fail(inout l: Lx, in why: Str) {
 }
 
 fn at(in s: Slice[u8], i: u64) -> u8 {
-    if i < s.len() {
-        byte(in s, i)
-    } else {
-        0
-    }
+    if i < s.len() { byte(in s, i) } else { 0 }
 }
 
 fn skip_block_comment(in s: Slice[u8], inout l: Lx) {
@@ -511,11 +507,7 @@ fn namespace_prefix(in sc: Scopes) -> ChunkSeq[u8] {
 }
 
 fn decl_kind_text(lemma: bool) -> Str {
-    if lemma {
-        "lemma"
-    } else {
-        "theorem"
-    }
+    if lemma { "lemma" } else { "theorem" }
 }
 
 // `discover_theorems(proofs)`: `proofs` is valid UTF-8.
@@ -752,11 +744,7 @@ pub fn discover(in s: Slice[u8]) -> Found {
             }
             let root = wrapping_sub(ne, ns) >= 7
                 && same_str(in s[ns..wrapping_add(ns, 7)], in "_root_.");
-            let is_ = if root {
-                wrapping_add(ns, 7)
-            } else {
-                ns
-            };
+            let is_ = if root { wrapping_add(ns, 7) } else { ns };
             if !name_valid(in s[is_..ne]) {
                 return msg2(
                     in "unsupported ",

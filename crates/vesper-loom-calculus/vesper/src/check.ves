@@ -51,11 +51,7 @@ fn component(in s: Str, from: u64, to: u64) -> bool {
 pub fn name_valid(in s: Str) -> bool {
     let n = s.len();
     let at = n > 0 && str_byte(in s, 0) == Ascii::At;
-    let start: u64 = if at {
-        1
-    } else {
-        0
-    };
+    let start: u64 = if at { 1 } else { 0 };
     let mut slash = none();
     for i in start..n {
         if str_byte(in s, i) == Ascii::Slash {

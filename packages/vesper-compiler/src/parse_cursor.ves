@@ -83,11 +83,7 @@ fn parse_eat(
     p: ParseCursor,
     k: i64
 ) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
-    if parse_at(p, k) {
-        parse_bump(p)
-    } else {
-        p
-    }
+    if parse_at(p, k) { parse_bump(p) } else { p }
 }
 
 fn parse_ate(p: ParseCursor, q: ParseCursor) -> bool eff [SyntaxMemory] {
@@ -212,11 +208,7 @@ fn parse_ident(p: ParseCursor) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fai
         parse_bump(p)
     } else {
         let q = syntax_issue(p, 2);
-        if parse_at(q, 70) {
-            q
-        } else {
-            parse_bump(q)
-        }
+        if parse_at(q, 70) { q } else { parse_bump(q) }
     }
 }
 

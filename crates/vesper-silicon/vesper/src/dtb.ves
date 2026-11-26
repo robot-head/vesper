@@ -321,11 +321,7 @@ fn phandles(in b: Slice[u8], inout t: Fdt) {
         t.ph_b = bad_kind;
         t.ph_c = bad_len;
     }
-    let count = if dup != none {
-        dup
-    } else {
-        keys.len()
-    };
+    let count = if dup != none { dup } else { keys.len() };
     for e in 0..count {
         t.phandles.push(word(in keys, e) >> 32);
         t.phandles.push(word(in owner, e));
@@ -356,11 +352,7 @@ pub fn m_parse(in b: Slice[u8]) -> Fdt eff [Fail[DtbFault]] {
     if version < 16 || last > 17 || last > version {
         Fail::raise(DtbFault::UnsupportedVersion { version: version, last_compatible: last });
     }
-    let header: u64 = if version >= 17 {
-        40
-    } else {
-        36
-    };
+    let header: u64 = if version >= 17 { 40 } else { 36 };
     if total < header || total > blen {
         truncated(1);
     }

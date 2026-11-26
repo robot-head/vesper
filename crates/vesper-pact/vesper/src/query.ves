@@ -46,11 +46,7 @@ pub fn reset_solver(inout s: S) {
 fn restore(inout s: S, n: u64) -> u64 {
     let e = ChunkSeq::new[u64]();
     let r = run(inout s, in e, 8, n);
-    if r == 0 {
-        n
-    } else {
-        r
-    }
+    if r == 0 { n } else { r }
 }
 
 fn restore_failure(inout s: S, f: u64) -> u64 {

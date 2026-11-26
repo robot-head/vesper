@@ -113,14 +113,7 @@ pub fn term(inout m: Tm, k: u8, a: u32, b: u32, c: u32, kind: u8, op: u8, flag: 
 pub fn int_term(inout m: Tm, neg: bool, mag: u64, kind: u8) -> u32 {
     let t = term(inout m, TM_INT, 0, 0, 0, kind, 0, 0);
     let ok = m.mag.try_set(widen_u64(t), mag);
-    let ok2 = m.neg.try_set(
-        widen_u64(t),
-        if neg && mag != 0 {
-            1
-        } else {
-            0
-        }
-    );
+    let ok2 = m.neg.try_set(widen_u64(t), if neg && mag != 0 { 1 } else { 0 });
     t
 }
 
@@ -353,19 +346,11 @@ pub fn put_int(inout o: ChunkSeq[u8], neg: bool, mag: u64) {
 fn bv_literal(inout o: ChunkSeq[u8], neg: bool, mag: u64, w: u64) {
     let mut v: u64 = 0;
     if w >= 64 {
-        v = if neg {
-            wrapping_sub(0, mag)
-        } else {
-            mag
-        };
+        v = if neg { wrapping_sub(0, mag) } else { mag };
     } else if w > 0 {
         let m = wrapping_shl_u64(1, wrapping_u32(w));
         let r = mag & wrapping_sub(m, 1);
-        v = if neg && r != 0 {
-            wrapping_sub(m, r)
-        } else {
-            r
-        };
+        v = if neg && r != 0 { wrapping_sub(m, r) } else { r };
     }
     s(inout o, in "(");
     put_u(inout o, v);
@@ -546,16 +531,7 @@ fn emit(inout ex: Ex, in m: Tm, t: u32) -> Vf {
         return Vf { v: v, f: lit(in "False") };
     }
     if k == TM_BOOL {
-        return Vf {
-            v: lit(
-                in if t_flag(in m, t) != 0 {
-                    "1"
-                } else {
-                    "0"
-                }
-            ),
-            f: lit(in "False")
-        };
+        return Vf { v: lit(in if t_flag(in m, t) != 0 { "1" } else { "0" }), f: lit(in "False") };
     }
     if k == TM_UNIT {
         return Vf { v: lit(in "0"), f: lit(in "False") };
@@ -765,14 +741,7 @@ fn emit(inout ex: Ex, in m: Tm, t: u32) -> Vf {
         let cy = cond(in y.v);
         let mut p = ChunkSeq::new[u8]();
         sb(inout p, in cx);
-        s(
-            inout p,
-            in if and {
-                " ∧ "
-            } else {
-                " ∨ "
-            }
-        );
+        s(inout p, in if and { " ∧ " } else { " ∨ " });
         sb(inout p, in cy);
         bool_def(inout ex, in p, in tt);
         let runs = if and {
@@ -863,14 +832,7 @@ pub fn exact(inout o: ChunkSeq[u8], in m: Tm, root: u32) {
     s(inout o, in "    ¬ (");
     sb(inout o, in r.f);
     s(inout o, in ") := by\n  intros\n  ");
-    s(
-        inout o,
-        in if is_false(in r.f) {
-            "simp"
-        } else {
-            "omega"
-        }
-    );
+    s(inout o, in if is_false(in r.f) { "simp" } else { "omega" });
     s(inout o, in "\n");
 }
 
@@ -946,14 +908,7 @@ fn bv_value(inout o: ChunkSeq[u8], in m: Tm, t: u32) {
         if op == CMP_EQ || op == CMP_NE {
             s(inout o, in "(");
             sb(inout o, in x);
-            s(
-                inout o,
-                in if op == CMP_EQ {
-                    " == "
-                } else {
-                    " != "
-                }
-            );
+            s(inout o, in if op == CMP_EQ { " == " } else { " != " });
             sb(inout o, in y);
             s(inout o, in ")");
         } else {
@@ -985,14 +940,7 @@ fn bv_value(inout o: ChunkSeq[u8], in m: Tm, t: u32) {
     } else if k == TM_AND || k == TM_OR {
         s(inout o, in "(");
         bv_value(inout o, in m, ta(in m, t));
-        s(
-            inout o,
-            in if k == TM_AND {
-                " && "
-            } else {
-                " || "
-            }
-        );
+        s(inout o, in if k == TM_AND { " && " } else { " || " });
         bv_value(inout o, in m, tb(in m, t));
         s(inout o, in ")");
     } else if k == TM_ITE {
@@ -1174,14 +1122,7 @@ fn bv_fault(inout o: ChunkSeq[u8], in m: Tm, t: u32) {
     if k == TM_AND || k == TM_OR {
         s(inout o, in "(");
         bv_fault(inout o, in m, ta(in m, t));
-        s(
-            inout o,
-            in if k == TM_AND {
-                " || ("
-            } else {
-                " || (!"
-            }
-        );
+        s(inout o, in if k == TM_AND { " || (" } else { " || (!" });
         bv_value(inout o, in m, ta(in m, t));
         s(inout o, in " && ");
         bv_fault(inout o, in m, tb(in m, t));

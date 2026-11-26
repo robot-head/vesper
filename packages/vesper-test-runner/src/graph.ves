@@ -247,11 +247,7 @@ fn put_lit(inout b: ChunkSeq[u8], in a: Ast, l: u32, inout tmp: String) {
         if x.neg {
             // The two's complement of the magnitude.
             let lo = wrapping_add(!x.bits, 1);
-            let carry: u64 = if lo == 0 {
-                1
-            } else {
-                0
-            };
+            let carry: u64 = if lo == 0 { 1 } else { 0 };
             put_u128(inout b, lo, wrapping_add(!x.hi, carry));
         } else {
             put_u128(inout b, x.bits, x.hi);
@@ -472,11 +468,7 @@ fn put_expr(inout b: ChunkSeq[u8], in a: Ast, x: u32, inout tmp: String) {
         if m > 0 {
             put_clause(inout b, in a, list_at(in a, e.e, 0), inout tmp);
         }
-        let ops = if m > 0 {
-            wrapping_sub(m, 1)
-        } else {
-            0
-        };
+        let ops = if m > 0 { wrapping_sub(m, 1) } else { 0 };
         put_u64(inout b, ops);
         for i in 1..m {
             put_clause(inout b, in a, list_at(in a, e.e, i), inout tmp);

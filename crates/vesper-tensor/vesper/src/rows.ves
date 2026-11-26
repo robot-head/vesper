@@ -211,11 +211,7 @@ pub fn quantize_q8_0(
             amax = max(amax, abs(f(in data, BLOCK * b + i)));
         }
         let d = amax / Q8_MAX;
-        let id: f32 = if d != 0.0 {
-            1.0 / d
-        } else {
-            0.0
-        };
+        let id: f32 = if d != 0.0 { 1.0 / d } else { 0.0 };
         push_half(inout out, encode_fp16(d));
         for i in u64_zero()..BLOCK {
             out.push(wrapping_u8(saturating_i8(round(f(in data, BLOCK * b + i) * id))));
@@ -252,11 +248,7 @@ pub fn quantize_q4_0(
             }
         }
         let d = mx / -8.0;
-        let id: f32 = if d != 0.0 {
-            1.0 / d
-        } else {
-            0.0
-        };
+        let id: f32 = if d != 0.0 { 1.0 / d } else { 0.0 };
         push_half(inout out, encode_fp16(d));
         for j in u64_zero()..16 {
             let lo = q4(f(in data, BLOCK * b + j), id);

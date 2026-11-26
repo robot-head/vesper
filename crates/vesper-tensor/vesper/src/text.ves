@@ -531,35 +531,15 @@ pub fn parse_json(
             if c == LEFT_BRACE || c == LEFT_BRACKET {
                 let object = c == LEFT_BRACE;
                 at = at + 1;
-                n = push(
-                    inout tape,
-                    n,
-                    if object {
-                        8
-                    } else {
-                        6
-                    }
-                );
+                n = push(inout tape, n, if object { 8 } else { 6 });
                 if n == 0 {
                     return json_failure(11);
                 }
                 at = skip_ws(in b, at);
-                let close: u8 = if object {
-                    125
-                } else {
-                    93
-                };
+                let close: u8 = if object { 125 } else { 93 };
                 if at < b.len() && b[at] == close {
                     at = at + 1;
-                    n = push(
-                        inout tape,
-                        n,
-                        if object {
-                            9
-                        } else {
-                            7
-                        }
-                    );
+                    n = push(inout tape, n, if object { 9 } else { 7 });
                     if n == 0 {
                         return json_failure(11);
                     }
@@ -659,11 +639,7 @@ pub fn parse_json(
                 return json_failure(1);
             }
             let c = b[at];
-            let close: u8 = if object {
-                RIGHT_BRACE
-            } else {
-                RIGHT_BRACKET
-            };
+            let close: u8 = if object { RIGHT_BRACE } else { RIGHT_BRACKET };
             if c == COMMA {
                 at = at + 1;
                 if object {
@@ -674,15 +650,7 @@ pub fn parse_json(
                 }
             } else if c == close {
                 at = at + 1;
-                n = push(
-                    inout tape,
-                    n,
-                    if object {
-                        9
-                    } else {
-                        7
-                    }
-                );
+                n = push(inout tape, n, if object { 9 } else { 7 });
                 if n == 0 {
                     return json_failure(11);
                 }

@@ -146,16 +146,8 @@ fn load(inout l: L, to: u64, from: u64, at: u64, n: u64) {
 // Push the ids of `a` not in `b` (both ascending) to cids; returns the
 // count.
 fn difference(inout l: L, b_is_sa: bool) -> u64 {
-    let na = if b_is_sa {
-        l.sb.len()
-    } else {
-        l.sa.len()
-    };
-    let nb = if b_is_sa {
-        l.sa.len()
-    } else {
-        l.sb.len()
-    };
+    let na = if b_is_sa { l.sb.len() } else { l.sa.len() };
+    let nb = if b_is_sa { l.sa.len() } else { l.sb.len() };
     let mut i: u64 = 0;
     let mut j: u64 = 0;
     let mut n: u64 = 0;
@@ -278,11 +270,7 @@ fn node_sets(inout l: L, has_a: bool, in a: GNode, has_b: bool, in b: GNode, nam
     }
     sets(inout l, Scope::CapabilityCeiling, name, none());
     if has_b {
-        let old_forbid = if has_a {
-            man(in l, a.man).forbid
-        } else {
-            true
-        };
+        let old_forbid = if has_a { man(in l, a.man).forbid } else { true };
         let new_forbid = man(in l, b.man).forbid;
         if old_forbid != new_forbid {
             let relaxed = !new_forbid;
@@ -478,11 +466,7 @@ pub fn upgrade(inout l: L) {
             Order::Less
         } else {
             let o1 = ord(ap, bp);
-            if o1 != Order::Equal {
-                o1
-            } else {
-                ord(ac, bc)
-            }
+            if o1 != Order::Equal { o1 } else { ord(ac, bc) }
         };
         if o == Order::Less || o == Order::Equal {
             let d = dep(in l, ad);

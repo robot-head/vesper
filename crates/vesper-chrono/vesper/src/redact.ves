@@ -180,11 +180,7 @@ fn zero_range(
         return;
     }
     let avail = wrapping_sub(blen, offset);
-    let clipped = if len < avail {
-        len
-    } else {
-        avail
-    };
+    let clipped = if len < avail { len } else { avail };
     let end = wrapping_add(offset, clipped);
     let mut i = offset;
     loop {

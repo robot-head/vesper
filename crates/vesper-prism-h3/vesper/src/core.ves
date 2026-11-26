@@ -255,11 +255,7 @@ pub fn core_priority(in c: ConnCore, id: u64) -> Priority {
 
 fn set_priority(inout c: ConnCore, id: u64, p: Priority) {
     let f = bsearch_u64(in c.prio_id.as_slice(), id);
-    let inc_u64 = if p.incremental {
-        1
-    } else {
-        0
-    };
+    let inc_u64 = if p.incremental { 1 } else { 0 };
     if f.found {
         let _a = c.prio_urg.try_set(f.idx, widen_u64(p.urgency));
         let _b = c.prio_inc.try_set(f.idx, inc_u64);
@@ -569,11 +565,7 @@ fn is_critical(in c: ConnCore, id: u64) -> bool {
 
 fn hint_changed(inout c: ConnCore, id: u64, p: Priority) {
     let f = bsearch_u64(in c.hint_id.as_slice(), id);
-    let inc_u64 = if p.incremental {
-        1
-    } else {
-        0
-    };
+    let inc_u64 = if p.incremental { 1 } else { 0 };
     let u_u64 = widen_u64(p.urgency);
     if f.found {
         let cu = word(in c.hint_urg.as_slice(), f.idx);
@@ -798,13 +790,7 @@ pub fn core_flush_begin(
             hint_changed(inout c, id, p);
             c.fl_bidi.push(id);
             c.fl_bidi.push(widen_u64(p.urgency));
-            c.fl_bidi.push(
-                if p.incremental {
-                    1
-                } else {
-                    0
-                }
-            );
+            c.fl_bidi.push(if p.incremental { 1 } else { 0 });
         }
     }
     if c.fl_bidi.len() == 0 {

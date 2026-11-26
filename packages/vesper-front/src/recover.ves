@@ -86,11 +86,7 @@ pub fn editor_limits(a: u64, b: u64) -> ChunkSeq[u64] {
 
 fn field_or(x: u64, mask: u64, default: u64) -> u64 {
     let v = x & mask;
-    if v == 0 {
-        default
-    } else {
-        v
-    }
+    if v == 0 { default } else { v }
 }
 
 // `Limits::preflight` with `work` as `max_work`.
@@ -436,11 +432,7 @@ fn extent(
             head = next(in t, inc(head));
         }
     }
-    let mut i = if kind == DECL_OTHER {
-        start
-    } else {
-        inc(head)
-    };
+    let mut i = if kind == DECL_OTHER { start } else { inc(head) };
     let mut stack = ChunkSeq::new[u8]();
     let mut body_start = none();
     let mut uncertain = false;
@@ -461,11 +453,7 @@ fn extent(
                 return extent_of(e, 0, none(), 0, false);
             }
             let at = w32(in t.start, i);
-            let end = if found == none() {
-                eof
-            } else {
-                found
-            };
+            let end = if found == none() { eof } else { found };
             if shl(l_sites(in lim), 1) <= macros.len() {
                 return extent_of(14, 0, none(), 0, false);
             }
@@ -664,13 +652,7 @@ pub fn recover(in b: Slice[u8], in lim: ChunkSeq[u64]) -> Recovered {
         return failed(10);
     }
     if t.limited {
-        return failed(
-            if t.limit_kind == 1 {
-                11
-            } else {
-                12
-            }
-        );
+        return failed(if t.limit_kind == 1 { 11 } else { 12 });
     }
     let ntok = t.kind.len();
     let mut opaque = n;
@@ -728,11 +710,7 @@ pub fn recover(in b: Slice[u8], in lim: ChunkSeq[u64]) -> Recovered {
             return failed(15);
         }
         let (pk, name) = prefix(in t, start);
-        let kind = if pk == none() {
-            DECL_OTHER
-        } else {
-            pk
-        };
+        let kind = if pk == none() { DECL_OTHER } else { pk };
         macros.clear();
         let ext = extent(in b, in t, in lim, start, kind, opaque, inout work, inout macros);
         if ext.err != 0 {
@@ -758,11 +736,7 @@ pub fn recover(in b: Slice[u8], in lim: ChunkSeq[u64]) -> Recovered {
             || (name == none() && kind != DECL_IMPL && kind != DECL_USE && !test_block);
         let mut status = DECL_RECOVERED;
         let mut header_start = span_start;
-        let mut header_end = if has_body {
-            ext.body_start
-        } else {
-            span_end
-        };
+        let mut header_end = if has_body { ext.body_start } else { span_end };
         let mut green_start = none();
         let mut green_end = none();
         let mut context = none();
@@ -812,13 +786,7 @@ pub fn recover(in b: Slice[u8], in lim: ChunkSeq[u64]) -> Recovered {
             editor_reset(inout p, ranged_tokens(in t, start, end, span_end));
             let exact = parse_item(inout p);
             if p.halted {
-                return failed(
-                    if p.halt_kind == 2 {
-                        12
-                    } else {
-                        13
-                    }
-                );
+                return failed(if p.halt_kind == 2 { 12 } else { 13 });
             }
             if p.site_exhausted {
                 return failed(14);
@@ -854,11 +822,7 @@ pub fn recover(in b: Slice[u8], in lim: ChunkSeq[u64]) -> Recovered {
             for j in 0..(p.sites.len() >> 2) {
                 let at = shl(j, 2);
                 let rcv = w32(in p.sites, add(at, 3));
-                let root = if rcv == 0 {
-                    0
-                } else {
-                    add(rcv, start)
-                };
+                let root = if rcv == 0 { 0 } else { add(rcv, start) };
                 if !push_site(
                     inout sites,
                     in lim,

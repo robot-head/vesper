@@ -6,10 +6,6 @@ fn main() -> i64 {
         Ask::ask()
     } with {
         return v => v,
-        ask(k) => if true {
-            k(1)
-        } else {
-            k(2)
-        },
+        ask(k) => if true { k(1) } else { k(2) },
     }
 }

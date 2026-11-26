@@ -148,11 +148,7 @@ pub fn frame_header_parse(in frame: Slice[u8]) -> Option[FrameHdr] {
 
 pub fn sealer_new(id: u64, alg: AeadKind, epoch: u32, next_seq: u64, limit: u64) -> SealerSt {
     let max_rec = alg_record_limit(alg);
-    let clamped_alg = if limit < max_rec {
-        limit
-    } else {
-        max_rec
-    };
+    let clamped_alg = if limit < max_rec { limit } else { max_rec };
     let clamped = if clamped_alg < SEQ_SPACE_LIMIT {
         clamped_alg
     } else {

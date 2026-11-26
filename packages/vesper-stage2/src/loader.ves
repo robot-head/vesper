@@ -240,11 +240,7 @@ fn parse_manifest(in text: Slice[u8]) -> Manifest {
             if eq < lz {
                 let (rka, rkz) = trim_range(in text, la, eq);
                 let (ka, kz, kok) = parse_quoted(in text, rka, rkz);
-                let (da, dz) = if kok {
-                    (ka, kz)
-                } else {
-                    (rka, rkz)
-                };
+                let (da, dz) = if kok { (ka, kz) } else { (rka, rkz) };
                 let mut p_idx = wrapping_add(eq, 1);
                 let mut found_path = false;
                 let mut pa: u64 = 0;

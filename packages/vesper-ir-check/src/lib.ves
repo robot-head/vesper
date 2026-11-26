@@ -1361,14 +1361,7 @@ impl Origins {
                 let ok = self.sstate.try_set(w(rank), 1);
                 let ok2 = self.ss0.try_set(w(rank), s0);
                 let ok3 = self.ss1.try_set(w(rank), s1);
-                let ok4 = self.sparam.try_set(
-                    w(rank),
-                    if param {
-                        1
-                    } else {
-                        0
-                    }
-                );
+                let ok4 = self.sparam.try_set(w(rank), if param { 1 } else { 0 });
             } else {
                 let ok = self.sstate.try_set(w(rank), 2);
             }
@@ -1745,11 +1738,7 @@ impl Flow {
             );
         }
         let ft = p.paths.field_type(inout t, inout names, in wd, slot.ty, path);
-        let ty = if ft == NONE32 {
-            t.infer
-        } else {
-            ft
-        };
+        let ty = if ft == NONE32 { t.infer } else { ft };
         let tymode = self.mode(inout t, in names, in wd, ty);
         let exclusive = pass == TyPass::Inout || (pass == TyPass::Sink && tymode != TyMode::Copy);
         for vi in 0..s.values.len() {
@@ -2258,11 +2247,7 @@ impl Flow {
             let si = s.find_slot(rank);
             if si < 9223372036854775808 {
                 let ft = p.paths.field_type(inout t, inout names, in wd, s.slot_at(si).ty, path);
-                let fty = if ft == NONE32 {
-                    t.infer
-                } else {
-                    ft
-                };
+                let fty = if ft == NONE32 { t.infer } else { ft };
                 if self.mode(inout t, in names, in wd, fty) == TyMode::Linear {
                     self.say("IR assignment overwrites a linear obligation");
                     self.caused(

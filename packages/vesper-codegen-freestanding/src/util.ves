@@ -10,11 +10,7 @@ pub fn sub(a: u64, b: u64) -> u64 {
 }
 
 pub fn max64(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // `v` rounded up to a multiple of `a` (`a = 0` counts as 1), as

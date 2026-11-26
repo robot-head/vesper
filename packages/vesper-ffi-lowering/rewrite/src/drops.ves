@@ -13,11 +13,7 @@ use @vesper/ffi-lowering::{S};
 const NONE: u32 = 4294967295;
 
 fn max2(a: u32, b: u32) -> u32 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // `drops::span_base`: one past the largest span `end` in `a`.
@@ -462,11 +458,7 @@ pub fn append_drops(inout dst: Ast, in s: S) {
                 if it.kind != 2 {
                     continue;
                 }
-                let name = if ii == 0 {
-                    s1
-                } else {
-                    s2
-                };
+                let name = if ii == 0 { s1 } else { s2 };
                 let fn_id = copy_fn(inout dst, in parsed.ast, it.node, base, name);
                 let new_item = dst.items.alloc(ItemNode { kind: 2, node: fn_id }).raw;
                 dst.m_items.push(new_item);

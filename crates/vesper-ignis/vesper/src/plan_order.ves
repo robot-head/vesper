@@ -57,11 +57,7 @@ fn sort_seq[T: mod copy](inout s: ChunkSeq[T]) where T: Ord {
                         Option::None => false,
                     }
                 };
-                let from = if take_left {
-                    i
-                } else {
-                    j
-                };
+                let from = if take_left { i } else { j };
                 match src.try_get(from) {
                     Option::Some(v) => {
                         dst.try_set(k, v);
@@ -132,11 +128,7 @@ fn getb(in s: ChunkSeq[bool], i: u64) -> bool {
 }
 
 fn max32(a: u32, b: u32) -> u32 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn layout_ord(l: Layout) -> u32 {

@@ -3,11 +3,7 @@ use self::shapes::square::{Square, Pair, square, pair};
 
 fn main() -> i64 {
     let x: i64 = 3;
-    let same = if alike(x, x) {
-        16
-    } else {
-        0
-    };
+    let same = if alike(x, x) { 16 } else { 0 };
     let s = wrapping_add(best(square(3), square(4)), wrapping_sub(same, 16));
     let p = pair(square(2), square(5));
     let side = p.larger().side;

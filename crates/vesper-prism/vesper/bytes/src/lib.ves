@@ -64,11 +64,7 @@ fn short_word(in s: Slice[u8]) -> u64 {
 }
 
 fn shl(x: u64, s: u64) -> u64 {
-    if s < 64 {
-        x << s
-    } else {
-        0
-    }
+    if s < 64 { x << s } else { 0 }
 }
 
 // The word at `at` (callers keep `at + 8 <= s.len()`).
@@ -158,11 +154,7 @@ fn invisible_bits(x: u64) -> u64 {
 // `upper`).
 fn token_word(x: u64, upper: bool) -> bool {
     let x7 = x & LOW7;
-    let letters = if upper {
-        x7 | CASE_BITS
-    } else {
-        x7
-    };
+    let letters = if upper { x7 | CASE_BITS } else { x7 };
     let alpha = ge(letters, 97) & le(letters, 122);
     let digit = ge(x7, 48) & le(x7, 57);
     ((alpha | digit | eq(x7, 45)) & (~x)) == HIGHS

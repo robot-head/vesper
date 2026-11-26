@@ -75,11 +75,7 @@ pub fn patch_bind_slot(
             tag: vtag,
             payload: payload,
             tstart: at,
-            tlen: if vtag == ValueTag::Text {
-                tlen
-            } else {
-                0
-            }
+            tlen: if vtag == ValueTag::Text { tlen } else { 0 }
         }
     );
     s.slive.push(true);
@@ -141,11 +137,7 @@ pub fn patch_set_slot(
             tag: vtag,
             payload: payload,
             tstart: at,
-            tlen: if vtag == ValueTag::Text {
-                tlen
-            } else {
-                0
-            }
+            tlen: if vtag == ValueTag::Text { tlen } else { 0 }
         }
     );
     record(inout s, lim, op(EV_SLOT_CHANGED, slot, 0, 0, 0))

@@ -387,16 +387,8 @@ impl EGraph {
     // may not be canonical), or a new class.
     pub fn add_uncanonical(inout self, op: u32, data: i64, o0: u32, o1: u32) -> u32 {
         let a = self.arity_of(op);
-        let c0 = if a >= 1 {
-            self.find(o0)
-        } else {
-            0
-        };
-        let c1 = if a >= 2 {
-            self.find(o1)
-        } else {
-            0
-        };
+        let c0 = if a >= 1 { self.find(o0) } else { 0 };
+        let c1 = if a >= 2 { self.find(o1) } else { 0 };
         let existing = self.memo_get(op, data, c0, c1);
         if existing != NONE {
             return existing;
@@ -414,22 +406,10 @@ impl EGraph {
     // `lookup`).
     pub fn lookup(in self, op: u32, data: i64, c0: u32, c1: u32) -> u32 {
         let a = self.arity_of(op);
-        let k0 = if a >= 1 {
-            self.find(c0)
-        } else {
-            0
-        };
-        let k1 = if a >= 2 {
-            self.find(c1)
-        } else {
-            0
-        };
+        let k0 = if a >= 1 { self.find(c0) } else { 0 };
+        let k1 = if a >= 2 { self.find(c1) } else { 0 };
         let id = self.memo_get(op, data, k0, k1);
-        if id == NONE {
-            NONE
-        } else {
-            self.find(id)
-        }
+        if id == NONE { NONE } else { self.find(id) }
     }
 
     // egg's `union` (`perform_union`): whether two classes were merged.

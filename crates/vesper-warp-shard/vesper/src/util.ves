@@ -72,11 +72,7 @@ fn filled8(n: u64, v: u8) -> ChunkSeq[u8] {
 }
 
 fn max64(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // `1 << b` for `b < 64`.

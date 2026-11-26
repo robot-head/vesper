@@ -11,11 +11,7 @@ const RETRIES: u64 = 10;
 
 // 1 when the CPU has RDRAND, else 0 (2 is AArch64's RNDR).
 pub fn rng_instruction() -> u64 eff [Ffi[StdCpu]] {
-    if x86_has_rdrand() {
-        1
-    } else {
-        0
-    }
+    if x86_has_rdrand() { 1 } else { 0 }
 }
 
 // One hardware random word into `out`: true when the instruction exists

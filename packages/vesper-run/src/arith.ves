@@ -308,11 +308,7 @@ pub fn rotate(k: u8, left: bool, a: i128, amount: i128) -> i128 {
         urem(wrapping_u64(amount), width)
     } else {
         let r = urem(wrapping_u64(wrapping_sub(0, amount)), width);
-        if r == 0 {
-            0
-        } else {
-            wrapping_sub(width, r)
-        }
+        if r == 0 { 0 } else { wrapping_sub(width, r) }
     };
     let n = if left {
         n0

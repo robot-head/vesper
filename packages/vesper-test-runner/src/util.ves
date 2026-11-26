@@ -26,11 +26,7 @@ pub fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
 }
 
 pub fn bit(b: bool) -> u64 {
-    if b {
-        1
-    } else {
-        0
-    }
+    if b { 1 } else { 0 }
 }
 
 // Whether `b[s..e]` and `c[t..f]` hold the same bytes.
