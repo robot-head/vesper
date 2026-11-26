@@ -53,8 +53,7 @@ pub fn decode_catalog(inout s: A) {
         }
         let sev = rd(inout s.l);
         let sum = rd_str(inout s.l);
-        s
-            .advs
+        s.advs
             .push(Adv { id: id, kind: kind, name: name, r_at: r_at, r_n: nr, sev: sev, sum: sum });
     }
     let nnat = rd(inout s.l);

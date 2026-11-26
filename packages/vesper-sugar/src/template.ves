@@ -498,20 +498,19 @@ fn parse(in s: ChunkSeq[u8], in t: Tt, inout x: Tx, start: u64, end: u64, depth:
             } else {
                 0
             };
-            ids
-                .push(
-                    push_part(
-                        inout x,
-                        P_REPEAT,
-                        body >> 32,
-                        body & 4294967295,
-                        sep_s,
-                        sep_e,
-                        plus,
-                        first,
-                        count
-                    )
-                );
+            ids.push(
+                push_part(
+                    inout x,
+                    P_REPEAT,
+                    body >> 32,
+                    body & 4294967295,
+                    sep_s,
+                    sep_e,
+                    plus,
+                    first,
+                    count
+                )
+            );
         } else {
             let seq = i < tt_len(in t) && tt_kind(in t, i) == k_dot_dot();
             if seq {

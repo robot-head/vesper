@@ -230,17 +230,16 @@ pub fn lower_ty(
         }
         let mut args = ChunkSeq::new[u32]();
         for i in 0..n {
-            args
-                .push(
-                    lower_ty(
-                        in ast,
-                        list_at(in ast, node.b, i),
-                        inout names,
-                        inout types,
-                        inout cache,
-                        inout tmp
-                    )
-                );
+            args.push(
+                lower_ty(
+                    in ast,
+                    list_at(in ast, node.b, i),
+                    inout names,
+                    inout types,
+                    inout cache,
+                    inout tmp
+                )
+            );
         }
         return types.named(nm, in args);
     }
@@ -248,17 +247,16 @@ pub fn lower_ty(
         let n = list_len(in ast, node.a);
         let mut args = ChunkSeq::new[u32]();
         for i in 0..n {
-            args
-                .push(
-                    lower_ty(
-                        in ast,
-                        list_at(in ast, node.a, i),
-                        inout names,
-                        inout types,
-                        inout cache,
-                        inout tmp
-                    )
-                );
+            args.push(
+                lower_ty(
+                    in ast,
+                    list_at(in ast, node.a, i),
+                    inout names,
+                    inout types,
+                    inout cache,
+                    inout tmp
+                )
+            );
         }
         return types.tuple(in args);
     }
@@ -436,21 +434,20 @@ fn collect_fn_into(
         inout cache,
         inout tmp
     );
-    fns
-        .push(
-            FnInfo {
-                name: fname,
-                fip: fn_node.fip,
-                ga: ga,
-                gn: gn,
-                pa: pa,
-                pn: pn,
-                result: res,
-                effects: effs,
-                mod_idx: mod_idx,
-                body: fn_node.body
-            }
-        );
+    fns.push(
+        FnInfo {
+            name: fname,
+            fip: fn_node.fip,
+            ga: ga,
+            gn: gn,
+            pa: pa,
+            pn: pn,
+            result: res,
+            effects: effs,
+            mod_idx: mod_idx,
+            body: fn_node.body
+        }
+    );
 }
 
 fn add_ffi_op(
@@ -475,15 +472,9 @@ fn add_ffi_op(
         };
         params.push(ParamInfo { name: names.intern(in "a".as_bytes()), pass: pass, ty: ty });
     }
-    eff_ops
-        .push(
-            EffOpInfo {
-                name: names.intern(in op_name.as_bytes()),
-                pa: pa,
-                pn: pn,
-                result: result_ty
-            }
-        );
+    eff_ops.push(
+        EffOpInfo { name: names.intern(in op_name.as_bytes()), pa: pa, pn: pn, result: result_ty }
+    );
 }
 
 pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
@@ -586,21 +577,19 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
                         } else {
                             0
                         };
-                        world
-                            .adts
-                            .push(
-                                Adt {
-                                    name: aname,
-                                    mode: a.mode,
-                                    ga: ga,
-                                    gn: gn,
-                                    va: va,
-                                    vn: vn,
-                                    is_enum: a.is_enum,
-                                    tile: tile_val,
-                                    span_zero: a.start == 0 && a.end == 0
-                                }
-                            );
+                        world.adts.push(
+                            Adt {
+                                name: aname,
+                                mode: a.mode,
+                                ga: ga,
+                                gn: gn,
+                                va: va,
+                                vn: vn,
+                                is_enum: a.is_enum,
+                                tile: tile_val,
+                                span_zero: a.start == 0 && a.end == 0
+                            }
+                        );
                         set_by_symbol(inout world.by_name, aname, inc32(adt_idx));
                     } else if item.kind == 2 {
                         let fn_node = match m.ast.fns.get(idx_from_raw[FnNode](item.node)) {
@@ -631,8 +620,7 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
                             inout fns
                         );
                     } else if item.kind == 3 {
-                        let ed = match m
-                            .ast
+                        let ed = match m.ast
                             .effect_decls
                             .get(idx_from_raw[EffectDeclNode](item.node)) {
                             Option::Some(v) => v,
@@ -706,17 +694,16 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
                             );
                             eff_ops.push(EffOpInfo { name: oname, pa: opa, pn: opn, result: ores });
                         }
-                        eff_decls
-                            .push(
-                                EffDeclInfo {
-                                    name: ename,
-                                    linear: ed.linear,
-                                    ga: ega,
-                                    gn: egn,
-                                    oa: eoa,
-                                    on: eon
-                                }
-                            );
+                        eff_decls.push(
+                            EffDeclInfo {
+                                name: ename,
+                                linear: ed.linear,
+                                ga: ega,
+                                gn: egn,
+                                oa: eoa,
+                                on: eon
+                            }
+                        );
                     } else if item.kind == 4 {
                         let im = match m.ast.impls.get(idx_from_raw[ImplNode](item.node)) {
                             Option::Some(v) => v,
@@ -782,40 +769,30 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
         let oga = n32(world.generics.len());
         world.generics.push(Generic { name: t_gen, bound: 0, row: false });
         let ofa = n32(world.fields.len());
-        world
-            .fields
-            .push(
-                Field {
-                    name: names.intern(in "0".as_bytes()),
-                    ty: types.named0(t_gen),
-                    modality: 0
-                }
-            );
+        world.fields.push(
+            Field { name: names.intern(in "0".as_bytes()), ty: types.named0(t_gen), modality: 0 }
+        );
         let ova = n32(world.variants.len());
-        world
-            .variants
-            .push(
-                Variant { name: names.intern(in "Some".as_bytes()), fa: ofa, fc: 1, named: false }
-            );
-        world
-            .variants
-            .push(Variant { name: names.intern(in "None".as_bytes()), fa: 0, fc: 0, named: false });
+        world.variants.push(
+            Variant { name: names.intern(in "Some".as_bytes()), fa: ofa, fc: 1, named: false }
+        );
+        world.variants.push(
+            Variant { name: names.intern(in "None".as_bytes()), fa: 0, fc: 0, named: false }
+        );
         let oidx = n32(world.adts.len());
-        world
-            .adts
-            .push(
-                Adt {
-                    name: opt_sym,
-                    mode: 0,
-                    ga: oga,
-                    gn: 1,
-                    va: ova,
-                    vn: 2,
-                    is_enum: true,
-                    tile: 0,
-                    span_zero: false
-                }
-            );
+        world.adts.push(
+            Adt {
+                name: opt_sym,
+                mode: 0,
+                ga: oga,
+                gn: 1,
+                va: ova,
+                vn: 2,
+                is_enum: true,
+                tile: 0,
+                span_zero: false
+            }
+        );
         set_by_symbol(inout world.by_name, opt_sym, inc32(oidx));
     }
     let has_res_name = names.lookup(in "Result".as_bytes()) != NONE32
@@ -833,52 +810,42 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
             world.generics.push(Generic { name: t_gen, bound: 0, row: false });
             world.generics.push(Generic { name: e_gen, bound: 0, row: false });
             let f0 = n32(world.fields.len());
-            world
-                .fields
-                .push(
-                    Field {
-                        name: names.intern(in "0".as_bytes()),
-                        ty: types.named0(t_gen),
-                        modality: 0
-                    }
-                );
+            world.fields.push(
+                Field {
+                    name: names.intern(in "0".as_bytes()),
+                    ty: types.named0(t_gen),
+                    modality: 0
+                }
+            );
             let f1 = n32(world.fields.len());
-            world
-                .fields
-                .push(
-                    Field {
-                        name: names.intern(in "0".as_bytes()),
-                        ty: types.named0(e_gen),
-                        modality: 0
-                    }
-                );
+            world.fields.push(
+                Field {
+                    name: names.intern(in "0".as_bytes()),
+                    ty: types.named0(e_gen),
+                    modality: 0
+                }
+            );
             let rva = n32(world.variants.len());
-            world
-                .variants
-                .push(
-                    Variant { name: names.intern(in "Ok".as_bytes()), fa: f0, fc: 1, named: false }
-                );
-            world
-                .variants
-                .push(
-                    Variant { name: names.intern(in "Err".as_bytes()), fa: f1, fc: 1, named: false }
-                );
+            world.variants.push(
+                Variant { name: names.intern(in "Ok".as_bytes()), fa: f0, fc: 1, named: false }
+            );
+            world.variants.push(
+                Variant { name: names.intern(in "Err".as_bytes()), fa: f1, fc: 1, named: false }
+            );
             let res_idx = n32(world.adts.len());
-            world
-                .adts
-                .push(
-                    Adt {
-                        name: res_sym,
-                        mode: 0,
-                        ga: rga,
-                        gn: 2,
-                        va: rva,
-                        vn: 2,
-                        is_enum: true,
-                        tile: 0,
-                        span_zero: false
-                    }
-                );
+            world.adts.push(
+                Adt {
+                    name: res_sym,
+                    mode: 0,
+                    ga: rga,
+                    gn: 2,
+                    va: rva,
+                    vn: 2,
+                    is_enum: true,
+                    tile: 0,
+                    span_zero: false
+                }
+            );
             set_by_symbol(inout world.by_name, res_sym, inc32(res_idx));
         }
     }
@@ -889,52 +856,44 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
     };
     if !has_re {
         let rva = n32(world.variants.len());
-        world
-            .variants
-            .push(
-                Variant {
-                    name: names.intern(in "ArithOverflow".as_bytes()),
-                    fa: 0,
-                    fc: 0,
-                    named: false
-                }
-            );
-        world
-            .variants
-            .push(
-                Variant {
-                    name: names.intern(in "IndexOutOfBounds".as_bytes()),
-                    fa: 0,
-                    fc: 0,
-                    named: false
-                }
-            );
-        world
-            .variants
-            .push(
-                Variant {
-                    name: names.intern(in "DivisionByZero".as_bytes()),
-                    fa: 0,
-                    fc: 0,
-                    named: false
-                }
-            );
+        world.variants.push(
+            Variant {
+                name: names.intern(in "ArithOverflow".as_bytes()),
+                fa: 0,
+                fc: 0,
+                named: false
+            }
+        );
+        world.variants.push(
+            Variant {
+                name: names.intern(in "IndexOutOfBounds".as_bytes()),
+                fa: 0,
+                fc: 0,
+                named: false
+            }
+        );
+        world.variants.push(
+            Variant {
+                name: names.intern(in "DivisionByZero".as_bytes()),
+                fa: 0,
+                fc: 0,
+                named: false
+            }
+        );
         let ridx = n32(world.adts.len());
-        world
-            .adts
-            .push(
-                Adt {
-                    name: re_sym,
-                    mode: 0,
-                    ga: 0,
-                    gn: 0,
-                    va: rva,
-                    vn: 3,
-                    is_enum: true,
-                    tile: 0,
-                    span_zero: false
-                }
-            );
+        world.adts.push(
+            Adt {
+                name: re_sym,
+                mode: 0,
+                ga: 0,
+                gn: 0,
+                va: rva,
+                vn: 3,
+                is_enum: true,
+                tile: 0,
+                span_zero: false
+            }
+        );
         set_by_symbol(inout world.by_name, re_sym, inc32(ridx));
     }
     let fail_sym = names.intern(in "Fail".as_bytes());
@@ -950,24 +909,18 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
         let ega = n32(eff_gens.len());
         eff_gens.push(Generic { name: e_gen, bound: 0, row: false });
         let opa = n32(params.len());
-        params
-            .push(
-                ParamInfo {
-                    name: names.intern(in "e".as_bytes()),
-                    pass: 2,
-                    ty: types.named0(e_gen)
-                }
-            );
+        params.push(
+            ParamInfo { name: names.intern(in "e".as_bytes()), pass: 2, ty: types.named0(e_gen) }
+        );
         let eoa = n32(eff_ops.len());
-        eff_ops
-            .push(
-                EffOpInfo {
-                    name: names.intern(in "raise".as_bytes()),
-                    pa: opa,
-                    pn: 1,
-                    result: types.named0(world.k.never)
-                }
-            );
+        eff_ops.push(
+            EffOpInfo {
+                name: names.intern(in "raise".as_bytes()),
+                pa: opa,
+                pn: 1,
+                result: types.named0(world.k.never)
+            }
+        );
         eff_decls
             .push(EffDeclInfo { name: fail_sym, linear: false, ga: ega, gn: 1, oa: eoa, on: 1 });
     }

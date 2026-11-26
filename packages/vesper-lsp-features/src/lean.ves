@@ -113,16 +113,14 @@ pub fn term(inout m: Tm, k: u8, a: u32, b: u32, c: u32, kind: u8, op: u8, flag: 
 pub fn int_term(inout m: Tm, neg: bool, mag: u64, kind: u8) -> u32 {
     let t = term(inout m, TM_INT, 0, 0, 0, kind, 0, 0);
     let ok = m.mag.try_set(widen_u64(t), mag);
-    let ok2 = m
-        .neg
-        .try_set(
-            widen_u64(t),
-            if neg && mag != 0 {
-                1
-            } else {
-                0
-            }
-        );
+    let ok2 = m.neg.try_set(
+        widen_u64(t),
+        if neg && mag != 0 {
+            1
+        } else {
+            0
+        }
+    );
     t
 }
 

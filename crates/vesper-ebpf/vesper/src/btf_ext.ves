@@ -218,14 +218,13 @@ fn local_depth(
         out.push(name);
         out.push(0);
         out.push(a);
-        out
-            .push(
-                if k == BtfKind::Union {
-                    1
-                } else {
-                    0
-                }
-            );
+        out.push(
+            if k == BtfKind::Union {
+                1
+            } else {
+                0
+            }
+        );
         out.push(n);
         for i in 0..n {
             let mname = te(in tab, in idx, t, 4, i, 0);

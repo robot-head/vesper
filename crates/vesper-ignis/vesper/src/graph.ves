@@ -218,20 +218,18 @@ pub fn graph_add_buffer(inout g: Graph, size: u64) -> ResourceOutcome {
         ResourceOutcome::TooManyResources
     } else {
         let index = wrapping_u32(g.resources.len());
-        g
-            .resources
-            .push(
-                Resource {
-                    texture: false,
-                    size: size,
-                    mips: 0,
-                    slices: 0,
-                    planes: 0,
-                    initial_layout: Layout::Undefined,
-                    has_final: false,
-                    final_layout: Layout::Undefined
-                }
-            );
+        g.resources.push(
+            Resource {
+                texture: false,
+                size: size,
+                mips: 0,
+                slices: 0,
+                planes: 0,
+                initial_layout: Layout::Undefined,
+                has_final: false,
+                final_layout: Layout::Undefined
+            }
+        );
         ResourceOutcome::Added(index)
     }
 }
@@ -260,20 +258,18 @@ pub fn graph_add_texture(
             ResourceOutcome::TooManyResources
         } else {
             let index = wrapping_u32(g.resources.len());
-            g
-                .resources
-                .push(
-                    Resource {
-                        texture: true,
-                        size: 0,
-                        mips: mips,
-                        slices: slices,
-                        planes: planes,
-                        initial_layout: initial_layout,
-                        has_final: has_final,
-                        final_layout: final_layout
-                    }
-                );
+            g.resources.push(
+                Resource {
+                    texture: true,
+                    size: 0,
+                    mips: mips,
+                    slices: slices,
+                    planes: planes,
+                    initial_layout: initial_layout,
+                    has_final: has_final,
+                    final_layout: final_layout
+                }
+            );
             ResourceOutcome::Added(index)
         }
     }

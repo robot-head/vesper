@@ -99,20 +99,9 @@ fn read_exprs(inout r: WordReader, inout a: Ast, in b: Slice[u8]) {
         let c_ = wrapping_u32(r.word(in b));
         let d_ = wrapping_u32(r.word(in b));
         let e_ = wrapping_u32(r.word(in b));
-        let _ = a
-            .exprs
-            .alloc(
-                ExprNode {
-                    kind: kind_,
-                    start: start_,
-                    end: end_,
-                    a: a_,
-                    b: b_,
-                    c: c_,
-                    d: d_,
-                    e: e_
-                }
-            );
+        let _ = a.exprs.alloc(
+            ExprNode { kind: kind_, start: start_, end: end_, a: a_, b: b_, c: c_, d: d_, e: e_ }
+        );
     }
 }
 
@@ -125,8 +114,7 @@ fn read_pats(inout r: WordReader, inout a: Ast, in b: Slice[u8]) {
         let a_ = wrapping_u32(r.word(in b));
         let b_ = wrapping_u32(r.word(in b));
         let c_ = wrapping_u32(r.word(in b));
-        let _ = a
-            .pats
+        let _ = a.pats
             .alloc(PatNode { kind: kind_, start: start_, end: end_, a: a_, b: b_, c: c_ });
     }
 }
@@ -151,8 +139,7 @@ fn read_stmts(inout r: WordReader, inout a: Ast, in b: Slice[u8]) {
         let ty_ = wrapping_u32(r.word(in b));
         let value_ = wrapping_u32(r.word(in b));
         let mutable_ = r.word(in b) != 0;
-        let _ = a
-            .stmts
+        let _ = a.stmts
             .alloc(StmtNode { kind: kind_, pat: pat_, ty: ty_, value: value_, mutable: mutable_ });
     }
 }
@@ -186,18 +173,16 @@ fn read_params(inout r: WordReader, inout a: Ast, in b: Slice[u8]) {
         let ty_ = wrapping_u32(r.word(in b));
         let start_ = wrapping_u32(r.word(in b));
         let end_ = wrapping_u32(r.word(in b));
-        let _ = a
-            .params
-            .alloc(
-                ParamNode {
-                    name: name_,
-                    pass: pass_,
-                    projections: projections_,
-                    ty: ty_,
-                    start: start_,
-                    end: end_
-                }
-            );
+        let _ = a.params.alloc(
+            ParamNode {
+                name: name_,
+                pass: pass_,
+                projections: projections_,
+                ty: ty_,
+                start: start_,
+                end: end_
+            }
+        );
     }
 }
 
@@ -237,11 +222,9 @@ fn read_fields(inout r: WordReader, inout a: Ast, in b: Slice[u8]) {
         let ty_ = wrapping_u32(r.word(in b));
         let modality_ = wrapping_u8(r.word(in b));
         let temperature_ = wrapping_u8(r.word(in b));
-        let _ = a
-            .fields
-            .alloc(
-                FieldNode { name: name_, ty: ty_, modality: modality_, temperature: temperature_ }
-            );
+        let _ = a.fields.alloc(
+            FieldNode { name: name_, ty: ty_, modality: modality_, temperature: temperature_ }
+        );
     }
 }
 
@@ -267,21 +250,19 @@ fn read_adts(inout r: WordReader, inout a: Ast, in b: Slice[u8]) {
         let tile_width_ = wrapping_u32(r.word(in b));
         let start_ = wrapping_u32(r.word(in b));
         let end_ = wrapping_u32(r.word(in b));
-        let _ = a
-            .adts
-            .alloc(
-                AdtNode {
-                    name: name_,
-                    mode: mode_,
-                    generics: generics_,
-                    variants: variants_,
-                    is_enum: is_enum_,
-                    tiled: tiled_,
-                    tile_width: tile_width_,
-                    start: start_,
-                    end: end_
-                }
-            );
+        let _ = a.adts.alloc(
+            AdtNode {
+                name: name_,
+                mode: mode_,
+                generics: generics_,
+                variants: variants_,
+                is_enum: is_enum_,
+                tiled: tiled_,
+                tile_width: tile_width_,
+                start: start_,
+                end: end_
+            }
+        );
     }
 }
 
@@ -297,21 +278,19 @@ fn read_fns(inout r: WordReader, inout a: Ast, in b: Slice[u8]) {
         let body_ = wrapping_u32(r.word(in b));
         let start_ = wrapping_u32(r.word(in b));
         let end_ = wrapping_u32(r.word(in b));
-        let _ = a
-            .fns
-            .alloc(
-                FnNode {
-                    name: name_,
-                    fip: fip_,
-                    generics: generics_,
-                    params: params_,
-                    result: result_,
-                    effects: effects_,
-                    body: body_,
-                    start: start_,
-                    end: end_
-                }
-            );
+        let _ = a.fns.alloc(
+            FnNode {
+                name: name_,
+                fip: fip_,
+                generics: generics_,
+                params: params_,
+                result: result_,
+                effects: effects_,
+                body: body_,
+                start: start_,
+                end: end_
+            }
+        );
     }
 }
 
@@ -324,18 +303,16 @@ fn read_effect_decls(inout r: WordReader, inout a: Ast, in b: Slice[u8]) {
         let ops_ = wrapping_u32(r.word(in b));
         let start_ = wrapping_u32(r.word(in b));
         let end_ = wrapping_u32(r.word(in b));
-        let _ = a
-            .effect_decls
-            .alloc(
-                EffectDeclNode {
-                    name: name_,
-                    linear: linear_,
-                    generics: generics_,
-                    ops: ops_,
-                    start: start_,
-                    end: end_
-                }
-            );
+        let _ = a.effect_decls.alloc(
+            EffectDeclNode {
+                name: name_,
+                linear: linear_,
+                generics: generics_,
+                ops: ops_,
+                start: start_,
+                end: end_
+            }
+        );
     }
 }
 
@@ -359,19 +336,17 @@ fn read_traits(inout r: WordReader, inout a: Ast, in b: Slice[u8]) {
         let methods_ = wrapping_u32(r.word(in b));
         let start_ = wrapping_u32(r.word(in b));
         let end_ = wrapping_u32(r.word(in b));
-        let _ = a
-            .traits
-            .alloc(
-                TraitNode {
-                    name: name_,
-                    public: public_,
-                    generics: generics_,
-                    assoc: assoc_,
-                    methods: methods_,
-                    start: start_,
-                    end: end_
-                }
-            );
+        let _ = a.traits.alloc(
+            TraitNode {
+                name: name_,
+                public: public_,
+                generics: generics_,
+                assoc: assoc_,
+                methods: methods_,
+                start: start_,
+                end: end_
+            }
+        );
     }
 }
 
@@ -382,8 +357,7 @@ fn read_assoc_decls(inout r: WordReader, inout a: Ast, in b: Slice[u8]) {
         let bound_ = wrapping_u8(r.word(in b));
         let start_ = wrapping_u32(r.word(in b));
         let end_ = wrapping_u32(r.word(in b));
-        let _ = a
-            .assoc_decls
+        let _ = a.assoc_decls
             .alloc(AssocDeclNode { name: name_, bound: bound_, start: start_, end: end_ });
     }
 }
@@ -396,17 +370,9 @@ fn read_trait_refs(inout r: WordReader, inout a: Ast, in b: Slice[u8]) {
         let args_ = wrapping_u32(r.word(in b));
         let start_ = wrapping_u32(r.word(in b));
         let end_ = wrapping_u32(r.word(in b));
-        let _ = a
-            .trait_refs
-            .alloc(
-                TraitRefNode {
-                    package: package_,
-                    name: name_,
-                    args: args_,
-                    start: start_,
-                    end: end_
-                }
-            );
+        let _ = a.trait_refs.alloc(
+            TraitRefNode { package: package_, name: name_, args: args_, start: start_, end: end_ }
+        );
     }
 }
 
@@ -417,8 +383,7 @@ fn read_wheres(inout r: WordReader, inout a: Ast, in b: Slice[u8]) {
         let trait_ref_ = wrapping_u32(r.word(in b));
         let start_ = wrapping_u32(r.word(in b));
         let end_ = wrapping_u32(r.word(in b));
-        let _ = a
-            .wheres
+        let _ = a.wheres
             .alloc(WhereNode { ty: ty_, trait_ref: trait_ref_, start: start_, end: end_ });
     }
 }
@@ -430,8 +395,7 @@ fn read_assoc_binds(inout r: WordReader, inout a: Ast, in b: Slice[u8]) {
         let ty_ = wrapping_u32(r.word(in b));
         let start_ = wrapping_u32(r.word(in b));
         let end_ = wrapping_u32(r.word(in b));
-        let _ = a
-            .assoc_binds
+        let _ = a.assoc_binds
             .alloc(AssocBindNode { name: name_, ty: ty_, start: start_, end: end_ });
     }
 }
@@ -449,22 +413,20 @@ fn read_confs(inout r: WordReader, inout a: Ast, in b: Slice[u8]) {
         let methods_ = wrapping_u32(r.word(in b));
         let start_ = wrapping_u32(r.word(in b));
         let end_ = wrapping_u32(r.word(in b));
-        let _ = a
-            .confs
-            .alloc(
-                ConfNode {
-                    model: model_,
-                    public: public_,
-                    generics: generics_,
-                    trait_ref: trait_ref_,
-                    self_ty: self_ty_,
-                    wheres: wheres_,
-                    assoc: assoc_,
-                    methods: methods_,
-                    start: start_,
-                    end: end_
-                }
-            );
+        let _ = a.confs.alloc(
+            ConfNode {
+                model: model_,
+                public: public_,
+                generics: generics_,
+                trait_ref: trait_ref_,
+                self_ty: self_ty_,
+                wheres: wheres_,
+                assoc: assoc_,
+                methods: methods_,
+                start: start_,
+                end: end_
+            }
+        );
     }
 }
 
@@ -485,17 +447,15 @@ fn read_model_uses(inout r: WordReader, inout a: Ast, in b: Slice[u8]) {
         let end_ = wrapping_u32(r.word(in b));
         let scope_start_ = wrapping_u32(r.word(in b));
         let scope_end_ = wrapping_u32(r.word(in b));
-        let _ = a
-            .model_uses
-            .alloc(
-                ModelUseNode {
-                    model: model_,
-                    start: start_,
-                    end: end_,
-                    scope_start: scope_start_,
-                    scope_end: scope_end_
-                }
-            );
+        let _ = a.model_uses.alloc(
+            ModelUseNode {
+                model: model_,
+                start: start_,
+                end: end_,
+                scope_start: scope_start_,
+                scope_end: scope_end_
+            }
+        );
     }
 }
 
@@ -507,17 +467,15 @@ fn read_bounds(inout r: WordReader, inout a: Ast, in b: Slice[u8]) {
         let start_ = wrapping_u32(r.word(in b));
         let end_ = wrapping_u32(r.word(in b));
         let owner_ = wrapping_u32(r.word(in b));
-        let _ = a
-            .bounds
-            .alloc(
-                BoundNode {
-                    param: param_,
-                    trait_ref: trait_ref_,
-                    start: start_,
-                    end: end_,
-                    owner: owner_
-                }
-            );
+        let _ = a.bounds.alloc(
+            BoundNode {
+                param: param_,
+                trait_ref: trait_ref_,
+                start: start_,
+                end: end_,
+                owner: owner_
+            }
+        );
     }
 }
 
@@ -531,19 +489,17 @@ fn read_uses(inout r: WordReader, inout a: Ast, in b: Slice[u8]) {
         let public_ = r.word(in b) != 0;
         let start_ = wrapping_u32(r.word(in b));
         let end_ = wrapping_u32(r.word(in b));
-        let _ = a
-            .uses
-            .alloc(
-                UseNode {
-                    package: package_,
-                    supers: supers_,
-                    path: path_,
-                    names: names_,
-                    public: public_,
-                    start: start_,
-                    end: end_
-                }
-            );
+        let _ = a.uses.alloc(
+            UseNode {
+                package: package_,
+                supers: supers_,
+                path: path_,
+                names: names_,
+                public: public_,
+                start: start_,
+                end: end_
+            }
+        );
     }
 }
 
@@ -554,8 +510,7 @@ fn read_use_names(inout r: WordReader, inout a: Ast, in b: Slice[u8]) {
         let alias_ = wrapping_u32(r.word(in b));
         let start_ = wrapping_u32(r.word(in b));
         let end_ = wrapping_u32(r.word(in b));
-        let _ = a
-            .use_names
+        let _ = a.use_names
             .alloc(UseNameNode { name: name_, alias: alias_, start: start_, end: end_ });
     }
 }
@@ -716,13 +671,12 @@ pub fn put_ast_words(inout o: ChunkSeq[u64], in a: Ast) {
     let nsyms = a.names.len();
     o.push(nsyms);
     for i in 0..wrapping_add(nsyms, 1) {
-        o
-            .push(
-                match a.names.starts.try_get(i) {
-                    Option::Some(v) => v,
-                    Option::None => 0,
-                }
-            );
+        o.push(
+            match a.names.starts.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            }
+        );
     }
     let text = a.names.text.as_bytes();
     o.push(text.len());

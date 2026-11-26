@@ -59,35 +59,33 @@ pub fn control_session_plans(in input: Str) -> ChunkSeq[u64] {
                 } else {
                     0
                 };
-                ops
-                    .push(
-                        OpBinding {
-                            op: op,
-                            read: read,
-                            value: value,
-                            error: error,
-                            cancel_ctor: cancel_ctor,
-                            cancel: cancel,
-                            code: x
-                        }
-                    );
+                ops.push(
+                    OpBinding {
+                        op: op,
+                        read: read,
+                        value: value,
+                        error: error,
+                        cancel_ctor: cancel_ctor,
+                        cancel: cancel,
+                        code: x
+                    }
+                );
             }
             bindings.push(EffBinding { eff_name: eff_name, a: a, n: n32(on) });
         }
         let m = ls.mark();
         let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        if p
-            .plan(
-                inout ls,
-                inout c.types,
-                inout c.names,
-                in c.world,
-                in tb,
-                entry,
-                in bindings,
-                in ops,
-                inout line
-            ) {
+        if p.plan(
+            inout ls,
+            inout c.types,
+            inout c.names,
+            in c.world,
+            in tb,
+            entry,
+            in bindings,
+            in ops,
+            inout line
+        ) {
             o.extend(in line.as_slice());
         } else {
             o.extend(in "err ".as_bytes());
