@@ -44,6 +44,9 @@ mod float_math;
 /// Lane 27: bare-metal RISC-V and AArch64 images with no runtime.
 #[path = "native_freestanding.rs"]
 pub mod freestanding;
+/// Experimental machine-code swap downstream of CLIF construction.
+#[path = "native_machine.rs"]
+pub mod machine;
 /// Cranelift SIMD lowering of `Op::Vector` (lane 28).
 #[path = "native_vector.rs"]
 mod native_vector;
@@ -1666,6 +1669,8 @@ fn define_instances_observed_with_trace<M: Module>(
     );
     let mut clif = String::new();
     let denorm = crate::capability_effects::const_denorm_spans(world);
+    let try_machine =
+        matches!(linkage, DefinitionLinkage::Object) && observer.is_none() && instrument.is_none();
     let mut deferred_defs = Vec::new();
     for (key, (name, generic_vars)) in instances {
         let f = concrete(world, name, generic_vars)?;
@@ -1913,7 +1918,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 frame: Some(frame.clone()),
             });
         }
-        m.define_function(define_id, &mut ctx)
+        machine::define(m, define_id, &mut ctx, try_machine)
             .map_err(|e| format!("native codegen '{name}': {e}"))?;
         m.clear_context(&mut ctx);
     }
@@ -1987,7 +1992,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 });
             }
         }
-        m.define_function(define_id, &mut ctx)
+        machine::define(m, define_id, &mut ctx, try_machine)
             .map_err(|e| format!("native codegen '{name}': {e}"))?;
         m.clear_context(&mut ctx);
         for (cold_id, cold_key, cold_func) in cold_helpers {

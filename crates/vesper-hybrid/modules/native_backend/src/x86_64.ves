@@ -1,0 +1,157 @@
+// A leaf's assigned registers are implicit ABI operands. General values,
+// frame homes and call clobbers will need register allocation.
+
+const RETURN_CONSTANT: u64 = 0;
+const RETURN_ARGUMENT: u64 = 1;
+const ADD_ARGUMENTS: u64 = 2;
+const SUB_ARGUMENTS: u64 = 3;
+const MUL_ARGUMENTS: u64 = 4;
+const AND_ARGUMENTS: u64 = 5;
+const OR_ARGUMENTS: u64 = 6;
+const XOR_ARGUMENTS: u64 = 7;
+
+const RAX: u8 = 0;
+const RDX: u8 = 2;
+const RCX: u8 = 1;
+const RSI: u8 = 6;
+const RDI: u8 = 7;
+const R8: u8 = 8;
+const R9: u8 = 9;
+
+const REX_W: u8 = 0x48;
+const REX_R: u8 = 0x04;
+const REX_B: u8 = 0x01;
+const LOW_REGISTER_MASK: u8 = 0x07;
+const HIGH_REGISTER: u8 = 0x08;
+const MOD_REGISTER: u8 = 0xc0;
+const MOD_FIELD_SHIFT: u32 = 3;
+const MOV_RM_R64: u8 = 0x89;
+const MOV_REGISTER_IMMEDIATE: u8 = 0xb8;
+const MOV_RM64_IMM32: u8 = 0xc7;
+const ADD_RM_R64: u8 = 0x01;
+const SUB_RM_R64: u8 = 0x29;
+const AND_RM_R64: u8 = 0x21;
+const OR_RM_R64: u8 = 0x09;
+const XOR_RM_R64: u8 = 0x31;
+const TWO_BYTE_OPCODE: u8 = 0x0f;
+const IMUL_R64_RM64: u8 = 0xaf;
+const RET_NEAR: u8 = 0xc3;
+const U32_MAX_BITS: u64 = 0xffffffff;
+const I32_MIN_BITS: u64 = 0xffffffff80000000;
+const IMM32_BYTES: u64 = 4;
+const IMM64_BYTES: u64 = 8;
+const BITS_PER_BYTE: u32 = 8;
+
+copy enum MachineLeaf {
+    Constant(u64),
+    Argument(u8),
+    Binary(u8, u8, u8),
+    Multiply(u8, u8),
+}
+
+fn arg_register(argument: u64) -> Option[u8] {
+    match argument {
+        0 => Option::Some(RDI),
+        1 => Option::Some(RSI),
+        2 => Option::Some(RDX),
+        3 => Option::Some(RCX),
+        4 => Option::Some(R8),
+        5 => Option::Some(R9),
+        _ => Option::None,
+    }
+}
+
+pub fn select_leaf(op: u64, left: u64, right: u64) -> Option[MachineLeaf] {
+    if op == RETURN_CONSTANT {
+        return Option::Some(MachineLeaf::Constant(left));
+    }
+    let lhs = match arg_register(left) {
+        Option::Some(reg) => reg,
+        Option::None => return Option::None,
+    };
+    if op == RETURN_ARGUMENT {
+        return Option::Some(MachineLeaf::Argument(lhs));
+    }
+    let rhs = match arg_register(right) {
+        Option::Some(reg) => reg,
+        Option::None => return Option::None,
+    };
+    match op {
+        ADD_ARGUMENTS => Option::Some(MachineLeaf::Binary(ADD_RM_R64, lhs, rhs)),
+        SUB_ARGUMENTS => Option::Some(MachineLeaf::Binary(SUB_RM_R64, lhs, rhs)),
+        AND_ARGUMENTS => Option::Some(MachineLeaf::Binary(AND_RM_R64, lhs, rhs)),
+        OR_ARGUMENTS => Option::Some(MachineLeaf::Binary(OR_RM_R64, lhs, rhs)),
+        XOR_ARGUMENTS => Option::Some(MachineLeaf::Binary(XOR_RM_R64, lhs, rhs)),
+        MUL_ARGUMENTS => Option::Some(MachineLeaf::Multiply(lhs, rhs)),
+        _ => Option::None,
+    }
+}
+
+fn modrm(reg: u8, rm: u8) -> u8 {
+    MOD_REGISTER
+        | wrapping_shl_u8(reg & LOW_REGISTER_MASK, MOD_FIELD_SHIFT)
+        | (rm & LOW_REGISTER_MASK)
+}
+
+fn binary(inout out: ChunkSeq[u8], opcode: u8, reg: u8) {
+    let rex = if reg >= HIGH_REGISTER {
+        REX_W | REX_R
+    } else {
+        REX_W
+    };
+    out.push(rex);
+    out.push(opcode);
+    out.push(modrm(reg, RAX));
+}
+
+fn immediate(inout out: ChunkSeq[u8], bits: u64, size: u64) {
+    for i in 0..size {
+        let shift = wrapping_mul(wrapping_u32(i), BITS_PER_BYTE);
+        out.push(wrapping_u8(wrapping_shr_u64(bits, shift)));
+    }
+}
+
+fn return_constant(inout out: ChunkSeq[u8], bits: u64) {
+    if bits == 0 {
+        // xor eax, eax, including zeroing the upper half of rax.
+        out.push(XOR_RM_R64);
+        out.push(modrm(RAX, RAX));
+    } else if bits <= U32_MAX_BITS {
+        // mov eax, imm32, zero-extending into rax.
+        out.push(MOV_REGISTER_IMMEDIATE);
+        immediate(inout out, bits, IMM32_BYTES);
+    } else if bits >= I32_MIN_BITS {
+        out.push(REX_W);
+        out.push(MOV_RM64_IMM32);
+        out.push(modrm(RAX, RAX));
+        immediate(inout out, bits, IMM32_BYTES);
+    } else {
+        out.push(REX_W);
+        out.push(MOV_REGISTER_IMMEDIATE);
+        immediate(inout out, bits, IMM64_BYTES);
+    }
+}
+
+pub fn encode(inout out: ChunkSeq[u8], in leaf: MachineLeaf) {
+    match leaf {
+        MachineLeaf::Constant(bits) => return_constant(inout out, bits),
+        MachineLeaf::Argument(reg) => binary(inout out, MOV_RM_R64, reg),
+        MachineLeaf::Binary(op, lhs, rhs) => {
+            binary(inout out, MOV_RM_R64, lhs);
+            binary(inout out, op, rhs);
+        },
+        MachineLeaf::Multiply(lhs, rhs) => {
+            binary(inout out, MOV_RM_R64, lhs);
+            let rex = if rhs >= HIGH_REGISTER {
+                REX_W | REX_B
+            } else {
+                REX_W
+            };
+            out.push(rex);
+            out.push(TWO_BYTE_OPCODE);
+            out.push(IMUL_R64_RM64);
+            out.push(modrm(RAX, rhs));
+        },
+    };
+    out.push(RET_NEAR);
+}
