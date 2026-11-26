@@ -271,8 +271,7 @@ fn jobs() -> &'static [Job] {
 fn compiled() -> &'static (Vec<(String, usize, WasmArtifact)>, Vec<Job>) {
     static A: OnceLock<(Vec<(String, usize, WasmArtifact)>, Vec<Job>)> = OnceLock::new();
     A.get_or_init(|| {
-        let quiet = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        let quiet = quiet_panics();
         let compile = |w: &World, entry: &str, o: &WasmOptions| {
             std::panic::catch_unwind(|| wasm_backend::compile(w, entry, o))
                 .ok()
@@ -308,7 +307,7 @@ fn compiled() -> &'static (Vec<(String, usize, WasmArtifact)>, Vec<Job>) {
                 }
             }
         }
-        std::panic::set_hook(quiet);
+        drop(quiet);
         (out, jobs)
     })
 }

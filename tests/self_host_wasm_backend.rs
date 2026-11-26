@@ -199,8 +199,7 @@ fn error_class(e: &WasmError) -> String {
 #[ignore]
 fn rust_acceptance_census() {
     let mut classes: BTreeMap<String, usize> = BTreeMap::new();
-    let quiet = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
+    let quiet = quiet_panics();
     for c in cases() {
         for (k, o) in configs().iter().enumerate() {
             let r = std::panic::catch_unwind(|| wasm_backend::compile(&c.world, "main", o));
@@ -215,7 +214,7 @@ fn rust_acceptance_census() {
             *classes.entry(format!("{k} {key}")).or_default() += 1;
         }
     }
-    std::panic::set_hook(quiet);
+    drop(quiet);
     eprintln!("{} cases", cases().len());
     for (k, n) in classes {
         eprintln!("{k}: {n}");

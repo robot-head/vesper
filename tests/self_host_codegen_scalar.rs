@@ -74,8 +74,7 @@ pub fn stages() -> &'static [Stage] {
     static S: OnceLock<Vec<Stage>> = OnceLock::new();
     S.get_or_init(|| {
         let mut out = vec![];
-        let quiet = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        let quiet = quiet_panics();
         // Bazel shards the stepped worlds (BUILD.bazel `test_shards`).
         for c in corpus_shard::Shard::from_environment().keep(corpus().iter().step_by(step())) {
             let w = &c.world;
@@ -106,7 +105,7 @@ pub fn stages() -> &'static [Stage] {
                 }
             }
         }
-        std::panic::set_hook(quiet);
+        drop(quiet);
         out
     })
 }

@@ -954,10 +954,9 @@ mod isa {
     #[test]
     fn isa_walk_matches_rust() {
         let f = package().entry("regions_seqs_isa", true).0;
-        let quiet = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        let quiet = quiet_panics();
         let cases = cases();
-        std::panic::set_hook(quiet);
+        drop(quiet);
         let (mut bad, mut diags, mut missing) = (0, 0, 0);
         let mut codes = BTreeMap::<String, usize>::new();
         for (name, src, w) in &cases {
@@ -993,10 +992,9 @@ mod isa {
     #[ignore = "timing; run with CHECK_HARNESS_SPEED=1 and --ignored"]
     fn isa_walk_cost() {
         let f = package().entry("regions_seqs_isa", true).0;
-        let quiet = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        let quiet = quiet_panics();
         let cases = cases();
-        std::panic::set_hook(quiet);
+        drop(quiet);
         let inputs: Vec<Vec<u8>> = cases.iter().map(|(_, _, w)| input(w)).collect();
         // Rust's side with its parse, like the Vesper entry's.
         let parse = std::env::var_os("ISA_COST_WALK_ONLY").is_none();
