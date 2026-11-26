@@ -258,9 +258,40 @@ where the pass runs on the program the lowering reads.
 
 **Rust lines deleted:** 0. `fail.rs` goes at the retirement.
 
+## Part 4c-2: region blocks and region operations
+
+### What changed
+
+- `lower.ves` ports region capabilities: the plan gives each function its
+  row's `r: Region` labels, a region block's body the enclosing ones plus
+  its own (innermost last), and refuses a capability on the entry with the
+  Rust text. A call passes one header pointer word per capability after
+  its arguments; the prologue loads them.
+- Region blocks open a header on the program heap (bump allocation,
+  bounded by `HEAP_WORDS`), call the body like a nested function and close
+  the block with the pin rule. A failure that leaves the body closes the
+  open blocks, innermost first, before it propagates.
+- `Region::box`, `get`, `set` and `used` follow the Rust rows, including
+  the `vesper.region.accounting/1` bound checks. The payload size comes from
+  `@vesper/check-layout` (`Layout::of`).
+- Nothing in the corpus is answered `not ported` any more. Still left: evidence
+  passing (4c-3), which the front test skips by comparing only programs that
+  evidence leaves unchanged.
+
+### Evidence (Linux x86_64 host, release, `-C target-cpu=native`)
+
+| Check | Result |
+|---|---|
+| Lowering, corpus programs without handler sites, optimized and not | **0 of 304 differ** (204 lowered; none not ported, down from 26) |
+| Monomorphization and lowering in one pass | **0 of 296 differ** (196 lowered; none not ported) |
+| ABBA, lowering ×5 | rust 37.9 ms, vesper 37.9 ms: **1.00x** |
+| ABBA, front half ×5 | rust 64.0 ms, vesper 43.5 ms: **0.68x** |
+
+**Rust lines deleted:** 0. `lower.rs` goes at the retirement.
+
 ## Left
 
 - Optional: compare the per-arch `encoding_listing` text.
-- Part 4c-2: region blocks and region operations. Part 4c-3: `evidence`. Part 4d:
+- Part 4c-3: `evidence`. Part 4d:
   `coverage`, `cli`, then the swap into the hybrid and `bootstrap/stage1.rs`, with `bootstrap/stage1.lock`
   reproduced, and the Rust deleted at the retirement.

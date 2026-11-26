@@ -8,9 +8,9 @@
 // (`lower_function`) and prints the rows, or the error, as the Rust
 // `VerifiedError` prints it.
 //
-// Non-resuming `handle Fail[E]` handlers are lowered (part 4c-1; their
-// AST rows are exprs.ves). Not ported yet: region blocks and region
-// operations (4c-2); a program with one is answered `not ported`.
+// Non-resuming `handle Fail[E]` handlers (part 4c-1; their AST rows are
+// exprs.ves), region blocks, region capabilities and region operations
+// (part 4c-2) are lowered.
 //
 // Representation:
 //
@@ -67,6 +67,7 @@ use self::machine::{
     OP_SUB,
     T_DIV0,
     T_OVERFLOW,
+    T_REGION,
     T_UNREACHABLE
 };
 use self::certificate::{
@@ -117,6 +118,11 @@ use @vesper/check-data::input::{
     Reader,
     read_ctx
 };
+use @vesper/check-layout::{
+    Layouts,
+    layout_of,
+    layouts_new
+};
 use @vesper/place-ir::{
     InstRow,
     Program,
@@ -138,6 +144,25 @@ const MAX_FRAME_WORDS: u64 = 4000;
 const MAX_DEPTH: u64 = 32;
 // `machine::FIRST_FREE_LABEL`: labels below it are the shared abort exits.
 const FIRST_FREE_LABEL: u64 = 4;
+// The program heap's globals (heap word indices): words in use beyond the
+// globals, the innermost open region's header and the pin.
+const G_TOP: u64 = 0;
+const G_INNER: u64 = 1;
+const G_PIN: u64 = 2;
+const GLOBALS: u64 = 3;
+// Region header words: charged bytes, allocations, the previous innermost
+// header, the heap words in use when it opened, the capacity in bytes.
+const H_USED: u64 = 0;
+const H_ALLOCS: u64 = 1;
+const H_PREV: u64 = 2;
+const H_START: u64 = 3;
+const H_CAP: u64 = 4;
+const HEADER: u64 = 5;
+const MAX_PAYLOAD_WORDS: u64 = 4000;
+// `HEAP_WORDS`, `regions::DEFAULT_CAPACITY`, `store::MAX_ALLOCATIONS`
+const HEAP_WORDS: u64 = 67108864;
+const DEFAULT_CAPACITY: u64 = 1048576;
+const MAX_ALLOCATIONS: u64 = 1048576;
 
 // ----- errors -------------------------------------------------------------------
 
@@ -321,6 +346,10 @@ pub copy struct Sy {
     region_box: u32,
     watermark: u32,
     region: u32,
+    rbox: u32,
+    rget: u32,
+    rset: u32,
+    rused: u32,
     fail: u32,
     overflow: u32,
     runtime: u32,
@@ -370,6 +399,10 @@ fn sy_new(inout n: Names) -> Sy {
         region_box: n.intern(in "RegionBox".as_bytes()),
         watermark: n.intern(in "Watermark".as_bytes()),
         region: n.intern(in "Region".as_bytes()),
+        rbox: n.intern(in "Region::box".as_bytes()),
+        rget: n.intern(in "Region::get".as_bytes()),
+        rset: n.intern(in "Region::set".as_bytes()),
+        rused: n.intern(in "Region::used".as_bytes()),
         fail: n.intern(in "Fail".as_bytes()),
         overflow: n.intern(in "ArithOverflow".as_bytes()),
         runtime: n.intern(in "RuntimeError".as_bytes()),
@@ -471,6 +504,8 @@ pub struct Lw {
     // tuple element symbols "0", "1", ...
     digits: ChunkSeq[u32],
     regions_active: bool,
+    // native layouts (`Layout::of`) of region payloads
+    ls: Layouts,
     entry: u32,
     max_functions: u64,
     max_rows: u64,
@@ -665,6 +700,7 @@ fn decode(sink c: Ctx, sink p: Program, sink ex: Ex, inout r: Reader, in b: Slic
         shapes: ChunkSeq::new[u64](),
         digits: ChunkSeq::new[u32](),
         regions_active: false,
+        ls: layouts_new(),
         entry: 0,
         max_functions: 0,
         max_rows: 0,
@@ -1500,23 +1536,29 @@ fn hd_at(in hs: ChunkSeq[Hd], i: u64) -> Hd {
 // `region_block(..).is_some()`: a labeled `Region` handler whose `return`
 // pattern is the reserved `$region[:capacity]` name, with regions active.
 fn is_region_block(in lw: Lw, x: Hx) -> bool {
+    region_capacity(in lw, x) != NONE
+}
+
+// `region_block(..)`'s capacity in bytes, or NONE when `x` is not a
+// region block.
+fn region_capacity(in lw: Lw, x: Hx) -> u64 {
     if !lw.regions_active || x.kind != X_HANDLE || x.effect != lw.sy.region || x.label == 0 {
-        return false;
+        return NONE;
     }
     let r = lw.ex.clause(x.ret);
     if r.pn != 1 || lw.ex.pat_kind(r, 0) != P_BIND {
-        return false;
+        return NONE;
     }
     let s = lw.ex.pat_name(r, 0);
     if !starts_with(in lw.c.names, s, "$region") {
-        return false;
+        return NONE;
     }
     let n = lw.c.names.size(s);
     if n == 7 {
-        return true;
+        return DEFAULT_CAPACITY;
     }
     if lw.c.names.byte(s, 7) != 58 {
-        return false;
+        return NONE;
     }
     // `usize::from_str`: an optional `+`, then at least one digit, in range
     let mut i: u64 = 8;
@@ -1524,7 +1566,7 @@ fn is_region_block(in lw: Lw, x: Hx) -> bool {
         i = inc(i);
     }
     if i >= n {
-        return false;
+        return NONE;
     }
     let mut v: u64 = 0;
     loop {
@@ -1533,16 +1575,16 @@ fn is_region_block(in lw: Lw, x: Hx) -> bool {
         }
         let c = lw.c.names.byte(s, i);
         if c < 48 || c > 57 {
-            return false;
+            return NONE;
         }
         let d = widen_u64(wrapping_sub(c, 48));
         if v > wrapping_sub(NONE, d) / 10 {
-            return false;
+            return NONE;
         }
         v = wrapping_add(wrapping_mul(v, 10), d);
         i = inc(i);
     }
-    true
+    v
 }
 
 // The name pattern `i` of clause `c` binds: symbol + 1, 0 for `_`; raises
@@ -1765,6 +1807,9 @@ pub copy struct Planned {
     raises: u64,
     status: bool,
     ret_words: u64,
+    // region capabilities `Plan.caps[cpa..cpa+cpn]` (labels)
+    cpa: u64,
+    cpn: u64,
 }
 
 pub struct Plan {
@@ -1776,6 +1821,7 @@ pub struct Plan {
     fails: ChunkSeq[FailRow],
     // the resolved `handle Fail` sites
     hd: ChunkSeq[Hd],
+    caps: ChunkSeq[u32],
 }
 
 fn planned(in plan: Plan, i: u64) -> Planned {
@@ -1793,7 +1839,9 @@ fn planned(in plan: Plan, i: u64) -> Planned {
             },
             raises: 0,
             status: false,
-            ret_words: 0
+            ret_words: 0,
+            cpa: 0,
+            cpn: 0
         },
     }
 }
@@ -1860,10 +1908,11 @@ fn effects_supported(inout lw: Lw, f: Fn) eff [Fail[VErr]] {
     }
 }
 
-// Whether the row of `f` names a region capability (`row_caps` non-empty).
-fn has_region_caps(in lw: Lw, f: Fn) -> bool {
+// `row_caps`: the region capability labels of the row of `f`, in row
+// order, pushed to `out`.
+fn row_caps(in lw: Lw, f: Fn, inout out: ChunkSeq[u32]) {
     if !lw.regions_active {
-        return false;
+        return;
     }
     let node = lw.c.types.node(f.effects);
     let row = lw.c.types.row(node.r2);
@@ -1873,10 +1922,9 @@ fn has_region_caps(in lw: Lw, f: Fn) -> bool {
             && e.label != 0
             && e.n == 0
             && lw.c.names.byte(wrapping_sub(e.label, 1), 0) != 36 {
-            return true;
+            out.push(wrapping_sub(e.label, 1));
         }
     }
-    false
 }
 
 fn is_wrapping(sy: Sy, s: u32) -> bool {
@@ -1901,6 +1949,8 @@ pub copy struct Found {
     // `handle` sites: hd[ha..ha+hn]
     ha: u64,
     hn: u64,
+    cpa: u64,
+    cpn: u64,
 }
 
 // `plan` (`plan_with` without coverage, sites or handlers).
@@ -1914,7 +1964,14 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
     let mut queue = ChunkSeq::new[u32]();
     let mut seen = ChunkSeq::new[u8]();
     let mut hds = ChunkSeq::new[Hd]();
+    let mut caps = ChunkSeq::new[u32]();
+    // per queue entry: the inherited capabilities `caps[a..a+n]` (a = NONE:
+    // none, the row's own)
+    let mut qca = ChunkSeq::new[u64]();
+    let mut qcn = ChunkSeq::new[u64]();
     queue.push(entry);
+    qca.push(NONE);
+    qcn.push(0);
     set_table8(inout seen, w(entry), 1);
     let mut head: u64 = 0;
     loop {
@@ -1922,6 +1979,8 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
             break;
         }
         let name = u32_at(in queue, head);
+        let qa = u64_at(in qca, head);
+        let qn = u64_at(in qcn, head);
         head = inc(head);
         if found.len() >= lw.max_functions {
             let mut d = tx("more than ");
@@ -1957,8 +2016,25 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
             Fail::raise(unsup(U_GENERIC, name, tx("a type parameter without a concrete instance")));
         }
         effects_supported(inout lw, f);
-        if has_region_caps(in lw, f) {
-            Fail::raise(not_ported("region capabilities"));
+        let mut cpa = qa;
+        let mut cpn = qn;
+        if qa == NONE {
+            cpa = caps.len();
+            row_caps(in lw, f, inout caps);
+            cpn = wrapping_sub(caps.len(), cpa);
+        }
+        // Nothing supplies the entry's capabilities: the process starts with
+        // no open region.
+        if name == entry && cpn > 0 {
+            let mut d = tx("region capability on the entry (");
+            for j in 0..cpn {
+                if j > 0 {
+                    ap(inout d, ", ");
+                }
+                lw.put_sym(u32_at(in caps, add(cpa, j)), inout d);
+            }
+            ap(inout d, ")");
+            Fail::raise(unsup(U_EFFECT, name, d));
         }
         let pa = pps.len();
         for i in 0..f.pn {
@@ -2030,13 +2106,39 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
                 if ins.op == Op::Handle {
                     let x = lw.ex.row(lw.op(add(ins.a, 2)));
                     if is_region_block(in lw, x) {
-                        Fail::raise(not_ported("region blocks"));
+                        // The body sees the enclosing capabilities and its
+                        // own (which shadows an outer one of the same
+                        // label). Its failures pass through the block.
+                        let label = wrapping_sub(x.label, 1);
+                        let bn = nested_name(inout lw.c.names, "handler_body", x.b0, x.b1);
+                        let body = nested_instance(inout lw.c.names, name, bn);
+                        if u8_at(in seen, w(body)) == 0 {
+                            set_table8(inout seen, w(body), 1);
+                            queue.push(body);
+                            let mut inner = ChunkSeq::new[u32]();
+                            for j in 0..cpn {
+                                let c = u32_at(in caps, add(cpa, j));
+                                if c != label {
+                                    inner.push(c);
+                                }
+                            }
+                            inner.push(label);
+                            qca.push(caps.len());
+                            qcn.push(inner.len());
+                            for j in 0..inner.len() {
+                                caps.push(u32_at(in inner, j));
+                            }
+                        }
+                        calls.push(body);
+                        continue;
                     }
                     let h = fail_handler(inout lw, name, ins, x);
                     for g in [h.body, h.ret, h.raise] {
                         if u8_at(in seen, w(g)) == 0 {
                             set_table8(inout seen, w(g), 1);
                             queue.push(g);
+                            qca.push(NONE);
+                            qcn.push(0);
                         }
                     }
                     hds.push(h);
@@ -2052,6 +2154,8 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
                         if u8_at(in seen, w(callee)) == 0 {
                             set_table8(inout seen, w(callee), 1);
                             queue.push(callee);
+                            qca.push(NONE);
+                            qcn.push(0);
                         }
                         calls.push(callee);
                     }
@@ -2071,7 +2175,9 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
                     ca: ca,
                     cn: wrapping_sub(calls.len(), ca),
                     ha: ha,
-                    hn: wrapping_sub(hds.len(), ha)
+                    hn: wrapping_sub(hds.len(), ha),
+                    cpa: cpa,
+                    cpn: cpn
                 }
             );
     }
@@ -2249,7 +2355,9 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
                     result: fd.result,
                     raises: r,
                     status: status,
-                    ret_words: ret_words
+                    ret_words: ret_words,
+                    cpa: fd.cpa,
+                    cpn: fd.cpn
                 }
             );
         label = add(label, 2);
@@ -2261,6 +2369,7 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
         index: index,
         fails: fails,
         hd: hds,
+        caps: caps,
     }
 }
 
@@ -2298,7 +2407,9 @@ fn found_at(in found: ChunkSeq[Found], i: u64) -> Found {
             ca: 0,
             cn: 0,
             ha: 0,
-            hn: 0
+            hn: 0,
+            cpa: 0,
+            cpn: 0
         },
     }
 }
@@ -2330,6 +2441,11 @@ pub struct Fl {
     max_rows: u64,
     // raise stubs: label << 8 | kind
     stubs: ChunkSeq[u64],
+    // region capabilities in scope: (label, header slot) pairs, later
+    // ones shadowing earlier ones
+    caps: ChunkSeq[u64],
+    // the header slots of the region blocks open around the current call
+    open: ChunkSeq[u64],
 }
 
 fn lir(tag: u8, op: u8, kind: u8, f1: u64, f2: u64, f3: u64) -> Lir {
@@ -2990,6 +3106,15 @@ fn status_is(inout fl: Fl, status: u64, code: u64, tmp: u64, otherwise: u64) eff
 // `propagate`: pass a callee's failure on, or abort (the entry).
 fn propagate(inout lw: Lw, inout fl: Fl, in plan: Plan, status: u64, codes: u64) eff [Fail[VErr]] {
     if fl.me.status {
+        // A failure leaving open region blocks closes them, innermost first.
+        let mut k = fl.open.len();
+        loop {
+            if k == 0 {
+                break;
+            }
+            k = wrapping_sub(k, 1);
+            region_close(inout lw, inout fl, u64_at(in fl.open, k));
+        }
         let tmp = alloc(in lw, inout fl, 1);
         push(inout fl, lir(LIR_STORE_IN, 0, 0, 0, status, 0));
         let pw = payload_words(in plan.fails, codes);
@@ -3046,9 +3171,54 @@ fn call_catch(
     code: u64,
     handler: u64
 ) eff [Fail[VErr]] {
+    call_opening(inout lw, inout fl, in plan, n, in args, dst, code, handler, NONE32, 0);
+}
+
+// The header slot of region capability `label` in scope (`own`, the block
+// being opened, resolves to `own_slot` first).
+fn cap_slot(in lw: Lw, in fl: Fl, label: u32, own: u32, own_slot: u64) -> u64 eff [Fail[VErr]] {
+    if own != NONE32 && label == own {
+        return own_slot;
+    }
+    let mut k = fl.caps.len() / 2;
+    loop {
+        if k == 0 {
+            break;
+        }
+        k = wrapping_sub(k, 1);
+        if u64_at(in fl.caps, wrapping_mul(k, 2)) == w(label) {
+            return u64_at(in fl.caps, inc(wrapping_mul(k, 2)));
+        }
+    }
+    let mut d = tx("region capability '");
+    lw.put_sym(label, inout d);
+    ap(inout d, "' is not in scope");
+    Fail::raise(ufail(in fl, U_EFFECT, d));
+    0
+}
+
+// `call_opening`: `call_catch`, where `own` (NONE32: none) is the label of a
+// region block being opened, whose header is in `own_slot`.
+fn call_opening(
+    inout lw: Lw,
+    inout fl: Fl,
+    in plan: Plan,
+    n: u64,
+    in args: ChunkSeq[Arg],
+    dst: u64,
+    code: u64,
+    handler: u64,
+    own: u32,
+    own_slot: u64
+) eff [Fail[VErr]] {
     let target = planned(in plan, n);
+    let mut cap_slots = ChunkSeq::new[u64]();
+    for j in 0..target.cpn {
+        let c = u32_at(in plan.caps, add(target.cpa, j));
+        cap_slots.push(cap_slot(in lw, in fl, c, own, own_slot));
+    }
     let ret = target.ret_words;
-    let mut area = ret;
+    let mut area = add(ret, cap_slots.len());
     for i in 0..args.len() {
         match args.try_get(i) {
             Option::Some(a) => area = add(area, a.words),
@@ -3079,6 +3249,10 @@ fn call_catch(
             wbs.push(add(target.pa, i));
         }
         index = add(index, a.words);
+    }
+    for j in 0..cap_slots.len() {
+        push(inout fl, lir(LIR_STORE_OUT, 0, 0, index, u64_at(in cap_slots, j), 0));
+        index = inc(index);
     }
     push(inout fl, lir(LIR_CALL, 0, 0, target.label, 0, 0));
     let nw = wbs.len() / 3;
@@ -3209,8 +3383,10 @@ fn planned_index(in lw: Lw, in plan: Plan, name: u32) -> u64 eff [Fail[VErr]] {
 // `handle`: `handle Fail[E] in body with { return v => r, raise(e, _) => h }`.
 fn handle_fail(inout lw: Lw, inout fl: Fl, in plan: Plan, ins: InstRow) eff [Fail[VErr]] {
     let x = lw.ex.row(lw.op(add(ins.a, 2)));
-    if is_region_block(in lw, x) {
-        Fail::raise(not_ported("region blocks"));
+    let capacity = region_capacity(in lw, x);
+    if capacity != NONE {
+        region_block(inout lw, inout fl, in plan, ins, x, capacity);
+        return;
     }
     let mut found = NONE;
     for i in 0..plan.hd.len() {
@@ -3258,6 +3434,259 @@ fn handle_fail(inout lw: Lw, inout fl: Fl, in plan: Plan, ins: InstRow) eff [Fai
     let args3 = nested_args(inout lw, inout fl, in plan, raisef, aliases, h.raise_bind, payload);
     call(inout lw, inout fl, in plan, raisef, in args3, dst);
     push(inout fl, lir(LIR_LABEL, 0, 0, end, 0, 0));
+}
+
+// ----- regions --------------------------------------------------------------------
+
+fn word(in lw: Lw, inout fl: Fl, v: u64) -> u64 eff [Fail[VErr]] {
+    let dst = alloc(in lw, inout fl, 1);
+    push(inout fl, lir(LIR_CONST, 0, 0, dst, v, 0));
+    dst
+}
+
+fn load_ptr(in lw: Lw, inout fl: Fl, ptr: u64, offset: u64) -> u64 eff [Fail[VErr]] {
+    let dst = alloc(in lw, inout fl, 1);
+    push(inout fl, lir(LIR_LOAD_PTR, 0, 0, dst, ptr, offset));
+    dst
+}
+
+fn store_ptr(inout fl: Fl, ptr: u64, offset: u64, src: u64) eff [Fail[VErr]] {
+    push(inout fl, lir(LIR_STORE_PTR, 0, 0, ptr, offset, src));
+}
+
+fn add_u64(in lw: Lw, inout fl: Fl, a: u64, b: u64) -> u64 eff [Fail[VErr]] {
+    let dst = alloc(in lw, inout fl, 1);
+    push(inout fl, lir(LIR_ARITH, OP_ADD, K_U64, dst, a, b));
+    dst
+}
+
+// Abort with the region trap unless `a <= b` (unsigned).
+fn region_bound(in lw: Lw, inout fl: Fl, a: u64, b: u64) eff [Fail[VErr]] {
+    let ok = alloc(in lw, inout fl, 1);
+    push(inout fl, lir(LIR_COMPARE, C_LE, K_U64, ok, a, b));
+    push(inout fl, lir(LIR_BRANCH_ZERO, 0, 0, ok, widen_u64(T_REGION), 0));
+}
+
+// `heap_alloc`: bump-allocate `words` heap words: (globals pointer, first
+// word, words in use before, words in use after).
+fn heap_alloc(in lw: Lw, inout fl: Fl, words: u64) -> (u64, u64, u64, u64) eff [Fail[VErr]] {
+    let globals = word(in lw, inout fl, 0);
+    let top = load_ptr(in lw, inout fl, globals, G_TOP);
+    let base = word(in lw, inout fl, GLOBALS);
+    let first = add_u64(in lw, inout fl, top, base);
+    let n = word(in lw, inout fl, words);
+    let after = add_u64(in lw, inout fl, top, n);
+    let limit = word(in lw, inout fl, wrapping_sub(HEAP_WORDS, GLOBALS));
+    region_bound(in lw, inout fl, after, limit);
+    store_ptr(inout fl, globals, G_TOP, after);
+    (globals, first, top, after)
+}
+
+// `region label(capacity) { body }`: open a header, run the body's nested
+// function with the captured places and capabilities, close.
+fn region_block(inout lw: Lw, inout fl: Fl, in plan: Plan, ins: InstRow, x: Hx, capacity: u64) eff [
+    Fail[VErr]
+] {
+    let label = wrapping_sub(x.label, 1);
+    let bn = nested_name(inout lw.c.names, "handler_body", x.b0, x.b1);
+    let body = nested_instance(inout lw.c.names, fl.f.name, bn);
+    let k = w(u32_at(in plan.index, w(body)));
+    if k == 0 {
+        let mut d = tx("unplanned region body ");
+        lw.put_sym(body, inout d);
+        Fail::raise(err(E_INVALID, d));
+    }
+    let n = wrapping_sub(k, 1);
+    let fx = lw.find(body);
+    if fx == 0 {
+        let mut d = tx("missing region body ");
+        lw.put_sym(body, inout d);
+        Fail::raise(err(E_INVALID, d));
+    }
+    // Captured places are copied in (and `inout` ones back); a body that
+    // assigns a place captured by value would lose the write.
+    let root = assigned_capture(inout lw, wrapping_sub(fx, 1));
+    if root != 0 {
+        let mut d = tx("region block assigns the captured place '");
+        lw.put_sym(wrapping_sub(root, 1), inout d);
+        ap(inout d, "'");
+        Fail::raise(ufail(in fl, U_EFFECT, d));
+    }
+    // Open: a header in the heap.
+    let (globals, header, top, after) = heap_alloc(in lw, inout fl, HEADER);
+    let zero = word(in lw, inout fl, 0);
+    let cap = word(in lw, inout fl, capacity);
+    let prev = load_ptr(in lw, inout fl, globals, G_INNER);
+    store_ptr(inout fl, header, H_USED, zero);
+    store_ptr(inout fl, header, H_ALLOCS, zero);
+    store_ptr(inout fl, header, H_PREV, prev);
+    store_ptr(inout fl, header, H_START, top);
+    store_ptr(inout fl, header, H_CAP, cap);
+    store_ptr(inout fl, globals, G_INNER, header);
+    // The body, called like a function with the captured places and the
+    // capabilities in scope. A failure it passes on closes the block (see
+    // `propagate`).
+    let args = nested_args(inout lw, inout fl, in plan, n, aliases_at(ins), 0, 0);
+    let (dst, dsh) = value_of(inout lw, inout fl, w(ins.dest), ins.ty);
+    if dsh.n != planned(in plan, n).result.n {
+        let mut d = tx("result shape of ");
+        lw.put_sym(body, inout d);
+        Fail::raise(err(E_INVALID, d));
+    }
+    fl.open.push(header);
+    call_opening(inout lw, inout fl, in plan, n, in args, dst, 0, 0, label, header);
+    fl.open.truncate(wrapping_sub(fl.open.len(), 1));
+    region_close(inout lw, inout fl, header);
+}
+
+// `region_close`: close the region block whose header is in slot `header`:
+// the enclosing block is innermost again, and the heap words above the
+// block's start are free unless an outer region allocated while it was open
+// (the pin).
+fn region_close(inout lw: Lw, inout fl: Fl, header: u64) eff [Fail[VErr]] {
+    let globals = word(in lw, inout fl, 0);
+    let prev = load_ptr(in lw, inout fl, header, H_PREV);
+    store_ptr(inout fl, globals, G_INNER, prev);
+    let start = load_ptr(in lw, inout fl, header, H_START);
+    let pin = load_ptr(in lw, inout fl, globals, G_PIN);
+    let keep = alloc(in lw, inout fl, 1);
+    push(inout fl, lir(LIR_COMPARE, C_GT, K_U64, keep, pin, start));
+    let use_start = fresh(inout fl);
+    let done = fresh(inout fl);
+    push(inout fl, lir(LIR_BRANCH_ZERO, 0, 0, keep, use_start, 0));
+    store_ptr(inout fl, globals, G_TOP, pin);
+    push(inout fl, lir(LIR_JUMP, 0, 0, done, 0, 0));
+    push(inout fl, lir(LIR_LABEL, 0, 0, use_start, 0, 0));
+    store_ptr(inout fl, globals, G_TOP, start);
+    push(inout fl, lir(LIR_LABEL, 0, 0, done, 0, 0));
+}
+
+// Argument `i` of the call with operands at `ops[a..]` (`n` arguments).
+fn region_arg(in lw: Lw, callee: u32, a: u64, n: u64, i: u64) -> u64 eff [Fail[VErr]] {
+    if i >= n {
+        let mut d = ChunkSeq::new[u8]();
+        lw.put_sym(callee, inout d);
+        ap(inout d, " lacks an argument");
+        Fail::raise(err(E_INVALID, d));
+    }
+    lw.op(add(add(a, 3), wrapping_mul(i, 4)))
+}
+
+// `region_operation`: `label.op(args)` on a region capability.
+fn region_operation(
+    inout lw: Lw,
+    inout fl: Fl,
+    ins: InstRow,
+    label: u32,
+    callee: u32,
+    a: u64,
+    n: u64
+) eff [Fail[VErr]] {
+    if !lw.regions_active || !starts_with(in lw.c.names, callee, "Region::") {
+        let mut d = tx("effect operation ");
+        lw.put_sym(callee, inout d);
+        Fail::raise(ufail(in fl, U_EFFECT, d));
+    }
+    let header = cap_slot(in lw, in fl, label, NONE32, 0);
+    let sy = lw.sy;
+    let dest = w(ins.dest);
+    if callee == sy.rbox {
+        let v0 = region_arg(in lw, callee, a, n, 0);
+        let (src, sh) = value(in lw, in fl, v0);
+        let ty = vtype(in fl, v0);
+        if ty == NONE32 {
+            Fail::raise(err(E_INVALID, tx("untyped region payload")));
+        }
+        let l = layout_of(inout lw.ls, inout lw.c.types, inout lw.c.names, in lw.c.world, ty);
+        if l == NONE32 {
+            let mut d = tx("region payload ");
+            lw.put_ty(ty, inout d);
+            ap(inout d, ": ");
+            d.extend(in lw.ls.err.as_slice());
+            Fail::raise(ufail(in fl, U_TYPE, d));
+        }
+        let size = w(lw.ls.node(l).size);
+        // `store::slot_bytes`
+        let mut slots = wrapping_add(size, 7) / 8;
+        if slots == 0 {
+            slots = 1;
+        }
+        let bytes = wrapping_mul(slots, 8);
+        if sh.n > MAX_PAYLOAD_WORDS {
+            let mut d = tx("region payload of ");
+            apn(inout d, sh.n);
+            ap(inout d, " words in '");
+            lw.put_sym(fl.f.name, inout d);
+            ap(inout d, "'");
+            Fail::raise(err(E_LIMIT, d));
+        }
+        // `vesper.region.accounting/1`: the bytes, then the count.
+        let used = load_ptr(in lw, inout fl, header, H_USED);
+        let b = word(in lw, inout fl, bytes);
+        let used2 = add_u64(in lw, inout fl, used, b);
+        let cap = load_ptr(in lw, inout fl, header, H_CAP);
+        region_bound(in lw, inout fl, used2, cap);
+        let allocs = load_ptr(in lw, inout fl, header, H_ALLOCS);
+        let one = word(in lw, inout fl, 1);
+        let allocs2 = add_u64(in lw, inout fl, allocs, one);
+        let max = word(in lw, inout fl, MAX_ALLOCATIONS);
+        region_bound(in lw, inout fl, allocs2, max);
+        store_ptr(inout fl, header, H_USED, used2);
+        store_ptr(inout fl, header, H_ALLOCS, allocs2);
+        // A zero-word payload still takes one word, so that distinct boxes
+        // get distinct handles.
+        let words = if sh.n == 0 {
+            1
+        } else {
+            sh.n
+        };
+        let (globals, first, top, after) = heap_alloc(in lw, inout fl, words);
+        // An allocation in a region that is not the innermost pins the heap
+        // words below it until the outer region closes.
+        let inner = load_ptr(in lw, inout fl, globals, G_INNER);
+        let outer = alloc(in lw, inout fl, 1);
+        push(inout fl, lir(LIR_COMPARE, C_NE, K_U64, outer, inner, header));
+        let skip = fresh(inout fl);
+        push(inout fl, lir(LIR_BRANCH_ZERO, 0, 0, outer, skip, 0));
+        store_ptr(inout fl, globals, G_PIN, after);
+        push(inout fl, lir(LIR_LABEL, 0, 0, skip, 0, 0));
+        for k in 0..sh.n {
+            store_ptr(inout fl, first, k, add(src, k));
+        }
+        let (dst, ds) = value_of(inout lw, inout fl, dest, ins.ty);
+        push(inout fl, lir(LIR_MOVE, 0, 0, dst, first, 0));
+        return;
+    }
+    if callee == sy.rget {
+        let (ptr, ps) = value(in lw, in fl, region_arg(in lw, callee, a, n, 0));
+        let (dst, sh) = value_of(inout lw, inout fl, dest, ins.ty);
+        for k in 0..sh.n {
+            push(inout fl, lir(LIR_LOAD_PTR, 0, 0, add(dst, k), ptr, k));
+        }
+        return;
+    }
+    if callee == sy.rset {
+        let (ptr, ps) = value(in lw, in fl, region_arg(in lw, callee, a, n, 0));
+        let (src, sh) = value(in lw, in fl, region_arg(in lw, callee, a, n, 1));
+        let u = unit_ty(inout lw);
+        let x = value_of(inout lw, inout fl, dest, u);
+        for k in 0..sh.n {
+            store_ptr(inout fl, ptr, k, add(src, k));
+        }
+        return;
+    }
+    if callee == sy.rused {
+        let (dst, sh) = value_of(inout lw, inout fl, dest, ins.ty);
+        push(inout fl, lir(LIR_LOAD_PTR, 0, 0, dst, header, H_USED));
+        return;
+    }
+    let mut d = tx("region operation '");
+    let len = lw.c.names.size(callee);
+    for i in 8..len {
+        d.push(lw.c.names.byte(callee, i));
+    }
+    ap(inout d, "' (only box, get, set and used)");
+    Fail::raise(ufail(in fl, U_EFFECT, d));
 }
 
 // `try_`: `v?` on a `Result[T, E]`.
@@ -3630,7 +4059,8 @@ fn instruction(inout lw: Lw, inout fl: Fl, in plan: Plan, ins: InstRow) eff [Fai
             return;
         }
         if cap != 0 {
-            Fail::raise(not_ported("region operations"));
+            region_operation(inout lw, inout fl, ins, n32(wrapping_sub(cap, 1)), callee, a, n);
+            return;
         }
         if nt != 0 {
             let mut d = tx("call ");
@@ -3874,6 +4304,8 @@ fn lower_function(
         next_label: next_label,
         max_rows: max_rows,
         stubs: ChunkSeq::new[u64](),
+        caps: ChunkSeq::new[u64](),
+        open: ChunkSeq::new[u64](),
     };
     // the symbol table is shared across functions and cleared after
     fl.lidx = replace(inout lidx, ChunkSeq::new[u32]());
@@ -3967,6 +4399,13 @@ fn lower_body(inout lw: Lw, inout fl: Fl, in plan: Plan) eff [Fail[VErr]] {
             push(inout fl, lir(LIR_LOAD_IN, 0, 0, add(slot, k), add(index, k), 0));
         }
         index = add(index, s.n);
+    }
+    for j in 0..me.cpn {
+        let slot = alloc(in lw, inout fl, 1);
+        push(inout fl, lir(LIR_LOAD_IN, 0, 0, slot, index, 0));
+        fl.caps.push(w(u32_at(in plan.caps, add(me.cpa, j))));
+        fl.caps.push(slot);
+        index = inc(index);
     }
     for k in 0..f.bc {
         let b = lw.p.block(add(f.b0, k));

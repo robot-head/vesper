@@ -1076,10 +1076,10 @@ fn certificate_flip_gate() {
 // `verified_codegen::lowering_for_test`: the program `compile` lowers (after
 // ir_opt, monomorphization and evidence passing), as ir_words encodes it,
 // then the entry, the limits, whether the region prelude is active and the
-// names of the world's functions. The package prints every planned
-// function's rows in the Rust `Debug` form, or the error's text. Programs
-// with `handle` expressions or region operations are part 4c's: the
-// package answers `not ported` for them.
+// names of the world's functions, after the expression rows of the payload
+// pool (`expr_rows`). The package prints every planned function's rows in
+// the Rust `Debug` form, or the error's text. `handle Fail` handlers
+// (part 4c-1) and regions (part 4c-2) are lowered.
 
 fn put_string(s: &str, words: &mut Vec<u64>) {
     words.push(s.len() as u64);
@@ -1353,8 +1353,7 @@ fn lowering_flip_gate() {
 // (name, then (name, row) per generic) and `World::calls` ((start, end), then
 // (name, type) per argument). Names and types are indices into the input's
 // tables. It answers 0 and the monomorphized program's
-// words, or 1 and the error's packed text. Programs with `handle`
-// expressions are part 4c's (`not ported`).
+// words, or 1 and the error's packed text.
 
 /// The input of `mono_words`, and the payload pool its program refers to.
 fn mono_input(
