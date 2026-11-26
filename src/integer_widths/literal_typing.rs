@@ -47,6 +47,9 @@ impl Checker<'_> {
     pub(super) fn function_with_literal_typing(&mut self, f: &Function) {
         let diagnostics = self.diagnostics.len();
         let observations = self.observations.len();
+        // What earlier functions recorded is shared by the copies below.
+        self.types.freeze();
+        self.calls.freeze();
         self.literals = LiteralTyping::default();
         self.function_body(f);
         if self.diagnostics.len() == diagnostics || self.literals.open.is_empty() {
@@ -61,8 +64,8 @@ impl Checker<'_> {
             base.diagnostics.truncate(diagnostics);
             base.observations.truncate(observations);
             let inside = |k: &(usize, usize)| f.span.start <= k.0 && k.1 <= f.span.end;
-            base.types.retain(|k, _| !inside(k));
-            base.calls.retain(|k, _| !inside(k));
+            base.types.remove_within(f.span.start, f.span.end);
+            base.calls.remove_within(f.span.start, f.span.end);
             base.moves.retain(|k, _| !inside(k));
             base.handler_effects.retain(|k, _| !inside(k));
             base.partial_ops.retain(|k| !inside(k));
@@ -226,7 +229,10 @@ impl Checker<'_> {
 impl LiteralTyping {
     /// The one kind other than the default each open binding's uses
     /// settled to in a probe run.
-    fn settled_kinds(&self, types: &super::TypeMap) -> BTreeMap<(usize, usize), Type> {
+    fn settled_kinds(
+        &self,
+        types: &super::layered::Layered<Type>,
+    ) -> BTreeMap<(usize, usize), Type> {
         let default = Type::named("i64");
         let mut kinds: BTreeMap<(usize, usize), Vec<Type>> = BTreeMap::new();
         for (at, binding) in &self.uses {
