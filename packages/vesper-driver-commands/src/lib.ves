@@ -1281,6 +1281,12 @@ fn io_word(e: IoError) -> u64 {
     widen_u64(e.kind) | (widen_u64(e.os) << 32)
 }
 
+// A directory listing, or the error word of the read that failed.
+struct Listed {
+    entries: Entries,
+    err: u64,
+}
+
 // Directory `dir`'s names and kinds (not following symbolic links) into
 // `out`, in the OS's order, reading at most `budget` entries: one more sets
 // `over` and stops, so the walk's limit holds while the listing is read,
@@ -1288,17 +1294,27 @@ fn io_word(e: IoError) -> u64 {
 fn list_bounded(in dir: Slice[u8], budget: u64, inout out: Entries, inout over: bool)
     -> u64 eff [Ffi[StdFs]] {
     // The error comes back in the handled value: a clause's assignment to
-    // an outer local changes only the clause's copy.
-    let result = handle Fail[IoError] in {
-        Result::Ok(list_dir_path(in dir))
+    // an outer local changes only the clause's copy (#2038).
+    let got = handle Fail[IoError] in {
+        Listed {
+            entries: list_dir_path(in dir),
+            err: 0,
+        }
     } with {
         return v => v,
-        raise(e, _k) => Result::Err(io_word(e)),
+        raise(e, _k) => Listed {
+            entries: Entries {
+                bytes: ChunkSeq::new[u8](),
+                ends: ChunkSeq::new[u64](),
+                kinds: ChunkSeq::new[u32](),
+            },
+            err: io_word(e),
+        },
     };
-    let listed = match result {
-        Result::Ok(l) => l,
-        Result::Err(word) => return word,
-    };
+    if got.err != 0 {
+        return got.err;
+    }
+    let listed = got.entries;
     if listed.ends.len() > budget {
         over = true;
         return 0;
