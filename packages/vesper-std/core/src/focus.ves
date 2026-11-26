@@ -1,0 +1,92 @@
+// Lend fields of one local directly to a named function. Exclusive fields
+// come first, then shared fields (if listed), then the original arguments.
+// This is one ordinary call: the checker enforces overlap and the callee's
+// pass modes, and no field is copied or moved by the expansion itself.
+pub sugar focus: tag {
+    rule (
+        focus{
+            inout $root:ident.{$first:ident $(, $field:ident)*},
+            in.{$read:ident $(, $extra:ident)*} => $callee:ident($..args:args)
+        }
+    ) => {
+        $callee(
+            inout $root.$first,
+            $(
+                inout $root.$field,
+            )* in $root
+                .$read,
+            $(
+                in $root.$extra,
+            )* $..args
+        )
+    }
+    rule (
+        focus{ inout $root:ident.{$first:ident $(, $field:ident)*} => $callee:ident($..args:args) }
+    ) => {
+        $callee(
+            inout $root.$first,
+            $(
+                inout $root.$field,
+            )* $..args
+        )
+    }
+}
+
+test {
+    affine struct Cell {
+        value: u64,
+    }
+
+    affine struct State {
+        left: Cell,
+        right: Cell,
+        step: Cell,
+        bias: Cell,
+    }
+
+    fn make_state() -> State {
+        State {
+            left: Cell { value: 1 },
+            right: Cell { value: 10 },
+            step: Cell { value: 3 },
+            bias: Cell { value: 2 },
+        }
+    }
+
+    fn mix(inout left: Cell, inout right: Cell, in step: Cell, in bias: Cell, scale: u64) -> u64 {
+        let by = wrapping_mul(wrapping_add(step.value, bias.value), scale);
+        left.value = wrapping_add(left.value, by);
+        right.value = wrapping_sub(right.value, by);
+        wrapping_add(left.value, right.value)
+    }
+
+    fn bump(inout cell: Cell) -> u64 {
+        cell.value = wrapping_add(cell.value, 1);
+        cell.value
+    }
+
+    fn once(inout calls: u64) -> u64 {
+        calls = wrapping_add(calls, 1);
+        calls
+    }
+
+    // @case mixed_field_loans()
+    fn borrows_disjoint_affine_fields() -> bool {
+        let mut state = make_state();
+        let mut calls: u64 = 0;
+        let total = focus{ inout state.{left, right}, in.{step, bias} => mix(once(inout calls)) };
+        total == 11
+            && calls == 1
+            && state.left.value == 6
+            && state.right.value == 5
+            && state.step.value == 3
+            && state.bias.value == 2
+    }
+
+    // @case single_field()
+    fn accepts_no_extra_arguments() -> bool {
+        let mut state = make_state();
+        let right = focus{ inout state.{right} => bump() };
+        right == 11 && state.right.value == 11 && state.left.value == 1
+    }
+}
