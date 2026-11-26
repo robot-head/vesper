@@ -124,6 +124,54 @@ Stage 1 guard: no guarded path changed; the change is inside
 
 **Rust lines deleted:** 0. This part adds the switch and its tests.
 
+## Part 5a: the gated default build and the verified codegen gate
+
+### What changed
+
+- **`gated-default`** (`crates/vesper-hybrid`): a feature that makes
+  `gated` the set when neither `VESPER_HYBRID_SWAPS` nor
+  `VESPER_HYBRID_GATED` names one. It is the build the default `vesper`
+  switches to (piece S1 of the default switch, below), so that build needs
+  no environment variable. Without the feature nothing changes: the
+  default stays `all`, and an empty `VESPER_HYBRID_SWAPS` means the build's
+  default.
+- **`scripts/ci/flip-gate/verified-codegen.json`**: the verified code
+  generator's gate. The differential is every corpus world through
+  monomorphization, the front half, the lowering and the whole compile on
+  five targets; the `compile` workload times Rust's `build` against the
+  encoding, `compile_words` and the decoding.
+  `compile_flip_gate` (tests/self_host_verified_codegen.rs) now prints one
+  pair per epoch for the gate. The `verified_codegen` row is
+  `pass("verified_codegen", "verified-codegen", "#1886")`, so the gated
+  set runs it.
+
+### Evidence (Linux x86_64, release, `-C target-cpu=native`)
+
+| Check | Result |
+|---|---|
+| `aspect ci flip-gate -- verified-codegen` | **PASS**: 0 differences on 4,724 cases, tests 1/1, compile **0.88x** [0.84x, 0.90x] n=12 |
+
+**Rust lines deleted:** 0. `src/verified_codegen` (9,760 lines) goes at
+the retirement.
+
+## The default switch, in pieces
+
+Plan of 2026-11-26. The default `vesper` switches to the gated hybrid
+in pieces, each of which keeps the Rust binary and changes no output:
+
+- S1: the `gated-default` build (part 5a).
+- S2: Bazel's `//:vesper` is the gated hybrid; the Rust binary becomes an
+  internal boot compiler that only the port rules use.
+- S3: the same for Cargo: the root package's binary is renamed and the
+  hybrid crate's binary becomes `vesper`.
+- S4: the required checks run their CLI tests against the gated hybrid.
+- S5: docs, release validation and the default-CLI dependency check.
+
+That switch alone deletes no Rust: the ports are still compiled by the
+Rust compiler. A flipped module's Rust can go one PR at a time once Stage 2
+builds the port objects, which needs `hd_step` gone and Stage 2 to emit
+native objects (the `codegen-*` gaps in `STAGE2_PACKAGE_GAPS`).
+
 ## Retirement blockers found
 
 Besides the compiler rows that have not passed the gate (checklist item
@@ -157,7 +205,7 @@ Besides the compiler rows that have not passed the gate (checklist item
   once the complete compiler builds to wasm; the no-Rust CI check.
 - Part 3: `bootstrap/stage2.lock` for the complete compiler and the CI
   gate on it.
-- Part 5: the default switch to `gated` for the shipped `vesper`, then the
+- Part 5b onward: pieces S2 to S5 of the default switch, then the
   retirement PR (the plan's checklist).
 - Census: lane 2's rows (`codegen_swap`, `ir_swap`, `swap_input`,
   `compiler_modules`, `vesper-hybrid`) change only at the retirement.
