@@ -33,8 +33,13 @@ impl [T: mod copy] Atomic[T] {
             Option::None => value
         }
     }
-    fn compare_exchange(in self, current: T, new: T, success: MemoryOrder, failure: MemoryOrder)
-        -> Result[T, T] {
+    fn compare_exchange(
+        in self,
+        current: T,
+        new: T,
+        success: MemoryOrder,
+        failure: MemoryOrder
+    ) -> Result[T, T] {
         match self.cell.try_get(0) {
             Option::Some(_) => self.compare_exchange(current, new, success, failure),
             Option::None => Result::Err(current),
