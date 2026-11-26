@@ -1,0 +1,794 @@
+// `discover_theorems` and `tokenize_lean_proofs` of src/verify_commands.rs:
+// a light Lean tokenizer and the namespace/section scope walk that names
+// every theorem and lemma of a proofs file.
+use @vesper/proof-audit::{name_valid};
+use @vesper/proof-audit::strs::{Strs, byte, contains, push, put_str, same_str, strs_new};
+
+// What `discover` found: the names in declaration order, or `failed` and
+// the message.
+pub struct Found {
+    pub names: Strs,
+    pub failed: bool,
+    pub err: ChunkSeq[u8],
+}
+
+// Token kinds.
+const T_WORD: u8 = 0;
+const T_GUILLEMET: u8 = 1;
+const T_ATTR: u8 = 2;
+const T_DOT: u8 = 3;
+const T_OPEN: u8 = 4;
+const T_CLOSE: u8 = 5;
+const T_OTHER: u8 = 6;
+
+// The tokens: kind, the bracket byte of Open/Close, text range (Word and
+// Guillemet), line and whether a `.` came right before.
+struct Toks {
+    kind: ChunkSeq[u8],
+    ch: ChunkSeq[u8],
+    start: ChunkSeq[u64],
+    end: ChunkSeq[u64],
+    line: ChunkSeq[u64],
+    dot: ChunkSeq[bool],
+}
+
+// The tokenizer's position and its error.
+struct Lx {
+    i: u64,
+    line: u64,
+    failed: bool,
+    err: ChunkSeq[u8],
+}
+
+fn alpha(b: u8) -> bool {
+    (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+}
+
+fn ident_start(b: u8) -> bool {
+    alpha(b) || b == 95
+}
+
+fn ident_continue(b: u8) -> bool {
+    ident_start(b) || (b >= 48 && b <= 57) || b == 39
+}
+
+// `u8::is_ascii_whitespace`.
+fn ascii_space(b: u8) -> bool {
+    b == 32 || b == 9 || b == 10 || b == 12 || b == 13
+}
+
+fn keyword(in w: Slice[u8]) -> bool {
+    same_str(in w, in "theorem")
+        || same_str(in w, in "lemma")
+        || same_str(in w, in "def")
+        || same_str(in w, in "abbrev")
+        || same_str(in w, in "opaque")
+        || same_str(in w, in "axiom")
+        || same_str(in w, in "example")
+        || same_str(in w, in "inductive")
+        || same_str(in w, in "structure")
+        || same_str(in w, in "class")
+        || same_str(in w, in "instance")
+        || same_str(in w, in "namespace")
+        || same_str(in w, in "section")
+        || same_str(in w, in "end")
+        || same_str(in w, in "mutual")
+        || same_str(in w, in "open")
+        || same_str(in w, in "variable")
+        || same_str(in w, in "universe")
+        || same_str(in w, in "attribute")
+        || same_str(in w, in "private")
+        || same_str(in w, in "protected")
+        || same_str(in w, in "noncomputable")
+        || same_str(in w, in "unsafe")
+        || same_str(in w, in "partial")
+        || same_str(in w, in "scoped")
+        || same_str(in w, in "local")
+        || same_str(in w, in "where")
+        || same_str(in w, in "by")
+        || same_str(in w, in "let")
+        || same_str(in w, in "in")
+        || same_str(in w, in "if")
+        || same_str(in w, in "then")
+        || same_str(in w, in "else")
+        || same_str(in w, in "match")
+        || same_str(in w, in "with")
+        || same_str(in w, in "import")
+        || same_str(in w, in "set_option")
+}
+
+// The UTF-8 length of the character whose lead byte is `b`.
+fn char_len(b: u8) -> u64 {
+    if b < 128 {
+        1
+    } else if b < 224 {
+        2
+    } else if b < 240 {
+        3
+    } else {
+        4
+    }
+}
+
+fn lx_fail(inout l: Lx, in why: Str) {
+    if !l.failed {
+        l.failed = true;
+        put_str(inout l.err, in why);
+    }
+}
+
+fn at(in s: Slice[u8], i: u64) -> u8 {
+    if i < s.len() {
+        byte(in s, i)
+    } else {
+        0
+    }
+}
+
+fn skip_block_comment(in s: Slice[u8], inout l: Lx) {
+    let mut depth: u64 = 1;
+    l.i = wrapping_add(l.i, 2);
+    loop {
+        if l.i >= s.len() || depth == 0 {
+            break;
+        }
+        let b = byte(in s, l.i);
+        let has_next = wrapping_add(l.i, 1) < s.len();
+        if b == 10 {
+            l.line = wrapping_add(l.line, 1);
+            l.i = wrapping_add(l.i, 1);
+        } else if has_next && b == 47 && at(in s, wrapping_add(l.i, 1)) == 45 {
+            depth = wrapping_add(depth, 1);
+            l.i = wrapping_add(l.i, 2);
+        } else if has_next && b == 45 && at(in s, wrapping_add(l.i, 1)) == 47 {
+            depth = wrapping_sub(depth, 1);
+            l.i = wrapping_add(l.i, 2);
+        } else {
+            l.i = wrapping_add(l.i, 1);
+        }
+    }
+    if depth != 0 {
+        lx_fail(inout l, in "unterminated block comment in proofs file");
+    }
+}
+
+fn skip_string_lit(in s: Slice[u8], inout l: Lx) {
+    l.i = wrapping_add(l.i, 1);
+    loop {
+        if l.i >= s.len() {
+            break;
+        }
+        let b = byte(in s, l.i);
+        if b == 92 {
+            l.i = wrapping_add(l.i, 1);
+            if l.i < s.len() {
+                if byte(in s, l.i) == 10 {
+                    l.line = wrapping_add(l.line, 1);
+                }
+                l.i = wrapping_add(l.i, 1);
+            }
+        } else if b == 34 {
+            l.i = wrapping_add(l.i, 1);
+            return;
+        } else {
+            if b == 10 {
+                l.line = wrapping_add(l.line, 1);
+            }
+            l.i = wrapping_add(l.i, 1);
+        }
+    }
+    lx_fail(inout l, in "unterminated string literal in proofs file");
+}
+
+fn try_skip_char_lit(in s: Slice[u8], inout l: Lx) -> bool {
+    let i = l.i;
+    if wrapping_add(i, 2) >= s.len() || byte(in s, i) != 39 {
+        return false;
+    }
+    let b1 = byte(in s, wrapping_add(i, 1));
+    if b1 == 92 {
+        if wrapping_add(i, 3) < s.len() && byte(in s, wrapping_add(i, 3)) == 39 {
+            l.i = wrapping_add(i, 4);
+            return true;
+        }
+        return false;
+    }
+    if b1 != 39 && b1 != 10 && byte(in s, wrapping_add(i, 2)) == 39 {
+        l.i = wrapping_add(i, 3);
+        return true;
+    }
+    false
+}
+
+fn tok(inout t: Toks, kind: u8, ch: u8, s: u64, e: u64, line: u64, dot: bool) {
+    t.kind.push(kind);
+    t.ch.push(ch);
+    t.start.push(s);
+    t.end.push(e);
+    t.line.push(line);
+    t.dot.push(dot);
+}
+
+fn skip_attr(in s: Slice[u8], inout l: Lx) {
+    l.i = wrapping_add(l.i, 2);
+    let mut depth: u64 = 1;
+    loop {
+        if l.i >= s.len() || depth == 0 || l.failed {
+            break;
+        }
+        let b = byte(in s, l.i);
+        let next = at(in s, wrapping_add(l.i, 1));
+        let has_next = wrapping_add(l.i, 1) < s.len();
+        if b == 10 {
+            l.line = wrapping_add(l.line, 1);
+            l.i = wrapping_add(l.i, 1);
+        } else if b == 45 && has_next && next == 45 {
+            loop {
+                if l.i >= s.len() || byte(in s, l.i) == 10 {
+                    break;
+                }
+                l.i = wrapping_add(l.i, 1);
+            }
+        } else if b == 47 && has_next && next == 45 {
+            skip_block_comment(in s, inout l);
+        } else if b == 34 {
+            skip_string_lit(in s, inout l);
+        } else if b == 39 && try_skip_char_lit(in s, inout l) {} else if b == 91 {
+            depth = wrapping_add(depth, 1);
+            l.i = wrapping_add(l.i, 1);
+        } else if b == 93 {
+            depth = wrapping_sub(depth, 1);
+            l.i = wrapping_add(l.i, 1);
+        } else {
+            l.i = wrapping_add(l.i, 1);
+        }
+    }
+    if depth != 0 {
+        lx_fail(inout l, in "unterminated attribute block '@[' in proofs file");
+    }
+}
+
+fn tokenize(in s: Slice[u8], inout l: Lx) -> Toks {
+    let mut t = Toks {
+        kind: ChunkSeq::new[u8](),
+        ch: ChunkSeq::new[u8](),
+        start: ChunkSeq::new[u64](),
+        end: ChunkSeq::new[u64](),
+        line: ChunkSeq::new[u64](),
+        dot: ChunkSeq::new[bool]()
+    };
+    let mut dot_pending = false;
+    loop {
+        if l.i >= s.len() || l.failed {
+            break;
+        }
+        let b = byte(in s, l.i);
+        let has_next = wrapping_add(l.i, 1) < s.len();
+        let next = at(in s, wrapping_add(l.i, 1));
+        if b == 10 {
+            l.line = wrapping_add(l.line, 1);
+            l.i = wrapping_add(l.i, 1);
+            dot_pending = false;
+        } else if ascii_space(b) {
+            l.i = wrapping_add(l.i, 1);
+            dot_pending = false;
+        } else if has_next && b == 45 && next == 45 {
+            loop {
+                if l.i >= s.len() || byte(in s, l.i) == 10 {
+                    break;
+                }
+                l.i = wrapping_add(l.i, 1);
+            }
+            dot_pending = false;
+        } else if has_next && b == 47 && next == 45 {
+            skip_block_comment(in s, inout l);
+            dot_pending = false;
+        } else if b == 34 {
+            let line = l.line;
+            skip_string_lit(in s, inout l);
+            tok(inout t, T_OTHER, 0, 0, 0, line, false);
+            dot_pending = false;
+        } else if try_skip_char_lit(in s, inout l) {
+            tok(inout t, T_OTHER, 0, 0, 0, l.line, false);
+            dot_pending = false;
+        } else if has_next && b == 64 && next == 91 {
+            let line = l.line;
+            skip_attr(in s, inout l);
+            tok(inout t, T_ATTR, 0, 0, 0, line, false);
+            dot_pending = false;
+        } else if b == 194 && next == 171 {
+            // `«`: up to and including the next `»`.
+            let from = l.i;
+            let line = l.line;
+            l.i = wrapping_add(l.i, 2);
+            let mut closed = false;
+            loop {
+                if l.i >= s.len() {
+                    break;
+                }
+                let c = byte(in s, l.i);
+                if c == 10 {
+                    l.line = wrapping_add(l.line, 1);
+                }
+                if c == 194 && at(in s, wrapping_add(l.i, 1)) == 187 {
+                    l.i = wrapping_add(l.i, 2);
+                    closed = true;
+                    break;
+                }
+                l.i = wrapping_add(l.i, char_len(c));
+            }
+            if !closed {
+                lx_fail(inout l, in "unterminated guillemet identifier in proofs file");
+            } else {
+                tok(inout t, T_GUILLEMET, 0, from, l.i, line, dot_pending);
+            }
+            dot_pending = false;
+        } else if ident_start(b) {
+            let from = l.i;
+            l.i = wrapping_add(l.i, 1);
+            loop {
+                if l.i >= s.len() {
+                    break;
+                }
+                let c = byte(in s, l.i);
+                if ident_continue(c)
+                    || (
+                        c == 46
+                            && wrapping_add(l.i, 1) < s.len()
+                            && ident_start(byte(in s, wrapping_add(l.i, 1)))
+                    ) {
+                    l.i = wrapping_add(l.i, 1);
+                } else {
+                    break;
+                }
+            }
+            tok(inout t, T_WORD, 0, from, l.i, l.line, dot_pending);
+            dot_pending = false;
+        } else if b == 46 {
+            tok(inout t, T_DOT, 0, 0, 0, l.line, false);
+            dot_pending = true;
+            l.i = wrapping_add(l.i, 1);
+        } else {
+            dot_pending = false;
+            if b == 40 || b == 91 || b == 123 {
+                tok(inout t, T_OPEN, b, 0, 0, l.line, false);
+                l.i = wrapping_add(l.i, 1);
+            } else if b == 41 || b == 93 || b == 125 {
+                tok(inout t, T_CLOSE, b, 0, 0, l.line, false);
+                l.i = wrapping_add(l.i, 1);
+            } else {
+                l.i = wrapping_add(l.i, char_len(b));
+                tok(inout t, T_OTHER, 0, 0, 0, l.line, false);
+            }
+        }
+    }
+    t
+}
+
+fn get64(in v: ChunkSeq[u64], i: u64) -> u64 {
+    match v.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn get8(in v: ChunkSeq[u8], i: u64) -> u8 {
+    match v.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn getb(in v: ChunkSeq[bool], i: u64) -> bool {
+    match v.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => false,
+    }
+}
+
+// Rust's `Failure::new` keeps at most 4096 bytes, cut on a character
+// boundary.
+fn truncated(in m: Slice[u8]) -> ChunkSeq[u8] {
+    let mut end = m.len();
+    if end > 4096 {
+        end = 4096;
+        loop {
+            if end == 0 {
+                break;
+            }
+            let b = byte(in m, end);
+            if b < 128 || b >= 192 {
+                break;
+            }
+            end = wrapping_sub(end, 1);
+        }
+    }
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.extend(in m[0..end]);
+    out
+}
+
+fn found_err(in m: Slice[u8]) -> Found {
+    Found { names: strs_new(), failed: true, err: truncated(in m) }
+}
+
+fn found_str(in m: Str) -> Found {
+    found_err(in m.as_bytes())
+}
+
+// `lead` + `what` + `tail`.
+fn msg(in lead: Str, in what: Slice[u8], in tail: Str) -> Found {
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout m, in lead);
+    m.extend(in what);
+    put_str(inout m, in tail);
+    found_err(in m.as_slice())
+}
+
+// `lead` + `kind` + `mid` + `what` + `tail`.
+fn msg2(in lead: Str, in kind: Str, in mid: Str, in what: Slice[u8], in tail: Str) -> Found {
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout m, in lead);
+    put_str(inout m, in kind);
+    put_str(inout m, in mid);
+    m.extend(in what);
+    put_str(inout m, in tail);
+    found_err(in m.as_slice())
+}
+
+// Scopes: kind 0 namespace, 1 named section, 2 anonymous section, 3 mutual.
+struct Scopes {
+    kind: ChunkSeq[u8],
+    names: Strs,
+}
+
+fn scope_push(inout sc: Scopes, kind: u8, in name: Slice[u8]) {
+    sc.kind.push(kind);
+    push(inout sc.names, in name);
+}
+
+// Push one scope per dot-separated component of `name`.
+fn scope_parts(inout sc: Scopes, kind: u8, in name: Slice[u8]) {
+    let mut from: u64 = 0;
+    for i in 0..wrapping_add(name.len(), 1) {
+        if i == name.len() || byte(in name, i) == 46 {
+            scope_push(inout sc, kind, in name[from..i]);
+            from = wrapping_add(i, 1);
+        }
+    }
+}
+
+// Pop the last scope: its kind, or 255 when there is none.
+fn scope_pop(inout sc: Scopes) -> u8 {
+    let n = sc.kind.len();
+    if n == 0 {
+        return 255;
+    }
+    let k = get8(in sc.kind, wrapping_sub(n, 1));
+    sc.kind.truncate(wrapping_sub(n, 1));
+    let m = sc.names.ends.len();
+    sc.names.ends.truncate(wrapping_sub(m, 1));
+    let keep = if m >= 2 {
+        get64(in sc.names.ends, wrapping_sub(m, 2))
+    } else {
+        0
+    };
+    sc.names.bytes.truncate(keep);
+    k
+}
+
+fn scope_name(in sc: Scopes) -> ChunkSeq[u8] {
+    let m = sc.names.ends.len();
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if m == 0 {
+        return out;
+    }
+    let e = get64(in sc.names.ends, wrapping_sub(m, 1));
+    let s = if m >= 2 {
+        get64(in sc.names.ends, wrapping_sub(m, 2))
+    } else {
+        0
+    };
+    out.extend(in sc.names.bytes[s..e]);
+    out
+}
+
+// The namespace components, joined with dots.
+fn namespace_prefix(in sc: Scopes) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut from: u64 = 0;
+    for k in 0..sc.kind.len() {
+        let e = get64(in sc.names.ends, k);
+        if get8(in sc.kind, k) == 0 {
+            if out.len() > 0 {
+                out.push(46);
+            }
+            out.extend(in sc.names.bytes[from..e]);
+        }
+        from = e;
+    }
+    out
+}
+
+fn decl_kind_text(lemma: bool) -> Str {
+    if lemma {
+        "lemma"
+    } else {
+        "theorem"
+    }
+}
+
+// `discover_theorems(proofs)`: `proofs` is valid UTF-8.
+pub fn discover(in s: Slice[u8]) -> Found {
+    let mut l = Lx { i: 0, line: 1, failed: false, err: ChunkSeq::new[u8]() };
+    let t = tokenize(in s, inout l);
+    if l.failed {
+        return found_err(in l.err.as_slice());
+    }
+    let n = t.kind.len();
+    let mut sc = Scopes { kind: ChunkSeq::new[u8](), names: strs_new() };
+    let mut found = strs_new();
+    let mut paren: u64 = 0;
+    let mut bracket: u64 = 0;
+    let mut brace: u64 = 0;
+    let mut private = false;
+    let mut idx: u64 = 0;
+    loop {
+        if idx >= n {
+            break;
+        }
+        let kind = get8(in t.kind, idx);
+        let ch = get8(in t.ch, idx);
+        if kind == T_OPEN || kind == T_CLOSE {
+            if kind == T_OPEN {
+                if ch == 40 {
+                    paren = wrapping_add(paren, 1);
+                } else if ch == 91 {
+                    bracket = wrapping_add(bracket, 1);
+                } else {
+                    brace = wrapping_add(brace, 1);
+                }
+            } else if ch == 41 {
+                if paren > 0 {
+                    paren = wrapping_sub(paren, 1);
+                }
+            } else if ch == 93 {
+                if bracket > 0 {
+                    bracket = wrapping_sub(bracket, 1);
+                }
+            } else if brace > 0 {
+                brace = wrapping_sub(brace, 1);
+            }
+            private = false;
+            idx = wrapping_add(idx, 1);
+            continue;
+        }
+        if paren > 0 || bracket > 0 || brace > 0 || getb(in t.dot, idx) {
+            idx = wrapping_add(idx, 1);
+            continue;
+        }
+        if kind == T_ATTR {
+            idx = wrapping_add(idx, 1);
+            continue;
+        }
+        if kind != T_WORD {
+            private = false;
+            idx = wrapping_add(idx, 1);
+            continue;
+        }
+        let w = s[get64(in t.start, idx)..get64(in t.end, idx)];
+        let line = get64(in t.line, idx);
+        let has_next = wrapping_add(idx, 1) < n;
+        let nx = wrapping_add(idx, 1);
+        let next_kind = get8(in t.kind, nx);
+        let next_line = get64(in t.line, nx);
+        let next_dot = getb(in t.dot, nx);
+        // The next token's text range (empty when it has none).
+        let ns = get64(in t.start, nx);
+        let ne = get64(in t.end, nx);
+        if same_str(in w, in "protected")
+            || same_str(in w, in "noncomputable")
+            || same_str(in w, in "unsafe")
+            || same_str(in w, in "partial")
+            || same_str(in w, in "scoped")
+            || same_str(in w, in "local") {
+            idx = wrapping_add(idx, 1);
+        } else if same_str(in w, in "private") {
+            private = true;
+            idx = wrapping_add(idx, 1);
+        } else if same_str(in w, in "namespace") {
+            private = false;
+            if !has_next {
+                return found_str(in "expected namespace name in proofs file");
+            }
+            if next_line != line {
+                return found_str(in "expected namespace name on same line in proofs file");
+            }
+            if next_kind == T_WORD {
+                if !next_dot && !keyword(in s[ns..ne]) && name_valid(in s[ns..ne]) {
+                    scope_parts(inout sc, 0, in s[ns..ne]);
+                    idx = wrapping_add(idx, 2);
+                } else {
+                    return msg(
+                        in "unsupported namespace identifier '",
+                        in s[ns..ne],
+                        in "' in proofs file"
+                    );
+                }
+            } else if next_kind == T_GUILLEMET {
+                return msg(
+                    in "unsupported namespace identifier '",
+                    in s[ns..ne],
+                    in "' in proofs file"
+                );
+            } else {
+                return found_str(in "expected namespace name in proofs file");
+            }
+        } else if same_str(in w, in "section") {
+            private = false;
+            let mut named = false;
+            if has_next && next_line == line && !next_dot {
+                if next_kind == T_WORD && !keyword(in s[ns..ne]) {
+                    if !name_valid(in s[ns..ne]) {
+                        return msg(
+                            in "unsupported section identifier '",
+                            in s[ns..ne],
+                            in "' in proofs file"
+                        );
+                    }
+                    scope_parts(inout sc, 1, in s[ns..ne]);
+                    idx = wrapping_add(idx, 2);
+                    named = true;
+                } else if next_kind == T_GUILLEMET {
+                    return msg(
+                        in "unsupported section identifier '",
+                        in s[ns..ne],
+                        in "' in proofs file"
+                    );
+                }
+            }
+            if !named {
+                scope_push(inout sc, 2, in s[0..0]);
+                idx = wrapping_add(idx, 1);
+            }
+        } else if same_str(in w, in "mutual") {
+            private = false;
+            scope_push(inout sc, 3, in s[0..0]);
+            idx = wrapping_add(idx, 1);
+        } else if same_str(in w, in "end") {
+            private = false;
+            let mut named = false;
+            if has_next && next_line == line && !next_dot {
+                if next_kind == T_WORD && !keyword(in s[ns..ne]) {
+                    if !name_valid(in s[ns..ne]) {
+                        return msg(
+                            in "unsupported 'end ",
+                            in s[ns..ne],
+                            in "' identifier in proofs file"
+                        );
+                    }
+                    // Components from the last: each must close its scope.
+                    let mut e = ne;
+                    let mut k = ne;
+                    loop {
+                        let cut = k == ns || byte(in s, wrapping_sub(k, 1)) == 46;
+                        if cut {
+                            let top = scope_name(in sc);
+                            let popped = scope_pop(inout sc);
+                            if !(
+                                (popped == 0 || popped == 1) && same(in top.as_slice(), in s[k..e])
+                            ) {
+                                return msg(
+                                    in "mismatched 'end ",
+                                    in s[ns..ne],
+                                    in "' in proofs file"
+                                );
+                            }
+                            if k == ns {
+                                break;
+                            }
+                            e = wrapping_sub(k, 1);
+                        }
+                        k = wrapping_sub(k, 1);
+                    }
+                    idx = wrapping_add(idx, 2);
+                    named = true;
+                } else if next_kind == T_GUILLEMET {
+                    return msg(
+                        in "unsupported 'end ",
+                        in s[ns..ne],
+                        in "' identifier in proofs file"
+                    );
+                }
+            }
+            if !named {
+                if scope_pop(inout sc) == 255 {
+                    return found_str(in "unexpected 'end' with no open namespace or section");
+                }
+                idx = wrapping_add(idx, 1);
+            }
+        } else if same_str(in w, in "example") {
+            return found_str(
+                in "anonymous 'example' declarations in proofs file cannot be audited; use a named theorem"
+            );
+        } else if same_str(in w, in "theorem") || same_str(in w, in "lemma") {
+            let kind_text = decl_kind_text(same_str(in w, in "lemma"));
+            if private {
+                return msg2(
+                    in "private ",
+                    in kind_text,
+                    in " declarations in proofs file cannot be audited by name",
+                    in s[0..0],
+                    in ""
+                );
+            }
+            if !has_next {
+                return msg2(
+                    in "expected ",
+                    in kind_text,
+                    in " identifier in proofs file",
+                    in s[0..0],
+                    in ""
+                );
+            }
+            if next_kind == T_GUILLEMET
+                || (next_kind == T_WORD && (next_dot || keyword(in s[ns..ne]))) {
+                return msg2(
+                    in "unsupported ",
+                    in kind_text,
+                    in " identifier '",
+                    in s[ns..ne],
+                    in "' in proofs file"
+                );
+            }
+            if next_kind != T_WORD {
+                return msg2(
+                    in "expected ",
+                    in kind_text,
+                    in " identifier in proofs file",
+                    in s[0..0],
+                    in ""
+                );
+            }
+            let root = wrapping_sub(ne, ns) >= 7
+                && same_str(in s[ns..wrapping_add(ns, 7)], in "_root_.");
+            let is_ = if root {
+                wrapping_add(ns, 7)
+            } else {
+                ns
+            };
+            if !name_valid(in s[is_..ne]) {
+                return msg2(
+                    in "unsupported ",
+                    in kind_text,
+                    in " identifier '",
+                    in s[ns..ne],
+                    in "' in proofs file"
+                );
+            }
+            let mut full: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            if !root {
+                full = namespace_prefix(in sc);
+                if full.len() > 0 {
+                    full.push(46);
+                }
+            }
+            full.extend(in s[is_..ne]);
+            if !contains(in found, in full.as_slice()) {
+                push(inout found, in full.as_slice());
+                if found.ends.len() > 128 {
+                    return found_str(in "proofs file declares more than 128 theorems");
+                }
+            }
+            idx = wrapping_add(idx, 2);
+        } else {
+            private = false;
+            idx = wrapping_add(idx, 1);
+        }
+    }
+    Found { names: found, failed: false, err: ChunkSeq::new[u8]() }
+}
+
+fn same(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    @vesper/proof-audit::strs::same(in a, in b)
+}

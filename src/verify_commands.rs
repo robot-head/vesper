@@ -26,9 +26,9 @@ const MAX_OLEAN_BYTES: u64 = 256 * 1024 * 1024;
 const HELP: &str = "Usage: vesper verify SOURCE --format [--json | --emit-lean] [--lean PATH] [--timeout SECONDS]\n       vesper verify SOURCE --extract [--proofs FILE.lean] [--theorem Name ...] [--contract-proof Function=Theorem --contract-witness Function=Theorem ...] [--allow-axiom Name ...] [--olean-store DIR|default] [--json | --emit-lean] [--lean PATH] [--timeout SECONDS]\n\n--format: Kernel-check a formatter document-algebra comment-conservation model with Lean 4.35.0.\n--extract: Extract a Lean 4 proof model from checked .ves source, compile and replay through the Lean 4.35.0 kernel, and audit axioms (sorryAx is always forbidden). Total fuel companions are noncomputable; original recursive executable definitions and their callers are omitted and listed in JSON.\n--proofs joins an explicit Lean proof script containing theorem proofs for the extracted model.\n--theorem selects theorem names to audit (default: theorems discovered in --proofs, or an internal model-compilation witness).\n--contract-proof binds an emitted function contract to a theorem; when used, every emitted contract must be covered. Each binding requires --contract-witness for the generated existential input precondition. This checks model partial correctness and inhabited input preconditions, not termination or native-code correspondence. Explicit contract admission permits only the three standard Lean axioms.\n--allow-axiom permits named axioms such as propext, Quot.sound, or Classical.choice.\n--olean-store stores audited .olean artifacts and compares cache hits with a fresh compilation in a Loom CAS directory (`default` is ~/.vesper/store).\n--emit-lean prints the generated Lean source only after compilation and kernel replay.\n--timeout bounds each Lean process (1 to 300 seconds; default 30).\nThe selected Lean toolchain and artifact parser remain trusted.\n";
 
 #[derive(Debug)]
-struct Failure {
-    stage: &'static str,
-    message: String,
+pub(crate) struct Failure {
+    pub(crate) stage: &'static str,
+    pub(crate) message: String,
 }
 impl Failure {
     fn new(stage: &'static str, message: impl std::fmt::Display) -> Self {
@@ -808,7 +808,8 @@ fn tokenize_lean_proofs(proofs: &str) -> Result<Vec<LeanToken>, Failure> {
     Ok(tokens)
 }
 
-fn discover_theorems(proofs: &str) -> Result<Vec<String>, Failure> {
+/// tests/self_host_verify.rs compares this with `@vesper/verify::discover`.
+pub(crate) fn discover_theorems(proofs: &str) -> Result<Vec<String>, Failure> {
     let tokens = tokenize_lean_proofs(proofs)?;
     let mut scope_stack: Vec<Scope> = Vec::new();
     let mut discovered = Vec::new();
@@ -1109,7 +1110,8 @@ fn resolve_store_dir(spec: &str) -> Result<PathBuf, Failure> {
         Ok(PathBuf::from(spec))
     }
 }
-fn contract_bindings(
+/// tests/self_host_verify.rs compares this with `@vesper/verify::bindings`.
+pub(crate) fn contract_bindings(
     contracts: &[String],
     requested: &BTreeMap<String, String>,
     witnesses: &BTreeMap<String, String>,

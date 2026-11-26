@@ -481,3 +481,27 @@ the flip gate.
 - The flip gate for `entry_plans` and `export_plans`. After that,
   `instances_for_roots`, `NativeAbi::plan` and `frame_plan` go, except
   for the callers outside the walk (`capability_abi_functions`).
+
+## Flip gate (#2056)
+
+`scripts/ci/flip-gate/native-walk.json` gates the `entry_plans` and
+`export_plans` swaps. The differential is the three swap tests. The ABBA
+workloads come from the `flip_gate` test of
+tests/self_host_native_walk_frame.rs. They time the same entry compiles
+(the trace hosts included) and library builds end to end, with the package
+at the hook against without it.
+
+`aspect ci flip-gate -- native-walk` (Linux x86_64, `-C target-cpu=native`):
+
+| Check | Result |
+|---|---|
+| Tests | 1/1 pass |
+| Differential | 0 differences on 978 cases |
+| ABBA `entries` (114 compiles an arm) | 1.00x [0.98x, 1.03x] n=12 |
+| ABBA `exports` (26 libraries an arm) | 0.99x [0.93x, 1.03x] n=12 |
+| Verdict | **PASS** |
+
+Both swaps join the hybrid's `gated` set. **Rust lines deleted:** 0. This is
+a compiler module, so `instances_for_roots`, `NativeAbi::plan` and
+`frame_plan` go when the Rust compiler retires, and nothing goes at this
+flip.

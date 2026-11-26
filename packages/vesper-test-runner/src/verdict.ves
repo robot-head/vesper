@@ -124,10 +124,7 @@ fn newlines(in b: Slice[u8], from: u64, end: u64) -> u64 {
         if add(i, 8) > end {
             break;
         }
-        let x = match b.try_read_u64_le(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let x = b.try_read_u64_le(i).unwrap_or(0);
         let y = x ^ nl;
         // A byte of `y` is zero exactly where `x` holds `\n`.
         let t = (wrapping_add(y & low, low) | y) ^ 0xffffffffffffffff;
@@ -141,10 +138,7 @@ fn newlines(in b: Slice[u8], from: u64, end: u64) -> u64 {
         if i >= end {
             break;
         }
-        let c = match b.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let c = b.try_get(i).unwrap_or(0);
         if c == 10 {
             count = inc(count);
         }
@@ -165,10 +159,7 @@ fn line_start(in b: Slice[u8], offset: u64) -> (u64, u64) {
         if end == 0 || end >= n {
             break;
         }
-        let c = match b.try_get(end) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let c = b.try_get(end).unwrap_or(0);
         if c < 128 || c >= 192 {
             break;
         }
@@ -180,10 +171,7 @@ fn line_start(in b: Slice[u8], offset: u64) -> (u64, u64) {
         if j == 0 {
             break;
         }
-        let c = match b.try_get(sub(j, 1)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let c = b.try_get(sub(j, 1)).unwrap_or(0);
         if c == 10 {
             break;
         }
