@@ -2920,6 +2920,109 @@ impl Renamer<'_> {
     }
 }
 
+/// The Rust pieces the Vesper driver's package loader still calls (#1986
+/// slice 2): it reads the package graph itself (modules/driver/src/load.ves)
+/// and asks for the manifest decode, the SemVer match and the `.vsys` type
+/// names here, through the driver's host steps.
+pub mod driver_host {
+    use super::*;
+
+    /// `read_for_target`'s source-directory OS and whether the build is the
+    /// WASI component's.
+    pub fn target_os(target: Option<&str>) -> (&'static str, bool) {
+        let wasi = target == Some(crate::wasm_backend::TARGET);
+        let os = if wasi {
+            "wasip2"
+        } else if let Some(triple) = target {
+            VSYS_TARGETS
+                .iter()
+                .find(|v| v.triple == triple)
+                .map_or(std::env::consts::OS, |v| v.os)
+        } else {
+            std::env::consts::OS
+        };
+        (os, wasi)
+    }
+
+    /// The index in [`VSYS_TARGETS`] of the host, which a plain `.vsys`
+    /// path's type names are read for.
+    pub fn host_target() -> Option<usize> {
+        let (triple, _) = vsys_target(None).ok()?;
+        VSYS_TARGETS.iter().position(|t| t.triple == triple)
+    }
+
+    /// The parser's byte budget: `Loading::assembly_input` leaves a graph
+    /// with a larger source to the Rust loader.
+    pub fn max_source_bytes() -> usize {
+        crate::parser::ParseLimits::default().max_source_bytes
+    }
+
+    /// A manifest as `Loader::package` decodes it.
+    pub struct DriverManifest(Manifest);
+
+    /// One `[dependencies]` entry, in name order.
+    pub struct DriverDependency<'a> {
+        pub name: &'a str,
+        pub optional: bool,
+        pub path: Option<&'a str>,
+    }
+
+    impl DriverManifest {
+        /// `vesper_loom_calculus::parse_manifest`, or `None` for a manifest
+        /// error (the Rust loader reports it).
+        pub fn parse(text: &str) -> Option<Self> {
+            vesper_loom_calculus::parse_manifest(text).ok().map(Self)
+        }
+        pub fn name(&self) -> &str {
+            self.0.package.name.as_str()
+        }
+        pub fn vsys(&self) -> &[String] {
+            &self.0.package.vsys
+        }
+        pub fn objects(&self) -> &[String] {
+            &self.0.package.objects
+        }
+        pub fn dependencies(&self) -> impl Iterator<Item = DriverDependency<'_>> {
+            self.0
+                .dependencies
+                .iter()
+                .map(|(name, d)| DriverDependency {
+                    name: name.as_str(),
+                    optional: d.optional,
+                    path: d.path.as_deref(),
+                })
+        }
+        /// Whether dependency `name`'s version requirement accepts
+        /// `found`'s version (`false` when there is no such dependency).
+        pub fn accepts(&self, name: &str, found: &DriverManifest) -> bool {
+            self.0
+                .dependencies
+                .iter()
+                .find(|(n, _)| n.as_str() == name)
+                .is_some_and(|(_, d)| d.version.matches(&found.0.package.version))
+        }
+    }
+
+    /// The `.vsys` library `text` for target `VSYS_TARGETS[target]`
+    /// (`@TARGET@` and `@ABI@` filled in): whether it links statically and
+    /// the type names it declares (extern types, wire structs, enums, as
+    /// [`PackageVsys::type_names`] lists them), or `None` when it does not
+    /// parse.
+    pub fn vsys_names(target: usize, text: &str) -> Option<(bool, Vec<String>)> {
+        let t = VSYS_TARGETS.get(target)?;
+        let source = text.replace("@TARGET@", t.triple).replace("@ABI@", t.abi);
+        let d = vesper_ffi::sys::parse(&source, vesper_ffi::sys::Limits::default()).ok()?;
+        let names = d
+            .extern_types()
+            .iter()
+            .map(|t| t.name().to_owned())
+            .chain(d.wire_structs().iter().map(|w| w.name().to_owned()))
+            .chain(d.enums().iter().map(|e| e.name().to_owned()))
+            .collect();
+        Some((d.link().mode() == vesper_ffi::sys::LinkMode::Static, names))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::mangled;

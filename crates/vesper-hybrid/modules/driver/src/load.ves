@@ -1,0 +1,1517 @@
+// The driver's own read of the package graph (#1986 slice 2):
+// `Loader::package` of src/packages.rs in Vesper. The driver reads every
+// `Loom.toml` of the dependency closure, finds the cycles and the packages
+// loaded twice through their canonical directories, walks each package's
+// source directory (`src-wasip2` for the WASI component build, `src-<os>`
+// for an OS that has one, else `src`), checks the module names and the
+// root module, reads the sources and the `[package] vsys` and `objects`
+// files, and encodes the assembler's input itself
+// (packages/vesper-check-names-packages/src/load.ves), so the graph never
+// crosses from Rust.
+//
+// What still runs over the Rust parsers are three host steps
+// (crates/vesper-hybrid/src/driver/load.rs): the manifest decode
+// (`Manifest`), a dependency's version match (`VersionMatches`) and a
+// `.vsys` library's type names and link mode (`VsysNames`). A graph with a
+// manifest error, an I/O error or anything else this reader does not
+// cover (an absolute dependency path, a UNC path, a name that is not
+// UTF-8, a source over the parser's byte budget) goes back to the Rust
+// loader, which loads it and reports its errors exactly as before:
+// `read_graph` then returns `false`.
+//
+// Paths follow `std::path` on the host: `display` is the loader's
+// `display(&normalize(..))` (components joined by `/`, the root directory
+// one of them), and the raw paths (`dir.join(..)`) are `PathBuf::push`'s
+// (driver-commands' `join`).
+
+use @vesper-std/fs::{
+    IoError, read_path, canonicalize_path, metadata_path, is_dir_path, is_file_path, kind_dir,
+    kind_file, kind_symlink
+};
+use @vesper-std/fs::walk::{Entries, entry_count, entry_start, entry_end, entry_kind, list_dir_path};
+use @vesper/driver-commands::{join};
+
+// The host steps (`Step` of crates/vesper-hybrid/src/driver.rs).
+fn step_load_begin() -> u32 {
+    71
+}
+
+fn step_manifest() -> u32 {
+    72
+}
+
+fn step_version_matches() -> u32 {
+    73
+}
+
+fn step_vsys_names() -> u32 {
+    74
+}
+
+fn step_graph() -> u32 {
+    75
+}
+
+// `Loader::package`'s bounds.
+fn max_files() -> u64 {
+    4096
+}
+
+fn max_depth() -> u64 {
+    32
+}
+
+fn max_packages() -> u64 {
+    256
+}
+
+// The `.vsys` targets (`VSYS_TARGETS`): 4 stands for none.
+fn target_count() -> u64 {
+    4
+}
+
+fn no_target() -> u64 {
+    4
+}
+
+// The state of one read. Every string is a range of `t`.
+struct Ld {
+    wasi: bool,
+    host: u64,
+    max_src: u64,
+    os: ChunkSeq[u8],
+    windows: bool,
+    // Set by anything this reader does not cover: the Rust loader loads
+    // the graph instead.
+    failed: bool,
+    t: ChunkSeq[u8],
+    // Per package: name (start, end), canonical directory (start, end),
+    // manifest index.
+    pkgs: ChunkSeq[u64],
+    // Dependencies (package, name start, name end, package index), in the
+    // order they are added.
+    deps: ChunkSeq[u64],
+    // Optional dependencies (package, name start, name end).
+    opts: ChunkSeq[u64],
+    // Foreign type names (package, start, end).
+    foreign: ChunkSeq[u64],
+    // Files: display (start, end), text (start, end), base.
+    files: ChunkSeq[u64],
+    // Modules: package, file, first segment, segment count.
+    mods: ChunkSeq[u64],
+    // Module path segments (start, end).
+    segs: ChunkSeq[u64],
+    // The packages being loaded, outermost first.
+    stack: ChunkSeq[u64],
+    // `.vsys` libraries: package (start, end), display (start, end), text
+    // (start, end), first target, target count.
+    vsys: ChunkSeq[u64],
+    // Their per-target files: target, display (start, end), text (start,
+    // end).
+    vt: ChunkSeq[u64],
+    // Objects: package (start, end), display (start, end), first file,
+    // file count.
+    objs: ChunkSeq[u64],
+    // Their files: target (or `no_target()`), path (start, end).
+    of: ChunkSeq[u64],
+}
+
+const PKG: u64 = 5;
+const FILE: u64 = 5;
+const MODULE: u64 = 4;
+const VSYS: u64 = 8;
+const VT: u64 = 5;
+const OBJ: u64 = 6;
+const OF: u64 = 3;
+
+fn w(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn b(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn eq(in x: Slice[u8], in y: Slice[u8]) -> bool {
+    if x.len() != y.len() {
+        return false;
+    }
+    for i in 0..x.len() {
+        if b(in x, i) != b(in y, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn ends_with(in x: Slice[u8], in suffix: Slice[u8]) -> bool {
+    x.len() >= suffix.len() && eq(in x[wrapping_sub(x.len(), suffix.len())..x.len()], in suffix)
+}
+
+fn contains(in x: Slice[u8], in part: Slice[u8]) -> bool {
+    if part.len() > x.len() {
+        return false;
+    }
+    for i in 0..wrapping_add(wrapping_sub(x.len(), part.len()), 1) {
+        if eq(in x[i..wrapping_add(i, part.len())], in part) {
+            return true;
+        }
+    }
+    false
+}
+
+// Byte order (`Ord` of `str`).
+fn less(in x: Slice[u8], in y: Slice[u8]) -> bool {
+    let n = if x.len() < y.len() { x.len() } else { y.len() };
+    for i in 0..n {
+        let (p, q) = (b(in x, i), b(in y, i));
+        if p != q {
+            return p < q;
+        }
+    }
+    x.len() < y.len()
+}
+
+// `x` with every `from` replaced by `to`.
+fn replace(in x: Slice[u8], in from: Slice[u8], in to: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= x.len() {
+            break;
+        }
+        if wrapping_add(i, from.len()) <= x.len()
+            && eq(in x[i..wrapping_add(i, from.len())], in from) {
+            out.extend(in to);
+            i = wrapping_add(i, from.len());
+        } else {
+            out.push(b(in x, i));
+            i = wrapping_add(i, 1);
+        }
+    }
+    out
+}
+
+// Text `[s, e)` of the arena.
+fn tx(in l: Ld, s: u64, e: u64) -> ChunkSeq[u8] {
+    let t = l.t.as_slice();
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.extend(in t[s..e]);
+    out
+}
+
+// Whether text `[s, e)` of the arena is `y`.
+fn same_text(in l: Ld, s: u64, e: u64, in y: Slice[u8]) -> bool {
+    let t = l.t.as_slice();
+    eq(in t[s..e], in y)
+}
+
+// `x[s..e]` as a sequence of its own.
+fn copy(in x: Slice[u8], s: u64, e: u64) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.extend(in x[s..e]);
+    out
+}
+
+fn keep(inout l: Ld, in x: Slice[u8]) -> (u64, u64) {
+    let s = l.t.len();
+    l.t.extend(in x);
+    (s, l.t.len())
+}
+
+// ---------------------------------------------------------- the streams
+
+fn put(inout o: ChunkSeq[u8], v: u64) {
+    for k in 0..8 {
+        o.push(wrapping_u8(wrapping_shr_u64(v, wrapping_u32(wrapping_mul(k, 8)))));
+    }
+}
+
+fn put_str(inout o: ChunkSeq[u8], in x: Slice[u8]) {
+    put(inout o, x.len());
+    o.extend(in x);
+    loop {
+        if o.len() % 8 == 0 {
+            break;
+        }
+        o.push(0);
+    }
+}
+
+fn rd(in x: Slice[u8], inout at: u64) -> u64 {
+    let v = match x.try_read_u64_le(at) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    at = wrapping_add(at, 8);
+    v
+}
+
+// A text's range; `at` moves past its padding.
+fn rd_str(in x: Slice[u8], inout at: u64) -> (u64, u64) {
+    let len = rd(in x, inout at);
+    let s = at;
+    at = wrapping_add(at, wrapping_add(len, 7) & 18446744073709551608);
+    (s, wrapping_add(s, len))
+}
+
+// The session's text, as `text` of lib.ves reads it.
+fn host_text(in s: Session) -> ChunkSeq[u8] eff [Ffi[HybridDriver]] {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    buf.resize(256, 0);
+    loop {
+        let n = HybridDriver::hd_text(in s, inout buf.as_slice_mut());
+        let len = wrapping_u64(n);
+        if n >= 0 && len > buf.len() {
+            buf.resize(len, 0);
+            continue;
+        }
+        if n >= 0 {
+            buf.truncate(len);
+        } else {
+            buf.truncate(0);
+        }
+        break;
+    }
+    buf
+}
+
+// ---------------------------------------------------------- the file system
+
+fn read_text(inout l: Ld, in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+    let r = handle Fail[IoError] in {
+        Option::Some(read_path(in path))
+    } with {
+        return v => v,
+        raise(_e, _k) => Option::None,
+    };
+    match r {
+        Option::Some(bytes) => {
+            match String::from_utf8(in bytes.as_slice()) {
+                Option::Some(_) => bytes,
+                Option::None => {
+                    l.failed = true;
+                    ChunkSeq::new[u8]()
+                },
+            }
+        },
+        Option::None => {
+            l.failed = true;
+            ChunkSeq::new[u8]()
+        },
+    }
+}
+
+fn canonical(inout l: Ld, in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+    let r = handle Fail[IoError] in {
+        Option::Some(canonicalize_path(in path))
+    } with {
+        return v => v,
+        raise(_e, _k) => Option::None,
+    };
+    match r {
+        Option::Some(c) => c,
+        Option::None => {
+            l.failed = true;
+            ChunkSeq::new[u8]()
+        },
+    }
+}
+
+fn no_entries() -> Entries {
+    Entries { bytes: ChunkSeq::new[u8](), ends: ChunkSeq::new[u64](), kinds: ChunkSeq::new[u32]() }
+}
+
+fn listing(inout l: Ld, in path: Slice[u8]) -> Entries eff [Ffi[StdFs]] {
+    let r = handle Fail[IoError] in {
+        Option::Some(list_dir_path(in path))
+    } with {
+        return v => v,
+        raise(_e, _k) => Option::None,
+    };
+    match r {
+        Option::Some(e) => e,
+        Option::None => {
+            l.failed = true;
+            no_entries()
+        },
+    }
+}
+
+// The kind of `path`, following symbolic links (`fs::metadata`).
+fn kind_of(inout l: Ld, in path: Slice[u8]) -> u32 eff [Ffi[StdFs]] {
+    let r = handle Fail[IoError] in {
+        Option::Some(metadata_path(in path).kind)
+    } with {
+        return v => v,
+        raise(_e, _k) => Option::None,
+    };
+    match r {
+        Option::Some(k) => k,
+        Option::None => {
+            l.failed = true;
+            0
+        },
+    }
+}
+
+// ---------------------------------------------------------- paths
+
+fn is_sep(c: u8, windows: bool) -> bool {
+    c == 47 || (windows && c == 92)
+}
+
+// A normalized path is its components, each followed by a 0 byte. The
+// root directory is `/` (`\` on Windows) and a Windows drive prefix
+// `X:`; both only come first.
+fn is_normal(in c: Slice[u8], windows: bool) -> bool {
+    if c.len() == 0 || eq(in c, in "..".as_bytes()) {
+        return false;
+    }
+    if c.len() == 1 && is_sep(b(in c, 0), windows) {
+        return false;
+    }
+    !(windows && c.len() == 2 && b(in c, 1) == 58)
+}
+
+// The start of `p`'s last component.
+fn last_start(in p: Slice[u8]) -> u64 {
+    if p.len() == 0 {
+        return 0;
+    }
+    let mut i = wrapping_sub(p.len(), 1);
+    loop {
+        if i == 0 {
+            return 0;
+        }
+        if b(in p, wrapping_sub(i, 1)) == 0 {
+            return i;
+        }
+        i = wrapping_sub(i, 1);
+    }
+}
+
+fn last_is_normal(in ps: Slice[u8], at: u64, windows: bool) -> bool {
+    is_normal(in ps[at..wrapping_sub(ps.len(), 1)], windows)
+}
+
+// `normalize`'s push of one component (never `.`).
+fn push_comp(inout p: ChunkSeq[u8], in c: Slice[u8], windows: bool) {
+    if eq(in c, in "..".as_bytes()) && p.len() != 0 {
+        let at = last_start(in p.as_slice());
+        if last_is_normal(in p.as_slice(), at, windows) {
+            p.truncate(at);
+            return;
+        }
+    }
+    p.extend(in c);
+    p.push(0);
+}
+
+// `p` with `path`'s components pushed, as `normalize(&p.join(path))` for
+// a relative `path`. A path `std::path` reads with a prefix this does not
+// model (`\\server\share`, `\\?\`) fails the read.
+fn push_path(inout l: Ld, inout p: ChunkSeq[u8], in path: Slice[u8]) {
+    let windows = l.windows;
+    let mut i: u64 = 0;
+    if windows && path.len() >= 2 && is_sep(b(in path, 0), true) && is_sep(b(in path, 1), true) {
+        l.failed = true;
+        return;
+    }
+    if windows && path.len() >= 2 && b(in path, 1) == 58 {
+        push_comp(inout p, in path[0..2], true);
+        i = 2;
+    }
+    if i < path.len() && is_sep(b(in path, i), windows) {
+        if windows {
+            push_comp(inout p, in "\\".as_bytes(), true);
+        } else {
+            push_comp(inout p, in "/".as_bytes(), false);
+        }
+    }
+    loop {
+        if i >= path.len() {
+            break;
+        }
+        if is_sep(b(in path, i), windows) {
+            i = wrapping_add(i, 1);
+            continue;
+        }
+        let s = i;
+        loop {
+            if i >= path.len() || is_sep(b(in path, i), windows) {
+                break;
+            }
+            i = wrapping_add(i, 1);
+        }
+        if !eq(in path[s..i], in ".".as_bytes()) {
+            push_comp(inout p, in path[s..i], windows);
+        }
+    }
+}
+
+// `display`: the components joined by `/`.
+fn display(in p: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut first = true;
+    let mut s: u64 = 0;
+    for i in 0..p.len() {
+        if b(in p, i) == 0 {
+            if !first {
+                out.push(47);
+            }
+            out.extend(in p[s..i]);
+            first = false;
+            s = wrapping_add(i, 1);
+        }
+    }
+    out
+}
+
+fn is_absolute(in path: Slice[u8], windows: bool) -> bool {
+    if path.len() != 0 && is_sep(b(in path, 0), windows) {
+        return true;
+    }
+    windows && path.len() >= 2 && b(in path, 1) == 58
+}
+
+// A manifest's file path the loader accepts (`Component::Normal` and
+// `CurDir` only, `/` separators): no root, no prefix, no `..`, no `\`.
+fn plain_relative(in path: Slice[u8], windows: bool) -> bool {
+    if contains(in path, in "\\".as_bytes()) || is_absolute(in path, windows) {
+        return false;
+    }
+    let mut s: u64 = 0;
+    for i in 0..wrapping_add(path.len(), 1) {
+        if i == path.len() || b(in path, i) == 47 {
+            if eq(in path[s..i], in "..".as_bytes()) {
+                return false;
+            }
+            s = wrapping_add(i, 1);
+        }
+    }
+    true
+}
+
+// `normalize(relative)` of a plain relative path: its components without
+// `.` and empty ones, joined by `/`.
+fn plain_key(in path: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut s: u64 = 0;
+    for i in 0..wrapping_add(path.len(), 1) {
+        if i == path.len() || b(in path, i) == 47 {
+            if i > s && !eq(in path[s..i], in ".".as_bytes()) {
+                if out.len() != 0 {
+                    out.push(47);
+                }
+                out.extend(in path[s..i]);
+            }
+            s = wrapping_add(i, 1);
+        }
+    }
+    out
+}
+
+fn is_module_segment(in s: Slice[u8]) -> bool {
+    if s.len() == 0 {
+        return false;
+    }
+    let c0 = b(in s, 0);
+    if !((c0 >= 97 && c0 <= 122) || c0 == 95) {
+        return false;
+    }
+    for i in 1..s.len() {
+        let c = b(in s, i);
+        if !((c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95) {
+            return false;
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------- targets
+
+fn target_triple(t: u64) -> Str {
+    if t == 0 {
+        "x86_64-unknown-linux-gnu"
+    } else if t == 1 {
+        "aarch64-unknown-linux-gnu"
+    } else if t == 2 {
+        "aarch64-apple-darwin"
+    } else {
+        "x86_64-pc-windows-msvc"
+    }
+}
+
+fn target_os(t: u64) -> Str {
+    if t == 0 || t == 1 {
+        "linux"
+    } else if t == 2 {
+        "macos"
+    } else {
+        "windows"
+    }
+}
+
+fn target_arch(t: u64) -> Str {
+    if t == 1 || t == 2 {
+        "aarch64"
+    } else {
+        "x86_64"
+    }
+}
+
+fn is_per_target(in path: Slice[u8]) -> bool {
+    contains(in path, in "@TARGET@".as_bytes())
+        || contains(in path, in "@OS@".as_bytes())
+        || contains(in path, in "@ARCH@".as_bytes())
+}
+
+// `expand_vsys_path`.
+fn expand(in path: Slice[u8], t: u64) -> ChunkSeq[u8] {
+    let a = replace(in path, in "@TARGET@".as_bytes(), in target_triple(t).as_bytes());
+    let c = replace(in a.as_slice(), in "@OS@".as_bytes(), in target_os(t).as_bytes());
+    replace(in c.as_slice(), in "@ARCH@".as_bytes(), in target_arch(t).as_bytes())
+}
+
+// ---------------------------------------------------------- host steps
+
+// `VsysNames`: 0 when the library does not parse, 1, or 2 when it links
+// statically; its type names go to package `pkg`'s foreign types.
+fn vsys_names(
+    inout s: Session,
+    inout l: Ld,
+    t: u64,
+    in text: Slice[u8],
+    pkg: u64,
+    names: bool
+) -> i64 eff [Ffi[HybridDriver]] {
+    let mut arg: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put(inout arg, t);
+    arg.extend(in text);
+    let r = HybridDriver::hd_step(inout s, step_vsys_names(), in arg.as_slice());
+    if r < 0 {
+        l.failed = true;
+        return 0;
+    }
+    if r > 0 && names {
+        let out = host_text(in s);
+        let o = out.as_slice();
+        let mut at: u64 = 0;
+        let n = rd(in o, inout at);
+        for _k in 0..n {
+            let (a, e) = rd_str(in o, inout at);
+            let (ks, ke) = keep(inout l, in o[a..e]);
+            l.foreign.push(pkg);
+            l.foreign.push(ks);
+            l.foreign.push(ke);
+        }
+    }
+    r
+}
+
+// ---------------------------------------------------------- the walk
+
+// `walk`: the `.ves` files under `dir` in the loader's order (each
+// directory's entries sorted by name, directories entered where they sort,
+// names starting with `.` left out, symbolic links followed). `out` gets
+// each file's raw path and `rel` its path below the walk's root (names
+// each followed by a 0 byte), one 0-separated entry per file in `ends`.
+fn walk(
+    inout l: Ld,
+    in dir: Slice[u8],
+    in prefix: Slice[u8],
+    depth: u64,
+    inout paths: ChunkSeq[u8],
+    inout path_ends: ChunkSeq[u64],
+    inout rels: ChunkSeq[u8],
+    inout rel_ends: ChunkSeq[u64]
+) eff [Ffi[StdFs]] {
+    if depth > max_depth() {
+        l.failed = true;
+        return;
+    }
+    let e = listing(inout l, in dir);
+    if l.failed {
+        return;
+    }
+    let names = e.bytes.as_slice();
+    for i in 0..entry_count(in e) {
+        let name_seq = copy(in names, entry_start(in e, i), entry_end(in e, i));
+        let name = name_seq.as_slice();
+        if name.len() == 0 || b(in name, 0) == 46 {
+            continue;
+        }
+        let path = join(in dir, in name, l.windows);
+        let mut kind = entry_kind(in e, i);
+        if kind == kind_symlink() {
+            kind = kind_of(inout l, in path.as_slice());
+            if l.failed {
+                return;
+            }
+        }
+        let mut rel: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        rel.extend(in prefix);
+        rel.extend(in name);
+        rel.push(0);
+        if kind == kind_dir() {
+            walk(
+                inout l,
+                in path.as_slice(),
+                in rel.as_slice(),
+                wrapping_add(depth, 1),
+                inout paths,
+                inout path_ends,
+                inout rels,
+                inout rel_ends
+            );
+            if l.failed {
+                return;
+            }
+        } else if kind == kind_file() && ends_with(in name, in ".ves".as_bytes()) {
+            if path_ends.len() >= max_files() {
+                l.failed = true;
+                return;
+            }
+            // A name that is not UTF-8 (`to_string_lossy`) is left to Rust.
+            match String::from_utf8(in name) {
+                Option::Some(_) => {},
+                Option::None => {
+                    l.failed = true;
+                    return;
+                },
+            }
+            paths.extend(in path.as_slice());
+            path_ends.push(paths.len());
+            rels.extend(in rel.as_slice());
+            rel_ends.push(rels.len());
+        }
+    }
+}
+
+// ---------------------------------------------------------- packages
+
+// The package at raw directory `dir`, shown as the normalized path
+// `shown`, and its dependencies: its index (meaningless when the read
+// failed).
+fn package(
+    inout s: Session,
+    inout l: Ld,
+    in dir: Slice[u8],
+    in shown: Slice[u8]
+) -> u64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+    let canon = canonical(inout l, in dir);
+    if l.failed {
+        return 0;
+    }
+    let np = l.pkgs.len() / PKG;
+    // A cycle is a manifest error.
+    for k in 0..l.stack.len() {
+        let p = w(in l.stack.as_slice(), k);
+        let cs = w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(p, PKG), 2));
+        let ce = w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(p, PKG), 3));
+        if same_text(in l, cs, ce, in canon.as_slice()) {
+            l.failed = true;
+            return 0;
+        }
+    }
+    for p in 0..np {
+        let cs = w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(p, PKG), 2));
+        let ce = w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(p, PKG), 3));
+        if same_text(in l, cs, ce, in canon.as_slice()) {
+            return p;
+        }
+    }
+    if np >= max_packages() {
+        l.failed = true;
+        return 0;
+    }
+    let manifest_path = join(in dir, in "Loom.toml".as_bytes(), l.windows);
+    let manifest_text = read_text(inout l, in manifest_path.as_slice());
+    if l.failed {
+        return 0;
+    }
+    let mi = HybridDriver::hd_step(inout s, step_manifest(), in manifest_text.as_slice());
+    if mi <= 0 {
+        l.failed = true;
+        return 0;
+    }
+    let m = host_text(in s);
+    let ms = m.as_slice();
+    let mut at: u64 = 0;
+    let (na, ne) = rd_str(in ms, inout at);
+    let name_seq = copy(in ms, na, ne);
+    let name = name_seq.as_slice();
+    // A package loaded from two directories is a manifest error.
+    for p in 0..np {
+        let s0 = w(in l.pkgs.as_slice(), wrapping_mul(p, PKG));
+        let e0 = w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(p, PKG), 1));
+        if same_text(in l, s0, e0, in name) {
+            l.failed = true;
+            return 0;
+        }
+    }
+    let index = np;
+    // Sources first, as the loader adds them.
+    let mut target_src: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    target_src.extend(in "src-".as_bytes());
+    target_src.extend(in l.os.as_slice());
+    let has_os = l.os.len() != 0;
+    let wasip2 = join(in dir, in "src-wasip2".as_bytes(), l.windows);
+    let os_src = join(in dir, in target_src.as_slice(), l.windows);
+    let source_dir = if l.wasi && is_dir_path(in wasip2.as_slice()) {
+        let mut d: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        d.extend(in "src-wasip2".as_bytes());
+        d
+    } else if !l.wasi && has_os && is_dir_path(in os_src.as_slice()) {
+        target_src
+    } else {
+        let mut d: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        d.extend(in "src".as_bytes());
+        d
+    };
+    let src = join(in dir, in source_dir.as_slice(), l.windows);
+    let mut paths: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut path_ends: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut rels: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut rel_ends: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if is_dir_path(in src.as_slice()) {
+        let none: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        walk(
+            inout l,
+            in src.as_slice(),
+            in none.as_slice(),
+            0,
+            inout paths,
+            inout path_ends,
+            inout rels,
+            inout rel_ends
+        );
+        if l.failed {
+            return 0;
+        }
+    }
+    let mut roots: u64 = 0;
+    let mut src_shown: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    src_shown.extend(in shown);
+    push_path(inout l, inout src_shown, in source_dir.as_slice());
+    for f in 0..path_ends.len() {
+        let ps = if f == 0 {
+            0
+        } else {
+            w(in path_ends.as_slice(), wrapping_sub(f, 1))
+        };
+        let pe = w(in path_ends.as_slice(), f);
+        let rs = if f == 0 {
+            0
+        } else {
+            w(in rel_ends.as_slice(), wrapping_sub(f, 1))
+        };
+        let re = w(in rel_ends.as_slice(), f);
+        let rel_seq = copy(in rels.as_slice(), rs, re);
+        let rel = rel_seq.as_slice();
+        // The file's display: the source directory's, then each name.
+        let mut file_shown: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        file_shown.extend(in src_shown.as_slice());
+        let mut count: u64 = 0;
+        let mut k: u64 = 0;
+        for i in 0..rel.len() {
+            if b(in rel, i) == 0 {
+                push_comp(inout file_shown, in rel[k..i], l.windows);
+                count = wrapping_add(count, 1);
+                k = wrapping_add(i, 1);
+            }
+        }
+        // The module path: the names, the last without `.ves`.
+        let first_seg = l.segs.len() / 2;
+        let mut nseg: u64 = 0;
+        k = 0;
+        let mut root = false;
+        for i in 0..rel.len() {
+            if b(in rel, i) == 0 {
+                let seg_end = if wrapping_add(nseg, 1) == count {
+                    wrapping_sub(i, 4)
+                } else {
+                    i
+                };
+                let seg_seq = copy(in rel, k, seg_end);
+                let seg = seg_seq.as_slice();
+                if count == 1
+                    && (eq(in seg, in "lib".as_bytes()) || eq(in seg, in "main".as_bytes())) {
+                    root = true;
+                } else {
+                    if !is_module_segment(in seg) {
+                        // An invalid module name is a manifest error.
+                        l.failed = true;
+                        return 0;
+                    }
+                    let (ss, se) = keep(inout l, in seg);
+                    l.segs.push(ss);
+                    l.segs.push(se);
+                }
+                nseg = wrapping_add(nseg, 1);
+                k = wrapping_add(i, 1);
+            }
+        }
+        if root {
+            roots = wrapping_add(roots, 1);
+        }
+        let path_seq = copy(in paths.as_slice(), ps, pe);
+        let text = read_text(inout l, in path_seq.as_slice());
+        if l.failed {
+            return 0;
+        }
+        if text.len() > l.max_src {
+            l.failed = true;
+            return 0;
+        }
+        let shown_text = display(in file_shown.as_slice());
+        let (ds, de) = keep(inout l, in shown_text.as_slice());
+        let (ts, te) = keep(inout l, in text.as_slice());
+        let nf = l.files.len() / FILE;
+        let base = if nf == 0 {
+            0
+        } else {
+            let last = wrapping_mul(wrapping_sub(nf, 1), FILE);
+            let lb = w(in l.files.as_slice(), wrapping_add(last, 4));
+            let lts = w(in l.files.as_slice(), wrapping_add(last, 2));
+            let lte = w(in l.files.as_slice(), wrapping_add(last, 3));
+            wrapping_add(wrapping_add(lb, wrapping_sub(lte, lts)), 1)
+        };
+        l.files.push(ds);
+        l.files.push(de);
+        l.files.push(ts);
+        l.files.push(te);
+        l.files.push(base);
+        l.mods.push(index);
+        l.mods.push(nf);
+        l.mods.push(first_seg);
+        l.mods.push(wrapping_sub(l.segs.len() / 2, first_seg));
+    }
+    if roots > 1 {
+        l.failed = true;
+        return 0;
+    }
+    let (ns, ne2) = keep(inout l, in name);
+    // `[package] vsys`.
+    let nvsys = rd(in ms, inout at);
+    let mut seen: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for _k in 0..nvsys {
+        let (vs, ve) = rd_str(in ms, inout at);
+        let written_seq = copy(in ms, vs, ve);
+        let written = written_seq.as_slice();
+        let path = if l.wasi && is_per_target(in written) {
+            let a = replace(in written, in "@TARGET@".as_bytes(), in "wasm32-wasip2".as_bytes());
+            let c = replace(in a.as_slice(), in "@OS@".as_bytes(), in "wasip2".as_bytes());
+            replace(in c.as_slice(), in "@ARCH@".as_bytes(), in "wasm32".as_bytes())
+        } else {
+            let mut p: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            p.extend(in written);
+            p
+        };
+        let ps = path.as_slice();
+        if !ends_with(in ps, in ".vsys".as_bytes()) || !plain_relative(in ps, l.windows) {
+            l.failed = true;
+            return 0;
+        }
+        let key = plain_key(in ps);
+        if !first_seen(inout seen, in key.as_slice()) {
+            l.failed = true;
+            return 0;
+        }
+        let mut vshown: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        vshown.extend(in shown);
+        push_path(inout l, inout vshown, in ps);
+        let vdisplay = display(in vshown.as_slice());
+        let first_t = l.vt.len() / VT;
+        let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        if is_per_target(in ps) {
+            for t in 0..target_count() {
+                let expanded = expand(in ps, t);
+                let file = join(in dir, in expanded.as_slice(), l.windows);
+                if !is_file_path(in file.as_slice()) {
+                    continue;
+                }
+                let ttext = read_text(inout l, in file.as_slice());
+                if l.failed {
+                    return 0;
+                }
+                let mut tshown: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                tshown.extend(in shown);
+                push_path(inout l, inout tshown, in expanded.as_slice());
+                let td = display(in tshown.as_slice());
+                let (tds, tde) = keep(inout l, in td.as_slice());
+                let (tts, tte) = keep(inout l, in ttext.as_slice());
+                l.vt.push(t);
+                l.vt.push(tds);
+                l.vt.push(tde);
+                l.vt.push(tts);
+                l.vt.push(tte);
+            }
+            if l.vt.len() / VT == first_t {
+                l.failed = true;
+                return 0;
+            }
+            // The host's file, or else the first target's.
+            let mut pick = first_t;
+            for k2 in first_t..l.vt.len() / VT {
+                if w(in l.vt.as_slice(), wrapping_mul(k2, VT)) == l.host {
+                    pick = k2;
+                }
+            }
+            let a = w(in l.vt.as_slice(), wrapping_add(wrapping_mul(pick, VT), 3));
+            let e = w(in l.vt.as_slice(), wrapping_add(wrapping_mul(pick, VT), 4));
+            text = tx(in l, a, e);
+            for k2 in first_t..l.vt.len() / VT {
+                let t = w(in l.vt.as_slice(), wrapping_mul(k2, VT));
+                let a2 = w(in l.vt.as_slice(), wrapping_add(wrapping_mul(k2, VT), 3));
+                let e2 = w(in l.vt.as_slice(), wrapping_add(wrapping_mul(k2, VT), 4));
+                let tt = tx(in l, a2, e2);
+                let _ = vsys_names(inout s, inout l, t, in tt.as_slice(), index, true);
+                if l.failed {
+                    return 0;
+                }
+            }
+        } else {
+            let file = join(in dir, in ps, l.windows);
+            if !is_file_path(in file.as_slice()) {
+                l.failed = true;
+                return 0;
+            }
+            text = read_text(inout l, in file.as_slice());
+            if l.failed {
+                return 0;
+            }
+            if l.host != no_target() {
+                let host = l.host;
+                let _ = vsys_names(inout s, inout l, host, in text.as_slice(), index, true);
+                if l.failed {
+                    return 0;
+                }
+            }
+        }
+        let (vds, vde) = keep(inout l, in vdisplay.as_slice());
+        let (vts, vte) = keep(inout l, in text.as_slice());
+        l.vsys.push(ns);
+        l.vsys.push(ne2);
+        l.vsys.push(vds);
+        l.vsys.push(vde);
+        l.vsys.push(vts);
+        l.vsys.push(vte);
+        l.vsys.push(first_t);
+        l.vsys.push(wrapping_sub(l.vt.len() / VT, first_t));
+    }
+    // `[package] objects`.
+    let nobj = rd(in ms, inout at);
+    let mut oseen: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    // Whether one of the package's `.vsys` libraries links statically
+    // (0 not computed yet, 1 no, 2 yes).
+    let mut statically: u64 = 0;
+    for _k in 0..nobj {
+        let (os2, oe2) = rd_str(in ms, inout at);
+        let path_seq = copy(in ms, os2, oe2);
+        let path = path_seq.as_slice();
+        if !object_extension(in path) || !plain_relative(in path, l.windows) {
+            l.failed = true;
+            return 0;
+        }
+        let key = plain_key(in path);
+        if !first_seen(inout oseen, in key.as_slice()) {
+            l.failed = true;
+            return 0;
+        }
+        let first_f = l.of.len() / OF;
+        if is_per_target(in path) {
+            for t in 0..target_count() {
+                let expanded = expand(in path, t);
+                let file = join(in dir, in expanded.as_slice(), l.windows);
+                if is_file_path(in file.as_slice()) {
+                    let (fs2, fe2) = keep(inout l, in file.as_slice());
+                    l.of.push(t);
+                    l.of.push(fs2);
+                    l.of.push(fe2);
+                }
+            }
+        } else {
+            let file = join(in dir, in path, l.windows);
+            if is_file_path(in file.as_slice()) {
+                let (fs2, fe2) = keep(inout l, in file.as_slice());
+                l.of.push(no_target());
+                l.of.push(fs2);
+                l.of.push(fe2);
+            }
+        }
+        if l.of.len() / OF == first_f {
+            l.failed = true;
+            return 0;
+        }
+        if statically == 0 {
+            statically = 1;
+            for v in 0..l.vsys.len() / VSYS {
+                let at0 = wrapping_mul(v, VSYS);
+                let vp = tx(
+                    in l,
+                    w(in l.vsys.as_slice(), at0),
+                    w(in l.vsys.as_slice(), wrapping_add(at0, 1))
+                );
+                if !eq(in vp.as_slice(), in name) {
+                    continue;
+                }
+                let ft = w(in l.vsys.as_slice(), wrapping_add(at0, 6));
+                let nt = w(in l.vsys.as_slice(), wrapping_add(at0, 7));
+                let (t, a, e) = if nt == 0 {
+                    (
+                        0,
+                        w(in l.vsys.as_slice(), wrapping_add(at0, 4)),
+                        w(in l.vsys.as_slice(), wrapping_add(at0, 5))
+                    )
+                } else {
+                    let k0 = wrapping_mul(ft, VT);
+                    (
+                        w(in l.vt.as_slice(), k0),
+                        w(in l.vt.as_slice(), wrapping_add(k0, 3)),
+                        w(in l.vt.as_slice(), wrapping_add(k0, 4))
+                    )
+                };
+                let vt2 = tx(in l, a, e);
+                let r = vsys_names(inout s, inout l, t, in vt2.as_slice(), index, false);
+                if l.failed {
+                    return 0;
+                }
+                if r == 2 {
+                    statically = 2;
+                    break;
+                }
+            }
+        }
+        if statically != 2 {
+            l.failed = true;
+            return 0;
+        }
+        let mut oshown: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        oshown.extend(in shown);
+        push_path(inout l, inout oshown, in path);
+        let od = display(in oshown.as_slice());
+        let (ods, ode) = keep(inout l, in od.as_slice());
+        l.objs.push(ns);
+        l.objs.push(ne2);
+        l.objs.push(ods);
+        l.objs.push(ode);
+        l.objs.push(first_f);
+        l.objs.push(wrapping_sub(l.of.len() / OF, first_f));
+    }
+    let (cs, ce) = keep(inout l, in canon.as_slice());
+    l.pkgs.push(ns);
+    l.pkgs.push(ne2);
+    l.pkgs.push(cs);
+    l.pkgs.push(ce);
+    l.pkgs.push(wrapping_sub(wrapping_u64(mi), 1));
+    l.stack.push(index);
+    // The dependencies, in name order; optional ones are not loaded.
+    let ndep = rd(in ms, inout at);
+    for _k in 0..ndep {
+        let (ds, de) = rd_str(in ms, inout at);
+        let optional = rd(in ms, inout at) != 0;
+        let has_path = rd(in ms, inout at) != 0;
+        let (ps, pe) = rd_str(in ms, inout at);
+        let dep_seq = copy(in ms, ds, de);
+        let dep_name = dep_seq.as_slice();
+        if optional {
+            let (ks, ke) = keep(inout l, in dep_name);
+            l.opts.push(index);
+            l.opts.push(ks);
+            l.opts.push(ke);
+            continue;
+        }
+        let path_seq = copy(in ms, ps, pe);
+        let path = path_seq.as_slice();
+        // A registry dependency is a manifest error; an absolute path is
+        // the Rust loader's.
+        if !has_path || is_absolute(in path, l.windows) {
+            l.failed = true;
+            return 0;
+        }
+        let dep_dir = join(in dir, in path, l.windows);
+        let dep_manifest = join(in dep_dir.as_slice(), in "Loom.toml".as_bytes(), l.windows);
+        if !is_file_path(in dep_manifest.as_slice()) {
+            l.failed = true;
+            return 0;
+        }
+        let mut dep_shown: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        dep_shown.extend(in shown);
+        push_path(inout l, inout dep_shown, in path);
+        if l.failed {
+            return 0;
+        }
+        let d = package(inout s, inout l, in dep_dir.as_slice(), in dep_shown.as_slice());
+        if l.failed {
+            return 0;
+        }
+        let dn0 = w(in l.pkgs.as_slice(), wrapping_mul(d, PKG));
+        let dn1 = w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(d, PKG), 1));
+        if !same_text(in l, dn0, dn1, in dep_name) {
+            l.failed = true;
+            return 0;
+        }
+        let mut arg: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put(inout arg, wrapping_sub(wrapping_u64(mi), 1));
+        put(inout arg, w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(d, PKG), 4)));
+        put_str(inout arg, in dep_name);
+        if HybridDriver::hd_step(inout s, step_version_matches(), in arg.as_slice()) != 1 {
+            l.failed = true;
+            return 0;
+        }
+        let (ks, ke) = keep(inout l, in dep_name);
+        l.deps.push(index);
+        l.deps.push(ks);
+        l.deps.push(ke);
+        l.deps.push(d);
+    }
+    l.stack.truncate(wrapping_sub(l.stack.len(), 1));
+    index
+}
+
+fn has_key(in all: Slice[u8], in key: Slice[u8]) -> bool {
+    let mut s: u64 = 0;
+    for i in 0..all.len() {
+        if b(in all, i) == 0 {
+            if eq(in all[s..i], in key) {
+                return true;
+            }
+            s = wrapping_add(i, 1);
+        }
+    }
+    false
+}
+
+// Whether `key` is new to `seen` (0-separated); adds it.
+fn first_seen(inout seen: ChunkSeq[u8], in key: Slice[u8]) -> bool {
+    if has_key(in seen.as_slice(), in key) {
+        return false;
+    }
+    seen.extend(in key);
+    seen.push(0);
+    true
+}
+
+// `Path::extension` of a manifest object path is one of
+// `OBJECT_EXTENSIONS`.
+fn object_extension(in path: Slice[u8]) -> bool {
+    // The file name: the last component that is not empty or `.`.
+    let mut ns: u64 = 0;
+    let mut ne: u64 = 0;
+    let mut s: u64 = 0;
+    for i in 0..wrapping_add(path.len(), 1) {
+        if i == path.len() || b(in path, i) == 47 {
+            if i > s && !eq(in path[s..i], in ".".as_bytes()) {
+                ns = s;
+                ne = i;
+            }
+            s = wrapping_add(i, 1);
+        }
+    }
+    let name_seq = copy(in path, ns, ne);
+    let name = name_seq.as_slice();
+    if name.len() == 0 || eq(in name, in "..".as_bytes()) {
+        return false;
+    }
+    let mut dot = name.len();
+    for i in 0..name.len() {
+        if b(in name, i) == 46 {
+            dot = i;
+        }
+    }
+    if dot == name.len() || dot == 0 {
+        return false;
+    }
+    let ext_seq = copy(in name, wrapping_add(dot, 1), name.len());
+    let ext = ext_seq.as_slice();
+    eq(in ext, in "c".as_bytes())
+        || eq(in ext, in "s".as_bytes())
+        || eq(in ext, in "S".as_bytes())
+        || eq(in ext, in "asm".as_bytes())
+        || eq(in ext, in "o".as_bytes())
+        || eq(in ext, in "obj".as_bytes())
+}
+
+// ---------------------------------------------------------- the input
+
+// The assembler's input (`Loading::assembly_input`) of the graph read.
+fn assembly_input(in l: Ld) -> ChunkSeq[u8] {
+    let t = l.t.as_slice();
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let np = l.pkgs.len() / PKG;
+    put(inout o, np);
+    for p in 0..np {
+        let at = wrapping_mul(p, PKG);
+        put_str(
+            inout o,
+            in t[w(in l.pkgs.as_slice(), at)..w(in l.pkgs.as_slice(), wrapping_add(at, 1))]
+        );
+        let mut n: u64 = 0;
+        for k in 0..l.deps.len() / 4 {
+            if w(in l.deps.as_slice(), wrapping_mul(k, 4)) == p {
+                n = wrapping_add(n, 1);
+            }
+        }
+        put(inout o, n);
+        for k in 0..l.deps.len() / 4 {
+            let a = wrapping_mul(k, 4);
+            if w(in l.deps.as_slice(), a) == p {
+                put_str(
+                    inout o,
+                    in t[
+                        w(in l.deps.as_slice(), wrapping_add(a, 1))..w(
+                            in l.deps.as_slice(),
+                            wrapping_add(a, 2)
+                        )
+                    ]
+                );
+                put(inout o, w(in l.deps.as_slice(), wrapping_add(a, 3)));
+            }
+        }
+        n = 0;
+        for k in 0..l.opts.len() / 3 {
+            if w(in l.opts.as_slice(), wrapping_mul(k, 3)) == p {
+                n = wrapping_add(n, 1);
+            }
+        }
+        put(inout o, n);
+        for k in 0..l.opts.len() / 3 {
+            let a = wrapping_mul(k, 3);
+            if w(in l.opts.as_slice(), a) == p {
+                put_str(
+                    inout o,
+                    in t[
+                        w(in l.opts.as_slice(), wrapping_add(a, 1))..w(
+                            in l.opts.as_slice(),
+                            wrapping_add(a, 2)
+                        )
+                    ]
+                );
+            }
+        }
+    }
+    let nf = l.files.len() / FILE;
+    put(inout o, nf);
+    for f in 0..nf {
+        let a = wrapping_mul(f, FILE);
+        put_str(
+            inout o,
+            in t[w(in l.files.as_slice(), a)..w(in l.files.as_slice(), wrapping_add(a, 1))]
+        );
+        put(inout o, w(in l.files.as_slice(), wrapping_add(a, 4)));
+    }
+    let nm = l.mods.len() / MODULE;
+    put(inout o, nm);
+    for m in 0..nm {
+        let a = wrapping_mul(m, MODULE);
+        put(inout o, w(in l.mods.as_slice(), a));
+        let first = w(in l.mods.as_slice(), wrapping_add(a, 2));
+        let n = w(in l.mods.as_slice(), wrapping_add(a, 3));
+        put(inout o, n);
+        for k in first..wrapping_add(first, n) {
+            put_str(
+                inout o,
+                in t[
+                    w(in l.segs.as_slice(), wrapping_mul(k, 2))..w(
+                        in l.segs.as_slice(),
+                        wrapping_add(wrapping_mul(k, 2), 1)
+                    )
+                ]
+            );
+        }
+        let file = w(in l.mods.as_slice(), wrapping_add(a, 1));
+        put(inout o, file);
+        let fa = wrapping_mul(file, FILE);
+        put_str(
+            inout o,
+            in t[
+                w(in l.files.as_slice(), wrapping_add(fa, 2))..w(
+                    in l.files.as_slice(),
+                    wrapping_add(fa, 3)
+                )
+            ]
+        );
+    }
+    // The foreign type names: per package, sorted and without repeats (the
+    // keys of `Package::foreign_types`).
+    let mut rows: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for p in 0..np {
+        let first = rows.len();
+        for k in 0..l.foreign.len() / 3 {
+            let a = wrapping_mul(k, 3);
+            if w(in l.foreign.as_slice(), a) != p {
+                continue;
+            }
+            let s = w(in l.foreign.as_slice(), wrapping_add(a, 1));
+            let e = w(in l.foreign.as_slice(), wrapping_add(a, 2));
+            // Insert in order, once.
+            let mut i = first;
+            let mut dup = false;
+            loop {
+                if i >= rows.len() {
+                    break;
+                }
+                let rs = w(in rows.as_slice(), wrapping_add(i, 1));
+                let re = w(in rows.as_slice(), wrapping_add(i, 2));
+                if eq(in t[rs..re], in t[s..e]) {
+                    dup = true;
+                    break;
+                }
+                if less(in t[s..e], in t[rs..re]) {
+                    break;
+                }
+                i = wrapping_add(i, 3);
+            }
+            if dup {
+                continue;
+            }
+            rows.push(0);
+            rows.push(0);
+            rows.push(0);
+            let mut j = wrapping_sub(rows.len(), 3);
+            loop {
+                if j <= i {
+                    break;
+                }
+                for c in 0..3 {
+                    let v = w(in rows.as_slice(), wrapping_add(wrapping_sub(j, 3), c));
+                    let _ = rows.try_set(wrapping_add(j, c), v);
+                }
+                j = wrapping_sub(j, 3);
+            }
+            let _ = rows.try_set(i, p);
+            let _ = rows.try_set(wrapping_add(i, 1), s);
+            let _ = rows.try_set(wrapping_add(i, 2), e);
+        }
+    }
+    put(inout o, rows.len() / 3);
+    for k in 0..rows.len() / 3 {
+        let a = wrapping_mul(k, 3);
+        put(inout o, w(in rows.as_slice(), a));
+        put_str(
+            inout o,
+            in t[
+                w(in rows.as_slice(), wrapping_add(a, 1))..w(in rows.as_slice(), wrapping_add(a, 2))
+            ]
+        );
+    }
+    // No sugar declarations: a module with sugar does not parse, and the
+    // Rust loader loads a graph with a parse error.
+    put(inout o, 0);
+    o
+}
+
+// The `Graph` step's argument: the input, then the `.vsys` libraries and
+// the objects.
+fn graph_arg(in l: Ld, in input: Slice[u8]) -> ChunkSeq[u8] {
+    let t = l.t.as_slice();
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put(inout o, input.len());
+    o.extend(in input);
+    let nv = l.vsys.len() / VSYS;
+    put(inout o, nv);
+    for v in 0..nv {
+        let a = wrapping_mul(v, VSYS);
+        let r = l.vsys.as_slice();
+        put_str(inout o, in t[w(in r, a)..w(in r, wrapping_add(a, 1))]);
+        put_str(inout o, in t[w(in r, wrapping_add(a, 2))..w(in r, wrapping_add(a, 3))]);
+        put_str(inout o, in t[w(in r, wrapping_add(a, 4))..w(in r, wrapping_add(a, 5))]);
+        let first = w(in r, wrapping_add(a, 6));
+        let n = w(in r, wrapping_add(a, 7));
+        put(inout o, n);
+        for k in first..wrapping_add(first, n) {
+            let c = wrapping_mul(k, VT);
+            let q = l.vt.as_slice();
+            put(inout o, w(in q, c));
+            put_str(inout o, in t[w(in q, wrapping_add(c, 1))..w(in q, wrapping_add(c, 2))]);
+            put_str(inout o, in t[w(in q, wrapping_add(c, 3))..w(in q, wrapping_add(c, 4))]);
+        }
+    }
+    let no = l.objs.len() / OBJ;
+    put(inout o, no);
+    for k in 0..no {
+        let a = wrapping_mul(k, OBJ);
+        let r = l.objs.as_slice();
+        put_str(inout o, in t[w(in r, a)..w(in r, wrapping_add(a, 1))]);
+        put_str(inout o, in t[w(in r, wrapping_add(a, 2))..w(in r, wrapping_add(a, 3))]);
+        let first = w(in r, wrapping_add(a, 4));
+        let n = w(in r, wrapping_add(a, 5));
+        put(inout o, n);
+        for f in first..wrapping_add(first, n) {
+            let c = wrapping_mul(f, OF);
+            let q = l.of.as_slice();
+            put(inout o, w(in q, c));
+            put_str(inout o, in t[w(in q, wrapping_add(c, 1))..w(in q, wrapping_add(c, 2))]);
+        }
+    }
+    o
+}
+
+// ---------------------------------------------------------- entry
+
+// Reads the package graph at the driver's input `input` when the session
+// says the driver reads it (`LoadBegin`), and hands it to the session
+// (`Graph`): its assembler input for `assembled_words`. `Option::None`
+// when the Rust loader loads the graph: the session's `LoadPackage` then
+// reads it as before.
+pub fn read_graph(
+    inout s: Session,
+    in input: Slice[u8],
+    windows: bool
+) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs], Ffi[HybridDriver]] {
+    if HybridDriver::hd_step(inout s, step_load_begin(), in "".as_bytes()) != 1 {
+        return Option::None;
+    }
+    let begin = host_text(in s);
+    let bs = begin.as_slice();
+    let mut at: u64 = 0;
+    let wasi = rd(in bs, inout at) != 0;
+    let host = rd(in bs, inout at);
+    let max_src = rd(in bs, inout at);
+    let (os_s, os_e) = rd_str(in bs, inout at);
+    let mut os: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    os.extend(in bs[os_s..os_e]);
+    let mut l = Ld {
+        wasi: wasi,
+        host: host,
+        max_src: max_src,
+        os: os,
+        windows: windows,
+        failed: false,
+        t: ChunkSeq::new[u8](),
+        pkgs: ChunkSeq::new[u64](),
+        deps: ChunkSeq::new[u64](),
+        opts: ChunkSeq::new[u64](),
+        foreign: ChunkSeq::new[u64](),
+        files: ChunkSeq::new[u64](),
+        mods: ChunkSeq::new[u64](),
+        segs: ChunkSeq::new[u64](),
+        stack: ChunkSeq::new[u64](),
+        vsys: ChunkSeq::new[u64](),
+        vt: ChunkSeq::new[u64](),
+        objs: ChunkSeq::new[u64](),
+        of: ChunkSeq::new[u64]()
+    };
+    let mut shown: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    push_path(inout l, inout shown, in input);
+    if !l.failed {
+        let _ = package(inout s, inout l, in input, in shown.as_slice());
+    }
+    if l.failed {
+        return Option::None;
+    }
+    let graph = assembly_input(in l);
+    let arg = graph_arg(in l, in graph.as_slice());
+    if HybridDriver::hd_step(inout s, step_graph(), in arg.as_slice()) != 0 {
+        return Option::None;
+    }
+    Option::Some(graph)
+}

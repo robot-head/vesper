@@ -1,12 +1,64 @@
-# The driver's package load in Vesper, slice 1: assembly
+# The driver's package load in Vesper
 
 > The [manuscript](../manuscript/README.md) is the sole specification.
 > Confirm live ownership on the issue board before acting.
 
 Claim: #1986 (part of hd_step group 1, #1896, and Stage 2 retirement,
-#1397). Built on #1984's step table (`LoadPackage` = 70).
+#1397). Built on #1984's step table (`LoadPackage` = 70). Slice 1 (the
+assembly) is #2033; slice 2 (the loader's I/O) follows it.
 
-## Summary
+## Slice 2: the loader's I/O
+
+- The driver now reads the package graph itself
+  (`crates/vesper-hybrid/modules/driver/src/load.ves`): `Loader::package`
+  in Vesper over `@vesper-std/fs`. It canonicalizes each package directory
+  (cycles and packages loaded twice), reads every `Loom.toml` of the
+  dependency closure, picks the source directory (`src-wasip2` for the WASI
+  component build, `src-<os>` when the target's OS has one, else `src`),
+  walks it in the loader's order (each directory sorted by name, hidden
+  names skipped, symbolic links followed, the depth and file bounds),
+  checks the module names and the single root module, reads the sources,
+  and reads and checks the `[package] vsys` and `objects` files (per-target
+  paths, the static `.vsys` library objects need). It then encodes the
+  assembler's input itself, so the graph no longer crosses from Rust, and
+  hands the session only what `packages::Assembled` keeps besides the
+  assembly: the `.vsys` libraries and the objects (the `Graph` step). The
+  sources, root package and root module come back out of the assembler's
+  input.
+- What still runs over the Rust parsers, as host steps (71-75,
+  `crates/vesper-hybrid/src/driver/load.rs`): the manifest decode
+  (`vesper_loom_calculus::parse_manifest`), a dependency's version match
+  and a `.vsys` library's type names and link mode (`vesper_ffi::sys`). A
+  graph with a manifest error or an I/O error, or one this reader does not
+  model (an absolute dependency path, a UNC path, a file name that is not
+  UTF-8, a source over the parser's byte budget), goes back to the Rust
+  loader: the driver then runs `LoadPackage` as before, which reports it
+  exactly.
+- **Differential: 0 differences** on all 211 Loom packages of the corpus:
+  206 read in Vesper, 5 handed back (the manifest-error fixtures). At
+  `VESPER_HYBRID_STATS=time` the comparison with `packages::load_for_target`
+  now covers the whole `Assembled` for a graph the driver read: the source
+  files (display, text, offset), the root package and module, the root
+  package's files, the `.vsys` libraries and the objects.
+- **Speed: 0.78x (95% CI 0.76..0.80)** of the Rust load. ABBA over 6 rounds
+  of the whole package load (the Vesper read, assembly and read-back,
+  against `VESPER_HYBRID_ASSEMBLE=0`, the Rust loader's whole load) on every
+  6th corpus package the driver reads and assembles (32 packages), release,
+  `RUSTFLAGS="-C target-cpu=native"`. The read alone
+  (`DRIVER_PACKAGES_SPEED_OFF=VESPER_HYBRID_LOAD`: the Rust read with the
+  Vesper assembly as the other side) measured 1.05x (95% CI 0.86..1.24, 3
+  rounds over 15 packages).
+- The swap is `load` (an open row, in `src/swap/assemble.rs`);
+  `VESPER_HYBRID_LOAD=0` turns the read off and keeps slice 1.
+  `VESPER_HYBRID_STATS=1` prints `load read <n> package graphs in Vesper
+  (<m> handed back to Rust)`.
+- Left for slice 2b: the manifest decode in Vesper (`@vesper/loom-calculus`
+  already decodes the TOML to the manifest's JSON; the JSON-to-words step
+  of its validator is still Rust's src/port.rs), the version match over its
+  SemVer port, the `.vsys` names over `@vesper/vsys`, and manifest errors
+  rendered in Vesper, so that no graph goes back to Rust.
+
+## Slice 1: assembly
 
 - The Vesper driver (`crates/vesper-hybrid/modules/driver`) now assembles
   the package it loads. `LoadPackage` reads the package graph with the Rust
