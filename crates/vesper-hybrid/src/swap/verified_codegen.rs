@@ -16,6 +16,7 @@ mod verified_codegen_binding;
 mod verified_words;
 
 use super::{Registry, Swap, env_off, ir_words, must, on, open};
+use verified_words::{COMPILE_INPUT_FORMAT, compile_input, decode_build};
 use vesper::verified_codegen as verified;
 
 /// Builds whose artifact came from Vesper.
@@ -36,32 +37,12 @@ const VESPER_VERIFIED_BUILD: verified::VerifiedBuildTable = verified::VerifiedBu
             return verified::rust_build(world, entry, options);
         };
         VERIFIED_CODEGEN_CALLS.fetch_add(1, Relaxed);
-        decode(
+        decode_build(
             &verified_codegen_binding::compile_input_words(&input),
             options.target,
         )
     },
 };
-
-/// `compile_input_words`'s input: the target words and the front-half
-/// input of `entry` built for `target` (default: the host).
-fn compile_input(
-    world: &vesper::check::World,
-    entry: &str,
-    options: &verified::Options,
-) -> Result<Option<Vec<u8>>, verified::VerifiedError> {
-    let (program, max) = verified::optimized_program(world, entry, options)?;
-    let Some((front, _)) = verified_words::mono_input(world, &program, entry, max, Some(options))
-    else {
-        return Ok(None);
-    };
-    let mut input: Vec<u8> = verified_words::target_words(options)
-        .iter()
-        .flat_map(|w| w.to_le_bytes())
-        .collect();
-    input.extend_from_slice(&front);
-    Ok(Some(input))
-}
 
 /// The input of the Vesper driver's `vesper build --codegen verified`
 /// (#1886): the summary's target text (`X86_64 Linux`) as a byte length
@@ -100,48 +81,6 @@ pub(crate) fn verified_build_input(
     Some(out)
 }
 
-/// `compile_input_words`'s two packings (each a byte length, then the
-/// bytes, eight to a word): `error: <display>\n`, or the build's summary
-/// (`code <bytes>` first) and then the artifact.
-fn decode(
-    words: &[u64],
-    target: verified::Target,
-) -> Result<verified::Built, verified::VerifiedError> {
-    let invalid =
-        |m: &str| verified::VerifiedError::Invalid(format!("Vesper verified codegen: {m}"));
-    let unpack = |at: usize| -> Option<(Vec<u8>, usize)> {
-        let len = usize::try_from(*words.get(at)?).ok()?;
-        let n = len.div_ceil(8);
-        let packed = words.get(at + 1..at.checked_add(1 + n)?)?;
-        let mut bytes = Vec::with_capacity(n * 8);
-        for w in packed {
-            bytes.extend_from_slice(&w.to_le_bytes());
-        }
-        bytes.truncate(len);
-        Some((bytes, at + 1 + n))
-    };
-    let (text, at) = unpack(0).ok_or_else(|| invalid("truncated output"))?;
-    let (bytes, _) = unpack(at).ok_or_else(|| invalid("truncated output"))?;
-    let text = String::from_utf8(text).map_err(|e| invalid(&e.to_string()))?;
-    if let Some(e) = text.strip_prefix("error: ") {
-        return Err(verified::VerifiedError::from_display(
-            e.strip_suffix('\n').unwrap_or(e),
-        ));
-    }
-    let code_len = text
-        .lines()
-        .next()
-        .and_then(|l| l.strip_prefix("code "))
-        .and_then(|n| n.parse().ok())
-        .ok_or_else(|| invalid("no code size"))?;
-    let container = verified::container_of(target).ok_or_else(|| invalid("no container"))?;
-    Ok(verified::Built {
-        container,
-        bytes,
-        code_len,
-    })
-}
-
 /// The flip-gate rows of this file's swaps (`swaps::on`).
 pub(super) const SWAPS: &[Swap] = &[open(
     "verified_codegen",
@@ -151,7 +90,7 @@ pub(super) const SWAPS: &[Swap] = &[open(
 pub(super) fn register(_r: &mut Registry) {
     if on("verified_codegen") && !env_off("VESPER_HYBRID_VERIFIED") {
         // The input layout the Rust encoder writes must be the module's.
-        if verified_codegen_binding::format() != 1 {
+        if verified_codegen_binding::format() != COMPILE_INPUT_FORMAT {
             std::process::abort();
         }
         must(verified::install_verified_build(VESPER_VERIFIED_BUILD));
