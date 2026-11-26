@@ -1349,3 +1349,136 @@ fn rigid_solve_matches_the_rust_build() {
     assert!(joints > 1000 && contacts > 1000);
     assert_eq!(differences, 0);
 }
+
+/// One random particle world, built the same way in either build: spheres
+/// over the ground with random masses (some static), compliance,
+/// distance-joint chains, a contact material with friction and restitution,
+/// and the scalar or the serial Batched16 solver.
+macro_rules! world_scene {
+    ($k:ident, $seed:expr) => {{
+        use $k::{
+            Body, ContactMaterial, DistanceConstraint, SolverMode, SphereCollider, World,
+            WorldConfig,
+        };
+        let mut rng = Lcg($seed);
+        let n = 20 + (rng.next() % 120) as usize;
+        let mut bodies = Vec::with_capacity(n);
+        for i in 0..n {
+            bodies.push(Body {
+                // A jittered lattice: neighbours touch, none overlap deeply.
+                pos: [
+                    (i % 6) as f32 * 0.85 + rng.range(-0.05, 0.05) as f32,
+                    0.45 + (i / 36) as f32 * 0.85 + rng.range(0.0, 0.05) as f32,
+                    ((i / 6) % 6) as f32 * 0.85 + rng.range(-0.05, 0.05) as f32,
+                ],
+                vel: [
+                    rng.range(-0.5, 0.5) as f32,
+                    rng.range(-0.5, 0.2) as f32,
+                    rng.range(-0.5, 0.5) as f32,
+                ],
+                inv_mass: if i % 17 == 3 {
+                    0.0
+                } else {
+                    rng.range(0.2, 3.0) as f32
+                },
+                compliance_alpha: if rng.next() % 2 == 0 { 0.0 } else { 1.0e-4 },
+                collider_asset_id: rng.next() % 2,
+                collision_layer_mask: 1,
+            });
+        }
+        let mut joints = Vec::new();
+        // Chains of consecutive bodies, so no body has many joints.
+        for _ in 0..rng.next() % 4 {
+            let start = rng.next() % (n as u32 - 8);
+            for a in start..start + 6 {
+                let b = a + 1;
+                joints.push(DistanceConstraint {
+                    a,
+                    b,
+                    rest_length: rng.range(0.8, 0.9) as f32,
+                    compliance: if rng.next() % 2 == 0 { 0.0 } else { 1.0e-3 },
+                });
+            }
+        }
+        let mut w = World::new(
+            WorldConfig {
+                substeps: 1 + rng.next() % 6,
+                ground_y: Some(rng.range(-0.5, 0.0) as f32),
+                cell_size: 1.0,
+                contact_margin: 0.05,
+                max_contacts: 4096,
+                ..WorldConfig::default()
+            },
+            &bodies,
+            &[
+                SphereCollider { radius: 0.25 },
+                SphereCollider { radius: 0.4 },
+            ],
+            &joints,
+        )
+        .unwrap();
+        w.set_contact_material(ContactMaterial {
+            static_friction: if rng.next() % 3 == 0 {
+                0.0
+            } else {
+                rng.range(0.0, 1.0) as f32
+            },
+            dynamic_friction: if rng.next() % 3 == 0 {
+                0.0
+            } else {
+                rng.range(0.0, 0.8) as f32
+            },
+            restitution: if rng.next() % 2 == 0 {
+                0.0
+            } else {
+                rng.range(0.1, 0.9) as f32
+            },
+        })
+        .unwrap();
+        if rng.next() % 2 == 0 {
+            w.set_solver_mode(SolverMode::Batched16);
+        }
+        w
+    }};
+}
+
+/// The port's particle-world substeps (`World::advance`,
+/// vesper/src/world.ves) against the frozen Rust build: the world hash after
+/// every tick of random sphere piles with joints, friction, restitution and
+/// both serial solvers (SH6 lane 9, #1404).
+#[test]
+fn world_substeps_match_the_rust_build() {
+    let mut differences = 0usize;
+    let mut cases = 0usize;
+    let mut contacts = 0usize;
+    let mut errors = 0usize;
+    for round in 0..64u64 {
+        let seed = 0x776f_726c_6400 + round;
+        let mut pw = world_scene!(vesper_kinetic, seed);
+        let mut rw = world_scene!(vesper_kinetic_rust, seed);
+        for step in 0..60 {
+            let (p, r) = (pw.step(), rw.step());
+            match (p, r) {
+                (Ok(p), Ok(r)) => {
+                    cases += 1;
+                    contacts += p.manifold_count as usize;
+                    if p.world_state_blake3 != r.world_state_blake3 {
+                        differences += 1;
+                    }
+                }
+                (p, r) => {
+                    assert_eq!(p.is_ok(), r.is_ok(), "round {round} step {step}");
+                    errors += 1;
+                    break;
+                }
+            }
+        }
+    }
+    println!(
+        "world substeps differential differences={differences} cases={cases} contacts={contacts} errors={errors}"
+    );
+    // Some scenes stop early where both builds refuse a step alike (a sweep
+    // too large for the contact search); the ticks before that compare.
+    assert!(cases > 2000 && contacts > 100_000);
+    assert_eq!(differences, 0);
+}
