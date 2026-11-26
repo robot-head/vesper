@@ -1,35 +1,15 @@
 // Module entry of @vesper/quarry (see lib.ves).
 use self::{CCol, CTab, D, Q};
 use self::util::{
-    bound,
-    cw,
-    empty_col,
-    ex,
-    fail,
-    fail_name,
-    identifier,
-    load_limits,
-    new_d,
-    new_q,
-    none,
-    param,
-    same,
-    sw,
-    vat
+    bound, cw, empty_col, ex, fail, fail_name, identifier, load_limits, new_d, new_q, none, param,
+    same, sw, vat
 };
 use self::check::{ex_end};
 use self::plan::{decode_plan};
 use self::values::{dtab, eval, size_value, size_vec, tick, val_at, valid, vbytes, vheap};
 use self::rows::{
-    check_inputs,
-    load_catalog_ex,
-    load_data,
-    load_data_in,
-    run,
-    table_bytes,
-    table_bytes_in,
-    validate_rows,
-    validate_rows_in
+    check_inputs, load_catalog_ex, load_data, load_data_in, run, table_bytes, table_bytes_in,
+    validate_rows, validate_rows_in
 };
 
 // `PreparedQuery::execute` after the Rust snapshot check. prog is

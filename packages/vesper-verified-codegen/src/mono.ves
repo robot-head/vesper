@@ -27,17 +27,7 @@
 
 use self::machine::{Lowered, lowered_new};
 use self::lower::{
-    E_LIMIT,
-    lower_rows,
-    put_lowered,
-    U_GENERIC,
-    VErr,
-    ap,
-    apn,
-    err,
-    put_error,
-    tx,
-    unsup
+    E_LIMIT, lower_rows, put_lowered, U_GENERIC, VErr, ap, apn, err, put_error, tx, unsup
 };
 use self::evidence::{evidence, sites_new};
 use self::exprs::{Ex, X_HANDLE, nested_name, read_exprs};
@@ -45,14 +35,7 @@ use @vesper/check-data::pack_text;
 use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, u8_at, w};
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{
-    EffNode,
-    TyKind,
-    Types,
-    Vars,
-    default_type,
-    display,
-    substitute,
-    vars_new
+    EffNode, TyKind, Types, Vars, default_type, display, substitute, vars_new
 };
 use @vesper/check-data::input::{Ctx, Reader, read_ctx};
 use @vesper/place-ir::{BlockRow, FnRow, InstRow, Program, put_program, read_program};

@@ -1,21 +1,8 @@
 // Module lex of @vesper/quarry (see lib.ves).
 use self::{Q, Tok};
 use self::util::{
-    bound,
-    fail,
-    identifier,
-    identifier_in,
-    word_end,
-    lim,
-    put,
-    put_u64,
-    sb,
-    tk_int,
-    tk_op,
-    tk_param,
-    tk_sym,
-    tk_text,
-    tk_word
+    bound, fail, identifier, identifier_in, word_end, lim, put, put_u64, sb, tk_int, tk_op,
+    tk_param, tk_sym, tk_text, tk_word
 };
 use self::parse::{keyword};
 

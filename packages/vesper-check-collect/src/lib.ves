@@ -18,24 +18,8 @@
 // `.ves` corpus.
 
 use @vesper/ast::{
-    Ast,
-    AdtNode,
-    EffectDeclNode,
-    EffectNode,
-    EffectsNode,
-    FieldNode,
-    FnNode,
-    GenericNode,
-    ImplNode,
-    ItemNode,
-    ParamNode,
-    TypeNode,
-    VariantNode,
-    list_at,
-    list_len,
-    none,
-    type_at,
-    type_name
+    Ast, AdtNode, EffectDeclNode, EffectNode, EffectsNode, FieldNode, FnNode, GenericNode, ImplNode,
+    ItemNode, ParamNode, TypeNode, VariantNode, list_at, list_len, none, type_at, type_name
 };
 use @vesper/ast::lower::{lower_source};
 use @vesper/check-data::{pack_text};

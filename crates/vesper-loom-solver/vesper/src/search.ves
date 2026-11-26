@@ -9,21 +9,8 @@ use @vesper/loom-calculus::util::{add, dep, feat, find_feat, id_at, inc, man, no
 use self::{Node, S};
 use self::closure::{all_reqs_match, assigned, closure, has_entry, matches_req};
 use self::diag::{
-    ErrorKind,
-    Objective,
-    ResultTag,
-    SolverCode,
-    did,
-    dlit,
-    dmark,
-    dnum,
-    dreq,
-    dver,
-    emit,
-    node,
-    setw,
-    subj_id,
-    subj_lit
+    ErrorKind, Objective, ResultTag, SolverCode, did, dlit, dmark, dnum, dreq, dver, emit, node,
+    setw, subj_id, subj_lit
 };
 use self::input::{find_meta, mxv};
 use self::metrics::{metrics_of_current, score_key};

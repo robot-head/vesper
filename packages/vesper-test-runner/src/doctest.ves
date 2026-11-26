@@ -10,47 +10,14 @@
 use @vesper/front::lex::{lex_raw, token_end};
 use @vesper/front::diag::{diags_new};
 use @vesper/front::kinds::{
-    k_affine,
-    k_block_comment,
-    k_comment,
-    k_copy,
-    k_effect,
-    k_enum,
-    k_eof,
-    k_fn,
-    k_impl,
-    k_l_brace,
-    k_l_bracket,
-    k_l_paren,
-    k_linear,
-    k_lower,
-    k_r_brace,
-    k_r_bracket,
-    k_r_paren,
-    k_semi,
-    k_struct,
+    k_affine, k_block_comment, k_comment, k_copy, k_effect, k_enum, k_eof, k_fn, k_impl, k_l_brace,
+    k_l_bracket, k_l_paren, k_linear, k_lower, k_r_brace, k_r_bracket, k_r_paren, k_semi, k_struct,
     k_whitespace
 };
 use @vesper/front::util::{w32};
 use self::util::{
-    Reader,
-    add,
-    bit,
-    byte,
-    char_at,
-    inc,
-    is_digit,
-    is_space_char,
-    is_text,
-    push_range,
-    put_buf,
-    put_text,
-    starts_with,
-    sub,
-    trim_end,
-    trim_start,
-    u8_at,
-    u64_at
+    Reader, add, bit, byte, char_at, inc, is_digit, is_space_char, is_text, push_range, put_buf,
+    put_text, starts_with, sub, trim_end, trim_start, u8_at, u64_at
 };
 
 // The device bits of a `sim(...)` spec (`Device` of vesper-doc).

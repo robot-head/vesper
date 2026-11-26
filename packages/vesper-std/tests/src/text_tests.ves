@@ -1,53 +1,18 @@
 // Unit tests for @vesper-std/fmt and @vesper-std/bytes.
 test {
     use @vesper-std/fmt::{
-        ParseIntError,
-        write_u64_radix,
-        write_u64,
-        write_i64,
-        write_hex_u64,
-        write_bool,
-        write_bytes,
-        parse_u64_radix,
-        parse_u64,
-        parse_i64,
-        fnv1a64
+        ParseIntError, write_u64_radix, write_u64, write_i64, write_hex_u64, write_bool,
+        write_bytes, parse_u64_radix, parse_u64, parse_i64, fnv1a64
     };
     use @vesper-std/bytes::{
-        read_u8,
-        read_u16_le,
-        read_u16_be,
-        read_u32_le,
-        read_u32_be,
-        read_u64_le,
-        read_u64_be,
-        read_i64_le,
-        read_i64_be,
-        push_u16_le,
-        push_u16_be,
-        push_u32_le,
-        push_u32_be,
-        push_u64_le,
-        push_u64_be,
-        push_i64_le,
-        push_i64_be,
-        put_u16_le,
-        put_u16_be,
-        put_u32_le,
-        put_u32_be,
-        put_u64_le,
-        put_u64_be
+        read_u8, read_u16_le, read_u16_be, read_u32_le, read_u32_be, read_u64_le, read_u64_be,
+        read_i64_le, read_i64_be, push_u16_le, push_u16_be, push_u32_le, push_u32_be, push_u64_le,
+        push_u64_be, push_i64_le, push_i64_be, put_u16_le, put_u16_be, put_u32_le, put_u32_be,
+        put_u64_le, put_u64_be
     };
     use @vesper-std/core::option::is_none;
     use self::support::{
-        check,
-        text,
-        same_text,
-        parsed_u64,
-        parsed_i64,
-        parse_error,
-        parse_error_i64,
-        some_u64
+        check, text, same_text, parsed_u64, parsed_i64, parse_error, parse_error_i64, some_u64
     };
 
     pub fn check_fmt_write() -> u64 {

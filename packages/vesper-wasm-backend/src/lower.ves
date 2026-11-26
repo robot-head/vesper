@@ -18,22 +18,8 @@ use self::module::{Builder, builder_new};
 use self::fmod::{fmod_code};
 use self::host::{Host, host_new, host_fn, op_index, returns_handle, takes_handle, takes_meta};
 use self::plan::{
-    Cx,
-    HClause,
-    Handler,
-    Inst,
-    Plan,
-    Shape,
-    TVars,
-    alias_of,
-    captures,
-    closure_operands,
-    cmp_syms,
-    contains32,
-    instance_key,
-    instance_name,
-    prefixed_key,
-    tvars_new
+    Cx, HClause, Handler, Inst, Plan, Shape, TVars, alias_of, captures, closure_operands, cmp_syms,
+    contains32, instance_key, instance_name, prefixed_key, tvars_new
 };
 use self::tables::{alloc_code, stage2_heap_mark, stage2_heap_reset};
 

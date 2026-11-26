@@ -5,25 +5,8 @@ use @vesper/loom-calculus::util::{Ascii, Order, dep, feat, man, none, ver_ord};
 use self::{A};
 use self::license::{allowlist};
 use self::util::{
-    AuditSort,
-    ErrorKind,
-    Identity,
-    adv,
-    ascii_alnum,
-    byte,
-    fail,
-    fresh_marks,
-    mark_seen,
-    msort,
-    nat,
-    prec_ord,
-    rng,
-    sat_add,
-    sat_mul,
-    spend,
-    str_len,
-    str_off,
-    word
+    AuditSort, ErrorKind, Identity, adv, ascii_alnum, byte, fail, fresh_marks, mark_seen, msort,
+    nat, prec_ord, rng, sat_add, sat_mul, spend, str_len, str_off, word
 };
 
 // The safe parser limits a policy may ask for (`AuditLimits`).

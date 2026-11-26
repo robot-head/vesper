@@ -22,14 +22,7 @@ use self::util::{n32, put_text_words, u32_at, u8_at, w};
 use self::names::{Names};
 use self::types::{TyKind, Types, Vars, debug_type, default_type, display, substitute, vars_new};
 use self::world::{
-    Adt,
-    Variant,
-    bounds_new,
-    constructor,
-    effectful_row,
-    field_step,
-    mode_of,
-    vector_words
+    Adt, Variant, bounds_new, constructor, effectful_row, field_step, mode_of, vector_words
 };
 use self::input::{Ctx, Reader, read_ctx};
 

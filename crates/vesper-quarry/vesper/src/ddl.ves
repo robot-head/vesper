@@ -1,34 +1,13 @@
 // Module ddl of @vesper/quarry (see lib.ves).
 use self::{CTab, Q};
 use self::util::{
-    bound,
-    ctab,
-    cw,
-    fail,
-    fail_name,
-    find_table,
-    is_lit,
-    load_catalog,
-    load_limits,
-    new_q,
-    none,
-    same,
-    syntax
+    bound, ctab, cw, fail, fail_name, find_table, is_lit, load_catalog, load_limits, new_q, none,
+    same, syntax
 };
 use self::lex::{lex};
 use self::parse::{
-    at_end,
-    kw_create,
-    kw_drop,
-    kw_not,
-    kw_null,
-    kw_table,
-    expect_sym,
-    expect_word,
-    ident,
-    sym,
-    take,
-    word
+    at_end, kw_create, kw_drop, kw_not, kw_null, kw_table, expect_sym, expect_word, ident, sym,
+    take, word
 };
 
 // DDL (src/parse.rs `ddl` and `HermeticCatalog::apply_ddl_changes`).

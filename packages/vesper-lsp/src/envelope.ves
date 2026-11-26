@@ -8,16 +8,7 @@
 // reproduce those two outcomes; nothing else of the body is copied: the
 // envelope names its parts by token.
 use @vesper/serde::{
-    Doc,
-    Error,
-    ErrorKind,
-    Kind,
-    Limits,
-    Token,
-    doc_field,
-    doc_new,
-    doc_parse,
-    string_decode,
+    Doc, Error, ErrorKind, Kind, Limits, Token, doc_field, doc_new, doc_parse, string_decode,
     string_equals
 };
 use @vesper/serde::index::{tok};

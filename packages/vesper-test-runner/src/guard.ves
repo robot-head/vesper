@@ -13,25 +13,8 @@
 // (0 ok, or 1 and the message) (tests/common/doctest_guard_words.rs).
 
 use @vesper/ast::{
-    AdtNode,
-    ArgNode,
-    Ast,
-    EffectDeclNode,
-    EffectNode,
-    EffectsNode,
-    FieldNode,
-    FnNode,
-    ImplNode,
-    ItemNode,
-    ParamNode,
-    StmtNode,
-    VariantNode,
-    expr_at,
-    list_at,
-    list_len,
-    none,
-    pat_at,
-    type_at
+    AdtNode, ArgNode, Ast, EffectDeclNode, EffectNode, EffectsNode, FieldNode, FnNode, ImplNode,
+    ItemNode, ParamNode, StmtNode, VariantNode, expr_at, list_at, list_len, none, pat_at, type_at
 };
 use @vesper/ast::lower::{lower_source};
 use @vesper-std/arena::{idx_from_raw};

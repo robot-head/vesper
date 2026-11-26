@@ -12,29 +12,14 @@
 use @vesper/check-data::util::{add, inc, inc32, n32, push_decimal, u32_at, u8_at, w};
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{
-    Types,
-    Vars,
-    default_type,
-    display,
-    substitute,
-    vars_new,
-    TyKind,
-    TyPass
+    Types, Vars, default_type, display, substitute, vars_new, TyKind, TyPass
 };
 use @vesper/check-data::world::{World, constructor, field_step};
 use @vesper/check-data::input::{Ctx};
 use self::ast::{Ast, ExprRow, FnRow, PatRow};
 use self::layout::{Sizes, layout_size, sizes_new};
 use self::state::{
-    BindRow,
-    Binds,
-    FipState,
-    Paths,
-    SlotRow,
-    copy_binds,
-    copy_state,
-    paths_new,
-    state_new
+    BindRow, Binds, FipState, Paths, SlotRow, copy_binds, copy_state, paths_new, state_new
 };
 
 const NONE32: u32 = 4294967295;

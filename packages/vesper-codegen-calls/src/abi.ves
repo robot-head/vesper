@@ -14,18 +14,8 @@ use @vesper/check-data::world::{World};
 use @vesper/check-layout::{Layouts, layout_of};
 use self::data::{Calls, FnInfo, ParamInfo};
 use self::instances::{
-    Conc,
-    Found,
-    Inst,
-    Syms,
-    bare_trace,
-    capability_abi,
-    capability_only,
-    concrete,
-    contains_function,
-    fail_only,
-    is_foreign,
-    is_root
+    Conc, Found, Inst, Syms, bare_trace, capability_abi, capability_only, concrete,
+    contains_function, fail_only, is_foreign, is_root
 };
 
 const NONE32: u32 = 4294967295;

@@ -16,28 +16,8 @@
 // 5 continue, 6 end) and blocks in `sk` as `n stmt..`.
 use self::{C};
 use self::util::{
-    add,
-    flag,
-    inc,
-    intern_str,
-    intern_tb,
-    is_ident_byte,
-    is_ident_start,
-    ib,
-    none,
-    sat_add,
-    sat_mul,
-    set_flag,
-    sw,
-    tb_str,
-    tb_sym,
-    tb_u64,
-    Ascii,
-    Br,
-    GTag,
-    Limit,
-    Out,
-    Wf
+    add, flag, inc, intern_str, intern_tb, is_ident_byte, is_ident_start, ib, none, sat_add,
+    sat_mul, set_flag, sw, tb_str, tb_sym, tb_u64, Ascii, Br, GTag, Limit, Out, Wf
 };
 use self::tree::{emit_g, g_mk, gsize, validate};
 

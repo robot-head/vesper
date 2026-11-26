@@ -17,26 +17,9 @@ use self::links::{Link, SIZE_LINK_TARGET, ident_byte, ident_start, link_new};
 use @vesper-std/arena::{idx_from_raw};
 use self::json::{byte};
 use self::nav::{
-    Ix,
-    ERR_NONE,
-    ERR_INVALID_SPAN,
-    ERR_INVALID_LIMITS,
-    ERR_DOC_INVENTORY,
-    ERR_DOC_LINK_BUDGET,
-    MAX_SOURCE_BYTES,
-    MAX_SYMBOLS,
-    adt_at,
-    conf_at,
-    effect_decl_at,
-    fn_at,
-    impl_at,
-    item_at,
-    put_name,
-    token_start,
-    trait_at,
-    u32_at,
-    u8_at,
-    w
+    Ix, ERR_NONE, ERR_INVALID_SPAN, ERR_INVALID_LIMITS, ERR_DOC_INVENTORY, ERR_DOC_LINK_BUDGET,
+    MAX_SOURCE_BYTES, MAX_SYMBOLS, adt_at, conf_at, effect_decl_at, fn_at, impl_at, item_at,
+    put_name, token_start, trait_at, u32_at, u8_at, w
 };
 
 const NONE: u32 = 4294967295;

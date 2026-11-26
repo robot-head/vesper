@@ -36,7 +36,8 @@ fn use_groups_stay_on_one_line_when_they_fit() {
         verify("use @vesper/front::{\n    P\n};\nuse self::text::{parse_float,decode_string};"),
         "use @vesper/front::{P};\nuse self::text::{parse_float, decode_string};\n"
     );
-    // Too long for the ribbon: one name per line, as any delimited list.
+    // Too long for the ribbon: the braces break and the names fill the
+    // lines between them, as rustfmt lays out a long `use` list.
     let long = format!(
         "use @vesper/front::kinds::{{{}}};",
         ["k_upper_case_kind"; 6].join(",")
@@ -44,8 +45,28 @@ fn use_groups_stay_on_one_line_when_they_fit() {
     assert_eq!(
         verify(&long),
         format!(
-            "use @vesper/front::kinds::{{\n{}\n}};\n",
-            ["    k_upper_case_kind"; 6].join(",\n")
+            "use @vesper/front::kinds::{{\n    {},\n    k_upper_case_kind\n}};\n",
+            ["k_upper_case_kind"; 5].join(", ")
+        )
+    );
+    // Other lists still break one item per line.
+    let call = format!("fn f() {{ g({}); }}", ["k_upper_case_kind"; 6].join(","));
+    assert_eq!(
+        verify(&call),
+        format!(
+            "fn f() {{\n    g(\n{}\n    );\n}}\n",
+            ["        k_upper_case_kind"; 6].join(",\n")
+        )
+    );
+    // A comment in the group keeps one name per line.
+    assert_eq!(
+        verify(&format!(
+            "use self::kinds::{{{}, // last\nk_upper_case_kind}};",
+            ["k_upper_case_kind"; 5].join(",")
+        )),
+        format!(
+            "use self::kinds::{{\n{},\n    // last\n    k_upper_case_kind\n}};\n",
+            ["    k_upper_case_kind"; 5].join(",\n")
         )
     );
     // A source trailing comma still keeps the group vertical.

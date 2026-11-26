@@ -1,34 +1,13 @@
 // Module plan of @vesper/quarry (see lib.ves).
 use self::{Bind, CCol, CTab, Link, Node, Q, Sel};
 use self::util::{
-    bcol,
-    bound,
-    ctab,
-    cw,
-    ex,
-    fail,
-    link,
-    load_limits,
-    new_q_sized,
-    node,
-    none,
-    param,
-    put,
-    put_range,
-    raw,
-    same
+    bcol, bound, ctab, cw, ex, fail, link, load_limits, new_q_sized, node, none, param, put,
+    put_range, raw, same
 };
 use self::lex::{lex};
 use self::parse::{parse_select};
 use self::check::{
-    bool_word,
-    check_expr,
-    check_table,
-    emit_column,
-    ex_end,
-    ex_ty,
-    load_params,
-    set_nullable
+    bool_word, check_expr, check_table, emit_column, ex_end, ex_ty, load_params, set_nullable
 };
 
 // Plan streams. A plan is written in prefix order as

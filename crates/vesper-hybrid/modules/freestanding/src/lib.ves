@@ -5,10 +5,7 @@
 // @export abi 4
 
 use @vesper/codegen-freestanding::{
-    freestanding_compare_code,
-    freestanding_link,
-    freestanding_script,
-    freestanding_stub
+    freestanding_compare_code, freestanding_link, freestanding_script, freestanding_stub
 };
 
 pub fn script_words(in req: Slice[u8]) -> ChunkSeq[u8] {
