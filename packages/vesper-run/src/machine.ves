@@ -3402,6 +3402,13 @@ const WIDE_WRITE: u64 = 2;
 const WIDE_TOTAL: u64 = 1;
 const BITS_PER_BYTE: u64 = 8;
 const BYTE_MASK: u64 = 255;
+// The flag combinations of a wide access (big, write, total).
+const WIDE_FLAG_COMBOS: u64 = 8;
+// Wide access widths in bytes: 2, 4 and 8, each twice the last.
+const WIDE_U16_BYTES: u64 = 2;
+const WIDE_U32_BYTES: u64 = 4;
+const WIDE_U64_BYTES: u64 = 8;
+const WIDE_WIDTH_STEP: u64 = 2;
 // The largest `with_capacity` the machine takes: Rust's `try_reserve` of a
 // larger one may fail.
 const SEQ_CAPACITY_LIMIT: u64 = 16777216;
@@ -3809,10 +3816,10 @@ fn wide_code(in machine: M, sym: u32) -> u64 {
     if !has_prefix(in machine, sym, "Wide(Wide { bytes: ") {
         return 0;
     }
-    for flags in 0..8 {
-        let mut bytes: u64 = 2;
+    for flags in 0..WIDE_FLAG_COMBOS {
+        let mut bytes = WIDE_U16_BYTES;
         loop {
-            if bytes > 8 {
+            if bytes > WIDE_U64_BYTES {
                 break;
             }
             let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -3825,7 +3832,7 @@ fn wide_code(in machine: M, sym: u32) -> u64 {
             if machine.ctx.names.spells(sym, in text.as_slice()) {
                 return add(add(SQ_WIDE, wrapping_mul(bytes, BITS_PER_BYTE)), flags);
             }
-            bytes = wrapping_mul(bytes, 2);
+            bytes = wrapping_mul(bytes, WIDE_WIDTH_STEP);
         }
     }
     0
@@ -3880,9 +3887,9 @@ fn wide_op(inout machine: M, form: u64, inout oob: bool) -> Val {
             value = wrapping_mul(value, inc(BYTE_MASK)) | (byte & BYTE_MASK);
         }
     }
-    let kind = if n == 2 {
+    let kind = if n == WIDE_U16_BYTES {
         K_U16
-    } else if n == 4 {
+    } else if n == WIDE_U32_BYTES {
         K_U32
     } else {
         K_U64
