@@ -1243,6 +1243,11 @@ fn windows_link_request(in object: Slice[u8], in path: Slice[u8], in o: Options)
     request
 }
 
+// The bytes of the stdout length in `proof_audit_run`'s result, and the
+// radix of one byte.
+const AUDIT_LEN_BYTES: u64 = 8;
+const BYTE_RADIX: u64 = 256;
+
 // `proof_commands::run` (the `proof_audit` swap, src/swap/proof_audit.rs).
 // `hc_proof_audit_run` (src/commands.rs) hands over the arguments after
 // the command name, each followed by a NUL byte, and reads back the
@@ -1268,9 +1273,9 @@ pub fn proof_audit_run(
         result.push(0);
     }
     let mut n = o.out.len();
-    for _k in 0..8 {
-        result.push(wrapping_u8(n % 256));
-        n = n / 256;
+    for _k in 0..AUDIT_LEN_BYTES {
+        result.push(wrapping_u8(n % BYTE_RADIX));
+        n = n / BYTE_RADIX;
     }
     result.extend(in o.out.as_slice());
     result.extend(in o.err.as_slice());
