@@ -193,14 +193,7 @@ fn quoted_bytes(in s: Slice[u8], a: u64, b: u64) -> u64 {
             // Two bytes: U+0080..U+07FF; U+0080..U+009F are controls.
             let c1 = byte(in s, wrapping_add(i, 1));
             let cp = wrapping_add(wrapping_mul(widen_u64(c0) % 32, 64), widen_u64(c1) % 64);
-            n = add(
-                n,
-                if cp < 160 {
-                    4
-                } else {
-                    2
-                }
-            );
+            n = add(n, if cp < 160 { 4 } else { 2 });
             i = wrapping_add(i, 2);
         } else if c0 < 240 {
             let c1 = byte(in s, wrapping_add(i, 1));
@@ -412,14 +405,7 @@ fn text_str(inout e: W, in s: Str) {
 // A `Name` of `parts` separated by `.`.
 fn name(inout e: W, rooted: bool, in parts: Str) {
     let b = parts.as_bytes();
-    w(
-        inout e,
-        if rooted {
-            1
-        } else {
-            0
-        }
-    );
+    w(inout e, if rooted { 1 } else { 0 });
     let mut n: u64 = 1;
     for i in 0..b.len() {
         if byte(in b, i) == 46 {
