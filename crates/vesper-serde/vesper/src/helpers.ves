@@ -39,14 +39,7 @@ pub fn swar_compile(field_idx: u16, in key: Slice[u8]) -> Option[Swar] {
     word = word | bit_shl(Ascii::Quote, wrapping_mul(n, 8));
     let count = wrapping_add(n, 1);
     let mask = bit_shr(U64_MAX, wrapping_mul(wrapping_sub(WORD_BYTES, count), 8));
-    Option::Some(
-        Swar {
-            field_idx: field_idx,
-            word: word,
-            mask: mask,
-            len: wrapping_u8(n)
-        }
-    )
+    Option::Some(Swar { field_idx: field_idx, word: word, mask: mask, len: wrapping_u8(n) })
 }
 
 // `SwarFieldMatcher::matches_window`: the key and its closing quote are the
@@ -101,10 +94,7 @@ pub fn bound_string(max_utf8_bytes: u64) -> Bound eff [Fail[Error]] {
         raise(ErrorKind::Overflow, 0);
     }
     let escaped = wrapping_mul(max_utf8_bytes, UNICODE_ESCAPE_LEN);
-    Bound {
-        n: add(escaped, QUOTES_LEN),
-        dynamic: false
-    }
+    Bound { n: add(escaped, QUOTES_LEN), dynamic: false }
 }
 
 // `JsonSizeBound::combine_field`.
@@ -117,10 +107,7 @@ pub fn bound_field(object: Bound, key_escaped_len: u64, field: Bound, first: boo
     };
     let prefix = add(add(not_first, key_escaped_len), KEY_PUNCTUATION_LEN);
     let n = add(add(object.n, prefix), field.n);
-    Bound {
-        n: n,
-        dynamic: object.dynamic || field.dynamic
-    }
+    Bound { n: n, dynamic: object.dynamic || field.dynamic }
 }
 
 // `SwarKey::matches_raw`: the two packed words of a compiled key, its

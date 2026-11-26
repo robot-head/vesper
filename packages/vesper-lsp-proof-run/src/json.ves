@@ -534,10 +534,7 @@ pub fn parse(in t: Slice[u8]) -> Doc {
         err: E_NONE,
         err_at: 0
     };
-    let mut p = P {
-        i: 0,
-        depth: 0
-    };
+    let mut p = P { i: 0, depth: 0 };
     let root = value(inout d, in t, inout p);
     if root != NONE && whitespace(in t, inout p) {
         let x = peek_fail(inout d, in t, p, TRAILING_CHARS);

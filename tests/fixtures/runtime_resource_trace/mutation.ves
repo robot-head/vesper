@@ -11,14 +11,8 @@ fn close(sink ticket: Ticket) {
 fn routing() -> i64 {
     let first = Ticket {};
     let second = Ticket {};
-    let pair = Pair {
-        left: first,
-        right: second
-    };
-    let Pair {
-        left,
-        right
-    } = pair;
+    let pair = Pair { left: first, right: second };
+    let Pair { left, right } = pair;
     close(left);
     close(right);
     42

@@ -131,19 +131,11 @@ fn lifted(r: Lifted) -> u64 eff [Fail[IntcFault]] {
 }
 
 fn ok(v: u64) -> Lifted {
-    Lifted {
-        ok: true,
-        v: v,
-        e: AiaFault::NoDeliveryMode
-    }
+    Lifted { ok: true, v: v, e: AiaFault::NoDeliveryMode }
 }
 
 fn failed(e: AiaFault) -> Lifted {
-    Lifted {
-        ok: false,
-        v: 0,
-        e: e
-    }
+    Lifted { ok: false, v: 0, e: e }
 }
 
 pub fn m_fabric_new() -> Fabric {
@@ -187,14 +179,7 @@ pub fn m_fabric_new() -> Fabric {
 fn plic_hdr(in f: Fabric, p: u64) -> PlicHdr {
     match f.plic.try_get(p) {
         Option::Some(h) => h,
-        Option::None => PlicHdr {
-            base: 0,
-            ndev: 0,
-            nctx: 0,
-            src_off: 0,
-            ctx_off: 0,
-            en_off: 0
-        },
+        Option::None => PlicHdr { base: 0, ndev: 0, nctx: 0, src_off: 0, ctx_off: 0, en_off: 0 },
     }
 }
 
@@ -208,12 +193,7 @@ pub fn m_add_plic(inout f: Fabric, base: u64, size: u64, ndev: u64, in ctx: Slic
     }
     let needed = wrapping_add(2097152, wrapping_mul(4096, nctx));
     if size < needed {
-        Fail::raise(
-            IntcFault::WindowTooSmall {
-                size: size,
-                needed: needed
-            }
-        );
+        Fail::raise(IntcFault::WindowTooSmall { size: size, needed: needed });
     }
     let n = wrapping_add(ndev, 1);
     let h = PlicHdr {
@@ -391,22 +371,14 @@ fn plic_decode(h: PlicHdr, addr: u64) -> PlicReg eff [Fail[IntcFault]] {
     if off < 4096 {
         let s = off >> 2;
         if s <= h.ndev {
-            return PlicReg {
-                kind: 0,
-                a: s,
-                b: 0
-            };
+            return PlicReg { kind: 0, a: s, b: 0 };
         }
         Fail::raise(IntcFault::Unmapped(addr));
     }
     if off < 8192 {
         let w = wrapping_sub(off, 4096) >> 2;
         if w < plic_words(h) {
-            return PlicReg {
-                kind: 1,
-                a: w,
-                b: 0
-            };
+            return PlicReg { kind: 1, a: w, b: 0 };
         }
         Fail::raise(IntcFault::Unmapped(addr));
     }
@@ -415,11 +387,7 @@ fn plic_decode(h: PlicHdr, addr: u64) -> PlicReg eff [Fail[IntcFault]] {
         let ctx = rel >> 7;
         let w = (rel & 127) >> 2;
         if ctx < h.nctx && w < plic_words(h) {
-            return PlicReg {
-                kind: 2,
-                a: ctx,
-                b: w
-            };
+            return PlicReg { kind: 2, a: ctx, b: w };
         }
         Fail::raise(IntcFault::Unmapped(addr));
     }
@@ -427,18 +395,10 @@ fn plic_decode(h: PlicHdr, addr: u64) -> PlicReg eff [Fail[IntcFault]] {
     let ctx = rel >> 12;
     let r = rel & 4095;
     if ctx < h.nctx && r == 0 {
-        return PlicReg {
-            kind: 3,
-            a: ctx,
-            b: 0
-        };
+        return PlicReg { kind: 3, a: ctx, b: 0 };
     }
     if ctx < h.nctx && r == 4 {
-        return PlicReg {
-            kind: 4,
-            a: ctx,
-            b: 0
-        };
+        return PlicReg { kind: 4, a: ctx, b: 0 };
     }
     Fail::raise(IntcFault::Unmapped(addr))
 }
@@ -510,13 +470,7 @@ pub fn m_plic_context(in f: Fabric, p: u64, want: u64) -> u64 {
 fn topo(in f: Fabric, d: u64) -> DomTopo {
     match f.dom.try_get(d) {
         Option::Some(t) => t,
-        Option::None => DomTopo {
-            parent: none(),
-            child_off: 0,
-            nchild: 0,
-            idc_off: 0,
-            nidc: 0
-        },
+        Option::None => DomTopo { parent: none(), child_off: 0, nchild: 0, idc_off: 0, nidc: 0 },
     }
 }
 
@@ -561,13 +515,7 @@ pub fn m_add_aplic(
     f
         .dom
         .push(
-            DomTopo {
-                parent: none(),
-                child_off: 0,
-                nchild: 0,
-                idc_off: idc_off,
-                nidc: idcs.len()
-            }
+            DomTopo { parent: none(), child_off: 0, nchild: 0, idc_off: idc_off, nidc: idcs.len() }
         );
 }
 
@@ -713,10 +661,7 @@ fn slot(in f: Fabric, b: u64, k: u64) -> ImsicSlot {
             Option::None => (),
         }
     }
-    ImsicSlot {
-        first: 0,
-        nguest: 0
-    }
+    ImsicSlot { first: 0, nguest: 0 }
 }
 
 // One IMSIC: its files' targets and addresses, and whether a PLIC context or
@@ -763,14 +708,7 @@ pub fn m_add_imsic(
             };
             let _ = lifted(r);
         }
-        f
-            .mslot
-            .push(
-                ImsicSlot {
-                    first: first,
-                    nguest: guests
-                }
-            );
+        f.mslot.push(ImsicSlot { first: first, nguest: guests });
     }
     f.m_tgt.extend(in targets);
     f.m_addr.extend(in addrs);
@@ -873,18 +811,10 @@ fn locate(in f: Fabric, b: u64, addr: u64) -> Located {
         let base = w_at(in f.m_addr, wrapping_add(x.addr_off, k));
         if addr >= base && wrapping_sub(addr, base) < stride {
             let rel = wrapping_sub(addr, base);
-            return Located {
-                k: k,
-                g: rel >> 12,
-                off: rel & 4095
-            };
+            return Located { k: k, g: rel >> 12, off: rel & 4095 };
         }
     }
-    Located {
-        k: none(),
-        g: 0,
-        off: 0
-    }
+    Located { k: none(), g: 0, off: 0 }
 }
 
 // The implemented file `(b, k, g)` whose page holds `addr`, or `k` none().
@@ -892,18 +822,10 @@ pub fn m_locate_file(in f: Fabric, addr: u64) -> Located {
     for b in 0..f.mblk.len() {
         let l = locate(in f, b, addr);
         if l.k != none() && l.g < slot(in f, b, l.k).nguest {
-            return Located {
-                k: (b << 32) | l.k,
-                g: l.g,
-                off: l.off
-            };
+            return Located { k: (b << 32) | l.k, g: l.g, off: l.off };
         }
     }
-    Located {
-        k: none(),
-        g: 0,
-        off: 0
-    }
+    Located { k: none(), g: 0, off: 0 }
 }
 
 fn in_any_imsic(in f: Fabric, addr: u64) -> bool {
@@ -1147,11 +1069,7 @@ fn block_at(in f: Fabric, addr: u64) -> BlockAt eff [Fail[IntcFault]] {
             let base = w_at(in f.c_base, wrapping_add(h.reg_off, r));
             let size = w_at(in f.c_size, wrapping_add(h.reg_off, r));
             if addr >= base && wrapping_sub(addr, base) < size {
-                return BlockAt {
-                    b: b,
-                    r: r,
-                    off: wrapping_sub(addr, base)
-                };
+                return BlockAt { b: b, r: r, off: wrapping_sub(addr, base) };
             }
         }
     }
@@ -1403,11 +1321,7 @@ pub fn m_set_hgeie(inout f: Fabric, hart: u64, v: u64) {
 pub fn m_guest_files(in f: Fabric, hart: u64) -> Located {
     let bk = m_imsic_file(in f, target(hart, seip()));
     if bk == none() {
-        return Located {
-            k: none(),
-            g: 0,
-            off: 0
-        };
+        return Located { k: none(), g: 0, off: 0 };
     }
     let n = slot(in f, bk >> 32, bk & 4294967295).nguest;
     let g = if n == 0 {
@@ -1472,12 +1386,7 @@ fn vs_file(in f: Fabric, hart: u64) -> u64 eff [Fail[IntcFault]] {
     let vgein = m_vgein(in f, hart);
     let gf = m_guest_files(in f, hart);
     if gf.k == none() || vgein == 0 || vgein > gf.g {
-        Fail::raise(
-            IntcFault::NoGuestFile {
-                hart: hart,
-                vgein: vgein
-            }
-        );
+        Fail::raise(IntcFault::NoGuestFile { hart: hart, vgein: vgein });
     }
     file_idx(in f, gf.k >> 32, gf.k & 4294967295, vgein)
 }
@@ -1619,13 +1528,7 @@ pub fn m_set_wire(inout f: Fabric, kind: u64, a: u64, src: u64, high: bool) eff 
 }
 
 fn claimed(kind: u64, a: u64, b: u64, number: u64) -> Claim {
-    Claim {
-        found: true,
-        kind: kind,
-        a: a,
-        b: b,
-        number: number
-    }
+    Claim { found: true, kind: kind, a: a, b: b, number: number }
 }
 
 // Claims one external interrupt for `(hart, cause)`: the IMSIC file first,
@@ -1644,13 +1547,7 @@ pub fn m_claim_external(inout f: Fabric, hart: u64, cause: u64) -> Claim {
         }
         if m_imsic_hdr(in f.imsic, i).delivery != 1073741824 {
             // The file, not the PLIC/APLIC, supplies this level.
-            return Claim {
-                found: false,
-                kind: 0,
-                a: 0,
-                b: 0,
-                number: 0
-            };
+            return Claim { found: false, kind: 0, a: 0, b: 0, number: 0 };
         }
     }
     for d in 0..f.dom.len() {
@@ -1674,13 +1571,7 @@ pub fn m_claim_external(inout f: Fabric, hart: u64, cause: u64) -> Claim {
             }
         }
     }
-    Claim {
-        found: false,
-        kind: 0,
-        a: 0,
-        b: 0,
-        number: 0
-    }
+    Claim { found: false, kind: 0, a: 0, b: 0, number: 0 }
 }
 
 // Completes `number` on the controller a claim named. `fwd_d`/`fwd_s` are

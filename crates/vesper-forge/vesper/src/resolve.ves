@@ -249,11 +249,7 @@ pub fn resolver_new(in w: Slice[u64]) -> R {
         alias: ChunkSeq::new[u64](),
         apool: ChunkSeq::new[u64](),
         has_last: false,
-        last: Res {
-            tag: 0,
-            a: 0,
-            b: 0
-        },
+        last: Res { tag: 0, a: 0, b: 0 },
         cands: ChunkSeq::new[u64]()
     }
 }
@@ -637,11 +633,7 @@ fn lookup(in w: Slice[u64], in g: Slice[u64], inout r: R, symbol: u64, token: u6
         }
     }
     let nc = r.cands.len() / Cand::Words;
-    let none = Res {
-        tag: 0,
-        a: 0,
-        b: 0
-    };
+    let none = Res { tag: 0, a: 0, b: 0 };
     if nc == 0 {
         raise(inout r, Code::Unbound, token, symbol, 0, 0);
         return none;
@@ -753,11 +745,7 @@ fn path(
     at: u64,
     ctx_len: u64
 ) -> Res {
-    let none = Res {
-        tag: 0,
-        a: 0,
-        b: 0
-    };
+    let none = Res { tag: 0, a: 0, b: 0 };
     let n = wd(in w, at);
     let first = wd(in w, wrapping_add(at, 1));
     let symbol = wd(in w, wrapping_add(at, wrapping_add(n, 1)));
@@ -816,11 +804,7 @@ fn path(
             raise(inout r, Code::PrintedMismatch, cp, ci, symbol, 0);
             return none;
         }
-        res = Res {
-            tag: Tag::Global,
-            a: cp,
-            b: ci
-        };
+        res = Res { tag: Tag::Global, a: cp, b: ci };
         pre = 1;
     } else {
         r.tmp.clear();

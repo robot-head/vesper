@@ -34,6 +34,8 @@ mod backends;
 mod front;
 #[path = "driver/native.rs"]
 mod native_steps;
+#[path = "driver/world.rs"]
+mod world;
 
 /// The process entry: the Vesper driver on the CLI thread (the same name
 /// and stack as the Rust CLI's), or the Rust CLI when the driver hands the
@@ -318,12 +320,13 @@ struct Checking {
 /// in parallel (#1896) don't collide: 28-39 the front-end passes (#1900),
 /// 40-49 front end (driver/front.rs, #1893), 50-59 IR and native
 /// (driver/native.rs, #1894), 60-69 the other backends
-/// (driver/backends.rs, #1895), 70-79 session and I/O (this file, #1896).
+/// (driver/backends.rs, #1895), 70-79 session and I/O (this file, #1896),
+/// 80-89 the world the Vesper driver holds (driver/world.rs, #2024).
 #[derive(Clone, Copy)]
 enum Step {
     // 1 (`IsPackage`), 19 (`IsWindowsTarget`), 21 (`Tee`) and 27
-    // (`IoError`) moved to the Vesper driver (#1896); numbers are not
-    // reused.
+    // (`IoError`) moved to the Vesper driver (#1896), and 17 (`CheckMain`)
+    // to the world it holds (#2024); numbers are not reused.
     Load = 2,
     EbpfBuild = 3,
     Parse = 4,
@@ -339,7 +342,6 @@ enum Step {
     Jit = 14,
     VerifiedBuild = 15,
     WasmBuild = 16,
-    CheckMain = 17,
     NativeObject = 18,
     WindowsLink = 20,
     EmitHir = 22,
@@ -359,6 +361,8 @@ enum Step {
     EbpfInput = 61,
     /// Load the package the Vesper driver found at the input (#1896).
     LoadPackage = 70,
+    /// The checked world's declarations, for the Vesper driver to hold.
+    WorldDecls = 80,
 }
 
 const STEPS: [Step; 32] = [
@@ -377,7 +381,6 @@ const STEPS: [Step; 32] = [
     Step::Jit,
     Step::VerifiedBuild,
     Step::WasmBuild,
-    Step::CheckMain,
     Step::NativeObject,
     Step::WindowsLink,
     Step::EmitHir,
@@ -394,6 +397,7 @@ const STEPS: [Step; 32] = [
     Step::WasmInput,
     Step::EbpfInput,
     Step::LoadPackage,
+    Step::WorldDecls,
 ];
 
 /// A pass failed; its message is the session's text.
@@ -461,24 +465,6 @@ impl Session {
                 })?;
                 Ok(0)
             }
-            Step::CheckMain => {
-                let f = self
-                    .checked()?
-                    .world
-                    .functions
-                    .get("main")
-                    .ok_or("missing main function")?;
-                if !f.params.is_empty()
-                    || !(vesper::numeric::is_integer_name(f.result.name())
-                        || matches!(f.result.name(), "Unit" | ""))
-                {
-                    return Err(
-                        "executable main must take no arguments and return an integer or Unit"
-                            .into(),
-                    );
-                }
-                Ok(0)
-            }
             Step::Parse
             | Step::EmitCst
             | Step::ReportSyntax
@@ -506,6 +492,7 @@ impl Session {
             | Step::VerifiedBuild
             | Step::WasmInput
             | Step::EbpfInput => self.backends_step(step, arg),
+            Step::WorldDecls => self.world_step(step),
         }
     }
 }

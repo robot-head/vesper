@@ -10,9 +10,7 @@ impl Score for Square {
 }
 
 pub fn square(side: i64) -> Square {
-    Square {
-        side: side
-    }
+    Square { side: side }
 }
 
 // An opted-in builtin conformance and a bounded inherent impl.
@@ -33,10 +31,7 @@ impl [T: mod copy + Ord] Pair[T] {
 }
 
 pub fn pair[T: mod copy](a: T, b: T) -> Pair[T] {
-    Pair {
-        a: a,
-        b: b
-    }
+    Pair { a: a, b: b }
 }
 
 // A named model, selected with `use model` in another module.

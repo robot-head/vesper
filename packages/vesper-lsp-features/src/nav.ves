@@ -200,15 +200,7 @@ fn fail(inout x: Ix, code: u64) -> bool {
 // ------------------------------------------------------------ accessors
 
 pub fn item_at(in a: Ast, i: u32) -> ItemNode {
-    a
-        .items
-        .get_or(
-            idx_from_raw[ItemNode](i),
-            ItemNode {
-                kind: 0,
-                node: NONE
-            }
-        )
+    a.items.get_or(idx_from_raw[ItemNode](i), ItemNode { kind: 0, node: NONE })
 }
 
 pub fn fn_at(in a: Ast, f: u32) -> FnNode {
@@ -254,28 +246,12 @@ pub fn effect_decl_at(in a: Ast, i: u32) -> EffectDeclNode {
         .effect_decls
         .get_or(
             idx_from_raw[EffectDeclNode](i),
-            EffectDeclNode {
-                name: NONE,
-                linear: false,
-                generics: 0,
-                ops: 0,
-                start: 0,
-                end: 0
-            }
+            EffectDeclNode { name: NONE, linear: false, generics: 0, ops: 0, start: 0, end: 0 }
         )
 }
 
 pub fn impl_at(in a: Ast, i: u32) -> ImplNode {
-    a
-        .impls
-        .get_or(
-            idx_from_raw[ImplNode](i),
-            ImplNode {
-                ty: NONE,
-                generics: 0,
-                methods: 0
-            }
-        )
+    a.impls.get_or(idx_from_raw[ImplNode](i), ImplNode { ty: NONE, generics: 0, methods: 0 })
 }
 
 pub fn trait_at(in a: Ast, i: u32) -> TraitNode {
@@ -320,40 +296,16 @@ pub fn stmt_at(in a: Ast, s: u32) -> StmtNode {
         .stmts
         .get_or(
             idx_from_raw[StmtNode](s),
-            StmtNode {
-                kind: 0,
-                pat: NONE,
-                ty: NONE,
-                value: NONE,
-                mutable: false
-            }
+            StmtNode { kind: 0, pat: NONE, ty: NONE, value: NONE, mutable: false }
         )
 }
 
 pub fn arg_at(in a: Ast, i: u32) -> ArgNode {
-    a
-        .args
-        .get_or(
-            idx_from_raw[ArgNode](i),
-            ArgNode {
-                pass: 0,
-                explicit: false,
-                expr: NONE
-            }
-        )
+    a.args.get_or(idx_from_raw[ArgNode](i), ArgNode { pass: 0, explicit: false, expr: NONE })
 }
 
 pub fn clause_at(in a: Ast, c: u32) -> ClauseNode {
-    a
-        .clauses
-        .get_or(
-            idx_from_raw[ClauseNode](c),
-            ClauseNode {
-                name: NONE,
-                pats: 0,
-                body: NONE
-            }
-        )
+    a.clauses.get_or(idx_from_raw[ClauseNode](c), ClauseNode { name: NONE, pats: 0, body: NONE })
 }
 
 pub fn param_at(in a: Ast, p: u32) -> ParamNode {
@@ -361,14 +313,7 @@ pub fn param_at(in a: Ast, p: u32) -> ParamNode {
         .params
         .get_or(
             idx_from_raw[ParamNode](p),
-            ParamNode {
-                name: NONE,
-                pass: 0,
-                projections: 0,
-                ty: NONE,
-                start: 0,
-                end: 0
-            }
+            ParamNode { name: NONE, pass: 0, projections: 0, ty: NONE, start: 0, end: 0 }
         )
 }
 
@@ -1020,10 +965,7 @@ fn try_range(in x: Ix, s: u64, e: u64) -> Result[Range, SpanError] {
                 in x.src,
                 in x.lines.as_slice(),
                 x.max_work,
-                ByteSpan {
-                    start: narrow_usize(s),
-                    end: narrow_usize(e)
-                }
+                ByteSpan { start: narrow_usize(s), end: narrow_usize(e) }
             )
         )
     } with {
@@ -1053,10 +995,7 @@ fn offset_err(e: SpanError) -> Result[usize, SpanError] {
 
 // `LineIndex::offset`, or `ERR_POSITION` with the span error.
 pub fn cursor(inout x: Ix, line: u32, character: u32, inout at: u64) -> bool {
-    let p = Position {
-        line: line,
-        character: character
-    };
+    let p = Position { line: line, character: character };
     let r = handle Fail[SpanError] in {
         offset_ok(offset(in x.src, in x.lines.as_slice(), x.max_work, p))
     } with {

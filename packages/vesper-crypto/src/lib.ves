@@ -123,11 +123,7 @@ pub enum Size: _ {
 
 fn check(status: u32) eff [Fail[CryptoError]] {
     if status != 0 {
-        Fail::raise(
-            CryptoError {
-                status: status
-            }
-        );
+        Fail::raise(CryptoError { status: status });
     }
 }
 

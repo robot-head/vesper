@@ -9,11 +9,7 @@ copy struct Wrapper {
 }
 
 fn main() {
-    let ticket = Ticket {
-        id: 1
-    };
-    let wrapper = Wrapper {
-        ticket
-    };
+    let ticket = Ticket { id: 1 };
+    let wrapper = Wrapper { ticket };
     // Weakening a copy wrapper would lose its nested linear obligation.
 }

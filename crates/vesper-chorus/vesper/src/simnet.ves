@@ -739,11 +739,7 @@ fn next_delivery(in net: SimNetCore, delivered: bool) -> SimDeliverOut {
     } else {
         0
     };
-    SimDeliverOut {
-        delivered: delivered,
-        has_next: has_next,
-        next_at: next_at
-    }
+    SimDeliverOut { delivered: delivered, has_next: has_next, next_at: next_at }
 }
 
 pub fn simnet_core_take_abandon(inout net: SimNetCore) -> bool {

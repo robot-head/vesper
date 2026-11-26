@@ -188,11 +188,7 @@ impl Decls {
     pub fn gen(in self, i: u64) -> Gen {
         match self.gens.try_get(i) {
             Option::Some(g) => g,
-            Option::None => Gen {
-                name: 0,
-                bound: 0,
-                row: false
-            },
+            Option::None => Gen { name: 0, bound: 0, row: false },
         }
     }
 
@@ -216,15 +212,7 @@ impl Decls {
     pub fn par(in self, i: u64) -> Par {
         match self.pars.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Par {
-                name: 0,
-                pass: 0,
-                ja: 0,
-                jn: 0,
-                ty: 0,
-                s: 0,
-                e: 0
-            },
+            Option::None => Par { name: 0, pass: 0, ja: 0, jn: 0, ty: 0, s: 0, e: 0 },
         }
     }
 
@@ -252,26 +240,14 @@ impl Decls {
     pub fn assoc(in self, i: u64) -> AssocDecl {
         match self.assocs.try_get(i) {
             Option::Some(x) => x,
-            Option::None => AssocDecl {
-                name: 0,
-                bound: 0,
-                s: 0,
-                e: 0
-            },
+            Option::None => AssocDecl { name: 0, bound: 0, s: 0, e: 0 },
         }
     }
 
     pub fn tref(in self, i: u64) -> TRef {
         match self.trefs.try_get(i) {
             Option::Some(x) => x,
-            Option::None => TRef {
-                pkg: 0,
-                name: 0,
-                xa: 0,
-                xn: 0,
-                s: 0,
-                e: 0
-            },
+            Option::None => TRef { pkg: 0, name: 0, xa: 0, xn: 0, s: 0, e: 0 },
         }
     }
 
@@ -300,71 +276,42 @@ impl Decls {
     pub fn where_row(in self, i: u64) -> Where {
         match self.wheres.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Where {
-                ty: 0,
-                tref: 0
-            },
+            Option::None => Where { ty: 0, tref: 0 },
         }
     }
 
     pub fn bind(in self, i: u64) -> Bind {
         match self.binds.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Bind {
-                name: 0,
-                ty: 0,
-                s: 0,
-                e: 0
-            },
+            Option::None => Bind { name: 0, ty: 0, s: 0, e: 0 },
         }
     }
 
     pub fn use_row(in self, i: u64) -> UseRow {
         match self.uses.try_get(i) {
             Option::Some(x) => x,
-            Option::None => UseRow {
-                model: 0,
-                s: 0,
-                e: 0
-            },
+            Option::None => UseRow { model: 0, s: 0, e: 0 },
         }
     }
 
     pub fn bound_syn(in self, i: u64) -> BoundSyn {
         match self.bounds.try_get(i) {
             Option::Some(x) => x,
-            Option::None => BoundSyn {
-                param: 0,
-                tref: 0,
-                s: 0,
-                e: 0,
-                owner: 0
-            },
+            Option::None => BoundSyn { param: 0, tref: 0, s: 0, e: 0, owner: 0 },
         }
     }
 
     pub fn item(in self, i: u64) -> ItemRow {
         match self.items.try_get(i) {
             Option::Some(x) => x,
-            Option::None => ItemRow {
-                adt: false,
-                name: 0,
-                s: 0,
-                e: 0,
-                a: 0,
-                n: 0
-            },
+            Option::None => ItemRow { adt: false, name: 0, s: 0, e: 0, a: 0, n: 0 },
         }
     }
 
     pub fn fn_row(in self, i: u64) -> FnRow {
         match self.fns.try_get(i) {
             Option::Some(x) => x,
-            Option::None => FnRow {
-                name: 0,
-                ga: 0,
-                gn: 0
-            },
+            Option::None => FnRow { name: 0, ga: 0, gn: 0 },
         }
     }
 }
@@ -385,15 +332,7 @@ fn read_gens(inout r: Reader, in b: Slice[u8], inout d: Decls, in nmap: ChunkSeq
         let name = sym(in nmap, r.word(in b));
         let bound = wrapping_u8(r.word(in b));
         let row = r.word(in b) != 0;
-        d
-            .gens
-            .push(
-                Gen {
-                    name: name,
-                    bound: bound,
-                    row: row
-                }
-            );
+        d.gens.push(Gen { name: name, bound: bound, row: row });
     }
     n32(n)
 }
@@ -421,18 +360,7 @@ fn read_tref(
     let s = r.word(in b);
     let e = r.word(in b);
     let id = n32(d.trefs.len());
-    d
-        .trefs
-        .push(
-            TRef {
-                pkg: pkg,
-                name: name,
-                xa: xa,
-                xn: n32(xn),
-                s: s,
-                e: e
-            }
-        );
+    d.trefs.push(TRef { pkg: pkg, name: name, xa: xa, xn: n32(xn), s: s, e: e });
     id
 }
 
@@ -467,19 +395,7 @@ fn read_sig(
         let ty = tid(in tmap, r.word(in b));
         let ps = r.word(in b);
         let pe = r.word(in b);
-        d
-            .pars
-            .push(
-                Par {
-                    name: pname,
-                    pass: pass,
-                    ja: ja,
-                    jn: jn,
-                    ty: ty,
-                    s: ps,
-                    e: pe
-                }
-            );
+        d.pars.push(Par { name: pname, pass: pass, ja: ja, jn: jn, ty: ty, s: ps, e: pe });
     }
     let result = tid(in tmap, r.word(in b));
     let row = tid(in tmap, r.word(in b));
@@ -537,16 +453,7 @@ pub fn read_traits(
             let bound = wrapping_u8(r.word(in b));
             let as_ = r.word(in b);
             let ae = r.word(in b);
-            d
-                .assocs
-                .push(
-                    AssocDecl {
-                        name: aname,
-                        bound: bound,
-                        s: as_,
-                        e: ae
-                    }
-                );
+            d.assocs.push(AssocDecl { name: aname, bound: bound, s: as_, e: ae });
         }
         let ma = n32(d.sigs.len());
         let mn = read_sigs(inout r, in b, inout d, in nmap, in tmap);
@@ -588,14 +495,7 @@ fn read_confs(
         for j in 0..wn {
             let ty = tid(in tmap, r.word(in b));
             let wt = read_tref(inout r, in b, inout d, in nmap, in tmap);
-            d
-                .wheres
-                .push(
-                    Where {
-                        ty: ty,
-                        tref: wt
-                    }
-                );
+            d.wheres.push(Where { ty: ty, tref: wt });
         }
         let bn = r.word(in b);
         let ba = n32(d.binds.len());
@@ -604,16 +504,7 @@ fn read_confs(
             let bty = tid(in tmap, r.word(in b));
             let bs = r.word(in b);
             let be = r.word(in b);
-            d
-                .binds
-                .push(
-                    Bind {
-                        name: bname,
-                        ty: bty,
-                        s: bs,
-                        e: be
-                    }
-                );
+            d.binds.push(Bind { name: bname, ty: bty, s: bs, e: be });
         }
         let ma = n32(d.sigs.len());
         let mn = read_sigs(inout r, in b, inout d, in nmap, in tmap);
@@ -662,33 +553,11 @@ fn read_items(
                 let t = tid(in tmap, r.word(in b));
                 d.words.push(t);
             }
-            d
-                .items
-                .push(
-                    ItemRow {
-                        adt: true,
-                        name: name,
-                        s: s,
-                        e: e,
-                        a: a,
-                        n: n32(fc)
-                    }
-                );
+            d.items.push(ItemRow { adt: true, name: name, s: s, e: e, a: a, n: n32(fc) });
         } else {
             let a = n32(d.sigs.len());
             let on = read_sigs(inout r, in b, inout d, in nmap, in tmap);
-            d
-                .items
-                .push(
-                    ItemRow {
-                        adt: false,
-                        name: name,
-                        s: s,
-                        e: e,
-                        a: a,
-                        n: on
-                    }
-                );
+            d.items.push(ItemRow { adt: false, name: name, s: s, e: e, a: a, n: on });
         }
     }
 }
@@ -703,15 +572,7 @@ pub fn read_decls(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in t
         let name = sym(in nmap, r.word(in b));
         let ga = n32(d.gens.len());
         let gn = read_gens(inout r, in b, inout d, in nmap);
-        d
-            .fns
-            .push(
-                FnRow {
-                    name: name,
-                    ga: ga,
-                    gn: gn
-                }
-            );
+        d.fns.push(FnRow { name: name, ga: ga, gn: gn });
     }
     read_traits(inout r, in b, inout d, in nmap, in tmap);
     read_confs(inout r, in b, inout d, in nmap, in tmap);
@@ -720,15 +581,7 @@ pub fn read_decls(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in t
         let model = sym(in nmap, r.word(in b));
         let s = r.word(in b);
         let e = r.word(in b);
-        d
-            .uses
-            .push(
-                UseRow {
-                    model: model,
-                    s: s,
-                    e: e
-                }
-            );
+        d.uses.push(UseRow { model: model, s: s, e: e });
     }
     let bn = r.word(in b);
     for i in 0..bn {
@@ -737,17 +590,7 @@ pub fn read_decls(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in t
         let s = r.word(in b);
         let e = r.word(in b);
         let owner = sym(in nmap, r.word(in b));
-        d
-            .bounds
-            .push(
-                BoundSyn {
-                    param: param,
-                    tref: tref,
-                    s: s,
-                    e: e,
-                    owner: owner
-                }
-            );
+        d.bounds.push(BoundSyn { param: param, tref: tref, s: s, e: e, owner: owner });
     }
     read_items(inout r, in b, inout d, in nmap, in tmap);
     d

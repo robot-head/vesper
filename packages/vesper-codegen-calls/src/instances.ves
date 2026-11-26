@@ -160,10 +160,7 @@ pub struct IVars {
 }
 
 pub fn ivars_new() -> IVars {
-    IVars {
-        keys: ChunkSeq::new[u32](),
-        tys: ChunkSeq::new[u32]()
-    }
+    IVars { keys: ChunkSeq::new[u32](), tys: ChunkSeq::new[u32]() }
 }
 
 // The byte order of two names (Rust `str` order): -1, 0 or 1.
@@ -377,35 +374,19 @@ pub fn concrete(inout t: Types, inout names: Names, in d: Calls, name: u32, in v
         }
         if keep {
             let pt = substitute(inout t, p.ty, in v);
-            params
-                .push(
-                    ParamInfo {
-                        name: p.name,
-                        pass: p.pass,
-                        ty: pt
-                    }
-                );
+            params.push(ParamInfo { name: p.name, pass: p.pass, ty: pt });
         }
     }
     let result = substitute(inout t, f.result, in v);
     let row = substitute_row(inout t, f.row, in v);
-    Conc {
-        f: fi,
-        params: params,
-        result: result,
-        row: row
-    }
+    Conc { f: fi, params: params, result: result, row: row }
 }
 
 impl Conc {
     pub fn param(in self, i: u64) -> ParamInfo {
         match self.params.try_get(i) {
             Option::Some(p) => p,
-            Option::None => ParamInfo {
-                name: 0,
-                pass: 0,
-                ty: 0
-            },
+            Option::None => ParamInfo { name: 0, pass: 0, ty: 0 },
         }
     }
 }
@@ -512,11 +493,7 @@ fn any_param_contains_function(inout t: Types, in wd: World, in params: ChunkSeq
     for i in 0..params.len() {
         let p = match params.try_get(i) {
             Option::Some(p) => p,
-            Option::None => ParamInfo {
-                name: 0,
-                pass: 0,
-                ty: 0
-            },
+            Option::None => ParamInfo { name: 0, pass: 0, ty: 0 },
         };
         if contains_function(inout t, in wd, p.ty) {
             return true;
@@ -638,11 +615,7 @@ pub struct ProgramFacts {
 fn ref_at(in rs: ChunkSeq[Ref], i: u64) -> Ref {
     match rs.try_get(i) {
         Option::Some(r) => r,
-        Option::None => Ref {
-            s0: 0,
-            s1: 0,
-            sym: 0
-        },
+        Option::None => Ref { s0: 0, s1: 0, sym: 0 },
     }
 }
 
@@ -711,11 +684,7 @@ fn min_u64(a: u64, b: u64) -> u64 {
 
 impl ProgramFacts {
     pub fn has_ref(in self, s0: u64, s1: u64, sym: u32) -> bool {
-        let key = Ref {
-            s0: s0,
-            s1: s1,
-            sym: sym
-        };
+        let key = Ref { s0: s0, s1: s1, sym: sym };
         let mut lo: u64 = 0;
         let mut hi = self.refs.len();
         loop {
@@ -811,15 +780,7 @@ pub fn program_facts(in names: Names, in d: Calls, in p: Program) -> ProgramFact
                 if inst.op == Op::Read {
                     let root = n32(p.op(inst.a));
                     if d.function(root) != NONE32 && u32_at(in marks, w(root)) != stamp {
-                        facts
-                            .refs
-                            .push(
-                                Ref {
-                                    s0: inst.s0,
-                                    s1: inst.s1,
-                                    sym: root
-                                }
-                            );
+                        facts.refs.push(Ref { s0: inst.s0, s1: inst.s1, sym: root });
                     }
                 } else if inst.op == Op::Call {
                     let callee = n32(p.op(inst.a));
@@ -959,12 +920,7 @@ impl Found {
     pub fn inst(in self, i: u64) -> Inst {
         match self.insts.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Inst {
-                key: 0,
-                name: 0,
-                a: 0,
-                n: 0
-            },
+            Option::None => Inst { key: 0, name: 0, a: 0, n: 0 },
         }
     }
 
@@ -1332,14 +1288,7 @@ pub fn discover_roots(
         if kept || !specialized(inout t, in names, in wd, k, in f) || bound_any {
             found
                 .insts
-                .push(
-                    Inst {
-                        key: key,
-                        name: name,
-                        a: n32(found.keys.len()),
-                        n: n32(vars.len())
-                    }
-                );
+                .push(Inst { key: key, name: name, a: n32(found.keys.len()), n: n32(vars.len()) });
             for i in 0..vars.len() {
                 found.keys.push(vars.key(i));
                 found.tys.push(vars.ty(i));
@@ -1367,12 +1316,7 @@ pub fn discover_roots(
 fn inst_at(in xs: ChunkSeq[Inst], i: u64) -> Inst {
     match xs.try_get(i) {
         Option::Some(x) => x,
-        Option::None => Inst {
-            key: 0,
-            name: 0,
-            a: 0,
-            n: 0
-        },
+        Option::None => Inst { key: 0, name: 0, a: 0, n: 0 },
     }
 }
 

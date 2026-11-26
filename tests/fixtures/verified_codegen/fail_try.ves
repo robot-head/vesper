@@ -25,12 +25,7 @@ fn sum(a: i64, b: i64) -> i64 eff [Fail[Bad], Fail[ArithOverflow]] {
 }
 
 fn over(x: i64) -> i64 eff [Fail[Limit]] {
-    Fail::raise(
-        Limit {
-            at: x,
-            max: 100
-        }
-    )
+    Fail::raise(Limit { at: x, max: 100 })
 }
 
 fn bounded(x: i64) -> i64 eff [Fail[Limit], Fail[Bad], Fail[ArithOverflow]] {

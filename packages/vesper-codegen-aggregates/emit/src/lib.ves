@@ -580,9 +580,7 @@ fn drops(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[Cranelift
         return DECLINED;
     }
     let bytes = request_bytes(call);
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in bytes.as_slice());
     let ty = u32_at(in c.tmap, r.word(in bytes.as_slice()));
     let mut st = St {

@@ -3,7 +3,5 @@ copy struct Pair {
     b: i64
 }
 fn main() {
-    Pair {
-        a: 1
-    };
+    Pair { a: 1 };
 }

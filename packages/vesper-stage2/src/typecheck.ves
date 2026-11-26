@@ -120,14 +120,7 @@ fn pop_scope(inout tc: Tc) {
 }
 
 fn bind_var(inout tc: Tc, name: u32, ty: u32) {
-    tc
-        .env
-        .push(
-            Binding {
-                name: name,
-                ty: ty
-            }
-        );
+    tc.env.push(Binding { name: name, ty: ty });
 }
 
 fn lookup_var(in tc: Tc, name: u32) -> u32 {
@@ -191,15 +184,7 @@ fn record_span(inout tc: Tc, s0: u64, s1: u64, ty: u32) {
         return;
     }
     let dt = default_type(inout tc.types, ty);
-    tc
-        .spans
-        .push(
-            SpanRow {
-                start: s0,
-                end: s1,
-                ty: dt
-            }
-        );
+    tc.spans.push(SpanRow { start: s0, end: s1, ty: dt });
 }
 
 fn split_last_colon(inout names: Names, sym: u32) -> (u32, u32) {
@@ -516,28 +501,12 @@ fn check_fn_call(inout tc: Tc, in a: Ast, f: FnR, receiver_ty: u32, e: Ex, ce: E
             let gn = u32_at(in gnames, gi);
             let vty = vars.get(gn);
             if vty != NONE32 {
-                tc
-                    .pairs
-                    .push(
-                        Pair {
-                            name: gn,
-                            ty: vty
-                        }
-                    );
+                tc.pairs.push(Pair { name: gn, ty: vty });
                 vn = wrapping_add(vn, 1);
             }
         }
         if vn > 0 {
-            tc
-                .calls
-                .push(
-                    CallRow {
-                        s0: e.s0,
-                        s1: e.s1,
-                        v0: v0,
-                        vn: vn
-                    }
-                );
+            tc.calls.push(CallRow { s0: e.s0, s1: e.s1, v0: v0, vn: vn });
         }
     }
     let rty = substitute(inout tc.types, f.result, in vars);
@@ -1350,14 +1319,7 @@ fn rebuild_tc(
     let sn = wrapping_sub(tc_spans.len(), n_spans);
     for si in n_spans..tc_spans.len() {
         match tc_spans.try_get(si) {
-            Option::Some(r) => new_spans
-                .push(
-                    SpanRow {
-                        start: r.start,
-                        end: r.end,
-                        ty: r.ty
-                    }
-                ),
+            Option::Some(r) => new_spans.push(SpanRow { start: r.start, end: r.end, ty: r.ty }),
             Option::None => {},
         }
     }
@@ -1366,14 +1328,7 @@ fn rebuild_tc(
     }
     for si in 0..new_spans.len() {
         match new_spans.try_get(si) {
-            Option::Some(r) => tc_spans
-                .push(
-                    SpanRow {
-                        start: r.start,
-                        end: r.end,
-                        ty: r.ty
-                    }
-                ),
+            Option::Some(r) => tc_spans.push(SpanRow { start: r.start, end: r.end, ty: r.ty }),
             Option::None => {},
         }
     }
@@ -1381,15 +1336,7 @@ fn rebuild_tc(
     let cn = wrapping_sub(tc_calls.len(), n_calls);
     for ci in n_calls..tc_calls.len() {
         match tc_calls.try_get(ci) {
-            Option::Some(r) => new_calls
-                .push(
-                    CallRow {
-                        s0: r.s0,
-                        s1: r.s1,
-                        v0: r.v0,
-                        vn: r.vn
-                    }
-                ),
+            Option::Some(r) => new_calls.push(CallRow { s0: r.s0, s1: r.s1, v0: r.v0, vn: r.vn }),
             Option::None => {},
         }
     }
@@ -1398,15 +1345,7 @@ fn rebuild_tc(
     }
     for ci in 0..new_calls.len() {
         match new_calls.try_get(ci) {
-            Option::Some(r) => tc_calls
-                .push(
-                    CallRow {
-                        s0: r.s0,
-                        s1: r.s1,
-                        v0: r.v0,
-                        vn: r.vn
-                    }
-                ),
+            Option::Some(r) => tc_calls.push(CallRow { s0: r.s0, s1: r.s1, v0: r.v0, vn: r.vn }),
             Option::None => {},
         }
     }
@@ -1414,13 +1353,7 @@ fn rebuild_tc(
     let pn = wrapping_sub(tc_pairs.len(), n_pairs);
     for pi in n_pairs..tc_pairs.len() {
         match tc_pairs.try_get(pi) {
-            Option::Some(r) => new_pairs
-                .push(
-                    Pair {
-                        name: r.name,
-                        ty: r.ty
-                    }
-                ),
+            Option::Some(r) => new_pairs.push(Pair { name: r.name, ty: r.ty }),
             Option::None => {},
         }
     }
@@ -1429,13 +1362,7 @@ fn rebuild_tc(
     }
     for pi in 0..new_pairs.len() {
         match new_pairs.try_get(pi) {
-            Option::Some(r) => tc_pairs
-                .push(
-                    Pair {
-                        name: r.name,
-                        ty: r.ty
-                    }
-                ),
+            Option::Some(r) => tc_pairs.push(Pair { name: r.name, ty: r.ty }),
             Option::None => {},
         }
     }

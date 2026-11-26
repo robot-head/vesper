@@ -128,17 +128,11 @@ test {
         let mut t: CacheBTree[Point, u64] = btree_new[Point, u64]();
         let mut f: FlatTable[Point, u64] = flat_table_new[Point, u64]();
         for i in 0..count(50) {
-            let p = Point {
-                x: wrapping_sub(25, wrapping_i64(i)),
-                y: wrapping_i64(i % 3)
-            };
+            let p = Point { x: wrapping_sub(25, wrapping_i64(i)), y: wrapping_i64(i % 3) };
             t.insert(p, i);
             f.insert(p, i);
         }
-        let probe = Point {
-            x: 0,
-            y: 1
-        };
+        let probe = Point { x: 0, y: 1 };
         r = check(some_u64(t.get(probe), 25) && some_u64(f.get(probe), 25), 1, r);
         let low = match t.first() {
             Option::Some((p, v)) => v,

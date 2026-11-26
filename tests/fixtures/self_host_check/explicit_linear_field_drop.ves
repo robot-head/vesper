@@ -2,8 +2,6 @@ copy struct OwnedFd {
     raw: i64 @@linear
 }
 fn main() -> i64 {
-    let fd = OwnedFd {
-        raw: 7
-    };
+    let fd = OwnedFd { raw: 7 };
     0
 }

@@ -608,13 +608,7 @@ fn node(in t: Toml, id: u32) -> TNode {
 fn ent(in t: Toml, id: u32) -> TEnt {
     match t.ents.try_get(widen_u64(id)) {
         Option::Some(e) => e,
-        Option::None => TEnt {
-            kstart: 0,
-            klen: 0,
-            hash: 0,
-            child: NONE,
-            next: NONE
-        },
+        Option::None => TEnt { kstart: 0, klen: 0, hash: 0, child: NONE, next: NONE },
     }
 }
 
@@ -2101,20 +2095,9 @@ fn extract(in t: Toml, inout b: Budget, inout levels: ChunkSeq[u64]) eff [Fail[L
 // then the usage: decoded bytes, tokens, nodes and work.
 pub fn parse_policy(in source: Str, bytes: u64, depth: u64, tokens: u64, nodes: u64, work: u64)
     -> ChunkSeq[u64] eff [Fail[LintFail]] {
-    let lim = Limits {
-        bytes: bytes,
-        depth: depth,
-        tokens: tokens,
-        nodes: nodes,
-        work: work
-    };
+    let lim = Limits { bytes: bytes, depth: depth, tokens: tokens, nodes: nodes, work: work };
     validate_limits(in lim);
-    let mut b = Budget {
-        lim: lim,
-        work: 0,
-        nodes: 0,
-        value_bytes: 0
-    };
+    let mut b = Budget { lim: lim, work: 0, nodes: 0, value_bytes: 0 };
     let s = source.as_bytes();
     let ntokens = preflight(in s, inout b);
     let mut t = Toml {

@@ -295,12 +295,7 @@ pub fn huff_unpack(in h: Huff, in data: Slice[u8], max_len: u64, inout out: Chun
 
 pub fn huff_decode_int(in h: Huff, in buf: Slice[u8], bits: u64) -> Result[IntRead, PrefixError] {
     match decode_int(in buf, 0, bits) {
-        Result::Ok(n) => Result::Ok(
-            IntRead {
-                value: n.value,
-                used: n.used
-            }
-        ),
+        Result::Ok(n) => Result::Ok(IntRead { value: n.value, used: n.used }),
         Result::Err(e) => Result::Err(e),
     }
 }

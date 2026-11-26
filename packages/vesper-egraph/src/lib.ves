@@ -219,9 +219,7 @@ fn push_u32s(inout out: ChunkSeq[u64], in r: Records) {
 // cost, and the best expression's nodes (op, data, child, child).
 pub fn egraph_math(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut rd = Reader {
-        pos: 0
-    };
+    let mut rd = Reader { pos: 0 };
     let rules = math_rules();
     let arity = math_arity();
     let cases = rd.word(in b);
@@ -394,9 +392,7 @@ fn set_token(inout s: ChunkSeq[u32], t: u64, id: u32) -> bool {
 // candidate in the read's class, or u32::MAX.
 pub fn egraph_memory(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut rd = Reader {
-        pos: 0
-    };
+    let mut rd = Reader { pos: 0 };
     let arity = memory_arity();
     let rounds = rd.word(in b);
     let blocks = rd.word(in b);

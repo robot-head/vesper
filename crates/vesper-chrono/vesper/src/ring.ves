@@ -88,10 +88,7 @@ fn byte_at(in b: Slice[u8], i: u64) -> u8 {
 fn slot_at(in s: Slice[Slot], i: u64) -> Slot {
     match s.try_get(i) {
         Option::Some(v) => v,
-        Option::None => Slot {
-            pos: 0,
-            len: 0
-        },
+        Option::None => Slot { pos: 0, len: 0 },
     }
 }
 
@@ -154,13 +151,7 @@ pub fn new_recorder(config: RecorderConfig) -> Result[FlightRecorder, u32] {
         if s >= config.max_records {
             break;
         }
-        slots
-            .push(
-                Slot {
-                    pos: 0,
-                    len: 0
-                }
-            );
+        slots.push(Slot { pos: 0, len: 0 });
         s = wrapping_add(s, 1);
     }
     let mut snaps: ChunkSeq[SnapshotSlot] = ChunkSeq::new();

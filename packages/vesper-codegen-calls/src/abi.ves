@@ -45,10 +45,7 @@ pub copy struct FnAbi {
 }
 
 pub fn default_abi() -> FnAbi {
-    FnAbi {
-        status: false,
-        result_words: 0
-    }
+    FnAbi { status: false, result_words: 0 }
 }
 
 pub struct Sig {
@@ -89,17 +86,9 @@ pub fn layout_facts(
         err.text.clear();
         err.text.extend(in ls.err.as_slice());
         ls.reset(m);
-        return LayoutFacts {
-            ok: false,
-            aggregate: false,
-            size: 0
-        };
+        return LayoutFacts { ok: false, aggregate: false, size: 0 };
     }
-    let facts = LayoutFacts {
-        ok: true,
-        aggregate: ls.aggregate(l),
-        size: ls.node(l).size
-    };
+    let facts = LayoutFacts { ok: true, aggregate: ls.aggregate(l), size: ls.node(l).size };
     ls.reset(m);
     facts
 }

@@ -6,11 +6,7 @@ use self::check::{ex_end};
 // Values and the row executor (src/execute.rs).
 
 pub fn val_at(in q: Q, in s: ChunkSeq[u64], p: u64) -> Val {
-    Val {
-        t: cw(in s, p),
-        a: cw(in s, wrapping_add(p, 1)),
-        b: cw(in s, wrapping_add(p, 2))
-    }
+    Val { t: cw(in s, p), a: cw(in s, wrapping_add(p, 1)), b: cw(in s, wrapping_add(p, 2)) }
 }
 
 // `Value::bytes`: the payload length of text and bytes, 8 otherwise.
@@ -273,12 +269,7 @@ pub fn holds(in ds: D, inout q: Q, p: u64, row: u64) -> bool {
 pub fn dtab(in ds: D, in q: Q, i: u64) -> CTab {
     match ds.dtabs.try_get(i) {
         Option::Some(t) => t,
-        Option::None => CTab {
-            noff: 0,
-            nlen: 0,
-            start: 0,
-            n: 0
-        },
+        Option::None => CTab { noff: 0, nlen: 0, start: 0, n: 0 },
     }
 }
 

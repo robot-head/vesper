@@ -524,10 +524,7 @@ impl B {
 
     // The words written since mark `m`, as a term.
     pub fn since(in self, m: u64) -> T {
-        T {
-            a: m,
-            n: wrapping_sub(self.words.len(), m)
-        }
+        T { a: m, n: wrapping_sub(self.words.len(), m) }
     }
 
     // Writes a copy of `t`.

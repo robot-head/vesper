@@ -73,9 +73,7 @@ const F64_ONE: u64 = 4607182418800017408;
 const F64_MIN_POSITIVE: u64 = 4503599627370496;
 
 fn fty(code: u32) -> Ty {
-    Ty {
-        code: code
-    }
+    Ty { code: code }
 }
 
 fn arg(call: u64, i: u64) -> u64 eff [Ffi[Cranelift]] {
@@ -183,9 +181,7 @@ fn math(call: u64, inout b: Builder) -> Value eff [Ffi[Cranelift]] {
     if k == MATH_FMA {
         let y = arg_value(call, 2);
         let z = arg_value(call, 3);
-        return Value {
-            id: Cranelift::vcl_ternary(inout b, Ternary::Fma, x.id, y.id, z.id)
-        };
+        return Value { id: Cranelift::vcl_ternary(inout b, Ternary::Fma, x.id, y.id, z.id) };
     }
     // `round`: t = trunc(x); |x - t| >= 0.5 moves t one away from zero.
     let t = ins_unary(inout b, Un::Trunc, x);

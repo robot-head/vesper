@@ -3,32 +3,14 @@
 fn c_type(at: i64, depth: i64) -> CTypeAt eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if depth > 32 {
         let limit = c_limit(at);
-        CTypeAt {
-            ty: CType {
-                tag: 0,
-                at: 0
-            },
-            next: at
-        }
+        CTypeAt { ty: CType { tag: 0, at: 0 }, next: at }
     } else {
         let t = c_token(at);
         if t.kind == 12 {
             let sig = c_signature(at, false, depth + 1);
-            CTypeAt {
-                ty: CType {
-                    tag: 4,
-                    at: t.start
-                },
-                next: sig.body
-            }
+            CTypeAt { ty: CType { tag: 4, at: t.start }, next: sig.body }
         } else if t.kind == 32 && c_kind(t.end) == 33 {
-            CTypeAt {
-                ty: CType {
-                    tag: 0,
-                    at: 0
-                },
-                next: c_next(t.end)
-            }
+            CTypeAt { ty: CType { tag: 0, at: 0 }, next: c_next(t.end) }
         } else if t.kind == 3 || t.kind == 4 {
             let builtin = t.end - t.start > 6
                 && (
@@ -58,40 +40,16 @@ fn c_type(at: i64, depth: i64) -> CTypeAt eff [Fail[CheckError], Fail[Diag], Fai
             };
             if c_kind(t.end) == 36 {
                 let unsupported = c_unsupported(1, t.end);
-                CTypeAt {
-                    ty: CType {
-                        tag: tag,
-                        at: t.start
-                    },
-                    next: t.end
-                }
+                CTypeAt { ty: CType { tag: tag, at: t.start }, next: t.end }
             } else if c_kind(t.end) == 41 {
                 let unsupported = c_unsupported(2, at);
-                CTypeAt {
-                    ty: CType {
-                        tag: tag,
-                        at: t.start
-                    },
-                    next: t.end
-                }
+                CTypeAt { ty: CType { tag: tag, at: t.start }, next: t.end }
             } else {
-                CTypeAt {
-                    ty: CType {
-                        tag: tag,
-                        at: t.start
-                    },
-                    next: t.end
-                }
+                CTypeAt { ty: CType { tag: tag, at: t.start }, next: t.end }
             }
         } else {
             let unsupported = c_unsupported(2, at);
-            CTypeAt {
-                ty: CType {
-                    tag: 0,
-                    at: 0
-                },
-                next: at
-            }
+            CTypeAt { ty: CType { tag: 0, at: 0 }, next: at }
         }
     }
 }
@@ -122,12 +80,7 @@ fn c_param(at: i64, named: bool, depth: i64)
         start
     };
     let ty = c_type(ty_at, depth + 1);
-    CParam {
-        name: name,
-        ty: ty.ty,
-        pass: c_pass(at),
-        next: ty.next
-    }
+    CParam { name: name, ty: ty.ty, pass: c_pass(at), next: ty.next }
 }
 fn c_params_end(at: i64, named: bool, depth: i64)
     -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
@@ -160,13 +113,7 @@ fn c_signature(at: i64, named: bool, depth: i64)
     let ret = if c_kind(next) == 46 {
         c_type(c_next(next), depth + 1)
     } else {
-        CTypeAt {
-            ty: CType {
-                tag: 0,
-                at: 0
-            },
-            next: next
-        }
+        CTypeAt { ty: CType { tag: 0, at: 0 }, next: next }
     };
     let effects = if c_kind(ret.next) == 18 {
         c_take(c_next(ret.next), 36)
@@ -178,12 +125,7 @@ fn c_signature(at: i64, named: bool, depth: i64)
     } else {
         c_row_end(effects)
     };
-    CSignature {
-        params: params,
-        result: ret.ty,
-        effects: effects,
-        body: body
-    }
+    CSignature { params: params, result: ret.ty, effects: effects, body: body }
 }
 // Rows contain only unlabelled Fail[monomorphic error type] entries.
 fn c_row_end(at: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
@@ -227,14 +169,7 @@ fn c_decl(at: i64) -> CDecl eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflo
     };
     if c_kind(body) == 36 {
         let unsupported = c_unsupported(1, body);
-        CDecl {
-            kind: kind,
-            mode: mode,
-            name: name,
-            start: start,
-            body: body,
-            end: body
-        }
+        CDecl { kind: kind, mode: mode, name: name, start: start, body: body, end: body }
     } else {
         CDecl {
             kind: kind,

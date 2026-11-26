@@ -518,9 +518,7 @@ fn read_fn(inout c: Cx, inout r: Reader, in b: Slice[u8]) {
 }
 
 pub fn read_input(in b: Slice[u8]) -> Cx {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut nm = names_new();
     read_strings(inout r, in b, inout nm);
     let words = r.word(in b);

@@ -16,29 +16,12 @@ enum List[T] {
 
 fn insert[T: mod copy](sink l: List[T], x: T) -> List[T] where T: Ord {
     match l {
-        List::Nil => List::Cons {
-            head: x,
-            tail: Box::new(List::Nil)
-        },
-        List::Cons {
-            head,
-            tail
-        } => match x.cmp(head) {
+        List::Nil => List::Cons { head: x, tail: Box::new(List::Nil) },
+        List::Cons { head, tail } => match x.cmp(head) {
             Greater => match tail {
-                Box(rest) => List::Cons {
-                    head: head,
-                    tail: Box::new(insert(rest, x))
-                },
+                Box(rest) => List::Cons { head: head, tail: Box::new(insert(rest, x)) },
             },
-            _ => List::Cons {
-                head: x,
-                tail: Box::new(
-                    List::Cons {
-                        head: head,
-                        tail: tail
-                    }
-                )
-            },
+            _ => List::Cons { head: x, tail: Box::new(List::Cons { head: head, tail: tail }) },
         },
     }
 }
@@ -46,10 +29,7 @@ fn insert[T: mod copy](sink l: List[T], x: T) -> List[T] where T: Ord {
 fn digest(sink l: List[Key], acc: u64) -> u64 {
     match l {
         List::Nil => acc,
-        List::Cons {
-            head,
-            tail
-        } => match tail {
+        List::Cons { head, tail } => match tail {
             Box(rest) => digest(
                 rest,
                 wrapping_add(
@@ -62,10 +42,7 @@ fn digest(sink l: List[Key], acc: u64) -> u64 {
 }
 
 fn key(major: u64, minor: u64) -> Key {
-    Key {
-        major: major,
-        minor: minor
-    }
+    Key { major: major, minor: minor }
 }
 
 fn main() -> u64 {

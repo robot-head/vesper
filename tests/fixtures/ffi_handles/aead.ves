@@ -22,11 +22,7 @@ fn payload_sum(in p: Slice[u8]) -> u64 {
 fn open_or_fail(in s: Sealer, inout p: Slice[u8]) -> u64 eff [Ffi[Aead], Fail[AuthError]] {
     let code = Aead::aead_open(in s, inout p);
     if code != 0 {
-        Fail::raise(
-            AuthError {
-                code: code
-            }
-        )
+        Fail::raise(AuthError { code: code })
     } else {
         p.sum_be16()
     }

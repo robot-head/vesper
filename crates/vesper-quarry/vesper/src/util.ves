@@ -151,51 +151,28 @@ pub fn ex(in q: Q, i: u64) -> u64 {
 pub fn tok(in q: Q, i: u64) -> Tok {
     match q.toks.try_get(i) {
         Option::Some(t) => t,
-        Option::None => Tok {
-            kind: 0,
-            a: 0,
-            b: 0,
-            kw: 0
-        },
+        Option::None => Tok { kind: 0, a: 0, b: 0, kw: 0 },
     }
 }
 
 pub fn raw(in q: Q, i: u64) -> Raw {
     match q.raw.try_get(i) {
         Option::Some(r) => r,
-        Option::None => Raw {
-            kind: 0,
-            a: 0,
-            b: 0,
-            c: 0,
-            d: 0
-        },
+        Option::None => Raw { kind: 0, a: 0, b: 0, c: 0, d: 0 },
     }
 }
 
 pub fn node(in q: Q, i: u64) -> Node {
     match q.plan.try_get(i) {
         Option::Some(n) => n,
-        Option::None => Node {
-            kind: 0,
-            a: 0,
-            b: 0,
-            c: 0,
-            d: 0,
-            e: 0,
-            f: none(),
-            g: none()
-        },
+        Option::None => Node { kind: 0, a: 0, b: 0, c: 0, d: 0, e: 0, f: none(), g: none() },
     }
 }
 
 pub fn link(in q: Q, i: u64) -> Link {
     match q.links.try_get(i) {
         Option::Some(l) => l,
-        Option::None => Link {
-            expr: 0,
-            next: none()
-        },
+        Option::None => Link { expr: 0, next: none() },
     }
 }
 
@@ -216,13 +193,7 @@ pub fn bcol(in q: Q, i: u64) -> BCol {
 }
 
 pub fn empty_col() -> CCol {
-    CCol {
-        noff: 0,
-        nlen: 0,
-        ty: 0,
-        nullable: false,
-        used: false
-    }
+    CCol { noff: 0, nlen: 0, ty: 0, nullable: false, used: false }
 }
 
 pub fn ccol(in q: Q, i: u64) -> CCol {
@@ -242,21 +213,12 @@ pub fn param(in q: Q, i: u64) -> CCol {
 pub fn ctab(in q: Q, i: u64) -> CTab {
     match q.tabs.try_get(i) {
         Option::Some(t) => t,
-        Option::None => CTab {
-            noff: 0,
-            nlen: 0,
-            start: 0,
-            n: 0
-        },
+        Option::None => CTab { noff: 0, nlen: 0, start: 0, n: 0 },
     }
 }
 
 pub fn null_val() -> Val {
-    Val {
-        t: 0,
-        a: 0,
-        b: 0
-    }
+    Val { t: 0, a: 0, b: 0 }
 }
 
 pub fn bool_val(b: bool) -> Val {
@@ -599,16 +561,7 @@ pub fn load_catalog(inout q: Q, in meta: Slice[u64], at: u64) -> u64 {
         let nlen = sw(in meta, wrapping_add(p, 1));
         let nc = sw(in meta, wrapping_add(p, 2));
         p = wrapping_add(p, 3);
-        q
-            .tabs
-            .push(
-                CTab {
-                    noff: noff,
-                    nlen: nlen,
-                    start: q.cols.len(),
-                    n: nc
-                }
-            );
+        q.tabs.push(CTab { noff: noff, nlen: nlen, start: q.cols.len(), n: nc });
         for c in 0..nc {
             q
                 .cols

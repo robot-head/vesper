@@ -284,17 +284,7 @@ impl TableCore {
         let t = i / LANES;
         let bits = get64(in self.occupied, t);
         self.occupied.try_set(t, bits & ~bit(i % LANES));
-        self
-            .set_key(
-                i,
-                CidKey {
-                    w0: 0,
-                    w1: 0,
-                    w2: 0,
-                    w3: 0,
-                    w4: 0
-                }
-            );
+        self.set_key(i, CidKey { w0: 0, w1: 0, w2: 0, w3: 0, w4: 0 });
         self
             .write_state(
                 i,

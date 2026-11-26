@@ -107,12 +107,7 @@ pub fn huff_tables() -> Huff {
             nib.push(walk(in child, node_at, n));
         }
     }
-    Huff {
-        codes: codes,
-        nib: nib,
-        info: info,
-        st: static_new()
-    }
+    Huff { codes: codes, nib: nib, info: info, st: static_new() }
 }
 
 fn walk(in child: ChunkSeq[u64], node_at: u64, nibble: u64) -> u64 {

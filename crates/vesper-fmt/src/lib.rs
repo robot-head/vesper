@@ -49,7 +49,10 @@ pub use doc::{DEFAULT_LINE_WIDTH, Doc, DocId, Document};
 pub use proof_model::{DocumentModel, ProofError, ProofLimits};
 pub use proof_source::{FormatVerification, format_for_verification};
 pub use recovery::{RecoveryEdit, RecoveryFormatResult, format_recovery_source};
-use vesper_syntax::lexer::{self, Token, TokenKind as K};
+use vesper_syntax::{
+    lexer::{self, Token, TokenKind as K},
+    parser,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
@@ -141,6 +144,9 @@ struct Piece<'a> {
     glued: bool,
     /// Grammar-sensitive boundary from the unexpanded surface CST.
     sugar_gap: Option<Gap>,
+    /// The token's CST parent is an expression or pattern node, where a `{`
+    /// right after a type name opens a struct literal or pattern.
+    expr: bool,
 }
 fn pieces<'a>(source: &'a str, tokens: &[Token]) -> Vec<Piece<'a>> {
     tokens
@@ -152,6 +158,7 @@ fn pieces<'a>(source: &'a str, tokens: &[Token]) -> Vec<Piece<'a>> {
             blank: false,
             glued: false,
             sugar_gap: None,
+            expr: false,
         })
         .collect()
 }
@@ -437,6 +444,9 @@ fn once(
                     blank: std::mem::take(&mut blank),
                     glued: std::mem::replace(&mut glued, true),
                     sugar_gap: None,
+                    expr: token
+                        .parent()
+                        .is_some_and(|n| matches!(n.kind(), parser::EXPR | parser::PATTERN)),
                 });
             }
         }
@@ -808,12 +818,28 @@ fn sequence<'a>(
     // Inside a package name `@scope/name` (`use` and trait paths), whose
     // tokens must stay adjacent for the parser.
     let mut package = false;
+    // Inside the head of an `if`, `match`, `for` or `while` at this level,
+    // up to its `{`: the parser admits no struct literal there, so a type
+    // name before `{` ends the head (`for i in 0..N {`).
+    let mut head = false;
     while *pos < atoms.len() && Some(atoms[*pos].kind) != end {
         let current = atoms[*pos];
         // `{` after `.` or `::` opens a list, not a block: a tagged literal or
         // a `use` group (`use a::{b, c};`), which stays on one line when it fits.
         let is_block = current.kind == K::LBrace
             && previous.is_none_or(|p| !matches!(p.kind, K::Dot | K::ColonColon));
+        // A struct literal or pattern (`Point { x: 1, y: 2 }`) is a list
+        // too, spaced inside its braces.
+        let is_record =
+            is_block && current.expr && !head && previous.is_some_and(|p| p.kind == K::Upper);
+        let is_block = is_block && !is_record;
+        if matches!(current.kind, K::If | K::Match)
+            || current.kind == K::Lower && matches!(current.text, "for" | "while")
+        {
+            head = true;
+        } else if matches!(current.kind, K::LBrace | K::Semi) {
+            head = false;
+        }
         package = current.glued
             && previous.is_some_and(|p| {
                 (p.kind == K::At && current.kind == K::Lower)
@@ -902,6 +928,8 @@ fn sequence<'a>(
             } else {
                 let lead = document.push(if is_block || trailing_comma {
                     Doc::HardLine
+                } else if is_record {
+                    Doc::SoftLineOrSpace
                 } else {
                     Doc::SoftLineOrEmpty
                 })?;
@@ -910,6 +938,8 @@ fn sequence<'a>(
                 let trail =
                     document.push(if is_block || last_is_line_comment || trailing_comma {
                         Doc::HardLine
+                    } else if is_record {
+                        Doc::SoftLineOrSpace
                     } else {
                         Doc::SoftLineOrEmpty
                     })?;
@@ -954,6 +984,7 @@ fn sequence<'a>(
             blank: false,
             glued: current.glued,
             sugar_gap: None,
+            expr: current.expr,
         });
     }
     line.flush(document, &mut output)?;

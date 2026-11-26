@@ -11,10 +11,7 @@ enum List {
 fn length(sink l: List) -> u64 {
     match l {
         List::Nil => 0,
-        List::Cons {
-            head,
-            tail
-        } => wrapping_add(1, length(tail)),
+        List::Cons { head, tail } => wrapping_add(1, length(tail)),
     }
 }
 
@@ -43,13 +40,5 @@ fn is_odd(n: u64) -> bool {
 }
 
 fn main() -> u64 {
-    length(
-        List::Cons {
-            head: 7,
-            tail: List::Cons {
-                head: 8,
-                tail: List::Nil
-            }
-        }
-    )
+    length(List::Cons { head: 7, tail: List::Cons { head: 8, tail: List::Nil } })
 }
