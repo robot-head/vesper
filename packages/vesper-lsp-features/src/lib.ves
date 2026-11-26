@@ -24,6 +24,7 @@ use self::ownership::{lens_facts, lens_requests, lens_view};
 use self::repair::{lens_repair};
 use self::proof_lenses::{proof_lenses};
 use self::lens_state::{lens_state};
+use self::anvil::{anvil_actions};
 use self::hover::{Facts, facts_new, fact_function, fact_param, hover_answer};
 use self::nav::{
     Ix, MAX_DOCUMENTS, MAX_OUTPUT_BYTES, MAX_QUERY_BYTES, MAX_SYMBOLS, MAX_URI_BYTES, ERR_NONE,
@@ -578,4 +579,38 @@ pub fn lsp_proof_lenses(in input: Str) -> ChunkSeq[u64] {
 // `CancelToken`; lens_state.ves).
 pub fn lsp_lens_state(in input: Str) -> ChunkSeq[u64] {
     lens_state(in input)
+}
+
+// Task "anvil": the Vesper Anvil code actions (anvil.ves). The input is
+// the rounds, the function's line, whether failing arguments are given,
+// the URI, source, function name and argument lengths, then those texts.
+// The actions are computed `rounds` times; the result is their JSON array.
+pub fn lsp_anvil_actions(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader { pos: 0 };
+    let rounds = word(in b, inout r);
+    let fn_line = word(in b, inout r);
+    let has_args = word(in b, inout r) == 1;
+    let uri_len = word(in b, inout r);
+    let src_len = word(in b, inout r);
+    let name_len = word(in b, inout r);
+    let args_len = word(in b, inout r);
+    let uri_at = r.pos;
+    let src_at = wrapping_add(uri_at, uri_len);
+    let name_at = wrapping_add(src_at, src_len);
+    let args_at = wrapping_add(name_at, name_len);
+    let args_end = wrapping_add(args_at, args_len);
+    let mut out = ChunkSeq::new[u8]();
+    for k in 0..rounds {
+        anvil_actions(
+            inout out,
+            in b[uri_at..src_at],
+            in b[src_at..name_at],
+            in b[name_at..args_at],
+            fn_line,
+            has_args,
+            in b[args_at..args_end]
+        );
+    }
+    pack(in out.as_slice())
 }
