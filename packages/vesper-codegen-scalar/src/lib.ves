@@ -879,7 +879,8 @@ impl Gen {
     // The `const` decision: Rust asks the checker's type at the span.
     fn decide_constant(inout self, i: InstRow) {
         let lit = self.p.op(i.a);
-        if lit == Lit::Int {
+        // A literal past `i128::MAX` is an integer too (`Literal::WideInt`).
+        if lit == Lit::Int || lit == Lit::WideInt {
             let t = self.c.world.expr_type(i.s0, i.s1);
             let wide = if t == NONE32 {
                 false
