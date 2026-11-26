@@ -307,6 +307,8 @@ const CASES: &[&str] = &[
     "fn f(a: Atomic[u64]) -> u64 { 1 }",
     "fn f() -> u64 { let o = MemoryOrder::SeqCst; 1 }",
     "struct Atomic { x: u64 } fn f(a: Atomic) -> u64 { 1 }",
+    "effect E { fn op(x: MemoryOrder) -> u64; } fn f() -> u64 { handle E in { 1 } with { return v => v, op(MemoryOrder::SeqCst, resume) => 0, } }",
+    "effect E { fn op(x: u64) -> u64; } fn f() -> u64 { handle E in { 1 } with { return v => v, op(Atomic::A, resume) => 0, } }",
     "fn body(in d: u64, i: u64) { } fn f() { parallel_for(in 1, 2, body); }",
     "fn f(o: Option[u64]) -> u64 { let c = Atomic::new(1); parallel_for(in c, 1, g); o.unwrap_or(0) }",
     // The float prelude.

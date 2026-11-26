@@ -273,7 +273,7 @@ fn clause_uses(m: u8, in a: Ast, c: u32) -> bool {
         .clauses
         .get_or(idx_from_raw[ClauseNode](c), ClauseNode { name: none(), pats: 0, body: none() });
     for i in 0..list_len(in a, n.pats) {
-        if pattern_mentions(m, in a, list_at(in a, n.pats, i)) {
+        if m == 1 && pattern_mentions(m, in a, list_at(in a, n.pats, i)) {
             return true;
         }
     }
