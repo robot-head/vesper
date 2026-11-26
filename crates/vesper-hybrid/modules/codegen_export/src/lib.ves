@@ -6,13 +6,8 @@
 // handle drop glue, emitted in Vesper over the Cranelift module the Rust
 // compiler lends (`export`, the `export` hook at src/native_export/glue.rs's
 // swap point).
-use @vesper/codegen-export::{
-    export_plan_bytes,
-    interface_text_bytes
-};
-use @vesper/codegen-export-glue::{
-    export_glue
-};
+use @vesper/codegen-export::{export_plan_bytes, interface_text_bytes};
+use @vesper/codegen-export-glue::{export_glue};
 
 // The interface planner (`plan_with`, the `plan` hook): its inputs as
 // words (tests/self_host_codegen_export/plan_words.rs `plan_input`), and

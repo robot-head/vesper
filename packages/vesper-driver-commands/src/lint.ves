@@ -2,19 +2,8 @@
 // in Vesper, delegating package discovery, policy loading, checked lint
 // analysis, and bounded atomic fix replacement (`src/lint_commands.rs`) to
 // `HybridCommands::hc_lint_run`.
-use @vesper/driver::{
-    Args,
-    args_count,
-    eq
-};
-use super::{
-    PrintFailed,
-    arg,
-    byte_at,
-    print,
-    fail,
-    stdout_stream
-};
+use @vesper/driver::{Args, args_count, eq};
+use super::{PrintFailed, arg, byte_at, print, fail, stdout_stream};
 
 pub fn run_lint(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     let n = args_count(in args);

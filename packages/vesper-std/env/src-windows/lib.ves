@@ -1,9 +1,6 @@
 // @vesper-std/env (Windows): arguments, environment variables and current
 // directory directly over Win32 `kernel32` (`env-windows.vsys`).
-use @vesper-std/fs::{
-    IoError,
-    raise_kind
-};
+use @vesper-std/fs::{IoError, raise_kind};
 
 fn u8_at(in s: Slice[u8], i: u64) -> u8 {
     match s.try_get(i) {

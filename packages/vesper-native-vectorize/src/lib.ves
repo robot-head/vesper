@@ -10,14 +10,7 @@
 // function. `VESPER_VECTORIZE` stays with the caller; the `debug` verifier
 // run is the caller's too.
 
-use @vesper/clif::{
-    Func,
-    n32,
-    read_func,
-    u32_at,
-    u64_at,
-    w
-};
+use @vesper/clif::{Func, n32, read_func, u32_at, u64_at, w};
 use @vesper/clif::codes::{
     CC_EQ,
     CC_NE,

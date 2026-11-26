@@ -8,13 +8,8 @@
 // stream plus a text pool and rebuilds the crate's own types from the
 // results. The encodings are documented in src/port.rs and check.ves.
 
-use self::check::{
-    compare_q,
-    subset_words
-};
-use self::version::{
-    release_q
-};
+use self::check::{compare_q, subset_words};
+use self::version::{release_q};
 
 // A parsed version, or the first parse error (module version).
 pub copy struct Ver {

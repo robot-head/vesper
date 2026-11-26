@@ -24,19 +24,9 @@
 //
 // Lists are a count then their words; strings are symbols.
 
-use @vesper/check-data::names::{
-    Names,
-    names_new
-};
-use @vesper/check-data::util::{
-    n32
-};
-use self::util::{
-    g,
-    filled,
-    put_at,
-    st
-};
+use @vesper/check-data::names::{Names, names_new};
+use @vesper/check-data::util::{n32};
+use self::util::{g, filled, put_at, st};
 
 pub struct Reader {
     pos: u64,

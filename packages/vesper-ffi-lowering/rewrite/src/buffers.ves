@@ -48,12 +48,8 @@ use @vesper/ast::{
     pat_at,
     type_at
 };
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
 
 const NONE: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;

@@ -4,10 +4,7 @@
 // behind vesper-aether's clone entropy (SH6 lane 14, #1409), RDRAND, found
 // through CPUID. build.rs (and BUILD.bazel) build this package on x86_64
 // and ../aarch64/ on AArch64; both export the same two functions.
-use @vesper-std/cpu::{
-    x86_has_rdrand,
-    x86_rdrand64
-};
+use @vesper-std/cpu::{x86_has_rdrand, x86_rdrand64};
 
 // Retries per word, as Intel's DRNG guide recommends for RDRAND.
 const RETRIES: u64 = 10;

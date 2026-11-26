@@ -810,7 +810,10 @@ fn sequence<'a>(
     let mut package = false;
     while *pos < atoms.len() && Some(atoms[*pos].kind) != end {
         let current = atoms[*pos];
-        let is_block = current.kind == K::LBrace && previous.is_none_or(|p| p.kind != K::Dot);
+        // `{` after `.` or `::` opens a list, not a block: a tagged literal or
+        // a `use` group (`use a::{b, c};`), which stays on one line when it fits.
+        let is_block = current.kind == K::LBrace
+            && previous.is_none_or(|p| !matches!(p.kind, K::Dot | K::ColonColon));
         package = current.glued
             && previous.is_some_and(|p| {
                 (p.kind == K::At && current.kind == K::Lower)

@@ -1,15 +1,8 @@
 // @vesper/stage2: pure-Vesper Stage 2 compiler driver (#1397).
 
-use @vesper/check-data::input::{
-    Ctx
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    TyPass,
-    Types
-};
+use @vesper/check-data::input::{Ctx};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{TyPass, Types};
 use @vesper/check-data::util::{
     add,
     inc,
@@ -22,71 +15,28 @@ use @vesper/check-data::util::{
     u64_at,
     w
 };
-use @vesper/check-data::world::{
-    World,
-    set_by_symbol
-};
-use @vesper/place-ir::{
-    Program
-};
-use @vesper/place-ir-lower::ast::{
-    Ast as IrAst
-};
+use @vesper/check-data::world::{World, set_by_symbol};
+use @vesper/place-ir::{Program};
+use @vesper/place-ir-lower::ast::{Ast as IrAst};
 use @vesper/check-names-packages::{
     AssembledModule,
     assemble_next_bytes,
     assembly_begin_bytes,
     assembly_metadata
 };
-use @vesper/place-ir-lower::lower::{
-    L,
-    l_new,
-    lower_all
-};
-use @vesper/wasm-backend::{
-    compile_with_facts,
-    compile_with_facts_diag
-};
+use @vesper/place-ir-lower::lower::{L, l_new, lower_all};
+use @vesper/wasm-backend::{compile_with_facts, compile_with_facts_diag};
 use @vesper/wit-component::comp::encode as wit_encode;
 use @vesper/wit-component::wit::parse as parse_wit;
-use @vesper/wasm-backend::err::{
-    WErr,
-    format_werr,
-    werr
-};
-use @vesper/wasm-backend::ir::{
-    add_eff_decl,
-    add_fn_sig,
-    empty_facts,
-    push_hop,
-    set_expr_handler
-};
-use @vesper/place-ir::codes::{
-    Op,
-    Pat,
-    PoolKind
-};
-use @vesper-std/env::{
-    arg,
-    arg_count,
-    var
-};
-use @vesper-std/fs::{
-    IoError,
-    write_path
-};
-use self::ast_lower::{
-    build_ir_ast_for_entry
-};
-use self::collect::{
-    collect_program
-};
-use self::loader::{
-    load_package_graph_bytes
-};
-use self::typecheck::{
-    typecheck_ast
-};
+use @vesper/wasm-backend::err::{WErr, format_werr, werr};
+use @vesper/wasm-backend::ir::{add_eff_decl, add_fn_sig, empty_facts, push_hop, set_expr_handler};
+use @vesper/place-ir::codes::{Op, Pat, PoolKind};
+use @vesper-std/env::{arg, arg_count, var};
+use @vesper-std/fs::{IoError, write_path};
+use self::ast_lower::{build_ir_ast_for_entry};
+use self::collect::{collect_program};
+use self::loader::{load_package_graph_bytes};
+use self::typecheck::{typecheck_ast};
 
 /// Load, assemble, and collect declarations of a Loom package from `root_dir`
 /// via `@vesper-std/fs`, returning `(module_count, fn_count, adt_count, diagnostic_bytes)`.

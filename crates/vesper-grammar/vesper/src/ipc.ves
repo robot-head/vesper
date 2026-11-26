@@ -21,34 +21,10 @@
 // per batch its rows, body start, body length, metadata version and seven
 // ArCol words per column (ranges relative to the body), then the work
 // used, the metadata allocation bytes and the consumed length.
-use self::{
-    ArCol,
-    ArReq,
-    GErr,
-    P2,
-    P4
-};
-use self::common::{
-    add_or,
-    fail,
-    fail2,
-    le16,
-    le32,
-    le64,
-    min,
-    mul_or,
-    none,
-    pair,
-    sb,
-    sw
-};
-use self::arrow::{
-    checked_buffer_range,
-    validate
-};
-use self::utf8::{
-    valid_up_to
-};
+use self::{ArCol, ArReq, GErr, P2, P4};
+use self::common::{add_or, fail, fail2, le16, le32, le64, min, mul_or, none, pair, sb, sw};
+use self::arrow::{checked_buffer_range, validate};
+use self::utf8::{valid_up_to};
 
 // Ceilings (src/ipc.rs `HARD_*`), in `lim` order.
 const HARD_INPUT_BYTES: u64 = 134217728;

@@ -3,10 +3,7 @@
 
 // @export abi 4
 
-use @vesper/check-effects::{
-    check_effects_bytes,
-    check_policies_bytes
-};
+use @vesper/check-effects::{check_effects_bytes, check_policies_bytes};
 
 pub fn effects_diags(in b: Slice[u8]) -> ChunkSeq[u64] {
     check_effects_bytes(in b)

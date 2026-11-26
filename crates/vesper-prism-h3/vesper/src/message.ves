@@ -3,25 +3,10 @@
 // three words per field: name length, value length, start in the bytes); results
 // name byte ranges of `bytes`, which the Rust wrapper turns into strings.
 
-use self::{
-    MessageError,
-    Span,
-    RequestParts,
-    ResponseParts
-};
-use self::int::{
-    inc,
-    byte,
-    word
-};
-use @vesper/prism-bytes::{
-    first_not_lower_token,
-    first_not_visible,
-    first_nul_or_line_break
-};
-use self::capsule::{
-    valid_utf8
-};
+use self::{MessageError, Span, RequestParts, ResponseParts};
+use self::int::{inc, byte, word};
+use @vesper/prism-bytes::{first_not_lower_token, first_not_visible, first_nul_or_line_break};
+use self::capsule::{valid_utf8};
 
 // Words per field in `meta`: name length, value length, and where the
 // field begins in the bytes.

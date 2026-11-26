@@ -7,10 +7,7 @@
 // not correctly rounded: 1.7976931348623158e308 is refused although it
 // rounds to `f64::MAX`.
 
-use self::limits::{
-    Ascii,
-    F64
-};
+use self::limits::{Ascii, F64};
 
 // serde_json's `POW10`: 1e0 ..= 1e308 as binary64 bits, then 1.0 to 512.
 const POW10_BITS: [u64; 512] = [

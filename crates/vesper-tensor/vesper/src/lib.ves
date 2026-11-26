@@ -54,13 +54,7 @@ use self::ocp::{
     fp8_encode as f_fp8_encode,
     nearest_int as f_nearest_int
 };
-use self::qk::{
-    check_block,
-    dequantize_block,
-    make_qkx2,
-    quantize_block,
-    scale_min
-};
+use self::qk::{check_block, dequantize_block, make_qkx2, quantize_block, scale_min};
 use self::rows::{
     check_rows,
     decode_piece as b_decode_piece,
@@ -74,17 +68,9 @@ use self::rows::{
     quantize_q4_0 as b_quantize_q4_0,
     quantize_q8_0 as b_quantize_q8_0
 };
-use self::store::{
-    parse_gguf as g_parse_gguf
-};
-use self::text::{
-    parse_json as j_parse_json
-};
-use self::tokens::{
-    build_table as t_build_table,
-    encode as t_encode,
-    lookup as t_lookup
-};
+use self::store::{parse_gguf as g_parse_gguf};
+use self::text::{parse_json as j_parse_json};
+use self::tokens::{build_table as t_build_table, encode as t_encode, lookup as t_lookup};
 use self::pool::{
     kv_append as p_kv_append,
     kv_begin as p_kv_begin,
@@ -106,10 +92,7 @@ use self::sampling::{
     sample_mult as s_sample_mult,
     sample_top_p as s_sample_top_p
 };
-use self::shape::{
-    gqa_ratio as d_gqa_ratio,
-    normalize as d_normalize
-};
+use self::shape::{gqa_ratio as d_gqa_ratio, normalize as d_normalize};
 
 // Q4_K super-blocks (src/formats.rs `QK_K`, `Q4_K_BYTES`) and the scratch
 // `qk::quantize_block` needs (its `S_LEN` bytes and `W_LEN` words).

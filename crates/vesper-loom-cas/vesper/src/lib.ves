@@ -60,22 +60,10 @@
 // function writes it to its `inout info` word before it raises; the Rust
 // wrapper (src/port.rs) rebuilds the crate's error values from it and from
 // the input bytes.
-use self::name::{
-    name_code
-};
-use self::id::{
-    object_hash,
-    parse_id,
-    hex_into
-};
-use self::tree::{
-    tree_encode_into,
-    tree_scan
-};
-use self::drv::{
-    drv_encode_into,
-    drv_scan
-};
+use self::name::{name_code};
+use self::id::{object_hash, parse_id, hex_into};
+use self::tree::{tree_encode_into, tree_scan};
+use self::drv::{drv_encode_into, drv_scan};
 use self::store::StoreErr;
 use self::fold::fold_into;
 use @vesper-std/hash-sys::derive_key_hash;

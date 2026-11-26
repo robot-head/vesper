@@ -9,28 +9,10 @@
 // tables, and replays the identities a kernel minted (symbols for joined
 // paths, scopes and binders) on the host in the same order, so both
 // builds leave the host in the same state, on success and on failure.
-use self::authority::{
-    requirements
-};
-use self::parse::{
-    Parser,
-    delimiters,
-    expr,
-    parser_new
-};
-use self::resolve::{
-    parameters,
-    resolver_new,
-    term
-};
-use self::util::{
-    Code,
-    Out,
-    Row,
-    Token,
-    W,
-    Want
-};
+use self::authority::{requirements};
+use self::parse::{Parser, delimiters, expr, parser_new};
+use self::resolve::{parameters, resolver_new, term};
+use self::util::{Code, Out, Row, Token, W, Want};
 
 // The header of `fg_parse`'s result: error, e1, e2, paths, path words.
 const PARSE_HEADER: u64 = 5;

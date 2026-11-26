@@ -2,10 +2,7 @@
 // with the FlatBuffers builder in the field order `arrow-ipc` 56 uses, and
 // the encapsulated stream framing: a continuation marker, the metadata
 // length, the metadata padded to the stream alignment, then the body.
-use self::fb::{
-    Fb,
-    padding
-};
+use self::fb::{Fb, padding};
 
 // Message.fbs: MetadataVersion V5, MessageHeader Schema and RecordBatch.
 const VERSION_V5: u64 = 4;

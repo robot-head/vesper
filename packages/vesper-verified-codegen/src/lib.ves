@@ -13,11 +13,7 @@
 // Harness entries (tests/self_host_verified_codegen.rs) take one `Str` of
 // little-endian words and return `pack_text`'s packing.
 
-use self::aarch64::{
-    emit as aarch64_emit,
-    exits as aarch64_exits,
-    start as aarch64_start
-};
+use self::aarch64::{emit as aarch64_emit, exits as aarch64_exits, start as aarch64_start};
 use self::asm::{
     Asm,
     ERR_INVALID,
@@ -34,27 +30,10 @@ use self::asm::{
     here,
     last_exits
 };
-use self::certificate::{
-    certify,
-    check_input,
-    validate_input
-};
-use self::lower::{
-    lower_input
-};
-use self::mono::{
-    front_input,
-    front_rows,
-    mono_input
-};
-use self::container::{
-    EM_AARCH64,
-    EM_RISCV,
-    EM_X86_64,
-    coff_object,
-    elf_executable,
-    macho_object
-};
+use self::certificate::{certify, check_input, validate_input};
+use self::lower::{lower_input};
+use self::mono::{front_input, front_rows, mono_input};
+use self::container::{EM_AARCH64, EM_RISCV, EM_X86_64, coff_object, elf_executable, macho_object};
 use self::machine::{
     LIR_LOAD_PTR,
     LIR_STORE_PTR,
@@ -67,16 +46,8 @@ use self::machine::{
     select,
     table_listing
 };
-use self::riscv64::{
-    emit as riscv64_emit,
-    exits as riscv64_exits,
-    start as riscv64_start
-};
-use self::x86_64::{
-    emit as x86_64_emit,
-    start as x86_64_start,
-    start_windows
-};
+use self::riscv64::{emit as riscv64_emit, exits as riscv64_exits, start as riscv64_start};
+use self::x86_64::{emit as x86_64_emit, start as x86_64_start, start_windows};
 
 // `Arch` and `Os` of the input.
 const ARCH_X86_64: u64 = 0;

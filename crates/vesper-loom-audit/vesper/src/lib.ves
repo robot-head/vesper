@@ -9,40 +9,13 @@
 // Rust wrapper (src/port.rs), which encodes the inputs in the calculus word
 // stream plus the audit's own fields and rebuilds the crate's types from
 // `out`: the encodings are documented there. Messages are built in `dp`.
-use @vesper/loom-calculus::{
-    L
-};
-use @vesper/loom-calculus::decode::{
-    decode_solution,
-    decode_tables,
-    new_l,
-    rd
-};
-use @vesper/loom-calculus::solve::{
-    solve
-};
-use self::input::{
-    decode_catalog,
-    decode_head,
-    decode_licenses,
-    decode_policy,
-    decode_range
-};
-use self::check::{
-    check_catalog,
-    check_limits,
-    check_policy,
-    preflight
-};
-use self::paths::{
-    paths
-};
-use self::report::{
-    findings,
-    out_error,
-    out_ok,
-    range_holds
-};
+use @vesper/loom-calculus::{L};
+use @vesper/loom-calculus::decode::{decode_solution, decode_tables, new_l, rd};
+use @vesper/loom-calculus::solve::{solve};
+use self::input::{decode_catalog, decode_head, decode_licenses, decode_policy, decode_range};
+use self::check::{check_catalog, check_limits, check_policy, preflight};
+use self::paths::{paths};
+use self::report::{findings, out_error, out_ok, range_holds};
 
 // One advisory: its ranges are rngs[r_at .. r_at + r_n]. kind is 0 for a
 // Vesper identity, 1 for a native one; id, name and sum are string ids.

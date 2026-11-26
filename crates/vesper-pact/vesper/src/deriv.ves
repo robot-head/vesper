@@ -3,9 +3,7 @@
 //
 // A failure records the child path (s.path, copied to s.de_path) and the
 // message (txt[s.de_off ..]); every check returns false once it failed.
-use self::{
-    S
-};
+use self::{S};
 use self::term::{
     add,
     arg_kind,
@@ -49,37 +47,12 @@ use self::term::{
     vkind,
     word_at
 };
-use self::fold::{
-    inst
-};
-use self::render::{
-    byte,
-    d_step,
-    lit,
-    num,
-    r_brand,
-    r_goal,
-    r_id,
-    r_trait_ref,
-    r_ty
-};
-use self::diag::{
-    render_diags,
-    truncate_diags
-};
-use self::program::{
-    v_arg,
-    v_goal,
-    validate_query
-};
-use self::canon::{
-    binders_slist,
-    canon_free
-};
-use self::mode::{
-    decide,
-    mode_atoms
-};
+use self::fold::{inst};
+use self::render::{byte, d_step, lit, num, r_brand, r_goal, r_id, r_trait_ref, r_ty};
+use self::diag::{render_diags, truncate_diags};
+use self::program::{v_arg, v_goal, validate_query};
+use self::canon::{binders_slist, canon_free};
+use self::mode::{decide, mode_atoms};
 
 // ASCII bytes.
 const BACKTICK: u8 = 96;

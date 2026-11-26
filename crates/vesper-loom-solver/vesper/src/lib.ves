@@ -10,31 +10,13 @@
 // request in the calculus word stream plus the solver's own fields, and
 // rebuilds the crate's types from `out`: the encodings are documented
 // there. Diagnostic text is built in `dp`.
-use @vesper/loom-calculus::{
-    Diag,
-    L,
-    SysSel
-};
-use @vesper/loom-calculus::decode::{
-    new_l
-};
-use self::input::{
-    decode_metadata,
-    decode_request,
-    index_inputs
-};
-use self::search::{
-    search
-};
-use self::locked::{
-    locked
-};
-use self::metrics::{
-    metrics_only
-};
-use self::output::{
-    objective_code_of
-};
+use @vesper/loom-calculus::{Diag, L, SysSel};
+use @vesper/loom-calculus::decode::{new_l};
+use self::input::{decode_metadata, decode_request, index_inputs};
+use self::search::{search};
+use self::locked::{locked};
+use self::metrics::{metrics_only};
+use self::output::{objective_code_of};
 
 // One search node: an assignment is the chain of nodes from the top of
 // the stack up to the root node (parent none()).

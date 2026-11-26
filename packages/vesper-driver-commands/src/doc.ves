@@ -1,19 +1,8 @@
 // `vesper doc`: CLI option parsing, validation, and `--help` in Vesper,
 // delegating doc generation and `store-olean` (`src/doc_commands.rs`) to
 // `HybridCommands::hc_doc_run`.
-use @vesper/driver::{
-    Args,
-    args_count,
-    eq
-};
-use super::{
-    PrintFailed,
-    arg,
-    byte_at,
-    print,
-    fail,
-    stdout_stream
-};
+use @vesper/driver::{Args, args_count, eq};
+use super::{PrintFailed, arg, byte_at, print, fail, stdout_stream};
 
 fn print_doc_help() eff [Ffi[StdFs], Fail[PrintFailed]] {
     print(

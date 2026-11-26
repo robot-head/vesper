@@ -4,10 +4,7 @@
 // #1408). Every operation performs `Ffi[StdEnv]`. Text comes back as
 // `String` when it is UTF-8 and as bytes from the `*_bytes` variants (Unix
 // allows any bytes; Windows text is UTF-16 converted to UTF-8).
-use @vesper-std/fs::{
-    IoError,
-    raise_kind
-};
+use @vesper-std/fs::{IoError, raise_kind};
 
 // The word of `size` bytes (at most 8, little-endian) at `address`, or 0
 // for a `NULL` address.

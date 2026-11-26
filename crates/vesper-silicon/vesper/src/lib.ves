@@ -98,9 +98,7 @@ use self::intc::{
     m_vstopei,
     m_write32
 };
-use self::dtb::{
-    m_parse
-};
+use self::dtb::{m_parse};
 
 // ---------------------------------------------------------------- AIA types
 

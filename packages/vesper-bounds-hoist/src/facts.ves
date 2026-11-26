@@ -23,21 +23,9 @@ use self::fun::{
     u8_at,
     w
 };
-use self::graph::{
-    Graph,
-    graph,
-    successors
-};
-use self::rules::{
-    all_blocks,
-    block_drop_overlaps,
-    changes_len,
-    single_bindings,
-    stable_place
-};
-use @vesper/check-data::types::{
-    TyPass
-};
+use self::graph::{Graph, graph, successors};
+use self::rules::{all_blocks, block_drop_overlaps, changes_len, single_bindings, stable_place};
+use @vesper/check-data::types::{TyPass};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;

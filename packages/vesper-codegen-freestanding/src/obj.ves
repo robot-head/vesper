@@ -10,33 +10,8 @@
 // `RelocationSections`). Malformed input is an `Object` error; its message
 // is ours, not the `object` crate's.
 
-use self::codes::{
-    Absent,
-    Ehdr,
-    Et,
-    Ident,
-    RelEnt,
-    Shdr,
-    Shf,
-    Shn,
-    Sht,
-    Stb,
-    Stt,
-    Stv,
-    SymEnt
-};
-use self::util::{
-    Span,
-    add,
-    rd16,
-    rd32,
-    rd64,
-    rd8,
-    push16,
-    push32,
-    push64,
-    grow
-};
+use self::codes::{Absent, Ehdr, Et, Ident, RelEnt, Shdr, Shf, Shn, Sht, Stb, Stt, Stv, SymEnt};
+use self::util::{Span, add, rd16, rd32, rd64, rd8, push16, push32, push64, grow};
 
 const ELF_ALIGN: u64 = 8;
 

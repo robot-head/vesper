@@ -4,9 +4,7 @@
 // non-trivia tokens of @vesper/front's lexer. The attribute-argument
 // diagnostics are not kept: discovery drops them.
 
-use @vesper/front::lex::{
-    trivia_kind
-};
+use @vesper/front::lex::{trivia_kind};
 use @vesper/front::kinds::{
     k_at,
     k_comma,
@@ -28,23 +26,8 @@ use @vesper/front::kinds::{
     k_true,
     k_upper
 };
-use self::big::{
-    Big,
-    as_u64,
-    parse_int
-};
-use self::util::{
-    add,
-    byte,
-    inc,
-    is_text,
-    push_range,
-    sub,
-    trim_end,
-    trim_start,
-    u8_at,
-    u64_at
-};
+use self::big::{Big, as_u64, parse_int};
+use self::util::{add, byte, inc, is_text, push_range, sub, trim_end, trim_start, u8_at, u64_at};
 
 // `AttrValue` tags.
 pub const V_IDENT: u8 = 0;

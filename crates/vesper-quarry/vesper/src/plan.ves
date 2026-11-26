@@ -1,13 +1,5 @@
 // Module plan of @vesper/quarry (see lib.ves).
-use self::{
-    Bind,
-    CCol,
-    CTab,
-    Link,
-    Node,
-    Q,
-    Sel
-};
+use self::{Bind, CCol, CTab, Link, Node, Q, Sel};
 use self::util::{
     bcol,
     bound,
@@ -26,12 +18,8 @@ use self::util::{
     raw,
     same
 };
-use self::lex::{
-    lex
-};
-use self::parse::{
-    parse_select
-};
+use self::lex::{lex};
+use self::parse::{parse_select};
 use self::check::{
     bool_word,
     check_expr,

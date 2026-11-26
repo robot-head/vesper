@@ -10,32 +10,11 @@
 // parameters, generic bounds and effects) from the @vesper/ast tree, as
 // `print_type` prints both from one `ast::Type`.
 
-use @vesper/ast::{
-    Ast,
-    TypeNode,
-    EffectsNode,
-    EffectNode,
-    GenericNode,
-    list_len,
-    list_at
-};
-use @vesper/check-data::input::{
-    Ctx
-};
-use @vesper/check-data::world::{
-    Bounds,
-    bounds_new,
-    mode_of
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use self::json::{
-    byte,
-    put,
-    put_bytes,
-    put_string
-};
+use @vesper/ast::{Ast, TypeNode, EffectsNode, EffectNode, GenericNode, list_len, list_at};
+use @vesper/check-data::input::{Ctx};
+use @vesper/check-data::world::{Bounds, bounds_new, mode_of};
+use @vesper-std/arena::{idx_from_raw};
+use self::json::{byte, put, put_bytes, put_string};
 use self::nav::{
     Ix,
     ERR_NONE,
@@ -57,9 +36,7 @@ use self::nav::{
     u8_at,
     w
 };
-use @vesper/front::lex::{
-    token_end
-};
+use @vesper/front::lex::{token_end};
 
 const NONE: u32 = 4294967295;
 

@@ -17,11 +17,7 @@ use self::{
     UnavailableEvidence,
     UnavailableReason
 };
-use self::stats::{
-    Limit,
-    cadd,
-    do_paired_sample_new
-};
+use self::stats::{Limit, cadd, do_paired_sample_new};
 use self::util::{
     BP_SCALE,
     I64_MIN_MAGNITUDE,

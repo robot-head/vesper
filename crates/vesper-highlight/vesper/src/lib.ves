@@ -11,10 +11,7 @@
 // flag bits (4: ligature, 8: recovered). Each span starts where the previous
 // one ends, so the words partition the source.
 
-use @vesper/front::{
-    Tokens,
-    Diags
-};
+use @vesper/front::{Tokens, Diags};
 use @vesper/front::lex::{
     lex_with_limits,
     hard_source_bytes,
@@ -24,13 +21,8 @@ use @vesper/front::lex::{
     token_end,
     token_sym
 };
-use @vesper/front::diag::{
-    diags_new
-};
-use @vesper/front::parse::{
-    parse_tokens,
-    hard_depth
-};
+use @vesper/front::diag::{diags_new};
+use @vesper/front::parse::{parse_tokens, hard_depth};
 
 // ---------------------------------------------------------------- kinds
 

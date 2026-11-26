@@ -2,15 +2,8 @@
 // `OrderedSet[K]` keeps its keys in `Ord` order (a `CacheBTree[K, ()]`);
 // `FlatSet[K]` is a hash set (a `FlatTable[K, ()]`) whose element order is
 // insertion order, adjusted by removals as in `FlatTable`.
-use self::btree::{
-    CacheBTree,
-    BTreeCursor,
-    btree_new
-};
-use self::flat_table::{
-    FlatTable,
-    flat_table_new
-};
+use self::btree::{CacheBTree, BTreeCursor, btree_new};
+use self::flat_table::{FlatTable, flat_table_new};
 
 pub struct OrderedSet[K] {
     map: CacheBTree[K, ()]

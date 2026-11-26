@@ -1,20 +1,5 @@
 // Module util of @vesper/quarry (see lib.ves).
-use self::{
-    BCol,
-    Bind,
-    CCol,
-    CTab,
-    D,
-    Link,
-    Node,
-    Q,
-    Raw,
-    Rng,
-    Sel,
-    Stat,
-    Tok,
-    Val
-};
+use self::{BCol, Bind, CCol, CTab, D, Link, Node, Q, Raw, Rng, Sel, Stat, Tok, Val};
 
 // ASCII bytes (`B_` as u8, for pool bytes).
 const DIGIT_0: u64 = 48;

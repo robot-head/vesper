@@ -12,24 +12,10 @@
 // - search.ves: the proof producer of src/optimize/certificate.rs
 //   (`propose_rewrite`) on `@vesper/egraph`.
 
-use @vesper/ast::{
-    ArgNode,
-    expr_at,
-    list_at,
-    list_len,
-    lit_at,
-    none
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
-use self::budget::{
-    Budget,
-    valid_limits
-};
+use @vesper/ast::{ArgNode, expr_at, list_at, list_len, lit_at, none};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
+use self::budget::{Budget, valid_limits};
 use self::input::{
     Cert,
     Reader,
@@ -44,17 +30,8 @@ use self::input::{
     read_types,
     tree_new
 };
-use self::search::{
-    Builder,
-    Proposal,
-    builder_new,
-    proposal_new,
-    propose
-};
-use self::input::{
-    ProofRow,
-    TermRow
-};
+use self::search::{Builder, Proposal, builder_new, proposal_new, propose};
+use self::input::{ProofRow, TermRow};
 use self::witness::{
     Bound,
     Ops,

@@ -7,22 +7,8 @@
 // and `Ty == Ty` in Rust are id equality here; names are symbols of one
 // `Names` table, compared byte by byte where Rust orders `String`s.
 
-use @vesper/check-data::names::{
-    Names,
-    names_new
-};
-use @vesper/check-data::util::{
-    add,
-    fold,
-    inc,
-    inc32,
-    n32,
-    push_decimal,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
+use @vesper/check-data::names::{Names, names_new};
+use @vesper/check-data::util::{add, fold, inc, inc32, n32, push_decimal, u32_at, u64_at, u8_at, w};
 
 // `u32::MAX`: an absent id, or a failed conversion (its text is `St.err`).
 const NONE: u32 = 4294967295;

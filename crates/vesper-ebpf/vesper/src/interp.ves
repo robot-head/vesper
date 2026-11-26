@@ -31,21 +31,9 @@
 // and consumer and returns the new producers and a log of the bytes it
 // wrote (map, position, length, offset in the output bytes), which the
 // caller applies in order, wrapping at the end of the data area.
-use self::common::{
-    sext_const,
-    shl,
-    shr,
-    umax
-};
-use self::concrete::{
-    alu_concrete,
-    cmp_concrete,
-    endian
-};
-use self::helpers::{
-    Helper,
-    allowed
-};
+use self::common::{sext_const, shl, shr, umax};
+use self::concrete::{alu_concrete, cmp_concrete, endian};
+use self::helpers::{Helper, allowed};
 use self::insn::{
     AluOp,
     AtomicOp,
@@ -58,10 +46,7 @@ use self::insn::{
     Size,
     decode_slots
 };
-use self::program::{
-    MapType,
-    ProgramType
-};
+use self::program::{MapType, ProgramType};
 
 // Kernel UAPI values (src/helpers.rs, src/interp.rs, src/verifier.rs); helper
 // ids are `Helper` (helpers.ves) and map types `MapType` (program.ves).

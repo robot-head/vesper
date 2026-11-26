@@ -1,19 +1,8 @@
 // `vesper graph`: CLI option parsing and `--help` in Vesper, delegating
 // `Loom.lock` snapshot validation, projection, and text/JSON/DOT rendering
 // (`src/package_graph.rs`) to `HybridCommands::hc_graph_run`.
-use @vesper/driver::{
-    Args,
-    args_count,
-    eq
-};
-use super::{
-    PrintFailed,
-    arg,
-    byte_at,
-    print,
-    fail,
-    stdout_stream
-};
+use @vesper/driver::{Args, args_count, eq};
+use super::{PrintFailed, arg, byte_at, print, fail, stdout_stream};
 
 pub fn run_graph(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     let n = args_count(in args);

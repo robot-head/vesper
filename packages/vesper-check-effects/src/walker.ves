@@ -11,43 +11,12 @@
 // Capabilities are bits in `BTreeSet<Capability>` order: 1 ConstTime,
 // 2 Realtime, 4 DetFloat, 8 ConstDenorm.
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    push_decimal,
-    u32_at,
-    w
-};
-use @vesper/check-data::input::{
-    Ctx
-};
-use @vesper/check-data::types::{
-    EffNode,
-    Vars,
-    display,
-    substitute,
-    vars_new,
-    TyKind,
-    TyPass
-};
-use @vesper/check-data::world::{
-    constructor,
-    field_step
-};
-use self::keys::{
-    Keys,
-    Sums,
-    keys_new,
-    pair,
-    sums_new
-};
-use self::prog::{
-    ExprNode,
-    Fun,
-    PatNode,
-    Prog
-};
+use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, w};
+use @vesper/check-data::input::{Ctx};
+use @vesper/check-data::types::{EffNode, Vars, display, substitute, vars_new, TyKind, TyPass};
+use @vesper/check-data::world::{constructor, field_step};
+use self::keys::{Keys, Sums, keys_new, pair, sums_new};
+use self::prog::{ExprNode, Fun, PatNode, Prog};
 
 const NONE32: u32 = 4294967295;
 

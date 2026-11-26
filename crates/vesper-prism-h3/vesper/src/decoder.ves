@@ -7,30 +7,9 @@
 // error, 2 "drop the ready sections of this stream", 3 the section
 // `decode_section` returns.
 
-use self::{
-    DecoderCore,
-    Sections,
-    QpackError,
-    Reason,
-    PrefixError,
-    Huff
-};
-use self::int::{
-    inc,
-    word,
-    byte,
-    max64,
-    sat_add,
-    sat_mul,
-    remove_word,
-    drain_front
-};
-use self::prefix::{
-    Num,
-    decode_int,
-    encode_int,
-    decode_string
-};
+use self::{DecoderCore, Sections, QpackError, Reason, PrefixError, Huff};
+use self::int::{inc, word, byte, max64, sat_add, sat_mul, remove_word, drain_front};
+use self::prefix::{Num, decode_int, encode_int, decode_string};
 use self::table::{
     Static,
     Table,
@@ -45,9 +24,7 @@ use self::table::{
     slot_value_hi
 };
 
-use self::reason::{
-    reason_of
-};
+use self::reason::{reason_of};
 use self::wire::{
     Duplicate,
     Indexed,

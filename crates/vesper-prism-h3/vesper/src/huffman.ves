@@ -2,25 +2,10 @@
 // §4.1.2), decoded canonically one bit at a time from the code lengths, with
 // the RFC 7541 §5.2 padding and EOS rules.
 
-use self::table::{
-    static_new
-};
-use self::{
-    HuffmanError,
-    Huff
-};
-use self::int::{
-    inc,
-    word,
-    byte,
-    div_ceil,
-    bit,
-    shl,
-    shr
-};
-use self::huffman_codes::{
-    huffman_codes
-};
+use self::table::{static_new};
+use self::{HuffmanError, Huff};
+use self::int::{inc, word, byte, div_ceil, bit, shl, shr};
+use self::huffman_codes::{huffman_codes};
 
 // A code word (huffman_codes): `bit length << CODE_LEN_SHIFT | code`.
 const CODE_LEN_SHIFT: u64 = 32;

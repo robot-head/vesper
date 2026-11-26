@@ -65,20 +65,8 @@ use @vesper/driver::{
     record_format as driver_record_format,
     with_extension
 };
-use @vesper-std/env::{
-    arg_count,
-    arg_bytes,
-    os,
-    os_windows
-};
-use @vesper-std/process::{
-    command_path,
-    arg_bytes as proc_arg,
-    spawn,
-    wait,
-    release,
-    success
-};
+use @vesper-std/env::{arg_count, arg_bytes, os, os_windows};
+use @vesper-std/process::{command_path, arg_bytes as proc_arg, spawn, wait, release, success};
 use @vesper-std/fs::{
     IoError,
     is_dir_path,
@@ -89,19 +77,11 @@ use @vesper-std/fs::{
     remove_file
 };
 // `vesper build --target wasm32-wasip2` in Vesper (#1895).
-use @vesper/wasm-backend::{
-    wasm_backend_module
-};
-use @vesper/wit-component::{
-    wit_component_command
-};
+use @vesper/wasm-backend::{wasm_backend_module};
+use @vesper/wit-component::{wit_component_command};
 // `vesper build --target bpf` in Vesper (#1895).
-use @vesper/ebpf-backend::{
-    ebpf_backend_build
-};
-use @vesper-std/fmt::{
-    write_u64
-};
+use @vesper/ebpf-backend::{ebpf_backend_build};
+use @vesper-std/fmt::{write_u64};
 // SH5 lane 13 (#1336): the layers of the commands off the compile path.
 use @vesper/driver-commands::{
     run as run_command,
@@ -110,17 +90,10 @@ use @vesper/driver-commands::{
     measure_tee
 };
 // Target triples (#1896).
-use @vesper/driver::triple::{
-    is_windows as triple_is_windows
-};
+use @vesper/driver::triple::{is_windows as triple_is_windows};
 // hd_step group 2 (#1893): the front-end passes in Vesper.
-use self::front::{
-    parse_clean,
-    cst_text
-};
-use self::interface::{
-    interface_json
-};
+use self::front::{parse_clean, cst_text};
+use self::interface::{interface_json};
 
 // `main_code`'s result when the Rust CLI should run the command instead.
 pub fn delegate() -> i64 {

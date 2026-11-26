@@ -1,9 +1,5 @@
-use self::ascii::{
-    Ascii
-};
-use @vesper/prism-bytes::{
-    first_not_path
-};
+use self::ascii::{Ascii};
+use @vesper/prism-bytes::{first_not_path};
 // Vesper port of the single request-target interpretation of
 // crates/vesper-prism (`Target::parse` in src/target.rs, port wave P1 lane
 // 14, #911).

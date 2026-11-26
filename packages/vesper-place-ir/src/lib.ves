@@ -28,40 +28,12 @@
 // - `place_ir_dump` / `place_ir_words`: the harness entries
 //   (tests/self_host_place_ir.rs).
 
-use self::codes::{
-    Lit,
-    Op,
-    Pat,
-    Tag,
-    Term
-};
+use self::codes::{Lit, Op, Pat, Tag, Term};
 use @vesper/check-data::pack_text;
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    push_decimal,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    EffNode,
-    RowNode,
-    TypeNode,
-    Types,
-    debug_type,
-    TyKind
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    read_ctx
-};
+use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{EffNode, RowNode, TypeNode, Types, debug_type, TyKind};
+use @vesper/check-data::input::{Ctx, Reader, read_ctx};
 
 // Patterns nested deeper than this are corrupt input.
 const MAX_DEPTH: u64 = 512;

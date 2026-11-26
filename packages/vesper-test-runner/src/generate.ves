@@ -12,9 +12,7 @@
 // snippet and code starts, the segment count and each (start, end), and
 // the entry (0, or 1 and the name) (tests/common/doctest_generate_words.rs).
 
-use @vesper/ast::lower::{
-    lower_source
-};
+use @vesper/ast::lower::{lower_source};
 use @vesper/front::kinds::{
     k_affine,
     k_block_comment,
@@ -30,18 +28,8 @@ use @vesper/front::kinds::{
     k_struct,
     k_whitespace
 };
-use self::discover::{
-    toks
-};
-use self::util::{
-    Reader,
-    inc,
-    is_text,
-    push_range,
-    put_buf,
-    u8_at,
-    u64_at
-};
+use self::discover::{toks};
+use self::util::{Reader, inc, is_text, push_range, put_buf, u8_at, u64_at};
 
 // Whether the first non-trivia token of `raw` starts a declaration.
 fn declaration_token(in raw: Slice[u8]) -> bool {
