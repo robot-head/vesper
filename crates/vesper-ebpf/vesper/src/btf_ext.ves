@@ -13,22 +13,9 @@
 // not a FUNC, 9 unsupported relocation kind (x), 10 access string (the
 // part at x, y bytes), 11 nests too deeply, 12 no type (x), 13 bad
 // bitfield member, 14 unsupported local type (the type x).
-use self::btf::{
-    BtfHeader,
-    BtfKind,
-    byte,
-    le32,
-    name_span
-};
+use self::btf::{BtfHeader, BtfKind, byte, le32, name_span};
 use self::program::map_from_kernel_type;
-use self::core::{
-    CoreReloc,
-    size_of,
-    skip_mods,
-    tf,
-    te,
-    tkind
-};
+use self::core::{CoreReloc, size_of, skip_mods, tf, te, tkind};
 
 // `.BTF.ext` (src/btf_ext.rs; its magic and version are btf.ves `BtfHeader`): the header
 // before CO-RE (24 bytes), the subsection (offset, length) pairs from byte

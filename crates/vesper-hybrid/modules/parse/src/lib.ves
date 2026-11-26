@@ -32,20 +32,11 @@
 
 // @export abi 4
 
-use @vesper/ast::words::{
-    put_ast_words
-};
-use @vesper/ast::lower::{
-    lower_source
-};
+use @vesper/ast::words::{put_ast_words};
+use @vesper/ast::lower::{lower_source};
 use @vesper/front::Diags;
-use @vesper/front::lex::{
-    max_source_bytes,
-    token_end
-};
-use @vesper/front::diag::{
-    limit_message_observed
-};
+use @vesper/front::lex::{max_source_bytes, token_end};
+use @vesper/front::diag::{limit_message_observed};
 
 // The layout version of `parse_words`; the Rust reader checks it.
 pub fn format() -> u64 {

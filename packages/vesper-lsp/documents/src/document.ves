@@ -7,13 +7,7 @@
 // appends the accepted one to the arena, so a refused change leaves every
 // row as it was (Rust keeps the old `Arc<str>` the same way). The arena is
 // compacted when its dead bytes outgrow the live ones.
-use @vesper/span::{
-    Limits,
-    Position,
-    Range,
-    line_table,
-    span
-};
+use @vesper/span::{Limits, Position, Range, line_table, span};
 use @vesper/span::Error as SpanError;
 
 // `StoreError`, variant for variant (prefixed: variants share one

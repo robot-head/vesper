@@ -18,10 +18,7 @@
 //
 // Every function is total: out-of-range ids are refused (`add_edge` returns
 // `false`) or answered as absent (`none()` / `Option::None`).
-use self::util::{
-    get32,
-    get64
-};
+use self::util::{get32, get64};
 
 // The reserved index for missing nodes and components.
 pub enum GraphIndex: _ {

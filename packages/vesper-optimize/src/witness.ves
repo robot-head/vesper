@@ -10,31 +10,10 @@
 // vectors it charges for are the `S_*` constants (64-bit targets); the
 // differential checks the ones it can name against Rust's.
 
-use @vesper/ast::{
-    ArgNode,
-    ExprNode,
-    Lit,
-    list_at,
-    list_len,
-    expr_at,
-    lit_at,
-    none
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
-use self::budget::{
-    Budget,
-    limit,
-    metadata,
-    names,
-    reserve,
-    work,
-    work_units
-};
+use @vesper/ast::{ArgNode, ExprNode, Lit, list_at, list_len, expr_at, lit_at, none};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
+use self::budget::{Budget, limit, metadata, names, reserve, work, work_units};
 use self::input::{
     Cert,
     ProofRow,

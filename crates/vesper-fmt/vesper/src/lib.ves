@@ -14,34 +14,14 @@
 // `quote`) are `OpaqueMacro` here: the Rust side formats them with its own
 // macro-profile parser, which this package does not port.
 
-use @vesper/front::{
-    Tokens,
-    P
-};
-use @vesper-std/hash::blake3::{
-    Digest
-};
-use @vesper-std/hash-sys::{
-    hash
-};
-use @vesper/front::diag::{
-    diags_new
-};
-use @vesper/front::parse::{
-    parse_tokens,
-    hard_depth
-};
-use @vesper/front::{
-    Tokens
-};
-use @vesper/front::lex::{
-    lex_with_limits,
-    max_diagnostics,
-    token_end
-};
-use @vesper/front::diag::{
-    diags_new
-};
+use @vesper/front::{Tokens, P};
+use @vesper-std/hash::blake3::{Digest};
+use @vesper-std/hash-sys::{hash};
+use @vesper/front::diag::{diags_new};
+use @vesper/front::parse::{parse_tokens, hard_depth};
+use @vesper/front::{Tokens};
+use @vesper/front::lex::{lex_with_limits, max_diagnostics, token_end};
+use @vesper/front::diag::{diags_new};
 
 // ---------------------------------------------------------------- kinds
 
@@ -1339,7 +1319,9 @@ fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in
         let f = aflags(in at, pos);
         let blank = f & 1 != 0;
         let glued = f & 2 != 0;
-        let is_block = c == K_L_BRACE && (!has_prev || prev != K_DOT);
+        // `{` after `.` or `::` opens a list, not a block: a tagged literal or
+        // a `use` group (`use a::{b, c};`), which stays on one line when it fits.
+        let is_block = c == K_L_BRACE && (!has_prev || (prev != K_DOT && prev != K_COLON_COLON));
         package = glued
             && has_prev
             && (

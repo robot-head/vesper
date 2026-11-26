@@ -35,14 +35,7 @@
 //              cut by the encoder past 256 levels is [7, description, k]
 // Maps and sets are in Rust iteration order (sorted).
 use self::Q;
-use self::util::{
-    Class,
-    none,
-    put,
-    put_i64,
-    put_text,
-    put_u64
-};
+use self::util::{Class, none, put, put_i64, put_text, put_u64};
 
 // SCHEMA_VERSION and SEMANTICS_VERSION of src/lib.rs.
 const SCHEMA_VERSION: u64 = 1;

@@ -14,9 +14,7 @@ use self::words::{
     SeqWord,
     Word,
 };
-use @vesper/check-data::types::{
-    TyPass
-};
+use @vesper/check-data::types::{TyPass};
 
 const NONE32: u32 = 4294967295;
 

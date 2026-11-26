@@ -31,12 +31,7 @@ use @vesper/cranelift::{
     ins_call_indirect,
     value_of_word
 };
-use @vesper/codegen-base::{
-    DECLINED,
-    HANDLED,
-    arg_u32,
-    arg_value
-};
+use @vesper/codegen-base::{DECLINED, HANDLED, arg_u32, arg_value};
 
 // `codegen_swap::call`.
 pub const CALL: u32 = 1;

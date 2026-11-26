@@ -12,18 +12,9 @@
 // per batch its digest (32 bytes), lo, hi and row count (u64 each), then the
 // parent (tag u8, and for tag 1 the parent manifest's digest). Every
 // integer is little-endian.
-use self::{
-    CpErr,
-    ZAcc
-};
-use self::util::{
-    cell,
-    word
-};
-use self::acc::{
-    acc_insert,
-    acc_new
-};
+use self::{CpErr, ZAcc};
+use self::util::{cell, word};
+use self::acc::{acc_insert, acc_new};
 use self::image::{
     add,
     byte,

@@ -2,23 +2,10 @@
 // (crates/vesper-doc/src/links.rs): code spans, link brackets and titles
 // over the joined doc-comment lines, charged against links.ves's budget.
 
-use @vesper/front::lex::{
-    lex_with_limits,
-    token_end
-};
-use @vesper/front::diag::{
-    diags_new
-};
-use self::json::{
-    byte
-};
-use self::nav::{
-    Ix,
-    MAX_SOURCE_BYTES,
-    u32_at,
-    u8_at,
-    w
-};
+use @vesper/front::lex::{lex_with_limits, token_end};
+use @vesper/front::diag::{diags_new};
+use self::json::{byte};
+use self::nav::{Ix, MAX_SOURCE_BYTES, u32_at, u8_at, w};
 use self::links::{
     L_MAX_METADATA,
     L_MAX_REFERENCES,

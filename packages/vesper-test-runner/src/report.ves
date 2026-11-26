@@ -17,13 +17,7 @@
 //   killed, survived, ill-typed, tested and total counts.
 // Result words: 0 and the text.
 
-use self::util::{
-    Reader,
-    push_decimal,
-    push_range,
-    put_buf,
-    sub
-};
+use self::util::{Reader, push_decimal, push_range, put_buf, sub};
 
 // `v` in decimal. Below 10^16 the digits are packed into two words, most
 // significant in the lowest byte, and pushed in order.

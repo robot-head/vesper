@@ -2,19 +2,9 @@
 // tracking (ack.rs). The Rust wrapper owns the fixed array of `N` ranges
 // and lends it; `RxState` holds the rest of `ReceivedPackets`, and
 // `ranges[..s.len]` are live (descending, disjoint, non-adjacent).
-use self::{
-    AckErr,
-    AckRange,
-    Received,
-    RxState
-};
-use self::pn::{
-    pn_limit
-};
-use self::varint::{
-    sat_add,
-    vi_max
-};
+use self::{AckErr, AckRange, Received, RxState};
+use self::pn::{pn_limit};
+use self::varint::{sat_add, vi_max};
 
 // ECN codepoints (RFC 3168 §5): ECT(0), ECT(1) and CE.
 const ECN_ECT0: u8 = 1;

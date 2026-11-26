@@ -20,10 +20,7 @@
 // no `i128`, so 128-bit values are `W` word pairs (module wide), joined by
 // the wrappers. Every helper is total, so each export raises only its own
 // crate error type.
-use self::contract::{
-    do_gate_evaluate,
-    do_parse_attribute
-};
+use self::contract::{do_gate_evaluate, do_parse_attribute};
 use self::plan::{
     do_evaluate_evidence_requirement,
     do_experiment_run,
@@ -61,9 +58,7 @@ use self::stats::{
     do_paired_sample_new,
     do_regression_bp_bounds
 };
-use self::wide::{
-    w
-};
+use self::wide::{w};
 use self::wire::{
     do_backend_bound_bp,
     do_mask_check,

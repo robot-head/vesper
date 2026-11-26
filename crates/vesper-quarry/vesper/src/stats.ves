@@ -1,12 +1,5 @@
 // Module stats of @vesper/quarry (see lib.ves).
-use self::{
-    Bound,
-    D,
-    Node,
-    Q,
-    Stat,
-    Val
-};
+use self::{Bound, D, Node, Q, Stat, Val};
 use self::util::{
     ccol,
     ceil_div,
@@ -23,14 +16,8 @@ use self::util::{
     same,
     vat
 };
-use self::check::{
-    ex_end
-};
-use self::values::{
-    compare_vals,
-    dtab,
-    val_at
-};
+use self::check::{ex_end};
+use self::values::{compare_vals, dtab, val_at};
 
 // Access path selection (spec/planner-ddl.md, sections 1 and 2).
 

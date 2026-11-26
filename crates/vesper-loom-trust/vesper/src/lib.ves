@@ -15,10 +15,7 @@
 // values to the trees below (export ABI 4) and back.
 //
 // @export abi 4 options
-use @vesper/crypto::{
-    ed25519_check_public,
-    ed25519_verify
-};
+use @vesper/crypto::{ed25519_check_public, ed25519_verify};
 
 const SCHEMA_VERSION: u32 = 1;
 const MAX_POLICY_KEYS: u64 = 64;

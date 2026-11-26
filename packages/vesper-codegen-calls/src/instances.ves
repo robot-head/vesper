@@ -8,21 +8,9 @@
 // (name symbol, type id) pairs kept sorted by the names' bytes, so
 // iterating it is BTreeMap order and its key text is Rust's `{:?}`.
 
-use @vesper/place-ir::codes::{
-    Op
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    inc32,
-    n32,
-    u32_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
+use @vesper/place-ir::codes::{Op};
+use @vesper/check-data::util::{add, inc, inc32, n32, u32_at, u8_at, w};
+use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{
     TyKind,
     TyPass,
@@ -34,21 +22,9 @@ use @vesper/check-data::types::{
     substitute_row,
     vars_new
 };
-use @vesper/check-data::world::{
-    World,
-    set_by_symbol
-};
-use @vesper/place-ir::{
-    Program
-};
-use self::data::{
-    Calls,
-    ExprKind,
-    ExprNode,
-    FnInfo,
-    ParamInfo,
-    VarsRow
-};
+use @vesper/check-data::world::{World, set_by_symbol};
+use @vesper/place-ir::{Program};
+use self::data::{Calls, ExprKind, ExprNode, FnInfo, ParamInfo, VarsRow};
 
 const NONE32: u32 = 4294967295;
 // `MAX_NATIVE_INSTANCES` of src/native.rs.

@@ -16,9 +16,7 @@
 // TokenLimit, 4 StaleGeneration, 5 OutOfPages, 6 GenerationExhausted, 7
 // SequenceLimit, 8 StaleCheckpoint, 9 Shape, 10 Format, 11 InvalidConfig, 12
 // Budget, 13 ForeignOwner. Results go to `out`. A failed call changes nothing.
-use self::num::{
-    u64_zero
-};
+use self::num::{u64_zero};
 
 const U64_MAX: u64 = 18446744073709551615;
 // Ceilings on a configuration (src/kv.rs `MAX_PAGES`, `MAX_SEQUENCES`,

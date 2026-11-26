@@ -26,43 +26,15 @@
 // @vesper/ebpf port has both; the harness runs the Rust verifier on the
 // decoded program so verifier results are compared as well).
 
-use @vesper/check-data::util::{
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::input::{
-    Reader,
-    read_ctx
-};
-use @vesper/place-ir::{
-    read_program
-};
-use @vesper/ebpf::insn::{
-    RawInsn
-};
-use self::asm::{
-    LineRow,
-    MapRow,
-    slot_at
-};
-use self::extra::{
-    read_extra
-};
-use self::backend::{
-    G,
-    analyze,
-    g_new,
-    lower
-};
-use self::object::{
-    build_object,
-    declined_compile
-};
+use @vesper/check-data::util::{u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/place-ir::{read_program};
+use @vesper/ebpf::insn::{RawInsn};
+use self::asm::{LineRow, MapRow, slot_at};
+use self::extra::{read_extra};
+use self::backend::{G, analyze, g_new, lower};
+use self::object::{build_object, declined_compile};
 
 fn put_bytes(inout o: ChunkSeq[u64], in b: ChunkSeq[u8]) {
     let n = b.len();

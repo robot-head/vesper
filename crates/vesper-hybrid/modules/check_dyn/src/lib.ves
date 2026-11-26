@@ -6,10 +6,7 @@
 
 // @export abi 4
 
-use @vesper/check-dyn::{
-    dyn_fn_bytes,
-    dyn_trait_bytes
-};
+use @vesper/check-dyn::{dyn_fn_bytes, dyn_trait_bytes};
 
 pub fn dyn_fn_lower(in module: Slice[u8], base: u64) -> ChunkSeq[u64] {
     dyn_fn_bytes(in module, base)

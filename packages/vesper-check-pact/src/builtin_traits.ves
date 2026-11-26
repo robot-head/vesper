@@ -2,25 +2,10 @@
 // and derived `impl` source generation) for `@vesper/check-pact`
 // (SH2 lane 13 part 4, #1617).
 
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    read_ctx
-};
-use @vesper/check-data::names::{
-    Names,
-    names_new
-};
-use @vesper/check-data::{
-    pack_text
-};
-use @vesper/check-data::types::{
-    TyKind,
-    TyMode,
-    TypeNode,
-    Types,
-    display
-};
+use @vesper/check-data::input::{Ctx, Reader, read_ctx};
+use @vesper/check-data::names::{Names, names_new};
+use @vesper/check-data::{pack_text};
+use @vesper/check-data::types::{TyKind, TyMode, TypeNode, Types, display};
 
 const K_FN: u8 = TyKind::Fn;
 const K_NAMED: u8 = TyKind::Named;
@@ -29,22 +14,8 @@ const K_TUPLE: u8 = TyKind::Tuple;
 const M_AFFINE: u8 = TyMode::Affine;
 const M_COPY: u8 = TyMode::Copy;
 const M_LINEAR: u8 = TyMode::Linear;
-use @vesper/check-data::util::{
-    add,
-    n32,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use self::session_input::{
-    put_num,
-    put_str,
-    put_sym,
-    read_q_names,
-    read_q_types,
-    sym
-};
+use @vesper/check-data::util::{add, n32, u32_at, u64_at, u8_at, w};
+use self::session_input::{put_num, put_str, put_sym, read_q_names, read_q_types, sym};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;

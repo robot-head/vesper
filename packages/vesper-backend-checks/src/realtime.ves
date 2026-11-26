@@ -5,30 +5,10 @@
 // which @vesper/resonance already ports (`verify_realtime`, confine.ves),
 // with the Rust wrapper's effect numbering and finding text.
 
-use @vesper/resonance::{
-    verify_realtime
-};
-use self::input::{
-    Cx,
-    block_row,
-    fw,
-    iw,
-    pw
-};
-use self::report::{
-    raw_finding
-};
-use self::util::{
-    contains,
-    filled,
-    find_row,
-    g,
-    intern_str,
-    put,
-    putn,
-    puts,
-    st
-};
+use @vesper/resonance::{verify_realtime};
+use self::input::{Cx, block_row, fw, iw, pw};
+use self::report::{raw_finding};
+use self::util::{contains, filled, find_row, g, intern_str, put, putn, puts, st};
 
 const EXT_LIBCALL: u64 = 2;
 const EXT_TESTCASE: u64 = 1;

@@ -14,35 +14,9 @@
 //   2 Deadlock: n (role summary)*n; 3 UnexpectedMessage: role peer n
 //   expected.. found; 4 Orphans: n (from to label)*n; 5 StateBudgetExceeded:
 //   states. (Kind 1, Projection, is written by lib.ves.)
-use self::{
-    C
-};
-use self::util::{
-    add,
-    inc,
-    intern_tb,
-    none,
-    role_sym,
-    setw,
-    sw,
-    tb_str,
-    tb_sym,
-    Br,
-    Fnv,
-    LTag,
-    Out
-};
-use self::local::{
-    la,
-    lb,
-    lbr,
-    lc,
-    ld,
-    lkn,
-    lt,
-    summary,
-    unfold
-};
+use self::{C};
+use self::util::{add, inc, intern_tb, none, role_sym, setw, sw, tb_str, tb_sym, Br, Fnv, LTag, Out};
+use self::local::{la, lb, lbr, lc, ld, lkn, lt, summary, unfold};
 
 // The error kinds of `out` (after `Out::Failed`).
 pub enum XErr: _ {

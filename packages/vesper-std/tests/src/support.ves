@@ -1,9 +1,6 @@
 // Helpers shared by the @vesper-std unit tests.
 test {
-    use @vesper-std/fmt::{
-        ParseIntError,
-        fnv1a64
-    };
+    use @vesper-std/fmt::{ParseIntError, fnv1a64};
 
     // The first failure: `prior` if set, else `id` when `ok` is false.
     pub fn check(ok: bool, id: u64, prior: u64) -> u64 {

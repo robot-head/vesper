@@ -30,90 +30,26 @@
 // - module.ves: the whole module: ordering, companions, the proof module.
 // - contract.ves: `f$contract` and `f$admissible`.
 
-use @vesper/check-data::input::{
-    Reader,
-    read_ctx
-};
-use @vesper/check-data::{
-    pack_text
-};
-use @vesper/lean-syntax::{
-    LeanError,
-    render_module
-};
-use @vesper/check-data::names::{
-    names_new
-};
-use self::build::{
-    B,
-    D_NAMESPACE,
-    D_OPTION,
-    K_DEF,
-    K_PARTIAL,
-    builder
-};
-use self::head::{
-    adt_groups,
-    effect_classes,
-    effect_lifts,
-    has_fail_model
-};
-use self::input::{
-    read_effects
-};
-use self::fn_input::{
-    read_fns
-};
-use self::emit::{
-    X,
-    extract
-};
-use self::head::{
-    recursive_structs
-};
-use @vesper/place-ir::{
-    read_program
-};
-use @vesper/check-data::world::{
-    set_by_symbol
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at
-};
-use self::ast::{
-    read_ast
-};
-use self::contract::{
-    contracts,
-    read_contracts
-};
-use self::module::{
-    defs_new,
-    K_NONCOMPUTABLE,
-    emit_ordered,
-    order,
-    references_symbol,
-    take_module
-};
-use self::input::{
-    Effects
-};
-use @vesper/check-data::types::{
-    Types
-};
-use @vesper/check-data::world::{
-    World
-};
-use self::gen::{
-    G,
-    Y,
-    function,
-    gen_new
-};
+use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/check-data::{pack_text};
+use @vesper/lean-syntax::{LeanError, render_module};
+use @vesper/check-data::names::{names_new};
+use self::build::{B, D_NAMESPACE, D_OPTION, K_DEF, K_PARTIAL, builder};
+use self::head::{adt_groups, effect_classes, effect_lifts, has_fail_model};
+use self::input::{read_effects};
+use self::fn_input::{read_fns};
+use self::emit::{X, extract};
+use self::head::{recursive_structs};
+use @vesper/place-ir::{read_program};
+use @vesper/check-data::world::{set_by_symbol};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at};
+use self::ast::{read_ast};
+use self::contract::{contracts, read_contracts};
+use self::module::{defs_new, K_NONCOMPUTABLE, emit_ordered, order, references_symbol, take_module};
+use self::input::{Effects};
+use @vesper/check-data::types::{Types};
+use @vesper/check-data::world::{World};
+use self::gen::{G, Y, function, gen_new};
 use self::prelude::{
     arithmetic_semantics,
     arithmetic_simp_bundle,

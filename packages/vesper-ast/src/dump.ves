@@ -43,12 +43,8 @@ use self::{
     UseNode,
     UseNameNode
 };
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
 
 fn put(inout o: ChunkSeq[u8], in s: Str) {
     o.extend(in s.as_bytes());

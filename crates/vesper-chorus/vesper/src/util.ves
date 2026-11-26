@@ -6,9 +6,7 @@
 // symbol: an interned byte string. Equal strings are equal ids, so every
 // string comparison of the Rust build is one word here. The wrapper reads
 // a symbol's bytes from `sy_txt[sy_off[i] ..][.. sy_len[i]]`.
-use self::{
-    C
-};
+use self::{C};
 
 // The tags of global tree nodes (`gt`, and the input and output words of
 // lib.ves).

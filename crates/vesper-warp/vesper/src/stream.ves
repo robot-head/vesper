@@ -3,14 +3,8 @@
 // per-byte bitmaps (`Bits`: one bit per ring byte, `cap` bits in words of
 // 64), which the Rust wrapper owns and lends; `SendSt` and `RecvSt` hold
 // the offsets. The stream state machines and `StreamSet` stay Rust.
-use self::{
-    LostRange,
-    RecvSt,
-    SendSt
-};
-use self::varint::{
-    sat_add
-};
+use self::{LostRange, RecvSt, SendSt};
+use self::varint::{sat_add};
 
 fn u64_max() -> u64 {
     18446744073709551615

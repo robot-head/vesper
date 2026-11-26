@@ -1,8 +1,6 @@
 // Module canon of @vesper/pact (see lib.ves): `canon.rs`, canonical goals
 // and environments, and the variable visitor (`visit_goal_vars`).
-use self::{
-    S
-};
+use self::{S};
 use self::term::{
     b_var,
     e_env,
@@ -33,13 +31,8 @@ use self::term::{
     vkind,
     word_at
 };
-use self::fold::{
-    cn_begin,
-    run
-};
-use self::program::{
-    row_dup
-};
+use self::fold::{cn_begin, run};
+use self::program::{row_dup};
 
 fn on_var(inout s: S, v: u64, what: u64) {
     if what == 0 {

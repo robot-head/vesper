@@ -3,10 +3,7 @@
 // `[pos, end)` of one input slice and the Format it reports; nested readers
 // (a quote's signature data, its certification data) are narrower windows
 // of the same slice.
-use self::{
-    AErr,
-    Rd
-};
+use self::{AErr, Rd};
 
 // ParseError variant indices (crate::error::ParseError).
 pub fn k_truncated() -> u64 {

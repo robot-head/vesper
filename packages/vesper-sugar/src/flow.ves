@@ -33,24 +33,11 @@ use @vesper/ast::{
     none,
     pat_at
 };
-use @vesper/ast::lower::{
-    lower_source,
-    lower_template_source
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
-use @vesper/front::lex::{
-    lex_raw,
-    token_end,
-    trivia_kind
-};
-use @vesper/front::diag::{
-    diags_new
-};
+use @vesper/ast::lower::{lower_source, lower_template_source};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
+use @vesper/front::lex::{lex_raw, token_end, trivia_kind};
+use @vesper/front::diag::{diags_new};
 use @vesper/front::kinds::{
     k_colon,
     k_comma,

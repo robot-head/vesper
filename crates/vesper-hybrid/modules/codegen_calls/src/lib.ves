@@ -6,9 +6,7 @@
 // Cranelift builder. `vesper build --lib` exports `call` as
 // `vesper_hybrid_codegen_calls_call`, and crates/vesper-hybrid installs it
 // as the `call` hook of `vesper::codegen_swap`.
-use @vesper/codegen-calls-emit::{
-    call_hook
-};
+use @vesper/codegen-calls-emit::{call_hook};
 
 // One request of the `call` family: `call` is the address of the lent
 // call. Returns 1 when it emitted the request, 0 to leave it to Rust.

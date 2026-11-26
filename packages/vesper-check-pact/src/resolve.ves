@@ -2,15 +2,9 @@
 // normalization (`Elaborator::normalize`) for `@vesper/check-pact`
 // (SH2 lane 13 part 3, #1612).
 
-use @vesper/check-data::input::{
-    Reader
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::{
-    pack_text
-};
+use @vesper/check-data::input::{Reader};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::{pack_text};
 use @vesper/check-data::types::{
     EffNode,
     RowNode,
@@ -28,35 +22,10 @@ const K_INFER: u8 = TyKind::Infer;
 const K_NAMED: u8 = TyKind::Named;
 const K_ROW: u8 = TyKind::Row;
 const K_TUPLE: u8 = TyKind::Tuple;
-use @vesper/check-data::util::{
-    add,
-    n32,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use self::decl::{
-    Bind,
-    Conf,
-    Decls,
-    Gen,
-    Par,
-    Sig,
-    TRef,
-    TraitRow,
-    Where
-};
-use self::frontend::{
-    Fe,
-    fe_new
-};
-use self::session::{
-    PactSession,
-    SolveOutcome,
-    session_open_reader,
-    solve_spec
-};
+use @vesper/check-data::util::{add, n32, u32_at, u64_at, u8_at, w};
+use self::decl::{Bind, Conf, Decls, Gen, Par, Sig, TRef, TraitRow, Where};
+use self::frontend::{Fe, fe_new};
+use self::session::{PactSession, SolveOutcome, session_open_reader, solve_spec};
 use self::session_input::{
     QArg,
     QGoal,

@@ -1,11 +1,5 @@
 // Wire struct layout compiler (`vesper_ffi::Registry::compile`).
-use self::lexer::{
-    VsysError,
-    err_duplicate,
-    err_limit,
-    err_type,
-    fail_vsys
-};
+use self::lexer::{VsysError, err_duplicate, err_limit, err_type, fail_vsys};
 
 pub fn wt_int() -> u8 {
     1

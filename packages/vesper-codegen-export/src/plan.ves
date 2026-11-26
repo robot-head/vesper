@@ -10,23 +10,10 @@
 // `plan_words` is the entry: the answer is a status word, then the
 // interface or the refusals (`write_plan`).
 
-use @vesper/check-data::util::{
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
+use @vesper/check-data::util::{inc, n32, u32_at, u64_at, u8_at, w};
 use @vesper/check-data::input::Reader;
-use @vesper/check-data::names::{
-    Names,
-    names_new
-};
-use @vesper/check-data::types::{
-    TyMode,
-    TyPass
-};
+use @vesper/check-data::names::{Names, names_new};
+use @vesper/check-data::types::{TyMode, TyPass};
 
 // Type classes (plan_words.rs `C_*`).
 const C_OTHER: u8 = 0;

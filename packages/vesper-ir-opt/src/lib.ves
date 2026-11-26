@@ -21,25 +21,11 @@
 // made and per payload (bind dest, slot index, size) for the pool rows
 // appended after the input's, then (status 0) `put_program`'s words.
 
-use @vesper/check-data::input::{
-    Reader,
-    read_ctx
-};
-use @vesper/place-ir::{
-    put_program,
-    read_program
-};
-use self::view::{
-    type_classes
-};
-use self::forward::{
-    forward_program
-};
-use self::reuse::{
-    read_facts,
-    reuse_new,
-    reuse_program
-};
+use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/place-ir::{put_program, read_program};
+use self::view::{type_classes};
+use self::forward::{forward_program};
+use self::reuse::{read_facts, reuse_new, reuse_program};
 
 // Constants are copied, not imported: the Vesper package assembler
 // (@vesper/check-names-packages) does not resolve an imported constant

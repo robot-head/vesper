@@ -344,6 +344,9 @@ def _self_host_differentials_run_as_their_own_buildbuddy_check(h):
     codegen = command("Self-host codegen differentials")
     _contains("--build_tests_only", codegen)
     _contains("--test_tag_filters=self_host_codegen,-lean_replay", codegen)
+    # Five 4GiB tests at once on its 25GB VM, with 5GiB to spare.
+    _contains("--config=ci_tests --local_resources=memory=20480", codegen)
+    _equal(actions["Self-host codegen differentials"]["resource_requests"]["memory"], "25GB")
     for name in ("Self-host differentials", "Self-host differentials 2", "Self-host codegen differentials"):
         _equal(actions[name]["timeout"], "60m")
         # Per-target times, to balance the split on.

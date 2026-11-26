@@ -17,23 +17,10 @@
 // its diagnostics or report as text packed by `pack_text`. Rust stays the
 // default checker.
 
-use @vesper/check-data::{
-    pack_text
-};
-use @vesper/check-data::input::{
-    NamesCtx,
-    Reader,
-    read_ctx,
-    read_names_ctx
-};
-use self::ast::{
-    exprs_new,
-    read_fns
-};
-use self::control::{
-    check_bodies,
-    control_new
-};
+use @vesper/check-data::{pack_text};
+use @vesper/check-data::input::{NamesCtx, Reader, read_ctx, read_names_ctx};
+use self::ast::{exprs_new, read_fns};
+use self::control::{check_bodies, control_new};
 use self::atomics::{
     atomics_new,
     check_program,
@@ -44,14 +31,8 @@ use self::atomics::{
     read_ir,
     syms_new
 };
-use self::stack::{
-    read_graph,
-    report_words,
-    write_report
-};
-use self::out::{
-    put
-};
+use self::stack::{read_graph, report_words, write_report};
+use self::out::{put};
 
 // Task "control": the world's functions (n function records). Returns the
 // E0213 and E0200 diagnostics of the control rules, in walk order.

@@ -9,17 +9,8 @@
 // neither checked bodies nor the closure and handler expressions of the
 // Place IR are in the Vesper tables yet (report, gap 1).
 
-use @vesper/check-data::util::{
-    add,
-    inc32,
-    n32,
-    u32_at,
-    w
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader
-};
+use @vesper/check-data::util::{add, inc32, n32, u32_at, w};
+use @vesper/check-data::input::{Ctx, Reader};
 
 const NONE32: u32 = 4294967295;
 

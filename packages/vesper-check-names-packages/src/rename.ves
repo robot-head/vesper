@@ -38,12 +38,8 @@ use @vesper/ast::{
     pat_at,
     type_at
 };
-use @vesper-std/collections::flat_table::{
-    FlatTable
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
+use @vesper-std/collections::flat_table::{FlatTable};
+use @vesper-std/arena::{idx_from_raw};
 use self::state::{
     St,
     at32,
@@ -68,17 +64,8 @@ use self::state::{
     sym_starts,
     w
 };
-use self::load::{
-    adt_at,
-    back,
-    effect_decl_at,
-    fn_at,
-    tr
-};
-use self::resolve::{
-    qualified,
-    unknown_import
-};
+use self::load::{adt_at, back, effect_decl_at, fn_at, tr};
+use self::resolve::{qualified, unknown_import};
 
 fn file(in s: St) -> u32 {
     at32(in s.mod_file, w(s.cur))

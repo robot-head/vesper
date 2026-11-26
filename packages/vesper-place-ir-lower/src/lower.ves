@@ -14,14 +14,7 @@
 // vector and `Box` operations. Closures and handlers nest functions
 // (`add_nested`), lowered after the world's.
 
-use @vesper/place-ir::codes::{
-    Lit,
-    Op,
-    Pat,
-    PoolKind,
-    Tag,
-    Term
-};
+use @vesper/place-ir::codes::{Lit, Op, Pat, PoolKind, Tag, Term};
 use @vesper/check-data::util::{
     add,
     inc,
@@ -35,9 +28,7 @@ use @vesper/check-data::util::{
     u8_at,
     w
 };
-use @vesper/check-data::names::{
-    Names
-};
+use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{
     Types,
     Vars,
@@ -48,34 +39,10 @@ use @vesper/check-data::types::{
     TyMode,
     TyPass
 };
-use @vesper/check-data::world::{
-    Adt,
-    Variant,
-    constructor,
-    field_step,
-    set_by_symbol
-};
-use @vesper/check-data::input::{
-    Ctx,
-    ctx_new
-};
-use @vesper/place-ir::{
-    BlockRow,
-    FnRow,
-    InstRow,
-    PoolRow,
-    Program,
-    program_new
-};
-use self::ast::{
-    Ast,
-    Ex,
-    FnR,
-    Gn,
-    Pm,
-    Pt,
-    ast_empty
-};
+use @vesper/check-data::world::{Adt, Variant, constructor, field_step, set_by_symbol};
+use @vesper/check-data::input::{Ctx, ctx_new};
+use @vesper/place-ir::{BlockRow, FnRow, InstRow, PoolRow, Program, program_new};
+use self::ast::{Ast, Ex, FnR, Gn, Pm, Pt, ast_empty};
 use self::ops::{
     SeqRes,
     TiledRes,

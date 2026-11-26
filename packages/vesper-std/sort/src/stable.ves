@@ -1,12 +1,6 @@
 // @vesper-std/sort::stable: a stable bottom-up merge sort.
-use self::unstable::{
-    lt,
-    insertion
-};
-use @vesper-std/sugar::{
-    guard,
-    when
-};
+use self::unstable::{lt, insertion};
+use @vesper-std/sugar::{guard, when};
 
 // The length of the runs `stable_sort` insertion sorts before merging.
 const RUN: u64 = 16;

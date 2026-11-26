@@ -3,31 +3,11 @@
 // short header, an optional ACK frame and the application's frames) into
 // the endpoint's scratch buffer: `WarpEndpoint::write_plaintext` with the
 // endpoint's tables, keys and UMEM frames left in Rust.
-use self::{
-    AckErr,
-    AckRange,
-    FrameErr,
-    FrameW,
-    HdrErr,
-    PlainErr,
-    PlainOut,
-    PnErr,
-    RxState,
-    Sp
-};
-use self::ack::{
-    rx_ack_delay
-};
-use self::frame::{
-    fr_check_ranges,
-    fr_encode
-};
-use self::header::{
-    hdr_write_short_to_peer
-};
-use self::pn::{
-    pn_encoded_len
-};
+use self::{AckErr, AckRange, FrameErr, FrameW, HdrErr, PlainErr, PlainOut, PnErr, RxState, Sp};
+use self::ack::{rx_ack_delay};
+use self::frame::{fr_check_ranges, fr_encode};
+use self::header::{hdr_write_short_to_peer};
+use self::pn::{pn_encoded_len};
 
 // A short header's largest size: the first byte, a 20-byte DCID and a
 // 4-byte packet number. Frames are written after it, then moved once the

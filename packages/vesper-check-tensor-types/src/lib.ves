@@ -9,31 +9,12 @@
 // @vesper/ast and returns the report text (`pack_text`) the Rust side
 // prints from `tensor_types::active` and `tensor_types::analyze`.
 
-use @vesper/ast::{
-    Ast
-};
-use @vesper/ast::lower::{
-    lower_source
-};
-use @vesper/check-data::input::{
-    Reader
-};
-use @vesper/check-data::{
-    pack_text
-};
-use @vesper/check-data::util::{
-    push_decimal,
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
+use @vesper/ast::{Ast};
+use @vesper/ast::lower::{lower_source};
+use @vesper/check-data::input::{Reader};
+use @vesper/check-data::{pack_text};
+use @vesper/check-data::util::{push_decimal, add, inc, n32, u32_at, u64_at, u8_at, w};
+use @vesper-std/intern::{symbol_from_id};
 use self::state::{
     St,
     st_new,
@@ -53,12 +34,8 @@ use self::kinds::{
 use self::infer::{
     analyze,
 };
-use self::ast_input::{
-    read_ast
-};
-use self::elaborate::{
-    elaborate_report
-};
+use self::ast_input::{read_ast};
+use self::elaborate::{elaborate_report};
 
 const NONE: u32 = 4294967295;
 

@@ -19,9 +19,7 @@ use @vesper/front::lex::{
     token_end,
     trivia_kind
 };
-use @vesper/front::diag::{
-    diags_new
-};
+use @vesper/front::diag::{diags_new};
 use @vesper/front::kinds::{
     k_comma,
     k_dollar,
