@@ -6,6 +6,7 @@
 
 use self::util::{at64, n32, w};
 use self::engine::{Code, Eng, NONE, eng_new};
+use self::witness::{witness_check, witness_parse_rewrites, witness_source_term};
 
 // `fusion_run`'s mode: bit 0 saturates, bit 1 explains, and the iteration
 // limit starts at bit `LimitShift`.
@@ -97,4 +98,16 @@ pub fn fusion_run(in program: Str, in root: Str, mode: u64) -> ChunkSeq[u64] {
         }
     }
     out
+}
+
+pub fn fusion_parse_rewrites(in text: Str, mode: u64) -> ChunkSeq[u64] {
+    witness_parse_rewrites(in text, mode)
+}
+
+pub fn fusion_source_term(in bindings: Str, in root: Str) -> ChunkSeq[u64] {
+    witness_source_term(in bindings, in root)
+}
+
+pub fn fusion_check_witness(in words: Slice[u64]) -> ChunkSeq[u64] {
+    witness_check(in words)
 }

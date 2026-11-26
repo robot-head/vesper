@@ -28,7 +28,7 @@ static RUN_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// The flip-gate rows of this file's swaps (`swaps::on`).
 pub(super) const SWAPS: &[Swap] = &[open(
     "run",
-    "0.137x over 113 programs (tests/self_host_run.rs); no flip-gate configuration",
+    "0.156x over 130 programs (tests/self_host_run.rs); no flip-gate configuration",
 )];
 
 /// The driver's hook, not a registry slot.

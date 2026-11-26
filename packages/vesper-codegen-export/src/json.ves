@@ -4,40 +4,33 @@
 // are left out as their `skip_serializing_if` says.
 
 use @vesper/check-data::util::{inc, u32_at, u8_at, w};
-use self::iface::{Iface, TyNode};
+use @vesper-std/bytes::ascii::{
+    BACKSLASH, BACKSPACE, CARRIAGE_RETURN, CLOSE_BRACE, CLOSE_BRACKET, COMMA, DIGIT_ZERO, FORM_FEED,
+    NEWLINE, OPEN_BRACE, OPEN_BRACKET, QUOTE, SPACE, TAB
+};
+use self::iface::{
+    Iface, K_BOX, K_CALLBACK, K_EXTERN, K_NAMED, K_OBJECT, K_SCALAR, K_SEQ, K_SLICE, K_STR, K_TUPLE,
+    M_CONVERTED, M_REPR_C, P_IN, P_INOUT, P_OTHER, P_SINK, TyNode
+};
+use self::text::{HEX_LETTER_BASE, TEXT_CAPACITY};
 
-const K_SCALAR: u8 = 0;
-const K_TUPLE: u8 = 1;
-const K_NAMED: u8 = 2;
-const K_SEQ: u8 = 3;
-const K_SLICE: u8 = 4;
-const K_BOX: u8 = 5;
-const K_STR: u8 = 6;
-const K_OBJECT: u8 = 7;
-const K_EXTERN: u8 = 8;
-const K_CALLBACK: u8 = 9;
-
-const P_IN: u8 = 1;
-const P_INOUT: u8 = 2;
-const P_SINK: u8 = 3;
-const P_OTHER: u8 = 4;
-
-const M_REPR_C: u8 = 1;
-const M_CONVERTED: u8 = 2;
+// The state of an open container in `Json::empty`: no entry yet, or one.
+const CONTAINER_EMPTY: u8 = 1;
+const CONTAINER_USED: u8 = 0;
 
 // A pretty JSON writer: each open object or array remembers whether it
 // has an entry yet.
 struct Json {
     out: ChunkSeq[u8],
-    // per open container: 1 while it is empty
+    // per open container: CONTAINER_EMPTY while it is empty
     empty: ChunkSeq[u8],
 }
 
 fn hex(d: u8) -> u8 {
     if d < 10 {
-        wrapping_add(d, 48)
+        wrapping_add(d, DIGIT_ZERO)
     } else {
-        wrapping_add(d, 87)
+        wrapping_add(d, HEX_LETTER_BASE)
     }
 }
 
@@ -51,31 +44,31 @@ impl Json {
     }
 
     fn newline(inout self) {
-        self.out.push(10);
+        self.out.push(NEWLINE);
         let depth = self.empty.len();
         for i in 0..depth {
-            self.out.push(32);
-            self.out.push(32);
+            self.out.push(SPACE);
+            self.out.push(SPACE);
         }
     }
 
     // One byte of a JSON string, escaped as serde_json does.
     fn esc(inout self, c: u8) {
-        if c == 34 {
+        if c == QUOTE {
             self.raw("\\\"");
-        } else if c == 92 {
+        } else if c == BACKSLASH {
             self.raw("\\\\");
-        } else if c == 10 {
+        } else if c == NEWLINE {
             self.raw("\\n");
-        } else if c == 13 {
+        } else if c == CARRIAGE_RETURN {
             self.raw("\\r");
-        } else if c == 9 {
+        } else if c == TAB {
             self.raw("\\t");
-        } else if c == 8 {
+        } else if c == BACKSPACE {
             self.raw("\\b");
-        } else if c == 12 {
+        } else if c == FORM_FEED {
             self.raw("\\f");
-        } else if c < 32 {
+        } else if c < SPACE {
             self.raw("\\u00");
             self.out.push(hex(c / 16));
             self.out.push(hex(c % 16));
@@ -85,29 +78,29 @@ impl Json {
     }
 
     fn sym(inout self, in i: Iface, s: u32) {
-        self.out.push(34);
+        self.out.push(QUOTE);
         let n = i.names.size(s);
         for k in 0..n {
             self.esc(i.names.byte(s, k));
         }
-        self.out.push(34);
+        self.out.push(QUOTE);
     }
 
     fn text(inout self, in s: Str) {
-        self.out.push(34);
+        self.out.push(QUOTE);
         let b = s.as_bytes();
         for k in 0..b.len() {
             let c = b.try_get(k).unwrap_or(0);
             self.esc(c);
         }
-        self.out.push(34);
+        self.out.push(QUOTE);
     }
 
     fn num(inout self, v: u64) {
         if v >= 10 {
             self.num(v / 10);
         }
-        self.out.push(wrapping_u8(wrapping_add(v % 10, 48)));
+        self.out.push(wrapping_u8(wrapping_add(v % 10, widen_u64(DIGIT_ZERO))));
     }
 
     fn boolean(inout self, b: bool) {
@@ -120,14 +113,14 @@ impl Json {
 
     fn open(inout self, c: u8) {
         self.out.push(c);
-        self.empty.push(1);
+        self.empty.push(CONTAINER_EMPTY);
     }
 
     fn close(inout self, c: u8) {
         let n = self.empty.len();
         let was = u8_at(in self.empty, wrapping_sub(n, 1));
         self.empty.truncate(wrapping_sub(n, 1));
-        if was == 0 {
+        if was == CONTAINER_USED {
             self.newline();
         }
         self.out.push(c);
@@ -137,10 +130,10 @@ impl Json {
     fn next(inout self) {
         let n = self.empty.len();
         let last = wrapping_sub(n, 1);
-        if u8_at(in self.empty, last) == 0 {
-            self.out.push(44);
+        if u8_at(in self.empty, last) == CONTAINER_USED {
+            self.out.push(COMMA);
         }
-        let ok = self.empty.try_set(last, 0);
+        let ok = self.empty.try_set(last, CONTAINER_USED);
         self.newline();
     }
 
@@ -158,7 +151,7 @@ impl Json {
 
     fn ty(inout self, in i: Iface, t: u32) {
         let n = i.node(t);
-        self.open(123);
+        self.open(OPEN_BRACE);
         self.key("kind");
         if n.kind == K_SCALAR {
             self.text("scalar");
@@ -203,25 +196,25 @@ impl Json {
             self.key("name");
             self.sym(in i, n.name);
         }
-        self.close(125);
+        self.close(CLOSE_BRACE);
     }
 
     // The parts of `n` as an array.
     fn types(inout self, in i: Iface, n: TyNode) {
-        self.open(91);
+        self.open(OPEN_BRACKET);
         for k in 0..n.n {
             self.next();
             self.ty(in i, u32_at(in i.kids, wrapping_add(n.a, k)));
         }
-        self.close(93);
+        self.close(CLOSE_BRACKET);
     }
 
     fn decls(inout self, in i: Iface) {
-        self.open(123);
+        self.open(OPEN_BRACE);
         for di in 0..i.decls.len() {
             let d = i.decl(di);
             self.key_sym(in i, d.name);
-            self.open(123);
+            self.open(OPEN_BRACE);
             self.key("name");
             self.sym(in i, d.name);
             self.key("enum");
@@ -229,31 +222,31 @@ impl Json {
             self.key("words");
             self.num(d.words);
             self.key("variants");
-            self.open(91);
+            self.open(OPEN_BRACKET);
             for v in 0..d.vn {
                 let vr = i.var(wrapping_add(d.v0, v));
                 self.next();
-                self.open(123);
+                self.open(OPEN_BRACE);
                 self.key("name");
                 self.sym(in i, vr.name);
                 self.key("fields");
-                self.open(91);
+                self.open(OPEN_BRACKET);
                 for f in 0..vr.fc {
                     let fr = i.field(wrapping_add(vr.f0, f));
                     self.next();
-                    self.open(123);
+                    self.open(OPEN_BRACE);
                     self.key("name");
                     self.sym(in i, fr.name);
                     self.key("ty");
                     self.ty(in i, fr.ty);
                     self.key("offset");
                     self.num(fr.offset);
-                    self.close(125);
+                    self.close(CLOSE_BRACE);
                 }
-                self.close(93);
-                self.close(125);
+                self.close(CLOSE_BRACKET);
+                self.close(CLOSE_BRACE);
             }
-            self.close(93);
+            self.close(CLOSE_BRACKET);
             if d.is_handle {
                 self.key("handle");
                 self.boolean(true);
@@ -272,40 +265,40 @@ impl Json {
             }
             if d.mirror == M_REPR_C {
                 self.key("mirror");
-                self.open(123);
+                self.open(OPEN_BRACE);
                 self.key("kind");
                 self.text("repr_c");
-                self.close(125);
+                self.close(CLOSE_BRACE);
             } else if d.mirror == M_CONVERTED {
                 self.key("mirror");
-                self.open(123);
+                self.open(OPEN_BRACE);
                 self.key("kind");
                 self.text("converted");
                 self.key("reason");
                 self.sym(in i, wrapping_sub(d.reason, 1));
-                self.close(125);
+                self.close(CLOSE_BRACE);
             }
-            self.close(125);
+            self.close(CLOSE_BRACE);
         }
-        self.close(125);
+        self.close(CLOSE_BRACE);
     }
 
     fn functions(inout self, in i: Iface) {
-        self.open(91);
+        self.open(OPEN_BRACKET);
         for fi in 0..i.fns.len() {
             let f = i.func(fi);
             self.next();
-            self.open(123);
+            self.open(OPEN_BRACE);
             self.key("name");
             self.sym(in i, f.name);
             self.key("symbol");
             self.sym(in i, f.symbol);
             self.key("params");
-            self.open(91);
+            self.open(OPEN_BRACKET);
             for k in 0..f.pn {
                 let p = i.param(wrapping_add(f.p0, k));
                 self.next();
-                self.open(123);
+                self.open(OPEN_BRACE);
                 self.key("name");
                 self.sym(in i, p.name);
                 self.key("ty");
@@ -328,9 +321,9 @@ impl Json {
                     self.key("in_place");
                     self.boolean(true);
                 }
-                self.close(125);
+                self.close(CLOSE_BRACE);
             }
-            self.close(93);
+            self.close(CLOSE_BRACKET);
             self.key("result");
             self.ty(in i, f.result);
             self.key("result_words");
@@ -338,12 +331,12 @@ impl Json {
             self.key("result_pointer");
             self.boolean(f.result_pointer);
             self.key("errors");
-            self.open(91);
+            self.open(OPEN_BRACKET);
             for k in 0..f.en {
                 self.next();
                 self.ty(in i, i.err(wrapping_add(f.e0, k)));
             }
-            self.close(93);
+            self.close(CLOSE_BRACKET);
             if f.fail != 0 {
                 self.key("fail_record_words");
                 self.num(wrapping_sub(f.fail, 1));
@@ -354,56 +347,56 @@ impl Json {
             }
             if f.ln > 0 {
                 self.key("foreign");
-                self.open(91);
+                self.open(OPEN_BRACKET);
                 for k in 0..f.ln {
                     self.next();
                     self.sym(in i, i.fn_lib(wrapping_add(f.l0, k)));
                 }
-                self.close(93);
+                self.close(CLOSE_BRACKET);
             }
             if f.result_in_place {
                 self.key("result_in_place");
                 self.boolean(true);
             }
-            self.close(125);
+            self.close(CLOSE_BRACE);
         }
-        self.close(93);
+        self.close(CLOSE_BRACKET);
     }
 
     fn foreign(inout self, in i: Iface) {
-        self.open(91);
+        self.open(OPEN_BRACKET);
         for li in 0..i.libs.len() {
             let l = i.lib(li);
             self.next();
-            self.open(123);
+            self.open(OPEN_BRACE);
             self.key("name");
             self.sym(in i, l.name);
             self.key("handler");
             self.sym(in i, l.handler);
             self.key("symbols");
-            self.open(91);
+            self.open(OPEN_BRACKET);
             for k in 0..l.sn {
                 self.next();
                 self.sym(in i, i.lib_sym(wrapping_add(l.s0, k)));
             }
-            self.close(93);
+            self.close(CLOSE_BRACKET);
             if l.rust_path != 0 {
                 self.key("rust_path");
                 self.sym(in i, wrapping_sub(l.rust_path, 1));
             }
-            self.close(125);
+            self.close(CLOSE_BRACE);
         }
-        self.close(93);
+        self.close(CLOSE_BRACKET);
     }
 }
 
 // `interface_json(interface)`.
 pub fn interface_json(in i: Iface) -> ChunkSeq[u8] {
     let mut j = Json {
-        out: ChunkSeq::with_capacity[u8](65536),
+        out: ChunkSeq::with_capacity[u8](TEXT_CAPACITY),
         empty: ChunkSeq::new[u8](),
     };
-    j.open(123);
+    j.open(OPEN_BRACE);
     j.key("abi");
     j.sym(in i, i.abi);
     j.key("library");
@@ -414,7 +407,7 @@ pub fn interface_json(in i: Iface) -> ChunkSeq[u8] {
     j.functions(in i);
     if i.runtime {
         j.key("runtime");
-        j.open(123);
+        j.open(OPEN_BRACE);
         j.key("seq_new");
         j.sym(in i, i.seq_new);
         j.key("seq_free");
@@ -425,7 +418,7 @@ pub fn interface_json(in i: Iface) -> ChunkSeq[u8] {
             j.key("box_new");
             j.sym(in i, wrapping_sub(i.box_new, 1));
         }
-        j.close(125);
+        j.close(CLOSE_BRACE);
     }
     if i.libs.len() > 0 {
         j.key("foreign");
@@ -435,7 +428,7 @@ pub fn interface_json(in i: Iface) -> ChunkSeq[u8] {
         j.key("option_mirrors");
         j.boolean(true);
     }
-    j.close(125);
-    j.out.push(10);
+    j.close(CLOSE_BRACE);
+    j.out.push(NEWLINE);
     j.out
 }

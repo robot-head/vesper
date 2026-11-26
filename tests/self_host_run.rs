@@ -138,6 +138,53 @@ const PROGRAMS: &[(&str, &str)] = &[
          handle Fail[String] in { h() } with { return v => v, raise(e, k) => 98 }) }",
     ),
     (
+        // An effectful function value binds the incoming capability
+        // (`bind_callable_evidence`): the outer handler answers.
+        "bound_evidence",
+        "effect Ask { fn ask() -> i64; } fn ask() -> i64 eff [Ask] { Ask::ask() } \
+         fn apply(sink f: fn() -> i64 eff [Ask]) -> i64 eff [Ask] { handle inner: Ask in { f() } \
+         with { return x => x, ask(k) => 2, } } \
+         fn main() -> i64 { let f = ask; handle outer: Ask in { apply(sink f) } \
+         with { return x => x, ask(k) => 1, } }",
+    ),
+    (
+        // A clause writes an `inout` operation argument before aborting.
+        "inout_operation",
+        "effect Stop { fn stop(inout x: i64) -> i64; } fn main() -> i64 { let mut x = 0; \
+         let r = handle Stop in { x += 5; Stop::stop(inout x); x = wrapping_add(x, 100); 1 } \
+         with { return v => v, stop(x, k) => { x = wrapping_add(x, 30); 7 }, }; \
+         wrapping_add(wrapping_mul(r, 1000), x) }",
+    ),
+    (
+        "aborting_operation",
+        "effect Stop { fn stop() -> i64; } fn main() -> i64 { let mut x = 0; \
+         let r = handle Stop in { x += 5; Stop::stop(); x += 100; 1 } \
+         with { return v => v, stop(k) => 7, }; wrapping_add(wrapping_mul(r, 1000), x) }",
+    ),
+    (
+        "resumed_continuations",
+        "effect Ask { fn ask(x: i64) -> i64; } \
+         fn f(n: i64) -> i64 eff [Ask] { let mut s = 0; for i in 0..n { s = wrapping_add(s, Ask::ask(i)); } s } \
+         fn main() -> (i64, i64) { (handle Ask in { f(10) } with { return v => wrapping_mul(v, 2), \
+         ask(x, k) => k(wrapping_mul(x, x)) }, handle Ask in { wrapping_add(Ask::ask(1), 100) } \
+         with { return v => v, ask(x, k) => wrapping_add(k(x), 1000) }) }",
+    ),
+    (
+        "aborting_loop",
+        "effect Stop { fn stop() -> i64; } fn main() -> i64 { let mut s = 0; for i in 0..2000 { \
+         s = wrapping_add(s, handle Stop in { wrapping_add(Stop::stop(), i) } \
+         with { return v => v, stop(k) => 2, }); } s }",
+    ),
+    (
+        "state_handlers",
+        "linear effect Counter { fn next() -> i64; } \
+         fn main() -> (i64, (i64, i64)) { (handle Counter state c = 0 in { \
+         wrapping_add(Counter::next(), Counter::next()) } with { \
+         return (v, c) => wrapping_add(wrapping_mul(v, 10), c), next(c, k) => k(c, wrapping_add(c, 1)), }, \
+         handle Counter state c = 5 in { Counter::next() } with { \
+         return p => p, next(c, k) => k(c, wrapping_mul(c, 2)), }) }",
+    ),
+    (
         "unhandled_in_clause",
         "fn d(a: u64, b: u64) -> u64 eff [Fail[RuntimeError]] { a / b } \
          fn main() -> u64 { handle Fail[RuntimeError] in { \

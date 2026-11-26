@@ -39,12 +39,6 @@ mod native_steps;
 #[path = "driver/world.rs"]
 mod world;
 
-/// `proof_audit_run` of the driver module (the `proof_audit` swap,
-/// src/swap/proof_audit.rs).
-pub(crate) fn proof_audit_run(packed: &[u8]) -> Vec<u8> {
-    binding::proof_audit_run(packed)
-}
-
 /// The process entry: the Vesper driver on the CLI thread (the same name
 /// and stack as the Rust CLI's), or the Rust CLI when the driver hands the
 /// command back.
@@ -393,9 +387,12 @@ enum Step {
     Graph = 75,
     /// The checked world's declarations, for the Vesper driver to hold.
     WorldDecls = 80,
+    /// 1 when the Vesper driver collects the declarations itself (the
+    /// world swap, #2024 slice 2c), else 0.
+    WorldBegin = 81,
 }
 
-const STEPS: [Step; 38] = [
+const STEPS: [Step; 39] = [
     Step::Load,
     Step::EbpfBuild,
     Step::Parse,
@@ -434,6 +431,7 @@ const STEPS: [Step; 38] = [
     Step::VsysNames,
     Step::Graph,
     Step::WorldDecls,
+    Step::WorldBegin,
 ];
 
 /// A pass failed; its message is the session's text.
@@ -565,7 +563,7 @@ impl Session {
             | Step::VersionMatches
             | Step::VsysNames
             | Step::Graph => self.load_step(step, arg),
-            Step::WorldDecls => self.world_step(step),
+            Step::WorldDecls | Step::WorldBegin => self.world_step(step, arg),
         }
     }
 }

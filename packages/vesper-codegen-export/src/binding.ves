@@ -4,26 +4,18 @@
 // scalar conversions. Text is byte for byte the Rust generator's.
 
 use @vesper/check-data::util::{inc, u32_at, u8_at, w};
-use self::iface::{FieldRow, FnRow, Iface, ParamRow, VarRow};
-use self::text::{StrSet, copy_of, nl, put, put_hex, put_seq, put_u64, same_str, str_set, text};
+use @vesper-std/bytes::ascii::{LOWER_A, LOWER_Z, UNDERSCORE, UPPER_A, UPPER_Z};
+use self::iface::{
+    FieldRow, FnRow, Iface, K_BOX, K_CALLBACK, K_EXTERN, K_NAMED, K_OBJECT, K_SCALAR, K_SEQ,
+    K_SLICE, K_STR, K_TUPLE, M_REPR_C, NONE32, P_IN, P_INOUT, P_SINK, ParamRow, VarRow
+};
+use self::text::{
+    CASE_BIT, StrSet, copy_of, nl, put, put_hex, put_seq, put_u64, same_str, str_set, text
+};
 
-// `AbiType` kinds, passing modes and mirrors (iface.ves).
-const K_SCALAR: u8 = 0;
-const K_TUPLE: u8 = 1;
-const K_NAMED: u8 = 2;
-const K_SEQ: u8 = 3;
-const K_SLICE: u8 = 4;
-const K_BOX: u8 = 5;
-const K_STR: u8 = 6;
-const K_OBJECT: u8 = 7;
-const K_EXTERN: u8 = 8;
-const K_CALLBACK: u8 = 9;
-const P_IN: u8 = 1;
-const P_INOUT: u8 = 2;
-const P_SINK: u8 = 3;
-const M_REPR_C: u8 = 1;
-
-const NONE32: u32 = 4294967295;
+// `callback_id`'s 64-bit FNV-1a offset basis and prime.
+const FNV_OFFSET_BASIS: u64 = 14695981039346656037;
+const FNV_PRIME: u64 = 1099511628211;
 
 // The interface and the binding options.
 pub struct Gen {
@@ -117,9 +109,9 @@ impl Gen {
     // `callback_id`: the 64-bit FNV-1a hash of a callback type's name.
     pub fn callback_id(in self, s: u32) -> u64 {
         let len = wrapping_sub(self.i.names.end(s), self.i.names.start(s));
-        let mut h: u64 = 14695981039346656037;
+        let mut h: u64 = FNV_OFFSET_BASIS;
         for k in 0..len {
-            h = wrapping_mul(h ^ widen_u64(self.i.names.byte(s, k)), 1099511628211);
+            h = wrapping_mul(h ^ widen_u64(self.i.names.byte(s, k)), FNV_PRIME);
         }
         h
     }
@@ -196,12 +188,12 @@ impl Gen {
         let mut start = true;
         for k in 0..n.len() {
             let c = u8_at(in n, k);
-            if c == 95 {
+            if c == UNDERSCORE {
                 start = true;
             } else if start {
                 start = false;
-                if c >= 97 && c <= 122 {
-                    o.push(wrapping_sub(c, 32));
+                if c >= LOWER_A && c <= LOWER_Z {
+                    o.push(wrapping_sub(c, CASE_BIT));
                 } else {
                     o.push(c);
                 }
@@ -216,11 +208,11 @@ impl Gen {
         let n = self.name(s);
         for k in 0..n.len() {
             let c = u8_at(in n, k);
-            if c >= 65 && c <= 90 {
+            if c >= UPPER_A && c <= UPPER_Z {
                 if k > 0 {
-                    o.push(95);
+                    o.push(UNDERSCORE);
                 }
-                o.push(wrapping_add(c, 32));
+                o.push(wrapping_add(c, CASE_BIT));
             } else {
                 o.push(c);
             }

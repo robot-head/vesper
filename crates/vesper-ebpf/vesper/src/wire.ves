@@ -102,7 +102,7 @@ pub copy struct SynDropAlertWire {
 // caller has checked the length, so the reads never miss; the encoders
 // write into a buffer the caller lends (no sequence is built on the Vesper
 // side and nothing is copied back across the port), and a shorter buffer
-// keeps the words that fit.
+// is left as it is.
 
 fn rd(in s: Slice[u8], at: u64) -> u64 {
     s.try_read_u64_be(at).unwrap_or(0)
@@ -117,6 +117,10 @@ fn short(need: u64, got: u64) -> Never eff [Fail[WireError]] {
 }
 
 pub fn eth_encode_into(w: EthIpv4TcpWire, inout out: Slice[u8]) {
+    // One length check covers every word store below (#2226).
+    if out.len() < ETH_FRAME_SIZE {
+        return;
+    }
     let dst_ipv4 = widen_u64(w.dst_ipv4);
     let seq_num = widen_u64(w.seq_num);
     let data_offset_flags = widen_u64(w.data_offset_flags);
@@ -210,6 +214,9 @@ pub fn eth_decode(in s: Slice[u8]) -> EthIpv4TcpWire eff [Fail[WireError]] {
 }
 
 pub fn alert_encode_into(w: SynDropAlertWire, inout out: Slice[u8]) {
+    if out.len() < ALERT_SIZE {
+        return;
+    }
     wr(
         inout out,
         ALERT_HEAD,

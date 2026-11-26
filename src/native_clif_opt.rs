@@ -127,9 +127,11 @@ fn remove_unreachable(func: &mut ir::Function) {
 /// Block parameters that receive one value on every edge (or themselves,
 /// around a loop) become aliases of that value. A slot address that flows
 /// through such a parameter is then seen as the slot itself.
+const MAX_CONST_PARAM_ROUNDS: usize = 16;
+
 pub fn remove_constant_params(func: &mut ir::Function) {
     let entry = func.layout.entry_block();
-    for _round in 0..16 {
+    for _round in 0..MAX_CONST_PARAM_ROUNDS {
         let mut edges: HashMap<Block, Vec<(Inst, usize)>> = HashMap::new();
         for (_, inst) in insts(func) {
             let dests = func.dfg.insts[inst]
@@ -153,8 +155,13 @@ pub fn remove_constant_params(func: &mut ir::Function) {
             let params = func.dfg.block_params(block).to_vec();
             for i in (0..params.len()).rev() {
                 let p = params[i];
-                let mut only: Option<Value> = None;
-                let mut ok = true;
+                let p_ty = func.dfg.value_type(p);
+                let is_int_ty = matches!(p_ty, types::I8 | types::I16 | types::I32 | types::I64);
+                let mut only_val: Option<Value> = None;
+                let mut only_const: Option<i64> = None;
+                let mut saw_non_self = false;
+                let mut same_val = true;
+                let mut same_const = is_int_ty;
                 for &(inst, k) in incoming {
                     let call = func.dfg.insts[inst]
                         .branch_destination(&func.dfg.jump_tables, &func.dfg.exception_tables)[k];
@@ -164,20 +171,47 @@ pub fn remove_constant_params(func: &mut ir::Function) {
                             if v == p {
                                 continue;
                             }
-                            match only {
-                                None => only = Some(v),
+                            saw_non_self = true;
+                            match only_val {
+                                None => only_val = Some(v),
                                 Some(o) if o == v => {}
-                                Some(_) => ok = false,
+                                Some(_) => same_val = false,
+                            }
+                            if same_const {
+                                if let Some(c) = constant(func, v, 1) {
+                                    match only_const {
+                                        None => only_const = Some(c),
+                                        Some(oc) if oc == c => {}
+                                        Some(_) => same_const = false,
+                                    }
+                                } else {
+                                    same_const = false;
+                                }
                             }
                         }
-                        _ => ok = false,
+                        _ => {
+                            same_val = false;
+                            same_const = false;
+                        }
                     }
-                    if !ok {
+                    if !same_val && !same_const {
                         break;
                     }
                 }
-                let (true, Some(a)) = (ok, only) else {
+                if !saw_non_self || (!same_val && !same_const) {
                     continue;
+                }
+                let replacement = if same_val {
+                    let Some(a) = only_val else {
+                        continue;
+                    };
+                    a
+                } else {
+                    let (Some(c), Some(first)) = (only_const, func.layout.first_inst(block)) else {
+                        continue;
+                    };
+                    let mut pos = cranelift_codegen::cursor::FuncCursor::new(func).at_inst(first);
+                    pos.ins().iconst(p_ty, c)
                 };
                 for &(inst, k) in incoming {
                     let ir::DataFlowGraph {
@@ -191,7 +225,7 @@ pub fn remove_constant_params(func: &mut ir::Function) {
                         .remove(i, value_lists);
                 }
                 func.dfg.remove_block_param(p);
-                func.dfg.change_to_alias(p, a);
+                func.dfg.change_to_alias(p, replacement);
                 changed = true;
             }
         }
@@ -4353,6 +4387,16 @@ fn is_entry_param(func: &ir::Function, val: Value) -> bool {
     )
 }
 
+const SEQ_LEN_OFFSET: i64 = 0;
+const SEQ_DATA_OFFSET: i64 = 16;
+const SEQ_WORD_BYTES: i64 = 8;
+const MAX_SEQ_ADDR_DEPTH: u32 = 5;
+const MAX_SEQ_ARM_SCAN_INSTS: usize = 16;
+const MAX_DOM_REGION_BLOCKS: usize = 64;
+const MAX_SEQ_HOIST_ROUNDS: usize = 2;
+const MAX_SEQ_REUSE_ROUNDS: usize = 2;
+const MIN_SHARED_DATA_LOADS: usize = 2;
+
 fn seq_data_handle_from_elem_addr(
     func: &ir::Function,
     val: Value,
@@ -4372,7 +4416,7 @@ fn seq_data_handle_from_elem_addr(
             ..
         } if func.dfg.value_type(val) == types::I64 => {
             let (h, off) = resolve_base_offset(func, addr, i64::from(i32::from(offset)));
-            (off == 16 && extra_off >= 0).then_some(h)
+            (off == SEQ_DATA_OFFSET && extra_off >= 0).then_some(h)
         }
         InstructionData::BinaryImm64 {
             opcode: Opcode::IaddImm,
@@ -4394,8 +4438,10 @@ fn seq_data_handle_from_elem_addr(
 }
 
 /// Collects `Value`s proven to be `SeqHandle`s by matching `TrySet` `plain_word`
-/// stores: `store _, select(icmp ult(_, *(h + 0)), *(h + 16) + off, stack_addr _)`.
+/// stores (`store _, select(icmp ult(_, *(h + 0)), *(h + 16) + off, stack_addr _)`)
+/// or `Brif` bounds-checked element loads/stores.
 fn collect_verified_seq_handles(func: &ir::Function) -> HashSet<Value> {
+    use cranelift_codegen::ir::condcodes::IntCC;
     let mut handles = HashSet::new();
     let is_stack = |v: Value| {
         let v = func.dfg.resolve_aliases(v);
@@ -4413,7 +4459,7 @@ fn collect_verified_seq_handles(func: &ir::Function) -> HashSet<Value> {
         for inst in func.layout.block_insts(block) {
             if let InstructionData::Brif {
                 arg: cond,
-                blocks: [t_call, _],
+                blocks: [t_call, f_call],
                 ..
             } = func.dfg.insts[inst]
             {
@@ -4421,7 +4467,7 @@ fn collect_verified_seq_handles(func: &ir::Function) -> HashSet<Value> {
                 if let Some(cmp_inst) = func.dfg.value_def(cond).inst()
                     && let InstructionData::IntCompare {
                         opcode: Opcode::Icmp,
-                        cond: cranelift_codegen::ir::condcodes::IntCC::UnsignedLessThan,
+                        cond: cc @ (IntCC::UnsignedLessThan | IntCC::UnsignedGreaterThanOrEqual),
                         args: [_, len_val],
                     } = func.dfg.insts[cmp_inst]
                     && let Some(len_inst) =
@@ -4435,30 +4481,58 @@ fn collect_verified_seq_handles(func: &ir::Function) -> HashSet<Value> {
                 {
                     let (h_len, off_len) =
                         resolve_base_offset(func, len_addr, i64::from(i32::from(len_off)));
-                    let t_blk = t_call.block(&func.dfg.value_lists);
-                    if off_len == 0
-                        && let Some(first) = func.layout.first_inst(t_blk)
-                        && let InstructionData::Load {
-                            opcode: Opcode::Load,
-                            arg: elem_ptr,
-                            offset: elem_off,
-                            ..
-                        } = func.dfg.insts[first]
-                        && let Some(h_data) = seq_data_handle_from_elem_addr(
-                            func,
-                            elem_ptr,
-                            i64::from(i32::from(elem_off)),
-                            5,
-                        )
-                        && h_data == h_len
-                    {
-                        handles.insert(h_len);
+                    let elem_blk = if cc == IntCC::UnsignedLessThan {
+                        t_call.block(&func.dfg.value_lists)
+                    } else {
+                        f_call.block(&func.dfg.value_lists)
+                    };
+                    if off_len == SEQ_LEN_OFFSET {
+                        let matched = func
+                            .layout
+                            .block_insts(elem_blk)
+                            .take(MAX_SEQ_ARM_SCAN_INSTS)
+                            .any(|arm_inst| match func.dfg.insts[arm_inst] {
+                                InstructionData::Load {
+                                    opcode:
+                                        Opcode::Load
+                                        | Opcode::Uload8
+                                        | Opcode::Sload8
+                                        | Opcode::Uload16
+                                        | Opcode::Sload16
+                                        | Opcode::Uload32
+                                        | Opcode::Sload32,
+                                    arg: elem_ptr,
+                                    offset: elem_off,
+                                    ..
+                                }
+                                | InstructionData::Store {
+                                    opcode:
+                                        Opcode::Store
+                                        | Opcode::Istore8
+                                        | Opcode::Istore16
+                                        | Opcode::Istore32,
+                                    args: [_, elem_ptr],
+                                    offset: elem_off,
+                                    ..
+                                } => {
+                                    seq_data_handle_from_elem_addr(
+                                        func,
+                                        elem_ptr,
+                                        i64::from(i32::from(elem_off)),
+                                        MAX_SEQ_ADDR_DEPTH,
+                                    ) == Some(h_len)
+                                }
+                                _ => false,
+                            });
+                        if matched {
+                            handles.insert(h_len);
+                        }
                     }
                 }
                 continue;
             }
             let InstructionData::Store {
-                opcode: Opcode::Store,
+                opcode: Opcode::Store | Opcode::Istore8 | Opcode::Istore16 | Opcode::Istore32,
                 args: [_, ptr],
                 offset,
                 ..
@@ -4493,7 +4567,7 @@ fn collect_verified_seq_handles(func: &ir::Function) -> HashSet<Value> {
             };
             let InstructionData::IntCompare {
                 opcode: Opcode::Icmp,
-                cond: cranelift_codegen::ir::condcodes::IntCC::UnsignedLessThan,
+                cond: IntCC::UnsignedLessThan,
                 args: [_, len_val],
             } = func.dfg.insts[cmp_inst]
             else {
@@ -4514,10 +4588,11 @@ fn collect_verified_seq_handles(func: &ir::Function) -> HashSet<Value> {
             };
             let (h_len, off_len) =
                 resolve_base_offset(func, len_addr, i64::from(i32::from(len_off)));
-            if off_len != 0 {
+            if off_len != SEQ_LEN_OFFSET {
                 continue;
             }
-            if let Some(h_data) = seq_data_handle_from_elem_addr(func, elem_arm, 0, 5)
+            if let Some(h_data) =
+                seq_data_handle_from_elem_addr(func, elem_arm, 0, MAX_SEQ_ADDR_DEPTH)
                 && h_data == h_len
             {
                 handles.insert(h_len);
@@ -4570,16 +4645,18 @@ fn classify_seq_store(
             })
         };
         if (is_stack(f_arm)
-            && seq_data_handle_from_elem_addr(func, t_arm, 0, 5)
+            && seq_data_handle_from_elem_addr(func, t_arm, 0, MAX_SEQ_ADDR_DEPTH)
                 .is_some_and(|h| seq_handles.contains(&h)))
             || (is_stack(t_arm)
-                && seq_data_handle_from_elem_addr(func, f_arm, 0, 5)
+                && seq_data_handle_from_elem_addr(func, f_arm, 0, MAX_SEQ_ADDR_DEPTH)
                     .is_some_and(|h| seq_handles.contains(&h)))
         {
             return SeqStoreKind::SeqElem;
         }
     }
-    if seq_data_handle_from_elem_addr(func, ptr, off, 5).is_some_and(|h| seq_handles.contains(&h)) {
+    if seq_data_handle_from_elem_addr(func, ptr, off, MAX_SEQ_ADDR_DEPTH)
+        .is_some_and(|h| seq_handles.contains(&h))
+    {
         return SeqStoreKind::SeqElem;
     }
     let (base, total_off) = resolve_base_offset(func, ptr, off);
@@ -4701,7 +4778,7 @@ fn reuse_seq_header_loads(func: &mut ir::Function) {
                 }
             }
         }
-        for _ in 0..2 {
+        for _ in 0..MAX_SEQ_HOIST_ROUNDS {
             let mut to_hoist: Vec<(Inst, Value, ir::MemFlags, Value, i32)> = Vec::new();
             for &b in &rpo_blocks {
                 if !loop_blocks.contains(&b) {
@@ -4734,13 +4811,13 @@ fn reuse_seq_header_loads(func: &mut ir::Function) {
                     if !is_outside_loop(func, base) {
                         continue;
                     }
-                    let is_seq_hdr =
-                        seq_handles.contains(&base) && (total_off == 0 || total_off == 16);
+                    let is_seq_hdr = seq_handles.contains(&base)
+                        && (total_off == SEQ_LEN_OFFSET || total_off == SEQ_DATA_OFFSET);
                     let is_param_seq_field = is_entry_param(func, base)
                         && seq_handles.contains(&res)
                         && !written_param_fields
                             .iter()
-                            .any(|&(p, po)| p == base && (po - total_off).abs() < 8);
+                            .any(|&(p, po)| p == base && (po - total_off).abs() < SEQ_WORD_BYTES);
                     if is_seq_hdr || is_param_seq_field {
                         to_hoist.push((inst, res, flags, base, off32));
                     }
@@ -4762,7 +4839,6 @@ fn reuse_seq_header_loads(func: &mut ir::Function) {
 
     cfg.compute(func);
     domtree.compute(func, &cfg);
-    loops.compute(func, &cfg, &domtree);
 
     let mut dom_children: HashMap<Block, Vec<Block>> = HashMap::new();
     for b in domtree.cfg_postorder().iter().rev().copied() {
@@ -4773,16 +4849,21 @@ fn reuse_seq_header_loads(func: &mut ir::Function) {
         }
     }
 
-    type HeaderClobbers = HashMap<Block, (bool, Vec<(Value, i64)>)>;
-    let mut header_clobbers: HeaderClobbers = HashMap::new();
-    for lp in loops.loops() {
-        let header = loops.loop_header(lp);
-        let mut clobber_all = false;
-        let mut written_fields = Vec::new();
+    let Some(entry) = func.layout.entry_block() else {
+        return;
+    };
+
+    struct BlockClobber {
+        clobber_all: bool,
+        written_fields: Vec<(Value, i64)>,
+    }
+
+    for _ in 0..MAX_SEQ_REUSE_ROUNDS {
+        let mut changed = false;
+        let mut block_clobbers: HashMap<Block, BlockClobber> = HashMap::new();
         for b in func.layout.blocks() {
-            if !loops.is_in_loop(b, lp) {
-                continue;
-            }
+            let mut clobber_all = false;
+            let mut written_fields = Vec::new();
             for inst in func.layout.block_insts(b) {
                 match func.dfg.insts[inst].opcode() {
                     Opcode::Call | Opcode::CallIndirect => clobber_all = true,
@@ -4796,129 +4877,207 @@ fn reuse_seq_header_loads(func: &mut ir::Function) {
                     _ => {}
                 }
             }
-        }
-        let entry = header_clobbers.entry(header).or_insert((false, Vec::new()));
-        entry.0 |= clobber_all;
-        entry.1.extend(written_fields);
-    }
-
-    let block_has_side_effect: HashSet<Block> = func
-        .layout
-        .blocks()
-        .filter(|&b| {
-            func.layout.block_insts(b).any(|inst| {
-                matches!(
-                    func.dfg.insts[inst].opcode(),
-                    Opcode::Call
-                        | Opcode::CallIndirect
-                        | Opcode::Store
-                        | Opcode::Istore8
-                        | Opcode::Istore16
-                        | Opcode::Istore32
-                )
-            })
-        })
-        .collect();
-
-    let Some(entry) = func.layout.entry_block() else {
-        return;
-    };
-    type AvailLoads = HashMap<(Value, i64), Value>;
-    let mut stack: Vec<(Block, AvailLoads)> = vec![(entry, AvailLoads::new())];
-    while let Some((block, mut avail)) = stack.pop() {
-        if cfg.pred_iter(block).count() > 1 {
-            let all_preds_clean = domtree.idom(block).is_some_and(|idom| {
-                cfg.pred_iter(block).all(|p| {
-                    p.block == idom
-                        || (domtree.idom(p.block) == Some(idom)
-                            && !block_has_side_effect.contains(&p.block))
-                })
-            });
-            if !all_preds_clean {
-                avail.clear();
-            }
-        } else if let Some((clobber_all, written_fields)) = header_clobbers.get(&block) {
-            if *clobber_all {
-                avail.clear();
-            } else {
-                avail.retain(|&(b, o), _| {
-                    seq_handles.contains(&b)
-                        || written_fields
-                            .iter()
-                            .all(|&(p, po)| b == p && (po - o).abs() >= 8)
-                });
-            }
+            block_clobbers.insert(
+                b,
+                BlockClobber {
+                    clobber_all,
+                    written_fields,
+                },
+            );
         }
 
-        let insts: Vec<Inst> = func.layout.block_insts(block).collect();
-        for inst in insts {
-            match func.dfg.insts[inst].opcode() {
-                Opcode::Call | Opcode::CallIndirect => avail.clear(),
-                Opcode::Store | Opcode::Istore8 | Opcode::Istore16 | Opcode::Istore32 => {
-                    match classify_seq_store(func, inst, &seq_handles) {
-                        SeqStoreKind::SeqElem | SeqStoreKind::StackSlot => {}
-                        SeqStoreKind::ParamField(p, o) => {
-                            avail.retain(|&(b, bo), _| {
-                                (b == p && (bo - o).abs() >= 8) || seq_handles.contains(&b)
-                            });
-                            if let InstructionData::Store {
-                                opcode: Opcode::Store,
-                                args: [val, _],
-                                ..
-                            } = func.dfg.insts[inst]
-                                && func.dfg.value_type(val) == types::I64
-                            {
-                                avail.insert((p, o), func.dfg.resolve_aliases(val));
+        type AvailLoads = HashMap<(Value, i64), Value>;
+        type AvailLenInsts = HashMap<Value, (Inst, ir::MemFlags)>;
+        type DataGroup = (Value, ir::MemFlags, Vec<(Inst, Value)>);
+        let mut group_order: Vec<Inst> = Vec::new();
+        let mut data_groups: HashMap<Inst, DataGroup> = HashMap::new();
+
+        let mut stack: Vec<(Block, AvailLoads, AvailLenInsts)> =
+            vec![(entry, AvailLoads::new(), AvailLenInsts::new())];
+        while let Some((block, mut avail, mut avail_len)) = stack.pop() {
+            if (!avail.is_empty() || !avail_len.is_empty()) && cfg.pred_iter(block).count() > 1 {
+                let Some(idom) = domtree.idom(block) else {
+                    avail.clear();
+                    avail_len.clear();
+                    continue;
+                };
+                let mut clobber_all = false;
+                let mut region: Vec<Block> = Vec::new();
+                let mut visited: HashSet<Block> = HashSet::new();
+                for pred in cfg.pred_iter(block) {
+                    if !domtree.is_reachable(pred.block) || pred.block == idom {
+                        continue;
+                    }
+                    if visited.insert(pred.block) {
+                        region.push(pred.block);
+                    }
+                }
+                let mut cursor = 0;
+                while cursor < region.len() {
+                    if region.len() > MAX_DOM_REGION_BLOCKS {
+                        clobber_all = true;
+                        break;
+                    }
+                    let cur = region[cursor];
+                    cursor += 1;
+                    if !domtree.dominates(idom, cur, &func.layout)
+                        || block_clobbers.get(&cur).is_some_and(|c| c.clobber_all)
+                    {
+                        clobber_all = true;
+                        break;
+                    }
+                    for pred in cfg.pred_iter(cur) {
+                        if !domtree.is_reachable(pred.block) || pred.block == idom {
+                            continue;
+                        }
+                        if visited.insert(pred.block) {
+                            region.push(pred.block);
+                        }
+                    }
+                }
+                if clobber_all {
+                    avail.clear();
+                    avail_len.clear();
+                } else {
+                    avail.retain(|&(b, o), _| {
+                        seq_handles.contains(&b)
+                            || region.iter().all(|r| {
+                                block_clobbers.get(r).is_none_or(|c| {
+                                    c.written_fields
+                                        .iter()
+                                        .all(|&(p, po)| b == p && (po - o).abs() >= SEQ_WORD_BYTES)
+                                })
+                            })
+                    });
+                }
+            }
+
+            let insts: Vec<Inst> = func.layout.block_insts(block).collect();
+            for inst in insts {
+                match func.dfg.insts[inst].opcode() {
+                    Opcode::Call | Opcode::CallIndirect => {
+                        avail.clear();
+                        avail_len.clear();
+                    }
+                    Opcode::Store | Opcode::Istore8 | Opcode::Istore16 | Opcode::Istore32 => {
+                        match classify_seq_store(func, inst, &seq_handles) {
+                            SeqStoreKind::SeqElem | SeqStoreKind::StackSlot => {}
+                            SeqStoreKind::ParamField(p, o) => {
+                                avail.retain(|&(b, bo), _| {
+                                    (b == p && (bo - o).abs() >= SEQ_WORD_BYTES)
+                                        || seq_handles.contains(&b)
+                                });
+                                if let InstructionData::Store {
+                                    opcode: Opcode::Store,
+                                    args: [val, _],
+                                    ..
+                                } = func.dfg.insts[inst]
+                                {
+                                    let val = func.dfg.resolve_aliases(val);
+                                    if func.dfg.value_type(val) == types::I64
+                                        && seq_handles.contains(&val)
+                                    {
+                                        avail.insert((p, o), val);
+                                    }
+                                }
+                            }
+                            SeqStoreKind::Unknown => {
+                                avail.clear();
+                                avail_len.clear();
                             }
                         }
-                        SeqStoreKind::Unknown => avail.clear(),
                     }
-                }
-                Opcode::Load => {
-                    let InstructionData::Load {
-                        opcode: Opcode::Load,
-                        arg: addr,
-                        offset,
-                        ..
-                    } = func.dfg.insts[inst]
-                    else {
-                        continue;
-                    };
-                    let Some(&res) = func.dfg.inst_results(inst).first() else {
-                        continue;
-                    };
-                    if func.dfg.value_type(res) != types::I64 {
-                        continue;
-                    }
-                    let (base, total_off) =
-                        resolve_base_offset(func, addr, i64::from(i32::from(offset)));
-                    let is_seq_hdr =
-                        seq_handles.contains(&base) && (total_off == 0 || total_off == 16);
-                    let is_param_seq_field =
-                        is_entry_param(func, base) && seq_handles.contains(&res);
-                    if is_seq_hdr || is_param_seq_field {
-                        if let Some(&prev) = avail.get(&(base, total_off)) {
-                            func.dfg.detach_inst_results(inst);
-                            func.layout.remove_inst(inst);
-                            func.dfg.change_to_alias(res, prev);
-                        } else {
-                            avail.insert((base, total_off), res);
+                    Opcode::Load => {
+                        let InstructionData::Load {
+                            opcode: Opcode::Load,
+                            arg: addr,
+                            offset,
+                            flags,
+                        } = func.dfg.insts[inst]
+                        else {
+                            continue;
+                        };
+                        let Some(&res) = func.dfg.inst_results(inst).first() else {
+                            continue;
+                        };
+                        if func.dfg.value_type(res) != types::I64 {
+                            continue;
+                        };
+                        let (base, total_off) =
+                            resolve_base_offset(func, addr, i64::from(i32::from(offset)));
+                        let is_seq_hdr = seq_handles.contains(&base)
+                            && (total_off == SEQ_LEN_OFFSET || total_off == SEQ_DATA_OFFSET);
+                        let is_param_seq_field = is_entry_param(func, base)
+                            && (seq_handles.contains(&res)
+                                || avail.contains_key(&(base, total_off)));
+                        if is_seq_hdr || is_param_seq_field {
+                            if let Some(&prev) = avail.get(&(base, total_off)) {
+                                func.dfg.detach_inst_results(inst);
+                                func.layout.remove_inst(inst);
+                                func.dfg.change_to_alias(res, prev);
+                                changed = true;
+                            } else {
+                                avail.insert((base, total_off), res);
+                                if is_seq_hdr && total_off == SEQ_LEN_OFFSET {
+                                    avail_len.insert(base, (inst, flags));
+                                } else if is_seq_hdr
+                                    && total_off == SEQ_DATA_OFFSET
+                                    && let Some(&(len_inst, len_flags)) = avail_len.get(&base)
+                                {
+                                    if func.layout.inst_block(len_inst) == Some(block) {
+                                        avail_len.remove(&base);
+                                    } else {
+                                        let entry =
+                                            data_groups.entry(len_inst).or_insert_with(|| {
+                                                group_order.push(len_inst);
+                                                (base, len_flags, Vec::new())
+                                            });
+                                        entry.2.push((inst, res));
+                                    }
+                                }
+                            }
                         }
                     }
+                    _ => {}
                 }
-                _ => {}
+            }
+
+            if let Some(children) = dom_children.get(&block) {
+                for (idx, &child) in children.iter().enumerate() {
+                    let (child_avail, child_len) = if idx + 1 == children.len() {
+                        (std::mem::take(&mut avail), std::mem::take(&mut avail_len))
+                    } else {
+                        (avail.clone(), avail_len.clone())
+                    };
+                    stack.push((child, child_avail, child_len));
+                }
             }
         }
 
-        if let Some(children) = dom_children.get(&block) {
-            for (idx, &child) in children.iter().enumerate() {
-                let child_avail = if idx + 1 == children.len() {
-                    std::mem::take(&mut avail)
-                } else {
-                    avail.clone()
-                };
-                stack.push((child, child_avail));
+        for len_inst in group_order {
+            let Some((base, len_flags, loads)) = data_groups.remove(&len_inst) else {
+                continue;
+            };
+            if loads.len() < MIN_SHARED_DATA_LOADS {
+                continue;
             }
+            let Some(next_inst) = func.layout.next_inst(len_inst) else {
+                continue;
+            };
+            let mut pos = cranelift_codegen::cursor::FuncCursor::new(func).at_inst(next_inst);
+            let hoisted = pos
+                .ins()
+                .load(types::I64, len_flags, base, SEQ_DATA_OFFSET as i32);
+            for (inst, res) in loads {
+                func.dfg.detach_inst_results(inst);
+                func.layout.remove_inst(inst);
+                func.dfg.change_to_alias(res, hoisted);
+            }
+            changed = true;
+        }
+
+        if !changed {
+            break;
         }
     }
 }

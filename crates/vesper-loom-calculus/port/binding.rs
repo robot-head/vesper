@@ -277,6 +277,67 @@ impl Abi for Ver {
     }
 }
 
+/// Owned handle of a Vesper `GraphRun` value: its words, which own the Vesper
+/// allocations they point to. Dropping it calls `vesper_loom_calculus_GraphRun_drop`.
+pub struct GraphRun {
+    words: [u64; 3],
+}
+
+impl GraphRun {
+    /// # Safety
+    /// `words` must hold a `GraphRun` value of this library that the caller owns.
+    unsafe fn from_words(words: &[u64]) -> Self {
+        let mut owned = [0u64; 3];
+        owned.copy_from_slice(&words[..3]);
+        Self { words: owned }
+    }
+
+    /// A borrowed view of the value.
+    pub fn as_ref(&self) -> GraphRunRef<'_> {
+        GraphRunRef { words: &self.words }
+    }
+}
+
+impl Drop for GraphRun {
+    fn drop(&mut self) {
+        // SAFETY: the handle owns its words and is dropped once.
+        unsafe { vesper_loom_calculus_GraphRun_drop(self.words.as_mut_ptr()) };
+    }
+}
+
+impl core::fmt::Debug for GraphRun {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("GraphRun { .. }")
+    }
+}
+
+// SAFETY: the handle owns its Vesper allocations exclusively (no Vesper
+// code keeps a reference to them), and they are plain heap memory.
+unsafe impl Send for GraphRun {}
+// SAFETY: shared access only reads the words and the memory they own.
+unsafe impl Sync for GraphRun {}
+
+/// A borrowed view of a Vesper `GraphRun` value, read in place.
+#[derive(Clone, Copy)]
+pub struct GraphRunRef<'a> {
+    words: &'a [u64],
+}
+
+impl<'a> GraphRunRef<'a> {
+    pub fn status(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[0..])
+    }
+    pub fn out(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[1]) }
+    }
+    pub fn err(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[2]) }
+    }
+}
+
 /// Owned handle of a Vesper `L` value: its words, which own the Vesper
 /// allocations they point to. Dropping it calls `vesper_loom_calculus_L_drop`.
 pub struct L {
@@ -687,9 +748,13 @@ unsafe extern "C" {
     fn vesper_loom_calculus_seq_new(capacity: i64, stride: i64) -> i64;
     fn vesper_loom_calculus_seq_free(seq: i64) -> i64;
     fn vesper_loom_calculus_live_allocations() -> i64;
+    fn vesper_loom_calculus_GraphRun_drop(value: *mut u64) -> i64;
     fn vesper_loom_calculus_L_drop(value: *mut u64) -> i64;
     fn vesper_loom_calculus_TomlRead_drop(value: *mut u64) -> i64;
     fn vesper_loom_calculus_check_upgrade(result: *mut u64, words: *mut u64, text: *mut u64) -> i64;
+    fn vesper_loom_calculus_lock_graph(result: *mut u64, lock: *mut u64, has_focus: i64, focus: *mut u64, invert: i64, json: i64, dot: i64) -> i64;
+    fn vesper_loom_calculus_lock_graph_focus_error(result: *mut u64, name: *mut u64) -> i64;
+    fn vesper_loom_calculus_lock_json(result: *mut u64, text: *mut u64) -> i64;
     fn vesper_loom_calculus_manifest_toml(result: *mut u64, text: *mut u64) -> i64;
     fn vesper_loom_calculus_package_name_valid(s: *mut u64) -> i64;
     fn vesper_loom_calculus_read_toml(result: *mut u64, text: *mut u64) -> i64;
@@ -719,6 +784,36 @@ pub fn check_upgrade(words: &[u64], text: &[u8]) -> L {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(words, |view_words| vesper_port_abi::with_slice(text, |view_text| unsafe { vesper_loom_calculus_check_upgrade(result.as_mut_ptr(), view_words, view_text) }));
     unsafe { L::from_words(&result[0..]) }
+}
+
+/// Calls `lock_graph` of the Vesper library `loom_calculus` (`vesper_loom_calculus_lock_graph`).
+pub fn lock_graph(lock: &[u8], has_focus: bool, focus: &[u8], invert: bool, json: bool, dot: bool) -> GraphRun {
+    let mut result = [0u64; 3];
+    // SAFETY: `vesper_loom_calculus_lock_graph` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(lock, |view_lock| vesper_port_abi::with_slice(focus, |view_focus| unsafe { vesper_loom_calculus_lock_graph(result.as_mut_ptr(), view_lock, has_focus as i64, view_focus, invert as i64, json as i64, dot as i64) }));
+    unsafe { GraphRun::from_words(&result[0..]) }
+}
+
+/// Calls `lock_graph_focus_error` of the Vesper library `loom_calculus` (`vesper_loom_calculus_lock_graph_focus_error`).
+pub fn lock_graph_focus_error(name: &[u8]) -> TomlRead {
+    let mut result = [0u64; 1];
+    // SAFETY: `vesper_loom_calculus_lock_graph_focus_error` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(name, |view_name| unsafe { vesper_loom_calculus_lock_graph_focus_error(result.as_mut_ptr(), view_name) });
+    unsafe { TomlRead::from_words(&result[0..]) }
+}
+
+/// Calls `lock_json` of the Vesper library `loom_calculus` (`vesper_loom_calculus_lock_json`).
+pub fn lock_json(text: &[u8]) -> TomlRead {
+    let mut result = [0u64; 1];
+    // SAFETY: `vesper_loom_calculus_lock_json` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(text, |view_text| unsafe { vesper_loom_calculus_lock_json(result.as_mut_ptr(), view_text) });
+    unsafe { TomlRead::from_words(&result[0..]) }
 }
 
 /// Calls `manifest_toml` of the Vesper library `loom_calculus` (`vesper_loom_calculus_manifest_toml`).

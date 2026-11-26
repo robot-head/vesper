@@ -34,62 +34,64 @@ copy struct Rd {
     pos: u64
 }
 
-fn word(in b: Slice[u8], inout r: Rd) -> u64 {
-    let x = match b.try_read_u64_le(r.pos) {
-        Option::Some(x) => x,
+fn word(in bytes: Slice[u8], inout reader: Rd) -> u64 {
+    let value = match bytes.try_read_u64_le(reader.pos) {
+        Option::Some(value) => value,
         Option::None => 0,
     };
-    r.pos = wrapping_add(r.pos, 8);
-    x
+    reader.pos = wrapping_add(reader.pos, 8);
+    value
 }
 
-// The next `n` bytes of the blob: their offset.
-fn take(inout t: Rd, n: u64) -> u64 {
-    let at = t.pos;
-    t.pos = wrapping_add(t.pos, n);
+// The next `len` bytes of the blob: their offset.
+fn take(inout blob_cursor: Rd, len: u64) -> u64 {
+    let at = blob_cursor.pos;
+    blob_cursor.pos = wrapping_add(blob_cursor.pos, len);
     at
 }
 
-fn g64(in v: ChunkSeq[u64], i: u64) -> u64 {
-    match v.try_get(i) {
+fn g64(in column: ChunkSeq[u64], i: u64) -> u64 {
+    match column.try_get(i) {
         Option::Some(x) => x,
         Option::None => 0,
     }
 }
 
-fn bt(in b: Slice[u8], i: u64) -> u8 {
-    match b.try_get(i) {
+fn bt(in bytes: Slice[u8], i: u64) -> u8 {
+    match bytes.try_get(i) {
         Option::Some(x) => x,
         Option::None => 0,
     }
 }
 
-fn same(in b: Slice[u8], x: u64, y: u64, n: u64) -> bool {
+fn same(in bytes: Slice[u8], lhs_at: u64, rhs_at: u64, n: u64) -> bool {
     let words = n >> 3;
-    for k in 0..words {
-        let i = wrapping_mul(k, 8);
-        if b.try_read_u64_le(wrapping_add(x, i)) != b.try_read_u64_le(wrapping_add(y, i)) {
+    for word_index in 0..words {
+        let i = wrapping_mul(word_index, 8);
+        if bytes.try_read_u64_le(wrapping_add(lhs_at, i))
+            != bytes.try_read_u64_le(wrapping_add(rhs_at, i))
+        {
             return false;
         }
     }
     for i in wrapping_mul(words, 8)..n {
-        if bt(in b, wrapping_add(x, i)) != bt(in b, wrapping_add(y, i)) {
+        if bt(in bytes, wrapping_add(lhs_at, i)) != bt(in bytes, wrapping_add(rhs_at, i)) {
             return false;
         }
     }
     true
 }
 
-// Byte-wise order of `b[x..x+xn]` against `b[y..y+yn]`: -1, 0 or 1.
-fn compare(in b: Slice[u8], x: u64, xn: u64, y: u64, yn: u64) -> i64 {
-    let n = if xn < yn { xn } else { yn };
-    for i in 0..n {
-        let p = bt(in b, wrapping_add(x, i));
-        let q = bt(in b, wrapping_add(y, i));
-        if p < q {
+// Byte-wise order of `bytes[x..x+xn]` against `bytes[y..y+yn]`: -1, 0 or 1.
+fn compare(in bytes: Slice[u8], x: u64, xn: u64, y: u64, yn: u64) -> i64 {
+    let common_len = if xn < yn { xn } else { yn };
+    for i in 0..common_len {
+        let lhs_byte = bt(in bytes, wrapping_add(x, i));
+        let rhs_byte = bt(in bytes, wrapping_add(y, i));
+        if lhs_byte < rhs_byte {
             return -1;
         }
-        if p > q {
+        if lhs_byte > rhs_byte {
             return 1;
         }
     }
@@ -102,25 +104,25 @@ fn compare(in b: Slice[u8], x: u64, xn: u64, y: u64, yn: u64) -> i64 {
     }
 }
 
-fn is(in b: Slice[u8], at: u64, len: u64, in s: Str) -> bool {
-    let w = s.as_bytes();
-    if len != w.len() {
+fn is(in bytes: Slice[u8], at: u64, len: u64, in expected: Str) -> bool {
+    let expected_bytes = expected.as_bytes();
+    if len != expected_bytes.len() {
         return false;
     }
     for i in 0..len {
-        if bt(in b, wrapping_add(at, i)) != bt(in w, i) {
+        if bt(in bytes, wrapping_add(at, i)) != bt(in expected_bytes, i) {
             return false;
         }
     }
     true
 }
 
-fn put(inout o: ChunkSeq[u8], in s: Str) {
-    o.extend(in s.as_bytes());
+fn put(inout out: ChunkSeq[u8], in s: Str) {
+    out.extend(in s.as_bytes());
 }
 
-fn put_span(inout o: ChunkSeq[u8], in b: Slice[u8], at: u64, len: u64) {
-    o.extend(in b[at..wrapping_add(at, len)]);
+fn put_span(inout out: ChunkSeq[u8], in bytes: Slice[u8], at: u64, len: u64) {
+    out.extend(in bytes[at..wrapping_add(at, len)]);
 }
 
 const ONES: u64 = 72340172838076673;
@@ -138,10 +140,10 @@ fn special(w: u64) -> bool {
         || has_zero(w ^ wrapping_mul(ONES, 92))
 }
 
-// `b[at..at+len]` as a JSON string with serde_json's escapes (json.ves
+// `bytes[at..at+len]` as a JSON string with serde_json's escapes (json.ves
 // `put_string`), copying the runs between escaped bytes whole.
-pub fn put_json(inout o: ChunkSeq[u8], in b: Slice[u8], at: u64, len: u64) {
-    o.push(34);
+pub fn put_json(inout out: ChunkSeq[u8], in bytes: Slice[u8], at: u64, len: u64) {
+    out.push(34);
     let end = wrapping_add(at, len);
     let mut run = at;
     let mut i = at;
@@ -151,7 +153,7 @@ pub fn put_json(inout o: ChunkSeq[u8], in b: Slice[u8], at: u64, len: u64) {
         }
         // Eight bytes at a time while none needs an escape.
         if wrapping_add(i, 8) <= end {
-            let w = match b.try_read_u64_le(i) {
+            let w = match bytes.try_read_u64_le(i) {
                 Option::Some(w) => w,
                 Option::None => 0,
             };
@@ -160,53 +162,53 @@ pub fn put_json(inout o: ChunkSeq[u8], in b: Slice[u8], at: u64, len: u64) {
                 continue;
             }
         }
-        let c = bt(in b, i);
+        let ch = bt(in bytes, i);
         i = wrapping_add(i, 1);
-        if c == 34 || c == 92 || c < 32 {
+        if ch == 34 || ch == 92 || ch < 32 {
             let i = wrapping_sub(i, 1);
-            o.extend(in b[run..i]);
+            out.extend(in bytes[run..i]);
             run = wrapping_add(i, 1);
-            o.push(92);
-            if c == 34 || c == 92 {
-                o.push(c);
-            } else if c == 8 {
-                o.push(98);
-            } else if c == 12 {
-                o.push(102);
-            } else if c == 10 {
-                o.push(110);
-            } else if c == 13 {
-                o.push(114);
-            } else if c == 9 {
-                o.push(116);
+            out.push(92);
+            if ch == 34 || ch == 92 {
+                out.push(ch);
+            } else if ch == 8 {
+                out.push(98);
+            } else if ch == 12 {
+                out.push(102);
+            } else if ch == 10 {
+                out.push(110);
+            } else if ch == 13 {
+                out.push(114);
+            } else if ch == 9 {
+                out.push(116);
             } else {
-                put(inout o, in "u00");
-                o.push(hex(c >> 4));
-                o.push(hex(c & 15));
+                put(inout out, in "u00");
+                out.push(hex(ch >> 4));
+                out.push(hex(ch & 15));
             }
         }
     }
-    o.extend(in b[run..end]);
-    o.push(34);
+    out.extend(in bytes[run..end]);
+    out.push(34);
 }
 
-fn hex(d: u8) -> u8 {
-    if d < 10 {
-        wrapping_add(d, 48)
+fn hex(nibble: u8) -> u8 {
+    if nibble < 10 {
+        wrapping_add(nibble, 48)
     } else {
-        wrapping_add(d, 87)
+        wrapping_add(nibble, 87)
     }
 }
 
 // The 32 bytes at `at` as a quoted lowercase hex string.
-fn put_hash(inout o: ChunkSeq[u8], in b: Slice[u8], at: u64) {
-    o.push(34);
+fn put_hash(inout out: ChunkSeq[u8], in bytes: Slice[u8], at: u64) {
+    out.push(34);
     for i in 0..32 {
-        let x = bt(in b, wrapping_add(at, i));
-        o.push(hex(x >> 4));
-        o.push(hex(x & 15));
+        let byte = bt(in bytes, wrapping_add(at, i));
+        out.push(hex(byte >> 4));
+        out.push(hex(byte & 15));
     }
-    o.push(34);
+    out.push(34);
 }
 
 fn status_name(code: u64) -> Str {
@@ -227,14 +229,14 @@ fn status_name(code: u64) -> Str {
 // failed stage and reason) as blob spans.
 copy struct Status {
     code: u64,
-    a_at: u64,
-    a_len: u64,
-    b_at: u64,
-    b_len: u64
+    detail_at: u64,
+    detail_len: u64,
+    reason_at: u64,
+    reason_len: u64
 }
 
 fn not_attempted() -> Status {
-    Status { code: NOT_ATTEMPTED, a_at: 0, a_len: 0, b_at: 0, b_len: 0 }
+    Status { code: NOT_ATTEMPTED, detail_at: 0, detail_len: 0, reason_at: 0, reason_len: 0 }
 }
 
 // `ProofLedger`: outcomes keyed by (32-byte key, function), stamped by a
@@ -243,14 +245,14 @@ struct Ledger {
     cap: u64,
     clock: u64,
     key: ChunkSeq[u64],
-    f_at: ChunkSeq[u64],
-    f_len: ChunkSeq[u64],
+    fn_name_at: ChunkSeq[u64],
+    fn_name_len: ChunkSeq[u64],
     stamp: ChunkSeq[u64],
     code: ChunkSeq[u64],
-    a_at: ChunkSeq[u64],
-    a_len: ChunkSeq[u64],
-    b_at: ChunkSeq[u64],
-    b_len: ChunkSeq[u64]
+    detail_at: ChunkSeq[u64],
+    detail_len: ChunkSeq[u64],
+    reason_at: ChunkSeq[u64],
+    reason_len: ChunkSeq[u64]
 }
 
 fn ledger(cap: u64) -> Ledger {
@@ -258,36 +260,42 @@ fn ledger(cap: u64) -> Ledger {
         cap: cap,
         clock: 0,
         key: ChunkSeq::new[u64](),
-        f_at: ChunkSeq::new[u64](),
-        f_len: ChunkSeq::new[u64](),
+        fn_name_at: ChunkSeq::new[u64](),
+        fn_name_len: ChunkSeq::new[u64](),
         stamp: ChunkSeq::new[u64](),
         code: ChunkSeq::new[u64](),
-        a_at: ChunkSeq::new[u64](),
-        a_len: ChunkSeq::new[u64](),
-        b_at: ChunkSeq::new[u64](),
-        b_len: ChunkSeq::new[u64]()
+        detail_at: ChunkSeq::new[u64](),
+        detail_len: ChunkSeq::new[u64](),
+        reason_at: ChunkSeq::new[u64](),
+        reason_len: ChunkSeq::new[u64]()
     }
 }
 
-fn clear(inout l: Ledger, cap: u64) {
-    l.cap = cap;
-    l.clock = 0;
-    l.key.truncate(0);
-    l.f_at.truncate(0);
-    l.f_len.truncate(0);
-    l.stamp.truncate(0);
-    l.code.truncate(0);
-    l.a_at.truncate(0);
-    l.a_len.truncate(0);
-    l.b_at.truncate(0);
-    l.b_len.truncate(0);
+fn clear(inout outcomes: Ledger, cap: u64) {
+    outcomes.cap = cap;
+    outcomes.clock = 0;
+    outcomes.key.truncate(0);
+    outcomes.fn_name_at.truncate(0);
+    outcomes.fn_name_len.truncate(0);
+    outcomes.stamp.truncate(0);
+    outcomes.code.truncate(0);
+    outcomes.detail_at.truncate(0);
+    outcomes.detail_len.truncate(0);
+    outcomes.reason_at.truncate(0);
+    outcomes.reason_len.truncate(0);
 }
 
-fn find(in l: Ledger, in b: Slice[u8], key: u64, f_at: u64, f_len: u64) -> u64 {
-    for i in 0..l.key.len() {
-        if g64(in l.f_len, i) == f_len
-            && same(in b, g64(in l.key, i), key, 32)
-            && same(in b, g64(in l.f_at, i), f_at, f_len)
+fn find(
+    in outcomes: Ledger,
+    in bytes: Slice[u8],
+    key: u64,
+    fn_name_at: u64,
+    fn_name_len: u64
+) -> u64 {
+    for i in 0..outcomes.key.len() {
+        if g64(in outcomes.fn_name_len, i) == fn_name_len
+            && same(in bytes, g64(in outcomes.key, i), key, 32)
+            && same(in bytes, g64(in outcomes.fn_name_at, i), fn_name_at, fn_name_len)
         {
             return i;
         }
@@ -295,69 +303,82 @@ fn find(in l: Ledger, in b: Slice[u8], key: u64, f_at: u64, f_len: u64) -> u64 {
     NONE
 }
 
-fn status(in l: Ledger, in b: Slice[u8], key: u64, f_at: u64, f_len: u64) -> Status {
-    let i = find(in l, in b, key, f_at, f_len);
+fn status(
+    in outcomes: Ledger,
+    in bytes: Slice[u8],
+    key: u64,
+    fn_name_at: u64,
+    fn_name_len: u64
+) -> Status {
+    let i = find(in outcomes, in bytes, key, fn_name_at, fn_name_len);
     if i == NONE {
         return not_attempted();
     }
     Status {
-        code: g64(in l.code, i),
-        a_at: g64(in l.a_at, i),
-        a_len: g64(in l.a_len, i),
-        b_at: g64(in l.b_at, i),
-        b_len: g64(in l.b_len, i)
+        code: g64(in outcomes.code, i),
+        detail_at: g64(in outcomes.detail_at, i),
+        detail_len: g64(in outcomes.detail_len, i),
+        reason_at: g64(in outcomes.reason_at, i),
+        reason_len: g64(in outcomes.reason_len, i)
     }
 }
 
-fn swap_out(inout v: ChunkSeq[u64], i: u64) {
-    let last = wrapping_sub(v.len(), 1);
-    let _ = v.try_set(i, g64(in v, last));
-    v.truncate(last);
+fn swap_out(inout column: ChunkSeq[u64], i: u64) {
+    let last = wrapping_sub(column.len(), 1);
+    let _ = column.try_set(i, g64(in column, last));
+    column.truncate(last);
 }
 
-fn record(inout l: Ledger, in b: Slice[u8], key: u64, f_at: u64, f_len: u64, s: Status) {
-    l.clock = wrapping_add(l.clock, 1);
-    let mut i = find(in l, in b, key, f_at, f_len);
+fn record(
+    inout outcomes: Ledger,
+    in bytes: Slice[u8],
+    key: u64,
+    fn_name_at: u64,
+    fn_name_len: u64,
+    new_status: Status
+) {
+    outcomes.clock = wrapping_add(outcomes.clock, 1);
+    let mut i = find(in outcomes, in bytes, key, fn_name_at, fn_name_len);
     if i == NONE {
-        if l.key.len() >= l.cap {
+        if outcomes.key.len() >= outcomes.cap {
             let mut oldest: u64 = NONE;
             let mut low: u64 = NONE;
-            for j in 0..l.stamp.len() {
-                let s = g64(in l.stamp, j);
-                if oldest == NONE || s < low {
+            for j in 0..outcomes.stamp.len() {
+                let stamp = g64(in outcomes.stamp, j);
+                if oldest == NONE || stamp < low {
                     oldest = j;
-                    low = s;
+                    low = stamp;
                 }
             }
             if oldest != NONE {
-                swap_out(inout l.key, oldest);
-                swap_out(inout l.f_at, oldest);
-                swap_out(inout l.f_len, oldest);
-                swap_out(inout l.stamp, oldest);
-                swap_out(inout l.code, oldest);
-                swap_out(inout l.a_at, oldest);
-                swap_out(inout l.a_len, oldest);
-                swap_out(inout l.b_at, oldest);
-                swap_out(inout l.b_len, oldest);
+                swap_out(inout outcomes.key, oldest);
+                swap_out(inout outcomes.fn_name_at, oldest);
+                swap_out(inout outcomes.fn_name_len, oldest);
+                swap_out(inout outcomes.stamp, oldest);
+                swap_out(inout outcomes.code, oldest);
+                swap_out(inout outcomes.detail_at, oldest);
+                swap_out(inout outcomes.detail_len, oldest);
+                swap_out(inout outcomes.reason_at, oldest);
+                swap_out(inout outcomes.reason_len, oldest);
             }
         }
-        l.key.push(key);
-        l.f_at.push(f_at);
-        l.f_len.push(f_len);
-        l.stamp.push(l.clock);
-        l.code.push(s.code);
-        l.a_at.push(s.a_at);
-        l.a_len.push(s.a_len);
-        l.b_at.push(s.b_at);
-        l.b_len.push(s.b_len);
+        outcomes.key.push(key);
+        outcomes.fn_name_at.push(fn_name_at);
+        outcomes.fn_name_len.push(fn_name_len);
+        outcomes.stamp.push(outcomes.clock);
+        outcomes.code.push(new_status.code);
+        outcomes.detail_at.push(new_status.detail_at);
+        outcomes.detail_len.push(new_status.detail_len);
+        outcomes.reason_at.push(new_status.reason_at);
+        outcomes.reason_len.push(new_status.reason_len);
         return;
     }
-    let _ = l.stamp.try_set(i, l.clock);
-    let _ = l.code.try_set(i, s.code);
-    let _ = l.a_at.try_set(i, s.a_at);
-    let _ = l.a_len.try_set(i, s.a_len);
-    let _ = l.b_at.try_set(i, s.b_at);
-    let _ = l.b_len.try_set(i, s.b_len);
+    let _ = outcomes.stamp.try_set(i, outcomes.clock);
+    let _ = outcomes.code.try_set(i, new_status.code);
+    let _ = outcomes.detail_at.try_set(i, new_status.detail_at);
+    let _ = outcomes.detail_len.try_set(i, new_status.detail_len);
+    let _ = outcomes.reason_at.try_set(i, new_status.reason_at);
+    let _ = outcomes.reason_len.try_set(i, new_status.reason_len);
 }
 
 // One finished job's outcomes, as blob spans.
@@ -372,29 +393,35 @@ struct Outcome {
     compiled: u64,
     elapsed: u64,
     // extraction: function, status
-    x_at: ChunkSeq[u64],
-    x_len: ChunkSeq[u64],
-    x_st: ChunkSeq[Status],
+    extract_fn_at: ChunkSeq[u64],
+    extract_fn_len: ChunkSeq[u64],
+    extract_status: ChunkSeq[Status],
     // semantic: function, model key, status
-    s_at: ChunkSeq[u64],
-    s_len: ChunkSeq[u64],
-    s_key: ChunkSeq[u64],
-    s_st: ChunkSeq[Status]
+    semantic_fn_at: ChunkSeq[u64],
+    semantic_fn_len: ChunkSeq[u64],
+    semantic_key: ChunkSeq[u64],
+    semantic_status: ChunkSeq[Status]
 }
 
-fn st_at(in v: ChunkSeq[Status], i: u64) -> Status {
-    match v.try_get(i) {
-        Option::Some(s) => s,
+fn st_at(in column: ChunkSeq[Status], i: u64) -> Status {
+    match column.try_get(i) {
+        Option::Some(found) => found,
         Option::None => not_attempted(),
     }
 }
 
-fn read_status(in b: Slice[u8], inout r: Rd, inout t: Rd, code: u64) -> Status {
-    let a_len = word(in b, inout r);
-    let b_len = word(in b, inout r);
-    let a_at = take(inout t, a_len);
-    let b_at = take(inout t, b_len);
-    Status { code: code, a_at: a_at, a_len: a_len, b_at: b_at, b_len: b_len }
+fn read_status(in bytes: Slice[u8], inout reader: Rd, inout blob_cursor: Rd, code: u64) -> Status {
+    let detail_len = word(in bytes, inout reader);
+    let reason_len = word(in bytes, inout reader);
+    let detail_at = take(inout blob_cursor, detail_len);
+    let reason_at = take(inout blob_cursor, reason_len);
+    Status {
+        code: code,
+        detail_at: detail_at,
+        detail_len: detail_len,
+        reason_at: reason_at,
+        reason_len: reason_len
+    }
 }
 
 fn outcome() -> Outcome {
@@ -408,76 +435,88 @@ fn outcome() -> Outcome {
         reused: 0,
         compiled: 0,
         elapsed: 0,
-        x_at: ChunkSeq::new[u64](),
-        x_len: ChunkSeq::new[u64](),
-        x_st: ChunkSeq::new[Status](),
-        s_at: ChunkSeq::new[u64](),
-        s_len: ChunkSeq::new[u64](),
-        s_key: ChunkSeq::new[u64](),
-        s_st: ChunkSeq::new[Status]()
+        extract_fn_at: ChunkSeq::new[u64](),
+        extract_fn_len: ChunkSeq::new[u64](),
+        extract_status: ChunkSeq::new[Status](),
+        semantic_fn_at: ChunkSeq::new[u64](),
+        semantic_fn_len: ChunkSeq::new[u64](),
+        semantic_key: ChunkSeq::new[u64](),
+        semantic_status: ChunkSeq::new[Status]()
     }
 }
 
-// The next job's outcomes into `o` (its sequences reused).
-fn read_outcome(in b: Slice[u8], inout r: Rd, inout t: Rd, inout o: Outcome) {
-    o.generation = word(in b, inout r);
-    o.requested = word(in b, inout r);
-    o.req_len = word(in b, inout r);
-    let n_x = word(in b, inout r);
-    let n_s = word(in b, inout r);
-    o.reused = word(in b, inout r);
-    o.compiled = word(in b, inout r);
-    o.elapsed = word(in b, inout r);
-    o.source = take(inout t, 32);
-    o.current = take(inout t, 32);
-    o.req_at = take(inout t, o.req_len);
-    o.x_at.truncate(0);
-    o.x_len.truncate(0);
-    o.x_st.truncate(0);
-    o.s_at.truncate(0);
-    o.s_len.truncate(0);
-    o.s_key.truncate(0);
-    o.s_st.truncate(0);
-    for i in 0..n_x {
-        let len = word(in b, inout r);
-        let code = word(in b, inout r);
-        o.x_at.push(take(inout t, len));
-        o.x_len.push(len);
-        o.x_st.push(read_status(in b, inout r, inout t, code));
+// The next job's outcomes into `job` (its sequences reused).
+fn read_outcome(in bytes: Slice[u8], inout reader: Rd, inout blob_cursor: Rd, inout job: Outcome) {
+    job.generation = word(in bytes, inout reader);
+    job.requested = word(in bytes, inout reader);
+    job.req_len = word(in bytes, inout reader);
+    let extract_count = word(in bytes, inout reader);
+    let semantic_count = word(in bytes, inout reader);
+    job.reused = word(in bytes, inout reader);
+    job.compiled = word(in bytes, inout reader);
+    job.elapsed = word(in bytes, inout reader);
+    job.source = take(inout blob_cursor, 32);
+    job.current = take(inout blob_cursor, 32);
+    job.req_at = take(inout blob_cursor, job.req_len);
+    job.extract_fn_at.truncate(0);
+    job.extract_fn_len.truncate(0);
+    job.extract_status.truncate(0);
+    job.semantic_fn_at.truncate(0);
+    job.semantic_fn_len.truncate(0);
+    job.semantic_key.truncate(0);
+    job.semantic_status.truncate(0);
+    for i in 0..extract_count {
+        let len = word(in bytes, inout reader);
+        let code = word(in bytes, inout reader);
+        job.extract_fn_at.push(take(inout blob_cursor, len));
+        job.extract_fn_len.push(len);
+        job.extract_status.push(read_status(in bytes, inout reader, inout blob_cursor, code));
     }
-    for i in 0..n_s {
-        let len = word(in b, inout r);
-        let code = word(in b, inout r);
-        o.s_at.push(take(inout t, len));
-        o.s_len.push(len);
-        o.s_key.push(take(inout t, 32));
-        o.s_st.push(read_status(in b, inout r, inout t, code));
+    for i in 0..semantic_count {
+        let len = word(in bytes, inout reader);
+        let code = word(in bytes, inout reader);
+        job.semantic_fn_at.push(take(inout blob_cursor, len));
+        job.semantic_fn_len.push(len);
+        job.semantic_key.push(take(inout blob_cursor, 32));
+        job.semantic_status.push(read_status(in bytes, inout reader, inout blob_cursor, code));
     }
 }
 
 // `record_of`: every extraction outcome, and every semantic outcome except
 // a failure before the prover ran (toolchain or I/O), which says nothing
 // about the model.
-fn record_outcome(inout proofs: Ledger, inout models: Ledger, in b: Slice[u8], in o: Outcome) {
-    for i in 0..o.x_at.len() {
+fn record_outcome(
+    inout proofs: Ledger,
+    inout models: Ledger,
+    in bytes: Slice[u8],
+    in job: Outcome
+) {
+    for i in 0..job.extract_fn_at.len() {
         record(
             inout proofs,
-            in b,
-            o.source,
-            g64(in o.x_at, i),
-            g64(in o.x_len, i),
-            st_at(in o.x_st, i)
+            in bytes,
+            job.source,
+            g64(in job.extract_fn_at, i),
+            g64(in job.extract_fn_len, i),
+            st_at(in job.extract_status, i)
         );
     }
-    for i in 0..o.s_at.len() {
-        let s = st_at(in o.s_st, i);
-        if s.code == FAILED
-            && !is(in b, s.a_at, s.a_len, in "prove")
-            && !is(in b, s.a_at, s.a_len, in "kernel")
+    for i in 0..job.semantic_fn_at.len() {
+        let semantic_status = st_at(in job.semantic_status, i);
+        if semantic_status.code == FAILED
+            && !is(in bytes, semantic_status.detail_at, semantic_status.detail_len, in "prove")
+            && !is(in bytes, semantic_status.detail_at, semantic_status.detail_len, in "kernel")
         {
             continue;
         }
-        record(inout models, in b, g64(in o.s_key, i), g64(in o.s_at, i), g64(in o.s_len, i), s);
+        record(
+            inout models,
+            in bytes,
+            g64(in job.semantic_key, i),
+            g64(in job.semantic_fn_at, i),
+            g64(in job.semantic_fn_len, i),
+            semantic_status
+        );
     }
 }
 
@@ -487,36 +526,36 @@ fn record_outcome(inout proofs: Ledger, inout models: Ledger, in b: Slice[u8], i
 // `obligation`.
 fn put_result(
     inout out: ChunkSeq[u8],
-    in b: Slice[u8],
+    in bytes: Slice[u8],
     semantic: bool,
-    f_at: u64,
-    f_len: u64,
+    fn_name_at: u64,
+    fn_name_len: u64,
     hash: u64,
-    s: Status,
+    outcome_status: Status,
     kind: u8,
-    in o: Outcome
+    in job: Outcome
 ) {
     out.push(123);
-    if s.code == REFUTED {
+    if outcome_status.code == REFUTED {
         put(inout out, in "\"counterexample\":");
-        put_json(inout out, in b, s.a_at, s.a_len);
+        put_json(inout out, in bytes, outcome_status.detail_at, outcome_status.detail_len);
         out.push(44);
     }
-    if s.code == PROVED || s.code == CHECKED {
+    if outcome_status.code == PROVED || outcome_status.code == CHECKED {
         put(inout out, in "\"detail\":");
-        put_json(inout out, in b, s.a_at, s.a_len);
+        put_json(inout out, in bytes, outcome_status.detail_at, outcome_status.detail_len);
         out.push(44);
     }
     if kind == COMMAND {
         put(inout out, in "\"elapsed_ms\":");
-        put_u64(inout out, o.elapsed);
+        put_u64(inout out, job.elapsed);
         out.push(44);
     }
     put(inout out, in "\"function\":");
-    put_json(inout out, in b, f_at, f_len);
+    put_json(inout out, in bytes, fn_name_at, fn_name_len);
     if semantic && hash != NONE {
         put(inout out, in ",\"model_blake3\":");
-        put_hash(inout out, in b, hash);
+        put_hash(inout out, in bytes, hash);
     }
     if kind == BACKGROUND {
         if semantic {
@@ -527,26 +566,26 @@ fn put_result(
     }
     if kind == COMMAND {
         put(inout out, in ",\"olean_compiled\":");
-        put_u64(inout out, o.compiled);
+        put_u64(inout out, job.compiled);
         put(inout out, in ",\"olean_reused\":");
-        put_u64(inout out, o.reused);
+        put_u64(inout out, job.reused);
     }
-    if s.code == FAILED {
+    if outcome_status.code == FAILED {
         put(inout out, in ",\"reason\":");
-        put_json(inout out, in b, s.b_at, s.b_len);
+        put_json(inout out, in bytes, outcome_status.reason_at, outcome_status.reason_len);
     }
     if semantic {
         put(inout out, in ",\"scope\":\"lean_model_arith_fault_free\"");
     } else {
         put(inout out, in ",\"scope\":\"lean_extraction_axiom_free\",\"source_blake3\":");
-        put_hash(inout out, in b, hash);
+        put_hash(inout out, in bytes, hash);
     }
-    if s.code == FAILED {
+    if outcome_status.code == FAILED {
         put(inout out, in ",\"stage\":");
-        put_json(inout out, in b, s.a_at, s.a_len);
+        put_json(inout out, in bytes, outcome_status.detail_at, outcome_status.detail_len);
     }
     put(inout out, in ",\"status\":\"");
-    put(inout out, status_name(s.code));
+    put(inout out, status_name(outcome_status.code));
     out.push(34);
     if semantic {
         put(
@@ -559,51 +598,63 @@ fn put_result(
 
 // `proof_result_of`: the requested obligation's outcome (not attempted
 // when the job has none for it), or null for a job no command asked for.
-fn put_proof_result(inout out: ChunkSeq[u8], in b: Slice[u8], in o: Outcome) {
-    if o.requested == 0 {
+fn put_proof_result(inout out: ChunkSeq[u8], in bytes: Slice[u8], in job: Outcome) {
+    if job.requested == 0 {
         put(inout out, in "null");
         return;
     }
-    if o.requested == 2 {
-        for i in 0..o.s_at.len() {
-            if g64(in o.s_len, i) == o.req_len
-                && same(in b, g64(in o.s_at, i), o.req_at, o.req_len)
+    if job.requested == 2 {
+        for i in 0..job.semantic_fn_at.len() {
+            if g64(in job.semantic_fn_len, i) == job.req_len
+                && same(in bytes, g64(in job.semantic_fn_at, i), job.req_at, job.req_len)
             {
                 put_result(
                     inout out,
-                    in b,
+                    in bytes,
                     true,
-                    o.req_at,
-                    o.req_len,
-                    g64(in o.s_key, i),
-                    st_at(in o.s_st, i),
+                    job.req_at,
+                    job.req_len,
+                    g64(in job.semantic_key, i),
+                    st_at(in job.semantic_status, i),
                     COMMAND,
-                    in o
+                    in job
                 );
                 return;
             }
         }
         put_result(
             inout out,
-            in b,
+            in bytes,
             true,
-            o.req_at,
-            o.req_len,
+            job.req_at,
+            job.req_len,
             NONE,
             not_attempted(),
             COMMAND,
-            in o
+            in job
         );
         return;
     }
-    let mut s = not_attempted();
-    for i in 0..o.x_at.len() {
-        if g64(in o.x_len, i) == o.req_len && same(in b, g64(in o.x_at, i), o.req_at, o.req_len) {
-            s = st_at(in o.x_st, i);
+    let mut found_status = not_attempted();
+    for i in 0..job.extract_fn_at.len() {
+        if g64(in job.extract_fn_len, i) == job.req_len
+            && same(in bytes, g64(in job.extract_fn_at, i), job.req_at, job.req_len)
+        {
+            found_status = st_at(in job.extract_status, i);
             break;
         }
     }
-    put_result(inout out, in b, false, o.req_at, o.req_len, o.source, s, COMMAND, in o);
+    put_result(
+        inout out,
+        in bytes,
+        false,
+        job.req_at,
+        job.req_len,
+        job.source,
+        found_status,
+        COMMAND,
+        in job
+    );
 }
 
 // The proof-lens inputs every request reads.
@@ -615,69 +666,69 @@ struct Doc {
     lines: ChunkSeq[u64],
     max_work: usize,
     // functions: name, span start
-    f_at: ChunkSeq[u64],
-    f_len: ChunkSeq[u64],
-    f_start: ChunkSeq[u64],
+    fn_name_at: ChunkSeq[u64],
+    fn_name_len: ChunkSeq[u64],
+    fn_start: ChunkSeq[u64],
     // models, sorted by name: name, ok, key or reason
-    m_at: ChunkSeq[u64],
-    m_len: ChunkSeq[u64],
-    m_ok: ChunkSeq[u64],
-    m_v_at: ChunkSeq[u64],
-    m_v_len: ChunkSeq[u64]
+    model_name_at: ChunkSeq[u64],
+    model_name_len: ChunkSeq[u64],
+    model_ok: ChunkSeq[u64],
+    model_value_at: ChunkSeq[u64],
+    model_value_len: ChunkSeq[u64]
 }
 
 // `proof_status_of`: the `vesper/proofStatus` parameters of a finished background run.
-fn put_proof_status(inout out: ChunkSeq[u8], in b: Slice[u8], in d: Doc, in o: Outcome) {
+fn put_proof_status(inout out: ChunkSeq[u8], in bytes: Slice[u8], in doc: Doc, in job: Outcome) {
     put(inout out, in "{\"elapsed_ms\":");
-    put_u64(inout out, o.elapsed);
+    put_u64(inout out, job.elapsed);
     put(inout out, in ",\"generation\":");
-    put_u64(inout out, o.generation);
+    put_u64(inout out, job.generation);
     put(inout out, in ",\"olean_compiled\":");
-    put_u64(inout out, o.compiled);
+    put_u64(inout out, job.compiled);
     put(inout out, in ",\"olean_reused\":");
-    put_u64(inout out, o.reused);
+    put_u64(inout out, job.reused);
     put(inout out, in ",\"results\":[");
     let mut first = true;
-    for i in 0..o.x_at.len() {
+    for i in 0..job.extract_fn_at.len() {
         if !first {
             out.push(44);
         }
         first = false;
         put_result(
             inout out,
-            in b,
+            in bytes,
             false,
-            g64(in o.x_at, i),
-            g64(in o.x_len, i),
-            o.source,
-            st_at(in o.x_st, i),
+            g64(in job.extract_fn_at, i),
+            g64(in job.extract_fn_len, i),
+            job.source,
+            st_at(in job.extract_status, i),
             BACKGROUND,
-            in o
+            in job
         );
     }
-    for i in 0..o.s_at.len() {
+    for i in 0..job.semantic_fn_at.len() {
         if !first {
             out.push(44);
         }
         first = false;
         put_result(
             inout out,
-            in b,
+            in bytes,
             true,
-            g64(in o.s_at, i),
-            g64(in o.s_len, i),
-            g64(in o.s_key, i),
-            st_at(in o.s_st, i),
+            g64(in job.semantic_fn_at, i),
+            g64(in job.semantic_fn_len, i),
+            g64(in job.semantic_key, i),
+            st_at(in job.semantic_status, i),
             BACKGROUND,
-            in o
+            in job
         );
     }
     put(inout out, in "],\"source_blake3\":");
-    put_hash(inout out, in b, o.source);
+    put_hash(inout out, in bytes, job.source);
     put(inout out, in ",\"uri\":");
-    put_json(inout out, in b, d.uri_at, d.uri_len);
+    put_json(inout out, in bytes, doc.uri_at, doc.uri_len);
     put(inout out, in ",\"version\":");
-    put_i64(inout out, d.version);
+    put_i64(inout out, doc.version);
     out.push(125);
 }
 
@@ -689,9 +740,9 @@ fn pos_err(e: SpanError) -> Result[Position, SpanError] {
     Result::Err(e)
 }
 
-fn lens_position(in d: Doc, at: u64) -> Result[Position, SpanError] {
+fn lens_position(in doc: Doc, at: u64) -> Result[Position, SpanError] {
     handle Fail[SpanError] in {
-        pos_ok(position(in d.text, in d.lines.as_slice(), d.max_work, narrow_usize(at)))
+        pos_ok(position(in doc.text, in doc.lines.as_slice(), doc.max_work, narrow_usize(at)))
     } with {
         return v => v,
         raise(err, resume) => pos_err(err),
@@ -706,29 +757,35 @@ fn lines_err(e: SpanError) -> Result[ChunkSeq[u64], SpanError] {
     Result::Err(e)
 }
 
-pub fn lines_of(in text: Str, in l: Limits) -> Result[ChunkSeq[u64], SpanError] {
+pub fn lines_of(in text: Str, in limits: Limits) -> Result[ChunkSeq[u64], SpanError] {
     handle Fail[SpanError] in {
-        lines_ok(line_table(in text, in l, narrow_usize(16)))
+        lines_ok(line_table(in text, in limits, narrow_usize(16)))
     } with {
         return v => v,
         raise(err, resume) => lines_err(err),
     }
 }
 
-// The model of function `f_at, f_len` (binary search by name), or NONE.
-fn model_of(in d: Doc, in b: Slice[u8], f_at: u64, f_len: u64) -> u64 {
+// The model of function `fn_name_at, fn_name_len` (binary search by name), or NONE.
+fn model_of(in doc: Doc, in bytes: Slice[u8], fn_name_at: u64, fn_name_len: u64) -> u64 {
     let mut lo: u64 = 0;
-    let mut hi = d.m_at.len();
+    let mut hi = doc.model_name_at.len();
     loop {
         if lo >= hi {
             return NONE;
         }
         let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
-        let c = compare(in b, g64(in d.m_at, mid), g64(in d.m_len, mid), f_at, f_len);
-        if c == 0 {
+        let order = compare(
+            in bytes,
+            g64(in doc.model_name_at, mid),
+            g64(in doc.model_name_len, mid),
+            fn_name_at,
+            fn_name_len
+        );
+        if order == 0 {
             return mid;
         }
-        if c < 0 {
+        if order < 0 {
             lo = wrapping_add(mid, 1);
         } else {
             hi = mid;
@@ -736,54 +793,54 @@ fn model_of(in d: Doc, in b: Slice[u8], f_at: u64, f_len: u64) -> u64 {
     }
 }
 
-// Up to 80 characters of the UTF-8 text `b[at..at+len]`.
-fn put_chars(inout o: ChunkSeq[u8], in b: Slice[u8], at: u64, len: u64, max: u64) {
+// Up to 80 characters of the UTF-8 text `bytes[at..at+len]`.
+fn put_chars(inout out: ChunkSeq[u8], in bytes: Slice[u8], at: u64, len: u64, max: u64) {
     let mut chars: u64 = 0;
     for i in 0..len {
-        let x = bt(in b, wrapping_add(at, i));
-        if x & 192 != 128 {
+        let byte = bt(in bytes, wrapping_add(at, i));
+        if byte & 192 != 128 {
             if chars == max {
                 return;
             }
             chars = wrapping_add(chars, 1);
         }
-        o.push(x);
+        out.push(byte);
     }
 }
 
 fn put_lens_head(
     inout out: ChunkSeq[u8],
-    in b: Slice[u8],
-    in d: Doc,
-    f_at: u64,
-    f_len: u64,
+    in bytes: Slice[u8],
+    in doc: Doc,
+    fn_name_at: u64,
+    fn_name_len: u64,
     semantic: bool
 ) {
     put(inout out, in "{\"command\":{\"arguments\":[{\"function\":");
-    put_json(inout out, in b, f_at, f_len);
+    put_json(inout out, in bytes, fn_name_at, fn_name_len);
     if semantic {
         put(inout out, in ",\"obligation\":\"semantic\"");
     }
     put(inout out, in ",\"uri\":");
-    put_json(inout out, in b, d.uri_at, d.uri_len);
+    put_json(inout out, in bytes, doc.uri_at, doc.uri_len);
     put(inout out, in ",\"version\":");
-    put_i64(inout out, d.version);
+    put_i64(inout out, doc.version);
     put(inout out, in "}],\"command\":\"vesper.proofAudit\",\"title\":");
 }
 
-pub fn put_pos(inout o: ChunkSeq[u8], p: Position) {
-    put(inout o, in "{\"character\":");
-    put_u64(inout o, widen_u64(p.character));
-    put(inout o, in ",\"line\":");
-    put_u64(inout o, widen_u64(p.line));
-    o.push(125);
+pub fn put_pos(inout out: ChunkSeq[u8], pos: Position) {
+    put(inout out, in "{\"character\":");
+    put_u64(inout out, widen_u64(pos.character));
+    put(inout out, in ",\"line\":");
+    put_u64(inout out, widen_u64(pos.line));
+    out.push(125);
 }
 
-fn put_lens_tail(inout out: ChunkSeq[u8], p: Position) {
+fn put_lens_tail(inout out: ChunkSeq[u8], pos: Position) {
     put(inout out, in "},\"range\":{\"end\":");
-    put_pos(inout out, p);
+    put_pos(inout out, pos);
     put(inout out, in ",\"start\":");
-    put_pos(inout out, p);
+    put_pos(inout out, pos);
     put(inout out, in "}}");
 }
 
@@ -792,8 +849,8 @@ fn put_lens_tail(inout out: ChunkSeq[u8], p: Position) {
 // span the document has no position for.
 fn put_code_lenses(
     inout out: ChunkSeq[u8],
-    in b: Slice[u8],
-    in d: Doc,
+    in bytes: Slice[u8],
+    in doc: Doc,
     source: u64,
     in proofs: Ledger,
     in models: Ledger,
@@ -801,30 +858,30 @@ fn put_code_lenses(
 ) {
     let mark = out.len();
     out.push(91);
-    let n = if d.f_at.len() < MAX_LENSES {
-        d.f_at.len()
+    let lens_count = if doc.fn_name_at.len() < MAX_LENSES {
+        doc.fn_name_at.len()
     } else {
         MAX_LENSES
     };
-    for i in 0..n {
-        let f_at = g64(in d.f_at, i);
-        let f_len = g64(in d.f_len, i);
-        let s = status(in proofs, in b, source, f_at, f_len);
+    for i in 0..lens_count {
+        let fn_name_at = g64(in doc.fn_name_at, i);
+        let fn_name_len = g64(in doc.fn_name_len, i);
+        let extract_status = status(in proofs, in bytes, source, fn_name_at, fn_name_len);
         title.truncate(0);
-        if s.code == NOT_ATTEMPTED {
+        if extract_status.code == NOT_ATTEMPTED {
             put(inout title, in "Lean: not attempted (run proof audit)");
-        } else if s.code == PROVED {
+        } else if extract_status.code == PROVED {
             put(inout title, in "Lean: proved (extraction kernel-checked, no axioms)");
-        } else if s.code == FAILED {
+        } else if extract_status.code == FAILED {
             put(inout title, in "Lean: failed at ");
-            put_span(inout title, in b, s.a_at, s.a_len);
+            put_span(inout title, in bytes, extract_status.detail_at, extract_status.detail_len);
             put(inout title, in " (rerun)");
         } else {
             put(inout title, in "Lean: ");
-            put(inout title, status_name(s.code));
+            put(inout title, status_name(extract_status.code));
         }
-        let p = match lens_position(in d, g64(in d.f_start, i)) {
-            Result::Ok(p) => p,
+        let pos = match lens_position(in doc, g64(in doc.fn_start, i)) {
+            Result::Ok(pos) => pos,
             Result::Err(_) => {
                 out.truncate(mark);
                 put(
@@ -837,71 +894,71 @@ fn put_code_lenses(
         if i > 0 {
             out.push(44);
         }
-        put_lens_head(inout out, in b, in d, f_at, f_len, false);
+        put_lens_head(inout out, in bytes, in doc, fn_name_at, fn_name_len, false);
         put_json(inout out, in title.as_slice(), 0, title.len());
         put(inout out, in "},\"data\":{\"vesper\":{\"function\":");
-        put_json(inout out, in b, f_at, f_len);
+        put_json(inout out, in bytes, fn_name_at, fn_name_len);
         put(inout out, in ",\"scope\":\"lean_extraction_axiom_free\",\"status\":\"");
-        put(inout out, status_name(s.code));
+        put(inout out, status_name(extract_status.code));
         put(inout out, in "\"}");
-        put_lens_tail(inout out, p);
-        let m = model_of(in d, in b, f_at, f_len);
-        if m == NONE {
+        put_lens_tail(inout out, pos);
+        let model_row = model_of(in doc, in bytes, fn_name_at, fn_name_len);
+        if model_row == NONE {
             continue;
         }
-        let ok = g64(in d.m_ok, m) == 1;
-        let v_at = g64(in d.m_v_at, m);
-        let v_len = g64(in d.m_v_len, m);
-        let s = if ok {
-            status(in models, in b, v_at, f_at, f_len)
+        let ok = g64(in doc.model_ok, model_row) == 1;
+        let model_value_at = g64(in doc.model_value_at, model_row);
+        let model_value_len = g64(in doc.model_value_len, model_row);
+        let model_status = if ok {
+            status(in models, in bytes, model_value_at, fn_name_at, fn_name_len)
         } else {
             not_attempted()
         };
         title.truncate(0);
         if !ok {
             put(inout title, in "Lean model: unavailable (");
-            put_chars(inout title, in b, v_at, v_len, 80);
+            put_chars(inout title, in bytes, model_value_at, model_value_len, 80);
             put(inout title, in ")");
-        } else if s.code == NOT_ATTEMPTED {
+        } else if model_status.code == NOT_ATTEMPTED {
             put(inout title, in "Lean model: not attempted (check arithmetic faults)");
-        } else if s.code == PROVED {
+        } else if model_status.code == PROVED {
             put(inout title, in "Lean model: no arithmetic fault (proved, kernel-replayed)");
-        } else if s.code == CHECKED {
+        } else if model_status.code == CHECKED {
             put(inout title, in "Lean model: no counterexample (bv_decide, not kernel-replayed)");
-        } else if s.code == REFUTED {
+        } else if model_status.code == REFUTED {
             put(inout title, in "Lean model: arithmetic fault when ");
-            put_span(inout title, in b, s.a_at, s.a_len);
+            put_span(inout title, in bytes, model_status.detail_at, model_status.detail_len);
         } else {
             put(inout title, in "Lean model: failed at ");
-            put_span(inout title, in b, s.a_at, s.a_len);
+            put_span(inout title, in bytes, model_status.detail_at, model_status.detail_len);
             put(inout title, in " (rerun)");
         }
         out.push(44);
-        put_lens_head(inout out, in b, in d, f_at, f_len, true);
+        put_lens_head(inout out, in bytes, in doc, fn_name_at, fn_name_len, true);
         put_json(inout out, in title.as_slice(), 0, title.len());
         put(inout out, in "},\"data\":{\"vesper\":{");
-        if ok && s.code == REFUTED {
+        if ok && model_status.code == REFUTED {
             put(inout out, in "\"counterexample\":");
-            put_json(inout out, in b, s.a_at, s.a_len);
+            put_json(inout out, in bytes, model_status.detail_at, model_status.detail_len);
             out.push(44);
         }
         put(inout out, in "\"function\":");
-        put_json(inout out, in b, f_at, f_len);
+        put_json(inout out, in bytes, fn_name_at, fn_name_len);
         if ok {
             put(inout out, in ",\"model_blake3\":");
-            put_hash(inout out, in b, v_at);
+            put_hash(inout out, in bytes, model_value_at);
         } else {
             put(inout out, in ",\"reason\":");
-            put_json(inout out, in b, v_at, v_len);
+            put_json(inout out, in bytes, model_value_at, model_value_len);
         }
         put(inout out, in ",\"scope\":\"lean_model_arith_fault_free\",\"status\":\"");
         if ok {
-            put(inout out, status_name(s.code));
+            put(inout out, status_name(model_status.code));
         } else {
             put(inout out, in "unavailable");
         }
         put(inout out, in "\"}");
-        put_lens_tail(inout out, p);
+        put_lens_tail(inout out, pos);
     }
     out.push(93);
 }
@@ -912,36 +969,36 @@ fn put_code_lenses(
 // tests/self_host_lsp_features.rs); then the bytes they name, in order.
 // The answers (`proof_lenses_for_port`) are built `rounds` times.
 pub fn proof_lenses(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Rd { pos: 0 };
-    let words = word(in b, inout r);
-    let mut t = Rd { pos: wrapping_mul(words, 8) };
-    let l = Limits {
-        max_source_bytes: narrow_usize(word(in b, inout r)),
-        max_lines: narrow_usize(word(in b, inout r)),
-        max_metadata_bytes: narrow_usize(word(in b, inout r)),
-        max_work: narrow_usize(word(in b, inout r)),
-        max_edits: narrow_usize(word(in b, inout r)),
-        max_output_bytes: narrow_usize(word(in b, inout r)),
-        max_diagnostics: narrow_usize(word(in b, inout r)),
-        max_labels: narrow_usize(word(in b, inout r)),
-        max_fixes: narrow_usize(word(in b, inout r)),
-        max_text_bytes: narrow_usize(word(in b, inout r))
+    let bytes = input.as_bytes();
+    let mut reader = Rd { pos: 0 };
+    let words = word(in bytes, inout reader);
+    let mut blob_cursor = Rd { pos: wrapping_mul(words, 8) };
+    let limits = Limits {
+        max_source_bytes: narrow_usize(word(in bytes, inout reader)),
+        max_lines: narrow_usize(word(in bytes, inout reader)),
+        max_metadata_bytes: narrow_usize(word(in bytes, inout reader)),
+        max_work: narrow_usize(word(in bytes, inout reader)),
+        max_edits: narrow_usize(word(in bytes, inout reader)),
+        max_output_bytes: narrow_usize(word(in bytes, inout reader)),
+        max_diagnostics: narrow_usize(word(in bytes, inout reader)),
+        max_labels: narrow_usize(word(in bytes, inout reader)),
+        max_fixes: narrow_usize(word(in bytes, inout reader)),
+        max_text_bytes: narrow_usize(word(in bytes, inout reader))
     };
-    let uri_len = word(in b, inout r);
-    let doc_len = word(in b, inout r);
-    let version = wrapping_i64(word(in b, inout r));
-    let cap_proofs = word(in b, inout r);
-    let cap_models = word(in b, inout r);
-    let rounds = word(in b, inout r);
-    let uri_at = take(inout t, uri_len);
-    let doc_at = take(inout t, doc_len);
-    let text = match String::from_utf8(in b[doc_at..wrapping_add(doc_at, doc_len)]) {
-        Option::Some(s) => s,
+    let uri_len = word(in bytes, inout reader);
+    let doc_len = word(in bytes, inout reader);
+    let version = wrapping_i64(word(in bytes, inout reader));
+    let cap_proofs = word(in bytes, inout reader);
+    let cap_models = word(in bytes, inout reader);
+    let rounds = word(in bytes, inout reader);
+    let uri_at = take(inout blob_cursor, uri_len);
+    let doc_at = take(inout blob_cursor, doc_len);
+    let text = match String::from_utf8(in bytes[doc_at..wrapping_add(doc_at, doc_len)]) {
+        Option::Some(decoded) => decoded,
         Option::None => String::new(),
     };
     let mut out = ChunkSeq::new[u8]();
-    let lines = match lines_of(in text, in l) {
+    let lines = match lines_of(in text, in limits) {
         Result::Ok(x) => x,
         Result::Err(e) => {
             put(inout out, in "E\t");
@@ -950,69 +1007,77 @@ pub fn proof_lenses(in input: Str) -> ChunkSeq[u64] {
             return pack(in out.as_slice());
         }
     };
-    let mut d = Doc {
+    let mut doc = Doc {
         uri_at: uri_at,
         uri_len: uri_len,
         version: version,
         text: text,
         lines: lines,
-        max_work: l.max_work,
-        f_at: ChunkSeq::new[u64](),
-        f_len: ChunkSeq::new[u64](),
-        f_start: ChunkSeq::new[u64](),
-        m_at: ChunkSeq::new[u64](),
-        m_len: ChunkSeq::new[u64](),
-        m_ok: ChunkSeq::new[u64](),
-        m_v_at: ChunkSeq::new[u64](),
-        m_v_len: ChunkSeq::new[u64]()
+        max_work: limits.max_work,
+        fn_name_at: ChunkSeq::new[u64](),
+        fn_name_len: ChunkSeq::new[u64](),
+        fn_start: ChunkSeq::new[u64](),
+        model_name_at: ChunkSeq::new[u64](),
+        model_name_len: ChunkSeq::new[u64](),
+        model_ok: ChunkSeq::new[u64](),
+        model_value_at: ChunkSeq::new[u64](),
+        model_value_len: ChunkSeq::new[u64]()
     };
-    let n_f = word(in b, inout r);
-    for i in 0..n_f {
-        let len = word(in b, inout r);
-        d.f_start.push(word(in b, inout r));
-        d.f_len.push(len);
-        d.f_at.push(take(inout t, len));
+    let fn_count = word(in bytes, inout reader);
+    for i in 0..fn_count {
+        let len = word(in bytes, inout reader);
+        doc.fn_start.push(word(in bytes, inout reader));
+        doc.fn_name_len.push(len);
+        doc.fn_name_at.push(take(inout blob_cursor, len));
     }
-    let n_m = word(in b, inout r);
-    for i in 0..n_m {
-        let len = word(in b, inout r);
-        let ok = word(in b, inout r);
-        let reason = word(in b, inout r);
-        d.m_len.push(len);
-        d.m_at.push(take(inout t, len));
-        d.m_ok.push(ok);
-        let v_len = if ok == 1 { 32 } else { reason };
-        d.m_v_len.push(v_len);
-        d.m_v_at.push(take(inout t, v_len));
+    let model_count = word(in bytes, inout reader);
+    for i in 0..model_count {
+        let len = word(in bytes, inout reader);
+        let ok = word(in bytes, inout reader);
+        let reason = word(in bytes, inout reader);
+        doc.model_name_len.push(len);
+        doc.model_name_at.push(take(inout blob_cursor, len));
+        doc.model_ok.push(ok);
+        let model_value_len = if ok == 1 { 32 } else { reason };
+        doc.model_value_len.push(model_value_len);
+        doc.model_value_at.push(take(inout blob_cursor, model_value_len));
     }
-    let n_ops = word(in b, inout r);
-    let ops_r = r;
-    let ops_t = t;
+    let op_count = word(in bytes, inout reader);
+    let ops_reader = reader;
+    let ops_blob_cursor = blob_cursor;
     let mut proofs = ledger(cap_proofs);
     let mut models = ledger(cap_models);
-    let mut o = outcome();
+    let mut job = outcome();
     let mut title = ChunkSeq::new[u8]();
     for round in 0..rounds {
         out.truncate(0);
-        r = ops_r;
-        t = ops_t;
+        reader = ops_reader;
+        blob_cursor = ops_blob_cursor;
         clear(inout proofs, cap_proofs);
         clear(inout models, cap_models);
-        for k in 0..n_ops {
-            let kind = word(in b, inout r);
-            read_outcome(in b, inout r, inout t, inout o);
+        for op_index in 0..op_count {
+            let kind = word(in bytes, inout reader);
+            read_outcome(in bytes, inout reader, inout blob_cursor, inout job);
             if kind == 76 {
                 put(inout out, in "L\t");
-                put_code_lenses(inout out, in b, in d, o.source, in proofs, in models, inout title);
+                put_code_lenses(
+                    inout out,
+                    in bytes,
+                    in doc,
+                    job.source,
+                    in proofs,
+                    in models,
+                    inout title
+                );
             } else if kind == 80 {
-                record_outcome(inout proofs, inout models, in b, in o);
+                record_outcome(inout proofs, inout models, in bytes, in job);
                 put(inout out, in "P\t");
-                put_proof_result(inout out, in b, in o);
+                put_proof_result(inout out, in bytes, in job);
             } else {
-                record_outcome(inout proofs, inout models, in b, in o);
+                record_outcome(inout proofs, inout models, in bytes, in job);
                 put(inout out, in "B\t");
-                if same(in b, o.source, o.current, 32) {
-                    put_proof_status(inout out, in b, in d, in o);
+                if same(in bytes, job.source, job.current, 32) {
+                    put_proof_status(inout out, in bytes, in doc, in job);
                 } else {
                     out.push(45);
                 }

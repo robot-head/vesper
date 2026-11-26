@@ -585,7 +585,6 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
             lp_new_file_name: *const u16,
             b_fail_if_exists: i32,
         ) -> i32;
-        fn GetModuleFileNameW(h_module: *mut c_void, lp_filename: *mut u16, n_size: u32) -> u32;
         fn GetSystemDirectoryW(lp_buffer: *mut u16, u_size: u32) -> u32;
         fn GetWindowsDirectoryW(lp_buffer: *mut u16, u_size: u32) -> u32;
         fn GetModuleHandleW(lp_module_name: *const u16) -> *mut c_void;
@@ -683,7 +682,6 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("GetFileAttributesW", GetFileAttributesW as *const u8),
         ("SetFileAttributesW", SetFileAttributesW as *const u8),
         ("CopyFileW", CopyFileW as *const u8),
-        ("GetModuleFileNameW", GetModuleFileNameW as *const u8),
         ("GetSystemDirectoryW", GetSystemDirectoryW as *const u8),
         ("GetWindowsDirectoryW", GetWindowsDirectoryW as *const u8),
     ]

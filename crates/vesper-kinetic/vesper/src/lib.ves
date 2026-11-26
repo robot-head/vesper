@@ -5,6 +5,7 @@
 //
 // The export ABI has no f32, so an f32 crosses the boundary as its bit
 // pattern (a `u32`), as in @vesper/tensor.
+use self::couple::substep as cp_substep;
 use self::diff::{detect_contacts as d_detect_contacts, tape_backward as d_tape_backward};
 use self::manifold::pair_manifold as m_pair_manifold;
 use self::sleep::{update_sleep_pass as s_update_sleep_pass, wake_island_pass as s_wake_island_pass};
@@ -741,5 +742,45 @@ pub fn soft_substeps(
         in layer_off,
         in layer_idx,
         in params
+    )
+}
+
+pub fn couple_substep(
+    inout pos: Slice[f32],
+    inout prev: Slice[f32],
+    in p_inv_mass: Slice[f32],
+    nb: u64,
+    inout bodies: Slice[f32],
+    in shape_meta: Slice[u64],
+    in shape_rad: Slice[f64],
+    in local_pts: Slice[f64],
+    radius: f32,
+    mu: f32,
+    h: f32,
+    dt: f32,
+    inout acc: Slice[f32],
+    inout probe_buf: Slice[f64],
+    inout body_verts: Slice[f64],
+    inout gjk_out: Slice[f64],
+    inout out_meta: Slice[u64]
+) {
+    cp_substep(
+        inout pos,
+        inout prev,
+        in p_inv_mass,
+        nb,
+        inout bodies,
+        in shape_meta,
+        in shape_rad,
+        in local_pts,
+        radius,
+        mu,
+        h,
+        dt,
+        inout acc,
+        inout probe_buf,
+        inout body_verts,
+        inout gjk_out,
+        inout out_meta
     )
 }

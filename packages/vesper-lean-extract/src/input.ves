@@ -11,16 +11,16 @@ pub copy struct Effect {
     // generic names: gens[ga..ga+gn]
     ga: u32,
     gn: u32,
-    // operations: ops[oa..oa+on]
-    oa: u32,
-    on: u32,
+    // operations: ops[op_start..op_start+op_count]
+    op_start: u32,
+    op_count: u32,
 }
 
 pub copy struct Op {
     name: u32,
-    // parameters: params[pa..pa+pn]
-    pa: u32,
-    pn: u32,
+    // parameters: params[param_start..param_start+param_count]
+    param_start: u32,
+    param_count: u32,
     result: u32,
 }
 
@@ -40,37 +40,37 @@ impl Effects {
     pub fn effect_at(in self, i: u64) -> Effect {
         match self.effects.try_get(i) {
             Option::Some(e) => e,
-            Option::None => Effect { name: 0, ga: 0, gn: 0, oa: 0, on: 0 },
+            Option::None => Effect { name: 0, ga: 0, gn: 0, op_start: 0, op_count: 0 },
         }
     }
 
-    pub fn generic(in self, e: Effect, i: u64) -> u32 {
-        u32_at(in self.gens, wrapping_add(widen_u64(e.ga), i))
+    pub fn generic(in self, decl: Effect, i: u64) -> u32 {
+        u32_at(in self.gens, wrapping_add(widen_u64(decl.ga), i))
     }
 
-    pub fn op(in self, e: Effect, i: u64) -> Op {
-        match self.ops.try_get(wrapping_add(widen_u64(e.oa), i)) {
+    pub fn op(in self, decl: Effect, i: u64) -> Op {
+        match self.ops.try_get(wrapping_add(widen_u64(decl.op_start), i)) {
             Option::Some(o) => o,
-            Option::None => Op { name: 0, pa: 0, pn: 0, result: 0 },
+            Option::None => Op { name: 0, param_start: 0, param_count: 0, result: 0 },
         }
     }
 
-    pub fn param(in self, o: Op, i: u64) -> Param {
-        match self.params.try_get(wrapping_add(widen_u64(o.pa), i)) {
+    pub fn param(in self, op: Op, i: u64) -> Param {
+        match self.params.try_get(wrapping_add(widen_u64(op.param_start), i)) {
             Option::Some(p) => p,
             Option::None => Param { pass: 0, ty: 0 },
         }
     }
 }
 
-fn sym(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32]) -> u32 {
-    let x = r.word(in b);
-    u32_at(in nmap, x)
+fn sym(inout reader: Reader, in bytes: Slice[u8], in nmap: ChunkSeq[u32]) -> u32 {
+    let index = reader.word(in bytes);
+    u32_at(in nmap, index)
 }
 
 pub fn read_effects(
-    inout r: Reader,
-    in b: Slice[u8],
+    inout reader: Reader,
+    in bytes: Slice[u8],
     in nmap: ChunkSeq[u32],
     in tmap: ChunkSeq[u32]
 ) -> Effects {
@@ -80,30 +80,41 @@ pub fn read_effects(
         ops: ChunkSeq::new[Op](),
         params: ChunkSeq::new[Param](),
     };
-    let n = r.word(in b);
-    for i in 0..n {
-        let name = sym(inout r, in b, in nmap);
-        let ga = n32(out.gens.len());
-        let gn = r.word(in b);
-        for j in 0..gn {
-            let g = sym(inout r, in b, in nmap);
-            out.gens.push(g);
+    let effect_count = reader.word(in bytes);
+    for i in 0..effect_count {
+        let name = sym(inout reader, in bytes, in nmap);
+        let generic_start = n32(out.gens.len());
+        let generic_count = reader.word(in bytes);
+        for j in 0..generic_count {
+            let generic = sym(inout reader, in bytes, in nmap);
+            out.gens.push(generic);
         }
-        let oa = n32(out.ops.len());
-        let on = r.word(in b);
-        for j in 0..on {
-            let op = sym(inout r, in b, in nmap);
-            let pa = n32(out.params.len());
-            let pn = r.word(in b);
-            for k in 0..pn {
-                let pass = wrapping_u8(r.word(in b));
-                let ty = u32_at(in tmap, r.word(in b));
+        let op_start = n32(out.ops.len());
+        let op_count = reader.word(in bytes);
+        for j in 0..op_count {
+            let op_name = sym(inout reader, in bytes, in nmap);
+            let param_start = n32(out.params.len());
+            let param_count = reader.word(in bytes);
+            for k in 0..param_count {
+                let pass = wrapping_u8(reader.word(in bytes));
+                let ty = u32_at(in tmap, reader.word(in bytes));
                 out.params.push(Param { pass: pass, ty: ty });
             }
-            let result = u32_at(in tmap, r.word(in b));
-            out.ops.push(Op { name: op, pa: pa, pn: n32(pn), result: result });
+            let result = u32_at(in tmap, reader.word(in bytes));
+            out.ops.push(Op {
+                name: op_name,
+                param_start: param_start,
+                param_count: n32(param_count),
+                result: result
+            });
         }
-        out.effects.push(Effect { name: name, ga: ga, gn: n32(gn), oa: oa, on: n32(on) });
+        out.effects.push(Effect {
+            name: name,
+            ga: generic_start,
+            gn: n32(generic_count),
+            op_start: op_start,
+            op_count: n32(op_count)
+        });
     }
     out
 }

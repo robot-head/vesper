@@ -27,9 +27,10 @@
 
 use self::machine::{Lowered, lowered_new};
 use self::lower::{
-    E_LIMIT, lower_rows, put_lowered, U_GENERIC, VErr, ap, apn, err, put_error, tx, unsup
+    E_LIMIT, E_NONE, lower_rows, put_lowered, U_GENERIC, VErr, ap, apn, err, put_error, tx, unsup
 };
-use self::evidence::{evidence, sites_new};
+use self::cover::{Rf, cover_listing, rf_new, rf_push};
+use self::evidence::{evidence, evidence_from, sites_new};
 use self::exprs::{Ex, X_HANDLE, nested_name, read_exprs};
 use @vesper/check-data::pack_text;
 use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, u8_at, w};
@@ -779,6 +780,19 @@ fn instantiate(inout m: Mo, f: FnRow, name: u32, in vars: Vars) eff [Fail[VErr]]
 fn mono_all(inout m: Mo) eff [Fail[VErr]] {
     let entry = m.entry;
     enqueue(inout m, entry, in vars_new());
+    mono_queue(inout m);
+}
+
+// Monomorphization from every symbol of `roots` (instances reached from
+// several are the same copy).
+pub fn mono_roots(inout m: Mo, in roots: ChunkSeq[u32]) eff [Fail[VErr]] {
+    for i in 0..roots.len() {
+        enqueue(inout m, u32_at(in roots, i), in vars_new());
+    }
+    mono_queue(inout m);
+}
+
+fn mono_queue(inout m: Mo) eff [Fail[VErr]] {
     let mut head: u64 = 0;
     loop {
         if head >= m.qb.len() {
@@ -826,13 +840,13 @@ pub fn mono_input(in b: Slice[u8]) -> ChunkSeq[u64] {
     let mut m = decode(c, p, ex, inout r, in b);
     let e = handle Fail[VErr] in {
         mono_all(inout m);
-        err(255, ChunkSeq::new[u8]())
+        err(E_NONE, ChunkSeq::new[u8]())
     } with {
         return v => v,
         raise(e, k) => e,
     };
     let mut o = ChunkSeq::new[u64]();
-    if e.kind != 255 {
+    if e.kind != E_NONE {
         let mut t = tx("error: ");
         put_error(in m.c.names, in e, inout t);
         ap(inout t, "\n");
@@ -933,12 +947,12 @@ pub fn front_rows(in b: Slice[u8], inout lo: Lowered) -> ChunkSeq[u8] {
     let mut m = decode(c, p, ex, inout r, in b);
     let e = handle Fail[VErr] in {
         mono_all(inout m);
-        err(255, ChunkSeq::new[u8]())
+        err(E_NONE, ChunkSeq::new[u8]())
     } with {
         return v => v,
         raise(e, k) => e,
     };
-    if e.kind != 255 {
+    if e.kind != E_NONE {
         let mut t = tx("error: ");
         put_error(in m.c.names, in e, inout t);
         ap(inout t, "\n");
@@ -960,12 +974,12 @@ pub fn front_rows(in b: Slice[u8], inout lo: Lowered) -> ChunkSeq[u8] {
     let mut sites = sites_new();
     let e2 = handle Fail[VErr] in {
         sites = evidence(inout m.c, inout m.p, in m.ex, entry0, active);
-        err(255, ChunkSeq::new[u8]())
+        err(E_NONE, ChunkSeq::new[u8]())
     } with {
         return v => v,
         raise(e, k) => e,
     };
-    if e2.kind != 255 {
+    if e2.kind != E_NONE {
         let mut t = tx("error: ");
         put_error(in m.c.names, in e2, inout t);
         ap(inout t, "\n");
@@ -1001,4 +1015,169 @@ pub fn front_rows(in b: Slice[u8], inout lo: Lowered) -> ChunkSeq[u8] {
         qv,
     } = m;
     lower_rows(c, p, ex, sites, inout r, in b, inout lo)
+}
+
+// ----- coverage --------------------------------------------------------------------
+
+const NONE64: u64 = 18446744073709551615;
+
+// The input read up to the coverage section: the monomorphization state
+// and the reader after the mono extras.
+fn mo_at(in b: Slice[u8]) -> (Mo, Reader) {
+    let mut r = Reader { pos: 0 };
+    let c = read_ctx(inout r, in b);
+    let p = read_program(inout r, in b, in c);
+    let ex = read_exprs(inout r, in b, in c);
+    let m = decode(c, p, ex, inout r, in b);
+    (m, r)
+}
+
+fn error_text(in m: Mo, in e: VErr) -> ChunkSeq[u8] {
+    let mut t = tx("error: ");
+    put_error(in m.c.names, in e, inout t);
+    ap(inout t, "\n");
+    t
+}
+
+// The instances of `roots`, sorted, or the error.
+fn mono_from(in b: Slice[u8], in roots: ChunkSeq[u32], inout m: Mo) -> VErr {
+    let (m2, r2) = mo_at(in b);
+    m = m2;
+    let e = handle Fail[VErr] in {
+        mono_roots(inout m, in roots);
+        err(E_NONE, ChunkSeq::new[u8]())
+    } with {
+        return v => v,
+        raise(e, k) => e,
+    };
+    if e.kind == E_NONE {
+        sort_fns(in m.c.names, inout m.p.fns);
+    }
+    e
+}
+
+// `verified_codegen::coverage` (src/verified_codegen/coverage.rs): the
+// input is `front_input`'s with a coverage section between the mono
+// extras and the lowering's: the roots, each a name, a class (0 plannable,
+// 1 generic, 2 effect-polymorphic) and its effects' text (a name). The
+// listing (`Coverage::listing`), or `error: `, the error and a newline.
+pub fn coverage_input(in b: Slice[u8]) -> ChunkSeq[u8] {
+    let (m0, r0) = mo_at(in b);
+    let mut m = m0;
+    let mut r = r0;
+    let mut roots = ChunkSeq::new[u32]();
+    let mut poly = ChunkSeq::new[u32]();
+    let mut poly_text = ChunkSeq::new[u32]();
+    let n = r.word(in b);
+    for i in 0..n {
+        let s = sym(inout r, in b, in m.c);
+        let class = r.word(in b);
+        let t = sym(inout r, in b, in m.c);
+        if class == 0 {
+            roots.push(s);
+        } else if class == 2 {
+            poly.push(s);
+            poly_text.push(t);
+        }
+    }
+    let lpos = r.pos;
+    // whether the region prelude is active: the lowering extras' fourth
+    // word, after the entry string and the two limits
+    let len = r.word(in b);
+    for i in 0..wrapping_add(len, 7) / 8 {
+        let x = r.word(in b);
+    }
+    let x1 = r.word(in b);
+    let x2 = r.word(in b);
+    let active = r.word(in b) != 0;
+    // Monomorphization from every plannable root; a root whose own
+    // monomorphization fails is refused and is no entry.
+    let mut rf = rf_new();
+    let mut entries = ChunkSeq::new[u32]();
+    let e = mono_from(in b, in roots, inout m);
+    if e.kind == E_NONE {
+        entries.extend(in roots.as_slice());
+    } else {
+        for i in 0..roots.len() {
+            let root = u32_at(in roots, i);
+            let mut one = ChunkSeq::new[u32]();
+            one.push(root);
+            let e1 = mono_from(in b, in one, inout m);
+            if e1.kind == E_NONE {
+                entries.push(root);
+            } else {
+                rf_push(inout rf, root, in e1);
+            }
+        }
+        let e2 = mono_from(in b, in entries, inout m);
+        if e2.kind != E_NONE {
+            return error_text(in m, in e2);
+        }
+    }
+    // Evidence passing; a handler site that cannot be rewritten is
+    // refused under its function, and the pass runs again without it.
+    let mut hrf = rf_new();
+    let mut skip = ChunkSeq::new[u64]();
+    let mut sites = sites_new();
+    loop {
+        let mut at = NONE64;
+        let e3 = handle Fail[VErr] in {
+            sites = evidence_from(
+                inout m.c,
+                inout m.p,
+                in m.ex,
+                in entries,
+                active,
+                in skip,
+                inout at
+            );
+            err(E_NONE, ChunkSeq::new[u8]())
+        } with {
+            return v => v,
+            raise(e, k) => e,
+        };
+        if e3.kind == E_NONE {
+            break;
+        }
+        if at == NONE64 {
+            return error_text(in m, in e3);
+        }
+        rf_push(inout hrf, wrapping_u32(at >> 32), in e3);
+        skip.push(at & 4294967295);
+        let e4 = mono_from(in b, in entries, inout m);
+        if e4.kind != E_NONE {
+            return error_text(in m, in e4);
+        }
+    }
+    sort_fns(in m.c.names, inout m.p.fns);
+    let Mo {
+        c,
+        ex,
+        p,
+        src,
+        sy,
+        by_fn,
+        wf,
+        ga,
+        gn,
+        gname,
+        grow,
+        cs,
+        ce,
+        ca,
+        cn,
+        ck,
+        cv,
+        entry,
+        max,
+        seen,
+        nseen,
+        qb,
+        qa,
+        qn,
+        qk,
+        qv,
+    } = m;
+    r.pos = lpos;
+    cover_listing(c, p, ex, sites, inout r, in b, in entries, rf, in hrf, in poly, in poly_text)
 }

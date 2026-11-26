@@ -5,15 +5,9 @@
 use @vesper/check-data::util::{add, inc, n32, u32_at, w};
 use @vesper/check-data::input::{Ctx};
 use self::keys::{pair};
-use self::prog::{Prog};
-use self::walker::{Walk, caps_of, expr, is_declassify_gate, secret_type, start};
+use self::prog::{NONE32, Prog};
+use self::walker::{CD, CT, DF, RT, Walk, caps_of, expr, is_declassify_gate, secret_type, start};
 use self::check::{cmp_names, push_u32_le, summarise};
-
-const NONE32: u32 = 4294967295;
-const CT: u8 = 1;
-const RT: u8 = 2;
-const DF: u8 = 4;
-const CD: u8 = 8;
 
 copy struct RtFunRow {
     name: u32,

@@ -61,10 +61,8 @@ use @vesper/driver::triple::{is_windows as triple_is_windows};
 use self::assemble::{assembled_words};
 // The package graph read of the package load (#1986 slice 2).
 use self::load::{read_graph};
-// `vesper proof-audit` (SH5 lane 18, #1341; moved here from its own
-// module by #2091).
-use @vesper/proof-audit::{run as proof_audit_command};
-use @vesper/proof-audit::strs::{byte as audit_byte, push as audit_push, strs_new as audit_strs_new};
+// The checked world's declarations from the Vesper collector (#2024).
+use @vesper/check-collect::{decls_bytes};
 // hd_step group 2 (#1893): the front-end passes in Vesper.
 use self::front::{parse_clean, cst_text};
 use self::interface::{interface_json};
@@ -155,6 +153,10 @@ fn step_world_decls() -> u32 {
     80
 }
 
+fn step_world_begin() -> u32 {
+    81
+}
+
 fn step_native_object() -> u32 {
     18
 }
@@ -237,10 +239,12 @@ fn print(stream: u32, in text: Slice[u8]) eff [Ffi[HybridDriver]] {
 
 // `vesper: <message>` on stderr; exit code 1.
 fn error(in message: Slice[u8]) -> i64 eff [Ffi[HybridDriver]] {
-    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    line.extend(in "vesper: ".as_bytes());
-    line.extend(in message);
-    line.push(10);
+    let line = fmt{
+        new;
+        write_str(in "vesper: "),
+        write_bytes(in message),
+        write_str(in "\n")
+    };
     print(stderr_stream(), in line.as_slice());
     1
 }
@@ -290,10 +294,12 @@ fn is_failure(r: i64) -> bool {
 
 // `<n> <what>` as an error.
 fn count_error(n: i64, in what: Str) -> i64 eff [Ffi[HybridDriver]] {
-    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    write_u64(inout m, wrapping_u64(n));
-    m.push(32);
-    m.extend(in what.as_bytes());
+    let m = fmt{
+        new;
+        write_u64(wrapping_u64(n)),
+        write_str(in " "),
+        write_str(in what)
+    };
     error(in m.as_slice())
 }
 
@@ -311,7 +317,14 @@ fn value(in o: Options, k: u64) -> ChunkSeq[u8] {
 // the ones it answers (`VESPER_HYBRID_STATS=1`).
 fn commands(
     in args: Args
-) -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver], Ffi[HybridCommands]] {
+) -> i64 eff [
+    Ffi[StdFs],
+    Ffi[StdProcess],
+    Ffi[StdEnv],
+    Ffi[Blake3],
+    Ffi[HybridDriver],
+    Ffi[HybridCommands]
+] {
     let code = run_command(in args);
     if code != delegate() {
         HybridDriver::hd_commands_answered();
@@ -322,7 +335,14 @@ fn commands(
 // The hybrid's `main` for the compile commands: the process exit code, or
 // `delegate()`.
 pub fn main_code()
-    -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver], Ffi[HybridCommands]] {
+    -> i64 eff [
+        Ffi[StdFs],
+        Ffi[StdProcess],
+        Ffi[StdEnv],
+        Ffi[Blake3],
+        Ffi[HybridDriver],
+        Ffi[HybridCommands]
+    ] {
     let args = match read_args() {
         Option::Some(a) => a,
         Option::None => return delegate(),
@@ -475,6 +495,9 @@ fn drive(
             Option::None => (),
         }
     }
+    // The session's module is the parse of `source` itself, so the Vesper
+    // collector can give its checked world's declarations.
+    let held = r != declined();
     if r == declined() {
         r = step(inout s, step_parse());
     }
@@ -518,11 +541,13 @@ fn drive(
         if o.json {
             print(stdout_stream(), in "[]\n".as_bytes());
         } else {
-            let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-            line.extend(in "checked ".as_bytes());
             let input = value(in o, slot_input());
-            line.extend(in input.as_slice());
-            line.push(10);
+            let line = fmt{
+                new;
+                write_str(in "checked "),
+                write_bytes(in input.as_slice()),
+                write_str(in "\n")
+            };
             print(stdout_stream(), in line.as_slice());
         }
         return 0;
@@ -535,7 +560,7 @@ fn drive(
             return pass_failed(in s, r);
         }
         let package = text(in s);
-        let r = step(inout s, step_world_decls());
+        let r = world_decls(inout s, in source.as_slice(), held);
         if is_failure(r) {
             return pass_failed(in s, r);
         }
@@ -551,13 +576,13 @@ fn drive(
         }
     }
     if c == cmd_run() {
-        return run(inout s, in o);
+        return run(inout s, in o, in source.as_slice(), held);
     }
     if c == cmd_jit() {
         return pass(inout s, step_jit());
     }
     if c == cmd_build() {
-        return build(inout s, in o);
+        return build(inout s, in o, in source.as_slice(), held);
     }
     emit(inout s, in o)
 }
@@ -566,6 +591,24 @@ fn drive(
 // pass to run.
 fn declined() -> i64 {
     -3
+}
+
+// `WorldDecls`: with the world swap on and a standalone source the driver
+// parsed itself (`held`), the Vesper collector's declarations of its
+// checked world (@vesper/check-collect, which declines a module the
+// checker elaborates first); else the session's encoding. The AST
+// optimizer keeps the declarations, so its re-check changes none.
+fn world_decls(inout s: Session, in source: Slice[u8], held: bool) -> i64 eff [Ffi[HybridDriver]] {
+    if held && step(inout s, step_world_begin()) == 1 {
+        match String::from_utf8(in source) {
+            Option::Some(t) => match decls_bytes(in t.as_str()) {
+                Option::Some(d) => return step_with(inout s, step_world_decls(), in d.as_slice()),
+                Option::None => (),
+            },
+            Option::None => (),
+        }
+    }
+    step(inout s, step_world_decls())
 }
 
 // `crate::write` of `cli()`: the command's output to `-o`'s path, or to
@@ -616,7 +659,9 @@ fn pass_with(inout s: Session, which: u32, in a: Slice[u8]) -> i64 eff [Ffi[Hybr
 
 fn build(
     inout s: Session,
-    in o: Options
+    in o: Options,
+    in source: Slice[u8],
+    held: bool
 ) -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver], Ffi[HybridCommands]] {
     // Wave-eight lane 2: the direct verified code generator (§42).
     if has(in o, slot_codegen()) {
@@ -639,7 +684,7 @@ fn build(
         return error(in "build currently requires entry 'main'".as_bytes());
     }
     // An executable's `main`, over the world the driver holds.
-    let r = step(inout s, step_world_decls());
+    let r = world_decls(inout s, in source, held);
     if is_failure(r) {
         return pass_failed(in s, r);
     }
@@ -684,10 +729,12 @@ fn build(
     if r != 0 {
         return r;
     }
-    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    line.extend(in "built ".as_bytes());
-    line.extend(in built.as_slice());
-    line.push(10);
+    let line = fmt{
+        new;
+        write_str(in "built "),
+        write_bytes(in built.as_slice()),
+        write_str(in "\n")
+    };
     print(stdout_stream(), in line.as_slice());
     if o.tee {
         return measure_tee(in built.as_slice());
@@ -763,9 +810,8 @@ fn wasm_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[Hybri
     if failed != 0 {
         return pass(inout s, step_wasm_build());
     }
-    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    fmt{
-        inout line;
+    let line = fmt{
+        new;
         write_str(in "built "),
         write_bytes(in path.as_slice()),
         write_str(in " (wasm32-wasip2 component)\n")
@@ -817,18 +863,23 @@ fn starts_with(in text: Slice[u8], in prefix: Slice[u8]) -> bool {
     true
 }
 
+// Length of the `error: ` prefix in front of a code generator error summary.
+const ERROR_PREFIX_LEN: u64 = 7;
+// The newline byte that ends a summary line.
+const NEWLINE: u8 = 10;
+
 // Whether the code generator's summary is an `error: <display>` line whose
 // display Rust's `VerifiedError::from_display` reads back to the same text.
 fn verified_error_text(in summary: Slice[u8]) -> bool {
     let n = summary.len();
-    if n < 8 {
+    if n <= ERROR_PREFIX_LEN {
         return false;
     }
     let last = match summary.try_get(wrapping_sub(n, 1)) {
         Option::Some(c) => c,
         Option::None => 0,
     };
-    if last != 10 {
+    if last != NEWLINE {
         return false;
     }
     for i in 0..wrapping_sub(n, 1) {
@@ -836,7 +887,7 @@ fn verified_error_text(in summary: Slice[u8]) -> bool {
             Option::Some(c) => c,
             Option::None => 0,
         };
-        if c == 10 {
+        if c == NEWLINE {
             return false;
         }
     }
@@ -875,7 +926,8 @@ fn verified_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[H
     // one `VerifiedError::from_display` reads back exactly).
     if verified_error_text(in summary.as_slice()) {
         let line = summary.as_slice();
-        return error(in line[7..wrapping_sub(line.len(), 1)]);
+        let start = ERROR_PREFIX_LEN;
+        return error(in line[start..wrapping_sub(line.len(), 1)]);
     }
     let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let rest = unpack(in words, at, inout bytes);
@@ -902,9 +954,9 @@ fn verified_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[H
     for i in prefix.len()..summary.len() {
         let c = match summary.try_get(i) {
             Option::Some(c) => c,
-            Option::None => 10,
+            Option::None => NEWLINE,
         };
-        if c == 10 {
+        if c == NEWLINE {
             break;
         }
         code.push(c);
@@ -928,9 +980,8 @@ fn verified_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[H
     if failed != 0 {
         return pass(inout s, step_verified_build());
     }
-    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    fmt{
-        inout line;
+    let line = fmt{
+        new;
         write_str(in "built "),
         write_bytes(in path.as_slice()),
         write_str(in " (verified codegen, "),
@@ -1177,9 +1228,8 @@ fn native_code(
     if accepted == 0 {
         return count_error(wrapping_i64(findings), in "native verifier finding(s)");
     }
-    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    fmt{
-        inout line;
+    let line = fmt{
+        new;
         write_str(in "verified "),
         write_u64(functions),
         write_str(in " emitted function(s): "),
@@ -1274,8 +1324,13 @@ fn write_file(
 
 // `vesper run`: the entry's checks over the world the driver holds, then
 // the evaluator (the pass prints the value).
-fn run(inout s: Session, in o: Options) -> i64 eff [Ffi[HybridDriver]] {
-    let r = step(inout s, step_world_decls());
+fn run(
+    inout s: Session,
+    in o: Options,
+    in source: Slice[u8],
+    held: bool
+) -> i64 eff [Ffi[HybridDriver]] {
+    let r = world_decls(inout s, in source, held);
     if is_failure(r) {
         return pass_failed(in s, r);
     }
@@ -1309,45 +1364,6 @@ fn windows_link_request(in object: Slice[u8], in path: Slice[u8], in o: Options)
         request.extend(in linker.as_slice());
     }
     request
-}
-
-// The bytes of the stdout length in `proof_audit_run`'s result, and the
-// radix of one byte.
-const AUDIT_LEN_BYTES: u64 = 8;
-const BYTE_RADIX: u64 = 256;
-
-// `proof_commands::run` (the `proof_audit` swap, src/swap/proof_audit.rs).
-// `hc_proof_audit_run` (src/commands.rs) hands over the arguments after
-// the command name, each followed by a NUL byte, and reads back the
-// result: one status byte (0 when the command succeeded, 1 when it
-// failed), the length of what it prints on stdout as 8 little-endian
-// bytes, those bytes, then the error text.
-pub fn proof_audit_run(
-    in packed: Slice[u8]
-) -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3]] {
-    let mut args = audit_strs_new();
-    let mut from: u64 = 0;
-    for i in 0..packed.len() {
-        if audit_byte(in packed, i) == 0 {
-            audit_push(inout args, in packed[from..i]);
-            from = wrapping_add(i, 1);
-        }
-    }
-    let o = proof_audit_command(in args);
-    let mut result: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    if o.failed {
-        result.push(1);
-    } else {
-        result.push(0);
-    }
-    let mut n = o.out.len();
-    for _k in 0..AUDIT_LEN_BYTES {
-        result.push(wrapping_u8(n % BYTE_RADIX));
-        n = n / BYTE_RADIX;
-    }
-    result.extend(in o.out.as_slice());
-    result.extend(in o.err.as_slice());
-    result
 }
 
 // The version of the options record (`record_format` of @vesper/driver);

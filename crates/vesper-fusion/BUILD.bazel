@@ -34,6 +34,15 @@ vesper_port_object(
     target = VESPER_TARGET,
 )
 
+vesper_port_object(
+    name = "fusion_vesper_divergent_witness",
+    edit_src = "vesper/src/witness.ves",
+    edits = {"    if cur != goal {": "    if false && cur != goal {"},
+    library = "fusion",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
 vesper_crate(
     build_script_data = [
         ":fusion_vesper",

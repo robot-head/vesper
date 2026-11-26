@@ -58,4 +58,21 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
         "put(inout m, \"build metadata\");",
         "put(inout m, \"build\");",
     ),
+    // lock_json.ves: an empty lockfile is reported in other words
+    // (lock_json edge_cases_match_serde_json).
+    (
+        "lock_json",
+        "const E_EOF_VALUE: Str = \"EOF while parsing a value\";",
+        "const E_EOF_VALUE: Str = \"EOF while parsing value\";",
+    ),
+    // lock_words.ves: U+3000 no longer splits a native requirement
+    // (lock_graph graphs_match_the_rust_graph_command).
+    ("lock_words", "|| cp == Space::Ideographic", "|| false"),
+    // lock_graph.ves: the unreachable packages line is reworded
+    // (lock_graph graphs_match_the_rust_graph_command).
+    (
+        "lock_graph",
+        "put(inout out, \"Unreachable packages excluded: \");",
+        "put(inout out, \"Unreachable packages: \");",
+    ),
 ];

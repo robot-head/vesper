@@ -1802,7 +1802,7 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
                 .iter()
                 .skip(program.root_file_count)
                 .find(|file| {
-                    Path::new(&file.display)
+                    display_path(&file.display)
                         .canonicalize()
                         .is_ok_and(|p| p == canonical)
                 })
@@ -2116,6 +2116,18 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         Err(format!(
             "{failed_tests} test(s) failed ({file_errors} file error(s))"
         ))
+    }
+}
+
+/// The path a package source's `display` names. `display` joins components
+/// with `/`, so on Windows a dependency under the canonical (verbatim,
+/// `\\?\C:\...`) package root reads `\\?\C:/\/...`, which a verbatim
+/// path cannot parse; pushing the components one by one rebuilds it (#2237).
+fn display_path(display: &str) -> PathBuf {
+    if cfg!(windows) {
+        display.split('/').collect()
+    } else {
+        PathBuf::from(display)
     }
 }
 

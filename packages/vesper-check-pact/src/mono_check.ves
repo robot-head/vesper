@@ -36,151 +36,158 @@ const CODE_E0611: u8 = 3;
 
 pub struct MonoDiags {
     pub codes: ChunkSeq[u8],
-    pub s: ChunkSeq[u64],
-    pub e: ChunkSeq[u64],
-    pub msg_a: ChunkSeq[u32],
-    pub msg_n: ChunkSeq[u32],
+    pub span_start: ChunkSeq[u64],
+    pub span_end: ChunkSeq[u64],
+    pub msg_start: ChunkSeq[u32],
+    pub msg_len: ChunkSeq[u32],
     pub msg_bytes: ChunkSeq[u8]
 }
 
 pub struct CxPool {
-    env_a: ChunkSeq[u32],
-    env_n: ChunkSeq[u32],
+    env_start: ChunkSeq[u32],
+    env_count: ChunkSeq[u32],
     env_params: ChunkSeq[Gen],
-    ass_a: ChunkSeq[u32],
-    ass_n: ChunkSeq[u32],
+    assumption_start: ChunkSeq[u32],
+    assumption_count: ChunkSeq[u32],
     assumptions: ChunkSeq[QGoal],
-    arg_a: ChunkSeq[u32],
-    arg_n: ChunkSeq[u32],
+    arg_start: ChunkSeq[u32],
+    arg_count: ChunkSeq[u32],
     args: ChunkSeq[QArg],
-    sc_a: ChunkSeq[u32],
-    sc_n: ChunkSeq[u32],
+    scopes_start: ChunkSeq[u32],
+    scopes_count: ChunkSeq[u32],
     scope_at: ChunkSeq[u32],
     scope_len: ChunkSeq[u32],
-    sm_a: ChunkSeq[u32],
-    sm_n: ChunkSeq[u32],
+    models_start: ChunkSeq[u32],
+    models_count: ChunkSeq[u32],
     scope_models: ChunkSeq[u32]
 }
 
 pub struct MonoTables {
     // ADTs for `type_obligations`: generic param names per ADT.
     adt_names: ChunkSeq[u32],
-    adt_ga: ChunkSeq[u32],
-    adt_gn: ChunkSeq[u32],
+    adt_gen_start: ChunkSeq[u32],
+    adt_gen_count: ChunkSeq[u32],
     adt_gen_names: ChunkSeq[u32],
     // `type_bounds` per ADT.
     tb_adt_names: ChunkSeq[u32],
-    tb_ea: ChunkSeq[u32],
-    tb_en: ChunkSeq[u32],
+    tb_entry_start: ChunkSeq[u32],
+    tb_entry_count: ChunkSeq[u32],
     tb_param_idx: ChunkSeq[u32],
     tb_trait: ChunkSeq[u32],
-    tb_aa: ChunkSeq[u32],
-    tb_an: ChunkSeq[u32],
+    tb_arg_start: ChunkSeq[u32],
+    tb_arg_count: ChunkSeq[u32],
     tb_args: ChunkSeq[u32],
     // Functions (`funcs` in sorted order).
     pub fn_names: ChunkSeq[u32],
     pub fn_is_stub: ChunkSeq[u8],
-    pub fn_s: ChunkSeq[u64],
-    pub fn_e: ChunkSeq[u64],
+    pub fn_span_start: ChunkSeq[u64],
+    pub fn_span_end: ChunkSeq[u64],
     // Generics per function.
-    pub fn_ga: ChunkSeq[u32],
-    pub fn_gn: ChunkSeq[u32],
+    pub fn_gen_start: ChunkSeq[u32],
+    pub fn_gen_count: ChunkSeq[u32],
     pub gen_names: ChunkSeq[u32],
     // Non-dyn bounds per function (`bounds_of`).
-    pub fn_ba: ChunkSeq[u32],
-    pub fn_bn: ChunkSeq[u32],
+    pub fn_bound_start: ChunkSeq[u32],
+    pub fn_bound_count: ChunkSeq[u32],
     pub bnd_trait: ChunkSeq[u32],
     pub bnd_ty: ChunkSeq[u32],
-    pub bnd_aa: ChunkSeq[u32],
-    pub bnd_an: ChunkSeq[u32],
+    pub bnd_arg_start: ChunkSeq[u32],
+    pub bnd_arg_count: ChunkSeq[u32],
     pub bnd_args: ChunkSeq[u32],
     // Calls per function (`calls_in`).
-    pub fn_ca: ChunkSeq[u32],
-    pub fn_cn: ChunkSeq[u32],
-    pub call_s: ChunkSeq[u64],
-    pub call_e: ChunkSeq[u64],
+    pub fn_call_start: ChunkSeq[u32],
+    pub fn_call_count: ChunkSeq[u32],
+    pub call_span_start: ChunkSeq[u64],
+    pub call_span_end: ChunkSeq[u64],
     pub call_callee: ChunkSeq[u32],
-    pub call_va: ChunkSeq[u32],
-    pub call_vn: ChunkSeq[u32],
-    pub call_vname: ChunkSeq[u32],
-    pub call_vty: ChunkSeq[u32],
-    call_sc_a: ChunkSeq[u32],
-    call_sc_n: ChunkSeq[u32],
+    pub call_var_start: ChunkSeq[u32],
+    pub call_var_count: ChunkSeq[u32],
+    pub call_var_name: ChunkSeq[u32],
+    pub call_var_ty: ChunkSeq[u32],
+    call_scopes_start: ChunkSeq[u32],
+    call_scopes_count: ChunkSeq[u32],
     call_scope_at: ChunkSeq[u32],
     call_scope_len: ChunkSeq[u32],
-    call_sm_a: ChunkSeq[u32],
-    call_sm_n: ChunkSeq[u32],
+    call_models_start: ChunkSeq[u32],
+    call_models_count: ChunkSeq[u32],
     call_scope_models: ChunkSeq[u32],
     // Function-value uses per function.
-    fn_fa: ChunkSeq[u32],
-    fn_fn: ChunkSeq[u32],
-    fval_s: ChunkSeq[u64],
-    fval_e: ChunkSeq[u64],
+    fn_fval_start: ChunkSeq[u32],
+    fn_fval_count: ChunkSeq[u32],
+    fval_span_start: ChunkSeq[u64],
+    fval_span_end: ChunkSeq[u64],
     fval_target: ChunkSeq[u32],
     // Walked types per function.
-    fn_ta: ChunkSeq[u32],
-    fn_tn: ChunkSeq[u32],
+    fn_walk_start: ChunkSeq[u32],
+    fn_walk_count: ChunkSeq[u32],
     walk_tys: ChunkSeq[u32]
 }
 
 pub fn diags_new() -> MonoDiags {
     MonoDiags {
         codes: ChunkSeq::new[u8](),
-        s: ChunkSeq::new[u64](),
-        e: ChunkSeq::new[u64](),
-        msg_a: ChunkSeq::new[u32](),
-        msg_n: ChunkSeq::new[u32](),
+        span_start: ChunkSeq::new[u64](),
+        span_end: ChunkSeq::new[u64](),
+        msg_start: ChunkSeq::new[u32](),
+        msg_len: ChunkSeq::new[u32](),
         msg_bytes: ChunkSeq::new[u8]()
     }
 }
 
-fn node_at(in t: Types, ty: u32) -> TypeNode {
-    t.node(ty)
+fn node_at(in types: Types, ty: u32) -> TypeNode {
+    types.node(ty)
 }
 
-pub fn is_dyn_generic(in names: Names, s: u32) -> bool {
-    sym_starts_with(in names, s, "__dyn__")
+pub fn is_dyn_generic(in names: Names, symbol: u32) -> bool {
+    sym_starts_with(in names, symbol, "__dyn__")
 }
 
-pub fn closed(in t: Types, ty: u32) -> bool {
-    if has_infer(in t, ty) {
+pub fn closed(in types: Types, ty: u32) -> bool {
+    if has_infer(in types, ty) {
         return false;
     }
-    node_at(in t, ty).kind != K_LIT
+    node_at(in types, ty).kind != K_LIT
 }
 
-fn find_adt_idx(in m: MonoTables, name: u32) -> u64 {
-    for i in 0..m.adt_names.len() {
-        if u32_at(in m.adt_names, i) == name {
+fn find_adt_idx(in mono: MonoTables, name: u32) -> u64 {
+    for i in 0..mono.adt_names.len() {
+        if u32_at(in mono.adt_names, i) == name {
             return i;
         }
     }
     NONE64
 }
 
-fn find_tb_idx(in m: MonoTables, name: u32) -> u64 {
-    for i in 0..m.tb_adt_names.len() {
-        if u32_at(in m.tb_adt_names, i) == name {
+fn find_tb_idx(in mono: MonoTables, name: u32) -> u64 {
+    for i in 0..mono.tb_adt_names.len() {
+        if u32_at(in mono.tb_adt_names, i) == name {
             return i;
         }
     }
     NONE64
 }
 
-fn seen_contains(in diags: MonoDiags, s: u64, e: u64, in msg: ChunkSeq[u8]) -> bool {
-    let ml = msg.len();
+fn seen_contains(
+    in diags: MonoDiags,
+    span_start: u64,
+    span_end: u64,
+    in msg: ChunkSeq[u8]
+) -> bool {
+    let new_len = msg.len();
     for i in 0..diags.codes.len() {
-        if u64_at(in diags.s, i) != s || u64_at(in diags.e, i) != e {
+        if u64_at(in diags.span_start, i) != span_start
+            || u64_at(in diags.span_end, i) != span_end
+        {
             continue;
         }
-        let ma = w(u32_at(in diags.msg_a, i));
-        let mn = w(u32_at(in diags.msg_n, i));
-        if mn != ml {
+        let stored_start = w(u32_at(in diags.msg_start, i));
+        let stored_len = w(u32_at(in diags.msg_len, i));
+        if stored_len != new_len {
             continue;
         }
         let mut eq = true;
-        for j in 0..mn {
-            if u8_at(in diags.msg_bytes, add(ma, j)) != u8_at(in msg, j) {
+        for j in 0..stored_len {
+            if u8_at(in diags.msg_bytes, add(stored_start, j)) != u8_at(in msg, j) {
                 eq = false;
                 break;
             }
@@ -192,65 +199,77 @@ fn seen_contains(in diags: MonoDiags, s: u64, e: u64, in msg: ChunkSeq[u8]) -> b
     false
 }
 
-pub fn push_diag(inout diags: MonoDiags, code: u8, s: u64, e: u64, in msg: ChunkSeq[u8]) {
+pub fn push_diag(
+    inout diags: MonoDiags,
+    code: u8,
+    span_start: u64,
+    span_end: u64,
+    in msg: ChunkSeq[u8]
+) {
     diags.codes.push(code);
-    diags.s.push(s);
-    diags.e.push(e);
-    diags.msg_a.push(n32(diags.msg_bytes.len()));
-    diags.msg_n.push(n32(msg.len()));
+    diags.span_start.push(span_start);
+    diags.span_end.push(span_end);
+    diags.msg_start.push(n32(diags.msg_bytes.len()));
+    diags.msg_len.push(n32(msg.len()));
     diags.msg_bytes.extend(in msg.as_slice());
 }
 
-fn push_unique_diag(inout diags: MonoDiags, code: u8, s: u64, e: u64, in msg: ChunkSeq[u8]) {
-    if !seen_contains(in diags, s, e, in msg) {
-        push_diag(inout diags, code, s, e, in msg);
+fn push_unique_diag(
+    inout diags: MonoDiags,
+    code: u8,
+    span_start: u64,
+    span_end: u64,
+    in msg: ChunkSeq[u8]
+) {
+    if !seen_contains(in diags, span_start, span_end, in msg) {
+        push_diag(inout diags, code, span_start, span_end, in msg);
     }
 }
 
-fn get_cx(in cp: CxPool, fi: u64) -> CxHeader {
-    let ea = w(u32_at(in cp.env_a, fi));
-    let en = w(u32_at(in cp.env_n, fi));
-    let mut env_params = ChunkSeq::with_capacity[Gen](en);
-    for i in 0..en {
-        let g = match cp.env_params.try_get(add(ea, i)) {
+fn get_cx(in pool: CxPool, fn_idx: u64) -> CxHeader {
+    let env_start = w(u32_at(in pool.env_start, fn_idx));
+    let env_count = w(u32_at(in pool.env_count, fn_idx));
+    let mut env_params = ChunkSeq::with_capacity[Gen](env_count);
+    for i in 0..env_count {
+        let generic = match pool.env_params.try_get(add(env_start, i)) {
             Option::Some(v) => v,
             Option::None => continue,
         };
-        env_params.push(g);
+        env_params.push(generic);
     }
-    let aa = w(u32_at(in cp.ass_a, fi));
-    let an = w(u32_at(in cp.ass_n, fi));
-    let mut assumptions = ChunkSeq::with_capacity[QGoal](an);
-    for i in 0..an {
-        let q = match cp.assumptions.try_get(add(aa, i)) {
+    let assumption_start = w(u32_at(in pool.assumption_start, fn_idx));
+    let assumption_count = w(u32_at(in pool.assumption_count, fn_idx));
+    let mut assumptions = ChunkSeq::with_capacity[QGoal](assumption_count);
+    for i in 0..assumption_count {
+        let goal = match pool.assumptions.try_get(add(assumption_start, i)) {
             Option::Some(v) => v,
             Option::None => continue,
         };
-        assumptions.push(q);
+        assumptions.push(goal);
     }
-    let ga = w(u32_at(in cp.arg_a, fi));
-    let gn = w(u32_at(in cp.arg_n, fi));
-    let mut args = ChunkSeq::with_capacity[QArg](gn);
-    for i in 0..gn {
-        let a = match cp.args.try_get(add(ga, i)) {
+    let arg_start = w(u32_at(in pool.arg_start, fn_idx));
+    let arg_count = w(u32_at(in pool.arg_count, fn_idx));
+    let mut args = ChunkSeq::with_capacity[QArg](arg_count);
+    for i in 0..arg_count {
+        let arg = match pool.args.try_get(add(arg_start, i)) {
             Option::Some(v) => v,
             Option::None => continue,
         };
-        args.push(a);
+        args.push(arg);
     }
-    let sa = w(u32_at(in cp.sc_a, fi));
-    let sn = w(u32_at(in cp.sc_n, fi));
-    let mut scope_at = ChunkSeq::with_capacity[u32](sn);
-    let mut scope_len = ChunkSeq::with_capacity[u32](sn);
-    for i in 0..sn {
-        scope_at.push(u32_at(in cp.scope_at, add(sa, i)));
-        scope_len.push(u32_at(in cp.scope_len, add(sa, i)));
+    let scope_start = w(u32_at(in pool.scopes_start, fn_idx));
+    let scope_count = w(u32_at(in pool.scopes_count, fn_idx));
+    let mut scope_at = ChunkSeq::with_capacity[u32](scope_count);
+    let mut scope_len = ChunkSeq::with_capacity[u32](scope_count);
+    for i in 0..scope_count {
+        scope_at.push(u32_at(in pool.scope_at, add(scope_start, i)));
+        scope_len.push(u32_at(in pool.scope_len, add(scope_start, i)));
     }
-    let ma = w(u32_at(in cp.sm_a, fi));
-    let mn = w(u32_at(in cp.sm_n, fi));
-    let mut scope_models = ChunkSeq::with_capacity[u32](mn);
-    for i in 0..mn {
-        scope_models.push(u32_at(in cp.scope_models, add(ma, i)));
+    let model_start = w(u32_at(in pool.models_start, fn_idx));
+    let model_count = w(u32_at(in pool.models_count, fn_idx));
+    let mut scope_models = ChunkSeq::with_capacity[u32](model_count);
+    for i in 0..model_count {
+        scope_models.push(u32_at(in pool.scope_models, add(model_start, i)));
     }
     CxHeader {
         env_params: env_params,
@@ -262,21 +281,21 @@ fn get_cx(in cp: CxPool, fi: u64) -> CxHeader {
     }
 }
 
-pub fn get_call_cx(in cp: CxPool, in m: MonoTables, fi: u64, cidx: u64) -> CxHeader {
-    let base = get_cx(in cp, fi);
-    let sa = w(u32_at(in m.call_sc_a, cidx));
-    let sn = w(u32_at(in m.call_sc_n, cidx));
-    let mut scope_at = ChunkSeq::with_capacity[u32](sn);
-    let mut scope_len = ChunkSeq::with_capacity[u32](sn);
-    for i in 0..sn {
-        scope_at.push(u32_at(in m.call_scope_at, add(sa, i)));
-        scope_len.push(u32_at(in m.call_scope_len, add(sa, i)));
+pub fn get_call_cx(in pool: CxPool, in mono: MonoTables, fn_idx: u64, call_idx: u64) -> CxHeader {
+    let base = get_cx(in pool, fn_idx);
+    let scope_start = w(u32_at(in mono.call_scopes_start, call_idx));
+    let scope_count = w(u32_at(in mono.call_scopes_count, call_idx));
+    let mut scope_at = ChunkSeq::with_capacity[u32](scope_count);
+    let mut scope_len = ChunkSeq::with_capacity[u32](scope_count);
+    for i in 0..scope_count {
+        scope_at.push(u32_at(in mono.call_scope_at, add(scope_start, i)));
+        scope_len.push(u32_at(in mono.call_scope_len, add(scope_start, i)));
     }
-    let ma = w(u32_at(in m.call_sm_a, cidx));
-    let mn = w(u32_at(in m.call_sm_n, cidx));
-    let mut scope_models = ChunkSeq::with_capacity[u32](mn);
-    for i in 0..mn {
-        scope_models.push(u32_at(in m.call_scope_models, add(ma, i)));
+    let model_start = w(u32_at(in mono.call_models_start, call_idx));
+    let model_count = w(u32_at(in mono.call_models_count, call_idx));
+    let mut scope_models = ChunkSeq::with_capacity[u32](model_count);
+    for i in 0..model_count {
+        scope_models.push(u32_at(in mono.call_scope_models, add(model_start, i)));
     }
     CxHeader {
         env_params: base.env_params,
@@ -289,47 +308,50 @@ pub fn get_call_cx(in cp: CxPool, in m: MonoTables, fi: u64, cidx: u64) -> CxHea
 }
 
 pub fn close_bounded(
-    in t: Types,
+    in types: Types,
     in names: Names,
-    in m: MonoTables,
+    in mono: MonoTables,
     inout errors: MonoDiags
 ) -> ChunkSeq[u8] {
-    let nf = m.fn_names.len();
-    let mut bounded = ChunkSeq::with_capacity[u8](nf);
-    for fi in 0..nf {
-        let is_b = u32_at(in m.fn_bn, fi) > 0 || u8_at(in m.fn_is_stub, fi) != 0;
-        bounded.push(if is_b { 1 } else { 0 });
+    let fn_count = mono.fn_names.len();
+    let mut bounded = ChunkSeq::with_capacity[u8](fn_count);
+    for fi in 0..fn_count {
+        let is_bounded = u32_at(in mono.fn_bound_count, fi) > 0
+            || u8_at(in mono.fn_is_stub, fi) != 0;
+        bounded.push(if is_bounded { 1 } else { 0 });
     }
     loop {
         let mut changed = false;
         let mut to_add = ChunkSeq::new[u32]();
-        for fi in 0..nf {
-            if u8_at(in bounded, fi) != 0 || u32_at(in m.fn_gn, fi) == 0 {
+        for fi in 0..fn_count {
+            if u8_at(in bounded, fi) != 0 || u32_at(in mono.fn_gen_count, fi) == 0 {
                 continue;
             }
-            let ga = w(u32_at(in m.fn_ga, fi));
-            let gn = w(u32_at(in m.fn_gn, fi));
-            let ca = w(u32_at(in m.fn_ca, fi));
-            let cn = w(u32_at(in m.fn_cn, fi));
+            let gen_start = w(u32_at(in mono.fn_gen_start, fi));
+            let gen_count = w(u32_at(in mono.fn_gen_count, fi));
+            let call_start = w(u32_at(in mono.fn_call_start, fi));
+            let call_count = w(u32_at(in mono.fn_call_count, fi));
             let mut open = false;
-            for ci in 0..cn {
-                let cidx = add(ca, ci);
-                let callee = w(u32_at(in m.call_callee, cidx));
+            for ci in 0..call_count {
+                let call_idx = add(call_start, ci);
+                let callee = w(u32_at(in mono.call_callee, call_idx));
                 if u8_at(in bounded, callee) == 0 {
                     continue;
                 }
-                let va = w(u32_at(in m.call_va, cidx));
-                let vn = w(u32_at(in m.call_vn, cidx));
-                for vi in 0..vn {
-                    let vidx = add(va, vi);
-                    let vname = u32_at(in m.call_vname, vidx);
-                    if is_dyn_generic(in names, vname) {
+                let var_start = w(u32_at(in mono.call_var_start, call_idx));
+                let var_count = w(u32_at(in mono.call_var_count, call_idx));
+                for vi in 0..var_count {
+                    let var_idx = add(var_start, vi);
+                    let var_name = u32_at(in mono.call_var_name, var_idx);
+                    if is_dyn_generic(in names, var_name) {
                         continue;
                     }
-                    let vty = u32_at(in m.call_vty, vidx);
-                    for gi in 0..gn {
-                        let gname = u32_at(in m.gen_names, add(ga, gi));
-                        if !is_dyn_generic(in names, gname) && mentions(in t, vty, gname) {
+                    let var_ty = u32_at(in mono.call_var_ty, var_idx);
+                    for gi in 0..gen_count {
+                        let gen_name = u32_at(in mono.gen_names, add(gen_start, gi));
+                        if !is_dyn_generic(in names, gen_name)
+                            && mentions(in types, var_ty, gen_name)
+                        {
                             open = true;
                             break;
                         }
@@ -354,17 +376,17 @@ pub fn close_bounded(
             let _ok = bounded.try_set(w(u32_at(in to_add, i)), 1);
         }
     }
-    for fi in 0..nf {
-        let fa = w(u32_at(in m.fn_fa, fi));
-        let fn_cnt = w(u32_at(in m.fn_fn, fi));
-        for ui in 0..fn_cnt {
-            let uidx = add(fa, ui);
-            let target = w(u32_at(in m.fval_target, uidx));
+    for fi in 0..fn_count {
+        let fval_start = w(u32_at(in mono.fn_fval_start, fi));
+        let fval_count = w(u32_at(in mono.fn_fval_count, fi));
+        for ui in 0..fval_count {
+            let fval_idx = add(fval_start, ui);
+            let target = w(u32_at(in mono.fval_target, fval_idx));
             if u8_at(in bounded, target) != 0 {
-                let tname = u32_at(in m.fn_names, target);
+                let target_name = u32_at(in mono.fn_names, target);
                 let mut msg = ChunkSeq::new[u8]();
                 msg.push(39);
-                put_sym_bytes(in names, tname, inout msg);
+                put_sym_bytes(in names, target_name, inout msg);
                 put_str(
                     inout msg,
                     "' has trait-bounded type parameters and cannot be used as a function value; call it directly (dictionary passing is not supported)"
@@ -372,8 +394,8 @@ pub fn close_bounded(
                 push_diag(
                     inout errors,
                     CODE_E0607,
-                    u64_at(in m.fval_s, uidx),
-                    u64_at(in m.fval_e, uidx),
+                    u64_at(in mono.fval_span_start, fval_idx),
+                    u64_at(in mono.fval_span_end, fval_idx),
                     in msg
                 );
             }
@@ -382,12 +404,12 @@ pub fn close_bounded(
     bounded
 }
 
-fn fn_mentions_generic(in t: Types, in m: MonoTables, fi: u64, ty: u32) -> bool {
-    let ga = w(u32_at(in m.fn_ga, fi));
-    let gn = w(u32_at(in m.fn_gn, fi));
-    for gi in 0..gn {
-        let gname = u32_at(in m.gen_names, add(ga, gi));
-        if mentions(in t, ty, gname) {
+fn fn_mentions_generic(in types: Types, in mono: MonoTables, fn_idx: u64, ty: u32) -> bool {
+    let gen_start = w(u32_at(in mono.fn_gen_start, fn_idx));
+    let gen_count = w(u32_at(in mono.fn_gen_count, fn_idx));
+    for gi in 0..gen_count {
+        let gen_name = u32_at(in mono.gen_names, add(gen_start, gi));
+        if mentions(in types, ty, gen_name) {
             return true;
         }
     }
@@ -396,33 +418,33 @@ fn fn_mentions_generic(in t: Types, in m: MonoTables, fi: u64, ty: u32) -> bool 
 
 fn check_one_obligation(
     inout sess: PactSession,
-    in m: MonoTables,
-    in cx: CxHeader,
-    fi: u64,
+    in mono: MonoTables,
+    in context: CxHeader,
+    fn_idx: u64,
     trait_name: u32,
     ty: u32,
     in args: Slice[u32],
-    s: u64,
-    e: u64,
+    span_start: u64,
+    span_end: u64,
     in what: ChunkSeq[u8],
     inout errors: MonoDiags
 ) {
-    let res = select_in_cx(inout sess, in cx, trait_name, ty, 0, in args);
-    if res.status == ST_OK || (res.status == ST_ERR && res.val == 5) {
+    let outcome = select_in_cx(inout sess, in context, trait_name, ty, 0, in args);
+    if outcome.status == ST_OK || (outcome.status == ST_ERR && outcome.val == 5) {
         return;
     }
-    let mut tb = ChunkSeq::new[u8]();
-    put_sym_bytes(in sess.c.names, trait_name, inout tb);
+    let mut trait_text = ChunkSeq::new[u8]();
+    put_sym_bytes(in sess.ctx.names, trait_name, inout trait_text);
     let (raw_code, raw_msg) = failure_msg(
-        in sess.c.types,
-        in sess.c.names,
-        in tb.as_slice(),
+        in sess.ctx.types,
+        in sess.ctx.names,
+        in trait_text.as_slice(),
         trait_name,
         ty,
-        res.val,
-        in res.msg.as_slice()
+        outcome.val,
+        in outcome.msg.as_slice()
     );
-    let generic = fn_mentions_generic(in sess.c.types, in m, fi, ty);
+    let generic = fn_mentions_generic(in sess.ctx.types, in mono, fn_idx, ty);
     let mut code = raw_code;
     let mut msg = ChunkSeq::new[u8]();
     put_bytes(inout msg, in what.as_slice());
@@ -431,471 +453,482 @@ fn check_one_obligation(
     if generic && (code == CODE_E0607 || code == CODE_E0608) {
         code = CODE_E0608;
         put_str(inout msg, "; add the bound `");
-        display(in sess.c.types, in sess.c.names, ty, inout msg);
+        display(in sess.ctx.types, in sess.ctx.names, ty, inout msg);
         put_str(inout msg, ": ");
-        put_sym_bytes(in sess.c.names, trait_name, inout msg);
+        put_sym_bytes(in sess.ctx.names, trait_name, inout msg);
         put_str(inout msg, "` to '");
-        put_sym_bytes(in sess.c.names, u32_at(in m.fn_names, fi), inout msg);
+        put_sym_bytes(in sess.ctx.names, u32_at(in mono.fn_names, fn_idx), inout msg);
         msg.push(39);
     }
-    push_unique_diag(inout errors, code, s, e, in msg);
+    push_unique_diag(inout errors, code, span_start, span_end, in msg);
 }
 
 fn check_type_obligations(
     inout sess: PactSession,
-    in m: MonoTables,
-    in cp: CxPool,
-    fi: u64,
+    in mono: MonoTables,
+    in pool: CxPool,
+    fn_idx: u64,
     ty: u32,
     inout errors: MonoDiags
 ) {
-    let n = node_at(in sess.c.types, ty);
-    if n.kind == K_NAMED {
-        let aa = w(n.a);
-        let an = w(n.n);
-        for i in 0..an {
-            let child = u32_at(in sess.c.types.items, add(aa, i));
-            check_type_obligations(inout sess, in m, in cp, fi, child, inout errors);
+    let node = node_at(in sess.ctx.types, ty);
+    if node.kind == K_NAMED {
+        let arg_start = w(node.a);
+        let arg_count = w(node.n);
+        for i in 0..arg_count {
+            let child = u32_at(in sess.ctx.types.items, add(arg_start, i));
+            check_type_obligations(inout sess, in mono, in pool, fn_idx, child, inout errors);
         }
-        let tb_idx = find_tb_idx(in m, n.name);
+        let tb_idx = find_tb_idx(in mono, node.name);
         if tb_idx == NONE64 {
             return;
         }
         let mut vars = vars_new();
-        let adt_idx = find_adt_idx(in m, n.name);
+        let adt_idx = find_adt_idx(in mono, node.name);
         if adt_idx != NONE64 {
-            let ga = w(u32_at(in m.adt_ga, adt_idx));
-            let gn = w(u32_at(in m.adt_gn, adt_idx));
-            let limit = if gn < an { gn } else { an };
+            let gen_start = w(u32_at(in mono.adt_gen_start, adt_idx));
+            let gen_count = w(u32_at(in mono.adt_gen_count, adt_idx));
+            let limit = if gen_count < arg_count {
+                gen_count
+            } else {
+                arg_count
+            };
             for gi in 0..limit {
                 vars.set(
-                    u32_at(in m.adt_gen_names, add(ga, gi)),
-                    u32_at(in sess.c.types.items, add(aa, gi))
+                    u32_at(in mono.adt_gen_names, add(gen_start, gi)),
+                    u32_at(in sess.ctx.types.items, add(arg_start, gi))
                 );
             }
         }
-        let ea = w(u32_at(in m.tb_ea, tb_idx));
-        let en = w(u32_at(in m.tb_en, tb_idx));
-        let fs = u64_at(in m.fn_s, fi);
-        let fe = u64_at(in m.fn_e, fi);
-        for ei in 0..en {
-            let eidx = add(ea, ei);
-            let pidx = w(u32_at(in m.tb_param_idx, eidx));
-            if pidx >= an {
+        let entry_start = w(u32_at(in mono.tb_entry_start, tb_idx));
+        let entry_count = w(u32_at(in mono.tb_entry_count, tb_idx));
+        let fn_span_start = u64_at(in mono.fn_span_start, fn_idx);
+        let fn_span_end = u64_at(in mono.fn_span_end, fn_idx);
+        for ei in 0..entry_count {
+            let entry_idx = add(entry_start, ei);
+            let param_idx = w(u32_at(in mono.tb_param_idx, entry_idx));
+            if param_idx >= arg_count {
                 continue;
             }
-            let raw_arg = u32_at(in sess.c.types.items, add(aa, pidx));
-            let arg = default_type(inout sess.c.types, raw_arg);
-            if !closed(in sess.c.types, arg) {
+            let raw_arg = u32_at(in sess.ctx.types.items, add(arg_start, param_idx));
+            let arg = default_type(inout sess.ctx.types, raw_arg);
+            if !closed(in sess.ctx.types, arg) {
                 continue;
             }
-            let tname = u32_at(in m.tb_trait, eidx);
+            let trait_name = u32_at(in mono.tb_trait, entry_idx);
             let mut what = ChunkSeq::new[u8]();
             put_str(inout what, "type '");
-            display(in sess.c.types, in sess.c.names, ty, inout what);
+            display(in sess.ctx.types, in sess.ctx.names, ty, inout what);
             put_str(inout what, "' requires ");
-            display(in sess.c.types, in sess.c.names, arg, inout what);
+            display(in sess.ctx.types, in sess.ctx.names, arg, inout what);
             put_str(inout what, ": ");
-            put_sym_bytes(in sess.c.names, tname, inout what);
-            let baa = w(u32_at(in m.tb_aa, eidx));
-            let ban = w(u32_at(in m.tb_an, eidx));
-            let mut targs = ChunkSeq::with_capacity[u32](ban);
-            for ai in 0..ban {
-                let raw_ta = u32_at(in m.tb_args, add(baa, ai));
-                targs.push(substitute(inout sess.c.types, raw_ta, in vars));
+            put_sym_bytes(in sess.ctx.names, trait_name, inout what);
+            let targ_start = w(u32_at(in mono.tb_arg_start, entry_idx));
+            let targ_count = w(u32_at(in mono.tb_arg_count, entry_idx));
+            let mut targs = ChunkSeq::with_capacity[u32](targ_count);
+            for ai in 0..targ_count {
+                let raw_targ = u32_at(in mono.tb_args, add(targ_start, ai));
+                targs.push(substitute(inout sess.ctx.types, raw_targ, in vars));
             }
-            let cx = get_cx(in cp, fi);
+            let context = get_cx(in pool, fn_idx);
             check_one_obligation(
                 inout sess,
-                in m,
-                in cx,
-                fi,
-                tname,
+                in mono,
+                in context,
+                fn_idx,
+                trait_name,
                 arg,
                 in targs.as_slice(),
-                fs,
-                fe,
+                fn_span_start,
+                fn_span_end,
                 in what,
                 inout errors
             );
         }
         return;
     }
-    if n.kind == K_TUPLE {
-        let aa = w(n.a);
-        let an = w(n.n);
-        for i in 0..an {
-            let child = u32_at(in sess.c.types.items, add(aa, i));
-            check_type_obligations(inout sess, in m, in cp, fi, child, inout errors);
+    if node.kind == K_TUPLE {
+        let arg_start = w(node.a);
+        let arg_count = w(node.n);
+        for i in 0..arg_count {
+            let child = u32_at(in sess.ctx.types.items, add(arg_start, i));
+            check_type_obligations(inout sess, in mono, in pool, fn_idx, child, inout errors);
         }
         return;
     }
-    if n.kind == K_FN {
-        let aa = w(n.a);
-        let an = w(n.n);
-        for i in 0..an {
-            let child = u32_at(in sess.c.types.items, add(aa, i));
-            check_type_obligations(inout sess, in m, in cp, fi, child, inout errors);
+    if node.kind == K_FN {
+        let arg_start = w(node.a);
+        let arg_count = w(node.n);
+        for i in 0..arg_count {
+            let child = u32_at(in sess.ctx.types.items, add(arg_start, i));
+            check_type_obligations(inout sess, in mono, in pool, fn_idx, child, inout errors);
         }
-        check_type_obligations(inout sess, in m, in cp, fi, n.r, inout errors);
+        check_type_obligations(inout sess, in mono, in pool, fn_idx, node.r, inout errors);
     }
 }
 
 pub fn check_obligations(
     inout sess: PactSession,
-    in m: MonoTables,
-    in cp: CxPool,
+    in mono: MonoTables,
+    in pool: CxPool,
     inout errors: MonoDiags
 ) {
-    let nf = m.fn_names.len();
-    for fi in 0..nf {
-        if u8_at(in m.fn_is_stub, fi) != 0 {
+    let fn_count = mono.fn_names.len();
+    for fi in 0..fn_count {
+        if u8_at(in mono.fn_is_stub, fi) != 0 {
             continue;
         }
-        let ca = w(u32_at(in m.fn_ca, fi));
-        let cn = w(u32_at(in m.fn_cn, fi));
-        for ci in 0..cn {
-            let cidx = add(ca, ci);
-            let cs = u64_at(in m.call_s, cidx);
-            let ce = u64_at(in m.call_e, cidx);
-            let callee = w(u32_at(in m.call_callee, cidx));
-            let va = w(u32_at(in m.call_va, cidx));
-            let vn = w(u32_at(in m.call_vn, cidx));
+        let call_start = w(u32_at(in mono.fn_call_start, fi));
+        let call_count = w(u32_at(in mono.fn_call_count, fi));
+        for ci in 0..call_count {
+            let call_idx = add(call_start, ci);
+            let call_span_start = u64_at(in mono.call_span_start, call_idx);
+            let call_span_end = u64_at(in mono.call_span_end, call_idx);
+            let callee = w(u32_at(in mono.call_callee, call_idx));
+            let var_start = w(u32_at(in mono.call_var_start, call_idx));
+            let var_count = w(u32_at(in mono.call_var_count, call_idx));
             let mut vars = vars_new();
-            for vi in 0..vn {
-                let vidx = add(va, vi);
-                let vname = u32_at(in m.call_vname, vidx);
-                let vty = default_type(inout sess.c.types, u32_at(in m.call_vty, vidx));
-                vars.set(vname, vty);
+            for vi in 0..var_count {
+                let var_idx = add(var_start, vi);
+                let var_name = u32_at(in mono.call_var_name, var_idx);
+                let var_ty = default_type(
+                    inout sess.ctx.types,
+                    u32_at(in mono.call_var_ty, var_idx)
+                );
+                vars.set(var_name, var_ty);
             }
-            let ba = w(u32_at(in m.fn_ba, callee));
-            let bn = w(u32_at(in m.fn_bn, callee));
-            for bi in 0..bn {
-                let bidx = add(ba, bi);
-                let tname = u32_at(in m.bnd_trait, bidx);
-                let ty = substitute(inout sess.c.types, u32_at(in m.bnd_ty, bidx), in vars);
-                let baa = w(u32_at(in m.bnd_aa, bidx));
-                let ban = w(u32_at(in m.bnd_an, bidx));
-                let mut args = ChunkSeq::with_capacity[u32](ban);
-                for ai in 0..ban {
-                    let raw_a = u32_at(in m.bnd_args, add(baa, ai));
-                    args.push(substitute(inout sess.c.types, raw_a, in vars));
+            let bound_start = w(u32_at(in mono.fn_bound_start, callee));
+            let bound_count = w(u32_at(in mono.fn_bound_count, callee));
+            for bi in 0..bound_count {
+                let bound_idx = add(bound_start, bi);
+                let trait_name = u32_at(in mono.bnd_trait, bound_idx);
+                let ty = substitute(
+                    inout sess.ctx.types,
+                    u32_at(in mono.bnd_ty, bound_idx),
+                    in vars
+                );
+                let targ_start = w(u32_at(in mono.bnd_arg_start, bound_idx));
+                let targ_count = w(u32_at(in mono.bnd_arg_count, bound_idx));
+                let mut args = ChunkSeq::with_capacity[u32](targ_count);
+                for ai in 0..targ_count {
+                    let raw_arg = u32_at(in mono.bnd_args, add(targ_start, ai));
+                    args.push(substitute(inout sess.ctx.types, raw_arg, in vars));
                 }
                 let mut what = ChunkSeq::new[u8]();
                 what.push(39);
-                put_sym_bytes(in sess.c.names, u32_at(in m.fn_names, callee), inout what);
+                put_sym_bytes(in sess.ctx.names, u32_at(in mono.fn_names, callee), inout what);
                 put_str(inout what, "' requires ");
-                display(in sess.c.types, in sess.c.names, ty, inout what);
+                display(in sess.ctx.types, in sess.ctx.names, ty, inout what);
                 put_str(inout what, ": ");
-                put_sym_bytes(in sess.c.names, tname, inout what);
-                if !closed(in sess.c.types, ty) {
+                put_sym_bytes(in sess.ctx.names, trait_name, inout what);
+                if !closed(in sess.ctx.types, ty) {
                     put_str(
                         inout what,
                         ", but the type argument cannot be inferred; annotate the arguments"
                     );
-                    push_diag(inout errors, CODE_E0607, cs, ce, in what);
+                    push_diag(inout errors, CODE_E0607, call_span_start, call_span_end, in what);
                     continue;
                 }
-                let cx = get_call_cx(in cp, in m, fi, cidx);
+                let context = get_call_cx(in pool, in mono, fi, call_idx);
                 check_one_obligation(
                     inout sess,
-                    in m,
-                    in cx,
+                    in mono,
+                    in context,
                     fi,
-                    tname,
+                    trait_name,
                     ty,
                     in args.as_slice(),
-                    cs,
-                    ce,
+                    call_span_start,
+                    call_span_end,
                     in what,
                     inout errors
                 );
             }
         }
-        let ta = w(u32_at(in m.fn_ta, fi));
-        let tn = w(u32_at(in m.fn_tn, fi));
-        for ti in 0..tn {
-            let ty = u32_at(in m.walk_tys, add(ta, ti));
-            check_type_obligations(inout sess, in m, in cp, fi, ty, inout errors);
+        let walk_start = w(u32_at(in mono.fn_walk_start, fi));
+        let walk_count = w(u32_at(in mono.fn_walk_count, fi));
+        for ti in 0..walk_count {
+            let ty = u32_at(in mono.walk_tys, add(walk_start, ti));
+            check_type_obligations(inout sess, in mono, in pool, fi, ty, inout errors);
         }
     }
 }
 
 pub fn read_mono_tables(
-    inout r: Reader,
-    in b: Slice[u8],
+    inout reader: Reader,
+    in bytes: Slice[u8],
     inout sess: PactSession,
     in nmap: ChunkSeq[u32],
     in tmap: ChunkSeq[u32]
 ) -> (MonoTables, CxPool) {
-    let n_adts = r.word(in b);
-    let mut adt_names = ChunkSeq::with_capacity[u32](n_adts);
-    let mut adt_ga = ChunkSeq::with_capacity[u32](n_adts);
-    let mut adt_gn = ChunkSeq::with_capacity[u32](n_adts);
+    let adt_count = reader.word(in bytes);
+    let mut adt_names = ChunkSeq::with_capacity[u32](adt_count);
+    let mut adt_gen_start = ChunkSeq::with_capacity[u32](adt_count);
+    let mut adt_gen_count = ChunkSeq::with_capacity[u32](adt_count);
     let mut adt_gen_names = ChunkSeq::new[u32]();
-    for _ in 0..n_adts {
-        adt_names.push(sym(in nmap, r.word(in b)));
-        adt_ga.push(n32(adt_gen_names.len()));
-        let gn = r.word(in b);
-        adt_gn.push(n32(gn));
-        for _ in 0..gn {
-            adt_gen_names.push(sym(in nmap, r.word(in b)));
+    for _ in 0..adt_count {
+        adt_names.push(sym(in nmap, reader.word(in bytes)));
+        adt_gen_start.push(n32(adt_gen_names.len()));
+        let gen_count = reader.word(in bytes);
+        adt_gen_count.push(n32(gen_count));
+        for _ in 0..gen_count {
+            adt_gen_names.push(sym(in nmap, reader.word(in bytes)));
         }
     }
 
-    let n_tb = r.word(in b);
-    let mut tb_adt_names = ChunkSeq::with_capacity[u32](n_tb);
-    let mut tb_ea = ChunkSeq::with_capacity[u32](n_tb);
-    let mut tb_en = ChunkSeq::with_capacity[u32](n_tb);
+    let tb_count = reader.word(in bytes);
+    let mut tb_adt_names = ChunkSeq::with_capacity[u32](tb_count);
+    let mut tb_entry_start = ChunkSeq::with_capacity[u32](tb_count);
+    let mut tb_entry_count = ChunkSeq::with_capacity[u32](tb_count);
     let mut tb_param_idx = ChunkSeq::new[u32]();
     let mut tb_trait = ChunkSeq::new[u32]();
-    let mut tb_aa = ChunkSeq::new[u32]();
-    let mut tb_an = ChunkSeq::new[u32]();
+    let mut tb_arg_start = ChunkSeq::new[u32]();
+    let mut tb_arg_count = ChunkSeq::new[u32]();
     let mut tb_args = ChunkSeq::new[u32]();
-    for _ in 0..n_tb {
-        tb_adt_names.push(sym(in nmap, r.word(in b)));
-        tb_ea.push(n32(tb_param_idx.len()));
-        let en = r.word(in b);
-        tb_en.push(n32(en));
-        for _ in 0..en {
-            tb_param_idx.push(n32(r.word(in b)));
-            tb_trait.push(sym(in nmap, r.word(in b)));
-            tb_aa.push(n32(tb_args.len()));
-            let an = r.word(in b);
-            tb_an.push(n32(an));
-            for _ in 0..an {
-                tb_args.push(u32_at(in tmap, r.word(in b)));
+    for _ in 0..tb_count {
+        tb_adt_names.push(sym(in nmap, reader.word(in bytes)));
+        tb_entry_start.push(n32(tb_param_idx.len()));
+        let entry_count = reader.word(in bytes);
+        tb_entry_count.push(n32(entry_count));
+        for _ in 0..entry_count {
+            tb_param_idx.push(n32(reader.word(in bytes)));
+            tb_trait.push(sym(in nmap, reader.word(in bytes)));
+            tb_arg_start.push(n32(tb_args.len()));
+            let arg_count = reader.word(in bytes);
+            tb_arg_count.push(n32(arg_count));
+            for _ in 0..arg_count {
+                tb_args.push(u32_at(in tmap, reader.word(in bytes)));
             }
         }
     }
 
-    let nf = r.word(in b);
-    let mut fn_names = ChunkSeq::with_capacity[u32](nf);
-    let mut fn_is_stub = ChunkSeq::with_capacity[u8](nf);
-    let mut fn_s = ChunkSeq::with_capacity[u64](nf);
-    let mut fn_e = ChunkSeq::with_capacity[u64](nf);
-    let mut fn_ga = ChunkSeq::with_capacity[u32](nf);
-    let mut fn_gn = ChunkSeq::with_capacity[u32](nf);
+    let fn_count = reader.word(in bytes);
+    let mut fn_names = ChunkSeq::with_capacity[u32](fn_count);
+    let mut fn_is_stub = ChunkSeq::with_capacity[u8](fn_count);
+    let mut fn_span_start = ChunkSeq::with_capacity[u64](fn_count);
+    let mut fn_span_end = ChunkSeq::with_capacity[u64](fn_count);
+    let mut fn_gen_start = ChunkSeq::with_capacity[u32](fn_count);
+    let mut fn_gen_count = ChunkSeq::with_capacity[u32](fn_count);
     let mut gen_names = ChunkSeq::new[u32]();
-    let mut fn_ba = ChunkSeq::with_capacity[u32](nf);
-    let mut fn_bn = ChunkSeq::with_capacity[u32](nf);
+    let mut fn_bound_start = ChunkSeq::with_capacity[u32](fn_count);
+    let mut fn_bound_count = ChunkSeq::with_capacity[u32](fn_count);
     let mut bnd_trait = ChunkSeq::new[u32]();
     let mut bnd_ty = ChunkSeq::new[u32]();
-    let mut bnd_aa = ChunkSeq::new[u32]();
-    let mut bnd_an = ChunkSeq::new[u32]();
+    let mut bnd_arg_start = ChunkSeq::new[u32]();
+    let mut bnd_arg_count = ChunkSeq::new[u32]();
     let mut bnd_args = ChunkSeq::new[u32]();
-    let mut fn_ca = ChunkSeq::with_capacity[u32](nf);
-    let mut fn_cn = ChunkSeq::with_capacity[u32](nf);
-    let mut call_s = ChunkSeq::new[u64]();
-    let mut call_e = ChunkSeq::new[u64]();
+    let mut fn_call_start = ChunkSeq::with_capacity[u32](fn_count);
+    let mut fn_call_count = ChunkSeq::with_capacity[u32](fn_count);
+    let mut call_span_start = ChunkSeq::new[u64]();
+    let mut call_span_end = ChunkSeq::new[u64]();
     let mut call_callee = ChunkSeq::new[u32]();
-    let mut call_va = ChunkSeq::new[u32]();
-    let mut call_vn = ChunkSeq::new[u32]();
-    let mut call_vname = ChunkSeq::new[u32]();
-    let mut call_vty = ChunkSeq::new[u32]();
-    let mut call_sc_a = ChunkSeq::new[u32]();
-    let mut call_sc_n = ChunkSeq::new[u32]();
+    let mut call_var_start = ChunkSeq::new[u32]();
+    let mut call_var_count = ChunkSeq::new[u32]();
+    let mut call_var_name = ChunkSeq::new[u32]();
+    let mut call_var_ty = ChunkSeq::new[u32]();
+    let mut call_scopes_start = ChunkSeq::new[u32]();
+    let mut call_scopes_count = ChunkSeq::new[u32]();
     let mut call_scope_at = ChunkSeq::new[u32]();
     let mut call_scope_len = ChunkSeq::new[u32]();
-    let mut call_sm_a = ChunkSeq::new[u32]();
-    let mut call_sm_n = ChunkSeq::new[u32]();
+    let mut call_models_start = ChunkSeq::new[u32]();
+    let mut call_models_count = ChunkSeq::new[u32]();
     let mut call_scope_models = ChunkSeq::new[u32]();
-    let mut fn_fa = ChunkSeq::with_capacity[u32](nf);
-    let mut fn_fn = ChunkSeq::with_capacity[u32](nf);
-    let mut fval_s = ChunkSeq::new[u64]();
-    let mut fval_e = ChunkSeq::new[u64]();
+    let mut fn_fval_start = ChunkSeq::with_capacity[u32](fn_count);
+    let mut fn_fval_count = ChunkSeq::with_capacity[u32](fn_count);
+    let mut fval_span_start = ChunkSeq::new[u64]();
+    let mut fval_span_end = ChunkSeq::new[u64]();
     let mut fval_target = ChunkSeq::new[u32]();
-    let mut fn_ta = ChunkSeq::with_capacity[u32](nf);
-    let mut fn_tn = ChunkSeq::with_capacity[u32](nf);
+    let mut fn_walk_start = ChunkSeq::with_capacity[u32](fn_count);
+    let mut fn_walk_count = ChunkSeq::with_capacity[u32](fn_count);
     let mut walk_tys = ChunkSeq::new[u32]();
 
-    let mut cp_env_a = ChunkSeq::with_capacity[u32](nf);
-    let mut cp_env_n = ChunkSeq::with_capacity[u32](nf);
+    let mut cp_env_start = ChunkSeq::with_capacity[u32](fn_count);
+    let mut cp_env_count = ChunkSeq::with_capacity[u32](fn_count);
     let mut cp_env_params = ChunkSeq::new[Gen]();
-    let mut cp_ass_a = ChunkSeq::with_capacity[u32](nf);
-    let mut cp_ass_n = ChunkSeq::with_capacity[u32](nf);
+    let mut cp_assumption_start = ChunkSeq::with_capacity[u32](fn_count);
+    let mut cp_assumption_count = ChunkSeq::with_capacity[u32](fn_count);
     let mut cp_assumptions = ChunkSeq::new[QGoal]();
-    let mut cp_arg_a = ChunkSeq::with_capacity[u32](nf);
-    let mut cp_arg_n = ChunkSeq::with_capacity[u32](nf);
+    let mut cp_arg_start = ChunkSeq::with_capacity[u32](fn_count);
+    let mut cp_arg_count = ChunkSeq::with_capacity[u32](fn_count);
     let mut cp_args = ChunkSeq::new[QArg]();
-    let mut cp_sc_a = ChunkSeq::with_capacity[u32](nf);
-    let mut cp_sc_n = ChunkSeq::with_capacity[u32](nf);
+    let mut cp_scopes_start = ChunkSeq::with_capacity[u32](fn_count);
+    let mut cp_scopes_count = ChunkSeq::with_capacity[u32](fn_count);
     let mut cp_scope_at = ChunkSeq::new[u32]();
     let mut cp_scope_len = ChunkSeq::new[u32]();
-    let mut cp_sm_a = ChunkSeq::with_capacity[u32](nf);
-    let mut cp_sm_n = ChunkSeq::with_capacity[u32](nf);
+    let mut cp_models_start = ChunkSeq::with_capacity[u32](fn_count);
+    let mut cp_models_count = ChunkSeq::with_capacity[u32](fn_count);
     let mut cp_scope_models = ChunkSeq::new[u32]();
 
-    for _ in 0..nf {
-        let fname = sym(in nmap, r.word(in b));
-        fn_names.push(fname);
+    for _ in 0..fn_count {
+        let fn_name = sym(in nmap, reader.word(in bytes));
+        fn_names.push(fn_name);
         fn_is_stub.push(
-            if sym_starts_with(in sess.c.names, fname, "bound$") {
+            if sym_starts_with(in sess.ctx.names, fn_name, "bound$") {
                 1
             } else {
                 0
             }
         );
-        fn_s.push(r.word(in b));
-        fn_e.push(r.word(in b));
+        fn_span_start.push(reader.word(in bytes));
+        fn_span_end.push(reader.word(in bytes));
 
-        let cx = read_cx_header(inout r, in b, inout sess, in nmap, in tmap, fname);
-        fn_ga.push(n32(gen_names.len()));
-        fn_gn.push(n32(cx.env_params.len()));
-        cp_env_a.push(n32(cp_env_params.len()));
-        cp_env_n.push(n32(cx.env_params.len()));
-        for gi in 0..cx.env_params.len() {
-            let g = match cx.env_params.try_get(gi) {
+        let context = read_cx_header(inout reader, in bytes, inout sess, in nmap, in tmap, fn_name);
+        fn_gen_start.push(n32(gen_names.len()));
+        fn_gen_count.push(n32(context.env_params.len()));
+        cp_env_start.push(n32(cp_env_params.len()));
+        cp_env_count.push(n32(context.env_params.len()));
+        for gi in 0..context.env_params.len() {
+            let generic = match context.env_params.try_get(gi) {
                 Option::Some(v) => v,
                 Option::None => continue,
             };
-            gen_names.push(g.name);
-            cp_env_params.push(g);
+            gen_names.push(generic.name);
+            cp_env_params.push(generic);
         }
-        cp_ass_a.push(n32(cp_assumptions.len()));
-        cp_ass_n.push(n32(cx.assumptions.len()));
-        cp_assumptions.extend(in cx.assumptions.as_slice());
-        cp_arg_a.push(n32(cp_args.len()));
-        cp_arg_n.push(n32(cx.args.len()));
-        cp_args.extend(in cx.args.as_slice());
-        cp_sc_a.push(n32(cp_scope_at.len()));
-        cp_sc_n.push(n32(cx.scope_at.len()));
-        cp_scope_at.extend(in cx.scope_at.as_slice());
-        cp_scope_len.extend(in cx.scope_len.as_slice());
-        cp_sm_a.push(n32(cp_scope_models.len()));
-        cp_sm_n.push(n32(cx.scope_models.len()));
-        cp_scope_models.extend(in cx.scope_models.as_slice());
+        cp_assumption_start.push(n32(cp_assumptions.len()));
+        cp_assumption_count.push(n32(context.assumptions.len()));
+        cp_assumptions.extend(in context.assumptions.as_slice());
+        cp_arg_start.push(n32(cp_args.len()));
+        cp_arg_count.push(n32(context.args.len()));
+        cp_args.extend(in context.args.as_slice());
+        cp_scopes_start.push(n32(cp_scope_at.len()));
+        cp_scopes_count.push(n32(context.scope_at.len()));
+        cp_scope_at.extend(in context.scope_at.as_slice());
+        cp_scope_len.extend(in context.scope_len.as_slice());
+        cp_models_start.push(n32(cp_scope_models.len()));
+        cp_models_count.push(n32(context.scope_models.len()));
+        cp_scope_models.extend(in context.scope_models.as_slice());
 
-        fn_ba.push(n32(bnd_trait.len()));
-        let bn = r.word(in b);
-        fn_bn.push(n32(bn));
-        for _ in 0..bn {
-            bnd_trait.push(sym(in nmap, r.word(in b)));
-            bnd_ty.push(u32_at(in tmap, r.word(in b)));
-            bnd_aa.push(n32(bnd_args.len()));
-            let an = r.word(in b);
-            bnd_an.push(n32(an));
-            for _ in 0..an {
-                bnd_args.push(u32_at(in tmap, r.word(in b)));
+        fn_bound_start.push(n32(bnd_trait.len()));
+        let bound_count = reader.word(in bytes);
+        fn_bound_count.push(n32(bound_count));
+        for _ in 0..bound_count {
+            bnd_trait.push(sym(in nmap, reader.word(in bytes)));
+            bnd_ty.push(u32_at(in tmap, reader.word(in bytes)));
+            bnd_arg_start.push(n32(bnd_args.len()));
+            let arg_count = reader.word(in bytes);
+            bnd_arg_count.push(n32(arg_count));
+            for _ in 0..arg_count {
+                bnd_args.push(u32_at(in tmap, reader.word(in bytes)));
             }
         }
 
-        fn_ca.push(n32(call_s.len()));
-        let cn = r.word(in b);
-        fn_cn.push(n32(cn));
-        for _ in 0..cn {
-            call_s.push(r.word(in b));
-            call_e.push(r.word(in b));
-            call_callee.push(n32(r.word(in b)));
-            call_va.push(n32(call_vname.len()));
-            let vn = r.word(in b);
-            call_vn.push(n32(vn));
-            for _ in 0..vn {
-                call_vname.push(sym(in nmap, r.word(in b)));
-                call_vty.push(u32_at(in tmap, r.word(in b)));
+        fn_call_start.push(n32(call_span_start.len()));
+        let call_count = reader.word(in bytes);
+        fn_call_count.push(n32(call_count));
+        for _ in 0..call_count {
+            call_span_start.push(reader.word(in bytes));
+            call_span_end.push(reader.word(in bytes));
+            call_callee.push(n32(reader.word(in bytes)));
+            call_var_start.push(n32(call_var_name.len()));
+            let var_count = reader.word(in bytes);
+            call_var_count.push(n32(var_count));
+            for _ in 0..var_count {
+                call_var_name.push(sym(in nmap, reader.word(in bytes)));
+                call_var_ty.push(u32_at(in tmap, reader.word(in bytes)));
             }
-            call_sc_a.push(n32(call_scope_at.len()));
-            let cns = r.word(in b);
-            call_sc_n.push(n32(cns));
-            call_sm_a.push(n32(call_scope_models.len()));
-            let sm_start = call_scope_models.len();
-            for _ in 0..cns {
-                call_scope_at.push(n32(wrapping_sub(call_scope_models.len(), sm_start)));
-                let sl = r.word(in b);
-                call_scope_len.push(n32(sl));
-                for _ in 0..sl {
-                    call_scope_models.push(sym(in nmap, r.word(in b)));
+            call_scopes_start.push(n32(call_scope_at.len()));
+            let scope_count = reader.word(in bytes);
+            call_scopes_count.push(n32(scope_count));
+            call_models_start.push(n32(call_scope_models.len()));
+            let model_base = call_scope_models.len();
+            for _ in 0..scope_count {
+                call_scope_at.push(n32(wrapping_sub(call_scope_models.len(), model_base)));
+                let models_len = reader.word(in bytes);
+                call_scope_len.push(n32(models_len));
+                for _ in 0..models_len {
+                    call_scope_models.push(sym(in nmap, reader.word(in bytes)));
                 }
             }
-            call_sm_n.push(n32(wrapping_sub(call_scope_models.len(), sm_start)));
+            call_models_count.push(n32(wrapping_sub(call_scope_models.len(), model_base)));
         }
 
-        fn_fa.push(n32(fval_s.len()));
-        let fn_cnt = r.word(in b);
-        fn_fn.push(n32(fn_cnt));
-        for _ in 0..fn_cnt {
-            fval_s.push(r.word(in b));
-            fval_e.push(r.word(in b));
-            fval_target.push(n32(r.word(in b)));
+        fn_fval_start.push(n32(fval_span_start.len()));
+        let fval_count = reader.word(in bytes);
+        fn_fval_count.push(n32(fval_count));
+        for _ in 0..fval_count {
+            fval_span_start.push(reader.word(in bytes));
+            fval_span_end.push(reader.word(in bytes));
+            fval_target.push(n32(reader.word(in bytes)));
         }
 
-        fn_ta.push(n32(walk_tys.len()));
-        let tn = r.word(in b);
-        fn_tn.push(n32(tn));
-        for _ in 0..tn {
-            walk_tys.push(u32_at(in tmap, r.word(in b)));
+        fn_walk_start.push(n32(walk_tys.len()));
+        let walk_count = reader.word(in bytes);
+        fn_walk_count.push(n32(walk_count));
+        for _ in 0..walk_count {
+            walk_tys.push(u32_at(in tmap, reader.word(in bytes)));
         }
     }
 
     (
         MonoTables {
             adt_names: adt_names,
-            adt_ga: adt_ga,
-            adt_gn: adt_gn,
+            adt_gen_start: adt_gen_start,
+            adt_gen_count: adt_gen_count,
             adt_gen_names: adt_gen_names,
             tb_adt_names: tb_adt_names,
-            tb_ea: tb_ea,
-            tb_en: tb_en,
+            tb_entry_start: tb_entry_start,
+            tb_entry_count: tb_entry_count,
             tb_param_idx: tb_param_idx,
             tb_trait: tb_trait,
-            tb_aa: tb_aa,
-            tb_an: tb_an,
+            tb_arg_start: tb_arg_start,
+            tb_arg_count: tb_arg_count,
             tb_args: tb_args,
             fn_names: fn_names,
             fn_is_stub: fn_is_stub,
-            fn_s: fn_s,
-            fn_e: fn_e,
-            fn_ga: fn_ga,
-            fn_gn: fn_gn,
+            fn_span_start: fn_span_start,
+            fn_span_end: fn_span_end,
+            fn_gen_start: fn_gen_start,
+            fn_gen_count: fn_gen_count,
             gen_names: gen_names,
-            fn_ba: fn_ba,
-            fn_bn: fn_bn,
+            fn_bound_start: fn_bound_start,
+            fn_bound_count: fn_bound_count,
             bnd_trait: bnd_trait,
             bnd_ty: bnd_ty,
-            bnd_aa: bnd_aa,
-            bnd_an: bnd_an,
+            bnd_arg_start: bnd_arg_start,
+            bnd_arg_count: bnd_arg_count,
             bnd_args: bnd_args,
-            fn_ca: fn_ca,
-            fn_cn: fn_cn,
-            call_s: call_s,
-            call_e: call_e,
+            fn_call_start: fn_call_start,
+            fn_call_count: fn_call_count,
+            call_span_start: call_span_start,
+            call_span_end: call_span_end,
             call_callee: call_callee,
-            call_va: call_va,
-            call_vn: call_vn,
-            call_vname: call_vname,
-            call_vty: call_vty,
-            call_sc_a: call_sc_a,
-            call_sc_n: call_sc_n,
+            call_var_start: call_var_start,
+            call_var_count: call_var_count,
+            call_var_name: call_var_name,
+            call_var_ty: call_var_ty,
+            call_scopes_start: call_scopes_start,
+            call_scopes_count: call_scopes_count,
             call_scope_at: call_scope_at,
             call_scope_len: call_scope_len,
-            call_sm_a: call_sm_a,
-            call_sm_n: call_sm_n,
+            call_models_start: call_models_start,
+            call_models_count: call_models_count,
             call_scope_models: call_scope_models,
-            fn_fa: fn_fa,
-            fn_fn: fn_fn,
-            fval_s: fval_s,
-            fval_e: fval_e,
+            fn_fval_start: fn_fval_start,
+            fn_fval_count: fn_fval_count,
+            fval_span_start: fval_span_start,
+            fval_span_end: fval_span_end,
             fval_target: fval_target,
-            fn_ta: fn_ta,
-            fn_tn: fn_tn,
+            fn_walk_start: fn_walk_start,
+            fn_walk_count: fn_walk_count,
             walk_tys: walk_tys
         },
         CxPool {
-            env_a: cp_env_a,
-            env_n: cp_env_n,
+            env_start: cp_env_start,
+            env_count: cp_env_count,
             env_params: cp_env_params,
-            ass_a: cp_ass_a,
-            ass_n: cp_ass_n,
+            assumption_start: cp_assumption_start,
+            assumption_count: cp_assumption_count,
             assumptions: cp_assumptions,
-            arg_a: cp_arg_a,
-            arg_n: cp_arg_n,
+            arg_start: cp_arg_start,
+            arg_count: cp_arg_count,
             args: cp_args,
-            sc_a: cp_sc_a,
-            sc_n: cp_sc_n,
+            scopes_start: cp_scopes_start,
+            scopes_count: cp_scopes_count,
             scope_at: cp_scope_at,
             scope_len: cp_scope_len,
-            sm_a: cp_sm_a,
-            sm_n: cp_sm_n,
+            models_start: cp_models_start,
+            models_count: cp_models_count,
             scope_models: cp_scope_models
         }
     )
@@ -903,71 +936,71 @@ pub fn read_mono_tables(
 
 fn mono_check_body(
     inout sess: PactSession,
-    inout r: Reader,
-    in b: Slice[u8],
+    inout reader: Reader,
+    in bytes: Slice[u8],
     inout out: ChunkSeq[u64]
 ) {
     let mut nmap = ChunkSeq::new[u32]();
-    read_q_names(inout r, in b, inout sess.c.names, inout nmap);
+    read_q_names(inout reader, in bytes, inout sess.ctx.names, inout nmap);
     let mut tmap = ChunkSeq::new[u32]();
-    read_q_types(inout r, in b, inout sess.c, in nmap, inout tmap);
-    let (m, cp) = read_mono_tables(inout r, in b, inout sess, in nmap, in tmap);
+    read_q_types(inout reader, in bytes, inout sess.ctx, in nmap, inout tmap);
+    let (mono, pool) = read_mono_tables(inout reader, in bytes, inout sess, in nmap, in tmap);
     let mut errors = diags_new();
-    let bounded = close_bounded(in sess.c.types, in sess.c.names, in m, inout errors);
-    check_obligations(inout sess, in m, in cp, inout errors);
+    let bounded = close_bounded(in sess.ctx.types, in sess.ctx.names, in mono, inout errors);
+    check_obligations(inout sess, in mono, in pool, inout errors);
     out.push(bounded.len());
     for i in 0..bounded.len() {
         out.push(if u8_at(in bounded, i) != 0 { 1 } else { 0 });
     }
     out.push(errors.codes.len());
     for i in 0..errors.codes.len() {
-        let c = u8_at(in errors.codes, i);
+        let code = u8_at(in errors.codes, i);
         out.push(
-            if c == 1 {
+            if code == 1 {
                 1
-            } else if c == 2 {
+            } else if code == 2 {
                 2
-            } else if c == 3 {
+            } else if code == 3 {
                 3
             } else {
                 0
             }
         );
-        out.push(u64_at(in errors.s, i));
-        out.push(u64_at(in errors.e, i));
-        let ma = w(u32_at(in errors.msg_a, i));
-        let mn = w(u32_at(in errors.msg_n, i));
-        let mut msg = ChunkSeq::with_capacity[u8](mn);
-        for j in 0..mn {
-            msg.push(u8_at(in errors.msg_bytes, add(ma, j)));
+        out.push(u64_at(in errors.span_start, i));
+        out.push(u64_at(in errors.span_end, i));
+        let msg_start = w(u32_at(in errors.msg_start, i));
+        let msg_len = w(u32_at(in errors.msg_len, i));
+        let mut msg = ChunkSeq::with_capacity[u8](msg_len);
+        for j in 0..msg_len {
+            msg.push(u8_at(in errors.msg_bytes, add(msg_start, j)));
         }
-        let pmsg = pack_text(in msg);
-        out.extend(in pmsg.as_slice());
+        let packed_msg = pack_text(in msg);
+        out.extend(in packed_msg.as_slice());
     }
 }
 
 // Entrypoint for an already-open `PactSession`: `[mono_input]`.
-pub fn session_mono_check_words(inout sess: PactSession, in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
+pub fn session_mono_check_words(inout sess: PactSession, in bytes: Slice[u8]) -> ChunkSeq[u64] {
+    let mut reader = Reader { pos: 0 };
     let mut out = ChunkSeq::new[u64]();
     out.push(0);
     out.push(1);
-    mono_check_body(inout sess, inout r, in b, inout out);
+    mono_check_body(inout sess, inout reader, in bytes, inout out);
     out
 }
 
 // Entrypoint for `check_pact_mono_check`: `[session_input][mono_input]`.
-pub fn mono_check_words(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
-    let mut sess = session_open_reader(inout r, in b);
+pub fn mono_check_words(in bytes: Slice[u8]) -> ChunkSeq[u64] {
+    let mut reader = Reader { pos: 0 };
+    let mut sess = session_open_reader(inout reader, in bytes);
     let mut out = ChunkSeq::new[u64]();
-    let p_out = pack_text(in sess.out);
-    out.extend(in p_out.as_slice());
+    let packed_out = pack_text(in sess.out);
+    out.extend(in packed_out.as_slice());
     if !sess.ok {
         out.push(0);
         return out;
     }
     out.push(1);
-    mono_check_body(inout sess, inout r, in b, inout out);
+    mono_check_body(inout sess, inout reader, in bytes, inout out);
     out
 }

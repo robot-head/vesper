@@ -4,28 +4,21 @@
 // runtime, and for v3 the `repr` mirrors.
 
 use @vesper/check-data::util::{inc, u64_at, u8_at, w};
-use self::iface::{DeclRow, FnRow, ParamRow, VarRow};
+use @vesper-std/bytes::ascii::{UNDERSCORE};
+use self::iface::{
+    DeclRow, FnRow, K_BOX, K_CALLBACK, K_EXTERN, K_NAMED, K_OBJECT, K_SCALAR, K_SEQ, K_SLICE, K_STR,
+    K_TUPLE, M_REPR_C, NONE32, P_IN, P_INOUT, P_SINK, ParamRow, VarRow
+};
 use self::text::{StrSet, copy_of, nl, put, put_seq, put_u64, same, str_set, text};
 use self::binding::{Gen, put_ident};
 use self::binding_v4::{v4_items};
 
-// `AbiType` kinds, passing modes and mirrors (iface.ves).
-const K_SCALAR: u8 = 0;
-const K_TUPLE: u8 = 1;
-const K_NAMED: u8 = 2;
-const K_SEQ: u8 = 3;
-const K_SLICE: u8 = 4;
-const K_BOX: u8 = 5;
-const K_STR: u8 = 6;
-const K_OBJECT: u8 = 7;
-const K_EXTERN: u8 = 8;
-const K_CALLBACK: u8 = 9;
-const P_IN: u8 = 1;
-const P_INOUT: u8 = 2;
-const P_SINK: u8 = 3;
-const M_REPR_C: u8 = 1;
-
-const NONE32: u32 = 4294967295;
+// `methods`: how a method takes its receiver: none, `&self`, `&mut self`
+// or `self`.
+const RECV_NONE: u8 = 0;
+const RECV_REF: u8 = 1;
+const RECV_MUT: u8 = 2;
+const RECV_OWNED: u8 = 3;
 
 // `Names`: fresh local names that never shadow a parameter or each other.
 pub fn fresh(inout taken: StrSet, in base: ChunkSeq[u8]) -> ChunkSeq[u8] {
@@ -34,7 +27,7 @@ pub fn fresh(inout taken: StrSet, in base: ChunkSeq[u8]) -> ChunkSeq[u8] {
         if !taken.contains(in n) {
             break;
         }
-        n.push(95);
+        n.push(UNDERSCORE);
     }
     taken.insert_key(in n, 0);
     n
@@ -1101,7 +1094,7 @@ impl Gen {
     fn methods(in self, inout out: ChunkSeq[u8], d: DeclRow) {
         let mut prefix = ChunkSeq::new[u8]();
         self.put_snake(inout prefix, d.name);
-        prefix.push(95);
+        prefix.push(UNDERSCORE);
         let mut lines = ChunkSeq::new[u8]();
         let mut any = false;
         for fi in 0..self.i.fns.len() {
@@ -1125,24 +1118,24 @@ impl Gen {
                 method.push(u8_at(in fname, k));
             }
             // receiver: 0 none, 1 &self, 2 &mut self, 3 self
-            let mut receiver: u8 = 0;
+            let mut receiver: u8 = RECV_NONE;
             if f.pn > 0 {
                 let p = self.i.param(f.p0);
                 if self.names_decl(p.ty, d.name) {
                     let pass = self.i.pass(p);
                     receiver = if pass == P_IN {
-                        1
+                        RECV_REF
                     } else if pass == P_INOUT {
-                        2
+                        RECV_MUT
                     } else {
-                        3
+                        RECV_OWNED
                     };
                 }
             }
-            if receiver == 0 && !self.names_decl(f.result, d.name) {
+            if receiver == RECV_NONE && !self.names_decl(f.result, d.name) {
                 continue;
             }
-            let skip: u64 = if receiver == 0 { 0 } else { 1 };
+            let skip: u64 = if receiver == RECV_NONE { 0 } else { 1 };
             if any {
                 put(inout lines, "\n\n");
             }
@@ -1167,13 +1160,13 @@ impl Gen {
             put_ident(inout lines, in method);
             put(inout lines, "(");
             let mut first = true;
-            if receiver == 1 {
+            if receiver == RECV_REF {
                 put(inout lines, "&self");
                 first = false;
-            } else if receiver == 2 {
+            } else if receiver == RECV_MUT {
                 put(inout lines, "&mut self");
                 first = false;
-            } else if receiver == 3 {
+            } else if receiver == RECV_OWNED {
                 put(inout lines, "self");
                 first = false;
             }

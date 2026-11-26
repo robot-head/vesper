@@ -104,4 +104,9 @@ const EDITS: &[(&str, &str)] = &[
         "    if kind == Region::Packet && at < i.data_off {\n",
         "    if kind == Region::Packet && wrapping_add(at, 1) < i.data_off {\n",
     ),
+    // 13 mitigator.rs: the reference model drops at the threshold itself.
+    (
+        "    let action = if count <= threshold {\n",
+        "    let action = if count < threshold {\n",
+    ),
 ];

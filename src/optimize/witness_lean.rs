@@ -260,9 +260,6 @@ impl PreparedLean {
     pub fn manifest(&self) -> &ReplayManifest {
         &self.manifest
     }
-    pub fn into_module(self) -> Module {
-        self.module
-    }
     pub fn render(self) -> Result<RenderedLean, ExportError> {
         // AST/all printer temporaries/output growth were prepaid before AST
         // construction. This is the sole serialization, never a measurement pass.

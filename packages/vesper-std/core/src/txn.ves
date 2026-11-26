@@ -1,4 +1,4 @@
-// Copy-state rollback, from manuscript §7.7. Only the named binding is
+// Copy-state rollback, from manuscript §7.7. Only the named place is
 // restored; writes elsewhere remain visible. Fail[E] is handled and raised
 // again with the same payload. A local Fail handler inside the body can
 // recover normally, in which case the writes commit.
@@ -12,14 +12,17 @@ fn restore[T: mod copy](inout dst: T, value: T) {
 
 // Usage: transact inout config on[ConfigError] returning[Config] { ... }
 // Explicit error and success types fix the handler result layout in native code.
-// An identifier prevents a projected/indexed place from being evaluated
-// twice. The handler records the exit without capturing the inout place;
+// A binding or its named field path has no effectful address to re-evaluate.
+// Indexed places and computed bases are deliberately not accepted.
+// The handler records the exit without capturing the inout place;
 // only the error arm outside the handler restores the snapshot. As in any
 // handled body, break and continue cannot target a loop outside the body.
 pub sugar transact: expr emits eff [Fail] {
-    rule (transact inout $target:ident on[$error:ty] returning[$ok:ty] $body:block) => {
+    rule (
+        transact inout $target:ident $(.$field:ident)* on[$error:ty] returning[$ok:ty] $body:block
+    ) => {
         {
-            let before = snapshot(in $target);
+            let before = snapshot(in $target $(.$field)*);
             let outcome: Result[$ok, $error] = handle Fail[$error] in {
                 $body
             } with {
@@ -29,7 +32,7 @@ pub sugar transact: expr emits eff [Fail] {
             match outcome {
                 Result::Ok(value) => value,
                 Result::Err(failure) => {
-                    restore(inout $target, before);
+                    restore(inout $target $(.$field)*, before);
                     Fail::raise(failure)
                 },
             }
@@ -63,6 +66,41 @@ test {
         }
     }
 
+    copy struct Ledger {
+        state: State,
+        writes: u64,
+    }
+
+    fn adjust_balance(inout ledger: Ledger, rejected: bool) -> u64 eff [Fail[Rejected]] {
+        transact inout ledger.state.balance on[Rejected] returning[u64] {
+            ledger.state.balance = 5;
+            ledger.state.count = 9;
+            ledger.writes = wrapping_add(ledger.writes, 1);
+            if rejected {
+                Fail::raise(
+                    Rejected {
+                        code: 77
+                    }
+                );
+            }
+            ledger.state.balance
+        }
+    }
+
+    fn same_outcome_for_field_path(rejected: bool, outcome: u64, balance: u64) -> bool {
+        let mut ledger = Ledger { state: State { balance: 12, count: 2 }, writes: 0 };
+        let result = handle Fail[Rejected] in {
+            adjust_balance(inout ledger, rejected)
+        } with {
+            return value => value,
+            raise(error, _) => error.code,
+        };
+        result == outcome
+            && ledger.state.balance == balance
+            && ledger.state.count == 9
+            && ledger.writes == 1
+    }
+
     // @case commit(false, 5, 5, 9)
     // @case rollback(true, 77, 12, 2)
     fn test_rollback_only_the_target(
@@ -79,7 +117,11 @@ test {
             return value => value,
             raise(error, _) => error.code,
         };
-        result == outcome && target.balance == balance && target.count == count && changes == 1
+        result == outcome
+            && target.balance == balance
+            && target.count == count
+            && changes == 1
+            && same_outcome_for_field_path(rejected, outcome, balance)
     }
 
     fn nested(inout target: u64) -> u64 eff [Fail[u64]] {

@@ -8,12 +8,21 @@
 use super::*;
 
 impl Session {
-    pub(super) fn world_step(&mut self, step: Step) -> Result<i64, String> {
+    /// `WorldDecls`: the session's encoding of the checked world, or `arg`
+    /// when the Vesper driver collected the declarations itself
+    /// (@vesper/check-collect `decls_words`, the world swap).
+    pub(super) fn world_step(&mut self, step: Step, arg: &[u8]) -> Result<i64, String> {
         match step {
             Step::WorldDecls => {
-                self.text = world_words::encode(&self.checked()?.world);
+                let world = &self.checked()?.world;
+                self.text = if arg.is_empty() {
+                    world_words::encode(world)
+                } else {
+                    crate::vesper_hybrid::driver_world(arg, || world_words::encode(world))
+                };
                 Ok(0)
             }
+            Step::WorldBegin => Ok(i64::from(crate::vesper_hybrid::driver_world_begin())),
             _ => Err(format!("driver: step {} is not a world step", step as u32)),
         }
     }

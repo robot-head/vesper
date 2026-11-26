@@ -1,0 +1,78 @@
+// Module mitigator of @vesper/ebpf (see lib.ves): the reference model of
+// the XDP SYN-flood mitigator (src/mitigator.rs `reference_decision`). The
+// frame is read here, so only the packet bytes cross the port, and the
+// decision comes back as three words (#2230). Where the Rust decodes the
+// whole `EthIpv4TcpWire`, this reads the three fields the decision uses
+// after the same length check (a frame shorter than the struct passes).
+
+// `XdpAction` codes (src/wire.rs).
+const XDP_DROP: u64 = 1;
+const XDP_PASS: u64 = 2;
+
+const ETH_P_IPV4: u16 = 0x0800;
+const IPPROTO_TCP: u8 = 6;
+const TCP_FLAG_SYN: u16 = 0x0002;
+const TCP_FLAG_ACK: u16 = 0x0010;
+// The six TCP flag bits of the data-offset/flags word.
+const TCP_FLAGS_MASK: u16 = 0x3f;
+// The IPv4 header length field (`ver_ihl` low nibble), in 32-bit words.
+const IHL_MASK: u8 = 0x0f;
+const IHL_MIN: u64 = 5;
+const IHL_WORD_BYTES: u64 = 4;
+// `eth_ipv4_tcp` offsets and size (src/wire.rs).
+const ETHER_TYPE_AT: u64 = 12;
+const IPV4_START: u64 = 14;
+const PROTO_AT: u64 = 23;
+const ETH_FRAME_SIZE: u64 = 54;
+// The flags word inside the TCP header (`TCP_FLAGS_OFF`) and the length of
+// a TCP header without options (`TCP_HDR_MIN`).
+const TCP_FLAGS_OFF: u64 = 12;
+const TCP_HDR_MIN: u64 = 20;
+
+// The model's answer: the action code, and the source's new counter when
+// the packet is counted.
+pub copy struct Decision {
+    action: u64,
+    counted: bool,
+    count: u64
+}
+
+fn pass() -> Decision {
+    Decision { action: XDP_PASS, counted: false, count: 0 }
+}
+
+pub fn reference_decision(
+    in packet: Slice[u8],
+    prior_count: Option[u64],
+    threshold: u64
+) -> Decision {
+    if packet.len() < ETH_FRAME_SIZE {
+        return pass();
+    }
+    let ether_type = packet.try_read_u16_be(ETHER_TYPE_AT).unwrap_or(0);
+    let proto = packet.try_get(PROTO_AT).unwrap_or(0);
+    if ether_type != ETH_P_IPV4 || proto != IPPROTO_TCP {
+        return pass();
+    }
+    let ver_ihl = packet.try_get(IPV4_START).unwrap_or(0);
+    let ihl = widen_u64(ver_ihl & IHL_MASK);
+    let tcp = wrapping_add(IPV4_START, wrapping_mul(ihl, IHL_WORD_BYTES));
+    if ihl < IHL_MIN || packet.len() < wrapping_add(tcp, TCP_HDR_MIN) {
+        return pass();
+    }
+    let word = packet.try_read_u16_be(wrapping_add(tcp, TCP_FLAGS_OFF)).unwrap_or(0);
+    let flags = word & TCP_FLAGS_MASK;
+    if flags & TCP_FLAG_SYN == 0 || flags & TCP_FLAG_ACK != 0 {
+        return pass();
+    }
+    let count = match prior_count {
+        Option::Some(c) => wrapping_add(c, 1),
+        Option::None => 1,
+    };
+    let action = if count <= threshold {
+        XDP_PASS
+    } else {
+        XDP_DROP
+    };
+    Decision { action: action, counted: true, count: count }
+}

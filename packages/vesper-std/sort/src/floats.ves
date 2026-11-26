@@ -2,6 +2,7 @@
 use self::unstable::{sort, is_sorted};
 use self::stable::stable_sort;
 use @vesper-std/core::defer::defer;
+use @vesper-std/core::iter::all;
 use @vesper-std/core::pact::using;
 use @vesper-std/sugar::{guard, when};
 
@@ -139,15 +140,9 @@ test {
         expected.push(0x0000000000000000);
         expected.push(0x7ff0000000000000);
         expected.push(0x7ff8000000000001);
-        for i in 0..expected.len() {
-            guard let Option::Some(value) = values.try_get(i) else {
-                return false;
-            };
-            if expected.try_get(i) != Option::Some(to_bits_f64(value)) {
-                return false;
-            }
-        }
-        values.len() == 6 && is_sorted_f64(in values.as_slice())
+        values.len() == expected.len()
+            && all{ { to_bits_f64(value) == bits } | (value, bits) in zip{ values, expected } }
+            && is_sorted_f64(in values.as_slice())
     }
 
     // @case negative_nan(0xffc00001, 0x003ffffe)
