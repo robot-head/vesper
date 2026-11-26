@@ -359,27 +359,6 @@ pub fn os_is_executable(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
     }
 }
 
-// The C library's text for `errno` `e` (`std`'s `error_string`: the XSI
-// `strerror_r` into 128 bytes, up to the NUL; empty when it fails).
-pub fn os_error_string(e: u32) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
-    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    buf.resize(128, 0);
-    let r = StdFs::strerror_r(wrapping_i32(e), inout buf.as_slice_mut());
-    if r < 0 {
-        buf.truncate(0);
-        return buf;
-    }
-    let mut n: u64 = 0;
-    loop {
-        if n >= buf.len() || byte_at(in buf.as_slice(), n) == 0 {
-            break;
-        }
-        n = wrapping_add(n, 1);
-    }
-    buf.truncate(n);
-    buf
-}
-
 // The length of the open file `fd` (0 when it cannot be read).
 pub fn os_file_len(fd: i32) -> u64 eff [Ffi[StdFs]] {
     let mut st = new_stat();

@@ -12,7 +12,7 @@ use std_io_support::{MODES, Temp, agree, check_driver, lit};
 const DRIVER: &str = r#"use @vesper-std/fs::{
     IoError, Metadata, read, read_path, read_string, write, append, create_new, replace, rename,
     remove_file, remove_dir, remove_dir_all, create_dir, create_dir_all, metadata,
-    symlink_metadata, exists, kind_file, kind_dir, error_text, is_executable, write_stdout,
+    symlink_metadata, exists, kind_file, kind_dir, is_executable, write_stdout,
     write_stderr
 };
 use @vesper-std/fs::walk::{
@@ -47,21 +47,6 @@ fn pattern(n: u64) -> ChunkSeq[u8] {
         b.push(wrapping_u8(wrapping_mul(i, 31)));
     }
     b
-}
-
-// The hash of `std::io::Error`'s text for `kind` (an OS error `os` when
-// it is not 0), for every kind 0..=14 and the OS errors 1..@MAXOS@.
-pub fn error_texts() -> u64 eff [Ffi[StdFs]] {
-    let mut h: u64 = 0;
-    for k in 0..15 {
-        let t = error_text(IoError { kind: wrapping_u32(k), os: 0 });
-        h = mix(h, hash(in t.as_slice()));
-    }
-    for os in 1..@MAXOS@ {
-        let t = error_text(IoError { kind: 0, os: wrapping_u32(os) });
-        h = mix(h, hash(in t.as_slice()));
-    }
-    h
 }
 
 // Write a line to standard output and one to standard error: 0, or the
@@ -423,31 +408,6 @@ fn source(dir: &Temp) -> String {
         .replace("@ROOT@", &root)
         .replace("@LONG@", &long_name())
         .replace("@ODD@", if cfg!(unix) { "a\\\\b.txt" } else { "odd.txt" })
-        .replace("@MAXOS@", &MAX_OS.to_string())
-}
-
-/// `error_texts` covers the OS errors `1..MAX_OS`.
-const MAX_OS: i32 = 160;
-
-/// The `io::ErrorKind` of each `IoError` kind code (`commands::io_error` in
-/// vesper-hybrid), `Other` outside 1..=12.
-fn kind_of(code: u64) -> std::io::ErrorKind {
-    use std::io::ErrorKind as K;
-    match code {
-        1 => K::NotFound,
-        2 => K::PermissionDenied,
-        3 => K::AlreadyExists,
-        4 => K::NotADirectory,
-        5 => K::IsADirectory,
-        6 => K::DirectoryNotEmpty,
-        7 => K::InvalidInput,
-        8 => K::Interrupted,
-        9 => K::UnexpectedEof,
-        10 => K::WriteZero,
-        11 => K::Unsupported,
-        12 => K::OutOfMemory,
-        _ => K::Other,
-    }
 }
 
 /// A 240-byte file name for `replace_atomic`.
@@ -735,24 +695,6 @@ fn handles_do_not_leak_across_many_files() {
         assert_eq!(agree(&checked, "churn", &[mode]), want, "{mode:?}");
     }
     let _ = lit;
-}
-
-/// `error_text` is `std::io::Error`'s `Display`: each kind's text, and
-/// the system message with ` (os error N)` for every OS error code.
-#[test]
-fn error_text_matches_std_display() {
-    let dir = Temp::new("std-fs");
-    let checked = check_driver(&source(&dir));
-    let mut want = 0;
-    for k in 0..15 {
-        let t = std::io::Error::from(kind_of(k)).to_string();
-        want = mix(want, hash(t.as_bytes()));
-    }
-    for os in 1..MAX_OS {
-        let t = std::io::Error::from_raw_os_error(os).to_string();
-        want = mix(want, hash(t.as_bytes()));
-    }
-    assert_eq!(agree(&checked, "error_texts", &MODES), want);
 }
 
 /// `is_executable` is the check `vesper <tool>` makes before running a

@@ -27,8 +27,7 @@ use self::sys::{
     os_parent_len,
     os_unique,
     os_word_kind,
-    os_is_executable,
-    os_error_string
+    os_is_executable
 };
 
 // Why an operation failed. `kind` is one of the codes below
@@ -438,49 +437,4 @@ pub fn exists(in path: Str) -> bool eff [Ffi[StdFs]] {
     let mut err: u64 = 0;
     let m = os_metadata(in path.as_bytes(), true, inout err);
     err == 0
-}
-
-// ---------------------------------------------------------------------------
-// Error text.
-
-// `std::io::Error`'s `Display`: for an OS error, the system's message and
-// ` (os error N)`; otherwise the kind's text (`ErrorKind::as_str`).
-pub fn error_text(e: IoError) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
-    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    if e.os != 0 {
-        let msg = os_error_string(e.os);
-        out.extend(in msg.as_slice());
-        out.extend(in " (os error ".as_bytes());
-        push_dec(inout out, widen_u64(e.os));
-        out.push(41);
-        return out;
-    }
-    out.extend(in kind_text(e.kind).as_bytes());
-    out
-}
-
-fn push_dec(inout out: ChunkSeq[u8], v: u64) {
-    if v >= 10 {
-        push_dec(inout out, v / 10);
-    }
-    out.push(wrapping_u8(wrapping_add(48, v % 10)));
-}
-
-// `ErrorKind::as_str` of each kind code.
-fn kind_text(kind: u32) -> Str {
-    match kind {
-        1 => "entity not found",
-        2 => "permission denied",
-        3 => "entity already exists",
-        4 => "not a directory",
-        5 => "is a directory",
-        6 => "directory not empty",
-        7 => "invalid input parameter",
-        8 => "operation interrupted",
-        9 => "unexpected end of file",
-        10 => "write zero",
-        11 => "unsupported",
-        12 => "out of memory",
-        _ => "other error",
-    }
 }
