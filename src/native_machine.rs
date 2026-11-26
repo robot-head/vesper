@@ -1,12 +1,15 @@
 //! Function definition swap for the experimental Vesper machine backend.
 use cranelift_codegen::{
+    binemit::Reloc,
     entity::SecondaryMap,
     ir::{
-        AbiParam, Block, BlockCall, Endianness, Function, Inst, InstructionData, MemFlags, Opcode,
-        StackSlot, StackSlotKind, Type, Value, condcodes::IntCC, immediates::Offset32, types,
+        AbiParam, Block, BlockCall, Endianness, ExternalName, Function, Inst, InstructionData,
+        MemFlags, Opcode, StackSlot, StackSlotKind, Type, Value, ValueDef, condcodes::IntCC,
+        immediates::Offset32, types,
     },
     isa::CallConv,
 };
+use cranelift_module::{ModuleReloc, ModuleRelocTarget};
 use std::sync::OnceLock;
 
 /// Opcodes in the architecture-independent integer block format.
@@ -51,14 +54,22 @@ enum IntegerOp {
     StackStoreDword = 35,
     StackStoreQword = 36,
     ReturnPair = 37,
+    Call = 38,
+    CallArgument = 39,
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
 static ENCODER: OnceLock<Encoder> = OnceLock::new();
+static CALL_ENCODER: OnceLock<Encoder> = OnceLock::new();
 
 /// Install the x86-64 integer encoder. A declined request uses Cranelift.
 pub fn install_integer_encoder(encode: Encoder) -> Result<(), Encoder> {
     ENCODER.set(encode)
+}
+
+/// Installs the encoder for functions that need direct-call relocations.
+pub fn install_call_encoder(encode: Encoder) -> Result<(), Encoder> {
+    CALL_ENCODER.set(encode)
 }
 
 const ARGUMENT_COUNT: usize = 0;
@@ -67,6 +78,8 @@ const HEADER_WORDS: usize = 2;
 const INSTRUCTION_WORDS: usize = 4;
 const GP_ARGUMENTS: usize = 6;
 const GP_RESULTS: usize = 2;
+const FUNCTION_NAMESPACE: u32 = 0;
+const CALL_DISPLACEMENT_BYTES: i64 = size_of::<i32>() as i64;
 
 fn binary_op(opcode: Opcode) -> Option<IntegerOp> {
     Some(match opcode {
@@ -121,8 +134,8 @@ fn integer_bits(bits: i64, ty: Type) -> u64 {
 
 type Values = SecondaryMap<Value, Option<u64>>;
 
-fn supports_memory(flags: MemFlags) -> bool {
-    flags.notrap() && !flags.checked() && flags.endianness(Endianness::Little) == Endianness::Little
+fn supports_memory_format(flags: MemFlags) -> bool {
+    !flags.checked() && flags.endianness(Endianness::Little) == Endianness::Little
 }
 
 fn store_op(opcode: Opcode, ty: Type) -> Option<IntegerOp> {
@@ -153,6 +166,7 @@ struct IntegerBlocks<'a> {
     function: &'a Function,
     arity: usize,
     words: Vec<u64>,
+    calls: bool,
 }
 
 impl IntegerBlocks<'_> {
@@ -174,6 +188,23 @@ impl IntegerBlocks<'_> {
         let offset = u32::try_from(i32::from(offset)).ok()?;
         (offset.checked_add(access)? <= size)
             .then_some([u64::from(slot.as_u32()), u64::from(offset)])
+    }
+
+    fn stack_operand(&self, base: Value, offset: Offset32, access: u32) -> Option<[u64; 2]> {
+        let dfg = &self.function.dfg;
+        let ValueDef::Result(instruction, _) = dfg.value_def(dfg.resolve_aliases(base)) else {
+            return None;
+        };
+        let InstructionData::StackLoad {
+            opcode: Opcode::StackAddr,
+            stack_slot,
+            offset: base_offset,
+        } = dfg.insts[instruction]
+        else {
+            return None;
+        };
+        let offset = i32::from(base_offset).checked_add(i32::from(offset))?;
+        self.stack_location(stack_slot, Offset32::new(offset), access)
     }
 
     fn edge(&self, edge: BlockCall, values: &mut Values) -> Option<Block> {
@@ -229,17 +260,24 @@ impl IntegerBlocks<'_> {
                 offset,
             } = function.dfg.insts[inst]
             {
-                if !supports_memory(flags) || ty(base) != types::I64 {
+                if !supports_memory_format(flags) || ty(base) != types::I64 {
+                    return None;
+                }
+                let address = input(base)?;
+                if opcode == Opcode::Store
+                    && let Some([slot, offset]) =
+                        self.stack_operand(base, offset, ty(source).bytes())
+                {
+                    self.append(stack_store_op(ty(source))?, [input(source)?, slot, offset]);
+                    continue;
+                }
+                if !flags.notrap() {
                     return None;
                 }
                 let op = store_op(opcode, ty(source))?;
                 self.append(
                     op,
-                    [
-                        input(base)?,
-                        input(source)?,
-                        u64::from(i32::from(offset) as u32),
-                    ],
+                    [address, input(source)?, u64::from(i32::from(offset) as u32)],
                 );
                 continue;
             }
@@ -256,6 +294,42 @@ impl IntegerBlocks<'_> {
                     IntegerOp::Constant,
                     [integer_bits(imm.bits(), output), 0, 0],
                 ),
+                InstructionData::Call {
+                    opcode: Opcode::Call,
+                    func_ref,
+                    ..
+                } if output == types::I64 => {
+                    let callee = &function.dfg.ext_funcs[func_ref];
+                    let ExternalName::User(name) = callee.name else {
+                        return None;
+                    };
+                    let name = &function.params.user_named_funcs()[name];
+                    let signature = &function.dfg.signatures[callee.signature];
+                    let args = function.dfg.inst_args(inst);
+                    if name.namespace != FUNCTION_NAMESPACE
+                        || signature.call_conv != CallConv::SystemV
+                        || signature.params.len() != args.len()
+                        || args.len() > GP_ARGUMENTS
+                        || signature.returns != [AbiParam::new(types::I64)]
+                        || signature
+                            .params
+                            .iter()
+                            .any(|param| *param != AbiParam::new(types::I64))
+                    {
+                        return None;
+                    }
+                    for &arg in args {
+                        if ty(arg) != types::I64 {
+                            return None;
+                        }
+                        self.append(IntegerOp::CallArgument, [input(arg)?, 0, 0]);
+                    }
+                    self.calls = true;
+                    (
+                        IntegerOp::Call,
+                        [u64::from(name.index), args.len() as u64, 0],
+                    )
+                }
                 InstructionData::StackLoad {
                     opcode: Opcode::StackAddr,
                     stack_slot,
@@ -289,7 +363,19 @@ impl IntegerBlocks<'_> {
                     flags,
                     arg,
                     offset,
-                } if supports_memory(flags) && ty(arg) == types::I64 => {
+                } if supports_memory_format(flags) && ty(arg) == types::I64 => {
+                    let address = input(arg)?;
+                    if opcode == Opcode::Load
+                        && let Some([slot, offset]) =
+                            self.stack_operand(arg, offset, output.bytes())
+                    {
+                        values[value] =
+                            Some(self.append(IntegerOp::StackLoad, [slot, offset, width]));
+                        continue;
+                    }
+                    if !flags.notrap() {
+                        return None;
+                    }
                     let (access_width, signed) = match opcode {
                         Opcode::Load => (width, false),
                         Opcode::Uload8 => (u64::from(types::I8.bits()), false),
@@ -303,11 +389,7 @@ impl IntegerBlocks<'_> {
                     if opcode != Opcode::Load && access_width >= width {
                         return None;
                     }
-                    let load = [
-                        input(arg)?,
-                        u64::from(i32::from(offset) as u32),
-                        access_width,
-                    ];
+                    let load = [address, u64::from(i32::from(offset) as u32), access_width];
                     if signed {
                         let value = self.append(IntegerOp::Load, load);
                         (IntegerOp::SignExtend, [value, access_width, width])
@@ -471,7 +553,14 @@ impl IntegerBlocks<'_> {
 /// right operand a second result ID as well.
 /// Leading StackSlot records declare frame slots by size and alignment.
 /// Stack addresses and accesses use a slot ordinal and an offset within the slot.
+/// Each Call is preceded by its CallArgument records, in argument order.
+/// The call's left operand is the function ID and its right operand is the
+/// argument count. Argument records leave unreferenced slots.
 pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
+    integer_program(function).map(|(words, _)| words)
+}
+
+fn integer_program(function: &Function) -> Option<(Vec<u64>, bool)> {
     let signature = &function.signature;
     let arity = signature.params.len();
     if signature.call_conv != CallConv::SystemV
@@ -507,6 +596,7 @@ pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
         function,
         arity,
         words: vec![0; HEADER_WORDS],
+        calls: false,
     };
     for slot in function.sized_stack_slots.values() {
         if slot.kind != StackSlotKind::ExplicitSlot {
@@ -530,13 +620,47 @@ pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
     if let Some(high) = high {
         blocks.append(IntegerOp::ReturnPair, [high, 0, 0]);
     }
-    Some(blocks.words)
+    Some((blocks.words, blocks.calls))
+}
+
+struct MachineCode {
+    bytes: Vec<u8>,
+    relocations: Vec<ModuleReloc>,
+}
+
+fn decode_callable(packet: &[u8]) -> Option<MachineCode> {
+    let (length, body) = packet.split_first_chunk::<{ size_of::<u64>() }>()?;
+    let length = usize::try_from(u64::from_le_bytes(*length)).ok()?;
+    let (bytes, records) = body.split_at_checked(length)?;
+    let (records, remainder) = records.as_chunks::<{ 2 * size_of::<u64>() }>();
+    if bytes.is_empty() || records.is_empty() || !remainder.is_empty() {
+        return None;
+    }
+    let mut relocations = Vec::with_capacity(records.len());
+    for record in records {
+        let (offset, target) = record.split_first_chunk::<{ size_of::<u64>() }>()?;
+        let offset = u32::try_from(u64::from_le_bytes(*offset)).ok()?;
+        let target = u32::try_from(u64::from_le_bytes(target.try_into().ok()?)).ok()?;
+        if (offset as usize).checked_add(CALL_DISPLACEMENT_BYTES as usize)? > bytes.len() {
+            return None;
+        }
+        relocations.push(ModuleReloc {
+            offset,
+            kind: Reloc::X86CallPLTRel4,
+            name: ModuleRelocTarget::user(FUNCTION_NAMESPACE, target),
+            addend: -CALL_DISPLACEMENT_BYTES,
+        });
+    }
+    Some(MachineCode {
+        bytes: bytes.to_vec(),
+        relocations,
+    })
 }
 
 fn encode_integer_block(
     isa: &dyn cranelift_codegen::isa::TargetIsa,
     function: &Function,
-) -> Option<Vec<u8>> {
+) -> Option<MachineCode> {
     let encode = ENCODER.get()?;
     let triple = isa.triple();
     if triple.architecture != target_lexicon::Architecture::X86_64
@@ -545,8 +669,16 @@ fn encode_integer_block(
     {
         return None;
     }
-    let words = integer_block_words(function)?;
-    encode(&words)
+    let (words, calls) = integer_program(function)?;
+    if calls {
+        let packet = CALL_ENCODER.get()?(&words)?;
+        decode_callable(&packet)
+    } else {
+        Some(MachineCode {
+            bytes: encode(&words)?,
+            relocations: Vec::new(),
+        })
+    }
 }
 
 /// Defines one already-lowered function. JIT and instrumented/observed
@@ -558,9 +690,9 @@ pub(super) fn define(
     try_machine: bool,
 ) -> Result<(), String> {
     let definition =
-        if try_machine && let Some(bytes) = encode_integer_block(module.isa(), &context.func) {
+        if try_machine && let Some(code) = encode_integer_block(module.isa(), &context.func) {
             let alignment = u64::from(module.isa().function_alignment().minimum);
-            module.define_function_bytes(id, alignment, &bytes, &[])
+            module.define_function_bytes(id, alignment, &code.bytes, &code.relocations)
         } else {
             module.define_function(id, context)
         };

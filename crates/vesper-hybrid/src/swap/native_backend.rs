@@ -36,6 +36,14 @@ pub(super) fn register(_r: &mut Registry) {
             ENCODED.fetch_add(1, Relaxed);
             Some(bytes)
         }));
+        must(machine::install_call_encoder(|words| {
+            let packet = binding::x86_64_callable_block(words);
+            if packet.is_empty() {
+                return None;
+            }
+            ENCODED.fetch_add(1, Relaxed);
+            Some(packet)
+        }));
     }
     if on("native_elf")
         && std::env::var_os("VESPER_HYBRID_NATIVE_ELF").is_some_and(|value| value == "1")

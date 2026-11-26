@@ -2,7 +2,8 @@ use self::x86_64::{
     ADD_RM_R64, AND_RM_R64, ARGUMENTS, BYTE_BITS, DWORD_BITS, QWORD_BITS, WORD_BITS, CC_A, CC_AE,
     CC_B, CC_BE, CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, Instruction, NEG_EXTENSION, NOT_EXTENSION,
     OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION, SHL_EXTENSION, SHR_EXTENSION, SUB_RM_R64,
-    UNASSIGNED, XOR_RM_R64, arg_register, emit, find_register, patch_forward_branch, register_bit
+    UNASSIGNED, XOR_RM_R64, REGISTER_CODES, arg_register, emit, emit_direct_call, find_register,
+    patch_forward_branch, register_bit
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -44,6 +45,8 @@ const STACK_STORE_WORD: u64 = 34;
 const STACK_STORE_DWORD: u64 = 35;
 const STACK_STORE_QWORD: u64 = 36;
 const RETURN_PAIR: u64 = 37;
+const CALL: u64 = 38;
+const CALL_ARGUMENT: u64 = 39;
 
 const EQUAL: u64 = 0;
 const NOT_EQUAL: u64 = 1;
@@ -103,6 +106,8 @@ copy enum Location {
 struct Allocation {
     locations: ChunkSeq[Location],
     frame_size: u32,
+    calls: ChunkSeq[u32],
+    call_frame: u64,
 }
 
 fn word_at(in words: Slice[u64], position: u64) -> u64 {
@@ -120,6 +125,10 @@ fn read_record(in words: Slice[u64], index: u64) -> Record {
         right: word_at(in words, wrapping_add(start, RIGHT)),
         extra: word_at(in words, wrapping_add(start, EXTRA))
     }
+}
+
+fn call_argument(in words: Slice[u64], start: u64, argument: u64) -> u64 {
+    read_record(in words, wrapping_add(start, argument)).left
 }
 
 fn align_up(size: u64, alignment: u64) -> u64 {
@@ -216,7 +225,10 @@ fn is_stack_operation(op: u64) -> bool {
 }
 
 fn has_no_result(op: u64) -> bool {
-    (op >= STORE_BYTE && op <= STACK_SLOT) || is_stack_store(op) || op == RETURN_PAIR
+    (op >= STORE_BYTE && op <= STACK_SLOT)
+        || is_stack_store(op)
+        || op == RETURN_PAIR
+        || op == CALL_ARGUMENT
 }
 
 fn store_width(op: u64) -> u64 {
@@ -260,6 +272,8 @@ fn reads_left(op: u64) -> bool {
         && op != STACK_ADDRESS
         && op != STACK_LOAD
         && op != RETURN_PAIR
+        && op != CALL
+        && op != CALL_ARGUMENT
 }
 
 fn reads_right(op: u64, paired: bool) -> bool {
@@ -299,6 +313,7 @@ fn find_last_reads(
     count: u64,
     result: u64,
     second: u64,
+    allow_calls: bool,
     inout frame: FrameLayout
 ) -> Option[ChunkSeq[u64]] {
     let values = wrapping_add(arguments, count);
@@ -313,17 +328,25 @@ fn find_last_reads(
     }
     let mut early_return_at = NEVER_READ;
     let mut has_branch = false;
+    let mut pending_arguments: u64 = 0;
     for reverse_index in 0..count {
         let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
-        if record.op > RETURN_PAIR
+        if record.op > CALL_ARGUMENT
             || (record.op == STACK_SLOT && index >= frame.slots.len())
             || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
         {
             return Option::None;
         }
         let last = last_read(in reads, value);
+        if record.op == CALL_ARGUMENT {
+            if pending_arguments == 0 || last != NEVER_READ {
+                return Option::None;
+            }
+            pending_arguments = wrapping_sub(pending_arguments, 1);
+            continue;
+        }
         if is_stack_operation(record.op) {
             match stack_displacement(in frame, in record) {
                 Option::Some(_) => {},
@@ -373,6 +396,25 @@ fn find_last_reads(
             // The false arm cannot use a value created in the true arm.
             return Option::None;
         }
+        if record.op == CALL {
+            if !allow_calls
+                || record.right > ARGUMENTS
+                || record.right > index
+                || record.left > DISP32_MASK
+            {
+                return Option::None;
+            }
+            let start = wrapping_sub(index, record.right);
+            let limit = wrapping_add(arguments, start);
+            for i in 0..record.right {
+                let argument = read_record(in words, wrapping_add(start, i));
+                if argument.op != CALL_ARGUMENT || argument.left >= limit {
+                    return Option::None;
+                }
+                first_read_backwards(inout reads, argument.left, value);
+            }
+            pending_arguments = record.right;
+        }
         let has_left = reads_left(record.op);
         let has_right = reads_right(record.op, paired);
         let has_third = record.op == SELECT;
@@ -415,7 +457,8 @@ fn without_register(used: u32, register: u8) -> u32 {
 fn emits_instruction(op: u64, result_live: bool) -> bool {
     op != STACK_SLOT
         && op != RETURN_PAIR
-        && (result_live || op == LOAD || op == STACK_LOAD || has_no_result(op))
+        && op != CALL_ARGUMENT
+        && (result_live || op == LOAD || op == STACK_LOAD || op == CALL || has_no_result(op))
 }
 
 fn dying_register(
@@ -446,12 +489,15 @@ fn allocate(
     spills: bool
 ) -> Option[Allocation] {
     let mut locations = ChunkSeq::with_capacity[Location](wrapping_add(arguments, count));
-    let mut used = if spills {
+    let reserved = if spills {
         register_bit(LEFT_SCRATCH) | register_bit(RIGHT_SCRATCH) | register_bit(THIRD_SCRATCH)
     } else {
         0
     };
+    let mut used = reserved;
     let mut stack_end = explicit_frame;
+    let mut calls = ChunkSeq::new[u32]();
+    let mut call_slots: u64 = 0;
     for argument in 0..arguments {
         let reg = arg_register(argument);
         locations.push(Location::Register(reg));
@@ -467,6 +513,27 @@ fn allocate(
         if !emits_instruction(record.op, result_live) {
             locations.push(Location::Absent);
             continue;
+        }
+        if record.op == CALL {
+            let start = wrapping_sub(index, record.right);
+            for i in 0..record.right {
+                let operand = call_argument(in words, start, i);
+                used = without_register(
+                    used,
+                    dying_register(in reads, in locations, operand, value)
+                );
+            }
+            let saved = used & ~reserved;
+            let mut slots: u64 = 0;
+            for reg in 0..REGISTER_CODES {
+                if (saved & register_bit(wrapping_u8(reg))) != 0 {
+                    slots = wrapping_add(slots, 1);
+                }
+            }
+            if slots > call_slots {
+                call_slots = slots;
+            }
+            calls.push(saved);
         }
         let left = if reads_left(record.op) {
             dying_register(in reads, in locations, record.left, value)
@@ -495,7 +562,7 @@ fn allocate(
             find_register(used)
         };
         used = without_register(without_register(without_register(used, left), right), third);
-        let location = if has_no_result(record.op) {
+        let location = if has_no_result(record.op) || (record.op == CALL && !result_live) {
             Location::Absent
         } else if register != UNASSIGNED {
             if result_live {
@@ -517,12 +584,22 @@ fn allocate(
         };
         locations.push(location);
     }
-    let size = if stack_end == 0 {
+    let call_frame = stack_end;
+    stack_end = wrapping_add(stack_end, wrapping_mul(call_slots, SPILL_SLOT_BYTES));
+    let size = if stack_end == 0 && calls.len() == 0 {
         0
     } else {
         aligned_frame_size(stack_end)
     };
-    Option::Some(Allocation { locations: locations, frame_size: wrapping_u32(size) })
+    if size > STACK_PROBE_INTERVAL {
+        return Option::None;
+    }
+    Option::Some(Allocation {
+        locations: locations,
+        frame_size: wrapping_u32(size),
+        calls: calls,
+        call_frame: call_frame
+    })
 }
 
 fn materialize(inout output: ChunkSeq[u8], in location: Location, scratch: u8) -> u8 {
@@ -589,7 +666,125 @@ fn emit_return(inout output: ChunkSeq[u8], in low: Location, in high: Location, 
     emit(inout output, in Instruction::Return);
 }
 
-pub fn encode_block(in words: Slice[u64]) -> ChunkSeq[u8] {
+fn move_call_arguments(
+    inout out: ChunkSeq[u8],
+    in words: Slice[u64],
+    in locations: ChunkSeq[Location],
+    start: u64,
+    arguments: u64
+) {
+    let mut homes = ChunkSeq::with_capacity[Location](arguments);
+    for i in 0..arguments {
+        let home = assigned(in locations, call_argument(in words, start, i));
+        homes.push(
+            if in_register(in home, arg_register(i)) {
+                Location::Absent
+            } else {
+                home
+            }
+        );
+    }
+    for round in 0..arguments {
+        let mut needed: u32 = 0;
+        let mut first = arguments;
+        for i in 0..arguments {
+            match assigned(in homes, i) {
+                Location::Absent => continue,
+                Location::Register(reg) => {
+                    needed = needed | register_bit(reg);
+                },
+                Location::Spill(_) => {},
+            };
+            if first == arguments {
+                first = i;
+            }
+        }
+        if first == arguments {
+            break;
+        }
+        let mut ready = arguments;
+        for i in first..arguments {
+            let home = assigned(in homes, i);
+            match home {
+                Location::Absent => continue,
+                _ => {},
+            };
+            let destination = arg_register(i);
+            if in_register(in home, destination) || (needed & register_bit(destination)) == 0 {
+                ready = i;
+                break;
+            }
+        }
+        if ready < arguments {
+            let home = assigned(in homes, ready);
+            move_return(inout out, in home, arg_register(ready));
+            let _ = homes.try_set(ready, Location::Absent);
+        } else {
+            // Every pending destination is still needed, so these moves
+            // form register cycles. Satisfy one move with an exchange.
+            let destination = arg_register(first);
+            let source = match assigned(in homes, first) {
+                Location::Register(reg) => reg,
+                _ => return,
+            };
+            emit(inout out, in Instruction::Exchange(destination, source));
+            let _ = homes.try_set(first, Location::Absent);
+            for i in wrapping_add(first, 1)..arguments {
+                let home = assigned(in homes, i);
+                if in_register(in home, source) {
+                    let _ = homes.try_set(i, Location::Register(destination));
+                } else if in_register(in home, destination) {
+                    let _ = homes.try_set(i, Location::Register(source));
+                }
+            }
+        }
+    }
+}
+
+fn emit_call(
+    inout out: ChunkSeq[u8],
+    in words: Slice[u64],
+    in allocation: Allocation,
+    saved: u32,
+    start: u64,
+    arguments: u64,
+    in result: Location
+) -> u64 {
+    let mut slot = allocation.call_frame;
+    for code in 0..REGISTER_CODES {
+        let reg = wrapping_u8(code);
+        if (saved & register_bit(reg)) != 0 {
+            emit(inout out, in Instruction::Store(reg, RSP, wrapping_u32(slot), QWORD_BITS));
+            slot = wrapping_add(slot, SPILL_SLOT_BYTES);
+        }
+    }
+    move_call_arguments(inout out, in words, in allocation.locations, start, arguments);
+    let reference = emit_direct_call(inout out);
+    // The new result's home is distinct from every saved value's home.
+    match result {
+        Location::Register(reg) => emit(inout out, in Instruction::Move(reg, RAX)),
+        Location::Spill(offset) => emit(
+            inout out,
+            in Instruction::Store(RAX, RSP, offset, QWORD_BITS)
+        ),
+        Location::Absent => {},
+    };
+    slot = allocation.call_frame;
+    for code in 0..REGISTER_CODES {
+        let reg = wrapping_u8(code);
+        if (saved & register_bit(reg)) != 0 {
+            emit(inout out, in Instruction::Load(reg, RSP, wrapping_u32(slot), QWORD_BITS));
+            slot = wrapping_add(slot, SPILL_SLOT_BYTES);
+        }
+    }
+    reference
+}
+
+pub fn encode_block(
+    in words: Slice[u64],
+    allow_calls: bool,
+    inout relocations: ChunkSeq[u64]
+) -> ChunkSeq[u8] {
     if words.len() < HEADER_WORDS {
         return ChunkSeq::new[u8]();
     }
@@ -618,7 +813,15 @@ pub fn encode_block(in words: Slice[u64]) -> ChunkSeq[u8] {
         Option::Some(layout) => layout,
         Option::None => return ChunkSeq::new[u8](),
     };
-    let reads = match find_last_reads(in words, arguments, count, result, second, inout frame) {
+    let reads = match find_last_reads(
+        in words,
+        arguments,
+        count,
+        result,
+        second,
+        allow_calls,
+        inout frame
+    ) {
         Option::Some(last) => last,
         Option::None => return ChunkSeq::new[u8](),
     };
@@ -651,12 +854,34 @@ pub fn encode_block(in words: Slice[u64]) -> ChunkSeq[u8] {
     let mut output = ChunkSeq::new[u8]();
     emit(inout output, in Instruction::FrameEnter(frame_size));
     let mut branch_end: u64 = 0;
+    let mut call_index: u64 = 0;
 
     for index in 0..count {
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
         let result_live = last_read(in reads, value) != NEVER_READ;
         if !emits_instruction(record.op, result_live) {
+            continue;
+        }
+        if record.op == CALL {
+            let saved = match allocation.calls.try_get(call_index) {
+                Option::Some(saved) => saved,
+                Option::None => return ChunkSeq::new[u8](),
+            };
+            let home = assigned(in allocation.locations, value);
+            let start = wrapping_sub(index, record.right);
+            let offset = emit_call(
+                inout output,
+                in words,
+                in allocation,
+                saved,
+                start,
+                record.right,
+                in home
+            );
+            relocations.push(offset);
+            relocations.push(record.left);
+            call_index = wrapping_add(call_index, 1);
             continue;
         }
         if record.op == EARLY_RETURN {

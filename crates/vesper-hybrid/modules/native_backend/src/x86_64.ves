@@ -11,6 +11,7 @@ pub const R10: u8 = 10;
 pub const R11: u8 = 11;
 
 pub const ARGUMENTS: u64 = 6;
+pub const REGISTER_CODES: u64 = 16;
 pub const UNASSIGNED: u8 = 255;
 pub const BYTE_BITS: u64 = 8;
 pub const WORD_BITS: u64 = 16;
@@ -60,6 +61,7 @@ const MOVZX_R32_RM16: u8 = 0xb7;
 const MOVSX_R64_RM16: u8 = 0xbf;
 const MOVSXD_R64_RM32: u8 = 0x63;
 const RET_NEAR: u8 = 0xc3;
+const CALL_REL32: u8 = 0xe8;
 const U32_MAX_BITS: u64 = 0xffffffff;
 const I32_MIN_BITS: u64 = 0xffffffff80000000;
 const DISP8_MAX: u32 = 0x7f;
@@ -173,6 +175,13 @@ fn immediate(inout out: ChunkSeq[u8], bits: u64, size: u64) {
         let shift = wrapping_mul(wrapping_u32(i), wrapping_u32(BYTE_BITS));
         out.push(wrapping_u8(wrapping_shr_u64(bits, shift)));
     }
+}
+
+pub fn emit_direct_call(inout out: ChunkSeq[u8]) -> u64 {
+    out.push(CALL_REL32);
+    let displacement = out.len();
+    immediate(inout out, 0, IMM32_BYTES);
+    displacement
 }
 
 fn adjust_stack(inout out: ChunkSeq[u8], extension: u8, size: u32) {
