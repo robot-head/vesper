@@ -147,11 +147,7 @@ pub fn sub(a: u64, b: u64) -> u64 {
 // `a + b`, saturating.
 pub fn sat_add(a: u64, b: u64) -> u64 {
     let s = wrapping_add(a, b);
-    if s < a {
-        none()
-    } else {
-        s
-    }
+    if s < a { none() } else { s }
 }
 
 // `a * b`, saturating.

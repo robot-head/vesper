@@ -189,11 +189,7 @@ fn fits_i32(x: i64) -> bool {
 }
 
 fn max_u32(a: u32, b: u32) -> u32 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // `Layout::of`: the layout id, or NONE32 with the message in `ls.err`.

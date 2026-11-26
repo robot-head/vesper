@@ -6,19 +6,11 @@ const MAX_PFN: u64 = 1099511627776;
 const U64_MAX: u64 = 18446744073709551615;
 
 fn min_u64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 fn max_u64(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn get_w(in iv: Slice[u64], idx: u64) -> u64 {

@@ -86,11 +86,7 @@ pub fn editor_limits(a: u64, b: u64) -> ChunkSeq[u64] {
 
 fn field_or(x: u64, mask: u64, default: u64) -> u64 {
     let v = x & mask;
-    if v == 0 {
-        default
-    } else {
-        v
-    }
+    if v == 0 { default } else { v }
 }
 
 // `Limits::preflight` with `work` as `max_work`.

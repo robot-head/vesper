@@ -316,11 +316,7 @@ pub fn mentions(in c: C, t: u64, var: u64) -> bool {
 pub fn subst(inout c: C, t: u64, var: u64, wv: u64) -> u64 {
     let tag = lt(in c, t);
     if tag == LTag::Var {
-        if la(in c, t) == var {
-            wv
-        } else {
-            t
-        }
+        if la(in c, t) == var { wv } else { t }
     } else if tag == LTag::End {
         t
     } else if tag == LTag::Send || tag == LTag::Recv {

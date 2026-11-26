@@ -514,11 +514,7 @@ fn push_value(inout out: ChunkSeq[u8], in txt: Slice[u8], v: Val) {
 }
 
 fn opt_value(has: bool, v: u64) -> u64 {
-    if has {
-        v
-    } else {
-        0
-    }
+    if has { v } else { 0 }
 }
 
 // One discovered test: index, name, span, the harness plan and the raw

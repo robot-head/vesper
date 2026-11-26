@@ -248,11 +248,7 @@ pub fn div_rem(v: u64, d: u64) -> (u64, u64) {
 // ceil(a / b) for b > 0.
 pub fn ceil_div(a: u64, b: u64) -> u64 {
     let (d, r) = div_rem(a, b);
-    if r == 0 {
-        d
-    } else {
-        wrapping_add(d, 1)
-    }
+    if r == 0 { d } else { wrapping_add(d, 1) }
 }
 
 pub fn put(inout m: ChunkSeq[u8], in s: Str) {

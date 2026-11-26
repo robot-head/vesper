@@ -53,11 +53,7 @@ pub struct Graph {
 }
 
 fn opt(x: u64) -> u64 {
-    if x == 0 {
-        NONE64
-    } else {
-        wrapping_sub(x, 1)
-    }
+    if x == 0 { NONE64 } else { wrapping_sub(x, 1) }
 }
 
 fn sym(in nmap: ChunkSeq[u32], x: u64) -> u32 {

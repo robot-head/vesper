@@ -488,11 +488,7 @@ fn sorted_rows(in s: Walk) -> ChunkSeq[u64] {
 }
 
 fn min_u64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // One line per kept diagnostic, as the Rust side writes it:

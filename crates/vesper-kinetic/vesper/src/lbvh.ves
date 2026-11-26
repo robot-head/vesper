@@ -41,19 +41,11 @@ fn delta(in codes: Slice[u64], n: u64, i: u64, a: u64, j: i64) -> i64 {
 }
 
 fn min_i64(a: i64, b: i64) -> i64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 fn max_i64(a: i64, b: i64) -> i64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // Karras 2012, algorithm 3, for internal node `i`: its (left, right)

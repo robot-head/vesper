@@ -409,11 +409,7 @@ impl EGraph {
         let k0 = if a >= 1 { self.find(c0) } else { 0 };
         let k1 = if a >= 2 { self.find(c1) } else { 0 };
         let id = self.memo_get(op, data, k0, k1);
-        if id == NONE {
-            NONE
-        } else {
-            self.find(id)
-        }
+        if id == NONE { NONE } else { self.find(id) }
     }
 
     // egg's `union` (`perform_union`): whether two classes were merged.

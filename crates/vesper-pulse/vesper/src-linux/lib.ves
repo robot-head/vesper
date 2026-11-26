@@ -461,20 +461,12 @@ pub fn epoll_rearm(
 ) -> (bool, u32) eff [Ffi[PulseSys]] {
     let ev = make_epoll_event(epoll_mask(interest), token);
     let (rc, err) = PulseSys::epoll_ctl_add_mod(poller.fd, PulseSys::EPOLL_CTL_MOD, fd, in ev);
-    if rc >= 0 {
-        (true, 0)
-    } else {
-        (false, err)
-    }
+    if rc >= 0 { (true, 0) } else { (false, err) }
 }
 
 pub fn epoll_release(in poller: EpollPoller, fd: i32) -> (bool, u32) eff [Ffi[PulseSys]] {
     let (rc, err) = PulseSys::epoll_ctl_del(poller.fd, PulseSys::EPOLL_CTL_DEL, fd, 0);
-    if rc >= 0 {
-        (true, 0)
-    } else {
-        (false, err)
-    }
+    if rc >= 0 { (true, 0) } else { (false, err) }
 }
 
 pub fn epoll_wait_one(
@@ -2000,11 +1992,7 @@ fn is_read(op: Operation) -> bool {
 
 // The epoll interest of `op`, as `epoll_mask` takes it.
 fn op_interest(op: Operation) -> u32 {
-    if is_read(op) {
-        0
-    } else {
-        1
-    }
+    if is_read(op) { 0 } else { 1 }
 }
 
 // A driver of `entries` requests at most, or `Err` with the error.
@@ -2108,11 +2096,7 @@ fn io_streamed(inout d: EpollDriver, r: IoRequest) -> (bool, u64, u32) eff [Ffi[
 // Remove the registration of `fd`: 0 or the errno.
 fn io_deregister(in d: EpollDriver, fd: i32) -> u32 eff [Ffi[PulseSys]] {
     let (ok, e) = epoll_release(in d.poller, fd);
-    if ok {
-        0
-    } else {
-        e
-    }
+    if ok { 0 } else { e }
 }
 
 // Submit a read into a buffer of `buffer.len()` bytes (its contents are
@@ -2724,11 +2708,7 @@ fn uring_enter(in d: UringDriver, want: u64) -> u32 eff [Ffi[PulseSys]] {
         0,
         0
     );
-    if rc < 0 {
-        e
-    } else {
-        0
-    }
+    if rc < 0 { e } else { 0 }
 }
 
 // Queue `sqe`, handing the queue to the kernel first when it is full: 0,

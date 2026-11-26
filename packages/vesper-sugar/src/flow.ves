@@ -1274,11 +1274,7 @@ fn plan(
         } else {
             sub(span_e, PREFIX_LEN)
         };
-        if e > sk.src.len() {
-            sk.src.len()
-        } else {
-            e
-        }
+        if e > sk.src.len() { sk.src.len() } else { e }
     } else {
         NONE
     };

@@ -1148,11 +1148,7 @@ fn status_name(status: u32) -> Str {
 }
 
 fn mode_name(recovery: bool) -> Str {
-    if recovery {
-        "recovery"
-    } else {
-        "source"
-    }
+    if recovery { "recovery" } else { "source" }
 }
 
 // One file's `format_file` report (its keys sorted, as serde_json's map
@@ -1351,11 +1347,7 @@ fn set64(inout s: Slice[u64], i: u64, v: u64) {
 }
 
 fn min_u64(x: u64, y: u64) -> u64 {
-    if x < y {
-        x
-    } else {
-        y
-    }
+    if x < y { x } else { y }
 }
 
 // Whether `name` holds U+FFFD: on Windows the host lists names lossily, so

@@ -157,11 +157,7 @@ fn seg(in c: C, s: u64, k: u64, key: u64) -> (u64, bool) {
 
 fn qlen(in c: C, s: u64, k: u64, key: u64) -> u64 {
     let (at, found) = seg(in c, s, k, key);
-    if found {
-        xword(in c, s, inc(at))
-    } else {
-        0
-    }
+    if found { xword(in c, s, inc(at)) } else { 0 }
 }
 
 // Writes the successor of `s` with role `i` at `t` into `sb`: `op` (`Op`)

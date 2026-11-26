@@ -889,7 +889,13 @@ fn short_if_else(atoms: &[Piece<'_>], start: usize, end: Option<K>) -> Option<us
     let close = loop {
         let atom = atoms.get(i)?;
         let kind = atom.kind;
-        if matches!(kind, K::Comment | K::BlockComment | K::Semi) {
+        // A comment, a statement, a separator or a sugar boundary (`else` on
+        // its own line in a template) can break the line, so the `if` cannot
+        // be one group.
+        if matches!(kind, K::Comment | K::BlockComment | K::Semi)
+            || i > start && atom.sugar_gap.is_some()
+            || depth == 0 && matches!(kind, K::Comma | K::Arrow)
+        {
             return None;
         }
         if let Some(p) = previous {
@@ -1001,17 +1007,21 @@ fn sequence<'a>(
     let mut short_if: Option<(usize, usize, usize)> = None;
     while *pos < atoms.len() && Some(atoms[*pos].kind) != end {
         let current = atoms[*pos];
-        // An `if` used as a value (`let x = if ..`, an argument, a match arm),
-        // not one at the start of a statement, as rustfmt decides.
+        // An `if` used as a value (`let x = if ..`, an argument, a match arm,
+        // a block's last expression), as rustfmt decides.
         let starts_short_if = short_if.is_none()
             && current.kind == K::If
-            && !previous.is_some_and(|p| p.kind == K::Else)
-            && !(block
-                && previous.is_none_or(|p| {
-                    previous_block || matches!(p.kind, K::Semi | K::Comment | K::BlockComment)
-                }));
+            && !previous.is_some_and(|p| p.kind == K::Else);
+        // An `if` that starts a statement is a value only as its block's last
+        // expression.
+        let starts_statement = block
+            && previous.is_none_or(|p| {
+                previous_block || matches!(p.kind, K::Semi | K::Comment | K::BlockComment)
+            });
         let short_if_close = if starts_short_if {
-            short_if_else(atoms, *pos, end)
+            short_if_else(atoms, *pos, end).filter(|&close| {
+                !starts_statement || atoms.get(close + 1).is_none_or(|a| Some(a.kind) == end)
+            })
         } else {
             None
         };
@@ -1203,17 +1213,21 @@ fn sequence<'a>(
         // other `if`, with the breaks in its condition kept on one line.
         if let Some((close, docs, breaks)) = short_if.filter(|&(close, _, _)| *pos > close) {
             let _ = close;
-            for &(offset, level) in &line.breaks[breaks..] {
-                line.docs[offset] = document.push(if level == 12 {
-                    Doc::Nil
-                } else {
-                    Doc::Text(" ")
-                })?;
-            }
-            line.breaks.truncate(breaks);
-            let inner = document.push(Doc::Concat(line.docs.split_off(docs)))?;
-            line.push(document.push(Doc::Group(inner))?);
             short_if = None;
+            // Unless the line broke inside the `if`, which `short_if_else`
+            // rules out, leaving nothing to group.
+            if docs <= line.docs.len() && breaks <= line.breaks.len() {
+                for &(offset, level) in &line.breaks[breaks..] {
+                    line.docs[offset] = document.push(if level == 12 {
+                        Doc::Nil
+                    } else {
+                        Doc::Text(" ")
+                    })?;
+                }
+                line.breaks.truncate(breaks);
+                let inner = document.push(Doc::Concat(line.docs.split_off(docs)))?;
+                line.push(document.push(Doc::Group(inner))?);
+            }
         }
         previous_block = is_block;
         previous_params = params;

@@ -166,19 +166,11 @@ fn load_secret(in t: Ct, a: u64, s: u64) -> u64 {
     if untracked(a, s) && t.untracked {
         sec = true;
     }
-    if sec {
-        SECRET
-    } else {
-        0
-    }
+    if sec { SECRET } else { 0 }
 }
 
 fn slot_a(slot: u64) -> u64 {
-    if slot < 64 {
-        0
-    } else {
-        PTS_HIGH_SLOT << 1
-    }
+    if slot < 64 { 0 } else { PTS_HIGH_SLOT << 1 }
 }
 
 fn slot_s(slot: u64) -> u64 {

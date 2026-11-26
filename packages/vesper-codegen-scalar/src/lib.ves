@@ -588,17 +588,9 @@ impl Gen {
         } else if !float && (op == ops.star || op == ops.wrapping_mul) {
             "imul"
         } else if !float && op == ops.slash {
-            if unsigned {
-                "udiv"
-            } else {
-                "sdiv-guarded"
-            }
+            if unsigned { "udiv" } else { "sdiv-guarded" }
         } else if !float && op == ops.percent {
-            if unsigned {
-                "urem"
-            } else {
-                "srem"
-            }
+            if unsigned { "urem" } else { "srem" }
         } else if float && op == ops.plus {
             "fadd"
         } else if float && op == ops.minus {
@@ -734,11 +726,7 @@ impl Gen {
             ""
         };
         let r = if op == self.ops.minus {
-            if float {
-                "fneg"
-            } else {
-                "ineg"
-            }
+            if float { "fneg" } else { "ineg" }
         } else if op == self.ops.bang && !float {
             "not"
         } else if op == self.ops.widen_u64 && !float {
@@ -790,11 +778,7 @@ impl Gen {
             let how = if op == ops.shl {
                 "ishl"
             } else if op == ops.shr {
-                if kind_unsigned(k) {
-                    "ushr"
-                } else {
-                    "sshr"
-                }
+                if kind_unsigned(k) { "ushr" } else { "sshr" }
             } else if rot == 1 {
                 "rotl"
             } else {

@@ -151,11 +151,7 @@ fn byte_token(
 
 // `f32::total_cmp` order of f32 bits as an unsigned key.
 fn total_order(b: u32) -> u32 {
-    if b & F32_SIGN != 0 {
-        ~b
-    } else {
-        b | F32_SIGN
-    }
+    if b & F32_SIGN != 0 { ~b } else { b | F32_SIGN }
 }
 
 // Node `i` of the merge list is three words at `3 * i`: the token with the

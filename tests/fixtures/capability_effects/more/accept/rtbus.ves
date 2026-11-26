@@ -21,11 +21,7 @@ fn callback(frames: u64) -> u64 eff [Realtime, RtBus] {
 }
 
 fn count(n: u32) -> u32 eff [Realtime] {
-    if n > 4 {
-        4
-    } else {
-        n
-    }
+    if n > 4 { 4 } else { n }
 }
 
 fn main() -> u64 {

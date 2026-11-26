@@ -321,11 +321,7 @@ pub fn surface_fragment_status(in b: Slice[u8], inout m: ChunkSeq[u8]) -> u64 {
         return 1;
     }
     let p = parse_surface_tokens(in b, t, d, max_diagnostics(), hard_depth(), false);
-    if p.d.code.len() != 0 {
-        1
-    } else {
-        0
-    }
+    if p.d.code.len() != 0 { 1 } else { 0 }
 }
 
 // The tables of a refused parse: no tokens or nodes, the diagnostics of `d`.

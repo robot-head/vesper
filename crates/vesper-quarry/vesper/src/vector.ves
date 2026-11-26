@@ -133,11 +133,7 @@ fn tri_opd(off: u64) -> Opd {
 }
 
 fn tri_of(b: bool) -> u8 {
-    if b {
-        T_TRUE
-    } else {
-        T_FALSE
-    }
+    if b { T_TRUE } else { T_FALSE }
 }
 
 fn tri_val(t: u8) -> Val {
@@ -189,11 +185,7 @@ fn opd_tri(in v: V, in prog: Slice[u64], in r: Rel, ti0: u64, o: Opd, i: u64) ->
         return cb(in v.tri, wrapping_add(o.s, i));
     }
     let x = opd_val(in v, in prog, in r, ti0, o, i);
-    if x.t == 0 {
-        T_NULL
-    } else {
-        tri_of(x.a != 0)
-    }
+    if x.t == 0 { T_NULL } else { tri_of(x.a != 0) }
 }
 
 // `cell_bytes` summed over the slots of the bindings in `mask` for tuple
@@ -451,11 +443,7 @@ fn fixed_key(t: u64, a: u64) -> u64 {
         a ^ SIGN_BIT
     } else if t == 3 {
         let b = if a == SIGN_BIT { 0 } else { a };
-        if (b >> 63) == 1 {
-            ~b
-        } else {
-            b | SIGN_BIT
-        }
+        if (b >> 63) == 1 { ~b } else { b | SIGN_BIT }
     } else {
         a
     }
@@ -786,11 +774,7 @@ fn acc_push(inout q: Q, a: Acc, has: bool, x: Val) -> Acc {
             if q.err != 0 {
                 return r;
             }
-            if a.max {
-                o == 2
-            } else {
-                o == 0
-            }
+            if a.max { o == 2 } else { o == 0 }
         };
         if replace {
             r.best = x;
@@ -955,11 +939,7 @@ fn acc_column(
                         } else {
                             key_order(fixed_key(tag, x), fixed_key(best.t, best.a))
                         };
-                        if a.max {
-                            o == 2
-                        } else {
-                            o == 0
-                        }
+                        if a.max { o == 2 } else { o == 0 }
                     };
                     if replace {
                         best = y;
@@ -1303,11 +1283,7 @@ fn flatten_inner(in q: Q, n: u64, inout leaves: ChunkSeq[u64], inout on: ChunkSe
 
 // The non-null key word of a value (`KeyPart::Word`; -0.0 is 0.0).
 fn key_word(x: Val) -> u64 {
-    if x.t == 3 && x.a == SIGN_BIT {
-        0
-    } else {
-        x.a
-    }
+    if x.t == 3 && x.a == SIGN_BIT { 0 } else { x.a }
 }
 
 fn mix(h: u64, x: u64) -> u64 {

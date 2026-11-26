@@ -211,11 +211,7 @@ fn wrapping_op(in o: Ops, sym: u32) -> u8 {
 
 // `op_name(op, wrapping).len()`.
 fn op_name_len(wrapping: bool) -> u64 {
-    if wrapping {
-        WRAPPING_NAME_LEN
-    } else {
-        1
-    }
+    if wrapping { WRAPPING_NAME_LEN } else { 1 }
 }
 
 // `IntegerKind::fits` for the four closed kinds.
@@ -252,11 +248,7 @@ fn int_value(in t: Tree, e: ExprNode) -> i128 {
     let l = lit_at(in t.ast, e.a);
     // The 128-bit magnitude `hi`:`bits` (2^127 wraps to `i128::MIN`).
     let m = wrapping_shl_i128(widen_i128(wrapping_i64(l.hi)), 64) | widen_i128(l.bits);
-    if l.neg {
-        wrapping_neg_i128(m)
-    } else {
-        m
-    }
+    if l.neg { wrapping_neg_i128(m) } else { m }
 }
 
 fn is_int_literal(in t: Tree, e: ExprNode) -> bool {
@@ -677,11 +669,7 @@ fn bytes_of(n: u64, size: u64) -> u64 {
 fn capped_sum(a: u64, b: u64, cap: u64) -> u64 {
     let s = saturating_add(a, b);
     let c = saturating_add(cap, 1);
-    if s < c {
-        s
-    } else {
-        c
-    }
+    if s < c { s } else { c }
 }
 
 // `validate_terms`: every term of the source's kind, in range and
@@ -1416,11 +1404,7 @@ fn check_rule(
         }
         application(in terms, from, wrapping, op, x, y) && ok && expected == target.value
     };
-    if valid {
-        0
-    } else {
-        E_INVALID_RULE_INSTANCE
-    }
+    if valid { 0 } else { E_INVALID_RULE_INSTANCE }
 }
 
 // ---------------------------------------------------------------- verify

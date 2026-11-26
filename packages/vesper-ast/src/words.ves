@@ -618,11 +618,7 @@ pub fn words_count(in input: Str) -> u64 {
 // pass lowered, #1976).
 
 fn bw(b: bool) -> u64 {
-    if b {
-        1
-    } else {
-        0
-    }
+    if b { 1 } else { 0 }
 }
 
 fn w(x: u32) -> u64 {

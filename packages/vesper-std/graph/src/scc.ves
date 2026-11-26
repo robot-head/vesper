@@ -47,11 +47,7 @@ impl Scc {
 }
 
 fn min32(a: u32, b: u32) -> u32 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // The discovery number of a node `scc` has not reached yet.

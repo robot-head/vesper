@@ -152,11 +152,7 @@ fn finite32(x: f32) -> bool {
 }
 
 fn fmax(a: f32, b: f32) -> f32 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn zero3() -> V3 {

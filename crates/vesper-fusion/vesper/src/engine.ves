@@ -1392,11 +1392,7 @@ impl Eng {
         let id = self.push_node(op, data, in kids);
         let (_i, e) = self.probe(id, true);
         self.pop_node(id);
-        if e == NONE {
-            NONE
-        } else {
-            self.find(e)
-        }
+        if e == NONE { NONE } else { self.find(e) }
     }
 
     // Adds the instance of pattern `p` under `sub[at ..]` (variables are

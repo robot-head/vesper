@@ -122,11 +122,7 @@ fn advance_edt(prev_ns: u64, now_ns: u64, pacing_ns: u64) -> u64 {
 }
 
 fn max_u64(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn lookup_cid(conns: Conns, dcid: u64) -> Option[Conn] {

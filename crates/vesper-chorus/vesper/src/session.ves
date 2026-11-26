@@ -366,11 +366,7 @@ fn write_violation(inout m: Mon, send: bool, peer: u64, in label: Slice[u8], in 
 
 fn m_unfold(in m: Mon, id: u64) -> u64 {
     let u = m_unf(in m, id);
-    if u != none() {
-        u
-    } else {
-        id
-    }
+    if u != none() { u } else { id }
 }
 
 // BFS over reachable nodes in `c` starting from `start`, ensuring `c.lu` is

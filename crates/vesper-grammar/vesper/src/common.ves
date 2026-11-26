@@ -64,19 +64,11 @@ pub fn charge_or(inout remaining: u64, units: u64, kind: u64) -> Unit eff [Fail[
 }
 
 pub fn min(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 pub fn max(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // The byte at `i`, or 0 past the end (callers check bounds first).

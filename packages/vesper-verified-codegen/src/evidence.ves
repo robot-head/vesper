@@ -1096,11 +1096,7 @@ fn next_value(in p: Program, in ef: EF) -> u64 {
             any = true;
         }
     }
-    if any {
-        inc(top)
-    } else {
-        0
-    }
+    if any { inc(top) } else { 0 }
 }
 
 // The values instruction `i` reads (`op_uses`), into `out`.

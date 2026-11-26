@@ -4,11 +4,7 @@ copy enum E {
 }
 
 fn check(n: i64) -> i64 eff [Fail[E]] {
-    if n > 10 {
-        Fail::raise(E::Big)
-    } else {
-        n
-    }
+    if n > 10 { Fail::raise(E::Big) } else { n }
 }
 
 fn boxed(n: i64) -> i64 eff [r: Region, Fail[E]] {

@@ -11,27 +11,15 @@ fn u64_max() -> u64 {
 }
 
 fn min64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 fn max64(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn rem(a: u64, b: u64) -> u64 {
-    if b == 0 {
-        0
-    } else {
-        a % b
-    }
+    if b == 0 { 0 } else { a % b }
 }
 
 fn word(in w: Slice[u64], i: u64) -> u64 {

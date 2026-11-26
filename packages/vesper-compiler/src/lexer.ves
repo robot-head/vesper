@@ -283,11 +283,7 @@ fn number(i: i64) -> Tok eff [Fail[ArithOverflow]] {
     let float_end = if source_byte(digits) == 46 && is_digit(source_byte(digits + 1)) {
         let fraction = scan_digits(digits + 1);
         let e = exponent_end(fraction);
-        if e == -1 {
-            fraction
-        } else {
-            e
-        }
+        if e == -1 { fraction } else { e }
     } else {
         exponent_end(digits)
     };

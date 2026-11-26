@@ -7,11 +7,7 @@ const RUN: u64 = 16;
 
 // `a` or `b`, whichever is smaller.
 fn min_u64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // Merges the sorted runs `src[lo..mid]` and `src[mid..hi]` into

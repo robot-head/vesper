@@ -962,11 +962,7 @@ fn mt_index(in f: Fabric, addr: u64) -> u64 {
 
 fn mtime_at(in f: Fabric, addr: u64) -> u64 {
     let i = mt_index(in f, addr);
-    if i == none() {
-        0
-    } else {
-        w_at(in f.mt_val, i)
-    }
+    if i == none() { 0 } else { w_at(in f.mt_val, i) }
 }
 
 // The counter at `addr`, created at 0 if new.
@@ -1048,11 +1044,7 @@ fn block_at(in f: Fabric, addr: u64) -> BlockAt eff [Fail[IntcFault]] {
 }
 
 fn half(v: u64, hi: bool) -> u64 {
-    if hi {
-        v >> 32
-    } else {
-        v & 4294967295
-    }
+    if hi { v >> 32 } else { v & 4294967295 }
 }
 
 fn set_half(old: u64, hi: bool, v: u64) -> u64 {
@@ -1301,11 +1293,7 @@ pub fn m_guest_files(in f: Fabric, hart: u64) -> Located {
 
 pub fn m_geilen(in f: Fabric, hart: u64) -> u64 {
     let gf = m_guest_files(in f, hart);
-    if gf.k == none() {
-        0
-    } else {
-        gf.g
-    }
+    if gf.k == none() { 0 } else { gf.g }
 }
 
 pub fn m_hgeip(in f: Fabric, hart: u64) -> u64 {

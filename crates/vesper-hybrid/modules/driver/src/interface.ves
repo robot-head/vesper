@@ -171,11 +171,7 @@ fn pass_name(p: u64) -> Str {
 }
 
 fn resumption_name(linear: bool) -> Str {
-    if linear {
-        "linear"
-    } else {
-        "affine"
-    }
+    if linear { "linear" } else { "affine" }
 }
 
 // `Exporter::id`: `<package>::<kind>::<name>`, builtins under `std/core`.

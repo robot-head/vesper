@@ -291,11 +291,7 @@ fn domain_name(tag: u8) -> Str {
 }
 
 fn kind_name(tag: u8) -> Str {
-    if tag == 1 {
-        "blob"
-    } else {
-        "tree"
-    }
+    if tag == 1 { "blob" } else { "tree" }
 }
 
 fn hex_of(in digest: Slice[u8]) -> ChunkSeq[u8] {
@@ -2073,11 +2069,7 @@ fn sorted_names(in names: Slice[u8], in ends: Slice[u64], n: u64) -> ChunkSeq[u6
         in_b = !in_b;
         width = wrapping_mul(width, 2);
     }
-    if in_b {
-        b
-    } else {
-        a
-    }
+    if in_b { b } else { a }
 }
 
 // `Store::ingest_dir`: the tree's `Ingested` reply.

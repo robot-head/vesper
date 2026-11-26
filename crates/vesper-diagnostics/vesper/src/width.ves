@@ -1520,22 +1520,14 @@ fn width_run(c: u64) -> u64 {
             hi = mid;
         }
     }
-    if lo == 0 {
-        497
-    } else {
-        wrapping_sub(lo, 1)
-    }
+    if lo == 0 { 497 } else { wrapping_sub(lo, 1) }
 }
 
 // `UnicodeWidthChar::width(c).unwrap_or(1)` for the char `c`.
 pub fn char_width(c: u64) -> u64 {
     let i = width_run(c);
     if i < 497 {
-        if c <= WIDTH_HI[i] {
-            WIDTH_W[i]
-        } else {
-            1
-        }
+        if c <= WIDTH_HI[i] { WIDTH_W[i] } else { 1 }
     } else {
         1
     }

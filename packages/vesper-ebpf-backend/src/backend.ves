@@ -2951,29 +2951,13 @@ fn binary(inout g: G, inout c: Ctx, in p: Program, i: InstRow) -> bool {
     } else if ne {
         JmpOp::Ne
     } else if is(in c.names, bop, "<") {
-        if signed {
-            JmpOp::SLt
-        } else {
-            JmpOp::Lt
-        }
+        if signed { JmpOp::SLt } else { JmpOp::Lt }
     } else if is(in c.names, bop, "<=") {
-        if signed {
-            JmpOp::SLe
-        } else {
-            JmpOp::Le
-        }
+        if signed { JmpOp::SLe } else { JmpOp::Le }
     } else if is(in c.names, bop, ">") {
-        if signed {
-            JmpOp::SGt
-        } else {
-            JmpOp::Gt
-        }
+        if signed { JmpOp::SGt } else { JmpOp::Gt }
     } else if is(in c.names, bop, ">=") {
-        if signed {
-            JmpOp::SGe
-        } else {
-            JmpOp::Ge
-        }
+        if signed { JmpOp::SGe } else { JmpOp::Ge }
     } else {
         is_cmp = false;
         JmpOp::Eq

@@ -695,11 +695,7 @@ fn link(
     release(ch);
     match waited {
         Result::Ok(st) => {
-            if success(st) {
-                0
-            } else {
-                1
-            }
+            if success(st) { 0 } else { 1 }
         },
         Result::Err(e) => error_word(e),
     }

@@ -95,11 +95,7 @@ fn digit_at(in text: Slice[u8], p: u64) -> u64 {
     match text.try_get(p) {
         Option::Some(c) => {
             let d = wrapping_sub(widen_u64(c), Ascii::Zero);
-            if d < DECIMAL_BASE {
-                d
-            } else {
-                NOT_DIGIT
-            }
+            if d < DECIMAL_BASE { d } else { NOT_DIGIT }
         },
         Option::None => NOT_DIGIT,
     }

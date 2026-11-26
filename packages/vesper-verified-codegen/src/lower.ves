@@ -1678,11 +1678,7 @@ fn pp(in plan: Plan, i: u64) -> PP {
 }
 
 fn result_base(p: Planned) -> u64 {
-    if p.status {
-        1
-    } else {
-        0
-    }
+    if p.status { 1 } else { 0 }
 }
 
 pub fn not_ported(in s: Str) -> VErr {
@@ -2498,11 +2494,7 @@ fn int_fits(in lw: Lw, ty: u32, lo: u64, hi: u64) -> u8 {
         // the other integer kinds never get a one-word shape here
         return int_kind_other(in lw, s, lo, hi);
     };
-    if fits {
-        1
-    } else {
-        2
-    }
+    if fits { 1 } else { 2 }
 }
 
 // `from_type` of the integer kinds without a one-word shape (shape rejects

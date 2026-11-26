@@ -476,11 +476,7 @@ fn atomic_from_imm(imm: i32) -> Option[AtomicOp] {
 }
 
 fn fetch_bit(f: bool) -> i32 {
-    if f {
-        BpfAtomic::Fetch
-    } else {
-        0
-    }
+    if f { BpfAtomic::Fetch } else { 0 }
 }
 
 fn atomic_imm(op: AtomicOp) -> i32 {

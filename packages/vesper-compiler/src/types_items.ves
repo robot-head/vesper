@@ -35,11 +35,7 @@ fn dimensions(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     } else {
         let q = dimension(dimension_factor(p));
         let r = eat(q, 38);
-        if ate(q, r) {
-            dimensions(r)
-        } else {
-            r
-        }
+        if ate(q, r) { dimensions(r) } else { r }
     }
 }
 
@@ -67,11 +63,7 @@ fn ty_params(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     } else {
         let q = ty(pass(p));
         let r = eat(q, 38);
-        if ate(q, r) {
-            ty_params(r)
-        } else {
-            r
-        }
+        if ate(q, r) { ty_params(r) } else { r }
     }
 }
 
@@ -81,11 +73,7 @@ fn ty_list(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     } else {
         let q = ty(p);
         let r = eat(q, 38);
-        if ate(q, r) {
-            ty_list(r)
-        } else {
-            r
-        }
+        if ate(q, r) { ty_list(r) } else { r }
     }
 }
 
@@ -105,11 +93,7 @@ fn type_arg_list(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     } else {
         let q = type_arg(p);
         let r = eat(q, 38);
-        if ate(q, r) {
-            type_arg_list(r)
-        } else {
-            r
-        }
+        if ate(q, r) { type_arg_list(r) } else { r }
     }
 }
 
@@ -121,11 +105,7 @@ fn type_arg(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
         if ate(q, r) {
             let s = type_args(upper(r));
             let u = eat(s, 68);
-            if ate(s, u) {
-                lower(u)
-            } else {
-                u
-            }
+            if ate(s, u) { lower(u) } else { u }
         } else {
             r
         }
@@ -219,11 +199,7 @@ fn generic_list(p: P, track: bool) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
             q
         };
         let s = eat(r, 38);
-        if ate(r, s) {
-            generic_list(s, track)
-        } else {
-            s
-        }
+        if ate(r, s) { generic_list(s, track) } else { s }
     }
 }
 
@@ -247,11 +223,7 @@ fn field_list(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
         let m = eat(q, 45);
         let r = if ate(q, m) { required_mode(m) } else { q };
         let s = eat(r, 38);
-        if ate(r, s) {
-            field_list(s)
-        } else {
-            s
-        }
+        if ate(r, s) { field_list(s) } else { s }
     }
 }
 
@@ -305,18 +277,10 @@ fn variants(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
             fields(q)
         } else {
             let l = eat(q, 32);
-            if ate(q, l) {
-                expect(ty_list(l), 33)
-            } else {
-                q
-            }
+            if ate(q, l) { expect(ty_list(l), 33) } else { q }
         };
         let s = eat(r, 38);
-        if ate(r, s) {
-            variants(s)
-        } else {
-            s
-        }
+        if ate(r, s) { variants(s) } else { s }
     }
 }
 
@@ -379,11 +343,7 @@ fn params(p: P, end: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
         let c = eat(q, 40);
         let q = if ate(q, c) { ty(c) } else { q };
         let r = eat(q, 38);
-        if ate(q, r) {
-            params(r, end)
-        } else {
-            r
-        }
+        if ate(q, r) { params(r, end) } else { r }
     }
 }
 
@@ -398,11 +358,7 @@ fn place_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     } else {
         let r = lower(p);
         let d = eat(r, 42);
-        if ate(r, d) {
-            place_tree(d)
-        } else {
-            r
-        }
+        if ate(r, d) { place_tree(d) } else { r }
     }
 }
 
@@ -412,10 +368,6 @@ fn place_list(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     } else {
         let q = place_tree(p);
         let r = eat(q, 38);
-        if ate(q, r) {
-            place_list(r)
-        } else {
-            r
-        }
+        if ate(q, r) { place_list(r) } else { r }
     }
 }

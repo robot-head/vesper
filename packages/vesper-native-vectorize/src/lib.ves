@@ -157,11 +157,7 @@ impl Map {
     // `map.get(&v).copied().unwrap_or(v)`.
     fn or(in self, v: u32) -> u32 {
         let x = self.get(v);
-        if x == NONE {
-            v
-        } else {
-            x
-        }
+        if x == NONE { v } else { x }
     }
 
     fn put(inout self, k: u32, v: u32) {
@@ -224,11 +220,7 @@ fn compare(in f: Func, c: u32) -> u32 {
     if i == NONE || f.def_num(c) != 0 {
         return NONE;
     }
-    if f.op(i) == OP_ICMP {
-        i
-    } else {
-        NONE
-    }
+    if f.op(i) == OP_ICMP { i } else { NONE }
 }
 
 // `constant`: whether `v` is an `iconst` (and `out` its value).

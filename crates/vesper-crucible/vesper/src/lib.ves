@@ -104,11 +104,7 @@ fn inc(x: u64) -> u64 {
 }
 
 fn min_u64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // `a % b` for `b > 0`.
@@ -1196,19 +1192,11 @@ fn insert_at(inout s: ChunkSeq[u64], pos: u64, x: u64) {
 
 fn sat_add(a: u64, b: u64) -> u64 {
     let s = wrapping_add(a, b);
-    if s < a {
-        max_u64()
-    } else {
-        s
-    }
+    if s < a { max_u64() } else { s }
 }
 
 fn sat_sub(a: u64, b: u64) -> u64 {
-    if b > a {
-        0
-    } else {
-        wrapping_sub(a, b)
-    }
+    if b > a { 0 } else { wrapping_sub(a, b) }
 }
 
 // `1 << bit` for `bit < 64`.
@@ -2902,11 +2890,7 @@ pub fn search_child(
     let d = wrapping_sub(s.ev_proc.len(), 1);
     let p = s.p_proc;
     let running = if proc_tag(p) == Proc::Task {
-        if still_ready {
-            p
-        } else {
-            none()
-        }
+        if still_ready { p } else { none() }
     } else {
         at(in s.n_running.as_slice(), d)
     };

@@ -258,11 +258,7 @@ pub fn l_new(sink c: Ctx, sink a: Ast) -> L {
 
 fn alias_of(in l: L, s: u32) -> u32 {
     let x = u32_at(in l.alias, w(s));
-    if x == 0 {
-        NONE32
-    } else {
-        wrapping_sub(x, 1)
-    }
+    if x == 0 { NONE32 } else { wrapping_sub(x, 1) }
 }
 
 fn has_alias(in l: L, s: u32) -> bool {
@@ -297,20 +293,12 @@ fn set_local(inout l: L, s: u32, ty: u32) {
 
 fn local_of(in l: L, s: u32) -> u32 {
     let x = u32_at(in l.local_ty, w(s));
-    if x == 0 {
-        NONE32
-    } else {
-        wrapping_sub(x, 1)
-    }
+    if x == 0 { NONE32 } else { wrapping_sub(x, 1) }
 }
 
 fn cap_of(in l: L, s: u32) -> u32 {
     let x = u32_at(in l.cap_of, w(s));
-    if x == 0 {
-        NONE32
-    } else {
-        wrapping_sub(x, 1)
-    }
+    if x == 0 { NONE32 } else { wrapping_sub(x, 1) }
 }
 
 fn fresh(inout l: L) -> u32 {
@@ -415,11 +403,7 @@ fn ppath(inout l: L, i: u64) -> u64 {
 // `types.get(span)`, or `Type::Infer`.
 fn span_type(in l: L, s0: u64, s1: u64) -> u32 {
     let t = l.c.world.expr_type(s0, s1);
-    if t == NONE32 {
-        l.c.types.infer
-    } else {
-        t
-    }
+    if t == NONE32 { l.c.types.infer } else { t }
 }
 
 // `type_at`: the default type of the span's type.
@@ -2878,11 +2862,7 @@ fn copy_words(in s: ChunkSeq[u64]) -> ChunkSeq[u64] {
 }
 
 fn min_u64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // ----- thread_tokens and the program tables ----------------------------------------------

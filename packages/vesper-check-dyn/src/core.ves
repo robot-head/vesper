@@ -795,11 +795,7 @@ pub fn is_infer(in d: D, t: u32) -> bool {
 // `Type::name`: the name of a Named type, else NONE ("").
 pub fn type_name(in d: D, t: u32) -> u32 {
     let n = ty(in d, t);
-    if n.kind == 1 {
-        n.a
-    } else {
-        NONE
-    }
+    if n.kind == 1 { n.a } else { NONE }
 }
 
 // `dyn_trait::object_trait`: the trait of `dyn Trait[args]`, or NONE.
@@ -841,11 +837,7 @@ pub fn fn_sig(in d: D, t: u32) -> u32 {
         return NONE;
     }
     let sig = la(in d, n.b, 0);
-    if ty(in d, sig).kind == 3 {
-        sig
-    } else {
-        NONE
-    }
+    if ty(in d, sig).kind == 3 { sig } else { NONE }
 }
 
 pub fn fn_kind(in d: D, t: u32) -> u32 {
@@ -864,11 +856,7 @@ pub fn boxed_fn_sig(in d: D, t: u32) -> u32 {
 
 pub fn any_fn_sig(in d: D, t: u32) -> u32 {
     let s = fn_sig(in d, t);
-    if s != NONE {
-        s
-    } else {
-        boxed_fn_sig(in d, t)
-    }
+    if s != NONE { s } else { boxed_fn_sig(in d, t) }
 }
 
 fn effects_mention(in d: D, e: u32, name: u32, bare: bool) -> bool {

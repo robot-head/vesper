@@ -184,11 +184,7 @@ fn adt_ty_arg(in st: St, t: u32, i: u64) -> u32 {
 }
 
 fn or_unknown(in st: St, t: u32) -> u32 {
-    if t == NONE {
-        st.unknown
-    } else {
-        t
-    }
+    if t == NONE { st.unknown } else { t }
 }
 
 // ----- obligations ------------------------------------------------------------------------
@@ -471,11 +467,7 @@ fn signature(inout st: St, inout cx: Cx, in a: Ast, f: u32) {
 fn info_gen_count(in cx: Cx, r: u32) -> u64 {
     let g = widen_u64(u32_at(in cx.ai_gn, widen_u64(r)));
     let k = widen_u64(u32_at(in cx.ai_kn, widen_u64(r)));
-    if k < g {
-        k
-    } else {
-        g
-    }
+    if k < g { k } else { g }
 }
 
 // All generics of the info (not zipped with kinds), for `adt_subst`.

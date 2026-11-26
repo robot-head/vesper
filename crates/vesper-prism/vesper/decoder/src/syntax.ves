@@ -206,11 +206,7 @@ pub fn find(in s: Slice[u8], lo: u64, hi: u64, b: u8) -> u64 {
         }
     }
     if b == Ascii::Nul && end < hi && lo < hi {
-        if lo > end {
-            lo
-        } else {
-            end
-        }
+        if lo > end { lo } else { end }
     } else {
         hi
     }

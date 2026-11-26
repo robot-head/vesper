@@ -723,11 +723,7 @@ pub fn constants_end(i: u32, args: u64) -> u64 {
     if f == I_EXTRACT || f == I_REPLACE {
         2
     } else if f == I_SHUFFLE {
-        if args > 1 {
-            args
-        } else {
-            1
-        }
+        if args > 1 { args } else { 1 }
     } else {
         0
     }

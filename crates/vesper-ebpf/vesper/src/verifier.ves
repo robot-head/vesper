@@ -470,11 +470,7 @@ fn is_or_null(r: R) -> bool {
 }
 
 fn null_id(r: R) -> u64 {
-    if is_or_null(r) {
-        r.y
-    } else {
-        0
-    }
+    if is_or_null(r) { r.y } else { 0 }
 }
 
 fn has_ref(r: R) -> bool {
@@ -1683,11 +1679,7 @@ fn alu(inout v: V, inout st: St, pc: u64, wide: bool, op: AluOp, dst: u64, src: 
 }
 
 fn finish(wide: bool, s: Scalar) -> Scalar {
-    if wide {
-        s
-    } else {
-        scalar_zext32(s)
-    }
+    if wide { s } else { scalar_zext32(s) }
 }
 
 fn alu_inner(inout v: V, inout st: St, pc: u64, wide: bool, op: AluOp, dst: u64, src: Operand) eff [

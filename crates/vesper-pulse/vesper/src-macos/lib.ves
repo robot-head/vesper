@@ -390,11 +390,7 @@ pub copy struct KqueueWaitResult {
 }
 
 fn kqueue_filter(interest: u32) -> u16 {
-    if interest == 0 {
-        65535
-    } else {
-        65534
-    }
+    if interest == 0 { 65535 } else { 65534 }
 }
 
 fn make_kevent(fd: i32, interest: u32, flags: u16, token: u64) -> Kevent {
@@ -463,11 +459,7 @@ pub fn kqueue_deregister(
 ) -> (bool, u32) eff [Ffi[PulseSys]] {
     let ev = make_kevent(fd, interest, PulseSys::EV_DELETE, 0);
     let (rc, err) = PulseSys::kevent_apply(poller.fd, in ev, 1, 0, 0, 0);
-    if rc >= 0 {
-        (true, 0)
-    } else {
-        (false, err)
-    }
+    if rc >= 0 { (true, 0) } else { (false, err) }
 }
 
 pub fn kqueue_wait_one(
@@ -1996,11 +1988,7 @@ fn is_read(op: Operation) -> bool {
 
 // The kqueue interest of `op`, as `kqueue_filter` takes it.
 fn op_interest(op: Operation) -> u32 {
-    if is_read(op) {
-        0
-    } else {
-        1
-    }
+    if is_read(op) { 0 } else { 1 }
 }
 
 // A driver of `entries` requests at most, or `Err` with the error.
@@ -2121,11 +2109,7 @@ fn io_deregister(in d: KqueueDriver, fd: i32, op: Operation) -> u32 eff [Ffi[Pul
 fn io_apply(in d: KqueueDriver, fd: i32, op: Operation, token: u64) -> u32 eff [Ffi[PulseSys]] {
     let ev = make_kevent(fd, op_interest(op), PulseSys::EV_ADD | PulseSys::EV_ONESHOT, token);
     let (rc, e) = PulseSys::kevent_apply(d.poller.fd, in ev, 1, 0, 0, 0);
-    if rc >= 0 {
-        0
-    } else {
-        e
-    }
+    if rc >= 0 { 0 } else { e }
 }
 
 // Whether `fd` is a regular file (always ready), as `(ok, regular, errno)`.

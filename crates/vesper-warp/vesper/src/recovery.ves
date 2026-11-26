@@ -99,35 +99,19 @@ fn sat_mul1000(x: u64) -> u64 {
 }
 
 fn sat_sub(a: u64, b: u64) -> u64 {
-    if b > a {
-        0
-    } else {
-        wrapping_sub(a, b)
-    }
+    if b > a { 0 } else { wrapping_sub(a, b) }
 }
 
 fn max64(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn min64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 fn rem(a: u64, b: u64) -> u64 {
-    if b == 0 {
-        0
-    } else {
-        a % b
-    }
+    if b == 0 { 0 } else { a % b }
 }
 
 // ---------------------------------------------------------------------------
@@ -329,11 +313,7 @@ fn backoff(in st: RecState, d: u64) -> u64 {
 }
 
 fn probe_space(in st: RecState) -> u8 {
-    if st.has_handshake_keys {
-        1
-    } else {
-        0
-    }
+    if st.has_handshake_keys { 1 } else { 0 }
 }
 
 // The earliest loss time (the first space on a tie) and A.8

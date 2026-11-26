@@ -102,11 +102,7 @@ fn f(a: u64) -> u64 {
     for i in 0..N {
         g(i)
     }
-    if a == N {
-        a
-    } else {
-        N
-    }
+    if a == N { a } else { N }
 }
 "
     );
@@ -538,7 +534,7 @@ fn large_module(items: usize) -> String {
     let mut source = String::new();
     for i in 0..items {
         source.push_str(&format!(
-            "// item {i}\nfn item_{i}(in x: u64, in y: u64) -> u64 {{\n    let pair = (x, y);\n    if x > y {{\n        add(x, y) * 2\n    }} else {{\n        y\n    }}\n}}\n\n"
+            "// item {i}\nfn item_{i}(in x: u64, in y: u64) -> u64 {{\n    let pair = (x, y);\n    if x > y {{ add(x, y) * 2 }} else {{ y }}\n}}\n\n"
         ));
     }
     source.pop();
@@ -889,10 +885,11 @@ fn short_if_else_expressions_stay_on_one_line_like_rustfmt() {
 }
 "
     );
-    // A longer one, or an `if` that starts a statement, stays vertical.
+    // A longer one, or an `if` statement, stays vertical; a block's last
+    // expression is a value, so it stays on one line.
     assert_eq!(
         verify(
-            "fn f(a:u64)->u64{let x=if a>first_limit_value{a}else{second_limit_value};if a>1{a}else{2}}"
+            "fn f(a:u64)->u64{let x=if a>first_limit_value{a}else{second_limit_value};if a>1{g()}else{h()}if a>1{a}else{2}}"
         ),
         "fn f(a: u64) -> u64 {
     let x = if a > first_limit_value {
@@ -901,10 +898,11 @@ fn short_if_else_expressions_stay_on_one_line_like_rustfmt() {
         second_limit_value
     };
     if a > 1 {
-        a
+        g()
     } else {
-        2
+        h()
     }
+    if a > 1 { a } else { 2 }
 }
 "
     );

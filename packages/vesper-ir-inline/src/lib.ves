@@ -538,11 +538,7 @@ impl Prog {
             return NONE32;
         }
         let t = u32_at(in self.val, add(w(f.va), v));
-        if t == 0 {
-            NONE32
-        } else {
-            wrapping_sub(t, 1)
-        }
+        if t == 0 { NONE32 } else { wrapping_sub(t, 1) }
     }
 
     pub fn local_ty(in self, f: Fun, name: u32) -> u32 {
@@ -2332,11 +2328,7 @@ fn value_bound(in p: Prog, f: Fun) -> u64 {
             }
         }
     }
-    if any {
-        inc(top)
-    } else {
-        0
-    }
+    if any { inc(top) } else { 0 }
 }
 
 // The seeds of a fold: the caller's constants passed by value to stable
@@ -3010,11 +3002,7 @@ fn renamed_root(in p: Prog, in rn: Rename, root: u64) -> u64 {
         return p.op(w(place));
     }
     let name = rn.names.get(root);
-    if name != NONE32 {
-        w(name)
-    } else {
-        root
-    }
+    if name != NONE32 { w(name) } else { root }
 }
 
 // A renamed copy of the pattern at `at` (`Rename::pattern`).

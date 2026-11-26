@@ -1,10 +1,6 @@
 // Modal kinding, owned bindings, path joins and the Fail frame condition.
 fn c_max(a: i64, b: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 fn c_mode(ty: CType, depth: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     c_kind_walk(ty, 0, 0, depth).mode

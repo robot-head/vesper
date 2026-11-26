@@ -1277,11 +1277,7 @@ fn declaration(inout l: L) -> u32 {
         0
     } else {
         let m = mode(inout l);
-        if m == 3 {
-            1
-        } else {
-            m
-        }
+        if m == 3 { 1 } else { m }
     };
     let k = kind(in l);
     if k == k_struct() {
@@ -1736,17 +1732,9 @@ fn fold_member(
     } else if op == 2 {
         checked_mul_u64(a, b)
     } else if op == 3 {
-        if b > 0 {
-            Option::Some(a / b)
-        } else {
-            None
-        }
+        if b > 0 { Option::Some(a / b) } else { None }
     } else if op == 4 {
-        if b > 0 {
-            Some(a % b)
-        } else {
-            None
-        }
+        if b > 0 { Some(a % b) } else { None }
     } else if op == 5 {
         Some(a & b)
     } else if op == 6 {
@@ -1765,11 +1753,7 @@ fn fold_member(
             None
         }
     } else if op == 9 {
-        if b < 64 {
-            Some(a >> b)
-        } else {
-            None
-        }
+        if b < 64 { Some(a >> b) } else { None }
     } else {
         None
     };
@@ -2006,11 +1990,7 @@ fn ty(inout l: L) -> u32 {
     let result = if eat(inout l, k_fn()) {
         let md = if eat(inout l, k_at()) {
             let m = mode(inout l);
-            if m == 3 {
-                1
-            } else {
-                m
-            }
+            if m == 3 { 1 } else { m }
         } else {
             1
         };
@@ -2183,11 +2163,7 @@ fn array_length(inout l: L) -> u64 {
     }
     let i = bump(inout l);
     let (ok, v) = int_value(in l, i);
-    if ok && v <= max_array_length() {
-        v
-    } else {
-        0
-    }
+    if ok && v <= max_array_length() { v } else { 0 }
 }
 
 // The scalar elements of a value of type `t`, through nested tuples.
@@ -2201,11 +2177,7 @@ fn type_leaves(in a: Ast, t: u32) -> u64 {
         let x = type_leaves(in a, list_at(in a, n.a, i));
         sum = saturating_add_u64(sum, x);
     }
-    if sum == 0 {
-        1
-    } else {
-        sum
-    }
+    if sum == 0 { 1 } else { sum }
 }
 
 // `OR_PATTERN_EXPANSION`: the token weight or-pattern alternatives may
@@ -2216,11 +2188,7 @@ fn or_pattern_expansion() -> u64 {
 
 fn saturating_add_u64(a: u64, b: u64) -> u64 {
     let s = wrapping_add(a, b);
-    if s < a {
-        18446744073709551615
-    } else {
-        s
-    }
+    if s < a { 18446744073709551615 } else { s }
 }
 
 fn saturating_mul_u64(a: u64, b: u64) -> u64 {
@@ -2236,11 +2204,7 @@ fn saturating_mul_u64(a: u64, b: u64) -> u64 {
     }
     let lo = wrapping_mul(big & 4294967295, small);
     let sum = wrapping_add(lo, wrapping_shl_u64(hi, 32));
-    if sum < lo {
-        max
-    } else {
-        sum
-    }
+    if sum < lo { max } else { sum }
 }
 
 fn dimension(inout l: L) -> u32 {
@@ -2568,11 +2532,7 @@ fn trait_decl(inout l: L, start: u64, public: bool) -> u32 {
             let bound = if eat(inout l, k_colon()) {
                 expect(inout l, k_mod());
                 let md = mode(inout l);
-                if md == 3 {
-                    2
-                } else {
-                    md
-                }
+                if md == 3 { 2 } else { md }
             } else {
                 2
             };
@@ -3512,11 +3472,7 @@ fn expr_leaves(in a: Ast, e: u32) -> u64 {
         for i in 0..list_len(in a, n.a) {
             sum = saturating_add_u64(sum, expr_leaves(in a, list_at(in a, n.a, i)));
         }
-        if sum == 0 {
-            1
-        } else {
-            sum
-        }
+        if sum == 0 { 1 } else { sum }
     } else if n.kind == 5 && n.b != none() {
         expr_leaves(in a, n.b)
     } else {

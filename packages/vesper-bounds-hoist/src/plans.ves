@@ -1631,11 +1631,7 @@ fn loop_candidate(
                         pb
                     } else {
                         let d = fa.def(v);
-                        if d == NONE64 {
-                            NONE32
-                        } else {
-                            fa.def_block(d)
-                        }
+                        if d == NONE64 { NONE32 } else { fa.def_block(d) }
                     };
                     if db != NONE32 && !has(in blocks, db) {
                         bound = BoundRow { kind: 2, a: rn.a, b: 0 };

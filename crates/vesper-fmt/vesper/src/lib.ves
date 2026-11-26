@@ -180,11 +180,7 @@ fn cadd(a: u64, b: u64) -> u64 eff [Fail[FmtFail]] {
 }
 
 fn min64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // `Limits` (all fields are `usize` in Rust, at most `u64::MAX` here).
@@ -1437,7 +1433,18 @@ fn short_if_else(in at: Atoms, start: u64, end: u8, in src: Slice[u8]) -> u64 {
             return NONE;
         }
         let kind = akind(in at, i);
-        if kind == K_COMMENT || kind == K_BLOCK_COMMENT || kind == K_SEMI {
+        let sugar = match at.sgap.try_get(i) {
+            Option::Some(g) => g,
+            Option::None => SGAP_NONE,
+        };
+        // A comment, a statement, a separator or a sugar boundary (`else` on
+        // its own line in a template) can break the line, so the `if` cannot
+        // be one group.
+        if kind == K_COMMENT
+            || kind == K_BLOCK_COMMENT
+            || kind == K_SEMI
+            || i > start && sugar != SGAP_NONE
+            || depth == 0 && (kind == K_COMMA || kind == K_ARROW) {
             return NONE;
         }
         if has_prev {
@@ -1571,22 +1578,29 @@ fn sequence(
             break;
         }
         // An `if` used as a value (`let x = if ..`, an argument, a match
-        // arm), not one at the start of a statement, as rustfmt decides.
-        let starts_short_if = short_close == NONE
-            && c == K_IF
-            && !(has_prev && prev == K_ELSE)
-            && !(
-                block
-                    && (
-                        !has_prev
-                            || previous_block
-                            || prev == K_SEMI
-                            || prev == K_COMMENT
-                            || prev == K_BLOCK_COMMENT
-                    )
+        // arm, a block's last expression), as rustfmt decides.
+        let starts_short_if = short_close == NONE && c == K_IF && !(has_prev && prev == K_ELSE);
+        // An `if` that starts a statement is a value only as its block's last
+        // expression.
+        let starts_statement = block
+            && (
+                !has_prev
+                    || previous_block
+                    || prev == K_SEMI
+                    || prev == K_COMMENT
+                    || prev == K_BLOCK_COMMENT
             );
         let short_if_close = if starts_short_if {
-            short_if_else(in at, pos, end, in src)
+            let close = short_if_else(in at, pos, end, in src);
+            let next = wrapping_add(close, 1);
+            if close == NONE
+                || !starts_statement
+                || next >= n
+                || end != NO_END && akind(in at, next) == end {
+                close
+            } else {
+                NONE
+            }
         } else {
             NONE
         };
@@ -1805,16 +1819,20 @@ fn sequence(
         // The short `if` ends: it becomes one group that breaks like any
         // other `if`, with the breaks in its condition kept on one line.
         if short_close != NONE && pos > short_close {
-            for i in short_breaks..breaks.len() {
-                let b = break_at(in breaks, i);
-                let glue = push_leaf(inout d, if b.level == 12 { D_NIL } else { D_SPACE });
-                let _ = line.try_set(b.offset, wrapping_u32(glue));
-            }
-            breaks.truncate(short_breaks);
-            let inner = push_concat_range(inout d, in line.as_slice(), short_docs, line.len());
-            line.truncate(short_docs);
-            line.push(wrapping_u32(push_group(inout d, inner)));
             short_close = NONE;
+            // Unless the line broke inside the `if`, which `short_if_else`
+            // rules out, leaving nothing to group.
+            if short_docs <= line.len() && short_breaks <= breaks.len() {
+                for i in short_breaks..breaks.len() {
+                    let b = break_at(in breaks, i);
+                    let glue = push_leaf(inout d, if b.level == 12 { D_NIL } else { D_SPACE });
+                    let _ = line.try_set(b.offset, wrapping_u32(glue));
+                }
+                breaks.truncate(short_breaks);
+                let inner = push_concat_range(inout d, in line.as_slice(), short_docs, line.len());
+                line.truncate(short_docs);
+                line.push(wrapping_u32(push_group(inout d, inner)));
+            }
         }
         previous_block = is_block;
         previous_params = params;

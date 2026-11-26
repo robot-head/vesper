@@ -72,11 +72,7 @@ pub fn proj_self(in t: Types, ty: u32) -> u32 {
 // The projection's trait name, or NONE32 for the shorthand `T::A`.
 pub fn proj_trait(in t: Types, sy: Sy, ty: u32) -> u32 {
     let n = t.node(t.arg(ty, 1)).name;
-    if n == sy.any_trait {
-        NONE32
-    } else {
-        n
-    }
+    if n == sy.any_trait { NONE32 } else { n }
 }
 
 // The `Trait[args]` part (its arguments are the projection's trait args).

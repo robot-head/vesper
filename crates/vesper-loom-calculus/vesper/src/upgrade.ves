@@ -466,11 +466,7 @@ pub fn upgrade(inout l: L) {
             Order::Less
         } else {
             let o1 = ord(ap, bp);
-            if o1 != Order::Equal {
-                o1
-            } else {
-                ord(ac, bc)
-            }
+            if o1 != Order::Equal { o1 } else { ord(ac, bc) }
         };
         if o == Order::Less || o == Order::Equal {
             let d = dep(in l, ad);

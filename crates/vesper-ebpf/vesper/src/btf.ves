@@ -142,11 +142,7 @@ fn entry_words(kind: u64) -> u64 {
 }
 
 fn sext32(v: u64) -> u64 {
-    if v & SIGN_BIT32 != 0 {
-        v | HIGH32
-    } else {
-        v
-    }
+    if v & SIGN_BIT32 != 0 { v | HIGH32 } else { v }
 }
 
 // The byte `i` of the base strings followed by the own strings.

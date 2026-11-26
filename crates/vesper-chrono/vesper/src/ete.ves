@@ -238,11 +238,7 @@ fn push_address(inout st: EteState, address: u64, in isa: InstructionSet) {
 }
 
 fn latest_addr(in st: EteState) -> u64 {
-    if st.has_h0 {
-        st.h0_addr
-    } else {
-        0
-    }
+    if st.has_h0 { st.h0_addr } else { 0 }
 }
 
 fn is_addr_header(h: u8) -> bool {

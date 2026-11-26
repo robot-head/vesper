@@ -256,19 +256,11 @@ fn mul_to(inout x: u64, k: u64) -> u8 {
 }
 
 fn min(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 fn max(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // certificate.rs's `grow`: room for one more element of a vector of `len`

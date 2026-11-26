@@ -13,19 +13,11 @@ fn sf(inout s: Slice[f64], i: u64, v: f64) {
 }
 
 fn abs64(x: f64) -> f64 {
-    if x < 0.0 {
-        -x
-    } else {
-        x
-    }
+    if x < 0.0 { -x } else { x }
 }
 
 fn max64(a: f64, b: f64) -> f64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn support_dot(

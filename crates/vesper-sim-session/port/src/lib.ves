@@ -79,11 +79,7 @@ struct LinkState {
 }
 
 fn max(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn at(in s: ChunkSeq[u64], i: u64) -> u64 {
@@ -480,11 +476,7 @@ fn remove_words(inout s: ChunkSeq[u64], start: u64, width: u64) {
 }
 
 fn min(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // The index of `endpoint` in `endpoints`, or its length when unknown.

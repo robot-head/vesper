@@ -865,11 +865,7 @@ fn r8(in b: Slice[u8], inout at: u64) -> i64 eff [Fail[KwErr]] {
         Option::Some(x) => {
             at = wrapping_add(at, 1);
             let v = wrapping_i64(widen_u64(x));
-            if v >= 128 {
-                wrapping_sub(v, 256)
-            } else {
-                v
-            }
+            if v >= 128 { wrapping_sub(v, 256) } else { v }
         },
         Option::None => {
             malformed();
@@ -974,11 +970,7 @@ fn rlen(in b: Slice[u8], inout at: u64, flex: bool) -> i64 eff [Fail[KwErr]] {
 
 fn rarray(in b: Slice[u8], inout at: u64, flex: bool) -> u64 eff [Fail[KwErr]] {
     let n = rlen(in b, inout at, flex);
-    if n < 0 {
-        0
-    } else {
-        wrapping_u64(n)
-    }
+    if n < 0 { 0 } else { wrapping_u64(n) }
 }
 
 // `R::nstr`: the string's length, -1 for null; it starts at `at` minus
@@ -1827,11 +1819,7 @@ pub fn batch_head(in b: Slice[u8], at0: u64) -> ChunkSeq[i64] {
     let res = handle Fail[KwErr] in {
         let _ = r32(in body, inout at);
         let magic = r8(in body, inout at);
-        if magic != 2 {
-            4
-        } else {
-            0
-        }
+        if magic != 2 { 4 } else { 0 }
     } with {
         return x => x,
         raise(e, k) => 3,
@@ -1870,11 +1858,7 @@ pub fn batch_head(in b: Slice[u8], at0: u64) -> ChunkSeq[i64] {
         let _ = out.try_set(7, base_ts);
         let _ = out.try_set(8, producer_id);
         let _ = out.try_set(9, count);
-        if count < 0 || last_delta < 0 {
-            2
-        } else {
-            0
-        }
+        if count < 0 || last_delta < 0 { 2 } else { 0 }
     } with {
         return x => x,
         raise(e, k) => 1,

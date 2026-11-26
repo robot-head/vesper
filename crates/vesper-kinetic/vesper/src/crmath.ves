@@ -116,59 +116,31 @@ struct Approx {
 // ----- formats ---------------------------------------------------------------
 
 fn prec(is64: bool) -> i64 {
-    if is64 {
-        F64_PREC
-    } else {
-        F32_PREC
-    }
+    if is64 { F64_PREC } else { F32_PREC }
 }
 
 fn emin(is64: bool) -> i64 {
-    if is64 {
-        F64_EMIN
-    } else {
-        F32_EMIN
-    }
+    if is64 { F64_EMIN } else { F32_EMIN }
 }
 
 fn emax(is64: bool) -> i64 {
-    if is64 {
-        F64_EMAX
-    } else {
-        F32_EMAX
-    }
+    if is64 { F64_EMAX } else { F32_EMAX }
 }
 
 fn inf_bits(is64: bool) -> u64 {
-    if is64 {
-        F64_INF_BITS
-    } else {
-        F32_INF_BITS
-    }
+    if is64 { F64_INF_BITS } else { F32_INF_BITS }
 }
 
 fn sign_bit(is64: bool) -> u64 {
-    if is64 {
-        F64_SIGN_BIT
-    } else {
-        F32_SIGN_BIT
-    }
+    if is64 { F64_SIGN_BIT } else { F32_SIGN_BIT }
 }
 
 fn nan_bits(is64: bool) -> u64 {
-    if is64 {
-        F64_NAN_BITS
-    } else {
-        F32_NAN_BITS
-    }
+    if is64 { F64_NAN_BITS } else { F32_NAN_BITS }
 }
 
 fn one_bits(is64: bool) -> u64 {
-    if is64 {
-        F64_ONE_BITS
-    } else {
-        F32_ONE_BITS
-    }
+    if is64 { F64_ONE_BITS } else { F32_ONE_BITS }
 }
 
 fn start_precision(is64: bool) -> u64 {
@@ -180,11 +152,7 @@ fn start_precision(is64: bool) -> u64 {
 }
 
 fn max_i64(a: i64, b: i64) -> i64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // Correctly round `sign * m * 2^e2` (`m >= 0`) to the format; the bits.

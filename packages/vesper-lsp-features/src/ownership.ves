@@ -522,11 +522,7 @@ fn ty_of(in o: Ow, in c: Ctx, in a: Ast, e: u32) -> u32 {
         }
     }
     let t = c.world.expr_type(w(n.start), w(n.end));
-    if t == NONE {
-        c.types.infer
-    } else {
-        t
-    }
+    if t == NONE { c.types.infer } else { t }
 }
 
 // The check-data symbol of AST name `s`, if the checker has one.
@@ -858,11 +854,7 @@ fn branch(
 // The function of AST symbol `s` (index), or NONE.
 fn function(in k: Callees, s: u32) -> u32 {
     let x = table_get(in k.fn_by_sym, s);
-    if x == 0 {
-        NONE
-    } else {
-        wrapping_sub(x, 1)
-    }
+    if x == 0 { NONE } else { wrapping_sub(x, 1) }
 }
 
 // A call `callee(args)` (`ExprKind::Call`).

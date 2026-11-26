@@ -49,11 +49,7 @@ fn r_csource(inout s: S, source: u64) {
 fn conformance(in s: S, source: u64) -> u64 {
     let x = source >> 1;
     if (source & 1) == 0 {
-        if x < s.nimpl {
-            x
-        } else {
-            none()
-        }
+        if x < s.nimpl { x } else { none() }
     } else if x < s.nmodel {
         add(s.nimpl, x)
     } else {
@@ -238,11 +234,7 @@ fn rp_begin(inout s: S, d: u64, from: u64, to: u64) {
 // Alpha-normal form: inference variables renumbered by first occurrence.
 fn alpha(inout s: S, g: u64) -> u64 {
     let r = canon_free(inout s, g);
-    if r == 0 {
-        g
-    } else {
-        r
-    }
+    if r == 0 { g } else { r }
 }
 
 // ---------------------------------------------------------------------------

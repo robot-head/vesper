@@ -602,11 +602,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
     } else if e.kind == X_FIELD {
         let bt = check_expr(inout tc, in a, e.a, tc.infer_ty);
         let ft = field_step(inout tc.types, inout tc.names, in tc.world, bt, n32(e.b), false);
-        if ft == NONE32 {
-            expected
-        } else {
-            ft
-        }
+        if ft == NONE32 { expected } else { ft }
     } else if e.kind == X_INDEX {
         let bt = check_expr(inout tc, in a, e.a, tc.infer_ty);
         let _it = check_expr(inout tc, in a, e.b, tc.infer_ty);
@@ -955,11 +951,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 }
                             } else {
                                 let eres = find_eop_result(in a, inout tc.names, cname);
-                                if eres != NONE32 {
-                                    eres
-                                } else {
-                                    expected
-                                }
+                                if eres != NONE32 { eres } else { expected }
                             };
                             record_span(inout tc, ce.s0, ce.s1, rty);
                             record_span(inout tc, e.s0, e.s1, rty);
@@ -1082,11 +1074,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 tc.bool_ty
                             } else {
                                 let eres = find_eop_result(in a, inout tc.names, cname);
-                                if eres != NONE32 {
-                                    eres
-                                } else {
-                                    expected
-                                }
+                                if eres != NONE32 { eres } else { expected }
                             };
                             record_span(inout tc, ce.s0, ce.s1, rty);
                             record_span(inout tc, e.s0, e.s1, rty);

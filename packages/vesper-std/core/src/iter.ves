@@ -92,7 +92,11 @@ pub sugar sum: tag emits eff [Fail] {
             let nr = $right $(.$right_field)*.len();
             let lhs = $left $(.$left_field)* [0..nl];
             let rhs = $right $(.$right_field)* [0..nr];
-            let limit = if nl < nr { nl } else { nr };
+            let limit = if nl < nr {
+                nl
+            } else {
+                nr
+            };
             let mut total = 0;
             for i in 0..limit {
                 match (lhs.try_get(i), rhs.try_get(i)) {

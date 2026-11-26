@@ -41,11 +41,7 @@ test {
     }
 
     fn larger(a: u64, b: u64) -> u64 {
-        if a > b {
-            a
-        } else {
-            b
-        }
+        if a > b { a } else { b }
     }
 
     // Up to 8 ASCII bytes packed little-endian into `w` (stops at a 0 byte).

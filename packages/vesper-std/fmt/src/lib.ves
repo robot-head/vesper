@@ -58,11 +58,7 @@ fn digit_value(b: u8, radix: u64) -> u64 {
     } else {
         radix
     };
-    if value < radix {
-        value
-    } else {
-        radix
-    }
+    if value < radix { value } else { radix }
 }
 
 // `(v / d, v % d)`, and `(0, 0)` when `d` is 0.

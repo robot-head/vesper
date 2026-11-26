@@ -80,11 +80,7 @@ fn no_vec() -> VecRes {
 
 fn span_type(in c: Ctx, s0: u64, s1: u64) -> u32 {
     let t = c.world.expr_type(s0, s1);
-    if t == NONE32 {
-        c.types.infer
-    } else {
-        t
-    }
+    if t == NONE32 { c.types.infer } else { t }
 }
 
 pub fn is_seq_type(in c: Ctx, ty: u32) -> bool {

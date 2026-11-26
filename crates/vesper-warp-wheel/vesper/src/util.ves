@@ -38,19 +38,11 @@ fn at(in s: ChunkSeq[u64], i: u64) -> u64 {
 }
 
 fn min(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 fn max(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // `x << s` and `x >> s`, 0 for `s >= 64` (every caller's amount is below
@@ -89,20 +81,12 @@ fn shr_in(x: u64, s: u64) -> u64 {
 // The `b != 0` test lets the checker prove the division total, so there is
 // no handler and the inliner takes it.
 fn div(a: u64, b: u64) -> u64 {
-    if b != 0 {
-        a / b
-    } else {
-        0
-    }
+    if b != 0 { a / b } else { 0 }
 }
 
 fn saturating_add(a: u64, b: u64) -> u64 {
     let s = wrapping_add(a, b);
-    if s < a {
-        u64_max()
-    } else {
-        s
-    }
+    if s < a { u64_max() } else { s }
 }
 
 fn saturating_mul(a: u64, b: u64) -> u64 {

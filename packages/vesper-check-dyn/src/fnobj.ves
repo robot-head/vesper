@@ -186,11 +186,7 @@ fn decls(inout d: D) {
 // `Type::name` as a symbol: "" for a type that is not Named.
 fn tname(in d: D, t: u32) -> u32 {
     let n = type_name(in d, t);
-    if n == NONE {
-        d.k.empty
-    } else {
-        n
-    }
+    if n == NONE { d.k.empty } else { n }
 }
 
 fn is_linear(in d: D, name: u32) -> bool {
@@ -969,11 +965,7 @@ fn infer(inout d: D, e: u32) -> u32 {
         return d.t_infer;
     }
     let t = type_of(in d, e);
-    if t == NONE {
-        d.t_infer
-    } else {
-        t
-    }
+    if t == NONE { d.t_infer } else { t }
 }
 
 // The parameter types of function `f`, from parameter `skip` on.
@@ -1453,11 +1445,7 @@ fn call(inout d: D, e: u32) {
 }
 
 fn field_name(in d: D, n: u32) -> u32 {
-    if n == d.k.self_ {
-        d.k.self_field
-    } else {
-        n
-    }
+    if n == d.k.self_ { d.k.self_field } else { n }
 }
 
 // The instance and tail names of an effect row, ", "-joined, into the

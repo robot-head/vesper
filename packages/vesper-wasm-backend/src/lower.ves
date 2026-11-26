@@ -2232,11 +2232,7 @@ impl L {
         }
         if sh.kind == SH_STRUCT || sh.kind == SH_ENUM {
             let nv = if sh.kind == SH_STRUCT {
-                if self.cx.variant_count(sh) > 0 {
-                    1
-                } else {
-                    0
-                }
+                if self.cx.variant_count(sh) > 0 { 1 } else { 0 }
             } else {
                 self.cx.variant_count(sh)
             };

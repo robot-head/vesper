@@ -44,11 +44,7 @@ const U32_MAX: u64 = 4294967295;
 
 fn sat32(a: u64, b: u64) -> u64 {
     let s = wrapping_add(a, b);
-    if s > U32_MAX {
-        U32_MAX
-    } else {
-        s
-    }
+    if s > U32_MAX { U32_MAX } else { s }
 }
 
 // Byte `i` of function `f`'s code (0 past the end).

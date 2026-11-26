@@ -130,11 +130,7 @@ fn parse_float(in s: Slice[u8]) -> u8 {
 }
 
 fn float_name(fl: u8) -> Str {
-    if fl == 1 {
-        "f32"
-    } else {
-        "f64"
-    }
+    if fl == 1 { "f32" } else { "f64" }
 }
 
 fn is_reserved_type(in s: Slice[u8]) -> bool {

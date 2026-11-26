@@ -805,11 +805,7 @@ pub fn attend(
 }
 
 fn visible(stored: u64, left: u64) -> u64 {
-    if stored < left {
-        stored
-    } else {
-        left
-    }
+    if stored < left { stored } else { left }
 }
 
 // Element `i` of a K/V head at byte `at`: little-endian FP32 or BF16.

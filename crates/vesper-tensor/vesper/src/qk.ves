@@ -86,11 +86,7 @@ pub fn check_block(in block: Slice[u8]) -> bool eff [Fail[ArithOverflow], Fail[R
 }
 
 fn err(use_mad: bool, diff: f32) -> f32 {
-    if use_mad {
-        abs(diff)
-    } else {
-        diff * diff
-    }
+    if use_mad { abs(diff) } else { diff * diff }
 }
 
 // GGML `make_qkx2_quants` over `x[0..n]` (FP32 bits); returns the bits of
@@ -289,11 +285,7 @@ pub fn quantize_block(
 }
 
 fn min_u8(a: u8, b: u8) -> u8 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // `make_qkx2_quants(15, sub, weights, l[lo..lo + 32], laux, -1, 0.1, 20,

@@ -46,11 +46,7 @@ fn limbs_for(exp: i64) -> u64 {
         wrapping_u64(exp)
     };
     let n = wrapping_add(e, LIMB_HEADROOM_BITS) / LIMB_BITS;
-    if n > MAX_LIMBS {
-        MAX_LIMBS
-    } else {
-        n
-    }
+    if n > MAX_LIMBS { MAX_LIMBS } else { n }
 }
 
 fn mask32() -> u64 {

@@ -401,11 +401,7 @@ impl Types {
     // `Type::name`: the name of a `Named` type, else "" (symbol 0).
     pub fn name(in self, t: u32) -> u32 {
         let n = self.node(t);
-        if n.kind == TyKind::Named {
-            n.name
-        } else {
-            0
-        }
+        if n.kind == TyKind::Named { n.name } else { 0 }
     }
 
     pub fn arity(in self, t: u32) -> u64 {

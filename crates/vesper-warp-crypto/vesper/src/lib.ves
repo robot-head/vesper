@@ -499,11 +499,7 @@ pub fn hp_mask_chacha(
 }
 
 fn first_byte_mask(first: u8) -> u8 {
-    if first & LONG_HEADER_BIT != 0 {
-        15
-    } else {
-        31
-    }
+    if first & LONG_HEADER_BIT != 0 { 15 } else { 31 }
 }
 
 // The top `pn_len` bytes of a 32-bit word.

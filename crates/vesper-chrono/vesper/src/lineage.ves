@@ -188,11 +188,7 @@ fn is_pre_window(in l: ObligationLineage, id: u64) -> bool {
     if !l.allow_truncated_prefix {
         return false;
     }
-    if !l.has_base {
-        true
-    } else {
-        id < l.base
-    }
+    if !l.has_base { true } else { id < l.base }
 }
 
 fn next_mint_id(in l: ObligationLineage, proposed: u64) -> u64 {
@@ -203,11 +199,7 @@ fn next_mint_id(in l: ObligationLineage, proposed: u64) -> u64 {
         }
         return proposed;
     }
-    if l.next_id < 1 {
-        1
-    } else {
-        l.next_id
-    }
+    if l.next_id < 1 { 1 } else { l.next_id }
 }
 
 fn last_hop_for(in l: ObligationLineage, id: u64) -> Option[ObligationHop] {
@@ -308,17 +300,9 @@ pub fn mint(
 ) -> Result[u64, u32] {
     let id = if !l.has_base && l.allow_truncated_prefix {
         let (has_max, mx) = max_u64(in l.truncated.as_slice());
-        if has_max {
-            wrapping_add(mx, 1)
-        } else {
-            1
-        }
+        if has_max { wrapping_add(mx, 1) } else { 1 }
     } else {
-        if l.next_id < 1 {
-            1
-        } else {
-            l.next_id
-        }
+        if l.next_id < 1 { 1 } else { l.next_id }
     };
     let err = record(
         inout l,

@@ -163,11 +163,7 @@ impl Ast {
             return NONE32;
         }
         let x = u32_at(in self.fn_by_name, w(name));
-        if x == 0 {
-            NONE32
-        } else {
-            wrapping_sub(x, 1)
-        }
+        if x == 0 { NONE32 } else { wrapping_sub(x, 1) }
     }
 }
 

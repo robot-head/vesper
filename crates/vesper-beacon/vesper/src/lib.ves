@@ -345,19 +345,11 @@ pub fn exp_bucket_index(v: u64, scale: i32) -> i32 eff [Fail[ArithOverflow]] {
 }
 
 fn min_i64(a: i64, b: i64) -> i64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 fn max_i64(a: i64, b: i64) -> i64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // The downscale needed so that `index` fits the window alongside the

@@ -176,11 +176,7 @@ impl Blake3 {
     }
 
     fn start_flag(in self) -> u32 {
-        if self.blocks == 0 {
-            chunk_start()
-        } else {
-            0
-        }
+        if self.blocks == 0 { chunk_start() } else { 0 }
     }
 
     // Load the buffered block into `words`.

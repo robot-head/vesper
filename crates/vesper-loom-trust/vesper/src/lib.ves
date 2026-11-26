@@ -1352,11 +1352,7 @@ fn cell(in w: ChunkSeq[u64], i: u64) -> u64 {
 }
 
 fn min(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // Optimal string alignment distance of `a` (the longer) and `b`, over

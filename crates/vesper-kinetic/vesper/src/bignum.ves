@@ -519,11 +519,7 @@ pub fn big_cmp(in a: Big, in b: Big) -> i64 {
         return if a.neg { -1 } else { 1 };
     }
     let c = nat_cmp(in a.mag.as_slice(), in b.mag.as_slice());
-    if a.neg {
-        wrapping_sub(0, c)
-    } else {
-        c
-    }
+    if a.neg { wrapping_sub(0, c) } else { c }
 }
 
 fn signed_add(an: bool, in a: Slice[u64], bn: bool, in b: Slice[u64]) -> Big {

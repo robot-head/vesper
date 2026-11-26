@@ -254,11 +254,7 @@ fn fresh_node() -> Node {
 }
 
 fn terms_of(n: Node, trailing: bool) -> u64 {
-    if trailing {
-        n.terms_slash
-    } else {
-        n.terms
-    }
+    if trailing { n.terms_slash } else { n.terms }
 }
 
 pub fn router_core_new(limits: RouterLimits) -> RouterCore eff [Fail[RouteFault]] {

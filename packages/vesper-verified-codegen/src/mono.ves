@@ -907,11 +907,7 @@ fn sort_fns(in names: Names, inout fns: ChunkSeq[FnRow]) {
 }
 
 fn min_u64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // Monomorphization, evidence passing (evidence.ves) and then the lowering

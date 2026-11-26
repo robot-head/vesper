@@ -280,11 +280,7 @@ fn parse_args(p: ParseCursor) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail
     } else {
         let q = parse_expr(parse_pass(p));
         let r = parse_eat(q, 38);
-        if parse_ate(q, r) {
-            parse_args(r)
-        } else {
-            r
-        }
+        if parse_ate(q, r) { parse_args(r) } else { r }
     }
 }
 
@@ -317,11 +313,7 @@ fn parse_primary_inner(
         parse_block(p)
     } else {
         let q = syntax_issue(p, 7);
-        if parse_at(q, 70) {
-            q
-        } else {
-            parse_bump(q)
-        }
+        if parse_at(q, 70) { q } else { parse_bump(q) }
     }
 }
 
@@ -409,11 +401,7 @@ fn parse_pattern_inner(
         parse_expect(parse_pattern_list(parse_bump(n), 33), 33)
     } else {
         let q = syntax_issue(n, 8);
-        if parse_at(q, 70) {
-            q
-        } else {
-            parse_bump(q)
-        }
+        if parse_at(q, 70) { q } else { parse_bump(q) }
     }
 }
 

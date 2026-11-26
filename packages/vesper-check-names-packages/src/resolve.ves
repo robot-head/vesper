@@ -451,11 +451,7 @@ pub fn group(
         grp_insert(inout s, member, key);
         r = at32(in s.rx_next, w(r));
     }
-    if s.grp_m.len() == 0 {
-        0
-    } else {
-        1
-    }
+    if s.grp_m.len() == 0 { 0 } else { 1 }
 }
 
 // Records the re-export of `local` by module `m`.

@@ -462,11 +462,7 @@ fn btf_finish(in b: Btf) -> ChunkSeq[u8] {
 
 // The `__uint()` members of map k (`map_fields`): (name, value) pairs.
 fn field_count(in p: Prog, k: u64) -> u64 {
-    if u32_at(in p.map_flags, k) != 0 {
-        5
-    } else {
-        4
-    }
+    if u32_at(in p.map_flags, k) != 0 { 5 } else { 4 }
 }
 
 fn field_name(f: u64) -> Str {

@@ -25,11 +25,7 @@ pub fn new_tap() -> SimPulseTap {
 }
 
 pub fn event_task(in ev: SimPulseEvent) -> u64 {
-    if ev.kind == 9 {
-        0
-    } else {
-        ev.task
-    }
+    if ev.kind == 9 { 0 } else { ev.task }
 }
 
 pub fn event_time_ns(in ev: SimPulseEvent, last_time_ns: u64) -> u64 {

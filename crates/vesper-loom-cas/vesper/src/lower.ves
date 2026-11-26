@@ -2676,11 +2676,7 @@ fn lower_run(c: u64) -> u64 {
             hi = mid;
         }
     }
-    if lo == 0 {
-        194
-    } else {
-        wrapping_sub(lo, 1)
-    }
+    if lo == 0 { 194 } else { wrapping_sub(lo, 1) }
 }
 
 // The char `c` lowers to, for every char but U+0130 (`char::to_lowercase`).

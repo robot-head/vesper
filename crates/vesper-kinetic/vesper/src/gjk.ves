@@ -126,11 +126,7 @@ fn fmax(a: f64, b: f64) -> f64 {
     if b != b {
         return a;
     }
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn gd(in s: Slice[f64], i: u64) -> f64 {
@@ -524,11 +520,7 @@ fn canonical_sign(v: V3) -> V3 {
     } else {
         1.0
     };
-    if first < 0.0 {
-        scale(v, -1.0)
-    } else {
-        v
-    }
+    if first < 0.0 { scale(v, -1.0) } else { v }
 }
 
 // src/gjk.rs EPA_TOL: EPA stops when a face is this close (relative).

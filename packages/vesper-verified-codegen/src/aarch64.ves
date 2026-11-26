@@ -125,11 +125,7 @@ fn sub_sp(inout a: Asm, bytes: u32) {
 }
 
 fn signed(s: u8, x: u32, y: u32) -> u32 {
-    if s == S_S {
-        x
-    } else {
-        y
-    }
+    if s == S_S { x } else { y }
 }
 
 // `emit`: the words of one instruction.

@@ -129,11 +129,7 @@ fn sig_at(in s: Sigs, i: u64) -> Sig {
 // The signature index of `name`, or NONE64.
 fn sig_of(in s: Sigs, name: u32) -> u64 {
     let k = u64_at(in s.by_name, w(name));
-    if k == 0 {
-        NONE64
-    } else {
-        wrapping_sub(k, 1)
-    }
+    if k == 0 { NONE64 } else { wrapping_sub(k, 1) }
 }
 
 fn name_word(inout r: Reader, in b: Slice[u8], in c: Ctx) -> u32 {

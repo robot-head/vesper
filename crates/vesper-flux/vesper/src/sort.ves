@@ -49,11 +49,7 @@ fn merge(
 }
 
 fn min_u64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // Entry numbers 0..n in stable order. With `by_row`, entries compare by
@@ -113,11 +109,7 @@ fn sort_entries(
         in_a = !in_a;
         run = step;
     }
-    if in_a {
-        a
-    } else {
-        b
-    }
+    if in_a { a } else { b }
 }
 
 // The n entries of `cells` (stride width + 1) in stable row order.

@@ -76,11 +76,7 @@ fn abs32(x: f32) -> f32 {
 }
 
 fn fmax(a: f32, b: f32) -> f32 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn eps() -> f32 {
@@ -94,11 +90,7 @@ fn friction_k(lt: f32, corr: f32, mu_s: f32, mu_d: f32) -> f32 {
         return 1.0;
     }
     let r = (mu_d * corr) / lt;
-    if r < 1.0 {
-        r
-    } else {
-        1.0
-    }
+    if r < 1.0 { r } else { 1.0 }
 }
 
 // A distance joint or a body-body contact (`contact`: an inequality with

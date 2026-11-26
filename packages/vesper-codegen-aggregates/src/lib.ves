@@ -110,11 +110,7 @@ fn put(inout o: ChunkSeq[u8], in s: Str) {
 }
 
 fn min64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // ----- the World facts after the program section ------------------------------

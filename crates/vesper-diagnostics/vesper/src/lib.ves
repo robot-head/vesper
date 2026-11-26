@@ -570,11 +570,7 @@ fn line_of(in starts: ChunkSeq[u64], offset: u64) -> u64 {
             hi = mid;
         }
     }
-    if lo == 0 {
-        0
-    } else {
-        wrapping_sub(lo, 1)
-    }
+    if lo == 0 { 0 } else { wrapping_sub(lo, 1) }
 }
 
 // `LineIndex::position` of a checked offset: the line, and the UTF-16
@@ -1078,11 +1074,7 @@ enum Line: _ {
 // length, the terminator included (CRLF is one).
 
 fn display_byte(in t: Slice[u8], n: u64, i: u64) -> u8 {
-    if i < n {
-        byte(in t, i)
-    } else {
-        Ascii::Space
-    }
+    if i < n { byte(in t, i) } else { Ascii::Space }
 }
 
 fn source_lines(in t: Slice[u8], n: u64, pad: u64) -> ChunkSeq[u64] {
@@ -1171,11 +1163,7 @@ fn find_line(in lines: ChunkSeq[u64], field: u64, x: u64) -> u64 {
             hi = mid;
         }
     }
-    if lo == 0 {
-        0
-    } else {
-        wrapping_sub(lo, 1)
-    }
+    if lo == 0 { 0 } else { wrapping_sub(lo, 1) }
 }
 
 // The chars of the display text before the byte offset `x` of line `l`.
@@ -1251,11 +1239,7 @@ fn l_last(in r: Rep, l: u64) -> u64 {
     let e = l_end(in r, l);
     let s = l_start(in r, l);
     let x = if e > 0 { wrapping_sub(e, 1) } else { 0 };
-    if x > s {
-        x
-    } else {
-        s
-    }
+    if x > s { x } else { s }
 }
 
 fn multi_count(in r: Rep) -> u64 {
@@ -1432,11 +1416,7 @@ fn write_margin(
             a = if is_limit {
                 rarrow()
             } else if is_col {
-                if ptr_start {
-                    ltop()
-                } else {
-                    lcross()
-                }
+                if ptr_start { ltop() } else { lcross() }
             } else {
                 hbar()
             };
@@ -1849,11 +1829,7 @@ fn write_line(
             let mut tail: u64 = Ascii::Space;
             if col == col_of && !is_margin(in r, label) {
                 c = if multi {
-                    if draw {
-                        mbot()
-                    } else {
-                        rbot()
-                    }
+                    if draw { mbot() } else { rbot() }
                 } else {
                     lbot()
                 };

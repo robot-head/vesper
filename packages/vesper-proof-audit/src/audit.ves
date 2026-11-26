@@ -112,11 +112,7 @@ fn is_sep(b: u8) -> bool {
 }
 
 fn sep() -> u8 {
-    if windows() {
-        92
-    } else {
-        47
-    }
+    if windows() { 92 } else { 47 }
 }
 
 // `base.join(part)` for a relative `part`.
@@ -1295,9 +1291,5 @@ fn windows_key(k: u64) -> Str {
 }
 
 fn scope_name(artifact: bool) -> Str {
-    if artifact {
-        "artifact"
-    } else {
-        "toolchain"
-    }
+    if artifact { "artifact" } else { "toolchain" }
 }

@@ -346,11 +346,7 @@ fn sq_pipe_part(s: SentSeg) -> u64 {
 
 // What an entry adds to `sent_lost`.
 fn sq_lost_part(s: SentSeg) -> u64 {
-    if s.lost && !s.sacked {
-        1
-    } else {
-        0
-    }
+    if s.lost && !s.sacked { 1 } else { 0 }
 }
 
 fn sq_count_in(inout t: Tcb, s: SentSeg) {

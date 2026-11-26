@@ -2738,11 +2738,7 @@ fn same_name(in a: Ast, x: u64, y: u64) -> bool {
 }
 
 fn max_u64(x: u64, y: u64) -> u64 {
-    if x > y {
-        x
-    } else {
-        y
-    }
+    if x > y { x } else { y }
 }
 
 fn zeros(n: u64) -> ChunkSeq[u8] {

@@ -593,11 +593,7 @@ pub fn read_fns(inout r: Reader, in b: Slice[u8], inout ck: Ck) {
 
 fn fn_index(in ck: Ck, name: u32) -> u32 {
     let x = u32_at(in ck.fn_by_name, w(name));
-    if x == 0 {
-        NONE32
-    } else {
-        wrapping_sub(x, 1)
-    }
+    if x == 0 { NONE32 } else { wrapping_sub(x, 1) }
 }
 
 // ----- checker state ---------------------------------------------------------

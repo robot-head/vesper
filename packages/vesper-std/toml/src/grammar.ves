@@ -508,11 +508,7 @@ fn escaped(in s: Slice[u8], inout p: P) -> u64 {
         push_char(inout p, c);
         return 1;
     }
-    if p.cut {
-        2
-    } else {
-        0
-    }
+    if p.cut { 2 } else { 0 }
 }
 
 fn basic_string(in s: Slice[u8], inout p: P) -> bool {
@@ -1049,11 +1045,7 @@ fn parse_i64(in s: Slice[u8], a: u64, b: u64, radix: u64) -> (u64, u64) {
         }
         v = wrapping_add(lo, dv);
     }
-    if neg {
-        (0, wrapping_sub(0, v))
-    } else {
-        (0, v)
-    }
+    if neg { (0, wrapping_sub(0, v)) } else { (0, v) }
 }
 
 fn overflow_message(code: u64) -> Str {
@@ -1392,11 +1384,7 @@ fn full_date(in s: Slice[u8], inout p: P) -> bool {
     }
     let leap = (year % 4 == 0) && ((year % 100 != 0) || (year % 400 == 0));
     let max: u64 = if month == 2 {
-        if leap {
-            29
-        } else {
-            28
-        }
+        if leap { 29 } else { 28 }
     } else if month == 4 || month == 6 || month == 9 || month == 11 {
         30
     } else {

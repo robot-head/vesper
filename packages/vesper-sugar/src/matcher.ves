@@ -559,11 +559,7 @@ fn compile(in pb: ChunkSeq[u8], in p: Toks, inout m: Mx) -> bool {
                     && last_literal
                     && head_kind(kind(in p, sub(i, 1)))
                     && (kind(in p, i) == k_l_brace() || kind(in p, i) == k_string()) {
-                    if joined(in p, i) {
-                        1
-                    } else {
-                        2
-                    }
+                    if joined(in p, i) { 1 } else { 2 }
                 } else {
                     0
                 }
@@ -761,11 +757,7 @@ fn valid_fragment(
         fail(inout m, in text.as_slice());
         return 2;
     }
-    if status == 0 {
-        1
-    } else {
-        0
-    }
+    if status == 0 { 1 } else { 0 }
 }
 
 // `State::record`: log one event under the first `nf` frames of `frames`.

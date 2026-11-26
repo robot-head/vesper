@@ -72,11 +72,7 @@ fn rel(inout a: Asm, opcode: u8, l: u64) {
 }
 
 fn signed_cc(s: u8, signed: u8, unsigned: u8) -> u8 {
-    if s == S_S {
-        signed
-    } else {
-        unsigned
-    }
+    if s == S_S { signed } else { unsigned }
 }
 
 // `emit`: the bytes of one instruction.

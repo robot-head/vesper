@@ -207,11 +207,7 @@ impl Fip {
 
     fn expr_type(in self, e: ExprRow) -> u32 {
         let t = self.c.world.expr_type(e.start, e.end);
-        if t == NONE32 {
-            self.c.types.infer
-        } else {
-            t
-        }
+        if t == NONE32 { self.c.types.infer } else { t }
     }
 
     // Whether the world has a type for the span (`world.types.get(..)`).

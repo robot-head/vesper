@@ -332,11 +332,7 @@ pub fn quorum_size(rule: u64, n: u64) -> u64 {
         wrapping_add(n / 2, 1)
     } else {
         let half = n / 2;
-        if half > 1 {
-            half
-        } else {
-            1
-        }
+        if half > 1 { half } else { 1 }
     }
 }
 

@@ -272,11 +272,7 @@ fn field_type(k: u64, i: u64) -> u64 {
             T_OPT_STRING
         }
     } else if k == S_FEATURE {
-        if i == 1 {
-            T_NAME_SET
-        } else {
-            T_STRING_SET
-        }
+        if i == 1 { T_NAME_SET } else { T_STRING_SET }
     } else if k == S_SANDBOX {
         if i == 0 {
             T_OPT_STRING
@@ -1602,11 +1598,7 @@ fn field_of(k: u64, h: u64) -> u64 {
             3
         }
     } else if k == S_RESOLVER {
-        if h == FieldHash::Policy {
-            0
-        } else {
-            1
-        }
+        if h == FieldHash::Policy { 0 } else { 1 }
     } else if k == S_VERIFICATION {
         if h == FieldHash::ExportLean4Specs {
             0
