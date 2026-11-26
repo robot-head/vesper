@@ -31,14 +31,14 @@ pub(crate) fn install_proof_audit(run: ProofAuditRun) -> Result<(), ProofAuditRu
     PROOF_AUDIT.set(run)
 }
 
-/// `vesper verify SOURCE --format` from `modules/verify` (#1341): it takes
+/// `vesper verify SOURCE --format` from the driver module (#1341): it takes
 /// the packed arguments and returns the module's result bytes.
 pub(crate) type VerifyRun = fn(&[u8]) -> Vec<u8>;
 
 /// The installed [`VerifyRun`], when its swap is on (src/swap/verify.rs).
 static VERIFY: std::sync::OnceLock<VerifyRun> = std::sync::OnceLock::new();
 
-/// Serve `hc_verify_run`'s `--format` runs from `run` (`modules/verify`).
+/// Serve `hc_verify_run`'s `--format` runs from `run` (`modules/driver`).
 pub(crate) fn install_verify(run: VerifyRun) -> Result<(), VerifyRun> {
     VERIFY.set(run)
 }
@@ -73,7 +73,7 @@ fn verify_format(packed: &[u8]) -> bool {
 }
 
 /// Print what a Vesper command module (`proof_audit_run` of
-/// `modules/driver`, `modules/verify`) printed and return its error: a
+/// `modules/driver`, and its `verify_run`) printed and return its error: a
 /// status byte, the stdout length (8 bytes, little-endian), stdout, then
 /// the error text.
 fn module_result(result: &[u8]) -> Result<(), String> {

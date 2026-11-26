@@ -72,31 +72,31 @@ pub struct Doc {
     kids: ChunkSeq[u64],
     pool: ChunkSeq[u8],
     // The error (E_NONE: none) and the byte index its position is of.
-    err: u8,
-    err_at: u64
+    error_code: u8,
+    error_at: u64
 }
 
 struct P {
-    i: u64,
+    pos: u64,
     depth: u64
 }
 
-fn byte(in b: Slice[u8], i: u64) -> u8 {
-    match b.try_get(i) {
+fn byte(in bytes: Slice[u8], i: u64) -> u8 {
+    match bytes.try_get(i) {
         Option::Some(x) => x,
         Option::None => 0,
     }
 }
 
-fn g64(in v: ChunkSeq[u64], i: u64) -> u64 {
-    match v.try_get(i) {
+fn g64(in values: ChunkSeq[u64], i: u64) -> u64 {
+    match values.try_get(i) {
         Option::Some(x) => x,
         Option::None => 0,
     }
 }
 
-fn g8(in v: ChunkSeq[u8], i: u64) -> u8 {
-    match v.try_get(i) {
+fn g8(in values: ChunkSeq[u8], i: u64) -> u8 {
+    match values.try_get(i) {
         Option::Some(x) => x,
         Option::None => 0,
     }
@@ -107,51 +107,51 @@ fn min64(a: u64, b: u64) -> u64 {
 }
 
 // `error`: at the index after the last byte read.
-fn fail(inout d: Doc, code: u8, at: u64) -> u64 {
-    if d.err == E_NONE {
-        d.err = code;
-        d.err_at = at;
+fn fail(inout doc: Doc, code: u8, at: u64) -> u64 {
+    if doc.error_code == E_NONE {
+        doc.error_code = code;
+        doc.error_at = at;
     }
     NONE
 }
 
 // `peek_error`: at the index after the peeked byte.
-fn peek_fail(inout d: Doc, in t: Slice[u8], p: P, code: u8) -> u64 {
-    fail(inout d, code, min64(t.len(), wrapping_add(p.i, 1)))
+fn peek_fail(inout doc: Doc, in text: Slice[u8], cursor: P, code: u8) -> u64 {
+    fail(inout doc, code, min64(text.len(), wrapping_add(cursor.pos, 1)))
 }
 
-fn node(inout d: Doc, kind: u8, a: u64, b: u64) -> u64 {
-    d.kind.push(kind);
-    d.a.push(a);
-    d.b.push(b);
-    wrapping_sub(d.kind.len(), 1)
+fn node(inout doc: Doc, kind: u8, a: u64, b: u64) -> u64 {
+    doc.kind.push(kind);
+    doc.a.push(a);
+    doc.b.push(b);
+    wrapping_sub(doc.kind.len(), 1)
 }
 
-fn whitespace(in t: Slice[u8], inout p: P) -> bool {
+fn whitespace(in text: Slice[u8], inout cursor: P) -> bool {
     loop {
-        if p.i >= t.len() {
+        if cursor.pos >= text.len() {
             return false;
         }
-        let c = byte(in t, p.i);
+        let c = byte(in text, cursor.pos);
         if c == SPACE || c == NEWLINE || c == TAB || c == CARRIAGE_RETURN {
-            p.i = wrapping_add(p.i, 1);
+            cursor.pos = wrapping_add(cursor.pos, 1);
         } else {
             return true;
         }
     }
 }
 
-fn ident(inout d: Doc, in t: Slice[u8], inout p: P, in rest: Str) -> bool {
-    let r = rest.as_bytes();
-    for k in 0..r.len() {
-        if p.i >= t.len() {
-            let x = fail(inout d, EOF_VALUE, p.i);
+fn ident(inout doc: Doc, in text: Slice[u8], inout cursor: P, in rest: Str) -> bool {
+    let expected = rest.as_bytes();
+    for k in 0..expected.len() {
+        if cursor.pos >= text.len() {
+            let _ = fail(inout doc, EOF_VALUE, cursor.pos);
             return false;
         }
-        let c = byte(in t, p.i);
-        p.i = wrapping_add(p.i, 1);
-        if c != byte(in r, k) {
-            let x = fail(inout d, EXPECTED_IDENT, p.i);
+        let c = byte(in text, cursor.pos);
+        cursor.pos = wrapping_add(cursor.pos, 1);
+        if c != byte(in expected, k) {
+            let _ = fail(inout doc, EXPECTED_IDENT, cursor.pos);
             return false;
         }
     }
@@ -163,83 +163,85 @@ fn is_digit(c: u8) -> bool {
 }
 
 // `parse_any_number` after an optional `-` (already eaten).
-fn number(inout d: Doc, in t: Slice[u8], inout p: P, positive: bool, start: u64) -> u64 {
-    if p.i >= t.len() {
-        return fail(inout d, EOF_VALUE, p.i);
+fn number(inout doc: Doc, in text: Slice[u8], inout cursor: P, positive: bool, start: u64) -> u64 {
+    if cursor.pos >= text.len() {
+        return fail(inout doc, EOF_VALUE, cursor.pos);
     }
-    let c = byte(in t, p.i);
-    p.i = wrapping_add(p.i, 1);
+    let c = byte(in text, cursor.pos);
+    cursor.pos = wrapping_add(cursor.pos, 1);
     let mut float = false;
-    let mut sig: u64 = 0;
+    let mut significand: u64 = 0;
     if c == DIGIT_ZERO {
-        if is_digit(byte(in t, p.i)) {
-            return peek_fail(inout d, in t, p, INVALID_NUMBER);
+        if is_digit(byte(in text, cursor.pos)) {
+            return peek_fail(inout doc, in text, cursor, INVALID_NUMBER);
         }
     } else if c >= DIGIT_ONE && c <= DIGIT_NINE {
-        sig = widen_u64(wrapping_sub(c, DIGIT_ZERO));
+        significand = widen_u64(wrapping_sub(c, DIGIT_ZERO));
         loop {
-            let x = byte(in t, p.i);
-            if !is_digit(x) {
+            let digit_byte = byte(in text, cursor.pos);
+            if !is_digit(digit_byte) {
                 break;
             }
-            let digit = widen_u64(wrapping_sub(x, DIGIT_ZERO));
-            if sig > U64_MAX_TENTH || (sig == U64_MAX_TENTH && digit > U64_MAX_LAST_DIGIT) {
+            let digit = widen_u64(wrapping_sub(digit_byte, DIGIT_ZERO));
+            if significand > U64_MAX_TENTH
+                || (significand == U64_MAX_TENTH && digit > U64_MAX_LAST_DIGIT)
+            {
                 float = true;
             } else {
-                sig = wrapping_add(wrapping_mul(sig, 10), digit);
+                significand = wrapping_add(wrapping_mul(significand, 10), digit);
             }
-            p.i = wrapping_add(p.i, 1);
+            cursor.pos = wrapping_add(cursor.pos, 1);
         }
     } else {
-        return fail(inout d, INVALID_NUMBER, p.i);
+        return fail(inout doc, INVALID_NUMBER, cursor.pos);
     }
-    if byte(in t, p.i) == DOT {
+    if byte(in text, cursor.pos) == DOT {
         float = true;
-        p.i = wrapping_add(p.i, 1);
-        let mut n: u64 = 0;
+        cursor.pos = wrapping_add(cursor.pos, 1);
+        let mut frac_len: u64 = 0;
         loop {
-            if !is_digit(byte(in t, p.i)) {
+            if !is_digit(byte(in text, cursor.pos)) {
                 break;
             }
-            p.i = wrapping_add(p.i, 1);
-            n = wrapping_add(n, 1);
+            cursor.pos = wrapping_add(cursor.pos, 1);
+            frac_len = wrapping_add(frac_len, 1);
         }
-        if n == 0 {
-            if p.i < t.len() {
-                return peek_fail(inout d, in t, p, INVALID_NUMBER);
+        if frac_len == 0 {
+            if cursor.pos < text.len() {
+                return peek_fail(inout doc, in text, cursor, INVALID_NUMBER);
             }
-            return peek_fail(inout d, in t, p, EOF_VALUE);
+            return peek_fail(inout doc, in text, cursor, EOF_VALUE);
         }
     }
-    let e = byte(in t, p.i);
-    if e == LOWER_E || e == UPPER_E {
+    let exp_marker = byte(in text, cursor.pos);
+    if exp_marker == LOWER_E || exp_marker == UPPER_E {
         float = true;
-        p.i = wrapping_add(p.i, 1);
-        let s = byte(in t, p.i);
-        if s == PLUS || s == HYPHEN {
-            p.i = wrapping_add(p.i, 1);
+        cursor.pos = wrapping_add(cursor.pos, 1);
+        let exp_sign = byte(in text, cursor.pos);
+        if exp_sign == PLUS || exp_sign == HYPHEN {
+            cursor.pos = wrapping_add(cursor.pos, 1);
         }
-        if p.i >= t.len() {
-            return fail(inout d, EOF_VALUE, p.i);
+        if cursor.pos >= text.len() {
+            return fail(inout doc, EOF_VALUE, cursor.pos);
         }
-        let x = byte(in t, p.i);
-        p.i = wrapping_add(p.i, 1);
-        if !is_digit(x) {
-            return fail(inout d, INVALID_NUMBER, p.i);
+        let digit_byte = byte(in text, cursor.pos);
+        cursor.pos = wrapping_add(cursor.pos, 1);
+        if !is_digit(digit_byte) {
+            return fail(inout doc, INVALID_NUMBER, cursor.pos);
         }
         loop {
-            if !is_digit(byte(in t, p.i)) {
+            if !is_digit(byte(in text, cursor.pos)) {
                 break;
             }
-            p.i = wrapping_add(p.i, 1);
+            cursor.pos = wrapping_add(cursor.pos, 1);
         }
     }
-    if float && number_out_of_range(in t[start..p.i]) {
-        return fail(inout d, OUT_OF_RANGE, p.i);
+    if float && number_out_of_range(in text[start..cursor.pos]) {
+        return fail(inout doc, OUT_OF_RANGE, cursor.pos);
     }
     // A negative or fractional number is not a u64.
-    let u = positive && !float;
-    node(inout d, NUMBER, if u { 1 } else { 0 }, sig)
+    let is_u64 = positive && !float;
+    node(inout doc, NUMBER, if is_u64 { 1 } else { 0 }, significand)
 }
 
 fn hex_digit(c: u8) -> u64 {
@@ -255,331 +257,331 @@ fn hex_digit(c: u8) -> u64 {
 }
 
 // `decode_hex_escape` of `SliceRead`: NONE on an error.
-fn hex4(inout d: Doc, in t: Slice[u8], inout p: P) -> u64 {
-    if wrapping_add(p.i, HEX_ESCAPE_DIGITS) > t.len() {
-        p.i = t.len();
-        return fail(inout d, EOF_STRING, p.i);
+fn hex4(inout doc: Doc, in text: Slice[u8], inout cursor: P) -> u64 {
+    if wrapping_add(cursor.pos, HEX_ESCAPE_DIGITS) > text.len() {
+        cursor.pos = text.len();
+        return fail(inout doc, EOF_STRING, cursor.pos);
     }
-    let mut n: u64 = 0;
+    let mut value: u64 = 0;
     let mut bad = false;
     for k in 0..HEX_ESCAPE_DIGITS {
-        let h = hex_digit(byte(in t, wrapping_add(p.i, k)));
-        if h == NONE {
+        let digit = hex_digit(byte(in text, wrapping_add(cursor.pos, k)));
+        if digit == NONE {
             bad = true;
         }
-        n = wrapping_add(wrapping_mul(n, 16), h);
+        value = wrapping_add(wrapping_mul(value, 16), digit);
     }
-    p.i = wrapping_add(p.i, HEX_ESCAPE_DIGITS);
+    cursor.pos = wrapping_add(cursor.pos, HEX_ESCAPE_DIGITS);
     if bad {
-        return fail(inout d, INVALID_ESCAPE, p.i);
+        return fail(inout doc, INVALID_ESCAPE, cursor.pos);
     }
-    n
+    value
 }
 
-fn push_code(inout out: ChunkSeq[u8], n: u64) {
-    if n < 128 {
-        out.push(wrapping_u8(n));
-    } else if n < 2048 {
-        out.push(wrapping_u8(wrapping_add(192, n >> 6)));
-        out.push(wrapping_u8(wrapping_add(128, n & 63)));
-    } else if n < 65536 {
-        out.push(wrapping_u8(wrapping_add(224, n >> 12)));
-        out.push(wrapping_u8(wrapping_add(128, (n >> 6) & 63)));
-        out.push(wrapping_u8(wrapping_add(128, n & 63)));
+fn push_code(inout out: ChunkSeq[u8], code_point: u64) {
+    if code_point < 128 {
+        out.push(wrapping_u8(code_point));
+    } else if code_point < 2048 {
+        out.push(wrapping_u8(wrapping_add(192, code_point >> 6)));
+        out.push(wrapping_u8(wrapping_add(128, code_point & 63)));
+    } else if code_point < 65536 {
+        out.push(wrapping_u8(wrapping_add(224, code_point >> 12)));
+        out.push(wrapping_u8(wrapping_add(128, (code_point >> 6) & 63)));
+        out.push(wrapping_u8(wrapping_add(128, code_point & 63)));
     } else {
-        out.push(wrapping_u8(wrapping_add(240, n >> 18)));
-        out.push(wrapping_u8(wrapping_add(128, (n >> 12) & 63)));
-        out.push(wrapping_u8(wrapping_add(128, (n >> 6) & 63)));
-        out.push(wrapping_u8(wrapping_add(128, n & 63)));
+        out.push(wrapping_u8(wrapping_add(240, code_point >> 18)));
+        out.push(wrapping_u8(wrapping_add(128, (code_point >> 12) & 63)));
+        out.push(wrapping_u8(wrapping_add(128, (code_point >> 6) & 63)));
+        out.push(wrapping_u8(wrapping_add(128, code_point & 63)));
     }
 }
 
 // `parse_str` (validating) after the opening quote: a STRING node.
-fn string(inout d: Doc, in t: Slice[u8], inout p: P) -> u64 {
-    let start = d.pool.len();
+fn string(inout doc: Doc, in text: Slice[u8], inout cursor: P) -> u64 {
+    let start = doc.pool.len();
     loop {
-        if p.i >= t.len() {
-            return fail(inout d, EOF_STRING, p.i);
+        if cursor.pos >= text.len() {
+            return fail(inout doc, EOF_STRING, cursor.pos);
         }
-        let c = byte(in t, p.i);
-        p.i = wrapping_add(p.i, 1);
+        let c = byte(in text, cursor.pos);
+        cursor.pos = wrapping_add(cursor.pos, 1);
         if c == QUOTE {
             break;
         }
         if c < SPACE {
-            return fail(inout d, CONTROL, p.i);
+            return fail(inout doc, CONTROL, cursor.pos);
         }
         if c != BACKSLASH {
-            d.pool.push(c);
+            doc.pool.push(c);
             continue;
         }
-        if p.i >= t.len() {
-            return fail(inout d, EOF_STRING, p.i);
+        if cursor.pos >= text.len() {
+            return fail(inout doc, EOF_STRING, cursor.pos);
         }
-        let e = byte(in t, p.i);
-        p.i = wrapping_add(p.i, 1);
-        if e == QUOTE || e == BACKSLASH || e == SLASH {
-            d.pool.push(e);
-        } else if e == LOWER_B {
-            d.pool.push(BACKSPACE);
-        } else if e == LOWER_F {
-            d.pool.push(FORM_FEED);
-        } else if e == LOWER_N {
-            d.pool.push(NEWLINE);
-        } else if e == LOWER_R {
-            d.pool.push(CARRIAGE_RETURN);
-        } else if e == LOWER_T {
-            d.pool.push(TAB);
-        } else if e == LOWER_U {
-            let n = hex4(inout d, in t, inout p);
-            if n == NONE {
+        let escape = byte(in text, cursor.pos);
+        cursor.pos = wrapping_add(cursor.pos, 1);
+        if escape == QUOTE || escape == BACKSLASH || escape == SLASH {
+            doc.pool.push(escape);
+        } else if escape == LOWER_B {
+            doc.pool.push(BACKSPACE);
+        } else if escape == LOWER_F {
+            doc.pool.push(FORM_FEED);
+        } else if escape == LOWER_N {
+            doc.pool.push(NEWLINE);
+        } else if escape == LOWER_R {
+            doc.pool.push(CARRIAGE_RETURN);
+        } else if escape == LOWER_T {
+            doc.pool.push(TAB);
+        } else if escape == LOWER_U {
+            let code_unit = hex4(inout doc, in text, inout cursor);
+            if code_unit == NONE {
                 return NONE;
             }
-            if n >= LOW_SURROGATE_FIRST && n <= LOW_SURROGATE_LAST {
-                return fail(inout d, LONE_SURROGATE, p.i);
+            if code_unit >= LOW_SURROGATE_FIRST && code_unit <= LOW_SURROGATE_LAST {
+                return fail(inout doc, LONE_SURROGATE, cursor.pos);
             }
-            if n < HIGH_SURROGATE_FIRST || n > HIGH_SURROGATE_LAST {
-                push_code(inout d.pool, n);
+            if code_unit < HIGH_SURROGATE_FIRST || code_unit > HIGH_SURROGATE_LAST {
+                push_code(inout doc.pool, code_unit);
                 continue;
             }
             // A leading surrogate: a trailing one must follow.
-            if p.i >= t.len() {
-                return fail(inout d, EOF_STRING, p.i);
+            if cursor.pos >= text.len() {
+                return fail(inout doc, EOF_STRING, cursor.pos);
             }
-            if byte(in t, p.i) != BACKSLASH {
-                p.i = wrapping_add(p.i, 1);
-                return fail(inout d, END_OF_HEX, p.i);
+            if byte(in text, cursor.pos) != BACKSLASH {
+                cursor.pos = wrapping_add(cursor.pos, 1);
+                return fail(inout doc, END_OF_HEX, cursor.pos);
             }
-            p.i = wrapping_add(p.i, 1);
-            if p.i >= t.len() {
-                return fail(inout d, EOF_STRING, p.i);
+            cursor.pos = wrapping_add(cursor.pos, 1);
+            if cursor.pos >= text.len() {
+                return fail(inout doc, EOF_STRING, cursor.pos);
             }
-            if byte(in t, p.i) != LOWER_U {
-                p.i = wrapping_add(p.i, 1);
-                return fail(inout d, END_OF_HEX, p.i);
+            if byte(in text, cursor.pos) != LOWER_U {
+                cursor.pos = wrapping_add(cursor.pos, 1);
+                return fail(inout doc, END_OF_HEX, cursor.pos);
             }
-            p.i = wrapping_add(p.i, 1);
-            let n2 = hex4(inout d, in t, inout p);
-            if n2 == NONE {
+            cursor.pos = wrapping_add(cursor.pos, 1);
+            let low_unit = hex4(inout doc, in text, inout cursor);
+            if low_unit == NONE {
                 return NONE;
             }
-            if n2 < LOW_SURROGATE_FIRST || n2 > LOW_SURROGATE_LAST {
-                return fail(inout d, LONE_SURROGATE, p.i);
+            if low_unit < LOW_SURROGATE_FIRST || low_unit > LOW_SURROGATE_LAST {
+                return fail(inout doc, LONE_SURROGATE, cursor.pos);
             }
-            let cp = wrapping_add(
-                wrapping_shl_u64(wrapping_sub(n, HIGH_SURROGATE_FIRST), SURROGATE_BITS)
-                    | wrapping_sub(n2, LOW_SURROGATE_FIRST),
+            let code_point = wrapping_add(
+                wrapping_shl_u64(wrapping_sub(code_unit, HIGH_SURROGATE_FIRST), SURROGATE_BITS)
+                    | wrapping_sub(low_unit, LOW_SURROGATE_FIRST),
                 SUPPLEMENTARY_FIRST
             );
-            push_code(inout d.pool, cp);
+            push_code(inout doc.pool, code_point);
         } else {
-            return fail(inout d, INVALID_ESCAPE, p.i);
+            return fail(inout doc, INVALID_ESCAPE, cursor.pos);
         }
     }
-    node(inout d, STRING, start, wrapping_sub(d.pool.len(), start))
+    node(inout doc, STRING, start, wrapping_sub(doc.pool.len(), start))
 }
 
 // `deserialize_any` into a `Value`.
-fn value(inout d: Doc, in t: Slice[u8], inout p: P) -> u64 {
-    if !whitespace(in t, inout p) {
-        return peek_fail(inout d, in t, p, EOF_VALUE);
+fn value(inout doc: Doc, in text: Slice[u8], inout cursor: P) -> u64 {
+    if !whitespace(in text, inout cursor) {
+        return peek_fail(inout doc, in text, cursor, EOF_VALUE);
     }
-    let c = byte(in t, p.i);
+    let c = byte(in text, cursor.pos);
     if c == LOWER_N {
-        p.i = wrapping_add(p.i, 1);
-        if !ident(inout d, in t, inout p, in "ull") {
+        cursor.pos = wrapping_add(cursor.pos, 1);
+        if !ident(inout doc, in text, inout cursor, in "ull") {
             return NONE;
         }
-        return node(inout d, NULL, 0, 0);
+        return node(inout doc, NULL, 0, 0);
     }
     if c == LOWER_T {
-        p.i = wrapping_add(p.i, 1);
-        if !ident(inout d, in t, inout p, in "rue") {
+        cursor.pos = wrapping_add(cursor.pos, 1);
+        if !ident(inout doc, in text, inout cursor, in "rue") {
             return NONE;
         }
-        return node(inout d, BOOL, 1, 0);
+        return node(inout doc, BOOL, 1, 0);
     }
     if c == LOWER_F {
-        p.i = wrapping_add(p.i, 1);
-        if !ident(inout d, in t, inout p, in "alse") {
+        cursor.pos = wrapping_add(cursor.pos, 1);
+        if !ident(inout doc, in text, inout cursor, in "alse") {
             return NONE;
         }
-        return node(inout d, BOOL, 0, 0);
+        return node(inout doc, BOOL, 0, 0);
     }
     if c == HYPHEN {
-        let start = p.i;
-        p.i = wrapping_add(p.i, 1);
-        return number(inout d, in t, inout p, false, start);
+        let start = cursor.pos;
+        cursor.pos = wrapping_add(cursor.pos, 1);
+        return number(inout doc, in text, inout cursor, false, start);
     }
     if is_digit(c) {
-        return number(inout d, in t, inout p, true, p.i);
+        return number(inout doc, in text, inout cursor, true, cursor.pos);
     }
     if c == QUOTE {
-        p.i = wrapping_add(p.i, 1);
-        return string(inout d, in t, inout p);
+        cursor.pos = wrapping_add(cursor.pos, 1);
+        return string(inout doc, in text, inout cursor);
     }
     if c == OPEN_BRACKET || c == OPEN_BRACE {
-        if wrapping_add(p.depth, 1) >= MAX_DEPTH {
-            return peek_fail(inout d, in t, p, RECURSION);
+        if wrapping_add(cursor.depth, 1) >= MAX_DEPTH {
+            return peek_fail(inout doc, in text, cursor, RECURSION);
         }
-        p.depth = wrapping_add(p.depth, 1);
-        p.i = wrapping_add(p.i, 1);
-        let x = if c == OPEN_BRACKET {
-            array(inout d, in t, inout p)
+        cursor.depth = wrapping_add(cursor.depth, 1);
+        cursor.pos = wrapping_add(cursor.pos, 1);
+        let container = if c == OPEN_BRACKET {
+            array(inout doc, in text, inout cursor)
         } else {
-            object(inout d, in t, inout p)
+            object(inout doc, in text, inout cursor)
         };
-        p.depth = wrapping_sub(p.depth, 1);
-        return x;
+        cursor.depth = wrapping_sub(cursor.depth, 1);
+        return container;
     }
-    peek_fail(inout d, in t, p, EXPECTED_VALUE)
+    peek_fail(inout doc, in text, cursor, EXPECTED_VALUE)
 }
 
 // The elements of an array after its `[` (`SeqAccess`, then `end_seq`).
-fn array(inout d: Doc, in t: Slice[u8], inout p: P) -> u64 {
+fn array(inout doc: Doc, in text: Slice[u8], inout cursor: P) -> u64 {
     let mut items = ChunkSeq::new[u64]();
     let mut first = true;
     loop {
-        if !whitespace(in t, inout p) {
-            return peek_fail(inout d, in t, p, EOF_LIST);
+        if !whitespace(in text, inout cursor) {
+            return peek_fail(inout doc, in text, cursor, EOF_LIST);
         }
-        let c = byte(in t, p.i);
+        let c = byte(in text, cursor.pos);
         if c == CLOSE_BRACKET {
             break;
         }
         if first {
             first = false;
         } else if c == COMMA {
-            p.i = wrapping_add(p.i, 1);
-            if !whitespace(in t, inout p) {
-                return peek_fail(inout d, in t, p, EOF_VALUE);
+            cursor.pos = wrapping_add(cursor.pos, 1);
+            if !whitespace(in text, inout cursor) {
+                return peek_fail(inout doc, in text, cursor, EOF_VALUE);
             }
-            if byte(in t, p.i) == CLOSE_BRACKET {
-                return peek_fail(inout d, in t, p, TRAILING_COMMA);
+            if byte(in text, cursor.pos) == CLOSE_BRACKET {
+                return peek_fail(inout doc, in text, cursor, TRAILING_COMMA);
             }
         } else {
-            return peek_fail(inout d, in t, p, EXPECTED_LIST);
+            return peek_fail(inout doc, in text, cursor, EXPECTED_LIST);
         }
-        let x = value(inout d, in t, inout p);
-        if x == NONE {
+        let element = value(inout doc, in text, inout cursor);
+        if element == NONE {
             return NONE;
         }
-        items.push(x);
+        items.push(element);
     }
-    p.i = wrapping_add(p.i, 1);
-    let at = d.kids.len();
+    cursor.pos = wrapping_add(cursor.pos, 1);
+    let at = doc.kids.len();
     for k in 0..items.len() {
-        d.kids.push(g64(in items, k));
+        doc.kids.push(g64(in items, k));
     }
-    node(inout d, ARRAY, at, items.len())
+    node(inout doc, ARRAY, at, items.len())
 }
 
 // The entries of an object after its `{` (`MapAccess`, then `end_map`).
-fn object(inout d: Doc, in t: Slice[u8], inout p: P) -> u64 {
+fn object(inout doc: Doc, in text: Slice[u8], inout cursor: P) -> u64 {
     let mut items = ChunkSeq::new[u64]();
     let mut first = true;
     loop {
-        if !whitespace(in t, inout p) {
-            return peek_fail(inout d, in t, p, EOF_OBJECT);
+        if !whitespace(in text, inout cursor) {
+            return peek_fail(inout doc, in text, cursor, EOF_OBJECT);
         }
-        let c = byte(in t, p.i);
+        let c = byte(in text, cursor.pos);
         if c == CLOSE_BRACE {
             break;
         }
         if first {
             first = false;
             if c != QUOTE {
-                return peek_fail(inout d, in t, p, KEY_STRING);
+                return peek_fail(inout doc, in text, cursor, KEY_STRING);
             }
         } else if c == COMMA {
-            p.i = wrapping_add(p.i, 1);
-            if !whitespace(in t, inout p) {
-                return peek_fail(inout d, in t, p, EOF_VALUE);
+            cursor.pos = wrapping_add(cursor.pos, 1);
+            if !whitespace(in text, inout cursor) {
+                return peek_fail(inout doc, in text, cursor, EOF_VALUE);
             }
-            let c2 = byte(in t, p.i);
-            if c2 == CLOSE_BRACE {
-                return peek_fail(inout d, in t, p, TRAILING_COMMA);
+            let next_byte = byte(in text, cursor.pos);
+            if next_byte == CLOSE_BRACE {
+                return peek_fail(inout doc, in text, cursor, TRAILING_COMMA);
             }
-            if c2 != QUOTE {
-                return peek_fail(inout d, in t, p, KEY_STRING);
+            if next_byte != QUOTE {
+                return peek_fail(inout doc, in text, cursor, KEY_STRING);
             }
         } else {
-            return peek_fail(inout d, in t, p, EXPECTED_OBJECT);
+            return peek_fail(inout doc, in text, cursor, EXPECTED_OBJECT);
         }
-        p.i = wrapping_add(p.i, 1);
-        let key = string(inout d, in t, inout p);
+        cursor.pos = wrapping_add(cursor.pos, 1);
+        let key = string(inout doc, in text, inout cursor);
         if key == NONE {
             return NONE;
         }
-        if !whitespace(in t, inout p) {
-            return peek_fail(inout d, in t, p, EOF_OBJECT);
+        if !whitespace(in text, inout cursor) {
+            return peek_fail(inout doc, in text, cursor, EOF_OBJECT);
         }
-        if byte(in t, p.i) != COLON {
-            return peek_fail(inout d, in t, p, EXPECTED_COLON);
+        if byte(in text, cursor.pos) != COLON {
+            return peek_fail(inout doc, in text, cursor, EXPECTED_COLON);
         }
-        p.i = wrapping_add(p.i, 1);
-        let x = value(inout d, in t, inout p);
-        if x == NONE {
+        cursor.pos = wrapping_add(cursor.pos, 1);
+        let value_id = value(inout doc, in text, inout cursor);
+        if value_id == NONE {
             return NONE;
         }
         items.push(key);
-        items.push(x);
+        items.push(value_id);
     }
-    p.i = wrapping_add(p.i, 1);
-    let at = d.kids.len();
+    cursor.pos = wrapping_add(cursor.pos, 1);
+    let at = doc.kids.len();
     for k in 0..items.len() {
-        d.kids.push(g64(in items, k));
+        doc.kids.push(g64(in items, k));
     }
-    node(inout d, OBJECT, at, items.len() / 2)
+    node(inout doc, OBJECT, at, items.len() / 2)
 }
 
 // `serde_json::from_slice::<Value>`: the document; its root is the last
-// node, or `err` is set.
-pub fn parse(in t: Slice[u8]) -> Doc {
-    let mut d = Doc {
+// node, or `error_code` is set.
+pub fn parse(in text: Slice[u8]) -> Doc {
+    let mut doc = Doc {
         kind: ChunkSeq::new[u8](),
         a: ChunkSeq::new[u64](),
         b: ChunkSeq::new[u64](),
         kids: ChunkSeq::new[u64](),
         pool: ChunkSeq::new[u8](),
-        err: E_NONE,
-        err_at: 0
+        error_code: E_NONE,
+        error_at: 0
     };
-    let mut p = P { i: 0, depth: 0 };
-    let root = value(inout d, in t, inout p);
-    if root != NONE && whitespace(in t, inout p) {
-        let x = peek_fail(inout d, in t, p, TRAILING_CHARS);
+    let mut cursor = P { pos: 0, depth: 0 };
+    let root = value(inout doc, in text, inout cursor);
+    if root != NONE && whitespace(in text, inout cursor) {
+        let _ = peek_fail(inout doc, in text, cursor, TRAILING_CHARS);
     }
-    d
+    doc
 }
 
-pub fn failed(in d: Doc) -> bool {
-    d.err != E_NONE
+pub fn failed(in doc: Doc) -> bool {
+    doc.error_code != E_NONE
 }
 
-pub fn root(in d: Doc) -> u64 {
-    wrapping_sub(d.kind.len(), 1)
+pub fn root(in doc: Doc) -> u64 {
+    wrapping_sub(doc.kind.len(), 1)
 }
 
-pub fn kind(in d: Doc, n: u64) -> u8 {
-    if n == NONE {
+pub fn kind(in doc: Doc, node_id: u64) -> u8 {
+    if node_id == NONE {
         return NULL;
     }
-    g8(in d.kind, n)
+    g8(in doc.kind, node_id)
 }
 
 // `value[key]`: the last entry named `key` of an object, or NONE.
-pub fn field(in d: Doc, n: u64, in key: Str) -> u64 {
-    if kind(in d, n) != OBJECT {
+pub fn field(in doc: Doc, node_id: u64, in key: Str) -> u64 {
+    if kind(in doc, node_id) != OBJECT {
         return NONE;
     }
-    let k = key.as_bytes();
-    let at = g64(in d.a, n);
+    let key_bytes = key.as_bytes();
+    let at = g64(in doc.a, node_id);
     let mut found = NONE;
-    for e in 0..g64(in d.b, n) {
-        let kn = g64(in d.kids, wrapping_add(at, wrapping_mul(e, 2)));
-        if str_is(in d, kn, in k) {
-            found = g64(in d.kids, wrapping_add(at, inc(wrapping_mul(e, 2))));
+    for entry in 0..g64(in doc.b, node_id) {
+        let key_id = g64(in doc.kids, wrapping_add(at, wrapping_mul(entry, 2)));
+        if str_is(in doc, key_id, in key_bytes) {
+            found = g64(in doc.kids, wrapping_add(at, inc(wrapping_mul(entry, 2))));
         }
     }
     found
@@ -589,127 +591,127 @@ fn inc(x: u64) -> u64 {
     wrapping_add(x, 1)
 }
 
-// Whether `n` is a string equal to `k`.
-pub fn str_is(in d: Doc, n: u64, in k: Slice[u8]) -> bool {
-    if kind(in d, n) != STRING {
+// Whether `node_id` is a string equal to `expected`.
+pub fn str_is(in doc: Doc, node_id: u64, in expected: Slice[u8]) -> bool {
+    if kind(in doc, node_id) != STRING {
         return false;
     }
-    let at = g64(in d.a, n);
-    let len = g64(in d.b, n);
-    if len != k.len() {
+    let at = g64(in doc.a, node_id);
+    let len = g64(in doc.b, node_id);
+    if len != expected.len() {
         return false;
     }
     for i in 0..len {
-        if g8(in d.pool, wrapping_add(at, i)) != byte(in k, i) {
+        if g8(in doc.pool, wrapping_add(at, i)) != byte(in expected, i) {
             return false;
         }
     }
     true
 }
 
-pub fn put_str_of(inout out: ChunkSeq[u8], in d: Doc, n: u64) {
-    let at = g64(in d.a, n);
-    for i in 0..g64(in d.b, n) {
-        out.push(g8(in d.pool, wrapping_add(at, i)));
+pub fn put_str_of(inout out: ChunkSeq[u8], in doc: Doc, node_id: u64) {
+    let at = g64(in doc.a, node_id);
+    for i in 0..g64(in doc.b, node_id) {
+        out.push(g8(in doc.pool, wrapping_add(at, i)));
     }
 }
 
-pub fn is_true(in d: Doc, n: u64) -> bool {
-    kind(in d, n) == BOOL && g64(in d.a, n) == 1
+pub fn is_true(in doc: Doc, node_id: u64) -> bool {
+    kind(in doc, node_id) == BOOL && g64(in doc.a, node_id) == 1
 }
 
 // `as_u64`, or 0.
-pub fn u64_or_zero(in d: Doc, n: u64) -> u64 {
-    if kind(in d, n) == NUMBER && g64(in d.a, n) == 1 {
-        g64(in d.b, n)
+pub fn u64_or_zero(in doc: Doc, node_id: u64) -> u64 {
+    if kind(in doc, node_id) == NUMBER && g64(in doc.a, node_id) == 1 {
+        g64(in doc.b, node_id)
     } else {
         0
     }
 }
 
 // The items of an array (`as_array`): count, and the id of item `i`.
-pub fn items(in d: Doc, n: u64) -> u64 {
-    if kind(in d, n) != ARRAY {
+pub fn items(in doc: Doc, node_id: u64) -> u64 {
+    if kind(in doc, node_id) != ARRAY {
         return 0;
     }
-    g64(in d.b, n)
+    g64(in doc.b, node_id)
 }
 
-pub fn item(in d: Doc, n: u64, i: u64) -> u64 {
-    g64(in d.kids, wrapping_add(g64(in d.a, n), i))
+pub fn item(in doc: Doc, node_id: u64, i: u64) -> u64 {
+    g64(in doc.kids, wrapping_add(g64(in doc.a, node_id), i))
 }
 
-pub fn put(inout o: ChunkSeq[u8], in s: Str) {
-    let b = s.as_bytes();
-    for i in 0..b.len() {
-        o.push(byte(in b, i));
+pub fn put(inout out: ChunkSeq[u8], in text: Str) {
+    let bytes = text.as_bytes();
+    for i in 0..bytes.len() {
+        out.push(byte(in bytes, i));
     }
 }
 
-pub fn put_u64(inout o: ChunkSeq[u8], n: u64) {
+pub fn put_u64(inout out: ChunkSeq[u8], n: u64) {
     if n >= 10 {
-        put_u64(inout o, n / 10);
+        put_u64(inout out, n / 10);
     }
-    o.push(wrapping_u8(wrapping_add(widen_u64(DIGIT_ZERO), n % 10)));
+    out.push(wrapping_u8(wrapping_add(widen_u64(DIGIT_ZERO), n % 10)));
 }
 
 // The error as serde_json's `Display` writes it: the message, then
 // ` at line L column C`.
-pub fn put_error(inout o: ChunkSeq[u8], in d: Doc, in t: Slice[u8]) {
-    let c = d.err;
-    if c == EOF_LIST {
-        put(inout o, in "EOF while parsing a list");
-    } else if c == EOF_OBJECT {
-        put(inout o, in "EOF while parsing an object");
-    } else if c == EOF_STRING {
-        put(inout o, in "EOF while parsing a string");
-    } else if c == EOF_VALUE {
-        put(inout o, in "EOF while parsing a value");
-    } else if c == EXPECTED_COLON {
-        put(inout o, in "expected `:`");
-    } else if c == EXPECTED_LIST {
-        put(inout o, in "expected `,` or `]`");
-    } else if c == EXPECTED_OBJECT {
-        put(inout o, in "expected `,` or `}`");
-    } else if c == EXPECTED_IDENT {
-        put(inout o, in "expected ident");
-    } else if c == EXPECTED_VALUE {
-        put(inout o, in "expected value");
-    } else if c == INVALID_ESCAPE {
-        put(inout o, in "invalid escape");
-    } else if c == INVALID_NUMBER {
-        put(inout o, in "invalid number");
-    } else if c == OUT_OF_RANGE {
-        put(inout o, in "number out of range");
-    } else if c == CONTROL {
-        put(inout o, in "control character (\\u0000-\\u001F) found while parsing a string");
-    } else if c == KEY_STRING {
-        put(inout o, in "key must be a string");
-    } else if c == LONE_SURROGATE {
-        put(inout o, in "lone leading surrogate in hex escape");
-    } else if c == TRAILING_COMMA {
-        put(inout o, in "trailing comma");
-    } else if c == TRAILING_CHARS {
-        put(inout o, in "trailing characters");
-    } else if c == END_OF_HEX {
-        put(inout o, in "unexpected end of hex escape");
+pub fn put_error(inout out: ChunkSeq[u8], in doc: Doc, in text: Slice[u8]) {
+    let code = doc.error_code;
+    if code == EOF_LIST {
+        put(inout out, in "EOF while parsing a list");
+    } else if code == EOF_OBJECT {
+        put(inout out, in "EOF while parsing an object");
+    } else if code == EOF_STRING {
+        put(inout out, in "EOF while parsing a string");
+    } else if code == EOF_VALUE {
+        put(inout out, in "EOF while parsing a value");
+    } else if code == EXPECTED_COLON {
+        put(inout out, in "expected `:`");
+    } else if code == EXPECTED_LIST {
+        put(inout out, in "expected `,` or `]`");
+    } else if code == EXPECTED_OBJECT {
+        put(inout out, in "expected `,` or `}`");
+    } else if code == EXPECTED_IDENT {
+        put(inout out, in "expected ident");
+    } else if code == EXPECTED_VALUE {
+        put(inout out, in "expected value");
+    } else if code == INVALID_ESCAPE {
+        put(inout out, in "invalid escape");
+    } else if code == INVALID_NUMBER {
+        put(inout out, in "invalid number");
+    } else if code == OUT_OF_RANGE {
+        put(inout out, in "number out of range");
+    } else if code == CONTROL {
+        put(inout out, in "control character (\\u0000-\\u001F) found while parsing a string");
+    } else if code == KEY_STRING {
+        put(inout out, in "key must be a string");
+    } else if code == LONE_SURROGATE {
+        put(inout out, in "lone leading surrogate in hex escape");
+    } else if code == TRAILING_COMMA {
+        put(inout out, in "trailing comma");
+    } else if code == TRAILING_CHARS {
+        put(inout out, in "trailing characters");
+    } else if code == END_OF_HEX {
+        put(inout out, in "unexpected end of hex escape");
     } else {
-        put(inout o, in "recursion limit exceeded");
+        put(inout out, in "recursion limit exceeded");
     }
     // `position_of_index`.
-    let i = d.err_at;
+    let error_at = doc.error_at;
     let mut line: u64 = 1;
-    let mut start: u64 = 0;
-    for k in 0..i {
-        if byte(in t, k) == NEWLINE {
+    let mut line_start: u64 = 0;
+    for k in 0..error_at {
+        if byte(in text, k) == NEWLINE {
             line = inc(line);
-            start = inc(k);
+            line_start = inc(k);
         }
     }
-    put(inout o, in " at line ");
-    put_u64(inout o, line);
-    put(inout o, in " column ");
-    put_u64(inout o, wrapping_sub(i, start));
+    put(inout out, in " at line ");
+    put_u64(inout out, line);
+    put(inout out, in " column ");
+    put_u64(inout out, wrapping_sub(error_at, line_start));
 }
 
 fn hex(c: u8) -> u8 {
@@ -721,33 +723,33 @@ fn hex(c: u8) -> u8 {
 }
 
 // A JSON string with serde_json's escapes.
-pub fn put_string(inout o: ChunkSeq[u8], in b: Slice[u8]) {
-    o.push(QUOTE);
-    for i in 0..b.len() {
-        let c = byte(in b, i);
+pub fn put_string(inout out: ChunkSeq[u8], in bytes: Slice[u8]) {
+    out.push(QUOTE);
+    for i in 0..bytes.len() {
+        let c = byte(in bytes, i);
         if c == QUOTE || c == BACKSLASH {
-            o.push(BACKSLASH);
-            o.push(c);
+            out.push(BACKSLASH);
+            out.push(c);
         } else if c < SPACE {
-            o.push(BACKSLASH);
+            out.push(BACKSLASH);
             if c == BACKSPACE {
-                o.push(LOWER_B);
+                out.push(LOWER_B);
             } else if c == FORM_FEED {
-                o.push(LOWER_F);
+                out.push(LOWER_F);
             } else if c == NEWLINE {
-                o.push(LOWER_N);
+                out.push(LOWER_N);
             } else if c == CARRIAGE_RETURN {
-                o.push(LOWER_R);
+                out.push(LOWER_R);
             } else if c == TAB {
-                o.push(LOWER_T);
+                out.push(LOWER_T);
             } else {
-                put(inout o, in "u00");
-                o.push(hex(c >> 4));
-                o.push(hex(c & 15));
+                put(inout out, in "u00");
+                out.push(hex(c >> 4));
+                out.push(hex(c & 15));
             }
         } else {
-            o.push(c);
+            out.push(c);
         }
     }
-    o.push(QUOTE);
+    out.push(QUOTE);
 }

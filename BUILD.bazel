@@ -1131,6 +1131,14 @@ vesper_crate(
         "test/self_host_swap_inputs": [
             "resources:memory:6144",
         ],
+        # One thread, but it keeps every fixture world's check data and
+        # machine arenas: 12.3 GiB peak RSS locally (782 runs, Nov 2026).
+        # Unreserved, the kernel killed it in "Self-host differentials" on
+        # #2151 and #2190.
+        "test/self_host_run": [
+            "resources:memory:13312",
+            "resources:cpu:1",
+        ],
         # Four actual corpus workers; memory is an estimate, not an RSS cap.
         "test/self_host_front_end": [
             "resources:memory:5120",

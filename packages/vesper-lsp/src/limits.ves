@@ -141,21 +141,21 @@ pub fn hard() -> Plimits {
 }
 
 // `ProtocolLimits::validate`.
-pub fn validate(l: Plimits) -> Unit eff [Fail[Perr]] {
-    let h = hard();
-    if l.max_body_bytes > h.max_body_bytes
-        || l.max_reply_bytes > h.max_reply_bytes
-        || l.max_header_bytes > h.max_header_bytes
-        || l.max_header_line_bytes > h.max_header_line_bytes
-        || l.max_headers > h.max_headers
-        || l.max_json_depth > h.max_json_depth
-        || l.max_json_nodes > h.max_json_nodes
-        || l.max_json_string_bytes > h.max_json_string_bytes
-        || l.max_json_total_string_bytes > h.max_json_total_string_bytes
-        || l.max_json_index_bytes > h.max_json_index_bytes
-        || l.max_json_work > h.max_json_work
-        || l.max_id_bytes > h.max_id_bytes
-        || l.max_method_bytes > h.max_method_bytes
+pub fn validate(limits: Plimits) -> Unit eff [Fail[Perr]] {
+    let hard_limits = hard();
+    if limits.max_body_bytes > hard_limits.max_body_bytes
+        || limits.max_reply_bytes > hard_limits.max_reply_bytes
+        || limits.max_header_bytes > hard_limits.max_header_bytes
+        || limits.max_header_line_bytes > hard_limits.max_header_line_bytes
+        || limits.max_headers > hard_limits.max_headers
+        || limits.max_json_depth > hard_limits.max_json_depth
+        || limits.max_json_nodes > hard_limits.max_json_nodes
+        || limits.max_json_string_bytes > hard_limits.max_json_string_bytes
+        || limits.max_json_total_string_bytes > hard_limits.max_json_total_string_bytes
+        || limits.max_json_index_bytes > hard_limits.max_json_index_bytes
+        || limits.max_json_work > hard_limits.max_json_work
+        || limits.max_id_bytes > hard_limits.max_id_bytes
+        || limits.max_method_bytes > hard_limits.max_method_bytes
     {
         Fail::raise(Perr::PInvalidLimits);
     }
@@ -244,29 +244,29 @@ pub fn perr_name(e: Perr) -> Str {
 
 // The harness input's limits: `LimitWord::Count` little-endian words at
 // `at`.
-pub fn read_limits(in b: Slice[u8], at: u64) -> Plimits {
+pub fn read_limits(in bytes: Slice[u8], at: u64) -> Plimits {
     Plimits {
-        max_body_bytes: le(in b, at, LimitWord::BodyBytes),
-        max_reply_bytes: le(in b, at, LimitWord::ReplyBytes),
-        max_header_bytes: le(in b, at, LimitWord::HeaderBytes),
-        max_header_line_bytes: le(in b, at, LimitWord::HeaderLineBytes),
-        max_headers: le(in b, at, LimitWord::Headers),
-        max_json_depth: le(in b, at, LimitWord::JsonDepth),
-        max_json_nodes: le(in b, at, LimitWord::JsonNodes),
-        max_json_string_bytes: le(in b, at, LimitWord::JsonStringBytes),
-        max_json_total_string_bytes: le(in b, at, LimitWord::JsonTotalStringBytes),
-        max_json_index_bytes: le(in b, at, LimitWord::JsonIndexBytes),
-        max_json_work: le(in b, at, LimitWord::JsonWork),
-        max_id_bytes: le(in b, at, LimitWord::IdBytes),
-        max_method_bytes: le(in b, at, LimitWord::MethodBytes)
+        max_body_bytes: le(in bytes, at, LimitWord::BodyBytes),
+        max_reply_bytes: le(in bytes, at, LimitWord::ReplyBytes),
+        max_header_bytes: le(in bytes, at, LimitWord::HeaderBytes),
+        max_header_line_bytes: le(in bytes, at, LimitWord::HeaderLineBytes),
+        max_headers: le(in bytes, at, LimitWord::Headers),
+        max_json_depth: le(in bytes, at, LimitWord::JsonDepth),
+        max_json_nodes: le(in bytes, at, LimitWord::JsonNodes),
+        max_json_string_bytes: le(in bytes, at, LimitWord::JsonStringBytes),
+        max_json_total_string_bytes: le(in bytes, at, LimitWord::JsonTotalStringBytes),
+        max_json_index_bytes: le(in bytes, at, LimitWord::JsonIndexBytes),
+        max_json_work: le(in bytes, at, LimitWord::JsonWork),
+        max_id_bytes: le(in bytes, at, LimitWord::IdBytes),
+        max_method_bytes: le(in bytes, at, LimitWord::MethodBytes)
     }
 }
 
-// The little-endian word `k` after byte `at` (0 past the end).
-pub fn le(in b: Slice[u8], at: u64, k: u64) -> u64 {
-    b.try_read_u64_le(wrapping_add(at, wrapping_mul(k, Le::WordBytes))).unwrap_or(0)
+// The little-endian word `word_index` after byte `at` (0 past the end).
+pub fn le(in bytes: Slice[u8], at: u64, word_index: u64) -> u64 {
+    bytes.try_read_u64_le(wrapping_add(at, wrapping_mul(word_index, Le::WordBytes))).unwrap_or(0)
 }
 
-pub fn byte(in b: Slice[u8], i: u64) -> u8 {
-    b.try_get(i).unwrap_or(0)
+pub fn byte(in bytes: Slice[u8], i: u64) -> u8 {
+    bytes.try_get(i).unwrap_or(0)
 }

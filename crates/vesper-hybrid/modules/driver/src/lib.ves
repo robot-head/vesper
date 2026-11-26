@@ -65,6 +65,8 @@ use self::load::{read_graph};
 // module by #2091).
 use @vesper/proof-audit::{run as proof_audit_command};
 use @vesper/proof-audit::strs::{byte as audit_byte, push as audit_push, strs_new as audit_strs_new};
+// `vesper verify SOURCE --format` (SH5 lane 18, #1341).
+use @vesper/verify::{run_format as verify_format_command};
 // hd_step group 2 (#1893): the front-end passes in Vesper.
 use self::front::{parse_clean, cst_text};
 use self::interface::{interface_json};
@@ -1345,6 +1347,37 @@ pub fn proof_audit_run(
         }
     }
     let o = proof_audit_command(in args);
+    let mut result: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if o.failed {
+        result.push(1);
+    } else {
+        result.push(0);
+    }
+    let mut n = o.out.len();
+    for _k in 0..AUDIT_LEN_BYTES {
+        result.push(wrapping_u8(n % BYTE_RADIX));
+        n = n / BYTE_RADIX;
+    }
+    result.extend(in o.out.as_slice());
+    result.extend(in o.err.as_slice());
+    result
+}
+
+// `verify_commands::run` for `--format` (the `verify` swap,
+// src/swap/verify.rs): `hc_verify_run` hands over `--format` runs in
+// `proof_audit_run`'s packing and reads back the same result.
+pub fn verify_run(
+    in packed: Slice[u8]
+) -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3]] {
+    let mut args = audit_strs_new();
+    let mut from: u64 = 0;
+    for i in 0..packed.len() {
+        if audit_byte(in packed, i) == 0 {
+            audit_push(inout args, in packed[from..i]);
+            from = wrapping_add(i, 1);
+        }
+    }
+    let o = verify_format_command(in args);
     let mut result: ChunkSeq[u8] = ChunkSeq::new[u8]();
     if o.failed {
         result.push(1);

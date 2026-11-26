@@ -1893,7 +1893,7 @@ fn proof_audit_audits_in_vesper() {
 }
 
 /// `vesper verify SOURCE --format` past the command layer runs in
-/// `modules/verify` (#1341).
+/// the driver module's `verify_run` (#1341).
 #[test]
 fn verify_format_runs_in_vesper() {
     let hybrid = hybrid();
@@ -1947,7 +1947,7 @@ fn verify_matches_the_default_compiler() {
         &["verify", "--format", "--lean", ""],
         &["verify", "--format", "a.ves", "b.ves"],
         &["verify", "--format", "--", "-dash.ves"],
-        // Past the command layer, in modules/verify (#1341): a missing
+        // Past the command layer, in the driver module (#1341): a missing
         // source and a directory, in text and JSON, and a Lean that is not
         // there.
         &["verify", "missing.ves", "--format"],

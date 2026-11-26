@@ -41,49 +41,56 @@ pub fn sub(a: u64, b: u64) -> u64 {
     wrapping_sub(a, b)
 }
 
-pub fn byte(in s: Slice[u8], i: u64) -> u8 {
-    s.try_get(i).unwrap_or(0)
+pub fn byte(in bytes: Slice[u8], i: u64) -> u8 {
+    bytes.try_get(i).unwrap_or(0)
 }
 
-pub fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
-    s.try_get(i).unwrap_or(0)
+pub fn u8_at(in seq: ChunkSeq[u8], i: u64) -> u8 {
+    seq.try_get(i).unwrap_or(0)
 }
 
-pub fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
-    s.try_get(i).unwrap_or(0)
+pub fn u64_at(in seq: ChunkSeq[u64], i: u64) -> u64 {
+    seq.try_get(i).unwrap_or(0)
 }
 
-pub fn bit(b: bool) -> u64 {
-    if b { 1 } else { 0 }
+pub fn bit(flag: bool) -> u64 {
+    if flag { 1 } else { 0 }
 }
 
-// Whether `b[s..e]` and `c[t..f]` hold the same bytes.
-pub fn same(in b: Slice[u8], s: u64, e: u64, in c: Slice[u8], t: u64, f: u64) -> bool {
-    if sub(e, s) != sub(f, t) {
+// Whether `lhs[lhs_start..lhs_end]` and `rhs[rhs_start..rhs_end]` hold the same bytes.
+pub fn same(
+    in lhs: Slice[u8],
+    lhs_start: u64,
+    lhs_end: u64,
+    in rhs: Slice[u8],
+    rhs_start: u64,
+    rhs_end: u64
+) -> bool {
+    if sub(lhs_end, lhs_start) != sub(rhs_end, rhs_start) {
         return false;
     }
-    let n = sub(e, s);
+    let n = sub(lhs_end, lhs_start);
     for i in 0..n {
-        if byte(in b, add(s, i)) != byte(in c, add(t, i)) {
+        if byte(in lhs, add(lhs_start, i)) != byte(in rhs, add(rhs_start, i)) {
             return false;
         }
     }
     true
 }
 
-// Whether `b[s..e]` is the text `w`.
-pub fn is_text(in b: Slice[u8], s: u64, e: u64, in w: Str) -> bool {
-    let c = w.as_bytes();
-    same(in b, s, e, in c, 0, c.len())
+// Whether `bytes[start..end]` is `text`.
+pub fn is_text(in bytes: Slice[u8], start: u64, end: u64, in text: Str) -> bool {
+    let text_bytes = text.as_bytes();
+    same(in bytes, start, end, in text_bytes, 0, text_bytes.len())
 }
 
-// Whether `b[s..e]` starts with the text `w`.
-pub fn starts_with(in b: Slice[u8], s: u64, e: u64, in w: Str) -> bool {
-    let c = w.as_bytes();
-    if sub(e, s) < c.len() {
+// Whether `bytes[start..end]` starts with `text`.
+pub fn starts_with(in bytes: Slice[u8], start: u64, end: u64, in text: Str) -> bool {
+    let text_bytes = text.as_bytes();
+    if sub(end, start) < text_bytes.len() {
         return false;
     }
-    same(in b, s, add(s, c.len()), in c, 0, c.len())
+    same(in bytes, start, add(start, text_bytes.len()), in text_bytes, 0, text_bytes.len())
 }
 
 pub fn is_alpha(c: u8) -> bool {
@@ -100,22 +107,22 @@ pub fn is_alnum(c: u8) -> bool {
 
 // The scalar value of the UTF-8 character at `i` (sources are valid
 // UTF-8) and its length in bytes.
-pub fn char_at(in b: Slice[u8], i: u64) -> (u64, u64) {
-    let c = widen_u64(byte(in b, i));
-    if c < 128 {
-        (c, 1)
-    } else if c < 224 {
-        let c1 = widen_u64(byte(in b, inc(i))) & 63;
-        (((c & 31) << 6) | c1, 2)
-    } else if c < 240 {
-        let c1 = widen_u64(byte(in b, inc(i))) & 63;
-        let c2 = widen_u64(byte(in b, add(i, 2))) & 63;
-        (((c & 15) << 12) | (c1 << 6) | c2, 3)
+pub fn char_at(in bytes: Slice[u8], i: u64) -> (u64, u64) {
+    let lead = widen_u64(byte(in bytes, i));
+    if lead < 128 {
+        (lead, 1)
+    } else if lead < 224 {
+        let second = widen_u64(byte(in bytes, inc(i))) & 63;
+        (((lead & 31) << 6) | second, 2)
+    } else if lead < 240 {
+        let second = widen_u64(byte(in bytes, inc(i))) & 63;
+        let third = widen_u64(byte(in bytes, add(i, 2))) & 63;
+        (((lead & 15) << 12) | (second << 6) | third, 3)
     } else {
-        let c1 = widen_u64(byte(in b, inc(i))) & 63;
-        let c2 = widen_u64(byte(in b, add(i, 2))) & 63;
-        let c3 = widen_u64(byte(in b, add(i, 3))) & 63;
-        (((c & 7) << 18) | (c1 << 12) | (c2 << 6) | c3, 4)
+        let second = widen_u64(byte(in bytes, inc(i))) & 63;
+        let third = widen_u64(byte(in bytes, add(i, 2))) & 63;
+        let fourth = widen_u64(byte(in bytes, add(i, 3))) & 63;
+        (((lead & 7) << 18) | (second << 12) | (third << 6) | fourth, 4)
     }
 }
 
@@ -145,64 +152,64 @@ pub fn is_continuation(c: u8) -> bool {
     c >= 128 && c < 192
 }
 
-// `str::trim_start`: the first byte of `b[s..e]` that starts a
-// non-whitespace character, else `e`.
-pub fn trim_start(in b: Slice[u8], s: u64, e: u64) -> u64 {
-    let mut i = s;
+// `str::trim_start`: the first byte of `bytes[start..end]` that starts a
+// non-whitespace character, else `end`.
+pub fn trim_start(in bytes: Slice[u8], start: u64, end: u64) -> u64 {
+    let mut i = start;
     loop {
-        if i >= e {
+        if i >= end {
             break;
         }
-        let (c, n) = char_at(in b, i);
-        if !is_space_char(c) {
+        let (code_point, char_len) = char_at(in bytes, i);
+        if !is_space_char(code_point) {
             break;
         }
-        i = add(i, n);
+        i = add(i, char_len);
     }
     i
 }
 
-// `str::trim_end`: the end of `b[s..e]` without trailing whitespace.
-pub fn trim_end(in b: Slice[u8], s: u64, e: u64) -> u64 {
-    let mut j = e;
+// `str::trim_end`: the end of `bytes[start..end]` without trailing whitespace.
+pub fn trim_end(in bytes: Slice[u8], start: u64, end: u64) -> u64 {
+    let mut trimmed_end = end;
     loop {
-        if j <= s {
+        if trimmed_end <= start {
             break;
         }
-        let mut k = sub(j, 1);
+        let mut char_start = sub(trimmed_end, 1);
         loop {
-            if k <= s || !is_continuation(byte(in b, k)) {
+            if char_start <= start || !is_continuation(byte(in bytes, char_start)) {
                 break;
             }
-            k = sub(k, 1);
+            char_start = sub(char_start, 1);
         }
-        let (c, n) = char_at(in b, k);
-        if !is_space_char(c) {
+        let (code_point, char_len) = char_at(in bytes, char_start);
+        if !is_space_char(code_point) {
             break;
         }
-        j = k;
+        trimmed_end = char_start;
     }
-    j
+    trimmed_end
 }
 
-// Whether `b[s..e]` starts with a whitespace character.
-pub fn starts_with_space(in b: Slice[u8], s: u64, e: u64) -> bool {
-    if s >= e {
+// Whether `bytes[start..end]` starts with a whitespace character.
+pub fn starts_with_space(in bytes: Slice[u8], start: u64, end: u64) -> bool {
+    if start >= end {
         return false;
     }
-    let (c, n) = char_at(in b, s);
-    is_space_char(c)
+    let (code_point, char_len) = char_at(in bytes, start);
+    is_space_char(code_point)
 }
 
 // The 1-based line and column (in characters) of byte `offset`
 // (`location` of src/test_discovery.rs).
-pub fn location(in b: Slice[u8], offset: u64) -> (u64, u64) {
+pub fn location(in bytes: Slice[u8], offset: u64) -> (u64, u64) {
     let mut end = offset;
-    if end > b.len() {
-        end = b.len();
+    if end > bytes.len() {
+        end = bytes.len();
     }
     loop {
-        if end == 0 || end >= b.len() || !is_continuation(byte(in b, end)) {
+        if end == 0 || end >= bytes.len() || !is_continuation(byte(in bytes, end)) {
             break;
         }
         end = sub(end, 1);
@@ -210,27 +217,27 @@ pub fn location(in b: Slice[u8], offset: u64) -> (u64, u64) {
     let mut line: u64 = 1;
     let mut column: u64 = 1;
     for i in 0..end {
-        let c = byte(in b, i);
-        if c == NEWLINE {
+        let cur_byte = byte(in bytes, i);
+        if cur_byte == NEWLINE {
             line = inc(line);
             column = 1;
-        } else if !is_continuation(c) {
+        } else if !is_continuation(cur_byte) {
             column = inc(column);
         }
     }
     (line, column)
 }
 
-pub fn push_decimal(inout out: ChunkSeq[u8], v: u64) {
-    if v >= 10 {
-        push_decimal(inout out, v / 10);
+pub fn push_decimal(inout out: ChunkSeq[u8], value: u64) {
+    if value >= 10 {
+        push_decimal(inout out, value / 10);
     }
-    out.push(wrapping_u8(wrapping_add(v % 10, widen_u64(DIGIT_ZERO))));
+    out.push(wrapping_u8(wrapping_add(value % 10, widen_u64(DIGIT_ZERO))));
 }
 
-pub fn push_range(inout out: ChunkSeq[u8], in b: Slice[u8], s: u64, e: u64) {
-    if s < e {
-        out.extend(in b[s..e]);
+pub fn push_range(inout out: ChunkSeq[u8], in bytes: Slice[u8], start: u64, end: u64) {
+    if start < end {
+        out.extend(in bytes[start..end]);
     }
 }
 
@@ -242,53 +249,57 @@ pub struct Reader {
 }
 
 impl Reader {
-    pub fn word(inout self, in b: Slice[u8]) -> u64 {
-        let x = b.try_read_u64_le(self.pos).unwrap_or(0);
+    pub fn word(inout self, in input: Slice[u8]) -> u64 {
+        let value = input.try_read_u64_le(self.pos).unwrap_or(0);
         self.pos = add(self.pos, WORD_BYTES);
-        x
+        value
     }
 
-    // A text: its range in `b`.
-    pub fn text(inout self, in b: Slice[u8]) -> (u64, u64) {
-        let len = self.word(in b);
-        let s = self.pos;
-        self.pos = add(s, wrapping_mul(add(len, WORD_ROUND_UP) / WORD_BYTES, WORD_BYTES));
-        (s, add(s, len))
+    // A text: its range in `input`.
+    pub fn text(inout self, in input: Slice[u8]) -> (u64, u64) {
+        let len = self.word(in input);
+        let start = self.pos;
+        self.pos = add(start, wrapping_mul(add(len, WORD_ROUND_UP) / WORD_BYTES, WORD_BYTES));
+        (start, add(start, len))
     }
 }
 
 // The result words (decoded by `test_runner_words.rs`).
-pub fn put_text(inout out: ChunkSeq[u64], in b: Slice[u8], s: u64, e: u64) {
-    let n = sub(e, s);
+pub fn put_text(inout out: ChunkSeq[u64], in bytes: Slice[u8], start: u64, end: u64) {
+    let n = sub(end, start);
     out.push(n);
-    // Whole words straight from `b`, then the tail byte by byte.
-    let mut p = s;
+    // Whole words straight from `bytes`, then the tail byte by byte.
+    let mut pos = start;
     loop {
-        if add(p, WORD_BYTES) > e {
+        if add(pos, WORD_BYTES) > end {
             break;
         }
-        match b.try_read_u64_le(p) {
-            Option::Some(x) => out.push(x),
+        match bytes.try_read_u64_le(pos) {
+            Option::Some(word) => out.push(word),
             Option::None => out.push(0),
         }
-        p = add(p, WORD_BYTES);
+        pos = add(pos, WORD_BYTES);
     }
-    if p < e {
-        let mut x: u64 = 0;
-        let mut k: u64 = 0;
+    if pos < end {
+        let mut word: u64 = 0;
+        let mut tail_len: u64 = 0;
         loop {
-            if p >= e {
+            if pos >= end {
                 break;
             }
-            let c = widen_u64(byte(in b, p));
-            x = x | wrapping_shl_u64(c, wrapping_u32(wrapping_mul(k, widen_u64(BYTE_BITS))));
-            k = inc(k);
-            p = inc(p);
+            let cur_byte = widen_u64(byte(in bytes, pos));
+            word = word
+                | wrapping_shl_u64(
+                    cur_byte,
+                    wrapping_u32(wrapping_mul(tail_len, widen_u64(BYTE_BITS)))
+                );
+            tail_len = inc(tail_len);
+            pos = inc(pos);
         }
-        out.push(x);
+        out.push(word);
     }
 }
 
-pub fn put_buf(inout out: ChunkSeq[u64], in t: ChunkSeq[u8]) {
-    put_text(inout out, in t.as_slice(), 0, t.len());
+pub fn put_buf(inout out: ChunkSeq[u64], in buf: ChunkSeq[u8]) {
+    put_text(inout out, in buf.as_slice(), 0, buf.len());
 }
