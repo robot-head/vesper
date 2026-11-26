@@ -7,17 +7,9 @@
 // tests/common/test_runner_words.rs (util.ves `Reader`,
 // `put_text`).
 
-use @vesper/front::lex::{
-    lex,
-    token_end
-};
-use @vesper/front::diag::{
-    diags_new
-};
-use @vesper/front::kinds::{
-    k_comment,
-    k_whitespace
-};
+use @vesper/front::lex::{lex, token_end};
+use @vesper/front::diag::{diags_new};
+use @vesper/front::kinds::{k_comment, k_whitespace};
 use self::attrs::{
     Arg,
     Attrs,
@@ -36,9 +28,7 @@ use self::attrs::{
     extract_test_attrs,
     test_attr_new
 };
-use self::big::{
-    push_big
-};
+use self::big::{push_big};
 use self::util::{
     Reader,
     add,

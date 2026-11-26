@@ -14,21 +14,9 @@
 //
 // Names are `Names` symbols; `analyze_stack` interns nothing.
 
-use @vesper/check-data::names::{
-    Names
-};
-use self::input::{
-    Report
-};
-use self::util::{
-    cmp_names,
-    filled,
-    g,
-    put,
-    putn,
-    puts,
-    st
-};
+use @vesper/check-data::names::{Names};
+use self::input::{Report};
+use self::util::{cmp_names, filled, g, put, putn, puts, st};
 
 const NONE: u64 = 18446744073709551615;
 

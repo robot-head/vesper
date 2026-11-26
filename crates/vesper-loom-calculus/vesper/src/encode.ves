@@ -1,22 +1,8 @@
 // Module encode of @vesper/loom-calculus (see lib.ves): results into
 // l.out (documented in src/port.rs).
-use self::{
-    L
-};
-use self::util::{
-    add,
-    dep,
-    diag,
-    gnode,
-    id_at,
-    man,
-    none,
-    sedge,
-    sw
-};
-use self::solve::{
-    sort_diags
-};
+use self::{L};
+use self::util::{add, dep, diag, gnode, id_at, man, none, sedge, sw};
+use self::solve::{sort_diags};
 
 fn w(inout l: L, x: u64) {
     l.out.push(x);

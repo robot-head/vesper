@@ -1,8 +1,5 @@
 // Recording a SimPulse session into a flight recorder and seed metadata helpers.
-use super::ring::{
-    FlightRecorder,
-    record_effect_internal
-};
+use super::ring::{FlightRecorder, record_effect_internal};
 use super::wire::effect_scheduler;
 
 // TraceEvent kinds:

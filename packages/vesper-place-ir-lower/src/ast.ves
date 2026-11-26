@@ -5,26 +5,10 @@
 // row's children have smaller ids. Names are check-data symbols and types
 // are check-data type ids.
 
-use @vesper/check-data::util::{
-    add,
-    copy_seq,
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    w
-};
-use @vesper/check-data::world::{
-    set_by_symbol
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader
-};
-use @vesper/place-ir::codes::{
-    Lit,
-    Pat
-};
+use @vesper/check-data::util::{add, copy_seq, inc, n32, u32_at, u64_at, w};
+use @vesper/check-data::world::{set_by_symbol};
+use @vesper/check-data::input::{Ctx, Reader};
+use @vesper/place-ir::codes::{Lit, Pat};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;

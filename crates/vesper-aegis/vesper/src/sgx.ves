@@ -1,10 +1,7 @@
 // Module sgx of @vesper/aegis (see lib.ves): SgxQuote::parse_prefix (and
 // parse, parse_padded) of src/sgx.rs, Intel SGX DCAP quotes v3. Format
 // code 1 (SgxQuoteV3).
-use self::{
-    AErr,
-    Rd
-};
+use self::{AErr, Rd};
 use self::reader::{
     arr,
     finish,
@@ -19,11 +16,7 @@ use self::reader::{
     unsupported,
     put
 };
-use self::tdx::{
-    blob,
-    max_sig_data,
-    qe_report
-};
+use self::tdx::{blob, max_sig_data, qe_report};
 
 // src/sgx.rs: quote version 3, ECDSA P-256 attestation keys, the 384-byte
 // report body and PCK chain certification data (type 5). Field widths in

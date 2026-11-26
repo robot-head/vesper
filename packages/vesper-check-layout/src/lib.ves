@@ -14,39 +14,11 @@
 //   (tests/hybrid_layout.rs).
 
 use @vesper/check-data::pack_text;
-use @vesper/check-data::util::{
-    add,
-    fold,
-    inc,
-    n32,
-    push_decimal,
-    push_signed,
-    u32_at,
-    u64_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    Types,
-    default_type,
-    display,
-    substitute,
-    TyKind
-};
-use @vesper/check-data::world::{
-    Known,
-    World,
-    vector_words
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    ctx_new,
-    extend_ctx,
-    read_ctx
-};
+use @vesper/check-data::util::{add, fold, inc, n32, push_decimal, push_signed, u32_at, u64_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{Types, default_type, display, substitute, TyKind};
+use @vesper/check-data::world::{Known, World, vector_words};
+use @vesper/check-data::input::{Ctx, Reader, ctx_new, extend_ctx, read_ctx};
 
 // Constants cannot be imported across modules yet (check-data gap 1); these
 // copies equal check-data's.

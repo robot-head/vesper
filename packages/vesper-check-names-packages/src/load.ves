@@ -34,22 +34,10 @@ use @vesper/ast::{
     list_len,
     none as ast_none
 };
-use @vesper/check-data::util::{
-    stage2_heap_mark,
-    stage2_heap_reset,
-    stage2_heap_swap
-};
-use @vesper/ast::lower::{
-    L,
-    lower_source,
-    lower_source_perm
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
+use @vesper/check-data::util::{stage2_heap_mark, stage2_heap_reset, stage2_heap_swap};
+use @vesper/ast::lower::{L, lower_source, lower_source_perm};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
 use self::state::{
     St,
     at32,

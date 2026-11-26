@@ -1,13 +1,6 @@
 // Unit tests for @vesper-std/core.
 test {
-    use @vesper-std/core::{
-        min,
-        max,
-        clamp,
-        ordering_sign,
-        reverse,
-        then_cmp
-    };
+    use @vesper-std/core::{min, max, clamp, ordering_sign, reverse, then_cmp};
     use @vesper-std/core::mem::swap as swap_places;
     use @vesper-std/core::option::{
         is_some,
@@ -35,11 +28,7 @@ test {
         and_then as result_and_then,
         or as result_or
     };
-    use self::support::{
-        check,
-        some_u64,
-        some_pair
-    };
+    use self::support::{check, some_u64, some_pair};
 
     copy struct SwapFields {
         left: u64,

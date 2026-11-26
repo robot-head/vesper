@@ -7,28 +7,9 @@
 // stack slots below 64 it may point into. `CtPolicy::secret_regions` is
 // always empty in native_verifiers.rs, so alias regions are not read.
 
-use self::input::{
-    Cx,
-    arg,
-    block_row,
-    fw,
-    iw,
-    nargs,
-    pw,
-    val
-};
-use self::report::{
-    raw_finding
-};
-use self::util::{
-    contains,
-    filled,
-    g,
-    put,
-    putn,
-    puts,
-    st
-};
+use self::input::{Cx, arg, block_row, fw, iw, nargs, pw, val};
+use self::report::{raw_finding};
+use self::util::{contains, filled, g, put, putn, puts, st};
 
 const CAN_LOAD: u64 = 2;
 const CAN_STORE: u64 = 4;

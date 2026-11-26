@@ -33,20 +33,10 @@ use @vesper/ast::{
     pat_at,
     type_at
 };
-use @vesper/ast::lower::{
-    lower_source
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
-use self::util::{
-    Reader,
-    put_text,
-    sub
-};
+use @vesper/ast::lower::{lower_source};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
+use self::util::{Reader, put_text, sub};
 
 // ------------------------------------------------------------ node access
 

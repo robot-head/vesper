@@ -8,15 +8,8 @@
 // pairs pack the two `u32`s into one `u64` the same way.
 
 use @vesper/ast::lower::L;
-use @vesper-std/intern::{
-    Interner,
-    interner_new,
-    symbol_from_id
-};
-use @vesper-std/collections::flat_table::{
-    FlatTable,
-    flat_table_new
-};
+use @vesper-std/intern::{Interner, interner_new, symbol_from_id};
+use @vesper-std/collections::flat_table::{FlatTable, flat_table_new};
 
 // An absent index or symbol.
 pub fn none() -> u32 {

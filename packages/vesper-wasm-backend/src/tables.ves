@@ -1,46 +1,14 @@
 // Constant tables in the port: a use of a constant aggregate
 // (`$table$NAME`, src/arrays.rs) as read-only static data.
 
-use @vesper/check-data::names::{
-    Names,
-    names_new
-};
-pub use @vesper/check-data::util::{
-    stage2_heap_mark,
-    stage2_heap_reset,
-    stage2_heap_swap
-};
-use @vesper/check-data::types::{
-    TyKind,
-    TyMode,
-    types_new
-};
-use @vesper/check-data::world::{
-    Bounds,
-    Known,
-    mode_of,
-    world_new
-};
-use @vesper/place-ir::{
-    program_new
-};
-use @vesper/place-ir::codes::{
-    Lit,
-    Op
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u64_at,
-    u8_at,
-    w
-};
-use self::err::{
-    WErr,
-    werr,
-    werr_syms
-};
+use @vesper/check-data::names::{Names, names_new};
+pub use @vesper/check-data::util::{stage2_heap_mark, stage2_heap_reset, stage2_heap_swap};
+use @vesper/check-data::types::{TyKind, TyMode, types_new};
+use @vesper/check-data::world::{Bounds, Known, mode_of, world_new};
+use @vesper/place-ir::{program_new};
+use @vesper/place-ir::codes::{Lit, Op};
+use @vesper/check-data::util::{add, inc, n32, u64_at, u8_at, w};
+use self::err::{WErr, werr, werr_syms};
 use self::enc::{
     Code,
     OP_ELSE,
@@ -68,30 +36,10 @@ use self::enc::{
     OP_UNREACHABLE,
     code_new
 };
-use self::ir::{
-    FnInfo,
-    empty_facts,
-    ir_new
-};
-use self::lower::{
-    L,
-    lowerer_new,
-    set64
-};
-use self::module::{
-    Builder
-};
-use self::plan::{
-    Cx,
-    Inst,
-    SH_ENUM,
-    SH_SCALAR,
-    SH_STR,
-    SH_STRUCT,
-    SH_TUPLE,
-    Syms,
-    empty_plan
-};
+use self::ir::{FnInfo, empty_facts, ir_new};
+use self::lower::{L, lowerer_new, set64};
+use self::module::{Builder};
+use self::plan::{Cx, Inst, SH_ENUM, SH_SCALAR, SH_STR, SH_STRUCT, SH_TUPLE, Syms, empty_plan};
 
 // Consts do not cross modules: src/err.ves, src/lower.ves.
 const K_UNSUPPORTED: u8 = 0;

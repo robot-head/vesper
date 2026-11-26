@@ -2,16 +2,8 @@
 // that src/release.rs uses from the `semver` crate (1.0.28): `Version::parse`
 // with its error kinds and messages, `Version::cmp_precedence` and `Display`,
 // and release policy 1 itself (`check_release` after the comparison).
-use self::{
-    R,
-    Ver
-};
-use self::util::{
-    Class,
-    div_rem,
-    put,
-    put_u64
-};
+use self::{R, Ver};
+use self::util::{Class, div_rem, put, put_u64};
 
 // Byte `i` of a version text, or 0 past the end.
 fn byte(in t: ChunkSeq[u8], i: u64) -> u8 {

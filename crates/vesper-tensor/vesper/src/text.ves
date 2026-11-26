@@ -10,9 +10,7 @@
 // (see `json_failure`) as `code << 60`. Codes 11 and 12 ask the caller to
 // retry with a larger tape (`tape.len()` words) and key table
 // (`keys.len() / 2` slots, a power of two).
-use self::num::{
-    u64_zero
-};
+use self::num::{u64_zero};
 
 // ASCII bytes the JSON grammar (RFC 8259) uses.
 const TAB: u8 = 9;

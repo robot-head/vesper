@@ -7,26 +7,11 @@
 // `/`, `%`, `<<`, `>>`, `|` and the orderings. Anything else on a `u128` (and every
 // `i128`) is refused (sites 248 and 249).
 
-use @vesper/check-data::types::{
-    TyKind
-};
-use @vesper/check-data::util::{
-    u32_at
-};
-use self::enc::{
-    Code,
-    ValTy,
-    code_new,
-    vt
-};
-use self::err::{
-    WErr,
-    werr
-};
-use self::lower::{
-    L,
-    body_n
-};
+use @vesper/check-data::types::{TyKind};
+use @vesper/check-data::util::{u32_at};
+use self::enc::{Code, ValTy, code_new, vt};
+use self::err::{WErr, werr};
+use self::lower::{L, body_n};
 
 // Consts do not cross modules: src/err.ves, src/lower.ves, src/enc.ves.
 const K_UNSUPPORTED: u8 = 0;

@@ -23,31 +23,12 @@
 //   refused the entry (`X <message>`).
 
 use @vesper/check-data::pack_text;
-use @vesper/check-data::input::{
-    Reader,
-    read_ctx
-};
-use @vesper/check-layout::{
-    layouts_new
-};
-use @vesper/place-ir::{
-    read_program
-};
-use self::data::{
-    read_calls
-};
-use self::instances::{
-    capability_abi,
-    concrete,
-    discover,
-    program_facts,
-    syms_new
-};
-use self::abi::{
-    Errs,
-    check_entry,
-    declare
-};
+use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/check-layout::{layouts_new};
+use @vesper/place-ir::{read_program};
+use self::data::{read_calls};
+use self::instances::{capability_abi, concrete, discover, program_facts, syms_new};
+use self::abi::{Errs, check_entry, declare};
 
 pub fn codegen_calls_text(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();

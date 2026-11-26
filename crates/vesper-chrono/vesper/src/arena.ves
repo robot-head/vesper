@@ -1,12 +1,6 @@
 // VirtualArena copy-on-write shard checkpoints (§31.1 item 2).
-use @vesper-std/hash::blake3::{
-    blake3,
-    digest_bytes
-};
-use super::ring::{
-    FlightRecorder,
-    capture_snapshot
-};
+use @vesper-std/hash::blake3::{blake3, digest_bytes};
+use super::ring::{FlightRecorder, capture_snapshot};
 
 // ArenaError codes:
 // 0 = Ok

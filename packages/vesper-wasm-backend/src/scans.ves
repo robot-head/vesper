@@ -3,13 +3,8 @@
 // slice: the index of the first matching byte as an `Option[u64]`, total.
 // The lexer of @vesper/front uses all three.
 
-use self::err::{
-    WErr,
-    werr
-};
-use self::lower::{
-    L
-};
+use self::err::{WErr, werr};
+use self::lower::{L};
 
 // Consts do not cross modules: src/err.ves, src/lower.ves.
 const K_UNSUPPORTED: u8 = 0;

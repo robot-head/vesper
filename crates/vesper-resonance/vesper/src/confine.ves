@@ -21,12 +21,7 @@
 // Rules (`Rule`): forbidden effect (code), unknown callee, unresolved
 // indirect call (site), unbounded loop, loop bound (bound, maximum),
 // recursion, stack budget (depth, budget), stack depth overflow.
-use self::seqs::{
-    at,
-    filled,
-    get,
-    set
-};
+use self::seqs::{at, filled, get, set};
 
 // No function or instruction.
 const NONE: u64 = 18446744073709551615;

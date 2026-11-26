@@ -8,32 +8,11 @@
 // - encode.ves: `encode_frame` (the output budget and serde_json's writer).
 // - lib.ves: the entries, and `lsp_serve`, the transport half of the stdio
 //   loop of src/lsp.rs (`dispatch`).
-use self::limits::{
-    Le,
-    LimitWord,
-    Perr,
-    Plimits,
-    perr_code,
-    perr_name,
-    read_limits
-};
-use self::envelope::{
-    Env,
-    Envelope,
-    Id,
-    NO_TOKEN,
-    decoded,
-    new_doc,
-    parse_envelope,
-    raw_span
-};
+use self::limits::{Le, LimitWord, Perr, Plimits, perr_code, perr_name, read_limits};
+use self::envelope::{Env, Envelope, Id, NO_TOKEN, decoded, new_doc, parse_envelope, raw_span};
 use @vesper/serde::Doc;
 use self::encode::encode_frame;
-use self::frame::{
-    Body,
-    Cursor,
-    read_frame
-};
+use self::frame::{Body, Cursor, read_frame};
 
 // A `read_frame` step's status.
 enum Status: _ {

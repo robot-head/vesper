@@ -18,20 +18,10 @@
 const TCHAR_MASK_LOW: u64 = 288068722172624896;
 const TCHAR_MASK_HIGH: u64 = 6341068274398134270;
 
-use self::matching::{
-    find_path,
-    is_lit,
-    not_allowed,
-    not_found
-};
+use self::matching::{find_path, is_lit, not_allowed, not_found};
 
-use self::pattern::{
-    same,
-    parse_pattern
-};
-use self::ascii::{
-    Ascii
-};
+use self::pattern::{same, parse_pattern};
+use self::ascii::{Ascii};
 
 copy struct RouterLimits {
     max_routes: u64,

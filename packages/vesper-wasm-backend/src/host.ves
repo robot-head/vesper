@@ -34,24 +34,10 @@
 // address the canonical ABI hands back points into memory that
 // `cabi_realloc` took from the heap.
 
-use @vesper/check-data::util::{
-    add,
-    inc
-};
-use self::enc::{
-    Code,
-    ValTy,
-    code_new,
-    function_bytes,
-    vt
-};
-use self::err::{
-    WErr,
-    werr
-};
-use self::module::{
-    Builder
-};
+use @vesper/check-data::util::{add, inc};
+use self::enc::{Code, ValTy, code_new, function_bytes, vt};
+use self::err::{WErr, werr};
+use self::module::{Builder};
 
 const VT_I32: u8 = 127;
 const VT_I64: u8 = 126;

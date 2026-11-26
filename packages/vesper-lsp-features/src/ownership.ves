@@ -31,21 +31,9 @@ use @vesper/ast::{
     expr_at,
     pat_at
 };
-use @vesper/ast::lower::{
-    lower_source
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader as CtxReader,
-    read_ctx
-};
-use @vesper/check-data::types::{
-    EffNode,
-    Vars,
-    vars_new,
-    substitute,
-    display as type_display
-};
+use @vesper/ast::lower::{lower_source};
+use @vesper/check-data::input::{Ctx, Reader as CtxReader, read_ctx};
+use @vesper/check-data::types::{EffNode, Vars, vars_new, substitute, display as type_display};
 use @vesper/check-data::world::{
     Adt,
     Generic,
@@ -56,19 +44,8 @@ use @vesper/check-data::world::{
     mode_of,
     constructor
 };
-use @vesper-std/intern::{
-    symbol_from_id
-};
-use self::json::{
-    byte,
-    pack,
-    put,
-    put_bytes,
-    put_position,
-    put_range,
-    put_string,
-    put_u64
-};
+use @vesper-std/intern::{symbol_from_id};
+use self::json::{byte, pack, put, put_bytes, put_position, put_range, put_string, put_u64};
 use self::nav::{
     arg_at,
     clause_at,
@@ -80,22 +57,9 @@ use self::nav::{
     put_span_error,
     stmt_at
 };
-use @vesper/span::{
-    ByteSpan,
-    Limits,
-    Position,
-    Range,
-    line_table,
-    offset,
-    position,
-    range
-};
+use @vesper/span::{ByteSpan, Limits, Position, Range, line_table, offset, position, range};
 use @vesper/span::Error as SpanError;
-use self::proof_types::{
-    ty_at,
-    effects_at,
-    effect_at
-};
+use self::proof_types::{ty_at, effects_at, effect_at};
 
 const NONE: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;

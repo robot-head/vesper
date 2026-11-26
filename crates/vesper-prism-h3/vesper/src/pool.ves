@@ -2,22 +2,9 @@
 // reader used by connection, client, and session state machines so that
 // active streams store scalar handles instead of per-stream ChunkSeqs.
 
-use self::{
-    FrameError,
-    FrameOut,
-    CapsuleError,
-    CapsuleOut
-};
-use self::int::{
-    inc,
-    min64,
-    word,
-    byte,
-    remove_word
-};
-use self::varint::{
-    vdec
-};
+use self::{FrameError, FrameOut, CapsuleError, CapsuleOut};
+use self::int::{inc, min64, word, byte, remove_word};
+use self::varint::{vdec};
 use self::frame::{
     data_type,
     headers_type,

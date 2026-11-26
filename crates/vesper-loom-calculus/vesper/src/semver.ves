@@ -1,20 +1,7 @@
 // Module semver of @vesper/loom-calculus (see lib.ves): `VersionReq::matches`
 // of the semver crate, over the decoded comparators.
-use self::{
-    Cmp,
-    L,
-    Ver
-};
-use self::util::{
-    CmpOp,
-    Order,
-    add,
-    cmp,
-    pre_ord,
-    req,
-    slen,
-    ver
-};
+use self::{Cmp, L, Ver};
+use self::util::{CmpOp, Order, add, cmp, pre_ord, req, slen, ver};
 
 fn exact(in l: L, in c: Cmp, in v: Ver) -> bool {
     if v.major != c.major {

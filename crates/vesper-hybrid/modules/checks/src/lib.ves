@@ -20,28 +20,10 @@
 
 // @export abi 4
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    w
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    ctx_new,
-    extend_ctx
-};
-use @vesper/check-layout::{
-    Layouts,
-    layout_of,
-    layouts_new,
-    put_bytes
-};
-use @vesper/ir-check::{
-    ir_check_task
-};
+use @vesper/check-data::util::{add, inc, n32, u32_at, w};
+use @vesper/check-data::input::{Ctx, Reader, ctx_new, extend_ctx};
+use @vesper/check-layout::{Layouts, layout_of, layouts_new, put_bytes};
+use @vesper/ir-check::{ir_check_task};
 
 // Copies of check-data's and check-layout's constants (constants cannot be
 // imported across packages here yet; check-data gap 1).

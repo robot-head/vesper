@@ -23,14 +23,7 @@
 // What is not kept is the iteration order of egg's `classes` hash map:
 // here classes are visited in ascending id order. See the README.
 
-use self::util::{
-    filled_u32,
-    i64_at,
-    mix,
-    u32_at,
-    u64_at,
-    u8_at
-};
+use self::util::{filled_u32, i64_at, mix, u32_at, u64_at, u8_at};
 
 const NONE: u32 = 4294967295;
 

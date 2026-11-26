@@ -10,30 +10,12 @@
 // comment text. Both budgets of the Rust code are kept charge for charge,
 // with the Rust `size_of` of each value the charges count.
 
-use @vesper/ast::{
-    TypeNode,
-    list_len,
-    list_at
-};
-use @vesper/front::lex::{
-    token_end
-};
-use self::markdown::{
-    analyze
-};
-use self::links::{
-    Link,
-    SIZE_LINK_TARGET,
-    ident_byte,
-    ident_start,
-    link_new
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use self::json::{
-    byte
-};
+use @vesper/ast::{TypeNode, list_len, list_at};
+use @vesper/front::lex::{token_end};
+use self::markdown::{analyze};
+use self::links::{Link, SIZE_LINK_TARGET, ident_byte, ident_start, link_new};
+use @vesper-std/arena::{idx_from_raw};
+use self::json::{byte};
 use self::nav::{
     Ix,
     ERR_NONE,

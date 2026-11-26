@@ -1,18 +1,8 @@
 // Module concrete of @vesper/ebpf (see lib.ves): the concrete ALU, jump and
 // byte-order semantics of src/interp.rs (`alu_concrete`, `cmp_concrete`,
 // `endian`).
-use self::common::{
-    sar,
-    sext_const,
-    shl,
-    shr,
-    signed
-};
-use self::insn::{
-    AluOp,
-    Endian,
-    JmpOp
-};
+use self::common::{sar, sext_const, shl, shr, signed};
+use self::insn::{AluOp, Endian, JmpOp};
 
 fn udiv(a: u64, b: u64) -> u64 {
     if b == 0 {

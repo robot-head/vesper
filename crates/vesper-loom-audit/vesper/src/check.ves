@@ -1,23 +1,9 @@
 // Module check of @vesper/loom-audit (see lib.ves): `Limits::validate`,
 // `validate_catalog`, `validate_policy` and the audit `preflight`.
-use @vesper/loom-calculus::check::{
-    system_name_valid
-};
-use @vesper/loom-calculus::util::{
-    Ascii,
-    Order,
-    dep,
-    feat,
-    man,
-    none,
-    ver_ord
-};
-use self::{
-    A
-};
-use self::license::{
-    allowlist
-};
+use @vesper/loom-calculus::check::{system_name_valid};
+use @vesper/loom-calculus::util::{Ascii, Order, dep, feat, man, none, ver_ord};
+use self::{A};
+use self::license::{allowlist};
 use self::util::{
     AuditSort,
     ErrorKind,

@@ -1,22 +1,9 @@
 // Module input of @vesper/loom-audit (see lib.ves): the audit's own words
 // after the calculus tables (documented in src/port.rs).
-use @vesper/loom-calculus::{
-    L
-};
-use @vesper/loom-calculus::decode::{
-    rd,
-    rd_bool,
-    rd_str
-};
-use @vesper/loom-calculus::util::{
-    none
-};
-use self::{
-    A,
-    Adv,
-    Nat,
-    Rng
-};
+use @vesper/loom-calculus::{L};
+use @vesper/loom-calculus::decode::{rd, rd_bool, rd_str};
+use @vesper/loom-calculus::util::{none};
+use self::{A, Adv, Nat, Rng};
 
 // The limits (13 words, in field order) and the wrapper's three
 // serialized-size checks (catalog, policy, solution).

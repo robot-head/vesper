@@ -9,30 +9,10 @@
 // (n); Bytes 2 (start, length: of the input when decoding, of `arena` when
 // encoding); Sequence 3 (count); Choice 4 (branch); Frame 5; Repeat 6
 // (count). Children follow their parent.
-use self::{
-    GErr
-};
-use self::common::{
-    add_or,
-    bound,
-    charge_or,
-    fail,
-    leb_len,
-    min,
-    mul_or,
-    put_leb,
-    sb,
-    sw
-};
-use self::framing::{
-    decode
-};
-use self::grammar::{
-    charge_or_at,
-    first_has,
-    rec,
-    same
-};
+use self::{GErr};
+use self::common::{add_or, bound, charge_or, fail, leb_len, min, mul_or, put_leb, sb, sw};
+use self::framing::{decode};
+use self::grammar::{charge_or_at, first_has, rec, same};
 
 // Rule record tags (module grammar).
 const R_EMPTY: u64 = 0;

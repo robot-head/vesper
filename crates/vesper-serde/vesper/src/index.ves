@@ -2,18 +2,8 @@
 // of src/index.rs: UTF-8 validation, the parser with its work, entry and
 // limit accounting, duplicate-key checks, JSON escapes, decoded string
 // comparison and decoding, and schema-directed field lookup.
-use self::{
-    Doc,
-    Error,
-    ErrorKind,
-    Kind,
-    Limits,
-    Token
-};
-use self::ascii::{
-    Ascii,
-    Utf8
-};
+use self::{Doc, Error, ErrorKind, Kind, Limits, Token};
+use self::ascii::{Ascii, Utf8};
 
 // `at` past the end: no byte has this value.
 const NO_BYTE: u64 = 256;

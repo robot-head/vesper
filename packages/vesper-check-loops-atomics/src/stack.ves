@@ -9,19 +9,10 @@
 // `BTreeSet<Succ>` of one function's successors (functions by id, then
 // bounded externals by symbol text) is a sorted run of one key array.
 
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::input::{
-    Reader
-};
-use @vesper/check-data::util::{
-    put_text_words
-};
-use self::out::{
-    put,
-    put_u64
-};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::input::{Reader};
+use @vesper/check-data::util::{put_text_words};
+use self::out::{put, put_u64};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;

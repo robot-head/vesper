@@ -8,27 +8,10 @@
 // Sizes are memoized per (defaulted) type id: the type arena is
 // hash-consed, so equal types share the entry.
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    Types,
-    default_type,
-    substitute,
-    TyKind
-};
-use @vesper/check-data::world::{
-    World,
-    vector_words
-};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{Types, default_type, substitute, TyKind};
+use @vesper/check-data::world::{World, vector_words};
 
 const NONE32: u32 = 4294967295;
 
