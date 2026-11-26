@@ -9,18 +9,8 @@
 // emission reads (bound operations, buffer sizes, constructor names, the
 // failure order and the frame layout).
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    inc32,
-    n32,
-    push_decimal,
-    u32_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
+use @vesper/check-data::util::{add, inc, inc32, n32, push_decimal, u32_at, w};
+use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{
     Types,
     debug_type,
@@ -30,19 +20,9 @@ use @vesper/check-data::types::{
     TyKind,
     TyPass
 };
-use @vesper/check-data::world::{
-    World
-};
-use @vesper/check-layout::{
-    Layouts,
-    layout_of
-};
-use self::tables::{
-    Decl,
-    Func,
-    Param,
-    Tables
-};
+use @vesper/check-data::world::{World};
+use @vesper/check-layout::{Layouts, layout_of};
+use self::tables::{Decl, Func, Param, Tables};
 
 const NONE32: u32 = 4294967295;
 // Copies of @vesper/check-layout's layout kinds: Rust's loader imports a

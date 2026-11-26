@@ -12,29 +12,10 @@
 // Every write goes to a writer bounded by `max_output_bytes` that refuses a
 // write that does not fit, so the page fails with "output byte budget
 // exceeded" exactly when its full text is longer than the budget.
-use @vesper/serde::{
-    Doc,
-    Error,
-    Kind,
-    Limits,
-    Token,
-    doc_field,
-    doc_new,
-    doc_parse
-};
-use @vesper/serde::index::{
-    next_decoded,
-    tok
-};
-use self::json::{
-    PRETTY_OK,
-    pretty
-};
-use self::{
-    Reader,
-    read_bytes,
-    read_word
-};
+use @vesper/serde::{Doc, Error, Kind, Limits, Token, doc_field, doc_new, doc_parse};
+use @vesper/serde::index::{next_decoded, tok};
+use self::json::{PRETTY_OK, pretty};
+use self::{Reader, read_bytes, read_word};
 
 const AMP: u8 = 38;
 const LT: u8 = 60;

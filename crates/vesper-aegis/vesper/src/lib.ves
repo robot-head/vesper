@@ -23,14 +23,8 @@ use self::cca::{
     realm_claims,
     realm_profile
 };
-use self::claims::{
-    check_policy,
-    decode_wire
-};
-use self::corim::{
-    corim_meta_parse as corim_meta_parse_impl,
-    corim_parse as corim_parse_impl
-};
+use self::claims::{check_policy, decode_wire};
+use self::corim::{corim_meta_parse as corim_meta_parse_impl, corim_parse as corim_parse_impl};
 use self::corim_cca::{
     cca_appraise as cca_appraise_impl,
     corim_validate_cca as corim_validate_cca_impl
@@ -55,10 +49,7 @@ use self::host::{
     validate_clock as host_validate_clock_impl
 };
 use self::sgx::parse as sgx_parse_impl;
-use self::snp::{
-    parse as snp_parse_impl,
-    parse_etcb
-};
+use self::snp::{parse as snp_parse_impl, parse_etcb};
 use self::tdx::parse as tdx_parse_impl;
 use self::time::iso8601_utc_to_unix as iso8601_impl;
 

@@ -1,10 +1,5 @@
 // Module entry of @vesper/quarry (see lib.ves).
-use self::{
-    CCol,
-    CTab,
-    D,
-    Q
-};
+use self::{CCol, CTab, D, Q};
 use self::util::{
     bound,
     cw,
@@ -22,23 +17,9 @@ use self::util::{
     sw,
     vat
 };
-use self::check::{
-    ex_end
-};
-use self::plan::{
-    decode_plan
-};
-use self::values::{
-    dtab,
-    eval,
-    size_value,
-    size_vec,
-    tick,
-    val_at,
-    valid,
-    vbytes,
-    vheap
-};
+use self::check::{ex_end};
+use self::plan::{decode_plan};
+use self::values::{dtab, eval, size_value, size_vec, tick, val_at, valid, vbytes, vheap};
 use self::rows::{
     check_inputs,
     load_catalog_ex,

@@ -41,10 +41,7 @@
 //     Result::Err(_) => {},
 // }
 // ```
-use @vesper-std/fs::{
-    IoError,
-    invalid_input
-};
+use @vesper-std/fs::{IoError, invalid_input};
 use @vesper-std/fs::sys::os_error_word;
 
 // How a child ended: `exited` with `code`, or (Unix) killed by `signal`.

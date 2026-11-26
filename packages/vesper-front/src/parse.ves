@@ -6,12 +6,7 @@
 // scoped name sets (`row_names`, `bound_values`) and the pending trait
 // bound spans.
 
-use self::{
-    Tokens,
-    Diags,
-    P,
-    Ex
-};
+use self::{Tokens, Diags, P, Ex};
 use self::kinds::{
     TokenSentinel,
     k_upper,
@@ -138,23 +133,9 @@ use self::util::{
     w32,
     shl
 };
-use self::tree::{
-    Event,
-    NodeKind
-};
-use self::diag::{
-    diags_new,
-    diag_push_limit,
-    limit_message
-};
-use self::lex::{
-    trivia_kind,
-    max_diagnostics,
-    token_end,
-    token_word,
-    token_sym,
-    tokens_new
-};
+use self::tree::{Event, NodeKind};
+use self::diag::{diags_new, diag_push_limit, limit_message};
+use self::lex::{trivia_kind, max_diagnostics, token_end, token_word, token_sym, tokens_new};
 
 // ---------------------------------------------------------------- kinds
 

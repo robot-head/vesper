@@ -4,27 +4,11 @@
 // src/vector/check.rs and the ISA walker of `vector::check_world` walk the
 // AST: a later PR of #1181.
 
-use @vesper/check-data::util::{
-    add,
-    push_decimal,
-    u32_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    EffNode,
-    Types,
-    display,
-    TyKind
-};
-use @vesper/check-data::world::{
-    Known
-};
-use @vesper/check-data::diag::{
-    Diags
-};
+use @vesper/check-data::util::{add, push_decimal, u32_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{EffNode, Types, display, TyKind};
+use @vesper/check-data::world::{Known};
+use @vesper/check-data::diag::{Diags};
 
 const NONE32: u32 = 4294967295;
 

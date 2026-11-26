@@ -80,10 +80,7 @@ use self::common::{
     seq_word_or_cached,
     zero
 };
-use self::drops::{
-    emit_drop_elements_tree,
-    emit_drop_tree
-};
+use self::drops::{emit_drop_elements_tree, emit_drop_tree};
 
 pub const SEQ_WITH_CAPACITY: u64 = 1;
 pub const SEQ_LEN: u64 = 2;

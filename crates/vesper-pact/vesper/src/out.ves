@@ -14,9 +14,7 @@
 //               | 4 index | 5 | 6 | 7 | 8
 //   diagnostics n (code sv sa sb off len)*     text in txt
 //   env         n (kind bound)* n goal* n (n model*)*
-use self::{
-    S
-};
+use self::{S};
 use self::term::{
     am_mode,
     am_multi,

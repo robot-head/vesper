@@ -4,10 +4,7 @@
 // in the Rust build's order, and the result is a tape of offsets into the
 // blob that the Rust wrapper (src/dtb/port.rs) turns into nodes and
 // properties. Failures are DtbFault codes (see lib.ves).
-use self::{
-    DtbFault,
-    Fdt
-};
+use self::{DtbFault, Fdt};
 
 fn truncated(what: u64) -> Never eff [Fail[DtbFault]] {
     Fail::raise(DtbFault::Truncated(what))

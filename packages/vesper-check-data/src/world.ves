@@ -2,29 +2,9 @@
 // (`world.adts`, a BTreeMap by name in Rust, kept here in the same name
 // order), `World::constructor`, `World::field` and `World::mode`.
 
-use self::util::{
-    add,
-    copy_seq,
-    inc,
-    fold,
-    inc32,
-    n32,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use self::names::{
-    Names
-};
-use self::types::{
-    Types,
-    Vars,
-    substitute,
-    vars_new,
-    TyKind,
-    TyMode
-};
+use self::util::{add, copy_seq, inc, fold, inc32, n32, u32_at, u64_at, u8_at, w};
+use self::names::{Names};
+use self::types::{Types, Vars, substitute, vars_new, TyKind, TyMode};
 
 const NONE32: u32 = 4294967295;
 

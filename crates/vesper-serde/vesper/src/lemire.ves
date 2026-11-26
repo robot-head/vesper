@@ -4,9 +4,7 @@
 // result says so and the Rust wrapper asks `str::parse`, which is the
 // Fallback path of the Rust build too.
 use self::Decoded;
-use self::ascii::{
-    Ascii
-};
+use self::ascii::{Ascii};
 
 const DECIMAL_BASE: u64 = 10;
 const EXP_BASE: i64 = 10;

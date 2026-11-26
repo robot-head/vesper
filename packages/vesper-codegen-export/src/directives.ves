@@ -13,31 +13,10 @@
 // `display` (vesper-core's `Display`).
 
 use @vesper/check-data::pack_text;
-use @vesper/check-data::util::{
-    inc,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names,
-    names_new
-};
-use @vesper/check-data::types::{
-    Types,
-    display,
-    types_new,
-    TyKind
-};
-use self::text::{
-    copy_of,
-    nl,
-    put,
-    put_seq,
-    put_u64,
-    same_str
-};
+use @vesper/check-data::util::{inc, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names, names_new};
+use @vesper/check-data::types::{Types, display, types_new, TyKind};
+use self::text::{copy_of, nl, put, put_seq, put_u64, same_str};
 
 const NONE32: u32 = 4294967295;
 

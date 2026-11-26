@@ -30,38 +30,13 @@ use @vesper/ast::{
     pat_at,
     lit_at
 };
-use @vesper/ast::lower::{
-    lower_source
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader as CtxReader,
-    read_ctx
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
-use @vesper-std/hash::blake3::{
-    blake3,
-    digest_bytes
-};
-use self::json::{
-    pack
-};
-use self::nav::{
-    arg_at,
-    fn_at,
-    impl_at,
-    item_at,
-    param_at,
-    put_name,
-    put_u,
-    stmt_at,
-    w
-};
+use @vesper/ast::lower::{lower_source};
+use @vesper/check-data::input::{Ctx, Reader as CtxReader, read_ctx};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
+use @vesper-std/hash::blake3::{blake3, digest_bytes};
+use self::json::{pack};
+use self::nav::{arg_at, fn_at, impl_at, item_at, param_at, put_name, put_u, stmt_at, w};
 use self::proof_types::{
     Syms,
     syms,

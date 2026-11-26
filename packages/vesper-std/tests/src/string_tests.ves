@@ -13,13 +13,7 @@ test {
         parse_u64_str,
         parse_i64_str
     };
-    use self::support::{
-        check,
-        parsed_u64,
-        parsed_i64,
-        parse_error,
-        parse_error_i64
-    };
+    use self::support::{check, parsed_u64, parsed_i64, parse_error, parse_error_i64};
 
     pub fn check_fmt_string() -> u64 {
         let mut r: u64 = 0;

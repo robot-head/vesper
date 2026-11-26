@@ -8,35 +8,12 @@
 // Names are symbols and types are arena ids, so `Atomic[T]` is one node
 // compare and a method name one symbol compare.
 
-use @vesper/check-data::types::{
-    Types,
-    default_type,
-    display,
-    TyKind,
-    TyPass
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::world::{
-    World
-};
-use @vesper/check-data::input::{
-    Reader
-};
-use self::ast::{
-    Exprs,
-    ExprRow,
-    FnRow,
-    PatRow,
-    read_fn
-};
-use self::out::{
-    help,
-    line,
-    open,
-    put
-};
+use @vesper/check-data::types::{Types, default_type, display, TyKind, TyPass};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::world::{World};
+use @vesper/check-data::input::{Reader};
+use self::ast::{Exprs, ExprRow, FnRow, PatRow, read_fn};
+use self::out::{help, line, open, put};
 
 const NONE32: u32 = 4294967295;
 

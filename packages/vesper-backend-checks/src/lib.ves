@@ -19,29 +19,12 @@
 // Rust stays the default build; tests/self_host_backend_checks.rs runs both
 // over the verifier tests and compares the reports byte for byte.
 
-use @vesper/check-data::{
-    pack_text
-};
-use @vesper/check-data::names::{
-    Names
-};
-use self::input::{
-    Cx,
-    read_input
-};
-use self::stack_bound::{
-    render
-};
-use self::verify::{
-    run
-};
-use self::util::{
-    b8,
-    g,
-    put,
-    putn,
-    puts
-};
+use @vesper/check-data::{pack_text};
+use @vesper/check-data::names::{Names};
+use self::input::{Cx, read_input};
+use self::stack_bound::{render};
+use self::verify::{run};
+use self::util::{b8, g, put, putn, puts};
 
 const FDW: u64 = 13;
 const V_CT: u64 = 1;

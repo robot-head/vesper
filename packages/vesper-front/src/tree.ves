@@ -3,22 +3,9 @@
 // `parse_tables`. A node's text range runs from the text offset at its
 // start event to the offset at its finish event, as in rowan.
 
-use self::{
-    P,
-    Tokens,
-    Diags,
-    Tree
-};
-use self::util::{
-    add,
-    narrow,
-    w32,
-    u8_at,
-    u32_at
-};
-use self::lex::{
-    token_end
-};
+use self::{P, Tokens, Diags, Tree};
+use self::util::{add, narrow, w32, u8_at, u32_at};
+use self::lex::{token_end};
 
 // Event words encode a token index, the start base plus the node kind,
 // or a finish.

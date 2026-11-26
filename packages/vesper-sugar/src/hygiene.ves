@@ -5,40 +5,11 @@
 // a pattern hole keeps its name. (`protect`, the caller-side renaming,
 // runs in the expansion driver.)
 
-use @vesper/ast::{
-    expr_at,
-    list_at,
-    list_len,
-    none,
-    pat_at
-};
-use @vesper/ast::lower::{
-    lower_surface_source
-};
-use self::flow::{
-    Rd,
-    fn_of,
-    name_byte,
-    name_is,
-    name_len
-};
-use self::scope::{
-    Sc,
-    push_name,
-    refusal,
-    sc_err,
-    sc_err_seq,
-    sc_ok
-};
-use self::template::{
-    add,
-    b8,
-    inc,
-    push_decimal,
-    sub,
-    w32,
-    w64
-};
+use @vesper/ast::{expr_at, list_at, list_len, none, pat_at};
+use @vesper/ast::lower::{lower_surface_source};
+use self::flow::{Rd, fn_of, name_byte, name_is, name_len};
+use self::scope::{Sc, push_name, refusal, sc_err, sc_err_seq, sc_ok};
+use self::template::{add, b8, inc, push_decimal, sub, w32, w64};
 
 const PREFIX: Str = "fn __pattern() {match 0 { ";
 // `PREFIX.len() + 1`: the rendered text starts after a space.

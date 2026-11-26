@@ -18,26 +18,9 @@
 // The entries below are the harness's own differential tasks
 // (tests/self_host_check_data.rs).
 
-use self::util::{
-    n32,
-    put_text_words,
-    u32_at,
-    u8_at,
-    w
-};
-use self::names::{
-    Names
-};
-use self::types::{
-    TyKind,
-    Types,
-    Vars,
-    debug_type,
-    default_type,
-    display,
-    substitute,
-    vars_new
-};
+use self::util::{n32, put_text_words, u32_at, u8_at, w};
+use self::names::{Names};
+use self::types::{TyKind, Types, Vars, debug_type, default_type, display, substitute, vars_new};
 use self::world::{
     Adt,
     Variant,
@@ -48,11 +31,7 @@ use self::world::{
     mode_of,
     vector_words
 };
-use self::input::{
-    Ctx,
-    Reader,
-    read_ctx
-};
+use self::input::{Ctx, Reader, read_ctx};
 
 const NONE32: u32 = 4294967295;
 

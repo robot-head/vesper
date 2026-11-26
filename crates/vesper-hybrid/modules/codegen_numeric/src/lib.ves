@@ -8,9 +8,7 @@
 // `vesper::codegen_swap`. The Rust side declines the graph walk's
 // `INSTRUCTION` requests, so this only sees the typed requests of
 // `codegen_swap::numeric`.
-use @vesper/codegen-numeric::{
-    numeric_hook
-};
+use @vesper/codegen-numeric::{numeric_hook};
 
 // One typed request of the `numeric` family: `call` is the address of the
 // lent call. Returns 1 when it emitted the request, 0 to leave it to Rust.

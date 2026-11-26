@@ -2,23 +2,8 @@
 // (frame.rs). A parsed frame names its byte fields as spans of the input;
 // an encoded one takes them as the slices `a` (data, reason, token, CID or
 // ACK range pairs) and `b` (the stateless reset token).
-use self::{
-    AckRange,
-    FrameAt,
-    FrameErr,
-    FrameW,
-    PktType,
-    Sp,
-    WireStep
-};
-use self::varint::{
-    b8,
-    vi_len_or_zero,
-    vi_max,
-    vi_prefix_len,
-    vi_put,
-    vi_value_at
-};
+use self::{AckRange, FrameAt, FrameErr, FrameW, PktType, Sp, WireStep};
+use self::varint::{b8, vi_len_or_zero, vi_max, vi_prefix_len, vi_put, vi_value_at};
 
 // Frame types (RFC 9000 §19, Table 3). STREAM is 0x08-0x0f: the low bits
 // are OFF, LEN and FIN.

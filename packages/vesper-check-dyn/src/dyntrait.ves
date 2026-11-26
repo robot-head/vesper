@@ -5,17 +5,8 @@
 // escapes syntactically (E0631, E0632). Its outputs are the rewritten
 // module and the `params`, `forwards` and `boxed` tables of `Lowered`.
 
-use @vesper/ast::{
-    ParamNode,
-    FnNode,
-    TraitRefNode,
-    StmtNode
-};
-use @vesper/check-data::types::{
-    Vars,
-    vars_new,
-    substitute_row
-};
+use @vesper/ast::{ParamNode, FnNode, TraitRefNode, StmtNode};
+use @vesper/check-data::types::{Vars, vars_new, substitute_row};
 use self::core::{
     D,
     w,

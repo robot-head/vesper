@@ -8,27 +8,9 @@
 // with effectful arrows (which need the `Id` monad in `ty`). The
 // differential compares the other functions.
 
-use @vesper/check-data::types::{
-    Types,
-    Vars,
-    substitute,
-    vars_new,
-    TyKind,
-    TyPass
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    w
-};
-use @vesper/check-data::world::{
-    Adt,
-    World,
-    set_by_symbol
-};
+use @vesper/check-data::types::{Types, Vars, substitute, vars_new, TyKind, TyPass};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, w};
+use @vesper/check-data::world::{Adt, World, set_by_symbol};
 use self::ast::{
     Ast,
     EffDecl,
@@ -189,23 +171,9 @@ use self::tm::{
     unit,
     update
 };
-use self::ty::{
-    E_NONE,
-    emit_ty,
-    emit_ty_m,
-    report,
-    spells,
-    ty_check,
-    ty_error,
-    ty_error_m
-};
-use self::cfg::{
-    effectful_arrow
-};
-use self::fn_input::{
-    Fns,
-    Sig
-};
+use self::ty::{E_NONE, emit_ty, emit_ty_m, report, spells, ty_check, ty_error, ty_error_m};
+use self::cfg::{effectful_arrow};
+use self::fn_input::{Fns, Sig};
 use self::emit::{
     LOOP_REFUSAL,
     X,

@@ -1,13 +1,6 @@
 // @vesper-std/sort::keyed: sorting by a parallel key slice.
-use self::unstable::{
-    lt,
-    swap_at,
-    depth_limit
-};
-use @vesper-std/sugar::{
-    guard,
-    when
-};
+use self::unstable::{lt, swap_at, depth_limit};
+use @vesper-std/sugar::{guard, when};
 
 // Whether index `x` sorts before `y`: by key, then by the index itself.
 // Indices past the end of `keys` sort after every key, by index.

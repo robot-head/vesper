@@ -2,21 +2,9 @@
 // capsule reader, laid out like the frame reader (frame.ves): unread bytes
 // from `head` on, a value copied into `out` for the Rust wrapper.
 
-use self::{
-    CapsuleError,
-    CapsuleOut,
-    CapsuleReaderCore
-};
-use self::int::{
-    inc,
-    byte,
-    min64,
-    drain_front
-};
-use self::varint::{
-    vdec,
-    put_record
-};
+use self::{CapsuleError, CapsuleOut, CapsuleReaderCore};
+use self::int::{inc, byte, min64, drain_front};
+use self::varint::{vdec, put_record};
 
 // CLOSE_WEBTRANSPORT_SESSION: a 32-bit application error code, then the
 // UTF-8 reason.

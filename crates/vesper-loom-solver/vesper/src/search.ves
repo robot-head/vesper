@@ -5,29 +5,9 @@
 // The pending stack holds node indices; a node's assignment is its chain
 // to the root node. Nodes are allocated in push order, so when node n is
 // popped every node above n is dead and the node list is cut back to n.
-use @vesper/loom-calculus::util::{
-    add,
-    dep,
-    feat,
-    find_feat,
-    id_at,
-    inc,
-    man,
-    none,
-    sw,
-    ver
-};
-use self::{
-    Node,
-    S
-};
-use self::closure::{
-    all_reqs_match,
-    assigned,
-    closure,
-    has_entry,
-    matches_req
-};
+use @vesper/loom-calculus::util::{add, dep, feat, find_feat, id_at, inc, man, none, sw, ver};
+use self::{Node, S};
+use self::closure::{all_reqs_match, assigned, closure, has_entry, matches_req};
 use self::diag::{
     ErrorKind,
     Objective,
@@ -45,26 +25,10 @@ use self::diag::{
     subj_id,
     subj_lit
 };
-use self::input::{
-    find_meta,
-    mxv
-};
-use self::metrics::{
-    metrics_of_current,
-    score_key
-};
-use self::output::{
-    objective_of_id,
-    out_error,
-    out_solution,
-    reset_diags,
-    solution_words,
-    table,
-    w
-};
-use self::snap::{
-    run_solve
-};
+use self::input::{find_meta, mxv};
+use self::metrics::{metrics_of_current, score_key};
+use self::output::{objective_of_id, out_error, out_solution, reset_diags, solution_words, table, w};
+use self::snap::{run_solve};
 
 // `unsupported_policy` (resolve) for manifest mi.
 pub fn unsupported(in s: S, mi: u64) -> bool {

@@ -1,13 +1,8 @@
 // Module sampling of @vesper/tensor (see lib.ves): llama2.c `run.c` sampling
 // (src/sampling.rs) and the FP32 kernels of src/ops.rs that need no `exp`
 // (lib.ves holds the ones that call `Libm`).
-use self::{
-    Fault
-};
-use self::num::{
-    is_finite,
-    u64_zero
-};
+use self::{Fault};
+use self::num::{is_finite, u64_zero};
 
 // The xorshift64* multiplier and the `2^24` scale of `next_f32`
 // (src/sampling.rs `XORSHIFT64_STAR_MUL`, `F32_UNIT_SCALE`).

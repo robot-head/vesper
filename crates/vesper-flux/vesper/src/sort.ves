@@ -1,11 +1,7 @@
 // Module sort of @vesper/flux: stable bottom-up merge sorts of entry
 // numbers, so that equal rows keep their input order (the order in which
 // the Rust accumulator inserted them).
-use self::util::{
-    cell,
-    cmp_rows,
-    word
-};
+use self::util::{cell, cmp_rows, word};
 
 // Merges the sorted runs src[lo..mid] and src[mid..hi] into dst, by row
 // (`key` < 0) or by the column `key` of each entry.

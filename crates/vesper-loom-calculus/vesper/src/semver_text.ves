@@ -2,10 +2,7 @@
 // crate (1.0, src/parse.rs), with its error text (src/error.rs). Text is
 // `s[a..b]`, valid UTF-8. Identifiers are kept as ranges of `s`.
 
-use @vesper-std/toml::debug::{
-    utf8_at,
-    put_debug_char
-};
+use @vesper-std/toml::debug::{utf8_at, put_debug_char};
 
 pub const OP_EXACT: u64 = 0;
 pub const OP_GREATER: u64 = 1;

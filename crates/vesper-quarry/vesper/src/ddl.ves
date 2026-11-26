@@ -1,8 +1,5 @@
 // Module ddl of @vesper/quarry (see lib.ves).
-use self::{
-    CTab,
-    Q
-};
+use self::{CTab, Q};
 use self::util::{
     bound,
     ctab,
@@ -18,9 +15,7 @@ use self::util::{
     same,
     syntax
 };
-use self::lex::{
-    lex
-};
+use self::lex::{lex};
 use self::parse::{
     at_end,
     kw_create,

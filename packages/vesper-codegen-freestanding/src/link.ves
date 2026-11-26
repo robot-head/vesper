@@ -7,13 +7,7 @@
 // are copied into one name pool. The tables are small (one entry per
 // function and data object of an image), so lookups are linear scans.
 
-use self::codes::{
-    Absent,
-    Out,
-    Page,
-    RelType,
-    RvOpcode
-};
+use self::codes::{Absent, Out, Page, RelType, RvOpcode};
 use self::util::{
     Span,
     add,
@@ -60,22 +54,9 @@ use self::obj::{
     rel_count,
     rel_at
 };
-use self::stub::{
-    is_riscv,
-    machine_of
-};
-use self::script::{
-    triple
-};
-use self::elf::{
-    OutSec,
-    OutSeg,
-    OutSym,
-    Placement,
-    pf_rw,
-    pf_rx,
-    write_executable
-};
+use self::stub::{is_riscv, machine_of};
+use self::script::{triple};
+use self::elf::{OutSec, OutSeg, OutSym, Placement, pf_rw, pf_rx, write_executable};
 
 // The four sections contributed by input objects precede the stack.
 const OUTS: u64 = Out::Stack;

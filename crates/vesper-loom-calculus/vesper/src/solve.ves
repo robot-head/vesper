@@ -8,12 +8,7 @@
 // features) have nf flags per package, rrow (required capabilities) nc. nfirst holds four
 // words per node: its edges ea[at .. at + n] (dependency indices) and its
 // native edges eb[at .. at + 3n] (name, text, requirement).
-use self::{
-    GNode,
-    L,
-    SEdge,
-    Snap
-};
+use self::{GNode, L, SEdge, Snap};
 use self::util::{
     Ascii,
     Code,
@@ -47,18 +42,8 @@ use self::util::{
     sw,
     sys
 };
-use self::check::{
-    check_manifest,
-    emit_at,
-    emit_id,
-    emit_lit,
-    mark,
-    since,
-    system_name_valid
-};
-use self::semver::{
-    matches
-};
+use self::check::{check_manifest, emit_at, emit_id, emit_lit, mark, since, system_name_valid};
+use self::semver::{matches};
 
 // The solution schema version this validator accepts.
 const SOLUTION_SCHEMA_VERSION: u64 = 1;
