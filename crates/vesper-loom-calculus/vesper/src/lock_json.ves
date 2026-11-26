@@ -1769,7 +1769,8 @@ fn map_value(inout j: J, in t: Slice[u8], deps: bool) -> bool {
                 len,
                 qw(in q, next),
                 qw(in q, wrapping_add(next, 1))
-            ) {
+            )
+        {
             continue;
         }
         if written > 0 {
