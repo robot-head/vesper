@@ -13,7 +13,7 @@ mod sugar_binding;
 #[path = "../../../../tests/common/sugar_words.rs"]
 mod sugar_words;
 
-use super::{Registry, Swap, must, on, open, stats};
+use super::{Registry, Swap, must, on, pass, stats};
 
 /// Expansions run by the Vesper driver.
 static SUGAR_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -53,10 +53,7 @@ const VESPER_SUGAR: vesper_syntax::sugar_expand::SugarExpandTable =
     };
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
-pub(super) const SWAPS: &[Swap] = &[open(
-    "sugar",
-    "0 diffs, driver 1.38x; no release ABBA run yet",
-)];
+pub(super) const SWAPS: &[Swap] = &[pass("sugar", "sugar", "#1157")];
 
 pub(super) fn register(_r: &mut Registry) {
     if on("sugar") {
