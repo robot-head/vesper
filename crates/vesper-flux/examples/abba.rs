@@ -29,6 +29,13 @@
 //!   encoder and the CRC dominate): [`KAFKA_BATCHES`] batches of
 //!   [`KAFKA_RECORDS`] CDC-shaped records (8-24 byte keys, 40-300 byte
 //!   values, 0-2 headers, some tombstones) encoded per request.
+//! - `kafka_wire`: the Kafka wire codecs: [`KAFKA_ROUNDS`] rounds of a
+//!   transactional consume-transform-produce member's traffic (metadata,
+//!   coordinator, join and sync, heartbeat, offsets, fetch with one batch,
+//!   produce, the transaction calls), every request framed and every
+//!   response decoded. The Rust arm is this example built with the
+//!   `abba-reference` feature, which runs the round on the Rust codecs the
+//!   port replaced.
 //!
 //! The two arms are two builds of this example, in separate worker
 //! processes: before #1069 replaced the Rust kernels they were the Rust
@@ -40,8 +47,8 @@
 //! both builds agree.
 //!
 //! ```text
-//! abba worker <join|example|resume|ingest|log|image|durable|kafka_encode>                 # one arm
-//! abba drive <join|example|resume|ingest|log|image|durable|kafka_encode> <rust-worker> <vesper-worker>
+//! abba worker <join|example|resume|ingest|log|image|durable|kafka_encode|kafka_wire>                 # one arm
+//! abba drive <join|example|resume|ingest|log|image|durable|kafka_encode|kafka_wire> <rust-worker> <vesper-worker>
 //! ```
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -70,6 +77,8 @@ const IMAGE_ROUNDS: u64 = 8;
 /// `kafka_encode`: batches per request and records per batch.
 const KAFKA_BATCHES: u64 = 64;
 const KAFKA_RECORDS: u64 = 500;
+/// `kafka_wire`: rounds of a member's traffic per request.
+const KAFKA_ROUNDS: u64 = 2000;
 
 fn fnv(mut h: u64, bytes: &[u8]) -> u64 {
     for &b in bytes {
@@ -531,6 +540,7 @@ fn worker(workload: &str) {
             "image" => image_batch(image.as_ref().expect("image state")),
             "durable" => durable_batch(image.as_ref().expect("image state"), n),
             "kafka_encode" => kafka_encode_batch(&kafka),
+            "kafka_wire" => vesper_flux::kafka_wire_rounds(KAFKA_ROUNDS),
             other => panic!("unknown workload {other}"),
         };
         writeln!(out, "{digest}").expect("answer");
@@ -599,6 +609,7 @@ fn drive(workload: &str, rust: &str, vesper: &str) {
         "image" => (4, IMAGE_ROUNDS),
         "durable" => (4, IMAGE_ROUNDS),
         "kafka_encode" => (4, KAFKA_BATCHES),
+        "kafka_wire" => (4, KAFKA_ROUNDS),
         other => panic!("unknown workload {other}"),
     };
     let config = RunConfig {
@@ -678,7 +689,7 @@ fn main() {
         ["drive", workload, rust, vesper] => drive(workload, rust, vesper),
         _ => {
             eprintln!(
-                "usage: abba worker <join|example|resume|ingest|log|image|durable|kafka_encode>| abba drive <join|example|resume|ingest|log|image|durable|kafka_encode> <rust-worker> <vesper-worker>"
+                "usage: abba worker <join|example|resume|ingest|log|image|durable|kafka_encode|kafka_wire>| abba drive <join|example|resume|ingest|log|image|durable|kafka_encode|kafka_wire> <rust-worker> <vesper-worker>"
             );
             std::process::exit(2);
         }

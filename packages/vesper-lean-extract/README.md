@@ -94,6 +94,12 @@ and its `ensures_` predicate, then per function its generics (name, bound,
 row). It returns the module, then `-- proof` and the proof module, then
 `-- omitted`, `-- totality` and `-- contracts` lines, or `error: <message>`.
 
+The entry `extract_text` takes the same input as bytes and returns only
+the module (what `lean::extract` returns), or `error: <message>`. The
+hybrid's `lean_extract` swap (crates/vesper-hybrid/modules/lean_extract)
+serves `vesper emit --emit lean` and the driver's Lean emit step from it;
+its input encoder is tests/common/lean_words.rs, shared with the tests.
+
 ## Test
 
 `tests/self_host_lean_extract.rs` compares the text with

@@ -130,6 +130,14 @@ const DIVERGENT_DOC_EDIT: (&str, &str) = (
     "(sink page: ChunkSeq[u8]) -> ChunkSeq[u8] {\n    let mut p = page;\n    p.push(32);\n    p\n",
 );
 
+/// The Lean extraction module's divergence check: every text comes back
+/// empty (mirrored in BUILD.bazel).
+#[cfg(feature = "divergent-lean-extract")]
+const DIVERGENT_LEAN_EXTRACT_EDIT: (&str, &str) = (
+    "(sink text: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    text\n",
+    "(sink text: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = text;\n    let _ = t.try_set(0, 0);\n    t\n",
+);
+
 /// The stack-bound divergence check: every graph is rejected as malformed
 /// (`divergent_words` in modules/stack_bound), so every report differs.
 #[cfg(feature = "divergent-stack-bound")]
@@ -188,12 +196,13 @@ const DIVERGENT_PACT_EDIT: (&str, &str) = (
     "    divergent_session(in input)\n",
 );
 
-/// The parse module's divergence check: every AST flag (`let mut`, `pub`,
-/// `@fip`, named fields, ...) reads back inverted (mirrored in BUILD.bazel).
+/// The parse module's divergence check: every source parses to the empty
+/// module's AST (mirrored in BUILD.bazel). The AST writer itself is
+/// `put_ast_words` in `@vesper/ast` (#1976), which the edit cannot reach.
 #[cfg(feature = "divergent-parse")]
 const DIVERGENT_PARSE_EDIT: (&str, &str) = (
-    "    if b {\n        1\n    } else {\n        0\n    }",
-    "    if b {\n        0\n    } else {\n        1\n    }",
+    "    put_ast_words(inout o, in l.ast);\n",
+    "    put_ast_words(inout o, in lower_source(in \"\").ast);\n",
 );
 
 fn main() {
@@ -303,6 +312,12 @@ fn main() {
         #[cfg(feature = "divergent-doc")]
         let port = if library == "hybrid_doc" {
             port.edit(DIVERGENT_DOC_EDIT.0, DIVERGENT_DOC_EDIT.1)
+        } else {
+            port
+        };
+        #[cfg(feature = "divergent-lean-extract")]
+        let port = if library == "hybrid_lean_extract" {
+            port.edit(DIVERGENT_LEAN_EXTRACT_EDIT.0, DIVERGENT_LEAN_EXTRACT_EDIT.1)
         } else {
             port
         };

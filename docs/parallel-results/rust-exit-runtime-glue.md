@@ -310,5 +310,46 @@ port, behind the `vesper-port` feature.
   `JitScanner::compile` and `ObjectArtifact::emit` calls, release,
   `-C target-cpu=native`) takes 0.76 to 1.18 ms per call with either builder. The run
   noise is larger than the difference, so the ratio is about 1.0x.
-- **Left.** The `vvec` profiles (the scalar reference, and the SVE and RVV `asm!`
-  backends) are unported. The Rust builder stays the default until the flip.
+- **Left.** The SVE and RVV `asm!` backends of `vvec` wait on G10. The Rust
+  builder stays the default until the flip.
+
+### Part 2: the `vvec` scalar profile
+
+`vesper/src/vvec.ves` is the scalar arm of every `VVec` and `VMask` operation:
+the governing predicate (`prefix_bits`), mask logic, splat, masked load and
+store, compare, the four lane-wise operations, the XOR reduction, and the
+whole-loop scan kernel. `src/vvec/scalar.rs` lends the 256-byte lane and 4-word
+mask buffers in place. With the `vesper-port` feature the `dispatch!` scalar
+arm calls the port; the Rust arms stay as `scalar::reference`. Profile tokens,
+bounds checks, the mask queries (`count_ones`, `first_active` and the like,
+one instruction per word) and the SVE and RVV arms stay Rust.
+
+- **Tests.** `vesper_port_vvec_scalar_arms_match_rust` runs every arm against
+  the Rust one at about 40 lane widths from 1 to 256, with masks that are full, empty
+  and random per word. Each masked load reads a source cut right after its last
+  active lane, so a read of an inactive lane past the end would fail. The scan
+  runs at every length below 300 and at 4,096 and 65,537 bytes, from three start
+  offsets. `tests/vvec.rs` (strip-mining at many widths, guard pages) runs
+  against the port unchanged. No sequence is left allocated.
+- **How it runs.** The port works eight lanes per word: equality goes through
+  the exact zero-byte test and a multiply that gathers one bit per byte, the
+  lane-wise add is a carry-free SWAR add, and the scan keeps a per-byte count
+  of the bytes that differ from the delimiter and adds those counts with one
+  multiply every 252 words.
+- **Speed** (release, `-C target-cpu=native`, best of 7):
+
+  | Workload | Rust | Vesper | Ratio |
+  | --- | ---: | ---: | ---: |
+  | `kernels::scan`, 1 MiB | 144 us | 238 us | 1.65x |
+  | `scan_record_delimiters`, 64 KiB, 16 lanes | 238 us | 497 us | 2.09x |
+  | same, 64 lanes | 125 us | 150 us | 1.20x |
+  | same, 256 lanes | 110 us | 100 us | 0.91x |
+  | mask, load, compare, and, XOR, reduce at 64 lanes | 0.15 us | 0.27 us | 1.8x |
+
+  LLVM vectorizes the Rust scan loop; the Vesper object has no vector types, and
+  each checked `try_read_u64_le` costs about a dozen instructions (bounds test,
+  `Option` tag, select), so unrolling to four words per step did not help. Short
+  strips are bound by the crossing: about six calls per 16-byte strip. The Rust
+  arms stay the default until the checked reads get cheaper (a compiler gap:
+  the bounds test is not hoisted out of a loop whose index is known to be in
+  range).

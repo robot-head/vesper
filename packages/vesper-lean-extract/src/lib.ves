@@ -547,7 +547,17 @@ const NONE: u64 = 18446744073709551615;
 // `rust_module_text`). The input is the structured input followed by the
 // effect section and the contract section (contract.ves).
 pub fn extract_module(in input: Str) -> ChunkSeq[u64] {
-    let bytes = input.as_bytes();
+    module_text(in input.as_bytes(), true)
+}
+
+// `lean::extract` of the world: the module alone, or `error: <message>`,
+// packed by `pack_text`; the text the hybrid's `lean_extract` swap returns.
+pub fn extract_text(in input: Slice[u8]) -> ChunkSeq[u64] {
+    module_text(in input, false)
+}
+
+// [`extract_module`], or with `full` false only its module.
+fn module_text(in bytes: Slice[u8], full: bool) -> ChunkSeq[u64] {
     let mut r = Reader {
         pos: 0
     };
@@ -788,7 +798,7 @@ pub fn extract_module(in input: Str) -> ChunkSeq[u64] {
         Option::Some(s) => s,
         Option::None => String::new(),
     };
-    if !render_words(inout out, in b, in pool.as_str()) {
+    if !render_words(inout out, in b, in pool.as_str()) || !full {
         return pack_text(in out);
     }
     // the proof module

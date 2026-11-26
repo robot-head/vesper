@@ -37,6 +37,7 @@ use self::ast::{
     L_BOOL,
     L_FLOAT,
     L_INT,
+    L_WIDE,
     NONE,
     NONE32,
     PK_BIND,
@@ -1576,6 +1577,9 @@ fn literal(inout b: B, in t: Types, kind: u64, lo: u64, hi: u64, sym: u32, ty: u
         }
         return nat_u128_t(inout b, hi, lo);
     }
+    if kind == L_WIDE {
+        return nat_u128_t(inout b, hi, lo);
+    }
     if kind == L_FLOAT {
         if ty != NONE32 && is_named(in b, in t, ty, in "f32") {
             let n = nat_u64(inout b, f32_bits(lo));
@@ -1928,6 +1932,9 @@ fn pat(inout b: B, in t: Types, in y: Y, inout g: G, p: u64, inout rs: ChunkSeq[
             b.w(lo);
         } else if lk == L_FLOAT {
             b.fail(in "Lean extraction does not support floating-point literal patterns");
+            b.w(0);
+        } else if lk == L_WIDE {
+            b.fail(in "Lean extraction does not support 128-bit literal patterns");
             b.w(0);
         } else {
             b.w(P_STRING);

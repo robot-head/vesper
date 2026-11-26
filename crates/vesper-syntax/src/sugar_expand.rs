@@ -1084,3 +1084,24 @@ pub fn match_rule_words(
     }
     out
 }
+
+/// `template::render`'s skeleton of `template` for the captures of
+/// `pattern` on `invocation` (and `tail`), as words (see
+/// `template::skeleton_words`), or `[0]` when the rule refuses or does not
+/// match. Test hook for tests/self_host_sugar.rs; nothing else calls it.
+#[doc(hidden)]
+pub fn template_skeleton_words(
+    pattern: &str,
+    invocation: &str,
+    tail: Option<&str>,
+    template: &str,
+    mark: &str,
+    max_bytes: usize,
+    work: usize,
+) -> Vec<u64> {
+    let mut left = work;
+    match matcher::match_rule(pattern, invocation, tail, &mut left) {
+        Ok(Some(captures)) => template::skeleton_words(template, &captures, mark, max_bytes),
+        _ => vec![0],
+    }
+}

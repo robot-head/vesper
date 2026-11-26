@@ -914,6 +914,8 @@ fn literal(inout b: B, in t: Types, in x: X, i: u64, ty: u32) {
         } else {
             nat_u128(inout b, hi, lo);
         }
+    } else if kind == Lit::WideInt {
+        nat_u128(inout b, hi, lo);
     } else if kind == Lit::Float {
         let n = t.node(ty);
         if n.kind == TyKind::Named && spells(in b, n.name, in "f32") {
@@ -972,6 +974,9 @@ fn pattern(inout b: B, in t: Types, in x: X, i: u64) {
         } else if lk == Lit::String {
             b.w(P_STRING);
             b.sym(n32(x.p.op(inc(j))));
+        } else if lk == Lit::WideInt {
+            b.fail(in "128-bit literal patterns are unsupported in Lean extraction");
+            b.w(P_WILD);
         } else {
             b.fail(in "floating-point patterns are unsupported in Lean extraction");
             b.w(P_WILD);

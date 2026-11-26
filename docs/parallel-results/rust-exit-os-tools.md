@@ -567,6 +567,23 @@ Port ABI gap found on the way: a `Slice[u16]` passed from Rust reads 0 past
 its first element in Vesper, so the register file takes the queue sizes as
 little-endian bytes.
 
+## Part 2i: the seccomp compiler flips to Vesper
+
+Part 2f measured the seccomp compiler at 1.67x. Most of its time went to
+sorting: it copied the allowlist and the ioctl requests into temporary
+chunked sequences and insertion-sorted them there. It now sorts each list
+straight into its jump slots of the output program, removes repeats in
+place, and rewrites each slot as its jump. The Rust side sizes the output
+for every input value plus nine instructions.
+
+The compiler is now Vesper-only. The Rust compiler is kept under
+`#[cfg(test)]` as `compile_reference`.
+
+| Check | Result |
+|---|---|
+| Differential `port_reference_tests::abba_seccomp`: 4,000 random profiles (syscall subsets with repeats and refused `ioctl`, 0 to 320 ioctl requests, past the 255-instruction jump reach, both architectures, both default kinds), plus the VMM profiles | 0 diffs in programs and errors |
+| ABBA `seccomp_compile`: the VMM profile | 1.35x, 95% CI [1.31, 1.39] |
+
 ## Compiler gaps (for the coordinator)
 
 | Gap | Blocks | Owner of the fix |
@@ -586,6 +603,6 @@ little-endian bytes.
 wrappers over the OS). Its virtqueue walks are Vesper-only since part 2d,
 hot sets, the packed capture and the seccomp evaluator since part 2f, and
 the vsock device since part 2g, and the net and block devices and the MMIO
-register file since part 2h;
+register file since part 2h, and the seccomp compiler since part 2i;
 slot plans and PVH parsing wait on G10, and the small device codecs on
 porting their callers.

@@ -20,6 +20,16 @@ pub const ERR_NONE: u8 = 0;
 pub const ERR_INVALID: u8 = 1;
 pub const ERR_LIMIT: u8 = 2;
 
+// Which failure `err` is (`Asm.why`), for its text: a label bound twice,
+// an unbound label (both with `Asm.why_label`), an x86-64 branch, a
+// RISC-V jump, a RISC-V call or an AArch64 branch out of range.
+pub const WHY_BOUND_TWICE: u8 = 1;
+pub const WHY_UNBOUND: u8 = 2;
+pub const WHY_X86_64_RANGE: u8 = 3;
+pub const WHY_RISCV_JUMP: u8 = 4;
+pub const WHY_RISCV_CALL: u8 = 5;
+pub const WHY_AARCH64_RANGE: u8 = 6;
+
 pub copy struct Fixup {
     at: u64,
     label: u64,
@@ -74,6 +84,8 @@ pub struct Asm {
     scope_ovf: u64,
     scope_div0: u64,
     err: u8,
+    why: u8,
+    why_label: u64,
 }
 
 pub fn asm() -> Asm {
@@ -89,7 +101,9 @@ pub fn asm() -> Asm {
         scoped: false,
         scope_ovf: 0,
         scope_div0: 0,
-        err: ERR_NONE
+        err: ERR_NONE,
+        why: 0,
+        why_label: 0
     }
 }
 
@@ -173,6 +187,15 @@ fn label_at(in a: Asm, l: u64) -> u64 {
     }
 }
 
+// Keep the first failure.
+fn fail(inout a: Asm, e: u8, why: u8, l: u64) {
+    if a.err == ERR_NONE {
+        a.err = e;
+        a.why = why;
+        a.why_label = l;
+    }
+}
+
 pub fn bind(inout a: Asm, l: u64) {
     loop {
         if a.labels.len() > l {
@@ -181,7 +204,7 @@ pub fn bind(inout a: Asm, l: u64) {
         a.labels.push(0);
     }
     if label_at(in a, l) != 0 {
-        a.err = ERR_INVALID;
+        fail(inout a, ERR_INVALID, WHY_BOUND_TWICE, l);
         return;
     }
     let at = wrapping_add(a.code.len(), 1);
@@ -239,7 +262,7 @@ pub fn finish(inout a: Asm) {
         };
         let bound = label_at(in a, f.label);
         if bound == 0 {
-            a.err = ERR_INVALID;
+            fail(inout a, ERR_INVALID, WHY_UNBOUND, f.label);
             return;
         }
         let mut target = wrapping_sub(bound, 1);
@@ -257,14 +280,14 @@ pub fn finish(inout a: Asm) {
         if f.kind == FIX_REL32 {
             let rel = wrapping_sub(target, wrapping_add(f.at, 4));
             if !fits(rel, 32) {
-                a.err = ERR_LIMIT;
+                fail(inout a, ERR_LIMIT, WHY_X86_64_RANGE, 0);
                 return;
             }
             let ok = a.code.try_write_u32_le(f.at, wrapping_u32(rel));
         } else if f.kind == FIX_JAL {
             let rel = wrapping_sub(target, f.at);
             if !fits(rel, 21) {
-                a.err = ERR_LIMIT;
+                fail(inout a, ERR_LIMIT, WHY_RISCV_JUMP, 0);
                 return;
             }
             let imm = wrapping_u32(rel);
@@ -280,7 +303,7 @@ pub fn finish(inout a: Asm) {
             let hi = wrapping_u64(wrapping_i64(wrapping_add(rel, 2048)) >> 12);
             let lo = wrapping_sub(rel, wrapping_shl_u64(hi, 12));
             if !fits(hi, 20) {
-                a.err = ERR_LIMIT;
+                fail(inout a, ERR_LIMIT, WHY_RISCV_CALL, 0);
                 return;
             }
             or32(inout a, f.at, (wrapping_u32(hi) & 1048575) << 12);
@@ -299,7 +322,7 @@ pub fn finish(inout a: Asm) {
                 5
             };
             if !fits(words, bits) {
-                a.err = ERR_LIMIT;
+                fail(inout a, ERR_LIMIT, WHY_AARCH64_RANGE, 0);
                 return;
             }
             let mask = wrapping_sub(wrapping_shl_u64(1, bits), 1);

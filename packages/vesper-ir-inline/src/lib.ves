@@ -1807,52 +1807,70 @@ pub struct Graph {
     // node position -> function index
     nodes: ChunkSeq[u32],
     // function index -> node position
-    pos: ChunkSeq[u32],
-    // adjacency: per node a linked list of (target node, next) in insertion
-    // order (head, tail)
-    head: ChunkSeq[u32],
-    tail: ChunkSeq[u32],
-    to: ChunkSeq[u32],
-    next: ChunkSeq[u32],
+    node_of: ChunkSeq[u32],
+    // adjacency: per node a linked list of edges in insertion order, from
+    // `first_edge` to `last_edge`; edge `e` goes to node `edge_to[e]` and is
+    // followed by `edge_next[e]`
+    first_edge: ChunkSeq[u32],
+    last_edge: ChunkSeq[u32],
+    edge_to: ChunkSeq[u32],
+    edge_next: ChunkSeq[u32],
+    // the (caller, callee) pairs already added
     edges: MapU,
+    // 1 for a node with an edge to itself
     self_edge: ChunkSeq[u8],
 }
 
+fn graph_new(functions: u64) -> Graph {
+    Graph {
+        nodes: ChunkSeq::new[u32](),
+        node_of: fill32(functions, NONE32),
+        first_edge: ChunkSeq::new[u32](),
+        last_edge: ChunkSeq::new[u32](),
+        edge_to: ChunkSeq::new[u32](),
+        edge_next: ChunkSeq::new[u32](),
+        edges: map_new(1024),
+        self_edge: ChunkSeq::new[u8]()
+    }
+}
+
 impl Graph {
+    // The node of function `f`, added if it is new.
     fn node(inout self, f: u32) -> u32 {
-        let at = u32_at(in self.pos, w(f));
+        let at = u32_at(in self.node_of, w(f));
         if at != NONE32 {
             return at;
         }
         let n = n32(self.nodes.len());
         self.nodes.push(f);
-        set_u32(inout self.pos, w(f), n);
-        self.head.push(NONE32);
-        self.tail.push(NONE32);
+        set_u32(inout self.node_of, w(f), n);
+        self.first_edge.push(NONE32);
+        self.last_edge.push(NONE32);
         self.self_edge.push(0);
         n
     }
 
+    // Adds the edge from function `a` to function `b` unless it is there.
     fn edge(inout self, a: u32, b: u32) {
-        let na = self.node(a);
+        let from = self.node(a);
         let key = pair(a, b);
         if self.edges.get(key) != NONE32 {
             return;
         }
         self.edges.set(key, 1);
-        let nb = self.node(b);
-        let e = n32(self.to.len());
-        self.to.push(nb);
-        self.next.push(NONE32);
-        let t = u32_at(in self.tail, w(na));
-        if t == NONE32 {
-            set_u32(inout self.head, w(na), e);
+        let to = self.node(b);
+        let e = n32(self.edge_to.len());
+        self.edge_to.push(to);
+        self.edge_next.push(NONE32);
+        let last = u32_at(in self.last_edge, w(from));
+        if last == NONE32 {
+            set_u32(inout self.first_edge, w(from), e);
         } else {
-            set_u32(inout self.next, w(t), e);
+            set_u32(inout self.edge_next, w(last), e);
         }
-        set_u32(inout self.tail, w(na), e);
+        set_u32(inout self.last_edge, w(from), e);
         if a == b {
-            set_u8(inout self.self_edge, w(na), 1);
+            set_u8(inout self.self_edge, w(from), 1);
         }
     }
 }
@@ -1860,61 +1878,83 @@ impl Graph {
 // petgraph's `TarjanScc` (Pearce's variant), components callees first.
 pub struct Tarjan {
     index: u64,
+    // the next component number, counting down from MAX64
     count: u64,
+    // per node: 0 unvisited, its visit index while open, then its component
     root: ChunkSeq[u64],
     stack: ChunkSeq[u32],
-    // components: members comp_nodes[comp_a[c]..comp_a[c+1]]
-    comp_a: ChunkSeq[u32],
+    // components: members comp_nodes[comp_start[c]..comp_start[c+1]]
+    comp_start: ChunkSeq[u32],
     comp_nodes: ChunkSeq[u32],
+}
+
+impl Tarjan {
+    fn root_of(in self, v: u32) -> u64 {
+        u64_at(in self.root, w(v))
+    }
+
+    fn set_root(inout self, v: u32, r: u64) {
+        set_u64(inout self.root, w(v), r);
+    }
+
+    fn components(in self) -> u64 {
+        sub(self.comp_start.len(), 1)
+    }
+
+    // Closes the component rooted at `v`: it and the stacked nodes above its
+    // root index, which are popped.
+    fn close_component(inout self, v: u32) {
+        let mut popped: u64 = 1;
+        let component = self.count;
+        let v_root = self.root_of(v);
+        let mut start: u64 = 0;
+        let mut depth = self.stack.len();
+        loop {
+            if depth == 0 {
+                break;
+            }
+            let x = u32_at(in self.stack, sub(depth, 1));
+            if v_root > self.root_of(x) {
+                start = depth;
+                break;
+            }
+            self.set_root(x, component);
+            popped = inc(popped);
+            depth = sub(depth, 1);
+        }
+        self.set_root(v, component);
+        self.stack.push(v);
+        self.comp_start.push(n32(self.comp_nodes.len()));
+        for j in start..self.stack.len() {
+            self.comp_nodes.push(u32_at(in self.stack, j));
+        }
+        self.stack.truncate(start);
+        self.index = sub(self.index, popped);
+        self.count = sub(self.count, 1);
+    }
 }
 
 fn visit(in g: Graph, inout t: Tarjan, v: u32) {
     let mut local_root = true;
-    set_u64(inout t.root, w(v), t.index);
+    t.set_root(v, t.index);
     t.index = inc(t.index);
-    let mut e = u32_at(in g.head, w(v));
+    let mut e = u32_at(in g.first_edge, w(v));
     loop {
         if e == NONE32 {
             break;
         }
-        let x = u32_at(in g.to, w(e));
-        if u64_at(in t.root, w(x)) == 0 {
-            visit(in g, inout t, x);
+        let succ = u32_at(in g.edge_to, w(e));
+        if t.root_of(succ) == 0 {
+            visit(in g, inout t, succ);
         }
-        if u64_at(in t.root, w(x)) < u64_at(in t.root, w(v)) {
-            set_u64(inout t.root, w(v), u64_at(in t.root, w(x)));
+        if t.root_of(succ) < t.root_of(v) {
+            t.set_root(v, t.root_of(succ));
             local_root = false;
         }
-        e = u32_at(in g.next, w(e));
+        e = u32_at(in g.edge_next, w(e));
     }
     if local_root {
-        let mut adjust: u64 = 1;
-        let c = t.count;
-        let rv = u64_at(in t.root, w(v));
-        let mut start: u64 = 0;
-        let mut k = t.stack.len();
-        loop {
-            if k == 0 {
-                break;
-            }
-            let x = u32_at(in t.stack, sub(k, 1));
-            if rv > u64_at(in t.root, w(x)) {
-                start = k;
-                break;
-            }
-            set_u64(inout t.root, w(x), c);
-            adjust = inc(adjust);
-            k = sub(k, 1);
-        }
-        set_u64(inout t.root, w(v), c);
-        t.stack.push(v);
-        t.comp_a.push(n32(t.comp_nodes.len()));
-        for j in start..t.stack.len() {
-            t.comp_nodes.push(u32_at(in t.stack, j));
-        }
-        t.stack.truncate(start);
-        t.index = sub(t.index, adjust);
-        t.count = sub(t.count, 1);
+        t.close_component(v);
     } else {
         t.stack.push(v);
     }
@@ -1926,7 +1966,7 @@ fn tarjan(in g: Graph) -> Tarjan {
         count: MAX64,
         root: zeros64(g.nodes.len()),
         stack: ChunkSeq::new[u32](),
-        comp_a: ChunkSeq::new[u32](),
+        comp_start: ChunkSeq::new[u32](),
         comp_nodes: ChunkSeq::new[u32](),
     };
     for v in 0..g.nodes.len() {
@@ -1934,7 +1974,7 @@ fn tarjan(in g: Graph) -> Tarjan {
             visit(in g, inout t, n32(v));
         }
     }
-    t.comp_a.push(n32(t.comp_nodes.len()));
+    t.comp_start.push(n32(t.comp_nodes.len()));
     t
 }
 
@@ -3943,21 +3983,12 @@ pub fn inline(inout p: Prog) -> Report {
         return rep;
     }
     rep.constants = fold_literal_constants(inout p);
-    let mut gr = Graph {
-        nodes: ChunkSeq::new[u32](),
-        pos: fill32(nf, NONE32),
-        head: ChunkSeq::new[u32](),
-        tail: ChunkSeq::new[u32](),
-        to: ChunkSeq::new[u32](),
-        next: ChunkSeq::new[u32](),
-        edges: map_new(1024),
-        self_edge: ChunkSeq::new[u8]()
-    };
+    let mut gr = graph_new(nf);
     let mut sites = zeros64(nf);
     let mut graphs: ChunkSeq[u32] = ChunkSeq::new[u32]();
     for fi in 0..nf {
         let f32 = n32(fi);
-        let x = gr.node(f32);
+        let _ = gr.node(f32);
         let f = p.fun(f32);
         for b in 0..w(f.fc) {
             let bk = p.block(f, b);
@@ -3985,9 +4016,9 @@ pub fn inline(inout p: Prog) -> Report {
     let t = tarjan(in gr);
     let mut recursive = zeros8(nf);
     let mut order: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    for c in 0..sub(t.comp_a.len(), 1) {
-        let lo = w(u32_at(in t.comp_a, c));
-        let hi = w(u32_at(in t.comp_a, inc(c)));
+    for c in 0..t.components() {
+        let lo = w(u32_at(in t.comp_start, c));
+        let hi = w(u32_at(in t.comp_start, inc(c)));
         let first = u32_at(in t.comp_nodes, lo);
         let cyclic = sub(hi, lo) > 1 || u8_at(in gr.self_edge, w(first)) != 0;
         for k in lo..hi {

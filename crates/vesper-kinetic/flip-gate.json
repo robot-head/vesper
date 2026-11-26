@@ -10,7 +10,8 @@
     "Both builds are in one binary (the seed is a dev-dependency), so the",
     "harness times both arms itself (A B B A per epoch) and prints the pairs.",
     "The rigid substep solver (RigidWorld::solve, vesper/src/solve.ves) runs four ticks of box stacks and driven hinge chains, then 24 more solver runs.",
-    "The particle world's substep loop (World::advance, vesper/src/world.ves) runs a 1024-sphere pile with friction, restitution and joint chains, then 16 more substep runs after two ticks."
+    "The particle world's substep loop (World::advance, vesper/src/world.ves) runs a 1024-sphere pile with friction, restitution and joint chains, then 16 more substep runs after two ticks.",
+    "The soft-body substeps (SoftWorld::step, vesper/src/soft.ves): a tetrahedral box of 8 x 4 x 8 cells on a frictional ground, 12 ticks."
   ],
   "name": "vesper-kinetic",
   "lane": "SH6-9",
@@ -114,6 +115,13 @@
       "run": {
         "cargo_target": "release/examples/abba",
         "args": ["flip-gate", "world-substeps", "5"]
+      }
+    },
+    {
+      "workload": "soft-step",
+      "run": {
+        "cargo_target": "release/examples/abba",
+        "args": ["flip-gate", "soft-step", "5"]
       }
     }
   ]
