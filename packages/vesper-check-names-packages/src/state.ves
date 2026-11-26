@@ -2,7 +2,7 @@
 // loader read from disk, every module's declared names and imports as flat
 // rows, the resolver's tables and the output buffers.
 //
-// Names are symbols of one global interner `St.g` (the census design: no
+// Names are symbols of one global interner `St.interner` (the census design: no
 // `String`-keyed maps). A module is a row index; an item key
 // (`ItemKey` in src/packages.rs) is `module << 32 | name`. Tables keyed by
 // pairs pack the two `u32`s into one `u64` the same way.
@@ -36,57 +36,57 @@ pub fn kind_sugar() -> u8 {
 }
 
 // `Kind::has`.
-pub fn kind_has(k: u8, ns: u8) -> bool {
-    k == kind_both() || k == ns
+pub fn kind_has(kind: u8, ns: u8) -> bool {
+    kind == kind_both() || kind == ns
 }
 
-pub fn w(x: u32) -> u64 {
-    widen_u64(x)
+pub fn w(value: u32) -> u64 {
+    widen_u64(value)
 }
 
-pub fn n32(x: u64) -> u32 {
-    wrapping_u32(x)
+pub fn n32(value: u64) -> u32 {
+    wrapping_u32(value)
 }
 
-pub fn inc(x: u64) -> u64 {
-    wrapping_add(x, 1)
+pub fn inc(value: u64) -> u64 {
+    wrapping_add(value, 1)
 }
 
-pub fn pair(a: u32, b: u32) -> u64 {
-    wrapping_shl_u64(widen_u64(a), 32) | widen_u64(b)
+pub fn pair(high: u32, low: u32) -> u64 {
+    wrapping_shl_u64(widen_u64(high), 32) | widen_u64(low)
 }
 
-pub fn hi(k: u64) -> u32 {
-    wrapping_u32(k >> 32)
+pub fn hi(key: u64) -> u32 {
+    wrapping_u32(key >> 32)
 }
 
-pub fn lo(k: u64) -> u32 {
-    wrapping_u32(k & 4294967295)
+pub fn lo(key: u64) -> u32 {
+    wrapping_u32(key & 4294967295)
 }
 
-pub fn at32(in s: ChunkSeq[u32], i: u64) -> u32 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
+pub fn at32(in seq: ChunkSeq[u32], i: u64) -> u32 {
+    match seq.try_get(i) {
+        Option::Some(value) => value,
         Option::None => none(),
     }
 }
 
-pub fn at64(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
+pub fn at64(in seq: ChunkSeq[u64], i: u64) -> u64 {
+    match seq.try_get(i) {
+        Option::Some(value) => value,
         Option::None => 0,
     }
 }
 
-pub fn at8(in s: ChunkSeq[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
+pub fn at8(in seq: ChunkSeq[u8], i: u64) -> u8 {
+    match seq.try_get(i) {
+        Option::Some(value) => value,
         Option::None => 0,
     }
 }
 
 pub struct St {
-    g: Interner,
+    interner: Interner,
     buf: String,
     // Packages: name, dependencies (name -> package) and the names of
     // optional dependencies (for E0111's message).
@@ -101,13 +101,13 @@ pub struct St {
     // Files: display path and base offset in the virtual concatenation.
     file_display: ChunkSeq[u32],
     file_base: ChunkSeq[u64],
-    // Modules, in load order: package, module path (segments in `seg`),
+    // Modules, in load order: package, module path (segments in `segments`),
     // file, and the source's byte range in the input.
     mod_pkg: ChunkSeq[u32],
     mod_file: ChunkSeq[u32],
     mod_seg_first: ChunkSeq[u32],
     mod_seg_len: ChunkSeq[u32],
-    seg: ChunkSeq[u32],
+    segments: ChunkSeq[u32],
     mod_text_start: ChunkSeq[u64],
     mod_text_end: ChunkSeq[u64],
     // (package, path) hash -> module; `mod_collide` when two share a hash.
@@ -142,48 +142,48 @@ pub struct St {
     use_public: ChunkSeq[u8],
     use_start: ChunkSeq[u32],
     use_end: ChunkSeq[u32],
-    un_name: ChunkSeq[u32],
-    un_alias: ChunkSeq[u32],
-    un_start: ChunkSeq[u32],
-    un_end: ChunkSeq[u32],
+    import_name: ChunkSeq[u32],
+    import_alias: ChunkSeq[u32],
+    import_start: ChunkSeq[u32],
+    import_end: ChunkSeq[u32],
     // Enums in load order, with their variant names.
     enum_mod: ChunkSeq[u32],
     enum_name: ChunkSeq[u32],
-    enum_var_first: ChunkSeq[u32],
-    enum_var_len: ChunkSeq[u32],
-    enum_vars: ChunkSeq[u32],
+    enum_variant_first: ChunkSeq[u32],
+    enum_variant_len: ChunkSeq[u32],
+    enum_variants: ChunkSeq[u32],
     // `Resolver::reexported`: (module, local) -> item key and kind, and the
     // root module's re-exported local names in insertion order.
-    reexp_key: FlatTable[u64, u64],
-    reexp_kind: FlatTable[u64, u8],
+    reexport_key: FlatTable[u64, u64],
+    reexport_kind: FlatTable[u64, u8],
     root_reexports: ChunkSeq[u32],
     // The re-exported path locals `E::M` of each module, listed by (module,
-    // E) through `rx_next`: the members of re-exported value enums.
-    rx_head: FlatTable[u64, u32],
-    rx_local: ChunkSeq[u32],
-    rx_next: ChunkSeq[u32],
+    // E) through `path_reexport_next`: the members of re-exported value enums.
+    path_reexport_head: FlatTable[u64, u32],
+    path_reexport_name: ChunkSeq[u32],
+    path_reexport_next: ChunkSeq[u32],
     // Value enums (`Table::group`): (module, enum) -> its first member row;
     // each row is a member name, its constant `const$E::M` and the next
     // row. `own_prefix` holds (module, P) for every constant `const$P::..`.
-    grp_head: FlatTable[u64, u32],
-    grp_member: ChunkSeq[u32],
-    grp_item: ChunkSeq[u32],
-    grp_next: ChunkSeq[u32],
+    group_head: FlatTable[u64, u32],
+    group_member: ChunkSeq[u32],
+    group_const: ChunkSeq[u32],
+    group_next: ChunkSeq[u32],
     own_prefix: FlatTable[u64, u8],
     // The last `group` result: members in byte order and their item keys.
-    grp_m: ChunkSeq[u32],
-    grp_k: ChunkSeq[u64],
+    result_members: ChunkSeq[u32],
+    result_keys: ChunkSeq[u64],
     // Constants with a literal value (`const_literal`), as parsed: module,
     // function name, the literal and whether the constant is an untyped
     // value enum member. `lit_row` maps each one's internal name to its
     // row (latest declaration wins); `untyped` holds the untyped ones.
-    cl_mod: ChunkSeq[u32],
-    cl_item: ChunkSeq[u32],
-    cl_kind: ChunkSeq[u8],
-    cl_neg: ChunkSeq[u8],
-    cl_bits: ChunkSeq[u64],
-    cl_hi: ChunkSeq[u64],
-    cl_untyped: ChunkSeq[u8],
+    lit_module: ChunkSeq[u32],
+    lit_func: ChunkSeq[u32],
+    lit_kind: ChunkSeq[u8],
+    lit_neg: ChunkSeq[u8],
+    lit_bits: ChunkSeq[u64],
+    lit_hi: ChunkSeq[u64],
+    lit_untyped: ChunkSeq[u8],
     lit_row: FlatTable[u32, u32],
     untyped: FlatTable[u32, u8],
     // `Resolver::renamed`: item key -> root name.
@@ -201,8 +201,8 @@ pub struct St {
     // owning enum of every variant, and the first module declaring each
     // global name.
     hidden: FlatTable[u32, u8],
-    var_owner: FlatTable[u32, u32],
-    var_shown: FlatTable[u32, u32],
+    variant_owner: FlatTable[u32, u32],
+    variant_shown: FlatTable[u32, u32],
     globals: FlatTable[u32, u32],
     // The outputs: diagnostics, `SourceMap::qualified` (mangled -> shown),
     // and `Module::public_items`.
@@ -216,17 +216,17 @@ pub struct St {
     public_out: ChunkSeq[u32],
     // The module being renamed (`Renamer`): its bound names (local ->
     // target | kind << 32), the set of their targets, the value and type
-    // scopes, and its symbol maps between the AST's interner and `g`.
+    // scopes, and its symbol maps between the AST's interner and `interner`.
     names: FlatTable[u32, u64],
     targets: FlatTable[u32, u8],
     values: ChunkSeq[u32],
     types: ChunkSeq[u32],
-    cur: u32,
+    cur_module: u32,
     cur_pkg: u32,
     is_root: bool,
     shift: u32,
-    symmap: ChunkSeq[u32],
-    back: FlatTable[u32, u32],
+    ast_to_global: ChunkSeq[u32],
+    global_to_ast: FlatTable[u32, u32],
     // Nodes of the module's AST already renamed. The lowering shares some
     // nodes where Rust's parser clones them (an array repetition's element,
     // an or-pattern arm's body, a generic impl's bound): a revisit renames
@@ -240,7 +240,7 @@ pub struct St {
     const_flag: ChunkSeq[u8],
     // The module's expression count before renaming: the nodes the renamer
     // makes (a constant's call callee) come after it and are final.
-    made_from: u64,
+    parsed_expr_count: u64,
     // `assemble`'s per-module `groups`: local enum name -> range of
     // `group_pool` (its member constants, sorted).
     groups: FlatTable[u32, u64],
@@ -249,24 +249,24 @@ pub struct St {
     scopes: FlatTable[u32, u64],
     scope_pool: ChunkSeq[u32],
     // Interned spellings the renamer compares against.
-    s_self: u32,
-    s_super: u32,
-    s_self_ty: u32,
-    cached_ls: ChunkSeq[L],
+    self_sym: u32,
+    super_sym: u32,
+    self_ty_sym: u32,
+    cached_lowerings: ChunkSeq[L],
     // Parse diagnostics of every module (the Vesper driver's package load
     // assembles only graphs without any, #1986).
     parse_errors: u64,
-    s_empty: u32
+    empty_sym: u32
 }
 
 pub fn st_new() -> St {
-    let mut g = interner_new();
-    let s_empty = g.intern(in "").id();
-    let s_self = g.intern(in "self").id();
-    let s_super = g.intern(in "super").id();
-    let s_self_ty = g.intern(in "Self").id();
+    let mut interner = interner_new();
+    let empty_sym = interner.intern(in "").id();
+    let self_sym = interner.intern(in "self").id();
+    let super_sym = interner.intern(in "super").id();
+    let self_ty_sym = interner.intern(in "Self").id();
     St {
-        g: g,
+        interner: interner,
         buf: String::new(),
         pkg_name: ChunkSeq::new[u32](),
         pkg_dep_first: ChunkSeq::new[u32](),
@@ -282,7 +282,7 @@ pub fn st_new() -> St {
         mod_file: ChunkSeq::new[u32](),
         mod_seg_first: ChunkSeq::new[u32](),
         mod_seg_len: ChunkSeq::new[u32](),
-        seg: ChunkSeq::new[u32](),
+        segments: ChunkSeq::new[u32](),
         mod_text_start: ChunkSeq::new[u64](),
         mod_text_end: ChunkSeq::new[u64](),
         mod_index: flat_table_new[u64, u32](),
@@ -308,35 +308,35 @@ pub fn st_new() -> St {
         use_public: ChunkSeq::new[u8](),
         use_start: ChunkSeq::new[u32](),
         use_end: ChunkSeq::new[u32](),
-        un_name: ChunkSeq::new[u32](),
-        un_alias: ChunkSeq::new[u32](),
-        un_start: ChunkSeq::new[u32](),
-        un_end: ChunkSeq::new[u32](),
+        import_name: ChunkSeq::new[u32](),
+        import_alias: ChunkSeq::new[u32](),
+        import_start: ChunkSeq::new[u32](),
+        import_end: ChunkSeq::new[u32](),
         enum_mod: ChunkSeq::new[u32](),
         enum_name: ChunkSeq::new[u32](),
-        enum_var_first: ChunkSeq::new[u32](),
-        enum_var_len: ChunkSeq::new[u32](),
-        enum_vars: ChunkSeq::new[u32](),
-        reexp_key: flat_table_new[u64, u64](),
-        reexp_kind: flat_table_new[u64, u8](),
+        enum_variant_first: ChunkSeq::new[u32](),
+        enum_variant_len: ChunkSeq::new[u32](),
+        enum_variants: ChunkSeq::new[u32](),
+        reexport_key: flat_table_new[u64, u64](),
+        reexport_kind: flat_table_new[u64, u8](),
         root_reexports: ChunkSeq::new[u32](),
-        rx_head: flat_table_new[u64, u32](),
-        rx_local: ChunkSeq::new[u32](),
-        rx_next: ChunkSeq::new[u32](),
-        grp_head: flat_table_new[u64, u32](),
-        grp_member: ChunkSeq::new[u32](),
-        grp_item: ChunkSeq::new[u32](),
-        grp_next: ChunkSeq::new[u32](),
+        path_reexport_head: flat_table_new[u64, u32](),
+        path_reexport_name: ChunkSeq::new[u32](),
+        path_reexport_next: ChunkSeq::new[u32](),
+        group_head: flat_table_new[u64, u32](),
+        group_member: ChunkSeq::new[u32](),
+        group_const: ChunkSeq::new[u32](),
+        group_next: ChunkSeq::new[u32](),
         own_prefix: flat_table_new[u64, u8](),
-        grp_m: ChunkSeq::new[u32](),
-        grp_k: ChunkSeq::new[u64](),
-        cl_mod: ChunkSeq::new[u32](),
-        cl_item: ChunkSeq::new[u32](),
-        cl_kind: ChunkSeq::new[u8](),
-        cl_neg: ChunkSeq::new[u8](),
-        cl_bits: ChunkSeq::new[u64](),
-        cl_hi: ChunkSeq::new[u64](),
-        cl_untyped: ChunkSeq::new[u8](),
+        result_members: ChunkSeq::new[u32](),
+        result_keys: ChunkSeq::new[u64](),
+        lit_module: ChunkSeq::new[u32](),
+        lit_func: ChunkSeq::new[u32](),
+        lit_kind: ChunkSeq::new[u8](),
+        lit_neg: ChunkSeq::new[u8](),
+        lit_bits: ChunkSeq::new[u64](),
+        lit_hi: ChunkSeq::new[u64](),
+        lit_untyped: ChunkSeq::new[u8](),
         lit_row: flat_table_new[u32, u32](),
         untyped: flat_table_new[u32, u8](),
         renamed: flat_table_new[u64, u32](),
@@ -348,8 +348,8 @@ pub fn st_new() -> St {
         err_start: 0,
         err_end: 0,
         hidden: flat_table_new[u32, u8](),
-        var_owner: flat_table_new[u32, u32](),
-        var_shown: flat_table_new[u32, u32](),
+        variant_owner: flat_table_new[u32, u32](),
+        variant_shown: flat_table_new[u32, u32](),
         globals: flat_table_new[u32, u32](),
         diags: ChunkSeq::new[u8](),
         diag_rows: ChunkSeq::new[u64](),
@@ -360,83 +360,83 @@ pub fn st_new() -> St {
         targets: flat_table_new[u32, u8](),
         values: ChunkSeq::new[u32](),
         types: ChunkSeq::new[u32](),
-        cur: 0,
+        cur_module: 0,
         cur_pkg: 0,
         is_root: false,
         shift: 0,
-        symmap: ChunkSeq::new[u32](),
-        back: flat_table_new[u32, u32](),
+        ast_to_global: ChunkSeq::new[u32](),
+        global_to_ast: flat_table_new[u32, u32](),
         seen_expr: flat_table_new[u32, u8](),
         seen_pat: flat_table_new[u32, u8](),
         seen_param: flat_table_new[u32, u8](),
         seen_tref: flat_table_new[u32, u8](),
         const_flag: ChunkSeq::new[u8](),
-        cached_ls: ChunkSeq::new[L](),
+        cached_lowerings: ChunkSeq::new[L](),
         parse_errors: 0,
-        made_from: 0,
+        parsed_expr_count: 0,
         groups: flat_table_new[u32, u64](),
         group_pool: ChunkSeq::new[u32](),
         scopes: flat_table_new[u32, u64](),
         scope_pool: ChunkSeq::new[u32](),
-        s_self: s_self,
-        s_super: s_super,
-        s_self_ty: s_self_ty,
-        s_empty: s_empty
+        self_sym: self_sym,
+        super_sym: super_sym,
+        self_ty_sym: self_ty_sym,
+        empty_sym: empty_sym
     }
 }
 
 // ---------------------------------------------------------------- symbols
 
-// The byte range of symbol `sym` in `s.g`'s text.
-pub fn sym_range(in s: St, sym: u32) -> (u64, u64) {
-    s.g.span(symbol_from_id(sym))
+// The byte range of symbol `sym` in `loader.interner`'s text.
+pub fn sym_range(in loader: St, sym: u32) -> (u64, u64) {
+    loader.interner.span(symbol_from_id(sym))
 }
 
-pub fn sym_len(in s: St, sym: u32) -> u64 {
-    let (a, b) = sym_range(in s, sym);
-    wrapping_sub(b, a)
+pub fn sym_len(in loader: St, sym: u32) -> u64 {
+    let (start, end) = sym_range(in loader, sym);
+    wrapping_sub(end, start)
 }
 
 // Byte `i` of symbol `sym` (0 past its end).
-pub fn sym_byte(in s: St, sym: u32, i: u64) -> u8 {
-    let (a, b) = sym_range(in s, sym);
-    let at = wrapping_add(a, i);
-    if at >= b {
+pub fn sym_byte(in loader: St, sym: u32, i: u64) -> u8 {
+    let (start, end) = sym_range(in loader, sym);
+    let at = wrapping_add(start, i);
+    if at >= end {
         return 0;
     }
-    match s.g.text_byte(at) {
-        Option::Some(c) => c,
+    match loader.interner.text_byte(at) {
+        Option::Some(byte) => byte,
         Option::None => 0,
     }
 }
 
 // Appends the text of `sym` to `out`.
-pub fn push_sym(in s: St, sym: u32, inout out: String) {
-    s.g.resolve_into(symbol_from_id(sym), inout out);
+pub fn push_sym(in loader: St, sym: u32, inout out: String) {
+    loader.interner.resolve_into(symbol_from_id(sym), inout out);
 }
 
-// Interns `s.buf`.
-pub fn intern_buf(inout s: St) -> u32 {
-    s.g.intern(in s.buf).id()
+// Interns `loader.buf`.
+pub fn intern_buf(inout loader: St) -> u32 {
+    loader.interner.intern(in loader.buf).id()
 }
 
-pub fn intern_str(inout s: St, in t: Str) -> u32 {
-    s.g.intern(in t).id()
+pub fn intern_str(inout loader: St, in text: Str) -> u32 {
+    loader.interner.intern(in text).id()
 }
 
-// Whether `sym` starts with `p`.
-pub fn sym_starts(in s: St, sym: u32, in p: Str) -> bool {
-    let n = p.len();
-    if sym_len(in s, sym) < n {
+// Whether `sym` starts with `prefix`.
+pub fn sym_starts(in loader: St, sym: u32, in prefix: Str) -> bool {
+    let len = prefix.len();
+    if sym_len(in loader, sym) < len {
         return false;
     }
-    let b = p.as_bytes();
-    for i in 0..n {
-        let c = match b.try_get(i) {
-            Option::Some(c) => c,
+    let prefix_bytes = prefix.as_bytes();
+    for i in 0..len {
+        let byte = match prefix_bytes.try_get(i) {
+            Option::Some(byte) => byte,
             Option::None => 0,
         };
-        if sym_byte(in s, sym, i) != c {
+        if sym_byte(in loader, sym, i) != byte {
             return false;
         }
     }
@@ -444,14 +444,14 @@ pub fn sym_starts(in s: St, sym: u32, in p: Str) -> bool {
 }
 
 // The offset of the first `::` in `sym`, or its length when it has none.
-pub fn sym_path_split(in s: St, sym: u32) -> u64 {
-    let n = sym_len(in s, sym);
+pub fn sym_path_split(in loader: St, sym: u32) -> u64 {
+    let len = sym_len(in loader, sym);
     let mut i: u64 = 0;
     loop {
-        if inc(i) >= n {
-            break n;
+        if inc(i) >= len {
+            break len;
         }
-        if sym_byte(in s, sym, i) == 58 && sym_byte(in s, sym, inc(i)) == 58 {
+        if sym_byte(in loader, sym, i) == 58 && sym_byte(in loader, sym, inc(i)) == 58 {
             break i;
         }
         i = inc(i);
@@ -459,78 +459,78 @@ pub fn sym_path_split(in s: St, sym: u32) -> u64 {
 }
 
 // Symbol of bytes `a..b` of `sym`.
-pub fn sym_slice(inout s: St, sym: u32, a: u64, b: u64) -> u32 {
-    s.buf.clear();
-    let (start, end) = sym_range(in s, sym);
-    let x = wrapping_add(start, a);
-    let mut y = wrapping_add(start, b);
-    if y > end {
-        y = end;
+pub fn sym_slice(inout loader: St, sym: u32, from: u64, to: u64) -> u32 {
+    loader.buf.clear();
+    let (start, end) = sym_range(in loader, sym);
+    let abs_from = wrapping_add(start, from);
+    let mut abs_to = wrapping_add(start, to);
+    if abs_to > end {
+        abs_to = end;
     }
-    s.g.resolve_into(symbol_from_id(sym), inout s.buf);
-    let t = wrapping_sub(x, start);
-    let u = wrapping_sub(y, start);
-    s.g.intern(in s.buf[t..u]).id()
+    loader.interner.resolve_into(symbol_from_id(sym), inout loader.buf);
+    let rel_from = wrapping_sub(abs_from, start);
+    let rel_to = wrapping_sub(abs_to, start);
+    loader.interner.intern(in loader.buf[rel_from..rel_to]).id()
 }
 
 // Whether two symbols' texts are in byte order `a < b` (Rust's `String`
 // order, which `BTreeMap` keys iterate in).
-pub fn sym_less(in s: St, a: u32, b: u32) -> bool {
-    let na = sym_len(in s, a);
-    let nb = sym_len(in s, b);
+pub fn sym_less(in loader: St, a: u32, b: u32) -> bool {
+    let a_len = sym_len(in loader, a);
+    let b_len = sym_len(in loader, b);
     let mut i: u64 = 0;
     loop {
-        if i >= na || i >= nb {
-            break na < nb;
+        if i >= a_len || i >= b_len {
+            break a_len < b_len;
         }
-        let x = sym_byte(in s, a, i);
-        let y = sym_byte(in s, b, i);
-        if x != y {
-            break x < y;
+        let a_byte = sym_byte(in loader, a, i);
+        let b_byte = sym_byte(in loader, b, i);
+        if a_byte != b_byte {
+            break a_byte < b_byte;
         }
         i = inc(i);
     }
 }
 
-// Whether `p` occurs in `sym` (one pass over the interner's text; the
+// Whether `needle` occurs in `sym` (one pass over the interner's text; the
 // renamer asks for every new name).
-pub fn sym_contains(in s: St, sym: u32, in p: Str) -> bool {
-    let (a, z) = sym_range(in s, sym);
-    let k = p.len();
-    if k == 0 || wrapping_sub(z, a) < k {
+pub fn sym_contains(in loader: St, sym: u32, in needle: Str) -> bool {
+    let (start, end) = sym_range(in loader, sym);
+    let needle_len = needle.len();
+    if needle_len == 0 || wrapping_sub(end, start) < needle_len {
         return false;
     }
-    let t = s.g.text.as_bytes();
-    let b = p.as_bytes();
-    let c0 = match b.try_get(0) {
-        Option::Some(c) => c,
+    let text = loader.interner.text.as_bytes();
+    let needle_bytes = needle.as_bytes();
+    let first_byte = match needle_bytes.try_get(0) {
+        Option::Some(byte) => byte,
         Option::None => 0,
     };
-    let last = wrapping_sub(z, k);
-    let mut i = a;
+    let last = wrapping_sub(end, needle_len);
+    let mut i = start;
     loop {
         if i > last {
             break false;
         }
-        let c = match t.try_get(i) {
-            Option::Some(c) => c,
+        let byte = match text.try_get(i) {
+            Option::Some(byte) => byte,
             Option::None => 0,
         };
-        if c == c0 {
+        if byte == first_byte {
             let mut j: u64 = 1;
             let found = loop {
-                if j >= k {
+                if j >= needle_len {
                     break true;
                 }
-                let x = match t.try_get(wrapping_add(i, j)) {
-                    Option::Some(x) => x,
+                let text_byte = match text.try_get(wrapping_add(i, j)) {
+                    Option::Some(text_byte) => text_byte,
                     Option::None => 0,
                 };
-                let y = match b.try_get(j) {
-                    Option::Some(y) => y,
+                let needle_byte = match needle_bytes.try_get(j) {
+                    Option::Some(needle_byte) => needle_byte,
                     Option::None => 0,
                 };
-                if x != y {
+                if text_byte != needle_byte {
                     break false;
                 }
                 j = inc(j);
@@ -549,80 +549,80 @@ pub fn const_prefix() -> Str {
 }
 
 // `const$` followed by the text of `sym`.
-pub fn const_of(inout s: St, sym: u32) -> u32 {
-    s.buf.clear();
-    s.buf.push_str(in const_prefix());
-    s.g.resolve_into(symbol_from_id(sym), inout s.buf);
-    s.g.intern(in s.buf).id()
+pub fn const_of(inout loader: St, sym: u32) -> u32 {
+    loader.buf.clear();
+    loader.buf.push_str(in const_prefix());
+    loader.interner.resolve_into(symbol_from_id(sym), inout loader.buf);
+    loader.interner.intern(in loader.buf).id()
 }
 
 // `a::b`.
-pub fn join_path(inout s: St, a: u32, b: u32) -> u32 {
-    s.buf.clear();
-    s.g.resolve_into(symbol_from_id(a), inout s.buf);
-    s.buf.push_str(in "::");
-    s.g.resolve_into(symbol_from_id(b), inout s.buf);
-    s.g.intern(in s.buf).id()
+pub fn join_path(inout loader: St, head: u32, tail: u32) -> u32 {
+    loader.buf.clear();
+    loader.interner.resolve_into(symbol_from_id(head), inout loader.buf);
+    loader.buf.push_str(in "::");
+    loader.interner.resolve_into(symbol_from_id(tail), inout loader.buf);
+    loader.interner.intern(in loader.buf).id()
 }
 
 // `is_const_function`: `const$NAME`, or one renamed into a package
 // (`{scope}__{package}__{module}__const$NAME`).
-pub fn is_const_function(in s: St, sym: u32) -> bool {
-    sym_starts(in s, sym, in const_prefix()) || sym_contains(in s, sym, in "__const$")
+pub fn is_const_function(in loader: St, sym: u32) -> bool {
+    sym_starts(in loader, sym, in const_prefix()) || sym_contains(in loader, sym, in "__const$")
 }
 
 // Bit 0: `sym` contains `const$`; bit 1: it is a constant's function
 // (`is_const_function`). Cached per symbol: the renamer asks for every
 // name expression.
-pub fn const_flags(inout s: St, sym: u32) -> u8 {
-    let i = w(sym);
-    let cached = at8(in s.const_flag, i);
+pub fn const_flags(inout loader: St, sym: u32) -> u8 {
+    let index = w(sym);
+    let cached = at8(in loader.const_flag, index);
     if cached != 0 {
         return cached & 3;
     }
-    let mut f: u8 = 0;
-    if sym_contains(in s, sym, in const_prefix()) {
-        f = 1;
-        if is_const_function(in s, sym) {
-            f = 3;
+    let mut flags: u8 = 0;
+    if sym_contains(in loader, sym, in const_prefix()) {
+        flags = 1;
+        if is_const_function(in loader, sym) {
+            flags = 3;
         }
     }
-    if i >= s.const_flag.len() {
-        s.const_flag.resize(inc(i), 0);
+    if index >= loader.const_flag.len() {
+        loader.const_flag.resize(inc(index), 0);
     }
-    s.const_flag.try_set(i, f | 4);
-    f
+    loader.const_flag.try_set(index, flags | 4);
+    flags
 }
 
 // ---------------------------------------------------------------- output
 
-pub fn put(inout o: ChunkSeq[u8], in t: Str) {
-    o.extend(in t.as_bytes());
+pub fn put(inout out: ChunkSeq[u8], in text: Str) {
+    out.extend(in text.as_bytes());
 }
 
-pub fn put_string(inout o: ChunkSeq[u8], in t: String) {
-    o.extend(in t.as_bytes());
+pub fn put_string(inout out: ChunkSeq[u8], in text: String) {
+    out.extend(in text.as_bytes());
 }
 
-pub fn put_decimal(inout o: ChunkSeq[u8], v: u64) {
-    if v >= 10 {
-        put_decimal(inout o, v / 10);
+pub fn put_decimal(inout out: ChunkSeq[u8], value: u64) {
+    if value >= 10 {
+        put_decimal(inout out, value / 10);
     }
-    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+    out.push(wrapping_u8(wrapping_add(value % 10, 48)));
 }
 
-pub fn push_decimal(inout o: String, v: u64) {
-    if v >= 10 {
-        push_decimal(inout o, v / 10);
+pub fn push_decimal(inout out: String, value: u64) {
+    if value >= 10 {
+        push_decimal(inout out, value / 10);
     }
-    o.push_char(wrapping_u32(wrapping_add(v % 10, 48)));
+    out.push_char(wrapping_u32(wrapping_add(value % 10, 48)));
 }
 
-pub fn put_sym(inout o: ChunkSeq[u8], in names: Interner, sym: u32) {
-    let (a, b) = names.span(symbol_from_id(sym));
-    for i in a..b {
+pub fn put_sym(inout out: ChunkSeq[u8], in names: Interner, sym: u32) {
+    let (start, end) = names.span(symbol_from_id(sym));
+    for i in start..end {
         match names.text_byte(i) {
-            Option::Some(c) => o.push(c),
+            Option::Some(byte) => out.push(byte),
             Option::None => {},
         }
     }
@@ -631,26 +631,26 @@ pub fn put_sym(inout o: ChunkSeq[u8], in names: Interner, sym: u32) {
 // ---------------------------------------------------------------- modules
 
 pub fn mod_hash(pkg: u32, in path: ChunkSeq[u32]) -> u64 {
-    let mut h: u64 = 14695981039346656037;
-    h = wrapping_mul(h ^ widen_u64(pkg), 1099511628211);
+    let mut hash: u64 = 14695981039346656037;
+    hash = wrapping_mul(hash ^ widen_u64(pkg), 1099511628211);
     for i in 0..path.len() {
-        h = wrapping_mul(h ^ widen_u64(at32(in path, i)), 1099511628211);
+        hash = wrapping_mul(hash ^ widen_u64(at32(in path, i)), 1099511628211);
     }
-    h
+    hash
 }
 
-// Whether module `m` is package `pkg`'s module `path`.
-pub fn mod_is(in s: St, m: u32, pkg: u32, in path: ChunkSeq[u32]) -> bool {
-    if at32(in s.mod_pkg, w(m)) != pkg {
+// Whether `module` is package `pkg`'s module `path`.
+pub fn mod_is(in loader: St, module: u32, pkg: u32, in path: ChunkSeq[u32]) -> bool {
+    if at32(in loader.mod_pkg, w(module)) != pkg {
         return false;
     }
-    let n = w(at32(in s.mod_seg_len, w(m)));
-    if n != path.len() {
+    let len = w(at32(in loader.mod_seg_len, w(module)));
+    if len != path.len() {
         return false;
     }
-    let f = w(at32(in s.mod_seg_first, w(m)));
-    for i in 0..n {
-        if at32(in s.seg, wrapping_add(f, i)) != at32(in path, i) {
+    let first = w(at32(in loader.mod_seg_first, w(module)));
+    for i in 0..len {
+        if at32(in loader.segments, wrapping_add(first, i)) != at32(in path, i) {
             return false;
         }
     }
@@ -658,89 +658,89 @@ pub fn mod_is(in s: St, m: u32, pkg: u32, in path: ChunkSeq[u32]) -> bool {
 }
 
 // The module `path` of package `pkg`, or `none()` (`tables.contains_key`).
-pub fn find_module(in s: St, pkg: u32, in path: ChunkSeq[u32]) -> u32 {
-    match s.mod_index.get(mod_hash(pkg, in path)) {
-        Option::Some(m) => {
-            if mod_is(in s, m, pkg, in path) {
-                return m;
+pub fn find_module(in loader: St, pkg: u32, in path: ChunkSeq[u32]) -> u32 {
+    match loader.mod_index.get(mod_hash(pkg, in path)) {
+        Option::Some(module) => {
+            if mod_is(in loader, module, pkg, in path) {
+                return module;
             }
         },
         Option::None => {
-            if !s.mod_collide {
+            if !loader.mod_collide {
                 return none();
             }
         },
     }
-    if !s.mod_collide {
+    if !loader.mod_collide {
         return none();
     }
-    for m in 0..s.mod_pkg.len() {
-        if mod_is(in s, n32(m), pkg, in path) {
-            return n32(m);
+    for module in 0..loader.mod_pkg.len() {
+        if mod_is(in loader, n32(module), pkg, in path) {
+            return n32(module);
         }
     }
     none()
 }
 
-// The path of module `m`, appended to `out`.
-pub fn mod_path_into(in s: St, m: u32, inout out: ChunkSeq[u32]) {
-    let f = w(at32(in s.mod_seg_first, w(m)));
-    let n = w(at32(in s.mod_seg_len, w(m)));
-    for i in 0..n {
-        out.push(at32(in s.seg, wrapping_add(f, i)));
+// The path of `module`, appended to `out`.
+pub fn mod_path_into(in loader: St, module: u32, inout out: ChunkSeq[u32]) {
+    let first = w(at32(in loader.mod_seg_first, w(module)));
+    let len = w(at32(in loader.mod_seg_len, w(module)));
+    for i in 0..len {
+        out.push(at32(in loader.segments, wrapping_add(first, i)));
     }
 }
 
-pub fn mod_path_len(in s: St, m: u32) -> u64 {
-    w(at32(in s.mod_seg_len, w(m)))
+pub fn mod_path_len(in loader: St, module: u32) -> u64 {
+    w(at32(in loader.mod_seg_len, w(module)))
 }
 
-pub fn mod_seg(in s: St, m: u32, i: u64) -> u32 {
-    at32(in s.seg, wrapping_add(w(at32(in s.mod_seg_first, w(m))), i))
+pub fn mod_seg(in loader: St, module: u32, i: u64) -> u32 {
+    at32(in loader.segments, wrapping_add(w(at32(in loader.mod_seg_first, w(module))), i))
 }
 
 // ---------------------------------------------------------------- errors
 
 // Starts an error (`Diagnostic::new(code, ..)`); the caller writes the
-// message into `s.err_msg`.
-pub fn err(inout s: St, code: u32, start: u32, end: u32) {
-    s.err_code = code;
-    s.err_msg.clear();
-    s.err_help.clear();
-    s.err_has_help = false;
-    s.err_start = start;
-    s.err_end = end;
+// message into `loader.err_msg`.
+pub fn err(inout loader: St, code: u32, start: u32, end: u32) {
+    loader.err_code = code;
+    loader.err_msg.clear();
+    loader.err_help.clear();
+    loader.err_has_help = false;
+    loader.err_start = start;
+    loader.err_end = end;
 }
 
 // Writes the pending error as a diagnostic of `file`, one line:
 // `diag <file> E0<code> <start>..<end> <message>[ help: <help>]`.
-pub fn emit(inout s: St, file: u32) {
-    s.diag_rows.push(w(file));
-    s.diag_rows.push(w(s.err_code));
-    s.diag_rows.push(w(s.err_start));
-    s.diag_rows.push(w(s.err_end));
-    s.diag_rows.push(s.err_msg.len());
-    s.diag_text.extend(in s.err_msg.as_bytes());
-    if s.err_has_help {
-        s.diag_rows.push(s.err_help.len());
-        s.diag_text.extend(in s.err_help.as_bytes());
+pub fn emit(inout loader: St, file: u32) {
+    loader.diag_rows.push(w(file));
+    loader.diag_rows.push(w(loader.err_code));
+    loader.diag_rows.push(w(loader.err_start));
+    loader.diag_rows.push(w(loader.err_end));
+    loader.diag_rows.push(loader.err_msg.len());
+    loader.diag_text.extend(in loader.err_msg.as_bytes());
+    if loader.err_has_help {
+        loader.diag_rows.push(loader.err_help.len());
+        loader.diag_text.extend(in loader.err_help.as_bytes());
     } else {
-        s.diag_rows.push(18446744073709551615);
+        loader.diag_rows.push(18446744073709551615);
     }
-    s.diags.extend(in "diag ".as_bytes());
-    put_decimal(inout s.diags, w(file));
-    s.diags.extend(in " E0".as_bytes());
-    put_decimal(inout s.diags, w(s.err_code));
-    s.diags.push(32);
-    put_decimal(inout s.diags, w(s.err_start));
-    s.diags.extend(in "..".as_bytes());
-    put_decimal(inout s.diags, w(s.err_end));
-    s.diags.push(32);
-    s.diags.extend(in s.err_msg.as_bytes());
-    if s.err_has_help {
-        s.diags.extend(in " help: ".as_bytes());
-        s.diags.extend(in s.err_help.as_bytes());
+    loader.diags.extend(in "diag ".as_bytes());
+    put_decimal(inout loader.diags, w(file));
+    loader.diags.extend(in " E0".as_bytes());
+    put_decimal(inout loader.diags, w(loader.err_code));
+    loader.diags.push(32);
+    put_decimal(inout loader.diags, w(loader.err_start));
+    loader.diags.extend(in "..".as_bytes());
+    put_decimal(inout loader.diags, w(loader.err_end));
+    loader.diags.push(32);
+    loader.diags.extend(in loader.err_msg.as_bytes());
+    if loader.err_has_help {
+        loader.diags.extend(in " help: ".as_bytes());
+        loader.diags.extend(in loader.err_help.as_bytes());
     }
-    s.diags.push(10);
-    s.err_code = 0;
+    loader.diags.push(10);
+    loader.err_code = 0;
 }
