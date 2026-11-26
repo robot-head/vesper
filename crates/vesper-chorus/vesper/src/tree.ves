@@ -172,11 +172,7 @@ pub fn read_chor(inout c: C, in w: Slice[u64], in t: Slice[u8], at: u64) -> u64 
 }
 
 fn sub_sat(a: u64, b: u64) -> u64 {
-    if b > a {
-        0
-    } else {
-        wrapping_sub(a, b)
-    }
+    if b > a { 0 } else { wrapping_sub(a, b) }
 }
 
 // Writes node `n` in postorder to `out` (expanding shared nodes).

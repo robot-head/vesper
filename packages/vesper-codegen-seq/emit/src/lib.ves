@@ -285,15 +285,7 @@ fn define_fault(
         let mut ptr = data_address(inout b, in m, d0);
         let mut len = iconst(inout b, wrapping_i64(message(0).len()));
         for code in 1..MESSAGES {
-            let this = data_address(
-                inout b,
-                in m,
-                if code == 1 {
-                    d1
-                } else {
-                    d2
-                }
-            );
+            let this = data_address(inout b, in m, if code == 1 { d1 } else { d2 });
             let this_len = iconst(inout b, wrapping_i64(message(code).len()));
             let is = ins_icmp_imm(inout b, cc_eq(), code_arg, wrapping_i64(code));
             ptr = ins_select(inout b, is, this, ptr);

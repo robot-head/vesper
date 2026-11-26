@@ -251,22 +251,14 @@ fn intersect(in idom: ChunkSeq[u32], in post_number: ChunkSeq[u32], a: u32, b: u
                 break;
             }
             let up = u32_at(in idom, w(x));
-            x = if up == NONE32 {
-                0
-            } else {
-                up
-            };
+            x = if up == NONE32 { 0 } else { up };
         }
         loop {
             if u32_at(in post_number, w(y)) >= u32_at(in post_number, w(x)) {
                 break;
             }
             let up = u32_at(in idom, w(y));
-            y = if up == NONE32 {
-                0
-            } else {
-                up
-            };
+            y = if up == NONE32 { 0 } else { up };
         }
     }
     x

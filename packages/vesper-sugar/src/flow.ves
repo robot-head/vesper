@@ -319,11 +319,7 @@ fn permission(in c: Caps, in sk: Sk, h: u64) -> u64 {
     }
     if sort_in(in c, cap, in "place".as_bytes()) {
         let p = cap_pass(in c, cap);
-        return if p == 0 {
-            S_IN
-        } else {
-            p
-        };
+        return if p == 0 { S_IN } else { p };
     }
     0
 }
@@ -383,12 +379,10 @@ fn is_nested(in f: Fx, s: u64, e: u64) -> bool {
 // ---------------------------------------------------------------- AST
 
 pub fn stmt_of(in a: Ast, i: u32) -> StmtNode {
-    a
-        .stmts
-        .get_or(
-            idx_from_raw[StmtNode](i),
-            StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
-        )
+    a.stmts.get_or(
+        idx_from_raw[StmtNode](i),
+        StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
+    )
 }
 
 pub fn arg_of(in a: Ast, i: u32) -> ArgNode {
@@ -396,37 +390,32 @@ pub fn arg_of(in a: Ast, i: u32) -> ArgNode {
 }
 
 pub fn clause_of(in a: Ast, i: u32) -> ClauseNode {
-    a
-        .clauses
+    a.clauses
         .get_or(idx_from_raw[ClauseNode](i), ClauseNode { name: none(), pats: 0, body: none() })
 }
 
 pub fn param_of(in a: Ast, i: u32) -> ParamNode {
-    a
-        .params
-        .get_or(
-            idx_from_raw[ParamNode](i),
-            ParamNode { name: none(), pass: 0, projections: 0, ty: none(), start: 0, end: 0 }
-        )
+    a.params.get_or(
+        idx_from_raw[ParamNode](i),
+        ParamNode { name: none(), pass: 0, projections: 0, ty: none(), start: 0, end: 0 }
+    )
 }
 
 pub fn fn_of(in a: Ast, i: u32) -> FnNode {
-    a
-        .fns
-        .get_or(
-            idx_from_raw[FnNode](i),
-            FnNode {
-                name: none(),
-                fip: false,
-                generics: 0,
-                params: 0,
-                result: none(),
-                effects: none(),
-                body: none(),
-                start: 0,
-                end: 0
-            }
-        )
+    a.fns.get_or(
+        idx_from_raw[FnNode](i),
+        FnNode {
+            name: none(),
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: none(),
+            effects: none(),
+            body: none(),
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 pub fn es(in a: Ast, e: u32) -> u64 {
@@ -670,31 +659,13 @@ fn walk_kids_tuple(
         if f.failed {
             return;
         }
-        nd_set(
-            inout f,
-            child,
-            5,
-            if earlier {
-                1
-            } else {
-                0
-            }
-        );
+        nd_set(inout f, child, 5, if earlier { 1 } else { 0 });
         earlier = earlier || !inert(in f, in a, x);
     }
 }
 
 fn set_earlier(inout f: Fx, child: u64, v: bool) {
-    nd_set(
-        inout f,
-        child,
-        5,
-        if v {
-            1
-        } else {
-            0
-        }
-    );
+    nd_set(inout f, child, 5, if v { 1 } else { 0 });
 }
 
 // `self.walk(e, parent, edge, env)`.
@@ -717,11 +688,7 @@ fn walk(
     let node = push_node(inout f, parent_in, edge, s, t);
     let parent = node;
     let nested = is_nested(in f, s, t);
-    let operand_edge = if nested {
-        E_CONDITIONAL
-    } else {
-        E_ALWAYS
-    };
+    let operand_edge = if nested { E_CONDITIONAL } else { E_ALWAYS };
     let outer = env_len(in env);
     let k = n.kind;
     if k == 2 {
@@ -902,18 +869,7 @@ fn walk(
                 init_out = cap_pass(in c, hole_cap(in sk, slot_hole(in sk, slot))) == S_OUT;
             }
         }
-        place(
-            inout f,
-            in sk,
-            in c,
-            in a,
-            n.b,
-            if init_out {
-                S_OUT
-            } else {
-                S_INOUT
-            }
-        );
+        place(inout f, in sk, in c, in a, n.b, if init_out { S_OUT } else { S_INOUT });
         if f.failed {
             return;
         }
@@ -1041,11 +997,7 @@ fn walk(
             for q in 0..list_len(in a, cl.pats) {
                 pattern(inout f, in sk, in a, list_at(in a, cl.pats, q), inout env);
             }
-            let edge2 = if i == 0 {
-                E_CONDITIONAL
-            } else {
-                E_REPEATED
-            };
+            let edge2 = if i == 0 { E_CONDITIONAL } else { E_REPEATED };
             walk(inout f, in sk, in c, in a, cl.body, parent, edge2, inout env);
             if f.failed {
                 return;
@@ -1281,11 +1233,7 @@ fn plan(
         for i in 0..inc(common) {
             let n = path_at(in rows, in paths, from, i);
             if n != NONE && nd(in f, n, 1) == E_REPEATED {
-                common = if i == 0 {
-                    0
-                } else {
-                    sub(i, 1)
-                };
+                common = if i == 0 { 0 } else { sub(i, 1) };
                 break;
             }
         }
@@ -1314,11 +1262,7 @@ fn plan(
     if statement == NONE {
         statement = nd(in f, top, 4);
     }
-    let base = if statement == NONE {
-        span_s
-    } else {
-        statement
-    };
+    let base = if statement == NONE { span_s } else { statement };
     let start = if base < PREFIX_LEN {
         0
     } else {
@@ -1330,11 +1274,7 @@ fn plan(
         } else {
             sub(span_e, PREFIX_LEN)
         };
-        if e > sk.src.len() {
-            sk.src.len()
-        } else {
-            e
-        }
+        if e > sk.src.len() { sk.src.len() } else { e }
     } else {
         NONE
     };
@@ -1343,28 +1283,11 @@ fn plan(
     f.decls.push(end);
     f.decls.push(id);
     f.decls.push(num);
-    f
-        .decls
-        .push(
-            if lazy {
-                1
-            } else {
-                0
-            }
-        );
+    f.decls.push(if lazy { 1 } else { 0 });
     for u in from..add(from, count) {
         let slot = w64(in rows, wrapping_mul(u, 3));
         f.memo.try_set(slot, num);
-        f
-            .lazy
-            .try_set(
-                slot,
-                if lazy {
-                    1
-                } else {
-                    0
-                }
-            );
+        f.lazy.try_set(slot, if lazy { 1 } else { 0 });
     }
 }
 
@@ -1455,15 +1378,7 @@ fn rd_hole(
     r.origins.push(r.text.len());
     r.origins.push(vs);
     r.origins.push(ve);
-    r
-        .origins
-        .push(
-            if from_tail {
-                1
-            } else {
-                0
-            }
-        );
+    r.origins.push(if from_tail { 1 } else { 0 });
     let p = permission(in c, in sk, h);
     if p != 0 {
         r.places.push(add(start, w64(in sk.holes, add(h << 2, 2))));
@@ -1820,26 +1735,22 @@ pub fn render(
     let a = l.ast;
     if l.p.d.code.len() == 0 && a.m_items.len() != 0 {
         for i in 0..a.m_items.len() {
-            let it = a
-                .items
-                .get_or(
-                    idx_from_raw[ItemNode](
-                        match a.m_items.try_get(i) {
-                            Option::Some(v) => v,
-                            Option::None => 0,
-                        }
-                    ),
-                    ItemNode { kind: 0, node: 0 }
-                );
+            let it = a.items.get_or(
+                idx_from_raw[ItemNode](
+                    match a.m_items.try_get(i) {
+                        Option::Some(v) => v,
+                        Option::None => 0,
+                    }
+                ),
+                ItemNode { kind: 0, node: 0 }
+            );
             if it.kind == 2 {
                 function(inout f, in sk, in c, in a, it.node, wrapped);
             } else if it.kind == 4 {
-                let n = a
-                    .impls
-                    .get_or(
-                        idx_from_raw[ImplNode](it.node),
-                        ImplNode { ty: none(), generics: 0, methods: 0 }
-                    );
+                let n = a.impls.get_or(
+                    idx_from_raw[ImplNode](it.node),
+                    ImplNode { ty: none(), generics: 0, methods: 0 }
+                );
                 for m in 0..list_len(in a, n.methods) {
                     function(inout f, in sk, in c, in a, list_at(in a, n.methods, m), wrapped);
                     if f.failed {
@@ -1847,20 +1758,18 @@ pub fn render(
                     }
                 }
             } else if it.kind == 5 {
-                let n = a
-                    .traits
-                    .get_or(
-                        idx_from_raw[TraitNode](it.node),
-                        TraitNode {
-                            name: none(),
-                            public: false,
-                            generics: 0,
-                            assoc: 0,
-                            methods: 0,
-                            start: 0,
-                            end: 0
-                        }
-                    );
+                let n = a.traits.get_or(
+                    idx_from_raw[TraitNode](it.node),
+                    TraitNode {
+                        name: none(),
+                        public: false,
+                        generics: 0,
+                        assoc: 0,
+                        methods: 0,
+                        start: 0,
+                        end: 0
+                    }
+                );
                 for m in 0..list_len(in a, n.methods) {
                     function(inout f, in sk, in c, in a, list_at(in a, n.methods, m), wrapped);
                     if f.failed {
@@ -1868,23 +1777,21 @@ pub fn render(
                     }
                 }
             } else if it.kind == 6 {
-                let n = a
-                    .confs
-                    .get_or(
-                        idx_from_raw[ConfNode](it.node),
-                        ConfNode {
-                            model: none(),
-                            public: false,
-                            generics: 0,
-                            trait_ref: none(),
-                            self_ty: none(),
-                            wheres: 0,
-                            assoc: 0,
-                            methods: 0,
-                            start: 0,
-                            end: 0
-                        }
-                    );
+                let n = a.confs.get_or(
+                    idx_from_raw[ConfNode](it.node),
+                    ConfNode {
+                        model: none(),
+                        public: false,
+                        generics: 0,
+                        trait_ref: none(),
+                        self_ty: none(),
+                        wheres: 0,
+                        assoc: 0,
+                        methods: 0,
+                        start: 0,
+                        end: 0
+                    }
+                );
                 for m in 0..list_len(in a, n.methods) {
                     function(inout f, in sk, in c, in a, list_at(in a, n.methods, m), wrapped);
                     if f.failed {
@@ -1995,20 +1902,7 @@ pub fn render(
         let id = w64(in f.decls, add(wrapping_mul(i, 5), 2));
         let num = w64(in f.decls, add(wrapping_mul(i, 5), 3));
         let lz = w64(in f.decls, add(wrapping_mul(i, 5), 4));
-        push_edit(
-            inout edits,
-            s,
-            s,
-            ED_BINDING,
-            id,
-            num,
-            if e == NONE {
-                0
-            } else {
-                1
-            },
-            lz
-        );
+        push_edit(inout edits, s, s, ED_BINDING, id, num, if e == NONE { 0 } else { 1 }, lz);
         if e != NONE {
             let first = f.pool.len();
             f.pool.extend(in " }".as_bytes());

@@ -21,13 +21,16 @@ thread_local! {
     static FMT_OUTPUT: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
-/// `vesper proof-audit` from `modules/proof_audit` (#1341), when its swap
-/// is on (src/swap/proof_audit.rs): it takes the packed arguments and
-/// returns the module's result bytes.
-static PROOF_AUDIT: std::sync::OnceLock<fn(&[u8]) -> Vec<u8>> = std::sync::OnceLock::new();
+/// `vesper proof-audit` from `modules/proof_audit` (#1341): it takes the
+/// packed arguments and returns the module's result bytes.
+pub(crate) type ProofAuditRun = fn(&[u8]) -> Vec<u8>;
+
+/// The installed [`ProofAuditRun`], when its swap is on
+/// (src/swap/proof_audit.rs).
+static PROOF_AUDIT: std::sync::OnceLock<ProofAuditRun> = std::sync::OnceLock::new();
 
 /// Serve `hc_proof_audit_run` from `run` (`modules/proof_audit`).
-pub(crate) fn install_proof_audit(run: fn(&[u8]) -> Vec<u8>) -> Result<(), fn(&[u8]) -> Vec<u8>> {
+pub(crate) fn install_proof_audit(run: ProofAuditRun) -> Result<(), ProofAuditRun> {
     PROOF_AUDIT.set(run)
 }
 

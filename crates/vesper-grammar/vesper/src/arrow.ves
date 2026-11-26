@@ -110,11 +110,7 @@ pub fn validate(in body: Slice[u8], r: ArReq) -> ArCol eff [Fail[GErr]] {
             fail(16, b.a);
         }
     } else {
-        let tail: u64 = if rows & 7 != 0 {
-            1
-        } else {
-            0
-        };
+        let tail: u64 = if rows & 7 != 0 { 1 } else { 0 };
         let minimum = wrapping_add(rows >> 3, tail);
         if wrapping_sub(b.b, b.a) < minimum {
             fail(16, b.a);

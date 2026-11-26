@@ -448,6 +448,7 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     // SH5 lane 18 (#1341): the proof-audit port uses `use`
                     // (#880) and `pub const`.
                     || path.ends_with("packages/vesper-proof-audit")
+                    || path.ends_with("packages/vesper-verify")
                 {
                     continue;
                 }

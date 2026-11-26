@@ -230,11 +230,7 @@ fn where_key(in d: Decls, in fe: Fe, r: TRef) -> u32 {
         return find_dep_trait(in d, in fe, di, r.name);
     }
     let t = at_symbol(in fe.trait_of, r.name);
-    if t == 0 {
-        NONE32
-    } else {
-        wrapping_sub(t, 1)
-    }
+    if t == 0 { NONE32 } else { wrapping_sub(t, 1) }
 }
 
 fn type_of_args_equal(in d: Decls, a: Par, b: Par) -> bool {

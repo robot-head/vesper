@@ -11,45 +11,25 @@ pub fn max_u64() -> u64 {
 }
 
 pub fn min64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 pub fn max64(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 pub fn sat_add(a: u64, b: u64) -> u64 {
     let s = wrapping_add(a, b);
-    if s < a {
-        max_u64()
-    } else {
-        s
-    }
+    if s < a { max_u64() } else { s }
 }
 
 pub fn sat_sub(a: u64, b: u64) -> u64 {
-    if a > b {
-        wrapping_sub(a, b)
-    } else {
-        0
-    }
+    if a > b { wrapping_sub(a, b) } else { 0 }
 }
 
 pub fn sat_mul(a: u64, b: u64) -> u64 {
     let (lo, hi) = mul_wide(a, b);
-    if hi != 0 {
-        max_u64()
-    } else {
-        lo
-    }
+    if hi != 0 { max_u64() } else { lo }
 }
 
 // `x.div_ceil(d)` for `d > 0`, without overflow.
@@ -58,11 +38,7 @@ pub fn div_ceil(x: u64, d: u64) -> u64 {
         return 0;
     }
     let q = x / d;
-    if x % d != 0 {
-        wrapping_add(q, 1)
-    } else {
-        q
-    }
+    if x % d != 0 { wrapping_add(q, 1) } else { q }
 }
 
 // `1 << bits` for `bits < 64`.
@@ -107,17 +83,9 @@ pub fn drain_front(inout s: ChunkSeq[u8], n: u64) {
 // `x << s` and `x >> s` for `s < 64`, else 0. (`wrapping_shl_u64` on a loop
 // variable fails the optimizer's ownership validation, see the report.)
 pub fn shl(x: u64, s: u64) -> u64 {
-    if s < 64 {
-        x << s
-    } else {
-        0
-    }
+    if s < 64 { x << s } else { 0 }
 }
 
 pub fn shr(x: u64, s: u64) -> u64 {
-    if s < 64 {
-        x >> s
-    } else {
-        0
-    }
+    if s < 64 { x >> s } else { 0 }
 }

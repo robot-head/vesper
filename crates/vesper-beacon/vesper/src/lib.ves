@@ -345,19 +345,11 @@ pub fn exp_bucket_index(v: u64, scale: i32) -> i32 eff [Fail[ArithOverflow]] {
 }
 
 fn min_i64(a: i64, b: i64) -> i64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 fn max_i64(a: i64, b: i64) -> i64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // The downscale needed so that `index` fits the window alongside the
@@ -409,11 +401,7 @@ pub fn exp_record(inout counts: Slice[u64], inout st: ExpState, value: u64) eff 
         raise_histogram(HistogramError::TotalOverflow);
     }
     let sum_lo = wrapping_add(st.sum_lo, value);
-    let carry: u64 = if sum_lo < value {
-        1
-    } else {
-        0
-    };
+    let carry: u64 = if sum_lo < value { 1 } else { 0 };
     if carry == 1 && st.sum_hi == MAX_U64 {
         raise_histogram(HistogramError::TotalOverflow);
     }

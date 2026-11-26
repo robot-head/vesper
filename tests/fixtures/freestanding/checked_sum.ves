@@ -9,11 +9,7 @@ fn scale(in p: Pair, k: u64) -> u64 eff [Fail[ArithOverflow]] {
 }
 
 fn classify(v: u64) -> Option[u64] {
-    if v > 100 {
-        Some(v)
-    } else {
-        None
-    }
+    if v > 100 { Some(v) } else { None }
 }
 
 fn main() -> u64 {

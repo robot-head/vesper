@@ -197,15 +197,7 @@ pub fn check_checkpoint(
     if code != 0 {
         return code;
     }
-    out
-        .set(
-            7,
-            if shared {
-                1
-            } else {
-                0
-            }
-        );
+    out.set(7, if shared { 1 } else { 0 });
     let dim = out[0];
     let hidden = out[1];
     let layers = out[2];

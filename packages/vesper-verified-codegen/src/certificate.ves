@@ -305,11 +305,7 @@ fn join_kind(a: u8, b: u8) -> u8 {
     let l_neg = lo_neg(a) || lo_neg(b);
     let ha = hi_rank(a);
     let hb = hi_rank(b);
-    let h = if ha > hb {
-        ha
-    } else {
-        hb
-    };
+    let h = if ha > hb { ha } else { hb };
     for i in 0..5 {
         let k = candidate(i);
         if (lo_neg(k) || !l_neg) && h <= hi_rank(k) {
@@ -614,16 +610,8 @@ fn caught_targets(in p: Prog, inout c1: ChunkSeq[u64], inout c2: ChunkSeq[u64]) 
     let mut s_div0 = div0_exit;
     for i in 0..p.rows.len() {
         let r = row_at(in p, i);
-        let ovf = if s_ovf != ovf_exit {
-            s_ovf
-        } else {
-            MISSING
-        };
-        let div0 = if s_div0 != div0_exit {
-            s_div0
-        } else {
-            MISSING
-        };
+        let ovf = if s_ovf != ovf_exit { s_ovf } else { MISSING };
+        let div0 = if s_div0 != div0_exit { s_div0 } else { MISSING };
         let mut a = MISSING;
         let mut b = MISSING;
         if r.tag == LIR_ARITH {
@@ -1192,11 +1180,7 @@ fn validate(in p: Prog, in c: Cert, inout out: ChunkSeq[u8]) -> bool {
                 return false;
             }
             if r.tag == LIR_JUMP || r.tag == LIR_BRANCH_ZERO {
-                let l = if r.tag == LIR_JUMP {
-                    r.f1
-                } else {
-                    r.f2
-                };
+                let l = if r.tag == LIR_JUMP { r.f1 } else { r.f2 };
                 if l == entry || label_row(in labels, f, l) == MISSING {
                     reject(inout out, in p, f, pc);
                     puts(inout out, "jump to label ");
@@ -1474,11 +1458,7 @@ fn retain_tag(inout f: ChunkSeq[u64], inout o: ChunkSeq[u64], which: u8) {
             break;
         }
         let key = at(in o, i);
-        let keep = if which == 0 {
-            is_in(key)
-        } else {
-            !is_out(key)
-        };
+        let keep = if which == 0 { is_in(key) } else { !is_out(key) };
         if keep {
             no.push(key);
             no.push(at(in o, wrapping_add(i, 1)));
@@ -2271,11 +2251,7 @@ fn generate(in p: Prog) -> Cert {
 // `widen`: a comparison at the widest kind of the same signedness.
 fn widen(r: Lir) -> Lir {
     if r.tag == LIR_COMPARE && lean_kind(r.kind) {
-        let k = if r.kind == K_I64 {
-            K_I64
-        } else {
-            K_U64
-        };
+        let k = if r.kind == K_I64 { K_I64 } else { K_U64 };
         return Lir { tag: r.tag, op: r.op, kind: k, f1: r.f1, f2: r.f2, f3: r.f3 };
     }
     r

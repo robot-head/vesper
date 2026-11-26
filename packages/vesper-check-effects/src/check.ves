@@ -176,11 +176,7 @@ fn edge_at(in s: Walk, i: u64) -> Edge {
 pub fn cmp_names(in c: Ctx, a: u32, b: u32) -> i32 {
     let na = c.names.size(a);
     let nb = c.names.size(b);
-    let n = if na < nb {
-        na
-    } else {
-        nb
-    };
+    let n = if na < nb { na } else { nb };
     for i in 0..n {
         let x = c.names.byte(a, i);
         let y = c.names.byte(b, i);
@@ -395,11 +391,7 @@ fn row(in s: Walk, i: u64) -> DRow {
 }
 
 fn cmp_text(in s: Walk, a: u64, an: u64, b: u64, bn: u64) -> i32 {
-    let n = if an < bn {
-        an
-    } else {
-        bn
-    };
+    let n = if an < bn { an } else { bn };
     for i in 0..n {
         let x = u8_at(in s.text, add(a, i));
         let y = u8_at(in s.text, add(b, i));
@@ -424,18 +416,10 @@ fn cmp_rows(in s: Walk, i: u64, j: u64) -> i32 {
     let a = row(in s, i);
     let b = row(in s, j);
     if a.start != b.start {
-        return if a.start < b.start {
-            -1
-        } else {
-            1
-        };
+        return if a.start < b.start { -1 } else { 1 };
     }
     if a.end != b.end {
-        return if a.end < b.end {
-            -1
-        } else {
-            1
-        };
+        return if a.end < b.end { -1 } else { 1 };
     }
     let c = cmp_text(in s, a.a, wrapping_sub(a.m, a.a), b.a, wrapping_sub(b.m, b.a));
     if c != 0 {
@@ -504,11 +488,7 @@ fn sorted_rows(in s: Walk) -> ChunkSeq[u64] {
 }
 
 fn min_u64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // One line per kept diagnostic, as the Rust side writes it:

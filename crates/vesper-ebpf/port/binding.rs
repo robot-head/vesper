@@ -489,7 +489,7 @@ impl Abi for crate::port::vesper__ebpf__program__MapKind {
             crate::port::vesper__ebpf__program__MapKind::Hash => {
                 out[0] = 0;
             }
-            crate::port::vesper__ebpf__program__MapKind::Array => {
+            crate::port::vesper__ebpf__program__MapKind::ArrayMap => {
                 out[0] = 1;
             }
             crate::port::vesper__ebpf__program__MapKind::PerCpuHash => {
@@ -512,7 +512,7 @@ impl Abi for crate::port::vesper__ebpf__program__MapKind {
     fn get(words: &[u64]) -> Self {
         match words[0] {
             0 => crate::port::vesper__ebpf__program__MapKind::Hash,
-            1 => crate::port::vesper__ebpf__program__MapKind::Array,
+            1 => crate::port::vesper__ebpf__program__MapKind::ArrayMap,
             2 => crate::port::vesper__ebpf__program__MapKind::PerCpuHash,
             3 => crate::port::vesper__ebpf__program__MapKind::PerCpuArray,
             4 => crate::port::vesper__ebpf__program__MapKind::LruHash,

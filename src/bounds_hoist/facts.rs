@@ -1122,7 +1122,11 @@ fn guard_and_copy(
             op: Op::Seq {
                 op: SeqOp::BoundsGuard {
                     inclusive: false,
-                    form: IndexForm::index(false, 0, 0),
+                    form: IndexForm {
+                        negated: false,
+                        plus: 0,
+                        minus: 0,
+                    },
                 },
                 args,
             },

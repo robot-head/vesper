@@ -339,11 +339,7 @@ pub fn mmio_read(in st: MmioState, offset: u64, len: u64, offered: u64, config_l
         }
     } else if offset == 68 {
         match st.queues.try_get(widen_u64(st.queue_sel)) {
-            Option::Some(q) => if q.ready {
-                1
-            } else {
-                0
-            },
+            Option::Some(q) => if q.ready { 1 } else { 0 },
             Option::None => {
                 return MMIO_E_INVALID_QUEUE | mmio_value(st.queue_sel);
             }
@@ -490,8 +486,7 @@ fn mmio_status_write(inout st: MmioState, value: u32, offered: u64) -> u64 {
             MmioStatusFault::StatusRegression { from: _, to: _ } => MMIO_E_STATUS_REGRESSION,
             MmioStatusFault::DriverOkWithoutFeaturesOk { rejected_features: r } => {
                 if r {
-                    st
-                        .stats
+                    st.stats
                         .rejected_feature_sets = wrapping_add(st.stats.rejected_feature_sets, 1);
                 }
                 MMIO_E_DRIVER_OK_WITHOUT_FEATURES_OK

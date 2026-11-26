@@ -3,19 +3,11 @@
 // total full product `mul_wide`).
 
 fn min(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 fn max(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn add_overflows(a: u64, b: u64) -> bool {
@@ -24,39 +16,23 @@ fn add_overflows(a: u64, b: u64) -> bool {
 
 fn sat_add(a: u64, b: u64) -> u64 {
     let s = wrapping_add(a, b);
-    if s < a {
-        INFINITY
-    } else {
-        s
-    }
+    if s < a { INFINITY } else { s }
 }
 
 fn sat_sub(a: u64, b: u64) -> u64 {
-    if a > b {
-        wrapping_sub(a, b)
-    } else {
-        0
-    }
+    if a > b { wrapping_sub(a, b) } else { 0 }
 }
 
 fn sat_mul(a: u64, b: u64) -> u64 {
     let (lo, hi) = mul_wide(a, b);
-    if hi != 0 {
-        INFINITY
-    } else {
-        lo
-    }
+    if hi != 0 { INFINITY } else { lo }
 }
 
 // `a / b` for a divisor the caller knows is non-zero (0 otherwise). The
 // explicit test proves the divisor non-zero to the checker, so the body needs
 // no `Fail[RuntimeError]` handler and the inliner can inline it.
 fn div(a: u64, b: u64) -> u64 {
-    if b == 0 {
-        0
-    } else {
-        a / b
-    }
+    if b == 0 { 0 } else { a / b }
 }
 
 // `2^n` for `n < 64` (0 otherwise). `rotate_left` is total and equals

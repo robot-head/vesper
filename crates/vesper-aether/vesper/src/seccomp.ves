@@ -81,11 +81,7 @@ fn validate_code(at: u64, w: u64, len: u64) -> u64 {
     if code == BPF_JMP_JEQ_K {
         let jt = (w >> 16) & 255;
         let jf = (w >> 24) & 255;
-        let max_j = if jt > jf {
-            jt
-        } else {
-            jf
-        };
+        let max_j = if jt > jf { jt } else { jf };
         if wrapping_add(wrapping_add(at, 1), max_j) >= len {
             return VALIDATE_JUMP;
         }
@@ -284,11 +280,7 @@ pub fn seccomp_compile(
     }
     let n = sort_dedup_into(inout out, 4, in nrs_in);
     let has_ioctl = reqs_in.len() > 0;
-    let ioctl_slot: u64 = if has_ioctl {
-        1
-    } else {
-        0
-    };
+    let ioctl_slot: u64 = if has_ioctl { 1 } else { 0 };
     let ioctl_block = wrapping_add(wrapping_add(4, n), wrapping_add(ioctl_slot, 1));
     let reqs_at = wrapping_add(ioctl_block, 1);
     let m = if has_ioctl {

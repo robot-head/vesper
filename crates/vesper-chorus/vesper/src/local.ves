@@ -173,11 +173,7 @@ pub fn l_init(inout c: C) {
 
 pub fn l_msg(inout c: C, send: bool, peer: u64, label: u64, payload: u64, next: u64) -> u64 {
     let f = c.tmp.len();
-    let tag: u64 = if send {
-        LTag::Send
-    } else {
-        LTag::Recv
-    };
+    let tag: u64 = if send { LTag::Send } else { LTag::Recv };
     mkl(inout c, tag, peer, label, payload, next, f)
 }
 
@@ -212,16 +208,8 @@ fn merge_pass(inout c: C, src: u64, dst: u64, n: u64, w: u64) {
         if lo >= n {
             break;
         }
-        let mid = if add(lo, w) < n {
-            add(lo, w)
-        } else {
-            n
-        };
-        let hi = if add(mid, w) < n {
-            add(mid, w)
-        } else {
-            n
-        };
+        let mid = if add(lo, w) < n { add(lo, w) } else { n };
+        let hi = if add(mid, w) < n { add(mid, w) } else { n };
         let mut i = lo;
         let mut j = mid;
         let mut k = lo;
@@ -297,11 +285,7 @@ pub fn choice(inout c: C, send: bool, peer: u64, from: u64) -> u64 {
         return l_msg(inout c, send, peer, l, p, nx);
     }
     sort_triples(inout c, from, n);
-    let tag: u64 = if send {
-        LTag::Select
-    } else {
-        LTag::Offer
-    };
+    let tag: u64 = if send { LTag::Select } else { LTag::Offer };
     mkl(inout c, tag, peer, 0, 0, 0, from)
 }
 
@@ -332,11 +316,7 @@ pub fn mentions(in c: C, t: u64, var: u64) -> bool {
 pub fn subst(inout c: C, t: u64, var: u64, wv: u64) -> u64 {
     let tag = lt(in c, t);
     if tag == LTag::Var {
-        if la(in c, t) == var {
-            wv
-        } else {
-            t
-        }
+        if la(in c, t) == var { wv } else { t }
     } else if tag == LTag::End {
         t
     } else if tag == LTag::Send || tag == LTag::Recv {

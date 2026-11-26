@@ -154,11 +154,7 @@ pub fn insert(inout b: Slice[u8], pos: u64, rowid: u64, inv_ts: u64, right: u64)
 
 pub fn remove(inout b: Slice[u8], i: u64) {
     let n = rd16(in b, 20);
-    let k = if i == 0 {
-        0
-    } else {
-        wrapping_sub(i, 1)
-    };
+    let k = if i == 0 { 0 } else { wrapping_sub(i, 1) };
     move_left(
         inout b,
         wrapping_add(KEY_OFF, wrapping_add(k, 1) << 4),

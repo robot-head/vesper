@@ -1,10 +1,6 @@
 // User contracts: requires_f and ensures_f become the Lean proposition f$contract.
 fn clamp(x: u64, hi: u64) -> u64 {
-    if x > hi {
-        hi
-    } else {
-        x
-    }
+    if x > hi { hi } else { x }
 }
 
 fn ensures_clamp(x: u64, hi: u64, r: u64) -> bool {

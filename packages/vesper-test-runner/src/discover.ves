@@ -47,13 +47,12 @@ pub fn toks(in src: Slice[u8]) -> Toks {
     let mut start = ChunkSeq::with_capacity[u64](n);
     let mut end = ChunkSeq::with_capacity[u64](n);
     for i in 0..n {
-        start
-            .push(
-                match t.start.try_get(i) {
-                    Option::Some(s) => widen_u64(s),
-                    Option::None => 0,
-                }
-            );
+        start.push(
+            match t.start.try_get(i) {
+                Option::Some(s) => widen_u64(s),
+                Option::None => 0,
+            }
+        );
         end.push(token_end(in t, i));
     }
     Toks { kind: t.kind, start: start, end: end }
@@ -515,11 +514,7 @@ fn push_value(inout out: ChunkSeq[u8], in txt: Slice[u8], v: Val) {
 }
 
 fn opt_value(has: bool, v: u64) -> u64 {
-    if has {
-        v
-    } else {
-        0
-    }
+    if has { v } else { 0 }
 }
 
 // One discovered test: index, name, span, the harness plan and the raw
@@ -558,11 +553,7 @@ fn put_test(
     let attr_fault = has_test && t.fault_profile.has;
     let gate = has_test
         && (t.max_stack.has || t.max_cycles.has || (t.zero_alloc_has && t.zero_alloc));
-    let pins = if has_attrs {
-        fa.cn
-    } else {
-        0
-    };
+    let pins = if has_attrs { fa.cn } else { 0 };
     // A case row's wrapper is an explicit unit invocation: no effects.
     let effectful = !is_case;
     let const_time = effectful && has_effect(in b, in effects, it, in "ConstTime");
@@ -761,22 +752,21 @@ pub fn discover(in b: Slice[u8]) -> ChunkSeq[u64] {
     for i in 0..item_count {
         let is_fn = r.word(in b) != 0;
         if !is_fn {
-            items
-                .push(
-                    Item {
-                        is_fn: false,
-                        ns: 0,
-                        ne: 0,
-                        start: 0,
-                        end: 0,
-                        generic: false,
-                        body: false,
-                        pa: 0,
-                        pn: 0,
-                        ea: 0,
-                        en: 0
-                    }
-                );
+            items.push(
+                Item {
+                    is_fn: false,
+                    ns: 0,
+                    ne: 0,
+                    start: 0,
+                    end: 0,
+                    generic: false,
+                    body: false,
+                    pa: 0,
+                    pn: 0,
+                    ea: 0,
+                    en: 0
+                }
+            );
             continue;
         }
         let (ns, ne) = r.text(in b);
@@ -798,22 +788,21 @@ pub fn discover(in b: Slice[u8]) -> ChunkSeq[u64] {
             effects.push(es);
             effects.push(ee);
         }
-        items
-            .push(
-                Item {
-                    is_fn: true,
-                    ns: ns,
-                    ne: ne,
-                    start: start,
-                    end: end,
-                    generic: generic,
-                    body: body,
-                    pa: pa,
-                    pn: pn,
-                    ea: ea,
-                    en: en
-                }
-            );
+        items.push(
+            Item {
+                is_fn: true,
+                ns: ns,
+                ne: ne,
+                start: start,
+                end: end,
+                generic: generic,
+                body: body,
+                pa: pa,
+                pn: pn,
+                ea: ea,
+                en: en
+            }
+        );
     }
     let case_count = r.word(in b);
     let mut cases: ChunkSeq[Case] = ChunkSeq::with_capacity[Case](case_count);
@@ -923,11 +912,7 @@ pub fn discover(in b: Slice[u8]) -> ChunkSeq[u64] {
             is_case,
             c
         );
-        let key = if is_case {
-            c.start
-        } else {
-            it.start
-        };
+        let key = if is_case { c.start } else { it.start };
         order.push(key);
         order.push(offset);
         order.push(sub(words.len(), offset));

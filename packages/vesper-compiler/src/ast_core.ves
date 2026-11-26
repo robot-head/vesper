@@ -210,11 +210,7 @@ fn c_slot(env: CEnv, i: i64) -> CBinding eff [Fail[CheckError], Fail[Diag], Fail
     }
 }
 fn c_power(i: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
-    if i == 0 {
-        1
-    } else {
-        2 * c_power(i - 1)
-    }
+    if i == 0 { 1 } else { 2 * c_power(i - 1) }
 }
 fn c_moved(env: CEnv, i: i64) -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     c_div(env.moved, c_power(i)) % 2 == 1

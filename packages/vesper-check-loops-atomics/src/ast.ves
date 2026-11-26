@@ -304,12 +304,10 @@ pub fn read_pat(
     }
     let n = wrapping_u32(wrapping_sub(x.stack.len(), mark));
     let a = x.finish_pat_kids(mark);
-    let ok = x
-        .pats
-        .try_set(
-            widen_u64(id),
-            PatRow { kind: kind, start: start, end: end, name: name, a: a, n: n }
-        );
+    let ok = x.pats.try_set(
+        widen_u64(id),
+        PatRow { kind: kind, start: start, end: end, name: name, a: a, n: n }
+    );
     id
 }
 

@@ -188,50 +188,44 @@ pub fn item_at(in a: Ast, i: u32) -> ItemNode {
 }
 
 pub fn fn_at(in a: Ast, f: u32) -> FnNode {
-    a
-        .fns
-        .get_or(
-            idx_from_raw[FnNode](f),
-            FnNode {
-                name: NONE,
-                fip: false,
-                generics: 0,
-                params: 0,
-                result: NONE,
-                effects: NONE,
-                body: NONE,
-                start: 0,
-                end: 0
-            }
-        )
+    a.fns.get_or(
+        idx_from_raw[FnNode](f),
+        FnNode {
+            name: NONE,
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: NONE,
+            effects: NONE,
+            body: NONE,
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 pub fn adt_at(in a: Ast, i: u32) -> AdtNode {
-    a
-        .adts
-        .get_or(
-            idx_from_raw[AdtNode](i),
-            AdtNode {
-                name: NONE,
-                mode: 0,
-                generics: 0,
-                variants: 0,
-                is_enum: false,
-                tiled: false,
-                tile_width: 0,
-                start: 0,
-                end: 0
-            }
-        )
+    a.adts.get_or(
+        idx_from_raw[AdtNode](i),
+        AdtNode {
+            name: NONE,
+            mode: 0,
+            generics: 0,
+            variants: 0,
+            is_enum: false,
+            tiled: false,
+            tile_width: 0,
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 pub fn effect_decl_at(in a: Ast, i: u32) -> EffectDeclNode {
-    a
-        .effect_decls
-        .get_or(
-            idx_from_raw[EffectDeclNode](i),
-            EffectDeclNode { name: NONE, linear: false, generics: 0, ops: 0, start: 0, end: 0 }
-        )
+    a.effect_decls.get_or(
+        idx_from_raw[EffectDeclNode](i),
+        EffectDeclNode { name: NONE, linear: false, generics: 0, ops: 0, start: 0, end: 0 }
+    )
 }
 
 pub fn impl_at(in a: Ast, i: u32) -> ImplNode {
@@ -239,49 +233,35 @@ pub fn impl_at(in a: Ast, i: u32) -> ImplNode {
 }
 
 pub fn trait_at(in a: Ast, i: u32) -> TraitNode {
-    a
-        .traits
-        .get_or(
-            idx_from_raw[TraitNode](i),
-            TraitNode {
-                name: NONE,
-                public: false,
-                generics: 0,
-                assoc: 0,
-                methods: 0,
-                start: 0,
-                end: 0
-            }
-        )
+    a.traits.get_or(
+        idx_from_raw[TraitNode](i),
+        TraitNode { name: NONE, public: false, generics: 0, assoc: 0, methods: 0, start: 0, end: 0 }
+    )
 }
 
 pub fn conf_at(in a: Ast, i: u32) -> ConfNode {
-    a
-        .confs
-        .get_or(
-            idx_from_raw[ConfNode](i),
-            ConfNode {
-                model: NONE,
-                public: false,
-                generics: 0,
-                trait_ref: NONE,
-                self_ty: NONE,
-                wheres: 0,
-                assoc: 0,
-                methods: 0,
-                start: 0,
-                end: 0
-            }
-        )
+    a.confs.get_or(
+        idx_from_raw[ConfNode](i),
+        ConfNode {
+            model: NONE,
+            public: false,
+            generics: 0,
+            trait_ref: NONE,
+            self_ty: NONE,
+            wheres: 0,
+            assoc: 0,
+            methods: 0,
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 pub fn stmt_at(in a: Ast, s: u32) -> StmtNode {
-    a
-        .stmts
-        .get_or(
-            idx_from_raw[StmtNode](s),
-            StmtNode { kind: 0, pat: NONE, ty: NONE, value: NONE, mutable: false }
-        )
+    a.stmts.get_or(
+        idx_from_raw[StmtNode](s),
+        StmtNode { kind: 0, pat: NONE, ty: NONE, value: NONE, mutable: false }
+    )
 }
 
 pub fn arg_at(in a: Ast, i: u32) -> ArgNode {
@@ -293,12 +273,10 @@ pub fn clause_at(in a: Ast, c: u32) -> ClauseNode {
 }
 
 pub fn param_at(in a: Ast, p: u32) -> ParamNode {
-    a
-        .params
-        .get_or(
-            idx_from_raw[ParamNode](p),
-            ParamNode { name: NONE, pass: 0, projections: 0, ty: NONE, start: 0, end: 0 }
-        )
+    a.params.get_or(
+        idx_from_raw[ParamNode](p),
+        ParamNode { name: NONE, pass: 0, projections: 0, ty: NONE, start: 0, end: 0 }
+    )
 }
 
 // ------------------------------------------------------------ names
@@ -471,18 +449,7 @@ fn declaration(inout x: Ix, name: u32, s: u32, e: u32, kind: u8, f: u32) -> bool
 
 fn function_decl(inout x: Ix, f: u32, kind: u8, record: bool) -> bool {
     let n = fn_at(in x.ast, f);
-    declaration(
-        inout x,
-        n.name,
-        n.start,
-        n.end,
-        kind,
-        if record {
-            f
-        } else {
-            NONE
-        }
-    )
+    declaration(inout x, n.name, n.start, n.end, kind, if record { f } else { NONE })
 }
 
 fn item(inout x: Ix, it: ItemNode) -> bool {
@@ -495,11 +462,7 @@ fn item(inout x: Ix, it: ItemNode) -> bool {
             a.name,
             a.start,
             a.end,
-            if a.is_enum {
-                KIND_ENUM
-            } else {
-                KIND_STRUCT
-            },
+            if a.is_enum { KIND_ENUM } else { KIND_STRUCT },
             NONE
         )
     } else if it.kind == ITEM_EFFECT {

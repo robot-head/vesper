@@ -32,27 +32,24 @@ fn p_item(in a: Ast, i: u32) -> ItemNode {
 }
 
 fn p_fn(in a: Ast, i: u32) -> FnNode {
-    a
-        .fns
-        .get_or(
-            idx_from_raw[FnNode](i),
-            FnNode {
-                name: none(),
-                fip: false,
-                generics: 0,
-                params: 0,
-                result: none(),
-                effects: none(),
-                body: none(),
-                start: 0,
-                end: 0
-            }
-        )
+    a.fns.get_or(
+        idx_from_raw[FnNode](i),
+        FnNode {
+            name: none(),
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: none(),
+            effects: none(),
+            body: none(),
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 fn adt_end(in a: Ast, i: u32) -> u32 {
-    a
-        .adts
+    a.adts
         .get_or(
             idx_from_raw[AdtNode](i),
             AdtNode {
@@ -71,8 +68,7 @@ fn adt_end(in a: Ast, i: u32) -> u32 {
 }
 
 fn effect_end(in a: Ast, i: u32) -> u32 {
-    a
-        .effect_decls
+    a.effect_decls
         .get_or(
             idx_from_raw[EffectDeclNode](i),
             EffectDeclNode { name: none(), linear: false, generics: 0, ops: 0, start: 0, end: 0 }
@@ -85,58 +81,50 @@ fn p_impl(in a: Ast, i: u32) -> ImplNode {
 }
 
 fn p_trait(in a: Ast, i: u32) -> TraitNode {
-    a
-        .traits
-        .get_or(
-            idx_from_raw[TraitNode](i),
-            TraitNode {
-                name: none(),
-                public: false,
-                generics: 0,
-                assoc: 0,
-                methods: 0,
-                start: 0,
-                end: 0
-            }
-        )
+    a.traits.get_or(
+        idx_from_raw[TraitNode](i),
+        TraitNode {
+            name: none(),
+            public: false,
+            generics: 0,
+            assoc: 0,
+            methods: 0,
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 fn p_conf(in a: Ast, i: u32) -> ConfNode {
-    a
-        .confs
-        .get_or(
-            idx_from_raw[ConfNode](i),
-            ConfNode {
-                model: none(),
-                public: false,
-                generics: 0,
-                trait_ref: none(),
-                self_ty: none(),
-                wheres: 0,
-                assoc: 0,
-                methods: 0,
-                start: 0,
-                end: 0
-            }
-        )
+    a.confs.get_or(
+        idx_from_raw[ConfNode](i),
+        ConfNode {
+            model: none(),
+            public: false,
+            generics: 0,
+            trait_ref: none(),
+            self_ty: none(),
+            wheres: 0,
+            assoc: 0,
+            methods: 0,
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 fn p_param(in a: Ast, i: u32) -> ParamNode {
-    a
-        .params
-        .get_or(
-            idx_from_raw[ParamNode](i),
-            ParamNode { name: none(), pass: 0, projections: 0, ty: none(), start: 0, end: 0 }
-        )
+    a.params.get_or(
+        idx_from_raw[ParamNode](i),
+        ParamNode { name: none(), pass: 0, projections: 0, ty: none(), start: 0, end: 0 }
+    )
 }
 
 fn p_stmt(in a: Ast, i: u32) -> StmtNode {
-    a
-        .stmts
-        .get_or(
-            idx_from_raw[StmtNode](i),
-            StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
-        )
+    a.stmts.get_or(
+        idx_from_raw[StmtNode](i),
+        StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
+    )
 }
 
 fn p_arg(in a: Ast, i: u32) -> ArgNode {
@@ -144,8 +132,7 @@ fn p_arg(in a: Ast, i: u32) -> ArgNode {
 }
 
 fn p_clause(in a: Ast, i: u32) -> ClauseNode {
-    a
-        .clauses
+    a.clauses
         .get_or(idx_from_raw[ClauseNode](i), ClauseNode { name: none(), pats: 0, body: none() })
 }
 
@@ -500,11 +487,7 @@ fn cmp_keys(in k: Interner, x: u32, y: u32) -> i64 {
     let (ys, ye) = k.span(symbol_from_id(y));
     let xl = wrapping_sub(xe, xs);
     let yl = wrapping_sub(ye, ys);
-    let n = if xl < yl {
-        xl
-    } else {
-        yl
-    };
+    let n = if xl < yl { xl } else { yl };
     for i in 0..n {
         let a = match k.text_byte(wrapping_add(xs, i)) {
             Option::Some(c) => c,
@@ -515,11 +498,7 @@ fn cmp_keys(in k: Interner, x: u32, y: u32) -> i64 {
             Option::None => 0,
         };
         if a != b {
-            return if a < b {
-                -1
-            } else {
-                1
-            };
+            return if a < b { -1 } else { 1 };
         }
     }
     if xl < yl {

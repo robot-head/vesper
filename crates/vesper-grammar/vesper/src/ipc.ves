@@ -839,14 +839,7 @@ fn batch(
         let c = column(in input[body_at..body_end], request, body_at);
         out.push(c.values_start);
         out.push(c.values_end);
-        out
-            .push(
-                if c.has_validity {
-                    1
-                } else {
-                    0
-                }
-            );
+        out.push(if c.has_validity { 1 } else { 0 });
         out.push(c.validity_start);
         out.push(c.validity_end);
         out.push(c.rows);

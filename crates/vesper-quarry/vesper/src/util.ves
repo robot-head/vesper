@@ -222,15 +222,7 @@ pub fn null_val() -> Val {
 }
 
 pub fn bool_val(b: bool) -> Val {
-    Val {
-        t: 4,
-        a: if b {
-            1
-        } else {
-            0
-        },
-        b: 0
-    }
+    Val { t: 4, a: if b { 1 } else { 0 }, b: 0 }
 }
 
 pub fn vat(in d: D, in q: Q, i: u64) -> Val {
@@ -256,11 +248,7 @@ pub fn div_rem(v: u64, d: u64) -> (u64, u64) {
 // ceil(a / b) for b > 0.
 pub fn ceil_div(a: u64, b: u64) -> u64 {
     let (d, r) = div_rem(a, b);
-    if r == 0 {
-        d
-    } else {
-        wrapping_add(d, 1)
-    }
+    if r == 0 { d } else { wrapping_add(d, 1) }
 }
 
 pub fn put(inout m: ChunkSeq[u8], in s: Str) {
@@ -339,11 +327,7 @@ pub fn same(in p: ChunkSeq[u8], ao: u64, al: u64, bo: u64, bl: u64) -> bool {
 
 // Byte-wise order of two pool ranges: 0 less, 1 equal, 2 greater.
 pub fn order(in p: ChunkSeq[u8], ao: u64, al: u64, bo: u64, bl: u64) -> u64 {
-    let n = if al < bl {
-        al
-    } else {
-        bl
-    };
+    let n = if al < bl { al } else { bl };
     for i in 0..n {
         let x = cb(in p, wrapping_add(ao, i));
         let y = cb(in p, wrapping_add(bo, i));
@@ -563,17 +547,15 @@ pub fn load_catalog(inout q: Q, in meta: Slice[u64], at: u64) -> u64 {
         p = wrapping_add(p, 3);
         q.tabs.push(CTab { noff: noff, nlen: nlen, start: q.cols.len(), n: nc });
         for c in 0..nc {
-            q
-                .cols
-                .push(
-                    CCol {
-                        noff: sw(in meta, p),
-                        nlen: sw(in meta, wrapping_add(p, 1)),
-                        ty: sw(in meta, wrapping_add(p, 2)),
-                        nullable: sw(in meta, wrapping_add(p, 3)) != 0,
-                        used: false
-                    }
-                );
+            q.cols.push(
+                CCol {
+                    noff: sw(in meta, p),
+                    nlen: sw(in meta, wrapping_add(p, 1)),
+                    ty: sw(in meta, wrapping_add(p, 2)),
+                    nullable: sw(in meta, wrapping_add(p, 3)) != 0,
+                    used: false
+                }
+            );
             p = wrapping_add(p, 4);
         }
     }
