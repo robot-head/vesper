@@ -422,6 +422,16 @@ fn meta_path(in path: Slice[u8], follow: bool) -> Metadata eff [Ffi[StdFs], Fail
     }
 }
 
+// WASI 0.2 paths are relative to a preopened directory and have no
+// absolute form: `canonicalize` is `unsupported()`.
+pub fn canonicalize(in path: Str) -> String eff [Ffi[StdFs], Fail[IoError]] {
+    raise_kind(unsupported())
+}
+
+pub fn canonicalize_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    raise_kind(unsupported())
+}
+
 // The metadata of `path`, following symbolic links.
 pub fn metadata(in path: Str) -> Metadata eff [Ffi[StdFs], Fail[IoError]] {
     meta_path(in path.as_bytes(), true)

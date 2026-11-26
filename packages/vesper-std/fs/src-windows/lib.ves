@@ -809,6 +809,115 @@ fn meta_path(in path: Slice[u8], follow: bool) -> Metadata eff [Ffi[StdFs], Fail
     }
 }
 
+fn push_utf8_cp(inout out: ChunkSeq[u8], cp: u32) {
+    if cp < 128 {
+        out.push(wrapping_u8(cp));
+    } else if cp < 2048 {
+        out.push(wrapping_u8(192 | wrapping_shr_u32(cp, 6)));
+        out.push(wrapping_u8(128 | (cp & 63)));
+    } else if cp < 65536 {
+        out.push(wrapping_u8(224 | wrapping_shr_u32(cp, 12)));
+        out.push(wrapping_u8(128 | (wrapping_shr_u32(cp, 6) & 63)));
+        out.push(wrapping_u8(128 | (cp & 63)));
+    } else {
+        out.push(wrapping_u8(240 | wrapping_shr_u32(cp, 18)));
+        out.push(wrapping_u8(128 | (wrapping_shr_u32(cp, 12) & 63)));
+        out.push(wrapping_u8(128 | (wrapping_shr_u32(cp, 6) & 63)));
+        out.push(wrapping_u8(128 | (cp & 63)));
+    }
+}
+
+// UTF-16 unit `i` of a buffer that holds two units per `u32`.
+fn unit_at(in src: Slice[u32], i: u64) -> u32 {
+    let w = match src.try_get(wrapping_shr_u64(i, 1)) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    if (i & 1) == 0 {
+        w & 65535
+    } else {
+        wrapping_shr_u32(w, 16)
+    }
+}
+
+// The first `n` UTF-16 units of `src` as UTF-8 (a lone surrogate is
+// U+FFFD).
+fn units_to_utf8(in src: Slice[u32], n: u64) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let w1 = unit_at(in src, i);
+        i = wrapping_add(i, 1);
+        if w1 >= 55296 && w1 <= 56319 && i < n {
+            let w2 = unit_at(in src, i);
+            if w2 >= 56320 && w2 <= 57343 {
+                i = wrapping_add(i, 1);
+                let hi = wrapping_shl_u32(wrapping_sub(w1, 55296), 10);
+                let lo = wrapping_sub(w2, 56320);
+                push_utf8_cp(inout out, wrapping_add(65536, hi | lo));
+                continue;
+            }
+        }
+        if w1 >= 55296 && w1 <= 57343 {
+            push_utf8_cp(inout out, 65533);
+        } else {
+            push_utf8_cp(inout out, w1);
+        }
+    }
+    out
+}
+
+// `path` as an absolute path with every link, `.` and `..` resolved, as
+// `std::fs::canonicalize`: the final path of a handle opened on it (a
+// `\\?\` path). The path must exist.
+pub fn canonicalize(in path: Str) -> String eff [Ffi[StdFs], Fail[IoError]] {
+    let bytes = canonicalize_path(in path.as_bytes());
+    match String::from_utf8(in bytes.as_slice()) {
+        Option::Some(s) => s,
+        Option::None => raise_kind(invalid_input()),
+    }
+}
+
+pub fn canonicalize_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    let wpath = utf8_to_utf16(in path);
+    let h = match StdFs::CreateFileW(
+        in wpath.as_slice(),
+        0,
+        StdFs::FILE_SHARE_ALL,
+        0,
+        StdFs::OPEN_EXISTING,
+        StdFs::FILE_FLAG_BACKUP_SEMANTICS,
+        0
+    ) {
+        Result::Ok((h, err)) => {
+            if h == StdFs::INVALID_HANDLE_VALUE {
+                return raise_io(widen_u64(err));
+            }
+            h
+        }
+        Result::Err(_) => return raise_kind(invalid_input()),
+    };
+    let mut buf: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    buf.resize(260, 0);
+    loop {
+        let (n, err) = StdFs::GetFinalPathNameByHandleW(h, inout buf.as_slice_mut(), 0);
+        if n == 0 {
+            let _ = StdFs::CloseHandle(h);
+            return raise_io(widen_u64(err));
+        }
+        let nu = widen_u64(n);
+        if nu < buf.len() {
+            let _ = StdFs::CloseHandle(h);
+            return units_to_utf8(in buf.as_slice(), nu);
+        }
+        buf.resize(nu, 0);
+    }
+    ChunkSeq::new[u8]()
+}
+
 pub fn metadata(in path: Str) -> Metadata eff [Ffi[StdFs], Fail[IoError]] {
     meta_path(in path.as_bytes(), true)
 }

@@ -12,7 +12,8 @@ use std_io_support::{MODES, Temp, agree, check_driver, lit};
 const DRIVER: &str = r#"use @vesper-std/fs::{
     IoError, Metadata, read, read_path, read_string, write, append, create_new, replace, rename,
     remove_file, remove_dir, remove_dir_all, create_dir, create_dir_all, metadata,
-    symlink_metadata, exists, kind_file, kind_dir, create_dir_mode, set_permissions, copy
+    symlink_metadata, exists, kind_file, kind_dir, create_dir_mode, set_permissions, copy,
+    canonicalize, canonicalize_path
 };
 use @vesper-std/fs::walk::{
     Entries, walk, list_dir, entry_count, entry_start, entry_end, entry_kind, entry_join
@@ -178,6 +179,27 @@ pub fn paths() -> u64 eff [Ffi[StdFs]] {
         let b: u64 = if there { 1 } else { 0 };
         let c: u64 = if after { 1 } else { 0 };
         mix(mix(mix(mix(mix(a, b), c), m.size), widen_u64(m.kind)), widen_u64(d.kind))
+    } with {
+        return v => v,
+        raise(e, _) => code(e),
+    }
+}
+
+// `canonicalize` of a path through `.`, `..` and (on Unix) a link the test
+// makes, as text and as bytes, and of a missing path (an error).
+pub fn canonical() -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        create_dir_all(in "@DIR@/c/d/e");
+        let text = canonicalize(in "@DIR@/c/./link/../d/e");
+        let bytes = canonicalize_path(in "@DIR@/c/d/e/..".as_bytes());
+        let missing = handle Fail[IoError] in {
+            let _ = canonicalize(in "@DIR@/c/none");
+            0
+        } with {
+            return v => v,
+            raise(e, _) => code(e),
+        };
+        mix(mix(hash(in text.as_bytes()), hash(in bytes.as_slice())), missing)
     } with {
         return v => v,
         raise(e, _) => code(e),
@@ -620,6 +642,29 @@ fn failures_raise_typed_io_errors() {
         let _ = fs::remove_file(dir.path().join("once.txt"));
         assert_eq!(agree(&checked, "errors", &[mode]), want, "{mode:?}");
     }
+}
+
+#[test]
+fn canonicalize_matches_std() {
+    let dir = Temp::new("std-fs");
+    let checked = check_driver(&source(&dir));
+    let d = dir.path();
+    fs::create_dir_all(d.join("c/d/e")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(d.join("c/d"), d.join("c/link")).unwrap();
+    #[cfg(not(unix))]
+    fs::create_dir_all(d.join("c/link")).unwrap();
+    let text = fs::canonicalize(d.join("c/./link/../d/e")).unwrap();
+    let bytes = fs::canonicalize(d.join("c/d/e/..")).unwrap();
+    let missing = code(&fs::canonicalize(d.join("c/none")).unwrap_err());
+    let want = mix(
+        mix(
+            hash(text.to_str().unwrap().as_bytes()),
+            hash(bytes.to_str().unwrap().as_bytes()),
+        ),
+        missing,
+    );
+    assert_eq!(agree(&checked, "canonical", &MODES), want);
 }
 
 #[cfg(unix)]

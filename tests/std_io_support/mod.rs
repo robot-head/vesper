@@ -226,6 +226,7 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn rename(from: *const c_char, to: *const c_char) -> i32;
         fn unlink(path: *const c_char) -> i32;
         fn rmdir(path: *const c_char) -> i32;
+        fn realpath(path: *const c_char, resolved: *mut c_char) -> *mut c_char;
         fn mkdir(path: *const c_char, mode: u32) -> i32;
         fn chmod(path: *const c_char, mode: u32) -> i32;
         fn fchmod(fd: i32, mode: u32) -> i32;
@@ -329,6 +330,7 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("rename", rename as *const u8),
         ("unlink", unlink as *const u8),
         ("rmdir", rmdir as *const u8),
+        ("realpath", realpath as *const u8),
         ("mkdir", mkdir as *const u8),
         ("chmod", chmod as *const u8),
         ("fchmod", fchmod as *const u8),

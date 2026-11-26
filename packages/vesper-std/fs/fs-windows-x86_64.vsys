@@ -17,6 +17,8 @@ sys library StdFs (
     const FILE_ATTRIBUTE_DIRECTORY: u32 = 16;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 1024;
     const MOVEFILE_REPLACE_EXISTING: u32 = 1;
+    // `CreateFileW` opens a directory only with this flag.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 33554432;
     const ERROR_FILE_NOT_FOUND: u32 = 2;
     const ERROR_PATH_NOT_FOUND: u32 = 3;
     const ERROR_NO_MORE_FILES: u32 = 18;
@@ -58,6 +60,14 @@ sys library StdFs (
     ) -> ForeignVal[i32] errno;
     fn FlushFileBuffers(hFile: u64) -> ForeignVal[i32] errno;
     fn CloseHandle(hObject: u64) -> ForeignVal[i32];
+    // The final path of an open handle (`VOLUME_NAME_DOS`, a `\\?\` path, as
+    // `std::fs::canonicalize`): UTF-16 lands two units per `u32`, and the
+    // buffer's `u32` count is the size passed, so a result always fits.
+    fn GetFinalPathNameByHandleW(
+        hFile: u64,
+        nocapture inout lpszFilePath: CSlice[u32],
+        dwFlags: u32
+    ) -> ForeignVal[u32] errno;
     fn GetFileSizeEx(hFile: u64, nocapture inout lpFileSize: i64) -> ForeignVal[i32] errno;
     fn GetFileAttributesExW(
         nocapture in lpFileName: CWStr,

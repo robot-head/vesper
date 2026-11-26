@@ -30,6 +30,8 @@ sys library StdFs (
     const STAT_MTIME_WORD: u64 = 11;
     const DIRENT_TYPE: u64 = 18;
     const DIRENT_NAME: u64 = 19;
+    // The longest path `realpath` writes, its NUL included.
+    const PATH_MAX: u64 = 4096;
     // A `DIR *` from `opendir`.
     linear extern type Dir;
     // Room for every target's `struct stat`, read word by word.
@@ -48,6 +50,7 @@ sys library StdFs (
     fn rename(nocapture in from: CStr, nocapture in to: CStr) -> ForeignVal[i32] errno;
     fn unlink(nocapture in path: CStr) -> ForeignVal[i32] errno;
     fn rmdir(nocapture in path: CStr) -> ForeignVal[i32] errno;
+    fn realpath(nocapture in path: CStr, nocapture inout resolved: CSlice[u8]) -> ForeignVal[u64] errno;
     fn mkdir(nocapture in path: CStr, mode: u32) -> ForeignVal[i32] errno;
     // `set_permissions` and `copy` (`mode_t` is 16 bits on Apple; the
     // argument travels in a full register either way).

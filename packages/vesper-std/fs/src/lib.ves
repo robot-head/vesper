@@ -18,6 +18,7 @@ use self::sys::{
     os_write,
     os_sync,
     os_metadata,
+    os_canonicalize,
     os_file_len,
     os_rename,
     os_remove_file,
@@ -425,6 +426,25 @@ fn meta_path(in path: Slice[u8], follow: bool) -> Metadata eff [Ffi[StdFs], Fail
         return raise_io(err);
     }
     m
+}
+
+// `path` as an absolute path with every symbolic link, `.` and `..`
+// resolved, as `std::fs::canonicalize`: the path must exist.
+pub fn canonicalize(in path: Str) -> String eff [Ffi[StdFs], Fail[IoError]] {
+    let bytes = canonicalize_path(in path.as_bytes());
+    match String::from_utf8(in bytes.as_slice()) {
+        Option::Some(s) => s,
+        Option::None => raise_kind(invalid_input()),
+    }
+}
+
+pub fn canonicalize_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    let mut err: u64 = 0;
+    let out = os_canonicalize(in path, inout err);
+    if err != 0 {
+        return raise_io(err);
+    }
+    out
 }
 
 // The metadata of `path`, following symbolic links.

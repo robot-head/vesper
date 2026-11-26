@@ -415,6 +415,37 @@ fn path_status(r: Result[(i32, u32), ForeignInvalid], inout err: u64) -> u32 {
 }
 
 // Rename `from` to `to`, replacing `to` if it exists.
+// `path` made absolute, with every symbolic link, `.` and `..` resolved
+// (`realpath`), or empty with `err` set.
+pub fn os_canonicalize(in path: Slice[u8], inout err: u64) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.resize(StdFs::PATH_MAX, 0);
+    match StdFs::realpath(in path, inout out.as_slice_mut()) {
+        Result::Ok((p, e)) => {
+            if p == 0 {
+                err = os_error_word(e);
+                out.clear();
+                return out;
+            }
+            err = 0;
+            let mut n: u64 = 0;
+            loop {
+                if n >= out.len() || byte_at(in out.as_slice(), n) == 0 {
+                    break;
+                }
+                n = wrapping_add(n, 1);
+            }
+            out.truncate(n);
+            out
+        },
+        Result::Err(_) => {
+            err = bad_path();
+            out.clear();
+            out
+        },
+    }
+}
+
 pub fn os_rename(in from: Slice[u8], in to: Slice[u8], inout err: u64) -> u32 eff [Ffi[StdFs]] {
     path_status(StdFs::rename(in from, in to), inout err)
 }
