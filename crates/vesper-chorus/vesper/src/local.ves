@@ -11,25 +11,8 @@
 // words.
 use self::{C};
 use self::util::{
-    add,
-    inc,
-    intern_slice,
-    intern_str,
-    intern_tb,
-    iw,
-    none,
-    role_sym,
-    setw,
-    sw,
-    sym_cmp,
-    tb_str,
-    tb_sym,
-    tb_u64,
-    Br,
-    Fnv,
-    LTag,
-    Order,
-    Wire
+    add, inc, intern_slice, intern_str, intern_tb, iw, none, role_sym, setw, sw, sym_cmp, tb_str,
+    tb_sym, tb_u64, Br, Fnv, LTag, Order, Wire
 };
 
 // Input records (lib.ves) past their tag word: Send/Recv `1|2 peer label

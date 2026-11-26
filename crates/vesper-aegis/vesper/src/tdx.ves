@@ -4,19 +4,8 @@
 // (TdxQuoteV4).
 use self::{AErr, Rd};
 use self::reader::{
-    arr,
-    finish,
-    k_over_budget,
-    raise,
-    rd,
-    reserved,
-    tail,
-    take,
-    rd_u16,
-    rd_u32,
-    rd_u64,
-    unsupported,
-    put
+    arr, finish, k_over_budget, raise, rd, reserved, tail, take, rd_u16, rd_u32, rd_u64,
+    unsupported, put
 };
 
 // src/tdx.rs: quote versions, the body types and their lengths, ECDSA

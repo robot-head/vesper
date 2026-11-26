@@ -2,19 +2,8 @@
 use self::{CCol, CTab, D, Q, Val};
 use self::util::{ccol, ctab, cw, ex, fail_name, find_table, link, node, none, put, put_range, sw};
 use self::values::{
-    charge_row,
-    dtab,
-    finite,
-    find_data,
-    holds,
-    row_val,
-    size_value,
-    size_vec,
-    tick,
-    val_at,
-    valid,
-    vheap,
-    width
+    charge_row, dtab, finite, find_data, holds, row_val, size_value, size_vec, tick, val_at, valid,
+    vheap, width
 };
 
 // The scan slots of the plan below n, in order (`RelPlan::slots`).

@@ -10,45 +10,28 @@
 // declaration order. Results that are trees are flat word streams; the
 // encodings are documented beside each export and in src/port.rs.
 use self::framing::{
-    decode_prefix,
-    encode_frame_into,
-    encode_u24_frame_into,
-    encode_u64_into,
-    frame_encoded_len,
-    frame_parts,
-    parse_u64,
-    u24_frame_parts
+    decode_prefix, encode_frame_into, encode_u24_frame_into, encode_u64_into, frame_encoded_len,
+    frame_parts, parse_u64, u24_frame_parts
 };
 
 use self::arrow::{checked_buffer_range, checked_sum, get, validate, wire_pair};
 
 use self::capnp::{
-    list_pointer,
-    pack_into,
-    packed_len,
-    parse_prefix,
-    struct_pointer,
-    unpack_into,
-    unpacked_len
+    list_pointer, pack_into, packed_len, parse_prefix, struct_pointer, unpack_into, unpacked_len
 };
 
 use self::grammar::{parse_prefix as grammar_parse_prefix, validate as grammar_validate};
 use self::codec::{decode_exact, validate_limits, encode_into, encoded_len};
 
 use self::der::{
-    as_i64 as der_as_i64_impl,
-    encode_into as der_encode,
-    encoding_plan as der_plan,
-    parse_prefix as der_parse,
-    reencode_into as der_reencode
+    as_i64 as der_as_i64_impl, encode_into as der_encode, encoding_plan as der_plan,
+    parse_prefix as der_parse, reencode_into as der_reencode
 };
 
 use self::ipc::{parse_prefix as ipc_parse};
 
 use self::protobuf::{
-    encode_into as pb_encode,
-    encoded_len as pb_encoded,
-    parse_exact as pb_parse,
+    encode_into as pb_encode, encoded_len as pb_encoded, parse_exact as pb_parse,
     validate as pb_validate
 };
 

@@ -10,37 +10,9 @@
 // native edges eb[at .. at + 3n] (name, text, requirement).
 use self::{GNode, L, SEdge, Snap};
 use self::util::{
-    Ascii,
-    Code,
-    Order,
-    SortKind,
-    add,
-    dep,
-    diag,
-    diag_ord,
-    feat,
-    find_feat,
-    gb,
-    id_at,
-    inc,
-    is_lit,
-    man,
-    mul,
-    none,
-    put,
-    put_id,
-    put_ver,
-    put_join,
-    req,
-    root,
-    sbool,
-    sedge,
-    slen,
-    soff,
-    sort,
-    ssel,
-    sw,
-    sys
+    Ascii, Code, Order, SortKind, add, dep, diag, diag_ord, feat, find_feat, gb, id_at, inc, is_lit,
+    man, mul, none, put, put_id, put_ver, put_join, req, root, sbool, sedge, slen, soff, sort, ssel,
+    sw, sys
 };
 use self::check::{check_manifest, emit_at, emit_id, emit_lit, mark, since, system_name_valid};
 use self::semver::{matches};

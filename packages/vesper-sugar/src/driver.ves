@@ -21,73 +21,24 @@ use @vesper/ast::lower::{lower_source, lower_surface_source_limits};
 use @vesper-std/arena::{idx_from_raw};
 use @vesper/front::{P};
 use @vesper/front::lex::{
-    lex_sugar_raw_with_limits,
-    lex_sugar_with_limits,
-    max_diagnostics,
-    max_source_bytes,
-    max_tokens,
-    token_end,
-    trivia_kind
+    lex_sugar_raw_with_limits, lex_sugar_with_limits, max_diagnostics, max_source_bytes, max_tokens,
+    token_end, trivia_kind
 };
 use @vesper/front::diag::{diags_new};
 use @vesper/front::parse::{hard_depth, parse_surface_tokens};
 use @vesper/front::kinds::{
-    k_amp,
-    k_amp_eq,
-    k_and,
-    k_arrow,
-    k_caret,
-    k_colon,
-    k_dot,
-    k_eff,
-    k_eq_eq,
-    k_ge,
-    k_gt,
-    k_l_brace,
-    k_le,
-    k_linear,
-    k_lower,
-    k_lt,
-    k_minus,
-    k_minus_eq,
-    k_ne,
-    k_or,
-    k_percent,
-    k_percent_eq,
-    k_pipe,
-    k_pipe_eq,
-    k_plus,
-    k_plus_eq,
-    k_question,
-    k_r_brace,
-    k_shl,
-    k_shr,
-    k_slash,
-    k_slash_eq,
-    k_star,
-    k_star_eq,
-    k_state,
-    k_with
+    k_amp, k_amp_eq, k_and, k_arrow, k_caret, k_colon, k_dot, k_eff, k_eq_eq, k_ge, k_gt, k_l_brace,
+    k_le, k_linear, k_lower, k_lt, k_minus, k_minus_eq, k_ne, k_or, k_percent, k_percent_eq, k_pipe,
+    k_pipe_eq, k_plus, k_plus_eq, k_question, k_r_brace, k_shl, k_shr, k_slash, k_slash_eq, k_star,
+    k_star_eq, k_state, k_with
 };
 use self::flow::{Rd, arg_of, clause_of, fn_of, name_byte, name_len, param_of, render, stmt_of};
 use self::hygiene::{pattern_hygiene};
 use self::matcher::{captures_tail, match_rule_encoded};
 use self::scope::{lower};
 use self::template::{
-    Caps,
-    add,
-    b8,
-    cap_at,
-    cap_count,
-    caps_read,
-    inc,
-    push_decimal,
-    skeleton_run,
-    sort_in,
-    sub,
-    value_at,
-    w32,
-    w64
+    Caps, add, b8, cap_at, cap_count, caps_read, inc, push_decimal, skeleton_run, sort_in, sub,
+    value_at, w32, w64
 };
 
 const NONE: u64 = 18446744073709551615;

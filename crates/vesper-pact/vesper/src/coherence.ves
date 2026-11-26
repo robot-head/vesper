@@ -4,37 +4,9 @@
 // first (c = impl id), then models (c = nimpl + model id).
 use self::{S};
 use self::term::{
-    add,
-    byte_at,
-    e_env,
-    e_ph,
-    field_a,
-    field_b,
-    g_impl,
-    g_mode,
-    inc,
-    intern,
-    intern2,
-    intern_with_kids,
-    k_list,
-    k_slist,
-    kid,
-    kid_count,
-    m_const,
-    none,
-    q_ambig,
-    q_nosol,
-    q_proven,
-    q_unsup,
-    sub,
-    t_ctor,
-    t_proj,
-    t_ref,
-    t_var,
-    tag_of,
-    vidx,
-    vkind,
-    word_at
+    add, byte_at, e_env, e_ph, field_a, field_b, g_impl, g_mode, inc, intern, intern2,
+    intern_with_kids, k_list, k_slist, kid, kid_count, m_const, none, q_ambig, q_nosol, q_proven,
+    q_unsup, sub, t_ctor, t_proj, t_ref, t_var, tag_of, vidx, vkind, word_at
 };
 use self::fold::{inst, run};
 use self::infer::{fresh_args, unify_trait_ref};

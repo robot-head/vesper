@@ -9,12 +9,7 @@ use super::redact::{
     verify_absent,
 };
 use super::ring::{
-    FlightEvent,
-    FlightRecorder,
-    SnapshotImage,
-    events,
-    first_retained_seq,
-    snapshots
+    FlightEvent, FlightRecorder, SnapshotImage, events, first_retained_seq, snapshots
 };
 use super::wire::{
     EventHeader,

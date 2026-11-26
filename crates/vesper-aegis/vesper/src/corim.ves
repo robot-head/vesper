@@ -2,30 +2,9 @@
 // (tag 506) and corim-meta CBOR parsing (draft-ietf-rats-corim).
 use self::AErr;
 use self::cbor::{
-    K_ARRAY,
-    K_BIGNUM,
-    K_BYTES,
-    K_MAP,
-    K_NINT,
-    K_TAG,
-    K_TEXT,
-    K_UINT,
-    Scratch,
-    arg,
-    cbor_err,
-    cur_len,
-    decode_span,
-    decode_whole_at,
-    i64_bits,
-    int_nodes_eq,
-    is_i64,
-    kind,
-    materialize_bytes,
-    put_str,
-    set_len,
-    skip,
-    str_len,
-    text_eq_s
+    K_ARRAY, K_BIGNUM, K_BYTES, K_MAP, K_NINT, K_TAG, K_TEXT, K_UINT, Scratch, arg, cbor_err,
+    cur_len, decode_span, decode_whole_at, i64_bits, int_nodes_eq, is_i64, kind, materialize_bytes,
+    put_str, set_len, skip, str_len, text_eq_s
 };
 use self::reader::{k_over_budget, put, raise};
 

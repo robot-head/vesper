@@ -6,25 +6,8 @@
 
 use @vesper/front::lex::{trivia_kind};
 use @vesper/front::kinds::{
-    k_at,
-    k_comma,
-    k_eof,
-    k_eq,
-    k_false,
-    k_float,
-    k_fn,
-    k_int,
-    k_l_brace,
-    k_l_bracket,
-    k_l_paren,
-    k_lower,
-    k_minus,
-    k_r_brace,
-    k_r_bracket,
-    k_r_paren,
-    k_string,
-    k_true,
-    k_upper
+    k_at, k_comma, k_eof, k_eq, k_false, k_float, k_fn, k_int, k_l_brace, k_l_bracket, k_l_paren,
+    k_lower, k_minus, k_r_brace, k_r_bracket, k_r_paren, k_string, k_true, k_upper
 };
 use self::big::{Big, as_u64, parse_int};
 use self::util::{add, byte, inc, is_text, push_range, sub, trim_end, trim_start, u8_at, u64_at};

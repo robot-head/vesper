@@ -2,6 +2,7 @@
 //
 // Element reads use `try_get`, whose `None` arm no index here reaches, so
 // the functions are total and raise nothing.
+use @vesper-std/core::iter::all;
 use @vesper-std/sugar::{guard, when};
 
 // Whether `a` sorts before `b`.
@@ -37,17 +38,12 @@ pub fn swap_at[T: mod copy](inout s: Slice[T], i: u64, j: u64) {
 
 // Whether no element of `s` is smaller than the one before it.
 pub fn is_sorted[T: mod copy + Ord](in s: Slice[T]) -> bool {
-    let n = s.len();
-    let mut i: u64 = 1;
-    let mut sorted = true;
-    loop {
-        if i >= n || !sorted {
-            break;
+    all{
+        {
+            !lt_at(in s, i, wrapping_sub(i, 1))
         }
-        sorted = !lt_at(in s, i, wrapping_sub(i, 1));
-        i = wrapping_add(i, 1);
+        | i in 1..s.len()
     }
-    sorted
 }
 
 // Insertion sort of `s[lo..hi]`.

@@ -42,15 +42,11 @@ use self::leaf::check as leaf_check_impl;
 use self::vector::{vaggregate_rows_q, vexecute_q};
 use self::paths::{access_paths_q};
 use self::page::{
-    insert as page_insert_impl,
-    update as page_update_impl,
-    used_bytes as page_used_bytes_impl,
+    insert as page_insert_impl, update as page_update_impl, used_bytes as page_used_bytes_impl,
     validate as page_validate_impl
 };
 use self::wal::{
-    decode as wal_decode_impl,
-    decode_header as wal_decode_header_impl,
-    encode as wal_encode_impl
+    decode as wal_decode_impl, decode_header as wal_decode_header_impl, encode as wal_encode_impl
 };
 
 // One SQL token. kind: Word 1 (a, b = pool range of the lowercase word),

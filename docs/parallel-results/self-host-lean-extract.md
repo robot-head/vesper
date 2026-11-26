@@ -470,14 +470,45 @@ Both spend nearly all of it in Lean.
   a `raise` clause changes the clause's copy and is lost, so an error has
   to come back in the handled value. The port does that throughout.
 
+## Part 5b: the `proof_audit` hybrid swap
+
+`hc_proof_audit_run` (crates/vesper-hybrid/src/commands.rs) now answers
+from `modules/proof_audit` when the `proof_audit` swap is on (the
+default): the driver-commands layer validates as before, packs the
+arguments, and the module runs `@vesper/proof-audit::run` and returns a
+status byte, the stdout bytes and the error text. `--json` error
+documents and text reports come from Vesper.
+
+- `self_host_cli_commands`'s `proof_audit_matches_the_default_compiler`
+  adds three vectors past the command layer (a missing root in text and
+  JSON, a Lean that is not there); all 23 vectors match the default CLI.
+  `proof_audit_audits_in_vesper` checks the module answered.
+- The byte-level differential, with real Lean, stays
+  tests/self_host_proof_audit.rs (76 of 76).
+
+**Finding: one variant namespace per world.** Linking
+`@vesper/proof-audit` into the driver module fails with E0113: the
+driver's world already has the eBPF backend's `MapKind::Array`, and
+`@vesper/serde` declares `Kind::Array`; enum variants share one
+namespace across every package of a program. The swap uses its own
+module, so the two never meet. A Stage 2 driver that links both needs
+one of them renamed.
+
+**Build note.** A hybrid module whose closure has `[package] objects`
+(here hash-sys's BLAKE3 C) gets them through
+`VESPER_HYBRID_OBJECT_PACKAGES_<LIBRARY>` under Bazel (build.rs sets the
+harness's `VESPER_PORT_OBJECT_PACKAGES` for that module only); Cargo
+finds them through the path dependencies.
+
 ## What is left
 
-- **Driver hookup**: `@vesper/driver-commands` still runs the Rust
-  command (`hc_proof_audit_run`); it moves to `@vesper/proof-audit`
-  next. `audit_generated` and `audit_policy` (verify, publish) use the
-  same audit.
-- **Verify command** (`src/verify_commands.rs`): port onto
-  `@vesper/driver-commands`.
+- **Verify command** (`src/verify_commands.rs`): `--format` needs the
+  formatter's proof model (`vesper-fmt` proof_model.rs, proof_lean.rs)
+  in Vesper; `--extract` needs the checked world in Vesper. Both reuse
+  `@vesper/proof-audit`'s audit (`audit_generated`, `audit_policy`).
 - **`extract_report` callers**: `verify --extract` and the forge
   provenance path still build the Rust `Extraction`; they move with the
   verify command, then the Rust extractor goes.
+- **Deleting the Rust**: `src/proof_commands.rs` stays while the Rust
+  CLI (`src/main.rs`) and `verify`/`publish` call it; it goes with the
+  Stage 2 retirement of the Rust driver.

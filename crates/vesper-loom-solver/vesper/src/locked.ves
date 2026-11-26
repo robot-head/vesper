@@ -9,16 +9,7 @@ use @vesper/loom-calculus::util::{add, id_at, inc, man, none, req, root, ssel, s
 use self::{S};
 use self::closure::{closure, has_entry, mark_features};
 use self::diag::{
-    ErrorKind,
-    ResultTag,
-    SolverCode,
-    copy_calculus,
-    dlit,
-    dver,
-    emit,
-    setw,
-    subj_id,
-    subj_lit
+    ErrorKind, ResultTag, SolverCode, copy_calculus, dlit, dver, emit, setw, subj_id, subj_lit
 };
 use self::input::{mxv, sysv};
 use self::output::{out_error, table, w};

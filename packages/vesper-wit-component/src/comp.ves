@@ -17,26 +17,9 @@
 
 use @vesper/check-data::util::{add, inc, w};
 use self::host::{
-    Core,
-    Imp,
-    aliased_type,
-    fixup_module,
-    host_name,
-    if_count,
-    iface_of,
-    import_ifaces,
-    imp_at,
-    instance_type,
-    lower_is_drop,
-    lower_is_indirect,
-    lower_kind,
-    lower_ok,
-    lower_uses_realloc,
-    lower_uses_utf8,
-    needs_descriptor_alias,
-    put_decimal,
-    read_core,
-    shim_module
+    Core, Imp, aliased_type, fixup_module, host_name, if_count, iface_of, import_ifaces, imp_at,
+    instance_type, lower_is_drop, lower_is_indirect, lower_kind, lower_ok, lower_uses_realloc,
+    lower_uses_utf8, needs_descriptor_alias, put_decimal, read_core, shim_module
 };
 use self::wit::{Wit, Ty, Def, Field, Func, ty_at, def_at, field_at, func_at, arg_at, text_at};
 

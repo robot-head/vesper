@@ -17,27 +17,9 @@ use @vesper/front::lex::{lex_with_limits, token_end};
 use @vesper/front::diag::{diags_new};
 use @vesper/front::parse::{parse_tokens, hard_depth};
 use @vesper/front::kinds::{
-    k_whitespace,
-    k_comment,
-    k_block_comment,
-    k_eof,
-    k_upper,
-    k_lower,
-    k_self_kw,
-    k_let,
-    k_if,
-    k_match,
-    k_handle,
-    k_return,
-    k_fn,
-    k_l_brace,
-    k_r_brace,
-    k_l_paren,
-    k_r_paren,
-    k_l_bracket,
-    k_r_bracket,
-    k_semi,
-    k_comma
+    k_whitespace, k_comment, k_block_comment, k_eof, k_upper, k_lower, k_self_kw, k_let, k_if,
+    k_match, k_handle, k_return, k_fn, k_l_brace, k_r_brace, k_l_paren, k_r_paren, k_l_bracket,
+    k_r_bracket, k_semi, k_comma
 };
 use self::json::{pack, put, put_bytes, put_u64};
 

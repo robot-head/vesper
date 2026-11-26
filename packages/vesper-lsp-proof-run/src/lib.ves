@@ -15,82 +15,23 @@
 // - numbers.ves: serde_json's "number out of range" check (as in @vesper/lsp).
 
 use @vesper-std/fs::{
-    IoError,
-    already_exists,
-    read,
-    write,
-    rename,
-    create_dir,
-    create_dir_all,
-    remove_dir_all,
-    metadata,
-    kind_dir,
-    create_dir_mode,
-    set_permissions,
-    copy
+    IoError, already_exists, read, write, rename, create_dir, create_dir_all, remove_dir_all,
+    metadata, kind_dir, create_dir_mode, set_permissions, copy
 };
 use @vesper-std/process::{
-    ExitStatus,
-    ProcCommand,
-    command_path,
-    arg,
-    arg_bytes,
-    env,
-    env_clear,
-    cwd,
-    stdio,
-    spawn,
-    wait_timeout,
-    kill_tree,
-    stdout,
-    stderr,
-    release,
-    success,
-    id,
-    stdin_stream,
-    stdout_stream,
-    stderr_stream,
-    capture,
-    null,
-    process_group,
-    capture_limit
+    ExitStatus, ProcCommand, command_path, arg, arg_bytes, env, env_clear, cwd, stdio, spawn,
+    wait_timeout, kill_tree, stdout, stderr, release, success, id, stdin_stream, stdout_stream,
+    stderr_stream, capture, null, process_group, capture_limit
 };
 use @vesper-std/env::{var_bytes, os, os_windows};
 use @vesper-std/hash::blake3::{blake3, digest_bytes};
 use self::json::{
-    Doc,
-    parse,
-    failed,
-    root,
-    field,
-    str_is,
-    put_str_of,
-    is_true,
-    u64_or_zero,
-    items,
-    item,
-    kind,
-    put,
-    put_u64,
-    put_error,
-    put_string,
-    STRING,
-    ARRAY
+    Doc, parse, failed, root, field, str_is, put_str_of, is_true, u64_or_zero, items, item, kind,
+    put, put_u64, put_error, put_string, STRING, ARRAY
 };
 use self::text::{
-    byte,
-    put_bytes,
-    lossy,
-    trimmed,
-    contains,
-    find,
-    trim,
-    first_error,
-    bounded,
-    put_escaped,
-    put_hex,
-    put_io_error,
-    put_status
+    byte, put_bytes, lossy, trimmed, contains, find, trim, first_error, bounded, put_escaped,
+    put_hex, put_io_error, put_status
 };
 
 const MAX_CAPTURE: u64 = 8388608;

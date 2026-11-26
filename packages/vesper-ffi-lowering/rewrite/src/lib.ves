@@ -24,48 +24,16 @@
 use self::drops::{append_drops};
 use self::buffers::{W, w_new, check_buffers};
 use @vesper/ast::{
-    Ast,
-    Lit,
-    ExprNode,
-    PatNode,
-    TypeNode,
-    StmtNode,
-    ArgNode,
-    ClauseNode,
-    ParamNode,
-    EffectsNode,
-    EffectNode,
-    FieldNode,
-    VariantNode,
-    AdtNode,
-    FnNode,
-    EffectDeclNode,
-    ImplNode,
-    TraitNode,
-    ConfNode,
-    ItemNode,
-    list_len,
-    list_at,
-    expr_at,
-    pat_at,
-    type_at
+    Ast, Lit, ExprNode, PatNode, TypeNode, StmtNode, ArgNode, ClauseNode, ParamNode, EffectsNode,
+    EffectNode, FieldNode, VariantNode, AdtNode, FnNode, EffectDeclNode, ImplNode, TraitNode,
+    ConfNode, ItemNode, list_len, list_at, expr_at, pat_at, type_at
 };
 use @vesper/ast::lower::{lower_source};
 use @vesper/ast::dump::{dump_ast};
 use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{symbol_from_id};
 use @vesper/ffi-lowering::{
-    S,
-    Err,
-    Sh,
-    Sp,
-    ConstRow,
-    Reader,
-    s_new,
-    read_library,
-    generate,
-    slice_count,
-    put_op_name
+    S, Err, Sh, Sp, ConstRow, Reader, s_new, read_library, generate, slice_count, put_op_name
 };
 
 const NONE: u32 = 4294967295;

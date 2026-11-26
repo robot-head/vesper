@@ -21,10 +21,14 @@
 // <type index>`, part 4b); a task that planned every instance ends with
 // `W` and the decimal words of the variables' type table.
 //
-// Trace entries (`trace_ok` of `compile_entry`) are out of scope: their
-// discovery includes the entry and the calls family refuses them
-// (`check_entry`), so every plan here has no trace flag and no trace-host
-// identity.
+// A task with the trace flag (part 5, `EntryEffects::TraceHost`) whose
+// entry passes `trace_ok` is a Beacon trace host: its discovery keeps the
+// entry and the `trace_host_direct` instances, those take the trace flag
+// (`uses_trace_fail`), and each bare `Trace` of a row starts with the
+// `native-trace-host` identity. A library task (flags 4, its other export
+// roots following with flags 8) plans `native_export::compile_exports`:
+// one discovery from every export, each export a boundary of the
+// conventions, one block for the whole library.
 
 use @vesper/check-data::pack_text;
 use @vesper/check-data::util::{add, inc, push_decimal, u32_at, u64_at, w};
@@ -36,28 +40,12 @@ use @vesper/check-layout::{L_ENUM, Layouts, layout_of, layouts_new, out_new};
 use @vesper/place-ir::{read_program};
 use @vesper/codegen-calls::data::{Calls, read_calls};
 use @vesper/codegen-calls::instances::{
-    Conc,
-    IVars,
-    Syms,
-    concrete,
-    discover,
-    fail_only,
-    program_facts,
-    syms_new
+    Conc, Found, IVars, Syms, bare_trace, concrete, discover_roots, fail_only, is_root,
+    program_facts, syms_new, trace_host_direct
 };
 use @vesper/codegen-calls::abi::{
-    Errs,
-    FnAbi,
-    V_F32,
-    V_F64,
-    V_I128,
-    check_entry,
-    declare,
-    default_abi,
-    internal,
-    layout_facts,
-    scalar,
-    uses_caller_slot
+    Errs, FnAbi, V_F32, V_F64, V_I128, check_entry_traced, declare_roots, default_abi, internal,
+    layout_facts, scalar, trace_entry_ok, uses_caller_slot
 };
 
 const NONE32: u32 = 4294967295;
@@ -381,11 +369,40 @@ fn fail_identities(
     }
 }
 
+// The trace host's identities: for each bare `Trace` of the row (at row
+// index `index`), `native-trace-host` under `$effect:Trace` and
+// `$static:$fncap:<name>:<index>`.
+fn trace_identities(in t: Types, in names: Names, k: Syms, name: u32, row: u32, inout caps: Caps) {
+    let r = t.row(row);
+    for index in 0..w(r.n) {
+        let e = t.effect_at(add(w(r.a), index));
+        if !bare_trace(k, e) {
+            continue;
+        }
+        let id_a = caps.text.len();
+        put(inout caps.text, "native-trace-host");
+        let id_e = caps.text.len();
+        let k1 = caps.text.len();
+        put(inout caps.text, "$effect:");
+        names.write(e.name, inout caps.text);
+        let k1e = caps.text.len();
+        caps.insert(k1, k1e, id_a, id_e);
+        let k2 = caps.text.len();
+        put(inout caps.text, "$static:$fncap:");
+        names.write(name, inout caps.text);
+        caps.text.push(58);
+        push_decimal(inout caps.text, index);
+        let k2e = caps.text.len();
+        caps.insert(k2, k2e, id_a, id_e);
+    }
+}
+
 // ----- the plan ---------------------------------------------------------------------
 
 // `frame_plan` of instance `name` (`f`) under `abi`, written as
 // `FramePlan::text`; false with the message in `err` when a layout or
-// `scalar` refuses.
+// `scalar` refuses. `pass_trace` is the trailing trace flag
+// (`uses_trace_fail`), `trace_host` the task's `trace_ok`.
 pub fn frame_plan(
     inout ls: Layouts,
     inout t: Types,
@@ -398,6 +415,8 @@ pub fn frame_plan(
     in vars: IVars,
     abi: FnAbi,
     operands_only: bool,
+    pass_trace: bool,
+    trace_host: bool,
     inout o: ChunkSeq[u8],
     inout err: Errs
 ) -> bool {
@@ -409,7 +428,9 @@ pub fn frame_plan(
         return false;
     }
     let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    put(inout line, "trace=0 fail=");
+    put(inout line, "trace=");
+    bit(inout line, pass_trace);
+    put(inout line, " fail=");
     bit(inout line, fail_record);
     put(inout line, " caller=");
     bit(inout line, caller_slot);
@@ -466,12 +487,39 @@ pub fn frame_plan(
         names.write(t.name(vars.ty(i)), inout line);
         line.push(10);
     }
+    let mut caps = caps_new();
     if fail_record {
-        let mut caps = caps_new();
         fail_identities(inout t, in names, k, name, f.row, inout caps);
-        caps.write(inout line);
     }
+    if trace_host {
+        trace_identities(in t, in names, k, name, f.row, inout caps);
+    }
+    caps.write(inout line);
     o.extend(in line.as_slice());
+    true
+}
+
+// `compile_exports`' check that every export is a standalone instance;
+// false with the message in `err` for the first that is not.
+fn all_roots_found(in names: Names, in found: Found, in roots: ChunkSeq[u32], inout err: Errs)
+    -> bool {
+    for i in 0..roots.len() {
+        let root = u32_at(in roots, i);
+        let mut seen = false;
+        for j in 0..found.insts.len() {
+            if found.inst(j).key == root {
+                seen = true;
+                break;
+            }
+        }
+        if !seen {
+            err.text.clear();
+            err.text.push(39);
+            names.write(root, inout err.text);
+            put(inout err.text, "' is not compiled as a standalone native function");
+            return false;
+        }
+    }
     true
 }
 
@@ -493,6 +541,10 @@ pub fn frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
     let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
     for ti in 0..d.tasks.len() {
         let task = d.task(ti);
+        if task.more {
+            // A root of the library task before it.
+            continue;
+        }
         put(inout o, "E ");
         c.names.write(task.entry, inout o);
         if task.optimize {
@@ -500,29 +552,54 @@ pub fn frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
         } else {
             put(inout o, " 0\n");
         }
-        let found = discover(
+        // The roots: the entry, then a library's other exports.
+        let mut roots: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        roots.push(task.entry);
+        if task.library {
+            let mut tj = add(ti, 1);
+            loop {
+                if tj >= d.tasks.len() || !d.task(tj).more {
+                    break;
+                }
+                roots.push(d.task(tj).entry);
+                tj = add(tj, 1);
+            }
+        }
+        let trace_ok = !task.library
+            && task.trace
+            && trace_entry_ok(in c.types, in c.names, in d, k, task.entry);
+        let found = discover_roots(
             inout c.types,
             inout c.names,
             in c.world,
             in d,
             in facts,
             k,
-            task.entry
+            in roots,
+            trace_ok
         );
         let mut err = Errs { text: ChunkSeq::new[u8]() };
+        // An entry passes `compile_entry`'s checks; a library compiles
+        // every export as a standalone instance.
+        let checked = if task.library {
+            found.err.len() != 0 || all_roots_found(in c.names, in found, in roots, inout err)
+        } else {
+            check_entry_traced(
+                inout c.types,
+                in c.names,
+                in c.world,
+                in d,
+                task.entry,
+                trace_ok,
+                inout err
+            )
+        };
         // The declarations (`declare_instances_with_trace`) come first: a
         // signature that refuses stops the build before any frame.
         let mut scratch: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        let declared = check_entry(
-            inout c.types,
-            in c.names,
-            in c.world,
-            in d,
-            task.entry,
-            inout err
-        )
+        let declared = checked
             && found.err.len() == 0
-            && declare(
+            && declare_roots(
                 inout ls,
                 inout c.types,
                 inout c.names,
@@ -530,7 +607,7 @@ pub fn frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
                 in d,
                 k,
                 in found,
-                task.entry,
+                in roots,
                 task.optimize,
                 inout scratch,
                 inout err
@@ -543,7 +620,7 @@ pub fn frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
                 let vars = found.vars_of(x);
                 let f = concrete(inout c.types, inout c.names, in d, x.name, in vars);
                 let mut abi = default_abi();
-                if task.optimize && x.key != task.entry {
+                if task.optimize && !is_root(in roots, x.key) {
                     if !internal(
                         inout ls,
                         inout c.types,
@@ -583,6 +660,11 @@ pub fn frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
                 put(inout o, "F ");
                 c.names.write(x.key, inout o);
                 o.push(10);
+                let pass_trace = trace_ok
+                    && (
+                        x.key == task.entry
+                            || trace_host_direct(inout c.types, in c.world, in d, k, in f)
+                    );
                 if !frame_plan(
                     inout ls,
                     inout c.types,
@@ -595,6 +677,8 @@ pub fn frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
                     in vars,
                     abi,
                     task.optimize,
+                    pass_trace,
+                    trace_ok,
                     inout o,
                     inout err
                 ) {

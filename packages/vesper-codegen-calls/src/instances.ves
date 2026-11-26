@@ -12,14 +12,7 @@ use @vesper/place-ir::codes::{Op};
 use @vesper/check-data::util::{add, inc, inc32, n32, u32_at, u8_at, w};
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{
-    TyKind,
-    TyPass,
-    Types,
-    Vars,
-    debug_type,
-    default_type,
-    substitute,
-    substitute_row,
+    EffNode, TyKind, TyPass, Types, Vars, debug_type, default_type, substitute, substitute_row,
     vars_new
 };
 use @vesper/check-data::world::{World, set_by_symbol};
@@ -33,6 +26,7 @@ const MAX_NATIVE_INSTANCES: u64 = 4096;
 // Names the decisions compare against, interned once.
 pub copy struct Syms {
     fail: u32,
+    trace: u32,
     box_: u32,
     box_new: u32,
     dyn_: u32,
@@ -67,6 +61,7 @@ pub copy struct Syms {
 pub fn syms_new(inout n: Names) -> Syms {
     Syms {
         fail: n.intern(in "Fail".as_bytes()),
+        trace: n.intern(in "Trace".as_bytes()),
         box_: n.intern(in "Box".as_bytes()),
         box_new: n.intern(in "Box::new".as_bytes()),
         dyn_: n.intern(in "dyn".as_bytes()),
@@ -445,6 +440,32 @@ fn contains_fn_in(inout t: Types, in wd: World, ty: u32, inout seen: ChunkSeq[u3
     let last = wrapping_sub(seen.len(), 1);
     seen.truncate(last);
     result
+}
+
+// The built-in Beacon `Trace` effect, unlabelled and without arguments.
+pub fn bare_trace(k: Syms, e: EffNode) -> bool {
+    e.name == k.trace && e.label == 0 && e.n == 0
+}
+
+// `trace_host_direct` of src/native.rs: with Beacon active, an instance
+// whose row is closed, holds only capabilities and the bare `Trace`, and
+// exposes no function value takes the trace flag of a trace host.
+pub fn trace_host_direct(inout t: Types, in wd: World, in d: Calls, k: Syms, in f: Conc) -> bool {
+    if !d.trace_active {
+        return false;
+    }
+    let r = t.row(f.row);
+    if r.tail != 0 {
+        return false;
+    }
+    for i in 0..w(r.n) {
+        let e = t.effect_at(add(w(r.a), i));
+        if !k.is_capability(e.name) && !bare_trace(k, e) {
+            return false;
+        }
+    }
+    ! contains_function(inout t, in wd, f.result)
+        && !any_param_contains_function(inout t, in wd, in f.params)
 }
 
 // `capability_only` of a row.
@@ -1139,6 +1160,49 @@ pub fn discover(
     k: Syms,
     entry: u32
 ) -> Found {
+    discover_traced(inout t, inout names, in wd, in d, in facts, k, entry, false)
+}
+
+// `instances_for_entry(world, entry, include_entry)`: with `include_entry`
+// (a trace host) the entry and every `trace_host_direct` instance are kept
+// even when they need no specialization.
+pub fn discover_traced(
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    in d: Calls,
+    in facts: ProgramFacts,
+    k: Syms,
+    entry: u32,
+    include_entry: bool
+) -> Found {
+    let mut roots: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    roots.push(entry);
+    discover_roots(inout t, inout names, in wd, in d, in facts, k, in roots, include_entry)
+}
+
+// Whether `key` is one of `roots`.
+pub fn is_root(in roots: ChunkSeq[u32], key: u32) -> bool {
+    for i in 0..roots.len() {
+        if u32_at(in roots, i) == key {
+            return true;
+        }
+    }
+    false
+}
+
+// `instances_for_roots`: the instances every root reaches, from one walk
+// (a library's exports, `native_export::compile_exports`).
+pub fn discover_roots(
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    in d: Calls,
+    in facts: ProgramFacts,
+    k: Syms,
+    in roots: ChunkSeq[u32],
+    include_entry: bool
+) -> Found {
     let mut found = Found {
         insts: ChunkSeq::new[Inst](),
         keys: ChunkSeq::new[u32](),
@@ -1153,7 +1217,15 @@ pub fn discover(
         tys: ChunkSeq::new[u32](),
     };
     let none = ivars_new();
-    todo.push(entry, in none);
+    // `roots.iter().rev()`: the first root is walked first.
+    let mut ri = roots.len();
+    loop {
+        if ri == 0 {
+            break;
+        }
+        ri = wrapping_sub(ri, 1);
+        todo.push(u32_at(in roots, ri), in none);
+    }
     let stamp: u32 = 1;
     let mut seen: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut seen_count: u64 = 0;
@@ -1203,7 +1275,9 @@ pub fn discover(
                 bound_any = true;
             }
         }
-        if !specialized(inout t, in names, in wd, k, in f) || bound_any {
+        let kept = include_entry
+            && (is_root(in roots, key) || trace_host_direct(inout t, in wd, in d, k, in f));
+        if kept || !specialized(inout t, in names, in wd, k, in f) || bound_any {
             found
                 .insts
                 .push(Inst { key: key, name: name, a: n32(found.keys.len()), n: n32(vars.len()) });

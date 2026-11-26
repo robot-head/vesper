@@ -28,10 +28,7 @@ pub fn find(in hay: Slice[u8], in needle: Slice[u8]) -> Option[u64] {
     if m == 0 {
         return Option::Some(0);
     }
-    let first = match needle.try_get(0) {
-        Option::Some(b) => b,
-        Option::None => 0,
-    };
+    let first = needle.try_get(0).unwrap_or(0);
     let last = wrapping_sub(n, m);
     let mut at: u64 = 0;
     loop {

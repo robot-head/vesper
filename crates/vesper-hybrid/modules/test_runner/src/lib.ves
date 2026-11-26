@@ -21,20 +21,12 @@
 // @export abi 4
 
 use @vesper/test-runner::{
-    case_rows_words as rows,
-    discover_words as tests,
-    doctest_extract_words as fences,
-    doctest_generate_words as wrap,
-    doctest_guard_words as profile,
-    doctest_preflight_words as limits,
-    doctest_verdict_words as decide,
-    doctest_wrappers_words as names,
-    format as words_format,
-    mutants_words as sites,
-    report_baseline_text_words as baseline,
-    report_doc_text_words as doc,
-    report_mutants_text_words as gate,
-    report_unit_text_words as unit
+    case_rows_words as rows, discover_words as tests, doctest_extract_words as fences,
+    doctest_generate_words as wrap, doctest_guard_words as profile,
+    doctest_preflight_words as limits, doctest_verdict_words as decide,
+    doctest_wrappers_words as names, format as words_format, mutants_words as sites,
+    report_baseline_text_words as baseline, report_doc_text_words as doc,
+    report_mutants_text_words as gate, report_unit_text_words as unit
 };
 
 // The word format of both entries; tests/common/test_runner_words.rs

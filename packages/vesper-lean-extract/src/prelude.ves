@@ -4,34 +4,9 @@
 // `extract_report` lists them.
 
 use self::build::{
-    B,
-    B_EXPLICIT,
-    B_IMPLICIT,
-    D_DEF,
-    D_INSTANCE,
-    D_THEOREM,
-    D_TYPE,
-    K_ABBREV,
-    K_DEF,
-    OP_ADD,
-    OP_AND,
-    OP_EQ,
-    OP_IFF,
-    OP_LE,
-    OP_LT,
-    OP_MOD,
-    OP_MUL,
-    OP_SUB,
-    P_BIND,
-    S_BIND,
-    TD_CLASS,
-    T_ARROW,
-    T_DO,
-    T_FORALL,
-    T_RECORD,
-    T_STRING,
-    T_UNARY,
-    U_NEG
+    B, B_EXPLICIT, B_IMPLICIT, D_DEF, D_INSTANCE, D_THEOREM, D_TYPE, K_ABBREV, K_DEF, OP_ADD,
+    OP_AND, OP_EQ, OP_IFF, OP_LE, OP_LT, OP_MOD, OP_MUL, OP_SUB, P_BIND, S_BIND, TD_CLASS, T_ARROW,
+    T_DO, T_FORALL, T_RECORD, T_STRING, T_UNARY, U_NEG
 };
 
 // `app(m, [x])` for fixed names.

@@ -14,7 +14,8 @@ const DRIVER: &str = r#"use @vesper-std/fs::{
     remove_file, remove_dir, remove_dir_all, create_dir, create_dir_all, metadata,
     symlink_metadata, exists, kind_file, kind_dir, error_text, is_dir_path, is_file_path,
     is_executable, canonicalize, write_stdout, write_stderr, create_dir_mode, set_permissions,
-    copy, arch
+    copy, arch, FileId, Opened, read_nofollow_limit, same_file, create_staged, remove_staged,
+    rename_path, symlink_metadata_path, process_id, already_exists
 };
 use @vesper-std/fs::walk::{
     Entries, walk, list_dir, entry_count, entry_start, entry_end, entry_kind, entry_join
@@ -514,6 +515,78 @@ fn kind_bits(in p: Str, shift: u32) -> u64 eff [Ffi[StdFs]] {
 
 pub fn arch_code() -> u64 {
     widen_u64(arch())
+}
+
+// The checked replace of `vesper fmt` over @DIR@/st.txt, written here as
+// "hello" with mode 0o640: one bit per step that behaved.
+fn staged_steps() -> u64 eff [Ffi[StdFs], Fail[IoError]] {
+    write(in "@DIR@/st.txt", in "hello".as_bytes());
+    set_permissions(in "@DIR@/st.txt", 416);
+    let p = "@DIR@/st.txt".as_bytes();
+    let stage = "@DIR@/st.stage".as_bytes();
+    let mut bits: u64 = 0;
+    let a = read_nofollow_limit(in p, 6);
+    if a.id.regular && a.id.size == 5 && a.bytes.len() == 5 && hash(in a.bytes.as_slice()) == hash(in "hello".as_bytes()) {
+        bits = bits | 1;
+    }
+    // At least `limit` bytes long: nothing is read.
+    let b = read_nofollow_limit(in p, 5);
+    if b.id.size == 5 && b.bytes.len() == 0 {
+        bits = bits | 2;
+    }
+    let d = read_nofollow_limit(in "@DIR@".as_bytes(), 6);
+    if !d.id.regular && d.bytes.len() == 0 {
+        bits = bits | 4;
+    }
+    create_staged(in stage, in "world!".as_bytes(), a.id.perm);
+    let again = read_nofollow_limit(in p, 6);
+    if same_file(a.id, again.id) {
+        bits = bits | 8;
+    }
+    let taken = handle Fail[IoError] in {
+        create_staged(in stage, in "x".as_bytes(), a.id.perm);
+        0
+    } with {
+        return v => v,
+        raise(e, _) => code(e),
+    };
+    if taken == wrapping_add(1000, widen_u64(already_exists())) {
+        bits = bits | 16;
+    }
+    rename_path(in stage, in p);
+    let c = read_nofollow_limit(in p, 7);
+    if hash(in c.bytes.as_slice()) == hash(in "world!".as_bytes()) && !same_file(a.id, c.id) {
+        bits = bits | 32;
+    }
+    if symlink_metadata_path(in p).kind == kind_file() && process_id() != 0 {
+        bits = bits | 64;
+    }
+    create_staged(in stage, in "z".as_bytes(), a.id.perm);
+    remove_staged(in stage);
+    if !exists(in "@DIR@/st.stage") {
+        bits = bits | 128;
+    }
+    bits
+}
+
+pub fn staged_replace() -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        staged_steps()
+    } with {
+        return v => v,
+        raise(e, _) => code(e),
+    }
+}
+
+// `read_nofollow_limit` of @DIR@/st-link, a symbolic link to st.txt.
+pub fn nofollow_link() -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        let o = read_nofollow_limit(in "@DIR@/st-link".as_bytes(), 64);
+        o.bytes.len()
+    } with {
+        return v => v,
+        raise(e, _) => widen_u64(e.os),
+    }
 }
 
 pub fn path_kinds() -> u64 eff [Ffi[StdFs]] {
@@ -1095,6 +1168,36 @@ fn canonicalize_matches_std() {
     }
     let checked = check_driver(&source(&dir));
     assert_eq!(agree(&checked, "canonical_paths", &MODES), want);
+}
+
+/// The pieces of `vesper fmt`'s checked replace: a bounded no-follow read
+/// with the file's identity, a private staged file given the original's
+/// permissions, the identity check and the rename.
+#[test]
+fn staged_replace_keeps_permissions_and_identity() {
+    let dir = Temp::new("std-fs");
+    let checked = check_driver(&source(&dir));
+    let file = dir.path().join("st.txt");
+    assert_eq!(agree(&checked, "staged_replace", &MODES), 255);
+    assert_eq!(fs::read_to_string(&file).unwrap(), "world!");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o7777,
+            0o640
+        );
+        std::os::unix::fs::symlink(&file, dir.path().join("st-link")).unwrap();
+        use std::os::unix::fs::OpenOptionsExt;
+        let eloop = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(dir.path().join("st-link"))
+            .unwrap_err()
+            .raw_os_error()
+            .unwrap();
+        assert_eq!(agree(&checked, "nofollow_link", &MODES), eloop as u64);
+    }
 }
 
 /// `arch` is the architecture of `std::env::consts::ARCH`.

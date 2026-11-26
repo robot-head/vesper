@@ -48,6 +48,10 @@ vesper_hybrid(
             "edit_src": "modules/lean_extract/src/lib.ves",
             "edits": {"(sink text: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    text\n": "(sink text: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = text;\n    let _ = t.try_set(0, 0);\n    t\n"},
         },
+        "hybrid_verified_codegen": {
+            "edit_src": "modules/verified_codegen/src/lib.ves",
+            "edits": {"(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    words\n": "(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = words;\n    let _ = t.try_set(0, 0);\n    t\n"},
+        },
         "hybrid_layout": {
             "edit_src": "modules/layout/src/lib.ves",
             "edits": {"        8\n    } else {\n        0\n": "        16\n    } else {\n        0\n"},
@@ -71,6 +75,16 @@ vesper_hybrid(
     },
     # The included CLI sources (src/main.rs and its command modules) and
     # what they embed.
+    # The proof-audit module (#1341) links hash-sys's `[package] objects`
+    # (the BLAKE3 C library), which the harness compiles into its archive.
+    build_script_data = [
+        "//:std_hash_sys_manifest",
+        "//:std_hash_sys_package",
+    ],
+    build_script_env = {
+        # Path dependencies are not beside the crate in Bazel.
+        "VESPER_HYBRID_OBJECT_PACKAGES_HYBRID_PROOF_AUDIT": "$(execpath //:std_hash_sys_manifest)",
+    },
     extra_compile_data = ["//:files"],
     # The differential harness runs the default compiler beside the hybrid
     # over the bootstrap corpus, examples/ and tests/; tests/parse.rs also
@@ -171,11 +185,13 @@ vesper_hybrid(
         # The command layers (#1336) add @vesper/driver-commands; the
         # front-end passes (#1893) the parse module, the front end v2, the
         # AST and @vesper-std/toml's Debug text; the wasm and eBPF builds
-        # (#1895) those backends and wit-component.
+        # (#1895) those backends and wit-component; the package load
+        # (#1986) the package assembler.
         "hybrid_driver": [
             ":hybrid_parse_package",
             "//:ast_package",
             "//:check_data_package",
+            "//:check_names_packages_package",
             "//:driver_commands_package",
             "//:driver_package",
             "//:ebpf_backend_package",
@@ -184,6 +200,7 @@ vesper_hybrid(
             "//:std_env_package",
             "//:std_fmt_package",
             "//:std_fs_package",
+            "//:std_intern_package",
             "//:std_process_package",
             "//:std_toml_package",
             "//:wasm_backend_package",
@@ -237,6 +254,25 @@ vesper_hybrid(
             "//:place_ir_package",
             "//crates/vesper-lean-syntax:port_package",
         ],
+        # `vesper proof-audit` (#1341) is @vesper/proof-audit.
+        "hybrid_proof_audit": [
+            "//:proof_audit_package",
+            "//:std_env_package",
+            "//:std_fs_package",
+            "//:std_hash_package",
+            "//:std_hash_sys_package",
+            "//:std_process_package",
+            "//crates/vesper-serde:port_package",
+        ],
+        # The verified code generator (#1886) builds on
+        # @vesper/verified-codegen.
+        "hybrid_verified_codegen": [
+            "//:check_data_package",
+            "//:check_layout_package",
+            "//:place_ir_package",
+            "//:std_collections_package",
+            "//:verified_codegen_package",
+        ],
         # The AST optimizer (#1249): its producer and checker.
         "hybrid_optimize": [
             "//:ast_package",
@@ -262,6 +298,12 @@ vesper_hybrid(
         "hybrid_place_ir": [
             "//:check_data_package",
             "//:place_ir_package",
+        ],
+        # The `vesper run` evaluator (#2053) builds on @vesper/run.
+        "hybrid_run": [
+            "//:check_data_package",
+            "//:place_ir_package",
+            "//:run_package",
         ],
         # The stack-bound swap (#1182) builds on @vesper/check-loops-atomics.
         "hybrid_stack_bound": [
@@ -355,6 +397,9 @@ vesper_hybrid(
         # The interface export differential (#1893) runs every 8th source
         # and package here; Cargo runs them all.
         "VESPER_DRIVER_INTERFACE_STRIDE": "8",
+        # The package load differential (#1986) checks every 4th corpus
+        # package here; Cargo checks them all.
+        "VESPER_DRIVER_PACKAGES_STRIDE": "4",
     },
     # 51 libraries, each built by both compilers.
     # The differential runs the corpus twice since the gated set (#1397).
@@ -362,6 +407,9 @@ vesper_hybrid(
         "test/codegen_export": "long",
         "test/differential": "long",
         "test/driver_front": "long",
+        # Every examples/ and tests/fixtures/ program, four runs each.
+        "test/run": "long",
+        "test/driver_packages": "long",
     },
     test_path_binaries = {
         "test/codegen_export": [
@@ -382,12 +430,19 @@ vesper_hybrid(
             ":bin/vesper-hybrid",
             "//:bin/vesper",
         ],
+        # The verified code generator (#1886) through the CLI.
+        "test/verified_codegen": [":bin/vesper-hybrid"],
         "test/driver": [
             ":bin/vesper-hybrid",
             "//:bin/vesper",
         ],
         # hd_step group 2 (#1893): the front-end passes in the driver.
         "test/driver_front": [
+            ":bin/vesper-hybrid",
+            "//:bin/vesper",
+        ],
+        # The package load (#1986) in the driver.
+        "test/driver_packages": [
             ":bin/vesper-hybrid",
             "//:bin/vesper",
         ],
@@ -410,6 +465,8 @@ vesper_hybrid(
             ":bin/vesper-hybrid",
             "//:bin/vesper",
         ],
+        # The `run` swap (#2053) with and without the Vesper evaluator.
+        "test/run": [":bin/vesper-hybrid"],
         # SH4 lane 2 (#1276): the hybrid's own cost report.
         "test/swap_inputs": [":bin/vesper-hybrid"],
         # SH5 lane 10 (#1333): the shared-world cost report.

@@ -1,24 +1,15 @@
 // @vesper-std/graph::util: total reads of index sequences.
 
 pub fn get32(in s: Slice[u32], i: u64, d: u32) -> u32 {
-    match s.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => d,
-    }
+    s.try_get(i).unwrap_or(d)
 }
 
 pub fn get64(in s: Slice[u64], i: u64, d: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => d,
-    }
+    s.try_get(i).unwrap_or(d)
 }
 
 pub fn get_bool(in s: Slice[bool], i: u64) -> bool {
-    match s.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => false,
-    }
+    s.try_get(i).unwrap_or(false)
 }
 
 pub fn filled32(n: u64, v: u32) -> ChunkSeq[u32] {

@@ -16,18 +16,8 @@
 // rename it. The cursor hands each renamed AST to its caller in load order.
 
 use @vesper/ast::{
-    Ast,
-    BoundNode,
-    GenericNode,
-    ImplNode,
-    ItemNode,
-    ModelUseNode,
-    TraitNode,
-    VariantNode,
-    list_at,
-    list_len,
-    none as ast_none,
-    type_name as ast_type_name
+    Ast, BoundNode, GenericNode, ImplNode, ItemNode, ModelUseNode, TraitNode, VariantNode, list_at,
+    list_len, none as ast_none, type_name as ast_type_name
 };
 use @vesper/ast::lower::{lower_source};
 use @vesper/ast::dump::{dump_ast};
@@ -36,54 +26,15 @@ use @vesper-std/intern::{Interner};
 use @vesper-std/arena::{idx_from_raw};
 use @vesper/check-data::{pack_text};
 use self::state::{
-    St,
-    at32,
-    at64,
-    at8,
-    join_path,
-    kind_value,
-    emit,
-    err,
-    hi,
-    inc,
-    kind_has,
-    kind_sugar,
-    lo,
-    n32,
-    none,
-    pair,
-    push_sym,
-    put,
-    put_sym,
-    st_new,
-    w
+    St, at32, at64, at8, join_path, kind_value, emit, err, hi, inc, kind_has, kind_sugar, lo, n32,
+    none, pair, push_sym, put, put_sym, st_new, w
 };
 use self::load::{
-    adt_at,
-    back,
-    begin_module,
-    collect_all,
-    collect_all_bytes,
-    decode,
-    decode_bytes,
-    effect_decl_at,
-    fn_at,
-    item_at,
-    item_name,
-    tr,
-    variant_name
+    adt_at, back, begin_module, collect_all, collect_all_bytes, decode, decode_bytes,
+    effect_decl_at, fn_at, item_at, item_name, tr, variant_name
 };
 use self::resolve::{
-    ambiguous,
-    group,
-    is_foreign,
-    local_of,
-    lookup,
-    name_of,
-    no_key,
-    overrides,
-    reexports,
-    shown,
+    ambiguous, group, is_foreign, local_of, lookup, name_of, no_key, overrides, reexports, shown,
     use_module
 };
 use self::rename::{assoc_decl_at, conf_at, item, owner, trait_ref};
@@ -687,7 +638,13 @@ pub struct AssemblyMetadata {
     file_display: ChunkSeq[u32],
     file_base: ChunkSeq[u64],
     // Assembler diagnostics in the canonical `diag ...` text format.
-    diagnostics: ChunkSeq[u8]
+    diagnostics: ChunkSeq[u8],
+    // The same as rows: per diagnostic its file, code (111 for E0111),
+    // start, end (file-local), message length and help length (`u64::MAX`
+    // for none); the message and help bytes follow each other in
+    // `diagnostic_text`.
+    diagnostic_rows: ChunkSeq[u64],
+    diagnostic_text: ChunkSeq[u8]
 }
 
 pub fn assembly_begin(in input: Str) -> Assembly {
@@ -703,6 +660,11 @@ pub fn assembly_begin_bytes(in input: Slice[u8]) -> Assembly {
     hidden_and_variants(inout s);
     literals(inout s);
     Assembly { state: s, next: 0 }
+}
+
+/// The number of parse diagnostics across the graph's modules.
+pub fn assembly_parse_errors(in a: Assembly) -> u64 {
+    a.state.parse_errors
 }
 
 /// `input` is the same encoded graph passed to `assembly_begin`. Each
@@ -729,7 +691,9 @@ pub fn assembly_metadata(sink a: Assembly) -> AssemblyMetadata {
         qualified: a.state.qualified,
         file_display: a.state.file_display,
         file_base: a.state.file_base,
-        diagnostics: a.state.diags
+        diagnostics: a.state.diags,
+        diagnostic_rows: a.state.diag_rows,
+        diagnostic_text: a.state.diag_text
     }
 }
 

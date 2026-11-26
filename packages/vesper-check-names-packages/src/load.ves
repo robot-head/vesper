@@ -21,44 +21,16 @@
 // Package 0 is the root package.
 
 use @vesper/ast::{
-    Ast,
-    lit_at,
-    AdtNode,
-    EffectDeclNode,
-    FnNode,
-    ItemNode,
-    UseNameNode,
-    UseNode,
-    VariantNode,
-    list_at,
-    list_len,
-    none as ast_none
+    Ast, lit_at, AdtNode, EffectDeclNode, FnNode, ItemNode, UseNameNode, UseNode, VariantNode,
+    list_at, list_len, none as ast_none
 };
 use @vesper/check-data::util::{stage2_heap_mark, stage2_heap_reset, stage2_heap_swap};
 use @vesper/ast::lower::{L, lower_source, lower_source_perm};
 use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{symbol_from_id};
 use self::state::{
-    St,
-    at32,
-    at8,
-    const_of,
-    const_prefix,
-    sym_byte,
-    sym_len,
-    sym_slice,
-    sym_starts,
-    find_module,
-    inc,
-    kind_both,
-    kind_sugar,
-    kind_type,
-    kind_value,
-    mod_hash,
-    n32,
-    none,
-    pair,
-    w
+    St, at32, at8, const_of, const_prefix, sym_byte, sym_len, sym_slice, sym_starts, find_module,
+    inc, kind_both, kind_sugar, kind_type, kind_value, mod_hash, n32, none, pair, w
 };
 
 fn rd(in b: Slice[u8], inout pos: u64) -> u64 {
@@ -519,6 +491,7 @@ pub fn collect_all_bytes(inout s: St, in input: Slice[u8]) {
             Option::Some(src) => lower_source_perm(in src.as_str(), inout ast_perm, ast_perm_end),
             Option::None => lower_source_perm(in "", inout ast_perm, ast_perm_end),
         };
+        s.parse_errors = wrapping_add(s.parse_errors, l.p.d.code.len());
         begin_module(inout s);
         collect(inout s, in l.ast, n32(m));
         constants(inout s, in l, n32(m));

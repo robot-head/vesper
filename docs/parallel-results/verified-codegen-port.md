@@ -344,9 +344,44 @@ where the pass runs on the program the lowering reads.
 
 **Rust lines deleted:** 0. All of `src/verified_codegen` goes at the retirement.
 
+## Part 4d-2: the `verified_codegen` hybrid swap
+
+### What changed
+
+- `verified_codegen::build` (container, bytes and code size) is now a swap
+  point, `VerifiedBuildTable`, with Rust's `compile` as the default.
+  `build_command` uses it, which covers `vesper build --codegen verified` and
+  the driver's `VerifiedBuild` step.
+- `crates/vesper-hybrid/modules/verified_codegen` and
+  `src/swap/verified_codegen.rs` install the Vesper port. The swap encodes
+  the optimized program with `tests/common/verified_words.rs`, which moved
+  out of the test so the test and the hybrid share it. The Rust error text
+  comes back as a `VerifiedError` through `VerifiedError::from_display`. A
+  program the word format cannot hold keeps Rust's build.
+  `VESPER_HYBRID_VERIFIED=0` turns the swap off.
+- `crates/vesper-hybrid/tests/verified_codegen.rs` runs `vesper build
+  --codegen verified` over `examples/` and `tests/fixtures/` for the three
+  Linux targets, with the swap on and off. The comparison uses the hybrid
+  with the swap off, not the default compiler, because the hybrid's AST
+  optimizer already reassociates two of these programs differently from
+  the default's (`examples/traits/shapes.ves`,
+  `tests/fixtures/bounded_generics/nested.ves`). The divergent build
+  (`divergent-verified-codegen`) empties every summary, and the
+  differential catches it.
+
+### Evidence (Linux x86_64, release, `-C target-cpu=native`)
+
+| Check | Result |
+|---|---|
+| CLI builds, swap on vs off, 3 Linux targets: status, stdout, stderr, executable bytes | **0 of 1,605 differ** (333 built) |
+| Wall time of those builds | Rust 11.54 s, Vesper 11.18 s: **0.97x** |
+| Divergent build | caught (549 differ) |
+
+**Rust lines deleted:** 0. All of `src/verified_codegen` goes at the retirement.
+
 ## Left
 
 - Optional: compare the per-arch `encoding_listing` text.
-- Part 4d-2:
-  `coverage`, `cli`, then the swap into the hybrid and `bootstrap/stage1.rs`, with `bootstrap/stage1.lock`
-  reproduced, and the Rust deleted at the retirement.
+- Part 4d-3: `coverage`, then the swap into `bootstrap/stage1.rs` with
+  `bootstrap/stage1.lock` reproduced, and the Rust deleted at the
+  retirement.

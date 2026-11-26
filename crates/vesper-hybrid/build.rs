@@ -8,7 +8,7 @@
 //! `VESPER_HYBRID_BINDING_<MODULE>`), tools/bazel/vesper_hybrid.bzl. The
 //! harness takes one prebuilt object per build script, so each module's is
 //! handed to it in turn.
-use vesper_port_harness::{GENERATED_BINDING_ENV, OBJECT_ENV, Port};
+use vesper_port_harness::{GENERATED_BINDING_ENV, OBJECT_ENV, OBJECT_PACKAGES_ENV, Port};
 
 /// This package's directory.
 fn manifest_dir() -> std::path::PathBuf {
@@ -138,6 +138,14 @@ const DIVERGENT_LEAN_EXTRACT_EDIT: (&str, &str) = (
     "(sink text: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = text;\n    let _ = t.try_set(0, 0);\n    t\n",
 );
 
+/// The verified code generator's divergence check: every summary comes
+/// back empty, so every build fails (mirrored in BUILD.bazel).
+#[cfg(feature = "divergent-verified-codegen")]
+const DIVERGENT_VERIFIED_CODEGEN_EDIT: (&str, &str) = (
+    "(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    words\n",
+    "(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = words;\n    let _ = t.try_set(0, 0);\n    t\n",
+);
+
 /// The stack-bound divergence check: every graph is rejected as malformed
 /// (`divergent_words` in modules/stack_bound), so every report differs.
 #[cfg(feature = "divergent-stack-bound")]
@@ -214,8 +222,12 @@ fn main() {
         let key = library.to_ascii_uppercase();
         let object = format!("VESPER_HYBRID_OBJECT_{key}");
         let generated = format!("VESPER_HYBRID_BINDING_{key}");
+        // The `[package] objects` packages of this module only (Bazel; in
+        // Cargo the harness finds them through the path dependencies).
+        let objects = format!("VESPER_HYBRID_OBJECT_PACKAGES_{key}");
         println!("cargo:rerun-if-env-changed={object}");
         println!("cargo:rerun-if-env-changed={generated}");
+        println!("cargo:rerun-if-env-changed={objects}");
         // SAFETY: build scripts are single-threaded; the harness reads
         // these right after.
         unsafe {
@@ -226,6 +238,10 @@ fn main() {
             match std::env::var_os(&generated) {
                 Some(path) => std::env::set_var(GENERATED_BINDING_ENV, path),
                 None => std::env::remove_var(GENERATED_BINDING_ENV),
+            }
+            match std::env::var_os(&objects) {
+                Some(paths) => std::env::set_var(OBJECT_PACKAGES_ENV, paths),
+                None => std::env::remove_var(OBJECT_PACKAGES_ENV),
             }
         }
         let port = Port::new(library, package).binding(binding);
@@ -318,6 +334,15 @@ fn main() {
         #[cfg(feature = "divergent-lean-extract")]
         let port = if library == "hybrid_lean_extract" {
             port.edit(DIVERGENT_LEAN_EXTRACT_EDIT.0, DIVERGENT_LEAN_EXTRACT_EDIT.1)
+        } else {
+            port
+        };
+        #[cfg(feature = "divergent-verified-codegen")]
+        let port = if library == "hybrid_verified_codegen" {
+            port.edit(
+                DIVERGENT_VERIFIED_CODEGEN_EDIT.0,
+                DIVERGENT_VERIFIED_CODEGEN_EDIT.1,
+            )
         } else {
             port
         };

@@ -16,24 +16,9 @@ use @vesper/check-data::world::{Bounds, bounds_new, mode_of, set_by_symbol};
 use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, w};
 use self::decl::{Conf, Decls, Gen, Par, Sig, TRef, TraitRow};
 use self::tyops::{
-    Sy,
-    binding_of,
-    compatible,
-    contains32,
-    contains_projection,
-    conform_type,
-    insert32,
-    is_projection,
-    is_self,
-    key_segment,
-    mentions,
-    proj_assoc,
-    proj_self,
-    proj_trait,
-    proj_trait_ty,
-    row_arg,
-    same_type,
-    trait_has_assoc
+    Sy, binding_of, compatible, contains32, contains_projection, conform_type, insert32,
+    is_projection, is_self, key_segment, mentions, proj_assoc, proj_self, proj_trait, proj_trait_ty,
+    row_arg, same_type, trait_has_assoc
 };
 
 const NONE32: u32 = 4294967295;

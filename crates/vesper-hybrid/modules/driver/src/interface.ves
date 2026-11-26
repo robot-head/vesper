@@ -10,18 +10,8 @@
 use @vesper-std/fmt::{write_u64};
 // The world's declaration stream and its readers (world.ves, #2024).
 use self::world::{
-    byte_at,
-    num,
-    text,
-    cmp_bytes,
-    same,
-    is_name,
-    skip_effects,
-    skip_ty,
-    skip_generics,
-    skip_projections,
-    effects_at,
-    skip_function
+    byte_at, num, text, cmp_bytes, same, is_name, skip_effects, skip_ty, skip_generics,
+    skip_projections, effects_at, skip_function
 };
 
 const NONE: u64 = 18446744073709551615;

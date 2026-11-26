@@ -7,32 +7,12 @@ use self::local::{choice, l_action, l_init, l_msg, lt as ltag};
 use self::session::{c_mon_action, c_mon_step};
 use self::simnet::{sm_chance, sm_range};
 use self::wire::{
-    ack_decode_range,
-    ack_encode_seq,
-    batch_decode_range,
-    batch_encode_arena_seq,
-    checker_core_committed_arena,
-    checker_core_compacted_changed,
-    checker_core_leader_elected,
-    checker_core_logs_changed_arena,
-    checker_core_new,
-    checker_core_record,
-    config_index_arena,
-    quorum_size,
-    raft_config_of_arena,
-    term_decode_range,
-    term_encode_seq,
-    votereq_decode_range,
-    votereq_encode_seq,
-    CheckerCore,
-    RaftEntry,
-    ViolKind,
-    WireAck,
-    WireErr,
-    WireHeader,
-    WireVoteReq,
-    CONFIG_FLAG,
-    MAX_BATCH
+    ack_decode_range, ack_encode_seq, batch_decode_range, batch_encode_arena_seq,
+    checker_core_committed_arena, checker_core_compacted_changed, checker_core_leader_elected,
+    checker_core_logs_changed_arena, checker_core_new, checker_core_record, config_index_arena,
+    quorum_size, raft_config_of_arena, term_decode_range, term_encode_seq, votereq_decode_range,
+    votereq_encode_seq, CheckerCore, RaftEntry, ViolKind, WireAck, WireErr, WireHeader, WireVoteReq,
+    CONFIG_FLAG, MAX_BATCH
 };
 
 const MAX_U64: u64 = 18446744073709551615;

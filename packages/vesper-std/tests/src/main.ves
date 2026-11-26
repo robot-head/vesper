@@ -8,14 +8,12 @@ test {
     use self::core_tests::{check_core_ordering, check_core_option, check_core_result};
     use self::text_tests::{check_fmt_write, check_fmt_parse, check_bytes};
     use self::map_tests::{
-        check_btree,
-        check_struct_keys,
-        check_flat_table,
-        check_flat_table_differential
+        check_btree, check_struct_keys, check_flat_table, check_flat_table_differential
     };
     use self::seq_tests::{check_sets, check_radix_seq, check_version};
     use self::string_tests::check_fmt_string;
     use self::control_tests::check_core_control;
+    use self::scratch_tests::check_core_scratch;
     use self::traces::{map_trace, seq_trace};
 
     // `1000 * t + c` for check `c` failing in test `t`, else `prior`.
@@ -47,6 +45,7 @@ test {
         r = first_failure(13, check_version(), r);
         r = first_failure(14, check_fmt_string(), r);
         r = first_failure(15, check_core_control(), r);
+        r = first_failure(16, check_core_scratch(), r);
         r
     }
 

@@ -3,27 +3,12 @@
 //
 // @export abi 3
 use self::events::{
-    e_check,
-    e_decode,
-    e_encode,
-    e_frames,
-    e_ramp_next,
-    e_ramp_set,
-    e_tile_advance,
-    e_tile_next,
+    e_check, e_decode, e_encode, e_frames, e_ramp_next, e_ramp_set, e_tile_advance, e_tile_next,
     e_tile_set
 };
 use self::pdc::{
-    p_accumulate,
-    p_compile,
-    p_copy,
-    p_line_advance,
-    p_line_len,
-    p_line_read,
-    p_line_write,
-    p_mix_lr,
-    p_scale,
-    p_zero
+    p_accumulate, p_compile, p_copy, p_line_advance, p_line_len, p_line_read, p_line_write,
+    p_mix_lr, p_scale, p_zero
 };
 use self::confine::{c_verify};
 use self::graph::{g_render};

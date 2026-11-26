@@ -18,6 +18,39 @@ thread_local! {
     static LAST_VERIFY_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static LAST_LSP_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static FMT_ERROR: RefCell<String> = const { RefCell::new(String::new()) };
+    static FMT_OUTPUT: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// `vesper proof-audit` from `modules/proof_audit` (#1341), when its swap
+/// is on (src/swap/proof_audit.rs): it takes the packed arguments and
+/// returns the module's result bytes.
+static PROOF_AUDIT: std::sync::OnceLock<fn(&[u8]) -> Vec<u8>> = std::sync::OnceLock::new();
+
+/// Serve `hc_proof_audit_run` from `run` (`modules/proof_audit`).
+pub(crate) fn install_proof_audit(run: fn(&[u8]) -> Vec<u8>) -> Result<(), fn(&[u8]) -> Vec<u8>> {
+    PROOF_AUDIT.set(run)
+}
+
+/// Print what `modules/proof_audit` printed and return its error: a
+/// status byte, the stdout length (8 bytes, little-endian), stdout, then
+/// the error text.
+fn proof_audit_result(result: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let (Some(&status), Some(len)) = (result.first(), result.get(1..9)) else {
+        std::process::abort();
+    };
+    let len = u64::from_le_bytes(len.try_into().expect("8 bytes")) as usize;
+    let Some(out) = result.get(9..9 + len) else {
+        std::process::abort();
+    };
+    let mut stdout = io::stdout().lock();
+    let _ = stdout.write_all(out);
+    let _ = stdout.flush();
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&result[9 + len..]).into_owned())
+    }
 }
 
 /// Commands the Vesper command layers answered (the driver's
@@ -69,28 +102,24 @@ pub mod host {
         i64::try_from(text.len()).unwrap_or(i64::MAX)
     }
 
-    /// One file of `vesper fmt` (`fmt_commands::format_file`: the bounded
-    /// read, the formatter and the checked atomic replace). Flag 1 is
-    /// `--check`, 2 `--recovery`. The status is 0 unchanged, 1 formatted,
-    /// 2 needs formatting or 3 failed (`hc_fmt_error` has the error);
-    /// `stats` gets changed, input bytes, output bytes, whether there is an
-    /// edit count, and the edit count.
+    /// The formatter of one `vesper fmt` file (`fmt_commands::format_text`),
+    /// after the Vesper command layer's bounded read: `text` is its UTF-8
+    /// contents and flag 2 is `--recovery`. The status is 0 formatted (the
+    /// output waits for `hc_fmt_output`) or 3 failed (`hc_fmt_error` has the
+    /// error); `stats` gets changed, output bytes, whether there is an edit
+    /// count, and the edit count.
     ///
     /// # Safety
-    /// `path` is a lent byte slice and `stats` a lent writable slice of
+    /// `text` is a lent byte slice and `stats` a lent writable slice of
     /// `slen` words.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn hc_fmt_file(
-        path: *const u8,
+    pub unsafe extern "C" fn hc_fmt_source(
+        text: *const u8,
         len: usize,
         flags: u32,
         stats: *mut u64,
         slen: usize,
     ) -> u32 {
-        let _flush = FlushOnReturn;
-        // SAFETY: lent for the call; the bytes came from the command line
-        // or from a directory listing.
-        let path = unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(bytes(path, len)) };
         let out: &mut [u64] = if slen == 0 || stats.is_null() {
             &mut []
         } else {
@@ -98,34 +127,45 @@ pub mod host {
             unsafe { std::slice::from_raw_parts_mut(stats, slen) }
         };
         out.iter_mut().for_each(|w| *w = 0);
-        let report =
-            match crate::fmt_commands::format_file(Path::new(path), flags & 1 != 0, flags & 2 != 0)
-            {
-                Ok(report) => report,
-                Err(error) => {
-                    super::FMT_ERROR.with(|e| *e.borrow_mut() = error);
-                    return 3;
-                }
-            };
-        let word = |key: &str| report[key].as_u64();
+        // SAFETY: lent for the call.
+        let Ok(text) = std::str::from_utf8(unsafe { bytes(text, len) }) else {
+            super::FMT_ERROR.with(|e| *e.borrow_mut() = "fmt input must be UTF-8".into());
+            return 3;
+        };
+        let (result, edits) = match crate::fmt_commands::format_text(text, flags & 2 != 0) {
+            Ok(done) => done,
+            Err(error) => {
+                super::FMT_ERROR.with(|e| *e.borrow_mut() = error);
+                return 3;
+            }
+        };
         let values = [
-            u64::from(report["changed"].as_bool().unwrap_or(false)),
-            word("input_bytes").unwrap_or(0),
-            word("output_bytes").unwrap_or(0),
-            u64::from(word("edits").is_some()),
-            word("edits").unwrap_or(0),
+            u64::from(result.changed),
+            result.output.len() as u64,
+            u64::from(edits.is_some()),
+            edits.unwrap_or(0) as u64,
         ];
         for (slot, v) in out.iter_mut().zip(values) {
             *slot = v;
         }
-        match report["status"].as_str() {
-            Some("formatted") => 1,
-            Some("needs_format") => 2,
-            _ => 0,
-        }
+        super::FMT_OUTPUT.with(|o| *o.borrow_mut() = result.output);
+        0
     }
 
-    /// The error of the last failed `hc_fmt_file`.
+    /// The output of the last successful `hc_fmt_source` (copy-out).
+    ///
+    /// # Safety
+    /// `buf` is a lent writable slice.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hc_fmt_output(buf: *mut u8, len: usize) -> i64 {
+        super::FMT_OUTPUT.with(|o| {
+            let o = o.borrow();
+            // SAFETY: lent for the call.
+            unsafe { copy_out(Some(o.as_bytes()), buf, len) }
+        })
+    }
+
+    /// The error of the last failed `hc_fmt_source`.
     ///
     /// # Safety
     /// `buf` is a lent writable slice.
@@ -1685,8 +1725,11 @@ pub mod host {
         let _flush = FlushOnReturn;
         // SAFETY: lent for the call.
         let raw = unsafe { bytes(packed, packed_len) };
-        let args = unpack_test_args(raw);
-        match crate::proof_commands::run(args) {
+        let result = match super::PROOF_AUDIT.get() {
+            Some(run) => super::proof_audit_result(&run(raw)),
+            None => crate::proof_commands::run(unpack_test_args(raw)),
+        };
+        match result {
             Ok(()) => 0,
             Err(err) => {
                 let bytes = err.into_bytes();

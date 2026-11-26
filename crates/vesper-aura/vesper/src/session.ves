@@ -1,13 +1,7 @@
 // session.rs: the reconciler a Session wraps.
 use self::codes::{MAX_U64, NONE_ID};
 use self::plan::{
-    copy_mounted,
-    mounted_find,
-    mounted_new,
-    mounted_prop,
-    mounted_sub,
-    plan,
-    prepared_empty,
+    copy_mounted, mounted_find, mounted_new, mounted_prop, mounted_sub, plan, prepared_empty,
     prepared_for
 };
 use self::{CloseRequest, Op, Prepared, Reconciler, ViewFault};

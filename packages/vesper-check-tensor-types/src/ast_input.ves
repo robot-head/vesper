@@ -1,29 +1,9 @@
 // Binary `Ast` decoder for `@vesper/check-tensor-types` (SH2 lane 14 part 3, #1186).
 
 use @vesper/ast::{
-    AdtNode,
-    ArgNode,
-    Ast,
-    ClauseNode,
-    ConfNode,
-    EffectDeclNode,
-    EffectNode,
-    EffectsNode,
-    ExprNode,
-    FieldNode,
-    FnNode,
-    GenericNode,
-    ImplNode,
-    ItemNode,
-    ListRef,
-    Lit,
-    ParamNode,
-    PatNode,
-    StmtNode,
-    TraitNode,
-    TypeNode,
-    VariantNode,
-    ast_new
+    AdtNode, ArgNode, Ast, ClauseNode, ConfNode, EffectDeclNode, EffectNode, EffectsNode, ExprNode,
+    FieldNode, FnNode, GenericNode, ImplNode, ItemNode, ListRef, Lit, ParamNode, PatNode, StmtNode,
+    TraitNode, TypeNode, VariantNode, ast_new
 };
 use @vesper/check-data::input::{Reader};
 use @vesper/check-data::util::{add, n32};

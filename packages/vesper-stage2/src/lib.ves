@@ -4,25 +4,14 @@ use @vesper/check-data::input::{Ctx};
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{TyPass, Types};
 use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    push_decimal,
-    stage2_heap_mark,
-    stage2_heap_reset,
-    stage2_heap_swap,
-    u32_at,
-    u64_at,
-    w
+    add, inc, n32, push_decimal, stage2_heap_mark, stage2_heap_reset, stage2_heap_swap, u32_at,
+    u64_at, w
 };
 use @vesper/check-data::world::{World, set_by_symbol};
 use @vesper/place-ir::{Program};
 use @vesper/place-ir-lower::ast::{Ast as IrAst};
 use @vesper/check-names-packages::{
-    AssembledModule,
-    assemble_next_bytes,
-    assembly_begin_bytes,
-    assembly_metadata
+    AssembledModule, assemble_next_bytes, assembly_begin_bytes, assembly_metadata
 };
 use @vesper/place-ir-lower::lower::{L, l_new, lower_all};
 use @vesper/wasm-backend::{compile_with_facts, compile_with_facts_diag};
