@@ -3,7 +3,7 @@ use cranelift_codegen::{
     entity::SecondaryMap,
     ir::{
         AbiParam, Block, BlockCall, Endianness, Function, Inst, InstructionData, MemFlags, Opcode,
-        Type, Value, condcodes::IntCC, types,
+        StackSlot, StackSlotKind, Type, Value, condcodes::IntCC, immediates::Offset32, types,
     },
     isa::CallConv,
 };
@@ -43,6 +43,13 @@ enum IntegerOp {
     StoreQword = 27,
     BranchZero = 28,
     EarlyReturn = 29,
+    StackSlot = 30,
+    StackAddress = 31,
+    StackLoad = 32,
+    StackStoreByte = 33,
+    StackStoreWord = 34,
+    StackStoreDword = 35,
+    StackStoreQword = 36,
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
@@ -130,6 +137,16 @@ fn store_op(opcode: Opcode, ty: Type) -> Option<IntegerOp> {
     })
 }
 
+fn stack_store_op(ty: Type) -> Option<IntegerOp> {
+    match ty {
+        types::I8 => Some(IntegerOp::StackStoreByte),
+        types::I16 => Some(IntegerOp::StackStoreWord),
+        types::I32 => Some(IntegerOp::StackStoreDword),
+        types::I64 => Some(IntegerOp::StackStoreQword),
+        _ => None,
+    }
+}
+
 struct IntegerBlocks<'a> {
     function: &'a Function,
     arity: usize,
@@ -148,6 +165,13 @@ impl IntegerBlocks<'_> {
         self.function
             .dfg
             .value_type(self.function.dfg.resolve_aliases(value))
+    }
+
+    fn stack_location(&self, slot: StackSlot, offset: Offset32, access: u32) -> Option<[u64; 2]> {
+        let size = self.function.sized_stack_slots.get(slot)?.size;
+        let offset = u32::try_from(i32::from(offset)).ok()?;
+        (offset.checked_add(access)? <= size)
+            .then_some([u64::from(slot.as_u32()), u64::from(offset)])
     }
 
     fn edge(&self, edge: BlockCall, values: &mut Values) -> Option<Block> {
@@ -183,6 +207,19 @@ impl IntegerBlocks<'_> {
         for inst in instructions {
             let input = |value| values[function.dfg.resolve_aliases(value)];
             let ty = |value| function.dfg.value_type(function.dfg.resolve_aliases(value));
+            if let InstructionData::StackStore {
+                opcode: Opcode::StackStore,
+                arg,
+                stack_slot,
+                offset,
+            } = function.dfg.insts[inst]
+            {
+                let source = ty(arg);
+                let op = stack_store_op(source)?;
+                let [slot, offset] = self.stack_location(stack_slot, offset, source.bytes())?;
+                self.append(op, [input(arg)?, slot, offset]);
+                continue;
+            }
             if let InstructionData::Store {
                 opcode,
                 flags,
@@ -217,6 +254,22 @@ impl IntegerBlocks<'_> {
                     IntegerOp::Constant,
                     [integer_bits(imm.bits(), output), 0, 0],
                 ),
+                InstructionData::StackLoad {
+                    opcode: Opcode::StackAddr,
+                    stack_slot,
+                    offset,
+                } if output == types::I64 => {
+                    let [slot, offset] = self.stack_location(stack_slot, offset, 0)?;
+                    (IntegerOp::StackAddress, [slot, offset, 0])
+                }
+                InstructionData::StackLoad {
+                    opcode: Opcode::StackLoad,
+                    stack_slot,
+                    offset,
+                } => {
+                    let [slot, offset] = self.stack_location(stack_slot, offset, output.bytes())?;
+                    (IntegerOp::StackLoad, [slot, offset, width])
+                }
                 InstructionData::Unary { opcode, arg } => {
                     let source_width = integer_width(ty(arg))?;
                     let op = match opcode {
@@ -404,6 +457,8 @@ impl IntegerBlocks<'_> {
 /// A single BranchZero may skip to the instruction after EarlyReturn. These
 /// records also leave unreferenced slots, and the false arm uses the header's
 /// return value. Neither arm may read values defined in the other.
+/// Leading StackSlot records declare frame slots by size and alignment.
+/// Stack addresses and accesses use a slot ordinal and an offset within the slot.
 pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
     let signature = &function.signature;
     let arity = signature.params.len();
@@ -414,7 +469,6 @@ pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
             .params
             .iter()
             .any(|param| *param != AbiParam::new(types::I64))
-        || !function.sized_stack_slots.is_empty()
         || !function.dynamic_stack_slots.is_empty()
     {
         return None;
@@ -440,6 +494,13 @@ pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
         arity,
         words: vec![0; HEADER_WORDS],
     };
+    for slot in function.sized_stack_slots.values() {
+        if slot.kind != StackSlotKind::ExplicitSlot {
+            return None;
+        }
+        let alignment = 1u64.checked_shl(u32::from(slot.align_shift))?;
+        blocks.append(IntegerOp::StackSlot, [u64::from(slot.size), alignment, 0]);
+    }
     let mut visited = SecondaryMap::new();
     let terminator = blocks.follow_jumps(block, &mut values, &mut visited)?;
     let result = match function.dfg.insts[terminator] {

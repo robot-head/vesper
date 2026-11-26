@@ -2,6 +2,7 @@
 pub const RAX: u8 = 0;
 const RCX: u8 = 1;
 const RDX: u8 = 2;
+pub const RSP: u8 = 4;
 const RSI: u8 = 6;
 const RDI: u8 = 7;
 const R8: u8 = 8;
@@ -32,8 +33,13 @@ const MOD_FIELD_SHIFT: u32 = 3;
 const MOV_RM_R8: u8 = 0x88;
 const MOV_RM_R64: u8 = 0x89;
 const MOV_R64_RM: u8 = 0x8b;
+const LEA: u8 = 0x8d;
 const MOV_REGISTER_IMMEDIATE: u8 = 0xb8;
 const MOV_RM64_IMM32: u8 = 0xc7;
+const ALU_RM64_IMM8: u8 = 0x83;
+const ALU_RM64_IMM32: u8 = 0x81;
+const ALU_ADD_EXTENSION: u8 = 0;
+const ALU_SUB_EXTENSION: u8 = 5;
 const TWO_BYTE_OPCODE: u8 = 0x0f;
 const IMUL_R64_RM64: u8 = 0xaf;
 const UNARY_GROUP: u8 = 0xf7;
@@ -99,6 +105,9 @@ pub copy enum Instruction {
     Truncate(u8, u8, u64),
     SignExtend(u8, u8, u64, u64),
     BranchZero(u8),
+    FrameEnter(u32),
+    FrameLeave(u32),
+    StackAddress(u8, u32),
     Return,
 }
 
@@ -162,6 +171,22 @@ fn immediate(inout out: ChunkSeq[u8], bits: u64, size: u64) {
     for i in 0..size {
         let shift = wrapping_mul(wrapping_u32(i), wrapping_u32(BYTE_BITS));
         out.push(wrapping_u8(wrapping_shr_u64(bits, shift)));
+    }
+}
+
+fn adjust_stack(inout out: ChunkSeq[u8], extension: u8, size: u32) {
+    if size == 0 {
+        return;
+    }
+    out.push(REX_W);
+    if size <= DISP8_MAX {
+        out.push(ALU_RM64_IMM8);
+        out.push(modrm(extension, RSP));
+        out.push(wrapping_u8(size));
+    } else {
+        out.push(ALU_RM64_IMM32);
+        out.push(modrm(extension, RSP));
+        immediate(inout out, widen_u64(size), IMM32_BYTES);
     }
 }
 
@@ -433,6 +458,13 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             out.push(TWO_BYTE_OPCODE);
             out.push(JCC_NEAR | CC_E);
             immediate(inout out, 0, IMM32_BYTES);
+        },
+        Instruction::FrameEnter(size) => adjust_stack(inout out, ALU_SUB_EXTENSION, size),
+        Instruction::FrameLeave(size) => adjust_stack(inout out, ALU_ADD_EXTENSION, size),
+        Instruction::StackAddress(destination, displacement) => {
+            out.push(rex(destination, RSP, true));
+            out.push(LEA);
+            memory_operand(inout out, destination, RSP, displacement);
         },
         Instruction::Return => out.push(RET_NEAR),
     };

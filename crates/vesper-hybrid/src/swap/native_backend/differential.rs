@@ -1,7 +1,8 @@
 use super::binding;
 use super::machine::integer_block_words;
 use cranelift_codegen::ir::{
-    AbiParam, BlockArg, Endianness, InstBuilder, MemFlags, Opcode, Type, condcodes::IntCC, types,
+    AbiParam, BlockArg, Endianness, InstBuilder, MemFlags, Opcode, StackSlotData, StackSlotKind,
+    Type, condcodes::IntCC, types,
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -35,6 +36,7 @@ enum Case {
     MemoryStores,
     GuardedMemory,
     JoinedMemory,
+    StackFrame(u32),
     CompareImmediate,
     Select,
     SelectKeepingArms,
@@ -67,6 +69,15 @@ fn integer_backend_matches_cranelift_results() {
     // The false arm cannot return a value defined in the true arm.
     assert!(
         binding::x86_64_integer_block(&[1, 2, 28, 0, 0, 0, 0, 9, 0, 0, 29, 2, 0, 0]).is_empty()
+    );
+    // Excessive alignment, a frame that needs probing, and an invalid slot offset.
+    assert!(binding::x86_64_integer_block(&[1, 0, 30, 32, 32, 0]).is_empty());
+    assert!(binding::x86_64_integer_block(&[1, 0, 30, 4096, 16, 0]).is_empty());
+    assert!(binding::x86_64_integer_block(&[1, 2, 30, 16, 16, 0, 31, 0, 17, 0]).is_empty());
+    assert!(binding::x86_64_integer_block(&[1, 0, 30, 16, 16, 0, 36, 0, 0, 9]).is_empty());
+    assert_eq!(
+        binding::x86_64_integer_block(&[1, 0, 30, 16, 16, 0]),
+        binding::x86_64_integer_block(&[1, 0]),
     );
 
     let isa = cranelift_native::builder()
@@ -120,6 +131,8 @@ fn integer_backend_matches_cranelift_results() {
         Case::MemoryStores,
         Case::GuardedMemory,
         Case::JoinedMemory,
+        Case::StackFrame(16),
+        Case::StackFrame(256),
     ];
     let cases: Vec<_> = cases
         .into_iter()
@@ -386,6 +399,49 @@ fn integer_backend_matches_cranelift_results() {
                 let written = builder.ins().iadd(old, delta);
                 builder.ins().store(flags, written, e, 0);
                 written
+            }
+            Case::StackFrame(size) => {
+                let padding = builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    3,
+                    0,
+                ));
+                let payload = builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    size,
+                    4,
+                ));
+                let offset = i32::try_from(size - 8).unwrap();
+                let byte = builder.ins().ireduce(types::I8, d);
+                let word = builder.ins().ireduce(types::I16, a);
+                let dword = builder.ins().ireduce(types::I32, e);
+                builder.ins().stack_store(byte, padding, 1);
+                builder.ins().stack_store(word, payload, 0);
+                builder.ins().stack_store(dword, payload, 2);
+                builder.ins().stack_store(c, payload, offset);
+                let base = builder.ins().stack_addr(types::I64, payload, 0);
+                let misalignment = builder.ins().band_imm(base, 15);
+                let yes = builder.create_block();
+                let no = builder.create_block();
+                builder.ins().brif(b, yes, &[], no, &[]);
+                builder.switch_to_block(yes);
+                let wide = builder.ins().stack_load(types::I64, payload, offset);
+                let narrow = builder.ins().stack_load(types::I8, padding, 1);
+                let narrow = builder.ins().uextend(types::I64, narrow);
+                let folded = builder.ins().bxor(wide, narrow);
+                let word = builder.ins().stack_load(types::I16, payload, 0);
+                let dword = builder.ins().stack_load(types::I32, payload, 2);
+                let word = builder.ins().uextend(types::I64, word);
+                let dword = builder.ins().uextend(types::I64, dword);
+                let more = builder.ins().iadd(word, dword);
+                let result = builder.ins().iadd(folded, more);
+                let result = builder.ins().iadd(result, misalignment);
+                builder.ins().return_(&[result]);
+                builder.switch_to_block(no);
+                let wide = builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), base, offset);
+                builder.ins().isub(wide, misalignment)
             }
             Case::CompareImmediate => {
                 let byte = builder.ins().ireduce(types::I8, a);
