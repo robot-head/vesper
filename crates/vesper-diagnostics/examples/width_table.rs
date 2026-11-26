@@ -65,21 +65,33 @@ fn width_run(c: u64) -> u64 {
             break;
         }
         let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
-        let first = if mid < {W} { WIDTH_LO[mid] } else { 0 };
+        let first = if mid < {W} {
+            WIDTH_LO[mid]
+        } else {
+            0
+        };
         if first <= c {
             lo = wrapping_add(mid, 1);
         } else {
             hi = mid;
         }
     }
-    if lo == 0 { {W} } else { wrapping_sub(lo, 1) }
+    if lo == 0 {
+        {W}
+    } else {
+        wrapping_sub(lo, 1)
+    }
 }
 
 // `UnicodeWidthChar::width(c).unwrap_or(1)` for the char `c`.
 pub fn char_width(c: u64) -> u64 {
     let i = width_run(c);
     if i < {W} {
-        if c <= WIDTH_HI[i] { WIDTH_W[i] } else { 1 }
+        if c <= WIDTH_HI[i] {
+            WIDTH_W[i]
+        } else {
+            1
+        }
     } else {
         1
     }
@@ -92,8 +104,16 @@ pub fn is_space(c: u64) -> bool {
         if i >= {S} {
             break;
         }
-        let lo = if i < {S} { SPACE_LO[i] } else { 0 };
-        let hi = if i < {S} { SPACE_HI[i] } else { 0 };
+        let lo = if i < {S} {
+            SPACE_LO[i]
+        } else {
+            0
+        };
+        let hi = if i < {S} {
+            SPACE_HI[i]
+        } else {
+            0
+        };
         if c < lo {
             return false;
         }
