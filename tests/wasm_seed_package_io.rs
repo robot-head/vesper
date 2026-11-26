@@ -2790,6 +2790,10 @@ const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
         "Stage 2 itself: stage2.wasm == stage3.wasm",
     ),
     (
+        "vesper-verify",
+        "`vesper verify` pieces as a native executable beside Rust's (tests/self_host_verify.rs); it depends on @vesper/proof-audit, which hashes with C BLAKE3 (@vesper-std/hash-sys), which a Wasm entry does not have",
+    ),
+    (
         "vesper-std",
         "standard library packages, built as dependencies of the probes",
     ),
