@@ -1,0 +1,4 @@
+// The `Telemetrable` prelude (src/trace_effects.rs), added only when a module names it.
+trait Telemetrable {
+    fn telemetry_attr(in self) -> TelemetryAttr;
+}
