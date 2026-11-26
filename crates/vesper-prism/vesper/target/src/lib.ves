@@ -288,7 +288,8 @@ fn decode(inout out: ChunkSeq[u8], in s: Slice[u8], lo: u64, hi: u64, plus_is_sp
     if lo <= hi
         && hi <= s.len()
         && find(in s, lo, hi, Ascii::Percent) == hi
-        && (!plus_is_space || find(in s, lo, hi, 43) == hi) {
+        && (!plus_is_space || find(in s, lo, hi, 43) == hi)
+    {
         out.extend(in s[lo..hi]);
         return;
     }
@@ -343,7 +344,8 @@ fn query_part(
 ) -> Option[TargetError] {
     if lo <= hi
         && hi <= s.len()
-        && (plain || (find(in s, lo, hi, Ascii::Percent) == hi && find(in s, lo, hi, PLUS) == hi)) {
+        && (plain || (find(in s, lo, hi, Ascii::Percent) == hi && find(in s, lo, hi, PLUS) == hi))
+    {
         // Nothing to decode: ASCII without NUL, as the grammar keeps it.
         out.extend(in s[lo..hi]);
         return Option::None;
@@ -476,7 +478,8 @@ fn parse(in raw: Slice[u8], limits: TargetLimits) -> Result[ParsedTarget, Target
                 let n = wrapping_sub(end, at);
                 if (n == 1 || n == 2)
                     && byte(in raw, at) == Ascii::Dot
-                    && byte(in raw, wrapping_sub(end, 1)) == Ascii::Dot {
+                    && byte(in raw, wrapping_sub(end, 1)) == Ascii::Dot
+                {
                     return Result::Err(TargetError::DotSegment);
                 }
             } else {

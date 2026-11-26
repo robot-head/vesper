@@ -392,13 +392,15 @@ pub fn takes(in p: Program, in t: Types, in wd: World, in fx: Fns, in f: Fun) ->
             let ins = p.inst(add(blk.i0, ii));
             if ins.fallible != 0
                 || wd.is_partial(ins.s0, ins.s1)
-                || wd.may_overflow(ins.s0, ins.s1) {
+                || wd.may_overflow(ins.s0, ins.s1)
+            {
                 return false;
             }
             if ins.op == Op::Handle
                 || ins.op == Op::Try
                 || ins.op == Op::Index
-                || ins.op == Op::Seq {
+                || ins.op == Op::Seq
+            {
                 return false;
             }
             if ins.op == Op::Call {

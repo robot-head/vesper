@@ -233,7 +233,8 @@ fn c_bind_name(
     let valid = if old >= 0
         && c_slot(env, old).pass == 2
         && !c_moved(env, old)
-        && c_mode(c_slot(env, old).ty, 0) == 2 {
+        && c_mode(c_slot(env, old).ty, 0) == 2
+    {
         c_error(302, name.start, name.end)
     } else {
         0
@@ -263,7 +264,8 @@ fn c_exhaust(
         let valid = if c_lookup(env, b.name, env.count) == n - 1
             && b.pass == 2
             && !c_moved(env, n - 1)
-            && c_mode(b.ty, 0) == 2 {
+            && c_mode(b.ty, 0) == 2
+        {
             c_error(302, start, end)
         } else {
             0

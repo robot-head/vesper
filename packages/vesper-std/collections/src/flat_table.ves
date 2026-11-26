@@ -383,14 +383,16 @@ test {
                 || table.entry_at(k) != Option::Some((k, previous))
                 || table.insert(k, replacement) != Option::Some(previous)
                 || table.get(k) != Option::Some(replacement)
-                || table.entry_at(k) != Option::Some((k, replacement)) {
+                || table.entry_at(k) != Option::Some((k, replacement))
+            {
                 return false;
             }
         }
         if table.len() != count
             || table.contains_key(count)
             || table.get(count) != Option::None
-            || table.entry_at(count) != Option::None {
+            || table.entry_at(count) != Option::None
+        {
             return false;
         }
         table.clear();
@@ -416,7 +418,8 @@ test {
             || table.entry_at(0) != Option::Some((first, wrapping_add(first, 10)))
             || table.entry_at(1) != Option::Some((second, wrapping_add(second, 10)))
             || table.get(first) != Option::Some(wrapping_add(first, 10))
-            || table.get(second) != Option::Some(wrapping_add(second, 10)) {
+            || table.get(second) != Option::Some(wrapping_add(second, 10))
+        {
             return false;
         }
         let replacement: u64 = 99;

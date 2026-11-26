@@ -179,7 +179,8 @@ pub fn validate(in l: Limits) -> Unit eff [Fail[Error]] {
         || l.max_diagnostics > h.max_diagnostics
         || l.max_labels > h.max_labels
         || l.max_fixes > h.max_fixes
-        || l.max_text_bytes > h.max_text_bytes {
+        || l.max_text_bytes > h.max_text_bytes
+    {
         Fail::raise(Error::InvalidLimits);
     }
 }
@@ -411,7 +412,8 @@ pub fn span(
     r: Range
 ) -> ByteSpan eff [Fail[Error]] {
     if r.start.line > r.end.line
-        || (r.start.line == r.end.line && r.start.character > r.end.character) {
+        || (r.start.line == r.end.line && r.start.character > r.end.character)
+    {
         Fail::raise(Error::ReversedRange);
     }
     let start = offset(in text, in lines, max_work, r.start);
@@ -497,7 +499,8 @@ fn check_edits(
             if start == b_start
                 || (start < b_end && b_start < end)
                 || (start == end && start == b_end)
-                || (b_start == b_end && b_start == end) {
+                || (b_start == b_end && b_start == end)
+            {
                 Fail::raise(Error::OverlappingEdits);
             }
         }
@@ -651,7 +654,8 @@ pub fn diagnostics_check(
                 )
                     & PRIMARY_BIT
             )
-                != 0 {
+                != 0
+            {
                 primary = true;
             }
         }

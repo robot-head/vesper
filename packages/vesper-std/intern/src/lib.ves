@@ -439,7 +439,8 @@ test {
             || table.symbol_len(first) != length
             || start != 0
             || end != length
-            || table.text_byte(end) != Option::None {
+            || table.text_byte(end) != Option::None
+        {
             return false;
         }
         let bytes = text.as_bytes();
@@ -500,7 +501,8 @@ test {
             let sym = symbol_from_id(wrapping_u32(i));
             if table.lookup(in name) != Option::Some(sym)
                 || !table.symbol_eq(sym, in name)
-                || table.intern(in name) != sym {
+                || table.intern(in name) != sym
+            {
                 return false;
             }
         }
@@ -531,7 +533,8 @@ test {
         let mut at: u64 = 0;
         for i in 1..b.len() {
             if b.try_get(i) == Option::Some(58)
-                && b.try_get(wrapping_sub(i, 1)) == Option::Some(58) {
+                && b.try_get(wrapping_sub(i, 1)) == Option::Some(58)
+            {
                 at = wrapping_add(i, 1);
             }
         }

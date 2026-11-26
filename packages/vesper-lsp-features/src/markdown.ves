@@ -410,7 +410,8 @@ fn occurrence(inout k: Link, in b: Slice[u8], s: u64, e: u64, span_s: u64, span_
             }
         }
         if (pe > ps && byte(in b, ps) == 64)
-            || (bracket != NOT_FOUND && local_path(in b, ps, bracket)) {
+            || (bracket != NOT_FOUND && local_path(in b, ps, bracket))
+        {
             if !check_path(inout k, in b, ps, pe) {
                 return false;
             }
@@ -580,7 +581,8 @@ fn group(inout k: Link, in b: Slice[u8]) -> bool {
                 c == 33
                     && wrapping_add(at, 1) < len
                     && lb(in k, in b, line, wrapping_add(at, 1)) == 91
-            ) {
+            )
+        {
             let image = c == 33;
             let start = if image { wrapping_add(at, 1) } else { at };
             let mut close: u64 = 0;

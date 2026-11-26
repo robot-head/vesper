@@ -830,7 +830,8 @@ fn utf8_ok(in b: Slice[u8], start: u64, end: u64) -> bool {
             let hi: u8 = if x == 237 { 159 } else { 191 };
             if wrapping_add(i, 3) > end
                 || !ok_byte(in b, wrapping_add(i, 1), lo, hi)
-                || !ok_byte(in b, wrapping_add(i, 2), 128, 191) {
+                || !ok_byte(in b, wrapping_add(i, 2), 128, 191)
+            {
                 return false;
             }
             i = wrapping_add(i, 3);
@@ -840,7 +841,8 @@ fn utf8_ok(in b: Slice[u8], start: u64, end: u64) -> bool {
             if wrapping_add(i, 4) > end
                 || !ok_byte(in b, wrapping_add(i, 1), lo, hi)
                 || !ok_byte(in b, wrapping_add(i, 2), 128, 191)
-                || !ok_byte(in b, wrapping_add(i, 3), 128, 191) {
+                || !ok_byte(in b, wrapping_add(i, 3), 128, 191)
+            {
                 return false;
             }
             i = wrapping_add(i, 4);

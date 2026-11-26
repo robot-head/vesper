@@ -446,7 +446,8 @@ pub fn analyze_stack(
         if !is_cycle {
             for k in g(in succ.start, first)..g(in succ.start, wrapping_add(first, 1)) {
                 if g(in succ.rows, wrapping_mul(k, 3)) == 0
-                    && g(in succ.rows, wrapping_add(wrapping_mul(k, 3), 1)) == first {
+                    && g(in succ.rows, wrapping_add(wrapping_mul(k, 3), 1)) == first
+                {
                     is_cycle = true;
                 }
             }

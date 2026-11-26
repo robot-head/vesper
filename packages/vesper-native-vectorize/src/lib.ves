@@ -577,7 +577,8 @@ fn plan(in f: Func, h: u32, inout p: Plan) -> bool {
     if f.dest_nargs(term, body_dest) != 0
         || f.dest_nargs(term, exit_dest) != 0
         || body == h
-        || exit == h {
+        || exit == h
+    {
         return false;
     }
     if !header_is_plain(in f, h, term) {
@@ -621,7 +622,8 @@ fn plan(in f: Func, h: u32, inout p: Plan) -> bool {
             || f.inst(w(body_cmp)).cond != CC_EQ
             || x != j
             || bound == NONE
-            || y != bound {
+            || y != bound
+        {
             return false;
         }
         latch = l;
@@ -653,7 +655,8 @@ fn plan(in f: Func, h: u32, inout p: Plan) -> bool {
             if q != latch_term
                 && latch_op != OP_ICONST
                 && latch_op != OP_IADD
-                && latch_op != OP_IADD_IMM {
+                && latch_op != OP_IADD_IMM
+            {
                 return false;
             }
             q = f.next_inst(q);
@@ -1207,7 +1210,8 @@ fn plan_widen(in f: Func, h: u32, inout p: WidenPlan) -> bool {
             let a0 = u32_at(in args, 0);
             if kind_of(in f, in kinds, a0, h, body, NONE) != K_SCALAR
                 || !kinds.known_step(a0)
-                || kinds.step_of(a0) != 1 {
+                || kinds.step_of(a0) != 1
+            {
                 return false;
             }
             src_addr = a0;
@@ -1219,7 +1223,8 @@ fn plan_widen(in f: Func, h: u32, inout p: WidenPlan) -> bool {
         }
         if op == OP_LOAD {
             if kind_of(in f, in kinds, u32_at(in args, 0), h, body, NONE) == K_INV
-                && readonly_can_move(row.mem) {
+                && readonly_can_move(row.mem)
+            {
                 kinds.set(f.resolve(f.result(i, 0)), K_INV, false, 0);
                 p.invariants.push(i);
                 i = f.next_inst(i);
@@ -1234,7 +1239,8 @@ fn plan_widen(in f: Func, h: u32, inout p: WidenPlan) -> bool {
             let a1 = u32_at(in args, 1);
             if kind_of(in f, in kinds, a1, h, body, NONE) != K_SCALAR
                 || !kinds.known_step(a1)
-                || kinds.step_of(a1) != 4 {
+                || kinds.step_of(a1) != 4
+            {
                 return false;
             }
             let a0 = u32_at(in args, 0);
@@ -1277,7 +1283,8 @@ fn plan_widen(in f: Func, h: u32, inout p: WidenPlan) -> bool {
                 && s0 == NONE
                 && args.len() == 2
                 && kind_of(in f, in kinds, a1, h, body, NONE) == K_INV
-                && f.value_type(a1) == TY_F32 {
+                && f.value_type(a1) == TY_F32
+            {
                 kinds.set_stage(r, S_F32, a1);
             } else if op == OP_BITCAST && st0 == S_F32 && r_ty == TY_I32 {
                 kinds.set_stage(r, S_BITS, s0);
@@ -1295,7 +1302,8 @@ fn plan_widen(in f: Func, h: u32, inout p: WidenPlan) -> bool {
             if kind_of(in f, in kinds, a0, h, body, NONE) == K_INV
                 && f.value_type(a0) == TY_F32
                 && kinds.stage_of(a1) == S_F32
-                && kinds.scale_of(a1) == NONE {
+                && kinds.scale_of(a1) == NONE
+            {
                 kinds.set_stage(r, S_F32, a0);
                 i = f.next_inst(i);
                 continue;

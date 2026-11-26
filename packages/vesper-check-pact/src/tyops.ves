@@ -232,7 +232,8 @@ pub fn conform_type(
         if is_self(in t, sy, proj_self(in t, ty))
             && (pt == NONE32 || pt == tr.name)
             && trait_has_assoc(in d, tr, assoc)
-            && !contains32(in stack, assoc) {
+            && !contains32(in stack, assoc)
+        {
             let v = binding_of(in d, c, assoc);
             if v != NONE32 {
                 let depth = stack.len();
@@ -330,7 +331,8 @@ pub fn compatible(in t: Types, sy: Sy, a: u32, b: u32) -> bool {
     let y = t.node(b);
     if x.kind == TyKind::Infer
         || y.kind == TyKind::Infer
-        || (y.kind == TyKind::Named && y.name == sy.never) {
+        || (y.kind == TyKind::Named && y.name == sy.never)
+    {
         return true;
     }
     if x.kind == TyKind::Lit || y.kind == TyKind::Lit {

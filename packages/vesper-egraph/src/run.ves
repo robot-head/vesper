@@ -373,7 +373,8 @@ fn run_one(
         for match_index in first_match..end_match {
             // The RecordingApplier's caps come before the rule's condition.
             if wrapping_add(graph.raw_len(), config.reserve) > config.raw_cap
-                || records.count >= config.record_cap {
+                || records.count >= config.record_cap
+            {
                 return STOP_FAILED;
             }
             if !guard_holds(in graph, in rules, rule, in matches, match_index) {

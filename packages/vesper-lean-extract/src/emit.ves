@@ -445,7 +445,8 @@ fn field_type(inout t: Types, in b: B, in wd: World, ty: u32, field: u32) -> u32
     } else if spells(in b, n.name, in "ChunkSeq")
         || spells(in b, n.name, in "Slice")
         || spells(in b, n.name, in "String")
-        || spells(in b, n.name, in "Str") {
+        || spells(in b, n.name, in "Str")
+    {
         // Interval and view loans of sequences and strings are not places
         // the CFG extractor updates.
         return NONE32;
@@ -1682,7 +1683,8 @@ fn tiled_term(inout b: B, in x: X, label: u32, args: u64) {
         global_app(inout b, in "Array", in "emptyWithCapacity");
         nat_u64(inout b, 0);
     } else if tiled_kind(in b, in x, label, in "WithCapacity")
-        || tiled_kind(in b, in x, label, in "WithRegion") {
+        || tiled_kind(in b, in x, label, in "WithRegion")
+    {
         global_app(inout b, in "Array", in "emptyWithCapacity");
         to_nat_of_value(inout b, v0);
     } else if tiled_kind(in b, in x, label, in "Len") {

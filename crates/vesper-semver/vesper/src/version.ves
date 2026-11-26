@@ -213,7 +213,8 @@ fn identifier(in t: ChunkSeq[u8], start: u64, pos: u64, inout v: Ver) -> u64 {
             if pos == Pos::Pre
                 && seg > 1
                 && !nondigit
-                && byte(in t, wrapping_add(start, acc)) == Ascii::Zero {
+                && byte(in t, wrapping_add(start, acc)) == Ascii::Zero
+            {
                 fail_at(inout v, ErrorKind::LeadingZero, pos, 0);
                 return start;
             }
@@ -609,7 +610,8 @@ pub fn release_q(in old_text: Slice[u8], in new_text: Slice[u8], classification:
         Bump::Minor
     } else if after.major == before.major
         && after.minor == before.minor
-        && after.patch > before.patch {
+        && after.patch > before.patch
+    {
         Bump::Patch
     } else {
         Bump::None
@@ -754,7 +756,8 @@ test {
             || r.words.try_get(1) != Option::Some(0)
             || r.words.try_get(2) != Option::Some(new_offset)
             || r.words.try_get(3) != Option::Some(new_offset)
-            || r.words.try_get(4) != Option::Some(new.len()) {
+            || r.words.try_get(4) != Option::Some(new.len())
+        {
             return false;
         }
         let mut prefix = ChunkSeq::new[u8]();

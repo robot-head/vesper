@@ -228,10 +228,8 @@ pub fn fields(inout r: Rd, i: u64, in names: Strs, open: bool, in what: Str) -> 
         let mut found = false;
         for n in 0..count(in names) {
             if !found
-                && same(
-                    in key[0..key.len()],
-                    in names.bytes[start(in names, n)..end(in names, n)]
-                ) {
+                && same(in key[0..key.len()], in names.bytes[start(in names, n)..end(in names, n)])
+            {
                 let _ = out.try_set(n, v);
                 found = true;
             }

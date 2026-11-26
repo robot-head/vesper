@@ -371,7 +371,8 @@ impl Dec {
         }
         if n.kind == TyKind::Named
             && n.n == 0
-            && self.c.names.has_prefix(n.name, in "__dyn__".as_bytes()) {
+            && self.c.names.has_prefix(n.name, in "__dyn__".as_bytes())
+        {
             return true;
         }
         if n.kind == TyKind::Tuple {
@@ -636,7 +637,8 @@ impl Dec {
                         let root = n32(p.op(inst.a));
                         if bool_at(in self.matched, d)
                             && bool_at(in self.named, w(root))
-                            && !bool_at(in self.borrowed, d) {
+                            && !bool_at(in self.borrowed, d)
+                        {
                             let ok = self.borrowed.try_set(d, true);
                             changed = true;
                         }
@@ -644,7 +646,8 @@ impl Dec {
                         let l = seq_label(in p, inst);
                         if (l == self.s.try_get || l == self.s.hoisted_try_get)
                             && bool_at(in self.matched, d)
-                            && !bool_at(in self.borrowed, d) {
+                            && !bool_at(in self.borrowed, d)
+                        {
                             let ok = self.borrowed.try_set(d, true);
                             changed = true;
                         }
@@ -731,7 +734,8 @@ impl Dec {
                 D_OWNED
             } else if self.is_adt(ty)
                 && !param
-                && (self.holds_sequence(ty) || self.needs_drop(ty)) {
+                && (self.holds_sequence(ty) || self.needs_drop(ty))
+            {
                 D_FIELDS
             } else {
                 D_NONE
@@ -769,7 +773,8 @@ impl Dec {
                     let root = self.place_root(place);
                     if (place != root && !self.owned_or_fields(root))
                         || op != self.s.assign
-                        || (self.plan_is(root, D_STR) && self.fn_.is_param(root)) {
+                        || (self.plan_is(root, D_STR) && self.fn_.is_param(root))
+                    {
                         if root != NONE32 {
                             self.refuse(root);
                         }
@@ -795,7 +800,8 @@ impl Dec {
                     };
                     if borrow_read
                         || bool_at(in self.borrowed, v)
-                        || (info.kind != Pat::Bind && info.has_box) {
+                        || (info.kind != Pat::Bind && info.has_box)
+                    {
                         self.refuse_scratch();
                     }
                 } else if inst.op == Op::Closure || inst.op == Op::Handle {
@@ -977,7 +983,8 @@ fn op_fallible(in a: ChunkSeq[u8], o: OpInfo) -> bool {
         || head_is(in a, o, "Set")
         || head_is(in a, o, "Finish")
         || head_is(in a, o, "SliceGet")
-        || head_is(in a, o, "SliceSet") {
+        || head_is(in a, o, "SliceSet")
+    {
         return true;
     }
     if head_is(in a, o, "CopyFrom")
@@ -985,7 +992,8 @@ fn op_fallible(in a: ChunkSeq[u8], o: OpInfo) -> bool {
         || head_is(in a, o, "MakeAsciiLowercase")
         || head_is(in a, o, "FillRange")
         || head_is(in a, o, "ExtendFromWithin")
-        || head_is(in a, o, "Wide") {
+        || head_is(in a, o, "Wide")
+    {
         return contains(in a, "total: false");
     }
     if head_is(in a, o, "Vector") {

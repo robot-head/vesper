@@ -256,7 +256,8 @@ fn register_result_words(
         || layout.size > 16
         || contains_function(inout types, in world, func.result)
         || uses_caller_slot(in calls, info)
-        || info.fip {
+        || info.fip
+    {
         return 0;
     }
     wrapping_add(layout.size, 7) / 8
@@ -279,7 +280,8 @@ pub fn internal(
     abi.result_words = 0;
     let row = types.row(func.row);
     if fail_only(inout types, in names, in world, syms, in func)
-        && !capability_abi(inout types, in names, in world, syms, in func) {
+        && !capability_abi(inout types, in names, in world, syms, in func)
+    {
         abi.status = true;
     } else if row.n == 0 && row.tail == 0 {
         let words = register_result_words(

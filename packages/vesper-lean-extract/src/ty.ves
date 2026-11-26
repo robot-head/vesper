@@ -73,7 +73,8 @@ fn primitive_rest(in b: B, s: u32) -> Str {
         "Except"
     } else if spells(in b, s, in "TiledSeq")
         || spells(in b, s, in "ChunkSeq")
-        || spells(in b, s, in "Slice") {
+        || spells(in b, s, in "Slice")
+    {
         "Array"
     } else {
         ""

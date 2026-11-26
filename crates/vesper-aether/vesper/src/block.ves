@@ -116,7 +116,8 @@ pub fn blk_validate_discard_or_zero(
         }
         if discard {
             if sector % BLK_DISCARD_SECTOR_ALIGNMENT != 0
-                || widen_u64(count) % BLK_DISCARD_SECTOR_ALIGNMENT != 0 {
+                || widen_u64(count) % BLK_DISCARD_SECTOR_ALIGNMENT != 0
+            {
                 return (BLK_S_IOERR, 0);
             }
         }

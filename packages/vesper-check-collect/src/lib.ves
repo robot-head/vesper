@@ -309,7 +309,8 @@ fn collect_item(
         if name_is(in a, n.name, "Unit")
             || name_is(in a, n.name, "Never")
             || name_is(in a, n.name, "String")
-            || name_is(in a, n.name, "Str") {
+            || name_is(in a, n.name, "Str")
+        {
             let m = quoted(in a, n.name, " is a reserved builtin type");
             diag(
                 inout c,
@@ -375,7 +376,8 @@ fn collect_item(
         let n = fn_node(in a, it.node);
         let key = name_text(in a, n.name);
         if is_wrapping_intrinsic(in a, n.name)
-            || (src == 1 && reserved_width_name(in key.as_str())) {
+            || (src == 1 && reserved_width_name(in key.as_str()))
+        {
             let m = quoted(in a, n.name, " is a reserved arithmetic intrinsic");
             diag(
                 inout c,
@@ -1663,7 +1665,8 @@ fn mode_visit(in w: Collected, in a: Ast, t: u32, in b: Bounds, inout seen: Seen
     }
     if name_is(in a, n.a, "ChunkSeq")
         || name_is(in a, n.a, "Slice")
-        || name_is(in a, n.a, "TiledSeq") {
+        || name_is(in a, n.a, "TiledSeq")
+    {
         return join_mode(mode_visit(in w, in a, list_at(in a, n.b, 0), in b, inout seen), 1);
     }
     let mut args = ChunkSeq::new[u8]();
@@ -1941,7 +1944,8 @@ fn declined(in source: Str, in a: Ast) -> bool {
         if it.kind == 2 {
             let f = fn_node(in a, it.node);
             if head_const(in a, f.name)
-                && (f.result == none() || type_at(in a, f.result).kind == 5) {
+                && (f.result == none() || type_at(in a, f.result).kind == 5)
+            {
                 return true;
             }
         }
@@ -1954,7 +1958,8 @@ fn declined(in source: Str, in a: Ast) -> bool {
                 name_is(in a, n.a, "dyn")
                     || name_is(in a, n.a, "$projection")
                     || name_is(in a, n.a, "[]")
-            ) {
+            )
+        {
             return true;
         }
     }

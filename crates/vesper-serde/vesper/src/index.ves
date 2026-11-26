@@ -289,7 +289,8 @@ pub fn escape_body(in t: Slice[u8], pos0: u64, mode: u64, budget0: u64) -> Esc {
                 }
             }
             if at(in t, pos) != Ascii::Backslash
-                || at(in t, wrapping_add(pos, 1)) != Ascii::LowerU {
+                || at(in t, wrapping_add(pos, 1)) != Ascii::LowerU
+            {
                 return esc_fail(1, pos, budget);
             }
             pos = wrapping_add(pos, 2);

@@ -139,7 +139,8 @@ fn vendor_of(in s: Slice[u8]) -> u32 {
     if arch_of(in s) != none()
         || os_of(in s) != none()
         || index_in(in s, in env_names()) != none()
-        || index_in(in s, in binary_format_names()) != none() {
+        || index_in(in s, in binary_format_names()) != none()
+    {
         return none();
     }
     if !is_lower(byte_at(in s, 0)) {
@@ -249,9 +250,11 @@ fn default_binary_format(t: Triple) -> u32 {
         || os == code(in "emscripten", in os_names())
         || os == code(in "vxworks", in os_names())
         || os == code(in "wasi", in os_names())
-        || os == os_unknown() {
+        || os == os_unknown()
+    {
         if t.arch == code(in "wasm32", in arch_names())
-            || t.arch == code(in "wasm64", in arch_names()) {
+            || t.arch == code(in "wasm64", in arch_names())
+        {
             return code(in "wasm", in binary_format_names());
         }
         if t.arch == 0 {

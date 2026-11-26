@@ -174,13 +174,15 @@ test {
             if !ordered.insert(entry)
                 || !flat.insert(entry)
                 || ordered.insert(entry)
-                || flat.insert(entry) {
+                || flat.insert(entry)
+            {
                 return false;
             }
         }
         for i in 0..ordered_before.len() {
             if ordered.nth(i) != ordered_before.try_byte_at(i)
-                || flat.element_at(i) != flat_before.try_byte_at(i) {
+                || flat.element_at(i) != flat_before.try_byte_at(i)
+            {
                 return false;
             }
         }
@@ -203,7 +205,8 @@ test {
         }
         for i in 0..ordered.len() {
             if ordered_out.try_get(i) != ordered_after.try_byte_at(i)
-                || flat_out.try_get(i) != flat_after.try_byte_at(i) {
+                || flat_out.try_get(i) != flat_after.try_byte_at(i)
+            {
                 return false;
             }
         }
