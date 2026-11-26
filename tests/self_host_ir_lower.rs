@@ -125,8 +125,7 @@ struct Lowered {
 fn lowered() -> &'static [Lowered] {
     static S: OnceLock<Vec<Lowered>> = OnceLock::new();
     S.get_or_init(|| {
-        let quiet = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        let quiet = quiet_panics();
         let mut out = vec![];
         for c in corpus().iter().step_by(step()) {
             let w = &c.world;
@@ -138,7 +137,7 @@ fn lowered() -> &'static [Lowered] {
                 });
             }
         }
-        std::panic::set_hook(quiet);
+        drop(quiet);
         out
     })
 }
