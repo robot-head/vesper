@@ -2,14 +2,16 @@
 
 load("./lib/process.axl", "check")
 load("./port-abi.axl", "port_compiler", "run_port_abi")
+load("./port-shards.axl", "load_port_harness_plan")
 
 def _port_harness(ctx: TaskContext) -> int:
-    root = ctx.std.env.aspect_root_dir()
+    task_root = ctx.std.env.aspect_root_dir()
+    root = ctx.std.env.var("PLATFORM_WORKSPACE") or task_root
     compiler = port_compiler(ctx, root)
     env = {"VESPER_PORT_COMPILER": compiler}
     ctx.std.io.stdout.write("compiling ports with " + compiler + "\n")
 
-    plan = json.decode(ctx.std.fs.read_to_string(root + "/scripts/port-harness-plan.json"))
+    plan, own_plan = load_port_harness_plan(ctx, root)
     shard = ctx.std.env.var("VESPER_PORT_HARNESS_SHARD") or ""
     valid_shards = [str(n) for n in range(1, len(plan) + 1)]
     if shard and shard not in valid_shards:
@@ -35,8 +37,11 @@ def _port_harness(ctx: TaskContext) -> int:
         if shard and shard != str(index):
             continue
         for suite in checks:
+            # A checkout predating the manifest may also predate newer ports.
+            if not own_plan and not ctx.std.fs.exists(root + "/crates/vesper-" + suite["task"][1] + "/Cargo.toml"):
+                continue
             if selection == "all" or any([crate in crates for crate in suite["crates"]]):
-                check(ctx, ctx.std.env.current_exe(), suite["task"], root, env)
+                check(ctx, ctx.std.env.current_exe(), suite["task"], task_root, env)
     return 0
 
 test_port_harness = task(

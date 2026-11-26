@@ -66,7 +66,7 @@ stacker = "0.1"
 vesper-core = { path = "../vesper-core" }
 # The compiler links the frozen Rust seed copy of vesper-forge (#1157).
 vesper-forge = { path = "../vesper-forge/seed", package = "vesper-forge-seed", default-features = false }
-vesper-simd = { path = "../vesper-simd" }
+vesper-simd = { path = "../vesper-simd/seed", package = "vesper-simd-seed" }
 # The compiler links the frozen Rust seed copies of vesper-lean-syntax and
 # vesper-span (#1128).
 vesper-lean-syntax = { path = "../vesper-lean-syntax/seed", package = "vesper-lean-syntax-seed" }

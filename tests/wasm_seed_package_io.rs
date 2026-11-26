@@ -2306,6 +2306,13 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         CompilerExecCheck::NonZero,
     ),
     (
+        "sugar",
+        "@vesper/sugar",
+        "packages/vesper-sugar",
+        "match_rule_words(in \"a $x:expra 1\", 12884901897, 100000).len()",
+        CompilerExecCheck::NonZero,
+    ),
+    (
         "backend-checks",
         "@vesper/backend-checks",
         "packages/vesper-backend-checks",
@@ -2659,14 +2666,14 @@ const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[
         "@vesper/codegen-control-emit",
         "packages/vesper-codegen-control-emit",
         "use @vesper/codegen-control-emit::control_hook;\npub fn main() -> u64 eff [Ffi[Cranelift]] { control_hook(0) }\n",
-        "native Cranelift glue over vesper-cranelift-sys: Stage 2 assembly does not resolve the cranelift.vsys handle types (E0111 no item 'Data'), and Stage 2 emits only Wasm, where Ffi[Cranelift] has no host",
+        "native Cranelift glue over vesper-cranelift-sys: it assembles and checks (the cranelift.vsys handle types resolve), but Stage 2 emits only Wasm, where the Cranelift imports have no host (WErr ExternalFunction vcl_call_builder)",
     ),
     (
         "codegen-numeric",
         "@vesper/codegen-numeric",
         "packages/vesper-codegen-numeric",
         "use @vesper/codegen-numeric::numeric_hook;\npub fn main() -> u64 eff [Ffi[Cranelift]] { numeric_hook(0) }\n",
-        "native Cranelift glue over vesper-cranelift-sys: Stage 2 assembly does not resolve the cranelift.vsys handle types (E0111 no item 'Builder'), and Stage 2 emits only Wasm, where Ffi[Cranelift] has no host",
+        "native Cranelift glue over vesper-cranelift-sys: it assembles and checks (the cranelift.vsys handle types resolve), but Stage 2 emits only Wasm, where the Cranelift imports have no host (WErr ExternalFunction vcl_call_builder)",
     ),
     (
         "driver-commands",
@@ -2906,10 +2913,16 @@ fn check_compiler_packages_fixed_point(
             ));
         }
         write_probe(&wrap_dir, &manifest, lib_src);
-        if build_compiler_package_probe(stage2, stage2_syms, dir, "stage2.wasm").is_ok() {
-            failures.push(format!(
+        match build_compiler_package_probe(stage2, stage2_syms, dir, "stage2.wasm") {
+            Ok(_) => failures.push(format!(
                 "{pkg_name}: Stage 2 now builds it (listed as a gap: {why}); move it from STAGE2_PACKAGE_GAPS into COMPILER_PACKAGES"
-            ));
+            )),
+            // Every gap is in the Wasm backend: loading, assembly and the
+            // checks must pass.
+            Err(e) if !e.contains("[wasm-backend WErr") => failures.push(format!(
+                "{pkg_name}: a gap fails before the Wasm backend (listed as: {why}): {e}"
+            )),
+            Err(_) => {}
         }
     }
     // @vesper-std/process on WASI (src-wasip2): a start is refused with

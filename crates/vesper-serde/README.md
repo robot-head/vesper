@@ -175,7 +175,7 @@ Run the actual self-checking finite corpus and independent Python interoperabili
 
 ```sh
 cargo build -p vesper-serde --example finite_float_json
-python3 scripts/check-float-json.py --binary target/debug/examples/finite_float_json
+aspect acceptance check-float-json -- --binary target/debug/examples/finite_float_json
 ```
 
 The example emits bounded JSON-lines records containing bit strings and actual

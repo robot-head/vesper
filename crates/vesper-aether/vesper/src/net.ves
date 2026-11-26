@@ -87,3 +87,316 @@ pub fn net_config_space(
     net_write_u16_le(inout out, 10, mtu);
     NET_CONFIG_BYTES
 }
+
+// ---------------------------------------------------------------------------
+// The whole virtio-net device (`NetDevice`): configuration, features,
+// multiqueue pairs, the control queue, transmit validation and the receive
+// plan, with the per-pair backlog counts and the stats. Rust keeps the frame
+// bytes (the receive backlogs and the transmitted queue) and the queue
+// loops, and asks before each step.
+
+const NET_F_MTU: u64 = 8;
+const NET_F_MAC: u64 = 32;
+const NET_F_MRG_RXBUF: u64 = 32768;
+const NET_F_STATUS: u64 = 65536;
+const NET_F_CTRL_VQ: u64 = 131072;
+const NET_OK: u8 = 0;
+const NET_ERR: u8 = 1;
+const NET_RX_BACKLOG: u64 = 256;
+const NET_TX_BACKLOG: u64 = 256;
+const NET_NONE: u64 = 18446744073709551615;
+
+// `net_tx` verdicts.
+const NET_TX_INVALID: u8 = 0;
+const NET_TX_BACKLOG_FULL: u8 = 1;
+const NET_TX_ACCEPT: u8 = 2;
+
+// `net_rx_first` plans.
+const NET_RX_SMALL: u8 = 0;
+const NET_RX_NO_HEADER: u8 = 1;
+const NET_RX_ONE: u8 = 2;
+const NET_RX_MORE: u8 = 3;
+
+// `net_queue` kinds (low byte; the pair is above it).
+const NET_Q_CTRL: u64 = 0;
+const NET_Q_TX: u64 = 1;
+const NET_Q_RX: u64 = 2;
+const NET_Q_NONE: u64 = 3;
+
+pub copy struct NetStats {
+    pub tx_frames: u64,
+    pub tx_dropped: u64,
+    pub tx_dropped_backlog: u64,
+    pub rx_frames: u64,
+    pub rx_dropped_backlog: u64,
+    pub rx_dropped_small_buffer: u64,
+    pub rx_dropped_inactive: u64,
+    pub rx_merged: u64,
+    pub ctrl_ok: u64,
+    pub ctrl_err: u64,
+}
+
+struct NetState {
+    // The MAC address, byte 0 lowest.
+    mac: u64,
+    mtu: u16,
+    link_up: bool,
+    config_changed: bool,
+    features: u64,
+    max_pairs: u16,
+    active_pairs: u16,
+    // Frames waiting in each pair's receive backlog.
+    backlog: ChunkSeq[u64],
+    stats: NetStats,
+}
+
+fn net_zero_stats() -> NetStats {
+    NetStats {
+        tx_frames: 0,
+        tx_dropped: 0,
+        tx_dropped_backlog: 0,
+        rx_frames: 0,
+        rx_dropped_backlog: 0,
+        rx_dropped_small_buffer: 0,
+        rx_dropped_inactive: 0,
+        rx_merged: 0,
+        ctrl_ok: 0,
+        ctrl_err: 0,
+    }
+}
+
+// `NetDevice::new(mac, mtu).with_queue_pairs(pairs)`; the caller checked
+// `mtu` and `pairs`.
+pub fn net_state_new(in mac: Slice[u8], mtu: u16, pairs: u16) -> NetState {
+    let mut m: u64 = 0;
+    let n: u64 = 6;
+    for i in 0..n {
+        m = m | wrapping_shl_u64(widen_u64(net_byte(in mac, i)), wrapping_u32(wrapping_mul(i, 8)));
+    }
+    let mut backlog: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](widen_u64(pairs));
+    for _i in 0..widen_u64(pairs) {
+        backlog.push(0);
+    }
+    NetState {
+        mac: m,
+        mtu: mtu,
+        link_up: true,
+        config_changed: false,
+        features: 0,
+        max_pairs: pairs,
+        active_pairs: 1,
+        backlog: backlog,
+        stats: net_zero_stats(),
+    }
+}
+
+pub fn net_stats(in st: NetState) -> NetStats {
+    st.stats
+}
+
+pub fn net_active_pairs(in st: NetState) -> u16 {
+    st.active_pairs
+}
+
+pub fn net_device_features(in st: NetState) -> u64 {
+    let base = NET_F_MTU | NET_F_MAC | NET_F_STATUS | NET_F_MRG_RXBUF;
+    if st.max_pairs > 1 {
+        base | NET_F_MQ | NET_F_CTRL_VQ
+    } else {
+        base
+    }
+}
+
+// The control queue's index, or `NET_NONE`.
+pub fn net_ctrl_queue(in st: NetState) -> u64 {
+    if (st.features & NET_F_CTRL_VQ) == 0 {
+        NET_NONE
+    } else if (st.features & NET_F_MQ) != 0 {
+        wrapping_mul(widen_u64(st.max_pairs), 2)
+    } else {
+        2
+    }
+}
+
+// What `queue` is: `NET_Q_*` in the low byte, the pair above it.
+pub fn net_queue(in st: NetState, queue: u16) -> u64 {
+    let q = widen_u64(queue);
+    if q == net_ctrl_queue(in st) {
+        return NET_Q_CTRL;
+    }
+    let pairs = if (st.features & NET_F_MQ) != 0 {
+        widen_u64(st.max_pairs)
+    } else {
+        1
+    };
+    let pair = wrapping_shr_u64(q, 1);
+    if pair >= pairs {
+        return NET_Q_NONE;
+    }
+    let kind = if (q & 1) == 1 {
+        NET_Q_TX
+    } else {
+        NET_Q_RX
+    };
+    kind | wrapping_shl_u64(pair, 8)
+}
+
+pub fn net_config(in st: NetState, inout out: Slice[u8]) -> u64 {
+    if out.len() < NET_CONFIG_BYTES {
+        return 0;
+    }
+    let n: u64 = 6;
+    for i in 0..n {
+        out.try_set(i, wrapping_u8(wrapping_shr_u64(st.mac, wrapping_u32(wrapping_mul(i, 8)))));
+    }
+    let status: u16 = if st.link_up {
+        NET_S_LINK_UP
+    } else {
+        0
+    };
+    net_write_u16_le(inout out, 6, status);
+    net_write_u16_le(inout out, 8, st.max_pairs);
+    net_write_u16_le(inout out, 10, st.mtu);
+    NET_CONFIG_BYTES
+}
+
+fn net_clear_backlogs_from(inout st: NetState, first: u64) {
+    let n = st.backlog.len();
+    for i in first..n {
+        let b = at(in st.backlog, i);
+        st.stats.rx_dropped_inactive = wrapping_add(st.stats.rx_dropped_inactive, b);
+        st.backlog.try_set(i, 0);
+    }
+}
+
+pub fn net_activate(inout st: NetState, features: u64) {
+    st.features = features;
+    st.active_pairs = 1;
+}
+
+// `reset`: the caller empties every backlog.
+pub fn net_reset(inout st: NetState) {
+    st.features = 0;
+    st.active_pairs = 1;
+    let n = st.backlog.len();
+    for i in 0..n {
+        st.backlog.try_set(i, 0);
+    }
+}
+
+pub fn net_set_link(inout st: NetState, up: bool) {
+    if st.link_up != up {
+        st.link_up = up;
+        st.config_changed = true;
+    }
+}
+
+pub fn net_take_config_change(inout st: NetState) -> bool {
+    let c = st.config_changed;
+    st.config_changed = false;
+    c
+}
+
+fn net_max_frame(in st: NetState) -> u64 {
+    wrapping_add(widen_u64(st.mtu), NET_ETHERNET_HEADER_BYTES)
+}
+
+// One control command: the ack byte, with the active pair count above it
+// (the caller empties the backlogs of the pairs at or above it).
+pub fn net_control(inout st: NetState, in readable: Slice[u8]) -> u64 {
+    let ack = match net_parse_ctrl(in readable, st.features, st.max_pairs) {
+        Option::Some(pairs) => {
+            st.active_pairs = pairs;
+            net_clear_backlogs_from(inout st, widen_u64(pairs));
+            st.stats.ctrl_ok = wrapping_add(st.stats.ctrl_ok, 1);
+            NET_OK
+        },
+        Option::None => {
+            st.stats.ctrl_err = wrapping_add(st.stats.ctrl_err, 1);
+            NET_ERR
+        },
+    };
+    widen_u64(ack) | wrapping_shl_u64(widen_u64(st.active_pairs), 8)
+}
+
+// One transmitted chain, with `queued` frames the host has not taken.
+pub fn net_tx(inout st: NetState, in readable: Slice[u8], queued: u64) -> u8 {
+    if !net_validate_tx(in readable, net_max_frame(in st), st.link_up) {
+        st.stats.tx_dropped = wrapping_add(st.stats.tx_dropped, 1);
+        return NET_TX_INVALID;
+    }
+    if queued >= NET_TX_BACKLOG {
+        st.stats.tx_dropped_backlog = wrapping_add(st.stats.tx_dropped_backlog, 1);
+        return NET_TX_BACKLOG_FULL;
+    }
+    st.stats.tx_frames = wrapping_add(st.stats.tx_frames, 1);
+    NET_TX_ACCEPT
+}
+
+// A host frame of `len` bytes for receive pair `pair`: whether it joins the
+// backlog.
+pub fn net_inject(inout st: NetState, pair: u16, len: u64) -> bool {
+    if pair >= st.active_pairs {
+        st.stats.rx_dropped_inactive = wrapping_add(st.stats.rx_dropped_inactive, 1);
+        return false;
+    }
+    let p = widen_u64(pair);
+    let queued = at(in st.backlog, p);
+    if len < NET_ETHERNET_HEADER_BYTES || len > net_max_frame(in st) || queued >= NET_RX_BACKLOG {
+        st.stats.rx_dropped_backlog = wrapping_add(st.stats.rx_dropped_backlog, 1);
+        return false;
+    }
+    st.backlog.try_set(p, wrapping_add(queued, 1));
+    true
+}
+
+pub fn net_rx_backlog(in st: NetState) -> u64 {
+    let mut total: u64 = 0;
+    let n = st.backlog.len();
+    for i in 0..n {
+        total = wrapping_add(total, at(in st.backlog, i));
+    }
+    total
+}
+
+fn net_delivered(inout st: NetState, pair: u64, chains: u64) {
+    let queued = at(in st.backlog, pair);
+    if queued > 0 {
+        st.backlog.try_set(pair, wrapping_sub(queued, 1));
+    }
+    st.stats.rx_frames = wrapping_add(st.stats.rx_frames, 1);
+    if chains > 1 {
+        st.stats.rx_merged = wrapping_add(st.stats.rx_merged, 1);
+    }
+}
+
+// The first receive chain for the next `frame_len`-byte frame of `pair`:
+// drop it as too small, refuse it (no room for the header), deliver the
+// frame into it alone (counted as delivered), or gather more chains
+// (mergeable buffers; `net_rx_merged` counts the delivery).
+pub fn net_rx_first(
+    inout st: NetState,
+    pair: u16,
+    frame_len: u64,
+    readable_empty: bool,
+    writable: u64
+) -> u8 {
+    let mergeable = (st.features & NET_F_MRG_RXBUF) != 0;
+    let need = wrapping_add(NET_HDR_BYTES, frame_len);
+    if !readable_empty || (!mergeable && writable < need) {
+        st.stats.rx_dropped_small_buffer = wrapping_add(st.stats.rx_dropped_small_buffer, 1);
+        return NET_RX_SMALL;
+    }
+    if writable < NET_HDR_BYTES {
+        return NET_RX_NO_HEADER;
+    }
+    if writable >= need {
+        net_delivered(inout st, widen_u64(pair), 1);
+        return NET_RX_ONE;
+    }
+    NET_RX_MORE
+}
+
+pub fn net_rx_merged(inout st: NetState, pair: u16, chains: u64) {
+    net_delivered(inout st, widen_u64(pair), chains);
+}

@@ -245,3 +245,106 @@ fn guard_pages_prove_no_front_or_tail_load_crosses_slice() {
         }
     }
 }
+
+/// The Vesper port builds the same function as the Rust builder: the same
+/// CLIF text and the same object bytes for both ELF targets, and the same
+/// CLIF in a JIT module.
+#[cfg(feature = "vesper-port")]
+#[test]
+fn vesper_port_builds_the_reference_scanner() {
+    fn object_module(target: ElfTarget) -> ObjectModule {
+        let isa = make_isa(target.triple()).unwrap();
+        let builder = ObjectBuilder::new(isa, "vesper-simd", default_libcall_names()).unwrap();
+        ObjectModule::new(builder)
+    }
+    for target in [ElfTarget::X86_64, ElfTarget::Aarch64] {
+        let mut rust = object_module(target);
+        let (_, rust_clif) = reference_define_scanner(&mut rust).unwrap();
+        let mut vesper = object_module(target);
+        let (_, vesper_clif) = define_scanner(&mut vesper, false).unwrap();
+        assert_eq!(vesper_clif, rust_clif, "{target:?} CLIF");
+        let rust_bytes = rust.finish().emit().unwrap();
+        let vesper_bytes = vesper.finish().emit().unwrap();
+        assert!(vesper_bytes == rust_bytes, "{target:?} object bytes differ");
+        assert_eq!(
+            ObjectArtifact::emit(target, IsaProfileKind::Baseline128)
+                .unwrap()
+                .bytes(),
+            &rust_bytes[..]
+        );
+    }
+    if profile_support(IsaProfileKind::Baseline128).is_ok() {
+        let jit = |port: bool| {
+            let isa = make_isa(Triple::host()).unwrap();
+            let mut module = JITModule::new(JITBuilder::with_isa(isa, default_libcall_names()));
+            let (_, clif) = if port {
+                define_scanner(&mut module, true).unwrap()
+            } else {
+                reference_define_scanner(&mut module).unwrap()
+            };
+            // SAFETY: nothing was finalized, so no code escaped.
+            unsafe { module.free_memory() };
+            clif
+        };
+        assert_eq!(jit(true), jit(false));
+    }
+}
+
+/// Every profile and simulated host gets the same answer from the port as
+/// from the Rust decision it replaces.
+#[cfg(feature = "vesper-port")]
+#[test]
+fn vesper_port_profile_decisions_match_rust() {
+    let reference = |features: Features| -> Result<(), Error> {
+        match features {
+            Features::X86 {
+                sse3,
+                ssse3,
+                sse41,
+                sse42,
+            } if sse3 && ssse3 && sse41 && sse42 => Ok(()),
+            Features::Aarch64 { neon: true } => Ok(()),
+            Features::Other => Err(Error::UnsupportedHost),
+            _ => Err(Error::MissingBaselineFeatures),
+        }
+    };
+    for bits in 0..16u32 {
+        let bit = |i: u32| bits & (1 << i) != 0;
+        for features in [
+            Features::X86 {
+                sse3: bit(0),
+                ssse3: bit(1),
+                sse41: bit(2),
+                sse42: bit(3),
+            },
+            Features::Aarch64 { neon: bit(0) },
+            Features::Other,
+        ] {
+            assert_eq!(check_features(features), reference(features));
+        }
+    }
+    for profile in [
+        IsaProfileKind::Baseline128,
+        IsaProfileKind::Avx2,
+        IsaProfileKind::Avx512,
+        IsaProfileKind::Sve2,
+        IsaProfileKind::Rvv1,
+    ] {
+        for features in [0, 2, 3] {
+            for bits in [32, 64] {
+                let want = if profile != IsaProfileKind::Baseline128 {
+                    1
+                } else if bits != 64 {
+                    2
+                } else {
+                    features
+                };
+                assert_eq!(
+                    port::profile_support(profile_code(profile), bits, features),
+                    want,
+                    "{profile:?} {features} {bits}"
+                );
+            }
+        }
+    }
+}

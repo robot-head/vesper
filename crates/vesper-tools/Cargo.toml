@@ -122,7 +122,7 @@ vesper-beacon = { path = "../vesper-beacon/seed", package = "vesper-beacon-seed"
 vesper-crucible = { path = "../vesper-crucible/seed", package = "vesper-crucible-seed" }
 # Only the tools link these (SH6 lane 3, #1398): they left the compiler's
 # closure, so their Rust can flip before Stage 2.
-vesper-simd = { path = "../vesper-simd" }
+vesper-simd = { path = "../vesper-simd/seed", package = "vesper-simd-seed" }
 vesper-highlight = { path = "../vesper-highlight/seed", package = "vesper-highlight-seed", features = ["shot"] }
 vesper-span = { path = "../vesper-span/seed", package = "vesper-span-seed" }
 vesper-migrate = { path = "../vesper-migrate" }

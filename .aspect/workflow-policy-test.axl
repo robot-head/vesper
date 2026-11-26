@@ -1,0 +1,559 @@
+"""Check required workflow jobs, native entry points and release gates."""
+
+load("./lib/process.axl", "capture", "check", "command", "exit_code", "scratch_dir")
+
+def _require(condition, detail = "Workflow invariant"):
+    if not condition:
+        fail(detail)
+
+def _equal(actual, expected, detail = "Workflow invariant"):
+    _require(actual == expected, "%s: expected %r, got %r" % (detail, expected, actual))
+
+def _contains(member, collection, detail = "Workflow invariant"):
+    _require(member in collection, "%s: missing %r in %r" % (detail, member, collection))
+
+def _absent(member, collection, detail = "Workflow invariant"):
+    _require(member not in collection, "%s: unexpected %r in %r" % (detail, member, collection))
+
+def _lower(first, second):
+    _require(first < second, "Workflow step %d must precede %d" % (first, second))
+
+def _first(items):
+    _require(bool(items), "Expected a matching workflow step")
+    return items[0]
+
+def _unique(items):
+    _require(len(items) == 1, "Expected one matching workflow step, got %r" % items)
+    return items[0]
+
+def _command_steps(steps):
+    return "\n".join([step.get("run", "") for step in steps])
+
+def _ids(steps):
+    return {step["id"]: step for step in steps if "id" in step}
+
+def _catalog(h):
+    # Legacy entries remain discoverable until their native replacements are
+    # landed. The lists must agree as originals are removed.
+    paths = capture(h.ctx, "git", ["ls-files", "*.sh", "*.py"], h.root).splitlines()
+    used = []
+    catalog = json.decode(capture(h.ctx, h.ctx.std.env.current_exe(), ["describe"], h.root))
+    for item in catalog["commands"]:
+        summary = item["summary"]
+        if summary.startswith("Run "):
+            used.extend([word for word in summary.split() if word.endswith(".py") or word.endswith(".sh")])
+    _equal(sorted(used), sorted(paths), "Tracked script task registrations")
+
+def _platform_workflow_selects_ports_natively_with_historical_fallback(h):
+    plan = h.platforms["jobs"]["plan"]
+    steps = _ids(plan["steps"])
+    _equal(steps["ports"]["run"], "aspect ci choose-platform-ports")
+    _contains("!= ''", steps["ports"]["if"])
+    _contains("== ''", steps["legacy_ports"]["if"])
+    _equal(steps["legacy_ports"]["run"], steps["ports"]["run"])
+    _equal(steps["legacy_ports"]["env"]["PLATFORM_WORKSPACE"], "${{ github.workspace }}")
+    _equal(plan["outputs"]["ports"], "${{ steps.ports.outputs.crates || steps.legacy_ports.outputs.crates }}")
+
+def _platform_workflow_checks_identity_and_plans_before_test_lanes(h):
+    plan = h.platforms["jobs"]["plan"]
+    steps = plan["steps"]
+    native = _first([i for i, step in enumerate(steps) if step.get("run") == "aspect ci verify-platform-dispatch"])
+    tests = _first([i for i, step in enumerate(steps) if step.get("run") == "aspect ci platform-tests"])
+    report = _first([step for step in steps if step.get("id") == "plan"])
+    _lower(native, tests)
+    _equal(report["run"], "aspect ci plan-platform-workflow")
+    _contains("!= ''", report["if"])
+    historical = _first([step for step in steps if step.get("id") == "legacy_plan"])
+    _contains("== ''", historical["if"])
+    _equal(historical["run"], report["run"])
+    _equal(historical["env"]["PLATFORM_WORKSPACE"], "${{ github.workspace }}")
+    historical_tests = _first([step for step in steps if step.get("name") == "Check CI policy and workflow regressions for a historical checkout"])
+    _equal(historical_tests["working-directory"], ".platform-legacy-tools")
+    _equal(historical_tests["run"], "aspect ci platform-tests")
+    _contains("hashFiles('.aspect/workflow-policy-test.axl') == ''", historical_tests["if"])
+    _equal(h.platforms["jobs"]["complete"]["steps"][-1]["run"], "aspect ci complete-platform-validation")
+    for name in ("sha", "profile", "groups"):
+        _equal(plan["outputs"][name],
+                         "${{ steps.plan.outputs." + name + " || steps.legacy_plan.outputs." + name + " }}")
+
+def _required_check_names_and_events_are_preserved(h):
+    _require(all([event in h.platforms["on"] for event in ["push", "merge_group", "schedule",
+                     "workflow_dispatch", "workflow_call"]]))
+    # Pull requests get Platforms from native-checks.yml once they can
+    # merge and BuildBuddy is green (#1479), not on every push.
+    _absent("pull_request", h.platforms["on"])
+    _contains("pull_request", h.platforms["on"]["workflow_dispatch"]["inputs"])
+    mac = h.platforms["jobs"]["platform"]
+    windows = h.platforms["jobs"]["windows"]
+    _require(mac["name"].startswith("macOS (AArch64)"))
+    _absent("strategy", mac)
+    _require(windows["name"].startswith("Windows (x86_64 MSVC)"))
+    for job in (mac, windows):
+        _equal(job["needs"], "plan")
+        _contains("always()", job["if"])
+        _contains("!cancelled()", job["if"])
+        first = job["steps"][0]
+        _equal(first["if"], "needs.plan.result != 'success'")
+        _equal(first["run"], "exit 1")
+        checkout = _first([s for s in job["steps"] if s.get("uses") == "actions/checkout@v4"])
+        _equal(checkout["with"]["ref"], "${{ needs.plan.outputs.sha }}")
+        _require(any([s.get("name") == "Verify exact checkout" for s in job["steps"]]))
+    _equal(mac["timeout-minutes"], 120)
+    _equal(windows["timeout-minutes"], 120)
+    _equal(windows["defaults"]["run"]["shell"], "pwsh")
+    for job, command in [(mac, "aspect ci verify-platform-checkout"),
+                         (windows, "./scripts/windows/verify-platform-checkout.ps1")]:
+        check = _first([s for s in job["steps"] if s.get("name") == "Verify exact checkout"])
+        _equal(check["run"], command)
+        _contains("!= ''", check["if"])
+        _require(all(["\n" not in step.get("run", "") for step in job["steps"]]))
+    for job in (mac, windows):
+        commands = _command_steps(job["steps"])
+        _absent("--workspace", commands)
+        _absent("clippy", commands)
+        _absent("check-lean-models", commands)
+    mac_commands = _command_steps(mac["steps"])
+    windows_commands = _command_steps(windows["steps"])
+    _contains("aspect ci test-native-executables", mac_commands)
+    _contains("aspect ci test-pulse-port", mac_commands)
+    for name, command in [("Validate native Mach-O executables in a historical checkout", "aspect ci test-native-executables"),
+                          ("Test the Vesper port export ABI in a historical checkout", "aspect ci test-port-abi")]:
+        fallback = _first([step for step in mac["steps"] if step.get("name") == name])
+        _equal(fallback["working-directory"], ".platform-verify-tools")
+        _equal(fallback["env"]["PLATFORM_WORKSPACE"], "${{ github.workspace }}")
+        _equal(fallback["run"], command)
+    native_step = _first([s for s in windows["steps"] if s.get("name") == "Validate native COFF executables"])
+    _equal(native_step["shell"], "pwsh")
+    _contains("./scripts/windows/test-native-executables.ps1", native_step["run"])
+    for script in ["test-native-executables.ps1", "test-port-abi.ps1"]:
+        fallback = _first([step for step in windows["steps"] if step.get("run") == "./.platform-verify-tools/scripts/windows/" + script])
+        _equal(fallback["shell"], "pwsh")
+        _equal(fallback["env"]["PLATFORM_WORKSPACE"], "${{ github.workspace }}")
+        _contains("hashFiles('scripts/windows/" + script + "') == ''", fallback["if"])
+    backup = _first([step for step in windows["steps"] if step.get("with", {}).get("path") == ".platform-verify-tools"])
+    _equal(backup["with"]["ref"], "${{ github.workflow_sha }}")
+    for path in ["/scripts/windows/", "/scripts/native-example-cases.txt", "/scripts/port-abi-plan.json"]:
+        _contains(path, backup["with"]["sparse-checkout"].splitlines())
+    hybrid = h.workflow("hybrid.yml")["jobs"]["hybrid"]
+    hybrid_step = _first([s for s in hybrid["steps"]
+                       if s.get("name") == "The CLI suites on the hybrid (Windows)"])
+    _equal(hybrid_step["shell"], "pwsh")
+    _equal(hybrid_step["run"], "./scripts/windows/test-hybrid-cli.ps1")
+    _equal({row["os"]: row["compiler"] for row in hybrid["strategy"]["matrix"]["include"]},
+                     {"ubuntu-latest": "vesper", "macos-latest": "vesper", "windows-latest": "vesper.exe"})
+    for variable in ("VESPER_PORT_COMPILER", "VESPER_DEFAULT_COMPILER"):
+        _equal(hybrid["env"][variable], "${{ github.workspace }}/target/debug/${{ matrix.compiler }}")
+    _contains("--test platform", mac_commands)
+    _contains("--test windows_platform", windows_commands)
+    _contains("--test windows", windows_commands)
+    for commands in (mac_commands, windows_commands):
+        _contains("--test drivers", commands)
+        _contains("--test pool", commands)
+
+def _buildbuddy_reclaims_disk_and_runs_bazel_via_aspect(h):
+    config = h.yaml("buildbuddy.yaml")
+    launcher = "./.git/vesper-aspect/aspect"
+    checksum = h.read(".aspect/launcher-linux-x86_64.sha256").split()
+    _equal(checksum[1:], [launcher])
+    _require(len(checksum[0]) == 64 and all([char in "abcdef0123456789" for char in checksum[0].elems()]))
+    lanes = {
+        "Test all targets": "--test_tag_filters=-lean_replay,-self_host",
+        "Self-host differentials": "--test_tag_filters=self_host,-self_host_codegen,-self_host_part2,-lean_replay",
+        "Self-host differentials 2": "--test_tag_filters=self_host_part2,-lean_replay",
+        "Self-host codegen differentials": "--test_tag_filters=self_host_codegen,-lean_replay",
+        "Native and acceptance scripts": "",
+    }
+    _equal(sorted([action["name"] for action in config["actions"]]), sorted(lanes))
+    for action in config["actions"]:
+        steps = [step["run"] for step in action["steps"]]
+        _require(all(["\n" not in step for step in steps]))
+        _equal(steps[0], "mkdir -p ./.git/vesper-aspect")
+        _require(steps[1].startswith("curl --fail "))
+        _require(steps[1].endswith((" -o %s" % launcher)))
+        _equal(steps[2:5], [
+            "sha256sum --check .aspect/launcher-linux-x86_64.sha256",
+            ("chmod +x %s" % launcher), ("%s ci reclaim-disk" % launcher),
+        ])
+        lane = lanes[action["name"]]
+        if lane:
+            tests = _first([step for step in steps if step.startswith(("%s ci bazel-tests -- " % launcher))])
+            _contains("--config=ci --config=rbe_build --config=ci_tests", tests)
+            _contains("--remote_download_outputs=minimal", tests)
+            _contains(lane, tests.split())
+            _require(tests.endswith(" //..."))
+            _lower(steps.index("%s ci install-lean" % launcher), steps.index(tests))
+        else:
+            _contains(("%s acceptance test-format-proof" % launcher), steps)
+
+def _bazel_setup_selects_native_configuration_by_host(h):
+    action = h.yaml(".github/actions/bazel/action.yml")
+    setup, aspect, unix, windows = action["runs"]["steps"]
+    _contains("inputs.buildbuddy-api-key == ''", setup["with"]["disk-cache"])
+    _equal(aspect["uses"], "./.github/actions/aspect")
+    _equal(aspect["if"], "runner.os != 'Windows'")
+    _equal(unix["if"], aspect["if"])
+    _equal(unix["run"], "aspect ci configure-bazel")
+    _equal(windows["if"], "runner.os == 'Windows'")
+    _equal(windows["shell"], "pwsh")
+    _equal(windows["run"], "./scripts/windows/configure-bazel.ps1")
+    _equal(unix["env"], windows["env"])
+
+def _bootstrap_workflows_invoke_native_tasks(h):
+    stage1 = h.workflow("bootstrap-stage1.yml")["jobs"]
+    stage2 = h.workflow("bootstrap-stage2.yml")["jobs"]["bootstrap"]
+    for job in stage1.values() + [stage2]:
+        _require(all(["\n" not in step.get("run", "") for step in job["steps"]]))
+    _contains("aspect ci stage1-cross-backend", [step.get("run") for step in stage1["stage1"]["steps"]])
+    _contains("aspect ci install-lean", [step.get("run") for step in stage1["stage0-two-seed"]["steps"]])
+    _contains("aspect ci install-wasmtime", [step.get("run") for step in stage2["steps"]])
+    verified = _first([step for step in stage2["steps"] if step.get("run") == "aspect bootstrap stage2 -- which"])
+    _equal(verified["env"]["WASMTIME_BIN"], "${{ runner.temp }}/wasmtime/wasmtime")
+
+def _port_harness_runs_once_on_linux(h):
+    # macOS and Windows run only the export ABI tier; the ported crates
+    # are platform-neutral and run once in the Linux job (#1010).
+    jobs = h.platforms["jobs"]
+    for job, command in (("platform", "aspect ci test-port-abi"),
+                         ("windows", "./scripts/windows/test-port-abi.ps1")):
+        step = _first([s for s in jobs[job]["steps"] if command in s.get("run", "")])
+        _equal(step["env"]["VESPER_PORT_HARNESS_SCOPE"], "abi")
+        if job == "windows":
+            _equal(step["shell"], "pwsh")
+    ports = jobs["ports"]
+    _equal(ports["runs-on"], "ubuntu-latest")
+    _equal(ports["needs"], ["plan", "ports-compiler"])
+    _equal(ports["steps"][0]["if"], "needs.plan.result != 'success'")
+    _equal(ports["steps"][0]["run"], "exit 1")
+    step = _first([s for s in ports["steps"] if "aspect acceptance test-port-harness" in s.get("run", "")])
+    fallback = _first([s for s in ports["steps"] if s.get("name") == "Test the Vesper port harness in a historical checkout"])
+    _equal(fallback["working-directory"], ".platform-verify-tools")
+    _equal(fallback["env"]["PLATFORM_WORKSPACE"], "${{ github.workspace }}")
+    _equal(fallback["run"], step["run"])
+    _absent("VESPER_PORT_HARNESS_SCOPE", step.get("env", {}))
+    # One optimized compiler, built once and shared by every shard (#1103).
+    compiler = jobs["ports-compiler"]
+    _equal(compiler["needs"], "plan")
+    build = _first([s for s in compiler["steps"] if "cargo build" in s.get("run", "")])
+    _contains("--profile port-compiler --bin vesper", build["run"])
+    _equal(step["env"]["VESPER_PORT_COMPILER"], "${{ runner.temp }}/port-compiler/vesper")
+    _equal(step["env"]["VESPER_PORT_HARNESS_CRATES"], "${{ needs.plan.outputs.ports }}")
+    _absent("cargo build", "\n".join([s.get("run", "") for s in ports["steps"]]))
+    # Nine shards (#1019, #1100, #1924), each running its own part of the harness.
+    shards = [str(n) for n in range(1, 10)]
+    _equal(ports["strategy"]["matrix"]["shard"], "${{ fromJSON(needs.plan.outputs.shards || '[1]') }}")
+    plan = h.platforms["jobs"]["plan"]
+    _equal(plan["outputs"]["shards"], "${{ steps.shards.outputs.shards || steps.historical_shards.outputs.shards }}")
+    steps = _ids(plan["steps"])
+    _equal(steps["shards"]["run"], "aspect ci port-shard-matrix")
+    _contains("!= ''", steps["shards"]["if"])
+    _contains("== ''", steps["historical_shards"]["if"])
+    _equal(steps["historical_shards"]["env"]["PORT_HARNESS_ROOT"], "${{ github.workspace }}")
+    _equal(ports["strategy"]["fail-fast"], False)
+    _equal(step["env"]["VESPER_PORT_HARNESS_SHARD"], "${{ matrix.shard }}")
+    _contains("ports", jobs["complete"]["needs"])
+    plan = json.decode(h.read("scripts/port-abi-plan.json"))
+    abi_tier = "\n".join([" ".join(case["args"]) for group in plan for case in group["checks"]])
+    for check in ("-p vesper-port-abi", "-p vesper-port-harness", "--test kit",
+                  "--test kit_memory", "-p vesper-port-pilot --features vesper-port",
+                  "-p vesper-port-build --features divergent"):
+        _contains(check, abi_tier)
+    _absent("vesper-beacon", abi_tier)
+    # Every configured shard has work, and later ports land in the last one.
+    shards_plan = json.decode(h.read("scripts/port-harness-plan.json"))
+    _equal(len(shards_plan), len(shards))
+    _require(all(shards_plan))
+    _equal(shards_plan[-1][-1]["task"], ["crate", "vault", "check"])
+    _equal(shards_plan[6][-1]["task"], ["crate", "diagnostics", "test-port"])
+    _equal(shards_plan[7][-1]["task"], ["crate", "lint", "test-port"])
+    _equal(shards_plan[8][0]["task"], ["crate", "sim-session", "test-port"])
+
+def _plan_failure_fails_required_jobs(h):
+    for name in ("platform", "windows", "ports"):
+        job = h.platforms["jobs"][name]
+        _equal(job["steps"][0]["run"], "exit 1")
+        _equal(job["steps"][0]["if"], "needs.plan.result != 'success'")
+    compiler_gate = h.platforms["jobs"]["ports"]["steps"][1]
+    _equal(compiler_gate["run"], "exit 1")
+    _equal(compiler_gate["if"], "needs.ports-compiler.result != 'success'")
+
+def _main_runs_of_pr_skipped_jobs_are_never_cancelled(h):
+    # Ports and hybrid run only on main, so a later merge must not cancel
+    # the run that would catch a regression (#1479).
+    cancel = h.platforms["concurrency"]["cancel-in-progress"]
+    _absent("'push'", cancel)
+    _contains("inputs.pull_request != ''", cancel)
+    _contains("inputs.profile == 'pr'", cancel)
+    _contains("github.ref != 'refs/heads/main'", cancel)
+    group = h.platforms["concurrency"]["group"]
+    _contains(cancel.removeprefix("${{ ").removesuffix(" }}") + " && github.ref", group)
+    _contains("'main'", group)
+    hybrid = h.workflow("hybrid.yml")["concurrency"]
+    _equal(hybrid["cancel-in-progress"], False)
+    _contains("'main'", hybrid["group"])
+
+def _merge_gate_is_the_first_step_of_every_pull_request_job(h):
+    # The gate runs inside the jobs it guards, not as a job of its own
+    # that queued for a runner ahead of them (#1479).
+    _require(not h.ctx.std.fs.exists(h.root + "/.github/workflows/merge-gate.yml"))
+    action = h.yaml(".github/actions/merge-gate/action.yml")
+    gate = _unique(action["runs"]["steps"])
+    _absent("uses", gate)
+    _equal(gate["run"], "aspect ci merge-gate-workflow")
+    guarded = []
+    for path in sorted([entry.path.rsplit("/", 1)[-1] for entry in h.ctx.std.fs.read_dir(h.root + "/.github/workflows") if entry.path.endswith(".yml")]):
+        flow = h.workflow(path)
+        if "pull_request" not in flow["on"]:
+            continue
+        _equal(flow["permissions"].get("actions"), "write", path)
+        _equal(flow["permissions"].get("pull-requests"), "read", path)
+        for name, job in flow["jobs"].items():
+            if "github.event_name != 'pull_request'" in job.get("if", ""):
+                continue
+            checkout, setup, gate = job["steps"][:3]
+            _equal(checkout["uses"], "actions/checkout@v4", (path, name))
+            _equal(checkout["with"]["path"], ".gate")
+            _equal(checkout["with"]["ref"], "${{ github.event.pull_request.head.sha }}")
+            _equal(checkout["with"]["fetch-depth"], 0)
+            _contains(".aspect", checkout["with"]["sparse-checkout"].splitlines())
+            _require(setup["uses"].startswith("aspect-build/setup-aspect@"))
+            _equal(setup["with"]["launcher-version"], "2026.47.12")
+            _equal(gate["uses"], "./.gate/.github/actions/merge-gate", (path, name))
+            _equal(gate["with"]["head-sha"], "${{ github.event.pull_request.head.sha }}")
+            for step in (checkout, setup, gate):
+                _equal(step["if"], "github.event_name == 'pull_request'")
+            guarded.append(("%s:%s" % (path, name)))
+    _contains("website.yml:build", guarded)
+    _require(len(guarded) >= 10)
+
+def _self_host_differentials_run_as_their_own_buildbuddy_check(h):
+    # #1519: on one runner the corpus differentials pushed "Test all
+    # targets" past BuildBuddy's one-hour limit.
+    config = h.yaml("buildbuddy.yaml")
+    actions = {a["name"]: a for a in config["actions"]}
+    command = lambda name: actions[name]["steps"][-1]["run"]
+    everything = command("Test all targets")
+    _contains("--test_tag_filters=-lean_replay,-self_host", everything)
+    _contains("--build_tag_filters=-lean_replay,-self_host", everything)
+    self_host = command("Self-host differentials")
+    _contains("--build_tests_only", self_host)
+    _contains("--test_tag_filters=self_host,-self_host_codegen,-self_host_part2,-lean_replay", self_host)
+    # #1882: the non-codegen differentials neared the hour on one runner.
+    part2 = command("Self-host differentials 2")
+    _contains("--build_tests_only", part2)
+    _contains("--test_tag_filters=self_host_part2,-lean_replay", part2)
+    codegen = command("Self-host codegen differentials")
+    _contains("--build_tests_only", codegen)
+    _contains("--test_tag_filters=self_host_codegen,-lean_replay", codegen)
+    for name in ("Self-host differentials", "Self-host differentials 2", "Self-host codegen differentials"):
+        _equal(actions[name]["timeout"], "60m")
+        # Per-target times, to balance the split on.
+        _contains("--test_summary=short", command(name))
+        _contains("--config=ci_opt", command(name).split())
+    _absent("--config=ci_opt", everything.split())
+    bazelrc = h.read(".bazelrc").splitlines()
+    for option in ["--compilation_mode=opt",
+                   "--@rules_rust//rust/settings:extra_rustc_flag=-Cdebug-assertions=on",
+                   "--@rules_rust//rust/settings:extra_rustc_flag=-Coverflow-checks=on"]:
+        _contains("common:ci_opt " + option, bazelrc)
+    defs = h.read("tools/bazel/defs.bzl")
+    _contains('startswith("self_host_")', defs)
+    _contains('"self_host_codegen"', defs)
+    _contains('"self_host_part2"', defs)
+    _contains("_SELF_HOST_PART2 = (", defs)
+    # Three "Self-host differentials" tests at a time fit the runner (#1519).
+    _contains('_SELF_HOST_MEMORY = "resources:memory:6144"', defs)
+    _contains("--local_resources=memory=18432", h.read(".bazelrc"))
+
+def _native_checks_start_only_after_the_gate_and_buildbuddy(h):
+    native = h.workflow("native-checks.yml")
+    _equal(sorted(native["on"]), ["status"])
+    job = native["jobs"]["start"]
+    _contains("github.event.state == 'success'", job["if"])
+    _equal(job["runs-on"], "ubuntu-latest")
+    steps = job["steps"]
+    for context in ("Test all targets", "Self-host differentials", "Self-host differentials 2",
+                    "Self-host codegen differentials", "Native and acceptance scripts"):
+        _contains(context, job["if"])
+    names = [s.get("uses") or s.get("name") for s in steps]
+    gate = names.index("./.gate/.github/actions/merge-gate")
+    find = _first([i for i, s in enumerate(steps) if s.get("run") == "aspect ci find-native-dispatch"])
+    dispatch = _first([i for i, s in enumerate(steps) if s.get("run") == "aspect ci dispatch-native-checks"])
+    _lower(find, gate)
+    _lower(gate, dispatch)
+    _require(steps[gate - 1]["uses"].startswith("aspect-build/setup-aspect@"))
+    _equal(steps[gate - 1]["if"], steps[gate]["if"])
+    for index in (find, dispatch):
+        _equal(steps[index]["working-directory"], ".native-checks-tools")
+    verify = _first([s for s in h.platforms["jobs"]["plan"]["steps"]
+                  if s.get("name") == "Verify the dispatched pull request commit"])
+    _contains("inputs.pull_request != ''", verify["if"])
+
+def _dedup_retains_distinct_features_and_moves_stdio_checks(h):
+    source = h.workflow("source-macros.yml")
+    matrix = source["jobs"]["native-tier1-source"]["strategy"]["matrix"]["os"]
+    _equal(sorted(matrix), ["ubuntu-latest"])
+    source_steps = source["jobs"]["native-tier1-source"]["steps"]
+    commands = "\n".join([s.get("run", "") for s in source_steps])
+    _contains("--no-default-features", commands)
+    _contains("--test forge_authority", commands)
+    _contains("structured-component-foundation", source["jobs"])
+    stylus = h.workflow("stylus.yml")["jobs"]["native-stylus"]
+    _equal(stylus["strategy"]["matrix"]["os"], ["ubuntu-latest"])
+    for steps in (source_steps, stylus["steps"]):
+        runner = _first([i for i, step in enumerate(steps) if step.get("uses") == "./.github/actions/aspect"])
+        graph = _first([i for i, step in enumerate(steps) if step.get("run") == "aspect ci check-default-cli-dependencies"])
+        _lower(runner, graph)
+        _require(all(["python -c" not in step.get("run", "") for step in steps]))
+
+def _release_is_read_only_full_validation_before_ready(h):
+    _equal(sorted(h.release["on"]), ["workflow_dispatch"])
+    _equal(h.release["permissions"]["contents"], "read")
+    full = h.release["jobs"]["platforms"]
+    _equal(full["needs"], "linux")
+    _equal(full["with"]["profile"], "full")
+    _equal(full["with"]["checkout_ref"], "${{ needs.linux.outputs.sha }}")
+    _equal(sorted(h.release["jobs"]["ready"]["needs"]), ["linux", "platforms"])
+    _absent("publish", h.release["jobs"])
+    _equal(h.release["jobs"]["linux"]["steps"][-1]["run"], "aspect ci require-release-linux")
+    _equal(h.release["jobs"]["ready"]["steps"][-2]["run"], "aspect ci attest-release-validation")
+
+def _completion_rules(h):
+    run = h.platforms["jobs"]["complete"]["steps"][-1]["run"]
+    _contains("needs.plan.outputs.ports != 'none'", h.platforms["jobs"]["ports"]["if"])
+    values = {
+        "PLAN_RESULT": "success", "MAC_RESULT": "success",
+        "WINDOWS_RESULT": "success", "SWAP_RESULT": "success",
+        "PORTS_RESULT": "success", "NATIVE": "all",
+        "CHECKED_SHA": "a" * 40, "PROFILE": "full",
+    }
+    work = scratch_dir(h.ctx, "vesper-workflow-test-")
+    for status in ["failure", "skipped", "cancelled"]:
+        for failing in ["WINDOWS_RESULT", "SWAP_RESULT", "PORTS_RESULT"]:
+            output = work + "/" + status + "-" + failing
+            env = dict(values, GITHUB_OUTPUT = output)
+            env[failing] = status
+            _require(h.run(run.split(), env) != 0 and not h.ctx.std.fs.exists(output), "Partial platform coverage must fail")
+    for ports, expected in [("none", True), ("vesper-aura", False), ("", False)]:
+        output = work + "/ports-" + ports
+        env = dict(values, PORTS_RESULT = "skipped", PORTS = ports, PROFILE = "pr", GITHUB_OUTPUT = output)
+        _equal(h.run(run.split(), env) == 0, expected, "Completion after skipped shards")
+        _equal(h.ctx.std.fs.exists(output), expected, "Completion outputs for skipped shards")
+    jobs = h.platforms["jobs"]
+    plan = _ids(jobs["plan"]["steps"])["plan"]
+    _equal(plan["env"]["PULL_REQUEST"], "${{ inputs.pull_request }}")
+    swap = jobs["codegen-swap"]
+    _equal(swap["runs-on"], "ubuntu-latest")
+    _equal(sorted([row["target"] for row in swap["strategy"]["matrix"]["include"]]),
+           ["aarch64-apple-darwin", "x86_64-pc-windows-msvc"])
+    compare = _first([step for step in swap["steps"] if "vesper-codegen-swap-test" in step.get("run", "")])
+    _equal(compare["env"]["CODEGEN_SWAP_TARGET"], "${{ matrix.target }}")
+    _contains("codegen-swap", jobs["complete"]["needs"])
+    for name in ["platform", "windows", "codegen-swap"]:
+        _contains("needs.plan.outputs.native != 'none'", jobs[name]["if"])
+    for name in ["platform", "windows"]:
+        native_step = _first([step for step in jobs[name]["steps"] if step.get("name") == "Test the codegen swap point"])
+        _equal(native_step["env"]["CHECK_HARNESS_STRIDE"], "4")
+        _absent("CODEGEN_SWAP_TARGET", native_step["env"])
+    for native, state, expected in [("none", "skipped", True), ("all", "skipped", False),
+                                     ("", "skipped", False), ("none", "success", True)]:
+        output = work + "/native-" + (native or "unset") + "-" + state
+        env = dict(values, NATIVE = native, MAC_RESULT = state, WINDOWS_RESULT = state, SWAP_RESULT = state,
+                   PORTS_RESULT = "skipped", PORTS = "none", GITHUB_OUTPUT = output)
+        _equal(h.run(run.split(), env) == 0, expected, "Completion after skipped native jobs")
+        _equal(h.ctx.std.fs.exists(output), expected)
+
+def _hybrid_and_ports_skip_pull_requests(h):
+    hybrid = h.workflow("hybrid.yml")
+    _absent("pull_request", hybrid["on"])
+    for event in ["push", "schedule", "workflow_dispatch"]:
+        _contains(event, hybrid["on"])
+    include = hybrid["jobs"]["hybrid"]["strategy"]["matrix"]["include"]
+    _equal([row["os"] for row in include], ["ubuntu-latest", "macos-latest", "windows-latest"])
+    hybrid_steps = hybrid["jobs"]["hybrid"]["steps"]
+    divergent = [step for step in hybrid_steps if " catches a divergent " in step.get("name", "")]
+    _equal(len(divergent), 10)
+    for step in divergent:
+        _equal(step.get("if"), "runner.os == 'Linux'")
+    _absent("if", _first([step for step in hybrid_steps if step.get("name") == "Build and test the hybrid compiler"]))
+    step = _ids(h.platforms["jobs"]["plan"]["steps"])["ports"]
+    output = scratch_dir(h.ctx, "vesper-workflow-ports-") + "/outputs"
+    env = {"PULL_REQUEST": "1311", "GITHUB_OUTPUT": output, "REQUESTED_PROFILE": "pr", "EVENT": "workflow_dispatch", "BASE_SHA": ""}
+    _equal(h.run(step["run"].split(), env), 0, "PR dispatch port selection exit")
+    _equal(h.ctx.std.fs.read_to_string(output), "crates=none\n", "PR dispatch defers port jobs")
+
+def _automation_entry_points(h):
+    files = capture(h.ctx, "git", ["ls-files", ".github/workflows", ".github/actions", "buildbuddy.yaml"], h.root).splitlines()
+    for path in files:
+        if not path.endswith(".yml") and not path.endswith(".yaml"):
+            continue
+        config = h.yaml(path)
+        groups = config.get("jobs", {}).values() + config.get("actions", [])
+        if "runs" in config:
+            groups.append(config["runs"])
+        for group in groups:
+            for step in group.get("steps", []):
+                location = "%s (%s)" % (path, step.get("name", step.get("id", "unnamed step")))
+                _absent("script", step.get("with", {}), location)
+                run = step.get("run", "")
+                _absent("\n", run, location)
+                words = run.split()
+                if words:
+                    _absent(words[0].rsplit("/", 1)[-1], ["bash", "sh", "zsh", "ksh", "dash", "python", "python2", "python3"], location)
+
+def _run(ctx):
+    root = ctx.std.env.aspect_root_dir()
+    yq = ctx.std.process.which("yq")
+    _require(yq != None, "Install Mike Farah's yq v4 to run workflow tests")
+    parsed = {}
+
+    def read(path):
+        return ctx.std.fs.read_to_string(root + "/" + path)
+
+    def yaml(path):
+        if path not in parsed:
+            parsed[path] = json.decode(capture(ctx, yq, ["eval", "--output-format=json", "explode(.)", root + "/" + path], root))
+        return parsed[path]
+
+    def workflow(name):
+        return yaml(".github/workflows/" + name)
+
+    def run(argv, env):
+        _equal(argv[0], "aspect", "Workflow regression must invoke an Aspect task directly")
+        result = command(ctx, ctx.std.env.current_exe(), argv[1:], root, dict(env, CI = "false")).stdout("piped").stderr("piped").spawn().wait_with_output()
+        return exit_code(result.status)
+
+    h = struct(ctx = ctx, root = root, read = read, yaml = yaml, workflow = workflow, run = run,
+               platforms = workflow("platforms.yml"), release = workflow("platform-release.yml"))
+    for suite in ["test-plan", "lean-replay-scope"]:
+        check(ctx, ctx.std.env.current_exe(), ["ci", "tests", suite], root)
+    if ctx.std.process.which("cargo"):
+        for suite in ["port-selection", "port-divergent-features"]:
+            check(ctx, ctx.std.env.current_exe(), ["ci", "tests", suite], root)
+    for test in [
+        _catalog,
+        _automation_entry_points,
+        _platform_workflow_selects_ports_natively_with_historical_fallback,
+        _platform_workflow_checks_identity_and_plans_before_test_lanes,
+        _required_check_names_and_events_are_preserved,
+        _buildbuddy_reclaims_disk_and_runs_bazel_via_aspect,
+        _bazel_setup_selects_native_configuration_by_host,
+        _bootstrap_workflows_invoke_native_tasks,
+        _port_harness_runs_once_on_linux,
+        _plan_failure_fails_required_jobs,
+        _completion_rules,
+        _hybrid_and_ports_skip_pull_requests,
+        _main_runs_of_pr_skipped_jobs_are_never_cancelled,
+        _merge_gate_is_the_first_step_of_every_pull_request_job,
+        _self_host_differentials_run_as_their_own_buildbuddy_check,
+        _native_checks_start_only_after_the_gate_and_buildbuddy,
+        _dedup_retains_distinct_features_and_moves_stdio_checks,
+        _release_is_read_only_full_validation_before_ready,
+    ]:
+        test(h)
+    ctx.std.io.stdout.write("Passed workflow job, native entry point, and release policy tests\n")
+    return 0
+
+tests_workflows = task(
+    kind = "workflows", group = ["ci", "tests"], summary = "Test workflow policy and native entry points",
+    implementation = _run,
+)
