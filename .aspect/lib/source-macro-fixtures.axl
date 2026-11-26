@@ -1,0 +1,252 @@
+"""Shared compiler and editor fixture operations for source macros."""
+
+load("../bounded-stdio.axl", "bounded_run", "utf8")
+load("./bazel_exec.axl", "executable")
+load("./lsp-fixture.axl", "decode_frames", "frame", "notice", "request", "result")
+load("./process.axl", "root_path", "scratch_dir")
+load("./strict-json.axl", "decode_list", "decode_object")
+
+MAX_FRAME = 2 * 1024 * 1024
+_HEX = "0123456789abcdef"
+_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_"
+_DIGITS = "0123456789"
+_CLAIMS = ["world", "checked_source", "approved", "original_checked", "source_checked"]
+_USAGE = "Pass -- --binary <vesper> [--work <directory>]."
+
+def require(condition, message):
+    if not condition:
+        fail(message)
+
+def equal(actual, expected, message):
+    if actual != expected:
+        fail("%s: expected %r, got %r" % (message, expected, actual))
+
+def parse_object(data):
+    return decode_object(utf8(data))
+
+def fixture(ctx, h, name):
+    return ctx.std.fs.read_to_string(h.root + "/tests/fixtures/" + h.name.replace("-", "_") + "/" + name + ".ves")
+
+def read(ctx, path):
+    return ctx.std.fs.open(path).read()
+
+def source_range(value, source):
+    data = bytes(source)
+    start, end = value["start"], value["end"]
+    require(type(start) == "int" and type(end) == "int" and 0 <= start and start <= end and end <= len(data), "Invalid source map byte range")
+    utf8(data[:start])
+    utf8(data[:end])
+    return utf8(data[start:end])
+
+def byte_index(source, needle, start = 0):
+    return len(bytes(source[:source.index(needle, start)]))
+
+def digest(value):
+    return type(value) == "string" and len(value) == 64 and all([char in _HEX for char in value.elems()])
+
+def identifier(name):
+    return bool(name) and name[0] in _LETTERS and all([char in _LETTERS + _DIGITS for char in name.elems()])
+
+def _arguments(ctx, values):
+    options = {}
+    pending = ""
+    for value in values:
+        if pending:
+            if value.startswith("--"):
+                ctx.std.process.exit(2, "Missing value for " + pending)
+            options[pending] = value
+            pending = ""
+        elif value in ["-h", "--help"]:
+            ctx.std.io.stdout.write(_USAGE + "\n")
+            return None
+        else:
+            flag, equals, argument = value.partition("=")
+            if flag not in ["--binary", "--work"]:
+                ctx.std.process.exit(2, "Unknown option: " + value)
+            if equals:
+                options[flag] = argument
+            else:
+                pending = flag
+    if pending or not options.get("--binary"):
+        ctx.std.process.exit(2, _USAGE)
+    return options
+
+def _run(ctx, name, binary, parent, cases):
+    root = ctx.std.env.aspect_root_dir()
+    binary = root_path(root, binary)
+    if ctx.std.fs.exists(binary + ".exe") and ctx.std.fs.metadata(binary + ".exe").is_file:
+        binary += ".exe"
+    require(ctx.std.fs.exists(binary) and ctx.std.fs.metadata(binary).is_file, "Compiler not found: " + binary)
+    prefix = "vesper-" + name + "-"
+    if parent:
+        parent = root_path(root, parent)
+        ctx.std.fs.create_dir_all(parent)
+        work = ctx.std.fs.mkdtemp(parent = parent, prefix = prefix)
+        ctx.defer(lambda: ctx.std.fs.remove_dir_all(work))
+    else:
+        work = scratch_dir(ctx, prefix)
+    h = struct(
+        root = root, name = name, work = work, binary = binary,
+        timeout = 45 if name == "source-macros" else 60,
+        frame_count = 8 if name == "source-macros" else 16,
+        counts = {"commands": 0, "sessions": 0, "requests": 0, "runs": 0, "serial": 0, "refusals": 0},
+    )
+    receipt = cases(ctx, h)
+    ctx.std.io.stdout.write(json.encode(dict(receipt, status = "passed", commands = h.counts["commands"])) + "\n")
+    return 0
+
+def check_with(ctx, name, cases):
+    options = _arguments(ctx, ctx.args.tool_args)
+    return _run(ctx, name, options["--binary"], options.get("--work", ""), cases) if options else 0
+
+def suite_with(ctx, name, variable, cases):
+    root = ctx.std.env.aspect_root_dir()
+    return _run(ctx, name, ctx.std.env.var(variable) or executable(ctx, root, "//:bin/vesper"), "", cases)
+
+def execute(ctx, h, argv, *, expected = 0, input = None, expected_error = ""):
+    output = bounded_run(
+        ctx, h.root, h.work, h.binary, argv, timeout = h.timeout, stdout_limit = h.frame_count * MAX_FRAME,
+        stderr_limit = MAX_FRAME, label = "Source macro compiler", input = input,
+    )
+    if output.code != expected:
+        ctx.std.io.stderr.write(output.stdout)
+        ctx.std.io.stderr.write(output.stderr)
+        fail("Expected exit %d, got %d: %r" % (expected, output.code, argv))
+    if expected_error:
+        require(not len(output.stdout) and expected_error in utf8(output.stderr), "Missing expected compiler rejection: " + expected_error)
+    h.counts["commands"] += 1
+    return output.stdout
+
+def write(ctx, h, name, text):
+    path = h.work + "/" + name
+    ctx.std.fs.write(path, text)
+    return path
+
+def next_path(ctx, h, name, suffix, text):
+    h.counts["serial"] += 1
+    return write(ctx, h, "%s-%d%s" % (name, h.counts["serial"], suffix), text)
+
+def explicit_run(ctx, h, expanded, expected = "42", refusal = False):
+    path = write(ctx, h, "expanded-%d.ves" % h.counts["runs"], expanded)
+    equal(decode_list(utf8(execute(ctx, h, ["check", path, "--json"]))), [], "Expanded artifact diagnostics")
+    if refusal:
+        execute(ctx, h, ["run", path], expected = 1, expected_error = "entry must handle all effects")
+        h.counts["refusals"] += 1
+    else:
+        equal(utf8(execute(ctx, h, ["run", path])).strip(), expected, "Explicit expanded artifact output")
+        h.counts["runs"] += 1
+    equal(read(ctx, path), bytes(expanded), "Expanded artifact mutation")
+
+def preview(identifier, uri, version = None):
+    document = {"uri": uri}
+    if version != None:
+        document["version"] = version
+    return request(identifier, "vesper/macroPreview", {"textDocument": document})
+
+def lsp(ctx, h, messages, *, verify_capability = False):
+    all_messages = [request(1, "initialize", {"capabilities": {}})] + messages + [request(9999, "shutdown", {}), notice("exit", {})]
+    payload = bytes([])
+    for message in all_messages:
+        payload += frame(message)
+    replies = decode_frames(execute(ctx, h, ["lsp"], input = payload))
+    if verify_capability:
+        capability = result(replies, 1)["capabilities"]["experimental"]["vesperMacroPreview"]
+        equal(capability, {"version": 1, "tier": 1, "scope": "expanded_source_only"}, "Preview capability")
+        equal(result(replies, 9999), None, "Shutdown")
+    h.counts["sessions"] += 1
+    h.counts["requests"] += len([message for message in all_messages if "id" in message])
+    return replies
+
+def no_fields(value, fields):
+    require(not any([field in value for field in fields]), "Unexpected fields in macro report: %r" % [field for field in fields if field in value])
+
+def _envelope(value, uri, version):
+    require(value["schema"] == "vesper.editor.macro-preview/1" and value["scope"] == "expanded_source_only" and value["tier"] == 1, "Unexpected preview schema, scope or tier")
+    require(value["uri"] == uri and value["version"] == version, "Unexpected preview document or version")
+    require(value["range_unit"] == "utf8_bytes" and digest(value["source_blake3"]), "Invalid preview source metadata")
+    no_fields(value, _CLAIMS)
+    require(len(bytes(json.encode(value))) <= MAX_FRAME, "Oversized preview result")
+
+def _maps(value, source):
+    require(bool(value["source_map"]), "Expected a source map")
+    for entry in value["source_map"]:
+        source_range(entry["original"], source)
+        source_range(entry["expanded"], value["expanded_source"])
+
+def accepted_preview(value, uri, version, source):
+    _envelope(value, uri, version)
+    require(value["status"] == "expanded_checked" and value["package"] == "@local/source", "Preview was not accepted")
+    require(digest(value["expanded_blake3"]), "Invalid preview expanded digest")
+    equal(value["source_bytes"], len(bytes(source)), "Original source byte count")
+    expanded = value["expanded_source"]
+    equal(value["expanded_bytes"], len(bytes(expanded)), "Expanded source byte count")
+    require(value["macro_definitions"] >= 1 and value["invocations"] >= 1 and len(value["audits"]) == value["invocations"], "Invalid macro or audit counts")
+    _maps(value, source)
+    require(all([entry["kind"] in ["source", "generated"] for entry in value["source_map"]]), "Unexpected source map kind")
+    for audit in value["audits"]:
+        require(audit["scope"] == "expanded_function" and "!(" in source_range(audit["invocation"], source), "Invalid audit invocation")
+    return expanded
+
+def rejected_preview(value, uri, version, stage):
+    _envelope(value, uri, version)
+    require(value["status"] == "rejected" and value["stage"] == stage, "Unexpected preview rejection")
+    require(value["message"] and value["source_map"] == [] and value["audits"] == [], "Rejected preview has missing diagnostic or accepted evidence")
+    no_fields(value, ["expanded_blake3", "package", "source_bytes", "expanded_bytes", "macro_definitions", "invocations"])
+    require(value["diagnostic_source"] in ["original", "expanded", "none"], "Unexpected diagnostic source")
+    if value["diagnostic_source"] == "expanded":
+        require(type(value["expanded_source"]) == "string", "Missing rejected expanded source")
+        for diagnostic in value["diagnostics"]:
+            source_range(diagnostic["span"], value["expanded_source"])
+
+def forge(ctx, h, source, *, success = True, options = []):
+    path = next_path(ctx, h, "original", ".ves", source)
+    expected = 0 if success else 1
+    report = parse_object(execute(ctx, h, ["forge", "check", path] + options, expected = expected))
+    equal(report["schema"], "vesper.forge.source/1", "Forge report schema")
+    equal(report["status"], "expanded_checked" if success else "rejected", "Forge report status")
+    expanded = execute(ctx, h, ["forge", "expand", path] + options, expected = expected)
+    if success:
+        equal(expanded, bytes(report["expanded_source"]), "Exact forge expand output")
+        equal(report["source_bytes"], len(bytes(source)), "Original source byte count")
+        equal(report["expanded_bytes"], len(expanded), "Expanded source byte count")
+        _maps(report, source)
+    else:
+        require(not len(expanded) and report["source_map"] == [], "Rejected expansion published an artifact")
+        if h.name != "source-macros":
+            no_fields(report, ["world", "expanded_blake3", "invocations", "package"])
+    equal(read(ctx, path), bytes(source), "Forge original source")
+    return report
+
+def tokens(source):
+    """Independent lexical inventory for the fixtures, including comment text."""
+    inventory = []
+    end = 0
+    for index, char in enumerate(source.elems()):
+        if index < end or char.isspace():
+            continue
+        end = index + 1
+        pair = source[index:index + 2]
+        if pair == "/*":
+            close = source.index("*/", end + 1)
+            end = close + 2
+        elif pair == "//":
+            for cursor in range(end, len(source)):
+                if source[cursor] in "\r\n":
+                    break
+                end = cursor + 1
+        elif char == '"':
+            escaped = False
+            for cursor in range(end, len(source)):
+                end = cursor + 1
+                current = source[cursor]
+                if current == '"' and not escaped:
+                    break
+                escaped = current == "\\" and not escaped
+        elif char in _LETTERS + _DIGITS:
+            alphabet = _LETTERS + _DIGITS if char in _LETTERS else _DIGITS
+            for cursor in range(end, len(source)):
+                if source[cursor] not in alphabet:
+                    break
+                end = cursor + 1
+        inventory.append(source[index:end])
+    return inventory

@@ -1,0 +1,213 @@
+"""Regenerate independent correctly rounded kinetic math reference vectors."""
+
+load("./lib/ieee-reference.axl", "F32", "F64", "add", "bit_length", "dyadic", "hex_bits", "literal", "pack", "rounded")
+load("./lib/mt19937.axl", "mt19937")
+
+def _uniform(rng, lo, hi):
+    left = dyadic(lo, F64)
+    right = dyadic(hi, F64)
+    span = dyadic(pack(add(right, (-left[0], left[1])), F64), F64)
+    product = dyadic(pack((span[0] * rng.double_numerator(), span[1] - 53), F64), F64)
+    return pack(add(left, product), F64)
+
+def _range(rng, lo, hi, count):
+    left, right = literal(lo, F64), literal(hi, F64)
+    return [_uniform(rng, left, right) for _ in range(count)]
+
+def _random(rng, lo = -1074, hi = 1023):
+    exponent = rng.integer(lo, hi)
+    significand = rng.bits(52) | (1 << 52)
+    result = pack((significand, exponent - 52), F64)
+    return result | F64.sign if rng.double_numerator() < (1 << 52) else result
+
+def _literals(values):
+    return [literal(value, F64) for value in values]
+
+def _as_f32(value, limit):
+    if value & (F64.sign - 1) > limit:
+        return None
+    n, e = dyadic(value, F64)
+    return rounded(n, 1, e, F32, negative_zero = n == 0 and bool(value & F64.sign))
+
+def _cases(seed, count):
+    rng = mt19937(seed)
+    small = count // 3
+    exp = _range(rng, "-745", "709", count) + _range(rng, "-1", "1", small)
+    exp += [_random(rng, -80, -1) for _ in range(small)]
+    exp += _literals(["709.78", "-745.1", "-708.5", "1e-300", "-1e-300", "0.5", "1.0", "-1.0"]) + [pack((1, -53), F64)]
+    log = [_random(rng) & (F64.sign - 1) for _ in range(count)]
+    log += [_random(rng, -149, 127) & (F64.sign - 1) for _ in range(count)]
+    log += [pack(add((1, 0), dyadic(value, F64)), F64) for value in _range(rng, "-1e-3", "1e-3", small)]
+    log += [pack(((1 << 52) + 1, -52), F64), pack(((1 << 53) - 1, -53), F64)]
+    log += _literals(["5e-324", "1.7976931348623157e308", "2", "0.5", "10"])
+    trig = _range(rng, "-10", "10", count)
+    trig += [_random(rng, -60, 200) for _ in range(count // 2)] + [_random(rng) for _ in range(small)]
+    trig += _literals(["1e22"]) + [pack((1, 1023), F64)]
+    trig += _literals(["355", "103993", "1.5707963267948966", "3.141592653589793"])
+    trig += [pack((6381956970095103, 797), F64)] + _literals(["1e-310"])
+    lo, hi = literal("-10", F64), literal("10", F64)
+    atan = [(_uniform(rng, lo, hi), _uniform(rng, lo, hi)) for _ in range(count)]
+    atan += [(_random(rng), _random(rng)) for _ in range(count // 2)]
+    atan += [tuple(_literals(pair)) for pair in [("1", "1"), ("-1", "-1"), ("1e-300", "1e300"), ("1e300", "-1e-300"), ("3", "-4")]]
+    return [("exp", [(value,) for value in exp]), ("log", [(value,) for value in log]),
+            ("sin", [(value,) for value in trig]), ("cos", [(value,) for value in trig]), ("atan2", atan)]
+
+def _fixed_ratio(n, d, scale):
+    return (n << scale) // d
+
+def _atan_series(x, scale, alternating):
+    total, term = x, x
+    square = (x * x) >> scale
+    for index in range(1, scale):
+        term = (term * square) >> scale
+        piece = term // (2 * index + 1)
+        if not piece:
+            break
+        total += -piece if alternating and index % 2 else piece
+    return total
+
+def _math(precision):
+    # Extra fractional bits leave the requested accuracy after reduction of
+    # inputs up to 2^1024 and keep IEEE binary64 subnormals representable.
+    scale = precision + 1100
+    one = 1 << scale
+    pi = 16 * _atan_series(one // 5, scale, True) - 4 * _atan_series(one // 239, scale, True)
+    ln2 = 2 * _atan_series(one // 3, scale, False)
+    return struct(scale = scale, one = one, pi = pi, ln2 = ln2)
+
+def _trig(h, value, cosine):
+    x = (abs(value) + h.pi // 2) % (h.pi * 2) if cosine else abs(value) % (h.pi * 2)
+    negative = x >= h.pi
+    if negative:
+        x -= h.pi
+    x = min(x, h.pi - x)
+    if not cosine and value < 0:
+        negative = not negative
+    square = (x * x) >> h.scale
+    total, term = x, x
+    for index in range(1, h.scale):
+        term = ((term * square) >> h.scale) // ((2 * index) * (2 * index + 1))
+        if not term:
+            break
+        total += -term if index % 2 else term
+    return -total if negative else total
+
+def _exp(h, value):
+    n = value // h.ln2
+    x = value - n * h.ln2
+    total, term = h.one, h.one
+    for index in range(1, h.scale):
+        term = ((term * x) >> h.scale) // index
+        if not term:
+            break
+        total += term
+    return total << n if n >= 0 else total >> -n
+
+def _log(h, value):
+    exponent = bit_length(value) - 1 - h.scale
+    normalized = value >> exponent if exponent >= 0 else value << -exponent
+    x = _fixed_ratio(normalized - h.one, normalized + h.one, h.scale)
+    return exponent * h.ln2 + 2 * _atan_series(x, h.scale, False)
+
+def _atan2(h, y, x):
+    a, b = abs(y), abs(x)
+    ratio = _fixed_ratio(min(a, b), max(a, b), h.scale)
+    if ratio > h.one // 2:
+        shifted = _fixed_ratio(h.one - ratio, h.one + ratio, h.scale)
+        angle = h.pi // 4 - _atan_series(shifted, h.scale, True)
+    else:
+        angle = _atan_series(ratio, h.scale, True)
+    if a > b:
+        angle = h.pi // 2 - angle
+    if x < 0:
+        angle = h.pi - angle
+    return -angle if y < 0 else angle
+
+def _evaluate(h, name, values, fmt):
+    fixed = []
+    for value in values:
+        n, e = dyadic(value, fmt)
+        fixed.append(n << (e + h.scale))
+    x = fixed[0]
+    if name == "exp":
+        result = _exp(h, x)
+    elif name == "log":
+        result = _log(h, x)
+    elif name == "atan2":
+        result = _atan2(h, x, fixed[1])
+    else:
+        result = _trig(h, x, name == "cos")
+    negative_zero = result == 0 and name == "atan2" and x < 0
+    return rounded(result, 1, -h.scale, fmt, negative_zero = negative_zero)
+
+def _generate(seed, count):
+    inputs = _cases(seed, count)
+    low, high = _math(400), _math(700)
+    limit = literal("3.4e38", F64)
+    exp_limit = literal("150", F32)
+    rows = []
+    for fmt, suffix in [(F64, ""), (F32, "f")]:
+        infinity = ((1 << fmt.exponent) - 1) << fmt.fraction
+        for name, cases in inputs:
+            seen = {}
+            for case in cases:
+                values = case if fmt == F64 else tuple([_as_f32(value, limit) for value in case])
+                if any([value == None or not (value & (fmt.sign - 1)) or value & (fmt.sign - 1) >= infinity for value in values]):
+                    continue
+                if name == "exp" and fmt == F32 and values[0] & (fmt.sign - 1) > exp_limit:
+                    n, e = dyadic(values[0], F32)
+                    values = (pack((n, e - 3), F32),)
+                if values in seen:
+                    continue
+                seen[values] = True
+                first, second = _evaluate(low, name, values, fmt), _evaluate(high, name, values, fmt)
+                if first != second:
+                    fail("%s precision check disagrees for %r" % (name, values))
+                rows.append(" ".join([name + suffix] + [hex_bits(value) for value in values] + [hex_bits(first)]))
+    return "\n".join(rows) + "\n"
+
+def _seed(text):
+    sign = -1 if text.startswith("-") else 1
+    text = text.removeprefix("-").removeprefix("+").lower().replace("_", "")
+    for prefix, base in [("0x", 16), ("0o", 8), ("0b", 2)]:
+        if text.startswith(prefix):
+            return sign * int(text[2:], base)
+    return sign * int(text)
+
+def _run(ctx):
+    seed = _seed(ctx.std.env.var("SEED") or "0x5E5BE2")
+    count = int(ctx.std.env.var("N") or "300")
+    ctx.std.io.stdout.write(_generate(seed, count))
+    return 0
+
+gen_crmath = task(
+    kind = "gen-crmath-refs", group = ["crate", "kinetic"], summary = "Generate independent correctly rounded IEEE math fixtures",
+    implementation = _run,
+)
+
+def _test(ctx):
+    cases = [
+        (rounded(1, 1, -1075, F64), 0, "exact half subnormal rounds to even"),
+        (rounded(-1, 1, -1075, F64), F64.sign, "negative half rounds to signed zero"),
+        (rounded(3, 1, -1075, F64), 2, "tie between subnormal values"),
+        (literal("1.7976931348623157e308", F64), 0x7fefffffffffffff, "maximum finite binary64"),
+        (literal("3.4028234663852886e38", F32), 0x7f7fffff, "maximum finite binary32"),
+        (literal("3.4028236693e38", F32), 0x7f800000, "overflow rounds to infinity"),
+        (pack(((1 << 24) - 1, -150), F32), 0x00800000, "subnormal tie promotes to normal"),
+        (_seed("-0xAF01234dEDEF"), -192419422137839, "signed multiword seed"),
+    ]
+    for actual, expected, label in cases:
+        if actual != expected:
+            fail("%s: expected %r, got %r" % (label, expected, actual))
+    root = ctx.std.env.aspect_root_dir()
+    expected = ctx.std.fs.read_to_string(root + "/crates/vesper-kinetic/tests/data/crmath_refs.txt")
+    actual = _generate(_seed("0x5E5BE2"), 300)
+    if actual != expected:
+        fail("Independent generator differs from the committed kinetic math reference")
+    ctx.std.io.stdout.write("Passed IEEE rounding edge cases and all 4,888 committed reference vectors\n")
+    return 0
+
+test_crmath_reference = task(
+    kind = "crmath-reference", group = ["ci", "tests"], summary = "Check exact rounding and regenerate the committed kinetic vectors",
+    implementation = _test,
+)

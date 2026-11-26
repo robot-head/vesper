@@ -3,9 +3,9 @@ name: Website
 on:
   push:
     branches: [main]
-    paths: ['website/**', 'crates/vesper-highlight/**', 'src/browser_tour.rs', 'crates/vesper-tools/src/highlight.rs', 'crates/vesper-tools/src/highlight/**', 'lean/**', 'docs/manuscript/**', '.github/workflows/website.yml', 'examples/transaction.ves', 'examples/projections.ves', 'examples/checked_math.ves', 'examples/rejected/error_unwind.ves']
+    paths: ['website/**', 'crates/vesper-highlight/**', 'src/browser_tour.rs', 'crates/vesper-tools/src/highlight.rs', 'crates/vesper-tools/src/highlight/**', 'lean/**', 'docs/manuscript/**', '.aspect/manuscript.axl', '.aspect/lib/html-fixture.axl', '.github/workflows/website.yml', 'examples/transaction.ves', 'examples/projections.ves', 'examples/checked_math.ves', 'examples/rejected/error_unwind.ves']
   pull_request:
-    paths: ['website/**', 'crates/vesper-highlight/**', 'src/browser_tour.rs', 'crates/vesper-tools/src/highlight.rs', 'crates/vesper-tools/src/highlight/**', 'lean/**', 'docs/manuscript/**', '.github/workflows/website.yml', 'examples/transaction.ves', 'examples/projections.ves', 'examples/checked_math.ves', 'examples/rejected/error_unwind.ves']
+    paths: ['website/**', 'crates/vesper-highlight/**', 'src/browser_tour.rs', 'crates/vesper-tools/src/highlight.rs', 'crates/vesper-tools/src/highlight/**', 'lean/**', 'docs/manuscript/**', '.aspect/manuscript.axl', '.aspect/lib/html-fixture.axl', '.github/workflows/website.yml', 'examples/transaction.ves', 'examples/projections.ves', 'examples/checked_math.ves', 'examples/rejected/error_unwind.ves']
   workflow_dispatch:
 
 permissions:
@@ -36,7 +36,15 @@ jobs:
           fetch-depth: 0
           sparse-checkout: |
             .github/actions
-            scripts/ci
+            .aspect
+      - name: Set up Aspect for the merge gate
+        if: github.event_name == 'pull_request'
+        uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
+        with:
+          launcher-version: '2026.47.12'
+          bazelrc-generate: 'false'
+          bazelisk-cache: 'false'
+          disk-cache: 'false'
       - name: Merge gate
         if: github.event_name == 'pull_request'
         uses: ./.gate/.github/actions/merge-gate
@@ -67,8 +75,10 @@ jobs:
           typst-version: '0.15.1'
       - name: Typeset the language manuscript
         run: typst compile --ignore-system-fonts --root .. ../docs/manuscript/main.typ vesper-specification.pdf
-      - name: Install manuscript verification dependency
-        run: python -m pip install PyMuPDF==1.26.6
+      - name: Update the package index
+        run: sudo apt-get update
+      - name: Install manuscript verification tools
+        run: sudo apt-get install -y poppler-utils qpdf icu-devtools
       - name: Test the manuscript checker
         run: aspect manuscript test
       - name: Verify the manuscript

@@ -158,9 +158,9 @@ actions:
       - *aspect_executable
       - run: ./.git/vesper-aspect/aspect ci reclaim-disk
       - *apt_update
-      - run: sudo apt-get install -y build-essential python-is-python3 qemu-user binutils-aarch64-linux-gnu
+      - run: sudo apt-get install -y build-essential qemu-user binutils-aarch64-linux-gnu
       - run: ./.git/vesper-aspect/aspect ci install-lean
-      # One Bazel build for every executable the scripts run, instead of a
+      # One Bazel build for every executable the tasks run, instead of a
       # build and a cquery per executable.
       - run: ./.git/vesper-aspect/aspect ci prebuild-acceptance -- .ci-bazel-executables
       - run: ./.git/vesper-aspect/aspect acceptance test-aarch64

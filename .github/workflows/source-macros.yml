@@ -20,8 +20,11 @@ on:
       - 'tests/forge_authority.rs'
       - 'tests/forge_lower.rs'
       - 'tests/fixtures/source_macros/**'
-      - 'scripts/check-source-macros.py'
-      - '.aspect/acceptance-suites.axl'
+      - '.aspect/source-macros.axl'
+      - '.aspect/source-macro-shapes.axl'
+      - '.aspect/macro-preview.axl'
+      - '.aspect/lib/source-macro-fixtures.axl'
+      - '.aspect/lib/lsp-fixture.axl'
       - '.github/workflows/source-macros.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -43,8 +46,11 @@ on:
       - 'tests/forge_authority.rs'
       - 'tests/forge_lower.rs'
       - 'tests/fixtures/source_macros/**'
-      - 'scripts/check-source-macros.py'
-      - '.aspect/acceptance-suites.axl'
+      - '.aspect/source-macros.axl'
+      - '.aspect/source-macro-shapes.axl'
+      - '.aspect/macro-preview.axl'
+      - '.aspect/lib/source-macro-fixtures.axl'
+      - '.aspect/lib/lsp-fixture.axl'
       - '.github/workflows/source-macros.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -88,7 +94,15 @@ jobs:
           fetch-depth: 0
           sparse-checkout: |
             .github/actions
-            scripts/ci
+            .aspect
+      - name: Set up Aspect for the merge gate
+        if: github.event_name == 'pull_request'
+        uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
+        with:
+          launcher-version: '2026.47.12'
+          bazelrc-generate: 'false'
+          bazelisk-cache: 'false'
+          disk-cache: 'false'
       - name: Merge gate
         if: github.event_name == 'pull_request'
         uses: ./.gate/.github/actions/merge-gate
@@ -116,14 +130,9 @@ jobs:
       # Selecting the root package alone preserves its pure-host dependency
       # graph; workspace feature unification also enables Forge transports.
       - name: Test compiler authority, resolved lowering and actual CLI/stdio
-        run: >-
-          cargo test --locked -p vesper --lib --test forge_authority
-          --test forge_lower --test forge_cli --test lsp_cli --test recovery_cli
+        run: cargo test --locked -p vesper --lib --test forge_authority --test forge_lower --test forge_cli --test lsp_cli --test recovery_cli
       - name: Check strict source compiler and pure host Clippy
-        run: >-
-          cargo clippy --locked --all-targets --no-default-features
-          -p vesper -p vesper-forge -p vesper-syntax -p vesper-core
-          -p vesper-span -p vesper-diagnostics -- -D warnings
+        run: cargo clippy --locked --all-targets --no-default-features -p vesper -p vesper-forge -p vesper-syntax -p vesper-core -p vesper-span -p vesper-diagnostics -- -D warnings
       # The source-macros acceptance task runs through Bazel in the BuildBuddy
       # and Platforms workflows. This workflow keeps the Cargo-only feature
       # checks (--no-default-features, the default CLI dependency graph).
@@ -143,7 +152,15 @@ jobs:
           fetch-depth: 0
           sparse-checkout: |
             .github/actions
-            scripts/ci
+            .aspect
+      - name: Set up Aspect for the merge gate
+        if: github.event_name == 'pull_request'
+        uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
+        with:
+          launcher-version: '2026.47.12'
+          bazelrc-generate: 'false'
+          bazelisk-cache: 'false'
+          disk-cache: 'false'
       - name: Merge gate
         if: github.event_name == 'pull_request'
         uses: ./.gate/.github/actions/merge-gate

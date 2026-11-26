@@ -1,0 +1,248 @@
+"""Check real fmt, lint, doc and benchmark commands with disposable sources."""
+
+load("./bounded-stdio.axl", "bounded_run", "utf8")
+load("./lib/bazel_exec.axl", "executable", "run_target")
+load("./lib/html-fixture.axl", "tags")
+load("./lib/process.axl", "root_path", "scratch_dir")
+load("./lib/strict-json.axl", "decode_list", "decode_object")
+
+_USAGE = "Pass -- --binary <vesper> --root <repository> --work <existing directory>."
+
+def _require(condition, message):
+    if not condition:
+        fail(message)
+
+def _local_html_problem(html):
+    for tag, attrs in tags(html):
+        if tag in ["script", "iframe", "img", "link", "object", "embed"]:
+            return "Unexpected active or remote asset tag: " + tag
+        for name, _ in attrs:
+            if name in ["src", "href", "srcset"] or name.startswith("on"):
+                return "Unexpected asset or event attribute: " + name
+    return ""
+
+def _run_tool(ctx, h, argv, success = True):
+    output = bounded_run(
+        ctx, h.root, h.capture, h.binary, [str(value) for value in argv], timeout = 60,
+        stdout_limit = 16 * 1024 * 1024, stderr_limit = 16 * 1024 * 1024, label = "Source tooling",
+    )
+    if (output.code == 0) != success:
+        ctx.std.io.stderr.write(output.stdout)
+        ctx.std.io.stderr.write(output.stderr)
+        fail("Unexpected exit %d: %r" % (output.code, argv))
+    return utf8(output.stdout)
+
+def _report(ctx, h, argv, success = True):
+    return decode_object(_run_tool(ctx, h, argv + ["--json"], success = success))
+
+def _source(ctx, h, name, text):
+    path = h.work + "/" + name
+    ctx.std.fs.write(path, text)
+    return path
+
+def _read(ctx, path):
+    return ctx.std.fs.open(path).read()
+
+def _check42(ctx, h, source):
+    _require(decode_list(_run_tool(ctx, h, ["check", source, "--json"])) == [], "Source did not pass compiler checking")
+    _require(_run_tool(ctx, h, ["run", source]).strip() == "42", "Source did not execute as 42")
+
+def _format(ctx, h):
+    source = _source(ctx, h, "format.ves", "// Disposable formatter acceptance\nfn main( )->i64{let answer=42;answer}\n")
+    before = _read(ctx, source)
+    dirty = _report(ctx, h, ["fmt", source, "--check"], success = False)
+    _require(dirty["status"] == "needs_format" and dirty["changed"], "Format check must detect changes")
+    _require(_read(ctx, source) == before, "Format check mutated input")
+    formatted = _report(ctx, h, ["fmt", source])
+    _require(formatted["status"] == "formatted" and formatted["changed"], "Formatter must write the requested changes")
+    after = _read(ctx, source)
+    _require(after != before and "// Disposable formatter acceptance" in utf8(after), "Formatting must preserve comments and change whitespace")
+    unchanged = _report(ctx, h, ["fmt", source, "--check"])
+    _require(unchanged["status"] == "unchanged" and not unchanged["changed"], "Formatted source must be idempotent")
+    _require(_read(ctx, source) == after, "Second format check mutated input")
+    _check42(ctx, h, source)
+
+def _lint(ctx, h, fixture):
+    source = h.work + "/lint-demo.ves"
+    original = _read(ctx, fixture)
+    ctx.std.fs.copy(fixture, source)
+    initial = _report(ctx, h, ["lint", source])
+    _require(any([diagnostic["code"] == "L0102" for diagnostic in initial["diagnostics"]]), "Expected unused-effect evidence")
+    fixed = _report(ctx, h, ["lint", source, "--fix", "--semver-safe"])
+    _require(fixed["status"] == "checked" and fixed["changed"] and fixed["applied_edits"] > 0, "Lint fix must apply validated edits")
+    _require(fixed["semver"]["classification"] in ["patch", "minor"] and fixed["semver"]["required_adapters"] == [], "Expected compatible interface evidence")
+    _require(_read(ctx, source) != original, "Lint demo copy was not changed")
+    _check42(ctx, h, source)
+    final = _report(ctx, h, ["lint", source])
+    _require(not any([diagnostic["code"] == "L0102" for diagnostic in final["diagnostics"]]), "Unused-effect finding survived the fix")
+
+def _documentation(ctx, h, api_fixture, query_fixture):
+    api = h.work + "/api.ves"
+    query = h.work + "/query.json"
+    ctx.std.fs.copy(api_fixture, api)
+    ctx.std.fs.copy(query_fixture, query)
+    doc = _report(ctx, h, ["doc", api, "--query", query])
+    _require(doc["status"] == "valid" and doc["schema_version"] == 1, "Checked documentation must validate")
+    _require([hit["function"] for hit in doc["search"]["matches"]] == ["close"], "Structural query must match only close")
+    _require(bool(doc["document"]["types"]), "Expected native type documentation")
+    html = _run_tool(ctx, h, ["doc", api])
+    _require("&lt;b&gt;native&lt;/b&gt;" in html and "<b>native</b>" not in html, "Source documentation must be escaped")
+    _require("unverified" in html and "Content-Security-Policy" in html, "HTML must include proof scope and local-content policy")
+    problem = _local_html_problem(html)
+    _require(not problem, problem)
+    _require(_run_tool(ctx, h, ["doc", api]) == html, "Documentation must be deterministic")
+    _require(_read(ctx, api) == _read(ctx, api_fixture) and _read(ctx, query) == _read(ctx, query_fixture), "Documentation mutated source or query")
+
+def _examples(ctx, h):
+    positive = _source(ctx, h, "positive-docs.ves", """//! ```vesper,entry=first
+//! fn first() -> i64 { helper(41) }
+//! ```
+/// ```vesper,entry=second
+/// fn second() -> i64 { helper(8) }
+/// ```
+fn helper(x: i64) -> i64 { wrapping_add(x, 1) }
+""")
+    report = _report(ctx, h, ["test", "--doc", positive])
+    body = report["report"]
+    _require(report["passed"] and body["passed"] and body["base_diagnostics"] == [], "Positive examples must parse, check and execute")
+    _require([example["result"] for example in body["examples"]] == ["42", "9"] and all([example["passed"] for example in body["examples"]]), "Both entries must return their executed results")
+    batch = body["batch"]
+    _require(batch == {
+        "module_count": 1, "compilation_count": 1, "defined_functions": 3,
+        "entry_count": 2, "runs": 4, "max_entry_work": batch["max_entry_work"],
+    } and batch["max_entry_work"] > 0, "Positive examples must share one compiled module")
+
+    negative_text = """/// ```vesper,compile_fail(E0302)
+/// fn bad() { let tx = Tx {}; }
+/// ```
+linear struct Tx {}
+"""
+    negative = _source(ctx, h, "negative-docs.ves", negative_text)
+    report = _report(ctx, h, ["test", "--doc", negative])
+    body = report["report"]
+    _require(report["passed"] and body["base_diagnostics"] == [] and body["batch"] == None, "Compile-fail examples must be isolated")
+    _require(len(body["examples"]) == 1, "Expected a single negative example")
+    example = body["examples"][0]
+    _require(example["passed"] and example["expected_code"] == "E0302" and example["diagnostics"] and
+             all([diagnostic["code"] == "E0302" for diagnostic in example["diagnostics"]]), "Compile-fail must match the exact diagnostic")
+    wrong = _source(ctx, h, "wrong-negative-docs.ves", negative_text.replace("compile_fail(E0302)", "compile_fail(E0301)"))
+    failed = _report(ctx, h, ["test", "--doc", wrong], success = False)
+    _require(not failed["passed"] and not failed["report"]["examples"][0]["passed"], "A different requested diagnostic must fail")
+
+def _benchmark(ctx, h):
+    bench = _source(ctx, h, "benchmark.ves", "fn helper() -> u64 { 42 }\nfn main() -> u64 { helper() }\n")
+    before = _read(ctx, bench)
+    report = _report(ctx, h, ["bench", bench, "--samples", 6, "--warmup", 0, "--iterations", 8])
+    _require(report["schema"] == "vesper.bench/1" and report["status"] == "measured", "Expected a measurement-only benchmark report")
+    _require(report["provider"] == "std::time::Instant" and report["unit"] == "nanoseconds", "Expected the wall-clock provider and units")
+    _require(report["body_calls"] == 192 and len(report["pairs"]) == 6, "Expected 192 calls across six ABBA epochs")
+    _require(report["config"] == {"epochs": 6, "warmup_epochs": 0, "operations_per_window": 8}, "Unexpected benchmark configuration")
+    for arm in ["candidate", "baseline"]:
+        jit = report[arm]["jit"]
+        _require(jit["modules"] == 1 and jit["compilations"] == 1 and jit["entries"] == 1 and jit["defined_functions"] == 2 and jit["runs"] == 96, "Expected one compilation and 96 calls for " + arm)
+        digest = report[arm]["source_blake3"]
+        _require(len(digest) == 64 and all([char in "0123456789abcdef" for char in digest.elems()]), "Missing source digest for " + arm)
+    _require(report["candidate"]["source_blake3"] == report["baseline"]["source_blake3"], "Both benchmark arms must compile the same snapshot")
+    for pair in report["pairs"]:
+        _require(int(pair["baseline_total_ns"]) > 0 and int(pair["candidate_total_ns"]) > 0 and pair["operations_per_arm"] == 16, "Expected positive and comparable observations")
+    _require(report["analysis"]["gate_decision"] == None and report["analysis"]["interval"] != None, "Expected a measured interval without a threshold")
+    _require(report["evidence"] == {"hardware_pmu": "unavailable", "zero_allocation": "unavailable", "vectorization": "unavailable"}, "Unsupported evidence must remain unavailable")
+    _require(_read(ctx, bench) == before, "Benchmark rewrote its source")
+
+def _check_workspace(ctx, binary, root, work):
+    _require(ctx.std.fs.exists(binary) and ctx.std.fs.metadata(binary).is_file, "Compiler not found: " + binary)
+    _require(ctx.std.fs.exists(work) and ctx.std.fs.metadata(work).is_dir, "Disposable directory not found: " + work)
+    h = struct(root = root, work = work, binary = binary, capture = scratch_dir(ctx, "vesper-source-tooling-stdio-"))
+    fixtures = {
+        "lint": root + "/crates/vesper-lint/examples/lint_demo.ves",
+        "api": root + "/crates/vesper-doc/examples/api.ves",
+        "query": root + "/crates/vesper-doc/examples/query.json",
+    }
+    original = {name: _read(ctx, path) for name, path in fixtures.items()}
+
+    def verify_fixtures():
+        for name, path in fixtures.items():
+            _require(_read(ctx, path) == original[name], "Tracked fixture was mutated: " + name)
+
+    ctx.defer(verify_fixtures)
+    _format(ctx, h)
+    _lint(ctx, h, fixtures["lint"])
+    _documentation(ctx, h, fixtures["api"], fixtures["query"])
+    _examples(ctx, h)
+    _benchmark(ctx, h)
+    ctx.std.io.stdout.write("Source tooling acceptance: fmt/check, lint/fix/run=42, typed doc search/HTML, shared JIT doctests/exact E0302, and 192 measured callback calls passed\n")
+
+def _check(ctx: TaskContext) -> int:
+    options = {}
+    pending = ""
+    for value in ctx.args.tool_args:
+        if pending:
+            if value.startswith("--"):
+                ctx.std.process.exit(2, "Missing value for " + pending)
+            options[pending] = value
+            pending = ""
+        elif value in ["-h", "--help"]:
+            ctx.std.io.stdout.write(_USAGE + "\n")
+            return 0
+        else:
+            flag, equals, argument = value.partition("=")
+            if flag not in ["--binary", "--root", "--work"]:
+                ctx.std.process.exit(2, "Unknown option: " + value)
+            if equals:
+                options[flag] = argument
+            else:
+                pending = flag
+    if pending or not all([options.get(key) for key in ["--binary", "--root", "--work"]]):
+        ctx.std.process.exit(2, _USAGE)
+    cwd = ctx.std.env.aspect_root_dir()
+    _check_workspace(ctx, root_path(cwd, options["--binary"]), root_path(cwd, options["--root"]), root_path(cwd, options["--work"]))
+    return 0
+
+check_source_tooling = task(
+    kind = "check-source-tooling",
+    group = ["acceptance"],
+    summary = "Check formatting, lint fixes, documentation and measured benchmark output",
+    implementation = _check,
+    args = {"tool_args": args.trailing_var_args(description = _USAGE)},
+)
+
+def _suite(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    binary = executable(ctx, root, "//:bin/vesper")
+    candidate = binary + ".exe"
+    if ctx.std.fs.exists(candidate) and ctx.std.fs.metadata(candidate).is_file:
+        binary = candidate
+    _check_workspace(ctx, binary, root, scratch_dir(ctx, "vesper-source-tooling-"))
+    for target in [
+        "//crates/vesper-grammar:example/grammar",
+        "//crates/vesper-fmt:example/canonical",
+        "//crates/vesper-bench:example/paired_callbacks",
+    ]:
+        run_target(ctx, root, target)
+    return 0
+
+test_source_tooling = task(
+    kind = "test-source-tooling",
+    group = ["acceptance"],
+    summary = "Check source tooling and execute the companion Bazel examples",
+    implementation = _suite,
+)
+
+def _test(ctx: TaskContext) -> int:
+    for html, problem in [
+        ("<p id=local>&lt;img&gt;</p><!-- <script> -->", ""),
+        ("<b>escaped</b><IFRAME SRC='x'>", "Unexpected active or remote asset tag: iframe"),
+        ("<aside HREF='#local'>anchor</aside>", "Unexpected asset or event attribute: href"),
+        ("<div OnLoad='remote()'>", "Unexpected asset or event attribute: onload"),
+        ("<meta content='x>y'>", ""),
+    ]:
+        _require(_local_html_problem(html) == problem, "Unexpected local HTML policy result for " + html)
+    ctx.std.io.stdout.write("Passed local source-documentation HTML policy cases\n")
+    return 0
+
+test_source_tooling_helpers = task(
+    kind = "source-tooling",
+    group = ["ci", "tests"],
+    summary = "Test the source tooling acceptance HTML policy",
+    implementation = _test,
+)

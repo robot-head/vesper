@@ -1,0 +1,12 @@
+// Control-flow sugar from manuscript §7.6. The false branch raises the
+// caller's typed Fail effect; only the true branch evaluates the block tail.
+pub sugar ensure: stmt emits eff [Fail] {
+    rule (ensure $condition:expr else $error:expr; $..rest:stmts) => {
+        if $condition {
+            $..rest
+        } else {
+            let failure = $error;
+            Fail::raise(failure)
+        }
+    }
+}

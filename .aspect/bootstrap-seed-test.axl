@@ -1,0 +1,225 @@
+"""Check deterministic seed and Stage 1 preparation through the bootstrap CLI."""
+
+load("./lib/process.axl", "check", "root_path")
+load("./lib/task-fixture.axl", "contains", "equal", "fixture_launcher", "fixture_workspace", "invoke_fixture", "write_fixture")
+
+_ARTIFACTS = [
+    "debug/libvesper.rlib", "debug/libvesper_codegen_verified.rlib", "debug/deps/foo.rmeta",
+    "debug/deps/lib.so", "debug/build/pkg/out/libbar.rlib", "debug/apple/lib.dylib",
+    "debug/windows/lib.dll", "debug/unrelated/not-an-artifact.txt",
+]
+
+def _copy_executable(ctx, output, source = None):
+    ctx.std.fs.create_dir_all(output.rpartition("/")[0])
+    ctx.std.fs.copy(source or ctx.std.env.var("VESPER_FIXTURE_LAUNCHER"), output)
+    ctx.std.fs.set_permissions(output, 0o755)
+
+def _mock_stage1(ctx, root, cwd, tool, argv):
+    log = json.encode([tool, argv, ctx.std.env.var("CARGO_ENCODED_RUSTFLAGS"), ctx.std.env.var("SOURCE_DATE_EPOCH")])
+    equal(ctx.std.fs.try_append(root + "/stage1.log", log + "\n"), True)
+    if tool == "cargo":
+        equal(argv[:4], ["build", "--locked", "--profile", "dev"])
+        equal(argv[6:], ["--lib", "-p", "vesper", "-p", "vesper-codegen-verified"])
+        target = argv[5]
+        equal(ctx.std.fs.exists(target + "/stale"), False)
+        for path in _ARTIFACTS:
+            write_fixture(ctx, target + "/" + path, "")
+    elif tool == "rustc":
+        if argv == ["-vV"]:
+            ctx.std.io.stdout.write("rustc fixture\nhost: fixture-host\n")
+        else:
+            equal(argv[:4], ["--edition=2024", "-O", root + "/bootstrap/stage1.rs", "-o"])
+            _copy_executable(ctx, root_path(cwd, argv[4]))
+    else:
+        equal(tool, "stage1-runner")
+        equal(argv[2], "fixture-host")
+        if argv[4:] == ["--record"]:
+            mismatch = ctx.std.env.var("REPRO_MISMATCH") and "repro-b" in argv[3]
+            ctx.std.fs.write(root_path(cwd, argv[3]), "changed" if mismatch else "same lock")
+        else:
+            return int(ctx.std.env.var("FINAL_RUNNER_STATUS") or "0")
+    return 0
+
+def _mock_stage0(ctx, root, cwd, tool, argv):
+    log = json.encode([tool, argv, ctx.std.env.var("SOURCE_DATE_EPOCH"), ctx.std.env.var("CARGO_ENCODED_RUSTFLAGS")])
+    equal(ctx.std.fs.try_append(root + "/stage0.log", log + "\n"), True)
+    if tool == "cargo":
+        if argv[0] == "build":
+            equal(argv[1:6], ["--locked", "--profile", "dev", "--bin", "vesper"])
+            target = argv[7]
+            equal(ctx.std.fs.exists(target), False)
+            _copy_executable(ctx, target + "/debug/vesper")
+        else:
+            equal(argv[:2], ["run", "--quiet"])
+            options = argv[argv.index("seed-lock") + 1:]
+            opts = {options[i]: options[i + 1] for i in range(0, len(options), 2)}
+            for key in ["--results-a", "--results-b"]:
+                equal(ctx.std.fs.read_to_string(root_path(cwd, opts[key])), "a 3\nb 7\n")
+            objects = [sorted([str(item).rpartition("/")[2] for item in ctx.std.fs.read_dir(opts[key])])
+                       for key in ["--objects-a", "--objects-b"]]
+            equal(objects[0], objects[1])
+            ctx.std.fs.write(root_path(cwd, opts["--out"]), json.encode(opts))
+    elif tool in ["seed-a", "seed-b"]:
+        output = root_path(cwd, argv[-1])
+        if argv[0] == "emit":
+            equal(argv[2:5], ["--emit", "object", "-o"])
+            ctx.std.fs.write(output, argv[1])
+        else:
+            equal(argv[0], "build")
+            _copy_executable(ctx, output)
+    elif tool in ["a", "b"]:
+        return {"a": 3, "b": 7}[tool]
+    elif tool == "lean":
+        if argv == ["--print-prefix"]:
+            ctx.std.io.stdout.write(root + "/lean toolchain\n")
+        elif argv == ["--version"]:
+            ctx.std.io.stdout.write("Lean (version 4.35.0, Release)\n")
+        else:
+            equal((argv[0], argv[2], cwd), ("-c", "BootstrapDdc/Reference.lean", root + "/lean"))
+            ctx.std.fs.write(root_path(cwd, argv[1]), "C source")
+    elif tool == "gcc":
+        if argv == ["--version"]:
+            ctx.std.io.stdout.write("gcc fixture\nsecond line\n")
+        else:
+            path_b = root + "/seed scratch/path-b"
+            toolchain = root + "/lean toolchain"
+            if argv[0].startswith("-O"):
+                equal(argv, ["-O2", "-I" + toolchain + "/include", "-c", path_b + "/reference.c", "-o", path_b + "/reference.o"])
+            else:
+                library = toolchain + "/lib/lean"
+                equal(argv, [path_b + "/reference.o", "-L" + library, "-lleanshared", "-Wl,-rpath," + library, "-o", path_b + "/vesperc-lean-ddc"])
+            _copy_executable(ctx, root_path(cwd, argv[-1]))
+    elif tool == "rustc":
+        equal(argv, ["--version"])
+        ctx.std.io.stdout.write("rustc 1.100.0 (fixture)\n")
+    else:
+        equal(tool, "vesperc-lean-ddc")
+        equal(argv, ["bootstrap/corpus/a.ves", "bootstrap/corpus/b.ves"])
+        ctx.std.io.stdout.write("a 3\nb 7\n")
+    return 0
+
+def mock_bootstrap(ctx, cwd, tool, argv):
+    root = ctx.std.env.var("FIXTURE_ROOT")
+    kind = ctx.std.env.var("VESPER_FIXTURE_CASE")
+    if kind == "bootstrap-stage1":
+        return _mock_stage1(ctx, root, cwd, tool, argv)
+    if kind == "bootstrap-stage0":
+        return _mock_stage0(ctx, root, cwd, tool, argv)
+    if tool == "cargo":
+        equal(argv, ["build", "--locked", "-p", "vesper-codegen-verified", "--bin", "vesper-bootstrap"])
+        return 0
+    equal(argv[0], "check-stage1-lock")
+    equal(ctx.std.fs.try_append(root + "/gate.log", argv[1] + "\n"), True)
+    setting = "COMMITTED_STATUS" if argv[1].rpartition("/")[2] == "stage1.lock" else "FRESH_STATUS"
+    return int(ctx.std.env.var(setting))
+
+def _stage1(ctx, workspace, launcher):
+    root, cwd = workspace.root, workspace.cwd
+    env = dict(launcher, FIXTURE_ROOT = root, VESPER_FIXTURE_CASE = "bootstrap-stage1", WORK = "work scratch",
+               OUT = "my lock", PROFILE = "dev", CARGO_HOME = "cargo home", CARGO_TARGET_DIR = "other target",
+               SOURCE_DATE_EPOCH = "", CARGO_ENCODED_RUSTFLAGS = "", REPRO_MISMATCH = "", FINAL_RUNNER_STATUS = "")
+    work = root + "/work scratch"
+    write_fixture(ctx, root + "/bootstrap/stage1.rs", "fixture")
+    write_fixture(ctx, work + "/repro-a/target/stale", "")
+    log = root + "/stage1.log"
+    ctx.std.fs.write(log, "")
+    command = ["bootstrap", "run", "--", "stage1"]
+
+    def run(options, status = 0, variables = env):
+        return invoke_fixture(ctx, command + options, cwd, status, variables)
+
+    result = run(["--reproduce", "--outcome", "--require-cross-backend"], 36, dict(env, FINAL_RUNNER_STATUS = "36"))
+    contains("two clean builds recorded identical locks", result.stdout)
+    rows = [json.decode(line) for line in ctx.std.fs.read_to_string(log).splitlines()]
+    equal([row[0] for row in rows], ["rustc", "cargo", "rustc", "stage1-runner", "cargo", "rustc", "stage1-runner", "stage1-runner"])
+    for side, offset in [("a", 1), ("b", 4)]:
+        cargo, rustc, runner = rows[offset:offset + 3]
+        directory = work + "/repro-" + side
+        target = directory + "/target"
+        equal(ctx.std.fs.exists(target), False)
+        equal(cargo[1][5], target)
+        equal(cargo[2].split("\x1f"), [
+            "--remap-path-prefix=" + root + "=/vesper",
+            "--remap-path-prefix=" + root + "/cargo home=/cargo",
+            "--remap-path-prefix=" + target + "=/target",
+        ])
+        equal(cargo[3], "1794650795")
+        profile = target + "/debug"
+        expected = [
+            "--remap-path-prefix=" + root + "=/vesper", "--remap-path-prefix=" + target + "=/target",
+            "--extern", "vesper=" + profile + "/libvesper.rlib",
+            "--extern", "vesper_codegen_verified=" + profile + "/libvesper_codegen_verified.rlib",
+        ]
+        for suffix in ["", "/apple", "/build/pkg/out", "/deps", "/windows"]:
+            expected.extend(["-L", "dependency=" + profile + suffix])
+        equal(rustc[1][5:], expected)
+        equal(runner[1], [root, directory + "/work", "fixture-host", directory + "/stage1.lock", "--record"])
+    equal(rows[-1][1], [root, work, "fixture-host", "my lock", "--outcome", "--require-cross-backend"])
+    contains("ReproducibilityMismatch", run(["--reproduce", "--outcome"], 1, dict(env, REPRO_MISMATCH = "1")).stderr)
+    ctx.std.fs.write(log, "")
+    run(["--record"])
+    rows = [json.decode(line) for line in ctx.std.fs.read_to_string(log).splitlines()]
+    equal(rows[1][1][5], root + "/other target")
+    equal(rows[-1][1][-1], "--record")
+    compile_argv = ["bootstrap", "compile-stage1", "--"]
+    invoke_fixture(ctx, compile_argv + [root + "/other target/debug", root + "/bootstrap/stage1.rs", "adapter", "--test"], cwd, env = env)
+    contains("--test", json.decode(ctx.std.fs.read_to_string(log).splitlines()[-1])[1])
+    run(["--unknown"], 2)
+    run([], 2, dict(env, PROFILE = "invalid"))
+    invoke_fixture(ctx, compile_argv + ["p", "s", "o", "--invalid"], cwd, 2, env)
+
+def _stage0(ctx, workspace, launcher):
+    root, cwd = workspace.root, workspace.cwd
+    write_fixture(ctx, root + "/.ci-lean-path", root + "/bin/lean\n")
+    write_fixture(ctx, root + "/bootstrap/corpus/b.ves", "b")
+    write_fixture(ctx, root + "/bootstrap/corpus/a.ves", "a")
+    write_fixture(ctx, root + "/lean/BootstrapDdc/Reference.lean", "fixture")
+    check(ctx, "git", ["init", "-q"], root)
+    check(ctx, "git", ["-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+                       "commit", "-qm", "base", "--allow-empty"], root)
+    env = dict(launcher, FIXTURE_ROOT = root, VESPER_FIXTURE_CASE = "bootstrap-stage0", WORK = "seed scratch",
+               OUT = "recorded lock", PROFILE = "dev", SOURCE_DATE_EPOCH = "1717", CC_B = "gcc", VESPER_LEAN = "")
+    ctx.std.fs.write(root + "/stage0.log", "")
+    command = ["bootstrap", "run"]
+    invoke_fixture(ctx, command, cwd, env = env)
+    equal(ctx.std.fs.exists(root + "/seed scratch/target"), False)
+    lock = json.decode(ctx.std.fs.read_to_string(root + "/recorded lock"))
+    equal([lock[name] for name in ["--rustc", "--profile", "--epoch", "--lean", "--cc"]],
+          ["rustc 1.100.0", "dev", "1717", "Lean 4.35.0", "gcc fixture"])
+    rows = [json.decode(row) for row in ctx.std.fs.read_to_string(root + "/stage0.log").splitlines()]
+    equal([row[0] for row in rows], [
+        "lean", "cargo", "cargo", "seed-a", "seed-b", "seed-a", "a", "seed-a", "seed-b", "seed-a", "b",
+        "lean", "gcc", "gcc", "vesperc-lean-ddc", "rustc", "lean", "gcc", "cargo",
+    ])
+    equal(all([row[2] == "1717" for row in rows]), True)
+    contains("--remap-path-prefix=" + root + "=/vesper", rows[1][3].split("\x1f"))
+    invoke_fixture(ctx, command, cwd, 2, dict(env, VESPER_LEAN = "missing-lean"))
+    invoke_fixture(ctx, command, cwd, 2, dict(env, CC_B = "missing-cc"))
+
+def _ratchet(ctx, workspace, launcher):
+    root, cwd = workspace.root, workspace.cwd
+    env = dict(launcher, FIXTURE_ROOT = root, VESPER_FIXTURE_CASE = "bootstrap-ratchet", WORK = "gate scratch", CARGO_TARGET_DIR = "custom target")
+    _copy_executable(ctx, root + "/custom target/debug/vesper-bootstrap", launcher["VESPER_FIXTURE_LAUNCHER"])
+    log = root + "/gate.log"
+    ctx.std.fs.write(log, "")
+    for baseline, fresh, status, message in [
+        ("0", "39", 39, "the fresh lock must be too"), ("1", "0", 0, "passes the strict gate"),
+        ("1", "1", 0, "not yet satisfiable"),
+    ]:
+        result = invoke_fixture(ctx, ["ci", "stage1-cross-backend"], cwd, status, dict(env, COMMITTED_STATUS = baseline, FRESH_STATUS = fresh))
+        contains(message, result.stdout)
+    equal(ctx.std.fs.read_to_string(log).splitlines(), ["bootstrap/stage1.lock", root + "/gate scratch/stage1.fresh.lock"] * 3)
+
+def _test(ctx):
+    workspace = fixture_workspace(ctx, "vesper-bootstrap-seed-test-")
+    launcher = fixture_launcher(ctx, workspace, "", ["cargo", "rustc", "lean", "gcc"])
+    _stage1(ctx, workspace, launcher)
+    _stage0(ctx, workspace, launcher)
+    _ratchet(ctx, workspace, launcher)
+    return 0
+
+test_bootstrap_seeds = task(
+    kind = "bootstrap-seeds", group = ["ci", "tests"],
+    summary = "Check bootstrap stage reproducibility, seed inputs and the cross-backend gate",
+    implementation = _test,
+)

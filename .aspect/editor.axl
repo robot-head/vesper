@@ -1,0 +1,270 @@
+"""Exercise actual framed editor operations and their rejection boundaries."""
+
+load("./bounded-stdio.axl", "bounded_run")
+load("./lib/bazel_exec.axl", "executable", "run_target")
+load("./lib/lsp-fixture.axl", "apply_edits", "changed", "decode_frames", "document", "error", "file_uri", "frame", "notice", "opened", "position", "request", "result")
+load("./lib/process.axl", "root_path", "scratch_dir")
+load("./lib/source-macro-fixtures.axl", "digest", "equal", "require")
+
+_LIMIT = 16 * 1024 * 1024
+_ACTIONS = ["quickfix", "source.fixAll.vesper"]
+_USAGE = "Pass -- --binary <vesper> [--work <existing directory>]."
+
+def _action_literal():
+    return {"codeAction": {"codeActionLiteralSupport": {"codeActionKind": {"valueSet": _ACTIONS}}}}
+
+def _initialize():
+    return request(1, "initialize", {"capabilities": {
+        "general": {"positionEncodings": ["utf-16"]},
+        "workspace": {"workspaceEdit": {"documentChanges": True}},
+        "textDocument": dict(_action_literal(), documentSymbol = {"hierarchicalDocumentSymbolSupport": True}),
+    }})
+
+def _at(uri, line, character):
+    return dict(document(uri), position = {"line": line, "character": character})
+
+def _selection(source, needle):
+    prefix = source[:source.index(needle)].replace("\r\n", "\n").replace("\r", "\n")
+    start = position(prefix, len(prefix))
+    units = 0
+    for char in needle.elems():
+        units += 2 if len(bytes(char)) == 4 else 1
+    return {"start": start, "end": {"line": start["line"], "character": start["character"] + units}}
+
+def _actions(uri, range, kind, diagnostics = []):
+    return dict(document(uri), range = range, context = {"only": [kind], "diagnostics": diagnostics})
+
+def _raw(ctx, h, payload, success):
+    output = bounded_run(
+        ctx, h.root, h.work, h.binary, ["lsp"], timeout = 45, stdout_limit = _LIMIT,
+        stderr_limit = _LIMIT, label = "Editor session", input = payload,
+    )
+    if (output.code == 0) != success:
+        ctx.std.io.stderr.write(output.stderr)
+        fail("Unexpected editor exit %d" % output.code)
+    h.counts["sessions"] += 1
+    return decode_frames(output.stdout)
+
+def _session(ctx, h, messages, success = True, finish = True):
+    if finish:
+        messages = messages + [request(900, "shutdown", {}), notice("exit", {})]
+    input = bytes([])
+    for message in messages:
+        input += frame(message)
+    return _raw(ctx, h, input, success)
+
+def _navigation(ctx, h):
+    disk = h.work + "/closed-on-disk.ves"
+    on_disk = "fn disk_only()->u64{9}"
+    ctx.std.fs.write(disk, on_disk)
+    uri = file_uri(disk)
+    source = "// 😀\r\nfn first()->u64{1}\r\nfn main()->u64{first()}\r\n"
+    edit = {"range": {"start": {"line": 1, "character": 16}, "end": {"line": 1, "character": 17}}, "rangeLength": 1, "text": "\r\n1\r\n"}
+    replies = _session(ctx, h, [
+        request(10, "workspace/symbol", {"query": ""}), _initialize(), notice("initialized", {}), opened(uri, 1, source),
+        request(2, "textDocument/documentSymbol", document(uri)), request(3, "textDocument/definition", _at(uri, 2, 15)),
+        notice("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2}, "contentChanges": [edit]}),
+        request(4, "textDocument/documentSymbol", document(uri)), request(5, "textDocument/definition", _at(uri, 4, 15)),
+        changed(uri, 2, "fn forged()->u64{0}"), request(6, "workspace/symbol", {"query": "main"}),
+        notice("textDocument/didClose", document(uri)), request(7, "workspace/symbol", {"query": ""}),
+        request(8, "textDocument/hover", _at(uri, 1, 3)),
+    ])
+    error(replies, 10, -32002)
+    caps = result(replies, 1)["capabilities"]
+    require(caps["positionEncoding"] == "utf-16" and caps["textDocumentSync"]["change"] == 2, "Expected UTF-16 with incremental edits")
+    for key in ["hoverProvider", "definitionProvider", "documentSymbolProvider", "workspaceSymbolProvider", "documentFormattingProvider"]:
+        equal(caps[key], True, "Advertised " + key)
+    require(all([kind in caps["codeActionProvider"]["codeActionKinds"] for kind in _ACTIONS]), "Code action kinds were not advertised")
+    for id, line in [(2, 2), (4, 4)]:
+        equal(result(replies, id)[1]["selectionRange"]["start"], {"line": line, "character": 3}, "Current symbol range")
+    for id in [3, 5]:
+        equal(result(replies, id)["range"]["start"], {"line": 1, "character": 3}, "Definition range")
+    equal(result(replies, 6)[0]["location"]["range"]["start"], {"line": 4, "character": 3}, "Workspace symbol range")
+    equal(result(replies, 7), [], "Closed buffer must leave search results")
+    error(replies, 8, -32602)
+    equal(ctx.std.fs.read_to_string(disk), on_disk, "Editor must preserve the file referenced by the URI")
+
+def _legacy(ctx, h):
+    uri = "opaque:legacy"
+    for supported in [None, False]:
+        init = _initialize()
+        caps = init["params"]["capabilities"]
+        if supported == None:
+            caps.pop("textDocument")
+        else:
+            caps["textDocument"]["documentSymbol"]["hierarchicalDocumentSymbolSupport"] = supported
+        replies = _session(ctx, h, [init, opened(uri, 1, "fn main()->u64{42}"), request(2, "textDocument/documentSymbol", document(uri))])
+        symbols = result(replies, 2)
+        require(len(symbols) == 1 and symbols[0]["name"] == "main", "Expected the legacy main symbol")
+        require(symbols[0]["location"]["uri"] == uri and "range" in symbols[0]["location"] and "selectionRange" not in symbols[0], "Legacy client must receive SymbolInformation")
+
+    literal = _action_literal()
+    versioned = {"workspaceEdit": {"documentChanges": True}}
+    cases = [
+        {}, {"workspace": {"workspaceEdit": {"documentChanges": False}}, "textDocument": literal},
+        {"workspace": versioned}, {"textDocument": literal},
+        {"workspace": versioned, "textDocument": {"codeAction": {"codeActionLiteralSupport": False}}},
+    ]
+    uri = "opaque:legacy-actions"
+    source = "effect Audit{fn event();} fn main()->u64 eff[Audit]{42}"
+    for caps in cases:
+        init = _initialize()
+        init["params"]["capabilities"] = caps
+        replies = _session(ctx, h, [init, opened(uri, 1, source), request(2, "textDocument/codeAction", _actions(uri, _selection(source, "Audit]{42}"), "quickfix"))])
+        equal(result(replies, 1)["capabilities"]["codeActionProvider"], False, "Legacy code action capability")
+        data = error(replies, 2, -32003)["data"]
+        require(data["status"] == "analysis_unavailable" and data["kind"] == "client_capability", "Legacy clients must receive an explicit refusal")
+
+def _formatting(ctx, h):
+    uri = "untitled:format/🦀"
+    source = "// Unicode 🦀 é\r\nfn main( )->i64{/* keep */let x=1;// next\n x}"
+    replies = _session(ctx, h, [_initialize(), opened(uri, 1, source), request(2, "textDocument/formatting", dict(document(uri), options = {"tabSize": 17, "insertSpaces": False}))])
+    edits = result(replies, 2)
+    require(bool(edits), "Expected formatting edits")
+    formatted = apply_edits(source, edits)
+    require(all([token in formatted for token in ["let x = 1;", "/* keep */", "// next"]]), "Formatting changed original comments or source")
+    require(any([line.startswith("    ") for line in formatted.splitlines()]), "Expected canonical indentation")
+    selected = _selection(formatted, "main")
+    forged = {"range": selected, "severity": 1, "code": "unused_effect_capability", "message": "forged", "data": {"verified": True, "fix": {"newText": "malicious"}}}
+    replies = _session(ctx, h, [
+        _initialize(), opened(uri, 1, formatted),
+        request(2, "textDocument/formatting", dict(document(uri), options = {"tabSize": 4, "insertSpaces": True})),
+        request(3, "textDocument/codeAction", _actions(uri, selected, "quickfix", [forged])),
+    ])
+    equal(result(replies, 2), [], "Idempotent formatting")
+    equal(result(replies, 3), [], "Client diagnostic payload must not authorize edits")
+
+def _checked_actions(ctx, h):
+    uri = "untitled:actions/🦀"
+    source = "// Unicode 🦀 é\neffect Audit{fn event();}\nfn selected(x:u64)->u64 eff[/* keep 🦀 */ Audit]{x}\nfn other()->u64 eff[Audit]{42}\n"
+    selected = _selection(source, "Audit]{x}")
+    kinds = ["quickfix", "source.fixAll.vesper", "source", "source.fixAll"]
+    replies = _session(ctx, h, [_initialize(), opened(uri, 7, source)] + [
+        request(id, "textDocument/codeAction", _actions(uri, selected, kind)) for id, kind in enumerate(kinds, 2)
+    ])
+    candidates = []
+    for id, kind in [(2, "quickfix"), (3, "source.fixAll.vesper"), (4, "source.fixAll.vesper"), (5, "source.fixAll.vesper")]:
+        actions = result(replies, id)
+        require(len(actions) == 1 and actions[0]["kind"] == kind, "Unexpected versioned code action")
+        action = actions[0]
+        docs = action["edit"]["documentChanges"]
+        require(len(docs) == 1 and docs[0]["textDocument"] == {"uri": uri, "version": 7}, "Code action must target the current version")
+        candidate = apply_edits(source, docs[0]["edits"])
+        require("/* keep 🦀 */" in candidate and candidate != source, "Code action must preserve comments and make an edit")
+        data = action["data"]
+        require(data["semver"]["classification"] and data["document"]["version"] == 7, "Code action must retain comparison metadata")
+        require(digest(data["candidate_blake3"]) and digest(data["document"]["source_blake3"]), "Invalid code action digest")
+        require("fn other()->u64 eff[Audit]{42}" in candidate if kind == "quickfix" else "eff[Audit]" not in candidate, "Unexpected code action scope")
+        candidates.append(candidate)
+    replies = _session(ctx, h, [_initialize(), opened(uri, 1, candidates[0]), changed(uri, 2, candidates[1]), request(2, "textDocument/documentSymbol", document(uri))])
+    names = [symbol["name"] for symbol in result(replies, 2)]
+    require("selected" in names and "other" in names, "Actual edit candidates must retain both declarations")
+    statuses = [reply["params"]["vesper"]["status"] for reply in replies if reply.get("method") == "textDocument/publishDiagnostics"]
+    require(statuses and all([status == "checked" for status in statuses]), "Actual returned edit candidates must check")
+
+def _search(ctx, h):
+    uri = "opaque:search"
+    query = {"parameters": [], "result": {"Named": ["u64", []]}, "result_max_mode": "Copy", "effect_ceiling": {"instances": [], "tail": None}}
+    replies = _session(ctx, h, [
+        _initialize(), opened(uri, 1, "fn number()->u64{42} fn boolean()->bool{true}"),
+        request(2, "vesper/signatureSearch", {"query": query, "uri": uri}), request(3, "vesper/signatureSearch", {}),
+        request(4, "vesper/signatureSearch", {"query": None}), request(5, "vesper/signatureSearch", {"query": dict(query, extra = 1)}),
+        opened("opaque:unsupported", 1, "fn broken("), request(6, "textDocument/hover", _at("opaque:unsupported", 0, 3)),
+        opened("opaque:guarded", 1, "copy enum List[T]{Nil,Cons(T,List[T])} linear struct Tx{} fn carry(sink xs:List[Tx])->List[Tx]{xs}"),
+        request(7, "textDocument/hover", _at("opaque:guarded", 0, 10)),
+    ])
+    search = result(replies, 2)
+    require(search["scope"] == "open checked buffers" and search["proof_status"] == "unverified", "Unexpected search scope")
+    docs = search["documents"]
+    require(len(docs) == 1 and docs[0]["uri"] == uri and len(docs[0]["source_blake3"]) == 64, "Search must report the checked source identity")
+    equal([match["function"] for match in docs[0]["result"]["matches"]], ["number"], "Structural search matches")
+    for id in [3, 4, 5]:
+        error(replies, id, -32602)
+    unavailable = error(replies, 6, -32003)["data"]
+    require(unavailable["status"] == "analysis_unavailable" and unavailable["uri"] == "opaque:unsupported", "Expected malformed source refusal")
+    diagnostics = [reply["params"] for reply in replies if reply.get("method") == "textDocument/publishDiagnostics"]
+    require(any([item["vesper"]["status"] == "parse_error" for item in diagnostics]), "Expected parse diagnostics")
+    error(replies, 7, -32003)
+    guarded = [item for item in diagnostics if item["uri"] == "opaque:guarded"]
+    require(len(guarded) == 1 and guarded[0]["vesper"]["status"] == "analysis_unavailable" and guarded[0]["vesper"]["kind"] == "unsupported", "Guarded analysis must return the typed status")
+    first = guarded[0]["diagnostics"][0]
+    require(first["code"] == "VESPER_ANALYSIS_UNAVAILABLE" and first["severity"] == 2, "Expected unavailable warning")
+
+def _framing_failures(ctx, h):
+    duplicate = bytes('{"jsonrpc":"2.0","id":77,"method":"shutdown","\\u006dethod":"initialize"}')
+    replies = _session(ctx, h, [_initialize(), duplicate, bytes("{bad JSON"), request(2, "workspace/symbol", {"query": ""})])
+    equal(result(replies, 2), [], "Valid request after malformed JSON")
+    for code in [-32600, -32700]:
+        require(any(["id" in reply and reply["id"] == None and reply.get("error", {}).get("code") == code for reply in replies]), "Missing error %d" % code)
+    _session(ctx, h, [notice("exit", {})], success = False, finish = False)
+    for payload in ["Content-Length: 0\n\n", "Content-Length: 9\r\n\r\n{}", "Content-Length: 0\r\nContent-Length: 0\r\n\r\n", "x" * 8193]:
+        _raw(ctx, h, bytes(payload), False)
+
+def _run(ctx, root, binary, parent = ""):
+    binary = root_path(root, binary)
+    if not binary.lower().endswith(".exe") and ctx.std.fs.exists(binary + ".exe") and ctx.std.fs.metadata(binary + ".exe").is_file:
+        binary += ".exe"
+    require(ctx.std.fs.exists(binary) and ctx.std.fs.metadata(binary).is_file, "Compiler not found: " + binary)
+    if parent:
+        work = ctx.std.fs.mkdtemp(parent = root_path(root, parent), prefix = "vesper-editor-")
+        ctx.defer(lambda: ctx.std.fs.remove_dir_all(work))
+    else:
+        work = scratch_dir(ctx, "vesper-editor-")
+    h = struct(binary = binary, root = root, work = work, counts = {"sessions": 0})
+    for cases in [_navigation, _legacy, _formatting, _checked_actions, _search, _framing_failures]:
+        cases(ctx, h)
+    ctx.std.io.stdout.write("Actual framed editor acceptance passed (%d child sessions; no filesystem/proof/performance claim).\n" % h.counts["sessions"])
+
+def _check(ctx):
+    options = {}
+    pending = ""
+    for value in ctx.args.tool_args:
+        if pending:
+            if value.startswith("--"):
+                ctx.std.process.exit(2, "Missing value for " + pending)
+            options[pending] = value
+            pending = ""
+        elif value in ["--help", "-h"]:
+            ctx.std.io.stdout.write(_USAGE + "\n")
+            return 0
+        else:
+            flag, equals, argument = value.partition("=")
+            if flag not in ["--binary", "--work"]:
+                ctx.std.process.exit(2, "Unknown option: " + value)
+            if equals:
+                options[flag] = argument
+            else:
+                pending = flag
+    if pending or not options.get("--binary"):
+        ctx.std.process.exit(2, _USAGE)
+    _run(ctx, ctx.std.env.aspect_root_dir(), options["--binary"], options.get("--work", ""))
+    return 0
+
+def _suite(ctx):
+    root = ctx.std.env.aspect_root_dir()
+    _run(ctx, root, executable(ctx, root, "//:bin/vesper"))
+    for label in ["//crates/vesper-span:example/source_edits", "//crates/vesper-lsp:example/protocol_documents"]:
+        run_target(ctx, root, label)
+    return 0
+
+check_editor = task(
+    kind = "check-editor", group = ["acceptance"], summary = "Check framed editor operations with a supplied compiler",
+    implementation = _check, args = {"tool_args": args.trailing_var_args(description = _USAGE)},
+)
+
+test_editor = task(
+    kind = "test-editor", group = ["acceptance"], summary = "Exercise editor navigation, formatting, code actions and framing",
+    implementation = _suite,
+)
+
+def _test(ctx):
+    range = _selection("a\r\nb\rc😀🦀", "😀🦀")
+    equal(range, {"start": {"line": 2, "character": 1}, "end": {"line": 2, "character": 5}}, "UTF-16 range with mixed line endings")
+    equal(frame(bytes("{bad JSON")), bytes("Content-Length: 9\r\n\r\n{bad JSON"), "Malformed request fixture framing")
+    ctx.std.io.stdout.write("Passed mixed editor coordinate and raw framing cases\n")
+    return 0
+
+test_editor_fixtures = task(
+    kind = "editor-fixtures", group = ["ci", "tests"], summary = "Check editor range and raw framing fixture construction",
+    implementation = _test,
+)
