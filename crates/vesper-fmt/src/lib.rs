@@ -668,9 +668,7 @@ impl Chain {
             _ => None,
         };
         let mut kept = 0;
-        if chain.calls == 1
-            && chain.ends_with_call
-            && alone.is_none_or(|w| w > DEFAULT_LINE_WIDTH)
+        if chain.calls == 1 && chain.ends_with_call && alone.is_none_or(|w| w > DEFAULT_LINE_WIDTH)
         {
             kept = chain.dots.len();
         } else {
@@ -1014,7 +1012,15 @@ fn sequence<'a>(
             let fill =
                 current.kind == K::LBrace && previous.is_some_and(|p| p.kind == K::ColonColon);
             let inner_indent = indent.checked_add(4).ok_or(Error::Overflow)?;
-            let inner = sequence(atoms, pos, Some(close), is_block, fill, inner_indent, document)?;
+            let inner = sequence(
+                atoms,
+                pos,
+                Some(close),
+                is_block,
+                fill,
+                inner_indent,
+                document,
+            )?;
             let last_is_line_comment = *pos > 0 && atoms[*pos - 1].kind == K::Comment;
             // The formatter never adds or removes tokens, so a source trailing
             // comma is kept and selects the vertical layout.
@@ -1074,7 +1080,11 @@ fn sequence<'a>(
             output.push(node);
         } else {
             line.push(node);
-            chain.push(document.width(node)?, current.kind == K::LParen, current.kind)?;
+            chain.push(
+                document.width(node)?,
+                current.kind == K::LParen,
+                current.kind,
+            )?;
         }
         previous_block = is_block;
         previous_params = params;
