@@ -19,8 +19,8 @@
 //! order, an unmatched left row right after its (absent) matches, unmatched
 //! right rows at the end.
 use crate::execute::{DataSet, QueryResult};
-use crate::port::{self, VMode};
 use crate::plan::PreparedQuery;
+use crate::port::{self, VMode};
 use crate::{Error, ErrorKind, HermeticCatalog, Result, Value};
 use std::collections::BTreeMap;
 use vesper_simd::{IsaProfileKind, JitScanner};

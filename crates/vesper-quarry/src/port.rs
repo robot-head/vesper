@@ -27,11 +27,11 @@
 
 use crate::execute::{rows_bytes, validate_rows, DataSet, QueryResult};
 use crate::parse::Cmp;
-use crate::vector::Aggregate;
 use crate::plan::{
     AccessPath, AccessPlan, BindingPath, BoundColumn, ExprNode, IndexBound, JoinKind,
     PreparedQuery, RelPlan, TypedExpr,
 };
+use crate::vector::Aggregate;
 use crate::{
     bound, identifier, ColumnDef, DdlChange, Error, ErrorKind, HermeticCatalog, Limits, ParamDef,
     Result, ScalarType, Value,

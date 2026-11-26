@@ -356,9 +356,15 @@ fn digest() {
             &d,
             &none,
             &e,
-            &[Aggregate::Min(4)]
+            &[Aggregate::Min(4)],
         )));
-        out.push(show(q.aggregate_vectorized(&changed, &d, &none, &e, &[Aggregate::Sum(0)])));
+        out.push(show(q.aggregate_vectorized(
+            &changed,
+            &d,
+            &none,
+            &e,
+            &[Aggregate::Sum(0)],
+        )));
     }
     for line in out {
         println!("{line}");
@@ -412,11 +418,15 @@ fn pass(name: &str, w: &mut Work) -> u64 {
                 Aggregate::Max(3),
                 Aggregate::Count(3),
             ];
-            let r = w.q.aggregate_vectorized(&w.c, &w.d, &w.binds, &w.e, &aggs).unwrap();
+            let r =
+                w.q.aggregate_vectorized(&w.c, &w.d, &w.binds, &w.e, &aggs)
+                    .unwrap();
             format!("{r:?}").hash(&mut h);
         }
         "tiles" => {
-            let work = w.q.execute_tiled(&w.c, &w.d, &w.binds, &w.e, &mut w.tiles).unwrap();
+            let work =
+                w.q.execute_tiled(&w.c, &w.d, &w.binds, &w.e, &mut w.tiles)
+                    .unwrap();
             (work, w.tiles.len()).hash(&mut h);
         }
         _ => {

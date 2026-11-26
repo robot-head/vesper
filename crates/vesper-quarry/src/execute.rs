@@ -1,6 +1,4 @@
-use crate::{
-    add, Error, ErrorKind, HermeticCatalog, Limits, PreparedQuery, Result, Value,
-};
+use crate::{add, Error, ErrorKind, HermeticCatalog, Limits, PreparedQuery, Result, Value};
 use std::collections::BTreeMap;
 use std::mem::size_of;
 /// Data is explicitly tied to a complete schema snapshot; mutations validate before replacement.
