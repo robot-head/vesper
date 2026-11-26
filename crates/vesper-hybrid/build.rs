@@ -146,6 +146,14 @@ const DIVERGENT_VERIFIED_CODEGEN_EDIT: (&str, &str) = (
     "(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = words;\n    let _ = t.try_set(0, 0);\n    t\n",
 );
 
+/// The sugar expansion module's divergence check: every source reads back
+/// as having no sugar (mirrored in BUILD.bazel).
+#[cfg(feature = "divergent-sugar")]
+const DIVERGENT_SUGAR_EDIT: (&str, &str) = (
+    "(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    words\n",
+    "(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = words;\n    let _ = t.try_set(0, 0);\n    t\n",
+);
+
 /// The stack-bound divergence check: every graph is rejected as malformed
 /// (`divergent_words` in modules/stack_bound), so every report differs.
 #[cfg(feature = "divergent-stack-bound")]
@@ -343,6 +351,12 @@ fn main() {
                 DIVERGENT_VERIFIED_CODEGEN_EDIT.0,
                 DIVERGENT_VERIFIED_CODEGEN_EDIT.1,
             )
+        } else {
+            port
+        };
+        #[cfg(feature = "divergent-sugar")]
+        let port = if library == "hybrid_sugar" {
+            port.edit(DIVERGENT_SUGAR_EDIT.0, DIVERGENT_SUGAR_EDIT.1)
         } else {
             port
         };
