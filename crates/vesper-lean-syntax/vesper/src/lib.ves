@@ -1495,7 +1495,8 @@ pub fn valid_ident(in v: Str) -> bool {
             || c == Ch::ParagraphSeparator
             || (c >= Ch::EmbeddingFirst && c <= Ch::EmbeddingLast)
             || (c >= Ch::IsolateFirst && c <= Ch::IsolateLast)
-            || c == Ch::ByteOrderMark {
+            || c == Ch::ByteOrderMark
+        {
             return false;
         }
         i = next;

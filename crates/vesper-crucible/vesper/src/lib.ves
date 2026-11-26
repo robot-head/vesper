@@ -1369,7 +1369,8 @@ impl Fuzzer {
         let mut same = true;
         for j in 0..self.width {
             if at(in self.scratch.as_slice(), j)
-                != at(in self.c_vals.as_slice(), wrapping_add(estart, j)) {
+                != at(in self.c_vals.as_slice(), wrapping_add(estart, j))
+            {
                 same = false;
             }
         }
@@ -1492,7 +1493,8 @@ impl Fuzzer {
             let pos = wrapping_add(estart, i);
             if at(in self.c_vals.as_slice(), pos) == needle
                 && at(in self.c_tag.as_slice(), pos) == 0
-                && repl <= at(in self.c_max.as_slice(), pos) {
+                && repl <= at(in self.c_max.as_slice(), pos)
+            {
                 self.scratch_from_entry(estart);
                 self.scratch.try_set(i, repl);
                 self.push_scratch(estart);
@@ -2343,7 +2345,8 @@ impl Search {
             let e = at(in self.ev_proc.as_slice(), j);
             if self.clock_get(hb_off, hb_len, e) > j
                 && self.en_find(n, e) != none()
-                && !seq_has(in self.t3.as_slice(), e) {
+                && !seq_has(in self.t3.as_slice(), e)
+            {
                 self.t3.push(e);
             }
         }
@@ -3085,7 +3088,8 @@ test {
         if !fuzzer_next(inout fuzzer)
             || fuzzer_seed(in fuzzer) != 16294208416658607535
             || fuzzer_observe(inout fuzzer, 0, in features.as_slice()) != 1
-            || fuzzer_observe(inout fuzzer, 0, in features.as_slice()) != 0 {
+            || fuzzer_observe(inout fuzzer, 0, in features.as_slice()) != 0
+        {
             return false;
         }
 
@@ -3117,7 +3121,8 @@ test {
             || entry.try_get(0) != Option::Some(2)
             || candidate.len() != 1
             || candidate.try_get(0) != Option::Some(7)
-            || fuzzer_observe(inout fuzzer, 0, in features.as_slice()) != 1 {
+            || fuzzer_observe(inout fuzzer, 0, in features.as_slice()) != 1
+        {
             return false;
         }
         let stats = fuzzer_stats(in fuzzer);
@@ -3131,7 +3136,8 @@ test {
         let features = ChunkSeq::new[u64]();
         if !fuzzer_next(inout fuzzer)
             || fuzzer_observe(inout fuzzer, 2, in features.as_slice()) != 0
-            || !fuzzer_next(inout fuzzer) {
+            || !fuzzer_next(inout fuzzer)
+        {
             return false;
         }
         let result = fuzzer_observe(inout fuzzer, verdict, in features.as_slice());
@@ -3176,7 +3182,8 @@ test {
             || search_running(in search) != none()
             || search_preemptions(in search) != 0
             || !search_backtrack(inout search)
-            || search_nodes(in search) != 1 {
+            || search_nodes(in search) != 1
+        {
             return false;
         }
         let second = search_choose(inout search);
@@ -3434,7 +3441,8 @@ test {
         search_child(inout search, false, in empty.as_slice(), in empty.as_slice());
         if search_key(inout search, 2)
             || !search_backtrack(inout search)
-            || search_choose(inout search).code != 0 {
+            || search_choose(inout search).code != 0
+        {
             return false;
         }
         search_child(inout search, false, in empty.as_slice(), in empty.as_slice());
@@ -4021,7 +4029,8 @@ test {
         if first.len() != 1
             || first.try_get(0) != Option::Some(7)
             || !fuzzer_next(inout fuzzer)
-            || !fuzzer.solver_run {
+            || !fuzzer.solver_run
+        {
             return false;
         }
         let second = fuzzer_candidate(in fuzzer);
@@ -4151,7 +4160,8 @@ test {
             let prefix = search_prefix(in search);
             if prefix.len() != 2
                 || prefix.try_get(0) != Option::Some(first.value)
-                || prefix.try_get(1) != Option::Some(second.value) {
+                || prefix.try_get(1) != Option::Some(second.value)
+            {
                 return false;
             }
             explored = inc(explored);

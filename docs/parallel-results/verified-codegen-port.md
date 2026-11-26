@@ -410,12 +410,27 @@ where the pass runs on the program the lowering reads.
 **Rust lines deleted:** 0. Rust's `VerifiedBuild` pass stays as the
 fallback until the retirement.
 
+## Part 4d-4: coverage inventory rendering
+
+The Vesper renderer takes sorted function coverage records and a dictionary
+of refusal details. It counts and sorts the refusals, renders the summary,
+and writes each function's own refusals and refused callees. Rust still
+collects those records. `VESPER_HYBRID_VERIFIED_COVERAGE=1` opts into the
+renderer with the hybrid's `all` swap set.
+
+| Check | Result |
+|---|---|
+| Complete listings for the Stage 1, parser and checker units, an empty report, and a mixed report with repeated UTF-8 details | **0 of 5 differ** |
+| Release ABBA, input encoding through decoded text, 30 rounds, `RUSTFLAGS="-C target-cpu=native"` | **0.347x median**, 95% CI **0.338x–0.356x** |
+
+**Rust lines deleted:** 0.
+
 ## Left
 
 - Optional: compare the per-arch `encoding_listing` text.
-- Part 4d-4: `coverage`, then the swap into `bootstrap/stage1.rs` with
-  `bootstrap/stage1.lock` reproduced, and the Rust deleted at the
-  retirement.
+- Part 4d-4: coverage refusal collection, then the swap into
+  `bootstrap/stage1.rs` with `bootstrap/stage1.lock` reproduced, and the
+  Rust deleted at the retirement.
 
 ## The VerifiedBuild driver step reports code generator errors (#2197)
 

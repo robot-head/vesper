@@ -458,7 +458,8 @@ pub fn decode_delta(in bytes: Slice[u8], max_shards: u64) -> Result[ArenaDelta, 
         || byte_at(in bytes, 4) != 78
         || byte_at(in bytes, 5) != 65
         || byte_at(in bytes, 6) != 0
-        || byte_at(in bytes, 7) != 2 {
+        || byte_at(in bytes, 7) != 2
+    {
         return Result::Err(6);
     }
     let body_len = wrapping_sub(bytes.len(), digest_len);

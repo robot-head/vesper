@@ -104,7 +104,8 @@ pub fn fr_allowed(ty: u64, pt: PktType) -> bool {
         || ty == T_RESET_STREAM
         || ty == T_STOP_SENDING
         || ty == T_CONNECTION_CLOSE_APP
-        || ty >= T_STREAM && ty <= T_STREAMS_BLOCKED_UNI {
+        || ty >= T_STREAM && ty <= T_STREAMS_BLOCKED_UNI
+    {
         zero_rtt || one_rtt
     } else {
         false
@@ -263,7 +264,8 @@ pub fn fr_parse_at(in buf: Slice[u8], at: u64, pt: PktType) -> FrameAt eff [Fail
     if ty >= T_MAX_STREAMS_BIDI
         && ty <= T_STREAMS_BLOCKED_UNI
         && ty != T_DATA_BLOCKED
-        && ty != T_STREAM_DATA_BLOCKED {
+        && ty != T_STREAM_DATA_BLOCKED
+    {
         let (n, p1) = vi(in buf, p0, ty);
         if n > max_stream_count() {
             malformed(ty);
@@ -461,9 +463,8 @@ pub fn fr_check_ranges(in ranges: Slice[AckRange], ack_delay: u64) eff [Fail[Fra
             malformed(T_ACK);
         }
         if i > 0
-            && (
-                r.largest > wrapping_sub(U64_MAX, 2) || wrapping_add(r.largest, 2) > prev_smallest
-            ) {
+            && (r.largest > wrapping_sub(U64_MAX, 2) || wrapping_add(r.largest, 2) > prev_smallest)
+        {
             malformed(T_ACK);
         }
         prev_smallest = r.smallest;

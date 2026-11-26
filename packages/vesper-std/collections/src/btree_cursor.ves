@@ -278,7 +278,8 @@ test {
             let position = wrapping_add(i, 1);
             let value = wrapping_add(key, 100);
             if keys.try_get(position) != Option::Some(key)
-                || values.try_get(position) != Option::Some(value) {
+                || values.try_get(position) != Option::Some(value)
+            {
                 return false;
             }
         }

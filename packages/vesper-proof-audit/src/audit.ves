@@ -751,7 +751,8 @@ fn report_new() -> Report {
 pub fn forbidden_axiom(in name: Slice[u8]) -> bool {
     if same_str(in name, in "sorryAx")
         || same_str(in name, in "Lean.ofReduceBool")
-        || same_str(in name, in "Lean.trustCompiler") {
+        || same_str(in name, in "Lean.trustCompiler")
+    {
         return true;
     }
     let mut part: u64 = 0;

@@ -423,7 +423,8 @@ pub fn parameters(in w: Slice[u64], inout r: R) -> u64 {
         if tok(in w, index, Token::Kind) != Tk::Ident
             || origin_rank(in w, tok(in w, index, Token::Origin)) != 0
             || tok(in w, index, Token::HasClaim) != 0
-            || !distinct {
+            || !distinct
+        {
             raise(inout r, Code::Parameter, index, 1, 0, 0);
             return ctx_len;
         }
@@ -566,7 +567,8 @@ fn path_spells(
         if i > 0 {
             if wrapping_add(k, SEPARATOR_LEN) > len
                 || byte(in names, wrapping_add(start, k)) != COLON
-                || byte(in names, wrapping_add(start, wrapping_add(k, 1))) != COLON {
+                || byte(in names, wrapping_add(start, wrapping_add(k, 1))) != COLON
+            {
                 return false;
             }
             k = wrapping_add(k, SEPARATOR_LEN);
@@ -579,7 +581,8 @@ fn path_spells(
         }
         for b in 0..tl {
             if byte(in text, wrapping_add(ts, b))
-                != byte(in names, wrapping_add(start, wrapping_add(k, b))) {
+                != byte(in names, wrapping_add(start, wrapping_add(k, b)))
+            {
                 return false;
             }
         }
@@ -771,7 +774,8 @@ fn path(
             ff,
             fl
         )
-            || tok(in w, t, Token::Origin) != fo {
+            || tok(in w, t, Token::Origin) != fo
+        {
             raise(inout r, Code::MixedPath, t, 0, 0, 0);
             return none;
         }

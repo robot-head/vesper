@@ -1361,7 +1361,8 @@ fn live(inout res: ChunkSeq[u64], in o: Ow, f: u64, at: u64) {
         let r = resolve(in o, f, g32(in o.b_name, b), at);
         if r == NONE64
             || g64(in o.b_os, r) != g64(in o.b_os, b)
-            || g64(in o.b_oe, r) != g64(in o.b_oe, b) {
+            || g64(in o.b_oe, r) != g64(in o.b_oe, b)
+        {
             continue;
         }
         res.push(b);
@@ -1794,7 +1795,8 @@ fn signature(
             break;
         }
         if byte(in bytes, wrapping_add(off, i)) == 58
-            && byte(in bytes, wrapping_add(off, inc(i))) == 58 {
+            && byte(in bytes, wrapping_add(off, inc(i))) == 58
+        {
             from = wrapping_add(i, 2);
             i = wrapping_add(i, 2);
         } else {

@@ -874,7 +874,8 @@ fn strtab_write(inout t: Strtab) -> ChunkSeq[u8] {
         if suffix {
             for k in 0..len {
                 if u8_at(in t.bytes, wrapping_add(a, k))
-                    != u8_at(in t.bytes, wrapping_add(wrapping_sub(prev_b, len), k)) {
+                    != u8_at(in t.bytes, wrapping_add(wrapping_sub(prev_b, len), k))
+                {
                     suffix = false;
                 }
             }

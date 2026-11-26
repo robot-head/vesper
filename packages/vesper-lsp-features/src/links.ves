@@ -198,7 +198,8 @@ pub fn has_self_segment(in b: Slice[u8], s: u64, e: u64) -> bool {
                 && byte(in b, seg) == 83
                 && byte(in b, wrapping_add(seg, 1)) == 101
                 && byte(in b, wrapping_add(seg, 2)) == 108
-                && byte(in b, wrapping_add(seg, 3)) == 102 {
+                && byte(in b, wrapping_add(seg, 3)) == 102
+            {
                 return true;
             }
             if i >= e {
@@ -256,7 +257,8 @@ pub fn link_inventory(
         };
         if !local_path(in pb, s, e)
             || segments(in pb, s, e) != required
-            || has_self_segment(in pb, s, e) {
+            || has_self_segment(in pb, s, e)
+        {
             return link_fail(inout k, 3);
         }
         for j in 0..i {

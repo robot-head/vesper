@@ -129,7 +129,8 @@ fn path_head(in a: Ast, sym: u32) -> bool {
             break;
         }
         if a.names.text_byte(i) == Option::Some(58)
-            && a.names.text_byte(wrapping_add(i, 1)) == Option::Some(58) {
+            && a.names.text_byte(wrapping_add(i, 1)) == Option::Some(58)
+        {
             end = i;
             break;
         }
@@ -222,7 +223,8 @@ fn pattern_mentions(m: u8, in a: Ast, p: u32) -> bool {
         false
     } else if n.kind == 5 {
         if (m == 1 && (is(in a, n.a, "Box") || is(in a, n.a, "Box::Box")))
-            || (m == 2 && path_head(in a, n.a)) {
+            || (m == 2 && path_head(in a, n.a))
+        {
             return true;
         }
         let pairs = list_len(in a, n.b) / 2;
@@ -317,7 +319,8 @@ fn expr_uses(m: u8, in a: Ast, e: u32) -> bool {
             if s.kind == 1 {
                 if pattern_mentions(m, in a, s.pat)
                     || type_mentions(m, in a, s.ty)
-                    || expr_uses(m, in a, s.value) {
+                    || expr_uses(m, in a, s.value)
+                {
                     return true;
                 }
             } else if expr_uses(m, in a, s.value) {
@@ -358,7 +361,8 @@ fn expr_uses(m: u8, in a: Ast, e: u32) -> bool {
         params_mention(m, in a, x.a) || type_mentions(m, in a, x.c) || expr_uses(m, in a, x.e)
     } else if k == 16 {
         if x.b != none()
-            && ((m == 1 && pattern_mentions(m, in a, x.b)) || expr_uses(m, in a, x.c)) {
+            && ((m == 1 && pattern_mentions(m, in a, x.b)) || expr_uses(m, in a, x.c))
+        {
             return true;
         }
         if expr_uses(m, in a, x.d) {

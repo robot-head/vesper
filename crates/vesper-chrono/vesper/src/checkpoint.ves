@@ -262,7 +262,8 @@ pub fn decode_checkpoint(
         || byte_at(in bytes, 4) != 80
         || byte_at(in bytes, 5) != 84
         || byte_at(in bytes, 6) != 0
-        || byte_at(in bytes, 7) != 1 {
+        || byte_at(in bytes, 7) != 1
+    {
         return Result::Err(2);
     }
     let body_len = wrapping_sub(bytes.len(), 32);

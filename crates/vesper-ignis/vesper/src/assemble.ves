@@ -386,7 +386,8 @@ pub fn graph_plan(in g: Graph, split_barriers: bool) -> PlanOut {
         match g.explicit.try_get(e) {
             Option::Some(x) => {
                 if get_pass(in g, widen_u64(x.before)).queue
-                    != get_pass(in g, widen_u64(x.after)).queue {
+                    != get_pass(in g, widen_u64(x.after)).queue
+                {
                     pl.cross.push(Pair { key: x.after, value: x.before });
                 }
             },

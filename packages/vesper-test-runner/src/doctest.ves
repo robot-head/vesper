@@ -132,7 +132,8 @@ pub fn preflight(in b: Slice[u8]) -> ChunkSeq[u64] {
                 is_item_start(k)
                     || k == k_lower()
                         && is_contextual_item(in src, w32(in t.start, i), token_end(in t, i))
-            ) {
+            )
+        {
             top_item = true;
         }
         let mut completed_item = false;
@@ -538,7 +539,8 @@ fn part(in src: Slice[u8], s: u64, e: u64, inout a: Attrs, inout msg: ChunkSeq[u
     }
     if sub(e, s) >= MIN_SIM_BYTES
         && starts_with(in src, s, e, in "sim(")
-        && byte(in src, sub(e, 1)) == CLOSE_PAREN {
+        && byte(in src, sub(e, 1)) == CLOSE_PAREN
+    {
         if a.has_sim {
             msg.clear();
             msg.extend(in "duplicate sim doctest attribute".as_bytes());

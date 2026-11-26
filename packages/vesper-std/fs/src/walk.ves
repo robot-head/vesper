@@ -90,7 +90,8 @@ fn list_into(in dir: Slice[u8], in prefix: Slice[u8], inout out: Entries) eff [
 ] {
     let mut err: u64 = 0;
     if os_list(in dir, in prefix, inout out.bytes, inout out.ends, inout out.kinds, inout err)
-        != 0 {
+        != 0
+    {
         raise_io(err)
     }
 }

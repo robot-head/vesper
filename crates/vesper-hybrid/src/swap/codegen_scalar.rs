@@ -20,6 +20,9 @@ static SCALAR_DECLINED: AtomicU64 = AtomicU64::new(0);
 static BODY_CALLS: AtomicU64 = AtomicU64::new(0);
 static BODY_DECLINED: AtomicU64 = AtomicU64::new(0);
 
+/// A hook's answer when it emitted the request (`HANDLED` in
+/// @vesper/codegen-scalar-emit).
+const HANDLED: u64 = 1;
 /// `body`'s answer to words that are not a body plan.
 const BODY_ERROR: u64 = 2;
 
@@ -166,7 +169,7 @@ fn vesper_scalar(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool, 
             "codegen (scalar request {request}) kept a lent handle"
         ));
     }
-    if answer == 1 {
+    if answer == HANDLED {
         SCALAR_CALLS.fetch_add(1, Relaxed);
         lent.results.extend(crossing.results);
         Ok(true)
@@ -278,7 +281,7 @@ fn vesper_body(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool, St
         return Err(format!("codegen (body of {function}) kept a lent handle"));
     }
     match answer {
-        1 => {
+        HANDLED => {
             BODY_CALLS.fetch_add(1, Relaxed);
             Ok(true)
         }
