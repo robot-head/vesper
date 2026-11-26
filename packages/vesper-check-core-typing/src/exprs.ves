@@ -28,8 +28,8 @@ use self::relations::{
 };
 use self::patterns::{Pats, arms_cover, irrefutable, pats_new};
 use self::methods::{
-    inherent_index, is_str, is_string, peek_type, receiver_type, string_comparison,
-    string_literal, string_method, text_operand
+    inherent_index, is_qualified, is_str, is_string, peek_type, receiver_type, seq_method, seq_new,
+    string_comparison, string_literal, string_method, text_operand
 };
 
 const NONE32: u32 = 4294967295;
@@ -637,8 +637,8 @@ pub fn error(inout ck: Ck, in code: Str, start: u64, end: u64) {
     ck.out.push(10);
 }
 
-// Whether `ty` belongs to another lane's rules (sequences, vectors,
-// boxes, regions, atomics, `f32`, function types, effect rows).
+// Whether `ty` belongs to another lane's rules (tiled sequences,
+// vectors, boxes, regions, atomics, `f32`, function types, effect rows).
 fn foreign(in ck: Ck, ty: u32) -> bool {
     let node = ck.ctx.types.node(ty);
     if node.kind == TyKind::Fn || node.kind == TyKind::Row {
@@ -647,9 +647,7 @@ fn foreign(in ck: Ck, ty: u32) -> bool {
     if node.kind == TyKind::Named {
         let known = ck.ctx.world.k;
         let name = node.name;
-        if name == known.chunk_seq
-            || name == known.slice
-            || name == known.tiled_seq
+        if name == known.tiled_seq
             || name == known.vec
             || name == known.mask
             || name == known.box_
@@ -671,7 +669,7 @@ fn foreign(in ck: Ck, ty: u32) -> bool {
     false
 }
 
-fn note(inout ck: Ck, ty: u32) {
+pub fn note(inout ck: Ck, ty: u32) {
     if foreign(in ck, ty) {
         ck.skip = true;
     }
@@ -682,7 +680,7 @@ pub fn record(inout ck: Ck, e: u32, ty: u32) {
     let ok = ck.ex_types.try_set(w(e), ty);
 }
 
-fn mode(inout ck: Ck, ty: u32) -> u8 {
+pub fn mode(inout ck: Ck, ty: u32) -> u8 {
     mode_of(inout ck.ctx.types, in ck.ctx.names, in ck.ctx.world, ty, in ck.bounds)
 }
 
@@ -1658,6 +1656,12 @@ fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
         return ctor_ty;
     }
     let callee_index = fn_index(in ck, callee.x);
+    if callee_index == NONE32 && is_qualified(in ck, callee.x, "ChunkSeq::new") {
+        return seq_new(inout ck, ex, false, expected);
+    }
+    if callee_index == NONE32 && is_qualified(in ck, callee.x, "ChunkSeq::with_capacity") {
+        return seq_new(inout ck, ex, true, expected);
+    }
     if callee_index == NONE32 {
         // Intrinsics, effect operations and trait calls: not ported yet.
         ck.skip = true;
@@ -1693,6 +1697,13 @@ fn method_call(inout ck: Ck, ex: Ex, callee: Ex, expected: u32) -> u32 {
     }
     if text.handled {
         return text.ty;
+    }
+    let elements = seq_method(inout ck, ex, callee);
+    if ck.skip {
+        return hole;
+    }
+    if elements.handled {
+        return elements.ty;
     }
     let peeked = peek_type(inout ck, callee.x);
     let receiver_ty = if peeked == hole && root == NONE32 {

@@ -10,9 +10,9 @@
 // never raises.
 
 use @vesper/check-data::util::{add, u32_at, w};
-use @vesper/check-data::types::{default_type, substitute, vars_new, TyKind};
+use @vesper/check-data::types::{default_type, substitute, vars_new, TyKind, TyMode};
 use self::exprs::{
-    Ck, Ex, actual_arg, binding, error, expect_type, expr, expr_expected, field_path, fn_index,
+    Ck, Ex, actual_arg, mode, note, binding, error, expect_type, expr, expr_expected, field_path, fn_index,
     fn_generics, is_named, lookup, named, place_of, record, constrain_literals
 };
 use self::relations::{infer, mk_lit};
@@ -21,6 +21,7 @@ use self::ints::{Lit};
 const NONE32: u32 = 4294967295;
 
 // Expression kinds (keep equal to exprs.ves).
+const E_OTHER: u8 = 0;
 const E_INT: u8 = 1;
 const E_STRING: u8 = 4;
 const E_NAME: u8 = 5;
@@ -42,6 +43,19 @@ const OP_PUSH_STR: u8 = 6;
 const OP_PUSH_CHAR: u8 = 7;
 const OP_CLEAR: u8 = 8;
 const OP_RESERVE: u8 = 9;
+
+// The sequence operations ported here (`seq::SeqOp`).
+const SEQ_LEN: u8 = 20;
+const SEQ_PUSH: u8 = 21;
+const SEQ_POP: u8 = 22;
+const SEQ_GET: u8 = 23;
+const SEQ_SET: u8 = 24;
+const SEQ_TRY_GET: u8 = 25;
+const SEQ_LAST: u8 = 26;
+const SEQ_TRY_SET: u8 = 27;
+const SEQ_CLEAR: u8 = 28;
+const SEQ_TRUNCATE: u8 = 29;
+const SEQ_RESERVE: u8 = 30;
 
 // What a method call arm did: not this arm's call, or typed with a type.
 pub copy struct Typed {
@@ -396,4 +410,267 @@ pub fn string_method(inout ck: Ck, ex: Ex, callee: Ex) -> Typed {
         ck.ctx.types.unit
     };
     typed_as(result)
+}
+
+// ----- sequences -------------------------------------------------------------
+
+// `seq::is_seq_type` and `seq::is_slice_type`.
+fn is_seq(in ck: Ck, ty: u32) -> bool {
+    let node = ck.ctx.types.node(ty);
+    node.kind == TyKind::Named && node.name == ck.ctx.world.k.chunk_seq && node.n == 1
+}
+
+fn is_slice(in ck: Ck, ty: u32) -> bool {
+    let node = ck.ctx.types.node(ty);
+    node.kind == TyKind::Named && node.name == ck.ctx.world.k.slice && node.n == 1
+}
+
+pub fn is_seq_or_slice(in ck: Ck, ty: u32) -> bool {
+    is_seq(in ck, ty) || is_slice(in ck, ty)
+}
+
+// The element type of a `ChunkSeq[T]` or `Slice[T]`.
+fn seq_elem(in ck: Ck, ty: u32) -> u32 {
+    ck.ctx.types.arg(ty, 0)
+}
+
+fn option_of(inout ck: Ck, ty: u32) -> u32 {
+    let option_sym = ck.ctx.names.intern(in "Option".as_bytes());
+    let mut targs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    targs.push(ty);
+    ck.ctx.types.named(option_sym, in targs)
+}
+
+// `seq::resolve` for a `ChunkSeq` or `Slice` receiver, restricted to the
+// operations ported here; OP_NONE for the others.
+fn seq_resolve(in ck: Ck, method: u32, seq: bool) -> u8 {
+    if is_method(in ck, method, "len") {
+        return SEQ_LEN;
+    }
+    if is_method(in ck, method, "get") {
+        return SEQ_GET;
+    }
+    if is_method(in ck, method, "set") {
+        return SEQ_SET;
+    }
+    if is_method(in ck, method, "try_get") {
+        return SEQ_TRY_GET;
+    }
+    if is_method(in ck, method, "last") {
+        return SEQ_LAST;
+    }
+    if is_method(in ck, method, "try_set") {
+        return SEQ_TRY_SET;
+    }
+    if !seq {
+        return OP_NONE;
+    }
+    if is_method(in ck, method, "push") {
+        SEQ_PUSH
+    } else if is_method(in ck, method, "pop") {
+        SEQ_POP
+    } else if is_method(in ck, method, "clear") {
+        SEQ_CLEAR
+    } else if is_method(in ck, method, "truncate") {
+        SEQ_TRUNCATE
+    } else if is_method(in ck, method, "reserve") {
+        SEQ_RESERVE
+    } else {
+        OP_NONE
+    }
+}
+
+fn seq_arity(op: u8) -> u32 {
+    if op == SEQ_LEN || op == SEQ_POP || op == SEQ_LAST || op == SEQ_CLEAR {
+        0
+    } else if op == SEQ_SET || op == SEQ_TRY_SET {
+        2
+    } else {
+        1
+    }
+}
+
+// `SeqOp::receiver_pass` is `inout` for these.
+fn seq_updates(op: u8) -> bool {
+    op == SEQ_PUSH
+        || op == SEQ_POP
+        || op == SEQ_SET
+        || op == SEQ_TRY_SET
+        || op == SEQ_CLEAR
+        || op == SEQ_TRUNCATE
+        || op == SEQ_RESERVE
+}
+
+// Argument 0 is an index (or a length) of type `u64`.
+fn seq_index_arg(op: u8) -> bool {
+    op == SEQ_GET
+        || op == SEQ_SET
+        || op == SEQ_TRY_GET
+        || op == SEQ_TRY_SET
+        || op == SEQ_TRUNCATE
+        || op == SEQ_RESERVE
+}
+
+// Whether `e` is written as a view (`s.as_slice()`, `s.as_bytes()`,
+// `s[a..b]`): a view receiver, lane 9's.
+fn view_form(in ck: Ck, e: u32) -> bool {
+    let ex = ck.ex(e);
+    if ex.kind == E_OTHER {
+        return true;
+    }
+    if ex.kind != E_CALL {
+        return false;
+    }
+    let callee = ck.ex(ex.x);
+    callee.kind == E_FIELD
+        && (is_method(in ck, callee.y, "as_slice")
+            || is_method(in ck, callee.y, "as_slice_mut")
+            || is_method(in ck, callee.y, "as_bytes"))
+}
+
+// `Checker::seq_method_call`: a method on a `ChunkSeq[T]` or `Slice[T]`
+// place. The bulk, byte-scan, wide, atomic and view operations, element
+// views and the receivers written as views skip the function.
+pub fn seq_method(inout ck: Ck, ex: Ex, callee: Ex) -> Typed {
+    let hole = ck.ctx.types.infer;
+    let known = ck.ctx.world.k;
+    let base = callee.x;
+    let place = is_place(in ck, base);
+    if !place && view_form(in ck, base) {
+        ck.skip = true;
+        return typed_as(hole);
+    }
+    let base_ty = peek_type(inout ck, base);
+    if !is_seq_or_slice(in ck, base_ty) {
+        return unhandled();
+    }
+    let seq = is_seq(in ck, base_ty);
+    let op = seq_resolve(in ck, callee.y, seq);
+    if op == OP_NONE || !place {
+        ck.skip = true;
+        return typed_as(hole);
+    }
+    let elem_ty = seq_elem(in ck, base_ty);
+    let elem_known = elem_ty != hole;
+    let elem_mode = mode(inout ck, elem_ty);
+    let reads_element = op == SEQ_GET || op == SEQ_TRY_GET || op == SEQ_LAST;
+    let drops_elements =
+        op == SEQ_SET || op == SEQ_TRY_SET || op == SEQ_CLEAR || op == SEQ_TRUNCATE;
+    if elem_known
+        && ((reads_element && elem_mode != TyMode::Copy)
+            || (drops_elements && elem_mode == TyMode::Linear))
+    {
+        // Element views (`match s.try_get(i)`) and E1522/E1523.
+        ck.skip = true;
+        return typed_as(hole);
+    }
+    if ex.m != 0 {
+        error(inout ck, "E0207", ex.start, ex.end);
+    }
+    let arity = seq_arity(op);
+    if ex.n != arity {
+        error(inout ck, "E0207", ex.start, ex.end);
+    }
+    // `seq_receiver`: an update borrows the place `inout` and records its
+    // type; a read checks the receiver.
+    if seq_updates(op) {
+        record(inout ck, base, base_ty);
+    } else {
+        expr(inout ck, base);
+    }
+    if ck.skip {
+        return typed_as(hole);
+    }
+    let u64_ty = named(inout ck, known.u64_);
+    for i in 0..w(ex.n) {
+        let arg = actual_arg(in ck, ex, i);
+        let arg_ex = ck.ex(arg.expr);
+        if i == 0 && seq_index_arg(op) {
+            if arg.explicit && arg.pass != P_IN {
+                error(inout ck, "E0308", arg_ex.start, arg_ex.end);
+            }
+            let ty = expr_expected(inout ck, arg.expr, u64_ty);
+            if !ck.skip {
+                expect_type(inout ck, u64_ty, ty, arg_ex.start, arg_ex.end);
+            }
+        } else if i < w(arity) {
+            let ty = expr_expected(inout ck, arg.expr, elem_ty);
+            if !ck.skip {
+                expect_type(inout ck, elem_ty, ty, arg_ex.start, arg_ex.end);
+            }
+        } else {
+            expr(inout ck, arg.expr);
+        }
+        if ck.skip {
+            return typed_as(hole);
+        }
+    }
+    // Fallible operations raise `IndexOutOfBounds` (lane 8's effects).
+    let result = if op == SEQ_LEN {
+        u64_ty
+    } else if op == SEQ_POP || op == SEQ_TRY_GET || op == SEQ_LAST {
+        option_of(inout ck, elem_ty)
+    } else if op == SEQ_TRY_SET {
+        named(inout ck, known.bool_)
+    } else if op == SEQ_GET {
+        elem_ty
+    } else {
+        ck.ctx.types.unit
+    };
+    typed_as(result)
+}
+
+// `Checker::seq_call` for `ChunkSeq::new` and `ChunkSeq::with_capacity`
+// (`capacity`), called when the world has no function of that name.
+pub fn seq_new(inout ck: Ck, ex: Ex, capacity: bool, expected: u32) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let known = ck.ctx.world.k;
+    let arity: u32 = if capacity { 1 } else { 0 };
+    if ex.n != arity {
+        error(inout ck, "E0207", ex.start, ex.end);
+    }
+    let u64_ty = named(inout ck, known.u64_);
+    for i in 0..w(ex.n) {
+        let arg = actual_arg(in ck, ex, i);
+        let arg_ex = ck.ex(arg.expr);
+        if i < w(arity) {
+            if arg.explicit && arg.pass != P_IN {
+                error(inout ck, "E0308", arg_ex.start, arg_ex.end);
+            }
+            let ty = expr_expected(inout ck, arg.expr, u64_ty);
+            if !ck.skip {
+                expect_type(inout ck, u64_ty, ty, arg_ex.start, arg_ex.end);
+            }
+        } else {
+            expr(inout ck, arg.expr);
+        }
+        if ck.skip {
+            return hole;
+        }
+    }
+    let elem_ty = if ex.m == 1 {
+        let targ = u32_at(in ck.targs, w(ex.b));
+        note(inout ck, targ);
+        targ
+    } else if ex.m == 0 && is_seq(in ck, expected) {
+        seq_elem(in ck, expected)
+    } else if ex.m == 0 {
+        error(inout ck, "E0208", ex.start, ex.end);
+        hole
+    } else {
+        error(inout ck, "E0205", ex.start, ex.end);
+        hole
+    };
+    if ck.skip {
+        return hole;
+    }
+    let defaulted = default_type(inout ck.ctx.types, elem_ty);
+    let mut targs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    targs.push(defaulted);
+    ck.ctx.types.named(known.chunk_seq, in targs)
+}
+
+// Whether the name symbol `name` is `text`.
+pub fn is_qualified(in ck: Ck, name: u32, in text: Str) -> bool {
+    is_method(in ck, name, text)
 }
