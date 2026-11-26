@@ -46,6 +46,11 @@ pub const INST_BIND: u64 = 3;
 pub const INST_WRITE: u64 = 4;
 pub const INST_CALL: u64 = 5;
 
+// A call's operands (place-ir `operands`): the callee, the argument count,
+// then each argument's pass, value, place root and place path.
+const CALL_ARGS: u64 = 2;
+const CALL_ARG_WORDS: u64 = 4;
+
 // A `Bind` of the wildcard pattern binds no local.
 pub const NO_LOCAL: u64 = 18446744073709551615;
 
@@ -372,7 +377,7 @@ impl Gen {
             extra.push(call);
             let n = self.program.op(inc(i.a));
             for k in 0..n {
-                let at = add(add(i.a, 2), wrapping_mul(k, 4));
+                let at = add(add(i.a, CALL_ARGS), wrapping_mul(k, CALL_ARG_WORDS));
                 if !self.body_operand(in h, inc(at), inout ops) {
                     return false;
                 }

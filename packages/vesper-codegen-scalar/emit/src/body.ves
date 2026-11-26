@@ -37,8 +37,7 @@ use @vesper/cranelift::{
     Block, FuncId, Ty, Value, Var, append_block_param, call_arg, call_arg_count, create_block,
     current_block, declare_var, def_var, import_function, inst_result, ins_brif0, ins_call,
     ins_f32const, ins_f64const, ins_iconst, ins_jump, ins_return, ins_trap, invalid, is_invalid,
-    seal_block, set_srcloc, switch_to_block, trap_user, ty_f32, ty_f64, ty_i64, use_var,
-    value_type
+    seal_block, set_srcloc, switch_to_block, trap_user, ty_f32, ty_f64, ty_i64, use_var, value_type
 };
 use super::{BODY_ERROR, DECLINED, HANDLED, coerce, planned};
 
