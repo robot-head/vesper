@@ -10,6 +10,7 @@ use @vesper/driver::{
     eq
 };
 use super::{
+    PrintFailed,
     arg,
     byte_at,
     print,
@@ -21,7 +22,7 @@ const ACTION_CHECK: u32 = 0;
 const ACTION_EXPAND: u32 = 1;
 const ACTION_LEAN: u32 = 2;
 
-pub fn run_forge(in args: Args) -> i64 eff [Ffi[HybridCommands]] {
+pub fn run_forge(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     let n = args_count(in args);
     let mut i: u64 = 1;
     loop {
@@ -184,7 +185,7 @@ pub fn run_forge(in args: Args) -> i64 eff [Ffi[HybridCommands]] {
     fail(in err.as_slice())
 }
 
-fn reject_config(check: bool, in message: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
+fn reject_config(check: bool, in message: Slice[u8]) -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
     if check {
         let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
         line

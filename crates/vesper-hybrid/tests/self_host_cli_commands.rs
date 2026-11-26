@@ -530,8 +530,8 @@ fn routing_matches_the_default_compiler() {
     );
 }
 
-/// The routing really runs in Vesper (it prints through the
-/// `HybridCommands` import), and the compiler's commands in the Rust CLI.
+/// The routing really runs in Vesper (the driver counts each command its
+/// Vesper layer answers), and the compiler's commands in the Rust CLI.
 #[test]
 fn routing_runs_in_vesper() {
     let hybrid = hybrid();
@@ -544,7 +544,7 @@ fn routing_runs_in_vesper() {
         let stderr = String::from_utf8_lossy(&r.output.stderr);
         stderr
             .lines()
-            .find_map(|l| l.strip_prefix("vesper-hybrid: the command layers printed "))
+            .find_map(|l| l.strip_prefix("vesper-hybrid: the command layers answered "))
             .and_then(|l| l.split(' ').next())
             .and_then(|n| n.parse().ok())
             .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"))
@@ -557,7 +557,7 @@ fn routing_runs_in_vesper() {
     assert_eq!(prints(&bare, &["semver", "--help"]), 1);
     assert_eq!(prints(&bare, &["highlight", "--help"]), 1);
     assert_eq!(prints(&bare, &["shot", "--help"]), 1);
-    // `vesper fmt` (part 2): its layer prints once, after every file.
+    // `vesper fmt` (part 2): its layer answers once, after every file.
     assert_eq!(prints(&bare, &["fmt", "--help"]), 1);
     assert_eq!(prints(&bare, &["fmt", "--bogus"]), 1);
     assert_eq!(prints(&bare, &["fmt", "input"]), 1);
@@ -1000,8 +1000,8 @@ fn ebpf_runs_in_vesper() {
     let prints: u64 = stderr
         .lines()
         .find_map(|l| {
-            l.strip_prefix("vesper-hybrid: the command layers printed ")
-                .and_then(|s| s.strip_suffix(" times from Vesper"))
+            l.strip_prefix("vesper-hybrid: the command layers answered ")
+                .and_then(|s| s.strip_suffix(" commands from Vesper"))
                 .and_then(|n| n.parse().ok())
         })
         .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"));
@@ -1114,8 +1114,8 @@ fn forge_runs_in_vesper() {
     let prints: u64 = stderr
         .lines()
         .find_map(|l| {
-            l.strip_prefix("vesper-hybrid: the command layers printed ")
-                .and_then(|s| s.strip_suffix(" times from Vesper"))
+            l.strip_prefix("vesper-hybrid: the command layers answered ")
+                .and_then(|s| s.strip_suffix(" commands from Vesper"))
                 .and_then(|n| n.parse().ok())
         })
         .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"));
@@ -1254,8 +1254,8 @@ fn graph_runs_in_vesper() {
     let prints: u64 = stderr
         .lines()
         .find_map(|l| {
-            l.strip_prefix("vesper-hybrid: the command layers printed ")
-                .and_then(|s| s.strip_suffix(" times from Vesper"))
+            l.strip_prefix("vesper-hybrid: the command layers answered ")
+                .and_then(|s| s.strip_suffix(" commands from Vesper"))
                 .and_then(|n| n.parse().ok())
         })
         .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"));
@@ -1378,8 +1378,8 @@ fn lint_runs_in_vesper() {
     let prints: u64 = stderr
         .lines()
         .find_map(|l| {
-            l.strip_prefix("vesper-hybrid: the command layers printed ")
-                .and_then(|s| s.strip_suffix(" times from Vesper"))
+            l.strip_prefix("vesper-hybrid: the command layers answered ")
+                .and_then(|s| s.strip_suffix(" commands from Vesper"))
                 .and_then(|n| n.parse().ok())
         })
         .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"));
@@ -1493,8 +1493,8 @@ fn doc_runs_in_vesper() {
     let prints: u64 = stderr
         .lines()
         .find_map(|l| {
-            l.strip_prefix("vesper-hybrid: the command layers printed ")
-                .and_then(|s| s.strip_suffix(" times from Vesper"))
+            l.strip_prefix("vesper-hybrid: the command layers answered ")
+                .and_then(|s| s.strip_suffix(" commands from Vesper"))
                 .and_then(|n| n.parse().ok())
         })
         .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"));
@@ -1593,8 +1593,8 @@ fn test_runs_in_vesper() {
     let prints: u64 = stderr
         .lines()
         .find_map(|l| {
-            l.strip_prefix("vesper-hybrid: the command layers printed ")
-                .and_then(|s| s.strip_suffix(" times from Vesper"))
+            l.strip_prefix("vesper-hybrid: the command layers answered ")
+                .and_then(|s| s.strip_suffix(" commands from Vesper"))
                 .and_then(|n| n.parse().ok())
         })
         .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"));
@@ -1689,8 +1689,8 @@ fn proof_audit_runs_in_vesper() {
     let prints: u64 = stderr
         .lines()
         .find_map(|l| {
-            l.strip_prefix("vesper-hybrid: the command layers printed ")
-                .and_then(|s| s.strip_suffix(" times from Vesper"))
+            l.strip_prefix("vesper-hybrid: the command layers answered ")
+                .and_then(|s| s.strip_suffix(" commands from Vesper"))
                 .and_then(|n| n.parse().ok())
         })
         .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"));
@@ -1786,8 +1786,8 @@ fn verify_runs_in_vesper() {
     let prints: u64 = stderr
         .lines()
         .find_map(|l| {
-            l.strip_prefix("vesper-hybrid: the command layers printed ")
-                .and_then(|s| s.strip_suffix(" times from Vesper"))
+            l.strip_prefix("vesper-hybrid: the command layers answered ")
+                .and_then(|s| s.strip_suffix(" commands from Vesper"))
                 .and_then(|n| n.parse().ok())
         })
         .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"));

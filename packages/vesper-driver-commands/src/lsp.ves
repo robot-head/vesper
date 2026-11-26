@@ -4,10 +4,11 @@ use @vesper/driver::{
     Args
 };
 use super::{
+    PrintFailed,
     fail
 };
 
-pub fn run_lsp(in _args: Args) -> i64 eff [Ffi[HybridCommands]] {
+pub fn run_lsp(in _args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     let err_len = HybridCommands::hc_lsp_serve();
     if err_len == 0 {
         return 0;

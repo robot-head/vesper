@@ -9,6 +9,8 @@ sys library StdFs (
     link = "static", name = "vesper_std_host",
     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
 ) {
+    // The architecture: 1 x86_64, 2 aarch64, 3 wasm32 (`arch` in src).
+    const ARCH: u32 = 3;
     linear extern type FsFile;
     linear extern type FsDir;
     wire struct FsMeta { size: u64, mtime_s: i64, mtime_ns: u32, kind: u32 }
