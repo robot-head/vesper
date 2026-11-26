@@ -4,7 +4,6 @@ test {
         min,
         max,
         clamp,
-        swap,
         ordering_sign,
         reverse,
         then_cmp
@@ -57,7 +56,7 @@ test {
         r = check(clamp(2, 4, 1) == 4, 6, r);
         let mut a: u64 = 1;
         let mut b: u64 = 2;
-        swap(inout a, inout b);
+        swap_places inout a with inout b;
         r = check(a == 2 && b == 1, 7, r);
         r = check(ordering_sign(reverse(3 .cmp(4))) == 1, 8, r);
         r = check(ordering_sign(reverse(4 .cmp(4))) == 0, 9, r);
