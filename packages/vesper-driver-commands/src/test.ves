@@ -18,8 +18,8 @@ fn any_flag(in args: Args, n: u64, in flag: Str) -> bool {
         if i >= n {
             return false;
         }
-        let a_buf = arg(in args, i);
-        if eq(in a_buf.as_slice(), in flag) {
+        let arg_buf = arg(in args, i);
+        if eq(in arg_buf.as_slice(), in flag) {
             return true;
         }
         i = wrapping_add(i, 1);
@@ -33,9 +33,9 @@ fn any_help(in args: Args, n: u64) -> bool {
         if i >= n {
             return false;
         }
-        let a_buf = arg(in args, i);
-        let a = a_buf.as_slice();
-        if eq(in a, in "--help") || eq(in a, in "-h") {
+        let arg_buf = arg(in args, i);
+        let arg_text = arg_buf.as_slice();
+        if eq(in arg_text, in "--help") || eq(in arg_text, in "-h") {
             return true;
         }
         i = wrapping_add(i, 1);
@@ -68,8 +68,8 @@ fn pack_args(in args: Args, n: u64) -> ChunkSeq[u8] {
         if i >= n {
             break;
         }
-        let a_buf = arg(in args, i);
-        packed.extend(in a_buf.as_slice());
+        let arg_buf = arg(in args, i);
+        packed.extend(in arg_buf.as_slice());
         packed.push(0);
         i = wrapping_add(i, 1);
     }
@@ -103,51 +103,51 @@ fn run_packed(
 fn parse_u64(in text: Slice[u8], inout out: u64) -> bool {
     let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
     for i in 0..text.len() {
-        let b = byte_at(in text, i);
-        if b != 95 {
-            digits.push(b);
+        let byte = byte_at(in text, i);
+        if byte != 95 {
+            digits.push(byte);
         }
     }
-    let d = digits.as_slice();
-    if d.len() == 0 {
+    let cleaned = digits.as_slice();
+    if cleaned.len() == 0 {
         return false;
     }
     let mut start: u64 = 0;
     let mut radix: u64 = 10;
-    if d.len() >= 2 && byte_at(in d, 0) == 48 && byte_at(in d, 1) == 120 {
+    if cleaned.len() >= 2 && byte_at(in cleaned, 0) == 48 && byte_at(in cleaned, 1) == 120 {
         start = 2;
         radix = 16;
-        if d.len() == 2 {
+        if cleaned.len() == 2 {
             return false;
         }
     }
     let max_div: u64 = 18446744073709551615 / radix;
     let max_rem: u64 = 18446744073709551615 % radix;
-    let mut val: u64 = 0;
+    let mut value: u64 = 0;
     let mut idx = start;
     loop {
-        if idx >= d.len() {
+        if idx >= cleaned.len() {
             break;
         }
-        let c = byte_at(in d, idx);
+        let digit_byte = byte_at(in cleaned, idx);
         let mut digit: u64 = 99;
-        if c >= 48 && c <= 57 {
-            digit = widen_u64(wrapping_sub(c, 48));
-        } else if radix == 16 && c >= 97 && c <= 102 {
-            digit = widen_u64(wrapping_add(wrapping_sub(c, 97), 10));
-        } else if radix == 16 && c >= 65 && c <= 70 {
-            digit = widen_u64(wrapping_add(wrapping_sub(c, 65), 10));
+        if digit_byte >= 48 && digit_byte <= 57 {
+            digit = widen_u64(wrapping_sub(digit_byte, 48));
+        } else if radix == 16 && digit_byte >= 97 && digit_byte <= 102 {
+            digit = widen_u64(wrapping_add(wrapping_sub(digit_byte, 97), 10));
+        } else if radix == 16 && digit_byte >= 65 && digit_byte <= 70 {
+            digit = widen_u64(wrapping_add(wrapping_sub(digit_byte, 65), 10));
         }
         if digit >= radix {
             return false;
         }
-        if val > max_div || (val == max_div && digit > max_rem) {
+        if value > max_div || (value == max_div && digit > max_rem) {
             return false;
         }
-        val = wrapping_add(wrapping_mul(val, radix), digit);
+        value = wrapping_add(wrapping_mul(value, radix), digit);
         idx = wrapping_add(idx, 1);
     }
-    out = val;
+    out = value;
     true
 }
 
@@ -164,13 +164,13 @@ fn run_doctest_cli(
         if i >= n {
             break;
         }
-        let a_buf = arg(in args, i);
-        let a = a_buf.as_slice();
-        if eq(in a, in "--doc") && !doc {
+        let arg_buf = arg(in args, i);
+        let arg_text = arg_buf.as_slice();
+        if eq(in arg_text, in "--doc") && !doc {
             doc = true;
-        } else if eq(in a, in "--json") && !json {
+        } else if eq(in arg_text, in "--json") && !json {
             json = true;
-        } else if (a.len() == 0 || byte_at(in a, 0) != 45) && !has_file {
+        } else if (arg_text.len() == 0 || byte_at(in arg_text, 0) != 45) && !has_file {
             has_file = true;
         } else {
             return fail_usage(has_json);
@@ -209,43 +209,43 @@ pub fn run_test(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail
         if i >= n {
             break;
         }
-        let a_buf = arg(in args, i);
-        let a = a_buf.as_slice();
-        if eq(in a, in "--mutate") && !mutate {
+        let arg_buf = arg(in args, i);
+        let arg_text = arg_buf.as_slice();
+        if eq(in arg_text, in "--mutate") && !mutate {
             mutate = true;
-        } else if eq(in a, in "--no-opt") && optimize {
+        } else if eq(in arg_text, in "--no-opt") && optimize {
             optimize = false;
-        } else if eq(in a, in "--mutate-dependency") && !has_mutate_dep {
+        } else if eq(in arg_text, in "--mutate-dependency") && !has_mutate_dep {
             i = wrapping_add(i, 1);
             if i >= n {
                 return fail_test(has_json, in "--mutate-dependency requires a file".as_bytes());
             }
             has_mutate_dep = true;
-        } else if eq(in a, in "--no-cache") && !no_cache {
+        } else if eq(in arg_text, in "--no-cache") && !no_cache {
             no_cache = true;
-        } else if eq(in a, in "--link-search") {
+        } else if eq(in arg_text, in "--link-search") {
             i = wrapping_add(i, 1);
             if i >= n {
                 return fail_test(has_json, in "--link-search requires a directory".as_bytes());
             }
-        } else if eq(in a, in "--json") && !json {
+        } else if eq(in arg_text, in "--json") && !json {
             json = true;
-        } else if eq(in a, in "--engines") && !has_engines {
+        } else if eq(in arg_text, in "--engines") && !has_engines {
             i = wrapping_add(i, 1);
             if i >= n {
                 return fail_test(has_json, in "--engines requires `all` or `unit`".as_bytes());
             }
-            let v_buf = arg(in args, i);
-            let v = v_buf.as_slice();
-            if eq(in v, in "all") {
+            let value_buf = arg(in args, i);
+            let engines = value_buf.as_slice();
+            if eq(in engines, in "all") {
                 engines_all = true;
-            } else if eq(in v, in "unit") {
+            } else if eq(in engines, in "unit") {
                 engines_all = false;
             } else {
                 return fail_test(has_json, in "--engines takes `all` or `unit`".as_bytes());
             }
             has_engines = true;
-        } else if eq(in a, in "--filter") {
+        } else if eq(in arg_text, in "--filter") {
             if has_filter {
                 return fail_test(has_json, in "duplicate --filter option".as_bytes());
             }
@@ -254,7 +254,7 @@ pub fn run_test(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail
                 return fail_test(has_json, in "--filter requires a pattern".as_bytes());
             }
             has_filter = true;
-        } else if eq(in a, in "--max-mutants") {
+        } else if eq(in arg_text, in "--max-mutants") {
             if has_max_mutants {
                 return fail_test(has_json, in "duplicate --max-mutants option".as_bytes());
             }
@@ -265,22 +265,22 @@ pub fn run_test(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail
                     in "--max-mutants requires a positive integer".as_bytes()
                 );
             }
-            let v_buf = arg(in args, i);
-            let mut val: u64 = 0;
-            if !parse_u64(in v_buf.as_slice(), inout val) {
+            let value_buf = arg(in args, i);
+            let mut parsed: u64 = 0;
+            if !parse_u64(in value_buf.as_slice(), inout parsed) {
                 return fail_test(
                     has_json,
                     in "--max-mutants requires a positive integer".as_bytes()
                 );
             }
-            if val == 0 || val > 2048 {
+            if parsed == 0 || parsed > 2048 {
                 return fail_test(
                     has_json,
                     in "--max-mutants must be between 1 and 2048".as_bytes()
                 );
             }
             has_max_mutants = true;
-        } else if eq(in a, in "--mutant-offset") {
+        } else if eq(in arg_text, in "--mutant-offset") {
             if has_mutant_offset {
                 return fail_test(has_json, in "duplicate --mutant-offset option".as_bytes());
             }
@@ -288,29 +288,29 @@ pub fn run_test(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail
             if i >= n {
                 return fail_test(has_json, in "--mutant-offset requires an integer".as_bytes());
             }
-            let v_buf = arg(in args, i);
-            let mut val: u64 = 0;
-            if !parse_u64(in v_buf.as_slice(), inout val) {
+            let value_buf = arg(in args, i);
+            let mut parsed: u64 = 0;
+            if !parse_u64(in value_buf.as_slice(), inout parsed) {
                 return fail_test(
                     has_json,
                     in "--mutant-offset requires a positive integer".as_bytes()
                 );
             }
             has_mutant_offset = true;
-        } else if eq(in a, in "--fuel") {
+        } else if eq(in arg_text, in "--fuel") {
             i = wrapping_add(i, 1);
             if i >= n {
                 return fail_test(has_json, in "--fuel requires a positive integer".as_bytes());
             }
-            let v_buf = arg(in args, i);
-            let mut val: u64 = 0;
-            if !parse_u64(in v_buf.as_slice(), inout val) {
+            let value_buf = arg(in args, i);
+            let mut parsed: u64 = 0;
+            if !parse_u64(in value_buf.as_slice(), inout parsed) {
                 return fail_test(has_json, in "--fuel requires a positive integer".as_bytes());
             }
-            if val == 0 {
+            if parsed == 0 {
                 return fail_test(has_json, in "--fuel must be positive".as_bytes());
             }
-        } else if (a.len() == 0 || byte_at(in a, 0) != 45) && !has_path {
+        } else if (arg_text.len() == 0 || byte_at(in arg_text, 0) != 45) && !has_path {
             has_path = true;
         } else {
             return fail_usage(has_json);

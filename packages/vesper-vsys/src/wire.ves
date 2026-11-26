@@ -30,51 +30,56 @@ pub fn endian_be() -> u8 {
 }
 
 pub copy struct WireField {
-    pub name_a: u64,
-    pub name_b: u64,
+    pub name_start: u64,
+    pub name_end: u64,
     pub kind: u8,
     pub signed: bool,
     pub bits: u8,
     pub endian: u8,
     pub count: u64,
-    pub struct_a: u64,
-    pub struct_b: u64,
-    pub s0: u64,
-    pub s1: u64,
+    pub struct_name_start: u64,
+    pub struct_name_end: u64,
+    pub span_start: u64,
+    pub span_end: u64,
 }
 
 pub copy struct WireStructDef {
-    pub name_a: u64,
-    pub name_b: u64,
-    pub f0: u64,
-    pub fn_count: u64,
+    pub name_start: u64,
+    pub name_end: u64,
+    pub field_start: u64,
+    pub field_count: u64,
     pub size: u64,
     pub alignment: u64,
-    pub s0: u64,
-    pub s1: u64,
+    pub span_start: u64,
+    pub span_end: u64,
 }
 
-fn slice_eq(in a: Slice[u8], in b: Slice[u8]) -> bool {
-    if a.len() != b.len() {
+fn slice_eq(in lhs: Slice[u8], in rhs: Slice[u8]) -> bool {
+    if lhs.len() != rhs.len() {
         return false;
     }
-    for i in 0..a.len() {
-        let xa = a.try_get(i).unwrap_or(0);
-        let xb = b.try_get(i).unwrap_or(0);
-        if xa != xb {
+    for i in 0..lhs.len() {
+        let lhs_byte = lhs.try_get(i).unwrap_or(0);
+        let rhs_byte = rhs.try_get(i).unwrap_or(0);
+        if lhs_byte != rhs_byte {
             return false;
         }
     }
     true
 }
 
-fn find_struct(in defs: Slice[WireStructDef], in arena: Slice[u8], a: u64, b: u64) -> Option[u64] {
+fn find_struct(
+    in defs: Slice[WireStructDef],
+    in arena: Slice[u8],
+    name_start: u64,
+    name_end: u64
+) -> Option[u64] {
     for i in 0..defs.len() {
-        let d = match defs.try_get(i) {
+        let def = match defs.try_get(i) {
             Option::Some(v) => v,
             Option::None => continue,
         };
-        if slice_eq(in arena[d.name_a..d.name_b], in arena[a..b]) {
+        if slice_eq(in arena[def.name_start..def.name_end], in arena[name_start..name_end]) {
             return Option::Some(i);
         }
     }
@@ -82,7 +87,7 @@ fn find_struct(in defs: Slice[WireStructDef], in arena: Slice[u8], a: u64, b: u6
 }
 
 fn visit_struct(
-    idx: u64,
+    def_index: u64,
     inout defs: ChunkSeq[WireStructDef],
     in fields: Slice[WireField],
     in arena: Slice[u8],
@@ -90,110 +95,118 @@ fn visit_struct(
     inout budget: u64
 ) -> (u64, u64) eff [Fail[VsysError]] {
     for i in 0..visiting.len() {
-        let v = visiting.try_get(i).unwrap_or(0);
-        if v == idx {
-            let d = match defs.try_get(idx) {
+        let seen = visiting.try_get(i).unwrap_or(0);
+        if seen == def_index {
+            let def = match defs.try_get(def_index) {
                 Option::Some(w) => w,
                 Option::None => return (0, 1),
             };
-            return fail_vsys(err_type(), d.s0, d.s1, 100);
+            return fail_vsys(err_type(), def.span_start, def.span_end, 100);
         }
     }
     if visiting.len() >= 128 {
-        let d = match defs.try_get(idx) {
+        let def = match defs.try_get(def_index) {
             Option::Some(w) => w,
             Option::None => return (0, 1),
         };
-        return fail_vsys(err_limit(), d.s0, d.s1, 101);
+        return fail_vsys(err_limit(), def.span_start, def.span_end, 101);
     }
-    let d = match defs.try_get(idx) {
+    let def = match defs.try_get(def_index) {
         Option::Some(w) => w,
         Option::None => return (0, 1),
     };
-    if d.alignment != 0 {
-        return (d.size, d.alignment);
+    if def.alignment != 0 {
+        return (def.size, def.alignment);
     }
-    visiting.push(idx);
+    visiting.push(def_index);
     let mut size: u64 = 0;
     let mut alignment: u64 = 1;
     let max_u64: u64 = 18446744073709551615;
-    for fi in 0..d.fn_count {
-        let fidx = wrapping_add(d.f0, fi);
-        let f = match fields.try_get(fidx) {
+    for field_pos in 0..def.field_count {
+        let field_index = wrapping_add(def.field_start, field_pos);
+        let field = match fields.try_get(field_index) {
             Option::Some(x) => x,
             Option::None => continue,
         };
         if budget == 0 {
-            return fail_vsys(err_limit(), f.s0, f.s1, 102);
+            return fail_vsys(err_limit(), field.span_start, field.span_end, 102);
         }
         budget = wrapping_sub(budget, 1);
-        if f.name_a == f.name_b {
-            return fail_vsys(err_type(), f.s0, f.s1, 103);
+        if field.name_start == field.name_end {
+            return fail_vsys(err_type(), field.span_start, field.span_end, 103);
         }
-        for prev_i in 0..fi {
-            let pf = match fields.try_get(wrapping_add(d.f0, prev_i)) {
+        for prev_pos in 0..field_pos {
+            let prev_field = match fields.try_get(wrapping_add(def.field_start, prev_pos)) {
                 Option::Some(x) => x,
                 Option::None => continue,
             };
-            if slice_eq(in arena[pf.name_a..pf.name_b], in arena[f.name_a..f.name_b]) {
-                return fail_vsys(err_duplicate(), f.s0, f.s1, 104);
+            if slice_eq(
+                in arena[prev_field.name_start..prev_field.name_end],
+                in arena[field.name_start..field.name_end]
+            ) {
+                return fail_vsys(err_duplicate(), field.span_start, field.span_end, 104);
             }
         }
-        let mut fsize: u64 = 0;
-        let mut falign: u64 = 1;
-        if f.kind == wt_int() {
-            let width = widen_u64(f.bits / 8);
-            fsize = width;
-            falign = if f.endian == endian_native() {
+        let mut field_size: u64 = 0;
+        let mut field_align: u64 = 1;
+        if field.kind == wt_int() {
+            let width = widen_u64(field.bits / 8);
+            field_size = width;
+            field_align = if field.endian == endian_native() {
                 width
             } else {
                 1
             };
-        } else if f.kind == wt_bytes() || f.kind == wt_pad() {
-            fsize = f.count;
-            falign = 1;
+        } else if field.kind == wt_bytes() || field.kind == wt_pad() {
+            field_size = field.count;
+            field_align = 1;
         } else {
-            let sub_idx = match find_struct(in defs.as_slice(), in arena, f.struct_a, f.struct_b) {
+            let sub_index = match find_struct(
+                in defs.as_slice(),
+                in arena,
+                field.struct_name_start,
+                field.struct_name_end
+            ) {
                 Option::Some(si) => si,
-                Option::None => return fail_vsys(err_type(), f.s0, f.s1, 105),
+                Option::None => return fail_vsys(err_type(), field.span_start, field.span_end, 105),
             };
-            let (ss, sa) = visit_struct(
-                sub_idx,
+            let (sub_size, sub_align) = visit_struct(
+                sub_index,
                 inout defs,
                 in fields,
                 in arena,
                 inout visiting,
                 inout budget
             );
-            fsize = ss;
-            falign = sa;
+            field_size = sub_size;
+            field_align = sub_align;
         }
-        if (size & wrapping_sub(falign, 1)) != 0 {
-            return fail_vsys(err_type(), f.s0, f.s1, 106);
+        if (size & wrapping_sub(field_align, 1)) != 0 {
+            return fail_vsys(err_type(), field.span_start, field.span_end, 106);
         }
-        if size > wrapping_sub(max_u64, fsize) {
-            return fail_vsys(err_type(), f.s0, f.s1, 107);
+        if size > wrapping_sub(max_u64, field_size) {
+            return fail_vsys(err_type(), field.span_start, field.span_end, 107);
         }
-        size = wrapping_add(size, fsize);
-        if falign > alignment {
-            alignment = falign;
+        size = wrapping_add(size, field_size);
+        if field_align > alignment {
+            alignment = field_align;
         }
     }
     if (size & wrapping_sub(alignment, 1)) != 0 {
-        return fail_vsys(err_type(), d.s0, d.s1, 108);
+        return fail_vsys(err_type(), def.span_start, def.span_end, 108);
     }
     let _ = visiting.pop();
     let updated = WireStructDef {
-        name_a: d.name_a,
-        name_b: d.name_b,
-        f0: d.f0,
-        fn_count: d.fn_count,
+        name_start: def.name_start,
+        name_end: def.name_end,
+        field_start: def.field_start,
+        field_count: def.field_count,
         size: size,
         alignment: alignment,
-        s0: d.s0,
-        s1: d.s1,
+        span_start: def.span_start,
+        span_end: def.span_end,
     };
-    defs.try_set(idx, updated);
+    defs.try_set(def_index, updated);
     (size, alignment)
 }
 

@@ -129,15 +129,23 @@ pub const CSTR_ALLOC_TRAP: u8 = 7;
 /// allocated.
 pub const MAPPING_ALLOC_TRAP: u8 = 8;
 
+/// The Linux C library's function returning the address of `errno`.
+pub(crate) const ERRNO_LOCATION_SYMBOL: &str = "__errno_location";
+/// The Darwin and FreeBSD C library's function returning the address of
+/// `errno`.
+pub(crate) const ERROR_SYMBOL: &str = "__error";
+/// The Windows function returning the calling thread's last error code.
+pub(crate) const LAST_ERROR_SYMBOL: &str = "GetLastError";
+
 /// The C function that yields the calling thread's OS error code on
 /// `triple`, and whether it returns the address of `errno` (Unix) rather
 /// than the code itself (`GetLastError` on Windows).
 pub fn os_error_symbol(triple: &target_lexicon::Triple) -> Result<(&'static str, bool), String> {
     use target_lexicon::OperatingSystem as Os;
     match triple.operating_system {
-        Os::Linux => Ok(("__errno_location", true)),
-        Os::Darwin(_) | Os::MacOSX(_) | Os::IOS(_) | Os::Freebsd => Ok(("__error", true)),
-        Os::Windows => Ok(("GetLastError", false)),
+        Os::Linux => Ok((ERRNO_LOCATION_SYMBOL, true)),
+        Os::Darwin(_) | Os::MacOSX(_) | Os::IOS(_) | Os::Freebsd => Ok((ERROR_SYMBOL, true)),
+        Os::Windows => Ok((LAST_ERROR_SYMBOL, false)),
         other => Err(format!(
             "`errno` results are not supported on {other} yet (Linux, macOS, FreeBSD and Windows are)"
         )),
@@ -357,17 +365,24 @@ pub fn effect_name(library: &str) -> String {
 pub fn isolation_symbol(library: &str) -> String {
     format!("vesper_bridge_pkru_revoke_{library}")
 }
+/// The highest x86-64 protection key (`PKRU` covers keys `0..=15`).
+const MAX_PROTECTION_KEY: u32 = 15;
+/// `PKRU` bits per protection key.
+const PKRU_BITS_PER_KEY: u32 = 2;
+/// The access- and write-disable bits of protection key 0 in `PKRU`; key
+/// `k`'s are these shifted left by `PKRU_BITS_PER_KEY * k`.
+pub(crate) const PKRU_KEY_DISABLE_BITS: u32 = 0b11;
 /// The `PKRU` access- and write-disable bits of protection key `key`
 /// (1..=15; key 0 holds the host's own stack and heap and is never revoked).
 pub fn pkru_revoke_mask(key: u32) -> Result<u32, FfiError> {
-    if !(1..=15).contains(&key) {
+    if !(1..=MAX_PROTECTION_KEY).contains(&key) {
         return Err(FfiError::new(
             FfiErrorKind::IsolationUnavailable,
-            format!("protection key {key} is not revocable (expected 1..=15)"),
+            format!("protection key {key} is not revocable (expected 1..={MAX_PROTECTION_KEY})"),
             None,
         ));
     }
-    Ok(0b11 << (2 * key))
+    Ok(PKRU_KEY_DISABLE_BITS << (PKRU_BITS_PER_KEY * key))
 }
 
 /// One checked foreign call site.
@@ -453,7 +468,7 @@ pub(crate) fn jit_symbols() -> Vec<(String, *const u8)> {
             .collect()
     });
     #[cfg(windows)]
-    out.push(("GetLastError".into(), jit_last_error as *const u8));
+    out.push((LAST_ERROR_SYMBOL.into(), jit_last_error as *const u8));
     out
 }
 struct JitGuard;

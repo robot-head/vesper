@@ -3963,20 +3963,31 @@ fn lower_profile_source(
     include_tests: bool
 ) -> L {
     let b = source.as_bytes();
-    let mut a = ast_new();
-    let s = syms_new(inout a);
-    let mut text = String::new();
     let mut d = diags_new();
     let t = lex_sugar_with_limits(in b, inout d, max_bytes, max_tok, max_diagnostics());
-    let oversized = t.rejected;
-    if !oversized {
-        text.push_str(in source);
-    }
     let p = if template {
         parse_template_tokens(in b, t, d)
     } else {
         parse_surface_tokens(in b, t, d, max_diagnostics(), hard_depth(), include_tests)
     };
+    lower_parsed(in source, p, include_tests)
+}
+
+// `lower_surface_source_limits` over a surface parse the caller already
+// ran (the sugar driver's round parse of the same source under the same
+// limits), so the source is not lexed and parsed again.
+pub fn lower_surface_parsed(in source: Str, sink p: P, include_tests: bool) -> L {
+    lower_parsed(in source, p, include_tests)
+}
+
+fn lower_parsed(in source: Str, sink p: P, include_tests: bool) -> L {
+    let mut a = ast_new();
+    let s = syms_new(inout a);
+    let mut text = String::new();
+    let oversized = p.t.rejected;
+    if !oversized {
+        text.push_str(in source);
+    }
     let mut l = L {
         p: p,
         text: text,

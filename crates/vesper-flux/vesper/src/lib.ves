@@ -457,6 +457,39 @@ pub fn zs_filter(
     out
 }
 
+// Project each input row to a fixed-width row and give it a signed weight.
+// The column expression runs once per output column and the weight once
+// per input row. Prepare each row once before either. Consolidation keeps
+// Map's work charges, row limit, ordering and cancellation semantics.
+pub sugar zset: tag emits eff [Fail] {
+    rule (
+        zset{
+            $project:block => $weight:block
+                | $row:ident in 0.. $rows:expr with $prepared:ident = $prepare:block,
+            $column:ident in 0.. $columns:expr;
+            limits $max_columns:expr,
+            $max_rows:expr;
+            inout $budget:place
+        }
+    ) => {
+        {
+            let columns: u64 = $columns;
+            check_columns(columns, $max_columns);
+            let rows: u64 = $rows;
+            let charge = wrapping_add(wrapping_add(columns, columns), 1);
+            let mut mapped = ChunkSeq::new[i64]();
+            for $row in 0..rows {
+                let $prepared = $prepare;
+                for $column in 0..columns {
+                    mapped.push($project);
+                }
+                mapped.push($weight);
+            }
+            consolidate_core(columns, in mapped.as_slice(), rows, charge, $max_rows, inout $budget)
+        }
+    }
+}
+
 // `Map`: `fields` holds a (kind, value) pair per output column; kind 0 is
 // `Column(value)`, 1 is `Constant(value)`.
 pub fn zs_map(
@@ -469,25 +502,27 @@ pub fn zs_map(
     max_rows: u64,
     inout budget: u64
 ) -> ChunkSeq[i64] eff [Fail[ZErr]] {
-    check_columns(nf, max_columns);
     let stride = wrapping_add(width, 1);
-    // The Rust loop charges nf, then 1 + nf on insertion.
-    let charge = wrapping_add(wrapping_add(nf, nf), 1);
-    let mut mapped = ChunkSeq::new[i64]();
-    for e in 0..n {
-        let at = wrapping_mul(e, stride);
-        for f in 0..nf {
+    zset{
+        {
             let fk = wrapping_add(f, f);
             let v = cell(in fields, wrapping_add(fk, 1));
             if cell(in fields, fk) == 0 {
-                mapped.push(cell(in a, wrapping_add(at, wrapping_u64(v))));
+                cell(in a, wrapping_add(at, wrapping_u64(v)))
             } else {
-                mapped.push(v);
+                v
             }
+        } => {
+            cell(in a, wrapping_add(at, width))
         }
-        mapped.push(cell(in a, wrapping_add(at, width)));
+        | e in 0..n with at = {
+            wrapping_mul(e, stride)
+        },
+        f in 0..nf;
+        limits max_columns,
+        max_rows;
+        inout budget
     }
-    consolidate_core(nf, in mapped.as_slice(), n, charge, max_rows, inout budget)
 }
 
 // `Join`: rows of a and b whose key columns are equal, concatenated, with

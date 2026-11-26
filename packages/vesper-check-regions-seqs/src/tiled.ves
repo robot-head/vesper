@@ -19,49 +19,49 @@ pub fn is_valid_width(width: u64) -> bool {
     width == 8 || width == 16 || width == 32 || width == 64
 }
 
-pub fn is_tiled_seq(in t: Types, k: Known, ty: u32) -> bool {
-    let n = t.node(ty);
-    n.kind == TyKind::Named && n.name == k.tiled_seq && (n.n == 1 || n.n == 2)
+pub fn is_tiled_seq(in types: Types, known: Known, ty: u32) -> bool {
+    let node = types.node(ty);
+    node.kind == TyKind::Named && node.name == known.tiled_seq && (node.n == 1 || node.n == 2)
 }
 
 // `seq_elem`, or NONE32.
-pub fn seq_elem(in t: Types, k: Known, ty: u32) -> u32 {
-    if is_tiled_seq(in t, k, ty) {
-        t.arg(ty, 0)
+pub fn seq_elem(in types: Types, known: Known, ty: u32) -> u32 {
+    if is_tiled_seq(in types, known, ty) {
+        types.arg(ty, 0)
     } else {
         NONE32
     }
 }
 
 // `seq_adt`: the ADT index, or NONE32.
-pub fn seq_adt(in t: Types, in wd: World, k: Known, ty: u32) -> u32 {
-    let e = seq_elem(in t, k, ty);
-    if e == NONE32 {
+pub fn seq_adt(in types: Types, in world: World, known: Known, ty: u32) -> u32 {
+    let elem = seq_elem(in types, known, ty);
+    if elem == NONE32 {
         return NONE32;
     }
-    let n = t.node(e);
-    if n.kind != TyKind::Named || n.n != 0 {
+    let node = types.node(elem);
+    if node.kind != TyKind::Named || node.n != 0 {
         return NONE32;
     }
-    let id = wd.lookup(n.name);
-    if id == NONE32 || wd.adt(id).tile == 0 {
+    let adt_id = world.lookup(node.name);
+    if adt_id == NONE32 || world.adt(adt_id).tile == 0 {
         return NONE32;
     }
-    id
+    adt_id
 }
 
 // `hot_elem_bytes`, or 0.
-pub fn hot_elem_bytes(in t: Types, k: Known, ty: u32) -> u64 {
-    let n = t.node(ty);
-    if n.kind != TyKind::Named || n.n != 0 {
+pub fn hot_elem_bytes(in types: Types, known: Known, ty: u32) -> u64 {
+    let node = types.node(ty);
+    if node.kind != TyKind::Named || node.n != 0 {
         return 0;
     }
-    let s = n.name;
-    if s == k.u8_ || s == k.bool_ {
+    let name = node.name;
+    if name == known.u8_ || name == known.bool_ {
         1
-    } else if s == k.u32_ {
+    } else if name == known.u32_ {
         4
-    } else if s == k.u64_ || s == k.i64_ || s == k.f64_ {
+    } else if name == known.u64_ || name == known.i64_ || name == known.f64_ {
         8
     } else {
         0
@@ -69,94 +69,106 @@ pub fn hot_elem_bytes(in t: Types, k: Known, ty: u32) -> u64 {
 }
 
 // `hot_vector_shape`.
-pub fn hot_vector_shape(in t: Types, k: Known, ty: u32, width: u64) -> Shape {
+pub fn hot_vector_shape(in types: Types, known: Known, ty: u32, width: u64) -> Shape {
     if width > 65535 {
         return shape_new(0, 0);
     }
-    shape_new(elem_of(in t, k, ty), width)
+    shape_new(elem_of(in types, known, ty), width)
 }
 
-fn tiled_name(in names: Names, inout d: Diags, a: u32) {
-    names.write(a, inout d.text);
+fn tiled_name(in names: Names, inout diags: Diags, name: u32) {
+    names.write(name, inout diags.text);
 }
 
 // `check_world_adts`.
-pub fn check_world_adts(in t: Types, in names: Names, in wd: World, in sg: Sigs, inout d: Diags) {
-    let k = wd.k;
-    for i in 0..wd.adts.len() {
-        let a = wd.adt(n32(i));
-        let start = sg.adt_span_start(i);
-        let stop = sg.adt_span_stop(i);
-        if a.tile != 0 {
-            let width = w(wrapping_sub(a.tile, 1));
-            if a.is_enum {
-                let c = d.open("E1501");
-                let m = d.text.len();
-                d.text.extend(in "tiled(".as_bytes());
-                push_decimal(inout d.text, width);
-                d.text.extend(in ") may only annotate a struct, not enum '".as_bytes());
-                tiled_name(in names, inout d, a.name);
-                d.text.push(39);
-                d.close(c, m, "", start, stop);
+pub fn check_world_adts(
+    in types: Types,
+    in names: Names,
+    in world: World,
+    in sigs: Sigs,
+    inout diags: Diags
+) {
+    let known = world.k;
+    for i in 0..world.adts.len() {
+        let adt = world.adt(n32(i));
+        let start = sigs.adt_span_start(i);
+        let stop = sigs.adt_span_stop(i);
+        if adt.tile != 0 {
+            let width = w(wrapping_sub(adt.tile, 1));
+            if adt.is_enum {
+                let code_start = diags.open("E1501");
+                let msg_start = diags.text.len();
+                diags.text.extend(in "tiled(".as_bytes());
+                push_decimal(inout diags.text, width);
+                diags.text.extend(in ") may only annotate a struct, not enum '".as_bytes());
+                tiled_name(in names, inout diags, adt.name);
+                diags.text.push(39);
+                diags.close(code_start, msg_start, "", start, stop);
                 continue;
             }
             if !is_valid_width(width) {
-                let c = d.open("E1501");
-                let m = d.text.len();
-                d.text.extend(in "tiled(N) struct '".as_bytes());
-                tiled_name(in names, inout d, a.name);
-                d.text.extend(in "' tile width must be 8, 16, 32, or 64, found ".as_bytes());
-                push_decimal(inout d.text, width);
-                d.close(c, m, "use tiled(8), tiled(16), tiled(32), or tiled(64)", start, stop);
+                let code_start = diags.open("E1501");
+                let msg_start = diags.text.len();
+                diags.text.extend(in "tiled(N) struct '".as_bytes());
+                tiled_name(in names, inout diags, adt.name);
+                diags.text.extend(in "' tile width must be 8, 16, 32, or 64, found ".as_bytes());
+                push_decimal(inout diags.text, width);
+                diags.close(
+                    code_start,
+                    msg_start,
+                    "use tiled(8), tiled(16), tiled(32), or tiled(64)",
+                    start,
+                    stop
+                );
             }
-            if a.gn != 0 {
-                let c = d.open("E1501");
-                let m = d.text.len();
-                d.text.extend(in "tiled(N) struct '".as_bytes());
-                tiled_name(in names, inout d, a.name);
-                d.text.extend(in "' cannot declare generic parameters yet".as_bytes());
-                d.close(c, m, "", start, stop);
+            if adt.gn != 0 {
+                let code_start = diags.open("E1501");
+                let msg_start = diags.text.len();
+                diags.text.extend(in "tiled(N) struct '".as_bytes());
+                tiled_name(in names, inout diags, adt.name);
+                diags.text.extend(in "' cannot declare generic parameters yet".as_bytes());
+                diags.close(code_start, msg_start, "", start, stop);
             }
             let mut has_hot = false;
-            if a.vn > 0 {
-                let var = wd.variant(w(a.va));
-                for x in 0..w(var.fc) {
-                    let at = add(w(var.fa), x);
-                    let fd = wd.field(at);
-                    let temp = sg.temp(at);
+            if adt.vn > 0 {
+                let variant = world.variant(w(adt.va));
+                for offset in 0..w(variant.fc) {
+                    let field_index = add(w(variant.fa), offset);
+                    let field = world.field(field_index);
+                    let temp = sigs.temp(field_index);
                     if temp == T_HOT {
                         has_hot = true;
-                        if hot_elem_bytes(in t, k, fd.ty) == 0 {
-                            let c = d.open("E1503");
-                            let m = d.text.len();
-                            d.text.extend(in "hot field '".as_bytes());
-                            names.write(fd.name, inout d.text);
-                            d.text.extend(in "' in tiled struct '".as_bytes());
-                            tiled_name(in names, inout d, a.name);
-                            d.text.extend(
+                        if hot_elem_bytes(in types, known, field.ty) == 0 {
+                            let code_start = diags.open("E1503");
+                            let msg_start = diags.text.len();
+                            diags.text.extend(in "hot field '".as_bytes());
+                            names.write(field.name, inout diags.text);
+                            diags.text.extend(in "' in tiled struct '".as_bytes());
+                            tiled_name(in names, inout diags, adt.name);
+                            diags.text.extend(
                                 in "' must have a Copy scalar type (u8, u32, u64, i64, f64, bool), found "
                                     .as_bytes()
                             );
-                            display(in t, in names, fd.ty, inout d.text);
-                            d.close(
-                                c,
-                                m,
+                            display(in types, in names, field.ty, inout diags.text);
+                            diags.close(
+                                code_start,
+                                msg_start,
                                 "mark non-scalar or aggregate fields as 'cold'",
                                 start,
                                 stop
                             );
                         }
                     } else if temp != T_COLD {
-                        let c = d.open("E1502");
-                        let m = d.text.len();
-                        d.text.extend(in "field '".as_bytes());
-                        names.write(fd.name, inout d.text);
-                        d.text.extend(in "' of tiled struct '".as_bytes());
-                        tiled_name(in names, inout d, a.name);
-                        d.text.extend(in "' must be annotated 'hot' or 'cold'".as_bytes());
-                        d.close(
-                            c,
-                            m,
+                        let code_start = diags.open("E1502");
+                        let msg_start = diags.text.len();
+                        diags.text.extend(in "field '".as_bytes());
+                        names.write(field.name, inout diags.text);
+                        diags.text.extend(in "' of tiled struct '".as_bytes());
+                        tiled_name(in names, inout diags, adt.name);
+                        diags.text.extend(in "' must be annotated 'hot' or 'cold'".as_bytes());
+                        diags.close(
+                            code_start,
+                            msg_start,
                             "prefix every field in a tiled(N) struct with 'hot' or 'cold'",
                             start,
                             stop
@@ -165,28 +177,28 @@ pub fn check_world_adts(in t: Types, in names: Names, in wd: World, in sg: Sigs,
                 }
             }
             if !has_hot {
-                let c = d.open("E1502");
-                let m = d.text.len();
-                d.text.extend(in "tiled struct '".as_bytes());
-                tiled_name(in names, inout d, a.name);
-                d.text.extend(in "' must declare at least one 'hot' field".as_bytes());
-                d.close(c, m, "", start, stop);
+                let code_start = diags.open("E1502");
+                let msg_start = diags.text.len();
+                diags.text.extend(in "tiled struct '".as_bytes());
+                tiled_name(in names, inout diags, adt.name);
+                diags.text.extend(in "' must declare at least one 'hot' field".as_bytes());
+                diags.close(code_start, msg_start, "", start, stop);
             }
         } else {
-            for v in 0..w(a.vn) {
-                let var = wd.variant(add(w(a.va), v));
-                for x in 0..w(var.fc) {
-                    let at = add(w(var.fa), x);
-                    if sg.temp(at) != 0 {
-                        let fd = wd.field(at);
-                        let c = d.open("E1502");
-                        let m = d.text.len();
-                        d.text.extend(in "'hot'/'cold' field annotation on '".as_bytes());
-                        tiled_name(in names, inout d, a.name);
-                        d.text.push(46);
-                        names.write(fd.name, inout d.text);
-                        d.text.extend(in "' is only valid inside a tiled(N) struct".as_bytes());
-                        d.close(c, m, "", start, stop);
+            for variant_index in 0..w(adt.vn) {
+                let variant = world.variant(add(w(adt.va), variant_index));
+                for offset in 0..w(variant.fc) {
+                    let field_index = add(w(variant.fa), offset);
+                    if sigs.temp(field_index) != 0 {
+                        let field = world.field(field_index);
+                        let code_start = diags.open("E1502");
+                        let msg_start = diags.text.len();
+                        diags.text.extend(in "'hot'/'cold' field annotation on '".as_bytes());
+                        tiled_name(in names, inout diags, adt.name);
+                        diags.text.push(46);
+                        names.write(field.name, inout diags.text);
+                        diags.text.extend(in "' is only valid inside a tiled(N) struct".as_bytes());
+                        diags.close(code_start, msg_start, "", start, stop);
                     }
                 }
             }

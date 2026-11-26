@@ -12,12 +12,12 @@ fn print_proof_audit_help() eff [Ffi[StdFs], Fail[PrintFailed]] {
     );
 }
 
-fn is_ascii_alpha(b: u8) -> bool {
-    (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+fn is_ascii_alpha(byte: u8) -> bool {
+    (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122)
 }
 
-fn is_ascii_alnum(b: u8) -> bool {
-    is_ascii_alpha(b) || (b >= 48 && b <= 57)
+fn is_ascii_alnum(byte: u8) -> bool {
+    is_ascii_alpha(byte) || (byte >= 48 && byte <= 57)
 }
 
 pub fn name_valid(in name: Slice[u8]) -> bool {
@@ -41,8 +41,8 @@ pub fn name_valid(in name: Slice[u8]) -> bool {
                 if j >= i {
                     break;
                 }
-                let b = byte_at(in name, j);
-                if !is_ascii_alnum(b) && b != 95 && b != 39 {
+                let byte = byte_at(in name, j);
+                if !is_ascii_alnum(byte) && byte != 95 && byte != 39 {
                     return false;
                 }
                 j = wrapping_add(j, 1);
@@ -101,20 +101,20 @@ fn parse_timeout(in text: Slice[u8]) -> u32 {
     if text.len() == 0 {
         return 1;
     }
-    let mut val: u64 = 0;
+    let mut seconds: u64 = 0;
     let mut overflow = false;
     for i in 0..text.len() {
-        let b = byte_at(in text, i);
-        if b < 48 || b > 57 {
+        let byte = byte_at(in text, i);
+        if byte < 48 || byte > 57 {
             return 1;
         }
-        if val > 300 {
+        if seconds > 300 {
             overflow = true;
         } else {
-            val = wrapping_add(wrapping_mul(val, 10), widen_u64(wrapping_sub(b, 48)));
+            seconds = wrapping_add(wrapping_mul(seconds, 10), widen_u64(wrapping_sub(byte, 48)));
         }
     }
-    if overflow || val < 1 || val > 300 {
+    if overflow || seconds < 1 || seconds > 300 {
         return 2;
     }
     0
@@ -127,8 +127,8 @@ fn pack_args(in args: Args, n: u64) -> ChunkSeq[u8] {
         if i >= n {
             break;
         }
-        let a_buf = arg(in args, i);
-        packed.extend(in a_buf.as_slice());
+        let arg_buf = arg(in args, i);
+        packed.extend(in arg_buf.as_slice());
         packed.push(0);
         i = wrapping_add(i, 1);
     }
@@ -172,12 +172,12 @@ pub fn run_proof_audit(
         if i >= n {
             break;
         }
-        let a_buf = arg(in args, i);
-        let a = a_buf.as_slice();
-        if eq(in a, in "--help") || eq(in a, in "-h") {
+        let arg_buf = arg(in args, i);
+        let arg_text = arg_buf.as_slice();
+        if eq(in arg_text, in "--help") || eq(in arg_text, in "-h") {
             print_proof_audit_help();
             return 0;
-        } else if eq(in a, in "--root") {
+        } else if eq(in arg_text, in "--root") {
             if has_root {
                 return fail(in "--root may only be specified once".as_bytes());
             }
@@ -186,33 +186,33 @@ pub fn run_proof_audit(
                 return fail(in "--root requires a directory".as_bytes());
             }
             has_root = true;
-        } else if eq(in a, in "--theorem") || eq(in a, in "--allow-axiom") {
-            let is_theorem = eq(in a, in "--theorem");
+        } else if eq(in arg_text, in "--theorem") || eq(in arg_text, in "--allow-axiom") {
+            let is_theorem = eq(in arg_text, in "--theorem");
             i = wrapping_add(i, 1);
             if i >= n {
                 let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
-                err.extend(in a);
+                err.extend(in arg_text);
                 err.extend(in " requires a name".as_bytes());
                 return fail(in err.as_slice());
             }
-            let v_buf = arg(in args, i);
-            let v = v_buf.as_slice();
-            if !name_valid(in v) {
+            let name_buf = arg(in args, i);
+            let lean_name = name_buf.as_slice();
+            if !name_valid(in lean_name) {
                 let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
                 err.extend(in "invalid Lean name '".as_bytes());
-                err.extend(in v);
+                err.extend(in lean_name);
                 err.extend(in "'; use qualified ASCII identifiers".as_bytes());
                 return fail(in err.as_slice());
             }
             if is_theorem {
                 has_theorem = true;
-            } else if forbidden_axiom(in v) {
+            } else if forbidden_axiom(in lean_name) {
                 let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
-                err.extend(in v);
+                err.extend(in lean_name);
                 err.extend(in " cannot be allowed by the audit policy".as_bytes());
                 return fail(in err.as_slice());
             }
-        } else if eq(in a, in "--lean") {
+        } else if eq(in arg_text, in "--lean") {
             if has_lean {
                 return fail(in "--lean may only be specified once".as_bytes());
             }
@@ -221,7 +221,7 @@ pub fn run_proof_audit(
                 return fail(in "--lean requires a path".as_bytes());
             }
             has_lean = true;
-        } else if eq(in a, in "--timeout") {
+        } else if eq(in arg_text, in "--timeout") {
             if has_timeout {
                 return fail(in "--timeout may only be specified once".as_bytes());
             }
@@ -229,8 +229,8 @@ pub fn run_proof_audit(
             if i >= n {
                 return fail(in "--timeout requires seconds".as_bytes());
             }
-            let v_buf = arg(in args, i);
-            let status = parse_timeout(in v_buf.as_slice());
+            let name_buf = arg(in args, i);
+            let status = parse_timeout(in name_buf.as_slice());
             if status == 1 {
                 return fail(in "invalid --timeout; expected 1 to 300 seconds".as_bytes());
             }
@@ -238,9 +238,9 @@ pub fn run_proof_audit(
                 return fail(in "--timeout must be between 1 and 300 seconds".as_bytes());
             }
             has_timeout = true;
-        } else if eq(in a, in "--json") {
+        } else if eq(in arg_text, in "--json") {
             // Forwarded to `hc_proof_audit_run`.
-        } else if eq(in a, in "--macro-provenance") {
+        } else if eq(in arg_text, in "--macro-provenance") {
             if has_macro_prov {
                 return fail(in "--macro-provenance may only be specified once".as_bytes());
             }
@@ -249,10 +249,10 @@ pub fn run_proof_audit(
                 return fail(in "--macro-provenance requires a manifest file".as_bytes());
             }
             has_macro_prov = true;
-        } else if a.len() != 0 && byte_at(in a, 0) == 45 {
+        } else if arg_text.len() != 0 && byte_at(in arg_text, 0) == 45 {
             let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
             err.extend(in "unknown proof-audit option '".as_bytes());
-            err.extend(in a);
+            err.extend(in arg_text);
             err.push(39);
             return fail(in err.as_slice());
         } else {
@@ -260,15 +260,15 @@ pub fn run_proof_audit(
                 return fail(in "proof-audit accepts one module".as_bytes());
             }
             has_module = true;
-            module.extend(in a);
+            module.extend(in arg_text);
         }
         i = wrapping_add(i, 1);
     }
     if !has_module {
         return fail(in "missing Lean module".as_bytes());
     }
-    let m = module.as_slice();
-    if !name_valid(in m) || toolchain_namespace(in m) {
+    let module_name = module.as_slice();
+    if !name_valid(in module_name) || toolchain_namespace(in module_name) {
         return fail(
             in "module must be a qualified ASCII identifier outside trusted toolchain namespaces"
                 .as_bytes()

@@ -53,15 +53,15 @@ pub struct Syms {
     // `OPS` method names, by `AtomicOp`.
     ops: ChunkSeq[u32],
     // The integer kind names (`IntegerKind::from_name`).
-    ints: ChunkSeq[u32],
+    int_kinds: ChunkSeq[u32],
     new_: u32,
     into_inner: u32,
     // `MemoryOrder::Relaxed` ... `MemoryOrder::SeqCst`, by `ORDERS`.
     orders: ChunkSeq[u32],
 }
 
-fn intern(inout names: Names, in s: Str) -> u32 {
-    names.intern(in s.as_bytes())
+fn intern(inout names: Names, in text: Str) -> u32 {
+    names.intern(in text.as_bytes())
 }
 
 pub fn syms_new(inout names: Names) -> Syms {
@@ -75,17 +75,17 @@ pub fn syms_new(inout names: Names) -> Syms {
     ops.push(intern(inout names, "fetch_and"));
     ops.push(intern(inout names, "fetch_or"));
     ops.push(intern(inout names, "fetch_xor"));
-    let mut ints = ChunkSeq::new[u32]();
-    ints.push(intern(inout names, "u8"));
-    ints.push(intern(inout names, "u16"));
-    ints.push(intern(inout names, "u32"));
-    ints.push(intern(inout names, "u64"));
-    ints.push(intern(inout names, "usize"));
-    ints.push(intern(inout names, "i8"));
-    ints.push(intern(inout names, "i16"));
-    ints.push(intern(inout names, "i32"));
-    ints.push(intern(inout names, "i64"));
-    ints.push(intern(inout names, "isize"));
+    let mut int_kinds = ChunkSeq::new[u32]();
+    int_kinds.push(intern(inout names, "u8"));
+    int_kinds.push(intern(inout names, "u16"));
+    int_kinds.push(intern(inout names, "u32"));
+    int_kinds.push(intern(inout names, "u64"));
+    int_kinds.push(intern(inout names, "usize"));
+    int_kinds.push(intern(inout names, "i8"));
+    int_kinds.push(intern(inout names, "i16"));
+    int_kinds.push(intern(inout names, "i32"));
+    int_kinds.push(intern(inout names, "i64"));
+    int_kinds.push(intern(inout names, "isize"));
     let mut orders = ChunkSeq::new[u32]();
     orders.push(intern(inout names, "MemoryOrder::Relaxed"));
     orders.push(intern(inout names, "MemoryOrder::Acquire"));
@@ -99,28 +99,28 @@ pub fn syms_new(inout names: Names) -> Syms {
         cell: intern(inout names, "cell"),
         bool_: intern(inout names, "bool"),
         ops: ops,
-        ints: ints,
+        int_kinds: int_kinds,
         new_: intern(inout names, "new"),
         into_inner: intern(inout names, "into_inner"),
         orders: orders
     }
 }
 
-fn contains(in s: ChunkSeq[u32], x: u32) -> bool {
-    for i in 0..s.len() {
-        let y = s.try_get(i).unwrap_or(NONE32);
-        if y == x {
+fn contains(in seq: ChunkSeq[u32], symbol: u32) -> bool {
+    for i in 0..seq.len() {
+        let entry = seq.try_get(i).unwrap_or(NONE32);
+        if entry == symbol {
             return true;
         }
     }
     false
 }
 
-// The position of `name` in `s`, NONE32 when absent.
-fn of_symbol(in s: ChunkSeq[u32], name: u32) -> u32 {
-    for i in 0..s.len() {
-        let y = s.try_get(i).unwrap_or(NONE32);
-        if y == name {
+// The position of `name` in `seq`, NONE32 when absent.
+fn of_symbol(in seq: ChunkSeq[u32], name: u32) -> u32 {
+    for i in 0..seq.len() {
+        let entry = seq.try_get(i).unwrap_or(NONE32);
+        if entry == name {
             return wrapping_u32(i);
         }
     }
@@ -128,8 +128,8 @@ fn of_symbol(in s: ChunkSeq[u32], name: u32) -> u32 {
 }
 
 // The operation of method `name` (`AtomicOp::of_method`).
-fn of_method(in sy: Syms, name: u32) -> u32 {
-    of_symbol(in sy.ops, name)
+fn of_method(in syms: Syms, name: u32) -> u32 {
+    of_symbol(in syms.ops, name)
 }
 
 // Arguments after the receiver that are values, before the orders.
@@ -147,28 +147,28 @@ fn on_bool(op: u32) -> bool {
     op != OP_FETCH_ADD && op != OP_FETCH_SUB
 }
 
-// The symbol of the text after `prefix` in `s` (`str::strip_prefix`),
-// NONE32 when `s` does not start with it or the rest was never interned.
-fn strip(in names: Names, s: u32, in prefix: Str) -> u32 {
-    let p = prefix.as_bytes();
-    if s == NONE32 || !names.has_prefix(s, in p) {
+// The symbol of the text after `prefix` in `symbol` (`str::strip_prefix`),
+// NONE32 when `symbol` does not start with it or the rest was never interned.
+fn strip(in names: Names, symbol: u32, in prefix: Str) -> u32 {
+    let prefix_bytes = prefix.as_bytes();
+    if symbol == NONE32 || !names.has_prefix(symbol, in prefix_bytes) {
         return NONE32;
     }
     let mut rest = ChunkSeq::new[u8]();
-    for i in p.len()..names.size(s) {
-        rest.push(names.byte(s, i));
+    for i in prefix_bytes.len()..names.size(symbol) {
+        rest.push(names.byte(symbol, i));
     }
     names.lookup(in rest.as_slice())
 }
 
 // `Type::Named("Atomic", [T])`: `T`, else NONE32 (`cell_type`).
-pub fn cell_type(in t: Types, in sy: Syms, ty: u32) -> u32 {
+pub fn cell_type(in types: Types, in syms: Syms, ty: u32) -> u32 {
     if ty == NONE32 {
         return NONE32;
     }
-    let n = t.node(ty);
-    if n.kind == TyKind::Named && n.name == sy.atomic && n.n == 1 {
-        t.arg(ty, 0)
+    let node = types.node(ty);
+    if node.kind == TyKind::Named && node.name == syms.atomic && node.n == 1 {
+        types.arg(ty, 0)
     } else {
         NONE32
     }
@@ -176,13 +176,14 @@ pub fn cell_type(in t: Types, in sy: Syms, ty: u32) -> u32 {
 
 // `cell_kind`: 0 for no atomic operations, 1 for `bool`, 2 for an integer
 // kind.
-fn cell_kind(inout t: Types, in sy: Syms, ty: u32) -> u8 {
-    let d = default_type(inout t, ty);
-    let n = t.node(d);
-    if n.kind == TyKind::Named && n.name == sy.bool_ && n.n == 0 {
+fn cell_kind(inout types: Types, in syms: Syms, ty: u32) -> u8 {
+    let defaulted = default_type(inout types, ty);
+    let node = types.node(defaulted);
+    if node.kind == TyKind::Named && node.name == syms.bool_ && node.n == 0 {
         return 1;
     }
-    if n.kind == TyKind::Lit || (n.kind == TyKind::Named && contains(in sy.ints, n.name)) {
+    if node.kind == TyKind::Lit
+        || (node.kind == TyKind::Named && contains(in syms.int_kinds, node.name)) {
         return 2;
     }
     0
@@ -192,60 +193,60 @@ fn cell_kind(inout t: Types, in sy: Syms, ty: u32) -> u8 {
 // (`is_prelude_function`).
 pub fn is_prelude_function(
     in names: Names,
-    in sy: Syms,
+    in syms: Syms,
     atomic: bool,
     workers: bool,
     name: u32
 ) -> bool {
-    if workers && name == sy.parallel_for {
+    if workers && name == syms.parallel_for {
         return true;
     }
     if !atomic {
         return false;
     }
-    let m = strip(in names, name, "Atomic::");
-    if m == NONE32 {
+    let method = strip(in names, name, "Atomic::");
+    if method == NONE32 {
         return false;
     }
-    m == sy.new_ || m == sy.into_inner || of_method(in sy, m) != OP_NONE
+    method == syms.new_ || method == syms.into_inner || of_method(in syms, method) != OP_NONE
 }
 
 // The memory order a literal `MemoryOrder::X` argument names, NONE32 for
 // any other expression (`order_name`).
-fn order_name(in sy: Syms, in x: Exprs, e: u32) -> u32 {
-    let r = x.row(e);
-    if r.kind != E_NAME {
+fn order_name(in syms: Syms, in exprs: Exprs, expr: u32) -> u32 {
+    let row = exprs.row(expr);
+    if row.kind != E_NAME {
         return NONE32;
     }
-    of_symbol(in sy.orders, r.name)
+    of_symbol(in syms.orders, row.name)
 }
 
-fn order_text(o: u32) -> Str {
-    if o == ORDER_RELAXED {
+fn order_text(order: u32) -> Str {
+    if order == ORDER_RELAXED {
         "Relaxed"
-    } else if o == ORDER_ACQUIRE {
+    } else if order == ORDER_ACQUIRE {
         "Acquire"
-    } else if o == ORDER_RELEASE {
+    } else if order == ORDER_RELEASE {
         "Release"
-    } else if o == ORDER_ACQREL {
+    } else if order == ORDER_ACQREL {
         "AcqRel"
     } else {
         "SeqCst"
     }
 }
 
-fn ty_of(in w: World, in x: Exprs, e: u32) -> u32 {
-    if e == NONE32 {
+fn ty_of(in world: World, in exprs: Exprs, expr: u32) -> u32 {
+    if expr == NONE32 {
         return NONE32;
     }
-    let r = x.row(e);
-    w.expr_type(r.start, r.end)
+    let row = exprs.row(expr);
+    world.expr_type(row.start, row.end)
 }
 
-// The function of `world.functions` named `name`, as its index in `x.fns`.
-fn function_named(in x: Exprs, name: u32) -> u64 {
-    for i in 0..x.fn_count() {
-        if x.function(i).name == name {
+// The function of `world.functions` named `name`, as its index in `exprs.fns`.
+fn function_named(in exprs: Exprs, name: u32) -> u64 {
+    for i in 0..exprs.fn_count() {
+        if exprs.function(i).name == name {
             return i;
         }
     }
@@ -253,280 +254,319 @@ fn function_named(in x: Exprs, name: u32) -> u64 {
 }
 
 pub struct Atomics {
-    sy: Syms,
+    syms: Syms,
     atomic: bool,
     workers: bool,
 }
 
 // `check_expr`: the rules of one expression of a body.
 fn check_expr(
-    inout o: ChunkSeq[u8],
-    inout t: Types,
+    inout output: ChunkSeq[u8],
+    inout types: Types,
     in names: Names,
-    in w: World,
-    in x: Exprs,
-    in a: Atomics,
-    e: u32
+    in world: World,
+    in exprs: Exprs,
+    in atomics: Atomics,
+    expr: u32
 ) {
-    let r = x.row(e);
-    if r.kind == E_STRUCT && r.name == a.sy.atomic {
-        open(inout o, "E0822", r.start, r.end);
-        put(inout o, "an 'Atomic' cell is built by 'Atomic::new'");
-        help(inout o, "write `Atomic::new(value)`");
+    let row = exprs.row(expr);
+    if row.kind == E_STRUCT && row.name == atomics.syms.atomic {
+        open(inout output, "E0822", row.start, row.end);
+        put(inout output, "an 'Atomic' cell is built by 'Atomic::new'");
+        help(inout output, "write `Atomic::new(value)`");
         return;
     }
-    if r.kind != E_CALL {
+    if row.kind != E_CALL {
         return;
     }
-    let callee = x.kid(e, 0);
-    let cr = x.row(callee);
-    let args = wrapping_sub(x.kid_count(e), 1);
+    let callee = exprs.kid(expr, 0);
+    let callee_row = exprs.row(callee);
+    let arg_count = wrapping_sub(exprs.kid_count(expr), 1);
     let mut method = NONE32;
     let mut receiver = NONE32;
-    // The first argument of `rest`, as a child index of `e`.
+    // The first argument of `rest`, as a child index of `expr`.
     let mut rest: u64 = 1;
-    if cr.kind == E_FIELD
-        && cell_type(in t, in a.sy, ty_of(in w, in x, x.kid(callee, 0))) != NONE32 {
-        method = cr.name;
-        receiver = ty_of(in w, in x, x.kid(callee, 0));
-    } else if cr.kind == E_NAME && names.has_prefix(cr.name, in "Atomic::".as_bytes()) {
-        method = strip(in names, cr.name, "Atomic::");
-        if method == a.sy.new_ {
-            receiver = ty_of(in w, in x, e);
+    if callee_row.kind == E_FIELD
+        && cell_type(in types, in atomics.syms, ty_of(in world, in exprs, exprs.kid(callee, 0)))
+            != NONE32 {
+        method = callee_row.name;
+        receiver = ty_of(in world, in exprs, exprs.kid(callee, 0));
+    } else if callee_row.kind == E_NAME
+        && names.has_prefix(callee_row.name, in "Atomic::".as_bytes()) {
+        method = strip(in names, callee_row.name, "Atomic::");
+        if method == atomics.syms.new_ {
+            receiver = ty_of(in world, in exprs, expr);
         } else {
-            if args > 0 {
-                receiver = ty_of(in w, in x, x.kid(e, 1));
+            if arg_count > 0 {
+                receiver = ty_of(in world, in exprs, exprs.kid(expr, 1));
             }
             rest = 2;
         }
     } else {
         return;
     }
-    let cell = cell_type(in t, in a.sy, receiver);
+    let cell = cell_type(in types, in atomics.syms, receiver);
     if cell == NONE32 {
         return;
     }
-    let kind = cell_kind(inout t, in a.sy, cell);
+    let kind = cell_kind(inout types, in atomics.syms, cell);
     if kind == 0 {
-        open(inout o, "E0821", r.start, r.end);
-        put(inout o, "'Atomic[");
-        display(in t, in names, cell, inout o);
-        put(inout o, "]' has no atomic operations");
-        help(inout o, "an atomic cell holds a `bool` or an integer kind");
+        open(inout output, "E0821", row.start, row.end);
+        put(inout output, "'Atomic[");
+        display(in types, in names, cell, inout output);
+        put(inout output, "]' has no atomic operations");
+        help(inout output, "an atomic cell holds a `bool` or an integer kind");
         return;
     }
-    let op = of_method(in a.sy, method);
+    let op = of_method(in atomics.syms, method);
     if op == OP_NONE {
         return;
     }
     if kind == 1 && !on_bool(op) {
-        open(inout o, "E0821", r.start, r.end);
-        put(inout o, "'");
-        names.write(method, inout o);
-        put(inout o, "' is not defined on 'Atomic[bool]'");
-        o.push(10);
+        open(inout output, "E0821", row.start, row.end);
+        put(inout output, "'");
+        names.write(method, inout output);
+        put(inout output, "' is not defined on 'Atomic[bool]'");
+        output.push(10);
     }
-    let values = op_values(op);
-    let mut i: u64 = 0;
-    for k in rest..x.kid_count(e) {
-        if i >= values {
-            let arg = x.kid(e, k);
-            let ar = x.row(arg);
-            let order = order_name(in a.sy, in x, arg);
+    let value_count = op_values(op);
+    let mut arg_index: u64 = 0;
+    for kid_index in rest..exprs.kid_count(expr) {
+        if arg_index >= value_count {
+            let arg = exprs.kid(expr, kid_index);
+            let arg_row = exprs.row(arg);
+            let order = order_name(in atomics.syms, in exprs, arg);
             if order == NONE32 {
-                open(inout o, "E0820", ar.start, ar.end);
-                put(inout o, "the memory order of '");
-                names.write(method, inout o);
-                put(inout o, "' must be a literal 'MemoryOrder'");
+                open(inout output, "E0820", arg_row.start, arg_row.end);
+                put(inout output, "the memory order of '");
+                names.write(method, inout output);
+                put(inout output, "' must be a literal 'MemoryOrder'");
                 help(
-                    inout o,
+                    inout output,
                     "write one of `MemoryOrder::Relaxed`, `Acquire`, `Release`, `AcqRel`, `SeqCst`"
                 );
             } else {
-                let loads = op == OP_LOAD || (op == OP_CAS && i == wrapping_add(values, 1));
+                let loads = op == OP_LOAD
+                    || (op == OP_CAS && arg_index == wrapping_add(value_count, 1));
                 let refused = (loads && (order == ORDER_RELEASE || order == ORDER_ACQREL))
                     || (op == OP_STORE && (order == ORDER_ACQUIRE || order == ORDER_ACQREL));
                 if refused {
-                    open(inout o, "E0820", ar.start, ar.end);
+                    open(inout output, "E0820", arg_row.start, arg_row.end);
                     if op == OP_CAS {
-                        put(inout o, "the failure order of 'compare_exchange'");
+                        put(inout output, "the failure order of 'compare_exchange'");
                     } else {
-                        put(inout o, "'");
-                        names.write(method, inout o);
-                        put(inout o, "'");
+                        put(inout output, "'");
+                        names.write(method, inout output);
+                        put(inout output, "'");
                     }
-                    put(inout o, " cannot use 'MemoryOrder::");
-                    put(inout o, order_text(order));
-                    put(inout o, "'");
-                    o.push(10);
+                    put(inout output, " cannot use 'MemoryOrder::");
+                    put(inout output, order_text(order));
+                    put(inout output, "'");
+                    output.push(10);
                 }
             }
         }
-        i = wrapping_add(i, 1);
+        arg_index = wrapping_add(arg_index, 1);
     }
 }
 
 // `worker_body`: whether `body` names a top-level, non-generic function
 // whose effect row may run on a worker (`worker_row`).
-fn worker_body(in names: Names, in x: Exprs, in a: Atomics, body: u32) -> bool {
-    let r = x.row(body);
-    if r.kind != E_NAME {
+fn worker_body(in names: Names, in exprs: Exprs, in atomics: Atomics, body: u32) -> bool {
+    let row = exprs.row(body);
+    if row.kind != E_NAME {
         return false;
     }
-    let i = function_named(in x, r.name);
-    if i == 18446744073709551615 {
+    let fn_index = function_named(in exprs, row.name);
+    if fn_index == 18446744073709551615 {
         return false;
     }
-    let f = x.function(i);
-    f.generics == 0
-        && f.worker_row
-        && !is_prelude_function(in names, in a.sy, a.atomic, a.workers, f.name)
+    let func = exprs.function(fn_index);
+    func.generics == 0
+        && func.worker_row
+        && !is_prelude_function(
+            in names,
+            in atomics.syms,
+            atomics.atomic,
+            atomics.workers,
+            func.name
+        )
 }
 
 // `check_workers`: the scoped-worker rules of one expression.
-fn check_workers(inout o: ChunkSeq[u8], in names: Names, in x: Exprs, in a: Atomics, e: u32) {
-    let r = x.row(e);
-    if r.kind != E_CALL {
+fn check_workers(
+    inout output: ChunkSeq[u8],
+    in names: Names,
+    in exprs: Exprs,
+    in atomics: Atomics,
+    expr: u32
+) {
+    let row = exprs.row(expr);
+    if row.kind != E_CALL {
         return;
     }
-    let callee = x.row(x.kid(e, 0));
-    if callee.kind != E_NAME || callee.name != a.sy.parallel_for || x.kid_count(e) != 4 {
+    let callee = exprs.row(exprs.kid(expr, 0));
+    if callee.kind != E_NAME
+        || callee.name != atomics.syms.parallel_for
+        || exprs.kid_count(expr) != 4 {
         return;
     }
-    let data = x.row(x.kid(e, 1));
-    let body_id = x.kid(e, 3);
-    let body = x.row(body_id);
+    let data = exprs.row(exprs.kid(expr, 1));
+    let body_id = exprs.kid(expr, 3);
+    let body = exprs.row(body_id);
     let shared_inout = data.pass == TyPass::Inout;
     let mut body_inout = false;
     if body.kind == E_NAME {
-        let i = function_named(in x, body.name);
-        if i != 18446744073709551615 {
-            let f = x.function(i);
-            body_inout = f.pn > 0 && x.param_pass(f, 0) != TyPass::In;
+        let fn_index = function_named(in exprs, body.name);
+        if fn_index != 18446744073709551615 {
+            let func = exprs.function(fn_index);
+            body_inout = func.param_count > 0 && exprs.param_pass(func, 0) != TyPass::In;
         }
     }
     if shared_inout || body_inout {
-        let at = if shared_inout { data } else { body };
-        open(inout o, "E0824", at.start, at.end);
-        put(inout o, "workers of 'parallel_for' share their data only by 'in'");
+        let blamed = if shared_inout { data } else { body };
+        open(inout output, "E0824", blamed.start, blamed.end);
+        put(inout output, "workers of 'parallel_for' share their data only by 'in'");
         help(
-            inout o,
+            inout output,
             "pass the data as `in data` and update shared state through an `Atomic` cell inside it"
         );
         return;
     }
-    if !worker_body(in names, in x, in a, body_id) {
-        open(inout o, "E0823", body.start, body.end);
+    if !worker_body(in names, in exprs, in atomics, body_id) {
+        open(inout output, "E0823", body.start, body.end);
         put(
-            inout o,
+            inout output,
             "the body of 'parallel_for' must be a named function whose effects need no handler"
         );
         help(
-            inout o,
+            inout output,
             "declare `fn body(in data: A, i: u64)` whose row holds only `Ffi[Lib]`, `Alloc` or capability effects, and pass `body`"
         );
     }
 }
 
 fn walk_check(
-    inout o: ChunkSeq[u8],
-    inout t: Types,
+    inout output: ChunkSeq[u8],
+    inout types: Types,
     in names: Names,
-    in w: World,
-    in x: Exprs,
-    in a: Atomics,
-    e: u32
+    in world: World,
+    in exprs: Exprs,
+    in atomics: Atomics,
+    expr: u32
 ) {
-    if a.atomic {
-        check_expr(inout o, inout t, in names, in w, in x, in a, e);
+    if atomics.atomic {
+        check_expr(inout output, inout types, in names, in world, in exprs, in atomics, expr);
     }
-    if a.workers {
-        check_workers(inout o, in names, in x, in a, e);
+    if atomics.workers {
+        check_workers(inout output, in names, in exprs, in atomics, expr);
     }
-    for i in 0..x.kid_count(e) {
-        walk_check(inout o, inout t, in names, in w, in x, in a, x.kid(e, i));
+    for i in 0..exprs.kid_count(expr) {
+        walk_check(
+            inout output,
+            inout types,
+            in names,
+            in world,
+            in exprs,
+            in atomics,
+            exprs.kid(expr, i)
+        );
     }
 }
 
-// `check_world`: every non-prelude function body of `x` (the world's
+// `check_world`: every non-prelude function body of `exprs` (the world's
 // functions, in name order).
 pub fn check_world(
-    inout o: ChunkSeq[u8],
-    inout t: Types,
+    inout output: ChunkSeq[u8],
+    inout types: Types,
     in names: Names,
-    in w: World,
-    in x: Exprs,
-    in a: Atomics
+    in world: World,
+    in exprs: Exprs,
+    in atomics: Atomics
 ) {
-    if !a.atomic && !a.workers {
+    if !atomics.atomic && !atomics.workers {
         return;
     }
-    for i in 0..x.fn_count() {
-        let f = x.function(i);
-        if is_prelude_function(in names, in a.sy, a.atomic, a.workers, f.name) {
+    for i in 0..exprs.fn_count() {
+        let func = exprs.function(i);
+        if is_prelude_function(
+            in names,
+            in atomics.syms,
+            atomics.atomic,
+            atomics.workers,
+            func.name
+        ) {
             continue;
         }
-        if f.body != NONE32 {
-            walk_check(inout o, inout t, in names, in w, in x, in a, f.body);
+        if func.body != NONE32 {
+            walk_check(
+                inout output,
+                inout types,
+                in names,
+                in world,
+                in exprs,
+                in atomics,
+                func.body
+            );
         }
     }
 }
 
-pub fn atomics_new(sink sy: Syms, atomic: bool, workers: bool) -> Atomics {
-    Atomics { sy: sy, atomic: atomic, workers: workers }
+pub fn atomics_new(sink syms: Syms, atomic: bool, workers: bool) -> Atomics {
+    Atomics { syms: syms, atomic: atomic, workers: workers }
 }
 
 // ------------------------------------------------------------ preludes
 
-// `path_mentions`: the first `::` segment of `n` is `Atomic` or
+// `path_mentions`: the first `::` segment of `name` is `Atomic` or
 // `MemoryOrder`.
-fn path_mentions(in names: Names, in sy: Syms, n: u32) -> bool {
-    if n == sy.atomic || n == sy.memory_order {
+fn path_mentions(in names: Names, in syms: Syms, name: u32) -> bool {
+    if name == syms.atomic || name == syms.memory_order {
         return true;
     }
-    names.has_prefix(n, in "Atomic::".as_bytes())
-        || names.has_prefix(n, in "MemoryOrder::".as_bytes())
+    names.has_prefix(name, in "Atomic::".as_bytes())
+        || names.has_prefix(name, in "MemoryOrder::".as_bytes())
 }
 
 // `type_mentions`.
-pub fn type_mentions(in t: Types, in sy: Syms, ty: u32) -> bool {
+pub fn type_mentions(in types: Types, in syms: Syms, ty: u32) -> bool {
     if ty == NONE32 {
         return false;
     }
-    let n = t.node(ty);
-    if n.kind == TyKind::Named {
-        if n.name == sy.atomic || n.name == sy.memory_order {
+    let node = types.node(ty);
+    if node.kind == TyKind::Named {
+        if node.name == syms.atomic || node.name == syms.memory_order {
             return true;
         }
-    } else if n.kind == TyKind::Fn {
-        if type_mentions(in t, in sy, n.r) {
+    } else if node.kind == TyKind::Fn {
+        if type_mentions(in types, in syms, node.r) {
             return true;
         }
-    } else if n.kind != TyKind::Tuple {
+    } else if node.kind != TyKind::Tuple {
         return false;
     }
-    for i in 0..t.arity(ty) {
-        if type_mentions(in t, in sy, t.arg(ty, i)) {
+    for i in 0..types.arity(ty) {
+        if type_mentions(in types, in syms, types.arg(ty, i)) {
             return true;
         }
     }
     false
 }
 
-fn pattern_mentions(in names: Names, in x: Exprs, in sy: Syms, p: u32) -> bool {
-    if p == NONE32 {
+fn pattern_mentions(in names: Names, in exprs: Exprs, in syms: Syms, pattern: u32) -> bool {
+    if pattern == NONE32 {
         return false;
     }
-    let r = x.pat(p);
-    if r.kind == PAT_CTOR {
-        if path_mentions(in names, in sy, r.name) {
+    let row = exprs.pat(pattern);
+    if row.kind == PAT_CTOR {
+        if path_mentions(in names, in syms, row.name) {
             return true;
         }
-    } else if r.kind != PAT_TUPLE {
+    } else if row.kind != PAT_TUPLE {
         return false;
     }
-    for i in 0..widen_u64(r.n) {
-        if pattern_mentions(in names, in x, in sy, x.pat_kid(p, i)) {
+    for i in 0..widen_u64(row.kid_count) {
+        if pattern_mentions(in names, in exprs, in syms, exprs.pat_kid(pattern, i)) {
             return true;
         }
     }
@@ -537,63 +577,75 @@ fn pattern_mentions(in names: Names, in x: Exprs, in sy: Syms, p: u32) -> bool {
 // rows (the walk's answer is whether any node mentions the names, so the
 // order does not matter). A block's `let` values and a match's arm bodies
 // carry the `let` type and pattern, and the arm pattern, on their own rows.
-fn expr_mentions(in names: Names, in t: Types, in x: Exprs, in sy: Syms, e: u32) -> bool {
-    let end = x.subtree_end(e);
-    for i in widen_u64(e)..widen_u64(end) {
+fn expr_mentions(
+    in names: Names,
+    in types: Types,
+    in exprs: Exprs,
+    in syms: Syms,
+    expr: u32
+) -> bool {
+    let end = exprs.subtree_end(expr);
+    for i in widen_u64(expr)..widen_u64(end) {
         let id = wrapping_u32(i);
-        let r = x.row(id);
-        let k = r.kind;
-        if k == E_NAME || k == E_STRUCT {
-            if path_mentions(in names, in sy, r.name) {
+        let row = exprs.row(id);
+        let kind = row.kind;
+        if kind == E_NAME || kind == E_STRUCT {
+            if path_mentions(in names, in syms, row.name) {
                 return true;
             }
-        } else if k == E_CALL {
-            for j in 0..widen_u64(r.tn) {
-                if type_mentions(in t, in sy, x.ty_at(id, j)) {
+        } else if kind == E_CALL {
+            for j in 0..widen_u64(row.ty_count) {
+                if type_mentions(in types, in syms, exprs.ty_at(id, j)) {
                     return true;
                 }
             }
-        } else if k == E_CLOSURE {
-            if type_mentions(in t, in sy, r.ty) {
+        } else if kind == E_CLOSURE {
+            if type_mentions(in types, in syms, row.ty) {
                 return true;
             }
-            for j in 0..widen_u64(r.tn) {
-                if type_mentions(in t, in sy, x.ty_at(id, j)) {
+            for j in 0..widen_u64(row.ty_count) {
+                if type_mentions(in types, in syms, exprs.ty_at(id, j)) {
                     return true;
                 }
             }
         }
-        if r.is_let
+        if row.is_let
             && (
-                type_mentions(in t, in sy, r.let_ty)
-                    || pattern_mentions(in names, in x, in sy, r.pat)
+                type_mentions(in types, in syms, row.let_ty)
+                    || pattern_mentions(in names, in exprs, in syms, row.pat)
             ) {
             return true;
         }
-        if r.arm && pattern_mentions(in names, in x, in sy, r.pat) {
+        if row.is_arm_body && pattern_mentions(in names, in exprs, in syms, row.pat) {
             return true;
         }
     }
     false
 }
 
-fn function_mentions(in names: Names, in t: Types, in x: Exprs, in sy: Syms, f: FnRow) -> bool {
-    for i in 0..widen_u64(f.pn) {
-        if type_mentions(in t, in sy, x.param_type(f, i)) {
+fn function_mentions(
+    in names: Names,
+    in types: Types,
+    in exprs: Exprs,
+    in syms: Syms,
+    func: FnRow
+) -> bool {
+    for i in 0..widen_u64(func.param_count) {
+        if type_mentions(in types, in syms, exprs.param_type(func, i)) {
             return true;
         }
     }
-    if type_mentions(in t, in sy, f.result) {
+    if type_mentions(in types, in syms, func.result) {
         return true;
     }
-    f.body != NONE32 && expr_mentions(in names, in t, in x, in sy, f.body)
+    func.body != NONE32 && expr_mentions(in names, in types, in exprs, in syms, func.body)
 }
 
-fn calls_workers(in x: Exprs, in sy: Syms, e: u32) -> bool {
-    let end = x.subtree_end(e);
-    for i in widen_u64(e)..widen_u64(end) {
-        let r = x.row(wrapping_u32(i));
-        if r.kind == E_NAME && r.name == sy.parallel_for {
+fn calls_workers(in exprs: Exprs, in syms: Syms, expr: u32) -> bool {
+    let end = exprs.subtree_end(expr);
+    for i in widen_u64(expr)..widen_u64(end) {
+        let row = exprs.row(wrapping_u32(i));
+        if row.kind == E_NAME && row.name == syms.parallel_for {
             return true;
         }
     }
@@ -608,76 +660,80 @@ const I_IMPL: u8 = 3;
 const I_TRAIT: u8 = 4;
 const I_CONFORMANCE: u8 = 5;
 
-// One module item: an ADT's name and field types (`tys[ta..ta+tn]`), an
-// impl's self type, and the functions `x.fns[fa..fa+fn_]` it holds.
+// One module item: an ADT's name and field types (`tys[ty_start..ty_start+ty_count]`), an
+// impl's self type, and the functions `exprs.fns[fn_start..fn_start+fn_count]` it holds.
 pub copy struct ItemRow {
     tag: u8,
     name: u32,
     ty: u32,
-    ta: u32,
-    tn: u32,
-    fa: u32,
-    fn_: u32,
+    ty_start: u32,
+    ty_count: u32,
+    fn_start: u32,
+    fn_count: u32,
 }
 
 pub struct Items {
     rows: ChunkSeq[ItemRow],
     tys: ChunkSeq[u32],
-    x: Exprs,
+    exprs: Exprs,
 }
 
-fn at32(in s: ChunkSeq[u32], i: u64) -> u32 {
-    s.try_get(i).unwrap_or(NONE32)
+fn at32(in seq: ChunkSeq[u32], i: u64) -> u32 {
+    seq.try_get(i).unwrap_or(NONE32)
 }
 
 // The module items: n, then per item its tag and words (Adt: name, n
 // field types; Function: one function; Effect, Trait, Conformance: n
 // functions; Impl: self type, n functions).
 pub fn read_items(
-    inout r: Reader,
-    in b: Slice[u8],
+    inout reader: Reader,
+    in bytes: Slice[u8],
     in nmap: ChunkSeq[u32],
     in tmap: ChunkSeq[u32],
-    sink x: Exprs
+    sink exprs: Exprs
 ) -> Items {
-    let mut items = Items { rows: ChunkSeq::new[ItemRow](), tys: ChunkSeq::new[u32](), x: x };
-    let n = r.word(in b);
+    let mut items = Items {
+        rows: ChunkSeq::new[ItemRow](),
+        tys: ChunkSeq::new[u32](),
+        exprs: exprs
+    };
+    let n = reader.word(in bytes);
     for i in 0..n {
-        let tag = wrapping_u8(r.word(in b));
+        let tag = wrapping_u8(reader.word(in bytes));
         let mut row = ItemRow {
             tag: tag,
             name: NONE32,
             ty: NONE32,
-            ta: 0,
-            tn: 0,
-            fa: wrapping_u32(items.x.fns.len()),
-            fn_: 0
+            ty_start: 0,
+            ty_count: 0,
+            fn_start: wrapping_u32(items.exprs.fns.len()),
+            fn_count: 0
         };
         let mut count: u64 = 0;
         if tag == I_ADT {
-            row.name = at32(in nmap, r.word(in b));
-            let k = r.word(in b);
-            row.ta = wrapping_u32(items.tys.len());
-            row.tn = wrapping_u32(k);
-            for j in 0..k {
-                items.tys.push(at32(in tmap, r.word(in b)));
+            row.name = at32(in nmap, reader.word(in bytes));
+            let field_count = reader.word(in bytes);
+            row.ty_start = wrapping_u32(items.tys.len());
+            row.ty_count = wrapping_u32(field_count);
+            for j in 0..field_count {
+                items.tys.push(at32(in tmap, reader.word(in bytes)));
             }
         } else if tag == I_FUNCTION {
             count = 1;
         } else {
             if tag == I_IMPL {
-                row.ty = at32(in tmap, r.word(in b));
+                row.ty = at32(in tmap, reader.word(in bytes));
             }
-            count = r.word(in b);
+            count = reader.word(in bytes);
         }
         for j in 0..count {
-            let f = read_fn(inout r, in b, inout items.x, in nmap, in tmap);
-            items.x.fns.push(f);
+            let func = read_fn(inout reader, in bytes, inout items.exprs, in nmap, in tmap);
+            items.exprs.fns.push(func);
             if tag == I_FUNCTION {
-                row.name = f.name;
+                row.name = func.name;
             }
         }
-        row.fn_ = wrapping_u32(count);
+        row.fn_count = wrapping_u32(count);
         items.rows.push(row);
     }
     items
@@ -686,20 +742,28 @@ pub fn read_items(
 fn item(in items: Items, i: u64) -> ItemRow {
     match items.rows.try_get(i) {
         Option::Some(r) => r,
-        Option::None => ItemRow { tag: 255, name: NONE32, ty: NONE32, ta: 0, tn: 0, fa: 0, fn_: 0 },
+        Option::None => ItemRow {
+            tag: 255,
+            name: NONE32,
+            ty: NONE32,
+            ty_start: 0,
+            ty_count: 0,
+            fn_start: 0,
+            fn_count: 0
+        },
     }
 }
 
 fn item_functions_mention(
     in names: Names,
-    in t: Types,
+    in types: Types,
     in items: Items,
-    in sy: Syms,
-    r: ItemRow
+    in syms: Syms,
+    row: ItemRow
 ) -> bool {
-    for j in 0..widen_u64(r.fn_) {
-        let f = items.x.function(wrapping_add(widen_u64(r.fa), j));
-        if function_mentions(in names, in t, in items.x, in sy, f) {
+    for j in 0..widen_u64(row.fn_count) {
+        let func = items.exprs.function(wrapping_add(widen_u64(row.fn_start), j));
+        if function_mentions(in names, in types, in items.exprs, in syms, func) {
             return true;
         }
     }
@@ -708,30 +772,30 @@ fn item_functions_mention(
 
 // `needs_prelude`: the module uses `Atomic` or `MemoryOrder` without
 // declaring either.
-pub fn needs_prelude(in names: Names, in t: Types, in items: Items, in sy: Syms) -> bool {
+pub fn needs_prelude(in names: Names, in types: Types, in items: Items, in syms: Syms) -> bool {
     for i in 0..items.rows.len() {
-        let r = item(in items, i);
-        if r.tag == I_ADT && (r.name == sy.atomic || r.name == sy.memory_order) {
+        let row = item(in items, i);
+        if row.tag == I_ADT && (row.name == syms.atomic || row.name == syms.memory_order) {
             return false;
         }
     }
     for i in 0..items.rows.len() {
-        let r = item(in items, i);
-        if r.tag == I_ADT {
-            for j in 0..widen_u64(r.tn) {
+        let row = item(in items, i);
+        if row.tag == I_ADT {
+            for j in 0..widen_u64(row.ty_count) {
                 if type_mentions(
-                    in t,
-                    in sy,
-                    at32(in items.tys, wrapping_add(widen_u64(r.ta), j))
+                    in types,
+                    in syms,
+                    at32(in items.tys, wrapping_add(widen_u64(row.ty_start), j))
                 ) {
                     return true;
                 }
             }
         } else {
-            if r.tag == I_IMPL && type_mentions(in t, in sy, r.ty) {
+            if row.tag == I_IMPL && type_mentions(in types, in syms, row.ty) {
                 return true;
             }
-            if item_functions_mention(in names, in t, in items, in sy, r) {
+            if item_functions_mention(in names, in types, in items, in syms, row) {
                 return true;
             }
         }
@@ -740,19 +804,19 @@ pub fn needs_prelude(in names: Names, in t: Types, in items: Items, in sy: Syms)
 }
 
 // `needs_workers`: the module calls `parallel_for` without declaring it.
-pub fn needs_workers(in items: Items, in sy: Syms) -> bool {
+pub fn needs_workers(in items: Items, in syms: Syms) -> bool {
     for i in 0..items.rows.len() {
-        let r = item(in items, i);
-        if r.tag == I_FUNCTION && r.name == sy.parallel_for {
+        let row = item(in items, i);
+        if row.tag == I_FUNCTION && row.name == syms.parallel_for {
             return false;
         }
     }
     for i in 0..items.rows.len() {
-        let r = item(in items, i);
-        if r.tag == I_FUNCTION || r.tag == I_IMPL || r.tag == I_CONFORMANCE {
-            for j in 0..widen_u64(r.fn_) {
-                let f = items.x.function(wrapping_add(widen_u64(r.fa), j));
-                if f.body != NONE32 && calls_workers(in items.x, in sy, f.body) {
+        let row = item(in items, i);
+        if row.tag == I_FUNCTION || row.tag == I_IMPL || row.tag == I_CONFORMANCE {
+            for j in 0..widen_u64(row.fn_count) {
+                let func = items.exprs.function(wrapping_add(widen_u64(row.fn_start), j));
+                if func.body != NONE32 && calls_workers(in items.exprs, in syms, func.body) {
                     return true;
                 }
             }
@@ -771,11 +835,11 @@ pub copy struct Typed {
 // The IR an `E0822` check reads: per function its locals, parameters and
 // value types, and its `Read`, `Write` and `Project` instructions.
 pub copy struct IrInst {
-    // 0 Read (name = root, seg = first path segment or NONE32), 1 Write
-    // (name = place), 2 Project (value = the projected value, seg = field)
+    // 0 Read (name = root, segment = first path segment or NONE32), 1 Write
+    // (name = place), 2 Project (value = the projected value, segment = field)
     tag: u8,
     name: u32,
-    seg: u32,
+    segment: u32,
     value: u32,
     start: u64,
     end: u64,
@@ -783,14 +847,14 @@ pub copy struct IrInst {
 
 pub copy struct IrFn {
     name: u32,
-    la: u32,
-    ln: u32,
-    pa: u32,
-    pn: u32,
-    va: u32,
-    vn: u32,
-    ia: u32,
-    in_: u32,
+    local_start: u32,
+    local_count: u32,
+    param_start: u32,
+    param_count: u32,
+    value_start: u32,
+    value_count: u32,
+    inst_start: u32,
+    inst_count: u32,
 }
 
 pub struct Ir {
@@ -802,29 +866,29 @@ pub struct Ir {
 }
 
 fn read_typed(
-    inout r: Reader,
-    in b: Slice[u8],
+    inout reader: Reader,
+    in bytes: Slice[u8],
     inout ir: Ir,
     in nmap: ChunkSeq[u32],
     in tmap: ChunkSeq[u32],
     names_key: bool
 ) -> u32 {
-    let n = r.word(in b);
+    let n = reader.word(in bytes);
     for i in 0..n {
-        let k = r.word(in b);
+        let raw_key = reader.word(in bytes);
         let key = if names_key {
-            at32(in nmap, k)
+            at32(in nmap, raw_key)
         } else {
-            wrapping_u32(k)
+            wrapping_u32(raw_key)
         };
-        ir.typed.push(Typed { key: key, ty: at32(in tmap, r.word(in b)) });
+        ir.typed.push(Typed { key: key, ty: at32(in tmap, reader.word(in bytes)) });
     }
     wrapping_u32(n)
 }
 
 pub fn read_ir(
-    inout r: Reader,
-    in b: Slice[u8],
+    inout reader: Reader,
+    in bytes: Slice[u8],
     in nmap: ChunkSeq[u32],
     in tmap: ChunkSeq[u32]
 ) -> Ir {
@@ -833,55 +897,55 @@ pub fn read_ir(
         typed: ChunkSeq::new[Typed](),
         insts: ChunkSeq::new[IrInst]()
     };
-    let n = r.word(in b);
+    let n = reader.word(in bytes);
     ir.fns.reserve(n);
     for i in 0..n {
-        let name = at32(in nmap, r.word(in b));
-        let la = wrapping_u32(ir.typed.len());
-        let ln = read_typed(inout r, in b, inout ir, in nmap, in tmap, true);
-        let pa = wrapping_u32(ir.typed.len());
-        let pn = read_typed(inout r, in b, inout ir, in nmap, in tmap, true);
-        let va = wrapping_u32(ir.typed.len());
-        let vn = read_typed(inout r, in b, inout ir, in nmap, in tmap, false);
-        let ia = wrapping_u32(ir.insts.len());
-        let k = r.word(in b);
-        ir.insts.reserve(k);
-        for j in 0..k {
-            let tag = wrapping_u8(r.word(in b));
-            let start = r.word(in b);
-            let end = r.word(in b);
+        let name = at32(in nmap, reader.word(in bytes));
+        let local_start = wrapping_u32(ir.typed.len());
+        let local_count = read_typed(inout reader, in bytes, inout ir, in nmap, in tmap, true);
+        let param_start = wrapping_u32(ir.typed.len());
+        let param_count = read_typed(inout reader, in bytes, inout ir, in nmap, in tmap, true);
+        let value_start = wrapping_u32(ir.typed.len());
+        let value_count = read_typed(inout reader, in bytes, inout ir, in nmap, in tmap, false);
+        let inst_start = wrapping_u32(ir.insts.len());
+        let inst_count = reader.word(in bytes);
+        ir.insts.reserve(inst_count);
+        for j in 0..inst_count {
+            let tag = wrapping_u8(reader.word(in bytes));
+            let start = reader.word(in bytes);
+            let end = reader.word(in bytes);
             let mut inst = IrInst {
                 tag: tag,
                 name: NONE32,
-                seg: NONE32,
+                segment: NONE32,
                 value: 0,
                 start: start,
                 end: end
             };
             if tag == 0 {
-                inst.name = at32(in nmap, r.word(in b));
-                let s = r.word(in b);
-                if s != 0 {
-                    inst.seg = at32(in nmap, wrapping_sub(s, 1));
+                inst.name = at32(in nmap, reader.word(in bytes));
+                let raw_segment = reader.word(in bytes);
+                if raw_segment != 0 {
+                    inst.segment = at32(in nmap, wrapping_sub(raw_segment, 1));
                 }
             } else if tag == 1 {
-                inst.name = at32(in nmap, r.word(in b));
+                inst.name = at32(in nmap, reader.word(in bytes));
             } else {
-                inst.value = wrapping_u32(r.word(in b));
-                inst.seg = at32(in nmap, r.word(in b));
+                inst.value = wrapping_u32(reader.word(in bytes));
+                inst.segment = at32(in nmap, reader.word(in bytes));
             }
             ir.insts.push(inst);
         }
         ir.fns.push(IrFn {
             name: name,
-            la: la,
-            ln: ln,
-            pa: pa,
-            pn: pn,
-            va: va,
-            vn: vn,
-            ia: ia,
-            in_: wrapping_u32(k)
+            local_start: local_start,
+            local_count: local_count,
+            param_start: param_start,
+            param_count: param_count,
+            value_start: value_start,
+            value_count: value_count,
+            inst_start: inst_start,
+            inst_count: wrapping_u32(inst_count)
         });
     }
     ir
@@ -895,39 +959,39 @@ fn typed_at(in ir: Ir, i: u64) -> Typed {
 }
 
 // `f.locals.get(root).or_else(|| params.find(root))`.
-fn root_type(in ir: Ir, f: IrFn, root: u32) -> u32 {
+fn root_type(in ir: Ir, func: IrFn, root: u32) -> u32 {
     if root == NONE32 {
         return NONE32;
     }
-    for i in 0..widen_u64(f.ln) {
-        let t = typed_at(in ir, wrapping_add(widen_u64(f.la), i));
-        if t.key == root {
-            return t.ty;
+    for i in 0..widen_u64(func.local_count) {
+        let entry = typed_at(in ir, wrapping_add(widen_u64(func.local_start), i));
+        if entry.key == root {
+            return entry.ty;
         }
     }
-    for i in 0..widen_u64(f.pn) {
-        let t = typed_at(in ir, wrapping_add(widen_u64(f.pa), i));
-        if t.key == root {
-            return t.ty;
+    for i in 0..widen_u64(func.param_count) {
+        let entry = typed_at(in ir, wrapping_add(widen_u64(func.param_start), i));
+        if entry.key == root {
+            return entry.ty;
         }
     }
     NONE32
 }
 
 // `f.values.get(v)`: values are sorted by id.
-fn value_type(in ir: Ir, f: IrFn, v: u32) -> u32 {
+fn value_type(in ir: Ir, func: IrFn, value: u32) -> u32 {
     let mut lo: u64 = 0;
-    let mut hi = widen_u64(f.vn);
+    let mut hi = widen_u64(func.value_count);
     loop {
         if lo >= hi {
             return NONE32;
         }
         let mid = wrapping_add(lo, wrapping_sub(hi, lo) / 2);
-        let t = typed_at(in ir, wrapping_add(widen_u64(f.va), mid));
-        if t.key == v {
-            return t.ty;
+        let entry = typed_at(in ir, wrapping_add(widen_u64(func.value_start), mid));
+        if entry.key == value {
+            return entry.ty;
         }
-        if t.key < v {
+        if entry.key < value {
             lo = wrapping_add(mid, 1);
         } else {
             hi = mid;
@@ -937,101 +1001,116 @@ fn value_type(in ir: Ir, f: IrFn, v: u32) -> u32 {
 
 // A `Write` place `root.cell...`: whether the second segment is `cell`
 // and the root's type is an `Atomic` cell.
-fn writes_cell(in names: Names, in t: Types, in ir: Ir, in sy: Syms, f: IrFn, place: u32) -> bool {
-    let n = names.size(place);
-    let mut dot = n;
-    for i in 0..n {
+fn writes_cell(
+    in names: Names,
+    in types: Types,
+    in ir: Ir,
+    in syms: Syms,
+    func: IrFn,
+    place: u32
+) -> bool {
+    let len = names.size(place);
+    let mut dot = len;
+    for i in 0..len {
         if names.byte(place, i) == 46 {
             dot = i;
             break;
         }
     }
-    if dot == n {
+    if dot == len {
         return false;
     }
-    let mut end = n;
-    for i in wrapping_add(dot, 1)..n {
+    let mut end = len;
+    for i in wrapping_add(dot, 1)..len {
         if names.byte(place, i) == 46 {
             end = i;
             break;
         }
     }
-    let cell = "cell".as_bytes();
-    if wrapping_sub(end, wrapping_add(dot, 1)) != cell.len() {
+    let cell_bytes = "cell".as_bytes();
+    if wrapping_sub(end, wrapping_add(dot, 1)) != cell_bytes.len() {
         return false;
     }
-    for i in 0..cell.len() {
-        let c = cell.try_get(i).unwrap_or(0);
-        if names.byte(place, wrapping_add(wrapping_add(dot, 1), i)) != c {
+    for i in 0..cell_bytes.len() {
+        let cell_byte = cell_bytes.try_get(i).unwrap_or(0);
+        if names.byte(place, wrapping_add(wrapping_add(dot, 1), i)) != cell_byte {
             return false;
         }
     }
-    let mut root = ChunkSeq::new[u8]();
+    let mut root_text = ChunkSeq::new[u8]();
     for i in 0..dot {
-        root.push(names.byte(place, i));
+        root_text.push(names.byte(place, i));
     }
-    let sym = names.lookup(in root.as_slice());
-    cell_type(in t, in sy, root_type(in ir, f, sym)) != NONE32
+    let root_sym = names.lookup(in root_text.as_slice());
+    cell_type(in types, in syms, root_type(in ir, func, root_sym)) != NONE32
 }
 
 // `check_program`: no function outside the prelude reads, writes or
 // projects the cell of an `Atomic[T]`.
 pub fn check_program(
-    inout o: ChunkSeq[u8],
+    inout output: ChunkSeq[u8],
     in names: Names,
-    in t: Types,
+    in types: Types,
     in ir: Ir,
-    in a: Atomics
+    in atomics: Atomics
 ) {
-    if !a.atomic {
+    if !atomics.atomic {
         return;
     }
     for i in 0..ir.fns.len() {
-        let f = match ir.fns.try_get(i) {
-            Option::Some(f) => f,
+        let func = match ir.fns.try_get(i) {
+            Option::Some(func) => func,
             Option::None => IrFn {
                 name: NONE32,
-                la: 0,
-                ln: 0,
-                pa: 0,
-                pn: 0,
-                va: 0,
-                vn: 0,
-                ia: 0,
-                in_: 0
+                local_start: 0,
+                local_count: 0,
+                param_start: 0,
+                param_count: 0,
+                value_start: 0,
+                value_count: 0,
+                inst_start: 0,
+                inst_count: 0
             },
         };
-        if is_prelude_function(in names, in a.sy, a.atomic, a.workers, f.name) {
+        if is_prelude_function(
+            in names,
+            in atomics.syms,
+            atomics.atomic,
+            atomics.workers,
+            func.name
+        ) {
             continue;
         }
-        for j in 0..widen_u64(f.in_) {
-            let inst = match ir.insts.try_get(wrapping_add(widen_u64(f.ia), j)) {
+        for j in 0..widen_u64(func.inst_count) {
+            let inst = match ir.insts.try_get(wrapping_add(widen_u64(func.inst_start), j)) {
                 Option::Some(x) => x,
                 Option::None => IrInst {
                     tag: 255,
                     name: NONE32,
-                    seg: NONE32,
+                    segment: NONE32,
                     value: 0,
                     start: 0,
                     end: 0
                 },
             };
             let private = if inst.tag == 0 {
-                inst.seg == a.sy.cell
-                    && cell_type(in t, in a.sy, root_type(in ir, f, inst.name)) != NONE32
+                inst.segment == atomics.syms.cell
+                    && cell_type(in types, in atomics.syms, root_type(in ir, func, inst.name))
+                        != NONE32
             } else if inst.tag == 1 {
-                writes_cell(in names, in t, in ir, in a.sy, f, inst.name)
+                writes_cell(in names, in types, in ir, in atomics.syms, func, inst.name)
             } else if inst.tag == 2 {
-                inst.seg == a.sy.cell
-                    && cell_type(in t, in a.sy, value_type(in ir, f, inst.value)) != NONE32
+                inst.segment == atomics.syms.cell
+                    && cell_type(in types, in atomics.syms, value_type(in ir, func, inst.value))
+                        != NONE32
             } else {
                 false
             };
             if private {
-                open(inout o, "E0822", inst.start, inst.end);
-                put(inout o, "the cell of an 'Atomic' is private to its operations");
+                open(inout output, "E0822", inst.start, inst.end);
+                put(inout output, "the cell of an 'Atomic' is private to its operations");
                 help(
-                    inout o,
+                    inout output,
                     "use `load`, `store`, `swap`, `compare_exchange` or a `fetch_*` operation"
                 );
             }

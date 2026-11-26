@@ -56,6 +56,7 @@
 //! | `component` | `wasm_backend::component::encode` | the component around a core module and its WIT ([`ComponentHook`]) |
 //! | `ebpf` | `ebpf_backend::compile_world` | whole program ([`EbpfHook`]) |
 //! | `verifiers` | `native_verifiers::verify_emitted` | whole report ([`VerifierHook`]) |
+//! | `body` | `native::define_instances_observed_with_trace`, after the entry block | a whole function body ([`body::FUNCTION`]) |
 //!
 //! An [`INSTRUCTION`] request's arguments are the Cranelift value of each
 //! operand of the IR instruction, in `ir_inline::operands` order
@@ -331,6 +332,9 @@ pub struct CodegenHooks {
     pub entry_plans: Option<EntryPlansHook>,
     pub export_plans: Option<ExportPlansHook>,
     pub block_plan: Option<BlockPlanHook>,
+    /// The native walk's whole-function hook (`#2094`, part 6 of `#1509`):
+    /// asked for each function body before the Rust walk ([`body`]).
+    pub body: Option<Hook>,
 }
 
 impl CodegenHooks {
@@ -361,6 +365,7 @@ impl CodegenHooks {
             || self.entry_plans.is_some()
             || self.export_plans.is_some()
             || self.block_plan.is_some()
+            || self.body.is_some()
     }
 }
 
@@ -444,6 +449,41 @@ pub fn hook(family: Family) -> Option<Hook> {
         return None;
     }
     installed().family(family)
+}
+
+/// The [`body::FUNCTION`] request of `function`: whether the `body` hook
+/// emitted its body (`false` when no hook is in effect or it declined).
+pub fn body_request(
+    builder: &mut FunctionBuilder<'_>,
+    module: &mut dyn Module,
+    world: &World,
+    program: &Program,
+    function: &str,
+    args: &[u64],
+) -> Result<bool, String> {
+    if !ACTIVE.load(Ordering::Acquire) {
+        return Ok(false);
+    }
+    let Some(hook) = installed().body else {
+        return Ok(false);
+    };
+    let mut results = Vec::new();
+    hook(&mut Lent {
+        builder,
+        module,
+        world,
+        program,
+        site: Site {
+            function,
+            ..Site::NONE
+        },
+        op: body::FUNCTION,
+        args,
+        ty: None,
+        results: &mut results,
+        jit: JIT.with(Cell::get),
+        optimize: OPTIMIZE.with(Cell::get),
+    })
 }
 
 /// A family request: `None` when no hook is in effect or it declined (the
@@ -1190,6 +1230,33 @@ pub mod scalar {
             .position(|k| *k == kind)
             .map(|i| i as u64 + 1)
     }
+}
+
+/// The native walk's whole-function request (`#2094`, part 6 of `#1509`).
+///
+/// `native::define_instances_observed_with_trace` asks the `body` hook
+/// once per function, after it has built the entry block (the frame plan:
+/// the entry block's parameters, the parameters' variables) and before the
+/// Rust walk (`Codegen::ir_function`). The hook emits the whole body on the
+/// lent builder and answers `Ok(true)`, after which Rust only seals and
+/// finalizes the function, or declines and the Rust walk emits it.
+///
+/// Rust asks only for a function its frame leaves plain: the optimize
+/// path, no generic variables, no trace or `Fail`
+/// record parameter, no caller slot, no `sret` or result buffer, no
+/// function-value or `inout` parameters, no capabilities, not a `fip`
+/// function and no `fip` side tables. Everything else about the body
+/// (which instructions, types and terminators it covers) is the hook's to
+/// decide, and it declines what it does not cover.
+pub mod body {
+    /// Emit one function body. [`super::Site`] names the function (the
+    /// `Program` key) with no block or instruction; args
+    /// `[status, locations, var of each parameter...]`, `status` 1 when
+    /// the function returns a status word beside its value
+    /// (`FnAbi::status`), `locations` 1 when instructions carry their
+    /// source locations (`CodegenOptions::source_locations`), the
+    /// variables in parameter order. No result.
+    pub const FUNCTION: u32 = 1;
 }
 
 /// The `seq` family's helper requests (self-hosting SH4 lane 9, #1283).

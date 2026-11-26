@@ -66,6 +66,10 @@ fn push_bytes(inout out: ChunkSeq[u8], in text: Slice[u8]) {
 }
 
 pub fn push_range(inout out: ChunkSeq[u8], in bytes: ChunkSeq[u8], start: u64, end: u64) {
+    if start <= end && end <= bytes.len() {
+        out.extend(in bytes[start..end]);
+        return;
+    }
     for j in start..end {
         out.push(b8(in bytes, j));
     }
