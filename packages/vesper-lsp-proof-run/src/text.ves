@@ -3,7 +3,7 @@
 // src/lsp/proof_lens.rs, and the `Display` of `io::Error` and
 // `ExitStatus` on Unix.
 
-use @vesper-std/fs::IoError;
+use @vesper-std/fs::{IoError, program_not_found};
 use @vesper-std/process::ExitStatus;
 use self::json::{put, put_u64};
 
@@ -406,7 +406,7 @@ pub fn put_io_error(inout o: ChunkSeq[u8], e: IoError) {
         put(inout o, in "unsupported");
     } else if k == 12 {
         put(inout o, in "out of memory");
-    } else if k == 14 {
+    } else if k == program_not_found() {
         put(inout o, in "program not found");
     } else {
         put(inout o, in "other error");
