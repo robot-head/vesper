@@ -826,3 +826,18 @@ grammar_check = port_checks(
         ]
     ],
 )
+
+simd_test_port = port_checks(
+    "simd",
+    "test-port",
+    [
+        ["-p", "vesper-simd"],
+        ["-p", "vesper-simd", "--features", "vesper-port"],
+    ],
+    [
+        divergence(name, _FEATURE + args + _SERIAL, [failed], [passed])
+        for name, args, failed, passed in [
+            ("scanner", ["--lib"], "tests::native_all_byte_values_and_delimiters", "tests::vesper_port_profile_decisions_match_rust"),
+        ]
+    ],
+)

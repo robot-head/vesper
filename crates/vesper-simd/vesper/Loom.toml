@@ -1,0 +1,10 @@
+[package]
+name = "@vesper/simd"
+version = "0.1.0"
+edition = "2026"
+# The scanner is built through @vesper/cranelift's `.vsys` library, into
+# the Cranelift module the Rust crate lends.
+capability_ceiling = ["Fail", "Ffi"]
+
+[dependencies]
+"@vesper/cranelift" = { version = "^0.1", path = "../../../packages/vesper-cranelift" }
