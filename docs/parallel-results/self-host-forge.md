@@ -450,3 +450,34 @@ itself (part 4b-4).
 |---|---|---|
 | `self_host_sugar` `driver_matches_on_the_import_examples` | the import examples of `crates/vesper-syntax/tests/sugar_expand.rs` and 6 refusals (missing scopes, invalid import, duplicate alias, unknown scope binding, broken and missing declarations) | 0 differences |
 | `self_host_sugar` `driver_matches_on_imported_sugar_test_suites` | the suite and scope programs with their declarations moved into imports: visible by name, under aliases, and behind a shared scope (1,035 programs, 2,070 expansions) | 0 differences, 4 macro-validation gaps |
+
+## Part 5: the hybrid swap of sugar expansion
+
+- **Swap-in point** (`crates/vesper-syntax/src/sugar_expand.rs`):
+  `SugarExpandTable`, `RUST_SUGAR_EXPAND`, `install_sugar_expand` and
+  `rust_expand_sugar`. Every caller (package sugar imports in
+  `src/packages/sugar.rs`, the forge front end in `src/forge_frontend`)
+  goes through `expand_sugar_with_scopes_for_execution`, so the one table
+  covers them all. The default compiler installs nothing.
+- **Module** (`crates/vesper-hybrid/modules/sugar`, `@vesper/hybrid-sugar`):
+  `expand_words` over `@vesper/sugar` `sugar_expand_scoped_words`.
+  `src/sugar_words.rs` writes its input text (scopes that the caller
+  passes as one slice become one scope, as the Rust driver binds them
+  once) and reads its words back into `ExpandedSugar` or the
+  `Diagnostic`. An `emits` row is read with the Rust parser, once per
+  distinct row in a call.
+- **Swap** (`src/swap/sugar.rs`, row `sugar`, open): a source or import
+  that contains `macro` stays on Rust until part 6 ports
+  `macro_source::validate_surface`, and so does a length that the
+  input's 28-bit numbers cannot hold. Both are counted in the
+  `VESPER_HYBRID_STATS` report. The `divergent-sugar` feature reads every
+  source back as having no sugar.
+
+| Test | Cases | Result |
+|---|---|---|
+| `vesper-hybrid` `sugar` `expansion_matches_rust` | every repository `.ves` file and the suite sources without `macro`, plain and with their declarations moved into imports (by name, aliased, behind one shared scope), with and without tests (1,831 programs, 3,662 expansions) | 0 differences |
+| `vesper-hybrid check` with `VESPER_HYBRID_STATS=time` (debug build) | `@vesper-std/core`, `@vesper-std/tests` and `@vesper-std/sort` (38 expansions) | 0 differences, 0 kept on Rust |
+
+The release driver measured 1.38x Rust in part 4c. The debug numbers
+above are not a speed measurement. The row stays open until a release
+ABBA run on a sugar-heavy package and the macro gap close.

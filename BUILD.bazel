@@ -1486,6 +1486,21 @@ vesper_package(
     ],
 )
 
+# @vesper/sugar for the hybrid compiler's sugar expansion swap (SH1 lane
+# 14, #1157).
+vesper_package(
+    name = "sugar_package",
+    srcs = glob(["packages/vesper-sugar/src/**/*.ves"]),
+    manifest = "packages/vesper-sugar/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ast_package",
+        ":front_package",
+        ":std_arena_package",
+        ":std_intern_package",
+    ],
+)
+
 vesper_package(
     name = "ast_package",
     srcs = glob(["packages/vesper-ast/src/**/*.ves"]),
