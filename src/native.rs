@@ -4144,7 +4144,9 @@ impl<M: Module> Codegen<'_, '_, M> {
             && body.box_drops_before_inst.is_empty()
             && body.box_drops_after_inst.is_empty()
             && body.box_drops_before_term.is_empty();
-        if !plain {
+        // Without a `body` hook the request is never read, so the default
+        // compiler skips building it (and the callee scan below).
+        if !plain || crate::codegen_swap::installed().body.is_none() {
             return Ok(false);
         }
         let mut args = vec![
