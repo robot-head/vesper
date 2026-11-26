@@ -5,6 +5,22 @@
 // `BTreeSet<(String, u32)>` and `BTreeMap<String, u32>`).
 
 use @vesper/check-data::util::{inc, u64_at, u8_at};
+use @vesper-std/bytes::ascii::{DIGIT_ZERO, NEWLINE};
+
+// The difference between an upper-case ASCII letter and its lower case.
+pub const CASE_BIT: u8 = 32;
+
+// Subtracted from a hex digit `a`-`f`, or added to its value 10 to 15
+// (`'a' - 10`).
+pub const HEX_LETTER_BASE: u8 = 87;
+
+// A word's bytes, and what rounds a byte length up to whole words
+// (`WORD_BYTES - 1`).
+pub const WORD_BYTES: u64 = 8;
+pub const WORD_ROUND_UP: u64 = 7;
+
+// The starting capacity of a generated text (a binding or JSON document).
+pub const TEXT_CAPACITY: u64 = 65536;
 
 pub fn put(inout o: ChunkSeq[u8], in s: Str) {
     o.extend(in s.as_bytes());
@@ -18,7 +34,7 @@ pub fn put_u64(inout o: ChunkSeq[u8], v: u64) {
     if v >= 10 {
         put_u64(inout o, v / 10);
     }
-    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+    o.push(wrapping_u8(wrapping_add(v % 10, widen_u64(DIGIT_ZERO))));
 }
 
 // Rust's `{:#x}`: `0x` and the lower-case hex digits, no leading zeros.
@@ -33,14 +49,14 @@ fn put_hex_digits(inout o: ChunkSeq[u8], v: u64) {
     }
     let d = v % 16;
     if d < 10 {
-        o.push(wrapping_u8(wrapping_add(d, 48)));
+        o.push(wrapping_u8(wrapping_add(d, widen_u64(DIGIT_ZERO))));
     } else {
-        o.push(wrapping_u8(wrapping_add(d, 87)));
+        o.push(wrapping_u8(wrapping_add(d, widen_u64(HEX_LETTER_BASE))));
     }
 }
 
 pub fn nl(inout o: ChunkSeq[u8]) {
-    o.push(10);
+    o.push(NEWLINE);
 }
 
 pub fn text(in s: Str) -> ChunkSeq[u8] {
