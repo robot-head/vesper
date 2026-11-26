@@ -34,7 +34,9 @@ use @vesper-std/intern::{
     symbol_from_id
 };
 use self::lower::{
-    lower_source
+    L,
+    lower_source,
+    lower_template_source
 };
 use self::dump::{
     dump_ast
@@ -1220,6 +1222,18 @@ pub fn type_name(in a: Ast, t: u32) -> u32 {
 // CST (0 unless the two disagree).
 pub fn ast_dump(in source: Str) -> ChunkSeq[u64] {
     let l = lower_source(in source);
+    dump_words(in l)
+}
+
+// `ast_dump` for the template-scopes parse (`parser::parse_template_scopes`,
+// lower.ves `lower_template_source`), which sugar expansion's template
+// flow analysis reads.
+pub fn ast_template_dump(in source: Str) -> ChunkSeq[u64] {
+    let l = lower_template_source(in source);
+    dump_words(in l)
+}
+
+fn dump_words(in l: L) -> ChunkSeq[u64] {
     let mut text = ChunkSeq::new[u8]();
     dump_ast(in l.ast, inout text);
     let n = text.len();

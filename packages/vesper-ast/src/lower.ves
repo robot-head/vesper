@@ -84,6 +84,7 @@ use @vesper/front::lex::{
     lex,
     max_diagnostics,
     max_source_bytes,
+    max_tokens,
     token_end,
     token_sym,
     token_word,
@@ -94,7 +95,13 @@ use @vesper/front::diag::{
 };
 use @vesper/front::parse::{
     hard_depth,
-    parse_tokens
+    head_word,
+    parse_template_tokens,
+    parse_tokens,
+    sugar_operator_at
+};
+use @vesper/front::lex::{
+    lex_sugar_with_limits
 };
 use @vesper/front::kinds::{
     k_upper,
@@ -265,7 +272,10 @@ pub struct L {
     // Whether the last `declaration` was `pub` (its tuple's `bool`).
     decl_public: bool,
     buf: String,
-    s: Syms
+    s: Syms,
+    // Test blocks are parsed (`include_tests`), as in the template-scopes
+    // profile.
+    tests: bool
 }
 
 // ---------------------------------------------------------------- helpers
@@ -1435,8 +1445,26 @@ fn item_name(in l: L, it: u32) -> u32 {
 
 // `Parser::item`.
 fn item(inout l: L) {
+    if l.p.surface {
+        // An expression macro or sugar declaration: no item.
+        if node_ahead(in l, 224) {
+            skip_node(inout l, 224);
+            return;
+        }
+        if node_ahead(in l, 212) {
+            skip_node(inout l, 212);
+            return;
+        }
+    }
     if at_test_block(in l) {
         skip_test_block(inout l);
+        return;
+    }
+    if l.p.surface && node_ahead(in l, 208) {
+        // An item phrase: its operands are parsed, then dropped.
+        let m = mark(in l);
+        sugar_phrase(inout l, 208);
+        l.stk.truncate(m);
         return;
     }
     l.decl_public = false;
@@ -3168,6 +3196,13 @@ fn block(inout l: L) -> u32 {
             use_model(inout l, start, start);
             continue;
         }
+        if l.p.surface && node_ahead(in l, 209) {
+            let e = sugar_phrase(inout l, 209);
+            if l.p.template_scopes {
+                push_stmt(inout l, e);
+            }
+            continue;
+        }
         if eat(inout l, k_let()) {
             let mutable = at_word(in l, 0, w_mut()) && nth(in l, 1) != k_colon();
             if mutable {
@@ -3293,6 +3328,8 @@ fn expr_rest(inout l: L, k: u8) -> u32 {
         jump_expr(inout l, true)
     } else if k == k_pipe() || k == k_or() {
         closure(inout l)
+    } else if l.p.surface && node_ahead(in l, 210) {
+        sugar_phrase(inout l, 210)
     } else {
         binary(inout l, 0)
     }
@@ -3327,11 +3364,11 @@ fn for_expr(inout l: L) -> u32 {
     expect(inout l, k_in());
     let old = l.no_struct;
     l.no_struct = true;
-    let first = binary(inout l, 2);
+    let first = binary(inout l, 3);
     let iter = if at(in l, k_dot_dot()) || at(in l, k_dot_dot_eq()) {
         let inclusive = at(in l, k_dot_dot_eq());
         bump(inout l);
-        let end = binary(inout l, 2);
+        let end = binary(inout l, 3);
         let s = espan_start(in l, first);
         let e = espan_end(in l, end);
         mk(
@@ -3704,13 +3741,15 @@ fn precedence_bits(k: u8) -> (u8, bool) {
     }
 }
 
+// `Parser::binary` at Rust's levels (twice `precedence`'s, which leaves
+// the odd level 3 for the surface pipeline).
 fn binary(inout l: L, min: u8) -> u32 {
     let k = kind(in l);
     let mut lhs = if k == k_minus() || k == k_bang() || k == k_tilde() {
         let start = cur_start(in l);
         let oi = bump(inout l);
         let op = tok_name(inout l, oi);
-        let v = binary(inout l, 12);
+        let v = binary(inout l, 24);
         let vn = ex(in l, v);
         let end = l.last;
         if k == k_minus() && vn.kind == 1 && negatable(lit_at(in l.ast, vn.a)) {
@@ -3723,13 +3762,36 @@ fn binary(inout l: L, min: u8) -> u32 {
         postfix(inout l)
     };
     loop {
-        let (prec, right) = precedence(kind(in l));
+        let (custom, custom_end) = if l.p.surface {
+            sugar_operator_at(in l.p, idx(in l, 0))
+        } else {
+            (0, 0)
+        };
+        let (core, right) = precedence(kind(in l));
+        let prec: u8 = if custom != 0 {
+            wrapping_u8(custom)
+        } else {
+            wrapping_u8(wrapping_mul(widen_u64(core), 2))
+        };
         if prec == 0 || prec < min {
             break;
         }
-        let oi = bump(inout l);
-        let op = tok_name(inout l, oi);
-        let rhs = if right {
+        let op = if custom != 0 {
+            // `consume_sugar_operator`: the operator's text.
+            let a = cur_start(in l);
+            loop {
+                if l.pos >= custom_end {
+                    break;
+                }
+                bump(inout l);
+            }
+            let b = l.last;
+            intern_text(inout l, a, b)
+        } else {
+            let oi = bump(inout l);
+            tok_name(inout l, oi)
+        };
+        let rhs = if right && custom == 0 {
             expr(inout l)
         } else {
             binary(inout l, wrapping_add(prec, 1))
@@ -3760,6 +3822,12 @@ fn postfix(inout l: L) -> u32 {
         if !(k == k_l_paren() || k == k_l_bracket() || k == k_dot() || k == k_question()) {
             break;
         }
+        if k == k_dot() && l.p.surface {
+            let (custom, _) = sugar_operator_at(in l.p, idx(in l, 0));
+            if custom != 0 {
+                break;
+            }
+        }
         let start = espan_start(in l, e);
         if k == k_l_paren() {
             bump(inout l);
@@ -3773,14 +3841,14 @@ fn postfix(inout l: L) -> u32 {
                 let index = if at(in l, k_dot_dot()) {
                     open_interval(inout l, e, none())
                 } else {
-                    let i = expr(inout l);
+                    let i = dexpr(inout l);
                     if at(in l, k_dot_dot()) {
                         if nth(in l, 1) == k_r_bracket() {
                             open_interval(inout l, e, i)
                         } else {
                             let oi = bump(inout l);
                             let op = tok_name(inout l, oi);
-                            let hi = expr(inout l);
+                            let hi = dexpr(inout l);
                             let s = espan_start(in l, i);
                             let en = espan_end(in l, hi);
                             mk(inout l, 11, s, en, op, i, hi)
@@ -3821,7 +3889,7 @@ fn args(inout l: L) -> u32 {
             break;
         }
         let ps = pass_in(inout l, 2);
-        let value = expr(inout l);
+        let value = dexpr(inout l);
         let a = l
             .ast
             .args
@@ -3848,6 +3916,15 @@ fn primary(inout l: L) -> u32 {
         return mk(inout l, 1, start, end, li, none(), none());
     }
     let k = kind(in l);
+    if l.p.surface
+        && k == k_lower()
+        && nth(in l, 1) == k_bang()
+        && !at_word(in l, 0, w_underscore()) {
+        return surface_macro_call(inout l, start);
+    }
+    if l.p.surface && node_ahead(in l, 223) && !at_word(in l, 0, w_underscore()) {
+        return tagged_literal(inout l, start);
+    }
     if at_path_root(in l) {
         let (name, upper_last) = qualified_path(inout l);
         if upper_last && at(in l, k_l_brace()) && !l.no_struct {
@@ -3887,7 +3964,7 @@ fn primary(inout l: L) -> u32 {
             if at(in l, k_r_paren()) || at(in l, k_eof()) {
                 break;
             }
-            let v = expr(inout l);
+            let v = dexpr(inout l);
             push(inout l, v);
             comma = eat(inout l, k_comma());
             if !comma {
@@ -3932,7 +4009,7 @@ fn array_literal(inout l: L, start: u64) -> u32 {
         if at(in l, k_r_bracket()) || at(in l, k_eof()) {
             break;
         }
-        let value = expr(inout l);
+        let value = dexpr(inout l);
         if l.stk.len() == m && eat(inout l, k_semi()) {
             let mut n = array_length(inout l);
             expect(inout l, k_r_bracket());
@@ -4141,6 +4218,12 @@ fn pattern_list(inout l: L, end: u8) -> u32 {
 
 fn pattern(inout l: L) -> u32 {
     let start = cur_start(in l);
+    if l.p.surface && !at(in l, k_minus()) && node_ahead(in l, 218) {
+        // A pattern phrase is a wildcard to the core parser.
+        skip_node(inout l, 218);
+        let end = l.last;
+        return mkp(inout l, 1, start, end, none(), none(), none());
+    }
     let negative = eat(inout l, k_minus());
     let li = literal(inout l);
     if li != none() {
@@ -4399,7 +4482,8 @@ pub fn lower_source_perm(in source: Str, inout ast_perm: u64, ast_perm_end: u64)
         expansion: 0,
         decl_public: false,
         buf: String::new(),
-        s: out_s
+        s: out_s,
+        tests: false
     };
     let ast_after = stage2_heap_mark();
     ast_perm = stage2_heap_swap(s_ast);
@@ -4448,7 +4532,64 @@ pub fn lower_source(in source: Str) -> L {
         expansion: 0,
         decl_public: false,
         buf: String::new(),
-        s: s
+        s: s,
+        tests: false
+    };
+    if oversized || l.p.halted || l.p.t.limited {
+        return l;
+    }
+    run(inout l);
+    l
+}
+
+// Lexes and parses `source` in the template-scopes profile of the
+// front end (`parser::parse_template_scopes`), then lowers its tables to
+// the AST that parse returns: sugar declarations and item phrases leave no
+// item, a statement or expression phrase is the block of its operands, a
+// tagged literal the tuple of its payload block, a pattern phrase a
+// wildcard, and a sugar operator a binary expression.
+pub fn lower_template_source(in source: Str) -> L {
+    let b = source.as_bytes();
+    let mut a = ast_new();
+    let s = syms_new(inout a);
+    let mut text = String::new();
+    let mut d = diags_new();
+    let t = lex_sugar_with_limits(
+        in b,
+        inout d,
+        max_source_bytes(),
+        max_tokens(),
+        max_diagnostics()
+    );
+    let oversized = t.rejected;
+    if !oversized {
+        text.push_str(in source);
+    }
+    let p = parse_template_tokens(in b, t, d);
+    let mut l = L {
+        p: p,
+        text: text,
+        ast: a,
+        symmap: ChunkSeq::new[u32](),
+        pos: 0,
+        last: 0,
+        no_struct: false,
+        vals: ChunkSeq::new[u32](),
+        vals_trail: ChunkSeq::new[u32](),
+        stk: ChunkSeq::new[u32](),
+        pending: ChunkSeq::new[u32](),
+        consts: ChunkSeq::new[u32](),
+        const_lits: ChunkSeq::new[u32](),
+        const_untyped: ChunkSeq::new[u8](),
+        extra: ChunkSeq::new[u32](),
+        evpos: ChunkSeq::new[u32](),
+        evc: 0,
+        desync: 0,
+        expansion: 0,
+        decl_public: false,
+        buf: String::new(),
+        s: s,
+        tests: true
     };
     if oversized || l.p.halted || l.p.t.limited {
         return l;
@@ -4483,7 +4624,7 @@ fn run(inout l: L) {
     for j in 0..nsig {
         let i = w(u32_at(in l.p.sig, j));
         let k = tk(in l, i);
-        if depth == 0 && k == k_lower() && tword(in l, i) == w_test() && inc(j) < nsig {
+        if !l.tests && depth == 0 && k == k_lower() && tword(in l, i) == w_test() && inc(j) < nsig {
             if tk(in l, w(u32_at(in l.p.sig, inc(j)))) == k_l_brace() {
                 skipping_test = true;
             }
@@ -4513,11 +4654,290 @@ fn run(inout l: L) {
         if at(in l, k_eof()) {
             break;
         }
+        if l.tests && at_test_block(in l) {
+            bump(inout l);
+            bump(inout l);
+            loop {
+                if at(in l, k_r_brace()) || at(in l, k_eof()) {
+                    break;
+                }
+                let before = l.pos;
+                item(inout l);
+                if l.pos == before {
+                    bump(inout l);
+                }
+            }
+            expect(inout l, k_r_brace());
+            continue;
+        }
         let before = l.pos;
         item(inout l);
         if l.pos == before {
             bump(inout l);
         }
     }
-    lower_const_uses(inout l);
+    if !l.p.surface {
+        lower_const_uses(inout l);
+    }
+}
+
+// ---------------------------------------------------------------- surface
+
+// Whether the CST opens a node of `kind` before the next significant
+// token: the front end's decision at the cursor.
+fn node_ahead(in l: L, kind: u32) -> bool {
+    let mut e = l.evc;
+    loop {
+        let v = match l.p.ev.try_get(e) {
+            Option::Some(v) => v,
+            Option::None => return false,
+        };
+        if v == 4294967295 {
+            // A node closing.
+        } else if v >= 2147483648 {
+            if wrapping_sub(v, 2147483648) == kind {
+                return true;
+            }
+        } else if !trivia_kind(tk(in l, w(v))) {
+            return false;
+        }
+        e = inc(e);
+    }
+}
+
+// Consumes the tokens of the next node of `kind` the CST opens (the one
+// `node_ahead` saw), as the front end did.
+fn skip_node(inout l: L, kind: u32) {
+    let mut e = l.evc;
+    let mut depth: u64 = 0;
+    loop {
+        let v = match l.p.ev.try_get(e) {
+            Option::Some(v) => v,
+            Option::None => {
+                l.evc = e;
+                return;
+            },
+        };
+        e = inc(e);
+        if v == 4294967295 {
+            if depth > 0 {
+                depth = wrapping_sub(depth, 1);
+                if depth == 0 {
+                    break;
+                }
+            }
+        } else if v >= 2147483648 {
+            if depth > 0 || wrapping_sub(v, 2147483648) == kind {
+                depth = inc(depth);
+            }
+        } else if depth > 0 && !trivia_kind(tk(in l, w(v))) {
+            l.pos = inc(w(v));
+            l.last = tend(in l, w(v));
+        }
+    }
+    l.evc = e;
+}
+
+fn at_text(in l: L, n: u64, in text: Str) -> bool {
+    let i = idx(in l, n);
+    let a = tstart(in l, i);
+    let b = tend(in l, i);
+    if wrapping_sub(b, a) != text.len() {
+        return false;
+    }
+    let t = text.as_bytes();
+    for j in 0..text.len() {
+        let c = match t.try_get(j) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if u8_at(in l.p.src, wrapping_add(a, j)) != c {
+            return false;
+        }
+    }
+    true
+}
+
+// `Parser::delimited_expr`: a brace inside a call argument, tuple or
+// index cannot close an outer header (surface profile).
+fn dexpr(inout l: L) -> u32 {
+    let header = l.no_struct;
+    if l.p.surface {
+        l.no_struct = false;
+    }
+    let e = expr(inout l);
+    l.no_struct = header;
+    e
+}
+
+// `Parser::sugar_phrase` in the `slot` node: under template scopes the
+// block of its operands (pushed on the stack while read), else the empty
+// tuple.
+fn sugar_phrase(inout l: L, slot: u32) -> u32 {
+    let start = cur_start(in l);
+    let m = mark(in l);
+    if at_text(in l, 0, in "ghost") && head_word(nth(in l, 1)) {
+        bump(inout l);
+    }
+    bump(inout l);
+    sugar_heads(inout l);
+    if at(in l, k_l_brace()) {
+        phrase_body(inout l);
+        loop {
+            if slot == 208 || !node_ahead(in l, 216) {
+                break;
+            }
+            bump(inout l);
+            sugar_heads(inout l);
+            phrase_body(inout l);
+        }
+        if slot == 209 {
+            eat(inout l, k_semi());
+        }
+    } else if slot == 209 {
+        expect(inout l, k_semi());
+    }
+    let end = l.last;
+    if l.p.template_scopes {
+        let stmts = list_from(inout l, m);
+        mk(inout l, 5, start, end, stmts, none(), none())
+    } else {
+        l.stk.truncate(m);
+        mk(inout l, 3, start, end, 0, none(), none())
+    }
+}
+
+fn phrase_body(inout l: L) {
+    if l.p.template_scopes {
+        let b = block(inout l);
+        push_stmt(inout l, b);
+    } else if node_ahead(in l, 211) {
+        skip_node(inout l, 211);
+    }
+}
+
+fn push_let(inout l: L, pat: u32, value: u32) {
+    let t = infer(inout l);
+    let s = l
+        .ast
+        .stmts
+        .alloc(
+            StmtNode {
+                kind: 1,
+                pat: pat,
+                ty: t,
+                value: value,
+                mutable: false
+            }
+        );
+    push(inout l, s.raw());
+}
+
+// `Parser::sugar_heads`: under template scopes each operand is pushed as
+// a statement.
+fn sugar_heads(inout l: L) {
+    let keep = l.p.template_scopes;
+    loop {
+        let k = kind(in l);
+        if k == k_l_brace()
+            || k == k_semi()
+            || k == k_eof()
+            || k == k_r_brace()
+            || k == k_r_paren()
+            || k == k_r_bracket()
+            || k == k_comma() {
+            return;
+        }
+        let before = l.pos;
+        if k == k_let() {
+            bump(inout l);
+            let pat = pattern(inout l);
+            expect(inout l, k_eq());
+            let value = restricted(inout l);
+            if keep {
+                push_let(inout l, pat, value);
+            }
+        } else if k == k_in()
+            || k == k_inout()
+            || k == k_sink()
+            || (k == k_lower() && at_text(in l, 0, in "out")) {
+            bump(inout l);
+            let old = l.no_struct;
+            l.no_struct = true;
+            let e = postfix(inout l);
+            l.no_struct = old;
+            if keep {
+                push_stmt(inout l, e);
+            }
+        } else if k == k_l_paren() {
+            bump(inout l);
+            let a = args(inout l);
+            if keep {
+                for i in 0..list_len(in l.ast, a) {
+                    let ai = idx_from_raw[ArgNode](list_at(in l.ast, a, i));
+                    let value = match l.ast.args.get(ai) {
+                        Option::Some(n) => n.expr,
+                        Option::None => none(),
+                    };
+                    push_stmt(inout l, value);
+                }
+            }
+            expect(inout l, k_r_paren());
+        } else if k == k_l_bracket() {
+            if node_ahead(in l, 211) {
+                skip_node(inout l, 211);
+            }
+        } else if node_ahead(in l, 202) {
+            let e = restricted(inout l);
+            if keep {
+                push_stmt(inout l, e);
+            }
+        } else {
+            // `else` or a bracketed head word.
+            bump(inout l);
+        }
+        if l.pos == before {
+            return;
+        }
+    }
+}
+
+// `Parser::tagged_literal`: the tuple of its payload block under template
+// scopes, else the empty tuple.
+fn tagged_literal(inout l: L, start: u64) -> u32 {
+    let m = mark(in l);
+    bump(inout l);
+    if at(in l, k_string()) {
+        bump(inout l);
+    } else if l.p.template_scopes {
+        let b = block(inout l);
+        push(inout l, b);
+    } else if node_ahead(in l, 211) {
+        skip_node(inout l, 211);
+    }
+    let end = l.last;
+    let values = list_from(inout l, m);
+    mk(inout l, 3, start, end, values, none(), none())
+}
+
+// `Parser::surface_macro_call`: the tuple of its arguments.
+fn surface_macro_call(inout l: L, start: u64) -> u32 {
+    let m = mark(in l);
+    bump(inout l);
+    expect(inout l, k_bang());
+    expect(inout l, k_l_paren());
+    loop {
+        if at(in l, k_r_paren()) || at(in l, k_eof()) {
+            break;
+        }
+        let a = dexpr(inout l);
+        push(inout l, a);
+        if !eat(inout l, k_comma()) {
+            break;
+        }
+    }
+    expect(inout l, k_r_paren());
+    let end = l.last;
+    let values = list_from(inout l, m);
+    mk(inout l, 3, start, end, values, none(), none())
 }

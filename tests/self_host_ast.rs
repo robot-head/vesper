@@ -634,6 +634,7 @@ fn rust_dump(source: &str) -> String {
 struct Ast {
     dump: native::WordFunction,
     count: native::WordFunction,
+    template: native::WordFunction,
 }
 
 fn load_checked(dir: &Path) -> check::Checked {
@@ -665,6 +666,7 @@ fn ast() -> &'static Ast {
         Ast {
             dump: compile("ast_dump"),
             count: compile("ast_count"),
+            template: compile("ast_template_dump"),
         }
     })
 }
@@ -1698,4 +1700,224 @@ fn backends_agree_on_small_sources() {
         let status = std::process::Command::new(&exe).output().unwrap().status;
         assert_eq!(status.code(), Some((expected & 0xff) as i32), "executable");
     }
+}
+
+// ------------------------------------------------------- template scopes
+
+/// The template-scopes AST (`parser::parse_template_cst`, which sugar
+/// expansion's template flow analysis reads) against `ast_template_dump`,
+/// for the source and for it inside `flow::render`'s wrapper function.
+fn compare_template(source: &str) -> Option<String> {
+    for text in [
+        source.to_owned(),
+        format!("fn template_body() {{{source}\n}}"),
+    ] {
+        let Ok(parse) = parser::parse_template_cst(&text) else {
+            continue;
+        };
+        let rust = dump_module(&parse.module);
+        let (vesper, desync) = unpack(&take_words(call(&ast().template, &text)));
+        if rust != vesper {
+            return Some(format!("{text:?}: {}", first_difference(&rust, &vesper)));
+        }
+        if desync != 0 {
+            return Some(format!(
+                "{text:?}: the lowering left the CST's token order {desync} times"
+            ));
+        }
+    }
+    None
+}
+
+/// `$name` and `$..name` holes as identifiers, as the template skeleton
+/// spells them (`template::render`'s markers).
+fn holes_as_markers(template: &str) -> String {
+    let mut out = String::new();
+    let mut rest = template;
+    while let Some(i) = rest.find('$') {
+        out.push_str(&rest[..i]);
+        rest = rest[i + 1..].strip_prefix("..").unwrap_or(&rest[i + 1..]);
+        out.push_str("__sugar1_0_");
+    }
+    out.push_str(rest);
+    out
+}
+
+const TEMPLATE_SOURCES: &[&str] = &[
+    "{ let t = x; inner t { t } }",
+    "{ let t = x; inner inout p { let t = 7; t } }",
+    "with_lock m { g(); } else { h(); }",
+    "retry 3 times { g(); }\n else { h(); }",
+    "atomically let x = load(p) in inout q { x } else { y }",
+    "use_buf out b { b.push(1) }",
+    "guard x > 0 else { return; }",
+    "scratch tmp[256] { use_it(tmp); }",
+    "measure { 1 + 2 } + measure x",
+    "let v = measure { 1 }; v",
+    "json{ a: 1 } + sql\"x\" + tag{ { 1 } }",
+    "twice!(1, (2, 3), [4]) + m!()",
+    "xs |> map(_, g) |> sum() |?> parse(_)",
+    "a .+ b .* c .== d .< e .+= f .-> g",
+    "a.b.+c.d() + -a .+ b",
+    "x = a .+ b |> g()",
+    "match v { point x y => 0, -1 => 1, pair (x, y) => 2, _ => 3 }",
+    "match v { Some(x) | None => with_lock m { x } y => 1 }",
+    "let point x y = v; for q in xs { ghost assert q { } }",
+    "f(json{ a }, [measure { 1 }, 2], (measure { 3 }, 4), xs[measure { 0 }], xs[a..measure { 0 }])",
+    "handle E state s = with_lock m { 0 } in { s } with { return x => x }",
+    "fn made(t: i64) -> i64 { let y = x; with_lock m { y + t } }",
+    "sugar s: stmt { rule (s) => { } } macro twice(x: Expr) -> expr { x + x } fn f() { s { } }",
+    "with_tracing span { fn g() {} } fn h() { defer cleanup(); }",
+    "test { fn g() { defer { } } } fn f() { break; }",
+    "fn break() {} test { fn continue() {} }",
+    "const N: u8 = 3; fn f() -> u8 { N }",
+    "if c { phrase a { 1 } } else { phrase b { 2 } }",
+    "loop { each x in xs { g(x); } break; }",
+    "|x| with_lock m { x }",
+    "inner raw [tokens here] { 1 }",
+];
+
+/// The template-scopes AST on hand-written templates, the sugar sources
+/// of the test suites and their rule templates.
+#[test]
+fn template_scopes_match_the_rust_ast() {
+    let mut cases: Vec<String> = TEMPLATE_SOURCES.iter().map(|s| s.to_string()).collect();
+    for file in [
+        "crates/vesper-syntax/tests/sugar_expand.rs",
+        "crates/vesper-syntax/tests/sugar_surface.rs",
+        "crates/vesper-syntax/tests/source_macro_syntax.rs",
+        "crates/vesper-syntax/src/sugar_expand.rs",
+        "crates/vesper-syntax/src/sugar_expand/template.rs",
+        "crates/vesper-syntax/src/sugar_expand/scope.rs",
+        "crates/vesper-syntax/src/sugar_expand/hygiene.rs",
+        "src/forge_frontend/sugar.rs",
+        "src/packages/sugar.rs",
+        "tests/forge_cli.rs",
+        "tests/package_paths.rs",
+        "tests/self_host_front_v2.rs",
+        "tests/self_host_sugar.rs",
+    ] {
+        let Ok(text) = std::fs::read_to_string(root().join(file)) else {
+            continue;
+        };
+        for literal in rust_string_literals(&text) {
+            // The rule templates of a sugar source, holes as markers.
+            if let Ok(parse) = parser::parse_surface_cst(&literal, Default::default(), true) {
+                for node in parse.syntax().descendants() {
+                    if node.kind() == parser::SUGAR_TEMPLATE {
+                        let r = node.text_range();
+                        let (a, b) = (usize::from(r.start()), usize::from(r.end()));
+                        if b >= a + 2 {
+                            cases.push(holes_as_markers(&literal[a + 1..b - 1]));
+                        }
+                    }
+                }
+            }
+            cases.push(holes_as_markers(&literal));
+            cases.push(literal);
+        }
+    }
+    let failures: Vec<String> = cases.iter().filter_map(|c| compare_template(c)).collect();
+    if !under_bazel() {
+        assert!(cases.len() >= 500, "{} template sources", cases.len());
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} differ:\n{}",
+        failures.len(),
+        cases.len(),
+        failures[..failures.len().min(10)].join("\n")
+    );
+}
+
+/// The template-scopes AST of every repository `.ves` file.
+#[test]
+fn template_scopes_match_the_rust_ast_on_repository_sources() {
+    let mut failures = vec![];
+    for path in repository_sources() {
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Some(d) = compare_template(&source) {
+            failures.push(format!("{}: {}", path.display(), &d[..d.len().min(3000)]));
+            if failures.len() >= 5 {
+                break;
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Surface fragments the template fuzzer splices in.
+const SURFACE_FRAGMENTS: &[&str] = &[
+    "with_lock m { ",
+    "measure ",
+    "json{ ",
+    "sql\"q\"",
+    " |> ",
+    " |?> ",
+    ".+",
+    ".==",
+    "_",
+    "twice!(",
+    "ghost ",
+    "else { ",
+    "in ",
+    "inout ",
+    "out ",
+    "let ",
+    "[raw] ",
+    "point x y",
+    "sugar s: stmt { rule (s) => { } } ",
+    "macro m(x: Expr) -> expr { x } ",
+    "test { ",
+    "}",
+    "{",
+    ")",
+    "(",
+    ";",
+    ",",
+    "=>",
+    "|",
+    "__sugar1_0_",
+    "retry 3 times { ",
+    "defer ",
+];
+
+/// Edited template sources and surface token soup.
+#[test]
+fn template_scopes_match_the_rust_ast_on_the_fuzzed_corpus() {
+    let rounds: usize = std::env::var("VESPER_AST_FUZZ")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3000);
+    let mut rng = Rng(0x7e3b_1157_4b03);
+    let mut failures = vec![];
+    for round in 0..rounds {
+        let mut source = TEMPLATE_SOURCES[rng.below(TEMPLATE_SOURCES.len())].to_owned();
+        for _ in 0..=rng.below(4) {
+            let f = SURFACE_FRAGMENTS[rng.below(SURFACE_FRAGMENTS.len())];
+            let at = rng.below(source.len() + 1);
+            if source.is_char_boundary(at) {
+                if rng.below(3) == 0 && at < source.len() {
+                    let end = (at + 1 + rng.below(6)).min(source.len());
+                    if source.is_char_boundary(end) {
+                        source.replace_range(at..end, f);
+                    }
+                } else {
+                    source.insert_str(at, f);
+                }
+            }
+        }
+        if round % 5 == 4 {
+            source = mutate(&mut rng, &source);
+        }
+        if let Some(d) = compare_template(&source) {
+            failures.push(format!("round {round}: {}", &d[..d.len().min(2000)]));
+            if failures.len() >= 5 {
+                break;
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
