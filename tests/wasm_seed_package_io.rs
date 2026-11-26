@@ -2760,19 +2760,18 @@ const STAGE2_CRANELIFT_PACKAGES: &[(&str, &str, &str, &str)] = &[
         "packages/vesper-codegen-control-emit",
         "use @vesper/codegen-control-emit::control_hook;\npub fn main() -> u64 eff [Ffi[Cranelift]] { control_hook(0) }\n",
     ),
+    (
+        "codegen-numeric",
+        "@vesper/codegen-numeric",
+        "packages/vesper-codegen-numeric",
+        "use @vesper/codegen-numeric::numeric_hook;\npub fn main() -> u64 eff [Ffi[Cranelift]] { numeric_hook(0) }\n",
+    ),
 ];
 
 /// Compiler packages Stage 2 cannot build yet: (stem, package, path, probe
 /// `src/lib.ves`, reason). `stage2_self_compilation_fixed_point` checks that
 /// each one still fails, so a gap that closes moves into [`COMPILER_PACKAGES`].
 const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[
-    (
-        "codegen-numeric",
-        "@vesper/codegen-numeric",
-        "packages/vesper-codegen-numeric",
-        "use @vesper/codegen-numeric::numeric_hook;\npub fn main() -> u64 eff [Ffi[Cranelift]] { numeric_hook(0) }\n",
-        "its float constants call the `from_bits_f64` intrinsic (src/floats.ves `float_const_of`), which the Wasm backend does not lower (WErr ExternalFunction, site 221); its Ffi[Cranelift] calls resolve (#2210)",
-    ),
     (
         "driver-commands",
         "@vesper/driver-commands",

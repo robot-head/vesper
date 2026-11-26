@@ -19,7 +19,7 @@ bazel test //crates/vesper-core/...               # one crate, with its lints
 bazel test //:test/lint_cli                       # one integration test
 bazel test --test_tag_filters=rustfmt //...       # formatting only
 bazel test --test_tag_filters=clippy //...        # Clippy only
-bazel build //:bin/vesper && bazel-bin/bin/vesper --help
+bazel build //:vesper_shipped && bazel-bin/shipped/vesper --help
 bazel run @rules_rust//:rustfmt                   # reformat every Rust target
 ```
 
