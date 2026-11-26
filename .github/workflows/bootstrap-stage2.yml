@@ -28,7 +28,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/aspect
       - name: Install the bootstrap toolchain
-        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          # The Cranelift component Stage 2 calls (#2210).
+          rustup target add --toolchain "$RUSTUP_TOOLCHAIN" wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
       - name: Install pinned wasmtime CLI (v50.0.1) for Stage 2 checks
         run: aspect ci install-wasmtime
@@ -44,6 +47,8 @@ jobs:
         env:
           WASMTIME_BIN: ${{ runner.temp }}/wasmtime/wasmtime
         run: cargo test --locked -p vesper --test wasm_seed_breadth --test wasm_seed_package_io -- --test-threads=1
+      - name: Compare the Cranelift component's objects with the native shim's
+        run: cargo test --locked -p vesper-cranelift-component --test objects -- --test-threads=1
       - name: Compare Vesper package assembly with the bootstrap loader
         run: cargo test --locked -p vesper --test self_host_check_names_packages -- --test-threads=1
       - name: Compare the hybrid driver with the default compiler

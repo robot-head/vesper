@@ -39,10 +39,12 @@ pub mod codes;
 
 /// The Cranelift crates the shim wraps, for Rust hosts that build the same
 /// IR directly (the comparison tests).
-pub use {
-    cranelift_codegen, cranelift_frontend, cranelift_jit, cranelift_module, cranelift_native,
-    cranelift_object,
-};
+pub use {cranelift_codegen, cranelift_frontend, cranelift_module, cranelift_object};
+/// The JIT and host-detection crates exist only outside a Wasm sandbox:
+/// under `wasm32-wasip2` (the Cranelift component that Stage 2 calls, #2210)
+/// there is no host to detect and no code to map.
+#[cfg(not(target_family = "wasm"))]
+pub use {cranelift_jit, cranelift_native};
 
 pub mod extras;
 pub mod lend;
@@ -69,6 +71,7 @@ use cranelift_codegen::ir::{
 };
 use cranelift_codegen::{Context, settings, settings::Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Switch, Variable};
+#[cfg(not(target_family = "wasm"))]
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, DataId, FuncId, Module as _};
 use cranelift_object::{ObjectBuilder, ObjectModule};
@@ -179,16 +182,27 @@ pub enum ModuleKind {
 #[allow(clippy::large_enum_variant)]
 enum Backend {
     Object(ObjectModule),
+    #[cfg(not(target_family = "wasm"))]
     Jit(Box<JITModule>),
     /// A module the Rust host owns and lends for one hook call ([`lend`]).
     /// Its function and data indices are Cranelift's own ids.
     Lent(NonNull<dyn cranelift_module::Module>),
 }
 
+#[cfg(not(target_family = "wasm"))]
+fn is_jit(m: &Backend) -> bool {
+    matches!(m, Backend::Jit(_))
+}
+#[cfg(target_family = "wasm")]
+fn is_jit(_: &Backend) -> bool {
+    false
+}
+
 impl Module {
     fn get(&self) -> &dyn cranelift_module::Module {
         match &self.m {
             Backend::Object(m) => m,
+            #[cfg(not(target_family = "wasm"))]
             Backend::Jit(m) => &**m,
             // SAFETY: `lend` keeps the lent module alive and unaliased for
             // the whole call, and the handle never outlives it.
@@ -198,6 +212,7 @@ impl Module {
     fn get_mut(&mut self) -> &mut dyn cranelift_module::Module {
         match &mut self.m {
             Backend::Object(m) => m,
+            #[cfg(not(target_family = "wasm"))]
             Backend::Jit(m) => &mut **m,
             // SAFETY: as in `get`.
             Backend::Lent(m) => unsafe { m.as_mut() },
@@ -214,6 +229,7 @@ impl Module {
         let ctx = self.ctx.as_mut().expect("context made above");
         let m: &mut dyn cranelift_module::Module = match &mut self.m {
             Backend::Object(m) => m,
+            #[cfg(not(target_family = "wasm"))]
             Backend::Jit(m) => &mut **m,
             // SAFETY: as in `get`.
             Backend::Lent(m) => unsafe { m.as_mut() },
@@ -222,7 +238,7 @@ impl Module {
     }
     fn empty(m: Backend) -> Module {
         Module {
-            jit: matches!(m, Backend::Jit(_)),
+            jit: is_jit(&m),
             m,
             sigs: Vec::new(),
             funcs: Vec::new(),
@@ -438,15 +454,25 @@ fn value(v: u32) -> ir::Value {
 fn block(v: u32) -> ir::Block {
     ir::Block::from_u32(v)
 }
-fn values(ptr: *const u32, len: usize) -> Vec<ir::Value> {
+/// The values of an argument list. [`INVALID`] (the answer of a failed
+/// call) is an error here rather than a Cranelift panic, so the call fails
+/// the same way in every build: debug or release, native or in the Wasm
+/// component, where a panic cannot be caught (#2210).
+fn values(ptr: *const u32, len: usize) -> Result<Vec<ir::Value>, String> {
     // SAFETY: the `.vsys` CSlice contract.
     unsafe { slice(ptr, len) }
         .iter()
-        .map(|&v| value(v))
+        .map(|&v| {
+            if v == INVALID {
+                Err("invalid value number in an argument list".to_string())
+            } else {
+                Ok(value(v))
+            }
+        })
         .collect()
 }
-fn block_args(ptr: *const u32, len: usize) -> Vec<BlockArg> {
-    values(ptr, len).into_iter().map(BlockArg::Value).collect()
+fn block_args(ptr: *const u32, len: usize) -> Result<Vec<BlockArg>, String> {
+    Ok(values(ptr, len)?.into_iter().map(BlockArg::Value).collect())
 }
 fn copy_out(src: &[u8], offset: u64, out: *mut u8, len: usize) -> u64 {
     // SAFETY: the `.vsys` CSlice contract.
@@ -464,7 +490,7 @@ fn copy_out(src: &[u8], offset: u64, out: *mut u8, len: usize) -> u64 {
 fn isa_for(triple: &str, flags: &str) -> Result<cranelift_codegen::isa::OwnedTargetIsa, String> {
     let mut fb = settings::builder();
     let mut isa_builder = if triple.is_empty() {
-        cranelift_native::builder().map_err(str::to_string)?
+        host_isa_builder()?
     } else {
         let t: target_lexicon::Triple = triple.parse().map_err(|e| format!("triple: {e}"))?;
         cranelift_codegen::isa::lookup(t).map_err(|e| e.to_string())?
@@ -489,6 +515,22 @@ fn isa_for(triple: &str, flags: &str) -> Result<cranelift_codegen::isa::OwnedTar
     isa_builder.finish(flags).map_err(|e| e.to_string())
 }
 
+#[cfg(not(target_family = "wasm"))]
+fn host_isa_builder() -> Result<cranelift_codegen::isa::Builder, String> {
+    cranelift_native::builder().map_err(str::to_string)
+}
+/// A Wasm sandbox has no host machine to detect. The embedder names the
+/// target an empty triple means in `VESPER_CRANELIFT_HOST` (a triple; its
+/// baseline ISA, with no detected CPU features, so the output does not
+/// depend on the machine Stage 2 runs on).
+#[cfg(target_family = "wasm")]
+fn host_isa_builder() -> Result<cranelift_codegen::isa::Builder, String> {
+    let triple = std::env::var("VESPER_CRANELIFT_HOST")
+        .map_err(|_| "no host ISA under Wasm: set VESPER_CRANELIFT_HOST or name the triple")?;
+    let t: target_lexicon::Triple = triple.parse().map_err(|e| format!("triple: {e}"))?;
+    cranelift_codegen::isa::lookup(t).map_err(|e| e.to_string())
+}
+
 fn new_module(triple: &str, flags: &str, name: &str) -> Result<Module, String> {
     let isa = isa_for(triple, flags)?;
     let name = if name.is_empty() { "vesper" } else { name };
@@ -498,6 +540,7 @@ fn new_module(triple: &str, flags: &str, name: &str) -> Result<Module, String> {
     Ok(Module::empty(Backend::Object(ObjectModule::new(builder))))
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn new_jit_module(flags: &str, symbols: &str, addrs: &[u64]) -> Result<Module, String> {
     let isa = isa_for("", flags)?;
     let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
@@ -576,11 +619,14 @@ pub unsafe extern "C" fn vcl_module_free(m: *mut Module) {
     if !m.is_null() {
         // SAFETY: the sink import consumes the handle exactly once.
         let m = *unsafe { Box::from_raw(m) };
+        #[cfg(not(target_family = "wasm"))]
         if let Backend::Jit(j) = m.m {
             // SAFETY: freeing the module ends its code; the `.vsys`
             // contract is that no address it handed out is called after.
             unsafe { j.free_memory() };
         }
+        #[cfg(target_family = "wasm")]
+        drop(m);
         died(MODULE);
     }
 }
@@ -1854,7 +1900,7 @@ pub unsafe extern "C" fn vcl_call(
 ) -> u32 {
     with_builder(b, INVALID, |b| {
         // Converted inside the panic boundary: an invalid number panics.
-        let args = values(args, args_len);
+        let args = values(args, args_len)?;
         let i = b.fb().ins().call(ir::FuncRef::from_u32(fref), &args);
         placed(b, i);
         Ok(b.fb().inst_results(i).len() as u32)
@@ -1870,7 +1916,7 @@ pub unsafe extern "C" fn vcl_call_indirect(
 ) -> u32 {
     with_builder(b, INVALID, |b| {
         // Converted inside the panic boundary: an invalid number panics.
-        let args = values(args, args_len);
+        let args = values(args, args_len)?;
         let i = b
             .fb()
             .ins()
@@ -1888,7 +1934,7 @@ pub unsafe extern "C" fn vcl_return_call(
 ) {
     with_builder(b, (), |b| {
         // Converted inside the panic boundary: an invalid number panics.
-        let args = values(args, args_len);
+        let args = values(args, args_len)?;
         let i = b.fb().ins().return_call(ir::FuncRef::from_u32(fref), &args);
         placed(b, i);
         Ok(())
@@ -1898,7 +1944,7 @@ pub unsafe extern "C" fn vcl_return_call(
 pub unsafe extern "C" fn vcl_jump(b: *mut Builder, blk: u32, args: *const u32, args_len: usize) {
     with_builder(b, (), |b| {
         // Converted inside the panic boundary: an invalid number panics.
-        let args = block_args(args, args_len);
+        let args = block_args(args, args_len)?;
         let i = b.fb().ins().jump(block(blk), &args);
         placed(b, i);
         Ok(())
@@ -1917,8 +1963,8 @@ pub unsafe extern "C" fn vcl_brif(
 ) {
     with_builder(b, (), |b| {
         // Converted inside the panic boundary: an invalid number panics.
-        let t = block_args(then_args, then_len);
-        let e = block_args(else_args, else_len);
+        let t = block_args(then_args, then_len)?;
+        let e = block_args(else_args, else_len)?;
         let i = b
             .fb()
             .ins()
@@ -1931,7 +1977,7 @@ pub unsafe extern "C" fn vcl_brif(
 pub unsafe extern "C" fn vcl_return(b: *mut Builder, vals: *const u32, len: usize) {
     with_builder(b, (), |b| {
         // Converted inside the panic boundary: an invalid number panics.
-        let vals = values(vals, len);
+        let vals = values(vals, len)?;
         let i = b.fb().ins().return_(&vals);
         placed(b, i);
         Ok(())
@@ -1985,7 +2031,13 @@ pub unsafe extern "C" fn vcl_jit_module_new(
                 slice(addrs, addrs_len),
             )
         };
-        new_jit_module(text(f)?, text(s)?, a)
+        #[cfg(not(target_family = "wasm"))]
+        return new_jit_module(text(f)?, text(s)?, a);
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = (text(f)?, text(s)?, a);
+            Err::<Module, String>("no JIT under Wasm".into())
+        }
     })
     .unwrap_or_else(|p| Err(panic_message(p)));
     match made {
@@ -2002,6 +2054,7 @@ pub unsafe extern "C" fn vcl_jit_module_new(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vcl_module_finalize(m: *mut Module) -> u32 {
     with_module(m, 1, |m| match &mut m.m {
+        #[cfg(not(target_family = "wasm"))]
         Backend::Jit(j) => {
             j.finalize_definitions().map_err(|e| e.to_string())?;
             Ok(0)
@@ -2014,8 +2067,10 @@ pub unsafe extern "C" fn vcl_module_finalize(m: *mut Module) -> u32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vcl_function_address(m: *mut Module, func: u32) -> u64 {
     with_module(m, 0, |m| {
+        #[cfg_attr(target_family = "wasm", allow(unused_variables))]
         let id = func_id(m, func)?;
         match &m.m {
+            #[cfg(not(target_family = "wasm"))]
             Backend::Jit(j) => Ok(j.get_finalized_function(id) as usize as u64),
             _ => Err("only a JIT module has function addresses".into()),
         }

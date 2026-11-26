@@ -5841,6 +5841,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-cranelift-component"
+version = "0.1.0"
+dependencies = [
+ "cranelift-codegen 0.125.4",
+ "vesper",
+ "vesper-cranelift-sys",
+ "wasmtime",
+ "wasmtime-wasi",
+ "wit-component",
+ "wit-parser",
+]
+
+[[package]]
 name = "vesper-cranelift-sys"
 version = "0.1.0"
 dependencies = [
