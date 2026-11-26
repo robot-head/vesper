@@ -608,12 +608,7 @@ pub fn lower_plan(
                                             Native::Elided => (),
                                             native => out
                                                 .natives
-                                                .push(
-                                                    NativeRec {
-                                                        source: bi,
-                                                        native: native
-                                                    }
-                                                ),
+                                                .push(NativeRec { source: bi, native: native }),
                                         }
                                     },
                                     Option::None => (),

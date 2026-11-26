@@ -903,11 +903,7 @@ impl Planner {
             self
                 .effects
                 .push(
-                    BoundEffect {
-                        name: d.name,
-                        a: a,
-                        n: n32(wrapping_sub(self.bound.len(), w(a)))
-                    }
+                    BoundEffect { name: d.name, a: a, n: n32(wrapping_sub(self.bound.len(), w(a))) }
                 );
         }
         for i in 0..bindings.len() {
@@ -1002,11 +998,7 @@ impl Planner {
         for i in 0..self.effects.len() {
             let e = match self.effects.try_get(i) {
                 Option::Some(e) => e,
-                Option::None => BoundEffect {
-                    name: 0,
-                    a: 0,
-                    n: 0
-                },
+                Option::None => BoundEffect { name: 0, a: 0, n: 0 },
             };
             if i > 0 {
                 put(inout o, ", ");
@@ -1137,11 +1129,7 @@ fn bound_at(in s: ChunkSeq[BoundOp], i: u64) -> BoundOp {
 pub fn binding_at(in s: ChunkSeq[EffBinding], i: u64) -> EffBinding {
     match s.try_get(i) {
         Option::Some(b) => b,
-        Option::None => EffBinding {
-            eff_name: 0,
-            a: 0,
-            n: 0
-        },
+        Option::None => EffBinding { eff_name: 0, a: 0, n: 0 },
     }
 }
 

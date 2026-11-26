@@ -322,11 +322,7 @@ pub fn db_log(in db: Db) -> ChunkSeq[u64] {
 }
 
 pub fn oracle_new() -> Oracle {
-    Oracle {
-        keys: ChunkSeq::new(),
-        at: ChunkSeq::new(),
-        data: ChunkSeq::new()
-    }
+    Oracle { keys: ChunkSeq::new(), at: ChunkSeq::new(), data: ChunkSeq::new() }
 }
 
 // Appends one recorded result; results must come sorted by key.

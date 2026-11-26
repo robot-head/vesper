@@ -212,16 +212,7 @@ pub fn load_data(inout ds: D, inout q: Q, p: u64) -> u64 {
         let nlen = ex(in q, wrapping_add(at, 1));
         let nrows = ex(in q, wrapping_add(at, 2));
         at = wrapping_add(at, 3);
-        ds
-            .dtabs
-            .push(
-                CTab {
-                    noff: noff,
-                    nlen: nlen,
-                    start: at,
-                    n: nrows
-                }
-            );
+        ds.dtabs.push(CTab { noff: noff, nlen: nlen, start: at, n: nrows });
         for r in 0..nrows {
             at = wrapping_add(wrapping_add(at, 1), wrapping_mul(ex(in q, at), 3));
         }
@@ -289,16 +280,7 @@ pub fn load_catalog_ex(inout q: Q, p: u64) -> u64 {
         let nc = ex(in q, wrapping_add(at, 2));
         at = wrapping_add(at, 3);
         let start = q.cols.len();
-        q
-            .tabs
-            .push(
-                CTab {
-                    noff: noff,
-                    nlen: nlen,
-                    start: start,
-                    n: nc
-                }
-            );
+        q.tabs.push(CTab { noff: noff, nlen: nlen, start: start, n: nc });
         for c in 0..nc {
             let col = CCol {
                 noff: ex(in q, at),
@@ -323,16 +305,7 @@ pub fn load_data_in(inout ds: D, in s: Slice[u64], p: u64) -> u64 {
         let nlen = sw(in s, wrapping_add(at, 1));
         let nrows = sw(in s, wrapping_add(at, 2));
         at = wrapping_add(at, 3);
-        ds
-            .dtabs
-            .push(
-                CTab {
-                    noff: noff,
-                    nlen: nlen,
-                    start: at,
-                    n: nrows
-                }
-            );
+        ds.dtabs.push(CTab { noff: noff, nlen: nlen, start: at, n: nrows });
         for r in 0..nrows {
             at = wrapping_add(wrapping_add(at, 1), wrapping_mul(sw(in s, at), 3));
         }

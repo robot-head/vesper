@@ -86,13 +86,7 @@ fn imm(v: i32) -> Operand {
 pub fn slot_at(in s: ChunkSeq[RawInsn], i: u64) -> RawInsn {
     match s.try_get(i) {
         Option::Some(r) => r,
-        Option::None => RawInsn {
-            code: 0,
-            dst: 0,
-            src: 0,
-            off: 0,
-            imm: 0
-        },
+        Option::None => RawInsn { code: 0, dst: 0, src: 0, off: 0, imm: 0 },
     }
 }
 
@@ -128,27 +122,11 @@ impl Asm {
     }
 
     pub fn alu64(inout self, op: AluOp, dst: u8, src: Operand) {
-        self
-            .insn(
-                Insn::Alu {
-                    wide: true,
-                    op: op,
-                    dst: dst,
-                    src: src
-                }
-            );
+        self.insn(Insn::Alu { wide: true, op: op, dst: dst, src: src });
     }
 
     pub fn alu32(inout self, op: AluOp, dst: u8, src: Operand) {
-        self
-            .insn(
-                Insn::Alu {
-                    wide: false,
-                    op: op,
-                    dst: dst,
-                    src: src
-                }
-            );
+        self.insn(Insn::Alu { wide: false, op: op, dst: dst, src: src });
     }
 
     pub fn mov_reg(inout self, dst: u8, src: u8) {
@@ -168,73 +146,29 @@ impl Asm {
     }
 
     pub fn endian(inout self, kind: Endian, bits: u8, dst: u8) {
-        self
-            .insn(
-                Insn::Endian {
-                    kind: kind,
-                    bits: bits,
-                    dst: dst
-                }
-            );
+        self.insn(Insn::Endian { kind: kind, bits: bits, dst: dst });
     }
 
     pub fn ld_imm64(inout self, dst: u8, v: u64) {
-        self
-            .insn(
-                Insn::LdImm64 {
-                    dst: dst,
-                    imm: Imm64::Value(v)
-                }
-            );
+        self.insn(Insn::LdImm64 { dst: dst, imm: Imm64::Value(v) });
     }
 
     pub fn ld_map(inout self, dst: u8, map: u64) {
         self.relocs.push(self.slots.len());
         self.relocs.push(map);
-        self
-            .insn(
-                Insn::LdImm64 {
-                    dst: dst,
-                    imm: Imm64::MapFd(wrapping_i32(map))
-                }
-            );
+        self.insn(Insn::LdImm64 { dst: dst, imm: Imm64::MapFd(wrapping_i32(map)) });
     }
 
     pub fn ldx(inout self, size: Size, dst: u8, src: u8, off: i16) {
-        self
-            .insn(
-                Insn::Ldx {
-                    size: size,
-                    dst: dst,
-                    src: src,
-                    off: off,
-                    sign_extend: false
-                }
-            );
+        self.insn(Insn::Ldx { size: size, dst: dst, src: src, off: off, sign_extend: false });
     }
 
     pub fn stx(inout self, size: Size, dst: u8, off: i16, src: u8) {
-        self
-            .insn(
-                Insn::Stx {
-                    size: size,
-                    dst: dst,
-                    src: src,
-                    off: off
-                }
-            );
+        self.insn(Insn::Stx { size: size, dst: dst, src: src, off: off });
     }
 
     pub fn st(inout self, size: Size, dst: u8, off: i16, v: i32) {
-        self
-            .insn(
-                Insn::St {
-                    size: size,
-                    dst: dst,
-                    off: off,
-                    imm: v
-                }
-            );
+        self.insn(Insn::St { size: size, dst: dst, off: off, imm: v });
     }
 
     pub fn atomic_add(inout self, size: Size, dst: u8, off: i16, src: u8) {
@@ -242,9 +176,7 @@ impl Asm {
             .insn(
                 Insn::Atomic {
                     size: size,
-                    op: AtomicOp::Add {
-                        fetch: false
-                    },
+                    op: AtomicOp::Add { fetch: false },
                     dst: dst,
                     src: src,
                     off: off
@@ -257,15 +189,7 @@ impl Asm {
     }
 
     pub fn call_local(inout self, target: u64) {
-        self
-            .fixes
-            .push(
-                Fix {
-                    at: self.slots.len(),
-                    label: target,
-                    call: true
-                }
-            );
+        self.fixes.push(Fix { at: self.slots.len(), label: target, call: true });
         self.insn(Insn::Call(CallTarget::Local(0)));
     }
 
@@ -284,17 +208,7 @@ impl Asm {
                 self.lines.truncate(wrapping_sub(n, 1));
             }
         }
-        self
-            .lines
-            .push(
-                LineRow {
-                    slot: slot,
-                    line: line,
-                    col: col,
-                    ta: ta,
-                    tb: tb
-                }
-            );
+        self.lines.push(LineRow { slot: slot, line: line, col: col, ta: ta, tb: tb });
     }
 
     pub fn function(inout self, name: u32, entry: u64) {
@@ -307,43 +221,13 @@ impl Asm {
     }
 
     pub fn ja(inout self, target: u64) {
-        self
-            .fixes
-            .push(
-                Fix {
-                    at: self.slots.len(),
-                    label: target,
-                    call: false
-                }
-            );
-        self
-            .insn(
-                Insn::Ja {
-                    off: 0
-                }
-            );
+        self.fixes.push(Fix { at: self.slots.len(), label: target, call: false });
+        self.insn(Insn::Ja { off: 0 });
     }
 
     pub fn jmp(inout self, op: JmpOp, dst: u8, src: Operand, target: u64) {
-        self
-            .fixes
-            .push(
-                Fix {
-                    at: self.slots.len(),
-                    label: target,
-                    call: false
-                }
-            );
-        self
-            .insn(
-                Insn::Jcond {
-                    wide: true,
-                    op: op,
-                    dst: dst,
-                    src: src,
-                    off: 0
-                }
-            );
+        self.fixes.push(Fix { at: self.slots.len(), label: target, call: false });
+        self.insn(Insn::Jcond { wide: true, op: op, dst: dst, src: src, off: 0 });
     }
 
     pub fn jmp_i(inout self, op: JmpOp, dst: u8, v: i32, target: u64) {
@@ -368,11 +252,7 @@ impl Asm {
         for k in 0..self.fixes.len() {
             let f = match self.fixes.try_get(k) {
                 Option::Some(x) => x,
-                Option::None => Fix {
-                    at: 0,
-                    label: 0,
-                    call: false
-                },
+                Option::None => Fix { at: 0, label: 0, call: false },
             };
             let target = self.resolve(f.label);
             if target == UNBOUND {

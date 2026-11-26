@@ -154,49 +154,28 @@ pub fn wit_new() -> Wit {
 pub fn ty_at(in w: Wit, t: u32) -> Ty {
     match w.tys.try_get(widen_u64(t)) {
         Option::Some(x) => x,
-        Option::None => Ty {
-            kind: T_PRIM,
-            a: 0,
-            n: 0
-        },
+        Option::None => Ty { kind: T_PRIM, a: 0, n: 0 },
     }
 }
 
 pub fn def_at(in w: Wit, d: u64) -> Def {
     match w.defs.try_get(d) {
         Option::Some(x) => x,
-        Option::None => Def {
-            kind: 0,
-            n0: 0,
-            nn: 0,
-            f0: 0,
-            fnum: 0,
-            ty: 0
-        },
+        Option::None => Def { kind: 0, n0: 0, nn: 0, f0: 0, fnum: 0, ty: 0 },
     }
 }
 
 pub fn field_at(in w: Wit, i: u64) -> Field {
     match w.fields.try_get(i) {
         Option::Some(x) => x,
-        Option::None => Field {
-            n0: 0,
-            nn: 0,
-            ty: NONE32
-        },
+        Option::None => Field { n0: 0, nn: 0, ty: NONE32 },
     }
 }
 
 pub fn func_at(in w: Wit, i: u64) -> Func {
     match w.funcs.try_get(i) {
         Option::Some(x) => x,
-        Option::None => Func {
-            n0: 0,
-            nn: 0,
-            p0: 0,
-            pn: 0,
-            res: NONE32
-        },
+        Option::None => Func { n0: 0, nn: 0, p0: 0, pn: 0, res: NONE32 },
     }
 }
 
@@ -314,15 +293,7 @@ fn intern(inout w: Wit, kind: u8, a: u64, n: u64) -> u32 {
         }
     }
     let at = wrapping_u32(w.tys.len());
-    w
-        .tys
-        .push(
-            Ty {
-                kind: kind,
-                a: a,
-                n: n
-            }
-        );
+    w.tys.push(Ty { kind: kind, a: a, n: n });
     at
 }
 
@@ -332,11 +303,7 @@ fn intern_tuple(inout w: Wit, a: u64, n: u64) -> u32 {
     for i in 0..w.tys.len() {
         let t = match w.tys.try_get(i) {
             Option::Some(t) => t,
-            Option::None => Ty {
-                kind: T_PRIM,
-                a: 0,
-                n: 0
-            },
+            Option::None => Ty { kind: T_PRIM, a: 0, n: 0 },
         };
         if t.kind == T_TUPLE && t.n == n {
             let mut eq = true;
@@ -353,15 +320,7 @@ fn intern_tuple(inout w: Wit, a: u64, n: u64) -> u32 {
         }
     }
     let at = wrapping_u32(w.tys.len());
-    w
-        .tys
-        .push(
-            Ty {
-                kind: T_TUPLE,
-                a: a,
-                n: n
-            }
-        );
+    w.tys.push(Ty { kind: T_TUPLE, a: a, n: n });
     at
 }
 
@@ -491,14 +450,7 @@ fn def(inout c: Cur, in b: Slice[u8], inout w: Wit, kind: u8) {
             punct(inout c, in b, inout w, C_RPAREN);
         }
         let n0 = name(inout w, in b, fs, fe);
-        items
-            .push(
-                Field {
-                    n0: n0,
-                    nn: wrapping_sub(fe, fs),
-                    ty: t
-                }
-            );
+        items.push(Field { n0: n0, nn: wrapping_sub(fe, fs), ty: t });
         if peek(inout c, in b) == C_COMMA {
             c.pos = inc(c.pos);
         }
@@ -514,16 +466,7 @@ fn def(inout c: Cur, in b: Slice[u8], inout w: Wit, kind: u8) {
     let t = intern(inout w, T_NAMED, d, 0);
     w
         .defs
-        .push(
-            Def {
-                kind: kind,
-                n0: n0,
-                nn: wrapping_sub(e, s),
-                f0: f0,
-                fnum: items.len(),
-                ty: t
-            }
-        );
+        .push(Def { kind: kind, n0: n0, nn: wrapping_sub(e, s), f0: f0, fnum: items.len(), ty: t });
 }
 
 // `name: func(%p: ty, ...) [-> ty];` after its name `b[s..e]`.
@@ -540,14 +483,7 @@ fn func(inout c: Cur, in b: Slice[u8], inout w: Wit, s: u64, e: u64) {
         punct(inout c, in b, inout w, C_COLON);
         let t = ty(inout c, in b, inout w, 0);
         let n0 = name(inout w, in b, ps, pe);
-        params
-            .push(
-                Field {
-                    n0: n0,
-                    nn: wrapping_sub(pe, ps),
-                    ty: t
-                }
-            );
+        params.push(Field { n0: n0, nn: wrapping_sub(pe, ps), ty: t });
         if peek(inout c, in b) == C_COMMA {
             c.pos = inc(c.pos);
         }
@@ -566,17 +502,7 @@ fn func(inout c: Cur, in b: Slice[u8], inout w: Wit, s: u64, e: u64) {
     let p0 = w.fields.len();
     w.fields.extend(in params.as_slice());
     let n0 = name(inout w, in b, s, e);
-    w
-        .funcs
-        .push(
-            Func {
-                n0: n0,
-                nn: wrapping_sub(e, s),
-                p0: p0,
-                pn: params.len(),
-                res: res
-            }
-        );
+    w.funcs.push(Func { n0: n0, nn: wrapping_sub(e, s), p0: p0, pn: params.len(), res: res });
 }
 
 // The text of a world item up to its `;`, blanks removed.
@@ -660,9 +586,7 @@ fn plugin(inout c: Cur, in b: Slice[u8], inout w: Wit) {
 // Read the backend's WIT; `err` is 0 when it is inside the subset.
 pub fn parse(in b: Slice[u8]) -> Wit {
     let mut w = wit_new();
-    let mut c = Cur {
-        pos: 0
-    };
+    let mut c = Cur { pos: 0 };
     keyword(inout c, in b, inout w, in "package".as_bytes());
     let it = item(inout c, in b, inout w);
     let x = it.as_slice();
@@ -675,17 +599,7 @@ pub fn parse(in b: Slice[u8]) -> Wit {
     let run_name = w.text.len();
     w.text.extend(in "run".as_bytes());
     w.run_func = w.funcs.len();
-    w
-        .funcs
-        .push(
-            Func {
-                n0: run_name,
-                nn: 3,
-                p0: 0,
-                pn: 0,
-                res: result_ty
-            }
-        );
+    w.funcs.push(Func { n0: run_name, nn: 3, p0: 0, pn: 0, res: result_ty });
     w.e0 = w.funcs.len();
     let (ks, ke) = word(inout c, in b, inout w);
     if same(in b, ks, ke, in "world".as_bytes()) {

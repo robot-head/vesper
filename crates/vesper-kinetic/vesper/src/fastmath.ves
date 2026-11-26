@@ -365,11 +365,7 @@ fn rem_pio2_medium(x: f64) -> Reduced {
         }
     }
     let y1 = (r - y0) - w;
-    Reduced {
-        n: n,
-        y0: y0,
-        y1: y1
-    }
+    Reduced { n: n, y0: y0, y1: y1 }
 }
 
 pub fn sin(x: f64) -> f64 {

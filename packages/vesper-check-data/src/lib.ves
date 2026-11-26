@@ -74,9 +74,7 @@ fn line_debug(inout o: ChunkSeq[u8], in c: Ctx, ty: u32) {
 // (name index, type index)).
 pub fn check_data_types(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let mut o = ChunkSeq::new[u8]();
     let n = r.word(in b);
@@ -117,9 +115,7 @@ pub fn check_data_types(in input: Str) -> ChunkSeq[u64] {
 //   `partial_ops` and `overflow_ops` membership (O: two digits).
 pub fn check_data_world(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let mut o = ChunkSeq::new[u8]();
     let none = bounds_new();
@@ -218,9 +214,7 @@ pub fn check_data_world(in input: Str) -> ChunkSeq[u64] {
 // round-trip test and as the cheapest entry to time the decoder with.
 pub fn check_data_sizes(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let mut out = ChunkSeq::new[u64]();
     out.push(c.names.len());

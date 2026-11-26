@@ -603,11 +603,7 @@ struct A {
 }
 
 fn asm(params: u64) -> A {
-    A {
-        c: code_new(),
-        params: wrapping_u32(params),
-        next: wrapping_u32(params)
-    }
+    A { c: code_new(), params: wrapping_u32(params), next: wrapping_u32(params) }
 }
 
 impl A {

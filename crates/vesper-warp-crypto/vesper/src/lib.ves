@@ -155,21 +155,12 @@ fn cipher_hash(c: Cipher) -> u32 {
 
 fn check_pn(pn: u64) eff [Fail[WcErr]] {
     if pn >= PN_LIMIT {
-        Fail::raise(
-            WcErr::PacketNumberOutOfRange {
-                pn: pn
-            }
-        );
+        Fail::raise(WcErr::PacketNumberOutOfRange { pn: pn });
     }
 }
 
 fn too_short(needed: u64, available: u64) eff [Fail[WcErr]] {
-    Fail::raise(
-        WcErr::BufferTooShort {
-            needed: needed,
-            available: available
-        }
-    );
+    Fail::raise(WcErr::BufferTooShort { needed: needed, available: available });
 }
 
 // `start + len`, raising `BufferTooShort` past `available` (or on
@@ -225,12 +216,7 @@ fn expand_label(
 pub fn secret_check(c: Cipher, len: u64) eff [Fail[WcErr]] {
     let expected = cipher_secret_len(c);
     if len != expected {
-        Fail::raise(
-            WcErr::SecretLength {
-                expected: expected,
-                actual: len
-            }
-        );
+        Fail::raise(WcErr::SecretLength { expected: expected, actual: len });
     }
 }
 
@@ -261,11 +247,7 @@ pub fn key_material(
 
 fn check_cid(len: u64) eff [Fail[WcErr]] {
     if len > MAX_CID_LEN {
-        Fail::raise(
-            WcErr::ConnectionIdTooLong {
-                len: len
-            }
-        );
+        Fail::raise(WcErr::ConnectionIdTooLong { len: len });
     }
 }
 
@@ -438,20 +420,10 @@ fn sample_start(len: u64, pn_offset: u64) -> u64 eff [Fail[WcErr]] {
     let start = wrapping_add(pn_offset, 4);
     let end = wrapping_add(start, SAMPLE_LEN);
     if start < pn_offset || end < start {
-        Fail::raise(
-            WcErr::SampleOutOfBounds {
-                sample_end: U64_MAX,
-                packet_len: len
-            }
-        );
+        Fail::raise(WcErr::SampleOutOfBounds { sample_end: U64_MAX, packet_len: len });
     }
     if end > len {
-        Fail::raise(
-            WcErr::SampleOutOfBounds {
-                sample_end: end,
-                packet_len: len
-            }
-        );
+        Fail::raise(WcErr::SampleOutOfBounds { sample_end: end, packet_len: len });
     }
     start
 }
@@ -739,18 +711,9 @@ pub fn sealer_ticket(inout s: SealerSt, pn: u64) eff [Fail[WcErr]] {
     check_pn(pn);
     if pn < s.next_pn {
         if wrapping_add(pn, 1) == s.next_pn {
-            Fail::raise(
-                WcErr::PacketNumberReused {
-                    pn: pn
-                }
-            );
+            Fail::raise(WcErr::PacketNumberReused { pn: pn });
         }
-        Fail::raise(
-            WcErr::PacketNumberRegression {
-                requested: pn,
-                next_allowed: s.next_pn
-            }
-        );
+        Fail::raise(WcErr::PacketNumberRegression { requested: pn, next_allowed: s.next_pn });
     }
     if s.issued_this_key >= s.confidentiality_limit {
         Fail::raise(WcErr::ConfidentialityLimitReached);
@@ -815,12 +778,7 @@ fn check_seal(
     // pn_offset < total, so this cannot overflow.
     let sample_end = wrapping_add(wrapping_add(pn_offset, 4), SAMPLE_LEN);
     if sample_end > total {
-        Fail::raise(
-            WcErr::SampleOutOfBounds {
-                sample_end: sample_end,
-                packet_len: total
-            }
-        );
+        Fail::raise(WcErr::SampleOutOfBounds { sample_end: sample_end, packet_len: total });
     }
     if !truncated_matches(in buf, pn_offset, pn_len, pn) {
         Fail::raise(WcErr::PacketNumberMismatch);

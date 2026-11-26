@@ -221,11 +221,7 @@ impl Nic {
 
     // Publishes an rx descriptor for a pool buffer (space already checked).
     fn publish_rx(inout self, base: u64, offset: u32, len: u32) {
-        let d = XdpDesc {
-            addr: wrapping_add(base, widen_u64(offset)),
-            len: len,
-            options: 0
-        };
+        let d = XdpDesc { addr: wrapping_add(base, widen_u64(offset)), len: len, options: 0 };
         self.rx.push_desc(d);
         match self.chunk_of(base) {
             Option::Some(chunk) => self.note(T_NIC_DELIVER, chunk),
@@ -261,9 +257,7 @@ impl Nic {
         self.publish_rx(base, headroom, wrapping_u32(len));
         self.stats.rx_delivered = wrapping_add(self.stats.rx_delivered, 1);
         match self.chunk_of(base) {
-            Option::Some(chunk) => DeliverOutcome::Delivered {
-                chunk: chunk
-            },
+            Option::Some(chunk) => DeliverOutcome::Delivered { chunk: chunk },
             Option::None => DeliverOutcome::NoBuffer,
         }
     }

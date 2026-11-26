@@ -178,12 +178,7 @@ pub fn set_u64(inout s: ChunkSeq[u64], i: u64, x: u64) {
 }
 
 fn no_val() -> Val {
-    Val {
-        kind: V_ALIAS,
-        a: NONE,
-        b: 0,
-        ty: TY_OTHER
-    }
+    Val { kind: V_ALIAS, a: NONE, b: 0, ty: TY_OTHER }
 }
 
 fn no_blk() -> Blk {
@@ -229,9 +224,7 @@ fn read_list(inout r: Reader, in b: Slice[u8], inout pool: ChunkSeq[u32]) -> u32
 
 // Reads the words of `clif_words::encode`.
 pub fn read_func(in b: Slice[u8]) -> Func {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let version = r.word(in b);
     let flags = r.word(in b);
     let nv = r.word(in b);
@@ -263,16 +256,7 @@ pub fn read_func(in b: Slice[u8]) -> Func {
         let k = r.word(in b);
         let a = n32(r.word(in b));
         let bb = n32(r.word(in b));
-        f
-            .vals
-            .push(
-                Val {
-                    kind: k & 255,
-                    a: a,
-                    b: bb,
-                    ty: k >> 8
-                }
-            );
+        f.vals.push(Val { kind: k & 255, a: a, b: bb, ty: k >> 8 });
     }
     for i in 0..nb {
         f.blks.push(no_blk());
@@ -336,15 +320,7 @@ pub fn read_func(in b: Slice[u8]) -> Func {
             let blk = n32(r.word(in b));
             let a0 = n32(f.args.len());
             let an = read_list(inout r, in b, inout f.args);
-            f
-                .dests
-                .push(
-                    Dst {
-                        block: blk,
-                        a0: a0,
-                        an: an
-                    }
-                );
+            f.dests.push(Dst { block: blk, a0: a0, an: an });
         }
         f.put_inst(i, row);
     }
@@ -388,11 +364,7 @@ impl Func {
     pub fn dest_row(in self, d: u64) -> Dst {
         match self.dests.try_get(d) {
             Option::Some(x) => x,
-            Option::None => Dst {
-                block: NONE,
-                a0: 0,
-                an: 0
-            },
+            Option::None => Dst { block: NONE, a0: 0, an: 0 },
         }
     }
 
@@ -564,16 +536,7 @@ impl Func {
 
     fn new_value(inout self, kind: u64, a: u32, b: u32, ty: u64) -> u32 {
         let v = n32(self.vals.len());
-        self
-            .vals
-            .push(
-                Val {
-                    kind: kind,
-                    a: a,
-                    b: b,
-                    ty: ty
-                }
-            );
+        self.vals.push(Val { kind: kind, a: a, b: b, ty: ty });
         v
     }
 
@@ -690,15 +653,7 @@ impl Func {
                 self.args.push(u32_at(in vals, k));
                 k = inc(k);
             }
-            self
-                .dests
-                .push(
-                    Dst {
-                        block: d.block,
-                        a0: a0,
-                        an: d.an
-                    }
-                );
+            self.dests.push(Dst { block: d.block, a0: a0, an: d.an });
         }
         row.r0 = n32(self.results.len());
         row.block = NONE;
@@ -764,15 +719,7 @@ impl Func {
             for k in 0..n {
                 self.args.push(u32_at(in dws, wrapping_add(wrapping_add(at, 2), k)));
             }
-            self
-                .dests
-                .push(
-                    Dst {
-                        block: blk,
-                        a0: a0,
-                        an: n32(n)
-                    }
-                );
+            self.dests.push(Dst { block: blk, a0: a0, an: n32(n) });
             nd = wrapping_add(nd, 1);
             at = wrapping_add(wrapping_add(at, 2), n);
         }

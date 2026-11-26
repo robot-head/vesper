@@ -152,11 +152,7 @@ pub fn build(
     let n = boxes.len() / 6;
     for i in 0..n {
         if !box_valid(in boxes, i) {
-            return raise_sap(
-                SapError::InvalidBox {
-                    index: wrapping_usize(i)
-                }
-            );
+            return raise_sap(SapError::InvalidBox { index: wrapping_usize(i) });
         }
     }
     let inf = from_bits_f32(F32_INFINITY_BITS);

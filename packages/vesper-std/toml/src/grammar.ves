@@ -924,17 +924,7 @@ fn simple_key(in s: Slice[u8], inout p: P) -> bool {
     }
     let klen = wrapping_sub(p.text.len(), koff);
     let hash = fnv(in p.text, koff, klen);
-    p
-        .path
-        .push(
-            Part {
-                koff: koff,
-                klen: klen,
-                hash: hash,
-                ks: ks,
-                ke: p.pos
-            }
-        );
+    p.path.push(Part { koff: koff, klen: klen, hash: hash, ks: ks, ke: p.pos });
     true
 }
 
@@ -983,13 +973,7 @@ fn key(in s: Slice[u8], inout p: P) -> bool {
 fn part_at(in path: ChunkSeq[Part], i: u64) -> Part {
     match path.try_get(i) {
         Option::Some(x) => x,
-        Option::None => Part {
-            koff: 0,
-            klen: 0,
-            hash: 0,
-            ks: 0,
-            ke: 0
-        },
+        Option::None => Part { koff: 0, klen: 0, hash: 0, ks: 0, ke: 0 },
     }
 }
 
@@ -1625,13 +1609,7 @@ fn add_entry(inout p: P, c: u32, keyed: bool, k: Part, child: u32) -> u32 {
 }
 
 fn no_part() -> Part {
-    Part {
-        koff: 0,
-        klen: 0,
-        hash: 0,
-        ks: 0,
-        ke: 0
-    }
+    Part { koff: 0, klen: 0, hash: 0, ks: 0, ke: 0 }
 }
 
 // `value`: a node, or NONE.
@@ -2101,13 +2079,7 @@ fn table_from_pairs(inout p: P, root: u32, pair_base: u64) -> bool {
             let x = ent(in p.ents, e);
             return dup_key_err(
                 inout p,
-                Part {
-                    koff: x.koff,
-                    klen: x.klen,
-                    hash: x.hash,
-                    ks: x.ks,
-                    ke: x.ke
-                }
+                Part { koff: x.koff, klen: x.klen, hash: x.hash, ks: x.ks, ke: x.ke }
             );
         }
         add_entry(inout p, t, true, leaf, v);
@@ -2217,17 +2189,7 @@ fn on_keyval(inout p: P, base: u64, v: u32) -> bool {
         let x = ent(in p.ents, e);
         let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
         m.extend(in "duplicate key `".as_bytes());
-        put_key(
-            inout m,
-            p,
-            Part {
-                koff: x.koff,
-                klen: x.klen,
-                hash: x.hash,
-                ks: x.ks,
-                ke: x.ke
-            }
-        );
+        put_key(inout m, p, Part { koff: x.koff, klen: x.klen, hash: x.hash, ks: x.ks, ke: x.ke });
         if p.current_path.len() == 0 {
             m.extend(in "` in document root".as_bytes());
         } else {
@@ -2522,12 +2484,5 @@ pub fn parse_document(in s: Slice[u8]) -> Doc {
         put_context_error(inout m, p);
         render_error(inout message, in s, false, 0, 0, in m, in empty_keys);
     }
-    Doc {
-        ok: ok,
-        message: message,
-        nodes: p.nodes,
-        ents: p.ents,
-        text: p.text,
-        root: p.root
-    }
+    Doc { ok: ok, message: message, nodes: p.nodes, ents: p.ents, text: p.text, root: p.root }
 }

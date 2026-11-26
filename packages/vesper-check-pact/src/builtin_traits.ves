@@ -106,29 +106,14 @@ fn conf_at(in m: BuiltinMod, i: u64) -> ConfInfo {
 fn own_at(in m: BuiltinMod, i: u64) -> OwnBound {
     match m.own_bounds.try_get(i) {
         Option::Some(v) => v,
-        Option::None => OwnBound {
-            owner: 0,
-            param: 0,
-            trait_name: 0,
-            arg_a: 0,
-            arg_n: 0
-        },
+        Option::None => OwnBound { owner: 0, param: 0, trait_name: 0, arg_a: 0, arg_n: 0 },
     }
 }
 
 fn node_at(in t: Types, ty: u32) -> TypeNode {
     match t.nodes.try_get(w(ty)) {
         Option::Some(v) => v,
-        Option::None => TypeNode {
-            kind: 0,
-            mode: 0,
-            name: 0,
-            a: 0,
-            n: 0,
-            r: 0,
-            r2: 0,
-            lit: 0
-        },
+        Option::None => TypeNode { kind: 0, mode: 0, name: 0, a: 0, n: 0, r: 0, r2: 0, lit: 0 },
     }
 }
 
@@ -687,9 +672,7 @@ fn emit_derived_conformance(in m: BuiltinMod, st: StructInfo, tname: u32, inout 
 }
 
 fn read_builtin_mod(in b: Slice[u8]) -> BuiltinMod {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
 
     let mut gen_names = ChunkSeq::new[u32]();
@@ -990,9 +973,7 @@ fn bytes_contains(in hay: Slice[u8], start: u64, end: u64, in needle: Str) -> bo
 
 // Entrypoint for `check_pact_builtin_wanted` (`builtin_traits::wanted`).
 pub fn builtin_wanted_words(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut names = names_new();
     let mut nmap = ChunkSeq::new[u32]();
     read_q_names(inout r, in b, inout names, inout nmap);

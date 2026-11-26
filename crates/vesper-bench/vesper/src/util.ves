@@ -61,11 +61,7 @@ pub fn cw(in s: ChunkSeq[W], i: u64) -> W {
 }
 
 pub fn no_sample() -> Sample {
-    Sample {
-        baseline: 0,
-        candidate: 0,
-        operations: 0
-    }
+    Sample { baseline: 0, candidate: 0, operations: 0 }
 }
 
 pub fn gs(in s: Slice[Sample], i: u64) -> Sample {

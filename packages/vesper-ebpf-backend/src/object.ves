@@ -964,16 +964,7 @@ fn write_object(in p: Prog, inout out: ChunkSeq[u8]) -> u64 {
         let at = seq64(in p.relocs, wrapping_mul(r, 2));
         let s = slot_at(in insns, at);
         let ok = insns
-            .try_set(
-                at,
-                RawInsn {
-                    code: s.code,
-                    dst: s.dst,
-                    src: s.src,
-                    off: s.off,
-                    imm: 0
-                }
-            );
+            .try_set(at, RawInsn { code: s.code, dst: s.dst, src: s.src, off: s.off, imm: 0 });
     }
     let mut code: ChunkSeq[u8] = ChunkSeq::new[u8]();
     for i in 0..insns.len() {

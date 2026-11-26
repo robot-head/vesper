@@ -189,14 +189,7 @@ pub fn slen(in l: L, id: u64) -> u64 {
 pub fn ver(in l: L, i: u64) -> Ver {
     match l.vers.try_get(i) {
         Option::Some(v) => v,
-        Option::None => Ver {
-            major: 0,
-            minor: 0,
-            patch: 0,
-            pre: 0,
-            build: 0,
-            text: 0
-        },
+        Option::None => Ver { major: 0, minor: 0, patch: 0, pre: 0, build: 0, text: 0 },
     }
 }
 
@@ -218,11 +211,7 @@ pub fn cmp(in l: L, i: u64) -> Cmp {
 pub fn req(in l: L, i: u64) -> Req {
     match l.reqs.try_get(i) {
         Option::Some(r) => r,
-        Option::None => Req {
-            at: 0,
-            n: 0,
-            text: 0
-        },
+        Option::None => Req { at: 0, n: 0, text: 0 },
     }
 }
 
@@ -270,12 +259,7 @@ pub fn feat(in l: L, i: u64) -> Feat {
 pub fn sys(in l: L, i: u64) -> Sys {
     match l.syss.try_get(i) {
         Option::Some(s) => s,
-        Option::None => Sys {
-            raw: 0,
-            ok: false,
-            name: 0,
-            req: 0
-        },
+        Option::None => Sys { raw: 0, ok: false, name: 0, req: 0 },
     }
 }
 
@@ -297,36 +281,19 @@ pub fn dep(in l: L, i: u64) -> Dep {
 pub fn root(in l: L, i: u64) -> Root {
     match l.roots.try_get(i) {
         Option::Some(r) => r,
-        Option::None => Root {
-            name: 0,
-            req: 0,
-            feat_at: 0,
-            feat_n: 0
-        },
+        Option::None => Root { name: 0, req: 0, feat_at: 0, feat_n: 0 },
     }
 }
 
 pub fn ssel(in l: L, i: u64) -> SysSel {
     match l.ssels.try_get(i) {
         Option::Some(s) => s,
-        Option::None => SysSel {
-            name: 0,
-            ver: 0
-        },
+        Option::None => SysSel { name: 0, ver: 0 },
     }
 }
 
 pub fn empty_diag() -> Diag {
-    Diag {
-        snap: 0,
-        code: 0,
-        pkg: 0,
-        dep: 0,
-        so: 0,
-        sl: 0,
-        mo: 0,
-        ml: 0
-    }
+    Diag { snap: 0, code: 0, pkg: 0, dep: 0, so: 0, sl: 0, mo: 0, ml: 0 }
 }
 
 pub fn diag(in s: ChunkSeq[Diag], i: u64) -> Diag {
@@ -357,11 +324,7 @@ pub fn gnode(in l: L, i: u64) -> GNode {
 pub fn sedge(in s: ChunkSeq[SEdge], i: u64) -> SEdge {
     match s.try_get(i) {
         Option::Some(e) => e,
-        Option::None => SEdge {
-            name: 0,
-            text: 0,
-            req: 0
-        },
+        Option::None => SEdge { name: 0, text: 0, req: 0 },
     }
 }
 

@@ -74,9 +74,7 @@ pub fn toeplitz_core_new(in key: Slice[u8]) -> ToeplitzCore {
             rows.push(wrapping_u32(e));
         }
     }
-    ToeplitzCore {
-        rows: rows
-    }
+    ToeplitzCore { rows: rows }
 }
 
 // Raises the input length when it is over 36 bytes.

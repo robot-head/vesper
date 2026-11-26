@@ -27,9 +27,7 @@ test {
 
     impl Release for HoldingTestTicket {
         fn release(sink self) {
-            let HoldingTestTicket {
-                id: _
-            } = self;
+            let HoldingTestTicket { id: _ } = self;
         }
     }
 

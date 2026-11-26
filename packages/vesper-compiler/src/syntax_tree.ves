@@ -26,11 +26,7 @@ fn syntax_byte(index: i64, byte: i64) -> i64 eff [SyntaxMemory, Fail[Diag], Fail
 
 fn syntax_tok(i: i64) -> Tok eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let base = 16 + i * 4;
-    Tok {
-        kind: syntax_cell(base),
-        start: syntax_cell(base + 1),
-        end: syntax_cell(base + 2)
-    }
+    Tok { kind: syntax_cell(base), start: syntax_cell(base + 1), end: syntax_cell(base + 2) }
 }
 
 fn syntax_sig(i: i64) -> i64 eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
@@ -74,12 +70,7 @@ fn syntax_lex_step(s: Lexer) -> Lexer eff [SyntaxMemory, Fail[Diag], Fail[ArithO
             syntax_put(base + 1, t.start);
             syntax_put(base + 2, t.end);
             syntax_put(base + 3, 0);
-            Lexer {
-                pos: t.end,
-                h: mix_token(s.h, t),
-                count: s.count + 1,
-                done: t.kind == 70
-            }
+            Lexer { pos: t.end, h: mix_token(s.h, t), count: s.count + 1, done: t.kind == 70 }
         }
     }
 }
@@ -98,15 +89,7 @@ fn syntax_lex() -> i64 eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if source_len() > 1048576 {
         fail_i(Diag::Limit(0))
     } else {
-        let s = syntax_lex_steps(
-            65537,
-            Lexer {
-                pos: 0,
-                h: offset_basis(),
-                count: 0,
-                done: false
-            }
-        );
+        let s = syntax_lex_steps(65537, Lexer { pos: 0, h: offset_basis(), count: 0, done: false });
         syntax_put(0, s.count);
         digest(mix(s.h, s.count))
     }

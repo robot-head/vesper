@@ -197,17 +197,13 @@ pub struct Map {
 }
 
 fn new_map(n: u64) -> Map {
-    let mut m = Map {
-        to: ChunkSeq::new[u32]()
-    };
+    let mut m = Map { to: ChunkSeq::new[u32]() };
     m.to.resize(n, NONE);
     m
 }
 
 fn copy_map(in m: Map) -> Map {
-    let mut c = Map {
-        to: ChunkSeq::with_capacity[u32](m.to.len())
-    };
+    let mut c = Map { to: ChunkSeq::with_capacity[u32](m.to.len()) };
     c.to.extend(in m.to.as_slice());
     c
 }

@@ -339,12 +339,7 @@ pub fn invalid_argument() -> u64 eff [Ffi[Cranelift]] {
         },
     };
     entry_block(inout b);
-    ins_return1(
-        inout b,
-        Value {
-            id: invalid()
-        }
-    );
+    ins_return1(inout b, Value { id: invalid() });
     let err = builder_error_len(in b);
     builder_free(b);
     module_free(m);

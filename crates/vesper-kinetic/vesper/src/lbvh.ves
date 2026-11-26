@@ -147,11 +147,7 @@ pub fn build(
     let n = boxes.len() / 6;
     for i in 0..n {
         if !box_valid(in boxes, i) {
-            raise_lbvh(
-                LbvhError::InvalidBox {
-                    index: wrapping_usize(i)
-                }
-            );
+            raise_lbvh(LbvhError::InvalidBox { index: wrapping_usize(i) });
         }
     }
     if n == 0 {

@@ -977,9 +977,7 @@ fn mono_check_body(
 
 // Entrypoint for an already-open `PactSession`: `[mono_input]`.
 pub fn session_mono_check_words(inout sess: PactSession, in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut out = ChunkSeq::new[u64]();
     out.push(0);
     out.push(1);
@@ -989,9 +987,7 @@ pub fn session_mono_check_words(inout sess: PactSession, in b: Slice[u8]) -> Chu
 
 // Entrypoint for `check_pact_mono_check`: `[session_input][mono_input]`.
 pub fn mono_check_words(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut sess = session_open_reader(inout r, in b);
     let mut out = ChunkSeq::new[u64]();
     let p_out = pack_text(in sess.out);
