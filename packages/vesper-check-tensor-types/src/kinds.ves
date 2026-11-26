@@ -717,10 +717,8 @@ pub fn expr_mentions(inout state: St, in ast: Ast, expr_id: u32) -> bool {
             return true;
         }
         if node.b != NONE
-            && (
-                pattern_mentions(inout state, in ast, node.b)
-                    || expr_mentions(inout state, in ast, node.c)
-            )
+            && (pattern_mentions(inout state, in ast, node.b)
+                || expr_mentions(inout state, in ast, node.c))
         {
             return true;
         }

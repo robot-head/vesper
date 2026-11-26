@@ -341,14 +341,12 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
             a = sot;
         }
         // `BtfType::name_off`: these kinds carry no name
-        let named = !(
-            kind == BtfKind::Ptr
-                || kind == BtfKind::Array
-                || kind == BtfKind::Volatile
-                || kind == BtfKind::Const
-                || kind == BtfKind::Restrict
-                || kind == BtfKind::FuncProto
-        );
+        let named = !(kind == BtfKind::Ptr
+            || kind == BtfKind::Array
+            || kind == BtfKind::Volatile
+            || kind == BtfKind::Const
+            || kind == BtfKind::Restrict
+            || kind == BtfKind::FuncProto);
         out.push(kind);
         out.push(if named { name } else { 0 });
         out.push(a);

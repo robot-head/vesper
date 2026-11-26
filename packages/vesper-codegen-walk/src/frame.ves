@@ -666,10 +666,8 @@ pub fn frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
                 c.names.write(x.key, inout o);
                 o.push(10);
                 let pass_trace = trace_ok
-                    && (
-                        x.key == task.entry
-                            || trace_host_direct(inout c.types, in c.world, in d, k, in f)
-                    );
+                    && (x.key == task.entry
+                        || trace_host_direct(inout c.types, in c.world, in d, k, in f));
                 if !frame_plan(
                     inout ls,
                     inout c.types,

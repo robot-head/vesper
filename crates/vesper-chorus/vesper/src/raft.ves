@@ -1283,10 +1283,8 @@ fn handle_request(inout rc: RaftCluster, i: u64, p: u64, now: u64) {
             let prev = h.prev_log_index;
             let cur_len = node_log_len(in rc, i);
             let prev_ok = prev == 0
-                || (
-                    prev <= cur_len
-                        && node_log_get(in rc, i, wrapping_sub(prev, 1)).term == h.prev_log_term
-                );
+                || (prev <= cur_len
+                    && node_log_get(in rc, i, wrapping_sub(prev, 1)).term == h.prev_log_term);
             if prev_ok {
                 let mut changed = false;
                 let ec = rc.tmp_entries.len();
@@ -1411,10 +1409,8 @@ fn handle_request(inout rc: RaftCluster, i: u64, p: u64, now: u64) {
             if last > sw(in rc.nd_commit, i) {
                 let cur_len = node_log_len(in rc, i);
                 let have = last <= cur_len
-                    && (
-                        last == 0
-                            || node_log_get(in rc, i, wrapping_sub(last, 1)).term == h.prev_log_term
-                    );
+                    && (last == 0
+                        || node_log_get(in rc, i, wrapping_sub(last, 1)).term == h.prev_log_term);
                 if !have {
                     let ilen = rc.tmp_entries.len();
                     let mn = if cur_len < ilen { cur_len } else { ilen };

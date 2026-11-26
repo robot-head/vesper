@@ -1838,13 +1838,11 @@ fn signature(
     let shown = r.as_slice();
     let infer = r.len() == 1 && byte(in shown, 0) == 95;
     let unit = (r.len() == 2 && byte(in shown, 0) == 40 && byte(in shown, 1) == 41)
-        || (
-            r.len() == 4
-                && byte(in shown, 0) == 85
-                && byte(in shown, 1) == 110
-                && byte(in shown, 2) == 105
-                && byte(in shown, 3) == 116
-        );
+        || (r.len() == 4
+            && byte(in shown, 0) == 85
+            && byte(in shown, 1) == 110
+            && byte(in shown, 2) == 105
+            && byte(in shown, 3) == 116);
     if !infer && !unit {
         put(inout out, in " -> ");
         put_bytes(inout out, in shown);
@@ -2133,17 +2131,15 @@ fn rank_members(
             let tp = g8(in rk.tier, p);
             let ti = g8(in rk.tier, i);
             let before = ti < tp
-                || (
-                    ti == tp
-                        && cmp_blob(
-                            in bytes,
-                            g64(in rk.l_at, i),
-                            g64(in rk.l_len, i),
-                            g64(in rk.l_at, p),
-                            g64(in rk.l_len, p)
-                        )
-                            < 0
-                );
+                || (ti == tp
+                    && cmp_blob(
+                        in bytes,
+                        g64(in rk.l_at, i),
+                        g64(in rk.l_len, i),
+                        g64(in rk.l_at, p),
+                        g64(in rk.l_len, p)
+                    )
+                        < 0);
             if !before {
                 break;
             }

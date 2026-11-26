@@ -28,13 +28,12 @@ fn id_bytes(in s: A, id: u64) -> bool {
     let off = str_off(in s, id);
     for i in 0..str_len(in s, id) {
         let c = byte(in s, wrapping_add(off, i));
-        if !(
-            ascii_alnum(c)
-                || c == Ascii::Minus
-                || c == Ascii::Underscore
-                || c == Ascii::Dot
-                || c == Ascii::Colon
-        ) {
+        if !(ascii_alnum(c)
+            || c == Ascii::Minus
+            || c == Ascii::Underscore
+            || c == Ascii::Dot
+            || c == Ascii::Colon)
+        {
             return false;
         }
     }

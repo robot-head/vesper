@@ -833,12 +833,10 @@ fn split_walk(inout e: Env, inout c: Ctx, layout: u32, base: i64, inout out: Lea
         let known = c.world.k;
         let word = ty_node.kind == TyKind::Named
             && ty_node.n == 0
-            && (
-                integer_name(in e, in c, ty_node.name)
-                    || ty_node.name == known.f32_
-                    || ty_node.name == known.f64_
-                    || ty_node.name == known.bool_
-            );
+            && (integer_name(in e, in c, ty_node.name)
+                || ty_node.name == known.f32_
+                || ty_node.name == known.f64_
+                || ty_node.name == known.bool_);
         if word {
             out.pa.push(out.syms.len());
             out.pn.push(out.stack.len());
@@ -2109,10 +2107,8 @@ fn window_ok(
                 ok = u8_at(in members, p.op(operands)) != 0;
             } else if op == Op::Read {
                 ok = u8_at(in members, w(inst.dest)) != 0
-                    || (
-                        p.op(inc(operands)) == 0
-                            && scalar_local(inout e, inout c, in g, in syms, n32(p.op(operands)))
-                    );
+                    || (p.op(inc(operands)) == 0
+                        && scalar_local(inout e, inout c, in g, in syms, n32(p.op(operands))));
             } else if op == Op::Data {
                 ok = true;
                 for j in 0..p.op(inc(operands)) {

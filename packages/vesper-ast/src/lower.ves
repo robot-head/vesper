@@ -996,14 +996,10 @@ fn fields(inout l: L) -> u32 {
             break;
         }
         if at_word(in l, 0, w_pub())
-            && (
-                (nth(in l, 1) == k_lower() && nth(in l, 2) == k_colon())
-                    || (
-                        (at_word(in l, 1, w_hot()) || at_word(in l, 1, w_cold()))
-                            && nth(in l, 2) == k_lower()
-                            && nth(in l, 3) == k_colon()
-                    )
-            )
+            && ((nth(in l, 1) == k_lower() && nth(in l, 2) == k_colon())
+                || ((at_word(in l, 1, w_hot()) || at_word(in l, 1, w_cold()))
+                    && nth(in l, 2) == k_lower()
+                    && nth(in l, 3) == k_colon()))
         {
             bump(inout l);
         }
@@ -1101,14 +1097,10 @@ fn pub_item_follows(in l: L) -> bool {
         || nth(in l, 1) == k_fn()
         || is_type_decl_kind(nth(in l, 1))
         || (is_mode_kind(nth(in l, 1)) && is_type_decl_kind(nth(in l, 2)))
-        || (
-            nth(in l, 1) == k_at()
-                && (
-                    at_word(in l, 2, w_fip())
-                        || at_word(in l, 2, w_test())
-                        || at_word(in l, 2, w_test_case())
-                )
-        )
+        || (nth(in l, 1) == k_at()
+            && (at_word(in l, 2, w_fip())
+                || at_word(in l, 2, w_test())
+                || at_word(in l, 2, w_test_case())))
 }
 
 fn fip_attr(inout l: L) -> bool {
@@ -1571,10 +1563,8 @@ fn function(inout l: L, op: bool, fip: bool) -> u32 {
 
 fn at_method(in l: L) -> bool {
     at(in l, k_fn())
-        || (
-            at_word(in l, 0, w_pub())
-                && (nth(in l, 1) == k_fn() || (nth(in l, 1) == k_at() && at_word(in l, 2, w_fip())))
-        )
+        || (at_word(in l, 0, w_pub())
+            && (nth(in l, 1) == k_fn() || (nth(in l, 1) == k_at() && at_word(in l, 2, w_fip()))))
         || (at(in l, k_at()) && at_word(in l, 1, w_fip()))
 }
 
@@ -1582,9 +1572,8 @@ fn method(inout l: L) -> u32 {
     let start = cur_start(in l);
     let mut fip = fip_attr(inout l);
     let public = at_word(in l, 0, w_pub())
-        && (
-            nth(in l, 1) == k_fn() || (!fip && nth(in l, 1) == k_at() && at_word(in l, 2, w_fip()))
-        );
+        && (nth(in l, 1) == k_fn()
+            || (!fip && nth(in l, 1) == k_at() && at_word(in l, 2, w_fip())));
     if public {
         bump(inout l);
     }
@@ -2842,15 +2831,13 @@ fn loop_expr(inout l: L) -> u32 {
 fn for_header(in l: L) -> bool {
     let k = nth(in l, 1);
     !bound(in l, l.s.for_)
-        && (
-            k == k_lower()
-                || k == k_upper()
-                || k == k_l_paren()
-                || k == k_int()
-                || k == k_true()
-                || k == k_false()
-                || contextual_name(k)
-        )
+        && (k == k_lower()
+            || k == k_upper()
+            || k == k_l_paren()
+            || k == k_int()
+            || k == k_true()
+            || k == k_false()
+            || contextual_name(k))
 }
 
 fn for_expr(inout l: L) -> u32 {

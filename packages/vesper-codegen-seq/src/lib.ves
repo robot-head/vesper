@@ -1004,13 +1004,11 @@ fn op_fallible(in a: ChunkSeq[u8], o: OpInfo) -> bool {
 
 // `SeqOp::has_receiver`.
 fn op_has_receiver(in a: ChunkSeq[u8], o: OpInfo) -> bool {
-    !(
-        head_is(in a, o, "New")
-            || head_is(in a, o, "WithCapacity")
-            || head_is(in a, o, "BoundsGuard")
-            || head_is(in a, o, "Swap")
-            || head_is(in a, o, "Replace")
-    )
+    !(head_is(in a, o, "New")
+        || head_is(in a, o, "WithCapacity")
+        || head_is(in a, o, "BoundsGuard")
+        || head_is(in a, o, "Swap")
+        || head_is(in a, o, "Replace"))
 }
 
 // `SeqOp::place_primitive`.
