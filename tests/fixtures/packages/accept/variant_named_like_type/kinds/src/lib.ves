@@ -1,0 +1,12 @@
+// An enum with a variant spelled like the built-in `String` type.
+pub enum Kind {
+    String,
+    Number
+}
+
+pub fn rank(k: Kind) -> u64 {
+    match k {
+        Kind::String => 1,
+        Kind::Number => 2,
+    }
+}

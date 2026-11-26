@@ -2,9 +2,9 @@
 // delegating Lean artifact replay and axiom-policy auditing (`src/proof_commands.rs`)
 // to `HybridCommands::hc_proof_audit_run`.
 use @vesper/driver::{Args, args_count, eq};
-use super::{arg, byte_at, print, fail, stdout_stream};
+use super::{PrintFailed, arg, byte_at, print, fail, stdout_stream};
 
-fn print_proof_audit_help() eff [Ffi[HybridCommands]] {
+fn print_proof_audit_help() eff [Ffi[StdFs], Fail[PrintFailed]] {
     print(
         stdout_stream(),
         in "Usage: vesper proof-audit <Module> --root <artifact-directory> --theorem <Qualified.name> [--theorem ...] [--allow-axiom <Name>] [--lean <path>] [--timeout <seconds>] [--macro-provenance <manifest.json>] [--json]\n\nReplay existing local Lean 4.35.0 artifacts through the kernel and audit named theorems.\nArtifact imports disable package environment extensions and plugins.\nThe selected Lean toolchain and artifact parser remain trusted; this is not an OS sandbox, provenance certificate or reusable proof-cache approval.\nThe default axiom policy is empty; sorryAx, compiler-trust axioms, and generated _native axioms are always forbidden.\nA theorem that depends on macro-expanded definitions (those with `$macro_provenance` markers, see `vesper forge lean`) is rejected unless --macro-provenance names the matching provenance manifest.\n"
@@ -135,7 +135,8 @@ fn pack_args(in args: Args, n: u64) -> ChunkSeq[u8] {
     packed
 }
 
-fn run_packed(in args: Args, n: u64) -> i64 eff [Ffi[HybridCommands]] {
+fn run_packed(in args: Args, n: u64)
+    -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     let packed = pack_args(in args, n);
     let err_len = HybridCommands::hc_proof_audit_run(in packed.as_slice());
     if err_len == 0 {
@@ -153,7 +154,8 @@ fn run_packed(in args: Args, n: u64) -> i64 eff [Ffi[HybridCommands]] {
     fail(in err.as_slice())
 }
 
-pub fn run_proof_audit(in args: Args) -> i64 eff [Ffi[HybridCommands]] {
+pub fn run_proof_audit(in args: Args)
+    -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     let n = args_count(in args);
     let mut has_module = false;
     let mut module: ChunkSeq[u8] = ChunkSeq::new[u8]();

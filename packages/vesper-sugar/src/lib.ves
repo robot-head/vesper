@@ -12,6 +12,7 @@
 // `vesper_syntax::sugar_expand` on a rule corpus and a fuzzed corpus.
 
 use self::matcher::{match_rule_encoded};
+use self::driver::{expand_words};
 use self::flow::{Rd, render};
 use self::hygiene::{pattern_hygiene};
 use self::scope::{lower};
@@ -175,6 +176,17 @@ pub fn template_scope_words(in text: Str, max_bytes: u64, work: u64) -> ChunkSeq
 // as in `template_render_words`.
 pub fn template_pattern_words(in text: Str, max_bytes: u64, work: u64) -> ChunkSeq[u64] {
     render_encoded(in text, max_bytes, work, false, true)
+}
+
+// `sugar_expand_words(source, include_tests)` of
+// `vesper_syntax::sugar_expand`: one bounded expansion round of the
+// sugar driver (sugar_expand.rs `expand`, driver.ves) over `text` with no
+// imports. `include_tests` is 0 or 1; the words are driver.ves
+// `expand_words`.
+pub fn sugar_expand_words(in text: Str, include_tests: u64, work: u64) -> ChunkSeq[u64] {
+    let b = text.as_bytes();
+    let src = copy_bytes(in b, 0, b.len());
+    expand_words(in src, include_tests != 0)
 }
 
 fn render_encoded(in text: Str, max_bytes: u64, work: u64, scoped: bool, patterned: bool)

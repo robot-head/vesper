@@ -1,0 +1,442 @@
+// The messages Rust's standard library prints that the audit's errors
+// carry: `io::Error`, `ExitStatus` and `FromUtf8Error` as `Display`
+// writes them, and the UTF-8 handling of `String::from_utf8`,
+// `from_utf8_lossy` and `str::trim`.
+use @vesper-std/fs::IoError;
+use @vesper-std/process::ExitStatus;
+use @vesper-std/env::os;
+use self::strs::{byte, put_str};
+use self::json::put_u64;
+
+fn os_linux() -> bool {
+    os() == 1
+}
+
+fn os_windows() -> bool {
+    os() == 3
+}
+
+// `strerror` for the codes the audit meets (glibc and Apple agree on these
+// strings), or the Win32 `FormatMessageW` text.
+fn common_os_text(code: u32) -> Str {
+    match code {
+        1 => "Operation not permitted",
+        2 => "No such file or directory",
+        4 => "Interrupted system call",
+        5 => "Input/output error",
+        7 => "Argument list too long",
+        8 => "Exec format error",
+        9 => "Bad file descriptor",
+        10 => "No child processes",
+        12 => "Cannot allocate memory",
+        13 => "Permission denied",
+        17 => "File exists",
+        20 => "Not a directory",
+        21 => "Is a directory",
+        22 => "Invalid argument",
+        24 => "Too many open files",
+        26 => "Text file busy",
+        28 => "No space left on device",
+        30 => "Read-only file system",
+        _ => "",
+    }
+}
+
+fn os_text(code: u32) -> Str {
+    if os_windows() {
+        return match code {
+            2 => "The system cannot find the file specified.",
+            3 => "The system cannot find the path specified.",
+            5 => "Access is denied.",
+            32 => "The process cannot access the file because it is being used by another process.",
+            80 => "The file exists.",
+            123 => "The filename, directory name, or volume label syntax is incorrect.",
+            183 => "Cannot create a file when that file already exists.",
+            193 => "%1 is not a valid Win32 application.",
+            267 => "The directory name is invalid.",
+            _ => "",
+        };
+    }
+    if common_os_text(code).len() != 0 {
+        return common_os_text(code);
+    }
+    if os_linux() {
+        match code {
+            11 => "Resource temporarily unavailable",
+            36 => "File name too long",
+            39 => "Directory not empty",
+            40 => "Too many levels of symbolic links",
+            _ => "",
+        }
+    } else {
+        match code {
+            35 => "Resource temporarily unavailable",
+            62 => "Too many levels of symbolic links",
+            63 => "File name too long",
+            66 => "Directory not empty",
+            _ => "",
+        }
+    }
+}
+
+// The description of an error kind with no OS code (`io::ErrorKind`'s
+// `Display`), as @vesper-std/fs numbers the kinds.
+fn kind_text(kind: u32) -> Str {
+    match kind {
+        1 => "entity not found",
+        2 => "permission denied",
+        3 => "entity already exists",
+        4 => "not a directory",
+        5 => "is a directory",
+        6 => "directory not empty",
+        // A path with a NUL byte, the one kind-only error the audit's
+        // file and process calls raise.
+        7 => "file name contained an unexpected NUL byte",
+        8 => "operation interrupted",
+        9 => "unexpected end of file",
+        10 => "write zero",
+        11 => "unsupported",
+        12 => "out of memory",
+        _ => "other error",
+    }
+}
+
+// `io::Error`'s `Display`.
+pub fn put_io(inout out: ChunkSeq[u8], e: IoError) {
+    if e.os == 0 {
+        put_str(inout out, in kind_text(e.kind));
+        return;
+    }
+    let t = os_text(e.os);
+    if t.len() != 0 {
+        put_str(inout out, in t);
+    } else {
+        if os_windows() {
+            put_str(inout out, in "OS Error ");
+        } else {
+            put_str(inout out, in "Unknown error ");
+        }
+        put_u64(inout out, widen_u64(e.os));
+    }
+    put_str(inout out, in " (os error ");
+    put_u64(inout out, widen_u64(e.os));
+    out.push(41);
+}
+
+pub fn io_text(e: IoError) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_io(inout out, e);
+    out
+}
+
+fn common_signal_name(n: u32) -> Str {
+    match n {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        4 => "SIGILL",
+        5 => "SIGTRAP",
+        6 => "SIGABRT",
+        8 => "SIGFPE",
+        9 => "SIGKILL",
+        13 => "SIGPIPE",
+        14 => "SIGALRM",
+        15 => "SIGTERM",
+        _ => "",
+    }
+}
+
+fn signal_name(n: u32) -> Str {
+    if common_signal_name(n).len() != 0 {
+        return common_signal_name(n);
+    }
+    if os_linux() {
+        match n {
+            7 => "SIGBUS",
+            10 => "SIGUSR1",
+            11 => "SIGSEGV",
+            12 => "SIGUSR2",
+            _ => "",
+        }
+    } else {
+        match n {
+            7 => "SIGEMT",
+            10 => "SIGBUS",
+            11 => "SIGSEGV",
+            12 => "SIGSYS",
+            _ => "",
+        }
+    }
+}
+
+fn put_hex(inout out: ChunkSeq[u8], n: u64) {
+    let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut m = n;
+    loop {
+        let d = wrapping_u8(m & 15);
+        digits
+            .push(
+                if d < 10 {
+                    wrapping_add(d, 48)
+                } else {
+                    wrapping_add(d, 87)
+                }
+            );
+        m = m >> 4;
+        if m == 0 {
+            break;
+        }
+    }
+    let mut i = digits.len();
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        out.push(byte(in digits.as_slice(), i));
+    }
+}
+
+fn put_i64(inout out: ChunkSeq[u8], n: i64) {
+    if n < 0 {
+        out.push(45);
+        put_u64(inout out, wrapping_u64(wrapping_sub(0, n)));
+    } else {
+        put_u64(inout out, wrapping_u64(n));
+    }
+}
+
+// `ExitStatus`'s `Display`.
+pub fn put_status(inout out: ChunkSeq[u8], s: ExitStatus) {
+    if os_windows() {
+        let code = wrapping_u64(s.code) & 4294967295;
+        put_str(inout out, in "exit code: ");
+        if (code & 2147483648) != 0 {
+            put_str(inout out, in "0x");
+            put_hex(inout out, code);
+        } else {
+            put_u64(inout out, code);
+        }
+        return;
+    }
+    if s.exited {
+        put_str(inout out, in "exit status: ");
+        put_i64(inout out, s.code);
+        return;
+    }
+    put_str(inout out, in "signal: ");
+    put_u64(inout out, widen_u64(s.signal));
+    let name = signal_name(s.signal);
+    if name.len() != 0 {
+        put_str(inout out, in " (");
+        put_str(inout out, in name);
+        out.push(41);
+    }
+}
+
+// The first UTF-8 error in `b` from `at`: `(valid_up_to, error_len)`,
+// `error_len` 0 for a sequence cut short by the end, as `Utf8Error`
+// reports it; `(b.len(), 0)` when the rest is valid.
+pub fn utf8_error(in b: Slice[u8], from: u64) -> (u64, u64) {
+    let n = b.len();
+    let mut i = from;
+    loop {
+        if i >= n {
+            return (n, 0);
+        }
+        let c = byte(in b, i);
+        if c < 128 {
+            i = wrapping_add(i, 1);
+            continue;
+        }
+        let width: u64 = if c >= 194 && c <= 223 {
+            2
+        } else if c >= 224 && c <= 239 {
+            3
+        } else if c >= 240 && c <= 244 {
+            4
+        } else {
+            0
+        };
+        if width == 0 {
+            return (i, 1);
+        }
+        // The second byte's range depends on the first.
+        let (lo, hi): (u8, u8) = if c == 224 {
+            (160, 191)
+        } else if c == 237 {
+            (128, 159)
+        } else if c == 240 {
+            (144, 191)
+        } else if c == 244 {
+            (128, 143)
+        } else {
+            (128, 191)
+        };
+        for k in 1..width {
+            let at = wrapping_add(i, k);
+            if at >= n {
+                return (i, 0);
+            }
+            let d = byte(in b, at);
+            let ok = if k == 1 {
+                d >= lo && d <= hi
+            } else {
+                d >= 128 && d <= 191
+            };
+            if !ok {
+                return (i, k);
+            }
+        }
+        i = wrapping_add(i, width);
+    }
+    (n, 0)
+}
+
+pub fn utf8_valid(in b: Slice[u8]) -> bool {
+    let (at, _) = utf8_error(in b, 0);
+    at == b.len()
+}
+
+// `FromUtf8Error`'s `Display` for `b` (which is not valid UTF-8).
+pub fn put_utf8_error(inout out: ChunkSeq[u8], in b: Slice[u8]) {
+    let (at, len) = utf8_error(in b, 0);
+    if len == 0 {
+        put_str(inout out, in "incomplete utf-8 byte sequence from index ");
+    } else {
+        put_str(inout out, in "invalid utf-8 sequence of ");
+        put_u64(inout out, len);
+        put_str(inout out, in " bytes from index ");
+    }
+    put_u64(inout out, at);
+}
+
+// `String::from_utf8_lossy`: each invalid sequence becomes U+FFFD.
+pub fn lossy(in b: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut i: u64 = 0;
+    loop {
+        let (at, len) = utf8_error(in b, i);
+        out.extend(in b[i..at]);
+        if at >= b.len() {
+            break;
+        }
+        out.push(239);
+        out.push(191);
+        out.push(189);
+        if len == 0 {
+            break;
+        }
+        i = wrapping_add(at, len);
+    }
+    out
+}
+
+// The first `n` characters of valid UTF-8 `s`.
+pub fn take_chars(in s: Slice[u8], n: u64) -> ChunkSeq[u8] {
+    let mut seen: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= s.len() {
+            break;
+        }
+        let c = byte(in s, i);
+        if (c & 192) != 128 {
+            if seen == n {
+                break;
+            }
+            seen = wrapping_add(seen, 1);
+        }
+        i = wrapping_add(i, 1);
+    }
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.extend(in s[0..i]);
+    out
+}
+
+fn space(c: u8) -> bool {
+    c == 32 || (c >= 9 && c <= 13)
+}
+
+// `str::trim` for the ASCII white space a path printout ends with.
+pub fn trim(in s: Slice[u8]) -> ChunkSeq[u8] {
+    let mut a: u64 = 0;
+    let mut z = s.len();
+    loop {
+        if a >= z || !space(byte(in s, a)) {
+            break;
+        }
+        a = wrapping_add(a, 1);
+    }
+    loop {
+        if z <= a || !space(byte(in s, wrapping_sub(z, 1))) {
+            break;
+        }
+        z = wrapping_sub(z, 1);
+    }
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.extend(in s[a..z]);
+    out
+}
+
+// Whether `s[at..]` begins with `prefix`.
+pub fn starts_at(in s: Slice[u8], at: u64, in prefix: Str) -> bool {
+    let p = prefix.as_bytes();
+    if wrapping_add(at, p.len()) > s.len() {
+        return false;
+    }
+    for i in 0..p.len() {
+        if byte(in s, wrapping_add(at, i)) != byte(in p, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// Whether `s[a..z]` holds `needle`.
+pub fn holds(in s: Slice[u8], a: u64, z: u64, in needle: Str) -> bool {
+    let p = needle.as_bytes();
+    if p.len() == 0 {
+        return true;
+    }
+    if z < p.len() {
+        return false;
+    }
+    let mut i = a;
+    loop {
+        if wrapping_add(i, p.len()) > z {
+            return false;
+        }
+        if starts_at(in s, i, in needle) {
+            return true;
+        }
+        i = wrapping_add(i, 1);
+    }
+    false
+}
+
+// `str::lines`: the end of the line starting at `at` (before `\n`, less a
+// `\r` before it) and where the next line starts.
+pub fn line_at(in s: Slice[u8], at: u64) -> (u64, u64) {
+    let mut i = at;
+    loop {
+        if i >= s.len() {
+            break;
+        }
+        if byte(in s, i) == 10 {
+            break;
+        }
+        i = wrapping_add(i, 1);
+    }
+    let next = if i < s.len() {
+        wrapping_add(i, 1)
+    } else {
+        i
+    };
+    // A `\r` goes only with a `\n`: the last line keeps its own.
+    let mut end = i;
+    if i < s.len() && end > at && byte(in s, wrapping_sub(end, 1)) == 13 {
+        end = wrapping_sub(end, 1);
+    }
+    (end, next)
+}

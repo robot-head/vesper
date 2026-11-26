@@ -1,0 +1,503 @@
+// Text helpers with std's behaviour: `String::from_utf8_lossy`,
+// `str::trim`, `str::lines`, `first_error` and `bounded` of
+// src/lsp/proof_lens.rs, and the `Display` of `io::Error` and
+// `ExitStatus` on Unix.
+
+use @vesper-std/fs::IoError;
+use @vesper-std/process::ExitStatus;
+use self::json::{put, put_u64};
+
+pub fn byte(in b: Slice[u8], i: u64) -> u8 {
+    match b.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
+pub fn put_bytes(inout o: ChunkSeq[u8], in b: Slice[u8]) {
+    for i in 0..b.len() {
+        o.push(byte(in b, i));
+    }
+}
+
+fn in_range(in b: Slice[u8], i: u64, lo: u8, hi: u8) -> bool {
+    i < b.len() && byte(in b, i) >= lo && byte(in b, i) <= hi
+}
+
+// `String::from_utf8_lossy`: each maximal invalid subpart becomes U+FFFD.
+pub fn lossy(in b: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::with_capacity[u8](b.len());
+    let mut i: u64 = 0;
+    loop {
+        if i >= b.len() {
+            break;
+        }
+        let c = byte(in b, i);
+        if c < 128 {
+            out.push(c);
+            i = inc(i);
+            continue;
+        }
+        // The sequence length and the range of the second byte.
+        let mut n: u64 = 0;
+        let mut lo: u8 = 128;
+        let mut hi: u8 = 191;
+        if c >= 194 && c <= 223 {
+            n = 2;
+        } else if c == 224 {
+            n = 3;
+            lo = 160;
+        } else if (c >= 225 && c <= 236) || c == 238 || c == 239 {
+            n = 3;
+        } else if c == 237 {
+            n = 3;
+            hi = 159;
+        } else if c == 240 {
+            n = 4;
+            lo = 144;
+        } else if c >= 241 && c <= 243 {
+            n = 4;
+        } else if c == 244 {
+            n = 4;
+            hi = 143;
+        }
+        if n == 0 {
+            put_replacement(inout out);
+            i = inc(i);
+            continue;
+        }
+        let mut ok: u64 = 1;
+        if in_range(in b, inc(i), lo, hi) {
+            ok = 2;
+            loop {
+                if ok >= n || !in_range(in b, wrapping_add(i, ok), 128, 191) {
+                    break;
+                }
+                ok = inc(ok);
+            }
+        }
+        if ok == n {
+            for k in 0..n {
+                out.push(byte(in b, wrapping_add(i, k)));
+            }
+        } else {
+            put_replacement(inout out);
+        }
+        i = wrapping_add(i, ok);
+    }
+    out
+}
+
+fn put_replacement(inout out: ChunkSeq[u8]) {
+    out.push(239);
+    out.push(191);
+    out.push(189);
+}
+
+// The scalar value starting at `i` of valid UTF-8 and its length.
+fn decode(in b: Slice[u8], i: u64, inout len: u64) -> u64 {
+    let c = widen_u64(byte(in b, i));
+    if c < 128 {
+        len = 1;
+        return c;
+    }
+    let x1 = widen_u64(byte(in b, inc(i))) & 63;
+    if c < 224 {
+        len = 2;
+        return wrapping_shl_u64(c & 31, 6) | x1;
+    }
+    let x2 = widen_u64(byte(in b, wrapping_add(i, 2))) & 63;
+    if c < 240 {
+        len = 3;
+        return wrapping_shl_u64(c & 15, 12) | wrapping_shl_u64(x1, 6) | x2;
+    }
+    let x3 = widen_u64(byte(in b, wrapping_add(i, 3))) & 63;
+    len = 4;
+    wrapping_shl_u64(c & 7, 18) | wrapping_shl_u64(x1, 12) | wrapping_shl_u64(x2, 6) | x3
+}
+
+// `char::is_whitespace` (Unicode `White_Space`).
+fn white(c: u64) -> bool {
+    (c >= 9 && c <= 13)
+        || c == 32
+        || c == 133
+        || c == 160
+        || c == 5760
+        || (c >= 8192 && c <= 8202)
+        || c == 8232
+        || c == 8233
+        || c == 8239
+        || c == 8287
+        || c == 12288
+}
+
+// `str::trim` of valid UTF-8 `b`: the start and end of the trimmed text.
+// Narrow `b[s..e]` to its `str::trim`.
+pub fn trim(in b: Slice[u8], inout s: u64, inout e: u64) {
+    let end = e;
+    loop {
+        if s >= end {
+            break;
+        }
+        let mut n: u64 = 0;
+        let c = decode(in b, s, inout n);
+        if !white(c) {
+            break;
+        }
+        s = wrapping_add(s, n);
+    }
+    loop {
+        if e <= s {
+            break;
+        }
+        // The start of the last scalar before `e`.
+        let mut j = wrapping_sub(e, 1);
+        loop {
+            if j <= s || (byte(in b, j) & 192) != 128 {
+                break;
+            }
+            j = wrapping_sub(j, 1);
+        }
+        let mut n: u64 = 0;
+        let c = decode(in b, j, inout n);
+        if !white(c) {
+            break;
+        }
+        e = j;
+    }
+}
+
+pub fn trimmed(in b: Slice[u8]) -> ChunkSeq[u8] {
+    let mut s: u64 = 0;
+    let mut e = b.len();
+    trim(in b, inout s, inout e);
+    let mut out = ChunkSeq::new[u8]();
+    for i in s..e {
+        out.push(byte(in b, i));
+    }
+    out
+}
+
+pub fn contains(in hay: Slice[u8], s: u64, e: u64, in needle: Slice[u8]) -> bool {
+    find(in hay, s, e, in needle) != 18446744073709551615
+}
+
+// The first index of `needle` in `hay[s..e]`, or `u64::MAX`.
+pub fn find(in hay: Slice[u8], s: u64, e: u64, in needle: Slice[u8]) -> u64 {
+    if needle.len() == 0 {
+        return s;
+    }
+    if e < s || wrapping_sub(e, s) < needle.len() {
+        return 18446744073709551615;
+    }
+    let last = wrapping_sub(e, needle.len());
+    let mut i = s;
+    loop {
+        if i > last {
+            return 18446744073709551615;
+        }
+        let mut k: u64 = 0;
+        loop {
+            if k >= needle.len() || byte(in hay, wrapping_add(i, k)) != byte(in needle, k) {
+                break;
+            }
+            k = inc(k);
+        }
+        if k == needle.len() {
+            return i;
+        }
+        i = inc(i);
+    }
+}
+
+// `first_error`: the first line holding "error", else the first non-blank
+// line, else nothing; at most 400 scalars of it. `b` is valid UTF-8.
+pub fn first_error(in b: Slice[u8]) -> ChunkSeq[u8] {
+    let mut pick_s: u64 = 0;
+    let mut pick_e: u64 = 0;
+    let mut found = false;
+    let mut blank_s: u64 = 0;
+    let mut blank_e: u64 = 0;
+    let mut have_blank = false;
+    let mut s: u64 = 0;
+    loop {
+        if s >= b.len() {
+            break;
+        }
+        // One `lines()` line: up to the next `\n`, without a final `\r`.
+        let mut e = s;
+        loop {
+            if e >= b.len() || byte(in b, e) == 10 {
+                break;
+            }
+            e = inc(e);
+        }
+        let next = inc(e);
+        let mut le = e;
+        if le > s && byte(in b, wrapping_sub(le, 1)) == 13 {
+            le = wrapping_sub(le, 1);
+        }
+        if contains(in b, s, le, in "error".as_bytes()) {
+            pick_s = s;
+            pick_e = le;
+            found = true;
+            break;
+        }
+        if !have_blank {
+            let mut ts = s;
+            let mut te = le;
+            trim(in b, inout ts, inout te);
+            if te > ts {
+                blank_s = s;
+                blank_e = le;
+                have_blank = true;
+            }
+        }
+        s = next;
+    }
+    if !found && have_blank {
+        pick_s = blank_s;
+        pick_e = blank_e;
+    }
+    let mut out = ChunkSeq::new[u8]();
+    let mut chars: u64 = 0;
+    for k in pick_s..pick_e {
+        let c = byte(in b, k);
+        if (c & 192) != 128 {
+            if chars >= 400 {
+                break;
+            }
+            chars = inc(chars);
+        }
+        out.push(c);
+    }
+    out
+}
+
+// `bounded`: at most 2048 bytes, cut at a char boundary.
+pub fn bounded(in b: Slice[u8]) -> ChunkSeq[u8] {
+    let mut end = b.len();
+    if end > 2048 {
+        end = 2048;
+        loop {
+            if end == 0 || (byte(in b, end) & 192) != 128 {
+                break;
+            }
+            end = wrapping_sub(end, 1);
+        }
+    }
+    let mut out = ChunkSeq::new[u8]();
+    for k in 0..end {
+        out.push(byte(in b, k));
+    }
+    out
+}
+
+// `escaped` of the outcome rows: `\\`, tab, CR and LF escaped.
+pub fn put_escaped(inout o: ChunkSeq[u8], in b: Slice[u8]) {
+    for i in 0..b.len() {
+        let c = byte(in b, i);
+        if c == 92 {
+            put(inout o, in "\\\\");
+        } else if c == 9 {
+            put(inout o, in "\\t");
+        } else if c == 13 {
+            put(inout o, in "\\r");
+        } else if c == 10 {
+            put(inout o, in "\\n");
+        } else {
+            o.push(c);
+        }
+    }
+}
+
+pub fn put_hex(inout o: ChunkSeq[u8], in b: Slice[u8]) {
+    for i in 0..b.len() {
+        let c = byte(in b, i);
+        o.push(hex_digit(c >> 4));
+        o.push(hex_digit(c & 15));
+    }
+}
+
+fn hex_digit(c: u8) -> u8 {
+    if c < 10 {
+        wrapping_add(48, c)
+    } else {
+        wrapping_add(87, c)
+    }
+}
+
+// `strerror` for the codes a run can meet (Linux numbering).
+fn put_strerror(inout o: ChunkSeq[u8], n: u32) -> bool {
+    if n == 1 {
+        put(inout o, in "Operation not permitted");
+    } else if n == 2 {
+        put(inout o, in "No such file or directory");
+    } else if n == 5 {
+        put(inout o, in "Input/output error");
+    } else if n == 7 {
+        put(inout o, in "Argument list too long");
+    } else if n == 8 {
+        put(inout o, in "Exec format error");
+    } else if n == 12 {
+        put(inout o, in "Cannot allocate memory");
+    } else if n == 13 {
+        put(inout o, in "Permission denied");
+    } else if n == 17 {
+        put(inout o, in "File exists");
+    } else if n == 20 {
+        put(inout o, in "Not a directory");
+    } else if n == 21 {
+        put(inout o, in "Is a directory");
+    } else if n == 26 {
+        put(inout o, in "Text file busy");
+    } else if n == 28 {
+        put(inout o, in "No space left on device");
+    } else if n == 30 {
+        put(inout o, in "Read-only file system");
+    } else if n == 36 {
+        put(inout o, in "File name too long");
+    } else if n == 39 {
+        put(inout o, in "Directory not empty");
+    } else {
+        return false;
+    }
+    true
+}
+
+// `io::Error`'s `Display`: the OS message and `(os error N)`, or the kind.
+pub fn put_io_error(inout o: ChunkSeq[u8], e: IoError) {
+    if e.os != 0 {
+        if !put_strerror(inout o, e.os) {
+            put(inout o, in "Unknown error ");
+            put_u64(inout o, widen_u64(e.os));
+        }
+        put(inout o, in " (os error ");
+        put_u64(inout o, widen_u64(e.os));
+        o.push(41);
+        return;
+    }
+    let k = e.kind;
+    if k == 1 {
+        put(inout o, in "entity not found");
+    } else if k == 2 {
+        put(inout o, in "permission denied");
+    } else if k == 3 {
+        put(inout o, in "entity already exists");
+    } else if k == 4 {
+        put(inout o, in "not a directory");
+    } else if k == 5 {
+        put(inout o, in "is a directory");
+    } else if k == 6 {
+        put(inout o, in "directory not empty");
+    } else if k == 7 {
+        put(inout o, in "invalid input parameter");
+    } else if k == 8 {
+        put(inout o, in "operation interrupted");
+    } else if k == 9 {
+        put(inout o, in "unexpected end of file");
+    } else if k == 10 {
+        put(inout o, in "write zero");
+    } else if k == 11 {
+        put(inout o, in "unsupported");
+    } else if k == 12 {
+        put(inout o, in "out of memory");
+    } else {
+        put(inout o, in "other error");
+    }
+}
+
+fn signal_name(inout o: ChunkSeq[u8], s: u32) -> bool {
+    if s == 1 {
+        put(inout o, in "SIGHUP");
+    } else if s == 2 {
+        put(inout o, in "SIGINT");
+    } else if s == 3 {
+        put(inout o, in "SIGQUIT");
+    } else if s == 4 {
+        put(inout o, in "SIGILL");
+    } else if s == 5 {
+        put(inout o, in "SIGTRAP");
+    } else if s == 6 {
+        put(inout o, in "SIGABRT");
+    } else if s == 7 {
+        put(inout o, in "SIGBUS");
+    } else if s == 8 {
+        put(inout o, in "SIGFPE");
+    } else if s == 9 {
+        put(inout o, in "SIGKILL");
+    } else if s == 10 {
+        put(inout o, in "SIGUSR1");
+    } else if s == 11 {
+        put(inout o, in "SIGSEGV");
+    } else if s == 12 {
+        put(inout o, in "SIGUSR2");
+    } else if s == 13 {
+        put(inout o, in "SIGPIPE");
+    } else if s == 14 {
+        put(inout o, in "SIGALRM");
+    } else if s == 15 {
+        put(inout o, in "SIGTERM");
+    } else if s == 16 {
+        put(inout o, in "SIGSTKFLT");
+    } else if s == 17 {
+        put(inout o, in "SIGCHLD");
+    } else if s == 18 {
+        put(inout o, in "SIGCONT");
+    } else if s == 19 {
+        put(inout o, in "SIGSTOP");
+    } else if s == 20 {
+        put(inout o, in "SIGTSTP");
+    } else if s == 21 {
+        put(inout o, in "SIGTTIN");
+    } else if s == 22 {
+        put(inout o, in "SIGTTOU");
+    } else if s == 23 {
+        put(inout o, in "SIGURG");
+    } else if s == 24 {
+        put(inout o, in "SIGXCPU");
+    } else if s == 25 {
+        put(inout o, in "SIGXFSZ");
+    } else if s == 26 {
+        put(inout o, in "SIGVTALRM");
+    } else if s == 27 {
+        put(inout o, in "SIGPROF");
+    } else if s == 28 {
+        put(inout o, in "SIGWINCH");
+    } else if s == 29 {
+        put(inout o, in "SIGIO");
+    } else if s == 30 {
+        put(inout o, in "SIGPWR");
+    } else if s == 31 {
+        put(inout o, in "SIGSYS");
+    } else {
+        return false;
+    }
+    true
+}
+
+// `ExitStatus`'s `Display` on Unix.
+pub fn put_status(inout o: ChunkSeq[u8], s: ExitStatus) {
+    if s.exited {
+        put(inout o, in "exit status: ");
+        if s.code < 0 {
+            o.push(45);
+            put_u64(inout o, wrapping_u64(wrapping_sub(0, s.code)));
+        } else {
+            put_u64(inout o, wrapping_u64(s.code));
+        }
+        return;
+    }
+    put(inout o, in "signal: ");
+    put_u64(inout o, widen_u64(s.signal));
+    let mut name = ChunkSeq::new[u8]();
+    if signal_name(inout name, s.signal) {
+        put(inout o, in " (");
+        put_bytes(inout o, in name.as_slice());
+        o.push(41);
+    }
+}

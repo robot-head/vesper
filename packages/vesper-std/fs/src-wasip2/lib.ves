@@ -148,13 +148,25 @@ pub fn read(in path: Str) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
 }
 
 pub fn read_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    read_path_limit(in path, 18446744073709551615)
+}
+
+// At most the first `limit` bytes of the file at `path` (`Read::take`):
+// no more is read, however long the file is.
+pub fn read_path_limit(in path: Slice[u8], limit: u64)
+    -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
     let mut err: u64 = 0;
     let mut f = match StdFs::vstd_fs_open(in path, mode_read(), inout err) {
         Option::Some(f) => f,
         Option::None => return raise_io(err),
     };
     // Read the length the file has now, then whatever it grew by since.
-    let n = StdFs::vstd_fs_file_len(in f);
+    let len = StdFs::vstd_fs_file_len(in f);
+    let n = if len < limit {
+        len
+    } else {
+        limit
+    };
     let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
     buf.resize(n, 0);
     let got = StdFs::vstd_fs_read(inout f, inout buf.as_slice_mut(), inout err);
@@ -162,7 +174,17 @@ pub fn read_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoErr
         let mut more: ChunkSeq[u8] = ChunkSeq::new[u8]();
         more.resize(4096, 0);
         loop {
-            let m = StdFs::vstd_fs_read(inout f, inout more.as_slice_mut(), inout err);
+            let at = buf.len();
+            if at >= limit {
+                break;
+            }
+            let room = wrapping_sub(limit, at);
+            let step: u64 = if room < 4096 {
+                room
+            } else {
+                4096
+            };
+            let m = StdFs::vstd_fs_read(inout f, inout more[0..step], inout err);
             if m == 0 || err != 0 {
                 break;
             }
@@ -576,4 +598,22 @@ fn kind_text(kind: u32) -> Str {
         12 => "out of memory",
         _ => "other error",
     }
+}
+
+// The architecture this package was built for: `arch_x86_64()`,
+// `arch_aarch64()` or `arch_wasm32()` (the vsys file's `ARCH`).
+pub fn arch() -> u32 {
+    StdFs::ARCH
+}
+
+pub fn arch_x86_64() -> u32 {
+    1
+}
+
+pub fn arch_aarch64() -> u32 {
+    2
+}
+
+pub fn arch_wasm32() -> u32 {
+    3
 }

@@ -82,20 +82,34 @@ merge_gate = task(
     args = {"tool_args": args.trailing_var_args(description = _USAGE)},
 )
 
-def gate_workflow(settings, run, get, cancel, analyze, append, tell):
+def _refspec(pr):
+    return "+refs/pull/%d/head:%s" % (pr["number"], pr["ref"])
+
+def _fetch_open_prs(prs, run, attempt, tell):
+    # GitHub lists a pull request opened a moment ago before its head ref can
+    # be fetched (#2039), so one missing ref must not fail the gate for an
+    # unrelated pull request: fetch the refs one by one, wait once for the
+    # missing ones, and leave out any that still cannot be fetched.
+    if not prs or attempt("git", ["fetch", "--quiet", "origin"] + [_refspec(pr) for pr in prs]):
+        return prs
+    missing = [pr for pr in prs if not attempt("git", ["fetch", "--quiet", "origin", _refspec(pr)])]
+    if missing:
+        run("sleep", ["10"])
+        missing = [pr for pr in missing if not attempt("git", ["fetch", "--quiet", "origin", _refspec(pr)])]
+    for pr in missing:
+        tell("skipping open PR #%d: its head ref cannot be fetched yet\n" % pr["number"])
+    return [pr for pr in prs if pr not in missing]
+
+def gate_workflow(settings, run, attempt, get, cancel, analyze, append, tell):
     repo = "repos/" + settings.repo
     run("git", ["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"])
     prs = []
-    refspecs = []
     for row in get(repo + "/pulls?state=open&per_page=100", '.[] | [.number, .base.ref] | @tsv').splitlines():
         number, base = row.split("\t")
         if not _decimal(number):
             fail("Invalid pull request number from GitHub: " + number)
-        ref = "refs/gate/pr/" + number
-        prs.append({"number": int(number), "base": base, "ref": ref})
-        refspecs.append("+refs/pull/" + number + "/head:" + ref)
-    if refspecs:
-        run("git", ["fetch", "--quiet", "origin"] + refspecs)
+        prs.append({"number": int(number), "base": base, "ref": "refs/gate/pr/" + number})
+    prs = _fetch_open_prs(prs, run, attempt, tell)
     reasons = analyze(prs)
     report = _decision(settings.number, reasons)
     tell(report)
@@ -104,7 +118,7 @@ def gate_workflow(settings, run, get, cancel, analyze, append, tell):
         return 0
     append(settings.summary, "### CI skipped: this pull request cannot merge yet\n" + report +
            "\nPush again once the parent has merged or the conflict is fixed.\n")
-    for attempt in range(3):
+    for sweep in range(3):
         for row in get(repo + "/actions/runs?head_sha=" + settings.head + "&per_page=100", '.workflow_runs[] | [.id, .status] | @tsv').splitlines():
             run_id, status = row.split("\t")
             if not _decimal(run_id):
@@ -112,7 +126,7 @@ def gate_workflow(settings, run, get, cancel, analyze, append, tell):
             if run_id != settings.run_id and status != "completed":
                 tell("cancelling run " + run_id + "\n")
                 cancel(repo + "/actions/runs/" + run_id + "/cancel")
-        if attempt < 2:
+        if sweep < 2:
             run("sleep", ["20"])
     cancel(repo + "/actions/runs/" + settings.run_id + "/cancel")
     return 1
@@ -139,6 +153,9 @@ def _workflow(ctx: TaskContext) -> int:
     def run(tool, args):
         check(ctx, tool, args, root)
 
+    def attempt(tool, args):
+        return command(ctx, tool, args, root).status().success
+
     def get(endpoint, query):
         return capture(ctx, "gh", ["api", "--paginate", endpoint, "--jq", query], root)
 
@@ -152,7 +169,7 @@ def _workflow(ctx: TaskContext) -> int:
         if not ctx.std.fs.try_append(path, value):
             fail("Cannot write GitHub Actions file: " + path)
 
-    return gate_workflow(settings, run, get, cancel, analyze, append, ctx.std.io.stdout.write)
+    return gate_workflow(settings, run, attempt, get, cancel, analyze, append, ctx.std.io.stdout.write)
 
 merge_gate_workflow = task(
     kind = "merge-gate-workflow",
