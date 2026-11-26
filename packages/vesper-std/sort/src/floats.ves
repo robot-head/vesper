@@ -1,6 +1,7 @@
 // @vesper-std/sort::floats: sorting floats under the IEEE 754 total order.
 use self::unstable::{sort, is_sorted};
 use self::stable::stable_sort;
+use @vesper-std/core::defer::defer;
 use @vesper-std/core::pact::using;
 use @vesper-std/sugar::{guard, when};
 
@@ -77,12 +78,15 @@ pub fn sort_f32_bits(inout s: Slice[u32]) {
             s.try_set(i, total_key_f32_bits(b));
         }
     }
-    sort(inout s);
-    for i in 0..n {
-        when let Option::Some(k) = s.try_get(i) {
-            s.try_set(i, f32_bits_from_key(k));
+    // The caller owns IEEE bit patterns, not the temporary order keys.
+    defer {
+        for i in 0..n {
+            when let Option::Some(k) = s.try_get(i) {
+                s.try_set(i, f32_bits_from_key(k));
+            }
         }
     }
+    sort(inout s);
 }
 
 test {
