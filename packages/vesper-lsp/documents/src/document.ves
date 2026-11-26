@@ -102,10 +102,7 @@ pub struct Change {
 }
 
 fn w(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 fn hard_index() -> Limits {
@@ -197,18 +194,12 @@ fn has_control(in u: Str) -> bool {
     let b = u.as_bytes();
     let n = b.len();
     for i in 0..n {
-        let c = match b.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let c = b.try_get(i).unwrap_or(0);
         if c < Control::C0End || c == Control::Del {
             return true;
         }
         if c == Control::C1Lead {
-            let d = match b.try_get(wrapping_add(i, 1)) {
-                Option::Some(x) => x,
-                Option::None => 0,
-            };
+            let d = b.try_get(wrapping_add(i, 1)).unwrap_or(0);
             if d >= Control::C1First && d < Control::C1End {
                 return true;
             }
@@ -324,10 +315,7 @@ fn utf16_len(in t: Str) -> u64 {
     let b = t.as_bytes();
     let mut n: u64 = 0;
     for i in 0..b.len() {
-        let c = match b.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let c = b.try_get(i).unwrap_or(0);
         if c < 128 || c >= 192 {
             n = if c >= 240 {
                 wrapping_add(n, 2)
@@ -426,10 +414,7 @@ pub fn store_change(
     in changes: ChunkSeq[Change]
 ) -> u64 eff [Fail[StoreError]] {
     let at = lookup(in s, in uri);
-    let old_version = match s.versions.try_get(at) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    };
+    let old_version = s.versions.try_get(at).unwrap_or(0);
     let old_len = w(in s.text_len, at);
     if version <= old_version {
         Fail::raise(StoreError::SVersion);
@@ -505,10 +490,7 @@ fn remove_u64(inout v: ChunkSeq[u64], at: u64) {
 fn remove_i64(inout v: ChunkSeq[i64], at: u64) {
     let n = v.len();
     for i in at..wrapping_sub(n, 1) {
-        let x = match v.try_get(wrapping_add(i, 1)) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let x = v.try_get(wrapping_add(i, 1)).unwrap_or(0);
         let _ = v.try_set(i, x);
     }
     v.truncate(wrapping_sub(n, 1));
@@ -526,10 +508,7 @@ pub fn store_close(inout s: Store, in uri: Str) -> Closed eff [Fail[StoreError]]
     let at = lookup(in s, in uri);
     let revision = next_revision(in s);
     let closed = Closed {
-        version: match s.versions.try_get(at) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        },
+        version: s.versions.try_get(at).unwrap_or(0),
         revision: w(in s.revs, at),
         text: text_copy(in s, at)
     };
@@ -561,10 +540,7 @@ pub fn store_get(in s: Store, in uri: Str) -> Option[u64] {
 }
 
 pub fn doc_version(in s: Store, at: u64) -> i64 {
-    match s.versions.try_get(at) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.versions.try_get(at).unwrap_or(0)
 }
 
 pub fn doc_revision(in s: Store, at: u64) -> u64 {
