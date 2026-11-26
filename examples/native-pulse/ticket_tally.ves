@@ -51,20 +51,9 @@ fn absorb(inout t: Tally, inout buf: Block) eff [Pulse] {
     }
 }
 fn main() -> Summary eff [Pulse] {
-    let ticket = Ticket {
-        id: 7
-    };
-    let mut tally = Tally {
-        reads: 0,
-        bytes: 0,
-        sum: 0,
-        cancelled: 0,
-        failed: 0
-    };
-    let mut buf = Block {
-        lo: 1,
-        hi: 2
-    };
+    let ticket = Ticket { id: 7 };
+    let mut tally = Tally { reads: 0, bytes: 0, sum: 0, cancelled: 0, failed: 0 };
+    let mut buf = Block { lo: 1, hi: 2 };
     let before = wrapping_mul(buf.hi, 100);
     absorb(inout tally, inout buf);
     let paused: u64 = match Pulse::pause() {
@@ -73,13 +62,6 @@ fn main() -> Summary eff [Pulse] {
         TickCancelled => 3,
     };
     absorb(inout tally, inout buf);
-    let Ticket {
-        id
-    } = ticket;
-    Summary {
-        ticket: wrapping_add(id, before),
-        paused: paused,
-        tally: tally,
-        last: buf
-    }
+    let Ticket { id } = ticket;
+    Summary { ticket: wrapping_add(id, before), paused: paused, tally: tally, last: buf }
 }

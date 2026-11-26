@@ -89,11 +89,7 @@ pub struct Keys {
 }
 
 pub fn keys_new() -> Keys {
-    Keys {
-        bytes: ChunkSeq::new[u8](),
-        starts: ChunkSeq::new[u64](),
-        lens: ChunkSeq::new[u64]()
-    }
+    Keys { bytes: ChunkSeq::new[u8](), starts: ChunkSeq::new[u64](), lens: ChunkSeq::new[u64]() }
 }
 
 impl Keys {

@@ -14,10 +14,7 @@ fn ensures_tag[B](before: Tagged[B], result: u64) -> bool {
 }
 
 fn package[T](sink payload: T, stamp: u64) -> Tagged[T] {
-    Tagged {
-        payload: payload,
-        tag: stamp
-    }
+    Tagged { payload: payload, tag: stamp }
 }
 fn ensures_package[U](payload: U, stamp: u64, result: Tagged[U]) -> bool {
     result.tag == stamp
@@ -66,10 +63,5 @@ fn ensures_countdown[U](token: U, n: u64, result: u64) -> bool {
 }
 
 fn main() -> u64 {
-    tag(
-        Tagged {
-            payload: true,
-            tag: 42
-        }
-    )
+    tag(Tagged { payload: true, tag: 42 })
 }

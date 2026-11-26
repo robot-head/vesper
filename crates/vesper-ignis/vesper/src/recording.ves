@@ -207,14 +207,7 @@ pub fn recorder_submit(
             Option::None => (),
         }
     }
-    r
-        .active
-        .push(
-            ActiveSub {
-                first_stream: first_stream,
-                stream_count: keep
-            }
-        );
+    r.active.push(ActiveSub { first_stream: first_stream, stream_count: keep });
     RecorderVerdict::Recorded {
         uncertain: mode == SubmitMode::AcceptUncertain
             || mode == SubmitMode::AcceptFirstQueueUncertain,
@@ -225,13 +218,7 @@ pub fn recorder_submit(
 fn stream_at(in r: Recorder, i: u64) -> ActiveStream {
     match r.streams.try_get(i) {
         Option::Some(s) => s,
-        Option::None => ActiveStream {
-            runtime: 0,
-            index: 0,
-            first: 0,
-            count: 0,
-            cursor: 0
-        },
+        Option::None => ActiveStream { runtime: 0, index: 0, first: 0, count: 0, cursor: 0 },
     }
 }
 
@@ -300,11 +287,7 @@ fn step(inout r: Recorder) -> Step {
                             Option::None => SimCmd {
                                 wait: false,
                                 signal: false,
-                                point: Point {
-                                    runtime: 0,
-                                    index: 0,
-                                    value: 0
-                                }
+                                point: Point { runtime: 0, index: 0, value: 0 }
                             },
                         };
                         let blocked = blocked_by_earlier(in r, i, q.runtime, q.index);
@@ -376,10 +359,7 @@ pub fn recorder_poll(inout r: Recorder, max_events: u64) -> ChunkSeq[Point] {
                     }
                     active
                         .push(
-                            ActiveSub {
-                                first_stream: first_stream,
-                                stream_count: a.stream_count
-                            }
+                            ActiveSub { first_stream: first_stream, stream_count: a.stream_count }
                         );
                 }
             },

@@ -17,10 +17,7 @@ fn classify(v: u64) -> Option[u64] {
 }
 
 fn main() -> u64 {
-    let p = Pair {
-        x: 6,
-        y: 7
-    };
+    let p = Pair { x: 6, y: 7 };
     let big = handle Fail[ArithOverflow] in {
         scale(in p, 18446744073709551615)
     } with {

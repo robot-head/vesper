@@ -11,11 +11,7 @@ pub fn lifecycle_check_completion(in l: Lifecycle, runtime: u64, index: u64, val
     if value > get64(in l.reserved, index) {
         return LifeError::UnknownCompletion;
     }
-    let point = Point {
-        runtime: runtime,
-        index: index,
-        value: value
-    };
+    let point = Point { runtime: runtime, index: index, value: value };
     for f in 0..l.flights.len() {
         match l.flights.try_get(f) {
             Option::Some(fl) => {

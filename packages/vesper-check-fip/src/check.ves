@@ -1121,12 +1121,7 @@ impl Fip {
                     .binds
                     .insert(
                         in self.c.names,
-                        BindRow {
-                            name: p.a,
-                            ty: ty,
-                            start: p.start,
-                            end: p.end
-                        }
+                        BindRow { name: p.a, ty: ty, start: p.start, end: p.end }
                     );
             }
             return;
@@ -1154,15 +1149,7 @@ impl Fip {
                 if inner == NONE32 {
                     inner = self.c.types.infer;
                 }
-                st
-                    .slots
-                    .push(
-                        SlotRow {
-                            ty: inner,
-                            start: p.start,
-                            end: p.end
-                        }
-                    );
+                st.slots.push(SlotRow { ty: inner, start: p.start, end: p.end });
                 self.bind_pattern(self.ast.at(inc(w(p.b))), inner, inout st);
                 return;
             }
@@ -1825,12 +1812,7 @@ impl Fip {
                     .binds
                     .insert(
                         in self.c.names,
-                        BindRow {
-                            name: p.name,
-                            ty: p.ty,
-                            start: p.start,
-                            end: p.end
-                        }
+                        BindRow { name: p.name, ty: p.ty, start: p.start, end: p.end }
                     );
             }
         }

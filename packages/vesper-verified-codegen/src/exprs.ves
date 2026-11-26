@@ -81,13 +81,7 @@ pub fn hx0() -> Hx {
 }
 
 pub fn cl0() -> Cl {
-    Cl {
-        name: 0,
-        pa: 0,
-        pn: 0,
-        s0: 0,
-        s1: 0
-    }
+    Cl { name: 0, pa: 0, pn: 0, s0: 0, s1: 0 }
 }
 
 impl Ex {
@@ -155,17 +149,7 @@ fn read_clause(inout r: Reader, in b: Slice[u8], in c: Ctx, inout ex: Ex) -> u64
     let s0 = r.word(in b);
     let s1 = r.word(in b);
     let i = ex.cls.len();
-    ex
-        .cls
-        .push(
-            Cl {
-                name: name,
-                pa: pa,
-                pn: pn,
-                s0: s0,
-                s1: s1
-            }
-        );
+    ex.cls.push(Cl { name: name, pa: pa, pn: pn, s0: s0, s1: s1 });
     i
 }
 

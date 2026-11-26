@@ -560,11 +560,7 @@ fn translate(
                                     SubCmd {
                                         stream: s32,
                                         tag: 1,
-                                        point: Point {
-                                            runtime: 0,
-                                            index: 0,
-                                            value: 0
-                                        },
+                                        point: Point { runtime: 0, index: 0, value: 0 },
                                         source: ci,
                                         initialize: false
                                     }
@@ -602,11 +598,7 @@ fn translate(
                                     SubCmd {
                                         stream: s32,
                                         tag: 3,
-                                        point: Point {
-                                            runtime: 0,
-                                            index: 0,
-                                            value: 0
-                                        },
+                                        point: Point { runtime: 0, index: 0, value: 0 },
                                         source: ci,
                                         initialize: false
                                     }
@@ -619,26 +611,12 @@ fn translate(
             }
         }
         let last = match fence_add(high, 1) {
-            FenceSum::Value(v) => Point {
-                runtime: own.runtime,
-                index: own.index,
-                value: v
-            },
+            FenceSum::Value(v) => Point { runtime: own.runtime, index: own.index, value: v },
             FenceSum::Overflow => {
                 return refuse(LifeError::FenceOverflow);
             },
         };
-        out
-            .cmds
-            .push(
-                SubCmd {
-                    stream: s32,
-                    tag: 4,
-                    point: last,
-                    source: 0,
-                    initialize: false
-                }
-            );
+        out.cmds.push(SubCmd { stream: s32, tag: 4, point: last, source: 0, initialize: false });
         emitted = wrapping_add(emitted, 1);
         total = wrapping_add(total, emitted);
         if total > max {

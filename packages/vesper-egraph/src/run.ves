@@ -107,10 +107,7 @@ pub struct Records {
 }
 
 pub fn records_new() -> Records {
-    Records {
-        words: ChunkSeq::new[u32](),
-        count: 0
-    }
+    Records { words: ChunkSeq::new[u32](), count: 0 }
 }
 
 impl Records {

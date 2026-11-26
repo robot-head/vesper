@@ -231,15 +231,7 @@ fn sym(inout r: Reader, in b: Slice[u8], in c: Ctx) -> u32 {
 fn fn_row(in s: ChunkSeq[FnRow], i: u64) -> FnRow {
     match s.try_get(i) {
         Option::Some(x) => x,
-        Option::None => FnRow {
-            name: 0,
-            ha: 0,
-            hn: 0,
-            b0: 0,
-            bc: 0,
-            ta: 0,
-            tn: 0
-        },
+        Option::None => FnRow { name: 0, ha: 0, hn: 0, b0: 0, bc: 0, ta: 0, tn: 0 },
     }
 }
 
@@ -286,12 +278,7 @@ fn map_new(min: u64) -> SymMap {
         keys.push(0);
         vals.push(0);
     }
-    SymMap {
-        keys: keys,
-        vals: vals,
-        mask: wrapping_sub(cap, 1),
-        n: 0
-    }
+    SymMap { keys: keys, vals: vals, mask: wrapping_sub(cap, 1), n: 0 }
 }
 
 fn slot_of(s: u32, mask: u64) -> u64 {
@@ -389,15 +376,7 @@ fn subst_effects(inout t: Types, ty: u32, in vars: Vars) -> u32 {
             let s = subst(inout t, x, in vars);
             args.push(s);
         }
-        es
-            .push(
-                EffNode {
-                    label: e.label,
-                    name: e.name,
-                    a: a,
-                    n: e.n
-                }
-            );
+        es.push(EffNode { label: e.label, name: e.name, a: a, n: e.n });
     }
     let r = t.mk_row(in es, in args, row.tail);
     t.row_type(r)
@@ -813,20 +792,7 @@ fn instantiate(inout m: Mo, f: FnRow, name: u32, in vars: Vars) eff [Fail[VErr]]
                 }
             );
     }
-    m
-        .p
-        .fns
-        .push(
-            FnRow {
-                name: name,
-                ha: ha,
-                hn: f.hn,
-                b0: b0,
-                bc: f.bc,
-                ta: f.ta,
-                tn: f.tn
-            }
-        );
+    m.p.fns.push(FnRow { name: name, ha: ha, hn: f.hn, b0: b0, bc: f.bc, ta: f.ta, tn: f.tn });
 }
 
 // `monomorphize`: every instance the entry reaches, breadth first.
@@ -873,9 +839,7 @@ fn mono_all(inout m: Mo) eff [Fail[VErr]] {
 // ----- entry --------------------------------------------------------------------
 
 pub fn mono_input(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
     let ex = read_exprs(inout r, in b, in c);
@@ -986,9 +950,7 @@ pub fn front_input(in b: Slice[u8]) -> ChunkSeq[u8] {
 // `front_input` into `lo`: empty, or `error: `, the error's text and a
 // newline.
 pub fn front_rows(in b: Slice[u8], inout lo: Lowered) -> ChunkSeq[u8] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
     let ex = read_exprs(inout r, in b, in c);

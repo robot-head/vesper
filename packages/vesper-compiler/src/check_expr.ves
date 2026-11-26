@@ -4,17 +4,7 @@ fn c_expr(at: i64, env: CEnv, usage: i64, row: i64, loans: CEnv, depth: i64, res
     -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if depth > 48 {
         let limit = c_limit(at);
-        c_result(
-            CType {
-                tag: 0,
-                at: 0
-            },
-            at,
-            env,
-            at,
-            at,
-            -1
-        )
+        c_result(CType { tag: 0, at: 0 }, at, env, at, at, -1)
     } else {
         let k = c_kind(at);
         if k == 34 {
@@ -80,41 +70,11 @@ fn c_literal_primary(
         } else {
             0
         };
-        c_result(
-            CType {
-                tag: 2,
-                at: 0
-            },
-            t.end,
-            env,
-            t.start,
-            t.end,
-            -1
-        )
+        c_result(CType { tag: 2, at: 0 }, t.end, env, t.start, t.end, -1)
     } else if t.kind == 30 || t.kind == 31 {
-        c_result(
-            CType {
-                tag: 1,
-                at: 0
-            },
-            t.end,
-            env,
-            t.start,
-            t.end,
-            -1
-        )
+        c_result(CType { tag: 1, at: 0 }, t.end, env, t.start, t.end, -1)
     } else if t.kind == 32 && c_kind(t.end) == 33 {
-        c_result(
-            CType {
-                tag: 0,
-                at: 0
-            },
-            c_next(t.end),
-            env,
-            t.start,
-            c_next(t.end),
-            -1
-        )
+        c_result(CType { tag: 0, at: 0 }, c_next(t.end), env, t.start, c_next(t.end), -1)
     } else if t.kind == 32 {
         let value = c_expr(t.end, env, usage, row, loans, depth + 1, false);
         let end = c_take(value.next, 33);
@@ -125,17 +85,7 @@ fn c_literal_primary(
         } else {
             0
         };
-        c_result(
-            CType {
-                tag: 2,
-                at: 0
-            },
-            c_next(t.end),
-            env,
-            t.start,
-            c_next(t.end),
-            -1
-        )
+        c_result(CType { tag: 2, at: 0 }, c_next(t.end), env, t.start, c_next(t.end), -1)
     } else if t.kind == 67 {
         let value = c_postfix(
             c_primary(t.end, env, 2, row, loans, depth + 1, restricted),
@@ -143,29 +93,11 @@ fn c_literal_primary(
             loans,
             depth + 1
         );
-        let valid = c_expect_type(
-            CType {
-                tag: 1,
-                at: 0
-            },
-            value.ty,
-            t.start,
-            value.end
-        );
+        let valid = c_expect_type(CType { tag: 1, at: 0 }, value.ty, t.start, value.end);
         c_result(value.ty, value.next, value.env, t.start, value.end, -1)
     } else {
         let unsupported = c_unsupported(4, at);
-        c_result(
-            CType {
-                tag: 0,
-                at: 0
-            },
-            at,
-            env,
-            at,
-            at,
-            -1
-        )
+        c_result(CType { tag: 0, at: 0 }, at, env, at, at, -1)
     }
 }
 fn c_name_primary(
@@ -199,29 +131,9 @@ fn c_name_primary(
         let f = c_find(t, 12, 0);
         if f < 0 {
             let error = c_error(201, t.start, t.end);
-            c_result(
-                CType {
-                    tag: 0,
-                    at: 0
-                },
-                t.end,
-                env,
-                t.start,
-                t.end,
-                -1
-            )
+            c_result(CType { tag: 0, at: 0 }, t.end, env, t.start, t.end, -1)
         } else {
-            c_result(
-                CType {
-                    tag: 4,
-                    at: c_fn_at(f)
-                },
-                t.end,
-                env,
-                t.start,
-                t.end,
-                -1
-            )
+            c_result(CType { tag: 4, at: c_fn_at(f) }, t.end, env, t.start, t.end, -1)
         }
     }
 }
@@ -256,10 +168,7 @@ fn c_nominal_primary(
     } else {
         t.end
     };
-    let ty = CType {
-        tag: 3,
-        at: ctor.adt.name.start
-    };
+    let ty = CType { tag: 3, at: ctor.adt.name.start };
     if ctor.fields < 0 && c_kind(next) == 32 {
         let end = c_group(next, 0);
         let valid = if c_kind(c_next(next)) != 33 {
@@ -314,17 +223,7 @@ fn c_compare(left: CExpr, row: i64, loans: CEnv, depth: i64)
             0
         };
         c_compare(
-            c_result(
-                CType {
-                    tag: 1,
-                    at: 0
-                },
-                right.next,
-                right.env,
-                left.start,
-                right.end,
-                -1
-            ),
+            c_result(CType { tag: 1, at: 0 }, right.next, right.env, left.start, right.end, -1),
             row,
             loans,
             depth
@@ -350,17 +249,7 @@ fn c_order(left: CExpr, row: i64, loans: CEnv, depth: i64)
             0
         };
         c_order(
-            c_result(
-                CType {
-                    tag: 1,
-                    at: 0
-                },
-                right.next,
-                right.env,
-                left.start,
-                right.end,
-                -1
-            ),
+            c_result(CType { tag: 1, at: 0 }, right.next, right.env, left.start, right.end, -1),
             row,
             loans,
             depth
@@ -459,17 +348,7 @@ fn c_param_count(at: i64, named: bool)
 fn c_args(at: i64, param: i64, named: bool, env: CEnv, row: i64, loans: CEnv, depth: i64)
     -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if c_kind(at) == 33 {
-        c_result(
-            CType {
-                tag: 0,
-                at: 0
-            },
-            c_next(at),
-            env,
-            at,
-            c_next(at),
-            -1
-        )
+        c_result(CType { tag: 0, at: 0 }, c_next(at), env, at, c_next(at), -1)
     } else {
         let p = c_param(param, named, 0);
         let k = c_kind(at);
@@ -520,10 +399,7 @@ fn c_args(at: i64, param: i64, named: bool, env: CEnv, row: i64, loans: CEnv, de
                 loans,
                 CBinding {
                     name: c_token(value.start),
-                    ty: CType {
-                        tag: 0,
-                        at: value.place
-                    },
+                    ty: CType { tag: 0, at: value.place },
                     pass: p.pass
                 }
             )
@@ -588,17 +464,7 @@ fn c_assign(at: i64, env: CEnv, row: i64, loans: CEnv, depth: i64)
     } else {
         0
     };
-    c_result(
-        CType {
-            tag: 0,
-            at: 0
-        },
-        value.next,
-        value.env,
-        name.start,
-        value.end,
-        -1
-    )
+    c_result(CType { tag: 0, at: 0 }, value.next, value.env, name.start, value.end, -1)
 }
 
 fn c_place_shape(at: i64, end: i64)

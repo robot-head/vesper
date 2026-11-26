@@ -55,12 +55,7 @@ pub fn process_table_new(n: u64, max_epochs: u64) -> ProcessTable {
         up.push(true);
         i = wrapping_add(i, 1);
     }
-    ProcessTable {
-        epochs: epochs,
-        up: up,
-        crashes: 0,
-        max_epochs: max_epochs
-    }
+    ProcessTable { epochs: epochs, up: up, crashes: 0, max_epochs: max_epochs }
 }
 
 pub fn process_table_clone(in t: ProcessTable) -> ProcessTable {
@@ -76,12 +71,7 @@ pub fn process_table_clone(in t: ProcessTable) -> ProcessTable {
         up.push(up_at(in t.up, i));
         i = wrapping_add(i, 1);
     }
-    ProcessTable {
-        epochs: epochs,
-        up: up,
-        crashes: t.crashes,
-        max_epochs: t.max_epochs
-    }
+    ProcessTable { epochs: epochs, up: up, crashes: t.crashes, max_epochs: t.max_epochs }
 }
 
 pub fn process_table_crash(inout t: ProcessTable, p: u64) -> (u8, u64) {

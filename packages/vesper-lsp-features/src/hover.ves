@@ -346,52 +346,24 @@ fn type_at(in a: Ast, i: u32) -> TypeNode {
         .types
         .get_or(
             idx_from_raw[TypeNode](i),
-            TypeNode {
-                kind: AT_INFER,
-                a: NONE,
-                b: NONE,
-                c: NONE,
-                d: NONE
-            }
+            TypeNode { kind: AT_INFER, a: NONE, b: NONE, c: NONE, d: NONE }
         )
 }
 
 fn effects_at(in a: Ast, i: u32) -> EffectsNode {
-    a
-        .effects
-        .get_or(
-            idx_from_raw[EffectsNode](i),
-            EffectsNode {
-                instances: NONE,
-                tail: NONE
-            }
-        )
+    a.effects.get_or(idx_from_raw[EffectsNode](i), EffectsNode { instances: NONE, tail: NONE })
 }
 
 fn effect_at(in a: Ast, i: u32) -> EffectNode {
     a
         .effect_nodes
-        .get_or(
-            idx_from_raw[EffectNode](i),
-            EffectNode {
-                label: NONE,
-                name: NONE,
-                args: NONE
-            }
-        )
+        .get_or(idx_from_raw[EffectNode](i), EffectNode { label: NONE, name: NONE, args: NONE })
 }
 
 fn generic_at(in a: Ast, i: u32) -> GenericNode {
     a
         .generics
-        .get_or(
-            idx_from_raw[GenericNode](i),
-            GenericNode {
-                name: NONE,
-                bound: 0,
-                row: false
-            }
-        )
+        .get_or(idx_from_raw[GenericNode](i), GenericNode { name: NONE, bound: 0, row: false })
 }
 
 // `print_type` of a source type.
@@ -874,11 +846,7 @@ pub fn hover_answer(inout out: ChunkSeq[u8], inout x: Ix, inout f: Facts, line: 
     if !cursor(inout x, line, character, inout at) {
         return x.err;
     }
-    let mut o = Out {
-        v: ChunkSeq::new[u8](),
-        left: MAX_TYPE_WORK,
-        err: ERR_NONE
-    };
+    let mut o = Out { v: ChunkSeq::new[u8](), left: MAX_TYPE_WORK, err: ERR_NONE };
     let mut sel_start: u64 = 0;
     let mut sel_end: u64 = 0;
     let best = node_at(in x, at);

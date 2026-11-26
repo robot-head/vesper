@@ -103,14 +103,7 @@ pub fn decode(inout t: Tree, in w: Slice[u64]) {
             at = add(at, 5);
         }
         for j in 0..ns {
-            t
-                .subs
-                .push(
-                    TSub {
-                        event: get_u64(in w, at),
-                        handler: get_u64(in w, inc(at))
-                    }
-                );
+            t.subs.push(TSub { event: get_u64(in w, at), handler: get_u64(in w, inc(at)) });
             at = add(at, 2);
         }
         for j in 0..nc {
@@ -186,10 +179,7 @@ pub fn validate(inout t: Tree, lim: Lim, in text: Slice[u8]) -> Option[ViewFault
             let p = tprop(in t.props, add(node.pstart, j));
             if !property_valid(node.kind, p.property, p.tag, p.payload) {
                 return Option::Some(
-                    ViewFault::PropertyType {
-                        key: node.key,
-                        property: p.property
-                    }
+                    ViewFault::PropertyType { key: node.key, property: p.property }
                 );
             }
             if p.tag == ValueTag::Text {
@@ -208,12 +198,7 @@ pub fn validate(inout t: Tree, lim: Lim, in text: Slice[u8]) -> Option[ViewFault
         for j in 0..node.scount {
             let s = tsub(in t.subs, add(node.sstart, j));
             if !event_valid(node.kind, s.event) {
-                return Option::Some(
-                    ViewFault::UnsupportedEvent {
-                        key: node.key,
-                        event: s.event
-                    }
-                );
+                return Option::Some(ViewFault::UnsupportedEvent { key: node.key, event: s.event });
             }
         }
     }
@@ -227,12 +212,7 @@ pub fn validate(inout t: Tree, lim: Lim, in text: Slice[u8]) -> Option[ViewFault
             let child = seq_u64(in t.kids, add(node.cstart, j));
             let c = tree_find(in t, child);
             if c == NONE_ID {
-                return Option::Some(
-                    ViewFault::MissingChild {
-                        parent: node.key,
-                        child: child
-                    }
-                );
+                return Option::Some(ViewFault::MissingChild { parent: node.key, child: child });
             }
             if seq_u64(in t.parent, c) != NONE_ID {
                 return Option::Some(ViewFault::MultipleParents(child));

@@ -458,9 +458,7 @@ fn copy_row(in s: Sets, v: u64) -> ChunkSeq[u64] {
 
 // The functions of the input, one line each: `ok` or `err <message>`.
 pub fn freshness_text(in b: Slice[u8], inout o: ChunkSeq[u8]) {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let n = r.word(in b);
     for i in 0..n {
         let f = read_function(inout r, in b);

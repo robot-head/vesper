@@ -87,10 +87,7 @@ pub fn dominators(in g: Graph, root: u32) -> Dominators {
             }
         }
     }
-    Dominators {
-        root: root,
-        idom: idom
-    }
+    Dominators { root: root, idom: idom }
 }
 
 // The nearest common dominator of `a` and `b` in the partial tree `idom`:

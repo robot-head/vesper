@@ -93,11 +93,7 @@ fn parse_u64(in s: Slice[u8]) -> Option[u64] {
 }
 
 fn outcome() -> Outcome {
-    Outcome {
-        out: ChunkSeq::new[u8](),
-        failed: false,
-        err: ChunkSeq::new[u8]()
-    }
+    Outcome { out: ChunkSeq::new[u8](), failed: false, err: ChunkSeq::new[u8]() }
 }
 
 fn failed(in why: Str) -> Outcome {
@@ -267,10 +263,7 @@ pub fn run(in args: Strs) -> Outcome eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProces
         manifest: manifest,
         has_manifest: has_manifest
     };
-    let mut a = Au {
-        failed: false,
-        err: ChunkSeq::new[u8]()
-    };
+    let mut a = Au { failed: false, err: ChunkSeq::new[u8]() };
     let report = audit(inout a, in options, id());
     let mut o = outcome();
     if a.failed {

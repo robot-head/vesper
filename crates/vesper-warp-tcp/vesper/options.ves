@@ -1,8 +1,5 @@
 fn no_blk() -> Blk {
-    Blk {
-        left: 0,
-        right: 0
-    }
+    Blk { left: 0, right: 0 }
 }
 
 pub fn opts_default() -> Opts {
@@ -193,20 +190,13 @@ pub fn opts_write(o: Opts, inout out: Slice[u8]) -> Result[u64, WireError] {
 }
 
 fn malformed(kind: u8) -> Result[Opts, WireError] {
-    Result::Err(
-        WireError::MalformedOption {
-            kind: kind
-        }
-    )
+    Result::Err(WireError::MalformedOption { kind: kind })
 }
 
 // The SACK block at `bytes[at..at + 8]`: one wide read when it fits.
 fn sack_blk_at(in bytes: Slice[u8], at: u64) -> Blk {
     match bytes.try_read_u64_be(at) {
-        Option::Some(w) => Blk {
-            left: wrapping_u32(w >> 32),
-            right: wrapping_u32(w)
-        },
+        Option::Some(w) => Blk { left: wrapping_u32(w >> 32), right: wrapping_u32(w) },
         Option::None => Blk {
             left: rd32(in bytes, at),
             right: rd32(in bytes, wrapping_add(at, 4))
@@ -297,10 +287,7 @@ fn opts_parse_at(in bytes: Slice[u8], from: u64, to: u64) -> Result[Opts, WireEr
                 };
                 opts
                     .timestamps = Option::Some(
-                        Timestamps {
-                            val: wrapping_u32(w >> 32),
-                            ecr: wrapping_u32(w)
-                        }
+                        Timestamps { val: wrapping_u32(w >> 32), ecr: wrapping_u32(w) }
                     );
             }
             // Unknown options with a valid length are skipped.

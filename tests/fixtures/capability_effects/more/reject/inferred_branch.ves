@@ -14,12 +14,8 @@ fn pick(x: u64) -> u64 eff [ConstTime] {
 }
 
 fn leak(s: Secret[u64]) -> Secret[u64] eff [ConstTime] {
-    let Secret {
-        value
-    } = s;
-    Secret {
-        value: pick(value)
-    }
+    let Secret { value } = s;
+    Secret { value: pick(value) }
 }
 
 fn main() -> u64 {

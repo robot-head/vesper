@@ -153,12 +153,7 @@ fn read_eff(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts) -> EffI
     for i in 0..an {
         f.tys.push(tid(in c, r.word(in b)));
     }
-    EffInst {
-        label: label,
-        name: name,
-        a0: a0,
-        an: an
-    }
+    EffInst { label: label, name: name, a0: a0, an: an }
 }
 
 fn read_sig(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts) -> u64 {
@@ -167,14 +162,7 @@ fn read_sig(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts) -> u64 
     for i in 0..gn {
         let name = sym(in c, r.word(in b));
         let row = r.word(in b) != 0;
-        f
-            .gens
-            .push(
-                GenRow {
-                    name: name,
-                    row: row
-                }
-            );
+        f.gens.push(GenRow { name: name, row: row });
     }
     let pn = r.word(in b);
     let p0 = f.params.len();
@@ -182,15 +170,7 @@ fn read_sig(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts) -> u64 
         let name = sym(in c, r.word(in b));
         let pass = wrapping_u8(r.word(in b));
         let ty = tid(in c, r.word(in b));
-        f
-            .params
-            .push(
-                ParamRow {
-                    name: name,
-                    pass: pass,
-                    ty: ty
-                }
-            );
+        f.params.push(ParamRow { name: name, pass: pass, ty: ty });
     }
     let result = tid(in c, r.word(in b));
     let en = r.word(in b);
@@ -208,20 +188,7 @@ fn read_sig(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts) -> u64 
     }
     let tail = opt_sym(in c, r.word(in b));
     let i = f.sigs.len();
-    f
-        .sigs
-        .push(
-            Sig {
-                g0: g0,
-                gn: gn,
-                p0: p0,
-                pn: pn,
-                result: result,
-                e0: e0,
-                en: en,
-                tail: tail
-            }
-        );
+    f.sigs.push(Sig { g0: g0, gn: gn, p0: p0, pn: pn, result: result, e0: e0, en: en, tail: tail });
     i
 }
 
@@ -373,14 +340,7 @@ pub fn add_fn_sig(
             Option::Some(b) => b,
             Option::None => false,
         };
-        f
-            .gens
-            .push(
-                GenRow {
-                    name: nm,
-                    row: rw
-                }
-            );
+        f.gens.push(GenRow { name: nm, row: rw });
     }
     let p0 = f.params.len();
     let pn = pnames.len();
@@ -391,15 +351,7 @@ pub fn add_fn_sig(
             Option::None => 0,
         };
         let ty = u32_at(in ptys, i);
-        f
-            .params
-            .push(
-                ParamRow {
-                    name: nm,
-                    pass: ps,
-                    ty: ty
-                }
-            );
+        f.params.push(ParamRow { name: nm, pass: ps, ty: ty });
     }
     let e0 = f.effs.len();
     let row = c.types.row(effects);
@@ -415,16 +367,7 @@ pub fn add_fn_sig(
         for j in 0..w(ef.n) {
             f.tys.push(u32_at(in c.types.items, wrapping_add(w(ef.a), j)));
         }
-        f
-            .effs
-            .push(
-                EffInst {
-                    label: lbl,
-                    name: ef.name,
-                    a0: a0,
-                    an: w(ef.n)
-                }
-            );
+        f.effs.push(EffInst { label: lbl, name: ef.name, a0: a0, an: w(ef.n) });
     }
     let tail = if row.tail == 0 {
         NONE32
@@ -432,20 +375,7 @@ pub fn add_fn_sig(
         wrapping_sub(row.tail, 1)
     };
     let sidx = f.sigs.len();
-    f
-        .sigs
-        .push(
-            Sig {
-                g0: g0,
-                gn: gn,
-                p0: p0,
-                pn: pn,
-                result: result,
-                e0: e0,
-                en: en,
-                tail: tail
-            }
-        );
+    f.sigs.push(Sig { g0: g0, gn: gn, p0: p0, pn: pn, result: result, e0: e0, en: en, tail: tail });
     set_by_symbol(inout f.fn_sig, name, n32(inc(sidx)));
 }
 
@@ -488,11 +418,7 @@ pub fn add_eff_decl(
             f
                 .params
                 .push(
-                    ParamRow {
-                        name: u32_at(in pnames, idx),
-                        pass: ps,
-                        ty: u32_at(in ptys, idx)
-                    }
+                    ParamRow { name: u32_at(in pnames, idx), pass: ps, ty: u32_at(in ptys, idx) }
                 );
         }
         let sidx = f.sigs.len();
@@ -510,28 +436,10 @@ pub fn add_eff_decl(
                     tail: NONE32
                 }
             );
-        f
-            .ops
-            .push(
-                OpDecl {
-                    name: u32_at(in op_names, oi),
-                    sig: sidx
-                }
-            );
+        f.ops.push(OpDecl { name: u32_at(in op_names, oi), sig: sidx });
     }
     let d = f.decls.len();
-    f
-        .decls
-        .push(
-            EffDecl {
-                name: name,
-                linear: linear,
-                g0: g0,
-                gn: gn,
-                o0: o0,
-                on: on
-            }
-        );
+    f.decls.push(EffDecl { name: name, linear: linear, g0: g0, gn: gn, o0: o0, on: on });
     set_by_symbol(inout f.eff_by_sym, name, n32(inc(d)));
 }
 
@@ -549,30 +457,9 @@ pub fn set_expr_handler(inout f: Facts, pool: u64, h0: u64, in free_names: Chunk
         if f.exprs.len() > pool {
             break;
         }
-        f
-            .exprs
-            .push(
-                ExprFact {
-                    kind: 0,
-                    fn_: 0,
-                    f0: 0,
-                    fc: 0,
-                    h0: 0
-                }
-            );
+        f.exprs.push(ExprFact { kind: 0, fn_: 0, f0: 0, fc: 0, h0: 0 });
     }
-    f
-        .exprs
-        .try_set(
-            pool,
-            ExprFact {
-                kind: 2,
-                fn_: 0,
-                f0: f0,
-                fc: fc,
-                h0: h0
-            }
-        );
+    f.exprs.try_set(pool, ExprFact { kind: 2, fn_: 0, f0: f0, fc: fc, h0: h0 });
 }
 
 pub fn read_facts(inout r: Reader, in b: Slice[u8], in c: Ctx, pool: u64) -> Facts {
@@ -637,28 +524,10 @@ pub fn read_facts(inout r: Reader, in b: Slice[u8], in c: Ctx, pool: u64) -> Fac
         }
         let o0 = f.ops.len();
         for k in 0..on {
-            f
-                .ops
-                .push(
-                    OpDecl {
-                        name: u32_at(in names, k),
-                        sig: u64_at(in sigs, k)
-                    }
-                );
+            f.ops.push(OpDecl { name: u32_at(in names, k), sig: u64_at(in sigs, k) });
         }
         let d = f.decls.len();
-        f
-            .decls
-            .push(
-                EffDecl {
-                    name: name,
-                    linear: linear,
-                    g0: g0,
-                    gn: gn,
-                    o0: o0,
-                    on: on
-                }
-            );
+        f.decls.push(EffDecl { name: name, linear: linear, g0: g0, gn: gn, o0: o0, on: on });
         set_by_symbol(inout f.eff_by_sym, name, n32(inc(d)));
     }
     let ncalls = r.word(in b);
@@ -670,35 +539,13 @@ pub fn read_facts(inout r: Reader, in b: Slice[u8], in c: Ctx, pool: u64) -> Fac
         for j in 0..k {
             let name = sym(in c, r.word(in b));
             let ty = tid(in c, r.word(in b));
-            f
-                .pairs
-                .push(
-                    Pair {
-                        name: name,
-                        ty: ty
-                    }
-                );
+            f.pairs.push(Pair { name: name, ty: ty });
         }
-        f
-            .calls
-            .push(
-                CallRow {
-                    s0: s0,
-                    s1: s1,
-                    v0: v0,
-                    vn: k
-                }
-            );
+        f.calls.push(CallRow { s0: s0, s1: s1, v0: v0, vn: k });
     }
     for i in 0..pool {
         let kind = r.word(in b);
-        let mut fact = ExprFact {
-            kind: kind,
-            fn_: 0,
-            f0: f.free.len(),
-            fc: 0,
-            h0: f.hops.len()
-        };
+        let mut fact = ExprFact { kind: kind, fn_: 0, f0: f.free.len(), fc: 0, h0: f.hops.len() };
         if kind == ExprFactKind::Closure {
             fact.fn_ = sym(in c, r.word(in b));
             fact.f0 = f.free.len();
@@ -739,33 +586,21 @@ impl Facts {
     pub fn gen(in self, i: u64) -> GenRow {
         match self.gens.try_get(i) {
             Option::Some(g) => g,
-            Option::None => GenRow {
-                name: 0,
-                row: false
-            },
+            Option::None => GenRow { name: 0, row: false },
         }
     }
 
     pub fn param(in self, i: u64) -> ParamRow {
         match self.params.try_get(i) {
             Option::Some(p) => p,
-            Option::None => ParamRow {
-                name: 0,
-                pass: 0,
-                ty: 0
-            },
+            Option::None => ParamRow { name: 0, pass: 0, ty: 0 },
         }
     }
 
     pub fn eff(in self, i: u64) -> EffInst {
         match self.effs.try_get(i) {
             Option::Some(e) => e,
-            Option::None => EffInst {
-                label: NONE32,
-                name: 0,
-                a0: 0,
-                an: 0
-            },
+            Option::None => EffInst { label: NONE32, name: 0, a0: 0, an: 0 },
         }
     }
 
@@ -781,24 +616,14 @@ impl Facts {
     pub fn decl(in self, i: u64) -> EffDecl {
         match self.decls.try_get(i) {
             Option::Some(d) => d,
-            Option::None => EffDecl {
-                name: 0,
-                linear: false,
-                g0: 0,
-                gn: 0,
-                o0: 0,
-                on: 0
-            },
+            Option::None => EffDecl { name: 0, linear: false, g0: 0, gn: 0, o0: 0, on: 0 },
         }
     }
 
     pub fn op(in self, i: u64) -> OpDecl {
         match self.ops.try_get(i) {
             Option::Some(o) => o,
-            Option::None => OpDecl {
-                name: 0,
-                sig: 0
-            },
+            Option::None => OpDecl { name: 0, sig: 0 },
         }
     }
 
@@ -838,35 +663,21 @@ impl Facts {
     pub fn call(in self, i: u64) -> CallRow {
         match self.calls.try_get(i) {
             Option::Some(c) => c,
-            Option::None => CallRow {
-                s0: 0,
-                s1: 0,
-                v0: 0,
-                vn: 0
-            },
+            Option::None => CallRow { s0: 0, s1: 0, v0: 0, vn: 0 },
         }
     }
 
     pub fn pair(in self, i: u64) -> Pair {
         match self.pairs.try_get(i) {
             Option::Some(p) => p,
-            Option::None => Pair {
-                name: 0,
-                ty: 0
-            },
+            Option::None => Pair { name: 0, ty: 0 },
         }
     }
 
     pub fn expr(in self, i: u64) -> ExprFact {
         match self.exprs.try_get(i) {
             Option::Some(e) => e,
-            Option::None => ExprFact {
-                kind: ExprFactKind::None,
-                fn_: 0,
-                f0: 0,
-                fc: 0,
-                h0: 0
-            },
+            Option::None => ExprFact { kind: ExprFactKind::None, fn_: 0, f0: 0, fc: 0, h0: 0 },
         }
     }
 
@@ -940,15 +751,7 @@ pub fn ir_new(sink p: Program) -> Ir {
             at = add(at, add(3, k));
             let ty = n32(op_at(in ir.p, at));
             at = add(at, 3);
-            ir
-                .fparams
-                .push(
-                    IrParam {
-                        name: name,
-                        pass: pass,
-                        ty: ty
-                    }
-                );
+            ir.fparams.push(IrParam { name: name, pass: pass, ty: ty });
         }
         let result = n32(op_at(in ir.p, at));
         let effects = n32(op_at(in ir.p, inc(at)));
@@ -1036,21 +839,14 @@ impl Ir {
     pub fn param(in self, i: u64) -> IrParam {
         match self.fparams.try_get(i) {
             Option::Some(p) => p,
-            Option::None => IrParam {
-                name: 0,
-                pass: 0,
-                ty: 0
-            },
+            Option::None => IrParam { name: 0, pass: 0, ty: 0 },
         }
     }
 
     pub fn local(in self, i: u64) -> IrLocal {
         match self.flocals.try_get(i) {
             Option::Some(l) => l,
-            Option::None => IrLocal {
-                name: 0,
-                ty: 0
-            },
+            Option::None => IrLocal { name: 0, ty: 0 },
         }
     }
 

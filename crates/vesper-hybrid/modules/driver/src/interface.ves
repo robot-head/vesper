@@ -226,12 +226,7 @@ struct J {
 }
 
 fn writer(pretty: bool) -> J {
-    J {
-        out: ChunkSeq::new[u8](),
-        pretty: pretty,
-        depth: 0,
-        open: ChunkSeq::new[u8]()
-    }
+    J { out: ChunkSeq::new[u8](), pretty: pretty, depth: 0, open: ChunkSeq::new[u8]() }
 }
 
 fn newline(inout j: J) {

@@ -131,11 +131,7 @@ struct Targets {
 
 fn targets(in p: Program, f: FnRow) -> Targets {
     let n = f.bc;
-    let mut t = Targets {
-        at: zeros64(n),
-        count: zeros64(n),
-        to: ChunkSeq::new[u64]()
-    };
+    let mut t = Targets { at: zeros64(n), count: zeros64(n), to: ChunkSeq::new[u64]() };
     // mark[x] == b + 1: block b already has the edge to x
     let mut mark = zeros64(n);
     for b in 0..n {

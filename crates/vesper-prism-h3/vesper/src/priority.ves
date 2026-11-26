@@ -66,10 +66,7 @@ pub fn priority_update_push() -> u64 {
 }
 
 pub fn priority_default() -> Priority {
-    Priority {
-        urgency: DEFAULT_URGENCY,
-        incremental: false
-    }
+    Priority { urgency: DEFAULT_URGENCY, incremental: false }
 }
 
 // A bare item, reduced to what priorities need: kind 0 an integer (sign
@@ -82,21 +79,11 @@ copy struct Item {
 }
 
 fn other() -> Item {
-    Item {
-        kind: ITEM_OTHER,
-        neg: false,
-        mag: 0,
-        flag: false
-    }
+    Item { kind: ITEM_OTHER, neg: false, mag: 0, flag: false }
 }
 
 fn boolean(b: bool) -> Item {
-    Item {
-        kind: ITEM_BOOLEAN,
-        neg: false,
-        mag: 0,
-        flag: b
-    }
+    Item { kind: ITEM_BOOLEAN, neg: false, mag: 0, flag: b }
 }
 
 fn is_digit(c: u8) -> bool {
@@ -209,12 +196,7 @@ copy struct Parsed {
 }
 
 fn parsed(item: Item, end: u64) -> Option[Parsed] {
-    Option::Some(
-        Parsed {
-            item: item,
-            end: end
-        }
-    )
+    Option::Some(Parsed { item: item, end: end })
 }
 
 fn number(in v: Slice[u8], at: u64) -> Option[Parsed] {
@@ -266,15 +248,7 @@ fn number(in v: Slice[u8], at: u64) -> Option[Parsed] {
     if int_digits > MAX_INTEGER_DIGITS {
         return Option::None;
     }
-    parsed(
-        Item {
-            kind: ITEM_INTEGER,
-            neg: neg,
-            mag: mag,
-            flag: false
-        },
-        i
-    )
+    parsed(Item { kind: ITEM_INTEGER, neg: neg, mag: mag, flag: false }, i)
 }
 
 fn string(in v: Slice[u8], at: u64) -> Option[Parsed] {
@@ -437,18 +411,12 @@ fn apply(in v: Slice[u8], lo: u64, hi: u64, item: Item, p: Priority) -> Priority
     let k = byte(in v, lo);
     if k == ASCII_LOWER_U {
         if item.kind == ITEM_INTEGER && item.mag <= MAX_URGENCY && (!item.neg || item.mag == 0) {
-            return Priority {
-                urgency: wrapping_u8(item.mag),
-                incremental: p.incremental
-            };
+            return Priority { urgency: wrapping_u8(item.mag), incremental: p.incremental };
         }
         return p;
     }
     if k == ASCII_LOWER_I && item.kind == ITEM_BOOLEAN {
-        return Priority {
-            urgency: p.urgency,
-            incremental: item.flag
-        };
+        return Priority { urgency: p.urgency, incremental: item.flag };
     }
     p
 }

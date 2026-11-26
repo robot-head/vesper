@@ -258,24 +258,14 @@ pub fn bin_range(index: usize) -> Option[BinRange] eff [Fail[ArithOverflow]] {
         return Option::None;
     }
     if i < LINEAR_BINS {
-        return Option::Some(
-            BinRange {
-                lower: i,
-                upper: i
-            }
-        );
+        return Option::Some(BinRange { lower: i, upper: i });
     }
     let octave = ((i - LINEAR_BINS) >> SUB_BITS) + FIRST_OCTAVE;
     let sub = (i - LINEAR_BINS) & SUB_MASK;
     let one: u64 = 1;
     let width = one << (octave - SUB_BITS);
     let lower = (OCTAVE_BINS + sub) * width;
-    Option::Some(
-        BinRange {
-            lower: lower,
-            upper: lower + (width - 1)
-        }
-    )
+    Option::Some(BinRange { lower: lower, upper: lower + (width - 1) })
 }
 
 pub fn histogram_record(
@@ -289,11 +279,7 @@ pub fn histogram_record(
     let i = widen_u64(index);
     let count = slot_u64(buckets, i);
     if count == MAX_U64 {
-        raise_histogram(
-            HistogramError::BinOverflow {
-                index: index
-            }
-        );
+        raise_histogram(HistogramError::BinOverflow { index: index });
     }
     if stats.total_count == MAX_U64 {
         raise_histogram(HistogramError::TotalOverflow);
@@ -574,11 +560,7 @@ fn hex16_or_raise(in raw: Slice[u8], start: u64) -> u64 eff [Fail[TraceError]] {
 fn hex_or_raise(in raw: Slice[u8], start: u64, n: u64) -> u64 eff [Fail[TraceError]] {
     match hex_at(raw, start, n) {
         Result::Ok(v) => v,
-        Result::Err(at) => Fail::raise(
-            TraceError::InvalidHex {
-                offset: widen_usize(at)
-            }
-        ),
+        Result::Err(at) => Fail::raise(TraceError::InvalidHex { offset: widen_usize(at) }),
     }
 }
 
@@ -593,40 +575,20 @@ fn hyphen_at(in raw: Slice[u8], at: u64) -> bool {
 // ID, span ID, flags.
 pub fn parse_traceparent_55(in raw: Slice[u8]) -> SpanContext eff [Fail[TraceError]] {
     if raw.len() != Tp::Len {
-        Fail::raise(
-            TraceError::InvalidLength {
-                actual: widen_usize(raw.len())
-            }
-        );
+        Fail::raise(TraceError::InvalidLength { actual: widen_usize(raw.len()) });
     }
     if !hyphen_at(raw, Tp::FirstHyphen) {
-        Fail::raise(
-            TraceError::MissingHyphen {
-                offset: Tp::FirstHyphen
-            }
-        );
+        Fail::raise(TraceError::MissingHyphen { offset: Tp::FirstHyphen });
     }
     if !hyphen_at(raw, Tp::SecondHyphen) {
-        Fail::raise(
-            TraceError::MissingHyphen {
-                offset: Tp::SecondHyphen
-            }
-        );
+        Fail::raise(TraceError::MissingHyphen { offset: Tp::SecondHyphen });
     }
     if !hyphen_at(raw, Tp::ThirdHyphen) {
-        Fail::raise(
-            TraceError::MissingHyphen {
-                offset: Tp::ThirdHyphen
-            }
-        );
+        Fail::raise(TraceError::MissingHyphen { offset: Tp::ThirdHyphen });
     }
     let version = hex_or_raise(raw, Tp::Version, BYTE_DIGITS);
     if version != 0 {
-        Fail::raise(
-            TraceError::UnsupportedVersion {
-                version: wrapping_u8(version)
-            }
-        );
+        Fail::raise(TraceError::UnsupportedVersion { version: wrapping_u8(version) });
     }
     let trace_hi = hex16_or_raise(raw, Tp::TraceHi);
     let trace_lo = hex16_or_raise(raw, Tp::TraceLo);

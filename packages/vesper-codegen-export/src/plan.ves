@@ -303,13 +303,7 @@ fn tnode_none() -> TNode {
 }
 
 fn anode_none() -> ANode {
-    ANode {
-        kind: 0,
-        name: 0,
-        owned: false,
-        a: 0,
-        n: 0
-    }
+    ANode { kind: 0, name: 0, owned: false, a: 0, n: 0 }
 }
 
 fn decl_none() -> Decl {
@@ -384,9 +378,7 @@ fn put_u64(inout o: ChunkSeq[u8], v: u64) {
 }
 
 pub fn read_planner(in b: Slice[u8]) -> Planner {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut names = names_new();
     let library = read_str(inout r, in b, inout names);
     let prefix = read_str(inout r, in b, inout names);
@@ -405,16 +397,7 @@ pub fn read_planner(in b: Slice[u8]) -> Planner {
             vsys_syms.push(s);
         }
         let rust_path = read_opt(inout r, in b, inout names);
-        vsys
-            .push(
-                VsysIn {
-                    library: lib,
-                    handler: handler,
-                    sa: sa,
-                    sn: sn,
-                    rust_path: rust_path
-                }
-            );
+        vsys.push(VsysIn { library: lib, handler: handler, sa: sa, sn: sn, rust_path: rust_path });
     }
     let mut insts = ChunkSeq::new[InstIn]();
     let ni = r.word(in b);
@@ -422,14 +405,7 @@ pub fn read_planner(in b: Slice[u8]) -> Planner {
         let function = read_str(inout r, in b, inout names);
         let alias = read_str(inout r, in b, inout names);
         let spelling = read_str(inout r, in b, inout names);
-        insts
-            .push(
-                InstIn {
-                    function: function,
-                    alias: alias,
-                    spelling: spelling
-                }
-            );
+        insts.push(InstIn { function: function, alias: alias, spelling: spelling });
     }
     let mut nodes = ChunkSeq::new[TNode]();
     let mut tkids = ChunkSeq::new[u32]();
@@ -481,23 +457,9 @@ pub fn read_planner(in b: Slice[u8]) -> Planner {
                     let fname = read_str(inout r, in b, inout names);
                     let fty = n32(r.word(in b));
                     let off = r.word(in b);
-                    lfields
-                        .push(
-                            LField {
-                                name: fname,
-                                ty: fty,
-                                offset: off
-                            }
-                        );
+                    lfields.push(LField { name: fname, ty: fty, offset: off });
                 }
-                lvars
-                    .push(
-                        LVar {
-                            name: vname,
-                            fa: fa,
-                            fc: fc
-                        }
-                    );
+                lvars.push(LVar { name: vname, fa: fa, fc: fc });
             }
         } else {
             t.lreason = read_str(inout r, in b, inout names);
@@ -532,15 +494,7 @@ pub fn read_planner(in b: Slice[u8]) -> Planner {
             for k in 0..n {
                 eff_args.push(n32(r.word(in b)));
             }
-            effs
-                .push(
-                    EffIn {
-                        name: ename,
-                        labeled: labeled,
-                        a: a,
-                        n: n
-                    }
-                );
+            effs.push(EffIn { name: ename, labeled: labeled, a: a, n: n });
         }
         let caller_slot = flag(r.word(in b));
         let pa = params_in.len();
@@ -549,14 +503,7 @@ pub fn read_planner(in b: Slice[u8]) -> Planner {
             let pname = read_str(inout r, in b, inout names);
             let pass = wrapping_u8(r.word(in b));
             let pty = n32(r.word(in b));
-            params_in
-                .push(
-                    ParamIn {
-                        name: pname,
-                        pass: pass,
-                        ty: pty
-                    }
-                );
+            params_in.push(ParamIn { name: pname, pass: pass, ty: pty });
         }
         let result = n32(r.word(in b));
         fns
@@ -616,12 +563,7 @@ pub fn read_planner(in b: Slice[u8]) -> Planner {
         errs: ChunkSeq::new[u32](),
         fn_libs: ChunkSeq::new[u32](),
         refusals: ChunkSeq::new[Refusal](),
-        pending: Refusal {
-            kind: 0,
-            a: 0,
-            b: 0,
-            c: 0
-        },
+        pending: Refusal { kind: 0, a: 0, b: 0, c: 0 },
         v2: false,
         v4: abi == 4,
         s_unit: s_unit,
@@ -682,17 +624,7 @@ impl Planner {
             self.akids.push(u32_at(in kids, i));
         }
         let id = n32(self.anodes.len());
-        self
-            .anodes
-            .push(
-                ANode {
-                    kind: kind,
-                    name: name,
-                    owned: owned,
-                    a: a,
-                    n: kids.len()
-                }
-            );
+        self.anodes.push(ANode { kind: kind, name: name, owned: owned, a: a, n: kids.len() });
         id
     }
 
@@ -702,12 +634,7 @@ impl Planner {
     }
 
     fn refuse3(inout self, kind: u8, a: u32, b: u32, c: u32) -> u32 {
-        self.pending = Refusal {
-            kind: kind,
-            a: a,
-            b: b,
-            c: c
-        };
+        self.pending = Refusal { kind: kind, a: a, b: b, c: c };
         FAIL
     }
 
@@ -1183,21 +1110,13 @@ impl Planner {
             for v in 0..nd.ln {
                 let lv = match self.lvars.try_get(wrapping_add(nd.la, v)) {
                     Option::Some(x) => x,
-                    Option::None => LVar {
-                        name: 0,
-                        fa: 0,
-                        fc: 0
-                    },
+                    Option::None => LVar { name: 0, fa: 0, fc: 0 },
                 };
                 counts.push(lv.fc);
                 for k in 0..lv.fc {
                     let lf = match self.lfields.try_get(wrapping_add(lv.fa, k)) {
                         Option::Some(x) => x,
-                        Option::None => LField {
-                            name: 0,
-                            ty: 0,
-                            offset: 0
-                        },
+                        Option::None => LField { name: 0, ty: 0, offset: 0 },
                     };
                     let fty = self.ty(function, lf.ty);
                     if fty == FAIL {
@@ -1232,11 +1151,7 @@ impl Planner {
             for v in 0..nd.ln {
                 let lv = match self.lvars.try_get(wrapping_add(nd.la, v)) {
                     Option::Some(x) => x,
-                    Option::None => LVar {
-                        name: 0,
-                        fa: 0,
-                        fc: 0
-                    },
+                    Option::None => LVar { name: 0, fa: 0, fc: 0 },
                 };
                 // A struct has one variant named after the type.
                 let vname = if nd.lkind == 1 {
@@ -1259,15 +1174,7 @@ impl Planner {
                         );
                 }
                 at = wrapping_add(at, fc);
-                self
-                    .dvars
-                    .push(
-                        DVar {
-                            name: vname,
-                            fa: fa,
-                            fc: fc
-                        }
-                    );
+                self.dvars.push(DVar { name: vname, fa: fa, fc: fc });
             }
             let mut d = self.decl(di);
             d.va = va;
@@ -1299,13 +1206,7 @@ impl Planner {
         for i in 0..self.vsys.len() {
             let v = match self.vsys.try_get(i) {
                 Option::Some(v) => v,
-                Option::None => VsysIn {
-                    library: 0,
-                    handler: 0,
-                    sa: 0,
-                    sn: 0,
-                    rust_path: 0
-                },
+                Option::None => VsysIn { library: 0, handler: 0, sa: 0, sn: 0, rust_path: 0 },
             };
             if v.library == rest {
                 return rest;
@@ -1320,12 +1221,7 @@ impl Planner {
         for i in 0..f.en {
             let e = match self.effs.try_get(wrapping_add(f.ea, i)) {
                 Option::Some(e) => e,
-                Option::None => EffIn {
-                    name: 0,
-                    labeled: false,
-                    a: 0,
-                    n: 0
-                },
+                Option::None => EffIn { name: 0, labeled: false, a: 0, n: 0 },
             };
             if e.name == self.s_fail && e.n > 0 {
                 let nd = self.node(u32_at(in self.eff_args, e.a));
@@ -1541,24 +1437,14 @@ impl Planner {
     fn pout(in self, i: u64) -> POut {
         match self.pouts.try_get(i) {
             Option::Some(p) => p,
-            Option::None => POut {
-                name: 0,
-                ty: 0,
-                pointer: false,
-                raw: 0,
-                in_place: false
-            },
+            Option::None => POut { name: 0, ty: 0, pointer: false, raw: 0, in_place: false },
         }
     }
 
     fn inst(in self, i: u64) -> InstIn {
         match self.insts.try_get(i) {
             Option::Some(x) => x,
-            Option::None => InstIn {
-                function: 0,
-                alias: 0,
-                spelling: 0
-            },
+            Option::None => InstIn { function: 0, alias: 0, spelling: 0 },
         }
     }
 
@@ -1603,20 +1489,12 @@ impl Planner {
                 for v in 0..d.vn {
                     let dv = match self.dvars.try_get(wrapping_add(d.va, v)) {
                         Option::Some(x) => x,
-                        Option::None => DVar {
-                            name: 0,
-                            fa: 0,
-                            fc: 0
-                        },
+                        Option::None => DVar { name: 0, fa: 0, fc: 0 },
                     };
                     for k in 0..dv.fc {
                         let df = match self.dfields.try_get(wrapping_add(dv.fa, k)) {
                             Option::Some(x) => x,
-                            Option::None => DField {
-                                name: 0,
-                                ty: 0,
-                                offset: 0
-                            },
+                            Option::None => DField { name: 0, ty: 0, offset: 0 },
                         };
                         if self.holds_sequence(df.ty) {
                             owns = true;
@@ -1996,12 +1874,7 @@ pub fn write_plan(in p: Planner) -> ChunkSeq[u64] {
         for i in 0..p.refusals.len() {
             let r = match p.refusals.try_get(i) {
                 Option::Some(r) => r,
-                Option::None => Refusal {
-                    kind: 1,
-                    a: 0,
-                    b: 0,
-                    c: 0
-                },
+                Option::None => Refusal { kind: 1, a: 0, b: 0, c: 0 },
             };
             out.push(widen_u64(r.kind));
             if r.kind == E_NO_EXPORTS {
@@ -2081,22 +1954,14 @@ pub fn write_plan(in p: Planner) -> ChunkSeq[u64] {
         for v in 0..d.vn {
             let dv = match p.dvars.try_get(wrapping_add(d.va, v)) {
                 Option::Some(x) => x,
-                Option::None => DVar {
-                    name: 0,
-                    fa: 0,
-                    fc: 0
-                },
+                Option::None => DVar { name: 0, fa: 0, fc: 0 },
             };
             put_str(inout out, in p.names, dv.name);
             out.push(dv.fc);
             for f in 0..dv.fc {
                 let df = match p.dfields.try_get(wrapping_add(dv.fa, f)) {
                     Option::Some(x) => x,
-                    Option::None => DField {
-                        name: 0,
-                        ty: 0,
-                        offset: 0
-                    },
+                    Option::None => DField { name: 0, ty: 0, offset: 0 },
                 };
                 put_str(inout out, in p.names, df.name);
                 put_type(inout out, in p, df.ty);
@@ -2148,13 +2013,7 @@ pub fn write_plan(in p: Planner) -> ChunkSeq[u64] {
     for i in 0..p.vsys.len() {
         let v = match p.vsys.try_get(i) {
             Option::Some(v) => v,
-            Option::None => VsysIn {
-                library: 0,
-                handler: 0,
-                sa: 0,
-                sn: 0,
-                rust_path: 0
-            },
+            Option::None => VsysIn { library: 0, handler: 0, sa: 0, sn: 0, rust_path: 0 },
         };
         put_str(inout out, in p.names, v.library);
         put_str(inout out, in p.names, v.handler);

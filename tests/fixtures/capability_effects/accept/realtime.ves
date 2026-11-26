@@ -30,9 +30,6 @@ fn step(in g: Gains, error: f64, rate: f64, tick: u64) -> u64 eff [Realtime] {
 }
 
 fn main() -> u64 {
-    let g = Gains {
-        kp: 2.0,
-        kd: 0.5
-    };
+    let g = Gains { kp: 2.0, kd: 0.5 };
     step(in g, 1.0, 0.25, 41)
 }

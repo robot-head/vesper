@@ -99,14 +99,7 @@ fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
 }
 
 fn no_term() -> TermRow {
-    TermRow {
-        kind: 255,
-        tag: 255,
-        op: 0,
-        value: 0,
-        a: 0,
-        b: 0
-    }
+    TermRow { kind: 255, tag: 255, op: 0, value: 0, a: 0, b: 0 }
 }
 
 fn no_proof() -> ProofRow {
@@ -141,38 +134,17 @@ fn proof_get(in s: ChunkSeq[ProofRow], i: u32) -> ProofRow {
 }
 
 fn const_term(kind: u8, v: i128) -> TermRow {
-    TermRow {
-        kind: kind,
-        tag: T_CONST,
-        op: 0,
-        value: v,
-        a: 0,
-        b: 0
-    }
+    TermRow { kind: kind, tag: T_CONST, op: 0, value: v, a: 0, b: 0 }
 }
 
 fn input_term(kind: u8, id: u32) -> TermRow {
     let zero: i128 = 0;
-    TermRow {
-        kind: kind,
-        tag: T_INPUT,
-        op: 0,
-        value: zero,
-        a: id,
-        b: 0
-    }
+    TermRow { kind: kind, tag: T_INPUT, op: 0, value: zero, a: id, b: 0 }
 }
 
 fn op_term(kind: u8, tag: u8, op: u8, a: u32, b: u32) -> TermRow {
     let zero: i128 = 0;
-    TermRow {
-        kind: kind,
-        tag: tag,
-        op: op,
-        value: zero,
-        a: a,
-        b: b
-    }
+    TermRow { kind: kind, tag: tag, op: op, value: zero, a: a, b: b }
 }
 
 fn is_binary(t: TermRow) -> bool {
@@ -1318,17 +1290,7 @@ fn apply(
         } else {
             0
         };
-        c
-            .records
-            .push(
-                Rec {
-                    rule: rule,
-                    b0: ms.val(mi, 0),
-                    b1: b1,
-                    b2: b2,
-                    len: arity
-                }
-            );
+        c.records.push(Rec { rule: rule, b0: ms.val(mi, 0), b1: b1, b2: b2, len: arity });
         applied = true;
     }
     0
@@ -1525,12 +1487,7 @@ fn encode_graph(
             return E_LIMIT;
         }
         let t = term_get(in terms, wrapping_u32(i));
-        let mut node = MathNode {
-            op: M_NUM,
-            data: 0,
-            c0: 0,
-            c1: 0
-        };
+        let mut node = MathNode { op: M_NUM, data: 0, c0: 0, c1: 0 };
         if t.tag == T_CONST {
             node.data = wrapping_i64(t.value);
         } else if t.tag == T_INPUT {
@@ -1786,11 +1743,7 @@ fn search(
     if e != 0 {
         return e;
     }
-    let mut c = Capture {
-        records: ChunkSeq::new[Rec](),
-        records_cap: 0,
-        node_capacity: 0
-    };
+    let mut c = Capture { records: ChunkSeq::new[Rec](), records_cap: 0, node_capacity: 0 };
     let e = capture_nodes(inout c, max(nodes.len(), 4), inout b);
     if e != 0 {
         return e;
@@ -1930,13 +1883,7 @@ pub struct Proposal {
 }
 
 pub fn proposal_new() -> Proposal {
-    Proposal {
-        outcome: O_UNCHANGED,
-        input: 0,
-        output: 0,
-        conclusion: 0,
-        candidate: 0
-    }
+    Proposal { outcome: O_UNCHANGED, input: 0, output: 0, conclusion: 0, candidate: 0 }
 }
 
 fn is_barrier(e: u8) -> bool {
