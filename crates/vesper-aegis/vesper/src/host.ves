@@ -1,8 +1,6 @@
 // @vesper/aegis::host: host clock and mmap Iago validators (`src/host.rs`).
 use self::gpa::{
-    covers as gpa_covers,
-    first_overlap as gpa_first_overlap,
-    insert as gpa_insert,
+    covers as gpa_covers, first_overlap as gpa_first_overlap, insert as gpa_insert,
     remove as gpa_remove
 };
 

@@ -5,13 +5,7 @@
 // buffer padded to 64 bytes).
 use self::fb::{Fb, fb_new, padding};
 use self::ipc::{
-    batch_message,
-    framed_len,
-    int_field,
-    key_value,
-    schema_message,
-    write_eos,
-    write_framed
+    batch_message, framed_len, int_field, key_value, schema_message, write_eos, write_framed
 };
 
 const ALIGN: u64 = 64;

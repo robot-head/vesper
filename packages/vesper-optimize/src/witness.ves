@@ -15,16 +15,7 @@ use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{symbol_from_id};
 use self::budget::{Budget, limit, metadata, names, reserve, work, work_units};
 use self::input::{
-    Cert,
-    ProofRow,
-    TermRow,
-    Tree,
-    TypeRow,
-    add_binary,
-    add_call2,
-    add_int,
-    add_name,
-    cap_at,
+    Cert, ProofRow, TermRow, Tree, TypeRow, add_binary, add_call2, add_int, add_name, cap_at,
     type_code
 };
 

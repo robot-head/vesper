@@ -28,20 +28,7 @@
 //   edge's children were joined by older edges, so the recursion ends.
 
 use self::util::{
-    at32,
-    copy32,
-    copy64,
-    at64,
-    at8,
-    ati,
-    filled32,
-    filled64,
-    Fnv,
-    finish,
-    fold,
-    inc,
-    n32,
-    sat_add,
+    at32, copy32, copy64, at64, at8, ati, filled32, filled64, Fnv, finish, fold, inc, n32, sat_add,
     w
 };
 

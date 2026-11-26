@@ -14,38 +14,17 @@ use self::lemire::decode_bits;
 use self::stage2::{stage2_admit, stage2_build};
 use self::pow5::pow5_table;
 use self::records::{
-    event_check,
-    ndjson_account,
-    ndjson_admit,
-    ndjson_frame,
-    ndjson_validate,
-    node_i64,
-    node_u64,
+    event_check, ndjson_account, ndjson_admit, ndjson_frame, ndjson_validate, node_i64, node_u64,
     tile_decode
 };
 use self::encode::{encode_size, encode_write};
 use self::helpers::{
-    bound_field,
-    bound_string,
-    escaped_mask,
-    swar_compile,
-    swar_key,
-    swar_key_matches,
-    swar_key_raw,
+    bound_field, bound_string, escaped_mask, swar_compile, swar_key, swar_key_matches, swar_key_raw,
     swar_window
 };
 use self::binary::{
-    archive_encode,
-    archive_size,
-    archive_validate,
-    archive_validation_bytes,
-    relptr_between,
-    relptr_resolve,
-    relslice_resolve,
-    vbyte_decode,
-    vbyte_encode,
-    vbyte_max_size,
-    vbyte_size
+    archive_encode, archive_size, archive_validate, archive_validation_bytes, relptr_between,
+    relptr_resolve, relslice_resolve, vbyte_decode, vbyte_encode, vbyte_max_size, vbyte_size
 };
 
 // A decoded binary64: `path` 0 when the text is not a JSON number, 1

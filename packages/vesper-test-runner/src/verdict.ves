@@ -23,17 +23,7 @@ use @vesper-std/intern::{Interner, interner_new};
 use @vesper/front::kinds::{k_lower, k_upper};
 use self::discover::{toks};
 use self::util::{
-    Reader,
-    add,
-    inc,
-    push_decimal,
-    push_range,
-    put_buf,
-    put_text,
-    same,
-    sub,
-    u8_at,
-    u64_at
+    Reader, add, inc, push_decimal, push_range, put_buf, put_text, same, sub, u8_at, u64_at
 };
 
 // `reserved.insert(text)`: whether `text` was new.

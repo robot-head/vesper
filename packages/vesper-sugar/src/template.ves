@@ -11,30 +11,13 @@
 // (matcher.ves `match_rule_encoded`) read in place.
 
 use @vesper/front::lex::{
-    lex_raw,
-    lex_sugar_raw_with_limits,
-    max_diagnostics,
-    max_source_bytes,
-    max_tokens,
-    token_end,
+    lex_raw, lex_sugar_raw_with_limits, max_diagnostics, max_source_bytes, max_tokens, token_end,
     trivia_kind
 };
 use @vesper/front::diag::{diags_new};
 use @vesper/front::kinds::{
-    k_comma,
-    k_dollar,
-    k_dot_dot,
-    k_eff,
-    k_eof,
-    k_l_paren,
-    k_linear,
-    k_lower,
-    k_plus,
-    k_r_paren,
-    k_star,
-    k_state,
-    k_upper,
-    k_with
+    k_comma, k_dollar, k_dot_dot, k_eff, k_eof, k_l_paren, k_linear, k_lower, k_plus, k_r_paren,
+    k_star, k_state, k_upper, k_with
 };
 
 const NONE: u64 = 18446744073709551615;

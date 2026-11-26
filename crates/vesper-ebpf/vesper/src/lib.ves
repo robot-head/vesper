@@ -12,73 +12,23 @@
 //
 // Every export is named `<module>_<rust fn>`.
 use self::insn::{
-    AluOp,
-    DecodeError,
-    Encoded,
-    Endian,
-    Insn,
-    JmpOp,
-    RawInsn,
-    decode,
-    decode_all,
-    encode,
-    slots_from_bytes,
-    slots_to_bytes
+    AluOp, DecodeError, Encoded, Endian, Insn, JmpOp, RawInsn, decode, decode_all, encode,
+    slots_from_bytes, slots_to_bytes
 };
 use self::scalar::{
-    Scalar,
-    Tnum,
-    refine_jmp,
-    scalar_add,
-    scalar_alu,
-    scalar_and,
-    scalar_arsh,
-    scalar_contains,
-    scalar_hull,
-    scalar_includes,
-    scalar_lsh,
-    scalar_meet,
-    scalar_mul,
-    scalar_normalize,
-    scalar_or,
-    scalar_rsh,
-    scalar_sext,
-    scalar_srange,
-    scalar_sub,
-    scalar_truncate,
-    scalar_unknown_bits,
-    scalar_urange,
-    scalar_xor,
-    scalar_zext32,
-    sext_imm,
-    tnum_add,
-    tnum_and,
-    tnum_arsh,
-    tnum_contains,
-    tnum_includes,
-    tnum_intersect,
-    tnum_lsh,
-    tnum_or,
-    tnum_range,
-    tnum_rsh,
-    tnum_sub,
-    tnum_truncate,
-    tnum_xor
+    Scalar, Tnum, refine_jmp, scalar_add, scalar_alu, scalar_and, scalar_arsh, scalar_contains,
+    scalar_hull, scalar_includes, scalar_lsh, scalar_meet, scalar_mul, scalar_normalize, scalar_or,
+    scalar_rsh, scalar_sext, scalar_srange, scalar_sub, scalar_truncate, scalar_unknown_bits,
+    scalar_urange, scalar_xor, scalar_zext32, sext_imm, tnum_add, tnum_and, tnum_arsh,
+    tnum_contains, tnum_includes, tnum_intersect, tnum_lsh, tnum_or, tnum_range, tnum_rsh, tnum_sub,
+    tnum_truncate, tnum_xor
 };
 use self::common::{sext_const};
 use self::concrete::{alu_concrete, cmp_concrete, endian};
 use self::helpers::{allowed, gpl_compatible};
 use self::program::{
-    MapKind,
-    ProgramType,
-    map_from_kernel_type,
-    map_is_array,
-    map_kernel_type,
-    map_validate,
-    prog_from_kernel_type,
-    prog_has_packet,
-    prog_is_tracing,
-    prog_kernel_type
+    MapKind, ProgramType, map_from_kernel_type, map_is_array, map_kernel_type, map_validate,
+    prog_from_kernel_type, prog_has_packet, prog_is_tracing, prog_kernel_type
 };
 use self::btf::parse_btf;
 use self::btf_ext::{local_type_words, maps_from_btf, parse_ext};
@@ -87,13 +37,7 @@ use self::core::{combine, filter_candidates, local_value, patch_insn, target_val
 use self::callgraph::{check_stack};
 use self::verifier::{new_pools, Outcome, Pools, verify_program};
 use self::wire::{
-    EthIpv4TcpWire,
-    SynDropAlertWire,
-    WireError,
-    alert_decode,
-    alert_encode,
-    eth_decode,
-    eth_encode
+    EthIpv4TcpWire, SynDropAlertWire, WireError, alert_decode, alert_encode, eth_decode, eth_encode
 };
 
 // insn.rs

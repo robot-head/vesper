@@ -4,16 +4,8 @@
 use self::util::{inc, none, setw, sw};
 use self::simnet::{sm_chance};
 use self::wire::{
-    checker_core_committed_arena,
-    checker_core_leader_elected,
-    checker_core_logs_changed_arena,
-    checker_core_new,
-    CheckerCore,
-    RaftEntry,
-    WireAck,
-    WireHeader,
-    WireVoteReq,
-    MAX_BATCH
+    checker_core_committed_arena, checker_core_leader_elected, checker_core_logs_changed_arena,
+    checker_core_new, CheckerCore, RaftEntry, WireAck, WireHeader, WireVoteReq, MAX_BATCH
 };
 
 const FNV_OFFSET: u64 = 14695981039346656037;

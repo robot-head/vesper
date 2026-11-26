@@ -7,23 +7,8 @@
 // `Hoists.reads`, printed sorted and each once.
 
 use self::fun::{
-    Arg,
-    Blk,
-    Fun,
-    Ins,
-    add,
-    calls_out,
-    has,
-    has_receiver,
-    inc,
-    insert,
-    is_hoisted,
-    keeps_length,
-    n32,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
+    Arg, Blk, Fun, Ins, add, calls_out, has, has_receiver, inc, insert, is_hoisted, keeps_length,
+    n32, u32_at, u64_at, u8_at, w
 };
 use self::graph::{Graph, graph, natural_loop, no_cut, outside_preds};
 use self::rules::{all_blocks, stable_place};

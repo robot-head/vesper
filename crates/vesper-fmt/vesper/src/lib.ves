@@ -1285,8 +1285,15 @@ fn word_used_as_name(has_prev: bool, prev: u8, c: u8, next: u8) -> bool {
 }
 
 // `sequence`: the atoms from `pos` up to the closing delimiter `end`.
-fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in src: Slice[u8])
-    -> u64 eff [Fail[FmtFail]] {
+fn sequence(
+    in at: Atoms,
+    inout pos: u64,
+    end: u8,
+    block: bool,
+    fill: bool,
+    inout d: Doc,
+    in src: Slice[u8]
+) -> u64 eff [Fail[FmtFail]] {
     let n = at.kind.len();
     let list = end != NO_END && !block;
     let mut output = ChunkSeq::new[u32]();
@@ -1302,6 +1309,12 @@ fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in
     // up to its `{`: the parser admits no struct literal there, so a type
     // name before `{` ends the head (`for i in 0..N {`).
     let mut head = false;
+    // A `use` group fills its lines like rustfmt: each separator and the name
+    // after it break on their own, so names pack to the width. These are the
+    // separators' places in `output`; a comment or trailing comma keeps the
+    // plain one-name-per-line layout.
+    let mut separators = ChunkSeq::new[u32]();
+    let mut commented = false;
     loop {
         if pos >= n {
             break;
@@ -1353,6 +1366,9 @@ fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in
         let near_comment = c == K_COMMENT
             || c == K_BLOCK_COMMENT
             || has_prev && prev == K_BLOCK_COMMENT;
+        if c == K_COMMENT || c == K_BLOCK_COMMENT {
+            commented = true;
+        }
         if spacing == G_HARD {
             concat_group(inout line, inout breaks, inout d, inout output);
             if blank {
@@ -1361,6 +1377,7 @@ fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in
             output.push(wrapping_u32(push_leaf(inout d, D_HARD)));
         } else if spacing == G_SOFT && list && after_comma {
             concat_group(inout line, inout breaks, inout d, inout output);
+            separators.push(wrapping_u32(output.len()));
             output.push(wrapping_u32(push_leaf(inout d, D_SOFT_SPACE)));
         } else if spacing == G_SOFT && !is_block && near_comment {
             line.push(wrapping_u32(push_leaf(inout d, D_SOFT_SPACE)));
@@ -1401,7 +1418,8 @@ fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in
             let close = close_of(c);
             let empty = pos < n && akind(in at, pos) == close;
             let start = push_text(inout d, in src, cs, ce, false);
-            let inner = sequence(in at, inout pos, close, is_block, inout d, in src);
+            let fill = c == K_L_BRACE && has_prev && prev == K_COLON_COLON;
+            let inner = sequence(in at, inout pos, close, is_block, fill, inout d, in src);
             let last_is_line_comment = pos > 0 && akind(in at, wrapping_sub(pos, 1)) == K_COMMENT;
             let mut before_close = pos;
             loop {
@@ -1477,6 +1495,24 @@ fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in
         }
     }
     concat_group(inout line, inout breaks, inout d, inout output);
+    if fill && !commented && has_prev && prev != K_COMMA && separators.len() != 0 {
+        let mut filled = ChunkSeq::new[u32]();
+        let first = u32_at(in separators, 0);
+        for i in 0..first {
+            filled.push(wrapping_u32(u32_at(in output, i)));
+        }
+        for i in 0..separators.len() {
+            let from = u32_at(in separators, i);
+            let to = if wrapping_add(i, 1) < separators.len() {
+                u32_at(in separators, wrapping_add(i, 1))
+            } else {
+                output.len()
+            };
+            let item = push_concat_range(inout d, in output.as_slice(), from, to);
+            filled.push(wrapping_u32(push_group(inout d, item)));
+        }
+        return push_concat(inout d, in filled.as_slice());
+    }
     push_concat(inout d, in output.as_slice())
 }
 
@@ -1652,7 +1688,7 @@ fn once_tokens(in src: Slice[u8], sink t: Tokens, in lim: Limits, inout w: Work)
     dl.max_work = wrapping_sub(w.max, w.used);
     let mut d = doc_new(in dl, wrapping_add(wrapping_mul(at.kind.len(), 3), 8));
     let mut pos: u64 = 0;
-    let root = sequence(in at, inout pos, 255, false, inout d, in src);
+    let root = sequence(in at, inout pos, 255, false, false, inout d, in src);
     let end = push_leaf(inout d, D_HARD);
     let root = push_concat2(inout d, root, end);
     let out = render(inout d, in src, root);

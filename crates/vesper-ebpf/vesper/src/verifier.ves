@@ -31,32 +31,12 @@
 // into `V.rule` and `V.msg`.
 use self::common::{bits, checked_add_i64, max_u64, min_u64, shl, shr, signed, smin_i64, umax};
 use self::insn::{
-    AluOp,
-    AtomicOp,
-    CallTarget,
-    DecodeError,
-    Endian,
-    Imm64,
-    Insn,
-    JmpOp,
-    Operand,
-    RawInsn,
-    Size,
+    AluOp, AtomicOp, CallTarget, DecodeError, Endian, Imm64, Insn, JmpOp, Operand, RawInsn, Size,
     decode_all
 };
 use self::scalar::{
-    Scalar,
-    refine_jmp,
-    scalar_add,
-    scalar_alu,
-    scalar_includes,
-    scalar_konst,
-    scalar_meet,
-    scalar_sext,
-    scalar_truncate,
-    scalar_unknown,
-    scalar_unknown_bits,
-    scalar_zext32
+    Scalar, refine_jmp, scalar_add, scalar_alu, scalar_includes, scalar_konst, scalar_meet,
+    scalar_sext, scalar_truncate, scalar_unknown, scalar_unknown_bits, scalar_zext32
 };
 use self::concrete::{endian};
 use self::helpers::{allowed};

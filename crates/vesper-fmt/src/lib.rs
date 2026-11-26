@@ -470,7 +470,7 @@ fn once(
     doc_limits.max_work = work.max - work.used;
     let mut document = Document::new(doc_limits)?;
     let mut pos = 0;
-    let root = sequence(&atoms, &mut pos, None, false, &mut document)?;
+    let root = sequence(&atoms, &mut pos, None, false, false, &mut document)?;
     let end = document.push(Doc::HardLine)?;
     let root = document.push(Doc::Concat(vec![root, end]))?;
     let output = document.render(root)?;
@@ -802,6 +802,7 @@ fn sequence<'a>(
     pos: &mut usize,
     end: Option<K>,
     block: bool,
+    fill: bool,
     document: &mut Document<'a>,
 ) -> Result<DocId, Error> {
     // A delimited, non-block list breaks at its comma separators: those soft
@@ -822,6 +823,12 @@ fn sequence<'a>(
     // up to its `{`: the parser admits no struct literal there, so a type
     // name before `{` ends the head (`for i in 0..N {`).
     let mut head = false;
+    // A `use` group fills its lines like rustfmt: each separator and the name
+    // after it break on their own, so names pack to the width. These are the
+    // separators' places in `output`; a comment or trailing comma keeps the
+    // plain one-name-per-line layout.
+    let mut separators = Vec::new();
+    let mut commented = false;
     while *pos < atoms.len() && Some(atoms[*pos].kind) != end {
         let current = atoms[*pos];
         // `{` after `.` or `::` opens a list, not a block: a tagged literal or
@@ -861,6 +868,7 @@ fn sequence<'a>(
         let after_comma = previous.is_some_and(|p| p.kind == K::Comma);
         let near_comment = matches!(current.kind, K::Comment | K::BlockComment)
             || previous.is_some_and(|p| p.kind == K::BlockComment);
+        commented |= matches!(current.kind, K::Comment | K::BlockComment);
         match spacing {
             Gap::Hard => {
                 line.flush(document, &mut output)?;
@@ -873,6 +881,7 @@ fn sequence<'a>(
             }
             Gap::Soft if list && after_comma => {
                 line.flush(document, &mut output)?;
+                separators.push(output.len());
                 output.push(document.push(Doc::SoftLineOrSpace)?);
             }
             Gap::Soft if !is_block && near_comment => {
@@ -907,7 +916,9 @@ fn sequence<'a>(
             };
             let empty = atoms.get(*pos).is_some_and(|a| a.kind == close);
             let start = document.push(Doc::Text(current.text))?;
-            let inner = sequence(atoms, pos, Some(close), is_block, document)?;
+            let fill =
+                current.kind == K::LBrace && previous.is_some_and(|p| p.kind == K::ColonColon);
+            let inner = sequence(atoms, pos, Some(close), is_block, fill, document)?;
             let last_is_line_comment = *pos > 0 && atoms[*pos - 1].kind == K::Comment;
             // The formatter never adds or removes tokens, so a source trailing
             // comma is kept and selects the vertical layout.
@@ -988,5 +999,23 @@ fn sequence<'a>(
         });
     }
     line.flush(document, &mut output)?;
+    if fill && !commented && previous.is_some_and(|p| p.kind != K::Comma) {
+        let mut filled = Vec::new();
+        let mut from = 0;
+        for (i, &at) in separators.iter().enumerate() {
+            if i == 0 {
+                filled.extend_from_slice(&output[..at]);
+            } else {
+                let item = document.push(Doc::Concat(output[from..at].to_vec()))?;
+                filled.push(document.push(Doc::Group(item))?);
+            }
+            from = at;
+        }
+        if !separators.is_empty() {
+            let item = document.push(Doc::Concat(output[from..].to_vec()))?;
+            filled.push(document.push(Doc::Group(item))?);
+            output = filled;
+        }
+    }
     document.push(Doc::Concat(output))
 }

@@ -1,13 +1,7 @@
 // @vesper-std/fmt::text: the integer formatters and parsers over `String`
 // and `Str`. Output is ASCII, so every append keeps the `String` valid UTF-8.
 use self::{
-    ParseIntError,
-    write_u64_radix,
-    write_u64,
-    write_i64,
-    write_hex_u64,
-    parse_u64_radix,
-    parse_u64,
+    ParseIntError, write_u64_radix, write_u64, write_i64, write_hex_u64, parse_u64_radix, parse_u64,
     parse_i64
 };
 

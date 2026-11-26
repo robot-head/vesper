@@ -2,18 +2,8 @@
 // `CollectedProgram` into `@vesper/place-ir-lower::ast::Ast`.
 
 use @vesper/ast::{
-    ArgNode,
-    Ast as SurfAst,
-    ClauseNode,
-    EffectNode,
-    ExprNode,
-    Lit as SurfLit,
-    ParamNode,
-    PatNode,
-    StmtNode,
-    list_at,
-    list_len,
-    none as ast_none
+    ArgNode, Ast as SurfAst, ClauseNode, EffectNode, ExprNode, Lit as SurfLit, ParamNode, PatNode,
+    StmtNode, list_at, list_len, none as ast_none
 };
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{EffNode, Types};

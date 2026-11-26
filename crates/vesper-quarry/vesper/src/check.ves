@@ -1,23 +1,8 @@
 // Module check of @vesper/quarry (see lib.ves).
 use self::{BCol, Bind, CCol, Node, Q, Rng};
 use self::util::{
-    bcol,
-    bound,
-    ccol,
-    ctab,
-    ex,
-    fail,
-    fail_name,
-    find_table,
-    identifier,
-    none,
-    order,
-    param,
-    put,
-    put_range,
-    raw,
-    same,
-    sw
+    bcol, bound, ccol, ctab, ex, fail, fail_name, find_table, identifier, none, order, param, put,
+    put_range, raw, same, sw
 };
 
 // Checker (src/plan.rs `Checker` and `prepare`). Typed expressions are

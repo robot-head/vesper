@@ -20,12 +20,7 @@
 //                     length, then the message bytes, one per word
 
 use self::lex::{
-    lex,
-    lex_raw,
-    lex_with_limits,
-    lex_sugar_with_limits,
-    max_source_bytes,
-    max_tokens,
+    lex, lex_raw, lex_with_limits, lex_sugar_with_limits, max_source_bytes, max_tokens,
     max_diagnostics
 };
 use self::diag::{diags_new, diag_push, limit_message_observed};

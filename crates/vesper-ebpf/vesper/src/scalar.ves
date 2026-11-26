@@ -2,21 +2,8 @@
 // interval domain, and the domain functions of src/verifier.rs
 // (`scalar_alu`, `refine_jmp`, `exclude`). The Rust files are the model.
 use self::common::{
-    bits,
-    checked_add_i64,
-    checked_sub_i64,
-    max_i64,
-    max_u64,
-    min_i64,
-    min_u64,
-    sar,
-    sext_const,
-    shl,
-    shr,
-    signed,
-    smax_i64,
-    smin_i64,
-    umax
+    bits, checked_add_i64, checked_sub_i64, max_i64, max_u64, min_i64, min_u64, sar, sext_const,
+    shl, shr, signed, smax_i64, smin_i64, umax
 };
 use self::insn::{AluOp, JmpOp};
 use self::concrete::{cmp_concrete};

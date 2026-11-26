@@ -7,16 +7,7 @@ use @vesper/loom-calculus::check::{check_manifest, system_name_valid};
 use @vesper/loom-calculus::util::{add, inc, man, none, ssel, sw, ver};
 use self::{Meta, Mx, S};
 use self::diag::{
-    SolverCode,
-    SolverSort,
-    copy_calculus,
-    dlit,
-    dver,
-    emit,
-    fillw,
-    msort,
-    subj_id,
-    subj_lit
+    SolverCode, SolverSort, copy_calculus, dlit, dver, emit, fillw, msort, subj_id, subj_lit
 };
 
 // The local catalog schema version the solver accepts (`SCHEMA_VERSION`).

@@ -4,31 +4,9 @@
 // `type_mentions` and the item walks).
 
 use @vesper/ast::{
-    Ast,
-    ExprNode,
-    PatNode,
-    TypeNode,
-    StmtNode,
-    ArgNode,
-    ClauseNode,
-    ParamNode,
-    EffectsNode,
-    EffectNode,
-    GenericNode,
-    FieldNode,
-    VariantNode,
-    AdtNode,
-    FnNode,
-    EffectDeclNode,
-    ImplNode,
-    TraitNode,
-    ConfNode,
-    ItemNode,
-    list_len,
-    list_at,
-    expr_at,
-    pat_at,
-    type_at
+    Ast, ExprNode, PatNode, TypeNode, StmtNode, ArgNode, ClauseNode, ParamNode, EffectsNode,
+    EffectNode, GenericNode, FieldNode, VariantNode, AdtNode, FnNode, EffectDeclNode, ImplNode,
+    TraitNode, ConfNode, ItemNode, list_len, list_at, expr_at, pat_at, type_at
 };
 use @vesper-std/arena::{idx_from_raw};
 use @vesper/check-data::util::{push_decimal, add, inc, n32, u32_at, u64_at, u8_at, w};

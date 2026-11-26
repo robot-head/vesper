@@ -24,47 +24,19 @@
 // @export abi 3
 use self::apply::{do_recorder_apply};
 use self::recording::{
-    do_recorder_assign,
-    do_recorder_check_slot,
-    do_recorder_check_widget,
-    do_recorder_clone,
-    do_recorder_dispatch,
-    do_recorder_new,
-    do_recorder_reject_next_at,
-    do_recorder_set_user_state
+    do_recorder_assign, do_recorder_check_slot, do_recorder_check_widget, do_recorder_clone,
+    do_recorder_dispatch, do_recorder_new, do_recorder_reject_next_at, do_recorder_set_user_state
 };
 use self::session::{
-    do_prepared_fault,
-    do_prepared_header,
-    do_prepared_ops,
-    do_reconciler_adopt,
-    do_reconciler_close_check,
-    do_reconciler_close_state,
-    do_reconciler_commit_check,
-    do_reconciler_force_counters,
-    do_reconciler_mark_closed,
-    do_reconciler_new,
-    do_reconciler_prepare,
-    do_reconciler_reopen,
-    do_reconciler_request_close,
-    do_reconciler_reserve,
-    do_reconciler_revision,
-    do_reconciler_slot,
-    do_reconciler_subscription,
-    do_reconciler_widget
+    do_prepared_fault, do_prepared_header, do_prepared_ops, do_reconciler_adopt,
+    do_reconciler_close_check, do_reconciler_close_state, do_reconciler_commit_check,
+    do_reconciler_force_counters, do_reconciler_mark_closed, do_reconciler_new,
+    do_reconciler_prepare, do_reconciler_reopen, do_reconciler_request_close, do_reconciler_reserve,
+    do_reconciler_revision, do_reconciler_slot, do_reconciler_subscription, do_reconciler_widget
 };
 use self::sim::{
-    do_audit_tree,
-    do_encode_tree,
-    do_query_answer,
-    do_query_counts,
-    do_query_fault,
-    do_query_items,
-    do_query_values,
-    do_sim_audit,
-    do_sim_focus,
-    do_sim_focusable,
-    do_sim_still_focusable,
+    do_audit_tree, do_encode_tree, do_query_answer, do_query_counts, do_query_fault, do_query_items,
+    do_query_values, do_sim_audit, do_sim_focus, do_sim_focusable, do_sim_still_focusable,
     do_sim_trigger
 };
 use self::util::{do_limits_valid};
