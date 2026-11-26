@@ -1,0 +1,520 @@
+// @vesper/kinetic::world: the XPBD particle world's substeps (the substep
+// loop of `World::advance` in src/world.rs: integration, the colour-layer
+// projection of distance joints and contacts with Coulomb friction, the
+// velocities from positions and the restitution pass), in binary32 with the
+// Rust build's operation order.
+//
+// The Rust wrapper lends the tick's state packed once per tick in u64
+// words of two 32-bit lanes (low, high), every f32 as its bit pattern, so
+// one checked read fetches two lanes:
+// - `bodies`: BODY words per body: (x, y), (z, inverse mass), (collider
+//   radius, compliance), (vx, vy), (vz, 0).
+// - `jf`/`ju`: per distance joint (rest length, compliance) and the bodies
+//   (a, b).
+// - `contacts`: per contact the bodies (a, b) (b = GROUND: the ground).
+// - `layer_off`/`layer_idx`: the colourer's layers; an index below the
+//   joint count is a joint, the others are contacts.
+// - `params` (u32 lanes): dt, gravity (3), ground y, static friction,
+//   dynamic friction, restitution.
+// - `state`: 2 words per contact, the restitution state (correction, nx),
+//   (ny, nz); `prev`: PREV words per body, the body's words 0, 1, 3 and 4 at
+//   the start of the substep.
+
+const BODY: u64 = 5;
+const PREV: u64 = 4;
+const GROUND: u32 = 4294967295;
+const EPS_BITS: u32 = 814313567;
+// 1.0e-9f32 = 0x3089705f
+const LOW: u64 = 4294967295;
+
+fn gw(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn sw(inout s: Slice[u64], i: u64, v: u64) {
+    s.try_set(i, v);
+}
+
+fn gu(in s: Slice[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn gf(in s: Slice[u32], i: u64) -> f32 {
+    from_bits_f32(gu(in s, i))
+}
+
+// The low and high f32 lanes of a word, and the word of two lanes.
+fn lo(w: u64) -> f32 {
+    from_bits_f32(wrapping_u32(w))
+}
+
+fn hi(w: u64) -> f32 {
+    from_bits_f32(wrapping_u32(w >> 32))
+}
+
+fn pk(a: f32, b: f32) -> u64 {
+    widen_u64(to_bits_f32(a)) | (widen_u64(to_bits_f32(b)) << 32)
+}
+
+// The word `w` with its low lane replaced by `a`.
+fn with_lo(w: u64, a: f32) -> u64 {
+    (w & (LOW << 32)) | widen_u64(to_bits_f32(a))
+}
+
+fn sqrt32(x: f32) -> f32 {
+    nearest_f32(sqrt(widen_f64(x)))
+}
+
+fn abs32(x: f32) -> f32 {
+    from_bits_f32(to_bits_f32(x) & 2147483647)
+}
+
+fn fmax(a: f32, b: f32) -> f32 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+fn eps() -> f32 {
+    from_bits_f32(EPS_BITS)
+}
+
+// The friction scale k of `friction_correction` for the tangential motion
+// length `lt` (0: `None`; the caller has checked `lt > EPS`).
+fn friction_k(lt: f32, corr: f32, mu_s: f32, mu_d: f32) -> f32 {
+    if lt < mu_s * corr {
+        return 1.0;
+    }
+    let r = (mu_d * corr) / lt;
+    if r < 1.0 {
+        r
+    } else {
+        1.0
+    }
+}
+
+// A distance joint or a body-body contact (`contact`: an inequality with
+// friction and restitution state at `slot`).
+fn project_pair(
+    inout b: Slice[u64],
+    in prev: Slice[u64],
+    inout state: Slice[u64],
+    ia: u64,
+    ib: u64,
+    target: f32,
+    alpha_tilde: f32,
+    contact: bool,
+    slot: u64,
+    mu_s: f32,
+    mu_d: f32,
+    friction: bool
+) {
+    let epsv = eps();
+    let ba = wrapping_mul(ia, BODY);
+    let bb = wrapping_mul(ib, BODY);
+    let a0 = gw(in b, ba);
+    let a1 = gw(in b, wrapping_add(ba, 1));
+    let b0 = gw(in b, bb);
+    let b1 = gw(in b, wrapping_add(bb, 1));
+    let pax = lo(a0);
+    let pay = hi(a0);
+    let paz = lo(a1);
+    let pbx = lo(b0);
+    let pby = hi(b0);
+    let pbz = lo(b1);
+    let mut dx = pax - pbx;
+    let mut dy = pay - pby;
+    let mut dz = paz - pbz;
+    let mut len = sqrt32((dx * dx + dy * dy) + dz * dz);
+    if len <= epsv {
+        len = 0.0;
+        dx = 0.0;
+        dy = 1.0;
+        dz = 0.0;
+    }
+    let c = len - target;
+    if contact && c >= 0.0 {
+        return;
+    }
+    let wa = hi(a1);
+    let wb = hi(b1);
+    let w = wa + wb;
+    if w == 0.0 {
+        return;
+    }
+    let denom = fmax(w + alpha_tilde, epsv);
+    let d_lambda = -c / denom;
+    let inv_len: f32 = if len == 0.0 {
+        1.0
+    } else {
+        1.0 / len
+    };
+    let nx = dx * inv_len;
+    let ny = dy * inv_len;
+    let nz = dz * inv_len;
+    let sa = wa * d_lambda;
+    let sb = wb * d_lambda;
+    let mut nax = pax + sa * nx;
+    let mut nay = pay + sa * ny;
+    let mut naz = paz + sa * nz;
+    let mut nbx = pbx - sb * nx;
+    let mut nby = pby - sb * ny;
+    let mut nbz = pbz - sb * nz;
+    if contact {
+        let corr = sa + sb;
+        if friction {
+            let qa = wrapping_mul(ia, PREV);
+            let qb = wrapping_mul(ib, PREV);
+            let qa0 = gw(in prev, qa);
+            let qa1 = gw(in prev, wrapping_add(qa, 1));
+            let qb0 = gw(in prev, qb);
+            let qb1 = gw(in prev, wrapping_add(qb, 1));
+            let ddx = (nax - lo(qa0)) - (nbx - lo(qb0));
+            let ddy = (nay - hi(qa0)) - (nby - hi(qb0));
+            let ddz = (naz - lo(qa1)) - (nbz - lo(qb1));
+            let dn = (ddx * nx + ddy * ny) + ddz * nz;
+            let tx = ddx - dn * nx;
+            let ty = ddy - dn * ny;
+            let tz = ddz - dn * nz;
+            let lt = sqrt32((tx * tx + ty * ty) + tz * tz);
+            if lt > epsv {
+                let k = friction_k(lt, corr, mu_s, mu_d);
+                if k != 0.0 {
+                    let cx = -(k * tx);
+                    let cy = -(k * ty);
+                    let cz = -(k * tz);
+                    let fa = wa / w;
+                    let fb = wb / w;
+                    nax = nax + cx * fa;
+                    nbx = nbx - cx * fb;
+                    nay = nay + cy * fa;
+                    nby = nby - cy * fb;
+                    naz = naz + cz * fa;
+                    nbz = nbz - cz * fb;
+                }
+            }
+        }
+        let st = wrapping_mul(slot, 2);
+        sw(inout state, st, pk(corr, nx));
+        sw(inout state, wrapping_add(st, 1), pk(ny, nz));
+    }
+    sw(inout b, ba, pk(nax, nay));
+    sw(inout b, wrapping_add(ba, 1), with_lo(a1, naz));
+    sw(inout b, bb, pk(nbx, nby));
+    sw(inout b, wrapping_add(bb, 1), with_lo(b1, nbz));
+}
+
+// A ground contact of body `ia`.
+fn project_ground(
+    inout b: Slice[u64],
+    in prev: Slice[u64],
+    inout state: Slice[u64],
+    ia: u64,
+    slot: u64,
+    inv_h2: f32,
+    mu_s: f32,
+    mu_d: f32,
+    friction: bool,
+    ground_y: f32
+) {
+    let epsv = eps();
+    let ba = wrapping_mul(ia, BODY);
+    let a0 = gw(in b, ba);
+    let a2 = gw(in b, wrapping_add(ba, 2));
+    let pay = hi(a0);
+    let c = (pay - lo(a2)) - ground_y;
+    if c >= 0.0 {
+        return;
+    }
+    let a1 = gw(in b, wrapping_add(ba, 1));
+    let wa = hi(a1);
+    if wa == 0.0 {
+        return;
+    }
+    let alpha_tilde = hi(a2) * inv_h2;
+    let denom = fmax(wa + alpha_tilde, epsv);
+    let d_lambda = -c / denom;
+    let mut nax = lo(a0);
+    let mut nay = pay + wa * d_lambda;
+    let mut naz = lo(a1);
+    let corr = wa * d_lambda;
+    if friction {
+        let qa = wrapping_mul(ia, PREV);
+        let qa0 = gw(in prev, qa);
+        let ddx = nax - lo(qa0);
+        let ddy = nay - hi(qa0);
+        let ddz = naz - lo(gw(in prev, wrapping_add(qa, 1)));
+        // The normal is +y: dn = ddx * 0 + ddy * 1 + ddz * 0.
+        let dn = (ddx * 0.0 + ddy * 1.0) + ddz * 0.0;
+        let tx = ddx - dn * 0.0;
+        let ty = ddy - dn * 1.0;
+        let tz = ddz - dn * 0.0;
+        let lt = sqrt32((tx * tx + ty * ty) + tz * tz);
+        if lt > epsv {
+            let k = friction_k(lt, corr, mu_s, mu_d);
+            if k != 0.0 {
+                nax = nax + -(k * tx);
+                nay = nay + -(k * ty);
+                naz = naz + -(k * tz);
+            }
+        }
+    }
+    let st = wrapping_mul(slot, 2);
+    sw(inout state, st, pk(corr, 0.0));
+    sw(inout state, wrapping_add(st, 1), pk(1.0, 0.0));
+    sw(inout b, ba, pk(nax, nay));
+    sw(inout b, wrapping_add(ba, 1), with_lo(a1, naz));
+}
+
+// The restitution pass of one contact `slot` with the correction `corr`
+// and its state words `s0`, `s1`.
+fn restitute(
+    inout b: Slice[u64],
+    in prev: Slice[u64],
+    ia: u64,
+    cb: u32,
+    s0: u64,
+    s1: u64,
+    threshold: f32,
+    e: f32
+) {
+    let nx = hi(s0);
+    let ny = lo(s1);
+    let nz = hi(s1);
+    let ba = wrapping_mul(ia, BODY);
+    let qa = wrapping_mul(ia, PREV);
+    let mut vbx: f32 = 0.0;
+    let mut vby: f32 = 0.0;
+    let mut vbz: f32 = 0.0;
+    let mut pbx: f32 = 0.0;
+    let mut pby: f32 = 0.0;
+    let mut pbz: f32 = 0.0;
+    let mut wb: f32 = 0.0;
+    let mut bb: u64 = 0;
+    if cb != GROUND {
+        let ib = widen_u64(cb);
+        bb = wrapping_mul(ib, BODY);
+        let qb = wrapping_mul(ib, PREV);
+        let v0 = gw(in b, wrapping_add(bb, 3));
+        vbx = lo(v0);
+        vby = hi(v0);
+        vbz = lo(gw(in b, wrapping_add(bb, 4)));
+        let p0 = gw(in prev, wrapping_add(qb, 2));
+        pbx = lo(p0);
+        pby = hi(p0);
+        pbz = lo(gw(in prev, wrapping_add(qb, 3)));
+        wb = hi(gw(in b, wrapping_add(bb, 1)));
+    }
+    let v0 = gw(in b, wrapping_add(ba, 3));
+    let vax = lo(v0);
+    let vay = hi(v0);
+    let vaz = lo(gw(in b, wrapping_add(ba, 4)));
+    let wa = hi(gw(in b, wrapping_add(ba, 1)));
+    let w = wa + wb;
+    if w == 0.0 {
+        return;
+    }
+    let rx = vax - vbx;
+    let ry = vay - vby;
+    let rz = vaz - vbz;
+    let p0 = gw(in prev, wrapping_add(qa, 2));
+    let px = lo(p0) - pbx;
+    let py = hi(p0) - pby;
+    let pz = lo(gw(in prev, wrapping_add(qa, 3))) - pbz;
+    let vn = (rx * nx + ry * ny) + rz * nz;
+    let vn_prev = (px * nx + py * ny) + pz * nz;
+    let e_here: f32 = if abs32(vn_prev) <= threshold {
+        0.0
+    } else {
+        e
+    };
+    let wanted: f32 = if vn_prev < 0.0 {
+        -(e_here * vn_prev)
+    } else {
+        0.0
+    };
+    let dv = wanted - vn;
+    let fa = wa / w;
+    sw(inout b, wrapping_add(ba, 3), pk(vax + (dv * fa) * nx, vay + (dv * fa) * ny));
+    sw(inout b, wrapping_add(ba, 4), pk(vaz + (dv * fa) * nz, 0.0));
+    if cb != GROUND {
+        let fb = wb / w;
+        sw(inout b, wrapping_add(bb, 3), pk(vbx - (dv * fb) * nx, vby - (dv * fb) * ny));
+        sw(inout b, wrapping_add(bb, 4), pk(vbz - (dv * fb) * nz, 0.0));
+    }
+}
+
+pub fn substeps(
+    substeps: u32,
+    inout b: Slice[u64],
+    in jf: Slice[u64],
+    in ju: Slice[u64],
+    in contacts: Slice[u64],
+    in layer_off: Slice[u32],
+    in layer_idx: Slice[u32],
+    in params: Slice[u32],
+    inout state: Slice[u64],
+    inout prev: Slice[u64]
+) {
+    let n = b.len() / BODY;
+    let nj = ju.len();
+    let layers = if layer_off.len() > 0 {
+        wrapping_sub(layer_off.len(), 1)
+    } else {
+        0
+    };
+    let h = gf(in params, 0) / nearest_f32(widen_f64(substeps));
+    let inv_h = 1.0 / h;
+    let inv_h2 = inv_h * inv_h;
+    let gx = gf(in params, 1);
+    let gy = gf(in params, 2);
+    let gz = gf(in params, 3);
+    let e = gf(in params, 7);
+    let restitution = e > 0.0;
+    let ground_y = gf(in params, 4);
+    let mu_s = gf(in params, 5);
+    let mu_d = gf(in params, 6);
+    let friction = mu_s > 0.0 || mu_d > 0.0;
+    let g1 = (abs32(gx) + abs32(gy)) + abs32(gz);
+    let threshold = (2.0 * g1) * h;
+    for _step in 0..widen_u64(substeps) {
+        for i in 0..n {
+            let bi = wrapping_mul(i, BODY);
+            let qi = wrapping_mul(i, PREV);
+            let w0 = gw(in b, bi);
+            let w1 = gw(in b, wrapping_add(bi, 1));
+            let w3 = gw(in b, wrapping_add(bi, 3));
+            let w4 = gw(in b, wrapping_add(bi, 4));
+            sw(inout prev, qi, w0);
+            sw(inout prev, wrapping_add(qi, 1), w1);
+            sw(inout prev, wrapping_add(qi, 2), w3);
+            sw(inout prev, wrapping_add(qi, 3), w4);
+            if hi(w1) == 0.0 {
+                continue;
+            }
+            let nvx = lo(w3) + gx * h;
+            let nvy = hi(w3) + gy * h;
+            let nvz = lo(w4) + gz * h;
+            sw(inout b, wrapping_add(bi, 3), pk(nvx, nvy));
+            sw(inout b, wrapping_add(bi, 4), pk(nvz, 0.0));
+            sw(inout b, bi, pk(lo(w0) + nvx * h, hi(w0) + nvy * h));
+            sw(inout b, wrapping_add(bi, 1), with_lo(w1, lo(w1) + nvz * h));
+        }
+        if restitution {
+            state.fill(0);
+        }
+        for color in 0..layers {
+            let lo_i = widen_u64(gu(in layer_off, color));
+            let hi_i = widen_u64(gu(in layer_off, wrapping_add(color, 1)));
+            for idx in lo_i..hi_i {
+                let index = widen_u64(gu(in layer_idx, idx));
+                if index >= nj {
+                    let slot = wrapping_sub(index, nj);
+                    let cw = gw(in contacts, slot);
+                    let ia = cw & LOW;
+                    let cb = wrapping_u32(cw >> 32);
+                    if cb == GROUND {
+                        project_ground(
+                            inout b,
+                            in prev,
+                            inout state,
+                            ia,
+                            slot,
+                            inv_h2,
+                            mu_s,
+                            mu_d,
+                            friction,
+                            ground_y
+                        );
+                    } else {
+                        let ib = widen_u64(cb);
+                        let ra = gw(in b, wrapping_add(wrapping_mul(ia, BODY), 2));
+                        let rb = gw(in b, wrapping_add(wrapping_mul(ib, BODY), 2));
+                        project_pair(
+                            inout b,
+                            in prev,
+                            inout state,
+                            ia,
+                            ib,
+                            lo(ra) + lo(rb),
+                            (hi(ra) + hi(rb)) * inv_h2,
+                            true,
+                            slot,
+                            mu_s,
+                            mu_d,
+                            friction
+                        );
+                    }
+                } else {
+                    let jw = gw(in ju, index);
+                    let fw = gw(in jf, index);
+                    project_pair(
+                        inout b,
+                        in prev,
+                        inout state,
+                        jw & LOW,
+                        jw >> 32,
+                        lo(fw),
+                        hi(fw) * inv_h2,
+                        false,
+                        0,
+                        mu_s,
+                        mu_d,
+                        friction
+                    );
+                }
+            }
+        }
+        for i in 0..n {
+            let bi = wrapping_mul(i, BODY);
+            let w1 = gw(in b, wrapping_add(bi, 1));
+            if hi(w1) == 0.0 {
+                continue;
+            }
+            let qi = wrapping_mul(i, PREV);
+            let w0 = gw(in b, bi);
+            let q0 = gw(in prev, qi);
+            let q1 = gw(in prev, wrapping_add(qi, 1));
+            sw(
+                inout b,
+                wrapping_add(bi, 3),
+                pk((lo(w0) - lo(q0)) * inv_h, (hi(w0) - hi(q0)) * inv_h)
+            );
+            sw(inout b, wrapping_add(bi, 4), pk((lo(w1) - lo(q1)) * inv_h, 0.0));
+        }
+        if restitution {
+            for color in 0..layers {
+                let lo_i = widen_u64(gu(in layer_off, color));
+                let hi_i = widen_u64(gu(in layer_off, wrapping_add(color, 1)));
+                for idx in lo_i..hi_i {
+                    let index = widen_u64(gu(in layer_idx, idx));
+                    if index >= nj {
+                        let slot = wrapping_sub(index, nj);
+                        let s0 = gw(in state, wrapping_mul(slot, 2));
+                        if lo(s0) > 0.0 {
+                            let cw = gw(in contacts, slot);
+                            restitute(
+                                inout b,
+                                in prev,
+                                cw & LOW,
+                                wrapping_u32(cw >> 32),
+                                s0,
+                                gw(in state, wrapping_add(wrapping_mul(slot, 2), 1)),
+                                threshold,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -114,8 +114,14 @@ fn vesper_task(block: &str) -> (BTreeMap<String, String>, Option<String>) {
         if let Some(k) = l.strip_prefix("F ") {
             key = Some(k.to_string());
             frames.insert(k.to_string(), String::new());
-        } else if l.starts_with("B ") {
-            // The internal convention (part 4a), checked by the swap test.
+        } else if l.starts_with("B ")
+            || l.starts_with("I ")
+            || l.starts_with("V ")
+            || l.starts_with('W')
+        {
+            // The convention and the instance (parts 4a and 4b), checked by
+            // the swap test.
+            key = None;
         } else if let Some(e) = l.strip_prefix("X ") {
             err = Some(e.to_string());
             key = None;

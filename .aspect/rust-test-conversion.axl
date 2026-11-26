@@ -1,0 +1,331 @@
+"""Classify Rust integration tests and convert supported cases to Vesper."""
+
+load("./lib/process.axl", "capture", "command", "root_path", "scratch_dir")
+load("./lib/rust-test-source.axl", "IDENT", "PROGRAM_PATHS", "read_cases", "tokenize", "vesper_modules")
+
+_USAGE = """aspect maintenance convert-rust-tests -- classify [--json] [--files]
+aspect maintenance convert-rust-tests -- convert TESTS_RS --out DIR [--vesper VESPER] [--fuel N] [--write]"""
+_DEFAULT_FUEL = "200000000"
+
+def _dedent(source):
+    lines = source.split("\n")
+    rest = [line for line in lines[1:] if line.strip()]
+    if not rest:
+        return source.strip() + "\n"
+    indent = min([len(line) - len(line.lstrip(" ")) for line in rest])
+    body = [line[indent:] if len(line) >= indent else line.strip() for line in lines[1:]]
+    return "\n".join([line.rstrip() for line in [lines[0].strip()] + body]).strip() + "\n"
+
+def _items(source):
+    tokens = tokenize(source)
+    items = []
+    start, depth, name = 0, 0, None
+    for index, token in enumerate(tokens):
+        text = token.text
+        if not depth and name == None and token.kind == "ident" and text == "fn" and index + 1 < len(tokens) and tokens[index + 1].kind == "ident":
+            name = tokens[index + 1].text
+        if token.kind != "punct":
+            continue
+        if text == "{":
+            depth += 1
+        elif text == "}":
+            depth -= 1
+        if not depth and text in ["}", ";"]:
+            start += len(source[start:token.end]) - len(source[start:token.end].lstrip())
+            items.append((start, token.end, name))
+            start, name = token.end, None
+    return items
+
+def _header(path, case):
+    return ("// Converted from %s (`%s`) by `aspect maintenance convert-rust-tests`.\n" % (path, case.test)) + (
+        "// Run with `vesper test --engines all` (tests/vesper/README.md).\n"
+    )
+
+def _value_file(path, case):
+    return _header(path, case) + "\n" + _dedent(case.source) + (
+        "\ntest {\n    @test\n    fn %s() -> bool {\n        main() == %d\n    }\n}\n" % (case.name, case.expected)
+    )
+
+def _string(text):
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t") + '"'
+
+def _error_file(path, case, holder, source, items):
+    picked = [item for item in items if item[2] == holder]
+    if len(picked) != 1:
+        return None
+    start, end, _ = picked[0]
+    rest = (source[:start] + source[end:]).strip()
+    attr = "expect_error = " + case.code
+    if case.message:
+        attr += ", message = " + _string(case.message)
+    item = "\n".join(["    " + line if line else line for line in source[start:end].strip().split("\n")])
+    return _header(path, case) + "\n" + ((rest + "\n\n") if rest else "") + "test {\n    @test(" + attr + ")\n" + item + "\n}\n"
+
+def _exec(ctx, root, binary, argv):
+    return command(ctx, binary, argv, root).stdout("piped").stderr("piped").spawn().wait_with_output()
+
+def _error_case(ctx, root, binary, work, path, case):
+    source = _dedent(case.source)
+    probe = work + "/diagnostic.ves"
+    ctx.std.fs.write(probe, source)
+    result = _exec(ctx, root, binary, ["check", probe, "--json"])
+    data = json.try_decode(result.stdout)
+    if type(data) == "dict":
+        data = data.get("diagnostics", [])
+    reported = [row for row in data if row.get("code") == case.code and
+                (not case.message or case.message in row.get("message", ""))] if type(data) == "list" else []
+    if not reported:
+        return None, "the checker does not report the diagnostic on the dedented source"
+    offset = reported[0].get("span", {}).get("start", -1)
+    items = _items(source)
+    holders = [name for start, end, name in items if start <= offset and offset < end and name]
+    if not holders:
+        return None, "the diagnostic is outside every function"
+    text = _error_file(path, case, holders[0], source, items)
+    return (text, "") if text != None else (None, "could not isolate `fn %s`" % holders[0])
+
+def _safe_name(name):
+    return "".join([char if char in IDENT else "_" for char in name.elems()])
+
+def _convert(ctx, root, options):
+    cwd = ctx.std.env.current_dir()
+    input = capture(ctx, "realpath", [root_path(cwd, options.input)], cwd).rstrip("\r\n")
+    if not input.startswith(root + "/"):
+        fail("Rust test file must be inside the repository")
+    relative = input[len(root) + 1:]
+    source = ctx.std.fs.read_to_string(input)
+    analysis = read_cases(source)
+    binary = root_path(cwd, options.vesper) if "/" in options.vesper else options.vesper
+    work = scratch_dir(ctx, "vesper-test-conversion-")
+    used, kept, refused = {}, [], []
+    for case in analysis.cases:
+        stem = _safe_name(case.name)
+        for _ in range(len(used)):
+            if stem not in used:
+                break
+            stem += "_"
+        used[stem] = True
+        if case.kind == "value":
+            text = _value_file(relative, case)
+        else:
+            text, reason = _error_case(ctx, cwd, binary, work, relative, case)
+            if text == None:
+                refused.append((case, reason))
+                continue
+        probe = work + "/" + stem + ".ves"
+        ctx.std.fs.write(probe, text)
+        _exec(ctx, cwd, binary, ["fmt", probe])
+        text = ctx.std.fs.read_to_string(probe)
+        result = _exec(ctx, cwd, binary, ["test", probe, "--engines", "all", "--no-cache", "--fuel", options.fuel])
+        if result.status.success:
+            kept.append((stem, text))
+        else:
+            log = (result.stdout + result.stderr).strip().splitlines()
+            refused.append((case, "vesper test failed: " + log[-1] if log else "vesper test failed"))
+    refused_tests = {case.test: True for case, _ in refused}
+    covered = [name for name in analysis.tests if analysis.covered.get(name) and name not in refused_tests]
+    ctx.std.io.stdout.write("%s: %d #[test] functions, %d cases of known shapes\n" % (relative, len(analysis.tests), len(analysis.cases)))
+    ctx.std.io.stdout.write("  converted: %d cases; #[test] functions fully covered: %d\n" % (len(kept), len(covered)))
+    for case, reason in refused:
+        ctx.std.io.stdout.write("  refused %s/%s: %s\n" % (case.test, case.name, reason))
+    for item in analysis.skipped:
+        ctx.std.io.stdout.write("  kept in Rust %s: %s\n" % (item.test, item.reason))
+    if options.write:
+        destination = root_path(cwd, options.output)
+        ctx.std.fs.create_dir_all(destination)
+        for stem, text in kept:
+            ctx.std.fs.write(destination + "/" + stem + ".ves", text)
+        rust = dict(refused_tests)
+        rust.update({item.test: True for item in analysis.skipped})
+        record = {"from": relative, "cases": len(kept), "covered_tests": covered, "kept_in_rust": sorted(rust)}
+        ctx.std.fs.write(destination + "/converted.json", json.encode(record) + "\n")
+    return 0
+
+def _uses_cli(source):
+    return ("CARGO_BIN_EXE_vesper" in source or 'env!("CARGO_BIN_EXE' in source or
+            any([suffix.lstrip().startswith("vesper") for suffix in source.split("Command::new(")[1:]]))
+
+def _classify_file(ctx, root, path):
+    source = str(ctx.std.fs.open(path).read())
+    relative = path[len(root) + 1:]
+    modules = vesper_modules(source)
+    for line in source.splitlines():
+        if line.startswith("use vesper_"):
+            name = line[4:]
+            for index, char in enumerate(name.elems()):
+                if char not in "abcdefghijklmnopqrstuvwxyz_":
+                    name = name[:index]
+                    break
+            modules[name] = True
+    api = sorted([name for name in modules if name not in PROGRAM_PATHS and name != "ast"])
+    cli = _uses_cli(source)
+    embedded = len(source.split("fn main(")) - 1
+    shape = "rust-api" if relative.startswith("crates/") or api else ("program" if embedded else ("cli" if cli else "rust-api"))
+    error, result = catch(read_cases, source)
+    if error != None:
+        ctx.std.io.stderr.write("warning: %s: not scanned (%s)\n" % (relative, str(error)))
+    return {
+        "cases": len(result.cases) if result != None else 0,
+        "covered_tests": len([name for name, covered in result.covered.items() if covered]) if result != None else 0,
+        "file": relative,
+        "lines": len(source.split("\n")) - 1,
+        "tests": len(source.split("#[test]")) - 1,
+        "shape": shape, "cli": cli, "embedded_programs": embedded, "api": api,
+    }
+
+def _find(ctx, root, roots, pattern):
+    if not roots:
+        return []
+    return sorted(capture(ctx, "find", roots + ["-type", "f", "-name", pattern, "-print0"], root).split("\x00")[:-1])
+
+def _grouped(number):
+    digits = str(number)
+    first = len(digits) % 3 or 3
+    return ",".join([digits[:first]] + [digits[index:index + 3] for index in range(first, len(digits), 3)])
+
+def _classification(ctx, root, options):
+    paths = sorted([root + "/tests/" + entry.path for entry in ctx.std.fs.read_dir(root + "/tests") if entry.is_file and entry.path.endswith(".rs")])
+    crate_dirs = []
+    for entry in ctx.std.fs.read_dir(root + "/crates"):
+        directory = root + "/crates/" + entry.path + "/tests"
+        if entry.is_dir and ctx.std.fs.exists(directory) and ctx.std.fs.metadata(directory).is_dir:
+            crate_dirs.append(directory)
+    paths.extend(_find(ctx, root, crate_dirs, "*.rs"))
+    rows = [_classify_file(ctx, root, path) for path in paths]
+    done = {}
+    if ctx.std.fs.exists(root + "/tests/vesper"):
+        for path in _find(ctx, root, [root + "/tests/vesper"], "converted.json"):
+            record = json.decode(ctx.std.fs.read_to_string(path))
+            done[record["from"]] = record
+    totals, overall = {}, [0] * 5
+    for row in rows:
+        key = ("tests/" if row["file"].startswith("tests/") else "crates/*/tests/") + " " + row["shape"]
+        values = [1, row["lines"], row["tests"], row["cases"], row["covered_tests"]]
+        subtotal = totals.get(key, [0] * 5)
+        for index, value in enumerate(values):
+            subtotal[index] += value
+            overall[index] += value
+        totals[key] = subtotal
+    if options.json:
+        ctx.std.io.stdout.write(json.encode({"files": rows, "totals": totals, "converted": done}) + "\n")
+        return 0
+    lines = ["| Where | Shape | Files | Lines | #[test] | Cases of known shapes | #[test] fully of known shapes |",
+             "|---|---|--:|--:|--:|--:|--:|"]
+    for key in sorted(totals):
+        area, shape = key.split(" ")
+        numbers = " | ".join([_grouped(number) for number in totals[key]])
+        lines.append("| `%s` | %s | %s |" % (area, shape, numbers))
+    lines.append("| **Total** | | " + " | ".join(["**" + _grouped(number) + "**" for number in overall]) + " |")
+    cases, covered = 0, 0
+    for record in done.values():
+        cases += record["cases"]
+        covered += len(record["covered_tests"])
+    lines.extend(["", "Converted so far: %d file(s), %d Vesper cases under tests/vesper/, %d #[test] functions fully covered." % (len(done), cases, covered)])
+    if options.files:
+        lines.extend(["", "| File | Shape | Lines | #[test] | Cases | Embedded `main`s | API |", "|---|---|--:|--:|--:|--:|---|"])
+        for row in rows:
+            lines.append("| `%s` | %s | %d | %d | %d | %d | %s |" % (
+                row["file"], row["shape"], row["lines"], row["tests"], row["cases"], row["embedded_programs"], ", ".join(row["api"][:6]),
+            ))
+    ctx.std.io.stdout.write("\n".join(lines) + "\n")
+    return 0
+
+def _parse(ctx, argv):
+    if not argv or argv[0] not in ["convert", "classify"]:
+        ctx.std.process.exit(2, _USAGE)
+    sub = argv[0]
+    flags = {}
+    input, pending = None, None
+    for value in argv[1:]:
+        if pending:
+            if value.startswith("--"):
+                ctx.std.process.exit(2, "Missing value for " + pending)
+            flags[pending] = value
+            pending = None
+        elif sub == "classify" and value in ["--json", "--files", "--markdown"]:
+            flags[value] = True
+        elif sub == "convert" and value == "--write":
+            flags[value] = True
+        elif sub == "convert" and value in ["--out", "--vesper", "--fuel"]:
+            pending = value
+        elif sub == "convert" and not value.startswith("--") and input == None:
+            input = value
+        else:
+            ctx.std.process.exit(2, "Unexpected argument: " + value)
+    if pending or (sub == "convert" and (not input or not flags.get("--out"))):
+        ctx.std.process.exit(2, _USAGE)
+    error, fuel = catch(int, flags.get("--fuel", _DEFAULT_FUEL))
+    if error != None:
+        ctx.std.process.exit(2, "--fuel requires an integer")
+    return struct(sub = sub, input = input, output = flags.get("--out"), fuel = str(fuel),
+                  vesper = flags.get("--vesper", ctx.std.env.var("VESPER") or "target/release/vesper"),
+                  json = flags.get("--json"), files = flags.get("--files"), write = flags.get("--write"))
+
+def _run(ctx):
+    argv = ctx.args.tool_args
+    if argv in [["--help"], ["-h"], ["classify", "--help"], ["convert", "--help"]]:
+        ctx.std.io.stdout.write(_USAGE + "\n")
+        return 0
+    options = _parse(ctx, argv)
+    root = ctx.std.env.aspect_root_dir()
+    return _classification(ctx, root, options) if options.sub == "classify" else _convert(ctx, root, options)
+
+convert_rust_tests = task(
+    kind = "convert-rust-tests", group = ["maintenance"], summary = "Classify Rust tests and convert supported cases to Vesper",
+    implementation = _run, args = {"tool_args": args.trailing_var_args(description = _USAGE)},
+)
+
+def _test(ctx):
+    source = """use vesper::{runtime::jit, parser};
+fn execute(name: &str, source: &str, expected: i64) {
+    // Nested comments must not add dependencies.
+    /* /* hidden */ optimizer::step(); */
+    run_jit(source);
+}
+fn run_jit(source: &str) { runtime::jit_with_options(source); }
+fn ret(name: &str, source: &str) -> u64 { runtime::jit_with_options(source) }
+fn doomed(source: &str, code: &str, msg: &str) {
+    assert!(failure.code == code && failure.message.contains(msg));
+}
+#[test]
+fn value() {
+    let source = r###"fn main()->i64{-6}"###;
+    execute("simple", source, -0x6i64);
+    assert_eq!(ret("return_value", "fn main()->u64{42}"), 42);
+}
+#[test]
+fn error() {
+    doomed("pub fn bad() { oops() }", "E002", "quoted \\"term\\"");
+}
+#[test]
+fn partial() {
+    execute("known", "fn main()->u64{1}", 1);
+    unrelated_assertion();
+}
+"""
+    result = read_cases(source)
+    if result.covered != {"value": True, "error": True, "partial": False} or len(result.cases) != 4:
+        fail("Unexpected Rust helper coverage: %r" % result)
+    first, second, third = result.cases[:3]
+    if (first.source, first.expected, second.expected, third.message) != ("fn main()->i64{-6}", -6, 42, 'quoted "term"'):
+        fail("Rust literal extraction changed")
+    transformed = _value_file("tests/fixture.rs", first)
+    if "fn simple() -> bool" not in transformed or "main() == -6" not in transformed:
+        fail("Value fixture lost its test assertion")
+    body = _dedent(third.source)
+    transformed = _error_file("tests/fixture.rs", third, "bad", body, _items(body))
+    if "@test(expect_error = E002" not in transformed or "pub fn bad()" not in transformed:
+        fail("Diagnostic fixture lost its expected error")
+    tokens = tokenize('"escaped \\u{1f980} \\x66" /* hidden */ 0b11u32')
+    if [token.value for token in tokens] != ["escaped 🦀 f", 3]:
+        fail("Rust escapes and integer suffixes were not decoded")
+    rejected = read_cases(source.replace("runtime::jit_with_options(source);", "runtime::jit_with_options(source); vesper_hidden::step();"))
+    if rejected.covered["value"] or any([case.name == "simple" for case in rejected.cases]):
+        fail("A helper reaching an unrelated backend was accepted")
+    ctx.std.io.stdout.write("Passed Rust helper shape, literal decoding, coverage and converted source tests\n")
+    return 0
+
+test_rust_conversion = task(
+    kind = "rust-test-conversion", group = ["ci", "tests"], summary = "Test Rust case recognition and Vesper conversion",
+    implementation = _test,
+)

@@ -240,7 +240,7 @@ impl View {
 
     /// The view of prepared text: its ownership facts and the scope-exit
     /// diagnostics its regions absorb.
-    fn from_prepared(prepared: &Prepared) -> Result<Self, Unavailable> {
+    pub(crate) fn from_prepared(prepared: &Prepared) -> Result<Self, Unavailable> {
         let functions = facts(&prepared.module, &prepared.checked)?;
         let regions = prepared.regions.clone();
         let absorbed = prepared

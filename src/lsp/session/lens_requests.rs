@@ -207,73 +207,10 @@ impl Session {
         let Ok(document) = self.document(uri) else {
             return (Vec::new(), json!({"status":"unavailable"}));
         };
-        let view = match self.lens_view(uri) {
-            Ok(view) => view,
-            Err(error) => {
-                let reason = error
-                    .data
-                    .as_ref()
-                    .and_then(|data| data.get("reason"))
-                    .cloned()
-                    .unwrap_or_else(|| json!(error.message));
-                return (Vec::new(), json!({"status":"unavailable","reason":reason}));
-            }
-        };
-        let index = document.index();
-        let range_of = |span: &std::ops::Range<usize>| {
-            index
-                .range(vesper_span::ByteSpan {
-                    start: span.start,
-                    end: span.end,
-                })
-                .ok()
-                .map(range_json)
-        };
-        let mut diagnostics = Vec::new();
-        let mut poisoned = Vec::new();
-        for (region, bindings) in view.poisoned() {
-            let Some(damage) = range_of(&region.damage) else {
-                continue;
-            };
-            let line = index
-                .position(region.damage.start)
-                .map(|p| p.line + 1)
-                .unwrap_or(0);
-            for binding in bindings {
-                let Some(origin) = range_of(&binding.origin) else {
-                    continue;
-                };
-                diagnostics.push(json!({
-                    "range": origin,
-                    "severity": 3,
-                    "source": "vesper",
-                    "code": "VESPER_POISONED_RECOVERY",
-                    "message": format!(
-                        "linear binding '{}' is poisoned by unfinished code on line {line}; \
-                         its scope-exit leak checks are suppressed until '{}' parses again",
-                        binding.name, region.name
-                    ),
-                    "relatedInformation": [{
-                        "location": {"uri": uri, "range": damage},
-                        "message": "unfinished code (PoisonedRecovery region)"
-                    }],
-                    "data": {"status": "poisoned_recovery", "binding": binding.name,
-                        "type": binding.ty.to_string(), "function": region.name}
-                }));
-                poisoned.push(json!({"binding": binding.name, "function": region.name,
-                    "origin": byte_range(&binding.origin), "region": byte_range(&region.damage),
-                    "cut": region.cut}));
-            }
+        match self.lens_view(uri) {
+            Ok(view) => poison_of(uri, document.index(), &view),
+            Err(error) => (Vec::new(), unavailable_metadata(&error)),
         }
-        (
-            diagnostics,
-            json!({"status":"available","scope":view.scope(),"poisoned":poisoned,
-                "absorbed_scope_exit_diagnostics":view.absorbed(),
-                "regions":view.regions().iter().map(|r| json!({"function":r.name,
-                    "kind":r.kind.as_str(),"depth":r.depth,
-                    "span":byte_range(&r.span),"scope":byte_range(&r.scope),
-                    "cut":r.cut})).collect::<Vec<_>>()}),
-        )
     }
 
     pub(super) fn completion(
@@ -283,105 +220,15 @@ impl Session {
         let uri = document_uri(params)?;
         let at = position(field(params, "position")?)?;
         let document = self.document(uri)?;
-        let offset = document
-            .index()
-            .offset(at)
-            .map_err(|e| ServerError::params(e.to_string()))?;
-        let empty = json!({"isIncomplete": false, "items": []});
-        let Some(receiver) = member_receiver(document.text(), offset) else {
-            return Ok(empty);
-        };
-        let view = self.lens_view(uri)?;
-        let name = &document.text()[receiver.clone()];
         let ceiling = self.manifests.ceiling_for(uri);
-        let Some((binding, ranked)) = view.complete_member(name, receiver.start, ceiling) else {
-            return Ok(empty);
-        };
-        let live = view
-            .outstanding(receiver.start)
-            .iter()
-            .any(|b| b.origin == binding.origin);
-        let items: Vec<Value> = ranked
-            .iter()
-            .enumerate()
-            .map(|(i, item)| {
-                let mut value = json!({
-                    "label": item.label,
-                    "kind": 2,
-                    "detail": item.detail,
-                    "sortText": format!("{}{i:04}", item.tier as u8),
-                    "data": {"vesper": {"tier": item.tier.as_str(), "receiver": name,
-                        "receiver_type": binding.ty.to_string(),
-                        "receiver_live_linear": live, "scope": view.scope(),
-                        "capability_ceiling": ceiling}}
-                });
-                if let Some(badge) = &item.badge {
-                    value["labelDetails"] = json!({"description": badge});
-                }
-                if matches!(
-                    item.tier,
-                    CompletionTier::BlockedByFrame | CompletionTier::ExceedsCeiling
-                ) {
-                    value["tags"] = json!([1]);
-                }
-                value
-            })
-            .collect();
-        Ok(json!({"isIncomplete": false, "items": items}))
-    }
-
-    /// Consuming calls for a binding's type, rendered for hover text.
-    fn consumers(view: &View, binding: &Binding) -> Vec<String> {
-        let ty = binding.ty.name();
-        let mut out = Vec::new();
-        for (name, f) in &view.world().functions {
-            if let Some(method) = name.strip_prefix(ty).and_then(|n| n.strip_prefix("::")) {
-                if f.params
-                    .first()
-                    .is_some_and(|p| p.name == "self" && p.pass == crate::ast::Pass::Sink)
-                {
-                    out.push(format!("{}.{method}()", binding.name));
-                }
-            } else if !name.contains("::")
-                && f.params
-                    .iter()
-                    .any(|p| p.pass == crate::ast::Pass::Sink && p.ty.name() == ty)
-            {
-                out.push(format!("{name}(..)"));
-            }
-            if out.len() >= 8 {
-                break;
-            }
-        }
-        out
+        completion_of(document.text(), document.index(), at, ceiling, || {
+            self.lens_view(uri)
+        })
     }
 
     fn obligation_text(&self, uri: &str, offset: usize) -> Option<String> {
         let view = self.lens_view(uri).ok()?;
-        let index = self.document(uri).ok()?.index();
-        let live = view.outstanding(offset);
-        if live.is_empty() {
-            return None;
-        }
-        let mut text = format!("outstanding linear obligations here ({}):", view.scope());
-        for binding in live {
-            let line = index
-                .position(binding.origin.start)
-                .map(|p| p.line + 1)
-                .unwrap_or(0);
-            let consumers = Self::consumers(&view, binding);
-            text.push_str(&format!(
-                "\n- {}: {} (introduced on line {line}){}",
-                binding.name,
-                binding.ty,
-                if consumers.is_empty() {
-                    String::new()
-                } else {
-                    format!("; discharge with {}", consumers.join(", "))
-                }
-            ));
-        }
-        Some(text)
+        obligation_text_of(&view, self.document(uri).ok()?.index(), offset)
     }
 
     /// Append live obligations to the navigation hover. When checked
@@ -437,43 +284,9 @@ impl Session {
         let uri = document_uri(params)?;
         let selection = range(field(params, "range")?)?;
         let document = self.document(uri)?;
-        let index = document.index();
-        let start = index
-            .offset(selection.start)
-            .map_err(|e| ServerError::params(e.to_string()))?;
-        // Editors commonly request hints through a range past the last line.
-        let end = index.offset(selection.end).unwrap_or(document.text().len());
-        let view = self.lens_view(uri)?;
-        let mut hints = Vec::new();
-        let poisoned: Vec<_> = view
-            .poisoned()
-            .into_iter()
-            .flat_map(|(_, bindings)| bindings.into_iter().map(|b| b.origin.clone()))
-            .collect();
-        for binding in view.linear_bindings() {
-            if binding.origin.start < start || binding.origin.end > end {
-                continue;
-            }
-            let label = if poisoned.contains(&binding.origin) {
-                "linear: poisoned by unfinished code".to_owned()
-            } else if let Some(span) = binding.first_consumption_after(binding.origin.end) {
-                let line = index.position(span.start).map(|p| p.line + 1).unwrap_or(0);
-                format!("linear: consumed on line {line}")
-            } else {
-                "linear: outstanding".to_owned()
-            };
-            let at = index
-                .position(binding.origin.end)
-                .map_err(|_| ServerError::internal("binding span is invalid"))?;
-            hints.push(json!({"position":{"line":at.line,"character":at.character},
-                "label":label,"paddingLeft":true,
-                "data":{"vesper":{"binding":binding.name,"type":binding.ty.to_string(),
-                    "scope":view.scope()}}}));
-            if hints.len() >= 512 {
-                break;
-            }
-        }
-        Ok(Value::Array(hints))
+        inlay_hints_of(document.text(), document.index(), selection, || {
+            self.lens_view(uri)
+        })
     }
 
     fn toolchain(&self) -> proof_lens::Toolchain {
@@ -991,4 +804,297 @@ pub(super) fn cancellation_point() -> Result<(), ServerError> {
         return Err(cancelled_error());
     }
     Ok(())
+}
+
+/// Lens metadata for a document whose view is unavailable.
+fn unavailable_metadata(error: &ServerError) -> Value {
+    let reason = error
+        .data
+        .as_ref()
+        .and_then(|data| data.get("reason"))
+        .cloned()
+        .unwrap_or_else(|| json!(error.message));
+    json!({"status":"unavailable","reason":reason})
+}
+
+/// One informational notice per poisoned linear binding of `view`, and the
+/// Lens metadata of the document at `uri`.
+fn poison_of(uri: &str, index: &vesper_span::LineIndex, view: &View) -> (Vec<Value>, Value) {
+    let range_of = |span: &std::ops::Range<usize>| {
+        index
+            .range(vesper_span::ByteSpan {
+                start: span.start,
+                end: span.end,
+            })
+            .ok()
+            .map(range_json)
+    };
+    let mut diagnostics = Vec::new();
+    let mut poisoned = Vec::new();
+    for (region, bindings) in view.poisoned() {
+        let Some(damage) = range_of(&region.damage) else {
+            continue;
+        };
+        let line = index
+            .position(region.damage.start)
+            .map(|p| p.line + 1)
+            .unwrap_or(0);
+        for binding in bindings {
+            let Some(origin) = range_of(&binding.origin) else {
+                continue;
+            };
+            diagnostics.push(json!({
+                "range": origin,
+                "severity": 3,
+                "source": "vesper",
+                "code": "VESPER_POISONED_RECOVERY",
+                "message": format!(
+                    "linear binding '{}' is poisoned by unfinished code on line {line}; \
+                     its scope-exit leak checks are suppressed until '{}' parses again",
+                    binding.name, region.name
+                ),
+                "relatedInformation": [{
+                    "location": {"uri": uri, "range": damage},
+                    "message": "unfinished code (PoisonedRecovery region)"
+                }],
+                "data": {"status": "poisoned_recovery", "binding": binding.name,
+                    "type": binding.ty.to_string(), "function": region.name}
+            }));
+            poisoned.push(json!({"binding": binding.name, "function": region.name,
+                "origin": byte_range(&binding.origin), "region": byte_range(&region.damage),
+                "cut": region.cut}));
+        }
+    }
+    (
+        diagnostics,
+        json!({"status":"available","scope":view.scope(),"poisoned":poisoned,
+            "absorbed_scope_exit_diagnostics":view.absorbed(),
+            "regions":view.regions().iter().map(|r| json!({"function":r.name,
+                "kind":r.kind.as_str(),"depth":r.depth,
+                "span":byte_range(&r.span),"scope":byte_range(&r.scope),
+                "cut":r.cut})).collect::<Vec<_>>()}),
+    )
+}
+
+/// Obligation-guided member completion at `at` in `text`; `view` is asked
+/// for only when `at` follows a `receiver.` access.
+fn completion_of(
+    text: &str,
+    index: &vesper_span::LineIndex,
+    at: Position,
+    ceiling: Option<&std::collections::BTreeSet<String>>,
+    view: impl FnOnce() -> Result<Arc<View>, ServerError>,
+) -> Result<Value, ServerError> {
+    let offset = index
+        .offset(at)
+        .map_err(|e| ServerError::params(e.to_string()))?;
+    let empty = json!({"isIncomplete": false, "items": []});
+    let Some(receiver) = member_receiver(text, offset) else {
+        return Ok(empty);
+    };
+    let view = view()?;
+    let name = &text[receiver.clone()];
+    let Some((binding, ranked)) = view.complete_member(name, receiver.start, ceiling) else {
+        return Ok(empty);
+    };
+    let live = view
+        .outstanding(receiver.start)
+        .iter()
+        .any(|b| b.origin == binding.origin);
+    let items: Vec<Value> = ranked
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let mut value = json!({
+                "label": item.label,
+                "kind": 2,
+                "detail": item.detail,
+                "sortText": format!("{}{i:04}", item.tier as u8),
+                "data": {"vesper": {"tier": item.tier.as_str(), "receiver": name,
+                    "receiver_type": binding.ty.to_string(),
+                    "receiver_live_linear": live, "scope": view.scope(),
+                    "capability_ceiling": ceiling}}
+            });
+            if let Some(badge) = &item.badge {
+                value["labelDetails"] = json!({"description": badge});
+            }
+            if matches!(
+                item.tier,
+                CompletionTier::BlockedByFrame | CompletionTier::ExceedsCeiling
+            ) {
+                value["tags"] = json!([1]);
+            }
+            value
+        })
+        .collect();
+    Ok(json!({"isIncomplete": false, "items": items}))
+}
+
+/// Consuming calls for a binding's type, rendered for hover text.
+fn consumers(view: &View, binding: &Binding) -> Vec<String> {
+    let ty = binding.ty.name();
+    let mut out = Vec::new();
+    for (name, f) in &view.world().functions {
+        if let Some(method) = name.strip_prefix(ty).and_then(|n| n.strip_prefix("::")) {
+            if f.params
+                .first()
+                .is_some_and(|p| p.name == "self" && p.pass == crate::ast::Pass::Sink)
+            {
+                out.push(format!("{}.{method}()", binding.name));
+            }
+        } else if !name.contains("::")
+            && f.params
+                .iter()
+                .any(|p| p.pass == crate::ast::Pass::Sink && p.ty.name() == ty)
+        {
+            out.push(format!("{name}(..)"));
+        }
+        if out.len() >= 8 {
+            break;
+        }
+    }
+    out
+}
+
+/// The live linear obligations at `offset`, as hover text.
+fn obligation_text_of(
+    view: &View,
+    index: &vesper_span::LineIndex,
+    offset: usize,
+) -> Option<String> {
+    let live = view.outstanding(offset);
+    if live.is_empty() {
+        return None;
+    }
+    let mut text = format!("outstanding linear obligations here ({}):", view.scope());
+    for binding in live {
+        let line = index
+            .position(binding.origin.start)
+            .map(|p| p.line + 1)
+            .unwrap_or(0);
+        let consumers = consumers(view, binding);
+        text.push_str(&format!(
+            "\n- {}: {} (introduced on line {line}){}",
+            binding.name,
+            binding.ty,
+            if consumers.is_empty() {
+                String::new()
+            } else {
+                format!("; discharge with {}", consumers.join(", "))
+            }
+        ));
+    }
+    Some(text)
+}
+
+/// Linear-binding inlay hints for the bindings inside `selection`.
+fn inlay_hints_of(
+    text: &str,
+    index: &vesper_span::LineIndex,
+    selection: Range,
+    view: impl FnOnce() -> Result<Arc<View>, ServerError>,
+) -> Result<Value, ServerError> {
+    let start = index
+        .offset(selection.start)
+        .map_err(|e| ServerError::params(e.to_string()))?;
+    // Editors commonly request hints through a range past the last line.
+    let end = index.offset(selection.end).unwrap_or(text.len());
+    let view = view()?;
+    let mut hints = Vec::new();
+    let poisoned: Vec<_> = view
+        .poisoned()
+        .into_iter()
+        .flat_map(|(_, bindings)| bindings.into_iter().map(|b| b.origin.clone()))
+        .collect();
+    for binding in view.linear_bindings() {
+        if binding.origin.start < start || binding.origin.end > end {
+            continue;
+        }
+        let label = if poisoned.contains(&binding.origin) {
+            "linear: poisoned by unfinished code".to_owned()
+        } else if let Some(span) = binding.first_consumption_after(binding.origin.end) {
+            let line = index.position(span.start).map(|p| p.line + 1).unwrap_or(0);
+            format!("linear: consumed on line {line}")
+        } else {
+            "linear: outstanding".to_owned()
+        };
+        let at = index
+            .position(binding.origin.end)
+            .map_err(|_| ServerError::internal("binding span is invalid"))?;
+        hints.push(json!({"position":{"line":at.line,"character":at.character},
+            "label":label,"paddingLeft":true,
+            "data":{"vesper":{"binding":binding.name,"type":binding.ty.to_string(),
+                "scope":view.scope()}}}));
+        if hints.len() >= 512 {
+            break;
+        }
+    }
+    Ok(Value::Array(hints))
+}
+
+/// The Lens requests one document asks of a view, for the Vesper port's
+/// differential test.
+pub(crate) struct PortRequests<'a> {
+    pub completions: &'a [Position],
+    pub hovers: &'a [Position],
+    pub inlays: &'a [Range],
+    pub ceiling: Option<&'a std::collections::BTreeSet<String>>,
+}
+
+fn error_json(error: &ServerError) -> Value {
+    json!({"error":{"code":error.code,"message":error.message,"data":error.data}})
+}
+
+/// The Lens request answers on `text` (at `uri`, line index `limits`)
+/// against `view` (an unavailable view is its reason), `rounds` times (the
+/// last answers, or "" for no rounds): a `D` row with the poison notices
+/// and metadata, then a `C` row per completion, an `H` row per hover
+/// (the obligation text or null) and an `I` row per inlay-hint range.
+pub(crate) fn requests_dump(
+    uri: &str,
+    text: &str,
+    limits: vesper_span::Limits,
+    view: Result<Arc<View>, Unavailable>,
+    q: &PortRequests<'_>,
+    rounds: u64,
+) -> String {
+    use std::fmt::Write as _;
+    let index = match vesper_span::LineIndex::new(Arc::from(text), limits) {
+        Ok(index) => index,
+        Err(error) => return format!("E\t{error}\n"),
+    };
+    let view = view.map_err(|reason| lens_unavailable(uri, reason.as_str()));
+    let get = || match &view {
+        Ok(view) => Ok(Arc::clone(view)),
+        Err(error) => Err(ServerError {
+            code: error.code,
+            message: error.message.clone(),
+            data: error.data.clone(),
+        }),
+    };
+    let mut out = String::new();
+    for _ in 0..rounds {
+        out.clear();
+        let (diagnostics, metadata) = match &view {
+            Ok(view) => poison_of(uri, &index, view),
+            Err(error) => (Vec::new(), unavailable_metadata(error)),
+        };
+        let _ = writeln!(out, "D\t{}\t{metadata}", Value::Array(diagnostics));
+        for &at in q.completions {
+            let answer = completion_of(text, &index, at, q.ceiling, get);
+            let _ = writeln!(out, "C\t{}", answer.unwrap_or_else(|e| error_json(&e)));
+        }
+        for &at in q.hovers {
+            let answer = match (&view, index.offset(at)) {
+                (Ok(view), Ok(offset)) => obligation_text_of(view, &index, offset),
+                _ => None,
+            };
+            let _ = writeln!(out, "H\t{}", json!(answer));
+        }
+        for &selection in q.inlays {
+            let answer = inlay_hints_of(text, &index, selection, get);
+            let _ = writeln!(out, "I\t{}", answer.unwrap_or_else(|e| error_json(&e)));
+        }
+    }
+    out
 }

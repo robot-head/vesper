@@ -33,6 +33,10 @@ use self::certificate::{
 use self::lower::{
     lower_input
 };
+use self::mono::{
+    front_input,
+    mono_input
+};
 use self::container::{
     EM_AARCH64,
     EM_RISCV,
@@ -290,5 +294,18 @@ pub fn validate_text(in input: Str) -> ChunkSeq[u64] {
 // (lower.ves), or the lowering's error, as text.
 pub fn lowering_text(in input: Str) -> ChunkSeq[u64] {
     let out = lower_input(in input.as_bytes());
+    pack_text(in out)
+}
+
+// The monomorphized program of the harness input's entry (mono.ves): 0
+// and `put_program`'s words, or 1 and the error's packed text.
+pub fn mono_words(in input: Str) -> ChunkSeq[u64] {
+    mono_input(in input.as_bytes())
+}
+
+// Monomorphization and the lowering in one pass (mono.ves `front_input`),
+// as `lowering_text` prints it.
+pub fn front_text(in input: Str) -> ChunkSeq[u64] {
+    let out = front_input(in input.as_bytes());
     pack_text(in out)
 }

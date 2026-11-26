@@ -146,7 +146,7 @@ const U_ENUM: u8 = 2;
 const U_MATCH: u8 = 3;
 const U_INDEX: u8 = 4;
 const U_FUNCTION_VALUE: u8 = 5;
-const U_GENERIC: u8 = 6;
+pub const U_GENERIC: u8 = 6;
 const U_EFFECT: u8 = 7;
 const U_EXTERNAL_FUNCTION: u8 = 8;
 const U_STRUCTURAL_EQUALITY: u8 = 9;
@@ -190,7 +190,7 @@ fn construct_name(c: u8) -> Str {
 }
 
 // `impl Display for VerifiedError`.
-fn put_error(in names: Names, in e: VErr, inout out: ChunkSeq[u8]) {
+pub fn put_error(in names: Names, in e: VErr, inout out: ChunkSeq[u8]) {
     if e.kind == E_UNSUPPORTED {
         ap(inout out, "verified codegen: unsupported ");
         ap(inout out, construct_name(e.construct));
@@ -211,17 +211,17 @@ fn put_error(in names: Names, in e: VErr, inout out: ChunkSeq[u8]) {
     out.extend(in e.detail.as_slice());
 }
 
-fn ap(inout out: ChunkSeq[u8], in s: Str) {
+pub fn ap(inout out: ChunkSeq[u8], in s: Str) {
     out.extend(in s.as_bytes());
 }
 
-fn tx(in s: Str) -> ChunkSeq[u8] {
+pub fn tx(in s: Str) -> ChunkSeq[u8] {
     let mut out = ChunkSeq::new[u8]();
     out.extend(in s.as_bytes());
     out
 }
 
-fn apn(inout out: ChunkSeq[u8], v: u64) {
+pub fn apn(inout out: ChunkSeq[u8], v: u64) {
     push_decimal(inout out, v);
 }
 
@@ -273,7 +273,7 @@ fn ap_i128(inout out: ChunkSeq[u8], lo: u64, hi: u64) {
     }
 }
 
-fn err(kind: u8, sink d: ChunkSeq[u8]) -> VErr {
+pub fn err(kind: u8, sink d: ChunkSeq[u8]) -> VErr {
     VErr {
         kind: kind,
         construct: 0,
@@ -282,7 +282,7 @@ fn err(kind: u8, sink d: ChunkSeq[u8]) -> VErr {
     }
 }
 
-fn unsup(construct: u8, func: u32, sink d: ChunkSeq[u8]) -> VErr {
+pub fn unsup(construct: u8, func: u32, sink d: ChunkSeq[u8]) -> VErr {
     VErr {
         kind: E_UNSUPPORTED,
         construct: construct,
@@ -1520,7 +1520,7 @@ fn result_base(p: Planned) -> u64 {
     }
 }
 
-fn not_ported(in s: Str) -> VErr {
+pub fn not_ported(in s: Str) -> VErr {
     err(E_NOT_PORTED, tx(s))
 }
 
@@ -3722,6 +3722,13 @@ pub fn lower_input(in b: Slice[u8]) -> ChunkSeq[u8] {
     };
     let c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
+    lower_program(c, p, inout r, in b)
+}
+
+// The lowering of a program already read (or made by monomorphization),
+// with the lowering's extra section at `r`.
+pub fn lower_program(sink c: Ctx, sink p: Program, inout r: Reader, in b: Slice[u8])
+    -> ChunkSeq[u8] {
     let mut lw = decode(c, p, inout r, in b);
     let mut out = ChunkSeq::new[u8]();
     let e = handle Fail[VErr] in {

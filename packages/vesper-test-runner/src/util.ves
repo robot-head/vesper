@@ -249,19 +249,30 @@ impl Reader {
 pub fn put_text(inout out: ChunkSeq[u64], in b: Slice[u8], s: u64, e: u64) {
     let n = sub(e, s);
     out.push(n);
-    let mut x: u64 = 0;
-    let mut k: u64 = 0;
-    for i in 0..n {
-        let c = widen_u64(byte(in b, add(s, i)));
-        x = x | wrapping_shl_u64(c, wrapping_u32(wrapping_mul(k, 8)));
-        k = inc(k);
-        if k == 8 {
-            out.push(x);
-            x = 0;
-            k = 0;
+    // Whole words straight from `b`, then the tail byte by byte.
+    let mut p = s;
+    loop {
+        if add(p, 8) > e {
+            break;
         }
+        match b.try_read_u64_le(p) {
+            Option::Some(x) => out.push(x),
+            Option::None => out.push(0),
+        }
+        p = add(p, 8);
     }
-    if k != 0 {
+    if p < e {
+        let mut x: u64 = 0;
+        let mut k: u64 = 0;
+        loop {
+            if p >= e {
+                break;
+            }
+            let c = widen_u64(byte(in b, p));
+            x = x | wrapping_shl_u64(c, wrapping_u32(wrapping_mul(k, 8)));
+            k = inc(k);
+            p = inc(p);
+        }
         out.push(x);
     }
 }

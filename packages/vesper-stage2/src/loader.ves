@@ -192,11 +192,14 @@ struct DepSpec {
 struct Manifest {
     name: ChunkSeq[u8],
     deps: ChunkSeq[DepSpec],
+    // `[package] vsys`: the `.vsys` files the package names (§16.3).
+    vsys: ChunkSeq[ChunkSeq[u8]],
 }
 
 fn parse_manifest(in text: Slice[u8]) -> Manifest {
     let mut pkg_name = ChunkSeq::new[u8]();
     let mut deps = ChunkSeq::new[DepSpec]();
+    let mut vsys = ChunkSeq::new[ChunkSeq[u8]]();
     let mut sec: u8 = 0;
     let mut pos: u64 = 0;
     loop {
@@ -229,6 +232,19 @@ fn parse_manifest(in text: Slice[u8]) -> Manifest {
                     if ok {
                         pkg_name.clear();
                         pkg_name.extend(in text[a..z]);
+                    }
+                } else if eq_bytes(in text[ka..kz], in "vsys".as_bytes()) {
+                    // A one-line list of quoted paths.
+                    let mut q = wrapping_add(eq, 1);
+                    loop {
+                        let (a, z, ok) = parse_quoted(in text, q, lz);
+                        if !ok {
+                            break;
+                        }
+                        let mut v = ChunkSeq::new[u8]();
+                        v.extend(in text[a..z]);
+                        vsys.push(sink v);
+                        q = wrapping_add(z, 1);
                     }
                 }
             }
@@ -283,7 +299,8 @@ fn parse_manifest(in text: Slice[u8]) -> Manifest {
     }
     Manifest {
         name: pkg_name,
-        deps: deps
+        deps: deps,
+        vsys: vsys
     }
 }
 
@@ -387,6 +404,95 @@ struct PkgNode {
     dir: ChunkSeq[u8],
     dep_names: ChunkSeq[ChunkSeq[u8]],
     dep_indices: ChunkSeq[u64],
+    // The type names the package's `.vsys` libraries declare.
+    vsys_types: ChunkSeq[ChunkSeq[u8]],
+}
+
+// `path` with `@TARGET@`, `@OS@` and `@ARCH@` replaced for wasm32-wasip2,
+// the one target Stage 2 builds for (Rust `expand_vsys_path`).
+fn expand_vsys_path_wasip2(in path: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= path.len() {
+            break;
+        }
+        let rest = path[i..path.len()];
+        if starts_with(in rest, in "@TARGET@".as_bytes()) {
+            out.extend(in "wasm32-wasip2".as_bytes());
+            i = wrapping_add(i, 8);
+        } else if starts_with(in rest, in "@OS@".as_bytes()) {
+            out.extend(in "wasip2".as_bytes());
+            i = wrapping_add(i, 4);
+        } else if starts_with(in rest, in "@ARCH@".as_bytes()) {
+            out.extend(in "wasm32".as_bytes());
+            i = wrapping_add(i, 6);
+        } else {
+            out.push(byte_at(in path, i));
+            i = wrapping_add(i, 1);
+        }
+    }
+    out
+}
+
+fn starts_with(in s: Slice[u8], in p: Slice[u8]) -> bool {
+    if s.len() < p.len() {
+        return false;
+    }
+    eq_bytes(in s[0..p.len()], in p)
+}
+
+// The type names a `.vsys` library declares: its `extern type`s, `wire
+// struct`s and `enum`s (Rust `PackageVsys::type_names`). A word scan that
+// skips `//` comments and string literals.
+fn scan_vsys_types(in src: Slice[u8], inout out: ChunkSeq[ChunkSeq[u8]]) {
+    let n = src.len();
+    let mut i: u64 = 0;
+    // 0: none, 1: saw `extern`, 2: saw `wire`, 3: next word is a name.
+    let mut st: u8 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let b = byte_at(in src, i);
+        if b == 47 && byte_at(in src, wrapping_add(i, 1)) == 47 {
+            i = find_byte(in src, i, n, 10);
+            continue;
+        }
+        if b == 34 {
+            i = wrapping_add(find_byte(in src, wrapping_add(i, 1), n, 34), 1);
+            st = 0;
+            continue;
+        }
+        if !is_ident_byte(b) {
+            i = wrapping_add(i, 1);
+            continue;
+        }
+        let a = i;
+        loop {
+            if i >= n || !is_ident_byte(byte_at(in src, i)) {
+                break;
+            }
+            i = wrapping_add(i, 1);
+        }
+        let word = src[a..i];
+        if st == 3 {
+            push_unique_name(inout out, in word);
+            st = 0;
+        } else if eq_bytes(in word, in "extern".as_bytes()) {
+            st = 1;
+        } else if eq_bytes(in word, in "wire".as_bytes()) {
+            st = 2;
+        } else if st == 1 && eq_bytes(in word, in "type".as_bytes()) {
+            st = 3;
+        } else if st == 2 && eq_bytes(in word, in "struct".as_bytes()) {
+            st = 3;
+        } else if eq_bytes(in word, in "enum".as_bytes()) {
+            st = 3;
+        } else {
+            st = 0;
+        }
+    }
 }
 
 struct FileEntry {
@@ -432,6 +538,20 @@ fn load_pkg_graph(in root_dir: Slice[u8], inout pkgs: ChunkSeq[PkgNode])
         },
     };
     let manifest = parse_manifest(in mbytes.as_slice());
+    let mut vsys_types = ChunkSeq::new[ChunkSeq[u8]]();
+    for vi in 0..manifest.vsys.len() {
+        match manifest.vsys.try_get(vi) {
+            Option::Some(v) => {
+                let rel = expand_vsys_path_wasip2(in v.as_slice());
+                let vpath = join_path(in norm.as_slice(), in rel.as_slice());
+                match try_read_file(in vpath.as_slice()) {
+                    Option::Some(t) => scan_vsys_types(in t.as_slice(), inout vsys_types),
+                    Option::None => {},
+                }
+            },
+            Option::None => {},
+        }
+    }
     let mut name_copy = ChunkSeq::new[u8]();
     name_copy.extend(in manifest.name.as_slice());
     let mut dir_copy = ChunkSeq::new[u8]();
@@ -443,7 +563,8 @@ fn load_pkg_graph(in root_dir: Slice[u8], inout pkgs: ChunkSeq[PkgNode])
                 name: manifest.name,
                 dir: norm,
                 dep_names: ChunkSeq::new[ChunkSeq[u8]](),
-                dep_indices: ChunkSeq::new[u64]()
+                dep_indices: ChunkSeq::new[u64](),
+                vsys_types: ChunkSeq::new[ChunkSeq[u8]]()
             }
         );
     let mut dep_names = ChunkSeq::new[ChunkSeq[u8]]();
@@ -472,7 +593,8 @@ fn load_pkg_graph(in root_dir: Slice[u8], inout pkgs: ChunkSeq[PkgNode])
                 name: name_copy,
                 dir: dir_copy,
                 dep_names: dep_names,
-                dep_indices: dep_indices
+                dep_indices: dep_indices,
+                vsys_types: vsys_types
             }
         );
     Option::Some(idx)
@@ -1783,6 +1905,31 @@ pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] 
                 }
                 put_u64(inout out, m.file);
                 put_str(inout out, in m.text.as_slice());
+            },
+            Option::None => {},
+        }
+    }
+    // The foreign types every package's `.vsys` libraries declare.
+    let mut nforeign: u64 = 0;
+    for pi in 0..pkgs.len() {
+        match pkgs.try_get(pi) {
+            Option::Some(p) => nforeign = wrapping_add(nforeign, p.vsys_types.len()),
+            Option::None => {},
+        }
+    }
+    put_u64(inout out, nforeign);
+    for pi in 0..pkgs.len() {
+        match pkgs.try_get(pi) {
+            Option::Some(p) => {
+                for ti in 0..p.vsys_types.len() {
+                    match p.vsys_types.try_get(ti) {
+                        Option::Some(t) => {
+                            put_u64(inout out, pi);
+                            put_str(inout out, in t.as_slice());
+                        },
+                        Option::None => {},
+                    }
+                }
             },
             Option::None => {},
         }

@@ -1,6 +1,6 @@
 //! Correctly rounded math: every reference in `data/crmath_refs.txt`
-//! (mpmath at 400 and 700 bits, rounded exactly, see
-//! `data/gen_crmath_refs.py`) must match bit for bit, the C99 Annex F special
+//! (originally checked with mpmath at 400 and 700 bits, regenerated with
+//! `aspect crate kinetic gen-crmath-refs`) must match bit for bit, the C99 Annex F special
 //! values must hold, and a fixed input sweep must hash to the committed value
 //! on every CI architecture.
 

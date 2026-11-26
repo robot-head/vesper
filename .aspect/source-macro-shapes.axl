@@ -1,0 +1,233 @@
+"""Check parameter and tuple macro compilation, hygiene and unsaved previews."""
+
+load("./bounded-stdio.axl", "utf8")
+load("./lib/lsp-fixture.axl", "changed", "error", "file_uri", "opened", "request", "result")
+load("./lib/source-macro-fixtures.axl", "accepted_preview", "byte_index", "check_with", "digest", "equal", "execute", "explicit_run", "fixture", "forge", "identifier", "lsp", "parse_object", "preview", "read", "rejected_preview", "require", "source_range", "suite_with", "tokens", "write")
+
+_PARAMETERS = "source-macro-parameters"
+_TUPLES = "source-macro-tuples"
+_DISK = "fn main()->i64{99}\n"
+_PARAMETER_CASES = ["global_capture", "argument_capture", "reference_capture", "initializer", "repeated", "passes", "linear_consume", "self_parameter"]
+_TUPLE_CASES = [
+    "unit", "grouped", "singleton", "multiple", "nested", "unit_slot", "singleton_slot", "nested_slot",
+    "input_slot", "parameter", "argument_capture", "reference_capture", "global_capture", "initializer",
+    "element_scope", "evaluation_order", "punctuation", "repeated", "linear_consume", "arity_nine",
+]
+_COMPARE_FIELDS = ["source_blake3", "expanded_blake3", "expanded_source", "source_map", "audits", "invocations"]
+
+def _repeated(value, source, tuples):
+    expanded = value["expanded_source"]
+    comment = "/* tuple , ) λ 🦀 */" if tuples else "/* header λ 🦀 */"
+    require(comment in expanded, "Header or tuple comment was lost")
+    start = byte_index(source, "value:", source.index("fn forward") if tuples else 0)
+    header = [entry for entry in value["source_map"] if entry["original"] == {"start": start, "end": start + 5}]
+    require(len(header) == 1 and header[0]["kind"] == "source", "Original parameter header must have one source map entry")
+    name = source_range(header[0]["expanded"], expanded)
+    require(name != "value" and identifier(name), "Expected a hygienic parameter name")
+    start = byte_index(source, "twice!(value)") + len("twice!(")
+    entries = [entry for entry in value["source_map"] if entry["original"] == {"start": start, "end": start + 5}]
+    require(len(entries) == 2 and entries[0]["expanded"] != entries[1]["expanded"], "Copied input needs distinct expanded maps")
+    require(all([source_range(entry["expanded"], expanded) == name for entry in entries]), "Copied input must use the hygienic parameter")
+    if tuples:
+        left, right = [entry["expanded"] for entry in entries]
+        require(left["end"] <= right["start"] or right["end"] <= left["start"], "Expanded tuple argument maps overlap")
+
+def _happy(ctx, h, disk, uri, tuples):
+    prefix = "// current unsaved %s 😀\r\n" % ("tuples" if tuples else "parameters")
+    for name in _TUPLE_CASES if tuples else _PARAMETER_CASES:
+        source = prefix + fixture(ctx, h, name)
+        checked = forge(ctx, h, source)
+        explicit_run(ctx, h, checked["expanded_source"])
+        replies = lsp(ctx, h, [
+            opened(uri, 1, source), preview(2, uri, 1),
+            changed(uri, 2, source), preview(3, uri, 2),
+            request(4, "textDocument/hover", {"textDocument": {"uri": uri}, "position": {"line": 1 if tuples else 2, "character": 3}}),
+        ], verify_capability = True)
+        value = result(replies, 2)
+        accepted_preview(value, uri, 1, source)
+        for field in _COMPARE_FIELDS:
+            equal(value[field], checked[field], "%s preview field %s" % (name, field))
+        current = result(replies, 3)
+        equal(current["version"], 2, "Current document version")
+        equal({key: item for key, item in current.items() if key != "version"},
+              {key: item for key, item in value.items() if key != "version"}, "Unchanged versioned preview")
+        error(replies, 4, -32003)
+        publications = [message["params"] for message in replies if message.get("method") == "textDocument/publishDiagnostics"]
+        require(len(publications) == 2 and all([item["vesper"]["status"] == "parse_error" and item["diagnostics"] for item in publications]), "Original source must retain ordinary editor diagnostics")
+        equal(read(ctx, disk), bytes(_DISK), "Preview must preserve disk source")
+        if name == "repeated":
+            _repeated(checked, source, tuples)
+
+def _compiler_rejection(ctx, h, source, code):
+    value = forge(ctx, h, source, success = False)
+    require(value["stage"] == "check" and any([diagnostic["code"] == code for diagnostic in value["diagnostics"]]), "Expected compiler diagnostic " + code)
+
+def _format(ctx, h, name, original, comment = ""):
+    path = write(ctx, h, name + ".ves", original)
+    report = parse_object(execute(ctx, h, ["fmt", path, "--json"]))
+    equal(report["changed"], True, "Formatter must change disposable source")
+    formatted = utf8(read(ctx, path))
+    equal(tokens(formatted), tokens(original), "Formatter must preserve lexical payloads")
+    if comment:
+        require(comment in formatted and "value:" in formatted, "Formatter must preserve comment and original parameter name")
+    stable = parse_object(execute(ctx, h, ["fmt", path, "--check", "--json"]))
+    equal(stable["changed"], False, "Format check must report stable source")
+    equal(read(ctx, path), bytes(formatted), "Format check must preserve source")
+    explicit_run(ctx, h, forge(ctx, h, formatted)["expanded_source"])
+
+def _parameter_cases(ctx, h, uri):
+    for name, code in [("linear_duplicate", "E0303"), ("linear_leak", "E0302")]:
+        _compiler_rejection(ctx, h, fixture(ctx, h, name), code)
+    duplicate = forge(ctx, h, fixture(ctx, h, "duplicate_names"), success = False)
+    require(duplicate["stage"] == "parse" and "duplicate" in duplicate["message"], "Duplicate parameters must fail parsing")
+    for source in [
+        fixture(ctx, h, "projected"),
+        "macro keep($x:expr)->expr{quote{$x}} fn forward[T:mod copy](in n:T)->T{keep!(n)}",
+        "macro keep($x:expr)->expr{quote{$x}} fn forward(in n:i64)->i64{keep!(n)",
+    ]:
+        forge(ctx, h, source, success = False)
+    parameters = ",".join(["in p%d:i64" % index for index in range(9)])
+    value = forge(ctx, h, "macro keep($x:expr)->expr{quote{$x}} fn forward(" + parameters + ")->i64{keep!(p0)}", success = False)
+    equal(value["stage"], "resource", "Parameter limit")
+    pure = fixture(ctx, h, "helper_pure")
+    fallible = pure.replace("wrapping_add(value, 1)", "value + 1")
+    require(pure != fallible, "Expected a fallible helper fixture")
+    forge(ctx, h, pure)
+    equal(forge(ctx, h, fallible, success = False)["stage"], "authority", "Fallible helper authority")
+    replies = lsp(ctx, h, [
+        opened(uri, 10, pure), preview(2, uri, 10),
+        changed(uri, 11, fallible), preview(3, uri, 11), preview(4, uri, 10),
+        changed(uri, 12, fixture(ctx, h, "linear_duplicate")), preview(5, uri, 12),
+        request(6, "textDocument/hover", {"textDocument": {"uri": uri}, "position": {"line": 3, "character": 3}}),
+    ], verify_capability = True)
+    accepted_preview(result(replies, 2), uri, 10, pure)
+    rejected_preview(result(replies, 3), uri, 11, "authority")
+    rejected_preview(result(replies, 5), uri, 12, "check")
+    error(replies, 4, -32801)
+    error(replies, 6, -32003)
+    original = fixture(ctx, h, "repeated").replace("fn forward", "fn   forward").replace(" -> ", "->")
+    _format(ctx, h, "format", original, "/* header λ 🦀 */")
+
+def _tuple_rejections(ctx, h):
+    for name, code in [("linear_duplicate", "E0303"), ("linear_leak", "E0302"), ("field_mismatch", "E0200")]:
+        _compiler_rejection(ctx, h, fixture(ctx, h, name), code)
+    for expression, result_type in [("(42,)", "i64"), ("(42)", "(i64,)")]:
+        source = "macro make()->expr{quote{" + expression + "}} fn forward()->" + result_type + "{make!()} fn main()->i64{42}"
+        _compiler_rejection(ctx, h, source, "E0200")
+    for body in ["(,)", "(1,,2)", "(1 2)", "(1,2]", "((1,),,)"]:
+        forge(ctx, h, "macro make()->expr{quote{" + body + "}} fn main(){make!()}", success = False)
+    for source in [
+        "macro keep($x:expr)->expr{quote{$x}} fn main(){keep!((42,),)}",
+        "fn score(in n:(i64,))->i64{let(x,)=n;x} macro make()->expr{quote{(42,)}} fn main()->i64{score(make!(),)}",
+    ]:
+        forge(ctx, h, source, success = False)
+    nested = "(" * 160 + "42" + ",)" * 160
+    failure = forge(ctx, h, "macro make()->expr{quote{" + nested + "}} fn main(){make!()}", success = False)
+    equal(failure["stage"], "resource", "Tuple nesting limit")
+    values = ",".join(["0"] * 7000)
+    forge(ctx, h, "macro make()->expr{quote{(" + values + ")}} fn main(){make!()}", success = False)
+
+def _tuple_cases(ctx, h, uri):
+    _tuple_rejections(ctx, h)
+    pure, caller = fixture(ctx, h, "generated_pure"), fixture(ctx, h, "caller_effect")
+    forge(ctx, h, pure)
+    for old, new in [("wrapping_add(left, 1)", "left + 1"), ("wrapping_add(right, 1)", "right + 1")]:
+        candidate = pure.replace(old, new)
+        require(candidate != pure, "Expected a fallible tuple fixture")
+        equal(forge(ctx, h, candidate, success = False)["stage"], "authority", "Generated tuple effect authority")
+    caller_report = forge(ctx, h, caller)
+    explicit_run(ctx, h, caller_report["expanded_source"], refusal = True)
+    fallible = pure.replace("wrapping_add(right, 1)", "right + 1")
+    large = "macro make()->expr{quote{(" + ",".join(["0"] * 600) + ")}} fn main(){make!()}"
+    replies = lsp(ctx, h, [
+        opened(uri, 10, pure), preview(2, uri, 10),
+        changed(uri, 11, fallible), preview(3, uri, 11),
+        changed(uri, 12, caller), preview(4, uri, 12), preview(5, uri, 11),
+        changed(uri, 13, fixture(ctx, h, "linear_duplicate")), preview(6, uri, 13),
+        changed(uri, 14, large), preview(7, uri, 14),
+    ], verify_capability = True)
+    accepted_preview(result(replies, 2), uri, 10, pure)
+    rejected_preview(result(replies, 3), uri, 11, "authority")
+    accepted_preview(result(replies, 4), uri, 12, caller)
+    error(replies, 5, -32801)
+    rejected_preview(result(replies, 6), uri, 13, "check")
+    refused = result(replies, 7)
+    require(refused["status"] == "rejected" and refused["stage"] in ["lower", "resource"], "Expected tuple preview resource refusal")
+    require(refused["source_map"] == [] and refused["audits"] == [] and "expanded_blake3" not in refused, "Rejected preview retained accepted evidence")
+
+    # These examples stay within the formatter's separate macro syntax budget.
+    for name, source in {
+        "repeated": "macro twice($value:expr)->expr{quote{($value, /* , ) λ 🦀 */ $value)}} fn   main(/* header , ) */)->i64{let value=twice!(21);42}",
+        "punctuation": 'macro make()->expr{quote{("comma, ) 🦀", /* tuple , ) λ */)}} fn   main()->i64{let value=make!();42}',
+        "nested": "macro make()->expr{quote{((),(20,),(10,12))}} fn   main()->i64{let value=make!();42}",
+    }.items():
+        _format(ctx, h, "format-" + name, source)
+
+def _cases(ctx, h):
+    disk = write(ctx, h, "existing.ves", _DISK)
+    uri = file_uri(disk)
+    tuples = h.name == _TUPLES
+    _happy(ctx, h, disk, uri, tuples)
+    if tuples:
+        _tuple_cases(ctx, h, uri)
+    else:
+        _parameter_cases(ctx, h, uri)
+    receipt = {
+        "stdio_sessions": h.counts["sessions"],
+        "jsonrpc_requests": h.counts["requests"],
+        "explicit_expanded_source_runs": h.counts["runs"],
+        "scope": "actual pure Expr tuple compiler; original editor semantics unchanged" if tuples else "actual parameter-aware pure Tier1 compiler; original editor semantics unchanged",
+    }
+    if tuples:
+        receipt["unhandled_entry_refusals"] = h.counts["refusals"]
+    return receipt
+
+check_source_macro_parameters = task(
+    kind = "check-source-macro-parameters",
+    group = ["acceptance"],
+    summary = "Check parameter-aware macros with a supplied compiler",
+    implementation = lambda ctx: check_with(ctx, _PARAMETERS, _cases),
+    args = {"tool_args": args.trailing_var_args(description = "Pass -- --binary <vesper> [--work <directory>].")},
+)
+
+check_source_macro_tuples = task(
+    kind = "check-source-macro-tuples",
+    group = ["acceptance"],
+    summary = "Check tuple-aware macros with a supplied compiler",
+    implementation = lambda ctx: check_with(ctx, _TUPLES, _cases),
+    args = {"tool_args": args.trailing_var_args(description = "Pass -- --binary <vesper> [--work <directory>].")},
+)
+
+test_source_macro_parameters = task(
+    kind = "test-source-macro-parameters",
+    group = ["acceptance"],
+    summary = "Exercise compiler and editor hygiene for macro parameters",
+    implementation = lambda ctx: suite_with(ctx, _PARAMETERS, "VESPER_SOURCE_MACRO_PARAMETERS_BINARY", _cases),
+)
+
+test_source_macro_tuples = task(
+    kind = "test-source-macro-tuples",
+    group = ["acceptance"],
+    summary = "Exercise compiler and editor hygiene for macro tuples",
+    implementation = lambda ctx: suite_with(ctx, _TUPLES, "VESPER_SOURCE_MACRO_TUPLES_BINARY", _cases),
+)
+
+def _test(ctx):
+    text = '   fn α_2 ("a\\\"b", /* , ) λ 🦀 */ 12) // end\r\n_23'
+    equal(tokens(text), ["fn", "α", "_2", "(", '"a\\\"b"', ",", "/* , ) λ 🦀 */", "12", ")", "// end", "_23"], "Independent lexical inventory")
+    equal(byte_index("🦀λ[n]", "n"), 7, "UTF-8 fixture offset")
+    equal(source_range({"start": 4, "end": 6}, "🦀λ[n]"), "λ", "Mapped UTF-8 payload")
+    equal(source_range({"start": 6, "end": 6}, "🦀λ[n]"), "", "Empty map range")
+    require(identifier("_value42") and not identifier("42value") and not identifier("value-dash"), "Hygienic name shape")
+    require(digest("f" * 64) and not digest("F" * 64) and not digest("f" * 63), "Source digest shape")
+    equal(preview(2, "untitled:fixture")["params"], {"textDocument": {"uri": "untitled:fixture"}}, "Unversioned preview")
+    equal(preview(2, "untitled:fixture", 0)["params"], {"textDocument": {"uri": "untitled:fixture", "version": 0}}, "Explicit zero version")
+    ctx.std.io.stdout.write("Passed source macro fixture lexer, map, digest and version cases\n")
+    return 0
+
+test_source_macro_fixtures = task(
+    kind = "source-macro-fixtures",
+    group = ["ci", "tests"],
+    summary = "Test source macro fixture lexical and mapping checks",
+    implementation = _test,
+)

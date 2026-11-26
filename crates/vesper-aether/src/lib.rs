@@ -87,6 +87,13 @@ pub mod page_source;
 mod port_abba;
 #[cfg(test)]
 mod port_reference_tests;
+/// The spec-written test driver of `tests/common`, for the in-crate
+/// device differentials.
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod test_driver;
+#[cfg(test)]
+extern crate self as vesper_aether;
 pub mod pvh;
 pub mod seccomp;
 pub mod slot_plan;

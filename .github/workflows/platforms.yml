@@ -69,7 +69,7 @@ jobs:
   plan:
     name: Plan platform coverage
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     outputs:
       sha: ${{ steps.plan.outputs.sha || steps.legacy_plan.outputs.sha }}
       profile: ${{ steps.plan.outputs.profile || steps.legacy_plan.outputs.profile }}
@@ -77,7 +77,7 @@ jobs:
       ports: ${{ steps.ports.outputs.crates || steps.legacy_ports.outputs.crates }}
       shards: ${{ steps.shards.outputs.shards || steps.historical_shards.outputs.shards }}
       # `none` for a dispatched pull request that changes only documentation.
-      native: ${{ steps.plan.outputs.native }}
+      native: ${{ steps.plan.outputs.native || steps.legacy_plan.outputs.native }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -85,9 +85,15 @@ jobs:
           fetch-depth: 0
       - if: ${{ hashFiles('.aspect/version.axl') != '' }}
         uses: ./.github/actions/aspect
-      - uses: actions/setup-python@v5
+      - name: Check out Aspect tasks for a historical revision
+        if: ${{ hashFiles('.aspect/platform-plan.axl') == '' || hashFiles('.aspect/port-harness-selection.axl') == '' || hashFiles('.aspect/workflow-policy-test.axl') == '' }}
+        uses: actions/checkout@v4
         with:
-          python-version: '3.13'
+          ref: ${{ github.workflow_sha }}
+          path: .platform-legacy-tools
+          persist-credentials: false
+      - if: ${{ hashFiles('.aspect/platform-plan.axl') == '' || hashFiles('.aspect/port-harness-selection.axl') == '' || hashFiles('.aspect/workflow-policy-test.axl') == '' }}
+        uses: ./.platform-legacy-tools/.github/actions/aspect
       - name: Verify the dispatched pull request commit
         # The checks report on the commit the run was dispatched on, so it
         # must be the PR head that went green: the checkout is that head or
@@ -98,22 +104,28 @@ jobs:
         run: aspect ci verify-platform-dispatch
       - name: Verify a historical checkout's dispatched commit
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.pull_request != '' && hashFiles('.aspect/platform-plan.axl') == '' }}
+        working-directory: .platform-legacy-tools
         env:
+          PLATFORM_WORKSPACE: ${{ github.workspace }}
           PR_HEAD: ${{ github.sha }}
-        run: |
-          checked=$(git rev-parse HEAD)
-          test "$checked" = "$PR_HEAD" || test "$(git rev-parse HEAD^2 2>/dev/null)" = "$PR_HEAD"
-      - name: Install workflow test dependency
-        run: python -m pip install PyYAML==6.0.2
-      - name: Check the Aspect command runner
-        if: ${{ hashFiles('.aspect/version.axl') != '' }}
-        run: aspect ci tests aspect-unit
+        run: aspect ci verify-platform-dispatch
+      - if: ${{ hashFiles('.aspect/fixtures/tool-launcher.rs') != '' || hashFiles('.aspect/workflow-policy-test.axl') == '' }}
+        uses: dtolnay/rust-toolchain@stable
+      # The GPT-2 reference fixtures (.aspect/lib/gpt2-reference.axl)
+      # pretokenize with ripgrep's PCRE2 engine; the runner image has no rg.
+      - name: Refresh the package index for ripgrep
+        if: ${{ hashFiles('.aspect/lib/gpt2-reference.axl') != '' }}
+        run: sudo apt-get update --quiet
+      - name: Install ripgrep for the GPT-2 reference fixtures
+        if: ${{ hashFiles('.aspect/lib/gpt2-reference.axl') != '' }}
+        run: sudo apt-get install --yes --quiet --no-install-recommends ripgrep
       - name: Check CI policy and workflow regressions
-        if: ${{ hashFiles('.aspect/version.axl') != '' }}
+        if: ${{ hashFiles('.aspect/workflow-policy-test.axl') != '' }}
         run: aspect ci platform-tests
       - name: Check CI policy and workflow regressions for a historical checkout
-        if: ${{ hashFiles('.aspect/version.axl') == '' }}
-        run: python -m unittest discover -s scripts/ci/tests -p 'test_platform*.py'
+        if: ${{ hashFiles('.aspect/workflow-policy-test.axl') == '' }}
+        working-directory: .platform-legacy-tools
+        run: aspect ci platform-tests
       - id: plan
         if: ${{ hashFiles('.aspect/platform-plan.axl') != '' }}
         env:
@@ -123,15 +135,13 @@ jobs:
         run: aspect ci plan-platform-workflow
       - id: legacy_plan
         if: ${{ hashFiles('.aspect/platform-plan.axl') == '' }}
+        working-directory: .platform-legacy-tools
         env:
+          PLATFORM_WORKSPACE: ${{ github.workspace }}
           REQUESTED_PROFILE: ${{ inputs.profile || (github.event_name == 'schedule' && 'full') || 'pr' }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
-        run: |
-          plan=(python scripts/ci/platform_test_plan.py)
-          if [ -f .aspect/version.axl ]; then plan=(aspect ci platform-test-plan --); fi
-          "${plan[@]}" --profile "$REQUESTED_PROFILE" \
-            --base "$BASE_SHA" --head "$(git rev-parse HEAD)" \
-            --github-output "$GITHUB_OUTPUT" --output "$RUNNER_TEMP/platform-plan.json"
+          PULL_REQUEST: ${{ inputs.pull_request }}
+        run: aspect ci plan-platform-workflow
       - id: ports
         name: Choose the ports to test
         if: ${{ hashFiles('.aspect/port-harness-selection.axl') != '' }}
@@ -144,23 +154,14 @@ jobs:
       - id: legacy_ports
         name: Choose the ports for a historical checkout
         if: ${{ hashFiles('.aspect/port-harness-selection.axl') == '' }}
+        working-directory: .platform-legacy-tools
         env:
+          PLATFORM_WORKSPACE: ${{ github.workspace }}
           REQUESTED_PROFILE: ${{ inputs.profile || (github.event_name == 'schedule' && 'full') || 'pr' }}
           EVENT: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PULL_REQUEST: ${{ inputs.pull_request }}
-        run: |
-          if [ -n "$PULL_REQUEST" ]; then
-            # Pull requests leave the port shards to main and nightly (#1479).
-            echo "crates=none" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          select_ports=(python scripts/ci/port_harness_selection.py)
-          if [ -f .aspect/version.axl ]; then select_ports=(aspect ci port-harness-selection --); fi
-          crates=$("${select_ports[@]}" --profile "$REQUESTED_PROFILE" \
-            --event "$EVENT" --base "$BASE_SHA" --head "$(git rev-parse HEAD)")
-          echo "ports to test: $crates"
-          echo "crates=$crates" >> "$GITHUB_OUTPUT"
+        run: aspect ci choose-platform-ports
       - id: shards
         if: ${{ (steps.ports.outputs.crates || steps.legacy_ports.outputs.crates) != 'none' && hashFiles('.aspect/port-shards.axl') != '' }}
         run: aspect ci port-shard-matrix
@@ -174,6 +175,7 @@ jobs:
           sparse-checkout: |
             .aspect
             .github/actions/aspect
+            scripts/port-harness-plan.json
       - if: ${{ (steps.ports.outputs.crates || steps.legacy_ports.outputs.crates) != 'none' && hashFiles('.aspect/port-shards.axl') == '' }}
         uses: ./.platform-shard-tools/.github/actions/aspect
       - id: historical_shards
@@ -204,10 +206,9 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Require successful profile planning
-        env:
-          PLAN_RESULT: ${{ needs.plan.result }}
-        run: test "$PLAN_RESULT" = success
+      - name: Fail when profile planning failed
+        if: needs.plan.result != 'success'
+        run: exit 1
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
         with:
@@ -219,11 +220,26 @@ jobs:
         env:
           EXPECTED_SHA: ${{ needs.plan.outputs.sha }}
         run: aspect ci verify-platform-checkout
+      - if: ${{ hashFiles('.aspect/platform-plan.axl') == '' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .platform-verify-tools
+          persist-credentials: false
+          sparse-checkout: |
+            .aspect
+            .github/actions/aspect
+            scripts/native-example-cases.txt
+            scripts/port-abi-plan.json
+      - if: ${{ hashFiles('.aspect/platform-plan.axl') == '' }}
+        uses: ./.platform-verify-tools/.github/actions/aspect
       - name: Verify exact historical checkout
         if: ${{ hashFiles('.aspect/platform-plan.axl') == '' }}
+        working-directory: .platform-verify-tools
         env:
+          PLATFORM_WORKSPACE: ${{ github.workspace }}
           EXPECTED_SHA: ${{ needs.plan.outputs.sha }}
-        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+        run: aspect ci verify-platform-checkout
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Test macOS fiber and kqueue implementations
@@ -244,9 +260,11 @@ jobs:
         run: aspect ci test-native-executables
       - name: Validate native Mach-O executables in a historical checkout
         if: ${{ hashFiles('.aspect/version.axl') == '' }}
+        working-directory: .platform-verify-tools
         env:
+          PLATFORM_WORKSPACE: ${{ github.workspace }}
           VESPER_NATIVE_BINARY: target/port-compiler/vesper
-        run: scripts/ci/test-native-executables.sh
+        run: aspect ci test-native-executables
       - name: Test the Vesper Pulse port on kqueue
         # The kqueue poller and completion driver in @vesper/pulse's macOS
         # copy against vesper_pulse (Linux runs the epoll copy).
@@ -279,10 +297,12 @@ jobs:
         run: aspect ci test-port-abi
       - name: Test the Vesper port export ABI in a historical checkout
         if: ${{ hashFiles('.aspect/version.axl') == '' }}
+        working-directory: .platform-verify-tools
         env:
+          PLATFORM_WORKSPACE: ${{ github.workspace }}
           VESPER_PORT_COMPILER: ${{ github.workspace }}/target/port-compiler/vesper
           VESPER_PORT_HARNESS_SCOPE: abi
-        run: scripts/test-port-harness.sh
+        run: aspect ci test-port-abi
 
   windows:
     needs: plan
@@ -295,12 +315,11 @@ jobs:
     timeout-minutes: 120
     defaults:
       run:
-        shell: bash
+        shell: pwsh
     steps:
-      - name: Require successful profile planning
-        env:
-          PLAN_RESULT: ${{ needs.plan.result }}
-        run: test "$PLAN_RESULT" = success
+      - name: Fail when profile planning failed
+        if: needs.plan.result != 'success'
+        run: exit 1
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
         with:
@@ -311,11 +330,24 @@ jobs:
         env:
           EXPECTED_SHA: ${{ needs.plan.outputs.sha }}
         run: ./scripts/windows/verify-platform-checkout.ps1
+      - if: ${{ hashFiles('scripts/windows/verify-platform-checkout.ps1') == '' || hashFiles('scripts/windows/test-native-executables.ps1') == '' || hashFiles('scripts/windows/test-port-abi.ps1') == '' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .platform-verify-tools
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /scripts/windows/
+            /scripts/native-example-cases.txt
+            /scripts/port-abi-plan.json
       - name: Verify exact historical checkout
         if: ${{ hashFiles('scripts/windows/verify-platform-checkout.ps1') == '' }}
+        shell: pwsh
         env:
+          PLATFORM_WORKSPACE: ${{ github.workspace }}
           EXPECTED_SHA: ${{ needs.plan.outputs.sha }}
-        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+        run: ./.platform-verify-tools/scripts/windows/verify-platform-checkout.ps1
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Test Windows fiber and IOCP implementations
@@ -338,10 +370,12 @@ jobs:
         run: ./scripts/windows/test-native-executables.ps1
       - name: Validate native COFF executables in a historical checkout
         if: ${{ hashFiles('scripts/windows/test-native-executables.ps1') == '' }}
+        shell: pwsh
         env:
+          PLATFORM_WORKSPACE: ${{ github.workspace }}
           VESPER_NATIVE_BINARY: target/port-compiler/vesper.exe
           VESPER_NATIVE_SUFFIX: .exe
-        run: bash scripts/ci/test-native-executables.sh
+        run: ./.platform-verify-tools/scripts/windows/test-native-executables.ps1
       - name: Test the Cranelift C-ABI shim
         # Self-hosting SH0 lane 4 (#1126): Vesper drives Cranelift through
         # crates/vesper-cranelift-sys, links the object it builds and runs it.
@@ -371,10 +405,12 @@ jobs:
         run: ./scripts/windows/test-port-abi.ps1
       - name: Test the Vesper port export ABI in a historical checkout
         if: ${{ hashFiles('scripts/windows/test-port-abi.ps1') == '' }}
+        shell: pwsh
         env:
+          PLATFORM_WORKSPACE: ${{ github.workspace }}
           VESPER_PORT_COMPILER: ${{ github.workspace }}/target/port-compiler/vesper.exe
           VESPER_PORT_HARNESS_SCOPE: abi
-        run: bash scripts/test-port-harness.sh
+        run: ./.platform-verify-tools/scripts/windows/test-port-abi.ps1
 
   # The codegen swap point's macOS and Windows objects (#1275), compared
   # on Linux: an object for another target needs no machine of that kind,
@@ -429,10 +465,31 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.plan.outputs.sha }}
+      - if: ${{ hashFiles('.aspect/platform-plan.axl') != '' }}
+        uses: ./.github/actions/aspect
       - name: Verify exact checkout
+        if: ${{ hashFiles('.aspect/platform-plan.axl') != '' }}
         env:
           EXPECTED_SHA: ${{ needs.plan.outputs.sha }}
-        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+        run: aspect ci verify-platform-checkout
+      - if: ${{ hashFiles('.aspect/platform-plan.axl') == '' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .platform-verify-tools
+          persist-credentials: false
+          sparse-checkout: |
+            .aspect
+            .github/actions/aspect
+      - if: ${{ hashFiles('.aspect/platform-plan.axl') == '' }}
+        uses: ./.platform-verify-tools/.github/actions/aspect
+      - name: Verify exact historical checkout
+        if: ${{ hashFiles('.aspect/platform-plan.axl') == '' }}
+        working-directory: .platform-verify-tools
+        env:
+          PLATFORM_WORKSPACE: ${{ github.workspace }}
+          EXPECTED_SHA: ${{ needs.plan.outputs.sha }}
+        run: aspect ci verify-platform-checkout
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -463,17 +520,15 @@ jobs:
         shard: ${{ fromJSON(needs.plan.outputs.shards || '[1]') }}
     runs-on: ubuntu-latest
     # A backstop: each shard's tests and divergent builds take about
-    # 10-30 minutes (scripts/test-port-harness.sh).
+    # 10-30 minutes (scripts/port-harness-plan.json).
     timeout-minutes: 60
     steps:
-      - name: Require successful profile planning
-        env:
-          PLAN_RESULT: ${{ needs.plan.result }}
-        run: test "$PLAN_RESULT" = success
-      - name: Require the shared compiler
-        env:
-          COMPILER_RESULT: ${{ needs.ports-compiler.result }}
-        run: test "$COMPILER_RESULT" = success
+      - name: Fail when profile planning failed
+        if: needs.plan.result != 'success'
+        run: exit 1
+      - name: Fail when the shared compiler build failed
+        if: needs.ports-compiler.result != 'success'
+        run: exit 1
       - if: ${{ needs.plan.outputs.ports != 'none' }}
         uses: actions/checkout@v4
         with:
@@ -485,11 +540,26 @@ jobs:
         env:
           EXPECTED_SHA: ${{ needs.plan.outputs.sha }}
         run: aspect ci verify-platform-checkout
+      - if: ${{ needs.plan.outputs.ports != 'none' && hashFiles('.aspect/platform-plan.axl') == '' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .platform-verify-tools
+          persist-credentials: false
+          sparse-checkout: |
+            .aspect
+            .github/actions/aspect
+            scripts/port-abi-plan.json
+            scripts/port-harness-plan.json
+      - if: ${{ needs.plan.outputs.ports != 'none' && hashFiles('.aspect/platform-plan.axl') == '' }}
+        uses: ./.platform-verify-tools/.github/actions/aspect
       - name: Verify exact historical checkout
         if: ${{ needs.plan.outputs.ports != 'none' && hashFiles('.aspect/platform-plan.axl') == '' }}
+        working-directory: .platform-verify-tools
         env:
+          PLATFORM_WORKSPACE: ${{ github.workspace }}
           EXPECTED_SHA: ${{ needs.plan.outputs.sha }}
-        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+        run: aspect ci verify-platform-checkout
       - if: ${{ needs.plan.outputs.ports != 'none' }}
         uses: dtolnay/rust-toolchain@stable
       - if: ${{ needs.plan.outputs.ports != 'none' }}
@@ -516,11 +586,13 @@ jobs:
         run: aspect acceptance test-port-harness
       - name: Test the Vesper port harness in a historical checkout
         if: ${{ needs.plan.outputs.ports != 'none' && hashFiles('.aspect/version.axl') == '' }}
+        working-directory: .platform-verify-tools
         env:
+          PLATFORM_WORKSPACE: ${{ github.workspace }}
           VESPER_PORT_COMPILER: ${{ runner.temp }}/port-compiler/vesper
           VESPER_PORT_HARNESS_SHARD: ${{ matrix.shard }}
           VESPER_PORT_HARNESS_CRATES: ${{ needs.plan.outputs.ports }}
-        run: scripts/test-port-harness.sh
+        run: aspect acceptance test-port-harness
 
   complete:
     name: Platform validation complete
@@ -531,6 +603,14 @@ jobs:
       checked_sha: ${{ steps.ready.outputs.checked_sha }}
       validation_profile: ${{ steps.ready.outputs.validation_profile }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            .aspect
+            .github/actions/aspect
+      - uses: ./.github/actions/aspect
       - id: ready
         env:
           PLAN_RESULT: ${{ needs.plan.result }}
@@ -542,17 +622,4 @@ jobs:
           NATIVE: ${{ needs.plan.outputs.native }}
           CHECKED_SHA: ${{ needs.plan.outputs.sha }}
           PROFILE: ${{ needs.plan.outputs.profile }}
-        run: |
-          test "$PLAN_RESULT" = success
-          # A documentation-only pull request skips the native jobs.
-          if [ "$NATIVE" != none ]; then
-            test "$MAC_RESULT" = success
-            test "$WINDOWS_RESULT" = success
-            test "$SWAP_RESULT" = success
-          fi
-          # The shards are skipped only when no port is affected.
-          if [ "$PORTS_RESULT" != skipped ] || [ "$PORTS" != none ]; then
-            test "$PORTS_RESULT" = success
-          fi
-          echo "checked_sha=$CHECKED_SHA" >> "$GITHUB_OUTPUT"
-          echo "validation_profile=$PROFILE" >> "$GITHUB_OUTPUT"
+        run: aspect ci complete-platform-validation

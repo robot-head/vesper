@@ -35,6 +35,7 @@ members = [
     "crates/vesper-simpulse/seed",
     "crates/vesper-sim-session",
     "crates/vesper-simd",
+    "crates/vesper-simd/seed",
     "crates/vesper-semver",
     "crates/vesper-semver/seed",
     "crates/vesper-loom-solver",
@@ -154,6 +155,7 @@ default-members = [
     "crates/vesper-simpulse/seed",
     "crates/vesper-sim-session",
     "crates/vesper-simd",
+    "crates/vesper-simd/seed",
     "crates/vesper-semver",
     "crates/vesper-semver/seed",
     "crates/vesper-loom-solver",
@@ -373,7 +375,9 @@ vesper-nexus = { path = "crates/vesper-nexus" }
 # The tools moved out of the compiler by SH6 lane 3 (#1398) link these; the
 # CLI tests still call them to check results.
 vesper-serde = { path = "crates/vesper-serde/seed", package = "vesper-serde-seed" }
-vesper-simd = { path = "crates/vesper-simd" }
+# The seed: the port-backed package builds with a `vesper` built from this
+# package (#1969).
+vesper-simd = { path = "crates/vesper-simd/seed", package = "vesper-simd-seed" }
 vesper-highlight = { path = "crates/vesper-highlight/seed", package = "vesper-highlight-seed", features = ["shot"] }
 # HostCall drives the JIT-compiled front end v2 in tests/self_host_front_v2.rs (#1147).
 vesper-port-abi = { path = "crates/vesper-port-abi" }
