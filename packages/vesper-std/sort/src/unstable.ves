@@ -2,10 +2,7 @@
 //
 // Element reads use `try_get`, whose `None` arm no index here reaches, so
 // the functions are total and raise nothing.
-use @vesper-std/sugar::{
-    guard,
-    when
-};
+use @vesper-std/sugar::{guard, when};
 
 // Whether `a` sorts before `b`.
 pub fn lt[T: mod copy + Ord](a: T, b: T) -> bool {
@@ -269,14 +266,15 @@ test {
         b.extend(in original.as_bytes());
         insertion(inout a.as_slice_mut(), start, end);
         heapsort(inout b.as_slice_mut(), start, end);
-        same_bytes(in a.as_slice(), in expected) && same_bytes(in b.as_slice(), in expected)
-    }
-
-    fn test_insertion_skips_missing_indices() -> bool {
-        let mut items = ChunkSeq::new[u8]();
-        items.extend(in "cba".as_bytes());
-        insertion(inout items.as_slice_mut(), 0, 5);
-        same_bytes(in items.as_slice(), in "abc")
+        let ranges_match = same_bytes(in a.as_slice(), in expected)
+            && same_bytes(in b.as_slice(), in expected);
+        // Extending the whole range past the slice must skip missing reads.
+        if start == 0 && end == original.as_bytes().len() {
+            insertion(inout a.as_slice_mut(), start, wrapping_add(end, 2));
+            ranges_match && same_bytes(in a.as_slice(), in expected)
+        } else {
+            ranges_match
+        }
     }
 
     // @case distinct(0, 2, in "cba")
