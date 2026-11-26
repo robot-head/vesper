@@ -767,6 +767,7 @@ quarry_check = port_checks(
             ("ddl_atomic_deterministic_and_stale_revision_or_content_rejected", "sql", "ddl_atomic_deterministic_and_stale_revision_or_content_rejected", "real_where_aliases_literals_and_typed_bindings"),
             ("front_end_transcript_matches_golden", "planner_spec", "front_end_transcript_matches_golden", "golden_results_equal_filtered_index_lookups"),
             ("planner_chooses_the_golden_access_paths", "planner_spec", "planner_chooses_the_golden_access_paths", "golden_results_equal_filtered_index_lookups"),
+            ("vectorized_equals_row_executor_for_every_predicate_projection_and_batch", "vector", "vectorized_equals_row_executor_for_every_predicate_projection_and_batch", "simd_mask_count_matches_portable_count"),
         ]
     ],
 )

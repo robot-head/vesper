@@ -452,6 +452,34 @@ fn errno_kind(e: u32) -> u32 {
     }
 }
 
+// The path of the running executable (`std::env::current_exe`):
+// `GetModuleFileNameW` of the process's own module, in a buffer that grows
+// until the name fits.
+pub fn current_exe_bytes() -> ChunkSeq[u8] eff [Ffi[StdEnv], Fail[IoError]] {
+    let mut buf: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    buf.resize(260, 0);
+    loop {
+        let (n, err) = StdEnv::GetModuleFileNameW(0, inout buf.as_slice_mut());
+        if n == 0 {
+            return Fail::raise(
+                IoError {
+                    kind: errno_kind(err),
+                    os: err,
+                }
+            );
+        }
+        // The call is told the buffer holds `buf.len()` units (half what it
+        // does); a name of that length or more was cut short.
+        let nu = widen_u64(n);
+        if nu < buf.len() {
+            return utf16_u32_to_utf8(in buf.as_slice(), nu);
+        }
+        let cap = buf.len();
+        buf.resize(wrapping_mul(cap, 2), 0);
+    }
+    ChunkSeq::new[u8]()
+}
+
 pub fn current_dir_bytes() -> ChunkSeq[u8] eff [Ffi[StdEnv], Fail[IoError]] {
     let mut buf: ChunkSeq[u32] = ChunkSeq::new[u32]();
     buf.resize(260, 0);

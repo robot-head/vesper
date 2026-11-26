@@ -252,6 +252,34 @@ fn write_all_handle(h: u64, in data: Slice[u8]) -> u32 eff [Ffi[StdFs]] {
 }
 
 // ---------------------------------------------------------------------------
+// Standard output and standard error.
+
+// Write all of `data` to standard output: `WriteFile` on the
+// `GetStdHandle(STD_OUTPUT_HANDLE)` handle, unbuffered. The bytes go out as
+// they are; a console shows them in its code page (Rust's `print!`
+// converts to UTF-16 for a console, so non-ASCII text can differ there).
+pub fn write_stdout(in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    write_std_handle(StdFs::STD_OUTPUT_HANDLE, in data);
+}
+
+// Write all of `data` to standard error, as `write_stdout`.
+pub fn write_stderr(in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    write_std_handle(StdFs::STD_ERROR_HANDLE, in data);
+}
+
+fn write_std_handle(which: i32, in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    let h = StdFs::GetStdHandle(which);
+    // No handle (a detached process) takes everything, as Rust's stdout does.
+    if h == 0 || h == StdFs::INVALID_HANDLE_VALUE {
+        return;
+    }
+    let err = write_all_handle(h, in data);
+    if err != 0 {
+        raise_io(widen_u64(err))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Whole files.
 
 pub fn read(in path: Str) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
@@ -821,6 +849,132 @@ pub fn symlink_metadata(in path: Str) -> Metadata eff [Ffi[StdFs], Fail[IoError]
     meta_path(in path.as_bytes(), false)
 }
 
+// `std::fs::canonicalize`: open `path` (a directory too, with backup
+// semantics) and ask for its final path, `\\?\C:\...` form as `std` gives it.
+pub fn canonicalize(in path: Str) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    canonicalize_path(in path.as_bytes())
+}
+
+pub fn canonicalize_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    let wpath = utf8_to_utf16(in path);
+    let h = match StdFs::CreateFileW(
+        in wpath.as_slice(),
+        0,
+        StdFs::FILE_SHARE_ALL,
+        0,
+        StdFs::OPEN_EXISTING,
+        StdFs::FILE_FLAG_BACKUP_SEMANTICS,
+        0
+    ) {
+        Result::Ok((h, err)) => {
+            if h == StdFs::INVALID_HANDLE_VALUE {
+                return raise_io(widen_u64(err));
+            }
+            h
+        }
+        Result::Err(_) => return raise_kind(invalid_input()),
+    };
+    let mut buf: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    buf.resize(260, 0);
+    let mut fail: u32 = 0;
+    let mut units: u64 = 0;
+    loop {
+        let (n, err) = StdFs::GetFinalPathNameByHandleW(h, inout buf.as_slice_mut(), 0);
+        if n == 0 {
+            fail = err;
+            break;
+        }
+        // Told the buffer holds `buf.len()` units (half what it does): a
+        // result at least that long is the size it needs.
+        let nu = widen_u64(n);
+        if nu < buf.len() {
+            units = nu;
+            break;
+        }
+        buf.resize(wrapping_add(nu, 1), 0);
+    }
+    let _ = StdFs::CloseHandle(h);
+    if fail != 0 {
+        return raise_io(widen_u64(fail));
+    }
+    packed_utf16_to_utf8(in buf.as_slice(), units)
+}
+
+// The first `units` UTF-16 units of `buf` (two per word, low half first)
+// as UTF-8; an unpaired surrogate becomes U+FFFD.
+fn packed_utf16_to_utf8(in buf: Slice[u32], units: u64) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= units {
+            break;
+        }
+        let w1 = packed_unit(in buf, i);
+        i = wrapping_add(i, 1);
+        if w1 >= 55296 && w1 <= 56319 && i < units {
+            let w2 = packed_unit(in buf, i);
+            if w2 >= 56320 && w2 <= 57343 {
+                i = wrapping_add(i, 1);
+                let hi = wrapping_shl_u32(wrapping_sub(w1, 55296), 10);
+                push_cp(inout out, wrapping_add(65536, hi | wrapping_sub(w2, 56320)));
+                continue;
+            }
+        }
+        if w1 >= 55296 && w1 <= 57343 {
+            push_cp(inout out, 65533);
+        } else {
+            push_cp(inout out, w1);
+        }
+    }
+    out
+}
+
+fn packed_unit(in buf: Slice[u32], i: u64) -> u32 {
+    let w = match buf.try_get(wrapping_shr_u64(i, 1)) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    if (i & 1) == 0 {
+        w & 65535
+    } else {
+        wrapping_shr_u32(w, 16)
+    }
+}
+
+fn push_cp(inout out: ChunkSeq[u8], cp: u32) {
+    if cp < 128 {
+        out.push(wrapping_u8(cp));
+    } else if cp < 2048 {
+        out.push(wrapping_u8(192 | wrapping_shr_u32(cp, 6)));
+        out.push(wrapping_u8(128 | (cp & 63)));
+    } else if cp < 65536 {
+        out.push(wrapping_u8(224 | wrapping_shr_u32(cp, 12)));
+        out.push(wrapping_u8(128 | (wrapping_shr_u32(cp, 6) & 63)));
+        out.push(wrapping_u8(128 | (cp & 63)));
+    } else {
+        out.push(wrapping_u8(240 | wrapping_shr_u32(cp, 18)));
+        out.push(wrapping_u8(128 | (wrapping_shr_u32(cp, 12) & 63)));
+        out.push(wrapping_u8(128 | (wrapping_shr_u32(cp, 6) & 63)));
+        out.push(wrapping_u8(128 | (cp & 63)));
+    }
+}
+
+// Whether `path` (following symbolic links) is a regular file: Windows has
+// no execute bit, so any file can run (`std`'s non-Unix check). Never fails.
+pub fn is_executable(in path: Str) -> bool eff [Ffi[StdFs]] {
+    is_executable_path(in path.as_bytes())
+}
+
+pub fn is_executable_path(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        let m = metadata_path(in path);
+        m.kind == kind_file()
+    } with {
+        return v => v,
+        raise(_e, _k) => false,
+    }
+}
+
 pub fn exists(in path: Str) -> bool eff [Ffi[StdFs]] {
     handle Fail[IoError] in {
         let _ = metadata(in path);
@@ -829,4 +983,205 @@ pub fn exists(in path: Str) -> bool eff [Ffi[StdFs]] {
         return v => v,
         raise(_, _) => false,
     }
+}
+
+// `Path::is_dir`: whether `path` names a directory. Never fails.
+pub fn is_dir_path(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        metadata_path(in path).kind == kind_dir()
+    } with {
+        return v => v,
+        raise(_, _) => false,
+    }
+}
+
+// `Path::is_file`: whether `path` names a file. Never fails.
+pub fn is_file_path(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        metadata_path(in path).kind == kind_file()
+    } with {
+        return v => v,
+        raise(_, _) => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Error text.
+
+// Rust's `Display` of the `io::Error` that `e` stands for (#1896): the OS
+// error's message and number when it has one, else its kind's text.
+pub fn error_text(e: IoError) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if e.os != 0 {
+        os_error_message(inout out, e.os);
+        os_error_suffix(inout out, e.os);
+        return out;
+    }
+    out.extend(in kind_text(e.kind).as_bytes());
+    out
+}
+
+fn write_decimal(inout out: ChunkSeq[u8], v: u64) {
+    let mut n = v;
+    let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    loop {
+        digits.push(wrapping_u8(wrapping_add(48, n % 10)));
+        n = n / 10;
+        if n == 0 {
+            break;
+        }
+    }
+    let len = digits.len();
+    for i in 0..len {
+        match digits.try_get(wrapping_sub(wrapping_sub(len, 1), i)) {
+            Option::Some(d) => out.push(d),
+            Option::None => (),
+        }
+    }
+}
+
+// An OS error number as Rust's `i32`.
+fn write_os_number(inout out: ChunkSeq[u8], os: u32) {
+    if os >= 2147483648 {
+        out.push(45);
+        write_decimal(inout out, wrapping_sub(4294967296, widen_u64(os)));
+    } else {
+        write_decimal(inout out, widen_u64(os));
+    }
+}
+
+// ` (os error <n>)`.
+fn os_error_suffix(inout out: ChunkSeq[u8], os: u32) {
+    out.extend(in " (os error ".as_bytes());
+    write_os_number(inout out, os);
+    out.push(41);
+}
+
+// `ErrorKind::as_str` of the kind the hybrid's error words decode to
+// (`io_error` in crates/vesper-hybrid/src/driver.rs): every other code is
+// `Other`.
+fn kind_text(kind: u32) -> Str {
+    match kind {
+        1 => "entity not found",
+        2 => "permission denied",
+        3 => "entity already exists",
+        4 => "not a directory",
+        5 => "is a directory",
+        6 => "directory not empty",
+        7 => "invalid input parameter",
+        8 => "operation interrupted",
+        9 => "unexpected end of file",
+        10 => "write zero",
+        11 => "unsupported",
+        12 => "out of memory",
+        _ => "other error",
+    }
+}
+
+const FORMAT_MESSAGE_ALLOCATE_BUFFER: u32 = 256;
+const FORMAT_MESSAGE_IGNORE_INSERTS: u32 = 512;
+const FORMAT_MESSAGE_FROM_HMODULE: u32 = 2048;
+const FORMAT_MESSAGE_FROM_SYSTEM: u32 = 4096;
+const FACILITY_NT_BIT: u32 = 268435456;
+const CP_UTF8: u32 = 65001;
+const WC_ERR_INVALID_CHARS: u32 = 128;
+// `std`'s message buffer holds 2048 UTF-16 units, NUL included; a longer
+// message fails there with `ERROR_INSUFFICIENT_BUFFER`.
+const MESSAGE_UNITS: u32 = 2048;
+const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+
+// `OS Error <n> (FormatMessageW() <why>)`.
+fn format_failed(inout out: ChunkSeq[u8], errnum: u32, in why: Slice[u8]) {
+    out.extend(in "OS Error ".as_bytes());
+    write_os_number(inout out, errnum);
+    out.extend(in " (FormatMessageW() ".as_bytes());
+    out.extend(in why);
+    out.push(41);
+}
+
+// Whether `b` is ASCII whitespace (`u8::is_ascii_whitespace`).
+fn ascii_space(b: u8) -> bool {
+    b == 32 || b == 9 || b == 10 || b == 12 || b == 13
+}
+
+// `std`'s message for the Win32 (or NT, through `NTDLL.DLL`) error `e`:
+// `FormatMessageW`'s text with its trailing whitespace trimmed.
+fn os_error_message(inout out: ChunkSeq[u8], e: u32) eff [Ffi[StdFs]] {
+    let mut errnum = e;
+    let mut module: u64 = 0;
+    let mut flags: u32 = 0;
+    if (errnum & FACILITY_NT_BIT) != 0 {
+        let mut ntdll: ChunkSeq[u16] = ChunkSeq::new[u16]();
+        let name = "NTDLL.DLL".as_bytes();
+        for i in 0..name.len() {
+            ntdll.push(widen_u16(u8_at(in name, i)));
+        }
+        ntdll.push(0);
+        module = match StdFs::GetModuleHandleW(in ntdll.as_slice()) {
+            Result::Ok(h) => h,
+            Result::Err(_) => 0,
+        };
+        if module != 0 {
+            errnum = errnum ^ FACILITY_NT_BIT;
+            flags = FORMAT_MESSAGE_FROM_HMODULE;
+        }
+    }
+    let mut buffer: u64 = 0;
+    let (units, fm_err) = StdFs::FormatMessageW(
+        flags | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS | FORMAT_MESSAGE_ALLOCATE_BUFFER,
+        module,
+        errnum,
+        0,
+        inout buffer,
+        0,
+        0
+    );
+    if units == 0 || units >= MESSAGE_UNITS {
+        if buffer != 0 {
+            let _ = StdFs::LocalFree(buffer);
+        }
+        let err = if units == 0 {
+            fm_err
+        } else {
+            ERROR_INSUFFICIENT_BUFFER
+        };
+        let mut why: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        why.extend(in "returned error ".as_bytes());
+        write_os_number(inout why, err);
+        format_failed(inout out, errnum, in why.as_slice());
+        return;
+    }
+    // At most 3 UTF-8 bytes a UTF-16 unit.
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    text.resize(wrapping_mul(widen_u64(units), 3), 0);
+    let n = StdFs::WideCharToMultiByte(
+        CP_UTF8,
+        WC_ERR_INVALID_CHARS,
+        buffer,
+        wrapping_i32(units),
+        inout text.as_slice_mut(),
+        0,
+        0
+    );
+    let _ = StdFs::LocalFree(buffer);
+    if n <= 0 {
+        format_failed(inout out, errnum, in "returned invalid UTF-16".as_bytes());
+        return;
+    }
+    let mut end = widen_u64(wrapping_u32(n));
+    loop {
+        if end == 0 {
+            break;
+        }
+        match text.try_get(wrapping_sub(end, 1)) {
+            Option::Some(b) => {
+                if !ascii_space(b) {
+                    break;
+                }
+            },
+            Option::None => break,
+        }
+        end = wrapping_sub(end, 1);
+    }
+    out.extend(in text[0..end]);
 }

@@ -13,9 +13,8 @@
 // arguments, else `name<T=i64,U=bool>` (keys in name order). A call whose
 // type arguments are not all concrete is `Unsupported::Generic`.
 //
-// Not ported yet (part 4c): `handle` expressions, whose nested handler
-// bodies are named by AST spans; a program with one is answered
-// `not ported`.
+// A `handle` expression's nested functions (named by the AST spans of
+// exprs.ves) are instantiated with the parent's arguments.
 //
 // Representation: an instance's copy shares the input's operand words
 // wherever nothing changes (block headers, terminators, the fip trailer
@@ -26,18 +25,32 @@
 // Output words: 0 and then `put_program`'s words, or 1 and the error text
 // packed by `pack_text`.
 
+use self::machine::{
+    Lowered,
+    lowered_new
+};
 use self::lower::{
     E_LIMIT,
-    lower_program,
+    lower_rows,
+    put_lowered,
     U_GENERIC,
     VErr,
     ap,
     apn,
     err,
-    not_ported,
     put_error,
     tx,
     unsup
+};
+use self::evidence::{
+    evidence,
+    sites_new
+};
+use self::exprs::{
+    Ex,
+    X_HANDLE,
+    nested_name,
+    read_exprs
 };
 use @vesper/check-data::pack_text;
 use @vesper/check-data::util::{
@@ -122,6 +135,8 @@ fn ms_new(in n: Names) -> Ms {
 
 pub struct Mo {
     c: Ctx,
+    // the pool's expression rows
+    ex: Ex,
     // the input's tables, with `fns` replaced by the instances
     p: Program,
     // the input's functions
@@ -157,7 +172,7 @@ pub struct Mo {
     qv: ChunkSeq[u32],
 }
 
-fn decode(sink c: Ctx, sink p: Program, inout r: Reader, in b: Slice[u8]) -> Mo {
+fn decode(sink c: Ctx, sink p: Program, sink ex: Ex, inout r: Reader, in b: Slice[u8]) -> Mo {
     let mut c2 = c;
     let sy = ms_new(in c2.names);
     let Program {
@@ -173,6 +188,7 @@ fn decode(sink c: Ctx, sink p: Program, inout r: Reader, in b: Slice[u8]) -> Mo 
     let src_n = fns.len();
     let mut m = Mo {
         c: c2,
+        ex: ex,
         p: Program {
             fns: ChunkSeq::new[FnRow](),
             blocks: blocks,
@@ -723,7 +739,23 @@ fn instruction(inout m: Mo, i: InstRow, name: u32, in vars: Vars, in bound: Chun
         row.ty = subst(inout m.c.types, i.ty, in vars);
     }
     if i.op == Op::Handle {
-        Fail::raise(not_ported("handle expressions (part 4c)"));
+        // The nested functions of the handler, in this instance's
+        // arguments: the body, the `return` clause, then the operation
+        // clauses.
+        let x = m.ex.row(m.op(add(i.a, 2)));
+        if x.kind == X_HANDLE {
+            let body = nested_name(inout m.c.names, "handler_body", x.b0, x.b1);
+            enqueue(inout m, body, in vars);
+            let ret = m.ex.clause(x.ret);
+            let rs = nested_name(inout m.c.names, "handler_clause", ret.s0, ret.s1);
+            enqueue(inout m, rs, in vars);
+            for j in 0..x.on {
+                let c = m.ex.clause(add(x.oa, j));
+                let cs = nested_name(inout m.c.names, "handler_clause", c.s0, c.s1);
+                enqueue(inout m, cs, in vars);
+            }
+        }
+        return row;
     }
     if i.op == Op::Read {
         let root = n32(m.op(i.a));
@@ -881,7 +913,8 @@ pub fn mono_input(in b: Slice[u8]) -> ChunkSeq[u64] {
     };
     let c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
-    let mut m = decode(c, p, inout r, in b);
+    let ex = read_exprs(inout r, in b, in c);
+    let mut m = decode(c, p, ex, inout r, in b);
     let e = handle Fail[VErr] in {
         mono_all(inout m);
         err(255, ChunkSeq::new[u8]())
@@ -971,16 +1004,30 @@ fn min_u64(a: u64, b: u64) -> u64 {
     }
 }
 
-// Monomorphization and then the lowering (lower.ves) in one pass over one
-// input: the mono extras, then the lowering's. Evidence passing is part
-// 4c's; the harness compares only programs it leaves unchanged.
+// Monomorphization, evidence passing (evidence.ves) and then the lowering
+// (lower.ves) in one pass over one input: the mono extras, then the
+// lowering's.
 pub fn front_input(in b: Slice[u8]) -> ChunkSeq[u8] {
+    let mut lo = lowered_new();
+    let e = front_rows(in b, inout lo);
+    if e.len() != 0 {
+        return e;
+    }
+    let mut out = ChunkSeq::new[u8]();
+    put_lowered(in lo, inout out);
+    out
+}
+
+// `front_input` into `lo`: empty, or `error: `, the error's text and a
+// newline.
+pub fn front_rows(in b: Slice[u8], inout lo: Lowered) -> ChunkSeq[u8] {
     let mut r = Reader {
         pos: 0
     };
     let c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
-    let mut m = decode(c, p, inout r, in b);
+    let ex = read_exprs(inout r, in b, in c);
+    let mut m = decode(c, p, ex, inout r, in b);
     let e = handle Fail[VErr] in {
         mono_all(inout m);
         err(255, ChunkSeq::new[u8]())
@@ -995,8 +1042,36 @@ pub fn front_input(in b: Slice[u8]) -> ChunkSeq[u8] {
         return t;
     }
     sort_fns(in m.c.names, inout m.p.fns);
+    let entry0 = m.entry;
+    // whether the region prelude is active: the lowering extras' fourth
+    // word, after the entry string and the two limits
+    let pos = r.pos;
+    let len = r.word(in b);
+    for i in 0..wrapping_add(len, 7) / 8 {
+        let x = r.word(in b);
+    }
+    let x1 = r.word(in b);
+    let x2 = r.word(in b);
+    let active = r.word(in b) != 0;
+    r.pos = pos;
+    let mut sites = sites_new();
+    let e2 = handle Fail[VErr] in {
+        sites = evidence(inout m.c, inout m.p, in m.ex, entry0, active);
+        err(255, ChunkSeq::new[u8]())
+    } with {
+        return v => v,
+        raise(e, k) => e,
+    };
+    if e2.kind != 255 {
+        let mut t = tx("error: ");
+        put_error(in m.c.names, in e2, inout t);
+        ap(inout t, "\n");
+        return t;
+    }
+    sort_fns(in m.c.names, inout m.p.fns);
     let Mo {
         c,
+        ex,
         p,
         src,
         sy,
@@ -1022,5 +1097,5 @@ pub fn front_input(in b: Slice[u8]) -> ChunkSeq[u8] {
         qk,
         qv,
     } = m;
-    lower_program(c, p, inout r, in b)
+    lower_rows(c, p, ex, sites, inout r, in b, inout lo)
 }

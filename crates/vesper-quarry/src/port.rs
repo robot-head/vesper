@@ -31,6 +31,7 @@ use crate::plan::{
     AccessPath, AccessPlan, BindingPath, BoundColumn, ExprNode, IndexBound, JoinKind,
     PreparedQuery, RelPlan, TypedExpr,
 };
+use crate::vector::Aggregate;
 use crate::{
     bound, identifier, ColumnDef, DdlChange, Error, ErrorKind, HermeticCatalog, Limits, ParamDef,
     Result, ScalarType, Value,
@@ -120,6 +121,8 @@ fn limit_words(l: Limits) -> [u64; 16] {
 struct Enc {
     words: Vec<u64>,
     text: Vec<u8>,
+    /// The position of the data in `words` (`exec_input`).
+    data_at: usize,
 }
 impl Enc {
     /// An encoder with room for a typical call, so that small inputs do not
@@ -128,6 +131,7 @@ impl Enc {
         Self {
             words: Vec::with_capacity(words),
             text: Vec::with_capacity(text),
+            data_at: 0,
         }
     }
     fn w(&mut self, x: u64) {
@@ -637,14 +641,30 @@ fn set_rows_encoded(
     .s())
 }
 
-/// `PreparedQuery::execute` (after the snapshot check) through the port.
-pub(crate) fn execute(
+/// The execution input of `execute` and `vexecute`: limits, the plan, the
+/// projection, the parameter declarations and bindings, the catalog and the
+/// data.
+fn exec_input(
     query: &PreparedQuery,
     catalog: &HermeticCatalog,
     data: &DataSet,
     params: &BTreeMap<String, Value>,
-) -> Result<QueryResult> {
-    let mut e = Enc::default();
+) -> Enc {
+    // Room for the data, so that it is encoded without growing.
+    let (mut words, mut text) = (64, 0);
+    for rows in data.tables.values() {
+        for row in rows {
+            words += 1 + 3 * row.len();
+            for v in row {
+                if let Value::Text(s) = v {
+                    text += s.len();
+                } else if let Value::Bytes(b) = v {
+                    text += b.len();
+                }
+            }
+        }
+    }
+    let mut e = Enc::sized(words, text + 256);
     e.words.extend(limit_words(query.limits));
     e.w(query.columns.len() as u64);
     e.plan(&query.plan);
@@ -664,11 +684,23 @@ pub(crate) fn execute(
         e.value(v);
     }
     e.catalog(catalog);
+    e.data_at = e.words.len();
     e.w(data.tables.len() as u64);
     for (name, rows) in &data.tables {
         e.s(name);
         e.rows(rows, false);
     }
+    e
+}
+
+/// `PreparedQuery::execute` (after the snapshot check) through the port.
+pub(crate) fn execute(
+    query: &PreparedQuery,
+    catalog: &HermeticCatalog,
+    data: &DataSet,
+    params: &BTreeMap<String, Value>,
+) -> Result<QueryResult> {
+    let e = exec_input(query, catalog, data, params);
     let q = checked(binding::execute(&e.words, &e.text))?;
     let words = q.as_ref().words().to_vec();
     let mut d = Dec {
@@ -686,6 +718,168 @@ pub(crate) fn execute(
         rows,
         work,
     })
+}
+
+/// What a vectorized execution returns.
+pub(crate) enum VMode<'a> {
+    Rows,
+    Aggregates(&'a [Aggregate]),
+    Orders,
+}
+
+/// The words a vectorized execution returned, the input text its values
+/// point into and its own pool (inner-chain input names), with its error.
+pub(crate) struct VOut {
+    pub(crate) err: Option<Error>,
+    pub(crate) words: Vec<u64>,
+    pub(crate) text: Vec<u8>,
+    pub(crate) pool: Vec<u8>,
+}
+
+fn agg_words(a: Aggregate) -> [u64; 2] {
+    match a {
+        Aggregate::CountRows => [0, 0],
+        Aggregate::Count(i) => [1, i as u64],
+        Aggregate::Sum(i) => [2, i as u64],
+        Aggregate::Min(i) => [3, i as u64],
+        Aggregate::Max(i) => [4, i as u64],
+    }
+}
+
+/// The vectorized executor (vesper/src/vector.ves) through the port.
+pub(crate) fn vexecute(
+    query: &PreparedQuery,
+    catalog: &HermeticCatalog,
+    data: &DataSet,
+    params: &BTreeMap<String, Value>,
+    batch: usize,
+    mode: VMode<'_>,
+) -> VOut {
+    let stale = catalog != &query.catalog || data.catalog != query.catalog;
+    // A stale call fails before the input is read: only the aggregates'
+    // checks precede it.
+    let e = if stale {
+        Enc::default()
+    } else {
+        exec_input(query, catalog, data, params)
+    };
+    let mut extra = vec![
+        u64::from(stale),
+        match mode {
+            VMode::Rows => 0,
+            VMode::Aggregates(_) => 1,
+            VMode::Orders => 2,
+        },
+        batch as u64,
+        e.data_at as u64,
+        query.columns.len() as u64,
+    ];
+    extra.extend(query.columns.iter().map(|c| ty_index(c.ty)));
+    let aggs: &[Aggregate] = match mode {
+        VMode::Aggregates(a) => a,
+        _ => &[],
+    };
+    extra.push(aggs.len() as u64);
+    for a in aggs {
+        extra.extend(agg_words(*a));
+    }
+    extra.push(query.output.len() as u64);
+    extra.extend(query.output.iter().map(|c| ty_index(c.ty)));
+    let q = binding::vexecute(&e.words, &e.text, &extra);
+    let (words, pool) = {
+        let r = q.as_ref();
+        let pool = if matches!(mode, VMode::Orders) {
+            r.pool().to_vec()
+        } else {
+            Vec::new()
+        };
+        (r.words().to_vec(), pool)
+    };
+    let err = checked(q).err();
+    VOut {
+        err,
+        words,
+        text: e.text,
+        pool,
+    }
+}
+
+impl VOut {
+    fn ok(self) -> Result<Self> {
+        match self.err {
+            Some(e) => Err(e),
+            None => Ok(self),
+        }
+    }
+    /// The result rows of a `Rows` execution.
+    pub(crate) fn rows(self, query: &PreparedQuery) -> Result<QueryResult> {
+        let out = self.ok()?;
+        let mut d = Dec {
+            words: &out.words,
+            pool: &out.text,
+            at: 0,
+        };
+        let work = d.n();
+        let width = query.projection.len();
+        let rows = (0..d.n())
+            .map(|_| (0..width).map(|_| d.value()).collect())
+            .collect();
+        Ok(QueryResult {
+            columns: query.output.clone(),
+            rows,
+            work,
+        })
+    }
+    /// The aggregate values of an `Aggregates` execution.
+    pub(crate) fn aggregates(self, n: usize) -> Result<Vec<Value>> {
+        let out = self.ok()?;
+        let mut d = Dec {
+            words: &out.words,
+            pool: &out.text,
+            at: 1,
+        };
+        Ok((0..n).map(|_| d.value()).collect())
+    }
+    /// The inner-chain input orders of an `Orders` execution.
+    pub(crate) fn orders(self) -> Result<Vec<Vec<String>>> {
+        let out = self.ok()?;
+        let mut d = Dec {
+            words: &out.words,
+            pool: &out.pool,
+            at: 0,
+        };
+        Ok((0..d.n())
+            .map(|_| (0..d.n()).map(|_| d.s()).collect())
+            .collect())
+    }
+    /// The emitted rows of a `Rows` execution, also after a failure (the
+    /// rows before it): `(work, rows)`, each cell a value triple.
+    pub(crate) fn cells(&self) -> (usize, &[u64]) {
+        let work = self.words.first().copied().unwrap_or(0) as usize;
+        (work, self.words.get(2..).unwrap_or_default())
+    }
+}
+
+/// `vector::aggregate_rows` through the port.
+pub(crate) fn aggregate_rows(result: &QueryResult, aggs: &[Aggregate]) -> Result<Vec<Value>> {
+    let mut e = Enc::default();
+    e.w(aggs.len() as u64);
+    for a in aggs {
+        e.words.extend(agg_words(*a));
+    }
+    e.w(result.columns.len() as u64);
+    for c in &result.columns {
+        e.w(ty_index(c.ty));
+    }
+    e.rows(&result.rows, false);
+    let q = checked(binding::vaggregate_rows(&e.words, &e.text))?;
+    let words = q.as_ref().words().to_vec();
+    let mut d = Dec {
+        words: &words,
+        pool: &e.text,
+        at: 0,
+    };
+    Ok((0..aggs.len()).map(|_| d.value()).collect())
 }
 
 /// `PreparedQuery::access_plan` through the port.

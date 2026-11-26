@@ -96,6 +96,29 @@ pub copy struct Lir {
     f3: u64,
 }
 
+// A lowered program (`compile`'s `lir`): function `f` is the rows
+// `rows[starts[f]..starts[f + 1]]` named `names[name_at[f]..name_at[f + 1]]`,
+// with the entry's result word count and label.
+pub struct Lowered {
+    rows: ChunkSeq[Lir],
+    starts: ChunkSeq[u64],
+    names: ChunkSeq[u8],
+    name_at: ChunkSeq[u64],
+    result_words: u64,
+    entry_label: u64,
+}
+
+pub fn lowered_new() -> Lowered {
+    Lowered {
+        rows: ChunkSeq::new[Lir](),
+        starts: ChunkSeq::new[u64](),
+        names: ChunkSeq::new[u8](),
+        name_at: ChunkSeq::new[u64](),
+        result_words: 0,
+        entry_label: 0
+    }
+}
+
 // `M` instructions, in the order of the Rust enum.
 pub const M_LD: u8 = 0;
 pub const M_ST: u8 = 1;

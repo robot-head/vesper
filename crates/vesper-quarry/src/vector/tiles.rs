@@ -6,10 +6,11 @@
 //! A [`TileSet`] is reused across executions: `execute_tiled` clears it but
 //! keeps its tiles and arena, so refilling a warmed set with a result of the
 //! same shape and size allocates no tiles and no arena space.
-use super::{BatchSink, Column, Data, Operand, VectorEngine};
+use super::VectorEngine;
 use crate::execute::DataSet;
 use crate::plan::PreparedQuery;
-use crate::{add, bound, ColumnDef, Error, ErrorKind, HermeticCatalog, Result, ScalarType, Value};
+use crate::port::{self, VMode};
+use crate::{ColumnDef, Error, ErrorKind, HermeticCatalog, Result, ScalarType, Value};
 use std::collections::BTreeMap;
 
 /// Rows per tile.
@@ -56,28 +57,17 @@ enum Cell<'a> {
     Word(u64),
     Bytes(&'a [u8]),
 }
-fn column_cell(c: &Column, i: usize) -> Cell<'_> {
-    if c.nulls[i] == 1 {
-        return Cell::Null;
-    }
-    match &c.data {
-        Data::U64(x) => Cell::Word(x[i]),
-        Data::I64(x) => Cell::Word(x[i] as u64),
-        Data::F64(x) => Cell::Word(x[i].to_bits()),
-        Data::Bool(x) => Cell::Word(u64::from(x[i])),
-        Data::Text(x) => Cell::Bytes(x[i].as_bytes()),
-        Data::Bytes(x) => Cell::Bytes(&x[i]),
-    }
-}
-fn value_cell(v: &Value) -> Cell<'_> {
-    match v {
-        Value::Null => Cell::Null,
-        Value::U64(x) => Cell::Word(*x),
-        Value::I64(x) => Cell::Word(*x as u64),
-        Value::F64(x) => Cell::Word(x.to_bits()),
-        Value::Bool(x) => Cell::Word(u64::from(*x)),
-        Value::Text(s) => Cell::Bytes(s.as_bytes()),
-        Value::Bytes(b) => Cell::Bytes(b),
+/// The cell of a value triple of the port's output (`[tag, a, b]`, text
+/// and bytes as a range of `text`).
+fn word_cell<'a>(w: &[u64], text: &'a [u8]) -> Cell<'a> {
+    match w {
+        [0, ..] => Cell::Null,
+        [5 | 6, off, len] => {
+            let (off, len) = (*off as usize, *len as usize);
+            Cell::Bytes(text.get(off..off + len).unwrap_or_default())
+        }
+        [_, x, _] => Cell::Word(*x),
+        _ => Cell::Null,
     }
 }
 
@@ -235,7 +225,9 @@ impl TileSet {
 
 impl PreparedQuery {
     /// Vectorized execution into reusable AoSoA tiles. Rows and order equal
-    /// [`PreparedQuery::execute`]; returns the batch work counter.
+    /// [`PreparedQuery::execute`]; returns the batch work counter. The
+    /// executor (vesper/src/vector.ves) applies the output row and byte
+    /// limits; on a failure the set holds the rows emitted before it.
     pub fn execute_tiled(
         &self,
         catalog: &HermeticCatalog,
@@ -245,29 +237,17 @@ impl PreparedQuery {
         out: &mut TileSet,
     ) -> Result<usize> {
         out.reset(&self.output);
-        let limits = self.limits;
-        let mut bytes = 0usize;
-        let sink: &mut BatchSink<'_> = &mut |cols: &[Operand<'_>], sel: &[usize]| {
-            for &i in sel {
-                bound(add(out.len(), 1)?, limits.output_rows, "output row limit")?;
-                let cell = |c: usize| match &cols[c] {
-                    Operand::Col(col) => column_cell(col, i),
-                    Operand::Scalar(v) => value_cell(v),
-                };
-                // Output bytes are accounted like the row result's.
-                let mut row = size_of::<Vec<Value>>();
-                for c in 0..cols.len() {
-                    row = add(row, size_of::<Value>())?;
-                    if let Cell::Bytes(b) = cell(c) {
-                        row = add(row, b.len())?;
-                    }
-                }
-                bytes = add(bytes, row)?;
-                bound(bytes, limits.output_bytes, "output byte limit")?;
-                out.push(&cell)?;
+        let run = port::vexecute(self, catalog, data, params, engine.batch, VMode::Rows);
+        let (work, cells) = run.cells();
+        let width = 3 * self.output.len();
+        if width > 0 {
+            for row in cells.chunks_exact(width) {
+                out.push(&|c: usize| word_cell(&row[3 * c..3 * c + 3], &run.text))?;
             }
-            Ok(())
-        };
-        self.drive(catalog, data, params, engine, sink)
+        }
+        match run.err {
+            Some(e) => Err(e),
+            None => Ok(work),
+        }
     }
 }
