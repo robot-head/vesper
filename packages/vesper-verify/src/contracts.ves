@@ -2,16 +2,7 @@
 // each emitted contract to the theorem `--contract-proof` names and its
 // precondition to the `--contract-witness` theorem, and the theorem names.
 use @vesper/proof-audit::strs::{
-    Strs,
-    byte,
-    contains,
-    count,
-    end,
-    order,
-    put_str,
-    push,
-    start,
-    strs_new
+    Strs, byte, contains, count, end, order, put_str, push, start, strs_new
 };
 
 // What `bindings` wrote: the Lean source and the theorem names, or
