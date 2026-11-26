@@ -13,8 +13,7 @@ const DRIVER: &str = r#"use @vesper-std/fs::{
     IoError, Metadata, read, read_path, read_string, write, append, create_new, replace, rename,
     remove_file, remove_dir, remove_dir_all, create_dir, create_dir_all, metadata,
     symlink_metadata, exists, kind_file, kind_dir, is_executable, canonicalize, write_stdout,
-    write_stderr,
-    symlink_metadata, exists, kind_file, kind_dir, error_text, is_dir_path, is_file_path
+    write_stderr, error_text, is_dir_path, is_file_path, arch
 };
 use @vesper-std/fs::walk::{
     Entries, walk, list_dir, entry_count, entry_start, entry_end, entry_kind, entry_join
@@ -429,6 +428,10 @@ fn kind_bits(in p: Str, shift: u32) -> u64 eff [Ffi[StdFs]] {
         bits = bits | 2;
     }
     wrapping_shl_u64(bits, shift)
+}
+
+pub fn arch_code() -> u64 {
+    widen_u64(arch())
 }
 
 pub fn path_kinds() -> u64 eff [Ffi[StdFs]] {
@@ -962,4 +965,18 @@ fn path_kinds_follow_std() {
     for mode in MODES {
         assert_eq!(agree(&checked, "path_kinds", &[mode]), want, "{mode:?}");
     }
+}
+
+/// `arch` is the architecture of `std::env::consts::ARCH`.
+#[test]
+fn arch_matches_std_consts() {
+    let dir = Temp::new("std-fs");
+    let checked = check_driver(&source(&dir));
+    let want = match std::env::consts::ARCH {
+        "x86_64" => 1,
+        "aarch64" => 2,
+        "wasm32" => 3,
+        other => panic!("no ARCH code for {other}"),
+    };
+    assert_eq!(agree(&checked, "arch_code", &MODES), want);
 }

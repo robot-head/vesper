@@ -8,6 +8,7 @@ use @vesper/driver::{
     eq
 };
 use super::{
+    PrintFailed,
     arg,
     byte_at,
     print,
@@ -19,7 +20,7 @@ use super::proof_audit::{
     forbidden_axiom
 };
 
-fn print_verify_help() eff [Ffi[HybridCommands]] {
+fn print_verify_help() eff [Ffi[StdFs], Fail[PrintFailed]] {
     print(
         stdout_stream(),
         in "Usage: vesper verify SOURCE --format [--json | --emit-lean] [--lean PATH] [--timeout SECONDS]\n       vesper verify SOURCE --extract [--proofs FILE.lean] [--theorem Name ...] [--contract-proof Function=Theorem --contract-witness Function=Theorem ...] [--allow-axiom Name ...] [--olean-store DIR|default] [--json | --emit-lean] [--lean PATH] [--timeout SECONDS]\n\n--format: Kernel-check a formatter document-algebra comment-conservation model with Lean 4.35.0.\n--extract: Extract a Lean 4 proof model from checked .ves source, compile and replay through the Lean 4.35.0 kernel, and audit axioms (sorryAx is always forbidden). Total fuel companions are noncomputable; original recursive executable definitions and their callers are omitted and listed in JSON.\n--proofs joins an explicit Lean proof script containing theorem proofs for the extracted model.\n--theorem selects theorem names to audit (default: theorems discovered in --proofs, or an internal model-compilation witness).\n--contract-proof binds an emitted function contract to a theorem; when used, every emitted contract must be covered. Each binding requires --contract-witness for the generated existential input precondition. This checks model partial correctness and inhabited input preconditions, not termination or native-code correspondence. Explicit contract admission permits only the three standard Lean axioms.\n--allow-axiom permits named axioms such as propext, Quot.sound, or Classical.choice.\n--olean-store stores audited .olean artifacts and compares cache hits with a fresh compilation in a Loom CAS directory (`default` is ~/.vesper/store).\n--emit-lean prints the generated Lean source only after compilation and kernel replay.\n--timeout bounds each Lean process (1 to 300 seconds; default 30).\nThe selected Lean toolchain and artifact parser remain trusted.\n"
@@ -66,7 +67,7 @@ fn has_help_before_sep(in args: Args, n: u64) -> bool {
 }
 
 fn fail_verify(has_json: bool, has_extract: bool, in message: Slice[u8])
-    -> i64 eff [Ffi[HybridCommands]] {
+    -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     if has_json {
         HybridCommands::hc_verify_json_err(has_extract, in message);
     }
@@ -126,7 +127,8 @@ fn pack_args(in args: Args, n: u64) -> ChunkSeq[u8] {
     packed
 }
 
-fn run_packed(in args: Args, n: u64) -> i64 eff [Ffi[HybridCommands]] {
+fn run_packed(in args: Args, n: u64)
+    -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     let packed = pack_args(in args, n);
     let err_len = HybridCommands::hc_verify_run(in packed.as_slice());
     if err_len == 0 {
@@ -144,7 +146,7 @@ fn run_packed(in args: Args, n: u64) -> i64 eff [Ffi[HybridCommands]] {
     fail(in err.as_slice())
 }
 
-pub fn run_verify(in args: Args) -> i64 eff [Ffi[HybridCommands]] {
+pub fn run_verify(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     let n = args_count(in args);
     if has_help_before_sep(in args, n) {
         print_verify_help();

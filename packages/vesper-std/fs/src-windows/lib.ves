@@ -1131,3 +1131,21 @@ fn os_error_message(inout out: ChunkSeq[u8], e: u32) eff [Ffi[StdFs]] {
     }
     out.extend(in text[0..end]);
 }
+
+// The architecture this package was built for: `arch_x86_64()`,
+// `arch_aarch64()` or `arch_wasm32()` (the vsys file's `ARCH`).
+pub fn arch() -> u32 {
+    StdFs::ARCH
+}
+
+pub fn arch_x86_64() -> u32 {
+    1
+}
+
+pub fn arch_aarch64() -> u32 {
+    2
+}
+
+pub fn arch_wasm32() -> u32 {
+    3
+}
