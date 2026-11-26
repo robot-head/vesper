@@ -112,7 +112,7 @@ test {
     }
 
     fn stage_segment(inout window: SegmentWindow, length: u64) -> u64 eff [Fail[u64]] {
-        transact inout window on[u64] {
+        transact inout window on[u64] returning[u64] {
             window.start = wrapping_add(window.start, window.length);
             window.length = length;
             ensure window.length <= 32 else window.length;
