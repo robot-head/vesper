@@ -19,6 +19,7 @@ pub const ARGUMENTS: u64 = 6;
 pub const REGISTER_CODES: u64 = 16;
 pub const ALL_REGISTER_CODES: u64 = REGISTER_CODES + REGISTER_CODES;
 pub const XMM0: u8 = 16;
+const FIRST_XMM_HOME: u8 = 24;
 pub const XMM_LEFT_SCRATCH: u8 = 30;
 pub const XMM_RIGHT_SCRATCH: u8 = 31;
 pub const HOME_REGISTERS: u64 = 5;
@@ -76,6 +77,10 @@ const XMM_TO_GPR: u8 = 0x7e;
 const UCOMIS: u8 = 0x2e;
 const ANDPS: u8 = 0x54;
 const XORPS: u8 = 0x57;
+const PACKED_SHIFT_DWORD: u8 = 0x72;
+const PACKED_SHIFT_QWORD: u8 = 0x73;
+const PACKED_SHIFT_RIGHT: u8 = 2;
+const PACKED_SHIFT_LEFT: u8 = 6;
 const F32_SIGN: u64 = 0x80000000;
 const F64_SIGN: u64 = 0x8000000000000000;
 pub const SSE_ADD: u8 = 0x58;
@@ -178,6 +183,7 @@ pub copy enum Instruction {
     FloatImmediate(u8, u64, u64),
     FloatBinary(u8, u8, u8, u64),
     FloatSign(u8, bool, u64),
+    FloatCopySign(u8, u8, u64),
     FloatBits(u8, u8, u64),
     FloatCompare(u8, u8, u8, u64, u64),
     Move(u8, u8),
@@ -245,6 +251,10 @@ pub fn home_register(index: u64) -> u8 {
         4 => R15,
         _ => UNASSIGNED,
     }
+}
+
+pub fn xmm_home_register(index: u64) -> u8 {
+    wrapping_add(FIRST_XMM_HOME, wrapping_u8(index))
 }
 
 pub fn register_bit(reg: u8) -> u32 {
@@ -667,6 +677,22 @@ fn xmm_binary(inout out: ChunkSeq[u8], opcode: u8, destination: u8, source: u8) 
     out.push(modrm(dst, src));
 }
 
+fn packed_shift(inout out: ChunkSeq[u8], destination: u8, extension: u8, width: u64) {
+    let destination = xmm_code(destination);
+    out.push(OPERAND_SIZE_OVERRIDE);
+    float_rex(inout out, 0, destination, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(
+        if width == DWORD_BITS {
+            PACKED_SHIFT_DWORD
+        } else {
+            PACKED_SHIFT_QWORD
+        }
+    );
+    out.push(modrm(extension, destination));
+    out.push(wrapping_u8(wrapping_sub(width, 1)));
+}
+
 fn float_move(inout out: ChunkSeq[u8], destination: u8, source: u8) {
     if destination != source {
         xmm_binary(inout out, MOVAPS_LOAD, destination, source);
@@ -791,6 +817,15 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
                 destination,
                 XMM_RIGHT_SCRATCH
             );
+        },
+        Instruction::FloatCopySign(destination, sign, width) => {
+            // Isolate the differing sign bit, then toggle it in the magnitude.
+            let scratch = XMM_RIGHT_SCRATCH;
+            float_move(inout out, scratch, sign);
+            xmm_binary(inout out, XORPS, scratch, destination);
+            packed_shift(inout out, scratch, PACKED_SHIFT_RIGHT, width);
+            packed_shift(inout out, scratch, PACKED_SHIFT_LEFT, width);
+            xmm_binary(inout out, XORPS, destination, scratch);
         },
         Instruction::FloatBits(destination, source, width) => float_bits(
             inout out,

@@ -2,7 +2,7 @@ use super::{binding, integer_block_words};
 use cranelift_codegen::{
     Context,
     ir::{
-        AbiParam, InstBuilder, MemFlags, StackSlotData, StackSlotKind,
+        AbiParam, BlockArg, InstBuilder, MemFlags, StackSlotData, StackSlotKind,
         condcodes::{FloatCC, IntCC},
         types,
     },
@@ -193,6 +193,99 @@ fn sse2_values_survive_spills_bitcasts_and_mixed_register_arguments() {
         let b = unsafe { candidate(choose, left, right, &mut candidate_memory) };
         assert_eq!(a.to_bits(), b.to_bits());
         assert_eq!(reference_memory.to_bits(), candidate_memory.to_bits());
+    }
+    unsafe { module.free_memory() };
+}
+
+#[test]
+fn labeled_float_edges_preserve_parallel_values_and_copy_sign_bits() {
+    type Single = unsafe extern "C" fn(u64, f32, f32) -> f32;
+    type Double = unsafe extern "C" fn(u64, f64, f64) -> f64;
+    let mut module = module();
+    for width in [types::F32, types::F64] {
+        let mut context = module.make_context();
+        context
+            .func
+            .signature
+            .params
+            .extend([types::I64, width, width].map(AbiParam::new));
+        context.func.signature.returns.push(AbiParam::new(width));
+        let mut state = FunctionBuilderContext::new();
+        let mut b = FunctionBuilder::new(&mut context.func, &mut state);
+        let entry = b.create_block();
+        let header = b.create_block();
+        let body = b.create_block();
+        let exit = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        let count = b.append_block_param(header, types::I64);
+        let left = b.append_block_param(header, width);
+        let right = b.append_block_param(header, width);
+        let magnitude = b.append_block_param(exit, width);
+        let sign = b.append_block_param(exit, width);
+        b.switch_to_block(entry);
+        let [limit, first, second] = *b.block_params(entry) else {
+            unreachable!()
+        };
+        b.ins().jump(
+            header,
+            &[
+                BlockArg::Value(limit),
+                BlockArg::Value(first),
+                BlockArg::Value(second),
+            ],
+        );
+        b.switch_to_block(header);
+        b.ins().brif(
+            count,
+            body,
+            &[],
+            exit,
+            &[BlockArg::Value(left), BlockArg::Value(right)],
+        );
+        b.switch_to_block(body);
+        let next = b.ins().fsub(left, right);
+        let remaining = b.ins().iadd_imm(count, -1);
+        b.ins().jump(
+            header,
+            &[
+                BlockArg::Value(remaining),
+                BlockArg::Value(right),
+                BlockArg::Value(next),
+            ],
+        );
+        b.switch_to_block(exit);
+        let signed = b.ins().fcopysign(magnitude, sign);
+        b.ins().return_(&[signed]);
+        b.seal_all_blocks();
+        b.finalize();
+
+        let (a, b) = compile(&mut module, &mut context);
+        for (count, left, right) in [
+            (0, f64::from_bits(0x7ff8_0000_5412_0000), -0.0),
+            (0, -0.0, 1.25),
+            (0, f64::NEG_INFINITY, 0.0),
+            (1, 3.5, 4.0),
+            (6, -9.0, 0.125),
+        ] {
+            let (reference, candidate) = unsafe {
+                if width == types::F32 {
+                    let a = std::mem::transmute::<*const u8, Single>(a);
+                    let b = std::mem::transmute::<*const u8, Single>(b);
+                    (
+                        u64::from(a(count, left as f32, right as f32).to_bits()),
+                        u64::from(b(count, left as f32, right as f32).to_bits()),
+                    )
+                } else {
+                    let a = std::mem::transmute::<*const u8, Double>(a);
+                    let b = std::mem::transmute::<*const u8, Double>(b);
+                    (
+                        a(count, left, right).to_bits(),
+                        b(count, left, right).to_bits(),
+                    )
+                }
+            };
+            assert_eq!(candidate, reference, "{width}: {count}, {left}, {right}");
+        }
     }
     unsafe { module.free_memory() };
 }

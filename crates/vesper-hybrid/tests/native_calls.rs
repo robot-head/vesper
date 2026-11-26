@@ -9,7 +9,9 @@ mod binding;
 
 use cranelift_codegen::{
     binemit::Reloc,
-    ir::{AbiParam, Function, InstBuilder, MemFlags, StackSlotData, StackSlotKind, types},
+    ir::{
+        AbiParam, BlockArg, Function, InstBuilder, MemFlags, StackSlotData, StackSlotKind, types,
+    },
     settings::{self, Configurable},
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
@@ -571,6 +573,86 @@ fn mixed_float_calls_preserve_live_xmm_values_and_stack_arguments() {
             };
             assert_eq!(candidate, reference, "{fp}");
         }
+    }
+    unsafe { module.free_memory() };
+}
+
+#[test]
+fn float_cfg_homes_survive_a_callee_clobbering_the_xmm_home_bank() {
+    type Entry = unsafe extern "C" fn(u64, f64) -> f64;
+    const REX_HIGH_REGISTERS: u8 = 0x45;
+    const TWO_BYTE_OPCODE: u8 = 0x0f;
+    const XORPS: u8 = 0x57;
+    const REGISTER_MODRM: u8 = 0xc0;
+    const MODRM_REG_SHIFT: u8 = 3;
+    const HOME_REGISTERS: u8 = 5;
+    const RETURN: u8 = 0xc3;
+    let mut module = jit_module();
+    let signature = module.make_signature();
+    let callee = module.declare_anonymous_function(&signature).unwrap();
+    let mut callee_bytes = Vec::new();
+    for low in 0..HOME_REGISTERS {
+        callee_bytes.extend([
+            REX_HIGH_REGISTERS,
+            TWO_BYTE_OPCODE,
+            XORPS,
+            REGISTER_MODRM | (low << MODRM_REG_SHIFT) | low,
+        ]);
+    }
+    callee_bytes.push(RETURN);
+    let alignment = u64::from(module.isa().function_alignment().minimum);
+    module
+        .define_function_bytes(callee, alignment, &callee_bytes, &[])
+        .unwrap();
+
+    let mut context = module.make_context();
+    let mut state = FunctionBuilderContext::new();
+    let signature = &mut context.func.signature;
+    signature
+        .params
+        .extend([types::I64, types::F64].map(AbiParam::new));
+    signature.returns.push(AbiParam::new(types::F64));
+    let target = module.declare_func_in_func(callee, &mut context.func);
+    let mut b = FunctionBuilder::new(&mut context.func, &mut state);
+    let entry = b.create_block();
+    let header = b.create_block();
+    let body = b.create_block();
+    let exit = b.create_block();
+    b.append_block_params_for_function_params(entry);
+    let count = b.append_block_param(header, types::I64);
+    let result = b.append_block_param(header, types::F64);
+    b.switch_to_block(entry);
+    let [iterations, value] = *b.block_params(entry) else {
+        unreachable!()
+    };
+    b.ins().jump(
+        header,
+        &[BlockArg::Value(iterations), BlockArg::Value(value)],
+    );
+    b.switch_to_block(header);
+    b.ins().brif(count, body, &[], exit, &[]);
+    b.switch_to_block(body);
+    b.ins().call(target, &[]);
+    let remaining = b.ins().iadd_imm(count, -1);
+    b.ins().jump(
+        header,
+        &[BlockArg::Value(remaining), BlockArg::Value(result)],
+    );
+    b.switch_to_block(exit);
+    b.ins().return_(&[result]);
+    b.seal_all_blocks();
+    b.finalize();
+
+    let candidate = module
+        .declare_anonymous_function(&context.func.signature)
+        .unwrap();
+    define_callable(&mut module, candidate, callee, &context.func, 1);
+    module.finalize_definitions().unwrap();
+    let entry = unsafe {
+        std::mem::transmute::<*const u8, Entry>(module.get_finalized_function(candidate))
+    };
+    for value in [3.5, -0.0, f64::from_bits(0x7ff8_0000_0000_1234)] {
+        assert_eq!(unsafe { entry(3, value) }.to_bits(), value.to_bits());
     }
     unsafe { module.free_memory() };
 }

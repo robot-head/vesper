@@ -117,6 +117,10 @@ enum IntegerOp {
     FloatSelect = 95,
     FloatReturn = 96,
     CallFloat = 97,
+    FloatStackLoad = 98,
+    FloatStackStore32 = 99,
+    FloatStackStore64 = 100,
+    FloatCopySign = 101,
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
@@ -145,6 +149,7 @@ const STACK_PROBE_INTERVAL: usize = 4096;
 const CFG_HOME_BYTES: u64 = size_of::<u64>() as u64;
 const MAX_GP_ARGUMENTS: usize = GP_REGISTER_ARGUMENTS + STACK_PROBE_INTERVAL / size_of::<u64>() - 1;
 const GP_RESULTS: usize = 2;
+const FLOAT_RETURN_LAYOUT: u64 = GP_RESULTS as u64 + 1;
 const WIDE_INTEGER_CELLS: usize = 2;
 const INTEGER_CELL_BITS: u64 = u64::BITS as u64;
 const MAX_LINEARIZED_BRANCHES: usize = 32;
@@ -372,6 +377,8 @@ fn stack_store_op(ty: Type) -> Option<IntegerOp> {
         types::I16 => Some(IntegerOp::StackStoreWord),
         types::I32 => Some(IntegerOp::StackStoreDword),
         types::I64 => Some(IntegerOp::StackStoreQword),
+        types::F32 => Some(IntegerOp::FloatStackStore32),
+        types::F64 => Some(IntegerOp::FloatStackStore64),
         _ => None,
     }
 }
@@ -817,6 +824,7 @@ impl IntegerBlocks<'_> {
                     Opcode::Fsub => IntegerOp::FloatSub,
                     Opcode::Fmul => IntegerOp::FloatMul,
                     Opcode::Fdiv => IntegerOp::FloatDiv,
+                    Opcode::Fcopysign => IntegerOp::FloatCopySign,
                     _ => return None,
                 };
                 (op, [input(left)?, input(right)?, float_width(output)?])
@@ -876,8 +884,10 @@ impl IntegerBlocks<'_> {
                 offset,
             } => {
                 let [slot, offset] = self.stack_location(stack_slot, offset, output.bytes())?;
-                let address = self.append(IntegerOp::StackAddress, [slot, offset, 0]);
-                (IntegerOp::FloatLoad, [address, 0, float_width(output)?])
+                (
+                    IntegerOp::FloatStackLoad,
+                    [slot, offset, float_width(output)?],
+                )
             }
             InstructionData::Load {
                 opcode: Opcode::Load,
@@ -887,8 +897,7 @@ impl IntegerBlocks<'_> {
             } if ty(arg) == types::I64 && supports_memory_format(flags) => {
                 let width = float_width(output)?;
                 if let Some([slot, offset]) = self.stack_operand(arg, offset, output.bytes()) {
-                    let address = self.append(IntegerOp::StackAddress, [slot, offset, 0]);
-                    (IntegerOp::FloatLoad, [address, 0, width])
+                    (IntegerOp::FloatStackLoad, [slot, offset, width])
                 } else {
                     if !self.supports_memory_access(flags) {
                         return None;
@@ -902,16 +911,6 @@ impl IntegerBlocks<'_> {
             _ => return None,
         };
         Some(self.append(op, operands))
-    }
-
-    fn stack_store(&mut self, ty: Type, source: u64, slot: u64, offset: u64) -> Option<()> {
-        if let Some(op) = float_store_op(ty) {
-            let address = self.append(IntegerOp::StackAddress, [slot, offset, 0]);
-            self.append(op, [address, source, 0]);
-        } else {
-            self.append(stack_store_op(ty)?, [source, slot, offset]);
-        }
-        Some(())
     }
 
     // A block's arguments are already mapped by its incoming edge.
@@ -931,7 +930,7 @@ impl IntegerBlocks<'_> {
             {
                 let source = ty(arg);
                 let [slot, offset] = self.stack_location(stack_slot, offset, source.bytes())?;
-                self.stack_store(source, input(arg)?, slot, offset)?;
+                self.append(stack_store_op(source)?, [input(arg)?, slot, offset]);
                 continue;
             }
             if let InstructionData::Store {
@@ -949,7 +948,7 @@ impl IntegerBlocks<'_> {
                     && let Some([slot, offset]) =
                         self.stack_operand(base, offset, ty(source).bytes())
                 {
-                    self.stack_store(ty(source), input(source)?, slot, offset)?;
+                    self.append(stack_store_op(ty(source))?, [input(source)?, slot, offset]);
                     continue;
                 }
                 if !self.supports_memory_access(flags) {
@@ -1396,15 +1395,6 @@ impl IntegerBlocks<'_> {
 
     fn labeled_cfg(&mut self, entry: Block) -> Option<()> {
         let function = self.function;
-        if self.float_return
-            || function
-                .signature
-                .params
-                .iter()
-                .any(|p| float_width(p.value_type).is_some())
-        {
-            return None;
-        }
         let dfg = &function.dfg;
         let layout = &function.layout;
         let mut labels = SecondaryMap::new();
@@ -1441,7 +1431,7 @@ impl IntegerBlocks<'_> {
             let cells = if ty == types::I128 {
                 WIDE_INTEGER_CELLS as u64
             } else {
-                integer_width(ty)?;
+                integer_width(ty).or_else(|| float_width(ty))?;
                 1
             };
             if homes[value].is_none() {
@@ -1482,7 +1472,11 @@ impl IntegerBlocks<'_> {
         if home_bytes != 0 {
             self.append(IntegerOp::StackSlot, [home_bytes, CFG_HOME_BYTES, 0]);
         }
-        let results = self.return_cells as u64;
+        let results = if self.float_return {
+            FLOAT_RETURN_LAYOUT
+        } else {
+            self.return_cells as u64
+        };
         let mut next_edge = order.len() as u64;
         for block in order {
             let home_slot = if block == entry && home_bytes != 0 {
@@ -1502,9 +1496,14 @@ impl IntegerBlocks<'_> {
                 let width = if ty == types::I128 {
                     INTEGER_CELL_BITS
                 } else {
-                    integer_width(ty)?
+                    integer_width(ty).or_else(|| float_width(ty))?
                 };
-                values.low[value] = Some(self.append(IntegerOp::StackLoad, [slot, offset, width]));
+                let op = if float_width(ty).is_some() {
+                    IntegerOp::FloatStackLoad
+                } else {
+                    IntegerOp::StackLoad
+                };
+                values.low[value] = Some(self.append(op, [slot, offset, width]));
                 if ty == types::I128 {
                     values.high[value] = Some(
                         self.append(IntegerOp::StackLoad, [slot, offset + CFG_HOME_BYTES, width]),
@@ -1628,7 +1627,9 @@ impl IntegerBlocks<'_> {
 /// A trailing FloatReturn selects XMM0 for the single return value.
 /// SymbolRelative and SymbolGot read the data symbol ID from the left operand.
 /// A labeled function starts with BlockLabel after the stack declarations
-/// and returns through BlockReturn records. BranchLabel skips the taken edge
+/// and returns through BlockReturn records. The label's extra word describes
+/// the integer return arity or a single XMM result. Entry FloatArgument records
+/// follow the first label. BranchLabel skips the taken edge
 /// transfers and its jump to the matching EdgeLabel. Cross-block operands
 /// reload from frame homes, and JumpLabel targets a non-entry BlockLabel.
 /// BranchTable reads an i32 index, case count, and default label. Its following
