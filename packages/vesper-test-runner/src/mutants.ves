@@ -262,10 +262,7 @@ fn collect_in_fn(
         if n == 0 {
             break;
         }
-        let ei = match stack.try_get(sub(n, 1)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let ei = stack.try_get(sub(n, 1)).unwrap_or(0);
         stack.truncate(sub(n, 1));
         visited = inc(visited);
         if visited > 16384 {
@@ -478,10 +475,7 @@ fn site_less(in s: Sites, x: u64, y: u64) -> bool {
 }
 
 fn u8_at_slice(in s: Slice[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(c) => c,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 // `rust_collect` over the input words.
@@ -509,10 +503,7 @@ pub fn collect(in b: Slice[u8]) -> ChunkSeq[u64] {
     let mut name: String = String::new();
     let items = l.ast.m_items.len();
     for i in 0..items {
-        let it = match l.ast.m_items.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let it = l.ast.m_items.try_get(i).unwrap_or(0);
         let item = l.ast.items.get_or(idx_from_raw[ItemNode](it), ItemNode { kind: 0, node: 0 });
         if item.kind == 2 {
             let f = fn_at(in l.ast, item.node);

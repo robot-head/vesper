@@ -211,10 +211,7 @@ fn nodes(in w: Walk) -> u64 {
 // Option or Result (`builtin_constructor`).
 fn builtin(in a: Ast, inout w: Walk, name: u32) -> bool {
     let k = widen_u64(name);
-    let known = match w.builtin.try_get(k) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    };
+    let known = w.builtin.try_get(k).unwrap_or(0);
     if known != 0 {
         return known == 2;
     }
@@ -244,14 +241,8 @@ fn builtin_text(in s: String) -> bool {
         if i < 2 {
             break;
         }
-        let c0 = match b.try_get(sub(i, 2)) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
-        let c1 = match b.try_get(sub(i, 1)) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
+        let c0 = b.try_get(sub(i, 2)).unwrap_or(0);
+        let c1 = b.try_get(sub(i, 1)).unwrap_or(0);
         if c0 == 58 && c1 == 58 {
             start = i;
             break;
@@ -276,14 +267,8 @@ fn segment_is(in b: Slice[u8], start: u64, in w: Str) -> bool {
     let c = w.as_bytes();
     let n = c.len();
     for i in 0..n {
-        let x = match b.try_get(wrapping_add(start, i)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
-        let y = match c.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let x = b.try_get(wrapping_add(start, i)).unwrap_or(0);
+        let y = c.try_get(i).unwrap_or(0);
         if x != y {
             return false;
         }
@@ -457,10 +442,7 @@ fn walk(in a: Ast, inout w: Walk, max_declarations: u64) -> u64 {
         return 1;
     }
     for i in 0..items {
-        let it = match a.m_items.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let it = a.m_items.try_get(i).unwrap_or(0);
         let item = item_at(in a, it);
         if item.kind == 2 {
             let c = function(in a, inout w, item.node, false);
@@ -518,18 +500,9 @@ fn walk(in a: Ast, inout w: Walk, max_declarations: u64) -> u64 {
         if n < 3 {
             break;
         }
-        let tag = match w.todo.try_get(sub(n, 3)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
-        let node = match w.todo.try_get(sub(n, 2)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
-        let depth = match w.todo.try_get(sub(n, 1)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let tag = w.todo.try_get(sub(n, 3)).unwrap_or(0);
+        let node = w.todo.try_get(sub(n, 2)).unwrap_or(0);
+        let depth = w.todo.try_get(sub(n, 1)).unwrap_or(0);
         w.todo.truncate(sub(n, 3));
         count = wrapping_add(count, 1);
         if count > 16384 {
@@ -680,14 +653,8 @@ fn text_less(in a: Ast, x: u32, y: u32, inout t1: String, inout t2: String) -> b
         n2
     };
     for i in 0..n {
-        let c1 = match b1.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
-        let c2 = match b2.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let c1 = b1.try_get(i).unwrap_or(0);
+        let c2 = b2.try_get(i).unwrap_or(0);
         if c1 != c2 {
             return c1 < c2;
         }
@@ -711,10 +678,7 @@ fn nominal_expansion(in a: Ast, limit: u64, nsym: u64) -> u64 {
     let mut names: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let items = a.m_items.len();
     for i in 0..items {
-        let it = match a.m_items.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let it = a.m_items.try_get(i).unwrap_or(0);
         let item = item_at(in a, it);
         if item.kind == 1 {
             let name = adt_at(in a, item.node).name;
@@ -734,19 +698,13 @@ fn nominal_expansion(in a: Ast, limit: u64, nsym: u64) -> u64 {
     let mut t2 = String::new();
     let n = names.len();
     for i in 1..n {
-        let x = match names.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let x = names.try_get(i).unwrap_or(0);
         let mut j = i;
         loop {
             if j == 0 {
                 break;
             }
-            let y = match names.try_get(sub(j, 1)) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
+            let y = names.try_get(sub(j, 1)).unwrap_or(0);
             if !text_less(in a, x, y, inout t1, inout t2) {
                 break;
             }
@@ -756,10 +714,7 @@ fn nominal_expansion(in a: Ast, limit: u64, nsym: u64) -> u64 {
         let set2 = names.try_set(j, x);
     }
     for i in 0..n {
-        let name = match names.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let name = names.try_get(i).unwrap_or(0);
         s.path.clear();
         let c = step(inout s, 0);
         if c != 0 {

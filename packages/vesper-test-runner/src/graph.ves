@@ -229,10 +229,7 @@ fn put_effects(inout b: ChunkSeq[u8], in a: Ast, effs: u32, inout tmp: String) {
             if j == 0 {
                 break;
             }
-            let prev = match order.try_get(wrapping_sub(j, 1)) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
+            let prev = order.try_get(wrapping_sub(j, 1)).unwrap_or(0);
             if !digest_less(in digests, i, prev) {
                 break;
             }
@@ -243,10 +240,7 @@ fn put_effects(inout b: ChunkSeq[u8], in a: Ast, effs: u32, inout tmp: String) {
     }
     put_u64(inout b, m);
     for i in 0..m {
-        let x = match order.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let x = order.try_get(i).unwrap_or(0);
         let s = wrapping_mul(x, 32);
         for k in s..wrapping_add(s, 32) {
             match digests.try_get(k) {
@@ -798,10 +792,7 @@ fn calls(in a: Ast, x: u32, inout c: Calls) {
                 if m == none() {
                     break;
                 }
-                let key = match c.method_key.try_get(widen_u64(m)) {
-                    Option::Some(v) => v,
-                    Option::None => 0,
-                };
+                let key = c.method_key.try_get(widen_u64(m)).unwrap_or(0);
                 add_callee(inout c, key);
                 m = match c.method_next.try_get(widen_u64(m)) {
                     Option::Some(v) => v,
@@ -906,10 +897,7 @@ pub fn graph(in b: Slice[u8]) -> ChunkSeq[u64] {
     let mut methods: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let items = l.ast.m_items.len();
     for i in 0..items {
-        let it = match l.ast.m_items.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let it = l.ast.m_items.try_get(i).unwrap_or(0);
         let item = l.ast.items.get_or(idx_from_raw[ItemNode](it), ItemNode { kind: 0, node: 0 });
         if item.kind == 2 {
             let f = fn_at(in l.ast, item.node);
@@ -961,28 +949,16 @@ pub fn graph(in b: Slice[u8]) -> ChunkSeq[u64] {
     grow_u32(inout c.method_head, nsym);
     let n = keys.len();
     for i in 0..n {
-        let ks = match keys.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let ks = keys.try_get(i).unwrap_or(0);
         let ok = c.known.try_set(widen_u64(ks), 1);
     }
     // The method chains, in reverse so each chain runs in declaration
     // order (the order does not matter to a set).
     let nm = methods.len() / 2;
     for q in 0..nm {
-        let name = match methods.try_get(wrapping_mul(q, 2)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
-        let entry = match methods.try_get(wrapping_add(wrapping_mul(q, 2), 1)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
-        let ks = match keys.try_get(widen_u64(entry)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let name = methods.try_get(wrapping_mul(q, 2)).unwrap_or(0);
+        let entry = methods.try_get(wrapping_add(wrapping_mul(q, 2), 1)).unwrap_or(0);
+        let ks = keys.try_get(widen_u64(entry)).unwrap_or(0);
         let head = match c.method_head.try_get(widen_u64(name)) {
             Option::Some(v) => v,
             Option::None => none(),
@@ -997,14 +973,8 @@ pub fn graph(in b: Slice[u8]) -> ChunkSeq[u64] {
     let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut hex = String::new();
     for i in 0..n {
-        let ks = match keys.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
-        let fi = match fns.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let ks = keys.try_get(i).unwrap_or(0);
+        let fi = fns.try_get(i).unwrap_or(0);
         let f = fn_at(in l.ast, fi);
         key.clear();
         let ok = l.ast.names.resolve_into(symbol_from_id(ks), inout key);
@@ -1021,10 +991,7 @@ pub fn graph(in b: Slice[u8]) -> ChunkSeq[u64] {
         let m = c.out.len();
         res.push(m);
         for j in 0..m {
-            let callee = match c.out.try_get(j) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
+            let callee = c.out.try_get(j).unwrap_or(0);
             let ok = c.seen.try_set(widen_u64(callee), 0);
             key.clear();
             let ok2 = l.ast.names.resolve_into(symbol_from_id(callee), inout key);
