@@ -17,31 +17,13 @@ use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{symbol_from_id};
 use self::budget::{Budget, valid_limits};
 use self::input::{
-    Cert,
-    Reader,
-    Tree,
-    TypeRow,
-    cert_new,
-    mapped,
-    read_cert,
-    read_exprs,
-    read_names,
-    read_names_text,
-    read_types,
-    tree_new
+    Cert, Reader, Tree, TypeRow, cert_new, mapped, read_cert, read_exprs, read_names,
+    read_names_text, read_types, tree_new
 };
 use self::search::{Builder, Proposal, builder_new, proposal_new, propose};
 use self::input::{ProofRow, TermRow};
 use self::witness::{
-    Bound,
-    Ops,
-    bind_source,
-    bound_new,
-    build_candidate,
-    ops_new,
-    rust_sizes,
-    scratch_new,
-    verify
+    Bound, Ops, bind_source, bound_new, build_candidate, ops_new, rust_sizes, scratch_new, verify
 };
 
 fn put(inout o: ChunkSeq[u8], in s: Str) {

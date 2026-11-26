@@ -15,13 +15,7 @@ use self::decl::{Decls};
 use self::frontend::{Fe};
 use self::modes::{MAX_MODE_COMBINATIONS, SCHEME_OK, SCHEME_TOO_MANY_COMBOS, derive_adt_scheme};
 use self::session_input::{
-    SessionMeta,
-    cmp_sym_ascii,
-    put_num,
-    put_str,
-    put_sym,
-    valid_ident,
-    valid_key
+    SessionMeta, cmp_sym_ascii, put_num, put_str, put_sym, valid_ident, valid_key
 };
 
 const NONE32: u32 = 4294967295;

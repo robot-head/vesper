@@ -6,58 +6,13 @@
 // lean/CodegenRv64Encoding.lean models `emit`.
 
 use self::asm::{
-    Asm,
-    FIX_AUIPC_JALR,
-    FIX_JAL,
-    bind,
-    bind_copy,
-    fixup,
-    here,
-    put_u32,
-    set_scope,
-    trap_label
+    Asm, FIX_AUIPC_JALR, FIX_JAL, bind, bind_copy, fixup, here, put_u32, set_scope, trap_label
 };
 use self::machine::{
-    C_EQ,
-    C_GE,
-    C_GT,
-    C_LE,
-    C_LT,
-    C_NE,
-    L_IN,
-    M,
-    M_ADD_CHK,
-    M_AND_R2,
-    M_BZ,
-    M_CALL,
-    M_CMP,
-    M_DIV,
-    M_ENTER,
-    M_FCMP,
-    M_FNEG,
-    M_FOP,
-    M_IMM,
-    M_JMP,
-    M_LABEL,
-    M_LD,
-    M_LDH,
-    M_LEAVE,
-    M_MUL_CHK,
-    M_NEG_CHK,
-    M_REM,
-    M_ST,
-    M_STH,
-    M_SUB_CHK,
-    M_TRAP,
-    M_TRAP_DIV_OVF,
-    M_TRAP_GT_U,
-    M_TRAP_ZERO,
-    M_WRAP,
-    M_XOR_ONE,
-    OP_ADD,
-    OP_MUL,
-    OP_SUB,
-    S_S
+    C_EQ, C_GE, C_GT, C_LE, C_LT, C_NE, L_IN, M, M_ADD_CHK, M_AND_R2, M_BZ, M_CALL, M_CMP, M_DIV,
+    M_ENTER, M_FCMP, M_FNEG, M_FOP, M_IMM, M_JMP, M_LABEL, M_LD, M_LDH, M_LEAVE, M_MUL_CHK,
+    M_NEG_CHK, M_REM, M_ST, M_STH, M_SUB_CHK, M_TRAP, M_TRAP_DIV_OVF, M_TRAP_GT_U, M_TRAP_ZERO,
+    M_WRAP, M_XOR_ONE, OP_ADD, OP_MUL, OP_SUB, S_S
 };
 
 const P_EXIT_STATUS: u8 = 0;

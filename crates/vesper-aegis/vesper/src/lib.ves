@@ -17,35 +17,25 @@
 // (FIELDS), and `a`, `b` the variant's numbers.
 use self::cbor::decode as cbor_decode_impl;
 use self::cca::{
-    cca_token_parse as cca_token_parse_impl,
-    platform_claims,
-    platform_profile,
-    realm_claims,
+    cca_token_parse as cca_token_parse_impl, platform_claims, platform_profile, realm_claims,
     realm_profile
 };
 use self::claims::{check_policy, decode_wire};
 use self::corim::{corim_meta_parse as corim_meta_parse_impl, corim_parse as corim_parse_impl};
 use self::corim_cca::{
-    cca_appraise as cca_appraise_impl,
-    corim_validate_cca as corim_validate_cca_impl
+    cca_appraise as cca_appraise_impl, corim_validate_cca as corim_validate_cca_impl
 };
 use self::cose::{
-    cose_key_p384 as cose_key_p384_impl,
-    sig_structure as cose_sig_structure_impl,
+    cose_key_p384 as cose_key_p384_impl, sig_structure as cose_sig_structure_impl,
     sign1_parse as cose_sign1_parse_impl
 };
 use self::gpa::{
-    check_access as gpa_check_access_impl,
-    covers as gpa_covers_impl,
-    first_gap as gpa_first_gap_impl,
-    first_overlap as gpa_first_overlap_impl,
-    insert as gpa_insert_impl,
-    pages as gpa_pages_impl,
-    remove as gpa_remove_impl
+    check_access as gpa_check_access_impl, covers as gpa_covers_impl,
+    first_gap as gpa_first_gap_impl, first_overlap as gpa_first_overlap_impl,
+    insert as gpa_insert_impl, pages as gpa_pages_impl, remove as gpa_remove_impl
 };
 use self::host::{
-    accept_mmap as host_accept_mmap_impl,
-    unmap as host_unmap_impl,
+    accept_mmap as host_accept_mmap_impl, unmap as host_unmap_impl,
     validate_clock as host_validate_clock_impl
 };
 use self::sgx::parse as sgx_parse_impl;

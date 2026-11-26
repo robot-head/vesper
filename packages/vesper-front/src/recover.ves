@@ -19,31 +19,9 @@
 
 use self::{Tokens, Diags, Tree};
 use self::kinds::{
-    TokenSentinel,
-    k_upper,
-    k_lower,
-    k_struct,
-    k_enum,
-    k_effect,
-    k_impl,
-    k_fn,
-    k_copy,
-    k_affine,
-    k_linear,
-    k_self_kw,
-    k_int,
-    k_l_paren,
-    k_r_paren,
-    k_l_brace,
-    k_r_brace,
-    k_l_bracket,
-    k_r_bracket,
-    k_semi,
-    k_dot,
-    k_at,
-    k_bang,
-    k_eof,
-    k_error
+    TokenSentinel, k_upper, k_lower, k_struct, k_enum, k_effect, k_impl, k_fn, k_copy, k_affine,
+    k_linear, k_self_kw, k_int, k_l_paren, k_r_paren, k_l_brace, k_r_brace, k_l_bracket,
+    k_r_bracket, k_semi, k_dot, k_at, k_bang, k_eof, k_error
 };
 use self::words::{w_use, w_model, w_pub, w_fip, w_trait, w_test, w_tiled};
 use self::util::{inc, add, narrow, byte, u8_at, u32_at, u64_at, w32, shl};

@@ -22,13 +22,7 @@ use @vesper/check-data::input::{NamesCtx, Reader, read_ctx, read_names_ctx};
 use self::ast::{exprs_new, read_fns};
 use self::control::{check_bodies, control_new};
 use self::atomics::{
-    atomics_new,
-    check_program,
-    check_world,
-    needs_prelude,
-    needs_workers,
-    read_items,
-    read_ir,
+    atomics_new, check_program, check_world, needs_prelude, needs_workers, read_items, read_ir,
     syms_new
 };
 use self::stack::{read_graph, report_words, write_report};

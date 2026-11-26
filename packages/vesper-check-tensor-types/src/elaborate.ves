@@ -2,51 +2,15 @@
 // for `@vesper/check-tensor-types` (SH2 lane 14 part 2, #1186).
 
 use @vesper/ast::{
-    Ast,
-    ExprNode,
-    TypeNode,
-    StmtNode,
-    ArgNode,
-    ClauseNode,
-    ParamNode,
-    EffectsNode,
-    EffectNode,
-    GenericNode,
-    FieldNode,
-    VariantNode,
-    AdtNode,
-    FnNode,
-    ItemNode,
-    lit_at,
-    list_len,
-    list_at,
-    expr_at,
-    type_at
+    Ast, ExprNode, TypeNode, StmtNode, ArgNode, ClauseNode, ParamNode, EffectsNode, EffectNode,
+    GenericNode, FieldNode, VariantNode, AdtNode, FnNode, ItemNode, lit_at, list_len, list_at,
+    expr_at, type_at
 };
 use @vesper/check-data::util::{push_decimal, add, inc, u32_at, u64_at, u8_at, w};
 use self::state::{St, dim_exp_at, dim_node, dim_var_at, put, put_dim, spells};
 use self::kinds::{
-    Cx,
-    at32,
-    nm,
-    paramn,
-    fnn,
-    adtn,
-    variantn,
-    fieldn,
-    genericn,
-    effectsn,
-    effectn,
-    stmtn,
-    argn,
-    clausen,
-    effdecln,
-    impln,
-    traitn,
-    confn,
-    item_at,
-    is_wire_integer,
-    elab_find
+    Cx, at32, nm, paramn, fnn, adtn, variantn, fieldn, genericn, effectsn, effectn, stmtn, argn,
+    clausen, effdecln, impln, traitn, confn, item_at, is_wire_integer, elab_find
 };
 
 const NONE: u32 = 4294967295;

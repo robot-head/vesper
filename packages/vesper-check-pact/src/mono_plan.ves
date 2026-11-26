@@ -9,31 +9,12 @@ use @vesper/check-data::types::{TyKind, TypeNode, Types, Vars, default_type, sub
 use @vesper/check-data::util::{add, n32, u32_at, u64_at, u8_at, w};
 use self::decl::{Conf, Decls, Gen, TRef, TraitRow};
 use self::mono_check::{
-    CxPool,
-    MonoDiags,
-    MonoTables,
-    check_obligations,
-    close_bounded,
-    closed,
-    diags_new,
-    get_call_cx,
-    is_dyn_generic,
-    push_diag,
-    read_mono_tables
+    CxPool, MonoDiags, MonoTables, check_obligations, close_bounded, closed, diags_new, get_call_cx,
+    is_dyn_generic, push_diag, read_mono_tables
 };
 use self::resolve::{
-    CxHeader,
-    conf_at,
-    failure_msg,
-    find_trait_idx,
-    gen_at,
-    generated_name_for_conf,
-    put_bytes,
-    put_sym_bytes,
-    select_in_cx,
-    sym_starts_with,
-    trait_at,
-    tref_at
+    CxHeader, conf_at, failure_msg, find_trait_idx, gen_at, generated_name_for_conf, put_bytes,
+    put_sym_bytes, select_in_cx, sym_starts_with, trait_at, tref_at
 };
 use self::session::{PactSession, session_open_reader};
 use self::session_input::{put_num, put_str, read_q_names, read_q_types};

@@ -5,42 +5,10 @@
 // input would stand.
 
 use self::{
-    Doc,
-    Node,
-    Ent,
-    Part,
-    NONE,
-    EOF,
-    Utf8,
-    Scalar,
-    K_STRING,
-    K_INTEGER,
-    K_FLOAT,
-    K_BOOL,
-    K_DATETIME,
-    K_ARRAY,
-    K_INLINE,
-    K_TABLE,
-    K_AOT,
-    F_FINITE,
-    F_INF,
-    F_NEG_INF,
-    F_NAN,
-    F_NEG_NAN,
-    byte_at,
-    empty_node,
-    node,
-    ent,
-    fnv,
-    lookup,
-    link,
-    unlink,
-    put_type_name,
-    put,
-    char_span,
-    render_error,
-    min_u64,
-    put_u64
+    Doc, Node, Ent, Part, NONE, EOF, Utf8, Scalar, K_STRING, K_INTEGER, K_FLOAT, K_BOOL, K_DATETIME,
+    K_ARRAY, K_INLINE, K_TABLE, K_AOT, F_FINITE, F_INF, F_NEG_INF, F_NAN, F_NEG_NAN, byte_at,
+    empty_node, node, ent, fnv, lookup, link, unlink, put_type_name, put, char_span, render_error,
+    min_u64, put_u64
 };
 
 // Contexts. Labels (`StrContext::Label`) are 1..=31; expected values are

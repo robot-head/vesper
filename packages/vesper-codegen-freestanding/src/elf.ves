@@ -2,22 +2,7 @@
 // `write_executable` and `read_executable`.
 
 use self::codes::{
-    Absent,
-    Ehdr,
-    Et,
-    Ident,
-    Out,
-    Page,
-    Pf,
-    Phdr,
-    Pt,
-    Shdr,
-    Shf,
-    Shn,
-    Sht,
-    Stb,
-    Stt,
-    SymEnt
+    Absent, Ehdr, Et, Ident, Out, Page, Pf, Phdr, Pt, Shdr, Shf, Shn, Sht, Stb, Stt, SymEnt
 };
 use self::util::{add, sub, max64, grow, push16, push32, push64, put_str, rd8, rd16, rd32, rd64};
 use self::obj::{section_header};

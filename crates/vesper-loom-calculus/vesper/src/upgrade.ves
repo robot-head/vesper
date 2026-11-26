@@ -7,28 +7,8 @@
 // CapabilityCeiling 1, DependencyCeiling 2, UnsafeFfiPolicy 3.
 use self::{Change, Diag, GNode, L, Snap};
 use self::util::{
-    Code,
-    Forbid,
-    Order,
-    Scope,
-    SortKind,
-    UpgradeCode,
-    add,
-    dep,
-    diag,
-    gnode,
-    id_at,
-    inc,
-    man,
-    mul,
-    none,
-    ord,
-    put,
-    put_id,
-    put_range,
-    sort,
-    sw,
-    udiag_ord
+    Code, Forbid, Order, Scope, SortKind, UpgradeCode, add, dep, diag, gnode, id_at, inc, man, mul,
+    none, ord, put, put_id, put_range, sort, sw, udiag_ord
 };
 use self::check::{mark, since};
 

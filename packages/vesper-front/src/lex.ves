@@ -12,21 +12,8 @@
 
 use self::{Tokens, Diags};
 use self::kinds::{
-    k_whitespace,
-    k_comment,
-    k_block_comment,
-    k_upper,
-    k_lower,
-    k_float,
-    k_int,
-    k_string,
-    k_error,
-    k_backtick,
-    k_eof,
-    k_self_kw,
-    k_state,
-    k_linear,
-    k_with
+    k_whitespace, k_comment, k_block_comment, k_upper, k_lower, k_float, k_int, k_string, k_error,
+    k_backtick, k_eof, k_self_kw, k_state, k_linear, k_with
 };
 use self::util::{inc, add, byte, u8_at, u32_at, u64_at, w32, word_at, narrow, shl};
 use self::words::{keyword, lower_word, upper_word};

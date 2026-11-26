@@ -7,38 +7,9 @@
 // calls `ident`/`source_name`.
 
 use self::build::{
-    B,
-    B_EXPLICIT,
-    P_BIND,
-    P_NAT,
-    P_CTOR,
-    P_TUPLE,
-    P_WILD,
-    S_ASSIGN,
-    S_BIND,
-    S_BIND_TYPED,
-    S_EXPR,
-    S_IF,
-    S_LET,
-    T,
-    T_APP,
-    T_ARROW,
-    T_ASCRIBE,
-    T_BINARY,
-    T_DO,
-    T_ELIMINATE,
-    T_FUN,
-    T_IF,
-    T_INFER,
-    T_MATCH,
-    T_NAT,
-    T_PRODUCT,
-    T_PROJECT,
-    T_REF,
-    T_TUPLE,
-    T_UNARY,
-    T_UPDATE,
-    T_RECORD
+    B, B_EXPLICIT, P_BIND, P_NAT, P_CTOR, P_TUPLE, P_WILD, S_ASSIGN, S_BIND, S_BIND_TYPED, S_EXPR,
+    S_IF, S_LET, T, T_APP, T_ARROW, T_ASCRIBE, T_BINARY, T_DO, T_ELIMINATE, T_FUN, T_IF, T_INFER,
+    T_MATCH, T_NAT, T_PRODUCT, T_PROJECT, T_REF, T_TUPLE, T_UNARY, T_UPDATE, T_RECORD
 };
 
 pub fn empty() -> ChunkSeq[T] {

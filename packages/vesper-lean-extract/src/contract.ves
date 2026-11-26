@@ -13,26 +13,8 @@ use self::ast::{SrcFn};
 use self::build::{B, B_EXPLICIT, D_DEF, K_DEF, OP_EQ, T, T_ARROW, T_BOOL, T_FORALL};
 use self::gen::{Y, inferred};
 use self::tm::{
-    app,
-    app1,
-    app_args,
-    ascribe,
-    empty,
-    explicit,
-    field,
-    get,
-    global,
-    global2,
-    lambda,
-    lref,
-    named,
-    named_arg,
-    named_arg_sym,
-    pos,
-    product,
-    record,
-    sref,
-    tuple_get
+    app, app1, app_args, ascribe, empty, explicit, field, get, global, global2, lambda, lref, named,
+    named_arg, named_arg_sym, pos, product, record, sref, tuple_get
 };
 use self::ty::{emit_ty, spells, ty_check};
 

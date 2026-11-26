@@ -6,40 +6,11 @@
 // `is64` picks binary64 or binary32. pi and ln 2 come from a cache the
 // caller lends (src/crmath.rs keeps one per thread, as the Rust build does).
 use self::bignum::{
-    Big,
-    big_abs,
-    big_add,
-    big_add_assign,
-    big_add_u64,
-    big_bit0,
-    big_bits,
-    big_cmp,
-    big_copy,
-    big_div,
-    big_div_small,
-    big_div_u64,
-    big_div_u64_assign,
-    big_from_limbs,
-    big_i64,
-    big_is_neg,
-    big_is_zero,
-    big_limbs,
-    big_low_u64,
-    big_mod4,
-    big_mul,
-    big_mul_i64,
-    big_mul_small,
-    big_neg,
-    big_neg_assign,
-    big_shl,
-    big_shr,
-    big_shr_trunc_assign,
-    big_store,
-    big_sqrt,
-    big_sub,
-    big_sub_assign,
-    big_u64,
-    big_zero
+    Big, big_abs, big_add, big_add_assign, big_add_u64, big_bit0, big_bits, big_cmp, big_copy,
+    big_div, big_div_small, big_div_u64, big_div_u64_assign, big_from_limbs, big_i64, big_is_neg,
+    big_is_zero, big_limbs, big_low_u64, big_mod4, big_mul, big_mul_i64, big_mul_small, big_neg,
+    big_neg_assign, big_shl, big_shr, big_shr_trunc_assign, big_store, big_sqrt, big_sub,
+    big_sub_assign, big_u64, big_zero
 };
 use self::util::{g32, inc, shl_u64, u};
 

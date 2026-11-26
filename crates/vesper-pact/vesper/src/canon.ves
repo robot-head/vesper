@@ -2,34 +2,9 @@
 // and environments, and the variable visitor (`visit_goal_vars`).
 use self::{S};
 use self::term::{
-    b_var,
-    e_env,
-    field_a,
-    field_b,
-    field_c,
-    g_cap,
-    g_impl,
-    g_mode,
-    g_row,
-    inc,
-    intern,
-    intern_with_kids,
-    k_list,
-    k_slist,
-    kid,
-    kid_count,
-    l_cap,
-    l_eff,
-    m_var,
-    none,
-    t_ctor,
-    t_proj,
-    t_ref,
-    t_var,
-    tag_of,
-    vidx,
-    vkind,
-    word_at
+    b_var, e_env, field_a, field_b, field_c, g_cap, g_impl, g_mode, g_row, inc, intern,
+    intern_with_kids, k_list, k_slist, kid, kid_count, l_cap, l_eff, m_var, none, t_ctor, t_proj,
+    t_ref, t_var, tag_of, vidx, vkind, word_at
 };
 use self::fold::{cn_begin, run};
 use self::program::{row_dup};
