@@ -1557,18 +1557,30 @@ fn option_method_slot(in tok: Slice[u8]) -> u64 {
     4
 }
 
-// Where `/*` at `pos` ends, past its `*/` (or at the end of `src`).
+// Where `/*` at `pos` ends, past the `*/` that closes it (or at the end
+// of `src`). Block comments nest, as in the lexer.
 fn block_comment_end(in src: Slice[u8], pos: u64) -> u64 {
     let n = src.len();
+    let mut depth: u64 = 1;
     let mut p = wrapping_add(pos, 2);
     loop {
         if wrapping_add(p, 1) >= n {
             return n;
         }
-        if byte_at(in src, p) == 42 && byte_at(in src, wrapping_add(p, 1)) == 47 {
-            return wrapping_add(p, 2);
+        let c = byte_at(in src, p);
+        let d = byte_at(in src, wrapping_add(p, 1));
+        if c == 47 && d == 42 {
+            depth = wrapping_add(depth, 1);
+            p = wrapping_add(p, 2);
+        } else if c == 42 && d == 47 {
+            depth = wrapping_sub(depth, 1);
+            p = wrapping_add(p, 2);
+            if depth == 0 {
+                return p;
+            }
+        } else {
+            p = wrapping_add(p, 1);
         }
-        p = wrapping_add(p, 1);
     }
 }
 
@@ -1598,9 +1610,13 @@ fn scan_option_methods(
         }
         let (next_p, skipped) = next_code_byte(in src, pos);
         if skipped != 0 {
+            // A string literal ends a `.` or `fn` run; a line comment is
+            // trivia between tokens, like whitespace.
+            if byte_at(in src, pos) == 34 {
+                after_dot = false;
+                after_fn = false;
+            }
             pos = next_p;
-            after_dot = false;
-            after_fn = false;
             continue;
         }
         let b = byte_at(in src, pos);
@@ -2142,5 +2158,14 @@ test {
         );
         let (_, other) = option_scan(in "impl Foo { fn or(self) -> bool { true } }".as_bytes());
         u == 1 && d == 10 && other == 0
+    }
+
+    fn test_comments_between_tokens_are_trivia() -> bool {
+        let (u, d) = option_scan(
+            in "impl [T: mod copy] Option[T] { fn // c\n unwrap_or(self, d: T) -> T { d } } fn f() { o.unwrap_or(0) }"
+                .as_bytes()
+        );
+        let (nested, _) = option_scan(in "/* a /* b */ \" */ fn f() { o.unwrap_or(0) }".as_bytes());
+        u == 10 && d == 10 && nested == 10
     }
 }
