@@ -1,7 +1,7 @@
 //! End-to-end models from GGUF and safetensors, memory-mapped, and in the
 //! quantized formats. The FP32 reference text is llama2.c's recorded output
 //! (models/README.md); stories260K-q8_0.gguf was written by gguf-py 0.19.0
-//! (fixtures/make_interop.py).
+//! (reproduced by `aspect crate tensor make-interop`).
 use std::path::PathBuf;
 
 use vesper_tensor::attention::AttentionMode;

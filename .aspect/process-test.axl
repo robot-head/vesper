@@ -1,0 +1,24 @@
+"""Verify native command construction and exit status handling."""
+
+load("./lib/process.axl", "capture", "exit_code", "scratch_dir")
+
+def _equal(actual, expected):
+    if actual != expected:
+        fail("Expected %r, got %r" % (expected, actual))
+
+def _test(ctx):
+    root = scratch_dir(ctx, "vesper-process-test-") + "/repo with spaces"
+    ctx.std.fs.create_dir_all(root)
+    values = ["--flag", "", "two words", "--", "*"]
+    _equal(capture(ctx, "printf", ["[%s]\\n"] + values, root), "[--flag]\n[]\n[two words]\n[--]\n[*]\n")
+    _equal(capture(ctx, "pwd", [], root).strip(), root)
+    _equal(capture(ctx, "printenv", ["VESPER_TEST_MODE"], root, {"VESPER_TEST_MODE": "test value"}), "test value\n")
+    for code, signal, expected in [(0, None, 0), (2, None, 2), (255, None, 255), (None, 9, 137), (None, 15, 143), (None, None, 128)]:
+        _equal(exit_code(struct(code = code, signal = signal)), expected)
+    return 0
+
+aspect_unit = task(
+    kind = "aspect-unit", group = ["ci", "tests"],
+    summary = "Test native process argument forwarding and status decoding",
+    implementation = _test,
+)

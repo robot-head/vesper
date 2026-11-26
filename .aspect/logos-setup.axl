@@ -1,0 +1,376 @@
+"""Assemble the pinned Logos checker and publish only a genuine sealed receipt."""
+
+load("@std//time.axl", "monotonic_ns", "sleep_iter")
+load("./bounded-stdio.axl", "utf8")
+load("./lib/logos-sources.axl", "ADAPTERS", "CARGO_RECIPE", "CHECKER", "EXPORTER", "KERNEL", "LEAN_COMMIT", "PATCHES", "PROFILE", "RECEIPT_BYTES", "RELEASE", "SOURCE_BYTES", "SOURCE_FILES", "UPSTREAM", "read_bounded", "real_directory", "source_paths")
+load("./lib/process.axl", "exit_code", "root_path")
+load("./lib/strict-json.axl", "decode_object")
+
+_LOG_BYTES = 65536
+_SECOND = 1000000000
+_OPTIONS = ["directory", "lean", "lake", "git", "cargo", "driver"]
+_USAGE = "aspect maintenance logos42 setup -- --directory DIRECTORY --driver LOGOS42 --lean LEAN --lake LAKE --git GIT --cargo CARGO"
+_PROXIES = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"]
+_BUILD_ARGV = ["{lake}", "build", "logos42"]
+_RESERVED = ["setup-inputs.json", "build.stdout", "build.stderr", "setup-receipt.json"]
+
+def _require(condition, detail):
+    if not condition:
+        fail(detail)
+
+def _error(ctx, detail, status = 1):
+    ctx.std.process.exit(status, "logos42 setup refused: " + detail[:4096])
+
+def _environment(host):
+    keys = [
+        "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT",
+        "TEMP", "TMP", "TMPDIR", "ELAN_HOME", "PATH", "CARGO_HOME", "RUSTUP_HOME", "SSL_CERT_FILE", "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO", "GIT_SSL_CAPATH",
+    ] + _PROXIES
+    env = {key: host[key] for key in keys if key in host}
+    env.update(GIT_CONFIG_NOSYSTEM = "1", GIT_CONFIG_GLOBAL = "/dev/null", GIT_CONFIG_SYSTEM = "/dev/null",
+               GIT_TERMINAL_PROMPT = "0", LC_ALL = "C", LANG = "C", LEAN_NUM_THREADS = "1")
+    return env
+
+def _child(ctx, argv, cwd, host, env):
+    child = ctx.std.process.command(argv[0]).args(argv[1:]).current_dir(cwd).stdin("null")
+    for key in host:
+        if key not in env:
+            child.env(key, None)
+    for key, value in env.items():
+        child.env(key, value)
+    return child
+
+def _realpath(ctx, ctx_work, path, host, env):
+    child = _child(ctx, ["/usr/bin/realpath", path], ctx_work, host, env).stdout("piped").stderr("piped").spawn().wait_with_output()
+    _require(child.status.success, "Cannot resolve path: " + path)
+    result = child.stdout.rstrip("\r\n")
+    _require(result.startswith("/"), "Expected an absolute path: " + path)
+    return result
+
+def _absolute(cwd, path, host):
+    if path.startswith("~/"):
+        home = host.get("HOME")
+        _require(home, "HOME is required to resolve " + path)
+        return home + path[1:]
+    return root_path(cwd, path)
+
+def _parent(path):
+    return path.rsplit("/", 1)[0] or "/"
+
+def _destination(ctx, cwd, value, host, env):
+    raw = _absolute(cwd, value.rstrip("/"), host)
+    name = raw.rsplit("/", 1)[-1]
+    _require(name and name not in [".", ".."], "destination must name a new directory")
+    parent = _realpath(ctx, cwd, _parent(raw), host, env)
+    real_directory(ctx, parent)
+    path = parent.rstrip("/") + "/" + name
+    _require(ctx.std.fs.try_metadata(path) == None, "destination already exists; setup never overwrites it")
+    return path
+
+def _launcher(ctx, cwd, value, host, env, required_name = None):
+    if "/" not in value:
+        found = ctx.std.process.which(value)
+        _require(found, "executable unavailable: " + value)
+        value = found
+    raw = _absolute(cwd, value, host)
+    basename = raw.rsplit("/", 1)[-1]
+    _require(required_name == None or basename == required_name, "expected %s invocation basename" % required_name)
+    parent = _realpath(ctx, cwd, _parent(raw), host, env)
+    real_directory(ctx, parent)
+    selected = parent.rstrip("/") + "/" + basename
+    _require(ctx.std.process.which(selected), "executable unavailable: " + selected)
+    return selected
+
+def _digest(value):
+    return type(value) == "list" and len(value) == 32 and all([type(byte) == "int" and 0 <= byte and byte <= 255 for byte in value])
+
+def _recipe(ctx, root):
+    tool = root + "/tools/logos42"
+    pins = decode_object(utf8(read_bounded(ctx, tool + "/pins.json", 16384)))
+    immutable = {
+        "schema": 3, "profile": PROFILE, "upstream_commit": UPSTREAM, "exporter_commit": EXPORTER,
+        "lean_release": RELEASE, "lean_commit": LEAN_COMMIT, "build_argv": _BUILD_ARGV, "cargo_build_argv": CARGO_RECIPE,
+        "checker_relative_path": CHECKER, "kernel_relative_path": KERNEL,
+    }
+    digest_names = ["known_fixes_blake3", "source_manifest_blake3", "resource_bundle_blake3"]
+    _require(sorted(pins) == sorted(immutable.keys() + digest_names + ["patches", "source_overlays"]) and
+             all([pins[key] == value for key, value in immutable.items()]), "pins differ from the immutable Logos recipe")
+    _require(all([_digest(pins[key]) for key in digest_names]), "invalid pin digest representation")
+    patches = pins["patches"]
+    _require(type(patches) == "list" and len(patches) == len(PATCHES), "invalid fixed primitive port")
+    for index, patch in enumerate(patches):
+        _require(type(patch) == "dict" and patch.get("path") == PATCHES[index] and _digest(patch.get("blake3")), "invalid fixed primitive port")
+    overlays = pins["source_overlays"]
+    _require(type(overlays) == "list" and len(overlays) == len(ADAPTERS), "invalid adapter overlay count")
+    for index, overlay in enumerate(overlays):
+        path = ADAPTERS[index]
+        _require(type(overlay) == "dict" and sorted(overlay) == ["blake3", "destination", "source"] and
+                 overlay["source"] == "tools/logos42/" + path and overlay["destination"] == path and _digest(overlay["blake3"]),
+                 "invalid fixed adapter overlay")
+    for path in ["source-manifest.json", "resource-source-manifest.json", "known-fixes.json"]:
+        read_bounded(ctx, tool + "/" + path, RECEIPT_BYTES)
+    return [read_bounded(ctx, root + "/" + path, RECEIPT_BYTES) for path in PATCHES]
+
+def _remove(ctx, path):
+    if ctx.std.fs.exists(path):
+        ctx.std.fs.remove_dir_all(path)
+
+def _write_new(ctx, path, data):
+    _require(ctx.std.fs.try_metadata(path) == None, "setup output already exists: " + path)
+    ctx.std.fs.create_dir_all(_parent(path))
+    stream = ctx.std.fs.create(path)
+    size = stream.write(data)
+    stream.close()
+    _require(size == len(data), "short write: " + path)
+
+def _kill_group(ctx, h, id):
+    # Child.kill handles a live process and its group. The external kill also
+    # reaches a group whose leader has exited while a descendant still runs.
+    argv = ["/bin/kill", "-KILL", "--", "-" + str(id)]
+    return _child(ctx, argv, h.scratch, h.host, h.env).stdout("null").stderr("null").status().success
+
+def _bounded(ctx, h, argv, cwd = None, cap = _LOG_BYTES, seconds = None):
+    started = monotonic_ns()
+    _require(started < h.deadline, "setup deadline exceeded")
+    deadline = min(h.deadline, started + seconds * _SECOND) if seconds != None else h.deadline
+    stdout, stderr = h.scratch + "/command.stdout", h.scratch + "/command.stderr"
+    child = _child(ctx, argv, cwd or h.scratch, h.host, h.env).process_group(0).stdout(ctx.std.fs.create(stdout)).stderr(ctx.std.fs.create(stderr)).spawn()
+    id = child.id
+    status = None
+    reason = None
+    for _ in sleep_iter(10):
+        status = child.try_wait()
+        if ctx.std.fs.metadata(stdout).size > cap or ctx.std.fs.metadata(stderr).size > _LOG_BYTES:
+            reason = "subprocess output cap exceeded"
+            break
+        if monotonic_ns() >= deadline:
+            reason = "subprocess deadline exceeded"
+            break
+        if status != None:
+            break
+    group_remained = _kill_group(ctx, h, id)
+    if status == None:
+        child.kill()
+        status = child.wait()
+    _require(not reason, reason)
+    _require(not group_remained, "subprocess left live descendants")
+    stderr_data = read_bounded(ctx, stderr, _LOG_BYTES)
+    if not status.success:
+        detail = str(stderr_data)[-2048:]
+        for key in _PROXIES:
+            value = h.env.get(key)
+            if value:
+                detail = detail.replace(value, "<proxy>")
+        fail("%s exited %d: %s" % (argv[0].rsplit("/", 1)[-1], exit_code(status), detail))
+    return read_bounded(ctx, stdout, cap), stderr_data
+
+def _probe(ctx, h, lean, lake):
+    def text(executable, flag):
+        return utf8(_bounded(ctx, h, [executable, flag], seconds = 30)[0]).strip()
+
+    version = text(lean, "--version")
+    _require("version 4.35.0" in version and LEAN_COMMIT in version, "Lean release/commit identity mismatch")
+    sysroot = _realpath(ctx, h.scratch, text(lean, "--print-prefix"), h.host, h.env)
+    real_directory(ctx, sysroot)
+    actual_lean = _launcher(ctx, h.scratch, sysroot + "/bin/lean", h.host, h.env, "lean")
+    actual_lake = _launcher(ctx, h.scratch, sysroot + "/bin/lake", h.host, h.env, "lake")
+    h.env["LEAN_SYSROOT"] = sysroot
+    _require(text(actual_lean, "--version") == version and
+             _realpath(ctx, h.scratch, text(actual_lean, "--print-prefix"), h.host, h.env) == sysroot,
+             "launcher and actual Lean disagree")
+    lake_version = text(lake, "--version")
+    _require("4.35.0" in lake_version and text(actual_lake, "--version") == lake_version, "Lake is not the selected Lean 4.35 tool")
+    return actual_lean, actual_lake
+
+def _git(ctx, h, executable, args):
+    return _bounded(ctx, h, [executable, "-c", "core.hooksPath=" + h.scratch + "/hooks", "-c", "core.autocrlf=false"] + args)[0]
+
+def _checkout(ctx, h, git, directory, url, commit, selected = []):
+    _git(ctx, h, git, ["init", "--quiet", directory])
+    prefix = ["-C", directory]
+    _git(ctx, h, git, prefix + ["fetch", "--quiet", "--depth=1", "--no-tags", url, commit])
+    if selected:
+        _git(ctx, h, git, prefix + ["sparse-checkout", "set", "--no-cone"] + selected)
+    _git(ctx, h, git, prefix + ["checkout", "--quiet", "--detach", "FETCH_HEAD"])
+    head = utf8(_git(ctx, h, git, prefix + ["rev-parse", "--verify", "HEAD"])).strip()
+    _require(head == commit, "detached Git source identity mismatch")
+
+def _copy_sources(ctx, source, target):
+    pending = [""]
+    count = 0
+    for _ in range(SOURCE_FILES * 4 + 1):
+        if not pending:
+            break
+        relative = pending.pop()
+        path = source + "/" + relative
+        real_directory(ctx, path.rstrip("/"))
+        for entry in ctx.std.fs.read_dir(path):
+            count += 1
+            _require(count <= SOURCE_FILES * 4, "copy source entry cap exceeded")
+            name = relative + entry.path
+            _require(not entry.is_symlink, "symlink source entry: " + name)
+            if entry.is_dir:
+                pending.append(name + "/")
+            else:
+                _write_new(ctx, target + "/" + name, read_bounded(ctx, source + "/" + name, SOURCE_BYTES))
+
+def _assemble(ctx, h, root, stage, git, patches):
+    upstream = h.scratch + "/logos"
+    packages = ["logicaffeine_kernel", "logicaffeine_base"]
+    _checkout(ctx, h, git, upstream, "https://github.com/Brahmastra-Labs/logicaffeine.git", UPSTREAM,
+              ["/crates/" + name + "/" for name in packages])
+    for name in packages:
+        _copy_sources(ctx, upstream + "/crates/" + name, stage + "/vendor/logos/crates/" + name)
+    exporter = h.scratch + "/exporter"
+    _checkout(ctx, h, git, exporter, "https://github.com/leanprover/lean4export.git", EXPORTER)
+    for source, target in [("Export.lean", "Export.lean"), ("LICENSE", "EXPORT-LICENSE")]:
+        _write_new(ctx, stage + "/" + target, read_bounded(ctx, exporter + "/" + source, RECEIPT_BYTES))
+    for index, data in enumerate(patches):
+        path = h.scratch + "/patch-%d.patch" % index
+        _write_new(ctx, path, data)
+        _git(ctx, h, git, ["-C", stage, "apply", "--check", "--whitespace=error", path])
+        _git(ctx, h, git, ["-C", stage, "apply", "--whitespace=error", path])
+    tool = root + "/tools/logos42"
+    _copy_sources(ctx, tool + "/controls", stage + "/controls")
+    for path in ADAPTERS:
+        target = stage + "/" + path
+        data = read_bounded(ctx, tool + "/" + path, RECEIPT_BYTES)
+        if ctx.std.fs.try_metadata(target) != None:
+            _require(read_bounded(ctx, target, RECEIPT_BYTES) == data, "adapter overlay collision")
+        else:
+            _write_new(ctx, target, data)
+    _require(not any([ctx.std.fs.try_metadata(stage + "/" + name) != None for name in _RESERVED]),
+             "reserved setup root filename already exists in source")
+
+def _build(ctx, h, stage, driver, lean, lake, git, cargo):
+    before = source_paths(ctx, stage)
+    _bounded(ctx, h, [driver, "--verify-setup-source", stage])
+    argv = [lake] + _BUILD_ARGV[1:]
+    cargo_argv = [cargo] + CARGO_RECIPE[1:]
+    h.env["PATH"] = _parent(cargo) + ":" + (h.env.get("PATH") or "")
+    rustc = _parent(cargo) + "/rustc"
+    if ctx.std.fs.exists(rustc) and ctx.std.fs.metadata(rustc).is_file:
+        h.env["RUSTC"] = rustc
+    _bounded(ctx, h, [cargo, "--version"], seconds = 30)
+    _bounded(ctx, h, [cargo, "fetch", "--locked"], cwd = stage)
+    lean_out, lean_err = _bounded(ctx, h, argv, cwd = stage)
+    rust_out, rust_err = _bounded(ctx, h, cargo_argv, cwd = stage)
+    stdout, stderr = lean_out + rust_out, lean_err + rust_err
+    _require(len(stdout) <= _LOG_BYTES and len(stderr) <= _LOG_BYTES, "combined build log cap exceeded")
+    _require(source_paths(ctx, stage) == before, "build changed the source file set")
+    _write_new(ctx, stage + "/build.stdout", stdout)
+    _write_new(ctx, stage + "/build.stderr", stderr)
+    inputs = {
+        "schema": 2, "lean": lean, "lake": lake, "git": git, "cargo": cargo,
+        "build_argv": argv, "cargo_build_argv": cargo_argv, "build_exit": 0,
+        "build_stdout": "build.stdout", "build_stderr": "build.stderr",
+    }
+    encoded = bytes(json.encode(inputs) + "\n")
+    _require(len(encoded) <= 16384 and len(bytes("".join(argv))) <= 8192, "setup input cap exceeded")
+    _write_new(ctx, stage + "/setup-inputs.json", encoded)
+    sealed, _ = _bounded(ctx, h, [driver, "--seal-setup", stage], cap = RECEIPT_BYTES)
+    receipt = read_bounded(ctx, stage + "/setup-receipt.json", RECEIPT_BYTES)
+    _require(decode_object(utf8(sealed)) == decode_object(utf8(receipt)), "genuine sealer stdout and receipt differ")
+
+def setup(ctx, root, cwd, directory, driver, lean, lake, git, cargo):
+    host = dict(ctx.std.env.vars())
+    env = _environment(host)
+    destination = _destination(ctx, cwd, directory, host, env)
+    patches = _recipe(ctx, root)
+    driver = _launcher(ctx, cwd, driver, host, env)
+    lean = _launcher(ctx, cwd, lean, host, env, "lean")
+    lake = _launcher(ctx, cwd, lake, host, env, "lake")
+    git = _launcher(ctx, cwd, git, host, env)
+    cargo = _launcher(ctx, cwd, cargo, host, env, "cargo")
+    name = destination.rsplit("/", 1)[-1]
+    parent = _parent(destination)
+    stage = ctx.std.fs.mkdtemp(parent = parent, prefix = "." + name + ".stage-")
+    ctx.defer(lambda: _remove(ctx, stage))
+    scratch = ctx.std.fs.mkdtemp(parent = parent, prefix = "." + name + ".work-")
+    ctx.defer(lambda: _remove(ctx, scratch))
+    ctx.std.fs.create_dir(scratch + "/hooks")
+    h = struct(scratch = scratch, host = host, env = env, deadline = monotonic_ns() + 1800 * _SECOND)
+    actual_lean, actual_lake = _probe(ctx, h, lean, lake)
+    _assemble(ctx, h, root, stage, git, patches)
+    _build(ctx, h, stage, driver, actual_lean, actual_lake, git, cargo)
+    _require(ctx.std.fs.try_metadata(destination) == None, "destination appeared during setup; refusing publication")
+    _bounded(ctx, h, [driver, "--publish-setup", stage, destination])
+    ctx.std.io.stdout.write("Published sealed tool root: " + destination + "\n")
+
+def _cli(ctx):
+    options = {}
+    pending = None
+    for value in ctx.args.tool_args:
+        if pending:
+            if value.startswith("--"):
+                _error(ctx, "missing value for --" + pending, 2)
+            options[pending] = value
+            pending = None
+        elif value in ["--help", "-h"]:
+            ctx.std.io.stdout.write(_USAGE + "\n")
+            return 0
+        else:
+            flag, equals, argument = value.partition("=")
+            name = flag.removeprefix("--")
+            if not flag.startswith("--") or name not in _OPTIONS or name in options:
+                _error(ctx, "duplicate or unknown option " + value, 2)
+            if equals:
+                options[name] = argument
+            else:
+                pending = name
+    if pending or not all([options.get(name) for name in _OPTIONS]):
+        _error(ctx, _USAGE, 2)
+    root, cwd = ctx.std.env.aspect_root_dir(), ctx.std.env.current_dir()
+    error, _ = catch(setup, ctx, root, cwd, **options)
+    if error != None:
+        _error(ctx, str(error))
+    return 0
+
+logos_setup = task(
+    kind = "setup", group = ["maintenance", "logos42"],
+    summary = "Assemble and publish the sealed Logos checker",
+    implementation = _cli, args = {"tool_args": args.trailing_var_args(description = _USAGE)},
+)
+
+lean4lean_setup = logos_setup.alias(
+    kind = "setup", group = ["maintenance", "lean4lean42"],
+    summary = "Set up Logos under the former Lean4Lean task name",
+)
+
+def _test(ctx):
+    root = ctx.std.env.aspect_root_dir()
+    patches = _recipe(ctx, root)
+    _require(len(patches) == 1 and len(patches[0]) > 0, "Pinned primitive patch missing")
+    host = dict(ctx.std.env.vars())
+    env = _environment(dict(host, LEAN_PATH = "injected", GIT_CONFIG_GLOBAL = "injected", RUSTFLAGS = "injected"))
+    _require("RUSTFLAGS" not in env and "LEAN_PATH" not in env and env["GIT_CONFIG_GLOBAL"] == "/dev/null", "Setup tool environment is not isolated")
+    work = ctx.std.fs.mkdtemp(prefix = "vesper-logos-setup-test-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(work))
+    candidate = _destination(ctx, root, work + "/directory with spaces", host, env)
+    _require(candidate.endswith("/directory with spaces"), "Destination lost its basename")
+    ctx.std.fs.create_dir(candidate)
+    error, _ = catch(_destination, ctx, root, candidate, host, env)
+    _require(error != None and "never overwrites" in str(error), "Setup must refuse an existing directory")
+    probe = struct(scratch = work, host = host, env = env, deadline = monotonic_ns() + 30 * _SECOND)
+    stdout, _ = _bounded(ctx, probe, ["/usr/bin/printf", "%s", "original bytes"])
+    _require(stdout == bytes("original bytes"), "Owned process output changed")
+    error, _ = catch(_bounded, ctx, probe, ["/usr/bin/printf", "%s", "over cap"], cap = 2)
+    _require(error != None and "output cap" in str(error), "Over-cap subprocess must be refused")
+    sleeper = ctx.std.process.which("sleep")
+    error, _ = catch(_bounded, ctx, probe, [sleeper, "60"], seconds = 0)
+    _require(error != None and "deadline" in str(error), "Over-deadline subprocess must be terminated")
+    source = work + "/source"
+    ctx.std.fs.create_dir_all(source + "/deep")
+    _write_new(ctx, source + "/deep/input", bytes([0, 128, 255]))
+    _copy_sources(ctx, source, work + "/copy")
+    _require(read_bounded(ctx, work + "/copy/deep/input", 3) == bytes([0, 128, 255]), "Copied source changed bytes")
+    error, _ = catch(_write_new, ctx, work + "/copy/deep/input", bytes("different bytes"))
+    _require(error != None and "already exists" in str(error), "Setup allowed a source collision")
+    ctx.std.io.stdout.write("Passed Logos setup recipe, child limits and publication boundary tests\n")
+    return 0
+
+test_logos_setup = task(
+    kind = "logos-setup", group = ["ci", "tests"], summary = "Test Logos setup pins, process bounds and file handling",
+    implementation = _test,
+)

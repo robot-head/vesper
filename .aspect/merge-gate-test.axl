@@ -1,0 +1,134 @@
+"""Exercise the merge gate against Git histories and a simulated Actions API."""
+
+load("./lib/process.axl", "check", "scratch_dir")
+load("./merge-gate.axl", "blockers", "gate_workflow")
+
+_CENSUS = "docs/maintenance/rust-census.md"
+
+def _equal(actual, expected):
+    if actual != expected:
+        fail("Expected %r, got %r" % (expected, actual))
+
+def _git_cases(ctx):
+    root = scratch_dir(ctx, "vesper-merge-gate-test-")
+
+    def git(*argv):
+        check(ctx, "git", list(argv), root)
+
+    def commit(name, content):
+        ctx.std.fs.write(root + "/" + name, content)
+        git("add", "--", name)
+        git("commit", "-qm", name)
+
+    def reasons(number, head, base = "main", prs = None):
+        return blockers(ctx, root, number, base, head, "main", listed if prs == None else prs)
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.name", "Fixture")
+    git("config", "user.email", "fixture@example.invalid")
+    git("config", "commit.gpgsign", "false")
+    commit("a.txt", "base\n")
+    git("checkout", "-qb", "parent")
+    commit("parent.txt", "parent\n")
+    git("checkout", "-qb", "child", "main")
+    commit("child.txt", "child\n")
+    git("merge", "-q", "--no-edit", "parent")
+    git("checkout", "-qb", "clash", "main")
+    commit("a.txt", "clash\n")
+    git("checkout", "-q", "main")
+    commit("a.txt", "main\n")
+    listed = [{"number": 1, "ref": "parent"}, {"number": 2, "base": "main", "ref": "child"}, {"number": 3, "base": "main", "ref": "clash"}]
+    _equal(reasons(1, "parent"), [])
+    _equal(reasons(1, "parent", base = "child"), ["its base is child, not main"])
+    _equal(reasons(2, "child"), ["it carries 1 commit(s) of open PR #1"])
+    _equal(reasons(2, "child", prs = [{"number": 1, "base": "parent", "ref": "parent"}]), [])
+    _equal(reasons(3, "clash"), ["it conflicts with main"])
+    git("merge", "-q", "--no-edit", "parent")
+    _equal(reasons(2, "child"), [])
+
+    ctx.std.fs.create_dir_all(root + "/docs/maintenance")
+    git("checkout", "-qb", "refresh")
+    commit(_CENSUS, "old\n")
+    _equal(reasons(4, "refresh"), [])
+    git("checkout", "-q", "main")
+    git("merge", "-q", "--no-edit", "refresh")
+    git("checkout", "-qb", "lane")
+    commit("file with spaces.txt", "other work\n")
+    commit(_CENSUS, "lane\n")
+    census = reasons(5, "lane")
+    _equal(len(census), 1)
+    if not census[0].startswith("it changes " + _CENSUS):
+        fail("Expected a generated census blocker")
+    git("checkout", "-q", "main")
+    commit(_CENSUS, "refreshed\n")
+    git("checkout", "-q", "lane")
+    git("checkout", "main", "--", _CENSUS)
+    git("commit", "-qm", "take main's census")
+    _equal(reasons(5, "lane"), [])
+
+def _workflow_case(reasons, open_prs, candidates):
+    calls = []
+    published = {}
+
+    def run(tool, args):
+        calls.append((tool, args))
+
+    def get(endpoint, query):
+        calls.append(("get", endpoint))
+        if "/pulls?" in endpoint:
+            _equal(query, '.[] | [.number, .base.ref] | @tsv')
+            return open_prs
+        _equal(query, '.workflow_runs[] | [.id, .status] | @tsv')
+        return "51\tqueued\n52\tcompleted\n53\tin_progress\n"
+
+    def cancel(endpoint):
+        calls.append(("cancel", endpoint))
+
+    def analyze(prs):
+        _equal(prs, candidates)
+        return reasons
+
+    def append(path, value):
+        published[path] = published.get(path, "") + value
+
+    settings = struct(repo = "owner/repo", number = 9, head = "exact-sha", run_id = "51", output = "output", summary = "summary")
+    output = []
+    result = gate_workflow(settings, run, get, cancel, analyze, append, lambda text: output.append(text))
+    repo = "repos/owner/repo"
+    preparation = [
+        ("git", ["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"]),
+        ("get", repo + "/pulls?state=open&per_page=100"),
+    ]
+    if open_prs:
+        preparation.append(("git", ["fetch", "--quiet", "origin", "+refs/pull/8/head:refs/gate/pr/8", "+refs/pull/9/head:refs/gate/pr/9"]))
+    if not reasons:
+        _equal(result, 0)
+        _equal(calls, preparation)
+        _equal(published, {"output": "blocked=false\n"})
+        _equal(output, ["PR #9 can merge: CI runs\n"])
+        return
+    _equal(result, 1)
+    _equal(published["output"], "blocked=true\n")
+    _equal(published["summary"], "### CI skipped: this pull request cannot merge yet\nPR #9 cannot merge yet: conflict\n\nPush again once the parent has merged or the conflict is fixed.\n")
+    page = ("get", repo + "/actions/runs?head_sha=exact-sha&per_page=100")
+    sibling = ("cancel", repo + "/actions/runs/53/cancel")
+    delay = ("sleep", ["20"])
+    _equal(calls, preparation + [page, sibling, delay, page, sibling, delay, page, sibling, ("cancel", repo + "/actions/runs/51/cancel")])
+    _equal(output, ["PR #9 cannot merge yet: conflict\n"] + ["cancelling run 53\n"] * 3)
+
+def _test(ctx: TaskContext) -> int:
+    _git_cases(ctx)
+    _workflow_case([], "", [])
+    _workflow_case(["conflict"], "8\tmain\n9\tother\n", [
+        {"number": 8, "base": "main", "ref": "refs/gate/pr/8"},
+        {"number": 9, "base": "other", "ref": "refs/gate/pr/9"},
+    ])
+    ctx.std.io.stdout.write("Passed merge gate Git histories and workflow cases\n")
+    return 0
+
+test_merge_gate = task(
+    kind = "merge-gate",
+    group = ["ci", "tests"],
+    summary = "Test the native merge gate and its workflow effects",
+    implementation = _test,
+)

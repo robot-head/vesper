@@ -4,6 +4,10 @@ use self::unstable::{
     is_sorted
 };
 use self::stable::stable_sort;
+use @vesper-std/sugar::{
+    guard,
+    when
+};
 
 // `f64::total_cmp` as an `Ord` model: the bit pattern as an `i64`, with the
 // magnitude bits flipped for negative values, compares as the total order
@@ -71,20 +75,14 @@ pub fn f32_bits_from_key(k: u32) -> u32 {
 pub fn sort_f32_bits(inout s: Slice[u32]) {
     let n = s.len();
     for i in 0..n {
-        match s.try_get(i) {
-            Option::Some(b) => {
-                s.try_set(i, total_key_f32_bits(b));
-            },
-            Option::None => {},
+        when let Option::Some(b) = s.try_get(i) {
+            s.try_set(i, total_key_f32_bits(b));
         }
     }
     sort(inout s);
     for i in 0..n {
-        match s.try_get(i) {
-            Option::Some(k) => {
-                s.try_set(i, f32_bits_from_key(k));
-            },
-            Option::None => {},
+        when let Option::Some(k) = s.try_get(i) {
+            s.try_set(i, f32_bits_from_key(k));
         }
     }
 }
@@ -140,13 +138,11 @@ test {
         expected.push(0x7ff0000000000000);
         expected.push(0x7ff8000000000001);
         for i in 0..expected.len() {
-            match values.try_get(i) {
-                Option::Some(value) => {
-                    if expected.try_get(i) != Option::Some(to_bits_f64(value)) {
-                        return false;
-                    }
-                },
-                Option::None => return false,
+            guard let Option::Some(value) = values.try_get(i) else {
+                return false;
+            };
+            if expected.try_get(i) != Option::Some(to_bits_f64(value)) {
+                return false;
             }
         }
         values.len() == 6 && is_sorted_f64(in values.as_slice())

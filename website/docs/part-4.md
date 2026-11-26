@@ -979,7 +979,7 @@ To compare two versions of a hot loop, decide what work you want to measure, whi
 
 Comparing two versions of a hot path requires isolating the measured work from setup noise, accounting for hardware counter wraparound, and separating genuine algorithmic changes from memory-layout accidents or shared host drift. Vesper Metronome combines hardware performance monitoring unit (PMU) counters, interleaved A/B execution, layout randomization, and non-parametric confidence-interval gates.
 
-Metronome is implemented in `crates/vesper-bench` and `crates/vesper-bench-pmu` with CLI execution in `crates/vesper-tools/src/bench.rs` and CI port gating in `scripts/ci/flip_gate.py`, shipping `vesper bench FILE [--compare git:REV] [--pmu] [--pmu-provider group|rdpmc|kpc] [--randomize-layout N] [--deterministic] [--asm] [--expect-vectorized] [--expect-zero-alloc]`. Counter wraparound and paired drift arithmetic are modeled in `lean/MetronomeArithmetic.lean`. Per `REVIEW-STATUS.md` and `crates/vesper-tools/src/bench.rs`, the shipped CLI compiles bounded nongeneric pure scalar kernels (leaving recursive, aggregate, or fallible kernels and the library-only `vesper_bench::causal` profiler to Rust/library harnesses), `--randomize-layout` perturbs child-process heap, stack, and environment offsets rather than relocating JIT machine code, and `--deterministic` counts reference-evaluator steps rather than proving constant hardware execution time.
+Metronome is implemented in `crates/vesper-bench` and `crates/vesper-bench-pmu` with CLI execution in `crates/vesper-tools/src/bench.rs` and CI port gating in `aspect ci flip-gate --`, shipping `vesper bench FILE [--compare git:REV] [--pmu] [--pmu-provider group|rdpmc|kpc] [--randomize-layout N] [--deterministic] [--asm] [--expect-vectorized] [--expect-zero-alloc]`. Counter wraparound and paired drift arithmetic are modeled in `lean/MetronomeArithmetic.lean`. Per `REVIEW-STATUS.md` and `crates/vesper-tools/src/bench.rs`, the shipped CLI compiles bounded nongeneric pure scalar kernels (leaving recursive, aggregate, or fallible kernels and the library-only `vesper_bench::causal` profiler to Rust/library harnesses), `--randomize-layout` perturbs child-process heap, stack, and environment offsets rather than relocating JIT machine code, and `--deterministic` counts reference-evaluator steps rather than proving constant hardware execution time.
 
 ## 24.1 Pick counters that answer the question
 
@@ -1122,10 +1122,10 @@ Pair baseline and candidate runs, vary layout where appropriate, and inspect the
     │ - CountingAllocator 0-alloc & CLIF SIMD    │     │ 3. [[abba]] 95% CI upper <= 1.5x    │
     └────────────────────────────────────────────┘     └─────────────────────────────────────┘
 
-In continuous integration, `scripts/ci/flip_gate.py` and per-crate `flip-gate.toml` manifests (such as `crates/vesper-aegis/flip-gate.toml`) enforce the repository's self-hosting Rust-exit bar before any Rust module is deleted in favor of its Vesper port: every `[[tests]]` suite must exit `0`, `[differential]` fuzzing must report `differences=0`, and every `[[abba]]` workload compiled with `-C target-cpu=native` must keep the upper bound of `vesper-bench`'s 95 percent `ABBA` Vesper/Rust median-ratio interval at or below `1.5x`.
+In continuous integration, `aspect ci flip-gate --` and per-crate `flip-gate.json` manifests (such as `crates/vesper-aegis/flip-gate.json`) enforce the repository's self-hosting Rust-exit bar before any Rust module is deleted in favor of its Vesper port: every `tests` suite must exit `0`, `differential` fuzzing must report `differences=0`, and every `abba` workload compiled with `-C target-cpu=native` must keep the upper bound of `vesper-bench`'s 95 percent `ABBA` Vesper/Rust median-ratio interval at or below `1.5x`.
 
-    // CI Rust-to-Vesper port gate (scripts/ci/flip_gate.py & crates/vesper-aegis/flip-gate.toml)
-    $ python3 scripts/ci/flip_gate.py vesper-aegis --epochs 30 --threshold 1.5
+    // CI Rust-to-Vesper port gate (aspect ci flip-gate -- & crates/vesper-aegis/flip-gate.json)
+    $ python3 aspect ci flip-gate -- vesper-aegis --epochs 30 --threshold 1.5
     ----
     name = "vesper-aegis"
     build = ["cargo build --locked --release -p vesper-aegis --example abba"]
