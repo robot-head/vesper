@@ -29,7 +29,7 @@ use self::machine::{Lowered, lowered_new};
 use self::lower::{
     E_LIMIT, E_NONE, lower_rows, put_lowered, U_GENERIC, VErr, ap, apn, err, put_error, tx, unsup
 };
-use self::coverage::{Rf, cover_listing, rf_new, rf_push};
+use self::cover::{Rf, cover_listing, rf_new, rf_push};
 use self::evidence::{evidence, evidence_from, sites_new};
 use self::exprs::{Ex, X_HANDLE, nested_name, read_exprs};
 use @vesper/check-data::pack_text;

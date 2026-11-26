@@ -410,14 +410,29 @@ where the pass runs on the program the lowering reads.
 **Rust lines deleted:** 0. Rust's `VerifiedBuild` pass stays as the
 fallback until the retirement.
 
-## Part 4d-4: `coverage` in Vesper
+## Part 4d-4a: coverage inventory rendering
+
+The Vesper renderer takes sorted function coverage records and a dictionary
+of refusal details. It counts and sorts the refusals, renders the summary,
+and writes each function's own refusals and refused callees. Rust still
+collects those records. `VESPER_HYBRID_VERIFIED_COVERAGE=1` opts into the
+renderer with the hybrid's `all` swap set.
+
+| Check | Result |
+|---|---|
+| Complete listings for the Stage 1, parser and checker units, an empty report, and a mixed report with repeated UTF-8 details | **0 of 5 differ** |
+| Release ABBA, input encoding through decoded text, 30 rounds, `RUSTFLAGS="-C target-cpu=native"` | **0.347x median**, 95% CI **0.338x–0.356x** |
+
+**Rust lines deleted:** 0.
+
+## Part 4d-4b: coverage refusal collection
 
 ### What changed
 
 - `coverage` (every refusal of every function, which the front-end
   inventory `tests/verified_codegen_front_end.rs` lists) is now in the
   package as `coverage_text` (`mono.ves` `coverage_input`, the new
-  `coverage.ves`).
+  `cover.ves`; `coverage.ves` keeps part 4d-4a's renderer).
 - The plan and the lowering have a coverage mode (`Lw::tolerant`,
   `Fl::tolerant`). Like Rust's, it records a refusal and keeps going:
   - The plan starts from every root, skips the entry-only checks, and leaves
@@ -454,6 +469,5 @@ function takes about 2 s per world.
 ## Left
 
 - Optional: compare the per-arch `encoding_listing` text.
-- Part 4d-5: the swap into `bootstrap/stage1.rs` with
-  `bootstrap/stage1.lock` reproduced, and the Rust deleted at the
-  retirement.
+- The Rust deleted at the retirement. Stage 1 can already run the native
+  Vesper backend (`bootstrap/verified_port.rs`, #2191).

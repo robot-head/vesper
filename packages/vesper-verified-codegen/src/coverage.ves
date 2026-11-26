@@ -1,876 +1,237 @@
-// `verified_codegen::coverage` (src/verified_codegen/coverage.rs) in
-// Vesper (#1886, part 4d-4): every refusal of every function, not only
-// the first one `compile` reports. The plan and the lowering run in
-// coverage mode (lower.ves: `Lw::tolerant`, `Fl::tolerant`), which record
-// a refusal and keep going; mono.ves `coverage_input` reads the input,
-// monomorphizes from every root and runs evidence passing, and
-// `cover_listing` here gives `Coverage::listing`'s text.
+// The verified backend's refusal inventory. The input contains a sorted
+// dictionary of (construct, detail) pairs, grouped by construct, followed
+// by the function records. Strings are length-prefixed UTF-8. All integers
+// are little-endian words. Coverage::listing_input writes the layout.
 
-use self::evidence::{Sites};
-use self::exprs::{Ex};
-use self::lower::{
-    E_ENTRY, E_INVALID, E_LIMIT, E_NONE, E_TARGET, E_UNSUPPORTED, FIRST_FREE_LABEL, Lw, NONE, Plan,
-    U_EFFECT, U_EXTERNAL_FUNCTION, VErr, ap, apn, cmp_sym, err, construct_name, cover_function,
-    decode, hd_at, is_wrapping, plan, plan_empty, planned, put_error, set_table8, tx, unsup
-};
-use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, u8_at, w};
-use @vesper/check-data::names::{Names};
-use @vesper/check-data::input::{Ctx, Reader};
-use @vesper/place-ir::{Program};
-use @vesper/place-ir::codes::{Op};
+use self::machine::{put_decimal};
 
-// A UTF-8 continuation byte is `10xxxxxx`: `byte & UTF8_TAG_MASK` is
-// `UTF8_CONTINUATION`. Counting the other bytes counts characters.
-const UTF8_TAG_MASK: u8 = 192;
-const UTF8_CONTINUATION: u8 = 128;
-// `Coverage::listing` cuts an `Unsupported` detail longer than
-// `DETAIL_MAX_CHARS` characters to `DETAIL_KEPT_CHARS` and `DETAIL_ELLIPSIS`.
-const DETAIL_MAX_CHARS: u64 = 120;
-const DETAIL_KEPT_CHARS: u64 = 117;
-const DETAIL_ELLIPSIS: Str = "...";
-// Width the listing right-aligns counts to, and its padding byte.
-const COUNT_WIDTH: u64 = 4;
+const WORD_BYTES: u64 = 8;
+const NEWLINE: u8 = 10;
 const SPACE: u8 = 32;
-// Opens a generic instance's name, as in `f<i64>`.
-const INSTANCE_OPEN: u8 = 60;
+// The inventory aligns detail counts to four columns.
+const DETAIL_WIDTH: u64 = 4;
 
-// Recorded refusals (coverage mode), each under the function it belongs to,
-// in the order they were recorded. `live` is 0 for one taken back.
-pub struct Rf {
-    owner: ChunkSeq[u32],
-    kind: ChunkSeq[u8],
-    con: ChunkSeq[u8],
-    func: ChunkSeq[u32],
-    da: ChunkSeq[u64],
-    dn: ChunkSeq[u64],
-    d: ChunkSeq[u8],
-    live: ChunkSeq[u8],
+copy struct Text {
+    start: u64,
+    end: u64,
 }
 
-pub fn rf_new() -> Rf {
-    Rf {
-        owner: ChunkSeq::new[u32](),
-        kind: ChunkSeq::new[u8](),
-        con: ChunkSeq::new[u8](),
-        func: ChunkSeq::new[u32](),
-        da: ChunkSeq::new[u64](),
-        dn: ChunkSeq::new[u64](),
-        d: ChunkSeq::new[u8](),
-        live: ChunkSeq::new[u8](),
+struct Reader {
+    offset: u64,
+}
+
+impl Reader {
+    fn word(inout self, in input: Slice[u8]) -> u64 {
+        let value = input.try_read_u64_le(self.offset).unwrap_or(0);
+        self.offset = wrapping_add(self.offset, WORD_BYTES);
+        value
+    }
+
+    fn text(inout self, in input: Slice[u8]) -> Text {
+        let len = self.word(in input);
+        let start = self.offset;
+        self.offset = wrapping_add(start, len);
+        Text { start: start, end: self.offset }
     }
 }
 
-pub fn rf_len(in rf: Rf) -> u64 {
-    rf.owner.len()
+copy struct Construct {
+    name: Text,
+    details_end: u64,
 }
 
-pub fn rf_push(inout rf: Rf, owner: u32, in e: VErr) {
-    rf.owner.push(owner);
-    rf.kind.push(e.kind);
-    rf.con.push(e.construct);
-    rf.func.push(e.func);
-    rf.da.push(rf.d.len());
-    rf.dn.push(e.detail.len());
-    rf.d.extend(in e.detail.as_slice());
-    rf.live.push(1);
+copy struct Detail {
+    construct: u64,
+    text: Text,
+    count: u64,
 }
 
-// Refusal `i` of `from` recorded again in `rf` under `owner`.
-pub fn rf_copy(inout rf: Rf, owner: u32, in from: Rf, i: u64) {
-    let e = rf_get(in from, i);
-    rf_push(inout rf, owner, in e);
+struct Dictionary {
+    constructs: ChunkSeq[Construct],
+    details: ChunkSeq[Detail],
 }
 
-pub fn rf_get(in rf: Rf, i: u64) -> VErr {
-    let a = u64_at(in rf.da, i);
-    let n = u64_at(in rf.dn, i);
-    let mut d = ChunkSeq::with_capacity[u8](n);
-    for j in 0..n {
-        d.push(u8_at(in rf.d, add(a, j)));
+impl Dictionary {
+    fn construct(in self, index: u64) -> Construct {
+        self.constructs
+            .try_get(index)
+            .unwrap_or(Construct { name: Text { start: 0, end: 0 }, details_end: 0 })
     }
-    VErr {
-        kind: u8_at(in rf.kind, i),
-        construct: u8_at(in rf.con, i),
-        func: u32_at(in rf.func, i),
-        detail: d,
+
+    fn detail(in self, index: u64) -> Detail {
+        self.details
+            .try_get(index)
+            .unwrap_or(Detail { construct: 0, text: Text { start: 0, end: 0 }, count: 0 })
     }
 }
 
-pub fn rf_owner(in rf: Rf, i: u64) -> u32 {
-    u32_at(in rf.owner, i)
-}
-
-pub fn rf_live(in rf: Rf, i: u64) -> bool {
-    u8_at(in rf.live, i) != 0
-}
-
-pub fn rf_kill(inout rf: Rf, i: u64) {
-    let ok = rf.live.try_set(i, 0);
-}
-
-// Whether refusal `i` is `e` (`VerifiedError`'s equality).
-pub fn rf_is(in rf: Rf, i: u64, in e: VErr) -> bool {
-    if u8_at(in rf.kind, i) != e.kind
-        || u8_at(in rf.con, i) != e.construct
-        || u32_at(in rf.func, i) != e.func
-        || u64_at(in rf.dn, i) != e.detail.len()
-    {
-        return false;
-    }
-    let a = u64_at(in rf.da, i);
-    for j in 0..e.detail.len() {
-        if u8_at(in rf.d, add(a, j)) != u8_at(in e.detail, j) {
-            return false;
+fn dictionary(in input: Slice[u8], inout reader: Reader) -> Dictionary {
+    let construct_count = reader.word(in input);
+    let detail_count = reader.word(in input);
+    let mut constructs = ChunkSeq::with_capacity[Construct](construct_count);
+    let mut details = ChunkSeq::with_capacity[Detail](detail_count);
+    for construct in 0..construct_count {
+        let name = reader.text(in input);
+        let count = reader.word(in input);
+        for index in 0..count {
+            let text = reader.text(in input);
+            details.push(Detail { construct: construct, text: text, count: 0 });
         }
+        constructs.push(Construct { name: name, details_end: details.len() });
     }
-    true
+    Dictionary { constructs: constructs, details: details }
 }
 
-// Whether `owner` has a live refusal equal to `e`.
-pub fn rf_has(in rf: Rf, owner: u32, in e: VErr) -> bool {
-    for i in 0..rf_len(in rf) {
-        if rf_live(in rf, i) && rf_owner(in rf, i) == owner && rf_is(in rf, i, in e) {
-            return true;
-        }
-    }
-    false
+fn put(inout out: ChunkSeq[u8], in text: Str) {
+    out.extend(in text.as_bytes());
 }
 
-// Whether `owner` has a live refusal.
-pub fn rf_any(in rf: Rf, owner: u32) -> bool {
-    for i in 0..rf_len(in rf) {
-        if rf_live(in rf, i) && rf_owner(in rf, i) == owner {
-            return true;
-        }
-    }
-    false
+fn put_text(inout out: ChunkSeq[u8], in input: Slice[u8], text: Text) {
+    out.extend(in input[text.start..text.end]);
 }
 
-fn bytes_start(in d: ChunkSeq[u8], a: u64, n: u64, in p: Str) -> bool {
-    let pb = p.as_bytes();
-    if n < pb.len() {
-        return false;
-    }
-    for i in 0..pb.len() {
-        match pb.try_get(i) {
-            Option::Some(x) => {
-                if u8_at(in d, add(a, i)) != x {
-                    return false;
-                }
-            },
-            Option::None => {},
-        }
-    }
-    true
+fn count_line(inout out: ChunkSeq[u8], in label: Str, count: u64) {
+    put(inout out, in label);
+    put_decimal(inout out, count);
+    out.push(NEWLINE);
 }
 
-fn bytes_contain(in d: ChunkSeq[u8], a: u64, n: u64, in p: Str) -> bool {
-    let pb = p.as_bytes();
-    if n < pb.len() {
-        return false;
-    }
-    for s in 0..inc(wrapping_sub(n, pb.len())) {
-        if bytes_start(in d, add(a, s), wrapping_sub(n, s), p) {
-            return true;
-        }
-    }
-    false
+fn detail_text(inout out: ChunkSeq[u8], in input: Slice[u8], in dict: Dictionary, detail: Detail) {
+    let construct = dict.construct(detail.construct);
+    put_text(inout out, in input, construct.name);
+    put(inout out, in ": ");
+    put_text(inout out, in input, detail.text);
+    out.push(NEWLINE);
 }
 
-// Symbols sorted by text (a merge sort), duplicates kept.
-fn sort_syms(in names: Names, inout v: ChunkSeq[u32]) {
-    let n = v.len();
-    let mut tmp = ChunkSeq::with_capacity[u32](n);
-    for i in 0..n {
-        tmp.push(0);
-    }
-    let mut width: u64 = 1;
+fn aligned_count(inout out: ChunkSeq[u8], count: u64) {
+    let mut digits: u64 = 1;
+    let mut rest = count / 10;
     loop {
-        if width >= n {
+        if rest == 0 {
             break;
         }
-        let mut lo: u64 = 0;
-        loop {
-            if lo >= n {
-                break;
-            }
-            let mid = if add(lo, width) < n {
-                add(lo, width)
-            } else {
-                n
-            };
-            let hi = if add(lo, wrapping_mul(width, 2)) < n {
-                add(lo, wrapping_mul(width, 2))
-            } else {
-                n
-            };
-            let mut i = lo;
-            let mut j = mid;
-            let mut k = lo;
-            loop {
-                if k >= hi {
-                    break;
-                }
-                let left = if i >= mid {
-                    false
-                } else if j >= hi {
-                    true
-                } else {
-                    cmp_sym(in names, u32_at(in v, j), u32_at(in v, i)) >= 0
-                };
-                if left {
-                    let ok = tmp.try_set(k, u32_at(in v, i));
-                    i = inc(i);
-                } else {
-                    let ok = tmp.try_set(k, u32_at(in v, j));
-                    j = inc(j);
-                }
-                k = inc(k);
-            }
-            lo = hi;
-        }
-        for x in 0..n {
-            let ok = v.try_set(x, u32_at(in tmp, x));
-        }
-        width = wrapping_mul(width, 2);
+        digits = wrapping_add(digits, 1);
+        rest = rest / 10;
     }
-}
-
-// The functions `name` depends on: its direct calls and the nested
-// functions of its `handle Fail` expressions (`coverage`'s `deps`).
-fn cover_deps(in lw: Lw, in plan: Plan, name: u32, inout out: ChunkSeq[u32]) {
-    let fx = lw.find(name);
-    if fx == 0 {
-        return;
-    }
-    let f = lw.func(wrapping_sub(fx, 1));
-    let sy = lw.sy;
-    for bi in 0..f.bc {
-        let blk = lw.p.block(add(f.b0, bi));
-        for k in 0..blk.ic {
-            let ins = lw.p.inst(add(blk.i0, k));
-            if ins.op == Op::Call {
-                let callee = n32(lw.op(ins.a));
-                let n = lw.op(inc(ins.a));
-                let tat = add(add(ins.a, 2), wrapping_mul(n, 4));
-                let nt = lw.op(tat);
-                let cap = lw.op(add(inc(tat), nt));
-                if cap == 0 && callee != sy.raise && !is_wrapping(sy, callee) && callee != name {
-                    out.push(callee);
-                }
-            } else if ins.op == Op::Handle {
-                let x = lw.ex.row(lw.op(add(ins.a, 2)));
-                for j in 0..plan.hd.len() {
-                    let h = hd_at(in plan.hd, j);
-                    if h.site == name && h.s0 == x.s0 && h.s1 == x.s1 {
-                        for g in [h.body, h.ret, h.raise] {
-                            if g != name {
-                                out.push(g);
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-    }
-}
-
-// `construct_name` of refusal `i`.
-fn cover_construct(in rf: Rf, i: u64) -> Str {
-    let k = u8_at(in rf.kind, i);
-    if k == E_UNSUPPORTED {
-        construct_name(u8_at(in rf.con, i))
-    } else if k == E_LIMIT {
-        "Limit"
-    } else if k == E_INVALID {
-        "Invalid"
-    } else if k == E_ENTRY {
-        "Entry"
-    } else if k == E_TARGET {
-        "Target"
-    } else {
-        "NotPorted"
-    }
-}
-
-// `detail` of refusal `i`: an `Unsupported` detail over `DETAIL_MAX_CHARS`
-// characters is cut to `DETAIL_KEPT_CHARS` and `DETAIL_ELLIPSIS`.
-fn cover_detail(in rf: Rf, i: u64, inout out: ChunkSeq[u8]) {
-    let a = u64_at(in rf.da, i);
-    let n = u64_at(in rf.dn, i);
-    let mut chars: u64 = 0;
-    for j in 0..n {
-        if (u8_at(in rf.d, add(a, j)) & UTF8_TAG_MASK) != UTF8_CONTINUATION {
-            chars = inc(chars);
-        }
-    }
-    if u8_at(in rf.kind, i) == E_UNSUPPORTED && chars > DETAIL_MAX_CHARS {
-        let mut seen: u64 = 0;
-        for j in 0..n {
-            let c = u8_at(in rf.d, add(a, j));
-            if (c & UTF8_TAG_MASK) != UTF8_CONTINUATION {
-                if seen == DETAIL_KEPT_CHARS {
-                    break;
-                }
-                seen = inc(seen);
-            }
-            out.push(c);
-        }
-        ap(inout out, DETAIL_ELLIPSIS);
-        return;
-    }
-    for j in 0..n {
-        out.push(u8_at(in rf.d, add(a, j)));
-    }
-}
-
-fn bytes_cmp(in a: ChunkSeq[u8], in b: ChunkSeq[u8]) -> i64 {
-    let n = if a.len() < b.len() { a.len() } else { b.len() };
-    for i in 0..n {
-        let x = u8_at(in a, i);
-        let y = u8_at(in b, i);
-        if x < y {
-            return -1;
-        }
-        if x > y {
-            return 1;
-        }
-    }
-    if a.len() < b.len() {
-        -1
-    } else if a.len() > b.len() {
-        1
-    } else {
-        0
-    }
-}
-
-fn pad4(inout out: ChunkSeq[u8], n: u64) {
-    let mut d = ChunkSeq::new[u8]();
-    apn(inout d, n);
-    let mut k = d.len();
-    loop {
-        if k >= COUNT_WIDTH {
-            break;
-        }
+    for column in digits..DETAIL_WIDTH {
         out.push(SPACE);
-        k = inc(k);
     }
-    out.extend(in d.as_slice());
+    put_decimal(inout out, count);
 }
 
-// `coverage`'s plan, lowering and listing (after monomorphization and
-// evidence passing). `rf` holds the monomorphization refusals, `hrf` the
-// handler refusals of the rewrite, `poly` the effect-polymorphic roots and
-// `poly_text` their effects' text (a symbol). The listing, or `error: `,
-// the error and a newline.
-pub fn cover_listing(
-    sink c: Ctx,
-    sink p: Program,
-    sink ex: Ex,
-    sink sites: Sites,
-    inout r: Reader,
-    in b: Slice[u8],
-    in entries: ChunkSeq[u32],
-    sink rf: Rf,
-    in hrf: Rf,
-    in poly: ChunkSeq[u32],
-    in poly_text: ChunkSeq[u32]
-) -> ChunkSeq[u8] {
-    let mut lw = decode(c, p, ex, sites, inout r, in b);
-    lw.tolerant = true;
-    lw.max_functions = NONE;
-    lw.max_rows = NONE;
-    lw.entries.extend(in entries.as_slice());
-    if entries.len() > 0 {
-        lw.entry = u32_at(in entries, 0);
+fn details(inout out: ChunkSeq[u8], in input: Slice[u8], in dict: Dictionary, max_count: u64) {
+    // Bucket by frequency. Reverse insertion preserves dictionary order
+    // within each bucket. The links store one-based detail indices.
+    let mut heads = ChunkSeq::with_capacity[u64](wrapping_add(max_count, 1));
+    for count in 0..wrapping_add(max_count, 1) {
+        heads.push(0);
     }
-    lw.rf = rf;
-    let mut pl = plan_empty();
-    if entries.len() > 0 {
-        let e = handle Fail[VErr] in {
-            pl = plan(inout lw);
-            err(E_NONE, ChunkSeq::new[u8]())
-        } with {
-            return v => v,
-            raise(e, k) => e,
-        };
-        if e.kind != E_NONE {
-            let mut t = tx("error: ");
-            put_error(in lw.c.names, in e, inout t);
-            ap(inout t, "\n");
-            return t;
-        }
-    }
-    // A handler the rewrite refused is also refused by the planner, with
-    // less detail.
-    let mut owners = ChunkSeq::new[u32]();
-    for i in 0..rf_len(in hrf) {
-        let o = rf_owner(in hrf, i);
-        let mut dup = false;
-        for j in 0..owners.len() {
-            if u32_at(in owners, j) == o {
-                dup = true;
-            }
-        }
-        if !dup {
-            owners.push(o);
-        }
-    }
-    for j in 0..owners.len() {
-        let o = u32_at(in owners, j);
-        for i in 0..rf_len(in lw.rf) {
-            if rf_live(in lw.rf, i)
-                && rf_owner(in lw.rf, i) == o
-                && u8_at(in lw.rf.kind, i) == E_UNSUPPORTED
-                && bytes_contain(
-                    in lw.rf.d,
-                    u64_at(in lw.rf.da, i),
-                    u64_at(in lw.rf.dn, i),
-                    "(only Fail handlers)"
-                )
-            {
-                rf_kill(inout lw.rf, i);
-            }
-        }
-        for i in 0..rf_len(in hrf) {
-            if rf_owner(in hrf, i) == o {
-                rf_copy(inout lw.rf, o, in hrf, i);
-            }
-        }
-    }
-    // Effect-polymorphic functions no handler instantiates.
-    for i in 0..poly.len() {
-        let root = u32_at(in poly, i);
-        let mut prefix = ChunkSeq::new[u8]();
-        lw.c.names.write(root, inout prefix);
-        prefix.push(INSTANCE_OPEN);
-        let mut instanced = false;
-        for fi in 0..lw.fns.len() {
-            let mut t = ChunkSeq::new[u8]();
-            lw.c.names.write(lw.func(fi).name, inout t);
-            if t.len() >= prefix.len() {
-                let mut same = true;
-                for q in 0..prefix.len() {
-                    if u8_at(in t, q) != u8_at(in prefix, q) {
-                        same = false;
-                        break;
-                    }
-                }
-                if same {
-                    instanced = true;
-                    break;
-                }
-            }
-        }
-        if !instanced {
-            let mut d = tx("effect ");
-            lw.c.names.write(u32_at(in poly_text, i), inout d);
-            ap(inout d, " has no handler in the program (only its host handles it)");
-            let e = unsup(U_EFFECT, root, d);
-            rf_push(inout lw.rf, root, in e);
-        }
-    }
-    // Every planned function in coverage mode.
-    let mut next_label = match pl.fs.try_get(wrapping_sub(pl.fs.len(), 1)) {
-        Option::Some(x) => add(x.label, 2),
-        Option::None => FIRST_FREE_LABEL,
-    };
-    let mut lidx = ChunkSeq::new[u32]();
-    // symbol -> rows + 1 of a function that lowered without refusal
-    let mut rows = ChunkSeq::new[u64]();
-    for i in 0..pl.fs.len() {
-        let name = planned(in pl, i).name;
-        let mut found = rf_new();
-        let n = cover_function(inout lw, in pl, i, inout next_label, inout lidx, inout found);
-        let own = rf_any(in lw.rf, name);
-        let mut kept = ChunkSeq::new[u64]();
-        for j in 0..rf_len(in found) {
-            let k = u8_at(in found.kind, j);
-            let a = u64_at(in found.da, j);
-            let dn = u64_at(in found.dn, j);
-            let unplanned_call = k == E_UNSUPPORTED
-                && u8_at(in found.con, j) == U_EXTERNAL_FUNCTION
-                && bytes_start(in found.d, a, dn, "call to unplanned function ");
-            let unplanned = k == E_INVALID && bytes_start(in found.d, a, dn, "unplanned ");
-            // A broken invariant after a planning refusal is its consequence.
-            if unplanned_call || unplanned || (own && k == E_INVALID) {
-                continue;
-            }
-            kept.push(j);
-        }
-        if n != NONE && kept.len() == 0 && !own {
-            loop {
-                if rows.len() > w(name) {
-                    break;
-                }
-                rows.push(0);
-            }
-            let ok = rows.try_set(w(name), inc(n));
-        }
-        for j in 0..kept.len() {
-            rf_copy(inout lw.rf, name, in found, u64_at(in kept, j));
-        }
-    }
-    // Everything the plan reached or refused, by name.
-    let mut names = ChunkSeq::new[u32]();
-    let mut mark = ChunkSeq::new[u8]();
-    for i in 0..rf_len(in lw.rf) {
-        let o = rf_owner(in lw.rf, i);
-        if u8_at(in mark, w(o)) == 0 {
-            set_table8(inout mark, w(o), 1);
-            names.push(o);
-        }
-    }
-    for i in 0..pl.fs.len() {
-        let o = planned(in pl, i).name;
-        if u8_at(in mark, w(o)) == 0 {
-            set_table8(inout mark, w(o), 1);
-            names.push(o);
-        }
-    }
-    sort_syms(in lw.c.names, inout names);
-    // deps[da[i]..da[i]+dn[i]] of names[i]
-    let mut deps = ChunkSeq::new[u32]();
-    let mut dpa = ChunkSeq::new[u64]();
-    let mut dpn = ChunkSeq::new[u64]();
-    for i in 0..names.len() {
-        let a = deps.len();
-        cover_deps(in lw, in pl, u32_at(in names, i), inout deps);
-        dpa.push(a);
-        dpn.push(wrapping_sub(deps.len(), a));
-    }
-    // symbol -> 1 when it or a function it depends on is refused
-    let mut broken = ChunkSeq::new[u8]();
-    for i in 0..names.len() {
-        let o = u32_at(in names, i);
-        if rf_any(in lw.rf, o) {
-            set_table8(inout broken, w(o), 1);
-        }
-    }
+    let mut next = ChunkSeq::with_capacity[u64](dict.details.len());
+    let mut index = dict.details.len();
     loop {
-        let mut more = ChunkSeq::new[u32]();
-        for i in 0..names.len() {
-            let o = u32_at(in names, i);
-            if u8_at(in broken, w(o)) != 0 {
-                continue;
-            }
-            for j in 0..u64_at(in dpn, i) {
-                if u8_at(in broken, w(u32_at(in deps, add(u64_at(in dpa, i), j)))) != 0 {
-                    more.push(o);
-                    break;
-                }
-            }
-        }
-        if more.len() == 0 {
+        if index == 0 {
             break;
         }
-        for j in 0..more.len() {
-            set_table8(inout broken, w(u32_at(in more, j)), 1);
-        }
+        let detail = dict.detail(wrapping_sub(index, 1));
+        next.push(heads.try_get(detail.count).unwrap_or(0));
+        let updated = heads.try_set(detail.count, index);
+        index = wrapping_sub(index, 1);
     }
-    // Per name: the refused callees, sorted and distinct.
-    let mut rca = ChunkSeq::new[u64]();
-    let mut rcn = ChunkSeq::new[u64]();
-    let mut rc = ChunkSeq::new[u32]();
-    for i in 0..names.len() {
-        let mut v = ChunkSeq::new[u32]();
-        for j in 0..u64_at(in dpn, i) {
-            let d = u32_at(in deps, add(u64_at(in dpa, i), j));
-            if u8_at(in broken, w(d)) != 0 {
-                v.push(d);
-            }
+    let mut count = max_count;
+    loop {
+        if count == 0 {
+            break;
         }
-        sort_syms(in lw.c.names, inout v);
-        let a = rc.len();
-        for j in 0..v.len() {
-            let d = u32_at(in v, j);
-            if j == 0 || u32_at(in v, wrapping_sub(j, 1)) != d {
-                rc.push(d);
+        let mut link = heads.try_get(count).unwrap_or(0);
+        loop {
+            if link == 0 {
+                break;
             }
+            let detail = dict.detail(wrapping_sub(link, 1));
+            put(inout out, in "  ");
+            aligned_count(inout out, count);
+            out.push(SPACE);
+            detail_text(inout out, in input, in dict, detail);
+            link = next.try_get(wrapping_sub(dict.details.len(), link)).unwrap_or(0);
         }
-        rca.push(a);
-        rcn.push(wrapping_sub(rc.len(), a));
+        count = wrapping_sub(count, 1);
     }
-    // The summary.
-    let total = names.len();
+}
+
+pub fn coverage_listing(in input: Slice[u8]) -> ChunkSeq[u8] {
+    let mut reader = Reader { offset: 0 };
+    let mut dict = dictionary(in input, inout reader);
+    let function_count = reader.word(in input);
     let mut own_ok: u64 = 0;
-    let mut whole: u64 = 0;
-    let mut count: u64 = 0;
-    for i in 0..names.len() {
-        let o = u32_at(in names, i);
-        let any = rf_any(in lw.rf, o);
-        if !any {
-            own_ok = inc(own_ok);
-            if u64_at(in rcn, i) == 0 {
-                whole = inc(whole);
-            }
+    let mut complete_ok: u64 = 0;
+    let mut refusal_count: u64 = 0;
+    let mut max_count: u64 = 0;
+    let mut body = ChunkSeq::with_capacity[u8](input.len());
+    for function in 0..function_count {
+        let name = reader.text(in input);
+        let rows = reader.word(in input);
+        let own_count = reader.word(in input);
+        put_text(inout body, in input, name);
+        if own_count == 0 {
+            own_ok = wrapping_add(own_ok, 1);
+        } else {
+            put(inout body, in ":\n");
         }
-    }
-    // (construct, detail) keys of every live refusal, in function order
-    let mut kc = ChunkSeq::new[u8]();
-    let mut kd = ChunkSeq::new[u8]();
-    let mut ka = ChunkSeq::new[u64]();
-    let mut kn = ChunkSeq::new[u64]();
-    let mut kcount = ChunkSeq::new[u64]();
-    // construct counts: names "Float".. by text
-    let mut cnames = ChunkSeq::new[u8]();
-    let mut cna = ChunkSeq::new[u64]();
-    let mut cnn = ChunkSeq::new[u64]();
-    let mut ccount = ChunkSeq::new[u64]();
-    for i in 0..names.len() {
-        let o = u32_at(in names, i);
-        for j in 0..rf_len(in lw.rf) {
-            if !rf_live(in lw.rf, j) || rf_owner(in lw.rf, j) != o {
-                continue;
+        refusal_count = wrapping_add(refusal_count, own_count);
+        for refusal in 0..own_count {
+            let index = reader.word(in input);
+            let mut detail = dict.detail(index);
+            detail.count = wrapping_add(detail.count, 1);
+            if detail.count > max_count {
+                max_count = detail.count;
             }
-            count = inc(count);
-            let cn = cover_construct(in lw.rf, j);
-            let mut key = tx(cn);
-            let cl = key.len();
-            key.push(0);
-            cover_detail(in lw.rf, j, inout key);
-            // construct count
-            let mut found_c = NONE;
-            for q in 0..cna.len() {
-                if u64_at(in cnn, q) == cl {
-                    let mut same = true;
-                    for x in 0..cl {
-                        if u8_at(in cnames, add(u64_at(in cna, q), x)) != u8_at(in key, x) {
-                            same = false;
-                        }
-                    }
-                    if same {
-                        found_c = q;
-                    }
+            let updated = dict.details.try_set(index, detail);
+            put(inout body, in "  ");
+            detail_text(inout body, in input, in dict, detail);
+        }
+        let callee_count = reader.word(in input);
+        if callee_count == 0 && own_count == 0 {
+            complete_ok = wrapping_add(complete_ok, 1);
+            put(inout body, in ": ok, ");
+            put_decimal(inout body, rows);
+            put(inout body, in " rows\n");
+        }
+        if callee_count > 0 {
+            if own_count == 0 {
+                put(inout body, in ":\n");
+            }
+            put(inout body, in "  calls refused: ");
+            for callee in 0..callee_count {
+                if callee != 0 {
+                    put(inout body, in ", ");
                 }
+                put_text(inout body, in input, reader.text(in input));
             }
-            if found_c == NONE {
-                cna.push(cnames.len());
-                cnn.push(cl);
-                for x in 0..cl {
-                    cnames.push(u8_at(in key, x));
-                }
-                ccount.push(1);
-            } else {
-                let ok = ccount.try_set(found_c, inc(u64_at(in ccount, found_c)));
-            }
-            // detail count
-            let mut found_d = NONE;
-            for q in 0..ka.len() {
-                if u64_at(in kn, q) == key.len() {
-                    let mut same = true;
-                    for x in 0..key.len() {
-                        if u8_at(in kd, add(u64_at(in ka, q), x)) != u8_at(in key, x) {
-                            same = false;
-                            break;
-                        }
-                    }
-                    if same {
-                        found_d = q;
-                        break;
-                    }
-                }
-            }
-            if found_d == NONE {
-                ka.push(kd.len());
-                kn.push(key.len());
-                kd.extend(in key.as_slice());
-                kcount.push(1);
-            } else {
-                let ok = kcount.try_set(found_d, inc(u64_at(in kcount, found_d)));
-            }
+            body.push(NEWLINE);
         }
     }
-    let mut out = tx("functions: ");
-    apn(inout out, total);
-    ap(inout out, "\nwithout own refusal: ");
-    apn(inout out, own_ok);
-    ap(inout out, "\ncompiling with all callees: ");
-    apn(inout out, whole);
-    ap(inout out, "\nrefusals: ");
-    apn(inout out, count);
-    ap(inout out, "\n");
-    // constructs by name
-    let mut corder = ChunkSeq::new[u64]();
-    for q in 0..cna.len() {
-        corder.push(q);
+
+    let mut out = ChunkSeq::with_capacity[u8](input.len());
+    count_line(inout out, in "functions: ", function_count);
+    count_line(inout out, in "without own refusal: ", own_ok);
+    count_line(inout out, in "compiling with all callees: ", complete_ok);
+    count_line(inout out, in "refusals: ", refusal_count);
+    let mut start: u64 = 0;
+    for construct in 0..dict.constructs.len() {
+        let entry = dict.construct(construct);
+        let mut count: u64 = 0;
+        for index in start..entry.details_end {
+            count = wrapping_add(count, dict.detail(index).count);
+        }
+        put(inout out, in "  ");
+        put_text(inout out, in input, entry.name);
+        count_line(inout out, in ": ", count);
+        start = entry.details_end;
     }
-    for x in 1..corder.len() {
-        let mut y = x;
-        loop {
-            if y == 0 {
-                break;
-            }
-            let a = u64_at(in corder, wrapping_sub(y, 1));
-            let bq = u64_at(in corder, y);
-            let mut ta = ChunkSeq::new[u8]();
-            let mut tb = ChunkSeq::new[u8]();
-            for z in 0..u64_at(in cnn, a) {
-                ta.push(u8_at(in cnames, add(u64_at(in cna, a), z)));
-            }
-            for z in 0..u64_at(in cnn, bq) {
-                tb.push(u8_at(in cnames, add(u64_at(in cna, bq), z)));
-            }
-            if bytes_cmp(in ta, in tb) <= 0 {
-                break;
-            }
-            let ok = corder.try_set(wrapping_sub(y, 1), bq);
-            let ok2 = corder.try_set(y, a);
-            y = wrapping_sub(y, 1);
-        }
-    }
-    for x in 0..corder.len() {
-        let q = u64_at(in corder, x);
-        ap(inout out, "  ");
-        for z in 0..u64_at(in cnn, q) {
-            out.push(u8_at(in cnames, add(u64_at(in cna, q), z)));
-        }
-        ap(inout out, ": ");
-        apn(inout out, u64_at(in ccount, q));
-        ap(inout out, "\n");
-    }
-    ap(inout out, "by detail:\n");
-    // details by count, most first, then by (construct, detail)
-    let mut dorder = ChunkSeq::new[u64]();
-    for q in 0..ka.len() {
-        dorder.push(q);
-    }
-    let nd = dorder.len();
-    let mut tmp = ChunkSeq::with_capacity[u64](nd);
-    for q in 0..nd {
-        tmp.push(0);
-    }
-    let mut width: u64 = 1;
-    loop {
-        if width >= nd {
-            break;
-        }
-        let mut lo: u64 = 0;
-        loop {
-            if lo >= nd {
-                break;
-            }
-            let mid = if add(lo, width) < nd {
-                add(lo, width)
-            } else {
-                nd
-            };
-            let hi = if add(lo, wrapping_mul(width, 2)) < nd {
-                add(lo, wrapping_mul(width, 2))
-            } else {
-                nd
-            };
-            let mut i = lo;
-            let mut j = mid;
-            let mut k = lo;
-            loop {
-                if k >= hi {
-                    break;
-                }
-                let left = if i >= mid {
-                    false
-                } else if j >= hi {
-                    true
-                } else {
-                    let qi = u64_at(in dorder, i);
-                    let qj = u64_at(in dorder, j);
-                    let ci = u64_at(in kcount, qi);
-                    let cj = u64_at(in kcount, qj);
-                    if ci != cj {
-                        ci > cj
-                    } else {
-                        let mut ti = ChunkSeq::new[u8]();
-                        let mut tj = ChunkSeq::new[u8]();
-                        for z in 0..u64_at(in kn, qi) {
-                            ti.push(u8_at(in kd, add(u64_at(in ka, qi), z)));
-                        }
-                        for z in 0..u64_at(in kn, qj) {
-                            tj.push(u8_at(in kd, add(u64_at(in ka, qj), z)));
-                        }
-                        bytes_cmp(in ti, in tj) <= 0
-                    }
-                };
-                if left {
-                    let ok = tmp.try_set(k, u64_at(in dorder, i));
-                    i = inc(i);
-                } else {
-                    let ok = tmp.try_set(k, u64_at(in dorder, j));
-                    j = inc(j);
-                }
-                k = inc(k);
-            }
-            lo = hi;
-        }
-        for x in 0..nd {
-            let ok = dorder.try_set(x, u64_at(in tmp, x));
-        }
-        width = wrapping_mul(width, 2);
-    }
-    for x in 0..nd {
-        let q = u64_at(in dorder, x);
-        ap(inout out, "  ");
-        pad4(inout out, u64_at(in kcount, q));
-        ap(inout out, " ");
-        let a = u64_at(in ka, q);
-        let n = u64_at(in kn, q);
-        let mut z: u64 = 0;
-        loop {
-            if z >= n || u8_at(in kd, add(a, z)) == 0 {
-                break;
-            }
-            out.push(u8_at(in kd, add(a, z)));
-            z = inc(z);
-        }
-        ap(inout out, ": ");
-        z = inc(z);
-        loop {
-            if z >= n {
-                break;
-            }
-            out.push(u8_at(in kd, add(a, z)));
-            z = inc(z);
-        }
-        ap(inout out, "\n");
-    }
-    ap(inout out, "\n");
-    for i in 0..names.len() {
-        let o = u32_at(in names, i);
-        let any = rf_any(in lw.rf, o);
-        if !any && u64_at(in rcn, i) == 0 {
-            lw.c.names.write(o, inout out);
-            ap(inout out, ": ok, ");
-            let rn = match rows.try_get(w(o)) {
-                Option::Some(x) => x,
-                Option::None => 0,
-            };
-            apn(inout out, if rn == 0 { 0 } else { wrapping_sub(rn, 1) });
-            ap(inout out, " rows\n");
-            continue;
-        }
-        lw.c.names.write(o, inout out);
-        ap(inout out, ":\n");
-        for j in 0..rf_len(in lw.rf) {
-            if !rf_live(in lw.rf, j) || rf_owner(in lw.rf, j) != o {
-                continue;
-            }
-            ap(inout out, "  ");
-            ap(inout out, cover_construct(in lw.rf, j));
-            ap(inout out, ": ");
-            cover_detail(in lw.rf, j, inout out);
-            ap(inout out, "\n");
-        }
-        if u64_at(in rcn, i) > 0 {
-            ap(inout out, "  calls refused: ");
-            for j in 0..u64_at(in rcn, i) {
-                if j > 0 {
-                    ap(inout out, ", ");
-                }
-                lw.c.names.write(u32_at(in rc, add(u64_at(in rca, i), j)), inout out);
-            }
-            ap(inout out, "\n");
-        }
-    }
+    put(inout out, in "by detail:\n");
+    details(inout out, in input, in dict, max_count);
+    out.push(NEWLINE);
+    out.extend(in body.as_slice());
     out
 }

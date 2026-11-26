@@ -32,7 +32,7 @@ use self::machine::{
 };
 use self::certificate::{put_debug};
 use self::evidence::{Sites, sites_new};
-use self::coverage::{Rf, rf_copy, rf_has, rf_len, rf_new, rf_push};
+use self::cover::{Rf, rf_copy, rf_has, rf_len, rf_new, rf_push};
 use self::exprs::{Cl, Ex, Hx, P_BIND, P_OTHER, X_HANDLE, nested_instance, nested_name, read_exprs};
 use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, u64_at, u8_at, w};
 use @vesper/check-data::names::{Names};

@@ -19,6 +19,7 @@ use self::asm::{
     WHY_RISCV_JUMP, WHY_UNBOUND, WHY_X86_64_RANGE, asm, finish, here, last_exits
 };
 use self::certificate::{certify, check_input, validate_input};
+use self::coverage::{coverage_listing as render_coverage};
 use self::lower::{lower_input};
 use self::mono::{coverage_input, front_input, front_rows, mono_input};
 use self::container::{EM_AARCH64, EM_RISCV, EM_X86_64, coff_object, elf_executable, macho_object};
@@ -80,6 +81,10 @@ pub fn table_listing_text(in input: Str) -> ChunkSeq[u64] {
     let mut out = ChunkSeq::new[u8]();
     table_listing(inout out);
     pack_text(in out)
+}
+
+pub fn coverage_listing(in input: Slice[u8]) -> ChunkSeq[u8] {
+    render_coverage(in input)
 }
 
 fn read_row(in b: Slice[u8], at: u64) -> Lir {

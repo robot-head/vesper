@@ -12,7 +12,7 @@
 
 // @export abi 4
 
-use @vesper/verified-codegen::{compile_bytes};
+use @vesper/verified-codegen::{compile_bytes, coverage_listing};
 
 // The layout version of `compile_input_words`.
 pub fn format() -> u64 {
@@ -21,6 +21,10 @@ pub fn format() -> u64 {
 
 pub fn compile_input_words(in input: Slice[u8]) -> ChunkSeq[u64] {
     divergent(compile_bytes(in input))
+}
+
+pub fn coverage_listing_bytes(in input: Slice[u8]) -> ChunkSeq[u8] {
+    coverage_listing(in input)
 }
 
 // The divergent build (build.rs `divergent-verified-codegen`) swaps this
