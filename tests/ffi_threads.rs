@@ -65,8 +65,16 @@ pub fn main() -> u64 eff [Ffi[Pthread]] {
 }
 ";
 
+/// A fault recorded by a Vesper function C calls goes to one process-wide
+/// record (`FOREIGN_FAULT` in src/seq/native_runtime.rs), which the next
+/// JIT entry to finish takes. Two JIT entries running at once in this test
+/// binary could take each other's fault, so the tests here run one at a
+/// time.
+static ONE_ENTRY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn vesper_functions_run_on_new_threads() {
+    let _one = ONE_ENTRY.lock().unwrap_or_else(|e| e.into_inner());
     if !cfg!(any(
         all(target_os = "linux", target_arch = "x86_64"),
         all(target_os = "linux", target_arch = "aarch64"),
@@ -97,6 +105,7 @@ fn vesper_functions_run_on_new_threads() {
 /// result instead of vanishing with that thread.
 #[test]
 fn faults_on_c_threads_reach_the_entry() {
+    let _one = ONE_ENTRY.lock().unwrap_or_else(|e| e.into_inner());
     if !cfg!(any(
         all(target_os = "linux", target_arch = "x86_64"),
         all(target_os = "linux", target_arch = "aarch64"),

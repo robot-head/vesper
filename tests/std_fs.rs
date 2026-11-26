@@ -14,7 +14,7 @@ const DRIVER: &str = r#"use @vesper-std/fs::{
     remove_file, remove_dir, remove_dir_all, create_dir, create_dir_all, metadata,
     symlink_metadata, exists, kind_file, kind_dir, error_text, is_dir_path, is_file_path,
     is_executable, canonicalize, write_stdout, write_stderr, create_dir_mode, set_permissions,
-    copy
+    copy, arch
 };
 use @vesper-std/fs::walk::{
     Entries, walk, list_dir, entry_count, entry_start, entry_end, entry_kind, entry_join
@@ -510,6 +510,10 @@ fn kind_bits(in p: Str, shift: u32) -> u64 eff [Ffi[StdFs]] {
         bits = bits | 2;
     }
     wrapping_shl_u64(bits, shift)
+}
+
+pub fn arch_code() -> u64 {
+    widen_u64(arch())
 }
 
 pub fn path_kinds() -> u64 eff [Ffi[StdFs]] {
@@ -1091,4 +1095,18 @@ fn canonicalize_matches_std() {
     }
     let checked = check_driver(&source(&dir));
     assert_eq!(agree(&checked, "canonical_paths", &MODES), want);
+}
+
+/// `arch` is the architecture of `std::env::consts::ARCH`.
+#[test]
+fn arch_matches_std_consts() {
+    let dir = Temp::new("std-fs");
+    let checked = check_driver(&source(&dir));
+    let want = match std::env::consts::ARCH {
+        "x86_64" => 1,
+        "aarch64" => 2,
+        "wasm32" => 3,
+        other => panic!("no ARCH code for {other}"),
+    };
+    assert_eq!(agree(&checked, "arch_code", &MODES), want);
 }
