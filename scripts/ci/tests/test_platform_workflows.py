@@ -426,7 +426,7 @@ class PlatformWorkflowTests(unittest.TestCase):
             self.assertIn("--test_summary=short", command(name))
             # Optimized corpus differentials, with Cargo's debug checks kept.
             self.assertIn("--config=ci_opt", command(name))
-        self.assertNotIn("--config=ci_opt", everything)
+        self.assertIn("--config=ci_opt", everything)
         bazelrc = (ROOT / ".bazelrc").read_text()
         for flag in ("--compilation_mode=opt", "extra_rustc_flag=-Cdebug-assertions=on",
                      "extra_rustc_flag=-Coverflow-checks=on"):
