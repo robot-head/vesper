@@ -349,12 +349,10 @@ pub fn check_entry_traced(
     }
     if exposes {
         err.text.clear();
-        err
-            .text
-            .extend(
-                in "native entry cannot expose specialized closure values; invoke them within the entry function"
-                    .as_bytes()
-            );
+        err.text.extend(
+            in "native entry cannot expose specialized closure values; invoke them within the entry function"
+                .as_bytes()
+        );
         return false;
     }
     true

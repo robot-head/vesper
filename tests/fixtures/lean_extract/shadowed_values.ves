@@ -27,11 +27,7 @@ fn ensures_pack(value: u64, choose: bool, result: Wrapped) -> bool {
 }
 fn local(n: u64) -> u64 {
     let value = n;
-    if n == 0 {
-        value
-    } else {
-        value
-    }
+    if n == 0 { value } else { value }
 }
 fn ensures_local(n: u64, result: u64) -> bool {
     result == n

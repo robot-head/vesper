@@ -37,11 +37,7 @@ fn has_rndr() -> bool eff [Ffi[SysctlC]] {
 
 // 2 when the CPU has RNDR, else 0 (1 is x86_64's RDRAND).
 pub fn rng_instruction() -> u64 eff [Ffi[SysctlC], Ffi[StdCpu]] {
-    if has_rndr() {
-        2
-    } else {
-        0
-    }
+    if has_rndr() { 2 } else { 0 }
 }
 
 // One hardware random word into `out`: true when the instruction exists

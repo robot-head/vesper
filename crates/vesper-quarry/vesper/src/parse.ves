@@ -423,19 +423,7 @@ pub fn parse_not(inout q: Q, depth: u64) -> u64 {
     } else if word(inout q, kw_is()) {
         let negated = word(inout q, kw_not());
         expect_word(inout q, kw_null(), "null");
-        push_raw(
-            inout q,
-            raw2(
-                7,
-                if negated {
-                    1
-                } else {
-                    0
-                },
-                lhs,
-                0
-            )
-        )
+        push_raw(inout q, raw2(7, if negated { 1 } else { 0 }, lhs, 0))
     } else {
         lhs
     }
@@ -460,17 +448,7 @@ pub fn parse_atom(inout q: Q, depth: u64) -> u64 {
     } else if t.kind == tk_word() && t.kw == kw_null() {
         Raw { kind: 2, a: 0, b: 0, c: 0, d: 0 }
     } else if t.kind == tk_word() && (t.kw == kw_true() || t.kw == kw_false()) {
-        Raw {
-            kind: 2,
-            a: 4,
-            b: if t.kw == kw_true() {
-                1
-            } else {
-                0
-            },
-            c: 0,
-            d: 0
-        }
+        Raw { kind: 2, a: 4, b: if t.kw == kw_true() { 1 } else { 0 }, c: 0, d: 0 }
     } else if t.kind == tk_word() && t.kw == kw_none() {
         if sym(inout q, DOT) {
             let name = ident(inout q);
@@ -519,11 +497,7 @@ pub fn parse_select(inout q: Q) {
             return;
         }
         let star = sym(inout q, STAR);
-        let expr = if star {
-            none()
-        } else {
-            parse_expr(inout q, 0)
-        };
+        let expr = if star { none() } else { parse_expr(inout q, 0) };
         let mut aoff = none();
         let mut alen: u64 = 0;
         if word(inout q, kw_as()) {

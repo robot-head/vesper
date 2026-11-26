@@ -140,11 +140,7 @@ pub fn cdc_decode(
         for k in 0..width {
             row.push(wrapping_i64(le64(in bytes, wrapping_add(header_end, wrapping_mul(k, 8)))));
         }
-        let whi: i64 = if weight < 0 {
-            -1
-        } else {
-            0
-        };
+        let whi: i64 = if weight < 0 { -1 } else { 0 };
         let status = acc_insert(inout a, input, in row.as_slice(), 0, whi, wrapping_u64(weight));
         if status == ROWS_FULL {
             Fail::raise(CdcErr::Rows);

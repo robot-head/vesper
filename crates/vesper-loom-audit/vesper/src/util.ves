@@ -70,20 +70,12 @@ pub fn spend(inout s: A, n: u64) -> bool {
 
 pub fn sat_add(a: u64, b: u64) -> u64 {
     let x = wrapping_add(a, b);
-    if x < a {
-        none()
-    } else {
-        x
-    }
+    if x < a { none() } else { x }
 }
 
 pub fn sat_mul(a: u64, b: u64) -> u64 {
     let (lo, hi) = mul_wide(a, b);
-    if hi != 0 {
-        none()
-    } else {
-        lo
-    }
+    if hi != 0 { none() } else { lo }
 }
 
 pub fn str_off(in s: A, id: u64) -> u64 {

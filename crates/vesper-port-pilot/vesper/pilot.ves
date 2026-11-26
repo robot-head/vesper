@@ -15,11 +15,7 @@ copy enum Shape {
 }
 
 pub fn gcd(a: u64, b: u64) -> u64 {
-    if b == 0 {
-        a
-    } else {
-        gcd(b, a % b)
-    }
+    if b == 0 { a } else { gcd(b, a % b) }
 }
 
 pub fn clamp(x: i64, lo: i64, hi: i64) -> i64 {
@@ -33,11 +29,7 @@ pub fn clamp(x: i64, lo: i64, hi: i64) -> i64 {
 }
 
 pub fn bounds(a: i64, b: i64) -> (i64, i64) {
-    if a <= b {
-        (a, b)
-    } else {
-        (b, a)
-    }
+    if a <= b { (a, b) } else { (b, a) }
 }
 
 pub fn midpoint(in p: Point, in q: Point) -> Point eff [Fail[ArithOverflow]] {

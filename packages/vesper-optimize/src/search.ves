@@ -209,11 +209,7 @@ fn rule_row(
         b2: b2,
         len: len,
         has_guard: guard != NONE,
-        guard: if guard == NONE {
-            0
-        } else {
-            guard
-        },
+        guard: if guard == NONE { 0 } else { guard },
         p0: 0,
         p1: 0
     }
@@ -260,19 +256,11 @@ fn mul_to(inout x: u64, k: u64) -> u8 {
 }
 
 fn min(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 fn max(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // certificate.rs's `grow`: room for one more element of a vector of `len`
@@ -835,11 +823,7 @@ fn fold_prefix(inout d: Builder, count: u64, top: u32, inout b: Budget, inout ou
             if e != 0 {
                 return e;
             }
-            let base: u32 = if wrapping {
-                22
-            } else {
-                19
-            };
+            let base: u32 = if wrapping { 22 } else { 19 };
             let rule = wrapping_add(base, widen_u32(original.op));
             let mut p: u32 = 0;
             let e = proof(
@@ -941,20 +925,12 @@ fn instance(
         } else {
             OP_MUL
         };
-        let c = if rule == 11 {
-            one
-        } else {
-            zero
-        };
+        let c = if rule == 11 { one } else { zero };
         right = x;
         return wrapping_op(inout d, op, x, c, inout b, inout left);
     }
     if rule == 12 || rule == 13 {
-        let op = if rule == 12 {
-            OP_ADD
-        } else {
-            OP_MUL
-        };
+        let op = if rule == 12 { OP_ADD } else { OP_MUL };
         let e = wrapping_op(inout d, op, x, y, inout b, inout left);
         if e != 0 {
             return e;
@@ -962,11 +938,7 @@ fn instance(
         return wrapping_op(inout d, op, y, x, inout b, inout right);
     }
     if rule == 14 || rule == 15 {
-        let op = if rule == 14 {
-            OP_ADD
-        } else {
-            OP_MUL
-        };
+        let op = if rule == 14 { OP_ADD } else { OP_MUL };
         let mut xy: u32 = 0;
         let e = wrapping_op(inout d, op, x, y, inout b, inout xy);
         if e != 0 {
@@ -994,16 +966,8 @@ fn instance(
         return wrapping_op(inout d, OP_SUB, s, y, inout b, inout left);
     }
     if rule == 17 || rule == 18 {
-        let op = if rule == 17 {
-            OP_MUL
-        } else {
-            OP_SUB
-        };
-        let c = if rule == 17 {
-            zero
-        } else {
-            x
-        };
+        let op = if rule == 17 { OP_MUL } else { OP_SUB };
+        let c = if rule == 17 { zero } else { x };
         right = zero;
         erased = x;
         return wrapping_op(inout d, op, x, c, inout b, inout left);
@@ -1096,18 +1060,7 @@ copy struct Lhs {
 }
 
 fn lhs(len: u64, op0: u32, c0: i64, op1: u32, c1: i64) -> Lhs {
-    Lhs {
-        len: len,
-        n: if op1 == NONE {
-            1
-        } else {
-            2
-        },
-        op0: op0,
-        c0: c0,
-        op1: op1,
-        c1: c1
-    }
+    Lhs { len: len, n: if op1 == NONE { 1 } else { 2 }, op0: op0, c0: c0, op1: op1, c1: c1 }
 }
 
 // rules 1-18 (`optimize::rules()`).
@@ -1288,16 +1241,8 @@ fn apply(
     if apply_one(inout g, in rules, r, in ms, mi, inout ids) {
         let rule = wrapping_u32(wrapping_add(r, 1));
         let arity = rule_arity(rule);
-        let b1 = if arity >= 2 {
-            ms.val(mi, 1)
-        } else {
-            0
-        };
-        let b2 = if arity >= 3 {
-            ms.val(mi, 2)
-        } else {
-            0
-        };
+        let b1 = if arity >= 2 { ms.val(mi, 1) } else { 0 };
+        let b2 = if arity >= 3 { ms.val(mi, 2) } else { 0 };
         c.records.push(Rec { rule: rule, b0: ms.val(mi, 0), b1: b1, b2: b2, len: arity });
         applied = true;
     }
@@ -1418,11 +1363,7 @@ copy struct MathNode {
 }
 
 fn math_op(t: TermRow) -> u32 {
-    let base: u32 = if t.tag == T_WRAPPING {
-        4
-    } else {
-        1
-    };
+    let base: u32 = if t.tag == T_WRAPPING { 4 } else { 1 };
     wrapping_add(base, widen_u32(t.op))
 }
 
@@ -1561,16 +1502,8 @@ fn translate(
         } else {
             let x = id_at(in map, widen_u64(node.c0));
             let y = id_at(in map, widen_u64(node.c1));
-            let tag = if node.op >= 4 {
-                T_WRAPPING
-            } else {
-                T_CHECKED
-            };
-            let base: u32 = if node.op >= 4 {
-                4
-            } else {
-                1
-            };
+            let tag = if node.op >= 4 { T_WRAPPING } else { T_CHECKED };
+            let base: u32 = if node.op >= 4 { 4 } else { 1 };
             op_term(k, tag, wrapping_u8(wrapping_sub(node.op, base)), x, y)
         };
         let mut id: u32 = 0;
@@ -1831,15 +1764,14 @@ fn search(
     }
     let mut extracted: ChunkSeq[MathNode] = ChunkSeq::with_capacity[MathNode](x.len());
     for i in 0..x.len() {
-        extracted
-            .push(
-                MathNode {
-                    op: x.op_at(i),
-                    data: x.data_at(i),
-                    c0: x.child_at(i, 0),
-                    c1: x.child_at(i, 1)
-                }
-            );
+        extracted.push(
+            MathNode {
+                op: x.op_at(i),
+                data: x.data_at(i),
+                c0: x.child_at(i, 0),
+                c1: x.child_at(i, 1)
+            }
+        );
     }
     let mut best_map: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let e = translate(inout d, in extracted, vars, inout b, inout best_map);
@@ -1854,15 +1786,14 @@ fn search(
         let mut graph_nodes: ChunkSeq[MathNode] = ChunkSeq::with_capacity[MathNode](raw);
         for k in 0..raw {
             let id = wrapping_u32(k);
-            graph_nodes
-                .push(
-                    MathNode {
-                        op: g.raw_op(id),
-                        data: g.raw_data(id),
-                        c0: g.raw_child(id, 0),
-                        c1: g.raw_child(id, 1)
-                    }
-                );
+            graph_nodes.push(
+                MathNode {
+                    op: g.raw_op(id),
+                    data: g.raw_data(id),
+                    c0: g.raw_child(id, 0),
+                    c1: g.raw_child(id, 1)
+                }
+            );
         }
         let mut raw_map: ChunkSeq[u32] = ChunkSeq::new[u32]();
         let e = translate(inout d, in graph_nodes, vars, inout b, inout raw_map);

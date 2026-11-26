@@ -16,6 +16,8 @@
 mod check_harness;
 #[path = "common/check_words.rs"]
 mod check_words;
+#[path = "common/corpus_shard.rs"]
+mod corpus_shard;
 #[path = "common/ir_words.rs"]
 mod ir_words;
 #[path = "common/seed_runner.rs"]
@@ -33,6 +35,17 @@ use std::sync::OnceLock;
 use vesper::ffi_lowering::{ForeignChecked, Handler, Imports};
 use vesper::wasm_backend::{EffectLowering, WasmOptions};
 use wasm_words::*;
+
+/// Bazel runs this target as three shards (`test_shards` in BUILD.bazel), so
+/// each can start beside other tests instead of waiting for one 12 GiB slot
+/// at the end of "Test all targets". Shard 0 runs the self-compilation fixed
+/// point (the longest test) and the short tests; shards 1 and 2 split the
+/// other five stage2 builds. Cargo, without Bazel's shard variables, runs
+/// every test.
+fn runs_on_shard(owner: usize) -> bool {
+    let shard = corpus_shard::Shard::from_environment();
+    owner % shard.total == shard.index
+}
 
 fn backend() -> &'static Entry {
     static BACKEND: OnceLock<Entry> = OnceLock::new();
@@ -707,6 +720,9 @@ fn main() -> u64 eff [Ffi[StdFs]] {
 
 #[test]
 fn file_system_runs_like_the_native_host() {
+    if !runs_on_shard(0) {
+        return;
+    }
     if !cfg!(target_os = "linux") {
         // Error words carry the OS errno, which is Linux's in the shims.
         return;
@@ -756,6 +772,9 @@ fn file_system_runs_like_the_native_host() {
 /// every preopen fail with NotFound (ENOENT).
 #[test]
 fn relative_paths_use_the_dot_preopen() {
+    if !runs_on_shard(0) {
+        return;
+    }
     let src = format!(
         "{}\n{}",
         PRELUDE.replace("BASE/", ""),
@@ -799,6 +818,9 @@ fn relative_paths_use_the_dot_preopen() {
 
 #[test]
 fn too_many_preopens_fail_every_path() {
+    if !runs_on_shard(0) {
+        return;
+    }
     // A partial preopen table could resolve a path under the wrong
     // directory, so with more preopens than it holds every path fails
     // with Unsupported (ENOTSUP).
@@ -836,6 +858,9 @@ fn too_many_preopens_fail_every_path() {
 
 #[test]
 fn preopen_name_overflow_fails_every_path() {
+    if !runs_on_shard(0) {
+        return;
+    }
     // Only 2 preopens (< 16), whose combined guest names exceed the 1,024-byte
     // table budget, with the longer prefix second: resolves must fail with
     // Unsupported (ENOTSUP) rather than routing to `/a`.
@@ -871,6 +896,9 @@ fn main() -> u64 eff [Ffi[StdFs]] {{
 
 #[test]
 fn sync_dir_invokes_descriptor_sync_and_propagates_errors() {
+    if !runs_on_shard(0) {
+        return;
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use wasmtime::component::{Component, Linker, Resource, Val};
@@ -1075,6 +1103,9 @@ pub fn main() -> u64 eff [Ffi[StdFs]] {
 
 #[test]
 fn env_package_selects_wasi_arguments() {
+    if !runs_on_shard(0) {
+        return;
+    }
     let pkg = fresh("wasi-env");
     std::fs::create_dir(pkg.join("src")).unwrap();
     let env = std::fs::canonicalize("packages/vesper-std/env").unwrap();
@@ -1120,6 +1151,9 @@ capability_ceiling = ["Alloc", "Fail", "Ffi[StdEnv]"]
 
 #[test]
 fn arguments_and_environment_come_from_wasi() {
+    if !runs_on_shard(0) {
+        return;
+    }
     let src = r#"
 fn mix(acc: u64, x: u64) -> u64 { wrapping_add(wrapping_mul(acc, 1000003), x) }
 fn sum(in b: Slice[u8], n: u64) -> u64 {
@@ -1251,6 +1285,9 @@ fn main() -> u64 { sum(inc_all(build(30))) }"#,
 
 #[test]
 fn boxes_and_recursive_enums_run_like_the_evaluator() {
+    if !runs_on_shard(0) {
+        return;
+    }
     // The evaluator recurses once per list cell.
     std::thread::Builder::new()
         .stack_size(256 << 20)
@@ -1387,6 +1424,9 @@ fn front_corpus() -> Vec<PathBuf> {
 /// must be byte-identical.
 #[test]
 fn front_end_parses_like_native() {
+    if !runs_on_shard(0) {
+        return;
+    }
     if !cfg!(target_os = "linux") {
         // The native run binds the C library through the JIT.
         return;
@@ -1519,6 +1559,9 @@ fn front_end_parses_like_native() {
 
 #[test]
 fn seed_runner_grants_only_the_named_files_and_modes() {
+    if !runs_on_shard(0) {
+        return;
+    }
     let src = r#"
 fn opens(in name: Str, mode: u32) -> u64 eff [Ffi[StdFs]] {
     let mut err: u64 = 0;
@@ -1598,6 +1641,9 @@ fn main() -> u64 eff [Ffi[StdFs]] {
 /// compare the core it emits for its own Place IR with the native port's core.
 #[test]
 fn wasm_backend_emits_runnable_core_under_seed_runner() {
+    if !runs_on_shard(0) {
+        return;
+    }
     let dir = fresh("backend-self-build");
     std::fs::create_dir_all(dir.join("src")).unwrap();
     let backend_path = repo().join("packages/vesper-wasm-backend");
@@ -1733,10 +1779,18 @@ fn wasm_backend_emits_runnable_core_under_seed_runner() {
 /// How many stage2 tests may hold a compiler build at once. Each one compiles
 /// `@vesper/stage2` in-process and runs it with up to 4 GiB of linear memory;
 /// all six at once ran the 22GB "Test all targets" VM out of memory (#1870).
-/// BUILD.bazel reserves memory for this target to match.
-const STAGE2_SLOTS: usize = 2;
+/// Under Bazel's three shards each shard builds one at a time, so each stays
+/// under about 5 GiB; BUILD.bazel reserves memory per shard to match. Cargo
+/// runs every test in one process, two builds at a time (about 9 GiB).
+fn stage2_slots() -> usize {
+    if corpus_shard::Shard::from_environment().total > 1 {
+        1
+    } else {
+        2
+    }
+}
 
-/// Holds one of the `STAGE2_SLOTS` until dropped, also when the test panics.
+/// Holds one of the `stage2_slots()` until dropped, also when the test panics.
 struct Stage2Slot;
 
 static STAGE2_IN_USE: (std::sync::Mutex<usize>, std::sync::Condvar) =
@@ -1746,7 +1800,7 @@ impl Stage2Slot {
     fn acquire() -> Self {
         let (lock, freed) = &STAGE2_IN_USE;
         let mut in_use = lock.lock().unwrap_or_else(|e| e.into_inner());
-        while *in_use >= STAGE2_SLOTS {
+        while *in_use >= stage2_slots() {
             in_use = freed.wait(in_use).unwrap_or_else(|e| e.into_inner());
         }
         *in_use += 1;
@@ -1777,6 +1831,9 @@ where
 
 #[test]
 fn stage2_collects_package_under_wasi() {
+    if !runs_on_shard(2) {
+        return;
+    }
     with_large_stack(stage2_collects_package_under_wasi_impl);
 }
 
@@ -1857,6 +1914,9 @@ fn stage2_collects_package_under_wasi_impl() {
 
 #[test]
 fn stage2_compiles_package_to_runnable_wasm() {
+    if !runs_on_shard(2) {
+        return;
+    }
     with_large_stack(stage2_compiles_package_to_runnable_wasm_impl);
 }
 
@@ -1977,6 +2037,9 @@ fn stage2_compiles_package_to_runnable_wasm_impl() {
 
 #[test]
 fn stage2_compiles_vesper_ast() {
+    if !runs_on_shard(1) {
+        return;
+    }
     with_large_stack(stage2_compiles_vesper_ast_impl);
 }
 
@@ -2044,6 +2107,9 @@ fn stage2_compiles_vesper_ast_impl() {
 
 #[test]
 fn stage2_self_compilation_fixed_point() {
+    if !runs_on_shard(0) {
+        return;
+    }
     with_large_stack(stage2_self_compilation_fixed_point_impl);
 }
 
@@ -2186,6 +2252,9 @@ fn stage2_self_compilation_fixed_point_impl() {
 
 #[test]
 fn stage2_compiles_package_under_seed_runner() {
+    if !runs_on_shard(2) {
+        return;
+    }
     with_large_stack(stage2_compiles_package_under_seed_runner_impl);
 }
 
@@ -2721,6 +2790,10 @@ const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
         "Stage 2 itself: stage2.wasm == stage3.wasm",
     ),
     (
+        "vesper-verify",
+        "`vesper verify` pieces as a native executable beside Rust's (tests/self_host_verify.rs); it depends on @vesper/proof-audit, which hashes with C BLAKE3 (@vesper-std/hash-sys), which a Wasm entry does not have",
+    ),
+    (
         "vesper-std",
         "standard library packages, built as dependencies of the probes",
     ),
@@ -2728,6 +2801,9 @@ const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
 
 #[test]
 fn stage2_fixed_point_lists_every_package() {
+    if !runs_on_shard(0) {
+        return;
+    }
     let mut listed: Vec<String> = COMPILER_PACKAGES
         .iter()
         .map(|(_, _, rel, _, _)| *rel)
@@ -3006,6 +3082,9 @@ fn check_compiler_packages_fixed_point(
 
 #[test]
 fn stage2_compiles_compiler_packages() {
+    if !runs_on_shard(1) {
+        return;
+    }
     with_large_stack(|| {
         let dir = fresh("stage2-compiler-pkgs");
         let stage2_pkg = repo().join("packages/vesper-stage2");

@@ -5,22 +5,14 @@
 // operand logged by the instrumented `icmp` hands it to Crucible's solver.
 fn unlock(key: u64, len: u32) -> u32 eff [Fail[ArithOverflow]] {
     let magic: u64 = 4660 * 4660 + 77;
-    if key == magic {
-        len * 65536
-    } else {
-        len / 2
-    }
+    if key == magic { len * 65536 } else { len / 2 }
 }
 
 // A signed magic value behind two guards.
 fn gate(x: i64, y: i64) -> i64 eff [Fail[ArithOverflow]] {
     let wanted = 0 - 9000 * 9000 - 3;
     if x == wanted {
-        if y > 1000000 {
-            y * y * y * y
-        } else {
-            y
-        }
+        if y > 1000000 { y * y * y * y } else { y }
     } else {
         x / 2
     }

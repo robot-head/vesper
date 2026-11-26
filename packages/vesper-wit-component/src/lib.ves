@@ -81,10 +81,11 @@ pub fn wit_component_wrap_bytes(in input: Slice[u8]) -> ChunkSeq[u64] {
     }
     let mut len: u64 = 0;
     for k in 0..4 {
-        len = len | wrapping_shl_u64(
-            widen_u64(byte(in input, wrapping_add(1, k))),
-            wrapping_mul(wrapping_u32(k), 8)
-        );
+        len = len
+            | wrapping_shl_u64(
+                widen_u64(byte(in input, wrapping_add(1, k))),
+                wrapping_mul(wrapping_u32(k), 8)
+            );
     }
     let wit_end = wrapping_add(5, len);
     if wit_end > n {

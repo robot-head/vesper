@@ -77,11 +77,7 @@ fn c_param(
 ) -> CParam eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let start = c_pass_next(at);
     let name = c_token(start);
-    let ty_at = if named {
-        c_take(name.end, 40)
-    } else {
-        start
-    };
+    let ty_at = if named { c_take(name.end, 40) } else { start };
     let ty = c_type(ty_at, depth + 1);
     CParam { name: name, ty: ty.ty, pass: c_pass(at), next: ty.next }
 }
@@ -107,11 +103,7 @@ fn c_signature(
     depth: i64
 ) -> CSignature eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let next = c_take(at, 12);
-    let next = if named {
-        c_next(next)
-    } else {
-        next
-    };
+    let next = if named { c_next(next) } else { next };
     let next = if c_kind(next) == 44 {
         c_next(c_next(next))
     } else {

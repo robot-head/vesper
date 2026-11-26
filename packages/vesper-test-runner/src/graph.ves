@@ -25,12 +25,10 @@ use self::util::{Reader, is_text, put_text, u8_at};
 // ------------------------------------------------------------ node access
 
 fn stmt_at(in a: Ast, i: u32) -> StmtNode {
-    a
-        .stmts
-        .get_or(
-            idx_from_raw[StmtNode](i),
-            StmtNode { kind: 0, pat: 0, ty: 0, value: 0, mutable: false }
-        )
+    a.stmts.get_or(
+        idx_from_raw[StmtNode](i),
+        StmtNode { kind: 0, pat: 0, ty: 0, value: 0, mutable: false }
+    )
 }
 
 fn arg_at(in a: Ast, i: u32) -> ArgNode {
@@ -42,12 +40,10 @@ fn clause_at(in a: Ast, i: u32) -> ClauseNode {
 }
 
 fn param_at(in a: Ast, i: u32) -> ParamNode {
-    a
-        .params
-        .get_or(
-            idx_from_raw[ParamNode](i),
-            ParamNode { name: 0, pass: 0, projections: 0, ty: 0, start: 0, end: 0 }
-        )
+    a.params.get_or(
+        idx_from_raw[ParamNode](i),
+        ParamNode { name: 0, pass: 0, projections: 0, ty: 0, start: 0, end: 0 }
+    )
 }
 
 fn generic_at(in a: Ast, i: u32) -> GenericNode {
@@ -59,28 +55,25 @@ fn effects_at(in a: Ast, i: u32) -> EffectsNode {
 }
 
 fn effect_at(in a: Ast, i: u32) -> EffectNode {
-    a
-        .effect_nodes
+    a.effect_nodes
         .get_or(idx_from_raw[EffectNode](i), EffectNode { label: none(), name: 0, args: 0 })
 }
 
 fn fn_at(in a: Ast, i: u32) -> FnNode {
-    a
-        .fns
-        .get_or(
-            idx_from_raw[FnNode](i),
-            FnNode {
-                name: 0,
-                fip: false,
-                generics: 0,
-                params: 0,
-                result: 0,
-                effects: 0,
-                body: none(),
-                start: 0,
-                end: 0
-            }
-        )
+    a.fns.get_or(
+        idx_from_raw[FnNode](i),
+        FnNode {
+            name: 0,
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: 0,
+            effects: 0,
+            body: none(),
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 // ---------------------------------------------------------- canonical bytes
@@ -212,10 +205,7 @@ fn put_effects(inout b: ChunkSeq[u8], in a: Ast, effs: u32, inout tmp: String) {
             if j == 0 {
                 break;
             }
-            let prev = match order.try_get(wrapping_sub(j, 1)) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
+            let prev = order.try_get(wrapping_sub(j, 1)).unwrap_or(0);
             if !digest_less(in digests, i, prev) {
                 break;
             }
@@ -226,10 +216,7 @@ fn put_effects(inout b: ChunkSeq[u8], in a: Ast, effs: u32, inout tmp: String) {
     }
     put_u64(inout b, m);
     for i in 0..m {
-        let x = match order.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let x = order.try_get(i).unwrap_or(0);
         let s = wrapping_mul(x, 32);
         for k in s..wrapping_add(s, 32) {
             match digests.try_get(k) {
@@ -260,11 +247,7 @@ fn put_lit(inout b: ChunkSeq[u8], in a: Ast, l: u32, inout tmp: String) {
         if x.neg {
             // The two's complement of the magnitude.
             let lo = wrapping_add(!x.bits, 1);
-            let carry: u64 = if lo == 0 {
-                1
-            } else {
-                0
-            };
+            let carry: u64 = if lo == 0 { 1 } else { 0 };
             put_u128(inout b, lo, wrapping_add(!x.hi, carry));
         } else {
             put_u128(inout b, x.bits, x.hi);
@@ -485,11 +468,7 @@ fn put_expr(inout b: ChunkSeq[u8], in a: Ast, x: u32, inout tmp: String) {
         if m > 0 {
             put_clause(inout b, in a, list_at(in a, e.e, 0), inout tmp);
         }
-        let ops = if m > 0 {
-            wrapping_sub(m, 1)
-        } else {
-            0
-        };
+        let ops = if m > 0 { wrapping_sub(m, 1) } else { 0 };
         put_u64(inout b, ops);
         for i in 1..m {
             put_clause(inout b, in a, list_at(in a, e.e, i), inout tmp);
@@ -781,10 +760,7 @@ fn calls(in a: Ast, x: u32, inout c: Calls) {
                 if m == none() {
                     break;
                 }
-                let key = match c.method_key.try_get(widen_u64(m)) {
-                    Option::Some(v) => v,
-                    Option::None => 0,
-                };
+                let key = c.method_key.try_get(widen_u64(m)).unwrap_or(0);
                 add_callee(inout c, key);
                 m = match c.method_next.try_get(widen_u64(m)) {
                     Option::Some(v) => v,
@@ -889,23 +865,17 @@ pub fn graph(in b: Slice[u8]) -> ChunkSeq[u64] {
     let mut methods: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let items = l.ast.m_items.len();
     for i in 0..items {
-        let it = match l.ast.m_items.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let it = l.ast.m_items.try_get(i).unwrap_or(0);
         let item = l.ast.items.get_or(idx_from_raw[ItemNode](it), ItemNode { kind: 0, node: 0 });
         if item.kind == 2 {
             let f = fn_at(in l.ast, item.node);
             keys.push(f.name);
             fns.push(item.node);
         } else if item.kind == 4 {
-            let im = l
-                .ast
-                .impls
-                .get_or(
-                    idx_from_raw[ImplNode](item.node),
-                    ImplNode { ty: 0, generics: 0, methods: 0 }
-                );
+            let im = l.ast.impls.get_or(
+                idx_from_raw[ImplNode](item.node),
+                ImplNode { ty: 0, generics: 0, methods: 0 }
+            );
             // impl_type_key
             owner.clear();
             let n = type_at(in l.ast, im.ty);
@@ -944,28 +914,16 @@ pub fn graph(in b: Slice[u8]) -> ChunkSeq[u64] {
     grow_u32(inout c.method_head, nsym);
     let n = keys.len();
     for i in 0..n {
-        let ks = match keys.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let ks = keys.try_get(i).unwrap_or(0);
         let ok = c.known.try_set(widen_u64(ks), 1);
     }
     // The method chains, in reverse so each chain runs in declaration
     // order (the order does not matter to a set).
     let nm = methods.len() / 2;
     for q in 0..nm {
-        let name = match methods.try_get(wrapping_mul(q, 2)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
-        let entry = match methods.try_get(wrapping_add(wrapping_mul(q, 2), 1)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
-        let ks = match keys.try_get(widen_u64(entry)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let name = methods.try_get(wrapping_mul(q, 2)).unwrap_or(0);
+        let entry = methods.try_get(wrapping_add(wrapping_mul(q, 2), 1)).unwrap_or(0);
+        let ks = keys.try_get(widen_u64(entry)).unwrap_or(0);
         let head = match c.method_head.try_get(widen_u64(name)) {
             Option::Some(v) => v,
             Option::None => none(),
@@ -980,14 +938,8 @@ pub fn graph(in b: Slice[u8]) -> ChunkSeq[u64] {
     let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut hex = String::new();
     for i in 0..n {
-        let ks = match keys.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
-        let fi = match fns.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let ks = keys.try_get(i).unwrap_or(0);
+        let fi = fns.try_get(i).unwrap_or(0);
         let f = fn_at(in l.ast, fi);
         key.clear();
         let ok = l.ast.names.resolve_into(symbol_from_id(ks), inout key);
@@ -1004,10 +956,7 @@ pub fn graph(in b: Slice[u8]) -> ChunkSeq[u64] {
         let m = c.out.len();
         res.push(m);
         for j in 0..m {
-            let callee = match c.out.try_get(j) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
+            let callee = c.out.try_get(j).unwrap_or(0);
             let ok = c.seen.try_set(widen_u64(callee), 0);
             key.clear();
             let ok2 = l.ast.names.resolve_into(symbol_from_id(callee), inout key);

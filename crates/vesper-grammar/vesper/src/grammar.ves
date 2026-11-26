@@ -308,16 +308,7 @@ fn build(
     cm_set(inout meta, id, 1, f1);
     cm_set(inout meta, id, 2, f2);
     cm_set(inout meta, id, 3, f3);
-    cm_set(
-        inout meta,
-        id,
-        META_NULLABLE,
-        if nullable {
-            1
-        } else {
-            0
-        }
-    );
+    cm_set(inout meta, id, META_NULLABLE, if nullable { 1 } else { 0 });
     cm_set(inout meta, id, META_COLOR, DONE);
     cm_set(inout meta, id, META_HEIGHT, height);
 }

@@ -379,9 +379,40 @@ where the pass runs on the program the lowering reads.
 
 **Rust lines deleted:** 0. All of `src/verified_codegen` goes at the retirement.
 
+## Part 4d-3: the VerifiedBuild driver step
+
+### What changed
+
+- The Vesper driver (`crates/vesper-hybrid/modules/driver`) now builds a
+  Linux ELF executable for `vesper build --codegen verified` itself. A new
+  step, `VerifiedInput` (62), asks Rust for the compile input only: the
+  checked world goes through the same optimizer and word encoding as the
+  `verified_codegen` swap. The driver then calls
+  `@vesper/verified-codegen::compile_bytes`, writes the executable,
+  marks it `0o755` and prints the build line.
+- Anything the step cannot take falls back to Rust's `VerifiedBuild` pass:
+  dyn traits, Mach-O and COFF targets, a program the word format cannot
+  hold, and a compile error (Rust's pass reports it with its own text).
+- `VESPER_HYBRID_DRIVER_VERIFIED=0` turns the step off and leaves the
+  `verified_codegen` swap on. `VESPER_HYBRID_VERIFIED=0` turns both off.
+- The hybrid statistics report "driver built N verified executables in
+  Vesper (M fell back to Rust)".
+
+### Evidence (Linux x86_64, release, `-C target-cpu=native`)
+
+| Check | Result |
+|---|---|
+| CLI builds, driver step on vs both swaps off, 3 Linux targets: status, stdout, stderr, executable bytes | **0 of 1,605 differ** (333 built) |
+| Wall time of those builds | Rust 11.91 s, Vesper 14.42 s: **1.21x** |
+| `examples/checked_math.ves`, 40 builds each | driver step 8-9 ms, swap only 7-8 ms, Rust 7 ms |
+| `verified_build_runs_in_the_vesper_driver` | the driver wrote the executable |
+
+**Rust lines deleted:** 0. Rust's `VerifiedBuild` pass stays as the
+fallback until the retirement.
+
 ## Left
 
 - Optional: compare the per-arch `encoding_listing` text.
-- Part 4d-3: `coverage`, then the swap into `bootstrap/stage1.rs` with
+- Part 4d-4: `coverage`, then the swap into `bootstrap/stage1.rs` with
   `bootstrap/stage1.lock` reproduced, and the Rust deleted at the
   retirement.

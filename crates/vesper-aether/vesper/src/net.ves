@@ -77,11 +77,7 @@ pub fn net_config_space(
     for i in 0..6 {
         out.try_set(i, net_byte(in mac, i));
     }
-    let status: u16 = if link_up {
-        NET_S_LINK_UP
-    } else {
-        0
-    };
+    let status: u16 = if link_up { NET_S_LINK_UP } else { 0 };
     net_write_u16_le(inout out, 6, status);
     net_write_u16_le(inout out, 8, max_pairs);
     net_write_u16_le(inout out, 10, mtu);
@@ -233,11 +229,7 @@ pub fn net_queue(in st: NetState, queue: u16) -> u64 {
     if pair >= pairs {
         return NET_Q_NONE;
     }
-    let kind = if (q & 1) == 1 {
-        NET_Q_TX
-    } else {
-        NET_Q_RX
-    };
+    let kind = if (q & 1) == 1 { NET_Q_TX } else { NET_Q_RX };
     kind | wrapping_shl_u64(pair, 8)
 }
 
@@ -249,11 +241,7 @@ pub fn net_config(in st: NetState, inout out: Slice[u8]) -> u64 {
     for i in 0..n {
         out.try_set(i, wrapping_u8(wrapping_shr_u64(st.mac, wrapping_u32(wrapping_mul(i, 8)))));
     }
-    let status: u16 = if st.link_up {
-        NET_S_LINK_UP
-    } else {
-        0
-    };
+    let status: u16 = if st.link_up { NET_S_LINK_UP } else { 0 };
     net_write_u16_le(inout out, 6, status);
     net_write_u16_le(inout out, 8, st.max_pairs);
     net_write_u16_le(inout out, 10, st.mtu);

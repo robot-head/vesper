@@ -430,11 +430,7 @@ fn align_to(x: u64, a: u64) -> u64 {
 }
 
 fn max64(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // The member types of a tuple, of a struct or of variant `v` of an enum.
@@ -1141,10 +1137,9 @@ pub fn exports(inout l: L) -> ChunkSeq[u8] eff [Fail[WErr]] {
     let mut args = ChunkSeq::new[u32]();
     for i in 0..sig.pn {
         let p = l.cx.f.param(add(sig.p0, i));
-        args
-            .push(
-                lift(inout l, inout c, inout locals, nparams, p.ty, in flat_params, inout cursor)
-            );
+        args.push(
+            lift(inout l, inout c, inout locals, nparams, p.ty, in flat_params, inout cursor)
+        );
     }
     for i in 0..args.len() {
         match args.try_get(i) {

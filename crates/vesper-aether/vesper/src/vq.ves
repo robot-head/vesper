@@ -137,15 +137,7 @@ fn vq_store(inout out: Slice[u64], count: u64, gpa: u64, len: u64, writable: boo
     let at = wrapping_add(VQ_HEADER, wrapping_mul(count, 4));
     out.try_set(at, gpa);
     out.try_set(wrapping_add(at, 1), len);
-    out
-        .try_set(
-            wrapping_add(at, 2),
-            if writable {
-                1
-            } else {
-                0
-            }
-        );
+    out.try_set(wrapping_add(at, 2), if writable { 1 } else { 0 });
     out.try_set(wrapping_add(at, 3), tag);
 }
 
@@ -475,7 +467,11 @@ pub fn vq_packed_walk(
             & (
                 65535
                     ^ (
-                        VQ_FLAG_NEXT | VQ_FLAG_WRITE | VQ_FLAG_INDIRECT | VQ_FLAG_AVAIL | VQ_FLAG_USED
+                        VQ_FLAG_NEXT
+                            | VQ_FLAG_WRITE
+                            | VQ_FLAG_INDIRECT
+                            | VQ_FLAG_AVAIL
+                            | VQ_FLAG_USED
                     )
             )
             != 0 {
@@ -581,11 +577,7 @@ pub fn vq_packed_walk(
     out.try_set(0, id);
     vq_totals(inout out, count, total, wlen);
     out.try_set(6, slots);
-    let wrap_bit: u64 = if cw {
-        65536
-    } else {
-        0
-    };
+    let wrap_bit: u64 = if cw { 65536 } else { 0 };
     out.try_set(7, ci | wrap_bit);
     Result::Ok(2)
 }

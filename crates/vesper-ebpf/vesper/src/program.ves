@@ -22,9 +22,12 @@ const MAX_VALUE_SIZE: u32 = 1048576;
 // The first byte that is not ASCII.
 const ASCII_END: u8 = 128;
 
+// Rust's `MapKind`. `ArrayMap` is Rust's `MapKind::Array`: enum variants
+// share one namespace in a package world, and `@vesper/serde::Kind` has an
+// `Array` too, so the two could not be linked into one driver (#2074).
 pub copy enum MapKind {
     Hash,
-    Array,
+    ArrayMap,
     PerCpuHash,
     PerCpuArray,
     LruHash,
@@ -42,7 +45,7 @@ pub copy enum ProgramType {
 pub fn map_kernel_type(k: MapKind) -> u32 {
     match k {
         MapKind::Hash => MapType::Hash,
-        MapKind::Array => MapType::Array,
+        MapKind::ArrayMap => MapType::Array,
         MapKind::PerCpuHash => MapType::PercpuHash,
         MapKind::PerCpuArray => MapType::PercpuArray,
         MapKind::LruHash => MapType::LruHash,
@@ -55,7 +58,7 @@ pub fn map_from_kernel_type(t: u32) -> Option[MapKind] {
     if t == MapType::Hash {
         Option::Some(MapKind::Hash)
     } else if t == MapType::Array {
-        Option::Some(MapKind::Array)
+        Option::Some(MapKind::ArrayMap)
     } else if t == MapType::PercpuHash {
         Option::Some(MapKind::PerCpuHash)
     } else if t == MapType::PercpuArray {
@@ -73,7 +76,7 @@ pub fn map_from_kernel_type(t: u32) -> Option[MapKind] {
 
 pub fn map_is_array(k: MapKind) -> bool {
     match k {
-        MapKind::Array => true,
+        MapKind::ArrayMap => true,
         MapKind::PerCpuArray => true,
         MapKind::ProgArray => true,
         _ => false,

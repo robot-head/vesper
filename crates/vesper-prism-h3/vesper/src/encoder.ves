@@ -276,11 +276,7 @@ fn field_line(
     // The N bit of each literal form: NameRef::Never, and shifted right by
     // 2 and 1 it is the N bit of the post-base and literal-name forms
     // (PostBaseNameRef::Never and LiteralName::Never).
-    let ref_never: u8 = if sensitive {
-        NameRef::Never
-    } else {
-        0
-    };
+    let ref_never: u8 = if sensitive { NameRef::Never } else { 0 };
     let post_never = ref_never >> 2;
     let literal_never = ref_never >> 1;
     e.stats.literals = inc(e.stats.literals);
@@ -424,8 +420,7 @@ fn release(inout e: EncoderCore, i: u64) {
     for k in 0..n {
         let abs = word(in e.sec_refs.as_slice(), wrapping_add(lo, k));
         let slot = slot_of(in e, abs);
-        let _set = e
-            .table
+        let _set = e.table
             .refs
             .try_set(slot, wrapping_sub(word(in e.table.refs.as_slice(), slot), 1));
     }

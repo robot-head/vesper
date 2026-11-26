@@ -58,20 +58,12 @@ pub fn same_str(in a: Slice[u8], in b: Str) -> bool {
 
 // Byte order: negative, 0 or positive as `a` sorts before, with or after `b`.
 pub fn compare(in a: Slice[u8], in b: Slice[u8]) -> i64 {
-    let n = if a.len() < b.len() {
-        a.len()
-    } else {
-        b.len()
-    };
+    let n = if a.len() < b.len() { a.len() } else { b.len() };
     for i in 0..n {
         let x = byte(in a, i);
         let y = byte(in b, i);
         if x != y {
-            return if x < y {
-                -1
-            } else {
-                1
-            };
+            return if x < y { -1 } else { 1 };
         }
     }
     if a.len() < b.len() {
@@ -170,14 +162,7 @@ pub fn slashes(in s: Slice[u8]) -> ChunkSeq[u8] {
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     for i in 0..s.len() {
         let b = byte(in s, i);
-        out
-            .push(
-                if b == 92 {
-                    47
-                } else {
-                    b
-                }
-            );
+        out.push(if b == 92 { 47 } else { b });
     }
     out
 }

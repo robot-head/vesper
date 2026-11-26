@@ -266,13 +266,14 @@ fn decode(in t: Slice[u8], i: u64) -> u64 {
     } else if b < 224 {
         ((b & 31) << 6) | (widen_u64(byte(in t, wrapping_add(i, 1))) & 63)
     } else if b < 240 {
-        ((b & 15) << 12) | ((widen_u64(byte(in t, wrapping_add(i, 1))) & 63) << 6) | (
-            widen_u64(byte(in t, wrapping_add(i, 2))) & 63
-        )
+        ((b & 15) << 12)
+            | ((widen_u64(byte(in t, wrapping_add(i, 1))) & 63) << 6)
+            | (widen_u64(byte(in t, wrapping_add(i, 2))) & 63)
     } else {
-        ((b & 7) << 18) | ((widen_u64(byte(in t, wrapping_add(i, 1))) & 63) << 12) | (
-            (widen_u64(byte(in t, wrapping_add(i, 2))) & 63) << 6
-        ) | (widen_u64(byte(in t, wrapping_add(i, 3))) & 63)
+        ((b & 7) << 18)
+            | ((widen_u64(byte(in t, wrapping_add(i, 1))) & 63) << 12)
+            | ((widen_u64(byte(in t, wrapping_add(i, 2))) & 63) << 6)
+            | (widen_u64(byte(in t, wrapping_add(i, 3))) & 63)
     }
 }
 
@@ -570,11 +571,7 @@ fn line_of(in starts: ChunkSeq[u64], offset: u64) -> u64 {
             hi = mid;
         }
     }
-    if lo == 0 {
-        0
-    } else {
-        wrapping_sub(lo, 1)
-    }
+    if lo == 0 { 0 } else { wrapping_sub(lo, 1) }
 }
 
 // `LineIndex::position` of a checked offset: the line, and the UTF-16
@@ -614,11 +611,10 @@ fn put_decimal(inout out: ChunkSeq[u8], n: u64) {
     out.resize(wrapping_add(base, d), Ascii::Zero);
     let mut x = n;
     for i in 0..d {
-        let ok = out
-            .try_set(
-                wrapping_sub(wrapping_add(base, d), wrapping_add(i, 1)),
-                wrapping_u8(wrapping_add(x % 10, Ascii::Zero))
-            );
+        let ok = out.try_set(
+            wrapping_sub(wrapping_add(base, d), wrapping_add(i, 1)),
+            wrapping_u8(wrapping_add(x % 10, Ascii::Zero))
+        );
         x = x / 10;
     }
 }
@@ -1079,11 +1075,7 @@ enum Line: _ {
 // length, the terminator included (CRLF is one).
 
 fn display_byte(in t: Slice[u8], n: u64, i: u64) -> u8 {
-    if i < n {
-        byte(in t, i)
-    } else {
-        Ascii::Space
-    }
+    if i < n { byte(in t, i) } else { Ascii::Space }
 }
 
 fn source_lines(in t: Slice[u8], n: u64, pad: u64) -> ChunkSeq[u64] {
@@ -1172,39 +1164,21 @@ fn find_line(in lines: ChunkSeq[u64], field: u64, x: u64) -> u64 {
             hi = mid;
         }
     }
-    if lo == 0 {
-        0
-    } else {
-        wrapping_sub(lo, 1)
-    }
+    if lo == 0 { 0 } else { wrapping_sub(lo, 1) }
 }
 
 // The chars of the display text before the byte offset `x` of line `l`.
 fn chars_before(in t: Slice[u8], n: u64, in lines: ChunkSeq[u64], l: u64, x: u64) -> u64 {
     let from = byte_off(in lines, l);
     let to = x;
-    let real = if to <= n {
-        to
-    } else {
-        n
-    };
+    let real = if to <= n { to } else { n };
     let mut count = if from < real {
         chars_in(in t, from, real)
     } else {
         0
     };
     if to > n {
-        count = wrapping_add(
-            count,
-            wrapping_sub(
-                to,
-                if from > n {
-                    from
-                } else {
-                    n
-                }
-            )
-        );
+        count = wrapping_add(count, wrapping_sub(to, if from > n { from } else { n }));
     }
     wrapping_add(char_off(in lines, l), count)
 }
@@ -1265,16 +1239,8 @@ fn l_multi(in r: Rep, l: u64) -> bool {
 fn l_last(in r: Rep, l: u64) -> u64 {
     let e = l_end(in r, l);
     let s = l_start(in r, l);
-    let x = if e > 0 {
-        wrapping_sub(e, 1)
-    } else {
-        0
-    };
-    if x > s {
-        x
-    } else {
-        s
-    }
+    let x = if e > 0 { wrapping_sub(e, 1) } else { 0 };
+    if x > s { x } else { s }
 }
 
 fn multi_count(in r: Rep) -> u64 {
@@ -1338,14 +1304,7 @@ fn write_margin(
     } else {
         open(inout out, r.color, Color::Skipped);
         spaces(inout out, wrapping_add(r.width, 1));
-        put_char(
-            inout out,
-            if is_ellipsis {
-                vbar_gap()
-            } else {
-                vbar()
-            }
-        );
+        put_char(inout out, if is_ellipsis { vbar_gap() } else { vbar() });
         close(inout out, r.color, Color::Skipped);
     }
     out.push(Ascii::Space);
@@ -1353,11 +1312,7 @@ fn write_margin(
     let has_margin = labels && r.has_margin;
     let span_start = char_off(in lines, idx);
     let span_end = wrapping_add(span_start, char_len(in lines, idx));
-    let cols = if draw && m > 0 {
-        wrapping_add(m, 1)
-    } else {
-        0
-    };
+    let cols = if draw && m > 0 { wrapping_add(m, 1) } else { 0 };
     for col in 0..cols {
         let mut corner = NONE;
         let mut corner_start = false;
@@ -1365,11 +1320,7 @@ fn write_margin(
         let mut vbar_l = NONE;
         let mut ptr = NONE;
         let mut ptr_start = false;
-        let multi_label = if col < m {
-            multi_at(in r, col)
-        } else {
-            NONE
-        };
+        let multi_label = if col < m { multi_at(in r, col) } else { NONE };
         let lim = if wrapping_add(col, 1) < m {
             wrapping_add(col, 1)
         } else {
@@ -1410,11 +1361,7 @@ fn write_margin(
                     let mut skip = false;
                     if report_row == label_row {
                         if margin {
-                            vbar_l = if col == i {
-                                label
-                            } else {
-                                NONE
-                            };
+                            vbar_l = if col == i { label } else { NONE };
                             if is_start {
                                 skip = true;
                             }
@@ -1456,21 +1403,13 @@ fn write_margin(
         let mut a: u64 = Ascii::Space;
         let mut b: u64 = Ascii::Space;
         if corner != NONE {
-            a = if corner_start {
-                ltop()
-            } else {
-                lbot()
-            };
+            a = if corner_start { ltop() } else { lbot() };
             b = hbar();
         } else if hbar_l != NONE {
             a = hbar();
             b = hbar();
         } else if vbar_l != NONE {
-            a = if is_ellipsis {
-                vbar_gap()
-            } else {
-                vbar()
-            };
+            a = if is_ellipsis { vbar_gap() } else { vbar() };
             b = Ascii::Space;
         } else if ptr != NONE && is_line {
             let is_col = multi_label == ptr;
@@ -1478,19 +1417,11 @@ fn write_margin(
             a = if is_limit {
                 rarrow()
             } else if is_col {
-                if ptr_start {
-                    ltop()
-                } else {
-                    lcross()
-                }
+                if ptr_start { ltop() } else { lcross() }
             } else {
                 hbar()
             };
-            b = if !is_limit {
-                hbar()
-            } else {
-                Ascii::Space
-            };
+            b = if !is_limit { hbar() } else { Ascii::Space };
         }
         put_char(inout out, a);
         put_char(inout out, b);
@@ -1608,15 +1539,7 @@ fn report_labels(
         }
         r.lab.push(sc);
         r.lab.push(ec);
-        r
-            .lab
-            .push(
-                if first != last {
-                    1
-                } else {
-                    0
-                }
-            );
+        r.lab.push(if first != last { 1 } else { 0 });
         if l == 0 {
             r.lab.push(d.message);
             r.lab.push(d.message_len);
@@ -1722,11 +1645,7 @@ fn line_labels(inout r: Rep, in lines: ChunkSeq[u64], idx: u64, count: u64) -> b
             let e = l_end(in r, l);
             if s >= off && e <= end {
                 let mid = wrapping_add(s, e) / 2;
-                let col = if mid > s {
-                    mid
-                } else {
-                    s
-                };
+                let col = if mid > s { mid } else { s };
                 r.ll.push(l);
                 r.ll.push(wrapping_sub(col, off));
                 r.ll.push(0);
@@ -1771,16 +1690,8 @@ fn line_chars(inout r: Rep, in t: Slice[u8], n: u64, in lines: ChunkSeq[u64], id
         if i >= to {
             break;
         }
-        let c = if i < n {
-            decode(in t, i)
-        } else {
-            Ascii::Space
-        };
-        let len = if i < n {
-            utf8_len(byte(in t, i))
-        } else {
-            1
-        };
+        let c = if i < n { decode(in t, i) } else { Ascii::Space };
+        let len = if i < n { utf8_len(byte(in t, i)) } else { 1 };
         r.cps.push(c);
         if !is_space(c) {
             keep = r.cps.len();
@@ -1820,11 +1731,7 @@ fn write_line(
             arrow = len;
         } else {
             let e = l_end(in r, ll_label(in r, j));
-            let x = if e > off {
-                wrapping_sub(e, off)
-            } else {
-                0
-            };
+            let x = if e > off { wrapping_sub(e, off) } else { 0 };
             if x > arrow {
                 arrow = x;
             }
@@ -1896,14 +1803,7 @@ fn write_line(
                 tail = hbar();
             }
             for i in 0..w {
-                put_char(
-                    inout out,
-                    if i == 0 {
-                        c
-                    } else {
-                        tail
-                    }
-                );
+                put_char(inout out, if i == 0 { c } else { tail });
             }
         }
         out.push(Ascii::Lf);
@@ -1930,11 +1830,7 @@ fn write_line(
             let mut tail: u64 = Ascii::Space;
             if col == col_of && !is_margin(in r, label) {
                 c = if multi {
-                    if draw {
-                        mbot()
-                    } else {
-                        rbot()
-                    }
+                    if draw { mbot() } else { rbot() }
                 } else {
                     lbot()
                 };
@@ -2004,16 +1900,8 @@ fn write_report(
     } else {
         0
     };
-    let x = if ge > 0 {
-        wrapping_sub(ge, 1)
-    } else {
-        0
-    };
-    let y = if x > gs {
-        x
-    } else {
-        gs
-    };
+    let x = if ge > 0 { wrapping_sub(ge, 1) } else { 0 };
+    let y = if x > gs { x } else { gs };
     let end = if y <= src_len {
         wrapping_add(find_line(in lines, Line::CharOff, y), 1)
     } else {

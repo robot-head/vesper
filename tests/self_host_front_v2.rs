@@ -112,6 +112,7 @@ struct Front {
     editor: native::WordFunction,
     surface: native::WordFunction,
     template: native::WordFunction,
+    macros: native::WordFunction,
 }
 
 fn front() -> &'static Front {
@@ -143,6 +144,7 @@ fn front() -> &'static Front {
             editor: compile("parse_editor_tables"),
             surface: compile("parse_surface_tables"),
             template: compile("parse_template_tables"),
+            macros: compile("macro_source_tables"),
         }
     })
 }
@@ -2075,4 +2077,365 @@ fn surface_profile_speed() {
         ratios[0],
         ratios[ratios.len() - 1]
     );
+}
+
+// ---------------------------------------------------------------- source macros
+
+use vesper_syntax::macro_source;
+
+/// `macro_source::Error` as `MacroError::code` (source_macro.ves).
+fn macro_error_code(e: &macro_source::Error) -> u64 {
+    use macro_source::{ErrorKind as E, Resource as R};
+    match e.kind {
+        E::InvalidLimits => 1,
+        E::Lexical => 2,
+        E::Syntax => 3,
+        E::Unsupported => 4,
+        E::UnknownMacro => 5,
+        E::Arity => 6,
+        E::DuplicateName => 7,
+        E::ForeignId => 8,
+        E::Allocation => 9,
+        E::Budget(r) => {
+            10 + match r {
+                R::Source => 0,
+                R::Tokens => 1,
+                R::Macros => 2,
+                R::Functions => 3,
+                R::Invocations => 4,
+                R::Parameters => 5,
+                R::Depth => 6,
+                R::Metadata => 7,
+                R::Work => 8,
+            }
+        }
+    }
+}
+
+/// `macro_source::parse` as the rows of `macro_source_tables`.
+fn rust_macro_rows(source: &str, limits: macro_source::Limits) -> Vec<u64> {
+    let w = |n: usize| n as u64;
+    let parsed = match macro_source::parse(source, limits) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            let [s, e2] = span_words(e.span.as_ref());
+            return vec![macro_error_code(&e), s, e2];
+        }
+    };
+    let (mut defs, mut params, mut funs, mut names, mut invs, mut args) =
+        (vec![], vec![], vec![], vec![], vec![], vec![]);
+    for d in parsed.definitions() {
+        defs.extend([
+            w(d.name_span.start),
+            w(d.name_span.end),
+            w(d.quote_span.start),
+            w(d.quote_span.end),
+            w(d.span.start),
+            w(d.span.end),
+            w(params.len() / 4),
+            w(d.parameters.len()),
+        ]);
+        for p in &d.parameters {
+            params.extend([
+                w(p.name_span.start),
+                w(p.name_span.end),
+                w(p.span.start),
+                w(p.span.end),
+            ]);
+        }
+    }
+    let mut first_invocation = 0;
+    for f in parsed.functions() {
+        let spans = parsed.parameter_name_spans(f.id).unwrap();
+        funs.extend([
+            w(f.span.start),
+            w(f.span.end),
+            w(f.body_span.start),
+            w(f.body_span.end),
+            w(first_invocation),
+            w(f.invocations.len()),
+            w(names.len() / 2),
+            w(spans.len()),
+        ]);
+        first_invocation += f.invocations.len();
+        for s in spans {
+            names.extend([w(s.start), w(s.end)]);
+        }
+    }
+    for i in parsed.invocations() {
+        invs.extend([
+            w(i.definition.index()),
+            w(i.function.index()),
+            w(i.name_span.start),
+            w(i.name_span.end),
+            w(i.span.start),
+            w(i.span.end),
+            w(args.len() / 2),
+            w(i.arguments.len()),
+        ]);
+        for a in &i.arguments {
+            args.extend([w(a.start), w(a.end)]);
+        }
+    }
+    let mut out = vec![
+        0,
+        w(defs.len() / 8),
+        w(params.len() / 4),
+        w(funs.len() / 8),
+        w(names.len() / 2),
+        w(invs.len() / 8),
+        w(args.len() / 2),
+        w(parsed.tokens().len()),
+    ];
+    for rows in [defs, params, funs, names, invs, args] {
+        out.extend(rows);
+    }
+    out
+}
+
+/// The packed limit words of `macro_source_tables` (0 keeps a default).
+fn pack_macro_limits(l: macro_source::Limits) -> (u64, u64) {
+    let d = macro_source::Limits::default();
+    assert_eq!(l.max_source_bytes, d.max_source_bytes);
+    let w = |n: usize| n as u64;
+    let a = w(l.max_work) | w(l.max_metadata_bytes) << 32;
+    let b = w(l.max_tokens)
+        | w(l.max_macros) << 17
+        | w(l.max_functions) << 25
+        | w(l.max_invocations) << 36
+        | w(l.max_parameters) << 49
+        | w(l.max_depth) << 55;
+    (a, b)
+}
+
+fn compare_macro(source: &str, limits: macro_source::Limits) -> Option<String> {
+    let rust = rust_macro_rows(source, limits);
+    let (a, b) = pack_macro_limits(limits);
+    let vesper = call_words(&front().macros, source, &[a, b]);
+    (rust != vesper).then(|| {
+        let at = rust
+            .iter()
+            .zip(&vesper)
+            .position(|(r, v)| r != v)
+            .unwrap_or(rust.len().min(vesper.len()));
+        format!(
+            "rows differ at {at}: Rust {:?} Vesper {:?}",
+            &rust[at.saturating_sub(2)..rust.len().min(at + 6)],
+            &vesper[at.saturating_sub(2)..vesper.len().min(at + 6)]
+        )
+    })
+}
+
+/// The surface profile with the expression macro check
+/// (`parse_surface_with_test_mode`) as rows.
+fn rust_macro_surface(source: &str, include_tests: bool) -> Tables {
+    match parser::parse_surface_with_test_mode(source, sugar_limits(), include_tests) {
+        Ok(parse) => tree_rows(&parse.syntax(), &parse.diagnostics),
+        Err(limit) => Tables {
+            diagnostics: vec![(3, 0, 0, limit.to_string())],
+            ..Tables::default()
+        },
+    }
+}
+
+fn compare_macro_surface(source: &str, include_tests: bool) -> Option<String> {
+    let limits = sugar_limits();
+    let rust = rust_macro_surface(source, include_tests);
+    let bytes = limits.max_source_bytes as u64 | u64::from(include_tests) << 32 | 1 << 33;
+    let counts = limits.max_tokens as u64 | (limits.max_diagnostics as u64) << 32;
+    let vesper = tables_from_words(&call_words(&front().surface, source, &[bytes, counts]));
+    (rust != vesper).then(|| first_difference(source, &rust, &vesper))
+}
+
+/// The source macro cases: the macro parser test suites' strings and the
+/// repository sources that spell a macro call or `quote`.
+fn macro_cases() -> Vec<String> {
+    let mut cases = vec![];
+    for file in [
+        "crates/vesper-syntax/tests/source_macro_syntax.rs",
+        "crates/vesper-syntax/tests/source_macro_parameters.rs",
+        "crates/vesper-syntax/tests/source_macro_tuples.rs",
+        "crates/vesper-fmt/tests/macro_source.rs",
+    ] {
+        if let Ok(text) = std::fs::read_to_string(root().join(file)) {
+            cases.extend(rust_string_literals(&text));
+        }
+    }
+    for path in repository_sources() {
+        if let Ok(text) = std::fs::read_to_string(&path)
+            && (text.contains("quote") || text.contains("!("))
+        {
+            cases.push(text);
+        }
+    }
+    cases
+}
+
+/// Runs `f` on a thread with a 64 MiB stack: the debug build of the Rust
+/// surface parser recurses deeper than the default test stack on some
+/// edited sources.
+fn big_stack(f: fn()) {
+    std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(f)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// The metadata budget charges the sizes of these Rust records
+/// (source_macro.ves `SIZE_*`).
+#[test]
+fn source_macro_record_sizes_are_the_charged_ones() {
+    use std::mem::size_of;
+    assert_eq!(size_of::<macro_source::MacroDefinition>(), 112);
+    assert_eq!(size_of::<macro_source::MacroParameter>(), 32);
+    assert_eq!(size_of::<macro_source::SourceFunction>(), 352);
+    assert_eq!(size_of::<Vec<std::ops::Range<usize>>>(), 24);
+    assert_eq!(size_of::<macro_source::InvocationId>(), 40);
+    assert_eq!(size_of::<macro_source::Invocation>(), 176);
+    assert_eq!(size_of::<std::ops::Range<usize>>(), 16);
+    assert_eq!(size_of::<vesper_syntax::lexer::TokenKind>(), 2);
+    assert_eq!(size_of::<vesper_syntax::lexer::Token>(), 24);
+}
+
+/// `macro_source::parse` and the surface macro check on the macro test
+/// strings and repository macro sources, under the default limits and
+/// tight ones.
+#[test]
+fn source_macros_match_macro_source_parse() {
+    big_stack(source_macros_match_macro_source_parse_body);
+}
+
+fn source_macros_match_macro_source_parse_body() {
+    let cases = macro_cases();
+    assert!(cases.len() >= 60, "{} cases", cases.len());
+    let d = macro_source::Limits::default();
+    let tight = [
+        d,
+        macro_source::Limits {
+            max_work: 20_000,
+            ..d
+        },
+        macro_source::Limits {
+            max_metadata_bytes: 60_000,
+            ..d
+        },
+        macro_source::Limits {
+            max_macros: 1,
+            max_parameters: 1,
+            max_depth: 4,
+            ..d
+        },
+        macro_source::Limits {
+            max_functions: 1,
+            max_invocations: 1,
+            max_tokens: 64,
+            ..d
+        },
+    ];
+    let mut failures = vec![];
+    let mut accepted = 0;
+    for (i, source) in cases.iter().enumerate() {
+        for (j, limits) in tight.iter().enumerate() {
+            if j == 0 && macro_source::parse(source, *limits).is_ok() {
+                accepted += 1;
+            }
+            if let Some(diff) = compare_macro(source, *limits) {
+                let shown: String = source.chars().take(120).collect();
+                failures.push(format!("case {i} limits {j} {shown:?}: {diff}"));
+            }
+        }
+        if let Some(diff) = compare_macro_surface(source, i % 2 == 0) {
+            let shown: String = source.chars().take(120).collect();
+            failures.push(format!("case {i} surface {shown:?}: {diff}"));
+        }
+        if failures.len() >= 10 {
+            break;
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert!(accepted >= 20, "{accepted} accepted");
+}
+
+/// Edited macro sources and macro token soup.
+#[test]
+fn source_macros_match_on_the_fuzzed_corpus() {
+    big_stack(source_macros_match_on_the_fuzzed_corpus_body);
+}
+
+fn source_macros_match_on_the_fuzzed_corpus_body() {
+    let bases = macro_cases();
+    const MACRO_FRAGMENTS: &[&str] = &[
+        "macro",
+        "quote",
+        "expr",
+        "$",
+        "$x",
+        "!",
+        "m!(",
+        "(",
+        ")",
+        "{",
+        "}",
+        ",",
+        ";",
+        ":",
+        "->",
+        "let",
+        "fn",
+        "struct",
+        "copy",
+        "test {",
+        "::",
+        "1",
+        "\"s\"",
+        "true",
+        "in",
+        "inout",
+        "x",
+        "y",
+        "<T>",
+        ".f",
+        "where T: Eq",
+    ];
+    let rounds: usize = std::env::var("VESPER_FRONT_FUZZ")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000);
+    let mut rng = Rng(0x4d41_4352_4f53_5243);
+    let mut failures = vec![];
+    for round in 0..rounds {
+        let source = if round % 4 == 3 {
+            let n = 1 + rng.below(50);
+            let mut s = String::new();
+            for _ in 0..n {
+                s.push_str(MACRO_FRAGMENTS[rng.below(MACRO_FRAGMENTS.len())]);
+                if rng.below(3) != 0 {
+                    s.push(' ');
+                }
+            }
+            s
+        } else {
+            let base = rng.below(bases.len());
+            let mut s = mutate(&mut rng, &bases[base]);
+            if rng.below(2) == 0 {
+                let at = rng.below(s.len() + 1);
+                if s.is_char_boundary(at) {
+                    s.insert_str(at, MACRO_FRAGMENTS[rng.below(MACRO_FRAGMENTS.len())]);
+                }
+            }
+            s
+        };
+        let diff = compare_macro(&source, macro_source::Limits::default())
+            .or_else(|| compare_macro_surface(&source, round % 3 == 0));
+        if let Some(d) = diff {
+            let shown: String = source.chars().take(200).collect();
+            failures.push(format!("round {round} {shown:?}: {d}"));
+            if failures.len() >= 10 {
+                break;
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

@@ -231,18 +231,7 @@ pub fn decode_tables(inout l: L) {
         l.rank.try_set(occ, wrapping_sub(k, 1));
     }
     l.k = k;
-    l
-        .pos = add(
-            1,
-            mul(
-                nocc,
-                if given {
-                    3
-                } else {
-                    2
-                }
-            )
-        );
+    l.pos = add(1, mul(nocc, if given { 3 } else { 2 }));
     let nver = rd(inout l);
     l.vers.reserve(nver);
     for i in 0..nver {
@@ -252,11 +241,9 @@ pub fn decode_tables(inout l: L) {
         let pre = rd_str(inout l);
         let build = rd_str(inout l);
         let text = rd_str(inout l);
-        l
-            .vers
-            .push(
-                Ver { major: major, minor: minor, patch: patch, pre: pre, build: build, text: text }
-            );
+        l.vers.push(
+            Ver { major: major, minor: minor, patch: patch, pre: pre, build: build, text: text }
+        );
     }
     let nreq = rd(inout l);
     l.reqs.reserve(nreq);
@@ -272,19 +259,17 @@ pub fn decode_tables(inout l: L) {
             let patch = rd(inout l);
             let has_patch = rd_bool(inout l);
             let pre = rd_str(inout l);
-            l
-                .cmps
-                .push(
-                    Cmp {
-                        op: op,
-                        major: major,
-                        minor: minor,
-                        has_minor: has_minor,
-                        patch: patch,
-                        has_patch: has_patch,
-                        pre: pre
-                    }
-                );
+            l.cmps.push(
+                Cmp {
+                    op: op,
+                    major: major,
+                    minor: minor,
+                    has_minor: has_minor,
+                    patch: patch,
+                    has_patch: has_patch,
+                    pre: pre
+                }
+            );
         }
         l.reqs.push(Req { at: at, n: n, text: text });
     }
@@ -320,21 +305,19 @@ pub fn decode_manifest(inout l: L) -> u64 {
             let r = rd(inout l);
             l.syss.push(Sys { raw: raw, ok: ok, name: sname, req: r });
         }
-        l
-            .feats
-            .push(
-                Feat {
-                    name: fname,
-                    eff_at: eff_at,
-                    eff_n: eff_n,
-                    deps_at: deps_at,
-                    deps_n: deps_n,
-                    sub_at: sub_at,
-                    sub_n: sub_n,
-                    sys_at: sys_at,
-                    sys_n: nsys
-                }
-            );
+        l.feats.push(
+            Feat {
+                name: fname,
+                eff_at: eff_at,
+                eff_n: eff_n,
+                deps_at: deps_at,
+                deps_n: deps_n,
+                sub_at: sub_at,
+                sub_n: sub_n,
+                sys_at: sys_at,
+                sys_n: nsys
+            }
+        );
     }
     let ndep = rd(inout l);
     let dep_at = l.deps.len();
@@ -344,19 +327,17 @@ pub fn decode_manifest(inout l: L) -> u64 {
         let (eff_at, eff_n) = rd_set(inout l);
         let opt = rd_bool(inout l);
         let (fa, fan) = rd_set(inout l);
-        l
-            .deps
-            .push(
-                Dep {
-                    name: dname,
-                    req: r,
-                    eff_at: eff_at,
-                    eff_n: eff_n,
-                    opt: opt,
-                    feat_at: fa,
-                    feat_n: fan
-                }
-            );
+        l.deps.push(
+            Dep {
+                name: dname,
+                req: r,
+                eff_at: eff_at,
+                eff_n: eff_n,
+                opt: opt,
+                feat_at: fa,
+                feat_n: fan
+            }
+        );
     }
     let sandbox = rd_bool(inout l);
     let mut net = false;
@@ -369,28 +350,26 @@ pub fn decode_manifest(inout l: L) -> u64 {
         path_n = pn;
     }
     let at = l.mans.len();
-    l
-        .mans
-        .push(
-            Man {
-                name: name,
-                ver: v,
-                ceil_at: ceil_at,
-                ceil_n: ceil_n,
-                forbid: forbid,
-                feat_at: feat_at,
-                feat_n: nfeat,
-                dep_at: dep_at,
-                dep_n: ndep,
-                sandbox: sandbox,
-                net: net,
-                path_at: path_at,
-                path_n: path_n,
-                json: 0,
-                fs_at: 0,
-                fs_n: 0
-            }
-        );
+    l.mans.push(
+        Man {
+            name: name,
+            ver: v,
+            ceil_at: ceil_at,
+            ceil_n: ceil_n,
+            forbid: forbid,
+            feat_at: feat_at,
+            feat_n: nfeat,
+            dep_at: dep_at,
+            dep_n: ndep,
+            sandbox: sandbox,
+            net: net,
+            path_at: path_at,
+            path_n: path_n,
+            json: 0,
+            fs_at: 0,
+            fs_n: 0
+        }
+    );
     at
 }
 

@@ -9,11 +9,17 @@
 //! key with the block's generics and `self` type), then the diagnostics.
 //! The two dumps must be equal byte for byte.
 //!
-//! Part 1 of the port declines a module that could need one of the
-//! checker's preludes (`needs_prelude` in the package); the test counts the
-//! declined modules and requires every other one to match. The corpus is
-//! every `.ves` file of the repository plus hand-written cases for each
-//! diagnostic.
+//! Every prelude the checker adds comes along (regions, `Box`, secret
+//! operations, the width builtins, transcendentals, strings, atomics and
+//! workers, `Option` methods), with its spans where the checker parses it
+//! and the region labels of signatures normalized. The corpus is every
+//! `.ves` file of the repository plus hand-written cases for each
+//! diagnostic and prelude.
+//!
+//! `decls_match_rust` compares the package's `decls_words` (#2024 slice
+//! 2c) with the hybrid driver's `WorldDecls` encoding of `check::check`'s
+//! world, for every source that checks: the same bytes, or a decline for a
+//! module the checker elaborates before collecting.
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -296,6 +302,47 @@ const CASES: &[&str] = &[
     "fn checked_mul_u64(a: u64, b: u64) -> Option[u64] { Option::None } fn f() -> u64 { checked_mul_u64(1, 2); 0 }",
     "fn leading_zeros_u32(x: u32) -> u32 { x } fn f() -> u32 { 0 }",
     "fn to_le_bytes_u8(x: u8) -> u8 { x } fn f() -> u8 { to_le_bytes_u8(1) }",
+    // The `Box` prelude.
+    "fn f(b: Box[i64]) -> i64 { 1 }",
+    "fn f() -> i64 { let b = Box::new(1); 1 }",
+    "fn f(o: Option[i64]) -> i64 { match o { Option::Some(Box::Box(x)) => x, _ => 0 } }",
+    "struct Box { x: i64 } fn f(b: Box) -> i64 { 1 }",
+    "struct S { b: Box[u8] }",
+    // The atomic and worker preludes.
+    "fn f(a: Atomic[u64]) -> u64 { 1 }",
+    "fn f() -> u64 { let o = MemoryOrder::SeqCst; 1 }",
+    "struct Atomic { x: u64 } fn f(a: Atomic) -> u64 { 1 }",
+    "effect E { fn op(x: MemoryOrder) -> u64; } fn f() -> u64 { handle E in { 1 } with { return v => v, op(MemoryOrder::SeqCst, resume) => 0, } }",
+    "effect E { fn op(x: u64) -> u64; } fn f() -> u64 { handle E in { 1 } with { return v => v, op(Atomic::A, resume) => 0, } }",
+    "fn body(in d: u64, i: u64) { } fn f() { parallel_for(in 1, 2, body); }",
+    "fn f(o: Option[u64]) -> u64 { let c = Atomic::new(1); parallel_for(in c, 1, g); o.unwrap_or(0) }",
+    // Nominal modes (`WorldDecls`).
+    "struct P[T] { a: T, s: String } fn f() -> u64 { 0 }",
+    "enum L[T] { Nil, Cons(T, Box[L[T]]) } fn f() -> u64 { 0 }",
+    "struct V { v: Vec[f32, 4], m: Mask[u64, 2], b: Vec[u8, 3] } fn f() -> u64 { 0 }",
+    "struct C { s: ChunkSeq[u8] } struct D { f: fn(u64) -> u64 } fn f() -> u64 { 0 }",
+    "linear struct Q { x: u64 } struct R { q: Q } enum E { A(R), B } fn f() -> u64 { 0 }",
+    "struct N { n: Option[N] } struct M[T] { m: Option[M[T]], t: T } fn f() -> u64 { 0 }",
+    r#"fn f() -> u64 { let s = "x\u0022Eq\u003a:"; 0 }"#,
+    "enum T[A, B] { Leaf(A), Node(B, Box[T[B, A]]) } linear struct K { x: u64 } struct U { t: T[u64, K] } fn f() -> u64 { 0 }",
+    // The float prelude.
+    "fn f(x: f64) -> f64 { exp_f64(x) }",
+    "fn f(x: f32) -> f32 { cos_f32(sin_f32(x)) + ln_f32(x) }",
+    "fn float_kernel_sin_f64(x: f64, y: f64, i: u64) -> f64 { x } fn f(x: f64) -> f64 { sin_f64(x) }",
+    "fn exp_f64(x: f64) -> f64 { x } fn f(x: f32) -> f32 { exp_f32(x) }",
+    "fn f(x: f64, s: Str) -> f64 { let n = checked_add_u64(1, 2); exp_f64(x) }",
+    // The secret prelude.
+    "copy struct SecU64 { v: u64 } copy struct SecMask64 { m: u64 } fn f(a: SecU64, b: SecU64) -> bool { let k = a.ct_eq(b); let z = a.wrapping_add(b); let s = ct_select(k, a, b); let t = k.ct_select(a, b); let l = load_sec_u64le((1, 2, 3, 4, 5, 6, 7, 8)); k.ct_not().declassify_bool() }",
+    "copy struct SecU8 { x: u8 } copy struct SecU32 { y: u32 } fn f(a: SecU8, b: SecU32) -> SecU8 { a.bit_xor(a) }",
+    "copy struct SecU64 { v: u64 } impl SecU64 { fn bit_and(self, o: SecU64) -> SecU64 { o } } fn f(a: SecU64) -> SecU64 { a.bit_and(a).bit_or(a) }",
+    "struct SecU64 { v: u64 } fn f(a: SecU64) -> SecU64 { a.bit_and(a) }",
+    // The region prelude, its E0797 and the signature labels.
+    "fn f() -> u64 { region r { 1 } }",
+    "fn f(b: RegionBox[r, u64]) -> u64 eff [r: Region] { 1 }",
+    "fn f(b: RegionBox[r, u64], w: Watermark[q]) -> (RegionBox[r, u64], u64) eff [q: Region, r: Region] { (b, 1) }",
+    "effect Region { fn box(sink value: Unit) -> Unit; } fn f() -> u64 { region r { 1 } }",
+    "effect Region { fn x() -> Unit; } fn f() -> u64 { 1 }",
+    "struct S { b: RegionBox[r, u64] }",
 ];
 
 /// Every byte-order, bit and checked builtin, named once.
@@ -327,7 +374,7 @@ fn collect_matches_rust() {
             ));
         }
     }
-    let (mut matched, mut declined, mut skipped) = (0usize, 0usize, 0usize);
+    let (mut matched, mut skipped) = (0usize, 0usize);
     let mut differ = vec![];
     for (name, source) in &sources {
         let parsed = vesper::parser::parse(source);
@@ -336,10 +383,6 @@ fn collect_matches_rust() {
             continue;
         }
         let v = vesper_text(source);
-        if v == "declined\n" {
-            declined += 1;
-            continue;
-        }
         let r = rust_text(&parsed.module);
         if r == v {
             matched += 1;
@@ -352,10 +395,369 @@ fn collect_matches_rust() {
         eprintln!("  {d}");
     }
     eprintln!(
-        "collect: {} sources, {matched} match, {declined} declined (prelude), {skipped} skipped (parse errors), {} differ",
+        "collect: {} sources, {matched} match, {skipped} skipped (parse errors), {} differ",
         sources.len(),
         differ.len()
     );
     assert!(matched > CASES.len(), "too few compared");
     assert_eq!(differ.len(), 0);
+}
+
+// ---------------------------------------------------------------- the declarations
+
+/// The hybrid driver's `WorldDecls` encoder (crates/vesper-hybrid/src/
+/// driver/world.rs), which the package's `decls_words` matches.
+mod world_words {
+    #![allow(dead_code)]
+    use std::collections::BTreeMap;
+    use vesper::{ast, check::World};
+
+    #[derive(Default)]
+    struct Out(Vec<u8>);
+
+    impl Out {
+        fn n(&mut self, mut v: u64) {
+            loop {
+                let b = (v & 0x7f) as u8;
+                v >>= 7;
+                if v == 0 {
+                    self.0.push(b);
+                    return;
+                }
+                self.0.push(b | 0x80);
+            }
+        }
+        fn len(&mut self, n: usize) {
+            self.n(n as u64);
+        }
+        fn b(&mut self, v: bool) {
+            self.0.push(u8::from(v));
+        }
+        fn s(&mut self, s: &str) {
+            self.len(s.len());
+            self.0.extend_from_slice(s.as_bytes());
+        }
+        fn mode(&mut self, m: ast::Mode) {
+            self.n(m as u64);
+        }
+        fn pass(&mut self, p: ast::Pass) {
+            self.n(p as u64);
+        }
+        fn generics(&mut self, gs: &[ast::Generic]) {
+            self.len(gs.len());
+            for g in gs {
+                self.s(&g.name);
+                self.b(g.row);
+                self.mode(g.bound);
+            }
+        }
+        fn effects(&mut self, e: &ast::Effects) {
+            self.len(e.instances.len());
+            for i in &e.instances {
+                self.b(i.label.is_some());
+                self.s(&i.name);
+                self.len(i.args.len());
+                for t in &i.args {
+                    self.ty(t);
+                }
+            }
+            self.b(e.tail.is_some());
+            self.s(e.tail.as_deref().unwrap_or(""));
+        }
+        fn ty(&mut self, t: &ast::Type) {
+            match t {
+                ast::Type::Named(n, args) => {
+                    self.n(0);
+                    self.s(n);
+                    self.len(args.len());
+                    for a in args {
+                        self.ty(a);
+                    }
+                }
+                ast::Type::Tuple(ts) => {
+                    self.n(1);
+                    self.len(ts.len());
+                    for a in ts {
+                        self.ty(a);
+                    }
+                }
+                ast::Type::Function {
+                    params,
+                    result,
+                    effects,
+                    mode,
+                } => {
+                    self.n(2);
+                    self.len(params.len());
+                    for (p, t) in params {
+                        self.pass(*p);
+                        self.ty(t);
+                    }
+                    self.ty(result);
+                    self.effects(effects);
+                    self.mode(*mode);
+                }
+                ast::Type::Row(_) => self.n(3),
+                ast::Type::Infer | ast::Type::IntLiteral(_) => self.n(4),
+            }
+        }
+        fn function(&mut self, f: &ast::Function) {
+            self.len(f.params.len());
+            for p in &f.params {
+                self.pass(p.pass);
+                self.len(p.projections.len());
+                for path in &p.projections {
+                    self.len(path.len());
+                    for part in path {
+                        self.s(part);
+                    }
+                }
+                self.ty(&p.ty);
+            }
+            self.ty(&f.result);
+            self.effects(&f.effects);
+        }
+    }
+
+    // `Exporter::nominal_mode` of src/interface.rs.
+    fn nominal_mode(world: &World, adt: &ast::Adt) -> ast::Mode {
+        let bounds = adt
+            .generics
+            .iter()
+            .map(|g| (g.name.clone(), ast::Mode::Copy))
+            .collect::<BTreeMap<_, _>>();
+        let ty = ast::Type::Named(
+            adt.name.clone(),
+            adt.generics
+                .iter()
+                .map(|g| ast::Type::named(&g.name))
+                .collect(),
+        );
+        world.mode(&ty, &bounds)
+    }
+
+    pub fn encode(world: &World) -> Vec<u8> {
+        let mut o = Out::default();
+        o.len(world.adts.len());
+        for (name, adt) in &world.adts {
+            o.s(name);
+            o.len(adt.generics.len());
+            o.mode(nominal_mode(world, adt));
+        }
+        o.len(world.effects.len());
+        for (name, e) in &world.effects {
+            o.s(name);
+            o.len(e.generics.len());
+            o.b(e.linear);
+        }
+        for (name, adt) in &world.adts {
+            o.s(name);
+            o.generics(&adt.generics);
+            o.b(adt.is_enum);
+            o.len(adt.variants.len());
+            for v in &adt.variants {
+                o.s(&v.name);
+                o.b(v.named);
+                o.len(v.fields.len());
+                for f in &v.fields {
+                    o.s(&f.name);
+                    o.ty(&f.ty);
+                }
+            }
+        }
+        for (name, e) in &world.effects {
+            o.s(name);
+            o.b(e.linear);
+            o.generics(&e.generics);
+            o.len(e.ops.len());
+            for op in &e.ops {
+                o.s(&op.name);
+                o.b(!op.generics.is_empty()
+                    || op.body.is_some()
+                    || !op.effects.instances.is_empty()
+                    || op.effects.tail.is_some());
+                o.function(op);
+            }
+        }
+        let traits = &world.elaboration.traits;
+        o.len(traits.len());
+        for t in traits {
+            o.s(t);
+        }
+        let conformances = &world.elaboration.conformances;
+        o.len(conformances.len());
+        for c in conformances {
+            o.b(c.model.is_some());
+            o.s(c.model.as_deref().unwrap_or(""));
+            o.s(&c.path);
+            o.s(&c.trait_name);
+            o.s(&c.self_ty);
+        }
+        let generated = &world.elaboration.generated;
+        o.len(world.functions.len());
+        for (name, f) in &world.functions {
+            o.s(name);
+            o.b(generated.contains_key(name));
+            o.generics(&f.generics);
+            o.function(f);
+        }
+        o.0
+    }
+}
+
+fn decls_entry() -> &'static native::WordFunction {
+    static F: OnceLock<native::WordFunction> = OnceLock::new();
+    F.get_or_init(|| Package::load(PACKAGE).entry("decls_words", speed()).0)
+}
+
+fn vesper_decls(source: &str) -> Vec<u8> {
+    let words = [source.len() as u64, 0, source.as_ptr() as u64];
+    // SAFETY: as `vesper_text`.
+    let handle = unsafe { decls_entry().call(&[words.as_ptr() as u64]) }.unwrap();
+    let w = take_words(handle);
+    let len = w[0] as usize;
+    let mut bytes = Vec::with_capacity(len + 8);
+    for x in &w[1..] {
+        bytes.extend_from_slice(&x.to_le_bytes());
+    }
+    bytes.truncate(len);
+    bytes
+}
+
+/// `decls_words` against the driver's encoding of `check::check`'s world
+/// for every source that checks, or declines (the checker elaborates it).
+#[test]
+fn decls_match_rust() {
+    let _quiet = quiet_panics();
+    let mut sources: Vec<(String, String)> = CASES
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (format!("case {i}"), (*s).to_owned()))
+        .collect();
+    let mut files = vec![];
+    for d in ["examples", "tests", "packages", "src"] {
+        ves_files(&repo().join(d), &mut files);
+    }
+    for p in files {
+        if let Ok(s) = std::fs::read_to_string(&p)
+            && s.len() <= 1 << 20
+        {
+            sources.push((
+                p.strip_prefix(repo()).unwrap_or(&p).display().to_string(),
+                s,
+            ));
+        }
+    }
+    let (mut matched, mut declined, mut skipped) = (0usize, 0usize, 0usize);
+    let mut differ = vec![];
+    for (name, source) in &sources {
+        let parsed = vesper::parser::parse(source);
+        if !parsed.diagnostics.is_empty() {
+            skipped += 1;
+            continue;
+        }
+        let checked = vesper::check::check(&parsed.module);
+        if !checked.diagnostics.is_empty() {
+            skipped += 1;
+            continue;
+        }
+        let v = vesper_decls(source);
+        if v.first() == Some(&0) {
+            declined += 1;
+            continue;
+        }
+        let r = world_words::encode(&checked.world);
+        if v.get(1..) == Some(&r[..]) {
+            matched += 1;
+        } else {
+            let at = v[1..]
+                .iter()
+                .zip(&r)
+                .position(|(a, b)| a != b)
+                .unwrap_or(r.len().min(v.len() - 1));
+            let show = |b: &[u8]| {
+                String::from_utf8_lossy(&b[at.saturating_sub(40)..(at + 40).min(b.len())])
+                    .into_owned()
+            };
+            differ.push(format!(
+                "{name}: byte {at}: rust {:?} | vesper {:?}",
+                show(&r),
+                show(&v[1..])
+            ));
+        }
+    }
+    for d in differ.iter().take(20) {
+        eprintln!("  {d}");
+    }
+    eprintln!(
+        "decls: {} sources, {matched} match, {declined} declined, {skipped} skipped (parse or check errors), {} differ",
+        sources.len(),
+        differ.len()
+    );
+    assert!(matched > 100, "too few compared");
+    assert_eq!(differ.len(), 0);
+}
+
+// ------------------------------------------------------------ prelude copies
+
+/// The string literal that `pub fn <name>() -> Str` returns in `text`,
+/// unescaped.
+fn returned_literal(text: &str, name: &str) -> String {
+    let head = format!("pub fn {name}() -> Str {{");
+    let start = text.find(&head).unwrap_or_else(|| panic!("no `{head}`"));
+    let rest = &text[start + head.len()..];
+    let open = rest.find('"').expect("no string literal");
+    let mut out = String::new();
+    let mut chars = rest[open + 1..].chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return out,
+            '\\' => match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some(c) => out.push(c),
+                None => break,
+            },
+            c => out.push(c),
+        }
+    }
+    panic!("unterminated string literal in `{name}`")
+}
+
+/// The package keeps its own copy of each prelude it lowers (it cannot
+/// embed a file); every copy must be the checker's `src/preludes/*.ves`
+/// file byte for byte, so its spans land where the checker's do.
+#[test]
+fn prelude_copies_match_rust() {
+    let dir = repo().join(PACKAGE).join("src");
+    let mut texts = vec![];
+    for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+        if entry.path().extension().is_some_and(|e| e == "ves") {
+            texts.push((entry.path(), std::fs::read_to_string(entry.path()).unwrap()));
+        }
+    }
+    let copies = [
+        ("strings_source", vesper::strings::PRELUDE),
+        ("option_source", vesper::option_methods::PRELUDE),
+        ("atomics_source", vesper::atomics::PRELUDE),
+        ("workers_source", vesper::atomics::WORKERS_PRELUDE),
+        ("region_source", vesper::regions::PRELUDE),
+    ];
+    let mut checked = 0;
+    for (name, rust) in copies {
+        let head = format!("pub fn {name}() -> Str {{");
+        for (path, text) in texts.iter().filter(|(_, t)| t.contains(&head)) {
+            assert!(
+                returned_literal(text, name) == rust,
+                "`{name}` in {} is not the checker's prelude; copy src/preludes again",
+                path.display()
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 2,
+        "found {checked} prelude copies in {}",
+        dir.display()
+    );
 }

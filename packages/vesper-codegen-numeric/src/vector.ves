@@ -225,11 +225,7 @@ fn vx_operand(call: u64, i: u64) -> Value eff [Ffi[Cranelift]] {
 
 // `alloc_uninit` (no zeroing) and `alloc` (zeroed word by word).
 fn vx_alloc(inout b: Builder, in m: Module, size: u32, zeroed: bool) -> Value eff [Ffi[Cranelift]] {
-    let bytes = if size < 8 {
-        8
-    } else {
-        size
-    };
+    let bytes = if size < 8 { 8 } else { size };
     let slot = create_stack_slot(inout b, bytes, SLOT_ALIGN_SHIFT);
     let ptr = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
     if zeroed {
@@ -280,11 +276,7 @@ fn vx_load_chunks(
     lanes: u32,
     mask: bool
 ) -> ChunkSeq[u32] eff [Ffi[Cranelift]] {
-    let ty = if mask {
-        mask_chunk_ty(e)
-    } else {
-        chunk_ty(e)
-    };
+    let ty = if mask { mask_chunk_ty(e) } else { chunk_ty(e) };
     let n = widen_u64(shape_chunks(e, lanes));
     let mut out = ChunkSeq::with_capacity[u32](n);
     for c in 0..n {

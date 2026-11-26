@@ -156,8 +156,10 @@ pub fn sha256_hex(in bytes: Slice[u8]) -> ChunkSeq[u8] {
         BLOCK_BYTES
     };
     tail.resize(tail_len, 0);
-    let _ = tail
-        .try_write_u64_be(wrapping_sub(tail_len, LENGTH_BYTES), wrapping_mul(n, BITS_PER_BYTE));
+    let _ = tail.try_write_u64_be(
+        wrapping_sub(tail_len, LENGTH_BYTES),
+        wrapping_mul(n, BITS_PER_BYTE)
+    );
     let blocks = tail_len / BLOCK_BYTES;
     for block in 0..blocks {
         h = compress(h, in tail.as_slice(), wrapping_mul(block, BLOCK_BYTES));

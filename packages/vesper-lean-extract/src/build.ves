@@ -273,14 +273,7 @@ impl B {
                 put_escape(inout m, widen_u32(c));
             } else if cp != 0 {
                 put_escape(inout m, cp);
-                i = wrapping_add(
-                    i,
-                    if cp < 2048 {
-                        1
-                    } else {
-                        2
-                    }
-                );
+                i = wrapping_add(i, if cp < 2048 { 1 } else { 2 });
             } else {
                 m.push(c);
             }

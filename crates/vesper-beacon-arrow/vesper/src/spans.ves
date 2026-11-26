@@ -17,11 +17,7 @@ const NARROW: u64 = 5;
 // Column `c`'s byte width: trace and span ids, times and the attribute value
 // are u64; flags and codes are u8.
 fn width(c: u64) -> u64 {
-    if c < 6 || c == 11 {
-        8
-    } else {
-        1
-    }
+    if c < 6 || c == 11 { 8 } else { 1 }
 }
 
 fn field(inout fb: Fb, c: u64) -> u64 {
@@ -174,11 +170,10 @@ pub fn stream_into(
         if width(c) == 8 {
             let base = wrapping_mul(w, rows);
             for i in 0..rows {
-                out
-                    .try_write_u64_le(
-                        wrapping_add(at, wrapping_mul(i, 8)),
-                        word(in wide, wrapping_add(base, i))
-                    );
+                out.try_write_u64_le(
+                    wrapping_add(at, wrapping_mul(i, 8)),
+                    word(in wide, wrapping_add(base, i))
+                );
             }
             w = wrapping_add(w, 1);
         } else {

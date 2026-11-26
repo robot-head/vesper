@@ -272,11 +272,7 @@ fn inv_reserve(inout v: Inv, len: u64, cap: u64, size: u64, limit: u64) -> u64 {
     if len != cap {
         return cap;
     }
-    let base = if cap < 2 {
-        2
-    } else {
-        cap
-    };
+    let base = if cap < 2 { 2 } else { cap };
     let mut next = wrapping_mul(base, 2);
     if next > limit {
         next = limit;
@@ -537,11 +533,7 @@ fn inv_function(
         inout v,
         in x,
         in path,
-        if has_owner {
-            T_METHOD
-        } else {
-            T_FUNCTION
-        },
+        if has_owner { T_METHOD } else { T_FUNCTION },
         w(node.start),
         w(node.end),
         in name
@@ -549,10 +541,10 @@ fn inv_function(
 }
 
 fn type_node(in x: Ix, t: u32) -> TypeNode {
-    x
-        .ast
-        .types
-        .get_or(idx_from_raw[TypeNode](t), TypeNode { kind: 5, a: NONE, b: NONE, c: NONE, d: NONE })
+    x.ast.types.get_or(
+        idx_from_raw[TypeNode](t),
+        TypeNode { kind: 5, a: NONE, b: NONE, c: NONE, d: NONE }
+    )
 }
 
 // `Inventory::collect`.

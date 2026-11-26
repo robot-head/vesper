@@ -112,11 +112,7 @@ fn is_sep(b: u8) -> bool {
 }
 
 fn sep() -> u8 {
-    if windows() {
-        92
-    } else {
-        47
-    }
+    if windows() { 92 } else { 47 }
 }
 
 // `base.join(part)` for a relative `part`.
@@ -992,11 +988,7 @@ fn audit_in(
     arg_bytes(inout c, in "--run".as_bytes());
     arg_bytes(inout c, in helper.as_slice());
     arg_bytes(inout c, in request_path.as_slice());
-    let seconds = if o.timeout == 0 {
-        30
-    } else {
-        o.timeout
-    };
+    let seconds = if o.timeout == 0 { 30 } else { o.timeout };
     let ran = execute(inout a, c, seconds);
     if a.failed || !utf8_or_fail(inout a, in ran.stdout.as_slice()) {
         return;
@@ -1082,14 +1074,7 @@ fn audit_in(
             refuse(inout a, in "imported module escaped the artifact/toolchain roots");
             return;
         }
-        import_artifact
-            .push(
-                if in_snapshot {
-                    1
-                } else {
-                    0
-                }
-            );
+        import_artifact.push(if in_snapshot { 1 } else { 0 });
         if in_snapshot {
             file_parts(
                 inout a,
@@ -1306,9 +1291,5 @@ fn windows_key(k: u64) -> Str {
 }
 
 fn scope_name(artifact: bool) -> Str {
-    if artifact {
-        "artifact"
-    } else {
-        "toolchain"
-    }
+    if artifact { "artifact" } else { "toolchain" }
 }

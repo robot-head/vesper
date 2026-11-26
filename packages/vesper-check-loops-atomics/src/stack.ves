@@ -53,11 +53,7 @@ pub struct Graph {
 }
 
 fn opt(x: u64) -> u64 {
-    if x == 0 {
-        NONE64
-    } else {
-        wrapping_sub(x, 1)
-    }
+    if x == 0 { NONE64 } else { wrapping_sub(x, 1) }
 }
 
 fn sym(in nmap: ChunkSeq[u32], x: u64) -> u32 {
@@ -214,11 +210,7 @@ fn sift(inout s: ChunkSeq[u64], root: u64, n: u64) {
 fn cmp_names(in names: Names, a: u32, b: u32) -> i64 {
     let na = names.size(a);
     let nb = names.size(b);
-    let n = if na < nb {
-        na
-    } else {
-        nb
-    };
+    let n = if na < nb { na } else { nb };
     for i in 0..n {
         let x = names.byte(a, i);
         let y = names.byte(b, i);
@@ -319,17 +311,15 @@ fn finding(inout rep: Report, in names: Names, function: u32, inst: u64, in rule
     let rule_at = rep.findings.len();
     put(inout rep.findings, rule);
     put(inout rep.findings, ": ");
-    rep
-        .rows
-        .push(
-            FindingRow {
-                function: function,
-                inst: inst,
-                at: at,
-                rule_at: rule_at,
-                message_at: rep.findings.len()
-            }
-        );
+    rep.rows.push(
+        FindingRow {
+            function: function,
+            inst: inst,
+            at: at,
+            rule_at: rule_at,
+            message_at: rep.findings.len()
+        }
+    );
 }
 
 fn write_path(inout o: ChunkSeq[u8], in names: Names, in path: ChunkSeq[u32]) {
@@ -541,11 +531,7 @@ pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
         let c = widen_u64(s.caller);
         let caller = g.name(c);
         // `to_silicon` gives an unknown instruction 0.
-        let inst = if s.inst == NONE64 {
-            0
-        } else {
-            s.inst
-        };
+        let inst = if s.inst == NONE64 { 0 } else { s.inst };
         let row = g.target_row(caller);
         if row == NONE64 {
             set64(inout unbounded_here, c, 1);
@@ -736,18 +722,16 @@ pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
         if id == NONE64 {
             finding(inout rep, in names, root.key, NONE64, "silicon.stack.unknown_root");
             put(inout rep.findings, "stack root is not a function of this program\n");
-            rep
-                .roots
-                .push(
-                    RootRow {
-                        root: root.key,
-                        budget: root.value,
-                        worst: NONE64,
-                        pa: pa,
-                        pn: 0,
-                        within: false
-                    }
-                );
+            rep.roots.push(
+                RootRow {
+                    root: root.key,
+                    budget: root.value,
+                    worst: NONE64,
+                    pa: pa,
+                    pn: 0,
+                    within: false
+                }
+            );
             continue;
         }
         let worst = u64_at(in depth, id);
@@ -778,11 +762,10 @@ pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
                 if j > 0 {
                     put(inout rep.findings, " -> ");
                 }
-                names
-                    .write(
-                        u32_at(in rep.paths, wrapping_add(widen_u64(pa), j)),
-                        inout rep.findings
-                    );
+                names.write(
+                    u32_at(in rep.paths, wrapping_add(widen_u64(pa), j)),
+                    inout rep.findings
+                );
             }
             rep.findings.push(10);
         } else if worst == NONE64 {
@@ -792,18 +775,16 @@ pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
                 "worst-case stack depth is unbounded (recursion or unresolved call reachable)\n"
             );
         }
-        rep
-            .roots
-            .push(
-                RootRow {
-                    root: root.key,
-                    budget: root.value,
-                    worst: worst,
-                    pa: pa,
-                    pn: pn,
-                    within: within
-                }
-            );
+        rep.roots.push(
+            RootRow {
+                root: root.key,
+                budget: root.value,
+                worst: worst,
+                pa: pa,
+                pn: pn,
+                within: within
+            }
+        );
     }
     if g.ebpf {
         ebpf_rules(in names, in g, in adj_start, in adj, inout rep);
@@ -1182,13 +1163,12 @@ pub fn report_words(inout o: ChunkSeq[u64], in names: Names, in g: Graph) {
     let rep = report(inout text, in names, in g);
     // About a word per eight bytes of findings text, plus a few per row,
     // root and path step.
-    o
-        .reserve(
-            wrapping_add(
-                wrapping_add(rep.findings.len() >> 3, wrapping_mul(rep.rows.len(), 8)),
-                wrapping_add(wrapping_mul(rep.roots.len(), 8), wrapping_mul(rep.paths.len(), 3))
-            )
-        );
+    o.reserve(
+        wrapping_add(
+            wrapping_add(rep.findings.len() >> 3, wrapping_mul(rep.rows.len(), 8)),
+            wrapping_add(wrapping_mul(rep.roots.len(), 8), wrapping_mul(rep.paths.len(), 3))
+        )
+    );
     o.push(0);
     o.push(rep.roots.len());
     for i in 0..rep.roots.len() {

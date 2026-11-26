@@ -448,14 +448,7 @@ fn stage2_compile_dir_impl(
                     };
                     push_hop(inout facts, ta);
                 }
-                push_hop(
-                    inout facts,
-                    if h.has_state {
-                        1
-                    } else {
-                        0
-                    }
-                );
+                push_hop(inout facts, if h.has_state { 1 } else { 0 });
                 let bx = low.a.ex(h.body);
                 let body_fn = nested_sym(inout c2, in "$handler_body_", bx.s0, bx.s1);
                 push_hop(inout facts, widen_u64(body_fn));
@@ -464,11 +457,7 @@ fn stage2_compile_dir_impl(
                 let ret_fn = nested_sym(inout c2, in "$handler_clause_", rx.s0, rx.s1);
                 push_hop(inout facts, widen_u64(ret_fn));
                 push_hop(inout facts, rc.pn);
-                let mut r_binds: u64 = if h.has_state {
-                    1
-                } else {
-                    0
-                };
+                let mut r_binds: u64 = if h.has_state { 1 } else { 0 };
                 for pi in 0..rc.pn {
                     let pid = match low.a.xs.try_get(wrapping_add(rc.pa, pi)) {
                         Option::Some(v) => v,
@@ -505,11 +494,7 @@ fn stage2_compile_dir_impl(
                     let op_fn = nested_sym(inout c2, in "$handler_clause_", ox.s0, ox.s1);
                     push_hop(inout facts, widen_u64(op_fn));
                     push_hop(inout facts, oc.pn);
-                    let mut o_binds: u64 = if h.has_state {
-                        1
-                    } else {
-                        0
-                    };
+                    let mut o_binds: u64 = if h.has_state { 1 } else { 0 };
                     for pi in 0..oc.pn {
                         let pid = match low.a.xs.try_get(wrapping_add(oc.pa, pi)) {
                             Option::Some(v) => v,
@@ -540,11 +525,7 @@ fn stage2_compile_dir_impl(
                     }
                 }
                 let b_ps = prog_fn_params(in prog, in fn_by_sym, body_fn);
-                let b_non = if h.has_state {
-                    1
-                } else {
-                    0
-                };
+                let b_non = if h.has_state { 1 } else { 0 };
                 let b_nfree = if b_ps.len() > b_non {
                     wrapping_sub(b_ps.len(), b_non)
                 } else {

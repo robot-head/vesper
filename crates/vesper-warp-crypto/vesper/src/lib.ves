@@ -499,11 +499,7 @@ pub fn hp_mask_chacha(
 }
 
 fn first_byte_mask(first: u8) -> u8 {
-    if first & LONG_HEADER_BIT != 0 {
-        15
-    } else {
-        31
-    }
+    if first & LONG_HEADER_BIT != 0 { 15 } else { 31 }
 }
 
 // The top `pn_len` bytes of a 32-bit word.
@@ -519,8 +515,10 @@ fn apply_mask(inout buf: Slice[u8], pn_offset: u64, pn_len: u64, mask: u64) {
     // word of `mask`).
     match buf.try_read_u32_be(pn_offset) {
         Option::Some(field) => {
-            let _w = buf
-                .try_write_u32_be(pn_offset, field ^ (wrapping_u32(mask) & field_keep(pn_len)));
+            let _w = buf.try_write_u32_be(
+                pn_offset,
+                field ^ (wrapping_u32(mask) & field_keep(pn_len))
+            );
         },
         Option::None => {
             let mut i: u64 = 0;
@@ -1086,11 +1084,7 @@ pub fn onertt_open(
             k.has_previous = true;
             k.previous_generation = k.recv_generation;
             let deadline = wrapping_add(now_ns, k.retire_window_ns);
-            k.previous_deadline = if deadline < now_ns {
-                U64_MAX
-            } else {
-                deadline
-            };
+            k.previous_deadline = if deadline < now_ns { U64_MAX } else { deadline };
             k.recv_generation = generation;
             k.recv_has_first = true;
             k.recv_first_pn = pn;

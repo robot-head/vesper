@@ -113,20 +113,18 @@ pub fn take_module(inout b: B, inout d: Defs, owner: u64) -> bool {
         }
         let key = text_symbol(in b, off, len);
         let block = starts_with(in b, off, len, in "$block_");
-        d
-            .defs
-            .push(
-                Def {
-                    owner: owner,
-                    key: key,
-                    at: base,
-                    binders: add(base, wrapping_sub(ba, kind_at)),
-                    body: add(base, wrapping_sub(bo, kind_at)),
-                    end: add(base, wrapping_sub(end, kind_at)),
-                    nullary: wd_at(in s, ba) == 0,
-                    block: block
-                }
-            );
+        d.defs.push(
+            Def {
+                owner: owner,
+                key: key,
+                at: base,
+                binders: add(base, wrapping_sub(ba, kind_at)),
+                body: add(base, wrapping_sub(bo, kind_at)),
+                end: add(base, wrapping_sub(end, kind_at)),
+                nullary: wd_at(in s, ba) == 0,
+                block: block
+            }
+        );
         at = end;
     }
     true
@@ -146,11 +144,7 @@ pub struct Ordered {
 fn names_less(in b: B, x: u32, y: u32) -> bool {
     let nx = b.names.size(x);
     let ny = b.names.size(y);
-    let n = if nx < ny {
-        nx
-    } else {
-        ny
-    };
+    let n = if nx < ny { nx } else { ny };
     for i in 0..n {
         let cx = b.names.byte(x, i);
         let cy = b.names.byte(y, i);

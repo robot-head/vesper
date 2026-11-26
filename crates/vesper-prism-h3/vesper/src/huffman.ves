@@ -90,11 +90,7 @@ pub fn huff_tables() -> Huff {
                     child.push(0);
                     let _set = child.try_set(slot, c);
                     let up = word(in info.as_slice(), node);
-                    let ones = if b == 1 {
-                        up & INFO_ALL_ONES
-                    } else {
-                        0
-                    };
+                    let ones = if b == 1 { up & INFO_ALL_ONES } else { 0 };
                     info.push(inc(up & INFO_DEPTH_MASK) | ones);
                 }
                 node = c;

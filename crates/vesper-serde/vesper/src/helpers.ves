@@ -104,11 +104,7 @@ pub fn bound_field(
     field: Bound,
     first: bool
 ) -> Bound eff [Fail[Error]] {
-    let not_first: u64 = if first {
-        0
-    } else {
-        1
-    };
+    let not_first: u64 = if first { 0 } else { 1 };
     let prefix = add(add(not_first, key_escaped_len), KEY_PUNCTUATION_LEN);
     let n = add(add(object.n, prefix), field.n);
     Bound { n: n, dynamic: object.dynamic || field.dynamic }
@@ -150,11 +146,7 @@ pub fn swar_key_matches(w0: u64, w1: u64, len: u64, escaped: bool, in raw: Slice
     if escaped {
         let mut name: ChunkSeq[u8] = ChunkSeq::with_capacity(len);
         for i in 0..len {
-            let w = if i < WORD_BYTES {
-                w0
-            } else {
-                w1
-            };
+            let w = if i < WORD_BYTES { w0 } else { w1 };
             name.push(wrapping_u8(bit_shr(w, wrapping_mul(i % WORD_BYTES, 8)) & BYTE_MASK));
         }
         strings_equal(in raw, in name.as_slice())

@@ -103,11 +103,7 @@ fn parse_ty_list(
     } else {
         let q = parse_ty(p);
         let r = parse_eat(q, 38);
-        if parse_ate(q, r) {
-            parse_ty_list(r)
-        } else {
-            r
-        }
+        if parse_ate(q, r) { parse_ty_list(r) } else { r }
     }
 }
 
@@ -149,11 +145,7 @@ fn parse_type_arg(
         if parse_ate(q, r) {
             let s = parse_type_args(parse_upper(r));
             let u = parse_eat(s, 68);
-            if parse_ate(s, u) {
-                parse_lower(u)
-            } else {
-                u
-            }
+            if parse_ate(s, u) { parse_lower(u) } else { u }
         } else {
             r
         }
@@ -315,14 +307,7 @@ fn parse_expect_word(
     if parse_at_word(p, 0, packed) {
         parse_bump(p)
     } else {
-        syntax_issue(
-            p,
-            if packed == 0x6173 {
-                15
-            } else {
-                16
-            }
-        )
+        syntax_issue(p, if packed == 0x6173 { 15 } else { 16 })
     }
 }
 

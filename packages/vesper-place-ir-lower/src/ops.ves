@@ -79,12 +79,8 @@ fn no_vec() -> VecRes {
 }
 
 fn span_type(in c: Ctx, s0: u64, s1: u64) -> u32 {
-    let t = c.world.expr_type(s0, s1);
-    if t == NONE32 {
-        c.types.infer
-    } else {
-        t
-    }
+    let ty = c.world.expr_type(s0, s1);
+    if ty == NONE32 { c.types.infer } else { ty }
 }
 
 pub fn is_seq_type(in c: Ctx, ty: u32) -> bool {
@@ -130,31 +126,31 @@ fn is_tiled_seq(in c: Ctx, ty: u32) -> bool {
         && (c.types.arity(ty) == 1 || c.types.arity(ty) == 2)
 }
 
-fn sym_str(inout c: Ctx, in s: Str) -> u32 {
-    c.names.intern(in s.as_bytes())
+fn sym_str(inout c: Ctx, in text: Str) -> u32 {
+    c.names.intern(in text.as_bytes())
 }
 
-fn eq(in c: Ctx, sym: u32, in s: Str) -> bool {
-    c.names.spells(sym, in s.as_bytes())
+fn eq(in c: Ctx, sym: u32, in text: Str) -> bool {
+    c.names.spells(sym, in text.as_bytes())
 }
 
-fn put_str(inout out: ChunkSeq[u8], in s: Str) {
-    out.extend(in s.as_bytes());
+fn put_str(inout out: ChunkSeq[u8], in text: Str) {
+    out.extend(in text.as_bytes());
 }
 
-fn put_bool(inout out: ChunkSeq[u8], v: bool) {
-    if v {
+fn put_bool(inout out: ChunkSeq[u8], value: bool) {
+    if value {
         put_str(inout out, "true");
     } else {
         put_str(inout out, "false");
     }
 }
 
-fn put_quoted(inout out: ChunkSeq[u8], in names: Names, s: u32) {
+fn put_quoted(inout out: ChunkSeq[u8], in names: Names, sym: u32) {
     out.push(34);
-    let a = names.start(s);
-    let b = names.end(s);
-    for i in a..b {
+    let text_start = names.start(sym);
+    let text_end = names.end(sym);
+    for i in text_start..text_end {
         let ch = u8_at(in names.text, i);
         if ch == 92 {
             out.push(92);
@@ -180,47 +176,47 @@ fn put_quoted(inout out: ChunkSeq[u8], in names: Names, s: u32) {
 
 // ----- Shapes ----------------------------------------------------------------
 
-fn elem_of_name(in c: Ctx, s: u32) -> u8 {
-    let k = c.world.k;
-    if s == k.u8_ {
+fn elem_of_name(in c: Ctx, name: u32) -> u8 {
+    let known = c.world.k;
+    if name == known.u8_ {
         E_U8
-    } else if s == k.u32_ {
+    } else if name == known.u32_ {
         E_U32
-    } else if s == k.u64_ {
+    } else if name == known.u64_ {
         E_U64
-    } else if s == k.i64_ {
+    } else if name == known.i64_ {
         E_I64
-    } else if s == k.f32_ {
+    } else if name == known.f32_ {
         E_F32
-    } else if s == k.f64_ {
+    } else if name == known.f64_ {
         E_F64
     } else {
         E_NONE
     }
 }
 
-fn elem_bits(e: u8) -> u64 {
-    if e == E_U8 {
+fn elem_bits(elem: u8) -> u64 {
+    if elem == E_U8 {
         8
-    } else if e == E_U32 || e == E_F32 {
+    } else if elem == E_U32 || elem == E_F32 {
         32
-    } else if e == E_U64 || e == E_I64 || e == E_F64 {
+    } else if elem == E_U64 || elem == E_I64 || elem == E_F64 {
         64
     } else {
         0
     }
 }
 
-fn put_elem(inout out: ChunkSeq[u8], e: u8) {
-    if e == E_U8 {
+fn put_elem(inout out: ChunkSeq[u8], elem: u8) {
+    if elem == E_U8 {
         put_str(inout out, "U8");
-    } else if e == E_U32 {
+    } else if elem == E_U32 {
         put_str(inout out, "U32");
-    } else if e == E_U64 {
+    } else if elem == E_U64 {
         put_str(inout out, "U64");
-    } else if e == E_I64 {
+    } else if elem == E_I64 {
         put_str(inout out, "I64");
-    } else if e == E_F32 {
+    } else if elem == E_F32 {
         put_str(inout out, "F32");
     } else {
         put_str(inout out, "F64");
@@ -235,23 +231,23 @@ fn put_shape(inout out: ChunkSeq[u8], elem: u8, lanes: u64) {
     put_str(inout out, " }");
 }
 
-fn parse_u16_sym(in names: Names, s: u32) -> u64 {
-    let size = names.size(s);
+fn parse_u16_sym(in names: Names, sym: u32) -> u64 {
+    let size = names.size(sym);
     if size == 0 {
         return NONE64;
     }
-    let mut v: u64 = 0;
+    let mut value: u64 = 0;
     for i in 0..size {
-        let b = names.byte(s, i);
-        if b < 48 || b > 57 {
+        let digit = names.byte(sym, i);
+        if digit < 48 || digit > 57 {
             return NONE64;
         }
-        v = add(wrapping_mul(v, 10), widen_u64(wrapping_sub(b, 48)));
-        if v > 65535 {
+        value = add(wrapping_mul(value, 10), widen_u64(wrapping_sub(digit, 48)));
+        if value > 65535 {
             return NONE64;
         }
     }
-    v
+    value
 }
 
 // Packs `(elem as u64) << 16 | lanes` when valid (128, 256, 512 bits), else NONE64.
@@ -268,9 +264,9 @@ fn pack_shape(elem: u8, lanes: u64) -> u64 {
 }
 
 fn elem_from_type(in c: Ctx, ty: u32) -> u8 {
-    let n = c.types.node(ty);
-    if n.kind == TyKind::Named && n.n == 0 {
-        elem_of_name(in c, n.name)
+    let node = c.types.node(ty);
+    if node.kind == TyKind::Named && node.n == 0 {
+        elem_of_name(in c, node.name)
     } else {
         E_NONE
     }
@@ -280,20 +276,22 @@ fn shape_of(in c: Ctx, ty: u32) -> u64 {
     if ty == NONE32 {
         return NONE64;
     }
-    let n = c.types.node(ty);
-    let k = c.world.k;
-    if n.kind != TyKind::Named || (n.name != k.vec && n.name != k.mask) || n.n != 2 {
+    let node = c.types.node(ty);
+    let known = c.world.k;
+    if node.kind != TyKind::Named
+        || (node.name != known.vec && node.name != known.mask)
+        || node.n != 2 {
         return NONE64;
     }
     let elem = elem_from_type(in c, c.types.arg(ty, 0));
     if elem == E_NONE {
         return NONE64;
     }
-    let cn = c.types.node(c.types.arg(ty, 1));
-    if cn.kind != TyKind::Named || cn.n != 0 {
+    let lanes_node = c.types.node(c.types.arg(ty, 1));
+    if lanes_node.kind != TyKind::Named || lanes_node.n != 0 {
         return NONE64;
     }
-    let lanes = parse_u16_sym(in c.names, cn.name);
+    let lanes = parse_u16_sym(in c.names, lanes_node.name);
     if lanes == NONE64 {
         return NONE64;
     }
@@ -308,11 +306,11 @@ fn explicit_shape(in c: Ctx, in a: Ast, e: Ex) -> u64 {
     if elem == E_NONE {
         return NONE64;
     }
-    let cn = c.types.node(n32(a.x(inc(e.c))));
-    if cn.kind != TyKind::Named {
+    let lanes_node = c.types.node(n32(a.x(inc(e.c))));
+    if lanes_node.kind != TyKind::Named {
         return NONE64;
     }
-    let lanes = parse_u16_sym(in c.names, cn.name);
+    let lanes = parse_u16_sym(in c.names, lanes_node.name);
     if lanes == NONE64 {
         return NONE64;
     }
@@ -322,14 +320,14 @@ fn explicit_shape(in c: Ctx, in a: Ast, e: Ex) -> u64 {
 // ----- SliceIo & SeqOp -------------------------------------------------------
 
 // Splits `name` at the first `::`; returns index of `:` or NONE64.
-fn split_colons(in names: Names, s: u32) -> u64 {
-    let size = names.size(s);
+fn split_colons(in names: Names, sym: u32) -> u64 {
+    let size = names.size(sym);
     let mut i: u64 = 0;
     loop {
         if inc(i) >= size {
             break;
         }
-        if names.byte(s, i) == 58 && names.byte(s, inc(i)) == 58 {
+        if names.byte(sym, i) == 58 && names.byte(sym, inc(i)) == 58 {
             return i;
         }
         i = inc(i);
@@ -337,62 +335,62 @@ fn split_colons(in names: Names, s: u32) -> u64 {
     NONE64
 }
 
-fn slice_suffix(in names: Names, s: u32, start: u64, in target: Str) -> bool {
-    let size = names.size(s);
-    let tb = target.as_bytes();
-    if wrapping_sub(size, start) != tb.len() {
+fn slice_suffix(in names: Names, sym: u32, start: u64, in target: Str) -> bool {
+    let size = names.size(sym);
+    let target_bytes = target.as_bytes();
+    if wrapping_sub(size, start) != target_bytes.len() {
         return false;
     }
-    for i in 0..tb.len() {
-        let b = match tb.try_get(i) {
-            Option::Some(v) => v,
+    for i in 0..target_bytes.len() {
+        let expected = match target_bytes.try_get(i) {
+            Option::Some(byte) => byte,
             Option::None => 0,
         };
-        if names.byte(s, add(start, i)) != b {
+        if names.byte(sym, add(start, i)) != expected {
             return false;
         }
     }
     true
 }
 
-fn slice_prefix(in names: Names, s: u32, len: u64, in target: Str) -> bool {
-    let tb = target.as_bytes();
-    if len != tb.len() {
+fn slice_prefix(in names: Names, sym: u32, len: u64, in target: Str) -> bool {
+    let target_bytes = target.as_bytes();
+    if len != target_bytes.len() {
         return false;
     }
     for i in 0..len {
-        let b = match tb.try_get(i) {
-            Option::Some(v) => v,
+        let expected = match target_bytes.try_get(i) {
+            Option::Some(byte) => byte,
             Option::None => 0,
         };
-        if names.byte(s, i) != b {
+        if names.byte(sym, i) != expected {
             return false;
         }
     }
     true
 }
 
-fn resolve_slice_io(inout c: Ctx, in a: Ast, e: Ex, n: u32) -> SeqRes {
-    if !c.names.has_prefix(n, in "Vec::".as_bytes()) {
+fn resolve_slice_io(inout c: Ctx, in a: Ast, e: Ex, name: u32) -> SeqRes {
+    if !c.names.has_prefix(name, in "Vec::".as_bytes()) {
         return no_seq();
     }
     let mut store = false;
     let mut masked = false;
     let mut ok = false;
-    if eq(in c, n, "Vec::load") {
+    if eq(in c, name, "Vec::load") {
         ok = true;
-    } else if eq(in c, n, "Vec::store") {
+    } else if eq(in c, name, "Vec::store") {
         store = true;
         ok = true;
-    } else if eq(in c, n, "Vec::store_masked") {
+    } else if eq(in c, name, "Vec::store_masked") {
         store = true;
         masked = true;
         ok = true;
-    } else if eq(in c, n, "Vec::load_masked") {
+    } else if eq(in c, name, "Vec::load_masked") {
         if e.n > 0 {
-            let a0 = a.ex(a.x(inc(e.b)));
-            let t0 = span_type(in c, a0.s0, a0.s1);
-            if is_seq_or_slice(in c, t0) {
+            let arg0 = a.ex(a.x(inc(e.b)));
+            let arg0_ty = span_type(in c, arg0.s0, arg0.s1);
+            if is_seq_or_slice(in c, arg0_ty) {
                 masked = true;
                 ok = true;
             }
@@ -405,12 +403,12 @@ fn resolve_slice_io(inout c: Ctx, in a: Ast, e: Ex, n: u32) -> SeqRes {
         if e.n < 3 {
             return no_seq();
         }
-        let a2 = a.ex(a.x(add(e.b, 5)));
-        shape_of(in c, span_type(in c, a2.s0, a2.s1))
+        let arg2 = a.ex(a.x(add(e.b, 5)));
+        shape_of(in c, span_type(in c, arg2.s0, arg2.s1))
     } else {
-        let sr = shape_of(in c, span_type(in c, e.s0, e.s1));
-        if sr != NONE64 {
-            sr
+        let result_shape = shape_of(in c, span_type(in c, e.s0, e.s1));
+        if result_shape != NONE64 {
+            result_shape
         } else {
             explicit_shape(in c, in a, e)
         }
@@ -434,11 +432,7 @@ fn resolve_slice_io(inout c: Ctx, in a: Ast, e: Ex, n: u32) -> SeqRes {
         label: label,
         has_recv: false,
         recv_pass: TyPass::In,
-        arg_mode: if store {
-            3
-        } else {
-            4
-        }
+        arg_mode: if store { 3 } else { 4 }
     }
 }
 
@@ -539,14 +533,14 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
         };
     }
     if eq(in c, method, "fill") {
-        let lbl = if arity == 3 {
+        let fill_label = if arity == 3 {
             sym_str(inout c, "FillRange { total: false }")
         } else {
             sym_str(inout c, "Fill")
         };
         return SeqRes {
             matched: true,
-            label: lbl,
+            label: fill_label,
             has_recv: true,
             recv_pass: TyPass::Inout,
             arg_mode: 0
@@ -719,19 +713,15 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
         matched: true,
         label: label,
         has_recv: true,
-        recv_pass: if write {
-            TyPass::Inout
-        } else {
-            TyPass::In
-        },
+        recv_pass: if write { TyPass::Inout } else { TyPass::In },
         arg_mode: 0
     }
 }
 
 pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias: bool) -> SeqRes {
     if e.n == 0 && callee.kind == X_FIELD {
-        let m = n32(callee.b);
-        if eq(in c, m, "as_slice") || eq(in c, m, "as_slice_mut") {
+        let method = n32(callee.b);
+        if eq(in c, method, "as_slice") || eq(in c, method, "as_slice_mut") {
             let base = a.ex(callee.a);
             if is_seq_type(in c, span_type(in c, base.s0, base.s1)) {
                 return SeqRes {
@@ -745,15 +735,15 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
         }
     }
     if callee.kind == X_NAME && !local_alias {
-        let n = n32(callee.a);
-        if a.fn_index(n) != NONE64 {
+        let name = n32(callee.a);
+        if a.fn_index(name) != NONE64 {
             return no_seq();
         }
-        let sio = resolve_slice_io(inout c, in a, e, n);
-        if sio.matched {
-            return sio;
+        let slice_io = resolve_slice_io(inout c, in a, e, name);
+        if slice_io.matched {
+            return slice_io;
         }
-        if eq(in c, n, "swap") {
+        if eq(in c, name, "swap") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "Swap"),
@@ -762,7 +752,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 2
             };
         }
-        if eq(in c, n, "replace") {
+        if eq(in c, name, "replace") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "Replace"),
@@ -771,7 +761,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 3
             };
         }
-        if eq(in c, n, "ChunkSeq::new") {
+        if eq(in c, name, "ChunkSeq::new") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "New"),
@@ -780,7 +770,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, n, "ChunkSeq::with_capacity") {
+        if eq(in c, name, "ChunkSeq::with_capacity") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "WithCapacity"),
@@ -789,7 +779,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, n, "ChunkSeq::finish") {
+        if eq(in c, name, "ChunkSeq::finish") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "Finish"),
@@ -804,11 +794,11 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
         return no_seq();
     }
     let base = a.ex(callee.a);
-    let t = span_type(in c, base.s0, base.s1);
-    let m = n32(callee.b);
-    if is_text(in c, t) {
-        let is_strg = is_string_type(in c, t);
-        if eq(in c, m, "len") {
+    let recv_ty = span_type(in c, base.s0, base.s1);
+    let method = n32(callee.b);
+    if is_text(in c, recv_ty) {
+        let is_string = is_string_type(in c, recv_ty);
+        if eq(in c, method, "len") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "Str(Len)"),
@@ -817,7 +807,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "byte_at") {
+        if eq(in c, method, "byte_at") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "Str(ByteAt)"),
@@ -826,7 +816,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "try_byte_at") {
+        if eq(in c, method, "try_byte_at") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "Str(TryByteAt)"),
@@ -835,7 +825,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "as_str") {
+        if eq(in c, method, "as_str") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "Str(AsStr)"),
@@ -844,7 +834,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "as_bytes") {
+        if eq(in c, method, "as_bytes") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "Str(AsBytes)"),
@@ -853,8 +843,8 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if is_strg {
-            if eq(in c, m, "push_str") {
+        if is_string {
+            if eq(in c, method, "push_str") {
                 return SeqRes {
                     matched: true,
                     label: sym_str(inout c, "Str(PushStr)"),
@@ -863,7 +853,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                     arg_mode: 1
                 };
             }
-            if eq(in c, m, "push_char") {
+            if eq(in c, method, "push_char") {
                 return SeqRes {
                     matched: true,
                     label: sym_str(inout c, "Str(PushChar)"),
@@ -872,7 +862,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                     arg_mode: 0
                 };
             }
-            if eq(in c, m, "clear") {
+            if eq(in c, method, "clear") {
                 return SeqRes {
                     matched: true,
                     label: sym_str(inout c, "Str(Clear)"),
@@ -881,7 +871,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                     arg_mode: 0
                 };
             }
-            if eq(in c, m, "reserve") {
+            if eq(in c, method, "reserve") {
                 return SeqRes {
                     matched: true,
                     label: sym_str(inout c, "Str(Reserve)"),
@@ -893,8 +883,8 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
         }
         return no_seq();
     }
-    if is_seq_type(in c, t) {
-        if eq(in c, m, "len") {
+    if is_seq_type(in c, recv_ty) {
+        if eq(in c, method, "len") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "Len"),
@@ -903,7 +893,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "push") {
+        if eq(in c, method, "push") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "Push"),
@@ -912,7 +902,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "pop") {
+        if eq(in c, method, "pop") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "Pop"),
@@ -921,7 +911,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "get") {
+        if eq(in c, method, "get") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "Get"),
@@ -930,7 +920,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "set") {
+        if eq(in c, method, "set") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "Set"),
@@ -939,7 +929,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "try_get") || eq(in c, m, "try_get_mut") {
+        if eq(in c, method, "try_get") || eq(in c, method, "try_get_mut") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "TryGet"),
@@ -948,7 +938,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "last") {
+        if eq(in c, method, "last") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "Last"),
@@ -957,7 +947,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "try_set") {
+        if eq(in c, method, "try_set") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "TrySet"),
@@ -966,7 +956,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "clear") {
+        if eq(in c, method, "clear") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "Clear"),
@@ -975,7 +965,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "truncate") {
+        if eq(in c, method, "truncate") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "Truncate"),
@@ -984,7 +974,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "reserve") {
+        if eq(in c, method, "reserve") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "Reserve"),
@@ -993,7 +983,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "extend") || eq(in c, m, "extend_from_slice") {
+        if eq(in c, method, "extend") || eq(in c, method, "extend_from_slice") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "Extend"),
@@ -1002,7 +992,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 1
             };
         }
-        if eq(in c, m, "extend_ascii_lowercase") {
+        if eq(in c, method, "extend_ascii_lowercase") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "ExtendAsciiLowercase"),
@@ -1011,7 +1001,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 1
             };
         }
-        if eq(in c, m, "resize") {
+        if eq(in c, method, "resize") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "Resize"),
@@ -1020,7 +1010,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "extend_from_within") {
+        if eq(in c, method, "extend_from_within") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "ExtendFromWithin { total: false }"),
@@ -1029,7 +1019,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "try_extend_from_within") {
+        if eq(in c, method, "try_extend_from_within") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "ExtendFromWithin { total: true }"),
@@ -1038,7 +1028,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "extend_reversed") {
+        if eq(in c, method, "extend_reversed") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "ExtendReversed"),
@@ -1047,7 +1037,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 1
             };
         }
-        if eq(in c, m, "as_slice") || eq(in c, m, "as_slice_mut") {
+        if eq(in c, method, "as_slice") || eq(in c, method, "as_slice_mut") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "AsSlice"),
@@ -1056,10 +1046,10 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        return resolve_shared_method(inout c, m, e.n);
+        return resolve_shared_method(inout c, method, e.n);
     }
-    if is_slice_type(in c, t) {
-        if eq(in c, m, "len") {
+    if is_slice_type(in c, recv_ty) {
+        if eq(in c, method, "len") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "SliceLen"),
@@ -1068,7 +1058,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "get") {
+        if eq(in c, method, "get") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "SliceGet"),
@@ -1077,7 +1067,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "set") {
+        if eq(in c, method, "set") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "SliceSet"),
@@ -1086,7 +1076,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "try_get") || eq(in c, m, "try_get_mut") {
+        if eq(in c, method, "try_get") || eq(in c, method, "try_get_mut") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "TryGet"),
@@ -1095,7 +1085,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "last") {
+        if eq(in c, method, "last") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "Last"),
@@ -1104,7 +1094,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "try_set") {
+        if eq(in c, method, "try_set") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "TrySet"),
@@ -1113,7 +1103,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        return resolve_shared_method(inout c, m, e.n);
+        return resolve_shared_method(inout c, method, e.n);
     }
     no_seq()
 }
@@ -1121,26 +1111,22 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
 // ----- TiledOp ---------------------------------------------------------------
 
 fn field_arg_name(in c: Ctx, ty: u32) -> u32 {
-    let n = c.types.node(ty);
-    if n.kind == TyKind::Row {
-        let row = c.types.row(n.r2);
+    let node = c.types.node(ty);
+    if node.kind == TyKind::Row {
+        let row = c.types.row(node.r2);
         if row.n == 0 && row.tail != 0 {
             return wrapping_sub(row.tail, 1);
         }
         return NONE32;
     }
-    if n.kind == TyKind::Named && n.n == 0 {
-        return n.name;
+    if node.kind == TyKind::Named && node.n == 0 {
+        return node.name;
     }
     NONE32
 }
 
 fn col_name_from_type_args(in c: Ctx, in a: Ast, e: Ex, is_static: bool) -> u32 {
-    let idx = if is_static && e.m == 2 {
-        1
-    } else {
-        0
-    };
+    let idx = if is_static && e.m == 2 { 1 } else { 0 };
     if idx >= e.m {
         return NONE32;
     }
@@ -1148,11 +1134,7 @@ fn col_name_from_type_args(in c: Ctx, in a: Ast, e: Ex, is_static: bool) -> u32 
 }
 
 fn load_vec_col_name(in c: Ctx, in a: Ast, e: Ex, is_static: bool) -> u32 {
-    let start = if is_static && e.m >= 2 {
-        1
-    } else {
-        0
-    };
+    let start = if is_static && e.m >= 2 { 1 } else { 0 };
     let rem = wrapping_sub(e.m, start);
     if rem == 1 {
         field_arg_name(in c, n32(a.x(add(e.c, start))))
@@ -1169,33 +1151,33 @@ fn tiled_seq_adt(in c: Ctx, seq_ty: u32) -> u32 {
         return NONE32;
     }
     let elem = c.types.arg(seq_ty, 0);
-    let en = c.types.node(elem);
-    if en.kind != TyKind::Named || en.n != 0 {
+    let elem_node = c.types.node(elem);
+    if elem_node.kind != TyKind::Named || elem_node.n != 0 {
         return NONE32;
     }
-    let ai = c.world.lookup(en.name);
-    if ai == NONE32 || c.world.adt(ai).tile == 0 {
+    let adt_index = c.world.lookup(elem_node.name);
+    if adt_index == NONE32 || c.world.adt(adt_index).tile == 0 {
         return NONE32;
     }
-    ai
+    adt_index
 }
 
 // ADT name for `TiledSeq::new` / `with_capacity` / `with_region`, or NONE32.
 fn tiled_new_adt(in c: Ctx, in a: Ast, e: Ex) -> u32 {
-    let res = span_type(in c, e.s0, e.s1);
-    let elem = if is_tiled_seq(in c, res) {
-        c.types.arg(res, 0)
+    let result_ty = span_type(in c, e.s0, e.s1);
+    let elem = if is_tiled_seq(in c, result_ty) {
+        c.types.arg(result_ty, 0)
     } else if e.m > 0 {
         n32(a.x(e.c))
     } else {
         return NONE32;
     };
-    let ename = c.types.name(elem);
-    let ai = c.world.lookup(ename);
-    if ai == NONE32 {
+    let elem_name = c.types.name(elem);
+    let adt_index = c.world.lookup(elem_name);
+    if adt_index == NONE32 {
         NONE32
     } else {
-        c.world.adt(ai).name
+        c.world.adt(adt_index).name
     }
 }
 
@@ -1224,11 +1206,11 @@ pub fn resolve_tiled(inout c: Ctx, in a: Ast, e: Ex, name: u32, receiver: u64) -
     let mut op_start: u64 = 0;
     if receiver != NONE64 {
         let base = a.ex(receiver);
-        let bt = span_type(in c, base.s0, base.s1);
-        if !is_tiled_seq(in c, bt) {
+        let base_ty = span_type(in c, base.s0, base.s1);
+        if !is_tiled_seq(in c, base_ty) {
             return no_tiled();
         }
-        recv_ty = bt;
+        recv_ty = base_ty;
         // `name` is "TiledSeq::{method}" from `call`; find last `::` or start after "TiledSeq::".
         op_start = 10;
         let size = c.names.size(name);
@@ -1250,10 +1232,10 @@ pub fn resolve_tiled(inout c: Ctx, in a: Ast, e: Ex, name: u32, receiver: u64) -
         }
         op_start = 10;
         if e.n > 0 {
-            let a0 = a.ex(a.x(inc(e.b)));
-            let t0 = span_type(in c, a0.s0, a0.s1);
-            if is_tiled_seq(in c, t0) {
-                recv_ty = t0;
+            let arg0 = a.ex(a.x(inc(e.b)));
+            let arg0_ty = span_type(in c, arg0.s0, arg0.s1);
+            if is_tiled_seq(in c, arg0_ty) {
+                recv_ty = arg0_ty;
             }
         }
     }
@@ -1292,22 +1274,22 @@ pub fn resolve_tiled(inout c: Ctx, in a: Ast, e: Ex, name: u32, receiver: u64) -
         if adt == NONE32 || e.n == 0 {
             return no_tiled();
         }
-        let a0 = a.ex(a.x(inc(e.b)));
-        if a0.kind != X_NAME {
+        let arg0 = a.ex(a.x(inc(e.b)));
+        if arg0.kind != X_NAME {
             return no_tiled();
         }
-        let rlabel = n32(a0.a);
+        let region_label = n32(arg0.a);
         let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
         put_str(inout buf, "WithRegion { adt: ");
         put_quoted(inout buf, in c.names, adt);
         put_str(inout buf, ", region_label: ");
-        put_quoted(inout buf, in c.names, rlabel);
+        put_quoted(inout buf, in c.names, region_label);
         put_str(inout buf, " }");
         let label = c.names.intern(in buf.as_slice());
         return TiledRes {
             matched: true,
             label: label,
-            cap: wrapping_add(rlabel, 1),
+            cap: wrapping_add(region_label, 1),
             recv_pass: TyPass::In,
             recv_proj: NONE32,
             skip_first: true,
@@ -1325,11 +1307,11 @@ pub fn resolve_tiled(inout c: Ctx, in a: Ast, e: Ex, name: u32, receiver: u64) -
             is_recv_first: true
         };
     }
-    let ai = tiled_seq_adt(in c, recv_ty);
-    if ai == NONE32 {
+    let adt_index = tiled_seq_adt(in c, recv_ty);
+    if adt_index == NONE32 {
         return no_tiled();
     }
-    let adt_row = c.world.adt(ai);
+    let adt_row = c.world.adt(adt_index);
     let width = wrapping_sub(adt_row.tile, 1);
     if slice_suffix(in c.names, name, op_start, "tile_count") {
         let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -1414,12 +1396,12 @@ pub fn resolve_tiled(inout c: Ctx, in a: Ast, e: Ex, name: u32, receiver: u64) -
         if field == NONE32 || adt_row.vn == 0 {
             return no_tiled();
         }
-        let v = c.world.variant(w(adt_row.va));
-        let fi = c.world.find_field(v, field);
-        if fi == NONE32 {
+        let variant = c.world.variant(w(adt_row.va));
+        let field_index = c.world.find_field(variant, field);
+        if field_index == NONE32 {
             return no_tiled();
         }
-        let elem = elem_from_type(in c, c.world.field(w(fi)).ty);
+        let elem = elem_from_type(in c, c.world.field(w(field_index)).ty);
         let shape = pack_shape(elem, w(width));
         if shape == NONE64 {
             return no_tiled();
@@ -1447,12 +1429,12 @@ pub fn resolve_tiled(inout c: Ctx, in a: Ast, e: Ex, name: u32, receiver: u64) -
 
 // ----- VectorOp --------------------------------------------------------------
 
-fn profile_name(in c: Ctx, s: u32) -> bool {
-    eq(in c, s, "Baseline128")
-        || eq(in c, s, "Avx2")
-        || eq(in c, s, "Avx512")
-        || eq(in c, s, "Sve2")
-        || eq(in c, s, "Rvv1")
+fn profile_name(in c: Ctx, sym: u32) -> bool {
+    eq(in c, sym, "Baseline128")
+        || eq(in c, sym, "Avx2")
+        || eq(in c, sym, "Avx512")
+        || eq(in c, sym, "Sve2")
+        || eq(in c, sym, "Rvv1")
 }
 
 // Lookup intrinsic Debug string and mode: returns (label bytes in `intr`,
@@ -1466,99 +1448,99 @@ fn lookup_vec_intrinsic(
     inout cmode: u8,
     inout is_load_masked: bool
 ) -> bool {
-    let op = add(at, 2);
+    let method_at = add(at, 2);
     is_conv = false;
     cmode = C_NONE;
     is_load_masked = false;
     if slice_prefix(in c.names, name, at, "Vec") {
-        if slice_suffix(in c.names, name, op, "splat") {
+        if slice_suffix(in c.names, name, method_at, "splat") {
             put_str(inout intr, "Splat");
-        } else if slice_suffix(in c.names, name, op, "from") {
+        } else if slice_suffix(in c.names, name, method_at, "from") {
             put_str(inout intr, "From");
-        } else if slice_suffix(in c.names, name, op, "add") {
+        } else if slice_suffix(in c.names, name, method_at, "add") {
             put_str(inout intr, "Binary(Add)");
-        } else if slice_suffix(in c.names, name, op, "sub") {
+        } else if slice_suffix(in c.names, name, method_at, "sub") {
             put_str(inout intr, "Binary(Sub)");
-        } else if slice_suffix(in c.names, name, op, "mul") {
+        } else if slice_suffix(in c.names, name, method_at, "mul") {
             put_str(inout intr, "Binary(Mul)");
-        } else if slice_suffix(in c.names, name, op, "div") {
+        } else if slice_suffix(in c.names, name, method_at, "div") {
             put_str(inout intr, "Binary(Div)");
-        } else if slice_suffix(in c.names, name, op, "min") {
+        } else if slice_suffix(in c.names, name, method_at, "min") {
             put_str(inout intr, "Binary(Min)");
-        } else if slice_suffix(in c.names, name, op, "max") {
+        } else if slice_suffix(in c.names, name, method_at, "max") {
             put_str(inout intr, "Binary(Max)");
-        } else if slice_suffix(in c.names, name, op, "and") {
+        } else if slice_suffix(in c.names, name, method_at, "and") {
             put_str(inout intr, "Binary(And)");
-        } else if slice_suffix(in c.names, name, op, "or") {
+        } else if slice_suffix(in c.names, name, method_at, "or") {
             put_str(inout intr, "Binary(Or)");
-        } else if slice_suffix(in c.names, name, op, "xor") {
+        } else if slice_suffix(in c.names, name, method_at, "xor") {
             put_str(inout intr, "Binary(Xor)");
-        } else if slice_suffix(in c.names, name, op, "saturating_add") {
+        } else if slice_suffix(in c.names, name, method_at, "saturating_add") {
             put_str(inout intr, "Binary(SaturatingAdd)");
-        } else if slice_suffix(in c.names, name, op, "saturating_sub") {
+        } else if slice_suffix(in c.names, name, method_at, "saturating_sub") {
             put_str(inout intr, "Binary(SaturatingSub)");
-        } else if slice_suffix(in c.names, name, op, "not") {
+        } else if slice_suffix(in c.names, name, method_at, "not") {
             put_str(inout intr, "Not");
-        } else if slice_suffix(in c.names, name, op, "sqrt") {
+        } else if slice_suffix(in c.names, name, method_at, "sqrt") {
             put_str(inout intr, "Unary(Sqrt)");
-        } else if slice_suffix(in c.names, name, op, "abs") {
+        } else if slice_suffix(in c.names, name, method_at, "abs") {
             put_str(inout intr, "Unary(Abs)");
-        } else if slice_suffix(in c.names, name, op, "neg") {
+        } else if slice_suffix(in c.names, name, method_at, "neg") {
             put_str(inout intr, "Unary(Neg)");
-        } else if slice_suffix(in c.names, name, op, "mul_add") {
+        } else if slice_suffix(in c.names, name, method_at, "mul_add") {
             put_str(inout intr, "MulAdd");
-        } else if slice_suffix(in c.names, name, op, "to_bits") {
+        } else if slice_suffix(in c.names, name, method_at, "to_bits") {
             put_str(inout intr, "Convert(ToBits)");
             is_conv = true;
-        } else if slice_suffix(in c.names, name, op, "from_bits") {
+        } else if slice_suffix(in c.names, name, method_at, "from_bits") {
             put_str(inout intr, "Convert(FromBits)");
             is_conv = true;
-        } else if slice_suffix(in c.names, name, op, "widen_f64") {
+        } else if slice_suffix(in c.names, name, method_at, "widen_f64") {
             put_str(inout intr, "Convert(Widen)");
             is_conv = true;
-        } else if slice_suffix(in c.names, name, op, "nearest_f32") {
+        } else if slice_suffix(in c.names, name, method_at, "nearest_f32") {
             put_str(inout intr, "Convert(Narrow)");
             is_conv = true;
-        } else if slice_suffix(in c.names, name, op, "shl") {
+        } else if slice_suffix(in c.names, name, method_at, "shl") {
             put_str(inout intr, "Shift(Shl)");
-        } else if slice_suffix(in c.names, name, op, "shr") {
+        } else if slice_suffix(in c.names, name, method_at, "shr") {
             put_str(inout intr, "Shift(Shr)");
-        } else if slice_suffix(in c.names, name, op, "eq") {
+        } else if slice_suffix(in c.names, name, method_at, "eq") {
             put_str(inout intr, "Compare(Eq)");
-        } else if slice_suffix(in c.names, name, op, "ne") {
+        } else if slice_suffix(in c.names, name, method_at, "ne") {
             put_str(inout intr, "Compare(Ne)");
-        } else if slice_suffix(in c.names, name, op, "lt") {
+        } else if slice_suffix(in c.names, name, method_at, "lt") {
             put_str(inout intr, "Compare(Lt)");
-        } else if slice_suffix(in c.names, name, op, "le") {
+        } else if slice_suffix(in c.names, name, method_at, "le") {
             put_str(inout intr, "Compare(Le)");
-        } else if slice_suffix(in c.names, name, op, "gt") {
+        } else if slice_suffix(in c.names, name, method_at, "gt") {
             put_str(inout intr, "Compare(Gt)");
-        } else if slice_suffix(in c.names, name, op, "ge") {
+        } else if slice_suffix(in c.names, name, method_at, "ge") {
             put_str(inout intr, "Compare(Ge)");
-        } else if slice_suffix(in c.names, name, op, "select") {
+        } else if slice_suffix(in c.names, name, method_at, "select") {
             put_str(inout intr, "Select");
-        } else if slice_suffix(in c.names, name, op, "reduce_add") {
+        } else if slice_suffix(in c.names, name, method_at, "reduce_add") {
             put_str(inout intr, "Reduce(Add)");
-        } else if slice_suffix(in c.names, name, op, "reduce_xor") {
+        } else if slice_suffix(in c.names, name, method_at, "reduce_xor") {
             put_str(inout intr, "Reduce(Xor)");
-        } else if slice_suffix(in c.names, name, op, "reduce_or") {
+        } else if slice_suffix(in c.names, name, method_at, "reduce_or") {
             put_str(inout intr, "Reduce(Or)");
-        } else if slice_suffix(in c.names, name, op, "reduce_and") {
+        } else if slice_suffix(in c.names, name, method_at, "reduce_and") {
             put_str(inout intr, "Reduce(And)");
-        } else if slice_suffix(in c.names, name, op, "reduce_min") {
+        } else if slice_suffix(in c.names, name, method_at, "reduce_min") {
             put_str(inout intr, "Reduce(Min)");
-        } else if slice_suffix(in c.names, name, op, "reduce_max") {
+        } else if slice_suffix(in c.names, name, method_at, "reduce_max") {
             put_str(inout intr, "Reduce(Max)");
-        } else if slice_suffix(in c.names, name, op, "extract") {
+        } else if slice_suffix(in c.names, name, method_at, "extract") {
             put_str(inout intr, "Extract");
             cmode = C_SECOND;
-        } else if slice_suffix(in c.names, name, op, "replace") {
+        } else if slice_suffix(in c.names, name, method_at, "replace") {
             put_str(inout intr, "Replace");
             cmode = C_SECOND;
-        } else if slice_suffix(in c.names, name, op, "shuffle") {
+        } else if slice_suffix(in c.names, name, method_at, "shuffle") {
             put_str(inout intr, "Shuffle");
             cmode = C_TAIL;
-        } else if slice_suffix(in c.names, name, op, "load_masked") {
+        } else if slice_suffix(in c.names, name, method_at, "load_masked") {
             put_str(inout intr, "LoadMasked");
             is_load_masked = true;
         } else {
@@ -1567,25 +1549,25 @@ fn lookup_vec_intrinsic(
         return true;
     }
     if slice_prefix(in c.names, name, at, "Mask") {
-        if slice_suffix(in c.names, name, op, "and") {
+        if slice_suffix(in c.names, name, method_at, "and") {
             put_str(inout intr, "MaskBinary(And)");
-        } else if slice_suffix(in c.names, name, op, "or") {
+        } else if slice_suffix(in c.names, name, method_at, "or") {
             put_str(inout intr, "MaskBinary(Or)");
-        } else if slice_suffix(in c.names, name, op, "xor") {
+        } else if slice_suffix(in c.names, name, method_at, "xor") {
             put_str(inout intr, "MaskBinary(Xor)");
-        } else if slice_suffix(in c.names, name, op, "not") {
+        } else if slice_suffix(in c.names, name, method_at, "not") {
             put_str(inout intr, "MaskNot");
-        } else if slice_suffix(in c.names, name, op, "count") {
+        } else if slice_suffix(in c.names, name, method_at, "count") {
             put_str(inout intr, "MaskCount");
-        } else if slice_suffix(in c.names, name, op, "bitmask") {
+        } else if slice_suffix(in c.names, name, method_at, "bitmask") {
             put_str(inout intr, "MaskBitmask");
-        } else if slice_suffix(in c.names, name, op, "any") {
+        } else if slice_suffix(in c.names, name, method_at, "any") {
             put_str(inout intr, "MaskAny");
-        } else if slice_suffix(in c.names, name, op, "all") {
+        } else if slice_suffix(in c.names, name, method_at, "all") {
             put_str(inout intr, "MaskAll");
-        } else if slice_suffix(in c.names, name, op, "in_bounds") {
+        } else if slice_suffix(in c.names, name, method_at, "in_bounds") {
             put_str(inout intr, "InBounds");
-        } else if slice_suffix(in c.names, name, op, "active") {
+        } else if slice_suffix(in c.names, name, method_at, "active") {
             put_str(inout intr, "Active");
         } else {
             return false;
@@ -1600,14 +1582,16 @@ pub fn resolve_vector(inout c: Ctx, in a: Ast, e: Ex, name: u32) -> VecRes {
         if e.m != 1 {
             return no_vec();
         }
-        let t0 = n32(a.x(e.c));
-        let nd = c.types.node(t0);
-        if nd.kind != TyKind::Named || nd.n != 0 || !profile_name(in c, nd.name) {
+        let profile_ty = n32(a.x(e.c));
+        let profile_node = c.types.node(profile_ty);
+        if profile_node.kind != TyKind::Named
+            || profile_node.n != 0
+            || !profile_name(in c, profile_node.name) {
             return no_vec();
         }
         let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
         put_str(inout buf, "IsaSupported(");
-        c.names.write(nd.name, inout buf);
+        c.names.write(profile_node.name, inout buf);
         buf.push(41);
         return VecRes {
             matched: true,
@@ -1636,8 +1620,8 @@ pub fn resolve_vector(inout c: Ctx, in a: Ast, e: Ex, name: u32) -> VecRes {
         return no_vec();
     }
     let arg0_ty = if e.n > 0 {
-        let a0 = a.ex(a.x(inc(e.b)));
-        span_type(in c, a0.s0, a0.s1)
+        let arg0 = a.ex(a.x(inc(e.b)));
+        span_type(in c, arg0.s0, arg0.s1)
     } else {
         NONE32
     };
@@ -1648,9 +1632,9 @@ pub fn resolve_vector(inout c: Ctx, in a: Ast, e: Ex, name: u32) -> VecRes {
     let shape = if is_conv {
         op_shape
     } else {
-        let res = shape_of(in c, span_type(in c, e.s0, e.s1));
-        if res != NONE64 {
-            res
+        let result_shape = shape_of(in c, span_type(in c, e.s0, e.s1));
+        if result_shape != NONE64 {
+            result_shape
         } else if op_shape != NONE64 {
             op_shape
         } else {
@@ -1677,11 +1661,14 @@ pub fn resolve_vector(inout c: Ctx, in a: Ast, e: Ex, name: u32) -> VecRes {
     }
     let mut consts: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for i in const_lo..const_hi {
-        let ax = a.ex(a.x(add(e.b, inc(wrapping_mul(i, 2)))));
-        if ax.kind != X_LITERAL || ax.a != Lit::Int || ax.c != 0 || ax.b > 65535 {
+        let const_ex = a.ex(a.x(add(e.b, inc(wrapping_mul(i, 2)))));
+        if const_ex.kind != X_LITERAL
+            || const_ex.a != Lit::Int
+            || const_ex.c != 0
+            || const_ex.b > 65535 {
             return no_vec();
         }
-        consts.push(ax.b);
+        consts.push(const_ex.b);
     }
     let elem = wrapping_u8(wrapping_shr_u64(shape, 16));
     let lanes = shape & 65535;
@@ -1698,7 +1685,7 @@ pub fn resolve_vector(inout c: Ctx, in a: Ast, e: Ex, name: u32) -> VecRes {
         push_decimal(
             inout buf,
             match consts.try_get(i) {
-                Option::Some(v) => v,
+                Option::Some(constant) => constant,
                 Option::None => 0,
             }
         );

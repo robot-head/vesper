@@ -75,11 +75,7 @@ fn range_json(inout j: Json, a: u64, b: u64) {
 }
 
 fn origin_text(expanded: bool) -> Str {
-    if expanded {
-        "expanded"
-    } else {
-        "source"
-    }
+    if expanded { "expanded" } else { "source" }
 }
 
 // An `ExpansionRecord` as serde writes it.

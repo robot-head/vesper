@@ -1,0 +1,14 @@
+[package]
+name = "@vesper/verify"
+version = "0.1.0"
+edition = "2026"
+# `vesper verify` (src/verify_commands.rs) in Vesper (SH5 lane 18, #1341):
+# so far the pure pieces of `--extract`, theorem discovery in a Lean proofs
+# file and the contract-binding source; and `--format`'s formatter model
+# and its Lean witness.
+capability_ceiling = ["Fail", "Alloc", "Ffi"]
+
+[dependencies]
+"@vesper/proof-audit" = { version = "^0.1", path = "../vesper-proof-audit" }
+"@vesper/fmt" = { version = "^0.1", path = "../../crates/vesper-fmt/vesper" }
+"@vesper/lean-syntax" = { version = "^0.1", path = "../../crates/vesper-lean-syntax/vesper" }

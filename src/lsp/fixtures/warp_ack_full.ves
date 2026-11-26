@@ -117,20 +117,12 @@ fn decode_packet_number_rfc9000(largest: u64, trunc: u64) -> u64 {
 
 // EDT: launch no earlier than now or the previous launch, plus pacing.
 fn advance_edt(prev_ns: u64, now_ns: u64, pacing_ns: u64) -> u64 {
-    let base = if now_ns > prev_ns {
-        now_ns
-    } else {
-        prev_ns
-    };
+    let base = if now_ns > prev_ns { now_ns } else { prev_ns };
     wrapping_add(base, pacing_ns)
 }
 
 fn max_u64(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn lookup_cid(conns: Conns, dcid: u64) -> Option[Conn] {
