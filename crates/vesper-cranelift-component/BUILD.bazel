@@ -19,8 +19,15 @@ vesper_crate(
     },
     # tests/objects.rs shares vesper-cranelift-sys's test support module
     # and its fixtures.
-    extra_integration_compile_data = ["//crates/vesper-cranelift-sys:tests/support/mod.rs"],
+    # tests/wasm_imports.rs includes the root crate's tests/common modules
+    # by path and reads the Wasm backend's packages at run time.
+    extra_integration_compile_data = [
+        "//:files",
+        "//crates/vesper-cranelift-sys:tests/support/mod.rs",
+        "wit/vcl.wit",
+    ],
     extra_test_data = [
+        "//:files",
         "//crates/vesper-cranelift-sys:test_fixtures",
         "//packages/vesper-cranelift:files",
     ],

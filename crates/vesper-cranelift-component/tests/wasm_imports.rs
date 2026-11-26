@@ -11,13 +11,13 @@
 //! The Cranelift component is built with `cargo build --release --target
 //! wasm32-wasip2 -p vesper-cranelift-component` (or named by
 //! `VESPER_CRANELIFT_COMPONENT`); without it the test says so and passes.
-#[path = "common/check_harness.rs"]
+#[path = "../../../tests/common/check_harness.rs"]
 mod check_harness;
-#[path = "common/check_words.rs"]
+#[path = "../../../tests/common/check_words.rs"]
 mod check_words;
-#[path = "common/ir_words.rs"]
+#[path = "../../../tests/common/ir_words.rs"]
 mod ir_words;
-#[path = "common/wasm_words.rs"]
+#[path = "../../../tests/common/wasm_words.rs"]
 mod wasm_words;
 
 use check_harness::*;

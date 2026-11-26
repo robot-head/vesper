@@ -35,6 +35,62 @@ const VT_I64: u8 = 126;
 const K_UNSUPPORTED: u8 = 0;
 const U_EXTERNAL_FUNCTION: u8 = 11;
 
+// A `vcl.ves` row: fields separated by spaces, `-` for an empty one
+// (`vesper_table` in crates/vesper-cranelift-component/build.rs).
+const FIELD_NAME: u64 = 0;
+const FIELD_SHAPES: u64 = 1;
+const FIELD_PASSES: u64 = 2;
+const FIELD_RESULT: u64 = 3;
+const ROW_SEPARATOR: u8 = 32;
+const ROW_EMPTY: u8 = 45;
+// Parameter shapes: `h` handle, `w` a 32-bit scalar (anything else a 64-bit one), `a`/`c`/`e` an
+// `in` slice of u8/u32/u64, `A`/`C`/`E` an `inout` one.
+const SHAPE_HANDLE: u8 = 104;
+const SHAPE_WORD32: u8 = 119;
+const SHAPE_IN_U8: u8 = 97;
+const SHAPE_IN_U32: u8 = 99;
+const SHAPE_IN_U64: u8 = 101;
+const SHAPE_INOUT_U8: u8 = 65;
+const SHAPE_INOUT_U32: u8 = 67;
+const SHAPE_INOUT_U64: u8 = 69;
+// Passing modes (`i` in, `o` inout, `s` sink) and their `TyPass` codes.
+const ROW_PASS_INOUT: u8 = 111;
+const ROW_PASS_SINK: u8 = 115;
+const PASS_IN: u8 = 0;
+const PASS_INOUT: u8 = 1;
+const PASS_SINK: u8 = 2;
+// A call with fewer operands than the row has passes.
+const PASS_MISSING: u8 = 9;
+// Results: `u` unit, `w`/`q` 32/64-bit scalar, `o` an optional handle.
+const RET_UNIT: u8 = 117;
+const RET_WORD32: u8 = 119;
+const RET_WORD64: u8 = 113;
+const RET_OPTION: u8 = 111;
+// The Bridge's slice-arity suffix of an operation name (`name$...`).
+const NAME_ARITY_SUFFIX: u8 = 36;
+// snake_case to kebab-case.
+const CHAR_UNDERSCORE: u8 = 95;
+const CHAR_DASH: u8 = 45;
+// A slice view is `addr | len << 32`.
+const SLICE_LEN_SHIFT: i64 = 32;
+// Memory sizes: a byte and a word element, a 32-bit result, a canonical
+// ABI list (pointer and length, each 32 bits, at these offsets, loaded
+// with 2^2 alignment), and an `Option` block {tag, some box}.
+const BYTE_BYTES: u64 = 1;
+const WORD_BYTES: u64 = 8;
+const WORD32_BYTES: u64 = 4;
+const LIST_BYTES: u64 = 8;
+const LIST_PTR_OFFSET: u64 = 0;
+const LIST_LEN_OFFSET: u64 = 4;
+const ALIGN_WORD32: u64 = 2;
+const OPTION_BLOCK_BYTES: u64 = 16;
+// `WErr` sites of the vcl lowering.
+const E_VCL_PASS_COUNT: u64 = 250;
+const E_VCL_PASS_MODE: u64 = 251;
+const E_VCL_NO_ROW: u64 = 252;
+const E_VCL_NO_DECL: u64 = 253;
+const E_VCL_NO_RESULT: u64 = 254;
+
 fn byte(in bytes: Slice[u8], i: u64) -> u8 {
     match bytes.try_get(i) {
         Option::Some(value) => value,
@@ -49,7 +105,7 @@ pub fn vcl_field(row: u64, k: u64) -> ChunkSeq[u8] {
     let mut out = ChunkSeq::new[u8]();
     for i in 0..text.len() {
         let ch = byte(in text, i);
-        if ch == 32 {
+        if ch == ROW_SEPARATOR {
             field = wrapping_add(field, 1);
             continue;
         }
@@ -58,7 +114,7 @@ pub fn vcl_field(row: u64, k: u64) -> ChunkSeq[u8] {
         }
     }
     // `-`: no parameters.
-    if k != 0 && out.len() == 1 && byte(in out.as_slice(), 0) == 45 {
+    if k != 0 && out.len() == 1 && byte(in out.as_slice(), 0) == ROW_EMPTY {
         return ChunkSeq::new[u8]();
     }
     out
@@ -70,13 +126,13 @@ pub fn vcl_field(row: u64, k: u64) -> ChunkSeq[u8] {
 pub fn vcl_find(in name: Slice[u8], in passes: ChunkSeq[u8]) -> u64 eff [Fail[WErr]] {
     let mut n = name.len();
     for i in 0..name.len() {
-        if byte(in name, i) == 36 {
+        if byte(in name, i) == NAME_ARITY_SUFFIX {
             n = i;
             break;
         }
     }
     for row in 0..vcl_count() {
-        let want = vcl_field(row, 0);
+        let want = vcl_field(row, FIELD_NAME);
         if want.len() != n {
             continue;
         }
@@ -90,44 +146,48 @@ pub fn vcl_find(in name: Slice[u8], in passes: ChunkSeq[u8]) -> u64 eff [Fail[WE
         if !same {
             continue;
         }
-        let want_passes = vcl_field(row, 2);
+        let want_passes = vcl_field(row, FIELD_PASSES);
         if want_passes.len() != passes.len() {
-            Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 250));
+            Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, E_VCL_PASS_COUNT));
         }
         for i in 0..want_passes.len() {
             let ch = byte(in want_passes.as_slice(), i);
-            let want_pass: u8 = if ch == 111 {
-                1
-            } else if ch == 115 {
-                2
+            let want_pass: u8 = if ch == ROW_PASS_INOUT {
+                PASS_INOUT
+            } else if ch == ROW_PASS_SINK {
+                PASS_SINK
             } else {
-                0
+                PASS_IN
             };
             let have = match passes.try_get(i) {
                 Option::Some(pass) => pass,
-                Option::None => 9,
+                Option::None => PASS_MISSING,
             };
             // A sink handle is passed like an in one.
             let ok = have == want_pass
-                || (want_pass == 2 && have == 0)
-                || (want_pass == 0 && have == 2);
+                || (want_pass == PASS_SINK && have == PASS_IN)
+                || (want_pass == PASS_IN && have == PASS_SINK);
             if !ok {
-                Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 251));
+                Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, E_VCL_PASS_MODE));
             }
         }
         return row;
     }
-    Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 252))
+    Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, E_VCL_NO_ROW))
 }
 
 // Whether a shape letter is a slice (`a c e A C E`), and the size of its
 // elements in memory: a byte, else a word (a `u32` element is a word here
 // and crosses as a `u64`).
 pub fn slice_size(shape: u8) -> u64 {
-    if shape == 97 || shape == 65 {
-        1
-    } else if shape == 99 || shape == 67 || shape == 101 || shape == 69 {
-        8
+    if shape == SHAPE_IN_U8 || shape == SHAPE_INOUT_U8 {
+        BYTE_BYTES
+    } else if shape == SHAPE_IN_U32
+        || shape == SHAPE_INOUT_U32
+        || shape == SHAPE_IN_U64
+        || shape == SHAPE_INOUT_U64
+    {
+        WORD_BYTES
     } else {
         0
     }
@@ -135,7 +195,7 @@ pub fn slice_size(shape: u8) -> u64 {
 
 // Whether a shape letter is an `inout` (handed-back) slice.
 pub fn handed_back(shape: u8) -> bool {
-    shape == 65 || shape == 67 || shape == 69
+    shape == SHAPE_INOUT_U8 || shape == SHAPE_INOUT_U32 || shape == SHAPE_INOUT_U64
 }
 
 // Import every function of the interface, in row order; returns the first
@@ -143,9 +203,9 @@ pub fn handed_back(shape: u8) -> bool {
 pub fn vcl_imports(inout builder: Builder) -> u32 eff [Fail[WErr]] {
     let mut first: u32 = 0;
     for row in 0..vcl_count() {
-        let name = vcl_field(row, 0);
-        let shapes = vcl_field(row, 1);
-        let ret_field = vcl_field(row, 3);
+        let name = vcl_field(row, FIELD_NAME);
+        let shapes = vcl_field(row, FIELD_SHAPES);
+        let ret_field = vcl_field(row, FIELD_RESULT);
         let ret = byte(in ret_field.as_slice(), 0);
         let mut params = ChunkSeq::new[ValTy]();
         let mut through_memory = false;
@@ -157,7 +217,7 @@ pub fn vcl_imports(inout builder: Builder) -> u32 eff [Fail[WErr]] {
                 if handed_back(shape) {
                     through_memory = true;
                 }
-            } else if shape == 119 {
+            } else if shape == SHAPE_WORD32 {
                 params.push(vt(VT_I32));
             } else {
                 params.push(vt(VT_I64));
@@ -166,16 +226,16 @@ pub fn vcl_imports(inout builder: Builder) -> u32 eff [Fail[WErr]] {
         let mut results = ChunkSeq::new[ValTy]();
         if through_memory {
             params.push(vt(VT_I32));
-        } else if ret == 119 {
+        } else if ret == RET_WORD32 {
             results.push(vt(VT_I32));
-        } else if ret != 117 {
+        } else if ret != RET_UNIT {
             results.push(vt(VT_I64));
         }
         // The WIT name: kebab case.
         let mut wit_name = ChunkSeq::new[u8]();
         for i in 0..name.len() {
             let ch = byte(in name.as_slice(), i);
-            wit_name.push(if ch == 95 { 45 } else { ch });
+            wit_name.push(if ch == CHAR_UNDERSCORE { CHAR_DASH } else { ch });
         }
         let index = builder.import(
             in "vesper:cranelift/vcl@0.1.0".as_bytes(),
@@ -194,22 +254,22 @@ pub fn vcl_imports(inout builder: Builder) -> u32 eff [Fail[WErr]] {
 // (if any) first, then each handed-back list (address, length), as the
 // canonical ABI lays out `tuple<R, list<T>, ...>`.
 pub fn result_offsets(row: u64) -> ChunkSeq[u64] {
-    let shapes = vcl_field(row, 1);
-    let ret_field = vcl_field(row, 3);
+    let shapes = vcl_field(row, FIELD_SHAPES);
+    let ret_field = vcl_field(row, FIELD_RESULT);
     let ret = byte(in ret_field.as_slice(), 0);
     let mut out = ChunkSeq::new[u64]();
     let mut at: u64 = 0;
-    if ret == 113 || ret == 111 {
+    if ret == RET_WORD64 || ret == RET_OPTION {
         out.push(0);
-        at = 8;
-    } else if ret == 119 {
+        at = WORD_BYTES;
+    } else if ret == RET_WORD32 {
         out.push(0);
-        at = 4;
+        at = WORD32_BYTES;
     }
     for i in 0..shapes.len() {
         if handed_back(byte(in shapes.as_slice(), i)) {
             out.push(at);
-            at = wrapping_add(at, 8);
+            at = wrapping_add(at, LIST_BYTES);
         }
     }
     out
@@ -225,7 +285,7 @@ impl L {
     ] {
         let decl_id = self.ctx.facts.decl_of(ename);
         if decl_id == 0 {
-            Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 253));
+            Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, E_VCL_NO_DECL));
         }
         let decl = self.ctx.facts.decl(wrapping_sub(decl_id, 1));
         let mut passes = ChunkSeq::new[u8]();
@@ -245,15 +305,15 @@ impl L {
             }
         }
         if result == NONE32 {
-            Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 254));
+            Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, E_VCL_NO_RESULT));
         }
         let mut name = ChunkSeq::new[u8]();
         for i in 0..self.ctx.names.size(opname) {
             name.push(self.ctx.names.byte(opname, i));
         }
         let row = vcl_find(in name.as_slice(), in passes);
-        let shapes = vcl_field(row, 1);
-        let ret_field = vcl_field(row, 3);
+        let shapes = vcl_field(row, FIELD_SHAPES);
+        let ret_field = vcl_field(row, FIELD_RESULT);
         let ret = byte(in ret_field.as_slice(), 0);
         let mut cells = ChunkSeq::new[Cell]();
         let vals = self.host_args(inc(operands), in passes, in tys, inout cells);
@@ -271,7 +331,7 @@ impl L {
                 Option::None => 0,
             };
             let v = u32_at(in vals, k);
-            if shape == 104 {
+            if shape == SHAPE_HANDLE {
                 // A handle is a one-field struct: its word. An `inout` one
                 // is the cell holding it.
                 let handle = self.local();
@@ -312,10 +372,10 @@ impl L {
             if slice_size(shape) != 0 {
                 self.cur_fn.code.op(OP_I32_WRAP_I64);
                 self.cur_fn.code.get(arg);
-                self.cur_fn.code.i64_const(32);
+                self.cur_fn.code.i64_const(SLICE_LEN_SHIFT);
                 self.cur_fn.code.op(OP_I64_SHR_U);
                 self.cur_fn.code.op(OP_I32_WRAP_I64);
-            } else if shape == 119 {
+            } else if shape == SHAPE_WORD32 {
                 self.cur_fn.code.op(OP_I32_WRAP_I64);
             }
         }
@@ -329,10 +389,10 @@ impl L {
         if through_memory {
             let offsets = result_offsets(row);
             let mut part: u64 = 0;
-            if ret == 119 || ret == 113 || ret == 111 {
+            if ret == RET_WORD32 || ret == RET_WORD64 || ret == RET_OPTION {
                 self.cur_fn.code.i32_const(wrapping_i64(self.host.ret_area));
-                if ret == 119 {
-                    self.cur_fn.code.mem(OP_I64_LOAD32_U, 2, 0);
+                if ret == RET_WORD32 {
+                    self.cur_fn.code.mem(OP_I64_LOAD32_U, ALIGN_WORD32, 0);
                 } else {
                     self.cur_fn.code.load(0);
                 }
@@ -348,26 +408,26 @@ impl L {
                 self.cur_fn.code.get(u32_at(in backs, j));
                 self.cur_fn.code.op(OP_I32_WRAP_I64);
                 self.cur_fn.code.i32_const(wrapping_i64(at));
-                self.cur_fn.code.mem(OP_I64_LOAD32_U, 2, 0);
+                self.cur_fn.code.mem(OP_I64_LOAD32_U, ALIGN_WORD32, LIST_PTR_OFFSET);
                 self.cur_fn.code.op(OP_I32_WRAP_I64);
                 self.cur_fn.code.i32_const(wrapping_i64(at));
-                self.cur_fn.code.mem(OP_I64_LOAD32_U, 2, 4);
+                self.cur_fn.code.mem(OP_I64_LOAD32_U, ALIGN_WORD32, LIST_LEN_OFFSET);
                 self.cur_fn.code.i64_const(wrapping_i64(u64_at(in back_sizes, j)));
                 self.cur_fn.code.op(OP_I64_MUL);
                 self.cur_fn.code.op(OP_I32_WRAP_I64);
                 self.cur_fn.code.memory_copy();
             }
-        } else if ret == 119 {
+        } else if ret == RET_WORD32 {
             self.cur_fn.code.op(OP_I64_EXTEND_I32_U);
             self.cur_fn.code.set(ret_val);
-        } else if ret == 117 {
+        } else if ret == RET_UNIT {
             self.cur_fn.code.i64_const(0);
             self.cur_fn.code.set(ret_val);
         } else {
             self.cur_fn.code.set(ret_val);
         }
         self.writeback(in cells);
-        if ret == 111 {
+        if ret == RET_OPTION {
             // `Option[H]`: `Some` of a one-field struct holding the handle,
             // `None` for 0.
             let result_ty = self.subst(result);
@@ -375,9 +435,9 @@ impl L {
                 .variant_of(result_ty, self.ctx.syms.some);
             let (none, _none_enum, _none_shape) = self.ctx
                 .variant_of(result_ty, self.ctx.syms.none);
-            let some_box = self.alloc_block(8);
+            let some_box = self.alloc_block(WORD_BYTES);
             self.store(some_box, 0, ret_val);
-            let option_block = self.alloc_block(16);
+            let option_block = self.alloc_block(OPTION_BLOCK_BYTES);
             let tag = self.local();
             self.cur_fn.code.u64_const(some);
             self.cur_fn.code.u64_const(none);

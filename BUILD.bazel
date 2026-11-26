@@ -411,12 +411,8 @@ vesper_crate(
             "//crates/vesper-span:files",
         ],
         # #2210: @vesper/wit-component against wit-component over the
-        # Cranelift imports, and Cranelift programs through the port.
+        # Cranelift imports.
         "test/wasm_cranelift_wit_component": glob(["packages/**"]),
-        "test/wasm_cranelift_imports": glob(["packages/**"]) + [
-            "//crates/vesper-cranelift-sys:test_fixtures",
-            "//packages/vesper-cranelift:files",
-        ],
         # SH5 lane 11 (#1334): @vesper/wit-component against wit-component
         # over the same programs.
         "test/self_host_wit_component": glob([

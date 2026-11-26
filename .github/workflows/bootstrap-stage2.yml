@@ -53,7 +53,9 @@ jobs:
         env:
           WAC_BIN: ${{ runner.temp }}/wac/wac
           WASMTIME_BIN: ${{ runner.temp }}/wasmtime/wasmtime
-        run: cargo test --locked -p vesper --test wasm_cranelift_imports --test wasm_cranelift_wit_component -- --test-threads=1
+        run: cargo test --locked -p vesper-cranelift-component --test wasm_imports -- --test-threads=1
+      - name: Compare the Vesper wit-component's Cranelift imports with wit-component's
+        run: cargo test --locked -p vesper --test wasm_cranelift_wit_component -- --test-threads=1
       - name: Compare Vesper package assembly with the bootstrap loader
         run: cargo test --locked -p vesper --test self_host_check_names_packages -- --test-threads=1
       - name: Compare the hybrid driver with the default compiler
