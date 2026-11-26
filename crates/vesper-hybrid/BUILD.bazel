@@ -90,7 +90,6 @@ vesper_hybrid(
     build_script_env = {
         # Path dependencies are not beside the crate in Bazel.
         "VESPER_HYBRID_OBJECT_PACKAGES_HYBRID_DRIVER": "$(execpath //:std_hash_sys_manifest)",
-        "VESPER_HYBRID_OBJECT_PACKAGES_HYBRID_VERIFY": "$(execpath //:std_hash_sys_manifest)",
     },
     extra_compile_data = ["//:files"],
     # The differential harness runs the default compiler beside the hybrid
