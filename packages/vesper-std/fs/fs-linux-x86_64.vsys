@@ -21,6 +21,7 @@ sys library StdFs (
     const O_CLOEXEC: i32 = 524288;
     const O_DIRECTORY: i32 = 65536;
     const O_NOFOLLOW: i32 = 131072;
+    const O_NONBLOCK: i32 = 2048;
     const AT_FDCWD: i32 = -100;
     const AT_REMOVEDIR: i32 = 512;
     // `errno` values src/sys.ves tests (Win32 errors on Windows).

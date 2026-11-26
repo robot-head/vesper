@@ -18,6 +18,7 @@ thread_local! {
     static LAST_VERIFY_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static LAST_LSP_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static FMT_ERROR: RefCell<String> = const { RefCell::new(String::new()) };
+    static FMT_OUTPUT: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
 /// Commands the Vesper command layers answered (the driver's
@@ -69,28 +70,24 @@ pub mod host {
         i64::try_from(text.len()).unwrap_or(i64::MAX)
     }
 
-    /// One file of `vesper fmt` (`fmt_commands::format_file`: the bounded
-    /// read, the formatter and the checked atomic replace). Flag 1 is
-    /// `--check`, 2 `--recovery`. The status is 0 unchanged, 1 formatted,
-    /// 2 needs formatting or 3 failed (`hc_fmt_error` has the error);
-    /// `stats` gets changed, input bytes, output bytes, whether there is an
-    /// edit count, and the edit count.
+    /// The formatter of one `vesper fmt` file (`fmt_commands::format_text`),
+    /// after the Vesper command layer's bounded read: `text` is its UTF-8
+    /// contents and flag 2 is `--recovery`. The status is 0 formatted (the
+    /// output waits for `hc_fmt_output`) or 3 failed (`hc_fmt_error` has the
+    /// error); `stats` gets changed, output bytes, whether there is an edit
+    /// count, and the edit count.
     ///
     /// # Safety
-    /// `path` is a lent byte slice and `stats` a lent writable slice of
+    /// `text` is a lent byte slice and `stats` a lent writable slice of
     /// `slen` words.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn hc_fmt_file(
-        path: *const u8,
+    pub unsafe extern "C" fn hc_fmt_source(
+        text: *const u8,
         len: usize,
         flags: u32,
         stats: *mut u64,
         slen: usize,
     ) -> u32 {
-        let _flush = FlushOnReturn;
-        // SAFETY: lent for the call; the bytes came from the command line
-        // or from a directory listing.
-        let path = unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(bytes(path, len)) };
         let out: &mut [u64] = if slen == 0 || stats.is_null() {
             &mut []
         } else {
@@ -98,34 +95,45 @@ pub mod host {
             unsafe { std::slice::from_raw_parts_mut(stats, slen) }
         };
         out.iter_mut().for_each(|w| *w = 0);
-        let report =
-            match crate::fmt_commands::format_file(Path::new(path), flags & 1 != 0, flags & 2 != 0)
-            {
-                Ok(report) => report,
-                Err(error) => {
-                    super::FMT_ERROR.with(|e| *e.borrow_mut() = error);
-                    return 3;
-                }
-            };
-        let word = |key: &str| report[key].as_u64();
+        // SAFETY: lent for the call.
+        let Ok(text) = std::str::from_utf8(unsafe { bytes(text, len) }) else {
+            super::FMT_ERROR.with(|e| *e.borrow_mut() = "fmt input must be UTF-8".into());
+            return 3;
+        };
+        let (result, edits) = match crate::fmt_commands::format_text(text, flags & 2 != 0) {
+            Ok(done) => done,
+            Err(error) => {
+                super::FMT_ERROR.with(|e| *e.borrow_mut() = error);
+                return 3;
+            }
+        };
         let values = [
-            u64::from(report["changed"].as_bool().unwrap_or(false)),
-            word("input_bytes").unwrap_or(0),
-            word("output_bytes").unwrap_or(0),
-            u64::from(word("edits").is_some()),
-            word("edits").unwrap_or(0),
+            u64::from(result.changed),
+            result.output.len() as u64,
+            u64::from(edits.is_some()),
+            edits.unwrap_or(0) as u64,
         ];
         for (slot, v) in out.iter_mut().zip(values) {
             *slot = v;
         }
-        match report["status"].as_str() {
-            Some("formatted") => 1,
-            Some("needs_format") => 2,
-            _ => 0,
-        }
+        super::FMT_OUTPUT.with(|o| *o.borrow_mut() = result.output);
+        0
     }
 
-    /// The error of the last failed `hc_fmt_file`.
+    /// The output of the last successful `hc_fmt_source` (copy-out).
+    ///
+    /// # Safety
+    /// `buf` is a lent writable slice.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hc_fmt_output(buf: *mut u8, len: usize) -> i64 {
+        super::FMT_OUTPUT.with(|o| {
+            let o = o.borrow();
+            // SAFETY: lent for the call.
+            unsafe { copy_out(Some(o.as_bytes()), buf, len) }
+        })
+    }
+
+    /// The error of the last failed `hc_fmt_source`.
     ///
     /// # Safety
     /// `buf` is a lent writable slice.
