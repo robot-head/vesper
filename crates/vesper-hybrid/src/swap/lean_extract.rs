@@ -11,7 +11,6 @@ mod lean_extract_binding;
 
 // The extraction input words (#1341), shared with the root package's
 // tests/self_host_lean_extract.rs.
-#[allow(dead_code)]
 #[path = "../../../../tests/common/lean_words.rs"]
 mod lean_words;
 
