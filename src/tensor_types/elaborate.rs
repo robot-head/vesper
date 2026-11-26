@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 /// The built-in declarations. Operation types are the erased ones; the
 /// tensor pass has already checked shapes and dtypes.
-const PRELUDE: &str = include_str!("../preludes/tensor.ves");
+const PRELUDE: &str = include_str!("../../packages/vesper-preludes/preludes/tensor.ves");
 
 /// The built-in declarations, parsed.
 pub fn prelude() -> Vec<Item> {
