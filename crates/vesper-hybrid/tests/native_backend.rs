@@ -1,5 +1,12 @@
-use super::binding;
-use super::machine::integer_block_words;
+//! Differential tests for the opt-in native machine encoder.
+
+#![cfg(all(target_os = "linux", target_arch = "x86_64"))]
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/native_backend.rs"]
+mod binding;
+
 use cranelift_codegen::ir::{
     AbiParam, BlockArg, Endianness, InstBuilder, MemFlags, Opcode, StackSlotData, StackSlotKind,
     Type, condcodes::IntCC, types,
@@ -7,6 +14,7 @@ use cranelift_codegen::ir::{
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
+use vesper::native::machine::integer_block_words;
 
 const ABI_ARGS: usize = 6;
 
@@ -632,6 +640,129 @@ fn integer_backend_matches_cranelift_results() {
         byte_differences, case_count
     );
     // All code pointers have gone out of scope.
+    unsafe { module.free_memory() };
+}
+
+#[test]
+fn integer_backend_matches_paired_system_v_returns() {
+    // Reject a misplaced pair record, a self-reference, and a false-path
+    // result defined on the true path.
+    assert!(binding::x86_64_integer_block(&[1, 0, 37, 0, 0, 0, 0, 8, 0, 0]).is_empty());
+    assert!(binding::x86_64_integer_block(&[1, 0, 37, 1, 0, 0]).is_empty());
+    assert!(
+        binding::x86_64_integer_block(&[1, 0, 28, 0, 0, 0, 0, 8, 0, 0, 29, 0, 2, 0, 37, 2, 0, 0])
+            .is_empty()
+    );
+
+    #[derive(Clone, Copy, Debug)]
+    enum Case {
+        Exchange,
+        MoveOrder,
+        Duplicate,
+        Branch,
+        Spill,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[repr(C)]
+    struct Pair(u64, u64);
+    type Fn6 = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64) -> Pair;
+
+    let isa = cranelift_native::builder()
+        .unwrap()
+        .finish(cranelift_codegen::settings::Flags::new(
+            cranelift_codegen::settings::builder(),
+        ))
+        .unwrap();
+    let mut module = JITModule::new(JITBuilder::with_isa(
+        isa,
+        cranelift_module::default_libcall_names(),
+    ));
+    let mut signature = module.make_signature();
+    signature.params = vec![AbiParam::new(types::I64); ABI_ARGS];
+    signature.returns = vec![AbiParam::new(types::I64); 2];
+    for (index, case) in [
+        Case::Exchange,
+        Case::MoveOrder,
+        Case::Duplicate,
+        Case::Branch,
+        Case::Spill,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut context = module.make_context();
+        context.func.signature = signature.clone();
+        let mut builder_context = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let [a, b, c, _, e, f] = *builder.block_params(entry) else {
+            unreachable!();
+        };
+        let pair = match case {
+            Case::Exchange => [c, builder.ins().iconst(types::I64, -17)],
+            Case::MoveOrder => [a, builder.ins().iconst(types::I64, 41)],
+            Case::Duplicate => [c, c],
+            Case::Branch => {
+                let yes = builder.create_block();
+                let no = builder.create_block();
+                let high = builder.ins().iadd(a, b);
+                builder.ins().brif(a, yes, &[], no, &[]);
+                builder.switch_to_block(yes);
+                builder.ins().return_(&[c, high]);
+                builder.switch_to_block(no);
+                [f, e]
+            }
+            Case::Spill => {
+                let mut terms: Vec<_> = (1..=12).map(|n| builder.ins().iadd_imm(a, n)).collect();
+                let high = terms.pop().unwrap();
+                let low = terms
+                    .into_iter()
+                    .fold(b, |sum, term| builder.ins().iadd(sum, term));
+                [low, high]
+            }
+        };
+        builder.ins().return_(&pair);
+        builder.seal_all_blocks();
+        builder.finalize();
+
+        let request = integer_block_words(&context.func).unwrap();
+        let bytes = binding::x86_64_integer_block(&request);
+        assert!(!bytes.is_empty(), "{case:?}");
+        if matches!(case, Case::Exchange) {
+            assert!(bytes.ends_with(&[0x48, 0x87, 0xd0, 0xc3]));
+        }
+        let baseline = module
+            .declare_function(&format!("base_{index}"), Linkage::Local, &signature)
+            .unwrap();
+        let candidate = module
+            .declare_function(&format!("port_{index}"), Linkage::Local, &signature)
+            .unwrap();
+        module.define_function(baseline, &mut context).unwrap();
+        let alignment = u64::from(module.isa().function_alignment().minimum);
+        module
+            .define_function_bytes(candidate, alignment, &bytes, &[])
+            .unwrap();
+        module.finalize_definitions().unwrap();
+        // On System V the C pair of u64 fields uses the two registers of the
+        // CLIF signature. The module owns both pointers for these calls.
+        let baseline: Fn6 = unsafe { std::mem::transmute(module.get_finalized_function(baseline)) };
+        let candidate: Fn6 =
+            unsafe { std::mem::transmute(module.get_finalized_function(candidate)) };
+        for [a, b, c, d, e, f] in [
+            [0, 2, 3, 5, 7, 11],
+            [13, 17, 19, 23, 29, 31],
+            [u64::MAX; ABI_ARGS],
+        ] {
+            assert_eq!(
+                unsafe { candidate(a, b, c, d, e, f) },
+                unsafe { baseline(a, b, c, d, e, f) },
+                "{case:?}"
+            );
+        }
+    }
     unsafe { module.free_memory() };
 }
 

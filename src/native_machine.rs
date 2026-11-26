@@ -50,6 +50,7 @@ enum IntegerOp {
     StackStoreWord = 34,
     StackStoreDword = 35,
     StackStoreQword = 36,
+    ReturnPair = 37,
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
@@ -65,6 +66,7 @@ const RETURN_VALUE: usize = 1;
 const HEADER_WORDS: usize = 2;
 const INSTRUCTION_WORDS: usize = 4;
 const GP_ARGUMENTS: usize = 6;
+const GP_RESULTS: usize = 2;
 
 fn binary_op(opcode: Opcode) -> Option<IntegerOp> {
     Some(match opcode {
@@ -402,19 +404,27 @@ impl IntegerBlocks<'_> {
         }
     }
 
-    fn returned(&self, terminator: Inst, values: &Values) -> Option<u64> {
+    fn returned(&self, terminator: Inst, values: &Values) -> Option<(u64, Option<u64>)> {
         let dfg = &self.function.dfg;
         if dfg.insts[terminator].opcode() != Opcode::Return {
             return None;
         }
-        let [value] = *dfg.inst_args(terminator) else {
-            return None;
-        };
-        let value = dfg.resolve_aliases(value);
-        if dfg.value_type(value) != types::I64 {
+        let arguments = dfg.inst_args(terminator);
+        if arguments.len() != self.function.signature.returns.len() {
             return None;
         }
-        values[value]
+        let result = |value| {
+            let value = dfg.resolve_aliases(value);
+            if dfg.value_type(value) != types::I64 {
+                return None;
+            }
+            values[value]
+        };
+        match *arguments {
+            [low] => Some((result(low)?, None)),
+            [low, high] => Some((result(low)?, Some(result(high)?))),
+            _ => None,
+        }
     }
 
     // Each arm follows its jump chain to a return. If the paths rejoin, the
@@ -426,7 +436,7 @@ impl IntegerBlocks<'_> {
         arms: [BlockCall; 2],
         values: Values,
         mut visited: SecondaryMap<Block, bool>,
-    ) -> Option<u64> {
+    ) -> Option<(u64, Option<u64>)> {
         integer_width(self.value_type(condition))?;
         let condition = values[self.function.dfg.resolve_aliases(condition)]?;
         self.append(IntegerOp::BranchZero, [condition, 0, 0]);
@@ -435,8 +445,8 @@ impl IntegerBlocks<'_> {
         let mut yes_visited = visited.clone();
         let yes_block = self.edge(yes_edge, &mut yes_values)?;
         let yes_return = self.follow_jumps(yes_block, &mut yes_values, &mut yes_visited)?;
-        let yes = self.returned(yes_return, &yes_values)?;
-        self.append(IntegerOp::EarlyReturn, [yes, 0, 0]);
+        let (yes_low, yes_high) = self.returned(yes_return, &yes_values)?;
+        self.append(IntegerOp::EarlyReturn, [yes_low, yes_high.unwrap_or(0), 0]);
 
         let mut no_values = values;
         let no_block = self.edge(no_edge, &mut no_values)?;
@@ -457,6 +467,8 @@ impl IntegerBlocks<'_> {
 /// A single BranchZero may skip to the instruction after EarlyReturn. These
 /// records also leave unreferenced slots, and the false arm uses the header's
 /// return value. Neither arm may read values defined in the other.
+/// A trailing ReturnPair gives the second result ID and makes EarlyReturn's
+/// right operand a second result ID as well.
 /// Leading StackSlot records declare frame slots by size and alignment.
 /// Stack addresses and accesses use a slot ordinal and an offset within the slot.
 pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
@@ -464,10 +476,12 @@ pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
     let arity = signature.params.len();
     if signature.call_conv != CallConv::SystemV
         || arity > GP_ARGUMENTS
-        || signature.returns != [AbiParam::new(types::I64)]
+        || signature.returns.is_empty()
+        || signature.returns.len() > GP_RESULTS
         || signature
             .params
             .iter()
+            .chain(&signature.returns)
             .any(|param| *param != AbiParam::new(types::I64))
         || !function.dynamic_stack_slots.is_empty()
     {
@@ -503,7 +517,7 @@ pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
     }
     let mut visited = SecondaryMap::new();
     let terminator = blocks.follow_jumps(block, &mut values, &mut visited)?;
-    let result = match function.dfg.insts[terminator] {
+    let (low, high) = match function.dfg.insts[terminator] {
         InstructionData::Brif {
             opcode: Opcode::Brif,
             arg,
@@ -512,7 +526,10 @@ pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
         _ => blocks.returned(terminator, &values)?,
     };
     blocks.words[ARGUMENT_COUNT] = arity as u64;
-    blocks.words[RETURN_VALUE] = result;
+    blocks.words[RETURN_VALUE] = low;
+    if let Some(high) = high {
+        blocks.append(IntegerOp::ReturnPair, [high, 0, 0]);
+    }
     Some(blocks.words)
 }
 

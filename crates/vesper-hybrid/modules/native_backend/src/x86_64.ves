@@ -1,7 +1,7 @@
 // Physical registers and instructions for the x86-64 backend.
 pub const RAX: u8 = 0;
 const RCX: u8 = 1;
-const RDX: u8 = 2;
+pub const RDX: u8 = 2;
 pub const RSP: u8 = 4;
 const RSI: u8 = 6;
 const RDI: u8 = 7;
@@ -93,6 +93,7 @@ pub const CC_G: u8 = 15;
 pub copy enum Instruction {
     Immediate(u8, u64),
     Move(u8, u8),
+    Exchange(u8, u8),
     Binary(u8, u8, u8, u64),
     Multiply(u8, u8, u64),
     Unary(u8, u8, u64),
@@ -337,6 +338,7 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
                 binary(inout out, MOV_RM_R64, destination, source, true);
             }
         },
+        Instruction::Exchange(left, right) => binary(inout out, XCHG_RM_R64, left, right, true),
         Instruction::Binary(opcode, destination, source, width) => {
             binary(inout out, opcode, destination, source, width == QWORD_BITS);
             // Low-width bitwise operations preserve the zeroed upper bits.

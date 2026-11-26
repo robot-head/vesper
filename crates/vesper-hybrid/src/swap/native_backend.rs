@@ -38,7 +38,3 @@ pub(super) fn report() {
         ENCODED.load(Relaxed),
     );
 }
-
-#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
-#[path = "native_backend/differential.rs"]
-mod differential;

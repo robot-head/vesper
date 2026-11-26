@@ -1,7 +1,7 @@
 use self::x86_64::{
     ADD_RM_R64, AND_RM_R64, ARGUMENTS, BYTE_BITS, DWORD_BITS, QWORD_BITS, WORD_BITS, CC_A, CC_AE,
     CC_B, CC_BE, CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, Instruction, NEG_EXTENSION, NOT_EXTENSION,
-    OR_RM_R64, R10, R11, RAX, RSP, SAR_EXTENSION, SHL_EXTENSION, SHR_EXTENSION, SUB_RM_R64,
+    OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION, SHL_EXTENSION, SHR_EXTENSION, SUB_RM_R64,
     UNASSIGNED, XOR_RM_R64, arg_register, emit, find_register, patch_forward_branch, register_bit
 };
 
@@ -43,6 +43,7 @@ const STACK_STORE_BYTE: u64 = 33;
 const STACK_STORE_WORD: u64 = 34;
 const STACK_STORE_DWORD: u64 = 35;
 const STACK_STORE_QWORD: u64 = 36;
+const RETURN_PAIR: u64 = 37;
 
 const EQUAL: u64 = 0;
 const NOT_EQUAL: u64 = 1;
@@ -64,6 +65,7 @@ const RIGHT: u64 = 2;
 const EXTRA: u64 = 3;
 const RECORD_WORDS: u64 = 4;
 const NEVER_READ: u64 = 0;
+const NO_SECOND_RESULT: u64 = 0xffffffffffffffff;
 const DISP32_MASK: u64 = 0xffffffff;
 const STACK_ALIGNMENT: u64 = 16;
 const RETURN_ADDRESS_BYTES: u64 = 8;
@@ -214,7 +216,7 @@ fn is_stack_operation(op: u64) -> bool {
 }
 
 fn has_no_result(op: u64) -> bool {
-    (op >= STORE_BYTE && op <= STACK_SLOT) || is_stack_store(op)
+    (op >= STORE_BYTE && op <= STACK_SLOT) || is_stack_store(op) || op == RETURN_PAIR
 }
 
 fn store_width(op: u64) -> u64 {
@@ -253,15 +255,20 @@ fn stack_displacement(in frame: FrameLayout, in record: Record) -> Option[u32] {
 }
 
 fn reads_left(op: u64) -> bool {
-    op != CONSTANT && op != STACK_SLOT && op != STACK_ADDRESS && op != STACK_LOAD
+    op != CONSTANT
+        && op != STACK_SLOT
+        && op != STACK_ADDRESS
+        && op != STACK_LOAD
+        && op != RETURN_PAIR
 }
 
-fn reads_right(op: u64) -> bool {
+fn reads_right(op: u64, paired: bool) -> bool {
     (op >= ADD && op <= XOR)
         || is_comparison(op)
         || op == SELECT
         || is_register_shift(op)
         || is_store(op)
+        || (op == EARLY_RETURN && paired)
 }
 
 // A shift must keep its count until the destructive instruction reads it.
@@ -291,6 +298,7 @@ fn find_last_reads(
     arguments: u64,
     count: u64,
     result: u64,
+    second: u64,
     inout frame: FrameLayout
 ) -> Option[ChunkSeq[u64]] {
     let values = wrapping_add(arguments, count);
@@ -299,14 +307,19 @@ fn find_last_reads(
         reads.push(NEVER_READ);
     }
     let _ = reads.try_set(result, values);
+    let paired = second != NO_SECOND_RESULT;
+    if paired {
+        let _ = reads.try_set(second, values);
+    }
     let mut early_return_at = NEVER_READ;
     let mut has_branch = false;
     for reverse_index in 0..count {
         let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
-        if record.op > STACK_STORE_QWORD
+        if record.op > RETURN_PAIR
             || (record.op == STACK_SLOT && index >= frame.slots.len())
+            || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
         {
             return Option::None;
         }
@@ -361,7 +374,7 @@ fn find_last_reads(
             return Option::None;
         }
         let has_left = reads_left(record.op);
-        let has_right = reads_right(record.op);
+        let has_right = reads_right(record.op, paired);
         let has_third = record.op == SELECT;
         if (has_left && record.left >= value)
             || (has_right && record.right >= value)
@@ -400,7 +413,9 @@ fn without_register(used: u32, register: u8) -> u32 {
 }
 
 fn emits_instruction(op: u64, result_live: bool) -> bool {
-    op != STACK_SLOT && (result_live || op == LOAD || op == STACK_LOAD || has_no_result(op))
+    op != STACK_SLOT
+        && op != RETURN_PAIR
+        && (result_live || op == LOAD || op == STACK_LOAD || has_no_result(op))
 }
 
 fn dying_register(
@@ -427,6 +442,7 @@ fn allocate(
     arguments: u64,
     count: u64,
     explicit_frame: u64,
+    paired: bool,
     spills: bool
 ) -> Option[Allocation] {
     let mut locations = ChunkSeq::with_capacity[Location](wrapping_add(arguments, count));
@@ -457,7 +473,7 @@ fn allocate(
         } else {
             UNASSIGNED
         };
-        let right = if reads_right(record.op) {
+        let right = if reads_right(record.op, paired) {
             dying_register(in reads, in locations, record.right, value)
         } else {
             UNASSIGNED
@@ -541,9 +557,34 @@ fn operation(in record: Record, destination: u8, source: u8) -> Instruction {
     }
 }
 
-fn emit_return(inout output: ChunkSeq[u8], in location: Location, frame_size: u32) {
-    let register = materialize(inout output, in location, RAX);
-    emit(inout output, in Instruction::Move(RAX, register));
+fn in_register(in location: Location, expected: u8) -> bool {
+    match location {
+        Location::Register(reg) => reg == expected,
+        _ => false,
+    }
+}
+
+fn move_return(inout output: ChunkSeq[u8], in location: Location, destination: u8) {
+    let source = materialize(inout output, in location, destination);
+    if source != UNASSIGNED {
+        emit(inout output, in Instruction::Move(destination, source));
+    }
+}
+
+fn emit_return(inout output: ChunkSeq[u8], in low: Location, in high: Location, frame_size: u32) {
+    // Treat the ABI return registers as a parallel copy. Moving the high
+    // result first preserves RAX when it holds that result.
+    if in_register(in high, RAX) {
+        if in_register(in low, RDX) {
+            emit(inout output, in Instruction::Exchange(RAX, RDX));
+        } else {
+            move_return(inout output, in high, RDX);
+            move_return(inout output, in low, RAX);
+        }
+    } else {
+        move_return(inout output, in low, RAX);
+        move_return(inout output, in high, RDX);
+    }
     emit(inout output, in Instruction::FrameLeave(frame_size));
     emit(inout output, in Instruction::Return);
 }
@@ -562,18 +603,45 @@ pub fn encode_block(in words: Slice[u64]) -> ChunkSeq[u8] {
     {
         return ChunkSeq::new[u8]();
     }
+    let second = if count == 0 {
+        NO_SECOND_RESULT
+    } else {
+        let tail = read_record(in words, wrapping_sub(count, 1));
+        if tail.op == RETURN_PAIR {
+            tail.left
+        } else {
+            NO_SECOND_RESULT
+        }
+    };
+    let paired = second != NO_SECOND_RESULT;
     let mut frame = match frame_layout(in words, count) {
         Option::Some(layout) => layout,
         Option::None => return ChunkSeq::new[u8](),
     };
-    let reads = match find_last_reads(in words, arguments, count, result, inout frame) {
+    let reads = match find_last_reads(in words, arguments, count, result, second, inout frame) {
         Option::Some(last) => last,
         Option::None => return ChunkSeq::new[u8](),
     };
     let explicit_frame = if frame.used { frame.size } else { 0 };
-    let allocation = match allocate(in words, in reads, arguments, count, explicit_frame, false) {
+    let allocation = match allocate(
+        in words,
+        in reads,
+        arguments,
+        count,
+        explicit_frame,
+        paired,
+        false
+    ) {
         Option::Some(result) => result,
-        Option::None => match allocate(in words, in reads, arguments, count, explicit_frame, true) {
+        Option::None => match allocate(
+            in words,
+            in reads,
+            arguments,
+            count,
+            explicit_frame,
+            paired,
+            true
+        ) {
             Option::Some(result) => result,
             Option::None => return ChunkSeq::new[u8](),
         },
@@ -591,7 +659,22 @@ pub fn encode_block(in words: Slice[u64]) -> ChunkSeq[u8] {
         if !emits_instruction(record.op, result_live) {
             continue;
         }
-        let has_right = reads_right(record.op);
+        if record.op == EARLY_RETURN {
+            let low = assigned(in allocation.locations, record.left);
+            let high = if paired {
+                assigned(in allocation.locations, record.right)
+            } else {
+                Location::Absent
+            };
+            // Values in scope on the false path retain their homes. This
+            // return and its stack adjustment run only on the true path.
+            emit_return(inout output, in low, in high, frame_size);
+            if !patch_forward_branch(inout output, branch_end) {
+                return ChunkSeq::new[u8]();
+            }
+            continue;
+        }
+        let has_right = reads_right(record.op, paired);
         let left = if reads_left(record.op) {
             let location = assigned(in allocation.locations, record.left);
             materialize(inout output, in location, LEFT_SCRATCH)
@@ -620,13 +703,6 @@ pub fn encode_block(in words: Slice[u64]) -> ChunkSeq[u8] {
         if record.op == BRANCH_ZERO {
             emit(inout output, in Instruction::BranchZero(left));
             branch_end = output.len();
-        } else if record.op == EARLY_RETURN {
-            // Values in scope on the false path retain their homes. This
-            // return and its stack adjustment run only on the true path.
-            emit_return(inout output, in Location::Register(left), frame_size);
-            if !patch_forward_branch(inout output, branch_end) {
-                return ChunkSeq::new[u8]();
-            }
         } else if is_store(record.op) {
             emit(
                 inout output,
@@ -699,7 +775,12 @@ pub fn encode_block(in words: Slice[u64]) -> ChunkSeq[u8] {
             _ => {},
         };
     }
-    let returned = assigned(in allocation.locations, result);
-    emit_return(inout output, in returned, frame_size);
+    let low = assigned(in allocation.locations, result);
+    let high = if paired {
+        assigned(in allocation.locations, second)
+    } else {
+        Location::Absent
+    };
+    emit_return(inout output, in low, in high, frame_size);
     output
 }
