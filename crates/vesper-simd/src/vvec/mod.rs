@@ -65,6 +65,7 @@ macro_rules! dispatch {
 pub mod kernels;
 #[cfg(target_arch = "riscv64")]
 mod rvv;
+mod scalar;
 #[cfg(target_arch = "aarch64")]
 mod sve;
 
@@ -209,7 +210,7 @@ pub trait IsaProfile: Copy + fmt::Debug + Eq + sealed::Sealed {
         dispatch!(Self::ISA,
             sve => sve::while_lt(n, &mut bits),
             rvv => rvv::while_lt(n, self.lanes(), &mut bits),
-            scalar => prefix_bits(n, &mut bits),
+            scalar => scalar::prefix_bits(n, &mut bits),
         );
         VMask {
             profile: *self,
@@ -220,19 +221,6 @@ pub trait IsaProfile: Copy + fmt::Debug + Eq + sealed::Sealed {
     /// Active lanes of `mask`: how far a strip-mined loop advances.
     fn count(&self, mask: &VMask<Self>) -> usize {
         mask.count_ones()
-    }
-}
-
-fn prefix_bits(n: usize, bits: &mut [u64; MASK_WORDS]) {
-    for (i, w) in bits.iter_mut().enumerate() {
-        let lo = i * 64;
-        *w = if n >= lo + 64 {
-            u64::MAX
-        } else if n > lo {
-            (1u64 << (n - lo)) - 1
-        } else {
-            0
-        };
     }
 }
 
@@ -398,26 +386,22 @@ impl<P: IsaProfile> VMask<P> {
     /// Combine lane-wise, keeping `self`'s profile. Two scalar profiles of
     /// different widths share a type, so the result is clipped to `self`'s
     /// lanes to keep the invariant that no bit lies past them.
-    fn zip(self, other: Self, f: impl Fn(u64, u64) -> u64) -> Self {
-        let mut keep = [0u64; MASK_WORDS];
-        prefix_bits(self.profile.lanes(), &mut keep);
+    fn zip(self, other: Self, op: MaskOp) -> Self {
         let mut bits = self.bits;
-        for ((a, b), k) in bits.iter_mut().zip(other.bits).zip(keep) {
-            *a = f(*a, b) & k;
-        }
+        scalar::mask_zip(op, self.profile.lanes(), &mut bits, &other.bits);
         Self { bits, ..self }
     }
     pub fn and(self, other: Self) -> Self {
-        self.zip(other, |a, b| a & b)
+        self.zip(other, MaskOp::And)
     }
     pub fn or(self, other: Self) -> Self {
-        self.zip(other, |a, b| a | b)
+        self.zip(other, MaskOp::Or)
     }
     pub fn xor(self, other: Self) -> Self {
-        self.zip(other, |a, b| a ^ b)
+        self.zip(other, MaskOp::Xor)
     }
     pub fn and_not(self, other: Self) -> Self {
-        self.zip(other, |a, b| a & !b)
+        self.zip(other, MaskOp::AndNot)
     }
 }
 
@@ -477,7 +461,7 @@ impl<P: IsaProfile> VVec<P> {
         dispatch!(P::ISA,
             sve => sve::splat(value, n, &mut lanes),
             rvv => rvv::splat(value, n, &mut lanes),
-            scalar => lanes[..n].fill(value),
+            scalar => scalar::splat(value, n, &mut lanes),
         );
         Self { profile, lanes }
     }
@@ -505,11 +489,7 @@ impl<P: IsaProfile> VVec<P> {
         dispatch!(P::ISA,
             sve => sve::load_masked(src.as_ptr(), &mask.bits, passthru, n, &mut lanes),
             rvv => rvv::load_masked(src.as_ptr(), &mask.bits, passthru, n, &mut lanes),
-            scalar => {
-                for (i, lane) in lanes[..n].iter_mut().enumerate() {
-                    *lane = if mask.test(i) { src[i] } else { passthru };
-                }
-            },
+            scalar => scalar::load_masked(src, &mask.bits, passthru, n, &mut lanes),
         );
         Ok(Self { profile, lanes })
     }
@@ -531,13 +511,7 @@ impl<P: IsaProfile> VVec<P> {
         dispatch!(P::ISA,
             sve => sve::store_masked(dst.as_mut_ptr(), &mask.bits, n, &self.lanes),
             rvv => rvv::store_masked(dst.as_mut_ptr(), &mask.bits, n, &self.lanes),
-            scalar => {
-                for (i, lane) in self.lanes[..n].iter().enumerate() {
-                    if mask.test(i) {
-                        dst[i] = *lane;
-                    }
-                }
-            },
+            scalar => scalar::store_masked(dst, &mask.bits, n, &self.lanes),
         );
         Ok(())
     }
@@ -548,13 +522,7 @@ impl<P: IsaProfile> VVec<P> {
         dispatch!(P::ISA,
             sve => sve::compare(op, n, &self.lanes, &other.lanes, &mut bits),
             rvv => rvv::compare(op, n, &self.lanes, &other.lanes, &mut bits),
-            scalar => {
-                for i in 0..n {
-                    if op.eval(self.lanes[i], other.lanes[i]) {
-                        bits[i / 64] |= 1 << (i % 64);
-                    }
-                }
-            },
+            scalar => scalar::compare(op, n, &self.lanes, &other.lanes, &mut bits),
         );
         VMask {
             profile: self.profile,
@@ -578,11 +546,7 @@ impl<P: IsaProfile> VVec<P> {
         dispatch!(P::ISA,
             sve => sve::binary(op, n, &self.lanes, &other.lanes, &mut lanes),
             rvv => rvv::binary(op, n, &self.lanes, &other.lanes, &mut lanes),
-            scalar => {
-                for i in 0..n {
-                    lanes[i] = op.eval(self.lanes[i], other.lanes[i]);
-                }
-            },
+            scalar => scalar::binary(op, n, &self.lanes, &other.lanes, &mut lanes),
         );
         Self {
             profile: self.profile,
@@ -609,17 +573,19 @@ impl<P: IsaProfile> VVec<P> {
         dispatch!(P::ISA,
             sve => sve::reduce_xor(n, &self.lanes),
             rvv => rvv::reduce_xor(n, &self.lanes),
-            scalar => self.lanes[..n].iter().fold(0, |a, b| a ^ b),
+            scalar => scalar::reduce_xor(n, &self.lanes),
         )
     }
 }
 
+// The discriminants are the Vesper port's operation codes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code, reason = "each op is used by some backend")]
 enum CmpOp {
-    Eq,
-    LtU,
+    Eq = 0,
+    LtU = 1,
 }
+#[cfg_attr(all(feature = "vesper-port", not(test)), allow(dead_code))]
 impl CmpOp {
     fn eval(self, a: u8, b: u8) -> bool {
         match self {
@@ -631,11 +597,12 @@ impl CmpOp {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BinOp {
-    Xor,
-    And,
-    Or,
-    Add,
+    Xor = 0,
+    And = 1,
+    Or = 2,
+    Add = 3,
 }
+#[cfg_attr(all(feature = "vesper-port", not(test)), allow(dead_code))]
 impl BinOp {
     fn eval(self, a: u8, b: u8) -> u8 {
         match self {
@@ -643,6 +610,26 @@ impl BinOp {
             BinOp::And => a & b,
             BinOp::Or => a | b,
             BinOp::Add => a.wrapping_add(b),
+        }
+    }
+}
+
+/// Lane-wise mask logic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MaskOp {
+    And = 0,
+    Or = 1,
+    Xor = 2,
+    AndNot = 3,
+}
+#[cfg_attr(all(feature = "vesper-port", not(test)), allow(dead_code))]
+impl MaskOp {
+    fn eval(self, a: u64, b: u64) -> u64 {
+        match self {
+            MaskOp::And => a & b,
+            MaskOp::Or => a | b,
+            MaskOp::Xor => a ^ b,
+            MaskOp::AndNot => a & !b,
         }
     }
 }

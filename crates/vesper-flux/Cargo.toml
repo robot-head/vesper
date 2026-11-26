@@ -5,18 +5,22 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Bounded checked host DBSP circuits, owned frontier holds, LSM-spine CAS checkpoints, a durable input log, an exactly-once Quarry sink and simulated multi-worker recovery and rescaling"
 
-# The Z-set kernels, the frontier, the accumulator, the CDC decoder and the
-# input log's frame codec are the Vesper port: build.rs links the Loom
-# package in vesper/ (library `flux`). It replaced their Rust code once it
-# matched it in tests and beat it on every ABBA workload (#1069, #1401).
-# Checkpoints, the cluster driver and Kafka are still Rust, over the
-# kernels. vesper-flux is outside `cargo tree -p vesper -e normal,build`, so
+# The Z-set kernels, the frontier, the accumulator, the CDC decoder, the
+# input log's frame codec, the checkpoint codecs and the Kafka wire codecs
+# (record batches, every request and response, the consumer protocol) are
+# the Vesper port: build.rs links the Loom package in vesper/ (library
+# `flux`). It replaced their Rust code once it matched it in tests and ran
+# within the ABBA bar (#1069, #1401). The cluster driver, durable state and
+# Kafka's sockets, TLS and SASL are still Rust, over the port. vesper-flux is outside `cargo tree -p vesper -e normal,build`, so
 # it needs no seed copy.
 
 [features]
 # A deliberately wrong Vesper build, one change per ported kernel: the port
 # test runs must fail (scripts/test-port-harness.sh asserts it).
 vesper-port-divergent = []
+# The Rust Kafka wire codecs the port replaced (src/kafka_reference.rs),
+# built for the `kafka_wire` ABBA workload's Rust arm (examples/abba.rs).
+abba-reference = []
 
 [dependencies]
 vesper-port-abi = { path = "../vesper-port-abi" }

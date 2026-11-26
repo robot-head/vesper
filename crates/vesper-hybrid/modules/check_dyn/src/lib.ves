@@ -1,0 +1,20 @@
+// @vesper/hybrid-check-dyn: `dyn_fn::lower` and `dyn_trait::lower`
+// served from Vesper in the hybrid Stage 2 build (front-end wiring slice
+// 4, #1976). Each takes the module as the `ast` section of the
+// `parse_words` stream and returns the outcome that
+// packages/vesper-check-dyn/src/lib.ves documents.
+
+// @export abi 4
+
+use @vesper/check-dyn::{
+    dyn_fn_bytes,
+    dyn_trait_bytes
+};
+
+pub fn dyn_fn_lower(in module: Slice[u8], base: u64) -> ChunkSeq[u64] {
+    dyn_fn_bytes(in module, base)
+}
+
+pub fn dyn_trait_lower(in module: Slice[u8]) -> ChunkSeq[u64] {
+    dyn_trait_bytes(in module)
+}

@@ -12,13 +12,7 @@ pub fn scan<P: IsaProfile>(profile: &P, data: &[u8], delim: u8) -> ScanResult {
     let (matches, xor) = dispatch!(P::ISA,
         sve => super::sve::scan(data.as_ptr(), data.len(), delim),
         rvv => super::rvv::scan(data.as_ptr(), data.len(), delim),
-        scalar => scalar_scan(data, delim),
+        scalar => super::scalar::scan(data, delim),
     );
     ScanResult { matches, xor }
-}
-
-fn scalar_scan(data: &[u8], delim: u8) -> (u64, u8) {
-    data.iter().fold((0, 0), |(count, xor), byte| {
-        (count + u64::from(*byte == delim), xor ^ byte)
-    })
 }

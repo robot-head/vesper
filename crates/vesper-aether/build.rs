@@ -90,7 +90,7 @@ const DIVERGENT_EDITS: &[(&str, &str)] = &[
     ("    if count >= max_desc {", "    if count > max_desc {"),
     // seccomp: allow-list validator accepts an unaligned seccomp_data load offset.
     (
-        "        if k % 4 != 0 || k >= SECCOMP_DATA_BYTES {",
+        "        if (k & 3) != 0 || k >= SECCOMP_DATA_BYTES {",
         "        if k >= SECCOMP_DATA_BYTES {",
     ),
     // guest_mem: touching regions count as overlapping.

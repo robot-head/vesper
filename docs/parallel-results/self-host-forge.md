@@ -329,3 +329,43 @@ fragment); the rest is the matcher's fixed cost per call (two lexes and
 the tables). The module flip is measured on the whole expansion at the
 swap (part 5), where each round's whole-source surface parse
 (0.35x) dominates.
+
+## Part 4b-1 to 4b-3: template skeleton, template-scopes parse and AST
+
+`template::render` (crates/vesper-syntax/src/sugar_expand/template.rs)
+first builds a skeleton of the rule's template: holes become markers and
+repetitions are unrolled. `flow::render` then parses that skeleton with
+`parser::rust_parse`, falling back to `parser::parse_template_scopes`, and
+walks the AST to rename template binders and evaluate captures once.
+These three parts port everything that walk needs, but not the walk
+itself (part 4b-4).
+
+- **4b-1, skeleton** (`packages/vesper-sugar/src/template.ves`): ports
+  `parse`, `Skeleton::emit` and `operand_span`. It reads the matcher's
+  capture words in place, and its step and byte limits refuse at the
+  same points as Rust's. The Rust test hook is
+  `sugar_expand::template_skeleton_words`.
+- **4b-2, template-scopes CST** (`@vesper/front` `parse_template_tables`):
+  in this profile, phrase bodies and tagged payloads parse as blocks, and
+  raw phrase headers and nested pattern sugar are errors. To the core
+  parser, a phrase is a block of its operands, which affects match-arm
+  commas and expression heights. The Rust test hook is
+  `parser::parse_template_cst`.
+- **4b-3, template-scopes AST** (`@vesper/ast` `lower_template_source`,
+  `ast_template_dump`):
+  - Sugar and macro declarations and item phrases produce no item.
+  - A phrase becomes a block of its operands, a tagged literal a tuple of
+    its block, a pattern phrase a wildcard, and a sugar operator a binary
+    expression.
+  - Delimited expressions reopen struct literals.
+  - The lowering reads the CST to tell which surface construct it is at.
+  - The lowering's binary levels now match Rust's.
+
+| Test | Cases | Result |
+|---|---|---|
+| `self_host_sugar` `skeleton_matches_on_the_template_examples` | 48 hand-written templates (repetitions, splices, shared holes, grouping, every refusal) × 4 byte limits × tail | 0 differences |
+| `self_host_sugar` `skeleton_matches_on_the_sugar_test_suites` | the rules of the sugar test suites against their uses (732 renders) | 0 differences |
+| `self_host_sugar` `skeleton_matches_on_the_fuzzed_corpus` | 40,000 rounds locally (CI 4,000) | 0 differences |
+| `self_host_front_v2` surface tests with `compare_template` | the sugar corpus, 20,000 fuzzed sources locally, and depth-limit cases, both bare and wrapped as `flow::render` wraps them | 0 differences |
+| `self_host_ast` `template_scopes_*` | 899 template sources, every repository `.ves` file, and 60,000 fuzzed sources locally (CI 3,000) | 0 differences |
+| core AST and front end differentials | after the changes | pass |

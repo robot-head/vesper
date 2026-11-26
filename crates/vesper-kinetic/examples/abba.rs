@@ -34,6 +34,8 @@
 //!   solver on the last manifolds.
 //! - `world-substeps`: the `pile-lbvh` pile with friction, restitution and
 //!   joint chains: 2 ticks, then 16 more runs of the next tick's substeps.
+//! - `soft-step`: a tetrahedral soft box (8 x 4 x 8 cells, 16 substeps)
+//!   dropped on a frictional ground: 12 ticks.
 
 use std::time::Instant;
 use vesper_bench::{PairedSample, analyze_pairs};
@@ -49,8 +51,8 @@ macro_rules! workloads {
             };
             use $s::{
                 Body, BroadphaseMode, Colorer, ConstraintBodies, ContactMaterial,
-                DistanceConstraint, MultiColorer, SphereCollider, SweepAndPrune, World,
-                WorldConfig, crmath, fastmath, gjk, morton,
+                DistanceConstraint, MultiColorer, SoftConfig, SoftWorld, SphereCollider,
+                SweepAndPrune, World, WorldConfig, crmath, fastmath, gjk, morton,
             };
 
             fn rng(state: &mut u64) -> u64 {
@@ -393,6 +395,27 @@ macro_rules! workloads {
                 u64::from(w.header().world_state_blake3[0])
             }
 
+            /// A tetrahedral soft box dropped on a frictional ground: 12
+            /// ticks of 16 substeps.
+            pub fn soft_step(_: u64) -> u64 {
+                let (particles, constraints) = SoftWorld::tetrahedral_box(
+                    [0.0, 0.1, 0.0],
+                    0.125,
+                    [8, 4, 8],
+                    4.0,
+                    1.0e-4,
+                    1.0e-5,
+                )
+                .unwrap();
+                let mut w =
+                    SoftWorld::new(SoftConfig::default(), &particles, &constraints).unwrap();
+                let mut last = None;
+                for _ in 0..12 {
+                    last = Some(w.step().unwrap());
+                }
+                u64::from(last.unwrap().blake3[0])
+            }
+
             pub fn pile_lbvh(_: u64) -> u64 {
                 pile(1)
             }
@@ -635,7 +658,7 @@ workloads!(port_build, vesper_kinetic);
 
 type Work = fn(u64) -> u64;
 
-const WORKLOADS: [(&str, Work, Work); 15] = [
+const WORKLOADS: [(&str, Work, Work); 16] = [
     ("morton", rust_build::morton, port_build::morton),
     ("fastmath", rust_build::fastmath, port_build::fastmath),
     ("crmath", rust_build::crmath, port_build::crmath),
@@ -667,6 +690,7 @@ const WORKLOADS: [(&str, Work, Work); 15] = [
         rust_build::world_substeps,
         port_build::world_substeps,
     ),
+    ("soft-step", rust_build::soft_step, port_build::soft_step),
 ];
 
 /// Total nanoseconds for `ops` timed runs after `ops / 4` warm-up ones.

@@ -74,7 +74,7 @@ pub struct Db {
     memo_of: ChunkSeq[u64],
     m_verified: ChunkSeq[u64],
     m_changed: ChunkSeq[u64],
-    m_fp: ChunkSeq[u64],
+    m_fingerprint: ChunkSeq[u64],
     m_edges_at: ChunkSeq[u64],
     m_edges_len: ChunkSeq[u64],
     edges: ChunkSeq[u64],
@@ -82,14 +82,16 @@ pub struct Db {
     oracle: Oracle
 }
 
-fn w(in s: ChunkSeq[u64], i: u64) -> u64 {
+// Word `i` of `s`, or 0 past its end.
+fn word_at(in s: ChunkSeq[u64], i: u64) -> u64 {
     match s.try_get(i) {
         Option::Some(x) => x,
         Option::None => 0,
     }
 }
 
-fn set(inout s: ChunkSeq[u64], i: u64, x: u64) {
+// Sets word `i` of `s` when it exists.
+fn set_word(inout s: ChunkSeq[u64], i: u64, x: u64) {
     let _ = s.try_set(i, x);
 }
 
@@ -114,7 +116,7 @@ pub fn db_new(nq: u64, sink eq: ChunkSeq[u64], sink oracle: Oracle) -> Db {
         memo_of: ChunkSeq::new(),
         m_verified: ChunkSeq::new(),
         m_changed: ChunkSeq::new(),
-        m_fp: ChunkSeq::new(),
+        m_fingerprint: ChunkSeq::new(),
         m_edges_at: ChunkSeq::new(),
         m_edges_len: ChunkSeq::new(),
         edges: ChunkSeq::new(),
@@ -139,8 +141,8 @@ pub fn input_new(inout db: Db) -> u64 {
 // do not compare values.
 pub fn input_set(inout db: Db, row: u64) {
     db.revision = wrapping_add(db.revision, 1);
-    set(inout db.in_changed, row, db.revision);
-    set(inout db.in_state, row, wrapping_add(w(in db.in_state, row), 1));
+    set_word(inout db.in_changed, row, db.revision);
+    set_word(inout db.in_state, row, wrapping_add(word_at(in db.in_state, row), 1));
 }
 
 fn note(inout db: Db, kind: u64, q: u64, f: u64) {
@@ -163,13 +165,14 @@ fn lookup(in o: Oracle, f: u64, q: u64, s: u64) -> u64 {
         }
         let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
         let k = wrapping_mul(mid, Key::Words);
-        let kf = w(in o.keys, wrapping_add(k, Key::Row));
-        let kq = w(in o.keys, wrapping_add(k, Key::Query));
-        let ks = w(in o.keys, wrapping_add(k, Key::State));
-        if kf == f && kq == q && ks == s {
+        let mid_row = word_at(in o.keys, wrapping_add(k, Key::Row));
+        let mid_query = word_at(in o.keys, wrapping_add(k, Key::Query));
+        let mid_state = word_at(in o.keys, wrapping_add(k, Key::State));
+        if mid_row == f && mid_query == q && mid_state == s {
             return mid;
         }
-        let less = kf < f || (kf == f && (kq < q || (kq == q && ks < s)));
+        let less = mid_row < f
+            || (mid_row == f && (mid_query < q || (mid_query == q && mid_state < s)));
         if less {
             lo = wrapping_add(mid, 1);
         } else {
@@ -183,57 +186,63 @@ fn lookup(in o: Oracle, f: u64, q: u64, s: u64) -> u64 {
 // equals the old one.
 fn execute(inout db: Db, q: u64, f: u64, m: u64) -> u64 {
     note(inout db, Log::Execute, q, f);
-    let r = lookup(in db.oracle, f, q, w(in db.in_state, f));
-    let mut fp: u64 = 0;
+    let recorded = lookup(in db.oracle, f, q, word_at(in db.in_state, f));
+    let mut fingerprint: u64 = 0;
     let mut changed: u64 = FIRST_REVISION;
     // Reads fetch (and may execute) other queries, which add their own
     // edges: this memo's go to the pool after them.
     let mut reads_of: ChunkSeq[u64] = ChunkSeq::new();
-    if r == NONE {
+    if recorded == NONE {
         note(inout db, Log::Missing, q, f);
     } else {
-        let at = w(in db.oracle.at, r);
-        fp = w(in db.oracle.data, wrapping_add(at, Recorded::Fingerprint));
-        let reads = w(in db.oracle.data, wrapping_add(at, Recorded::Reads));
+        let at = word_at(in db.oracle.at, recorded);
+        fingerprint = word_at(in db.oracle.data, wrapping_add(at, Recorded::Fingerprint));
+        let reads = word_at(in db.oracle.data, wrapping_add(at, Recorded::Reads));
         for i in 0..reads {
             let e = wrapping_add(wrapping_add(at, Recorded::First), wrapping_mul(i, Read::Words));
-            let tag = w(in db.oracle.data, wrapping_add(e, Read::Tag));
-            let ef = w(in db.oracle.data, wrapping_add(e, Read::Row));
-            let eq = w(in db.oracle.data, wrapping_add(e, Read::Query));
+            let tag = word_at(in db.oracle.data, wrapping_add(e, Read::Tag));
+            let read_row = word_at(in db.oracle.data, wrapping_add(e, Read::Row));
+            let read_query = word_at(in db.oracle.data, wrapping_add(e, Read::Query));
             if tag == Edge::Input {
-                changed = max64(changed, w(in db.in_changed, ef));
+                changed = max64(changed, word_at(in db.in_changed, read_row));
             } else {
-                let dm = fetch_memo(inout db, eq, ef);
-                changed = max64(changed, w(in db.m_changed, dm));
+                let read_memo = fetch_memo(inout db, read_query, read_row);
+                changed = max64(changed, word_at(in db.m_changed, read_memo));
             }
             reads_of.push(tag);
-            reads_of.push(ef);
-            reads_of.push(eq);
+            reads_of.push(read_row);
+            reads_of.push(read_query);
         }
     }
     let start = db.edges.len();
     let len = reads_of.len();
     for i in 0..len {
-        db.edges.push(w(in reads_of, i));
+        db.edges.push(word_at(in reads_of, i));
     }
     let mut row = m;
     if m == NONE {
-        row = db.m_verified.len();
-        db.m_verified.push(0);
-        db.m_changed.push(0);
-        db.m_fp.push(0);
-        db.m_edges_at.push(0);
-        db.m_edges_len.push(0);
-        let s = slot(in db, q, f);
-        set(inout db.memo_of, s, row);
-    } else if w(in db.eq, q) == 1 && w(in db.m_fp, m) == fp {
-        changed = w(in db.m_changed, m);
+        row = memo_new(inout db, q, f);
+    } else if word_at(in db.eq, q) == 1 && word_at(in db.m_fingerprint, m) == fingerprint {
+        changed = word_at(in db.m_changed, m);
     }
-    set(inout db.m_verified, row, db.revision);
-    set(inout db.m_changed, row, changed);
-    set(inout db.m_fp, row, fp);
-    set(inout db.m_edges_at, row, start);
-    set(inout db.m_edges_len, row, len);
+    set_word(inout db.m_verified, row, db.revision);
+    set_word(inout db.m_changed, row, changed);
+    set_word(inout db.m_fingerprint, row, fingerprint);
+    set_word(inout db.m_edges_at, row, start);
+    set_word(inout db.m_edges_len, row, len);
+    row
+}
+
+// A zeroed memo row for query q on row f, recorded in `memo_of`.
+fn memo_new(inout db: Db, q: u64, f: u64) -> u64 {
+    let row = db.m_verified.len();
+    db.m_verified.push(0);
+    db.m_changed.push(0);
+    db.m_fingerprint.push(0);
+    db.m_edges_at.push(0);
+    db.m_edges_len.push(0);
+    let s = slot(in db, q, f);
+    set_word(inout db.memo_of, s, row);
     row
 }
 
@@ -241,28 +250,28 @@ fn execute(inout db: Db, q: u64, f: u64, m: u64) -> u64 {
 // was verified; the first changed one stops the walk. An unchanged memo is
 // marked verified (salsa's `DidValidateMemoizedValue`).
 fn deep_verify(inout db: Db, q: u64, f: u64, m: u64) -> bool {
-    let verified = w(in db.m_verified, m);
-    let at = w(in db.m_edges_at, m);
-    let n = w(in db.m_edges_len, m);
+    let verified = word_at(in db.m_verified, m);
+    let at = word_at(in db.m_edges_at, m);
+    let n = word_at(in db.m_edges_len, m);
     let mut i: u64 = 0;
     loop {
         if i >= n {
             break;
         }
-        let tag = w(in db.edges, wrapping_add(at, wrapping_add(i, Read::Tag)));
-        let ef = w(in db.edges, wrapping_add(at, wrapping_add(i, Read::Row)));
-        let eq = w(in db.edges, wrapping_add(at, wrapping_add(i, Read::Query)));
+        let tag = word_at(in db.edges, wrapping_add(at, wrapping_add(i, Read::Tag)));
+        let read_row = word_at(in db.edges, wrapping_add(at, wrapping_add(i, Read::Row)));
+        let read_query = word_at(in db.edges, wrapping_add(at, wrapping_add(i, Read::Query)));
         let changed = if tag == Edge::Input {
-            w(in db.in_changed, ef) > verified
+            word_at(in db.in_changed, read_row) > verified
         } else {
-            changed_after(inout db, eq, ef, verified)
+            changed_after(inout db, read_query, read_row, verified)
         };
         if changed {
             return false;
         }
         i = wrapping_add(i, Read::Words);
     }
-    set(inout db.m_verified, m, db.revision);
+    set_word(inout db.m_verified, m, db.revision);
     note(inout db, Log::Validate, q, f);
     true
 }
@@ -270,25 +279,25 @@ fn deep_verify(inout db: Db, q: u64, f: u64, m: u64) -> bool {
 // `maybe_changed_after`: whether query q on row f changed after `rev`,
 // verifying (and if need be executing) it first.
 fn changed_after(inout db: Db, q: u64, f: u64, rev: u64) -> bool {
-    let m = w(in db.memo_of, slot(in db, q, f));
+    let m = word_at(in db.memo_of, slot(in db, q, f));
     if m == NONE {
         return true;
     }
-    if w(in db.m_verified, m) == db.revision {
-        return w(in db.m_changed, m) > rev;
+    if word_at(in db.m_verified, m) == db.revision {
+        return word_at(in db.m_changed, m) > rev;
     }
     if deep_verify(inout db, q, f, m) {
-        return w(in db.m_changed, m) > rev;
+        return word_at(in db.m_changed, m) > rev;
     }
     let row = execute(inout db, q, f, m);
-    w(in db.m_changed, row) > rev
+    word_at(in db.m_changed, row) > rev
 }
 
 // `fetch`: the memo row of query q on row f, current in this revision.
 fn fetch_memo(inout db: Db, q: u64, f: u64) -> u64 {
-    let m = w(in db.memo_of, slot(in db, q, f));
+    let m = word_at(in db.memo_of, slot(in db, q, f));
     if m != NONE {
-        if w(in db.m_verified, m) == db.revision {
+        if word_at(in db.m_verified, m) == db.revision {
             return m;
         }
         if deep_verify(inout db, q, f, m) {
@@ -301,13 +310,13 @@ fn fetch_memo(inout db: Db, q: u64, f: u64) -> u64 {
 // The fingerprint of query q on row f's current value.
 pub fn fetch(inout db: Db, q: u64, f: u64) -> u64 {
     let m = fetch_memo(inout db, q, f);
-    w(in db.m_fp, m)
+    word_at(in db.m_fingerprint, m)
 }
 
 pub fn db_log(in db: Db) -> ChunkSeq[u64] {
     let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity(db.log.len());
     for i in 0..db.log.len() {
-        out.push(w(in db.log, i));
+        out.push(word_at(in db.log, i));
     }
     out
 }
@@ -333,8 +342,8 @@ pub fn oracle_push(inout o: Oracle, f: u64, q: u64, s: u64, fp: u64) -> u64 {
 
 // Adds a read to the result whose read count is at `count_at`.
 pub fn oracle_read(inout o: Oracle, count_at: u64, tag: u64, f: u64, q: u64) {
-    let n = w(in o.data, count_at);
-    set(inout o.data, count_at, wrapping_add(n, 1));
+    let n = word_at(in o.data, count_at);
+    set_word(inout o.data, count_at, wrapping_add(n, 1));
     o.data.push(tag);
     o.data.push(f);
     o.data.push(q);

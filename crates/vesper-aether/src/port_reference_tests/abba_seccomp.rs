@@ -1,7 +1,7 @@
-//! The Vesper seccomp evaluator against the Rust reference on random
-//! syscalls under the VMM profile: a differential, and an ABBA timing that
-//! prints the flip gate's `flip-gate pairs` line
-//! (crates/vesper-aether/flip-gate.json).
+//! The Vesper seccomp compiler and evaluator against the Rust references:
+//! the evaluator on random syscalls under the VMM profile, the compiler on
+//! random profiles, and ABBA timings of both that print the flip gate's
+//! `flip-gate pairs` lines (crates/vesper-aether/flip-gate.json).
 
 use std::hint::black_box;
 
@@ -142,4 +142,129 @@ fn abba_seccomp_evaluate() {
             analysis.decision
         );
     }
+}
+
+/// Random profiles: syscall subsets with repeats (and sometimes `ioctl`,
+/// which is refused), ioctl request lists from empty to past the 255-insn
+/// jump reach, both architectures and both default actions.
+#[test]
+fn seccomp_compile_random_differential() {
+    use crate::seccomp::Syscall::*;
+    let calls = [
+        Read,
+        Write,
+        Readv,
+        Writev,
+        Pread64,
+        Pwrite64,
+        Close,
+        Ioctl,
+        Ppoll,
+        EpollPwait,
+        Eventfd2,
+        Futex,
+        Mmap,
+        Munmap,
+        Mprotect,
+        Madvise,
+        Brk,
+        RtSigreturn,
+        RtSigprocmask,
+        Sigaltstack,
+        Exit,
+        ExitGroup,
+        ClockGettime,
+        SchedYield,
+        Getrandom,
+        Gettid,
+        Tgkill,
+        Openat,
+        Socket,
+        Execve,
+        Getpid,
+        Ptrace,
+    ];
+    let mut r = Rng(97);
+    let mut ok = 0;
+    for _ in 0..4_000 {
+        let arch = if r.below(2) == 0 {
+            Arch::X86_64
+        } else {
+            Arch::Aarch64
+        };
+        let default = if r.below(2) == 0 {
+            DefaultAction::KillProcess
+        } else {
+            DefaultAction::Errno(r.below(200) as u16)
+        };
+        let n = r.below(40) as usize;
+        let mut allowed = Vec::with_capacity(n);
+        for _ in 0..n {
+            let c = calls[r.below(calls.len() as u64) as usize];
+            if c != Ioctl || r.below(20) == 0 {
+                allowed.push(c);
+            }
+        }
+        let m = match r.below(10) {
+            0 => 0,
+            1 => 200 + r.below(120) as usize,
+            _ => r.below(30) as usize,
+        };
+        let ioctl_requests = (0..m)
+            .map(|_| match r.below(3) {
+                0 => r.below(8) as u32,
+                _ => r.next() as u32,
+            })
+            .collect();
+        let p = SeccompProfile {
+            arch,
+            allowed,
+            ioctl_requests,
+            default,
+        };
+        let a = p.compile();
+        assert_eq!(a, p.compile_reference(), "{p:?}");
+        ok += usize::from(a.is_ok());
+    }
+    assert!(ok > 1_000, "{ok} profiles compiled");
+}
+
+/// Prints the gate's pairs line and the median interval of an ABBA run.
+fn report(name: &str, mut rust: impl FnMut() -> u64, mut vesper: impl FnMut() -> u64) {
+    let run = RunConfig {
+        epochs: 30,
+        warmup_epochs: 2,
+        operations_per_window: 8,
+        max_total_calls: 100_000,
+        max_elapsed_nanos: 600_000_000_000,
+        layout_seed: 1,
+    };
+    let report = run_abba(run, &mut Arm(&mut rust), &mut Arm(&mut vesper)).expect("ABBA run");
+    let pairs = report.pairs();
+    let line: Vec<String> = pairs
+        .iter()
+        .map(|p| format!("{}:{}", p.baseline_total(), p.candidate_total()))
+        .collect();
+    println!("flip-gate pairs {name} {}", line.join(" "));
+    let analysis = analyze_pairs(pairs, 5_000).expect("analysis");
+    if let Some(i) = analysis.interval {
+        println!(
+            "{name}: 95% median interval of Vesper/Rust [{:.3}, {:.3}], {:?}",
+            i.lower.candidate_total() as f64 / i.lower.baseline_total() as f64,
+            i.upper.candidate_total() as f64 / i.upper.baseline_total() as f64,
+            analysis.decision
+        );
+    }
+}
+
+#[test]
+#[ignore = "benchmark; run in release with --ignored --nocapture"]
+fn abba_seccomp_compile() {
+    let arch = Arch::host().unwrap_or(Arch::X86_64);
+    let profile = SeccompProfile::vmm(arch, DefaultAction::KillProcess);
+    report(
+        "seccomp_compile",
+        || profile.compile_reference().unwrap().len() as u64,
+        || profile.compile().unwrap().len() as u64,
+    );
 }
