@@ -487,6 +487,13 @@ const STATE_INIT_STEPS: u64 = 2;
 // alias count and (name, slot) pairs.
 const HO_STATE_VALUE: u64 = 1;
 const HO_ALIAS_COUNT: u64 = 3;
+// The width of one (name, slot) alias pair in `Op::Handle` and
+// `Op::Closure` operands.
+const ALIAS_PAIR_WORDS: u64 = 2;
+// `Op::Data` operands: the constructor, the field count, then (name,
+// value) pairs.
+const DATA_FIELDS_AT: u64 = 2;
+const DATA_FIELD_WORDS: u64 = 2;
 // A call argument's pass word for `inout` (`Pass::Inout`).
 const PASS_INOUT: u64 = 1;
 // Words per call argument: pass, value, root + 1, path.
@@ -718,7 +725,7 @@ fn install(inout machine: M) {
     let mut slots: ChunkSeq[En] = ChunkSeq::new[En]();
     let alias_at = add(inst.a, HO_ALIAS_COUNT);
     for i in 0..machine.program.op(alias_at) {
-        let pair_at = add(inc(alias_at), wrapping_mul(i, 2));
+        let pair_at = add(inc(alias_at), wrapping_mul(i, ALIAS_PAIR_WORDS));
         let name = n32(machine.program.op(pair_at));
         let bound_index = binding(in machine, n32(machine.program.op(inc(pair_at))));
         if bound_index != NONE64 {
@@ -3104,7 +3111,7 @@ fn step(inout machine: M) {
         let n = machine.program.op(inc(operand_at));
         let kid_start = machine.kids.len();
         for i in 0..n {
-            let field_at = add(add(operand_at, 2), wrapping_mul(i, 2));
+            let field_at = add(add(operand_at, DATA_FIELDS_AT), wrapping_mul(i, DATA_FIELD_WORDS));
             let value = get(inout machine, machine.program.op(inc(field_at)));
             push_kid(inout machine, n32(machine.program.op(field_at)), value);
         }
@@ -4028,7 +4035,7 @@ fn make_closure(inout machine: M, inst_id: u64, inst: InstRow) {
     for i in 0..site_word(in machine, add(at, CS_FREE_COUNT)) {
         let name = n32(site_word(in machine, add(add(at, CS_FREE), i)));
         for j in 0..alias_count {
-            let pair_at = add(inc(alias_at), wrapping_mul(j, 2));
+            let pair_at = add(inc(alias_at), wrapping_mul(j, ALIAS_PAIR_WORDS));
             if n32(machine.program.op(pair_at)) == name {
                 let bound_index = binding(in machine, n32(machine.program.op(inc(pair_at))));
                 if bound_index != NONE64 {
