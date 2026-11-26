@@ -396,6 +396,8 @@ vesper_crate(
             "//packages/vesper-crypto:files",
             "//bootstrap:files",
             "//crates/vesper-ebpf:files",
+            # @vesper/driver-commands formats through @vesper/fmt (#1996).
+            "//crates/vesper-fmt:files",
             "//crates/vesper-lean-syntax:files",
             "//crates/vesper-pact:files",
             "//crates/vesper-resonance:files",
