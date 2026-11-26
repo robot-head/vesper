@@ -5,7 +5,24 @@
 
 use vesper_port_abi::Abi;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScanCounts { pub matches: u64, pub xor: u8 }
+
+impl Abi for ScanCounts {
+    const WORDS: usize = 2;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.matches, &mut out[0..]);
+        Abi::put(&self.xor, &mut out[1..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        ScanCounts { matches: Abi::get(&words[0..]), xor: Abi::get(&words[1..]) }
+    }
+}
+
+const _: () = assert!(<() as Abi>::WORDS == 1);
+const _: () = assert!(<ScanCounts as Abi>::WORDS == 2);
 const _: () = assert!(<u64 as Abi>::WORDS == 1);
+const _: () = assert!(<u8 as Abi>::WORDS == 1);
 
 unsafe extern "C" {
     fn vesper_simd_seq_new(capacity: i64, stride: i64) -> i64;
@@ -14,6 +31,15 @@ unsafe extern "C" {
     fn vesper_simd_check_features(arch: i64, sse3: i64, ssse3: i64, sse41: i64, sse42: i64, neon: i64) -> i64;
     fn vesper_simd_define_scanner(call: i64) -> i64;
     fn vesper_simd_profile_support(profile: i64, pointer_bits: i64, features: i64) -> i64;
+    fn vesper_simd_vvec_binary(op: i64, n: i64, a: *mut u64, b: *mut u64, out: *mut u64) -> i64;
+    fn vesper_simd_vvec_compare(op: i64, n: i64, a: *mut u64, b: *mut u64, bits: *mut u64) -> i64;
+    fn vesper_simd_vvec_load_masked(src: *mut u64, bits: *mut u64, passthru: i64, n: i64, lanes: *mut u64) -> i64;
+    fn vesper_simd_vvec_mask_zip(op: i64, lanes: i64, a: *mut u64, b: *mut u64) -> i64;
+    fn vesper_simd_vvec_prefix_bits(n: i64, bits: *mut u64) -> i64;
+    fn vesper_simd_vvec_reduce_xor(n: i64, a: *mut u64) -> i64;
+    fn vesper_simd_vvec_scan(result: *mut u64, data: *mut u64, delim: i64) -> i64;
+    fn vesper_simd_vvec_splat(value: i64, n: i64, lanes: *mut u64) -> i64;
+    fn vesper_simd_vvec_store_masked(dst: *mut u64, bits: *mut u64, n: i64, lanes: *mut u64) -> i64;
 }
 
 /// The sequence runtime of the Vesper library `simd`.
@@ -55,4 +81,86 @@ pub fn profile_support(profile: u64, pointer_bits: u64, features: u64) -> u64 {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_simd_profile_support(profile as i64, pointer_bits as i64, features as i64) };
     raw as u64
+}
+
+/// Calls `vvec_binary` of the Vesper library `simd` (`vesper_simd_vvec_binary`).
+pub fn vvec_binary(op: u64, n: u64, a: &[u8], b: &[u8], out: &mut [u8]) -> () {
+    // SAFETY: `vesper_simd_vvec_binary` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(a, |view_a| vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_simd_vvec_binary(op as i64, n as i64, view_a, view_b, view_out) })));
+    { let _ = raw; }
+}
+
+/// Calls `vvec_compare` of the Vesper library `simd` (`vesper_simd_vvec_compare`).
+pub fn vvec_compare(op: u64, n: u64, a: &[u8], b: &[u8], bits: &mut [u64]) -> () {
+    // SAFETY: `vesper_simd_vvec_compare` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(a, |view_a| vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(bits, |view_bits| unsafe { vesper_simd_vvec_compare(op as i64, n as i64, view_a, view_b, view_bits) })));
+    { let _ = raw; }
+}
+
+/// Calls `vvec_load_masked` of the Vesper library `simd` (`vesper_simd_vvec_load_masked`).
+pub fn vvec_load_masked(src: &[u8], bits: &[u64], passthru: u8, n: u64, lanes: &mut [u8]) -> () {
+    // SAFETY: `vesper_simd_vvec_load_masked` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(src, |view_src| vesper_port_abi::with_slice(bits, |view_bits| vesper_port_abi::with_slice_mut(lanes, |view_lanes| unsafe { vesper_simd_vvec_load_masked(view_src, view_bits, passthru as i64, n as i64, view_lanes) })));
+    { let _ = raw; }
+}
+
+/// Calls `vvec_mask_zip` of the Vesper library `simd` (`vesper_simd_vvec_mask_zip`).
+pub fn vvec_mask_zip(op: u64, lanes: u64, a: &mut [u64], b: &[u64]) -> () {
+    // SAFETY: `vesper_simd_vvec_mask_zip` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(a, |view_a| vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_simd_vvec_mask_zip(op as i64, lanes as i64, view_a, view_b) }));
+    { let _ = raw; }
+}
+
+/// Calls `vvec_prefix_bits` of the Vesper library `simd` (`vesper_simd_vvec_prefix_bits`).
+pub fn vvec_prefix_bits(n: u64, bits: &mut [u64]) -> () {
+    // SAFETY: `vesper_simd_vvec_prefix_bits` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(bits, |view_bits| unsafe { vesper_simd_vvec_prefix_bits(n as i64, view_bits) });
+    { let _ = raw; }
+}
+
+/// Calls `vvec_reduce_xor` of the Vesper library `simd` (`vesper_simd_vvec_reduce_xor`).
+pub fn vvec_reduce_xor(n: u64, a: &[u8]) -> u8 {
+    // SAFETY: `vesper_simd_vvec_reduce_xor` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(a, |view_a| unsafe { vesper_simd_vvec_reduce_xor(n as i64, view_a) });
+    raw as u8
+}
+
+/// Calls `vvec_scan` of the Vesper library `simd` (`vesper_simd_vvec_scan`).
+pub fn vvec_scan(data: &[u8], delim: u8) -> ScanCounts {
+    let mut result = [0u64; 2];
+    // SAFETY: `vesper_simd_vvec_scan` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(data, |view_data| unsafe { vesper_simd_vvec_scan(result.as_mut_ptr(), view_data, delim as i64) });
+    <ScanCounts as Abi>::get(&result[0..])
+}
+
+/// Calls `vvec_splat` of the Vesper library `simd` (`vesper_simd_vvec_splat`).
+pub fn vvec_splat(value: u8, n: u64, lanes: &mut [u8]) -> () {
+    // SAFETY: `vesper_simd_vvec_splat` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(lanes, |view_lanes| unsafe { vesper_simd_vvec_splat(value as i64, n as i64, view_lanes) });
+    { let _ = raw; }
+}
+
+/// Calls `vvec_store_masked` of the Vesper library `simd` (`vesper_simd_vvec_store_masked`).
+pub fn vvec_store_masked(dst: &mut [u8], bits: &[u64], n: u64, lanes: &[u8]) -> () {
+    // SAFETY: `vesper_simd_vvec_store_masked` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(dst, |view_dst| vesper_port_abi::with_slice(bits, |view_bits| vesper_port_abi::with_slice(lanes, |view_lanes| unsafe { vesper_simd_vvec_store_masked(view_dst, view_bits, n as i64, view_lanes) })));
+    { let _ = raw; }
 }
