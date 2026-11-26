@@ -165,7 +165,10 @@ vesper_crate(
         # SH1 lane 14 (#1157) part 4: @vesper/sugar against sugar_expand on
         # the rules of the sugar test suites.
         "test/self_host_sugar": glob([
+            "packages/vesper-ast/**",
+            "packages/vesper-check-data/**",
             "packages/vesper-front/**",
+            "packages/vesper-std/**",
             "packages/vesper-sugar/**",
             "src/forge_frontend/sugar.rs",
             "src/packages/sugar.rs",
