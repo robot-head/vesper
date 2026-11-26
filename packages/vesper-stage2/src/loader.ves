@@ -2649,6 +2649,17 @@ test {
     }
 
     fn fixture_graph(in declaration: Str, shadow_intrinsic: bool) -> Option[ChunkSeq[u8]] {
+        fixture_graph_calling(
+            in if shadow_intrinsic {
+                "use @fixture/dep::word as renamed; pub fn main() -> u64 { let wrapping_shr_u64: u64 = 0; renamed{ from 0x2a00; width 8 } }"
+            } else {
+                "use @fixture/dep::word as renamed; pub fn main() -> u64 { renamed{ from 0x2a00; width 8 } }"
+            },
+            in declaration
+        )
+    }
+
+    fn fixture_graph_calling(in caller_text: Str, in declaration: Str) -> Option[ChunkSeq[u8]] {
         let mut pkgs = ChunkSeq::new[PkgNode]();
         let mut caller = fixture_package(in "@fixture/caller");
         caller.dep_names.push(sink fixture_bytes(in "@fixture/dep"));
@@ -2664,15 +2675,7 @@ test {
                 pkg: 0,
                 file: 0,
                 segs: ChunkSeq::new[ChunkSeq[u8]](),
-                text: if shadow_intrinsic {
-                    fixture_bytes(
-                        in "use @fixture/dep::word as renamed; pub fn main() -> u64 { let wrapping_shr_u64: u64 = 0; renamed{ from 0x2a00; width 8 } }"
-                    )
-                } else {
-                    fixture_bytes(
-                        in "use @fixture/dep::word as renamed; pub fn main() -> u64 { renamed{ from 0x2a00; width 8 } }"
-                    )
-                }
+                text: fixture_bytes(in caller_text)
             }
         );
         mods.push(
@@ -2713,6 +2716,34 @@ test {
             },
             _ => false,
         }
+    }
+
+    fn test_imported_scalar_tag_keeps_its_precedence() -> bool {
+        let bytes = match fixture_graph_calling(
+            in "use @fixture/dep::yes as renamed; pub fn main() -> bool { renamed{} && false }",
+            in "pub sugar yes: tag { rule (yes{}) => { true || false } }"
+        ) {
+            Option::Some(bytes) => bytes,
+            Option::None => return false,
+        };
+        // The expanded caller without spaces: `(true||false)&&false`.
+        let space: u8 = 32;
+        let mut packed = ChunkSeq::new[u8]();
+        for i in 0..bytes.len() {
+            let byte = bytes.try_get(i).unwrap_or(0);
+            if byte != space {
+                packed.push(byte);
+            }
+        }
+        let grouped = "(true||false)&&false".as_bytes();
+        let text = packed.as_slice();
+        for start in 0..text.len() {
+            let end = wrapping_add(start, grouped.len());
+            if end <= text.len() && eq_bytes(in text[start..end], in grouped) {
+                return true;
+            }
+        }
+        false
     }
 
     fn test_bootstrap_rejects_a_definition_site_free_helper() -> bool {
