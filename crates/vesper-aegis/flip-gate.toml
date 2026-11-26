@@ -55,3 +55,13 @@ run = "aspect crate aegis bench-abba -- flip-gate corim_store"
 [[abba]]
 workload = "appraise_cca"
 run = "aspect crate aegis bench-abba -- flip-gate appraise_cca"
+
+# Part 4a: the measurement hashes and fixed-width ECDSA checks over the
+# crypto shim, against the last build with the ring calls.
+[[abba]]
+workload = "measure"
+run = "aspect crate aegis bench-abba -- flip-gate measure"
+
+[[abba]]
+workload = "ecdsa"
+run = "aspect crate aegis bench-abba -- flip-gate ecdsa"

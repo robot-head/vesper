@@ -2,4 +2,7 @@
 name = "@vesper/aegis"
 version = "0.1.0"
 edition = "2026"
-capability_ceiling = ["Fail"]
+capability_ceiling = ["Fail", "Ffi"]
+
+[dependencies]
+"@vesper/crypto" = { version = "^0.1", path = "../../../packages/vesper-crypto" }

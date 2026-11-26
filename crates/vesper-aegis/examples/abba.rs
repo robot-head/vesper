@@ -18,13 +18,20 @@
 //!   `CcaRealmClaims::from_cbor` of the vendor CCA tokens' payloads;
 //! - `cca_token`: `CcaToken::parse` of the vendor CCA tokens (COSE_Sign1
 //!   structure, still Rust, included);
-//! - `corim`: `Corim::parse_unsigned` of the vendor unsigned CoRIMs.
+//! - `corim`: `Corim::parse_unsigned` of the vendor unsigned CoRIMs;
+//! - `measure`: the measurement hashes (`report_data`, `single_extend` for
+//!   the three register banks, `cca_rim_measurement`, `rak_hash`,
+//!   `tls_key_channel_binding`, `expected_qe_report_data`);
+//! - `ecdsa`: `EcPublicKey::verify_fixed` of a P-256 and a P-384
+//!   signature.
 //!
 //! The first four compare with the build at the last commit with the Rust
 //! parsers and policy check; the CBOR workloads with the build at the last
 //! commit with ciborium decoding and the Rust CCA claim parsers, where
 //! the benchmark task builds this file (which uses only the crate's public
-//! API) in place of that commit's.
+//! API) in place of that commit's. `measure` and `ecdsa` compare the same
+//! way with the build at the last commit with the ring hashing and
+//! signature calls (part 4a).
 //!
 //! ```sh
 //! aspect crate aegis bench-abba                    # ABBA, wall clock
@@ -49,7 +56,7 @@ const EPOCHS: usize = 9;
 /// Epochs of one `flip-gate` run (the gate's default).
 const FLIP_GATE_EPOCHS: usize = 30;
 /// Each workload and the passes in one window.
-const WORKLOADS: [(&str, usize); 9] = [
+const WORKLOADS: [(&str, usize); 11] = [
     ("snp", 20_000),
     ("tdx", 10_000),
     ("sgx", 10_000),
@@ -59,6 +66,8 @@ const WORKLOADS: [(&str, usize); 9] = [
     ("corim", 2_000),
     ("corim_store", 2_000),
     ("appraise_cca", 5_000),
+    ("measure", 50_000),
+    ("ecdsa", 500),
 ];
 
 fn data(path: &str) -> Vec<u8> {
@@ -88,6 +97,36 @@ struct Samples {
     cca_good: Vec<u8>,
     cca_plat_corim: Vec<u8>,
     cca_realm_corim: Vec<u8>,
+    /// The `ecdsa` workload's cases.
+    ecdsa: Vec<EcdsaCase>,
+}
+
+/// (curve, SEC1 public key, message, r || s).
+type EcdsaCase = (port::Curve, Vec<u8>, Vec<u8>, Vec<u8>);
+
+/// A fixed-width signature of a 200-byte message on each curve.
+fn ecdsa_samples() -> Vec<EcdsaCase> {
+    use ring::signature::{self, EcdsaKeyPair, KeyPair as _};
+    let rng = ring::rand::SystemRandom::new();
+    [
+        (
+            port::Curve::P256,
+            &signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+        ),
+        (
+            port::Curve::P384,
+            &signature::ECDSA_P384_SHA384_FIXED_SIGNING,
+        ),
+    ]
+    .into_iter()
+    .map(|(curve, alg)| {
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(alg, &rng).unwrap();
+        let key = EcdsaKeyPair::from_pkcs8(alg, pkcs8.as_ref(), &rng).unwrap();
+        let msg: Vec<u8> = (0..200u8).collect();
+        let sig = key.sign(&rng, &msg).unwrap().as_ref().to_vec();
+        (curve, key.public_key().as_ref().to_vec(), msg, sig)
+    })
+    .collect()
 }
 
 fn samples() -> Samples {
@@ -157,6 +196,7 @@ fn samples() -> Samples {
         cca_good: data("cca-veraison-services/cca-good.cbor"),
         cca_plat_corim: data("cca-veraison-services/corim-cca-platform-valid.cbor"),
         cca_realm_corim: data("cca-veraison-services/corim-cca-realm-valid.cbor"),
+        ecdsa: ecdsa_samples(),
     }
 }
 
@@ -276,6 +316,37 @@ fn window(workload: &str, passes: usize, s: &Samples) -> u64 {
                         )
                         .unwrap(),
                     );
+                }
+                "measure" => {
+                    use $k::claims::{GuestRuntimeClaims, RegisterHash, single_extend};
+                    let rt = GuestRuntimeClaims {
+                        channel_binding: [3; 48],
+                        loom_lock_blake3: [4; 32],
+                        olean_spec_mif: [5; 32],
+                    };
+                    black_box(black_box(&rt).report_data());
+                    let d = [6u8; 32];
+                    black_box(single_extend(RegisterHash::Sha384, 48, black_box(&d)));
+                    black_box(single_extend(RegisterHash::Sha384, 64, black_box(&d)));
+                    black_box(single_extend(RegisterHash::Sha512, 64, black_box(&d)));
+                    let blob = [7u8; 97];
+                    black_box($k::cca::cca_rim_measurement(
+                        RegisterHash::Sha256,
+                        black_box(&blob),
+                    ));
+                    black_box($k::cca::rak_hash(RegisterHash::Sha384, black_box(&blob)));
+                    black_box($k::policy::tls_key_channel_binding(black_box(&blob)));
+                    black_box($k::tdx::TdxQuote::expected_qe_report_data(
+                        black_box(&[8; 64]),
+                        black_box(&blob[..32]),
+                    ));
+                }
+                "ecdsa" => {
+                    for (curve, sec1, msg, sig) in &s.ecdsa {
+                        let key = $k::EcPublicKey::from_sec1(*curve, sec1).unwrap();
+                        key.verify_fixed(black_box(msg), black_box(sig), "bench")
+                            .unwrap();
+                    }
                 }
                 _ => panic!("unknown workload {workload}"),
             };

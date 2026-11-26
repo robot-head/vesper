@@ -3,7 +3,6 @@
 //! measurement register replay.
 
 use crate::error::ParseError;
-use ring::digest;
 
 pub const ENCLAVE_FLAG_DEBUG_DISABLED: u32 = 1 << 0;
 pub const ENCLAVE_FLAG_SMT_MITIGATED: u32 = 1 << 1;
@@ -64,13 +63,14 @@ impl GuestRuntimeClaims {
     /// The 64-byte report data a Vesper guest requests from hardware:
     /// `SHA-384(REPORT_DATA_DOMAIN || channel_binding || loom || olean) || 0^16`.
     pub fn report_data(&self) -> [u8; 64] {
-        let mut ctx = digest::Context::new(&digest::SHA384);
-        ctx.update(REPORT_DATA_DOMAIN);
-        ctx.update(&self.channel_binding);
-        ctx.update(&self.loom_lock_blake3);
-        ctx.update(&self.olean_spec_mif);
         let mut out = [0u8; 64];
-        out[..48].copy_from_slice(ctx.finish().as_ref());
+        let ok = crate::port::vesper::report_data(
+            &self.channel_binding,
+            &self.loom_lock_blake3,
+            &self.olean_spec_mif,
+            &mut out,
+        );
+        assert!(ok, "the crypto shim hashes SHA-384");
         out
     }
 }
@@ -112,11 +112,12 @@ impl RegisterHash {
         false
     }
 
-    pub(crate) fn algorithm(self) -> &'static digest::Algorithm {
+    /// The crypto shim's hash code (`@vesper/crypto` HashAlg).
+    pub(crate) fn shim_code(self) -> u32 {
         match self {
-            RegisterHash::Sha256 => &digest::SHA256,
-            RegisterHash::Sha384 => &digest::SHA384,
-            RegisterHash::Sha512 => &digest::SHA512,
+            RegisterHash::Sha256 => 1,
+            RegisterHash::Sha384 => 2,
+            RegisterHash::Sha512 => 3,
         }
     }
 }
@@ -126,11 +127,10 @@ impl RegisterHash {
 /// 48 bytes for TDX RTMRs and to 64 bytes for CCA REMs. The result has
 /// length `hash.len()`; the caller compares it with the reported register.
 pub fn single_extend(hash: RegisterHash, pad_to: usize, data: &[u8; 32]) -> Vec<u8> {
-    let mut ctx = digest::Context::new(hash.algorithm());
-    ctx.update(&vec![0u8; hash.len()]);
-    ctx.update(data);
-    ctx.update(&vec![0u8; pad_to.saturating_sub(32)]);
-    ctx.finish().as_ref().to_vec()
+    let mut out = vec![0u8; hash.len()];
+    let ok = crate::port::vesper::single_extend(hash.shim_code(), pad_to as u64, data, &mut out);
+    assert!(ok, "the crypto shim hashes SHA-2");
+    out
 }
 
 /// Constant-time byte equality.

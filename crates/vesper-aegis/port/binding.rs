@@ -62,6 +62,7 @@ const _: () = assert!(<AErr as Abi>::WORDS == 5);
 const _: () = assert!(<AtErr as Abi>::WORDS == 7);
 const _: () = assert!(<Option<u64> as Abi>::WORDS == 2);
 const _: () = assert!(<PErr as Abi>::WORDS == 4);
+const _: () = assert!(<bool as Abi>::WORDS == 1);
 const _: () = assert!(<u64 as Abi>::WORDS == 1);
 
 unsafe extern "C" {
@@ -74,6 +75,7 @@ unsafe extern "C" {
     fn vesper_aegis_cca_platform_profile(b: *mut u64, n: *mut u64, st: *mut u64, fail: *mut u64) -> i64;
     fn vesper_aegis_cca_realm_claims(b: *mut u64, n: *mut u64, st: *mut u64, w: *mut u64, fail: *mut u64) -> i64;
     fn vesper_aegis_cca_realm_profile(b: *mut u64, n: *mut u64, st: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_aegis_cca_rim_measurement(alg: i64, rim: *mut u64, out: *mut u64) -> i64;
     fn vesper_aegis_cca_token_parse(b: *mut u64, s: *mut u64, n: *mut u64, st: *mut u64, w: *mut u64, fail: *mut u64) -> i64;
     fn vesper_aegis_claims_wire_decode(b: *mut u64, w: *mut u64, fail: *mut u64) -> i64;
     fn vesper_aegis_corim_meta_parse(b: *mut u64, n: *mut u64, st: *mut u64, w: *mut u64, fail: *mut u64) -> i64;
@@ -82,6 +84,8 @@ unsafe extern "C" {
     fn vesper_aegis_cose_key_p384(b: *mut u64, n: *mut u64, st: *mut u64, out_sec1: *mut u64, fail: *mut u64) -> i64;
     fn vesper_aegis_cose_sig_structure(prot: *mut u64, aad: *mut u64, pay: *mut u64, out: *mut u64) -> i64;
     fn vesper_aegis_cose_sign1_parse(b: *mut u64, s: *mut u64, n: *mut u64, st: *mut u64, w: *mut u64, field: i64, reason: i64, fail: *mut u64) -> i64;
+    fn vesper_aegis_ecdsa_fixed_verify(curve: i64, sec1: *mut u64, msg: *mut u64, rs: *mut u64) -> i64;
+    fn vesper_aegis_expected_qe_report_data(key: *mut u64, auth: *mut u64, out: *mut u64) -> i64;
     fn vesper_aegis_gpa_check_access(iv: *mut u64, count: i64, gpa: i64, len: i64) -> i64;
     fn vesper_aegis_gpa_covers(iv: *mut u64, count: i64, s: i64, e: i64) -> i64;
     fn vesper_aegis_gpa_first_gap(iv: *mut u64, count: i64, s: i64, e: i64) -> i64;
@@ -93,10 +97,16 @@ unsafe extern "C" {
     fn vesper_aegis_host_unmap(iv: *mut u64, count: i64, win_start: i64, win_end: i64, addr: i64, len: i64) -> i64;
     fn vesper_aegis_host_validate_clock(has_prev: i64, prev: i64, max_step: i64, reported: i64) -> i64;
     fn vesper_aegis_iso8601_utc_to_unix(result: *mut u64, s: *mut u64) -> i64;
+    fn vesper_aegis_rak_hash(alg: i64, rak: *mut u64, out: *mut u64) -> i64;
+    fn vesper_aegis_report_data(cb: *mut u64, loom: *mut u64, olean: *mut u64, out: *mut u64) -> i64;
+    fn vesper_aegis_rsa_pss_sha384_verify(public: *mut u64, msg: *mut u64, sig: *mut u64) -> i64;
     fn vesper_aegis_sgx_parse(b: *mut u64, mode: i64, w: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_aegis_sha256_matches(der: *mut u64, expected: *mut u64, scratch: *mut u64) -> i64;
+    fn vesper_aegis_single_extend(alg: i64, pad_to: i64, data: *mut u64, out: *mut u64) -> i64;
     fn vesper_aegis_snp_etcb_parse(b: *mut u64, w: *mut u64, fail: *mut u64) -> i64;
     fn vesper_aegis_snp_parse(b: *mut u64, w: *mut u64, d: *mut u64, fail: *mut u64) -> i64;
     fn vesper_aegis_tdx_parse(b: *mut u64, mode: i64, w: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_aegis_tls_key_channel_binding(spki: *mut u64, out: *mut u64) -> i64;
     fn vesper_aegis_verify_attestation_claims(cw: *mut u64, cb: *mut u64, pw: *mut u64, pb: *mut u64, expected: *mut u64, fail: *mut u64) -> i64;
 }
 
@@ -194,6 +204,15 @@ pub fn cca_realm_profile(b: &[u8], n: &mut [u64], st: &mut [u64]) -> Result<u64,
         1 => Err(<AErr as Abi>::get(&fail[1..])),
         status => panic!("invalid failure status {status} from vesper_aegis_cca_realm_profile"),
     }
+}
+
+/// Calls `cca_rim_measurement` of the Vesper library `aegis` (`vesper_aegis_cca_rim_measurement`).
+pub fn cca_rim_measurement(alg: u32, rim: &[u8], out: &mut [u8]) -> bool {
+    // SAFETY: `vesper_aegis_cca_rim_measurement` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(rim, |view_rim| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aegis_cca_rim_measurement(alg as i64, view_rim, view_out) }));
+    raw != 0
 }
 
 /// Calls `cca_token_parse` of the Vesper library `aegis` (`vesper_aegis_cca_token_parse`).
@@ -303,6 +322,24 @@ pub fn cose_sign1_parse(b: &[u8], s: &mut [u8], n: &mut [u64], st: &mut [u64], w
     }
 }
 
+/// Calls `ecdsa_fixed_verify` of the Vesper library `aegis` (`vesper_aegis_ecdsa_fixed_verify`).
+pub fn ecdsa_fixed_verify(curve: u64, sec1: &[u8], msg: &[u8], rs: &[u8]) -> bool {
+    // SAFETY: `vesper_aegis_ecdsa_fixed_verify` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(sec1, |view_sec1| vesper_port_abi::with_slice(msg, |view_msg| vesper_port_abi::with_slice(rs, |view_rs| unsafe { vesper_aegis_ecdsa_fixed_verify(curve as i64, view_sec1, view_msg, view_rs) })));
+    raw != 0
+}
+
+/// Calls `expected_qe_report_data` of the Vesper library `aegis` (`vesper_aegis_expected_qe_report_data`).
+pub fn expected_qe_report_data(key: &[u8], auth: &[u8], out: &mut [u8]) -> bool {
+    // SAFETY: `vesper_aegis_expected_qe_report_data` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(key, |view_key| vesper_port_abi::with_slice(auth, |view_auth| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aegis_expected_qe_report_data(view_key, view_auth, view_out) })));
+    raw != 0
+}
+
 /// Calls `gpa_check_access` of the Vesper library `aegis` (`vesper_aegis_gpa_check_access`).
 pub fn gpa_check_access(iv: &[u64], count: u64, gpa: u64, len: u64) -> u64 {
     // SAFETY: `vesper_aegis_gpa_check_access` has exactly this signature in the export ABI; every
@@ -403,6 +440,33 @@ pub fn iso8601_utc_to_unix(s: &[u8]) -> Option<u64> {
     <Option<u64> as Abi>::get(&result[0..])
 }
 
+/// Calls `rak_hash` of the Vesper library `aegis` (`vesper_aegis_rak_hash`).
+pub fn rak_hash(alg: u32, rak: &[u8], out: &mut [u8]) -> bool {
+    // SAFETY: `vesper_aegis_rak_hash` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(rak, |view_rak| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aegis_rak_hash(alg as i64, view_rak, view_out) }));
+    raw != 0
+}
+
+/// Calls `report_data` of the Vesper library `aegis` (`vesper_aegis_report_data`).
+pub fn report_data(cb: &[u8], loom: &[u8], olean: &[u8], out: &mut [u8]) -> bool {
+    // SAFETY: `vesper_aegis_report_data` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(cb, |view_cb| vesper_port_abi::with_slice(loom, |view_loom| vesper_port_abi::with_slice(olean, |view_olean| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aegis_report_data(view_cb, view_loom, view_olean, view_out) }))));
+    raw != 0
+}
+
+/// Calls `rsa_pss_sha384_verify` of the Vesper library `aegis` (`vesper_aegis_rsa_pss_sha384_verify`).
+pub fn rsa_pss_sha384_verify(public: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+    // SAFETY: `vesper_aegis_rsa_pss_sha384_verify` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(public, |view_public| vesper_port_abi::with_slice(msg, |view_msg| vesper_port_abi::with_slice(sig, |view_sig| unsafe { vesper_aegis_rsa_pss_sha384_verify(view_public, view_msg, view_sig) })));
+    raw != 0
+}
+
 /// Calls `sgx_parse` of the Vesper library `aegis` (`vesper_aegis_sgx_parse`).
 pub fn sgx_parse(b: &[u8], mode: u64, w: &mut [u64]) -> Result<u64, AErr> {
     let mut fail = [0u64; 6];
@@ -415,6 +479,24 @@ pub fn sgx_parse(b: &[u8], mode: u64, w: &mut [u64]) -> Result<u64, AErr> {
         1 => Err(<AErr as Abi>::get(&fail[1..])),
         status => panic!("invalid failure status {status} from vesper_aegis_sgx_parse"),
     }
+}
+
+/// Calls `sha256_matches` of the Vesper library `aegis` (`vesper_aegis_sha256_matches`).
+pub fn sha256_matches(der: &[u8], expected: &[u8], scratch: &mut [u8]) -> bool {
+    // SAFETY: `vesper_aegis_sha256_matches` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(der, |view_der| vesper_port_abi::with_slice(expected, |view_expected| vesper_port_abi::with_slice_mut(scratch, |view_scratch| unsafe { vesper_aegis_sha256_matches(view_der, view_expected, view_scratch) })));
+    raw != 0
+}
+
+/// Calls `single_extend` of the Vesper library `aegis` (`vesper_aegis_single_extend`).
+pub fn single_extend(alg: u32, pad_to: u64, data: &[u8], out: &mut [u8]) -> bool {
+    // SAFETY: `vesper_aegis_single_extend` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(data, |view_data| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aegis_single_extend(alg as i64, pad_to as i64, view_data, view_out) }));
+    raw != 0
 }
 
 /// Calls `snp_etcb_parse` of the Vesper library `aegis` (`vesper_aegis_snp_etcb_parse`).
@@ -457,6 +539,15 @@ pub fn tdx_parse(b: &[u8], mode: u64, w: &mut [u64]) -> Result<u64, AErr> {
         1 => Err(<AErr as Abi>::get(&fail[1..])),
         status => panic!("invalid failure status {status} from vesper_aegis_tdx_parse"),
     }
+}
+
+/// Calls `tls_key_channel_binding` of the Vesper library `aegis` (`vesper_aegis_tls_key_channel_binding`).
+pub fn tls_key_channel_binding(spki: &[u8], out: &mut [u8]) -> bool {
+    // SAFETY: `vesper_aegis_tls_key_channel_binding` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(spki, |view_spki| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aegis_tls_key_channel_binding(view_spki, view_out) }));
+    raw != 0
 }
 
 /// Calls `verify_attestation_claims` of the Vesper library `aegis` (`vesper_aegis_verify_attestation_claims`).

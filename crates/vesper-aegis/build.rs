@@ -102,4 +102,6 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
         "if wrapping_sub(reported, prev) > max_step {",
         "if false {",
     ),
+    // measure: a register extend is never padded.
+    ("measure", "if pad_to > EXTEND_DATA_LEN {", "if false {"),
 ];

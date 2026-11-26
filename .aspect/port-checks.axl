@@ -28,6 +28,7 @@ aegis_check = port_checks(
             ("corim_cca", ["port_differential"], "corim_store_agrees", "snp_reports_agree"),
             ("gpa", ["gpa_props"], "tracker_matches_reference_bitmap", "dropped_owner_is_counted_as_leaked"),
             ("host", ["host"], "clock_validator_rejects_backwards_and_jumps", "mmap_validator_rejects_overlap_and_invalid_replies"),
+            ("measure", ["port_differential"], "cca_crypto_agrees", "snp_reports_agree"),
         ]
     ],
 )

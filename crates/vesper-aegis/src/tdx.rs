@@ -22,7 +22,6 @@ use crate::claims::{
 };
 use crate::error::{AttestError, ParseError};
 use crate::intel::{TdxCollateral, VerifiedTdxQuote, verify_tdx_collateral};
-use ring::digest;
 
 pub const TDX_QUOTE_VERSION: u16 = 4;
 pub const TDX_QUOTE_VERSION_5: u16 = 5;
@@ -377,11 +376,10 @@ impl TdxQuote {
 
     /// The value the QE must place in `qe_report.report_data[0..32]`.
     pub fn expected_qe_report_data(attestation_key: &[u8; 64], qe_auth_data: &[u8]) -> [u8; 64] {
-        let mut ctx = digest::Context::new(&digest::SHA256);
-        ctx.update(attestation_key);
-        ctx.update(qe_auth_data);
         let mut out = [0u8; 64];
-        out[..32].copy_from_slice(ctx.finish().as_ref());
+        let ok =
+            crate::port::vesper::expected_qe_report_data(attestation_key, qe_auth_data, &mut out);
+        assert!(ok, "the crypto shim hashes SHA-256");
         out
     }
 }

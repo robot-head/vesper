@@ -54,6 +54,17 @@ use self::host::{
     unmap as host_unmap_impl,
     validate_clock as host_validate_clock_impl
 };
+use self::measure::{
+    cca_rim_measurement as cca_rim_measurement_impl,
+    ecdsa_fixed_verify as ecdsa_fixed_verify_impl,
+    expected_qe_report_data as expected_qe_report_data_impl,
+    rak_hash as rak_hash_impl,
+    report_data as report_data_impl,
+    rsa_pss_sha384_verify as rsa_pss_sha384_verify_impl,
+    sha256_matches as sha256_matches_impl,
+    single_extend as single_extend_impl,
+    tls_key_channel_binding as tls_key_channel_binding_impl
+};
 use self::sgx::parse as sgx_parse_impl;
 use self::snp::{
     parse as snp_parse_impl,
@@ -313,4 +324,59 @@ pub fn host_unmap(
     len: u64
 ) -> u64 {
     host_unmap_impl(inout iv, count, win_start, win_end, addr, len)
+}
+
+// Measurement hashes and fixed-width signature checks (module measure):
+// false only when the crypto shim refuses a call.
+
+// GuestRuntimeClaims::report_data (64 bytes).
+pub fn report_data(in cb: Slice[u8], in loom: Slice[u8], in olean: Slice[u8], inout out: Slice[u8])
+    -> bool eff [Ffi[Crypto]] {
+    report_data_impl(in cb, in loom, in olean, inout out)
+}
+
+// claims::single_extend (`alg` a shim hash code).
+pub fn single_extend(alg: u32, pad_to: u64, in data: Slice[u8], inout out: Slice[u8])
+    -> bool eff [Ffi[Crypto]] {
+    single_extend_impl(alg, pad_to, in data, inout out)
+}
+
+// cca::cca_rim_measurement (48 bytes).
+pub fn cca_rim_measurement(alg: u32, in rim: Slice[u8], inout out: Slice[u8])
+    -> bool eff [Ffi[Crypto]] {
+    cca_rim_measurement_impl(alg, in rim, inout out)
+}
+
+// cca::rak_hash.
+pub fn rak_hash(alg: u32, in rak: Slice[u8], inout out: Slice[u8]) -> bool eff [Ffi[Crypto]] {
+    rak_hash_impl(alg, in rak, inout out)
+}
+
+// policy::tls_key_channel_binding (48 bytes).
+pub fn tls_key_channel_binding(in spki: Slice[u8], inout out: Slice[u8]) -> bool eff [Ffi[Crypto]] {
+    tls_key_channel_binding_impl(in spki, inout out)
+}
+
+// TdxQuote::expected_qe_report_data (64 bytes).
+pub fn expected_qe_report_data(in key: Slice[u8], in auth: Slice[u8], inout out: Slice[u8])
+    -> bool eff [Ffi[Crypto]] {
+    expected_qe_report_data_impl(in key, in auth, inout out)
+}
+
+// PinnedCert::der: whether SHA-256(der) is `expected` (`scratch` 32 bytes).
+pub fn sha256_matches(in der: Slice[u8], in expected: Slice[u8], inout scratch: Slice[u8])
+    -> bool eff [Ffi[Crypto]] {
+    sha256_matches_impl(in der, in expected, inout scratch)
+}
+
+// EcPublicKey::verify_fixed (`curve` 0 P-256, 1 P-384).
+pub fn ecdsa_fixed_verify(curve: u64, in sec1: Slice[u8], in msg: Slice[u8], in rs: Slice[u8])
+    -> bool eff [Ffi[Crypto]] {
+    ecdsa_fixed_verify_impl(curve, in sec1, in msg, in rs)
+}
+
+// AmdRsaPssSha384::verify_signature.
+pub fn rsa_pss_sha384_verify(in public: Slice[u8], in msg: Slice[u8], in sig: Slice[u8])
+    -> bool eff [Ffi[Crypto]] {
+    rsa_pss_sha384_verify_impl(in public, in msg, in sig)
 }

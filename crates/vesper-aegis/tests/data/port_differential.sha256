@@ -22,3 +22,7 @@ cose_keys_agree 22515 3acdfa7003b22f7f0b7c9b0851d723df350a60d91a9ae07265dcc35e6d
 signed_corims_agree 9012 18cba9ee9010c070b07894522b453fc2264e719ecdd35ea5e1ab911a7c3c991d
 corim_store_agrees 86 285d87f9b56d4641666363bcc7cd8cd09daa6767f56d7117fc7208fa2c535a21
 cca_appraisal_agrees 44 4c83bfe75bdc491a79b9da516ae0a94e584e5ccf5d7586ac50ce9e7fd08a77d7
+# Recorded from the Rust build at fb9909e, the last commit with the Rust
+# SHA-2 register/report-data hashing, CCA RIM/RAK hashing and fixed-width
+# ECDSA verification (SH6 lane 8 part 4a, #1403).
+cca_crypto_agrees 23860 00935d8b7beef967ed2a0d28346c99103e25764d0bd5de1fdd55a4ecaa404652
