@@ -11,7 +11,7 @@ fn apply(
 }
 fn through(x: Tensor[F32, [2]]) -> Tensor[F32, [2]] eff [Tensor] {
     let f = identity;
-    let g = | t: Tensor[F32, [2]] | -> Tensor[F32, [2]] {
+    let g = |t: Tensor[F32, [2]]| -> Tensor[F32, [2]] {
         t
     };
     Tensor::silu(apply(g, f(x)))

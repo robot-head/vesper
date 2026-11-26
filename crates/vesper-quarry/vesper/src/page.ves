@@ -49,9 +49,10 @@ fn rd_u16(in b: Slice[u8], off: u64) -> u64 {
 }
 
 fn rd_u32(in b: Slice[u8], off: u64) -> u64 {
-    get_u8(in b, off) | (get_u8(in b, wrapping_add(off, 1)) << 8) | (
-        get_u8(in b, wrapping_add(off, 2)) << 16
-    ) | (get_u8(in b, wrapping_add(off, 3)) << 24)
+    get_u8(in b, off)
+        | (get_u8(in b, wrapping_add(off, 1)) << 8)
+        | (get_u8(in b, wrapping_add(off, 2)) << 16)
+        | (get_u8(in b, wrapping_add(off, 3)) << 24)
 }
 
 fn wr_u16(inout b: Slice[u8], off: u64, v: u64) {

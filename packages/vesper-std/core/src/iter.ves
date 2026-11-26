@@ -153,7 +153,7 @@ test {
             {
                 mark(inout log, x) == 2
             }
-            | x in mark(inout log, 1)..mark(inout log, 4)
+            |x in mark(inout log, 1)..mark(inout log, 4)
         };
         found && log == 1412
     }
@@ -165,7 +165,7 @@ test {
             {
                 mark(inout log, x) < 2
             }
-            | x in mark(inout log, 1)..mark(inout log, 4)
+            |x in mark(inout log, 1)..mark(inout log, 4)
         };
         !accepted && log == 1412
     }
@@ -179,13 +179,13 @@ test {
             {
                 mark(inout calls, x) != 0
             }
-            | x in lo..hi
+            |x in lo..hi
         };
         let accepted = all{
             {
                 mark(inout calls, x) != 0
             }
-            | x in lo..hi
+            |x in lo..hi
         };
         !found && accepted && calls == 0
     }
@@ -201,13 +201,13 @@ test {
             {
                 left == found && right == accepted
             }
-            | (left, right) in pairs.as_slice()
+            |(left, right) in pairs.as_slice()
         };
         matches && all{
             {
                 x < found
             }
-            | x in [1, 3, 8]
+            |x in [1, 3, 8]
         }
         && found == 9 && accepted == 3
     }
@@ -220,13 +220,13 @@ test {
             {
                 byte == 98
             }
-            | byte in bytes
+            |byte in bytes
         };
         let only_a = all{
             {
                 byte == 97
             }
-            | byte in bytes
+            |byte in bytes
         };
         has_b == found && only_a == accepted
     }
@@ -238,7 +238,7 @@ test {
             {
                 n
             }
-            | n in data
+            |n in data
         }
     }
 
@@ -260,7 +260,7 @@ test {
             {
                 sum_mark(inout log, n)
             }
-            | n in sum_mark(inout log, start)..sum_mark(inout log, end)
+            |n in sum_mark(inout log, start)..sum_mark(inout log, end)
         }
     }
 
@@ -277,7 +277,7 @@ test {
             {
                 sum_mark(inout log, n)
             }
-            | n in sum_numbers(inout log)
+            |n in sum_numbers(inout log)
         }
     }
 
@@ -291,7 +291,7 @@ test {
                 visits = wrapping_add(visits, 1);
                 n
             }
-            | n in xs.as_slice()
+            |n in xs.as_slice()
         }
     }
 
@@ -380,7 +380,7 @@ test {
                 visits = wrapping_add(visits, 1);
                 x * narrow_i64(weight)
             }
-            | (x, weight) in zip{
+            |(x, weight) in zip{
                 inputs.coefficients,
                 inputs.weights
             }
@@ -425,7 +425,7 @@ test {
             {
                 x
             }
-            | x in zip(40, 2)
+            |x in zip(40, 2)
         }
     }
 
@@ -444,7 +444,7 @@ test {
             {
                 x * y
             }
-            | (x, y) in zip{
+            |(x, y) in zip{
                 input,
                 input
             }

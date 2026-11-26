@@ -224,17 +224,21 @@ impl Asm {
                     self.broken = true;
                 }
                 let o = wrapping_u32(off);
-                w = w | (((o >> 12) & 1) << 31) | (((o >> 5) & 63) << 25) | (
-                    ((o >> 1) & 15) << 8
-                ) | (((o >> 11) & 1) << 7);
+                w = w
+                    | (((o >> 12) & 1) << 31)
+                    | (((o >> 5) & 63) << 25)
+                    | (((o >> 1) & 15) << 8)
+                    | (((o >> 11) & 1) << 7);
             } else if f.kind == Fix::RvJal {
                 if !in_range(off, 0x100000) || off & 1 != 0 {
                     self.broken = true;
                 }
                 let o = wrapping_u32(off);
-                w = w | (((o >> 20) & 1) << 31) | (((o >> 1) & 0x3ff) << 21) | (
-                    ((o >> 11) & 1) << 20
-                ) | (((o >> 12) & 255) << 12);
+                w = w
+                    | (((o >> 20) & 1) << 31)
+                    | (((o >> 1) & 0x3ff) << 21)
+                    | (((o >> 11) & 1) << 20)
+                    | (((o >> 12) & 255) << 12);
             } else if f.kind == Fix::RvPcrelI {
                 let off = wrapping_sub(target, f.base);
                 if !in_range(off, 2048) {
@@ -308,9 +312,12 @@ fn rv_csr(f3: u32, rd: u32, rs1_or_uimm: u32, csr: u32) -> u32 {
 }
 
 fn rv_s(f3: u32, rs1: u32, rs2: u32, imm: u32) -> u32 {
-    (((imm >> 5) & 127) << 25) | (rs2 << 20) | (rs1 << 15) | (f3 << 12) | (
-        (imm & 31) << 7
-    ) | RvOpcode::Store
+    (((imm >> 5) & 127) << 25)
+        | (rs2 << 20)
+        | (rs1 << 15)
+        | (f3 << 12)
+        | ((imm & 31) << 7)
+        | RvOpcode::Store
 }
 
 fn rv_b(f3: u32, rs1: u32, rs2: u32) -> u32 {

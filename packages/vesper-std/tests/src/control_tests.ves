@@ -52,7 +52,7 @@ test {
             {
                 value
             }
-            | value in values
+            |value in values
         }
     }
 
@@ -84,7 +84,7 @@ test {
             {
                 value * weight
             }
-            | (value, weight) in zip{
+            |(value, weight) in zip{
                 totals,
                 weights
             }

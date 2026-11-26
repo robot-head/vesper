@@ -443,29 +443,25 @@ pub fn m_msi_address(c: MsiCfg, supervisor: bool, hart: u64, guest: u64) -> u64 
     let ppn = if supervisor { c.s_ppn } else { c.m_ppn };
     let lhxs = if supervisor { c.lhxs_s } else { c.lhxs_m };
     let gu = if supervisor { guest } else { 0 };
-    let v = ppn | wrapping_shl_u64(
-        g,
-        wrapping_u32(wrapping_add(c.hhxs, PAGE_SHIFT))
-    ) | wrapping_shl_u64(h, wrapping_u32(lhxs)) | gu;
+    let v = ppn
+        | wrapping_shl_u64(g, wrapping_u32(wrapping_add(c.hhxs, PAGE_SHIFT)))
+        | wrapping_shl_u64(h, wrapping_u32(lhxs))
+        | gu;
     wrapping_shl_u64(v, wrapping_u32(PAGE_SHIFT))
 }
 
 fn high_m(c: MsiCfg) -> u64 {
-    wrapping_shl_u64(flag(c.locked), wrapping_u32(Msiaddrcfgh::LShift)) | wrapping_shl_u64(
-        c.hhxs,
-        wrapping_u32(Msiaddrcfgh::HhxsShift)
-    ) | wrapping_shl_u64(c.lhxs_m, wrapping_u32(Msiaddrcfgh::LhxsShift)) | wrapping_shl_u64(
-        c.hhxw,
-        wrapping_u32(Msiaddrcfgh::HhxwShift)
-    ) | wrapping_shl_u64(c.lhxw, wrapping_u32(Msiaddrcfgh::LhxwShift)) | (
-        (c.m_ppn >> 32) & Msiaddrcfgh::Ppn
-    )
+    wrapping_shl_u64(flag(c.locked), wrapping_u32(Msiaddrcfgh::LShift))
+        | wrapping_shl_u64(c.hhxs, wrapping_u32(Msiaddrcfgh::HhxsShift))
+        | wrapping_shl_u64(c.lhxs_m, wrapping_u32(Msiaddrcfgh::LhxsShift))
+        | wrapping_shl_u64(c.hhxw, wrapping_u32(Msiaddrcfgh::HhxwShift))
+        | wrapping_shl_u64(c.lhxw, wrapping_u32(Msiaddrcfgh::LhxwShift))
+        | ((c.m_ppn >> 32) & Msiaddrcfgh::Ppn)
 }
 
 fn high_s(c: MsiCfg) -> u64 {
-    wrapping_shl_u64(c.lhxs_s, wrapping_u32(Msiaddrcfgh::LhxsShift)) | (
-        (c.s_ppn >> 32) & Msiaddrcfgh::Ppn
-    )
+    wrapping_shl_u64(c.lhxs_s, wrapping_u32(Msiaddrcfgh::LhxsShift))
+        | ((c.s_ppn >> 32) & Msiaddrcfgh::Ppn)
 }
 
 // ---------------------------------------------------------------- APLIC
@@ -1049,9 +1045,9 @@ pub fn m_aplic_read32(inout a: Aplic, d: u64, addr: u64) -> u64 eff [Fail[AiaFau
     let off = decode(h, addr);
     let cfg_ok = h.root && h.msi_capable;
     if off == AplicReg::Domaincfg {
-        return Domaincfg::ReadOne | (flag(h.ie) << Domaincfg::IeShift) | (
-            flag(h.dm) << Domaincfg::DmShift
-        );
+        return Domaincfg::ReadOne
+            | (flag(h.ie) << Domaincfg::IeShift)
+            | (flag(h.dm) << Domaincfg::DmShift);
     }
     if in_words(off, AplicReg::Sourcecfg, h.sources) {
         let s = wrapping_add(wrapping_sub(off, AplicReg::Sourcecfg) >> 2, 1);

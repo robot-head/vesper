@@ -170,18 +170,17 @@ pub fn utf8_char(in t: Slice[u8], p: u64) -> (u64, u64) {
         (((b & Utf8::Lead2Payload) << 6) | (at(in t, wrapping_add(p, 1)) & Utf8::ContPayload), 2)
     } else if b < Utf8::Lead4Lo {
         (
-            ((b & Utf8::Lead3Payload) << 12) | (
-                (at(in t, wrapping_add(p, 1)) & Utf8::ContPayload) << 6
-            ) | (at(in t, wrapping_add(p, 2)) & Utf8::ContPayload),
+            ((b & Utf8::Lead3Payload) << 12)
+                | ((at(in t, wrapping_add(p, 1)) & Utf8::ContPayload) << 6)
+                | (at(in t, wrapping_add(p, 2)) & Utf8::ContPayload),
             3
         )
     } else {
         (
-            ((b & Utf8::Lead4Payload) << 18) | (
-                (at(in t, wrapping_add(p, 1)) & Utf8::ContPayload) << 12
-            ) | ((at(in t, wrapping_add(p, 2)) & Utf8::ContPayload) << 6) | (
-                at(in t, wrapping_add(p, 3)) & Utf8::ContPayload
-            ),
+            ((b & Utf8::Lead4Payload) << 18)
+                | ((at(in t, wrapping_add(p, 1)) & Utf8::ContPayload) << 12)
+                | ((at(in t, wrapping_add(p, 2)) & Utf8::ContPayload) << 6)
+                | (at(in t, wrapping_add(p, 3)) & Utf8::ContPayload),
             4
         )
     }

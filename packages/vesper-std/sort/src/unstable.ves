@@ -42,7 +42,7 @@ pub fn is_sorted[T: mod copy + Ord](in s: Slice[T]) -> bool {
         {
             !lt_at(in s, i, wrapping_sub(i, 1))
         }
-        | i in 1..s.len()
+        |i in 1..s.len()
     }
 }
 

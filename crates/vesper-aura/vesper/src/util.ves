@@ -349,13 +349,14 @@ pub fn blank_slice(in bytes: Slice[u8], start: u64, len: u64) -> bool {
         } else if w == 2 {
             ((b & 31) << 6) | (byte_at(in bytes, inc(i)) & 63)
         } else if w == 3 {
-            ((b & 15) << 12) | ((byte_at(in bytes, inc(i)) & 63) << 6) | (
-                byte_at(in bytes, add(i, 2)) & 63
-            )
+            ((b & 15) << 12)
+                | ((byte_at(in bytes, inc(i)) & 63) << 6)
+                | (byte_at(in bytes, add(i, 2)) & 63)
         } else {
-            ((b & 7) << 18) | ((byte_at(in bytes, inc(i)) & 63) << 12) | (
-                (byte_at(in bytes, add(i, 2)) & 63) << 6
-            ) | (byte_at(in bytes, add(i, 3)) & 63)
+            ((b & 7) << 18)
+                | ((byte_at(in bytes, inc(i)) & 63) << 12)
+                | ((byte_at(in bytes, add(i, 2)) & 63) << 6)
+                | (byte_at(in bytes, add(i, 3)) & 63)
         };
         if !is_space(c) {
             break false;

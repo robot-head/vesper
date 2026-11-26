@@ -337,9 +337,10 @@ fn source_type(in t: Tree, in types: ChunkSeq[TypeRow], e: ExprNode, kind: u8) -
 // source's kind) and a constant's value: the tag, the operation and the
 // children (term ids and variable indices stay below 2^30).
 fn term_key(term: TermRow) -> u64 {
-    (widen_u64(term.tag) << 62) | (widen_u64(term.op) << 60) | (
-        widen_u64(term.a) << 30
-    ) | widen_u64(term.b)
+    (widen_u64(term.tag) << 62)
+        | (widen_u64(term.op) << 60)
+        | (widen_u64(term.a) << 30)
+        | widen_u64(term.b)
 }
 
 fn const_at(in consts: ChunkSeq[i128], i: u64) -> i128 {
