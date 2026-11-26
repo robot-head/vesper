@@ -38,6 +38,7 @@ const E_UNARY: u64 = 11;
 const E_BINARY: u64 = 12;
 const E_IF: u64 = 13;
 const E_MATCH: u64 = 14;
+const E_INDEX: u64 = 40;
 
 fn unary_code(op: &str) -> u64 {
     match op {
@@ -260,6 +261,21 @@ fn encode_expr(w: &World, e: &mut Enc, x: &Expr, out: &mut Vec<u64>) {
             for (p, x) in arms {
                 encode_pattern(e, p, out);
                 encode_expr(w, e, x, out);
+            }
+        }
+        ExprKind::Index(base, index) => {
+            out.extend([E_INDEX, s, t]);
+            encode_expr(w, e, base, out);
+            match &index.kind {
+                ExprKind::Binary(op, lo, hi) if op == ".." => {
+                    out.push(1);
+                    encode_expr(w, e, lo, out);
+                    encode_expr(w, e, hi, out);
+                }
+                _ => {
+                    out.push(0);
+                    encode_expr(w, e, index, out);
+                }
             }
         }
         _ => out.extend([E_OTHER, s, t]),

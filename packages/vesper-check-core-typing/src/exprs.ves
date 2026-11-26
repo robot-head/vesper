@@ -30,7 +30,7 @@ use self::relations::{
 use self::patterns::{Pats, arms_cover, irrefutable, pats_new};
 use self::methods::{
     inherent_index, is_qualified, is_str, is_string, peek_type, receiver_type, seq_method, seq_new,
-    string_comparison, string_literal, string_method, text_operand
+    view_place, index_expr, string_comparison, string_literal, string_method, text_operand
 };
 
 const NONE32: u32 = 4294967295;
@@ -55,6 +55,9 @@ const E_UNARY: u8 = 11;
 const E_BINARY: u8 = 12;
 const E_IF: u8 = 13;
 const E_MATCH: u8 = 14;
+// `base[index]` (y = 0, z = index) or `base[lo..hi]` (y = 1, z = lo,
+// b = hi), x = base; typed by methods.ves.
+const E_INDEX: u8 = 40;
 
 // Pattern kinds (patterns.ves).
 const P_WILD: u8 = 0;
@@ -550,6 +553,13 @@ fn read_expr(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) -> u32 {
         if reader.word(in bytes) != 0 {
             ex.z = read_expr(inout reader, in bytes, inout ck);
         }
+    } else if kind == E_INDEX {
+        ex.x = read_expr(inout reader, in bytes, inout ck);
+        ex.y = n32(reader.word(in bytes));
+        ex.z = read_expr(inout reader, in bytes, inout ck);
+        if ex.y != 0 {
+            ex.b = read_expr(inout reader, in bytes, inout ck);
+        }
     } else if kind == E_MATCH {
         ex.x = read_expr(inout reader, in bytes, inout ck);
         let count = reader.word(in bytes);
@@ -840,6 +850,8 @@ pub fn expr_expected(inout ck: Ck, e: u32, expected: u32) -> u32 {
         match_expr(inout ck, ex, expected)
     } else if ex.kind == E_STRING {
         string_literal(inout ck, expected)
+    } else if ex.kind == E_INDEX {
+        index_expr(inout ck, ex)
     } else {
         // E_OTHER: not ported yet.
         ck.skip = true;
@@ -1836,7 +1848,16 @@ fn apply_args(inout ck: Ck, sig: FnSig, ex: Ex, receiver: u32, inout vars: Vars)
             error(inout ck, "E0308", arg_ex.start, arg_ex.end);
         }
         let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        let place = place_of(in ck, arg.expr, inout path);
+        let mut place = place_of(in ck, arg.expr, inout path);
+        if place == NONE32 && view_place(in ck, arg.expr) {
+            // `seq_view_place`: a view of a place lends that place.
+            place = 0;
+        }
+        if param.pass == P_INOUT && place == NONE32 && arg_ex.kind == E_INDEX {
+            // `boxed_element_place`: an element lent in place, not ported.
+            ck.skip = true;
+            return hole;
+        }
         if param.pass == P_INOUT && place == NONE32 {
             error(inout ck, "E0300", arg_ex.start, arg_ex.end);
         }
